@@ -11,6 +11,7 @@
 #   t2  go test passes before (the table had no case for the bug) and after, AND the patch must add the
 #       "too large" table row so the new case exercises the fix
 #   t3  nodes.json parses with exactly node-b flipped to true, nodes.md has exactly one row flipped to open
+#   all  the CLI exited 0 and the diff touches EXACTLY the task's expected files (the gate pins that set itself)
 #
 # Verdict: PASS only when all three tasks succeed, every diff applies cleanly and every proof holds; any deferred /
 # failed_verification / refused (400: the node has not opted in) task is a FAIL that names the reason. Measured
@@ -26,6 +27,7 @@ $ErrorActionPreference = "Continue"
 if (-not (Test-Path $Binary)) { throw "binary not found: $Binary" }
 if (-not (Test-Path $Config)) { throw "config not found: $Config" }
 $root = Join-Path $PSScriptRoot "..\contracts\write-door"
+$ExpectedFiles = @{ t1 = @("clamp.go"); t2 = @("port.go", "port_test.go"); t3 = @("nodes.json", "nodes.md") }
 New-Item -ItemType Directory -Force $OutDir | Out-Null
 $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
 
@@ -35,7 +37,9 @@ function Invoke-Task([string]$name) {
   if ($Remote) { $cliArgs += @("-route", "remote", "-remote", $Remote) } else { $cliArgs += @("-route", "local") }
   $t = [DateTime]::UtcNow
   $raw = (& $Binary @cliArgs 2> (Join-Path $OutDir "$name.stderr.txt")) -join "`n"
+  $cliExit = $LASTEXITCODE
   $wall = [int]([DateTime]::UtcNow - $t).TotalMilliseconds
+  if ($cliExit -ne 0) { return @{ name = $name; ok = $false; why = "CLI exit $cliExit (transport/config failure or infrastructure defer; see $name.stderr.txt)"; wall_ms = $wall; cli_exit = $cliExit } }
   $raw | Out-File -Encoding UTF8 (Join-Path $OutDir "$name.raw.json")
   $start = $raw.IndexOf("{"); $end = $raw.LastIndexOf("}")
   if ($start -lt 0 -or $end -le $start) { return @{ name = $name; ok = $false; why = "no JSON in the CLI output"; wall_ms = $wall } }
@@ -45,14 +49,18 @@ function Invoke-Task([string]$name) {
     $why = "summary $($s | ConvertTo-Json -Compress)"; if ($r -and $r.reason) { $why += " - $($r.reason)" }
     return @{ name = $name; ok = $false; why = $why; wall_ms = $wall }
   }
-  if (-not $r.diff) { return @{ name = $name; ok = $false; why = "succeeded but the result carries no diff (write_note: $($r.write_note))"; wall_ms = $wall } }
+  if (-not $r.diff) { return @{ name = $name; ok = $false; why = "succeeded but the result carries no diff (write_note: $($r.write_note))"; wall_ms = $wall; cli_exit = $cliExit } }
+  # the gate pins the touched set itself; the contract's diff_touches/diff_max_files are the delegator's check, not this proof's
+  $expected = $ExpectedFiles[$name]
+  $touched = @($r.diff_files | Sort-Object)
+  if (($touched -join ",") -ne (($expected | Sort-Object) -join ",")) { return @{ name = $name; ok = $false; why = "diff touches [$($touched -join ',')], expected exactly [$($expected -join ',')]"; wall_ms = $wall; cli_exit = $cliExit; diff_files = $touched } }
   $patch = Join-Path $OutDir "$name.patch"
   [System.IO.File]::WriteAllText($patch, ($r.diff -replace "`r`n", "`n"), (New-Object System.Text.UTF8Encoding($false)))
   # a FRESH copy of the task sources (never the contract, never the fixture in place)
   $copy = Join-Path $OutDir "$name-$stamp"
   New-Item -ItemType Directory -Force $copy | Out-Null
   Get-ChildItem $dir -File | Where-Object { $_.Name -ne "contract.json" } | Copy-Item -Destination $copy
-  return @{ name = $name; ok = $true; wall_ms = $wall; seat = $r.seat; node = $r.node; diff_files = @($r.diff_files); patch = $patch; copy = $copy; bytes = $r.diff.Length }
+  return @{ name = $name; ok = $true; wall_ms = $wall; cli_exit = $cliExit; seat = $r.seat; node = $r.node; diff_files = $touched; patch = $patch; copy = $copy; bytes = $r.diff.Length }
 }
 
 function Test-Go([string]$dir) {
@@ -67,6 +75,7 @@ function Prove([hashtable]$t) {
     "t1" {
       $before = Test-Go $t.copy
       if ($before.pass) { $t.ok = $false; $t.why = "t1 copy was GREEN before the patch - the fixture no longer carries its bug"; return $t }
+      if ($before.out -notmatch 'above: Clamp\(42, 0, 10\) = 0, want 10') { $t.ok = $false; $t.why = "t1 copy is red for a reason other than the staged bug: $($before.out)"; return $t }
     }
     "t2" {
       $before = Test-Go $t.copy
@@ -76,7 +85,7 @@ function Prove([hashtable]$t) {
   $apply = (& git -C $t.copy apply -p1 --verbose $t.patch 2>&1) -join "`n"
   if ($LASTEXITCODE -ne 0) { $t.ok = $false; $t.why = "git apply failed: $apply"; return $t }
   switch ($t.name) {
-    "t1" { $after = Test-Go $t.copy; if (-not $after.pass) { $t.ok = $false; $t.why = "go test still red after the patch: $($after.out)" } ; $t.proof = "go test FAIL -> ok" }
+    "t1" { $after = Test-Go $t.copy; if (-not $after.pass) { $t.ok = $false; $t.why = "go test still red after the patch: $($after.out)" } else { $t.proof = "go test FAIL -> ok" } }
     "t2" {
       $after = Test-Go $t.copy
       $patchText = Get-Content $t.patch -Raw
@@ -106,7 +115,7 @@ foreach ($name in "t1", "t2", "t3") {
   $t = Invoke-Task $name
   $t = Prove $t
   $results += [pscustomobject]$t
-  $line = if ($t.ok) { "PASS  $name  $($t.wall_ms) ms  $($t.node)/$($t.seat)  files=$($t.diff_files -join ',')  $($t.bytes) B  - $($t.proof)" } else { "FAIL  $name  $($t.wall_ms) ms  - $($t.why)" }
+  $line = if ($t.ok) { "PASS  $name  $($t.wall_ms) ms  exit $($t.cli_exit)  $($t.node)/$($t.seat)  files=$($t.diff_files -join ',')  $($t.bytes) B  - $($t.proof)" } else { "FAIL  $name  $($t.wall_ms) ms  - $($t.why)" }
   Write-Host $line
 }
 $passed = @($results | Where-Object { $_.ok }).Count
