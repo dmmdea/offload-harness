@@ -485,7 +485,7 @@ func (s *Server) handleStatus(ctx context.Context, req *mcp.CallToolRequest) (*m
 	// nowhere. If it failed to open at startup, every agent_run silently loses
 	// the in-loop cache and the only signal was one stderr line an MCP stdio
 	// client never sees.
-	// 0.117.8 (register D-05): the handle is lazy and this block must NOT resolve
+	// 0.121.1 (register D-05): the handle is lazy and this block must NOT resolve
 	// it — a status call that took the bbolt lock would be the very thing that
 	// creates the sibling it is reporting on. Everything here reads state the
 	// handle already holds, plus a stat of the cache directory.
@@ -2731,7 +2731,7 @@ func agentRunOrigin() string {
 
 // unavailableCacheReason names ONE specific reason a status reader can act on,
 // never a menu of possibilities. Lock contention alone never lands here — the
-// per-process fallback absorbs that, and since 0.117.8 a handle nobody has used
+// per-process fallback absorbs that, and since 0.121.1 a handle nobody has used
 // reports mode "unopened" rather than any kind of failure.
 func unavailableCacheReason(configured string, openErr error) string {
 	if configured == "" {

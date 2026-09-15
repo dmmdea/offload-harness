@@ -235,7 +235,7 @@ func main() {
 	// behaviour rather than refusing to start. Same policy as the main binary's
 	// cache open.
 	//
-	// 0.117.8 (register D-05): the handle is LAZY. A local-agent run that never
+	// 0.121.1 (register D-05): the handle is LAZY. A local-agent run that never
 	// reaches a cacheable offload — a --help, a config error, a drive mode that
 	// defers on its first step — now takes no bbolt lock and leaves no
 	// per-process sibling behind at all. The notes below fire at the first real

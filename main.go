@@ -359,7 +359,7 @@ func openPipeline(cfg config.Config) (*pipeline.Pipeline, func(), error) {
 	// cache-less rather than aborting — they speed things up / report savings,
 	// they are not required for correctness.
 	//
-	// 0.117.8 (register D-05): the cache handle is LAZY. openPipeline runs for
+	// 0.121.1 (register D-05): the cache handle is LAZY. openPipeline runs for
 	// every command and every MCP server start, and the eager open made each of
 	// them take (or lose) the bbolt lock before knowing whether a cacheable task
 	// would ever run — which is what produced 49 empty per-process siblings on

@@ -1,7 +1,7 @@
 // Package cache is a bbolt content-hash cache: identical (task+input+params+
 // model+grammar) requests return the stored result and skip the model entirely.
 //
-// # Why the handle is lazy (register D-05, 0.117.8)
+// # Why the handle is lazy (register D-05, 0.121.1)
 //
 // bbolt takes an EXCLUSIVE file lock for the whole life of a read-write handle,
 // and every harness process used to grab that lock while CONSTRUCTING its
@@ -80,7 +80,7 @@ const LockTimeout = 250 * time.Millisecond
 // it. Pids are reused on both Windows and Linux, so liveness cannot say whether
 // a sibling's owner is gone — age can.
 //
-// 0.117.8: 12 h -> 1 h. The long window existed to protect a long-lived MCP
+// 0.121.1: 12 h -> 1 h. The long window existed to protect a long-lived MCP
 // server's sibling, and that protection is not what keeps a live sibling alive:
 // a sibling a process still holds cannot be removed on Windows (the sweep
 // tolerates EBUSY/EPERM), and on Linux the unlink merely detaches the directory

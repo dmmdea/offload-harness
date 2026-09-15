@@ -239,14 +239,14 @@ actually ran; `offload_status`'s roster reports the effective `ocr` model, falli
 ### The result cache is opened lazily
 
 The cache is [bbolt](https://github.com/etcd-io/bbolt), which takes an **exclusive file lock** for the
-whole life of a read-write handle: one process at a time, machine-wide. Until 0.117.8 `openPipeline`
+whole life of a read-write handle: one process at a time, machine-wide. Until 0.121.1 `openPipeline`
 opened it **eagerly** — and `openPipeline` runs for every CLI command *and* every MCP server start, so
 each process took, or lost, that lock before anything knew whether it would ever run a cacheable task.
 With one MCP server per session (21 live on the workstation, 2026-09-14) one won the primary and every
 other one created a per-process sibling `cache.p<pid>.db` it then never wrote an entry into: **49
 files, 32 KB each**, accruing at roughly 12/h and swept only after 12 h.
 
-Since 0.117.8 (register D-05) the handle **resolves on first use**. A process that never runs a
+Since 0.121.1 (register D-05) the handle **resolves on first use**. A process that never runs a
 cacheable task never touches the cache directory at all — the common case for an MCP server that has
 served only status and fleet calls.
 

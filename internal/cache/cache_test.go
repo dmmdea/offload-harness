@@ -221,7 +221,7 @@ func TestNewOpensNothingUntilFirstUse(t *testing.T) {
 }
 
 // TestLazyOpenFallsToSiblingWithoutBlocking: a held primary must cost
-// milliseconds, not a second. The pre-0.117.8 bolt.Options.Timeout was 1s and
+// milliseconds, not a second. The pre-0.121.1 bolt.Options.Timeout was 1s and
 // every losing process paid it at startup.
 func TestLazyOpenFallsToSiblingWithoutBlocking(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "cache.db")
