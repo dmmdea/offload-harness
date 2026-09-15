@@ -950,14 +950,14 @@ writes it into an EMPTY root itself; a populated root without it is refused at s
 every removed page is one journal line), the cap to the dataset quota, and keep the seat's own
 `SEAT_L2_PRUNE_GB + max_capacity_gb` under the quota too — LMCache evicts only its own pages.
 
-**Serving-config provenance (0.122.0, ADR 0043) — `serving_config_path`.** The llama-swap config is rendered once, at
+**Serving-config provenance (0.123.0, ADR 0043) — `serving_config_path`.** The llama-swap config is rendered once, at
 install, and nothing re-renders it: `ampere-16` served a 32768 window for weeks after the tier table said 131072, and
 `audit-yaml` reported OK the whole time because a stale config breaks no operator rule. `install render` now stamps every
 config it writes with `spec_sha256` (a closed input set: tier, render params, template, tier entry, harness version) and
 `body_sha256` (the yaml below the stamp, so a hand edit stays distinguishable). Check a live box with
 `local-offload audit-yaml --against-render <file>` — flags BEFORE the files — which re-derives from the binary's own seeds
 and reports `MATCH` / `STALE(<keys>)` / `UNSTAMPED` / `HAND-EDITED`; STALE names the inputs that moved and exits 1, as does
-HAND-EDITED, while UNSTAMPED (every config rendered before 0.122.0) prints as a finding and does not fail. Point
+HAND-EDITED, while UNSTAMPED (every config rendered before 0.123.0) prints as a finding and does not fail. Point
 `serving_config_path` at the node's rendered config and `/fleet/health` publishes `serving_config_spec_sha256` +
 `serving_config_state` as well, so a fleet-wide sweep is one poll; unset, both keys are omitted. Fix a STALE box by
 re-rendering with `install render`, never by hand-editing the file.
@@ -1064,6 +1064,49 @@ inputs across subtasks. A contract that does not fit is not an error — it plac
   "remotes": ["http://<node-b>:18811"]
 }
 ```
+
+#### Delegating an IMPLEMENTATION leg (`write_root`, 0.122.0, register D-06)
+
+A subtask may add `"write_root": "<dir relative to the run's read root>"`. The seat then gets
+`write_file` + `edit_file` inside that directory of the node's own copy of the inlined docs, and what
+comes back beside the usual result is a **unified diff**:
+
+```json
+{
+  "subtasks": [{
+    "goal": "util.go has an off-by-one in Last(): it returns n where it must return n - 1. Fix it, and add one table-driven case to util_test.go covering n = 1.",
+    "context_paths": ["util.go", "util_test.go"],
+    "write_root": ".",
+    "output_schema": {"type": "object", "properties": {"change": {"type": "string"}}, "required": ["change"]},
+    "acceptance": ["diff_touches:util.go", "diff_max_files:2", "contains:n - 1"]
+  }],
+  "route": "local",
+  "read_root": "/abs/path/to/project"
+}
+```
+
+Read the result's `diff` and apply it yourself (`git apply -p1`); **the harness never applies it**, on
+purpose — a small local seat is worth handing an implementation leg precisely because a human reads
+what it produced before it touches anything real. `diff_files` lists the touched paths and `write_note`
+says what the door did when there is no diff (most often: the seat described the change instead of
+making it).
+
+Two acceptance verbs read the write set rather than the prose, and are the only checks on a write
+contract a talkative seat cannot satisfy by talking: `diff_touches:<path-prefix>` and
+`diff_max_files:<n>`. Both FAIL on an empty write set, `diff_max_files` included.
+
+Requirements and limits, all of them refusals rather than surprises:
+
+- The executing node must have `"agent_allow_write": true` (see docs/FLEET-NODE.md). Without it the
+  contract is refused at ACK and re-placed on a node that has it, or — locally — deferred with
+  `defer_class: "write"`.
+- `write_root` must be RELATIVE and must not escape (no `..`, no absolute path, no `.git`, no reserved
+  Windows device name). It is relative because the node has never seen your filesystem: the contract is
+  self-contained, and an absolute path from your box would name nothing there.
+- 8 files, 64 KiB written, 192 KiB of diff. Past any of them nothing is published and the subtask
+  defers `write` — split the leg instead.
+- No delete, no shell, no `run`, no network. This lane edits files; it does not verify them. Running the
+  tests is still yours.
 
 `context_paths` are read and inlined **by the delegator**, confined to `read_root`
 (≤ 128 KiB per file) — your session's context never pays for them, and the wire contract stays

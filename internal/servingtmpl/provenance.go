@@ -102,7 +102,7 @@ type SpecBasis struct {
 	// HarnessVersion is buildinfo.Version of the binary that rendered.
 	//
 	// It is in the IDENTITY hash (a config rendered by 0.117.2 is not the same
-	// artifact as one rendered by 0.122.0) but it is NOT what decides staleness:
+	// artifact as one rendered by 0.123.0) but it is NOT what decides staleness:
 	// AgainstRender re-renders and compares output, so a version bump that
 	// changed nothing about this tier still reports MATCH. A verdict wired to the
 	// version instead would read STALE on every node after every release.
@@ -464,7 +464,7 @@ func (r Report) Line(path string) string {
 func AgainstRender(text string, freshBasis SpecBasis, freshBody string) Report {
 	st, ok := ParseStamp(text)
 	if !ok {
-		return Report{State: StateUnstamped, Detail: "no provenance block: rendered before serving-config stamping (0.122.0), or written by hand. `local-offload install render` stamps it"}
+		return Report{State: StateUnstamped, Detail: "no provenance block: rendered before serving-config stamping (0.123.0), or written by hand. `local-offload install render` stamps it"}
 	}
 	base := Report{SpecSHA256: st.SpecSHA256, TierID: st.TierID, RenderedBy: st.RenderedBy, RenderedAt: st.RenderedAt}
 

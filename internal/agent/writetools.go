@@ -20,6 +20,18 @@ import (
 // untouched and the model can react. These tools are registered ONLY when the
 // caller opts into write capability; P0/P1 stay read-only.
 func WriteTools(worktreeRoot string, pol *Policy) ([]Tool, error) {
+	return WriteToolsLimited(worktreeRoot, pol, nil)
+}
+
+// WriteToolsLimited is WriteTools with a per-run byte/file ceiling (the D-06
+// delegation write door). A nil limit is exactly WriteTools — the operator own
+// CLI worktree keeps the uncapped behaviour it has always had.
+//
+// The limit is consulted AFTER the broker and immediately BEFORE the bytes are
+// written, so a refusal reads to the model like any other "NOT performed" and
+// the world is untouched. Deliberately not before the broker: a policy denial is
+// the more precise reason, and spending it on a budget message would lose it.
+func WriteToolsLimited(worktreeRoot string, pol *Policy, limit *WriteLimit) ([]Tool, error) {
 	absRoot, err := filepath.Abs(worktreeRoot)
 	if err != nil {
 		return nil, err
@@ -58,6 +70,9 @@ func WriteTools(worktreeRoot string, pol *Policy) ([]Tool, error) {
 			// the authoritative existence + containment guard.
 			if d, reason := pol.Decide(Action{Kind: ActWrite, Path: rel, Exists: exists}); d != Allow {
 				return "", NotPerformed(fmt.Sprintf("NOT performed (%s): %s", d, reason))
+			}
+			if why := limit.Admit(rel, len(in.Content)); why != "" {
+				return "", NotPerformed("NOT performed (write budget): " + why)
 			}
 			if dir := filepath.Dir(rel); dir != "." && dir != "" {
 				if err := r.MkdirAll(dir, 0o755); err != nil {
@@ -181,6 +196,12 @@ func WriteTools(worktreeRoot string, pol *Policy) ([]Tool, error) {
 			}
 			if d, reason := pol.Decide(Action{Kind: ActWrite, Path: rel, Exists: true}); d != Allow {
 				return "", NotPerformed(fmt.Sprintf("NOT performed (%s): %s", d, reason))
+			}
+			// The budget is charged the REPLACEMENT text, not the whole file: an edit
+			// rewrites the file on disk, but what the seat authored — and what a
+			// reviewer reads in the diff — is new_string.
+			if why := limit.Admit(rel, len(in.NewString)); why != "" {
+				return "", NotPerformed("NOT performed (write budget): " + why)
 			}
 			// Splice at the matched byte span (works for both the exact and the
 			// whitespace-tolerant path — the latter matched against the file's ACTUAL

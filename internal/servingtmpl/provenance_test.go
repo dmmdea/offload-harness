@@ -15,7 +15,7 @@ var stampedAt = time.Date(2026, 9, 14, 11, 22, 33, 0, time.UTC)
 
 func basis() SpecBasis {
 	return SpecBasis{
-		HarnessVersion:      "0.122.0",
+		HarnessVersion:      "0.123.0",
 		TierID:              "ampere-16",
 		TemplateSHA256:      strings.Repeat("a", 64),
 		ProfilesEntrySHA256: strings.Repeat("b", 64),
@@ -184,7 +184,7 @@ func TestStampKeepsTheBodyByteIdentical(t *testing.T) {
 			if st.SpecSHA256 != want {
 				t.Errorf("spec_sha256 = %s, want %s", short(st.SpecSHA256), short(want))
 			}
-			if st.TierID != "ampere-16" || st.RenderedBy != "0.122.0" || st.RenderedAt != "2026-09-14T11:22:33Z" {
+			if st.TierID != "ampere-16" || st.RenderedBy != "0.123.0" || st.RenderedAt != "2026-09-14T11:22:33Z" {
 				t.Errorf("stamp metadata lost: tier=%q rendered_by=%q rendered_at=%q", st.TierID, st.RenderedBy, st.RenderedAt)
 			}
 			var decoded SpecBasis

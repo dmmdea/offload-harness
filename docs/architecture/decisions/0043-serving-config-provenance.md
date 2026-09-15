@@ -5,7 +5,7 @@ date: "2026-09-14"
 
 # 0043 — The rendered serving config carries its own provenance
 
-Release: 0.122.0 (register K-02)
+Release: 0.123.0 (register K-02)
 
 ## Context
 
@@ -106,7 +106,7 @@ sweep is then one poll instead of three ssh sessions.
   unchanged and only the stamp is behind — never MATCH, because claiming "re-installing
   reproduces this file" when it might not is the certified-stale-as-current failure again.
 - **UNSTAMPED does not exit 1.** Every config on the fleet today predates stamping (verified
-  read-only on all three reference nodes at 0.122.0: Qube, Lenovo and Aorus all report
+  read-only on all three reference nodes at 0.123.0: Qube, Lenovo and Aorus all report
   UNSTAMPED). Failing on it would make the session-start audit red on every box from the
   moment this ships. It prints as a finding; STALE and HAND-EDITED fail.
 - **One derivation, two callers.** `deriveRender` is called by the renderer and by the replay.
@@ -136,7 +136,7 @@ sweep is then one poll instead of three ssh sessions.
 Register A-39 / commit 5e249dd (0.113.32) raising `ampere-16` `ctx_size` 32768 → 131072, and
 549f360 immediately before it. `internal/servingtmpl/audit.go` (rules only — the gate that
 passed the stale file). `internal/agent/props.go` `seatPinBasis` (the mirrored design).
-Live audit at 0.122.0, read-only, three nodes, all UNSTAMPED. Tests:
+Live audit at 0.123.0, read-only, three nodes, all UNSTAMPED. Tests:
 `TestPreA39AmpereConfigIsReportedStaleNamingCtxSize`, `TestParamsBasisMirrorsParams`,
 `TestSpecHashIsSensitiveToEveryInput`, `TestSpecHashIgnoresWhatIsNotAnInput`,
 `TestStampKeepsTheBodyByteIdentical`, `TestAgainstRenderVerdicts`,
