@@ -14,7 +14,9 @@ Versioning: [SemVer](https://semver.org/).
   a JSON parse, exact-row checks) — the proof a caller of a write contract owes, since the harness never
   applies its own writes. Measured 2026-09-15: 3/3 on a 4B vLLM fleet seat (18 / 45 / 48 s), t1 in 10 s
   on a 27B seat (register D-06). The fixtures are pinned `eol=lf` so a seat's LF diff applies on every
-  checkout.
+  checkout. Hardened after a clean-context review: the gate fails on a non-zero CLI exit, pins the EXACT set
+  of files each patch may touch itself (the contract's diff verbs are the delegator's check, not this proof's),
+  requires t1's pre-patch red to be the staged case, and both new guards were shown red with stub CLIs.
 
 ### Security
 - Operator identity scrubbed from the public tree, and a gate that keeps it out
