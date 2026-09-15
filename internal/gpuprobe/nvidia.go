@@ -195,6 +195,38 @@ func HeadlineDevice(devices []Device) Device {
 // treat !ok as "refuse" (the guards fail closed). An empty key, an index no
 // device carries, or a UUID prefix that matches MORE than one card (ambiguous
 // — "GPU-" matches every card) is !ok.
+// IndexOf resolves a device key — a CUDA index or a GPU-UUID prefix — to the
+// CUDA index nvidia-smi reports for it. Ambiguous (a prefix matching two
+// cards) or absent = !ok, so a caller refuses rather than guessing which card
+// an operator's UUID meant. It exists because a display card is pinned by
+// UUID on a board that reorders indices on power loss, while a seat is pinned
+// by index: the two must be compared in one space.
+func IndexOf(devs []Device, key string) (string, bool) {
+	key = strings.TrimSpace(key)
+	if key == "" || len(devs) == 0 {
+		return "", false
+	}
+	if idx, err := strconv.Atoi(key); err == nil {
+		for _, d := range devs {
+			if d.Index == idx {
+				return key, true
+			}
+		}
+		return "", false
+	}
+	lk := strings.ToLower(key)
+	found, n := Device{}, 0
+	for _, d := range devs {
+		if strings.HasPrefix(strings.ToLower(d.UUID), lk) {
+			found, n = d, n+1
+		}
+	}
+	if n != 1 {
+		return "", false
+	}
+	return strconv.Itoa(found.Index), true
+}
+
 func FreeGiB(devs []Device, key string) (float64, bool) {
 	key = strings.TrimSpace(key)
 	if key == "" || len(devs) == 0 {

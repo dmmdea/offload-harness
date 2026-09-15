@@ -1,6 +1,8 @@
 package placement
 
 import (
+	"strings"
+
 	"github.com/dmmdea/offload-harness/internal/config"
 )
 
@@ -11,12 +13,20 @@ import (
 // run the same Decide over them. Every measured number is omitempty; role is
 // always present because a seat without a role cannot be resolved.
 type SeatRow struct {
-	Role                string            `json:"role"`
-	Model               string            `json:"model,omitempty"`
-	Device              string            `json:"device,omitempty"`
-	CtxTokens           int               `json:"ctx_tokens,omitempty"`
-	MaxInflight         int               `json:"max_inflight,omitempty"`
-	Loaded              bool              `json:"loaded,omitempty"`
+	Role        string `json:"role"`
+	Model       string `json:"model,omitempty"`
+	Device      string `json:"device,omitempty"`
+	CtxTokens   int    `json:"ctx_tokens,omitempty"`
+	MaxInflight int    `json:"max_inflight,omitempty"`
+	Loaded      bool   `json:"loaded,omitempty"`
+	// Served is the ROSTER fact, not an occupancy one: the llama-swap behind
+	// this box answers for the seat's model (by id or alias). It exists
+	// because a fleet node's health is a cached read that never probes
+	// /running — it knows which seats it can serve, not which are loaded —
+	// and a delegator must be able to tell "this node declares the seat" from
+	// "this node has it warm". Left unset by a renderer with no roster in
+	// hand (offload_status's local rows report live occupancy instead).
+	Served              bool              `json:"served,omitempty"`
 	Known               bool              `json:"known,omitempty"`
 	Inflight            int               `json:"inflight,omitempty"`
 	FootprintGiB        float64           `json:"footprint_gib,omitempty"`
@@ -95,6 +105,41 @@ func RowsFromConfig(cfg config.Config, live Live) []LayerRow {
 	return rows
 }
 
+// MarkServed stamps SeatRow.Served from a roster's name list (canonical ids
+// AND aliases, as swapclient.Roster.Names returns them). A seat with a model
+// is served when that name is in the list; a router seat with a model_map is
+// served only when EVERY twin it may substitute is, because a layer that can
+// serve one rung and not the other cannot answer for the role. Rows are
+// returned modified in place — the caller owns them.
+func MarkServed(rows []LayerRow, names []string) []LayerRow {
+	if len(rows) == 0 {
+		return rows
+	}
+	served := make(map[string]bool, len(names))
+	for _, n := range names {
+		served[strings.ToLower(strings.TrimSpace(n))] = true
+	}
+	has := func(model string) bool { return served[strings.ToLower(strings.TrimSpace(model))] }
+	for i := range rows {
+		for j := range rows[i].Seats {
+			s := &rows[i].Seats[j]
+			switch {
+			case len(s.ModelMap) > 0:
+				all := true
+				for _, twin := range s.ModelMap {
+					if !has(twin) {
+						all = false
+					}
+				}
+				s.Served = all
+			case s.Model != "":
+				s.Served = has(s.Model)
+			}
+		}
+	}
+	return rows
+}
+
 // placementSeat is the seat a layer's verdict is computed for: agent, then
 // long, then router — the roles the table places on, in the order a layer is
 // most likely to be entered.
@@ -108,6 +153,24 @@ func placementSeat(l config.LayerSpec) (config.LayerSeat, bool) {
 		return l.Seats[0], true
 	}
 	return config.LayerSeat{}, false
+}
+
+// SeatOnLayer names the model a layer would be ENTERED on — its agent seat,
+// else its long seat, else its router seat — from the declaration alone. It is
+// for metadata a surface must produce before any live reading exists (the job
+// feed names the seat at admission, while the guards and the window run at
+// execution): a caller that must place work calls Decide / DecideOnLayer, not
+// this. ok=false when the layer is undeclared or names no seat with a model.
+func SeatOnLayer(layers []config.LayerSpec, name string) (string, bool) {
+	l, ok := findLayer(layers, name)
+	if !ok {
+		return "", false
+	}
+	s, ok := placementSeat(l)
+	if !ok || s.Model == "" {
+		return "", false
+	}
+	return s.Model, true
 }
 
 // FromRows rebuilds a remote node's []config.LayerSpec and a Live whose Seat

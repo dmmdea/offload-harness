@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"strconv"
 	"sync"
 	"time"
 
@@ -137,6 +136,34 @@ func snapshotKey(cfg config.Config) string {
 	return string(b)
 }
 
+// LiveFromReadings builds a Live from readings a caller ALREADY holds, for
+// the surface that must not read anything itself: a fleet node's health
+// handler answers from its background VRAM snapshot and host sample, never
+// from an exec or a seat probe inside the request. A nil reading stays a nil
+// reader, so the guard that needed it refuses (fail closed) instead of being
+// admitted on a number nobody read.
+//
+// Seat is deliberately absent: a cached health read knows which seats the
+// roster ANSWERS for (published per seat as SeatRow.Served), not which are
+// loaded, and claiming an unread seat is cold is how a delegator would tell
+// itself there was nothing to evict.
+func LiveFromReadings(devs []gpuprobe.Device, hostFreeGiB *float64, pres *Presence) Live {
+	l := Live{}
+	if len(devs) > 0 {
+		l.DeviceFree = func(device string) (float64, bool) { return gpuprobe.FreeGiB(devs, device) }
+		l.DeviceIndex = func(device string) (string, bool) { return gpuprobe.IndexOf(devs, device) }
+	}
+	if hostFreeGiB != nil {
+		free := *hostFreeGiB
+		l.HostFree = func() (float64, bool) { return free, true }
+	}
+	if pres != nil {
+		p := *pres
+		l.Presence = func() Presence { return p }
+	}
+	return l
+}
+
 // LiveFromConfig is the one-liner every local caller uses: a fresh 2 s
 // snapshot's readers. Callers that make many decisions per tick (the spread)
 // keep one Snapshot and call Live() once instead.
@@ -194,24 +221,7 @@ func (s *Snapshot) DeviceIndex(device string) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	if idx, err := strconv.Atoi(device); err == nil {
-		for _, d := range devs {
-			if d.Index == idx {
-				return device, true
-			}
-		}
-		return "", false
-	}
-	if _, ok := gpuprobe.FreeGiB(devs, device); !ok {
-		return "", false
-	}
-	lk := lower(device)
-	for _, d := range devs {
-		if hasPrefixFold(d.UUID, lk) {
-			return strconv.Itoa(d.Index), true
-		}
-	}
-	return "", false
+	return gpuprobe.IndexOf(devs, device)
 }
 
 // HostFree reads free host RAM from the memoised reader.
