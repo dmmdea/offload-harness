@@ -106,3 +106,9 @@ validating contracts), no daemon, every wait counted on the wire:
   carries the ready-to-paste diff and the elevated restart.
 - Follow-ups noted, not built: a cross-process admission (file-lock semaphore) on the box, and
   applying the fingerprint to every contract that carries a `ContextDoc`, not only research.
+- **Extended 2026-09-15 (0.125.0, register D-110):** "waited for, not deferred" holds only while the
+  wait can end. A GPU lease held by another process cannot, inside the caller's bound — so
+  `offload_review_diff` now asks `delegate.ForeignFence` BEFORE building its local loop and routes the
+  review to the fleet at route `remote` under `remoteEligible`'s ctx-fit floor, waiting locally only
+  when nothing out there qualifies; and `modelaffinity.LeaseError` carries the holder's declared
+  window, so the defer that remains says when to come back.

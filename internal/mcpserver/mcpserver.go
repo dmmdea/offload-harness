@@ -45,6 +45,13 @@ import (
 	"github.com/dmmdea/offload-harness/internal/visionremote"
 )
 
+// fleetDispatch is delegate.RunWith's signature, named so the review lane can
+// hold it behind a test seam. Deliberately the WHOLE engine and not a narrower
+// "dispatch one contract to one node": placement, the ctx-fit gate, the
+// re-placement loop and the telemetry all live inside it, and a lane that
+// reached past them would be a second, unaudited router.
+type fleetDispatch func(ctx context.Context, cfg config.Config, local delegate.LocalRunner, subtasks []core.AgentContract, route string, remotes []string, opts *delegate.RunOptions) ([]delegate.PlacedResult, delegate.Summary, error)
+
 type Server struct {
 	p *pipeline.Pipeline
 	// localAgent is the LOCAL execution seam shared by agent_delegate and offload_ask:
@@ -55,6 +62,11 @@ type Server struct {
 	// researchFetch is offload_research's fetch seam (tests inject pages; nil =
 	// research.FetchAll against the public web).
 	researchFetch func(ctx context.Context, urls []string, opt research.Options) []research.Fetched
+	// reviewFleet is the FLEET dispatch seam of the review lane's fenced-seat
+	// fallthrough (register D-110): nil (production) resolves to
+	// delegate.RunWith at call time; tests inject a fake so the handler is
+	// exercisable without a live fleet.
+	reviewFleet fleetDispatch
 	// quarantine remembers fleet nodes whose answers failed the document
 	// fingerprint twice (delegate.Quarantine) for this server's lifetime, so
 	// a research call's later chunks and later calls stop placing work there
@@ -2237,6 +2249,32 @@ func (s *Server) handleReviewDiff(ctx context.Context, req *mcp.CallToolRequest)
 			contract.TimeoutSec = core.AgentTimeoutSecCap
 		}
 	}
+	// THE FENCE CHECK (register D-110), before any local loop is built. Under a
+	// lease this process does not hold and that refuses new runs — an exclusive
+	// text hold, a draining cordon, a media render — the local loop below does
+	// not fail fast: it waits the whole agent_lease_wait_sec at the affinity
+	// cordon and is then filed as a capacity defer (agenttask.go, "gpu busy: ").
+	// For the lease's ENTIRE length, the one lane a lead reaches for at the
+	// moment of deciding answered nothing, however idle the fleet was. The
+	// verdict is on disk before the dial, so the review is offered to the fleet
+	// first — the same sentence register D-94 wrote about the retry path.
+	//
+	// ForeignFence, not Fenced: the holder's own session (GPU_LEASE_EPOCH) keeps
+	// the local path exactly as it was. Its lease exists to keep this work on
+	// these cards.
+	cfg := s.p.Cfg()
+	var fleetNote map[string]any
+	if fenced, why := delegate.ForeignFence(delegate.LocalLease(cfg.GPULockPath, cfg.StateDir)); fenced {
+		wire, extra, note, ok := s.reviewOnFleet(ctx, contract, why)
+		if ok {
+			return s.publishReview(wire, diff, in.MaxFindings, extra)
+		}
+		// Nothing out there took it. Today's path stands — the wait, then the
+		// capacity defer — and the note says the fleet WAS asked, so a caller
+		// reading "gpu busy" does not have to wonder whether the fallthrough
+		// exists.
+		fleetNote = map[string]any{"fleet": note}
+	}
 	run := s.localAgent // test seam, shared with agent_delegate and offload_ask
 	if run == nil {
 		run = s.p.RunAgentContract
@@ -2246,16 +2284,111 @@ func (s *Server) handleReviewDiff(ctx context.Context, req *mcp.CallToolRequest)
 	// again would give the run two budgets that could disagree.
 	wire, rerr := run(ctx, contract, delegate.LocalOptions{})
 	if rerr != nil {
-		return jsonResult(map[string]any{"deferred": true, "reason": rerr.Error()})
+		return jsonResult(withReviewExtra(map[string]any{"deferred": true, "reason": rerr.Error()}, fleetNote))
 	}
+	return s.publishReview(wire, diff, in.MaxFindings, fleetNote)
+}
+
+// reviewOnFleet offers ONE review to the fleet at route=remote (register D-110),
+// for a lane whose own seat is fenced by someone else's lease.
+//
+// It hands the whole contract to delegate.RunWith — placement, the ctx-fit gate,
+// the re-placement loop, the quarantine and the telemetry — rather than dialling
+// a node itself, because every one of those rules is what makes a remote review
+// worth publishing. The QUALITY FLOOR the plan states is exactly remoteEligible's:
+// the seat is resident, the node advertises the agent lane, its card is not itself
+// leased, and the contract's estimated tokens plus the loop's reserve fit the
+// node's agent_ctx_tokens. A node that fails any of it is not asked.
+//
+// route "remote" and not "auto" is the other half of that floor: auto would fall
+// back to the LOCAL seat when no remote qualified, which is the fenced seat this
+// whole path exists to avoid — RunWith's remote route defers loudly instead and
+// never places locally. So an accepted result here provably ran somewhere else.
+//
+// ok=false means "the fleet took nothing"; the note says why, and the caller keeps
+// today's path. Every failure shape is a note rather than an error, for the same
+// reason every other failure in this lane is a defer: the caller's next action is
+// the same either way.
+func (s *Server) reviewOnFleet(ctx context.Context, contract core.AgentContract, fence string) (core.AgentWireResult, map[string]any, string, bool) {
+	dispatch := s.reviewFleet // test seam
+	if dispatch == nil {
+		dispatch = delegate.RunWith
+	}
+	local := s.localAgent
+	if local == nil {
+		local = s.p.RunAgentContract
+	}
+	// remotes nil: RunWith reads the configured delegate_remotes, which is the
+	// fleet this box is a delegator for. A review names no node of its own.
+	results, _, err := dispatch(ctx, s.p.Cfg(), local, []core.AgentContract{contract}, "remote", nil,
+		&delegate.RunOptions{Quarantine: s.quarantine, Tenant: s.tenant})
+	switch {
+	case err != nil:
+		return core.AgentWireResult{}, nil, "the fleet could not be asked: " + err.Error(), false
+	case len(results) != 1:
+		return core.AgentWireResult{}, nil, fmt.Sprintf("the fleet dispatch returned %d results for one review", len(results)), false
+	}
+	pr := results[0]
+	switch {
+	case pr.Err != "":
+		return core.AgentWireResult{}, nil, "the fleet failed the review: " + pr.Err, false
+	case pr.Result.Deferred:
+		// The ordinary shape: "route=remote: no eligible remote" — nothing out
+		// there fits the diff, or nothing is up. Verbatim, because the reason
+		// distinguishes "no remotes configured" from "they answered and the diff
+		// does not fit their window", and those need different fixes.
+		return core.AgentWireResult{}, nil, pr.Result.Reason, false
+	}
+	extra := map[string]any{
+		"executed_on": "fleet",
+		"node":        pr.Node,
+		"placement":   pr.PlacementReason,
+		// The fence is published beside the result: a review that did NOT run on
+		// this box has a different provenance, and the reader is owed the reason
+		// it moved.
+		"fence": fence,
+	}
+	if pr.Seat != "" {
+		extra["seat"] = pr.Seat
+	}
+	return pr.Result, extra, "", true
+}
+
+// withReviewExtra folds the fleet block (node, placement, seat, fence — or the
+// note saying the fleet took nothing) into one published review result. Empty
+// values are dropped rather than published as "": a blank `node` would read as a
+// node that failed to identify itself.
+func withReviewExtra(out map[string]any, extra map[string]any) map[string]any {
+	for k, v := range extra {
+		if s, ok := v.(string); ok && s == "" {
+			continue
+		}
+		if v == nil {
+			continue
+		}
+		out[k] = v
+	}
+	return out
+}
+
+// publishReview turns ONE seat's wire result into the lane's published answer:
+// decode, ground, dedupe, rank, cap, then the clean-verdict gate and the notes.
+//
+// It is shared by the local path and the fenced-seat fleet path on purpose. The
+// filters are the whole reason this lane's output is worth reading — a finding
+// naming a file the diff never touched is the ordinary way a small seat fails —
+// and a remote review is produced by a SMALLER seat than the local one more often
+// than not. A second copy of these rules for the fleet path would have been the
+// copy that drifted.
+func (s *Server) publishReview(wire core.AgentWireResult, diff string, maxFindings int, extra map[string]any) (*mcp.CallToolResult, error) {
 	if wire.Deferred {
-		return jsonResult(map[string]any{
+		return jsonResult(withReviewExtra(map[string]any{
 			"deferred":    true,
 			"reason":      wire.Reason,
 			"defer_class": wire.DeferClass,
 			"seat":        wire.Seat,
 			"steps":       wire.Steps,
-		})
+		}, extra))
 	}
 	var structured struct {
 		Findings []string `json:"findings"`
@@ -2267,18 +2400,18 @@ func (s *Server) handleReviewDiff(ctx context.Context, req *mcp.CallToolRequest)
 	// nothing" is the one shape a caller might read as reassurance, so it must
 	// never be what a broken result degrades into.
 	if len(wire.Structured) == 0 {
-		return jsonResult(map[string]any{
+		return jsonResult(withReviewExtra(map[string]any{
 			"deferred": true, "reason": "the seat returned no structured findings (stop_reason " + wire.StopReason + ")",
 			"defer_class": core.DeferClassAbstention, "seat": wire.Seat, "steps": wire.Steps,
-		})
+		}, extra))
 	}
 	if uerr := json.Unmarshal(wire.Structured, &structured); uerr != nil {
-		return jsonResult(map[string]any{
+		return jsonResult(withReviewExtra(map[string]any{
 			"deferred": true, "reason": "could not decode the seat's findings: " + uerr.Error(),
 			"defer_class": core.DeferClassAbstention, "seat": wire.Seat, "steps": wire.Steps,
-		})
+		}, extra))
 	}
-	rep := reviewlane.Report(structured.Findings, diff, in.MaxFindings)
+	rep := reviewlane.Report(structured.Findings, diff, maxFindings)
 	// THE GATE. A zero-finding result is only published as a clean review when the seat's
 	// OWN raw answer says so. A structurally valid but UNEARNED empty array is reachable
 	// and indistinguishable from a real clean review at every other field. Until 0.115.8
@@ -2299,14 +2432,14 @@ func (s *Server) handleReviewDiff(ctx context.Context, req *mcp.CallToolRequest)
 	// it is not this failure, and it gets its own note below instead of a defer.
 	if len(rep.Findings) == 0 && rep.DroppedUngrounded == 0 && rep.DroppedEcho == 0 && rep.DroppedDuplicate == 0 &&
 		!reviewlane.VerdictReadsClean(wire.Output) {
-		return jsonResult(map[string]any{
+		return jsonResult(withReviewExtra(map[string]any{
 			"deferred":    true,
 			"reason":      "the seat produced no findings and its raw answer did not read as a clean NONE verdict — likely a broken run, not a clean diff; review it yourself",
 			"defer_class": core.DeferClassAbstention,
 			"seat":        wire.Seat,
 			"steps":       wire.Steps,
 			"stop_reason": wire.StopReason,
-		})
+		}, extra))
 	}
 	findings := rep.Findings
 	if findings == nil {
@@ -2349,7 +2482,7 @@ func (s *Server) handleReviewDiff(ctx context.Context, req *mcp.CallToolRequest)
 			out["note"] = "this reviewer found nothing in the diff — that is not a verification that the change works, which stays yours"
 		}
 	}
-	return jsonResult(out)
+	return jsonResult(withReviewExtra(out, extra))
 }
 
 // handleAgentDelegate is the MCP front door onto delegate.Run (Task 6). It
