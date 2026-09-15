@@ -218,7 +218,7 @@ fails in a way that looks like a model problem. A tier that drops the 26B has it
 block **and** its group membership removed together — llama-swap rejects a config whose
 group names a model that does not exist.
 
-#### The provenance stamp (0.118.0, ADR 0043)
+#### The provenance stamp (0.122.0, ADR 0043)
 
 Every config `install render` writes now begins with a six-line comment block:
 
@@ -226,10 +226,10 @@ Every config `install render` writes now begins with a six-line comment block:
 # local-offload serving-config provenance -- generated; re-derive with `local-offload audit-yaml --against-render`
 # spec_sha256: <64 hex>
 # body_sha256: <64 hex>
-# rendered_by: 0.118.0
+# rendered_by: 0.122.0
 # tier: ampere-16
 # rendered_at: 2026-09-14T11:22:33Z
-# basis: {"harness_version":"0.118.0","params":{...},"profiles_entry_sha256":"...","render":{...},"template_sha256":"...","tier_id":"ampere-16"}
+# basis: {"harness_version":"0.122.0","params":{...},"profiles_entry_sha256":"...","render":{...},"template_sha256":"...","tier_id":"ampere-16"}
 ```
 
 `spec_sha256` hashes a **closed, documented input set** (`servingtmpl.SpecBasis`): the tier
@@ -262,7 +262,7 @@ file gets its usual rule line plus one provenance line, reporting exactly one st
 |---|---|---|
 | `MATCH` | re-rendering from this binary's seeds reproduces the file byte for byte, and no seed input moved | 0 |
 | `STALE(<keys>)` | the seeds moved — the report NAMES the basis keys (`params.ctx_size`, `profiles_entry_sha256`, …) | 1 |
-| `UNSTAMPED` | no provenance block: rendered before 0.118.0, or written by hand | 0 |
+| `UNSTAMPED` | no provenance block: rendered before 0.122.0, or written by hand | 0 |
 | `HAND-EDITED` | the body no longer hashes to the stamp's record, or the stamp itself was edited | 1 |
 
 The verdict is settled by **re-rendering**, not by comparing hashes — a hash moves on inputs

@@ -20,7 +20,7 @@ Versioning: [SemVer](https://semver.org/).
   the working config (they carry the fleet token) and the second TTS venv. History is not rewritten: the
   paths it carries were already public and hold no credential (the fleet token never entered history).
 
-## [0.118.0] - 2026-09-14 - the rendered serving config carries its provenance
+## [0.122.0] - 2026-09-14 - the rendered serving config carries its provenance
 
 Register K-02. The llama-swap config is rendered ONCE, at install, from the tier table baked into the binary, and
 nothing re-renders it or recorded what it was rendered FROM. `audit-yaml` checks RULES, and a config that is a tier
@@ -71,6 +71,143 @@ revision stale breaks no rule - so it reported OK on ampere-16 for the whole tim
   It prints as a finding; STALE and HAND-EDITED exit 1.
 - **Nothing re-renders a live config.** The node only READS `serving_config_path`. Re-rendering stays `install
   render`, run by a human.
+## [0.121.0] - 2026-09-14 - a cache-server binding per vLLM seat
+
+### Changed
+- **Register B-01 - `kv_cache_server` is a LIST of per-seat bindings, and the box declares its vLLM
+  roster.** The block bound one store to one `seat` name (the deployed Qube config: `seat:
+  "qwen3.8-27b-vllm"`), which was right while a box ran one vLLM seat and wrong the moment one did
+  not: the reference workstation runs the tensor-parallel pair AND an opt-in 3-card layout, the
+  second box runs its own small seat, and the shape gave the others nothing to be — a seat with no
+  tier and a seat nobody thought about produced the same config, the same `offload_status` and the
+  same silence. The operator directive of 2026-09-10 is that the second device's store backs EVERY
+  vLLM seat while that device is online, and a config that binds `kv_cache_server` to a single seat
+  name is a DEFECT. Now:
+  - `kv_cache_server` takes a list of bindings, each naming its `seat`; a binding with no `seat` is
+    the BOX DEFAULT and backs every vLLM seat that has no binding of its own, with an exact match
+    always winning. **The pre-0.121 single object still loads**, as a one-element list bound to its
+    own seat — nothing already deployed has to change.
+  - `vllm_seats` names the seats this box serves with a vLLM engine. Declared rather than sniffed:
+    `/v1/models` reports model ids and not engines, and the cascade deliberately stays on llama.cpp
+    (Gemma-4 hybrids crash LMCache's V2 path, upstream #4263), so a sniffed roster would fail every
+    seat that must never have a store. Empty (the default, and every llama.cpp box) = inert.
+  - Validation refuses two bindings for one seat (including two box defaults — that is two stores
+    whose order in the file picks the winner, not a merge) and a `key_prefix` shared by seats of
+    different stack generations. The new `kv_dtype` / `tensor_parallel` fields make B-45's "one
+    key_prefix per stack generation" checkable: a shared prefix where any binding leaves the
+    generation undeclared is refused too, because it cannot be shown to be safe and the failure it
+    guards against (`value size exceeds buffer capacity`) reports success while serving nothing.
+  - `offload_status.kv_cache_server` lists every binding (`bindings[]` with seat, store, address,
+    key_prefix, l1_staging_gb, declared/enabled, or `storeless` with its reason) plus
+    `unbound_seats` — the same list `doctor` fails on, from the same code, so the report and the
+    gate cannot disagree.
+
+### Added
+- **`doctor` FAILS a vLLM seat with no cache-server binding** — one line per seat, non-zero exit,
+  printed above the health probe because the verdicts are pure config and a dead serving layer must
+  not hide them. The escape hatch is a DECLARATION and never silence: `{"seat": "…", "storeless":
+  true, "reason": "…"}` passes, an absent binding fails, and a binding merely switched off with
+  nothing saying why fails too — "the tier is off here" and "nobody considered this seat" must not
+  look alike. A binding naming a seat `vllm_seats` does not list is surfaced but never fatal.
+- **`local-offload install vllm-seat --config <config.json>`** renders a seat from THE BINDING THAT
+  NAMES IT, so two vLLM seats on one box each carry their own store directory, namespace, L1 size
+  and chunk without either being edited into a hardware tier. The tier keeps what only the tier
+  knows — the mount point, the write floor, the prune target, the writer count, the cap. A storeless
+  binding renders a seat with no L2 at all.
+- A tier that renders a vLLM seat now seeds `vllm_seats` and a binding for it — the tier's store when
+  it declares one, an explicit storeless opt-out when it does not — because a fresh install must not
+  ship a config its own `doctor` rejects.
+- [ADR 0045](docs/architecture/decisions/0045-a-cache-server-binding-per-vllm-seat.md); `docs/systems/cache-server.md`
+  and the OPERATOR-GUIDE config reference rewritten around the list shape and the gate.
+## [0.117.7] - 2026-09-14 - output tokens are priced; the pager gate can fire; the Windows cage builds its child's environment; retries skip a fenced seat
+
+### Security
+- **The Windows OS-cage builds its child's environment instead of inheriting it**
+  (`internal/sandbox`). `CreateProcessAsUser` was called with a nil `lpEnvironment`, and nil does
+  not mean "empty" — it means "give the child the caller's block". The caller is the harness, so
+  every `run` child on Windows received the delegator's entire environment: `GITHUB_TOKEN`,
+  `MEM0_API_KEY`, the fleet auth token, the session's own messaging token, `AWS_*`, anything a
+  shell had exported. The line's comment justified it with "reads are not contained on Windows
+  anyway", which conflates two things: a cage that does not stop a child GOING AND LOOKING for a
+  secret is no reason to HAND it one, and the Linux cage has exec'd with a hand-built env since it
+  landed.
+  - One contract for both platforms (`sandbox.cageEnv`, `sandbox.EnvAllowlist`,
+    `sandbox.inheritedEnv`), four explicit lists per platform — fixed / copied-by-name / home /
+    temp — so the two files cannot drift apart again.
+  - Linux keeps EXACTLY the env it had: a fixed `PATH`, `HOME` and `TMPDIR` at the scratch dir,
+    nothing copied from the parent at all.
+  - Windows copies by name only what a process needs to START and cannot synthesise: `SystemRoot`,
+    `SystemDrive`, `windir`, `PATH`, `PATHEXT`, `COMSPEC`, `NUMBER_OF_PROCESSORS`,
+    `PROCESSOR_ARCHITECTURE`, `OS`. `USERPROFILE`/`HOME` and `TEMP`/`TMP`/`TMPDIR` are DERIVED from
+    `Spec.Scratch`, the same redirection Linux does, so a child writes inside the cage rather than
+    into the operator's real profile. `APPDATA`/`LOCALAPPDATA`/`USERNAME`/`USERDOMAIN` are
+    deliberately absent: they name or point at that profile. The block is UTF-16, sorted, and
+    passed with `CREATE_UNICODE_ENVIRONMENT` — without that flag the same bytes are read as ANSI
+    and the child gets one truncated entry.
+  - The proof is adversarial: `cmd /c set` inside the cage with three canaries exported in the
+    parent, asserted absent by name AND by value, the allowlist asserted present, and the block
+    asserted CLOSED. On non-Windows the two test names remain as explicit `t.Skip`s rather than
+    vanishing behind a build tag — a guarantee whose test is merely absent reads as passing on
+    every Linux CI run, which is the same silence that let the nil ship.
+
+### Fixed
+- **The savings ledger prices output tokens instead of multiplying them by zero**
+  (`internal/ledger`). `est_value_kept_local` was `tokens_saved x opus_input_price_per_mtok` and
+  nothing else, so every token a local seat GENERATED was worth $0.00 — and output is the expensive
+  half on Opus ($75/MTok against $15/MTok input). 5M locally generated tokens reported nothing
+  instead of $375. The rows were always complete (`tokens_out` from the first version,
+  `seat_tokens_in` since 0.115.5), so this is arithmetic over the existing schema and no ledger
+  field changed.
+  - `ledger.Prices{InputPerMTok, OutputPerMTok}` replaces the single price float; `PricesFrom`
+    resolves each config key against the shipped defaults INDEPENDENTLY, so every config written
+    before `opus_output_price_per_mtok` existed keeps a real output price instead of re-creating
+    the zero on upgrade.
+  - New config key `opus_output_price_per_mtok` (default 75.0), in `config.example.json`, the
+    install template and the README. `local-offload ledger` now prints both token counts, since
+    the dollar figure is no longer a function of the input count alone.
+  - Deferred rows stay at zero on both halves — pinned by its own case, so the fix cannot
+    degenerate into "price every `tokens_out` in the file".
+- **The context-pager gate (R2-13) can now fire in either direction** (`internal/agent`).
+  `PagerStats` shipped complete — eviction hashes, re-fetch counting, a pointer rate, its own gate
+  verdict — and with NO production caller: `NoteEvicted`/`NoteFetched` were reachable only from the
+  instrument's own unit test, so every real run reported `insufficient_data` and the stated gate
+  ("build nothing further until the re-fetch rate clears 10 %") could neither close the pager family
+  nor open it. The instrument was not obsolete, it was unarmed.
+  - `PagerStats.NoteCompaction(before, after)` runs at every compaction pass in the loop (proactive,
+    the harder retry after a context-overflow rejection, and the emergency shrink) and records every
+    tool body that was in the transcript and is not in it byte-identical afterwards — dropped,
+    collapsed to a dedupe marker, or pruned to a skeleton all leave the agent without the content. A
+    no-op pass records nothing, so the happy path stays invisible.
+  - `NoteFetched` runs at the ONE boundary every tool result crosses, AFTER the result cap and the
+    env-rule rewrites, so the bytes hashed are the bytes the transcript carries.
+  - `Result.Pager` carries the report out beside `Result.Prefill`, and `local-agent --queue` prints
+    it beside the prefill line — basis WITH rate, so a run that evicted nothing can never be read as
+    a measured 0 %.
+- **A retry never lands on a fenced local seat** (`internal/delegate`, register D-94). A contract
+  deferred on the 4B seat and its cross-seat retry was placed on the local seat whose GPU lease was
+  EXCLUSIVE, waited the whole `gpu-lease timeout after 5m0s (bound 5m0s)` at the model-affinity
+  cordon and deferred as capacity — while another node was eligible and idle for those five minutes.
+  `alternativeNode` returned the local seat unconditionally whenever the first attempt had run
+  remote, with no lease read at all, and then learned the refusal by dialling.
+  - `delegate.Fenced(info)` reports whether a lease REFUSES A NEW RUN and names it. It CALLS
+    `modelaffinity.BlocksNewRun` rather than restating it, so placement and admission cannot drift
+    into a placement that dials a seat its own gate will refuse. Exclusive text, draining text and
+    media fence; a plain text reservation does not (it already removes the seat from FIRST
+    placement, and the affinity gate admits the load).
+  - Fenced with something else eligible: the retry goes there, through `gate.Place` with local out
+    of contention, so an idle node beats one that would queue. Fenced with nothing else: the
+    subtask defers AT ONCE, `retry_note` naming the fence and the holder. The lease is read fresh
+    and read as a VERDICT — never discovered by dialling.
+  - FIRST placement was audited and needs no change: `route=auto` defers to the capacity wait on
+    `Reserved(LocalLease(...))` and `route=spread` drops the local seat out of the deal, both
+    already covered by tests. A media lease is deliberately not a first-placement fence (ADR 0026)
+    — which is why it fences a RETRY: a retry runs on the leftovers of `timeout_sec` and cannot
+    spend them queueing behind a render.
+
+### Docs
+- `docs/systems/coding-agent.md`: the caged child's environment contract on both platforms.
+- `docs/systems/fleet-node.md`: the retry's fence rule, and what first placement already does.
+
 ## [0.117.6] - 2026-09-14 - duplicate review findings no longer crowd a unique one out of the cap
 
 ### Added

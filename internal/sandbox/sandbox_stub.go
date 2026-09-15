@@ -13,6 +13,16 @@ import (
 // MUST fail closed — a future shell capability stays ungranted there.
 var ErrUnsupported = errors.New("sandbox: OS-level cage is Linux-only (Landlock/seccomp/user namespaces); unavailable on this platform")
 
+// The cage's environment contract (sandbox.go) needs its four lists on every
+// platform. They are all empty here: this build refuses to run a caged command
+// at all, so there is no child to hand an environment to.
+var (
+	envFixed       []string
+	envPassthrough []string
+	envHomeNames   []string
+	envTempNames   []string
+)
+
 // Available reports whether the OS cage can be enforced on this host. Always
 // false off Linux.
 func Available() (bool, string) {

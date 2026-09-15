@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"unsafe"
@@ -52,6 +53,62 @@ const (
 	winProcessMemoryLimit = 2 << 30
 	truncMarker           = "\r\n[... output truncated ...]\r\n"
 )
+
+// The Windows half of the cage's environment contract (sandbox.go).
+//
+// envPassthrough is the ONLY set copied out of the harness's environment, and it
+// is closed: a Windows process cannot start without SystemRoot (the loader and
+// every CRT read it) or find a program without PATH/PATHEXT, and none of those
+// values can be synthesised the way Linux names its own PATH. Nothing else is
+// copied — GITHUB_TOKEN, MEM0_API_KEY, the fleet token, AWS_*, every credential
+// a shell exported into this process stays on this side of the cage.
+//
+// Deliberately NOT here: APPDATA / LOCALAPPDATA / USERNAME / USERDOMAIN. They
+// point at (or name) the operator's real profile, which is precisely what
+// envHomeNames redirects into the run's scratch dir.
+var (
+	envFixed       []string // Windows cannot name its own SystemRoot or PATH; see envPassthrough
+	envPassthrough = []string{
+		"SystemRoot",             // image loader, CRT, winsock: a process may not start without it
+		"SystemDrive",            // resolved by many installers/scripts before SystemRoot
+		"windir",                 // the legacy spelling; some tooling reads only this one
+		"PATH",                   // finding a program and its DLLs
+		"PATHEXT",                // cmd.exe needs it to resolve a bare command name
+		"COMSPEC",                // cmd.exe's own path, for a nested shell
+		"NUMBER_OF_PROCESSORS",   // build tools size their parallelism from it
+		"PROCESSOR_ARCHITECTURE", // toolchains branch on it
+		"OS",                     // "Windows_NT"; scripts branch on it
+	}
+	envHomeNames = []string{"USERPROFILE", "HOME"}
+	envTempNames = []string{"TEMP", "TMP", "TMPDIR"}
+)
+
+// envBlock renders an environment as a CreateProcess lpEnvironment block: a
+// sequence of NUL-terminated UTF-16 "K=V" strings closed by one extra NUL.
+//
+// Sorted case-insensitively by name because CreateProcess documents a sorted
+// block, and an EMPTY environment still renders as two NULs — never as nil,
+// which is the value that means "inherit the parent's block" and is the whole
+// defect this replaces.
+func envBlock(env []string) (*uint16, error) {
+	sorted := append([]string(nil), env...)
+	sort.Slice(sorted, func(i, j int) bool {
+		return strings.ToUpper(sorted[i]) < strings.ToUpper(sorted[j])
+	})
+	block := make([]uint16, 0, 64)
+	for _, e := range sorted {
+		u, err := windows.UTF16FromString(e) // rejects an embedded NUL, and NUL-terminates
+		if err != nil {
+			return nil, fmt.Errorf("environment entry %q: %w", e, err)
+		}
+		block = append(block, u...)
+	}
+	block = append(block, 0) // the block's own terminator (two NULs when env is empty)
+	if len(block) == 1 {
+		block = append([]uint16{0}, block...)
+	}
+	return &block[0], nil
+}
 
 // Available reports whether the OS cage can be enforced here. On Windows the Job
 // Object + low-integrity token primitives need no admin, so the cage is always
@@ -213,6 +270,21 @@ func Run(ctx context.Context, spec Spec) (Result, error) {
 	si.StdErr = stderrW
 	si.StdInput = 0
 
+	// The child's environment is BUILT, never inherited. A nil lpEnvironment means
+	// "give the child the caller's block", and the caller here is the harness: its
+	// environment carries GITHUB_TOKEN, MEM0_API_KEY, the fleet auth token and
+	// whatever else a shell exported. The Linux cage has always exec'd with a
+	// hand-built env (sandbox_linux.go) and this side simply did not, so an
+	// untrusted Windows command was handed every credential the delegator held.
+	// Reads are less contained on Windows than under Landlock, but that was never
+	// a reason to HAND the child the secrets — cageEnv is the shared allowlist.
+	envp, err := envBlock(cageEnv(spec, os.Environ()))
+	if err != nil {
+		windows.CloseHandle(stdoutW)
+		windows.CloseHandle(stderrW)
+		return Result{}, err
+	}
+
 	var pi windows.ProcessInformation
 
 	// (4) SPAWN SUSPENDED as the low-integrity user.
@@ -223,8 +295,11 @@ func Run(ctx context.Context, spec Spec) (Result, error) {
 		nil,  // process security
 		nil,  // thread security
 		true, // inherit handles (the pipe write ends)
-		windows.CREATE_SUSPENDED,
-		nil, // env: inherit the parent's (reads are not contained on Windows anyway)
+		// CREATE_UNICODE_ENVIRONMENT is not optional with a UTF-16 block: without
+		// it CreateProcess reads the same bytes as ANSI and the child's environment
+		// comes out as one truncated entry.
+		windows.CREATE_SUSPENDED|windows.CREATE_UNICODE_ENVIRONMENT,
+		envp, // the explicit allowlist block (cageEnv) — NEVER nil, which means "inherit"
 		cwd,
 		&si,
 		&pi,

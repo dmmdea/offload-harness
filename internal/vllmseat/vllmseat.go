@@ -586,9 +586,17 @@ func (s Spec) Bindings() map[string]any {
 	if s.AgentCtxTokens > 0 {
 		out["agent_ctx_tokens"] = s.AgentCtxTokens
 	}
-	if b := s.ConfigBlock(); b != nil {
-		out["kv_cache_server"] = b
-	}
+	// The box's vLLM ROSTER, seeded from the seat it actually renders. It is what
+	// `doctor`'s cache-server gate has a subject at all, and seeding it here is the
+	// only way a fresh install can be self-consistent: a box that renders a vLLM seat
+	// and does not list it would pass a gate that has nothing to check.
+	out["vllm_seats"] = []string{s.ID}
+	// ALWAYS a binding, and always a LIST (B-01). A seat the tier gave no store
+	// derives an explicit storeless opt-out rather than nothing: "no store, because
+	// the tier declares none" is a statement the gate accepts, while an absent
+	// binding is the silence it refuses — and a fresh install must not ship a config
+	// its own doctor fails.
+	out["kv_cache_server"] = []map[string]any{s.ConfigBinding()}
 	return out
 }
 
@@ -606,7 +614,7 @@ func (s Spec) ConfigBlock() map[string]any {
 		return nil
 	}
 	c := s.CacheServer
-	return map[string]any{
+	b := map[string]any{
 		"enabled":       true,
 		"store":         c.StoreName(),
 		"address":       c.Address,
@@ -614,6 +622,33 @@ func (s Spec) ConfigBlock() map[string]any {
 		"chunk_size":    c.ChunkSize,
 		"key_prefix":    c.KeyPrefix,
 		"seat":          s.ID,
+	}
+	// The stack generation that writes this namespace, carried into the harness
+	// binding so the "one key_prefix per stack generation" rule (B-45) can be
+	// CHECKED rather than remembered: two seats may share a prefix only when both
+	// declare the same KV dtype and tensor-parallel width.
+	if s.KVCacheDtype != "" {
+		b["kv_dtype"] = s.KVCacheDtype
+	}
+	b["tensor_parallel"] = s.tensorParallel()
+	return b
+}
+
+// ConfigBinding is this seat's entry in the harness's `kv_cache_server` LIST, and
+// unlike ConfigBlock it is never nil.
+//
+// A seat whose tier declares no cache server derives an EXPLICIT storeless opt-out
+// naming the reason, because `doctor` fails a vLLM seat with no binding (B-01) and a
+// fresh install must not ship a config its own doctor rejects. The distinction the
+// gate is built on survives: this is a declaration, not an absence.
+func (s Spec) ConfigBinding() map[string]any {
+	if b := s.ConfigBlock(); b != nil {
+		return b
+	}
+	return map[string]any{
+		"seat":      s.ID,
+		"storeless": true,
+		"reason":    "the tier declares no cache_server for this seat: it runs on VRAM plus LMCache's L1 staging only",
 	}
 }
 
