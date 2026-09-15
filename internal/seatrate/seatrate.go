@@ -292,6 +292,17 @@ type Estimate struct {
 	// RepackSec is the re-pack term inside TotalSec and MinTurnSec (0 when the
 	// contract carries no output_schema).
 	RepackSec int
+	// OtherSec is everything inside TotalSec that is NOT the final answer and
+	// its re-pack: the cold load, the one think block and the tool steps. It is
+	// published separately because the final-budget fit (FitFinalBudget,
+	// register D-95) has to subtract exactly those terms from the wall before
+	// converting what is left into tokens — deriving it downstream would be a
+	// second copy of this arithmetic, free to drift from this one.
+	OtherSec int
+	// TokS is the rate the estimate was computed at (0 when there was none),
+	// carried so a caller that sizes anything else from the same seat reads the
+	// number this note printed rather than re-resolving it.
+	TokS float64
 }
 
 // FinalBudgetFor is the final answer's completion budget for a tool-step
@@ -373,6 +384,8 @@ func Compute(in Input) Estimate {
 		TotalSec:   int(math.Ceil(total)),
 		MinTurnSec: int(math.Ceil(cold + finalSec + repackSec)),
 		RepackSec:  int(math.Ceil(repackSec)),
+		OtherSec:   int(math.Ceil(cold + thinkSec + stepsSec)),
+		TokS:       in.TokS,
 	}
 	src := in.RateSource
 	if src == "" {
