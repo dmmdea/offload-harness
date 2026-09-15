@@ -9,12 +9,12 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"net/netip"
 	"net/url"
 	"regexp"
 	"strings"
-	"syscall"
 	"time"
+
+	"github.com/dmmdea/offload-harness/internal/netguard"
 )
 
 const (
@@ -26,92 +26,11 @@ const (
 	// with a notice (consistent with read_file), not hard-errored.
 )
 
-// blockedNets are reserved / special-use IPv4 AND IPv6 ranges that net.IP's
-// IsPrivate/IsLoopback/IsLinkLocal* do NOT cover but must still be denied: the
-// 0.0.0.0/8 "this host" block (on Linux 0.x can reach localhost; only 0.0.0.0 is
-// IsUnspecified), CGNAT, IETF/TEST-NET/benchmarking/240-4, plus IPv6 special-use
-// that relays or embeds an IPv4 (NAT64 / 6to4) and the documentation/discard
-// ranges. (fc00::/7 ULA is already covered by IsPrivate.)
-var blockedNets = func() []netip.Prefix {
-	cidrs := []string{
-		"0.0.0.0/8",       // "this host on this network" (RFC 1122) — only 0.0.0.0 itself is IsUnspecified
-		"100.64.0.0/10",   // CGNAT (RFC 6598) — IsPrivate returns false for this
-		"192.0.0.0/24",    // IETF protocol assignments
-		"192.0.2.0/24",    // TEST-NET-1
-		"198.18.0.0/15",   // benchmarking
-		"198.51.100.0/24", // TEST-NET-2
-		"203.0.113.0/24",  // TEST-NET-3
-		"240.0.0.0/4",     // reserved
-		"64:ff9b::/96",    // NAT64 well-known prefix (embeds an IPv4 in the low 32 bits)
-		"2002::/16",       // 6to4 (embeds an IPv4 in bytes 2-5, incl. loopback)
-		"2001:db8::/32",   // IPv6 documentation
-		"100::/64",        // IPv6 discard-only
-	}
-	out := make([]netip.Prefix, 0, len(cidrs))
-	for _, c := range cidrs {
-		out = append(out, netip.MustParsePrefix(c))
-	}
-	return out
-}()
-
-// isDisallowedIP blocks any address an SSRF attacker would pivot to: loopback,
-// RFC1918 private, link-local (incl. the 169.254.169.254 cloud-metadata address,
-// which IsPrivate does NOT cover), multicast, unspecified, and the reserved
-// ranges above. IPv4-mapped IPv6 (::ffff:127.0.0.1) is normalized via To4()
-// first, so it cannot slip through disguised as "IPv6". Returns nil iff the IP is
-// a routable public address.
-func isDisallowedIP(ip net.IP) error {
-	if ip == nil {
-		return fmt.Errorf("nil IP")
-	}
-	if v4 := ip.To4(); v4 != nil {
-		ip = v4 // normalize IPv4-mapped IPv6 to its IPv4 form before classifying
-	}
-	switch {
-	case ip.IsLoopback():
-		return fmt.Errorf("loopback address %s blocked", ip)
-	case ip.IsPrivate():
-		return fmt.Errorf("private address %s blocked", ip)
-	case ip.IsLinkLocalUnicast():
-		return fmt.Errorf("link-local address %s blocked", ip) // includes 169.254.169.254
-	case ip.IsMulticast():
-		return fmt.Errorf("multicast address %s blocked", ip)
-	case ip.IsUnspecified():
-		return fmt.Errorf("unspecified address %s blocked", ip)
-	}
-	if a, ok := netip.AddrFromSlice(ip); ok {
-		a = a.Unmap()
-		for _, p := range blockedNets {
-			if p.Contains(a) {
-				return fmt.Errorf("reserved address %s blocked", ip)
-			}
-		}
-	}
-	return nil
-}
-
-// safeControl is the net.Dialer.Control hook. It fires AFTER DNS resolution and
-// BEFORE connect(2), with address = the exact resolved IP the kernel will dial.
-// Because validate-time IS connect-time here, there is no TOCTOU window: DNS
-// rebinding (a name that resolves public at the allowlist check but private at
-// connect) is defeated, and every candidate IP (multi-A / Happy-Eyeballs) is
-// vetted individually. This is the load-bearing anti-rebind defense.
-func safeControl(network, address string, _ syscall.RawConn) error {
-	switch network {
-	case "tcp4", "tcp6":
-	default:
-		return fmt.Errorf("network %q not allowed", network)
-	}
-	host, _, err := net.SplitHostPort(address)
-	if err != nil {
-		return fmt.Errorf("bad dial address %q: %w", address, err)
-	}
-	ip := net.ParseIP(host)
-	if ip == nil {
-		return fmt.Errorf("dial address %q is not a literal IP", host)
-	}
-	return isDisallowedIP(ip)
-}
+// The connect-time IP guard used to live here as blockedNets/isDisallowedIP/
+// safeControl. It now lives in internal/netguard (publicnet.go) because the
+// research lane needed the SAME decision and had been carrying a weaker second
+// copy of it — two predicates, two answers to one question. This lane keeps its
+// behavior exactly: netguard.PublicDialControl IS the old safeControl, moved.
 
 // validateURL enforces scheme (http/https only), no embedded userinfo, port
 // (80/443 only — no pivot to an admin port on an allowlisted host), a non-empty
@@ -143,7 +62,7 @@ func (p *Policy) validateURL(u *url.URL) error {
 // safeControl IP guard, no ambient-proxy trust), bounded per-phase timeouts, and
 // a CheckRedirect that re-validates every hop and caps the chain.
 func newFetchClient(p *Policy) *http.Client {
-	d := &net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second, Control: safeControl}
+	d := &net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second, Control: netguard.PublicDialControl}
 	tr := &http.Transport{
 		Proxy:                 nil, // ignore ambient HTTP(S)_PROXY/NO_PROXY — all egress goes through our dialer
 		DialContext:           d.DialContext,
@@ -180,8 +99,8 @@ func FetchTools(pol *Policy) []Tool {
 // fetchTool is the internal constructor with an injectable client. The real
 // dialer guard forbids loopback (so an httptest server is unreachable by design);
 // tests therefore exercise the orchestration (validate -> do -> fence) with a
-// fake transport and unit-test the network guard (isDisallowedIP/safeControl)
-// directly.
+// fake transport and unit-test the network guard (netguard.CheckPublicIP /
+// netguard.PublicDialControl) directly.
 func fetchTool(pol *Policy, client *http.Client) Tool {
 	return Tool{
 		ToolSpec: ToolSpec{

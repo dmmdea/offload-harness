@@ -20,6 +20,44 @@ Versioning: [SemVer](https://semver.org/).
   the working config (they carry the fleet token) and the second TTS venv. History is not rewritten: the
   paths it carries were already public and hold no credential (the fleet token never entered history).
 
+## [0.117.3] - 2026-09-14 - the research lane dials the address it validated
+
+### Security
+- **Register K-01 - the research lane's DNS-rebinding window is closed.** `internal/research.ValidateURL`
+  resolved the caller's host, approved every answer, and then THREW IT AWAY: the fetch reconnected by
+  NAME through a bare `&http.Client{}` (default transport, no dial-time hook), so the OS resolved again
+  outside the guard. An attacker serving their own name with a one-second TTL answered a public address
+  for the lookup the harness validated and `127.0.0.1` for the lookup the transport made. Redirect hops
+  were re-validated the same way - by name - so hop two had the identical window through any open
+  redirect. The new `internal/research/fetch_rebind_test.go` proved it on HEAD: the lane read
+  `fleet admin secret` off a loopback `httptest` listener, directly and again through a redirect.
+  The lane's client now rides `netguard.PublicTransport`, which resolves at DIAL time and connects to
+  the vetted IP LITERAL, on the first hop and on every redirect hop. The test asserts ZERO accepts on
+  the loopback listener and zero dial attempts, across 13 rebind targets.
+- **One public-IP predicate in the tree.** The research lane carried a second, weaker copy that missed
+  `0.0.0.0/8`, `240.0.0.0/4`, the TEST-NETs, `192.0.0.0/24`, `192.88.99.0/24`, NAT64 (`64:ff9b::/96`)
+  and 6to4 (`2002::/16`) - so it graded `64:ff9b::7f00:1` as public even at validate time. Deleted.
+  The agent lane's `blockedNets`/`isDisallowedIP`/`safeControl` moved into the shared
+  `internal/netguard/publicnet.go` (plus `192.88.99.0/24`, `64:ff9b:1::/48`, Teredo, ORCHIDv2, AS112
+  and the RFC 9637/9602 documentation ranges), and `internal/netguard/publicnet_test.go` table-tests
+  every reserved range and nine public addresses as the predicate's spec.
+
+### Added
+- `internal/netguard/publicnet.go`: `LookupIP` (the tree's single DNS seam - the tailnet guard's
+  `lookupNetIP` folded into it), `CheckPublicIP`/`PublicIP`, `PublicDialControl` (the agent lane's
+  `safeControl`, moved), `PublicDialContext` (resolve-and-pin), and `PublicTransport` (clones the
+  caller's transport, wraps `DialContext` and any `DialTLSContext`, strips `Proxy`).
+- ADR [0042 - No bare HTTP client on a caller-named host](docs/architecture/decisions/0042-no-bare-http-client-on-a-caller-named-host.md):
+  the house rule, its two-half guard shape, and why a mixed DNS answer is refused whole on the public
+  lane but skipped on the tailnet lane.
+
+### Changed
+- `research.Options.Client`'s contract: the transport is no longer used as-is, it is wrapped by
+  `netguard.PublicTransport`. Injecting a `DialContext` is the supported test seam; a stub
+  `RoundTripper` now gets `http.DefaultTransport`'s settings with the gate, because the dial gate
+  cannot be optional.
+- `docs/systems/mcp-server.md` describes the research lane's guard as the two halves it now is.
+
 ## [0.117.2] - 2026-09-14 - the retry floor is the retry seat's; the deal reads a starting seat as busy
 
 The D-46 sizing half of the stranded `fix/drain-starting-seat` branch, rebased onto the 0.117.0 drain. Its D-92

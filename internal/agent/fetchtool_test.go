@@ -8,11 +8,13 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+
+	"github.com/dmmdea/offload-harness/internal/netguard"
 )
 
-// --- network guard: isDisallowedIP (the connect-time decision) ---
+// --- network guard: the connect-time decision, now netguard's ---
 
-func TestIsDisallowedIP(t *testing.T) {
+func TestConnectTimeIPGuard(t *testing.T) {
 	blocked := []string{
 		"127.0.0.1", "::1", "::ffff:127.0.0.1", // loopback (+ IPv4-mapped)
 		"10.0.0.5", "192.168.1.1", "172.16.0.1", // RFC1918 private
@@ -32,13 +34,13 @@ func TestIsDisallowedIP(t *testing.T) {
 		if ip == nil {
 			t.Fatalf("bad test IP %q", s)
 		}
-		if err := isDisallowedIP(ip); err == nil {
-			t.Errorf("isDisallowedIP(%q) = nil, want blocked", s)
+		if err := netguard.CheckPublicIP(ip); err == nil {
+			t.Errorf("netguard.CheckPublicIP(%q) = nil, want blocked", s)
 		}
 	}
 	for _, s := range []string{"8.8.8.8", "93.184.216.34", "1.1.1.1", "2606:4700:4700::1111"} {
-		if err := isDisallowedIP(net.ParseIP(s)); err != nil {
-			t.Errorf("isDisallowedIP(%q) = %v, want allowed (public)", s, err)
+		if err := netguard.CheckPublicIP(net.ParseIP(s)); err != nil {
+			t.Errorf("netguard.CheckPublicIP(%q) = %v, want allowed (public)", s, err)
 		}
 	}
 	// Document WHY net.IP.IsPrivate alone is insufficient — the metadata + CGNAT gaps.
@@ -51,14 +53,14 @@ func TestIsDisallowedIP(t *testing.T) {
 }
 
 func TestSafeControl(t *testing.T) {
-	if err := safeControl("tcp4", "127.0.0.1:80", nil); err == nil {
-		t.Error("safeControl should block loopback")
+	if err := netguard.PublicDialControl("tcp4", "127.0.0.1:80", nil); err == nil {
+		t.Error("PublicDialControl should block loopback")
 	}
-	if err := safeControl("tcp4", "8.8.8.8:443", nil); err != nil {
-		t.Errorf("safeControl public = %v, want nil", err)
+	if err := netguard.PublicDialControl("tcp4", "8.8.8.8:443", nil); err != nil {
+		t.Errorf("PublicDialControl public = %v, want nil", err)
 	}
-	if err := safeControl("udp", "8.8.8.8:53", nil); err == nil {
-		t.Error("safeControl should block a non-tcp network")
+	if err := netguard.PublicDialControl("udp", "8.8.8.8:53", nil); err == nil {
+		t.Error("PublicDialControl should block a non-tcp network")
 	}
 }
 
