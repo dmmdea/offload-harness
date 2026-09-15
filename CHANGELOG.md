@@ -7,6 +7,15 @@ Versioning: [SemVer](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- **`results[].calls` on every delegate row (register D-99).** The `agent_delegate` tool description promised the
+  per-completion record — `finish_reason`, `completion_tokens`, `reasoning_tokens`, `thinking_off`, `sampling`,
+  `ms` — but `delegate.WireResponse` dropped it when it shaped the node's `AgentWireResult` into the published
+  row, so a delegator could read it only from the node's own `GET /fleet/jobs/{id}` with the fleet token (how
+  the D-95b measurement read `calls[].sampling`). The row now carries the LAST eight completions (the final
+  answer and the structured re-pack included), `omitempty` so a node that recorded none publishes a
+  byte-identical row. Pinned by `TestWireResponseCarriesTheLastEightCalls`, which reads the JSON, not the struct,
+  and was red before the field existed. MCP, CLI and the opencode plugin all publish through `WireResponse`,
+  so the field appears on every surface at once.
 - `contracts/digest-8-grounded.json` (register D-100): the eight digest contracts of `digest-8.json` with ONE
   grounded check per subtask on identifiers the document names and the goal does not. The old fixture's
   acceptance is shape-only (`min_items:findings:3` + `nonempty:summary`, which the intake lint says on every
