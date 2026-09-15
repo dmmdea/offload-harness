@@ -6,6 +6,8 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.125.0] - 2026-09-15 - the review lane and the cascade ride the fleet when the local seat is held; a cut tool call is a budget defect; delegate rows carry their calls (D-110, C-41, D-114, D-99, D-100)
+
 ### Fixed
 - **A cut tool-call argument is a BUDGET defect, never infrastructure (register D-114).** When the seat's
   completion budget runs out in the middle of a tool call's JSON argument, the engine refuses the call -
