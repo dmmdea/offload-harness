@@ -225,6 +225,14 @@ type Meta struct {
 	// byte-identically to before the route existed.
 	Node      string `json:"node,omitempty"`
 	Placement string `json:"placement,omitempty"`
+	// The agent job behind an agent row (0.124.0, register D-101): the run's
+	// job id, step count, stop reason and structured re-pack wall, copied from
+	// the wire result at finish so the ledger row carries them. All omitempty:
+	// a cascade call publishes byte-identically to before.
+	JobID      string             `json:"job_id,omitempty"`
+	Steps      int                `json:"steps,omitempty"`
+	StopReason string             `json:"stop_reason,omitempty"`
+	RepackMs   int64              `json:"repack_ms,omitempty"`
 	Feat            map[string]float64 `json:"feat,omitempty"`             // cheap input features for the entry-tier router
 	// TierPack records how a climbed-to tier's input was packed (TO-3): empty
 	// on entry-tier calls; "token-exact (full source)" / "token-exact (cut

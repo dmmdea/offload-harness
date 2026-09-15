@@ -129,6 +129,40 @@ type Entry struct {
 	// recorded without it — the exact "computed then discarded" defect class
 	// the 0.79.0 instrument-honesty round was about, one file over.
 	Arm string `json:"arm,omitempty"`
+	// --- row provenance (0.124.0, register D-101) ---------------------------
+	// OriginSession / OriginPID / OriginPPID name the PROCESS that recorded
+	// the row and the session it served (see Origin). Record stamps them on
+	// every row that carries none, so every writer in this binary — cascade,
+	// agent, delegate, media — is attributed by one rule. Rows from a service
+	// or a fleet node carry pids and no session; pre-0.124.0 rows carry
+	// neither, and a reader must treat that as UNATTRIBUTED, never as "some
+	// other session".
+	OriginSession string `json:"origin_session,omitempty"`
+	OriginPID     int    `json:"origin_pid,omitempty"`
+	OriginPPID    int    `json:"origin_ppid,omitempty"`
+	// CardsTokens is the ONE token figure a share reader wants: the tokens the
+	// cards processed for this row — the seat's prompt work (SeatTokensIn on
+	// agent rows, TokensIn on cascade rows: the same measurement under two
+	// names, kept apart only because TokensIn doubles as the savings column)
+	// plus what the seat generated. A cache hit did no card work and records
+	// 0. Always written, never omitted: its PRESENCE marks a row that carries
+	// this schema, so a reader can stop reconstructing the figure from three
+	// columns and an input_chars/4 guess the moment it sees the key.
+	CardsTokens int `json:"cards_tokens"`
+	// --- the job behind the row (0.124.0, D-101 / F15) ----------------------
+	// What the delegate result and the agent wire already knew, so the ledger
+	// can answer "which session, which job, how many steps, why it stopped"
+	// without opening the delegation-log corpus. All omitempty: a cascade row
+	// has no job. Placement is the delegator's placement note, capped like
+	// Reason; AcceptanceResult is "pass" | "fail" | "" (nothing evaluated: the
+	// run deferred or the wire failed).
+	JobID            string `json:"job_id,omitempty"`
+	Route            string `json:"route,omitempty"`
+	Placement        string `json:"placement,omitempty"`
+	Steps            int    `json:"steps,omitempty"`
+	StopReason       string `json:"stop_reason,omitempty"`
+	RepackMs         int64  `json:"repack_ms,omitempty"`
+	AcceptanceResult string `json:"acceptance_result,omitempty"`
 }
 
 // Label provenance values for Entry.LabelSource. Constants rather than string literals so
@@ -187,6 +221,13 @@ func (l *Ledger) Record(e Entry) error {
 		e.TS = time.Now().Unix()
 	}
 	e.Reason = truncateReason(e.Reason)
+	e.Placement = truncateReason(e.Placement)
+	// Provenance and the one token figure are stamped HERE, on the one path
+	// every writer takes, so no record site can forget them (D-101).
+	stampOrigin(&e)
+	if e.CardsTokens == 0 {
+		e.CardsTokens = cardsTokens(e)
+	}
 	val, err := json.Marshal(e)
 	if err != nil {
 		return err

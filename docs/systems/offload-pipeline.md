@@ -123,7 +123,13 @@ actually ran; `offload_status`'s roster reports the effective `ocr` model, falli
 
 - **Ledger** — append-only JSONL at the configured `ledger_path`, `fsync`ed per entry so a crash
   cannot lose recorded savings. Carries `tokens_saved` (input tokens kept out of the calling model)
-  and per-call metadata.
+  and per-call metadata. Since 0.124.0 ([ADR 0046](../architecture/decisions/0046-ledger-rows-carry-their-origin-and-job.md))
+  `Record` itself stamps every row's provenance — `origin_session` (the calling session, read once per
+  process from `LOCAL_OFFLOAD_ORIGIN` / `CLAUDE_CODE_SESSION_ID`), `origin_pid`, `origin_ppid` — and the
+  one token figure a share reader wants, `cards_tokens` (prompt work plus generation, 0 on a cache hit;
+  the key is always present, which is how a reader tells a new row from an unattributed old one). Agent
+  and delegate rows add the job behind them (`job_id`, `route`, `placement`, `steps`, `stop_reason`,
+  `repack_ms`, `acceptance_result`).
 - **Cache** — keyed result reuse. Bypassed on the *recordless* path (`NewRecordlessPipeline`);
   **shared** on the *in-loop* path (`NewInLoopPipeline`) — see Interfaces below for why those are two
   different things.

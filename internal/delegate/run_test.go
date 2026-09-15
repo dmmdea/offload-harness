@@ -468,6 +468,22 @@ func TestRunRemoteHappyPathWithAcceptance(t *testing.T) {
 	if rows[0].TokensIn != 0 {
 		t.Errorf("ledger tokens_in = %d, want 0 (a delegation row must never inflate tokens-saved)", rows[0].TokensIn)
 	}
+	// D-101 (ADR 0046): the row names the job it came from and who asked, so a
+	// reader never has to open the corpus — and the one token figure is the
+	// seat's prompt work plus what it generated (the fake wire generates 7).
+	row := rows[0]
+	if row.JobID != r.JobID || row.Route != "remote" || row.AcceptanceResult != "pass" || row.Placement == "" {
+		t.Errorf("ledger row job fields = job_id %q route %q acceptance %q placement %q, want %q / remote / pass / non-empty", row.JobID, row.Route, row.AcceptanceResult, row.Placement, r.JobID)
+	}
+	if row.Steps != 1 || row.StopReason != "done" {
+		t.Errorf("ledger row steps/stop_reason = %d/%q, want the wire's 1/done", row.Steps, row.StopReason)
+	}
+	if row.OriginPID != os.Getpid() {
+		t.Errorf("ledger row origin_pid = %d, want this process %d", row.OriginPID, os.Getpid())
+	}
+	if row.CardsTokens != 7 {
+		t.Errorf("ledger row cards_tokens = %d, want 7 (seat prompt 0 + generated 7)", row.CardsTokens)
+	}
 }
 
 // TestRunAcceptanceFailureFlipsToFailedVerification: a schema-VALID result

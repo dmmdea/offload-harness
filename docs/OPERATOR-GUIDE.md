@@ -188,6 +188,15 @@ local-offload --config setup\templates\config.json ledger --since 1
 tokens kept local (est.): 2920 (~$0.04 Opus-input value — an estimate, not billed savings)
 ```
 
+Every row (0.124.0, ADR 0046) also says WHO asked and WHAT ran: `origin_session` (the Claude Code
+session id the MCP server inherited from its environment, or `LOCAL_OFFLOAD_ORIGIN` when a caller names
+itself; absent on rows a service or a fleet node wrote), `origin_pid` / `origin_ppid`, `cards_tokens`
+(the one figure for the tokens the cards processed for that row — prompt work plus generation, 0 on a
+cache hit), and on agent / delegate rows `job_id`, `route`, `placement`, `steps`, `stop_reason`,
+`repack_ms`, `acceptance_result`. A per-session share is one filter away:
+`grep '"origin_session":"<session id>"' ~/.local-offload/ledger.jsonl`. Rows written before 0.124.0
+carry none of these and must be read as unattributed, not as another session's.
+
 | Failure | Fix |
 |---|---|
 | every call `deferred:true` | Run `doctor`. Usually the endpoint is down or unreachable. A defer on genuinely hard/over-long input is by design. |

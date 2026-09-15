@@ -158,6 +158,14 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		meta.LatencyMs = w.WallMs
 		meta.TokensOut = w.TokensOut
 		meta.SeatTokensIn = w.SeatTokensIn
+		// The job behind the row (D-101): what the wire already knows, so the
+		// ledger row can say which job, how many steps and why it stopped.
+		meta.Steps = w.Steps
+		meta.StopReason = w.StopReason
+		meta.RepackMs = w.RepackMs
+		if jid, _ := req.Params["job_id"].(string); jid != "" {
+			meta.JobID = jid
+		}
 		data, merr := json.Marshal(w)
 		if merr != nil {
 			return core.Result{OK: false, Reason: "agent task: marshaling wire result: " + merr.Error(), Meta: meta}

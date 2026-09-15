@@ -6,7 +6,25 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.124.0] - 2026-09-15 - every ledger row names the session that asked and the job behind it (D-101)
+
 ### Added
+- **Ledger rows carry their origin and their job (register D-101, ADR 0046).** `ledger.Record` stamps every
+  row — cascade, agent, delegate, media, whichever site wrote it — with `origin_session` (from
+  `LOCAL_OFFLOAD_ORIGIN` when a caller names itself, else `CLAUDE_CODE_SESSION_ID`, which Claude Code
+  exports to every child process: one MCP server is one session), `origin_pid` / `origin_ppid`, and ONE
+  token figure, `cards_tokens`: the seat's prompt work plus what it generated (`seat_tokens_in` or
+  `tokens_in`, never both, plus `tokens_out`), 0 on a cache hit and on a defer that never reached a model, the
+  chars/4 estimate only for a completed render that recorded no counts. The `cards_tokens` key is always
+  written, so its presence marks the new schema; pre-0.124.0 rows read as UNATTRIBUTED, never as another
+  session's. Delegate rows also carry `job_id`, `route`, `placement` (the placement note, capped like
+  `reason`), `steps`, `stop_reason`, `repack_ms` and `acceptance_result` (`pass` | `fail` | empty when nothing
+  was evaluated); agent rows carry `job_id`, `steps`, `stop_reason`, `repack_ms`; vision rows the route's
+  `placement`. `core.Meta` gains the same four job fields (omitempty). Why: the harness-share gate summed every
+  ledger row in a session's time window, so a session was credited with every concurrent session's delegations
+  (a five-call session read 35 %) and a session that routed everything it had could still be blocked — the floor
+  could not be enforced honestly until rows said who asked. A per-session share is now one filter away:
+  `grep '"origin_session":"<id>"' ledger.jsonl`.
 - The write door's three-task gate: `contracts/write-door/{t1,t2,t3}` (a one-file Go fix, a two-file Go
   fix plus the table case that exercises it, a JSON + Markdown record edit) and
   `scripts/write-door-gate.ps1`, which sends them to one seat (`-Remote http://<node>:18811` or this

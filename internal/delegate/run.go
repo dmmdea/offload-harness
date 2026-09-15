@@ -3650,6 +3650,16 @@ func (r *runner) record(contract core.AgentContract, pr PlacedResult) {
 			// ModelTier carries placement:seat — the ledger has no placement
 			// column, and "which node/seat ran it" is the row's whole story.
 			ModelTier: pr.Node + ":" + pr.Seat,
+			// The job behind the row (D-101 / F15): what this result already
+			// knew, so a reader never has to open the corpus for it. The
+			// session that asked is stamped by ledger.Record itself.
+			JobID:            pr.JobID,
+			Route:            r.route,
+			Placement:        pr.PlacementReason,
+			Steps:            pr.Result.Steps,
+			StopReason:       pr.Result.StopReason,
+			RepackMs:         pr.Result.RepackMs,
+			AcceptanceResult: acceptanceResult(pr),
 		}); err != nil {
 			r.ledgerLost.Add(1)
 			r.warnLedger.Do(func() {
@@ -3657,6 +3667,22 @@ func (r *runner) record(contract core.AgentContract, pr PlacedResult) {
 			})
 		}
 	}
+}
+
+// acceptanceResult is the ledger's one-word verdict for a placed result:
+// "pass" (the run completed and every acceptance check held — including a
+// contract that declared none), "fail" (a check failed), "" (nothing was
+// evaluated: the run deferred or the wire failed). It mirrors the corpus
+// row's acceptance_pass, spelled so a deferred row cannot read as a failed
+// check.
+func acceptanceResult(pr PlacedResult) string {
+	switch {
+	case len(pr.AcceptanceFailures) > 0:
+		return "fail"
+	case pr.Err == "" && !pr.Result.Deferred:
+		return "pass"
+	}
+	return ""
 }
 
 // appendDelegationLog appends one JSONL line to
