@@ -638,12 +638,50 @@ away a run that had read the whole document and only over-answered: nothing had 
 be. The loop now asks ONCE more, thinking off, at the same budget, with the caps spelled out: *cap every list at N items
 (keep the most important ones and drop the rest), and keep every string under 200 characters*. **N is the smallest
 `maxItems` anywhere in the contract's schema, and never more than 8** — a schema the author shaped is honoured, never
-broken by the retry, so set `maxItems` on your arrays when you know the bound. Three conditions gate it, so it can never
-re-create the shape it fixes: an `output_schema` is set, the partial is JSON-shaped (a cut narrative earns nothing —
-"cap every list" says nothing to it), and the wall still holds one turn at the seat's measured rate (`min_turn`, the
-re-pack term included). It is bounded at ONE: a seat that cuts the capped answer too abstains exactly as before, with
-`final_reissue=list_cap` and BOTH `finish_reason`s on the record (`calls[]`, and named in `repack_note`), so a first cut
-and a second are never read as the same event.
+broken by the retry, so set `maxItems` on your arrays when you know the bound. Two conditions gate it, so it can never
+re-create the shape it fixes: an `output_schema` is set, and the wall still holds one turn at the seat's measured rate
+(`min_turn`, the re-pack term included). It is bounded at ONE: a seat that cuts the capped answer too abstains exactly
+as before, with `final_reissue=list_cap` and BOTH `finish_reason`s on the record (`calls[]`, and named in
+`repack_note`), so a first cut and a second are never read as the same event.
+
+**The re-issue no longer asks the partial to be JSON-shaped (0.123.3, register D-95b).** 0.122.1 gated it on the cut
+answer starting with `{` or `[`, on the reasoning that "cap every list" says nothing to a truncated narrative. On the
+Lenovo 4B that excluded every run it was built for: the seat answers a schema contract in its OWN prose shape
+(`summary (≤100 words):` / `mechanisms:` / `- item`), which the structured re-pack reads perfectly well, so the live
+readback of `METHODOLOGY.md` on 2026-09-14 still deferred at 381 s with `output_truncated` and no re-issue at all. Any
+`length`-cut final on a schema contract now earns the one re-issue; the wall gate is what bounds it.
+
+**A repetition loop is a cut answer (0.123.3, register D-95b).** The same readback showed the second half of the
+failure: the answer had degenerated into a LOOP — one four-line block under `numbers:` repeated about twenty times
+until the budget ran out — and the engine reported it as an ordinary completion, so nothing downstream could tell it
+from an answer that merely ran long. The loop now reads the text it was handed:
+
+- **The rule.** Take the final's non-blank lines, normalised (trimmed, inner whitespace collapsed, case-folded). If the
+  TAIL of the answer is the same block of `p` lines repeated **4 or more times in a row** (`p` from 1 to 32 lines, the
+  smallest period wins, and the last block may be cut off mid-way — that is how a budget ends), the answer is a
+  degenerate loop. Four is the threshold: three repeats are legitimate parallel structure, and the measured failures
+  repeat twenty times or more. A long list of DISTINCT items never matches — the detector keys on repetition, not on
+  length.
+- **What happens.** The final is treated as CUT even when the engine said `stop`: `stop_note` carries
+  `repetition loop (20× "- 100 words cap for summary (enfor…")`, `output_truncated` is set, and the run re-issues ONCE
+  with the list caps PLUS *"Your previous answer got stuck REPEATING the same lines … write each list item exactly once
+  and then stop."* A second loop abstains exactly as a second cut does. `calls[].finish_reason` is **not** rewritten —
+  it stays what the engine reported; the guard is the loop's reading of the text, not the seat's report of itself.
+- **What the caller sees.** The repeated tail is trimmed off the partial that rides in `output`: one copy of the block,
+  then `[repetition trimmed ×19]`. Everything before the loop survives byte for byte.
+
+**`agent_sampling` / `agent_sampling_final` (0.123.3, register D-95b).** The agent client has always sent
+`temperature: 0` and no other sampling key — right for tool calling, and precisely the greedy decoding that makes a
+small seat fall into the loop above. These two box-config objects give a MEASURED seat a different policy:
+`agent_sampling` applies to planner (tool) calls on the executing seat, `agent_sampling_final` to the final answer turn
+and its re-issues — the thinking-off prose turn, which is where a model family's non-thinking recommendation actually
+applies. Both take `temperature`, `top_p`, `top_k`, `presence_penalty` and `repetition_penalty`, all optional; a knob
+you do not set is ABSENT from the request, so the seat keeps its own default, and an absent object is today's behaviour
+byte for byte. An out-of-range value fails the config LOAD, named by its key, rather than as a 400 mid-run. The
+effective policy of every completion is published in `calls[].sampling` (`temperature=0` for the default), so a
+measurement can prove which decoding produced which answer. **There is no house default and no recommended value
+here**: Qwen3.5's own non-thinking card says temperature 0.7 / top_p 0.8 / top_k 20 / presence_penalty 1.5, and that is
+a number to measure on a seat, not one to inherit fleet-wide.
 
 ### What is the harness doing on the cards? (0.117.0, ADR 0041)
 
@@ -709,7 +747,13 @@ same step ONCE with thinking off at 4× the step budget (cap 8,192), then stops 
 `empty`, which the node reports as a defer with the arithmetic in `stop_note` and per-call `calls[]` — never as an
 empty answer; `off` renders every planner call in non-thinking mode (`chat_template_kwargs: {"enable_thinking":
 false}`, the same knob the structured re-pack sends) for grounded extraction on a seat measured to starve; `on`
-never sends the kwarg. A contract's own `thinking` overrides the box. Until 0.115.8 the loop raised the budget
+never sends the kwarg. A contract's own `thinking` overrides the box. `agent_sampling` and `agent_sampling_final`
+(0.123.3) are this seat's decoding policy — planner calls and the final answer turn respectively — each an object of
+optional `temperature` / `top_p` / `top_k` / `presence_penalty` / `repetition_penalty`; absent or empty means the
+historical request (`temperature: 0`, no other key), an unset knob is absent from the body so the seat keeps its own
+default, an out-of-range value fails the load by key, and the effective policy of each completion is published in
+`calls[].sampling`. They carry no house default on purpose: a sampling setting is a per-seat measurement (see "The
+timeout chain"). Until 0.115.8 the loop raised the budget
 4× on a starved step, nudged once with a user turn and then accepted a second empty as `done` (1× + 4× + 4× the
 budget for nothing; 2026-09-10 retrospective D-01). `agent_retry_min_sec` (0.115.9) is the least `timeout_sec` budget a subtask's cross-seat verification retry is
 worth starting with (0 = the historical 10 s): set it to a cold load plus one turn at `max_tokens` on the retry

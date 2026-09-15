@@ -20,6 +20,8 @@
   "agent_ctx_tokens": 0,
   "agent_max_tokens": 0,
   "agent_thinking": "",
+  "agent_sampling": null,
+  "agent_sampling_final": null,
   "agent_allow_write": false,
   "tier_profile": "",
   "tiers": null,

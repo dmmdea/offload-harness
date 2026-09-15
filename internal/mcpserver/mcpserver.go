@@ -1830,18 +1830,20 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 	// against itself and silently fall back to no cache on every agent_run.
 	offload := pipeline.NewInLoopOffloadForPlanner(cfg, model, timeout, s.p.Cache())
 	built, err := agent.Build(agent.BuildConfig{
-		PlannerBase:  cfg.Endpoint,
-		Model:        model,
-		Timeout:      timeout,
-		MaxSteps:     maxSteps,
-		MaxTokens:    cfg.AgentMaxTokens,                                  // 0 => the loop default (1,024); a thinking seat wants 4096 (agent_max_tokens)
-		Thinking:     firstNonEmptyString(in.Thinking, cfg.AgentThinking), // the call's own policy, else this box's agent_thinking
-		ReadRoot:     absRoot,
-		Offload:      offload,
-		NPU:          pipeline.NewLoopNPU(cfg),
-		Accel:        pipeline.NewLoopAccel(cfg),
-		EnvRules:     cfg.AgentEnvRules,
-		SetupActions: in.SetupActions,
+		PlannerBase:   cfg.Endpoint,
+		Model:         model,
+		Timeout:       timeout,
+		MaxSteps:      maxSteps,
+		MaxTokens:     cfg.AgentMaxTokens,                                  // 0 => the loop default (1,024); a thinking seat wants 4096 (agent_max_tokens)
+		Thinking:      firstNonEmptyString(in.Thinking, cfg.AgentThinking), // the call's own policy, else this box's agent_thinking
+		Sampling:      cfg.AgentSampling,                                   // this seat's measured decoding policy (D-95b)
+		SamplingFinal: cfg.AgentSamplingFinal,
+		ReadRoot:      absRoot,
+		Offload:       offload,
+		NPU:           pipeline.NewLoopNPU(cfg),
+		Accel:         pipeline.NewLoopAccel(cfg),
+		EnvRules:      cfg.AgentEnvRules,
+		SetupActions:  in.SetupActions,
 	})
 	if err != nil {
 		return jsonResult(map[string]any{"deferred": true, "reason": "building agent: " + err.Error()})

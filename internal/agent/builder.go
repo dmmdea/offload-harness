@@ -59,6 +59,12 @@ type BuildConfig struct {
 	// whether a tool exists on this seat is answered by the loop as an
 	// observation. nil = no replay.
 	SetupActions []core.AgentSetupAction
+	// Sampling / SamplingFinal are the seat's decoding policy (sampling.go,
+	// register D-95b): the planner policy for tool steps and the optional
+	// separate policy for the (thinking-off) final answer. Both nil is the
+	// request this client has always sent — temperature 0 and nothing else.
+	Sampling      *core.AgentSampling
+	SamplingFinal *core.AgentSampling
 	// Thinking is the planner think-block policy (thinking.go ThinkingMode);
 	// "" = ThinkingAuto. Validated by the caller (core.ValidateThinking /
 	// ParseThinkingMode) — an unparseable value fails the build by name.
@@ -368,6 +374,14 @@ func Build(cfg BuildConfig) (*BuildResult, error) {
 		note := "agent env rules: " + cfg.EnvRules.Summary()
 		if denied := compiled.DeniedTools(before); len(denied) > 0 {
 			note += " (withheld: " + strings.Join(denied, ", ") + ")"
+		}
+		res.Notes = append(res.Notes, note)
+	}
+	if !cfg.Sampling.IsZero() || !cfg.SamplingFinal.IsZero() {
+		loop = loop.WithSampling(cfg.Sampling, cfg.SamplingFinal)
+		note := "agent sampling: planner " + cfg.Sampling.Summary()
+		if !cfg.SamplingFinal.IsZero() {
+			note += "; final " + cfg.SamplingFinal.Summary()
 		}
 		res.Notes = append(res.Notes, note)
 	}

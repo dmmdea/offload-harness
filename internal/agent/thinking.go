@@ -162,6 +162,10 @@ type CallRecord struct {
 	ToolCalls        int    `json:"tool_calls,omitempty"`
 	ThinkingOff      bool   `json:"thinking_off,omitempty"`
 	ReasoningKey     string `json:"reasoning_key,omitempty"`
+	// Sampling is the EFFECTIVE decoding policy of this call (sampling.go):
+	// temperature=0 for the default, the operator's policy otherwise. A
+	// measurement that cannot prove which sampling ran is not a measurement.
+	Sampling string `json:"sampling,omitempty"`
 	// ForcedFinal marks the forced final step (D-89): no tools offered, the
 	// answer asked for, the final budget.
 	ForcedFinal bool `json:"forced_final,omitempty"`

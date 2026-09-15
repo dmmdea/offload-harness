@@ -22,6 +22,9 @@ type fakeClient struct {
 	// and whether the context asked for a non-thinking render (thinking.go).
 	seenMax     []int
 	seenNoThink []bool
+	// seenSampling records the decoding policy each call carried on its
+	// context (sampling.go); nil = the default the client has always sent.
+	seenSampling []*Sampling
 }
 
 func (f *fakeClient) Chat(ctx context.Context, msgs []Msg, specs []ToolSpec, maxTokens int) (Completion, error) {
@@ -29,6 +32,7 @@ func (f *fakeClient) Chat(ctx context.Context, msgs []Msg, specs []ToolSpec, max
 	f.seenSpecs = append(f.seenSpecs, append([]ToolSpec(nil), specs...))
 	f.seenMax = append(f.seenMax, maxTokens)
 	f.seenNoThink = append(f.seenNoThink, IsThinkingOff(ctx))
+	f.seenSampling = append(f.seenSampling, SamplingFromContext(ctx))
 	if f.calls >= len(f.script) {
 		return Completion{}, errors.New("fakeClient: script exhausted")
 	}

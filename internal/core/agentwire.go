@@ -427,6 +427,11 @@ type AgentCallRecord struct {
 	ForcedFinal      bool   `json:"forced_final,omitempty"`
 	// Ms (0.115.21): the client-measured wall of the completion.
 	Ms int64 `json:"ms,omitempty"`
+	// Sampling (0.123.3, D-95b) is the EFFECTIVE decoding policy of this
+	// completion ("temperature=0" for the default). A measurement that cannot
+	// prove which sampling ran is not a measurement. Omitempty: a node that
+	// predates the field reports none, never "the default".
+	Sampling string `json:"sampling,omitempty"`
 }
 
 // ValidateContextClass accepts the closed vocabulary of the placement hint
