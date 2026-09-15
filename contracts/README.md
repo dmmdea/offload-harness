@@ -22,6 +22,7 @@ JSON carries no comments, so the field guidance lives here.
 | `profile` | no | Default `research` (read-over-docs). |
 | `max_steps` | no | Default 12, clamped to 12. |
 | `timeout_sec` | no | Default 300, clamped to 900. Size it to the seat — a weak seat reading three docs can legitimately need minutes. |
+| `write_root` | no | Opens the WRITE door (0.122.0, D-06): a directory RELATIVE to the run's read root that the seat may create and change files under. The executing node must have `agent_allow_write: true` or the contract is refused (ack 400 on the fleet path, `defer_class: "write"` locally). The seat works on the node's own throwaway copy of the docs and the result carries a unified `diff` + `diff_files` the **caller** applies — the harness never does. Grants create+overwrite only: no delete, no shell, no `run`, no network. Caps: 8 files, 64 KiB written, 192 KiB of diff; past any of them nothing is published. |
 
 `schema_version` and `depth` are minted by the delegator; putting them in a file has no effect.
 
@@ -34,10 +35,18 @@ JSON carries no comments, so the field guidance lives here.
 | `regex:<re>` | Go regexp matches output | shape demands, e.g. `regex:[0-9]` = "carries a number" |
 | `min_items:<field>:<n>` | `structured.<field>` is an array with ≥ n items (n ≥ 1) | minimum yield from an extraction |
 | `nonempty:<field>` | `structured.<field>` present and non-empty (`0`/`false` count as values) | required fields that must not be omitted |
+| `diff_touches:<prefix>` | the write set holds a changed path starting with `prefix` | a `write_root` contract: the leg changed the file it was pointed at |
+| `diff_max_files:<n>` | the write set is NON-EMPTY and touches ≤ n files | a `write_root` contract: the leg stayed in its lane |
 
 Text verbs read the final `output`, falling back to the raw `structured` bytes when `output`
 is empty; the field verbs require `structured` and fail closed without it. Unfalsifiable
 checks (`contains:`, `min_items:f:0`) are rejected at validation.
+
+The two diff verbs read the run's WRITE SET and are the only checks a talkative seat cannot
+satisfy by talking. Both fail closed on an empty write set, `diff_max_files` included: a cap
+assertion that passed because nothing was written would make a contract that verified nothing
+read as verified. They do not check that the change is CORRECT — nothing mechanical can. Read
+the diff.
 
 ### Authoring rule: anchor at least one check to content that appears only in the docs
 

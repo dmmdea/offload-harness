@@ -689,6 +689,16 @@ func buildAgentRun(cfg config.Config, payload json.RawMessage) (core.Request, fu
 	if contract.Depth < 1 {
 		contract.Depth = 1
 	}
+	// The WRITE door (register D-06) is refused at ACK on a node that has not
+	// opted in, not deferred after the fact: a 400 here is what makes the
+	// delegator RE-PLACE the contract on a node whose agent_allow_write is
+	// true, while a defer would spend the placement on a box that was never
+	// going to open the door. (The in-process local path has no ack hop and
+	// defers with class `write` instead — pipeline.runAgentTask.)
+	if contract.WriteRoot != "" && !cfg.AgentAllowWrite {
+		return core.Request{}, noop, fmt.Errorf(
+			"agent contract: this node does not open the write door (agent_allow_write is false in the config it loaded) and the contract asks to write under %q", contract.WriteRoot)
+	}
 
 	jobsRoot := filepath.Join(cfg.BaseDir(), "pipeline-jobs")
 	if mkErr := os.MkdirAll(jobsRoot, 0o755); mkErr != nil {

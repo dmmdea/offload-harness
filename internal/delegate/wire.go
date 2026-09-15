@@ -156,13 +156,21 @@ type ResultWire struct {
 	RepackMs       int64  `json:"repack_ms,omitempty"`
 	RepackAttempts int    `json:"repack_attempts,omitempty"`
 	RepackNote     string `json:"repack_note,omitempty"`
-	// Final-budget fit and the list-cap re-issue (0.121.2, register D-95),
+	// Final-budget fit and the list-cap re-issue (0.122.1, register D-95),
 	// passed through from the node. Without them a caller sizing its next
 	// contract cannot tell an answer that fitted from one the wall narrowed,
 	// nor a partial that was asked again from one that never was.
 	FinalBudgetFit int    `json:"final_budget_fit,omitempty"`
 	BudgetNote     string `json:"budget_note,omitempty"`
 	FinalReissue   string `json:"final_reissue,omitempty"`
+	// The write door (0.122.0, register D-06), passed through from the node.
+	// Diff is a unified patch the CALLER applies — the harness never does —
+	// DiffFiles names the paths it touches, and WriteNote says what the door
+	// did when there is no diff to read. All omitempty: a read-only
+	// delegation publishes byte-identically to before the door existed.
+	Diff      string   `json:"diff,omitempty"`
+	DiffFiles []string `json:"diff_files,omitempty"`
+	WriteNote string   `json:"write_note,omitempty"`
 }
 
 // ResponseWire is the full response: summary first, then per-subtask results
@@ -250,6 +258,9 @@ func WireResponse(results []PlacedResult, sum Summary, lints [][]string) Respons
 			FinalBudgetFit:     pr.Result.FinalBudgetFit,
 			BudgetNote:         pr.Result.BudgetNote,
 			FinalReissue:       pr.Result.FinalReissue,
+			Diff:               pr.Result.Diff,
+			DiffFiles:          pr.Result.DiffFiles,
+			WriteNote:          pr.Result.WriteNote,
 		}
 		if pr.Err != "" {
 			rw.Failed = true
