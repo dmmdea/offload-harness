@@ -690,7 +690,7 @@ func seatBlock(s mediaseat.Seat, p Params, a seatAnchors) (string, error) {
 		if env != "" {
 			envEntries = append(envEntries, fmt.Sprintf("%q", env))
 		}
-		envEntries = append(envEntries, s.GPUEnv...) // per-seat device pin, barewords
+		envEntries = append(envEntries, flowItems(s.GPUEnv)...) // per-seat device pin
 		if len(envEntries) > 0 {
 			fmt.Fprintf(&b, "    env: [%s]\n", strings.Join(envEntries, ", "))
 		}
@@ -764,7 +764,7 @@ func seatBlock(s mediaseat.Seat, p Params, a seatAnchors) (string, error) {
 		if lib := p.seatExpand(s.LibDir); lib != "" && p.GOOS != "windows" {
 			envEntries = append(envEntries, fmt.Sprintf("%q", "LD_LIBRARY_PATH="+lib+":${LD_LIBRARY_PATH:-}"))
 		}
-		envEntries = append(envEntries, s.GPUEnv...) // per-seat device pin
+		envEntries = append(envEntries, flowItems(s.GPUEnv)...) // per-seat device pin
 		if len(envEntries) > 0 {
 			fmt.Fprintf(&b, "    env: [%s]\n", strings.Join(envEntries, ", "))
 		}
@@ -979,12 +979,30 @@ func dropQ38(tmpl string) (string, error) {
 		}
 		tmpl = strings.ReplaceAll(out, " | q38l", "")
 	}
+	// The FAN-OUT twin (A-70, 2026-09-14) follows its parent for the same two reasons.
+	if definesModel(tmpl, modelQ38Par8) {
+		out, err := dropModel(tmpl, modelQ38Par8)
+		if err != nil {
+			return "", err
+		}
+		tmpl = strings.ReplaceAll(out, " | q38p", "")
+	}
 	return dropModel(tmpl, modelQ38)
 }
 
 // modelQ38Long is the 27B's long-context twin (literal --ctx-size 262144, no MTP),
 // rendered by the triple-Blackwell template and gated with its parent.
 const modelQ38Long = "qwen3.8-27b-262k"
+
+// modelQ38Par8 is the 27B's FAN-OUT twin: the same weights, pin and sampling at
+// `--parallel 8` - the operating point measured on the 5060 Ti pair 2026-09-01 (W1
+// 43.4 tok/s unchanged; aggregate 78.7/110.8/100.7/106.8 at c4/8/16/32 against the
+// --parallel 1 seat's flat 34.6-37.4, which also 429s from c16). It is a SEPARATE
+// entry rather than a flag on the seat because llama.cpp divides `-c` among its
+// slots - eight slots at --ctx-size 131072 serve 16,384 tokens each - and the parent
+// seat is the tier's declared fallback agent lane at 131,072. Rendered by both
+// pair-spanning Blackwell templates and gated with its parent.
+const modelQ38Par8 = "qwen3.8-27b-par8"
 
 // modelQ354B is the Qwen3.5-4B agent entry, gated by the tier's
 // include_qwen35_4b exactly as modelQ38 rides include_qwen38.
@@ -1070,6 +1088,24 @@ func removeMember(line, member string) string {
 		}
 	}
 	return line[:open+1] + strings.Join(kept, ", ") + line[close:]
+}
+
+// flowItems quotes the env entries that a YAML flow sequence would otherwise split or
+// mis-type. A multi-device pin is one string, "CUDA_VISIBLE_DEVICES=0,2", and written
+// bare inside `env: [...]` YAML reads it as TWO items -- "CUDA_VISIBLE_DEVICES=0" and
+// "2" -- so a seat that must span two cards is handed one card and a nonsense variable.
+// Barewords are kept for everything else so the rendered text stays the shape the
+// templates and their assertions already use.
+func flowItems(entries []string) []string {
+	out := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if strings.ContainsAny(e, ",[]{}") {
+			out = append(out, fmt.Sprintf("%q", e))
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
 }
 
 func uniqueTokens(s string) []string {

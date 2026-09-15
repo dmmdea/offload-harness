@@ -85,9 +85,38 @@ func TestDualBlackwellSeedsThePairSeatWithTheCacheServer(t *testing.T) {
 			t.Errorf("vllm_seat.%s = %q, differs from blackwell-3x16's %q", c.name, c.got, c.want)
 		}
 	}
-	if s.MaxModelLen != r.MaxModelLen || s.GPUMemoryUtilization != r.GPUMemoryUtilization || s.TTLSeconds != r.TTLSeconds {
-		t.Errorf("vllm_seat operating point (max_model_len %d, util %.2f, ttl %d) differs from blackwell-3x16's (%d, %.2f, %d)",
-			s.MaxModelLen, s.GPUMemoryUtilization, s.TTLSeconds, r.MaxModelLen, r.GPUMemoryUtilization, r.TTLSeconds)
+	if s.MaxModelLen != r.MaxModelLen || s.TTLSeconds != r.TTLSeconds {
+		t.Errorf("vllm_seat operating point (max_model_len %d, ttl %d) differs from blackwell-3x16's (%d, %d)",
+			s.MaxModelLen, s.TTLSeconds, r.MaxModelLen, r.TTLSeconds)
+	}
+	// UTILIZATION IS THE ONE NUMBER THAT LEGITIMATELY DIFFERS, and it used to be in the
+	// list above (A-22: the 2-card seat carried 0.9 copied from the 3-card tier). vLLM
+	// has ONE utilization for every rank, so what the figure means depends on what else
+	// is on the cards it spans. On the 3-card box the pair is devices 0 and 2 and the
+	// display card is not in the seat at all: 0.90 is soak-verified there (10/10 cold
+	// loads plus a 20-minute soak; 0.92 raised the pool 10% but did not stay stable, and
+	// 0.95 cannot initialise beside the mem0 embedder). On a TWO-card box the pair IS
+	// every card the machine has, so one of the two is also driving the desktop -- the
+	// starvation that dropped a display to a 720p-class mode and forced a reboot on
+	// 2026-09-04 is what 0.90 costs there. Arm P measured the two-card operating point
+	// on the pair itself: util 0.85 -> "Available KV cache memory: 2.32 GiB", "GPU KV
+	// cache size: 141,266 tokens", "Maximum concurrency for 131,072 tokens per request:
+	// 1.08x" -- a pool that still clears one full-window request. (Arm F, devices 1+2 at
+	// util 0.50, was VOID at -3.36 GiB and measures nothing.)
+	const (
+		pairUtil   = 0.85 // arm P, 2 cards, one of them the desktop
+		tripleUtil = 0.90 // A-28 sweep, 3 cards, display card outside the seat
+	)
+	if s.GPUMemoryUtilization != pairUtil {
+		t.Errorf("blackwell-2x16 vllm_seat gpu_memory_utilization = %.2f, want %.2f: that is arm P's measured "+
+			"two-card operating point (2.32 GiB KV / 141,266 tokens). %.2f is the THREE-card figure, and on a "+
+			"two-card box it is taken out of the card that also draws the desktop",
+			s.GPUMemoryUtilization, pairUtil, tripleUtil)
+	}
+	if r.GPUMemoryUtilization != tripleUtil {
+		t.Errorf("blackwell-3x16 vllm_seat gpu_memory_utilization = %.2f, want %.2f: the sweep on THAT box found "+
+			"0.90 stable over 10/10 cold loads and a 20-minute soak, 0.92 unstable and 0.95 impossible. The "+
+			"two-card seat's 0.85 is a different box, not a correction to this one", r.GPUMemoryUtilization, tripleUtil)
 	}
 	if !strings.Contains(s.Aliases[0]+strings.Join(s.Aliases, ","), "agent-pool") {
 		t.Errorf("vllm_seat aliases %v lack agent-pool — the harness binds to that alias", s.Aliases)
