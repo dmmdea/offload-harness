@@ -26,7 +26,7 @@ func TestLedgerRoundTripAndSummary(t *testing.T) {
 	rec(Entry{Task: "triage", TokensIn: 70, Deferred: true})    // deferred
 	l.Close()
 
-	s, err := SummarizeFile(p, 0, 15.0)
+	s, err := SummarizeFile(p, 0, Prices{InputPerMTok: 15})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,7 +42,7 @@ func TestLedgerRoundTripAndSummary(t *testing.T) {
 }
 
 func TestSummarizeMissingFileIsEmpty(t *testing.T) {
-	s, err := SummarizeFile(filepath.Join(t.TempDir(), "nope.jsonl"), 0, 1.0)
+	s, err := SummarizeFile(filepath.Join(t.TempDir(), "nope.jsonl"), 0, Prices{InputPerMTok: 1})
 	if err != nil || s.Calls != 0 {
 		t.Fatalf("missing file: err=%v calls=%d", err, s.Calls)
 	}
@@ -57,7 +57,7 @@ func TestSummarizeSkipsMalformed(t *testing.T) {
 	f, _ := os.OpenFile(p, os.O_APPEND|os.O_WRONLY, 0o600)
 	_, _ = f.WriteString(`{"task":"classify","tokens_in":5`)
 	f.Close()
-	s, err := SummarizeFile(p, 0, 0)
+	s, err := SummarizeFile(p, 0, Prices{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,7 +118,7 @@ func TestSummarizeCountsReasoningReclaims(t *testing.T) {
 	if err := os.WriteFile(p, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	s, err := SummarizeFile(p, 0, 1.0)
+	s, err := SummarizeFile(p, 0, Prices{InputPerMTok: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -140,7 +140,7 @@ func TestConcurrentAppend(t *testing.T) {
 	}
 	wg.Wait()
 	l.Close()
-	s, _ := SummarizeFile(p, 0, 0)
+	s, _ := SummarizeFile(p, 0, Prices{})
 	if s.Calls != 20 {
 		t.Fatalf("concurrent appends: got %d want 20", s.Calls)
 	}
@@ -289,7 +289,7 @@ func TestSummaryHonestValueLabel(t *testing.T) {
 	l, _ := Open(p)
 	_ = l.Record(Entry{Task: "summarize", TokensIn: 2_000_000}) // completed
 	l.Close()
-	s, err := SummarizeFile(p, 0, 15.0)
+	s, err := SummarizeFile(p, 0, Prices{InputPerMTok: 15})
 	if err != nil {
 		t.Fatal(err)
 	}

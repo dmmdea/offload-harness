@@ -2556,7 +2556,7 @@ func runLedger(args []string) error {
 		sinceTS = time.Now().AddDate(0, 0, -*since).Unix()
 	}
 	// Lock-free read: works even while the MCP server is appending to the ledger.
-	s, err := ledger.SummarizeFile(cfg.LedgerPath, sinceTS, cfg.OpusInputPricePerMTok)
+	s, err := ledger.SummarizeFile(cfg.LedgerPath, sinceTS, ledger.PricesFrom(cfg.OpusInputPricePerMTok, cfg.OpusOutputPricePerMTok))
 	if err != nil {
 		return err
 	}
@@ -2573,10 +2573,12 @@ func runLedger(args []string) error {
 	}{s, reasons}
 	b, _ := json.MarshalIndent(out, "", "  ")
 	fmt.Println(string(b))
-	// LO-12: honest claim — this is the est. Opus-input VALUE of tokens kept
-	// local, not literal billed savings. Math unchanged.
-	fmt.Printf("tokens kept local (est.): %d (~$%.2f Opus-input value — an estimate, not billed savings)\n",
-		s.TokensSaved, s.EstValueKeptLocal)
+	// LO-12: honest claim — this is the est. Opus VALUE of the work kept local,
+	// not literal billed savings. Since 0.117.4 it prices BOTH halves (input at
+	// opus_input_price_per_mtok, output at opus_output_price_per_mtok), so the
+	// line names both token counts rather than only the input one.
+	fmt.Printf("tokens kept local (est.): %d in + %d out (~$%.2f Opus value — an estimate, not billed savings)\n",
+		s.TokensSaved, s.TokensOut, s.EstValueKeptLocal)
 	return nil
 }
 

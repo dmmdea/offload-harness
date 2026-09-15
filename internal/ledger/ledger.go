@@ -245,10 +245,14 @@ type Summary struct {
 	ReasoningReclaims int `json:"reasoning_reclaims"` // completed via the terminal reasoning tier (deferrals it reclaimed before Opus)
 	TokensSaved       int `json:"tokens_saved"`       // input tokens kept out of Opus on completed/cache calls
 	TokensOut         int `json:"tokens_out"`
-	// EstValueKeptLocal is the estimated Opus-INPUT value of the tokens kept
-	// local (tokens_saved x opus_input_price_per_mtok / 1M). It is an estimate
-	// of avoided cloud input pricing, NOT literal billed dollars saved (LO-12:
-	// the old est_dollar_saved name presented it as money in the bank).
+	// EstValueKeptLocal is the estimated Opus value of the work kept local:
+	// tokens_saved x opus_input_price_per_mtok + tokens_out x
+	// opus_output_price_per_mtok, both per 1M. BOTH halves are priced — the
+	// input tokens the cloud never received AND the output tokens a local seat
+	// generated in its place (0.117.4; before that output was priced at zero,
+	// which is the expensive half on Opus). It is an estimate of avoided cloud
+	// pricing, NOT literal billed dollars saved (LO-12: the old est_dollar_saved
+	// name presented it as money in the bank).
 	EstValueKeptLocal float64 `json:"est_value_kept_local"`
 	// Deprecated: the same number under the old, misleading name — kept
 	// emitted for one release for consumers of the JSON; remove in v0.7.
@@ -256,9 +260,48 @@ type Summary struct {
 	ByTask         map[string]int `json:"by_task"`
 }
 
+// Prices values what a local seat produced, in Opus dollars per 1M tokens.
+//
+// TWO rates, not one, because the cloud bills two: on Opus an output token
+// costs FIVE TIMES an input token, and this package's whole claim is that a
+// local seat did work the cloud would otherwise have billed. One rate cannot
+// express that, and the single rate this package took priced output at zero.
+type Prices struct {
+	// InputPerMTok values prompt tokens kept out of the cloud (config
+	// `opus_input_price_per_mtok`).
+	InputPerMTok float64
+	// OutputPerMTok values tokens the local seat GENERATED (config
+	// `opus_output_price_per_mtok`). A caller with no configured value passes
+	// DefaultPrices.OutputPerMTok - never 0, which is the defect this field
+	// exists to close.
+	OutputPerMTok float64
+}
+
+// DefaultPrices are the shipped Opus list rates ($/1M tokens) and the fallback
+// an absent/zero config key resolves to, so an un-updated config under-reports
+// by a KNOWN factor instead of silently zeroing half the accounting.
+var DefaultPrices = Prices{InputPerMTok: 15.0, OutputPerMTok: 75.0}
+
+// PricesFrom resolves a config's two price keys against DefaultPrices. A
+// non-positive key falls back to the shipped rate INDEPENDENTLY of the other,
+// which is the whole point: every config written before `opus_output_price_per_mtok`
+// existed carries an input price and no output price, and the fallback is what
+// keeps those files from re-creating the priced-at-zero defect on upgrade.
+// Floats, not a config struct, so the ledger keeps depending on nothing.
+func PricesFrom(inputPerMTok, outputPerMTok float64) Prices {
+	p := DefaultPrices
+	if inputPerMTok > 0 {
+		p.InputPerMTok = inputPerMTok
+	}
+	if outputPerMTok > 0 {
+		p.OutputPerMTok = outputPerMTok
+	}
+	return p
+}
+
 // Summarize aggregates this ledger's file since `since` (unix; 0 = all).
-func (l *Ledger) Summarize(since int64, opusPricePerMTok float64) (Summary, error) {
-	return SummarizeFile(l.path, since, opusPricePerMTok)
+func (l *Ledger) Summarize(since int64, prices Prices) (Summary, error) {
+	return SummarizeFile(l.path, since, prices)
 }
 
 // ReadAll loads every parseable entry from a JSONL ledger (lock-free; skips
@@ -340,7 +383,7 @@ func TopDeferReasons(path string, since int64, topN int) ([]ReasonCount, error) 
 // SummarizeFile reads a JSONL ledger without any lock — safe to call while
 // another process is appending (a partial final line is skipped). A missing
 // file reports an empty summary (nothing offloaded yet), not an error.
-func SummarizeFile(path string, since int64, opusPricePerMTok float64) (Summary, error) {
+func SummarizeFile(path string, since int64, prices Prices) (Summary, error) {
 	s := Summary{ByTask: map[string]int{}}
 	f, err := os.Open(path)
 	if err != nil {
@@ -381,9 +424,13 @@ func SummarizeFile(path string, since int64, opusPricePerMTok float64) (Summary,
 			}
 		}
 	}
-	// Same math as ever — only the CLAIM changed (LO-12): this is the est.
-	// Opus-input value of locally-kept tokens, not billed savings.
-	s.EstValueKeptLocal = float64(s.TokensSaved) / 1_000_000 * opusPricePerMTok
+	// The est. Opus value of what stayed local, BOTH HALVES priced at their own
+	// rate. Until 0.117.4 this was TokensSaved x the input rate and nothing else,
+	// so every output token a seat generated was multiplied by zero — and output
+	// is the half that bills at 5x. The CLAIM is unchanged (LO-12): an estimate of
+	// avoided cloud pricing, never billed savings.
+	s.EstValueKeptLocal = float64(s.TokensSaved)/1_000_000*prices.InputPerMTok +
+		float64(s.TokensOut)/1_000_000*prices.OutputPerMTok
 	s.EstDollarSaved = s.EstValueKeptLocal // Deprecated alias; remove in v0.7
 	return s, sc.Err()
 }
