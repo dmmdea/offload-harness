@@ -26,6 +26,15 @@ type Options struct {
 	// SampleGPU runs nvidia-smi for utilization/memory and the processes on the
 	// cards. Off in tests and where the box has no NVIDIA driver.
 	SampleGPU bool
+	// Sampler overrides how the cards are read when SampleGPU is true. Nil (the
+	// production default) means the real SampleGPUs (nvidia-smi). A caller one
+	// package up from gpuactivity cannot reach the package-private smiRun seam
+	// (internal/gpuactivity/smi.go) to fake specific per-card numbers, so this
+	// field is the seam at the Options boundary: it lets a verdict test (held vs
+	// held-idle vs held-working depends on the ACTUAL util numbers, not just
+	// on/off) inject idle or busy cards without touching the real driver. See
+	// internal/mcpserver's statusGPUSampler var for how offload_status wires it.
+	Sampler func(ctx context.Context) ([]GPU, error)
 }
 
 // Holder describes the lease holder beyond the lease record.
@@ -133,7 +142,11 @@ func Snapshot(ctx context.Context, opts Options) View {
 	}
 
 	if opts.SampleGPU {
-		gpus, gerr := SampleGPUs(ctx)
+		sample := opts.Sampler
+		if sample == nil {
+			sample = SampleGPUs
+		}
+		gpus, gerr := sample(ctx)
 		if gerr != nil {
 			v.GPUErr = "nvidia-smi: " + gerr.Error()
 		} else {

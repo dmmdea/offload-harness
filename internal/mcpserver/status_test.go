@@ -14,9 +14,24 @@ import (
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/config"
+	"github.com/dmmdea/offload-harness/internal/gpuactivity"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
 	"github.com/dmmdea/offload-harness/internal/pipeline"
 )
+
+// fakeIdleGPUSampler stands in for statusGPUSampler in a verdict test: idle,
+// known utilization on every card, so a test can assert held-idle vs
+// held-working on ITS OWN scenario instead of on whatever nvidia-smi reports
+// for whatever else is running on the box at the moment the test runs (H-49 —
+// TestStatusPublishesTheLocalLeaseWithTheQueueCommand read the real cards and
+// failed on any machine actually doing GPU work, including this repo's own
+// measurement runs).
+func fakeIdleGPUSampler(context.Context) ([]gpuactivity.GPU, error) {
+	return []gpuactivity.GPU{
+		{Index: 0, Name: "fake-card-0", UtilPct: 0, UtilKnown: true, MemUsedMiB: 512, MemTotalMiB: 16384},
+		{Index: 1, Name: "fake-card-1", UtilPct: 1, UtilKnown: true, MemUsedMiB: 256, MemTotalMiB: 16384},
+	}, nil
+}
 
 // TestStatusDiscoversLocalCapability: offload_status is the discovery tool an
 // inspecting agent calls FIRST. It must surface the LOCAL model roster (the
@@ -268,6 +283,8 @@ func TestStatusPublishesTheLocalLeaseWithTheQueueCommand(t *testing.T) {
 	cfg.StateDir = t.TempDir()
 	t.Setenv("NVIDIA_API_KEY", "")
 	t.Setenv("NGC_API_KEY", "")
+	statusGPUSampler = fakeIdleGPUSampler
+	t.Cleanup(func() { statusGPUSampler = nil })
 	s := New(pipeline.New(cfg, nil, nil, nil))
 
 	status := func() map[string]any {
@@ -620,5 +637,75 @@ func TestStatusFleetLocalSeatResidencyUnknownIsNotAssertedLoaded(t *testing.T) {
 	}
 	if _, present := seat["ctx_probe_error"]; !present {
 		t.Fatalf("probe failure must be reported, got %v", seat)
+	}
+}
+
+// TestLiveStatusVerdictReadsTheRealCards exercises offload_status against the
+// REAL nvidia-smi on this machine (statusGPUSampler left nil — production
+// default) instead of the fake used everywhere else in this file. Gated behind
+// an env flag, following TestLiveWindowsProbes / the OFFLOAD_LIVE_PDH
+// convention (internal/fleetnode): the numbers are machine- and load-dependent
+// (this box may legitimately be mid-measurement, cards pegged at 100%), so the
+// assertions are sanity bounds on the vocabulary and the shape, never an exact
+// verdict. This is the receipt that the seam added for H-49 (statusGPUSampler)
+// is a genuine override and not a dead field nothing wires up — run it with:
+//
+//	OFFLOAD_LIVE_GPU=1 go test -run TestLiveStatusVerdictReadsTheRealCards -v ./internal/mcpserver/
+func TestLiveStatusVerdictReadsTheRealCards(t *testing.T) {
+	if os.Getenv("OFFLOAD_LIVE_GPU") != "1" {
+		t.Skip("set OFFLOAD_LIVE_GPU=1 to exercise offload_status against the real nvidia-smi")
+	}
+	cfg := config.Default()
+	cfg.Endpoint = "http://127.0.0.1:1" // nothing listens; this test is about the GPU leg, not the seat
+	cfg.StateDir = t.TempDir()
+	t.Setenv("NVIDIA_API_KEY", "")
+	t.Setenv("NGC_API_KEY", "")
+
+	s := New(pipeline.New(cfg, nil, nil, nil))
+	res, err := s.handleStatus(context.Background(), callReq(`{}`))
+	if err != nil {
+		t.Fatalf("handleStatus: %v", err)
+	}
+	gl, _ := decodeResult(t, res)["gpu_lease"].(map[string]any)
+	if gl == nil {
+		t.Fatal("status has no gpu_lease block")
+	}
+	verdict, _ := gl["verdict"].(string)
+	t.Logf("live verdict = %q", verdict)
+	switch verdict {
+	case "free", "loaded-idle", "working", "held-working", "held-idle", "busy-outside", "stale-holder":
+		// one of the documented vocabulary words (gpuactivity.Assess) — the exact
+		// one legitimately depends on what else this box is doing right now.
+	default:
+		t.Fatalf("verdict %q is not in the documented vocabulary", verdict)
+	}
+	act, _ := gl["activity"].(map[string]any)
+	if act == nil {
+		t.Fatal("live status must carry an activity block")
+	}
+	if gerr, _ := act["gpu_error"].(string); gerr != "" {
+		t.Logf("nvidia-smi unavailable on this box: %s (sanity checks below are skipped)", gerr)
+		return
+	}
+	gpus, _ := act["gpus"].([]any)
+	if len(gpus) == 0 {
+		t.Fatal("nvidia-smi reported no error but also no cards — implausible on a GPU box")
+	}
+	for _, raw := range gpus {
+		g, _ := raw.(map[string]any)
+		t.Logf("live card: %+v", g)
+		known, _ := g["util_known"].(bool)
+		if !known {
+			continue
+		}
+		pct, _ := g["util_pct"].(float64)
+		if pct < 0 || pct > 100 {
+			t.Fatalf("implausible live util_pct %v (card %v)", pct, g["index"])
+		}
+		used, _ := g["mem_used_mib"].(float64)
+		total, _ := g["mem_total_mib"].(float64)
+		if total <= 0 || used < 0 || used > total {
+			t.Fatalf("implausible live memory used=%v total=%v (card %v)", used, total, g["index"])
+		}
 	}
 }

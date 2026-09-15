@@ -629,7 +629,7 @@ Orchestrator-executed. Standing rules: never a display-card seat while the opera
 
 ---
 
-## Execution status — 2026-09-14 (0.123.0)
+## Execution status — 2026-09-14 (0.123.2)
 
 Tasks 1–7 landed earlier. This pass executed 8–12 and the non-GPU half of 13.
 
@@ -639,7 +639,7 @@ Tasks 1–7 landed earlier. This pass executed 8–12 and the non-GPU half of 13
 | 9 — Fleet node health | DONE. `tiers` + `layers` rows, lane-gated, from cached reads only (roster GET count pinned at 2 per TTL across 21 requests). Seats publish `served` (the roster fact) and claim NO load state — a cached health read cannot know it. Dispatch names the dispatched layer's seat on the job feed. |
 | 10 — D5 checked union | DONE, and it found a live defect on its first run: `env: [CUDA_VISIBLE_DEVICES=0,2]` parses as TWO YAML entries, so every two-card seat was served ONE card. The display twins render behind a fence, only for a tier that declares a display layer. |
 | 11 — Installer parity | DONE, and the parity is measured: `render.tests.ps1` compares `Get-CompositeSeed` against `install seed` field by field. |
-| 12 — Docs, ADR, version | DONE at **0.123.0** (main had taken 0.116–0.122 while this branch was out). |
+| 12 — Docs, ADR, version | DONE at **0.123.2** (main had taken 0.116–0.122 while this branch was out). |
 | 13 — Ship gate | PARTIAL: review, semgrep, mutants, PR and merge done; every LIVE gate below is prepared and NOT run (no deploy, no live config touched, no GPU taken). |
 
 ### Amendments applied while executing
@@ -697,7 +697,7 @@ fence, the decision row) and record why.
 
 Same rule: none of these touch a live config or take a card in this pass.
 
-- **G0 control** — `placed` absent on a delegate row from a pre-0.123.0 binary, present from this
+- **G0 control** — `placed` absent on a delegate row from a pre-0.123.2 binary, present from this
   one; a plain node with `layers` in config shows nothing new in health (diff two health bodies).
 - **G1** — mechanical under a saturated pair: `placed.layer == single`, `role == router`,
   `devices == ["0"]`, the reason names the time-share and `evicts == agent-pool`.
