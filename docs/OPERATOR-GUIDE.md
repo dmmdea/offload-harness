@@ -988,6 +988,18 @@ writes it into an EMPTY root itself; a populated root without it is refused at s
 every removed page is one journal line), the cap to the dataset quota, and keep the seat's own
 `SEAT_L2_PRUNE_GB + max_capacity_gb` under the quota too — LMCache evicts only its own pages.
 
+**Serving-config provenance (0.123.0, ADR 0043) — `serving_config_path`.** The llama-swap config is rendered once, at
+install, and nothing re-renders it: `ampere-16` served a 32768 window for weeks after the tier table said 131072, and
+`audit-yaml` reported OK the whole time because a stale config breaks no operator rule. `install render` now stamps every
+config it writes with `spec_sha256` (a closed input set: tier, render params, template, tier entry, harness version) and
+`body_sha256` (the yaml below the stamp, so a hand edit stays distinguishable). Check a live box with
+`local-offload audit-yaml --against-render <file>` — flags BEFORE the files — which re-derives from the binary's own seeds
+and reports `MATCH` / `STALE(<keys>)` / `UNSTAMPED` / `HAND-EDITED`; STALE names the inputs that moved and exits 1, as does
+HAND-EDITED, while UNSTAMPED (every config rendered before 0.123.0) prints as a finding and does not fail. Point
+`serving_config_path` at the node's rendered config and `/fleet/health` publishes `serving_config_spec_sha256` +
+`serving_config_state` as well, so a fleet-wide sweep is one poll; unset, both keys are omitted. Fix a STALE box by
+re-rendering with `install render`, never by hand-editing the file.
+
 **Lease in health (0.113.16).** `/fleet/health` carries `lease` while the node's GPU lease is held; a text lease makes the
 node ineligible for new delegated work (and its dispatch answers 503, re-placeable). `gpu reserve --drain --unload-seat` and
 `gpu release --warm-seat` are the maintenance verbs — see docs/systems/gpu-lease.md.

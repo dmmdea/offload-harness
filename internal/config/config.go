@@ -1098,6 +1098,23 @@ type Config struct {
 	// FleetStorePruneEveryJobs is how many completed jobs pass between store
 	// scans; 0 = 8 (one spread).
 	FleetStorePruneEveryJobs int `json:"fleet_store_prune_every_jobs,omitempty"`
+	// ServingConfigPath is the rendered llama-swap config this node actually
+	// serves (K-02). It is a PATH and not a derived default because no default
+	// is right: every node in this fleet keeps it somewhere else (a top-level
+	// llama-swap directory on one Windows box, the install-root stack directory
+	// on another, a service etc/ directory on the Linux node), and a guess that
+	// landed on the wrong file would publish some other config's provenance as
+	// this node's.
+	//
+	// Set, /fleet/health publishes serving_config_spec_sha256 and
+	// serving_config_state so a fleet-wide staleness check is one poll instead of
+	// three ssh sessions. Empty, both fields are OMITTED -- a reader can then tell
+	// "this node does not report" from "this node reports nothing wrong", which a
+	// published empty string could not.
+	//
+	// The node only READS it. Nothing in the harness rewrites a live serving
+	// config; re-rendering is `install render`, run by a human.
+	ServingConfigPath string `json:"serving_config_path,omitempty"`
 	// FleetQueueHost — Option B, ADR 0030, DARK by default: when true THIS
 	// node's fleet server also hosts the consolidated pull queue (durable
 	// bbolt store at <state-root>/fleet-queue.db + the /fleet/queue/* routes).
@@ -1793,6 +1810,7 @@ func pathFields(c *Config) []*string {
 		&c.ConfHeadThresholdsPath, &c.ExemplarsDir,
 		&c.ShadowQueuePath, &c.AgentTrajectoryQueuePath, &c.AgentTrajectoryLabelsPath,
 		&c.KNNIndexPath, &c.EmbedMemoPath,
+		&c.ServingConfigPath,
 	}
 }
 
