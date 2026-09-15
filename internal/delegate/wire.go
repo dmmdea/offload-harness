@@ -156,6 +156,14 @@ type ResultWire struct {
 	RepackMs       int64  `json:"repack_ms,omitempty"`
 	RepackAttempts int    `json:"repack_attempts,omitempty"`
 	RepackNote     string `json:"repack_note,omitempty"`
+	// The write door (0.122.0, register D-06), passed through from the node.
+	// Diff is a unified patch the CALLER applies — the harness never does —
+	// DiffFiles names the paths it touches, and WriteNote says what the door
+	// did when there is no diff to read. All omitempty: a read-only
+	// delegation publishes byte-identically to before the door existed.
+	Diff      string   `json:"diff,omitempty"`
+	DiffFiles []string `json:"diff_files,omitempty"`
+	WriteNote string   `json:"write_note,omitempty"`
 }
 
 // ResponseWire is the full response: summary first, then per-subtask results
@@ -240,6 +248,9 @@ func WireResponse(results []PlacedResult, sum Summary, lints [][]string) Respons
 			RepackMs:           pr.Result.RepackMs,
 			RepackAttempts:     pr.Result.RepackAttempts,
 			RepackNote:         pr.Result.RepackNote,
+			Diff:               pr.Result.Diff,
+			DiffFiles:          pr.Result.DiffFiles,
+			WriteNote:          pr.Result.WriteNote,
 		}
 		if pr.Err != "" {
 			rw.Failed = true
