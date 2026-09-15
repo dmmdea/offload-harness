@@ -215,6 +215,24 @@ type AgentWireResult struct {
 	WallEstimateSec int     `json:"wall_estimate_sec,omitempty"`
 	MinTurnSec      int     `json:"min_turn_sec,omitempty"`
 	WallNote        string  `json:"wall_note,omitempty"`
+	// Final-budget fit (0.121.1, register D-95). FinalBudgetFit is the
+	// final-answer completion budget the run actually opened at once the
+	// REMAINING wall was taken into account — never above the configured rule
+	// (4× the step budget, cap 8,192), floored at 1,024; BudgetNote is the
+	// arithmetic ("final 8192 → 3592 to fit 900 s at 15.0 tok/s (split with the
+	// output_schema re-pack)"). Both absent when the seat has no measured rate
+	// or the configured budget fitted as it was: an un-narrowed run must not
+	// publish a narrowing note. Measured 2026-09-14 on the Lenovo 4B seat: a
+	// schema contract's 8,192-token final plus its re-pack owed ≈ 1,420 s
+	// against a 900 s wall, and hit the wall instead of answering.
+	FinalBudgetFit int    `json:"final_budget_fit,omitempty"`
+	BudgetNote     string `json:"budget_note,omitempty"`
+	// FinalReissue names the re-issue a cut final earned — "list_cap" is the
+	// only shape (D-95): the final turn asked once more, thinking off, at the
+	// same budget, with the schema's own list caps spelled out. Present whether
+	// or not it then succeeded, so a first cut and a second are distinguishable
+	// without opening calls[].
+	FinalReissue string `json:"final_reissue,omitempty"`
 	// ContentionWaitSec is the wall this contract spent waiting on a peer-held
 	// seat (seatwait: llama-swap 429 / 503 not-ready / 500 src=llama-swap).
 	// Counted, never silent: the number that says whether the fix traded

@@ -110,6 +110,21 @@ type Result struct {
 	// correct partial the caller must not mistake for the whole (the 2026-09-10
 	// `ledger-02` row: 2,630 chars cut mid-sentence at exactly 1,024 tokens).
 	OutputTruncated bool
+	// FinalBudgetFit / BudgetNote (0.121.1, register D-95) are the wall fit for
+	// the final answer: the budget the final turn actually opened at once the
+	// remaining wall was taken into account, and the arithmetic behind it
+	// ("final 8192 → 3592 to fit 900 s at 15.0 tok/s"). Both zero/empty when no
+	// fit was installed or the configured budget was left untouched — a run
+	// that was not narrowed must never publish a note saying it was. Set on
+	// EVERY return path (Run wraps run for exactly that reason): the runs that
+	// end on the wall are the ones whose sizing most needs reading.
+	FinalBudgetFit int
+	BudgetNote     string
+	// FinalReissue names the re-issue a cut final earned, "" when none —
+	// FinalReissueListCap is the only shape there is (D-95). Set whether or not
+	// the re-issue then succeeded: a second cut abstains WITH the attempt on
+	// the record, so an operator can tell a first cut from a second.
+	FinalReissue string
 	// Calls is one CallRecord per planner completion, on EVERY return path
 	// (thinking.go, D-47): finish reason, completion/reasoning tokens, visible
 	// and hidden chars, whether thinking was off. The corpus fact the rigger
@@ -298,6 +313,23 @@ type Loop struct {
 	// downgrades the rest of the run to the legacy rung instead of stalling
 	// every step.
 	tok Tokenizer
+	// finalFit narrows the final answer's completion budget to what the
+	// REMAINING wall can decode at the seat's measured rate (register D-95,
+	// WithFinalBudgetFit). nil = no opinion: the final turn opens at
+	// finalMaxTokens exactly as it did before, which is what every caller that
+	// knows no rate (the CLI, --serve, tests) gets. Read-only after Build, like
+	// every other option — --serve shares ONE *Loop across concurrent handlers,
+	// so the per-run answers it returns are kept in Run's own locals, never here.
+	finalFit func(configured int, remaining time.Duration) (int, string)
+	// listCap is the instruction a cut final on a SCHEMA contract is re-issued
+	// with (register D-95, WithCutFinalReissue): the schema's own list caps,
+	// spelled out. "" = no schema, no re-issue. listCapMinTurn is the wall one
+	// more final turn costs on this seat (seatrate.MinTurnFor); the re-issue is
+	// skipped when less than that is left, so it can never re-create the D-91
+	// shape it exists to fix — a re-generation killed by the wall. 0 = unknown
+	// rate = fail open.
+	listCap        string
+	listCapMinTurn time.Duration
 	// specReserve is the token cost of the tool-spec block, reserved out of the
 	// input budget — the specs ship with EVERY chat request, and on a full
 	// --allow-* build they cost several compactionMargins' worth of tokens
@@ -737,9 +769,37 @@ func (l *Loop) toolResultCapChars() int {
 	return cap
 }
 
+// FinalReissueListCap names the one re-issue shape a cut final can earn
+// (register D-95): the final turn asked again, thinking off, with the schema's
+// own list caps spelled out.
+const FinalReissueListCap = "list_cap"
+
+// budgetState is Run's per-run record of what the final-budget fit decided and
+// whether a cut final was re-issued. It lives in a struct only so Run can stamp
+// it onto EVERY Result run returns — the budget/timeout/starved paths included,
+// which are exactly the runs whose sizing an operator reads first. It is
+// per-Run by construction: a *Loop is shared across --serve handlers, this is
+// not.
+type budgetState struct {
+	fit      int
+	note     string
+	reissue  string
+	narrowed bool
+}
+
 // Run executes the loop for objective until the model stops, the step budget is
 // exhausted, or the context is cancelled.
 func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
+	var bs budgetState
+	res, err := l.run(ctx, objective, &bs)
+	if bs.narrowed {
+		res.FinalBudgetFit, res.BudgetNote = bs.fit, bs.note
+	}
+	res.FinalReissue = bs.reissue
+	return res, err
+}
+
+func (l *Loop) run(ctx context.Context, objective string, bs *budgetState) (Result, error) {
 	// The tool-spec block ships with EVERY request, so its token cost is part
 	// of every budget this run computes — resolve it once before any budgeting
 	// (review finding 2026-08-14: the un-reserved ~2-3k tokens of tool JSON on
@@ -867,6 +927,21 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 	refusedRepeat := map[string]int{}
 	answerNowFor := ""
 	finalTurnAdded := false
+	// finalTokens resolves the final answer's budget for the call about to be
+	// made and records the fit on this run (D-95). A closure over run-locals
+	// rather than Loop state: --serve shares one *Loop.
+	finalTokens := func() int {
+		b, note := l.finalBudgetFor(ctx)
+		if l.finalFit != nil && note != "" {
+			bs.fit, bs.note, bs.narrowed = b, note, true
+		}
+		return b
+	}
+	// listCapDone bounds the list-cap re-issue at ONE per run; reissueFloor
+	// carries the cut turn's own budget onto it, so the re-issue answers at the
+	// SAME budget (the list caps are what makes it fit, not less room).
+	listCapDone := false
+	reissueFloor := 0
 
 	for step := 0; step < l.maxSteps; step++ {
 		if err := ctx.Err(); err != nil {
@@ -966,7 +1041,7 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 		thisIsReissue := retryNoThink
 		if retryNoThink {
 			retryNoThink = false
-			stepMax = finalMaxTokens(l.maxTokens)
+			stepMax = finalTokens()
 			if l.thinking != ThinkingOn {
 				stepCtx = ContextWithoutThinking(ctx)
 				// The seat has shown its think block does not fit the step
@@ -982,13 +1057,20 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 			// The answer needs room, not more deliberation — the rule the
 			// empty-final re-issue already follows: the final budget, and thinking
 			// off unless the seat is pinned to ThinkingOn.
-			if fb := finalMaxTokens(l.maxTokens); stepMax < fb {
+			if fb := finalTokens(); stepMax < fb {
 				stepMax = fb
 			}
 			if l.thinking != ThinkingOn {
 				stepCtx = ContextWithoutThinking(ctx)
 			}
 		}
+		// The list-cap re-issue answers at the budget the CUT turn had, never
+		// less: the explicit caps are what makes the answer fit, and shrinking
+		// the room as well would only guarantee a second cut.
+		if reissueFloor > stepMax {
+			stepMax = reissueFloor
+		}
+		reissueFloor = 0
 		callStart := time.Now()
 		comp, err := l.client.Chat(stepCtx, msgs, specs, stepMax)
 		if err != nil {
@@ -1082,11 +1164,34 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 		// answer cut at exactly 1,024 tokens — a JSON prefix no re-pack can
 		// repair). Re-issue it once at the final budget like an empty step;
 		// a second cut is accepted and flagged OutputTruncated.
-		if comp.FinishReason == "length" && len(comp.Msg.ToolCalls) == 0 && strings.TrimSpace(comp.Msg.Content) != "" && !lastWasReissue && reissues < maxReissues && !finalStep {
-			reissues++
-			retryNoThink = true
-			step-- // the re-issue does not spend a step
-			continue
+		if comp.FinishReason == "length" && len(comp.Msg.ToolCalls) == 0 && strings.TrimSpace(comp.Msg.Content) != "" {
+			// D-95 (0.121.1): on a SCHEMA contract a cut final is a JSON
+			// prefix, and 0.115.23 (D-91) rightly refuses to re-pack a partial
+			// — but abstaining there throws away a run that read the whole
+			// document and only over-answered. The seat was never told how
+			// long the lists could be. Tell it, once: same request, thinking
+			// off, the same budget, plus the schema's own caps spelled out
+			// ("cap every list at N items … keep every string under 200
+			// characters"). Measured 2026-09-14 on the Lenovo 4B: three of ten
+			// list-heavy extractions died exactly here. Gated on the wall
+			// holding one more turn, so this can never re-create the shape it
+			// fixes; bounded at one, so a seat that cuts the capped answer too
+			// abstains with both finish reasons on the record.
+			if l.listCap != "" && !listCapDone && jsonShapedPartial(comp.Msg.Content) && l.wallHoldsOneMoreTurn(ctx) {
+				listCapDone = true
+				bs.reissue = FinalReissueListCap
+				msgs = append(msgs, Msg{Role: "user", Content: l.listCap})
+				retryNoThink = true
+				reissueFloor = stepMax
+				step-- // the re-issue does not spend a step
+				continue
+			}
+			if !lastWasReissue && reissues < maxReissues && !finalStep {
+				reissues++
+				retryNoThink = true
+				step-- // the re-issue does not spend a step
+				continue
+			}
 		}
 		if kind, basis, empty := comp.Starvation(); empty {
 			// An empty completion — no tool call, no visible content — is never an
@@ -1453,6 +1558,74 @@ func (l *Loop) dispatch(ctx context.Context, call ToolCall) (string, bool, Effec
 // A non-positive value DISABLES capping — only for tests that need to observe an
 // unbounded tool.
 func (l *Loop) WithToolTimeout(d time.Duration) *Loop { l.toolTimeout = d; return l }
+
+// WithFinalBudgetFit installs the wall fit for the final answer's completion
+// budget (register D-95). fn is called with the CONFIGURED budget
+// (finalMaxTokens — its ceiling) and the wall that is left, and returns the
+// budget to run at plus the one-line arithmetic to publish; returning the
+// configured budget, or 0, leaves the run exactly as it was. Installed by the
+// node, which is the only caller that knows the seat's measured rate.
+func (l *Loop) WithFinalBudgetFit(fn func(configured int, remaining time.Duration) (int, string)) *Loop {
+	l.finalFit = fn
+	return l
+}
+
+// WithCutFinalReissue arms the list-cap re-issue of a final answer cut at the
+// completion budget (register D-95): instruction is derived from the contract's
+// output_schema and minTurn is what one more final turn costs on this seat. An
+// empty instruction disarms it — a schemaless contract has no list to cap.
+func (l *Loop) WithCutFinalReissue(instruction string, minTurn time.Duration) *Loop {
+	l.listCap, l.listCapMinTurn = instruction, minTurn
+	return l
+}
+
+// finalBudgetFor resolves the final answer's completion budget for THIS call:
+// the ONE rule (finalMaxTokens), narrowed to what the remaining wall can decode
+// when a fit is installed. The note is returned rather than stored, so a *Loop
+// shared across --serve handlers stays free of per-run state.
+func (l *Loop) finalBudgetFor(ctx context.Context) (int, string) {
+	configured := finalMaxTokens(l.maxTokens)
+	if l.finalFit == nil {
+		return configured, ""
+	}
+	var remaining time.Duration
+	if dl, ok := ctx.Deadline(); ok {
+		remaining = time.Until(dl)
+	}
+	fit, note := l.finalFit(configured, remaining)
+	if fit <= 0 || fit > configured {
+		return configured, "" // the fit is a ceiling; a raise is never honoured
+	}
+	return fit, note
+}
+
+// wallHoldsOneMoreTurn reports whether the wall that is left can hold one more
+// final turn on this seat. Unknown rate (no minTurn) or no deadline = true:
+// fail open, the way every other sizing decision here does.
+func (l *Loop) wallHoldsOneMoreTurn(ctx context.Context) bool {
+	if l.listCapMinTurn <= 0 {
+		return true
+	}
+	dl, ok := ctx.Deadline()
+	if !ok {
+		return true
+	}
+	return time.Until(dl) >= l.listCapMinTurn
+}
+
+// jsonShapedPartial reports whether a cut answer is a PARTIAL OBJECT — a JSON
+// prefix, fenced or bare — rather than cut prose. Only the former is worth a
+// list-cap re-issue: "cap every list" says nothing to a truncated narrative,
+// and a full re-generation is too expensive to spend on a guess.
+func jsonShapedPartial(s string) bool {
+	t := strings.TrimSpace(s)
+	if strings.HasPrefix(t, "```") {
+		if i := strings.IndexByte(t, '\n'); i >= 0 {
+			t = strings.TrimSpace(t[i+1:])
+		}
+	}
+	return strings.HasPrefix(t, "{") || strings.HasPrefix(t, "[")
+}
 
 // persist best-effort records the run outcome to memory. Defer-not-crash: any
 // error is swallowed — memory persistence must never fail an otherwise-complete

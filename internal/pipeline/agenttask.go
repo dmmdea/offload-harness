@@ -362,6 +362,53 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		log.Printf("agent task: wall sizing (%s): %s", seat, est.Note)
 	}
 
+	// The final budget FITS the wall (0.121.1, register D-95). Sizing the wall
+	// from the seat's rate told the caller the contract would not fit; it did
+	// nothing about the run in flight, which still opened its final answer at
+	// the configured 4× budget and, on a 15 tok/s seat with an output_schema,
+	// owed ≈ 1,420 s of a 900 s wall (METHODOLOGY.md and SELF-CONTROL.md,
+	// 2026-09-14). Now the same arithmetic runs backwards: the largest final
+	// budget the REMAINING wall can decode, split with the re-pack when a
+	// schema is set, capped by the configured rule and floored at 1,024.
+	// Published here for the run as a whole; the loop recomputes it at the
+	// forced final step, where the tool steps are spent and the live clock is
+	// the honest input.
+	finalBudget, repackBudget := finalBudgetsFor(p.cfg, contract)
+	hasSchema := len(contract.OutputSchema) > 0
+	startFit := seatrate.FitFinalBudget(seatrate.FinalFit{
+		ConfiguredFinal: finalBudget,
+		RemainingSec:    float64(timeoutSec),
+		OtherSec:        float64(est.OtherSec),
+		TokS:            est.TokS,
+		Schema:          hasSchema,
+	})
+	wire.FinalBudgetFit, wire.BudgetNote = startFit.Budget, startFit.Note
+	if startFit.Note != "" {
+		log.Printf("agent task: final-budget fit (%s): %s", seat, startFit.Note)
+	}
+	built.Loop.WithFinalBudgetFit(func(configured int, remaining time.Duration) (int, string) {
+		// At the final turn the cold load, the think block and the tool steps
+		// are already spent, so only the answer (and its re-pack) still has to
+		// fit — OtherSec is 0 here on purpose.
+		f := seatrate.FitFinalBudget(seatrate.FinalFit{
+			ConfiguredFinal: configured,
+			RemainingSec:    remaining.Seconds(),
+			TokS:            est.TokS,
+			Schema:          hasSchema,
+		})
+		return f.Budget, f.Note
+	})
+	// A cut final on a schema contract is re-issued ONCE with the schema's own
+	// list caps (D-95), gated on the wall still holding one turn at this seat's
+	// rate. No schema, no instruction, no re-issue — and no rate means a 0
+	// floor, which fails open exactly like every other sizing decision here.
+	if hasSchema {
+		built.Loop.WithCutFinalReissue(
+			listCapInstruction(contract.OutputSchema),
+			time.Duration(seatrate.MinTurnFor(0, finalBudget, repackBudget, est.TokS))*time.Second,
+		)
+	}
+
 	built.Loop.WithObserver(act)
 	act.Phase("running")
 	res, rerr := built.Loop.Run(cctx, contract.Goal)
@@ -401,6 +448,14 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	}
 	wire.StopNote = res.StopNote
 	wire.OutputTruncated = res.OutputTruncated
+	// The fit the loop actually ran at supersedes the run-start prediction, and
+	// the re-issue it made — same rule as the trace above: set before every
+	// defer branch, because a run that ended on the wall is the one whose
+	// budget arithmetic most needs reading.
+	if res.FinalBudgetFit > 0 {
+		wire.FinalBudgetFit, wire.BudgetNote = res.FinalBudgetFit, res.BudgetNote
+	}
+	wire.FinalReissue = res.FinalReissue
 	wire.ResponseShape = agent.ResponseShape(res.Calls)
 	// T2-B: capture the run's prefill accounting HERE, immediately after the loop and
 	// BEFORE the defer branches below. Every one of those branches still records a
@@ -551,8 +606,14 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	// lane over a 12,100-char cut answer) to the 900 s wall and deferred
 	// "wall timeout" on a loop that had finished in four minutes. Name the
 	// shape at once instead; the partial rides in output for the caller.
+	// D-95 (0.121.1) narrowed this branch: the loop now re-issues a cut,
+	// JSON-shaped final ONCE with the schema's own list caps before it gets
+	// here, so reaching this point with a schema contract means either the
+	// re-issue was not possible (no wall left, or the partial was prose) or the
+	// capped answer was cut as well. The abstention is the same; the note names
+	// which of the two it was.
 	if res.OutputTruncated {
-		wire.RepackNote = "re-pack skipped: the final answer was cut at the completion budget (output_truncated) — a partial cannot be re-packed into the requested object; the partial rides in output"
+		wire.RepackNote = truncatedRepackNote(res.FinalReissue, res.Calls)
 		return deferWire(core.DeferClassAbstention, "output failed schema: "+wire.RepackNote)
 	}
 	repackStart := time.Now()
@@ -1379,6 +1440,37 @@ func (p *Pipeline) seatRates() *seatrate.Store {
 	return s
 }
 
+// finalBudgetsFor is the contract's final-answer budget on this box and the
+// re-pack term that rides with it. ONE rule, read by the wall estimate, the
+// final-budget fit (D-95) and the list-cap re-issue's min_turn floor, so those
+// three can never size the same run from three different numbers.
+//
+// The loop opens the final-budget turn only on the LAST of ≥ 2 steps (loop.go:
+// maxSteps >= 2 && step == maxSteps-1); a one-step contract's single completion
+// runs at the plain step budget. A contract with an output_schema may pay one
+// more completion for the structured re-pack when the final answer is prose
+// (register D-46 follow-up: a 285 s re-pack on the 27B sat outside every floor
+// and estimate) — charged at the final budget as an upper bound, which a seat
+// answering in the object shape never pays.
+func finalBudgetsFor(cfg config.Config, contract core.AgentContract) (final, repack int) {
+	step := cfg.AgentMaxTokens
+	if step <= 0 {
+		step = 1024
+	}
+	final = agent.FinalBudgetFor(step)
+	steps := contract.MaxSteps
+	if steps <= 0 {
+		steps = core.AgentMaxStepsDefault
+	}
+	if steps == 1 {
+		final = step
+	}
+	if len(contract.OutputSchema) > 0 {
+		repack = final
+	}
+	return final, repack
+}
+
 // wallEstimateFor sizes one contract on one seat (register D-03): the seat's
 // remembered rate (else the box's agent_seat_tok_s), the slower of the
 // remembered and the just-observed cold load, the loop's step and final
@@ -1393,21 +1485,7 @@ func wallEstimateFor(cfg config.Config, contract core.AgentContract, seat string
 	if in.StepBudget <= 0 {
 		in.StepBudget = 1024
 	}
-	// The loop opens the final-budget turn only on the LAST of ≥ 2 steps
-	// (loop.go: maxSteps >= 2 && step == maxSteps-1); a one-step contract's
-	// single completion runs at the plain step budget.
-	in.FinalBudget = agent.FinalBudgetFor(in.StepBudget)
-	if in.MaxSteps == 1 {
-		in.FinalBudget = in.StepBudget
-	}
-	// A contract with an output_schema may pay one more completion for the
-	// structured re-pack when the final answer is prose (register D-46
-	// follow-up: a 285 s re-pack on the 27B sat outside every floor and
-	// estimate). Charged at the final budget as an upper bound; the note says
-	// when it is skipped.
-	if len(contract.OutputSchema) > 0 {
-		in.RepackBudget = in.FinalBudget
-	}
+	in.FinalBudget, in.RepackBudget = finalBudgetsFor(cfg, contract)
 	switch strings.ToLower(thinkingFor(cfg, contract)) {
 	case "", "auto":
 		in.ThinkingAuto = true
