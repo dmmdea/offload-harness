@@ -111,3 +111,19 @@ are pinned `eol=lf` in `.gitattributes` so a seat's LF diff applies on every che
 Eight self-contained digest subtasks (inline `context`: this repo's own ADRs), used by
 `scripts/parallel-sessions-gate.ps1` to run K concurrent 8-wide fan-outs against one llama-swap
 and prove the seat-contention wait fires instead of deferring (ADR 0032). Needs no `--read-root`.
+## `digest-8-grounded.json` — the same eight digests with a doc-only anchor each (register D-100)
+
+`digest-8.json`'s acceptance is SHAPE-ONLY (`min_items:findings:3` + `nonempty:summary`; the intake lint
+says so on every run), so an 8/8 on it proves the loop completed and the schema filled, not that the
+digests are right. This fixture adds ONE `contains:` per subtask on an identifier the document names and
+the goal does not (`installed.json`, `agent_model`, `gpulease.InspectDir`, `gpt-oss-20b`,
+`delegate-intent.jsonl`, `fleet_queue_holder`, `harness-loop-guard.js`, `AnchorCheck`) — extracted by the
+fleet seats on 2026-09-15 and re-checked against each document, so a faithful digest cannot avoid naming
+it and an evasive one fails verification. Run it BESIDE the old fixture (same seats, same day) for three
+K×8 passes before it replaces the old one: a step in pass rate is then attributable to the acceptance,
+not to the seats. Same inline `context`, no `--read-root`:
+
+```powershell
+local-offload delegate --contract contracts/digest-8-grounded.json --route local     # this box's seat
+local-offload delegate --contract contracts/digest-8-grounded.json --route remote --remote http://<node>:18811
+```
