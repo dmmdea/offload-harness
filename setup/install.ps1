@@ -741,6 +741,77 @@ function Get-AcceleratorSeed {
 }
 
 # Media-seat bindings: deliberate PARITY COPY of the FINAL layer of
+# Composite identity + layers (ADR 0039): parity copy of the composite branch of
+# internal/tierseed.Resolve (authoritative — change Go FIRST, then mirror here).
+# A composite tier is a box that IS several tiers at once, and everything at
+# runtime — placement, the health rows, offload_status, the ledger's layer
+# column — reads those three keys from CONFIG. Step 8's raw-merge path bypasses
+# tierseed, so without this mirror a fresh Windows install of the tier whose
+# reference box IS the 3-card workstation would render the layered llama-swap
+# config and then write a config.json that declares no layers at all: every
+# placement decision would fall back to the single implicit layer, the fleet
+# would see one capacity row instead of three, and nothing would say why.
+#
+# The pair's agent seat is deliberately BARE in the tier table so the seat's
+# numbers live in exactly one place (vllm_seat); this fills it the same way
+# tierseed.FillPairAgent does, from the seat when the box runs it and from the
+# declared fallback when it does not.
+function Get-CompositeSeed {
+  param($ProfileRow, [string]$ProfileId, [bool]$VLLMSeatActive)
+  if (-not $ProfileRow -or -not $ProfileRow.PSObject.Properties['composes']) { return $null }
+  if (-not $ProfileRow.PSObject.Properties['layers']) { return $null }
+  # Deep copy: the parsed profiles doc is read again by other steps and must not
+  # carry this fill.
+  $layers = $ProfileRow.layers | ConvertTo-Json -Depth 10 | ConvertFrom-Json
+  $seat = $null
+  if ($ProfileRow.PSObject.Properties['vllm_seat']) { $seat = $ProfileRow.vllm_seat }
+  foreach ($l in @($layers)) {
+    foreach ($s in @($l.seats)) {
+      if ($null -eq $s -or [string]$s.role -ne 'agent') { continue }
+      if ($s.PSObject.Properties['model'] -and [string]$s.model) { continue }
+      if ($null -eq $seat) { continue }
+      $model = ''; $ctx = 0; $inflight = 0
+      if ($VLLMSeatActive) {
+        $model = [string]$seat.id
+        if ($seat.PSObject.Properties['aliases'] -and @($seat.aliases).Count -gt 0) { $model = [string]@($seat.aliases)[0] }
+        if ($seat.PSObject.Properties['max_model_len']) { $ctx = [int]$seat.max_model_len }
+        if ($seat.PSObject.Properties['max_num_seqs']) { $inflight = [int]$seat.max_num_seqs }
+      } else {
+        if ($seat.PSObject.Properties['fallback_agent_model']) { $model = [string]$seat.fallback_agent_model }
+        if ($seat.PSObject.Properties['fallback_agent_ctx_tokens']) { $ctx = [int]$seat.fallback_agent_ctx_tokens }
+      }
+      if (-not $model) { continue }
+      Add-OrSet-Property -Object $s -Name 'model' -Value $model
+      if ($ctx -gt 0 -and -not ($s.PSObject.Properties['ctx_tokens'] -and [int]$s.ctx_tokens -gt 0)) {
+        Add-OrSet-Property -Object $s -Name 'ctx_tokens' -Value $ctx
+      }
+      if ($inflight -gt 0 -and -not ($s.PSObject.Properties['max_inflight'] -and [int]$s.max_inflight -gt 0)) {
+        Add-OrSet-Property -Object $s -Name 'max_inflight' -Value $inflight
+      }
+      if (-not ($s.PSObject.Properties['device'] -and [string]$s.device) -and $seat.PSObject.Properties['device']) {
+        Add-OrSet-Property -Object $s -Name 'device' -Value ([string]$seat.device)
+      }
+    }
+  }
+  # ,([object[]]...) on both arrays: PowerShell unrolls a 1-element array on
+  # return, and a `tiers` that serialized as a bare string would make Go reject
+  # the whole config (the same trap Merge-ConfigSeed documents).
+  return [pscustomobject][ordered]@{
+    tier_profile = $ProfileId
+    tiers        = ,([object[]]@(@($ProfileRow.composes) + $ProfileId))
+    layers       = ,([object[]]@($layers))
+  }
+}
+
+# Add-OrSet-Property writes a property whether or not it already exists — the
+# parsed-JSON objects above have only the keys the table declared.
+function Add-OrSet-Property {
+  param($Object, [string]$Name, $Value)
+  if ($Object.PSObject.Properties[$Name]) { $Object.$Name = $Value }
+  else { $Object | Add-Member -NotePropertyName $Name -NotePropertyValue $Value }
+}
+
+# Media-seat bindings: parity copy of the media-seat layer of
 # internal/tierseed.Resolve (authoritative — change Go FIRST, then mirror here).
 # In Go the seat is the SOLE writer of the config key it binds
 # (mediaseat.Bindings, landing after every config_seed layer), which is what
@@ -1442,6 +1513,17 @@ Step 'harness config -> ~/.local-offload/config.json' `
     if ($agentSeat) {
       $cfgText = Merge-ConfigSeed -ConfigText $cfgText -Seed ([pscustomobject]@{ agent_model = $agentSeat })
       Write-Host "      agent seat ($profileId): agent_model=$agentSeat (derived from resident_tier)" -ForegroundColor DarkGray
+    }
+    # Composite identity + layers (ADR 0039), the same keys tierseed seeds. The
+    # vLLM seat is NOT active on this path by construction: the render call above
+    # passes no --vllm-user/--vllm-proxy-host, so the renderer binds the tier's
+    # declared fallback seat — and the layer's agent seat must name the seat the
+    # rendered yaml actually serves, not the engine this box was never told how
+    # to start.
+    $compositeSeed = Get-CompositeSeed -ProfileRow $profRow -ProfileId $profileId -VLLMSeatActive $false
+    if ($compositeSeed) {
+      $cfgText = Merge-ConfigSeed -ConfigText $cfgText -Seed $compositeSeed
+      Write-Host "      composite ($profileId): tier_profile, tiers=$(@($compositeSeed.tiers) -join ','), layers=$(@($compositeSeed.layers).Count)" -ForegroundColor DarkGray
     }
     # Media-seat bindings: the LAST tier layer, exactly as in tierseed.Resolve —
     # the seat is the sole writer of vision_model/stt_model (see
