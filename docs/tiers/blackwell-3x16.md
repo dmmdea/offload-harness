@@ -15,6 +15,24 @@
 | agent_ctx_tokens | 163840 | the agent's `-ctx-tokens` compaction budget |
 | 26B-A4B | `gpu` | whether the 26B MoE is served, and where its experts live |
 
+## Composes
+
+This box is a COMPLETE instance of each of these tiers at once (ADR 0039) — it does not
+merely resemble them, and the fleet reads one capacity row per layer rather than one per box:
+
+- [`blackwell-16`](blackwell-16.md)
+- [`blackwell-2x16`](blackwell-2x16.md)
+
+Placement decides per task which LAYER and seat serve it, and records that decision on
+every result (`placed`). A layer marked dormant is declared but never routed to until the
+operator enables it; an opt-in layer is entered only on an explicit ask, under its guards.
+
+| layer | tier | devices | seats | guards | state |
+|---|---|---|---|---|---|
+| `single` | `blackwell-16` | `0` / `2` | router (device 0) — the cascade's own rungs<br>agent → `gemma-4-26b-agent` (device 0, window 131072)<br>ocr → `qwen3-vl-8b` (device 2, window 16384)<br>stt → `whisper-stt` (device 2) | — | active |
+| `pair` | `blackwell-2x16` | `0,2` | agent → the tier's vLLM seat<br>long → `qwen3.8-27b-262k` (device 0,2, window 262144)<br>vision → `qwen3-vl-32b` (device 0,2, window 16384) | — | active |
+| `display` | `blackwell-16` | `1` | router (device 1): triage → `gemma-4-e2b-display`, workhorse → `gemma-4-e4b-display` | display_floor, presence (display device 1, floor 4 GiB) | **dormant** (operator enables) |
+
 ## Agent seat
 
 This tier declares a persistent **vLLM** agent seat, and the installer RENDERS it — the

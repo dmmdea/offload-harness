@@ -12,9 +12,11 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/hwdetect"
 	"github.com/dmmdea/offload-harness/internal/mediaseat"
 	"github.com/dmmdea/offload-harness/internal/servingtmpl"
+	"github.com/dmmdea/offload-harness/internal/tierseed"
 	"github.com/dmmdea/offload-harness/internal/vllmseat"
 	"gopkg.in/yaml.v3"
 )
@@ -82,6 +84,11 @@ type servingProfile struct {
 	MediaSeats []mediaseat.Seat `json:"media_seats"`
 	// GPUEnv is added to every model in the rendered config.
 	GPUEnv []string `json:"gpu_env"`
+	// Composes / Layers are the composite declaration (ADR 0039): the tiers
+	// this one is a complete instance of, and the device layers it places work
+	// on. Absent on every ordinary tier, where the render is unchanged.
+	Composes []string           `json:"composes"`
+	Layers   []config.LayerSpec `json:"layers"`
 	// DisableCUDAGraphs keeps GGML_CUDA_DISABLE_GRAPHS=1 on the 26B seats for tiers
 	// that have never been measured with graphs on. Absent = false = graphs ON, which
 	// is the measured win (+40-51% generation on sm_120, output identical).
@@ -370,6 +377,9 @@ func runInstallRender(args []string) error {
 	seat, seatRT := vllmSeatFor(p, *home, vllmRuntimeFlags{
 		user: *vllmUser, proxyHost: *vllmProxy, venv: *vllmVenv, seatDir: *vllmSeatDir, hfHome: *hfHome,
 	})
+	// The layers as a box SEEDS them (tierseed fills the bare agent seat from
+	// the vLLM seat), so the render and the check reason about one shape.
+	layers := tierseed.FillPairAgent(p.Layers, p.VLLMSeat, seat != nil)
 	rendered, err := servingtmpl.Render(tmpl, servingtmpl.Params{
 		LlamaBin: *llamaBin, ModelsDir: *modelsDir, Listen: *listen,
 		Ctx: p.CtxSize, KVType: p.KVType, FlashAttn: p.FlashAttn,
@@ -378,6 +388,7 @@ func runInstallRender(args []string) error {
 		Seats: p.MediaSeats, Home: *home, GOOS: target, GPUEnv: p.GPUEnv, Backend: p.Backend,
 		DisableCUDAGraphs: p.DisableCUDAGraphs,
 		VLLMSeat:          seat, VLLMRuntime: seatRT,
+		DisplayLayer: displayLayerOf(layers),
 	})
 	if err != nil {
 		return fmt.Errorf("tier %s: %w", id, err)
@@ -390,6 +401,18 @@ func runInstallRender(args []string) error {
 		return fmt.Errorf("tier %s: the rendered config breaks %d operator rule(s) (INV-1/INV-2) — not written:\n%s", id, len(vs), servingtmpl.Violations(vs))
 	}
 
+	// D5 (ADR 0039): a composite tier's render must be the CHECKED UNION of the
+	// tiers it composes — every layer seat defined, every seat on the cards its
+	// layer declares, every composed capability present. The tier shipped a media
+	// block copied from the 2-card tier once (0.113.33) and nothing read the
+	// result; this reads it, and refuses before the file is written.
+	if len(p.Composes) > 0 {
+		if err := servingtmpl.CheckComposite(rendered, servingtmpl.CompositeDecl{
+			Tier: id, Composes: p.Composes, Layers: layers, MediaKinds: seatKinds(p.MediaSeats),
+		}, composedCapabilities(doc.Profiles, p.Composes)); err != nil {
+			return fmt.Errorf("tier %s: %w — not written", id, err)
+		}
+	}
 	warnMissingSeatModels(p.MediaSeats, *modelsDir, target)
 	warnMissingGatedModels(include26B, p.IncludeQwen38, p.IncludeQwen354B, p.IncludeQwen359B, *modelsDir, target)
 
@@ -438,4 +461,52 @@ func runAuditYAML(args []string) error {
 		return fmt.Errorf("audit-yaml: %d file(s) break the operator rules", bad)
 	}
 	return nil
+}
+
+// displayLayerOf finds a tier's display layer: the one that names a display
+// device and substitutes rungs onto it. nil — every tier but the composite one
+// — renders the template's display fences away entirely.
+func displayLayerOf(layers []config.LayerSpec) *config.LayerSpec {
+	for i := range layers {
+		if layers[i].DisplayDevice == "" {
+			continue
+		}
+		for _, s := range layers[i].Seats {
+			if len(s.ModelMap) > 0 {
+				return &layers[i]
+			}
+		}
+	}
+	return nil
+}
+
+// seatKinds lists the media-seat kinds a tier binds, for the composition check.
+func seatKinds(seats []mediaseat.Seat) []string {
+	out := make([]string, 0, len(seats))
+	for _, s := range seats {
+		out = append(out, s.Kind)
+	}
+	return out
+}
+
+// composedCapabilities reduces the tiers a composite claims to be a complete instance
+// of to the capabilities that claim has to survive. A composes entry naming a
+// tier the table does not define is itself a finding — reported as a composed
+// tier with no capabilities would hide it, so it is surfaced as its own row
+// with an id the check reports as missing.
+func composedCapabilities(profiles map[string]servingProfile, composes []string) []servingtmpl.ComposedTier {
+	out := make([]servingtmpl.ComposedTier, 0, len(composes))
+	for _, id := range composes {
+		p, ok := profiles[id]
+		if !ok {
+			out = append(out, servingtmpl.ComposedTier{ID: id, VLLMSeatID: "(tier " + id + " is not in the tier table)"})
+			continue
+		}
+		c := servingtmpl.ComposedTier{ID: id, SeatKinds: seatKinds(p.MediaSeats)}
+		if p.VLLMSeat != nil {
+			c.VLLMSeatID, c.FallbackID = p.VLLMSeat.ID, p.VLLMSeat.Fallback
+		}
+		out = append(out, c)
+	}
+	return out
 }

@@ -183,10 +183,26 @@ if ($r.verdict -and [int]$r.verdict.agent_ctx_tokens -eq 131072) { Ok 'blackwell
 Write-Host "== blackwell-3x16 - THREE homogeneous sm_120 cards (triple-blackwell template, cfg17) =="
 $r = Invoke-Render -Backend 'cuda' -ProfileId 'blackwell-3x16' -RamTier 'high' -BigRam $true
 if ($r.verdict -and $r.verdict.render_backend -eq 'triple-blackwell') { Ok 'b3x16 renders the triple-blackwell template' } else { Bad "b3x16 render_backend (got: $($r.verdict.render_backend))" }
-# THE placement law, asserted mechanically: device 1 is the DISPLAY card and no seat
-# may be pinned to it. A silent flip here starves the operator's desktop - measured
-# 2026-09-04, Windows fell to a 720p-class mode and the box needed a reboot.
-if ($r.yaml -notmatch 'CUDA_VISIBLE_DEVICES=1\b') { Ok 'b3x16 pins NOTHING to the display card (device 1)' } else { Bad 'b3x16 pinned a seat to device 1 - that is the display card' }
+# THE placement law, asserted mechanically: device 1 is the DISPLAY card. A silent
+# flip here starves the operator's desktop - measured 2026-09-04, Windows fell to a
+# 720p-class mode and the box needed a reboot. The ONLY seats allowed on it are the
+# display layer's dormant twins (ADR 0039): they exist so a small mechanical call has
+# somewhere to run while the pair holds its cards, placement never routes to them
+# until the operator sets dormant:false, and every placement onto them is fenced by
+# the display_floor and presence guards.
+$dev1 = @()
+$curSeat = ''
+foreach ($line in ($r.yaml -split "`r?`n")) {
+  if ($line -match '^  ([A-Za-z0-9._-]+):\s*$') { $curSeat = $Matches[1]; continue }
+  if ($line -match 'CUDA_VISIBLE_DEVICES=1\b') { $dev1 += $curSeat }
+}
+$stray = @($dev1 | Where-Object { $_ -notmatch '-display$' })
+if ($stray.Count -eq 0) { Ok 'b3x16 pins nothing to the display card except the display-layer twins' } else { Bad "b3x16 pinned $($stray -join ', ') to device 1 - that is the display card" }
+if ($dev1.Count -eq 2) { Ok 'b3x16 renders both display-layer twins on the display card' } else { Bad "b3x16 seats on device 1: $($dev1.Count), want exactly the 2 display twins" }
+# A two-card pin must survive YAML: `env: [CUDA_VISIBLE_DEVICES=0,2]` parses as TWO
+# entries and serves ONE card, which is how the 27B and its 262k twin rendered until
+# 0.120.0. The quoted form is the fix; this is the assertion that holds it.
+if ($r.yaml -match 'env: \["CUDA_VISIBLE_DEVICES=0,2"') { Ok 'b3x16 two-card pins are quoted, so YAML keeps them whole' } else { Bad 'b3x16 two-card pin is an unquoted flow entry - YAML tears it and the seat gets ONE card' }
 if ($r.yaml -match 'CUDA_VISIBLE_DEVICES=0' -and $r.yaml -match 'CUDA_VISIBLE_DEVICES=2') { Ok 'b3x16 uses the 5060 Ti pair (devices 0 and 2)' } else { Bad 'b3x16 does not use both 5060 Ti cards' }
 # Per-seat placement, at the RENDER layer (profiles.json is gated in Go by
 # TestTripleBlackwellNeverSchedulesOntoTheDisplayCard). The tier shipped 0.113.32 with

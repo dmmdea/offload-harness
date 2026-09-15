@@ -496,6 +496,19 @@ func validate(seed map[string]any, backend, id string) error {
 // writer of the box's identity, refused by name exactly like a media binding.
 var compositeKeys = map[string]bool{"tier_profile": true, "tiers": true, "layers": true}
 
+// FillPairAgent resolves the tier table's BARE agent seat — the one a
+// composite tier leaves as `{"role": "agent"}` so the seat's numbers live in
+// exactly one place (vllm_seat) — into a full seat: the vLLM seat's first
+// alias, window and max_num_seqs when the box actually runs it, the tier's
+// declared fallback when it does not. Exported because the SEED is not the
+// only consumer: `install render` checks the rendered config against the same
+// resolved layers (servingtmpl.CheckComposite), and a check run against the
+// bare declaration would report the agent seat as placeable on nothing.
+// The input is never mutated.
+func FillPairAgent(layers []config.LayerSpec, seat *vllmseat.Spec, active bool) []config.LayerSpec {
+	return fillPairAgent(layers, seat, active)
+}
+
 // fillPairAgent derives a layer's BARE agent seat ({"role": "agent"} with no
 // model) from the tier's vLLM seat, so the delegation seat's model, window,
 // concurrency and device pin are declared once — in vllm_seat — and the layer
