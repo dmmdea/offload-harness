@@ -296,6 +296,22 @@ publishing idle slots while its card was gone, and placement routed work TOWARD 
 node that would turn work away never advertises a free slot; and the saturation SCORE is computed from the CAPPED running set, the same set
 `idle_slot` measures, because feeding it the all-jobs count let a node publish `score 1.0` and `idle_slot true` in one payload.
 
+**`serving_config_spec_sha256`** / **`serving_config_state`** (0.118.0, ADR 0043) — the rendered llama-swap config's
+provenance. These are **new keys on this existing endpoint**: no new route, no new bind, and every pre-0.118.0
+delegator keeps decoding the payload unchanged. The spec hash is the config's identity (the sha256 of the closed
+input set it was rendered from: tier, render params, template, tier entry, harness version); the state is this
+node's own verdict on it — `MATCH`, `STALE`, `UNSTAMPED` or `HAND-EDITED` — computed by re-rendering from the
+node's embedded tier seeds, the same derivation `local-offload audit-yaml --against-render` uses.
+
+Published only when `serving_config_path` names this node's rendered config. There is no safe default — every node
+keeps it somewhere else (a top-level `llama-swap/` directory on one Windows box, the install-root stack directory on
+another, a service `etc/` directory on the Linux node) — and a guess landing on the wrong file would publish some
+other config's provenance as this node's. Both keys are **omitted** when the path is unset or the file cannot be read, so "this
+node does not report" stays distinguishable from "this node reports MATCH"; an `UNSTAMPED` file publishes the state
+with no hash, because the state is the finding. The verdict is cached on the file's (mtime, size) — health is polled
+every few seconds by every delegator and the verdict costs a re-render. The node only READS the file; re-rendering
+is `install render`, run by a human.
+
 **`store`** — published only when `fleet_store_root` is configured: the store steward's last status
 (`root, used_gb, cap_gb, high_gb, low_gb, files, last_scan, last_prune, last_removed, last_freed_gb, prunes, jobs_since_tick,
 error`). The steward (internal/storesteward) keeps a persistent KV page store this node owns on disk under a budget the box

@@ -20,6 +20,57 @@ Versioning: [SemVer](https://semver.org/).
   the working config (they carry the fleet token) and the second TTS venv. History is not rewritten: the
   paths it carries were already public and hold no credential (the fleet token never entered history).
 
+## [0.118.0] - 2026-09-14 - the rendered serving config carries its provenance
+
+Register K-02. The llama-swap config is rendered ONCE, at install, from the tier table baked into the binary, and
+nothing re-renders it or recorded what it was rendered FROM. `audit-yaml` checks RULES, and a config that is a tier
+revision stale breaks no rule - so it reported OK on ampere-16 for the whole time that tier's served window said
+32768 in a file whose seed had been raised to 131072 (register A-39, 0.113.32). A rule gate cannot see staleness.
+
+### Added
+- **The provenance stamp.** `install render` now writes a six-line comment block at the head of every config it
+  renders: `spec_sha256` (the sha256 of a CLOSED, documented input set - tier id, the render Params, the template
+  bytes, the tier's own profiles.json entry, the harness version, canonicalised as sorted-key JSON with number
+  literals preserved), `body_sha256` (the yaml BELOW the stamp, so a hand edit stays distinguishable from a seed
+  change), `rendered_by`, `tier`, `rendered_at`, and the canonical basis itself. The closed set mirrors
+  `servingtmpl.Params` one field for one field and `TestParamsBasisMirrorsParams` reflects over both structs, so a
+  field added to Params cannot silently fall outside the hash. Design mirrored from `internal/agent/props.go`
+  (`SeatPin`): a named closed set, never a language-default hasher, never a hash of the raw bytes.
+- **`local-offload audit-yaml --against-render`.** Re-derives each file from THIS binary's embedded tier seeds and
+  reports exactly one of MATCH / STALE(`<keys>`) / UNSTAMPED / HAND-EDITED. STALE NAMES the basis keys that moved
+  (`params.ctx_size`, `profiles_entry_sha256`, ...) - a verdict that cannot say which input changed sends an
+  operator to diff two configs by eye. Positive control, and the row's kill criterion:
+  `TestPreA39AmpereConfigIsReportedStaleNamingCtxSize` renders the pre-A-39 ampere-16 seed reconstructed from git
+  history (`testdata/profiles-pre-a39-ampere-16.json`, the entry at 549f360), stamps it, and asserts the audit says
+  `STALE(params.ctx_size, ...)` while the rule audit still says OK. Flags come BEFORE the files.
+- **`/fleet/health`: `serving_config_spec_sha256` and `serving_config_state`.** NEW KEYS on the EXISTING endpoint -
+  no new route and no new bind. Published only when the new `serving_config_path` config key names this node's
+  rendered config; both are omitted otherwise, so "this node does not report" stays distinguishable from "this node
+  reports MATCH". The verdict is cached on the file's (mtime, size): health is polled every few seconds by every
+  delegator and the verdict costs a re-render.
+
+### Changed
+- **One derivation, two callers.** `install render`'s tier resolution moved into `deriveRender`, which both the
+  renderer and the `--against-render` replay call. A second copy of that logic for the audit is how a gate comes to
+  certify the thing it was written to catch. The replay pins the per-box inputs the stamp recorded (install paths,
+  listen address, thread count, the vLLM deployment half) rather than re-deriving them from the auditing machine,
+  which would report every node stale.
+- **`install render --out` writes a stamped config**, and its success line now carries the spec hash. The rule audit
+  runs on the UNSTAMPED render, exactly as before, and the block is prepended after it - the stamp is inert yaml and
+  `TestEveryShippedTemplateStampsAndSelfVerifies` renders, stamps and re-verifies all eight shipped templates.
+
+### Deliberately not done
+- **The verdict is settled by RE-RENDERING, not by comparing hashes.** A basis hash moves on inputs that cannot
+  change the output (a tier's `measured` prose, a version bump with no renderer change), and a gate that cries stale
+  on a documentation edit is a gate operators learn to ignore. MATCH therefore means the verifiable thing:
+  re-rendering from this binary's seeds reproduces this file byte for byte AND no seed input moved.
+  `harness_version` stays in the identity hash but is excluded from the verdict, or every node would read STALE
+  after every release.
+- **UNSTAMPED does not exit 1.** Every config on the fleet today predates stamping (verified read-only on all three
+  reference nodes). Failing on it would make the session-start audit red on every box from the moment this ships.
+  It prints as a finding; STALE and HAND-EDITED exit 1.
+- **Nothing re-renders a live config.** The node only READS `serving_config_path`. Re-rendering stays `install
+  render`, run by a human.
 ## [0.117.6] - 2026-09-14 - duplicate review findings no longer crowd a unique one out of the cap
 
 ### Added
