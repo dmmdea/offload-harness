@@ -626,3 +626,86 @@ Orchestrator-executed. Standing rules: never a display-card seat while the opera
 **Placeholder scan.** Every new behaviour has a named test with its assertion; helper names are the real ones (`agentFake`, `agentTestPipeline`, `Resolve(p, id, Options{GOOS…})`).
 
 **Type consistency.** `core.Placed{Tier, Layer, Role, Seat, Devices, CtxTokens, Reason, Guard, Evicts}`; `placement.LayerRow`/`SeatRow` is the ONE row shape used by fleetnode health, `delegate.NodeView.Layers`, and `offload_status.local.layers`; `LocalOptions{Seat, Placed}` ↔ `AgentContractOptions{Seat, Placed}`; `Live{Seat, DeviceFree, HostFree, Presence}`; `LayerSeat.Role` vocabulary: router | agent | long | ocr | vision | stt; guards: display_floor | host_ram | presence.
+
+---
+
+## Execution status — 2026-09-14 (0.123.0)
+
+Tasks 1–7 landed earlier. This pass executed 8–12 and the non-GPU half of 13.
+
+| Task | State |
+|---|---|
+| 8 — MCP doors | DONE. `context_class` on both doors, the placement decision + opt-in guard on `agent_run`, `tier_profile`/`tiers`/`layers` in `offload_status`, `nodes[].layers`, the box's own contract cap on `agent_delegate`, the tier named from config in `report`. |
+| 9 — Fleet node health | DONE. `tiers` + `layers` rows, lane-gated, from cached reads only (roster GET count pinned at 2 per TTL across 21 requests). Seats publish `served` (the roster fact) and claim NO load state — a cached health read cannot know it. Dispatch names the dispatched layer's seat on the job feed. |
+| 10 — D5 checked union | DONE, and it found a live defect on its first run: `env: [CUDA_VISIBLE_DEVICES=0,2]` parses as TWO YAML entries, so every two-card seat was served ONE card. The display twins render behind a fence, only for a tier that declares a display layer. |
+| 11 — Installer parity | DONE, and the parity is measured: `render.tests.ps1` compares `Get-CompositeSeed` against `install seed` field by field. |
+| 12 — Docs, ADR, version | DONE at **0.123.0** (main had taken 0.116–0.122 while this branch was out). |
+| 13 — Ship gate | PARTIAL: review, semgrep, mutants, PR and merge done; every LIVE gate below is prepared and NOT run (no deploy, no live config touched, no GPU taken). |
+
+### Amendments applied while executing
+
+- **The tier declares no `triple` layer.** Its only seats were the three-card Flash-Next arms,
+  removed by the 2026-09-10 operator rule (0.115.4). Row 4 of the table therefore falls back:
+  an explicit `context_class: long` takes the pair's `qwen3.8-27b-262k` under the same eviction
+  rule window overflow uses. `config.CompositeFixture` KEEPS a three-card layer, because the
+  guards, the feasibility check and the wire must stay covered for the day a three-card seat
+  fits inside VRAM.
+- Gates G3b/G3c (explicit long on the triple) are **void**, as the amendment says. G3a stays.
+
+### OPEN — needs the operator away from the desk (G1b, the display measurement)
+
+Not run, by rule: no display-card seat while the operator is at the desk. Run it in one sitting,
+with the probe's own readings recorded first (`offload_status` → `local.layers[display]` and the
+presence block). The exact sequence:
+
+```pwsh
+# 0. Readings first, and a dated backup of every file this touches.
+local-offload status        # record: presence mode, idle seconds, console lock state, free VRAM on the 5070 Ti
+Copy-Item C:\llama-swap\llama-swap.yaml C:\llama-swap\llama-swap.yaml.bak-<date>-pre-display-twin
+
+# 1. Saturate the pair, so the measurement is taken in the state the layer exists for.
+pwsh -NoProfile -File scripts/seat-saturate.ps1 -Model agent-pool -N 32 -MaxTokens 1500
+
+# 2. BASELINE (the cost the layer would remove): a mechanical call while the pair holds its cards.
+#    Record the summarize wall AND the agent-pool reload time on the next contract.
+local-offload summarize --file <a ~4 KB doc>
+
+# 3. Add the twin to the LIVE yaml (pin the display card BY UUID on this box, never by index),
+#    reload llama-swap's config without restarting the service, and wake the layer:
+#      - llama-swap.yaml: the gemma-4-e4b-display entry + the set  display: "+residents & <vllm var> & (e4bd | e2bd)"
+#      - config.json:     layers[display].dormant = false
+#    A restart (if no config-reload verb exists) must stop the vLLM seat cleanly FIRST.
+
+# 4. MEASURED RUN, with nvidia-smi sampled every 2 s for the whole window:
+local-offload summarize --file <the same doc>
+#    Record: placed.layer == display, the rung that served it, the wall, the 5070 Ti's free VRAM
+#    floor throughout (must stay >= 4 GiB), and that agent-pool was NOT evicted (its 32 streams
+#    complete, no reload).
+
+# 5. CONTROL that must fail: set layers[display].display_floor_gib = 20 and rerun step 4.
+#    Expect a defer whose placed.guard == "display_floor" and whose reason carries the arithmetic.
+
+# 6. RESTORE: dormant = true, floor = 4, revert the yaml to the backup, confirm the twin is gone
+#    from /v1/models, and confirm the pair seat is serving again.
+```
+
+Report both walls side by side. The layer stays only if it held the desktop floor AND cut the
+wall while the pair kept serving; if it did not, delete the layer (profiles.json, the template
+fence, the decision row) and record why.
+
+### Prepared, not run — the rest of the live gates
+
+Same rule: none of these touch a live config or take a card in this pass.
+
+- **G0 control** — `placed` absent on a delegate row from a pre-0.123.0 binary, present from this
+  one; a plain node with `layers` in config shows nothing new in health (diff two health bodies).
+- **G1** — mechanical under a saturated pair: `placed.layer == single`, `role == router`,
+  `devices == ["0"]`, the reason names the time-share and `evicts == agent-pool`.
+- **G2** — saturation recorded, not acted on: one quality-gated contract while the 32 streams run
+  stays on `agent-pool`, `placed.reason` contains "queued in the seat", no remote dispatch.
+- **G3a** — window overflow: the ~600 KB needle contract while the pair is busy → `Wait`
+  observed (`capacity_wait_sec > 0`, `placed.evicts == agent-pool`), then the answer on
+  `qwen3.8-27b-262k`; the same contract on the previous binary is refused by the 256 KiB cap.
+- **G4** — the fleet sees rows: a transient `fleet-serve` on the composite box, `curl /fleet/health`
+  from another node shows `tiers` (3) and `layers` (3) with truthful `served`; a remote delegation
+  of the 600 KB contract lands on `pair`/`long`.
