@@ -15,7 +15,6 @@ import (
 	"fmt"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -355,24 +354,9 @@ func matrixVarFor(out, model string) (string, bool) {
 	return "", false
 }
 
-// flowItems renders env entries for a YAML FLOW list (`env: [a, b]`), quoting
-// any entry a flow list would otherwise tear apart.
-//
-// This is not a style choice. `env: [CUDA_VISIBLE_DEVICES=0,2]` is valid YAML
-// that parses as TWO entries — "CUDA_VISIBLE_DEVICES=0" and 2 — so every
-// two-card seat the templates and the tier tables pinned to "0,2" was rendered
-// as a ONE-card seat, silently, in the parser llama-swap itself uses. The 27B
-// and its 262k twin (both `-sm layer --tensor-split 24,26`, both needing the
-// pair) are exactly the seats that were pinned that way. Entries with no comma
-// stay barewords so every existing render is byte-identical.
-func flowItems(entries []string) []string {
-	out := make([]string, 0, len(entries))
-	for _, e := range entries {
-		if strings.ContainsAny(e, ",[]{}#") || strings.Contains(e, ": ") {
-			out = append(out, strconv.Quote(e))
-			continue
-		}
-		out = append(out, e)
-	}
-	return out
-}
+// NOTE: the quoting helper this file's check DEMANDS — flowItems, in
+// servingtmpl.go — was written twice. This package's checked union found the
+// YAML flow-list defect (a two-card pin `env: [CUDA_VISIBLE_DEVICES=0,2]`
+// parses as TWO entries and serves ONE card) at the same time as the session-2
+// seat work; that implementation is the one that ships, and the tests here —
+// over every shipped template and the rendered composite — hold it.
