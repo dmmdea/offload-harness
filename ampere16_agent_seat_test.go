@@ -112,9 +112,33 @@ func TestAmpere16AgentSeatIsTheMeasuredWinner(t *testing.T) {
 			t.Errorf("%s defines no %q entry, but a tier gates it on include_qwen38_27b", tmplName, seat)
 			continue
 		}
+		// The QUANT is the decision, not a detail: IQ3_S vs IQ3_XXS was the one pair the
+		// blind instrument could not separate (gap 0.40), and IQ3_S ships because its
+		// faithfulness lens is 0.76 higher and an independent screen found two genuine
+		// inventions in IQ3_XXS and none in it. Swapping the file silently reverses that.
+		if !strings.Contains(block, "Qwen3.8-27B-UD-IQ3_S.gguf") {
+			t.Errorf("%s: %q does not serve Qwen3.8-27B-UD-IQ3_S.gguf — the quant IS the decision (ADR 0047); "+
+				"IQ3_XXS scored lower on faithfulness and could not hold a larger window on this card anyway",
+				tmplName, seat)
+		}
 		if !strings.Contains(block, "--spec-type draft-mtp") {
 			t.Errorf("%s: %q lost --spec-type draft-mtp — the MTP head is embedded in the GGUF and drafted at "+
 				"0.592 acceptance; without the flag the seat carries it as dead weight", tmplName, seat)
+		}
+		if !strings.Contains(block, "--spec-draft-n-max 3") {
+			t.Errorf("%s: %q lost --spec-draft-n-max 3 — depth 3 is the draft depth the 0.592 acceptance was "+
+				"measured at; the head's acceptance decays with depth, so the number is part of the result",
+				tmplName, seat)
+		}
+		// Full offload is both the measured fit and INV-1: RAM is overflow only, and a
+		// partial offload would change the 14,410 MiB fit while every other check passed.
+		if !strings.Contains(block, "-ngl 999") && !strings.Contains(block, "--n-gpu-layers 999") {
+			t.Errorf("%s: %q does not offload every layer — the 14,410 MiB fit was measured at full offload, and "+
+				"a spilled seat runs its experts on the CPU (INV-1: the cards do the inference)", tmplName, seat)
+		}
+		if !strings.Contains(block, "--parallel 1") {
+			t.Errorf("%s: %q is not --parallel 1 — the 49,152 window fits at one slot; more slots multiply the "+
+				"KV allocation and the seat no longer fits the card", tmplName, seat)
 		}
 		if !strings.Contains(block, "--ctx-size 49152") {
 			t.Errorf("%s: %q does not serve a literal --ctx-size 49152 — that is the measured fit, and the same "+
