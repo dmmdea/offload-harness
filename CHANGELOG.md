@@ -6,6 +6,14 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- `scripts/write-door-gate.ps1` applied NOTHING and then judged the unpatched copy (register D-114 readback, 2026-09-15 0.125.0
+  gate on the Aorus 9B: VERDICT 1/4 while every seat diff was correct — t4 was exactly `Status: draft` → `Status: final`).
+  `git -C <copy> apply` from a SUBDIRECTORY of this repository resolves patch paths against the repository root and skips
+  every path outside the subdirectory with exit 0 (`Skipped patch …`). The proof now `git init`s a throwaway repository in
+  the fresh copy so the copy is the root, and a skip — or any apply that reports no `Applied patch` — fails the task
+  instead of passing it to a proof that cannot run. Reproduced and fixed on the saved t4 patch.
+
 ## [0.125.0] - 2026-09-15 - the review lane and the cascade ride the fleet when the local seat is held; a cut tool call is a budget defect; delegate rows carry their calls (D-110, C-41, D-114, D-99, D-100)
 
 ### Fixed
