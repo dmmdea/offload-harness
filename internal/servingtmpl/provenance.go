@@ -143,31 +143,32 @@ type RenderBasis struct {
 // cannot silently fall outside the hashed set. json tags are the stable wire
 // names an operator reads in a STALE report ("params.ctx_size").
 type ParamsBasis struct {
-	LlamaBin          string           `json:"llama_bin"`
-	ModelsDir         string           `json:"models_dir"`
-	Listen            string           `json:"listen"`
-	Ctx               int              `json:"ctx_size"`
-	KVType            string           `json:"kv_type"`
-	FlashAttn         string           `json:"flash_attn"`
-	MoE26B            string           `json:"moe_26b"`
-	Threads           int              `json:"threads"`
-	Include26B        bool             `json:"include_26b"`
-	IncludeQ38        bool             `json:"include_qwen38"`
-	IncludeQ354B      bool             `json:"include_qwen35_4b"`
-	IncludeQ359B      bool             `json:"include_qwen35_9b"`
-	Seats             []mediaseat.Seat `json:"seats"`
-	Home              string           `json:"home"`
-	GOOS              string           `json:"goos"`
+	LlamaBin      string           `json:"llama_bin"`
+	ModelsDir     string           `json:"models_dir"`
+	Listen        string           `json:"listen"`
+	Ctx           int              `json:"ctx_size"`
+	KVType        string           `json:"kv_type"`
+	FlashAttn     string           `json:"flash_attn"`
+	MoE26B        string           `json:"moe_26b"`
+	Threads       int              `json:"threads"`
+	Include26B    bool             `json:"include_26b"`
+	IncludeQ38    bool             `json:"include_qwen38"`
+	IncludeQ354B  bool             `json:"include_qwen35_4b"`
+	IncludeQ359B  bool             `json:"include_qwen35_9b"`
+	IncludeQ3827B bool             `json:"include_qwen38_27b"`
+	Seats         []mediaseat.Seat `json:"seats"`
+	Home          string           `json:"home"`
+	GOOS          string           `json:"goos"`
 	// DisplayLayer is hashed as the whole layer spec, not as its name: the
 	// template substitutes the layer’s rungs, its device pin and its guards into
 	// the rendered text (ADR 0039), so a change to any of them changes the
 	// config while the name stays "display".
 	DisplayLayer      *config.LayerSpec `json:"display_layer"`
-	GPUEnv            []string         `json:"gpu_env"`
-	Backend           string           `json:"backend"`
-	DisableCUDAGraphs bool             `json:"disable_cuda_graphs"`
-	VLLMSeat          *vllmseat.Spec   `json:"vllm_seat"`
-	VLLMRuntime       vllmseat.Runtime `json:"vllm_runtime"`
+	GPUEnv            []string          `json:"gpu_env"`
+	Backend           string            `json:"backend"`
+	DisableCUDAGraphs bool              `json:"disable_cuda_graphs"`
+	VLLMSeat          *vllmseat.Spec    `json:"vllm_seat"`
+	VLLMRuntime       vllmseat.Runtime  `json:"vllm_runtime"`
 }
 
 // BasisOf projects a Params into its hashed mirror.
@@ -177,7 +178,8 @@ func BasisOf(p Params) ParamsBasis {
 		Ctx: p.Ctx, KVType: p.KVType, FlashAttn: p.FlashAttn, MoE26B: p.MoE26B,
 		Threads: p.Threads, Include26B: p.Include26B, IncludeQ38: p.IncludeQ38,
 		IncludeQ354B: p.IncludeQ354B, IncludeQ359B: p.IncludeQ359B,
-		Seats: p.Seats, Home: p.Home, GOOS: p.GOOS, DisplayLayer: p.DisplayLayer, GPUEnv: p.GPUEnv,
+		IncludeQ3827B: p.IncludeQ3827B,
+		Seats:         p.Seats, Home: p.Home, GOOS: p.GOOS, DisplayLayer: p.DisplayLayer, GPUEnv: p.GPUEnv,
 		Backend: p.Backend, DisableCUDAGraphs: p.DisableCUDAGraphs,
 		VLLMSeat: p.VLLMSeat, VLLMRuntime: p.VLLMRuntime,
 	}
@@ -193,7 +195,8 @@ func (b ParamsBasis) Params() Params {
 		Ctx: b.Ctx, KVType: b.KVType, FlashAttn: b.FlashAttn, MoE26B: b.MoE26B,
 		Threads: b.Threads, Include26B: b.Include26B, IncludeQ38: b.IncludeQ38,
 		IncludeQ354B: b.IncludeQ354B, IncludeQ359B: b.IncludeQ359B,
-		Seats: b.Seats, Home: b.Home, GOOS: b.GOOS, DisplayLayer: b.DisplayLayer, GPUEnv: b.GPUEnv,
+		IncludeQ3827B: b.IncludeQ3827B,
+		Seats:         b.Seats, Home: b.Home, GOOS: b.GOOS, DisplayLayer: b.DisplayLayer, GPUEnv: b.GPUEnv,
 		Backend: b.Backend, DisableCUDAGraphs: b.DisableCUDAGraphs,
 		VLLMSeat: b.VLLMSeat, VLLMRuntime: b.VLLMRuntime,
 	}

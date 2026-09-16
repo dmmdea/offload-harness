@@ -127,6 +127,27 @@ models:
       --jinja --port ${PORT} --host 127.0.0.1
     checkEndpoint: /health
     ttl: 300
+  # AGENT seat for the 16GB class: Qwen3.8-27B UD-IQ3_S with the MTP head embedded in
+  # the same GGUF (blk.64.nextn.*), drafted at depth 3. Gated on the tier's
+  # include_qwen38_27b. It deliberately does NOT claim `agent-seat`: the 4B/9B entry
+  # keeps that alias as the fallback, and the lane binds here through
+  # config_seed.agent_model. The --ctx-size is a LITERAL, not __CTX__: 49,152 is the
+  # window measured to fit (14,410 MiB of a 15,356 MiB card, INCLUDING the ~456 MiB
+  # memory-stack embedder already resident) on the ampere-16 reference box. A larger
+  # window aborts at load with CUDA out-of-memory. --reasoning off is the policy the
+  # seat was measured under (ADR 0047); q8_0 KV holds the drafter at its measured
+  # 0.59 acceptance on free text.
+  qwen38-27b-agent:
+    aliases: [qwen38-27b, 27b-agent]
+    env: ["${ld}"]
+    cmd: >-
+      __LLAMA_BIN__/llama-server --model __MODELS__/Qwen3.8-27B-UD-IQ3_S.gguf
+      --spec-type draft-mtp --spec-draft-n-max 3
+      --n-gpu-layers 999 --parallel 1 --ctx-size 49152 --flash-attn __FLASH_ATTN__
+      --cache-type-k __KV_K__ --cache-type-v __KV_V__ --threads __NTHREADS__
+      --jinja --reasoning off --port ${PORT} --host 127.0.0.1
+    checkEndpoint: /health
+    ttl: 300
   embeddinggemma:
     aliases: [text-embedding, local-embed]
     env: ["${ld}"]
@@ -190,6 +211,7 @@ matrix:
     a26: gemma-4-26b-agent
     q354: qwen3.5-4b-agent
     q359: qwen3.5-9b-agent
+    q3827: qwen38-27b-agent
   # The memory stack is the most expensive thing on this box to lose and the cheapest to
   # keep: make it maximally expensive to stop, so if the solver ever does have a choice
   # it stops something else first.
@@ -198,4 +220,4 @@ matrix:
     rer: 1000
   sets:
     residents: "emb & rer__SEATS_RESIDENT__"
-    interactive: "+residents & (e4b | e2b__M26_ALT____Q354B_ALT____Q359B_ALT____SEATS_SWAPPABLE__)"
+    interactive: "+residents & (e4b | e2b__M26_ALT____Q354B_ALT____Q359B_ALT____Q3827B_ALT____SEATS_SWAPPABLE__)"

@@ -38,6 +38,7 @@ func TestAgentWindowMatchesWhatTheAgentSeatServes(t *testing.T) {
 			AgentCtxTokens int  `json:"agent_ctx_tokens"`
 			IncludeQ354B   bool `json:"include_qwen35_4b"`
 			IncludeQ359B   bool `json:"include_qwen35_9b"`
+			IncludeQ3827B  bool `json:"include_qwen38_27b"`
 		} `json:"profiles"`
 	}
 	if err := json.Unmarshal(raw, &doc); err != nil {
@@ -53,12 +54,19 @@ func TestAgentWindowMatchesWhatTheAgentSeatServes(t *testing.T) {
 	seatCtx := map[string]string{
 		"qwen3.5-4b-agent": ctxExprFor(t, string(tmplRaw), "qwen3.5-4b-agent"),
 		"qwen3.5-9b-agent": ctxExprFor(t, string(tmplRaw), "qwen3.5-9b-agent"),
+		"qwen38-27b-agent": ctxExprFor(t, string(tmplRaw), "qwen38-27b-agent"),
 	}
 
 	checked := 0
 	for tier, p := range doc.Profiles {
 		seat := ""
 		switch {
+		// The 27B agent entry does not claim the `agent-seat` alias, so a tier may
+		// render it ALONGSIDE a 4B/9B fallback entry. When it is present it IS the
+		// agent lane (config_seed.agent_model binds to it by name), so it decides the
+		// advertised window and is checked first.
+		case p.IncludeQ3827B:
+			seat = "qwen38-27b-agent"
 		case p.IncludeQ359B:
 			seat = "qwen3.5-9b-agent"
 		case p.IncludeQ354B:

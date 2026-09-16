@@ -76,8 +76,14 @@ type servingProfile struct {
 	// GGUF download) the same way IncludeQwen354B gates the 4B. Absent = false.
 	// Mutually exclusive with IncludeQwen354B (shared `agent-seat` alias) —
 	// servingtmpl.Render refuses a tier that sets both.
-	IncludeQwen359B bool   `json:"include_qwen35_9b"`
-	MoE26B          string `json:"moe_26b"`
+	IncludeQwen359B bool `json:"include_qwen35_9b"`
+	// IncludeQwen3827B gates the Qwen3.8-27B agent entry (UD-IQ3_S + the MTP head
+	// embedded in the same GGUF) — the 16GB-class agent seat measured in ADR 0047.
+	// Unlike the 4B/9B pair it does NOT claim the `agent-seat` alias, so it is not
+	// mutually exclusive with them: the smaller entry stays rendered as the fallback
+	// and the lane binds here through config_seed.agent_model.
+	IncludeQwen3827B bool   `json:"include_qwen38_27b"`
+	MoE26B           string `json:"moe_26b"`
 	// NCPUMoE is the N for the partial `n_cpu_moe` placement (top N expert layers in
 	// RAM, the rest on the GPU).
 	NCPUMoE int `json:"n_cpu_moe"`
@@ -438,7 +444,8 @@ func deriveRender(profilesRaw []byte, req renderRequest) (renderResult, error) {
 		Ctx: p.CtxSize, KVType: p.KVType, FlashAttn: p.FlashAttn,
 		MoE26B: moe, Threads: n, Include26B: include26B, IncludeQ38: p.IncludeQwen38,
 		IncludeQ354B: p.IncludeQwen354B, IncludeQ359B: p.IncludeQwen359B,
-		Seats: p.MediaSeats, Home: req.Home, GOOS: target, GPUEnv: p.GPUEnv, Backend: p.Backend,
+		IncludeQ3827B: p.IncludeQwen3827B,
+		Seats:         p.MediaSeats, Home: req.Home, GOOS: target, GPUEnv: p.GPUEnv, Backend: p.Backend,
 		DisableCUDAGraphs: p.DisableCUDAGraphs,
 		VLLMSeat:          seat, VLLMRuntime: seatRT,
 		DisplayLayer: displayLayerOf(layers),

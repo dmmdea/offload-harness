@@ -40,6 +40,10 @@ Decision provenance: the operator decided GO on 2026-09-06 16:49 (the measured a
 8-digest set at a 47 s median against the llama.cpp 4B seat's 159 s) and ordered the build the same evening;
 this ADR records the shape the build took and why, per the ownership rule in the index README.
 
+## Update 2026-09-16 — this tier no longer declares the seat
+
+[0047](0047-ampere-16-agent-seat-reaudit.md) re-audited the `ampere-16` agent seat blind and the 4B lost 24 of 24 to Qwen3.8-27B UD-IQ3_S + MTP. `profiles.json` therefore no longer declares a `vllm_seat` for `ampere-16`, and a fresh install of that tier builds no vLLM venv or unit. **The pattern below is unchanged and still correct** — it is the reference for any tier that seats a vLLM engine behind llama-swap, and the reference box's own unit is left installed (unbound) so the lane can be reverted with one config edit.
+
 ## Context
 
 The `ampere-16` reference box (NVIDIA A2 16 GB at a 40 W / 1200 MHz lock) served its agent lane from a

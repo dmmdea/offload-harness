@@ -104,7 +104,8 @@ func renderParams(prof servingProfile, goos string) servingtmpl.Params {
 		FlashAttn: prof.FlashAttn, MoE26B: moe, Threads: 8,
 		Include26B: include26B, IncludeQ38: prof.IncludeQwen38,
 		IncludeQ354B: prof.IncludeQwen354B, IncludeQ359B: prof.IncludeQwen359B,
-		Seats: prof.MediaSeats, Home: "/opt/offload", GOOS: goos, GPUEnv: prof.GPUEnv,
+		IncludeQ3827B: prof.IncludeQwen3827B,
+		Seats:         prof.MediaSeats, Home: "/opt/offload", GOOS: goos, GPUEnv: prof.GPUEnv,
 	}
 }
 
