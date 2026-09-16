@@ -7,6 +7,20 @@ Versioning: [SemVer](https://semver.org/).
 ## [Unreleased]
 
 ### Changed
+- **vLLM is a first-class engine on EVERY tier, and a tier never loses it as a side effect** — ADR 0048.
+  The A-07 ship (ADR 0047) deleted `ampere-16`'s entire `vllm_seat` object from `setup/templates/profiles.json`
+  in order to change a MODEL. That stopped the installer rendering the tier's systemd unit, both llama-swap
+  wrappers, the polkit rule and the llama-swap entry, and it removed the tier's only path to the LMCache cache
+  server, which ADR 0045 defines per vLLM seat. The seat is **restored** unchanged (`qwen3.5-4b-vllm`); the A-07
+  seat verdict and the held binding are untouched.
+  **Both existing guards passed through the deletion**, because each `continue`s on a nil declaration
+  (`agent_budget_test.go:64`, `vllmseat_table_test.go:35`) — a tier that loses a capability falls out of the
+  iteration instead of failing it. New gate `TestEveryTierCanSeatAModelUnderVLLM` asserts the SET of tiers: a
+  `vllmSeatTiers` regression floor that names the tier and the seat it lost, a countable `vllmSeatDebt` for the
+  tiers that cannot yet seat one (today **3 of 16 covered, 13 owing**), and a failure for any tier tracked by
+  neither. `TestEveryDeclaredVLLMSeatValidates` now FAILS instead of skipping when nothing is declared, and
+  `TestAmpere16AgentSeatIsTheMeasuredWinner`'s assertion is inverted — it required the absence of a `vllm_seat`.
+  Mutation-verified: re-applying the deletion turns the new gate red while both old gates still report `ok`.
 - **`ampere-16`: the 27B agent entry renders, but the DEFAULT BINDING is held on the 4B** — ADR 0047, after the
   live check. The seat decision is unchanged and unanimous (24/24 blind), but deployed to the reference box the
   winner returned 2/8 and then 0/8 on `contracts/digest-8.json` through the fleet node, every failure

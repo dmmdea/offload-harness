@@ -71,9 +71,18 @@ func TestAmpere16AgentSeatIsTheMeasuredWinner(t *testing.T) {
 		t.Errorf("%s does not set include_qwen38_27b: the measured winner (ADR 0047) is %q, which beat the "+
 			"previous 4B seat 24/24 on the blind instrument", tier, seat)
 	}
-	if p.VLLMSeat != nil {
-		t.Errorf("%s still declares a vllm_seat: it existed to render the 4B as the AGENT seat, and the 4B is "+
-			"no longer the agent seat (ADR 0047). The llama.cpp fallback entry carries that role now", tier)
+	// INVERTED 2026-09-16 (ADR 0048). This assertion used to read `p.VLLMSeat != nil` -> error,
+	// on the reasoning that the declaration "existed to render the 4B as the AGENT seat". That
+	// conflated two separate things: WHICH MODEL holds the agent lane (governed below, by
+	// config_seed naming the fallback) and WHETHER THIS TIER CAN SERVE UNDER vLLM AT ALL. The
+	// second is not a seat detail — it is the tier's engine capability, and deleting it also
+	// deleted the tier's LMCache cache-server binding, which ADR 0045 defines per vLLM seat.
+	// vLLM is a first-class engine here, so the tier must keep its seat while the agent lane
+	// moves independently.
+	if p.VLLMSeat == nil {
+		t.Errorf("%s declares no vllm_seat: vLLM is a first-class engine on every tier (ADR 0048) and this "+
+			"tier's seat is its only path to the LMCache cache server (ADR 0045). Changing which MODEL holds "+
+			"the agent lane is done in config_seed, never by deleting the engine declaration", tier)
 	}
 	if !p.IncludeQ354B {
 		t.Errorf("%s dropped include_qwen35_4b: the smaller entry stays rendered as the FALLBACK so a box "+
