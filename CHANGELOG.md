@@ -6,6 +6,8 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.125.1] - 2026-09-15 - a cascade lane call never waits on this box's GPU lease (C-41c); the write-door gate's proof applies its patches (D-114)
+
 ### Fixed
 - **A cascade lane call no longer waits on THIS box's GPU lease (register C-41c).** The 0.125.0 readback under a
   foreign media lease logged `cascade remote lane: gemma-4-e4b -> http://<node>:18811/fleet/chat (local GPU lease held)`
