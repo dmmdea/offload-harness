@@ -1,9 +1,15 @@
 ---
-status: Proposed
+status: Accepted
 date: "2026-09-16"
 ---
 
 # 0047 — The ampere-16 agent seat is re-audited blind; the 4B verdict behind ADR 0029/0035 is void
+
+> **Accepted, with the default binding HELD.** The seat DECISION is settled and unanimous: Qwen3.8-27B UD-IQ3_S
+> with its embedded MTP head beat the incumbent 4B 24 of 24 blind judgements. The DEFAULT BINDING is not yet
+> that seat, because the live check found it cannot finish a default 300 s delegated contract and no node-side
+> setting can extend one. The entry renders and is callable by name with a longer `timeout_sec`; the binding
+> flips when the wall is derived from the seat rate (register D-03). See "Live check" below.
 
 ## Context
 
@@ -75,9 +81,10 @@ wall at its measured rate (`final_budget_fit`). Single-stream rates from the pro
 | `a2-27b-iq3s-mtp` | 6.3 | ~650 | 111–806 s |
 
 The 27B is the only candidate whose final answer alone can exceed a default 300 s contract; at the 900 s cap it
-completed 8 of 8. So a 27B winner ships with the wall as part of the decision — the node's `agent_timeout_sec`
-raised and callers' default contracts understood to be trimmed by `final_budget_fit` — while a 12B or gpt-oss
-winner drops into the incumbent's budget class unchanged. This is a cost of the seat, not a reason to rank on
+completed 8 of 8. **The mitigation named in the first draft of this section — "the node's `agent_timeout_sec`
+raised" — does not work, and the live check below proves it**: that key is read only on local-run paths, so a
+dispatched contract keeps the delegator's 300 s regardless. The wall is therefore not a knob this tier can turn;
+it is the reason the binding is held. This is a cost of the seat, not a reason to rank on
 speed: the same instrument that forbids ranking on latency (INV-5) is why the trade is written down instead of
 being allowed to pick the winner quietly.
 
@@ -109,15 +116,46 @@ window for 1.1 GB less weight — measured void on this card (81,920 aborts at l
 49,152). No speed term enters the choice, per INV-5.
 
 Two costs ship with the winner and are stated rather than discovered later: it **pads** (102 degenerate findings
-flagged against the runner-up's 1 — contracts should ask for a bounded list), and it is **slow** (6.3 tok/s; see
-the wall section above — the seat needs the 900 s contract cap and a raised `agent_timeout_sec`, or its finals are
-floored by `FitFinalBudget`). Neither is a reason to prefer a thinner answer; both are configuration.
+flagged against the runner-up's 1 — contracts should ask for a bounded list), and it is **slow** (6.3 tok/s), which the live check
+below turned from a cost into a blocker for DEFAULT contracts: the seat needs a caller-supplied `timeout_sec`,
+and no node-side setting can supply it. Neither is a reason to prefer a thinner answer, but the second decides
+what ships as the default today.
 
 Measured fit on the reference card (NVIDIA A2 16 GB at the 40 W / 1200 MHz lock, cooled to ≤ 64 °C before the
 arm): 14,410 MiB resident **including** the ~456 MiB memory-stack embedder that was already on the card — so the
 seat coexists with the mem0 embedding lane rather than evicting it. Drafter acceptance 0.592 on free text
 (244 of 412 drafted tokens), prompt processing 76.5 tok/s, 8 of 8 contracts with zero deferrals at walls
 111–806 s.
+
+## Live check — the winner does not fit a DEFAULT contract, and the binding is held
+
+Deployed to the reference box the same day and checked with the harness's own
+`contracts/digest-8.json` through the fleet node, which is how production actually reaches the seat. It failed:
+
+| run | result | walls |
+|---|---|---|
+| as deployed (`agent_thinking` unset → auto) | **2 of 8**, 5 deferred `wall timeout after 300s` | 279–315 s |
+| at the measured policy (`agent_thinking: off`) | **0 of 8** | 297–315 s |
+| the 4B seat, same set, after reverting | **8 of 8**, 0 deferred | 36–132 s |
+
+**Root cause, traced in code rather than guessed.** A delegated contract's wall is stamped by the DELEGATOR
+before dispatch: `internal/delegate/intake.go` sets `TimeoutSec = core.AgentTimeoutSecDefault` (300) when the
+caller passes none, the node's `DecodeAgentContractWithCap` leaves a positive value alone, and
+`internal/pipeline/agenttask.go` enforces it as a context deadline. `Config.AgentTimeoutSec` is read in exactly
+two places — `cmd/local-agent/main.go` and `internal/mcpserver` `agentTimeout` — **both on local-run paths**. So
+no setting on the executing node extends a remote contract's wall, and a seat decoding at 6.3 tok/s cannot finish
+one. Seeding `agent_timeout_sec: 900` on the node, which this ADR originally claimed would give the seat room,
+does nothing for dispatched work. That claim was wrong and is corrected here.
+
+**What this does and does not change.** It does not touch the quality verdict: 24 of 24 blind, on a matched
+budget both seats could finish, stands exactly as measured. It changes what ships as the DEFAULT. The entry
+renders, its weights download, and any caller may name it with `timeout_sec` up to the 900 s cap — that is the
+configuration it won under. `config_seed.agent_model` stays on the llama.cpp 4B until the contract wall is
+derived from the seat's measured rate (`seatrate` already computes `wall_estimate_sec` / `min_turn_sec` and
+publishes them, and by design never imposes them — register D-03).
+
+**Operational note.** The live node ran the 27B binding for roughly twenty minutes before the revert, during
+which delegations to it deferred. Reverted to `qwen3.5-4b-vllm` and re-verified 8/8.
 
 ## Consequences
 

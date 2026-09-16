@@ -7,6 +7,19 @@ Versioning: [SemVer](https://semver.org/).
 ## [Unreleased]
 
 ### Changed
+- **`ampere-16`: the 27B agent entry renders, but the DEFAULT BINDING is held on the 4B** — ADR 0047, after the
+  live check. The seat decision is unchanged and unanimous (24/24 blind), but deployed to the reference box the
+  winner returned 2/8 and then 0/8 on `contracts/digest-8.json` through the fleet node, every failure
+  "wall timeout after 300s". A dispatched contract carries `timeout_sec` = `core.AgentTimeoutSecDefault` (300)
+  stamped by the DELEGATOR in `internal/delegate/intake.go`; the node's decoder leaves it, and
+  `Config.AgentTimeoutSec` is read only on local-run paths — so no node-side setting extends a remote
+  contract's wall, and a 6.3 tok/s seat cannot finish one. The earlier claim in this changelog that seeding
+  `agent_timeout_sec: 900` gave the seat room was WRONG. `config_seed.agent_model` stays on
+  `qwen3.5-4b-agent` (re-verified 8/8 at walls 36-132 s) and `agent_ctx_tokens` back to 131072; the 27B entry
+  is callable by name with a caller-supplied `timeout_sec` up to the 900 s cap, and becomes the default when
+  the wall is derived from the seat's measured rate (register D-03). `TestAgentWindowMatchesWhatTheAgentSeatServes`
+  now resolves the seat from `config_seed.agent_model` rather than from a gate flag, because a tier may render
+  several agent-capable entries and only the binding routes the lane.
 - **`ampere-16` agent seat is now `qwen38-27b-agent`** (Qwen3.8-27B UD-IQ3_S with the MTP head embedded in the same GGUF, `--spec-type draft-mtp --spec-draft-n-max 3`, literal `--ctx-size 49152`, q8_0 KV, `--reasoning off`) — ADR 0047, register A-07. Re-audited blind on the standard instrument (24 Opus judgements, three lenses, Latin-balanced, matched budget) on a card held at its accepted 40 W / 1200 MHz profile and cooled before every arm: it beats the previous seat `qwen3.5-4b-vllm` **24/24** (9.32 vs 5.39), Gemma 4 12B + MTP 24/24 and gpt-oss-20b + EAGLE-3 24/24. The tier drops its `vllm_seat` declaration, advertises `agent_ctx_tokens` 49152, and seeds `agent_max_tokens` 4096 / `agent_timeout_sec` 900 (the seat decodes at 6.3 tok/s, so an inherited budget is silently floored by `FitFinalBudget`). The llama.cpp `qwen3.5-4b-agent` entry stays rendered as the fallback. New tier gate `include_qwen38_27b` + `__Q3827B_ALT__` in both CUDA templates, covered by the serving-config provenance hash.
 
 ## [0.125.1] - 2026-09-15 - a cascade lane call never waits on this box's GPU lease (C-41c); the write-door gate's proof applies its patches (D-114)

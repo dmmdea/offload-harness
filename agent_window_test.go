@@ -34,11 +34,12 @@ func TestAgentWindowMatchesWhatTheAgentSeatServes(t *testing.T) {
 	}
 	var doc struct {
 		Profiles map[string]struct {
-			CtxSize        int  `json:"ctx_size"`
-			AgentCtxTokens int  `json:"agent_ctx_tokens"`
-			IncludeQ354B   bool `json:"include_qwen35_4b"`
-			IncludeQ359B   bool `json:"include_qwen35_9b"`
-			IncludeQ3827B  bool `json:"include_qwen38_27b"`
+			CtxSize        int                        `json:"ctx_size"`
+			AgentCtxTokens int                        `json:"agent_ctx_tokens"`
+			IncludeQ354B   bool                       `json:"include_qwen35_4b"`
+			IncludeQ359B   bool                       `json:"include_qwen35_9b"`
+			IncludeQ3827B  bool                       `json:"include_qwen38_27b"`
+			ConfigSeed     map[string]json.RawMessage `json:"config_seed"`
 		} `json:"profiles"`
 	}
 	if err := json.Unmarshal(raw, &doc); err != nil {
@@ -60,13 +61,22 @@ func TestAgentWindowMatchesWhatTheAgentSeatServes(t *testing.T) {
 	checked := 0
 	for tier, p := range doc.Profiles {
 		seat := ""
+		// A tier may render SEVERAL agent-capable entries (the 27B entry deliberately does
+		// not claim the `agent-seat` alias, so it coexists with a 4B/9B fallback). What
+		// actually routes the lane is config_seed.agent_model, so the binding — not a gate
+		// flag — decides which seat's window the tier must advertise. Resolving this from
+		// the gate instead would have hidden exactly the disagreement this test is for.
+		if raw, ok := p.ConfigSeed["agent_model"]; ok {
+			var bound string
+			if err := json.Unmarshal(raw, &bound); err == nil {
+				if _, known := seatCtx[bound]; known {
+					seat = bound
+				}
+			}
+		}
 		switch {
-		// The 27B agent entry does not claim the `agent-seat` alias, so a tier may
-		// render it ALONGSIDE a 4B/9B fallback entry. When it is present it IS the
-		// agent lane (config_seed.agent_model binds to it by name), so it decides the
-		// advertised window and is checked first.
-		case p.IncludeQ3827B:
-			seat = "qwen38-27b-agent"
+		case seat != "":
+			// resolved from the binding above
 		case p.IncludeQ359B:
 			seat = "qwen3.5-9b-agent"
 		case p.IncludeQ354B:
