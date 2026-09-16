@@ -6,6 +6,8 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.125.1] - 2026-09-15 - a cascade lane call never waits on this box's GPU lease (C-41c); the write-door gate's proof applies its patches (D-114)
+
 ### Fixed
 - `scripts/write-door-gate.ps1` applied NOTHING and then judged the unpatched copy (register D-114 readback, 2026-09-15 0.125.0
   gate on the Aorus 9B: VERDICT 1/4 while every seat diff was correct — t4 was exactly `Status: draft` → `Status: final`).
