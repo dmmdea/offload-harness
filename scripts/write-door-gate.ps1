@@ -86,8 +86,15 @@ function Prove([hashtable]$t) {
       if (-not $before.pass) { $t.ok = $false; $t.why = "t2 copy was RED before the patch - the fixture's table must not cover the bug"; return $t }
     }
   }
+  # The copy lives under this repository's work tree, and `git apply` run from a SUBDIRECTORY of a repository resolves
+  # patch paths against the repository root and SKIPS every path outside the subdirectory - exit 0, "Skipped patch",
+  # nothing changed (measured 2026-09-15 on the 0.125.0 gate: every seat diff was correct and t1/t3/t4 still "failed").
+  # A throwaway repository in the copy makes the copy the root, so `a/release-notes.md` means the copy's file; and a
+  # skip is a failure of the PROOF, never a pass.
+  & git -C $t.copy init -q 2>&1 | Out-Null
   $apply = (& git -C $t.copy apply -p1 --verbose $t.patch 2>&1) -join "`n"
   if ($LASTEXITCODE -ne 0) { $t.ok = $false; $t.why = "git apply failed: $apply"; return $t }
+  if ($apply -match 'Skipped patch' -or $apply -notmatch 'Applied patch') { $t.ok = $false; $t.why = "git apply changed nothing (the proof cannot run on an unpatched copy): $apply"; return $t }
   switch ($t.name) {
     "t1" { $after = Test-Go $t.copy; if (-not $after.pass) { $t.ok = $false; $t.why = "go test still red after the patch: $($after.out)" } else { $t.proof = "go test FAIL -> ok" } }
     "t2" {
