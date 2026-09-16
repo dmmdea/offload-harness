@@ -9,7 +9,13 @@ import (
 	"testing"
 )
 
-// TestAmpere16AgentSeatIsTheMeasuredWinner pins the ampere-16 agent seat to the
+// TestAmpere16AgentSeatIsTheMeasuredWinner pins two things that are NOT the same: the
+// entry ampere-16 renders, and the seat it BINDS. The first is the 2026-09-16 blind
+// re-audit's winner; the second is held on the fallback until a default contract can
+// afford the winner. A test that conflated them would go green on a tier that ships a
+// seat nothing can call.
+//
+// It pins the ampere-16 agent seat to the
 // 2026-09-16 blind re-audit on the tier's reference box (Lenovo M720q, NVIDIA A2
 // 16 GB at its accepted 40 W / 1200 MHz profile): Qwen3.8-27B UD-IQ3_S with the MTP
 // head embedded in the same GGUF beat the incumbent Qwen3.5-4B seat 24 of 24 blind
@@ -32,8 +38,9 @@ import (
 // The gate this replaces is the reason it exists: the 2026-09-14 "measured tie" that
 // kept a 4B on a 16 GB card was taken on a card running stock and thermally throttled
 // (register A-103), at a 1,024-token step budget, with the 12B capped at 32k. A tier
-// seat is only ever as good as the conditions it was measured under, so this test
-// pins the winner AND the window it was measured at.
+// seat is only ever as good as the conditions it was measured under — which cuts both
+// ways, and is why the binding assertion below pins the FALLBACK rather than the
+// winner: the winner was measured at a 900 s wall it does not get in production.
 func TestAmpere16AgentSeatIsTheMeasuredWinner(t *testing.T) {
 	const (
 		tier = "ampere-16"
@@ -72,33 +79,27 @@ func TestAmpere16AgentSeatIsTheMeasuredWinner(t *testing.T) {
 		t.Errorf("%s dropped include_qwen35_4b: the smaller entry stays rendered as the FALLBACK so a box "+
 			"without the 27B weights still serves an agent lane (ADR 0047)", tier)
 	}
-	if p.AgentCtxTokens != 49152 {
-		t.Errorf("%s advertises agent_ctx_tokens %d, want 49152 — the window the seat was measured to hold on "+
-			"the reference card; the fleet sizes every contract from the advertised figure",
-			tier, p.AgentCtxTokens)
+	if p.AgentCtxTokens != 131072 {
+		t.Errorf("%s advertises agent_ctx_tokens %d, want 131072 — the window of the seat that is BOUND. "+
+			"The 27B entry renders and serves 49,152, but the lane is held on the fallback (see below), and "+
+			"the fleet sizes every contract from the advertised figure", tier, p.AgentCtxTokens)
 	}
+	// THE BINDING IS HELD, AND THE REASON IS MEASURED. The 27B won the audit 24/24 blind, but
+	// live on the deployed seat it returned 2/8 and then 0/8 on the same contract set, every
+	// failure "wall timeout after 300s": a dispatched contract carries timeout_sec = 300
+	// stamped by the DELEGATOR (internal/delegate/intake.go), the node's decoder leaves it,
+	// and Config.AgentTimeoutSec is read only on local-run paths — so nothing node-side
+	// extends a remote contract's wall, and a 6.3 tok/s seat cannot fit one. Callers that
+	// pass timeout_sec (cap 900) can name the seat today. This flips to the 27B when the wall
+	// is derived from the seat's measured rate (register D-03), not before.
 	var gotModel string
 	if rawModel, ok := p.ConfigSeed["agent_model"]; ok {
 		_ = json.Unmarshal(rawModel, &gotModel)
 	}
-	if gotModel != seat {
-		t.Errorf("%s seeds config_seed.agent_model = %q, want %q: this entry does not claim the `agent-seat` "+
-			"alias on purpose, so the binding by name is the ONLY thing routing the lane to it", tier, gotModel, seat)
-	}
-	// A 6.3 tok/s seat starves at the built-in wall: FitFinalBudget floors the final
-	// answer at 1,024 tokens when the contract's wall cannot decode it. The tier must
-	// state the budget and wall it was measured under rather than inherit them.
-	for key, want := range map[string]string{"agent_max_tokens": "4096", "agent_timeout_sec": "900"} {
-		rawVal, ok := p.ConfigSeed[key]
-		if !ok {
-			t.Errorf("%s seeds no config_seed.%s: the seat decodes at ~6.3 tok/s, so an inherited budget is "+
-				"silently cut by FitFinalBudget (ADR 0047, the wall section)", tier, key)
-			continue
-		}
-		if got := strings.TrimSpace(string(rawVal)); got != want {
-			t.Errorf("%s seeds config_seed.%s = %s, want %s (the value the winner was measured under)",
-				tier, key, got, want)
-		}
+	if gotModel != "qwen3.5-4b-agent" {
+		t.Errorf("%s seeds config_seed.agent_model = %q, want %q: the 27B entry renders, but binding it by "+
+			"default ships a seat that cannot finish a default 300 s contract (ADR 0047, the live-check section)",
+			tier, gotModel, "qwen3.5-4b-agent")
 	}
 
 	// The rendered entry must carry the two flags that make it the measured seat.
