@@ -263,7 +263,16 @@ func (c *Client) sendWithSeatWait(ctx context.Context, ep endpointChoice, model 
 		if ep.token != "" {
 			req.Header.Set("Authorization", "Bearer "+ep.token)
 		}
-		tk, err := modelaffinity.Admit(ctx, ep.base, model, ep.client.Timeout)
+		// The machine-wide GPU lease governs what loads into THIS box's VRAM. A
+		// request bound for another box (a cascade lane, a pinned remote seat)
+		// loads nothing here, so it keeps the in-process per-base queue and
+		// skips the card wait (register C-41c) — otherwise the lane fires and the
+		// send still sits out the whole lease bound at home.
+		admit := modelaffinity.Admit
+		if ep.offBox {
+			admit = modelaffinity.AdmitOffBox
+		}
+		tk, err := admit(ctx, ep.base, model, ep.client.Timeout)
 		if err != nil {
 			return GenResult{}, err
 		}
