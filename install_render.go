@@ -239,14 +239,14 @@ func warnMissingSeatModels(seats []mediaseat.Seat, modelsDir, target string) {
 // contract (the same names install.ps1's $PINNED table downloads to).
 // Same shape as the seat warning: a warning, never an error, and skipped when
 // rendering for another machine, where a local miss means nothing.
-func warnMissingGatedModels(include26B, includeQ38, includeQ354B, includeQ359B bool, modelsDir, target string) {
-	warnMissingGatedModelsTo(include26B, includeQ38, includeQ354B, includeQ359B, modelsDir, target, os.Stderr)
+func warnMissingGatedModels(include26B, includeQ38, includeQ354B, includeQ359B, includeQ3827B bool, modelsDir, target string) {
+	warnMissingGatedModelsTo(include26B, includeQ38, includeQ354B, includeQ359B, includeQ3827B, modelsDir, target, os.Stderr)
 }
 
 // warnMissingGatedModelsTo carries the body with an injectable sink so the warning
 // is testable (it had no coverage at all — 0.72.0 review finding I-2). The wrapper
 // above keeps every production call site unchanged.
-func warnMissingGatedModelsTo(include26B, includeQ38, includeQ354B, includeQ359B bool, modelsDir, target string, w io.Writer) {
+func warnMissingGatedModelsTo(include26B, includeQ38, includeQ354B, includeQ359B, includeQ3827B bool, modelsDir, target string, w io.Writer) {
 	if modelsDir == "" || target != runtime.GOOS {
 		return
 	}
@@ -269,6 +269,9 @@ func warnMissingGatedModelsTo(include26B, includeQ38, includeQ354B, includeQ359B
 	}
 	if includeQ359B {
 		check("qwen3.5-9b-agent", "model", "Qwen3.5-9B-UD-Q4_K_XL.gguf")
+	}
+	if includeQ3827B {
+		check("qwen38-27b-agent", "model", "Qwen3.8-27B-UD-IQ3_S.gguf")
 	}
 	if len(missing) == 0 {
 		return
@@ -529,7 +532,7 @@ func runInstallRender(args []string) error {
 		}
 	}
 	warnMissingSeatModels(res.Profile.MediaSeats, *modelsDir, target)
-	warnMissingGatedModels(res.Include26B, res.Profile.IncludeQwen38, res.Profile.IncludeQwen354B, res.Profile.IncludeQwen359B, *modelsDir, target)
+	warnMissingGatedModels(res.Include26B, res.Profile.IncludeQwen38, res.Profile.IncludeQwen354B, res.Profile.IncludeQwen359B, res.Profile.IncludeQwen3827B, *modelsDir, target)
 
 	// The provenance stamp (K-02) rides on every rendered config from here on.
 	// It is prepended AFTER the rule audit so the audit sees exactly what a
