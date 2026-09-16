@@ -76,8 +76,14 @@ type servingProfile struct {
 	// GGUF download) the same way IncludeQwen354B gates the 4B. Absent = false.
 	// Mutually exclusive with IncludeQwen354B (shared `agent-seat` alias) —
 	// servingtmpl.Render refuses a tier that sets both.
-	IncludeQwen359B bool   `json:"include_qwen35_9b"`
-	MoE26B          string `json:"moe_26b"`
+	IncludeQwen359B bool `json:"include_qwen35_9b"`
+	// IncludeQwen3827B gates the Qwen3.8-27B agent entry (UD-IQ3_S + the MTP head
+	// embedded in the same GGUF) — the 16GB-class agent seat measured in ADR 0047.
+	// Unlike the 4B/9B pair it does NOT claim the `agent-seat` alias, so it is not
+	// mutually exclusive with them: the smaller entry stays rendered as the fallback
+	// and the lane binds here through config_seed.agent_model.
+	IncludeQwen3827B bool   `json:"include_qwen38_27b"`
+	MoE26B           string `json:"moe_26b"`
 	// NCPUMoE is the N for the partial `n_cpu_moe` placement (top N expert layers in
 	// RAM, the rest on the GPU).
 	NCPUMoE int `json:"n_cpu_moe"`
@@ -233,14 +239,14 @@ func warnMissingSeatModels(seats []mediaseat.Seat, modelsDir, target string) {
 // contract (the same names install.ps1's $PINNED table downloads to).
 // Same shape as the seat warning: a warning, never an error, and skipped when
 // rendering for another machine, where a local miss means nothing.
-func warnMissingGatedModels(include26B, includeQ38, includeQ354B, includeQ359B bool, modelsDir, target string) {
-	warnMissingGatedModelsTo(include26B, includeQ38, includeQ354B, includeQ359B, modelsDir, target, os.Stderr)
+func warnMissingGatedModels(include26B, includeQ38, includeQ354B, includeQ359B, includeQ3827B bool, modelsDir, target string) {
+	warnMissingGatedModelsTo(include26B, includeQ38, includeQ354B, includeQ359B, includeQ3827B, modelsDir, target, os.Stderr)
 }
 
 // warnMissingGatedModelsTo carries the body with an injectable sink so the warning
 // is testable (it had no coverage at all — 0.72.0 review finding I-2). The wrapper
 // above keeps every production call site unchanged.
-func warnMissingGatedModelsTo(include26B, includeQ38, includeQ354B, includeQ359B bool, modelsDir, target string, w io.Writer) {
+func warnMissingGatedModelsTo(include26B, includeQ38, includeQ354B, includeQ359B, includeQ3827B bool, modelsDir, target string, w io.Writer) {
 	if modelsDir == "" || target != runtime.GOOS {
 		return
 	}
@@ -263,6 +269,9 @@ func warnMissingGatedModelsTo(include26B, includeQ38, includeQ354B, includeQ359B
 	}
 	if includeQ359B {
 		check("qwen3.5-9b-agent", "model", "Qwen3.5-9B-UD-Q4_K_XL.gguf")
+	}
+	if includeQ3827B {
+		check("qwen38-27b-agent", "model", "Qwen3.8-27B-UD-IQ3_S.gguf")
 	}
 	if len(missing) == 0 {
 		return
@@ -438,7 +447,8 @@ func deriveRender(profilesRaw []byte, req renderRequest) (renderResult, error) {
 		Ctx: p.CtxSize, KVType: p.KVType, FlashAttn: p.FlashAttn,
 		MoE26B: moe, Threads: n, Include26B: include26B, IncludeQ38: p.IncludeQwen38,
 		IncludeQ354B: p.IncludeQwen354B, IncludeQ359B: p.IncludeQwen359B,
-		Seats: p.MediaSeats, Home: req.Home, GOOS: target, GPUEnv: p.GPUEnv, Backend: p.Backend,
+		IncludeQ3827B: p.IncludeQwen3827B,
+		Seats:         p.MediaSeats, Home: req.Home, GOOS: target, GPUEnv: p.GPUEnv, Backend: p.Backend,
 		DisableCUDAGraphs: p.DisableCUDAGraphs,
 		VLLMSeat:          seat, VLLMRuntime: seatRT,
 		DisplayLayer: displayLayerOf(layers),
@@ -522,7 +532,7 @@ func runInstallRender(args []string) error {
 		}
 	}
 	warnMissingSeatModels(res.Profile.MediaSeats, *modelsDir, target)
-	warnMissingGatedModels(res.Include26B, res.Profile.IncludeQwen38, res.Profile.IncludeQwen354B, res.Profile.IncludeQwen359B, *modelsDir, target)
+	warnMissingGatedModels(res.Include26B, res.Profile.IncludeQwen38, res.Profile.IncludeQwen354B, res.Profile.IncludeQwen359B, res.Profile.IncludeQwen3827B, *modelsDir, target)
 
 	// The provenance stamp (K-02) rides on every rendered config from here on.
 	// It is prepended AFTER the rule audit so the audit sees exactly what a

@@ -6,6 +6,9 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- **`ampere-16` agent seat is now `qwen38-27b-agent`** (Qwen3.8-27B UD-IQ3_S with the MTP head embedded in the same GGUF, `--spec-type draft-mtp --spec-draft-n-max 3`, literal `--ctx-size 49152`, q8_0 KV, `--reasoning off`) — ADR 0047, register A-07. Re-audited blind on the standard instrument (24 Opus judgements, three lenses, Latin-balanced, matched budget) on a card held at its accepted 40 W / 1200 MHz profile and cooled before every arm: it beats the previous seat `qwen3.5-4b-vllm` **24/24** (9.32 vs 5.39), Gemma 4 12B + MTP 24/24 and gpt-oss-20b + EAGLE-3 24/24. The tier drops its `vllm_seat` declaration, advertises `agent_ctx_tokens` 49152, and seeds `agent_max_tokens` 4096 / `agent_timeout_sec` 900 (the seat decodes at 6.3 tok/s, so an inherited budget is silently floored by `FitFinalBudget`). The llama.cpp `qwen3.5-4b-agent` entry stays rendered as the fallback. New tier gate `include_qwen38_27b` + `__Q3827B_ALT__` in both CUDA templates, covered by the serving-config provenance hash.
+
 ## [0.125.1] - 2026-09-15 - a cascade lane call never waits on this box's GPU lease (C-41c); the write-door gate's proof applies its patches (D-114)
 
 ### Fixed

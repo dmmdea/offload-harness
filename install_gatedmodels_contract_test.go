@@ -61,6 +61,7 @@ var gatedModelWeights = map[string][]string{
 	"qwen3.8-27b":      {weightQ38, mmprojQ38},
 	"qwen3.5-4b-agent": {weightQ354B},
 	"qwen3.5-9b-agent": {weightQ359B},
+	"qwen38-27b-agent": {weightQ3827B},
 }
 
 // TestGatedWeightFilenamesMatchTheShippedTemplates pins each filename against the

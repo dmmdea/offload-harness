@@ -120,6 +120,17 @@ $PINNED = @{
   # Qwen3.8-27B coder/agent seat (Seat Frontier Leg 1 winner, 2026-08-14). Gated on
   # the resolved profile's include_qwen38 (Step 5) — mirrors the include_26b
   # mechanism. sha = real LFS oid fetched from the HF tree API 2026-08-16.
+  # The 16GB-class AGENT seat's weights (ADR 0047). A DIFFERENT quant from 'model-qwen38'
+  # above: the agent seat serves UD-IQ3_S (12.0 GB) because that is what fits a 15,356 MiB
+  # card at a 49,152 window, while the 27B coder entry serves UD-Q4_K_XL (17.9 GB). The
+  # ampere-16 vision seat loads this same file, so a tier enabling both downloads it once.
+  'model-qwen38-iq3s' = @{
+    url  = 'https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/resolve/main/Qwen3.8-27B-UD-IQ3_S.gguf'
+    name = 'Qwen3.8-27B-UD-IQ3_S.gguf'
+    size = 12040883104
+    sha  = 'd847e2c1e4aa276e4b7b8e9ad7628050e61e165d49ab995407bc36677a6f3864'
+    version = 'd847e2c1'
+  }
   'model-qwen38' = @{
     url  = 'https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/resolve/main/Qwen3.8-27B-UD-Q4_K_XL.gguf'
     name = 'Qwen3.8-27B-UD-Q4_K_XL.gguf'
@@ -621,7 +632,7 @@ function Select-CudaBuild {
 # Previously this lived inline in the main flow, below the dot-source test seam, so no
 # test could reach it and deleting the qwen3.5-4b line left the whole suite green.
 function Get-GatedModelKeys {
-  param([bool]$IncludeQwen38, [bool]$IncludeQwen354B, [bool]$IncludeQwen359B, [bool]$WithFamily)
+  param([bool]$IncludeQwen38, [bool]$IncludeQwen354B, [bool]$IncludeQwen359B, [bool]$IncludeQwen3827B, [bool]$WithFamily)
   $keys = @()
   # The 27B coder/agent seat RIDES the family gate: OFFLOAD_WITH_FAMILY=0 (a lean
   # install) opts out of an 18.8GB download even on an include_qwen38 tier.
@@ -637,6 +648,12 @@ function Get-GatedModelKeys {
   # replaces was MEASURED at 0% extraction (2026-08-22 blackwell-8 on-box bake) - a
   # lean install that dropped it would ship a broken agent lane by omission.
   if ($IncludeQwen359B) { $keys += @('model-qwen35-9b') }
+  # The Qwen3.8-27B AGENT seat (ADR 0047) does not ride the family gate either, and for the
+  # sharpest version of the reason: on the 16GB tiers it beat the seat it replaces 24 of 24
+  # blind judgements, so a lean install that dropped it would render the winner and then
+  # serve nothing. 12.0 GB, and the tier's vision seat loads the SAME file, so a tier that
+  # enables both pays for it once.
+  if ($IncludeQwen3827B) { $keys += @('model-qwen38-iq3s') }
   # Returned WITHOUT the ,@() no-unroll wrapper on purpose. That guard is correct where a
   # 1-element array must survive JSON SERIALIZATION (Merge-ConfigSeed), but here the only
   # consumer is `$modelKeys += ...`, where unrolling is exactly what is wanted - and on an
@@ -1164,6 +1181,7 @@ if ($withFamily) { $modelKeys += @('model-e2b', 'model-26b') }
 $includeQwen38 = $false
 $includeQwen354B = $false
 $includeQwen359B = $false
+$includeQwen3827B = $false
 $profilesJsonStep5 = Join-Path (Join-Path $scriptDir 'templates') 'profiles.json'
 if ($profileId -and (Test-Path $profilesJsonStep5)) {
   $pdoc5 = Get-Content -Raw $profilesJsonStep5 | ConvertFrom-Json
@@ -1190,11 +1208,17 @@ if ($profileId -and (Test-Path $profilesJsonStep5)) {
       throw "profile '$profileId': include_qwen35_9b must be a JSON boolean, got '$q359Val' ($($q359Val.GetType().Name)) - fix setup/templates/profiles.json before the download set is chosen"
     }
     $includeQwen359B = ($q359Val -is [bool] -and $q359Val)
+
+    $q3827Val = $pdoc5.profiles.$profileId.include_qwen38_27b
+    if ($null -ne $q3827Val -and -not ($q3827Val -is [bool])) {
+      throw "profile '$profileId': include_qwen38_27b must be a JSON boolean, got '$q3827Val' ($($q3827Val.GetType().Name)) - fix setup/templates/profiles.json before the download set is chosen"
+    }
+    $includeQwen3827B = ($q3827Val -is [bool] -and $q3827Val)
   }
 }
 # Gate -> download-set mapping lives in Get-GatedModelKeys (above the test seam) so it
 # can be regression-pinned; the rules and their deliberate asymmetry are documented there.
-$modelKeys += Get-GatedModelKeys -IncludeQwen38 $includeQwen38 -IncludeQwen354B $includeQwen354B -IncludeQwen359B $includeQwen359B -WithFamily $withFamily
+$modelKeys += Get-GatedModelKeys -IncludeQwen38 $includeQwen38 -IncludeQwen354B $includeQwen354B -IncludeQwen359B $includeQwen359B -IncludeQwen3827B $includeQwen3827B -WithFamily $withFamily
 foreach ($key in $modelKeys) {
   $m = $PINNED[$key]
   $dest = Join-Path $modelDir $m.name
@@ -1340,6 +1364,7 @@ if ($RenderOut) { $yamlDest = $RenderOut } else { $yamlDest = Join-Path $HOME_DI
 $gatedSeats = [ordered]@{
   'qwen3.8-27b'      = $includeQwen38
   'qwen3.5-4b-agent' = $includeQwen354B
+  'qwen38-27b-agent' = $includeQwen3827B
 }
 # -RenderOnly always renders fresh: drop any stale output so the Step SKIP test can't short-circuit it.
 if ($RenderOnly -and (Test-Path $yamlDest)) { Remove-Item $yamlDest -Force }

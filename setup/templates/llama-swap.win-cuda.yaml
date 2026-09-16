@@ -115,6 +115,18 @@ models:
       --cache-type-k __KV_K__ --cache-type-v __KV_V__ --jinja
       --port ${PORT} --host 127.0.0.1
     ttl: 300
+  # AGENT seat for the 16GB class — see the linux-cuda template for the full rationale.
+  # Literal --ctx-size 49152 (measured fit), MTP head embedded in the GGUF, and no
+  # `agent-seat` alias so the smaller entry stays the fallback.
+  qwen38-27b-agent:
+    aliases: [qwen38-27b, 27b-agent]
+    cmd: >-
+      __LLAMA_BIN__/llama-server.exe -m __MODELS__/Qwen3.8-27B-UD-IQ3_S.gguf
+      --spec-type draft-mtp --spec-draft-n-max 3
+      -ngl 999 --parallel 1 --ctx-size 49152 --flash-attn __FLASH_ATTN__
+      --cache-type-k __KV_K__ --cache-type-v __KV_V__ --jinja --reasoning off
+      --port ${PORT} --host 127.0.0.1
+    ttl: 300
   embeddinggemma:
     cmd: >-
       __LLAMA_BIN__/llama-server.exe -m __MODELS__/embeddinggemma-300m-Q8_0.gguf
@@ -153,8 +165,9 @@ matrix:
     a26: gemma-4-26b-agent
     q354: qwen3.5-4b-agent
     q359: qwen3.5-9b-agent
+    q3827: qwen38-27b-agent
   evict_costs:
     emb: 1000
   sets:
     residents: "emb__SEATS_RESIDENT__"
-    interactive: "+residents & (e4b | e2b__M26_ALT____Q354B_ALT____Q359B_ALT____SEATS_SWAPPABLE__)"
+    interactive: "+residents & (e4b | e2b__M26_ALT____Q354B_ALT____Q359B_ALT____Q3827B_ALT____SEATS_SWAPPABLE__)"

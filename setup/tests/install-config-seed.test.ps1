@@ -74,11 +74,19 @@ foreach ($tier in @('blackwell-16','ampere-16','volta-16')) {
   Assert ($s.videogen_text_encoder -eq 'umt5_xxl_fp16.safetensors')         "$tier seeds the fp16 text encoder"
   Assert ($s.videogen_width -eq 1280 -and $s.videogen_height -eq 720)       "$tier seeds 720p video"
   Assert ($s.videogen_frames -eq 81)                                        "$tier seeds the 81-frame native ceiling"
-  # ampere-16 was corrected 2026-09-06 (0.113.15): measured on an NVIDIA A2 16 GB @ 40 W the 26B seat ran 1/8 digests,
-  # the 4B seat 8/8 — that band seeds qwen3.5-4b-agent; the other 16 GB tiers keep the validated 26B agent.
+  # ampere-16 was RE-AUDITED 2026-09-16 (ADR 0047, register A-07). The 2026-09-04/09-06 result that
+  # seated a 4B here was taken on a card running stock and thermally throttled (A-103) at a 1,024-token
+  # step budget; re-measured on a card at its accepted 40 W profile, cooled before every arm, at a
+  # matched budget, Qwen3.8-27B UD-IQ3_S + its embedded MTP head beat that 4B 24 of 24 blind judgements
+  # (9.32 vs 5.39; the 4B took zero firsts and fourteen lasts). The seat decodes at 6.3 tok/s, so the
+  # tier states the budget and wall it was measured under rather than inheriting the loop defaults —
+  # at an inherited 300 s wall FitFinalBudget floors the final answer at 1,024 tokens.
+  # The other 16 GB tiers keep the validated 26B agent.
   if ($tier -eq 'ampere-16') {
-    Assert ($s.agent_model -eq 'qwen3.5-4b-agent')                        "$tier seats the MEASURED 4B agent (A2 16 GB bake-off 2026-09-04)"
-    Assert ($s.agent_profile -eq 'research')                              "$tier seeds the research profile with the 4B seat"
+    Assert ($s.agent_model -eq 'qwen38-27b-agent')                        "$tier seats the RE-AUDITED 27B+MTP agent (blind 24/24 over the 4B, ADR 0047)"
+    Assert ($s.agent_profile -eq 'research')                              "$tier seeds the research profile with the 27B seat"
+    Assert ($s.agent_max_tokens -eq 4096)                                 "$tier seeds the step budget the winner was measured under"
+    Assert ($s.agent_timeout_sec -eq 900)                                 "$tier seeds the 900 s wall a 6.3 tok/s seat needs (an inherited wall floors its final answer)"
   } else {
     Assert ($s.agent_model -eq 'gemma-4-26b-agent')                       "$tier seats the validated thinking-on 26B agent (model KEY, not alias)"
   }

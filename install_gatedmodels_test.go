@@ -24,17 +24,18 @@ import (
 // table). Duplicated here deliberately: if a rename lands on one side only, this
 // test fails rather than silently checking a path nothing downloads to.
 const (
-	weight26B   = "gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf"
-	weightQ38   = "Qwen3.8-27B-UD-Q4_K_XL.gguf"
-	mmprojQ38   = "mmproj-Qwen3.8-27B-F16.gguf"
-	weightQ354B = "Qwen3.5-4B-UD-Q4_K_XL.gguf"
-	weightQ359B = "Qwen3.5-9B-UD-Q4_K_XL.gguf"
+	weight26B    = "gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf"
+	weightQ38    = "Qwen3.8-27B-UD-Q4_K_XL.gguf"
+	mmprojQ38    = "mmproj-Qwen3.8-27B-F16.gguf"
+	weightQ354B  = "Qwen3.5-4B-UD-Q4_K_XL.gguf"
+	weightQ359B  = "Qwen3.5-9B-UD-Q4_K_XL.gguf"
+	weightQ3827B = "Qwen3.8-27B-UD-IQ3_S.gguf"
 )
 
-func gatedWarn(t *testing.T, in26B, inQ38, inQ354B, inQ359B bool, dir, target string) string {
+func gatedWarn(t *testing.T, in26B, inQ38, inQ354B, inQ359B, inQ3827B bool, dir, target string) string {
 	t.Helper()
 	var buf bytes.Buffer
-	warnMissingGatedModelsTo(in26B, inQ38, inQ354B, inQ359B, dir, target, &buf)
+	warnMissingGatedModelsTo(in26B, inQ38, inQ354B, inQ359B, inQ3827B, dir, target, &buf)
 	return buf.String()
 }
 
@@ -51,7 +52,7 @@ func TestWarnMissingGatedModelsNamesOnlyAbsentGatedWeights(t *testing.T) {
 	touchWeight(t, dir, weightQ38)
 	touchWeight(t, dir, mmprojQ38)
 
-	out := gatedWarn(t, false, true, true, true, dir, runtime.GOOS)
+	out := gatedWarn(t, false, true, true, true, false, dir, runtime.GOOS)
 
 	if strings.Contains(out, weightQ38) || strings.Contains(out, mmprojQ38) {
 		t.Fatalf("a PRESENT gated weight must not be reported missing:\n%s", out)
@@ -74,7 +75,7 @@ func TestWarnMissingGatedModelsNamesOnlyAbsentGatedWeights(t *testing.T) {
 
 func TestWarnMissingGatedModelsCountsEachMissingFileIncludingMmproj(t *testing.T) {
 	dir := t.TempDir() // nothing on disk at all
-	out := gatedWarn(t, true, true, true, true, dir, runtime.GOOS)
+	out := gatedWarn(t, true, true, true, true, false, dir, runtime.GOOS)
 
 	// 26B weight + Q38 weight + Q38 mmproj + Q354B weight + Q359B weight = 5. The
 	// mmproj is a SEPARATE check: a vision entry with its weights but no projector
@@ -100,13 +101,13 @@ func TestWarnMissingGatedModelsSilentArms(t *testing.T) {
 	touchWeight(t, dir, weightQ359B)
 
 	// 1. Everything gated is present => silence.
-	if out := gatedWarn(t, true, true, true, true, dir, runtime.GOOS); strings.TrimSpace(out) != "" {
+	if out := gatedWarn(t, true, true, true, true, false, dir, runtime.GOOS); strings.TrimSpace(out) != "" {
 		t.Fatalf("all gated weights present must be silent, got:\n%s", out)
 	}
 
 	// 2. No gates set => silence, even on an empty dir. A tier that asked for
 	//    nothing cannot be missing anything.
-	if out := gatedWarn(t, false, false, false, false, t.TempDir(), runtime.GOOS); strings.TrimSpace(out) != "" {
+	if out := gatedWarn(t, false, false, false, false, false, t.TempDir(), runtime.GOOS); strings.TrimSpace(out) != "" {
 		t.Fatalf("no gates set must be silent, got:\n%s", out)
 	}
 
@@ -119,12 +120,38 @@ func TestWarnMissingGatedModelsSilentArms(t *testing.T) {
 	if runtime.GOOS == "linux" {
 		otherOS = "windows"
 	}
-	if out := gatedWarn(t, true, true, true, true, t.TempDir(), otherOS); strings.TrimSpace(out) != "" {
+	if out := gatedWarn(t, true, true, true, true, false, t.TempDir(), otherOS); strings.TrimSpace(out) != "" {
 		t.Fatalf("cross-machine render must be silent, got:\n%s", out)
 	}
 
 	// 4. Empty modelsDir => silence (nothing to resolve a relative path against).
-	if out := gatedWarn(t, true, true, true, true, "", runtime.GOOS); strings.TrimSpace(out) != "" {
+	if out := gatedWarn(t, true, true, true, true, false, "", runtime.GOOS); strings.TrimSpace(out) != "" {
 		t.Fatalf("empty modelsDir must be silent, got:\n%s", out)
+	}
+}
+
+// TestWarnMissingGatedModelsCoversThe27BAgentSeat pins the 16GB-class agent seat into
+// the same warning the other gated seats get. The gap this closes is the one the
+// installer's own comment names: a tier can RENDER a seat whose weights were never
+// downloaded, and because llama-swap lists models from the CONFIG, `doctor` and
+// `acceptance` both pass while the route fails only when something calls it. The seat
+// this covers (ADR 0047) beat the one it replaces 24 of 24 blind, so shipping it
+// unserved would be the worst version of that failure.
+func TestWarnMissingGatedModelsCoversThe27BAgentSeat(t *testing.T) {
+	dir := t.TempDir()
+	// Gate ON, weight absent -> it must be named.
+	out := gatedWarn(t, false, false, false, false, true, dir, runtime.GOOS)
+	if !strings.Contains(out, weightQ3827B) {
+		t.Errorf("include_qwen38_27b is set and %s is absent, but the warning does not name it:\n%s",
+			weightQ3827B, out)
+	}
+	// Weight present -> silent, so the warning cannot cry wolf on a complete install.
+	touchWeight(t, dir, weightQ3827B)
+	if out := gatedWarn(t, false, false, false, false, true, dir, runtime.GOOS); strings.TrimSpace(out) != "" {
+		t.Errorf("every gated weight is present, want silence, got:\n%s", out)
+	}
+	// Gate OFF -> silent even with the weight absent, or every non-16GB tier would warn.
+	if out := gatedWarn(t, false, false, false, false, false, t.TempDir(), runtime.GOOS); strings.TrimSpace(out) != "" {
+		t.Errorf("include_qwen38_27b is unset, want silence, got:\n%s", out)
 	}
 }

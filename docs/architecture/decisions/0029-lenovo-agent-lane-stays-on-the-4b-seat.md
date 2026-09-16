@@ -55,6 +55,10 @@ the same box's agent lane now runs on a persistent vLLM seat behind llama-swap (
 45 s median against this seat's 159 s. The FreeToken finding, the parked `gpt-oss-20b` entry and the re-eval triggers
 below are unchanged.
 
+## Update 2026-09-16
+
+The seat binding is superseded again by [0047](0047-ampere-16-agent-seat-reaudit.md): re-measured blind on a card at its accepted power profile and cooled before every arm, the 4B lost to Qwen3.8-27B UD-IQ3_S + MTP **24 of 24** judgements (5.39 vs 9.32) and took zero first places. `agent_model` on this tier is now `qwen38-27b-agent`. The FreeToken finding below, the parked `gpt-oss-20b` entry and the re-eval triggers are unchanged; the llama.cpp 4B entry stays rendered as the fallback.
+
 ## Re-eval triggers
 
 1. Isolate the contamination with a direct-`:1920`-vs-proxied differential
