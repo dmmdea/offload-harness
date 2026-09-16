@@ -51,8 +51,13 @@ func TestEveryDeclaredVLLMSeatValidates(t *testing.T) {
 			}
 		}
 	}
+	// Not t.Skip: vLLM is first-class infrastructure, so "nothing to validate" is the
+	// loudest possible failure, not a reason to go quiet. A skip here is what would
+	// report green if every tier lost its seat at once.
 	if declared == 0 {
-		t.Skip("no tier declares a vllm_seat yet")
+		t.Fatal("no tier declares a vllm_seat — vLLM is a first-class engine in this harness and at least " +
+			"one tier must be able to seat a model under it; see TestEveryTierCanSeatAModelUnderVLLM for the " +
+			"per-tier coverage floor")
 	}
 	t.Logf("validated %d declared vLLM seat(s)", declared)
 }
