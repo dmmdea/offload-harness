@@ -22,16 +22,16 @@ one declaration, so the seat and the lane routing to it cannot disagree.
 
 | setting | value | what it controls |
 |---|---|---|
-| id | `qwen3.5-4b-vllm` | the llama-swap model id, `--served-model-name`, and what `agent_model` binds to |
+| id | `qwen38-27b-gsq-vllm` | the llama-swap model id, `--served-model-name`, and what `agent_model` binds to |
 | cards | `0` | `CUDA_VISIBLE_DEVICES`, in PCI order |
 | tensor_parallel | 0 | `--tensor-parallel-size`; must equal how many cards are listed |
-| max_model_len | 131072 | the served window |
+| max_model_len | 49152 | the served window |
 | kv_cache_dtype | `fp8_e5m2` | KV precision — backend-dependent, not free everywhere |
 | ttl_seconds | 300 | idle window before the seat unloads and frees its cards |
 | launch | `—` | which artifact set starts it |
 | fallback | `qwen3.5-4b-agent` | the llama.cpp seat a box WITHOUT the vLLM venv serves instead |
 
-> NVIDIA A2 16 GB (Lenovo M720q, 40 W / 1200 MHz lock), vLLM 0.28 / torch 2.13+cu130, harness 0.113.19, 2026-09-06. GO decided 16:49; production seat built 23:2x-23:4x. 8/8 digests through the fleet node at a 45 s median (walls 33/33/33/39/45/48/48/51) against the llama.cpp 4B seat's 159 s at 32k -- 3.5x faster at 4x the window; go/no-go rule (8/8 AND >=2x window at <=1.3x wall) held at 0.28x. Weights 4.48 GiB, KV 2.91 GiB -> a 180,098-token pool (1.37x concurrency at 131,072), healthy in 126 s cold / 35 s warm, card 8,536 MiB at 16.7 W idle and 9,148 MiB under load, ~5.8 GB left for the small seats. KxN gate 48/48: K=1 96.7 s (was 121.2), K=2 150.3 s (was 187.8), K=3 190.0 s (was 353.7), 0 refusals. Records: Benchmarks and Optimizations/2026-09-06-a2-vllm-seat/ (README.md, digest8-qwen3.5-4b-vllm-r1.json) and ADR 0035.
+> NVIDIA A2 16 GB (Lenovo M720q, 40 W / 1200 MHz lock), vLLM 0.29.0 + the checkpoint's embedding patch, 2026-09-16. Qwen3.8-27B 3-bit GSQ (ISTA-DASLab; transformer 3-bit g128, embedding+LM head 4-bit RTN g64) = 11.85 GB, the ONLY published vLLM-loadable 27B that fits a 16 GB card — every W4A16/AWQ/GPTQ build is 19.45-19.56 GB because it leaves the ~248k-vocab embedding at high precision. Serves max_model_len 49,152 at util 0.92 (65,536 refused: needs 2.3 GiB KV against 1.97 available, est. max 54,880). MEASURED against the llama.cpp IQ3_S+MTP arm at the SAME vendor sampling (temp 0.7 / top_p 0.80 / top_k 20 / presence_penalty 1.5, the Qwen3.8 non-thinking card values): single-stream 5.75 vs 5.91 tok/s (a tie), TTFT 2.195 vs 0.408 s, and CONCURRENCY 19.53 vs 5.26 tok/s aggregate at 4 streams -- 3.7x, which is what this seat is chosen for, together with being the tier's only path to the LMCache cache server (ADR 0045 binds a cache server per vLLM seat). Blind quality at a 32,768 window lost 8.42 to 9.28 (22/24), with the whole gap in COVERAGE (7.69 vs 9.30) while accuracy was HIGHER (9.54 vs 9.47) -- that arm was handicapped by the window and the matched-window (49,152) re-measurement is the record that governs. Records: 'Benchmarks and Optimizations/2026-09-16-16gb-tier-pass/'.
 
 ## Media
 

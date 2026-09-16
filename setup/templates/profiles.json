@@ -377,20 +377,99 @@
         "CUDA_DEVICE_ORDER=PCI_BUS_ID",
         "CUDA_MODULE_LOADING=LAZY"
       ],
-      "composes": ["blackwell-16", "blackwell-2x16"],
+      "composes": [
+        "blackwell-16",
+        "blackwell-2x16"
+      ],
       "layers": [
-        {"name": "single", "tier": "blackwell-16", "devices": ["0", "2"], "seats": [
-          {"role": "router", "device": "0"},
-          {"role": "agent", "model": "gemma-4-26b-agent", "device": "0", "ctx_tokens": 131072, "footprint_gib": 13.0},
-          {"role": "ocr", "model": "qwen3-vl-8b", "device": "2", "ctx_tokens": 16384, "footprint_gib": 11.5},
-          {"role": "stt", "model": "whisper-stt", "device": "2", "footprint_gib": 2.2}]},
-        {"name": "pair", "tier": "blackwell-2x16", "devices": ["0,2"], "seats": [
-          {"role": "agent", "footprint_gib": 15.0},
-          {"role": "long", "model": "qwen3.8-27b-262k", "device": "0,2", "ctx_tokens": 262144, "footprint_gib": 15.5, "prefill_tps": 1197},
-          {"role": "vision", "model": "qwen3-vl-32b", "device": "0,2", "ctx_tokens": 16384, "footprint_gib": 12.0}]},
-        {"name": "display", "tier": "blackwell-16", "devices": ["1"], "opt_in": true, "dormant": true,
-          "display_device": "1", "display_floor_gib": 4, "guards": ["display_floor", "presence"], "seats": [
-          {"role": "router", "device": "1", "display_footprint_gib": 6.2, "model_map": {"workhorse": "gemma-4-e4b-display", "triage": "gemma-4-e2b-display"}}]}
+        {
+          "name": "single",
+          "tier": "blackwell-16",
+          "devices": [
+            "0",
+            "2"
+          ],
+          "seats": [
+            {
+              "role": "router",
+              "device": "0"
+            },
+            {
+              "role": "agent",
+              "model": "gemma-4-26b-agent",
+              "device": "0",
+              "ctx_tokens": 131072,
+              "footprint_gib": 13.0
+            },
+            {
+              "role": "ocr",
+              "model": "qwen3-vl-8b",
+              "device": "2",
+              "ctx_tokens": 16384,
+              "footprint_gib": 11.5
+            },
+            {
+              "role": "stt",
+              "model": "whisper-stt",
+              "device": "2",
+              "footprint_gib": 2.2
+            }
+          ]
+        },
+        {
+          "name": "pair",
+          "tier": "blackwell-2x16",
+          "devices": [
+            "0,2"
+          ],
+          "seats": [
+            {
+              "role": "agent",
+              "footprint_gib": 15.0
+            },
+            {
+              "role": "long",
+              "model": "qwen3.8-27b-262k",
+              "device": "0,2",
+              "ctx_tokens": 262144,
+              "footprint_gib": 15.5,
+              "prefill_tps": 1197
+            },
+            {
+              "role": "vision",
+              "model": "qwen3-vl-32b",
+              "device": "0,2",
+              "ctx_tokens": 16384,
+              "footprint_gib": 12.0
+            }
+          ]
+        },
+        {
+          "name": "display",
+          "tier": "blackwell-16",
+          "devices": [
+            "1"
+          ],
+          "opt_in": true,
+          "dormant": true,
+          "display_device": "1",
+          "display_floor_gib": 4,
+          "guards": [
+            "display_floor",
+            "presence"
+          ],
+          "seats": [
+            {
+              "role": "router",
+              "device": "1",
+              "display_footprint_gib": 6.2,
+              "model_map": {
+                "workhorse": "gemma-4-e4b-display",
+                "triage": "gemma-4-e2b-display"
+              }
+            }
+          ]
+        }
       ],
       "config_seed": {
         "upscale_model": "4x-UltraSharp.pth",
@@ -690,18 +769,18 @@
       "disable_cuda_graphs": true,
       "vllm_seat": {
         "ttl_seconds": 300,
-        "id": "qwen3.5-4b-vllm",
+        "id": "qwen38-27b-gsq-vllm",
         "aliases": [
           "a2-pool",
           "agent-pool-a2",
-          "qwen35-4b-vllm"
+          "qwen38-27b-gsq"
         ],
         "unit": "vllm-agent-seat",
         "port": 18797,
         "device": "0",
-        "model_repo": "hub/models--RedHatAI--Qwen3.5-4B-quantized.w4a16",
-        "max_model_len": 131072,
-        "gpu_memory_utilization": 0.65,
+        "model_repo": "hub/models--ISTA-DASLab--Qwen3.8-27B-3Bit-GSQ",
+        "max_model_len": 49152,
+        "gpu_memory_utilization": 0.92,
         "max_num_seqs": 32,
         "max_num_batched_tokens": 4096,
         "kv_cache_dtype": "fp8_e5m2",
@@ -709,10 +788,12 @@
         "reasoning_parser": "qwen3",
         "health_check_timeout": 480,
         "unload_timeout": 120,
-        "agent_ctx_tokens": 131072,
+        "agent_ctx_tokens": 49152,
         "fallback_agent_model": "qwen3.5-4b-agent",
         "fallback_agent_ctx_tokens": 131072,
-        "measured": "NVIDIA A2 16 GB (Lenovo M720q, 40 W / 1200 MHz lock), vLLM 0.28 / torch 2.13+cu130, harness 0.113.19, 2026-09-06. GO decided 16:49; production seat built 23:2x-23:4x. 8/8 digests through the fleet node at a 45 s median (walls 33/33/33/39/45/48/48/51) against the llama.cpp 4B seat's 159 s at 32k -- 3.5x faster at 4x the window; go/no-go rule (8/8 AND >=2x window at <=1.3x wall) held at 0.28x. Weights 4.48 GiB, KV 2.91 GiB -> a 180,098-token pool (1.37x concurrency at 131,072), healthy in 126 s cold / 35 s warm, card 8,536 MiB at 16.7 W idle and 9,148 MiB under load, ~5.8 GB left for the small seats. KxN gate 48/48: K=1 96.7 s (was 121.2), K=2 150.3 s (was 187.8), K=3 190.0 s (was 353.7), 0 refusals. Records: Benchmarks and Optimizations/2026-09-06-a2-vllm-seat/ (README.md, digest8-qwen3.5-4b-vllm-r1.json) and ADR 0035."
+        "measured": "NVIDIA A2 16 GB (Lenovo M720q, 40 W / 1200 MHz lock), vLLM 0.29.0 + the checkpoint's embedding patch, 2026-09-16. Qwen3.8-27B 3-bit GSQ (ISTA-DASLab; transformer 3-bit g128, embedding+LM head 4-bit RTN g64) = 11.85 GB, the ONLY published vLLM-loadable 27B that fits a 16 GB card — every W4A16/AWQ/GPTQ build is 19.45-19.56 GB because it leaves the ~248k-vocab embedding at high precision. Serves max_model_len 49,152 at util 0.92 (65,536 refused: needs 2.3 GiB KV against 1.97 available, est. max 54,880). MEASURED against the llama.cpp IQ3_S+MTP arm at the SAME vendor sampling (temp 0.7 / top_p 0.80 / top_k 20 / presence_penalty 1.5, the Qwen3.8 non-thinking card values): single-stream 5.75 vs 5.91 tok/s (a tie), TTFT 2.195 vs 0.408 s, and CONCURRENCY 19.53 vs 5.26 tok/s aggregate at 4 streams -- 3.7x, which is what this seat is chosen for, together with being the tier's only path to the LMCache cache server (ADR 0045 binds a cache server per vLLM seat). Blind quality at a 32,768 window lost 8.42 to 9.28 (22/24), with the whole gap in COVERAGE (7.69 vs 9.30) while accuracy was HIGHER (9.54 vs 9.47) -- that arm was handicapped by the window and the matched-window (49,152) re-measurement is the record that governs. Records: 'Benchmarks and Optimizations/2026-09-16-16gb-tier-pass/'.",
+        "engine_min_version": "0.29.0",
+        "engine_patch": "patch_vllm_qwen35_embedding.py (shipped in the checkpoint; vLLM builds a plain VocabParallelEmbedding for Qwen3.5 otherwise)"
       },
       "ctx_size": 131072,
       "kv_type": "q8_0",

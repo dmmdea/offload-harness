@@ -87,3 +87,6 @@ parallel-gate-out/
 
 # write-door-gate.ps1 evidence (raw results, patches, applied copies) — measurement output, never source
 write-door-gate-out/
+offload-harness.exe
+seat-contention-probe.json
+~/

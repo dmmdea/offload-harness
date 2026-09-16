@@ -7,6 +7,20 @@ Versioning: [SemVer](https://semver.org/).
 ## [Unreleased]
 
 ### Changed
+- **`ampere-16`'s vLLM seat is Qwen3.8-27B 3-bit GSQ** — ADR 0049. `qwen3.5-4b-vllm` ->
+  `qwen38-27b-gsq-vllm` (ISTA-DASLab/Qwen3.8-27B-3Bit-GSQ, 11.85 GB, `max_model_len` 49,152, util 0.92).
+  ADR 0047 recorded a 27B-under-vLLM on one 16 GB card as impossible; that was a SEARCH error twice over —
+  every W4A16/AWQ/GPTQ build is 19.45-19.56 GB because it leaves the ~248k-vocab embedding at high precision,
+  while GSQ quantizes the embedding and LM head (4-bit RTN g64) alongside 3-bit transformer weights, exactly
+  as llama.cpp's IQ3_S does. Chosen for **3.7x concurrency** (19.53 vs 5.26 tok/s aggregate at 4 streams;
+  single-stream 5.75 vs 5.91 is a tie) and for being the tier's only path to the LMCache cache server
+  (ADR 0045) — **not** on blind quality, where the llama.cpp IQ3_S+MTP arm leads.
+  The seat declares its engine floor as data: `engine_min_version` 0.29.0 plus the checkpoint's
+  `patch_vllm_qwen35_embedding.py`, which is CARRIED, not upstream (vLLM `main` still builds a stock
+  `VocabParallelEmbedding` for Qwen3.5). On 0.28.0 the patch applies and is still insufficient.
+  The BOUND agent lane is untouched: `config_seed.agent_model` stays on the llama.cpp fallback, and the
+  TIER-level `agent_ctx_tokens` stays 131,072 because it describes the bound lane, not the vLLM seat — a
+  distinction `TestAgentWindowMatchesWhatTheAgentSeatServes` caught when this change first got it wrong.
 - **vLLM is a first-class engine on EVERY tier, and a tier never loses it as a side effect** — ADR 0048.
   The A-07 ship (ADR 0047) deleted `ampere-16`'s entire `vllm_seat` object from `setup/templates/profiles.json`
   in order to change a MODEL. That stopped the installer rendering the tier's systemd unit, both llama-swap
