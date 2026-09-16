@@ -380,6 +380,13 @@ requested model being the loaded one is never busy (no swap at all), and every u
 — `/running`, the roster, the gauge — reads as NOT busy: "could not tell" never moves a call off
 this machine. One reading is cached 5 s per base.
 
+**A lane call never waits on this box's GPU lease (register C-41c).** The machine-wide lease governs what loads
+into THIS box's VRAM; a request the lane sends to another node loads nothing here. So a lane call (and a seat pinned
+to another node through `seat_endpoints`) admits through `modelaffinity.AdmitOffBox`, which keeps the in-process
+per-base queue and skips the card wait, while the local base keeps `Admit` and waits. Before 0.125.1 the lane fired,
+logged its reroute, and then sat out the whole lease bound at home — measured 2026-09-15 under a media lease: 240 s,
+`gpu-lease timeout`, and no request at the node.
+
 **A lane base is one of two shapes, and the lane finds out which (register C-41b).** One cached
 probe per base per 30 s decides it: a base that answers `GET /fleet/health` with a `node_id` is a
 FLEET NODE — residency is that payload's `served_models` (ids and aliases), and the call rides

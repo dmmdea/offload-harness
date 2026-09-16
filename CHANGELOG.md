@@ -7,6 +7,15 @@ Versioning: [SemVer](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- **A cascade lane call no longer waits on THIS box's GPU lease (register C-41c).** The 0.125.0 readback under a
+  foreign media lease logged `cascade remote lane: gemma-4-e4b -> http://<node>:18811/fleet/chat (local GPU lease held)`
+  and the call still deferred after the full two-minute bound: `llamaclient.sendWithSeatWait` admitted every send
+  through `modelaffinity.Admit`, whose card wait reads the machine-local lease whatever the endpoint, so a request
+  bound for another box sat at home and the node never saw it. `endpointChoice` now carries `offBox` (a lane, or a
+  seat pinned to another node) and such a send admits through `modelaffinity.AdmitOffBox`, which keeps the in-process
+  per-base queue and skips the card wait; the local base still waits (pinned as the control). Red first:
+  `TestAdmitOffBoxIgnoresTheLocalLease` and `TestFleetLaneSkipsTheLocalLeaseWait` reproduced the live shape against a
+  held media lease, then went green.
 - `scripts/write-door-gate.ps1` applied NOTHING and then judged the unpatched copy (register D-114 readback, 2026-09-15 0.125.0
   gate on the Aorus 9B: VERDICT 1/4 while every seat diff was correct — t4 was exactly `Status: draft` → `Status: final`).
   `git -C <copy> apply` from a SUBDIRECTORY of this repository resolves patch paths against the repository root and skips

@@ -116,6 +116,12 @@ type endpointChoice struct {
 	path   string       // the request path; always set (c.path unless a node lane)
 	token  string       // fleet bearer, node lanes only; "" = no Authorization header
 	client *http.Client // guarded for every remote target, default for local
+	// offBox (register C-41c) says the request loads nothing into THIS box's
+	// VRAM — a cascade lane or a seat pinned to another node — so the send
+	// admits through modelaffinity.AdmitOffBox and never waits on this box's
+	// GPU lease. Measured 2026-09-15: the lane fired and the call then sat the
+	// whole lease bound at home, and the node never saw it.
+	offBox bool
 }
 
 // resolveEndpoint decides, ONCE per request, both the base URL and the HTTP
@@ -152,12 +158,15 @@ func (c *Client) resolveEndpoint(model string) endpointChoice {
 					}
 				}
 				log.Printf("cascade remote lane: %s -> %s%s (%s)", model, base, suffix, why)
-				return endpointChoice{base: base, path: path, token: token, client: c.safeHTTP}
+				return endpointChoice{base: base, path: path, token: token, client: c.safeHTTP, offBox: true}
 			}
 		}
 	}
 	// The static seat/default resolution, unchanged.
-	return endpointChoice{base: c.BaseFor(model), path: c.path, client: c.httpFor(model)}
+	// The static seat/default resolution, unchanged — except that a seat pinned to
+	// another node (seat_endpoints) is off-box too (register C-41c).
+	base := c.BaseFor(model)
+	return endpointChoice{base: base, path: c.path, client: c.httpFor(model), offBox: base != c.base}
 }
 
 // laneWhyBusy asks both busy gates and returns the reason the lane fires, or

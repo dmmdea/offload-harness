@@ -160,7 +160,25 @@ func gateFor(base string) *gate {
 //
 // On success the caller MUST call Release on the returned Ticket exactly once.
 // On failure the error is always a *WaitError.
+// Admit is the admission for THIS box's llama-swap: the in-process per-base
+// queue below, and before it the machine-wide GPU lease (gpuwait.go), because
+// a load here can move VRAM a render or a measurement is using.
 func Admit(ctx context.Context, base, model string, budget time.Duration) (Ticket, error) {
+	return admit(ctx, base, model, budget, true)
+}
+
+// AdmitOffBox is Admit for an endpoint that is NOT this machine's llama-swap — a
+// cascade remote lane riding a fleet node's door, or a seat pinned to another box
+// (register C-41c). The request loads nothing into this box's VRAM, so the
+// machine-wide GPU lease has no say over it: it keeps the in-process per-base
+// queue (two callers of one remote base still take turns) and skips the card
+// wait. Measured 2026-09-15 on 0.125.0: the lane fired and the send then sat
+// the full two-minute lease bound at home, and the node never saw a request.
+func AdmitOffBox(ctx context.Context, base, model string, budget time.Duration) (Ticket, error) {
+	return admit(ctx, base, model, budget, false)
+}
+
+func admit(ctx context.Context, base, model string, budget time.Duration, waitCard bool) (Ticket, error) {
 	if budget <= 0 {
 		budget = defaultBudget
 	}
@@ -183,8 +201,10 @@ func Admit(ctx context.Context, base, model string, budget time.Duration) (Ticke
 	// caller's budget TWICE over. (The park bound is deliberately separate and larger —
 	// see waitBound: budget is its unit, not its total.)
 	leaseDeadline := time.Now().Add(budget)
-	if err := awaitCard(ctx, base, model, leaseDeadline); err != nil {
-		return Ticket{}, err
+	if waitCard {
+		if err := awaitCard(ctx, base, model, leaseDeadline); err != nil {
+			return Ticket{}, err
+		}
 	}
 
 	g.mu.Lock()
@@ -221,7 +241,7 @@ func Admit(ctx context.Context, base, model string, budget time.Duration) (Ticke
 	var cause error
 	select {
 	case <-w.admitted:
-		return admitPromoted(ctx, g, base, model, leaseDeadline)
+		return admitPromoted(ctx, g, base, model, leaseDeadline, waitCard)
 	case <-timer.C:
 		cause = context.DeadlineExceeded
 	case <-ctx.Done():
@@ -236,7 +256,7 @@ func Admit(ctx context.Context, base, model string, budget time.Duration) (Ticke
 	select {
 	case <-w.admitted:
 		g.mu.Unlock()
-		return admitPromoted(ctx, g, base, model, leaseDeadline)
+		return admitPromoted(ctx, g, base, model, leaseDeadline, waitCard)
 	default:
 	}
 	for i, x := range g.queue {
@@ -304,12 +324,15 @@ func (g *gate) tryJoin(model string) (Ticket, bool) {
 //
 // pending is raised for the whole wait so tryJoin cannot hand this batch's model to
 // a newcomer while its load has not happened yet — see tryJoin.
-func admitPromoted(ctx context.Context, g *gate, base, model string, deadline time.Time) (Ticket, error) {
+func admitPromoted(ctx context.Context, g *gate, base, model string, deadline time.Time, waitCard bool) (Ticket, error) {
 	tk := Ticket{g: g}
 	g.mu.Lock()
 	g.pending++
 	g.mu.Unlock()
-	err := awaitCard(ctx, base, model, deadline)
+	var err error
+	if waitCard {
+		err = awaitCard(ctx, base, model, deadline)
+	}
 	g.mu.Lock()
 	g.pending--
 	g.mu.Unlock()
