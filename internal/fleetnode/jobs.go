@@ -323,16 +323,23 @@ type AcceptSpec struct {
 }
 
 // IdleSlot reports whether a job admitted RIGHT NOW would start at once: the
-// backlog is empty and a capped execution slot is free (or execution is
-// unlimited). It is the server's shed predicate for BandSheddable dispatches —
-// measurement traffic takes only capacity nobody is queued for — and health
-// publishes it as saturation.idle_slot so a delegator can read the same answer
-// before it dispatches.
+// CAPPED backlog is empty and a capped execution slot is free (or execution
+// is unlimited). It is the server's shed predicate for BandSheddable
+// dispatches — measurement traffic takes only capacity nobody is queued for —
+// and health publishes it as saturation.idle_slot so a delegator can read the
+// same answer before it dispatches.
+//
+// Only a CAPPED queued job counts (register S-20), mirroring claimLocked's
+// own "jb.capped && full" skip: an uncapped job (AcceptSpec.Uncapped — a
+// render, an stt, a pipeline route whose work never touches the shared
+// llama-swap endpoint the cap protects) never waits behind maxConcurrent, so
+// one sitting in the backlog does not mean a NEW sheddable job would queue
+// behind it either.
 func (j *Jobs) IdleSlot() bool {
 	j.mu.RLock()
 	defer j.mu.RUnlock()
 	for _, jb := range j.m {
-		if jb.state == JobAccepted {
+		if jb.state == JobAccepted && jb.capped {
 			return false
 		}
 	}
