@@ -108,6 +108,38 @@ type agentFake struct {
 	// every pre-fallback test keeps its exact outcome.
 	chatFallback    func(int64) string
 	chatFallbackCNT atomic.Int64
+	// probe answers the admission-time COHERENCE probe (register D-118),
+	// recognised by its SHAPE rather than by a counter: exactly one user
+	// message opening with the probe goal. Routing it away from loop(n) is what
+	// keeps every older test's call indexing unchanged — the probe is a chat
+	// request carrying tools, so without this it would have become loop call 1
+	// everywhere it fires. nil = a parsed read_file tool call, i.e. a coherent
+	// seat, which is what every test that is not ABOUT the probe wants.
+	probe func(n int64) string
+	// probeStatus, when set, is the HTTP status the n-th probe answers with
+	// (0 = 200) — the transport-failure arm, which must FAIL OPEN.
+	probeStatus func(n int64) int
+	probeCNT    atomic.Int64
+}
+
+// isCoherenceProbeCall recognises the D-118 probe request by its shape. It must
+// stay in step with pipeline.coherenceProbeGoal; the probe test asserts the
+// count, so a drift shows up as "the fake never saw a probe" rather than
+// silently reclassifying it as a loop step.
+func isCoherenceProbeCall(body map[string]any) bool {
+	msgs, _ := body["messages"].([]any)
+	if len(msgs) != 1 {
+		return false
+	}
+	m, _ := msgs[0].(map[string]any)
+	content, _ := m["content"].(string)
+	return m["role"] == "user" && strings.HasPrefix(content, "Read the file notes.md")
+}
+
+// probeToolCall is the coherent answer: a parsed read_file tool call, the
+// strongest pass the probe can get.
+func probeToolCall() string {
+	return `{"choices":[{"message":{"role":"assistant","content":"","tool_calls":[{"id":"probe","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"notes.md\"}"}}]},"finish_reason":"tool_calls"}]}`
 }
 
 // repackDisablesThinking reports whether a captured grammar-completion body
@@ -164,6 +196,22 @@ func (f *agentFake) server(t *testing.T) *httptest.Server {
 			// A loop call carries tools — except the forced final step
 			// (0.115.19, D-89), which offers none and opens with the
 			// answer-now turn; recognise it by that turn, not by tools.
+			if isCoherenceProbeCall(body) {
+				n := f.probeCNT.Add(1)
+				w.Header().Set("Content-Type", "application/json")
+				if f.probeStatus != nil {
+					if st := f.probeStatus(n); st != 0 {
+						w.WriteHeader(st)
+						return
+					}
+				}
+				if f.probe == nil {
+					_, _ = w.Write([]byte(probeToolCall()))
+					return
+				}
+				_, _ = w.Write([]byte(f.probe(n)))
+				return
+			}
 			if _, hasTools := body["tools"]; hasTools || isForcedFinalCall(body) {
 				n := f.loopCalls.Add(1)
 				w.Header().Set("Content-Type", "application/json")

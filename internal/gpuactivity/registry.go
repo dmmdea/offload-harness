@@ -259,7 +259,13 @@ func (h *Handle) OnStep(step, tokensOut int) {
 	h.Update(func(r *Run) {
 		r.Step = step
 		r.TokensOut = tokensOut
-		if r.Phase == "admission" || r.Phase == "cold-load" {
+		// The pre-run phases heal on the first step: a run that is generating
+		// is not still being admitted, cold-loaded or coherence-probed. The
+		// probe phase is on this list because only ONE of the two agent doors
+		// resets it explicitly, and a run advertised as probing for its whole
+		// life misreads a multi-minute run in `gpu status` / offload_status
+		// (reviewer finding, D-118).
+		if r.Phase == "admission" || r.Phase == "cold-load" || r.Phase == "coherence-probe" {
 			r.Phase = "running"
 		}
 	})

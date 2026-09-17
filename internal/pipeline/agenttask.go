@@ -137,6 +137,7 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	var contention *seatwait.Budget // set once the wall exists; finish reads it
 	var admitted time.Duration      // the admission pre-flight, if any; finish reports it
 	var admitNote string            // why the pre-flight could not settle residency (probe error / budget)
+	var coherenceNote string        // what the post-warm coherence probe found, when it ran (D-118)
 	wire := core.AgentWireResult{SchemaVersion: core.AgentWireSchemaVersion, NodeID: nodeID, Seat: seat, Placed: placedPtr}
 
 	// finish is the ONE exit for every terminal wire result (success or defer):
@@ -152,6 +153,7 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 			w.AdmissionWaitSec = admitted.Seconds()
 		}
 		w.AdmissionNote = admitNote
+		w.CoherenceNote = coherenceNote
 		if w.SeatTokS > 0 {
 			meta.TokPerSec = w.SeatTokS // the ledger's tok_per_s column, empty on agent rows until 0.115.21
 		}
@@ -297,10 +299,12 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	// wall before the first token. Warm it here, on the admission budget's
 	// remainder, and start the clock when the seat reads ready.
 	var coldLoad time.Duration // this run's observed cold load, if the warm-up waited for one (seat-rates.json)
+	var coldLoaded bool        // the warm-up ATTEMPTED a load this run (D-118 reads this, never coldLoad > 0: a sub-tick load measures 0)
 	act.Phase("cold-load")
 	if warmed, warmNote := warmSeat(ctx, p.cfg.Endpoint, seat, admissionBudget(p.cfg.AgentAdmissionWaitSec)-admitted); warmed > 0 || warmNote != "" {
 		admitted += warmed
 		coldLoad = warmed
+		coldLoaded = true
 		if warmNote != "" {
 			log.Printf("agent task: seat warm-up (%s): %s", seat, warmNote)
 			if admitNote == "" {
@@ -309,6 +313,48 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 				admitNote += "; " + warmNote
 			}
 		}
+	}
+	// Post-warm COHERENCE probe (register D-118). A seat that is HEALTHY by
+	// every other gate can still be numerically broken: on 2026-09-16/17 a
+	// Qwen3.8-27B GSQ seat (fp8_e5m2 KV, RTX 5060 Ti, vLLM 0.29 / FlashInfer)
+	// passed /health, /v1/models, the speed probe and the READY smoke, then
+	// answered every contract with `<tool_call>!!!!!!!!!!!!!!!!!!!!…` to the cap
+	// — 126–336 s of degenerate output each, filed as `unparsed_tool_call`.
+	// One ≤ 96-token question here, on what is left of the ADMISSION budget and
+	// BEFORE the wall context exists, turns that into a seconds-long
+	// infrastructure defer the delegator can re-place on another node.
+	//
+	// The probe's own time is added to `admitted`, so the wall bookkeeping
+	// stays honest: it is admission, not run time, and the wire says so.
+	if CoherenceProbeWanted(p.cfg, coldLoaded) {
+		act.Phase("coherence-probe")
+		v := ProbeSeatCoherence(ctx, p.cfg, seat, admissionBudget(p.cfg.AgentAdmissionWaitSec)-admitted)
+		admitted += v.Spent
+		RememberCoherence(p.cfg.Endpoint, seat, v)
+		if v.Ran {
+			coherenceNote = v.Note
+		}
+		if v.Note != "" {
+			log.Printf("agent task: seat coherence (%s): %s", seat, v.Note)
+		}
+		if v.Broken {
+			// Infrastructure, not abstention: the seat answered, and what it
+			// answered says the stack under it is broken. The delegator reads
+			// core.IncoherentSeatReason off the reason and gives the contract
+			// one retry on a DIFFERENT node (delegate.IncoherentSeatDefer).
+			return deferWire(core.DeferClassInfrastructure, v.Note)
+		}
+	} else if note, ok := RecallIncoherentSeat(p.cfg.Endpoint, seat); ok {
+		// A WARM run on the seat this process already caught (reviewer
+		// finding, D-118). Under the default "cold" policy only the loading
+		// contract is probed, and the defer unloads nothing — the broken seat
+		// stays resident and contracts 2..N would each spend a whole wall on
+		// the output contract 1 already proved degenerate. The memo is cleared
+		// by the seat's next cold load, by any later non-broken probe, and by
+		// its own TTL, so a fixed seat is never stuck here.
+		coherenceNote = note
+		log.Printf("agent task: seat coherence (%s): %s", seat, note)
+		return deferWire(core.DeferClassInfrastructure, note)
 	}
 	cctx, cancel := context.WithTimeout(ctx, wall)
 	defer cancel()
@@ -942,6 +988,7 @@ func (p *Pipeline) RunAgentContract(ctx context.Context, contract core.AgentCont
 //     wrong") even though the seat had just failed a request; when a transport
 //     failure happened AT ALL, that is the operator's signal, and the returned
 //     error is the transport one so the message names it.
+//
 // repackAttemptFloor is the least wall a re-pack attempt is started with for a
 // contract of the given wall: a tenth of the wall, capped at
 // agentRepackAttemptFloor — so a 900 s contract keeps 45 s back, a 300 s one

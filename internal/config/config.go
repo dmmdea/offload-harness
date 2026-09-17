@@ -234,6 +234,24 @@ type Config struct {
 	// starts (a vLLM cold load is 125–250 s; it used to be charged to the
 	// contract). 0 = 300 s (was 120), negative = disabled.
 	AgentAdmissionWaitSec int `json:"agent_admission_wait_sec,omitempty"`
+	// AgentCoherenceProbe (register D-118) is this box's policy for the
+	// post-warm SEAT COHERENCE probe: one ≤ 96-token completion, on the
+	// admission budget and BEFORE the contract's wall starts, that asks the seat
+	// to call read_file and answer DONE.
+	//
+	// It exists because a numerically broken seat is INVISIBLE to every other
+	// gate. On 2026-09-16/17 a Qwen3.8-27B GSQ seat on an RTX 5060 Ti (vLLM 0.29,
+	// fp8_e5m2 KV through FlashInfer) passed /health, /v1/models, the speed probe
+	// and the READY smoke, and then answered every contract with
+	// `<tool_call>!!!!!!!!!!!!!!!!!!!!…` to the cap — 126–336 s of degenerate
+	// output per contract, filed as `unparsed_tool_call`, and two GPU leases spent
+	// on parser hypotheses before one raw completion was read.
+	//
+	// Values: "" or "cold" (the default — probe only when THIS run observed a
+	// cold load, which is when a freshly loaded seat can be freshly broken),
+	// "off" (never), "always" (every run, warm or cold). Anything else is refused
+	// at the config door by name.
+	AgentCoherenceProbe string `json:"agent_coherence_probe,omitempty"`
 	// AgentCtxTokens is the agent seat's SERVED context window in tokens — the tier
 	// profile's agent_ctx_tokens value (setup/templates/profiles.json; the installer
 	// records it in installed.json). It exists as a config key so /fleet/health can
@@ -1665,7 +1683,38 @@ func load(path string) (Config, error) {
 	if err := c.AgentSamplingFinal.Validate("agent_sampling_final"); err != nil {
 		return c, err
 	}
+	// A coherence-probe policy nobody implements must fail at the config door,
+	// not by silently falling back to a policy the operator did not choose —
+	// "off" and "always" differ by one GPU lease when a seat goes NaN.
+	if err := validateCoherenceProbe(c.AgentCoherenceProbe); err != nil {
+		return c, err
+	}
 	return c, nil
+}
+
+// validateCoherenceProbe refuses an agent_coherence_probe value by name. The
+// comparison is on the trimmed, lower-cased value so a copy-pasted " Always"
+// is accepted rather than silently demoted — CoherenceProbe() resolves the same
+// way.
+func validateCoherenceProbe(v string) error {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "", "cold", "off", "always":
+		return nil
+	}
+	return fmt.Errorf("agent_coherence_probe: unknown policy %q (valid: \"\" or \"cold\" (default: probe after a cold load), \"off\", \"always\")", v)
+}
+
+// CoherenceProbe resolves this box's post-warm coherence-probe policy to one of
+// "cold", "off" or "always". An unset key is "cold"; an unknown value cannot
+// reach here through Load (validateCoherenceProbe refuses it), and an
+// in-process Config built by hand falls back to the default rather than
+// skipping the probe.
+func (c Config) CoherenceProbe() string {
+	switch v := strings.ToLower(strings.TrimSpace(c.AgentCoherenceProbe)); v {
+	case "off", "always", "cold":
+		return v
+	}
+	return "cold"
 }
 
 // validateRawLayerKeys lifts the `layers` block out of the config file's bytes

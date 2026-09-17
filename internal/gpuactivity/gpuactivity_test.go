@@ -191,3 +191,47 @@ func TestSnapshotReadsTheLeaseRootAndTheRegistry(t *testing.T) {
 		t.Fatalf("lines: %v", lines)
 	}
 }
+
+// TestTheCoherenceProbePhaseHealsOnTheFirstStep (reviewer finding, D-118): the
+// MCP agent_run door sets the probe phase and the loop is what runs next, so a
+// run that never healed it advertised "[coherence-probe]" beside step 7 of a
+// multi-minute run in `gpu status` and offload_status. Every pre-run phase
+// heals the moment the seat produces a step.
+func TestTheCoherenceProbePhaseHealsOnTheFirstStep(t *testing.T) {
+	for _, phase := range []string{"admission", "cold-load", "coherence-probe"} {
+		t.Run(phase, func(t *testing.T) {
+			reg := OpenAt(filepath.Join(t.TempDir(), "gpu", "activity"))
+			h, err := reg.Begin(Run{Seat: "seat", Kind: "agent_run"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer h.End()
+			h.Phase(phase)
+			h.OnStep(1, 100)
+			if got := h.Run().Phase; got != "running" {
+				t.Fatalf("phase = %q after the first step, want %q", got, "running")
+			}
+			if sum := h.Run().Summary(time.Now()); strings.Contains(sum, phase) {
+				t.Fatalf("summary still advertises the pre-run phase: %q", sum)
+			}
+		})
+	}
+}
+
+// TestALaterPhaseSurvivesAStep: the heal list is the PRE-RUN phases only. A
+// phase the loop itself sets (the forced final step) must not be overwritten by
+// the step that follows it, or the status view loses the one phase that says
+// the run is finishing.
+func TestALaterPhaseSurvivesAStep(t *testing.T) {
+	reg := OpenAt(filepath.Join(t.TempDir(), "gpu", "activity"))
+	h, err := reg.Begin(Run{Seat: "seat", Kind: "agent_run"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.End()
+	h.Phase("final")
+	h.OnStep(9, 900)
+	if got := h.Run().Phase; got != "final" {
+		t.Fatalf("phase = %q, want the loop's own %q kept", got, "final")
+	}
+}

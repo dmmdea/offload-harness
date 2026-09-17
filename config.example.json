@@ -17,6 +17,7 @@
   "agent_timeout_sec": 0,
   "seat_contention_wait_sec": 0,
   "agent_admission_wait_sec": 0,
+  "agent_coherence_probe": "",
   "agent_ctx_tokens": 0,
   "agent_max_tokens": 0,
   "agent_thinking": "",
