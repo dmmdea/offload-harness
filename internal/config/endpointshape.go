@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/dmmdea/offload-harness/internal/netguard"
@@ -23,33 +24,64 @@ const FleetNodePort = "18811"
 // http://127.0.0.1:9/v1/v1/chat/completions, each paying the full timeout before
 // anything named the port. Refusing at load turns a timeout class into a config
 // error that names the key.
-var deadEndpointPorts = map[string]string{
-	"0": "port 0 asks the OS for ANY free port, so nothing ever listens on it",
-	"9": "port 9 is the IANA discard port, the shape of an endpoint whose value was never substituted",
+// The set is keyed on the port NUMBER, not the text of it. Keying on the string
+// meant ":09" — which url.Parse preserves verbatim and every dialer reads as 9 —
+// walked straight past the check that exists for exactly that port.
+var deadEndpointPorts = map[int]string{
+	0: "port 0 asks the OS for ANY free port, so nothing ever listens on it",
+	9: "port 9 is the IANA discard port, the shape of an endpoint whose value was never substituted",
 }
 
-// deadPortErr refuses one configured base whose port cannot answer. A base that
-// does not parse as a URL is left alone: the tailnet guard and the dialer each
-// own that refusal and word it better than a port check could.
+// validateBaseURL is the whole refusal for ONE configured HTTP base: it must be
+// a URL that can be dialled, and its port must be one something can answer on.
 //
-// Only the PORT is judged. A loopback host on an unusual port is explicitly
-// fine — INV-10 sanctions a loopback-only bench twin beside the production seat
-// on the delegator box, and refusing it would break measurement.
-func deadPortErr(label, raw string) error {
+// The URL half is not pedantry, it is the headline scenario. A value that was
+// never substituted usually is not a URL at all, and the three shapes measured
+// against net/url all used to pass in SILENCE on every key that is not one of
+// the two tailnet-guarded maps:
+//
+//	"${NODE_A_HOST}:18811"  parse error — first path segment cannot contain colon
+//	"http://node-a:$PORT"   parse error — invalid port
+//	"node-a:18811"          PARSES, as scheme "node-a" with an EMPTY host
+//
+// The third is the one that matters: nothing errors, there is no port for a port
+// check to judge, and the dialer resolves nothing. So a parse error, a scheme
+// that is not http/https, and an empty host are all hard errors naming the key
+// and the value.
+//
+// An EMPTY value is not a finding: an unset optional key is a machine that does
+// not have that thing, which every consumer already handles.
+//
+// Only the PORT is judged beyond that. A loopback host on an unusual port is
+// explicitly fine — INV-10 sanctions a loopback-only bench twin beside the
+// production seat on the delegator box, and refusing it would break measurement.
+func validateBaseURL(label, raw string) error {
 	v := strings.TrimSpace(raw)
 	if v == "" {
 		return nil
 	}
-	u, err := url.Parse(v)
-	if err != nil {
+	u, why := inspectBase(v)
+	if u == nil {
+		return fmt.Errorf("%s: %q is not a usable URL: %s", label, v, why)
+	}
+	return deadPortErr(label, v, u)
+}
+
+// deadPortErr refuses a parsed base whose port cannot answer.
+func deadPortErr(label, raw string, u *url.URL) error {
+	port := u.Port()
+	if port == "" {
 		return nil
 	}
-	port := u.Port()
-	why, dead := deadEndpointPorts[port]
+	n, err := strconv.Atoi(port)
+	if err != nil { // unreachable: url.Parse already refuses a non-numeric port
+		return nil
+	}
+	why, dead := deadEndpointPorts[n]
 	if !dead {
 		return nil
 	}
-	return fmt.Errorf("%s: %q dials port :%s — %s; set the real port or remove the key", label, v, port, why)
+	return fmt.Errorf("%s: %q dials port :%s — %s; set the real port or remove the key", label, raw, port, why)
 }
 
 // validateEndpointValue is the ONE per-value gate every configured HTTP base
@@ -63,7 +95,7 @@ func validateEndpointValue(label, raw string, tailnet bool) error {
 			return fmt.Errorf("%s: %w", label, err)
 		}
 	}
-	return deadPortErr(label, raw)
+	return validateBaseURL(label, raw)
 }
 
 // validateEndpointList is validateTailnetEndpoints' list twin: same per-value
@@ -77,16 +109,16 @@ func validateEndpointList(jsonKey string, values []string, tailnet bool) error {
 	return nil
 }
 
-// validateEndpointPorts holds every OTHER configured HTTP base in the file to
-// the dead-port rule — the singular endpoint keys plus delegate_remotes. The
-// two maps are covered by validateTailnetEndpoints, which runs the same
-// per-value gate.
+// validateConfiguredBases holds every OTHER configured HTTP base in the file to
+// the usable-URL and dead-port rules — the singular endpoint keys plus
+// delegate_remotes. The two maps are covered by validateTailnetEndpoints, which
+// runs the same per-value gate.
 //
 // delegate_remotes deliberately does NOT take the tailnet guard here: that would
 // be a new refusal for a key that has never had one, and this release's job is
-// to name the dead-port class, not to re-litigate fleet membership. The dial
+// to name the unusable-base class, not to re-litigate fleet membership. The dial
 // gate (netguard.SafeTransport) still vets every remote at connect time.
-func validateEndpointPorts(c Config) error {
+func validateConfiguredBases(c Config) error {
 	for _, kv := range []struct{ key, val string }{
 		{"endpoint", c.Endpoint},
 		{"fleet_queue_holder", c.FleetQueueHolder},
@@ -96,7 +128,7 @@ func validateEndpointPorts(c Config) error {
 		{"coral_endpoint", c.CoralEndpoint},
 		{"pair_workloads_endpoint", c.PairWorkloadsEndpoint},
 	} {
-		if err := deadPortErr(kv.key, kv.val); err != nil {
+		if err := validateBaseURL(kv.key, kv.val); err != nil {
 			return err
 		}
 	}
@@ -129,8 +161,9 @@ func EndpointWarnings(c Config) []string {
 	var out []string
 	for i, raw := range c.DelegateRemotes {
 		label := fmt.Sprintf("delegate_remotes[%d]", i)
-		u := parseBase(raw)
+		u, why := inspectBase(raw)
 		if u == nil {
+			out = append(out, fmt.Sprintf("%s %q is not a usable URL: %s", label, raw, why))
 			continue
 		}
 		if loopbackBase(u) {
@@ -147,8 +180,9 @@ func EndpointWarnings(c Config) []string {
 	for _, key := range sortedLaneKeys(c.CascadeRemoteLanes) {
 		raw := c.CascadeRemoteLanes[key]
 		label := fmt.Sprintf("cascade_remote_lanes[%q]", key)
-		u := parseBase(raw)
+		u, why := inspectBase(raw)
 		if u == nil {
+			out = append(out, fmt.Sprintf("%s %q is not a usable URL: %s", label, raw, why))
 			continue
 		}
 		// A lane base is one of exactly two things (internal/llamaclient
@@ -178,14 +212,30 @@ func sortedLaneKeys(m map[string]string) []string {
 	return out
 }
 
-// parseBase parses a configured base, returning nil for anything the endpoint
-// guards already own (empty, unparseable, hostless).
-func parseBase(raw string) *url.URL {
-	u, err := url.Parse(strings.TrimSpace(raw))
-	if err != nil || u == nil || u.Host == "" {
-		return nil
+// inspectBase parses a configured base and says, in one place, what is wrong
+// with it. A nil URL comes with a non-empty clause naming the problem, which is
+// what makes an unusable value REPORTABLE rather than skipped — the refusal and
+// the warning path read the same verdict, so they cannot disagree about what
+// counts as a usable base.
+//
+// u.Hostname() and not u.Host: "http://:18811" has a non-empty Host and no host
+// at all, which is precisely the shape a half-substituted template leaves.
+func inspectBase(raw string) (*url.URL, string) {
+	v := strings.TrimSpace(raw)
+	if v == "" {
+		return nil, "the value is empty"
 	}
-	return u
+	u, err := url.Parse(v)
+	if err != nil {
+		return nil, err.Error()
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return nil, fmt.Sprintf("scheme %q is not http or https (a base with no scheme parses as one: %q reads as scheme %q, not as a host)", u.Scheme, v, u.Scheme)
+	}
+	if u.Hostname() == "" {
+		return nil, "it names no host"
+	}
+	return u, ""
 }
 
 // hasV1Suffix reports whether a base carries the trailing /v1 segment that
@@ -199,7 +249,7 @@ func hasV1Suffix(u *url.URL) bool {
 // lane is expected to mirror. An unparseable or portless endpoint yields "",
 // which matches no lane and so warns rather than silently accepting anything.
 func endpointPort(c Config) string {
-	if u := parseBase(c.Endpoint); u != nil {
+	if u, _ := inspectBase(c.Endpoint); u != nil {
 		return u.Port()
 	}
 	return ""
@@ -215,33 +265,44 @@ func endpointPort(c Config) string {
 // the only one that can explain its behaviour.
 func (c Config) Findings() []string {
 	out := EndpointWarnings(c)
-	if f := gpuWaitFinding(c); f != "" {
-		out = append(out, f)
-	}
+	out = append(out, gpuWaitFindings(c)...)
 	for _, k := range c.RetiredKeys {
 		out = append(out, fmt.Sprintf("config key %q is retired and ignored — %s; delete it so the file stops describing behaviour the harness no longer has", k, retiredKeys[k]))
 	}
 	return out
 }
 
-// gpuWaitFinding names a media-lane GPU wait that has drifted far past the
-// vision lane's (register C-33/S-42). The two keys are one card's queue seen
-// from two lanes, and gpu_wait_ms documents itself as "90000, matching
-// VisionGPUWaitSec so the two GPU waiters behave alike". A live config carried
-// 600000 against a 90 s vision wait: ten minutes of blocking on every
-// image/video/audio/run_graph call, against the key's own stated design.
+// gpuWaitFindings names the two ways this box's GPU waits stop meaning what the
+// file says (register C-33/S-42).
 //
-// 3x is the threshold rather than equality because a longer media wait is a
-// legitimate choice — a video render genuinely outlasts a VQA. An order of
-// magnitude is not a choice, it is a value nobody revisited.
-func gpuWaitFinding(c Config) string {
-	if c.GPUWaitMs <= 0 || c.VisionGPUWaitSec <= 0 {
-		return ""
+// A NEGATIVE wait is not an unset one. Both consumers turn it into a
+// non-positive duration, so the task gets a single try — the same behaviour as
+// an explicit 0, which IS a documented choice — while the file says ten minutes.
+// It is reported rather than refused because nothing breaks: this whole class is
+// warn-then-fail, and a value that behaves as the documented 0 does not earn a
+// refusal ahead of the ones that cannot work at all.
+//
+// A media wait far past the VISION wait is the second: the two keys are one
+// card's queue seen from two lanes, and gpu_wait_ms documents itself as "90000,
+// matching VisionGPUWaitSec so the two GPU waiters behave alike". A live config
+// carried 600000 against a 90 s vision wait — ten minutes of blocking on every
+// image/video/audio/run_graph call, against the key's own stated design. 3x is
+// the threshold rather than equality because a longer media wait is a legitimate
+// choice: a video render genuinely outlasts a VQA. An order of magnitude is not
+// a choice, it is a value nobody revisited.
+func gpuWaitFindings(c Config) []string {
+	var out []string
+	if c.GPUWaitMs < 0 {
+		out = append(out, fmt.Sprintf("gpu_wait_ms %d is negative — the wait is built as a duration, so a negative value is a ZERO wait: every image/video/audio/run_graph call gets one try and defers the moment the card is held, while the file reads as a wait. Use 0 to mean that on purpose, or a positive number of milliseconds (default %d)",
+			c.GPUWaitMs, Default().GPUWaitMs))
 	}
-	ceiling := 3 * c.VisionGPUWaitSec * 1000
-	if c.GPUWaitMs <= ceiling {
-		return ""
+	if c.VisionGPUWaitSec < 0 {
+		out = append(out, fmt.Sprintf("vision_gpu_wait_sec %d is negative — same shape: a negative wait is a ZERO wait, so a vqa/ocr/assess_image/video_describe call defers the moment a render holds the card. Use 0 to mean that on purpose, or a positive number of seconds (default %d)",
+			c.VisionGPUWaitSec, Default().VisionGPUWaitSec))
 	}
-	return fmt.Sprintf("gpu_wait_ms %d ms (%d s) is more than 3x vision_gpu_wait_sec %d s — every image/video/audio/run_graph call blocks that long behind a lease holder while a vision call on the SAME card gives up at %d s; the key's own documented default is %d (90 s)",
-		c.GPUWaitMs, c.GPUWaitMs/1000, c.VisionGPUWaitSec, c.VisionGPUWaitSec, Default().GPUWaitMs)
+	if c.GPUWaitMs > 0 && c.VisionGPUWaitSec > 0 && c.GPUWaitMs > 3*c.VisionGPUWaitSec*1000 {
+		out = append(out, fmt.Sprintf("gpu_wait_ms %d ms (%d s) is more than 3x vision_gpu_wait_sec %d s — every image/video/audio/run_graph call blocks that long behind a lease holder while a vision call on the SAME card gives up at %d s; the key's own documented default is %d (90 s)",
+			c.GPUWaitMs, c.GPUWaitMs/1000, c.VisionGPUWaitSec, c.VisionGPUWaitSec, Default().GPUWaitMs))
+	}
+	return out
 }

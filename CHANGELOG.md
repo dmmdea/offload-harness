@@ -20,31 +20,66 @@ Versioning: [SemVer](https://semver.org/).
   normalised base, so two clients spelling one endpoint two ways now contend on one gate.
 
 ### Added
-- **`config.Load` refuses a configured HTTP base whose port can never answer** (register S-38).
-  `:0` is the OS’s "any free port", which nothing ever listens on; `:9` is the IANA discard
-  port — the shape of an endpoint whose value was never substituted. Both now fail the load
-  naming the key and the value, across `endpoint`, `delegate_remotes[]`,
-  `cascade_remote_lanes{}`, `seat_endpoints{}`, `fleet_queue_holder`, `tts_endpoint`,
-  `nim_endpoint`, `hailo_endpoint`, `coral_endpoint` and `pair_workloads_endpoint`. Until now
-  the only report of that class was a dial timeout on the first real call. A **loopback** base
-  on an unusual port is explicitly still allowed: INV-10 sanctions a loopback-only bench twin
-  beside the production seat, and refusing it would break measurement on the delegator box. The
-  two base-URL maps and the one base-URL list share ONE per-value gate
-  (`validateEndpointValue`) with the tailnet guard, so the never-cloud rule and the dead-port
+- **`config.Load` refuses a configured HTTP base it cannot prove is dialable** (register S-38).
+  Two classes, both of which used to be reported only as a dial timeout on the first real call:
+
+  - **Not a usable URL.** A parse error, a scheme that is not `http`/`https`, or no host at all.
+    An endpoint whose value was never substituted usually is not a URL — `${NODE_A_HOST}:18811`
+    and `http://node-a:$PORT` both fail `url.Parse`, and `node-a:18811` PARSES, as scheme
+    `node-a` with an empty host, so nothing errored, there was no port to judge and the dialer
+    resolved nothing.
+  - **A port nothing answers on.** `:0` is the OS’s "any free port", which nothing ever listens
+    on; `:9` is the IANA discard port. The comparison is NUMERIC, so `:09` is refused too.
+
+  Both apply to `endpoint`, `delegate_remotes[]`, `cascade_remote_lanes{}`, `seat_endpoints{}`,
+  `fleet_queue_holder`, `tts_endpoint`, `nim_endpoint`, `hailo_endpoint`, `coral_endpoint` and
+  `pair_workloads_endpoint`, and the error names the key and the value. An EMPTY value is not a
+  finding (an unset optional key is a machine that does not have that thing), and a **loopback**
+  base on an unusual port is explicitly still allowed: INV-10 sanctions a loopback-only bench
+  twin beside the production seat, and refusing it would break measurement on the delegator box.
+  The two base-URL maps and the one base-URL list share ONE per-value gate
+  (`validateEndpointValue`) with the tailnet guard, so the never-cloud rule and the dead-base
   rule cannot drift apart across keys.
+- **What a refused config actually does, per entry point.** The refusal is not advisory, and it
+  is not uniform — each door gets the answer that door can afford:
+
+  - **`fleet-serve` REFUSES to start** (non-zero exit, the error on stderr). A node advertises
+    capability to other boxes and then accepts their dispatches, so one that cannot prove its own
+    config does not fail alone: it turns every delegator’s placement into a wasted wall.
+  - **`mcp` STARTS and says so.** A server that exits removes every `offload_*` tool from every
+    session with no message on any surface an operator reads. Instead `offload_status` carries
+    `config_error` as its FIRST key, and every other tool returns
+    `{"deferred":true,"reason":"config invalid: <err>"}` until the file is fixed.
+  - **One-shot CLI verbs proceed**, warning as they already did.
+  - **`doctor` prints the refusal VERBATIM as its first `FAIL` row and exits non-zero.** It kept
+    the load error and printed only a generic one-liner, so the one text that names the offending
+    key never reached the operator through the one verb they run to find it.
 - **`local-offload doctor` prints a `config findings` section** — one `FAIL` row per value that
   loads and then cannot do what it says, and a non-zero exit, like every other doctor verdict.
   Three classes, all previously invisible: (1) a fleet/lane base shape (S-38, WARN half) — a
   `delegate_remotes` entry not on the fleet node port `:18811`, one that is loopback (a remote
-  cannot be this box), or one carrying a `/v1` suffix; a `cascade_remote_lanes` base on neither
-  shape a lane can be (a fleet node, or a llama-swap on this box’s own `endpoint` port) or
-  carrying `/v1`; (2) `gpu_wait_ms` more than 3x `vision_gpu_wait_sec` (register C-33 — a
-  deployed 600,000 ms against a 90 s vision wait is ten minutes of blocking on every media-lane
-  call, against that key’s own documented 90 s design); (3) one row per RETIRED key the file
-  still carries (`videogen_wait_ms`, `audiogen_wait_ms`), which until now was a single stderr
-  note at startup that scrolls past every command. These WARN rather than refuse for one
-  release — a strict validator that refuses a working odd config is a worse outage than the
-  dial timeout it replaces — and the fleet/lane shapes also print one stderr line at load.
+  cannot be this box), one carrying a `/v1` suffix, or one that is not a usable URL; a
+  `cascade_remote_lanes` base on neither shape a lane can be (a fleet node, or a llama-swap on
+  this box’s own `endpoint` port), carrying `/v1`, or unusable; (2) `gpu_wait_ms` more than 3x
+  `vision_gpu_wait_sec` (register C-33 — a deployed 600,000 ms against a 90 s vision wait is ten
+  minutes of blocking on every media-lane call, against that key’s own documented 90 s design),
+  and a NEGATIVE `gpu_wait_ms`/`vision_gpu_wait_sec`, which both consumers turn into a ZERO wait
+  while the file reads as a wait — a finding, deliberately not a load error, because it behaves
+  as the documented `0` rather than breaking anything; (3) one row per RETIRED key the file still
+  carries (`videogen_wait_ms`, `audiogen_wait_ms`), which until now was a single stderr note at
+  startup that scrolls past every command. These WARN rather than refuse for one release — a
+  strict validator that refuses a working odd config is a worse outage than the dial timeout it
+  replaces — and the fleet/lane shapes also print one stderr line at load.
+
+### Changed
+- **A config that FAILED validation no longer reports itself as "BUILT-IN DEFAULTS".** Both
+  disclosures said so and both were false: `Load` returns the FILE’s settings with only the five
+  composite keys stripped, so the process runs on that file — which is exactly why the refusal
+  matters. `config.WarnOnDefaults` and `config.SourceLine` now name the file, carry the
+  validation error verbatim, and say which entry points refuse, limp or proceed. Saying
+  "defaults" sent an operator hunting a path problem while the real one was a named key in the
+  file they already had open. `TestConfigSourceLine`’s load-failed assertion pinned the false
+  text and is amended.
 
 ## [0.126.2] - 2026-09-17 - a PAIR card's failure text is one short line
 

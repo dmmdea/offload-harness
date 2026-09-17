@@ -1673,11 +1673,13 @@ func load(path string) (Config, error) {
 	if err := validateTailnetEndpoints("cascade_remote_lanes", c.CascadeRemoteLanes); err != nil {
 		return c, err
 	}
-	// Every OTHER configured HTTP base takes the same dead-port rule the two maps
-	// just took. A base at :0 or :9 is not a slow endpoint, it is an UNSET one,
-	// and the only thing that ever reported it was a dial timeout on the first
-	// real call — a class the delegation ledger carried 8 rows of (S-38).
-	if err := validateEndpointPorts(c); err != nil {
+	// Every OTHER configured HTTP base takes the same rules the two maps just
+	// took: it must be a URL something can dial, on a port something can answer.
+	// A base at :0 or :9 — or one that is not a URL at all, which is what an
+	// unsubstituted template looks like — is not a slow endpoint, it is an UNSET
+	// one, and the only thing that ever reported it was a dial timeout on the
+	// first real call: a class the delegation ledger carried 8 rows of (S-38).
+	if err := validateConfiguredBases(c); err != nil {
 		return c, err
 	}
 	if err := ValidateKVCacheServers(c.KVCacheServers); err != nil {

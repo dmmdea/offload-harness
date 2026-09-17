@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -227,5 +228,134 @@ func TestFindingsRetiredKeysPresent(t *testing.T) {
 	// every run (Go randomizes map iteration).
 	if got := cfg.RetiredKeys; len(got) != 2 || got[0] != "audiogen_wait_ms" || got[1] != "videogen_wait_ms" {
 		t.Fatalf("RetiredKeys = %q, want the two keys sorted", got)
+	}
+}
+
+// TestLoadRefusesAnUnusableBaseURL (review of #361, blocker 1): the headline
+// scenario the dead-port check was written for — "an endpoint whose value was
+// never substituted" — does not always reach the port check at all, because the
+// value is not a URL. Until now `deadPortErr` and `parseBase` both returned nil
+// on a url.Parse error, so an unsubstituted shell/template placeholder passed
+// SILENTLY on every key that is not one of the two tailnet-guarded maps.
+//
+// Three shapes, all verified against net/url:
+//   - "${NODE_A_HOST}:18811" -> parse error (first path segment cannot contain colon)
+//   - "http://node-a:$PORT"  -> parse error (invalid port)
+//   - "node-a:18811"         -> PARSES, as scheme "node-a" with an empty host
+//
+// The third is the dangerous one: nothing errors, nothing has a port, and the
+// dialer resolves nothing. All three now fail the load naming the key and value.
+func TestLoadRefusesAnUnusableBaseURL(t *testing.T) {
+	unusable := []struct{ name, value string }{
+		{"an unsubstituted host template", "${NODE_A_HOST}:18811"},
+		{"an unsubstituted port template", "http://node-a:$PORT"},
+		{"no scheme at all", "node-a:18811"},
+		{"a scheme that is not http(s)", "ftp://node-a:18811"},
+		{"a port with no host", "http://:18811"},
+	}
+	for _, u := range unusable {
+		t.Run("endpoint/"+u.name, func(t *testing.T) {
+			body := `{"endpoint":` + quote(u.value) + `}`
+			_, err := Load(writeShapeCfg(t, body))
+			if err == nil {
+				t.Fatalf("Load must refuse endpoint %q", u.value)
+			}
+			for _, want := range []string{"endpoint", u.value} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("Load error %q must name %q", err, want)
+				}
+			}
+		})
+		t.Run("delegate_remotes/"+u.name, func(t *testing.T) {
+			body := `{"delegate_remotes":[` + quote(u.value) + `]}`
+			_, err := Load(writeShapeCfg(t, body))
+			if err == nil {
+				t.Fatalf("Load must refuse delegate_remotes %q", u.value)
+			}
+			for _, want := range []string{"delegate_remotes", u.value} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("Load error %q must name %q", err, want)
+				}
+			}
+		})
+	}
+	// Control: the same keys with a usable base still load.
+	if _, err := Load(writeShapeCfg(t, `{"endpoint":"http://node-a:18811","delegate_remotes":["http://node-a:18811"]}`)); err != nil {
+		t.Fatalf("a usable base must load: %v", err)
+	}
+}
+
+// quote renders a Go string as a JSON string literal for the table above.
+func quote(v string) string {
+	b, err := json.Marshal(v)
+	if err != nil {
+		panic(err)
+	}
+	return string(b)
+}
+
+// TestEndpointWarningsNameAnUnparseableValue (review of #361, blocker 1): a
+// Config built in process — or one doctor is reporting on after a failed load —
+// can still carry a value the refusal never saw. EndpointWarnings used to
+// `continue` past it, i.e. say nothing about the very value most likely to be
+// broken. It now emits a finding naming it.
+func TestEndpointWarningsNameAnUnparseableValue(t *testing.T) {
+	cfg := Config{
+		Endpoint:           "http://127.0.0.1:11436",
+		DelegateRemotes:    []string{"${NODE_A_HOST}:18811"},
+		CascadeRemoteLanes: map[string]string{"offload-e4b": "node-c:11436"},
+	}
+	joined := strings.Join(EndpointWarnings(cfg), "\n")
+	for _, want := range []string{"delegate_remotes", "${NODE_A_HOST}:18811", "cascade_remote_lanes", "node-c:11436"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("warnings %q must name %q", joined, want)
+		}
+	}
+}
+
+// TestLoadRefusesAZeroPaddedDeadPort (review of #361, medium 3): the dead-port
+// set was keyed on the port STRING, so ":09" — which url.Parse keeps verbatim and
+// every dialer reads as 9 — walked straight past it. The comparison is numeric.
+func TestLoadRefusesAZeroPaddedDeadPort(t *testing.T) {
+	for _, v := range []string{"http://node-a:09", "http://node-a:00", "http://node-a:0009"} {
+		_, err := Load(writeShapeCfg(t, `{"endpoint":`+quote(v)+`}`))
+		if err == nil {
+			t.Fatalf("Load must refuse endpoint %q — it dials a dead port", v)
+		}
+		if !strings.Contains(err.Error(), "endpoint") {
+			t.Errorf("Load error %q must name the key", err)
+		}
+	}
+}
+
+// TestFindingsNamesANegativeWait (review of #361, medium 4): gpuWaitFinding read
+// a negative value as "unset" and said nothing, but a negative wait is not unset
+// — the pipeline turns it into a zero-length wait, so a GPU task gets ONE try and
+// the config file says it should get ten minutes. A negative is a finding, not a
+// load error: it behaves as the documented 0 rather than breaking anything, and
+// this whole class is warn-then-fail.
+func TestFindingsNamesANegativeWait(t *testing.T) {
+	cfg := Default()
+	cfg.GPUWaitMs = -1
+	joined := strings.Join(cfg.Findings(), "\n")
+	for _, want := range []string{"gpu_wait_ms", "-1"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("findings %q must name %q", joined, want)
+		}
+	}
+	vis := Default()
+	vis.VisionGPUWaitSec = -5
+	joined = strings.Join(vis.Findings(), "\n")
+	for _, want := range []string{"vision_gpu_wait_sec", "-5"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("findings %q must name %q", joined, want)
+		}
+	}
+	// 0 is a documented choice (a single try) and stays silent.
+	zero := Default()
+	zero.GPUWaitMs = 0
+	zero.VisionGPUWaitSec = 0
+	if f := zero.Findings(); len(f) != 0 {
+		t.Fatalf("zero is a deliberate single-try setting, not a finding; got %q", f)
 	}
 }
