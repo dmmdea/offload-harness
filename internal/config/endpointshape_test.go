@@ -359,3 +359,38 @@ func TestFindingsNamesANegativeWait(t *testing.T) {
 		t.Fatalf("zero is a deliberate single-try setting, not a finding; got %q", f)
 	}
 }
+
+// TestEndpointWarningsSkipsBlankEntries (regression): validateBaseURL exempts
+// an empty value on purpose — "an unset optional key is a machine that does not
+// have that thing, which every consumer already handles" — and inspectBase's
+// own doc comment says the refusal path and the warning path "cannot disagree
+// about what counts as a usable base". They disagreed: EndpointWarnings called
+// inspectBase on every delegate_remotes/cascade_remote_lanes entry with no
+// blank check, so a config that LOADS clean (a blank slot is a no-op to Load)
+// still produced a doctor WARN row calling that same slot "not a usable URL:
+// the value is empty".
+func TestEndpointWarningsSkipsBlankEntries(t *testing.T) {
+	cfg, err := Load(writeShapeCfg(t, `{"delegate_remotes":[""]}`))
+	if err != nil {
+		t.Fatalf("an empty delegate_remotes entry must still load (validateBaseURL exempts it): %v", err)
+	}
+	if f := cfg.Findings(); len(f) != 0 {
+		t.Fatalf("an empty delegate_remotes entry must not produce a finding; got %q", f)
+	}
+
+	blankLane := Config{CascadeRemoteLanes: map[string]string{"offload-e4b": "   "}}
+	if f := EndpointWarnings(blankLane); len(f) != 0 {
+		t.Fatalf("a whitespace-only cascade_remote_lanes entry must not produce a finding; got %q", f)
+	}
+
+	// Control: a NON-blank unusable value in the same slot must still be
+	// refused by Load, and still reported by EndpointWarnings when built in
+	// process — the fix skips blank entries only, never unusable ones.
+	if _, err := Load(writeShapeCfg(t, `{"delegate_remotes":["node-a:18811"]}`)); err == nil {
+		t.Fatalf("Load must still refuse a non-blank unusable delegate_remotes value")
+	}
+	stillWarns := Config{DelegateRemotes: []string{"node-a:18811"}}
+	if f := EndpointWarnings(stillWarns); len(f) == 0 {
+		t.Fatalf("a non-blank unusable delegate_remotes value must still produce a finding")
+	}
+}

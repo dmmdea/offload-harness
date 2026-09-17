@@ -160,6 +160,9 @@ func loopbackBase(u *url.URL) bool {
 func EndpointWarnings(c Config) []string {
 	var out []string
 	for i, raw := range c.DelegateRemotes {
+		if strings.TrimSpace(raw) == "" {
+			continue // unset optional slot — validateBaseURL exempts it too; see inspectBase.
+		}
 		label := fmt.Sprintf("delegate_remotes[%d]", i)
 		u, why := inspectBase(raw)
 		if u == nil {
@@ -179,6 +182,9 @@ func EndpointWarnings(c Config) []string {
 	ownPort := endpointPort(c)
 	for _, key := range sortedLaneKeys(c.CascadeRemoteLanes) {
 		raw := c.CascadeRemoteLanes[key]
+		if strings.TrimSpace(raw) == "" {
+			continue // unset optional slot — validateBaseURL exempts it too; see inspectBase.
+		}
 		label := fmt.Sprintf("cascade_remote_lanes[%q]", key)
 		u, why := inspectBase(raw)
 		if u == nil {
