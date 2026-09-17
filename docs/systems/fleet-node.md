@@ -381,7 +381,7 @@ new is sampled (register C-05 stands: probing an unloaded seat through llama-swa
 
 | Health field | Type | Meaning |
 |---|---|---|
-| `jobs_admitting` | int, omitted when 0 | The subset of `jobs_running` whose worker has **not started generating**: it is still in the run's admission phase — cordon → swap pre-flight → warm → coherence probe — which the node budgets up to 300 s for. Counted from this process's own `gpuactivity` records with `phase: "admission"` (ADR 0041), never from the job store, which knows a worker took the job but not what that worker is waiting for. |
+| `jobs_admitting` | int, omitted when 0 | The subset of `jobs_running` whose worker has **not started generating**: it is still in the run's admission phase — cordon → swap pre-flight → warm → coherence probe — which the node budgets up to 300 s for. Counted from this process's own `gpuactivity` records with `phase: "admission"` (ADR 0041), never from the job store, which knows a worker took the job but not what that worker is waiting for. The registry is opened at most once per 2 s and **retried** — a briefly unresolvable state root does not silence the field for the life of the process — and a registry that cannot be opened or listed is logged once, because `0` is a legitimate value and silence would make the two indistinguishable. |
 | `seat_loaded` | bool, omitted when unread | llama-swap's `/running` says the agent seat is loaded. |
 | `seat_starting` | bool, omitted when unread | …and is still LOADING (llama-swap holds `/upstream/<seat>/…` for the whole load — 4m08s on the 27B TP2 seat, register D-92), so "loaded" is not yet "ready". |
 | `lease_exclusive` | bool, omitted when false | The held lease FENCES the cards: no model may be loaded onto them for its duration. |
@@ -403,9 +403,18 @@ phase.
 **Seat state is read from `/running` only**, through `internal/seatload`'s alias-aware reader
 (`seatload.Running`): `/running` lists CANONICAL ids while the harness binds seats by ALIAS, so a
 bare-name match reads a loaded seat as absent — the silent 0.113.16–19 drain defect. It rides the
-residency refresh's background single-flight (one cycle per 30 s TTL, never one per request), and a
-failed read leaves BOTH fields absent rather than publishing "not loaded": absent ≠ idle, the same
-rule the VRAM snapshot and the reclaim verdict follow.
+residency refresh's background single-flight (one cycle per 30 s TTL, never one per request).
+
+**Two different failures both publish NOTHING, and both are logged.** A `/running` read that ERRORS
+leaves both fields absent. So does a read that came back *without* an error and without an answer:
+when the roster GET fails, `seatload` falls back to matching `/running` by the bare name (better than
+a refusal), and that fallback cannot see an alias-bound seat listed under its canonical id — so
+`Loaded:false` with `RosterErr` set means "could not tell", not "idle". Publishing it as
+`seat_loaded:false` would assert a loaded seat is idle exactly when the box is busy enough to time out
+a roster GET. Health therefore refuses that reading the same way every other consumer does
+(`gpu_drain`'s `!rd.Loaded && rd.Ambiguous`, `internal/placement/live.go`'s `err == nil &&
+!rd.Ambiguous`): absent ≠ idle, the same rule the VRAM snapshot and the reclaim verdict follow, with
+the reason on the node's log so an operator is not left guessing at two missing keys.
 
 **`GET /fleet/jobs/{id}?wait=<seconds>` is a completion event.** An already-terminal job answers at
 once; anything else blocks on the job store's terminal broadcast — which the store has fired all

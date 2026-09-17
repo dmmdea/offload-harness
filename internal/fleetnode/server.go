@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"math"
 	"mime"
@@ -60,6 +61,12 @@ const maxSnapshotAge = 30 * time.Second
 // data (the VRAM snapshot) is no staler than that, and the roster answer
 // rides the same freshness contract rather than inventing a second cadence.
 const agentResidencyTTL = maxSnapshotAge
+
+// errSeatStateUnresolved marks a /running reading that came back without an
+// error and without an ANSWER: the roster could not be read, so the seat could
+// only be matched by its bare name, which cannot see an alias-bound seat listed
+// under its canonical id. "Not loaded" and "could not tell" are different facts.
+var errSeatStateUnresolved = errors.New("fleet: seat state unresolved (roster unreadable, alias could not be matched)")
 
 // errRefreshIncomplete is the seat-state read's "never ran" value: the deferred
 // publish in refreshAgentResidency runs on EVERY exit including a panic, and a
@@ -207,13 +214,18 @@ type Server struct {
 	// admitting counts the runs this process has claimed that are still in
 	// their ADMISSION phase (see admittingRuns). A field for the same reason as
 	// the roster seams: tests drive it without a registry on disk.
-	admitting    func() int
-	admittingAt  time.Time
-	admittingN   int
-	admittingMu  sync.Mutex
-	activityOnce sync.Once
-	activityReg  *gpuactivity.Registry
-	agentRes     agentResidency
+	admitting   func() int
+	admittingAt time.Time
+	admittingN  int
+	admittingMu sync.Mutex
+	activityReg *gpuactivity.Registry
+	// admittingLoggedOpen / admittingLoggedList keep the two registry failures
+	// to ONE line per process: health is polled every few seconds by every
+	// delegator, so a per-cycle line would be a log flood, and the failure is
+	// reported for an operator rather than for a counter.
+	admittingLoggedOpen bool
+	admittingLoggedList bool
+	agentRes            agentResidency
 }
 
 // agentResidency caches the roster's answer for the agent seat between health
@@ -351,20 +363,37 @@ func (s *Server) admittingRuns() int {
 	}
 	s.admittingAt = time.Now()
 	s.admittingN = 0
-	s.activityOnce.Do(func() {
+	if s.activityReg == nil {
 		reg, err := gpuactivity.Open(s.opts.Cfg.GPULockPath, s.opts.Cfg.StateDir)
 		if err != nil {
-			// An unresolvable registry is not an error here: the count is
-			// advisory, and zero is the pre-0.127 behaviour.
-			return
+			// RETRIED on the next cycle, never latched: a root that is briefly
+			// unresolvable (a state dir not yet created, a transient mount) must
+			// not silence this field for the life of the process. And it is SAID
+			// — once — because 0 is a legitimate value, so an unreported failure
+			// is indistinguishable from a node with nothing in admission.
+			if !s.admittingLoggedOpen {
+				s.admittingLoggedOpen = true
+				log.Printf("fleet: activity registry unreadable under state dir %q; jobs_admitting reads 0 until it resolves (reported once per process, retried every %s): %v",
+					s.opts.Cfg.StateDir, admittingTTL, err)
+			}
+			return 0
 		}
 		s.activityReg = reg
-	})
-	if s.activityReg == nil {
-		return 0
+	}
+	runs := s.activityReg.List(time.Now())
+	if len(runs) == 0 {
+		// List treats an unreadable directory as an empty one (it is advisory),
+		// so "nothing in admission" and "cannot read the registry" arrive here
+		// as the same nil slice. One cheap read tells them apart; a directory
+		// that does not exist yet is the normal cold state and says nothing.
+		if _, rerr := os.ReadDir(s.activityReg.Dir()); rerr != nil && !errors.Is(rerr, fs.ErrNotExist) && !s.admittingLoggedList {
+			s.admittingLoggedList = true
+			log.Printf("fleet: activity registry directory %q cannot be listed; jobs_admitting reads 0 (reported once per process): %v",
+				s.activityReg.Dir(), rerr)
+		}
 	}
 	pid := os.Getpid()
-	for _, run := range s.activityReg.List(time.Now()) {
+	for _, run := range runs {
 		// The phase string is internal/pipeline/agenttask.go's, verbatim: it
 		// registers a contract run as "admission" and flips it at the first
 		// planner step (gpuactivity.Run.Phase documents the whole ladder).
@@ -541,8 +570,29 @@ func (s *Server) refreshAgentResidency() {
 		seatCtx, seatCancel := context.WithTimeout(context.Background(), agentResidencyProbeTimeout)
 		defer seatCancel()
 		seat, seatErr = s.seatRunning(seatCtx, s.opts.Cfg.Endpoint, s.agentSeat)
-		if seatErr != nil {
+		switch {
+		case seatErr != nil:
+			// Same discipline as the residency probe above: the verdict this
+			// publishes (two absent fields) is useless to an operator without
+			// the reason, and the read runs at most once per TTL window, so it
+			// cannot spam.
+			log.Printf("fleet: seat state of %q against %s could not be read; omitting seat_loaded/seat_starting for up to %s: %v",
+				s.agentSeat, s.opts.Cfg.Endpoint, agentResidencyTTL, seatErr)
 			seat = seatload.Reading{}
+		case !seat.Loaded && (seat.RosterErr != nil || seat.Ambiguous):
+			// A NIL ERROR IS NOT A RESOLVED READING. seatload falls back to
+			// matching /running by the BARE name when the roster read fails —
+			// deliberately, because that beats a refusal — and the bare name
+			// cannot see a seat listed under its canonical id. Every harness
+			// seat is alias-bound, so "not loaded" here means "could not tell",
+			// and publishing it as seat_loaded:false would assert that a loaded
+			// seat is idle exactly when the box is busy enough to time out a
+			// roster GET. The other consumers of this reading already refuse it
+			// (gpu_drain's `!rd.Loaded && rd.Ambiguous`, placement/live.go's
+			// `err == nil && !rd.Ambiguous`); health joins them.
+			log.Printf("fleet: seat state of %q against %s is UNRESOLVED — the roster read failed, so /running could only be matched by the bare name and an alias-bound seat listed under its canonical id cannot be seen; omitting seat_loaded/seat_starting for up to %s: %v",
+				s.agentSeat, s.opts.Cfg.Endpoint, agentResidencyTTL, seat.RosterErr)
+			seat, seatErr = seatload.Reading{}, errSeatStateUnresolved
 		}
 	}
 }
@@ -650,11 +700,19 @@ func (s *Server) EnableQueueHost(dbPath string) (*fleetqueue.Queue, error) {
 // That is NOT a request failure: the handler simply runs under whatever bound
 // the writer has, exactly as before. The seam is a field so a test can observe
 // what each handler ASKS for, which is the property this fixes.
-func (s *Server) extendWrite(w http.ResponseWriter, d time.Duration) {
+func (s *Server) extendWrite(w http.ResponseWriter, d time.Duration, handler string) {
 	if s.setWriteDeadline == nil {
 		return
 	}
-	_ = s.setWriteDeadline(w, time.Now().Add(d))
+	if err := s.setWriteDeadline(w, time.Now().Add(d)); err != nil {
+		// Benign for a test recorder, NOT benign in production: the only way a
+		// real serve path lands here is a ResponseWriter wrapper that does not
+		// implement Unwrap, and then this handler is silently back under the
+		// 30 s blanket — the defect S-09 exists to remove, reintroduced by a
+		// middleware nobody would think to check. One line per invocation, on
+		// the two routes where it changes the answer.
+		log.Printf("fleet: %s could not extend its write deadline by %s past the server's blanket WriteTimeout — this answer will be CUT if it takes longer: %v", handler, d, err)
+	}
 }
 
 // controllerWriteDeadline is the production seam: the standard library's own
@@ -1876,7 +1934,7 @@ func (s *Server) handleJob(w http.ResponseWriter, r *http.Request) {
 		// which Go arms at header-read for every handler alike (register S-09).
 		// Without the extension the answer this poll is WAITING for would be
 		// cut as it was written.
-		s.extendWrite(w, wait+jobWaitWriteSlack)
+		s.extendWrite(w, wait+jobWaitWriteSlack, "the job long poll")
 		if v, still := s.jobs.WaitTerminal(r.Context(), id, wait); still {
 			view = v
 		}

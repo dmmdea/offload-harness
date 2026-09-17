@@ -21,11 +21,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -563,5 +566,178 @@ func TestFinishedAgentWallsAreTheAgentJobsNewestFirst(t *testing.T) {
 	}
 	if med := medianSeconds(nil); med != 0 {
 		t.Fatalf("medianSeconds(nil) = %v, want 0 = no claim", med)
+	}
+}
+
+// ---- review of PR #360: an UNREADABLE answer is not a NEGATIVE answer -------
+
+// lockedBuf collects log output while a test runs. Locked because the residency
+// refresh logs from a background goroutine.
+type lockedBuf struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (l *lockedBuf) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *lockedBuf) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
+}
+
+// captureLog redirects the standard logger for the test's duration.
+func captureLog(t *testing.T) *lockedBuf {
+	t.Helper()
+	buf := &lockedBuf{}
+	prevOut, prevFlags := log.Writer(), log.Flags()
+	log.SetOutput(buf)
+	log.SetFlags(0)
+	t.Cleanup(func() { log.SetOutput(prevOut); log.SetFlags(prevFlags) })
+	return buf
+}
+
+// expireResidency ages the residency cache so the NEXT health request kicks off
+// a fresh background refresh, without waiting out agentResidencyTTL. Production
+// reaches the same state by the clock.
+func expireResidency(s *Server) {
+	s.agentRes.mu.Lock()
+	s.agentRes.at = time.Time{}
+	s.agentRes.mu.Unlock()
+}
+
+// swapWithFailingRoster is a llama-swap whose /running is perfectly healthy and
+// whose ROSTER is not — the shape of a box under load, where a 27B is mid-load
+// and the /v1/models GET times out while /running answers instantly. The seat is
+// listed by its CANONICAL id; the harness binds the ALIAS.
+func swapWithFailingRoster(t *testing.T, rosterUp *atomic.Bool, canonical string) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models":
+			if !rosterUp.Load() {
+				http.Error(w, "roster unavailable", http.StatusBadGateway)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"object":"list","data":[{"id":%q,"object":"model","meta":{"llamaswap":{"aliases":["offload-e4b"]}}}]}`, canonical)
+		case "/running":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"running":[{"model":%q,"state":"ready"}]}`, canonical)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// TestHealthOmitsSeatStateWhenTheAliasCannotBeResolved is the review's blocker 1.
+//
+// seatload.Running returns a nil ERROR for a reading it could not resolve: when
+// the roster GET fails it falls back to matching /running by the BARE name, which
+// cannot see a seat listed under its canonical id — so an alias-bound seat that
+// is loaded and serving reads as `Loaded: false` with no error at all. Publishing
+// that as `seat_loaded: false` is the exact inversion these fields exist to
+// remove, and it lands precisely when it hurts most: a box busy enough to time
+// out a roster GET is a box mid-load.
+//
+// Every other consumer of this reading already checks it (gpu_drain.go's
+// `!rd.Loaded && rd.Ambiguous`, internal/placement/live.go's `err == nil &&
+// !rd.Ambiguous`). Health must too: an unresolved reading is UNKNOWN — both
+// fields absent — which is what docs/systems/fleet-node.md promises with
+// "absent ≠ idle".
+func TestHealthOmitsSeatStateWhenTheAliasCannotBeResolved(t *testing.T) {
+	var rosterUp atomic.Bool
+	swap := swapWithFailingRoster(t, &rosterUp, "gemma-4-e4b")
+	s, _ := newTestServer(t, agentHealthCfg(swap.URL), &fakeRunner{}, authOpts(true))
+
+	m := healthAfterProbe(t, s)
+	if v, present := m["seat_loaded"]; present {
+		t.Fatalf("seat_loaded = %v with the roster down: the alias could NOT be resolved, so /running's canonical id was never matched — publishing `false` here says a loaded seat is idle", v)
+	}
+	if v, present := m["seat_starting"]; present {
+		t.Fatalf("seat_starting = %v with the roster down: an unresolved reading is UNKNOWN, not negative", v)
+	}
+
+	// Control: the same /running answer, with the roster back. Now the alias
+	// resolves, the canonical id matches, and the node says so.
+	rosterUp.Store(true)
+	expireResidency(s)
+	m = healthAfterProbe(t, s)
+	if m["seat_loaded"] != true {
+		t.Fatalf("seat_loaded = %v once the roster answers again, want true (payload %v)", m["seat_loaded"], m)
+	}
+	if m["seat_starting"] != false {
+		t.Fatalf("seat_starting = %v, want an explicit false on a resolved reading", m["seat_starting"])
+	}
+}
+
+// TestSeatStateFailureIsSaidOutLoud is the review's blocker 2: the residency
+// probe logs why it is advertising `false` (the line four lines above this read
+// in refreshAgentResidency), and the seat-state read published the same kind of
+// verdict with nothing for an operator to look at, on either side of the wire.
+func TestSeatStateFailureIsSaidOutLoud(t *testing.T) {
+	buf := captureLog(t)
+	var rosterUp atomic.Bool // stays down: the reading cannot be resolved
+	swap := swapWithFailingRoster(t, &rosterUp, "gemma-4-e4b")
+	s, _ := newTestServer(t, agentHealthCfg(swap.URL), &fakeRunner{}, authOpts(true))
+	_ = healthAfterProbe(t, s)
+
+	out := buf.String()
+	if !strings.Contains(out, "seat state") {
+		t.Fatalf("nothing in the log says the seat state could not be read; an operator sees two absent fields and has nothing to look at. Log was:\n%s", out)
+	}
+	for _, want := range []string{s.agentSeat, swap.URL} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("the seat-state log line names neither the seat nor the endpoint (%q missing):\n%s", want, out)
+		}
+	}
+}
+
+// TestAdmittingRegistryFailureIsSaidOnceAndRetried is the review's blocker 3.
+//
+// The first draft opened the registry under a sync.Once: a node whose state dir
+// was momentarily unresolvable published `jobs_admitting` 0 forever, silently,
+// and 0 is a legitimate value — so the field could not be told apart from a
+// working node with nothing in admission. The failure must be SAID (once, not
+// per health request), and the open must be retried on the next cache cycle.
+func TestAdmittingRegistryFailureIsSaidOnceAndRetried(t *testing.T) {
+	buf := captureLog(t)
+	// A cloud-sync segment is refused by gpulease.ResolveStateRoot by design —
+	// a real, deterministic open failure that needs no permissions games.
+	bad := filepath.Join(t.TempDir(), "Dropbox", "state")
+	cfg := agentHealthCfg(fakeSwapWithRunning(t, "gemma-4-e4b", "offload-e4b", "ready", true).URL)
+	cfg.StateDir = bad
+	s, _ := newTestServer(t, cfg, &fakeRunner{}, authOpts(true))
+
+	if n := s.admitting(); n != 0 {
+		t.Fatalf("jobs_admitting = %d against an unopenable registry, want 0", n)
+	}
+	if c := strings.Count(buf.String(), "activity registry"); c != 1 {
+		t.Fatalf("the unopenable registry was reported %d times, want exactly 1 (a health poll every few seconds must not spam, and silence is how `0` became indistinguishable from `unreadable`). Log:\n%s", c, buf.String())
+	}
+	s.admittingAt = time.Time{} // the next cache cycle
+	_ = s.admitting()
+	if c := strings.Count(buf.String(), "activity registry"); c != 1 {
+		t.Fatalf("the failure was logged %d times across two cycles, want once per process", c)
+	}
+
+	// The open is RETRIED, not latched: point the node at a resolvable root and
+	// register a run there.
+	good := t.TempDir()
+	s.opts.Cfg.StateDir = good
+	act := gpuactivity.Start("", good, gpuactivity.Run{Seat: "offload-e4b", Kind: "contract", Phase: "admission"})
+	if act == nil {
+		t.Fatal("could not register the admission run")
+	}
+	defer act.End()
+	s.admittingAt = time.Time{}
+	if n := s.admitting(); n != 1 {
+		t.Fatalf("jobs_admitting = %d after the registry became readable, want 1: a failed open must not latch for the life of the process", n)
 	}
 }

@@ -198,7 +198,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	// past it was cut mid-write and read to the caller as a dead node. The
 	// blanket stays as the floor for every other handler; this one says what
 	// it needs, per request.
-	s.extendWrite(w, ChatProxyTimeout+chatWriteSlack)
+	s.extendWrite(w, ChatProxyTimeout+chatWriteSlack, "the chat lane")
 	pctx, pcancel := context.WithTimeout(r.Context(), ChatProxyTimeout)
 	defer pcancel()
 	upstream := swapclient.BaseURL(s.opts.Cfg.Endpoint) + "/v1/chat/completions"
