@@ -330,6 +330,65 @@ func TestHealthCountsAdmittingJobsOutOfTheSaturationScore(t *testing.T) {
 	}
 }
 
+// TestHealthQueueWaitEstimateCountsAdmittingAsRunning is item 4/S-04's red
+// test, the queue-wait twin of the saturation test above — and deliberately
+// the OPPOSITE conclusion. saturation.score subtracts an admitting job
+// because no card is busy; queue_wait_estimate_sec must NOT subtract it,
+// because the WORKER SLOT is still taken — a second contract genuinely queues
+// behind it and gets no card either, cordon-waiter or not. Built on the same
+// real gpuactivity registration S-17's test uses (not a hand-inserted count),
+// so this exercises the actual admission-phase machinery, not just the
+// arithmetic.
+func TestHealthQueueWaitEstimateCountsAdmittingAsRunning(t *testing.T) {
+	state := t.TempDir()
+	cfg := agentHealthCfg(fakeSwapWithRunning(t, "gemma-4-e4b", "offload-e4b", "ready", true).URL)
+	cfg.FleetMaxConcurrentJobs = 1
+	cfg.FleetMaxQueueDepth = -1 // only the concurrency term is under test
+	cfg.StateDir = state
+	s, jobs := newTestServer(t, cfg, &fakeRunner{}, authOpts(true))
+
+	// One FINISHED agent job, wall = 40s exactly, seeded directly (the same
+	// technique TestFinishedAgentWallsAreTheAgentJobsNewestFirst uses) so the
+	// wall sample is deterministic rather than a real 40s sleep.
+	now := time.Now()
+	jobs.mu.Lock()
+	jobs.m["seed"] = &job{state: JobDone, agent: true, startedAt: now, finishedAt: now.Add(40 * time.Second)}
+	jobs.mu.Unlock()
+
+	// adm-1: the worker parked in admission (blocked, registered "admission").
+	finish := blockingJob(t, jobs, "adm-1", AcceptSpec{Agent: true, Task: "agent-run"})
+	defer finish()
+	act := gpuactivity.Start(cfg.GPULockPath, cfg.StateDir, gpuactivity.Run{
+		Seat: "offload-e4b", Kind: "contract", Origin: "testnode", Phase: "admission"})
+	if act == nil {
+		t.Fatal("could not register the admission run")
+	}
+	defer act.End()
+
+	// adm-2: a SECOND agent job that genuinely queues behind the one capped
+	// worker adm-1 already holds.
+	if !jobs.Admit("adm-2", AcceptSpec{Agent: true, Task: "agent-run"}, func(ctx context.Context) (json.RawMessage, error) {
+		return json.RawMessage(`{}`), nil
+	}) {
+		t.Fatal("admit adm-2 refused")
+	}
+
+	m := healthAfterProbe(t, s)
+	if m["jobs_admitting"] != float64(1) {
+		t.Fatalf("jobs_admitting = %v, want 1", m["jobs_admitting"])
+	}
+	if m["jobs_running"] != float64(1) || m["jobs_queued"] != float64(1) {
+		t.Fatalf("jobs_running/jobs_queued = %v/%v, want 1/1", m["jobs_running"], m["jobs_queued"])
+	}
+	v, ok := m["queue_wait_estimate_sec"].(float64)
+	if !ok {
+		t.Fatalf("queue_wait_estimate_sec absent with a worker taken (in admission) and one job genuinely queued: %v", m)
+	}
+	if v != 40 {
+		t.Fatalf("queue_wait_estimate_sec = %v, want 40 (excess 1 x wall 40s / maxConcurrent 1) — an admitting job still holds the worker slot, unlike saturation.score which subtracts it", v)
+	}
+}
+
 // TestHealthReportsTheRecentAgentWall is S-36's red test: a node with no
 // seat_rate sample publishes no completion signal at all, so a fresh box is
 // indistinguishable from a fast one. The median of the last finished agent jobs
