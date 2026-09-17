@@ -93,6 +93,14 @@ Versioning: [SemVer](https://semver.org/).
     no longer advertise a multi-minute agent run as still being probed.
 
 ### Changed
+- **The 26B agent lane runs with thinking OFF** — `config_seed.agent_thinking: "off"` on the four tiers that ship
+  `gemma-4-26b-agent` (blackwell-16, volta-16, amd-rdna3-dgpu, dual-gpu), masterplan D-119 follow-up, 2026-09-17. Blind
+  on the H-04 instrument at a matched 4,096 budget (one axis, `pack --axis thinking`): thinking off 7.31 vs the shipped
+  auto 6.73 — gap 0.58, head-to-head 19/24, every lens agrees, SEPARATED; the think block costs specificity and
+  coverage and buys padding (8 degenerate flags vs 2), accuracy level. The seat entry keeps `--reasoning on`; the
+  harness renders the no-think turn per request. Measured on one RTX 5060 Ti; inherited by the three siblings as a
+  property of the model's output. The tier pages and profile notes carry the record
+  (`2026-09-17-d119-26b-budget-bake/out-thinking/`).
 - **`blackwell-16`'s `config_seed.agent_max_tokens 4096` is now a measurement** (masterplan D-119, 2026-09-17): the
   26B llama.cpp agent lane at the tier's own line on one RTX 5060 Ti (14,540 of 16,311 MiB, 16 s load, 100 tok/s),
   blind Opus 1,024 vs 4,096 = TIE (6.76 vs 6.30, gap 0.46, 18/24, both 8/8) — the seed stays; the profile note and
