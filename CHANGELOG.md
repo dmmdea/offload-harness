@@ -61,9 +61,12 @@ Versioning: [SemVer](https://semver.org/).
   (`wall_note` prefixed `auto wall`). A seat with no rate yet runs the default, as before. The delegator budgets,
   polls and re-places an auto contract at the cap (the node's wall lands anywhere inside it), every retry and
   re-placement clears the marker (its wall is what is left, an explicit number), placement's long-seat prefill
-  check sizes an auto contract against the cap instead of deferring it at 300, and the review lane's owner-set
-  `agent_timeout_sec` stays explicit. An older node ignores the field and runs the default; an older delegator
-  never sends it — wire-compatible both ways.
+  check sizes an auto contract against the cap instead of deferring it at 300, and the review lane keeps an
+  owner-set `agent_timeout_sec` explicit (a box that sets none is auto-sized like any other caller). An older
+  node ignores the field and runs the default; an older delegator never sends it — wire-compatible both ways.
+  **Accepted cost:** a node that acks and then dies silently is abandoned at the cap, 900 s instead of 300 s, on
+  this now-default path — the delegator cannot tell a slow seat under a sized wall from a dead node without
+  waiting; the tighter bound (the node's advertised `seat_rate`) is a follow-up.
 
 ### Fixed
 - **A cold seat no longer runs its whole task at an 8,192-token window.** On 2026-09-16 the same `agent_run`

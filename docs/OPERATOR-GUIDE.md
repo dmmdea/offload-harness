@@ -604,7 +604,9 @@ box config stands in, and with neither the note says so and no numbers are publi
 wall** — a contract that names `timeout_sec` runs under it exactly as before. A contract that names NONE is sized by it
 (0.126.0, register D-03): intake stamps `timeout_auto`, the executing node clamps this estimate to 300..900, runs under
 that and reports it as `results[].wall_sec` (`wall_note` prefixed `auto wall`), the delegator holds the 900 s cap open
-for it, and every retry carries an explicit remainder instead; a seat with no rate yet runs the 300 s default.
+for it, and every retry carries an explicit remainder instead; a seat with no rate yet runs the 300 s default. The
+accepted cost of holding the cap open: a node that acks and then dies silently is abandoned after 900 s on this path
+rather than 300 s — bounded and rare; the node's advertised `seat_rate` is the tighter bound, a follow-up.
 For an explicit wall, `wall X s is BELOW the estimate` in `wall_note` (and
 the node log) is the caller's signal to size the contract. A contract with an `output_schema` carries one more term
 (0.117.2): `+ re-pack ≤ N tok` — one final-budget completion for the structured re-pack of a prose answer, an upper

@@ -301,9 +301,10 @@ type AgentWireResult struct {
 	WallEstimateSec int     `json:"wall_estimate_sec,omitempty"`
 	MinTurnSec      int     `json:"min_turn_sec,omitempty"`
 	WallNote        string  `json:"wall_note,omitempty"`
-	// WallSec (register D-03, 0.126.0) is the wall this run actually ran under
-	// when the NODE sized it — a timeout_auto contract, the seat-rate estimate
-	// clamped to the wire bounds. Omitted when the contract named its own
+	// WallSec (register D-03, 0.126.0) is the wall the NODE sized this run to —
+	// a timeout_auto contract, the seat-rate estimate clamped to the wire
+	// bounds — stamped before admission, so a defer at the cordon carries it
+	// too (what WOULD have run). Omitted when the contract named its own
 	// timeout_sec, or when the seat had no rate yet and the wire default ran.
 	WallSec int `json:"wall_sec,omitempty"`
 	// Final-budget fit (0.122.1, register D-95). FinalBudgetFit is the

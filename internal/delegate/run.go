@@ -964,6 +964,13 @@ func (r *runner) runOne(ctx context.Context, i int, contract core.AgentContract)
 // the cap open rather than cut a 700 s wall the node chose at the 300 s default
 // the wire happens to carry. A retry never carries the marker: its wall is what
 // is left, an explicit number.
+//
+// The accepted cost (review, 2026-09-16): a node that acks and then dies
+// silently is abandoned at the CAP on this path, 900 s instead of the 300 s the
+// default gave — the delegator cannot tell "a slow seat under a properly sized
+// wall" from "a dead node" without waiting. Bounded, rare, and written down;
+// the tighter bound is the node's advertised seat_rate (health), the same
+// arithmetic the retry floor already reads — a follow-up, not this change.
 func executionBudgetSec(c core.AgentContract) int {
 	switch {
 	case c.TimeoutAuto:
