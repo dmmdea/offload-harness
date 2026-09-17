@@ -96,3 +96,37 @@ and +0.29 on the 12B in the 2026-09-08 four-way, on identical weights.
 **Verification.** The new gate was mutation-tested against the real regression: re-applying the A-07 deletion
 turns `TestEveryTierCanSeatAModelUnderVLLM` red with the tier named, while both pre-existing gates still report
 `ok` — which is the blindness this ADR exists to close.
+
+## Amendment 1 (2026-09-17): blackwell-16 pays its seat, measured on its own silicon
+
+The first debt entry to close is the one this ADR called "twin-arch sibling of ampere-16; owes the same seat".
+It was NOT paid by copying ampere-16's declaration, and the measurement is why that rule stands:
+
+- **The copy would have shipped a broken seat.** ampere-16's launch line carries `kv_cache_dtype fp8_e5m2`. On an
+  RTX 5060 Ti (sm_120) under vLLM 0.29 that dtype through the FlashInfer backend returns NaN tokens — raw
+  completions `<tool_call>!!!!…` at 8,580 prompt tokens, a hallucinated prompt at 290 — and every digest-8
+  contract deferred `unparsed_tool_call` in two runs. Nothing in the harness's health, speed or smoke checks
+  noticed: the seat was "healthy", 33 tok/s, and answered READY. Isolated one variable per arm (record:
+  `Benchmarks and Optimizations/2026-09-16-16gb-tier-pass/blackwell-16/raw-toolcall-test/`): transformers
+  version, the flashinfer sampler flag and prefix caching are irrelevant, `TRITON_ATTN` refuses the model, bf16 KV
+  is coherent, and **`fp8` (e4m3fn) on the same FlashInfer backend is coherent**. blackwell-16 therefore declares
+  `kv_cache_dtype: fp8`; `blackwell16_bound_lane_test.go` pins that field with the reason.
+- **Operating point and lane, measured:** 49,152 @ util 0.92 (KV 76,314 tokens, 1.55×; 65,536 also fits),
+  27.75 tok/s single / TTFT 0.43 s / 64.39 tok/s at 4 streams, digest-8 8/8 at the bound lane (4,096 / thinking
+  off / vendor sampling / 900 s), blind quality 8.53 — level with the same checkpoint on the A2 (8.46), below the
+  llama.cpp IQ3_S+MTP arm (9.30). The tier's llama.cpp lane stays the fallback.
+- **WSL2 launches of a vLLM ≥ 0.29 venv pin the V1 model runner.** 0.29's default V2 runner needs UVA; `seat_fg.sh`
+  now exports `VLLM_USE_V2_MODEL_RUNNER=0` when `/proc/version` says microsoft AND the venv's vLLM (read from its
+  dist-info name) is ≥ 0.29, unless the env file already chose. The version gate is load-bearing: 0.28's V2 runner runs
+  on WSL2 — the production pair seat logs `Using V2 Model Runner` on 0.28.0 — so a WSL-only pin would have silently
+  moved that seat to V1 (caught in review). vLLM's own `VLLM_WSL2_ENABLE_PIN_MEMORY=1` lets 0.29's V2 runner start on
+  WSL2 and it then dies in kernel warm-up (`CUDA error: invalid device ordinal`), so the pin is the working path there.
+- **The tier's llama.cpp lane gets a seeded budget too.** `TestAReasoningSeatSeedsItsCompletionBudget` asks every tier
+  with a reasoning vLLM seat for `config_seed.agent_max_tokens`, because that value is what a fresh install runs when the
+  vLLM prerequisites are absent and the fallback (`gemma-4-26b-agent`) is the lane. blackwell-16 seeds **4,096** — stated
+  plainly: NOT a 26B measurement. It is the value the two Qube tiers seed for their 27B llama.cpp lane and the direction
+  the 9B measured (+0.62 at 4,096), applied to a thinking-heavy 26B; the alternative was the loop's silent 1,024. The
+  measurement that settles it (1,024 vs 4,096, blind, on a 16 GB Blackwell card) is masterplan row D-119.
+- **Coverage now reads 4 of 16 tiers, 12 owing a seat.** The debt list shrank by one; the rule for the next
+  eleven is the same: measure on the tier's silicon, never copy a sibling's dtype or window.
+

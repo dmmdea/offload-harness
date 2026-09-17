@@ -204,6 +204,21 @@ fi
 export CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES="${SEAT_DEVICES:-0,1}" NCCL_CUMEM_ENABLE=0 NCCL_P2P_DISABLE=1 HF_HUB_OFFLINE=1
 export HOME=/root HF_HOME="${SEAT_HF_HOME:-$WORK/hf}" VLLM_CACHE_ROOT="${SEAT_VLLM_CACHE:-$WORK/vllm-cache}" LMCACHE_LOG_LEVEL=INFO
 export PATH="$VENV/bin:/usr/local/bin:/usr/bin:/bin"
+# WSL2 + vLLM >= 0.29: 0.29 selects its V2 GPU model runner by default and that runner needs UVA (pinned host memory),
+# which vLLM reports unavailable under WSL2; with VLLM_WSL2_ENABLE_PIN_MEMORY=1 it starts and then dies in kernel warm-up
+# (CUDA error: invalid device ordinal, measured 2026-09-17 on a 5060 Ti). The V1 runner is the one that serves there, so a
+# WSL2 launch of a >= 0.29 venv pins it unless the env file already chose. 0.28 is NOT touched: its V2 runner runs on WSL2
+# (the production pair seat logs "Using V2 Model Runner" on 0.28.0), and native Linux is untouched at any version (the
+# Lenovo A2 runs the V2 runner on 0.29). The version is read from the venv's dist-info name: importing vllm costs seconds.
+if grep -qi microsoft /proc/version 2>/dev/null; then
+  vllm_di="$(ls -d "$VENV"/lib/python3*/site-packages/vllm-*.dist-info 2>/dev/null | head -1)"
+  vllm_ver="${vllm_di##*/vllm-}"; vllm_ver="${vllm_ver%.dist-info}"; vllm_major="${vllm_ver%%.*}"; vllm_rest="${vllm_ver#*.}"; vllm_minor="${vllm_rest%%.*}"
+  case "$vllm_major$vllm_minor" in *[!0-9]*|"") vllm_major=0; vllm_minor=0;; esac
+  if [ "$vllm_major" -gt 0 ] || [ "$vllm_minor" -ge 29 ]; then
+    export VLLM_USE_V2_MODEL_RUNNER="${VLLM_USE_V2_MODEL_RUNNER:-0}"
+    echo "seat_fg: WSL2 + vLLM ${vllm_ver} — V1 model runner pinned (VLLM_USE_V2_MODEL_RUNNER=${VLLM_USE_V2_MODEL_RUNNER})"
+  fi
+fi
 # Same overlay as the MP server above (0.113.13): the engine's LMCache connector must match the server's, or store/retrieve
 # uses two different serializers. Prepend, never replace, so a caller-set PYTHONPATH survives.
 [ -n "${SEAT_LMCACHE_PYTHONPATH:-}" ] && export PYTHONPATH="$SEAT_LMCACHE_PYTHONPATH${PYTHONPATH:+:$PYTHONPATH}"
