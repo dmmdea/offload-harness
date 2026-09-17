@@ -35,6 +35,18 @@ stack that actually runs the work.
 5. **The dispatcher polls** `GET /fleet/jobs/{id}` and reads `{ job_id, state, data?, error? }`. The
    field is `state`, not `status`. An unknown or evicted id is a `404`.
 
+   **`?wait=<seconds>` makes the poll a completion EVENT.** With the parameter, a job that is already
+   terminal answers immediately, and anything else blocks until the job reaches a terminal state or the
+   wait elapses — whichever comes first — and then answers with whatever state the job is in. The node
+   wakes on the job store's own terminal broadcast, so the answer arrives when the job finishes, not at
+   the next tick of a timer. The wait is capped at `fleetnode.MaxJobWaitSec` (12 s), which must stay
+   below the delegator's `pollRequestTimeout` (15 s, `internal/delegate/run.go`): a longer server-side
+   wait would be cancelled by the caller a moment before the node answered. Absent the parameter the
+   route is byte-identical to before, so every deployed delegator keeps its 3 s cadence, and that
+   cadence remains the fallback. Why: fleet-wide, 236 measured queue-deadline rows spent exactly
+   `101 poll(s)` = 300 s doing nothing but asking again, while the store had been broadcasting every
+   terminal transition all along (diagnosis 2026-09-17 §2(d), register S-19).
+
 6. **A successful render also records a footprint observation**, so the node's advertised costs
    improve with use.
 

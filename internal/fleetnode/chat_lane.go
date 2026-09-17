@@ -73,6 +73,12 @@ const chatRosterTimeout = agentResidencyProbeTimeout
 // forgotten connection from pinning a proxy goroutine forever.
 const ChatProxyTimeout = 10 * time.Minute
 
+// chatWriteSlack is what this handler adds to ChatProxyTimeout when it extends
+// its own write deadline: the upstream's whole budget, plus room to copy the
+// answer back after the upstream has finished speaking. It is slack on a
+// deadline, not a second timeout — the request context is still the bound.
+const chatWriteSlack = 30 * time.Second
+
 // chatLaneTokenRequired is the 403 refusal for a chat-lane call on a
 // non-loopback listener with no fleet_auth_token configured — the agent lane's
 // signal, worded for this route: a loud misconfiguration, never a silent open
@@ -185,6 +191,14 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// THIS handler's own write deadline, past the server's blanket
+	// WriteTimeout (register S-09). net/http arms that blanket at header-read
+	// for every handler alike, so a 30-second table silently bounded a lane
+	// whose whole budget is ChatProxyTimeout: a cascade call that forwards
+	// past it was cut mid-write and read to the caller as a dead node. The
+	// blanket stays as the floor for every other handler; this one says what
+	// it needs, per request.
+	s.extendWrite(w, ChatProxyTimeout+chatWriteSlack)
 	pctx, pcancel := context.WithTimeout(r.Context(), ChatProxyTimeout)
 	defer pcancel()
 	upstream := swapclient.BaseURL(s.opts.Cfg.Endpoint) + "/v1/chat/completions"

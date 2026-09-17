@@ -17,10 +17,13 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"mime"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -29,9 +32,12 @@ import (
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/fleetqueue"
+	"github.com/dmmdea/offload-harness/internal/gpuactivity"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
 	"github.com/dmmdea/offload-harness/internal/hostsample"
+	"github.com/dmmdea/offload-harness/internal/netguard"
 	"github.com/dmmdea/offload-harness/internal/placement"
+	"github.com/dmmdea/offload-harness/internal/seatload"
 	"github.com/dmmdea/offload-harness/internal/seatrate"
 	"github.com/dmmdea/offload-harness/internal/storesteward"
 	"github.com/dmmdea/offload-harness/internal/swapclient"
@@ -54,6 +60,12 @@ const maxSnapshotAge = 30 * time.Second
 // data (the VRAM snapshot) is no staler than that, and the roster answer
 // rides the same freshness contract rather than inventing a second cadence.
 const agentResidencyTTL = maxSnapshotAge
+
+// errRefreshIncomplete is the seat-state read's "never ran" value: the deferred
+// publish in refreshAgentResidency runs on EVERY exit including a panic, and a
+// nil error there would publish "seat not loaded, and we know it" for a read
+// that never happened.
+var errRefreshIncomplete = errors.New("fleet: seat state not read")
 
 // agentResidencyProbeTimeout bounds ONE background roster GET. Deliberately
 // shorter than swapclient.DefaultTimeout: the probe informs a cached health
@@ -180,7 +192,28 @@ type Server struct {
 	// agentResidencyTTL window, is an acceptable cost for keeping today's
 	// residency seam untouched.
 	rosterServedModels func(ctx context.Context, endpoint string) ([]string, error)
-	agentRes           agentResidency
+	// seatRunning answers "what does llama-swap's /running say about the agent
+	// seat RIGHT NOW?" — loaded, starting, or neither. /running ONLY: reading
+	// `/upstream/<seat>/…` would START an unloaded seat (register C-05; 54
+	// measured status probes each blocked ~186 s for exactly that reason), so
+	// the health path is allowed to learn the seat's state and is not allowed
+	// to touch the seat. Alias-aware through internal/seatload, because the
+	// harness binds seats by alias and /running lists canonical ids.
+	seatRunning func(ctx context.Context, endpoint, seat string) (seatload.Reading, error)
+	// setWriteDeadline extends ONE handler's write deadline past the server's
+	// blanket WriteTimeout (see extendWrite). A field so a test can observe the
+	// deadline a handler asks for; production is controllerWriteDeadline.
+	setWriteDeadline func(w http.ResponseWriter, t time.Time) error
+	// admitting counts the runs this process has claimed that are still in
+	// their ADMISSION phase (see admittingRuns). A field for the same reason as
+	// the roster seams: tests drive it without a registry on disk.
+	admitting    func() int
+	admittingAt  time.Time
+	admittingN   int
+	admittingMu  sync.Mutex
+	activityOnce sync.Once
+	activityReg  *gpuactivity.Registry
+	agentRes     agentResidency
 }
 
 // agentResidency caches the roster's answer for the agent seat between health
@@ -205,9 +238,16 @@ type agentResidency struct {
 	// list — and never flips
 	// resident on its own; a later placement gate reads absent/empty as
 	// UNKNOWN, exactly like a cold or failed residency probe.
-	served   []string
-	at       time.Time
-	inflight bool
+	served []string
+	// seatLoaded / seatStarting / seatKnown are llama-swap's /running verdict on
+	// the agent seat, published by the SAME refresh (seatRunning). seatKnown
+	// false = the read failed or never ran, and health then omits both fields
+	// rather than publishing "not loaded" for "could not tell".
+	seatLoaded   bool
+	seatStarting bool
+	seatKnown    bool
+	at           time.Time
+	inflight     bool
 	// idle broadcasts when inflight clears, so a caller that needs the answer
 	// SYNCHRONOUSLY (RefreshAgentResidency) can wait for the probe already
 	// running instead of starting a second one. Created lazily under mu — a
@@ -250,7 +290,7 @@ func (a *agentResidency) awaitProbe() {
 // New builds a Server. The supported-task/family lists are computed here, not
 // per health request — the config cannot change under a running server.
 func New(runner Runner, jobs *Jobs, opts Options) *Server {
-	return &Server{
+	s := &Server{
 		runner:             runner,
 		jobs:               jobs,
 		opts:               opts,
@@ -262,7 +302,77 @@ func New(runner Runner, jobs *Jobs, opts Options) *Server {
 		chatLane:           ChatLaneAdmissible(opts.Cfg, opts.LoopbackListener),
 		rosterServes:       swapRosterServes,
 		rosterServedModels: swapRosterServedModels,
+		seatRunning:        swapSeatRunning,
+		setWriteDeadline:   controllerWriteDeadline,
 	}
+	s.admitting = s.admittingRuns
+	return s
+}
+
+// seatRunningClient reads /running on the node's own llama-swap. netguard's
+// transport for the same reason every outbound client here uses it, and a
+// timeout equal to the residency probe's: this runs on the background refresh,
+// never inside a health request.
+var seatRunningClient = &http.Client{Transport: netguard.SafeTransport(nil), Timeout: agentResidencyProbeTimeout}
+
+// swapSeatRunning is the production seat-state read: llama-swap's /running,
+// alias-resolved, and nothing else.
+func swapSeatRunning(ctx context.Context, endpoint, seat string) (seatload.Reading, error) {
+	return seatload.Running(ctx, seatRunningClient, endpoint, seat)
+}
+
+// admittingTTL bounds how often the health path re-reads the activity registry.
+// Health is polled every few seconds by every delegator, and the registry is a
+// directory: one read per window, never one per request — the same rule the
+// seat-rates store and the residency cache follow.
+const admittingTTL = 2 * time.Second
+
+// admittingRuns counts THIS PROCESS's agent runs that are still in their
+// ADMISSION phase, from the gpuactivity registry the harness already writes and
+// heartbeats (ADR 0041).
+//
+// WHICH PHASE, and why this source (register S-17): internal/pipeline registers
+// every contract run with `Phase: "admission"` and flips it to "running" at the
+// first planner step, so "admission" is precisely the window the diagnosis
+// measured — cordon → swap pre-flight → warm → coherence probe, up to 300 s
+// during which jobs.go has already flipped the job to `running` and the card is
+// idle. The job store cannot answer this: it knows a worker took the job, not
+// what that worker is waiting for.
+//
+// PID-scoped on purpose: the registry is machine-wide, and another process's
+// `agent_run` sitting in admission is not one of THIS node's jobs. It holds the
+// same seat, but it is not part of this node's queue accounting and must not
+// subtract from this node's saturation.
+func (s *Server) admittingRuns() int {
+	s.admittingMu.Lock()
+	defer s.admittingMu.Unlock()
+	if !s.admittingAt.IsZero() && time.Since(s.admittingAt) < admittingTTL {
+		return s.admittingN
+	}
+	s.admittingAt = time.Now()
+	s.admittingN = 0
+	s.activityOnce.Do(func() {
+		reg, err := gpuactivity.Open(s.opts.Cfg.GPULockPath, s.opts.Cfg.StateDir)
+		if err != nil {
+			// An unresolvable registry is not an error here: the count is
+			// advisory, and zero is the pre-0.127 behaviour.
+			return
+		}
+		s.activityReg = reg
+	})
+	if s.activityReg == nil {
+		return 0
+	}
+	pid := os.Getpid()
+	for _, run := range s.activityReg.List(time.Now()) {
+		// The phase string is internal/pipeline/agenttask.go's, verbatim: it
+		// registers a contract run as "admission" and flips it at the first
+		// planner step (gpuactivity.Run.Phase documents the whole ladder).
+		if run.PID == pid && run.Phase == "admission" {
+			s.admittingN++
+		}
+	}
+	return s.admittingN
 }
 
 // swapRosterServes is the production residency probe: one GET /v1/models via
@@ -311,6 +421,39 @@ func (s *Server) agentResident() bool {
 	return v
 }
 
+// recentAgentWallSamples is how many finished agent jobs recent_agent_wall_sec
+// is the median of. Eight: enough that one outlier cannot move the median, few
+// enough that the number describes the node NOW rather than an hour ago (the
+// store's terminal TTL is an hour).
+const recentAgentWallSamples = 8
+
+// medianSeconds is the median of a duration sample, in seconds rounded to
+// hundredths. An empty sample is 0 = "this node makes no claim", which the
+// payload omits.
+func medianSeconds(d []time.Duration) float64 {
+	if len(d) == 0 {
+		return 0
+	}
+	sorted := append([]time.Duration(nil), d...)
+	sort.Slice(sorted, func(a, b int) bool { return sorted[a] < sorted[b] })
+	mid := len(sorted) / 2
+	sec := sorted[mid].Seconds()
+	if len(sorted)%2 == 0 {
+		sec = (sorted[mid-1].Seconds() + sec) / 2
+	}
+	return math.Round(sec*100) / 100
+}
+
+// seatState reports the cached /running answer for the agent seat: loaded,
+// starting, and whether the read is KNOWN at all. Never probes itself — the
+// background residency refresh publishes it on the same TTL.
+func (s *Server) seatState() (loaded, starting, known bool) {
+	a := &s.agentRes
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.seatLoaded, a.seatStarting, a.seatKnown
+}
+
 // servedModels returns a copy of the cached roster id list, as of the last
 // residency refresh. It NEVER triggers a probe itself — agentResident()
 // already does, and handleHealth calls both, agentResident() first, so a
@@ -344,6 +487,8 @@ func (s *Server) refreshAgentResidency() {
 	var resident bool
 	var err error
 	var served []string
+	var seat seatload.Reading
+	var seatErr error = errRefreshIncomplete
 	// The publish is DEFERRED, not tail-appended: the probe below runs outside
 	// any lock, and clearing the latch only on the normal path meant a panic
 	// anywhere in that seam froze residency for the life of the process — never
@@ -356,6 +501,7 @@ func (s *Server) refreshAgentResidency() {
 		a.mu.Lock()
 		a.resident = resident && err == nil
 		a.served = served
+		a.seatLoaded, a.seatStarting, a.seatKnown = seat.Loaded, seat.Starting, seatErr == nil
 		a.at = time.Now()
 		a.inflight = false
 		a.idleCond().Broadcast() // release any synchronous waiter (RefreshAgentResidency)
@@ -385,6 +531,20 @@ func (s *Server) refreshAgentResidency() {
 		names = nil // unknown on failure — never keep a stale list, never flip resident
 	}
 	served = names
+
+	// The seat's LOAD state, from /running only (register C-05: nothing here may
+	// touch a path that could start the seat). Its own full-length timeout, for
+	// the same reason the served-models fetch has one: a slow roster must not
+	// starve the read after it. A failure publishes "unknown" — seat_loaded and
+	// seat_starting are then absent, never false.
+	if s.seatRunning != nil && strings.TrimSpace(s.opts.Cfg.Endpoint) != "" {
+		seatCtx, seatCancel := context.WithTimeout(context.Background(), agentResidencyProbeTimeout)
+		defer seatCancel()
+		seat, seatErr = s.seatRunning(seatCtx, s.opts.Cfg.Endpoint, s.agentSeat)
+		if seatErr != nil {
+			seat = seatload.Reading{}
+		}
+	}
 }
 
 // RefreshAgentResidency ensures ONE residency probe has published an answer
@@ -475,9 +635,42 @@ func (s *Server) EnableQueueHost(dbPath string) (*fleetqueue.Queue, error) {
 	return q, nil
 }
 
+// extendWrite pushes THIS handler's write deadline out to now+d.
+//
+// The blanket `WriteTimeout` below is armed by net/http at HEADER-READ time and
+// bounds every handler alike, whatever that handler's own budget is — which is
+// how a 30-second table came to truncate the chat lane's ten-minute proxy and
+// would truncate the long poll (register S-09). The blanket STAYS: it is the
+// floor that keeps a forgotten connection from pinning a goroutine, and the one
+// handler that needs longer says so for itself, per request, through
+// http.ResponseController.
+//
+// A ResponseWriter that does not support deadlines (httptest.ResponseRecorder,
+// and any middleware that wraps without unwrapping) returns ErrNotSupported.
+// That is NOT a request failure: the handler simply runs under whatever bound
+// the writer has, exactly as before. The seam is a field so a test can observe
+// what each handler ASKS for, which is the property this fixes.
+func (s *Server) extendWrite(w http.ResponseWriter, d time.Duration) {
+	if s.setWriteDeadline == nil {
+		return
+	}
+	_ = s.setWriteDeadline(w, time.Now().Add(d))
+}
+
+// controllerWriteDeadline is the production seam: the standard library's own
+// per-request deadline control.
+func controllerWriteDeadline(w http.ResponseWriter, t time.Time) error {
+	return http.NewResponseController(w).SetWriteDeadline(t)
+}
+
 // httpServer builds the *http.Server with the spec's timeout table
 // (ReadHeader 5s / Read 30s / Write 30s / Idle 120s). Split from Serve so the
 // timeouts are unit-assertable.
+//
+// WriteTimeout is the FLOOR, not the ceiling: handlers whose own budget exceeds
+// it (the chat lane's ChatProxyTimeout, the job long poll's `wait=`) extend
+// their own deadline through extendWrite. Removing the blanket instead would
+// leave every OTHER handler unbounded.
 func (s *Server) httpServer() *http.Server {
 	return &http.Server{
 		Handler:           s.Handler(),
@@ -542,6 +735,20 @@ type healthPayload struct {
 	// sum by construction).
 	JobsQueued  int `json:"jobs_queued"`  // admitted, waiting for a worker
 	JobsRunning int `json:"jobs_running"` // executing right now
+	// JobsAdmitting is the SUBSET of jobs_running whose worker has not started
+	// generating yet: it is still in the run's admission phase — cordon, swap
+	// pre-flight, warm, coherence probe — which the node budgets up to 300 s
+	// for (register S-17). Those jobs hold a capped execution slot while the
+	// card is idle, and `saturation.score` excludes them for exactly that
+	// reason: a cordon-waiter holds no card, and a delegator ranking on a score
+	// of 1.0 routes work AWAY from an idle box.
+	//
+	// Counted from the gpuactivity registry (ADR 0041) — the records this
+	// process wrote for its own runs, phase "admission" — and NOT from the job
+	// store, which knows a worker took the job but not what that worker is
+	// waiting for. Absent = none (or a node that cannot resolve its registry),
+	// which decodes to 0: the pre-0.127 reading.
+	JobsAdmitting int `json:"jobs_admitting,omitempty"`
 	// MaxConcurrentJobs is this node's execution limit (fleet_max_concurrent_jobs);
 	// 0 = unlimited. MaxQueueDepth is its admission ceiling on queue_depth
 	// (fleet_max_queue_depth); 0 = unlimited. A delegator could previously see
@@ -586,6 +793,21 @@ type healthPayload struct {
 	// a re-placeable 503 — the node stays up, keeps answering health, finishes
 	// what it holds, and is never "dropped" from the fleet for a measurement.
 	Lease *LeaseHealth `json:"lease,omitempty"`
+	// LeaseExclusive / LeaseDraining are the two lease facts a placement
+	// actually needs and `busy` never carried: whether the reservation FENCES
+	// the cards (no model may be loaded onto them for its duration) and whether
+	// it is still draining the seat. `busy` is a verdict about DECLARED time —
+	// it said "spoken for until 14:05" about a box whose cards were quiet, and
+	// 47 measured contracts burned 300 s each on it. These two say what the
+	// reservation is doing.
+	//
+	// Read from the same gpulease.Info the lease block is built from, published
+	// only while a lease is held and only when true (omitempty): a node with no
+	// lease, and every node one release behind, emits a byte-identical payload.
+	// Top-level rather than inside `lease` so a reader that wants the fence
+	// answer does not have to decode a nested block it otherwise ignores.
+	LeaseExclusive bool `json:"lease_exclusive,omitempty"`
+	LeaseDraining  bool `json:"lease_draining,omitempty"`
 	// Saturation (0.113.18): always published; see SaturationHealth.
 	Saturation *SaturationHealth `json:"saturation,omitempty"`
 	// Store is the store steward's last status (0.113.16), published only when
@@ -637,6 +859,35 @@ type healthPayload struct {
 	// imply — what a delegator sizes a RETRY on this seat by, instead of the
 	// first attempt's seat (D-46). nil until the seat has a sample.
 	SeatRate *SeatRateHealth `json:"seat_rate,omitempty"`
+	// SeatLoaded / SeatStarting are what llama-swap's /running says about the
+	// agent seat as of the last background refresh: loaded at all, and loaded
+	// but still LOADING (llama-swap holds `/upstream/<seat>/…` for the whole
+	// load — 4m08s on the 27B TP2 seat — so "starting" is not "ready", register
+	// D-92). A delegator can otherwise not tell a warm seat from one that will
+	// make its first request pay a cold load.
+	//
+	// POINTERS, not bare bools: a read that FAILED must stay distinguishable
+	// from a seat that is genuinely not loaded (absent ≠ idle, the rule the VRAM
+	// snapshot and the reclaim verdict already follow), and `omitempty` on a
+	// bool cannot express that. Both are set together from one /running read and
+	// both are nil when it could not be read.
+	//
+	// The read is /running ONLY and never `/upstream/<seat>/…`, which would
+	// LOAD an unloaded seat — register C-05, and the measured reason 54 status
+	// probes each blocked ~186 s.
+	SeatLoaded   *bool `json:"seat_loaded,omitempty"`
+	SeatStarting *bool `json:"seat_starting,omitempty"`
+	// RecentAgentWallSec is the MEDIAN wall of the last (up to) 8 agent jobs to
+	// finish on this node, in seconds — the completion signal a node with no
+	// seat_rate sample has no other way to publish (register S-36: without it a
+	// fresh box is indistinguishable from a fast one, and placement has nothing
+	// to rank on). The median, not the mean, so one 900-second outlier does not
+	// redefine the node.
+	//
+	// Computed from the same job map /fleet/jobs walks — no probe, no clock, no
+	// new state. Absent when this node has finished no agent job (a cold node
+	// makes no claim about its speed).
+	RecentAgentWallSec float64 `json:"recent_agent_wall_sec,omitempty"`
 	// ServedModels is the CACHED roster name list — canonical ids AND every
 	// alias (agentResidency.served, from swapclient.Roster.Names) —
 	// refreshed on the same TTL/single-flight as AgentResident. Absent/empty
@@ -725,6 +976,16 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	// two separate reads could straddle a job's accepted→running transition and
 	// publish a queue_depth that is not jobs_queued + jobs_running.
 	queued, running := s.jobs.Counts()
+	// Admission holds are read ONCE per health request, before the payload is
+	// assembled: the published `jobs_admitting` and the saturation numerator
+	// that excludes it must be the same number, exactly as queue_depth and its
+	// split are one walk of the store. The count is agent-lane-only — a node
+	// without the lane has no contract runs to be in admission — and skipping
+	// it there also keeps a media-only node off the registry directory.
+	admitting := 0
+	if s.agentLane && s.admitting != nil {
+		admitting = s.admitting()
+	}
 	payload := healthPayload{
 		NodeID:                s.opts.NodeID,
 		SchemaVersion:         1,
@@ -787,6 +1048,18 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		payload.ServedModels = s.servedModels()
 		payload.SeatBudget = s.seatBudget()
 		payload.SeatRate = s.seatRate()
+		// Seat load state and the admission count are agent-lane facts: they
+		// describe the seat this node runs contracts on, and a node with the
+		// lane off has neither. Both are cached reads — the seat state rides
+		// the residency refresh's TTL, the admission count its own — so this
+		// handler still never blocks on llama-swap or on a directory.
+		if loaded, starting, known := s.seatState(); known {
+			payload.SeatLoaded, payload.SeatStarting = &loaded, &starting
+		}
+		payload.JobsAdmitting = admitting
+		if med := medianSeconds(s.jobs.FinishedAgentWalls(recentAgentWallSamples)); med > 0 {
+			payload.RecentAgentWallSec = med
+		}
 		if s.opts.Cfg.Composite() {
 			payload.Tiers = s.opts.Cfg.Tiers
 			payload.Layers = s.layerRows(snap)
@@ -829,6 +1102,8 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 			// Any class, judged by REMAINING time (0.113.27): a long media
 			// reservation takes the card just as completely as a text one.
 			leaseBusy = payload.Lease.Busy
+			// What the reservation is DOING, beside what it declared.
+			payload.LeaseExclusive, payload.LeaseDraining = info.Exclusive, info.Draining
 		}
 	}
 	// Saturation (0.113.18): derived from the counters above and the two
@@ -840,7 +1115,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	// 0.113.27 the two were computed independently, so a draining or leased
 	// node still advertised an idle slot and sheddable work was dealt to it.
 	refusing := s.jobs.Draining() || leasedText || leaseBusy
-	sat := saturationOf(queued, running, s.jobs.RunningCapped(), payload.MaxConcurrentJobs, payload.MaxQueueDepth,
+	sat := saturationOf(queued, running, s.jobs.RunningCapped(), admitting, payload.MaxConcurrentJobs, payload.MaxQueueDepth,
 		refusing, s.jobs.IdleSlot() && !refusing)
 	payload.Saturation = &sat
 	// Store steward: a cached status; Status() itself starts a background
@@ -927,10 +1202,20 @@ type SaturationHealth struct {
 // publish score 1.0 and idle_slot true in the same payload whenever an
 // uncapped job was executing. The DEPTH term keeps using the all-jobs count,
 // because max_queue_depth bounds every admitted job regardless of capping.
-func saturationOf(queued, running, runningCapped, maxConcurrent, maxDepth int, refusing, idleSlot bool) SaturationHealth {
+// admitting (register S-17) is subtracted from the concurrency NUMERATOR only:
+// a job whose worker is still cordon-waiting, warming or probing holds a slot
+// but no card, and 10 of 47 measured lease-timeout rows happened on a box with
+// zero cards busy. `high` and `idle_slot` are deliberately UNCHANGED — the slot
+// really is taken, a new dispatch really would queue behind it, and those two
+// describe admission, not utilization.
+func saturationOf(queued, running, runningCapped, admitting, maxConcurrent, maxDepth int, refusing, idleSlot bool) SaturationHealth {
 	var score float64
 	if maxConcurrent > 0 {
-		score = float64(runningCapped) / float64(maxConcurrent)
+		generating := runningCapped - admitting
+		if generating < 0 {
+			generating = 0 // an admission hold from another lane; never negative
+		}
+		score = float64(generating) / float64(maxConcurrent)
 	}
 	if maxDepth > 0 {
 		if s := float64(queued+running) / float64(maxDepth); s > score {
@@ -1511,10 +1796,62 @@ func (s *Server) admit(w http.ResponseWriter, r *http.Request, env dispatchEnvel
 	writeAck(w, env.JobID)
 }
 
+// MaxJobWaitSec caps `GET /fleet/jobs/{id}?wait=<seconds>`.
+//
+// TWELVE, and the ceiling is not a taste: it MUST stay below the delegator's
+// pollRequestTimeout (15 s, internal/delegate/run.go), which bounds ONE poll
+// exchange client-side. A server-side wait at or above it cancels every long
+// poll from the client end — the delegator would abandon a connection this node
+// was about to answer, and the feature would read as a transport failure rather
+// than as the completion event it is. 12 + jobWaitWriteSlack (2 s) = 14 s, one
+// second inside that bound, and the pairing is pinned by a test in the external
+// test package (which can read the delegator's own source).
+const MaxJobWaitSec = 12
+
+// jobWaitWriteSlack is what the long poll adds to its own wait when it extends
+// the handler's write deadline: the wait itself, plus room to serialize and
+// write the answer after it ends.
+const jobWaitWriteSlack = 2 * time.Second
+
+// jobWaitUnit is the second a `wait=` value is measured in. One real second in
+// production; a test compresses it so the CAP can be observed without spending
+// MaxJobWaitSec of wall clock per assertion. A var for that reason only —
+// production never mutates it (the same discipline as the delegator's
+// pollSecond).
+var jobWaitUnit = time.Second
+
+// jobWaitOf reads `?wait=<seconds>`, clamped to MaxJobWaitSec.
+//
+// Read LENIENTLY, exactly like the envelope's `priority`: absent, empty,
+// negative or unparseable is 0 = NO WAIT, which is the pre-0.127 route byte for
+// byte. A caller asking for more than the cap gets the cap rather than a 400 —
+// the parameter is a hint about how long the caller is willing to hold a
+// connection, and the node's own bound is not the caller's business to satisfy.
+func jobWaitOf(r *http.Request) time.Duration {
+	q := strings.TrimSpace(r.URL.Query().Get("wait"))
+	if q == "" {
+		return 0
+	}
+	n, err := strconv.Atoi(q)
+	if err != nil || n <= 0 {
+		return 0
+	}
+	if n > MaxJobWaitSec {
+		n = MaxJobWaitSec
+	}
+	return time.Duration(n) * jobWaitUnit
+}
+
 // handleJob is the poll path: the job's current wire state, or 404 for an id
 // we never acked (or already evicted).
+//
+// With `?wait=<seconds>` it is a LONG poll: an already-terminal job answers at
+// once, and anything else blocks on the store's terminal broadcast until the
+// job finishes or the wait elapses (register S-19). The wait is applied AFTER
+// the auth gate, so an unauthorized caller can never hold a connection open.
 func (s *Server) handleJob(w http.ResponseWriter, r *http.Request) {
-	view, ok := s.jobs.Get(r.PathValue("id"))
+	id := r.PathValue("id")
+	view, ok := s.jobs.Get(id)
 	if !ok {
 		writeError(w, http.StatusNotFound, "unknown job")
 		return
@@ -1533,6 +1870,16 @@ func (s *Server) handleJob(w http.ResponseWriter, r *http.Request) {
 	if (view.Agent || view.Gated) && s.opts.Cfg.FleetAuthToken != "" && !bearerOK(r, s.opts.Cfg.FleetAuthToken) {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
+	}
+	if wait := jobWaitOf(r); wait > 0 && !Terminal(view.State) {
+		// This handler is now allowed to outlive the blanket WriteTimeout,
+		// which Go arms at header-read for every handler alike (register S-09).
+		// Without the extension the answer this poll is WAITING for would be
+		// cut as it was written.
+		s.extendWrite(w, wait+jobWaitWriteSlack)
+		if v, still := s.jobs.WaitTerminal(r.Context(), id, wait); still {
+			view = v
+		}
 	}
 	writeJobView(w, http.StatusOK, view)
 }

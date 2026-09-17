@@ -121,13 +121,17 @@ func TestHealthPublishesTiersAndLayerRowsOnlyOnACompositeLane(t *testing.T) {
 		t.Fatalf("the dormant display layer must publish admissible=false: %v", display)
 	}
 
-	// Cached: 20 more requests must not cost one more roster GET (two per TTL
-	// cycle — rosterServes + rosterServedModels — and the rows ride those).
+	// Cached: 20 more requests must not cost one more GET. Four per TTL cycle
+	// against THIS fake, which counts every path: rosterServes +
+	// rosterServedModels, plus the seat-state read's own roster fetch (it
+	// resolves the seat's alias) and its /running read. The layer rows still
+	// add none of them — they ride the residency refresh, and the count is flat
+	// across 20 further requests, which is the property under test.
 	for i := 0; i < 20; i++ {
 		_ = do(t, s, http.MethodGet, "/fleet/health", "", nil)
 	}
-	if n := probes.Load(); n != 2 {
-		t.Fatalf("roster GETs = %d, want exactly 2: the layer rows must never add a probe", n)
+	if n := probes.Load(); n != 4 {
+		t.Fatalf("llama-swap GETs = %d, want exactly 4 (one refresh cycle): the layer rows must never add a probe", n)
 	}
 
 	// Lane OFF on the same composite config: nothing new is published (a node

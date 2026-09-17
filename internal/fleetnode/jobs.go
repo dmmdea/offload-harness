@@ -549,11 +549,98 @@ func (j *Jobs) execute(id string, run func(context.Context) (json.RawMessage, er
 func (j *Jobs) Get(id string) (*JobView, bool) {
 	j.mu.RLock()
 	defer j.mu.RUnlock()
+	return j.viewLocked(id)
+}
+
+// viewLocked builds the poll copy. Caller holds mu (read or write) — WaitTerminal
+// holds the WRITE lock (cond.Wait requires it) and must not call Get, which
+// would take the read lock on top of it.
+func (j *Jobs) viewLocked(id string) (*JobView, bool) {
 	jb, ok := j.m[id]
 	if !ok {
 		return nil, false
 	}
 	return &JobView{ID: id, State: jb.state, Data: jb.data, Error: jb.err, Agent: jb.agent, Gated: jb.gated, WallSec: jb.wallSec}, true
+}
+
+// Terminal reports whether a state is one a job never leaves (write-once).
+func Terminal(s JobState) bool { return s == JobDone || s == JobError }
+
+// WaitTerminal is Get with a completion EVENT: it returns at once when the job
+// is already terminal (or unknown), and otherwise blocks until the job reaches
+// a terminal state, `d` elapses, or ctx is done — whichever comes first. The
+// returned view is always the job's state at that moment, terminal or not, so a
+// caller that timed out still answers its own caller with the truth.
+//
+// It is the server's long-poll primitive (register S-19). The store already had
+// everything needed: `finish` writes the terminal state and broadcasts, and the
+// drain's mark does the same — nothing new observes the job, and no goroutine is
+// spawned per job. Before this, the only way to learn a job had finished was to
+// ask again in three seconds, and 236 measured contract rows spent exactly 300 s
+// doing nothing but that.
+//
+// A cond wait cannot be cancelled, so ONE goroutine per waiter broadcasts when
+// the wait's own context ends; every waiter then re-checks its own predicate and
+// this one returns. That is the standard shape, and it is bounded by d.
+func (j *Jobs) WaitTerminal(ctx context.Context, id string, d time.Duration) (*JobView, bool) {
+	if d <= 0 {
+		return j.Get(id)
+	}
+	wctx, cancel := context.WithTimeout(ctx, d)
+	defer cancel()
+	stop := make(chan struct{})
+	go func() {
+		select {
+		case <-wctx.Done():
+			j.mu.Lock()
+			j.cond.Broadcast()
+			j.mu.Unlock()
+		case <-stop:
+		}
+	}()
+	defer close(stop)
+
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	for {
+		view, ok := j.viewLocked(id)
+		if !ok || Terminal(view.State) || wctx.Err() != nil {
+			return view, ok
+		}
+		j.cond.Wait()
+	}
+}
+
+// FinishedAgentWalls is the wall (finish − start) of the last n AGENT jobs to
+// finish, newest first — the completion signal `recent_agent_wall_sec` is the
+// median of (register S-36). It walks the same map /fleet/jobs walks, under the
+// same read lock, and reads only fields that map already carries: no clock, no
+// probe, and nothing a node without samples has to invent.
+func (j *Jobs) FinishedAgentWalls(n int) []time.Duration {
+	j.mu.RLock()
+	defer j.mu.RUnlock()
+	type row struct {
+		at   time.Time
+		wall time.Duration
+	}
+	rows := make([]row, 0, len(j.m))
+	for _, jb := range j.m {
+		if !jb.agent || jb.finishedAt.IsZero() || jb.startedAt.IsZero() {
+			continue
+		}
+		if w := jb.finishedAt.Sub(jb.startedAt); w > 0 {
+			rows = append(rows, row{at: jb.finishedAt, wall: w})
+		}
+	}
+	sort.SliceStable(rows, func(a, b int) bool { return rows[a].at.After(rows[b].at) })
+	if n > 0 && len(rows) > n {
+		rows = rows[:n]
+	}
+	out := make([]time.Duration, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, r.wall)
+	}
+	return out
 }
 
 // SetWall records the wall (seconds) the job's run reported it is executing
@@ -697,6 +784,10 @@ func (j *Jobs) DrainAndStop(timeout time.Duration) {
 			}
 		}
 	}
+	// Shutdown is a terminal transition like any other: a long poll parked on
+	// one of these jobs must learn the verdict now, not sit out its wait against
+	// a process that is already exiting.
+	j.cond.Broadcast()
 	j.mu.Unlock()
 	for _, f := range dropped {
 		f()
@@ -734,6 +825,11 @@ func (j *Jobs) finish(id string, data json.RawMessage, errStr string) {
 	jb.terminalAt = j.now()
 	jb.finishedAt = jb.terminalAt
 	fn := j.onFinish
+	// The terminal transition IS the event a long poll waits on (WaitTerminal).
+	// execute() broadcasts too, but only for the slot it frees and only on the
+	// path that ran a closure — this one fires wherever a job turns terminal,
+	// so the wake can never depend on which caller wrote the state.
+	j.cond.Broadcast()
 	j.mu.Unlock()
 	// OUTSIDE the lock, explicitly: a `defer fn()` registered after `defer
 	// j.mu.Unlock()` runs BEFORE the unlock (LIFO), and a callee that reads the
