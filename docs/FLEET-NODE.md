@@ -48,7 +48,7 @@ endpoint. A dispatch is now **admitted** and waits its turn.
 
 | Key | Bounds | Default | Refuses? |
 |---|---|---|---|
-| `fleet_max_queue_depth` | `accepted` + `running` (health's `queue_depth`), **all task types** | 32 | Yes — `503 queue full` |
+| `fleet_max_queue_depth` | `accepted` + `running` (health's `queue_depth`), **all task types** | 2x `fleet_max_concurrent_jobs` (8 with the default 4 workers — register S-04/C-25) | Yes — `503 queue full` |
 | `fleet_max_concurrent_jobs` | jobs actually executing, **`agent` only** | 4 | No — extra jobs WAIT in `accepted` |
 
 **The concurrency cap governs the text lane only.** It exists to protect one thing — the shared
@@ -73,12 +73,16 @@ counts `accepted` + `running` — so the refusal boundary did not move; what it 
 is double as the concurrency limit. Under any setting, actual concurrency is now less than
 or equal to what the same config produced in 0.99.0.
 
-A **busy node is not a full node**: with `fleet_max_concurrent_jobs: 4` and
-`fleet_max_queue_depth: 32`, the 5th dispatch is accepted and queued, and only the 33rd is
+A **busy node is not a full node**: with `fleet_max_concurrent_jobs: 4` and its default
+`fleet_max_queue_depth: 8`, the 5th dispatch is accepted and queued, and only the 9th is
 refused. The refusal check runs before request materialization; re-acks of jobs this node
-owns and result polls are never refused by it. The queue-depth default is deliberately
-generous (a full `agent_delegate` call is 8 subtasks; the delegator runs 4 at a time), and
-an over-tight cap suppressing real use is the worse defect.
+owns and result polls are never refused by it. The default is sized FROM the concurrency the
+node actually has — twice its worker count — rather than a flat number regardless of box
+size: a node admitting 32 deep behind 4 workers could pile up 28 jobs with no hope of
+starting inside any wall a caller would wait out (register S-04/C-25; 236 measured contracts
+died at the delegator's 5-minute queue deadline having never started). An explicit
+`fleet_max_queue_depth` still wins outright, and an over-tight cap suppressing real use
+remains the worse defect than a generous one.
 
 > **Since 0.101.0 the `503` sheds to a sibling** — within a bound, and only for the refusals
 > that are about THIS node. `internal/delegate` re-places a refused subtask: another eligible

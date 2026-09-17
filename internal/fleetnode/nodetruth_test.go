@@ -330,6 +330,126 @@ func TestHealthCountsAdmittingJobsOutOfTheSaturationScore(t *testing.T) {
 	}
 }
 
+// TestHealthQueueWaitEstimateCountsAdmittingAsRunning is item 4/S-04's red
+// test, the queue-wait twin of the saturation test above — and deliberately
+// the OPPOSITE conclusion. saturation.score subtracts an admitting job
+// because no card is busy; queue_wait_estimate_sec must NOT subtract it,
+// because the WORKER SLOT is still taken — a second contract genuinely queues
+// behind it and gets no card either, cordon-waiter or not. Built on the same
+// real gpuactivity registration S-17's test uses (not a hand-inserted count),
+// so this exercises the actual admission-phase machinery, not just the
+// arithmetic.
+func TestHealthQueueWaitEstimateCountsAdmittingAsRunning(t *testing.T) {
+	state := t.TempDir()
+	cfg := agentHealthCfg(fakeSwapWithRunning(t, "gemma-4-e4b", "offload-e4b", "ready", true).URL)
+	cfg.FleetMaxConcurrentJobs = 1
+	cfg.FleetMaxQueueDepth = -1 // only the concurrency term is under test
+	cfg.StateDir = state
+	s, jobs := newTestServer(t, cfg, &fakeRunner{}, authOpts(true))
+
+	// One FINISHED agent job, wall = 40s exactly, seeded directly (the same
+	// technique TestFinishedAgentWallsAreTheAgentJobsNewestFirst uses) so the
+	// wall sample is deterministic rather than a real 40s sleep.
+	now := time.Now()
+	jobs.mu.Lock()
+	jobs.m["seed"] = &job{state: JobDone, agent: true, startedAt: now, finishedAt: now.Add(40 * time.Second)}
+	jobs.mu.Unlock()
+
+	// adm-1: the worker parked in admission (blocked, registered "admission").
+	finish := blockingJob(t, jobs, "adm-1", AcceptSpec{Agent: true, Task: "agent-run"})
+	defer finish()
+	act := gpuactivity.Start(cfg.GPULockPath, cfg.StateDir, gpuactivity.Run{
+		Seat: "offload-e4b", Kind: "contract", Origin: "testnode", Phase: "admission"})
+	if act == nil {
+		t.Fatal("could not register the admission run")
+	}
+	defer act.End()
+
+	// adm-2: a SECOND agent job that genuinely queues behind the one capped
+	// worker adm-1 already holds.
+	if !jobs.Admit("adm-2", AcceptSpec{Agent: true, Task: "agent-run"}, func(ctx context.Context) (json.RawMessage, error) {
+		return json.RawMessage(`{}`), nil
+	}) {
+		t.Fatal("admit adm-2 refused")
+	}
+
+	m := healthAfterProbe(t, s)
+	if m["jobs_admitting"] != float64(1) {
+		t.Fatalf("jobs_admitting = %v, want 1", m["jobs_admitting"])
+	}
+	if m["jobs_running"] != float64(1) || m["jobs_queued"] != float64(1) {
+		t.Fatalf("jobs_running/jobs_queued = %v/%v, want 1/1", m["jobs_running"], m["jobs_queued"])
+	}
+	v, ok := m["queue_wait_estimate_sec"].(float64)
+	if !ok {
+		t.Fatalf("queue_wait_estimate_sec absent with a worker taken (in admission) and one job genuinely queued: %v", m)
+	}
+	if v != 40 {
+		t.Fatalf("queue_wait_estimate_sec = %v, want 40 (excess 1 x wall 40s / maxConcurrent 1) — an admitting job still holds the worker slot, unlike saturation.score which subtracts it", v)
+	}
+}
+
+// TestHealthQueueWaitEstimateIgnoresUncappedJobs is review round 1's BLOCKER
+// red test: queueWaitEstimateSec/retryAfterFor divided ALL jobs (Counts /
+// QueueDepth — capped + uncapped media/stt/pipeline runs) by maxConcurrent,
+// which bounds only the CAPPED set — exactly the class of bug `saturationOf`
+// was already fixed for (S-17) and `IdleSlot`'s own fix in this PR repeats
+// the lesson of. 10 uncapped renders running plus 4 fully IDLE agent slots
+// must read as an idle agent lane (estimate 0/absent), not a 90s wait.
+func TestHealthQueueWaitEstimateIgnoresUncappedJobs(t *testing.T) {
+	base := time.Date(2026, 9, 17, 10, 0, 0, 0, time.UTC)
+	jobs := newJobs(time.Hour, func() time.Time { return base }, time.Hour, 4) // maxConcurrent=4
+	t.Cleanup(func() { jobs.DrainAndStop(time.Second) })
+	jobs.mu.Lock()
+	jobs.m["done-agent"] = &job{state: JobDone, agent: true, startedAt: base, finishedAt: base.Add(60 * time.Second)}
+	for i := 0; i < 10; i++ {
+		jobs.m[fmt.Sprintf("uncapped-%d", i)] = &job{state: JobRunning, capped: false}
+	}
+	jobs.mu.Unlock()
+
+	cfg := imageCfg()
+	cfg.FleetMaxConcurrentJobs = 4
+	s := New(&fakeRunner{}, jobs, Options{NodeID: "testnode", Snapshot: goodSnapshot,
+		Footprints: func() []FootprintEntry { return nil }, GpuVendor: "nvidia", GpuArch: "ampere", Cfg: cfg})
+
+	m := decodeMap(t, do(t, s, http.MethodGet, "/fleet/health", "", nil))
+	if v, ok := m["queue_wait_estimate_sec"]; ok {
+		t.Fatalf("queue_wait_estimate_sec = %v with 4 IDLE agent slots (10 running jobs are all UNCAPPED renders that never contend for a capped slot): want absent/0, not a wait inflated by unrelated media load", v)
+	}
+}
+
+// TestHealthQueueWaitEstimateCappedControlArm is the control for the test
+// above, pinning the review's exact numbers: 4 capped workers all running, 2
+// more capped jobs genuinely queued behind them, wall 60s -> 30s (excess 2 x
+// 60 / maxConcurrent 4).
+func TestHealthQueueWaitEstimateCappedControlArm(t *testing.T) {
+	base := time.Date(2026, 9, 17, 10, 0, 0, 0, time.UTC)
+	jobs := newJobs(time.Hour, func() time.Time { return base }, time.Hour, 4) // maxConcurrent=4
+	t.Cleanup(func() { jobs.DrainAndStop(time.Second) })
+	jobs.mu.Lock()
+	jobs.m["done-agent"] = &job{state: JobDone, agent: true, startedAt: base, finishedAt: base.Add(60 * time.Second)}
+	for i := 0; i < 4; i++ {
+		jobs.m[fmt.Sprintf("running-%d", i)] = &job{state: JobRunning, capped: true}
+	}
+	jobs.m["queued-0"] = &job{state: JobAccepted, capped: true}
+	jobs.m["queued-1"] = &job{state: JobAccepted, capped: true}
+	jobs.mu.Unlock()
+
+	cfg := imageCfg()
+	cfg.FleetMaxConcurrentJobs = 4
+	s := New(&fakeRunner{}, jobs, Options{NodeID: "testnode", Snapshot: goodSnapshot,
+		Footprints: func() []FootprintEntry { return nil }, GpuVendor: "nvidia", GpuArch: "ampere", Cfg: cfg})
+
+	m := decodeMap(t, do(t, s, http.MethodGet, "/fleet/health", "", nil))
+	v, ok := m["queue_wait_estimate_sec"].(float64)
+	if !ok {
+		t.Fatalf("queue_wait_estimate_sec absent with 4 capped running + 2 capped queued and a 60s wall: %v", m)
+	}
+	if v != 30 {
+		t.Fatalf("queue_wait_estimate_sec = %v, want 30 (excess 2 x wall 60s / maxConcurrent 4)", v)
+	}
+}
+
 // TestHealthReportsTheRecentAgentWall is S-36's red test: a node with no
 // seat_rate sample publishes no completion signal at all, so a fresh box is
 // indistinguishable from a fast one. The median of the last finished agent jobs
@@ -369,6 +489,63 @@ func TestHealthReportsTheRecentAgentWall(t *testing.T) {
 	}
 	if v < 0.2 || v > 0.5 {
 		t.Fatalf("recent_agent_wall_sec = %v, want the MEDIAN of 0.1/0.6/0.3 s (~0.3) — not the mean, not the newest", v)
+	}
+}
+
+// TestHealthPublishesQueueWaitEstimate is item 3/S-04's red test: a delegator
+// reads ONE number the node computed, off the SAME arithmetic the "queue
+// full" 503's Retry-After uses, but over the CURRENT queued+running — so it
+// is visible before any dispatch is ever refused, not only after.
+func TestHealthPublishesQueueWaitEstimate(t *testing.T) {
+	base := time.Date(2026, 9, 17, 10, 0, 0, 0, time.UTC)
+	jobs := newJobs(time.Hour, func() time.Time { return base }, time.Hour, 1) // maxConcurrent=1
+	t.Cleanup(func() { jobs.DrainAndStop(time.Second) })
+	jobs.mu.Lock()
+	// One FINISHED agent job, wall = 60s exactly.
+	jobs.m["done-agent"] = &job{state: JobDone, agent: true, startedAt: base, finishedAt: base.Add(60 * time.Second)}
+	// depth 3 (1 running + 2 queued) against maxConcurrent 1: excess = 2.
+	jobs.m["running-1"] = &job{state: JobRunning, capped: true}
+	jobs.m["queued-1"] = &job{state: JobAccepted, capped: true}
+	jobs.m["queued-2"] = &job{state: JobAccepted, capped: true}
+	jobs.mu.Unlock()
+
+	cfg := imageCfg()
+	cfg.FleetMaxConcurrentJobs = 1
+	cfg.FleetMaxQueueDepth = -1
+	s := New(&fakeRunner{}, jobs, Options{NodeID: "testnode", Snapshot: goodSnapshot,
+		Footprints: func() []FootprintEntry { return nil }, GpuVendor: "nvidia", GpuArch: "ampere", Cfg: cfg})
+
+	m := decodeMap(t, do(t, s, http.MethodGet, "/fleet/health", "", nil))
+	v, ok := m["queue_wait_estimate_sec"].(float64)
+	if !ok {
+		t.Fatalf("queue_wait_estimate_sec absent with 2 jobs queued behind 1 worker and a 60s wall sample: %v", m)
+	}
+	if v != 120 {
+		t.Fatalf("queue_wait_estimate_sec = %v, want 120 (excess 2 x wall 60s / maxConcurrent 1)", v)
+	}
+}
+
+// TestHealthOmitsQueueWaitEstimateWithAFreeWorker: "0 when a worker is free"
+// is the honest number, and the field's omitempty then hides it — exactly
+// like recent_agent_wall_sec's own "a cold node makes no claim" rule, not a
+// floor clamped up from a small positive value.
+func TestHealthOmitsQueueWaitEstimateWithAFreeWorker(t *testing.T) {
+	base := time.Date(2026, 9, 17, 10, 0, 0, 0, time.UTC)
+	jobs := newJobs(time.Hour, func() time.Time { return base }, time.Hour, 4) // maxConcurrent=4
+	t.Cleanup(func() { jobs.DrainAndStop(time.Second) })
+	jobs.mu.Lock()
+	jobs.m["done-agent"] = &job{state: JobDone, agent: true, startedAt: base, finishedAt: base.Add(60 * time.Second)}
+	jobs.m["running-1"] = &job{state: JobRunning, capped: true} // 1 of 4 workers busy: free capacity
+	jobs.mu.Unlock()
+
+	cfg := imageCfg()
+	cfg.FleetMaxConcurrentJobs = 4
+	s := New(&fakeRunner{}, jobs, Options{NodeID: "testnode", Snapshot: goodSnapshot,
+		Footprints: func() []FootprintEntry { return nil }, GpuVendor: "nvidia", GpuArch: "ampere", Cfg: cfg})
+
+	body := do(t, s, http.MethodGet, "/fleet/health", "", nil).Body.String()
+	if strings.Contains(body, "queue_wait_estimate_sec") {
+		t.Fatalf("a node with a free worker published queue_wait_estimate_sec: %s", body)
 	}
 }
 

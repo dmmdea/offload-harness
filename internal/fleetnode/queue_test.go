@@ -363,6 +363,10 @@ func TestDispatchMediaLaneIsNotConcurrencyCapped(t *testing.T) {
 	}}
 	cfg := imageCfg()
 	cfg.FleetMaxConcurrentJobs = 1 // would cap the agent lane to one
+	// This test is about the CONCURRENCY cap only — the queue-depth cap
+	// (unrelated, and now sized from concurrency: S-04/C-25) must not be what
+	// refuses the third dispatch, so it is unlimited here.
+	cfg.FleetMaxQueueDepth = -1
 	s, _ := newTestServer(t, cfg, blocked, nil)
 
 	for _, id := range []string{"ml-1", "ml-2", "ml-3"} {
