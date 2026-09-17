@@ -7,6 +7,19 @@ Versioning: [SemVer](https://semver.org/).
 ## [Unreleased]
 
 ### Changed
+- **`blackwell-16` declares its vLLM seat, measured on an RTX 5060 Ti** — ADR 0048 Amendment 1. Same checkpoint as
+  ampere-16 (Qwen3.8-27B 3-bit GSQ) at 49,152 @ util 0.92 (KV 76,314 tokens, 1.55x), 27.75 tok/s single / 64.39 at 4
+  streams, digest-8 8/8 at the bound lane, blind 8.53 (level with the A2's 8.46). **`kv_cache_dtype` is `fp8` (e4m3),
+  not the A2's `fp8_e5m2`:** e5m2 through FlashInfer returns NaN tokens on this card under vLLM 0.29 (two 0/8 runs,
+  raw completions `<tool_call>!!!!…`) while e4m3 on the same backend is coherent — isolated one variable per arm and
+  pinned by `blackwell16_bound_lane_test.go`. The coverage gate now reads 4 of 16 tiers seated, 12 owing.
+- **WSL2 launches of a vLLM >= 0.29 venv pin the V1 model runner** (`seat_fg.sh`): 0.29's default V2 runner needs
+  UVA, which WSL2 reports unavailable; with `VLLM_WSL2_ENABLE_PIN_MEMORY=1` it starts and dies in kernel warm-up
+  (`CUDA error: invalid device ordinal`). `VLLM_USE_V2_MODEL_RUNNER=0` is exported when `/proc/version` says microsoft
+  AND the venv's vLLM dist-info is >= 0.29, unless the env file already set it. 0.28 is deliberately untouched (its V2
+  runner runs on WSL2; the production pair seat logs it) and native Linux launches are untouched at any version.
+  blackwell-16's `config_seed.agent_max_tokens` is seeded 4,096 for the llama.cpp fallback lane (not a 26B measurement;
+  masterplan D-119 measures it).
 - **`ampere-16`'s vLLM seat is Qwen3.8-27B 3-bit GSQ** — ADR 0049. `qwen3.5-4b-vllm` ->
   `qwen38-27b-gsq-vllm` (ISTA-DASLab/Qwen3.8-27B-3Bit-GSQ, 11.85 GB, `max_model_len` 49,152, util 0.92).
   ADR 0047 recorded a 27B-under-vLLM on one 16 GB card as impossible; that was a SEARCH error twice over —

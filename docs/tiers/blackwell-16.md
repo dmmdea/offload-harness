@@ -16,8 +16,37 @@
 
 ## Agent seat
 
-This tier declares no persistent vLLM agent seat: the agent lane runs on the
-llama.cpp seat named by `agent_model` above, in the tier's own llama-swap config.
+This tier declares a persistent **vLLM** agent seat, and the installer RENDERS it — the
+llama-swap entry, the start/stop wrappers and the harness `agent_model` binding all derive from
+one declaration, so the seat and the lane routing to it cannot disagree.
+
+| setting | value | what it controls |
+|---|---|---|
+| id | `qwen38-27b-gsq-vllm` | the llama-swap model id, `--served-model-name`, and what `agent_model` binds to |
+| cards | `0` | `CUDA_VISIBLE_DEVICES`, in PCI order |
+| tensor_parallel | 0 | `--tensor-parallel-size`; must equal how many cards are listed |
+| max_model_len | 49152 | the served window |
+| gpu_memory_utilization | 0.92 | the engine's share of the card — chosen WITH the seat's co-residents in mind, not alone |
+| kv_cache_dtype | `fp8` | KV precision — backend-dependent, not free everywhere |
+| ttl_seconds | 300 | idle window before the seat unloads and frees its cards |
+| launch | `—` | which artifact set starts it |
+| fallback | `gemma-4-26b-agent` | the llama.cpp seat a box WITHOUT the vLLM venv serves instead |
+
+### Bound lane
+
+When this seat is the box's agent lane, the loop runs it at the settings it was
+measured at (ADR 0049 Amendment 3) — the installer binds these beside `agent_model`; the
+tier's `config_seed` values stay for the fallback seat.
+
+| setting | value |
+|---|---|
+| agent_max_tokens | 4096 |
+| agent_thinking | `off` |
+| agent_sampling | temperature=0.7 top_p=0.8 top_k=20 presence_penalty=1.5 |
+| agent_timeout_sec | 900 |
+| agent_seat_tok_s | 27.75 — seeds the D-03 auto wall until the seat-rates store has a sample |
+
+> NVIDIA GeForce RTX 5060 Ti 16 GB (Blackwell sm_120; the Qube's headless card, PCI index 2, CUDA_VISIBLE_DEVICES pinned to it), vLLM 0.29.0 + flashinfer 0.6.18 + the checkpoint's embedding patch, V1 model runner (WSL2), storeless, 2026-09-16/17. Qwen3.8-27B 3-bit GSQ, the same checkpoint ampere-16 seats (ADR 0049), measured on THIS silicon rather than copied -- and the copy would have been wrong: the A2's launch line (kv_cache_dtype fp8_e5m2) produces NaN tokens on this card under vLLM 0.29 (raw completions `<tool_call>!!!!...` at 8,580 prompt tokens, a hallucinated prompt at 290; every digest-8 contract deferred unparsed_tool_call in two runs). Isolated one variable per arm: transformers version, the flashinfer sampler flag and prefix caching all irrelevant; TRITON_ATTN refuses the model; bf16 KV (auto -> FLASH_ATTN) coherent; fp8 (e4m3fn) on the same FLASHINFER backend coherent. So kv_cache_dtype is fp8 here and never fp8_e5m2. OPERATING POINT: max_model_len 49,152 at util 0.92 -- model 10.4 GiB, KV 2.84 GiB = 76,314 tokens (1.55x), 14,024 of 16,311 MiB (65,536 @ 0.92 also fits: 80,554 tokens, 1.23x). Single-stream 27.75 tok/s, TTFT p50 0.43 s, 4-stream aggregate 64.39 tok/s (16.1/req, 0 failed); digest-8 at the bound lane (thinking off / 4,096 / 900 s / vendor sampling) 8/8, 0 deferred, 364 s for all eight. Blind quality (Opus judge, 8 packets x 3 lenses, positions balanced): 8.53 overall (accuracy 9.30, specificity 8.80, coverage 8.29; 2 possible / 3 minor fabrication flags, the same count as the llama.cpp arm) -- level with the same checkpoint on the A2 (8.46) and below the llama.cpp IQ3_S+MTP arm (9.30, SEPARATED, 23/24). agent_seat_tok_s 27.75 seeds the D-03 auto wall. Cache server: none -- measured storeless; LMCache 0.5.4's MP connector rejects vLLM 0.29's kv_layout (D-117). On a WSL2 box with vLLM >= 0.29 the launcher pins the V1 runner (seat_fg.sh, version-gated: 0.28's V2 runner runs on WSL2; VLLM_WSL2_ENABLE_PIN_MEMORY=1 lets 0.29's V2 runner start and it then dies in kernel warm-up with CUDA error: invalid device ordinal). config_seed.agent_max_tokens 4,096 is the llama.cpp fallback lane's budget, NOT a 26B measurement (masterplan D-119). The tier's llama.cpp agent lane (gemma-4-26b-agent) stays the fallback. Record: 'Benchmarks and Optimizations/2026-09-16-16gb-tier-pass/' (blackwell-16/, raw-toolcall-test/, judge-27b-49k-bw/, live-cutover/README.md).
 
 ## Media
 
@@ -60,6 +89,7 @@ here so they are never mistaken for a media capability:
 
 | key | value |
 |---|---|
+| `agent_max_tokens` | `4096` |
 | `agent_model` | `gemma-4-26b-agent` |
 
 ## Operator notes

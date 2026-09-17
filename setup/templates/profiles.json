@@ -121,7 +121,8 @@
         "videogen_height": 720,
         "videogen_frames": 81,
         "videogen_timeout_sec": 5400,
-        "agent_model": "gemma-4-26b-agent"
+        "agent_model": "gemma-4-26b-agent",
+        "agent_max_tokens": 4096
       },
       "notes": "Config #1 (5060 Ti 16GB, Blackwell sm_120). 26B resident full-GPU (-ngl 99). REQUIRES the Blackwell CUDA-12.8 sm_120 build (Task H4) - the pinned 12.4 asset lacks sm_120 and the 13.x asset segfaults the MMQ kernel into a ~5.6x-slower cuBLAS fallback. H3 may push ctx to 64K with q8. config_seed: quality-first media bindings attributed to this exact tier [see the MEASURED-STATUS CLARIFICATION at the end of this note — this string simultaneously claimed PROVEN, PROJECTED, and 'informed by a LIVE REFERENCE, not a runtime measurement' about the same seat] (bf16 O1 = 3.9min/2048 render via RAM offload; needs the model downloads + >=~48GB system RAM — see SETUP-AGENT). TIER DURABILITY (2026-08-14, operator rule): the pooled 2x16 tier moved its image seat to Krea 2 Turbo (24.5GB — physically does not fit one 16GB card); HiDream-O1 bf16 via RAM offload REMAINS this tier's measured, quality-first binding. A 32GB-tier seat change is never an argument to change a 16GB-tier seed; this tier evolves only on measurements taken at 16GB. PROJECTED. J-media 2026-07-28: media_seats are informed by a LIVE REFERENCE, not a runtime measurement. This tier IS the workstation, and its hand-built llama-swap serves the same qwen3-vl-8b (Q8_0 weights + FULL-PRECISION F16 mmproj, ctx 16384) plus whisper large-v3-turbo. The Q8 + F16-tower pairing is the 8->16GB unlock: Q4 is where small-screenshot-text fidelity died, and this one seat owns screenshots/GUI/document OCR, which is why no separate OCR model exists (hence the 'ocr' alias here and on the other tiers that inherit this seat). DELTAS FROM LIVE, deliberate and NOT measured: the seat inherits this tier's q8_0 KV while the live entry sets no cache-type at all and therefore runs F16; and it adds --image-max-tokens 2048 + --no-context-shift, neither of which live carries. Same weights and window, tighter KV, an explicit image bound. Swappable, so the ~10GB seat is the only heavy seat loaded. (The former qwen3-asr HQ STT tier was RETIRED 2026-08-14 — Seat Frontier Leg 2 consolidated STT to the whisper seat after a paired house A/B tied on quality; stt_model_hq stays empty, hq falls back to stt_model by design.) TIER-DOCTRINE PASS 2026-08-16: agent seat pointed at the VALIDATED thinking-on 26B agent entry (0/15->12/15 at D1 with reasoning on, 2026-08-10) instead of the derived reasoning-off cascade seat (measured 0% as agent). Same weights as the 26B — no new download. Capability parity with the twin-arch sibling(s) is field-identical by design; the arch split (sm86/sm120/sm70) is a BUILD concern only. MEASURED-STATUS CLARIFICATION 2026-09-07: this note previously asserted PROVEN, PROJECTED and 'informed by a LIVE REFERENCE, not a runtime measurement' about the same seat — three incompatible claims in one string, which is exactly why a notes field must never be read as a measurement status. WHAT IS TRUE: this tier HAD a real reference box. The Qube ran as blackwell-16 on a SINGLE RTX 5060 Ti 16GB (sm_120, 16310 MiB, PCIe Gen3 x8 electrical) + i9-10980XE + 128GB DDR4-3400 from 2026-07-12 to 2026-08-02; the classifier self-identified blackwell-16 on it 2026-07-27; and a capability report from that box is committed at docs/tiers/reports/blackwell-16-node-b.md (banner: HISTORICAL). Primary artifacts: six llama-bench JSON receipts dated 2026-07-13 (gpt-oss-20b pp512 5184.92 / tg128 122.14; E4B 4515.53 / 93.94; 12b 2204.90 / 47.37; 26B-A4B -ot exps=CPU 231.60 / 27.84; Qwen3.6-27B at -ngl 99 82.55 / 1.162 = the 16GB spill ceiling), a 4-rung roster validation through the live llama-swap (e2b 154.5 -> e4b 95.7 -> 12b+MTP 82.1 -> 26b 32.5 tok/s), and the Phase-D KV/TTFT and compaction-flip runs, both scoped in their own text to 'single box (Qube 5060 Ti)'. WHAT IS NOT TRUE: the box never ran install.ps1, so this tier's INSTALLER-RENDERED serving params were never selftested there (the committed report reads 'hardware tier: UNKNOWN'), and the '3.9 min / 2048' HiDream-O1 bf16 figure is a prose sentence in the 2026-07-16 quality-first spec with no timing artifact anywhere. The box gained a second card on 2026-08-02 and a third on 2026-08-31, so this tier has NO CURRENT reference box.",
       "media_seats": [
@@ -159,7 +160,42 @@
           "residency": "swappable",
           "ttl": 300
         }
-      ]
+      ],
+      "vllm_seat": {
+        "ttl_seconds": 300,
+        "id": "qwen38-27b-gsq-vllm",
+        "aliases": [
+          "agent-pool",
+          "qwen38-27b-gsq"
+        ],
+        "unit": "vllm-agent-seat",
+        "port": 18797,
+        "device": "0",
+        "model_repo": "hub/models--ISTA-DASLab--Qwen3.8-27B-3Bit-GSQ",
+        "max_model_len": 49152,
+        "gpu_memory_utilization": 0.92,
+        "max_num_seqs": 32,
+        "max_num_batched_tokens": 4096,
+        "kv_cache_dtype": "fp8",
+        "tool_call_parser": "qwen3_xml",
+        "reasoning_parser": "qwen3",
+        "health_check_timeout": 480,
+        "unload_timeout": 120,
+        "agent_ctx_tokens": 49152,
+        "agent_max_tokens": 4096,
+        "agent_thinking": "off",
+        "agent_sampling": {
+          "temperature": 0.7,
+          "top_p": 0.8,
+          "top_k": 20,
+          "presence_penalty": 1.5
+        },
+        "agent_timeout_sec": 900,
+        "agent_seat_tok_s": 27.75,
+        "fallback_agent_model": "gemma-4-26b-agent",
+        "fallback_agent_ctx_tokens": 32768,
+        "measured": "NVIDIA GeForce RTX 5060 Ti 16 GB (Blackwell sm_120; the Qube's headless card, PCI index 2, CUDA_VISIBLE_DEVICES pinned to it), vLLM 0.29.0 + flashinfer 0.6.18 + the checkpoint's embedding patch, V1 model runner (WSL2), storeless, 2026-09-16/17. Qwen3.8-27B 3-bit GSQ, the same checkpoint ampere-16 seats (ADR 0049), measured on THIS silicon rather than copied -- and the copy would have been wrong: the A2's launch line (kv_cache_dtype fp8_e5m2) produces NaN tokens on this card under vLLM 0.29 (raw completions `<tool_call>!!!!...` at 8,580 prompt tokens, a hallucinated prompt at 290; every digest-8 contract deferred unparsed_tool_call in two runs). Isolated one variable per arm: transformers version, the flashinfer sampler flag and prefix caching all irrelevant; TRITON_ATTN refuses the model; bf16 KV (auto -> FLASH_ATTN) coherent; fp8 (e4m3fn) on the same FLASHINFER backend coherent. So kv_cache_dtype is fp8 here and never fp8_e5m2. OPERATING POINT: max_model_len 49,152 at util 0.92 -- model 10.4 GiB, KV 2.84 GiB = 76,314 tokens (1.55x), 14,024 of 16,311 MiB (65,536 @ 0.92 also fits: 80,554 tokens, 1.23x). Single-stream 27.75 tok/s, TTFT p50 0.43 s, 4-stream aggregate 64.39 tok/s (16.1/req, 0 failed); digest-8 at the bound lane (thinking off / 4,096 / 900 s / vendor sampling) 8/8, 0 deferred, 364 s for all eight. Blind quality (Opus judge, 8 packets x 3 lenses, positions balanced): 8.53 overall (accuracy 9.30, specificity 8.80, coverage 8.29; 2 possible / 3 minor fabrication flags, the same count as the llama.cpp arm) -- level with the same checkpoint on the A2 (8.46) and below the llama.cpp IQ3_S+MTP arm (9.30, SEPARATED, 23/24). agent_seat_tok_s 27.75 seeds the D-03 auto wall. Cache server: none -- measured storeless; LMCache 0.5.4's MP connector rejects vLLM 0.29's kv_layout (D-117). On a WSL2 box with vLLM >= 0.29 the launcher pins the V1 runner (seat_fg.sh, version-gated: 0.28's V2 runner runs on WSL2; VLLM_WSL2_ENABLE_PIN_MEMORY=1 lets 0.29's V2 runner start and it then dies in kernel warm-up with CUDA error: invalid device ordinal). config_seed.agent_max_tokens 4,096 is the llama.cpp fallback lane's budget, NOT a 26B measurement (masterplan D-119). The tier's llama.cpp agent lane (gemma-4-26b-agent) stays the fallback. Record: 'Benchmarks and Optimizations/2026-09-16-16gb-tier-pass/' (blackwell-16/, raw-toolcall-test/, judge-27b-49k-bw/, live-cutover/README.md)."
+      }
     },
     "blackwell-32": {
       "ctx_size": 65536,

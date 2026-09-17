@@ -28,7 +28,8 @@ var (
 	// entries are added as tiers gain a seat and removed only on an explicit
 	// operator instruction, never as a side effect of changing a model.
 	vllmSeatTiers = map[string]string{
-		"ampere-16":      "Qwen3.5-4B w4a16, unit vllm-agent-seat, fp8_e5m2 KV (ADR 0035; restored after the 2026-09-16 A-07 deletion)",
+		"ampere-16":      "Qwen3.8-27B 3-bit GSQ, unit vllm-agent-seat, fp8_e5m2 KV (ADR 0049; the seat ADR 0035 declared as the 4B was restored after the 2026-09-16 A-07 deletion, then re-declared)",
+		"blackwell-16":   "Qwen3.8-27B 3-bit GSQ, unit vllm-agent-seat, fp8 (e4m3) KV — measured on the RTX 5060 Ti 2026-09-17 (ADR 0048 amendment): fp8_e5m2 is NaN on this card under vLLM 0.29",
 		"blackwell-2x16": "Qwen3.8-27B INT4 across the pair, unit vllm-agent-seat-27b",
 		"blackwell-3x16": "Qwen3.8-27B INT4, unit vllm-agent-seat-27b",
 	}
@@ -36,19 +37,18 @@ var (
 	// vllmSeatDebt: tiers that CANNOT yet seat a model under vLLM. Every entry is a
 	// gap to close, not a settled exemption.
 	vllmSeatDebt = map[string]string{
-		"ampere-6":        "6 GB: needs a measured sub-6 GB w4a16 candidate",
-		"ampere-8":        "8 GB: 9B w4a16 arm never run against the llama.cpp seat",
-		"amd-gcn":         "ROCm build path not established for this box class",
-		"amd-rdna3":       "ROCm build path not established for this box class",
-		"amd-rdna3-dgpu":  "ROCm build path not established for this box class",
-		"blackwell-8":     "8 GB + accelerator tier: vLLM arm never measured",
-		"blackwell-16":    "twin-arch sibling of ampere-16; owes the same seat (tier-doctrine parity)",
-		"blackwell-32":    "no box of this class online to measure on",
-		"blackwell-48":    "no box of this class online to measure on",
-		"blackwell-72":    "no box of this class online to measure on",
-		"cpu":             "no GPU: vLLM CPU inference is forbidden by the RAM-is-overflow-only rule",
-		"dual-gpu":        "generic two-card fallback profile; seat follows whichever tier it resolves to",
-		"volta-16":        "sm70: needs a kv_cache_dtype that Volta backends accept",
+		"ampere-6":       "6 GB: needs a measured sub-6 GB w4a16 candidate",
+		"ampere-8":       "8 GB: 9B w4a16 arm never run against the llama.cpp seat",
+		"amd-gcn":        "ROCm build path not established for this box class",
+		"amd-rdna3":      "ROCm build path not established for this box class",
+		"amd-rdna3-dgpu": "ROCm build path not established for this box class",
+		"blackwell-8":    "8 GB + accelerator tier: vLLM arm never measured",
+		"blackwell-32":   "no box of this class online to measure on",
+		"blackwell-48":   "no box of this class online to measure on",
+		"blackwell-72":   "no box of this class online to measure on",
+		"cpu":            "no GPU: vLLM CPU inference is forbidden by the RAM-is-overflow-only rule",
+		"dual-gpu":       "generic two-card fallback profile; seat follows whichever tier it resolves to",
+		"volta-16":       "sm70: needs a kv_cache_dtype that Volta backends accept",
 	}
 )
 
