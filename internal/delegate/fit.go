@@ -14,11 +14,8 @@
 package delegate
 
 import (
-	"fmt"
 	"math"
 	"regexp"
-
-	"github.com/dmmdea/offload-harness/internal/seatrate"
 )
 
 // Kind is the coarse shape of a contract.
@@ -170,95 +167,15 @@ const fitInadequate = math.MinInt32
 // advertised ceiling, which on a composite box is only one layer's. A
 // decision that defers or waits is inadequate here exactly as it is in the
 // gate.
-// feasibleFinal reports whether v can hold a VIABLE final answer for st
-// within its own effective wall (W-05, register S-03/S-05 — the INV-5
-// rider's clause (i): "a feasibility floor computed from the contract's
-// FITTED final at the seat's published rate — never the seat's max-final
-// min_turn_sec — applied ... as a refusal only below a minimum viable final,
-// naming the arithmetic").
 //
-// ok=true, reason="" — NO OPINION — when the rate is unknown (nil SeatRate,
-// or zero tok_s/samples) or the contract's wall cannot be sized at all: the
-// house rule every other capacity field in this package follows ("unknown is
-// never credited", but also never PENALISED — see AgentCtxTokens==0). ok=true
-// also when the fitted final comfortably holds the configured budget.
-//
-// ok=false with reason naming the arithmetic ("fitted final 312 < floor 1024
-// at 5.4 tok/s in 300 s wall, cold 69 s") when the wall the contract would
-// actually run under — TimeoutSec as given, or seatrate.AutoWallFor's sizing
-// for a timeout_auto contract, exactly as autoPollBound computes it — cannot
-// buy even seatrate.FinalBudgetFloor tokens for the final answer (and its
-// structured re-pack, when the contract carries a schema) at the seat's
-// measured rate. This is a FITTED-final floor, not the seat's published
-// min_turn_sec (its max-final worst case) — the rider forbids gating on that.
-//
-// A composite node's published seat_rate describes its single advertised
-// agent seat, not necessarily whatever layer remoteDecision would dispatch
-// to; this reads it anyway (same imprecision autoPollBound already accepts
-// for the poll bound) rather than inventing a second rate source.
-func feasibleFinal(st Subtask, v NodeView) (ok bool, reason string) {
-	sr := v.SeatRate
-	if sr == nil || sr.TokS <= 0 || sr.Samples <= 0 {
-		return true, ""
-	}
-	policy := seatrate.SeatPolicy{Seat: v.AgentSeat, TokS: sr.TokS, RateSamples: sr.Samples, RateSource: "health seat_rate", ColdLoadSec: sr.ColdLoadSec}
-	if b := v.SeatBudget; b != nil {
-		policy.StepTokens, policy.Thinking = b.StepTokens, b.Thinking
-	}
-	in := seatrate.InputFor(policy, st.Contract)
-	wallSec := st.Contract.TimeoutSec
-	if st.Contract.TimeoutAuto {
-		wallSec, _ = seatrate.AutoWallFor(policy, st.Contract)
-	}
-	if wallSec <= 0 {
-		return true, ""
-	}
-	cold := fitColdSec(policy, v)
-	fit := seatrate.FitFinalBudget(seatrate.FinalFit{
-		ConfiguredFinal: in.FinalBudget,
-		RemainingSec:    float64(wallSec) - cold,
-		OtherSec:        otherSecExcludingCold(in),
-		TokS:            policy.TokS,
-		Schema:          len(st.Contract.OutputSchema) > 0,
-	})
-	if !fit.Floored {
-		return true, ""
-	}
-	return false, fmt.Sprintf("fitted final %d < floor %d at %.1f tok/s in %d s wall, cold %.0f s", fit.Fit, seatrate.FinalBudgetFloor, policy.TokS, wallSec, cold)
-}
-
-// fitColdSec is the cold-load charge feasibleFinal (and the W-11 ETA key)
-// use: policy.ColdLoadSec ONLY when SeatLoaded is KNOWN false — a positive
-// statement that the seat is not resident right now — never on an unknown
-// reading, the same "never credit a penalty toward an unmeasured field" rule
-// this package already follows for AgentCtxTokens==0 and GpuUtilKnown. A load
-// already IN PROGRESS (SeatStarting) is charged HALF regardless of what
-// SeatLoaded says (a starting seat is "not ready even though SeatLoaded may
-// read true too" — nodeview.go): the load is partway there, and charging the
-// full cold load again would double-count whatever it has already spent.
-func fitColdSec(p seatrate.SeatPolicy, v NodeView) float64 {
-	if v.SeatStarting != nil && *v.SeatStarting {
-		return p.ColdLoadSec / 2
-	}
-	if v.SeatLoaded != nil && !*v.SeatLoaded {
-		return p.ColdLoadSec
-	}
-	return 0
-}
-
-// otherSecExcludingCold is the "prefill + steps + think" seconds
-// seatrate.Compute bakes into Estimate.OtherSec ALONGSIDE the cold load.
-// Cold is charged separately here (fitColdSec) because whether it applies at
-// all depends on the seat's CURRENT residency (NodeView), a fact
-// seatrate.Input has no field for. Zeroing ColdLoadSec before calling Compute
-// isolates exactly the think+step terms — nothing else in Compute's formula
-// reads ColdLoadSec, so this changes no other term.
-func otherSecExcludingCold(in seatrate.Input) float64 {
-	coldFree := in
-	coldFree.ColdLoadSec = 0
-	return float64(seatrate.Compute(coldFree).OtherSec)
-}
-
+// W-11 (register S-02, INV-5 rider clause (ii), eta.go): once a seat is
+// adequate, mechanical work is no longer ranked on -window alone — the
+// expected-completion axis (eta.go's etaFor) decides first, window is the
+// tie-break; reasoning keeps window first, eta as its tie-break. An unknown
+// eta (no published seat_rate) degrades to exactly the pre-W-11 rule. The
+// fold into one maximisable int is scoreFitRanked, shared with betterRanked's
+// pairwise comparison so spread and auto/remote/vision order the same fleet
+// identically.
 func scoreFit(st Subtask, v NodeView) int {
 	window := v.AgentCtxTokens
 	if dec, ok := remoteDecision(st, v); ok {
@@ -271,8 +188,6 @@ func scoreFit(st Subtask, v NodeView) int {
 	} else if !adequate(st, v) {
 		return fitInadequate
 	}
-	if inferKind(st) == KindReasoning {
-		return window
-	}
-	return -window
+	eta, etaKnown := etaFor(st, v)
+	return scoreFitRanked(inferKind(st), window, eta, etaKnown)
 }

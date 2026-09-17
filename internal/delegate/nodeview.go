@@ -137,6 +137,14 @@ type NodeView struct {
 	// node with no seat_rate sample has no other way to publish. 0 = the node
 	// has finished no agent job, or predates the field.
 	RecentAgentWallSec float64
+	// QueueWaitEstimateSec is the node's OWN estimate of how long a new job
+	// would sit in its backlog — health `queue_wait_estimate_sec` (PR-6,
+	// 0.128+). nil on every node at 0.127: W-11's queueWaitFor then falls
+	// back to deriving the same shape from jobs_running/jobs_queued/
+	// max_concurrent_jobs/recent_agent_wall_sec. A POINTER because 0 is a
+	// genuine "no wait right now" answer and must read differently from
+	// "this node does not publish the estimate at all".
+	QueueWaitEstimateSec *float64
 }
 
 // VisionTask is the fleet task_type of the vision lane (0.116.0): a node
@@ -254,12 +262,13 @@ type healthWire struct {
 	// Additive (0.127.0, PR-5 item 1). Absent on an older node, decoding to
 	// the zero value — 0/nil/false — which the gate/placement code reads as
 	// UNKNOWN, never as a limit or a verdict.
-	JobsAdmitting      int     `json:"jobs_admitting"`
-	SeatLoaded         *bool   `json:"seat_loaded"`
-	SeatStarting       *bool   `json:"seat_starting"`
-	LeaseExclusive     bool    `json:"lease_exclusive"`
-	LeaseDraining      bool    `json:"lease_draining"`
-	RecentAgentWallSec float64 `json:"recent_agent_wall_sec"`
+	JobsAdmitting        int      `json:"jobs_admitting"`
+	SeatLoaded           *bool    `json:"seat_loaded"`
+	SeatStarting         *bool    `json:"seat_starting"`
+	LeaseExclusive       bool     `json:"lease_exclusive"`
+	LeaseDraining        bool     `json:"lease_draining"`
+	RecentAgentWallSec   float64  `json:"recent_agent_wall_sec"`
+	QueueWaitEstimateSec *float64 `json:"queue_wait_estimate_sec"`
 }
 
 // FetchNodeView reads one node's /fleet/health into a NodeView (Local=false —
@@ -321,12 +330,13 @@ func FetchNodeView(ctx context.Context, base, token string) (NodeView, error) {
 		Layers:            w.Layers,
 		Local:             false,
 
-		JobsAdmitting:      w.JobsAdmitting,
-		SeatLoaded:         w.SeatLoaded,
-		SeatStarting:       w.SeatStarting,
-		LeaseExclusive:     w.LeaseExclusive,
-		LeaseDraining:      w.LeaseDraining,
-		RecentAgentWallSec: w.RecentAgentWallSec,
+		JobsAdmitting:        w.JobsAdmitting,
+		SeatLoaded:           w.SeatLoaded,
+		SeatStarting:         w.SeatStarting,
+		LeaseExclusive:       w.LeaseExclusive,
+		LeaseDraining:        w.LeaseDraining,
+		RecentAgentWallSec:   w.RecentAgentWallSec,
+		QueueWaitEstimateSec: w.QueueWaitEstimateSec,
 	}
 	if w.Saturation != nil {
 		v.SaturationKnown = true

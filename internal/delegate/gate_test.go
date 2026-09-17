@@ -214,7 +214,7 @@ func TestPlace(t *testing.T) {
 			if tc.mutate != nil {
 				tc.mutate(&st, remotes)
 			}
-			got := Place(st, localNode(), remotes, tc.localBusy)
+			got := Place("seed", st, localNode(), remotes, tc.localBusy)
 			if got.NodeID != tc.wantNode {
 				t.Fatalf("Place -> %q, want %q", got.NodeID, tc.wantNode)
 			}
@@ -321,27 +321,29 @@ func TestRemoteEligible_ServedModelsWithoutSeatIsIneligible(t *testing.T) {
 }
 
 func TestBetterRemote_UtilizationBreaksQueueTies(t *testing.T) {
+	st := schemaSubtask()
 	a, b := eligibleRemote(), eligibleRemote()
 	a.NodeID, b.NodeID = "a", "b"
 	a.GpuUtilPct, a.GpuUtilKnown = 80, true
 	b.GpuUtilPct, b.GpuUtilKnown = 10, true
-	if !betterRemote(b, a) || betterRemote(a, b) {
+	if !betterRemote("seed", &st, b, a) || betterRemote("seed", &st, a, b) {
 		t.Fatal("lower known utilization must win an otherwise equal pair")
 	}
 	// queue depth still outranks utilization
 	b.QueueDepth = a.QueueDepth + 1
-	if betterRemote(b, a) {
+	if betterRemote("seed", &st, b, a) {
 		t.Fatal("utilization must never override QueueDepth")
 	}
-	if !betterRemote(a, b) {
+	if !betterRemote("seed", &st, a, b) {
 		t.Fatal("a's lower QueueDepth must still win once QueueDepth is no longer tied")
 	}
 }
 
 func TestBetterRemote_UnknownUtilizationNeverLoses(t *testing.T) {
+	st := schemaSubtask()
 	known, unknown := eligibleRemote(), eligibleRemote()
 	known.GpuUtilPct, known.GpuUtilKnown = 5, true
-	if betterRemote(known, unknown) || betterRemote(unknown, known) {
+	if betterRemote("seed", &st, known, unknown) || betterRemote("seed", &st, unknown, known) {
 		t.Fatal("an unknown utilization is neither credited nor blamed — roster order keeps the tie")
 	}
 }

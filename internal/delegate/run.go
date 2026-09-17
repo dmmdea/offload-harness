@@ -1631,6 +1631,11 @@ func probeFailureNote(fails map[string]*probeFailTally) string {
 func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentContract, start time.Time, budget int, pl *placements, seed PlacedResult, refusals []string, why string) PlacedResult {
 	localView := r.localView()
 	st := Subtask{Contract: contract, EstTokens: EstimateTokens(contract)}
+	// p2cSeed is W-11's ranking seed for every betterRemote comparison this
+	// wait makes: minted ONCE so the draw stays consistent across the wait's
+	// own ticks (never named `seed` — that identifier is this function's own
+	// PlacedResult parameter).
+	p2cSeed := mintP2CSeed()
 	waitStart := time.Now()
 	// decided is the composite decision behind the seed (ADR 0039, council
 	// R1): the decided seat exists and holds the contract, it would only evict
@@ -1737,7 +1742,7 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 				if until, ok := refusedUntil[bases[j]]; ok && time.Now().Before(until) {
 					continue
 				}
-				if best < 0 || betterRemote(v, views[best]) {
+				if best < 0 || betterRemote(p2cSeed, &st, v, views[best]) {
 					best = j
 				}
 			}
@@ -2044,7 +2049,7 @@ func (r *runner) replacementNode(ctx context.Context, contract core.AgentContrac
 			views, bases, _ = r.fetchViews(ctx)
 		}
 		freshViews, freshBases := untried(views, bases, pl.tried)
-		if chosen := Place(st, r.localView(), freshViews, true); !chosen.Local {
+		if chosen := Place(mintP2CSeed(), st, r.localView(), freshViews, true); !chosen.Local {
 			return placement{
 				view:   chosen,
 				base:   baseFor(chosen, freshViews, freshBases),
@@ -2294,7 +2299,7 @@ func (r *runner) remoteAlternative(ctx context.Context, st Subtask, pl *placemen
 		views, bases, _ = r.fetchViews(ctx)
 	}
 	freshViews, freshBases := untried(views, bases, pl.tried)
-	chosen := Place(st, r.localView(), freshViews, true)
+	chosen := Place(mintP2CSeed(), st, r.localView(), freshViews, true)
 	if chosen.Local {
 		return NodeView{}, "", false
 	}
@@ -2763,7 +2768,7 @@ func (r *runner) attempt(ctx context.Context, i int, contract core.AgentContract
 		if busy && r.route != "local" {
 			views, bases, probeErrs = r.fetchViews(ctx)
 		}
-		chosen = Place(st, localView, views, busy)
+		chosen = Place(jobID, st, localView, views, busy)
 
 		switch {
 		case r.route == "local":

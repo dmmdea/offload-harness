@@ -604,7 +604,7 @@ func TestPlaceIsCapacityAware(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := Place(st, localNode(), tc.remotes, true)
+			got := Place("seed", st, localNode(), tc.remotes, true)
 			if got.NodeID != tc.want {
 				t.Fatalf("Place chose %q, want %q", got.NodeID, tc.want)
 			}

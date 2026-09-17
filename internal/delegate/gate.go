@@ -72,8 +72,10 @@ func EstimateTokens(c core.AgentContract) int { return placetable.EstimateTokens
 //     beats ineligible-remote every time.
 //
 // Place is pure: it never probes anything. Callers build the inputs from
-// FetchNodeView + LocalBusy.
-func Place(st Subtask, local NodeView, remotes []NodeView, localBusy bool) NodeView {
+// FetchNodeView + LocalBusy. seed is the W-11 P2C draw's input (the wire job
+// id when the caller has minted one, else any string a caller wants two
+// otherwise-identical calls to agree on) — see betterRemote.
+func Place(seed string, st Subtask, local NodeView, remotes []NodeView, localBusy bool) NodeView {
 	if !localBusy {
 		return local
 	}
@@ -83,7 +85,7 @@ func Place(st Subtask, local NodeView, remotes []NodeView, localBusy bool) NodeV
 		if !remoteEligible(st, r) {
 			continue
 		}
-		if !found || betterRemote(r, best) {
+		if !found || betterRemote(seed, &st, r, best) {
 			best, found = r, true
 		}
 	}
@@ -142,7 +144,21 @@ func Place(st Subtask, local NodeView, remotes []NodeView, localBusy bool) NodeV
 //     neither credited nor blamed (the AgentCtxTokens == 0 rule), so a
 //     pre-0.113.0 node keeps its roster-order tie. A tie-breaker, never a
 //     primary signal — it only ever decides a case QueueDepth left tied.
-func betterRemote(candidate, incumbent NodeView) bool {
+//
+// W-11 (register S-02, INV-5 rider clause (ii), eta.go) inserts a FIFTH key
+// between provablyStartsNow and QueueDepth: expected completion among seats
+// tied on capacity so far — eta.go's betterRanked, fed by st and seeded by
+// `seed` for its power-of-two-choices draw on a near-tie. Undecided (neither
+// side publishes a usable seat_rate, or the two are truly identical) falls
+// through to QueueDepth/GpuUtil exactly as before — "unknown rate keeps
+// today's window ordering" widened to "today's WHOLE ordering".
+//
+// st is a POINTER, and nil is a real, meaningful input: PlaceVision has no
+// agent contract to fit a generation term against (a vision judgment is one
+// call, never an agent loop — "no feasibility term; vision is single-shot"),
+// so nil st runs the SIMPLER visionEtaBetter key (queue-wait only, still
+// P2C-drawn) instead of the full window+generation ranking.
+func betterRemote(seed string, st *Subtask, candidate, incumbent NodeView) bool {
 	// Key 0 (W-14, register S-15): a node still eligible under a lease-busy
 	// verdict loses to any node that is not — "ranked last" means it does not
 	// even get to compete on saturation or queue depth against a clean node.
@@ -158,6 +174,13 @@ func betterRemote(candidate, incumbent NodeView) bool {
 	}
 	if c, i := provablyStartsNow(candidate), provablyStartsNow(incumbent); c != i {
 		return c
+	}
+	if st != nil {
+		if better, decided := betterRanked(seed, inferKind(*st), rankFor(*st, candidate), rankFor(*st, incumbent)); decided {
+			return better
+		}
+	} else if better, decided := visionEtaBetter(seed, candidate, incumbent); decided {
+		return better
 	}
 	if candidate.QueueDepth != incumbent.QueueDepth {
 		return candidate.QueueDepth < incumbent.QueueDepth
@@ -372,26 +395,43 @@ func leaseBusyDemoted(v NodeView) bool { return v.LeaseBusy }
 // whatever the lane). AgentEnabled, residency, ctx arithmetic and the
 // output_schema rule are agent-contract facts and do not apply to an image.
 //
-// Ranking reuses betterRemote unchanged — not-saturated, then a provably free
-// slot, then queue depth, then GPU utilization, ties in roster order — so a
-// vision placement and an agent placement agree on which of two nodes is the
-// less loaded one.
+// Ranking reuses betterRemote — not-saturated, then a provably free slot,
+// then (W-11) a queue-wait tie-break, then queue depth, then GPU utilization,
+// ties in roster order — so a vision placement and an agent placement agree
+// on which of two nodes is the less loaded one. The seed for W-11's P2C draw
+// is minted once per call (PlaceVision carries no wire job id of its own to
+// thread through — visionremote's caller is outside this PR's scope): the
+// property the draw needs is only that independent CALLS disagree, which a
+// fresh seed per call already gives it.
 //
 // It returns the INDEX into remotes rather than the view, so a caller that
 // holds a parallel slice of base URLs (a NodeView carries no address) can
 // dispatch to the node it chose without matching on node_id — two
 // misconfigured nodes can share one id, and an id is not an address.
 func PlaceVision(remotes []NodeView) (int, bool) {
+	seed := mintP2CSeed()
 	best := -1
 	for i, r := range remotes {
 		if !visionEligible(r) {
 			continue
 		}
-		if best < 0 || betterRemote(r, remotes[best]) {
+		if best < 0 || betterRemote(seed, nil, r, remotes[best]) {
 			best = i
 		}
 	}
 	return best, best >= 0
+}
+
+// visionEtaBetter is PlaceVision's W-11 key: there is no contract to fit a
+// generation term against, so it compares only the node's own queue-wait
+// estimate (queueWaitFor — the same one etaFor folds cold+generation onto for
+// an agent contract), with the same P2C near-tie draw.
+func visionEtaBetter(seed string, candidate, incumbent NodeView) (better, decided bool) {
+	c, i := queueWaitFor(candidate), queueWaitFor(incumbent)
+	if c == i {
+		return false, false
+	}
+	return etaPreferred(seed, c, i), true
 }
 
 // visionEligible is PlaceVision's hard gate: the lane advertised, the card

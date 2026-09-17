@@ -227,7 +227,24 @@ func TestFetchNodeViewMapsActivityFields(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if v.JobsAdmitting != 0 || v.SeatLoaded != nil || v.SeatStarting != nil || v.LeaseExclusive || v.LeaseDraining || v.RecentAgentWallSec != 0 {
+	if v.JobsAdmitting != 0 || v.SeatLoaded != nil || v.SeatStarting != nil || v.LeaseExclusive || v.LeaseDraining || v.RecentAgentWallSec != 0 || v.QueueWaitEstimateSec != nil {
 		t.Fatalf("an older node must decode to the unknown reading: %+v", v)
+	}
+}
+
+// TestFetchNodeViewDecodesQueueWaitEstimate (W-11, PR-6's own field): a
+// POINTER because 0 is a genuine "no wait right now" answer, distinguishable
+// from a node that does not publish the estimate at all.
+func TestFetchNodeViewDecodesQueueWaitEstimate(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"node_id":"n","queue_wait_estimate_sec":0}`))
+	}))
+	defer srv.Close()
+	v, err := FetchNodeView(context.Background(), srv.URL, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.QueueWaitEstimateSec == nil || *v.QueueWaitEstimateSec != 0 {
+		t.Fatalf("queue_wait_estimate_sec = %+v, want a pointer to 0 (published, genuinely zero)", v.QueueWaitEstimateSec)
 	}
 }
