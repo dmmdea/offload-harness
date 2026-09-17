@@ -404,18 +404,36 @@ read, not for being busy. Four changes, none of which adds a probe:
   completion order is not an ordering any caller can use.
 - **Memoised per Run** (`fetchViewsMemoTTL`, 2 s). The sibling subtasks of one fan-out share one snapshot —
   what `spread` always did, now for every route — and the memo dies with the runner, so no snapshot outlives
-  the call that took it. 2 s is deliberately SHORTER than `placementPollInterval` (3 s): the capacity wait
-  exists to notice a node that just freed, so the memo must never be able to answer one of its ticks.
+  the call that took it. 2 s is deliberately shorter than the SHORTEST GAP BETWEEN TWO TICKS: the capacity
+  wait exists to notice a node that just freed, so the memo must never be able to answer one of its ticks.
+  The comparison is not against `placementPollInterval` itself — the tick is jittered, so the shortest gap
+  is `(1 - jitterFrac) × placementPollInterval` = 2.4 s, and a 2.5 s memo would read as "safely under 3 s"
+  while quietly serving ticks from cache. `TestProbeMemoCannotServeACapacityWaitTick` pins the relation over
+  the production values, because every capacity-wait test zeroes the memo in order to compress the tick.
 - **Negative-cached** (`probeNegativeTTL`, 30 s). A base that failed at the TRANSPORT — dial refused, no
   route, DNS, a reset, the per-base timeout — is skipped rather than re-dialled, and the reason it failed is
   REPLAYED into `probeErrs`, so the placement note still names the node and says what happened to it. Only
   transport failures: a `401`, `404` or `503` is a node that ANSWERED, and skipping it for half a minute
   would turn a momentary refusal into ineligibility.
-- **The wait's tick is bounded by the tick** (`probeTickBound` = `min(2 × placementPollInterval, what is left
-  of the wait)`). The wait passed the RAW run context to its probe while every other call site wrapped it in a
-  remaining-budget one, so a single black-holed remote could spend the whole TTL inside one tick's probe and
-  the node that DID free was never re-asked. Nothing is negative-cached when this bound fires: it expires
-  every base at the same instant, which is a fact about the tick and not about any node.
+- **The wait's tick may not outlive the wait** (`probeTickBound` = what is left of the wait). The wait passed
+  the RAW run context to its probe while every other call site wrapped it in a remaining-budget one, so a
+  probe could outlive the wait it was serving. Nothing TIGHTER belongs here, and both tighter bounds were
+  tried and reverted: `2 × placementPollInterval` (6 s) sits below `fetchNodeViewTimeout` (15 s), which is
+  this doc's own slow-vs-down boundary, so a remote answering in 6–15 s under load was cancelled on every
+  tick, never became a candidate, and was never negative-cached either (a cancellation is not evidence about
+  a node) — the wait then expired saying "no node had room", which was false. `min(fetchNodeViewTimeout,
+  remaining)` fails differently: the per-base context is DERIVED from the tick's, so the two deadlines land
+  on the same instant and the tick's fires first, nothing is ever attributable to a node, and a dead base is
+  re-dialled at full cost on every tick (measured at 30 dials across one compressed wait, against 6 after).
+  Nothing tighter is needed because the fan-out is concurrent and each goroutine is capped at
+  `fetchNodeViewTimeout`: one black-holed remote costs a tick that bound ONCE and is then skipped by the
+  30 s negative cache.
+- **A tick's probe failures reach the operator.** The tick used to discard `probeErrs` with `_`, so a wait
+  spent entirely on remotes that never answered ended as `no node had room … 0 refusal(s)` — an operator told
+  to add a node when the nodes they had were failing to answer. Failures are now tallied per base across the
+  wait and folded into the capacity defer as their own clause, `; N probe(s) failed during the wait: <base>:
+  <reason> (last of 3)`, kept distinct from refusals because a probe failure is not a refusal: nobody
+  declined the work.
 
 **The fixed sleeps are jittered (2026-09-17).** `pollEvery`, `placementPollInterval` and `refusalCooldown` are
 the same numbers in every dispatcher, so K sessions started within a second of each other re-read health,

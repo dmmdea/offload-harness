@@ -7,6 +7,20 @@ Versioning: [SemVer](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- **A capacity wait could not see a remote whose health was merely SLOW, and never said so.** The first cut
+  of the per-tick probe bound was `2 x placementPollInterval` (6 s), below `fetchNodeViewTimeout` (15 s) —
+  this repo's own boundary between slow and down. A remote answering health in 6-15 s under load was
+  cancelled on every tick for the whole wait, never became a candidate, and was never negative-cached either
+  (a cancellation is not evidence about a node), so the wait expired with `no node had room ... 0
+  refusal(s)`: an operator told to add a node while the nodes they had were failing to answer. The tick is
+  now bounded only by what is LEFT of the wait; the concurrent fan-out's per-base `fetchNodeViewTimeout` cap
+  is what keeps one dead remote from stalling it, and the 30 s negative cache absorbs the repeats.
+  `min(fetchNodeViewTimeout, remaining)` was tried and reverted: the per-base context is derived from the
+  tick's, so the two deadlines land on the same instant, the tick's fires first, nothing is ever attributable
+  to a node, and a dead base is re-dialled at full cost every tick (measured: 30 dials across one compressed
+  wait, 6 after). The tick's `probeErrs`, previously dropped with `_`, are now tallied per base and folded
+  into the capacity defer as their own clause -- `; N probe(s) failed during the wait: <base>: <reason>
+  (last of 3)` -- distinct from refusals, because nobody declined the work.
 - **The fleet health probe was serial, uncached and on the critical path of every placement** (register
   D-106; `plans/2026-09-17-harness-scheduling-diagnosis.md` §2(d), S-10/W-02). `delegate.fetchViews`
   probed every configured remote SEQUENTIALLY at `fetchNodeViewTimeout` (15 s) each, with no cache, once

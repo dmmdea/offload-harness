@@ -33,6 +33,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	// mathrand is the JITTER source only. crypto/rand above owns anything an
 	// operator or another process could observe (job ids); a sleep length is
 	// neither, and a lock-free generator is what a fan-out of dispatch
@@ -49,6 +50,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1515,31 +1517,84 @@ var (
 	refusalCooldown       = 10 * time.Second
 )
 
-// probeTickBound bounds ONE capacity-wait tick's fleet probe: twice the poll
-// interval, never more than what is left of the wait.
+// probeTickBound bounds ONE capacity-wait tick's fleet probe: WHAT IS LEFT of
+// the wait, and deliberately nothing tighter. The wait used to hand fetchViews
+// the raw run context while every other call site wrapped it in a
+// remaining-budget one, so a probe could outlive the wait it was serving.
 //
-// The wait used to hand fetchViews the RAW run context while every other call
-// site wrapped it in a remaining-budget one, so a single black-holed remote
-// stalled each tick for fetchNodeViewTimeout — up to the whole TTL inside one
-// tick's probe, and the node that DID free was never re-asked. Twice the
-// interval is the slack a healthy fleet needs and the most a dead one may take:
-// a probe that cannot finish in two ticks has already cost the wait its cadence,
-// and the answer it would have brought is stale by the time it lands.
+// Two tighter bounds were tried and both were wrong, for reasons worth keeping:
 //
-// Nothing is negative-cached when this bound fires (noteDeadProbe): it expires
-// every base at the same instant, which is a fact about the tick, not about any
-// node.
+//   - TWICE THE POLL INTERVAL (6 s in production). That sits below
+//     fetchNodeViewTimeout (15 s), which is this repo's own boundary between
+//     slow and down — "a node that cannot answer inside this is down, not busy".
+//     A remote whose health takes 6–15 s under load was therefore cancelled on
+//     EVERY tick for the whole wait; it never became a candidate, and it was
+//     never negative-cached either, because noteDeadProbe rightly refuses to
+//     blame a node for the caller giving up. The wait then expired saying "no
+//     node had room", which was false.
+//   - min(fetchNodeViewTimeout, remaining). Same number as the per-base bound,
+//     and that is the trap: the per-base context is DERIVED from this one, so
+//     the two deadlines land on the same instant and the tick's fires first
+//     (it was created first). Every probe failure then looks like the caller
+//     giving up, nothing is ever attributable to a node, the negative cache
+//     stays empty, and a dead base is re-dialled at full cost on every tick —
+//     measured at 30 dials across one compressed wait.
+//
+// Nothing tighter is NEEDED, which is what makes the simple bound the right
+// one: the fan-out is concurrent and each goroutine is capped at
+// fetchNodeViewTimeout, so one black-holed remote costs a tick that bound ONCE
+// and is then skipped by the 30 s negative cache — never the sum over the
+// roster, and never the whole TTL. This bound's only job is the one no other
+// bound covers: a probe must not outlive the wait.
 func probeTickBound(deadline time.Time) time.Duration {
-	bound := 2 * placementPollInterval
-	if left := time.Until(deadline); left > 0 && left < bound {
-		bound = left
+	left := time.Until(deadline)
+	if left <= 0 {
+		// The caller re-checks the deadline immediately after; a zero-length
+		// context would cancel the probe before it was sent.
+		left = time.Millisecond
 	}
-	if bound <= 0 {
-		// Only reachable when a test compresses the interval to zero; a
-		// zero-length context would cancel the probe before it is sent.
-		bound = time.Millisecond
+	return left
+}
+
+// probeFailTally is one base's probe failures during a capacity wait: how many
+// ticks it failed, and the most recent reason. Counted per base rather than
+// appended per tick because a 40-tick wait against one dead node would
+// otherwise render the same sentence forty times into the defer reason.
+type probeFailTally struct {
+	n    int
+	last string
+}
+
+// probeFailureNote renders the per-base probe failures a capacity wait
+// accumulated, or "" when every tick's probe answered. Sorted by base so the
+// sentence is stable across runs (map order is not).
+//
+// It exists because the tick used to discard probeErrs with `_`: a wait spent
+// entirely on remotes that never answered ended as "no node had room … 0
+// refusal(s)", which told an operator to add a node when the nodes they had
+// were failing to answer. A probe failure is NOT a refusal — nobody declined
+// the work — so it is reported as its own clause.
+func probeFailureNote(fails map[string]*probeFailTally) string {
+	if len(fails) == 0 {
+		return ""
 	}
-	return bound
+	bases := make([]string, 0, len(fails))
+	for base := range fails {
+		bases = append(bases, base)
+	}
+	sort.Strings(bases)
+	parts := make([]string, 0, len(bases))
+	total := 0
+	for _, base := range bases {
+		f := fails[base]
+		total += f.n
+		if f.n == 1 {
+			parts = append(parts, fmt.Sprintf("%s: %s", base, f.last))
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%s: %s (last of %d)", base, f.last, f.n))
+	}
+	return fmt.Sprintf("; %d probe(s) failed during the wait: %s", total, strings.Join(parts, "; "))
 }
 
 // awaitCapacity is the delegator's queue (0.113.18, L5 of the fleet-flow
@@ -1613,6 +1668,10 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 	// JITTERED once when the refusal happens: K dispatchers that all refused the
 	// same node must not all re-ask it on the same beat.
 	refusedUntil := map[string]time.Time{}
+	// probeFails is every base whose health probe failed DURING the wait, by
+	// base: the tick used to drop these on the floor, so a wait that never
+	// reached a single node reported "0 refusal(s)".
+	probeFails := map[string]*probeFailTally{}
 	var lease gpulease.Info
 	for wait > 0 && ctx.Err() == nil {
 		if decided == nil && r.route != "remote" && !pl.tried[""] {
@@ -1645,12 +1704,22 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 			}
 		}
 		if r.route != "local" {
-			// The tick's probe is bounded by the tick, never by the transport:
-			// a remote that black-holes must cost this wait one cadence, not
-			// its whole TTL (probeTickBound).
+			// The tick's probe may not outlive the wait it serves; the per-base
+			// bound inside the fan-out caps what any ONE remote can cost
+			// (probeTickBound explains why nothing tighter belongs here).
 			tickCtx, cancelTick := context.WithTimeout(ctx, probeTickBound(deadline))
-			views, bases, _ := r.fetchViews(tickCtx)
+			views, bases, _, failed := r.fetchViewsDetailed(tickCtx)
 			cancelTick()
+			// A base that did not answer is not a node with no room — it is a
+			// node nobody could ask. Kept per base so the defer can say so.
+			for base, why := range failed {
+				f := probeFails[base]
+				if f == nil {
+					f = &probeFailTally{}
+					probeFails[base] = f
+				}
+				f.n, f.last = f.n+1, why
+			}
 			best := -1
 			for j, v := range views {
 				if !remoteEligible(st, v) || !hasRoom(v, false) || pl.excluded[bases[j]] {
@@ -1742,7 +1811,7 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 		// decision), with the refusals appended.
 		return r.settle(contract, r.reservedDefer(localView, lease, idle, "no eligible remote had room — "+strings.Join(refusals, "; ")), pl, waitStart)
 	}
-	return r.settle(contract, r.capacityDefer(localView, seed, idle, wait, refusals), pl, waitStart)
+	return r.settle(contract, r.capacityDefer(localView, seed, idle, wait, refusals, probeFails), pl, waitStart)
 }
 
 // runDecided runs a decided-seed subtask on its decided seat once the capacity
@@ -1833,9 +1902,10 @@ func (r *runner) landedAfterWait(pr PlacedResult, idle time.Duration, refusals [
 // full for the whole wait. Deferred, class capacity — the fleet is healthy and
 // the contract is sound; it was not this contract's turn — with every refusal
 // and the wait named so the caller can re-run, widen the wait, or add a node.
-func (r *runner) capacityDefer(local NodeView, seed PlacedResult, idle, wait time.Duration, refusals []string) PlacedResult {
-	reason := fmt.Sprintf("capacity wait: no node had room within %s (waited %s; agent_placement_wait_sec=%d; %d refusal(s): %s) — re-run later, raise agent_placement_wait_sec, or add a node",
-		wait, idle.Round(time.Second), r.cfg.AgentPlacementWaitSec, len(refusals), strings.Join(refusals, "; "))
+func (r *runner) capacityDefer(local NodeView, seed PlacedResult, idle, wait time.Duration, refusals []string, probeFails map[string]*probeFailTally) PlacedResult {
+	reason := fmt.Sprintf("capacity wait: no node had room within %s (waited %s; agent_placement_wait_sec=%d; %d refusal(s): %s%s) — re-run later, raise agent_placement_wait_sec, or add a node",
+		wait, idle.Round(time.Second), r.cfg.AgentPlacementWaitSec, len(refusals), strings.Join(refusals, "; "),
+		probeFailureNote(probeFails))
 	return PlacedResult{
 		Node: local.NodeID, Seat: local.AgentSeat, JobID: seed.JobID,
 		PlacementReason: reason, waited: true, Unplaced: true, CapacityWaitSec: idle.Seconds(),
@@ -3535,6 +3605,12 @@ type probeSnapshot struct {
 	views     []NodeView
 	bases     []string
 	probeErrs []string
+	// failed is probeErrs keyed by the base it belongs to. probeErrs is a flat
+	// list because that is what every placement reason renders; a caller that
+	// has to ACCUMULATE failures across calls (the capacity wait) needs to know
+	// which base each one came from, and matching on substrings would be a
+	// guess.
+	failed map[string]string
 }
 
 // deadProbe is one base's last TRANSPORT failure — the negative cache's entry.
@@ -3548,11 +3624,17 @@ type deadProbe struct {
 // rather than re-dialled. Vars so tests can compress them, exactly like
 // pollEvery and placementPollInterval; production never mutates them.
 //
-// 2 s is chosen SHORTER than placementPollInterval (3 s) on purpose: the
+// 2 s is chosen SHORTER than the SHORTEST GAP BETWEEN TWO TICKS on purpose: the
 // capacity wait's whole job is to notice a node that just freed, so the memo
-// must never be able to serve one of its ticks. Anything that changes either
-// number has to keep that relation — a memo longer than the tick would make the
-// wait poll its own cache.
+// must never be able to serve one of its ticks.
+//
+// The comparison is not against placementPollInterval itself. The tick is
+// jittered, so the shortest gap is (1 - jitterFrac) x placementPollInterval =
+// 2.4 s, and a memo of 2.5 s would read as "safely under the 3 s interval"
+// while quietly answering ticks from cache. TestProbeMemoCannotServeACapacity-
+// WaitTick pins the real relation over the PRODUCTION values, because every
+// capacity-wait test zeroes the memo in order to compress the tick and so none
+// of them would ever notice.
 //
 // 30 s for the negative cache is the other side of the same trade: long enough
 // that a fan-out stops paying fetchNodeViewTimeout per subtask for a box that is
@@ -3564,15 +3646,24 @@ var (
 )
 
 func (r *runner) fetchViews(ctx context.Context) (views []NodeView, bases []string, probeErrs []string) {
+	views, bases, probeErrs, _ = r.fetchViewsDetailed(ctx)
+	return views, bases, probeErrs
+}
+
+// fetchViewsDetailed is fetchViews plus the failures keyed by BASE, for the one
+// caller that accumulates them across calls rather than rendering them once.
+func (r *runner) fetchViewsDetailed(ctx context.Context) ([]NodeView, []string, []string, map[string]string) {
 	if s := r.memoisedProbe(); s != nil {
-		return s.copyOut()
+		v, b, e := s.copyOut()
+		return v, b, e, maps.Clone(s.failed)
 	}
 	s := &probeSnapshot{at: time.Now()}
-	s.views, s.bases, s.probeErrs = r.probeRemotes(ctx)
+	s.views, s.bases, s.probeErrs, s.failed = r.probeRemotes(ctx)
 	r.probeMu.Lock()
 	r.probeMemo = s
 	r.probeMu.Unlock()
-	return s.copyOut()
+	v, b, e := s.copyOut()
+	return v, b, e, maps.Clone(s.failed)
 }
 
 // copyOut hands every caller its OWN slices. The snapshot is shared by the
@@ -3613,10 +3704,18 @@ func (r *runner) recentlyDead(base string) (string, bool) {
 	r.probeMu.Lock()
 	defer r.probeMu.Unlock()
 	d, ok := r.probeDead[base]
-	if !ok || time.Since(d.at) >= probeNegativeTTL {
+	if !ok {
 		return "", false
 	}
-	return fmt.Sprintf("%s (cached: not re-dialled for %s)", d.why, probeNegativeTTL), true
+	elapsed := time.Since(d.at)
+	if elapsed >= probeNegativeTTL {
+		return "", false
+	}
+	// Elapsed and remaining, not the configured TTL: an operator reading this
+	// wants to know how stale the verdict is and when the base is dialled
+	// again. Printing the fixed window said neither.
+	return fmt.Sprintf("%s (cached %s ago, re-dial in %s)",
+		d.why, elapsed.Round(time.Millisecond), (probeNegativeTTL - elapsed).Round(time.Millisecond)), true
 }
 
 // noteDeadProbe records a TRANSPORT failure against the base.
@@ -3644,7 +3743,7 @@ func (r *runner) noteDeadProbe(ctx context.Context, base string, err error) {
 // reassembled in the CONFIGURED order so views/bases/probeErrs keep the
 // positional contract fetchViews has always published. Completion order is not
 // an ordering any caller can use — a NodeView carries no base.
-func (r *runner) probeRemotes(ctx context.Context) ([]NodeView, []string, []string) {
+func (r *runner) probeRemotes(ctx context.Context) ([]NodeView, []string, []string, map[string]string) {
 	type outcome struct {
 		view NodeView
 		ok   bool
@@ -3693,6 +3792,7 @@ func (r *runner) probeRemotes(ctx context.Context) ([]NodeView, []string, []stri
 	views := make([]NodeView, 0, len(out))
 	bases := make([]string, 0, len(out))
 	var probeErrs []string
+	failed := map[string]string{}
 	for i, o := range out {
 		switch {
 		case o.ok:
@@ -3700,9 +3800,10 @@ func (r *runner) probeRemotes(ctx context.Context) ([]NodeView, []string, []stri
 			bases = append(bases, r.remotes[i])
 		case o.err != "":
 			probeErrs = append(probeErrs, o.err)
+			failed[r.remotes[i]] = o.err
 		}
 	}
-	return views, bases, probeErrs
+	return views, bases, probeErrs, failed
 }
 
 // noEligibleRemote turns "nothing eligible" into the cause an operator can act
