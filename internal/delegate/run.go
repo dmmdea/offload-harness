@@ -142,6 +142,12 @@ type PlacedResult struct {
 	// other such node under one empty key, and the dial target is the thing
 	// actually being re-tried.
 	ranBase string
+	// PollNote (register D-116) names the bound the delegator polled a
+	// timeout_auto contract at and where the number came from — the node's
+	// advertised seat rate, the node's own published wall, or the cap when it
+	// advertised neither. Empty for a contract that named its own timeout_sec,
+	// which is polled at timeout_sec + grace exactly as before.
+	PollNote string
 	// refusalStatus records a DISPATCH-TIME refusal: the node answered the
 	// dispatch with something other than the one 202 ack (the status it sent),
 	// or the delegator never reached it at all (0). Only set when Err is also
@@ -398,6 +404,12 @@ const (
 var (
 	pollEvery = 3 * time.Second
 	pollGrace = 60 * time.Second
+	// pollSecond is the unit a contract's wall (an integer number of SECONDS)
+	// is converted to wall clock with. One real second in production; a test
+	// compresses it because an auto contract's bound never falls below
+	// AgentTimeoutSecDefault (300 s) and a deadline test cannot wait that out.
+	// A var for that reason only — production never mutates it.
+	pollSecond = time.Second
 )
 
 // maxQueuedWait is the ABSOLUTE ceiling on how long a subtask may sit in a
@@ -2614,7 +2626,7 @@ func (r *runner) attempt(ctx context.Context, i int, contract core.AgentContract
 		dispatched.Layer = dec.Layer
 		remotePlaced = placedOrNil(dec)
 	}
-	pr := r.runRemote(ctx, base, jobID, dispatched)
+	pr := r.runRemote(ctx, base, jobID, dispatched, chosen)
 	pr.ranBase = base
 	pr.PlacementReason = reason
 	if pr.Node == "" {
@@ -2681,7 +2693,12 @@ func (r *runner) runLocal(ctx context.Context, contract core.AgentContract, view
 // runRemote drives the fleet wire: dispatch (202 ack, retried once on
 // transport doubt under the SAME job id), then poll to a terminal state or
 // the poll deadline.
-func (r *runner) runRemote(ctx context.Context, base, jobID string, contract core.AgentContract) PlacedResult {
+//
+// view is the health view of the node being dispatched to. It is the input to
+// the auto poll bound (register D-116): what that node advertises about its
+// seat is what the delegator's clock is sized from. A zero view simply bounds
+// nothing — the cap, as before.
+func (r *runner) runRemote(ctx context.Context, base, jobID string, contract core.AgentContract, view NodeView) PlacedResult {
 	var pr PlacedResult
 	payload, err := json.Marshal(contract)
 	if err != nil {
@@ -2714,7 +2731,22 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 	// wall clock. So QUEUED TIME IS CREDITED BACK: the deadline moves out by
 	// the time the job provably spent waiting, and the contract still gets the
 	// execution budget it asked for.
-	pollBudget := time.Duration(timeoutSec)*time.Second + pollGrace
+	pollBudget := time.Duration(timeoutSec)*pollSecond + pollGrace
+	// THE AUTO BOUND (register D-116). For a contract the caller left unsized,
+	// executionBudgetSec hands back the wire CAP — the delegator cannot cut a
+	// 700 s wall the node chose at the 300 s the wire happens to carry. But the
+	// cap is not the node's wall either, and holding the clock there abandoned
+	// a silently dead node 900 s after its own 300 s wall had expired. So the
+	// bound is sized from what the node ADVERTISES, by the same arithmetic the
+	// node sizes its wall with (autoPollBound → seatrate.AutoWallFor), and the
+	// cap stays the ceiling: a node that advertises no rate is still polled to
+	// it. pollNote names the source and rides the result (poll_note).
+	pollNote := ""
+	if bound, note := autoPollBound(view, contract); bound > 0 {
+		pollBudget = bound + pollGrace
+		pollNote = note
+		pr.PollNote = note
+	}
 	start := time.Now()
 	deadline := start.Add(pollBudget)
 	// queuedWaitBudget bounds the credit — an unbounded wait is its own
@@ -2791,7 +2823,7 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 				// job, so there is no defer to report. A FAILURE (Summary.Failed,
 				// non-zero CLI exit) is the honest outcome — a broken node, or one
 				// denying the job, must read broken.
-				pr.Err = fmt.Sprintf("poll deadline after %s%s: %s", pollBudget, queuedNote(queuedCredit), unownedDetail(sawNodeAnswer, saw404, redispatches, lastPollErr))
+				pr.Err = fmt.Sprintf("poll deadline after %s%s: %s%s", pollBudget, queuedNote(queuedCredit), unownedDetail(sawNodeAnswer, saw404, redispatches, lastPollErr), boundNote(pollNote))
 				return pr
 			}
 			// Roast delta 14: mark deferred, reason PREFIXED "poll deadline"
@@ -2799,7 +2831,7 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 			// job id in the telemetry line lets an operator reconcile by hand.
 			// The wording says only what is known: it acked and it never reached
 			// a terminal state — not that it "could not complete the contract".
-			reason := fmt.Sprintf("poll deadline after %s%s: node accepted the job but did not reach a terminal state", pollBudget, queuedNote(queuedCredit))
+			reason := fmt.Sprintf("poll deadline after %s%s: node accepted the job but did not reach a terminal state%s", pollBudget, queuedNote(queuedCredit), boundNote(pollNote))
 			// A node that answered every poll normally simply ran out of clock:
 			// a BUDGET defer. One whose last answer we could not use (a 5xx, an
 			// unknown state) is a broken box, and classing the two alike is how
@@ -2823,7 +2855,26 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 			pr.orphanable = true // acked, owned, no terminal state seen — recovery's case
 			return pr
 		}
-		state, data, jobErr, status, perr := r.pollOnce(ctx, base, jobID)
+		poll, perr := r.pollOnce(ctx, base, jobID)
+		state, data, jobErr, status := poll.State, poll.Data, poll.JobErr, poll.Status
+		// The node's OWN wall, published while the job runs (jobWire
+		// `wall_sec`, register D-116), beats every estimate: it is the number
+		// the run is actually executing under. It can only RAISE the bound —
+		// the delegator must never abandon a job the node is still running
+		// inside its own wall — and a node too old to publish it changes
+		// nothing. Only for an auto contract: an explicit timeout_sec is the
+		// caller's own number and the node runs exactly it.
+		if contract.TimeoutAuto && status == http.StatusOK {
+			if raised, note, ok := raisedPollBound(pollBudget, poll.WallSec); ok {
+				pollBudget = raised
+				pollNote = note
+				pr.PollNote = note
+				deadline = start.Add(pollBudget + queuedCredit)
+				if queuedWaitBudget = pollBudget; queuedWaitBudget > maxQueuedWait {
+					queuedWaitBudget = maxQueuedWait
+				}
+			}
+		}
 		// EVERY observation closes the queued span; only the `accepted` arm
 		// below re-opens it. Reset-then-re-arm is deliberate structure, not
 		// style: lastQueuedAt used to be cleared only in the `running` arm, so
@@ -2983,6 +3034,17 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 // wording — and the tests pinning it — still match. When it IS non-empty it
 // answers the first question a deadline raises on a queued fleet: was this job
 // slow, or was it merely late to start?
+// boundNote renders the auto poll bound for a deadline message, and NOTHING
+// when there is none — a contract that named its own timeout_sec must produce
+// the exact message it produced before D-116, so an operator grepping the old
+// wording (and the tests pinning it) still match.
+func boundNote(note string) string {
+	if note == "" {
+		return ""
+	}
+	return " (poll bound: " + note + ")"
+}
+
 func queuedNote(queuedCredit time.Duration) string {
 	if queuedCredit <= 0 {
 		return ""
@@ -3179,9 +3241,9 @@ func (r *runner) dispatch(ctx context.Context, base, jobID string, payload json.
 	return true, 0, lastErr
 }
 
-// pollOnce GETs the job state. perr covers transport-level failure only; an
-// HTTP answer (any status) comes back as (state, data, jobErr, status, nil).
-func (r *runner) pollOnce(ctx context.Context, base, jobID string) (state string, data json.RawMessage, jobErr string, status int, perr error) {
+// pollOnce GETs the job state. The error covers transport-level failure only;
+// an HTTP answer (any status) comes back as a jobPoll with a nil error.
+func (r *runner) pollOnce(ctx context.Context, base, jobID string) (jobPoll, error) {
 	// One poll implementation, two callers: the recovery pass (intent.go)
 	// polls by these same rules through the shared package function.
 	return pollJobOnce(ctx, r.cfg, base, jobID)

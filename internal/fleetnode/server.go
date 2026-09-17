@@ -1415,6 +1415,13 @@ func (s *Server) admit(w http.ResponseWriter, r *http.Request, env dispatchEnvel
 
 	run := func(ctx context.Context) (json.RawMessage, error) {
 		defer cleanup() // temp files live exactly as long as the job
+		// The wall report (register D-116): the executing lane publishes the
+		// wall it sized for this contract, and the job record carries it onto
+		// every poll of the RUNNING job. Wired for every task type — only the
+		// agent lane reports one today, and a lane that reports none leaves
+		// the record at 0, which is what a pre-D-116 node published.
+		jobID := env.JobID
+		ctx = core.WithWallReport(ctx, func(sec int) { s.jobs.SetWall(jobID, sec) })
 		res := s.runner.Run(ctx, req)
 		if env.TaskType == VisionTask {
 			// The vision caller reads the WHOLE core.Result back (defers
@@ -1642,10 +1649,17 @@ type jobWire struct {
 	State JobState        `json:"state"`
 	Data  json.RawMessage `json:"data,omitempty"`
 	Error string          `json:"error,omitempty"`
+	// WallSec (register D-116) is the wall the run reported it is executing
+	// under, published WHILE THE JOB RUNS so a delegator polling a
+	// timeout_auto contract can bound its clock by this node's sized wall
+	// rather than by the wire cap. Additive and omitempty: a delegator too
+	// old to read it ignores it, and a job whose lane reports no wall
+	// publishes a payload byte-identical to before.
+	WallSec int `json:"wall_sec,omitempty"`
 }
 
 func writeJobView(w http.ResponseWriter, status int, v *JobView) {
-	writeJSON(w, status, jobWire{JobID: v.ID, State: v.State, Data: v.Data, Error: v.Error})
+	writeJSON(w, status, jobWire{JobID: v.ID, State: v.State, Data: v.Data, Error: v.Error, WallSec: v.WallSec})
 }
 
 // writeAck emits the ONLY acceptance shape the contract allows: 202 + exact
