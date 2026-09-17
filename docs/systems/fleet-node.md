@@ -845,6 +845,11 @@ fleet-overview.md's "A failed `/fleet/jobs` fetch is distinguished from an empty
   exists because the node's sized wall used to reach the delegator only on the FINAL result,
   which is exactly the message a node that dies mid-run never sends. Never rewritten once the
   job is terminal: from there the result carries its own `wall_sec`.
+  It is reported at the line that OPENS the wall context — **after** admission — so it means
+  *the wall has started*, not *a wall was sized*: a job sits in state `running` for its whole
+  admission window (cordon, pre-flight, cold load, coherence probe), and the delegator anchors
+  its poll clock on the first `wall_sec` it sees. A run that defers during admission therefore
+  publishes no `wall_sec` at all, which is correct — no wall ever ran.
 - **Poll deadline** = the contract's `timeout_sec` + 60 s grace. Past it the delegator stops
   polling — the node may still finish server-side; the job id in the telemetry line lets an
   operator reconcile by hand. The outcome depends on whether the node ever ANSWERED about the
@@ -858,11 +863,21 @@ fleet-overview.md's "A failed `/fleet/jobs` fetch is distinguished from an empty
   wall — so the delegator sizes its clock from that node's advertised `seat_rate` and `seat_budget`
   through the SAME function the node uses (`seatrate.AutoWallFor`; the node's entry point is
   `pipeline.AutoWallFor`, the delegator's is `delegate.autoPollBound`, and a test runs both on one
-  contract so they cannot drift), clamped to the same 300..900. Three bounds, and the deadline
-  message names which one applied: `poll bound: sized from <node>'s seat_rate X tok/s (N samples):
-  M s`, `poll bound: the node's own wall M s` (a running poll published `wall_sec` larger than the
-  estimate — the node's number is authoritative and can only RAISE the bound, never lower it), or
-  `poll bound: cap: no seat rate advertised by <node>`. The bound also rides the published result as
+  contract so they cannot drift **while both are fed the same seat**), clamped to the same 300..900.
+  Four bounds, and the deadline message names which one applied: `poll bound: sized from <node>'s
+  seat_rate X tok/s (N samples): M s`, `poll bound: the node's own wall M s, from where the node
+  started it` (a running poll published `wall_sec`; the node's number and its START are
+  authoritative, so the clock is re-anchored there and can only ever be RAISED after), `poll bound:
+  cap: no seat rate advertised by <node>`, or `poll bound: cap: the contract runs on <node>'s seat
+  <x> and only <agent_seat>'s rate is advertised` — a COMPOSITE placement runs the dispatched
+  layer's seat and the node sizes its wall from that seat's rate, which health does not publish, so
+  the delegator refuses to size a clock from a seat the run will not use.
+  Until a `wall_sec` is observed the bound also carries an **admission allowance** (300 s,
+  `core.AgentAdmissionSecDefault`), named in the message as `+ Xs allowed for the node's admission
+  before its wall starts`: the node's wall starts only after the cordon, the pre-flight, the seat's
+  cold load and the coherence probe, and all of that is spent in state `running`, earning no queued
+  credit. Without it an auto contract landing on a cold seat was abandoned at the poll deadline
+  while the node was still inside its own wall. The bound also rides the published result as
   `results[].poll_note`, on a green result as much as on a deadline. A contract that names its own
   `timeout_sec` is untouched: `timeout_sec` + grace, no note, the pre-D-116 wording exactly. So is
   the `queue` route, where the claimant is not chosen by the delegator and there is no health view

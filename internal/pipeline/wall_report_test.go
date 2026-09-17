@@ -76,3 +76,38 @@ func TestRunAgentTaskReportsTheWallItRunsUnder(t *testing.T) {
 		t.Fatalf("deferred without a reporter: %s", wire.Reason)
 	}
 }
+
+// TestNoWallIsReportedUntilTheWallStarts (register D-116, review finding 1):
+// `wall_sec` means "the wall has STARTED", never "a wall was sized". The node
+// claims a job `running` before it runs it, and everything above the wall
+// context — the cordon wait, the llama-swap pre-flight, the cold-load warm-up,
+// the coherence probe, up to core.AgentAdmissionSecDefault — happens in that
+// state. Published at the sizing, the number told a delegator that a 300 s
+// wall was already burning while the seat still had 250 s of loading to do,
+// and the delegator's poll clock is anchored on it.
+//
+// So a run that defers during ADMISSION must report nothing at all: no wall
+// ever ran.
+func TestNoWallIsReportedUntilTheWallStarts(t *testing.T) {
+	// The seat cold-loads and the post-warm coherence probe catches it
+	// answering the NaN shape: an infrastructure defer BEFORE the wall exists.
+	fake := coldLoadFake(func(int64) string { return degenerateChat() })
+	srv := fake.server(t)
+	defer srv.Close()
+
+	var reported atomic.Int64
+	ctx := core.WithWallReport(context.Background(), func(sec int) { reported.Store(int64(sec)) })
+
+	auto := testContract()
+	auto.MaxSteps, auto.TimeoutSec, auto.TimeoutAuto = 12, core.AgentTimeoutSecDefault, true
+	wire := decodeWire(t, coherenceTestPipeline(t, srv.URL, 30, "").Run(ctx, agentTestRequest(t, auto)))
+	if !wire.Deferred {
+		t.Fatalf("the fixture must defer during admission, got a result: %q", wire.Output)
+	}
+	if wire.DeferClass != core.DeferClassInfrastructure {
+		t.Fatalf("defer class = %q, want the admission-time infrastructure defer (%s)", wire.DeferClass, wire.Reason)
+	}
+	if got := reported.Load(); got != 0 {
+		t.Fatalf("a run that never reached its wall published a wall of %d s: the delegator would anchor its poll clock on a wall that never started", got)
+	}
+}

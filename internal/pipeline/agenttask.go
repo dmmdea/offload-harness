@@ -255,12 +255,6 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		log.Printf("agent task: %s", note)
 		contract.TimeoutAuto, contract.TimeoutSec = false, timeoutSec
 	}
-	// Publish the wall this run is ACTUALLY under (register D-116). The node
-	// door writes it onto the job record, so a poll of a RUNNING job carries
-	// it and the delegator can bound its own clock by the node's — instead of
-	// learning the number only from a final result a dead node never sends.
-	// No reporter on the context (the local lane, a test) = a no-op.
-	core.ReportWall(ctx, timeoutSec)
 	wall := time.Duration(timeoutSec) * time.Second
 	// Register the run (0.117.0, register D-93) BEFORE admission, so a drain or
 	// a status reader sees it while the seat is still loading for it, and hold
@@ -362,6 +356,27 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		log.Printf("agent task: seat coherence (%s): %s", seat, note)
 		return deferWire(core.DeferClassInfrastructure, note)
 	}
+	// Publish the wall this run is ACTUALLY under (register D-116), HERE — at
+	// the one line where the wall actually begins, and never before it. The
+	// node door writes it onto the job record, so a poll of a RUNNING job
+	// carries it and the delegator can bound its own clock by the node's,
+	// instead of learning the number only from a final result a dead node
+	// never sends. No reporter on the context (the local lane, a test) = a
+	// no-op.
+	//
+	// WHY NOT AT THE SIZING (where it was first written, D-116 review finding
+	// 1): everything above this line — the cordon wait, the llama-swap
+	// pre-flight, the cold-load warm-up, the coherence probe — is ADMISSION,
+	// up to admissionBudget (300 s by default) spent in job state `running`
+	// because the node claims a job before it runs it. Publishing the wall at
+	// the top made `wall_sec` mean "a wall was SIZED", and a delegator that
+	// anchors its clock on it would have started counting a 300 s wall while
+	// the seat still had 250 s of loading to do. Published here it means "the
+	// wall has STARTED", which is the fact the delegator's clock needs. An
+	// admission defer therefore publishes no wall at all — correct: no wall
+	// ever ran. (Safe to move: `wall_sec` ships for the first time in this
+	// same release, so no deployed node ever published the earlier meaning.)
+	core.ReportWall(ctx, timeoutSec)
 	cctx, cancel := context.WithTimeout(ctx, wall)
 	defer cancel()
 	// One busy-seat budget for the WHOLE contract (seatwait): every chat step
@@ -1362,8 +1377,10 @@ func admissionBudget(sec int) time.Duration {
 	case sec == 0:
 		// 300 s since 0.115.11 (was 120): the budget now also covers the seat's
 		// own cold load (warmSeat), and a vLLM seat takes 125–250 s to load
-		// plus a Triton JIT on its first completion.
-		return 300 * time.Second
+		// plus a Triton JIT on its first completion. The number lives in core
+		// because the DELEGATOR must allow for this window too (register
+		// D-116) and cannot import this package.
+		return time.Duration(core.AgentAdmissionSecDefault) * time.Second
 	}
 	return time.Duration(sec) * time.Second
 }

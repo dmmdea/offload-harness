@@ -13,8 +13,8 @@ import (
 // import internal/pipeline, which imports this package, so it can only live in
 // an external test package — and an external test package cannot reach an
 // unexported function. Test-only: this file compiles into no binary.
-func AutoPollBoundForTest(view NodeView, c core.AgentContract) (time.Duration, string) {
-	return autoPollBound(view, c)
+func AutoPollBoundForTest(view NodeView, c core.AgentContract, runSeat string) (time.Duration, string) {
+	return autoPollBound(view, c, runSeat)
 }
 
 // PollSecondForTest is the unit an integer wall is converted to wall clock

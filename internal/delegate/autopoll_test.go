@@ -56,7 +56,7 @@ func ratedView(id string, tokS, coldLoadSec float64, samples, stepTokens int, th
 // to any ONE of them is visible.
 func TestAutoPollBoundIsTheSizedWallNotTheCap(t *testing.T) {
 	view := ratedView("node-a", 20, 30, 5, 1024, "auto")
-	bound, note := autoPollBound(view, autoContract())
+	bound, note := autoPollBound(view, autoContract(), "")
 	// 30 cold + 1024/20 think + 7 x (128/20 + 6) steps + 4096/20 final
 	// + 4096/20 re-pack = 577.6 -> 578 s, inside [300, 900].
 	if want := 578 * time.Second; bound != want {
@@ -77,11 +77,11 @@ func TestAutoPollBoundIsTheSizedWallNotTheCap(t *testing.T) {
 // clamp identically at both ends. A very fast seat cannot buy a 30 s poll
 // window, and a very slow one cannot hold a delegation past the cap.
 func TestAutoPollBoundClampsToTheWireBounds(t *testing.T) {
-	fast, note := autoPollBound(ratedView("fast", 2000, 1, 9, 1024, "auto"), autoContract())
+	fast, note := autoPollBound(ratedView("fast", 2000, 1, 9, 1024, "auto"), autoContract(), "")
 	if want := time.Duration(core.AgentTimeoutSecDefault) * time.Second; fast != want {
 		t.Errorf("fast seat: bound = %s, want the wire default %s (note %q)", fast, want, note)
 	}
-	slow, note := autoPollBound(ratedView("slow", 0.5, 120, 9, 4096, "on"), autoContract())
+	slow, note := autoPollBound(ratedView("slow", 0.5, 120, 9, 4096, "on"), autoContract(), "")
 	if want := time.Duration(core.AgentTimeoutSecCap) * time.Second; slow != want {
 		t.Errorf("slow seat: bound = %s, want the cap %s (note %q)", slow, want, note)
 	}
@@ -103,7 +103,7 @@ func TestAutoPollBoundWithoutARateIsTheCap(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			bound, note := autoPollBound(tc.view, autoContract())
+			bound, note := autoPollBound(tc.view, autoContract(), "")
 			if bound != capBound {
 				t.Fatalf("bound = %s, want the cap %s", bound, capBound)
 			}
@@ -119,7 +119,7 @@ func TestAutoPollBoundWithoutARateIsTheCap(t *testing.T) {
 // the note SAYS so rather than implying the budgets were read.
 func TestAutoPollBoundSizesAtHouseDefaultsWhenOnlyTheRateIsPublished(t *testing.T) {
 	view := NodeView{NodeID: "rate-only", AgentSeat: "remote-seat", SeatRate: &SeatRateView{TokS: 20, ColdLoadSec: 30, Samples: 5}}
-	bound, note := autoPollBound(view, autoContract())
+	bound, note := autoPollBound(view, autoContract(), "")
 	if want := 578 * time.Second; bound != want {
 		t.Fatalf("bound = %s, want %s (the 1024-token house default)", bound, want)
 	}
@@ -133,7 +133,7 @@ func TestAutoPollBoundSizesAtHouseDefaultsWhenOnlyTheRateIsPublished(t *testing.
 // it — no sizing, no note, and the poll budget stays timeout_sec + grace.
 func TestExplicitTimeoutContractIsNeverAutoBounded(t *testing.T) {
 	explicit := remoteContract() // TimeoutSec 30, TimeoutAuto false
-	bound, note := autoPollBound(ratedView("node-a", 20, 30, 5, 1024, "auto"), explicit)
+	bound, note := autoPollBound(ratedView("node-a", 20, 30, 5, 1024, "auto"), explicit, "")
 	if bound != 0 || note != "" {
 		t.Fatalf("bound/note = %s/%q for an explicit contract, want 0 and no note", bound, note)
 	}
@@ -310,7 +310,9 @@ func TestTheNodesOwnWallRaisesThePollBound(t *testing.T) {
 	if want := "poll bound: the node's own wall 800 s"; !strings.Contains(r.Result.Reason, want) {
 		t.Fatalf("reason = %q, want it to name %q", r.Result.Reason, want)
 	}
-	if r.PollNote != "the node's own wall 800 s" {
+	// The note names the wall AND where it was measured from: the node's own
+	// wall start, which is the instant the delegator's clock is anchored on.
+	if r.PollNote != "the node's own wall 800 s, from where the node started it" {
 		t.Fatalf("poll note = %q, want the node's wall named", r.PollNote)
 	}
 }
