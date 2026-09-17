@@ -83,6 +83,11 @@ func TestAgentRunDefersAnIncoherentSeat(t *testing.T) {
 	const seat = "agent-pool"
 	srv, chats := coherenceSeatServer(t, seat, func(body map[string]any) string {
 		if isProbeBody(body) {
+			// The probe takes measurable time so the admission assertion below
+			// is about BOOKKEEPING and not about the host clock: warm-up plus
+			// probe on a loopback fake otherwise complete inside one Windows
+			// timer tick and every duration reads 0.
+			time.Sleep(1200 * time.Millisecond)
 			return `{"choices":[{"message":{"role":"assistant","content":"<tool_call>` +
 				strings.Repeat("!", 40) + `"},"finish_reason":"length"}]}`
 		}
@@ -111,8 +116,8 @@ func TestAgentRunDefersAnIncoherentSeat(t *testing.T) {
 	if n := chats.Load(); n != 1 {
 		t.Fatalf("chat completions = %d, want exactly 1 (the probe) — the loop must never start", n)
 	}
-	if wait, _ := m["admission_wait_sec"].(float64); wait <= 0 {
-		t.Fatalf("admission_wait_sec = %v, want the cold load and the probe charged to admission", wait)
+	if wait, _ := m["admission_wait_sec"].(float64); wait < 1.1 {
+		t.Fatalf("admission_wait_sec = %v, want the probe's ~1.2 s charged to admission on the DEFER path too", wait)
 	}
 }
 
