@@ -239,6 +239,36 @@ Versioning: [SemVer](https://semver.org/).
   `config.Load` armed for the cordon, so the pre-check and the cordon can never disagree. An
   INHERITED lease (`GPU_LEASE_EPOCH`) and a plain non-fencing reservation are unchanged: ADR 0032's
   "a peer-held seat is waited for" governs every hold whose answer can still change.
+- **The list-cap re-issue's gate could never fire on a slow seat** (register S-06/W-07, diagnosis
+  `2026-09-17-harness-scheduling-diagnosis.md` §2(d)/§6). A final answer cut at the completion budget
+  on a schema contract is re-issued once with the schema's own list caps (0.122.1, D-95), gated on the
+  wall still holding one more turn — but that gate sized the turn from the CONFIGURED final (up to
+  8,192 tokens) plus a full re-pack term, `MinTurnFor(0, finalBudget, repackBudget, tok_s)`, when the
+  re-issue itself is one turn at the FITTED final (`final_budget_fit`) with nothing to re-pack. Below
+  ~9 tok/s the configured-budget gate exceeded the 900 s wall cap and was unsatisfiable — the #1
+  measured defer fleet-wide (48 rows "re-pack skipped: the final answer was cut at the completion
+  budget"). Now gates on `MinTurnFor(0, final_budget_fit, 0, tok_s)` — the arithmetic the re-issue
+  actually costs.
+- **The structured re-pack rebuilt its cascade-lane probe cache on every attempt** (register D-85/D-108,
+  S-21/W-19, same diagnosis §2(d)/§3/§6). Up to three attempts — two grammar completions and the chat
+  fallback — each called `repackClient` independently, and each one built a FRESH `FleetLaneGates` cache
+  and a fresh `LocalSwapBusy` closure, so every attempt re-paid a live `/v1/models` + `/running` +
+  per-model gauge read of the LOCAL seat before spending a token. Measured fleet-wide: 1,301 rows,
+  median 18 s, p90 109 s, max 581 s, **15.13 h total**, 244 rows at all three attempts — 180 of those
+  deferred anyway. The probe closures are now built ONCE per `repackStructured` call and threaded into
+  every client the call still constructs, so their own TTL cache does the sharing. Each attempt's own
+  transport timeout is also now bounded by `min(repackTimeout, remaining wall / attempts still owed a
+  turn)` instead of the full per-call allowance, so one slow attempt can no longer sit on everything
+  while the retry and the fallback are still due — sized against the client's own timeout, never a
+  wrapped context, so `llamaclient`'s seatwait 429/503 retry loop and the caller's wall-timeout
+  classification keep reading the same, real wall clock they always have.
+- **A cancelled parent mid-LOOP was filed as broken hardware** (register S-22/W-16, same diagnosis
+  §2(e)/§6). The loop branch of `runAgentTask` fell through to `agent loop: <err>` /
+  `defer_class: infrastructure` on a canceled parent context — the delegator abandoning the poll, or
+  the node shutting down — while the re-pack branch thirty-odd lines below already carried the correct
+  arm (12 `agent loop: context canceled` rows filed as broken hardware, an operator sent to fix a box
+  that never misbehaved). Mirrored into the loop branch: a canceled parent is now `defer_class: budget`
+  there too — nothing on the box failed; the caller went away.
 
 ## [0.126.2] - 2026-09-17 - a PAIR card's failure text is one short line
 
