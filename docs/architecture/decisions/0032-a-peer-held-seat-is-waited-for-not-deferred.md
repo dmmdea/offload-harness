@@ -70,7 +70,8 @@ validating contracts), no daemon, every wait counted on the wire:
    a budget defer the delegator would size future contracts from.
 2. **Admission pre-flight** (`awaitSeatAdmission`): before the contract's wall starts, poll
    `GET /running` (vendored client) while *any* model on the endpoint is in a non-`ready` state,
-   bounded by `agent_admission_wait_sec` (0 = 120 s, −1 = off), fail-open on a probe error; the
+   bounded by `agent_admission_wait_sec` (0 = `core.AgentAdmissionSecDefault`, i.e. 300 s since
+   0.115.11; −1 = off), fail-open on a probe error; the
    slept time is `admission_wait_sec` on the wire. **Known bound:** the drain phase before a swap
    shows nothing non-ready, so a swap that begins a second later is still charged to the wall — this
    removes the swap *window* from the wall, not the race. The remote-placement poll deadline in
@@ -90,7 +91,8 @@ validating contracts), no daemon, every wait counted on the wire:
 
 ## Consequences
 
-- Worst-case added latency per contract = the two budgets (90 s + 120 s), both counted on the wire
+- Worst-case added latency per contract = the two budgets (`seat_contention_wait_sec` +
+  `agent_admission_wait_sec`), both counted on the wire
   and both opt-out. The `seat contended:` reason plus `contention_wait_sec` / `admission_wait_sec`
   are the numbers that say whether defers were traded for latency.
 - The fingerprint is a **wrong-document tripwire, not a quality gate**: lexical overlap is a poor
@@ -112,3 +114,15 @@ validating contracts), no daemon, every wait counted on the wire:
   review to the fleet at route `remote` under `remoteEligible`'s ctx-fit floor, waiting locally only
   when nothing out there qualifies; and `modelaffinity.LeaseError` carries the holder's declared
   window, so the defer that remains says when to come back.
+- **Amended 2026-09-17 (0.126.2, register S-26/S-25/S-24/S-08):** the admission budget above is
+  `core.AgentAdmissionSecDefault` = **300 s**, not the 120 s this ADR was written against — it was
+  raised in 0.115.11 when the budget took on the seat's own cold load, and the figure is read from
+  the constant by every door and by the delegator's poll allowance. Three consequences follow for
+  this decision's own rule. (a) The D-110 extension now applies to BOTH agent doors, not only the
+  review lane: `ForeignFence` is asked before `AwaitRunSlot` on `runAgentTask` and on `agent_run`, so
+  a hold that cannot end inside the budget is a `capacity` defer in milliseconds. "Waited for, not
+  deferred" continues to govern a non-fencing reservation and an inherited lease, which is the case
+  this ADR actually decided. (b) The pre-flight matches the seat's own `/running` row by alias OR
+  canonical id; without that the "my seat is ready" exit could not fire on an alias-bound seat and
+  the wait this ADR bounded was paid in full for another model's swap. (c) `agent_run` runs the
+  pre-flight at all — it never did, which made this ADR's point 2 true of one door only.

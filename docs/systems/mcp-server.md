@@ -68,14 +68,28 @@ defer on a composite box carries `placed` {tier, layer, role, seat, devices, rea
 evicts} — absent on a plain box), its default
 timeout honors config `agent_timeout_sec` (else the built-in 180s), and its result reports the
 resolved planner `model` alongside `output`/`steps`/`stop_reason` — visibility is the cure for a
-silent seat. A seat that is not loaded is warmed BEFORE the wall, on the admission budget, exactly as
-on the delegation door (D-64), and the result says so in `admission_wait_sec` / `admission_note`. A seat that just
+silent seat. **Its admission block is the delegation door's, step for step** — the two run the same loop
+on the same seat behind the same llama-swap, and every difference between them so far was found in
+production rather than in review (see "Admission" in [fleet-node.md](fleet-node.md) for the ordered list
+and the reasoning). Before the cordon, `delegate.ForeignFence` reads the machine-wide lease and a hold that
+refuses this process's next run defers `capacity` in milliseconds naming the fence and the holder's declared
+window, instead of polling that file for the whole admission budget to reach the same verdict (register S-26,
+0.126.2); an INHERITED lease is not a fence. Then the llama-swap **swap pre-flight**
+(`pipeline.AwaitSeatAdmission`, register S-25, 0.126.2) waits out another session's model swap OUTSIDE the
+wall — this door had no pre-flight at all, so an `agent_run` that arrived mid-swap spent its wall inside
+llama-swap's silent queue. A seat that is not loaded is then warmed BEFORE the wall, on the same admission budget,
+exactly as on the delegation door (D-64), and the result reports the whole block in `admission_wait_sec` /
+`admission_note` — one number and one `; `-joined note, never a per-step field. A seat that just
 cold-loaded is then asked ONE bounded question before the wall starts — the D-118 coherence probe, ≤ 96 tokens,
 `pipeline.ProbeSeatCoherence`, shared with the delegation door — and a seat that answers with the NaN shape defers
 `infrastructure` in seconds instead of generating garbage for the whole wall; the verdict is reported as
-`coherence_note` (`agent_coherence_probe`: `cold` by default, `always`, `off`). The
+`coherence_note` (`agent_coherence_probe`: `cold` by default, `always`, `off`). The probe fires on the warm-up's
+own "a load was attempted" answer, never on the cold load's duration (a sub-tick load measures 0 s) and never on
+"a note exists" (the warm-up also speaks when it settled nothing). The
 window compaction budgets against is then probed live and reported as `ctx_window` (the box's
-`agent_ctx_tokens` when the probe cannot answer, the 8,192 fallback only when that is unset too). A resolved planner absent from the endpoint's served roster fails loud with
+`agent_ctx_tokens` when the probe cannot answer, the 8,192 fallback only when that is unset too) — that probe
+runs on the admission deadline too (register S-24, 0.126.2), because it is allowed to absorb a cold load and on
+the wall context a slow seat spent the run's whole clock on it. A resolved planner absent from the endpoint's served roster fails loud with
 `deferred: true` naming the model, never a silent fall back to the workhorse — "served" means
 matched against canonical ids **or** `meta.llamaswap.aliases`, since a tier-seeded `agent_model`
 is normally an alias. Every response

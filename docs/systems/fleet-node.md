@@ -616,6 +616,8 @@ remote reasoning is quarantined from the caller's context by construction.
 | `wall_note` | string | 0.115.21: the estimate's arithmetic (`wall 600 s is BELOW the estimate 733 s for agent-pool: cold load 210 s + one think block 4096 tok (137 s) + 11 tool steps × (128 tok + 6 s prefill) (113 s) + final 8192 tok (273 s) at 30.0 tok/s (store, 5 samples); min_turn 484 s`), or why there is none (`no decode-rate sample for … yet`). |
 | `repack_ms` / `repack_attempts` / `repack_note` | int / int / string | 0.115.23 (register D-91): how long the structured re-pack ran, how many seat completions it spent (two grammar attempts + the chat lane at most), and why it stopped or was skipped. A `length`-cut final answer (`output_truncated`) is never re-packed — the run abstains at once with `output failed schema: re-pack skipped …` and the partial in `output` — and no attempt starts with under a tenth of the wall (capped at 45 s) left (a 12 KB re-pack is a ~190 s re-generation on the 4B; three of them spent 690 s into a 900 s wall on 2026-09-10). |
 | `calls` | `[{step, max_tokens, finish_reason, completion_tokens, reasoning_tokens, content_chars, reasoning_chars, tool_calls, thinking_off, reasoning_key, forced_final, ms}]` | 0.115.8 (register D-47): one entry per planner completion (0.115.19: `forced_final` marks the forced final step's call, D-89), on every result shape, set before the defer branches — the arithmetic a starvation diagnosis needs without transcript bytes. `reasoning_tokens` is vLLM's `usage.completion_tokens_details.reasoning_tokens` (0 = not reported). A pre-0.115.8 node emits none. Since 0.125.0 (register D-99) the DELEGATOR's published row `results[].calls` carries the LAST eight of these records (`omitempty`), so a caller reads them from `agent_delegate` / the CLI directly instead of from this endpoint with the fleet token. |
+| `admission_wait_sec` | float | Everything spent BEFORE the wall started, as one number: the cordon wait, the llama-swap **swap pre-flight**, the seat's cold-load warm-up, the coherence probe and — since 0.126.2 (register S-24) — the served-window probe. All five draw on ONE budget (`agent_admission_wait_sec`, 0 = `core.AgentAdmissionSecDefault` = 300 s, −1 = off), so the ceiling is the budget and not the sum of five of them. Omitted when zero: nothing was swapping, the seat was already resident and the window read instantly. A job sits in state `running` for this whole window, which is why the delegator's poll bound carries a matching admission allowance. |
+| `admission_note` | string | What admission DID or could not settle, `; `-joined across the steps that had something to say: `cold load Ns outside the wall`, `budget spent while <model>:<state> (proceeding into the wall)`, `running probe failed (proceeding): …`. Since 0.126.2 the warm-up also speaks from its **no-op** exits — `warm-up could not read /running (proceeding; the seat may still be cold)`, `no admission budget left for the warm-up …` — because "could not read" and "the seat is ready" used to be reported identically, and a still-cold seat reached the wall looking warm. Empty = every step settled cleanly. |
 | `coherence_note` | string | Register D-118: the post-warm SEAT COHERENCE probe’s verdict — one ≤ 96-token completion, charged to `admission_wait_sec`, asking the freshly loaded seat to call `read_file` and answer DONE. `coherence probe: tool call parsed in Ns` (the seat is sane), `… answered in text without a tool call …` / `… inconclusive (…); proceeding` (fail-open), or `seat incoherent at warm: …`, which is also a `deferred` `infrastructure` result. Absent when the probe did not run (`agent_coherence_probe` `off`, a warm seat under the default `cold`, or a pre-D-118 node). |
 | `deferred` | bool | True = the node ran and honestly could not complete the contract. **A defer is a success shape at the job level**: the job lands `done`, never `error` — `error` is reserved for internal wiring bugs (mirrors the cascade's defer semantics). |
 | `reason` | string | Why it deferred (shapes below). |
@@ -847,9 +849,10 @@ fleet-overview.md's "A failed `/fleet/jobs` fetch is distinguished from an empty
   job is terminal: from there the result carries its own `wall_sec`.
   It is reported at the line that OPENS the wall context — **after** admission — so it means
   *the wall has started*, not *a wall was sized*: a job sits in state `running` for its whole
-  admission window (cordon, pre-flight, cold load, coherence probe), and the delegator anchors
-  its poll clock on the first `wall_sec` it sees. A run that defers during admission therefore
-  publishes no `wall_sec` at all, which is correct — no wall ever ran.
+  admission window (the foreign-fence check, the cordon, the swap pre-flight, the cold load, the
+  coherence probe and the served-window probe), and the delegator anchors its poll clock on the
+  first `wall_sec` it sees. A run that defers during admission therefore publishes no `wall_sec`
+  at all, which is correct — no wall ever ran.
 - **Poll deadline** = the contract's `timeout_sec` + 60 s grace. Past it the delegator stops
   polling — the node may still finish server-side; the job id in the telemetry line lets an
   operator reconcile by hand. The outcome depends on whether the node ever ANSWERED about the
@@ -874,14 +877,57 @@ fleet-overview.md's "A failed `/fleet/jobs` fetch is distinguished from an empty
   the delegator refuses to size a clock from a seat the run will not use.
   Until a `wall_sec` is observed the bound also carries an **admission allowance** (300 s,
   `core.AgentAdmissionSecDefault`), named in the message as `+ Xs allowed for the node's admission
-  before its wall starts`: the node's wall starts only after the cordon, the pre-flight, the seat's
-  cold load and the coherence probe, and all of that is spent in state `running`, earning no queued
-  credit. Without it an auto contract landing on a cold seat was abandoned at the poll deadline
-  while the node was still inside its own wall. The bound also rides the published result as
+  before its wall starts`: the node's wall starts only after the cordon, the swap pre-flight, the
+  seat's cold load, the coherence probe and the served-window probe, and all of that is spent in
+  state `running`, earning no queued credit. Without it an auto contract landing on a cold seat was
+  abandoned at the poll deadline while the node was still inside its own wall. The bound also rides the published result as
   `results[].poll_note`, on a green result as much as on a deadline. A contract that names its own
   `timeout_sec` is untouched: `timeout_sec` + grace, no note, the pre-D-116 wording exactly. So is
   the `queue` route, where the claimant is not chosen by the delegator and there is no health view
   to size from — it still polls at the cap.
+
+## Admission: what a run pays before its wall starts
+
+Everything below happens while the job reads `running` and before `core.ReportWall` opens the wall
+context. One budget covers all of it (`agent_admission_wait_sec`), and every step reports into
+`admission_wait_sec` / `admission_note`. Both agent doors — the fleet contract (`runAgentTask`) and
+the MCP `agent_run` handler — run the same steps in the same order, which is the invariant the
+`agentrun_admission` suite exists to hold: each drift between them was found in production.
+
+1. **The foreign-fence check** (register S-26, 0.126.2). The machine-wide GPU lease is read once,
+   through the directory `config.Load` armed for the cordon, and `delegate.ForeignFence` asks whether
+   it refuses THIS process's next run — an exclusive text hold, a draining cordon, or a media render
+   held by somebody else. If it does, the run defers `capacity` immediately, naming the fence and the
+   holder's line (class, pid, declared reason, expiry). Nothing the run can do inside its own budget
+   releases another process's lease, so the verdict is on disk before the first poll; the doors used
+   to poll that file for the whole budget and reach the same verdict 300 s later (47 rows, 3.92 h, in
+   the three days to 2026-09-17) while the delegator sat on the re-placement path that verdict exists
+   to trigger. An **inherited** lease (`GPU_LEASE_EPOCH`, i.e. `gpu reserve … -- <session>`) is not a
+   fence, and a plain non-fencing reservation still waits at the cordon — ADR 0032's "a peer-held seat
+   is waited for" governs every hold whose answer can still change.
+2. **The cordon** (`modelaffinity.AwaitRunSlot`, register D-93): the same rule, waited out rather than
+   refused, for a hold that arrives between the check above and this line.
+3. **The swap pre-flight** (`awaitSeatAdmission`, ADR 0032). llama-swap queues — with no timeout of
+   its own — any request that needs a model it is still loading, so a contract that dialled mid-swap
+   spent its whole wall inside that queue. This polls `GET /running` while any model is non-`ready`.
+   The seat's OWN row ends the wait at once, and since 0.126.2 that row is matched by **alias or
+   canonical id**: `/running` names models canonically while the harness binds seats by alias
+   (`agent-pool` → `qwen3.8-27b-vllm`), so the fast path was dead on every alias-bound box and a
+   READY seat slept the whole budget whenever any other model happened to be mid-swap (406 rows,
+   "/running lists the seat under another id"). The roster read that resolves the alias is lazy: it
+   happens only when the bare name missed AND the alternative is a sleep.
+4. **The cold-load warm-up** (`warmSeat`, register D-64): one GET through
+   `/upstream/<seat>/v1/models`, which makes llama-swap swap the seat in and answers only once its
+   health check passes. It also speaks from its no-op exits (see `admission_note`).
+5. **The coherence probe** (register D-118), on a seat this run cold-loaded — which the warm-up
+   reports explicitly, because a sub-tick load measures 0 s and a note is not the same fact.
+6. **The served-window probe** (`agent.ProbeServedWindow`, register S-24, 0.126.2). It carries a
+   ten-minute cold-start budget by design — it is allowed to absorb a load — so running it on the
+   WALL context handed a cold seat the contract's own clock and the run was filed as a wall timeout.
+   It is now bounded by the admission deadline like everything above it; an exhausted budget leaves
+   it a dead context and it falls back to `agent_ctx_tokens`, the same fallback an unanswerable probe
+   has always taken. The seat-residency (roster) check runs just ahead of it so a seat this endpoint
+   does not serve is never cold-started by a run that is about to defer.
 
 ## Source map
 

@@ -6,6 +6,49 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **A READY seat waited the whole admission budget whenever any OTHER model was mid-swap.**
+  The swap pre-flight matched llama-swap's `GET /running` by the seat's BOUND name, while `/running`
+  names models by canonical id only — and the harness binds agent seats by alias on the reference
+  boxes (`agent-pool` → `qwen3.8-27b-vllm`). The "my own seat is already ready" exit could therefore
+  never fire on an alias-bound seat, and 406 delegation-log rows say so verbatim ("/running lists the
+  seat under another id"). `awaitSeatAdmission` and `warmSeat` now resolve the seat through
+  `swapclient.Roster.Canonical` — the resolution `internal/seatload` has used for the drain since
+  C-11 — and match `/running` by alias AND canonical id. The roster read is lazy: it is paid only
+  when the bare name missed and the alternative is a sleep, so a seat bound by its own id costs no
+  extra round trip.
+- **The MCP `agent_run` door never ran the swap pre-flight.** llama-swap queues, with no timeout of
+  its own, any request that needs a model it is still loading, so an `agent_run` that arrived
+  mid-swap spent its wall inside that queue and reported a wall timeout — the failure ADR 0032
+  removed from the delegation door in 2026-09-02 and this door never had. `pipeline.AwaitSeatAdmission`
+  exports the same function; `handleAgentRun` calls it between the cordon and the warm-up, on the
+  remaining admission budget, and reports it under the same wire names (`admission_wait_sec` /
+  `admission_note`). The two doors' admission blocks are now the same steps in the same order.
+- **The served-window probe ran on the contract's WALL, on both doors.** `agent.ProbeServedWindow`
+  carries a ten-minute cold-start budget by design — it is allowed to absorb a seat's load — so on a
+  cold or slow seat it consumed the whole wall before the first token and the run was filed as a wall
+  timeout. On both doors it now runs on a context derived from the admission deadline, before the
+  wall context exists, and its duration is added to `admission_wait_sec`. On the delegation door the
+  seat-residency (roster) check moved just ahead of it, so a seat this endpoint does not serve is
+  never cold-started by a run that is about to defer.
+- **`warmSeat` failed silently on two exits.** A `/running` read that ERRORED and a budget already
+  spent by earlier admission both returned "nothing to report", so `admission_note` was empty on a
+  seat that might still be cold — "could not read" and "is ready" were indistinguishable on the wire.
+  Both now return a note. `warmSeat` also reports whether a load was ATTEMPTED as its own value:
+  neither the duration (a sub-tick load measures 0) nor "a note exists" can carry that fact, and the
+  D-118 coherence probe keys on it.
+- **Both agent doors held a worker at the cordon for the full admission budget under a FOREIGN GPU
+  fence** — 47 rows × 300 s (3.92 h) in the three days to 2026-09-17. An exclusive text hold, a
+  draining cordon or a media render held by another process refuses a new run for as long as it is
+  held; nothing the run can do inside its own budget changes that, so the wait reached the same
+  `capacity` defer five minutes later while the delegator sat on the re-placement path that defer
+  exists to trigger. `delegate.ForeignFence` — wired into the review lane since 0.125.0 (D-110) — is
+  now asked BEFORE `AwaitRunSlot` on `runAgentTask` and on `agent_run`, and defers at once naming the
+  fence and the holder's line (class, pid, declared reason, expiry). It reads the lease directory
+  `config.Load` armed for the cordon, so the pre-check and the cordon can never disagree. An
+  INHERITED lease (`GPU_LEASE_EPOCH`) and a plain non-fencing reservation are unchanged: ADR 0032's
+  "a peer-held seat is waited for" governs every hold whose answer can still change.
+
 ## [0.126.1] - 2026-09-17 - a remote delegation's in-flight PAIR frames name the node by its dispatch host
 
 ### Fixed
