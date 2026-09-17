@@ -330,6 +330,7 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		act.Phase("coherence-probe")
 		v := ProbeSeatCoherence(ctx, p.cfg, seat, admissionBudget(p.cfg.AgentAdmissionWaitSec)-admitted)
 		admitted += v.Spent
+		RememberCoherence(p.cfg.Endpoint, seat, v)
 		if v.Ran {
 			coherenceNote = v.Note
 		}
@@ -343,6 +344,17 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 			// one retry on a DIFFERENT node (delegate.IncoherentSeatDefer).
 			return deferWire(core.DeferClassInfrastructure, v.Note)
 		}
+	} else if note, ok := RecallIncoherentSeat(p.cfg.Endpoint, seat); ok {
+		// A WARM run on the seat this process already caught (reviewer
+		// finding, D-118). Under the default "cold" policy only the loading
+		// contract is probed, and the defer unloads nothing — the broken seat
+		// stays resident and contracts 2..N would each spend a whole wall on
+		// the output contract 1 already proved degenerate. The memo is cleared
+		// by the seat's next cold load, by any later non-broken probe, and by
+		// its own TTL, so a fixed seat is never stuck here.
+		coherenceNote = note
+		log.Printf("agent task: seat coherence (%s): %s", seat, note)
+		return deferWire(core.DeferClassInfrastructure, note)
 	}
 	cctx, cancel := context.WithTimeout(ctx, wall)
 	defer cancel()
@@ -976,6 +988,7 @@ func (p *Pipeline) RunAgentContract(ctx context.Context, contract core.AgentCont
 //     wrong") even though the seat had just failed a request; when a transport
 //     failure happened AT ALL, that is the operator's signal, and the returned
 //     error is the transport one so the message names it.
+//
 // repackAttemptFloor is the least wall a re-pack attempt is started with for a
 // contract of the given wall: a tenth of the wall, capped at
 // agentRepackAttemptFloor — so a 900 s contract keeps 45 s back, a 300 s one

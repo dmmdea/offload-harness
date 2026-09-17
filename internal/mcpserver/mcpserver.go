@@ -1923,6 +1923,7 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 	if pipeline.CoherenceProbeWanted(cfg, coldLoad > 0 || warmNote != "") {
 		act.Phase("coherence-probe")
 		v := pipeline.ProbeSeatCoherence(ctx, cfg, model, time.Until(admitDeadline))
+		pipeline.RememberCoherence(cfg.Endpoint, model, v)
 		if v.Ran {
 			coherenceNote = v.Note
 		}
@@ -1939,6 +1940,20 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 			return jsonResult(dout)
 		}
 		coldLoad += v.Spent // charged to admission, never to the wall
+		act.Phase("running")
+	} else if note, ok := pipeline.RecallIncoherentSeat(cfg.Endpoint, model); ok {
+		// The seat this process already caught, still resident (reviewer
+		// finding, D-118): under the default "cold" policy a warm run is not
+		// probed at all, and nothing unloads a broken seat — so every later
+		// run would pay a wall for output already proved degenerate. Same
+		// deferred shape as a live broken verdict, with no probe spent.
+		coherenceNote = note
+		log.Printf("agent_run: seat coherence (%s): %s", model, note)
+		dout := map[string]any{"deferred": true, "reason": note, "steps": 0}
+		withAdmission(dout, cordon+coldLoad, warmNote)
+		withCoherence(dout, coherenceNote)
+		withPlaced(dout, placed)
+		return jsonResult(dout)
 	}
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()

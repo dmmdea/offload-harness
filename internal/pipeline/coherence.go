@@ -26,6 +26,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/agent"
@@ -38,6 +40,12 @@ const (
 	// read_file tool call plus DONE and small enough that a NaN seat spamming
 	// token 0 stops within a second or two instead of running to a 1,024-token
 	// cap — the probe's whole point is that it is cheap even when it fails.
+	//
+	// Deliberately NOT raised for thinking seats (reviewer finding, D-118): a
+	// think block runs to hundreds or thousands of tokens, so no cap this probe
+	// can afford would let one finish, and a bigger cap only multiplies what a
+	// degenerate seat costs. A seat cut inside its think block is handled where
+	// it belongs — in the verdict, as a proceeding note, never as a defer.
 	coherenceProbeMaxTokens = 96
 	// coherenceProbeCap is the hard ceiling on the probe, whatever the
 	// admission budget still holds. A seat that needs more than 90 s to emit 96
@@ -162,9 +170,27 @@ func JudgeCoherence(comp agent.Completion, spent time.Duration) CoherenceVerdict
 	// its limit and emitted no content. A finished-and-empty turn is NOT judged
 	// broken — that is an ordinary (if useless) answer, and the loop is the
 	// right place to deal with it.
+	//
+	// EXCEPT when the seat reported hidden reasoning (reviewer finding, D-118).
+	// A thinking seat cut inside its think block arrives in EXACTLY this shape
+	// and is perfectly healthy: the client refuses to fold the reasoning
+	// channel into Content at finish_reason "length" on purpose (client.go — "a
+	// think block cut by max_tokens is not an answer"), so content is "" and
+	// finish is "length" for a seat that is only slower to the point than 96
+	// tokens allow. ContextWithoutThinking does not save us: it sends
+	// `chat_template_kwargs:{"enable_thinking":false}`, which a DeepSeek-R1 /
+	// gpt-oss / llama.cpp `--reasoning-format` template ignores. The loop's own
+	// classifier calls this same completion recoverable reasoning starvation
+	// (agent.Completion.Starvation), and two rules in one repo must not
+	// disagree about one completion — so the probe proceeds and says why.
 	if content == "" && comp.FinishReason == "length" {
+		if rChars, rTok := len(strings.TrimSpace(comp.Reasoning)), reasoningTokens(comp); rChars > 0 || rTok > 0 {
+			return CoherenceVerdict{Ran: true, Note: fmt.Sprintf(
+				"coherence probe: cut inside the think block at the %d-token cap (%s; proceeding)",
+				coherenceProbeMaxTokens, hiddenReasoningBasis(rChars, rTok, comp.ReasoningKey))}
+		}
 		return CoherenceVerdict{Ran: true, Broken: true, Note: fmt.Sprintf(
-			"%sthe completion is empty at the %d-token cap (finish_reason %q)",
+			"%sthe completion is empty at the %d-token cap (finish_reason %q, no reasoning channel reported)",
 			core.IncoherentSeatReason, coherenceProbeMaxTokens, comp.FinishReason)}
 	}
 	// A tool-call marker in plain TEXT with no parsed tool calls is the seat's
@@ -182,4 +208,118 @@ func JudgeCoherence(comp agent.Completion, spent time.Duration) CoherenceVerdict
 	// answer a one-line instruction in words.
 	return CoherenceVerdict{Ran: true, Note: fmt.Sprintf(
 		"coherence probe: answered in text without a tool call in %.1fs (proceeding)", spent.Seconds())}
+}
+
+// reasoningTokens is the seat's own count of tokens spent in the hidden
+// reasoning channel, or 0 when this backend reports no usage accounting at all
+// — nil Serve means "unmeasured", never "zero reasoning".
+func reasoningTokens(comp agent.Completion) int {
+	if comp.Serve == nil {
+		return 0
+	}
+	return comp.Serve.UsageReasoningTokens
+}
+
+// hiddenReasoningBasis is the one-line evidence behind a "cut inside the think
+// block" verdict: whichever of the two signals the seat actually gave, under
+// the key it answered with, so an operator reading the note can tell a
+// reasoning seat from a silent one without re-running the probe.
+func hiddenReasoningBasis(chars, tokens int, key string) string {
+	if key == "" {
+		key = "reasoning"
+	}
+	switch {
+	case tokens > 0 && chars > 0:
+		return fmt.Sprintf("%d reasoning tokens, %d chars under %q", tokens, chars, key)
+	case tokens > 0:
+		return fmt.Sprintf("%d reasoning tokens reported under %q", tokens, key)
+	default:
+		return fmt.Sprintf("%d chars of hidden reasoning under %q", chars, key)
+	}
+}
+
+// --- the incoherent-seat memo (reviewer finding, D-118) ------------------
+//
+// Under the shipped default ("cold") only the contract that LOADS the seat is
+// probed, and a broken seat stays loaded: the defer path unloads nothing, and
+// nothing in the fleet quarantines a local seat. So contracts 2..N landed on
+// the same NaN seat the probe had already caught and each spent its wall on
+// degenerate output — the very repeat the probe was written to prevent.
+//
+// The memo closes that: a broken verdict is remembered per endpoint+seat, and
+// a WARM run that would not have probed at all defers immediately on it. It is
+// process-local on purpose — the fleet node and the MCP server are the
+// long-lived processes that take contract after contract, which is where the
+// repeat happens; a one-shot CLI invocation has no second contract to protect.
+//
+// Two ways out, so a fixed seat is never stuck deferring: any later probe that
+// is NOT broken (an "always" box, or the next cold load) clears the entry, and
+// an entry expires on its own after coherenceMemoTTL. The TTL is longer than
+// the fleet's 5-minute idle unload, so a seat that fell out of residency comes
+// back through a cold load — which re-probes and overwrites the memo anyway.
+const coherenceMemoTTL = 10 * time.Minute
+
+var coherenceMemo struct {
+	sync.Mutex
+	broken map[string]coherenceMemoEntry
+}
+
+type coherenceMemoEntry struct {
+	note string
+	at   time.Time
+}
+
+func coherenceMemoKey(endpoint, seat string) string { return endpoint + " seat=" + seat }
+
+// RememberCoherence files what one probe learned about one seat. A broken
+// verdict is remembered; any other verdict the probe actually RAN clears the
+// seat, because a seat that just answered sanely is evidence against whatever
+// a previous residency did. A verdict that never ran teaches nothing and
+// leaves the memo untouched.
+func RememberCoherence(endpoint, seat string, v CoherenceVerdict) {
+	if !v.Ran || seat == "" {
+		return
+	}
+	coherenceMemo.Lock()
+	defer coherenceMemo.Unlock()
+	if !v.Broken {
+		delete(coherenceMemo.broken, coherenceMemoKey(endpoint, seat))
+		return
+	}
+	if coherenceMemo.broken == nil {
+		coherenceMemo.broken = map[string]coherenceMemoEntry{}
+	}
+	coherenceMemo.broken[coherenceMemoKey(endpoint, seat)] = coherenceMemoEntry{note: v.Note, at: time.Now()}
+}
+
+// RecallIncoherentSeat reports what this process last learned about a seat it
+// judged broken, and whether that verdict is still fresh. The note keeps the
+// core.IncoherentSeatReason prefix the delegator's retry gate matches on, with
+// the age appended so an operator can tell a remembered verdict from a probe
+// that just ran.
+func RecallIncoherentSeat(endpoint, seat string) (string, bool) {
+	if seat == "" {
+		return "", false
+	}
+	key := coherenceMemoKey(endpoint, seat)
+	coherenceMemo.Lock()
+	defer coherenceMemo.Unlock()
+	e, ok := coherenceMemo.broken[key]
+	if !ok {
+		return "", false
+	}
+	if age := time.Since(e.at); age > coherenceMemoTTL {
+		delete(coherenceMemo.broken, key)
+		return "", false
+	}
+	return fmt.Sprintf("%s (remembered from this seat's probe %s ago; it has not cold-loaded since)",
+		e.note, time.Since(e.at).Round(time.Second)), true
+}
+
+// forgetCoherence drops a seat's remembered verdict. Tests use it to keep one
+// process's memo from leaking between cases.
+func forgetCoherence(endpoint, seat string) {
+	coherenceMemo.Lock()
+	defer coherenceMemo.Unlock()
+	delete(coherenceMemo.broken, coherenceMemoKey(endpoint, seat))
 }

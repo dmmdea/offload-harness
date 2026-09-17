@@ -46,9 +46,9 @@ import (
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
-	"github.com/dmmdea/offload-harness/internal/seatrate"
 	"github.com/dmmdea/offload-harness/internal/ledger"
 	"github.com/dmmdea/offload-harness/internal/netguard"
+	"github.com/dmmdea/offload-harness/internal/seatrate"
 	// Aliased: this file's `placement` struct (a resolved "run it HERE") predates
 	// the package and is used at every placement site; the package is the
 	// composite tier's decision TABLE (ADR 0039), so the alias names what it is.
@@ -895,6 +895,17 @@ func (r *runner) runOne(ctx context.Context, i int, contract core.AgentContract)
 		first.RetryNote = fmt.Sprintf("retry skipped: the first attempt on %s ended on an empty final (stop_reason %s) — a second seat given the wall's leftovers repeats the shape; the fix is the seat's completion budget or agent_thinking, not a retry", nodeLabel(first), stop)
 		return first
 	}
+	// Credit back what the node's ADMISSION spent before the coherence defer
+	// (reviewer finding, D-118). The retry budget is delegator wall clock since
+	// `start`, and the defer's own trigger under the default "cold" policy is a
+	// COLD LOAD — 125–250 s of a vLLM seat on this fleet, against a 300 s
+	// default contract. Left uncredited, the promise this defer is retryable
+	// for ("the wall never started, the budget is still on the table") would be
+	// refused by the retry floor on the very path that produces it. It is the
+	// same mechanism, and the same argument, as the capacity wait's credit:
+	// time the subtask provably did not spend WORKING is not charged to
+	// timeout_sec.
+	pl.credit += admissionCredit(first)
 	// The retry lives INSIDE the subtask's own timeout_sec: the caller was told
 	// that number bounds the work per subtask, and a second full attempt would
 	// have doubled it silently. What is left after the first attempt is the
@@ -1922,10 +1933,13 @@ const minRetrySec = 10
 // and a contract-classed defer is the caller's to fix.
 //
 // The ONE infrastructure defer that IS retryable is the admission-time
-// coherence defer (register D-118): the seat itself is broken, it was caught
-// before the contract's wall started, and the whole budget is still on the
-// table — which is precisely the case another node fixes. The general
-// infrastructure rule is untouched; see IncoherentSeatDefer.
+// coherence defer (register D-118): the seat itself is broken and it was caught
+// before the contract's wall started, so the budget is still there to fund a
+// retry — which is precisely the case another node fixes. What the node's
+// admission spent getting there is credited back in runOne (admissionCredit),
+// because the cold load that triggers the probe would otherwise eat most of a
+// default budget before the retry floor is applied. The general infrastructure
+// rule is untouched; see IncoherentSeatDefer.
 func retryable(pr PlacedResult) bool {
 	if pr.Err != "" {
 		return false
@@ -1943,7 +1957,8 @@ func retryable(pr PlacedResult) bool {
 // defer: an `infrastructure` defer whose reason carries core.IncoherentSeatReason,
 // i.e. the executing node asked its freshly loaded seat one bounded question
 // and the seat answered with the NaN shape (a run of one repeated byte, an
-// unparsable tool call, or nothing at all at the cap).
+// unparsable tool call, or nothing at all at the cap with no hidden reasoning
+// reported), or the same verdict remembered about a seat it already caught.
 //
 // It matches on the CONSTANT the producer writes, never on prose: pipeline
 // (and the MCP door) build the reason from core.IncoherentSeatReason, so the
@@ -1956,6 +1971,20 @@ func retryable(pr PlacedResult) bool {
 func IncoherentSeatDefer(r core.AgentWireResult) bool {
 	return r.Deferred && r.DeferClass == core.DeferClassInfrastructure &&
 		strings.HasPrefix(r.Reason, core.IncoherentSeatReason)
+}
+
+// admissionCredit is the node-side admission time a coherence defer already
+// spent — its cordon wait, pre-flight, cold load and the probe itself — which
+// the subtask's execution budget must not be charged for: the contract's wall
+// never started, and the wire carries admission_wait_sec for exactly this.
+// Zero for every other result: no other shape has a claim on the credit, and a
+// node that reports no admission (a pre-D-118 node, or an unmeasured one) is
+// credited nothing rather than guessed at.
+func admissionCredit(pr PlacedResult) time.Duration {
+	if !IncoherentSeatDefer(pr.Result) || pr.Result.AdmissionWaitSec <= 0 {
+		return 0
+	}
+	return time.Duration(pr.Result.AdmissionWaitSec * float64(time.Second))
 }
 
 // alternativeNode picks the node a retry runs on: the best eligible remote

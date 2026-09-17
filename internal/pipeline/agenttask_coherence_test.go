@@ -252,26 +252,44 @@ func TestCoherenceProbeSkipsWithoutAdmissionBudget(t *testing.T) {
 	}
 }
 
-// TestJudgeCoherenceVerdicts covers the four shapes over ONE completion,
-// without a server: the judgement rule is what both agent doors share.
+// TestJudgeCoherenceVerdicts covers the shapes over ONE completion, without a
+// server: the judgement rule is what both agent doors share.
 func TestJudgeCoherenceVerdicts(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		content    string
 		toolCalls  int
 		finish     string
+		reasoning  string // the hidden channel this seat answered with
+		reasonTok  int    // usage.completion_tokens_details.reasoning_tokens
 		wantBroken bool
 		wantNote   string
 	}{
-		{"a parsed tool call passes", "", 1, "tool_calls", false, "tool call parsed"},
-		{"token-0 spam is broken", "<tool_call>" + strings.Repeat("!", 40), 0, "length", true, "repeats"},
-		{"an unparsed marker with no call is broken", "<tool_call>{\"name\":\"read_file\"}", 0, "stop", true, "no parsed tool call"},
-		{"empty at the cap is broken", "", 0, "length", true, "empty at the"},
-		{"empty but FINISHED is not broken", "", 0, "stop", false, "answered in text"},
-		{"plain prose proceeds", "DONE", 0, "stop", false, "without a tool call"},
+		{"a parsed tool call passes", "", 1, "tool_calls", "", 0, false, "tool call parsed"},
+		{"token-0 spam is broken", "<tool_call>" + strings.Repeat("!", 40), 0, "length", "", 0, true, "repeats"},
+		{"an unparsed marker with no call is broken", "<tool_call>{\"name\":\"read_file\"}", 0, "stop", "", 0, true, "no parsed tool call"},
+		{"empty at the cap is broken", "", 0, "length", "", 0, true, "empty at the"},
+		{"empty but FINISHED is not broken", "", 0, "stop", "", 0, false, "answered in text"},
+		{"plain prose proceeds", "DONE", 0, "stop", "", 0, false, "without a tool call"},
+		// A THINKING seat cut inside its think block arrives in exactly the
+		// empty-at-the-cap shape and is healthy: the client refuses to fold the
+		// reasoning channel into Content at finish "length" on purpose, so
+		// content is "" and finish is "length" for a seat that is only slower
+		// to the point than 96 tokens allow. Judging it broken deferred a sane
+		// seat as `infrastructure` before its wall (reviewer finding, D-118).
+		{"a think block cut at the cap is NOT broken", "", 0, "length", "The user wants me to read notes.md, so I should call read_file with", 0, false, "cut inside the think block"},
+		{"reasoning TOKENS alone also spare the seat", "", 0, "length", "", 96, false, "cut inside the think block"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			comp := agentCompletion(tc.content, tc.toolCalls, tc.finish)
+			comp.Reasoning = tc.reasoning
+			if tc.reasoning != "" {
+				comp.ReasoningKey = "reasoning_content"
+			}
+			if tc.reasonTok > 0 {
+				comp.ReasoningKey = "reasoning"
+				comp.Serve = &agent.ServeStats{UsageCompletionTokens: tc.reasonTok, UsageReasoningTokens: tc.reasonTok}
+			}
 			v := JudgeCoherence(comp, 1500*time.Millisecond)
 			if !v.Ran {
 				t.Fatal("a judged completion always Ran")
@@ -296,4 +314,124 @@ func agentCompletion(content string, toolCalls int, finish string) agent.Complet
 		msg.ToolCalls = append(msg.ToolCalls, agent.ToolCall{ID: "c", Name: "read_file", Args: `{"path":"notes.md"}`})
 	}
 	return agent.Completion{Msg: msg, FinishReason: finish}
+}
+
+// TestAThinkingSeatIsNotJudgedIncoherent is the finding in its live shape: a
+// llama.cpp/DeepSeek-style seat that returns `reasoning_content` and nothing
+// visible, cut at the probe's 96-token cap. The loop's own classifier calls
+// this recoverable reasoning starvation (agent.Completion.Starvation ->
+// reasoning_starved); the probe must not call the same completion a broken
+// seat, or every thinking seat in the fleet defers `infrastructure` on its
+// cold load and burns a re-placement for nothing.
+func TestAThinkingSeatIsNotJudgedIncoherent(t *testing.T) {
+	comp := agent.Completion{
+		Msg:          agent.Msg{Role: "assistant", Content: ""},
+		FinishReason: "length",
+		Reasoning:    "The user wants me to read notes.md with the read_file tool. Let me think about the path first.",
+		ReasoningKey: "reasoning_content",
+		Serve:        &agent.ServeStats{UsageCompletionTokens: 96, UsageReasoningTokens: 96},
+	}
+	// The loop's verdict on this exact completion, for the record: the two
+	// rules in this repo must agree about one shape.
+	if kind, _, ok := comp.Starvation(); !ok || kind != agent.StopReasoningStarved {
+		t.Fatalf("the loop classifies this completion as %q (ok=%v); the test's premise is wrong", kind, ok)
+	}
+	v := JudgeCoherence(comp, 1200*time.Millisecond)
+	if v.Broken {
+		t.Fatalf("a thinking seat cut at the cap must not be judged broken: %q", v.Note)
+	}
+	if !v.Ran {
+		t.Fatal("a judged completion always Ran")
+	}
+	if !strings.Contains(v.Note, "think block") || !strings.Contains(v.Note, "reasoning_content") {
+		t.Fatalf("note = %q, want it to name the think block and the channel the seat answered under", v.Note)
+	}
+}
+
+// TestAWarmRunDefersOnTheRememberedIncoherentSeat (reviewer finding, D-118).
+// Under the shipped default only the contract that LOADS a seat is probed, and
+// the defer unloads nothing — so before the memo, contract 2 landed on the same
+// NaN seat and spent its whole wall on output contract 1 had already proved
+// degenerate. The second run here takes the WARM path (no probe at all) and
+// still defers, on what the first run learned.
+func TestAWarmRunDefersOnTheRememberedIncoherentSeat(t *testing.T) {
+	fake := coldLoadFake(func(int64) string { return degenerateChat() })
+	srv := fake.server(t)
+	defer srv.Close()
+	defer forgetCoherence(srv.URL, agentTestSeat)
+
+	first := decodeWire(t, coherenceTestPipeline(t, srv.URL, 30, "").Run(context.Background(), agentTestRequest(t, testContract())))
+	if !first.Deferred {
+		t.Fatalf("the loading contract must defer: %q", first.Output)
+	}
+	// The seat is resident now, so this run never reaches the probe.
+	second := decodeWire(t, coherenceTestPipeline(t, srv.URL, 30, "").Run(context.Background(), agentTestRequest(t, testContract())))
+	if !second.Deferred {
+		t.Fatalf("the warm contract must defer on the remembered verdict, got: %q", second.Output)
+	}
+	if second.DeferClass != core.DeferClassInfrastructure {
+		t.Fatalf("defer_class = %q, want %q", second.DeferClass, core.DeferClassInfrastructure)
+	}
+	if !strings.HasPrefix(second.Reason, core.IncoherentSeatReason) {
+		t.Fatalf("reason = %q, want the %q prefix the delegator's retry gate matches on", second.Reason, core.IncoherentSeatReason)
+	}
+	if !strings.Contains(second.Reason, "remembered") {
+		t.Fatalf("reason = %q, want it to say the verdict is remembered, not freshly probed", second.Reason)
+	}
+	if second.CoherenceNote == "" {
+		t.Fatal("coherence_note is empty on a run that deferred on the memo")
+	}
+	if n := fake.probeCNT.Load(); n != 1 {
+		t.Fatalf("probe completions = %d, want exactly 1 across both runs — the memo costs no completion", n)
+	}
+	if n := fake.loopCalls.Load(); n != 0 {
+		t.Fatalf("loop completions = %d, want 0 — neither contract may reach the broken seat's loop", n)
+	}
+}
+
+// TestACoherentProbeClearsTheMemo: the memo must never outlive proof to the
+// contrary. A seat that answers a later probe sanely is a seat that works, and
+// the next warm contract has to run.
+func TestACoherentProbeClearsTheMemo(t *testing.T) {
+	const endpoint = "http://127.0.0.1:9/memo-clear"
+	defer forgetCoherence(endpoint, agentTestSeat)
+	RememberCoherence(endpoint, agentTestSeat, CoherenceVerdict{Ran: true, Broken: true, Note: core.IncoherentSeatReason + "spam"})
+	if _, ok := RecallIncoherentSeat(endpoint, agentTestSeat); !ok {
+		t.Fatal("a broken verdict must be remembered")
+	}
+	RememberCoherence(endpoint, agentTestSeat, CoherenceVerdict{Ran: true, Note: "coherence probe: tool call parsed in 1.0s"})
+	if note, ok := RecallIncoherentSeat(endpoint, agentTestSeat); ok {
+		t.Fatalf("a later coherent probe must clear the memo, still held: %q", note)
+	}
+}
+
+// TestAnInconclusiveProbeLeavesTheMemoAlone: a probe that never ran, or one
+// that could not reach the seat, learned nothing — it must neither create nor
+// clear a verdict. (Fail-open is about the DEFER, not about forgetting.)
+func TestAnInconclusiveProbeLeavesTheMemoAlone(t *testing.T) {
+	const endpoint = "http://127.0.0.1:9/memo-keep"
+	defer forgetCoherence(endpoint, agentTestSeat)
+	RememberCoherence(endpoint, agentTestSeat, CoherenceVerdict{Ran: true, Broken: true, Note: core.IncoherentSeatReason + "spam"})
+	RememberCoherence(endpoint, agentTestSeat, CoherenceVerdict{Note: "coherence probe skipped: 1s of admission budget left"})
+	if _, ok := RecallIncoherentSeat(endpoint, agentTestSeat); !ok {
+		t.Fatal("a skipped probe must not clear what a real one learned")
+	}
+}
+
+// TestTheMemoExpires: the escape hatch for a seat fixed out of band. A memo
+// older than its TTL is dropped and the next contract probes again — the
+// harness never traps a repaired seat in a permanent defer.
+func TestTheMemoExpires(t *testing.T) {
+	const endpoint = "http://127.0.0.1:9/memo-ttl"
+	defer forgetCoherence(endpoint, agentTestSeat)
+	RememberCoherence(endpoint, agentTestSeat, CoherenceVerdict{Ran: true, Broken: true, Note: core.IncoherentSeatReason + "spam"})
+	key := coherenceMemoKey(endpoint, agentTestSeat)
+	coherenceMemo.Lock()
+	e := coherenceMemo.broken[key]
+	e.at = time.Now().Add(-coherenceMemoTTL - time.Minute)
+	coherenceMemo.broken[key] = e
+	coherenceMemo.Unlock()
+	if note, ok := RecallIncoherentSeat(endpoint, agentTestSeat); ok {
+		t.Fatalf("a stale verdict must expire, still held: %q", note)
+	}
 }

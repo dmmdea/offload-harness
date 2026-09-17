@@ -228,3 +228,53 @@ func TestAgentRunCoherenceProbeIsBoundedByTheWall(t *testing.T) {
 		t.Fatalf("admission_wait_sec = %v, want the probe's ~1.5 s charged to admission", wait)
 	}
 }
+
+// TestAgentRunDefersAWarmRunOnTheRememberedIncoherentSeat (reviewer finding,
+// D-118). Under the shipped default only the run that LOADS the seat is
+// probed, and nothing unloads or quarantines a seat the probe caught — so the
+// NEXT agent_run landed on the same NaN seat warm, skipped the probe entirely
+// and paid a whole wall for output this process had already judged degenerate.
+// The second call here takes the warm path and still defers, without spending
+// a second probe completion.
+func TestAgentRunDefersAWarmRunOnTheRememberedIncoherentSeat(t *testing.T) {
+	const seat = "agent-pool"
+	srv, chats := coherenceSeatServer(t, seat, func(body map[string]any) string {
+		if isProbeBody(body) {
+			return `{"choices":[{"message":{"role":"assistant","content":"<tool_call>` +
+				strings.Repeat("!", 40) + `"},"finish_reason":"length"}]}`
+		}
+		return `{"choices":[{"message":{"role":"assistant","content":"The answer is 42."},"finish_reason":"stop"}]}`
+	})
+	defer srv.Close()
+	s := New(pipeline.New(coherenceCfg(t, srv.URL, seat, ""), nil, nil, nil))
+	req := callReq(fmt.Sprintf(`{"goal":"what is the answer","read_root":%q,"max_steps":2,"timeout_sec":60}`, t.TempDir()))
+
+	first, err := s.handleAgentRun(context.Background(), req)
+	if err != nil {
+		t.Fatalf("handleAgentRun (cold): %v", err)
+	}
+	if m := decodeResult(t, first); m["deferred"] != true {
+		t.Fatalf("the loading run must defer, got: %v", m)
+	}
+	second, err := s.handleAgentRun(context.Background(), req)
+	if err != nil {
+		t.Fatalf("handleAgentRun (warm): %v", err)
+	}
+	m := decodeResult(t, second)
+	if m["deferred"] != true {
+		t.Fatalf("the warm run must defer on the remembered verdict, got: %v", m)
+	}
+	reason, _ := m["reason"].(string)
+	if !strings.HasPrefix(reason, core.IncoherentSeatReason) {
+		t.Fatalf("reason = %q, want the %q prefix", reason, core.IncoherentSeatReason)
+	}
+	if !strings.Contains(reason, "remembered") {
+		t.Fatalf("reason = %q, want it to say the verdict is remembered, not freshly probed", reason)
+	}
+	if note, _ := m["coherence_note"].(string); note == "" {
+		t.Fatal("coherence_note is empty on a run that deferred on the memo")
+	}
+	if n := chats.Load(); n != 1 {
+		t.Fatalf("chat completions = %d, want exactly 1 across both runs — neither the loop nor a second probe may run", n)
+	}
+}

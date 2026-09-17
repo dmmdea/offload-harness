@@ -638,12 +638,24 @@ never). What comes back is reported as `coherence_note` on the wire, in one of t
 |---|---|---|
 | `coherence probe: tool call parsed in Ns` | the seat decoded, the template rendered, the server parsed the call | the run proceeds |
 | `coherence probe: answered in text without a tool call in Ns (proceeding)` / `… inconclusive (…); proceeding` | plain prose instead of a call, or the seat could not be reached at all | the run proceeds — the probe never turns silence into a defer |
-| `seat incoherent at warm: …` | ≥ 20 identical non-whitespace bytes in a row, an unparsed tool-call marker with no parsed call, or nothing at all at the cap | the contract defers `infrastructure` after SECONDS, and `agent_delegate` re-places it on another node |
+| `coherence probe: cut inside the think block at the 96-token cap (…; proceeding)` | a thinking seat spent the probe's 96 tokens in its hidden `reasoning` / `reasoning_content` channel | the run proceeds — a think block cut by the cap is not an incoherent seat |
+| `seat incoherent at warm: …` | ≥ 20 identical non-whitespace bytes in a row, an unparsed tool-call marker with no parsed call, or nothing at all at the cap **and no reasoning channel reported** | the contract defers `infrastructure` after SECONDS, and `agent_delegate` re-places it on another node |
+| `seat incoherent at warm: … (remembered from this seat's probe Ns ago…)` | a WARM contract on the seat this process already caught, still resident | the contract defers on the remembered verdict, spending no probe at all |
 
-The defer is the one `infrastructure` defer the delegator retries elsewhere: the fault is a property of that seat, it
-was caught before the wall started, and the whole `timeout_sec` budget is still unspent. It is still a broken stack —
-`--route remote` exits non-zero and an operator has to fix the box (on that seat the fix was `kv_cache_dtype: fp8`
-instead of `fp8_e5m2`; see ADR 0048 Amendment 1).
+The defer is the one `infrastructure` defer the delegator retries elsewhere: the fault is a property of that seat and
+it was caught before the contract's WALL started. The budget is delegator wall clock, so what the node spent getting
+there — cordon, pre-flight, the cold load that triggered the probe (125–250 s for a vLLM seat) and the probe itself — is
+credited back to the subtask's `timeout_sec` ledger from the `admission_wait_sec` the node reports, exactly as a
+capacity wait is credited; without that credit the retry floor (the alternate seat's own `min_turn`) would refuse the
+retry this defer exists for. It is still a broken stack — `--route remote` exits non-zero and an operator has to fix the
+box (on that seat the fix was `kv_cache_dtype: fp8` instead of `fp8_e5m2`; see ADR 0048 Amendment 1).
+
+Note what `cold` does and does not cover: it protects the contract that LOADS the seat, and the defer unloads nothing,
+so the broken seat stays resident. The node therefore REMEMBERS a broken verdict for that endpoint+seat for 10 minutes
+and defers the next warm contract on it without spending a probe. The memo lives in the node process, and it is dropped
+by the seat's next cold load, by any later probe that is not broken, and by its own TTL — so a seat you fix comes back
+by itself. Set `agent_coherence_probe: "always"` on a box whose seat has gone NaN under it before and you get the probe
+on every run instead, at one ≤ 96-token completion per contract.
 
 **The final budget fits the wall (0.122.1, register D-95).** Sizing told the caller a contract would not fit; it did
 nothing about the run in flight, which still opened its final answer at the configured 4× budget. On the Lenovo 4B seat

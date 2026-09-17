@@ -2,6 +2,7 @@ package delegate
 
 import (
 	"testing"
+	"time"
 
 	"github.com/dmmdea/offload-harness/internal/core"
 )
@@ -81,5 +82,58 @@ func TestAWireResultCarriesTheCoherenceNoteToTheCaller(t *testing.T) {
 	}
 	if wire.Results[0].CoherenceNote != note {
 		t.Fatalf("coherence_note = %q, want %q", wire.Results[0].CoherenceNote, note)
+	}
+}
+
+// TestTheCoherenceDeferCreditsBackTheNodesAdmission (reviewer finding, D-118).
+// The retry this defer is retryable FOR is budgeted in delegator wall clock
+// since the subtask started, and the default trigger is a COLD LOAD — 125–250 s
+// of a vLLM seat against a 300 s default contract. Uncredited, the retry floor
+// (the alternate seat's min_turn, ≈ 484 s for the 27B) refuses the retry on the
+// very path that produces the defer, and the promise "the budget is still on
+// the table" is false. The node reports what its admission spent; the subtask's
+// ledger credits exactly that back, the same way the capacity wait is credited.
+func TestTheCoherenceDeferCreditsBackTheNodesAdmission(t *testing.T) {
+	pr := PlacedResult{Result: core.AgentWireResult{
+		Deferred:         true,
+		DeferClass:       core.DeferClassInfrastructure,
+		Reason:           core.IncoherentSeatReason + "the completion is empty at the 96-token cap",
+		AdmissionWaitSec: 180,
+	}}
+	if got := admissionCredit(pr); got != 180*time.Second {
+		t.Fatalf("admissionCredit = %v, want the node's 180 s of admission", got)
+	}
+	// The arithmetic the retry floor actually reads: a subtask 200 s old on a
+	// 300 s budget has 100 s left uncredited — under any real retry floor — and
+	// 280 s once the node's 180 s cold load is credited back.
+	start := time.Now().Add(-200 * time.Second)
+	pl := newPlacements()
+	if got := pl.remaining(start, 300); got > 101 || got < 99 {
+		t.Fatalf("uncredited remaining = %d, want ≈100", got)
+	}
+	pl.credit += admissionCredit(pr)
+	if got := pl.remaining(start, 300); got > 281 || got < 279 {
+		t.Fatalf("credited remaining = %d, want ≈280", got)
+	}
+}
+
+// TestOnlyTheCoherenceDeferIsCredited: the credit is not a general rebate. A
+// result that RAN spent its admission on work the contract received, and a node
+// that reports no admission at all is credited nothing rather than guessed at.
+func TestOnlyTheCoherenceDeferIsCredited(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		result core.AgentWireResult
+	}{
+		{"a clean result", core.AgentWireResult{Output: "42", StopReason: "done", AdmissionWaitSec: 180}},
+		{"a wall timeout", core.AgentWireResult{Deferred: true, DeferClass: core.DeferClassBudget, Reason: "wall timeout after 300s", AdmissionWaitSec: 180}},
+		{"another infrastructure defer", core.AgentWireResult{Deferred: true, DeferClass: core.DeferClassInfrastructure, Reason: "agent loop: chat 502: bad gateway", AdmissionWaitSec: 180}},
+		{"a coherence defer with no admission reported", core.AgentWireResult{Deferred: true, DeferClass: core.DeferClassInfrastructure, Reason: core.IncoherentSeatReason + "x"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := admissionCredit(PlacedResult{Result: tc.result}); got != 0 {
+				t.Fatalf("admissionCredit = %v, want 0 for %s", got, tc.name)
+			}
+		})
 	}
 }
