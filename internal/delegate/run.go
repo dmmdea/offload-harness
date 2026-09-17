@@ -697,6 +697,28 @@ func RunWith(ctx context.Context, cfg config.Config, local LocalRunner, subtasks
 		// goroutines below: they read it, they never build it.
 		r.spreadDeal = r.dealSpread(subtasks, r.localView())
 	}
+	// route=auto/remote: ONE joint deal over ONE fleet snapshot (W-06,
+	// register S-11/S-13) — the same reason route=spread already probes and
+	// deals once. Before this, every subtask's attempt() probed the fleet and
+	// called Place independently, so runConcurrency siblings could read the
+	// same free slot within milliseconds of each other and pile onto it.
+	if route == "auto" || route == "remote" {
+		leaseInfo := LocalLease(cfg.GPULockPath, cfg.StateDir)
+		// W-01 (register S-01): busy = the lease, OR the local seat's own
+		// in-flight count at or past the fleet's own concurrency cap, OR a
+		// load in progress — the SAME formula attempt() used per-subtask,
+		// now read once so the whole batch agrees. route=remote forces busy
+		// unconditionally: local is never a placement for an explicit remote.
+		busy := route == "remote"
+		if route == "auto" {
+			local := r.probeLocalBusy(ctx)
+			busy = leaseInfo.Held || local.inflight >= cfg.FleetConcurrencyLimit() || local.loading
+		}
+		if busy {
+			r.autoViews, r.autoBases, r.autoProbeErrs = r.fetchViews(ctx)
+		}
+		r.autoDeal = r.dealAutoRemote(subtasks, r.localView(), r.autoViews, r.autoBases, busy)
+	}
 	results := make([]PlacedResult, len(subtasks))
 	sem := make(chan struct{}, runConcurrency)
 	var wg sync.WaitGroup
@@ -894,6 +916,19 @@ type runner struct {
 	// happens to be held.
 	autoLocalBusyOnce sync.Once
 	autoLocalBusy     busyReading
+	// autoViews/autoBases/autoProbeErrs/autoDeal are route=auto/remote's OWN
+	// one-fetch, one-deal snapshot (W-06, register S-11/S-13) — the same
+	// invariant spreadDeal holds for route=spread, extended here so
+	// runConcurrency sibling subtasks stop probing the fleet and calling
+	// Place independently (S-13: "those subtasks probe within milliseconds of
+	// each other — so several of them can read the same free slot and then
+	// compete for it"). Computed once in RunWith before any goroutine starts,
+	// read-only afterwards. Empty/nil on route=local, route=spread and route=
+	// queue, which never touch them.
+	autoViews     []NodeView
+	autoBases     []string
+	autoProbeErrs []string
+	autoDeal      []spreadSlot
 
 	// quarantine is the caller's Quarantine (RunOptions), nil = inert.
 	quarantine  *Quarantine
@@ -2398,6 +2433,100 @@ func baseFor(chosen NodeView, views []NodeView, bases []string) string {
 	return ""
 }
 
+// unlimitedHeadroom stands in for an unpublished max_concurrent_jobs (0 =
+// unknown, never a limit) — far past any real dealt count, so it can never be
+// mistaken for one.
+const unlimitedHeadroom = 1 << 30
+
+// headroom is a node's remaining execution capacity: max_concurrent_jobs −
+// jobs_running, floored at 0. An unpublished ceiling (0) reads as UNLIMITED —
+// the same convention MaxQueueDepth/MaxConcurrentJobs already follow
+// everywhere in this package (0 = unknown, never a limit), so a pre-0.100.0
+// node's headroom is never artificially exhausted by this key.
+func headroom(v NodeView) int {
+	if v.MaxConcurrentJobs <= 0 {
+		return unlimitedHeadroom
+	}
+	if h := v.MaxConcurrentJobs - v.JobsRunning; h > 0 {
+		return h
+	}
+	return 0
+}
+
+// dealAutoRemote computes route=auto/remote's placement for EVERY subtask of
+// the run in ONE ordered pass over ONE fleet snapshot — auto/remote's own
+// version of dealSpread's invariant (W-06, register S-11/S-13). Before this,
+// attempt() called fetchViews and Place PER SUBTASK, independently, on
+// whichever goroutine reached it first; runConcurrency siblings then probed
+// the fleet within milliseconds of each other and could all read the SAME
+// free slot on the SAME node before any of them had dispatched — gate.go's
+// saturated() DEMOTES rather than excludes a full node precisely because this
+// snapshot is stale by construction, and re-placement (the refusal loop) is
+// the net that used to catch it, one 503 at a time, after the fact.
+//
+// dealt tracks, per dial base, how many subtasks THIS deal has already
+// assigned — placeAutoRemote checks it against headroom(v) before a node is
+// even considered, so a run that fans 8 subtasks at a 4-worker node deals it
+// AT MOST 4, and the rest fall to the next-best eligible node instead of
+// queuing behind siblings that have not even dispatched yet.
+func (r *runner) dealAutoRemote(contracts []core.AgentContract, localView NodeView, views []NodeView, bases []string, localBusy bool) []spreadSlot {
+	dealt := make(map[string]int, len(views))
+	out := make([]spreadSlot, len(contracts))
+	for i, c := range contracts {
+		st := Subtask{Contract: c, EstTokens: EstimateTokens(c)}
+		out[i] = r.placeAutoRemote(mintP2CSeed(), st, localView, views, bases, localBusy, dealt)
+	}
+	return out
+}
+
+// placeAutoRemote deals ONE subtask within dealAutoRemote's joint pass: an
+// idle local seat wins unconditionally (Place's own rule, unchanged); busy,
+// the best REMOTE that passes remoteEligible AND still has headroom over what
+// this deal has already committed to it. A node at 0 headroom gets NOTHING —
+// no floor, no "at least one" — and the next-best candidate is tried.
+//
+//   - Some node had headroom: dealt, resolved, headroom decremented for the
+//     next subtask in this same deal.
+//   - No node had headroom, but at least one was otherwise eligible: the
+//     capacityWait sentinel — attempt() hands it to the existing capacity
+//     wait (awaitCapacity), which watches for room to free the same way it
+//     already watches a 503 refusal or a held lease.
+//   - Nothing was eligible at all (capability, not capacity): the noRemote
+//     sentinel — attempt() re-derives the exact pre-W-06 sentence
+//     (r.noEligibleRemote) over this same snapshot; unrelated to headroom.
+func (r *runner) placeAutoRemote(seed string, st Subtask, localView NodeView, views []NodeView, bases []string, localBusy bool, dealt map[string]int) spreadSlot {
+	if !localBusy {
+		return spreadSlot{placement: placement{view: localView, reason: "local idle"}}
+	}
+	var best NodeView
+	var bestBase string
+	found, anyEligible := false, false
+	for j, v := range views {
+		if !remoteEligible(st, v) {
+			continue
+		}
+		anyEligible = true
+		if headroom(v) <= dealt[bases[j]] {
+			continue // W-06: no floor — a node at 0 headroom gets nothing this deal
+		}
+		if !found || betterRemote(seed, &st, v, best) {
+			best, bestBase, found = v, bases[j], true
+		}
+	}
+	if found {
+		dealt[bestBase]++
+		return spreadSlot{placement: placement{view: best, base: bestBase,
+			reason: fmt.Sprintf("route=%s → %s (headroom)", r.route, best.NodeID)}}
+	}
+	if anyEligible {
+		return spreadSlot{
+			placement:    placement{view: localView, reason: fmt.Sprintf("route=%s: every eligible remote is at headroom", r.route)},
+			capacityWait: true,
+		}
+	}
+	return spreadSlot{placement: placement{view: localView}, noRemote: true}
+}
+
 // dealSpread computes the spread placement for EVERY subtask of the run in ONE
 // ordered pass, before any dispatch goroutine starts. It is a deal, not N
 // independent picks, and that is forced rather than stylistic:
@@ -2454,6 +2583,18 @@ type spreadSlot struct {
 	// and no remote was eligible: attempt() must wait on the lease (or defer)
 	// before running it, never run it outright.
 	reserved bool
+	// capacityWait (W-06, register S-11/S-13): at least one remote passed
+	// remoteEligible but every one of them was already dealt to its own
+	// headroom by the time this subtask's turn came — attempt() must hand it
+	// to the capacity wait (awaitCapacity), which watches for room to free,
+	// rather than dispatch to an already-full node or defer a contract the
+	// fleet can plainly run once something clears.
+	capacityWait bool
+	// noRemote marks a subtask for which NO node in the snapshot passed
+	// remoteEligible at all — the pre-W-06 "no eligible remote" outcome,
+	// unrelated to headroom. attempt() re-derives the exact sentence with
+	// r.noEligibleRemote over the SAME snapshot the deal used.
+	noRemote bool
 }
 
 // placeSpread deals ONE subtask across the run's fleet snapshot: slot 0 is the
@@ -2615,16 +2756,16 @@ func (r *runner) placeSpreadWith(i int, st Subtask, localView NodeView, dealt ma
 		if Reserved(r.spreadLease) {
 			// The one placement the lease exists to forbid. Dealt local so the
 			// slot has a view, but flagged: attempt() waits or defers.
-			return spreadSlot{placement{view: localView, reason: "route=spread: local seat reserved (" + HolderLine(r.spreadLease) + "); no eligible remote — " + why}, dead, true}
+			return spreadSlot{placement: placement{view: localView, reason: "route=spread: local seat reserved (" + HolderLine(r.spreadLease) + "); no eligible remote — " + why}, deadFleet: dead, reserved: true}
 		}
-		return spreadSlot{placement{view: localView, reason: "route=spread: no eligible remote — local (" + why + ")"}, dead, false}
+		return spreadSlot{placement: placement{view: localView, reason: "route=spread: no eligible remote — local (" + why + ")"}, deadFleet: dead}
 	}
 	slot := i % len(nodes)
 	if nodes[slot].Local {
 		// A local slot opens a new cycle: the deck of remotes is reshuffled, so
 		// the next len(nodes)-1 subtasks deal one to each seat again.
 		clear(dealt)
-		return spreadSlot{placement{view: localView, reason: fmt.Sprintf("route=spread → local (slot %d of %d)", slot+1, len(nodes))}, false, false}
+		return spreadSlot{placement: placement{view: localView, reason: fmt.Sprintf("route=spread → local (slot %d of %d)", slot+1, len(nodes))}}
 	}
 	k := fitPick(st, nodes, bases, slot, dealt)
 	if k < 0 {
@@ -2641,7 +2782,7 @@ func (r *runner) placeSpreadWith(i int, st Subtask, localView NodeView, dealt ma
 	if skip {
 		reason += fmt.Sprintf("; local seat busy: %d in flight", r.spreadLocalBusy.inflight)
 	}
-	return spreadSlot{placement{view: nodes[k], base: bases[k], reason: reason}, false, false}
+	return spreadSlot{placement: placement{view: nodes[k], base: bases[k], reason: reason}}
 }
 
 // fitPick returns the index of the best-scoring seat in nodes that is neither
@@ -2735,6 +2876,56 @@ func (r *runner) attempt(ctx context.Context, i int, contract core.AgentContract
 				return PlacedResult{waitCapacity: true, pendingReason: reason, PlacementReason: reason}
 			}
 			reason += " — lease cleared, running local"
+		}
+	case (r.route == "auto" || r.route == "remote") && r.autoDeal != nil:
+		// Read, never re-derive: W-06's joint deal (dealAutoRemote), computed
+		// once in RunWith over one fleet snapshot — see its own doc for why a
+		// per-subtask re-probe/re-place here would throw away the very
+		// invariant that makes headroom accounting correct. r.autoDeal is nil
+		// only for a caller that reached attempt() without going through
+		// RunWith (a white-box test driving runOne/attempt directly); that
+		// case falls to default below, unchanged from before W-06.
+		d := r.autoDeal[i]
+		deadFleet = d.deadFleet
+		switch {
+		case d.capacityWait:
+			// At least one remote was otherwise eligible; every one of them
+			// was already dealt to its own headroom by this subtask's turn.
+			// The existing capacity wait watches for room to free — the same
+			// mechanism a 503 refusal or a held lease already sends work to.
+			return PlacedResult{waitCapacity: true, pendingReason: d.reason, PlacementReason: d.reason}
+		case d.noRemote && r.route == "remote":
+			// Nothing in the fleet could ever take this contract (capability,
+			// not capacity): the established "route=remote: no eligible
+			// remote" Unplaced defer, unchanged.
+			why, class := r.noEligibleRemote(st, r.autoViews, r.autoProbeErrs)
+			return finish(PlacedResult{
+				Node: localView.NodeID, Seat: localView.AgentSeat,
+				Unplaced:        true,
+				PlacementReason: "route=remote: no eligible remote",
+				Result: core.AgentWireResult{
+					SchemaVersion: core.AgentWireSchemaVersion,
+					Deferred:      true,
+					DeferClass:    class,
+					Reason:        "route=remote: " + why,
+				},
+			})
+		case d.noRemote:
+			// route=auto, nothing eligible. A TEXT lease held NOW (re-read at
+			// dispatch time — the deal's own snapshot can be minutes stale by
+			// the time this subtask's turn comes, same as the spread case
+			// above) still reserves the seat; otherwise queued-local beats
+			// ineligible-remote, exactly as before W-06.
+			leaseInfo := LocalLease(r.cfg.GPULockPath, r.cfg.StateDir)
+			why, class := r.noEligibleRemote(st, r.autoViews, r.autoProbeErrs)
+			if Reserved(leaseInfo) {
+				return PlacedResult{waitCapacity: true, pendingReason: "local seat reserved (" + HolderLine(leaseInfo) + "); no eligible remote — " + why}
+			}
+			chosen = localView
+			reason = "local busy; no eligible remote — " + why + " (queued-local beats ineligible-remote)"
+			deadFleet = class == core.DeferClassInfrastructure
+		default:
+			chosen, base, reason = d.view, d.base, d.reason
 		}
 	default:
 		// Placement. Health is fetched ONLY when a remote could actually be

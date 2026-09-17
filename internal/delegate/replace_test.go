@@ -770,15 +770,27 @@ func TestWireResponsePublishesReplacement(t *testing.T) {
 // health handler sleeps) and turns the probe MEMO off, because the defect is
 // only visible while selection is expensive — with the memo on, the
 // re-placement reuses the run's snapshot and the second probe is free, which is
-// the improvement, not the thing under test. Two probes then run before the
-// second dispatch:
+// the improvement, not the thing under test.
 //
-//	t≈1.2s  first probe done → node-slow refuses instantly
-//	t≈1.2s  pre-selection measure would say 30-2 = 28
-//	t≈2.4s  second probe done
-//	t≈2.4s  post-selection measure says 30-3 = 27   ← what must be dispatched
+// Since W-06 (register S-11/S-13, PR-5 item 6) the FIRST placement for
+// route=remote/auto is no longer probed inside runOne's own clock at all: it
+// is resolved once, for the whole batch, by RunWith's joint deal
+// (dealAutoRemote) BEFORE any subtask's clock starts — the same rule
+// route=spread's dealSpread has always followed, and paying it once per Run
+// rather than once per subtask is the improvement W-06 is FOR. So exactly ONE
+// probe now runs inside this subtask's own clock — the RE-placement's, after
+// node-slow's instant 503 — not two:
 //
-// so an implementation that skips the re-measure ships 28 and this test fails.
+//	t≈0     node-slow dispatched and refuses instantly (chosen by RunWith's
+//	        deal, off this subtask's clock)
+//	t≈1.2s  the re-placement's OWN probe (replacementNode's fresh fetchViews,
+//	        the probe memo is off) finds node-taker
+//	        post-selection measure says 30 - ceil(1.2s) = 28   ← what must be
+//	        dispatched
+//
+// so an implementation that skips the re-measure ships the FULL 30 and this
+// test fails; one that pre-dates W-06 (both probes inside the clock) would
+// have shipped ≤27, which this fixture no longer produces.
 func TestRunReplacementBudgetIsRemeasuredAfterSelection(t *testing.T) {
 	compressPolls(t, 5*time.Millisecond, time.Second)
 	noProbeMemo(t)
@@ -798,11 +810,12 @@ func TestRunReplacementBudgetIsRemeasuredAfterSelection(t *testing.T) {
 	if sum.Succeeded != 1 {
 		t.Fatalf("summary = %+v, want the re-placement to have succeeded", sum)
 	}
-	// <= 27 rather than == 27 so a slower box (which spends MORE, not less)
-	// still passes, while the un-re-measured 28 fails.
-	if replaced := int(got.Load()); replaced > contract.TimeoutSec-3 {
-		t.Fatalf("re-placed contract carried timeout_sec=%d, want <= %d — the ~1.2s spent CHOOSING the node must be charged too",
-			replaced, contract.TimeoutSec-3)
+	// <= 28 (not == 30) proves the re-placement's own ~1.2s selection cost was
+	// charged; <= 29 would also catch a smaller-than-expected deduction, so
+	// the tighter 28 is used with a little slack above it for a slower box.
+	if replaced := int(got.Load()); replaced >= contract.TimeoutSec || replaced > 28 {
+		t.Fatalf("re-placed contract carried timeout_sec=%d, want <= 28 and < %d — the ~1.2s spent CHOOSING the replacement node must be charged too",
+			replaced, contract.TimeoutSec)
 	}
 }
 
