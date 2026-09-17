@@ -128,6 +128,12 @@ type agentFake struct {
 	// every pre-fallback test keeps its exact outcome.
 	chatFallback    func(int64) string
 	chatFallbackCNT atomic.Int64
+	// chatFallbackDelay stalls every chat-fallback completion — the mirror of
+	// repackDelay for the grammar lane, used to expire the contract's wall
+	// deadline DURING the chat fallback (register D-108: the chat fallback is
+	// the re-pack's own LAST attempt, so it is the one a wall-timeout test
+	// must stall). 0 = no delay, every pre-existing test's exact timing.
+	chatFallbackDelay time.Duration
 	// probe answers the admission-time COHERENCE probe (register D-118),
 	// recognised by its SHAPE rather than by a counter: exactly one user
 	// message opening with the probe goal. Routing it away from loop(n) is what
@@ -279,6 +285,9 @@ func (f *agentFake) server(t *testing.T) *httptest.Server {
 				if f.chatFallback == nil {
 					http.NotFound(w, r)
 					return
+				}
+				if f.chatFallbackDelay > 0 {
+					time.Sleep(f.chatFallbackDelay)
 				}
 				w.Header().Set("Content-Type", "application/json")
 				_, _ = w.Write([]byte(f.chatFallback(n)))
@@ -766,12 +775,21 @@ func TestRunAgentTaskRepackParentCancellation(t *testing.T) {
 // expires DURING the re-pack, the defer is the wall-timeout shape — not a
 // schema failure and not an "unreachable" endpoint. The delegator sizes future
 // contracts off this shape, so mislabeling it teaches it the wrong lesson.
+//
+// Every lane hangs past the 1 s wall (register D-108, W-19): since the
+// re-pack's per-attempt bound now splits the wall across the attempts still
+// owed a turn, a seat that never answers must be given every chance to prove
+// it — grammar AND the chat fallback — or an early, fast-failing lane (the
+// old fixture's un-configured chat fallback, a fast 404) would let the run
+// finish with wall to spare and never exercise the wall-timeout shape at all.
 func TestRunAgentTaskRepackDeadlineIsAWallTimeout(t *testing.T) {
 	fake := &agentFake{
-		rosterIDs:   []string{agentTestSeat},
-		loop:        func(int64) string { return doneChat("The answer is 42.") },
-		repack:      func(int64) string { return `{"answer":"42"}` },
-		repackDelay: 2500 * time.Millisecond, // past the 1s contract wall
+		rosterIDs:         []string{agentTestSeat},
+		loop:              func(int64) string { return doneChat("The answer is 42.") },
+		repack:            func(int64) string { return `{"answer":"42"}` },
+		repackDelay:       2500 * time.Millisecond, // past the 1s contract wall
+		chatFallback:      func(int64) string { return doneChat(`{"answer":"42"}`) },
+		chatFallbackDelay: 2500 * time.Millisecond, // past the 1s contract wall
 	}
 	srv := fake.server(t)
 	defer srv.Close()
