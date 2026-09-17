@@ -183,15 +183,20 @@ func JudgeCoherence(comp agent.Completion, spent time.Duration) CoherenceVerdict
 	// classifier calls this same completion recoverable reasoning starvation
 	// (agent.Completion.Starvation), and two rules in one repo must not
 	// disagree about one completion — so the probe proceeds and says why.
-	if content == "" && comp.FinishReason == "length" {
+	// Whitespace-only counts as empty (reviewer finding, D-118): a sampler
+	// that degenerates onto a space or newline token emits 96 tokens of
+	// nothing printable, which DegenerateRun ignores on purpose (indentation
+	// and table padding are legitimate inside real prose) — so the cap rule is
+	// where that shape has to be caught.
+	if strings.TrimSpace(content) == "" && comp.FinishReason == "length" {
 		if rChars, rTok := len(strings.TrimSpace(comp.Reasoning)), reasoningTokens(comp); rChars > 0 || rTok > 0 {
 			return CoherenceVerdict{Ran: true, Note: fmt.Sprintf(
 				"coherence probe: cut inside the think block at the %d-token cap (%s; proceeding)",
 				coherenceProbeMaxTokens, hiddenReasoningBasis(rChars, rTok, comp.ReasoningKey))}
 		}
 		return CoherenceVerdict{Ran: true, Broken: true, Note: fmt.Sprintf(
-			"%sthe completion is empty at the %d-token cap (finish_reason %q, no reasoning channel reported)",
-			core.IncoherentSeatReason, coherenceProbeMaxTokens, comp.FinishReason)}
+			"%sthe completion is empty at the %d-token cap (%d chars, whitespace-only counts as empty; finish_reason %q, no reasoning channel reported)",
+			core.IncoherentSeatReason, coherenceProbeMaxTokens, len(content), comp.FinishReason)}
 	}
 	// A tool-call marker in plain TEXT with no parsed tool calls is the seat's
 	// server failing to parse its own model's tool syntax — the 2026-09-04 Qube

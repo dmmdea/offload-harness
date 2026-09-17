@@ -18,8 +18,8 @@ Versioning: [SemVer](https://semver.org/).
   - A parsed tool call, or plain text with no tool call, proceeds; a transport error, a timeout or an empty choice list
     proceeds as `inconclusive` (fail-open, exactly like the warm-up). A completion carrying a run of ≥ 20 identical
     non-whitespace bytes (`agent.DegenerateRun`), an unparsed tool-call marker with no parsed call
-    (`agent.UnparsedToolCallMarker`, exported from the loop), or nothing at all at the token cap **with no hidden
-    reasoning reported** is BROKEN: the contract defers `infrastructure` with the reason prefixed
+    (`agent.UnparsedToolCallMarker`, exported from the loop), or nothing printable (empty or whitespace-only) at the
+    token cap **with no hidden reasoning reported** is BROKEN: the contract defers `infrastructure` with the reason prefixed
     `seat incoherent at warm: ` (`core.IncoherentSeatReason`) having spent seconds instead of its wall. A THINKING seat
     cut inside its think block arrives in that same empty-at-the-cap shape and is healthy — the client refuses to fold
     the reasoning channel into the content at `finish_reason: length` on purpose, and `enable_thinking:false` is a kwarg

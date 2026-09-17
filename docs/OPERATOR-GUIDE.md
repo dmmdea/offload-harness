@@ -639,7 +639,7 @@ never). What comes back is reported as `coherence_note` on the wire, in one of t
 | `coherence probe: tool call parsed in Ns` | the seat decoded, the template rendered, the server parsed the call | the run proceeds |
 | `coherence probe: answered in text without a tool call in Ns (proceeding)` / `… inconclusive (…); proceeding` | plain prose instead of a call, or the seat could not be reached at all | the run proceeds — the probe never turns silence into a defer |
 | `coherence probe: cut inside the think block at the 96-token cap (…; proceeding)` | a thinking seat spent the probe's 96 tokens in its hidden `reasoning` / `reasoning_content` channel | the run proceeds — a think block cut by the cap is not an incoherent seat |
-| `seat incoherent at warm: …` | ≥ 20 identical non-whitespace bytes in a row, an unparsed tool-call marker with no parsed call, or nothing at all at the cap **and no reasoning channel reported** | the contract defers `infrastructure` after SECONDS, and `agent_delegate` re-places it on another node |
+| `seat incoherent at warm: …` | ≥ 20 identical non-whitespace bytes in a row, an unparsed tool-call marker with no parsed call, or nothing printable (empty or whitespace-only) at the cap **and no reasoning channel reported** | the contract defers `infrastructure` after SECONDS, and `agent_delegate` re-places it on another node |
 | `seat incoherent at warm: … (remembered from this seat's probe Ns ago…)` | a WARM contract on the seat this process already caught, still resident | the contract defers on the remembered verdict, spending no probe at all |
 
 The defer is the one `infrastructure` defer the delegator retries elsewhere: the fault is a property of that seat and

@@ -269,6 +269,11 @@ func TestJudgeCoherenceVerdicts(t *testing.T) {
 		{"token-0 spam is broken", "<tool_call>" + strings.Repeat("!", 40), 0, "length", "", 0, true, "repeats"},
 		{"an unparsed marker with no call is broken", "<tool_call>{\"name\":\"read_file\"}", 0, "stop", "", 0, true, "no parsed tool call"},
 		{"empty at the cap is broken", "", 0, "length", "", 0, true, "empty at the"},
+		// A sampler degenerating onto a whitespace token is the NaN shape
+		// without the punctuation: DegenerateRun ignores whitespace on purpose,
+		// so the cap rule must treat whitespace-only as empty (reviewer finding).
+		{"whitespace-only at the cap is broken", strings.Repeat(" \n\t", 32), 0, "length", "", 0, true, "whitespace-only counts as empty"},
+		{"whitespace-only but FINISHED is not broken", "  \n", 0, "stop", "", 0, false, "answered in text"},
 		{"empty but FINISHED is not broken", "", 0, "stop", "", 0, false, "answered in text"},
 		{"plain prose proceeds", "DONE", 0, "stop", "", 0, false, "without a tool call"},
 		// A THINKING seat cut inside its think block arrives in exactly the
