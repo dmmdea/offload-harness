@@ -143,6 +143,16 @@ func Place(st Subtask, local NodeView, remotes []NodeView, localBusy bool) NodeV
 //     pre-0.113.0 node keeps its roster-order tie. A tie-breaker, never a
 //     primary signal — it only ever decides a case QueueDepth left tied.
 func betterRemote(candidate, incumbent NodeView) bool {
+	// Key 0 (W-14, register S-15): a node still eligible under a lease-busy
+	// verdict loses to any node that is not — "ranked last" means it does not
+	// even get to compete on saturation or queue depth against a clean node.
+	// See leaseBusyDemoted for why checking LeaseBusy alone is safe here: the
+	// gate has already excluded every OTHER lease-busy shape (exclusive,
+	// draining, non-text), so a lease-busy survivor is always the one case
+	// this key exists to demote.
+	if c, i := leaseBusyDemoted(candidate), leaseBusyDemoted(incumbent); c != i {
+		return i // candidate wins only when the incumbent is the demoted one
+	}
 	if c, i := saturated(candidate), saturated(incumbent); c != i {
 		return i // candidate wins only when the incumbent is the saturated one
 	}
@@ -281,10 +291,10 @@ func remoteEligible(st Subtask, r NodeView) bool {
 	// LOCAL seat a non-target. Before this a leased Lenovo had to STOP its fleet
 	// node to keep foreign digests off the card, and every in-flight remote job
 	// on it was cut ("Lenovo dropped mid-way", 2026-09-06).
-	// LeaseBusy joined the gate 2026-09-07: the same refusal, extended from
-	// "a text lease" to "a lease long enough that the node itself says place
-	// elsewhere". A short render still never refuses; a multi-hour hold does.
-	if !r.AgentEnabled || r.LeasedText || r.LeaseBusy || len(st.Contract.OutputSchema) == 0 || st.Contract.Depth != 0 {
+	// leaseFences (W-14, register S-15) is what decides whether the lease is a
+	// HARD refusal here — see its own doc for the exclusive/draining/media
+	// cases that still fence, and the plain-text-busy case that no longer does.
+	if !r.AgentEnabled || leaseFences(r) || len(st.Contract.OutputSchema) == 0 || st.Contract.Depth != 0 {
 		return false
 	}
 	if dec, ok := remoteDecision(st, r); ok {
@@ -310,6 +320,36 @@ func remoteDecision(st Subtask, r NodeView) (placetable.Decision, bool) {
 	layers, live := placetable.FromRows(r.Layers)
 	return placetable.Decide(placetable.RequestForContract(st.Contract, st.EstTokens, 0), layers, live), true
 }
+
+// leaseFences reports whether r's lease is a HARD refusal for remote
+// placement (W-14, register S-15): an EXCLUSIVE or DRAINING hold — gated to
+// TEXT-class leases at creation (gpulease.TryAcquire only ever sets either
+// flag for class=text, never for class=media) — or a lease the node's own
+// verdict reads as long enough (LeaseBusy) that is NOT a plain text
+// reservation. That second clause is what keeps a MEDIA render (a training
+// run, up to hours) fencing exactly as before: a busy, non-text lease can
+// never be Exclusive or Draining by construction, so without this clause it
+// would fall straight through to the demotion this function does NOT grant it.
+//
+// The ONE case this no longer excludes: a plain (non-exclusive, non-draining)
+// TEXT reservation the node calls busy. Before this it hard-refused on the
+// node's DECLARED window alone — 47 measured contracts burned 300 s each on a
+// lease whose cards were idle in 10 of them (register S-15) — because `busy`
+// says "spoken for until 15:04", not "the cards are working". That case stays
+// eligible and is demoted instead (betterRemote's leaseBusyDemoted key).
+func leaseFences(r NodeView) bool {
+	if r.LeaseExclusive || r.LeaseDraining {
+		return true
+	}
+	return r.LeaseBusy && !r.LeasedText
+}
+
+// leaseBusyDemoted is betterRemote's read of the ONE lease shape remoteEligible
+// still admits: LeaseBusy alone. Safe to check without re-deriving the
+// exclusive/draining/text conditions, because remoteEligible has already
+// excluded every other LeaseBusy shape (leaseFences) before a node ever
+// reaches ranking — a lease-busy survivor here is always the plain-text case.
+func leaseBusyDemoted(v NodeView) bool { return v.LeaseBusy }
 
 // PlaceVision picks the fleet node that runs ONE vision task (vqa / ocr /
 // assess_image, 0.116.0) when the caller has decided the work leaves the box
