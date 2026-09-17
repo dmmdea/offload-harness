@@ -885,6 +885,15 @@ type runner struct {
 	// seam tests drive it through; nil = the production probe (seatload).
 	spreadLocalBusy busyReading
 	localBusyProbe  func(ctx context.Context) busyReading
+	// autoLocalBusyOnce/autoLocalBusy cache route=auto's ONE read of the local
+	// seat's load (W-01, register S-01): every subtask of this Run must see
+	// the SAME reading — the same one-probe-per-Run invariant spreadLocalBusy
+	// already holds for route=spread, extended to auto so a busy local seat
+	// (in-flight at or past the fleet's own concurrency cap, or mid-load) is
+	// no longer indistinguishable from an idle one just because no GPU lease
+	// happens to be held.
+	autoLocalBusyOnce sync.Once
+	autoLocalBusy     busyReading
 
 	// quarantine is the caller's Quarantine (RunOptions), nil = inert.
 	quarantine  *Quarantine
@@ -2490,6 +2499,11 @@ type busyReading struct {
 	busy     bool
 	inflight int
 	note     string
+	// loading is true when a load is IN PROGRESS (probeLocalBusy's Starting
+	// branch): the in-flight count is unknown, not zero, and W-01's auto-busy
+	// rule reads it as its own signal — a seat mid-load is not idle, whatever
+	// inflight (0, by construction) says.
+	loading bool
 }
 
 // localBusyProbeTimeout bounds the one-shot read of the local seat's load: two
@@ -2534,7 +2548,7 @@ func (r *runner) probeLocalBusy(ctx context.Context) busyReading {
 		// engine, and the probe deliberately did not ask the upstream (it would
 		// have blocked for the whole load — register D-92). Busy, with the count
 		// unknown rather than zero.
-		return busyReading{busy: true, note: "local seat " + strings.TrimPrefix(rd.Source, "running-state:") + " (a load is in progress)"}
+		return busyReading{busy: true, loading: true, note: "local seat " + strings.TrimPrefix(rd.Source, "running-state:") + " (a load is in progress)"}
 	}
 	return busyReading{busy: rd.Inflight > 0, inflight: rd.Inflight, note: rd.Source}
 }
@@ -2729,7 +2743,19 @@ func (r *runner) attempt(ctx context.Context, i int, contract core.AgentContract
 			busy = true // forced remote behaves as "local unavailable" for Place
 		case "auto":
 			leaseInfo = LocalLease(r.cfg.GPULockPath, r.cfg.StateDir)
-			busy = leaseInfo.Held
+			// W-01 (register S-01): a lease is one way the local seat is
+			// spoken for, but the overwhelming majority of runs hold no lease
+			// at all — and a local seat already carrying more in-flight
+			// requests than the fleet's own concurrency cap is exactly as
+			// unavailable as one under a lease, yet Place never looked at the
+			// fleet for it. probeLocalBusy is read ONCE per Run (cached on
+			// the runner, sync.Once) so runConcurrency sibling subtasks agree
+			// on one reading, the same invariant spreadLocalBusy holds for
+			// route=spread. A probe failure fails OPEN to idle, exactly as
+			// probeLocalBusy always has.
+			r.autoLocalBusyOnce.Do(func() { r.autoLocalBusy = r.probeLocalBusy(ctx) })
+			local := r.autoLocalBusy
+			busy = leaseInfo.Held || local.inflight >= r.cfg.FleetConcurrencyLimit() || local.loading
 		}
 		var views []NodeView
 		var bases []string
