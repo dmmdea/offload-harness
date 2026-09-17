@@ -644,7 +644,7 @@ tokenless) is not a hole: the auth guard `403`s it before `BuildRequest` runs at
 
 | route | placement |
 |---|---|
-| `auto` (default) | `gate.Place`: an idle local seat always wins; remotes are considered only while the local GPU lease is held, and only the ones passing the hard gate (agent lane on, seat resident, contract fits the advertised ctx, output_schema present, origin hop). No eligible remote → queued-local. |
+| `auto` (default) | `gate.Place`: an idle local seat always wins; remotes are considered only while the local seat is busy — since PR-5 (W-01) that reading is `probeLocalBusy`'s own in-flight count at or past `FleetConcurrencyLimit()`, or a load in progress, OR'd with the GPU lease, read ONCE per Run — and only the ones passing the hard gate (agent lane on, seat resident, contract fits the advertised ctx, output_schema present, origin hop, and — PR-5's W-05 — the seat's FITTED final clears the floor within its own effective wall). No eligible remote → queued-local. See "Expected-completion ranking and the joint deal" below for how `auto`/`remote` now place a WHOLE Run's subtasks in one pass. |
 | `spread` (0.80.0, fit-scored 0.99.0) | one `Run` fetches every remote's health ONCE, then deals the subtasks across the local seat AND every remote that passes the hard gate for that subtask. The deal is computed for the WHOLE run in one pass before dispatch, and within each cycle of `len(nodes)` slots every eligible seat takes at most one subtask — so an N-contract fan-out genuinely runs on N seats at the same time, and the fit score can reorder a cycle but never collapse it (see "Fit-scored remote slots" below). The local rotation slot is never contested by shape: with the local seat IDLE, slot 0 is always the local seat (pinned by `TestDealSpreadKeepsSubtaskZeroLocal`, `TestDealSpreadSameShapedFanOutReachesEverySeat` and `TestRunSpreadDealsAcrossLocalAndEveryEligibleRemote`) and a 2-contract spread with an eligible remote is still guaranteed one local + one remote — the pair shape. It IS contested by load (0.113.20, `agent_spread_local_slot`): a local seat already holding a request at deal time loses its slots to the best-fit eligible remote with room — see "The local slot under load" below. Per-subtask eligibility means a contract failing the gate (no `output_schema`, over-size) silently takes the local slot instead; `results[].placement` names where each landed and, for a remote, which shape the fit score read. Measured before spread existed: `auto` put four concurrent contracts on one box, `remote` put four on the other one. No eligible remote → every subtask runs local and the reason says so. |
 | `local` | forced in-process, no network. |
 | `remote` | forced fleet node; with no eligible remote the subtask DEFERS loudly. |
@@ -686,6 +686,70 @@ when `Reserved(LocalLease(...))` holds (`TestRunAutoReservedLocalDefersNamingThe
 A MEDIA lease is deliberately excluded there — renders are arbitrated at the model-affinity gate
 (ADR 0026) — which is why it fences a retry but not a first placement: a retry runs on the leftovers
 of `timeout_sec` and cannot afford to spend them queueing behind a render.
+
+### Expected-completion ranking and the joint deal (route=auto/remote, PR-5)
+
+[ADR 0050](../architecture/decisions/0050-placement-ranks-adequate-seats-by-expected-completion.md) and the
+operator-signed INV-5 rider it cites (register Part A of the harness master plan, 2026-09-17: "a seat decision
+may carry a wall-time term only as (i) a feasibility floor computed from the contract's fitted final … and (ii)
+an ordering key among seats that have already passed the capability/adequacy gate, with power-of-two-choices
+among near-ties") reshaped `auto`/`remote` placement on the same "quality-first, then honest quantities"
+principle `spread`'s fit score already used. Nothing here widens who is eligible — `remoteEligible` still decides that — it changes how the
+survivors are RANKED and how many of one Run's subtasks one node can take.
+
+- **One joint deal, not N independent picks (W-06, register S-11/S-13).** `RunWith` now fetches the fleet ONCE
+  and computes every subtask's `auto`/`remote` placement in one ordered pass (`dealAutoRemote`) before any
+  dispatch goroutine starts — the exact invariant `spread`'s `dealSpread` already held, extended here because
+  siblings used to probe the fleet and call `Place` independently, within milliseconds of each other, and could
+  read the same free slot on the same node before any of them had actually dispatched. Per-node **headroom** —
+  `max_concurrent_jobs − jobs_running − (subtasks this deal has already committed to it)` — is checked before a
+  node is even ranked: a node at 0 headroom gets NOTHING, no floor, and the next-best eligible candidate is
+  tried. Three outcomes per subtask: a resolved node; `capacityWait` (something was eligible but every one of
+  them is at headroom right now — routed to the existing `awaitCapacity`, which watches for room to free exactly
+  as it already does for a 503 or a held lease); or `noRemote` (nothing in the fleet could ever take it —
+  unrelated to headroom, the pre-PR-5 "no eligible remote" outcome, unchanged).
+- **A feasibility floor from the FITTED final, never the seat's worst case (W-05, register S-03/S-05).** A seat
+  whose published `seat_rate` implies it cannot clear `seatrate.FinalBudgetFloor` tokens for the final answer
+  (and its structured re-pack, when the contract carries a schema) within its own EFFECTIVE wall —
+  `timeout_sec` as given, or `seatrate.AutoWallFor`'s own sizing for a `timeout_auto` contract — is excluded,
+  naming the arithmetic ("fitted final 312 < floor 1024 at 5.4 tok/s in 300 s wall, cold 69 s"). This is
+  deliberately NOT the seat's published `min_turn_sec` (its max-final worst case): the INV-5 rider permits a
+  wall-time term only as a feasibility floor on the contract's own fitted final, never a refusal built on a
+  number the contract does not need. An unpublished rate is no opinion — eligible, exactly as before.
+- **Expected-completion ranking among quality-adequate seats (W-11, register S-02).** Once a seat is past the
+  hard gate, `betterRemote` orders survivors by an ETA — cold load (charged only when `seat_loaded` is KNOWN
+  false; a load in progress counts half) plus the node's own queue wait plus the generation time for the
+  FITTED final at the seat's measured rate — with the axis depending on the contract's inferred shape exactly as
+  `spread`'s fit score already does: reasoning-shaped work still ranks the roomiest window first, eta only as
+  its tie-break; mechanical work now ranks the fastest expected completion first (replacing the old
+  "smallest adequate seat wins" rule), window as its tie-break. Two candidates whose etas are within 20 % of
+  each other are a near-tie, decided by a deterministic **power-of-two-choices draw** seeded from the wire job
+  id (or a fresh seed on the two re-placement/retry selection paths, which have no job id in hand yet) — so K
+  independent dispatchers spread across near-tied seats instead of all converging on the single fastest one.
+  An unknown rate on either side keeps today's window-only ordering; `PlaceVision` gets the same eta tie-break
+  after its own existing keys (no generation term — a vision judgment is one call, not an agent loop).
+- **A quiet lease demotes instead of excluding (W-14, register S-15).** `LeaseBusy` alone — a node's DECLARED
+  reservation window, not a measurement of the cards — used to hard-exclude a remote exactly like a held TEXT
+  lease. Now only an EXCLUSIVE or DRAINING hold, or a busy lease that is not a plain text reservation (a media
+  render, which can never be exclusive/draining), still excludes; a plain, non-exclusive, non-draining text
+  lease the node calls busy stays ELIGIBLE and is ranked last among eligible remotes instead — a 6-hour
+  reservation over idle cards no longer routes work away from a node that could run it.
+- **`placement_reason` names every reachable remote with a one-word verdict (item 8, register D-105).** The
+  resolved reason (`route=auto → node-a (headroom); node-a: chosen eta 41 s (cold 15 + 26 gen); node-b: slow
+  (fitted final 312 < 1024); node-c: cap (4/4 running)`) keeps the existing `route=remote`/`route=spread`
+  prefixes byte-identical (`fleet_smoke_cmd.go` parses them) and appends one clause per node from the vocabulary
+  `chosen | queue | cap | slow | lease | cold | probe | unfit(ctx) | noschema`, in gate order.
+- **Long-poll and a courtesy Retry-After retry (item 7, register D-106).** The delegator's poll now sends
+  `GET /fleet/jobs/<id>?wait=12`; a node at 0.127+ blocks the connection until the job finishes or 12 s elapse
+  (bounded under the client's own 15 s per-poll timeout), and an older node ignores the parameter and answers
+  at once — the fallback IS the parameter being a no-op, not a second code path. A dispatch 503 that carries its
+  own `Retry-After` is honored as a capacity hint: the delegator waits that long (bounded by the contract's
+  remaining budget) and retries the SAME node once, entirely inside the dispatch call — never surfaced to the
+  re-placement loop as a discrete refusal, so the node is never marked "tried" for it.
+- **`offload_status` reports the same in-flight signal (item 9, W-31).** Each fleet node row and the local seat
+  entry publish `in_flight` (a job-registry count — `jobs_running − jobs_admitting` remotely, the seat's own
+  gauge locally — never GPU utilization and never a lease alone) and a one-word `verdict`: `busy` (in-flight >
+  0) | `held-idle` (a lease is held, nothing running) | `loaded-idle` | `cold` | `unknown`.
 
 ### Contract wire shape (`core.AgentContract`)
 
