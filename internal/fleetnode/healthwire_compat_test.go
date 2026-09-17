@@ -16,6 +16,10 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -162,5 +166,42 @@ func TestHealthWireStaysDecodableByTheDelegator(t *testing.T) {
 	}
 	if !strings.Contains(future, "a_field_from_2027") {
 		t.Fatal("test fixture lost its unknown field")
+	}
+}
+
+// TestJobWaitCapStaysBelowTheDelegatorsPollRequestTimeout is the ORDERING
+// constraint the long poll lives or dies by (register S-19).
+//
+// `GET /fleet/jobs/{id}?wait=` holds a connection open server-side. The
+// delegator bounds ONE poll exchange client-side with pollRequestTimeout, so a
+// server-side cap at or above it means every long poll is cancelled by the
+// caller a moment before the node answers — the node would do the work of
+// waiting and the delegator would file the result as a transport failure. The
+// cap must therefore stay strictly below it, with room for the answer to be
+// written.
+//
+// The delegator's constant is UNEXPORTED and internal/delegate cannot be
+// imported for it from the package under test either way (delegate imports
+// fleetnode). Re-declaring the number here would pin a copy against a copy —
+// the exact "seam test that bypasses the logic it certifies" failure — so this
+// reads the shipped source and fails the moment someone lowers the real one.
+func TestJobWaitCapStaysBelowTheDelegatorsPollRequestTimeout(t *testing.T) {
+	src, err := os.ReadFile(filepath.Join("..", "delegate", "run.go"))
+	if err != nil {
+		t.Fatalf("reading the delegator's poll bound: %v", err)
+	}
+	m := regexp.MustCompile(`pollRequestTimeout\s*=\s*(\d+)\s*\*\s*time\.Second`).FindSubmatch(src)
+	if m == nil {
+		t.Fatal("pollRequestTimeout is no longer declared as `N * time.Second` in internal/delegate/run.go — re-derive this bound by hand before changing the cap")
+	}
+	sec, err := strconv.Atoi(string(m[1]))
+	if err != nil {
+		t.Fatalf("pollRequestTimeout value %q: %v", m[1], err)
+	}
+	poll := time.Duration(sec) * time.Second
+	held := fleetnode.MaxJobWaitSec*time.Second + 2*time.Second // the cap plus the handler's write slack
+	if held >= poll {
+		t.Fatalf("a capped long poll holds the connection for up to %s while the delegator abandons one exchange after %s: every wait= poll would be cancelled client-side (MaxJobWaitSec = %d)",
+			held, poll, fleetnode.MaxJobWaitSec)
 	}
 }

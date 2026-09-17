@@ -6,6 +6,61 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **`GET /fleet/jobs/{id}?wait=<seconds>` answers when the job FINISHES** (register S-19, diagnosis
+  `2026-09-17-harness-scheduling-diagnosis.md` §2(d)/§5.3). The node had no completion event at all,
+  so the only way to learn a job was done was to ask again in three seconds — all 236 measured
+  queue-deadline rows report exactly `101 poll(s)` = 300 s of pure polling — while the job store had
+  been broadcasting every terminal transition all along. The handler now waits on that broadcast
+  (`Jobs.WaitTerminal`), returning at the finish, at the wait, or when the caller hangs up, and
+  answering with the job's live state either way. Capped at `fleetnode.MaxJobWaitSec` = 12 s, which
+  MUST stay below the delegator's `pollRequestTimeout` (15 s, `internal/delegate/run.go`) or every
+  long poll would be cancelled client-side just before the node answered — pinned by a test that reads
+  the delegator's own source. Absent the parameter the route is byte-identical, so every deployed
+  delegator is unaffected and the 3 s poll remains the fallback. `finish` and the drain's shutdown mark
+  now broadcast too, so a parked poll wakes on any terminal transition, not only on the one that frees
+  a slot.
+- **`/fleet/health` publishes six honest fields about work in flight** (registers S-17, S-36; all
+  additive and `omitempty`, so a node without the lane, the lease or the holds emits a byte-identical
+  payload and an older delegator decodes exactly what it did before):
+  `jobs_admitting` (the subset of `jobs_running` whose worker is still in the run's ADMISSION phase —
+  cordon → pre-flight → warm → coherence probe, up to 300 s with the card idle — counted from this
+  process's own `gpuactivity` records, ADR 0041); `seat_loaded` / `seat_starting` (llama-swap's
+  `/running` verdict on the agent seat, read alias-aware through `internal/seatload` and `/running`
+  ONLY, never a path that could LOAD the seat — register C-05; BOTH a failed read and an AMBIGUOUS one
+  leave the pair absent rather than publishing "not loaded", where ambiguous is `seatload`'s own
+  predicate — the roster GET failed AND `/running` lists models the bare-name fallback cannot match, so
+  an alias-bound seat cannot be seen. That is the same refusal `gpu_drain` and
+  `internal/placement/live.go` already apply to this reading, and it is narrower than "the roster
+  failed": a failed roster over an EMPTY `/running` is knowable and publishes `seat_loaded:false`.
+  Both withheld cases are logged); `lease_exclusive` / `lease_draining` (what the held reservation is
+  DOING, beside `busy`'s verdict about declared time); and `recent_agent_wall_sec` (the median wall of
+  the last up to 8 agent jobs to finish, from the same job map `/fleet/jobs` walks — the completion
+  signal a node with no `seat_rate` sample could not otherwise publish).
+
+### Changed
+- **`saturation.score` no longer counts a job whose worker is still in admission** (register S-17).
+  `jobs.go` flips a job to `running` before `execute()`, and the run then spends up to 300 s in
+  admission — so the node published `score 1.0` beside `gpu_util_pct 0`, and in 10 of 47 measured
+  lease-timeout rows the box had zero agent jobs actually in flight. The exclusion applies to the
+  CONCURRENCY numerator only: `saturation.high`, `saturation.idle_slot` and the depth term are
+  unchanged, because the slot really is taken and `max_queue_depth` bounds every admitted job whatever
+  its phase.
+- `internal/seatload` gained `Running`, the `/running`-only half of `Inflight` (no `/upstream` read at
+  all, so it can never load an unloaded seat), shared by both so the alias resolution has one
+  implementation.
+
+### Fixed
+- **The 30 s blanket `WriteTimeout` truncated every handler that legitimately runs longer** (register
+  S-09). Go arms the write deadline at header-read, so the table bounded the chat lane — whose own
+  budget is `ChatProxyTimeout` = 10 minutes — and a forwarded cascade call that generated past 30 s
+  was cut mid-write and read to the caller as broken infrastructure. The blanket STAYS as the floor for
+  every other route; the two handlers that outlive it (the chat lane, and the new long poll) now extend
+  their own deadline per request with `http.NewResponseController(w).SetWriteDeadline` — the lane to
+  `ChatProxyTimeout` + 30 s of copy-back slack, the poll to its wait + 2 s. A `ResponseWriter` that
+  cannot carry a deadline simply runs under the blanket, as before. `TestServeTimeoutTable` now pins
+  both halves: the blanket value AND that exactly those two handlers extend it.
+
 ## [0.126.2] - 2026-09-17 - a PAIR card's failure text is one short line
 
 ### Changed
