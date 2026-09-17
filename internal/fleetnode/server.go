@@ -479,6 +479,54 @@ func medianSeconds(d []time.Duration) float64 {
 	return math.Round(sec*100) / 100
 }
 
+// queueWaitEstimateSec is how long a caller should expect to wait for a
+// worker to free, from the node's OWN measured recent wall — never from
+// seat_rate.min_turn_sec, which is a max-final RETRY floor for one seat and
+// has no relationship to how deep this node's backlog is (register S-04,
+// diagnosis §5.2, the overhaul plan's roast correction).
+//
+// depth is queue_depth (queued+running, whatever phase — an admitting job
+// still holds the worker slot a waiter needs; see health's admitting note).
+// excess = depth - maxConcurrent is how many admitted jobs are beyond what
+// can run AT ONCE right now; each of maxConcurrent workers retires roughly
+// one job every recentWallSec, so the deepest excess job waits about
+// excess x recentWallSec / maxConcurrent. 0 (no claim) when maxConcurrent is
+// unlimited (<=0 — nothing ever waits for a worker), there is no excess (a
+// worker is free), or the node has no recent wall sample at all.
+func queueWaitEstimateSec(depth, maxConcurrent int, recentWallSec float64) float64 {
+	if maxConcurrent <= 0 || recentWallSec <= 0 {
+		return 0
+	}
+	excess := depth - maxConcurrent
+	if excess <= 0 {
+		return 0
+	}
+	return float64(excess) * recentWallSec / float64(maxConcurrent)
+}
+
+// retryAfterSeconds is the "queue full" 503's Retry-After value: the ceiling
+// of queueWaitEstimateSec, bounded to [5, 300] so the header is never "retry
+// at once" (the queue IS full right now) and never an unbounded promise. With
+// no recent wall sample the node has no basis for an estimate and says the
+// flat 30s instead — a number a caller can always outwait, never a refusal
+// dressed up as a deadline (the overhaul plan's roast correction: an
+// admission refusal must be something the delegator can outwait, never
+// terminal).
+func retryAfterSeconds(depth, maxConcurrent int, recentWallSec float64) int {
+	if recentWallSec <= 0 {
+		return 30
+	}
+	sec := int(math.Ceil(queueWaitEstimateSec(depth, maxConcurrent, recentWallSec)))
+	switch {
+	case sec < 5:
+		return 5
+	case sec > 300:
+		return 300
+	default:
+		return sec
+	}
+}
+
 // seatState reports the cached /running answer for the agent seat: loaded,
 // starting, and whether the read is KNOWN at all. Never probes itself — the
 // background residency refresh publishes it on the same TTL.
@@ -1770,8 +1818,17 @@ func (s *Server) admit(w http.ResponseWriter, r *http.Request, env dispatchEnvel
 			// the one lever the operator holds, and leaves the routing to
 			// whoever made the request. Both halves stay true whatever any
 			// caller does next.
+			//
+			// Retry-After (register S-04) is ADDITIVE on top of that byte-
+			// identical prefix: the node's own recent_agent_wall_sec sizes a
+			// wait the delegator can actually honour, so a "queue full" 503 is
+			// something to outwait, not a dead end — never sized from
+			// seat_rate.min_turn_sec, a different quantity entirely (see
+			// retryAfterSeconds).
+			retryAfter := retryAfterSeconds(d, s.jobs.MaxConcurrent(), medianSeconds(s.jobs.FinishedAgentWalls(recentAgentWallSamples)))
+			w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
 			writeError(w, http.StatusServiceUnavailable,
-				fmt.Sprintf("queue full (%d jobs accepted+running, limit %d): retry later, or raise fleet_max_queue_depth", d, limit))
+				fmt.Sprintf("queue full (%d jobs accepted+running, limit %d): retry later, or raise fleet_max_queue_depth (~%d s until a worker frees)", d, limit, retryAfter))
 			return
 		}
 	}

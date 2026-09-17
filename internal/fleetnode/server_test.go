@@ -1425,6 +1425,78 @@ func TestDispatchQueueUnlimitedControlArm(t *testing.T) {
 	pollJob(t, s, "qu-2", JobDone)
 }
 
+// TestDispatchQueueFullRetryAfterFromRecentWall is S-04/S-16's red test: a
+// "queue full" refusal is a WALL a delegator has no way to size a re-placement
+// or a wait against, other than guessing. The node already knows roughly how
+// long its own backlog takes to drain — recent_agent_wall_sec (S-36) — so the
+// refusal now says it: Retry-After = ceil(excess x recent_agent_wall_sec /
+// max(1, maxConcurrent)), excess = queue_depth - maxConcurrent, bounded to
+// [5, 300]. This is NOT seat_rate.min_turn_sec (a max-final retry floor) —
+// that number sizes a RETRY on a specific seat, not how long a backlog takes
+// to drain, and using it here would size a queue wait from a quantity that
+// has nothing to do with queue depth.
+//
+// The existing message stays a BYTE-IDENTICAL PREFIX — the delegator quotes
+// it, and TestDispatchQueueFull503NewWorkOnly pins it — with the estimate
+// appended as a suffix, so this is additive on the wire.
+func TestDispatchQueueFullRetryAfterFromRecentWall(t *testing.T) {
+	base := time.Date(2026, 9, 17, 10, 0, 0, 0, time.UTC)
+	jobs := newJobs(time.Hour, func() time.Time { return base }, time.Hour, 1) // maxConcurrent=1
+	t.Cleanup(func() { jobs.DrainAndStop(time.Second) })
+	jobs.mu.Lock()
+	// One FINISHED agent job, wall = 60s exactly, so recent_agent_wall_sec = 60.
+	jobs.m["done-agent"] = &job{state: JobDone, agent: true, startedAt: base, finishedAt: base.Add(60 * time.Second)}
+	// depth 3 (1 running + 2 queued) against maxConcurrent 1: excess = 2.
+	jobs.m["running-1"] = &job{state: JobRunning, capped: true}
+	jobs.m["queued-1"] = &job{state: JobAccepted, capped: true}
+	jobs.m["queued-2"] = &job{state: JobAccepted, capped: true}
+	jobs.mu.Unlock()
+
+	cfg := imageCfg()
+	cfg.FleetMaxConcurrentJobs = 1
+	cfg.FleetMaxQueueDepth = 3 // already AT the limit: the next dispatch is refused
+	s := New(&fakeRunner{}, jobs, Options{NodeID: "testnode", Snapshot: goodSnapshot,
+		Footprints: func() []FootprintEntry { return nil }, GpuVendor: "nvidia", GpuArch: "ampere", Cfg: cfg})
+
+	rec := dispatchImage(t, s, "rf-1")
+	wantErrorShape(t, rec, http.StatusServiceUnavailable, "queue full")
+	if got := rec.Header().Get("Retry-After"); got != "120" {
+		t.Fatalf("Retry-After = %q, want 120 (excess 2 x wall 60s / maxConcurrent 1)", got)
+	}
+	m := decodeMap(t, rec)
+	msg, _ := m["error"].(string)
+	if !strings.Contains(msg, "~120 s until a worker frees") {
+		t.Fatalf("error = %q, want the same estimate named in the body", msg)
+	}
+}
+
+// TestDispatchQueueFullRetryAfterDefaultsWithoutRecentWall: a node with no
+// finished agent job (a fresh box, or a media-only node) has no wall sample to
+// size an estimate from — it must never guess from an unrelated number
+// (seat_rate.min_turn_sec, a config default). The flat 30s keeps the header
+// present (a caller can always outwait a "queue full" 503) without asserting
+// a precision the node does not have.
+func TestDispatchQueueFullRetryAfterDefaultsWithoutRecentWall(t *testing.T) {
+	jobs := NewJobs(time.Hour, 1)
+	t.Cleanup(func() { jobs.DrainAndStop(time.Second) })
+	jobs.mu.Lock()
+	jobs.m["running-1"] = &job{state: JobRunning, capped: true}
+	jobs.m["queued-1"] = &job{state: JobAccepted, capped: true}
+	jobs.mu.Unlock()
+
+	cfg := imageCfg()
+	cfg.FleetMaxConcurrentJobs = 1
+	cfg.FleetMaxQueueDepth = 2
+	s := New(&fakeRunner{}, jobs, Options{NodeID: "testnode", Snapshot: goodSnapshot,
+		Footprints: func() []FootprintEntry { return nil }, GpuVendor: "nvidia", GpuArch: "ampere", Cfg: cfg})
+
+	rec := dispatchImage(t, s, "rf-2")
+	wantErrorShape(t, rec, http.StatusServiceUnavailable, "queue full")
+	if got := rec.Header().Get("Retry-After"); got != "30" {
+		t.Fatalf("Retry-After = %q, want the flat 30s default with no recent wall sample", got)
+	}
+}
+
 func TestHealth_GpuUtilIsBusiestDevice(t *testing.T) {
 	opts := &Options{Snapshot: func() (Snapshot, bool) {
 		return Snapshot{TotalGiB: 32, FreeGiB: 20, At: time.Now(), Devices: []GPUDevice{
