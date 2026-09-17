@@ -811,8 +811,7 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 			return deferWire(core.DeferClassBudget, fmt.Sprintf("wall timeout after %ds", timeoutSec))
 		}
 		if errors.Is(cctx.Err(), context.Canceled) {
-			// The PARENT went away mid-loop (the delegator abandoned the poll,
-			// the node is shutting down) — the same shape the re-pack branch
+			// The PARENT went away mid-loop — the same shape the re-pack branch
 			// below already carries its own arm for (register S-22/W-16, 2026-
 			// 09-17 diagnosis: "a cancelled parent is filed as broken
 			// hardware", 12 "agent loop: context canceled" rows). The failed
@@ -821,7 +820,21 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 			// branch below and defer as infrastructure: an operator told to fix
 			// a box that never misbehaved. Budget is the honest class: a
 			// ceiling outside the model's control stopped the run.
-			return deferWire(core.DeferClassBudget, "agent loop: canceled (the caller's context ended)")
+			//
+			// The reason names NO cause (PR #366 review, correctness blocker):
+			// on the FLEET NODE path the only thing that ever cancels this
+			// context is fleetnode.Jobs.DrainAndStop (a node drain, never a
+			// caller) — and its own mark ("interrupted") is written BEFORE the
+			// cancel that releases this run, so finish() is write-once against
+			// an already-terminal job and this defer's words are NEVER what the
+			// delegator reads on that path (proven by
+			// TestJobsDrainDiscardsALateAgentBudgetDefer,
+			// internal/fleetnode/jobs_test.go). Only the LOCAL in-process path
+			// (RunAgentContract, no Jobs store in front of it) can ever surface
+			// this string to a human, and there a cancel genuinely IS the
+			// caller's own context ending — but the wording must not assert a
+			// cause the fleet-node path does not share, so it names both.
+			return deferWire(core.DeferClassBudget, "agent loop: canceled (the parent context ended — the caller gave up, or this box is draining)")
 		}
 		// A busy seat that outlived the contention budget is its OWN reason:
 		// "seat contended:" is the ledger/audit grep key, and the operator's fix
@@ -969,6 +982,7 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		// acceptance: every branch below returns deferWire, which sets
 		// Deferred, and delegate.runLocal/runRemote both run acceptance only
 		// when !wire.Deferred — so no check can ever read it on this path.
+		cutoff, isCutoff := asRepackCutoff(serr)
 		switch {
 		case errors.Is(cctx.Err(), context.DeadlineExceeded):
 			// The wall expired DURING the re-pack. That is the timeout shape,
@@ -989,6 +1003,16 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 			// misbehaved. Budget is the honest class: a ceiling outside the
 			// model's control stopped the run.
 			return deferWire(core.DeferClassBudget, "canceled during the structured re-pack (the caller's context ended)")
+		case isCutoff:
+			// The DECISIVE (last-run) re-pack attempt was ended by its OWN
+			// per-attempt bound (repackAttemptDeadline, register D-108) — not
+			// by the seat, not by the wall (that is the DeadlineExceeded arm
+			// above, which the real cctx would already have caught) and not by
+			// a caller (that is the Canceled arm above). Filing a self-imposed
+			// cutoff as infrastructure recreates, one arm over, the exact
+			// defect this PR already fixes for a canceled parent (PR #366
+			// correctness review): the box did nothing wrong.
+			return deferWire(core.DeferClassBudget, "structured re-pack "+cutoff.Error())
 		case transport:
 			var lse *llamaclient.StatusError
 			if errors.As(serr, &lse) && seatwait.Retryable(lse.StatusCode, lse.Body) {
@@ -1188,7 +1212,28 @@ func (p *Pipeline) repackStructured(ctx context.Context, seat string, rawSchema 
 	// so their own internal TTL cache does the sharing.
 	gates := p.newRepackGates()
 
-	var lastErr, transportErr error
+	// lastRaw/lastBound/lastAttemptNum describe the MOST RECENTLY failed
+	// attempt; earlierNotes carries every one before it. Only the FINAL
+	// attempt this call ends on decides transport/budget/abstention (register
+	// D-108, PR #366 correctness review): everything earlier is diagnostic
+	// context for the operator, never the published class — a seat that
+	// self-cut on attempt 1 and definitively refused on attempt 3 is a
+	// broken-box report, not a budget one, and the reverse must not read as
+	// broken hardware either. recordFailure shifts the PREVIOUS "last" into
+	// earlierNotes (formatted, plain text — no wrap chain needed on a note
+	// nothing unwraps) the moment a NEWER failure arrives, so the one entry
+	// that never lands in earlierNotes is whichever failure turns out to be
+	// the final one.
+	var earlierNotes []string
+	var lastRaw error
+	var lastBound time.Duration
+	var lastAttemptNum int
+	recordFailure := func(raw error, bound time.Duration, attemptNum int) {
+		if lastRaw != nil {
+			earlierNotes = append(earlierNotes, fmt.Sprintf("attempt %d/%d (bound %s): %v", lastAttemptNum, repackMaxAttempts, lastBound, lastRaw))
+		}
+		lastRaw, lastBound, lastAttemptNum = raw, bound, attemptNum
+	}
 	budget := repackBudget(output)
 	for attempt := 0; attempt < 2; attempt++ {
 		if !wallLeft("grammar re-pack") {
@@ -1228,10 +1273,7 @@ func (p *Pipeline) repackStructured(ctx context.Context, seat string, rawSchema 
 		attemptTimeout := repackAttemptDeadline(ctx, p.cfg, budget, repackMaxAttempts-attempts+1)
 		gres, gerr := p.repackClient(p.cfg.CompletionPath, attemptTimeout, gates).Generate(ctx, seat, system, user, grammar, budget, p.cfg.Temperature, 0, llamaclient.WithoutThinking())
 		if gerr != nil {
-			lastErr = gerr
-			if transportErr == nil && genErrIsTransport(gerr) {
-				transportErr = gerr
-			}
+			recordFailure(gerr, attemptTimeout, attempts)
 			continue
 		}
 		if gres.Truncated {
@@ -1242,7 +1284,7 @@ func (p *Pipeline) repackStructured(ctx context.Context, seat string, rawSchema 
 			// answer re-packed at 1,024 tokens on the 27B, an 8,380-char one
 			// on the 4B, both filed as invalid JSON). Name the truncation, and
 			// give the retry the cap.
-			lastErr = fmt.Errorf("re-pack truncated at %d tokens (the answer is %d chars; the structured budget cannot hold it)", budget, len(output))
+			recordFailure(fmt.Errorf("re-pack truncated at %d tokens (the answer is %d chars; the structured budget cannot hold it)", budget, len(output)), attemptTimeout, attempts)
 			budget = agentRepackMaxTokensCap
 			continue
 		}
@@ -1255,7 +1297,7 @@ func (p *Pipeline) repackStructured(ctx context.Context, seat string, rawSchema 
 			if fixed, ok := coerceToSchema(content, schema); ok {
 				return json.RawMessage(fixed), gres.TokensOut, false, attempts, nil
 			}
-			lastErr = verr
+			recordFailure(verr, attemptTimeout, attempts)
 			continue
 		}
 		return json.RawMessage(content), gres.TokensOut, false, attempts, nil
@@ -1277,17 +1319,33 @@ func (p *Pipeline) repackStructured(ctx context.Context, seat string, rawSchema 
 	attempts++
 	chatTimeout := repackAttemptDeadline(ctx, p.cfg, budget, repackMaxAttempts-attempts+1)
 	chatClient := p.repackClient("/v1/chat/completions", chatTimeout, gates)
-	if structured, tokensOut, ok := p.repackViaChat(ctx, chatClient, seat, schema, output); ok {
+	structured, tokensOut, cerr := p.repackViaChat(ctx, chatClient, seat, schema, output)
+	if cerr == nil {
 		return structured, tokensOut, false, attempts, nil
 	}
-	if transportErr != nil {
-		// Report the TRANSPORT failure itself, not whatever the other attempt
-		// produced: the caller prefixes this with "structured re-pack
-		// unreachable", and a message pairing that prefix with a schema
-		// validation error would be an unreadable diagnosis.
-		return nil, 0, true, attempts, transportErr
+	recordFailure(cerr, chatTimeout, attempts)
+
+	// Every attempt has now run and failed. lastRaw/lastBound/lastAttemptNum
+	// describe the FINAL one — its own nature alone decides the verdict
+	// (register D-108, PR #366 correctness review): a self-imposed cutoff is
+	// never evidence of a broken box (repackCutoffErr, budget); a genuine
+	// dial failure / 5xx / 429 on the LAST attempt is (transport=true,
+	// infrastructure); anything else — a validation failure, a truncation, a
+	// non-429 4xx refusal — means the seat answered and could not be used
+	// (abstention). earlierNotes rides along in every case as diagnostic
+	// context, never as what decides the class.
+	if selfCutoff(lastRaw) {
+		msg := fmt.Sprintf("attempt %d/%d cut by its %s share of the wall", lastAttemptNum, repackMaxAttempts, lastBound)
+		if len(earlierNotes) > 0 {
+			msg = strings.Join(earlierNotes, "; ") + "; " + msg
+		}
+		return nil, 0, false, attempts, &repackCutoffErr{msg: msg, raw: lastRaw}
 	}
-	return nil, 0, false, attempts, lastErr
+	finalErr := fmt.Errorf("attempt %d/%d (bound %s): %w", lastAttemptNum, repackMaxAttempts, lastBound, lastRaw)
+	if len(earlierNotes) > 0 {
+		finalErr = fmt.Errorf("%s; %w", strings.Join(earlierNotes, "; "), finalErr)
+	}
+	return nil, 0, genErrIsTransport(lastRaw), attempts, finalErr
 }
 
 // outerObject trims text to its outermost {...} span (fences and prose around
@@ -1480,7 +1538,16 @@ func repackBudget(output string) int {
 // client (register D-85/D-108) — seat-endpoint routing mirrored from the main
 // client's construction (recordless.go): the pipeline's own client is pinned
 // to the native completion path and cannot make this call.
-func (p *Pipeline) repackViaChat(ctx context.Context, client *llamaclient.Client, seat string, schema map[string]any, output string) (json.RawMessage, int, bool) {
+//
+// Returns the FAILURE itself (PR #366 correctness review, blocker: this used
+// to report a bare ok=false on any failure — a transport failure, where the
+// seat never answered, looked IDENTICAL to a validation failure, where it
+// answered wrong — so when both grammar attempts had already failed on
+// validation, repackStructured fell through to that STALE validation error
+// instead of the chat fallback's own, real one). The caller classifies the
+// returned error; repackViaChat makes no infrastructure/budget/abstention
+// judgment of its own.
+func (p *Pipeline) repackViaChat(ctx context.Context, client *llamaclient.Client, seat string, schema map[string]any, output string) (json.RawMessage, int, error) {
 	names := make([]string, 0, 8)
 	if props, ok := schema["properties"].(map[string]any); ok {
 		for name, raw := range props {
@@ -1498,18 +1565,21 @@ func (p *Pipeline) repackViaChat(ctx context.Context, client *llamaclient.Client
 	user := fmt.Sprintf("Extract these fields from the text as a JSON object: %s.\n\nTEXT:\n%s", strings.Join(names, ", "), output)
 	budget := repackBudget(output)
 	gres, gerr := client.Generate(ctx, seat, system, user, "", budget, p.cfg.Temperature, 0, llamaclient.WithoutThinking())
-	if gerr != nil || gres.Truncated {
-		return nil, 0, false
+	if gerr != nil {
+		return nil, 0, gerr
+	}
+	if gres.Truncated {
+		return nil, 0, fmt.Errorf("chat re-pack truncated at %d tokens (the answer is %d chars; the structured budget cannot hold it)", budget, len(output))
 	}
 	content := outerObject(gres.Content)
 	if verr := validator.Validate([]byte(content), schema); verr != nil {
 		fixed, ok := coerceToSchema([]byte(content), schema)
 		if !ok {
-			return nil, 0, false
+			return nil, 0, verr
 		}
-		return json.RawMessage(fixed), gres.TokensOut, true
+		return json.RawMessage(fixed), gres.TokensOut, nil
 	}
-	return json.RawMessage(content), gres.TokensOut, true
+	return json.RawMessage(content), gres.TokensOut, nil
 }
 
 // coerceToSchema repairs the ONE failure shape a grammar would have prevented
@@ -1983,6 +2053,54 @@ func genErrIsTransport(err error) bool {
 	}
 	var nerr net.Error
 	return errors.As(err, &nerr)
+}
+
+// selfCutoff reports whether err is a re-pack attempt's OWN per-attempt bound
+// (repackAttemptDeadline, register D-108) cutting the request short — never
+// evidence the seat is unreachable, the same distinction genErrIsTransport
+// already draws for a canceled parent (PR #366 correctness review, S-22/W-16
+// carried one arm further): a client.Timeout firing on a request THIS BOX
+// deliberately narrowed looks identical, on the wire, to a real ctx deadline
+// firing — both surface as a *url.Error whose Timeout() is true, or wrap
+// context.DeadlineExceeded — while a dial-refused or connection-reset error
+// has NEITHER shape. A TIMEOUT is always "we gave up waiting" (our own
+// patience, a budget decision), never direct proof the box is broken; only a
+// definitive refusal (a 5xx, a reset, a dial failure) is that.
+func selfCutoff(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var uerr *url.Error
+	if errors.As(err, &uerr) {
+		return uerr.Timeout()
+	}
+	return false
+}
+
+// repackCutoffErr marks a re-pack error whose decisive (LAST-run) attempt was
+// ended by the re-pack's own per-attempt bound rather than by the seat or a
+// canceled caller (register D-108, PR #366 correctness review). Filing this
+// as infrastructure — "the seat could not be reached" — recreates, one arm
+// over, the exact defect this PR already fixes for a canceled parent context
+// (S-22/W-16): the box did nothing wrong, this box's own narrowed clock ran
+// out. The caller reads it with errors.As and defers budget.
+type repackCutoffErr struct {
+	msg string
+	raw error
+}
+
+func (c *repackCutoffErr) Error() string { return c.msg }
+func (c *repackCutoffErr) Unwrap() error { return c.raw }
+
+// asRepackCutoff reports whether err (or anything it wraps) is a
+// *repackCutoffErr, and returns it.
+func asRepackCutoff(err error) (*repackCutoffErr, bool) {
+	var c *repackCutoffErr
+	ok := errors.As(err, &c)
+	return c, ok
 }
 
 // groundedContract reports whether the contract carries context documents — the
