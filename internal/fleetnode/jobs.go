@@ -278,6 +278,33 @@ func (j *Jobs) Counts() (queued, running int) {
 	return queued, running
 }
 
+// CountsCapped is Counts restricted to jobs that COUNT AGAINST
+// fleet_max_concurrent_jobs — the same set RunningCapped/runningCappedLocked
+// and IdleSlot measure against the cap. A queue-wait ESTIMATE (register S-04)
+// must be computed from this, not from Counts' all-jobs split: an uncapped
+// job (a render, an stt, a pipeline route) never waits behind maxConcurrent,
+// so mixing it into the numerator the same way saturationOf's fix and
+// IdleSlot's fix both already avoid would inflate the estimate for backlog
+// that was never contending for a capped worker slot. 4 idle agent slots
+// behind 10 running uncapped renders must read as an idle agent lane, not a
+// 90s wait.
+func (j *Jobs) CountsCapped() (queued, running int) {
+	j.mu.RLock()
+	defer j.mu.RUnlock()
+	for _, jb := range j.m {
+		if !jb.capped {
+			continue
+		}
+		switch jb.state {
+		case JobAccepted:
+			queued++
+		case JobRunning:
+			running++
+		}
+	}
+	return queued, running
+}
+
 // AcceptSpec carries the per-admission facts the store needs but cannot infer
 // from the run closure. It exists so the three flags stay ORTHOGONAL: there is
 // no Accept-method-per-combination to keep in sync, and adding a fourth fact

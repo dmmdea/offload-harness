@@ -389,6 +389,67 @@ func TestHealthQueueWaitEstimateCountsAdmittingAsRunning(t *testing.T) {
 	}
 }
 
+// TestHealthQueueWaitEstimateIgnoresUncappedJobs is review round 1's BLOCKER
+// red test: queueWaitEstimateSec/retryAfterFor divided ALL jobs (Counts /
+// QueueDepth — capped + uncapped media/stt/pipeline runs) by maxConcurrent,
+// which bounds only the CAPPED set — exactly the class of bug `saturationOf`
+// was already fixed for (S-17) and `IdleSlot`'s own fix in this PR repeats
+// the lesson of. 10 uncapped renders running plus 4 fully IDLE agent slots
+// must read as an idle agent lane (estimate 0/absent), not a 90s wait.
+func TestHealthQueueWaitEstimateIgnoresUncappedJobs(t *testing.T) {
+	base := time.Date(2026, 9, 17, 10, 0, 0, 0, time.UTC)
+	jobs := newJobs(time.Hour, func() time.Time { return base }, time.Hour, 4) // maxConcurrent=4
+	t.Cleanup(func() { jobs.DrainAndStop(time.Second) })
+	jobs.mu.Lock()
+	jobs.m["done-agent"] = &job{state: JobDone, agent: true, startedAt: base, finishedAt: base.Add(60 * time.Second)}
+	for i := 0; i < 10; i++ {
+		jobs.m[fmt.Sprintf("uncapped-%d", i)] = &job{state: JobRunning, capped: false}
+	}
+	jobs.mu.Unlock()
+
+	cfg := imageCfg()
+	cfg.FleetMaxConcurrentJobs = 4
+	s := New(&fakeRunner{}, jobs, Options{NodeID: "testnode", Snapshot: goodSnapshot,
+		Footprints: func() []FootprintEntry { return nil }, GpuVendor: "nvidia", GpuArch: "ampere", Cfg: cfg})
+
+	m := decodeMap(t, do(t, s, http.MethodGet, "/fleet/health", "", nil))
+	if v, ok := m["queue_wait_estimate_sec"]; ok {
+		t.Fatalf("queue_wait_estimate_sec = %v with 4 IDLE agent slots (10 running jobs are all UNCAPPED renders that never contend for a capped slot): want absent/0, not a wait inflated by unrelated media load", v)
+	}
+}
+
+// TestHealthQueueWaitEstimateCappedControlArm is the control for the test
+// above, pinning the review's exact numbers: 4 capped workers all running, 2
+// more capped jobs genuinely queued behind them, wall 60s -> 30s (excess 2 x
+// 60 / maxConcurrent 4).
+func TestHealthQueueWaitEstimateCappedControlArm(t *testing.T) {
+	base := time.Date(2026, 9, 17, 10, 0, 0, 0, time.UTC)
+	jobs := newJobs(time.Hour, func() time.Time { return base }, time.Hour, 4) // maxConcurrent=4
+	t.Cleanup(func() { jobs.DrainAndStop(time.Second) })
+	jobs.mu.Lock()
+	jobs.m["done-agent"] = &job{state: JobDone, agent: true, startedAt: base, finishedAt: base.Add(60 * time.Second)}
+	for i := 0; i < 4; i++ {
+		jobs.m[fmt.Sprintf("running-%d", i)] = &job{state: JobRunning, capped: true}
+	}
+	jobs.m["queued-0"] = &job{state: JobAccepted, capped: true}
+	jobs.m["queued-1"] = &job{state: JobAccepted, capped: true}
+	jobs.mu.Unlock()
+
+	cfg := imageCfg()
+	cfg.FleetMaxConcurrentJobs = 4
+	s := New(&fakeRunner{}, jobs, Options{NodeID: "testnode", Snapshot: goodSnapshot,
+		Footprints: func() []FootprintEntry { return nil }, GpuVendor: "nvidia", GpuArch: "ampere", Cfg: cfg})
+
+	m := decodeMap(t, do(t, s, http.MethodGet, "/fleet/health", "", nil))
+	v, ok := m["queue_wait_estimate_sec"].(float64)
+	if !ok {
+		t.Fatalf("queue_wait_estimate_sec absent with 4 capped running + 2 capped queued and a 60s wall: %v", m)
+	}
+	if v != 30 {
+		t.Fatalf("queue_wait_estimate_sec = %v, want 30 (excess 2 x wall 60s / maxConcurrent 4)", v)
+	}
+}
+
 // TestHealthReportsTheRecentAgentWall is S-36's red test: a node with no
 // seat_rate sample publishes no completion signal at all, so a fresh box is
 // indistinguishable from a fast one. The median of the last finished agent jobs

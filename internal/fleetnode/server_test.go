@@ -1495,6 +1495,88 @@ func TestDispatchQueueFullRetryAfterDefaultsWithoutRecentWall(t *testing.T) {
 	if got := rec.Header().Get("Retry-After"); got != "30" {
 		t.Fatalf("Retry-After = %q, want the flat 30s default with no recent wall sample", got)
 	}
+	// Review round 1 item 2: the flat default must not read like a
+	// MEASUREMENT — "~30 s until a worker frees" implies a precision the node
+	// does not have.
+	m := decodeMap(t, rec)
+	msg, _ := m["error"].(string)
+	if !strings.Contains(msg, "no recent completions yet") {
+		t.Fatalf("error = %q, want it to say the 30s is a DEFAULT (no wall sample), not a measured estimate", msg)
+	}
+	if strings.Contains(msg, "~30 s until a worker frees") {
+		t.Fatalf("error = %q, the flat default must not be worded as if it were a measured estimate", msg)
+	}
+}
+
+// TestDispatchQueueFullRetryAfterClampedHighSaysSo is review round 1 item 3's
+// red test: the [5, 300] clamp was SILENT — a raw 600s estimate rendered
+// "~300 s until a worker frees", indistinguishable from a genuine 300s
+// measurement, and every waiter reading it would retry in lockstep at the
+// same instant. maxConcurrent 1, excess 10, wall 60s -> raw estimate 600s;
+// the header is still capped at 300 (a bounded promise beats an unbounded
+// one), but the text must say the estimate was clamped.
+func TestDispatchQueueFullRetryAfterClampedHighSaysSo(t *testing.T) {
+	base := time.Date(2026, 9, 17, 10, 0, 0, 0, time.UTC)
+	jobs := newJobs(time.Hour, func() time.Time { return base }, time.Hour, 1) // maxConcurrent=1
+	t.Cleanup(func() { jobs.DrainAndStop(time.Second) })
+	jobs.mu.Lock()
+	jobs.m["done-agent"] = &job{state: JobDone, agent: true, startedAt: base, finishedAt: base.Add(60 * time.Second)}
+	jobs.m["running-1"] = &job{state: JobRunning, capped: true}
+	for i := 0; i < 10; i++ {
+		jobs.m[fmt.Sprintf("queued-%d", i)] = &job{state: JobAccepted, capped: true}
+	}
+	jobs.mu.Unlock()
+
+	cfg := imageCfg()
+	cfg.FleetMaxConcurrentJobs = 1
+	cfg.FleetMaxQueueDepth = 11 // already AT the limit (1 running + 10 queued)
+	s := New(&fakeRunner{}, jobs, Options{NodeID: "testnode", Snapshot: goodSnapshot,
+		Footprints: func() []FootprintEntry { return nil }, GpuVendor: "nvidia", GpuArch: "ampere", Cfg: cfg})
+
+	rec := dispatchImage(t, s, "rf-4")
+	wantErrorShape(t, rec, http.StatusServiceUnavailable, "queue full")
+	if got := rec.Header().Get("Retry-After"); got != "300" {
+		t.Fatalf("Retry-After = %q, want the clamped 300 (excess 10 x wall 60s / maxConcurrent 1 = 600, capped)", got)
+	}
+	m := decodeMap(t, rec)
+	msg, _ := m["error"].(string)
+	if !strings.Contains(msg, ">=300 s until a worker frees") {
+		t.Fatalf("error = %q, want the clamp said out loud (>=300 s), not a bare '~300 s' indistinguishable from a genuine measurement", msg)
+	}
+}
+
+// TestDispatchQueueFullRetryAfterIgnoresUncappedJobs is review round 1's
+// BLOCKER red test on the dispatch side: the total BACKLOG cap
+// (fleet_max_queue_depth) legitimately counts every task type — that part of
+// the 503 is correct and unchanged — but sizing Retry-After from that same
+// ALL-jobs depth divides by maxConcurrent, which bounds only the CAPPED set.
+// 10 uncapped renders filling the backlog, with all 4 agent slots genuinely
+// idle, must not report a 90s wait for an agent contract.
+func TestDispatchQueueFullRetryAfterIgnoresUncappedJobs(t *testing.T) {
+	base := time.Date(2026, 9, 17, 10, 0, 0, 0, time.UTC)
+	jobs := newJobs(time.Hour, func() time.Time { return base }, time.Hour, 4) // maxConcurrent=4
+	t.Cleanup(func() { jobs.DrainAndStop(time.Second) })
+	jobs.mu.Lock()
+	jobs.m["done-agent"] = &job{state: JobDone, agent: true, startedAt: base, finishedAt: base.Add(60 * time.Second)}
+	for i := 0; i < 10; i++ {
+		jobs.m[fmt.Sprintf("uncapped-%d", i)] = &job{state: JobRunning, capped: false}
+	}
+	jobs.mu.Unlock()
+
+	cfg := imageCfg()
+	cfg.FleetMaxConcurrentJobs = 4
+	cfg.FleetMaxQueueDepth = 10 // already AT the total-backlog limit
+	s := New(&fakeRunner{}, jobs, Options{NodeID: "testnode", Snapshot: goodSnapshot,
+		Footprints: func() []FootprintEntry { return nil }, GpuVendor: "nvidia", GpuArch: "ampere", Cfg: cfg})
+
+	rec := dispatchImage(t, s, "rf-3")
+	wantErrorShape(t, rec, http.StatusServiceUnavailable, "queue full")
+	if got := rec.Header().Get("Retry-After"); got == "90" {
+		t.Fatalf("Retry-After = %q: sized from ALL jobs (10 uncapped) / maxConcurrent(4), inflating a wait for 4 genuinely IDLE agent slots", got)
+	}
+	if got := rec.Header().Get("Retry-After"); got != "5" {
+		t.Fatalf("Retry-After = %q, want the 5s floor (excess 0 capped x wall 60s / maxConcurrent 4 = 0, clamped up)", got)
+	}
 }
 
 func TestHealth_GpuUtilIsBusiestDevice(t *testing.T) {
