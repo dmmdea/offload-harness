@@ -31,6 +31,20 @@ const (
 	claimTimeout  = 10 * time.Second
 )
 
+// claimBackpressureActive reports whether the claim loop should back off
+// because this node's backlog is at its cap — the SAME RESOLVED limit the
+// push path's own admission gate compares QueueDepth() against
+// (cfg.FleetQueueLimit(), review round 1 addendum item 7). Reading the raw
+// cfg.FleetMaxQueueDepth here instead meant a node left at its default (0 =
+// unset, resolving to 2x fleet_max_concurrent_jobs) never paced itself at
+// all: `limit > 0` was false for the raw 0, so the claim loop kept pulling
+// work past its own resolved backlog cap while the push path was already
+// refusing new dispatches at that same depth.
+func claimBackpressureActive(cfg config.Config, depth int) bool {
+	limit := cfg.FleetQueueLimit()
+	return limit > 0 && depth >= limit
+}
+
 // StartClaimLoop runs until ctx cancels. It never claims while this node's
 // backlog is at its cap (the push path's own back-pressure rule), and it
 // nacks jobs it cannot build rather than letting the lease expire — a loud
@@ -47,7 +61,7 @@ func (s *Server) StartClaimLoop(ctx context.Context, cfg config.Config) {
 		default:
 		}
 		wait := claimIdlePoll
-		if limit := cfg.FleetMaxQueueDepth; limit > 0 && s.jobs.QueueDepth() >= limit {
+		if claimBackpressureActive(cfg, s.jobs.QueueDepth()) {
 			wait = claimBusyPoll
 		} else if job, ok := s.claimOne(ctx, client, holder, nodeID, cfg); ok {
 			_ = job // claimed and admitted; loop immediately for more

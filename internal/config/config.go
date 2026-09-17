@@ -1107,8 +1107,9 @@ type Config struct {
 	// FleetMaxQueueDepth caps how many jobs this node will hold in
 	// accepted/running at once — i.e. it is the ceiling on health's
 	// `queue_depth` field, which counts exactly those two states. A NEW
-	// dispatch beyond it is refused 503. 0 = the built-in default (32);
-	// negative = unlimited (the pre-cap behavior).
+	// dispatch beyond it is refused 503. 0 = the built-in default (2x
+	// FleetConcurrencyLimit — see FleetQueueLimit); negative = unlimited (the
+	// pre-cap behavior).
 	//
 	// 0.100.0 SPLIT NOTE — this key's meaning is UNCHANGED, but what it is
 	// no longer doing matters. Before 0.100.0 a job started executing the
@@ -1554,7 +1555,7 @@ func Default() Config {
 		CoralIdleSec:                  300,
 		FleetListen:                   "127.0.0.1:18811", // fleet-serve bind (18810 = the dispatcher's)
 		FleetNodeID:                   "",                // "" = hostname at serve time
-		FleetMaxQueueDepth:            0,                 // 0 = built-in default (32 accepted+running); negative = unlimited
+		FleetMaxQueueDepth:            0,                 // 0 = built-in default (2x fleet_max_concurrent_jobs accepted+running); negative = unlimited
 		FleetMaxConcurrentJobs:        0,                 // 0 = built-in default (4 executing at once); negative = unlimited
 		FleetAuthToken:                "",                // "" = no agent-lane auth → agent dispatch loopback-only; media lane never auths (v1 scope)
 		FleetAgentEnabled:             false,             // node-side agent-lane worker role: explicit operator opt-in
@@ -2090,12 +2091,21 @@ func (c Config) SpreadLocalSlot() string {
 // FleetQueueLimit resolves FleetMaxQueueDepth: 0 → the built-in default,
 // negative → 0 meaning unlimited. Callers compare depth >= limit only when
 // limit > 0.
+//
+// The default (register S-04/C-25) is 2x FleetConcurrencyLimit() rather than
+// a flat 32: a node admitting 32 deep behind 4 workers could pile up 28 jobs
+// it has no hope of starting inside any wall a caller would wait out — 236
+// measured contracts died at the delegator's 5-minute queue deadline having
+// never started, 75% of them while another node sat idle. Sizing the backlog
+// from the concurrency the node actually has means a custom
+// fleet_max_concurrent_jobs still gets a sane default depth (twice its own
+// worker count) instead of the same flat ceiling regardless of box size.
 func (c Config) FleetQueueLimit() int {
 	switch {
 	case c.FleetMaxQueueDepth < 0:
 		return 0
 	case c.FleetMaxQueueDepth == 0:
-		return 32
+		return 2 * c.FleetConcurrencyLimit()
 	default:
 		return c.FleetMaxQueueDepth
 	}

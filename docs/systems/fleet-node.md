@@ -58,15 +58,64 @@ executions that one config key happened to cap. A dispatch is now *admitted* to 
 scheduler goroutine claims jobs only while an execution slot is free. Two independent limits fall
 out of that:
 
-- **`fleet_max_queue_depth`** (default 32) — the admission ceiling on `accepted` + `running`, i.e. on
-  `queue_depth`. Exceeding it is the only thing that produces `503 queue full`. Unchanged in meaning
-  from 0.99.0.
+- **`fleet_max_queue_depth`** (default 2x `fleet_max_concurrent_jobs`, i.e. 8 with the default 4
+  workers — register S-04/C-25) — the admission ceiling on `accepted` + `running`, i.e. on
+  `queue_depth`. Exceeding it is the only thing that produces `503 queue full`. The refusal boundary
+  itself is unchanged in meaning from 0.99.0; only the default resolution changed, from a flat 32
+  regardless of worker count to a multiple of the concurrency the node actually has. A node admitting
+  32 deep behind 4 workers could pile up 28 jobs with no hope of starting inside any wall a caller
+  would wait out — 236 measured contracts died at the delegator's 5-minute queue deadline having
+  never started, 75% of them while another node sat idle.
 - **`fleet_max_concurrent_jobs`** (default 4) — how many admitted jobs execute at once. Exceeding it
   never refuses anything; the job waits in `accepted`. This is the limit that protects the single
   llama-swap endpoint and the GPU behind it.
 
 Both read `0` as "use the built-in default" and a negative value as "unlimited". A **busy node is not
 a full node** — that distinction is the entire point of the split.
+
+**A `queue full` 503 carries `Retry-After` (register S-04).** The refusal is a wait the node
+PUBLISHES; nothing in `internal/delegate` reads it yet — that lands with the placement release
+(`feat/placement-eta`) — but the number is there now so that PR has something to consume. It is
+never a dead end: `Retry-After` (seconds) = `ceil(excess x recent_agent_wall_sec / max(1,
+max_concurrent_jobs))`, where `excess = capped_backlog - max_concurrent_jobs` — **the CAPPED
+backlog only** (`Jobs.CountsCapped`, the same set `max_concurrent_jobs` actually bounds), never the
+wire's all-task-types `queue_depth`. An uncapped job (a render, an stt, a pipeline route) never
+waits behind `max_concurrent_jobs`, so dividing the all-jobs depth by it would inflate the estimate
+for a node whose agent slots are genuinely idle behind unrelated media load — the same class of bug
+`saturation.score` was already fixed for (S-17) and this release's own `IdleSlot` fix (S-20)
+repeats the lesson of.
+
+The header is bounded to `[5, 300]` — never "retry at once" (the queue IS full) and never an
+unbounded promise — but the CLAMP IS SAID OUT LOUD rather than disguised as a precise number, so the
+three cases read differently:
+
+- No `recent_agent_wall_sec` sample (a fresh node, or one that has never finished an agent job):
+  the flat `30`, worded as a default — `(no recent completions yet — retry in 30 s)` — never as a
+  measurement.
+- A genuine estimate inside `[5, 300]`: `(~N s until a worker frees, from recent completions)`.
+- An estimate that would exceed 300s: the header still caps at 300, but the text says
+  `(>=300 s until a worker frees, from recent completions)` rather than presenting the cap as if it
+  were the precise answer — an undisguised clamp invites every waiter to retry in lockstep at the
+  same instant.
+
+The message's existing prefix (`queue full (…): retry later, or raise fleet_max_queue_depth`) is
+unchanged, byte for byte — the delegator quotes it — with one of the three clauses above appended.
+This is deliberately **not** sized from `seat_rate.min_turn_sec`: that number is a max-final RETRY
+floor for one seat and has no relationship to how deep this node's backlog is.
+
+`/fleet/health` publishes **`queue_wait_estimate_sec`** (float, omitted when a worker is free or no
+wall sample exists) — the node's own number, so a future delegator can read it before ever being
+refused, not only after (also not yet consumed anywhere; same placement-release caveat as
+`Retry-After` above). It is the SAME `excess x recent_agent_wall_sec / max(1, max_concurrent_jobs)`
+formula and the SAME capped-backlog-only `excess`, computed off the node's CURRENT capped backlog —
+but it is **RAW, not clamped to `[5, 300]`**: Retry-After is an HTTP retry contract that must stay a
+small, boundable promise, while the health field is a delegator's own placement signal, where a
+genuine 600s estimate is more useful reported honestly than floored to 300 or hidden. Reading the
+two fields together: **absent `queue_wait_estimate_sec` with a present `recent_agent_wall_sec`
+means genuinely 0** (a worker is free right now); **both absent means unknown** (no wall sample
+exists yet to estimate from, not that the wait is zero). A job still in its ADMISSION phase
+(`jobs_admitting`) counts toward this estimate exactly like any other running job: the worker slot
+is genuinely taken, even though `saturation.score` excludes admitting jobs (no card is busy yet).
 
 Health reports both sides: `queue_depth` (unchanged meaning and shape, for existing readers such as
 the delegator's placement tie-break) plus `jobs_running`, `jobs_queued`, `max_concurrent_jobs` and
@@ -79,7 +128,7 @@ workers are all busy. `queue_depth` still decides everything those two keys do n
 > **`queue_depth`'s meaning is unchanged, but its DISTRIBUTION shifts sharply.** It always counted
 > `accepted` + `running`; before 0.100.0 those were all executing, so the number topped out near what
 > the box could sustain and a high reading was a real alarm. Now most of it can be backlog, so a
-> healthy node can legitimately sit at 31. Placement is unaffected — lower is still better, and the
+> healthy node can legitimately sit near its `max_queue_depth` (7 of 8 at the default). Placement is unaffected — lower is still better, and the
 > delegator's tie-break compares like with like across nodes — but an operator reading it cold will
 > misjudge it. Read `jobs_running` / `jobs_queued` beside it.
 
@@ -287,6 +336,20 @@ bypass; `tasks_agent_test.go` the advertisement gate and contract materializatio
 - Expecting a duplicate dispatch to return an error. Only `error` jobs do.
 - Binding with `:18811` and expecting it to work as loopback.
 - Treating Afterburner as required.
+- Sizing a queue wait, a Retry-After, or any admission refusal from
+  `seat_rate.min_turn_sec`. That number is a max-final RETRY floor for one seat, not a measure of
+  backlog depth — use `recent_agent_wall_sec` / `queue_wait_estimate_sec` instead (register S-04).
+- Assuming any queued job blocks `Jobs.IdleSlot()` (health's `saturation.idle_slot`, the shed rule
+  for `priority: -1` dispatches). Only a CAPPED queued job does (register S-20) — an uncapped one
+  (a render, an stt, a pipeline route) never contends for a capped execution slot, mirroring
+  `claimLocked`'s own skip.
+- Computing `Retry-After` / `queue_wait_estimate_sec` from the wire's `queue_depth` (all task
+  types). Both are sized from the CAPPED backlog only (`Jobs.CountsCapped`) — the same distinction
+  `IdleSlot` makes above — or a pile of unrelated uncapped media/stt/pipeline work inflates the
+  estimate for a node whose agent slots are genuinely idle.
+- Reading `queue_wait_estimate_sec` as bounded the same way `Retry-After` is. It is not: the health
+  field is the RAW estimate (useful past 300s to a delegator making its own routing decision), and
+  only the HTTP header is clamped to `[5, 300]`.
 
 ## The node's lease and its store (0.113.16)
 
