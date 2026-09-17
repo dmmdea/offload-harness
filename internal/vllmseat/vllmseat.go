@@ -44,6 +44,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/dmmdea/offload-harness/internal/core"
 )
 
 // safeID mirrors internal/mediaseat: the id becomes a YAML key and an inline
@@ -181,6 +183,21 @@ type Spec struct {
 	FallbackCtx int `json:"fallback_agent_ctx_tokens,omitempty"`
 	// AgentCtxTokens is the window the harness advertises when the vLLM seat runs.
 	AgentCtxTokens int `json:"agent_ctx_tokens,omitempty"`
+
+	// Bound-lane settings (ADR 0049 Amendment 3, operator decision D5 = A). When
+	// this seat IS the box's agent lane, the loop must run it at the configuration
+	// it was MEASURED at. The tier's config_seed carries the FALLBACK seat's
+	// values, and binding a 27B at a 4B's 1,024-token / 300 s numbers was the
+	// measured failing configuration (digest-8 3/8 at the 300 s wire default,
+	// 8/8 at 900 s). Each field is optional; when set it lands in the box config
+	// under the SAME key the harness reads (internal/config), and when unset the
+	// tier's config_seed value stands. Validated against the same rules config
+	// applies (Validate), so a bad declaration fails at render, not at a seat.
+	AgentMaxTokens  int                 `json:"agent_max_tokens,omitempty"`
+	AgentThinking   string              `json:"agent_thinking,omitempty"`
+	AgentSampling   *core.AgentSampling `json:"agent_sampling,omitempty"`
+	AgentTimeoutSec int                 `json:"agent_timeout_sec,omitempty"`
+	AgentSeatTokS   float64             `json:"agent_seat_tok_s,omitempty"`
 
 	// Measured records what measured this operating point, so a reader never has to
 	// trust the numbers on faith.
@@ -500,6 +517,23 @@ func (s Spec) Validate(tier string) error {
 			problems = append(problems, err.Error())
 		}
 	}
+	// Bound-lane settings: the same rules the harness config applies, applied at
+	// declaration time so a tier cannot seed a lane the box would refuse or
+	// silently misrun.
+	req(s.AgentMaxTokens >= 0, "agent_max_tokens must not be negative")
+	if s.AgentThinking != "" {
+		if err := core.ValidateThinking(s.AgentThinking); err != nil {
+			problems = append(problems, "agent_thinking: "+err.Error())
+		}
+	}
+	if s.AgentSampling != nil {
+		if err := s.AgentSampling.Validate("agent_sampling"); err != nil {
+			problems = append(problems, err.Error())
+		}
+	}
+	req(s.AgentTimeoutSec >= 0 && s.AgentTimeoutSec <= core.AgentTimeoutSecCap,
+		fmt.Sprintf("agent_timeout_sec %d must be within 0..%d (the wire cap)", s.AgentTimeoutSec, core.AgentTimeoutSecCap))
+	req(s.AgentSeatTokS >= 0, "agent_seat_tok_s must not be negative")
 	if len(problems) == 0 {
 		return nil
 	}
@@ -585,6 +619,24 @@ func (s Spec) Bindings() map[string]any {
 	out := map[string]any{"agent_model": s.ID}
 	if s.AgentCtxTokens > 0 {
 		out["agent_ctx_tokens"] = s.AgentCtxTokens
+	}
+	// Bound-lane settings ride along ONLY when set (ADR 0049 Amendment 3): an
+	// unset field leaves the tier's config_seed value in place, and a zero must
+	// never be written into a box config as if it were a decision.
+	if s.AgentMaxTokens > 0 {
+		out["agent_max_tokens"] = s.AgentMaxTokens
+	}
+	if s.AgentThinking != "" {
+		out["agent_thinking"] = s.AgentThinking
+	}
+	if s.AgentSampling != nil && !s.AgentSampling.IsZero() {
+		out["agent_sampling"] = s.AgentSampling
+	}
+	if s.AgentTimeoutSec > 0 {
+		out["agent_timeout_sec"] = s.AgentTimeoutSec
+	}
+	if s.AgentSeatTokS > 0 {
+		out["agent_seat_tok_s"] = s.AgentSeatTokS
 	}
 	// The box's vLLM ROSTER, seeded from the seat it actually renders. It is what
 	// `doctor`'s cache-server gate has a subject at all, and seeding it here is the

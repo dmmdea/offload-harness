@@ -26,6 +26,7 @@ one declaration, so the seat and the lane routing to it cannot disagree.
 | cards | `0,1` | `CUDA_VISIBLE_DEVICES`, in PCI order |
 | tensor_parallel | 2 | `--tensor-parallel-size`; must equal how many cards are listed |
 | max_model_len | 163840 | the served window |
+| gpu_memory_utilization | 0.85 | the engine's share of the card — chosen WITH the seat's co-residents in mind, not alone |
 | kv_cache_dtype | `fp8` | KV precision — backend-dependent, not free everywhere |
 | ttl_seconds | 300 | idle window before the seat unloads and frees its cards |
 | launch | `windows-wsl` | which artifact set starts it |
