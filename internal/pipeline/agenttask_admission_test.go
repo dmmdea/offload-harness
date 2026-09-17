@@ -195,7 +195,14 @@ func TestRunAgentTaskAdmissionBudgetSpentProceeds(t *testing.T) {
 }
 
 // A 404 on /running (an endpoint that is not llama-swap, or an old one) fails
-// OPEN: no wait, nothing reported, the contract runs as before.
+// OPEN: nothing is waited for and the contract runs as before — but the gate now
+// SAYS it could not tell (W-08). "Could not read /running" and "the seat is
+// ready" were reported identically, which is how a still-cold seat reached the
+// wall with an empty admission_note.
+//
+// The wait is bounded rather than asserted at zero because the served-window
+// probe is charged to admission since W-08: against this fake that is three
+// instant 404s, and what the pin is about is that no POLL INTERVAL was spent.
 func TestRunAgentTaskAdmissionProbeFailureProceeds(t *testing.T) {
 	fake := &agentFake{
 		rosterIDs: []string{agentTestSeat},
@@ -206,7 +213,10 @@ func TestRunAgentTaskAdmissionProbeFailureProceeds(t *testing.T) {
 	defer srv.Close()
 	res := admissionTestPipeline(t, srv.URL, 30).Run(context.Background(), agentTestRequest(t, testContract()))
 	wire := decodeWire(t, res)
-	if wire.Deferred || wire.AdmissionWaitSec != 0 {
+	if wire.Deferred || wire.AdmissionWaitSec >= admissionPoll.Seconds() {
 		t.Fatalf("deferred=%v admission=%v", wire.Deferred, wire.AdmissionWaitSec)
+	}
+	if !strings.Contains(wire.AdmissionNote, "running probe failed") || !strings.Contains(wire.AdmissionNote, "warm-up could not read") {
+		t.Fatalf("admission_note = %q, want both admission steps to report the unreadable endpoint", wire.AdmissionNote)
 	}
 }

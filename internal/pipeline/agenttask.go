@@ -269,6 +269,34 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	// three share a deadline, and the time spent at the cordon is reported as
 	// admission time (reviewer finding, 0.117.0: each had its own full window).
 	admissionEnd := time.Now().Add(admissionBudget(p.cfg.AgentAdmissionWaitSec))
+	// THE FENCE CHECK (register S-26), BEFORE the cordon below. Under a lease
+	// this process does not hold and that refuses new runs — an exclusive text
+	// hold, a draining cordon, a media render — the cordon cannot succeed:
+	// nothing this run can do inside its own budget releases another process's
+	// lease. It polled that file for the WHOLE admission budget anyway (47 rows
+	// in three days, 300 s each, 3.92 h) and then deferred `capacity` — which is
+	// precisely the class the delegator re-places on another node. The verdict
+	// was on disk before the first poll, so say it now and let the re-placement
+	// happen five minutes earlier.
+	//
+	// ForeignFence, not Fenced, and only a FENCING hold: `gpu reserve --drain
+	// --unload-seat -- <session>` runs its own work under GPU_LEASE_EPOCH on the
+	// cards it cleared, and a plain non-fencing text reservation still WAITS at
+	// the cordon (ADR 0032, "a peer-held seat is waited for"). This changes only
+	// the hold whose answer cannot change inside the wait.
+	//
+	// The lease read is the CORDON's own armed directory (config.Load arms it),
+	// not an independent resolution from this config: a pre-check that predicts
+	// what AwaitRunSlot will do has to read what AwaitRunSlot reads, or the two
+	// can disagree — and a process that never loaded a config has that gate
+	// deliberately inert, which this check must be too.
+	if dir := modelaffinity.GPULeaseDir(); dir != "" {
+		lease := gpulease.InspectDir(dir)
+		if fenced, why := delegate.ForeignFence(lease); fenced {
+			return deferWire(core.DeferClassCapacity, fmt.Sprintf(
+				"gpu busy: %s; no new run is admitted on this box until it is released (%s)", why, delegate.HolderLine(lease)))
+		}
+	}
 	cordonStart := time.Now()
 	if lerr := modelaffinity.AwaitRunSlot(ctx, p.cfg.Endpoint, seat, admissionEnd); lerr != nil {
 		admitted = cordonWait(cordonStart)
@@ -301,17 +329,22 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	var coldLoad time.Duration // this run's observed cold load, if the warm-up waited for one (seat-rates.json)
 	var coldLoaded bool        // the warm-up ATTEMPTED a load this run (D-118 reads this, never coldLoad > 0: a sub-tick load measures 0)
 	act.Phase("cold-load")
-	if warmed, warmNote := warmSeat(ctx, p.cfg.Endpoint, seat, admissionBudget(p.cfg.AgentAdmissionWaitSec)-admitted); warmed > 0 || warmNote != "" {
+	warmed, warmNote, warmAttempted := warmSeat(ctx, p.cfg.Endpoint, seat, admissionBudget(p.cfg.AgentAdmissionWaitSec)-admitted)
+	if warmAttempted {
+		// coldLoaded is "the warm-up ATTEMPTED a load", and warmSeat is the only
+		// thing that knows it: a sub-tick load measures 0 and, since W-08, a note
+		// is also returned by exits that warmed nothing. Deriving it from either
+		// silently un-fired the D-118 coherence probe on a fast box.
 		admitted += warmed
 		coldLoad = warmed
 		coldLoaded = true
-		if warmNote != "" {
-			log.Printf("agent task: seat warm-up (%s): %s", seat, warmNote)
-			if admitNote == "" {
-				admitNote = warmNote
-			} else {
-				admitNote += "; " + warmNote
-			}
+	}
+	if warmNote != "" {
+		log.Printf("agent task: seat warm-up (%s): %s", seat, warmNote)
+		if admitNote == "" {
+			admitNote = warmNote
+		} else {
+			admitNote += "; " + warmNote
 		}
 	}
 	// Post-warm COHERENCE probe (register D-118). A seat that is HEALTHY by
@@ -356,6 +389,67 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		log.Printf("agent task: seat coherence (%s): %s", seat, note)
 		return deferWire(core.DeferClassInfrastructure, note)
 	}
+	// Seat-residency probe — the mirror of mcpserver's plannerUnserved gate: a
+	// POSITIVE "roster answered and the seat is absent" defers before any
+	// planner call; an unreachable/empty roster proceeds and lets the loop's
+	// first chat call surface the real transport error.
+	//
+	// It runs BEFORE the window probe below, and on the admission context for
+	// the same reason: the probe reads /upstream/<seat>/props, and llama-swap
+	// answers that route by LOADING the model. Asking it about a seat this
+	// endpoint does not serve would cold-start something as the side effect of a
+	// run that is about to defer — the side effect the seat-pin probe is placed
+	// after the loop to avoid.
+	if roster, rerr := swapclient.FetchRoster(ctx, p.cfg.Endpoint, agentRosterProbeTimeout); rerr != nil {
+		// Fail-open is right (the loop's first chat call surfaces the real
+		// transport error with far more detail), but SILENT fail-open is not:
+		// this is the first place a dead or misconfigured endpoint shows, and
+		// swallowing it turns the follow-on loop error into a mystery.
+		log.Printf("agent task: seat roster probe of %s failed (proceeding; the loop will surface any real transport failure): %v", p.cfg.Endpoint, rerr)
+	} else if roster.Len() > 0 && !roster.Serves(seat) {
+		return deferWire(core.DeferClassConfig, fmt.Sprintf("agent seat %q is not in the endpoint's served roster", seat))
+	}
+	// The SERVED-WINDOW probe is the last admission step, and it runs HERE —
+	// before the wall context exists (register S-24). agent.ProbeServedWindow
+	// carries a ten-minute cold-start budget on purpose: it is allowed to absorb
+	// a seat's load, because the caller is about to use exactly that seat. Run on
+	// the WALL context, as it was until now, that licence was spent out of the
+	// contract's own clock, and a slow or cold seat consumed the whole wall
+	// before the first token — reported as a wall timeout, with nothing to show
+	// for it. Every other pre-token step (cordon, pre-flight, warm-up, coherence)
+	// is already paid from admission; this one now is too, bounded by the same
+	// deadline and reported in the same admission_wait_sec.
+	//
+	// An admission budget already spent leaves the probe a dead context, so it
+	// fails open to this box's agent_ctx_tokens — the same fallback an
+	// unanswerable probe has always taken. That is the right trade: a box that
+	// spent 300 s loading has a cold-start problem, not a window problem, and
+	// the alternative is handing the wall back the licence this fix removes.
+	act.Phase(gpuactivity.PhaseWindowProbe)
+	probeStart := time.Now()
+	pctx, pcancel := context.WithDeadline(ctx, admissionEnd)
+	probed, probeOK := agent.ProbeServedWindow(pctx, p.cfg.Endpoint, seat)
+	probeCtxErr := pctx.Err() // read BEFORE the cancel below, which would mask a spent deadline
+	pcancel()
+	admitted += time.Since(probeStart)
+	// WHICH window the loop is about to budget against, and where it came from.
+	// agent.ResolveContextTokens has always returned that line and both doors
+	// dropped it (`effCtx, _ :=`), so a run that silently compacted at the 8,192
+	// fallback was indistinguishable on the wire from a correct one — the same
+	// invisibility that let the MCP door measure 8,192 cold and 114,688 warm for
+	// months without anyone being able to say which run was which.
+	effCtx, ctxNote := agent.ResolveContextTokens(0, probed, p.cfg.AgentCtxTokens, probeOK)
+	wire.CtxWindowNote = ctxNote
+	if ctxNote != "" {
+		log.Printf("agent task: %s", ctxNote)
+	}
+	// A fallback the ADMISSION BUDGET caused is an admission finding, not just a
+	// window one: it is the cost of this change's own trade (the probe no longer
+	// gets to spend the wall), and it belongs beside the steps that spent the
+	// budget.
+	if !probeOK && errors.Is(probeCtxErr, context.DeadlineExceeded) {
+		admitNote = joinAdmissionNotes(admitNote, "window probe ran out of admission budget; "+ctxNote)
+	}
 	// Publish the wall this run is ACTUALLY under (register D-116), HERE — at
 	// the one line where the wall actually begins, and never before it. The
 	// node door writes it onto the job record, so a poll of a RUNNING job
@@ -365,10 +459,11 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	// no-op.
 	//
 	// WHY NOT AT THE SIZING (where it was first written, D-116 review finding
-	// 1): everything above this line — the cordon wait, the llama-swap
-	// pre-flight, the cold-load warm-up, the coherence probe — is ADMISSION,
-	// up to admissionBudget (300 s by default) spent in job state `running`
-	// because the node claims a job before it runs it. Publishing the wall at
+	// 1): everything above this line — the fence check, the cordon wait, the
+	// llama-swap pre-flight, the cold-load warm-up, the coherence probe and the
+	// served-window probe — is ADMISSION, up to admissionBudget (300 s by
+	// default) spent in job state `running` because the node claims a job
+	// before it runs it. Publishing the wall at
 	// the top made `wall_sec` mean "a wall was SIZED", and a delegator that
 	// anchors its clock on it would have started counting a 300 s wall while
 	// the seat still had 250 s of loading to do. Published here it means "the
@@ -384,20 +479,6 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	// and the wait it consumed is reported on the wire (contention_wait_sec).
 	contention = seatwait.NewBudget(p.cfg.SeatContentionWaitSec)
 	cctx = seatwait.WithBudget(cctx, contention)
-
-	// Seat-residency probe — the mirror of mcpserver's plannerUnserved gate: a
-	// POSITIVE "roster answered and the seat is absent" defers before any
-	// planner call; an unreachable/empty roster proceeds and lets the loop's
-	// first chat call surface the real transport error.
-	if roster, rerr := swapclient.FetchRoster(cctx, p.cfg.Endpoint, agentRosterProbeTimeout); rerr != nil {
-		// Fail-open is right (the loop's first chat call surfaces the real
-		// transport error with far more detail), but SILENT fail-open is not:
-		// this is the first place a dead or misconfigured endpoint shows, and
-		// swallowing it turns the follow-on loop error into a mystery.
-		log.Printf("agent task: seat roster probe of %s failed (proceeding; the loop will surface any real transport failure): %v", p.cfg.Endpoint, rerr)
-	} else if roster.Len() > 0 && !roster.Serves(seat) {
-		return deferWire(core.DeferClassConfig, fmt.Sprintf("agent seat %q is not in the endpoint's served roster", seat))
-	}
 
 	// Depth (roast delta 2): buildAgentRun already derived
 	// contract.Depth = max(1, wireDepth). Nothing here consumes it YET because
@@ -485,11 +566,10 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		return deferWire(core.DeferClassInfrastructure, "building agent: "+berr.Error())
 	}
 
-	// Window budgeting parity with handleAgentRun: probe the SERVED window
-	// (conservative fallback when unanswerable) and run the measured-ON ladder
+	// Window budgeting parity with handleAgentRun: the SERVED window (probed and
+	// resolved above, on the admission budget; conservative fallback when
+	// unanswerable, and ctx_window_note says which) and the measured-ON ladder
 	// rungs with the real-tokenizer seam (fail-open to the legacy estimate).
-	probed, probeOK := agent.ProbeServedWindow(cctx, p.cfg.Endpoint, seat)
-	effCtx, _ := agent.ResolveContextTokens(0, probed, p.cfg.AgentCtxTokens, probeOK)
 	built.Loop.WithContextTokens(effCtx).WithSkeletonPrune(true).WithGCFCompact(true).
 		WithTokenizer(tokclient.New(p.cfg.Endpoint, seat, 0))
 
@@ -1402,8 +1482,109 @@ func AdmissionBudget(sec int) time.Duration { return admissionBudget(sec) }
 
 // WarmSeat is warmSeat for the other run launchers (the MCP agent_run door), so
 // no door loads a cold seat inside its wall or probes its window before it is up.
-func WarmSeat(ctx context.Context, endpoint, seat string, budget time.Duration) (time.Duration, string) {
+func WarmSeat(ctx context.Context, endpoint, seat string, budget time.Duration) (time.Duration, string, bool) {
 	return warmSeat(ctx, endpoint, seat, budget)
+}
+
+// AwaitSeatAdmission is awaitSeatAdmission for the other run launchers (the MCP
+// agent_run door). Both doors drive the same loop on the same seat behind the
+// same llama-swap, so both must wait out another session's swap the same way —
+// and this one had no pre-flight at all (register S-25): an agent_run that
+// arrived mid-swap spent its wall inside llama-swap's silent queue, which is the
+// exact failure ADR 0032 removed from the delegation door in 2026-09-02.
+func AwaitSeatAdmission(ctx context.Context, endpoint, seat string, budget time.Duration) (time.Duration, string) {
+	return awaitSeatAdmission(ctx, endpoint, seat, budget)
+}
+
+// seatMatcher answers "is this GET /running row MY seat?" for a seat that may be
+// bound by an ALIAS.
+//
+// llama-swap's /running names models by their CANONICAL id only, while the
+// harness binds agent seats by alias on the reference deployment (`agent-pool` ->
+// `qwen3.8-27b-vllm`, `offload-e4b` -> `gemma-4-e4b`). A reader that matches
+// /running by the bound name therefore never finds its own seat: the admission
+// pre-flight's "my seat is already ready" fast path was dead on every alias-bound
+// box, and a READY seat slept the entire admission budget whenever any OTHER
+// model happened to be mid-swap. 406 delegation-log rows carry the symptom in so
+// many words — "/running lists the seat under another id". internal/seatload
+// fixed exactly this for the drain (register C-11); this is the same resolution,
+// through the same swapclient.Roster.Canonical, applied to the second reader.
+//
+// The roster read is LAZY and happens at most once: a caller asks for it only
+// when the bare name matched nothing and the answer would otherwise be "wait", so
+// a seat bound by its own id pays no extra round trip. A roster that cannot be
+// read leaves the bare name in place — the pre-fix behaviour, never a refusal.
+type seatMatcher struct {
+	endpoint string
+	names    []string
+	// resolved latches on a SUCCESSFUL roster read only. Latching it on the
+	// attempt disabled the alias match for the rest of the wait after ONE
+	// transient error — and the moment the alias match matters is a box
+	// contended enough for another model to be mid-swap, which is exactly the
+	// moment that read times out or 500s. The seat then burned the whole
+	// admission budget for a swap it had no stake in: S-08's own symptom,
+	// intermittent and silent (blocker, review round 1).
+	resolved bool
+	// note is the FIRST resolution failure, carried to admission_note. A probe
+	// that failed silently is the defect class this change exists to remove, so
+	// this one does not get to be the exception.
+	note string
+}
+
+func newSeatMatcher(endpoint, seat string) *seatMatcher {
+	return &seatMatcher{endpoint: endpoint, names: []string{seat}}
+}
+
+// matches reports whether a /running row's model id is this seat under any name
+// resolved so far.
+func (m *seatMatcher) matches(id string) bool {
+	for _, n := range m.names {
+		if strings.EqualFold(id, n) {
+			return true
+		}
+	}
+	return false
+}
+
+// resolve reads the roster once and adds the canonical id this seat's name is an
+// alias of. It reports whether it learned a NEW name — i.e. whether re-scanning
+// rows already in hand can change the answer.
+func (m *seatMatcher) resolve(ctx context.Context) bool {
+	if m.resolved {
+		return false
+	}
+	roster, err := swapclient.FetchRoster(ctx, m.endpoint, admissionPoll)
+	if err != nil {
+		// NOT latched: the caller polls again inside the same admission budget,
+		// and the next read may well answer. Reported once — repeating it every
+		// poll would bury the rest of admission_note.
+		if m.note == "" {
+			m.note = "seat alias resolution failed (proceeding with the bound name): " + err.Error()
+			log.Printf("agent task: seat alias resolution (%s) failed (proceeding with the bound name): %v", m.names[0], err)
+		}
+		return false
+	}
+	m.resolved = true
+	id, ok := roster.Canonical(m.names[0])
+	if !ok || strings.EqualFold(id, m.names[0]) {
+		return false
+	}
+	m.names = append(m.names, id)
+	return true
+}
+
+// joinAdmissionNotes concatenates admission findings with "; ", dropping empties
+// — the same shape the caller uses to fold the pre-flight's note into the
+// warm-up's, so one admission_note can carry every step that had something to
+// say without any of them overwriting another.
+func joinAdmissionNotes(notes ...string) string {
+	kept := notes[:0:0]
+	for _, n := range notes {
+		if strings.TrimSpace(n) != "" {
+			kept = append(kept, n)
+		}
+	}
+	return strings.Join(kept, "; ")
 }
 
 // warmSeat loads an ABSENT seat outside the wall (D-64). One GET through
@@ -1413,51 +1594,83 @@ func WarmSeat(ctx context.Context, endpoint, seat string, budget time.Duration) 
 // /running probes around it carry their own admissionPoll timeout each, so
 // the wall-clock spent can exceed the budget by up to two poll intervals).
 // Then /running is polled (two extra polls at most) until the seat reads ready.
-// Returns the time spent and a note when residency could not be settled —
-// a probe failure, a spent budget — so the wire says "the gate could not
-// tell" rather than "nothing was loading". A seat that is already ready
-// costs one /running probe and returns 0.
-func warmSeat(ctx context.Context, endpoint, seat string, budget time.Duration) (time.Duration, string) {
-	if budget < admissionPoll || strings.TrimSpace(endpoint) == "" {
-		return 0, "" // nothing left of the admission budget (or the gate is off): the wall's business, as before
+// Returns the time spent, a note when residency could not be settled — a probe
+// failure, a spent budget — so the wire says "the gate could not tell" rather
+// than "nothing was loading", and whether a load was ATTEMPTED at all.
+//
+// That third answer cannot be derived from the first two. A sub-tick load
+// measures 0 (Windows CI, and any warm passthrough), so `spent > 0` misses real
+// loads; and since W-08 a note is also returned by exits that warmed NOTHING, so
+// `note != ""` over-reports them. The coherence probe (D-118) keys on exactly
+// "was this seat loaded for this run", and it now gets that fact directly.
+// A seat that is already ready costs one /running probe and returns (0, "", false).
+func warmSeat(ctx context.Context, endpoint, seat string, budget time.Duration) (time.Duration, string, bool) {
+	if strings.TrimSpace(endpoint) == "" {
+		return 0, "", false // no endpoint to warm against: the gate is off by construction
+	}
+	if budget < admissionPoll {
+		if budget <= 0 {
+			return 0, "", false // the admission gate is off (agent_admission_wait_sec −1)
+		}
+		// Admission spent the budget before the warm-up got a turn. Proceeding
+		// into the wall is right; doing it SILENTLY is what left admission_note
+		// empty on a seat that may still be cold, so the wire read "nothing was
+		// loading" where the truth was "nobody looked" (register S-24).
+		return 0, fmt.Sprintf("no admission budget left for the warm-up (%.0fs, under one poll interval): a cold seat will load inside the wall", budget.Seconds()), false
 	}
 	sc, err := swapclient.New(endpoint, admissionPoll)
 	if err != nil {
-		return 0, ""
+		return 0, "warm-up has no swap client (proceeding): " + err.Error(), false
 	}
+	// The seat may be listed under its CANONICAL id while the contract names an
+	// alias; seatMatcher resolves that, and only when the bare name missed.
+	m := newSeatMatcher(endpoint, seat)
 	ready := func() (bool, error) {
 		rows, rerr := sc.Running(ctx)
 		if rerr != nil {
 			return false, rerr
 		}
 		for _, r := range rows {
-			if strings.EqualFold(r.ID, seat) && r.State == "ready" {
+			if m.matches(r.ID) && r.State == "ready" {
 				return true, nil
+			}
+		}
+		if m.resolve(ctx) {
+			for _, r := range rows {
+				if m.matches(r.ID) && r.State == "ready" {
+					return true, nil
+				}
 			}
 		}
 		return false, nil
 	}
 	if ok, rerr := ready(); rerr != nil || ok {
-		return 0, "" // ready, or unreadable (awaitSeatAdmission already reported a failed probe)
+		if rerr != nil {
+			// "Could not read" is not "is ready", and it was reported as
+			// neither. A seat whose residency is unknown proceeds into the wall
+			// possibly cold, and the wire has to say so (register S-24).
+			return 0, "warm-up could not read /running (proceeding; the seat may still be cold): " + rerr.Error(), false
+		}
+		return 0, m.note, false // already resident: nothing to warm; only an alias-probe failure, if any, to report
 	}
 	start := time.Now()
 	b := swapclient.BaseURL(endpoint)
 	if b == "" {
-		return 0, ""
+		return 0, joinAdmissionNotes(m.note, "warm-up could not resolve a llama-swap root from the endpoint (proceeding; the seat may still be cold)"), false
 	}
 	wctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
 	req, rerr := http.NewRequestWithContext(wctx, http.MethodGet, b+"/upstream/"+url.PathEscape(seat)+"/v1/models", nil)
 	if rerr != nil {
-		return 0, ""
+		return 0, joinAdmissionNotes(m.note, "warm-up request could not be built (proceeding; the seat may still be cold): "+rerr.Error()), false
 	}
 	resp, derr := warmClient.Do(req)
 	if derr != nil {
 		spent := time.Since(start)
 		if wctx.Err() != nil && ctx.Err() == nil {
-			return spent, fmt.Sprintf("cold load exceeded the admission budget after %.0fs (proceeding into the wall)", spent.Seconds())
+			return spent, joinAdmissionNotes(m.note, fmt.Sprintf("cold load exceeded the admission budget after %.0fs (proceeding into the wall)", spent.Seconds())), true
 		}
-		return spent, "warm request failed (proceeding): " + derr.Error()
+		return spent, joinAdmissionNotes(m.note, "warm request failed (proceeding): "+derr.Error()), true
 	}
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
 	resp.Body.Close()
@@ -1470,27 +1683,27 @@ func warmSeat(ctx context.Context, endpoint, seat string, budget time.Duration) 
 	// that had plainly succeeded).
 	if resp.StatusCode == http.StatusOK {
 		if ok, rerr := ready(); rerr == nil && ok {
-			return time.Since(start), fmt.Sprintf("cold load %.0fs outside the wall", time.Since(start).Seconds())
+			return time.Since(start), joinAdmissionNotes(m.note, fmt.Sprintf("cold load %.0fs outside the wall", time.Since(start).Seconds())), true
 		}
-		return time.Since(start), fmt.Sprintf("cold load %.0fs outside the wall (passthrough answered 200; /running lists the seat under another id)", time.Since(start).Seconds())
+		return time.Since(start), joinAdmissionNotes(m.note, fmt.Sprintf("cold load %.0fs outside the wall (passthrough answered 200; /running lists the seat under another id)", time.Since(start).Seconds())), true
 	}
 	// A non-200 passthrough answer (404: llama-swap does not know the name)
 	// confirms nothing; two polls one interval apart, then say so and go.
 	for i := 0; i < 2; i++ {
 		if ok, rerr := ready(); rerr == nil && ok {
-			return time.Since(start), fmt.Sprintf("cold load %.0fs outside the wall", time.Since(start).Seconds())
+			return time.Since(start), joinAdmissionNotes(m.note, fmt.Sprintf("cold load %.0fs outside the wall", time.Since(start).Seconds())), true
 		}
 		// The second poll waits one interval, but only inside what is left of
 		// the budget — the confirmation must not outspend the gate it serves.
 		if i == 0 && time.Since(start)+admissionPoll <= budget {
 			if serr := seatwait.Sleep(ctx, admissionPoll); serr != nil {
-				return time.Since(start), serr.Error()
+				return time.Since(start), joinAdmissionNotes(m.note, serr.Error()), true
 			}
 		} else if i == 0 {
 			break
 		}
 	}
-	return time.Since(start), fmt.Sprintf("warm request answered HTTP %d after %.0fs but /running never listed %s ready (proceeding)", resp.StatusCode, time.Since(start).Seconds(), seat)
+	return time.Since(start), joinAdmissionNotes(m.note, fmt.Sprintf("warm request answered HTTP %d after %.0fs but /running never listed %s ready (proceeding)", resp.StatusCode, time.Since(start).Seconds(), seat)), true
 }
 
 // warmClient carries no timeout of its own: warmSeat bounds the request by
@@ -1514,32 +1727,65 @@ func awaitSeatAdmission(ctx context.Context, endpoint, seat string, budget time.
 	if err != nil {
 		return 0, "no swap client (proceeding): " + err.Error()
 	}
-	// waited counts only the SLEEPS, never the probe round-trips: an
-	// immediate admission reports zero, which is what "nothing was swapping"
-	// must read as on the wire.
+	// The seat's own /running row may be listed under the CANONICAL id while the
+	// contract names an alias; seatMatcher resolves that, lazily.
+	m := newSeatMatcher(endpoint, seat)
+	// waited counts the SLEEPS and the alias-resolution round-trips that
+	// precede them, never the /running probe itself: an immediate admission
+	// reports zero, which is what "nothing was swapping" must read as on the
+	// wire. The resolution is charged because it only runs when a sleep would
+	// follow, and a roster that TIMES OUT (3 s, admissionPoll) on every poll
+	// would otherwise let this loop run twice its budget in wall-clock time
+	// while reporting the budget exactly (reviewer finding on the S-08 retry).
 	var waited time.Duration
 	for {
 		rows, rerr := sc.Running(ctx)
 		if rerr != nil {
 			return waited, "running probe failed (proceeding): " + rerr.Error()
 		}
-		busy := ""
+		mine, busy := false, ""
 		for _, r := range rows {
-			if strings.EqualFold(r.ID, seat) && r.State == "ready" {
-				return waited, ""
+			if m.matches(r.ID) && r.State == "ready" {
+				mine = true
 			}
 			if r.State != "ready" {
 				busy = r.ID + ":" + r.State
 			}
 		}
-		if busy == "" {
-			return waited, ""
+		// Resolve the alias only when it would change the verdict — the seat's
+		// own row was not found under its bound name AND something else is
+		// mid-swap, i.e. the next step would be a sleep. This is the fast path
+		// that was dead: a READY alias-bound seat waited the whole budget for
+		// another model's swap it had no stake in (register S-08).
+		if !mine && busy != "" {
+			resolveStart := time.Now()
+			resolved := m.resolve(ctx)
+			if !resolved && m.note != "" {
+				// A FAILED resolution is charged (a roster that times out costs
+				// admissionPoll per poll); a successful one is part of an
+				// immediate admission and stays at the zero the wire promises.
+				waited += time.Since(resolveStart)
+			}
+			if resolved {
+				for _, r := range rows {
+					if m.matches(r.ID) && r.State == "ready" {
+						mine = true
+					}
+				}
+			}
+		}
+		// The seat this contract needs is up: another model's swap is not this
+		// contract's business, and waiting it out is wall spent on somebody
+		// else's load. Every exit below carries the matcher's note, so an alias
+		// probe that failed is reported whatever verdict this poll reaches.
+		if mine || busy == "" {
+			return waited, m.note
 		}
 		if waited+admissionPoll > budget {
-			return waited, "budget spent while " + busy + " (proceeding into the wall)"
+			return waited, joinAdmissionNotes(m.note, "budget spent while "+busy+" (proceeding into the wall)")
 		}
 		if serr := seatwait.Sleep(ctx, admissionPoll); serr != nil {
-			return waited, serr.Error()
+			return waited, joinAdmissionNotes(m.note, serr.Error())
 		}
 		waited += admissionPoll
 	}

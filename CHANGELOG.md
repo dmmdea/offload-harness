@@ -6,6 +6,8 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.127.0] - 2026-09-17 - the fleet answers faster: honest node health, long-poll completion, concurrent probes, alias-aware admission on both doors, config validation that names a dead endpoint
+
 ### Added
 - **`GET /fleet/jobs/{id}?wait=<seconds>` answers when the job FINISHES** (register S-19, diagnosis
   `2026-09-17-harness-scheduling-diagnosis.md` §2(d)/§5.3). The node had no completion event at all,
@@ -221,6 +223,65 @@ Versioning: [SemVer](https://semver.org/).
   and a node id is neither unique nor guaranteed to be published (register C-19 shows it drifting). The
   second remote of a cycle found its key already taken, the cycle was reshuffled, and the fit score handed
   the SAME seat both subtasks while the other idled. `dealt` and `fitPick` now key on the base.
+- **A READY seat waited the whole admission budget whenever any OTHER model was mid-swap.**
+  The swap pre-flight matched llama-swap's `GET /running` by the seat's BOUND name, while `/running`
+  names models by canonical id only — and the harness binds agent seats by alias on the reference
+  boxes (`agent-pool` → `qwen3.8-27b-vllm`). The "my own seat is already ready" exit could therefore
+  never fire on an alias-bound seat, and 406 delegation-log rows say so verbatim ("/running lists the
+  seat under another id"). `awaitSeatAdmission` and `warmSeat` now resolve the seat through
+  `swapclient.Roster.Canonical` — the resolution `internal/seatload` has used for the drain since
+  C-11 — and match `/running` by alias AND canonical id. The roster read is lazy: it is paid only
+  when the bare name missed and the alternative is a sleep, so a seat bound by its own id costs no
+  extra round trip.
+- **The MCP `agent_run` door never ran the swap pre-flight.** llama-swap queues, with no timeout of
+  its own, any request that needs a model it is still loading, so an `agent_run` that arrived
+  mid-swap spent its wall inside that queue and reported a wall timeout — the failure ADR 0032
+  removed from the delegation door in 2026-09-02 and this door never had. `pipeline.AwaitSeatAdmission`
+  exports the same function; `handleAgentRun` calls it between the cordon and the warm-up, on the
+  remaining admission budget, and reports it under the same wire names (`admission_wait_sec` /
+  `admission_note`). The two doors' admission blocks are now the same steps in the same order.
+- **The served-window probe ran on the contract's WALL, on both doors.** `agent.ProbeServedWindow`
+  carries a ten-minute cold-start budget by design — it is allowed to absorb a seat's load — so on a
+  cold or slow seat it consumed the whole wall before the first token and the run was filed as a wall
+  timeout. On both doors it now runs on a context derived from the admission deadline, before the
+  wall context exists, and its duration is added to `admission_wait_sec`. On the delegation door the
+  seat-residency (roster) check moved just ahead of it, so a seat this endpoint does not serve is
+  never cold-started by a run that is about to defer.
+- **`warmSeat` failed silently on two exits.** A `/running` read that ERRORED and a budget already
+  spent by earlier admission both returned "nothing to report", so `admission_note` was empty on a
+  seat that might still be cold — "could not read" and "is ready" were indistinguishable on the wire.
+  Both now return a note. `warmSeat` also reports whether a load was ATTEMPTED as its own value:
+  neither the duration (a sub-tick load measures 0) nor "a note exists" can carry that fact, and the
+  D-118 coherence probe keys on it.
+- **One transient roster error silently disabled the alias match for the rest of the wait.** The
+  resolution above latched "already tried" on the ATTEMPT rather than on a successful read, so a
+  single timeout or 500 on `GET /v1/models` — likeliest on exactly the contended box where another
+  model is mid-swap — left the seat matching by its bound name for the remaining polls and burning
+  the whole admission budget. S-08's own symptom, intermittent and with nothing in the log or on the
+  wire. The latch now closes only on success, the failure is logged and carried into
+  `admission_note`, and the next poll retries inside the same budget.
+- **The MCP door's cordon-timeout defer reported no admission at all.** `admission_wait_sec` /
+  `admission_note` were absent on that one path while the delegation door has stamped them since
+  0.117.0, so a caller could not tell a 300 s wait from an instant refusal. It now stamps them. (The
+  path is the fence pre-check's race window — the two share `modelaffinity.BlocksNewRun`, which
+  `TestForeignFenceAndTheCordonShareOnePredicate` pins across all eight lease shapes.)
+- **Both doors discarded the served-window resolver's note** (`effCtx, _ :=`), so a run that budgeted
+  against the conservative 8,192-token fallback on a 131,072-token seat looked exactly like a correct
+  one and the only symptom was a task that compacted for no reason — the same invisibility that let
+  the MCP door measure 8,192 cold and 114,688 warm on one seat, minutes apart. The line is now on the
+  wire as `ctx_window_note`, and when the fallback was caused by the probe running out of admission
+  budget it is repeated in `admission_note`, where the cause actually is.
+- **Both agent doors held a worker at the cordon for the full admission budget under a FOREIGN GPU
+  fence** — 47 rows × 300 s (3.92 h) in the three days to 2026-09-17. An exclusive text hold, a
+  draining cordon or a media render held by another process refuses a new run for as long as it is
+  held; nothing the run can do inside its own budget changes that, so the wait reached the same
+  `capacity` defer five minutes later while the delegator sat on the re-placement path that defer
+  exists to trigger. `delegate.ForeignFence` — wired into the review lane since 0.125.0 (D-110) — is
+  now asked BEFORE `AwaitRunSlot` on `runAgentTask` and on `agent_run`, and defers at once naming the
+  fence and the holder's line (class, pid, declared reason, expiry). It reads the lease directory
+  `config.Load` armed for the cordon, so the pre-check and the cordon can never disagree. An
+  INHERITED lease (`GPU_LEASE_EPOCH`) and a plain non-fencing reservation are unchanged: ADR 0032's
+  "a peer-held seat is waited for" governs every hold whose answer can still change.
 
 ## [0.126.2] - 2026-09-17 - a PAIR card's failure text is one short line
 
