@@ -1025,6 +1025,18 @@ type healthPayload struct {
 	// new state. Absent when this node has finished no agent job (a cold node
 	// makes no claim about its speed).
 	RecentAgentWallSec float64 `json:"recent_agent_wall_sec,omitempty"`
+	// QueueWaitEstimateSec (register S-04) is queueWaitEstimateSec over the
+	// CURRENT queue_depth and max_concurrent_jobs, using the same
+	// recent_agent_wall_sec sample published above — the "queue full" 503's
+	// Retry-After header computes the identical number at refusal time, so a
+	// delegator that reads this BEFORE dispatching sees the same estimate it
+	// would otherwise only learn from being refused. 0 (a worker is free, or
+	// no recent wall sample) is the honest answer and omitempty hides it,
+	// exactly like RecentAgentWallSec's own "a cold node makes no claim" rule.
+	// NOT gated to the agent lane: queue_depth counts every task type, and a
+	// media-only node with no agent history simply never has a wall sample to
+	// estimate from.
+	QueueWaitEstimateSec float64 `json:"queue_wait_estimate_sec,omitempty"`
 	// ServedModels is the CACHED roster name list — canonical ids AND every
 	// alias (agentResidency.served, from swapclient.Roster.Names) —
 	// refreshed on the same TTL/single-flight as AgentResident. Absent/empty
@@ -1123,6 +1135,12 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if s.agentLane && s.admitting != nil {
 		admitting = s.admitting()
 	}
+	// recentWall backs BOTH recent_agent_wall_sec (agent-lane only, below) and
+	// queue_wait_estimate_sec (published regardless of lane): one walk of the
+	// job store's finished rows feeds both fields, so they can never disagree
+	// about what "recent" means.
+	recentWall := medianSeconds(s.jobs.FinishedAgentWalls(recentAgentWallSamples))
+	maxConcurrentJobs := s.jobs.MaxConcurrent()
 	payload := healthPayload{
 		NodeID:                s.opts.NodeID,
 		SchemaVersion:         1,
@@ -1138,9 +1156,10 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		QueueDepth:            queued + running,
 		JobsQueued:            queued,
 		JobsRunning:           running,
-		MaxConcurrentJobs:     s.jobs.MaxConcurrent(),
+		MaxConcurrentJobs:     maxConcurrentJobs,
 		MaxQueueDepth:         s.opts.Cfg.FleetQueueLimit(),
 		HarnessVersion:        s.opts.Version,
+		QueueWaitEstimateSec:  math.Round(queueWaitEstimateSec(queued+running, maxConcurrentJobs, recentWall)*100) / 100,
 	}
 	if s.opts.ServingConfig != nil {
 		if sha, state := s.opts.ServingConfig(); state != "" {
@@ -1194,8 +1213,8 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 			payload.SeatLoaded, payload.SeatStarting = &loaded, &starting
 		}
 		payload.JobsAdmitting = admitting
-		if med := medianSeconds(s.jobs.FinishedAgentWalls(recentAgentWallSamples)); med > 0 {
-			payload.RecentAgentWallSec = med
+		if recentWall > 0 {
+			payload.RecentAgentWallSec = recentWall
 		}
 		if s.opts.Cfg.Composite() {
 			payload.Tiers = s.opts.Cfg.Tiers

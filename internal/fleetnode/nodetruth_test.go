@@ -372,6 +372,63 @@ func TestHealthReportsTheRecentAgentWall(t *testing.T) {
 	}
 }
 
+// TestHealthPublishesQueueWaitEstimate is item 3/S-04's red test: a delegator
+// reads ONE number the node computed, off the SAME arithmetic the "queue
+// full" 503's Retry-After uses, but over the CURRENT queued+running — so it
+// is visible before any dispatch is ever refused, not only after.
+func TestHealthPublishesQueueWaitEstimate(t *testing.T) {
+	base := time.Date(2026, 9, 17, 10, 0, 0, 0, time.UTC)
+	jobs := newJobs(time.Hour, func() time.Time { return base }, time.Hour, 1) // maxConcurrent=1
+	t.Cleanup(func() { jobs.DrainAndStop(time.Second) })
+	jobs.mu.Lock()
+	// One FINISHED agent job, wall = 60s exactly.
+	jobs.m["done-agent"] = &job{state: JobDone, agent: true, startedAt: base, finishedAt: base.Add(60 * time.Second)}
+	// depth 3 (1 running + 2 queued) against maxConcurrent 1: excess = 2.
+	jobs.m["running-1"] = &job{state: JobRunning, capped: true}
+	jobs.m["queued-1"] = &job{state: JobAccepted, capped: true}
+	jobs.m["queued-2"] = &job{state: JobAccepted, capped: true}
+	jobs.mu.Unlock()
+
+	cfg := imageCfg()
+	cfg.FleetMaxConcurrentJobs = 1
+	cfg.FleetMaxQueueDepth = -1
+	s := New(&fakeRunner{}, jobs, Options{NodeID: "testnode", Snapshot: goodSnapshot,
+		Footprints: func() []FootprintEntry { return nil }, GpuVendor: "nvidia", GpuArch: "ampere", Cfg: cfg})
+
+	m := decodeMap(t, do(t, s, http.MethodGet, "/fleet/health", "", nil))
+	v, ok := m["queue_wait_estimate_sec"].(float64)
+	if !ok {
+		t.Fatalf("queue_wait_estimate_sec absent with 2 jobs queued behind 1 worker and a 60s wall sample: %v", m)
+	}
+	if v != 120 {
+		t.Fatalf("queue_wait_estimate_sec = %v, want 120 (excess 2 x wall 60s / maxConcurrent 1)", v)
+	}
+}
+
+// TestHealthOmitsQueueWaitEstimateWithAFreeWorker: "0 when a worker is free"
+// is the honest number, and the field's omitempty then hides it — exactly
+// like recent_agent_wall_sec's own "a cold node makes no claim" rule, not a
+// floor clamped up from a small positive value.
+func TestHealthOmitsQueueWaitEstimateWithAFreeWorker(t *testing.T) {
+	base := time.Date(2026, 9, 17, 10, 0, 0, 0, time.UTC)
+	jobs := newJobs(time.Hour, func() time.Time { return base }, time.Hour, 4) // maxConcurrent=4
+	t.Cleanup(func() { jobs.DrainAndStop(time.Second) })
+	jobs.mu.Lock()
+	jobs.m["done-agent"] = &job{state: JobDone, agent: true, startedAt: base, finishedAt: base.Add(60 * time.Second)}
+	jobs.m["running-1"] = &job{state: JobRunning, capped: true} // 1 of 4 workers busy: free capacity
+	jobs.mu.Unlock()
+
+	cfg := imageCfg()
+	cfg.FleetMaxConcurrentJobs = 4
+	s := New(&fakeRunner{}, jobs, Options{NodeID: "testnode", Snapshot: goodSnapshot,
+		Footprints: func() []FootprintEntry { return nil }, GpuVendor: "nvidia", GpuArch: "ampere", Cfg: cfg})
+
+	body := do(t, s, http.MethodGet, "/fleet/health", "", nil).Body.String()
+	if strings.Contains(body, "queue_wait_estimate_sec") {
+		t.Fatalf("a node with a free worker published queue_wait_estimate_sec: %s", body)
+	}
+}
+
 // TestHealthPublishesLeaseExclusiveAndDraining (S-15's inputs): `busy` is a
 // verdict computed from a DECLARED expiry. Whether the lease FENCES the cards
 // (exclusive) and whether it is still draining are different facts, and they
