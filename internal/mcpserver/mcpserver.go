@@ -1882,7 +1882,7 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 	// budget, and the run was about to talk to that same endpoint anyway. The
 	// resolved window is reported in the result so a fallback is visible.
 	probed, probeOK := agent.ProbeServedWindow(cctx, cfg.Endpoint, model)
-	effCtx, _ := agent.ResolveContextTokens(0, probed, probeOK)
+	effCtx, _ := agent.ResolveContextTokens(0, probed, cfg.AgentCtxTokens, probeOK)
 	// Real-tokenizer seam (TO-4): whole-message middle cut on the planner's own
 	// served token counts; fail-open to the legacy estimate rung when the
 	// endpoint has no /tokenize. Same wiring as the CLI, so the drive modes

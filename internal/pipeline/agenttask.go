@@ -403,7 +403,7 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	// (conservative fallback when unanswerable) and run the measured-ON ladder
 	// rungs with the real-tokenizer seam (fail-open to the legacy estimate).
 	probed, probeOK := agent.ProbeServedWindow(cctx, p.cfg.Endpoint, seat)
-	effCtx, _ := agent.ResolveContextTokens(0, probed, probeOK)
+	effCtx, _ := agent.ResolveContextTokens(0, probed, p.cfg.AgentCtxTokens, probeOK)
 	built.Loop.WithContextTokens(effCtx).WithSkeletonPrune(true).WithGCFCompact(true).
 		WithTokenizer(tokclient.New(p.cfg.Endpoint, seat, 0))
 

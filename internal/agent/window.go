@@ -178,18 +178,26 @@ func fetchNCtx(ctx context.Context, client *http.Client, u string) (int, bool) {
 // ResolveContextTokens turns the --ctx-tokens knob + a probe result into the
 // window the loop budgets against, with one honest rule per case:
 //
-//   - flag <= 0 (auto, the default): the probed window when the probe answers,
-//     else FallbackContextTokens — never a hardcoded per-tier assumption;
+//   - flag <= 0 (auto, the default): the probed window when the probe answers;
+//     when the probe FAILS, the seat's CONFIGURED window (config
+//     agent_ctx_tokens) when one is known, and FallbackContextTokens only when
+//     nothing better is known — never a hardcoded per-tier assumption. A cold
+//     seat still loading answers the probe with 400: before this, that silently
+//     ran a 114,688-token seat at 8,192 for the WHOLE task, with no error (the
+//     same agent_run measured 8,192 cold and 114,688 warm, minutes apart);
 //   - flag > 0 (operator override): the flag wins, but when the probe answered
 //     with LESS than the flag a warning names the gap — that exact mismatch
 //     (assumed 16384, served 8192) killed real runs before it was measured.
 //
 // The returned note is "" or a human-readable line for stderr; this function
 // stays pure (no logging) so every drive mode reports identically.
-func ResolveContextTokens(flag, probed int, probeOK bool) (int, string) {
+func ResolveContextTokens(flag, probed, configured int, probeOK bool) (int, string) {
 	if flag <= 0 {
 		if probeOK {
 			return probed, fmt.Sprintf("context window: %d (probed from the serving endpoint)", probed)
+		}
+		if configured > 0 {
+			return configured, fmt.Sprintf("context window: %d (probe unanswered — using the seat's configured window; set --ctx-tokens to override)", configured)
 		}
 		return FallbackContextTokens, fmt.Sprintf("context window: %d (probe unanswered — conservative fallback; set --ctx-tokens to override)", FallbackContextTokens)
 	}

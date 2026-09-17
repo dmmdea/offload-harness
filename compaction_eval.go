@@ -187,7 +187,7 @@ func runCompactionEval(args []string) error {
 		ctxTokens := *kvCtxTokens
 		if ctxTokens <= 0 {
 			probed, ok := agent.ProbeServedWindow(ctx, endpoint, model)
-			ctxTokens, _ = agent.ResolveContextTokens(0, probed, ok)
+			ctxTokens, _ = agent.ResolveContextTokens(0, probed, 0, ok)
 		}
 		client := agent.NewLLMClient(endpoint, model, "", time.Duration(*kvTimeoutSec)*time.Second)
 		// Send the REAL read-only tool specs production sends. They are a

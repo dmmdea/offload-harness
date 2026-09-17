@@ -134,7 +134,7 @@ func TestResolveContextTokens(t *testing.T) {
 		{"explicit+noprobe", 16384, 0, false, 16384, "", true},
 	}
 	for _, c := range cases {
-		got, note := ResolveContextTokens(c.flag, c.probed, c.probeOK)
+		got, note := ResolveContextTokens(c.flag, c.probed, 0, c.probeOK)
 		if got != c.want {
 			t.Errorf("%s: tokens = %d, want %d", c.name, got, c.want)
 		}
@@ -203,6 +203,38 @@ func TestFetchMaxModelLenRules(t *testing.T) {
 			n, ok := fetchMaxModelLen(context.Background(), srv.Client(), srv.URL+"/upstream/m/v1/models", c.model)
 			if n != c.want || ok != c.ok {
 				t.Fatalf("fetchMaxModelLen = (%d,%v), want (%d,%v)", n, ok, c.want, c.ok)
+			}
+		})
+	}
+}
+
+// TestResolveContextTokensConfiguredFallback pins the cold-seat fix. When the
+// served-window probe fails — a cold seat still loading answers /props and
+// /v1/models with 400 — the loop must budget against the seat's CONFIGURED
+// window (config agent_ctx_tokens) rather than FallbackContextTokens. Before the
+// fix the same agent_run measured ctx_window 8,192 cold and 114,688 warm minutes
+// apart: a silent 14x loss that exhausted five compactions and truncated every
+// file read. The probed path and the operator flag are unchanged.
+func TestResolveContextTokensConfiguredFallback(t *testing.T) {
+	cases := []struct {
+		name       string
+		flag       int
+		probed     int
+		configured int
+		probeOK    bool
+		want       int
+	}{
+		{"probe fails, configured window known: use it", 0, 0, 114688, false, 114688},
+		{"probe fails, nothing configured: conservative fallback", 0, 0, 0, false, FallbackContextTokens},
+		{"probe answers: probed wins over configured", 0, 114688, 163840, true, 114688},
+		{"operator flag set: flag wins even when the probe fails", 32768, 0, 114688, false, 32768},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, _ := ResolveContextTokens(c.flag, c.probed, c.configured, c.probeOK)
+			if got != c.want {
+				t.Fatalf("ResolveContextTokens(flag=%d, probed=%d, configured=%d, probeOK=%v) = %d, want %d",
+					c.flag, c.probed, c.configured, c.probeOK, got, c.want)
 			}
 		})
 	}
