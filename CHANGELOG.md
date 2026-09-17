@@ -48,6 +48,10 @@ Versioning: [SemVer](https://semver.org/).
     no longer advertise a multi-minute agent run as still being probed.
 
 ### Changed
+- **`blackwell-16`'s `config_seed.agent_max_tokens 4096` is now a measurement** (masterplan D-119, 2026-09-17): the
+  26B llama.cpp agent lane at the tier's own line on one RTX 5060 Ti (14,540 of 16,311 MiB, 16 s load, 100 tok/s),
+  blind Opus 1,024 vs 4,096 = TIE (6.76 vs 6.30, gap 0.46, 18/24, both 8/8) — the seed stays; the profile note and
+  the generated tier page no longer call it unmeasured. Record `2026-09-17-d119-26b-budget-bake/`.
 - **`blackwell-16` declares its vLLM seat, measured on an RTX 5060 Ti** — ADR 0048 Amendment 1. Same checkpoint as
   ampere-16 (Qwen3.8-27B 3-bit GSQ) at 49,152 @ util 0.92 (KV 76,314 tokens, 1.55x), 27.75 tok/s single / 64.39 at 4
   streams, digest-8 8/8 at the bound lane, blind 8.53 (level with the A2's 8.46). **`kv_cache_dtype` is `fp8` (e4m3),
