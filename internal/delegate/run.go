@@ -51,6 +51,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -181,6 +182,13 @@ type PlacedResult struct {
 	// a delegator bug rather than any node's answer.
 	refused       bool
 	refusalStatus int
+	// retryAfterNote (item 7, register D-105/D-106) names a 503 dispatch
+	// refusal that carried a Retry-After header and was honored with a
+	// courtesy wait-then-retry to the SAME node, INSIDE runRemote — never
+	// surfaced to placeAndRun as a discrete refusal (the node is not marked
+	// `tried` for it), so this is the only trace of it: appended to
+	// PlacementReason by attempt() when the retry succeeded.
+	retryAfterNote string
 
 	// Replacements counts how many times this subtask was RE-PLACED on a
 	// different node after a node REFUSED it at dispatch. 0 on the
@@ -3077,6 +3085,9 @@ func (r *runner) attempt(ctx context.Context, i int, contract core.AgentContract
 	pr := r.runRemote(ctx, base, jobID, dispatched, chosen, runSeat)
 	pr.ranBase = base
 	pr.PlacementReason = reason
+	if pr.retryAfterNote != "" {
+		pr.PlacementReason += "; " + pr.retryAfterNote
+	}
 	if pr.Node == "" {
 		pr.Node = chosen.NodeID
 	}
@@ -3166,12 +3177,38 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 		intendedSeat = view.AgentSeat
 	}
 	r.pairInflight(&pr, jobID, pairNodeName(base, view.NodeID), intendedSeat, "queued")
-	if refused, status, err := r.dispatch(ctx, base, jobID, payload); err != nil {
-		pr.Err = err.Error()
+	disp := r.dispatchDetailed(ctx, base, jobID, payload)
+	if disp.refused && disp.status == http.StatusServiceUnavailable && disp.retryAfterSec > 0 {
+		// Item 7 (register D-105/D-106): a 503 carrying its own Retry-After
+		// is the node stating exactly how long to wait, not a generic
+		// capacity refusal — honor it and retry the SAME node ONCE before
+		// falling to the ordinary re-placement loop (placeAndRun's refusal
+		// chain, which would otherwise spend a whole different node's dial
+		// just to avoid a wait the first node already told us to take).
+		// Bounded by what the contract can still afford, so a node with a
+		// generous Retry-After never eats a budget it does not own.
+		wait := time.Duration(disp.retryAfterSec) * pollSecond
+		if budget := time.Duration(executionBudgetSec(contract)) * pollSecond; budget > 0 && wait > budget {
+			wait = budget
+		}
+		select {
+		case <-ctx.Done():
+			pr.Err = "canceled: " + ctx.Err().Error()
+			return pr
+		case <-time.After(wait):
+		}
+		retried := r.dispatchDetailed(ctx, base, jobID, payload)
+		if !retried.refused {
+			pr.retryAfterNote = fmt.Sprintf("dispatch 503 (Retry-After %ds) honored; landed here on retry", disp.retryAfterSec)
+		}
+		disp = retried
+	}
+	if disp.err != nil {
+		pr.Err = disp.err.Error()
 		// Carry the class so runOne can decide whether ANOTHER node is worth
 		// asking. Set here and nowhere else: this is the one moment at which
 		// the node has answered and no seat can possibly hold the contract.
-		pr.refused, pr.refusalStatus = refused, status
+		pr.refused, pr.refusalStatus = disp.refused, disp.status
 		return pr
 	}
 	// The node ACKED: from here the job can be orphaned by delegator death,
@@ -3685,14 +3722,35 @@ func (p *pollFailLog) summarize() {
 	log.Printf("delegate: poll %s at %s: %d failed poll(s) this job (%s)", p.jobID, p.base, p.total, strings.Join(parts, "; "))
 }
 
-// dispatch POSTs the job envelope, expecting the contract's one acceptance
-// shape (202). A transport-level failure is retried ONCE with the same job id
-// — if the first POST actually landed, the node's known-job path re-acks
-// idempotently, so the retry can never buy a second run. That bounded retry
-// (dispatchAttempts) is about DOUBT over one node's transport and is entirely
-// separate from re-placement, which is about a node that answered no.
+// dispatchResult is a node's answer to one dispatch POST — dispatchDetailed's
+// return shape (see its own doc for what each field means and when).
+type dispatchResult struct {
+	refused bool
+	status  int
+	// retryAfterSec is the node's `Retry-After` header on a 503 (capacity)
+	// refusal — a CAPACITY hint, not a promise, so the caller treats it as
+	// advisory. 0 when absent or unparsable, or on any status but 503.
+	retryAfterSec int
+	err           error
+}
+
+// dispatch is dispatchDetailed without the Retry-After hint — the plain
+// 3-value shape every caller but runRemote's 503 courtesy retry (item 7,
+// register D-105/D-106) uses.
+func (r *runner) dispatch(ctx context.Context, base, jobID string, payload json.RawMessage) (refused bool, status int, err error) {
+	res := r.dispatchDetailed(ctx, base, jobID, payload)
+	return res.refused, res.status, res.err
+}
+
+// dispatchDetailed POSTs the job envelope, expecting the contract's one
+// acceptance shape (202). A transport-level failure is retried ONCE with the
+// same job id — if the first POST actually landed, the node's known-job path
+// re-acks idempotently, so the retry can never buy a second run. That bounded
+// retry (dispatchAttempts) is about DOUBT over one node's transport and is
+// entirely separate from re-placement, which is about a node that answered
+// no.
 //
-// The returns say which of three things happened:
+// The result says which of three things happened:
 //
 //	err == nil                     the node acked 202.
 //	err != nil, refused == true    the node DECLINED (status = what it sent) or
@@ -3703,7 +3761,7 @@ func (p *pollFailLog) summarize() {
 //	                               will not marshal, a request that will not
 //	                               build). No node said anything, so there is
 //	                               nothing for another node to say differently.
-func (r *runner) dispatch(ctx context.Context, base, jobID string, payload json.RawMessage) (refused bool, status int, err error) {
+func (r *runner) dispatchDetailed(ctx context.Context, base, jobID string, payload json.RawMessage) dispatchResult {
 	envelope := map[string]any{
 		"job_id":    jobID,
 		"task_type": string(core.TaskAgentRun),
@@ -3720,7 +3778,7 @@ func (r *runner) dispatch(ctx context.Context, base, jobID string, payload json.
 	}
 	env, merr := json.Marshal(envelope)
 	if merr != nil {
-		return false, 0, fmt.Errorf("marshaling dispatch envelope: %w", merr)
+		return dispatchResult{err: fmt.Errorf("marshaling dispatch envelope: %w", merr)}
 	}
 	u := strings.TrimRight(strings.TrimSpace(base), "/") + "/fleet/dispatch"
 	var lastErr error
@@ -3729,7 +3787,7 @@ func (r *runner) dispatch(ctx context.Context, base, jobID string, payload json.
 		req, rerr := http.NewRequestWithContext(rctx, http.MethodPost, u, bytes.NewReader(env))
 		if rerr != nil {
 			cancel()
-			return false, 0, fmt.Errorf("dispatch request: %w", rerr)
+			return dispatchResult{err: fmt.Errorf("dispatch request: %w", rerr)}
 		}
 		req.Header.Set("Content-Type", "application/json")
 		if r.cfg.FleetAuthToken != "" {
@@ -3745,6 +3803,10 @@ func (r *runner) dispatch(ctx context.Context, base, jobID string, payload json.
 			continue // transport doubt → one more POST, same job id
 		}
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxFleetBody))
+		retryAfter := 0
+		if resp.StatusCode == http.StatusServiceUnavailable {
+			retryAfter = parseRetryAfterSeconds(resp.Header.Get("Retry-After"))
+		}
 		resp.Body.Close()
 		cancel()
 		if resp.StatusCode != http.StatusAccepted {
@@ -3752,21 +3814,49 @@ func (r *runner) dispatch(ctx context.Context, base, jobID string, payload json.
 			// answer, not doubt; re-POSTing the same bytes to the SAME node
 			// would get the same answer. Whether ANOTHER node is worth asking
 			// is replaceableRefusal's decision, made from this status.
-			return true, resp.StatusCode, fmt.Errorf("dispatch %s: status %d: %s", u, resp.StatusCode, truncate(body, 256))
+			return dispatchResult{refused: true, status: resp.StatusCode, retryAfterSec: retryAfter,
+				err: fmt.Errorf("dispatch %s: status %d: %s", u, resp.StatusCode, truncate(body, 256))}
 		}
-		return false, resp.StatusCode, nil
+		return dispatchResult{status: resp.StatusCode}
 	}
 	// Both POSTs failed at transport level: the delegator never reached this
 	// node. Status 0 says exactly that — no node authored this answer.
-	return true, 0, lastErr
+	return dispatchResult{refused: true, err: lastErr}
 }
 
-// pollOnce GETs the job state. The error covers transport-level failure only;
-// an HTTP answer (any status) comes back as a jobPoll with a nil error.
+// parseRetryAfterSeconds reads a `Retry-After` header's DELTA-SECONDS form
+// (the shape this fleet's own nodes send — never the HTTP-date form, which
+// this parser deliberately does not attempt). Empty, unparsable or negative
+// is 0 = no hint, the safe "the caller decides its own pacing" reading.
+func parseRetryAfterSeconds(v string) int {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
+}
+
+// pollWaitSec is what runRemote's poll asks a node to hold ONE connection
+// open for (?wait=12) before answering (item 7): at fleetnode.MaxJobWaitSec,
+// one second inside pollRequestTimeout (15 s) so the long poll always gets an
+// answer before the client gives up on the exchange — a pairing pinned on
+// the node side by a test that can read this package's own source. An older
+// node (pre-0.127) does not read the parameter at all and answers at once,
+// exactly as before: the fallback IS the parameter being a no-op there, not
+// a second code path — the existing pollEvery sleep between polls is
+// unchanged either way.
+const pollWaitSec = 12
+
+// pollOnce GETs the job state, long-polling up to pollWaitSec when the node
+// supports it (`?wait=`). The error covers transport-level failure only; an
+// HTTP answer (any status) comes back as a jobPoll with a nil error.
 func (r *runner) pollOnce(ctx context.Context, base, jobID string) (jobPoll, error) {
-	// One poll implementation, two callers: the recovery pass (intent.go)
-	// polls by these same rules through the shared package function.
-	return pollJobOnce(ctx, r.cfg, base, jobID)
+	u := strings.TrimRight(strings.TrimSpace(base), "/") + "/fleet/jobs/" + jobID + fmt.Sprintf("?wait=%d", pollWaitSec)
+	return pollJobOnceAt(ctx, r.cfg, u)
 }
 
 // EvalAcceptance runs every contract acceptance check against the result —
