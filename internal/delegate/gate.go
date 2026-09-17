@@ -309,30 +309,71 @@ func provablyStartsNow(v NodeView) bool {
 //     eligible right now — a capacity condition the wait re-polls, never a
 //     dispatch that evicts a remote's busy seat without asking.
 func remoteEligible(st Subtask, r NodeView) bool {
+	eligible, _, _ := eligibilityVerdict(st, r)
+	return eligible
+}
+
+// eligibilityVerdict is the SINGLE predicate sequence remoteEligible and
+// placement_reason.go's D-105 narration both consume, so the two can never
+// diverge on WHY a node is not the one running a subtask (review round 1,
+// BLOCKER item 1: the narration used to run its OWN copy of this gate in a
+// DIFFERENT order — schema/depth checked LAST instead of early — so a
+// schema-less contract was narrated `slow`/`unfit(ctx)` on every remote
+// instead of `noschema`, contradicting placement_reason.go's own "read-only
+// narration, never re-derives the decision" contract).
+//
+// eligible is byte-for-byte what remoteEligible has always returned. word is
+// the D-105 vocabulary entry for the FIRST disqualifying condition in gate
+// order, detail its one-line arithmetic/context — both empty when eligible
+// (the caller then applies its own RANKING-based verdict: queue/cap/cold,
+// which are about ORDER among eligible seats, never about admission).
+//
+// Order, exactly as remoteEligible has always checked it:
+//
+//	AgentEnabled → lease fence (W-14) → output_schema present → origin hop
+//	(Depth == 0) → feasibility (W-05) → the layer table (composite) OR
+//	residency/served/adequate (plain node).
+func eligibilityVerdict(st Subtask, r NodeView) (eligible bool, word, detail string) {
+	if !r.AgentEnabled {
+		return false, "probe", "agent lane not advertised"
+	}
 	// A node advertising a held TEXT lease is not a target at all (0.113.16):
 	// its card is reserved for a measurement, exactly as Reserved() makes the
 	// LOCAL seat a non-target. Before this a leased Lenovo had to STOP its fleet
 	// node to keep foreign digests off the card, and every in-flight remote job
 	// on it was cut ("Lenovo dropped mid-way", 2026-09-06).
-	// leaseFences (W-14, register S-15) is what decides whether the lease is a
-	// HARD refusal here — see its own doc for the exclusive/draining/media
+	// leaseFenceReason (W-14, register S-15) is what decides whether the lease
+	// is a HARD refusal here — see its own doc for the exclusive/draining/media
 	// cases that still fence, and the plain-text-busy case that no longer does.
-	if !r.AgentEnabled || leaseFences(r) || len(st.Contract.OutputSchema) == 0 || st.Contract.Depth != 0 {
-		return false
+	if fenced, why := leaseFenceReason(r); fenced {
+		return false, "lease", why
+	}
+	if len(st.Contract.OutputSchema) == 0 {
+		return false, "noschema", ""
+	}
+	if st.Contract.Depth != 0 {
+		return false, "hop", fmt.Sprintf("depth %d (only an origin contract may travel — hop limit 1)", st.Contract.Depth)
 	}
 	// W-05 (register S-03/S-05, INV-5 rider clause (i)): a seat whose fitted
 	// final cannot clear seatrate.FinalBudgetFloor within its own effective
 	// wall is refused here, naming the arithmetic (fit.go's feasibleFinal).
 	// An unknown rate is no opinion — see its own doc.
-	if ok, _ := feasibleFinal(st, r); !ok {
-		return false
+	if ok, reason := feasibleFinal(st, r); !ok {
+		return false, "slow", reason
 	}
 	if dec, ok := remoteDecision(st, r); ok {
-		return !dec.Defer && !dec.Wait
+		if dec.Defer || dec.Wait {
+			return false, "layer", dec.Reason
+		}
+		return true, "", ""
 	}
-	return r.AgentResident &&
-		seatServed(r) &&
-		adequate(st, r)
+	if !r.AgentResident || !seatServed(r) {
+		return false, "probe", "seat not resident on this node's cached roster"
+	}
+	if !adequate(st, r) {
+		return false, "unfit(ctx)", fmt.Sprintf("%d needed > %d advertised", st.EstTokens+specReserve, r.AgentCtxTokens)
+	}
+	return true, "", ""
 }
 
 // remoteDecision runs the placement table over a node's advertised layer rows
@@ -368,10 +409,25 @@ func remoteDecision(st Subtask, r NodeView) (placetable.Decision, bool) {
 // says "spoken for until 15:04", not "the cards are working". That case stays
 // eligible and is demoted instead (betterRemote's leaseBusyDemoted key).
 func leaseFences(r NodeView) bool {
-	if r.LeaseExclusive || r.LeaseDraining {
-		return true
+	fenced, _ := leaseFenceReason(r)
+	return fenced
+}
+
+// leaseFenceReason is leaseFences plus the one-word D-105 detail for WHICH
+// hold fenced it — read by eligibilityVerdict so the gate and the narration
+// can never name a different reason than the one that actually excluded a
+// node.
+func leaseFenceReason(r NodeView) (fenced bool, why string) {
+	switch {
+	case r.LeaseExclusive:
+		return true, "exclusive"
+	case r.LeaseDraining:
+		return true, "draining"
+	case r.LeaseBusy && !r.LeasedText:
+		return true, "busy"
+	default:
+		return false, ""
 	}
-	return r.LeaseBusy && !r.LeasedText
 }
 
 // leaseBusyDemoted is betterRemote's read of the ONE lease shape remoteEligible

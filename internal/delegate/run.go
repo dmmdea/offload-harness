@@ -718,14 +718,21 @@ func RunWith(ctx context.Context, cfg config.Config, local LocalRunner, subtasks
 		// now read once so the whole batch agrees. route=remote forces busy
 		// unconditionally: local is never a placement for an explicit remote.
 		busy := route == "remote"
+		local := busyReading{}
 		if route == "auto" {
-			local := r.probeLocalBusy(ctx)
+			local = r.probeLocalBusy(ctx)
 			busy = leaseInfo.Held || local.inflight >= cfg.FleetConcurrencyLimit() || local.loading
+			// One line per run, mirroring route=spread's own local-slot log
+			// (review round 1 item 4): before this the identical W-01 read had
+			// no trace at all, so an operator could not tell "busy" from
+			// "idle" without re-deriving it from the placement_reason.
+			log.Printf("delegate: auto local slot: busy=%v inflight=%d loading=%v (%s)", busy, local.inflight, local.loading, local.note)
 		}
+		var failed map[string]string
 		if busy {
-			r.autoViews, r.autoBases, r.autoProbeErrs = r.fetchViews(ctx)
+			r.autoViews, r.autoBases, r.autoProbeErrs, failed = r.fetchViewsDetailed(ctx)
 		}
-		r.autoDeal = r.dealAutoRemote(subtasks, r.localView(), r.autoViews, r.autoBases, busy)
+		r.autoDeal = r.dealAutoRemote(subtasks, r.localView(), r.autoViews, r.autoBases, busy, failed)
 	}
 	results := make([]PlacedResult, len(subtasks))
 	sem := make(chan struct{}, runConcurrency)
@@ -2477,12 +2484,12 @@ func headroom(v NodeView) int {
 // even considered, so a run that fans 8 subtasks at a 4-worker node deals it
 // AT MOST 4, and the rest fall to the next-best eligible node instead of
 // queuing behind siblings that have not even dispatched yet.
-func (r *runner) dealAutoRemote(contracts []core.AgentContract, localView NodeView, views []NodeView, bases []string, localBusy bool) []spreadSlot {
+func (r *runner) dealAutoRemote(contracts []core.AgentContract, localView NodeView, views []NodeView, bases []string, localBusy bool, failed map[string]string) []spreadSlot {
 	dealt := make(map[string]int, len(views))
 	out := make([]spreadSlot, len(contracts))
 	for i, c := range contracts {
 		st := Subtask{Contract: c, EstTokens: EstimateTokens(c)}
-		out[i] = r.placeAutoRemote(mintP2CSeed(), st, localView, views, bases, localBusy, dealt)
+		out[i] = r.placeAutoRemote(mintP2CSeed(), st, localView, views, bases, localBusy, dealt, failed)
 	}
 	return out
 }
@@ -2502,7 +2509,7 @@ func (r *runner) dealAutoRemote(contracts []core.AgentContract, localView NodeVi
 //   - Nothing was eligible at all (capability, not capacity): the noRemote
 //     sentinel — attempt() re-derives the exact pre-W-06 sentence
 //     (r.noEligibleRemote) over this same snapshot; unrelated to headroom.
-func (r *runner) placeAutoRemote(seed string, st Subtask, localView NodeView, views []NodeView, bases []string, localBusy bool, dealt map[string]int) spreadSlot {
+func (r *runner) placeAutoRemote(seed string, st Subtask, localView NodeView, views []NodeView, bases []string, localBusy bool, dealt map[string]int, failed map[string]string) spreadSlot {
 	if !localBusy {
 		return spreadSlot{placement: placement{view: localView, reason: "local idle"}}
 	}
@@ -2521,12 +2528,15 @@ func (r *runner) placeAutoRemote(seed string, st Subtask, localView NodeView, vi
 			best, bestBase, found = v, bases[j], true
 		}
 	}
+	// D-105 (review round 1, BLOCKER item 2): the verdict line is built ONCE,
+	// from `dealt` as it stood WHILE scanning (every candidate's headroom read
+	// against the state at decision time, matching what the loop above
+	// actually saw), and printed on EVERY exit — chosen, capacity-waiting, or
+	// nothing eligible at all — not only the happy path. `failed` carries the
+	// dead/unreachable bases from this SAME snapshot, so a node this deal
+	// never even heard from is named too, not silently dropped.
+	verdicts := placementVerdictLine(st, views, bases, bestBase, dealt, failed)
 	if found {
-		// D-105: the verdict line is built from `dealt` as it stood WHILE
-		// scanning (every other candidate's headroom read against the state
-		// at decision time, matching what the loop above actually saw) —
-		// bestBase's own count is incremented only after.
-		verdicts := placementVerdictLine(st, views, bases, bestBase, dealt)
 		dealt[bestBase]++
 		reason := fmt.Sprintf("route=%s → %s (headroom)", r.route, best.NodeID)
 		if verdicts != "" {
@@ -2535,12 +2545,16 @@ func (r *runner) placeAutoRemote(seed string, st Subtask, localView NodeView, vi
 		return spreadSlot{placement: placement{view: best, base: bestBase, reason: reason}}
 	}
 	if anyEligible {
+		reason := fmt.Sprintf("route=%s: every eligible remote is at headroom", r.route)
+		if verdicts != "" {
+			reason += "; " + verdicts
+		}
 		return spreadSlot{
-			placement:    placement{view: localView, reason: fmt.Sprintf("route=%s: every eligible remote is at headroom", r.route)},
+			placement:    placement{view: localView, reason: reason},
 			capacityWait: true,
 		}
 	}
-	return spreadSlot{placement: placement{view: localView}, noRemote: true}
+	return spreadSlot{placement: placement{view: localView, reason: verdicts}, noRemote: true}
 }
 
 // dealSpread computes the spread placement for EVERY subtask of the run in ONE

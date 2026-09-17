@@ -10,6 +10,7 @@ package delegate
 
 import (
 	"context"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -147,5 +148,73 @@ func TestRunAutoJointDealBothFullGoesToCapacityWait(t *testing.T) {
 	}
 	if sum.Deferred != 1 {
 		t.Fatalf("summary = %+v, want exactly one capacity defer", sum)
+	}
+	// Review round 1, BLOCKER item 2: the capacityWait exit must carry the
+	// per-node verdict line, not just the old aggregate "every eligible
+	// remote is at headroom" sentence with no node names attached. This
+	// fixture is saturated on BOTH ceilings (so awaitCapacity's own
+	// hasRoom-based tick loop, which knows nothing about W-06 headroom,
+	// also refuses it and the wait genuinely times out) — the ranking-word
+	// it earns is therefore "queue" (checked before "cap" in gate order),
+	// which TestPlaceAutoRemoteCapacityWaitNamesEachNodesHeadroom below
+	// exercises directly against a headroom-only-full fixture.
+	for _, want := range []string{"node-a: queue (1/1 queue_depth)", "node-b: queue (1/1 queue_depth)"} {
+		if !strings.Contains(pr.Result.Reason, want) {
+			t.Errorf("capacity defer reason = %q, want it to contain %q", pr.Result.Reason, want)
+		}
+	}
+}
+
+// TestPlaceAutoRemoteCapacityWaitNamesEachNodesHeadroom (review round 1,
+// BLOCKER item 2): a headroom-only-full node (not admission-saturated, so
+// the distinguishing case from the "queue" ranking word above) must be
+// narrated with its own running/headroom numbers on the capacityWait exit,
+// not just the old aggregate sentence.
+func TestPlaceAutoRemoteCapacityWaitNamesEachNodesHeadroom(t *testing.T) {
+	st := oneStepSchemaContract(300, false)
+	a := eligibleRemote()
+	a.NodeID, a.MaxConcurrentJobs, a.JobsRunning = "node-a", 4, 4
+	b := eligibleRemote()
+	b.NodeID, b.MaxConcurrentJobs, b.JobsRunning = "node-b", 4, 4
+	r := &runner{route: "remote"}
+	slot := r.placeAutoRemote("seed", st, localNode(), []NodeView{a, b}, []string{"http://node-a", "http://node-b"}, true, map[string]int{}, nil)
+	if !slot.capacityWait {
+		t.Fatalf("slot = %+v, want capacityWait", slot)
+	}
+	for _, want := range []string{"node-a: cap (4/4 running, 0 headroom)", "node-b: cap (4/4 running, 0 headroom)"} {
+		if !strings.Contains(slot.reason, want) {
+			t.Errorf("capacityWait reason = %q, want it to contain %q", slot.reason, want)
+		}
+	}
+}
+
+// TestRunAutoJointDealNamesADeadRemoteAsProbe (review round 1, BLOCKER item
+// 2): a remote that never answers its health probe is still CONFIGURED and
+// must still be named in placement_reason — the documented `probe` verdict
+// was dead code before this, because placementVerdictLine only ever walked
+// the successfully-probed views.
+func TestRunAutoJointDealNamesADeadRemoteAsProbe(t *testing.T) {
+	compressPolls(t, 5*time.Millisecond, time.Second)
+	noProbeMemo(t)
+	_, chosenURL := acceptingNode(t, "node-chosen", "qube from chosen", nil)
+	// deadListener (probe_fanout_test.go): accepts the TCP connection and
+	// hangs up with no HTTP response at all — probeUnreachable's shape, so
+	// FetchNodeView returns a transport error and the base lands in `failed`.
+	deadURL, _ := deadListener(t)
+
+	contract := remoteContract()
+	results, sum, err := Run(context.Background(), testCfg(t), neverLocal(t), []core.AgentContract{contract}, "remote", []string{chosenURL, deadURL})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if sum.Succeeded != 1 {
+		t.Fatalf("summary = %+v, want the reachable node to have run it", sum)
+	}
+	pr := results[0]
+	if pr.Node != "node-chosen" {
+		t.Fatalf("Node = %q, want node-chosen", pr.Node)
+	}
+	if !strings.Contains(pr.PlacementReason, deadURL+": probe (") {
+		t.Fatalf("PlacementReason = %q, want the dead remote named with a probe(...) verdict", pr.PlacementReason)
 	}
 }

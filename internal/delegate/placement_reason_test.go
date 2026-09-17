@@ -74,7 +74,10 @@ func TestOneWordVerdictVocabulary(t *testing.T) {
 		t.Errorf("disabled verdict = %q, want it to start with probe", got)
 	}
 
-	tooSmall := NodeView{NodeID: "too-small", AgentEnabled: true, AgentCtxTokens: 100}
+	// AgentResident: true isolates the ctx-size check — eligibilityVerdict now
+	// checks residency BEFORE adequate() (gate order), so an unresident
+	// fixture would read "probe", not "unfit(ctx)".
+	tooSmall := NodeView{NodeID: "too-small", AgentEnabled: true, AgentResident: true, AgentCtxTokens: 100}
 	if got := oneWordVerdict(st, tooSmall, "b-small", "b-chosen", 0); !strings.HasPrefix(got, "unfit(ctx)") {
 		t.Errorf("too-small verdict = %q, want it to start with unfit(ctx)", got)
 	}
@@ -101,5 +104,51 @@ func TestOneWordVerdictVocabulary(t *testing.T) {
 	winner.NodeID = "winner"
 	if got := oneWordVerdict(st, winner, "b-chosen", "b-chosen", 0); !strings.HasPrefix(got, "chosen") {
 		t.Errorf("winner verdict = %q, want it to start with chosen", got)
+	}
+}
+
+// TestOneWordVerdictAgreesWithTheGateOnSchemaAndDepth (review round 1,
+// BLOCKER item 1): oneWordVerdict must run the EXACT SAME predicate
+// sequence remoteEligible does (gate.go's eligibilityVerdict), so a
+// schema-less contract is narrated "noschema" on every node — never "slow"
+// or "unfit(ctx)" from a feasibility/adequacy check the gate never reached
+// — and a non-origin contract is narrated its own word.
+func TestOneWordVerdictAgreesWithTheGateOnSchemaAndDepth(t *testing.T) {
+	noSchema := Subtask{
+		// TimeoutSec explicit and nonzero: without it feasibleFinal reads "no
+		// opinion" (wallSec<=0) regardless of order, and this test would not
+		// actually distinguish the old (broken) order from the fixed one.
+		Contract:  core.AgentContract{SchemaVersion: core.AgentWireSchemaVersion, Goal: "summarize", Depth: 0, TimeoutSec: 300},
+		EstTokens: 1000,
+	}
+	// Two remotes of very different rate/window — under the PRE-FIX order
+	// (feasibility/adequacy checked before schema), the slow one would read
+	// "slow (fitted final ...)" instead of "noschema", contradicting the
+	// gate's own "no schema at all" refusal, which never even reaches
+	// feasibility.
+	fast := eligibleRemote()
+	fast.NodeID, fast.AgentCtxTokens = "fast", 131072
+	fast.SeatRate = &SeatRateView{TokS: 34, ColdLoadSec: 15, Samples: 5}
+	slow := eligibleRemote()
+	slow.NodeID, slow.AgentCtxTokens = "slow", 8192
+	slow.SeatRate = &SeatRateView{TokS: 5.4, ColdLoadSec: 69, Samples: 4}
+	for _, v := range []NodeView{fast, slow} {
+		if got := oneWordVerdict(noSchema, v, v.NodeID, "b-chosen", 0); got != "noschema" {
+			t.Errorf("%s verdict for a schema-less contract = %q, want exactly \"noschema\" (remoteEligible refuses on schema BEFORE feasibility/adequacy)", v.NodeID, got)
+		}
+		if remoteEligible(noSchema, v) {
+			t.Errorf("%s: remoteEligible must also refuse a schema-less contract", v.NodeID)
+		}
+	}
+
+	hop := Subtask{
+		Contract:  core.AgentContract{SchemaVersion: core.AgentWireSchemaVersion, Goal: "summarize", OutputSchema: gateSchema, Depth: 1},
+		EstTokens: 1000,
+	}
+	if got := oneWordVerdict(hop, fast, "fast", "b-chosen", 0); !strings.HasPrefix(got, "hop") {
+		t.Errorf("depth!=0 verdict = %q, want it to start with hop", got)
+	}
+	if remoteEligible(hop, fast) {
+		t.Fatal("remoteEligible must refuse a non-origin (depth != 0) contract")
 	}
 }
