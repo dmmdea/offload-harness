@@ -2663,6 +2663,10 @@ func doctorRun(cfg config.Config, routes []mediacap.Route, w io.Writer) error {
 	// Same reasoning, same place in the order: the cache-server verdicts are pure
 	// config too, so a serving layer that happens to be down must never hide them.
 	unbound := writeCacheServerSection(w, cfg)
+	// Third in the same band, for the third time the same reason: a configuration
+	// finding is pure config, so an endpoint that happens to be down must not hide
+	// the value that EXPLAINS what the operator is looking at.
+	findings := writeConfigFindingsSection(w, cfg)
 	client := llamaclient.New(cfg.Endpoint, cfg.CompletionPath, cfg.Model, 5*time.Second)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -2697,7 +2701,40 @@ func doctorRun(cfg config.Config, routes []mediacap.Route, w io.Writer) error {
 	if unbound > 0 {
 		return fmt.Errorf("%d vLLM seat(s) with no kv_cache_server binding", unbound)
 	}
+	if findings > 0 {
+		return fmt.Errorf("%d configuration finding(s) — see the config findings section above", findings)
+	}
 	return nil
+}
+
+// writeConfigFindingsSection prints ONE LINE PER non-fatal configuration finding
+// (config.Config.Findings) and returns how many — the number that makes doctor
+// exit non-zero.
+//
+// These are values that LOAD and then cannot do what they say: a fleet remote on
+// a port no node listens on, a lane base carrying the /v1 segment the client
+// appends itself, a media-lane GPU wait sitting at ten minutes against the 90 s
+// its own key documents (register C-33), a retired key the file still carries.
+// Every one of them was previously invisible: the retired-key note was a single
+// stderr line at startup that scrolls past every command, and the rest were only
+// ever observable as a dial timeout or a ten-minute block on a media call.
+//
+// Findings are reported on the config THIS PROCESS loaded, not a re-read of the
+// file, so the rows explain the behaviour the operator is actually seeing — the
+// `config:` line above says which file that was.
+//
+// A clean config prints nothing at all, header included: a green doctor stays as
+// short as it is today.
+func writeConfigFindingsSection(w io.Writer, cfg config.Config) int {
+	findings := cfg.Findings()
+	if len(findings) == 0 {
+		return 0
+	}
+	fmt.Fprintln(w, "config findings (values in the loaded config that cannot do what they say):")
+	for _, f := range findings {
+		fmt.Fprintf(w, "  FAIL  %s\n", f)
+	}
+	return len(findings)
 }
 
 // writeCacheServerSection prints ONE LINE PER vLLM SEAT of this box and returns how

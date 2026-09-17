@@ -6,6 +6,46 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **The agent client dialled `/v1/v1/chat/completions` for any base written with a `/v1`
+  suffix** (register S-37). `agent.NewLLMClient` trimmed only a trailing slash and then
+  appended `/v1/chat/completions`, so a base spelled `http://x/v1` — the shape `nim_endpoint`
+  documents, and the shape an operator copies off a vLLM seat’s own docs — produced a 404 that
+  named neither the key nor the doubling (8 rows in the delegation ledger, all on one seat).
+  The harness already owned the one normalisation rule — `swapclient.BaseURL`, the reader every
+  other consumer of `endpoint` goes through, whose own comment says a blind append "would have
+  produced `/v1/v1/models`" — and this client was the one that did not use it. It does now, so
+  `http://x`, `http://x/v1` and `http://x/v1/` all dial `/v1/chat/completions`. Normalising in
+  the constructor rather than at the ~60 call sites also keys the `modelaffinity` ticket on the
+  normalised base, so two clients spelling one endpoint two ways now contend on one gate.
+
+### Added
+- **`config.Load` refuses a configured HTTP base whose port can never answer** (register S-38).
+  `:0` is the OS’s "any free port", which nothing ever listens on; `:9` is the IANA discard
+  port — the shape of an endpoint whose value was never substituted. Both now fail the load
+  naming the key and the value, across `endpoint`, `delegate_remotes[]`,
+  `cascade_remote_lanes{}`, `seat_endpoints{}`, `fleet_queue_holder`, `tts_endpoint`,
+  `nim_endpoint`, `hailo_endpoint`, `coral_endpoint` and `pair_workloads_endpoint`. Until now
+  the only report of that class was a dial timeout on the first real call. A **loopback** base
+  on an unusual port is explicitly still allowed: INV-10 sanctions a loopback-only bench twin
+  beside the production seat, and refusing it would break measurement on the delegator box. The
+  two base-URL maps and the one base-URL list share ONE per-value gate
+  (`validateEndpointValue`) with the tailnet guard, so the never-cloud rule and the dead-port
+  rule cannot drift apart across keys.
+- **`local-offload doctor` prints a `config findings` section** — one `FAIL` row per value that
+  loads and then cannot do what it says, and a non-zero exit, like every other doctor verdict.
+  Three classes, all previously invisible: (1) a fleet/lane base shape (S-38, WARN half) — a
+  `delegate_remotes` entry not on the fleet node port `:18811`, one that is loopback (a remote
+  cannot be this box), or one carrying a `/v1` suffix; a `cascade_remote_lanes` base on neither
+  shape a lane can be (a fleet node, or a llama-swap on this box’s own `endpoint` port) or
+  carrying `/v1`; (2) `gpu_wait_ms` more than 3x `vision_gpu_wait_sec` (register C-33 — a
+  deployed 600,000 ms against a 90 s vision wait is ten minutes of blocking on every media-lane
+  call, against that key’s own documented 90 s design); (3) one row per RETIRED key the file
+  still carries (`videogen_wait_ms`, `audiogen_wait_ms`), which until now was a single stderr
+  note at startup that scrolls past every command. These WARN rather than refuse for one
+  release — a strict validator that refuses a working odd config is a worse outage than the
+  dial timeout it replaces — and the fleet/lane shapes also print one stderr line at load.
+
 ## [0.126.1] - 2026-09-17 - a remote delegation's in-flight PAIR frames name the node by its dispatch host
 
 ### Fixed
