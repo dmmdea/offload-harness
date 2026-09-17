@@ -90,6 +90,13 @@ type Server struct {
 	// node's backlog round-robins across sessions (0.113.18). Fixed at New:
 	// one process, one tenant, for its whole life.
 	tenant string
+	// configErr is the config VALIDATION error this server is running under, or
+	// nil. It is not a startup failure on purpose: an MCP server that exits
+	// removes every offload_* tool from every session with no message on any
+	// surface the operator reads. So the server starts and carries the error —
+	// offload_status publishes it as config_error and every other tool defers
+	// naming it (see configGate). Set once by WithConfigError, read-only after.
+	configErr error
 	// hailo is the lazily-built accelerator lane (ADR 0024): one Sidecar shared
 	// by every NPU tool so concurrent first calls share a single spawn.
 	// accelSidecars: one on-demand Sidecar per listed accelerator (ADR 0024, Coral
@@ -111,6 +118,44 @@ type Server struct {
 
 func New(p *pipeline.Pipeline) *Server {
 	return &Server{p: p, askCache: askcache.New(), quarantine: delegate.NewQuarantine(0), tenant: delegate.DefaultTenant()}
+}
+
+// WithConfigError records the config validation error this server is running
+// under and returns the server, so the caller reads as one line. A nil error is
+// the normal case and leaves every surface byte-identical: no config_error key,
+// no gate installed, no behaviour changed.
+func (s *Server) WithConfigError(err error) *Server {
+	s.configErr = err
+	return s
+}
+
+// configGate is the receiving middleware that keeps a server whose config failed
+// validation HONEST without making it disappear.
+//
+// A refusal means the loader could not vouch for a value the tools are about to
+// act on — typically an endpoint that dials nothing. Running the work anyway
+// spends a wall to arrive at a dial timeout, which is the exact cost this change
+// exists to remove; exiting instead takes the whole tool surface away with no
+// message. So every tool but the discovery one defers, by name, and
+// offload_status still answers because it is how the operator finds out WHY.
+//
+// It is installed only when there IS an error, so a healthy box runs the
+// unmodified handler chain.
+func (s *Server) configGate(next mcp.MethodHandler) mcp.MethodHandler {
+	return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+		if method != "tools/call" {
+			return next(ctx, method, req)
+		}
+		params, ok := req.GetParams().(*mcp.CallToolParamsRaw)
+		if !ok || params.Name == "offload_status" {
+			return next(ctx, method, req)
+		}
+		res, err := jsonResult(map[string]any{
+			"deferred": true,
+			"reason":   "config invalid: " + s.configErr.Error(),
+		})
+		return res, err
+	}
 }
 
 // parseArgs unmarshals the raw tool arguments into in. On a decode error it
@@ -141,6 +186,9 @@ func (s *Server) Run(ctx context.Context, version string) error {
 // must be byte-identical with agent_delegation_enabled off.
 func (s *Server) buildServer(version string) *mcp.Server {
 	srv := mcp.NewServer(&mcp.Implementation{Name: "local-offload", Version: version}, nil)
+	if s.configErr != nil {
+		srv.AddReceivingMiddleware(s.configGate)
+	}
 
 	// Discovery FIRST (LO-18): before this tool existed, offload_nim was the only
 	// tool that named or listed any model, so an agent inspecting the harness
@@ -587,6 +635,12 @@ func (s *Server) handleStatus(ctx context.Context, req *mcp.CallToolRequest) (*m
 	}
 	payload["kv_cache_server"] = kvCacheServerView(ctx, cfg)
 	payload["gpu_lease"] = localLeaseView(ctx, cfg)
+	if s.configErr != nil {
+		// FIRST key, not just present: this is the one tool still answering while
+		// every other one defers, so the reason has to be the first thing read —
+		// and a Go map marshals in sorted key order, which would bury it.
+		return jsonResultFirst("config_error", s.configErr.Error(), payload)
+	}
 	return jsonResult(payload)
 }
 
@@ -3002,6 +3056,33 @@ func jsonResult(v any) (*mcp.CallToolResult, error) {
 		return nil, err
 	}
 	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: string(b)}}}, nil
+}
+
+// jsonResultFirst is jsonResult with one key spliced in FRONT of the object.
+//
+// encoding/json marshals a map in sorted key order, so a key that must be read
+// before anything else cannot be placed by adding it to the map. v must marshal
+// to a JSON object; anything else is returned unchanged rather than corrupted.
+func jsonResultFirst(key string, val any, v any) (*mcp.CallToolResult, error) {
+	body, err := json.Marshal(v)
+	if err != nil {
+		return nil, err
+	}
+	head, err := json.Marshal(map[string]any{key: val})
+	if err != nil {
+		return nil, err
+	}
+	joined := body
+	switch {
+	case len(body) < 2 || body[0] != '{' || body[len(body)-1] != '}':
+		// Not an object: leave it alone rather than produce invalid JSON.
+	case len(body) == 2: // "{}"
+		joined = head
+	default:
+		joined = append(head[:len(head)-1:len(head)-1], ',')
+		joined = append(joined, body[1:]...)
+	}
+	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: string(joined)}}}, nil
 }
 
 func result(r core.Result) (*mcp.CallToolResult, error) {
