@@ -130,7 +130,11 @@ func queuePoll(ctx context.Context, cfg config.Config, holder string, contract c
 			}
 			return
 		}
-		state, data, jobErr, status, perr := pollJobOnceAt(ctx, cfg, holder+"/fleet/queue/jobs/"+pr.JobID)
+		// The queue lane keeps the CAP for a timeout_auto contract: the job is
+		// pulled by a claimant the delegator never chose, so there is no health
+		// view to size a bound from (register D-116 bounds the PUSH path).
+		p, perr := pollJobOnceAt(ctx, cfg, holder+"/fleet/queue/jobs/"+pr.JobID)
+		state, data, jobErr, status := p.State, p.Data, p.JobErr, p.Status
 		prevQueuedAt := lastQueuedAt
 		lastQueuedAt = time.Time{}
 		switch {

@@ -247,7 +247,7 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	// run this function, so neither can drift from the other.
 	rates := p.seatRates()
 	if contract.TimeoutAuto {
-		auto, note := autoWallFor(p.cfg, contract, seat, rates.Get(seat))
+		auto, note := AutoWallFor(p.cfg, contract, seat, rates.Get(seat))
 		if auto > 0 {
 			timeoutSec = auto
 			wire.WallSec = auto
@@ -356,6 +356,27 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		log.Printf("agent task: seat coherence (%s): %s", seat, note)
 		return deferWire(core.DeferClassInfrastructure, note)
 	}
+	// Publish the wall this run is ACTUALLY under (register D-116), HERE — at
+	// the one line where the wall actually begins, and never before it. The
+	// node door writes it onto the job record, so a poll of a RUNNING job
+	// carries it and the delegator can bound its own clock by the node's,
+	// instead of learning the number only from a final result a dead node
+	// never sends. No reporter on the context (the local lane, a test) = a
+	// no-op.
+	//
+	// WHY NOT AT THE SIZING (where it was first written, D-116 review finding
+	// 1): everything above this line — the cordon wait, the llama-swap
+	// pre-flight, the cold-load warm-up, the coherence probe — is ADMISSION,
+	// up to admissionBudget (300 s by default) spent in job state `running`
+	// because the node claims a job before it runs it. Publishing the wall at
+	// the top made `wall_sec` mean "a wall was SIZED", and a delegator that
+	// anchors its clock on it would have started counting a 300 s wall while
+	// the seat still had 250 s of loading to do. Published here it means "the
+	// wall has STARTED", which is the fact the delegator's clock needs. An
+	// admission defer therefore publishes no wall at all — correct: no wall
+	// ever ran. (Safe to move: `wall_sec` ships for the first time in this
+	// same release, so no deployed node ever published the earlier meaning.)
+	core.ReportWall(ctx, timeoutSec)
 	cctx, cancel := context.WithTimeout(ctx, wall)
 	defer cancel()
 	// One busy-seat budget for the WHOLE contract (seatwait): every chat step
@@ -1356,8 +1377,10 @@ func admissionBudget(sec int) time.Duration {
 	case sec == 0:
 		// 300 s since 0.115.11 (was 120): the budget now also covers the seat's
 		// own cold load (warmSeat), and a vLLM seat takes 125–250 s to load
-		// plus a Triton JIT on its first completion.
-		return 300 * time.Second
+		// plus a Triton JIT on its first completion. The number lives in core
+		// because the DELEGATOR must allow for this window too (register
+		// D-116) and cannot import this package.
+		return time.Duration(core.AgentAdmissionSecDefault) * time.Second
 	}
 	return time.Duration(sec) * time.Second
 }
@@ -1693,22 +1716,11 @@ func (p *Pipeline) seatRates() *seatrate.Store {
 // and estimate) — charged at the final budget as an upper bound, which a seat
 // answering in the object shape never pays.
 func finalBudgetsFor(cfg config.Config, contract core.AgentContract) (final, repack int) {
-	step := cfg.AgentMaxTokens
-	if step <= 0 {
-		step = 1024
-	}
-	final = agent.FinalBudgetFor(step)
-	steps := contract.MaxSteps
-	if steps <= 0 {
-		steps = core.AgentMaxStepsDefault
-	}
-	if steps == 1 {
-		final = step
-	}
-	if len(contract.OutputSchema) > 0 {
-		repack = final
-	}
-	return final, repack
+	// ONE copy of the rule (seatrate.FinalBudgets, register D-116): the
+	// DELEGATOR now sizes its poll clock from the same function, against what
+	// this node advertises on health, so the two can never disagree about what
+	// the final answer and its re-pack cost.
+	return seatrate.FinalBudgets(cfg.AgentMaxTokens, contract.MaxSteps, len(contract.OutputSchema) > 0)
 }
 
 // autoWallFor sizes the wall of a timeout_auto contract on this seat (register
@@ -1719,19 +1731,28 @@ func finalBudgetsFor(cfg config.Config, contract core.AgentContract) (final, rep
 // ceiling, not a spend, and the over-provision is at most the admission
 // budget's worth. Returns 0 when the seat has no rate yet — the caller keeps
 // the wire default — and always a note naming the arithmetic or its absence.
-func autoWallFor(cfg config.Config, contract core.AgentContract, seat string, known seatrate.Seat) (int, string) {
-	est := wallEstimateFor(cfg, contract, seat, known, 0, core.AgentTimeoutSecDefault)
-	if est.TotalSec <= 0 {
+func AutoWallFor(cfg config.Config, contract core.AgentContract, seat string, known seatrate.Seat) (int, string) {
+	wall, est := seatrate.AutoWallFor(SeatPolicyFor(cfg, seat, known), contract)
+	if wall <= 0 {
 		return 0, fmt.Sprintf("auto wall for %s: no rate yet, running at the wire default %d s (%s)", seat, core.AgentTimeoutSecDefault, est.Note)
 	}
-	wall := est.TotalSec
-	switch {
-	case wall < core.AgentTimeoutSecDefault:
-		wall = core.AgentTimeoutSecDefault
-	case wall > core.AgentTimeoutSecCap:
-		wall = core.AgentTimeoutSecCap
-	}
 	return wall, fmt.Sprintf("auto wall for %s: %d s (estimate %d s, bounds %d..%d)", seat, wall, est.TotalSec, core.AgentTimeoutSecDefault, core.AgentTimeoutSecCap)
+}
+
+// SeatPolicyFor is THIS box's seat policy for the agent seat: the loop's step
+// budget and thinking policy from config, the measured rate from the
+// machine-local seat-rates store (else the configured agent_seat_tok_s).
+// Exported beside AutoWallFor so the delegator's anti-drift test can size the
+// same contract on the node's arithmetic and on its own (register D-116).
+func SeatPolicyFor(cfg config.Config, seat string, known seatrate.Seat) seatrate.SeatPolicy {
+	p := seatrate.SeatPolicy{Seat: seat, StepTokens: cfg.AgentMaxTokens, Thinking: cfg.AgentThinking, ColdLoadSec: known.ColdLoadSec}
+	switch {
+	case known.TokS > 0:
+		p.TokS, p.RateSamples, p.RateSource = known.TokS, known.Samples, "store"
+	case cfg.AgentSeatTokS > 0:
+		p.TokS, p.RateSource = cfg.AgentSeatTokS, "config agent_seat_tok_s"
+	}
+	return p
 }
 
 // wallEstimateFor sizes one contract on one seat (register D-03): the seat's
@@ -1740,30 +1761,10 @@ func autoWallFor(cfg config.Config, contract core.AgentContract, seat string, kn
 // budgets, and whether the run thinks (one starved think block is what `auto`
 // cost on both fleet seats, 2026-09-10).
 func wallEstimateFor(cfg config.Config, contract core.AgentContract, seat string, known seatrate.Seat, coldLoadSec float64, timeoutSec int) seatrate.Estimate {
-	in := seatrate.Input{Seat: seat, MaxSteps: contract.MaxSteps, TimeoutSec: timeoutSec}
-	if in.MaxSteps <= 0 {
-		in.MaxSteps = core.AgentMaxStepsDefault
-	}
-	in.StepBudget = cfg.AgentMaxTokens
-	if in.StepBudget <= 0 {
-		in.StepBudget = 1024
-	}
-	in.FinalBudget, in.RepackBudget = finalBudgetsFor(cfg, contract)
-	switch strings.ToLower(thinkingFor(cfg, contract)) {
-	case "", "auto":
-		in.ThinkingAuto = true
-	case "on":
-		in.ThinkingOn = true
-	}
-	in.ColdLoadSec = known.ColdLoadSec
+	in := seatrate.InputFor(SeatPolicyFor(cfg, seat, known), contract)
+	in.TimeoutSec = timeoutSec
 	if coldLoadSec > in.ColdLoadSec {
 		in.ColdLoadSec = coldLoadSec
-	}
-	switch {
-	case known.TokS > 0:
-		in.TokS, in.RateSamples, in.RateSource = known.TokS, known.Samples, "store"
-	case cfg.AgentSeatTokS > 0:
-		in.TokS, in.RateSource = cfg.AgentSeatTokS, "config agent_seat_tok_s"
 	}
 	return seatrate.Compute(in)
 }

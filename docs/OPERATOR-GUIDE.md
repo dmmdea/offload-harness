@@ -585,7 +585,7 @@ does NOT contain:
 | clock | set by | contains | does not contain |
 |---|---|---|---|
 | `timeout_sec` (contract; default 300, box `agent_timeout_sec`) | the caller | the node's whole run: probe, build, loop, structured re-pack | placement wait, admission, cold load, queue time |
-| delegator poll | `timeout_sec` + a grace window; C-27 credits back intervals the node PROVABLY spent queued (both endpoints observed `accepted`), bounded at `min(timeout_sec + grace, 5 min)`; a job that never started is a `queue deadline` FAILURE, never a `budget` defer | waiting for the node's answer | the capacity wait (`agent_placement_wait_sec`, `results[].capacity_wait_sec`) |
+| delegator poll | `timeout_sec` + a grace window — for an UNSIZED (`timeout_auto`) contract, the bound the target node's advertised `seat_rate`/`seat_budget` imply, by the node's own arithmetic, plus a 300 s allowance for the node's admission (cordon, pre-flight, cold load, coherence probe — all spent in state `running`) until the node publishes a started `wall_sec`, at which point the clock is re-anchored on that wall start and the allowance drops; the 900 s cap when the node advertises no rate, or when the run is placed on a composite LAYER seat whose rate health does not publish (D-116); C-27 credits back intervals the node PROVABLY spent queued (both endpoints observed `accepted`), bounded at `min(poll bound + grace, 5 min)`; a job that never started is a `queue deadline` FAILURE, never a `budget` defer | waiting for the node's answer | the capacity wait (`agent_placement_wait_sec`, `results[].capacity_wait_sec`) |
 | admission + warm-up (`agent_admission_wait_sec`, default 300) | the node, BEFORE its wall starts (D-64) | another model's swap on the endpoint, then the seat's own cold load (`admission_wait_sec`, `admission_note`) | anything after the first token |
 | coherence probe (`agent_coherence_probe`, default `cold`) | the node, after the warm-up and still BEFORE its wall (D-118) | one ≤ 96-token completion asking the freshly loaded seat to call `read_file` and answer DONE (`coherence_note`; its time is added to `admission_wait_sec`) | the loop, the re-pack, anything the contract asked for |
 | node wall | `timeout_sec` as a context deadline over the loop | every planner call, tool execution, the re-pack | — |
@@ -604,10 +604,20 @@ processes on one box never drop each other's sample); until a seat has a sample,
 box config stands in, and with neither the note says so and no numbers are published. **The estimate never changes an explicit
 wall** — a contract that names `timeout_sec` runs under it exactly as before. A contract that names NONE is sized by it
 (0.126.0, register D-03): intake stamps `timeout_auto`, the executing node clamps this estimate to 300..900, runs under
-that and reports it as `results[].wall_sec` (`wall_note` prefixed `auto wall`), the delegator holds the 900 s cap open
-for it, and every retry carries an explicit remainder instead; a seat with no rate yet runs the 300 s default. The
-accepted cost of holding the cap open: a node that acks and then dies silently is abandoned after 900 s on this path
-rather than 300 s — bounded and rare; the node's advertised `seat_rate` is the tighter bound, a follow-up.
+that and reports it as `results[].wall_sec` (`wall_note` prefixed `auto wall`), and every retry carries an explicit
+remainder instead; a seat with no rate yet runs the 300 s default. **The delegator polls it at the node's wall, not at
+the cap** (register D-116, and the paid-down "accepted cost" of 0.126.0 — a node that acked and then died silently used
+to be abandoned 900 s later even when its own wall had been 300 s). The delegator's BUDGET — the retry remainder, the
+re-placement ledger — still holds the cap open, because the node may legitimately size anything up to it; its POLL CLOCK
+is sized from that node's `/fleet/health` `seat_rate` + `seat_budget` through the same function the node sizes its wall
+with (`seatrate.AutoWallFor`, clamped to the same 300..900), so the two clocks cannot drift. The node's own number
+overrides the estimate the moment a running poll publishes it: `/fleet/jobs/{id}` now carries `wall_sec` while the job
+RUNS, and the delegator RAISES its bound to it — it may never lower it, because abandoning a job the node is still
+running inside its own wall is the one failure this must not buy. The deadline message names the bound it used (`poll
+bound: sized from <node>'s seat_rate 30.0 tok/s (5 samples): 612 s` / `poll bound: the node's own wall 720 s` / `poll
+bound: cap: no seat rate advertised by <node>`), and the same line rides every result as `results[].poll_note`. A
+contract that names its own `timeout_sec` is polled exactly as before, with no note. The `queue` route still polls at the
+cap: its claimant is not a node the delegator chose, so there is no health view to size from.
 For an explicit wall, `wall X s is BELOW the estimate` in `wall_note` (and
 the node log) is the caller's signal to size the contract. A contract with an `output_schema` carries one more term
 (0.117.2): `+ re-pack ≤ N tok` — one final-budget completion for the structured re-pack of a prose answer, an upper

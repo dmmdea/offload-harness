@@ -202,7 +202,7 @@ func TestRunRemoteRecordsIntentAndOrphansOnDeadline(t *testing.T) {
 	// 1-second budget: the node stays `running` past the deadline → owned-job
 	// poll-deadline defer → the intent must survive OPEN.
 	pr := r.runRemote(context.Background(), srv.URL, "agd-orphan1",
-		coreContract("map the corpus", 1))
+		coreContract("map the corpus", 1), NodeView{NodeID: "fake-node"}, "")
 	if !pr.Result.Deferred {
 		t.Fatalf("expected the owned-deadline defer, got %+v", pr)
 	}

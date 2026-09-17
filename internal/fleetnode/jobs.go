@@ -60,6 +60,14 @@ type JobView struct {
 	// tokenless (auth scope v1 = the agent lane only). Never serialized to the
 	// wire: jobWire's shape is unchanged.
 	Agent bool
+	// WallSec (register D-116) is the wall the RUNNING job is executing under,
+	// as the executing lane reported it (core.ReportWall). 0 = not reported
+	// yet, or a lane that reports none. It rides the per-job poll payload so a
+	// delegator polling a timeout_auto contract can bound its own clock by the
+	// node's sized wall instead of by the wire cap — the node's wall is
+	// authoritative, and a delegator must never abandon a job the node is
+	// still running inside it.
+	WallSec int
 	// Gated marks a job whose poll rides the SAME bearer rule as an agent
 	// job without being one (0.116.0: the vision lane — its result is the
 	// caller's image judged in prose). Kept apart from Agent so the jobs feed
@@ -82,6 +90,7 @@ type job struct {
 	agent      bool      // created via AcceptAgent → poll auth applies (server.go handleJob)
 	gated      bool      // AcceptSpec.Gated → poll auth applies without the agent marker (vision lane)
 	terminalAt time.Time // set when state turns done|error; drives ttl eviction
+	wallSec    int       // the wall the run reported (register D-116); 0 = none reported
 	// task/model/acceptedAt/startedAt/finishedAt are the /fleet/jobs feed's
 	// metadata (see AcceptSpec). Written under mu exactly like every other
 	// field here: acceptedAt in Admit, startedAt in claimLocked's
@@ -544,7 +553,25 @@ func (j *Jobs) Get(id string) (*JobView, bool) {
 	if !ok {
 		return nil, false
 	}
-	return &JobView{ID: id, State: jb.state, Data: jb.data, Error: jb.err, Agent: jb.agent, Gated: jb.gated}, true
+	return &JobView{ID: id, State: jb.state, Data: jb.data, Error: jb.err, Agent: jb.agent, Gated: jb.gated, WallSec: jb.wallSec}, true
+}
+
+// SetWall records the wall (seconds) the job's run reported it is executing
+// under (register D-116). Unknown ids and non-positive walls are ignored, and
+// a TERMINAL job is never rewritten: the result carries its own wall from
+// there on, and a late report must not edit a finished record. The last
+// report before a job turns terminal wins — a wall is stamped once today.
+func (j *Jobs) SetWall(id string, sec int) {
+	if sec <= 0 {
+		return
+	}
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	jb, ok := j.m[id]
+	if !ok || jb.state == JobDone || jb.state == JobError {
+		return
+	}
+	jb.wallSec = sec
 }
 
 // Recent returns up to n jobs (n <= 0 = all), newest by acceptedAt first,

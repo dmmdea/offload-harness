@@ -39,7 +39,7 @@ func TestRunAgentTaskStampsTheAutoWallFromTheSeatRate(t *testing.T) {
 	auto := testContract()
 	auto.MaxSteps, auto.TimeoutSec, auto.TimeoutAuto = 12, core.AgentTimeoutSecDefault, true
 	store, _ := seatrate.Load(seatrate.Path(state))
-	want, _ := autoWallFor(cfg, auto, agentTestSeat, store.Get(agentTestSeat))
+	want, _ := AutoWallFor(cfg, auto, agentTestSeat, store.Get(agentTestSeat))
 	if want <= core.AgentTimeoutSecDefault {
 		t.Fatalf("fixture drifted: the auto wall %d must exceed the default to be observable", want)
 	}

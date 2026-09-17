@@ -201,7 +201,8 @@ func RecoverOrphans(ctx context.Context, cfg config.Config) (int, error) {
 			ledger.done(jobID, "expired unrecovered after "+age.Truncate(time.Hour).String())
 			continue
 		}
-		state, data, jobErr, status, perr := pollJobOnce(ctx, cfg, ev.Base, jobID)
+		p, perr := pollJobOnce(ctx, cfg, ev.Base, jobID)
+		state, data, jobErr, status := p.State, p.Data, p.JobErr, p.Status
 		switch {
 		case perr != nil:
 			// Node unreachable right now: leave open; a later pass retries.
@@ -236,43 +237,60 @@ func RecoverOrphans(ctx context.Context, cfg config.Config) (int, error) {
 	return recovered, nil
 }
 
+// jobPoll is one poll's answer. A struct rather than a widening return list
+// because the wall (register D-116) is the fourth fact a poll now carries and
+// the three callers read different subsets of it.
+type jobPoll struct {
+	State  string
+	Data   json.RawMessage
+	JobErr string
+	// WallSec is the wall the node says the RUNNING job is executing under
+	// (jobWire `wall_sec`, register D-116). 0 on a node too old to publish it,
+	// or on a lane that reports none — never read as "no wall".
+	WallSec int
+	Status  int
+}
+
 // pollJobOnce is runner.pollOnce lifted to package level so the recovery pass
 // (which has no runner) polls by the SAME rules. The runner method delegates
 // here — one poll implementation, two callers.
-func pollJobOnce(ctx context.Context, cfg config.Config, base, jobID string) (state string, data json.RawMessage, jobErr string, status int, perr error) {
+func pollJobOnce(ctx context.Context, cfg config.Config, base, jobID string) (jobPoll, error) {
 	return pollJobOnceAt(ctx, cfg, strings.TrimRight(strings.TrimSpace(base), "/")+"/fleet/jobs/"+jobID)
 }
 
 // pollJobOnceAt polls an EXPLICIT job URL — the queue holder's results route
-// (ADR 0030) shares the wire shape but not the push path's URL layout.
-func pollJobOnceAt(ctx context.Context, cfg config.Config, u string) (state string, data json.RawMessage, jobErr string, status int, perr error) {
+// (ADR 0030) shares the wire shape but not the push path's URL layout. The
+// error covers transport-level failure only; an HTTP answer of ANY status
+// comes back as a jobPoll with a nil error.
+func pollJobOnceAt(ctx context.Context, cfg config.Config, u string) (jobPoll, error) {
 	rctx, cancel := context.WithTimeout(ctx, pollRequestTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(rctx, http.MethodGet, u, nil)
 	if err != nil {
-		return "", nil, "", 0, err
+		return jobPoll{}, err
 	}
 	if cfg.FleetAuthToken != "" {
 		req.Header.Set("Authorization", "Bearer "+cfg.FleetAuthToken)
 	}
 	resp, err := fleetClient.Do(req)
 	if err != nil {
-		return "", nil, "", 0, err
+		return jobPoll{}, err
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxFleetBody))
 	if err != nil {
-		return "", nil, "", 0, err
+		return jobPoll{}, err
 	}
 	var wire struct {
-		State string          `json:"state"`
-		Data  json.RawMessage `json:"data"`
-		Error string          `json:"error"`
+		State   string          `json:"state"`
+		Data    json.RawMessage `json:"data"`
+		Error   string          `json:"error"`
+		WallSec int             `json:"wall_sec"`
 	}
 	if resp.StatusCode == http.StatusOK {
 		if uerr := json.Unmarshal(body, &wire); uerr != nil {
-			return "", nil, "", 0, fmt.Errorf("job poll %s: not JSON: %w", u, uerr)
+			return jobPoll{}, fmt.Errorf("job poll %s: not JSON: %w", u, uerr)
 		}
 	}
-	return wire.State, wire.Data, wire.Error, resp.StatusCode, nil
+	return jobPoll{State: wire.State, Data: wire.Data, JobErr: wire.Error, WallSec: wire.WallSec, Status: resp.StatusCode}, nil
 }

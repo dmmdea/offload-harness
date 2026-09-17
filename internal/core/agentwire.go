@@ -54,6 +54,23 @@ const (
 	AgentTimeoutSecDefault = 300
 	AgentTimeoutSecCap     = 900
 
+	// AgentAdmissionSecDefault is the node's default ADMISSION budget — the
+	// window a contract may spend at the cordon, in the llama-swap pre-flight,
+	// in the seat's cold-load warm-up and in the coherence probe BEFORE its
+	// wall starts (pipeline.admissionBudget; 300 s since 0.115.11, because a
+	// vLLM seat takes 125–250 s to load plus a Triton JIT on its first
+	// completion).
+	//
+	// It lives in core, and not only in the pipeline, because the DELEGATOR
+	// has to allow for it too (register D-116): a node stamps `running` the
+	// moment it claims a job — admission included — so an auto contract's poll
+	// clock, which starts at dispatch, must cover admission + wall or it
+	// abandons a job on a cold seat while the node is still inside its own
+	// wall. internal/delegate cannot import internal/pipeline (the pipeline
+	// imports the delegator), so the number is defined once, here, and read by
+	// both sides.
+	AgentAdmissionSecDefault = 300
+
 	// --- The write door (register D-06). Fixed ceilings, NOT contract fields.
 	// A caller cannot raise them (that is the point of a door) and does not
 	// need to lower them: `diff_max_files:<n>` already expresses "this leg may

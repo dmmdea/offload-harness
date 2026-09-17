@@ -583,7 +583,7 @@ decode error is an ack-time 400 with the decoder's reason.
 | `max_steps` | int | Loop step budget. Default 12, clamped to 12 — an over-ask is clamped, not rejected. |
 | `setup_actions` | `[{tool, args}]` | Optional (0.113.24, ADR 0036 P2). ≤ 8 tool calls the node REPLAYS before the model's first turn, through the seat's env rules and dispatch, spending no step; validated at decode (bare tool name, args a JSON object ≤ 4 KiB) — a bad list is a 400 naming `setup_actions`. Whether the tool exists on this seat is answered as an observation. A node with `agent_seed_context_reads: true` prepends one `read_file` per context doc on its own; seeded reads plus the contract's actions are one list clamped to 8 per run (seeded first). A node one release behind IGNORES the field (unknown fields are kept for the mixed fleet) and reports no `setup_ran`. Since 0.115.12 a committed replay feeds the exact-repeat breaker (a model call repeating it byte for byte is refused with "you already have that result" — one copy of the document in the transcript, not two) and a replayed `read_file` that reached EOF ends with a `(complete file: N lines …)` footer instead of a continuation hint. |
 | `timeout_sec` | int | Wall ceiling, enforced node-side as a context deadline over probe + build + loop + re-pack. Default 300, clamped to 900. Since 0.126.0 (register D-03) a caller who names none gets the default PLUS `timeout_auto`, and the node sizes the wall itself — see the next row. |
-| `timeout_auto` | bool | 0.126.0 (register D-03). Stamped by intake when the caller named no `timeout_sec`: the executing node sizes the wall from its seat's measured rate (the same estimate published as `wall_estimate_sec`), clamped to 300..900, runs under it and reports it as `wall_sec`. A seat with no rate yet runs the default. Never set next to a caller's own `timeout_sec`; never set on a retry or re-placement (its wall is what is left). The delegator budgets, polls and re-places an auto contract at the cap. An older node ignores the field and runs the default. |
+| `timeout_auto` | bool | 0.126.0 (register D-03). Stamped by intake when the caller named no `timeout_sec`: the executing node sizes the wall from its seat's measured rate (the same estimate published as `wall_estimate_sec`), clamped to 300..900, runs under it and reports it as `wall_sec`. A seat with no rate yet runs the default. Never set next to a caller's own `timeout_sec`; never set on a retry or re-placement (its wall is what is left). The delegator's **budget** (the retry remainder, the re-placement ledger) still holds the 900 s cap open, but since register D-116 its **poll clock** does not: it is sized from what the target node advertises (`seat_rate` + `seat_budget`) by the same arithmetic the node sizes its wall with, raised to the node's own `wall_sec` the moment a running poll publishes one, and only a node advertising no rate is polled to the cap — see [the poll deadline](#job-protocol-delegator--node). An older node ignores the field and runs the default. |
 | `thinking` | string | Optional (0.115.8). The planner think-block policy on the executing seat: `auto` (empty; falls back to the node's `agent_thinking`, then auto) thinks every step and re-issues an EMPTY final once with thinking off at 4× the step budget; `off` renders every planner call in non-thinking mode (`chat_template_kwargs: {"enable_thinking": false}`, the re-pack's knob) — for grounded extraction on a thinking seat that spends its budget in the think block; `on` never sends the kwarg (a template that rejects it). Any other string is a 400 naming `thinking`. |
 | `write_root` | string | Optional (0.122.0, register D-06). Opens the WRITE door: a directory RELATIVE to the run's read root (this node's materialized context dir) the seat may create and change files under. Must be relative and non-escaping — no `..`, no absolute or volume-qualified path, no `.git` segment, no reserved Windows device name, no trailing space or dot — validated on every platform, because the delegator and the node can be different operating systems. Refused unless this node's config says `agent_allow_write: true`: an ack-time 400 on the fleet path (so the delegator re-places), `defer_class: "write"` on the in-process local path. See [The write door](../FLEET-NODE.md#the-write-door-agent_allow_write-default-off). |
 | `depth` | int | **Advisory on the wire**: the node derives `max(1, depth)` for anything that arrives over the fleet wire, so a wire claim of "origin" is never trusted. The delegator's placement gate separately requires the requester's depth to be 0 (hop limit 1). |
@@ -838,6 +838,18 @@ fleet-overview.md's "A failed `/fleet/jobs` fetch is distinguished from an empty
   node never saw, or evicted, the job): re-dispatch the same id, bounded at 2 re-dispatches — a
   node that keeps forgetting the job is broken, and re-POSTing forever would re-run the
   contract on every node restart.
+- The poll payload is `{job_id, state, data?, error?}` plus, since register D-116, **`wall_sec`**:
+  the wall the RUNNING job is executing under, as the executing lane reported it
+  (`core.ReportWall` → `Jobs.SetWall`). Additive and `omitempty` — a lane that reports none
+  publishes the pre-D-116 payload, and a delegator too old to read it ignores the field. It
+  exists because the node's sized wall used to reach the delegator only on the FINAL result,
+  which is exactly the message a node that dies mid-run never sends. Never rewritten once the
+  job is terminal: from there the result carries its own `wall_sec`.
+  It is reported at the line that OPENS the wall context — **after** admission — so it means
+  *the wall has started*, not *a wall was sized*: a job sits in state `running` for its whole
+  admission window (cordon, pre-flight, cold load, coherence probe), and the delegator anchors
+  its poll clock on the first `wall_sec` it sees. A run that defers during admission therefore
+  publishes no `wall_sec` at all, which is correct — no wall ever ran.
 - **Poll deadline** = the contract's `timeout_sec` + 60 s grace. Past it the delegator stops
   polling — the node may still finish server-side; the job id in the telemetry line lets an
   operator reconcile by hand. The outcome depends on whether the node ever ANSWERED about the
@@ -846,6 +858,30 @@ fleet-overview.md's "A failed `/fleet/jobs` fetch is distinguished from an empty
   unparseable body — is a **failure**, because a delegator that manufactures a defer stamped
   with a silent node's id and seat is inventing a report nobody on that node ever made. Every
   poll failure is logged, and the last one is quoted in the reason.
+- **An unsized (`timeout_auto`) contract is polled at the node's wall, not at the cap** (register
+  D-116). `timeout_sec` on such a contract is only the wire default, and the node decides the real
+  wall — so the delegator sizes its clock from that node's advertised `seat_rate` and `seat_budget`
+  through the SAME function the node uses (`seatrate.AutoWallFor`; the node's entry point is
+  `pipeline.AutoWallFor`, the delegator's is `delegate.autoPollBound`, and a test runs both on one
+  contract so they cannot drift **while both are fed the same seat**), clamped to the same 300..900.
+  Four bounds, and the deadline message names which one applied: `poll bound: sized from <node>'s
+  seat_rate X tok/s (N samples): M s`, `poll bound: the node's own wall M s, from where the node
+  started it` (a running poll published `wall_sec`; the node's number and its START are
+  authoritative, so the clock is re-anchored there and can only ever be RAISED after), `poll bound:
+  cap: no seat rate advertised by <node>`, or `poll bound: cap: the contract runs on <node>'s seat
+  <x> and only <agent_seat>'s rate is advertised` — a COMPOSITE placement runs the dispatched
+  layer's seat and the node sizes its wall from that seat's rate, which health does not publish, so
+  the delegator refuses to size a clock from a seat the run will not use.
+  Until a `wall_sec` is observed the bound also carries an **admission allowance** (300 s,
+  `core.AgentAdmissionSecDefault`), named in the message as `+ Xs allowed for the node's admission
+  before its wall starts`: the node's wall starts only after the cordon, the pre-flight, the seat's
+  cold load and the coherence probe, and all of that is spent in state `running`, earning no queued
+  credit. Without it an auto contract landing on a cold seat was abandoned at the poll deadline
+  while the node was still inside its own wall. The bound also rides the published result as
+  `results[].poll_note`, on a green result as much as on a deadline. A contract that names its own
+  `timeout_sec` is untouched: `timeout_sec` + grace, no note, the pre-D-116 wording exactly. So is
+  the `queue` route, where the claimant is not chosen by the delegator and there is no health view
+  to size from — it still polls at the cap.
 
 ## Source map
 

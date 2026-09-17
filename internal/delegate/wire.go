@@ -136,6 +136,14 @@ type ResultWire struct {
 	// CapacityWaitSec (0.113.18): how long this subtask waited for a node to
 	// have room (agent_placement_wait_sec) — not charged to timeout_sec.
 	CapacityWaitSec float64 `json:"capacity_wait_sec,omitempty"`
+	// PollNote (register D-116) names the bound the DELEGATOR polled this
+	// subtask at and where that number came from: "sized from <node>'s
+	// seat_rate X tok/s: N s", "the node's own wall N s", or "cap: no seat
+	// rate advertised". Present only for a contract the caller left unsized
+	// (timeout_auto) — one that named its own timeout_sec is polled at
+	// timeout_sec + grace and publishes nothing here, byte-identically to
+	// before. Delegator-side: it is NOT a field on core.AgentWireResult.
+	PollNote string `json:"poll_note,omitempty"`
 	// Calls (register D-99) is the node's per-completion record for this
 	// subtask — finish reason, token counts, thinking_off, sampling — bounded
 	// to the LAST wireCallsMax completions (the final answer and the re-pack
@@ -289,6 +297,7 @@ func WireResponse(results []PlacedResult, sum Summary, lints [][]string) Respons
 			Replacements:       pr.Replacements,
 			ReplacementNote:    pr.ReplacementNote,
 			CapacityWaitSec:    pr.CapacityWaitSec,
+			PollNote:           pr.PollNote,
 			Calls:              lastCalls(pr.Result.Calls, wireCallsMax),
 			AcceptanceLint:     lintFor(lints, i),
 			HarnessVersion:     pr.Result.HarnessVersion,

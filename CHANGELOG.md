@@ -6,6 +6,51 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- **An auto contract is polled at the node's sized wall, not at the wire cap** (register D-116). Since D-03 a contract
+  whose caller named no `timeout_sec` rides the wire as `timeout_auto` and the EXECUTING node sizes the wall from its
+  own seat's measured rate, inside 300..900. The delegator budgeted AND POLLED it at the cap, so a node that acked a job
+  and then died silently was abandoned 900 s + grace later although its own wall had been 300 s — the "accepted cost"
+  the 0.126.0 review wrote down. It is paid down here, from both ends:
+  - **The delegator sizes its poll clock from what the node advertises.** `delegate.autoPollBound(view, contract,
+    runSeat)` builds a `seatrate.SeatPolicy` from the target node's health `seat_rate` + `seat_budget` and runs
+    `seatrate.AutoWallFor` — the SAME function `pipeline.AutoWallFor` runs on the node, over the same
+    `seatrate.FinalBudgets` / `seatrate.InputFor` rule, clamped to the same
+    `[AgentTimeoutSecDefault, AgentTimeoutSecCap]`. One arithmetic, two sources of numbers; a test sizes one contract
+    through both entry points and fails if they disagree. A node advertising no usable rate is still polled to the cap —
+    unchanged behaviour, and the reason says so.
+  - **One arithmetic is one clock only while both halves are fed the SAME seat.** On a composite node the delegator
+    dispatches a LAYER, and the node re-decides it, switches to that layer's seat and sizes its wall from THAT seat's
+    rate — which health publishes for the agent seat alone (`layers` carries seats, never rates). So the decided seat is
+    carried into the bound, and a run on a seat whose rate nobody advertised falls back to the cap with
+    `poll bound: cap: the contract runs on <node>'s seat <x> and only <agent_seat>'s rate is advertised`. Without it a
+    long layer seat put the node's wall up to the whole 300..900 span beyond the delegator's clock.
+  - **The two clocks also have two STARTS, and the delegator allows for the node's.** A node stamps a job `running` the
+    moment it claims it, so its ADMISSION — the cordon wait, the llama-swap pre-flight, a vLLM seat's 125–250 s cold
+    load, the coherence probe, up to `core.AgentAdmissionSecDefault` (300 s) — is spent in `running` and earns no queued
+    credit, while the delegator's clock starts at DISPATCH. Sized at wall + grace it therefore abandoned an auto
+    contract that landed on a COLD seat while the node was still inside its own wall. Two halves close it: the
+    pre-adoption bound carries an admission allowance (named in the deadline message, and dropped the moment it is no
+    longer needed), and `wall_sec` is now published at the line that OPENS the wall context rather than at the sizing —
+    so it means "the wall has started", and the first poll carrying one RE-ANCHORS the delegator's clock to that
+    instant. An admission-time defer publishes no wall at all, because no wall ran.
+  - **The node publishes the wall it is RUNNING under.** `GET /fleet/jobs/{id}` carries `wall_sec` (additive,
+    `omitempty`) while the job is `running`, fed by `core.ReportWall` from the lane that stamps the wall through
+    `fleetnode.Jobs.SetWall` — reported where the wall STARTS, after admission. The delegator anchors its clock on the
+    first one it sees and RAISES its bound to any larger number after, never lowering it:
+    the node's wall is authoritative, and abandoning a job a node is still running inside its own wall is the one thing
+    this change must not buy. A terminal job's record is never rewritten; an older delegator ignores the field.
+  - **The poll-deadline message names the bound's source** — `poll bound: sized from <node>'s seat_rate X tok/s (N
+    samples): M s` (plus `, + Xs allowed for the node's admission before its wall starts` until a wall is observed),
+    `poll bound: the node's own wall M s, from where the node started it`, or `poll bound: cap: no seat rate advertised
+    by <node>` — on the defer and on the never-owned FAILURE alike.
+  - **Wire:** `poll_note` on `delegate.ResultWire` (so `agent_delegate` and the CLI publish it), carrying that same line
+    on every outcome including a green one. Delegator-side only: no new field on `core.AgentWireResult`.
+  - Unchanged: a contract that names its own `timeout_sec` (polled at `timeout_sec` + grace, no note, byte-identical
+    output), the queued-time credit, retries and re-placements (their walls are explicit remainders), the delegator's
+    execution BUDGET for an auto contract (still the cap — the node may legitimately size anything up to it), and the
+    `queue` route, whose claimant the delegator never chose and for which there is therefore no health view to size from.
+
 ### Added
 - **Seat coherence probe at warm: an incoherent seat defers before the wall** (register D-118). A seat can pass
   `/health`, `/v1/models`, the speed probe and the READY smoke and still be numerically broken — on 2026-09-16/17 a
