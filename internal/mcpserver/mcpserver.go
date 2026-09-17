@@ -1747,20 +1747,22 @@ func (s *Server) handleNIM(ctx context.Context, req *mcp.CallToolRequest) (*mcp.
 	})
 }
 
-// firstNonEmptyString returns the first non-blank of its arguments ("" when none).
-// withAdmission stamps an agent_run result with the cold-load warm-up, under
-// the delegation wire's names (core.AgentWireResult admission_wait_sec /
-// admission_note): a run that loaded its seat first must say so, or its wall
-// time and its window read as if the seat had been warm.
-func withAdmission(out map[string]any, coldLoad time.Duration, note string) {
-	if coldLoad > 0 {
-		out["admission_wait_sec"] = coldLoad.Seconds()
+// withAdmission stamps an agent_run result with what was spent BEFORE the wall
+// — the cordon wait plus the cold-load warm-up, summed exactly as the delegation
+// door sums its `admitted` — under that wire's names (core.AgentWireResult
+// admission_wait_sec / admission_note): a run that waited or loaded its seat
+// first must say so, or its wall time and its window read as if the seat had
+// been warm and free.
+func withAdmission(out map[string]any, admitted time.Duration, note string) {
+	if admitted > 0 {
+		out["admission_wait_sec"] = admitted.Seconds()
 	}
 	if note != "" {
 		out["admission_note"] = note
 	}
 }
 
+// firstNonEmptyString returns the first non-blank of its arguments ("" when none).
 func firstNonEmptyString(vals ...string) string {
 	for _, v := range vals {
 		if strings.TrimSpace(v) != "" {
@@ -1881,9 +1883,16 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 	// finding, 0.117.0), the exact defect class D-64 removed from the other door.
 	act := gpuactivity.Start(cfg.GPULockPath, cfg.StateDir, gpuactivity.Run{Seat: model, Kind: "agent_run", Origin: agentRunOrigin(), Goal: in.Goal, MaxSteps: maxSteps})
 	defer act.End()
-	admitDeadline := time.Now().Add(pipeline.AdmissionBudget(cfg.AgentAdmissionWaitSec))
+	admitStart := time.Now()
+	admitDeadline := admitStart.Add(pipeline.AdmissionBudget(cfg.AgentAdmissionWaitSec))
 	if lerr := modelaffinity.AwaitRunSlot(ctx, cfg.Endpoint, model, admitDeadline); lerr != nil {
 		return jsonResult(map[string]any{"deferred": true, "reason": "gpu busy: " + lerr.Error()})
+	}
+	// The cordon wait counts only when the run actually waited: an ungated pass
+	// is nanoseconds, and the delegation door's cordonWait applies the same floor.
+	cordon := time.Since(admitStart)
+	if cordon < time.Millisecond {
+		cordon = 0
 	}
 	// Cold-load warm-up — the D-64 step the pipeline door has run since 0.115.11
 	// and this door never did. A seat that is not loaded loads HERE, on what is
@@ -1940,7 +1949,7 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 		// the run whose caller must not blindly retry. Dropping the ledger here
 		// would hide the one record that matters most.
 		dout := map[string]any{"deferred": true, "reason": rerr.Error(), "steps": res.Steps}
-		withAdmission(dout, coldLoad, warmNote)
+		withAdmission(dout, cordon+coldLoad, warmNote)
 		withPlaced(dout, placed)
 		addEffects(dout, res.Effects)
 		if len(res.RuleHits) > 0 {
@@ -1962,7 +1971,7 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 		"model":      model,  // the resolved PLANNER seat — visibility is the cure for a silent seat (roast finding)
 		"ctx_window": effCtx, // the window compaction budgeted against (probed, else configured, else the conservative fallback)
 	}
-	withAdmission(out, coldLoad, warmNote)
+	withAdmission(out, cordon+coldLoad, warmNote)
 	if res.TokenizerPath != "" {
 		// Which drop rung the ladder is on — same visibility rule as ctx_window:
 		// a sticky fail-open downgrade must be reportable, not inferred.
