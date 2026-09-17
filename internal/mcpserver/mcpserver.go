@@ -1749,7 +1749,8 @@ func (s *Server) handleNIM(ctx context.Context, req *mcp.CallToolRequest) (*mcp.
 }
 
 // withAdmission stamps an agent_run result with what was spent BEFORE the wall
-// — the cordon wait plus the cold-load warm-up, summed exactly as the delegation
+// — the cordon wait, the llama-swap swap pre-flight, the cold-load warm-up, the
+// coherence probe and the served-window probe, summed exactly as the delegation
 // door sums its `admitted` — under that wire's names (core.AgentWireResult
 // admission_wait_sec / admission_note): a run that waited or loaded its seat
 // first must say so, or its wall time and its window read as if the seat had
@@ -1761,6 +1762,19 @@ func withAdmission(out map[string]any, admitted time.Duration, note string) {
 	if note != "" {
 		out["admission_note"] = note
 	}
+}
+
+// joinAdmissionNotes concatenates the admission steps' notes the way the
+// delegation door does — "; " between them, empties dropped — so one
+// admission_note can carry what the pre-flight AND the warm-up each found.
+func joinAdmissionNotes(notes ...string) string {
+	var kept []string
+	for _, n := range notes {
+		if strings.TrimSpace(n) != "" {
+			kept = append(kept, n)
+		}
+	}
+	return strings.Join(kept, "; ")
 }
 
 // withCoherence stamps the post-warm seat coherence probe (register D-118)
@@ -1895,10 +1909,47 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 	// finding, 0.117.0), the exact defect class D-64 removed from the other door.
 	act := gpuactivity.Start(cfg.GPULockPath, cfg.StateDir, gpuactivity.Run{Seat: model, Kind: "agent_run", Origin: agentRunOrigin(), Goal: in.Goal, MaxSteps: maxSteps})
 	defer act.End()
+	// THE FENCE CHECK (register S-26), BEFORE the cordon below — the same read
+	// the review lane has made since 0.125.0 (D-110) and the delegation door now
+	// makes too. Under a lease this process does not hold and that refuses new
+	// runs, the cordon cannot succeed: nothing this call can do inside its budget
+	// releases another process's lease. Both agent doors polled that file for the
+	// whole admission budget anyway — 47 rows at 300 s each in three days — and
+	// then deferred `capacity`, which is the class a caller re-places on. The
+	// verdict is on disk before the dial, so it is given now.
+	//
+	// An INHERITED lease is not a fence (`gpu reserve … -- <session>` sets
+	// GPU_LEASE_EPOCH and its own work belongs on the cards it cleared), and a
+	// plain non-fencing reservation still WAITS at the cordon: ADR 0032's "a
+	// peer-held seat is waited for" governs every hold whose answer can change.
+	//
+	// The lease read is the CORDON's own armed directory (config.Load arms it),
+	// not an independent resolution from this config: a pre-check that predicts
+	// what AwaitRunSlot will do has to read what AwaitRunSlot reads, or the two
+	// can disagree — and a process that never loaded a config has that gate
+	// deliberately inert, which this check must be too.
+	if dir := modelaffinity.GPULeaseDir(); dir != "" {
+		lease := gpulease.InspectDir(dir)
+		if fenced, why := delegate.ForeignFence(lease); fenced {
+			dout := map[string]any{
+				"deferred":    true,
+				"defer_class": string(core.DeferClassCapacity),
+				"reason": fmt.Sprintf("gpu busy: %s; no new run is admitted on this box until it is released (%s)",
+					why, delegate.HolderLine(lease)),
+				"steps": 0,
+			}
+			withPlaced(dout, placed)
+			return jsonResult(dout)
+		}
+	}
 	admitStart := time.Now()
 	admitDeadline := admitStart.Add(pipeline.AdmissionBudget(cfg.AgentAdmissionWaitSec))
 	if lerr := modelaffinity.AwaitRunSlot(ctx, cfg.Endpoint, model, admitDeadline); lerr != nil {
-		return jsonResult(map[string]any{"deferred": true, "reason": "gpu busy: " + lerr.Error()})
+		return jsonResult(map[string]any{
+			"deferred":    true,
+			"defer_class": string(core.DeferClassCapacity),
+			"reason":      "gpu busy: " + lerr.Error(),
+		})
 	}
 	// The cordon wait counts only when the run actually waited: an ungated pass
 	// is nanoseconds, and the delegation door's cordonWait applies the same floor.
@@ -1906,13 +1957,34 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 	if cordon < time.Millisecond {
 		cordon = 0
 	}
+	// ONE admission total for this door, exactly as the delegation door keeps
+	// one: the cordon, the pre-flight, the warm-up and the coherence probe all
+	// draw on the same budget and are all reported as admission, so the wall
+	// below means run time and nothing else.
+	admitted := cordon
+	// SWAP PRE-FLIGHT — the step this door never had (register S-25). llama-swap
+	// QUEUES, with no timeout of its own, any request that needs a model it is
+	// still loading or that would evict a busy one; a run that dialled through
+	// that queue spent its wall inside llama-swap and reported a wall timeout —
+	// the 600 s failures several parallel sessions reported on 2026-09-01. The
+	// delegation door has waited it out OUTSIDE the wall since 2026-09-02 (ADR
+	// 0032); this one now calls the same function, on what is left of the same
+	// admission budget, and reports it under the same wire field names.
+	// Fail-open on a probe error, exactly as over there.
+	preflight, preNote := pipeline.AwaitSeatAdmission(ctx, cfg.Endpoint, model, time.Until(admitDeadline))
+	admitted += preflight
+	if preNote != "" {
+		log.Printf("agent_run: seat admission (%s): %s", model, preNote)
+	}
 	// Cold-load warm-up — the D-64 step the pipeline door has run since 0.115.11
 	// and this door never did. A seat that is not loaded loads HERE, on what is
 	// left of the admission budget, not inside the wall below; and the window
 	// probe after it reads a loaded seat. Without it this door measured ctx_window
 	// 8,192 cold and 114,688 warm minutes apart (2026-09-16: a 222 s vLLM cold
 	// start outlasted the probe). Reported with the wire's own field names.
-	coldLoad, warmNote := pipeline.WarmSeat(ctx, cfg.Endpoint, model, time.Until(admitDeadline))
+	coldLoad, warmNote, warmAttempted := pipeline.WarmSeat(ctx, cfg.Endpoint, model, time.Until(admitDeadline))
+	admitted += coldLoad
+	admitNote := joinAdmissionNotes(preNote, warmNote)
 	// Post-warm COHERENCE probe (register D-118) — the same shared helper the
 	// delegation door runs, on the same admission budget, BEFORE the wall
 	// context below exists. A seat that is healthy by every other gate and
@@ -1920,7 +1992,11 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 	// on a freshly loaded vLLM seat) defers here in seconds instead of
 	// answering garbage for the whole wall.
 	var coherenceNote string
-	if pipeline.CoherenceProbeWanted(cfg, coldLoad > 0 || warmNote != "") {
+	// "Did the warm-up attempt a load" comes from the warm-up itself, never from
+	// its duration (a sub-tick load measures 0) and never from "a note exists"
+	// (since W-08 the exits that warm NOTHING speak too). Both derivations were
+	// tried and both mis-fire the probe.
+	if pipeline.CoherenceProbeWanted(cfg, warmAttempted) {
 		act.Phase("coherence-probe")
 		v := pipeline.ProbeSeatCoherence(ctx, cfg, model, time.Until(admitDeadline))
 		pipeline.RememberCoherence(cfg.Endpoint, model, v)
@@ -1934,12 +2010,12 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 			// The door's own deferred shape, with the probe's time charged to
 			// admission (it is admission: the wall has not started).
 			dout := map[string]any{"deferred": true, "reason": v.Note, "steps": 0}
-			withAdmission(dout, cordon+coldLoad+v.Spent, warmNote)
+			withAdmission(dout, admitted+v.Spent, admitNote)
 			withCoherence(dout, coherenceNote)
 			withPlaced(dout, placed)
 			return jsonResult(dout)
 		}
-		coldLoad += v.Spent // charged to admission, never to the wall
+		admitted += v.Spent // charged to admission, never to the wall
 		act.Phase("running")
 	} else if note, ok := pipeline.RecallIncoherentSeat(cfg.Endpoint, model); ok {
 		// The seat this process already caught, still resident (reviewer
@@ -1950,22 +2026,32 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 		coherenceNote = note
 		log.Printf("agent_run: seat coherence (%s): %s", model, note)
 		dout := map[string]any{"deferred": true, "reason": note, "steps": 0}
-		withAdmission(dout, cordon+coldLoad, warmNote)
+		withAdmission(dout, admitted, admitNote)
 		withCoherence(dout, coherenceNote)
 		withPlaced(dout, placed)
 		return jsonResult(dout)
 	}
-	cctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	built.Loop.WithObserver(act)
 	// Budget compaction against the SERVED window (probe; conservative fallback
 	// inside ResolveContextTokens when unanswerable) and run the measured-ON
 	// ladder rungs — the same defaults as the CLI (flip decision 2026-07-24).
-	// The probe runs per request: warm it is one cheap GET; against a stalled
-	// endpoint it is bounded by its own HTTP timeout inside the run's cctx
-	// budget, and the run was about to talk to that same endpoint anyway. The
-	// resolved window is reported in the result so a fallback is visible.
-	probed, probeOK := agent.ProbeServedWindow(cctx, cfg.Endpoint, model)
+	// The resolved window is reported in the result so a fallback is visible.
+	//
+	// It runs on the ADMISSION deadline and BEFORE the wall context below, the
+	// same placement the delegation door gives it (register S-24). The probe
+	// carries a ten-minute cold-start budget by design — it is allowed to absorb
+	// a load — so on the wall context a cold or slow seat could spend the run's
+	// whole clock here and be filed as a wall timeout. The warm-up above usually
+	// leaves it one cheap GET, but "usually" is what the note the warm-up now
+	// returns exists to contradict: when residency could not be settled, this is
+	// exactly the call that pays for it.
+	probeStart := time.Now()
+	pctx, pcancel := context.WithDeadline(ctx, admitDeadline)
+	probed, probeOK := agent.ProbeServedWindow(pctx, cfg.Endpoint, model)
+	pcancel()
+	admitted += time.Since(probeStart)
+	cctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	built.Loop.WithObserver(act)
 	effCtx, _ := agent.ResolveContextTokens(0, probed, cfg.AgentCtxTokens, probeOK)
 	// Real-tokenizer seam (TO-4): whole-message middle cut on the planner's own
 	// served token counts; fail-open to the legacy estimate rung when the
@@ -2003,7 +2089,7 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 		// the run whose caller must not blindly retry. Dropping the ledger here
 		// would hide the one record that matters most.
 		dout := map[string]any{"deferred": true, "reason": rerr.Error(), "steps": res.Steps}
-		withAdmission(dout, cordon+coldLoad, warmNote)
+		withAdmission(dout, admitted, admitNote)
 		withCoherence(dout, coherenceNote)
 		withPlaced(dout, placed)
 		addEffects(dout, res.Effects)
@@ -2026,7 +2112,7 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 		"model":      model,  // the resolved PLANNER seat — visibility is the cure for a silent seat (roast finding)
 		"ctx_window": effCtx, // the window compaction budgeted against (probed, else configured, else the conservative fallback)
 	}
-	withAdmission(out, cordon+coldLoad, warmNote)
+	withAdmission(out, admitted, admitNote)
 	withCoherence(out, coherenceNote)
 	if res.TokenizerPath != "" {
 		// Which drop rung the ladder is on — same visibility rule as ctx_window:

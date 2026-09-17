@@ -55,6 +55,19 @@ type agentFake struct {
 	// its exact shape.
 	running    func(n int64) string
 	runningCNT atomic.Int64
+	// runningStatus, when non-zero, is the status GET /running answers with
+	// instead of a body — llama-swap answering 500, the shape that makes every
+	// residency read FAIL rather than report "the seat is absent" (register S-24).
+	runningStatus int
+	// seatName overrides agentTestSeat as the seat this fake serves on its
+	// per-model passthrough routes (/upstream/<seat>/…). Empty = agentTestSeat,
+	// which is what every test that does not name its own seat wants.
+	seatName string
+	// rosterAliases maps a canonical roster id to the names llama-swap also
+	// answers to for it, published under meta.llamaswap.aliases exactly as the
+	// real /v1/models does. Unset = no alias block at all, so every older test
+	// sees the byte-identical roster it always saw.
+	rosterAliases map[string][]string
 	// repackStatusFor, when set, wins over repackStatus and scripts the status
 	// per attempt (1-based) — the seam a transport-THEN-validation test needs,
 	// since the two attempts must fail differently.
@@ -99,8 +112,15 @@ type agentFake struct {
 	// /upstream/{seat}/props passthrough — the A1 pin probe's source. Nil
 	// keeps the historical 404, under which every consumer fails open and the
 	// pin stays absent.
-	props      any
-	propsCNT   atomic.Int64
+	props    any
+	propsCNT atomic.Int64
+	// propsDelay stalls the FIRST /upstream/<seat>/props answer — the
+	// served-window probe's own cold-start cost, which must be paid out of the
+	// ADMISSION budget and never out of the contract's wall (register S-24).
+	// Only the first, because the post-run seat-PIN probe reads the same route
+	// on a seat that is warm by then, and stalling it would spend the wall the
+	// window probe just stopped spending.
+	propsDelay time.Duration
 	loopCalls  atomic.Int64
 	grammarCNT atomic.Int64
 	// chatFallback scripts the grammar-FREE re-pack lane (repackViaChat): a
@@ -166,11 +186,27 @@ func repackDisablesThinking(body map[string]any) bool {
 	return ok && !et
 }
 
+// seat is the model name this fake serves on its per-model passthrough routes.
+func (f *agentFake) seat() string {
+	if f.seatName != "" {
+		return f.seatName
+	}
+	return agentTestSeat
+}
+
 func (f *agentFake) server(t *testing.T) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if os.Getenv("AGENTFAKE_TRACE") != "" {
+			log.Printf("FAKE %s %s", r.Method, r.URL.Path)
+		}
 		switch r.URL.Path {
 		case "/running":
+			if f.runningStatus != 0 {
+				f.runningCNT.Add(1)
+				w.WriteHeader(f.runningStatus)
+				return
+			}
 			if f.running == nil {
 				http.NotFound(w, r)
 				return
@@ -182,12 +218,26 @@ func (f *agentFake) server(t *testing.T) *httptest.Server {
 				w.WriteHeader(f.rosterStatus)
 				return
 			}
+			// meta.llamaswap.aliases is where llama-swap publishes the names a
+			// model ALSO answers to; the roster reader resolves a bound alias to
+			// the canonical id through exactly this block.
+			type meta struct {
+				Llamaswap struct {
+					Aliases []string `json:"aliases,omitempty"`
+				} `json:"llamaswap"`
+			}
 			type m struct {
-				ID string `json:"id"`
+				ID   string `json:"id"`
+				Meta *meta  `json:"meta,omitempty"`
 			}
 			var data []m
 			for _, id := range f.rosterIDs {
-				data = append(data, m{ID: id})
+				e := m{ID: id}
+				if al := f.rosterAliases[id]; len(al) > 0 {
+					e.Meta = &meta{}
+					e.Meta.Llamaswap.Aliases = al
+				}
+				data = append(data, e)
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": data})
 		case "/v1/chat/completions":
@@ -296,13 +346,15 @@ func (f *agentFake) server(t *testing.T) *httptest.Server {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":` + string(content) + `},"finish_reason":"` + finish + `"}],"usage":{"prompt_tokens":10,"completion_tokens":7}}`))
 		default:
-			if f.props != nil && r.URL.Path == "/upstream/"+agentTestSeat+"/props" {
-				f.propsCNT.Add(1)
+			if f.props != nil && r.URL.Path == "/upstream/"+f.seat()+"/props" {
+				if f.propsCNT.Add(1) == 1 && f.propsDelay > 0 {
+					time.Sleep(f.propsDelay)
+				}
 				w.Header().Set("Content-Type", "application/json")
 				_ = json.NewEncoder(w).Encode(f.props)
 				return
 			}
-			if r.URL.Path == "/upstream/"+agentTestSeat+"/v1/models" {
+			if r.URL.Path == "/upstream/"+f.seat()+"/v1/models" {
 				n := f.upstreamCNT.Add(1)
 				if f.upstreamModels != nil {
 					w.Header().Set("Content-Type", "application/json")
