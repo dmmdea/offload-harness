@@ -2522,9 +2522,17 @@ func (r *runner) placeAutoRemote(seed string, st Subtask, localView NodeView, vi
 		}
 	}
 	if found {
+		// D-105: the verdict line is built from `dealt` as it stood WHILE
+		// scanning (every other candidate's headroom read against the state
+		// at decision time, matching what the loop above actually saw) —
+		// bestBase's own count is incremented only after.
+		verdicts := placementVerdictLine(st, views, bases, bestBase, dealt)
 		dealt[bestBase]++
-		return spreadSlot{placement: placement{view: best, base: bestBase,
-			reason: fmt.Sprintf("route=%s → %s (headroom)", r.route, best.NodeID)}}
+		reason := fmt.Sprintf("route=%s → %s (headroom)", r.route, best.NodeID)
+		if verdicts != "" {
+			reason += "; " + verdicts
+		}
+		return spreadSlot{placement: placement{view: best, base: bestBase, reason: reason}}
 	}
 	if anyEligible {
 		return spreadSlot{
