@@ -18,6 +18,13 @@ Versioning: [SemVer](https://semver.org/).
   arms at 49,152, same sampling): **8.35 vs 9.29**, gap 0.94, 21/24, every lens agreeing — the window did not
   close it (coverage 7.56 either way; accuracy 9.63 vs 9.47 and 0 fabrications on the GSQ side), so the ADR now
   records the 0.94 as the real cost of choosing concurrency and the cache server.
+  **Deployed live on the reference box the same night** (venv vLLM 0.28.0 → 0.29.0 + the carried patch; the 4B
+  seat on the new engine passes digest-8 8/8): the GSQ loads (200 s direct / 67 s front door, KV 65,967 tokens),
+  serves, and passes digest-8 **8/8 at 900 s** walls (3/8 at the 300 s wire default — timeouts, no wrong answers;
+  no decode-rate sample recorded, so D-03's auto wall needs `agent_seat_tok_s` seeded). **The bound lane stays the
+  4B**: at util 0.92 the seat takes mem0's embedder off the card (`embeddinggemma → HTTP 500`, every mem0 write
+  500) and at util 0.90 vLLM refuses the 49,152 window (estimated maximum 32,928). Binding the GSQ is an operator
+  decision recorded in the ADR: 32,768 @ 0.90 (blind 8.42 already measured), or move the embedder off the box.
   The seat declares its engine floor as data: `engine_min_version` 0.29.0 plus the checkpoint's
   `patch_vllm_qwen35_embedding.py`, which is CARRIED, not upstream (vLLM `main` still builds a stock
   `VocabParallelEmbedding` for Qwen3.5). On 0.28.0 the patch applies and is still insufficient.
