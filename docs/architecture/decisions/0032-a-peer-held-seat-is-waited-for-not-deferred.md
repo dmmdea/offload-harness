@@ -114,7 +114,7 @@ validating contracts), no daemon, every wait counted on the wire:
   review to the fleet at route `remote` under `remoteEligible`'s ctx-fit floor, waiting locally only
   when nothing out there qualifies; and `modelaffinity.LeaseError` carries the holder's declared
   window, so the defer that remains says when to come back.
-- **Amended 2026-09-17 (0.126.2, register S-26/S-25/S-24/S-08):** the admission budget above is
+- **Amended 2026-09-17 (register S-26/S-25/S-24/S-08):** the admission budget above is
   `core.AgentAdmissionSecDefault` = **300 s**, not the 120 s this ADR was written against — it was
   raised in 0.115.11 when the budget took on the seat's own cold load, and the figure is read from
   the constant by every door and by the delegator's poll allowance. Three consequences follow for

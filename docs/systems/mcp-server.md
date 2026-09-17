@@ -73,9 +73,9 @@ on the same seat behind the same llama-swap, and every difference between them s
 production rather than in review (see "Admission" in [fleet-node.md](fleet-node.md) for the ordered list
 and the reasoning). Before the cordon, `delegate.ForeignFence` reads the machine-wide lease and a hold that
 refuses this process's next run defers `capacity` in milliseconds naming the fence and the holder's declared
-window, instead of polling that file for the whole admission budget to reach the same verdict (register S-26,
-0.126.2); an INHERITED lease is not a fence. Then the llama-swap **swap pre-flight**
-(`pipeline.AwaitSeatAdmission`, register S-25, 0.126.2) waits out another session's model swap OUTSIDE the
+window, instead of polling that file for the whole admission budget to reach the same verdict
+(register S-26); an INHERITED lease is not a fence. Then the llama-swap **swap pre-flight**
+(`pipeline.AwaitSeatAdmission`, register S-25) waits out another session's model swap OUTSIDE the
 wall — this door had no pre-flight at all, so an `agent_run` that arrived mid-swap spent its wall inside
 llama-swap's silent queue. A seat that is not loaded is then warmed BEFORE the wall, on the same admission budget,
 exactly as on the delegation door (D-64), and the result reports the whole block in `admission_wait_sec` /
@@ -88,7 +88,7 @@ own "a load was attempted" answer, never on the cold load's duration (a sub-tick
 "a note exists" (the warm-up also speaks when it settled nothing). The
 window compaction budgets against is then probed live and reported as `ctx_window` (the box's
 `agent_ctx_tokens` when the probe cannot answer, the 8,192 fallback only when that is unset too) — that probe
-runs on the admission deadline too (register S-24, 0.126.2), because it is allowed to absorb a cold load and on
+runs on the admission deadline too (register S-24), because it is allowed to absorb a cold load and on
 the wall context a slow seat spent the run's whole clock on it. A resolved planner absent from the endpoint's served roster fails loud with
 `deferred: true` naming the model, never a silent fall back to the workhorse — "served" means
 matched against canonical ids **or** `meta.llamaswap.aliases`, since a tier-seeded `agent_model`
