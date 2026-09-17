@@ -6,6 +6,8 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.127.0] - 2026-09-17 - the fleet answers faster: honest node health, long-poll completion, concurrent probes, alias-aware admission on both doors, config validation that names a dead endpoint
+
 ### Added
 - **`GET /fleet/jobs/{id}?wait=<seconds>` answers when the job FINISHES** (register S-19, diagnosis
   `2026-09-17-harness-scheduling-diagnosis.md` §2(d)/§5.3). The node had no completion event at all,
