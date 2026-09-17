@@ -6,6 +6,16 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.126.1] - 2026-09-17 - a remote delegation's in-flight PAIR frames name the node by its dispatch host
+
+### Fixed
+- **A remote delegation's `queued` / `running` PAIR frames showed the delegator as the running node.**
+  `runRemote` handed the emitter the fleet node id (`<node>-ampere8`-style), which is not a PAIR member
+  name, so the lookup fell back to this box; only the terminal frame, built from the node's reported
+  name, said where the job ran (measured live on the first remote card, 2026-09-17). The in-flight
+  frames now use `pairNodeName(base, …)`: the host of the dispatch URL, the tailnet name PAIR's
+  `members.json` also carries (`docs/systems/pair-workloads.md`).
+
 ## [0.126.0] - 2026-09-17 - harness jobs appear in NVIDIA PAIR's Jobs list (`pair_workloads_*`); an auto contract is polled at the node's sized wall (D-116)
 
 ### Added
