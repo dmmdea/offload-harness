@@ -86,9 +86,11 @@ const (
 	// pre-flight, warm-up and coherence probe, before a single token.
 	PhaseAdmission = "admission"
 	// PhaseColdLoad is the seat loading for this run; PhaseCoherenceProbe is
-	// the one short probe that follows it.
+	// the one short probe that follows it; PhaseWindowProbe is the served-window
+	// read that closes admission (register S-24 — it used to run on the wall).
 	PhaseColdLoad       = "cold-load"
 	PhaseCoherenceProbe = "coherence-probe"
+	PhaseWindowProbe    = "window-probe"
 	// PhaseRunning is the planner loop; PhaseFinal the forced final step;
 	// PhaseRepack the structured re-pack.
 	PhaseRunning = "running"
@@ -288,7 +290,8 @@ func (h *Handle) OnStep(step, tokensOut int) {
 		// resets it explicitly, and a run advertised as probing for its whole
 		// life misreads a multi-minute run in `gpu status` / offload_status
 		// (reviewer finding, D-118).
-		if r.Phase == PhaseAdmission || r.Phase == PhaseColdLoad || r.Phase == PhaseCoherenceProbe {
+		if r.Phase == PhaseAdmission || r.Phase == PhaseColdLoad ||
+			r.Phase == PhaseCoherenceProbe || r.Phase == PhaseWindowProbe {
 			r.Phase = PhaseRunning
 		}
 	})

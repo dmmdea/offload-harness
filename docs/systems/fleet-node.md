@@ -58,15 +58,64 @@ executions that one config key happened to cap. A dispatch is now *admitted* to 
 scheduler goroutine claims jobs only while an execution slot is free. Two independent limits fall
 out of that:
 
-- **`fleet_max_queue_depth`** (default 32) — the admission ceiling on `accepted` + `running`, i.e. on
-  `queue_depth`. Exceeding it is the only thing that produces `503 queue full`. Unchanged in meaning
-  from 0.99.0.
+- **`fleet_max_queue_depth`** (default 2x `fleet_max_concurrent_jobs`, i.e. 8 with the default 4
+  workers — register S-04/C-25) — the admission ceiling on `accepted` + `running`, i.e. on
+  `queue_depth`. Exceeding it is the only thing that produces `503 queue full`. The refusal boundary
+  itself is unchanged in meaning from 0.99.0; only the default resolution changed, from a flat 32
+  regardless of worker count to a multiple of the concurrency the node actually has. A node admitting
+  32 deep behind 4 workers could pile up 28 jobs with no hope of starting inside any wall a caller
+  would wait out — 236 measured contracts died at the delegator's 5-minute queue deadline having
+  never started, 75% of them while another node sat idle.
 - **`fleet_max_concurrent_jobs`** (default 4) — how many admitted jobs execute at once. Exceeding it
   never refuses anything; the job waits in `accepted`. This is the limit that protects the single
   llama-swap endpoint and the GPU behind it.
 
 Both read `0` as "use the built-in default" and a negative value as "unlimited". A **busy node is not
 a full node** — that distinction is the entire point of the split.
+
+**A `queue full` 503 carries `Retry-After` (register S-04).** The refusal is a wait the node
+PUBLISHES; nothing in `internal/delegate` reads it yet — that lands with the placement release
+(`feat/placement-eta`) — but the number is there now so that PR has something to consume. It is
+never a dead end: `Retry-After` (seconds) = `ceil(excess x recent_agent_wall_sec / max(1,
+max_concurrent_jobs))`, where `excess = capped_backlog - max_concurrent_jobs` — **the CAPPED
+backlog only** (`Jobs.CountsCapped`, the same set `max_concurrent_jobs` actually bounds), never the
+wire's all-task-types `queue_depth`. An uncapped job (a render, an stt, a pipeline route) never
+waits behind `max_concurrent_jobs`, so dividing the all-jobs depth by it would inflate the estimate
+for a node whose agent slots are genuinely idle behind unrelated media load — the same class of bug
+`saturation.score` was already fixed for (S-17) and this release's own `IdleSlot` fix (S-20)
+repeats the lesson of.
+
+The header is bounded to `[5, 300]` — never "retry at once" (the queue IS full) and never an
+unbounded promise — but the CLAMP IS SAID OUT LOUD rather than disguised as a precise number, so the
+three cases read differently:
+
+- No `recent_agent_wall_sec` sample (a fresh node, or one that has never finished an agent job):
+  the flat `30`, worded as a default — `(no recent completions yet — retry in 30 s)` — never as a
+  measurement.
+- A genuine estimate inside `[5, 300]`: `(~N s until a worker frees, from recent completions)`.
+- An estimate that would exceed 300s: the header still caps at 300, but the text says
+  `(>=300 s until a worker frees, from recent completions)` rather than presenting the cap as if it
+  were the precise answer — an undisguised clamp invites every waiter to retry in lockstep at the
+  same instant.
+
+The message's existing prefix (`queue full (…): retry later, or raise fleet_max_queue_depth`) is
+unchanged, byte for byte — the delegator quotes it — with one of the three clauses above appended.
+This is deliberately **not** sized from `seat_rate.min_turn_sec`: that number is a max-final RETRY
+floor for one seat and has no relationship to how deep this node's backlog is.
+
+`/fleet/health` publishes **`queue_wait_estimate_sec`** (float, omitted when a worker is free or no
+wall sample exists) — the node's own number, so a future delegator can read it before ever being
+refused, not only after (also not yet consumed anywhere; same placement-release caveat as
+`Retry-After` above). It is the SAME `excess x recent_agent_wall_sec / max(1, max_concurrent_jobs)`
+formula and the SAME capped-backlog-only `excess`, computed off the node's CURRENT capped backlog —
+but it is **RAW, not clamped to `[5, 300]`**: Retry-After is an HTTP retry contract that must stay a
+small, boundable promise, while the health field is a delegator's own placement signal, where a
+genuine 600s estimate is more useful reported honestly than floored to 300 or hidden. Reading the
+two fields together: **absent `queue_wait_estimate_sec` with a present `recent_agent_wall_sec`
+means genuinely 0** (a worker is free right now); **both absent means unknown** (no wall sample
+exists yet to estimate from, not that the wait is zero). A job still in its ADMISSION phase
+(`jobs_admitting`) counts toward this estimate exactly like any other running job: the worker slot
+is genuinely taken, even though `saturation.score` excludes admitting jobs (no card is busy yet).
 
 Health reports both sides: `queue_depth` (unchanged meaning and shape, for existing readers such as
 the delegator's placement tie-break) plus `jobs_running`, `jobs_queued`, `max_concurrent_jobs` and
@@ -79,7 +128,7 @@ workers are all busy. `queue_depth` still decides everything those two keys do n
 > **`queue_depth`'s meaning is unchanged, but its DISTRIBUTION shifts sharply.** It always counted
 > `accepted` + `running`; before 0.100.0 those were all executing, so the number topped out near what
 > the box could sustain and a high reading was a real alarm. Now most of it can be backlog, so a
-> healthy node can legitimately sit at 31. Placement is unaffected — lower is still better, and the
+> healthy node can legitimately sit near its `max_queue_depth` (7 of 8 at the default). Placement is unaffected — lower is still better, and the
 > delegator's tie-break compares like with like across nodes — but an operator reading it cold will
 > misjudge it. Read `jobs_running` / `jobs_queued` beside it.
 
@@ -287,6 +336,20 @@ bypass; `tasks_agent_test.go` the advertisement gate and contract materializatio
 - Expecting a duplicate dispatch to return an error. Only `error` jobs do.
 - Binding with `:18811` and expecting it to work as loopback.
 - Treating Afterburner as required.
+- Sizing a queue wait, a Retry-After, or any admission refusal from
+  `seat_rate.min_turn_sec`. That number is a max-final RETRY floor for one seat, not a measure of
+  backlog depth — use `recent_agent_wall_sec` / `queue_wait_estimate_sec` instead (register S-04).
+- Assuming any queued job blocks `Jobs.IdleSlot()` (health's `saturation.idle_slot`, the shed rule
+  for `priority: -1` dispatches). Only a CAPPED queued job does (register S-20) — an uncapped one
+  (a render, an stt, a pipeline route) never contends for a capped execution slot, mirroring
+  `claimLocked`'s own skip.
+- Computing `Retry-After` / `queue_wait_estimate_sec` from the wire's `queue_depth` (all task
+  types). Both are sized from the CAPPED backlog only (`Jobs.CountsCapped`) — the same distinction
+  `IdleSlot` makes above — or a pile of unrelated uncapped media/stt/pipeline work inflates the
+  estimate for a node whose agent slots are genuinely idle.
+- Reading `queue_wait_estimate_sec` as bounded the same way `Retry-After` is. It is not: the health
+  field is the RAW estimate (useful past 300s to a delegator making its own routing decision), and
+  only the HTTP header is clamped to `[5, 300]`.
 
 ## The node's lease and its store (0.113.16)
 
@@ -800,8 +863,13 @@ remote reasoning is quarantined from the caller's context by construction.
 | `wall_estimate_sec` | int | 0.115.21: the wall the node estimated the contract needed on this seat BEFORE the loop ran — cold load + (thinking auto ? one think block : 0) + (steps − 1) × (128 tok + 6 s prefill) + final budget, at the seat's remembered rate (`seat-rates.json`, else `agent_seat_tok_s`). Absent when no rate is known. Never changes the wall. |
 | `min_turn_sec` | int | 0.115.21: cold load + one turn at the final budget — the least wall a retry is worth on this seat; since 0.117.2 it includes the re-pack term for a contract with an `output_schema`. The delegator's retry floor is `max(agent_retry_min_sec, the RETRY seat's min_turn)` — a remote node's health `seat_rate` at its `seat_budget`, the local seat's store — and only falls back to this first-attempt value when the retry seat published none (register D-46). |
 | `wall_note` | string | 0.115.21: the estimate's arithmetic (`wall 600 s is BELOW the estimate 733 s for agent-pool: cold load 210 s + one think block 4096 tok (137 s) + 11 tool steps × (128 tok + 6 s prefill) (113 s) + final 8192 tok (273 s) at 30.0 tok/s (store, 5 samples); min_turn 484 s`), or why there is none (`no decode-rate sample for … yet`). |
-| `repack_ms` / `repack_attempts` / `repack_note` | int / int / string | 0.115.23 (register D-91): how long the structured re-pack ran, how many seat completions it spent (two grammar attempts + the chat lane at most), and why it stopped or was skipped. A `length`-cut final answer (`output_truncated`) is never re-packed — the run abstains at once with `output failed schema: re-pack skipped …` and the partial in `output` — and no attempt starts with under a tenth of the wall (capped at 45 s) left (a 12 KB re-pack is a ~190 s re-generation on the 4B; three of them spent 690 s into a 900 s wall on 2026-09-10). |
+| `final_budget_fit` / `budget_note` | int / string | 0.122.1 (register D-95): the final-answer completion budget the run actually opened at, once the REMAINING wall was taken into account — never above the configured rule (4× the step budget, cap 8,192), floored at 1,024 — and the arithmetic behind the narrowing. Both absent when the seat has no measured rate or the configured budget fitted as it was. |
+| `final_reissue` | string | Register D-95. `list_cap` is the only shape: a final answer cut at the completion budget on a SCHEMA contract is re-issued once, thinking off, at the same (fitted) budget, with the schema's own list caps spelled out ("cap every list at N items … keep every string under 200 characters"), before the run falls through to the re-pack. Present whether or not the re-issue then succeeded, so a first cut and a second are distinguishable without opening `calls[]`. Gated on the wall still holding one more turn AT THE FITTED BUDGET (`final_budget_fit` above) — since 2026-09-17 (register S-06/W-07): the gate used to size that one turn from the CONFIGURED final (up to 8,192 tokens) plus a full re-pack term, which below ~9 tok/s exceeded the 900 s wall cap and could never fire at all — the #1 measured defer fleet-wide ("re-pack skipped: the final answer was cut at the completion budget", 48 rows). |
+| `repack_ms` / `repack_attempts` / `repack_note` | int / int / string | 0.115.23 (register D-91): how long the structured re-pack ran, how many seat completions it spent (two grammar attempts + the chat lane at most), and why it stopped or was skipped. A `length`-cut final answer (`output_truncated`) is never re-packed — the run abstains at once with `output failed schema: re-pack skipped …` and the partial in `output` — and no attempt starts with under a tenth of the wall (capped at 45 s) left (a 12 KB re-pack is a ~190 s re-generation on the 4B; three of them spent 690 s into a 900 s wall on 2026-09-10). Since 2026-09-17 (register D-85/D-108, S-21/W-19) the lane-probe closures behind the re-pack's client (a cascade lane's residency cache and local-busy check) are built ONCE per re-pack call and shared across every attempt instead of rebuilt fresh each time — before this, each of up to three attempts re-paid a live `/v1/models` + `/running` + per-model gauge read of the LOCAL seat before spending a token (measured fleet-wide: 1,301 rows, median 18 s, p90 109 s, max 581 s, 15.13 h total). Each attempt's own transport timeout is also now bounded by `min(seat allowance, remaining wall / attempts still owed a turn)`, so one slow attempt can no longer sit on its full per-call allowance while the retry and the chat fallback are still due. |
 | `calls` | `[{step, max_tokens, finish_reason, completion_tokens, reasoning_tokens, content_chars, reasoning_chars, tool_calls, thinking_off, reasoning_key, forced_final, ms}]` | 0.115.8 (register D-47): one entry per planner completion (0.115.19: `forced_final` marks the forced final step's call, D-89), on every result shape, set before the defer branches — the arithmetic a starvation diagnosis needs without transcript bytes. `reasoning_tokens` is vLLM's `usage.completion_tokens_details.reasoning_tokens` (0 = not reported). A pre-0.115.8 node emits none. Since 0.125.0 (register D-99) the DELEGATOR's published row `results[].calls` carries the LAST eight of these records (`omitempty`), so a caller reads them from `agent_delegate` / the CLI directly instead of from this endpoint with the fleet token. |
+| `admission_wait_sec` | float | Everything spent BEFORE the wall started, as one number: the cordon wait, the llama-swap **swap pre-flight**, the seat's cold-load warm-up, the coherence probe and — since the S-24 fix — the served-window probe. All five draw on ONE budget (`agent_admission_wait_sec`, 0 = `core.AgentAdmissionSecDefault` = 300 s, −1 = off), so the ceiling is the budget and not the sum of five of them. Omitted when zero: nothing was swapping, the seat was already resident and the window read instantly. A job sits in state `running` for this whole window, which is why the delegator's poll bound carries a matching admission allowance. |
+| `admission_note` | string | What admission DID or could not settle, `; `-joined across the steps that had something to say: `cold load Ns outside the wall`, `budget spent while <model>:<state> (proceeding into the wall)`, `running probe failed (proceeding): …`. Since the S-24 fix the warm-up also speaks from its **no-op** exits — `warm-up could not read /running (proceeding; the seat may still be cold)`, `no admission budget left for the warm-up …` — because "could not read" and "the seat is ready" used to be reported identically, and a still-cold seat reached the wall looking warm. Empty = every step settled cleanly. |
+| `ctx_window_note` | string | WHICH window the loop budgeted against and WHERE it came from — the live probe, this box's `agent_ctx_tokens`, or the conservative 8,192 fallback (`agent.ResolveContextTokens`). Both doors discarded this line until the S-24 fix, so a run that silently compacted at 8,192 on a 131,072-token seat was indistinguishable on the wire from a correct one, and the only symptom was a task that compacted for no reason. When the fallback was caused by the probe running out of ADMISSION budget, the same sentence also appears in `admission_note`, because there the fix is a cold-start problem and not a window one. |
 | `coherence_note` | string | Register D-118: the post-warm SEAT COHERENCE probe’s verdict — one ≤ 96-token completion, charged to `admission_wait_sec`, asking the freshly loaded seat to call `read_file` and answer DONE. `coherence probe: tool call parsed in Ns` (the seat is sane), `… answered in text without a tool call …` / `… inconclusive (…); proceeding` (fail-open), or `seat incoherent at warm: …`, which is also a `deferred` `infrastructure` result. Absent when the probe did not run (`agent_coherence_probe` `off`, a warm seat under the default `cold`, or a pre-D-118 node). |
 | `deferred` | bool | True = the node ran and honestly could not complete the contract. **A defer is a success shape at the job level**: the job lands `done`, never `error` — `error` is reserved for internal wiring bugs (mirrors the cascade's defer semantics). |
 | `reason` | string | Why it deferred (shapes below). |
@@ -824,15 +892,17 @@ it; the class is what code branches on, because a reason string is prose and an 
 | `no agent seat resolvable (agent_model and model both empty)` | `config` | |
 | `agent seat "…" is not in the endpoint's served roster` | `config` | A *positive* roster miss. An unreachable or empty roster proceeds instead (logged), letting the loop's first call surface the real transport error. |
 | unknown-profile message naming the valid profiles | `config` | The contract asked for a profile this build does not have. |
-| `building agent: …` / `agent loop: …` | `infrastructure` | Build or planner failure — nothing was learned about the task. |
+| `building agent: …` / `agent loop: …` | `infrastructure` | Build or planner failure — nothing was learned about the task. Carve-out since 2026-09-17 (register S-22/W-16): a PARENT cancellation mid-loop is its own shape below, not this one. |
 | `seat incoherent at warm: …` | `infrastructure` | Register D-118. The post-warm coherence probe asked the freshly loaded seat for one `read_file` call and got the NaN shape back: ≥ 20 identical non-whitespace bytes in a row, an unparsed tool-call marker with no parsed call, or nothing at all at the 96-token cap AND no hidden reasoning reported (a thinking seat cut inside its think block proceeds with a `cut inside the think block` note — the loop calls that same completion reasoning starvation, not a broken seat). It fires BEFORE the wall starts, so the contract spent seconds, and it is the ONE `infrastructure` defer the delegator retries on another node (`delegate.IncoherentSeatDefer`) — the fault is a property of that seat, and what the node's admission spent before it (the cold load that triggered the probe) is credited back to the subtask's `timeout_sec` ledger so the retry floor does not refuse the retry. A broken verdict is also remembered for 10 minutes per endpoint+seat, so the next WARM contract on the still-resident seat defers on it without spending a probe. Still a broken stack: an operator has to fix the box. |
 | `wall timeout after <N>s` | `budget` | The `timeout_sec` deadline fired, in the loop **or** in the re-pack; its own shape so the delegator can size future contracts off it. |
 | `step budget exhausted (<n> steps)` (since 0.115.19 `: <stop_note>` appended when the forced final step got a tool call) | `budget` | The loop burned `max_steps` with no final answer; `output` is empty, so there is nothing to re-pack. Since 0.115.19 the last step already asked for the answer with no tools offered, so this shape now means the seat answered even that step with a tool call (never executed; `stop_note` carries it). |
 | `empty final answer after <n> steps and <t> completion tokens: <stop_note>` | `budget` (stop `reasoning_starved`) / `abstention` (stop `empty`) | 0.115.8. The loop's final completion carried no visible content on the first attempt AND on its one re-issue with thinking off at the final budget. `budget` when the completion budget went to the think block (vLLM `reasoning` / `reasoning_tokens ≥ 0.9 × completion`, or `finish_reason: length`), `abstention` when the seat had room and said nothing. Never re-packed: before 0.115.8 this shape reached the re-pack as `""`, came back as a schema-valid all-empty object, failed acceptance, and was retried cross-seat with the wall's leftovers (2026-09-10: 20,526 tokens on the Qube 27B for zero visible characters). |
-| `output failed schema: …` | `abstention` | The re-pack reached the seat and the answer was unusable after its one retry — a validation failure, a **non-429 4xx** (the seat refusing *this* request: context length exceeded, an uncompilable grammar), or a 200 carrying zero choices. All three are the box answering; the fix is a smaller context or a flatter schema, not an operator. |
-| `structured re-pack unreachable: …` | `infrastructure` | The re-pack could not REACH the seat, or the seat is not what answered: a dial/transport failure, a **5xx**, a **429** (llama-server does not rate-limit — a 429 means something in FRONT of it answered), or a **body that could not be read or parsed** (`llama-server response body unusable: …`). The last shape covers a proxy or captive portal returning HTML with a 200, and a connection dropped mid-body: both happen AFTER the request succeeds, so no `*url.Error` / `net.Error` exists to catch them, and all three used to be filed as abstentions at exit 0. Split from the schema shape deliberately — filed under `output failed schema:` a llama-swap outage reads as a model that cannot follow a schema. The flag is sticky across the retry: a 5xx followed by a wrong-shape retry stays `infrastructure`, because a transport failure that happened at all is the operator's signal. **This is the one broken-stack shape that carries a POPULATED `output`**: the agent loop already finished, so its prose is preserved (`agenttask.go` sets `wire.Output` before the re-pack, and every failure branch below keeps it, so the CALLER still receives the loop's answer — delegator-side acceptance does not read it, since acceptance runs only when `deferred` is false) while `structured` stays absent. It is still counted into `summary.lost_to_stack` — a contract with an `output_schema` asked for a mechanically checked deliverable, and unchecked prose is not one. |
+| `output failed schema: …` | `abstention` | The re-pack's FINAL, DECISIVE attempt (the last of up to three it ran: two grammar completions then the chat fallback — register D-108, PR #366 correctness review) reached the seat and the answer was unusable — a validation failure, a **non-429 4xx** (the seat refusing *this* request: context length exceeded, an uncompilable grammar), or a 200 carrying zero choices. All three are the box answering; the fix is a smaller context or a flatter schema, not an operator. Any EARLIER attempt's own failure — including a genuine transport failure or a self-imposed cutoff — rides in the message as a note (`attempt N/3 (bound …): …`), never as what decides the class: only the LAST attempt that ran does that. |
+| `structured re-pack unreachable: …` | `infrastructure` | The re-pack's FINAL, DECISIVE attempt could not REACH the seat, or the seat was not what answered: a dial/transport failure, a **5xx**, a **429** (llama-server does not rate-limit — a 429 means something in FRONT of it answered), or a **body that could not be read or parsed** (`llama-server response body unusable: …`). The last shape covers a proxy or captive portal returning HTML with a 200, and a connection dropped mid-body: both happen AFTER the request succeeds, so no `*url.Error` / `net.Error` exists to catch them, and all three used to be filed as abstentions at exit 0. Split from the schema shape deliberately — filed under `output failed schema:` a llama-swap outage reads as a model that cannot follow a schema. **No longer sticky across every attempt** (changed 2026-09-17, register D-108, PR #366 correctness review): a 5xx on an EARLIER attempt followed by a wrong-shape answer on the FINAL one now files as `output failed schema:` (abstention) — the seat did, in the end, answer — while a genuine 5xx/429/dial-refusal on the FINAL attempt still files here regardless of what earlier attempts did. A self-imposed per-attempt-bound cutoff (`client.Timeout` firing on a request this box deliberately narrowed) is explicitly EXCLUDED from this shape even on the final attempt — see `structured re-pack attempt N/3 cut by its …` below — because a timeout is never proof the box is broken. **This is the one broken-stack shape that carries a POPULATED `output`**: the agent loop already finished, so its prose is preserved (`agenttask.go` sets `wire.Output` before the re-pack, and every failure branch below keeps it, so the CALLER still receives the loop's answer — delegator-side acceptance does not read it, since acceptance runs only when `deferred` is false) while `structured` stays absent. It is still counted into `summary.lost_to_stack` — a contract with an `output_schema` asked for a mechanically checked deliverable, and unchecked prose is not one. |
+| `structured re-pack attempt <n>/3 cut by its <bound> share of the wall` | `budget` | 2026-09-17 (register D-108, PR #366 correctness review). The re-pack's FINAL, DECISIVE attempt was ended by its OWN per-attempt bound (`min(seat allowance, remaining wall / attempts still owed a turn)`) — indistinguishable on the wire from a real hang (both surface as a `*url.Error` whose `Timeout()` is true, or wrap `context.DeadlineExceeded`), but never evidence the box is broken: filing a self-imposed cutoff as `structured re-pack unreachable:` (infrastructure) recreates, one arm over, the exact defect this PR already fixes for a canceled parent context (S-22/W-16). A dial-refused or connection-reset failure has NEITHER shape and still files as `structured re-pack unreachable:`. Any earlier attempts' own failures ride in the message as notes, same as the other two shapes. |
 | `this node does not open the write door: agent_allow_write is false …` | `write` | 0.122.0, register D-06. The contract asked for `write_root` and this node has not opted in. Its own class because it is neither a broken stack (nothing is wrong with the box) nor an unplaceable contract (another node may have opted in) — the delegator's right reflex is to re-place. On the FLEET path this never appears: `buildAgentRun` refuses at ack with a 400 so the re-placement happens there; the defer is the in-process local path, which has no ack hop. |
 | `write door: … over the N-file cap` / `… over the N-byte cap` | `write` | The run finished and its write set is past a door cap. **No diff is published** — a truncated or partial patch applies as silent damage. The fix is a smaller leg, not an operator. |
+| `agent loop: canceled (the parent context ended — the caller gave up, or this box is draining)` | `budget` | 2026-09-17 (register S-22/W-16). The PARENT context was canceled mid-LOOP — the mirror of the re-pack's own arm below, added to the loop branch which fell through to the generic `agent loop: …` infrastructure shape instead: the failed request looks exactly like a dial refusal (a `*url.Error`), so an operator used to be told to fix a box that never misbehaved (12 `agent loop: context canceled` rows filed as broken hardware). Nothing on the box failed. **The reason names no single cause, on purpose (PR #366 review):** on the FLEET NODE path the only thing that ever cancels this context is `fleetnode.Jobs.DrainAndStop` on a node drain — never a caller abandoning a poll — and that path's own mark (`state=error, err="interrupted"`) is written BEFORE the cancel that releases the run; `finish()` is write-once against an already-terminal job, so **this defer's words never reach a delegator polling a drained node at all** — the delegator reads `interrupted`, not `budget` (proven in `internal/fleetnode/jobs_test.go`, `TestJobsDrainDiscardsALateAgentBudgetDefer`). Only the LOCAL in-process path (`RunAgentContract`, no `Jobs` store in front of it) can ever surface this string to a human, and there a cancel genuinely is the caller's own context ending — hence the wording names both possibilities rather than asserting the one that is false on the fleet path. |
 | `canceled during the structured re-pack (the caller's context ended)` | `budget` | The PARENT context was canceled mid-re-pack (the delegator abandoned the poll, the node is shutting down). It arrives as a `*url.Error` exactly like a dial refusal, so it used to read as broken infrastructure — but nothing on the box failed. |
 
 More shapes originate on the **delegator**, not the node:
@@ -1033,9 +1103,10 @@ fleet-overview.md's "A failed `/fleet/jobs` fetch is distinguished from an empty
   job is terminal: from there the result carries its own `wall_sec`.
   It is reported at the line that OPENS the wall context — **after** admission — so it means
   *the wall has started*, not *a wall was sized*: a job sits in state `running` for its whole
-  admission window (cordon, pre-flight, cold load, coherence probe), and the delegator anchors
-  its poll clock on the first `wall_sec` it sees. A run that defers during admission therefore
-  publishes no `wall_sec` at all, which is correct — no wall ever ran.
+  admission window (the foreign-fence check, the cordon, the swap pre-flight, the cold load, the
+  coherence probe and the served-window probe), and the delegator anchors its poll clock on the
+  first `wall_sec` it sees. A run that defers during admission therefore publishes no `wall_sec`
+  at all, which is correct — no wall ever ran.
 - **Poll deadline** = the contract's `timeout_sec` + 60 s grace. Past it the delegator stops
   polling — the node may still finish server-side; the job id in the telemetry line lets an
   operator reconcile by hand. The outcome depends on whether the node ever ANSWERED about the
@@ -1060,14 +1131,66 @@ fleet-overview.md's "A failed `/fleet/jobs` fetch is distinguished from an empty
   the delegator refuses to size a clock from a seat the run will not use.
   Until a `wall_sec` is observed the bound also carries an **admission allowance** (300 s,
   `core.AgentAdmissionSecDefault`), named in the message as `+ Xs allowed for the node's admission
-  before its wall starts`: the node's wall starts only after the cordon, the pre-flight, the seat's
-  cold load and the coherence probe, and all of that is spent in state `running`, earning no queued
-  credit. Without it an auto contract landing on a cold seat was abandoned at the poll deadline
-  while the node was still inside its own wall. The bound also rides the published result as
+  before its wall starts`: the node's wall starts only after the cordon, the swap pre-flight, the
+  seat's cold load, the coherence probe and the served-window probe, and all of that is spent in
+  state `running`, earning no queued credit. Without it an auto contract landing on a cold seat was
+  abandoned at the poll deadline while the node was still inside its own wall. The bound also rides the published result as
   `results[].poll_note`, on a green result as much as on a deadline. A contract that names its own
   `timeout_sec` is untouched: `timeout_sec` + grace, no note, the pre-D-116 wording exactly. So is
   the `queue` route, where the claimant is not chosen by the delegator and there is no health view
   to size from — it still polls at the cap.
+
+## Admission: what a run pays before its wall starts
+
+Everything below happens while the job reads `running` and before `core.ReportWall` opens the wall
+context. One budget covers all of it (`agent_admission_wait_sec`), and every step reports into
+`admission_wait_sec` / `admission_note`. Both agent doors — the fleet contract (`runAgentTask`) and
+the MCP `agent_run` handler — run the same steps in the same order, which is the invariant the
+`agentrun_admission` suite exists to hold: each drift between them was found in production.
+
+1. **The foreign-fence check** (register S-26). The machine-wide GPU lease is read once,
+   through the directory `config.Load` armed for the cordon, and `delegate.ForeignFence` asks whether
+   it refuses THIS process's next run — an exclusive text hold, a draining cordon, or a media render
+   held by somebody else. If it does, the run defers `capacity` immediately, naming the fence and the
+   holder's line (class, pid, declared reason, expiry). Nothing the run can do inside its own budget
+   releases another process's lease, so the verdict is on disk before the first poll; the doors used
+   to poll that file for the whole budget and reach the same verdict 300 s later (47 rows, 3.92 h, in
+   the three days to 2026-09-17) while the delegator sat on the re-placement path that verdict exists
+   to trigger. An **inherited** lease (`GPU_LEASE_EPOCH`, i.e. `gpu reserve … -- <session>`) is not a
+   fence, and a plain non-fencing reservation still waits at the cordon — ADR 0032's "a peer-held seat
+   is waited for" governs every hold whose answer can still change.
+2. **The cordon** (`modelaffinity.AwaitRunSlot`, register D-93): the same rule, waited out rather than
+   refused, for a hold that arrives between the check above and this line.
+3. **The swap pre-flight** (`awaitSeatAdmission`, ADR 0032). llama-swap queues — with no timeout of
+   its own — any request that needs a model it is still loading, so a contract that dialled mid-swap
+   spent its whole wall inside that queue. This polls `GET /running` while any model is non-`ready`.
+   The seat's OWN row ends the wait at once, and since the S-08 fix that row is matched by **alias or
+   canonical id**: `/running` names models canonically while the harness binds seats by alias
+   (`agent-pool` → `qwen3.8-27b-vllm`), so the fast path was dead on every alias-bound box and a
+   READY seat slept the whole budget whenever any other model happened to be mid-swap (406 rows,
+   "/running lists the seat under another id"). The roster read that resolves the alias is lazy: it
+   happens only when the bare name missed AND the alternative is a sleep.
+4. **The cold-load warm-up** (`warmSeat`, register D-64): one GET through
+   `/upstream/<seat>/v1/models`, which makes llama-swap swap the seat in and answers only once its
+   health check passes. It also speaks from its no-op exits (see `admission_note`).
+5. **The coherence probe** (register D-118), on a seat this run cold-loaded — which the warm-up
+   reports explicitly, because a sub-tick load measures 0 s and a note is not the same fact.
+6. **The served-window probe** (`agent.ProbeServedWindow`, register S-24). It carries a
+   ten-minute cold-start budget by design — it is allowed to absorb a load — so running it on the
+   WALL context handed a cold seat the contract's own clock and the run was filed as a wall timeout.
+   It is now bounded by the admission deadline like everything above it; an exhausted budget leaves
+   it a dead context and it falls back to `agent_ctx_tokens`, the same fallback an unanswerable probe
+   has always taken — and `ctx_window_note` says so, on every run, so that fallback is never a silent
+   one. The seat-residency (roster) check runs just ahead of it so a seat this endpoint does not serve
+   is never cold-started by a run that is about to defer.
+
+Every step above that PROBES reports its own failure rather than passing it off as a clean answer —
+the alias roster read, the residency read, the warm-up, the window probe. That rule is the point of
+the block: "the gate could not tell" and "there was nothing to tell" want different fixes, and a
+budget silently spent on the first while the wire reports the second is how each of these defects
+survived for months. The alias resolution in particular retries on the next poll inside the same
+budget: latching "already tried" on a failed roster read disabled the alias match for the rest of the
+wait after ONE transient error, which is S-08 again, intermittently.
 
 ## Source map
 

@@ -31,9 +31,14 @@ func contentionTestPipeline(t *testing.T, base string, waitSec int) *Pipeline {
 // carries a zero contention_wait_sec.
 func TestRunAgentTaskContendedSeatWithoutWaitIsNamed(t *testing.T) {
 	fake := &agentFake{
-		rosterIDs:    []string{agentTestSeat},
-		loop:         func(int64) string { return doneChat("The answer is 42.") },
-		repackStatus: http.StatusTooManyRequests,
+		rosterIDs: []string{agentTestSeat},
+		loop:      func(int64) string { return doneChat("The answer is 42.") },
+		// Both lanes contended (register D-108, PR #366 correctness review): the
+		// re-pack's LAST attempt decides its class, so an unconfigured chat lane's
+		// plain 404 would otherwise win over the grammar lane's 429 and read as an
+		// abstention instead of the contended-seat infrastructure this test names.
+		repackStatus:       http.StatusTooManyRequests,
+		chatFallbackStatus: http.StatusTooManyRequests,
 	}
 	srv := fake.server(t)
 	defer srv.Close()

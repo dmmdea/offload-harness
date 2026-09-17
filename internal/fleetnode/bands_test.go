@@ -143,6 +143,37 @@ func TestJobsIdleSlot(t *testing.T) {
 	}
 }
 
+// TestJobsIdleSlotIgnoresUncappedQueuedJob is item 5/S-20's red test.
+// IdleSlot returned false for ANY queued job, including one that will NEVER
+// contend for a capped execution slot (AcceptSpec.Uncapped — a render, an
+// stt, a pipeline route: see concurrencyCapped) — mirroring claimLocked's own
+// "jb.capped && full" skip, which an uncapped job never trips. A capped
+// queued job must still report the node as non-idle, exactly as before (the
+// control arm below).
+func TestJobsIdleSlotIgnoresUncappedQueuedJob(t *testing.T) {
+	j := newJobs(time.Hour, time.Now, time.Hour, 4)
+	defer j.DrainAndStop(time.Second)
+	j.mu.Lock()
+	j.m["blocking-uncapped"] = &job{state: JobAccepted, capped: false}
+	j.mu.Unlock()
+	if !j.IdleSlot() {
+		t.Fatal("an uncapped queued job must not report the node as full: it will never wait behind maxConcurrent")
+	}
+}
+
+// TestJobsIdleSlotStillFalseForACappedQueuedJob is the control arm: a capped
+// queued job DOES make the node non-idle, unchanged from before this fix.
+func TestJobsIdleSlotStillFalseForACappedQueuedJob(t *testing.T) {
+	j := newJobs(time.Hour, time.Now, time.Hour, 4)
+	defer j.DrainAndStop(time.Second)
+	j.mu.Lock()
+	j.m["blocking-capped"] = &job{state: JobAccepted, capped: true}
+	j.mu.Unlock()
+	if j.IdleSlot() {
+		t.Fatal("a capped queued job must still report the node as non-idle")
+	}
+}
+
 // TestDispatchSheddableIsShedWithoutAnIdleSlot is the shed rule with its
 // control arm in one lifecycle: a busy one-worker node refuses a priority -1
 // dispatch (503 "shed"), ADMITS a band-0 dispatch in the same state (it queues

@@ -6,6 +6,94 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.127.1] - 2026-09-17 - the final's tail and the node's honest backlog: fitted-final re-issue, one bounded re-pack, last attempt decides the class, queue depth = 2x workers with an ETA-bearing Retry-After
+
+### Added
+- **A `503 queue full` refusal now says when it will lift, and `/fleet/health` says it in advance**
+  (register S-04, diagnosis §2(a)/§5.2, the overhaul plan's roast correction: an admission refusal
+  must be something the delegator can outwait, never terminal). The NODE now publishes both signals
+  — `internal/delegate` does not consume either one automatically yet; that lands with the
+  placement release (`feat/placement-eta`), and this PR gives it something to read. The dispatch
+  response carries a `Retry-After` header, and health separately publishes `queue_wait_estimate_sec`
+  (float, omitted when a worker is free or no wall sample exists) from the SAME formula:
+  `ceil(excess x recent_agent_wall_sec / max(1, max_concurrent_jobs))`, `excess = capped_backlog -
+  max_concurrent_jobs` — the CAPPED backlog only (`Jobs.CountsCapped`), never the wire's all-task-
+  types `queue_depth`, or an uncapped media/stt/pipeline job would inflate the estimate for a node
+  whose agent slots are genuinely idle (the same class of bug `saturation.score` was already fixed
+  for, S-17, and this release's own `IdleSlot` fix, S-20, repeats the lesson of). Deliberately sized
+  from the node's own MEASURED recent wall, never from `seat_rate.min_turn_sec` — that number is a
+  max-final RETRY floor for one seat with no relationship to backlog depth. A job still in its
+  ADMISSION phase counts toward the estimate exactly like any other running job (the worker slot is
+  genuinely taken), unlike `saturation.score`, which excludes it because no card is busy yet.
+
+  The HEADER (an HTTP retry contract) is bounded to `[5, 300]`; the HEALTH FIELD is the raw,
+  unbounded estimate — a delegator's own placement signal, where a genuine 600s estimate is more
+  useful reported honestly than floored to 300. The header's clamp is said out loud rather than
+  disguised as a precise number, so a caller can tell three shapes apart: no wall sample yet
+  (`no recent completions yet — retry in 30 s`), a real estimate (`~N s until a worker frees, from
+  recent completions`), and a clamped-high one (`>=300 s until a worker frees, …`) — an undisguised
+  300 would otherwise be indistinguishable from a genuine 300s measurement and invite every waiter
+  to retry in lockstep. The existing "queue full" message text stays a byte-identical prefix — the
+  delegator already quotes it verbatim in its own placement-refused message — with one of the three
+  clauses above appended.
+
+### Changed
+- **`fleet_max_queue_depth`'s default is now `2x fleet_max_concurrent_jobs` (8 with the default 4
+  workers), not a flat 32** (register S-04/C-25, diagnosis §2(a)). A node admitting 32 deep behind 4
+  workers could pile up 28 jobs it had no hope of starting inside any wall a caller would wait out —
+  236 measured contracts died at the delegator's 5-minute queue deadline having never started, 75% of
+  them while another node sat idle. `0 = use the built-in default` and a negative value = unlimited
+  are unchanged; an explicit `fleet_max_queue_depth` still wins outright, and the default now tracks a
+  custom `fleet_max_concurrent_jobs` instead of ignoring it.
+
+### Fixed
+- **`Jobs.IdleSlot()` reported a node full because of a queued job that would never contend for a
+  capped execution slot** (register S-20/C-26). It returned `false` for ANY job sitting in `accepted`,
+  including one admitted `Uncapped` (a render, an stt, a pipeline route — work that never touches the
+  shared llama-swap endpoint `fleet_max_concurrent_jobs` protects); `claimLocked` already skips only
+  CAPPED entries when the concurrency cap is at its ceiling (`jb.capped && full`), so `IdleSlot` now
+  mirrors it — only a capped queued job makes the shed predicate (health's `saturation.idle_slot`, the
+  admission rule for `priority: -1` dispatches) report non-idle.
+- **The claim loop's back-pressure check read the RAW `fleet_max_queue_depth` config field instead
+  of the resolved limit** (register review round 1 addendum item 7). `StartClaimLoop` compared
+  `cfg.FleetMaxQueueDepth` (0 at the default, unset) directly, so `limit > 0` was always false and
+  the pull-queue's own back-off never activated no matter how deep the backlog got — even though the
+  push path was already refusing new dispatches at the resolved default. Extracted into
+  `claimBackpressureActive(cfg, depth)`, which reads `cfg.FleetQueueLimit()` instead — the same
+  resolved limit the push path's admission gate compares `QueueDepth()` against.
+- **The list-cap re-issue's gate could never fire on a slow seat** (register S-06/W-07, diagnosis
+  `2026-09-17-harness-scheduling-diagnosis.md` §2(d)/§6). A final answer cut at the completion budget
+  on a schema contract is re-issued once with the schema's own list caps (0.122.1, D-95), gated on the
+  wall still holding one more turn — but that gate sized the turn from the CONFIGURED final (up to
+  8,192 tokens) plus a full re-pack term, `MinTurnFor(0, finalBudget, repackBudget, tok_s)`, when the
+  re-issue itself is one turn at the FITTED final (`final_budget_fit`) with nothing to re-pack. Below
+  ~9 tok/s the configured-budget gate exceeded the 900 s wall cap and was unsatisfiable — the #1
+  measured defer fleet-wide (48 rows "re-pack skipped: the final answer was cut at the completion
+  budget"). Now gates on `MinTurnFor(0, final_budget_fit, 0, tok_s)` — the arithmetic the re-issue
+  actually costs.
+- **The structured re-pack rebuilt its cascade-lane probe cache on every attempt** (register D-85/D-108,
+  S-21/W-19, same diagnosis §2(d)/§3/§6). Up to three attempts — two grammar completions and the chat
+  fallback — each called `repackClient` independently, and each one built a FRESH `FleetLaneGates` cache
+  and a fresh `LocalSwapBusy` closure, so every attempt re-paid a live `/v1/models` + `/running` +
+  per-model gauge read of the LOCAL seat before spending a token. Measured fleet-wide: 1,301 rows,
+  median 18 s, p90 109 s, max 581 s, **15.13 h total**, 244 rows at all three attempts — 180 of those
+  deferred anyway. The probe closures are now built ONCE per `repackStructured` call and threaded into
+  every client the call still constructs, so their own TTL cache does the sharing. Each attempt's own
+  transport timeout is also now bounded by `min(repackTimeout, remaining wall / attempts still owed a
+  turn)` instead of the full per-call allowance, so one slow attempt can no longer sit on everything
+  while the retry and the fallback are still due — sized against the client's own timeout, never a
+  wrapped context, so `llamaclient`'s seatwait 429/503 retry loop and the caller's wall-timeout
+  classification keep reading the same, real wall clock they always have.
+- **A cancelled parent mid-LOOP was filed as broken hardware** (register S-22/W-16, same diagnosis
+  §2(e)/§6). The loop branch of `runAgentTask` fell through to `agent loop: <err>` /
+  `defer_class: infrastructure` on a canceled parent context — the delegator abandoning the poll, or
+  the node shutting down — while the re-pack branch thirty-odd lines below already carried the correct
+  arm (12 `agent loop: context canceled` rows filed as broken hardware, an operator sent to fix a box
+  that never misbehaved). Mirrored into the loop branch: a canceled parent is now `defer_class: budget`
+  there too — nothing on the box failed; the caller went away.
+
+## [0.127.0] - 2026-09-17 - the fleet answers faster: honest node health, long-poll completion, concurrent probes, alias-aware admission on both doors, config validation that names a dead endpoint
+
 ### Added
 - **Placement (`route=auto`/`remote`) ranks quality-adequate seats by expected completion, under the
   operator-signed INV-5 rider** (ADR [0050](docs/architecture/decisions/0050-placement-ranks-adequate-seats-by-expected-completion.md);
@@ -77,6 +165,56 @@ Versioning: [SemVer](https://semver.org/).
   DOING, beside `busy`'s verdict about declared time); and `recent_agent_wall_sec` (the median wall of
   the last up to 8 agent jobs to finish, from the same job map `/fleet/jobs` walks — the completion
   signal a node with no `seat_rate` sample could not otherwise publish).
+- **`config.Load` refuses a configured HTTP base it cannot prove is dialable** (register S-38).
+  Two classes, both of which used to be reported only as a dial timeout on the first real call:
+
+  - **Not a usable URL.** A parse error, a scheme that is not `http`/`https`, or no host at all.
+    An endpoint whose value was never substituted usually is not a URL — `${NODE_A_HOST}:18811`
+    and `http://node-a:$PORT` both fail `url.Parse`, and `node-a:18811` PARSES, as scheme
+    `node-a` with an empty host, so nothing errored, there was no port to judge and the dialer
+    resolved nothing.
+  - **A port nothing answers on.** `:0` is the OS’s "any free port", which nothing ever listens
+    on; `:9` is the IANA discard port. The comparison is NUMERIC, so `:09` is refused too.
+
+  Both apply to `endpoint`, `delegate_remotes[]`, `cascade_remote_lanes{}`, `seat_endpoints{}`,
+  `fleet_queue_holder`, `tts_endpoint`, `nim_endpoint`, `hailo_endpoint`, `coral_endpoint` and
+  `pair_workloads_endpoint`, and the error names the key and the value. An EMPTY value is not a
+  finding (an unset optional key is a machine that does not have that thing), and a **loopback**
+  base on an unusual port is explicitly still allowed: INV-10 sanctions a loopback-only bench
+  twin beside the production seat, and refusing it would break measurement on the delegator box.
+  The two base-URL maps and the one base-URL list share ONE per-value gate
+  (`validateEndpointValue`) with the tailnet guard, so the never-cloud rule and the dead-base
+  rule cannot drift apart across keys.
+- **What a refused config actually does, per entry point.** The refusal is not advisory, and it
+  is not uniform — each door gets the answer that door can afford:
+
+  - **`fleet-serve` REFUSES to start** (non-zero exit, the error on stderr). A node advertises
+    capability to other boxes and then accepts their dispatches, so one that cannot prove its own
+    config does not fail alone: it turns every delegator’s placement into a wasted wall.
+  - **`mcp` STARTS and says so.** A server that exits removes every `offload_*` tool from every
+    session with no message on any surface an operator reads. Instead `offload_status` carries
+    `config_error` as its FIRST key, and every other tool returns
+    `{"deferred":true,"reason":"config invalid: <err>"}` until the file is fixed.
+  - **One-shot CLI verbs proceed**, warning as they already did.
+  - **`doctor` prints the refusal VERBATIM as its first `FAIL` row and exits non-zero.** It kept
+    the load error and printed only a generic one-liner, so the one text that names the offending
+    key never reached the operator through the one verb they run to find it.
+- **`local-offload doctor` prints a `config findings` section** — one `FAIL` row per value that
+  loads and then cannot do what it says, and a non-zero exit, like every other doctor verdict.
+  Three classes, all previously invisible: (1) a fleet/lane base shape (S-38, WARN half) — a
+  `delegate_remotes` entry not on the fleet node port `:18811`, one that is loopback (a remote
+  cannot be this box), one carrying a `/v1` suffix, or one that is not a usable URL; a
+  `cascade_remote_lanes` base on neither shape a lane can be (a fleet node, or a llama-swap on
+  this box’s own `endpoint` port), carrying `/v1`, or unusable; (2) `gpu_wait_ms` more than 3x
+  `vision_gpu_wait_sec` (register C-33 — a deployed 600,000 ms against a 90 s vision wait is ten
+  minutes of blocking on every media-lane call, against that key’s own documented 90 s design),
+  and a NEGATIVE `gpu_wait_ms`/`vision_gpu_wait_sec`, which both consumers turn into a ZERO wait
+  while the file reads as a wait — a finding, deliberately not a load error, because it behaves
+  as the documented `0` rather than breaking anything; (3) one row per RETIRED key the file still
+  carries (`videogen_wait_ms`, `audiogen_wait_ms`), which until now was a single stderr note at
+  startup that scrolls past every command. These WARN rather than refuse for one release — a
+  strict validator that refuses a working odd config is a worse outage than the dial timeout it
+  replaces — and the fleet/lane shapes also print one stderr line at load.
 
 ### Changed
 - **`saturation.score` no longer counts a job whose worker is still in admission** (register S-17).
@@ -89,6 +227,14 @@ Versioning: [SemVer](https://semver.org/).
 - `internal/seatload` gained `Running`, the `/running`-only half of `Inflight` (no `/upstream` read at
   all, so it can never load an unloaded seat), shared by both so the alias resolution has one
   implementation.
+- **A config that FAILED validation no longer reports itself as "BUILT-IN DEFAULTS".** Both
+  disclosures said so and both were false: `Load` returns the FILE’s settings with only the five
+  composite keys stripped, so the process runs on that file — which is exactly why the refusal
+  matters. `config.WarnOnDefaults` and `config.SourceLine` now name the file, carry the
+  validation error verbatim, and say which entry points refuse, limp or proceed. Saying
+  "defaults" sent an operator hunting a path problem while the real one was a named key in the
+  file they already had open. `TestConfigSourceLine`’s load-failed assertion pinned the false
+  text and is amended.
 - **The delegator's fixed sleeps are jittered by ±20 %** (`pollEvery`, `placementPollInterval`,
   `refusalCooldown`). Every dispatcher sleeps on the same constants, so K sessions started within a second
   of each other re-read health, re-dispatch and re-ask a refusing node in lockstep for a whole run. Each
@@ -107,6 +253,17 @@ Versioning: [SemVer](https://semver.org/).
   `ChatProxyTimeout` + 30 s of copy-back slack, the poll to its wait + 2 s. A `ResponseWriter` that
   cannot carry a deadline simply runs under the blanket, as before. `TestServeTimeoutTable` now pins
   both halves: the blanket value AND that exactly those two handlers extend it.
+- **The agent client dialled `/v1/v1/chat/completions` for any base written with a `/v1`
+  suffix** (register S-37). `agent.NewLLMClient` trimmed only a trailing slash and then
+  appended `/v1/chat/completions`, so a base spelled `http://x/v1` — the shape `nim_endpoint`
+  documents, and the shape an operator copies off a vLLM seat’s own docs — produced a 404 that
+  named neither the key nor the doubling (8 rows in the delegation ledger, all on one seat).
+  The harness already owned the one normalisation rule — `swapclient.BaseURL`, the reader every
+  other consumer of `endpoint` goes through, whose own comment says a blind append "would have
+  produced `/v1/v1/models`" — and this client was the one that did not use it. It does now, so
+  `http://x`, `http://x/v1` and `http://x/v1/` all dial `/v1/chat/completions`. Normalising in
+  the constructor rather than at the ~60 call sites also keys the `modelaffinity` ticket on the
+  normalised base, so two clients spelling one endpoint two ways now contend on one gate.
 - **A capacity wait could not see a remote whose health was merely SLOW, and never said so.** The first cut
   of the per-tick probe bound was `2 x placementPollInterval` (6 s), below `fetchNodeViewTimeout` (15 s) —
   this repo's own boundary between slow and down. A remote answering health in 6-15 s under load was
@@ -151,6 +308,65 @@ Versioning: [SemVer](https://semver.org/).
   and a node id is neither unique nor guaranteed to be published (register C-19 shows it drifting). The
   second remote of a cycle found its key already taken, the cycle was reshuffled, and the fit score handed
   the SAME seat both subtasks while the other idled. `dealt` and `fitPick` now key on the base.
+- **A READY seat waited the whole admission budget whenever any OTHER model was mid-swap.**
+  The swap pre-flight matched llama-swap's `GET /running` by the seat's BOUND name, while `/running`
+  names models by canonical id only — and the harness binds agent seats by alias on the reference
+  boxes (`agent-pool` → `qwen3.8-27b-vllm`). The "my own seat is already ready" exit could therefore
+  never fire on an alias-bound seat, and 406 delegation-log rows say so verbatim ("/running lists the
+  seat under another id"). `awaitSeatAdmission` and `warmSeat` now resolve the seat through
+  `swapclient.Roster.Canonical` — the resolution `internal/seatload` has used for the drain since
+  C-11 — and match `/running` by alias AND canonical id. The roster read is lazy: it is paid only
+  when the bare name missed and the alternative is a sleep, so a seat bound by its own id costs no
+  extra round trip.
+- **The MCP `agent_run` door never ran the swap pre-flight.** llama-swap queues, with no timeout of
+  its own, any request that needs a model it is still loading, so an `agent_run` that arrived
+  mid-swap spent its wall inside that queue and reported a wall timeout — the failure ADR 0032
+  removed from the delegation door in 2026-09-02 and this door never had. `pipeline.AwaitSeatAdmission`
+  exports the same function; `handleAgentRun` calls it between the cordon and the warm-up, on the
+  remaining admission budget, and reports it under the same wire names (`admission_wait_sec` /
+  `admission_note`). The two doors' admission blocks are now the same steps in the same order.
+- **The served-window probe ran on the contract's WALL, on both doors.** `agent.ProbeServedWindow`
+  carries a ten-minute cold-start budget by design — it is allowed to absorb a seat's load — so on a
+  cold or slow seat it consumed the whole wall before the first token and the run was filed as a wall
+  timeout. On both doors it now runs on a context derived from the admission deadline, before the
+  wall context exists, and its duration is added to `admission_wait_sec`. On the delegation door the
+  seat-residency (roster) check moved just ahead of it, so a seat this endpoint does not serve is
+  never cold-started by a run that is about to defer.
+- **`warmSeat` failed silently on two exits.** A `/running` read that ERRORED and a budget already
+  spent by earlier admission both returned "nothing to report", so `admission_note` was empty on a
+  seat that might still be cold — "could not read" and "is ready" were indistinguishable on the wire.
+  Both now return a note. `warmSeat` also reports whether a load was ATTEMPTED as its own value:
+  neither the duration (a sub-tick load measures 0) nor "a note exists" can carry that fact, and the
+  D-118 coherence probe keys on it.
+- **One transient roster error silently disabled the alias match for the rest of the wait.** The
+  resolution above latched "already tried" on the ATTEMPT rather than on a successful read, so a
+  single timeout or 500 on `GET /v1/models` — likeliest on exactly the contended box where another
+  model is mid-swap — left the seat matching by its bound name for the remaining polls and burning
+  the whole admission budget. S-08's own symptom, intermittent and with nothing in the log or on the
+  wire. The latch now closes only on success, the failure is logged and carried into
+  `admission_note`, and the next poll retries inside the same budget.
+- **The MCP door's cordon-timeout defer reported no admission at all.** `admission_wait_sec` /
+  `admission_note` were absent on that one path while the delegation door has stamped them since
+  0.117.0, so a caller could not tell a 300 s wait from an instant refusal. It now stamps them. (The
+  path is the fence pre-check's race window — the two share `modelaffinity.BlocksNewRun`, which
+  `TestForeignFenceAndTheCordonShareOnePredicate` pins across all eight lease shapes.)
+- **Both doors discarded the served-window resolver's note** (`effCtx, _ :=`), so a run that budgeted
+  against the conservative 8,192-token fallback on a 131,072-token seat looked exactly like a correct
+  one and the only symptom was a task that compacted for no reason — the same invisibility that let
+  the MCP door measure 8,192 cold and 114,688 warm on one seat, minutes apart. The line is now on the
+  wire as `ctx_window_note`, and when the fallback was caused by the probe running out of admission
+  budget it is repeated in `admission_note`, where the cause actually is.
+- **Both agent doors held a worker at the cordon for the full admission budget under a FOREIGN GPU
+  fence** — 47 rows × 300 s (3.92 h) in the three days to 2026-09-17. An exclusive text hold, a
+  draining cordon or a media render held by another process refuses a new run for as long as it is
+  held; nothing the run can do inside its own budget changes that, so the wait reached the same
+  `capacity` defer five minutes later while the delegator sat on the re-placement path that defer
+  exists to trigger. `delegate.ForeignFence` — wired into the review lane since 0.125.0 (D-110) — is
+  now asked BEFORE `AwaitRunSlot` on `runAgentTask` and on `agent_run`, and defers at once naming the
+  fence and the holder's line (class, pid, declared reason, expiry). It reads the lease directory
+  `config.Load` armed for the cordon, so the pre-check and the cordon can never disagree. An
+  INHERITED lease (`GPU_LEASE_EPOCH`) and a plain non-fencing reservation are unchanged: ADR 0032's
+  "a peer-held seat is waited for" governs every hold whose answer can still change.
 
 ## [0.126.2] - 2026-09-17 - a PAIR card's failure text is one short line
 

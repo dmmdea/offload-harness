@@ -181,6 +181,29 @@ func TestFleetFieldsRoundTrip(t *testing.T) {
 	}
 }
 
+// TestFleetQueueLimitDefaultTracksConcurrency (register S-04/C-25): a node
+// that admits 32 deep behind 4 workers can pile up 28 jobs it has no hope of
+// starting inside any wall a caller would wait out. The default backlog is
+// now sized FROM the concurrency it actually has — 2x the worker count — so a
+// custom `fleet_max_concurrent_jobs` still gets a sane default depth instead
+// of the old flat 32 for every box regardless of how many workers it runs.
+// Negative still means unlimited, and an explicit depth still wins outright —
+// this changes only what "0 = unset" resolves to.
+func TestFleetQueueLimitDefaultTracksConcurrency(t *testing.T) {
+	if got := (Config{}).FleetQueueLimit(); got != 8 {
+		t.Errorf("FleetQueueLimit() with everything unset = %d, want 8 (2x the default 4 workers)", got)
+	}
+	if got := (Config{FleetMaxQueueDepth: 32}).FleetQueueLimit(); got != 32 {
+		t.Errorf("FleetQueueLimit() with an explicit 32 = %d, want 32 (an explicit value always wins)", got)
+	}
+	if got := (Config{FleetMaxQueueDepth: -1}).FleetQueueLimit(); got != 0 {
+		t.Errorf("FleetQueueLimit() with -1 = %d, want 0 (unlimited)", got)
+	}
+	if got := (Config{FleetMaxConcurrentJobs: 8}).FleetQueueLimit(); got != 16 {
+		t.Errorf("FleetQueueLimit() with fleet_max_concurrent_jobs=8 and depth unset = %d, want 16 (2x the configured worker count)", got)
+	}
+}
+
 func TestDefaultMemoryStack(t *testing.T) {
 	c := Default()
 	want := map[string]bool{"embeddinggemma": true, "bge-reranker-v2-m3": true}

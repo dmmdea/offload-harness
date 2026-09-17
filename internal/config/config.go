@@ -1107,8 +1107,9 @@ type Config struct {
 	// FleetMaxQueueDepth caps how many jobs this node will hold in
 	// accepted/running at once — i.e. it is the ceiling on health's
 	// `queue_depth` field, which counts exactly those two states. A NEW
-	// dispatch beyond it is refused 503. 0 = the built-in default (32);
-	// negative = unlimited (the pre-cap behavior).
+	// dispatch beyond it is refused 503. 0 = the built-in default (2x
+	// FleetConcurrencyLimit — see FleetQueueLimit); negative = unlimited (the
+	// pre-cap behavior).
 	//
 	// 0.100.0 SPLIT NOTE — this key's meaning is UNCHANGED, but what it is
 	// no longer doing matters. Before 0.100.0 a job started executing the
@@ -1241,6 +1242,13 @@ type Config struct {
 	// remotes argument REPLACES this list (it does not merge) so a caller can
 	// still target one node deliberately.
 	DelegateRemotes []string `json:"delegate_remotes,omitempty"`
+	// RetiredKeys are the retired config keys the FILE this value was loaded
+	// from still carries, sorted. Never serialized: it describes the file, not
+	// the settings. Load fills it from the raw bytes so `doctor` can print one
+	// row per key — until now the only signal was a single stderr note at
+	// startup, which nobody is reading when they run doctor to find out why a
+	// media call blocked for twenty minutes (register S-42).
+	RetiredKeys []string `json:"-"`
 	// FleetSampler selects the per-render VRAM footprint source: "auto" (PDH
 	// per-process tree on Windows, nvidia-smi global-delta elsewhere),
 	// "pdh-shared" (J3: the tree summing Dedicated+Shared — REQUIRED on UMA
@@ -1547,7 +1555,7 @@ func Default() Config {
 		CoralIdleSec:                  300,
 		FleetListen:                   "127.0.0.1:18811", // fleet-serve bind (18810 = the dispatcher's)
 		FleetNodeID:                   "",                // "" = hostname at serve time
-		FleetMaxQueueDepth:            0,                 // 0 = built-in default (32 accepted+running); negative = unlimited
+		FleetMaxQueueDepth:            0,                 // 0 = built-in default (2x fleet_max_concurrent_jobs accepted+running); negative = unlimited
 		FleetMaxConcurrentJobs:        0,                 // 0 = built-in default (4 executing at once); negative = unlimited
 		FleetAuthToken:                "",                // "" = no agent-lane auth → agent dispatch loopback-only; media lane never auths (v1 scope)
 		FleetAgentEnabled:             false,             // node-side agent-lane worker role: explicit operator opt-in
@@ -1636,7 +1644,7 @@ func load(path string) (Config, error) {
 	// SelectHeadlineDevice) — together these cover the two ways a manually
 	// copied UUID commonly fails to compare equal to the source.
 	c.PrimaryGPUUUID = strings.TrimSpace(c.PrimaryGPUUUID)
-	warnUnknownKeys(b)
+	c.RetiredKeys = warnUnknownKeys(b)
 	warnBadEnumValues(c)
 	warnDeadThresholds(c)
 	warnImageGenBindingTraps(c)
@@ -1664,6 +1672,15 @@ func load(path string) (Config, error) {
 		return c, err
 	}
 	if err := validateTailnetEndpoints("cascade_remote_lanes", c.CascadeRemoteLanes); err != nil {
+		return c, err
+	}
+	// Every OTHER configured HTTP base takes the same rules the two maps just
+	// took: it must be a URL something can dial, on a port something can answer.
+	// A base at :0 or :9 — or one that is not a URL at all, which is what an
+	// unsubstituted template looks like — is not a slow endpoint, it is an UNSET
+	// one, and the only thing that ever reported it was a dial timeout on the
+	// first real call: a class the delegation ledger carried 8 rows of (S-38).
+	if err := validateConfiguredBases(c); err != nil {
 		return c, err
 	}
 	if err := ValidateKVCacheServers(c.KVCacheServers); err != nil {
@@ -1700,6 +1717,13 @@ func load(path string) (Config, error) {
 	// "off" and "always" differ by one GPU lease when a seat goes NaN.
 	if err := validateCoherenceProbe(c.AgentCoherenceProbe); err != nil {
 		return c, err
+	}
+	// The WARN half of S-38, printed LAST so it can never be mistaken for the
+	// reason a load failed. These shapes load, dial, and then fail somewhere that
+	// names neither the key nor the value, so the operator gets a line here and a
+	// FAIL row from `doctor`; they become refusals only once the fleet is clean.
+	for _, w := range EndpointWarnings(c) {
+		fmt.Fprintf(os.Stderr, "warning: %s\n", w)
 	}
 	return c, nil
 }
@@ -1757,8 +1781,8 @@ func validateTailnetEndpoints(jsonKey string, endpoints map[string]string) error
 	}
 	sort.Strings(keys)
 	for _, key := range keys {
-		if err := netguard.TailnetURL(endpoints[key]); err != nil {
-			return fmt.Errorf("%s[%q]: %w", jsonKey, key, err)
+		if err := validateEndpointValue(fmt.Sprintf("%s[%q]", jsonKey, key), endpoints[key], true); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -2067,12 +2091,21 @@ func (c Config) SpreadLocalSlot() string {
 // FleetQueueLimit resolves FleetMaxQueueDepth: 0 → the built-in default,
 // negative → 0 meaning unlimited. Callers compare depth >= limit only when
 // limit > 0.
+//
+// The default (register S-04/C-25) is 2x FleetConcurrencyLimit() rather than
+// a flat 32: a node admitting 32 deep behind 4 workers could pile up 28 jobs
+// it has no hope of starting inside any wall a caller would wait out — 236
+// measured contracts died at the delegator's 5-minute queue deadline having
+// never started, 75% of them while another node sat idle. Sizing the backlog
+// from the concurrency the node actually has means a custom
+// fleet_max_concurrent_jobs still gets a sane default depth (twice its own
+// worker count) instead of the same flat ceiling regardless of box size.
 func (c Config) FleetQueueLimit() int {
 	switch {
 	case c.FleetMaxQueueDepth < 0:
 		return 0
 	case c.FleetMaxQueueDepth == 0:
-		return 32
+		return 2 * c.FleetConcurrencyLimit()
 	default:
 		return c.FleetMaxQueueDepth
 	}
@@ -2141,11 +2174,17 @@ var retiredKeys = map[string]string{
 // warnUnknownKeys prints a stderr warning for any JSON key that doesn't map to a
 // Config field — so a typo like "escalaton_model" surfaces instead of being
 // silently ignored. It never fails: the valid fields still load.
-func warnUnknownKeys(b []byte) {
+//
+// It also RETURNS the retired keys it found, sorted, so the one reader of the
+// raw bytes is also the one source of that list: Load parks it on
+// Config.RetiredKeys and `doctor` prints a row per entry, instead of the
+// startup note being the only place it was ever said (register S-42).
+func warnUnknownKeys(b []byte) []string {
 	var raw map[string]json.RawMessage
 	if json.Unmarshal(b, &raw) != nil {
-		return
+		return nil
 	}
+	var retired []string
 	known := map[string]bool{}
 	t := reflect.TypeOf(Config{})
 	for i := 0; i < t.NumField(); i++ {
@@ -2158,12 +2197,15 @@ func warnUnknownKeys(b []byte) {
 		if known[k] {
 			continue
 		}
-		if why, retired := retiredKeys[k]; retired {
+		if why, isRetired := retiredKeys[k]; isRetired {
 			fmt.Fprintf(os.Stderr, "note: config key %q is retired and ignored — %s\n", k, why)
+			retired = append(retired, k)
 			continue
 		}
 		fmt.Fprintf(os.Stderr, "warning: unknown config key %q (ignored — typo?)\n", k)
 	}
+	sort.Strings(retired)
+	return retired
 }
 
 // EmbedModel is the embedding model shared code (the judge/kNN embedder) requests —

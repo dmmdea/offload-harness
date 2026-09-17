@@ -55,6 +55,19 @@ type agentFake struct {
 	// its exact shape.
 	running    func(n int64) string
 	runningCNT atomic.Int64
+	// runningStatus, when non-zero, is the status GET /running answers with
+	// instead of a body — llama-swap answering 500, the shape that makes every
+	// residency read FAIL rather than report "the seat is absent" (register S-24).
+	runningStatus int
+	// seatName overrides agentTestSeat as the seat this fake serves on its
+	// per-model passthrough routes (/upstream/<seat>/…). Empty = agentTestSeat,
+	// which is what every test that does not name its own seat wants.
+	seatName string
+	// rosterAliases maps a canonical roster id to the names llama-swap also
+	// answers to for it, published under meta.llamaswap.aliases exactly as the
+	// real /v1/models does. Unset = no alias block at all, so every older test
+	// sees the byte-identical roster it always saw.
+	rosterAliases map[string][]string
 	// repackStatusFor, when set, wins over repackStatus and scripts the status
 	// per attempt (1-based) — the seam a transport-THEN-validation test needs,
 	// since the two attempts must fail differently.
@@ -99,8 +112,15 @@ type agentFake struct {
 	// /upstream/{seat}/props passthrough — the A1 pin probe's source. Nil
 	// keeps the historical 404, under which every consumer fails open and the
 	// pin stays absent.
-	props      any
-	propsCNT   atomic.Int64
+	props    any
+	propsCNT atomic.Int64
+	// propsDelay stalls the FIRST /upstream/<seat>/props answer — the
+	// served-window probe's own cold-start cost, which must be paid out of the
+	// ADMISSION budget and never out of the contract's wall (register S-24).
+	// Only the first, because the post-run seat-PIN probe reads the same route
+	// on a seat that is warm by then, and stalling it would spend the wall the
+	// window probe just stopped spending.
+	propsDelay time.Duration
 	loopCalls  atomic.Int64
 	grammarCNT atomic.Int64
 	// chatFallback scripts the grammar-FREE re-pack lane (repackViaChat): a
@@ -108,6 +128,21 @@ type agentFake struct {
 	// every pre-fallback test keeps its exact outcome.
 	chatFallback    func(int64) string
 	chatFallbackCNT atomic.Int64
+	// chatFallbackDelay stalls every chat-fallback completion — the mirror of
+	// repackDelay for the grammar lane, used to expire the contract's wall
+	// deadline DURING the chat fallback (register D-108: the chat fallback is
+	// the re-pack's own LAST attempt, so it is the one a wall-timeout test
+	// must stall). 0 = no delay, every pre-existing test's exact timing.
+	chatFallbackDelay time.Duration
+	// chatFallbackStatus, when non-zero and chatFallback is nil, is the status
+	// the chat-fallback lane answers with instead of its usual 404 — a test's
+	// way of making the re-pack's LAST attempt (register D-108: the re-pack
+	// now decides its class from the LAST attempt alone, PR #366 correctness
+	// review) carry the same wire failure the grammar lane already carries,
+	// since an unconfigured chat lane's plain 404 would otherwise always win
+	// the verdict for a scripted-failure test that never meant to test the
+	// chat lane at all.
+	chatFallbackStatus int
 	// probe answers the admission-time COHERENCE probe (register D-118),
 	// recognised by its SHAPE rather than by a counter: exactly one user
 	// message opening with the probe goal. Routing it away from loop(n) is what
@@ -166,11 +201,27 @@ func repackDisablesThinking(body map[string]any) bool {
 	return ok && !et
 }
 
+// seat is the model name this fake serves on its per-model passthrough routes.
+func (f *agentFake) seat() string {
+	if f.seatName != "" {
+		return f.seatName
+	}
+	return agentTestSeat
+}
+
 func (f *agentFake) server(t *testing.T) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if os.Getenv("AGENTFAKE_TRACE") != "" {
+			log.Printf("FAKE %s %s", r.Method, r.URL.Path)
+		}
 		switch r.URL.Path {
 		case "/running":
+			if f.runningStatus != 0 {
+				f.runningCNT.Add(1)
+				w.WriteHeader(f.runningStatus)
+				return
+			}
 			if f.running == nil {
 				http.NotFound(w, r)
 				return
@@ -182,12 +233,26 @@ func (f *agentFake) server(t *testing.T) *httptest.Server {
 				w.WriteHeader(f.rosterStatus)
 				return
 			}
+			// meta.llamaswap.aliases is where llama-swap publishes the names a
+			// model ALSO answers to; the roster reader resolves a bound alias to
+			// the canonical id through exactly this block.
+			type meta struct {
+				Llamaswap struct {
+					Aliases []string `json:"aliases,omitempty"`
+				} `json:"llamaswap"`
+			}
 			type m struct {
-				ID string `json:"id"`
+				ID   string `json:"id"`
+				Meta *meta  `json:"meta,omitempty"`
 			}
 			var data []m
 			for _, id := range f.rosterIDs {
-				data = append(data, m{ID: id})
+				e := m{ID: id}
+				if al := f.rosterAliases[id]; len(al) > 0 {
+					e.Meta = &meta{}
+					e.Meta.Llamaswap.Aliases = al
+				}
+				data = append(data, e)
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": data})
 		case "/v1/chat/completions":
@@ -226,12 +291,30 @@ func (f *agentFake) server(t *testing.T) *httptest.Server {
 			if g, _ := body["grammar"].(string); g == "" {
 				// The grammar-free chat fallback lane (repackViaChat).
 				n := f.chatFallbackCNT.Add(1)
-				if f.chatFallback == nil {
-					http.NotFound(w, r)
+				if f.chatFallback != nil {
+					if f.chatFallbackDelay > 0 {
+						time.Sleep(f.chatFallbackDelay)
+					}
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = w.Write([]byte(f.chatFallback(n)))
 					return
 				}
-				w.Header().Set("Content-Type", "application/json")
-				_, _ = w.Write([]byte(f.chatFallback(n)))
+				if f.chatFallbackStatus != 0 {
+					w.WriteHeader(f.chatFallbackStatus)
+					return
+				}
+				if f.repackRawBody != nil {
+					// The re-pack's LAST attempt decides its class (register
+					// D-108, PR #366 correctness review), and an unconfigured
+					// chat lane's plain 404 would always win that verdict for a
+					// test that scripted the GRAMMAR lane's wire failure and
+					// never meant to test the chat lane at all — so a test that
+					// scripts repackRawBody without its own chatFallback gets
+					// the SAME wire-level failure on both lanes.
+					writeRawOrCutBody(t, w, f.repackRawBody(n), f.repackCutBody)
+					return
+				}
+				http.NotFound(w, r)
 				return
 			}
 			n := f.grammarCNT.Add(1)
@@ -261,26 +344,7 @@ func (f *agentFake) server(t *testing.T) *httptest.Server {
 				return
 			}
 			if f.repackRawBody != nil {
-				body := f.repackRawBody(n)
-				if !f.repackCutBody {
-					w.Header().Set("Content-Type", "text/html")
-					_, _ = w.Write([]byte(body))
-					return
-				}
-				hj, ok := w.(http.Hijacker)
-				if !ok {
-					t.Errorf("test server does not support hijacking; the cut-body shape cannot be scripted")
-					return
-				}
-				conn, bufrw, herr := hj.Hijack()
-				if herr != nil {
-					t.Errorf("hijack: %v", herr)
-					return
-				}
-				// Promise more bytes than we send, then drop the connection.
-				fmt.Fprintf(bufrw, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s", len(body)+64, body)
-				_ = bufrw.Flush()
-				_ = conn.Close()
+				writeRawOrCutBody(t, w, f.repackRawBody(n), f.repackCutBody)
 				return
 			}
 			if f.repackEmptyChoices {
@@ -296,13 +360,15 @@ func (f *agentFake) server(t *testing.T) *httptest.Server {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":` + string(content) + `},"finish_reason":"` + finish + `"}],"usage":{"prompt_tokens":10,"completion_tokens":7}}`))
 		default:
-			if f.props != nil && r.URL.Path == "/upstream/"+agentTestSeat+"/props" {
-				f.propsCNT.Add(1)
+			if f.props != nil && r.URL.Path == "/upstream/"+f.seat()+"/props" {
+				if f.propsCNT.Add(1) == 1 && f.propsDelay > 0 {
+					time.Sleep(f.propsDelay)
+				}
 				w.Header().Set("Content-Type", "application/json")
 				_ = json.NewEncoder(w).Encode(f.props)
 				return
 			}
-			if r.URL.Path == "/upstream/"+agentTestSeat+"/v1/models" {
+			if r.URL.Path == "/upstream/"+f.seat()+"/v1/models" {
 				n := f.upstreamCNT.Add(1)
 				if f.upstreamModels != nil {
 					w.Header().Set("Content-Type", "application/json")
@@ -320,6 +386,37 @@ func (f *agentFake) server(t *testing.T) *httptest.Server {
 func doneChat(content string) string {
 	b, _ := json.Marshal(content)
 	return `{"choices":[{"message":{"role":"assistant","content":` + string(b) + `},"finish_reason":"stop"}]}`
+}
+
+// writeRawOrCutBody answers a request with body verbatim (a proxy/captive
+// portal shape — text/html, not a chat completion), or, when cut is true,
+// with a Content-Length that LIES and the connection dropped mid-body (the
+// failure then happens during the body READ, after client.Do already
+// succeeded, so no *url.Error / net.Error is anywhere in the returned
+// error's chain). Shared by the grammar and chat-fallback lanes so a test
+// can script the SAME wire-level failure shape on whichever lane turns out
+// to be the re-pack's decisive last attempt (register D-108).
+func writeRawOrCutBody(t *testing.T, w http.ResponseWriter, body string, cut bool) {
+	t.Helper()
+	if !cut {
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write([]byte(body))
+		return
+	}
+	hj, ok := w.(http.Hijacker)
+	if !ok {
+		t.Errorf("test server does not support hijacking; the cut-body shape cannot be scripted")
+		return
+	}
+	conn, bufrw, herr := hj.Hijack()
+	if herr != nil {
+		t.Errorf("hijack: %v", herr)
+		return
+	}
+	// Promise more bytes than we send, then drop the connection.
+	fmt.Fprintf(bufrw, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s", len(body)+64, body)
+	_ = bufrw.Flush()
+	_ = conn.Close()
 }
 
 // toolChat is an assistant turn that calls list_dir — used to burn steps so
@@ -541,10 +638,15 @@ func TestRunAgentTaskSchemaFailRetriesOnceThenDefers(t *testing.T) {
 // operator to rewrite a schema that was never the problem.
 func TestRunAgentTaskRepackTransportFailureIsNotASchemaFailure(t *testing.T) {
 	fake := &agentFake{
-		rosterIDs:    []string{agentTestSeat},
-		loop:         func(int64) string { return doneChat("The answer is 42.") },
-		repack:       func(int64) string { return `{"answer":"42"}` },
-		repackStatus: http.StatusInternalServerError,
+		rosterIDs: []string{agentTestSeat},
+		loop:      func(int64) string { return doneChat("The answer is 42.") },
+		repack:    func(int64) string { return `{"answer":"42"}` },
+		// Both lanes unreachable (register D-108, PR #366 correctness review):
+		// the re-pack's LAST attempt decides its class, so an unconfigured chat
+		// lane's plain 404 would otherwise win over the grammar lane's 500 and
+		// read as an abstention instead of the infrastructure this test names.
+		repackStatus:       http.StatusInternalServerError,
+		chatFallbackStatus: http.StatusInternalServerError,
 	}
 	srv := fake.server(t)
 	defer srv.Close()
@@ -632,22 +734,28 @@ func TestRunAgentTaskRepackEmptyChoicesIsAnAbstention(t *testing.T) {
 	}
 }
 
-// TestRunAgentTaskRepackTransportThenValidationStaysInfrastructure (C-E,
-// inverse): the transport flag was LAST-WINS, so a 500 on the first attempt
-// followed by a wrong-shape answer on the retry ended classed abstention —
-// "the model got the shape wrong" — while the box had in fact just failed a
-// request. A transport failure that happened AT ALL is the operator's signal.
-func TestRunAgentTaskRepackTransportThenValidationStaysInfrastructure(t *testing.T) {
+// TestRunAgentTaskRepackLastAttemptTransportOutranksEarlierValidation (C-E,
+// inverse; rewritten for register D-108, PR #366 correctness review): this
+// test used to pin "the transport flag is LAST-WINS across every attempt" —
+// a 500 on attempt 1 stayed infrastructure even after a later attempt merely
+// answered the wrong shape, because "a transport failure that happened AT
+// ALL is the operator's signal." That rule is gone on purpose: EARLIER
+// attempts are now diagnostic notes only, and the re-pack's FINAL, DECISIVE
+// attempt alone decides the class (a self-imposed per-attempt cutoff earlier
+// in the run must never read as a broken box either — the same correction,
+// mirrored). This test now proves the surviving half of the original claim
+// the right way round: two EARLIER validation failures do not paper over a
+// LATER, genuine transport failure — the seat that never answered the FINAL
+// attempt is still reported as unreachable, not as "the model got the shape
+// wrong" using a stale, earlier error.
+func TestRunAgentTaskRepackLastAttemptTransportOutranksEarlierValidation(t *testing.T) {
 	fake := &agentFake{
 		rosterIDs: []string{agentTestSeat},
 		loop:      func(int64) string { return doneChat("The answer is 42.") },
-		repack:    func(int64) string { return `{"wrong":"shape"}` }, // attempt 2 fails validation
-		repackStatusFor: func(n int64) int {
-			if n == 1 {
-				return http.StatusInternalServerError
-			}
-			return 0
-		},
+		repack:    func(int64) string { return `{"wrong":"shape"}` }, // both grammar attempts fail validation
+		// The chat fallback — the re-pack's LAST, decisive attempt — is
+		// genuinely unreachable.
+		chatFallbackStatus: http.StatusInternalServerError,
 	}
 	srv := fake.server(t)
 	defer srv.Close()
@@ -659,14 +767,23 @@ func TestRunAgentTaskRepackTransportThenValidationStaysInfrastructure(t *testing
 		t.Fatalf("want deferred, got %+v", wire)
 	}
 	if wire.DeferClass != core.DeferClassInfrastructure {
-		t.Fatalf("defer_class = %q (reason %q), want %q — the seat failed a request during this re-pack",
+		t.Fatalf("defer_class = %q (reason %q), want %q — the LAST attempt failed a request during this re-pack",
 			wire.DeferClass, wire.Reason, core.DeferClassInfrastructure)
 	}
 	if !strings.HasPrefix(wire.Reason, "structured re-pack unreachable: ") {
 		t.Fatalf("reason = %q, want the transport-specific prefix", wire.Reason)
 	}
 	if !strings.Contains(wire.Reason, "500") {
-		t.Fatalf("reason = %q, want the transport failure itself named, not the retry's validation error", wire.Reason)
+		t.Fatalf("reason = %q, want the LAST attempt's transport failure named", wire.Reason)
+	}
+	if !strings.Contains(wire.Reason, "attempt 3/3") {
+		t.Fatalf("reason = %q, want the decisive attempt named (attempt 3/3)", wire.Reason)
+	}
+	if got := fake.grammarCNT.Load(); got != 2 {
+		t.Fatalf("grammar attempts = %d, want 2 (both fail validation before the chat fallback)", got)
+	}
+	if got := fake.chatFallbackCNT.Load(); got != 1 {
+		t.Fatalf("chat-fallback attempts = %d, want 1", got)
 	}
 }
 
@@ -714,12 +831,21 @@ func TestRunAgentTaskRepackParentCancellation(t *testing.T) {
 // expires DURING the re-pack, the defer is the wall-timeout shape — not a
 // schema failure and not an "unreachable" endpoint. The delegator sizes future
 // contracts off this shape, so mislabeling it teaches it the wrong lesson.
+//
+// Every lane hangs past the 1 s wall (register D-108, W-19): since the
+// re-pack's per-attempt bound now splits the wall across the attempts still
+// owed a turn, a seat that never answers must be given every chance to prove
+// it — grammar AND the chat fallback — or an early, fast-failing lane (the
+// old fixture's un-configured chat fallback, a fast 404) would let the run
+// finish with wall to spare and never exercise the wall-timeout shape at all.
 func TestRunAgentTaskRepackDeadlineIsAWallTimeout(t *testing.T) {
 	fake := &agentFake{
-		rosterIDs:   []string{agentTestSeat},
-		loop:        func(int64) string { return doneChat("The answer is 42.") },
-		repack:      func(int64) string { return `{"answer":"42"}` },
-		repackDelay: 2500 * time.Millisecond, // past the 1s contract wall
+		rosterIDs:         []string{agentTestSeat},
+		loop:              func(int64) string { return doneChat("The answer is 42.") },
+		repack:            func(int64) string { return `{"answer":"42"}` },
+		repackDelay:       2500 * time.Millisecond, // past the 1s contract wall
+		chatFallback:      func(int64) string { return doneChat(`{"answer":"42"}`) },
+		chatFallbackDelay: 2500 * time.Millisecond, // past the 1s contract wall
 	}
 	srv := fake.server(t)
 	defer srv.Close()

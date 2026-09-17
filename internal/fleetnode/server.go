@@ -479,6 +479,81 @@ func medianSeconds(d []time.Duration) float64 {
 	return math.Round(sec*100) / 100
 }
 
+// queueWaitEstimateSec is how long a caller should expect to wait for a
+// worker to free, from the node's OWN measured recent wall — never from
+// seat_rate.min_turn_sec, which is a max-final RETRY floor for one seat and
+// has no relationship to how deep this node's backlog is (register S-04,
+// diagnosis §5.2, the overhaul plan's roast correction).
+//
+// cappedDepth is the CAPPED backlog only — Jobs.CountsCapped's queued+running,
+// whatever phase (an admitting job still holds the worker slot a waiter
+// needs; see health's admitting note) — NEVER health's all-jobs queue_depth
+// (register review round 1 BLOCKER). max_concurrent_jobs bounds only jobs
+// that count against it (the same set runningCappedLocked/IdleSlot measure);
+// an uncapped job (a render, an stt, a pipeline route) never waits behind
+// that cap, so dividing an ALL-jobs depth by maxConcurrent would inflate the
+// estimate for a node whose agent slots are genuinely idle behind unrelated
+// media load — exactly the class of bug saturationOf (S-17) and this PR's own
+// IdleSlot fix (S-20) both already avoid.
+//
+// excess = cappedDepth - maxConcurrent is how many admitted CAPPED jobs are
+// beyond what can run AT ONCE right now; each of maxConcurrent workers
+// retires roughly one job every recentWallSec, so the deepest excess job
+// waits about excess x recentWallSec / maxConcurrent. 0 (no claim) when
+// maxConcurrent is unlimited (<=0 — nothing ever waits for a worker), there
+// is no excess (a worker is free), or the node has no recent wall sample at
+// all.
+func queueWaitEstimateSec(cappedDepth, maxConcurrent int, recentWallSec float64) float64 {
+	if maxConcurrent <= 0 || recentWallSec <= 0 {
+		return 0
+	}
+	excess := cappedDepth - maxConcurrent
+	if excess <= 0 {
+		return 0
+	}
+	return float64(excess) * recentWallSec / float64(maxConcurrent)
+}
+
+// retryAfterFor computes the "queue full" 503's Retry-After header value AND
+// the human-readable suffix appended to the refusal message, from ONE
+// evaluation of the node's own measured recent wall — so the header and the
+// text can never disagree (register S-04; review round 1 items 2/3).
+//
+// The header is always ceil(queueWaitEstimateSec), bounded to [5, 300] so it
+// is never "retry at once" (the queue IS full right now) and never an
+// unbounded promise. The TEXT distinguishes three shapes the bare number
+// cannot:
+//
+//   - No recent wall sample yet (a fresh node, or one that has never
+//     finished an agent job): the flat 30s is a DEFAULT, not a measurement,
+//     and must not be worded like one — "no recent completions yet — retry
+//     in 30 s", never "~30 s until a worker frees" (that phrasing implies a
+//     precision the node does not have).
+//   - A genuine measured estimate that lands inside [5, 300]: "~N s until a
+//     worker frees, from recent completions".
+//   - An estimate that would exceed 300s: the header is still capped at 300
+//     (an unbounded promise is worse than an honest floor), but the text says
+//     so explicitly — ">=300 s until a worker frees" — rather than
+//     presenting the cap as if it were the precise answer. A raw 600s
+//     estimate silently rendered as "~300 s" invites every waiter to retry
+//     in lockstep at the same instant (the overhaul plan's roast correction:
+//     an admission refusal must be something the delegator can outwait,
+//     never terminal, and a disguised clamp defeats that).
+func retryAfterFor(cappedDepth, maxConcurrent int, recentWallSec float64) (headerSec int, suffix string) {
+	if recentWallSec <= 0 {
+		return 30, "no recent completions yet — retry in 30 s"
+	}
+	sec := int(math.Ceil(queueWaitEstimateSec(cappedDepth, maxConcurrent, recentWallSec)))
+	switch {
+	case sec < 5:
+		return 5, "~5 s until a worker frees, from recent completions"
+	case sec > 300:
+		return 300, ">=300 s until a worker frees, from recent completions"
+	default:
+		return sec, fmt.Sprintf("~%d s until a worker frees, from recent completions", sec)
+	}
+}
+
 // seatState reports the cached /running answer for the agent seat: loaded,
 // starting, and whether the read is KNOWN at all. Never probes itself — the
 // background residency refresh publishes it on the same TTL.
@@ -977,6 +1052,30 @@ type healthPayload struct {
 	// new state. Absent when this node has finished no agent job (a cold node
 	// makes no claim about its speed).
 	RecentAgentWallSec float64 `json:"recent_agent_wall_sec,omitempty"`
+	// QueueWaitEstimateSec (register S-04) is queueWaitEstimateSec over the
+	// CURRENT CAPPED backlog (Jobs.CountsCapped, NEVER the all-task-types
+	// queue_depth published above — an uncapped media/stt/pipeline job never
+	// waits behind max_concurrent_jobs, so mixing it in would inflate the
+	// estimate for a node whose agent slots are genuinely idle) and
+	// max_concurrent_jobs, using the same recent_agent_wall_sec sample
+	// published above. The "queue full" 503's Retry-After header uses the
+	// SAME formula, but this field is the RAW, UNBOUNDED value — Retry-After
+	// additionally clamps to [5, 300] because it is an HTTP retry contract;
+	// this field is a delegator's own placement signal, and a genuine 600s
+	// estimate is more useful reported honestly than floored to 300. Reading
+	// the two health fields together: absent QueueWaitEstimateSec with a
+	// PRESENT RecentAgentWallSec means genuinely 0 (a worker is free right
+	// now); both absent means unknown (no wall sample exists yet). 0 (a
+	// worker is free, or no recent wall sample) is the honest answer and
+	// omitempty hides it, exactly like RecentAgentWallSec's own "a cold node
+	// makes no claim" rule. NOT gated to the agent lane: the capped backlog
+	// spans every capped task type, and a media-only node with no agent
+	// history simply never has a wall sample to estimate from.
+	//
+	// Not yet consumed by internal/delegate — that lands with the placement
+	// release (feat/placement-eta); this field exists so that PR has
+	// something to read.
+	QueueWaitEstimateSec float64 `json:"queue_wait_estimate_sec,omitempty"`
 	// ServedModels is the CACHED roster name list — canonical ids AND every
 	// alias (agentResidency.served, from swapclient.Roster.Names) —
 	// refreshed on the same TTL/single-flight as AgentResident. Absent/empty
@@ -1075,6 +1174,19 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if s.agentLane && s.admitting != nil {
 		admitting = s.admitting()
 	}
+	// recentWall backs BOTH recent_agent_wall_sec (agent-lane only, below) and
+	// queue_wait_estimate_sec (published regardless of lane): one walk of the
+	// job store's finished rows feeds both fields, so they can never disagree
+	// about what "recent" means.
+	recentWall := medianSeconds(s.jobs.FinishedAgentWalls(recentAgentWallSamples))
+	maxConcurrentJobs := s.jobs.MaxConcurrent()
+	// The estimate's depth is the CAPPED backlog only (review round 1
+	// BLOCKER): max_concurrent_jobs bounds only jobs that count against it
+	// (Jobs.CountsCapped, the same set runningCappedLocked/IdleSlot measure),
+	// so mixing in an uncapped media/stt/pipeline job — which never waits
+	// behind that cap — would divide the wrong numerator by the right
+	// denominator and inflate the estimate for a fully idle agent lane.
+	cappedQueued, cappedRunning := s.jobs.CountsCapped()
 	payload := healthPayload{
 		NodeID:                s.opts.NodeID,
 		SchemaVersion:         1,
@@ -1090,9 +1202,10 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		QueueDepth:            queued + running,
 		JobsQueued:            queued,
 		JobsRunning:           running,
-		MaxConcurrentJobs:     s.jobs.MaxConcurrent(),
+		MaxConcurrentJobs:     maxConcurrentJobs,
 		MaxQueueDepth:         s.opts.Cfg.FleetQueueLimit(),
 		HarnessVersion:        s.opts.Version,
+		QueueWaitEstimateSec:  math.Round(queueWaitEstimateSec(cappedQueued+cappedRunning, maxConcurrentJobs, recentWall)*100) / 100,
 	}
 	if s.opts.ServingConfig != nil {
 		if sha, state := s.opts.ServingConfig(); state != "" {
@@ -1146,8 +1259,8 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 			payload.SeatLoaded, payload.SeatStarting = &loaded, &starting
 		}
 		payload.JobsAdmitting = admitting
-		if med := medianSeconds(s.jobs.FinishedAgentWalls(recentAgentWallSamples)); med > 0 {
-			payload.RecentAgentWallSec = med
+		if recentWall > 0 {
+			payload.RecentAgentWallSec = recentWall
 		}
 		if s.opts.Cfg.Composite() {
 			payload.Tiers = s.opts.Cfg.Tiers
@@ -1770,8 +1883,24 @@ func (s *Server) admit(w http.ResponseWriter, r *http.Request, env dispatchEnvel
 			// the one lever the operator holds, and leaves the routing to
 			// whoever made the request. Both halves stay true whatever any
 			// caller does next.
+			//
+			// Retry-After (register S-04) is ADDITIVE on top of that byte-
+			// identical prefix: the node's own recent_agent_wall_sec sizes a
+			// wait the delegator can actually honour, so a "queue full" 503 is
+			// something to outwait, not a dead end — never sized from
+			// seat_rate.min_turn_sec, a different quantity entirely (see
+			// retryAfterFor). Sized from the CAPPED backlog only (review
+			// round 1 BLOCKER) — `d` above is every job (the correct backlog
+			// total this refusal is ABOUT), but max_concurrent_jobs bounds
+			// only the capped set, so dividing the all-jobs depth by it would
+			// inflate the wait for a node whose agent slots are genuinely
+			// idle behind a pile of unrelated uncapped media/stt/pipeline
+			// work.
+			cappedQueued, cappedRunning := s.jobs.CountsCapped()
+			retryAfter, suffix := retryAfterFor(cappedQueued+cappedRunning, s.jobs.MaxConcurrent(), medianSeconds(s.jobs.FinishedAgentWalls(recentAgentWallSamples)))
+			w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
 			writeError(w, http.StatusServiceUnavailable,
-				fmt.Sprintf("queue full (%d jobs accepted+running, limit %d): retry later, or raise fleet_max_queue_depth", d, limit))
+				fmt.Sprintf("queue full (%d jobs accepted+running, limit %d): retry later, or raise fleet_max_queue_depth (%s)", d, limit, suffix))
 			return
 		}
 	}

@@ -75,7 +75,15 @@ func WarnOnDefaults(src Source, w io.Writer) bool {
 		fmt.Fprintf(w, "WARNING: config file NOT FOUND at %s (from --config/$LOCAL_OFFLOAD_CONFIG) — running on BUILT-IN DEFAULTS; machine bindings are inactive. Fix the path.\n", src.Path)
 		return true
 	case src.LoadErr != nil:
-		fmt.Fprintf(w, "WARNING: config at %s FAILED to load (%v) — running on BUILT-IN DEFAULTS; machine bindings are inactive.\n", src.Path, src.LoadErr)
+		// NOT "built-in defaults": Load returns the FILE's settings with only the
+		// five composite keys stripped, so this process runs on that file — which
+		// is exactly why a refusal matters. Saying "defaults" sent an operator
+		// hunting a path problem while the real one was a named key in the file
+		// they already had open, and it hid the only text that names it.
+		fmt.Fprintf(w, "WARNING: config at %s loaded but FAILED VALIDATION: %v\n"+
+			"  The file's other settings ARE in effect — this is not a fall back to built-in defaults.\n"+
+			"  fleet-serve refuses to start on it; the MCP server starts but defers every tool except offload_status; one-shot CLI verbs proceed. Fix the key named above.\n",
+			src.Path, src.LoadErr)
 		return true
 	}
 	return false
@@ -91,7 +99,12 @@ func SourceLine(src Source) string {
 		return "config:     BUILT-IN DEFAULTS (no config file found)"
 	case src.NotFound:
 		return "config:     BUILT-IN DEFAULTS (file not found: " + src.Path + ")"
+	case src.LoadErr != nil:
+		// Same correction as WarnOnDefaults above, on the line doctor prints
+		// FIRST: this config came from the file, it just did not pass validation,
+		// and the error text is the only thing that names the offending key.
+		return "config:     " + src.Path + " — FAILED VALIDATION: " + src.LoadErr.Error()
 	default:
-		return "config:     BUILT-IN DEFAULTS (failed to load: " + src.Path + ")"
+		return "config:     BUILT-IN DEFAULTS (" + src.Path + " was not read)"
 	}
 }

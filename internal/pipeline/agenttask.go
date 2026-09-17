@@ -80,6 +80,12 @@ const (
 	// agentRosterProbeTimeout bounds the seat-residency roster fetch — the same
 	// 10s mcpserver's plannerUnserved uses.
 	agentRosterProbeTimeout = 10 * time.Second
+	// repackMaxAttempts is the most seat completions repackStructured ever
+	// spends: two grammar attempts (the truncation retry included) plus the
+	// one grammar-free chat fallback. Named so repackAttemptDeadline (register
+	// D-108, W-19) can divide what is left of the wall by what is still owed a
+	// turn, instead of a single attempt assuming it is the only one left.
+	repackMaxAttempts = 3
 )
 
 // runAgentTask executes one delegation contract. req.Params carries the
@@ -269,6 +275,34 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	// three share a deadline, and the time spent at the cordon is reported as
 	// admission time (reviewer finding, 0.117.0: each had its own full window).
 	admissionEnd := time.Now().Add(admissionBudget(p.cfg.AgentAdmissionWaitSec))
+	// THE FENCE CHECK (register S-26), BEFORE the cordon below. Under a lease
+	// this process does not hold and that refuses new runs — an exclusive text
+	// hold, a draining cordon, a media render — the cordon cannot succeed:
+	// nothing this run can do inside its own budget releases another process's
+	// lease. It polled that file for the WHOLE admission budget anyway (47 rows
+	// in three days, 300 s each, 3.92 h) and then deferred `capacity` — which is
+	// precisely the class the delegator re-places on another node. The verdict
+	// was on disk before the first poll, so say it now and let the re-placement
+	// happen five minutes earlier.
+	//
+	// ForeignFence, not Fenced, and only a FENCING hold: `gpu reserve --drain
+	// --unload-seat -- <session>` runs its own work under GPU_LEASE_EPOCH on the
+	// cards it cleared, and a plain non-fencing text reservation still WAITS at
+	// the cordon (ADR 0032, "a peer-held seat is waited for"). This changes only
+	// the hold whose answer cannot change inside the wait.
+	//
+	// The lease read is the CORDON's own armed directory (config.Load arms it),
+	// not an independent resolution from this config: a pre-check that predicts
+	// what AwaitRunSlot will do has to read what AwaitRunSlot reads, or the two
+	// can disagree — and a process that never loaded a config has that gate
+	// deliberately inert, which this check must be too.
+	if dir := modelaffinity.GPULeaseDir(); dir != "" {
+		lease := gpulease.InspectDir(dir)
+		if fenced, why := delegate.ForeignFence(lease); fenced {
+			return deferWire(core.DeferClassCapacity, fmt.Sprintf(
+				"gpu busy: %s; no new run is admitted on this box until it is released (%s)", why, delegate.HolderLine(lease)))
+		}
+	}
 	cordonStart := time.Now()
 	if lerr := modelaffinity.AwaitRunSlot(ctx, p.cfg.Endpoint, seat, admissionEnd); lerr != nil {
 		admitted = cordonWait(cordonStart)
@@ -301,17 +335,22 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	var coldLoad time.Duration // this run's observed cold load, if the warm-up waited for one (seat-rates.json)
 	var coldLoaded bool        // the warm-up ATTEMPTED a load this run (D-118 reads this, never coldLoad > 0: a sub-tick load measures 0)
 	act.Phase("cold-load")
-	if warmed, warmNote := warmSeat(ctx, p.cfg.Endpoint, seat, admissionBudget(p.cfg.AgentAdmissionWaitSec)-admitted); warmed > 0 || warmNote != "" {
+	warmed, warmNote, warmAttempted := warmSeat(ctx, p.cfg.Endpoint, seat, admissionBudget(p.cfg.AgentAdmissionWaitSec)-admitted)
+	if warmAttempted {
+		// coldLoaded is "the warm-up ATTEMPTED a load", and warmSeat is the only
+		// thing that knows it: a sub-tick load measures 0 and, since W-08, a note
+		// is also returned by exits that warmed nothing. Deriving it from either
+		// silently un-fired the D-118 coherence probe on a fast box.
 		admitted += warmed
 		coldLoad = warmed
 		coldLoaded = true
-		if warmNote != "" {
-			log.Printf("agent task: seat warm-up (%s): %s", seat, warmNote)
-			if admitNote == "" {
-				admitNote = warmNote
-			} else {
-				admitNote += "; " + warmNote
-			}
+	}
+	if warmNote != "" {
+		log.Printf("agent task: seat warm-up (%s): %s", seat, warmNote)
+		if admitNote == "" {
+			admitNote = warmNote
+		} else {
+			admitNote += "; " + warmNote
 		}
 	}
 	// Post-warm COHERENCE probe (register D-118). A seat that is HEALTHY by
@@ -356,6 +395,67 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		log.Printf("agent task: seat coherence (%s): %s", seat, note)
 		return deferWire(core.DeferClassInfrastructure, note)
 	}
+	// Seat-residency probe — the mirror of mcpserver's plannerUnserved gate: a
+	// POSITIVE "roster answered and the seat is absent" defers before any
+	// planner call; an unreachable/empty roster proceeds and lets the loop's
+	// first chat call surface the real transport error.
+	//
+	// It runs BEFORE the window probe below, and on the admission context for
+	// the same reason: the probe reads /upstream/<seat>/props, and llama-swap
+	// answers that route by LOADING the model. Asking it about a seat this
+	// endpoint does not serve would cold-start something as the side effect of a
+	// run that is about to defer — the side effect the seat-pin probe is placed
+	// after the loop to avoid.
+	if roster, rerr := swapclient.FetchRoster(ctx, p.cfg.Endpoint, agentRosterProbeTimeout); rerr != nil {
+		// Fail-open is right (the loop's first chat call surfaces the real
+		// transport error with far more detail), but SILENT fail-open is not:
+		// this is the first place a dead or misconfigured endpoint shows, and
+		// swallowing it turns the follow-on loop error into a mystery.
+		log.Printf("agent task: seat roster probe of %s failed (proceeding; the loop will surface any real transport failure): %v", p.cfg.Endpoint, rerr)
+	} else if roster.Len() > 0 && !roster.Serves(seat) {
+		return deferWire(core.DeferClassConfig, fmt.Sprintf("agent seat %q is not in the endpoint's served roster", seat))
+	}
+	// The SERVED-WINDOW probe is the last admission step, and it runs HERE —
+	// before the wall context exists (register S-24). agent.ProbeServedWindow
+	// carries a ten-minute cold-start budget on purpose: it is allowed to absorb
+	// a seat's load, because the caller is about to use exactly that seat. Run on
+	// the WALL context, as it was until now, that licence was spent out of the
+	// contract's own clock, and a slow or cold seat consumed the whole wall
+	// before the first token — reported as a wall timeout, with nothing to show
+	// for it. Every other pre-token step (cordon, pre-flight, warm-up, coherence)
+	// is already paid from admission; this one now is too, bounded by the same
+	// deadline and reported in the same admission_wait_sec.
+	//
+	// An admission budget already spent leaves the probe a dead context, so it
+	// fails open to this box's agent_ctx_tokens — the same fallback an
+	// unanswerable probe has always taken. That is the right trade: a box that
+	// spent 300 s loading has a cold-start problem, not a window problem, and
+	// the alternative is handing the wall back the licence this fix removes.
+	act.Phase(gpuactivity.PhaseWindowProbe)
+	probeStart := time.Now()
+	pctx, pcancel := context.WithDeadline(ctx, admissionEnd)
+	probed, probeOK := agent.ProbeServedWindow(pctx, p.cfg.Endpoint, seat)
+	probeCtxErr := pctx.Err() // read BEFORE the cancel below, which would mask a spent deadline
+	pcancel()
+	admitted += time.Since(probeStart)
+	// WHICH window the loop is about to budget against, and where it came from.
+	// agent.ResolveContextTokens has always returned that line and both doors
+	// dropped it (`effCtx, _ :=`), so a run that silently compacted at the 8,192
+	// fallback was indistinguishable on the wire from a correct one — the same
+	// invisibility that let the MCP door measure 8,192 cold and 114,688 warm for
+	// months without anyone being able to say which run was which.
+	effCtx, ctxNote := agent.ResolveContextTokens(0, probed, p.cfg.AgentCtxTokens, probeOK)
+	wire.CtxWindowNote = ctxNote
+	if ctxNote != "" {
+		log.Printf("agent task: %s", ctxNote)
+	}
+	// A fallback the ADMISSION BUDGET caused is an admission finding, not just a
+	// window one: it is the cost of this change's own trade (the probe no longer
+	// gets to spend the wall), and it belongs beside the steps that spent the
+	// budget.
+	if !probeOK && errors.Is(probeCtxErr, context.DeadlineExceeded) {
+		admitNote = joinAdmissionNotes(admitNote, "window probe ran out of admission budget; "+ctxNote)
+	}
 	// Publish the wall this run is ACTUALLY under (register D-116), HERE — at
 	// the one line where the wall actually begins, and never before it. The
 	// node door writes it onto the job record, so a poll of a RUNNING job
@@ -365,10 +465,11 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	// no-op.
 	//
 	// WHY NOT AT THE SIZING (where it was first written, D-116 review finding
-	// 1): everything above this line — the cordon wait, the llama-swap
-	// pre-flight, the cold-load warm-up, the coherence probe — is ADMISSION,
-	// up to admissionBudget (300 s by default) spent in job state `running`
-	// because the node claims a job before it runs it. Publishing the wall at
+	// 1): everything above this line — the fence check, the cordon wait, the
+	// llama-swap pre-flight, the cold-load warm-up, the coherence probe and the
+	// served-window probe — is ADMISSION, up to admissionBudget (300 s by
+	// default) spent in job state `running` because the node claims a job
+	// before it runs it. Publishing the wall at
 	// the top made `wall_sec` mean "a wall was SIZED", and a delegator that
 	// anchors its clock on it would have started counting a 300 s wall while
 	// the seat still had 250 s of loading to do. Published here it means "the
@@ -384,20 +485,6 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	// and the wait it consumed is reported on the wire (contention_wait_sec).
 	contention = seatwait.NewBudget(p.cfg.SeatContentionWaitSec)
 	cctx = seatwait.WithBudget(cctx, contention)
-
-	// Seat-residency probe — the mirror of mcpserver's plannerUnserved gate: a
-	// POSITIVE "roster answered and the seat is absent" defers before any
-	// planner call; an unreachable/empty roster proceeds and lets the loop's
-	// first chat call surface the real transport error.
-	if roster, rerr := swapclient.FetchRoster(cctx, p.cfg.Endpoint, agentRosterProbeTimeout); rerr != nil {
-		// Fail-open is right (the loop's first chat call surfaces the real
-		// transport error with far more detail), but SILENT fail-open is not:
-		// this is the first place a dead or misconfigured endpoint shows, and
-		// swallowing it turns the follow-on loop error into a mystery.
-		log.Printf("agent task: seat roster probe of %s failed (proceeding; the loop will surface any real transport failure): %v", p.cfg.Endpoint, rerr)
-	} else if roster.Len() > 0 && !roster.Serves(seat) {
-		return deferWire(core.DeferClassConfig, fmt.Sprintf("agent seat %q is not in the endpoint's served roster", seat))
-	}
 
 	// Depth (roast delta 2): buildAgentRun already derived
 	// contract.Depth = max(1, wireDepth). Nothing here consumes it YET because
@@ -485,11 +572,10 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		return deferWire(core.DeferClassInfrastructure, "building agent: "+berr.Error())
 	}
 
-	// Window budgeting parity with handleAgentRun: probe the SERVED window
-	// (conservative fallback when unanswerable) and run the measured-ON ladder
+	// Window budgeting parity with handleAgentRun: the SERVED window (probed and
+	// resolved above, on the admission budget; conservative fallback when
+	// unanswerable, and ctx_window_note says which) and the measured-ON ladder
 	// rungs with the real-tokenizer seam (fail-open to the legacy estimate).
-	probed, probeOK := agent.ProbeServedWindow(cctx, p.cfg.Endpoint, seat)
-	effCtx, _ := agent.ResolveContextTokens(0, probed, p.cfg.AgentCtxTokens, probeOK)
 	built.Loop.WithContextTokens(effCtx).WithSkeletonPrune(true).WithGCFCompact(true).
 		WithTokenizer(tokclient.New(p.cfg.Endpoint, seat, 0))
 
@@ -569,7 +655,11 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	// Published here for the run as a whole; the loop recomputes it at the
 	// forced final step, where the tool steps are spent and the live clock is
 	// the honest input.
-	finalBudget, repackBudget := finalBudgetsFor(p.cfg, contract)
+	// The re-pack half of the pair is unused here now: the list-cap gate below
+	// sizes from the fitted final alone, with no re-pack term (register
+	// S-06/W-07) — only finalBudgetsFor's FINAL half still has a reader in
+	// this function.
+	finalBudget, _ := finalBudgetsFor(p.cfg, contract)
 	hasSchema := len(contract.OutputSchema) > 0
 	startFit := seatrate.FitFinalBudget(seatrate.FinalFit{
 		ConfiguredFinal: finalBudget,
@@ -598,10 +688,21 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	// list caps (D-95), gated on the wall still holding one turn at this seat's
 	// rate. No schema, no instruction, no re-issue — and no rate means a 0
 	// floor, which fails open exactly like every other sizing decision here.
+	//
+	// The gate sizes from the FITTED final (startFit.Budget, D-95 above), not
+	// the CONFIGURED one, and carries no re-pack term (register S-06/W-07,
+	// 2026-09-17 diagnosis): the re-issue is ONE turn at whatever budget the
+	// wall fit already narrowed the final answer to, and nothing about it gets
+	// re-packed on top. Gating on MinTurnFor(0, finalBudget, repackBudget,
+	// tokS) — the full CONFIGURED final (up to 8,192) plus a full re-pack term
+	// — asked for roughly double what the re-issue actually costs; below ~9
+	// tok/s that exceeded the 900 s wall cap and the gate could never fire at
+	// all. It was the #1 measured defer fleet-wide (48 rows "re-pack skipped:
+	// the final answer was cut at the completion budget").
 	if hasSchema {
 		built.Loop.WithCutFinalReissue(
 			listCapInstruction(contract.OutputSchema),
-			time.Duration(seatrate.MinTurnFor(0, finalBudget, repackBudget, est.TokS))*time.Second,
+			time.Duration(seatrate.MinTurnFor(0, startFit.Budget, 0, est.TokS))*time.Second,
 		)
 	}
 
@@ -708,6 +809,32 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 				return deferWire(core.DeferClassInfrastructure, r+"; the wall expired during the wait")
 			}
 			return deferWire(core.DeferClassBudget, fmt.Sprintf("wall timeout after %ds", timeoutSec))
+		}
+		if errors.Is(cctx.Err(), context.Canceled) {
+			// The PARENT went away mid-loop — the same shape the re-pack branch
+			// below already carries its own arm for (register S-22/W-16, 2026-
+			// 09-17 diagnosis: "a cancelled parent is filed as broken
+			// hardware", 12 "agent loop: context canceled" rows). The failed
+			// request looks exactly like a dial refusal — a *url.Error — so it
+			// used to fall through to the generic "agent loop: "+rerr.Error()
+			// branch below and defer as infrastructure: an operator told to fix
+			// a box that never misbehaved. Budget is the honest class: a
+			// ceiling outside the model's control stopped the run.
+			//
+			// The reason names NO cause (PR #366 review, correctness blocker):
+			// on the FLEET NODE path the only thing that ever cancels this
+			// context is fleetnode.Jobs.DrainAndStop (a node drain, never a
+			// caller) — and its own mark ("interrupted") is written BEFORE the
+			// cancel that releases this run, so finish() is write-once against
+			// an already-terminal job and this defer's words are NEVER what the
+			// delegator reads on that path (proven by
+			// TestJobsDrainDiscardsALateAgentBudgetDefer,
+			// internal/fleetnode/jobs_test.go). Only the LOCAL in-process path
+			// (RunAgentContract, no Jobs store in front of it) can ever surface
+			// this string to a human, and there a cancel genuinely IS the
+			// caller's own context ending — but the wording must not assert a
+			// cause the fleet-node path does not share, so it names both.
+			return deferWire(core.DeferClassBudget, "agent loop: canceled (the parent context ended — the caller gave up, or this box is draining)")
 		}
 		// A busy seat that outlived the contention budget is its OWN reason:
 		// "seat contended:" is the ledger/audit grep key, and the operator's fix
@@ -855,6 +982,7 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		// acceptance: every branch below returns deferWire, which sets
 		// Deferred, and delegate.runLocal/runRemote both run acceptance only
 		// when !wire.Deferred — so no check can ever read it on this path.
+		cutoff, isCutoff := asRepackCutoff(serr)
 		switch {
 		case errors.Is(cctx.Err(), context.DeadlineExceeded):
 			// The wall expired DURING the re-pack. That is the timeout shape,
@@ -875,6 +1003,16 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 			// misbehaved. Budget is the honest class: a ceiling outside the
 			// model's control stopped the run.
 			return deferWire(core.DeferClassBudget, "canceled during the structured re-pack (the caller's context ended)")
+		case isCutoff:
+			// The DECISIVE (last-run) re-pack attempt was ended by its OWN
+			// per-attempt bound (repackAttemptDeadline, register D-108) — not
+			// by the seat, not by the wall (that is the DeadlineExceeded arm
+			// above, which the real cctx would already have caught) and not by
+			// a caller (that is the Canceled arm above). Filing a self-imposed
+			// cutoff as infrastructure recreates, one arm over, the exact
+			// defect this PR already fixes for a canceled parent (PR #366
+			// correctness review): the box did nothing wrong.
+			return deferWire(core.DeferClassBudget, "structured re-pack "+cutoff.Error())
 		case transport:
 			var lse *llamaclient.StatusError
 			if errors.As(serr, &lse) && seatwait.Retryable(lse.StatusCode, lse.Body) {
@@ -1060,7 +1198,42 @@ func (p *Pipeline) repackStructured(ctx context.Context, seat string, rawSchema 
 	system := "You extract structured data from text. Output ONLY a JSON object with exactly the requested fields. Use empty values when a field is absent."
 	user := fmt.Sprintf("Extract these fields from the text: %s.\n\nTEXT:\n%s", strings.Join(names, ", "), output)
 
-	var lastErr, transportErr error
+	// ONE set of lane-probe closures for the WHOLE call (register D-85/D-108,
+	// W-19): before this, repackClient built a fresh FleetLaneGates cache and
+	// a fresh LocalSwapBusy closure on every attempt (each attempt called
+	// repackClient — or, for the chat fallback, repackViaChat's own copy —
+	// independently), so up to three attempts each re-paid a live
+	// /v1/models + /running + per-model gauge read of the LOCAL seat before
+	// spending a token. Measured fleet-wide: 1,301 rows, median 18 s, p90
+	// 109 s, max 581 s, 15.13 h total, 244 rows at all three attempts — and
+	// 180 of those deferred anyway. gates threads the SAME closures into
+	// every client this call still builds (one per attempt, same as before —
+	// a *llamaclient.Client is a cheap struct, never what was expensive here)
+	// so their own internal TTL cache does the sharing.
+	gates := p.newRepackGates()
+
+	// lastRaw/lastBound/lastAttemptNum describe the MOST RECENTLY failed
+	// attempt; earlierNotes carries every one before it. Only the FINAL
+	// attempt this call ends on decides transport/budget/abstention (register
+	// D-108, PR #366 correctness review): everything earlier is diagnostic
+	// context for the operator, never the published class — a seat that
+	// self-cut on attempt 1 and definitively refused on attempt 3 is a
+	// broken-box report, not a budget one, and the reverse must not read as
+	// broken hardware either. recordFailure shifts the PREVIOUS "last" into
+	// earlierNotes (formatted, plain text — no wrap chain needed on a note
+	// nothing unwraps) the moment a NEWER failure arrives, so the one entry
+	// that never lands in earlierNotes is whichever failure turns out to be
+	// the final one.
+	var earlierNotes []string
+	var lastRaw error
+	var lastBound time.Duration
+	var lastAttemptNum int
+	recordFailure := func(raw error, bound time.Duration, attemptNum int) {
+		if lastRaw != nil {
+			earlierNotes = append(earlierNotes, fmt.Sprintf("attempt %d/%d (bound %s): %v", lastAttemptNum, repackMaxAttempts, lastBound, lastRaw))
+		}
+		lastRaw, lastBound, lastAttemptNum = raw, bound, attemptNum
+	}
 	budget := repackBudget(output)
 	for attempt := 0; attempt < 2; attempt++ {
 		if !wallLeft("grammar re-pack") {
@@ -1087,12 +1260,20 @@ func (p *Pipeline) repackStructured(ctx context.Context, seat string, rawSchema 
 		// The flag is harmless on a non-thinking template — gemma-4-e4b's output
 		// with it is identical to its output without it — so it rides every
 		// re-pack rather than being gated on a seat guess we cannot make.
-		gres, gerr := p.repackClient(p.cfg.CompletionPath, budget).Generate(ctx, seat, system, user, grammar, budget, p.cfg.Temperature, 0, llamaclient.WithoutThinking())
+		//
+		// attemptTimeout (register D-108, W-19) bounds this ONE http round
+		// trip — the client's own transport-level Timeout, exactly the role
+		// repackTimeout has always played — narrowed to what an even split of
+		// the remaining wall across the attempts still owed a turn actually
+		// buys. ctx itself is passed UNCHANGED: wrapping it in a shorter
+		// context here would also cut off llamaclient's own seatwait retry
+		// loop (a 429/503 answer retries on the CONTRACT's contention budget,
+		// not a per-attempt one) and would desynchronize this call's
+		// deadline from the wall the caller classifies a failure against.
+		attemptTimeout := repackAttemptDeadline(ctx, p.cfg, budget, repackMaxAttempts-attempts+1)
+		gres, gerr := p.repackClient(p.cfg.CompletionPath, attemptTimeout, gates).Generate(ctx, seat, system, user, grammar, budget, p.cfg.Temperature, 0, llamaclient.WithoutThinking())
 		if gerr != nil {
-			lastErr = gerr
-			if transportErr == nil && genErrIsTransport(gerr) {
-				transportErr = gerr
-			}
+			recordFailure(gerr, attemptTimeout, attempts)
 			continue
 		}
 		if gres.Truncated {
@@ -1103,7 +1284,7 @@ func (p *Pipeline) repackStructured(ctx context.Context, seat string, rawSchema 
 			// answer re-packed at 1,024 tokens on the 27B, an 8,380-char one
 			// on the 4B, both filed as invalid JSON). Name the truncation, and
 			// give the retry the cap.
-			lastErr = fmt.Errorf("re-pack truncated at %d tokens (the answer is %d chars; the structured budget cannot hold it)", budget, len(output))
+			recordFailure(fmt.Errorf("re-pack truncated at %d tokens (the answer is %d chars; the structured budget cannot hold it)", budget, len(output)), attemptTimeout, attempts)
 			budget = agentRepackMaxTokensCap
 			continue
 		}
@@ -1116,7 +1297,7 @@ func (p *Pipeline) repackStructured(ctx context.Context, seat string, rawSchema 
 			if fixed, ok := coerceToSchema(content, schema); ok {
 				return json.RawMessage(fixed), gres.TokensOut, false, attempts, nil
 			}
-			lastErr = verr
+			recordFailure(verr, attemptTimeout, attempts)
 			continue
 		}
 		return json.RawMessage(content), gres.TokensOut, false, attempts, nil
@@ -1136,17 +1317,35 @@ func (p *Pipeline) repackStructured(ctx context.Context, seat string, rawSchema 
 		return nil, 0, false, attempts, err
 	}
 	attempts++
-	if structured, tokensOut, ok := p.repackViaChat(ctx, seat, schema, output); ok {
+	chatTimeout := repackAttemptDeadline(ctx, p.cfg, budget, repackMaxAttempts-attempts+1)
+	chatClient := p.repackClient("/v1/chat/completions", chatTimeout, gates)
+	structured, tokensOut, cerr := p.repackViaChat(ctx, chatClient, seat, schema, output)
+	if cerr == nil {
 		return structured, tokensOut, false, attempts, nil
 	}
-	if transportErr != nil {
-		// Report the TRANSPORT failure itself, not whatever the other attempt
-		// produced: the caller prefixes this with "structured re-pack
-		// unreachable", and a message pairing that prefix with a schema
-		// validation error would be an unreadable diagnosis.
-		return nil, 0, true, attempts, transportErr
+	recordFailure(cerr, chatTimeout, attempts)
+
+	// Every attempt has now run and failed. lastRaw/lastBound/lastAttemptNum
+	// describe the FINAL one — its own nature alone decides the verdict
+	// (register D-108, PR #366 correctness review): a self-imposed cutoff is
+	// never evidence of a broken box (repackCutoffErr, budget); a genuine
+	// dial failure / 5xx / 429 on the LAST attempt is (transport=true,
+	// infrastructure); anything else — a validation failure, a truncation, a
+	// non-429 4xx refusal — means the seat answered and could not be used
+	// (abstention). earlierNotes rides along in every case as diagnostic
+	// context, never as what decides the class.
+	if selfCutoff(lastRaw) {
+		msg := fmt.Sprintf("attempt %d/%d cut by its %s share of the wall", lastAttemptNum, repackMaxAttempts, lastBound)
+		if len(earlierNotes) > 0 {
+			msg = strings.Join(earlierNotes, "; ") + "; " + msg
+		}
+		return nil, 0, false, attempts, &repackCutoffErr{msg: msg, raw: lastRaw}
 	}
-	return nil, 0, false, attempts, lastErr
+	finalErr := fmt.Errorf("attempt %d/%d (bound %s): %w", lastAttemptNum, repackMaxAttempts, lastBound, lastRaw)
+	if len(earlierNotes) > 0 {
+		finalErr = fmt.Errorf("%s; %w", strings.Join(earlierNotes, "; "), finalErr)
+	}
+	return nil, 0, genErrIsTransport(lastRaw), attempts, finalErr
 }
 
 // outerObject trims text to its outermost {...} span (fences and prose around
@@ -1220,28 +1419,94 @@ func repackTimeout(cfg config.Config, budget int) time.Duration {
 	return t
 }
 
-// repackClient is a seat client for one re-pack lane, on the given path,
-// with a timeout sized to the budget (repackTimeout) and the same
-// seat-endpoint routing the recorded pipeline uses.
-// Construction mirrors openPipeline / NewRecordlessPipeline exactly — seat
-// endpoints AND the cascade remote lanes — so the re-pack keeps the busy-hour
-// failover the pipeline's own client has (review finding, 0.115.12).
-func (p *Pipeline) repackClient(path string, budget int) *llamaclient.Client {
-	c := llamaclient.New(p.cfg.Endpoint, path, p.cfg.Model, repackTimeout(p.cfg, budget)).
-		WithSeatEndpoints(p.cfg.SeatEndpoints)
+// repackGates are the cascade-lane probe closures ONE repackStructured call
+// shares across every client it builds (register D-85/D-108, W-19).
+// llamaclient.LocalSwapBusy and llamaclient.FleetLaneGates each return a
+// closure that caches its own probe for a TTL (laneBusyTTL / laneResidencyTTL,
+// both a few seconds) — but that cache is only as long-lived as the closure
+// itself, and repackClient used to build a fresh one on every call. Building
+// them ONCE here and threading the SAME closures into every client this call
+// constructs (both grammar attempts AND the chat fallback) is what lets that
+// cache do its job: one live probe per window, not one per attempt.
+type repackGates struct {
+	busy     func() bool
+	busyFor  func(model string) (bool, string)
+	resident func(base, model string) bool
+	route    func(base string) (path, token string)
+}
+
+// newRepackGates builds repackGates for one repackStructured call. The lease
+// check (busy) is free (a lock-file read) and always built; the network-probe
+// pair (busyFor/resident/route) is built only when a cascade lane is actually
+// configured — mirroring repackClient's old guard exactly, so a box with no
+// cascade_remote_lanes pays nothing extra.
+func (p *Pipeline) newRepackGates() repackGates {
+	gpuLockPath, stateDir := p.cfg.GPULockPath, p.cfg.StateDir
+	g := repackGates{busy: func() bool { return delegate.LocalBusy(gpuLockPath, stateDir) }}
 	if len(p.cfg.CascadeRemoteLanes) > 0 {
-		gpuLockPath, stateDir := p.cfg.GPULockPath, p.cfg.StateDir
+		g.busyFor = llamaclient.LocalSwapBusy(p.cfg.Endpoint)
 		// FleetLaneGates, not RosterResident alone: a lane base may be a
 		// plain llama-swap OR a fleet node whose own llama-swap binds
 		// loopback (C-41b). The pair shares one probe, so residency and the
 		// route can never disagree about which shape a base is.
-		laneResident, laneRoute := llamaclient.FleetLaneGates(p.cfg.FleetAuthToken)
-		c = c.WithRemoteLanes(p.cfg.CascadeRemoteLanes,
-			func() bool { return delegate.LocalBusy(gpuLockPath, stateDir) },
-			llamaclient.LocalSwapBusy(p.cfg.Endpoint),
-			laneResident).WithLaneRoute(laneRoute)
+		g.resident, g.route = llamaclient.FleetLaneGates(p.cfg.FleetAuthToken)
+	}
+	return g
+}
+
+// repackClient is a seat client for one re-pack lane, on the given path, with
+// the given transport-level timeout (repackAttemptDeadline sizes it per
+// attempt; repackTimeout is still the plain per-budget rule callers that want
+// it unbounded by the wall can pass directly) and the same seat-endpoint
+// routing the recorded pipeline uses, wired to gates — this call's SHARED
+// lane-probe closures (newRepackGates), never rebuilt per client even though
+// the *llamaclient.Client struct itself still is (a cheap allocation; the
+// probe caches gates carries are the part that was expensive to rebuild).
+// Construction otherwise mirrors openPipeline / NewRecordlessPipeline exactly
+// — seat endpoints AND the cascade remote lanes — so the re-pack keeps the
+// busy-hour failover the pipeline's own client has (review finding,
+// 0.115.12).
+func (p *Pipeline) repackClient(path string, timeout time.Duration, gates repackGates) *llamaclient.Client {
+	c := llamaclient.New(p.cfg.Endpoint, path, p.cfg.Model, timeout).
+		WithSeatEndpoints(p.cfg.SeatEndpoints)
+	if len(p.cfg.CascadeRemoteLanes) > 0 {
+		c = c.WithRemoteLanes(p.cfg.CascadeRemoteLanes, gates.busy, gates.busyFor, gates.resident).WithLaneRoute(gates.route)
 	}
 	return c
+}
+
+// repackAttemptDeadline bounds ONE re-pack attempt (register D-85/D-108,
+// W-19): the seat's own per-call allowance (repackTimeout, sized to this
+// attempt's budget) narrowed to what the remaining wall actually buys when
+// split evenly across the attempts still owed a turn (attemptsLeft, this one
+// included). It sizes the CLIENT's transport-level timeout (repackClient),
+// never a context wrapped around the call — ctx itself always carries the
+// real wall unchanged, so llamaclient's own seatwait retry loop (a 429/503
+// answer retries on the CONTRACT's shared contention budget, not a
+// per-attempt one) and the caller's wall-timeout classification
+// (errors.Is(ctx.Err(), context.DeadlineExceeded), read after this call
+// returns) both keep reading the SAME clock they always have. Before this, a
+// client's static per-call timeout was the ONLY bound below the contract
+// wall, so a slow first attempt could sit on its full allowance with two more
+// attempts still due — a wall that had, say, 30 s left let attempt one alone
+// burn all 30 rather than leaving room for the retry and the chat fallback.
+// No deadline on ctx, or nothing left to divide by, returns the seat
+// allowance unnarrowed — the pre-D-108 behaviour.
+func repackAttemptDeadline(ctx context.Context, cfg config.Config, budget, attemptsLeft int) time.Duration {
+	d := repackTimeout(cfg, budget)
+	if attemptsLeft <= 0 {
+		return d
+	}
+	dl, ok := ctx.Deadline()
+	if !ok {
+		return d
+	}
+	if remaining := time.Until(dl); remaining > 0 {
+		if share := remaining / time.Duration(attemptsLeft); share < d {
+			d = share
+		}
+	}
+	return d
 }
 
 // repackBudget sizes the structured re-pack's completion budget from the text
@@ -1269,8 +1534,20 @@ func repackBudget(output string) int {
 // the miss a type-annotated prompt prevents — measured on gpt-oss-20b). The
 // answer is trimmed to its outermost {...} span before validation, because
 // chat-route answers legitimately arrive fenced or prefixed where the native
-// grammar route could not.
-func (p *Pipeline) repackViaChat(ctx context.Context, seat string, schema map[string]any, output string) (json.RawMessage, int, bool) {
+// grammar route could not. client is repackStructured's hoisted chat-path
+// client (register D-85/D-108) — seat-endpoint routing mirrored from the main
+// client's construction (recordless.go): the pipeline's own client is pinned
+// to the native completion path and cannot make this call.
+//
+// Returns the FAILURE itself (PR #366 correctness review, blocker: this used
+// to report a bare ok=false on any failure — a transport failure, where the
+// seat never answered, looked IDENTICAL to a validation failure, where it
+// answered wrong — so when both grammar attempts had already failed on
+// validation, repackStructured fell through to that STALE validation error
+// instead of the chat fallback's own, real one). The caller classifies the
+// returned error; repackViaChat makes no infrastructure/budget/abstention
+// judgment of its own.
+func (p *Pipeline) repackViaChat(ctx context.Context, client *llamaclient.Client, seat string, schema map[string]any, output string) (json.RawMessage, int, error) {
 	names := make([]string, 0, 8)
 	if props, ok := schema["properties"].(map[string]any); ok {
 		for name, raw := range props {
@@ -1286,23 +1563,23 @@ func (p *Pipeline) repackViaChat(ctx context.Context, seat string, schema map[st
 	sort.Strings(names)
 	system := "You extract structured data from text. Output ONLY a JSON object — no prose, no code fences. Respect the field types exactly: numbers unquoted, strings quoted."
 	user := fmt.Sprintf("Extract these fields from the text as a JSON object: %s.\n\nTEXT:\n%s", strings.Join(names, ", "), output)
-	// A dedicated chat-path client, seat-endpoint routing mirrored from the
-	// main client's construction (recordless.go): the pipeline's own client is
-	// pinned to the native completion path and cannot make this call.
 	budget := repackBudget(output)
-	gres, gerr := p.repackClient("/v1/chat/completions", budget).Generate(ctx, seat, system, user, "", budget, p.cfg.Temperature, 0, llamaclient.WithoutThinking())
-	if gerr != nil || gres.Truncated {
-		return nil, 0, false
+	gres, gerr := client.Generate(ctx, seat, system, user, "", budget, p.cfg.Temperature, 0, llamaclient.WithoutThinking())
+	if gerr != nil {
+		return nil, 0, gerr
+	}
+	if gres.Truncated {
+		return nil, 0, fmt.Errorf("chat re-pack truncated at %d tokens (the answer is %d chars; the structured budget cannot hold it)", budget, len(output))
 	}
 	content := outerObject(gres.Content)
 	if verr := validator.Validate([]byte(content), schema); verr != nil {
 		fixed, ok := coerceToSchema([]byte(content), schema)
 		if !ok {
-			return nil, 0, false
+			return nil, 0, verr
 		}
-		return json.RawMessage(fixed), gres.TokensOut, true
+		return json.RawMessage(fixed), gres.TokensOut, nil
 	}
-	return json.RawMessage(content), gres.TokensOut, true
+	return json.RawMessage(content), gres.TokensOut, nil
 }
 
 // coerceToSchema repairs the ONE failure shape a grammar would have prevented
@@ -1402,8 +1679,109 @@ func AdmissionBudget(sec int) time.Duration { return admissionBudget(sec) }
 
 // WarmSeat is warmSeat for the other run launchers (the MCP agent_run door), so
 // no door loads a cold seat inside its wall or probes its window before it is up.
-func WarmSeat(ctx context.Context, endpoint, seat string, budget time.Duration) (time.Duration, string) {
+func WarmSeat(ctx context.Context, endpoint, seat string, budget time.Duration) (time.Duration, string, bool) {
 	return warmSeat(ctx, endpoint, seat, budget)
+}
+
+// AwaitSeatAdmission is awaitSeatAdmission for the other run launchers (the MCP
+// agent_run door). Both doors drive the same loop on the same seat behind the
+// same llama-swap, so both must wait out another session's swap the same way —
+// and this one had no pre-flight at all (register S-25): an agent_run that
+// arrived mid-swap spent its wall inside llama-swap's silent queue, which is the
+// exact failure ADR 0032 removed from the delegation door in 2026-09-02.
+func AwaitSeatAdmission(ctx context.Context, endpoint, seat string, budget time.Duration) (time.Duration, string) {
+	return awaitSeatAdmission(ctx, endpoint, seat, budget)
+}
+
+// seatMatcher answers "is this GET /running row MY seat?" for a seat that may be
+// bound by an ALIAS.
+//
+// llama-swap's /running names models by their CANONICAL id only, while the
+// harness binds agent seats by alias on the reference deployment (`agent-pool` ->
+// `qwen3.8-27b-vllm`, `offload-e4b` -> `gemma-4-e4b`). A reader that matches
+// /running by the bound name therefore never finds its own seat: the admission
+// pre-flight's "my seat is already ready" fast path was dead on every alias-bound
+// box, and a READY seat slept the entire admission budget whenever any OTHER
+// model happened to be mid-swap. 406 delegation-log rows carry the symptom in so
+// many words — "/running lists the seat under another id". internal/seatload
+// fixed exactly this for the drain (register C-11); this is the same resolution,
+// through the same swapclient.Roster.Canonical, applied to the second reader.
+//
+// The roster read is LAZY and happens at most once: a caller asks for it only
+// when the bare name matched nothing and the answer would otherwise be "wait", so
+// a seat bound by its own id pays no extra round trip. A roster that cannot be
+// read leaves the bare name in place — the pre-fix behaviour, never a refusal.
+type seatMatcher struct {
+	endpoint string
+	names    []string
+	// resolved latches on a SUCCESSFUL roster read only. Latching it on the
+	// attempt disabled the alias match for the rest of the wait after ONE
+	// transient error — and the moment the alias match matters is a box
+	// contended enough for another model to be mid-swap, which is exactly the
+	// moment that read times out or 500s. The seat then burned the whole
+	// admission budget for a swap it had no stake in: S-08's own symptom,
+	// intermittent and silent (blocker, review round 1).
+	resolved bool
+	// note is the FIRST resolution failure, carried to admission_note. A probe
+	// that failed silently is the defect class this change exists to remove, so
+	// this one does not get to be the exception.
+	note string
+}
+
+func newSeatMatcher(endpoint, seat string) *seatMatcher {
+	return &seatMatcher{endpoint: endpoint, names: []string{seat}}
+}
+
+// matches reports whether a /running row's model id is this seat under any name
+// resolved so far.
+func (m *seatMatcher) matches(id string) bool {
+	for _, n := range m.names {
+		if strings.EqualFold(id, n) {
+			return true
+		}
+	}
+	return false
+}
+
+// resolve reads the roster once and adds the canonical id this seat's name is an
+// alias of. It reports whether it learned a NEW name — i.e. whether re-scanning
+// rows already in hand can change the answer.
+func (m *seatMatcher) resolve(ctx context.Context) bool {
+	if m.resolved {
+		return false
+	}
+	roster, err := swapclient.FetchRoster(ctx, m.endpoint, admissionPoll)
+	if err != nil {
+		// NOT latched: the caller polls again inside the same admission budget,
+		// and the next read may well answer. Reported once — repeating it every
+		// poll would bury the rest of admission_note.
+		if m.note == "" {
+			m.note = "seat alias resolution failed (proceeding with the bound name): " + err.Error()
+			log.Printf("agent task: seat alias resolution (%s) failed (proceeding with the bound name): %v", m.names[0], err)
+		}
+		return false
+	}
+	m.resolved = true
+	id, ok := roster.Canonical(m.names[0])
+	if !ok || strings.EqualFold(id, m.names[0]) {
+		return false
+	}
+	m.names = append(m.names, id)
+	return true
+}
+
+// joinAdmissionNotes concatenates admission findings with "; ", dropping empties
+// — the same shape the caller uses to fold the pre-flight's note into the
+// warm-up's, so one admission_note can carry every step that had something to
+// say without any of them overwriting another.
+func joinAdmissionNotes(notes ...string) string {
+	kept := notes[:0:0]
+	for _, n := range notes {
+		if strings.TrimSpace(n) != "" {
+			kept = append(kept, n)
+		}
+	}
+	return strings.Join(kept, "; ")
 }
 
 // warmSeat loads an ABSENT seat outside the wall (D-64). One GET through
@@ -1413,51 +1791,83 @@ func WarmSeat(ctx context.Context, endpoint, seat string, budget time.Duration) 
 // /running probes around it carry their own admissionPoll timeout each, so
 // the wall-clock spent can exceed the budget by up to two poll intervals).
 // Then /running is polled (two extra polls at most) until the seat reads ready.
-// Returns the time spent and a note when residency could not be settled —
-// a probe failure, a spent budget — so the wire says "the gate could not
-// tell" rather than "nothing was loading". A seat that is already ready
-// costs one /running probe and returns 0.
-func warmSeat(ctx context.Context, endpoint, seat string, budget time.Duration) (time.Duration, string) {
-	if budget < admissionPoll || strings.TrimSpace(endpoint) == "" {
-		return 0, "" // nothing left of the admission budget (or the gate is off): the wall's business, as before
+// Returns the time spent, a note when residency could not be settled — a probe
+// failure, a spent budget — so the wire says "the gate could not tell" rather
+// than "nothing was loading", and whether a load was ATTEMPTED at all.
+//
+// That third answer cannot be derived from the first two. A sub-tick load
+// measures 0 (Windows CI, and any warm passthrough), so `spent > 0` misses real
+// loads; and since W-08 a note is also returned by exits that warmed NOTHING, so
+// `note != ""` over-reports them. The coherence probe (D-118) keys on exactly
+// "was this seat loaded for this run", and it now gets that fact directly.
+// A seat that is already ready costs one /running probe and returns (0, "", false).
+func warmSeat(ctx context.Context, endpoint, seat string, budget time.Duration) (time.Duration, string, bool) {
+	if strings.TrimSpace(endpoint) == "" {
+		return 0, "", false // no endpoint to warm against: the gate is off by construction
+	}
+	if budget < admissionPoll {
+		if budget <= 0 {
+			return 0, "", false // the admission gate is off (agent_admission_wait_sec −1)
+		}
+		// Admission spent the budget before the warm-up got a turn. Proceeding
+		// into the wall is right; doing it SILENTLY is what left admission_note
+		// empty on a seat that may still be cold, so the wire read "nothing was
+		// loading" where the truth was "nobody looked" (register S-24).
+		return 0, fmt.Sprintf("no admission budget left for the warm-up (%.0fs, under one poll interval): a cold seat will load inside the wall", budget.Seconds()), false
 	}
 	sc, err := swapclient.New(endpoint, admissionPoll)
 	if err != nil {
-		return 0, ""
+		return 0, "warm-up has no swap client (proceeding): " + err.Error(), false
 	}
+	// The seat may be listed under its CANONICAL id while the contract names an
+	// alias; seatMatcher resolves that, and only when the bare name missed.
+	m := newSeatMatcher(endpoint, seat)
 	ready := func() (bool, error) {
 		rows, rerr := sc.Running(ctx)
 		if rerr != nil {
 			return false, rerr
 		}
 		for _, r := range rows {
-			if strings.EqualFold(r.ID, seat) && r.State == "ready" {
+			if m.matches(r.ID) && r.State == "ready" {
 				return true, nil
+			}
+		}
+		if m.resolve(ctx) {
+			for _, r := range rows {
+				if m.matches(r.ID) && r.State == "ready" {
+					return true, nil
+				}
 			}
 		}
 		return false, nil
 	}
 	if ok, rerr := ready(); rerr != nil || ok {
-		return 0, "" // ready, or unreadable (awaitSeatAdmission already reported a failed probe)
+		if rerr != nil {
+			// "Could not read" is not "is ready", and it was reported as
+			// neither. A seat whose residency is unknown proceeds into the wall
+			// possibly cold, and the wire has to say so (register S-24).
+			return 0, "warm-up could not read /running (proceeding; the seat may still be cold): " + rerr.Error(), false
+		}
+		return 0, m.note, false // already resident: nothing to warm; only an alias-probe failure, if any, to report
 	}
 	start := time.Now()
 	b := swapclient.BaseURL(endpoint)
 	if b == "" {
-		return 0, ""
+		return 0, joinAdmissionNotes(m.note, "warm-up could not resolve a llama-swap root from the endpoint (proceeding; the seat may still be cold)"), false
 	}
 	wctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
 	req, rerr := http.NewRequestWithContext(wctx, http.MethodGet, b+"/upstream/"+url.PathEscape(seat)+"/v1/models", nil)
 	if rerr != nil {
-		return 0, ""
+		return 0, joinAdmissionNotes(m.note, "warm-up request could not be built (proceeding; the seat may still be cold): "+rerr.Error()), false
 	}
 	resp, derr := warmClient.Do(req)
 	if derr != nil {
 		spent := time.Since(start)
 		if wctx.Err() != nil && ctx.Err() == nil {
-			return spent, fmt.Sprintf("cold load exceeded the admission budget after %.0fs (proceeding into the wall)", spent.Seconds())
+			return spent, joinAdmissionNotes(m.note, fmt.Sprintf("cold load exceeded the admission budget after %.0fs (proceeding into the wall)", spent.Seconds())), true
 		}
-		return spent, "warm request failed (proceeding): " + derr.Error()
+		return spent, joinAdmissionNotes(m.note, "warm request failed (proceeding): "+derr.Error()), true
 	}
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
 	resp.Body.Close()
@@ -1470,27 +1880,27 @@ func warmSeat(ctx context.Context, endpoint, seat string, budget time.Duration) 
 	// that had plainly succeeded).
 	if resp.StatusCode == http.StatusOK {
 		if ok, rerr := ready(); rerr == nil && ok {
-			return time.Since(start), fmt.Sprintf("cold load %.0fs outside the wall", time.Since(start).Seconds())
+			return time.Since(start), joinAdmissionNotes(m.note, fmt.Sprintf("cold load %.0fs outside the wall", time.Since(start).Seconds())), true
 		}
-		return time.Since(start), fmt.Sprintf("cold load %.0fs outside the wall (passthrough answered 200; /running lists the seat under another id)", time.Since(start).Seconds())
+		return time.Since(start), joinAdmissionNotes(m.note, fmt.Sprintf("cold load %.0fs outside the wall (passthrough answered 200; /running lists the seat under another id)", time.Since(start).Seconds())), true
 	}
 	// A non-200 passthrough answer (404: llama-swap does not know the name)
 	// confirms nothing; two polls one interval apart, then say so and go.
 	for i := 0; i < 2; i++ {
 		if ok, rerr := ready(); rerr == nil && ok {
-			return time.Since(start), fmt.Sprintf("cold load %.0fs outside the wall", time.Since(start).Seconds())
+			return time.Since(start), joinAdmissionNotes(m.note, fmt.Sprintf("cold load %.0fs outside the wall", time.Since(start).Seconds())), true
 		}
 		// The second poll waits one interval, but only inside what is left of
 		// the budget — the confirmation must not outspend the gate it serves.
 		if i == 0 && time.Since(start)+admissionPoll <= budget {
 			if serr := seatwait.Sleep(ctx, admissionPoll); serr != nil {
-				return time.Since(start), serr.Error()
+				return time.Since(start), joinAdmissionNotes(m.note, serr.Error()), true
 			}
 		} else if i == 0 {
 			break
 		}
 	}
-	return time.Since(start), fmt.Sprintf("warm request answered HTTP %d after %.0fs but /running never listed %s ready (proceeding)", resp.StatusCode, time.Since(start).Seconds(), seat)
+	return time.Since(start), joinAdmissionNotes(m.note, fmt.Sprintf("warm request answered HTTP %d after %.0fs but /running never listed %s ready (proceeding)", resp.StatusCode, time.Since(start).Seconds(), seat)), true
 }
 
 // warmClient carries no timeout of its own: warmSeat bounds the request by
@@ -1514,32 +1924,65 @@ func awaitSeatAdmission(ctx context.Context, endpoint, seat string, budget time.
 	if err != nil {
 		return 0, "no swap client (proceeding): " + err.Error()
 	}
-	// waited counts only the SLEEPS, never the probe round-trips: an
-	// immediate admission reports zero, which is what "nothing was swapping"
-	// must read as on the wire.
+	// The seat's own /running row may be listed under the CANONICAL id while the
+	// contract names an alias; seatMatcher resolves that, lazily.
+	m := newSeatMatcher(endpoint, seat)
+	// waited counts the SLEEPS and the alias-resolution round-trips that
+	// precede them, never the /running probe itself: an immediate admission
+	// reports zero, which is what "nothing was swapping" must read as on the
+	// wire. The resolution is charged because it only runs when a sleep would
+	// follow, and a roster that TIMES OUT (3 s, admissionPoll) on every poll
+	// would otherwise let this loop run twice its budget in wall-clock time
+	// while reporting the budget exactly (reviewer finding on the S-08 retry).
 	var waited time.Duration
 	for {
 		rows, rerr := sc.Running(ctx)
 		if rerr != nil {
 			return waited, "running probe failed (proceeding): " + rerr.Error()
 		}
-		busy := ""
+		mine, busy := false, ""
 		for _, r := range rows {
-			if strings.EqualFold(r.ID, seat) && r.State == "ready" {
-				return waited, ""
+			if m.matches(r.ID) && r.State == "ready" {
+				mine = true
 			}
 			if r.State != "ready" {
 				busy = r.ID + ":" + r.State
 			}
 		}
-		if busy == "" {
-			return waited, ""
+		// Resolve the alias only when it would change the verdict — the seat's
+		// own row was not found under its bound name AND something else is
+		// mid-swap, i.e. the next step would be a sleep. This is the fast path
+		// that was dead: a READY alias-bound seat waited the whole budget for
+		// another model's swap it had no stake in (register S-08).
+		if !mine && busy != "" {
+			resolveStart := time.Now()
+			resolved := m.resolve(ctx)
+			if !resolved && m.note != "" {
+				// A FAILED resolution is charged (a roster that times out costs
+				// admissionPoll per poll); a successful one is part of an
+				// immediate admission and stays at the zero the wire promises.
+				waited += time.Since(resolveStart)
+			}
+			if resolved {
+				for _, r := range rows {
+					if m.matches(r.ID) && r.State == "ready" {
+						mine = true
+					}
+				}
+			}
+		}
+		// The seat this contract needs is up: another model's swap is not this
+		// contract's business, and waiting it out is wall spent on somebody
+		// else's load. Every exit below carries the matcher's note, so an alias
+		// probe that failed is reported whatever verdict this poll reaches.
+		if mine || busy == "" {
+			return waited, m.note
 		}
 		if waited+admissionPoll > budget {
-			return waited, "budget spent while " + busy + " (proceeding into the wall)"
+			return waited, joinAdmissionNotes(m.note, "budget spent while "+busy+" (proceeding into the wall)")
 		}
 		if serr := seatwait.Sleep(ctx, admissionPoll); serr != nil {
-			return waited, serr.Error()
+			return waited, joinAdmissionNotes(m.note, serr.Error())
 		}
 		waited += admissionPoll
 	}
@@ -1610,6 +2053,54 @@ func genErrIsTransport(err error) bool {
 	}
 	var nerr net.Error
 	return errors.As(err, &nerr)
+}
+
+// selfCutoff reports whether err is a re-pack attempt's OWN per-attempt bound
+// (repackAttemptDeadline, register D-108) cutting the request short — never
+// evidence the seat is unreachable, the same distinction genErrIsTransport
+// already draws for a canceled parent (PR #366 correctness review, S-22/W-16
+// carried one arm further): a client.Timeout firing on a request THIS BOX
+// deliberately narrowed looks identical, on the wire, to a real ctx deadline
+// firing — both surface as a *url.Error whose Timeout() is true, or wrap
+// context.DeadlineExceeded — while a dial-refused or connection-reset error
+// has NEITHER shape. A TIMEOUT is always "we gave up waiting" (our own
+// patience, a budget decision), never direct proof the box is broken; only a
+// definitive refusal (a 5xx, a reset, a dial failure) is that.
+func selfCutoff(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var uerr *url.Error
+	if errors.As(err, &uerr) {
+		return uerr.Timeout()
+	}
+	return false
+}
+
+// repackCutoffErr marks a re-pack error whose decisive (LAST-run) attempt was
+// ended by the re-pack's own per-attempt bound rather than by the seat or a
+// canceled caller (register D-108, PR #366 correctness review). Filing this
+// as infrastructure — "the seat could not be reached" — recreates, one arm
+// over, the exact defect this PR already fixes for a canceled parent context
+// (S-22/W-16): the box did nothing wrong, this box's own narrowed clock ran
+// out. The caller reads it with errors.As and defers budget.
+type repackCutoffErr struct {
+	msg string
+	raw error
+}
+
+func (c *repackCutoffErr) Error() string { return c.msg }
+func (c *repackCutoffErr) Unwrap() error { return c.raw }
+
+// asRepackCutoff reports whether err (or anything it wraps) is a
+// *repackCutoffErr, and returns it.
+func asRepackCutoff(err error) (*repackCutoffErr, bool) {
+	var c *repackCutoffErr
+	ok := errors.As(err, &c)
+	return c, ok
 }
 
 // groundedContract reports whether the contract carries context documents — the
