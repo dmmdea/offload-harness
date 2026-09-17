@@ -235,7 +235,7 @@ func (e *Emitter) frame(ev Event) ([]byte, error) {
 	}
 	errRaw, reqRaw := null, null
 	if ev.Error != "" {
-		errRaw = mustJSON(ev.Error)
+		errRaw = mustJSON(CardError(ev.Error))
 	}
 	if ev.Requester != "" {
 		reqRaw = mustJSON(ev.Requester)
@@ -263,6 +263,22 @@ func (e *Emitter) frame(ev Event) ([]byte, error) {
 		"method":  MethodFor(ev.State),
 		"params":  map[string]any{"workloadInfo": info},
 	})
+}
+
+// CardErrorMax bounds the failure text a PAIR card shows. A jsonschema
+// re-pack dump or a full acceptance report runs to hundreds of characters
+// and turned the Jobs list into a wall of red (2026-09-17, first live day);
+// the card wants the verdict, the ledger keeps the whole reason.
+const CardErrorMax = 140
+
+// CardError collapses a failure reason to one short line: whitespace folded,
+// cut at CardErrorMax with an ellipsis.
+func CardError(reason string) string {
+	s := strings.Join(strings.Fields(reason), " ")
+	if len(s) <= CardErrorMax {
+		return s
+	}
+	return strings.TrimSpace(s[:CardErrorMax-1]) + "…"
 }
 
 func mustJSON(v any) json.RawMessage {
