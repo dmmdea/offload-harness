@@ -9,9 +9,11 @@ package delegate
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -130,7 +132,18 @@ func (v NodeView) ServesVision() bool {
 // a caller-supplied ctx deadline still wins when shorter. Health is a cached
 // read on the node side (never blocks on llama-swap), so a node that cannot
 // answer inside this is down, not busy.
-const fetchNodeViewTimeout = 15 * time.Second
+//
+// It bounds ONE base. It used to bound the whole fleet probe as well, but
+// only by accident of the probe being serial: N unreachable remotes cost N x
+// this, on the critical path of every subtask. fetchViews now fans the probe
+// out and applies this per goroutine, so the fleet probe costs the SLOWEST
+// remote rather than the sum of all of them.
+//
+// A var, not a const, for one reason: a test needs to compress it, because the
+// capacity wait's per-tick bound can only be shown to work when it is provably
+// shorter than this. Production never mutates it, and healthClient.Timeout
+// below keeps the real 15 s transport backstop whatever a test does.
+var fetchNodeViewTimeout = 15 * time.Second
 
 // maxHealthBody bounds the decoded health response. A real payload is a few
 // KiB; the cap only exists so a misconfigured base pointing at something
@@ -280,6 +293,26 @@ func FetchNodeView(ctx context.Context, base, token string) (NodeView, error) {
 		v.IdleSlot = w.Saturation.IdleSlot
 	}
 	return v, nil
+}
+
+// probeUnreachable reports whether an error from FetchNodeView is a TRANSPORT
+// failure — the health GET never received an HTTP answer at all (dial refused,
+// no route, DNS, a reset, or the per-base timeout). That is the one class worth
+// a negative cache: it is a statement about the ADDRESS, so re-dialling it
+// inside the same Run only spends the next subtask's budget on the same dead
+// socket. Measured: 46 delegation rows kept work local because one remote's
+// health probe timed out, and in 41 of them that remote held zero jobs.
+//
+// A 401, 404 or 503, or a body that is not JSON, is deliberately NOT
+// unreachable: something answered, the operator's diagnosis is a different one,
+// and the node may well answer the next call. A CANCELLED context is not
+// unreachable either — that is the caller giving up, never the node.
+func probeUnreachable(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) {
+		return false
+	}
+	var uerr *url.Error
+	return errors.As(err, &uerr)
 }
 
 // truncate bounds an error-path body excerpt.
