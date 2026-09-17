@@ -373,6 +373,14 @@ type AgentWireResult struct {
 	// confirmed — so a wire reader can tell "nothing was swapping" from "the
 	// gate could not tell" from "the seat was loaded here".
 	AdmissionNote string `json:"admission_note,omitempty"`
+	// CtxWindowNote is the served-window resolver's own line for this run:
+	// which window the loop budgeted against and WHERE it came from — the live
+	// probe, this box's configured agent_ctx_tokens, or the conservative
+	// fallback. Both doors used to discard it, so an 8,192-token run on a
+	// 131,072-token seat looked identical on the wire to a correct one, and the
+	// only symptom was a task that compacted for no reason. Empty = a run old
+	// enough not to report it.
+	CtxWindowNote string `json:"ctx_window_note,omitempty"`
 	// CoherenceNote reports the post-warm SEAT COHERENCE probe (register
 	// D-118): one ≤ 96-token completion, charged to admission, that asks the
 	// seat to call read_file and answer DONE. Empty = the probe did not run
