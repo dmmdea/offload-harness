@@ -6,6 +6,48 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **Placement (`route=auto`/`remote`) ranks quality-adequate seats by expected completion, under the
+  operator-signed INV-5 rider** (ADR [0050](docs/architecture/decisions/0050-placement-ranks-adequate-seats-by-expected-completion.md);
+  registers S-01/S-02/S-03/S-05/S-11/S-13/S-15, D-105/D-106).
+  - `route=auto`'s busy reading widens from the GPU lease alone to `leaseInfo.Held || local.inflight
+    >= FleetConcurrencyLimit() || local.loading` (W-01) — `probeLocalBusy` read once per Run, cached
+    on the runner, the same one-probe invariant `route=spread` already held.
+  - `remoteEligible` gains a feasibility floor (W-05): a seat whose fitted final cannot clear
+    `seatrate.FinalBudgetFloor` within its own effective wall is excluded, naming the arithmetic
+    (`fitted final 312 < floor 1024 at 5.4 tok/s in 300 s wall, cold 69 s`) — deliberately the
+    contract's own FITTED final, never the seat's max-final `min_turn_sec`, which the rider forbids.
+  - `betterRemote` and `scoreFit` gain an expected-completion axis (W-11, new file
+    `internal/delegate/eta.go`): cold load (charged only when `seat_loaded` is KNOWN false) + the
+    node's own queue wait + the fitted final's generation time. Reasoning-shaped work still ranks
+    window first, eta as its tie-break; mechanical work now ranks eta first (replacing "smallest
+    adequate seat wins"), window as its tie-break. Two candidates within 20% of each other are
+    resolved by a deterministic seeded draw (power-of-two-choices) so independent dispatchers spread
+    across near-tied seats instead of herding onto the single fastest one. An unknown rate keeps
+    today's window-only ordering.
+  - `RunWith` computes route=auto/remote's WHOLE-Run placement in one joint deal over one fleet
+    snapshot (W-06, `dealAutoRemote`), respecting per-node headroom
+    (`max_concurrent_jobs − jobs_running − subtasks already dealt`, no floor) — the same invariant
+    `route=spread`'s `dealSpread` already held, closing the gap where `runConcurrency` siblings
+    probed and placed independently within milliseconds of each other.
+  - A remote's `LeaseBusy` (a declared-but-idle reservation) demotes instead of hard-excluding
+    (W-14); only an exclusive/draining hold, or a busy lease that is not a plain text reservation,
+    still fences.
+  - `placement_reason` on an `auto`/`remote` placement now names EVERY reachable remote with a
+    one-word verdict (`chosen | queue | cap | slow | lease | cold | probe | unfit(ctx) | noschema`,
+    new file `internal/delegate/placement_reason.go`), appended after the existing
+    `route=auto`/`route=remote` prefix (kept byte-identical for `fleet_smoke_cmd.go`).
+  - The delegator's poll now sends `GET /fleet/jobs/<id>?wait=12`; an older node ignores the
+    parameter and answers at once. A dispatch 503 carrying its own `Retry-After` is honored with a
+    bounded wait-then-retry to the SAME node, invisible to the re-placement loop (no `tried` mark).
+  - `NodeView` decodes the 0.127 health activity fields (`jobs_admitting`, `seat_loaded`/
+    `seat_starting` as tri-state `*bool`, `lease_exclusive`/`lease_draining`,
+    `recent_agent_wall_sec`, `queue_wait_estimate_sec`).
+  - `offload_status`'s fleet node rows and the local seat entry publish `in_flight`
+    (`jobs_running − jobs_admitting` remotely, the seat's own gauge locally — a job-registry count,
+    never GPU utilization or a lease alone) and a one-word `verdict` (`busy | held-idle | loaded-idle
+    | cold | unknown`) (W-31).
+
 ## [0.127.1] - 2026-09-17 - the final's tail and the node's honest backlog: fitted-final re-issue, one bounded re-pack, last attempt decides the class, queue depth = 2x workers with an ETA-bearing Retry-After
 
 ### Added
@@ -95,46 +137,6 @@ Versioning: [SemVer](https://semver.org/).
 ## [0.127.0] - 2026-09-17 - the fleet answers faster: honest node health, long-poll completion, concurrent probes, alias-aware admission on both doors, config validation that names a dead endpoint
 
 ### Added
-- **Placement (`route=auto`/`remote`) ranks quality-adequate seats by expected completion, under the
-  operator-signed INV-5 rider** (ADR [0050](docs/architecture/decisions/0050-placement-ranks-adequate-seats-by-expected-completion.md);
-  registers S-01/S-02/S-03/S-05/S-11/S-13/S-15, D-105/D-106).
-  - `route=auto`'s busy reading widens from the GPU lease alone to `leaseInfo.Held || local.inflight
-    >= FleetConcurrencyLimit() || local.loading` (W-01) — `probeLocalBusy` read once per Run, cached
-    on the runner, the same one-probe invariant `route=spread` already held.
-  - `remoteEligible` gains a feasibility floor (W-05): a seat whose fitted final cannot clear
-    `seatrate.FinalBudgetFloor` within its own effective wall is excluded, naming the arithmetic
-    (`fitted final 312 < floor 1024 at 5.4 tok/s in 300 s wall, cold 69 s`) — deliberately the
-    contract's own FITTED final, never the seat's max-final `min_turn_sec`, which the rider forbids.
-  - `betterRemote` and `scoreFit` gain an expected-completion axis (W-11, new file
-    `internal/delegate/eta.go`): cold load (charged only when `seat_loaded` is KNOWN false) + the
-    node's own queue wait + the fitted final's generation time. Reasoning-shaped work still ranks
-    window first, eta as its tie-break; mechanical work now ranks eta first (replacing "smallest
-    adequate seat wins"), window as its tie-break. Two candidates within 20% of each other are
-    resolved by a deterministic seeded draw (power-of-two-choices) so independent dispatchers spread
-    across near-tied seats instead of herding onto the single fastest one. An unknown rate keeps
-    today's window-only ordering.
-  - `RunWith` computes route=auto/remote's WHOLE-Run placement in one joint deal over one fleet
-    snapshot (W-06, `dealAutoRemote`), respecting per-node headroom
-    (`max_concurrent_jobs − jobs_running − subtasks already dealt`, no floor) — the same invariant
-    `route=spread`'s `dealSpread` already held, closing the gap where `runConcurrency` siblings
-    probed and placed independently within milliseconds of each other.
-  - A remote's `LeaseBusy` (a declared-but-idle reservation) demotes instead of hard-excluding
-    (W-14); only an exclusive/draining hold, or a busy lease that is not a plain text reservation,
-    still fences.
-  - `placement_reason` on an `auto`/`remote` placement now names EVERY reachable remote with a
-    one-word verdict (`chosen | queue | cap | slow | lease | cold | probe | unfit(ctx) | noschema`,
-    new file `internal/delegate/placement_reason.go`), appended after the existing
-    `route=auto`/`route=remote` prefix (kept byte-identical for `fleet_smoke_cmd.go`).
-  - The delegator's poll now sends `GET /fleet/jobs/<id>?wait=12`; an older node ignores the
-    parameter and answers at once. A dispatch 503 carrying its own `Retry-After` is honored with a
-    bounded wait-then-retry to the SAME node, invisible to the re-placement loop (no `tried` mark).
-  - `NodeView` decodes the 0.127 health activity fields (`jobs_admitting`, `seat_loaded`/
-    `seat_starting` as tri-state `*bool`, `lease_exclusive`/`lease_draining`,
-    `recent_agent_wall_sec`, `queue_wait_estimate_sec`).
-  - `offload_status`'s fleet node rows and the local seat entry publish `in_flight`
-    (`jobs_running − jobs_admitting` remotely, the seat's own gauge locally — a job-registry count,
-    never GPU utilization or a lease alone) and a one-word `verdict` (`busy | held-idle | loaded-idle
-    | cold | unknown`) (W-31).
 - **`GET /fleet/jobs/{id}?wait=<seconds>` answers when the job FINISHES** (register S-19, diagnosis
   `2026-09-17-harness-scheduling-diagnosis.md` §2(d)/§5.3). The node had no completion event at all,
   so the only way to learn a job was done was to ask again in three seconds — all 236 measured
