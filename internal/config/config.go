@@ -315,6 +315,17 @@ type Config struct {
 	// still an opt-in rather than a default because a node that opens it is
 	// spending its own disk on whatever a 4B decides to write.
 	AgentAllowWrite bool `json:"agent_allow_write,omitempty"`
+	// PairWorkloadsEnabled (0.126.0) reports every job this box runs or
+	// delegates to NVIDIA Personal AI Router's Jobs list, through the loopback
+	// workload ingress of PAIR's workload manager (fork
+	// dmmdea/Personal-AI-Router, worker 0.14.0; docs/systems/pair-workloads.md).
+	// Off by default. Enable on DELEGATOR boxes only: a fleet node that also
+	// reported the delegation it serves would show the same job twice, once
+	// per origin. Inert when PAIR is not installed (no node-id.json).
+	PairWorkloadsEnabled bool `json:"pair_workloads_enabled,omitempty"`
+	// PairWorkloadsEndpoint is the ingress URL; the default is the port every
+	// node's workload-ingress.json binds.
+	PairWorkloadsEndpoint string `json:"pair_workloads_endpoint,omitempty"`
 	// TierProfile (0.116.0, ADR 0039) is the tier this box is INSTALLED as
 	// (installed.json's profile, e.g. "blackwell-3x16"), seeded by tierseed so
 	// status, health and every placement record carry the identity from CONFIG
@@ -1495,6 +1506,7 @@ func Default() Config {
 		EmbedMemoMaxEntries:       50000, // ~640 MB on disk (bbolt ~12.8 KB/entry); see the field doc
 
 		LedgerPath:             filepath.Join(base, "ledger.jsonl"), // append-only JSONL (concurrent read/append)
+		PairWorkloadsEndpoint:  "http://127.0.0.1:14324/v1/workloads/events",
 		ThresholdsPath:         filepath.Join(base, "thresholds.json"),
 		TierOverridesPath:      filepath.Join(base, "tier_overrides.json"),
 		RouterWeightsPath:      filepath.Join(base, "router-weights.json"),

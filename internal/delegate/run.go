@@ -48,6 +48,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/gpulease"
 	"github.com/dmmdea/offload-harness/internal/ledger"
 	"github.com/dmmdea/offload-harness/internal/netguard"
+	"github.com/dmmdea/offload-harness/internal/pairworkloads"
 	"github.com/dmmdea/offload-harness/internal/seatrate"
 	// Aliased: this file's `placement` struct (a resolved "run it HERE") predates
 	// the package and is used at every placement site; the package is the
@@ -110,6 +111,13 @@ type PlacedResult struct {
 	// the round-trip number the break-even telemetry wants; the node's own
 	// wall stays in Result.WallMs.
 	wallMs int64
+	// pair* pin the NVIDIA PAIR card identity of this subtask (pairevents.go):
+	// the model/engine named by the first in-flight frame and its clock, so the
+	// terminal frame merges into the same card. Empty = no frame was emitted.
+	pairModel   string
+	pairEngine  string
+	pairCreated int64
+	pairStarted int64
 	// remotesUnreachable marks a LOCAL placement that happened while the
 	// configured fleet was failing its health probe. The work is fine (an idle
 	// or queued local box is the quality-first placement either way) but the
@@ -604,7 +612,7 @@ func RunWith(ctx context.Context, cfg config.Config, local LocalRunner, subtasks
 	// additions — a nil ledger and a failed recovery change nothing about how
 	// this run places or reports.
 	maybeRecoverOrphans(cfg)
-	r := &runner{cfg: cfg, local: local, route: route, remotes: remotes, intent: openIntentLedger(cfg), led: led, ledgerUnopened: ledgerUnopened}
+	r := &runner{cfg: cfg, local: local, route: route, remotes: remotes, intent: openIntentLedger(cfg), led: led, ledgerUnopened: ledgerUnopened, pair: pairworkloads.New(pairworkloads.FromConfig(cfg))}
 	if opts != nil {
 		r.quarantine = opts.Quarantine
 		r.priority = core.ClampBand(opts.Priority)
@@ -758,6 +766,9 @@ type runner struct {
 	// nil = inert (state root unresolvable); dispatch never depends on it.
 	intent *intentLedger
 	led    *ledger.Ledger
+	// pair reports each subtask to NVIDIA PAIR's Jobs list (pairevents.go);
+	// inert unless pair_workloads_enabled and PAIR is installed.
+	pair *pairworkloads.Emitter
 	// ledgerUnopened marks the TOTAL-loss case: a LedgerPath was configured and
 	// ledger.Open failed, so there is no handle to try. record() must still
 	// count a lost row per result — with the plain `if r.led != nil` guard it
@@ -2456,6 +2467,7 @@ func (r *runner) attempt(ctx context.Context, i int, contract core.AgentContract
 			r.intent.done(jobID, "terminal observed")
 		}
 		r.record(contract, pr)
+		r.pairTerminal(jobID, &pr)
 		return pr
 	}
 
@@ -2606,7 +2618,7 @@ func (r *runner) attempt(ctx context.Context, i int, contract core.AgentContract
 			// not through finish(): nothing ran, nothing to record yet.
 			return PlacedResult{waitCapacity: true, pendingReason: dec.Reason, PlacementReason: reason, decided: &dec}
 		}
-		pr := r.runLocal(ctx, contract, localView, reason, dec)
+		pr := r.runLocal(ctx, jobID, contract, localView, reason, dec)
 		pr.remotesUnreachable = deadFleet
 		pr.ranLocal = true
 		return finish(pr)
@@ -2656,7 +2668,7 @@ func (r *runner) attempt(ctx context.Context, i int, contract core.AgentContract
 // dec is the composite decision the run is made under: its seat and placed
 // block are handed to the runner (LocalOptions) and published on the result;
 // the zero Decision (a plain box) hands zero options, exactly as before.
-func (r *runner) runLocal(ctx context.Context, contract core.AgentContract, view NodeView, reason string, dec placetable.Decision) PlacedResult {
+func (r *runner) runLocal(ctx context.Context, jobID string, contract core.AgentContract, view NodeView, reason string, dec placetable.Decision) PlacedResult {
 	pr := PlacedResult{Node: view.NodeID, Seat: view.AgentSeat, PlacementReason: reason, Placed: placedOrNil(dec)}
 	if r.local == nil {
 		pr.Err = "no local runner wired (delegator surfaces must supply one)"
@@ -2666,6 +2678,9 @@ func (r *runner) runLocal(ctx context.Context, contract core.AgentContract, view
 	if dec.Seat != "" {
 		pr.Seat = dec.Seat
 	}
+	// A local placement starts the moment it is handed to the runner: no
+	// queue, no ack. "" as the node = this box's PAIR identity.
+	r.pairInflight(&pr, jobID, "", pr.Seat, "running")
 	wire, err := r.local(ctx, contract, opts)
 	if err != nil {
 		pr.Err = "local run: " + err.Error()
@@ -2714,6 +2729,14 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 		pr.Err = "marshaling contract: " + err.Error()
 		return pr
 	}
+	// Queued: the node is about to be asked. The seat named here is the one
+	// the decision intends (the layer's seat on a composite node, else the
+	// advertised agent seat) and it is what the card is keyed on from now on.
+	intendedSeat := runSeat
+	if intendedSeat == "" {
+		intendedSeat = view.AgentSeat
+	}
+	r.pairInflight(&pr, jobID, view.NodeID, intendedSeat, "queued")
 	if refused, status, err := r.dispatch(ctx, base, jobID, payload); err != nil {
 		pr.Err = err.Error()
 		// Carry the class so runOne can decide whether ANOTHER node is worth
@@ -2726,6 +2749,7 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 	// so persist the intent before any polling (Option A, intent.go).
 	r.intent.dispatched(jobID, base, contract.Goal)
 	pr.intentRecorded = true
+	r.pairInflight(&pr, jobID, view.NodeID, intendedSeat, "running")
 
 	timeoutSec := executionBudgetSec(contract)
 	// pollBudget is the budget for WORK. Before the node gained a real queue

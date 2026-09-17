@@ -6,6 +6,29 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.126.0] - 2026-09-17 - harness jobs appear in NVIDIA PAIR's Jobs list (`pair_workloads_*`); an auto contract is polled at the node's sized wall (D-116)
+
+### Added
+- **Harness jobs appear in NVIDIA Personal AI Router's Jobs list** (`docs/systems/pair-workloads.md`).
+  PAIR's Jobs list is a stream of workload lifecycle frames only PAIR's own proxies produce; the harness
+  routes around them, so nothing it ran was visible there and PAIR's scheduler could route its own
+  traffic onto a card the harness was using. New package `internal/pairworkloads` posts the same frames
+  to the loopback ingress of PAIR's workload manager (our patch: fork `dmmdea/Personal-AI-Router`,
+  branch `feat/workload-local-ingress`, worker 0.14.0, upstream PR pending): `id`/`runId` = the harness
+  job id, `model` = the seat, `engine` = the real engine with the identifiers PAIR's engine PRs use
+  (`llamacpp`, `vllm`, `whispercpp`, `comfyui`), `originatedFrom` = this box's PAIR UUID (from PAIR's
+  `node-id.json`), `scheduledOn` = the running node's UUID (by name from `cluster/members.json`),
+  `requesterId` = `offload-harness/<session>`. Two sources: the delegate runner emits `queued` before a
+  dispatch, `running` at the ack (or when a local placement starts) and the terminal frame in
+  `attempt()`'s `finish`, with the card identity pinned on the `PlacedResult` so every frame of one job
+  merges into ONE card; a new `ledger.Ledger.Observe` hook turns every other written row into one
+  terminal frame (`agent_delegate`, `agent` and cache-hit rows skipped). Fire-and-forget: a 2 s
+  timeout, one warning per process, never a result changed. Keys `pair_workloads_enabled` (default
+  false; delegator boxes only) and `pair_workloads_endpoint`
+  (`http://127.0.0.1:14324/v1/workloads/events`); env `OFFLOAD_PAIR_APPDIR` for a non-default PAIR
+  data dir. Verified live on the delegator box: frames accepted, the broker applied them with the stamped
+  origin, the record persisted to `workloads-history.json`.
+
 ### Changed
 - **An auto contract is polled at the node's sized wall, not at the wire cap** (register D-116). Since D-03 a contract
   whose caller named no `timeout_sec` rides the wire as `timeout_auto` and the EXECUTING node sizes the wall from its
