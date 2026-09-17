@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/ledger"
@@ -88,7 +89,7 @@ func TestEngineFor(t *testing.T) {
 func TestCardErrorIsOneShortLine(t *testing.T) {
 	long := "output failed schema: schema validation failed: jsonschema validation failed with 'mem://schema#'\n - at '/a/0': got string, want object\n - at '/a/1': got string, want object - at '/a/2': got string, want object - at '/a/3': got string, want object"
 	got := CardError(long)
-	if len(got) > CardErrorMax || strings.Contains(got, "\n") || !strings.HasSuffix(got, "…") {
+	if utf8.RuneCountInString(got) > CardErrorMax || strings.Contains(got, "\n") || !strings.HasSuffix(got, "…") {
 		t.Fatalf("CardError = %q (len %d)", got, len(got))
 	}
 	if got := CardError("  seat   busy \n now "); got != "seat busy now" {

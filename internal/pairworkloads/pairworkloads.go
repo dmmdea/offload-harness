@@ -275,10 +275,11 @@ const CardErrorMax = 140
 // cut at CardErrorMax with an ellipsis.
 func CardError(reason string) string {
 	s := strings.Join(strings.Fields(reason), " ")
-	if len(s) <= CardErrorMax {
+	r := []rune(s)
+	if len(r) <= CardErrorMax {
 		return s
 	}
-	return strings.TrimSpace(s[:CardErrorMax-1]) + "…"
+	return strings.TrimSpace(string(r[:CardErrorMax-1])) + "…"
 }
 
 func mustJSON(v any) json.RawMessage {
