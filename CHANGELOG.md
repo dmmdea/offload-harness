@@ -34,7 +34,7 @@ Versioning: [SemVer](https://semver.org/).
   `FallbackBindings()`. Until now the installer bound a vLLM seat as the agent lane at the tier's `config_seed`
   values — the FALLBACK seat's 1,024 tokens and 300 s — which is the configuration the gate measured failing (3/8
   at 300 s, 8/8 at 900 s). `profiles.json` declares the GSQ at 4,096 / thinking off / vendor sampling / 900 s /
-  `agent_seat_tok_s` 5.75 (its completions never reach the 1,024 tokens a rate sample needs, so the D-03 auto wall
+  `agent_seat_tok_s` 7.17 — the single-stream rate measured at THIS operating point (its completions never reach the 1,024 tokens a rate sample needs, so the D-03 auto wall
   needs the seed). Tier docs render the utilization and the bound-lane table.
   The seat declares its engine floor as data: `engine_min_version` 0.29.0 plus the checkpoint's
   `patch_vllm_qwen35_embedding.py`, which is CARRIED, not upstream (vLLM `main` still builds a stock

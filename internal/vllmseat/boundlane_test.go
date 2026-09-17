@@ -23,13 +23,13 @@ func TestBindingsCarryTheBoundLaneSettingsOnlyWhenSet(t *testing.T) {
 		}
 	}
 	s := ref()
-	s.AgentMaxTokens, s.AgentThinking, s.AgentTimeoutSec, s.AgentSeatTokS = 4096, "off", 900, 5.75
+	s.AgentMaxTokens, s.AgentThinking, s.AgentTimeoutSec, s.AgentSeatTokS = 4096, "off", 900, 7.17
 	s.AgentSampling = &core.AgentSampling{Temperature: f64(0.7), TopP: f64(0.8), TopK: iptr(20), PresencePenalty: f64(1.5)}
 	if err := s.Validate("t"); err != nil {
 		t.Fatalf("the measured bound-lane settings must validate: %v", err)
 	}
 	b := s.Bindings()
-	if b["agent_model"] != s.ID || b["agent_max_tokens"] != 4096 || b["agent_thinking"] != "off" || b["agent_timeout_sec"] != 900 || b["agent_seat_tok_s"] != 5.75 {
+	if b["agent_model"] != s.ID || b["agent_max_tokens"] != 4096 || b["agent_thinking"] != "off" || b["agent_timeout_sec"] != 900 || b["agent_seat_tok_s"] != 7.17 {
 		t.Fatalf("bound-lane bindings: %v", b)
 	}
 	if smp, ok := b["agent_sampling"].(*core.AgentSampling); !ok || smp == nil || smp.TopK == nil || *smp.TopK != 20 {

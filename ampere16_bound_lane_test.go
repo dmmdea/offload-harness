@@ -43,8 +43,8 @@ func TestAmpere16VLLMSeatDeclaresItsMeasuredBoundLane(t *testing.T) {
 	if s.GPUMemoryUtilization < 0.899 || s.GPUMemoryUtilization > 0.901 {
 		t.Errorf("ampere-16 vllm_seat gpu_memory_utilization = %v, want 0.90 — at 0.92 the seat takes the embedder off the card (measured HTTP 500); %s", s.GPUMemoryUtilization, adr)
 	}
-	if s.AgentMaxTokens != 4096 || s.AgentThinking != "off" || s.AgentTimeoutSec != 900 || s.AgentSeatTokS != 5.75 {
-		t.Errorf("ampere-16 bound-lane settings = max_tokens %d / thinking %q / timeout %d / tok_s %v, want 4096 / off / 900 / 5.75 (the digest-8 8/8 configuration) — %s",
+	if s.AgentMaxTokens != 4096 || s.AgentThinking != "off" || s.AgentTimeoutSec != 900 || s.AgentSeatTokS != 7.17 {
+		t.Errorf("ampere-16 bound-lane settings = max_tokens %d / thinking %q / timeout %d / tok_s %v, want 4096 / off / 900 / 7.17 (the digest-8 8/8 configuration) — %s",
 			s.AgentMaxTokens, s.AgentThinking, s.AgentTimeoutSec, s.AgentSeatTokS, adr)
 	}
 	smp := s.AgentSampling

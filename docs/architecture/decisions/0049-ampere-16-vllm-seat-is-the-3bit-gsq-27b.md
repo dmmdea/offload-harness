@@ -166,7 +166,7 @@ default. That is precisely the configuration the gate measured failing (3/8). A 
 own bound-lane settings — `agent_max_tokens`, `agent_thinking`, `agent_sampling`, `agent_timeout_sec`,
 `agent_seat_tok_s` — validated at render with the same rules the harness config applies, emitted by `Bindings()`
 only when set, and left alone by `FallbackBindings()`. `profiles.json` declares the GSQ at 32,768 @ 0.90 with
-4,096 / off / the vendor sampling / 900 s / 5.75 tok/s. The `agent_seat_tok_s` seed exists because the seat's
+4,096 / off / the vendor sampling / 900 s / 7.17 tok/s (the rate measured at this operating point, not the 5.75 of the 49,152 shape). The `agent_seat_tok_s` seed exists because the seat's
 completions never reach the 1,024 tokens a rate sample needs, so without it the D-03 auto wall would run the 300 s
 default it was measured failing at.
 

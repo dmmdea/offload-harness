@@ -294,6 +294,14 @@ func Resolve(p Profile, id string, opt Options) (map[string]any, error) {
 	if p.VLLMSeat != nil {
 		b := p.VLLMSeat.FallbackBindings()
 		if opt.VLLMSeatActive {
+			// The seat's own validation runs HERE too, not only under
+			// `install vllm-seat` (Artifacts): `install seed` is the path that
+			// writes a box's config.json, and a bound-lane value the harness
+			// config would refuse must fail at render, never land on a box
+			// (review finding, ADR 0049 Amendment 3).
+			if err := p.VLLMSeat.Validate(id); err != nil {
+				return nil, err
+			}
 			b = p.VLLMSeat.Bindings()
 		}
 		for k, v := range b {
