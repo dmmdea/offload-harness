@@ -206,3 +206,205 @@ func TestAgentRunUnderItsOwnInheritedLeaseRuns(t *testing.T) {
 		t.Error("the holder's own run must reach the seat its lease cleared")
 	}
 }
+
+// TestForeignFenceAndTheCordonShareOnePredicate is why the cordon-timeout defer
+// below needs a seam to reach at all, and it is a guard in its own right.
+//
+// delegate.ForeignFence delegates to modelaffinity.BlocksNewRun, which is
+// exactly what AwaitRunSlot waits on — so for every lease shape, "the pre-check
+// refuses" and "the cordon would block" are the SAME answer, and the pre-check
+// converts the whole 300 s wait into an immediate verdict. If anyone ever
+// weakens one of the two, this fails and says so, instead of quietly restoring
+// the 47-row, 3.92 h wait S-26 removed.
+func TestForeignFenceAndTheCordonShareOnePredicate(t *testing.T) {
+	shapes := []struct {
+		name string
+		cls  gpulease.Class
+		opts gpulease.Options
+	}{
+		{"plain text reservation", gpulease.ClassText, gpulease.Options{Reason: "bench", TTL: time.Hour}},
+		{"exclusive text", gpulease.ClassText, gpulease.Options{Reason: "bench", Exclusive: true, TTL: time.Hour}},
+		{"draining text", gpulease.ClassText, gpulease.Options{Reason: "bench", Draining: true, TTL: time.Hour}},
+		{"media render", gpulease.ClassMedia, gpulease.Options{Reason: "render", TTL: time.Hour}},
+	}
+	for _, sh := range shapes {
+		for _, inherited := range []bool{false, true} {
+			root := t.TempDir()
+			m, err := gpulease.OpenAt("", root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			l, err := m.TryAcquire(sh.cls, sh.opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			info := delegate.LocalLease("", root)
+			if inherited {
+				t.Setenv("GPU_LEASE_EPOCH", strconv.FormatUint(info.Epoch, 10))
+			} else {
+				t.Setenv("GPU_LEASE_EPOCH", "")
+			}
+			fenced, _ := delegate.ForeignFence(info)
+			if blocks := modelaffinity.BlocksNewRun(info); fenced != blocks {
+				t.Errorf("%s (inherited=%v): ForeignFence=%v but the cordon blocks=%v — the pre-check no longer predicts the cordon it replaces",
+					sh.name, inherited, fenced, blocks)
+			}
+			_ = l.Release()
+		}
+	}
+}
+
+// TestAgentRunPlainReservationIsNotAFenceAndDoesNotHold: ADR 0032's own case on
+// this door. A plain text reservation — a benchmark whose holder unloaded
+// nothing — steers placement but admits the load, so the run proceeds. It is
+// neither a fence nor a cordon wait, which is why it cannot be used to drive the
+// cordon-timeout path.
+func TestAgentRunPlainReservationIsNotAFenceAndDoesNotHold(t *testing.T) {
+	var dials atomic.Int64
+	s, root := reservedAgentRunServer(t, &dials, gpulease.Options{Reason: "5070 Ti bench", TTL: time.Hour})
+	_ = root
+
+	start := time.Now()
+	res, err := s.handleAgentRun(context.Background(), callReq(fmt.Sprintf(
+		`{"goal":"what is the answer","read_root":%q,"max_steps":2,"timeout_sec":60}`, t.TempDir())))
+	if err != nil {
+		t.Fatalf("handleAgentRun: %v", err)
+	}
+	m := decodeResult(t, res)
+	if m["deferred"] == true {
+		t.Fatalf("a plain reservation admits the load (ADR 0032); got a defer: %v", m)
+	}
+	if spent := time.Since(start); spent > 2*time.Second {
+		t.Errorf("a plain reservation must not hold the cordon at all; the run took %s", spent)
+	}
+}
+
+// TestAgentRunCordonTimeoutReportsItsAdmission: the cordon-timeout defer is the
+// pre-check's race window — a fencing lease taken between the pre-check's read
+// and AwaitRunSlot's. It is reached here by stubbing the pre-check away, which
+// is the only way to reach it (see TestForeignFenceAndTheCordonShareOnePredicate).
+//
+// Whatever else it is, it is a run that spent its admission budget, and it must
+// say so: the pipeline door has stamped admission on this exact path since
+// 0.117.0, and a caller that reads a bare "gpu busy" cannot tell a 300 s wait
+// from an instant refusal.
+func TestAgentRunCordonTimeoutReportsItsAdmission(t *testing.T) {
+	var dials atomic.Int64
+	s, _ := reservedAgentRunServer(t, &dials, gpulease.Options{Reason: "arm B drain", Draining: true, TTL: time.Hour})
+	// Blind the pre-check so the DRAINING hold below reaches the cordon, exactly
+	// as a lease taken a microsecond after the pre-check's read would.
+	s.foreignFence = func(gpulease.Info) (bool, string) { return false, "" }
+
+	res, err := s.handleAgentRun(context.Background(), callReq(fmt.Sprintf(
+		`{"goal":"what is the answer","read_root":%q,"max_steps":2,"timeout_sec":60}`, t.TempDir())))
+	if err != nil {
+		t.Fatalf("handleAgentRun: %v", err)
+	}
+	m := decodeResult(t, res)
+	if m["deferred"] != true {
+		t.Fatalf("a run held at the cordon for its whole budget must defer: %v", m)
+	}
+	wait, _ := m["admission_wait_sec"].(float64)
+	if wait < 0.9 {
+		t.Errorf("admission_wait_sec = %v, want the cordon wait reported as admission — the pipeline door stamps it on this path", m["admission_wait_sec"])
+	}
+	note, _ := m["admission_note"].(string)
+	if !strings.Contains(note, "cordon") {
+		t.Errorf("admission_note = %q, want the cordon named", note)
+	}
+}
+
+// reservedAgentRunServer is fencedAgentRunServer with the lease shape as an
+// argument, and it hands back the state root so a caller can inspect the lease.
+func reservedAgentRunServer(t *testing.T, dials *atomic.Int64, opts gpulease.Options) (*Server, string) {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/running":
+			dials.Add(1)
+			fmt.Fprint(w, `{"running":[{"model":"agent-pool","state":"ready","cmd":"y"}]}`)
+		case "/v1/models":
+			fmt.Fprint(w, `{"object":"list","data":[{"id":"agent-pool","object":"model"}]}`)
+		case "/v1/chat/completions":
+			dials.Add(1)
+			fmt.Fprint(w, `{"choices":[{"message":{"role":"assistant","content":"The answer is 42."},"finish_reason":"stop"}]}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	root := t.TempDir()
+	m, err := gpulease.OpenAt("", root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := modelaffinity.SetGPULease("", root); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = modelaffinity.SetGPULease("", filepath.Join(t.TempDir(), "My Drive", "x")) })
+	holder, err := m.TryAcquire(gpulease.ClassText, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = holder.Release() })
+
+	cfg := config.Default()
+	cfg.Home = t.TempDir()
+	cfg.StateDir = root
+	cfg.Endpoint = srv.URL
+	cfg.Model = "agent-pool"
+	cfg.AgentModel = "agent-pool"
+	cfg.AgentAdmissionWaitSec = 1 // a compressed budget: the cordon must not cost the suite 300 s
+	return New(pipeline.New(cfg, nil, nil, nil)), root
+}
+
+// TestAgentRunCtxWindowNoteNamesTheFallback is the same pin on the other door:
+// this one measured ctx_window 8,192 cold and 114,688 warm minutes apart and
+// nothing in its result said which it was, or why. The passthrough here outlasts
+// the admission budget, so the warm-up spends it and the window probe inherits a
+// dead context.
+func TestAgentRunCtxWindowNoteNamesTheFallback(t *testing.T) {
+	const seat = "agent-pool"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/running":
+			fmt.Fprint(w, `{"running":[]}`) // never resident: the warm-up keeps trying
+		case "/v1/models":
+			fmt.Fprintf(w, `{"object":"list","data":[{"id":%q,"object":"model"}]}`, seat)
+		case "/upstream/" + seat + "/v1/models":
+			time.Sleep(4 * time.Second) // longer than the 3 s admission budget
+			fmt.Fprintf(w, `{"object":"list","data":[{"id":%q,"max_model_len":131072}]}`, seat)
+		case "/v1/chat/completions":
+			fmt.Fprint(w, `{"choices":[{"message":{"role":"assistant","content":"The answer is 42."},"finish_reason":"stop"}]}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	cfg := config.Default()
+	cfg.Home = t.TempDir()
+	cfg.StateDir = t.TempDir()
+	cfg.Endpoint = srv.URL
+	cfg.Model = seat
+	cfg.AgentModel = seat
+	cfg.AgentAdmissionWaitSec = 3
+	s := New(pipeline.New(cfg, nil, nil, nil))
+
+	res, err := s.handleAgentRun(context.Background(), callReq(fmt.Sprintf(
+		`{"goal":"what is the answer","read_root":%q,"max_steps":2,"timeout_sec":60}`, t.TempDir())))
+	if err != nil {
+		t.Fatalf("handleAgentRun: %v", err)
+	}
+	m := decodeResult(t, res)
+	if m["deferred"] == true {
+		t.Fatalf("a spent probe budget falls back, it does not defer: %v", m)
+	}
+	note, _ := m["ctx_window_note"].(string)
+	if !strings.Contains(note, "fallback") {
+		t.Fatalf("ctx_window_note = %q, want the conservative fallback named beside ctx_window %v", note, m["ctx_window"])
+	}
+}

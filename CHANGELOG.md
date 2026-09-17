@@ -37,6 +37,24 @@ Versioning: [SemVer](https://semver.org/).
   Both now return a note. `warmSeat` also reports whether a load was ATTEMPTED as its own value:
   neither the duration (a sub-tick load measures 0) nor "a note exists" can carry that fact, and the
   D-118 coherence probe keys on it.
+- **One transient roster error silently disabled the alias match for the rest of the wait.** The
+  resolution above latched "already tried" on the ATTEMPT rather than on a successful read, so a
+  single timeout or 500 on `GET /v1/models` — likeliest on exactly the contended box where another
+  model is mid-swap — left the seat matching by its bound name for the remaining polls and burning
+  the whole admission budget. S-08's own symptom, intermittent and with nothing in the log or on the
+  wire. The latch now closes only on success, the failure is logged and carried into
+  `admission_note`, and the next poll retries inside the same budget.
+- **The MCP door's cordon-timeout defer reported no admission at all.** `admission_wait_sec` /
+  `admission_note` were absent on that one path while the delegation door has stamped them since
+  0.117.0, so a caller could not tell a 300 s wait from an instant refusal. It now stamps them. (The
+  path is the fence pre-check's race window — the two share `modelaffinity.BlocksNewRun`, which
+  `TestForeignFenceAndTheCordonShareOnePredicate` pins across all eight lease shapes.)
+- **Both doors discarded the served-window resolver's note** (`effCtx, _ :=`), so a run that budgeted
+  against the conservative 8,192-token fallback on a 131,072-token seat looked exactly like a correct
+  one and the only symptom was a task that compacted for no reason — the same invisibility that let
+  the MCP door measure 8,192 cold and 114,688 warm on one seat, minutes apart. The line is now on the
+  wire as `ctx_window_note`, and when the fallback was caused by the probe running out of admission
+  budget it is repeated in `admission_note`, where the cause actually is.
 - **Both agent doors held a worker at the cordon for the full admission budget under a FOREIGN GPU
   fence** — 47 rows × 300 s (3.92 h) in the three days to 2026-09-17. An exclusive text hold, a
   draining cordon or a media render held by another process refuses a new run for as long as it is

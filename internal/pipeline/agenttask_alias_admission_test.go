@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -31,8 +32,12 @@ type swapFake struct {
 	canonical string
 	alias     string
 	running   func(n int64) string
-	polls     atomic.Int64
-	rosters   atomic.Int64
+	// rosterFail, when set, decides per roster read (1-based) whether GET
+	// /v1/models answers 500 instead of the roster — a contended box timing out
+	// or erroring on the one read the alias match depends on.
+	rosterFail func(n int64) bool
+	polls      atomic.Int64
+	rosters    atomic.Int64
 }
 
 func (f *swapFake) server(t *testing.T) *httptest.Server {
@@ -43,7 +48,10 @@ func (f *swapFake) server(t *testing.T) *httptest.Server {
 		case "/running":
 			_, _ = w.Write([]byte(f.running(f.polls.Add(1))))
 		case "/v1/models":
-			f.rosters.Add(1)
+			if n := f.rosters.Add(1); f.rosterFail != nil && f.rosterFail(n) {
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
 			entry := map[string]any{"id": f.canonical}
 			if f.alias != "" {
 				entry["meta"] = map[string]any{"llamaswap": map[string]any{"aliases": []string{f.alias}}}
@@ -124,5 +132,66 @@ func TestSeatAdmissionReadsTheRosterOnlyWhenItWouldOtherwiseWait(t *testing.T) {
 	}
 	if fake.rosters.Load() != 0 {
 		t.Fatalf("roster reads = %d, want 0: a seat bound by its id must not pay a second round trip", fake.rosters.Load())
+	}
+}
+
+// TestSeatAdmissionRetriesTheAliasResolutionAfterATransientRosterError: the
+// roster read that resolves the alias is ONE HTTP call, and the moment it
+// matters most — a box contended enough that another model is mid-swap — is
+// exactly the moment it can time out or 500. A resolution that latched
+// "already tried" on the failed attempt disabled the alias match for the rest
+// of the wait, so the seat burned the whole admission budget for a swap it had
+// no stake in: S-08's own symptom, back as an intermittent one, and silent.
+//
+// The roster fails once and then answers. The wait must end at the SECOND poll.
+func TestSeatAdmissionRetriesTheAliasResolutionAfterATransientRosterError(t *testing.T) {
+	fake := &swapFake{
+		canonical:  "seat-canonical",
+		alias:      "seat-alias",
+		rosterFail: func(n int64) bool { return n == 1 },
+		running: func(int64) string {
+			return `{"running":[{"model":"seat-canonical","state":"ready","cmd":"y"},` +
+				`{"model":"other-heavy","state":"starting","cmd":"x"}]}`
+		},
+	}
+	srv := fake.server(t)
+
+	waited, note := awaitSeatAdmission(context.Background(), srv.URL, "seat-alias", 30*time.Second)
+	if waited != admissionPoll {
+		t.Fatalf("waited=%v, want exactly one poll interval: the second roster read resolves the alias and the seat is already ready", waited)
+	}
+	if !strings.Contains(note, "alias resolution") {
+		t.Errorf("note = %q, want the transient roster failure named — a probe that failed silently is the defect this PR exists to remove", note)
+	}
+	if fake.rosters.Load() < 2 {
+		t.Errorf("roster reads = %d, want the failed one RETRIED on the next poll", fake.rosters.Load())
+	}
+}
+
+// TestSeatAdmissionProceedsWhenTheRosterNeverAnswers is the control: a roster
+// that is down for the whole budget cannot resolve anything, so the wait behaves
+// exactly as it did before the alias match existed — bounded by the budget, then
+// into the wall. What must NOT happen is that it does so silently.
+func TestSeatAdmissionProceedsWhenTheRosterNeverAnswers(t *testing.T) {
+	fake := &swapFake{
+		canonical:  "seat-canonical",
+		alias:      "seat-alias",
+		rosterFail: func(int64) bool { return true },
+		running: func(int64) string {
+			return `{"running":[{"model":"seat-canonical","state":"ready","cmd":"y"},` +
+				`{"model":"other-heavy","state":"starting","cmd":"x"}]}`
+		},
+	}
+	srv := fake.server(t)
+
+	waited, note := awaitSeatAdmission(context.Background(), srv.URL, "seat-alias", 4*time.Second)
+	if waited < admissionPoll {
+		t.Fatalf("waited=%v, want the budget spent: nothing could resolve the alias", waited)
+	}
+	if !strings.Contains(note, "alias resolution") {
+		t.Errorf("note = %q, want the unreadable roster named beside the spent budget", note)
+	}
+	if !strings.Contains(note, "budget spent") {
+		t.Errorf("note = %q, want the spent budget still reported", note)
 	}
 }

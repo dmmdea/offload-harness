@@ -429,8 +429,27 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	probeStart := time.Now()
 	pctx, pcancel := context.WithDeadline(ctx, admissionEnd)
 	probed, probeOK := agent.ProbeServedWindow(pctx, p.cfg.Endpoint, seat)
+	probeCtxErr := pctx.Err() // read BEFORE the cancel below, which would mask a spent deadline
 	pcancel()
 	admitted += time.Since(probeStart)
+	// WHICH window the loop is about to budget against, and where it came from.
+	// agent.ResolveContextTokens has always returned that line and both doors
+	// dropped it (`effCtx, _ :=`), so a run that silently compacted at the 8,192
+	// fallback was indistinguishable on the wire from a correct one — the same
+	// invisibility that let the MCP door measure 8,192 cold and 114,688 warm for
+	// months without anyone being able to say which run was which.
+	effCtx, ctxNote := agent.ResolveContextTokens(0, probed, p.cfg.AgentCtxTokens, probeOK)
+	wire.CtxWindowNote = ctxNote
+	if ctxNote != "" {
+		log.Printf("agent task: %s", ctxNote)
+	}
+	// A fallback the ADMISSION BUDGET caused is an admission finding, not just a
+	// window one: it is the cost of this change's own trade (the probe no longer
+	// gets to spend the wall), and it belongs beside the steps that spent the
+	// budget.
+	if !probeOK && errors.Is(probeCtxErr, context.DeadlineExceeded) {
+		admitNote = joinAdmissionNotes(admitNote, "window probe ran out of admission budget; "+ctxNote)
+	}
 	// Publish the wall this run is ACTUALLY under (register D-116), HERE — at
 	// the one line where the wall actually begins, and never before it. The
 	// node door writes it onto the job record, so a poll of a RUNNING job
@@ -547,11 +566,10 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		return deferWire(core.DeferClassInfrastructure, "building agent: "+berr.Error())
 	}
 
-	// Window budgeting parity with handleAgentRun: the SERVED window (probed
-	// above, on the admission budget; conservative fallback when unanswerable)
-	// and the measured-ON ladder rungs with the real-tokenizer seam (fail-open
-	// to the legacy estimate).
-	effCtx, _ := agent.ResolveContextTokens(0, probed, p.cfg.AgentCtxTokens, probeOK)
+	// Window budgeting parity with handleAgentRun: the SERVED window (probed and
+	// resolved above, on the admission budget; conservative fallback when
+	// unanswerable, and ctx_window_note says which) and the measured-ON ladder
+	// rungs with the real-tokenizer seam (fail-open to the legacy estimate).
 	built.Loop.WithContextTokens(effCtx).WithSkeletonPrune(true).WithGCFCompact(true).
 		WithTokenizer(tokclient.New(p.cfg.Endpoint, seat, 0))
 
@@ -1499,7 +1517,18 @@ func AwaitSeatAdmission(ctx context.Context, endpoint, seat string, budget time.
 type seatMatcher struct {
 	endpoint string
 	names    []string
+	// resolved latches on a SUCCESSFUL roster read only. Latching it on the
+	// attempt disabled the alias match for the rest of the wait after ONE
+	// transient error — and the moment the alias match matters is a box
+	// contended enough for another model to be mid-swap, which is exactly the
+	// moment that read times out or 500s. The seat then burned the whole
+	// admission budget for a swap it had no stake in: S-08's own symptom,
+	// intermittent and silent (blocker, review round 1).
 	resolved bool
+	// note is the FIRST resolution failure, carried to admission_note. A probe
+	// that failed silently is the defect class this change exists to remove, so
+	// this one does not get to be the exception.
+	note string
 }
 
 func newSeatMatcher(endpoint, seat string) *seatMatcher {
@@ -1524,17 +1553,38 @@ func (m *seatMatcher) resolve(ctx context.Context) bool {
 	if m.resolved {
 		return false
 	}
-	m.resolved = true
 	roster, err := swapclient.FetchRoster(ctx, m.endpoint, admissionPoll)
 	if err != nil {
+		// NOT latched: the caller polls again inside the same admission budget,
+		// and the next read may well answer. Reported once — repeating it every
+		// poll would bury the rest of admission_note.
+		if m.note == "" {
+			m.note = "seat alias resolution failed (proceeding with the bound name): " + err.Error()
+			log.Printf("agent task: seat alias resolution (%s) failed (proceeding with the bound name): %v", m.names[0], err)
+		}
 		return false
 	}
+	m.resolved = true
 	id, ok := roster.Canonical(m.names[0])
 	if !ok || strings.EqualFold(id, m.names[0]) {
 		return false
 	}
 	m.names = append(m.names, id)
 	return true
+}
+
+// joinAdmissionNotes concatenates admission findings with "; ", dropping empties
+// — the same shape the caller uses to fold the pre-flight's note into the
+// warm-up's, so one admission_note can carry every step that had something to
+// say without any of them overwriting another.
+func joinAdmissionNotes(notes ...string) string {
+	kept := notes[:0:0]
+	for _, n := range notes {
+		if strings.TrimSpace(n) != "" {
+			kept = append(kept, n)
+		}
+	}
+	return strings.Join(kept, "; ")
 }
 
 // warmSeat loads an ABSENT seat outside the wall (D-64). One GET through
@@ -1601,26 +1651,26 @@ func warmSeat(ctx context.Context, endpoint, seat string, budget time.Duration) 
 			// possibly cold, and the wire has to say so (register S-24).
 			return 0, "warm-up could not read /running (proceeding; the seat may still be cold): " + rerr.Error(), false
 		}
-		return 0, "", false // already resident: nothing to warm, nothing to report
+		return 0, m.note, false // already resident: nothing to warm; only an alias-probe failure, if any, to report
 	}
 	start := time.Now()
 	b := swapclient.BaseURL(endpoint)
 	if b == "" {
-		return 0, "warm-up could not resolve a llama-swap root from the endpoint (proceeding; the seat may still be cold)", false
+		return 0, joinAdmissionNotes(m.note, "warm-up could not resolve a llama-swap root from the endpoint (proceeding; the seat may still be cold)"), false
 	}
 	wctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
 	req, rerr := http.NewRequestWithContext(wctx, http.MethodGet, b+"/upstream/"+url.PathEscape(seat)+"/v1/models", nil)
 	if rerr != nil {
-		return 0, "warm-up request could not be built (proceeding; the seat may still be cold): " + rerr.Error(), false
+		return 0, joinAdmissionNotes(m.note, "warm-up request could not be built (proceeding; the seat may still be cold): "+rerr.Error()), false
 	}
 	resp, derr := warmClient.Do(req)
 	if derr != nil {
 		spent := time.Since(start)
 		if wctx.Err() != nil && ctx.Err() == nil {
-			return spent, fmt.Sprintf("cold load exceeded the admission budget after %.0fs (proceeding into the wall)", spent.Seconds()), true
+			return spent, joinAdmissionNotes(m.note, fmt.Sprintf("cold load exceeded the admission budget after %.0fs (proceeding into the wall)", spent.Seconds())), true
 		}
-		return spent, "warm request failed (proceeding): " + derr.Error(), true
+		return spent, joinAdmissionNotes(m.note, "warm request failed (proceeding): "+derr.Error()), true
 	}
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
 	resp.Body.Close()
@@ -1633,27 +1683,27 @@ func warmSeat(ctx context.Context, endpoint, seat string, budget time.Duration) 
 	// that had plainly succeeded).
 	if resp.StatusCode == http.StatusOK {
 		if ok, rerr := ready(); rerr == nil && ok {
-			return time.Since(start), fmt.Sprintf("cold load %.0fs outside the wall", time.Since(start).Seconds()), true
+			return time.Since(start), joinAdmissionNotes(m.note, fmt.Sprintf("cold load %.0fs outside the wall", time.Since(start).Seconds())), true
 		}
-		return time.Since(start), fmt.Sprintf("cold load %.0fs outside the wall (passthrough answered 200; /running lists the seat under another id)", time.Since(start).Seconds()), true
+		return time.Since(start), joinAdmissionNotes(m.note, fmt.Sprintf("cold load %.0fs outside the wall (passthrough answered 200; /running lists the seat under another id)", time.Since(start).Seconds())), true
 	}
 	// A non-200 passthrough answer (404: llama-swap does not know the name)
 	// confirms nothing; two polls one interval apart, then say so and go.
 	for i := 0; i < 2; i++ {
 		if ok, rerr := ready(); rerr == nil && ok {
-			return time.Since(start), fmt.Sprintf("cold load %.0fs outside the wall", time.Since(start).Seconds()), true
+			return time.Since(start), joinAdmissionNotes(m.note, fmt.Sprintf("cold load %.0fs outside the wall", time.Since(start).Seconds())), true
 		}
 		// The second poll waits one interval, but only inside what is left of
 		// the budget — the confirmation must not outspend the gate it serves.
 		if i == 0 && time.Since(start)+admissionPoll <= budget {
 			if serr := seatwait.Sleep(ctx, admissionPoll); serr != nil {
-				return time.Since(start), serr.Error(), true
+				return time.Since(start), joinAdmissionNotes(m.note, serr.Error()), true
 			}
 		} else if i == 0 {
 			break
 		}
 	}
-	return time.Since(start), fmt.Sprintf("warm request answered HTTP %d after %.0fs but /running never listed %s ready (proceeding)", resp.StatusCode, time.Since(start).Seconds(), seat), true
+	return time.Since(start), joinAdmissionNotes(m.note, fmt.Sprintf("warm request answered HTTP %d after %.0fs but /running never listed %s ready (proceeding)", resp.StatusCode, time.Since(start).Seconds(), seat)), true
 }
 
 // warmClient carries no timeout of its own: warmSeat bounds the request by
@@ -1712,15 +1762,16 @@ func awaitSeatAdmission(ctx context.Context, endpoint, seat string, budget time.
 		}
 		// The seat this contract needs is up: another model's swap is not this
 		// contract's business, and waiting it out is wall spent on somebody
-		// else's load.
+		// else's load. Every exit below carries the matcher's note, so an alias
+		// probe that failed is reported whatever verdict this poll reaches.
 		if mine || busy == "" {
-			return waited, ""
+			return waited, m.note
 		}
 		if waited+admissionPoll > budget {
-			return waited, "budget spent while " + busy + " (proceeding into the wall)"
+			return waited, joinAdmissionNotes(m.note, "budget spent while "+busy+" (proceeding into the wall)")
 		}
 		if serr := seatwait.Sleep(ctx, admissionPoll); serr != nil {
-			return waited, serr.Error()
+			return waited, joinAdmissionNotes(m.note, serr.Error())
 		}
 		waited += admissionPoll
 	}

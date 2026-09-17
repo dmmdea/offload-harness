@@ -89,7 +89,10 @@ own "a load was attempted" answer, never on the cold load's duration (a sub-tick
 window compaction budgets against is then probed live and reported as `ctx_window` (the box's
 `agent_ctx_tokens` when the probe cannot answer, the 8,192 fallback only when that is unset too) — that probe
 runs on the admission deadline too (register S-24), because it is allowed to absorb a cold load and on
-the wall context a slow seat spent the run's whole clock on it. A resolved planner absent from the endpoint's served roster fails loud with
+the wall context a slow seat spent the run's whole clock on it. `ctx_window_note` says which of the three
+windows that number IS — probed, configured, or the conservative fallback — because this door measured
+8,192 cold and 114,688 warm on the same seat minutes apart and neither result said which it was. A defer
+at the CORDON reports its `admission_wait_sec` / `admission_note` like every other admission exit. A resolved planner absent from the endpoint's served roster fails loud with
 `deferred: true` naming the model, never a silent fall back to the workhorse — "served" means
 matched against canonical ids **or** `meta.llamaswap.aliases`, since a tier-seeded `agent_model`
 is normally an alias. Every response

@@ -618,6 +618,7 @@ remote reasoning is quarantined from the caller's context by construction.
 | `calls` | `[{step, max_tokens, finish_reason, completion_tokens, reasoning_tokens, content_chars, reasoning_chars, tool_calls, thinking_off, reasoning_key, forced_final, ms}]` | 0.115.8 (register D-47): one entry per planner completion (0.115.19: `forced_final` marks the forced final step's call, D-89), on every result shape, set before the defer branches — the arithmetic a starvation diagnosis needs without transcript bytes. `reasoning_tokens` is vLLM's `usage.completion_tokens_details.reasoning_tokens` (0 = not reported). A pre-0.115.8 node emits none. Since 0.125.0 (register D-99) the DELEGATOR's published row `results[].calls` carries the LAST eight of these records (`omitempty`), so a caller reads them from `agent_delegate` / the CLI directly instead of from this endpoint with the fleet token. |
 | `admission_wait_sec` | float | Everything spent BEFORE the wall started, as one number: the cordon wait, the llama-swap **swap pre-flight**, the seat's cold-load warm-up, the coherence probe and — since the S-24 fix — the served-window probe. All five draw on ONE budget (`agent_admission_wait_sec`, 0 = `core.AgentAdmissionSecDefault` = 300 s, −1 = off), so the ceiling is the budget and not the sum of five of them. Omitted when zero: nothing was swapping, the seat was already resident and the window read instantly. A job sits in state `running` for this whole window, which is why the delegator's poll bound carries a matching admission allowance. |
 | `admission_note` | string | What admission DID or could not settle, `; `-joined across the steps that had something to say: `cold load Ns outside the wall`, `budget spent while <model>:<state> (proceeding into the wall)`, `running probe failed (proceeding): …`. Since the S-24 fix the warm-up also speaks from its **no-op** exits — `warm-up could not read /running (proceeding; the seat may still be cold)`, `no admission budget left for the warm-up …` — because "could not read" and "the seat is ready" used to be reported identically, and a still-cold seat reached the wall looking warm. Empty = every step settled cleanly. |
+| `ctx_window_note` | string | WHICH window the loop budgeted against and WHERE it came from — the live probe, this box's `agent_ctx_tokens`, or the conservative 8,192 fallback (`agent.ResolveContextTokens`). Both doors discarded this line until the S-24 fix, so a run that silently compacted at 8,192 on a 131,072-token seat was indistinguishable on the wire from a correct one, and the only symptom was a task that compacted for no reason. When the fallback was caused by the probe running out of ADMISSION budget, the same sentence also appears in `admission_note`, because there the fix is a cold-start problem and not a window one. |
 | `coherence_note` | string | Register D-118: the post-warm SEAT COHERENCE probe’s verdict — one ≤ 96-token completion, charged to `admission_wait_sec`, asking the freshly loaded seat to call `read_file` and answer DONE. `coherence probe: tool call parsed in Ns` (the seat is sane), `… answered in text without a tool call …` / `… inconclusive (…); proceeding` (fail-open), or `seat incoherent at warm: …`, which is also a `deferred` `infrastructure` result. Absent when the probe did not run (`agent_coherence_probe` `off`, a warm seat under the default `cold`, or a pre-D-118 node). |
 | `deferred` | bool | True = the node ran and honestly could not complete the contract. **A defer is a success shape at the job level**: the job lands `done`, never `error` — `error` is reserved for internal wiring bugs (mirrors the cascade's defer semantics). |
 | `reason` | string | Why it deferred (shapes below). |
@@ -926,8 +927,17 @@ the MCP `agent_run` handler — run the same steps in the same order, which is t
    WALL context handed a cold seat the contract's own clock and the run was filed as a wall timeout.
    It is now bounded by the admission deadline like everything above it; an exhausted budget leaves
    it a dead context and it falls back to `agent_ctx_tokens`, the same fallback an unanswerable probe
-   has always taken. The seat-residency (roster) check runs just ahead of it so a seat this endpoint
-   does not serve is never cold-started by a run that is about to defer.
+   has always taken — and `ctx_window_note` says so, on every run, so that fallback is never a silent
+   one. The seat-residency (roster) check runs just ahead of it so a seat this endpoint does not serve
+   is never cold-started by a run that is about to defer.
+
+Every step above that PROBES reports its own failure rather than passing it off as a clean answer —
+the alias roster read, the residency read, the warm-up, the window probe. That rule is the point of
+the block: "the gate could not tell" and "there was nothing to tell" want different fixes, and a
+budget silently spent on the first while the wire reports the second is how each of these defects
+survived for months. The alias resolution in particular retries on the next poll inside the same
+budget: latching "already tried" on a failed roster read disabled the alias match for the rest of the
+wait after ONE transient error, which is S-08 again, intermittently.
 
 ## Source map
 

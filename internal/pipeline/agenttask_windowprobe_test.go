@@ -119,3 +119,71 @@ func TestWarmSeatReportsAnAttemptedLoadEvenWhenItMeasuresZero(t *testing.T) {
 		t.Fatalf("the passthrough GET was issued (note %q) — that IS the load, however long it took", note)
 	}
 }
+
+// TestCtxWindowNoteNamesTheFallbackWhenTheProbeRanOutOfAdmission: moving the
+// served-window probe onto the admission budget (above) bought a new failure
+// mode — an admission budget already spent leaves the probe a dead context, and
+// the loop then budgets against the 8,192-token conservative fallback on a seat
+// that may serve 131,072.
+//
+// agent.ResolveContextTokens has always returned a line saying exactly which of
+// the three windows it picked and why; both doors dropped it on the floor with
+// `effCtx, _ :=`. So a run that silently compacted at 8,192 was indistinguishable
+// on the wire from a correct one — the same invisibility that let the MCP door
+// measure 8,192 cold and 114,688 warm for months. The fallback must be visible
+// AS a fallback.
+func TestCtxWindowNoteNamesTheFallbackWhenTheProbeRanOutOfAdmission(t *testing.T) {
+	fake := &agentFake{
+		rosterIDs: []string{agentTestSeat},
+		// Another model swaps for the whole budget, so the PRE-FLIGHT spends it
+		// exactly — one 3 s sleep against a 3 s budget — and the window probe
+		// after it inherits an already-expired deadline. Spending it in the
+		// pre-flight rather than the warm-up is deliberate: the warm-up's own
+		// confirmation sleep is conditional on what is LEFT of the budget, which
+		// makes "did it sleep" a knife-edge at exactly one poll interval.
+		running: func(int64) string { return `{"running":[{"model":"other-heavy","state":"starting","cmd":"x"}]}` },
+		loop:    func(int64) string { return doneChat("The answer is 42.") },
+		repack:  func(int64) string { return `{"answer":"42"}` },
+	}
+	srv := fake.server(t)
+	defer srv.Close()
+
+	res := admissionTestPipeline(t, srv.URL, 3).Run(context.Background(), agentTestRequest(t, testContract()))
+	wire := decodeWire(t, res)
+	if wire.Deferred {
+		t.Fatalf("a spent probe budget falls back, it does not defer: %s", wire.Reason)
+	}
+	if !strings.Contains(wire.CtxWindowNote, "fallback") {
+		t.Fatalf("ctx_window_note = %q, want the conservative fallback named: an 8,192-token run on a 131,072-token seat must be visible as a fallback", wire.CtxWindowNote)
+	}
+	if !strings.Contains(wire.AdmissionNote, "window probe ran out of admission budget") {
+		t.Errorf("admission_note = %q, want the probe's exhausted budget named beside the other admission findings", wire.AdmissionNote)
+	}
+	if !strings.Contains(wire.AdmissionNote, "budget spent while") {
+		t.Errorf("admission_note = %q, want the step that actually spent the budget still named — notes accumulate, they never overwrite", wire.AdmissionNote)
+	}
+}
+
+// TestCtxWindowNoteNamesTheProbeWhenItAnswers: the note is not a failure
+// channel — on the normal path it records which window the run actually
+// budgeted against, which is the fact a slow-task diagnosis starts from.
+func TestCtxWindowNoteNamesTheProbeWhenItAnswers(t *testing.T) {
+	fake := &agentFake{
+		rosterIDs: []string{agentTestSeat},
+		running:   func(int64) string { return `{"running":[{"model":"` + agentTestSeat + `","state":"ready","cmd":"y"}]}` },
+		props:     map[string]any{"default_generation_settings": map[string]any{"n_ctx": 32768}},
+		loop:      func(int64) string { return doneChat("The answer is 42.") },
+		repack:    func(int64) string { return `{"answer":"42"}` },
+	}
+	srv := fake.server(t)
+	defer srv.Close()
+
+	res := admissionTestPipeline(t, srv.URL, 30).Run(context.Background(), agentTestRequest(t, testContract()))
+	wire := decodeWire(t, res)
+	if wire.Deferred {
+		t.Fatalf("deferred: %s", wire.Reason)
+	}
+	if !strings.Contains(wire.CtxWindowNote, "32768") || !strings.Contains(wire.CtxWindowNote, "probed") {
+		t.Fatalf("ctx_window_note = %q, want the probed window and its source", wire.CtxWindowNote)
+	}
+}

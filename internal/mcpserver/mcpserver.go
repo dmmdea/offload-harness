@@ -68,6 +68,19 @@ type Server struct {
 	// delegate.RunWith at call time; tests inject a fake so the handler is
 	// exercisable without a live fleet.
 	reviewFleet fleetDispatch
+	// foreignFence is the agent_run door's lease-fence seam: nil (production)
+	// resolves to delegate.ForeignFence at call time.
+	//
+	// It exists because the pre-check and the cordon below it share one
+	// predicate — delegate.ForeignFence delegates to modelaffinity.BlocksNewRun,
+	// which is exactly what AwaitRunSlot waits on — so with the real function a
+	// hold that could time out at the cordon is precisely a hold the pre-check
+	// already refused, and the cordon's own defer shape would be unreachable
+	// from a test (measured across all eight lease shapes: the two agree on
+	// every one; see TestForeignFenceAndTheCordonShareOnePredicate). The path
+	// stays in the code for the race the two reads leave open — a lease taken
+	// between them — and a seam is the only way to prove it reports honestly.
+	foreignFence func(gpulease.Info) (bool, string)
 	// quarantine remembers fleet nodes whose answers failed the document
 	// fingerprint twice (delegate.Quarantine) for this server's lifetime, so
 	// a research call's later chunks and later calls stop placing work there
@@ -1928,9 +1941,13 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 	// what AwaitRunSlot will do has to read what AwaitRunSlot reads, or the two
 	// can disagree — and a process that never loaded a config has that gate
 	// deliberately inert, which this check must be too.
+	fence := s.foreignFence
+	if fence == nil {
+		fence = delegate.ForeignFence
+	}
 	if dir := modelaffinity.GPULeaseDir(); dir != "" {
 		lease := gpulease.InspectDir(dir)
-		if fenced, why := delegate.ForeignFence(lease); fenced {
+		if fenced, why := fence(lease); fenced {
 			dout := map[string]any{
 				"deferred":    true,
 				"defer_class": string(core.DeferClassCapacity),
@@ -1944,19 +1961,33 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 	}
 	admitStart := time.Now()
 	admitDeadline := admitStart.Add(pipeline.AdmissionBudget(cfg.AgentAdmissionWaitSec))
+	// cordonWait is the time this run actually spent at the cordon: an ungated
+	// pass is nanoseconds, and the delegation door's own cordonWait applies the
+	// same floor rather than stamping a wait that never happened.
+	cordonWait := func() time.Duration {
+		if w := time.Since(admitStart); w >= time.Millisecond {
+			return w
+		}
+		return 0
+	}
 	if lerr := modelaffinity.AwaitRunSlot(ctx, cfg.Endpoint, model, admitDeadline); lerr != nil {
-		return jsonResult(map[string]any{
+		// This is the pre-check's RACE WINDOW — a fencing lease taken between
+		// its read and this one (the two share BlocksNewRun, so nothing else
+		// reaches here). Whatever else it is, it is a run that spent its whole
+		// admission budget, and it has to say so: a caller reading a bare
+		// "gpu busy" cannot tell a 300 s wait from an instant refusal, and the
+		// delegation door has stamped admission on this exact path since 0.117.0.
+		dout := map[string]any{
 			"deferred":    true,
 			"defer_class": string(core.DeferClassCapacity),
 			"reason":      "gpu busy: " + lerr.Error(),
-		})
+			"steps":       0,
+		}
+		withAdmission(dout, cordonWait(), "held at the cordon for the admission budget")
+		withPlaced(dout, placed)
+		return jsonResult(dout)
 	}
-	// The cordon wait counts only when the run actually waited: an ungated pass
-	// is nanoseconds, and the delegation door's cordonWait applies the same floor.
-	cordon := time.Since(admitStart)
-	if cordon < time.Millisecond {
-		cordon = 0
-	}
+	cordon := cordonWait()
 	// ONE admission total for this door, exactly as the delegation door keeps
 	// one: the cordon, the pre-flight, the warm-up and the coherence probe all
 	// draw on the same budget and are all reported as admission, so the wall
@@ -2047,12 +2078,25 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 	probeStart := time.Now()
 	pctx, pcancel := context.WithDeadline(ctx, admitDeadline)
 	probed, probeOK := agent.ProbeServedWindow(pctx, cfg.Endpoint, model)
+	probeCtxErr := pctx.Err() // read BEFORE the cancel, which would mask a spent deadline
 	pcancel()
 	admitted += time.Since(probeStart)
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	built.Loop.WithObserver(act)
-	effCtx, _ := agent.ResolveContextTokens(0, probed, cfg.AgentCtxTokens, probeOK)
+	// WHICH window this run budgets against, and where it came from. This door
+	// discarded that line for months while measuring 8,192 cold and 114,688 warm
+	// on the same seat, and nothing in either result said which it was.
+	effCtx, ctxNote := agent.ResolveContextTokens(0, probed, cfg.AgentCtxTokens, probeOK)
+	if ctxNote != "" {
+		log.Printf("agent_run: %s", ctxNote)
+	}
+	if !probeOK && errors.Is(probeCtxErr, context.DeadlineExceeded) {
+		// The fallback this change's own trade can cause: an admission budget
+		// spent before the probe got its turn. It belongs in admission_note,
+		// beside the steps that spent it.
+		admitNote = joinAdmissionNotes(admitNote, "window probe ran out of admission budget; "+ctxNote)
+	}
 	// Real-tokenizer seam (TO-4): whole-message middle cut on the planner's own
 	// served token counts; fail-open to the legacy estimate rung when the
 	// endpoint has no /tokenize. Same wiring as the CLI, so the drive modes
@@ -2111,6 +2155,10 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 		"profile":    prof.Name,
 		"model":      model,  // the resolved PLANNER seat — visibility is the cure for a silent seat (roast finding)
 		"ctx_window": effCtx, // the window compaction budgeted against (probed, else configured, else the conservative fallback)
+		// ...and WHICH of those three it was. A number alone cannot distinguish
+		// "this seat serves 8,192" from "the probe could not answer, so we
+		// assumed 8,192", and the two want opposite fixes.
+		"ctx_window_note": ctxNote,
 	}
 	withAdmission(out, admitted, admitNote)
 	withCoherence(out, coherenceNote)
