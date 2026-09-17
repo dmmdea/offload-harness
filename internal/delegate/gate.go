@@ -297,6 +297,13 @@ func remoteEligible(st Subtask, r NodeView) bool {
 	if !r.AgentEnabled || leaseFences(r) || len(st.Contract.OutputSchema) == 0 || st.Contract.Depth != 0 {
 		return false
 	}
+	// W-05 (register S-03/S-05, INV-5 rider clause (i)): a seat whose fitted
+	// final cannot clear seatrate.FinalBudgetFloor within its own effective
+	// wall is refused here, naming the arithmetic (fit.go's feasibleFinal).
+	// An unknown rate is no opinion — see its own doc.
+	if ok, _ := feasibleFinal(st, r); !ok {
+		return false
+	}
 	if dec, ok := remoteDecision(st, r); ok {
 		return !dec.Defer && !dec.Wait
 	}
