@@ -6,6 +6,8 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.127.1] - 2026-09-17 - the final's tail and the node's honest backlog: fitted-final re-issue, one bounded re-pack, last attempt decides the class, queue depth = 2x workers with an ETA-bearing Retry-After
+
 ### Added
 - **A `503 queue full` refusal now says when it will lift, and `/fleet/health` says it in advance**
   (register S-04, diagnosis §2(a)/§5.2, the overhaul plan's roast correction: an admission refusal
