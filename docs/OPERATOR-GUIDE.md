@@ -1031,7 +1031,11 @@ steering toward remotes as before and is arbitrated at the model-affinity gate (
 single-box render behaviour is unchanged. The local seat's window is probed live before each run —
 llama-server `/props`, else the backend's `/v1/models` `max_model_len` (a vLLM seat behind
 llama-swap has no `/props`; before 0.113.14 such a seat was budgeted at the 8,192-token fallback
-and `offload_status` showed `ctx_probe_error: HTTP 404` while it was warm).
+and `offload_status` showed `ctx_probe_error: HTTP 404` while it was warm). The per-model probes share
+one cold-start budget of 10 minutes (llama-swap's `healthCheckTimeout`), because llama-swap answers them
+only once a cold seat is up — a vLLM seat measured 222 s, and the old 60 s per-URL timeout returned the
+fallback for the whole run. When the probe still cannot answer, the box's `agent_ctx_tokens` is the
+window; when it answers and disagrees with `agent_ctx_tokens`, the served window wins and the note says so.
 
 **Store steward (0.113.16) — `fleet_store_root`, `fleet_store_cap_gb`, `fleet_store_prune_every_jobs`.** A node that owns a
 persistent KV page store on disk (the Lenovo's LMCache fs_native dataset) keeps it under budget between its own turns:

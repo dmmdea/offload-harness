@@ -68,7 +68,10 @@ defer on a composite box carries `placed` {tier, layer, role, seat, devices, rea
 evicts} — absent on a plain box), its default
 timeout honors config `agent_timeout_sec` (else the built-in 180s), and its result reports the
 resolved planner `model` alongside `output`/`steps`/`stop_reason` — visibility is the cure for a
-silent seat. A resolved planner absent from the endpoint's served roster fails loud with
+silent seat. A seat that is not loaded is warmed BEFORE the wall, on the admission budget, exactly as
+on the delegation door (D-64), and the result says so in `admission_wait_sec` / `admission_note`; the
+window compaction budgets against is then probed live and reported as `ctx_window` (the box's
+`agent_ctx_tokens` when the probe cannot answer, the 8,192 fallback only when that is unset too). A resolved planner absent from the endpoint's served roster fails loud with
 `deferred: true` naming the model, never a silent fall back to the workhorse — "served" means
 matched against canonical ids **or** `meta.llamaswap.aliases`, since a tier-seeded `agent_model`
 is normally an alias. Every response

@@ -406,8 +406,8 @@ func main() {
 	}
 	probed, probeOK := agent.ProbeServedWindow(ctx, plannerBase, probeModel)
 	// cfg.AgentCtxTokens is the seat's served window from the tier profile: the
-	// fallback when the probe fails on a cold seat, so a 400 at probe time can no
-	// longer silently drop the whole run to 8,192.
+	// fallback when the probe cannot answer inside the run's budget, so an
+	// unanswered probe no longer silently drops the whole run to 8,192.
 	effCtx, ctxNote := agent.ResolveContextTokens(*ctxTokens, probed, cfg.AgentCtxTokens, probeOK)
 	if ctxNote != "" {
 		fmt.Fprintln(os.Stderr, "[local-agent] "+ctxNote)

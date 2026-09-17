@@ -25,6 +25,21 @@ import (
 // budget headroom; a too-large one kills runs with server 400s.
 const FallbackContextTokens = 8192
 
+// coldStartWait bounds the per-model passthrough probes TOGETHER. llama-swap
+// holds a request for a model that is not loaded until that model's health
+// check passes, so these probes are also the wait for a cold start — and a vLLM
+// seat's cold start is minutes. Measured 2026-09-16 on the Qube agent-pool seat:
+// `starting` at 3 s, `ready` at 222 s. The old 60 s per-request timeout gave up
+// at 60 s on /props and again at 120 s on /v1/models, the bare-root /props
+// answered 404, and the run budgeted 8,192 against a 114,688-token window. Ten
+// minutes is llama-swap's healthCheckTimeout on the reference boxes (600): past
+// it, llama-swap has abandoned the load itself. A var so tests can shrink it.
+var coldStartWait = 10 * time.Minute
+
+// probeRequestTimeout bounds the bare-root /props probe, which never loads a
+// model: it answers for whatever is already running, or not at all.
+var probeRequestTimeout = 60 * time.Second
+
 // ProbeServedWindow asks the serving endpoint for model's live context window
 // (n_ctx). It tries, in order:
 //
@@ -74,24 +89,30 @@ func probeWindow(ctx context.Context, base, model string, upstreamOnly bool) (in
 	// on such a seat silently budgeted FallbackContextTokens (8,192) against a
 	// 163,840-token window. llama-server's /v1/models carries no max_model_len,
 	// so the order is safe: the second probe answers only where the first cannot.
-	candidates := []struct {
+	upstream := []struct {
 		u     string
 		fetch func(context.Context, *http.Client, string) (int, bool)
 	}{
 		{up + "/props", fetchNCtx},
-		{up + "/v1/models", func(ctx context.Context, c *http.Client, u string) (int, bool) { return fetchMaxModelLen(ctx, c, u, model) }},
-		{b + "/props", fetchNCtx},
+		{up + "/v1/models", func(ctx context.Context, c *http.Client, u string) (int, bool) {
+			return fetchMaxModelLen(ctx, c, u, model)
+		}},
 	}
-	if upstreamOnly {
-		candidates = candidates[:2]
-	}
-	client := &http.Client{Timeout: 60 * time.Second} // cold model swap can take tens of seconds
-	for _, c := range candidates {
-		if n, ok := c.fetch(ctx, client, c.u); ok {
+	// One budget for both passthrough probes, carried by context rather than a
+	// per-request client timeout: whichever probe lands on the cold seat absorbs
+	// the load, and the other then answers from a loaded seat in milliseconds.
+	uctx, cancel := context.WithTimeout(ctx, coldStartWait)
+	defer cancel()
+	coldClient := &http.Client{}
+	for _, c := range upstream {
+		if n, ok := c.fetch(uctx, coldClient, c.u); ok {
 			return n, true
 		}
 	}
-	return 0, false
+	if upstreamOnly {
+		return 0, false
+	}
+	return fetchNCtx(ctx, &http.Client{Timeout: probeRequestTimeout}, b+"/props")
 }
 
 // fetchMaxModelLen GETs a per-model /v1/models URL and extracts the served
@@ -181,10 +202,15 @@ func fetchNCtx(ctx context.Context, client *http.Client, u string) (int, bool) {
 //   - flag <= 0 (auto, the default): the probed window when the probe answers;
 //     when the probe FAILS, the seat's CONFIGURED window (config
 //     agent_ctx_tokens) when one is known, and FallbackContextTokens only when
-//     nothing better is known — never a hardcoded per-tier assumption. A cold
-//     seat still loading answers the probe with 400: before this, that silently
-//     ran a 114,688-token seat at 8,192 for the WHOLE task, with no error (the
-//     same agent_run measured 8,192 cold and 114,688 warm, minutes apart);
+//     nothing better is known — never a hardcoded per-tier assumption. The probe
+//     now waits out a cold start (coldStartWait), so the configured window is
+//     reached only when the endpoint cannot answer inside the caller's budget;
+//     before both fixes a cold seat silently ran a 114,688-token window at 8,192
+//     for the WHOLE task (the same agent_run measured 8,192 cold and 114,688
+//     warm, minutes apart). When the probe answers, the SERVED window wins over
+//     the configured one — live beats written — and a disagreement is named in
+//     the note, because a stale config is exactly what would mislead the
+//     fallback path the next time the probe fails;
 //   - flag > 0 (operator override): the flag wins, but when the probe answered
 //     with LESS than the flag a warning names the gap — that exact mismatch
 //     (assumed 16384, served 8192) killed real runs before it was measured.
@@ -194,6 +220,9 @@ func fetchNCtx(ctx context.Context, client *http.Client, u string) (int, bool) {
 func ResolveContextTokens(flag, probed, configured int, probeOK bool) (int, string) {
 	if flag <= 0 {
 		if probeOK {
+			if configured > 0 && configured != probed {
+				return probed, fmt.Sprintf("context window: %d (probed from the serving endpoint; config agent_ctx_tokens %d disagrees — the served window wins, correct the config)", probed, configured)
+			}
 			return probed, fmt.Sprintf("context window: %d (probed from the serving endpoint)", probed)
 		}
 		if configured > 0 {

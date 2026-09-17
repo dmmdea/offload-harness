@@ -5,7 +5,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 func propsJSON(nctx int) string {
@@ -223,19 +225,103 @@ func TestResolveContextTokensConfiguredFallback(t *testing.T) {
 		configured int
 		probeOK    bool
 		want       int
+		noteHas    string
 	}{
-		{"probe fails, configured window known: use it", 0, 0, 114688, false, 114688},
-		{"probe fails, nothing configured: conservative fallback", 0, 0, 0, false, FallbackContextTokens},
-		{"probe answers: probed wins over configured", 0, 114688, 163840, true, 114688},
-		{"operator flag set: flag wins even when the probe fails", 32768, 0, 114688, false, 32768},
+		{"probe fails, configured window known: use it", 0, 0, 114688, false, 114688, "configured window"},
+		{"probe fails, nothing configured: conservative fallback", 0, 0, 0, false, FallbackContextTokens, "conservative fallback"},
+		{"probe answers: probed wins over configured, and the disagreement is named", 0, 114688, 163840, true, 114688, "disagrees"},
+		{"probe answers and config agrees: no disagreement named", 0, 114688, 114688, true, 114688, "probed from the serving endpoint)"},
+		{"operator flag set: flag wins even when the probe fails", 32768, 0, 114688, false, 32768, ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got, _ := ResolveContextTokens(c.flag, c.probed, c.configured, c.probeOK)
+			got, note := ResolveContextTokens(c.flag, c.probed, c.configured, c.probeOK)
 			if got != c.want {
 				t.Fatalf("ResolveContextTokens(flag=%d, probed=%d, configured=%d, probeOK=%v) = %d, want %d",
 					c.flag, c.probed, c.configured, c.probeOK, got, c.want)
 			}
+			if c.noteHas != "" && !strings.Contains(note, c.noteHas) {
+				t.Fatalf("note = %q, want it to contain %q", note, c.noteHas)
+			}
 		})
+	}
+}
+
+// TestProbeServedWindowWaitsOutAColdStart (2026-09-16): llama-swap holds a
+// request for a model that is not loaded until its health check passes, so a
+// cold seat answers the per-model probe only after the load. Measured on the
+// Qube agent-pool seat: `ready` at 222 s, while the old 60 s per-request timeout
+// gave up at 60 s and 120 s and the run budgeted 8,192 against 114,688. Here the
+// load is 600 ms and the bare-root timeout 100 ms: a probe still bounded by the
+// per-request timeout gives up twice before the seat is up.
+func TestProbeServedWindowWaitsOutAColdStart(t *testing.T) {
+	oldReq := probeRequestTimeout
+	probeRequestTimeout = 100 * time.Millisecond
+	defer func() { probeRequestTimeout = oldReq }()
+	loaded := make(chan struct{})
+	var startLoad sync.Once
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.URL.Path, "/upstream/agent-pool/") {
+			http.NotFound(w, r)
+			return
+		}
+		// The first passthrough request starts the load; every request waits for it.
+		startLoad.Do(func() {
+			go func() { time.Sleep(600 * time.Millisecond); close(loaded) }()
+		})
+		select {
+		case <-loaded:
+		case <-r.Context().Done():
+			return
+		}
+		if r.URL.Path == "/upstream/agent-pool/v1/models" {
+			w.Write([]byte(`{"object":"list","data":[{"id":"agent-pool","max_model_len":114688}]}`))
+			return
+		}
+		http.NotFound(w, r) // a vLLM seat has no /props
+	}))
+	defer srv.Close()
+	n, ok := ProbeServedWindow(context.Background(), srv.URL, "agent-pool")
+	if !ok || n != 114688 {
+		t.Fatalf("probe = (%d,%v), want (114688,true): the probe must wait out the cold start, not fall back", n, ok)
+	}
+}
+
+// TestProbeServedWindowColdStartWaitIsBounded: the wait for a cold start is
+// bounded by coldStartWait even when the caller's context carries no deadline,
+// so a seat that never comes up cannot hang the probe.
+func TestProbeServedWindowColdStartWaitIsBounded(t *testing.T) {
+	oldWait := coldStartWait
+	coldStartWait = 200 * time.Millisecond
+	defer func() { coldStartWait = oldWait }()
+	never := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/upstream/") {
+			select {
+			case <-never:
+			case <-r.Context().Done():
+			}
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+	defer close(never)
+	type answer struct {
+		n  int
+		ok bool
+	}
+	got := make(chan answer, 1)
+	go func() {
+		n, ok := ProbeServedWindow(context.Background(), srv.URL, "agent-pool")
+		got <- answer{n, ok}
+	}()
+	select {
+	case a := <-got:
+		if a.ok {
+			t.Fatalf("probe = (%d,true) against a seat that never loaded, want (0,false)", a.n)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the cold-start wait is unbounded: the probe was still waiting after 5 s with coldStartWait 200 ms")
 	}
 }

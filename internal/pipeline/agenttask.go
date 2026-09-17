@@ -1309,6 +1309,12 @@ func cordonWait(since time.Time) time.Duration {
 // agent_run door), so every door holds at the cordon for the same window.
 func AdmissionBudget(sec int) time.Duration { return admissionBudget(sec) }
 
+// WarmSeat is warmSeat for the other run launchers (the MCP agent_run door), so
+// no door loads a cold seat inside its wall or probes its window before it is up.
+func WarmSeat(ctx context.Context, endpoint, seat string, budget time.Duration) (time.Duration, string) {
+	return warmSeat(ctx, endpoint, seat, budget)
+}
+
 // warmSeat loads an ABSENT seat outside the wall (D-64). One GET through
 // llama-swap's per-model passthrough (`/upstream/<seat>/v1/models`, the same
 // route ProbeServedWindow uses) makes llama-swap swap the seat in and answers
