@@ -43,6 +43,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/judge"
 	"github.com/dmmdea/offload-harness/internal/knn"
 	"github.com/dmmdea/offload-harness/internal/ledger"
+	"github.com/dmmdea/offload-harness/internal/pairworkloads"
 	"github.com/dmmdea/offload-harness/internal/llamaclient"
 	"github.com/dmmdea/offload-harness/internal/mcpserver"
 	"github.com/dmmdea/offload-harness/internal/mediacap"
@@ -394,6 +395,10 @@ func openPipeline(cfg config.Config) (*pipeline.Pipeline, func(), error) {
 		fmt.Fprintln(os.Stderr, "note: ledger unavailable (held by the MCP server?); continuing without ledger")
 		led = nil
 	}
+	// Every non-delegation tool row becomes one card in NVIDIA PAIR's Jobs
+	// list (docs/systems/pair-workloads.md); inert unless
+	// pair_workloads_enabled and PAIR is installed on this box.
+	pairworkloads.New(pairworkloads.FromConfig(cfg)).AttachLedger(led)
 	return pipeline.New(cfg, client, ca, led), func() {
 		if ca != nil {
 			ca.Close()

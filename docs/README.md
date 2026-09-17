@@ -39,6 +39,9 @@ where the code lives.
 - [systems/opencode-integration.md](systems/opencode-integration.md) — full harness support inside
   opencode: MCP registration, rules parity, the `opencode-local-offload` plugin (plan-time
   protocol, read-only task reroute, nudges, instrument)
+- [systems/pair-workloads.md](systems/pair-workloads.md) — harness jobs in NVIDIA Personal AI
+  Router's Jobs list: the workload frame contract, the two emit sources (delegate runner, ledger
+  observer), the `pair_workloads_*` keys, and the patched PAIR worker the ingress needs
 
 ## Hardware tiers — what YOUR machine gets
 

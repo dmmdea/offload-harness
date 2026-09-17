@@ -195,6 +195,18 @@ type Ledger struct {
 	mu   sync.Mutex
 	f    *os.File
 	path string
+	// observer, when set, sees every entry AFTER it is durably written. It
+	// runs on the recording goroutine and must not block: the one consumer
+	// (internal/pairworkloads) hands the entry to a background sender.
+	observer func(Entry)
+}
+
+// Observe registers fn to be called with every entry Record writes, after
+// the write and its fsync succeed. One observer; a later call replaces it.
+func (l *Ledger) Observe(fn func(Entry)) {
+	l.mu.Lock()
+	l.observer = fn
+	l.mu.Unlock()
 }
 
 // Open opens (creating if needed) the JSONL ledger for appending. It does NOT
@@ -234,13 +246,21 @@ func (l *Ledger) Record(e Entry) error {
 	}
 	val = append(val, '\n')
 	l.mu.Lock()
-	defer l.mu.Unlock()
+	obs := l.observer
 	if _, err = l.f.Write(val); err != nil {
+		l.mu.Unlock()
 		return err
 	}
 	// fsync each entry so a crash can't lose recorded savings — sub-ms on NVMe,
 	// negligible against multi-second model inference on the call path.
-	return l.f.Sync()
+	err = l.f.Sync()
+	l.mu.Unlock()
+	if err == nil && obs != nil {
+		// Outside the lock: an observer that recorded (or read) the ledger
+		// re-entrantly would otherwise deadlock.
+		obs(e)
+	}
+	return err
 }
 
 // labelMu serializes sidecar appends across concurrent in-process callers (the

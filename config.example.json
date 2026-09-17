@@ -24,6 +24,8 @@
   "agent_sampling": null,
   "agent_sampling_final": null,
   "agent_allow_write": false,
+  "pair_workloads_enabled": false,
+  "pair_workloads_endpoint": "http://127.0.0.1:14324/v1/workloads/events",
   "tier_profile": "",
   "tiers": null,
   "layers": null,
