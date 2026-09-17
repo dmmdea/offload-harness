@@ -1,11 +1,29 @@
 package delegate
 
 import (
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/ledger"
 	"github.com/dmmdea/offload-harness/internal/pairworkloads"
 )
+
+// pairNodeName is the name a remote placement is reported under BEFORE the
+// node has answered: the host of its dispatch URL (the tailnet name the fleet
+// config lists, which is the hostname PAIR's members.json carries), lowercased
+// and without the port. The fleet node id (`aorus-ampere8`-style) is not a
+// PAIR member name and resolved to nothing, which is why 0.126.0's queued and
+// running frames showed the delegator as the running node until the terminal
+// frame, built from the node's reported name, corrected it. fallback is used
+// when base has no usable host.
+func pairNodeName(base, fallback string) string {
+	u, err := url.Parse(strings.TrimSpace(base))
+	if err == nil && u.Hostname() != "" {
+		return strings.ToLower(u.Hostname())
+	}
+	return fallback
+}
 
 // PAIR workload frames for delegations (docs/systems/pair-workloads.md).
 //

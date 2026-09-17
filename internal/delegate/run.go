@@ -2736,7 +2736,7 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 	if intendedSeat == "" {
 		intendedSeat = view.AgentSeat
 	}
-	r.pairInflight(&pr, jobID, view.NodeID, intendedSeat, "queued")
+	r.pairInflight(&pr, jobID, pairNodeName(base, view.NodeID), intendedSeat, "queued")
 	if refused, status, err := r.dispatch(ctx, base, jobID, payload); err != nil {
 		pr.Err = err.Error()
 		// Carry the class so runOne can decide whether ANOTHER node is worth
@@ -2749,7 +2749,7 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 	// so persist the intent before any polling (Option A, intent.go).
 	r.intent.dispatched(jobID, base, contract.Goal)
 	pr.intentRecorded = true
-	r.pairInflight(&pr, jobID, view.NodeID, intendedSeat, "running")
+	r.pairInflight(&pr, jobID, pairNodeName(base, view.NodeID), intendedSeat, "running")
 
 	timeoutSec := executionBudgetSec(contract)
 	// pollBudget is the budget for WORK. Before the node gained a real queue

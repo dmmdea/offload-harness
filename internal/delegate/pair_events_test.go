@@ -43,6 +43,25 @@ func pairInfo(f map[string]any) map[string]any {
 // waitABit is the poll interval for the asynchronous emitter in these tests.
 func waitABit() { time.Sleep(50 * time.Millisecond) }
 
+// TestPairNodeNameUsesTheDispatchHost: the in-flight frames of a remote
+// placement must name the node by its dispatch host (the PAIR member name),
+// never by the fleet node id, which PAIR cannot resolve.
+func TestPairNodeNameUsesTheDispatchHost(t *testing.T) {
+	cases := map[[2]string]string{
+		{"http://NODE-B:18811", "node-b-ampere8"}:    "node-b",
+		{"http://node-b:18811/", "node-b-ampere8"}:   "node-b",
+		{"http://192.0.2.7:18811", "node-b-ampere8"}: "192.0.2.7",
+		{"", "node-b-ampere8"}:                       "node-b-ampere8",
+		{"::not a url::", "node-b-ampere8"}:          "node-b-ampere8",
+		{"http://node-b.tail.ts.net:18811", "x"}:     "node-b.tail.ts.net",
+	}
+	for in, want := range cases {
+		if got := pairNodeName(in[0], in[1]); got != want {
+			t.Errorf("pairNodeName(%q, %q) = %q, want %q", in[0], in[1], got, want)
+		}
+	}
+}
+
 // pairAppDir writes the two PAIR identity files the emitter reads and points
 // the emitter at them for the test's lifetime.
 func pairAppDir(t *testing.T) {
