@@ -1885,7 +1885,12 @@ func runMCP(args []string) error {
 	fs := flag.NewFlagSet("mcp", flag.ExitOnError)
 	fs.String("config", "", "config file path")
 	_ = fs.Parse(args)
-	cfg := loadCfg(fs)
+	// The MCP server deliberately STARTS on a config that failed validation. A
+	// server that exits removes every offload_* tool from every session with no
+	// message on any surface the operator reads — this repo has been bitten by
+	// that shape before. It starts and says so instead: offload_status carries
+	// config_error and every other tool defers by name (mcpserver.WithConfigError).
+	cfg, src := loadCfgWithSource(fs)
 	p, cleanup, err := openPipeline(cfg)
 	if err != nil {
 		return err
@@ -1929,7 +1934,7 @@ func runMCP(args []string) error {
 		}
 	}()
 
-	err = mcpserver.New(p).Run(ctx, version)
+	err = mcpserver.New(p).WithConfigError(src.LoadErr).Run(ctx, version)
 	stopSignals()
 	<-flushDone
 	// A cancelled context IS the clean shutdown here, not a failure. Returning it
@@ -2248,7 +2253,12 @@ func runFleetServe(args []string) error {
 	trusted := fs.Bool("listen-trusted-network", false, "allow --listen to bind beyond loopback (the Tailscale address). The fleet endpoints are UNAUTHENTICATED; set this ONLY on a network you fully trust — and NEVER bind 0.0.0.0.")
 	nodeIDFlag := fs.String("node-id", "", "node id advertised in /fleet/health (default: config fleet_node_id, else the hostname)")
 	_ = fs.Parse(args)
-	cfg := loadCfg(fs)
+	cfg, src := loadCfgWithSource(fs)
+	// Before ANY state is touched: a node that cannot prove its own config must
+	// not join the fleet (see fleetServeConfigGate).
+	if err := fleetServeConfigGate(src); err != nil {
+		return err
+	}
 
 	// Sweep orphaned pipeline-job dirs BEFORE anything else starts: jobs are
 	// in-memory, so any pipeline-jobs/<id> dir still on disk at this instant —
@@ -2618,10 +2628,61 @@ func runDoctor(args []string) error {
 	_ = fs.Parse(args)
 	cfg, src := loadCfgWithSource(fs)
 	// Disclose the config source FIRST — and truthfully: SourceLine never credits a file
-	// that was not actually read (not-found and failed-to-load both disclose defaults).
-	// Every binding verdict below is only as good as the file that produced it.
-	fmt.Fprintln(os.Stdout, config.SourceLine(src))
-	return doctorRun(cfg, mediacap.Routes(cfg), os.Stdout)
+	// that was not actually read. Every binding verdict below is only as good as the file
+	// that produced it, so a file that FAILED validation is named here, verbatim, before
+	// anything else is printed.
+	tainted := doctorConfigRow(src, os.Stdout)
+	err := doctorRun(cfg, mediacap.Routes(cfg), os.Stdout)
+	if err != nil {
+		return err
+	}
+	if tainted {
+		return fmt.Errorf("config at %s failed validation: %w", src.Path, src.LoadErr)
+	}
+	return nil
+}
+
+// doctorConfigRow prints doctor's config-source disclosure and, when the file
+// failed validation, the loader's refusal text VERBATIM as a FAIL row. It
+// reports whether doctor must exit non-zero because of it.
+//
+// The refusal text is the only thing that names the KEY and the VALUE. doctor
+// kept the Source and printed only the generic one-liner, so on a config the
+// loader had refused it printed a vague "failed to load", ran every other check
+// against the file's surviving settings, and exited 0 — the one verb an operator
+// runs to find out what is wrong stayed silent about the thing that was wrong.
+//
+// The row goes FIRST and the rest of doctor still runs: the media, cache-server
+// and config-findings sections are pure config and stay useful, and an operator
+// fixing one key wants to see the others in the same pass.
+func doctorConfigRow(src config.Source, w io.Writer) bool {
+	fmt.Fprintln(w, config.SourceLine(src))
+	if src.LoadErr == nil {
+		return false
+	}
+	fmt.Fprintf(w, "config:     FAIL  FAILED validation — %v\n", src.LoadErr)
+	return true
+}
+
+// fleetServeConfigGate refuses to start a fleet NODE on a config that failed
+// validation.
+//
+// Every other entry point degrades and warns, which is right for them: a
+// one-shot CLI verb that half-works still answers, and an MCP server that exits
+// takes every tool out of every session with no message anywhere. A fleet node
+// is the exception. It ADVERTISES capability to other boxes and then accepts
+// their dispatches, so a node whose endpoint dials a dead port does not fail
+// alone — it turns every delegator's placement decision into a wasted wall,
+// which is the cost this whole change exists to remove. A node that cannot
+// prove its own config must not join the fleet.
+//
+// Only a validation FAILURE refuses. A missing file, or no file at all, is a
+// legitimate fresh box; that path already warns loudly.
+func fleetServeConfigGate(src config.Source) error {
+	if src.LoadErr == nil {
+		return nil
+	}
+	return fmt.Errorf("refusing to serve: config at %s failed validation: %w", src.Path, src.LoadErr)
 }
 
 // aliasCheck pairs a config key with its configured llama-swap model alias.
@@ -2663,6 +2724,10 @@ func doctorRun(cfg config.Config, routes []mediacap.Route, w io.Writer) error {
 	// Same reasoning, same place in the order: the cache-server verdicts are pure
 	// config too, so a serving layer that happens to be down must never hide them.
 	unbound := writeCacheServerSection(w, cfg)
+	// Third in the same band, for the third time the same reason: a configuration
+	// finding is pure config, so an endpoint that happens to be down must not hide
+	// the value that EXPLAINS what the operator is looking at.
+	findings := writeConfigFindingsSection(w, cfg)
 	client := llamaclient.New(cfg.Endpoint, cfg.CompletionPath, cfg.Model, 5*time.Second)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -2697,7 +2762,40 @@ func doctorRun(cfg config.Config, routes []mediacap.Route, w io.Writer) error {
 	if unbound > 0 {
 		return fmt.Errorf("%d vLLM seat(s) with no kv_cache_server binding", unbound)
 	}
+	if findings > 0 {
+		return fmt.Errorf("%d configuration finding(s) — see the config findings section above", findings)
+	}
 	return nil
+}
+
+// writeConfigFindingsSection prints ONE LINE PER non-fatal configuration finding
+// (config.Config.Findings) and returns how many — the number that makes doctor
+// exit non-zero.
+//
+// These are values that LOAD and then cannot do what they say: a fleet remote on
+// a port no node listens on, a lane base carrying the /v1 segment the client
+// appends itself, a media-lane GPU wait sitting at ten minutes against the 90 s
+// its own key documents (register C-33), a retired key the file still carries.
+// Every one of them was previously invisible: the retired-key note was a single
+// stderr line at startup that scrolls past every command, and the rest were only
+// ever observable as a dial timeout or a ten-minute block on a media call.
+//
+// Findings are reported on the config THIS PROCESS loaded, not a re-read of the
+// file, so the rows explain the behaviour the operator is actually seeing — the
+// `config:` line above says which file that was.
+//
+// A clean config prints nothing at all, header included: a green doctor stays as
+// short as it is today.
+func writeConfigFindingsSection(w io.Writer, cfg config.Config) int {
+	findings := cfg.Findings()
+	if len(findings) == 0 {
+		return 0
+	}
+	fmt.Fprintln(w, "config findings (values in the loaded config that cannot do what they say):")
+	for _, f := range findings {
+		fmt.Fprintf(w, "  FAIL  %s\n", f)
+	}
+	return len(findings)
 }
 
 // writeCacheServerSection prints ONE LINE PER vLLM SEAT of this box and returns how

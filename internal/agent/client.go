@@ -12,6 +12,7 @@ import (
 
 	"github.com/dmmdea/offload-harness/internal/modelaffinity"
 	"github.com/dmmdea/offload-harness/internal/seatwait"
+	"github.com/dmmdea/offload-harness/internal/swapclient"
 )
 
 // LLMClient is the concrete OpenAI-compatible tool-calling Client. It targets
@@ -36,11 +37,21 @@ type StatusError struct {
 
 func (e *StatusError) Error() string { return fmt.Sprintf("chat %d: %s", e.Code, e.Body) }
 
-// NewLLMClient builds a client. base is the server root (no /v1); apiKey "" =>
-// no Authorization header (local).
+// NewLLMClient builds a client. base is the server ROOT, with or without the
+// trailing /v1 — swapclient.BaseURL is the one normalisation rule in the
+// harness and this client goes through it like every other reader of an
+// `endpoint` does. apiKey "" => no Authorization header (local).
+//
+// Register S-37: it used to trim only a trailing slash and then append
+// "/v1/chat/completions", so a base written as "http://x/v1" — the shape
+// `nim_endpoint` documents, and the shape an operator copies off a vLLM seat's
+// own docs — dialled "/v1/v1/chat/completions". Normalising here rather than at
+// the ~60 construction sites means no caller can reintroduce it; it also keys
+// the modelaffinity ticket on the normalised base, so two clients spelling one
+// endpoint two ways contend on the same gate instead of two.
 func NewLLMClient(base, model, apiKey string, timeout time.Duration) *LLMClient {
 	return &LLMClient{
-		base:   strings.TrimRight(base, "/"),
+		base:   swapclient.BaseURL(base),
 		model:  model,
 		apiKey: apiKey,
 		http:   &http.Client{Timeout: timeout},
