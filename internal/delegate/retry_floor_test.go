@@ -83,14 +83,20 @@ func TestRunRetryFloorComesFromConfig(t *testing.T) {
 	}
 }
 
-// TestRunRetryNeverLandsOnASeatAlreadyRunningAnotherJob: the retry node
-// publishes jobs_running 1 — its seat is generating for someone else — so the
-// retry is skipped with a note instead of halving both runs' tok/s.
+// TestRunRetryNeverLandsOnASeatAlreadyRunningAnotherJob: the retry node has
+// every worker busy — the retry would queue behind them — so it is skipped with
+// a note instead of halving both runs' tok/s.
+//
+// The fixture is AT ITS CEILING (4 of 4), not merely non-idle. The predicate
+// used to be jobs_running > 0, which refused a cross-seat retry on any
+// node running a single job however many workers it had free; the threshold is
+// now the node's own ceiling (provablyStartsNow) and
+// TestRetrySeatBusyReadsTheNodeCeiling pins the other side of it.
 func TestRunRetryNeverLandsOnASeatAlreadyRunningAnotherJob(t *testing.T) {
 	compressPolls(t, 10*time.Millisecond, 2*time.Second)
 	node, url := eligibleNode(t, "node-a", "qube from A")
-	node.jobsRunning = 1
-	node.maxConcurrentJobs = 4 // room by the capacity rule — the SEAT is what is busy
+	node.jobsRunning, node.queueDepth = 4, 4
+	node.maxConcurrentJobs = 4 // every worker busy: the retry can only queue
 	var localCalls atomic.Int64
 	results, sum, err := Run(context.Background(), testCfg(t), failingLocal(&localCalls), contracts(1), "spread", []string{url})
 	if err != nil {
@@ -100,7 +106,7 @@ func TestRunRetryNeverLandsOnASeatAlreadyRunningAnotherJob(t *testing.T) {
 	if node.dispatches.Load() != 0 || sum.Retried != 0 || pr.RetriedOn != "" {
 		t.Fatalf("retry must not land on a running seat: dispatches=%d retried=%d retried_on=%q", node.dispatches.Load(), sum.Retried, pr.RetriedOn)
 	}
-	if !strings.Contains(pr.RetryNote, "already running another job") || !strings.Contains(pr.RetryNote, "jobs_running 1") {
+	if !strings.Contains(pr.RetryNote, "already running another job") || !strings.Contains(pr.RetryNote, "jobs_running 4") {
 		t.Fatalf("retry_note = %q, want the busy seat named", pr.RetryNote)
 	}
 	// LIVENESS (review finding, 0.115.9): route=spread probes the fleet ONCE
@@ -109,7 +115,13 @@ func TestRunRetryNeverLandsOnASeatAlreadyRunningAnotherJob(t *testing.T) {
 	// local first attempt runs — a cached read would let the retry land.
 	live, liveURL := eligibleNode(t, "node-live", "qube from live")
 	var busyNow atomic.Int64
+	live.maxConcurrentJobs = 1
 	live.jobsRunningFn = func() int { return int(busyNow.Load()) }
+	// queue_depth moves WITH jobs_running, the way a node publishes it (its
+	// non-terminal job count). The busy check reads the node's ceiling, and a
+	// fixture that pinned queue_depth at 0 while jobs_running moved would
+	// advertise a shape no node emits — and read as idle whatever it said.
+	live.queueDepthFn = func() int { return int(busyNow.Load()) }
 	flipThenFail := func(ctx context.Context, c core.AgentContract, opts LocalOptions) (core.AgentWireResult, error) {
 		busyNow.Store(1) // a sibling job landed on node-live after the fleet probe
 		return failingLocal(&localCalls)(ctx, c, opts)
