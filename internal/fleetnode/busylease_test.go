@@ -137,12 +137,12 @@ func TestBusyLeaseThresholdIsConfigurable(t *testing.T) {
 // could publish score 1.0 and idle_slot true in one payload.
 func TestSaturationScoreUsesCappedRunning(t *testing.T) {
 	// 3 running, of which 1 is capped, cap = 1.
-	sat := saturationOf(0 /*queued*/, 3 /*running*/, 1 /*runningCapped*/, 1 /*maxConcurrent*/, 0, false, false)
+	sat := saturationOf(0 /*queued*/, 3 /*running*/, 1 /*runningCapped*/, 0 /*admitting*/, 1 /*maxConcurrent*/, 0, false, false)
 	if sat.Score != 1 {
 		t.Fatalf("score = %v want 1 (1 capped job against a cap of 1)", sat.Score)
 	}
 	// 3 running, NONE capped: the cap is untouched, so the node is not saturated.
-	sat = saturationOf(0, 3, 0, 1, 0, false, true)
+	sat = saturationOf(0, 3, 0, 0, 1, 0, false, true)
 	if sat.Score != 0 {
 		t.Fatalf("score = %v want 0 — three uncapped jobs do not fill a concurrency cap they are exempt from", sat.Score)
 	}
@@ -150,7 +150,7 @@ func TestSaturationScoreUsesCappedRunning(t *testing.T) {
 		t.Fatal("idle_slot must survive: the capped slot really is free")
 	}
 	// The depth term still counts EVERY admitted job.
-	sat = saturationOf(1, 3, 0, 8, 4, false, true)
+	sat = saturationOf(1, 3, 0, 0, 8, 4, false, true)
 	if sat.Score != 1 || !sat.High {
 		t.Fatalf("depth term = %+v: max_queue_depth bounds all admitted jobs, capped or not", sat)
 	}

@@ -75,6 +75,27 @@ const (
 	DirName = "activity"
 )
 
+// PhaseAdmission … PhaseRepack are Run.Phase's values. They are a shared
+// vocabulary, not one package's private strings: internal/pipeline WRITES the
+// phase, this package HEALS the pre-run ones on the first step, and
+// internal/fleetnode COUNTS the admission ones for health's `jobs_admitting`.
+// Three copies of a bare literal across three packages is a rename that silently
+// zeroes a published counter, so the name lives here, beside the field.
+const (
+	// PhaseAdmission is a run waiting for the endpoint to settle: cordon, swap
+	// pre-flight, warm-up and coherence probe, before a single token.
+	PhaseAdmission = "admission"
+	// PhaseColdLoad is the seat loading for this run; PhaseCoherenceProbe is
+	// the one short probe that follows it.
+	PhaseColdLoad       = "cold-load"
+	PhaseCoherenceProbe = "coherence-probe"
+	// PhaseRunning is the planner loop; PhaseFinal the forced final step;
+	// PhaseRepack the structured re-pack.
+	PhaseRunning = "running"
+	PhaseFinal   = "final"
+	PhaseRepack  = "repack"
+)
+
 // Run is one registered agent run on a seat: the harness's unit of work.
 type Run struct {
 	ID          string `json:"id"`
@@ -88,9 +109,11 @@ type Run struct {
 	Origin      string `json:"origin,omitempty"` // who asked: node id, job id, host
 	Goal        string `json:"goal,omitempty"`   // the first goalClip characters
 	StartedAtMs int64  `json:"started_at_ms"`
-	// Phase is where the run is: "admission" (waiting for the endpoint to
-	// settle), "cold-load" (the seat is loading for it), "running" (planner
-	// steps), "final" (the forced final step), "repack" (the structured re-pack).
+	// Phase is where the run is, spelled by the Phase* constants above:
+	// "admission" (waiting for the endpoint to settle), "cold-load" (the seat is
+	// loading for it), "running" (planner steps), "final" (the forced final
+	// step), "repack" (the structured re-pack). Use the constants — health's
+	// `jobs_admitting` counts one of these values across a package boundary.
 	Phase       string `json:"phase"`
 	Step        int    `json:"step,omitempty"`
 	MaxSteps    int    `json:"max_steps,omitempty"`
@@ -265,8 +288,8 @@ func (h *Handle) OnStep(step, tokensOut int) {
 		// resets it explicitly, and a run advertised as probing for its whole
 		// life misreads a multi-minute run in `gpu status` / offload_status
 		// (reviewer finding, D-118).
-		if r.Phase == "admission" || r.Phase == "cold-load" || r.Phase == "coherence-probe" {
-			r.Phase = "running"
+		if r.Phase == PhaseAdmission || r.Phase == PhaseColdLoad || r.Phase == PhaseCoherenceProbe {
+			r.Phase = PhaseRunning
 		}
 	})
 }

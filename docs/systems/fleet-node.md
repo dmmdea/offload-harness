@@ -41,7 +41,7 @@ stops accepting work while remaining readable.
 |---|---|
 | `GET /fleet/health` | Node identity, GPU vendor and architecture, live total and free VRAM, supported task types, loadable model families, measured footprints, queue depth, the node's job capacity (running / queued / both limits), GPU utilization, host CPU/RAM, and the agent lane's served-models roster (0.113.0) |
 | `POST /fleet/dispatch` | Submit a job; returns `202` with an ack |
-| `GET /fleet/jobs/{id}` | Poll one job's state and result |
+| `GET /fleet/jobs/{id}` | Poll one job's state and result; `?wait=<seconds>` (≤ 12) long-polls until the job is terminal |
 | `GET /fleet/jobs` | Cluster jobs feed: recent jobs across this node, newest first, payload-free (0.113.0) |
 
 The dispatch envelope is parsed **strictly** — unknown fields are rejected, and the body is capped.
@@ -442,6 +442,73 @@ busier than it is. Each sleep is now scaled by a uniform factor in `[0.8, 1.2]`;
 unchanged, and the jitter is CLAMPED so no sleep can run past the deadline it lives under (the wait's TTL,
 the poll deadline). The cooldown is jittered once when the refusal is recorded, not re-rolled per check, so a
 node does not flicker in and out of the candidate list.
+
+## What the node says about itself while work is in flight (unreleased)
+
+Three facts the node held and never published, and one it published wrongly. Every input here is a
+counter this node already keeps or a number it already reads — nothing new probes a seat, and nothing
+new is sampled (register C-05 stands: probing an unloaded seat through llama-swap LOADS it).
+
+| Health field | Type | Meaning |
+|---|---|---|
+| `jobs_admitting` | int, omitted when 0 | The subset of `jobs_running` whose worker has **not started generating**: it is still in the run's admission phase — cordon → swap pre-flight → warm → coherence probe — which the node budgets up to 300 s for. Counted from this process's own `gpuactivity` records with `phase: "admission"` (ADR 0041), never from the job store, which knows a worker took the job but not what that worker is waiting for. The registry is opened at most once per 2 s and **retried** — a briefly unresolvable state root does not silence the field for the life of the process — and a registry that cannot be opened or listed is logged once, because `0` is a legitimate value and silence would make the two indistinguishable. |
+| `seat_loaded` | bool, omitted when unread | llama-swap's `/running` says the agent seat is loaded. |
+| `seat_starting` | bool, omitted when unread | …and is still LOADING (llama-swap holds `/upstream/<seat>/…` for the whole load — 4m08s on the 27B TP2 seat, register D-92), so "loaded" is not yet "ready". |
+| `lease_exclusive` | bool, omitted when false | The held lease FENCES the cards: no model may be loaded onto them for its duration. |
+| `lease_draining` | bool, omitted when false | The held lease is still draining the seat. |
+| `recent_agent_wall_sec` | float, omitted when none | Median wall of the last (up to) 8 agent jobs to FINISH here — the completion signal a node with no `seat_rate` sample has no other way to publish. The median, not the mean, so one 900-second outlier does not redefine the node. |
+
+All six are additive and `omitempty`: a node with the agent lane off, no lease and no admission holds
+emits a byte-identical payload, and a delegator that has never heard of them decodes exactly what it
+decoded before (pinned in `nodetruth_test.go` and `healthwire_compat_test.go`).
+
+**`saturation.score` now excludes admitting jobs from its concurrency numerator**, and only from
+there. A job whose worker is cordon-waiting or warming holds a capped slot while the card is idle —
+measured: 10 of 47 lease-timeout rows happened on a box with zero agent jobs in flight — so counting
+it as utilization told every delegator to route away from an idle node. `saturation.high`,
+`saturation.idle_slot` and the DEPTH term are deliberately unchanged: the slot really is taken, a new
+dispatch really would queue behind it, and `max_queue_depth` bounds every admitted job whatever its
+phase.
+
+**Seat state is read from `/running` only**, through `internal/seatload`'s alias-aware reader
+(`seatload.Running`): `/running` lists CANONICAL ids while the harness binds seats by ALIAS, so a
+bare-name match reads a loaded seat as absent — the silent 0.113.16–19 drain defect. It rides the
+residency refresh's background single-flight (one cycle per 30 s TTL, never one per request).
+
+**Two different failures publish NOTHING, and both are logged.** A `/running` read that ERRORS leaves
+both fields absent. So does an AMBIGUOUS one: when the roster GET fails, `seatload` falls back to
+matching `/running` by the bare name (better than a refusal), and that fallback cannot see an
+alias-bound seat listed under its canonical id — so `Loaded:false` *while `/running` lists models*
+means "could not tell", not "idle". Publishing it as `seat_loaded:false` would assert a loaded seat is
+idle exactly when the box is busy enough to time out a roster GET.
+
+The predicate is `seatload`'s `Ambiguous` (a failed roster **and** a non-empty `/running`), which is
+exactly what `gpu_drain` (`!rd.Loaded && rd.Ambiguous`) and `internal/placement/live.go`
+(`err == nil && !rd.Ambiguous`) key on — and it is deliberately narrower than "the roster failed". A
+failed roster over an **empty** `/running` is knowable: nothing is loaded on the box at all, so the
+seat is not loaded either and no alias resolution is needed to say so, and health publishes
+`seat_loaded:false`. Only the unknowable case is withheld: absent ≠ idle, the same rule the VRAM
+snapshot and the reclaim verdict follow, with the reason on the node's log so an operator is not left
+guessing at two missing keys.
+
+**`GET /fleet/jobs/{id}?wait=<seconds>` is a completion event.** An already-terminal job answers at
+once; anything else blocks on the job store's terminal broadcast — which the store has fired all
+along — until the job finishes or the wait elapses, then answers with the job's live state. The wait
+is capped at `MaxJobWaitSec` = 12 s and **must stay below the delegator's `pollRequestTimeout`**
+(15 s, `internal/delegate/run.go`), or every long poll would be cancelled client-side a moment before
+the node answered; the pairing is pinned by a test that reads the delegator's own source. Absent the
+parameter the route is byte-identical, and the 3 s poll remains the fallback. Measured motivation:
+236 queue-deadline rows spent exactly `101 poll(s)` = 300 s of pure polling.
+
+**The blanket `WriteTimeout` (30 s) is a floor, not a ceiling.** Go arms it at header-read for every
+handler alike, so it silently truncated the chat lane, whose own budget is `ChatProxyTimeout` = 10
+minutes: a forwarded cascade call that generated past 30 s was cut mid-write and read to the caller
+as a dead node. The blanket stays — it is what keeps every other route bounded — and the two handlers
+that legitimately outlive it extend their OWN deadline per request through
+`http.NewResponseController(w).SetWriteDeadline`: the chat lane to `ChatProxyTimeout` + 30 s of
+copy-back slack, the long poll to its wait + 2 s. A `ResponseWriter` that cannot carry a deadline
+(a recorder, a wrapper that does not unwrap) is not a failure — the handler just runs under the
+blanket, as before.
 
 ## The acceptance gate (`local-offload acceptance`)
 

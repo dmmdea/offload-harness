@@ -88,10 +88,77 @@ type Reading struct {
 	Starting bool
 }
 
+// Running answers the FIRST half of Inflight and stops there: what llama-swap's
+// /running says about the seat (Loaded, Starting, Canonical, and the roster's
+// own failure), with no /upstream read at all.
+//
+// It exists because a caller can need the seat's LOAD STATE without being
+// allowed to touch the seat: `/upstream/<seat>/…` starts an unloaded model on
+// demand (register C-05 — 54 measured status probes each blocked ~186 s
+// because asking whether the seat was up STARTED it), so anything on a health
+// path may read /running and nothing else. Inflight is this call plus the
+// gauge read that only a LOADED seat can answer.
+//
+// Alias-awareness is the whole reason this is not two lines at the call site:
+// /running lists CANONICAL ids while the harness binds seats by ALIAS, so a
+// bare-name match reads a loaded seat as absent (the silent 0.113.16-19 drain
+// defect). An unreadable roster falls back to the bare name and says so in
+// RosterErr — never a refusal.
+func Running(ctx context.Context, client *http.Client, endpoint, seat string) (Reading, error) {
+	rd, _, err := running(ctx, client, endpoint, seat)
+	return rd, err
+}
+
 // Inflight reads the seat named `seat` (id or alias) behind the llama-swap at
 // endpoint. A metrics fetch that fails on a LOADED seat is an error — "could
 // not read" must never pass as "idle".
 func Inflight(ctx context.Context, client *http.Client, endpoint, seat string) (Reading, error) {
+	base := strings.TrimRight(endpoint, "/")
+	rd, done, err := running(ctx, client, endpoint, seat)
+	if err != nil || done {
+		return rd, err
+	}
+	// The upstream path is addressed by the name the caller bound (llama-swap
+	// resolves aliases there); the canonical id would work too, but the bound
+	// name is what every other harness call uses, so a proxy rule keyed on it
+	// behaves the same here.
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/upstream/"+url.PathEscape(seat)+"/metrics", nil)
+	if err != nil {
+		return rd, err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return rd, fmt.Errorf("seat metrics: %w", err)
+	}
+	defer resp.Body.Close()
+	switch resp.StatusCode {
+	case http.StatusOK:
+		rd.Inflight, rd.Source = ParseInflight(resp.Body), "metrics"
+		return rd, nil
+	case http.StatusNotImplemented, http.StatusNotFound:
+		// llama-server answers 501 (older builds 404) when it runs WITHOUT
+		// --metrics — every llama.cpp seat on this fleet does (2026-09-06: the
+		// Lenovo's drain timed out on a warm seat, "seat metrics: status 501").
+		// Its /slots endpoint is on by default and reports per-slot
+		// is_processing, which is the in-flight count for a slot-based server.
+		// Only these two statuses fall back: a 500 or a timeout is "could not
+		// read" and must never pass as idle.
+		n, serr := slotsInflight(ctx, client, base, seat, resp.StatusCode)
+		if serr != nil {
+			return rd, serr
+		}
+		rd.Inflight, rd.Source = n, "slots"
+		return rd, nil
+	default:
+		return rd, fmt.Errorf("seat metrics: status %d", resp.StatusCode)
+	}
+}
+
+// running is the shared /running read behind Running and Inflight. `done`
+// reports that the reading is FINAL — the seat is not listed, or it is
+// starting/stopping — so an upstream gauge read would be either meaningless or
+// a request llama-swap holds until the load completes.
+func running(ctx context.Context, client *http.Client, endpoint, seat string) (Reading, bool, error) {
 	base := strings.TrimRight(endpoint, "/")
 	rd := Reading{}
 	names := []string{seat}
@@ -108,24 +175,24 @@ func Inflight(ctx context.Context, client *http.Client, endpoint, seat string) (
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/running", nil)
 	if err != nil {
-		return rd, err
+		return rd, true, err
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return rd, fmt.Errorf("llama-swap /running: %w", err)
+		return rd, true, fmt.Errorf("llama-swap /running: %w", err)
 	}
-	var running struct {
+	var listed struct {
 		Running []struct {
 			Model string `json:"model"`
 			State string `json:"state"`
 		} `json:"running"`
 	}
-	derr := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&running)
+	derr := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&listed)
 	resp.Body.Close()
 	if derr != nil {
-		return rd, fmt.Errorf("llama-swap /running: %w", derr)
+		return rd, true, fmt.Errorf("llama-swap /running: %w", derr)
 	}
-	for _, m := range running.Running {
+	for _, m := range listed.Running {
 		if m.State == "stopped" || m.State == "shutdown" {
 			continue
 		}
@@ -154,45 +221,9 @@ func Inflight(ctx context.Context, client *http.Client, endpoint, seat string) (
 	}
 	if !rd.Loaded {
 		rd.Ambiguous = rd.RosterErr != nil && rd.RunningOthers > 0
-		return rd, nil
+		return rd, true, nil
 	}
-	if rd.Starting {
-		return rd, nil
-	}
-	// The upstream path is addressed by the name the caller bound (llama-swap
-	// resolves aliases there); the canonical id would work too, but the bound
-	// name is what every other harness call uses, so a proxy rule keyed on it
-	// behaves the same here.
-	req, err = http.NewRequestWithContext(ctx, http.MethodGet, base+"/upstream/"+url.PathEscape(seat)+"/metrics", nil)
-	if err != nil {
-		return rd, err
-	}
-	resp, err = client.Do(req)
-	if err != nil {
-		return rd, fmt.Errorf("seat metrics: %w", err)
-	}
-	defer resp.Body.Close()
-	switch resp.StatusCode {
-	case http.StatusOK:
-		rd.Inflight, rd.Source = ParseInflight(resp.Body), "metrics"
-		return rd, nil
-	case http.StatusNotImplemented, http.StatusNotFound:
-		// llama-server answers 501 (older builds 404) when it runs WITHOUT
-		// --metrics — every llama.cpp seat on this fleet does (2026-09-06: the
-		// Lenovo's drain timed out on a warm seat, "seat metrics: status 501").
-		// Its /slots endpoint is on by default and reports per-slot
-		// is_processing, which is the in-flight count for a slot-based server.
-		// Only these two statuses fall back: a 500 or a timeout is "could not
-		// read" and must never pass as idle.
-		n, serr := slotsInflight(ctx, client, base, seat, resp.StatusCode)
-		if serr != nil {
-			return rd, serr
-		}
-		rd.Inflight, rd.Source = n, "slots"
-		return rd, nil
-	default:
-		return rd, fmt.Errorf("seat metrics: status %d", resp.StatusCode)
-	}
+	return rd, rd.Starting, nil
 }
 
 // slotsInflight reads llama-server's GET /slots through llama-swap and counts
