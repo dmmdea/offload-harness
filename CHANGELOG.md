@@ -56,6 +56,14 @@ Versioning: [SemVer](https://semver.org/).
   cannot carry a deadline simply runs under the blanket, as before. `TestServeTimeoutTable` now pins
   both halves: the blanket value AND that exactly those two handlers extend it.
 
+## [0.126.2] - 2026-09-17 - a PAIR card's failure text is one short line
+
+### Changed
+- **The failure text on a PAIR Jobs card is capped to one short line** (`pairworkloads.CardError`, 140
+  characters, whitespace folded, ellipsis). On the first live day a jsonschema re-pack dump or a full
+  acceptance report ran to hundreds of characters per card and turned the Jobs list into a wall of red; the
+  card wants the verdict, the ledger keeps the whole reason.
+
 ## [0.126.1] - 2026-09-17 - a remote delegation's in-flight PAIR frames name the node by its dispatch host
 
 ### Fixed
