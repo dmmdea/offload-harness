@@ -649,7 +649,11 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	// Published here for the run as a whole; the loop recomputes it at the
 	// forced final step, where the tool steps are spent and the live clock is
 	// the honest input.
-	finalBudget, repackBudget := finalBudgetsFor(p.cfg, contract)
+	// The re-pack half of the pair is unused here now: the list-cap gate below
+	// sizes from the fitted final alone, with no re-pack term (register
+	// S-06/W-07) — only finalBudgetsFor's FINAL half still has a reader in
+	// this function.
+	finalBudget, _ := finalBudgetsFor(p.cfg, contract)
 	hasSchema := len(contract.OutputSchema) > 0
 	startFit := seatrate.FitFinalBudget(seatrate.FinalFit{
 		ConfiguredFinal: finalBudget,
@@ -678,10 +682,21 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	// list caps (D-95), gated on the wall still holding one turn at this seat's
 	// rate. No schema, no instruction, no re-issue — and no rate means a 0
 	// floor, which fails open exactly like every other sizing decision here.
+	//
+	// The gate sizes from the FITTED final (startFit.Budget, D-95 above), not
+	// the CONFIGURED one, and carries no re-pack term (register S-06/W-07,
+	// 2026-09-17 diagnosis): the re-issue is ONE turn at whatever budget the
+	// wall fit already narrowed the final answer to, and nothing about it gets
+	// re-packed on top. Gating on MinTurnFor(0, finalBudget, repackBudget,
+	// tokS) — the full CONFIGURED final (up to 8,192) plus a full re-pack term
+	// — asked for roughly double what the re-issue actually costs; below ~9
+	// tok/s that exceeded the 900 s wall cap and the gate could never fire at
+	// all. It was the #1 measured defer fleet-wide (48 rows "re-pack skipped:
+	// the final answer was cut at the completion budget").
 	if hasSchema {
 		built.Loop.WithCutFinalReissue(
 			listCapInstruction(contract.OutputSchema),
-			time.Duration(seatrate.MinTurnFor(0, finalBudget, repackBudget, est.TokS))*time.Second,
+			time.Duration(seatrate.MinTurnFor(0, startFit.Budget, 0, est.TokS))*time.Second,
 		)
 	}
 
