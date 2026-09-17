@@ -70,6 +70,13 @@ func PrepareContractWithCap(spec SubtaskSpec, readRoot string, capBytes int) (co
 	} else if c.MaxSteps > core.AgentMaxStepsCap {
 		c.MaxSteps = core.AgentMaxStepsCap
 	}
+	// The wall (register D-03): a caller who names timeout_sec gets it, clamped;
+	// a caller who names none gets the wire default AND the timeout_auto marker,
+	// so the executing node may size the wall from its seat's measured rate
+	// instead of running a 29 tok/s thinker at a wall sized for a fast seat. The
+	// marker is derived from TimeoutSec alone: a spec carrying timeout_auto next
+	// to a timeout_sec is a contradiction, and the explicit number wins.
+	c.TimeoutAuto = c.TimeoutSec <= 0
 	if c.TimeoutSec <= 0 {
 		c.TimeoutSec = core.AgentTimeoutSecDefault
 	} else if c.TimeoutSec > core.AgentTimeoutSecCap {

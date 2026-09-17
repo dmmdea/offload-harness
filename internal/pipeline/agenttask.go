@@ -234,6 +234,25 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	if timeoutSec <= 0 {
 		timeoutSec = core.AgentTimeoutSecDefault
 	}
+	// Auto wall (register D-03, 0.126.0): a contract whose caller named no
+	// timeout_sec carries the wire default and the timeout_auto marker, and
+	// THIS node — the one that knows its seat's measured rate — sizes the wall
+	// from the same estimate it publishes as wall_estimate_sec, clamped to the
+	// wire bounds, and reports what it ran under as wall_sec. Stamped exactly
+	// once, here: the loop, the estimate and the final-budget fit below all
+	// read the stamped value. A seat with no rate yet runs the default, as
+	// before, and the log says so. Both doors (fleet node and local delegate)
+	// run this function, so neither can drift from the other.
+	rates := p.seatRates()
+	if contract.TimeoutAuto {
+		auto, note := autoWallFor(p.cfg, contract, seat, rates.Get(seat))
+		if auto > 0 {
+			timeoutSec = auto
+			wire.WallSec = auto
+		}
+		log.Printf("agent task: %s", note)
+		contract.TimeoutAuto, contract.TimeoutSec = false, timeoutSec
+	}
 	wall := time.Duration(timeoutSec) * time.Second
 	// Register the run (0.117.0, register D-93) BEFORE admission, so a drain or
 	// a status reader sees it while the seat is still loading for it, and hold
@@ -463,9 +482,11 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	// beside the run (wall_estimate_sec / min_turn_sec / wall_note) and log
 	// when the contract's wall is under it. Never changes the wall: sizing is
 	// data for the caller and the operator, not a silent override.
-	rates := p.seatRates()
 	est := wallEstimateFor(p.cfg, contract, seat, rates.Get(seat), coldLoad.Seconds(), timeoutSec)
 	wire.WallEstimateSec, wire.MinTurnSec, wire.WallNote = est.TotalSec, est.MinTurnSec, est.Note
+	if wire.WallSec > 0 {
+		wire.WallNote = "auto wall (timeout_auto): " + wire.WallNote
+	}
 	if est.Below {
 		log.Printf("agent task: wall sizing (%s): %s", seat, est.Note)
 	}
@@ -1641,6 +1662,29 @@ func finalBudgetsFor(cfg config.Config, contract core.AgentContract) (final, rep
 		repack = final
 	}
 	return final, repack
+}
+
+// autoWallFor sizes the wall of a timeout_auto contract on this seat (register
+// D-03): the seat-rate estimate — cold load, think block, tool steps, final
+// answer and re-pack at the seat's remembered rate — clamped to the wire bounds
+// [AgentTimeoutSecDefault, AgentTimeoutSecCap]. The cold load stays inside the
+// number although the warm-up runs it outside the wall (D-64): a wall is a
+// ceiling, not a spend, and the over-provision is at most the admission
+// budget's worth. Returns 0 when the seat has no rate yet — the caller keeps
+// the wire default — and always a note naming the arithmetic or its absence.
+func autoWallFor(cfg config.Config, contract core.AgentContract, seat string, known seatrate.Seat) (int, string) {
+	est := wallEstimateFor(cfg, contract, seat, known, 0, core.AgentTimeoutSecDefault)
+	if est.TotalSec <= 0 {
+		return 0, fmt.Sprintf("auto wall for %s: no rate yet, running at the wire default %d s (%s)", seat, core.AgentTimeoutSecDefault, est.Note)
+	}
+	wall := est.TotalSec
+	switch {
+	case wall < core.AgentTimeoutSecDefault:
+		wall = core.AgentTimeoutSecDefault
+	case wall > core.AgentTimeoutSecCap:
+		wall = core.AgentTimeoutSecCap
+	}
+	return wall, fmt.Sprintf("auto wall for %s: %d s (estimate %d s, bounds %d..%d)", seat, wall, est.TotalSec, core.AgentTimeoutSecDefault, core.AgentTimeoutSecCap)
 }
 
 // wallEstimateFor sizes one contract on one seat (register D-03): the seat's

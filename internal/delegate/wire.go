@@ -172,6 +172,9 @@ type ResultWire struct {
 	WallEstimateSec int     `json:"wall_estimate_sec,omitempty"`
 	MinTurnSec      int     `json:"min_turn_sec,omitempty"`
 	WallNote        string  `json:"wall_note,omitempty"`
+	// WallSec (register D-03): the wall the node ran under when IT sized it (a
+	// timeout_auto contract); omitted when the contract named its own timeout_sec.
+	WallSec int `json:"wall_sec,omitempty"`
 	// Re-pack accounting (0.115.23, register D-91), passed through.
 	RepackMs       int64  `json:"repack_ms,omitempty"`
 	RepackAttempts int    `json:"repack_attempts,omitempty"`
@@ -292,6 +295,7 @@ func WireResponse(results []PlacedResult, sum Summary, lints [][]string) Respons
 			SeatTokS:           pr.Result.SeatTokS,
 			WallEstimateSec:    pr.Result.WallEstimateSec,
 			MinTurnSec:         pr.Result.MinTurnSec,
+			WallSec:            pr.Result.WallSec,
 			WallNote:           pr.Result.WallNote,
 			RepackMs:           pr.Result.RepackMs,
 			RepackAttempts:     pr.Result.RepackAttempts,

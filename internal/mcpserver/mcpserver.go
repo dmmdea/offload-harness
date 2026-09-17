@@ -2277,6 +2277,7 @@ func (s *Server) handleReviewDiff(ctx context.Context, req *mcp.CallToolRequest)
 	// ceiling still caps it.
 	if wall := int(agentTimeout(0, s.p.Cfg()).Seconds()); wall > contract.TimeoutSec {
 		contract.TimeoutSec = wall
+		contract.TimeoutAuto = false // the seat owner's number is explicit, never auto-sized (D-03)
 		if contract.TimeoutSec > core.AgentTimeoutSecCap {
 			contract.TimeoutSec = core.AgentTimeoutSecCap
 		}

@@ -49,10 +49,7 @@ func runQueued(ctx context.Context, cfg config.Config, subtasks []core.AgentCont
 			results[i].Err = "marshaling contract: " + merr.Error()
 			continue
 		}
-		timeoutSec := contract.TimeoutSec
-		if timeoutSec <= 0 {
-			timeoutSec = core.AgentTimeoutSecDefault
-		}
+		timeoutSec := executionBudgetSec(contract) // the cap for a timeout_auto contract (D-03): the claimer sizes the wall
 		if err := queueSubmit(ctx, cfg, holder, jobID, string(core.TaskAgentRun), payload, timeoutSec); err != nil {
 			results[i].Err = "queue submit: " + err.Error()
 		}
@@ -110,10 +107,7 @@ func queueSubmit(ctx context.Context, cfg config.Config, holder, jobID, taskType
 // the holder reports "accepted" while unclaimed, and that time extends the
 // deadline exactly like the push node's backlog credit (bounded the same way).
 func queuePoll(ctx context.Context, cfg config.Config, holder string, contract core.AgentContract, pr *PlacedResult) {
-	timeoutSec := contract.TimeoutSec
-	if timeoutSec <= 0 {
-		timeoutSec = core.AgentTimeoutSecDefault
-	}
+	timeoutSec := executionBudgetSec(contract) // the cap for a timeout_auto contract (D-03)
 	budget := time.Duration(timeoutSec)*time.Second + pollGrace
 	start := time.Now()
 	deadline := start.Add(budget)
