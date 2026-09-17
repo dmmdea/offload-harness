@@ -18,12 +18,18 @@ import (
 	"github.com/dmmdea/offload-harness/internal/gpulease"
 )
 
-// compressWait shortens the wait loop's clocks for one test.
+// compressWait shortens the wait loop's clocks for one test. The fleet-probe
+// memo is one of them: in production it is 2 s against a 3 s tick, so it can
+// never serve a re-read the wait makes, but at a 20 ms tick it would swallow
+// every one of them. Compressing the tick without compressing the memo would
+// therefore test a loop that polls its own cache.
 func compressWait(t *testing.T, poll, cooldown time.Duration) {
 	t.Helper()
-	oldPoll, oldCool := placementPollInterval, refusalCooldown
-	placementPollInterval, refusalCooldown = poll, cooldown
-	t.Cleanup(func() { placementPollInterval, refusalCooldown = oldPoll, oldCool })
+	oldPoll, oldCool, oldMemo := placementPollInterval, refusalCooldown, fetchViewsMemoTTL
+	placementPollInterval, refusalCooldown, fetchViewsMemoTTL = poll, cooldown, 0
+	t.Cleanup(func() {
+		placementPollInterval, refusalCooldown, fetchViewsMemoTTL = oldPoll, oldCool, oldMemo
+	})
 }
 
 // freesAfter returns a dispatch hook that refuses with `status` the first n

@@ -33,6 +33,11 @@ import (
 	"fmt"
 	"io"
 	"log"
+	// mathrand is the JITTER source only. crypto/rand above owns anything an
+	// operator or another process could observe (job ids); a sleep length is
+	// neither, and a lock-free generator is what a fan-out of dispatch
+	// goroutines should be calling.
+	mathrand "math/rand/v2"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -404,6 +409,48 @@ const (
 	// small; the cap only guards a misconfigured base).
 	maxFleetBody = 4 << 20
 )
+
+// jitterFrac is how far a fixed sleep is randomised either way (+/-20 %).
+//
+// Every dispatcher in this fleet sleeps on the SAME constants — pollEvery,
+// placementPollInterval, refusalCooldown — so K sessions that start within a
+// second of each other stay in lockstep for the whole run: they re-read health
+// together, re-dispatch together and re-ask a refusing node together, which is
+// exactly the convoy that makes a busy node look busier than it is. Randomising
+// each sleep by a fifth spreads them apart within a few ticks and costs nothing
+// else: the cadence's MEAN is unchanged, and no caller can observe an individual
+// sleep's length.
+//
+// 20 % is the usual choice for this (it is what exponential-backoff jitter
+// recipes use) and is deliberately small: a bigger spread would start to change
+// how quickly the capacity wait notices a node that freed.
+const jitterFrac = 0.2
+
+// jittered scales d by a uniform factor in [0.8, 1.2]. A non-positive d is
+// returned untouched — a test that compressed a clock to zero means zero.
+func jittered(d time.Duration) time.Duration {
+	if d <= 0 {
+		return d
+	}
+	j := time.Duration(float64(d) * (1 - jitterFrac + 2*jitterFrac*mathrand.Float64()))
+	if j <= 0 {
+		j = 1
+	}
+	return j
+}
+
+// jitteredWithin is jittered, clamped so the sleep can never run PAST the
+// deadline it lives under. Jitter is a de-synchroniser, never a licence to
+// overshoot a budget: `left` is what remains of that deadline, and a
+// non-positive `left` means there is no deadline left to protect (the caller's
+// own loop condition decides what happens next).
+func jitteredWithin(d, left time.Duration) time.Duration {
+	j := jittered(d)
+	if left > 0 && j > left {
+		return left
+	}
+	return j
+}
 
 // pollEvery/pollGrace are vars (not consts) so tests compress the cadence;
 // production never mutates them. Grace rides ON TOP of the contract's
@@ -786,6 +833,22 @@ type runner struct {
 	// printed sixteen identical lines, the exact hazard warnCorpus/warnLedger
 	// exist to avoid. Keys are base URLs; values are unused.
 	probeWarned sync.Map
+	// probeMu guards the two probe caches fetchViews keeps FOR THIS RUN.
+	//
+	// probeMemo is the fleet snapshot the run's sibling subtasks share
+	// (fetchViewsMemoTTL): route=spread always amortised its probe with one
+	// fetch at run start, and auto/remote/re-placement/retry each paid their
+	// own — per subtask, serially, at fetchNodeViewTimeout per unreachable
+	// remote. probeDead is the negative cache: a base that failed at the
+	// TRANSPORT is not re-dialled for probeNegativeTTL, and its reason is
+	// replayed into probeErrs so the placement note still names it.
+	//
+	// Both are per RUNNER, which is per Run: a snapshot must never outlive the
+	// call that took it, and a box that was down an hour ago must not be
+	// pre-judged by a Run starting now.
+	probeMu   sync.Mutex
+	probeMemo *probeSnapshot
+	probeDead map[string]deadProbe
 	// corpus*/ledger* count telemetry rows ATTEMPTED and LOST across the run
 	// (atomic: record() runs on every subtask goroutine). The once-per-run
 	// warnings above say THAT telemetry failed; these say how much, which is
@@ -1114,13 +1177,22 @@ func retryFloorSource(floor int) string {
 
 // retrySeatBusy reports whether the seat the retry would land on is already
 // generating for another job. A LOCAL landing reads the seat's in-flight count
-// through llama-swap (probeLocalBusy, fail-open to idle); a REMOTE landing
-// reads the node's jobs_running from a FRESH health probe (0 = idle or
-// unknown, never busy). Fresh, not the run's cached view: route=spread probes
-// the fleet once before the batch starts, so the cached view cannot show the
-// load a SIBLING subtask of the same batch has since put on that node — which
-// is exactly how the 2026-09-10 retry joined a seat mid-generation. A failed
-// probe falls back to the cached view (fail-open, like every placement read).
+// through llama-swap (probeLocalBusy, fail-open to idle); a REMOTE landing asks
+// the node's OWN CEILING from a FRESH health probe. Fresh, not the run's cached
+// view: route=spread probes the fleet once before the batch starts, so the
+// cached view cannot show the load a SIBLING subtask of the same batch has
+// since put on that node — which is exactly how the 2026-09-10 retry joined a
+// seat mid-generation. A failed probe falls back to the cached view (fail-open,
+// like every placement read).
+//
+// The remote predicate is !provablyStartsNow(view), the same ceiling-aware rule
+// gate.go ranks placements with — not `JobsRunning > 0`. Register D-46 shipped
+// the RULE and not the threshold, and 0 is the wrong threshold on every node
+// that runs more than one worker: a four-worker box with ONE job in flight
+// refused every cross-seat retry although three workers were idle. "Busy" here
+// means "the retry would queue", which is precisely what provablyStartsNow
+// answers — and it answers it conservatively, so an unknown ceiling still reads
+// as busy exactly where it used to.
 func (r *runner) retrySeatBusy(ctx context.Context, alt placement) (bool, string) {
 	if alt.base == "" {
 		rd := r.probeLocalBusy(ctx)
@@ -1136,10 +1208,23 @@ func (r *runner) retrySeatBusy(ctx context.Context, alt placement) (bool, string
 	if fresh, err := FetchNodeView(ctx, alt.base, r.cfg.FleetAuthToken); err == nil {
 		view, source = fresh, "fresh health"
 	}
-	if view.JobsRunning > 0 {
-		return true, fmt.Sprintf("jobs_running %d (%s)", view.JobsRunning, source)
+	if !provablyStartsNow(view) {
+		return true, seatBusyNote(view, source)
 	}
 	return false, ""
+}
+
+// seatBusyNote renders WHY the retry seat would queue, from the node's own
+// published numbers. Two shapes because a ceiling of 0 is UNKNOWN, never a
+// limit: printing "jobs_running 1 of max_concurrent_jobs 0" would state a
+// capacity the node never advertised.
+func seatBusyNote(v NodeView, source string) string {
+	if v.MaxConcurrentJobs > 0 {
+		return fmt.Sprintf("jobs_running %d of max_concurrent_jobs %d, jobs_queued %d (%s)",
+			v.JobsRunning, v.MaxConcurrentJobs, v.JobsQueued, source)
+	}
+	return fmt.Sprintf("jobs_running %d, queue_depth %d, no published ceiling (%s)",
+		v.JobsRunning, v.QueueDepth, source)
 }
 
 // placements is ONE SUBTASK's placement ledger. runOne owns it and hands the
@@ -1423,6 +1508,33 @@ var (
 	refusalCooldown       = 10 * time.Second
 )
 
+// probeTickBound bounds ONE capacity-wait tick's fleet probe: twice the poll
+// interval, never more than what is left of the wait.
+//
+// The wait used to hand fetchViews the RAW run context while every other call
+// site wrapped it in a remaining-budget one, so a single black-holed remote
+// stalled each tick for fetchNodeViewTimeout — up to the whole TTL inside one
+// tick's probe, and the node that DID free was never re-asked. Twice the
+// interval is the slack a healthy fleet needs and the most a dead one may take:
+// a probe that cannot finish in two ticks has already cost the wait its cadence,
+// and the answer it would have brought is stale by the time it lands.
+//
+// Nothing is negative-cached when this bound fires (noteDeadProbe): it expires
+// every base at the same instant, which is a fact about the tick, not about any
+// node.
+func probeTickBound(deadline time.Time) time.Duration {
+	bound := 2 * placementPollInterval
+	if left := time.Until(deadline); left > 0 && left < bound {
+		bound = left
+	}
+	if bound <= 0 {
+		// Only reachable when a test compresses the interval to zero; a
+		// zero-length context would cancel the probe before it is sent.
+		bound = time.Millisecond
+	}
+	return bound
+}
+
 // awaitCapacity is the delegator's queue (0.113.18, L5 of the fleet-flow
 // chapter): a subtask every fitting node has just refused for CAPACITY — or
 // whose only placement is a seat a text lease reserves — waits here, with a
@@ -1489,7 +1601,11 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 		pl.credit += now.Sub(spanStart)
 		spanStart = now
 	}
-	refusedAt := map[string]time.Time{}
+	// refusedUntil holds, per base, the instant it becomes a candidate again.
+	// An instant rather than the refusal's timestamp because the cooldown is
+	// JITTERED once when the refusal happens: K dispatchers that all refused the
+	// same node must not all re-ask it on the same beat.
+	refusedUntil := map[string]time.Time{}
 	var lease gpulease.Info
 	for wait > 0 && ctx.Err() == nil {
 		if decided == nil && r.route != "remote" && !pl.tried[""] {
@@ -1522,13 +1638,18 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 			}
 		}
 		if r.route != "local" {
-			views, bases, _ := r.fetchViews(ctx)
+			// The tick's probe is bounded by the tick, never by the transport:
+			// a remote that black-holes must cost this wait one cadence, not
+			// its whole TTL (probeTickBound).
+			tickCtx, cancelTick := context.WithTimeout(ctx, probeTickBound(deadline))
+			views, bases, _ := r.fetchViews(tickCtx)
+			cancelTick()
 			best := -1
 			for j, v := range views {
 				if !remoteEligible(st, v) || !hasRoom(v, false) || pl.excluded[bases[j]] {
 					continue
 				}
-				if t, ok := refusedAt[bases[j]]; ok && time.Since(t) < refusalCooldown {
+				if until, ok := refusedUntil[bases[j]]; ok && time.Now().Before(until) {
 					continue
 				}
 				if best < 0 || betterRemote(v, views[best]) {
@@ -1555,7 +1676,7 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 				}
 				seed = pr
 				refusals = append(refusals, refusalLine(pr))
-				refusedAt[bases[best]] = time.Now()
+				refusedUntil[bases[best]] = time.Now().Add(jittered(refusalCooldown))
 				pl.noteRefusal(pr) // a non-capacity answer excludes the node from the rest of the wait
 				// Fall through to the sleep: a refusal is charged (its attempt
 				// wrote telemetry and spent budget), so re-asking is paced by the
@@ -1565,10 +1686,7 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 		if !time.Now().Before(deadline) {
 			break
 		}
-		tick := placementPollInterval
-		if left := time.Until(deadline); left < tick {
-			tick = left
-		}
+		tick := jitteredWithin(placementPollInterval, time.Until(deadline))
 		select {
 		case <-ctx.Done():
 		case <-time.After(tick):
@@ -2216,7 +2334,17 @@ func baseFor(chosen NodeView, views []NodeView, bases []string) string {
 // result is read-only by the time the goroutines start (same posture as the
 // spreadViews snapshot), and the same contracts always produce the same deal.
 func (r *runner) dealSpread(contracts []core.AgentContract, localView NodeView) []spreadSlot {
-	// dealt holds the node ids already given a subtask in the CURRENT cycle.
+	// dealt holds the DIAL BASES already given a subtask in the CURRENT cycle.
+	//
+	// The base, not the node id, and that is the fix for a real collapse: every
+	// other exclusion in this file (pl.tried, pl.excluded, the refusal cooldown,
+	// the quarantine) keys on the base, and a node id is neither unique nor
+	// guaranteed to be published. Two remotes that both advertise "" — or the
+	// same id, which C-19 shows does drift here — shared one entry, so the
+	// second remote of a cycle found its key already taken, the cycle was
+	// reshuffled, and the fit score handed the SAME seat both subtasks while
+	// the other one idled. The base is what the dispatcher actually dials, so
+	// it is the only key that can mean "this seat already has one".
 	dealt := make(map[string]bool, len(r.spreadViews))
 	out := make([]spreadSlot, len(contracts))
 	for i, c := range contracts {
@@ -2402,16 +2530,16 @@ func (r *runner) placeSpreadWith(i int, st Subtask, localView NodeView, dealt ma
 		clear(dealt)
 		return spreadSlot{placement{view: localView, reason: fmt.Sprintf("route=spread → local (slot %d of %d)", slot+1, len(nodes))}, false, false}
 	}
-	k := fitPick(st, nodes, slot, dealt)
+	k := fitPick(st, nodes, bases, slot, dealt)
 	if k < 0 {
 		// Every eligible remote has already taken a subtask this cycle — which a
 		// ragged eligible set can reach without passing through a local slot.
 		// Reshuffle rather than stack: after the clear a pick always exists,
 		// because len(nodes) > 1 guarantees at least one remote.
 		clear(dealt)
-		k = fitPick(st, nodes, slot, dealt)
+		k = fitPick(st, nodes, bases, slot, dealt)
 	}
-	dealt[nodes[k].NodeID] = true
+	dealt[bases[k]] = true
 	kind, rule := shapeOf(st)
 	reason := fmt.Sprintf("route=spread → %s (slot %d of %d, fit=%s/%s)", nodes[k].NodeID, slot+1, len(nodes), kind, rule)
 	if skip {
@@ -2425,11 +2553,13 @@ func (r *runner) placeSpreadWith(i int, st Subtask, localView NodeView, dealt ma
 // The scan starts at the rotation slot and wraps, and only a STRICTLY better
 // score displaces the incumbent — so equal seats are dealt in rotation order
 // and an all-equal roster behaves exactly as blind round-robin did.
-func fitPick(st Subtask, nodes []NodeView, slot int, dealt map[string]bool) int {
+// bases is parallel to nodes and is what `dealt` is keyed on — see dealSpread
+// for why the node id is not a usable key here.
+func fitPick(st Subtask, nodes []NodeView, bases []string, slot int, dealt map[string]bool) int {
 	k, best := -1, 0
 	for c := 0; c < len(nodes); c++ {
 		j := (slot + c) % len(nodes)
-		if nodes[j].Local || dealt[nodes[j].NodeID] {
+		if nodes[j].Local || dealt[bases[j]] {
 			continue
 		}
 		if s := scoreFit(st, nodes[j]); k < 0 || s > best {
@@ -3105,7 +3235,7 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 		case <-ctx.Done():
 			pr.Err = "canceled: " + ctx.Err().Error()
 			return pr
-		case <-time.After(pollEvery):
+		case <-time.After(jitteredWithin(pollEvery, time.Until(deadline))):
 		}
 	}
 }
@@ -3391,29 +3521,179 @@ func (r *runner) strikeOnFingerprint(base string, failures []string) {
 	}
 }
 
+// probeSnapshot is ONE fleet probe, memoised on the runner (= on the Run) so
+// the sibling subtasks of a fan-out share it instead of each paying their own.
+type probeSnapshot struct {
+	at        time.Time
+	views     []NodeView
+	bases     []string
+	probeErrs []string
+}
+
+// deadProbe is one base's last TRANSPORT failure — the negative cache's entry.
+type deadProbe struct {
+	at  time.Time
+	why string
+}
+
+// fetchViewsMemoTTL is how long one fleet probe is reused by the rest of a Run;
+// probeNegativeTTL is how long a base that failed at the transport is skipped
+// rather than re-dialled. Vars so tests can compress them, exactly like
+// pollEvery and placementPollInterval; production never mutates them.
+//
+// 2 s is chosen SHORTER than placementPollInterval (3 s) on purpose: the
+// capacity wait's whole job is to notice a node that just freed, so the memo
+// must never be able to serve one of its ticks. Anything that changes either
+// number has to keep that relation — a memo longer than the tick would make the
+// wait poll its own cache.
+//
+// 30 s for the negative cache is the other side of the same trade: long enough
+// that a fan-out stops paying fetchNodeViewTimeout per subtask for a box that is
+// down, short enough that a node rebooting inside one long Run is picked up
+// again while the Run still has budget to use it.
+var (
+	fetchViewsMemoTTL = 2 * time.Second
+	probeNegativeTTL  = 30 * time.Second
+)
+
 func (r *runner) fetchViews(ctx context.Context) (views []NodeView, bases []string, probeErrs []string) {
-	for _, base := range r.remotes {
+	if s := r.memoisedProbe(); s != nil {
+		return s.copyOut()
+	}
+	s := &probeSnapshot{at: time.Now()}
+	s.views, s.bases, s.probeErrs = r.probeRemotes(ctx)
+	r.probeMu.Lock()
+	r.probeMemo = s
+	r.probeMu.Unlock()
+	return s.copyOut()
+}
+
+// copyOut hands every caller its OWN slices. The snapshot is shared by the
+// run's subtask goroutines, and callers index views/bases and build derived
+// lists from them (untried, Place) — a shared backing array is how one
+// subtask's filtering would silently rewrite a sibling's roster.
+func (s *probeSnapshot) copyOut() ([]NodeView, []string, []string) {
+	return append([]NodeView(nil), s.views...),
+		append([]string(nil), s.bases...),
+		append([]string(nil), s.probeErrs...)
+}
+
+// memoisedProbe returns the run's snapshot while it is inside the memo window,
+// else nil. A non-positive TTL switches the memo off — what a test compressing
+// the capacity wait's clocks does, because at a 20 ms tick a 2 s memo would
+// swallow every re-read the wait exists to make.
+func (r *runner) memoisedProbe() *probeSnapshot {
+	if fetchViewsMemoTTL <= 0 {
+		return nil
+	}
+	r.probeMu.Lock()
+	defer r.probeMu.Unlock()
+	if r.probeMemo == nil || time.Since(r.probeMemo.at) >= fetchViewsMemoTTL {
+		return nil
+	}
+	return r.probeMemo
+}
+
+// recentlyDead answers the negative cache: a base that failed at the transport
+// inside probeNegativeTTL is skipped, and the reason it failed is REPLAYED so
+// the placement note still names the node and says what happened to it. A
+// skipped base that vanished from probeErrs would read as a node nobody ever
+// configured — the exact ambiguity fetchViews' error-carrying exists to remove.
+func (r *runner) recentlyDead(base string) (string, bool) {
+	if probeNegativeTTL <= 0 {
+		return "", false
+	}
+	r.probeMu.Lock()
+	defer r.probeMu.Unlock()
+	d, ok := r.probeDead[base]
+	if !ok || time.Since(d.at) >= probeNegativeTTL {
+		return "", false
+	}
+	return fmt.Sprintf("%s (cached: not re-dialled for %s)", d.why, probeNegativeTTL), true
+}
+
+// noteDeadProbe records a TRANSPORT failure against the base.
+//
+// Two guards, and both are load-bearing. Only probeUnreachable errors are
+// cached: a 503 or a 401 is a node that ANSWERED, and skipping it for 30 s would
+// turn a momentary refusal into half a minute of ineligibility. And nothing is
+// cached once the CALLER's context is done — the capacity wait's per-tick bound
+// fails every base at the same instant, and that is a fact about the tick, never
+// about any of the nodes.
+func (r *runner) noteDeadProbe(ctx context.Context, base string, err error) {
+	if ctx.Err() != nil || !probeUnreachable(err) {
+		return
+	}
+	r.probeMu.Lock()
+	defer r.probeMu.Unlock()
+	if r.probeDead == nil {
+		r.probeDead = map[string]deadProbe{}
+	}
+	r.probeDead[base] = deadProbe{at: time.Now(), why: err.Error()}
+}
+
+// probeRemotes is the fan-out itself: every configured remote is probed
+// CONCURRENTLY, each bounded by fetchNodeViewTimeout, and the answers are
+// reassembled in the CONFIGURED order so views/bases/probeErrs keep the
+// positional contract fetchViews has always published. Completion order is not
+// an ordering any caller can use — a NodeView carries no base.
+func (r *runner) probeRemotes(ctx context.Context) ([]NodeView, []string, []string) {
+	type outcome struct {
+		view NodeView
+		ok   bool
+		err  string
+	}
+	out := make([]outcome, len(r.remotes))
+	var wg sync.WaitGroup
+	for i, base := range r.remotes {
 		if r.quarantine.Blocked(base) {
 			// Two fingerprint failures inside the TTL: the node is producing
 			// answers about the wrong document. Not a candidate until it expires.
-			probeErrs = append(probeErrs, fmt.Sprintf("%s: quarantined until %s (repeated off-document answers)", base, r.quarantine.Until(base).Format(time.Kitchen)))
+			out[i].err = fmt.Sprintf("%s: quarantined until %s (repeated off-document answers)", base, r.quarantine.Until(base).Format(time.Kitchen))
 			continue
 		}
-		v, err := FetchNodeView(ctx, base, r.cfg.FleetAuthToken)
-		if err != nil {
-			// Logged once per BASE per RUN, not once per (base, subtask):
-			// fetchViews is called inside runOne, so an 8-subtask fan-out at two
-			// dead remotes printed sixteen identical lines. The error still rides
-			// probeErrs on every subtask — the defer REASON must name the cause
-			// for each result even when the log line is spent.
-			if _, warned := r.probeWarned.LoadOrStore(base, struct{}{}); !warned {
-				log.Printf("delegate: health probe of %s failed (not a placement candidate): %v", base, err)
+		if why, dead := r.recentlyDead(base); dead {
+			out[i].err = why
+			continue
+		}
+		wg.Add(1)
+		go func(i int, base string) {
+			defer wg.Done()
+			// The per-base bound is the whole point of the fan-out: ONE
+			// unreachable remote costs fetchNodeViewTimeout, never N of them in
+			// series. A shorter caller ctx (the capacity wait's per-tick bound,
+			// a re-placement's remaining budget) still wins.
+			cctx, cancel := context.WithTimeout(ctx, fetchNodeViewTimeout)
+			defer cancel()
+			v, err := FetchNodeView(cctx, base, r.cfg.FleetAuthToken)
+			if err != nil {
+				// Logged once per BASE per RUN, not once per (base, subtask):
+				// fetchViews is called inside runOne, so an 8-subtask fan-out at
+				// two dead remotes printed sixteen identical lines. The error
+				// still rides probeErrs on every subtask — the defer REASON must
+				// name the cause for each result even when the log line is spent.
+				if _, warned := r.probeWarned.LoadOrStore(base, struct{}{}); !warned {
+					log.Printf("delegate: health probe of %s failed (not a placement candidate): %v", base, err)
+				}
+				out[i].err = err.Error()
+				r.noteDeadProbe(ctx, base, err)
+				return
 			}
-			probeErrs = append(probeErrs, err.Error())
-			continue
+			out[i].view, out[i].ok = v, true
+		}(i, base)
+	}
+	wg.Wait()
+	views := make([]NodeView, 0, len(out))
+	bases := make([]string, 0, len(out))
+	var probeErrs []string
+	for i, o := range out {
+		switch {
+		case o.ok:
+			views = append(views, o.view)
+			bases = append(bases, r.remotes[i])
+		case o.err != "":
+			probeErrs = append(probeErrs, o.err)
 		}
-		views = append(views, v)
-		bases = append(bases, base)
 	}
 	return views, bases, probeErrs
 }

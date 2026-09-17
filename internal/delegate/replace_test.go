@@ -760,14 +760,18 @@ func TestWireResponsePublishesReplacement(t *testing.T) {
 // handed to a re-placement must be measured AFTER choosing the node, not
 // before.
 //
-// Selecting a node blocks: fetchViews probes every remote SEQUENTIALLY at
-// fetchNodeViewTimeout each, and Run derives no deadline of its own. A number
-// taken before that probe can be minutes stale on a roster with blackholing
-// nodes, and writing it into the replacement's contract hands a seat execution
-// time the subtask no longer owns.
+// Selecting a node blocks: fetchViews probes every remote, bounded by
+// fetchNodeViewTimeout, and Run derives no deadline of its own. A number taken
+// before that probe can be minutes stale on a roster with blackholing nodes,
+// and writing it into the replacement's contract hands a seat execution time
+// the subtask no longer owns.
 //
 // The fixture makes the probe cost 1.2 s of real wall clock (node-taker's
-// health handler sleeps), so two probes run before the second dispatch:
+// health handler sleeps) and turns the probe MEMO off, because the defect is
+// only visible while selection is expensive — with the memo on, the
+// re-placement reuses the run's snapshot and the second probe is free, which is
+// the improvement, not the thing under test. Two probes then run before the
+// second dispatch:
 //
 //	t≈1.2s  first probe done → node-slow refuses instantly
 //	t≈1.2s  pre-selection measure would say 30-2 = 28
@@ -777,6 +781,7 @@ func TestWireResponsePublishesReplacement(t *testing.T) {
 // so an implementation that skips the re-measure ships 28 and this test fails.
 func TestRunReplacementBudgetIsRemeasuredAfterSelection(t *testing.T) {
 	compressPolls(t, 5*time.Millisecond, time.Second)
+	noProbeMemo(t)
 	_, slowURL := refusingNode(t, "node-slow", http.StatusServiceUnavailable, nil)
 	var got atomic.Int64
 	_, takerURL := acceptingNode(t, "node-taker", "qube from the taker", func(f *fakeNode) {
