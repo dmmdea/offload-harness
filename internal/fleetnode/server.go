@@ -195,9 +195,13 @@ type Server struct {
 	// independently), but production fetches its own roster per call rather
 	// than sharing swapRosterServes's fetch — that would mean threading a
 	// shared Roster through both closures' signatures, which changes tests
-	// that already inject rosterServes alone. Two GETs per refresh, once per
+	// that already inject rosterServes alone. THREE /v1/models GETs per refresh
+	// since the seat-state read joined them (seatRunning re-fetches the roster
+	// to resolve the seat's alias before reading /running), once per
 	// agentResidencyTTL window, is an acceptable cost for keeping today's
-	// residency seam untouched.
+	// residency seam untouched. What must stay true is the property the cache
+	// tests pin: one refresh CYCLE per TTL, single-flighted, never a probe per
+	// health request.
 	rosterServedModels func(ctx context.Context, endpoint string) ([]string, error)
 	// seatRunning answers "what does llama-swap's /running say about the agent
 	// seat RIGHT NOW?" — loaded, starting, or neither. /running ONLY: reading
@@ -394,10 +398,10 @@ func (s *Server) admittingRuns() int {
 	}
 	pid := os.Getpid()
 	for _, run := range runs {
-		// The phase string is internal/pipeline/agenttask.go's, verbatim: it
-		// registers a contract run as "admission" and flips it at the first
-		// planner step (gpuactivity.Run.Phase documents the whole ladder).
-		if run.PID == pid && run.Phase == "admission" {
+		// The SAME constant internal/pipeline/agenttask.go registers a contract
+		// run with, and the same one gpuactivity heals at the first planner
+		// step — a bare literal here would make a rename a silent zero.
+		if run.PID == pid && run.Phase == gpuactivity.PhaseAdmission {
 			s.admittingN++
 		}
 	}

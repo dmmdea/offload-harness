@@ -741,3 +741,45 @@ func TestAdmittingRegistryFailureIsSaidOnceAndRetried(t *testing.T) {
 		t.Fatalf("jobs_admitting = %d after the registry became readable, want 1: a failed open must not latch for the life of the process", n)
 	}
 }
+
+// TestAdmittingCountsTheSharedAdmissionPhaseOnly binds this reader to the
+// vocabulary the WRITER uses. `jobs_admitting` is produced by
+// internal/pipeline (which registers a contract run with
+// gpuactivity.PhaseAdmission) and consumed here; while both sides spelled the
+// phase as a bare literal, renaming it would have zeroed the published counter
+// silently and nothing would have failed. Registering through the shared
+// constant is the assertion.
+//
+// The negative arm matters just as much: a run that is GENERATING must not be
+// subtracted from saturation — only a worker that holds a slot without a card.
+func TestAdmittingCountsTheSharedAdmissionPhaseOnly(t *testing.T) {
+	state := t.TempDir()
+	cfg := agentHealthCfg(fakeSwapWithRunning(t, "gemma-4-e4b", "offload-e4b", "ready", true).URL)
+	cfg.StateDir = state
+	s, _ := newTestServer(t, cfg, &fakeRunner{}, authOpts(true))
+
+	admitting := gpuactivity.Start("", state, gpuactivity.Run{
+		Seat: "offload-e4b", Kind: "contract", Phase: gpuactivity.PhaseAdmission})
+	if admitting == nil {
+		t.Fatal("could not register the admission run")
+	}
+	defer admitting.End()
+	generating := gpuactivity.Start("", state, gpuactivity.Run{
+		Seat: "offload-e4b", Kind: "contract", Phase: gpuactivity.PhaseRunning})
+	if generating == nil {
+		t.Fatal("could not register the running run")
+	}
+	defer generating.End()
+
+	if n := s.admitting(); n != 1 {
+		t.Fatalf("jobs_admitting = %d with one run in %s and one in %s, want 1 — the reader and internal/pipeline's writer must agree on the phase name, and a generating run holds a card",
+			n, gpuactivity.PhaseAdmission, gpuactivity.PhaseRunning)
+	}
+	// And the phase really is the discriminator: once the admitting run takes
+	// its first planner step, gpuactivity heals the phase and the count drops.
+	admitting.OnStep(1, 32)
+	s.admittingAt = time.Time{} // the next cache cycle
+	if n := s.admitting(); n != 0 {
+		t.Fatalf("jobs_admitting = %d after the run started stepping, want 0", n)
+	}
+}
