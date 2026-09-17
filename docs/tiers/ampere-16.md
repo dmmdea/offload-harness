@@ -25,13 +25,28 @@ one declaration, so the seat and the lane routing to it cannot disagree.
 | id | `qwen38-27b-gsq-vllm` | the llama-swap model id, `--served-model-name`, and what `agent_model` binds to |
 | cards | `0` | `CUDA_VISIBLE_DEVICES`, in PCI order |
 | tensor_parallel | 0 | `--tensor-parallel-size`; must equal how many cards are listed |
-| max_model_len | 49152 | the served window |
+| max_model_len | 32768 | the served window |
+| gpu_memory_utilization | 0.90 | the engine's share of the card — chosen WITH the seat's co-residents in mind, not alone |
 | kv_cache_dtype | `fp8_e5m2` | KV precision — backend-dependent, not free everywhere |
 | ttl_seconds | 300 | idle window before the seat unloads and frees its cards |
 | launch | `—` | which artifact set starts it |
 | fallback | `qwen3.5-4b-agent` | the llama.cpp seat a box WITHOUT the vLLM venv serves instead |
 
-> NVIDIA A2 16 GB (Lenovo M720q, 40 W / 1200 MHz lock), vLLM 0.29.0 + the checkpoint's embedding patch, 2026-09-16. Qwen3.8-27B 3-bit GSQ (ISTA-DASLab; transformer 3-bit g128, embedding+LM head 4-bit RTN g64) = 11.85 GB, the ONLY published vLLM-loadable 27B that fits a 16 GB card — every W4A16/AWQ/GPTQ build is 19.45-19.56 GB because it leaves the ~248k-vocab embedding at high precision. Serves max_model_len 49,152 at util 0.92 (65,536 refused: needs 2.3 GiB KV against 1.97 available, est. max 54,880). MEASURED against the llama.cpp IQ3_S+MTP arm at the SAME vendor sampling (temp 0.7 / top_p 0.80 / top_k 20 / presence_penalty 1.5, the Qwen3.8 non-thinking card values): single-stream 5.75 vs 5.91 tok/s (a tie), TTFT 2.195 vs 0.408 s, and CONCURRENCY 19.53 vs 5.26 tok/s aggregate at 4 streams -- 3.7x, which is what this seat is chosen for, together with being the tier's only path to the LMCache cache server (ADR 0045 binds a cache server per vLLM seat). Blind quality at a 32,768 window lost 8.42 to 9.28 (22/24), with the whole gap in COVERAGE (7.69 vs 9.30) while accuracy was HIGHER (9.54 vs 9.47) -- that arm was handicapped by the window and the matched-window (49,152) re-measurement is the record that governs. Records: 'Benchmarks and Optimizations/2026-09-16-16gb-tier-pass/'.
+### Bound lane
+
+When this seat is the box's agent lane, the loop runs it at the settings it was
+measured at (ADR 0049 Amendment 3) — the installer binds these beside `agent_model`; the
+tier's `config_seed` values stay for the fallback seat.
+
+| setting | value |
+|---|---|
+| agent_max_tokens | 4096 |
+| agent_thinking | `off` |
+| agent_sampling | temperature=0.7 top_p=0.8 top_k=20 presence_penalty=1.5 |
+| agent_timeout_sec | 900 |
+| agent_seat_tok_s | 7.17 — seeds the D-03 auto wall until the seat-rates store has a sample |
+
+> NVIDIA A2 16 GB (Lenovo M720q, 40 W / 1200 MHz lock), vLLM 0.29.0 + the checkpoint's embedding patch, 2026-09-16. Qwen3.8-27B 3-bit GSQ (ISTA-DASLab; transformer 3-bit g128, embedding+LM head 4-bit RTN g64) = 11.85 GB, the ONLY published vLLM-loadable 27B that fits a 16 GB card -- every W4A16/AWQ/GPTQ build is 19.45-19.56 GB because it leaves the ~248k-vocab embedding at high precision. BOUND OPERATING POINT (operator decision D5 = A, 2026-09-16): max_model_len 32,768 at util 0.90 -- KV 1.75 GiB = 43,690 tokens (1.33x), 13,852 MiB alone, and the mem0 embedder answers HTTP 200 beside it idle AND under 4-stream load (card peak 14,623 of 15,356 MiB); single-stream 7.17 tok/s, TTFT p50 1.66 s, 4-stream aggregate 20.36 tok/s (0 failed); blind quality at this window 8.42 (accuracy 9.54, zero fabrications; the llama.cpp IQ3_S+MTP arm 9.28). Why not the seat's own shape: alone it serves 49,152 at util 0.92 (KV 2.46 GiB = 65,967 tokens, 1.34x; 65,536 refused; blind 8.35; single-stream 5.75, 4-stream 19.53 tok/s) but holds 14,694 of 15,356 MiB, and the support group's embedder then returns HTTP 500 -- every mem0 write failed while the seat was warm; at util 0.90 vLLM refuses 49,152 (estimated maximum 32,928). The bound-lane fields are the config the digest-8 gate passed 8/8 at (3/8 at the 300 s wire default -- timeouts only, no wrong answers); agent_seat_tok_s 7.17 (the single-stream rate MEASURED at this operating point; 5.75 was the 49,152 @ 0.92 shape's) seeds the D-03 auto wall because no completion reaches the 1,024 tokens a rate sample needs. Cache server: BLOCKED, not chosen (D-117) -- LMCache 0.5.4's MP connector rejects vLLM 0.29's kv_layout. Records: 'Benchmarks and Optimizations/2026-09-16-16gb-tier-pass/' (judge-27b-49k, live-cutover/).
 
 ## Media
 

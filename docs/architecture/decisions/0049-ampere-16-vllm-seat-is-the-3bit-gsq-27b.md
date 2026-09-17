@@ -18,6 +18,11 @@ date: "2026-09-16"
 > serves and passes the digest gate 8/8 at 900 s walls, and it cannot share the card with the embedder that backs
 > the ecosystem's memory authority at its declared window — see *Live cutover* below. Binding it is an operator
 > decision with two measured options, not a knob.
+>
+> **Amendment 3, 2026-09-16 (later still) — D5 = A, measured and wired.** The operator chose option 1: the GSQ is
+> the bound lane at **32,768 @ util 0.90**, the window the card shares with the embedder. Measured before binding:
+> KV 1.75 GiB = 43,690 tokens (1.33x), embedder HTTP 200 beside it idle and under 4-stream load, single-stream
+> 7.17 tok/s, 4-stream 20.36 tok/s. The seat declaration now carries its bound-lane settings — see *Amendment 3*.
 
 ## Context — the quant nobody had found
 
@@ -141,6 +146,34 @@ blocked by co-residency, not by the seat.
    this ADR does not make; or
 3. keep the 4B bound (today's state) and call the GSQ by name for fan-out.
 
+## Amendment 3 — D5 = A: the seat is the bound lane, at the operating point it shares the card at
+
+The operator's answer to the three options above was **1**. Before binding, the arm was run at the proposed point
+(record: `live-cutover/gsq-32k-u090-*`): 32,768 @ util 0.90 starts in 241 s, `Model loading took 10.4 GiB`, KV
+**1.75 GiB = 43,690 tokens (1.33x)**, 13,852 MiB alone; **the embedder answers HTTP 200 beside it**, idle and
+**12/12 times under the 4-stream load** (card peak 14,623 of 15,356 MiB); single-stream **7.17 tok/s**, TTFT 1.66 s,
+4-stream aggregate **20.36 tok/s**, 0 failed — every side column slightly better than the 49,152 @ 0.92 shape, and
+the blind quality at this window was already measured (8.42; accuracy 9.54, zero fabrications). Then it was bound
+live: seat launch line 32,768 @ 0.90, the node's config at the measured lane settings, `doctor` clean, and the seat
+joined llama-swap's `heavy` swap group — at 0.90 the ≤ 5.5 GB cascade seats no longer fit beside it (a request for
+one returned HTTP 500 "upstream command exited prematurely"), and in the group the two SWAP instead (measured both
+ways: cascade seat 200 with the GSQ swapped out; GSQ back through the front door in 67 s; embedder 200 beside it).
+
+**What "wire it properly" means, and why this amendment changes the seat schema.** The installer binds a vLLM seat
+as the agent lane whenever the venv exists (`Spec.Bindings()` → `agent_model`), but the lane's OTHER settings came
+from the tier's `config_seed`, which describes the FALLBACK seat: `agent_max_tokens` 1,024, no sampling, the 300 s
+default. That is precisely the configuration the gate measured failing (3/8). A seat declaration can now carry its
+own bound-lane settings — `agent_max_tokens`, `agent_thinking`, `agent_sampling`, `agent_timeout_sec`,
+`agent_seat_tok_s` — validated at render with the same rules the harness config applies, emitted by `Bindings()`
+only when set, and left alone by `FallbackBindings()`. `profiles.json` declares the GSQ at 32,768 @ 0.90 with
+4,096 / off / the vendor sampling / 900 s / 7.17 tok/s (the rate measured at this operating point, not the 5.75 of the 49,152 shape). The `agent_seat_tok_s` seed exists because the seat's
+completions never reach the 1,024 tokens a rate sample needs, so without it the D-03 auto wall would run the 300 s
+default it was measured failing at.
+
+**Costs recorded.** The matched-window claim is forfeited by design (the seat's own shape, 49,152 @ 0.92, stays in
+`measured` as history); walls are 129–516 s against the 4B's 42–108 s; the cache server stays blocked on the
+LMCache × vLLM 0.29 connector (D-117), so the seat runs on VRAM only and the binding says so.
+
 ## Consequences
 
 - `profiles.json` → `profiles["ampere-16"].vllm_seat` becomes `qwen38-27b-gsq-vllm`, `max_model_len` 49,152,
@@ -152,10 +185,9 @@ blocked by co-residency, not by the seat.
   so a box without the venv, without 0.29.0, or without the patch still serves an agent lane.
 - The cache-server binding for this tier is now possible for the first time since it became storeless: a binding
   is declared per vLLM seat (ADR 0045), and this seat is the tier's only vLLM-servable model of its class.
-- The bound lane on the reference box is the 4B vLLM seat (`qwen3.5-4b-vllm`, 131,072, 8/8 on 0.29); the GSQ is
-  the tier's declared vLLM seat and is served on demand. `profiles.json` keeps `gpu_memory_utilization` 0.92 /
-  `max_model_len` 49,152: that is what the seat serves when it has the card to itself, which is the seat's declared
-  shape; a co-resident binding is option 1 above and would be a profile change of its own.
+- **Superseded by Amendment 3:** the bound lane on the reference box is the GSQ at 32,768 @ 0.90, and
+  `profiles.json` now declares that operating point plus the bound-lane settings; the 49,152 @ 0.92 shape is kept
+  in `measured` as what the seat serves when it has the card to itself.
 - **Not propagated** to blackwell-16 / volta-16. Neither has been measured on its own silicon and both still owe
   a vLLM seat ([ADR 0048](0048-vllm-is-a-first-class-engine-on-every-tier.md) counts the debt).
 

@@ -473,6 +473,7 @@ func agentSeatSection(p Profile) string {
 	fmt.Fprintf(&b, "| cards | `%s` | `CUDA_VISIBLE_DEVICES`, in PCI order |\n", dash(s.Device))
 	fmt.Fprintf(&b, "| tensor_parallel | %d | `--tensor-parallel-size`; must equal how many cards are listed |\n", s.TensorParallel)
 	fmt.Fprintf(&b, "| max_model_len | %d | the served window |\n", s.MaxModelLen)
+	fmt.Fprintf(&b, "| gpu_memory_utilization | %.2f | the engine's share of the card — chosen WITH the seat's co-residents in mind, not alone |\n", s.GPUMemoryUtilization)
 	fmt.Fprintf(&b, "| kv_cache_dtype | `%s` | KV precision — backend-dependent, not free everywhere |\n", dash(s.KVCacheDtype))
 	fmt.Fprintf(&b, "| ttl_seconds | %d | idle window before the seat unloads and frees its cards |\n", s.TTLSeconds)
 	fmt.Fprintf(&b, "| launch | `%s` | which artifact set starts it |\n", dash(s.Launch))
@@ -490,6 +491,26 @@ func agentSeatSection(p Profile) string {
 		}
 		b.WriteString("\nThe store is a second device and stays **optional**: a box without one runs the seat on\n" +
 			"VRAM plus the L1 staging buffer.\n")
+	}
+	if s.AgentMaxTokens > 0 || s.AgentThinking != "" || s.AgentSampling != nil || s.AgentTimeoutSec > 0 || s.AgentSeatTokS > 0 {
+		b.WriteString("\n### Bound lane\n\nWhen this seat is the box's agent lane, the loop runs it at the settings it was\n" +
+			"measured at (ADR 0049 Amendment 3) — the installer binds these beside `agent_model`; the\n" +
+			"tier's `config_seed` values stay for the fallback seat.\n\n| setting | value |\n|---|---|\n")
+		if s.AgentMaxTokens > 0 {
+			fmt.Fprintf(&b, "| agent_max_tokens | %d |\n", s.AgentMaxTokens)
+		}
+		if s.AgentThinking != "" {
+			fmt.Fprintf(&b, "| agent_thinking | `%s` |\n", s.AgentThinking)
+		}
+		if s.AgentSampling != nil {
+			fmt.Fprintf(&b, "| agent_sampling | %s |\n", s.AgentSampling.Summary())
+		}
+		if s.AgentTimeoutSec > 0 {
+			fmt.Fprintf(&b, "| agent_timeout_sec | %d |\n", s.AgentTimeoutSec)
+		}
+		if s.AgentSeatTokS > 0 {
+			fmt.Fprintf(&b, "| agent_seat_tok_s | %.2f — seeds the D-03 auto wall until the seat-rates store has a sample |\n", s.AgentSeatTokS)
+		}
 	}
 	if s.Measured != "" {
 		fmt.Fprintf(&b, "\n> %s\n", s.Measured)

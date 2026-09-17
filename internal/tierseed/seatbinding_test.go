@@ -1,6 +1,7 @@
 package tierseed
 
 import (
+	"github.com/dmmdea/offload-harness/internal/vllmseat"
 	"strings"
 	"testing"
 
@@ -69,5 +70,22 @@ func TestAnInvalidSeatFailsResolution(t *testing.T) {
 	if _, err := Resolve(p, "ampere-6", Options{Home: "/srv/offload"}); err == nil ||
 		!strings.Contains(err.Error(), "mmproj") {
 		t.Fatalf("want a refusal naming the missing mmproj, got %v", err)
+	}
+}
+
+// TestAnInvalidBoundLaneFailsResolution (ADR 0049 Amendment 3, review finding):
+// `install seed` — the path that writes a box's config.json — resolves the vLLM
+// seat's bindings without going through Artifacts, so the seat's own validation
+// must run here too. A bound-lane value the harness config would refuse fails
+// the resolution when the seat is ACTIVE, and the fallback path is untouched.
+func TestAnInvalidBoundLaneFailsResolution(t *testing.T) {
+	p := seatProfile()
+	p.VLLMSeat = &vllmseat.Spec{ID: "seat-v", Unit: "seat-v", Port: 18797, Device: "0", ModelRepo: "hub/models--x", MaxModelLen: 4096,
+		GPUMemoryUtilization: 0.9, TTLSeconds: 300, Fallback: "seat-cpp", AgentThinking: "sometimes"}
+	if _, err := Resolve(p, "ampere-6", Options{Home: "/srv/offload", GOOS: "linux", VLLMSeatActive: true}); err == nil || !strings.Contains(err.Error(), "agent_thinking") {
+		t.Fatalf("an active seat with a bad bound-lane value must fail resolution naming the field, got %v", err)
+	}
+	if _, err := Resolve(p, "ampere-6", Options{Home: "/srv/offload", GOOS: "linux"}); err != nil {
+		t.Fatalf("the FALLBACK path binds the llama.cpp seat and must not validate the vLLM lane: %v", err)
 	}
 }

@@ -25,6 +25,17 @@ Versioning: [SemVer](https://semver.org/).
   4B**: at util 0.92 the seat takes mem0's embedder off the card (`embeddinggemma → HTTP 500`, every mem0 write
   500) and at util 0.90 vLLM refuses the 49,152 window (estimated maximum 32,928). Binding the GSQ is an operator
   decision recorded in the ADR: 32,768 @ 0.90 (blind 8.42 already measured), or move the embedder off the box.
+  **D5 = A (ADR 0049 Amendment 3): the GSQ is the bound lane at 32,768 @ util 0.90**, measured first — KV 43,690
+  tokens (1.33x), the embedder 200 beside it idle and under 4-stream load, 7.17 tok/s single / 20.36 tok/s at 4
+  streams — then wired live, and the seat joined llama-swap's `heavy` swap group so cascade seats swap with it
+  instead of dying (HTTP 500 measured). **A vLLM seat declaration can now carry its bound-lane settings**
+  (`agent_max_tokens`, `agent_thinking`, `agent_sampling`, `agent_timeout_sec`, `agent_seat_tok_s`): validated at
+  render with the harness config's own rules, emitted by `Bindings()` only when set, untouched in
+  `FallbackBindings()`. Until now the installer bound a vLLM seat as the agent lane at the tier's `config_seed`
+  values — the FALLBACK seat's 1,024 tokens and 300 s — which is the configuration the gate measured failing (3/8
+  at 300 s, 8/8 at 900 s). `profiles.json` declares the GSQ at 4,096 / thinking off / vendor sampling / 900 s /
+  `agent_seat_tok_s` 7.17 — the single-stream rate measured at THIS operating point (its completions never reach the 1,024 tokens a rate sample needs, so the D-03 auto wall
+  needs the seed). Tier docs render the utilization and the bound-lane table.
   The seat declares its engine floor as data: `engine_min_version` 0.29.0 plus the checkpoint's
   `patch_vllm_qwen35_embedding.py`, which is CARRIED, not upstream (vLLM `main` still builds a stock
   `VocabParallelEmbedding` for Qwen3.5). On 0.28.0 the patch applies and is still insufficient.
