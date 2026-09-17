@@ -13,6 +13,11 @@ date: "2026-09-16"
 >
 > **Amended 2026-09-16 — the matched-window result is in and did not close the gap** (8.35 vs 9.29 at 49,152,
 > gap 0.94, 21/24). The quality cost is recorded as real; see *Quality* below. The decision stands.
+>
+> **Amended 2026-09-16 (later) — deployed live on the reference box; the bound lane stays the 4B.** The seat
+> serves and passes the digest gate 8/8 at 900 s walls, and it cannot share the card with the embedder that backs
+> the ecosystem's memory authority at its declared window — see *Live cutover* below. Binding it is an operator
+> decision with two measured options, not a knob.
 
 ## Context — the quant nobody had found
 
@@ -101,6 +106,41 @@ Record: `Benchmarks and Optimizations/2026-09-16-16gb-tier-pass/judge-27b-49k`.
 **This decision does not touch the agent lane.** `config_seed.agent_model` remains the llama.cpp fallback, so the
 seat that ANSWERS a default contract is unchanged and no quality regression ships with this ADR.
 
+## Live cutover on the reference box (2026-09-16, same night)
+
+Everything below is measured on the Lenovo M720q with the production venv (`vllm-env-s6`, upgraded vLLM 0.28.0 →
+**0.29.0** by exact version with `uv`; torch 2.13.0 unchanged, LMCache 0.5.4 with its CUDA extensions intact,
+`pip check` clean) and the checkpoint's embedding patch applied in that venv. The tier's OTHER Qwen3.5 seat, the 4B,
+loads on 0.29 unpatched and patched and passed `contracts/digest-8.json` **8/8** (walls 42–108 s) — the patch is safe
+for the whole tier. Record: `Benchmarks and Optimizations/2026-09-16-16gb-tier-pass/live-cutover/`.
+
+| step | result |
+|---|---|
+| unit `vllm-agent-seat.service` + llama-swap entry `qwen38-27b-gsq-vllm` (aliases `a2-pool`, `agent-pool-a2`, `qwen38-27b-gsq`) | loads in **200 s** direct, **67 s** through the front door once cached; `Model loading took 10.4 GiB`, KV **2.46 GiB = 65,967 tokens**, 1.34x at 49,152; **14,694 of 15,356 MiB** |
+| digest-8 as the bound lane, measured config (4,096 / thinking off / vendor sampling), 300 s wire default | **3/8** — five `wall timeout after 300s`, zero wrong answers |
+| same, `timeout_sec: 900` | **8/8**, walls 129–516 s |
+| decode-rate sample for the auto wall (D-03) | **none recorded** — no single completion reached 1,024 tokens; the seat needs `agent_seat_tok_s` seeded (single-stream measured 5.75 tok/s → the estimate clamps to the 900 s cap, which is what 8/8 needed) |
+| embedder beside the seat at util 0.92 | `embeddinggemma /v1/embeddings → HTTP 500`; every mem0 write from every session returned 500 from the Lenovo authority while the seat was warm — the support group (`swap: false`) can neither evict it nor fit beside it |
+| the obvious fix, util 0.90 | vLLM refuses: `1.82 GiB KV cache is needed … available 1.32 GiB`; **estimated maximum model length 32,928** |
+
+**What this settles.** The seat is real, wired, callable by name and measured; it earns its keep on fan-out and on
+the cache-server path exactly as decided. As the tier's BOUND agent lane it needs 900 s walls and it takes the
+ecosystem's memory authority offline whenever it is warm, because the embedder mem0 relies on lives on this
+box's llama-swap. So the bound lane went back to the 4B the same night (`config.json.bak-2026-09-16-pre-gsq-bind`
+restored; the GSQ-bound copy kept as `config.json.gsq-bound-2026-09-16`), which is what this ADR already said
+about the agent lane. The 4B's own numbers on the new engine: 8/8, 42–108 s, blind 5.39 (ADR 0047); the GSQ's:
+8/8 at 900 s, 129–516 s, blind 8.35 — the quality argument for binding the GSQ is large and real, and it is
+blocked by co-residency, not by the seat.
+
+**The operator's decision (open, on the decision surface):**
+
+1. bind the GSQ at **32,768 @ util 0.90** — the window the card can share with the embedder; already blind-measured
+   at that window (**8.42**, 22/24 against the llama.cpp 27B, accuracy 9.54 vs 9.47, coverage 7.69), mem0 stays up,
+   concurrency at 0.90 not yet measured; or
+2. move mem0's embedder off the Lenovo (then the GSQ binds at 49,152 @ 0.92 as declared) — an architecture change
+   this ADR does not make; or
+3. keep the 4B bound (today's state) and call the GSQ by name for fan-out.
+
 ## Consequences
 
 - `profiles.json` → `profiles["ampere-16"].vllm_seat` becomes `qwen38-27b-gsq-vllm`, `max_model_len` 49,152,
@@ -112,12 +152,17 @@ seat that ANSWERS a default contract is unchanged and no quality regression ship
   so a box without the venv, without 0.29.0, or without the patch still serves an agent lane.
 - The cache-server binding for this tier is now possible for the first time since it became storeless: a binding
   is declared per vLLM seat (ADR 0045), and this seat is the tier's only vLLM-servable model of its class.
+- The bound lane on the reference box is the 4B vLLM seat (`qwen3.5-4b-vllm`, 131,072, 8/8 on 0.29); the GSQ is
+  the tier's declared vLLM seat and is served on demand. `profiles.json` keeps `gpu_memory_utilization` 0.92 /
+  `max_model_len` 49,152: that is what the seat serves when it has the card to itself, which is the seat's declared
+  shape; a co-resident binding is option 1 above and would be a profile change of its own.
 - **Not propagated** to blackwell-16 / volta-16. Neither has been measured on its own silicon and both still owe
   a vLLM seat ([ADR 0048](0048-vllm-is-a-first-class-engine-on-every-tier.md) counts the debt).
 
 ## Re-eval triggers
 
 A vLLM release that upstreams the Qwen3.5 quantized-embedding path (the patch is carried, not merged); a W4A16
-27B that fits 16 GB by quantizing its embedding; a vLLM-loadable 27B quant that closes the 0.94 coverage gap
+27B that fits 16 GB by quantizing its embedding; mem0's embedder leaving the Lenovo (removes the co-residency
+block on binding the GSQ at its declared window); a vLLM-loadable 27B quant that closes the 0.94 coverage gap
 (the matched-window result is in — a new quant, not a bigger window, is what would re-open this); and any change
 to the reference card's free VRAM, since the 49,152 window was fitted against what the box actually had free.
