@@ -50,6 +50,26 @@ Versioning: [SemVer](https://semver.org/).
   several agent-capable entries and only the binding routes the lane.
 - **`ampere-16` agent seat is now `qwen38-27b-agent`** (Qwen3.8-27B UD-IQ3_S with the MTP head embedded in the same GGUF, `--spec-type draft-mtp --spec-draft-n-max 3`, literal `--ctx-size 49152`, q8_0 KV, `--reasoning off`) — ADR 0047, register A-07. Re-audited blind on the standard instrument (24 Opus judgements, three lenses, Latin-balanced, matched budget) on a card held at its accepted 40 W / 1200 MHz profile and cooled before every arm: it beats the previous seat `qwen3.5-4b-vllm` **24/24** (9.32 vs 5.39), Gemma 4 12B + MTP 24/24 and gpt-oss-20b + EAGLE-3 24/24. The tier drops its `vllm_seat` declaration, advertises `agent_ctx_tokens` 49152, and seeds `agent_max_tokens` 4096 / `agent_timeout_sec` 900 (the seat decodes at 6.3 tok/s, so an inherited budget is silently floored by `FitFinalBudget`). The llama.cpp `qwen3.5-4b-agent` entry stays rendered as the fallback. New tier gate `include_qwen38_27b` + `__Q3827B_ALT__` in both CUDA templates, covered by the serving-config provenance hash.
 
+### Fixed
+- **A cold seat no longer runs its whole task at an 8,192-token window.** On 2026-09-16 the same `agent_run`
+  reported `ctx_window` 8,192 cold and 114,688 warm, minutes apart, on the Qube `agent-pool` seat: a silent 14x
+  loss that exhausted five compactions and truncated every file read. Replayed against the unloaded seat,
+  llama-swap reported `starting` at 3 s and `ready` at **222 s**, while the window probe gave each per-model URL
+  a fixed 60 s timeout, gave up at 60 s and 120 s, fell to the bare-root `/props` (404) and returned the
+  fallback. Three fixes, one per surface of the defect:
+  - the MCP `agent_run` door now runs the **cold-load warm-up** (D-64) the delegation door has run since
+    0.115.11 — the seat loads on the admission budget BEFORE the wall, and the result reports it as
+    `admission_wait_sec` / `admission_note`, the wire's own names. The two doors had drifted;
+  - `ProbeServedWindow` gives both per-model probes one **cold-start budget** (10 min, llama-swap's
+    `healthCheckTimeout` on the reference boxes) carried by context, instead of 60 s each; the bare-root probe
+    keeps 60 s. Bounded when the caller's context has no deadline;
+  - when the probe still cannot answer, `ResolveContextTokens` uses the box's configured `agent_ctx_tokens`
+    before the 8,192 fallback, and when the probe DOES answer and disagrees with the config, the note names
+    the disagreement — the served window wins, and a stale config is surfaced before it can mislead the
+    fallback path.
+  Mutation-verified at each call site: skipping the warm-up, restoring a per-request timeout, unbounding the
+  wait and dropping the disagreement note each turn their test red.
+
 ## [0.125.1] - 2026-09-15 - a cascade lane call never waits on this box's GPU lease (C-41c); the write-door gate's proof applies its patches (D-114)
 
 ### Fixed

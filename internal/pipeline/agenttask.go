@@ -403,7 +403,7 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	// (conservative fallback when unanswerable) and run the measured-ON ladder
 	// rungs with the real-tokenizer seam (fail-open to the legacy estimate).
 	probed, probeOK := agent.ProbeServedWindow(cctx, p.cfg.Endpoint, seat)
-	effCtx, _ := agent.ResolveContextTokens(0, probed, probeOK)
+	effCtx, _ := agent.ResolveContextTokens(0, probed, p.cfg.AgentCtxTokens, probeOK)
 	built.Loop.WithContextTokens(effCtx).WithSkeletonPrune(true).WithGCFCompact(true).
 		WithTokenizer(tokclient.New(p.cfg.Endpoint, seat, 0))
 
@@ -1308,6 +1308,12 @@ func cordonWait(since time.Time) time.Duration {
 // AdmissionBudget is admissionBudget for the other run launchers (the MCP
 // agent_run door), so every door holds at the cordon for the same window.
 func AdmissionBudget(sec int) time.Duration { return admissionBudget(sec) }
+
+// WarmSeat is warmSeat for the other run launchers (the MCP agent_run door), so
+// no door loads a cold seat inside its wall or probes its window before it is up.
+func WarmSeat(ctx context.Context, endpoint, seat string, budget time.Duration) (time.Duration, string) {
+	return warmSeat(ctx, endpoint, seat, budget)
+}
 
 // warmSeat loads an ABSENT seat outside the wall (D-64). One GET through
 // llama-swap's per-model passthrough (`/upstream/<seat>/v1/models`, the same

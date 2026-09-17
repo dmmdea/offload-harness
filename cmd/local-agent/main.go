@@ -405,7 +405,10 @@ func main() {
 		probeModel = edModel
 	}
 	probed, probeOK := agent.ProbeServedWindow(ctx, plannerBase, probeModel)
-	effCtx, ctxNote := agent.ResolveContextTokens(*ctxTokens, probed, probeOK)
+	// cfg.AgentCtxTokens is the seat's served window from the tier profile: the
+	// fallback when the probe cannot answer inside the run's budget, so an
+	// unanswered probe no longer silently drops the whole run to 8,192.
+	effCtx, ctxNote := agent.ResolveContextTokens(*ctxTokens, probed, cfg.AgentCtxTokens, probeOK)
 	if ctxNote != "" {
 		fmt.Fprintln(os.Stderr, "[local-agent] "+ctxNote)
 	}
