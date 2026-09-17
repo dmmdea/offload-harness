@@ -1,0 +1,568 @@
+// The fleet health probe: concurrent, memoised, negative-cached, and bounded
+// inside the capacity wait (W-02/S-10 of
+// plans/2026-09-17-harness-scheduling-diagnosis.md), plus the two placement
+// reads that ignored a node's own ceiling (W-15a/W-15b, S-14/S-12).
+//
+// Measured motivation for the whole file: 46 live delegation rows kept work on
+// the local seat because ONE remote's health probe timed out — and in 41 of
+// them that remote had zero jobs in flight. The probe was serial, uncached, and
+// re-run per subtask, per re-placement, per retry and per capacity-wait tick.
+
+package delegate
+
+import (
+	"net"
+	"net/http"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/dmmdea/offload-harness/internal/core"
+)
+
+// slowNode is a health-only fixture: it answers /fleet/health after delay and
+// counts how many times it was asked. Nothing dispatches to it — these tests
+// exercise the PROBE, not the job wire.
+func slowNode(t *testing.T, id string, delay time.Duration) (*fakeNode, string) {
+	t.Helper()
+	f := &fakeNode{t: t, agentEnabled: true, resident: true, ctxTokens: 32768, nodeID: id, healthDelay: delay}
+	return f, f.server().URL
+}
+
+// TestFetchViewsProbesEveryRemoteConcurrently (W-02a). Three remotes, each
+// spending 1.5 s on health: serially that is 4.5 s of pure waiting on the
+// critical path of EVERY subtask, and the fan-out multiplies it. Concurrently
+// it is one remote's latency.
+//
+// Why all three sleep and not just one: with a single slow remote the serial
+// loop and the concurrent fan-out cost the same wall, so the assertion could
+// never fail on the defect it exists to catch.
+//
+// The parallel views/bases/probeErrs contract is asserted too — the pairing is
+// positional (a NodeView carries no base), so a fan-out that reassembled in
+// COMPLETION order rather than configured order would hand every caller the
+// wrong dial address for the node it picked.
+func TestFetchViewsProbesEveryRemoteConcurrently(t *testing.T) {
+	const delay = 1500 * time.Millisecond
+	_, aURL := slowNode(t, "node-a", delay)
+	_, bURL := slowNode(t, "node-b", delay)
+	_, cURL := slowNode(t, "node-c", delay)
+	r := &runner{cfg: testCfg(t), remotes: []string{aURL, bURL, cURL}}
+
+	start := time.Now()
+	views, bases, probeErrs := r.fetchViews(t.Context())
+	elapsed := time.Since(start)
+
+	if len(probeErrs) != 0 {
+		t.Fatalf("probeErrs = %v, want none — every stub answers", probeErrs)
+	}
+	if got, want := len(views), 3; got != want {
+		t.Fatalf("views = %d, want %d", got, want)
+	}
+	if elapsed > 2500*time.Millisecond {
+		t.Fatalf("fetchViews took %s for three %s remotes — serial, not concurrent (concurrent is ~%s)",
+			elapsed.Round(time.Millisecond), delay, delay)
+	}
+	wantBases := []string{aURL, bURL, cURL}
+	wantIDs := []string{"node-a", "node-b", "node-c"}
+	for i := range wantBases {
+		if bases[i] != wantBases[i] {
+			t.Fatalf("bases = %v, want the CONFIGURED order %v", bases, wantBases)
+		}
+		if views[i].NodeID != wantIDs[i] {
+			t.Fatalf("views[%d] = %q, want %q — views and bases must stay parallel", i, views[i].NodeID, wantIDs[i])
+		}
+	}
+}
+
+// TestFetchViewsMemoisesOneSnapshotWithinARun (W-02b): the sibling subtasks of
+// ONE Run share one fleet snapshot instead of each paying its own probe.
+// route=spread already amortised this with a single probe at run start; auto,
+// remote, every re-placement and every retry did not.
+//
+// The memo is per RUNNER, which is per Run: a second Run must probe again, or a
+// long-lived delegator would place on a snapshot from a previous call.
+func TestFetchViewsMemoisesOneSnapshotWithinARun(t *testing.T) {
+	node, url := slowNode(t, "node-a", 0)
+	r := &runner{cfg: testCfg(t), remotes: []string{url}}
+
+	// One priming call, then the siblings: concurrent, the way a fan-out's
+	// subtasks actually arrive.
+	first, _, _ := r.fetchViews(t.Context())
+	if len(first) != 1 {
+		t.Fatalf("views = %d, want 1", len(first))
+	}
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			views, bases, _ := r.fetchViews(t.Context())
+			if len(views) != 1 || len(bases) != 1 || views[0].NodeID != "node-a" {
+				t.Errorf("memoised snapshot = %v / %v, want the one node", views, bases)
+			}
+		}()
+	}
+	wg.Wait()
+	if got := node.healths.Load(); got != 1 {
+		t.Fatalf("the node served %d health probes for one run's siblings, want 1 — the probe is not memoised", got)
+	}
+
+	// A SECOND Run gets its own snapshot.
+	r2 := &runner{cfg: testCfg(t), remotes: []string{url}}
+	if _, _, _ = r2.fetchViews(t.Context()); node.healths.Load() != 2 {
+		t.Fatalf("a new run brought the total to %d health probes, want 2 — the memo must not outlive its Run", node.healths.Load())
+	}
+}
+
+// TestRetrySeatBusyReadsTheNodeCeiling (W-15a, S-14; register D-46 shipped the
+// RULE and not the threshold). "The retry seat is already generating for
+// another job" was implemented as jobs_running > 0, so a four-worker node with
+// ONE job running refused a cross-seat retry it had three free workers for. The
+// predicate is the ceiling-aware one the gate already owns:
+// !provablyStartsNow(view).
+func TestRetrySeatBusyReadsTheNodeCeiling(t *testing.T) {
+	// queue_depth is set on both fixtures because a node publishes it as its
+	// non-terminal job count: {queue_depth 0, jobs_running 4} is not a shape
+	// any node emits, and provablyStartsNow reads queue_depth 0 as proof that
+	// the next job starts at once.
+	room := &fakeNode{t: t, agentEnabled: true, resident: true, ctxTokens: 32768, nodeID: "node-room",
+		maxConcurrentJobs: 4, jobsRunning: 1, jobsQueued: 0, queueDepth: 1}
+	roomURL := room.server().URL
+	full := &fakeNode{t: t, agentEnabled: true, resident: true, ctxTokens: 32768, nodeID: "node-full",
+		maxConcurrentJobs: 4, jobsRunning: 4, jobsQueued: 0, queueDepth: 4}
+	fullURL := full.server().URL
+
+	r := &runner{cfg: testCfg(t)}
+	if busy, why := r.retrySeatBusy(t.Context(), placement{base: roomURL}); busy {
+		t.Fatalf("a node at 1 of 4 workers reported busy (%q) — three workers are free, the retry must land", why)
+	}
+	busy, why := r.retrySeatBusy(t.Context(), placement{base: fullURL})
+	if !busy {
+		t.Fatal("a node at 4 of 4 workers must be busy: the retry would only queue behind a full node")
+	}
+	if !strings.Contains(why, "jobs_running 4") || !strings.Contains(why, "fresh health") {
+		t.Fatalf("busy note = %q, want the node's own numbers and the source", why)
+	}
+}
+
+// TestDealSpreadKeysTheCycleOnTheDialBase (W-15b, S-12): the per-cycle `dealt`
+// set keyed on NodeID while every other exclusion in run.go keys on the dial
+// base, so two remotes advertising an EMPTY (or identical) node_id collapsed
+// into one entry — the second remote of the cycle found its key already taken,
+// the cycle was reshuffled, and one seat took both subtasks while the other
+// idled.
+//
+// The fixture is the shape that makes the collapse visible: two seats of
+// different sizes, both with node_id "", and mechanical contracts — the fit
+// score sends every mechanical slot to the SMALLEST adequate seat, so after a
+// reshuffle it wins again and the roomy seat is never dealt.
+func TestDealSpreadKeysTheCycleOnTheDialBase(t *testing.T) {
+	const aBase, bBase = "http://node-a:18811", "http://node-b:18811"
+	r := &runner{
+		spreadViews: []NodeView{
+			{NodeID: "", AgentEnabled: true, AgentResident: true, AgentCtxTokens: 131072},
+			{NodeID: "", AgentEnabled: true, AgentResident: true, AgentCtxTokens: 32768},
+		},
+		spreadBases: []string{aBase, bBase},
+	}
+	goals := repeatGoal(fitMechGoal, 4)
+	contracts := make([]core.AgentContract, len(goals))
+	for i, g := range goals {
+		contracts[i] = fitSubtask(g, 100).Contract
+	}
+	dealtTo := map[string]int{}
+	for _, sl := range r.dealSpread(contracts, fitLocal()) {
+		dealtTo[sl.base]++
+	}
+	for _, base := range []string{aBase, bBase} {
+		if dealtTo[base] == 0 {
+			t.Fatalf("deal = %v: %s was never dealt a subtask — two remotes with the same node_id collapsed into one cycle entry", dealtTo, base)
+		}
+	}
+}
+
+// deadListener accepts a TCP connection and closes it at once: the probe gets a
+// transport failure with no HTTP answer at all — a dead node's shape — and the
+// listener COUNTS the dials, which is how a test proves a probe did NOT happen.
+func deadListener(t *testing.T) (string, *atomic.Int64) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	var dials atomic.Int64
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			dials.Add(1)
+			_ = c.Close()
+		}
+	}()
+	t.Cleanup(func() { _ = ln.Close() })
+	return "http://" + ln.Addr().String(), &dials
+}
+
+// blackHole accepts a connection and then never answers, so the probe blocks
+// until its own deadline. That is the shape a node behind a dropped route has,
+// and it is the only one that can demonstrate a BOUND — a refused dial fails
+// instantly and would prove nothing.
+func blackHole(t *testing.T) (string, *atomic.Int64) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	var dials atomic.Int64
+	var mu sync.Mutex
+	var held []net.Conn
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			dials.Add(1)
+			mu.Lock()
+			held = append(held, c)
+			mu.Unlock()
+		}
+	}()
+	t.Cleanup(func() {
+		_ = ln.Close()
+		mu.Lock()
+		defer mu.Unlock()
+		for _, c := range held {
+			_ = c.Close()
+		}
+	})
+	return "http://" + ln.Addr().String(), &dials
+}
+
+// shortProbeTimeout compresses the per-base health bound for one test.
+func shortProbeTimeout(t *testing.T, d time.Duration) {
+	t.Helper()
+	old := fetchNodeViewTimeout
+	fetchNodeViewTimeout = d
+	t.Cleanup(func() { fetchNodeViewTimeout = old })
+}
+
+// withNegativeProbeCache sets the negative-cache window for one test; 0 is off.
+func withNegativeProbeCache(t *testing.T, d time.Duration) {
+	t.Helper()
+	old := probeNegativeTTL
+	probeNegativeTTL = d
+	t.Cleanup(func() { probeNegativeTTL = old })
+}
+
+// TestFetchViewsNegativeCachesADeadBase (W-02c). A base that failed at the
+// TRANSPORT is not re-dialled for probeNegativeTTL — the measured defect is a
+// fan-out paying fetchNodeViewTimeout per subtask for the same dead socket —
+// and its reason is REPLAYED into probeErrs, because a base that silently
+// disappeared from the errors would read as a node nobody ever configured.
+// A healthy sibling is untouched: the cache is per base, never per fleet.
+func TestFetchViewsNegativeCachesADeadBase(t *testing.T) {
+	noProbeMemo(t) // the memo would answer the second call before the cache is reached
+	deadURL, dials := deadListener(t)
+	good, goodURL := slowNode(t, "node-good", 0)
+	r := &runner{cfg: testCfg(t), remotes: []string{deadURL, goodURL}}
+
+	views, bases, errs := r.fetchViews(t.Context())
+	if len(views) != 1 || len(bases) != 1 || bases[0] != goodURL {
+		t.Fatalf("first probe: views/bases = %v / %v, want only the healthy node", views, bases)
+	}
+	if len(errs) != 1 || !strings.Contains(errs[0], deadURL) {
+		t.Fatalf("first probe: probeErrs = %v, want one error naming %s", errs, deadURL)
+	}
+	if strings.Contains(errs[0], "re-dial in") {
+		t.Fatalf("first probe reported a CACHED reason (%q) — the first probe must be a real dial", errs[0])
+	}
+	if got := dials.Load(); got != 1 {
+		t.Fatalf("dead base was dialled %d times on the first probe, want 1", got)
+	}
+
+	_, _, errs = r.fetchViews(t.Context())
+	if got := dials.Load(); got != 1 {
+		t.Fatalf("dead base was dialled %d times over two probes — it is re-dialled inside the negative window", got)
+	}
+	// The cached reason says how stale the verdict is and when the base is
+	// dialled again — not the configured window, which told an operator
+	// neither.
+	if len(errs) != 1 || !strings.Contains(errs[0], deadURL) ||
+		!strings.Contains(errs[0], "cached") || !strings.Contains(errs[0], "re-dial in") {
+		t.Fatalf("probeErrs = %v, want the cached reason naming %s with its age and when it is re-dialled", errs, deadURL)
+	}
+	if got := good.healths.Load(); got != 2 {
+		t.Fatalf("the healthy node served %d probes, want 2 — the negative cache is per base, not per fleet", got)
+	}
+
+	// The window EXPIRES: a node that reboots inside a long Run is picked up
+	// again rather than written off for the rest of it.
+	withNegativeProbeCache(t, 0)
+	if _, _, errs = r.fetchViews(t.Context()); dials.Load() != 2 {
+		t.Fatalf("dead base was dialled %d times after the window expired, want 2 (%v)", dials.Load(), errs)
+	}
+}
+
+// TestCapacityWaitTickIsBoundedByThePerBaseProbe (W-02d, S-10) pins the
+// property the reviewer of the first cut named: ONE DEAD REMOTE DOES NOT STALL
+// THE TICK BEYOND THE PER-BASE BOUND. The wait re-reads fleet health every
+// placementPollInterval, and before this work that read was serial and
+// unbounded from the wait's point of view, so a black-holed remote cost each
+// tick fetchNodeViewTimeout — with several of them, a multiple of it.
+//
+// What delivers the property is the concurrent fan-out plus the per-base cap,
+// not the tick's own context: the healthy sibling's goroutine finishes in
+// milliseconds and its view is returned as soon as the slowest goroutine hits
+// ITS bound. The fixture makes that the only thing holding the wait up — the
+// memo is off (compressWait) and so is the negative cache, so the black hole is
+// re-probed on every single tick — and the wait still has to land inside a TTL
+// that only fits if each tick costs about one per-base bound.
+func TestCapacityWaitTickIsBoundedByThePerBaseProbe(t *testing.T) {
+	compressPolls(t, 5*time.Millisecond, time.Second)
+	compressWait(t, 100*time.Millisecond, 0)
+	withNegativeProbeCache(t, 0)
+	shortProbeTimeout(t, 300*time.Millisecond)
+
+	blackURL, _ := blackHole(t)
+	node, url := acceptingNode(t, "node-busy", "qube after the wait", func(f *fakeNode) {
+		f.dispatchHook = freesAfter(3, http.StatusServiceUnavailable)
+	})
+	cfg := testCfg(t)
+	cfg.AgentPlacementWaitSec = 2
+
+	results, sum, err := RunWith(t.Context(), cfg, neverLocal(t),
+		[]core.AgentContract{remoteContract()}, "remote", []string{blackURL, url}, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if sum.Succeeded != 1 {
+		t.Fatalf("summary = %+v (%q): the wait never re-asked the node that freed — a black-holed remote ate the tick",
+			sum, results[0].Result.Reason)
+	}
+	if got := node.dispatches.Load(); got < 4 {
+		t.Fatalf("node saw %d dispatches, want the wait to have re-asked it on each tick (>= 4)", got)
+	}
+	// Three ticks at roughly one per-base bound each have to fit inside the
+	// 2 s TTL. A tick that cost a MULTIPLE of the per-base bound — a serial
+	// probe, or a fan-out that waited on the roster rather than on its slowest
+	// member — would not get there.
+	if pr := results[0]; pr.CapacityWaitSec > 1.5 {
+		t.Fatalf("capacity_wait_sec = %.2f of a 2 s TTL, want ~3 ticks of 300ms — a dead remote is costing more than the per-base bound", pr.CapacityWaitSec)
+	}
+}
+
+// TestFixedSleepsAreJittered: every dispatcher in the fleet sleeps on the same
+// three constants (pollEvery, placementPollInterval, refusalCooldown), so K
+// sessions started within a second of each other re-read health, re-dispatch
+// and re-ask a refusing node in lockstep for the whole run. Each sleep is now
+// randomised by +/-20 %, which spreads them apart within a few ticks and leaves
+// the cadence's mean alone.
+//
+// The clamp is the other half and the one with teeth: jitter de-synchronises,
+// it never licenses a sleep to overshoot the deadline it lives under.
+func TestFixedSleepsAreJittered(t *testing.T) {
+	const base = time.Second
+	lo, hi := time.Duration(0.8*float64(base)), time.Duration(1.2*float64(base))
+	seen := map[time.Duration]int{}
+	for i := 0; i < 200; i++ {
+		d := jittered(base)
+		if d < lo || d > hi {
+			t.Fatalf("jittered(%s) = %s, want it inside [%s, %s]", base, d, lo, hi)
+		}
+		seen[d]++
+	}
+	if len(seen) < 2 {
+		t.Fatalf("200 samples produced %d distinct duration(s) — the sleep is not jittered at all", len(seen))
+	}
+
+	// A compressed clock stays compressed: a test that set an interval to zero
+	// means zero, and jitter must not manufacture a sleep out of it.
+	if got := jittered(0); got != 0 {
+		t.Fatalf("jittered(0) = %s, want 0 — a zeroed test clock must stay zero", got)
+	}
+
+	// The clamp: with less left than the jittered sleep, the sleep is what is
+	// left — never one millisecond past the deadline.
+	if got := jitteredWithin(base, 10*time.Millisecond); got != 10*time.Millisecond {
+		t.Fatalf("jitteredWithin(%s, 10ms) = %s, want 10ms — jitter must not run past its deadline", base, got)
+	}
+	// With no deadline to protect, the jittered value stands.
+	if got := jitteredWithin(base, 0); got < lo || got > hi {
+		t.Fatalf("jitteredWithin(%s, 0) = %s, want it inside [%s, %s]", base, got, lo, hi)
+	}
+}
+
+// TestProbeTickBoundNeverOutlivesTheWaitNorUndercutsThePerBaseBound pins BOTH
+// directions of the tick bound, because each one was got wrong once.
+//
+// Too tight is the blocker: a bound below fetchNodeViewTimeout cancels a
+// slow-but-alive remote on every tick, and since a cancellation is (rightly)
+// never attributed to the node, it is not negative-cached either — the remote
+// is invisible for the whole wait and the defer says "no node had room".
+//
+// Too loose is the original defect: the raw run context, so a probe outlives
+// the wait it was serving.
+func TestProbeTickBoundNeverOutlivesTheWaitNorUndercutsThePerBaseBound(t *testing.T) {
+	compressWait(t, 100*time.Millisecond, 0)
+	if got := probeTickBound(time.Now().Add(time.Hour)); got < fetchNodeViewTimeout {
+		t.Fatalf("bound with an hour of wait left = %s, below the per-base bound %s: a remote that answers between the two is cancelled on every tick and never becomes a candidate",
+			got, fetchNodeViewTimeout)
+	}
+	if got := probeTickBound(time.Now().Add(30 * time.Millisecond)); got > 30*time.Millisecond || got <= 0 {
+		t.Fatalf("bound with 30ms of wait left = %s, want what is left — a probe may not outlive the wait", got)
+	}
+	if got := probeTickBound(time.Now().Add(-time.Second)); got <= 0 {
+		t.Fatalf("bound past the deadline = %s, want a positive value — a zero-length context cancels the probe before it is sent", got)
+	}
+}
+
+// TestCapacityWaitLandsOnASlowButHealthyRemote is the blocker the first cut of
+// the per-tick bound introduced. `fetchNodeViewTimeout` is this repo's OWN
+// boundary between slow and down — "a node that cannot answer inside this is
+// down, not busy" (nodeview.go) — and the first bound, two poll intervals, sat
+// well below it: 6 s against 15 s in production. A remote whose health takes
+// 6–15 s under load was therefore cancelled on EVERY tick for the whole wait,
+// never became a candidate, and (correctly) was never negative-cached either,
+// because a context cancellation says nothing about the node.
+//
+// Compressed here at the same ratio: a 1 s per-base bound, a 100 ms poll
+// interval (so the old bound was 200 ms) and a node that answers health in
+// 400 ms — slow, comfortably alive, and invisible under the old bound.
+func TestCapacityWaitLandsOnASlowButHealthyRemote(t *testing.T) {
+	compressPolls(t, 5*time.Millisecond, time.Second)
+	compressWait(t, 100*time.Millisecond, 0)
+	shortProbeTimeout(t, time.Second)
+
+	node, url := acceptingNode(t, "node-slow-health", "qube after the wait", func(f *fakeNode) {
+		f.healthDelay = 400 * time.Millisecond
+		f.dispatchHook = freesAfter(1, http.StatusServiceUnavailable)
+	})
+	cfg := testCfg(t)
+	cfg.AgentPlacementWaitSec = 3
+
+	results, sum, err := RunWith(t.Context(), cfg, neverLocal(t),
+		[]core.AgentContract{remoteContract()}, "remote", []string{url}, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if sum.Succeeded != 1 {
+		t.Fatalf("summary = %+v (%q): a remote that answers health inside the per-base bound must still be a candidate — the tick bound cancelled it every tick",
+			sum, results[0].Result.Reason)
+	}
+	if got := node.dispatches.Load(); got < 2 {
+		t.Fatalf("node saw %d dispatches, want the wait to have re-asked it", got)
+	}
+}
+
+// TestCapacityWaitDeferNamesTheProbeFailures: the tick threw its probeErrs away
+// with `_`, so a wait spent entirely on remotes that never answered ended as
+// "no node had room … 0 refusal(s)" — an operator told to add a node when every
+// node they have was failing to answer. The defer now names each base that
+// failed a probe DURING the wait, with the last reason and how many times,
+// kept distinct from refusals (nobody refused anything).
+func TestCapacityWaitDeferNamesTheProbeFailures(t *testing.T) {
+	compressPolls(t, 5*time.Millisecond, time.Second)
+	compressWait(t, 50*time.Millisecond, 0)
+	shortProbeTimeout(t, 200*time.Millisecond)
+
+	deadURL, _ := deadListener(t)
+	// A second remote that always refuses is what gets the subtask INTO the
+	// wait; with only an unreachable base the run never reaches this path.
+	_, refusedURL := refusingNode(t, "node-full", http.StatusServiceUnavailable, nil)
+	cfg := testCfg(t)
+	cfg.AgentPlacementWaitSec = 1
+
+	results, sum, err := RunWith(t.Context(), cfg, neverLocal(t),
+		[]core.AgentContract{remoteContract()}, "remote", []string{deadURL, refusedURL}, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if sum.Deferred != 1 {
+		t.Fatalf("summary = %+v, want the wait to have expired as a defer", sum)
+	}
+	reason := results[0].Result.Reason
+	if !strings.Contains(reason, deadURL) {
+		t.Fatalf("defer reason = %q, want it to name the base that never answered (%s)", reason, deadURL)
+	}
+	if !strings.Contains(reason, "probe") {
+		t.Fatalf("defer reason = %q, want the probe failures called out distinctly from refusals", reason)
+	}
+}
+
+// TestCapacityWaitNegativeCachesADeadRemote pins the interaction the per-tick
+// bound must not break, and it is the reason the bound is what is LEFT of the
+// wait rather than min(fetchNodeViewTimeout, remaining).
+//
+// The per-base probe derives its context from the tick's. Give the tick a
+// deadline of fetchNodeViewTimeout and the two expire together — the tick's
+// microseconds FIRST, because it was created first — so every probe failure
+// looks like the caller giving up, noteDeadProbe (rightly) declines to cache
+// it, and a dead base is re-dialled at full cost on every tick for the whole
+// wait. Leaving the tick bounded only by the wait lets the per-base bound be
+// the one that fires, which is what makes the failure attributable to the node
+// and lets the 30 s negative cache absorb the repeats.
+func TestCapacityWaitNegativeCachesADeadRemote(t *testing.T) {
+	compressPolls(t, 5*time.Millisecond, time.Second)
+	compressWait(t, 20*time.Millisecond, 0)
+	shortProbeTimeout(t, 150*time.Millisecond)
+	// SHORTER than the wait on purpose: the first placement probe populates the
+	// cache before the wait even starts, so a 30 s window would hide the tick's
+	// behaviour entirely. At 250 ms the wait has to RE-LEARN the base several
+	// times, which is exactly when attribution decides the cost.
+	withNegativeProbeCache(t, 250*time.Millisecond)
+
+	// A BLACK HOLE, not a dead listener: only a probe that fails by TIMEOUT can
+	// exercise this at all. A refused dial fails in about a millisecond, long
+	// before either deadline, so it is attributable however the contexts are
+	// nested and the test would pass on any implementation.
+	deadURL, dials := blackHole(t)
+	_, refusedURL := refusingNode(t, "node-full", http.StatusServiceUnavailable, nil)
+	cfg := testCfg(t)
+	cfg.AgentPlacementWaitSec = 2
+
+	if _, _, err := RunWith(t.Context(), cfg, neverLocal(t),
+		[]core.AgentContract{remoteContract()}, "remote", []string{deadURL, refusedURL}, nil); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	// One dial for the whole run: the first probe learns the base is dead and
+	// the negative cache answers for the rest of the wait. A wait that re-dials
+	// it every tick spends its TTL on a socket nobody is listening to.
+	t.Logf("dials across the wait: %d", dials.Load())
+	if got := dials.Load(); got > 12 {
+		t.Fatalf("the dead base was dialled %d times across one capacity wait, want it negative-cached after the first — the tick's deadline is firing before the per-base one, so nothing is attributable to the node", got)
+	}
+}
+
+// TestProbeMemoCannotServeACapacityWaitTick pins the relation between three
+// PRODUCTION constants that nothing else guards: every capacity-wait test
+// zeroes the memo through compressWait, precisely so it can compress the tick,
+// so none of them would notice the day these numbers cross.
+//
+// The relation is not `fetchViewsMemoTTL < placementPollInterval`, which is
+// what the memo's own comment used to claim. The tick is JITTERED, so the
+// shortest gap between two ticks is (1 - jitterFrac) x placementPollInterval —
+// 2.4 s, not 3 s. A memo that outlives THAT can answer a tick from cache, and
+// the capacity wait, whose one job is to notice a node that just freed, would
+// be polling its own snapshot.
+func TestProbeMemoCannotServeACapacityWaitTick(t *testing.T) {
+	// Deliberately NOT compressed: this is a statement about what ships.
+	shortestTick := time.Duration((1 - jitterFrac) * float64(placementPollInterval))
+	if fetchViewsMemoTTL >= shortestTick {
+		t.Fatalf("fetchViewsMemoTTL = %s but the shortest jittered tick is %s (%.0f%% of placementPollInterval = %s): "+
+			"the memo can answer a capacity-wait tick from cache, so the wait polls its own snapshot instead of the fleet",
+			fetchViewsMemoTTL, shortestTick, 100*(1-jitterFrac), placementPollInterval)
+	}
+	// And the negative cache must outlive a tick too, or a dead base is
+	// re-dialled every tick at the per-base bound — the cost the cache exists
+	// to amortise.
+	if probeNegativeTTL <= shortestTick {
+		t.Fatalf("probeNegativeTTL = %s does not outlive one %s tick: a dead base is re-dialled every tick of the wait",
+			probeNegativeTTL, shortestTick)
+	}
+}

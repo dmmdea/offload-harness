@@ -216,3 +216,41 @@ func TestInflightReportsAStartingSeatWithoutTouchingTheUpstream(t *testing.T) {
 		t.Fatalf("after ready: reading = %+v err=%v; want 7 in flight via metrics", rd, err)
 	}
 }
+
+// TestRunningReadsTheSeatStateWithoutEverAskingTheUpstream is register C-05 in
+// one test: a health path may learn whether the agent seat is LOADED, and may
+// not do anything that could load it. Running answers from /running alone —
+// alias-resolved, so a seat bound by alias and listed by canonical id is still
+// seen — and never issues an /upstream request, not even for a seat that is
+// loaded and idle and would answer instantly.
+func TestRunningReadsTheSeatStateWithoutEverAskingTheUpstream(t *testing.T) {
+	f := &fakeSwap{id: "qwen3.8-27b-vllm", alias: "agent-pool", roster: true}
+	f.loaded.Store(true)
+	f.inflight.Store(2) // the upstream has an answer; Running must not want it
+	srv := httptest.NewServer(f.handler())
+	defer srv.Close()
+
+	rd, err := Running(context.Background(), srv.Client(), srv.URL, "agent-pool")
+	if err != nil {
+		t.Fatalf("Running: %v", err)
+	}
+	if !rd.Loaded || rd.Starting || rd.Canonical != "qwen3.8-27b-vllm" {
+		t.Fatalf("reading = %+v; want loaded, not starting, canonical resolved from the alias", rd)
+	}
+	if rd.Inflight != 0 {
+		t.Fatalf("Inflight = %d: Running does not count requests, and a caller must not read one out of it", rd.Inflight)
+	}
+
+	// A starting seat, and an unloaded one, are both answered the same way.
+	f.starting.Store(true)
+	if rd, err = Running(context.Background(), srv.Client(), srv.URL, "agent-pool"); err != nil || !rd.Loaded || !rd.Starting {
+		t.Fatalf("starting seat: reading = %+v err = %v; want loaded + starting", rd, err)
+	}
+	f.loaded.Store(false)
+	if rd, err = Running(context.Background(), srv.Client(), srv.URL, "agent-pool"); err != nil || rd.Loaded {
+		t.Fatalf("unloaded seat: reading = %+v err = %v; want not loaded", rd, err)
+	}
+	if n := f.metricsHits.Load(); n != 0 {
+		t.Fatalf("Running issued %d upstream metrics request(s): probing a seat through /upstream is what LOADS it (C-05)", n)
+	}
+}

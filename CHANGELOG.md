@@ -6,7 +6,111 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **`GET /fleet/jobs/{id}?wait=<seconds>` answers when the job FINISHES** (register S-19, diagnosis
+  `2026-09-17-harness-scheduling-diagnosis.md` §2(d)/§5.3). The node had no completion event at all,
+  so the only way to learn a job was done was to ask again in three seconds — all 236 measured
+  queue-deadline rows report exactly `101 poll(s)` = 300 s of pure polling — while the job store had
+  been broadcasting every terminal transition all along. The handler now waits on that broadcast
+  (`Jobs.WaitTerminal`), returning at the finish, at the wait, or when the caller hangs up, and
+  answering with the job's live state either way. Capped at `fleetnode.MaxJobWaitSec` = 12 s, which
+  MUST stay below the delegator's `pollRequestTimeout` (15 s, `internal/delegate/run.go`) or every
+  long poll would be cancelled client-side just before the node answered — pinned by a test that reads
+  the delegator's own source. Absent the parameter the route is byte-identical, so every deployed
+  delegator is unaffected and the 3 s poll remains the fallback. `finish` and the drain's shutdown mark
+  now broadcast too, so a parked poll wakes on any terminal transition, not only on the one that frees
+  a slot.
+- **`/fleet/health` publishes six honest fields about work in flight** (registers S-17, S-36; all
+  additive and `omitempty`, so a node without the lane, the lease or the holds emits a byte-identical
+  payload and an older delegator decodes exactly what it did before):
+  `jobs_admitting` (the subset of `jobs_running` whose worker is still in the run's ADMISSION phase —
+  cordon → pre-flight → warm → coherence probe, up to 300 s with the card idle — counted from this
+  process's own `gpuactivity` records, ADR 0041); `seat_loaded` / `seat_starting` (llama-swap's
+  `/running` verdict on the agent seat, read alias-aware through `internal/seatload` and `/running`
+  ONLY, never a path that could LOAD the seat — register C-05; BOTH a failed read and an AMBIGUOUS one
+  leave the pair absent rather than publishing "not loaded", where ambiguous is `seatload`'s own
+  predicate — the roster GET failed AND `/running` lists models the bare-name fallback cannot match, so
+  an alias-bound seat cannot be seen. That is the same refusal `gpu_drain` and
+  `internal/placement/live.go` already apply to this reading, and it is narrower than "the roster
+  failed": a failed roster over an EMPTY `/running` is knowable and publishes `seat_loaded:false`.
+  Both withheld cases are logged); `lease_exclusive` / `lease_draining` (what the held reservation is
+  DOING, beside `busy`'s verdict about declared time); and `recent_agent_wall_sec` (the median wall of
+  the last up to 8 agent jobs to finish, from the same job map `/fleet/jobs` walks — the completion
+  signal a node with no `seat_rate` sample could not otherwise publish).
+
+### Changed
+- **`saturation.score` no longer counts a job whose worker is still in admission** (register S-17).
+  `jobs.go` flips a job to `running` before `execute()`, and the run then spends up to 300 s in
+  admission — so the node published `score 1.0` beside `gpu_util_pct 0`, and in 10 of 47 measured
+  lease-timeout rows the box had zero agent jobs actually in flight. The exclusion applies to the
+  CONCURRENCY numerator only: `saturation.high`, `saturation.idle_slot` and the depth term are
+  unchanged, because the slot really is taken and `max_queue_depth` bounds every admitted job whatever
+  its phase.
+- `internal/seatload` gained `Running`, the `/running`-only half of `Inflight` (no `/upstream` read at
+  all, so it can never load an unloaded seat), shared by both so the alias resolution has one
+  implementation.
+- **The delegator's fixed sleeps are jittered by ±20 %** (`pollEvery`, `placementPollInterval`,
+  `refusalCooldown`). Every dispatcher sleeps on the same constants, so K sessions started within a second
+  of each other re-read health, re-dispatch and re-ask a refusing node in lockstep for a whole run. Each
+  sleep is scaled by a uniform factor in `[0.8, 1.2]` — the cadence's mean is unchanged — and the
+  jitter is CLAMPED so no sleep can run past the deadline it lives under (the wait's TTL, the poll
+  deadline). The cooldown is jittered once when the refusal is recorded rather than re-rolled per check, so
+  a node cannot flicker in and out of the candidate list.
+
 ### Fixed
+- **The 30 s blanket `WriteTimeout` truncated every handler that legitimately runs longer** (register
+  S-09). Go arms the write deadline at header-read, so the table bounded the chat lane — whose own
+  budget is `ChatProxyTimeout` = 10 minutes — and a forwarded cascade call that generated past 30 s
+  was cut mid-write and read to the caller as broken infrastructure. The blanket STAYS as the floor for
+  every other route; the two handlers that outlive it (the chat lane, and the new long poll) now extend
+  their own deadline per request with `http.NewResponseController(w).SetWriteDeadline` — the lane to
+  `ChatProxyTimeout` + 30 s of copy-back slack, the poll to its wait + 2 s. A `ResponseWriter` that
+  cannot carry a deadline simply runs under the blanket, as before. `TestServeTimeoutTable` now pins
+  both halves: the blanket value AND that exactly those two handlers extend it.
+- **A capacity wait could not see a remote whose health was merely SLOW, and never said so.** The first cut
+  of the per-tick probe bound was `2 x placementPollInterval` (6 s), below `fetchNodeViewTimeout` (15 s) —
+  this repo's own boundary between slow and down. A remote answering health in 6-15 s under load was
+  cancelled on every tick for the whole wait, never became a candidate, and was never negative-cached either
+  (a cancellation is not evidence about a node), so the wait expired with `no node had room ... 0
+  refusal(s)`: an operator told to add a node while the nodes they had were failing to answer. The tick is
+  now bounded only by what is LEFT of the wait; the concurrent fan-out's per-base `fetchNodeViewTimeout` cap
+  is what keeps one dead remote from stalling it, and the 30 s negative cache absorbs the repeats.
+  `min(fetchNodeViewTimeout, remaining)` was tried and reverted: the per-base context is derived from the
+  tick's, so the two deadlines land on the same instant, the tick's fires first, nothing is ever attributable
+  to a node, and a dead base is re-dialled at full cost every tick (measured: 30 dials across one compressed
+  wait, 6 after). The tick's `probeErrs`, previously dropped with `_`, are now tallied per base and folded
+  into the capacity defer as their own clause -- `; N probe(s) failed during the wait: <base>: <reason>
+  (last of 3)` -- distinct from refusals, because nobody declined the work.
+- **The fleet health probe was serial, uncached and on the critical path of every placement** (register
+  D-106; `plans/2026-09-17-harness-scheduling-diagnosis.md` §2(d), S-10/W-02). `delegate.fetchViews`
+  probed every configured remote SEQUENTIALLY at `fetchNodeViewTimeout` (15 s) each, with no cache, once
+  per subtask on `route=auto`/`remote`, once per re-placement, once per retry and once per capacity-wait
+  tick; only `route=spread` amortised it. Measured over 1,977 delegation rows: **46 rows kept work on the
+  local seat because one remote's health probe timed out, and in 41 of them that remote had zero jobs in
+  flight.** The probe is now (a) **concurrent** — one goroutine per base, each still bounded by
+  `fetchNodeViewTimeout`, answers reassembled in the CONFIGURED order so the positional
+  `views`/`bases`/`probeErrs` contract holds; (b) **memoised per Run** (`fetchViewsMemoTTL`, 2 s) so the
+  sibling subtasks of a fan-out share one snapshot, deliberately shorter than `placementPollInterval` (3 s)
+  so the memo can never answer a capacity-wait tick, and dying with the runner so no snapshot outlives its
+  call; (c) **negative-cached** (`probeNegativeTTL`, 30 s) for a base that failed at the TRANSPORT only —
+  a dial refusal, a reset, DNS or the per-base timeout — with the reason REPLAYED into `probeErrs` so the
+  placement note still names the node (a `401`/`404`/`503` is a node that answered and is never cached);
+  and (d) **bounded inside the capacity wait** by `probeTickBound` = `min(2 × placementPollInterval,
+  what is left of the wait)`, because that loop alone handed the probe the RAW run context, so one
+  black-holed remote could spend the whole TTL inside a single tick and the node that DID free was never
+  re-asked. Nothing is negative-cached when the tick bound fires: it expires every base at the same
+  instant, which is a fact about the tick, not about any node.
+- **A cross-seat retry was refused by any node running a single job** (S-14; register D-46 shipped the rule
+  and not the threshold). `retrySeatBusy`'s remote arm read `view.JobsRunning > 0` — a threshold of zero
+  instead of the node's own ceiling — so a four-worker box with one job in flight blocked every retry
+  although three workers were idle. It now asks `!provablyStartsNow(view)`, the same ceiling-aware
+  predicate the placement gate ranks on, and the note names the numbers it read
+  (`jobs_running 4 of max_concurrent_jobs 4, jobs_queued 0 (fresh health)`).
+- **Two remotes with the same `node_id` collapsed into one spread cycle entry** (S-12). `dealSpread` keyed
+  its per-cycle `dealt` set on `NodeID` while every other exclusion in the delegator keys on the dial base,
+  and a node id is neither unique nor guaranteed to be published (register C-19 shows it drifting). The
+  second remote of a cycle found its key already taken, the cycle was reshuffled, and the fit score handed
+  the SAME seat both subtasks while the other idled. `dealt` and `fitPick` now key on the base.
 - **A READY seat waited the whole admission budget whenever any OTHER model was mid-swap.**
   The swap pre-flight matched llama-swap's `GET /running` by the seat's BOUND name, while `/running`
   names models by canonical id only — and the harness binds agent seats by alias on the reference

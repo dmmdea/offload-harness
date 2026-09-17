@@ -1038,8 +1038,8 @@ func TestHealthAgentFieldsPresentWhenEnabled(t *testing.T) {
 	if v, present := m["agent_seat_resident"]; present {
 		t.Fatalf("agent_seat_resident = %v on the FIRST health (cache cold) — must fail closed until the probe lands, never block the handler", v)
 	}
-	if n := probes.Load(); n > 2 {
-		t.Fatalf("roster probes after ONE health request = %d, want at most 2 (rosterServes + rosterServedModels)", n)
+	if n := probes.Load(); n > 3 {
+		t.Fatalf("roster probes after ONE health request = %d, want at most 3 (rosterServes + rosterServedModels + the seat-state read's alias resolution)", n)
 	}
 
 	// The background refresh the GET above kicked off is the only thing that
@@ -1049,8 +1049,14 @@ func TestHealthAgentFieldsPresentWhenEnabled(t *testing.T) {
 	if m["agent_seat_resident"] != true {
 		t.Fatalf("agent_seat_resident = %v after a successful ALIAS-served roster probe, want true", m["agent_seat_resident"])
 	}
-	if n := probes.Load(); n != 2 {
-		t.Fatalf("roster probes = %d, want exactly 2 (rosterServes + rosterServedModels, single-flighted: concurrent/repeat health requests share one refresh cycle)", n)
+	// THREE roster GETs per cycle since 0.127: the seat-state read
+	// (seatload.Running, publishing seat_loaded/seat_starting) resolves the
+	// seat's alias through the same /v1/models roster before it reads
+	// /running, because /running lists canonical ids. The property this pins is
+	// unchanged and is the one that matters — one refresh CYCLE per TTL,
+	// single-flighted, never a probe per request (the 20-request loop below).
+	if n := probes.Load(); n != 3 {
+		t.Fatalf("roster probes = %d, want exactly 3 (rosterServes + rosterServedModels + the seat-state read, single-flighted: concurrent/repeat health requests share one refresh cycle)", n)
 	}
 
 	// Inside the TTL every further request is served from the cache — health
@@ -1061,8 +1067,8 @@ func TestHealthAgentFieldsPresentWhenEnabled(t *testing.T) {
 			t.Fatalf("agent_seat_resident = %v on cached health request %d, want true", m["agent_seat_resident"], i)
 		}
 	}
-	if n := probes.Load(); n != 2 {
-		t.Fatalf("roster probes after 20 more health requests = %d, want still exactly 2 (the %s TTL)", n, agentResidencyTTL)
+	if n := probes.Load(); n != 3 {
+		t.Fatalf("roster probes after 20 more health requests = %d, want still exactly 3 (the %s TTL)", n, agentResidencyTTL)
 	}
 }
 
@@ -1242,6 +1248,17 @@ func TestHealthAgentFieldsAbsentWhenDisabled(t *testing.T) {
 	}
 }
 
+// TestServeTimeoutTable pins the blanket table AND the two handlers that must
+// outlive it (register S-09).
+//
+// The blanket is the FLOOR, and it stays: WriteTimeout bounds every handler at
+// header-read, which is what keeps a forgotten connection from pinning a
+// goroutine. What was wrong was that it also bounded the two handlers whose own
+// budget is larger than it — the chat lane (ChatProxyTimeout, ten minutes) and
+// the job long poll (`wait=`) — so their answers were cut as they were written.
+// Each now extends its OWN deadline, per request, and this test asserts both
+// halves together: a change that removed the blanket, or one that dropped an
+// extension, fails here.
 func TestServeTimeoutTable(t *testing.T) {
 	s, _ := newTestServer(t, imageCfg(), &fakeRunner{}, nil)
 	srv := s.httpServer()
@@ -1249,6 +1266,41 @@ func TestServeTimeoutTable(t *testing.T) {
 		srv.WriteTimeout != 30*time.Second || srv.IdleTimeout != 120*time.Second {
 		t.Fatalf("timeout table wrong: header=%v read=%v write=%v idle=%v",
 			srv.ReadHeaderTimeout, srv.ReadTimeout, srv.WriteTimeout, srv.IdleTimeout)
+	}
+	blanket := srv.WriteTimeout
+
+	// The chat lane asks for its upstream budget plus the copy-back slack.
+	up := slowSwap(t, 0)
+	chat := servingNode(t, chatCfg(up.URL, ""), true, "gemma-4-e4b")
+	asked := recordWriteDeadlines(chat)
+	if rec := do(t, chat, http.MethodPost, ChatLanePath, chatBody, nil); rec.Code != http.StatusOK {
+		t.Fatalf("chat forward status = %d (%s)", rec.Code, rec.Body.String())
+	}
+	got := asked()
+	if len(got) != 1 || got[0] < ChatProxyTimeout || got[0] <= blanket {
+		t.Fatalf("chat lane asked for %v, want one deadline of at least ChatProxyTimeout (%s) and more than the blanket %s", got, ChatProxyTimeout, blanket)
+	}
+
+	// The long poll asks for its wait plus the write slack.
+	poll, jobs := newTestServer(t, imageCfg(), &fakeRunner{}, nil)
+	release := blockingJob(t, jobs, "deadline-1", AcceptSpec{Task: "image-gen"})
+	defer release()
+	asked = recordWriteDeadlines(poll)
+	defer restoreJobWaitUnit(compressJobWaitUnit(t, 10*time.Millisecond))
+	if rec := do(t, poll, http.MethodGet, "/fleet/jobs/deadline-1?wait=5", "", nil); rec.Code != http.StatusOK {
+		t.Fatalf("long poll status = %d (%s)", rec.Code, rec.Body.String())
+	}
+	if got = asked(); len(got) != 1 || got[0] < 5*jobWaitUnit {
+		t.Fatalf("long poll asked for %v, want one deadline of at least its own wait (5 x %s)", got, jobWaitUnit)
+	}
+
+	// And a handler with no budget of its own never touches the deadline: the
+	// blanket is the whole bound for every other route.
+	plain, _ := newTestServer(t, imageCfg(), &fakeRunner{}, nil)
+	asked = recordWriteDeadlines(plain)
+	_ = do(t, plain, http.MethodGet, "/fleet/health", "", nil)
+	if got = asked(); len(got) != 0 {
+		t.Fatalf("health extended its write deadline (%v): only a handler that outlives the blanket may", got)
 	}
 }
 

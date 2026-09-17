@@ -41,7 +41,7 @@ stops accepting work while remaining readable.
 |---|---|
 | `GET /fleet/health` | Node identity, GPU vendor and architecture, live total and free VRAM, supported task types, loadable model families, measured footprints, queue depth, the node's job capacity (running / queued / both limits), GPU utilization, host CPU/RAM, and the agent lane's served-models roster (0.113.0) |
 | `POST /fleet/dispatch` | Submit a job; returns `202` with an ack |
-| `GET /fleet/jobs/{id}` | Poll one job's state and result |
+| `GET /fleet/jobs/{id}` | Poll one job's state and result; `?wait=<seconds>` (≤ 12) long-polls until the job is terminal |
 | `GET /fleet/jobs` | Cluster jobs feed: recent jobs across this node, newest first, payload-free (0.113.0) |
 
 The dispatch envelope is parsed **strictly** — unknown fields are rejected, and the body is capped.
@@ -389,6 +389,127 @@ local seat still reserved → the holder-naming `infrastructure` deferral of 0.1
 now honours a text lease (before, a remote's 503 fell straight onto the reserved cards — the 2026-09-05 incident through a
 side door). The wait is bounded by the config key alone; `agent_lease_wait_sec` still applies when it is the longer of the two.
 
+**The health probe itself: concurrent, memoised, negative-cached, bounded inside the wait (register D-106,
+2026-09-17).** `fetchViews` — the delegator's read of every configured remote's `/fleet/health`, and the input to
+every placement decision — probed the roster SERIALLY at `fetchNodeViewTimeout` (15 s) per remote, with no
+cache, on the critical path of every subtask on `route=auto`/`remote`, of every re-placement, of every retry
+and of every capacity-wait tick. Only `route=spread` amortised it, with one probe at run start. Measured over
+1,977 delegation rows: **46 rows kept work on the local seat because one remote's health probe timed out, and
+in 41 of them that remote had zero jobs in flight** — a node was excluded for being slow to answer a cached
+read, not for being busy. Four changes, none of which adds a probe:
+
+- **Concurrent.** Every remote is probed at once, each goroutine bounded by `fetchNodeViewTimeout`, so the
+  fleet probe costs the SLOWEST remote rather than the sum of all of them. The answers are reassembled in the
+  CONFIGURED order, because `views`/`bases`/`probeErrs` are positional (a `NodeView` carries no base) and
+  completion order is not an ordering any caller can use.
+- **Memoised per Run** (`fetchViewsMemoTTL`, 2 s). The sibling subtasks of one fan-out share one snapshot —
+  what `spread` always did, now for every route — and the memo dies with the runner, so no snapshot outlives
+  the call that took it. 2 s is deliberately shorter than the SHORTEST GAP BETWEEN TWO TICKS: the capacity
+  wait exists to notice a node that just freed, so the memo must never be able to answer one of its ticks.
+  The comparison is not against `placementPollInterval` itself — the tick is jittered, so the shortest gap
+  is `(1 - jitterFrac) × placementPollInterval` = 2.4 s, and a 2.5 s memo would read as "safely under 3 s"
+  while quietly serving ticks from cache. `TestProbeMemoCannotServeACapacityWaitTick` pins the relation over
+  the production values, because every capacity-wait test zeroes the memo in order to compress the tick.
+- **Negative-cached** (`probeNegativeTTL`, 30 s). A base that failed at the TRANSPORT — dial refused, no
+  route, DNS, a reset, the per-base timeout — is skipped rather than re-dialled, and the reason it failed is
+  REPLAYED into `probeErrs`, so the placement note still names the node and says what happened to it. Only
+  transport failures: a `401`, `404` or `503` is a node that ANSWERED, and skipping it for half a minute
+  would turn a momentary refusal into ineligibility.
+- **The wait's tick may not outlive the wait** (`probeTickBound` = what is left of the wait). The wait passed
+  the RAW run context to its probe while every other call site wrapped it in a remaining-budget one, so a
+  probe could outlive the wait it was serving. Nothing TIGHTER belongs here, and both tighter bounds were
+  tried and reverted: `2 × placementPollInterval` (6 s) sits below `fetchNodeViewTimeout` (15 s), which is
+  this doc's own slow-vs-down boundary, so a remote answering in 6–15 s under load was cancelled on every
+  tick, never became a candidate, and was never negative-cached either (a cancellation is not evidence about
+  a node) — the wait then expired saying "no node had room", which was false. `min(fetchNodeViewTimeout,
+  remaining)` fails differently: the per-base context is DERIVED from the tick's, so the two deadlines land
+  on the same instant and the tick's fires first, nothing is ever attributable to a node, and a dead base is
+  re-dialled at full cost on every tick (measured at 30 dials across one compressed wait, against 6 after).
+  Nothing tighter is needed because the fan-out is concurrent and each goroutine is capped at
+  `fetchNodeViewTimeout`: one black-holed remote costs a tick that bound ONCE and is then skipped by the
+  30 s negative cache.
+- **A tick's probe failures reach the operator.** The tick used to discard `probeErrs` with `_`, so a wait
+  spent entirely on remotes that never answered ended as `no node had room … 0 refusal(s)` — an operator told
+  to add a node when the nodes they had were failing to answer. Failures are now tallied per base across the
+  wait and folded into the capacity defer as their own clause, `; N probe(s) failed during the wait: <base>:
+  <reason> (last of 3)`, kept distinct from refusals because a probe failure is not a refusal: nobody
+  declined the work.
+
+**The fixed sleeps are jittered (2026-09-17).** `pollEvery`, `placementPollInterval` and `refusalCooldown` are
+the same numbers in every dispatcher, so K sessions started within a second of each other re-read health,
+re-dispatch and re-ask a refusing node in lockstep for a whole run — the convoy that makes a busy node look
+busier than it is. Each sleep is now scaled by a uniform factor in `[0.8, 1.2]`; the cadence's mean is
+unchanged, and the jitter is CLAMPED so no sleep can run past the deadline it lives under (the wait's TTL,
+the poll deadline). The cooldown is jittered once when the refusal is recorded, not re-rolled per check, so a
+node does not flicker in and out of the candidate list.
+
+## What the node says about itself while work is in flight (unreleased)
+
+Three facts the node held and never published, and one it published wrongly. Every input here is a
+counter this node already keeps or a number it already reads — nothing new probes a seat, and nothing
+new is sampled (register C-05 stands: probing an unloaded seat through llama-swap LOADS it).
+
+| Health field | Type | Meaning |
+|---|---|---|
+| `jobs_admitting` | int, omitted when 0 | The subset of `jobs_running` whose worker has **not started generating**: it is still in the run's admission phase — cordon → swap pre-flight → warm → coherence probe — which the node budgets up to 300 s for. Counted from this process's own `gpuactivity` records with `phase: "admission"` (ADR 0041), never from the job store, which knows a worker took the job but not what that worker is waiting for. The registry is opened at most once per 2 s and **retried** — a briefly unresolvable state root does not silence the field for the life of the process — and a registry that cannot be opened or listed is logged once, because `0` is a legitimate value and silence would make the two indistinguishable. |
+| `seat_loaded` | bool, omitted when unread | llama-swap's `/running` says the agent seat is loaded. |
+| `seat_starting` | bool, omitted when unread | …and is still LOADING (llama-swap holds `/upstream/<seat>/…` for the whole load — 4m08s on the 27B TP2 seat, register D-92), so "loaded" is not yet "ready". |
+| `lease_exclusive` | bool, omitted when false | The held lease FENCES the cards: no model may be loaded onto them for its duration. |
+| `lease_draining` | bool, omitted when false | The held lease is still draining the seat. |
+| `recent_agent_wall_sec` | float, omitted when none | Median wall of the last (up to) 8 agent jobs to FINISH here — the completion signal a node with no `seat_rate` sample has no other way to publish. The median, not the mean, so one 900-second outlier does not redefine the node. |
+
+All six are additive and `omitempty`: a node with the agent lane off, no lease and no admission holds
+emits a byte-identical payload, and a delegator that has never heard of them decodes exactly what it
+decoded before (pinned in `nodetruth_test.go` and `healthwire_compat_test.go`).
+
+**`saturation.score` now excludes admitting jobs from its concurrency numerator**, and only from
+there. A job whose worker is cordon-waiting or warming holds a capped slot while the card is idle —
+measured: 10 of 47 lease-timeout rows happened on a box with zero agent jobs in flight — so counting
+it as utilization told every delegator to route away from an idle node. `saturation.high`,
+`saturation.idle_slot` and the DEPTH term are deliberately unchanged: the slot really is taken, a new
+dispatch really would queue behind it, and `max_queue_depth` bounds every admitted job whatever its
+phase.
+
+**Seat state is read from `/running` only**, through `internal/seatload`'s alias-aware reader
+(`seatload.Running`): `/running` lists CANONICAL ids while the harness binds seats by ALIAS, so a
+bare-name match reads a loaded seat as absent — the silent 0.113.16–19 drain defect. It rides the
+residency refresh's background single-flight (one cycle per 30 s TTL, never one per request).
+
+**Two different failures publish NOTHING, and both are logged.** A `/running` read that ERRORS leaves
+both fields absent. So does an AMBIGUOUS one: when the roster GET fails, `seatload` falls back to
+matching `/running` by the bare name (better than a refusal), and that fallback cannot see an
+alias-bound seat listed under its canonical id — so `Loaded:false` *while `/running` lists models*
+means "could not tell", not "idle". Publishing it as `seat_loaded:false` would assert a loaded seat is
+idle exactly when the box is busy enough to time out a roster GET.
+
+The predicate is `seatload`'s `Ambiguous` (a failed roster **and** a non-empty `/running`), which is
+exactly what `gpu_drain` (`!rd.Loaded && rd.Ambiguous`) and `internal/placement/live.go`
+(`err == nil && !rd.Ambiguous`) key on — and it is deliberately narrower than "the roster failed". A
+failed roster over an **empty** `/running` is knowable: nothing is loaded on the box at all, so the
+seat is not loaded either and no alias resolution is needed to say so, and health publishes
+`seat_loaded:false`. Only the unknowable case is withheld: absent ≠ idle, the same rule the VRAM
+snapshot and the reclaim verdict follow, with the reason on the node's log so an operator is not left
+guessing at two missing keys.
+
+**`GET /fleet/jobs/{id}?wait=<seconds>` is a completion event.** An already-terminal job answers at
+once; anything else blocks on the job store's terminal broadcast — which the store has fired all
+along — until the job finishes or the wait elapses, then answers with the job's live state. The wait
+is capped at `MaxJobWaitSec` = 12 s and **must stay below the delegator's `pollRequestTimeout`**
+(15 s, `internal/delegate/run.go`), or every long poll would be cancelled client-side a moment before
+the node answered; the pairing is pinned by a test that reads the delegator's own source. Absent the
+parameter the route is byte-identical, and the 3 s poll remains the fallback. Measured motivation:
+236 queue-deadline rows spent exactly `101 poll(s)` = 300 s of pure polling.
+
+**The blanket `WriteTimeout` (30 s) is a floor, not a ceiling.** Go arms it at header-read for every
+handler alike, so it silently truncated the chat lane, whose own budget is `ChatProxyTimeout` = 10
+minutes: a forwarded cascade call that generated past 30 s was cut mid-write and read to the caller
+as a dead node. The blanket stays — it is what keeps every other route bounded — and the two handlers
+that legitimately outlive it extend their OWN deadline per request through
+`http.NewResponseController(w).SetWriteDeadline`: the chat lane to `ChatProxyTimeout` + 30 s of
+copy-back slack, the long poll to its wait + 2 s. A `ResponseWriter` that cannot carry a deadline
+(a recorder, a wrapper that does not unwrap) is not a failure — the handler just runs under the
+blanket, as before.
+
 ## The acceptance gate (`local-offload acceptance`)
 
 A node must pass this before it is handed work. It is deliberately NOT `doctor`: doctor
@@ -538,10 +659,11 @@ Remotes come from the call's `remotes` argument, else from the config's `delegat
 - **Fit chooses WITHIN a cycle, never a free re-pick.** This is the load-bearing constraint: a subtask takes the best-fitting seat *among those not yet dealt in the current cycle*, and a local slot reshuffles the deck. Without it the smallest seat wins every mechanical slot and the roomiest wins every reasoning slot — measured on a `{local, qube 131k, aorus 32k, lenovo 32k}` roster, an unconstrained re-pick put 8 mechanical subtasks on `local 2 / aorus 4 / lenovo 2 / qube 0` and 8 reasoning subtasks on `local 2 / qube 6 / aorus 0 / lenovo 0`, which is precisely the stacking `spread` exists to remove. With the cycle constraint both deal `2/2/2/2` — mechanical dispatching the small seats first, reasoning the roomiest first.
 - **The deal is joint, and it has to be.** No per-subtask function of (index, own shape, roster) can hold the invariant: distinctness inside a cycle forces the slot-to-seat map to be a bijection for each shape, and distinctness inside a MIXED-shape cycle then forces the two shapes' bijections to be identical — i.e. forces the shape to have no effect at all. Fit scoring and one-per-seat therefore coexist only when the deal can see its siblings, so `dealSpread` computes every subtask's placement in one ordered pass before dispatch. That also keeps placement deterministic and free of shared mutable state (the goroutines read the deal, they never build it).
 - **Ties keep the rotation** (the comparison is strict), so an all-equal roster deals exactly as it did before fit scoring existed.
+- **The cycle is keyed on the DIAL BASE, not the node id (2026-09-17, S-12).** Every other exclusion in the delegator (the tried set, the re-placement exclusions, the refusal cooldown, the quarantine) keys on the base, and a `node_id` is neither unique nor guaranteed to be published. Two remotes advertising an empty id — or the same id, which register C-19 shows does drift — shared one entry, so the second remote of a cycle found its key already taken, the cycle was reshuffled, and the fit score handed the SAME seat both subtasks while the other one idled. The base is what the dispatcher actually dials, so it is the only key that can mean "this seat already has one".
 - **The local rotation slot is never contested by shape; it is contested by load (0.113.20).** With the local seat idle, subtask 0 lands local whatever its shape — a single-subtask spread is the riskiest case for a shape heuristic, and one regex match must not send a whole run off-box. The same holds for every later local slot, because the fit score ranks by advertised ceiling and the local seat advertises none in a delegator run; scoring it would mean inventing a number for it. Widening the contest to the local slot is a small change once the local seat advertises a ceiling of its own.
 - **The local slot under load (0.113.20, operator decision 2026-09-06).** The deal reads the local seat's in-flight count ONCE when it is computed — the same reader the drain uses (`internal/seatload`: vLLM `num_requests_running` + `waiting`, or a llama-server's processing `/slots`, through llama-swap, alias-aware) — and when the seat already holds a request, every local slot (`i mod len == 0`, subtask 0 included) goes to the best-fit eligible remote WITH ROOM (`hasRoom`; a sheddable run needs an idle slot) instead; the remotes' one-per-seat-per-cycle invariant is unchanged and the reason names the count (`…; local seat busy: 3 in flight`). With no remote that has room the slot stays local and the reason says `local seat busy … no remote with room`. An idle seat keeps every slot it had, so a lone session is dealt exactly as before; a text lease still removes the local seat in both modes. `agent_spread_local_slot: "always"` restores the unconditional local slot. Why: K delegating sessions each dealt 3 of every 8 subtasks to the same local seat while the remotes idled — the K×8 gate's remaining tail after the Lenovo seat replacement (first-local subtask 155–189 s under K=3 vs 91–105 s for its siblings; K=2 wall 1.55× K=1 against a 1.5× bound). A probe that fails deals as idle and logs why: the rule is an optimisation of the deal, never a gate.
 
-**Retry on a different seat (0.80.0).** A subtask whose first attempt came back `failed_verification` (the acceptance DSL caught a wrong answer) or an honest `abstention` is re-run ONCE on a different node when one is available — local → the best eligible remote, remote → local — under a fresh job id. The published result is the BETTER attempt (a success beats any failure; otherwise the first attempt stands) and carries `retried_on` + `retry_note`; the summary carries `retried` / `retry_recovered`. Measured motivation: on the same four digest contracts the 27B seat and the 4B seat each missed a different one, and neither miss was silent thanks to acceptance — the retry is what turns "caught" into "recovered". Transport failures and infrastructure/config/contract defers are NOT retried: a broken box or a bad contract does not get better on another seat. The retry lives **inside the subtask's `timeout_sec`** — it gets whatever budget the first attempt left, and is skipped (the result carries a `retry_note` saying so) when less than the retry floor remains — 10 s by default, raised by the delegator's `agent_retry_min_sec` (0.115.9, register D-46: a cold vLLM load plus one turn at `max_tokens` on the retry seat; 300 on the reference box) — so `timeout_sec` stays the wall ceiling the caller was told it is. Two more skips, each named in `retry_note` (0.115.9): a first attempt that ended on an **empty final** (`stop_reason` `reasoning_starved` / `empty`, 0.115.8) is never retried — the shape is the seat's completion budget, not a wrong answer another seat corrects; and the retry never lands on a seat that is **already running another job** (a remote publishing `jobs_running > 0`, or the local seat with requests in flight), which would only halve both runs' tok/s. The re-placement floor after a REFUSED dispatch (no seat time spent) stays at 10 s.
+**Retry on a different seat (0.80.0).** A subtask whose first attempt came back `failed_verification` (the acceptance DSL caught a wrong answer) or an honest `abstention` is re-run ONCE on a different node when one is available — local → the best eligible remote, remote → local — under a fresh job id. The published result is the BETTER attempt (a success beats any failure; otherwise the first attempt stands) and carries `retried_on` + `retry_note`; the summary carries `retried` / `retry_recovered`. Measured motivation: on the same four digest contracts the 27B seat and the 4B seat each missed a different one, and neither miss was silent thanks to acceptance — the retry is what turns "caught" into "recovered". Transport failures and infrastructure/config/contract defers are NOT retried: a broken box or a bad contract does not get better on another seat. The retry lives **inside the subtask's `timeout_sec`** — it gets whatever budget the first attempt left, and is skipped (the result carries a `retry_note` saying so) when less than the retry floor remains — 10 s by default, raised by the delegator's `agent_retry_min_sec` (0.115.9, register D-46: a cold vLLM load plus one turn at `max_tokens` on the retry seat; 300 on the reference box) — so `timeout_sec` stays the wall ceiling the caller was told it is. Two more skips, each named in `retry_note` (0.115.9): a first attempt that ended on an **empty final** (`stop_reason` `reasoning_starved` / `empty`, 0.115.8) is never retried — the shape is the seat's completion budget, not a wrong answer another seat corrects; and the retry never lands on a seat that is **already running another job** — a remote the delegator can prove would QUEUE the retry (`!provablyStartsNow`: no free worker, or a backlog ahead of it), or the local seat with requests in flight — which would only halve both runs' tok/s. The remote threshold was `jobs_running > 0` until 2026-09-17, i.e. zero rather than the node's own ceiling, so a four-worker box with one job in flight refused every cross-seat retry although three workers were idle; register D-46 shipped the rule and not the threshold. It is the same ceiling-aware predicate the placement gate ranks on, and it stays conservative — an unpublished ceiling still reads as busy. The re-placement floor after a REFUSED dispatch (no seat time spent) stays at 10 s.
 
 **The retry never lands on a FENCED local seat (0.117.7, register D-94).** Before choosing the local
 seat for a retry the delegator reads the machine-wide lease and asks `delegate.Fenced` — the

@@ -263,7 +263,7 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	// budget here — never inside the wall — and defers with the holder named.
 	// Before this, the warm-up below loaded the seat straight past the fence
 	// (10:20:03 on 2026-09-14, onto cards a render held).
-	act := gpuactivity.Start(p.cfg.GPULockPath, p.cfg.StateDir, gpuactivity.Run{Seat: seat, Kind: "contract", Origin: nodeID, Goal: contract.Goal, MaxSteps: contract.MaxSteps, Phase: "admission"})
+	act := gpuactivity.Start(p.cfg.GPULockPath, p.cfg.StateDir, gpuactivity.Run{Seat: seat, Kind: "contract", Origin: nodeID, Goal: contract.Goal, MaxSteps: contract.MaxSteps, Phase: gpuactivity.PhaseAdmission})
 	defer act.End()
 	// ONE admission budget for the cordon, the pre-flight and the warm-up: the
 	// three share a deadline, and the time spent at the cordon is reported as
@@ -425,7 +425,7 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	// unanswerable probe has always taken. That is the right trade: a box that
 	// spent 300 s loading has a cold-start problem, not a window problem, and
 	// the alternative is handing the wall back the licence this fix removes.
-	act.Phase("window-probe")
+	act.Phase(gpuactivity.PhaseWindowProbe)
 	probeStart := time.Now()
 	pctx, pcancel := context.WithDeadline(ctx, admissionEnd)
 	probed, probeOK := agent.ProbeServedWindow(pctx, p.cfg.Endpoint, seat)

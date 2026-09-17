@@ -68,6 +68,17 @@ func compressPolls(t *testing.T, every, grace time.Duration) {
 	t.Cleanup(func() { pollEvery, pollGrace = oldEvery, oldGrace })
 }
 
+// noProbeMemo switches the fleet-probe memo OFF for one test. fetchViews
+// memoises one snapshot per Run, which is exactly what a test must disable when
+// it needs the SELECTION step to cost real wall clock (or needs a second probe
+// to actually reach the wire).
+func noProbeMemo(t *testing.T) {
+	t.Helper()
+	old := fetchViewsMemoTTL
+	fetchViewsMemoTTL = 0
+	t.Cleanup(func() { fetchViewsMemoTTL = old })
+}
+
 // fakeNode is one scripted fleet node: health advertises the agent lane,
 // dispatch acks 202 (recording every POST), jobs answers per pollState.
 type fakeNode struct {
@@ -123,7 +134,13 @@ type fakeNode struct {
 	jobsRunning int
 	// jobsRunningFn, when set, answers jobs_running per health request (a
 	// node whose load CHANGES during the run — the liveness fixture).
-	jobsRunningFn     func() int
+	jobsRunningFn func() int
+	// queueDepthFn is the same seam for queue_depth. A real node publishes
+	// queue_depth as its non-terminal job count, so a fixture whose
+	// jobs_running moves has to move queue_depth with it — otherwise it
+	// advertises {queue_depth 0, jobs_running 1}, a shape no node emits, and
+	// every ceiling-aware reader (provablyStartsNow) reads it as idle.
+	queueDepthFn      func() int
 	maxConcurrentJobs int
 	maxQueueDepth     int
 
@@ -136,7 +153,10 @@ type fakeNode struct {
 
 	dispatches atomic.Int64
 	polls      atomic.Int64
-	lastJobID  atomic.Value // string
+	// healths counts the /fleet/health GETs this node actually served — what a
+	// memoisation or negative-cache test reads to prove a probe did NOT happen.
+	healths   atomic.Int64
+	lastJobID atomic.Value // string
 	// lastPriority / lastTenant record the scheduling keys the LAST dispatch
 	// carried (0.113.18): the envelope's `priority` (nil = absent) and the
 	// X-Offload-Tenant header ("" = absent).
@@ -159,9 +179,18 @@ func (f *fakeNode) jobsRunningNow() int {
 	return f.jobsRunning
 }
 
+// queueDepthNow is the health payload's queue_depth, same rule.
+func (f *fakeNode) queueDepthNow() int {
+	if f.queueDepthFn != nil {
+		return f.queueDepthFn()
+	}
+	return f.queueDepth
+}
+
 func (f *fakeNode) server() *httptest.Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /fleet/health", func(w http.ResponseWriter, r *http.Request) {
+		f.healths.Add(1)
 		if f.healthDelay > 0 {
 			select {
 			case <-time.After(f.healthDelay):
@@ -171,7 +200,7 @@ func (f *fakeNode) server() *httptest.Server {
 		}
 		health := map[string]any{
 			"node_id":             f.nodeID,
-			"queue_depth":         f.queueDepth,
+			"queue_depth":         f.queueDepthNow(),
 			"agent_seat":          "remote-seat",
 			"agent_ctx_tokens":    f.ctxTokens,
 			"agent_seat_resident": f.resident,
