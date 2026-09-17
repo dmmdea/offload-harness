@@ -962,6 +962,11 @@ func TestAdmittingCountsTheSharedAdmissionPhaseOnly(t *testing.T) {
 	}
 	defer generating.End()
 
+	// The server may have primed its 2 s admitting cache (a health refresh at
+	// construction) BEFORE the two runs above existed; read the registry fresh,
+	// as the second half of this test already does. Without this the first
+	// assertion read a cached 0 in 3 of 8 runs (2026-09-17).
+	s.admittingAt = time.Time{}
 	if n := s.admitting(); n != 1 {
 		t.Fatalf("jobs_admitting = %d with one run in %s and one in %s, want 1 — the reader and internal/pipeline's writer must agree on the phase name, and a generating run holds a card",
 			n, gpuactivity.PhaseAdmission, gpuactivity.PhaseRunning)
