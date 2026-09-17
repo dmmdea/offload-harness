@@ -810,6 +810,19 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 			}
 			return deferWire(core.DeferClassBudget, fmt.Sprintf("wall timeout after %ds", timeoutSec))
 		}
+		if errors.Is(cctx.Err(), context.Canceled) {
+			// The PARENT went away mid-loop (the delegator abandoned the poll,
+			// the node is shutting down) — the same shape the re-pack branch
+			// below already carries its own arm for (register S-22/W-16, 2026-
+			// 09-17 diagnosis: "a cancelled parent is filed as broken
+			// hardware", 12 "agent loop: context canceled" rows). The failed
+			// request looks exactly like a dial refusal — a *url.Error — so it
+			// used to fall through to the generic "agent loop: "+rerr.Error()
+			// branch below and defer as infrastructure: an operator told to fix
+			// a box that never misbehaved. Budget is the honest class: a
+			// ceiling outside the model's control stopped the run.
+			return deferWire(core.DeferClassBudget, "agent loop: canceled (the caller's context ended)")
+		}
 		// A busy seat that outlived the contention budget is its OWN reason:
 		// "seat contended:" is the ledger/audit grep key, and the operator's fix
 		// is capacity (llama-swap concurrencyLimit / --parallel), not a box.
