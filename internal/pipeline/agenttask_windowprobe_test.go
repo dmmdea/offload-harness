@@ -142,8 +142,15 @@ func TestCtxWindowNoteNamesTheFallbackWhenTheProbeRanOutOfAdmission(t *testing.T
 		// confirmation sleep is conditional on what is LEFT of the budget, which
 		// makes "did it sleep" a knife-edge at exactly one poll interval.
 		running: func(int64) string { return `{"running":[{"model":"other-heavy","state":"starting","cmd":"x"}]}` },
-		loop:    func(int64) string { return doneChat("The answer is 42.") },
-		repack:  func(int64) string { return `{"answer":"42"}` },
+		// The pre-flight's last sleep ends within a scheduler tick of the
+		// deadline, on either side of it: on a fast Linux runner the probe
+		// found a few milliseconds left, got its 404 inside them, and the
+		// "ran out of admission budget" note correctly did NOT fire (CI on
+		// 225d9cf). Stalling the props answer past whatever is left makes the
+		// probe's deadline certain, which is the premise this test states.
+		propsDelay: 2 * time.Second,
+		loop:       func(int64) string { return doneChat("The answer is 42.") },
+		repack:     func(int64) string { return `{"answer":"42"}` },
 	}
 	srv := fake.server(t)
 	defer srv.Close()
