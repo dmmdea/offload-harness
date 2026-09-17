@@ -37,8 +37,29 @@ Versioning: [SemVer](https://semver.org/).
   DOING, beside `busy`'s verdict about declared time); and `recent_agent_wall_sec` (the median wall of
   the last up to 8 agent jobs to finish, from the same job map `/fleet/jobs` walks — the completion
   signal a node with no `seat_rate` sample could not otherwise publish).
+- **A `503 queue full` refusal now says when it will lift, and `/fleet/health` says it in advance**
+  (register S-04, diagnosis §2(a)/§5.2, the overhaul plan's roast correction: an admission refusal
+  must be something the delegator can outwait, never terminal). The dispatch response carries a
+  `Retry-After` header, and health publishes the identical number as `queue_wait_estimate_sec` (float,
+  omitted when a worker is free or no wall sample exists): `ceil(excess x recent_agent_wall_sec /
+  max(1, max_concurrent_jobs))`, `excess = queue_depth - max_concurrent_jobs`, bounded to `[5, 300]`;
+  the flat `30` with no `recent_agent_wall_sec` sample yet. Deliberately sized from the node's own
+  MEASURED recent wall, never from `seat_rate.min_turn_sec` — that number is a max-final RETRY floor
+  for one seat with no relationship to backlog depth, and using it here would have sized a queue wait
+  from a quantity that has nothing to do with queue depth. A job still in its ADMISSION phase counts
+  toward the estimate exactly like any other running job (the worker slot is genuinely taken), unlike
+  `saturation.score`, which excludes it because no card is busy yet. The existing "queue full" message
+  text stays a byte-identical prefix — the delegator quotes it — with `(~N s until a worker frees)`
+  appended.
 
 ### Changed
+- **`fleet_max_queue_depth`'s default is now `2x fleet_max_concurrent_jobs` (8 with the default 4
+  workers), not a flat 32** (register S-04/C-25, diagnosis §2(a)). A node admitting 32 deep behind 4
+  workers could pile up 28 jobs it had no hope of starting inside any wall a caller would wait out —
+  236 measured contracts died at the delegator's 5-minute queue deadline having never started, 75% of
+  them while another node sat idle. `0 = use the built-in default` and a negative value = unlimited
+  are unchanged; an explicit `fleet_max_queue_depth` still wins outright, and the default now tracks a
+  custom `fleet_max_concurrent_jobs` instead of ignoring it.
 - **`saturation.score` no longer counts a job whose worker is still in admission** (register S-17).
   `jobs.go` flips a job to `running` before `execute()`, and the run then spends up to 300 s in
   admission — so the node published `score 1.0` beside `gpu_util_pct 0`, and in 10 of 47 measured
@@ -58,6 +79,13 @@ Versioning: [SemVer](https://semver.org/).
   a node cannot flicker in and out of the candidate list.
 
 ### Fixed
+- **`Jobs.IdleSlot()` reported a node full because of a queued job that would never contend for a
+  capped execution slot** (register S-20/C-26). It returned `false` for ANY job sitting in `accepted`,
+  including one admitted `Uncapped` (a render, an stt, a pipeline route — work that never touches the
+  shared llama-swap endpoint `fleet_max_concurrent_jobs` protects); `claimLocked` already skips only
+  CAPPED entries when the concurrency cap is at its ceiling (`jb.capped && full`), so `IdleSlot` now
+  mirrors it — only a capped queued job makes the shed predicate (health's `saturation.idle_slot`, the
+  admission rule for `priority: -1` dispatches) report non-idle.
 - **The 30 s blanket `WriteTimeout` truncated every handler that legitimately runs longer** (register
   S-09). Go arms the write deadline at header-read, so the table bounded the chat lane — whose own
   budget is `ChatProxyTimeout` = 10 minutes — and a forwarded cascade call that generated past 30 s
