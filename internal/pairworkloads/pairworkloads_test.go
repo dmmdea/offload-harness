@@ -182,8 +182,8 @@ func TestLedgerObserverEmitsTerminalRows(t *testing.T) {
 	rows := []ledger.Entry{
 		{TS: 100, Task: "summarize", ModelTier: "gemma-4-e4b", LatencyMs: 2500},
 		{TS: 101, Task: "agent_delegate", ModelTier: "node-b:qwen3.5-9b-agent", JobID: "agd-9"}, // the runner emits these
-		{TS: 102, Task: "agent", ModelTier: "qwen3.5-9b-agent"},                                      // node-side row of someone else's job
-		{TS: 103, Task: "classify", ModelTier: "gemma-4-e2b", CacheHit: true},                        // no GPU work
+		{TS: 102, Task: "agent", ModelTier: "qwen3.5-9b-agent"},                                 // node-side row of someone else's job
+		{TS: 103, Task: "classify", ModelTier: "gemma-4-e2b", CacheHit: true},                   // no GPU work
 		{TS: 104, Task: "transcribe", ModelTier: "whisper-stt", LatencyMs: 900, Deferred: true, Reason: "timeout"},
 	}
 	for _, r := range rows {
