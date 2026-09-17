@@ -10,6 +10,9 @@ date: "2026-09-16"
 > concurrency** and for being the tier's **only path to the LMCache cache server** — not on blind quality,
 > where the llama.cpp IQ3_S+MTP arm still leads. The BOUND agent lane is unchanged: `config_seed.agent_model`
 > stays on the llama.cpp fallback, per [ADR 0047](0047-ampere-16-agent-seat-reaudit.md).
+>
+> **Amended 2026-09-16 — the matched-window result is in and did not close the gap** (8.35 vs 9.29 at 49,152,
+> gap 0.94, 21/24). The quality cost is recorded as real; see *Quality* below. The decision stands.
 
 ## Context — the quant nobody had found
 
@@ -75,9 +78,25 @@ That arm was handicapped: 32,768 was the top of the ladder that run, not the sea
 about less of the document, which is exactly what a smaller window produces.
 
 The seat is wired at the **matched 49,152** window (65,536 refused: 2.3 GiB KV needed against 1.97 available,
-estimated maximum 54,880). **The matched-window blind measurement is in flight and its result governs this
-record**; if it does not close the gap materially, the quality cost of this seat is real and stands as a recorded
-cost of choosing concurrency, exactly as ADR 0047 recorded the 27B's padding and its wall.
+estimated maximum 54,880). **The matched-window blind measurement governs this record, and it did not close the
+gap.** Same instrument, same 8 packets, same vendor sampling, both arms at 49,152:
+
+| arm | accuracy | specificity | coverage | OVERALL | fabrications (P/M) | degenerate | head-to-head |
+|---|---|---|---|---|---|---|---|
+| llama.cpp IQ3_S + MTP | 9.47 | 9.45 | 9.35 | **9.29** | 2 / 3 | 0 | **21/24** |
+| vLLM 3-bit GSQ | **9.63** | 8.81 | 7.56 | 8.35 | **0 / 0** | 1 | 3/24 |
+
+Gap **0.94**, every lens agreeing (faithfulness 9.26 vs 8.74, substance 9.34 vs 8.19, usefulness 9.28 vs 8.12) —
+slightly WIDER than the 0.86 measured at 32,768. **The window hypothesis is refuted**: coverage did not move (7.69 → 7.56)
+with 50 % more context, so the loss is a property of the arm (the 3-bit GSQ weights, or vLLM's decoding of
+them), not of the budget it was given. What the GSQ arm keeps is the shape already seen at 32,768: **higher
+accuracy and zero fabrications** on both counts, against lower coverage and one degenerate answer.
+
+The quality cost of this seat is therefore real: **0.94 blind points, recorded as the cost of choosing
+concurrency and the cache server**, exactly as ADR 0047 recorded the 27B's padding and its wall. It is the
+reason the BOUND agent lane stays on the llama.cpp fallback: the seat that answers a default contract is the
+higher-quality arm, and the vLLM seat earns its place on fan-out and on prefix reuse, not on a single answer.
+Record: `Benchmarks and Optimizations/2026-09-16-16gb-tier-pass/judge-27b-49k`.
 
 **This decision does not touch the agent lane.** `config_seed.agent_model` remains the llama.cpp fallback, so the
 seat that ANSWERS a default contract is unchanged and no quality regression ships with this ADR.
@@ -99,5 +118,6 @@ seat that ANSWERS a default contract is unchanged and no quality regression ship
 ## Re-eval triggers
 
 A vLLM release that upstreams the Qwen3.5 quantized-embedding path (the patch is carried, not merged); a W4A16
-27B that fits 16 GB by quantizing its embedding; the matched-window quality result; and any change to the
-reference card's free VRAM, since the 49,152 window was fitted against what the box actually had free.
+27B that fits 16 GB by quantizing its embedding; a vLLM-loadable 27B quant that closes the 0.94 coverage gap
+(the matched-window result is in — a new quant, not a bigger window, is what would re-open this); and any change
+to the reference card's free VRAM, since the 49,152 window was fitted against what the box actually had free.

@@ -14,7 +14,10 @@ Versioning: [SemVer](https://semver.org/).
   while GSQ quantizes the embedding and LM head (4-bit RTN g64) alongside 3-bit transformer weights, exactly
   as llama.cpp's IQ3_S does. Chosen for **3.7x concurrency** (19.53 vs 5.26 tok/s aggregate at 4 streams;
   single-stream 5.75 vs 5.91 is a tie) and for being the tier's only path to the LMCache cache server
-  (ADR 0045) — **not** on blind quality, where the llama.cpp IQ3_S+MTP arm leads.
+  (ADR 0045) — **not** on blind quality, where the llama.cpp IQ3_S+MTP arm leads. Matched-window result (both
+  arms at 49,152, same sampling): **8.35 vs 9.29**, gap 0.94, 21/24, every lens agreeing — the window did not
+  close it (coverage 7.56 either way; accuracy 9.63 vs 9.47 and 0 fabrications on the GSQ side), so the ADR now
+  records the 0.94 as the real cost of choosing concurrency and the cache server.
   The seat declares its engine floor as data: `engine_min_version` 0.29.0 plus the checkpoint's
   `patch_vllm_qwen35_embedding.py`, which is CARRIED, not upstream (vLLM `main` still builds a stock
   `VocabParallelEmbedding` for Qwen3.5). On 0.28.0 the patch applies and is still insufficient.
