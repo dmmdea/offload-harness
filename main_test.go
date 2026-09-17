@@ -388,9 +388,19 @@ func TestConfigSourceLine(t *testing.T) {
 	if !strings.Contains(got, "BUILT-IN DEFAULTS") || !strings.Contains(got, "C:/typo.json") {
 		t.Fatalf("not-found: must state defaults AND name the bad path; got %q", got)
 	}
+	// AMENDED (review of #361): this assertion pinned a FALSE disclosure. A file
+	// that fails validation is still the file this process runs on — Load returns
+	// its settings with only the five composite keys stripped — so "BUILT-IN
+	// DEFAULTS" sent an operator hunting a path problem while the real one was a
+	// named key in the file they already had open. The line must name the file and
+	// carry the validation error verbatim, because that error text is the only
+	// thing that names the offending key.
 	got = config.SourceLine(config.Source{Path: "C:/bad.json", LoadErr: os.ErrInvalid})
-	if !strings.Contains(got, "BUILT-IN DEFAULTS") || !strings.Contains(got, "failed to load") {
-		t.Fatalf("load-failed: must state defaults and why; got %q", got)
+	if strings.Contains(got, "BUILT-IN DEFAULTS") {
+		t.Fatalf("load-failed: the settings came from the FILE, not from defaults; got %q", got)
+	}
+	if !strings.Contains(got, "C:/bad.json") || !strings.Contains(got, os.ErrInvalid.Error()) {
+		t.Fatalf("load-failed: must name the file and the validation error; got %q", got)
 	}
 }
 

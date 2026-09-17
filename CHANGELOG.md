@@ -51,6 +51,56 @@ Versioning: [SemVer](https://semver.org/).
   `saturation.score`, which excludes it because no card is busy yet. The existing "queue full" message
   text stays a byte-identical prefix — the delegator quotes it — with `(~N s until a worker frees)`
   appended.
+- **`config.Load` refuses a configured HTTP base it cannot prove is dialable** (register S-38).
+  Two classes, both of which used to be reported only as a dial timeout on the first real call:
+
+  - **Not a usable URL.** A parse error, a scheme that is not `http`/`https`, or no host at all.
+    An endpoint whose value was never substituted usually is not a URL — `${NODE_A_HOST}:18811`
+    and `http://node-a:$PORT` both fail `url.Parse`, and `node-a:18811` PARSES, as scheme
+    `node-a` with an empty host, so nothing errored, there was no port to judge and the dialer
+    resolved nothing.
+  - **A port nothing answers on.** `:0` is the OS’s "any free port", which nothing ever listens
+    on; `:9` is the IANA discard port. The comparison is NUMERIC, so `:09` is refused too.
+
+  Both apply to `endpoint`, `delegate_remotes[]`, `cascade_remote_lanes{}`, `seat_endpoints{}`,
+  `fleet_queue_holder`, `tts_endpoint`, `nim_endpoint`, `hailo_endpoint`, `coral_endpoint` and
+  `pair_workloads_endpoint`, and the error names the key and the value. An EMPTY value is not a
+  finding (an unset optional key is a machine that does not have that thing), and a **loopback**
+  base on an unusual port is explicitly still allowed: INV-10 sanctions a loopback-only bench
+  twin beside the production seat, and refusing it would break measurement on the delegator box.
+  The two base-URL maps and the one base-URL list share ONE per-value gate
+  (`validateEndpointValue`) with the tailnet guard, so the never-cloud rule and the dead-base
+  rule cannot drift apart across keys.
+- **What a refused config actually does, per entry point.** The refusal is not advisory, and it
+  is not uniform — each door gets the answer that door can afford:
+
+  - **`fleet-serve` REFUSES to start** (non-zero exit, the error on stderr). A node advertises
+    capability to other boxes and then accepts their dispatches, so one that cannot prove its own
+    config does not fail alone: it turns every delegator’s placement into a wasted wall.
+  - **`mcp` STARTS and says so.** A server that exits removes every `offload_*` tool from every
+    session with no message on any surface an operator reads. Instead `offload_status` carries
+    `config_error` as its FIRST key, and every other tool returns
+    `{"deferred":true,"reason":"config invalid: <err>"}` until the file is fixed.
+  - **One-shot CLI verbs proceed**, warning as they already did.
+  - **`doctor` prints the refusal VERBATIM as its first `FAIL` row and exits non-zero.** It kept
+    the load error and printed only a generic one-liner, so the one text that names the offending
+    key never reached the operator through the one verb they run to find it.
+- **`local-offload doctor` prints a `config findings` section** — one `FAIL` row per value that
+  loads and then cannot do what it says, and a non-zero exit, like every other doctor verdict.
+  Three classes, all previously invisible: (1) a fleet/lane base shape (S-38, WARN half) — a
+  `delegate_remotes` entry not on the fleet node port `:18811`, one that is loopback (a remote
+  cannot be this box), one carrying a `/v1` suffix, or one that is not a usable URL; a
+  `cascade_remote_lanes` base on neither shape a lane can be (a fleet node, or a llama-swap on
+  this box’s own `endpoint` port), carrying `/v1`, or unusable; (2) `gpu_wait_ms` more than 3x
+  `vision_gpu_wait_sec` (register C-33 — a deployed 600,000 ms against a 90 s vision wait is ten
+  minutes of blocking on every media-lane call, against that key’s own documented 90 s design),
+  and a NEGATIVE `gpu_wait_ms`/`vision_gpu_wait_sec`, which both consumers turn into a ZERO wait
+  while the file reads as a wait — a finding, deliberately not a load error, because it behaves
+  as the documented `0` rather than breaking anything; (3) one row per RETIRED key the file still
+  carries (`videogen_wait_ms`, `audiogen_wait_ms`), which until now was a single stderr note at
+  startup that scrolls past every command. These WARN rather than refuse for one release — a
+  strict validator that refuses a working odd config is a worse outage than the dial timeout it
+  replaces — and the fleet/lane shapes also print one stderr line at load.
 
 ### Changed
 - **`fleet_max_queue_depth`'s default is now `2x fleet_max_concurrent_jobs` (8 with the default 4
@@ -70,6 +120,14 @@ Versioning: [SemVer](https://semver.org/).
 - `internal/seatload` gained `Running`, the `/running`-only half of `Inflight` (no `/upstream` read at
   all, so it can never load an unloaded seat), shared by both so the alias resolution has one
   implementation.
+- **A config that FAILED validation no longer reports itself as "BUILT-IN DEFAULTS".** Both
+  disclosures said so and both were false: `Load` returns the FILE’s settings with only the five
+  composite keys stripped, so the process runs on that file — which is exactly why the refusal
+  matters. `config.WarnOnDefaults` and `config.SourceLine` now name the file, carry the
+  validation error verbatim, and say which entry points refuse, limp or proceed. Saying
+  "defaults" sent an operator hunting a path problem while the real one was a named key in the
+  file they already had open. `TestConfigSourceLine`’s load-failed assertion pinned the false
+  text and is amended.
 - **The delegator's fixed sleeps are jittered by ±20 %** (`pollEvery`, `placementPollInterval`,
   `refusalCooldown`). Every dispatcher sleeps on the same constants, so K sessions started within a second
   of each other re-read health, re-dispatch and re-ask a refusing node in lockstep for a whole run. Each
@@ -95,6 +153,17 @@ Versioning: [SemVer](https://semver.org/).
   `ChatProxyTimeout` + 30 s of copy-back slack, the poll to its wait + 2 s. A `ResponseWriter` that
   cannot carry a deadline simply runs under the blanket, as before. `TestServeTimeoutTable` now pins
   both halves: the blanket value AND that exactly those two handlers extend it.
+- **The agent client dialled `/v1/v1/chat/completions` for any base written with a `/v1`
+  suffix** (register S-37). `agent.NewLLMClient` trimmed only a trailing slash and then
+  appended `/v1/chat/completions`, so a base spelled `http://x/v1` — the shape `nim_endpoint`
+  documents, and the shape an operator copies off a vLLM seat’s own docs — produced a 404 that
+  named neither the key nor the doubling (8 rows in the delegation ledger, all on one seat).
+  The harness already owned the one normalisation rule — `swapclient.BaseURL`, the reader every
+  other consumer of `endpoint` goes through, whose own comment says a blind append "would have
+  produced `/v1/v1/models`" — and this client was the one that did not use it. It does now, so
+  `http://x`, `http://x/v1` and `http://x/v1/` all dial `/v1/chat/completions`. Normalising in
+  the constructor rather than at the ~60 call sites also keys the `modelaffinity` ticket on the
+  normalised base, so two clients spelling one endpoint two ways now contend on one gate.
 - **A capacity wait could not see a remote whose health was merely SLOW, and never said so.** The first cut
   of the per-tick probe bound was `2 x placementPollInterval` (6 s), below `fetchNodeViewTimeout` (15 s) —
   this repo's own boundary between slow and down. A remote answering health in 6-15 s under load was

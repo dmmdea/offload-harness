@@ -152,8 +152,11 @@ func gatherReport(cfg config.Config, src config.Source, routes []mediacap.Route,
 		Arch:         runtime.GOARCH,
 		Generated:    now.UTC().Format("2006-01-02 15:04 MST"),
 		// SourceLine is doctor's fixed-width console line; the table wants the value
-		// alone, and it must keep disclosing BUILT-IN DEFAULTS — a report built on
-		// defaults describes a machine whose real bindings are inactive.
+		// alone. It must keep disclosing BUILT-IN DEFAULTS — a report built on
+		// defaults describes a machine whose real bindings are inactive — and, when
+		// a configured file failed validation, it now also names that file and
+		// carries LoadErr's text verbatim (SourceLine's FAILED VALIDATION case), so
+		// the table cannot describe a bad config as if it had loaded clean.
 		ConfigSource: strings.TrimSpace(strings.TrimPrefix(config.SourceLine(src), "config:")),
 		Endpoint:     cfg.Endpoint,
 		Routes:       routes,
