@@ -142,14 +142,20 @@ func TestCtxWindowNoteNamesTheFallbackWhenTheProbeRanOutOfAdmission(t *testing.T
 		// confirmation sleep is conditional on what is LEFT of the budget, which
 		// makes "did it sleep" a knife-edge at exactly one poll interval.
 		running: func(int64) string { return `{"running":[{"model":"other-heavy","state":"starting","cmd":"x"}]}` },
-		// The pre-flight's last sleep ends within a scheduler tick of the
-		// deadline, on either side of it: on a fast Linux runner the probe
-		// found a few milliseconds left, got its 404 inside them, and the
-		// "ran out of admission budget" note correctly did NOT fire (CI on
-		// 225d9cf). Stalling the props answer past whatever is left makes the
-		// probe's deadline certain, which is the premise this test states.
-		propsDelay: 2 * time.Second,
-		loop:       func(int64) string { return doneChat("The answer is 42.") },
+		// The pre-flight's budget here EQUALS one poll interval, so whether it
+		// sleeps that interval or returns at once ("budget spent") is a
+		// clock-granularity coin flip: on a fast Linux runner it returned at
+		// once, the probe had the whole budget left, answered inside it, and
+		// the "ran out of admission budget" note correctly did NOT fire (CI on
+		// 225d9cf and 2f1c0e0). Stalling the props answer past the ENTIRE
+		// admission budget makes the probe's deadline certain either way,
+		// which is the premise this test states.
+		propsDelay: 4 * time.Second,
+		// The fake stalls /props only when it has a props answer to give; the
+		// probe asks /props first, so this is the request that outlives the
+		// budget.
+		props: map[string]any{"default_generation_settings": map[string]any{"n_ctx": 131072}},
+		loop:  func(int64) string { return doneChat("The answer is 42.") },
 		repack:     func(int64) string { return `{"answer":"42"}` },
 	}
 	srv := fake.server(t)

@@ -1730,9 +1730,13 @@ func awaitSeatAdmission(ctx context.Context, endpoint, seat string, budget time.
 	// The seat's own /running row may be listed under the CANONICAL id while the
 	// contract names an alias; seatMatcher resolves that, lazily.
 	m := newSeatMatcher(endpoint, seat)
-	// waited counts only the SLEEPS, never the probe round-trips: an
-	// immediate admission reports zero, which is what "nothing was swapping"
-	// must read as on the wire.
+	// waited counts the SLEEPS and the alias-resolution round-trips that
+	// precede them, never the /running probe itself: an immediate admission
+	// reports zero, which is what "nothing was swapping" must read as on the
+	// wire. The resolution is charged because it only runs when a sleep would
+	// follow, and a roster that TIMES OUT (3 s, admissionPoll) on every poll
+	// would otherwise let this loop run twice its budget in wall-clock time
+	// while reporting the budget exactly (reviewer finding on the S-08 retry).
 	var waited time.Duration
 	for {
 		rows, rerr := sc.Running(ctx)
@@ -1753,10 +1757,20 @@ func awaitSeatAdmission(ctx context.Context, endpoint, seat string, budget time.
 		// mid-swap, i.e. the next step would be a sleep. This is the fast path
 		// that was dead: a READY alias-bound seat waited the whole budget for
 		// another model's swap it had no stake in (register S-08).
-		if !mine && busy != "" && m.resolve(ctx) {
-			for _, r := range rows {
-				if m.matches(r.ID) && r.State == "ready" {
-					mine = true
+		if !mine && busy != "" {
+			resolveStart := time.Now()
+			resolved := m.resolve(ctx)
+			if !resolved && m.note != "" {
+				// A FAILED resolution is charged (a roster that times out costs
+				// admissionPoll per poll); a successful one is part of an
+				// immediate admission and stays at the zero the wire promises.
+				waited += time.Since(resolveStart)
+			}
+			if resolved {
+				for _, r := range rows {
+					if m.matches(r.ID) && r.State == "ready" {
+						mine = true
+					}
 				}
 			}
 		}

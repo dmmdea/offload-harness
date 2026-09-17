@@ -157,8 +157,11 @@ func TestSeatAdmissionRetriesTheAliasResolutionAfterATransientRosterError(t *tes
 	srv := fake.server(t)
 
 	waited, note := awaitSeatAdmission(context.Background(), srv.URL, "seat-alias", 30*time.Second)
-	if waited != admissionPoll {
-		t.Fatalf("waited=%v, want exactly one poll interval: the second roster read resolves the alias and the seat is already ready", waited)
+	// One poll interval plus the failed first roster read, which is charged to
+	// the wait (a roster that times out must not let the loop outrun its
+	// budget) — never a second interval.
+	if waited < admissionPoll || waited >= 2*admissionPoll {
+		t.Fatalf("waited=%v, want one poll interval (plus the failed roster read): the second roster read resolves the alias and the seat is already ready", waited)
 	}
 	if !strings.Contains(note, "alias resolution") {
 		t.Errorf("note = %q, want the transient roster failure named — a probe that failed silently is the defect this PR exists to remove", note)
