@@ -185,3 +185,49 @@ func TestFetchNodeViewMapsSeatRateAndBudget(t *testing.T) {
 		t.Fatalf("an older node must decode to nil rate/budget: %+v %+v err=%v", v.SeatRate, v.SeatBudget, err)
 	}
 }
+
+// TestFetchNodeViewMapsActivityFields (0.127, PR-5 item 1): the node's
+// admission/lease-detail/wall-history fields reach the view. seat_loaded and
+// seat_starting are TRI-STATE — a read that never happened must decode to nil
+// (unknown), never to false (idle), which is exactly why they are *bool on
+// the wire and here.
+func TestFetchNodeViewMapsActivityFields(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"node_id":"n","agent_enabled":true,"agent_seat":"s","agent_seat_resident":true,"agent_ctx_tokens":8192,
+		  "jobs_admitting":2,"seat_loaded":true,"seat_starting":false,
+		  "lease_exclusive":true,"lease_draining":true,"recent_agent_wall_sec":41.5}`))
+	}))
+	defer srv.Close()
+	v, err := FetchNodeView(context.Background(), srv.URL, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.JobsAdmitting != 2 {
+		t.Fatalf("jobs_admitting = %d, want 2", v.JobsAdmitting)
+	}
+	if v.SeatLoaded == nil || *v.SeatLoaded != true {
+		t.Fatalf("seat_loaded = %+v, want a pointer to true", v.SeatLoaded)
+	}
+	if v.SeatStarting == nil || *v.SeatStarting != false {
+		t.Fatalf("seat_starting = %+v, want a pointer to false", v.SeatStarting)
+	}
+	if !v.LeaseExclusive || !v.LeaseDraining {
+		t.Fatalf("lease_exclusive=%v lease_draining=%v, want both true", v.LeaseExclusive, v.LeaseDraining)
+	}
+	if v.RecentAgentWallSec != 41.5 {
+		t.Fatalf("recent_agent_wall_sec = %v, want 41.5", v.RecentAgentWallSec)
+	}
+	// A node that publishes none of these (pre-0.127) decodes to the UNKNOWN
+	// reading everywhere: 0/nil/false, never a fabricated number.
+	old := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"node_id":"n","agent_enabled":true,"agent_seat":"s","agent_seat_resident":true,"agent_ctx_tokens":8192}`))
+	}))
+	defer old.Close()
+	v, err = FetchNodeView(context.Background(), old.URL, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.JobsAdmitting != 0 || v.SeatLoaded != nil || v.SeatStarting != nil || v.LeaseExclusive || v.LeaseDraining || v.RecentAgentWallSec != 0 {
+		t.Fatalf("an older node must decode to the unknown reading: %+v", v)
+	}
+}
