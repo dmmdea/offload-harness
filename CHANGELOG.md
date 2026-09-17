@@ -6,6 +6,31 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **Seat coherence probe at warm: an incoherent seat defers before the wall** (register D-118). A seat can pass
+  `/health`, `/v1/models`, the speed probe and the READY smoke and still be numerically broken — on 2026-09-16/17 a
+  Qwen3.8-27B GSQ seat (fp8_e5m2 KV, RTX 5060 Ti, vLLM 0.29 / FlashInfer) answered every contract with
+  `<tool_call>!!!!!!!!!!!!!!!!!!!!…` to the cap, 126–336 s of degenerate output filed as `unparsed_tool_call`, and two
+  GPU leases went on parser hypotheses before one raw completion was read. Both agent doors (the delegation lane's
+  `runAgentTask` and the MCP `agent_run`) now ask the freshly loaded seat ONE bounded question on the admission budget
+  — "call `read_file`, then answer DONE", ≤ 96 tokens, thinking off, the node's own sampling, through the same
+  `agent.LLMClient` the loop uses — BEFORE the contract's wall context exists.
+  - A parsed tool call, or plain text with no tool call, proceeds; a transport error, a timeout or an empty choice list
+    proceeds as `inconclusive` (fail-open, exactly like the warm-up). A completion carrying a run of ≥ 20 identical
+    non-whitespace bytes (`agent.DegenerateRun`), an unparsed tool-call marker with no parsed call
+    (`agent.UnparsedToolCallMarker`, exported from the loop), or nothing at all at the token cap is BROKEN: the contract
+    defers `infrastructure` with the reason prefixed `seat incoherent at warm: ` (`core.IncoherentSeatReason`) having
+    spent seconds instead of its wall.
+  - Config `agent_coherence_probe`: `""`/`"cold"` (default — probe only after a cold load this run observed), `"off"`,
+    `"always"`. Any other value is refused at the config door by name.
+  - Wire: `coherence_note` on `core.AgentWireResult` and on every `agent_delegate` subtask (`delegate.ResultWire`),
+    beside `admission_note`; the MCP door emits it in its result map. Set on every run where the probe RAN — coherent,
+    inconclusive or broken — and empty when it did not. The probe's time is added to `admission_wait_sec`, never to the
+    wall.
+  - `delegate.IncoherentSeatDefer` makes this the ONE retry-eligible infrastructure defer: the fault is a property of
+    THIS seat, it was caught before the wall started, and the whole `timeout_sec` budget is still on the table, so the
+    delegator re-places the contract on another node. Every other infrastructure defer is unchanged.
+
 ### Changed
 - **`blackwell-16` declares its vLLM seat, measured on an RTX 5060 Ti** — ADR 0048 Amendment 1. Same checkpoint as
   ampere-16 (Qwen3.8-27B 3-bit GSQ) at 49,152 @ util 0.92 (KV 76,314 tokens, 1.55x), 27.75 tok/s single / 64.39 at 4

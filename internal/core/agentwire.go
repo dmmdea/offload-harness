@@ -122,6 +122,19 @@ const (
 	DeferClassWrite = "write"
 )
 
+// IncoherentSeatReason prefixes the defer a broken seat earns at admission
+// (register D-118). It is a CONSTANT and not a sentence typed twice: the
+// executing node writes the reason with it (pipeline.runAgentTask,
+// mcpserver.handleAgentRun) and the delegator matches on it to decide the
+// contract is worth one retry on another node (delegate.IncoherentSeatDefer),
+// so producer and consumer cannot drift.
+//
+// It stays a reason prefix rather than a new defer class on purpose: the class
+// is `infrastructure` because that is exactly what it is — the stack under this
+// seat is broken and no amount of re-asking it helps — and a new class would
+// read as an unknown one on every pre-D-118 node in a mixed-version fleet.
+const IncoherentSeatReason = "seat incoherent at warm: "
+
 // Scheduling bands (0.113.18) — the delegator stamps one on every dispatch
 // (`priority` in the fleet envelope) and the node's job store orders its
 // backlog by it. Shared here because both sides must agree on the vocabulary
@@ -343,6 +356,17 @@ type AgentWireResult struct {
 	// confirmed — so a wire reader can tell "nothing was swapping" from "the
 	// gate could not tell" from "the seat was loaded here".
 	AdmissionNote string `json:"admission_note,omitempty"`
+	// CoherenceNote reports the post-warm SEAT COHERENCE probe (register
+	// D-118): one ≤ 96-token completion, charged to admission, that asks the
+	// seat to call read_file and answer DONE. Empty = the probe did not run
+	// (policy "off", a warm seat under the default "cold" policy, no admission
+	// budget left, or a pre-D-118 node). Non-empty on every run where it DID
+	// run — coherent, inconclusive, or broken — so a wire reader can tell "the
+	// seat answered sanely" from "nobody asked".
+	//
+	// A broken verdict is also a defer: class `infrastructure`, reason prefixed
+	// IncoherentSeatReason, before the wall ever starts.
+	CoherenceNote string `json:"coherence_note,omitempty"`
 
 	// --- A1 config pinning (0.81.0, Tier 2 of the Phase 2 re-aim). Stamped by
 	// runAgentTask only when the seat DEMONSTRABLY SERVED this run (the loop

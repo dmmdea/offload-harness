@@ -587,6 +587,7 @@ does NOT contain:
 | `timeout_sec` (contract; default 300, box `agent_timeout_sec`) | the caller | the node's whole run: probe, build, loop, structured re-pack | placement wait, admission, cold load, queue time |
 | delegator poll | `timeout_sec` + a grace window; C-27 credits back intervals the node PROVABLY spent queued (both endpoints observed `accepted`), bounded at `min(timeout_sec + grace, 5 min)`; a job that never started is a `queue deadline` FAILURE, never a `budget` defer | waiting for the node's answer | the capacity wait (`agent_placement_wait_sec`, `results[].capacity_wait_sec`) |
 | admission + warm-up (`agent_admission_wait_sec`, default 300) | the node, BEFORE its wall starts (D-64) | another model's swap on the endpoint, then the seat's own cold load (`admission_wait_sec`, `admission_note`) | anything after the first token |
+| coherence probe (`agent_coherence_probe`, default `cold`) | the node, after the warm-up and still BEFORE its wall (D-118) | one ≤ 96-token completion asking the freshly loaded seat to call `read_file` and answer DONE (`coherence_note`; its time is added to `admission_wait_sec`) | the loop, the re-pack, anything the contract asked for |
 | node wall | `timeout_sec` as a context deadline over the loop | every planner call, tool execution, the re-pack | — |
 | loop budgets | `agent_max_tokens` per step (default 1,024; 4,096 on a thinking seat), the final answer at 4× (cap 8,192) **narrowed to what the remaining wall can decode** (0.122.1, D-95), 12 steps (`max_steps`, cap 12 remote), the forced final step (D-89) | one completion each | the wall — a step that generates for minutes is cut by the wall, not by its token budget |
 | engine + lease | the client's request timeout (split into connect / first token / stream, `llamaclient`), the GPU lease TTL (3,600 s default) against the media timeouts (`imagegen_timeout_sec` 600, `videogen_timeout_sec` 5,400, `gpu_wait_ms` 600,000 — C-33: a 5,400 s video run outlives the default lease; size the lease `--for` window to the job) | one request / one lease | — |
@@ -621,6 +622,28 @@ travel with the contract. Reference (2026-09-10, ledger-01 on both
 seats): the Qube 27B TP2 seat at ~30 tok/s needs ≈ 600 s thinking off / ≈ 730 s auto INCLUDING a 210 s cold load for a
 12-step, 8,192-token-final contract — a 600 s box default is at the edge and 900 s is the honest wall; the Lenovo 4B at
 ~30 tok/s answers the same contract in one step in 250–380 s with a 34 s cold load.
+
+**One question before the wall: the seat coherence probe (register D-118).** A seat can be HEALTHY by every gate the
+harness had and still be numerically broken. On 2026-09-16/17 the blackwell-16 vLLM seat (Qwen3.8-27B GSQ, `fp8_e5m2` KV
+through FlashInfer) passed `/health`, `/v1/models`, the speed probe and the READY smoke, then answered every contract
+with `<tool_call>!!!!!!!!!!!!!!!!!!!!…` to the token cap — 126–336 s of degenerate output per contract, all of it filed
+as `unparsed_tool_call`, and two GPU leases spent on parser hypotheses before anyone read a raw completion. So after the
+warm-up and still OUTSIDE the wall, the node asks the seat one bounded question: *read `notes.md` with the `read_file`
+tool, then answer DONE*, at most 96 tokens, thinking off, the node's own sampling, over the same client the loop uses.
+
+Cost: **one ≤ 96-token completion per cold load** under the default `cold` policy (`always` probes every run, `off`
+never). What comes back is reported as `coherence_note` on the wire, in one of three shapes:
+
+| verdict | what the seat did | what happens |
+|---|---|---|
+| `coherence probe: tool call parsed in Ns` | the seat decoded, the template rendered, the server parsed the call | the run proceeds |
+| `coherence probe: answered in text without a tool call in Ns (proceeding)` / `… inconclusive (…); proceeding` | plain prose instead of a call, or the seat could not be reached at all | the run proceeds — the probe never turns silence into a defer |
+| `seat incoherent at warm: …` | ≥ 20 identical non-whitespace bytes in a row, an unparsed tool-call marker with no parsed call, or nothing at all at the cap | the contract defers `infrastructure` after SECONDS, and `agent_delegate` re-places it on another node |
+
+The defer is the one `infrastructure` defer the delegator retries elsewhere: the fault is a property of that seat, it
+was caught before the wall started, and the whole `timeout_sec` budget is still unspent. It is still a broken stack —
+`--route remote` exits non-zero and an operator has to fix the box (on that seat the fix was `kv_cache_dtype: fp8`
+instead of `fp8_e5m2`; see ADR 0048 Amendment 1).
 
 **The final budget fits the wall (0.122.1, register D-95).** Sizing told the caller a contract would not fit; it did
 nothing about the run in flight, which still opened its final answer at the configured 4× budget. On the Lenovo 4B seat
@@ -824,6 +847,7 @@ all of those as *peers hold the seat* ([ADR 0032](architecture/decisions/0032-a-
 |---|---|---|
 | `seat_contention_wait_sec` | `0` → 90 s | one wait budget per agent contract, shared by every chat step and the re-pack; `-1` = never wait (first busy answer defers) |
 | `agent_admission_wait_sec` | `0` → 300 s | pre-flight: wait while any model on the endpoint is mid-swap, then WARM the seat if it is not loaded (0.115.11: one passthrough GET makes llama-swap swap it in; a vLLM cold load is 125–250 s) — all BEFORE the contract's wall starts; `admission_wait_sec` / `admission_note` on the wire report it; `-1` = off |
+| `agent_coherence_probe` | `""` → `cold` | post-warm SEAT COHERENCE probe (register D-118): after a cold load, ask the seat one ≤ 96-token question BEFORE the wall starts and defer `infrastructure` if it answers with the NaN shape. `cold` = only when this run loaded the seat, `always` = every run warm or cold, `off` = never. `coherence_note` on the wire reports the verdict |
 
 What you will see on the wire and in the ledger: `contention_wait_sec` and `admission_wait_sec`
 on every agent result; a defer whose reason starts with **`seat contended:`** when the budget was

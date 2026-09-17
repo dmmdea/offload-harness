@@ -1920,6 +1920,12 @@ const minRetrySec = 10
 // wrong result, or a seat honestly abstaining. A transport failure, a budget
 // defer, or a broken/misconfigured stack is not something another seat fixes,
 // and a contract-classed defer is the caller's to fix.
+//
+// The ONE infrastructure defer that IS retryable is the admission-time
+// coherence defer (register D-118): the seat itself is broken, it was caught
+// before the contract's wall started, and the whole budget is still on the
+// table — which is precisely the case another node fixes. The general
+// infrastructure rule is untouched; see IncoherentSeatDefer.
 func retryable(pr PlacedResult) bool {
 	if pr.Err != "" {
 		return false
@@ -1927,7 +1933,29 @@ func retryable(pr PlacedResult) bool {
 	if len(pr.AcceptanceFailures) > 0 {
 		return true
 	}
+	if IncoherentSeatDefer(pr.Result) {
+		return true
+	}
 	return pr.Result.Deferred && pr.Result.DeferClass == core.DeferClassAbstention
+}
+
+// IncoherentSeatDefer reports whether a result is the admission-time coherence
+// defer: an `infrastructure` defer whose reason carries core.IncoherentSeatReason,
+// i.e. the executing node asked its freshly loaded seat one bounded question
+// and the seat answered with the NaN shape (a run of one repeated byte, an
+// unparsable tool call, or nothing at all at the cap).
+//
+// It matches on the CONSTANT the producer writes, never on prose: pipeline
+// (and the MCP door) build the reason from core.IncoherentSeatReason, so the
+// two sides cannot drift. A pre-D-118 node never emits it and is unaffected.
+//
+// Why it is worth a retry when no other infrastructure defer is: the contract
+// spent seconds, not its wall, and the fault is a property of THIS seat — the
+// same contract on another node is the cure, and re-placing it is the whole
+// reason the probe fires before the wall instead of after it.
+func IncoherentSeatDefer(r core.AgentWireResult) bool {
+	return r.Deferred && r.DeferClass == core.DeferClassInfrastructure &&
+		strings.HasPrefix(r.Reason, core.IncoherentSeatReason)
 }
 
 // alternativeNode picks the node a retry runs on: the best eligible remote

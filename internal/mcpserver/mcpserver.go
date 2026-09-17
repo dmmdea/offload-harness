@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"os"
 	"path/filepath"
@@ -1762,6 +1763,17 @@ func withAdmission(out map[string]any, admitted time.Duration, note string) {
 	}
 }
 
+// withCoherence stamps the post-warm seat coherence probe (register D-118)
+// under the wire's own field name, beside admission_note. Empty = the probe did
+// not run (policy "off", a warm seat under the default "cold" policy, or no
+// admission budget left) and the key is absent, exactly as on the delegation
+// wire.
+func withCoherence(out map[string]any, note string) {
+	if note != "" {
+		out["coherence_note"] = note
+	}
+}
+
 // firstNonEmptyString returns the first non-blank of its arguments ("" when none).
 func firstNonEmptyString(vals ...string) string {
 	for _, v := range vals {
@@ -1901,6 +1913,33 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 	// 8,192 cold and 114,688 warm minutes apart (2026-09-16: a 222 s vLLM cold
 	// start outlasted the probe). Reported with the wire's own field names.
 	coldLoad, warmNote := pipeline.WarmSeat(ctx, cfg.Endpoint, model, time.Until(admitDeadline))
+	// Post-warm COHERENCE probe (register D-118) — the same shared helper the
+	// delegation door runs, on the same admission budget, BEFORE the wall
+	// context below exists. A seat that is healthy by every other gate and
+	// still numerically broken (2026-09-16/17: `<tool_call>!!!!...` to the cap
+	// on a freshly loaded vLLM seat) defers here in seconds instead of
+	// answering garbage for the whole wall.
+	var coherenceNote string
+	if pipeline.CoherenceProbeWanted(cfg, coldLoad > 0 || warmNote != "") {
+		act.Phase("coherence-probe")
+		v := pipeline.ProbeSeatCoherence(ctx, cfg, model, time.Until(admitDeadline))
+		if v.Ran {
+			coherenceNote = v.Note
+		}
+		if v.Note != "" {
+			log.Printf("agent_run: seat coherence (%s): %s", model, v.Note)
+		}
+		if v.Broken {
+			// The door's own deferred shape, with the probe's time charged to
+			// admission (it is admission: the wall has not started).
+			dout := map[string]any{"deferred": true, "reason": v.Note, "steps": 0}
+			withAdmission(dout, cordon+coldLoad+v.Spent, warmNote)
+			withCoherence(dout, coherenceNote)
+			withPlaced(dout, placed)
+			return jsonResult(dout)
+		}
+		coldLoad += v.Spent // charged to admission, never to the wall
+	}
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	built.Loop.WithObserver(act)
@@ -1950,6 +1989,7 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 		// would hide the one record that matters most.
 		dout := map[string]any{"deferred": true, "reason": rerr.Error(), "steps": res.Steps}
 		withAdmission(dout, cordon+coldLoad, warmNote)
+		withCoherence(dout, coherenceNote)
 		withPlaced(dout, placed)
 		addEffects(dout, res.Effects)
 		if len(res.RuleHits) > 0 {
@@ -1972,6 +2012,7 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 		"ctx_window": effCtx, // the window compaction budgeted against (probed, else configured, else the conservative fallback)
 	}
 	withAdmission(out, cordon+coldLoad, warmNote)
+	withCoherence(out, coherenceNote)
 	if res.TokenizerPath != "" {
 		// Which drop rung the ladder is on — same visibility rule as ctx_window:
 		// a sticky fail-open downgrade must be reportable, not inferred.

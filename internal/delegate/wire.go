@@ -118,6 +118,12 @@ type ResultWire struct {
 	ContentionWaitSec float64 `json:"contention_wait_sec,omitempty"`
 	AdmissionWaitSec  float64 `json:"admission_wait_sec,omitempty"`
 	AdmissionNote     string  `json:"admission_note,omitempty"`
+	// CoherenceNote carries the node's post-warm coherence probe (register
+	// D-118) up to the delegating caller: without it a run that deferred before
+	// its wall started, because the seat was emitting NaN tokens, would reach
+	// the caller as a bare infrastructure defer with nothing saying the seat
+	// itself was tested and failed.
+	CoherenceNote string `json:"coherence_note,omitempty"`
 	// RetriedOn / RetryNote: the published result is the better of two attempts
 	// when a retry ran; the note says what the other attempt did.
 	RetriedOn string `json:"retried_on,omitempty"`
@@ -277,6 +283,7 @@ func WireResponse(results []PlacedResult, sum Summary, lints [][]string) Respons
 			ContentionWaitSec:  pr.Result.ContentionWaitSec,
 			AdmissionWaitSec:   pr.Result.AdmissionWaitSec,
 			AdmissionNote:      pr.Result.AdmissionNote,
+			CoherenceNote:      pr.Result.CoherenceNote,
 			RetriedOn:          pr.RetriedOn,
 			RetryNote:          pr.RetryNote,
 			Replacements:       pr.Replacements,

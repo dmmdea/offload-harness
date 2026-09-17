@@ -1353,7 +1353,7 @@ func (l *Loop) run(ctx context.Context, objective string, bs *budgetState) (Resu
 			note := ""
 			if n := len(comp.Msg.ToolCalls); n > 0 {
 				note = fmt.Sprintf("forced final step: no tools were offered and the answer was asked for, and the seat answered with %d tool call(s) (first: %s) — nothing executed", n, comp.Msg.ToolCalls[0].Name)
-			} else if marker := unparsedToolCallMarker(comp.Msg.Content); marker != "" {
+			} else if marker := UnparsedToolCallMarker(comp.Msg.Content); marker != "" {
 				note = fmt.Sprintf("forced final step: no tools were offered and the answer was asked for, and the seat wrote a tool call as text (%q) — nothing executed", marker)
 			}
 			if note != "" {
@@ -1374,7 +1374,7 @@ func (l *Loop) run(ctx context.Context, objective string, bs *budgetState) (Resu
 		// finish_reason "stop", so trusting finish_reason drops the tool call
 		// and returns an empty answer.
 		if len(comp.Msg.ToolCalls) == 0 {
-			if marker := unparsedToolCallMarker(comp.Msg.Content); marker != "" {
+			if marker := UnparsedToolCallMarker(comp.Msg.Content); marker != "" {
 				// 2026-09-04: the Qube 27B seat answered every digest with
 				// "<tool_call><function=list_dir>…" as CONTENT — vLLM ran with
 				// --tool-call-parser hermes while the model's template emits the
@@ -1904,11 +1904,16 @@ func cutToolCallNote(stepTokens, finalTokens, argChars int) string {
 // template, 8/8 digests failed verification with findings about list_dir).
 var ErrUnparsedToolCall = errors.New("unparsed tool call in assistant content")
 
-// unparsedToolCallMarker returns the tool-call syntax found in an assistant
+// UnparsedToolCallMarker returns the tool-call syntax found in an assistant
 // message's plain text, or "" when there is none. The forms are the ones the
 // engines we run emit: the Qwen3/Hermes XML wrapper, the Qwen3-coder function
 // tag, and the Llama-3 pythonic tag.
-func unparsedToolCallMarker(content string) string {
+//
+// Exported since register D-118: the admission-time coherence probe
+// (pipeline.ProbeSeatCoherence) reads the SAME markers the loop does, so a seat
+// whose parser is mismatched is caught before the wall starts rather than after
+// it — one definition, never two that can drift.
+func UnparsedToolCallMarker(content string) string {
 	for _, m := range []string{"<tool_call>", "<function=", "<|python_tag|>"} {
 		if strings.Contains(content, m) {
 			return m

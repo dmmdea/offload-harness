@@ -35,7 +35,7 @@ func TestUnparsedToolCallMarker(t *testing.T) {
 		"mentions the word tool_call in prose":             "",
 	}
 	for in, want := range cases {
-		if got := unparsedToolCallMarker(in); got != want {
+		if got := UnparsedToolCallMarker(in); got != want {
 			t.Errorf("%q: got %q want %q", in, got, want)
 		}
 	}

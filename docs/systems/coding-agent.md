@@ -701,6 +701,9 @@ replaces the default. `cmd/local-agent/serve_test.go` covers the loopback guard.
   engine, acceptance evaluation
 - [`internal/pipeline/agenttask.go`](../../internal/pipeline/agenttask.go) — contract execution
   through this loop (local and fleet placements alike)
+- [`internal/pipeline/coherence.go`](../../internal/pipeline/coherence.go) — the post-warm seat
+  coherence probe (register D-118); [`internal/agent/degenerate.go`](../../internal/agent/degenerate.go) is its
+  NaN-shape detector
 - [`internal/sandbox/`](../../internal/sandbox/) — platform cages
 - [`cmd/local-agent/`](../../cmd/local-agent/) — CLI and server
 - [`internal/agent/client.go`](../../internal/agent/client.go) — `LLMClient.Chat`, the OpenAI wire
