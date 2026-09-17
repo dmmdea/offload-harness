@@ -113,8 +113,17 @@ func integrationSeatServer(t *testing.T, loopCalls *atomic.Int64, repackStatus i
 			}
 			if g, _ := body["grammar"].(string); g == "" {
 				// The grammar-free chat fallback lane (repackViaChat, 0.108.1).
-				// This fake 404s it so the unreachable-repack scenario keeps its
-				// lost-work semantics: BOTH re-pack lanes down = work lost.
+				// This fake fails it the SAME way as the grammar lane so the
+				// unreachable-repack scenario keeps its lost-work semantics: BOTH
+				// re-pack lanes down = work lost. Register D-108 (PR #366
+				// correctness review): the re-pack's LAST attempt — this lane —
+				// decides the class, so a plain 404 here would win over the
+				// grammar lane's scripted status and read as an abstention
+				// instead of the infrastructure defer this test is about.
+				if repackStatus != 0 {
+					w.WriteHeader(repackStatus)
+					return
+				}
 				http.NotFound(w, r)
 				return
 			}

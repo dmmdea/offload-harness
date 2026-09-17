@@ -8,6 +8,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/dmmdea/offload-harness/internal/core"
 )
 
 // waitJobState polls Get until the job reaches want (or the deadline trips).
@@ -249,6 +251,55 @@ func TestJobsDrainMarksSurvivorsInterrupted(t *testing.T) {
 	time.Sleep(20 * time.Millisecond)
 	if v, _ := j.Get("stuck"); v.State != JobError || v.Error != "interrupted" || v.Data != nil {
 		t.Fatalf("late completion overwrote the interrupted mark: %+v", v)
+	}
+}
+
+// TestJobsDrainDiscardsALateAgentBudgetDefer (PR #366 review, correctness
+// blocker 2): an agent run's own context.Canceled->budget deferWire (register
+// S-22/W-16) is a SUCCESS shape at the job level (OK:true, wire.Deferred
+// true) — runAgentTask's `run` closure therefore returns (data, nil), not an
+// error, exactly like TestJobsStateMachineDone's happy path. On the fleet
+// node path the only thing that ever cancels a run's context is
+// DrainAndStop, and its mark (state=error, err=ErrInterrupted) is written
+// BEFORE the cancel that releases the run — finish() is then write-once
+// against an already-terminal job, so this "late success" (a marshaled
+// AgentWireResult carrying Deferred:true/DeferClass:budget) is dropped on
+// the floor exactly like TestJobsDrainMarksSurvivorsInterrupted's late
+// `{"late":true}` is. The delegator polling this job NEVER sees the agent
+// loop's own budget classification or its reason text on a node drain — it
+// sees "interrupted". This is why the loop's context.Canceled arm
+// (agenttask.go) must not claim a specific cause ("the delegator abandoned
+// the poll"): on the one path where that arm's own words could ever reach a
+// human (an in-process/local run, which has no Jobs store in front of it),
+// the words must stay true there too — a drain is the OTHER real cause, and
+// on the node path this test proves the words are moot anyway.
+func TestJobsDrainDiscardsALateAgentBudgetDefer(t *testing.T) {
+	j := newJobs(time.Hour, time.Now, time.Hour, 0)
+
+	finished := make(chan struct{})
+	j.Accept("agent-canceled", func(ctx context.Context) (json.RawMessage, error) {
+		<-ctx.Done() // released only by the drain's cancel, exactly like a real agent loop's cctx
+		defer close(finished)
+		wire := core.AgentWireResult{
+			SchemaVersion: core.AgentWireSchemaVersion,
+			Deferred:      true,
+			DeferClass:    core.DeferClassBudget,
+			Reason:        "agent loop: canceled (the parent context ended — the caller gave up, or this box is draining)",
+		}
+		data, _ := json.Marshal(wire)
+		return data, nil // OK:true at the job level — a defer is a SUCCESS shape, never an error
+	})
+	waitJobState(t, j, "agent-canceled", JobRunning)
+
+	j.DrainAndStop(50 * time.Millisecond)
+	v, ok := j.Get("agent-canceled")
+	if !ok || v.State != JobError || v.Error != "interrupted" {
+		t.Fatalf("job view = ok=%v %+v, want state=error error=interrupted — the drain mark, not the agent's own budget defer", ok, v)
+	}
+	<-finished
+	time.Sleep(20 * time.Millisecond)
+	if v, _ := j.Get("agent-canceled"); v.State != JobError || v.Error != "interrupted" || v.Data != nil {
+		t.Fatalf("the late agent budget defer overwrote the interrupted mark: %+v — the delegator would have read defer_class budget instead of a drained node", v)
 	}
 }
 
