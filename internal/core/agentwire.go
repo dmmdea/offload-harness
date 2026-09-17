@@ -173,6 +173,17 @@ type AgentContract struct {
 	MaxSteps   int    `json:"max_steps,omitempty"`   // default AgentMaxStepsDefault, clamped to AgentMaxStepsCap
 	TimeoutSec int    `json:"timeout_sec,omitempty"` // default AgentTimeoutSecDefault, clamped to AgentTimeoutSecCap
 	Depth      int    `json:"depth"`                 // 0 = origin; ≥1 ⇒ delegate tool NEVER registered
+	// TimeoutAuto (register D-03, 0.126.0) marks a TimeoutSec the CALLER never
+	// set: intake stamped the wire default and the executing node may size the
+	// wall from its seat's measured rate instead, anywhere inside
+	// [AgentTimeoutSecDefault, AgentTimeoutSecCap], reporting what it ran under
+	// as AgentWireResult.WallSec. Two defaults used to turn "unset" into a
+	// legitimate-looking 300 before anything downstream could tell it from a
+	// caller who asked for 300 (intake.go and DecodeAgentContract), which is why
+	// this is a wire field and not a sentinel value. Never set alongside a
+	// caller's own timeout_sec; never set on a retry (its wall is what is left).
+	// An older node ignores it and runs the default, exactly as before.
+	TimeoutAuto bool `json:"timeout_auto,omitempty"`
 	// SetupActions (agentsetup.go, 0.113.24): tool calls the loop replays before
 	// the model's first turn; ≤ AgentSetupActionsMax, charged to the wall and
 	// never to max_steps. Optional; a node one release behind ignores it (the
@@ -290,6 +301,12 @@ type AgentWireResult struct {
 	WallEstimateSec int     `json:"wall_estimate_sec,omitempty"`
 	MinTurnSec      int     `json:"min_turn_sec,omitempty"`
 	WallNote        string  `json:"wall_note,omitempty"`
+	// WallSec (register D-03, 0.126.0) is the wall the NODE sized this run to —
+	// a timeout_auto contract, the seat-rate estimate clamped to the wire
+	// bounds — stamped before admission, so a defer at the cordon carries it
+	// too (what WOULD have run). Omitted when the contract named its own
+	// timeout_sec, or when the seat had no rate yet and the wire default ran.
+	WallSec int `json:"wall_sec,omitempty"`
 	// Final-budget fit (0.122.1, register D-95). FinalBudgetFit is the
 	// final-answer completion budget the run actually opened at once the
 	// REMAINING wall was taken into account — never above the configured rule

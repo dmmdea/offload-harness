@@ -196,8 +196,20 @@ func RequestForContract(c core.AgentContract, est, maxTokens int) Request {
 		MaxTokens:    maxTokens,
 		QualityGated: len(c.Acceptance) > 0 || len(c.OutputSchema) > 0,
 		ContextClass: c.ContextClass,
-		BudgetSec:    c.TimeoutSec,
+		BudgetSec:    budgetSecFor(c),
 	}
+}
+
+// budgetSecFor is the wall placement sizes a contract's prefill against: its
+// timeout_sec, or the wire CAP for a contract the caller left unsized
+// (timeout_auto, register D-03) — the executing node sizes that wall from its
+// seat's rate anywhere inside the cap, so deferring it here at the 300 s
+// default would refuse work the node would have given 900 s.
+func budgetSecFor(c core.AgentContract) int {
+	if c.TimeoutAuto {
+		return core.AgentTimeoutSecCap
+	}
+	return c.TimeoutSec
 }
 
 // need is the tokens a window must hold for req: the prompt estimate plus the

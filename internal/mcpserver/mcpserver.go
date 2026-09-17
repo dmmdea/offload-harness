@@ -2277,6 +2277,10 @@ func (s *Server) handleReviewDiff(ctx context.Context, req *mcp.CallToolRequest)
 	// ceiling still caps it.
 	if wall := int(agentTimeout(0, s.p.Cfg()).Seconds()); wall > contract.TimeoutSec {
 		contract.TimeoutSec = wall
+		// The owner's number is explicit, never auto-sized (D-03). A box that
+		// sets no agent_timeout_sec above the default leaves the marker on, and
+		// the review contract is then sized by the seat's rate like any other.
+		contract.TimeoutAuto = false
 		if contract.TimeoutSec > core.AgentTimeoutSecCap {
 			contract.TimeoutSec = core.AgentTimeoutSecCap
 		}

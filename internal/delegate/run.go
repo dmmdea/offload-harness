@@ -876,10 +876,7 @@ func (r *runner) runOne(ctx context.Context, i int, contract core.AgentContract)
 	//
 	// It is NOT the end-to-end wall — see placeAndRun for what else the wall
 	// contains and why none of it can be charged here.
-	budget := contract.TimeoutSec
-	if budget <= 0 {
-		budget = core.AgentTimeoutSecDefault
-	}
+	budget := executionBudgetSec(contract)
 	// ONE ledger per subtask, shared by every placeAndRun below. See placements.
 	pl := newPlacements()
 	first := r.placeAndRun(ctx, i, contract, nil, start, budget, pl)
@@ -954,8 +951,34 @@ func (r *runner) runOne(ctx context.Context, i int, contract core.AgentContract)
 	}
 	retryContract := contract
 	retryContract.TimeoutSec = remaining
+	retryContract.TimeoutAuto = false // a retry's wall is what is left — explicit, never auto (D-03)
 	second := r.placeAndRun(ctx, i, retryContract, &alt, start, budget, pl)
 	return mergeAttempts(first, second)
+}
+
+// executionBudgetSec is the delegator's execution budget for a contract: its
+// timeout_sec, or the wire CAP for a contract the caller left unsized
+// (timeout_auto, register D-03). The executing node sizes that wall from its
+// seat's measured rate anywhere inside the cap, so the delegator's clock — the
+// poll deadline, the re-placement ledger and a retry's remainder — must hold
+// the cap open rather than cut a 700 s wall the node chose at the 300 s default
+// the wire happens to carry. A retry never carries the marker: its wall is what
+// is left, an explicit number.
+//
+// The accepted cost (review, 2026-09-16): a node that acks and then dies
+// silently is abandoned at the CAP on this path, 900 s instead of the 300 s the
+// default gave — the delegator cannot tell "a slow seat under a properly sized
+// wall" from "a dead node" without waiting. Bounded, rare, and written down;
+// the tighter bound is the node's advertised seat_rate (health), the same
+// arithmetic the retry floor already reads — a follow-up, not this change.
+func executionBudgetSec(c core.AgentContract) int {
+	switch {
+	case c.TimeoutAuto:
+		return core.AgentTimeoutSecCap
+	case c.TimeoutSec <= 0:
+		return core.AgentTimeoutSecDefault
+	}
+	return c.TimeoutSec
 }
 
 // retryFloorSec is the least remaining budget a verification retry starts
@@ -1329,6 +1352,7 @@ func (r *runner) placeAndRun(ctx context.Context, i int, contract core.AgentCont
 		}
 		replaced := contract
 		replaced.TimeoutSec = remaining
+		replaced.TimeoutAuto = false // what is left — explicit, never auto (D-03)
 		pr = r.attempt(ctx, i, replaced, &next)
 		if pr.waitCapacity {
 			// The local last resort's composite decision must WAIT (the
@@ -1444,6 +1468,7 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 				}
 				replaced := contract
 				replaced.TimeoutSec = remaining
+				replaced.TimeoutAuto = false // what is left — explicit, never auto (D-03)
 				// Reaching here means the local seat WAS reserved when the wait
 				// began (an unreserved, untried local seat is taken by
 				// replacementNode before any wait): the lease cleared.
@@ -1484,6 +1509,7 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 				}
 				replaced := contract
 				replaced.TimeoutSec = remaining
+				replaced.TimeoutAuto = false // what is left — explicit, never auto (D-03)
 				forced := placement{view: views[best], base: bases[best],
 					reason: fmt.Sprintf("capacity wait → %s (room after %s)", views[best].NodeID, idle.Round(time.Second))}
 				pr := r.attempt(ctx, i, replaced, &forced)
@@ -1594,6 +1620,7 @@ func (r *runner) runDecided(ctx context.Context, i int, contract core.AgentContr
 	}
 	replaced := contract
 	replaced.TimeoutSec = remaining
+	replaced.TimeoutAuto = false // what is left — explicit, never auto (D-03)
 	dec.Wait = false
 	forced := placement{view: r.localView(), reason: note, decided: &dec}
 	pr := r.attempt(ctx, i, replaced, &forced)
@@ -2617,10 +2644,7 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 	r.intent.dispatched(jobID, base, contract.Goal)
 	pr.intentRecorded = true
 
-	timeoutSec := contract.TimeoutSec
-	if timeoutSec <= 0 {
-		timeoutSec = core.AgentTimeoutSecDefault
-	}
+	timeoutSec := executionBudgetSec(contract)
 	// pollBudget is the budget for WORK. Before the node gained a real queue
 	// (0.100.0) that distinction did not exist: the node's Accept was its
 	// start, so dispatch → running was microseconds and the whole budget went
