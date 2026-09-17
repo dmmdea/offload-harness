@@ -37,7 +37,14 @@ import (
 	// operator or another process could observe (job ids); a sleep length is
 	// neither, and a lock-free generator is what a fan-out of dispatch
 	// goroutines should be calling.
-	mathrand "math/rand/v2"
+	//
+	// semgrep's p/golang flags every math/rand import as a crypto finding. It is
+	// refuted here rather than suppressed globally: the only consumer is
+	// jittered(), whose output is a sleep duration nobody can observe and which
+	// guards nothing. Seeding this from crypto/rand would buy no property and
+	// would put a syscall on the dispatch path. If a SECOND consumer is ever
+	// added, delete this line and make it argue its own case.
+	mathrand "math/rand/v2" // nosemgrep: go.lang.security.audit.crypto.math_random.math-random-used — timer jitter only, not a security use
 	"net/http"
 	"os"
 	"path/filepath"
