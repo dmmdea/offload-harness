@@ -610,16 +610,28 @@ func expireResidency(s *Server) {
 	s.agentRes.mu.Unlock()
 }
 
-// swapWithFailingRoster is a llama-swap whose /running is perfectly healthy and
-// whose ROSTER is not — the shape of a box under load, where a 27B is mid-load
-// and the /v1/models GET times out while /running answers instantly. The seat is
-// listed by its CANONICAL id; the harness binds the ALIAS.
-func swapWithFailingRoster(t *testing.T, rosterUp *atomic.Bool, canonical string) *httptest.Server {
+// flakySwap is a llama-swap with two independent knobs: whether the ROSTER
+// (/v1/models) answers, and whether /running lists anything. The pair is the
+// whole point of these tests — a failed roster makes a LISTED seat unknowable
+// (the alias cannot be resolved, so the canonical id in /running cannot be
+// matched), while it makes an EMPTY /running perfectly knowable (nothing is
+// loaded on this box, and no name resolution is needed to say so).
+type flakySwap struct {
+	srv      *httptest.Server
+	rosterUp atomic.Bool
+	listSeat atomic.Bool
+}
+
+// newFlakySwap starts with the roster DOWN and the seat listed under its
+// canonical id — the box-under-load shape.
+func newFlakySwap(t *testing.T, canonical string) *flakySwap {
 	t.Helper()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	f := &flakySwap{}
+	f.listSeat.Store(true)
+	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v1/models":
-			if !rosterUp.Load() {
+			if !f.rosterUp.Load() {
 				http.Error(w, "roster unavailable", http.StatusBadGateway)
 				return
 			}
@@ -627,13 +639,17 @@ func swapWithFailingRoster(t *testing.T, rosterUp *atomic.Bool, canonical string
 			fmt.Fprintf(w, `{"object":"list","data":[{"id":%q,"object":"model","meta":{"llamaswap":{"aliases":["offload-e4b"]}}}]}`, canonical)
 		case "/running":
 			w.Header().Set("Content-Type", "application/json")
+			if !f.listSeat.Load() {
+				fmt.Fprint(w, `{"running":[]}`)
+				return
+			}
 			fmt.Fprintf(w, `{"running":[{"model":%q,"state":"ready"}]}`, canonical)
 		default:
 			http.NotFound(w, r)
 		}
 	}))
-	t.Cleanup(srv.Close)
-	return srv
+	t.Cleanup(f.srv.Close)
+	return f
 }
 
 // TestHealthOmitsSeatStateWhenTheAliasCannotBeResolved is the review's blocker 1.
@@ -652,9 +668,8 @@ func swapWithFailingRoster(t *testing.T, rosterUp *atomic.Bool, canonical string
 // fields absent — which is what docs/systems/fleet-node.md promises with
 // "absent ≠ idle".
 func TestHealthOmitsSeatStateWhenTheAliasCannotBeResolved(t *testing.T) {
-	var rosterUp atomic.Bool
-	swap := swapWithFailingRoster(t, &rosterUp, "gemma-4-e4b")
-	s, _ := newTestServer(t, agentHealthCfg(swap.URL), &fakeRunner{}, authOpts(true))
+	swap := newFlakySwap(t, "gemma-4-e4b")
+	s, _ := newTestServer(t, agentHealthCfg(swap.srv.URL), &fakeRunner{}, authOpts(true))
 
 	m := healthAfterProbe(t, s)
 	if v, present := m["seat_loaded"]; present {
@@ -666,7 +681,7 @@ func TestHealthOmitsSeatStateWhenTheAliasCannotBeResolved(t *testing.T) {
 
 	// Control: the same /running answer, with the roster back. Now the alias
 	// resolves, the canonical id matches, and the node says so.
-	rosterUp.Store(true)
+	swap.rosterUp.Store(true)
 	expireResidency(s)
 	m = healthAfterProbe(t, s)
 	if m["seat_loaded"] != true {
@@ -683,16 +698,15 @@ func TestHealthOmitsSeatStateWhenTheAliasCannotBeResolved(t *testing.T) {
 // verdict with nothing for an operator to look at, on either side of the wire.
 func TestSeatStateFailureIsSaidOutLoud(t *testing.T) {
 	buf := captureLog(t)
-	var rosterUp atomic.Bool // stays down: the reading cannot be resolved
-	swap := swapWithFailingRoster(t, &rosterUp, "gemma-4-e4b")
-	s, _ := newTestServer(t, agentHealthCfg(swap.URL), &fakeRunner{}, authOpts(true))
+	swap := newFlakySwap(t, "gemma-4-e4b") // roster down, seat listed: unresolvable
+	s, _ := newTestServer(t, agentHealthCfg(swap.srv.URL), &fakeRunner{}, authOpts(true))
 	_ = healthAfterProbe(t, s)
 
 	out := buf.String()
 	if !strings.Contains(out, "seat state") {
 		t.Fatalf("nothing in the log says the seat state could not be read; an operator sees two absent fields and has nothing to look at. Log was:\n%s", out)
 	}
-	for _, want := range []string{s.agentSeat, swap.URL} {
+	for _, want := range []string{s.agentSeat, swap.srv.URL} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("the seat-state log line names neither the seat nor the endpoint (%q missing):\n%s", want, out)
 		}
@@ -781,5 +795,33 @@ func TestAdmittingCountsTheSharedAdmissionPhaseOnly(t *testing.T) {
 	s.admittingAt = time.Time{} // the next cache cycle
 	if n := s.admitting(); n != 0 {
 		t.Fatalf("jobs_admitting = %d after the run started stepping, want 0", n)
+	}
+}
+
+// TestHealthPublishesNotLoadedWhenTheRosterIsDownAndNothingIsRunning is round
+// 2 of the review: "the roster failed" is not the same fact as "I could not
+// tell", and only the second one may hide the answer.
+//
+// seatload defines Ambiguous as `RosterErr != nil && RunningOthers > 0` — a
+// failed roster AND something listed that could not be matched. With /running
+// EMPTY there is nothing to mis-resolve: no model is loaded on this box, so the
+// agent seat is not loaded either, and no alias resolution is needed to say so.
+// Refusing that reading would withhold a fact the node has, and it is the common
+// case on a quiet box whose llama-swap is slow to answer /v1/models.
+//
+// gpu_drain (`!rd.Loaded && rd.Ambiguous`) and internal/placement/live.go
+// (`err == nil && !rd.Ambiguous`) both key on Ambiguous alone; health said it
+// mirrored them while keying on the broader RosterErr.
+func TestHealthPublishesNotLoadedWhenTheRosterIsDownAndNothingIsRunning(t *testing.T) {
+	swap := newFlakySwap(t, "gemma-4-e4b")
+	swap.listSeat.Store(false) // nothing loaded at all; the roster stays down
+	s, _ := newTestServer(t, agentHealthCfg(swap.srv.URL), &fakeRunner{}, authOpts(true))
+
+	m := healthAfterProbe(t, s)
+	if m["seat_loaded"] != false {
+		t.Fatalf("seat_loaded = %v with the roster down and /running EMPTY, want an explicit false: nothing is loaded on this box, which needs no alias resolution to know (payload %v)", m["seat_loaded"], m)
+	}
+	if m["seat_starting"] != false {
+		t.Fatalf("seat_starting = %v, want an explicit false", m["seat_starting"])
 	}
 }

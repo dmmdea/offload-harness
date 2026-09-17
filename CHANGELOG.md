@@ -27,11 +27,13 @@ Versioning: [SemVer](https://semver.org/).
   cordon → pre-flight → warm → coherence probe, up to 300 s with the card idle — counted from this
   process's own `gpuactivity` records, ADR 0041); `seat_loaded` / `seat_starting` (llama-swap's
   `/running` verdict on the agent seat, read alias-aware through `internal/seatload` and `/running`
-  ONLY, never a path that could LOAD the seat — register C-05; BOTH a failed read and an UNRESOLVED one
-  leave the pair absent rather than publishing "not loaded", where unresolved means the roster GET
-  failed and the bare-name fallback cannot see an alias-bound seat listed under its canonical id — the
-  same refusal `gpu_drain` and `internal/placement/live.go` already apply to that reading, with the
-  reason logged); `lease_exclusive` / `lease_draining` (what the held reservation is
+  ONLY, never a path that could LOAD the seat — register C-05; BOTH a failed read and an AMBIGUOUS one
+  leave the pair absent rather than publishing "not loaded", where ambiguous is `seatload`'s own
+  predicate — the roster GET failed AND `/running` lists models the bare-name fallback cannot match, so
+  an alias-bound seat cannot be seen. That is the same refusal `gpu_drain` and
+  `internal/placement/live.go` already apply to this reading, and it is narrower than "the roster
+  failed": a failed roster over an EMPTY `/running` is knowable and publishes `seat_loaded:false`.
+  Both withheld cases are logged); `lease_exclusive` / `lease_draining` (what the held reservation is
   DOING, beside `busy`'s verdict about declared time); and `recent_agent_wall_sec` (the median wall of
   the last up to 8 agent jobs to finish, from the same job map `/fleet/jobs` walks — the completion
   signal a node with no `seat_rate` sample could not otherwise publish).

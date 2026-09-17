@@ -63,9 +63,11 @@ const maxSnapshotAge = 30 * time.Second
 const agentResidencyTTL = maxSnapshotAge
 
 // errSeatStateUnresolved marks a /running reading that came back without an
-// error and without an ANSWER: the roster could not be read, so the seat could
-// only be matched by its bare name, which cannot see an alias-bound seat listed
-// under its canonical id. "Not loaded" and "could not tell" are different facts.
+// error and without an ANSWER: the roster could not be read WHILE /running
+// listed models, so the seat could only be matched by its bare name, which
+// cannot see an alias-bound seat listed under its canonical id (seatload's
+// `Ambiguous`). "Not loaded" and "could not tell" are different facts — and a
+// failed roster over an EMPTY /running is the first, not the second.
 var errSeatStateUnresolved = errors.New("fleet: seat state unresolved (roster unreadable, alias could not be matched)")
 
 // errRefreshIncomplete is the seat-state read's "never ran" value: the deferred
@@ -583,19 +585,27 @@ func (s *Server) refreshAgentResidency() {
 			log.Printf("fleet: seat state of %q against %s could not be read; omitting seat_loaded/seat_starting for up to %s: %v",
 				s.agentSeat, s.opts.Cfg.Endpoint, agentResidencyTTL, seatErr)
 			seat = seatload.Reading{}
-		case !seat.Loaded && (seat.RosterErr != nil || seat.Ambiguous):
-			// A NIL ERROR IS NOT A RESOLVED READING. seatload falls back to
-			// matching /running by the BARE name when the roster read fails —
+		case !seat.Loaded && seat.Ambiguous:
+			// A NIL ERROR IS NOT ALWAYS A RESOLVED READING. seatload falls back
+			// to matching /running by the BARE name when the roster read fails —
 			// deliberately, because that beats a refusal — and the bare name
-			// cannot see a seat listed under its canonical id. Every harness
-			// seat is alias-bound, so "not loaded" here means "could not tell",
-			// and publishing it as seat_loaded:false would assert that a loaded
-			// seat is idle exactly when the box is busy enough to time out a
-			// roster GET. The other consumers of this reading already refuse it
-			// (gpu_drain's `!rd.Loaded && rd.Ambiguous`, placement/live.go's
-			// `err == nil && !rd.Ambiguous`); health joins them.
-			log.Printf("fleet: seat state of %q against %s is UNRESOLVED — the roster read failed, so /running could only be matched by the bare name and an alias-bound seat listed under its canonical id cannot be seen; omitting seat_loaded/seat_starting for up to %s: %v",
-				s.agentSeat, s.opts.Cfg.Endpoint, agentResidencyTTL, seat.RosterErr)
+			// cannot see a seat listed under its canonical id. Every harness seat
+			// is alias-bound, so when /running listed SOMETHING that could not be
+			// matched, "not loaded" means "could not tell", and publishing it as
+			// seat_loaded:false would assert that a loaded seat is idle exactly
+			// when the box is busy enough to time out a roster GET.
+			//
+			// `Ambiguous`, NOT `RosterErr`, is the predicate — the same one
+			// gpu_drain (`!rd.Loaded && rd.Ambiguous`) and placement/live.go
+			// (`err == nil && !rd.Ambiguous`) key on, and it is narrower on
+			// purpose: seatload defines it as a failed roster AND a non-empty
+			// /running. A failed roster with an EMPTY /running is perfectly
+			// knowable — nothing is loaded on this box, so the seat is not
+			// loaded, and no name resolution is needed to say so. Withholding
+			// that would hide a fact the node has, on the common shape (a quiet
+			// box whose llama-swap is slow to answer /v1/models).
+			log.Printf("fleet: seat state of %q against %s is UNRESOLVED — the roster read failed and /running lists %d model(s) that the bare name cannot match, so an alias-bound seat listed under its canonical id cannot be seen; omitting seat_loaded/seat_starting for up to %s: %v",
+				s.agentSeat, s.opts.Cfg.Endpoint, seat.RunningOthers, agentResidencyTTL, seat.RosterErr)
 			seat, seatErr = seatload.Reading{}, errSeatStateUnresolved
 		}
 	}
@@ -708,16 +718,33 @@ func (s *Server) extendWrite(w http.ResponseWriter, d time.Duration, handler str
 	if s.setWriteDeadline == nil {
 		return
 	}
-	if err := s.setWriteDeadline(w, time.Now().Add(d)); err != nil {
-		// Benign for a test recorder, NOT benign in production: the only way a
-		// real serve path lands here is a ResponseWriter wrapper that does not
-		// implement Unwrap, and then this handler is silently back under the
-		// 30 s blanket — the defect S-09 exists to remove, reintroduced by a
-		// middleware nobody would think to check. One line per invocation, on
-		// the two routes where it changes the answer.
-		log.Printf("fleet: %s could not extend its write deadline by %s past the server's blanket WriteTimeout — this answer will be CUT if it takes longer: %v", handler, d, err)
+	err := s.setWriteDeadline(w, time.Now().Add(d))
+	if err == nil {
+		return
 	}
+	if errors.Is(err, http.ErrNotSupported) {
+		// A STANDING fact about this route's writer, not an event: the writer
+		// simply has no deadline to set (a test recorder, or a middleware that
+		// wraps without implementing Unwrap), so every request on the route
+		// reports it and a per-invocation line is a log flood — 9 of them in
+		// this package's own suite. Once per process per route says the same
+		// thing: on a real serve path it means a wrapper has put this handler
+		// back under the blanket write timeout, which is S-09's defect
+		// reintroduced by something nobody would think to check.
+		if _, seen := writeDeadlineUnsupported.LoadOrStore(handler, struct{}{}); !seen {
+			log.Printf("fleet: %s runs under the blanket write timeout: this ResponseWriter does not support SetWriteDeadline, so the %s extension cannot be applied (reported once per process per route)", handler, d)
+		}
+		return
+	}
+	// Any other failure IS an event — it is about this request, not about the
+	// writer's type — and the answer really will be cut if it takes longer.
+	log.Printf("fleet: %s could not extend its write deadline by %s past the server's blanket WriteTimeout — this answer will be CUT if it takes longer: %v", handler, d, err)
 }
+
+// writeDeadlineUnsupported remembers which routes have already reported a
+// writer that cannot carry a deadline. Keyed by the handler name, so the chat
+// lane and the long poll each say it once.
+var writeDeadlineUnsupported sync.Map
 
 // controllerWriteDeadline is the production seam: the standard library's own
 // per-request deadline control.

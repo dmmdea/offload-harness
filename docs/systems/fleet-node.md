@@ -405,16 +405,21 @@ phase.
 bare-name match reads a loaded seat as absent — the silent 0.113.16–19 drain defect. It rides the
 residency refresh's background single-flight (one cycle per 30 s TTL, never one per request).
 
-**Two different failures both publish NOTHING, and both are logged.** A `/running` read that ERRORS
-leaves both fields absent. So does a read that came back *without* an error and without an answer:
-when the roster GET fails, `seatload` falls back to matching `/running` by the bare name (better than
-a refusal), and that fallback cannot see an alias-bound seat listed under its canonical id — so
-`Loaded:false` with `RosterErr` set means "could not tell", not "idle". Publishing it as
-`seat_loaded:false` would assert a loaded seat is idle exactly when the box is busy enough to time out
-a roster GET. Health therefore refuses that reading the same way every other consumer does
-(`gpu_drain`'s `!rd.Loaded && rd.Ambiguous`, `internal/placement/live.go`'s `err == nil &&
-!rd.Ambiguous`): absent ≠ idle, the same rule the VRAM snapshot and the reclaim verdict follow, with
-the reason on the node's log so an operator is not left guessing at two missing keys.
+**Two different failures publish NOTHING, and both are logged.** A `/running` read that ERRORS leaves
+both fields absent. So does an AMBIGUOUS one: when the roster GET fails, `seatload` falls back to
+matching `/running` by the bare name (better than a refusal), and that fallback cannot see an
+alias-bound seat listed under its canonical id — so `Loaded:false` *while `/running` lists models*
+means "could not tell", not "idle". Publishing it as `seat_loaded:false` would assert a loaded seat is
+idle exactly when the box is busy enough to time out a roster GET.
+
+The predicate is `seatload`'s `Ambiguous` (a failed roster **and** a non-empty `/running`), which is
+exactly what `gpu_drain` (`!rd.Loaded && rd.Ambiguous`) and `internal/placement/live.go`
+(`err == nil && !rd.Ambiguous`) key on — and it is deliberately narrower than "the roster failed". A
+failed roster over an **empty** `/running` is knowable: nothing is loaded on the box at all, so the
+seat is not loaded either and no alias resolution is needed to say so, and health publishes
+`seat_loaded:false`. Only the unknowable case is withheld: absent ≠ idle, the same rule the VRAM
+snapshot and the reclaim verdict follow, with the reason on the node's log so an operator is not left
+guessing at two missing keys.
 
 **`GET /fleet/jobs/{id}?wait=<seconds>` is a completion event.** An already-terminal job answers at
 once; anything else blocks on the job store's terminal broadcast — which the store has fired all
