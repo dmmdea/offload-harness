@@ -39,18 +39,31 @@ Versioning: [SemVer](https://semver.org/).
   signal a node with no `seat_rate` sample could not otherwise publish).
 - **A `503 queue full` refusal now says when it will lift, and `/fleet/health` says it in advance**
   (register S-04, diagnosis §2(a)/§5.2, the overhaul plan's roast correction: an admission refusal
-  must be something the delegator can outwait, never terminal). The dispatch response carries a
-  `Retry-After` header, and health publishes the identical number as `queue_wait_estimate_sec` (float,
-  omitted when a worker is free or no wall sample exists): `ceil(excess x recent_agent_wall_sec /
-  max(1, max_concurrent_jobs))`, `excess = queue_depth - max_concurrent_jobs`, bounded to `[5, 300]`;
-  the flat `30` with no `recent_agent_wall_sec` sample yet. Deliberately sized from the node's own
-  MEASURED recent wall, never from `seat_rate.min_turn_sec` — that number is a max-final RETRY floor
-  for one seat with no relationship to backlog depth, and using it here would have sized a queue wait
-  from a quantity that has nothing to do with queue depth. A job still in its ADMISSION phase counts
-  toward the estimate exactly like any other running job (the worker slot is genuinely taken), unlike
-  `saturation.score`, which excludes it because no card is busy yet. The existing "queue full" message
-  text stays a byte-identical prefix — the delegator quotes it — with `(~N s until a worker frees)`
-  appended.
+  must be something the delegator can outwait, never terminal). The NODE now publishes both signals
+  — `internal/delegate` does not consume either one automatically yet; that lands with the
+  placement release (`feat/placement-eta`), and this PR gives it something to read. The dispatch
+  response carries a `Retry-After` header, and health separately publishes `queue_wait_estimate_sec`
+  (float, omitted when a worker is free or no wall sample exists) from the SAME formula:
+  `ceil(excess x recent_agent_wall_sec / max(1, max_concurrent_jobs))`, `excess = capped_backlog -
+  max_concurrent_jobs` — the CAPPED backlog only (`Jobs.CountsCapped`), never the wire's all-task-
+  types `queue_depth`, or an uncapped media/stt/pipeline job would inflate the estimate for a node
+  whose agent slots are genuinely idle (the same class of bug `saturation.score` was already fixed
+  for, S-17, and this release's own `IdleSlot` fix, S-20, repeats the lesson of). Deliberately sized
+  from the node's own MEASURED recent wall, never from `seat_rate.min_turn_sec` — that number is a
+  max-final RETRY floor for one seat with no relationship to backlog depth. A job still in its
+  ADMISSION phase counts toward the estimate exactly like any other running job (the worker slot is
+  genuinely taken), unlike `saturation.score`, which excludes it because no card is busy yet.
+
+  The HEADER (an HTTP retry contract) is bounded to `[5, 300]`; the HEALTH FIELD is the raw,
+  unbounded estimate — a delegator's own placement signal, where a genuine 600s estimate is more
+  useful reported honestly than floored to 300. The header's clamp is said out loud rather than
+  disguised as a precise number, so a caller can tell three shapes apart: no wall sample yet
+  (`no recent completions yet — retry in 30 s`), a real estimate (`~N s until a worker frees, from
+  recent completions`), and a clamped-high one (`>=300 s until a worker frees, …`) — an undisguised
+  300 would otherwise be indistinguishable from a genuine 300s measurement and invite every waiter
+  to retry in lockstep. The existing "queue full" message text stays a byte-identical prefix — the
+  delegator already quotes it verbatim in its own placement-refused message — with one of the three
+  clauses above appended.
 - **`config.Load` refuses a configured HTTP base it cannot prove is dialable** (register S-38).
   Two classes, both of which used to be reported only as a dial timeout on the first real call:
 
