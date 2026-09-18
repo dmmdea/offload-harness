@@ -6,6 +6,14 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **`calibrate` had never fitted a threshold, and the cause was file plumbing, not the 60-row floor**
+  (register D-126): the only classify/triage label writer appends to the confhead labels sidecar
+  (`confhead_labels_path`) while `calibrate` read the ledger alone, whose rows of the same calls carry the
+  margin and no label — 0 of 9,217 live ledger rows passed its filter. `calibration.RunSources` reads every
+  labeled-row source (ledger + sidecar), a missing file is a 0-row source, and the report names each source
+  with its usable-row count. Red test `TestRunSourcesFitsFromTheLabelsSidecar`.
+
 ## [0.129.0] - 2026-09-18 - a contract can name the layer it runs on (the Lenovo fast digest seat by name); the digest-adr-hard-8 contract set
 
 ### Added

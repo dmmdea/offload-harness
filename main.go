@@ -2928,7 +2928,9 @@ func runCalibrate(args []string) error {
 	if dst == "" {
 		dst = cfg.ThresholdsPath
 	}
-	_, report, err := calibration.Run(cfg.LedgerPath, *alpha, cfg.TargetErrorRate, dst)
+	// Both label sources (register D-126): the ledger and the confhead labels
+	// sidecar, where the classify/triage agreement labels actually land.
+	_, report, err := calibration.RunSources([]string{cfg.LedgerPath, cfg.ConfHeadLabelsPath}, *alpha, cfg.TargetErrorRate, dst)
 	if err != nil {
 		return err
 	}
