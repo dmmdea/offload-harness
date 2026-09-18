@@ -115,7 +115,7 @@ the live Resolve deployment is per-machine and the layers below are NOT intercha
   + scripting bridge at `%USERPROFILE%\resolve-claude\`. Reinstall deps ONLY with
   `mcp[cli]>=1.29,<2` (mcp 2.0 breaks it).
 - Kernel docs (fusion/render/audio/media-pool/…) are vendored in the repo at `docs/reference/`.
-- Footage: `D:\My Drive\YouTube\MyTools Auto Reviews`.
+- Footage: `<cloud-drive>\YouTube\MyTools Auto Reviews`.
 
 ### workstation — Studio **21.1.0.14** (upgraded 2026-09-08; was 21.0.4.5, activated locally 2026-08-27/28)
 > 21.1 facts (interpreters, native MCP, new API, crash list) live in `reference/09-resolve-21-1.md`.
