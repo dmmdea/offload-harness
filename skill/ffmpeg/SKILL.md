@@ -6,7 +6,7 @@ description: Use for any FFmpeg/ffprobe work in the video pipeline — probing a
 # FFmpeg
 
 Drive ffmpeg/ffprobe autonomously and prove every output. The reference folder holds measured
-facts (2026-09-01, ffmpeg 8.1.2 on the workstation, 8.0.1 on the Linux node); read `reference/README.md`
+facts (2026-09-01, ffmpeg 8.1.2 on the workstation, 8.0.1 on the edge node); read `reference/README.md`
 first — its ten rules are the contract — then only the file the task needs.
 
 ## Routing
@@ -24,7 +24,7 @@ first — its ten rules are the contract — then only the file the task needs.
 | It "worked" but the output is wrong | `reference/09-failure-modes.md` |
 
 ## Operating rules (short form)
-1. `hostname` + `ffmpeg -version` before promising an encoder — the hosts run **different major versions** (workstation PATH 8.1.2 + 9.0.1 off-PATH for the harness lane; editing rig editing rig 9.0; Linux node 8.0.1). Recipes port cleanly, but three behaviours differ: `reference/01-hosts-builds.md` § Version deltas.
+1. `hostname` + `ffmpeg -version` before promising an encoder — the hosts run **different major versions** (workstation PATH 8.1.2 + 9.0.1 off-PATH for the harness lane; editing rig editing rig 9.0; edge node 8.0.1). Recipes port cleanly, but three behaviours differ: `reference/01-hosts-builds.md` § Version deltas.
 2. Build commands as argv lists from Python (no shell) or `-filter_script`; when a shell is unavoidable follow 08. Fonts: only `fontfile='C\:/…'` (quoted AND colon-escaped) is portable — a drive-less path segfaults from a cwd on the wrong drive, and `%` in drawtext text needs `expansion=none`.
 3. Frame-exact cuts re-encode; `-c copy` only on keyframes. Input `-ss` resets time — subtitles/enable/`-to` need `-copyts`.
 4. Loudness: two-pass loudnorm, then `ebur128` re-measure. Dead air: `silencedetect` → cut list → `select`/`aselect`.
