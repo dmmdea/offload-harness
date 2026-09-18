@@ -12,8 +12,10 @@ Versioning: [SemVer](https://semver.org/).
   agent seat, under the window check and the layer's own guards, naming the loaded seat it displaces
   on a shared card) and row 5b (a box that declares no pair places the free choice on the `single`
   layer's agent seat — the planner default under a layer name), and the delegator decides FOR a
-  caller-named layer instead of overwriting it with the free choice, so a node that does not declare
-  the layer is ineligible for that subtask. Before this the table keyed every agent row on the pair
+  caller-named layer instead of overwriting it with the free choice — on its own box and over every
+  remote's rows — so a node that does not declare the layer is ineligible for that subtask, an idle
+  local box that does not declare it does not keep it, and with no node declaring it the subtask
+  defers naming the layer (never a silent run on the planner seat). Before this the table keyed every agent row on the pair
   and the triple: a one-card box (the ampere-16 Lenovo) that declared layers became ineligible for
   every contract, and its second layer — the 35B digest seat beside the 27B GSQ (digest-8 164.8 s vs
   1,597.8 s, blind coverage 4.65 vs 8.53, so by name only, never the default) — deferred "no layer

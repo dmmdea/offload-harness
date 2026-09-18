@@ -1,10 +1,12 @@
 package delegate
 
 import (
+	"context"
 	"strings"
 	"testing"
 
 	"github.com/dmmdea/offload-harness/internal/config"
+	"github.com/dmmdea/offload-harness/internal/core"
 	placetable "github.com/dmmdea/offload-harness/internal/placement"
 )
 
@@ -76,5 +78,46 @@ func TestRemoteDecisionRefusesANodeWithoutTheRequestedLayer(t *testing.T) {
 	eligible, word, detail := eligibilityVerdict(st, r)
 	if eligible || word != "layer" || !strings.Contains(detail, "fast") {
 		t.Fatalf("verdict = (%v, %q, %q), want ineligible on the layer word", eligible, word, detail)
+	}
+}
+
+func TestPlaceSendsANamedLayerToTheNodeThatDeclaresIt(t *testing.T) {
+	st := schemaSubtask()
+	st.Contract.Layer = "fast"
+	lenovo := eligibleRemote()
+	lenovo.Layers = oneCardRows(t)
+
+	// Idle local, plain box: the idle-local rule would keep it and run the
+	// planner seat; a named layer goes to the node that declares it.
+	if got := Place("seed", st, localNode(), []NodeView{lenovo}, false); got.NodeID != "lenovo" {
+		t.Fatalf("idle plain local kept a contract naming a layer it does not declare: placed on %q", got.NodeID)
+	}
+	// No node declares it: local still, where runner.decide defers by name.
+	plainRemote := eligibleRemote()
+	if got := Place("seed", st, localNode(), []NodeView{plainRemote}, false); !got.Local {
+		t.Fatalf("with no node declaring the layer the contract must land local (to defer by name), got %q", got.NodeID)
+	}
+	// An unnamed contract keeps the idle-local rule byte for byte.
+	if got := Place("seed", schemaSubtask(), localNode(), []NodeView{lenovo}, false); !got.Local {
+		t.Fatalf("idle local must still win an unnamed contract, got %q", got.NodeID)
+	}
+	// A composite local that declares the layer keeps it.
+	local := localNode()
+	local.Layers = oneCardRows(t)
+	if got := Place("seed", st, local, []NodeView{lenovo}, false); !got.Local {
+		t.Fatalf("an idle local that declares the layer must keep it, got %q", got.NodeID)
+	}
+}
+
+func TestLocalDecideDefersANamedLayerOnAPlainBox(t *testing.T) {
+	r := &runner{cfg: config.Default()}
+	c := schemaSubtask().Contract
+	c.Layer = "fast"
+	dec := r.decide(context.Background(), c, schemaSubtask())
+	if !dec.Defer || dec.DeferClass != core.DeferClassContract || dec.Layer != "fast" || !strings.Contains(dec.Reason, "declares no layers") {
+		t.Fatalf("a plain box must defer a named layer by name, got %+v", dec)
+	}
+	if dec := r.decide(context.Background(), schemaSubtask().Contract, schemaSubtask()); dec.Defer || dec.Layer != "" {
+		t.Fatalf("an unnamed contract on a plain box is the zero decision, got %+v", dec)
 	}
 }

@@ -968,15 +968,30 @@ type runner struct {
 // memoised snapshot. The request is built exactly as the node builds it
 // (placetable.RequestForContract with the box's agent_max_tokens), so the
 // delegator and the node describe the contract to the table identically.
+//
+// A contract that NAMES a layer (register A-100) is decided FOR that layer,
+// never by the free choice — the same rule remoteDecision applies to a
+// remote's rows. On a plain box the name cannot be served at all, and that is
+// said as a contract defer naming the layer: the one case a plain box
+// publishes a placed block, because the caller asked for a layer and a silent
+// run on the planner seat would be a lie about where the work went.
 func (r *runner) decide(ctx context.Context, contract core.AgentContract, st Subtask) placetable.Decision {
 	if !r.cfg.Composite() {
+		if contract.Layer != "" {
+			return placetable.Decision{Placed: core.Placed{Layer: contract.Layer,
+				Reason: fmt.Sprintf("layer %s requested; this box declares no layers", contract.Layer)}, Defer: true, DeferClass: core.DeferClassContract}
+		}
 		return placetable.Decision{}
 	}
 	if r.decider != nil {
 		return r.decider(ctx, contract, st)
 	}
 	r.snapOnce.Do(func() { r.snapshot = placetable.NewSnapshot(r.cfg, placetable.DefaultSnapshotTTL) })
-	return placetable.Decide(placetable.RequestForContract(contract, st.EstTokens, r.cfg.AgentMaxTokens), r.cfg.Layers, r.snapshot.Live())
+	req := placetable.RequestForContract(contract, st.EstTokens, r.cfg.AgentMaxTokens)
+	if contract.Layer != "" {
+		return placetable.DecideOnLayer(req, r.cfg.Layers, contract.Layer, r.snapshot.Live())
+	}
+	return placetable.Decide(req, r.cfg.Layers, r.snapshot.Live())
 }
 
 // placedOrNil is the block a decision publishes: nil for the zero Decision (a

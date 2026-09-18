@@ -76,7 +76,12 @@ func EstimateTokens(c core.AgentContract) int { return placetable.EstimateTokens
 // id when the caller has minted one, else any string a caller wants two
 // otherwise-identical calls to agree on) — see betterRemote.
 func Place(seed string, st Subtask, local NodeView, remotes []NodeView, localBusy bool) NodeView {
-	if !localBusy {
+	// A contract that names a layer (register A-100) is not the idle-local
+	// rule's to keep: an idle local box that does not DECLARE the layer would
+	// run it on its planner seat, silently. It goes to the remote that
+	// declares it; with none, it still lands local, where the decision defers
+	// naming the layer instead of running on the wrong seat.
+	if !localBusy && (st.Contract.Layer == "" || declaresLayer(local, st.Contract.Layer)) {
 		return local
 	}
 	var best NodeView
@@ -93,6 +98,18 @@ func Place(seed string, st Subtask, local NodeView, remotes []NodeView, localBus
 		return local
 	}
 	return best
+}
+
+// declaresLayer reports whether a node's advertised rows carry the named
+// layer — declared, not necessarily admissible: admission is the table's
+// verdict (remoteDecision / runner.decide), this only says who to ask.
+func declaresLayer(v NodeView, name string) bool {
+	for _, row := range v.Layers {
+		if row.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // betterRemote reports whether candidate should displace the incumbent. Only a
@@ -366,6 +383,12 @@ func eligibilityVerdict(st Subtask, r NodeView) (eligible bool, word, detail str
 			return false, "layer", dec.Reason
 		}
 		return true, "", ""
+	}
+	// A named layer (register A-100) can only be served by a node that
+	// declares it; a node with no rows would run the contract on its planner
+	// seat and never say so.
+	if st.Contract.Layer != "" {
+		return false, "layer", fmt.Sprintf("layer %s requested; node declares no layers", st.Contract.Layer)
 	}
 	if !r.AgentResident || !seatServed(r) {
 		return false, "probe", "seat not resident on this node's cached roster"

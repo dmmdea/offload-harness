@@ -54,8 +54,10 @@ tier declares it again and nothing else changes.
    seat beside its 27B GSQ on the one card), is reachable at all. A seat another layer holds
    loaded on the same card is named as the displacement (recorded, never acted on; llama-swap
    serialises the swap behind the loaded seat's in-flight work). The delegator decides FOR the
-   named layer too, so a node that does not declare it is ineligible for that contract and the
-   free choice never overwrites the caller's layer on the dispatched copy.
+   named layer too — on its own box (`runner.decide`) and over every remote's rows — so a node
+   that does not declare it is ineligible for that contract, an idle local box that does not
+   declare it does not keep it, the free choice never overwrites the caller's layer on the
+   dispatched copy, and with no node declaring it the contract defers naming the layer.
 5. **An agent contract that fits the pair's agent window** → the pair's agent seat, always.
    A saturated pair (in flight ≥ max_num_seqs) is RECORDED in the reason and nothing is
    re-placed: no other layer can hold that contract beside a loaded pair.

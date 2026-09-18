@@ -252,7 +252,8 @@ type AgentContract struct {
 	// that does not declare it is ineligible) and the node re-runs the same
 	// decision with its OWN live readers, so the display-card guards are
 	// evaluated where the card is. Empty on an unnamed local run and on a
-	// dispatch to a single-layer node; a plain box accepts and ignores it.
+	// dispatch to a single-layer node; a box that does not declare the named
+	// layer defers by name rather than running on its planner seat.
 	// Held to the layer-id shape that config.ValidateLayers enforces because
 	// the node uses it as a seat lookup key, and a name that validates there
 	// must always be dispatchable here.
