@@ -8,7 +8,7 @@
 > everything else. See ADR 0035's amendment.
 
 Reference files for the pattern decided in [ADR 0035](../../../../docs/architecture/decisions/0035-persistent-vllm-seat-behind-llama-swap.md):
-the engine is a **system unit** (NOT enabled at boot since the 2026-09-08 amendment; `Restart=no` since 0.128.3 —
+the engine is a **system unit** (NOT enabled at boot since the 2026-09-08 amendment; `Restart=no` since 0.128.4 —
 systemd never relaunches a seat on its own, because `vllm-seat-cmd.sh` detaches on a new invocation and the relaunched
 engine would sit on the card untracked, which is how the 2026-09-18 lease hand-off incident put a seat under another
 lease's exclusive window), and llama-swap — still the one endpoint the

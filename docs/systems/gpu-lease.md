@@ -351,7 +351,7 @@ the lease (the card stays reserved, work keeps routing elsewhere) and exits non-
 as the fallback). The wrapper form warms the seat back (`GET /upstream/<model>/health`) BEFORE releasing, so the first
 contract placed here again finds a loaded seat; the detach form's counterpart is `gpu release --warm-seat`.
 
-**The warm-back belongs to the LAST holder (0.128.3, register D-124).** On 2026-09-18 02:57 a wrapper whose command
+**The warm-back belongs to the LAST holder (0.128.4, register D-124).** On 2026-09-18 02:57 a wrapper whose command
 had been cut warmed the seat while the next queued lease had already taken the card, drained an "idle" seat and unloaded
 it; the unload killed the engine, the seat unit's `Restart=on-failure` brought it back 20 s later on the new holder's
 exclusive card, and three measurement rows read the seat's 10 GiB as their own fit. Three rules now order the hand-off:

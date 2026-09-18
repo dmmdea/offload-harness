@@ -411,7 +411,7 @@ func (r *Registry) List(now time.Time) []Run {
 // file. Without the retry that read returned NO run, and the drain printed a
 // run-less "1 in flight" line between two steps — and, with the seat's gauge
 // at zero between steps, would have counted the gap toward "drained"
-// (0.128.3, register D-124's gate hunt: 1 in 5 runs of the print-cadence test).
+// (0.128.4, register D-124's gate hunt: 1 in 5 runs of the print-cadence test).
 func readRecord(path string) (Run, bool) {
 	const attempts, pause = 4, 5 * time.Millisecond
 	for i := 0; i < attempts; i++ {

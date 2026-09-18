@@ -8,7 +8,7 @@ import (
 
 // A record caught mid-write (empty or torn for a few milliseconds) is still a
 // run: List waits it out instead of reporting no run — the read that made the
-// drain print a run-less line between two steps (0.128.3).
+// drain print a run-less line between two steps (0.128.4).
 func TestListWaitsOutARecordCaughtMidWrite(t *testing.T) {
 	reg := OpenAt(t.TempDir())
 	h, err := reg.Begin(Run{Seat: "seat", Kind: "contract"})
