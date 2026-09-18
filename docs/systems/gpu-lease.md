@@ -368,6 +368,14 @@ exclusive card, and three measurement rows read the seat's 10 GiB as their own f
 - **The warm is heartbeat for its length** (`drainRenewEvery`, 15 s), so a 27B load of several minutes cannot go stale
   under the 120 s heartbeat TTL; losing the lease mid-warm cancels the request and is reported.
 
+**A failed drain is not a cordon, and a stuck run is not a wait (register C-50).** A drain that misses its deadline
+clears the `draining` stamp before returning — the detach form keeps the lease held and non-exclusive, so new runs are
+admitted again instead of the seat staying cordoned for the rest of the window. And the overall deadline (the queue
+budget) is joined by a no-progress bound: when the busy state — in-flight count, registered runs at the same step and
+phase — has not changed for two seat turns plus the cold load (from the seat's own rate sample, floor 2 min, disabled
+without a sample), the drain gives up as stuck and says so, distinct from the deadline error; a step advance, an
+in-flight change or a load finishing resets it. `--drain-timeout` still wins as a fixed window.
+
 The seat unit template no longer restarts on failure (`Restart=no`): `vllm-seat-cmd.sh` detaches the moment the unit's
 invocation changes, so a systemd relaunch is a seat llama-swap does not track and no lease can order. A crashed seat is
 reloaded by llama-swap on the next request, which the lease gate orders like any other load.
