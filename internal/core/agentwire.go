@@ -244,13 +244,19 @@ type AgentContract struct {
 	// vocabulary: an unknown class would silently fall back to the default
 	// layer and the caller would never learn its ask was misspelt.
 	ContextClass string `json:"context_class,omitempty"`
-	// Layer is the layer the DELEGATOR placed this contract on when it chose a
-	// composite remote node (R5: ONE placement rule — the node re-runs the same
-	// Decide for this layer with its OWN live readers, so the display-card
-	// guards are evaluated where the card is). Empty on a local run and on a
-	// dispatch to a single-layer node. Held to the layer-id shape that
-	// config.ValidateLayers enforces because the node uses it as a seat lookup
-	// key, and a name that validates there must always be dispatchable here.
+	// Layer is the layer this contract runs on: the one the DELEGATOR placed it
+	// on when it chose a composite remote node, or the one the CALLER named on
+	// the door (register A-100: a box's second layer whose agent seat is not
+	// the planner default, reachable by name only). R5: ONE placement rule —
+	// a caller-named layer is decided FOR that layer on the delegator (a node
+	// that does not declare it is ineligible) and the node re-runs the same
+	// decision with its OWN live readers, so the display-card guards are
+	// evaluated where the card is. Empty on an unnamed local run and on a
+	// dispatch to a single-layer node; a box that does not declare the named
+	// layer defers by name rather than running on its planner seat.
+	// Held to the layer-id shape that config.ValidateLayers enforces because
+	// the node uses it as a seat lookup key, and a name that validates there
+	// must always be dispatchable here.
 	Layer string `json:"layer,omitempty"`
 }
 

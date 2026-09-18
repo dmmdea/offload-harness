@@ -76,7 +76,12 @@ func EstimateTokens(c core.AgentContract) int { return placetable.EstimateTokens
 // id when the caller has minted one, else any string a caller wants two
 // otherwise-identical calls to agree on) — see betterRemote.
 func Place(seed string, st Subtask, local NodeView, remotes []NodeView, localBusy bool) NodeView {
-	if !localBusy {
+	// A contract that names a layer (register A-100) is not the idle-local
+	// rule's to keep: an idle local box that does not DECLARE the layer would
+	// run it on its planner seat, silently. It goes to the remote that
+	// declares it; with none, it still lands local, where the decision defers
+	// naming the layer instead of running on the wrong seat.
+	if !localBusy && (st.Contract.Layer == "" || declaresLayer(local, st.Contract.Layer)) {
 		return local
 	}
 	var best NodeView
@@ -93,6 +98,18 @@ func Place(seed string, st Subtask, local NodeView, remotes []NodeView, localBus
 		return local
 	}
 	return best
+}
+
+// declaresLayer reports whether a node's advertised rows carry the named
+// layer — declared, not necessarily admissible: admission is the table's
+// verdict (remoteDecision / runner.decide), this only says who to ask.
+func declaresLayer(v NodeView, name string) bool {
+	for _, row := range v.Layers {
+		if row.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // betterRemote reports whether candidate should displace the incumbent. Only a
@@ -367,6 +384,12 @@ func eligibilityVerdict(st Subtask, r NodeView) (eligible bool, word, detail str
 		}
 		return true, "", ""
 	}
+	// A named layer (register A-100) can only be served by a node that
+	// declares it; a node with no rows would run the contract on its planner
+	// seat and never say so.
+	if st.Contract.Layer != "" {
+		return false, "layer", fmt.Sprintf("layer %s requested; node declares no layers", st.Contract.Layer)
+	}
 	if !r.AgentResident || !seatServed(r) {
 		return false, "probe", "seat not resident on this node's cached roster"
 	}
@@ -384,12 +407,23 @@ func eligibilityVerdict(st Subtask, r NodeView) (eligible bool, word, detail str
 // default (1024) is the conservative side of every seat's real setting. The
 // node re-runs the same decision for the dispatched layer with its OWN live
 // guards, so a verdict carried in the rows is never the last word.
+//
+// A contract that already NAMES a layer (the caller's `layer`, register
+// A-100) is decided FOR that layer, never re-placed by the free choice: a node
+// that does not declare it defers by name and is ineligible for this
+// contract, so the dispatch lands only where the requested seat is served.
+// Before this the free choice overwrote the caller's layer on the dispatched
+// copy, and a request for the Lenovo's fast layer ran on its planner default.
 func remoteDecision(st Subtask, r NodeView) (placetable.Decision, bool) {
 	if len(r.Layers) == 0 {
 		return placetable.Decision{}, false
 	}
 	layers, live := placetable.FromRows(r.Layers)
-	return placetable.Decide(placetable.RequestForContract(st.Contract, st.EstTokens, 0), layers, live), true
+	req := placetable.RequestForContract(st.Contract, st.EstTokens, 0)
+	if st.Contract.Layer != "" {
+		return placetable.DecideOnLayer(req, layers, st.Contract.Layer, live), true
+	}
+	return placetable.Decide(req, layers, live), true
 }
 
 // leaseFenceReason reports whether r's lease is a HARD refusal for remote

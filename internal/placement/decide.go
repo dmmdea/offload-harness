@@ -414,6 +414,25 @@ func (t table) agent() Decision {
 		}
 		return deferContract("", t.restricted("no layer serves context_class long on this box"))
 	}
+	// Row 4b (register A-100): a contract that NAMES a layer runs on that
+	// layer's agent seat. Rows 5–7 key on the pair and the triple, so before
+	// this a restriction to any other name only narrowed them to nothing and
+	// the request deferred "no layer serves an agent contract" — the reason a
+	// box declares a second layer whose agent seat is not the planner default
+	// (the ampere-16 Lenovo's 35B digest seat beside its 27B GSQ on the one
+	// card) was unreachable by contract at all. The pair keeps row 5, with its
+	// saturation note; every other named layer resolves here, under its own
+	// guards where it declares any — except `single` on a box that ALSO
+	// declares a pair: there the single layer's agent seat is the tier's
+	// one-card identity on the pair's own cards, never an agent placement
+	// (council R2: overflow is recorded, not moved), and the request keeps
+	// deferring as it always did.
+	_, hasPair := findLayer(t.layers, LayerPair)
+	if t.only != "" && t.only != LayerPair && !(t.only == LayerSingle && hasPair) {
+		if l, s, ok := t.seat(t.only, RoleAgent); ok {
+			return t.requestedAgent(l, s, need)
+		}
+	}
 	largest, largestLayer := 0, ""
 	note := func(s config.LayerSeat, layer string) {
 		if s.CtxTokens > largest {
@@ -432,6 +451,20 @@ func (t table) agent() Decision {
 			}
 			d.Reason = reason
 			return d
+		}
+	} else if l, s, ok := t.seat(LayerSingle, RoleAgent); ok && !hasPair {
+		// Row 5b: a box that declares no pair (one card — the ampere-16 Lenovo)
+		// places the free choice on the single layer's agent seat, the planner
+		// default under a layer name. Without this row the node's first layer
+		// declaration made it INELIGIBLE for every contract it ran the day
+		// before: the delegator's gate is "the table places it", and the table
+		// had no row for a single-layer agent seat. The fast layer beside it
+		// is reachable by name only (row 4b): the free choice never drifts onto
+		// a seat whose blind coverage measured 4.65 against the default's 8.53.
+		note(s, l.Name)
+		if need <= s.CtxTokens {
+			return Decision{Placed: core.Placed{Tier: l.Tier, Layer: l.Name, Role: RoleAgent, Seat: s.Model, Devices: s.DeviceList(), CtxTokens: s.CtxTokens,
+				Reason: fmt.Sprintf("agent contract (~%d tokens) fits the single layer's agent seat %s (window %d); this box declares no pair", need, s.Model, s.CtxTokens)}}
 		}
 	}
 	// Row 6: window overflow onto the pair's long seat, waiting out a busy agent seat.
@@ -524,6 +557,76 @@ func (t table) longSeat(l config.LayerSpec, s config.LayerSeat, need int, head s
 	}
 	return Decision{Placed: core.Placed{Tier: l.Tier, Layer: l.Name, Role: RoleLong, Seat: s.Model, Devices: s.DeviceList(), CtxTokens: s.CtxTokens,
 		Reason: fmt.Sprintf("%s (%s, window %d): prefill ~%d tokens at %.0f t/s ≈ %.0f s within budget %d s; guards: %s", head, s.Model, s.CtxTokens, need, s.PrefillTPS, secs, budget, reason)}}
+}
+
+// requestedAgent is row 4b's body: the named layer's agent seat, under the
+// window check and the layer's own guards (fail closed, exactly as the long
+// rows read them). A seat another layer holds loaded on the same devices is
+// NAMED as the eviction the swap will cause — recorded, never acted on, the
+// pair's saturation posture (council R2): on a one-card box the fast seat and
+// the planner default share the card, and llama-swap serialises the swap
+// behind the loaded seat's in-flight work. A seat with no declared window
+// cannot be sized and refuses as a contract problem naming the gap.
+func (t table) requestedAgent(l config.LayerSpec, s config.LayerSeat, need int) Decision {
+	placed := core.Placed{Tier: l.Tier, Layer: l.Name, Role: RoleAgent, Seat: s.Model, Devices: s.DeviceList(), CtxTokens: s.CtxTokens}
+	if s.CtxTokens <= 0 {
+		placed.Reason = fmt.Sprintf("layer %s requested, but its agent seat %s declares no ctx_tokens — the window cannot be sized", l.Name, s.Model)
+		return Decision{Placed: placed, Defer: true, DeferClass: core.DeferClassContract}
+	}
+	if need > s.CtxTokens {
+		placed.Reason = fmt.Sprintf("contract needs ~%d tokens; layer %s was requested and its agent seat %s window is %d", need, l.Name, s.Model, s.CtxTokens)
+		return Decision{Placed: placed, Defer: true, DeferClass: core.DeferClassContract}
+	}
+	reason := fmt.Sprintf("layer %s requested → its agent seat %s (window %d)", l.Name, s.Model, s.CtxTokens)
+	if len(l.Guards) > 0 {
+		ok, readings, guard := t.admissible(l, s)
+		if !ok {
+			placed.Reason = fmt.Sprintf("%s layer refused by %s: %s", l.Name, guard, readings)
+			placed.Guard = guard
+			return Decision{Placed: placed, Defer: true, DeferClass: core.DeferClassCapacity}
+		}
+		reason += "; guards: " + readings
+	}
+	d := Decision{Placed: placed}
+	if evicts := t.loadedSharingDevices(l, s); evicts != "" {
+		d.Evicts = evicts
+		reason += fmt.Sprintf(" — displaces %s (loaded on the same card; the swap waits behind its in-flight work)", evicts)
+	}
+	d.Reason = reason
+	return d
+}
+
+// loadedSharingDevices names the agent seat of another layer that is LOADED
+// on a device the requested seat pins, or "" when none is (or occupancy is
+// unreadable — an unknown is never named as an eviction).
+func (t table) loadedSharingDevices(l config.LayerSpec, s config.LayerSeat) string {
+	mine := map[string]bool{}
+	for _, d := range s.DeviceList() {
+		mine[d] = true
+	}
+	for _, other := range t.layers {
+		if other.Name == l.Name {
+			continue
+		}
+		os, ok := findSeat(other, RoleAgent)
+		if !ok || os.Model == "" || os.Model == s.Model {
+			continue
+		}
+		shares := false
+		for _, d := range os.DeviceList() {
+			if mine[d] {
+				shares = true
+				break
+			}
+		}
+		if !shares {
+			continue
+		}
+		if st := t.occupancy(other.Name, RoleAgent); st.Known && st.Loaded {
+			return os.Model
+		}
+	}
+	return ""
 }
 
 // restricted appends the restriction to a "nothing serves this" reason so a
