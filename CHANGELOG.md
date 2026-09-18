@@ -16,8 +16,10 @@ Versioning: [SemVer](https://semver.org/).
   and said once per refresh on the node's log when the wait runs out; a read 30–60 s old keeps the old
   shape. And the dispatch path writes the one fact a finished agent contract proves — a completed call on
   the advertised seat (`steps > 0`, `seat == agent_seat`) — as `seat_loaded:true` straight into the cache,
-  no probe, never touching residency or the cache's age; a zero-step defer, a job error or a foreign-seat
-  result writes nothing, and a probe that started before the write keeps the job's seat facts when it lands. Both eta directions were affected: a cold charge on a warm seat, and no cold charge on a seat
+  no probe, never touching residency or the cache's age, from BOTH doors (the push dispatch and the
+  pull-queue claim loop); a zero-step defer, a job error or a foreign-seat result writes nothing, a probe
+  that started before the write keeps the job's seat facts when it lands, and an undecodable result is
+  logged once per process instead of silently losing the fast path. Both eta directions were affected: a cold charge on a warm seat, and no cold charge on a seat
   that had idle-unloaded since the cached read.
 
 ## [0.128.1] - 2026-09-17 - the feasibility floor asks only for a minimum viable final, the eta is fitted to the wall, forced-remote refusals carry per-node verdicts

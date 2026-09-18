@@ -255,6 +255,11 @@ type Server struct {
 	admittingLoggedOpen bool
 	admittingLoggedList bool
 	agentRes            agentResidency
+	// agentResultDecodeOnce keeps the "could not decode a finished contract's
+	// result" line to one per process: the only producer of that JSON is this
+	// process's own agenttask, so the failure is a wire-shape drift, not a
+	// per-job event, and once said it is said.
+	agentResultDecodeOnce sync.Once
 }
 
 // agentResidency caches the roster's answer for the agent seat between health
@@ -393,7 +398,17 @@ func (s *Server) noteAgentResult(data json.RawMessage) {
 		Seat  string `json:"seat"`
 		Steps int    `json:"steps"`
 	}
-	if err := json.Unmarshal(data, &r); err != nil || r.Steps <= 0 || r.Seat == "" || r.Seat != s.agentSeat {
+	if err := json.Unmarshal(data, &r); err != nil {
+		// Not a "proves nothing" outcome: the producer is this process's own
+		// agenttask, so a decode failure means the wire shape drifted, and
+		// silently losing the fast path for every job from here on would
+		// look exactly like a node that never ran agent work. Said once.
+		s.agentResultDecodeOnce.Do(func() {
+			log.Printf("fleet: a finished agent contract's result could not be decoded for the seat-state write (%v); until this is fixed the residency cache learns the seat state from /running only", err)
+		})
+		return
+	}
+	if r.Steps <= 0 || r.Seat == "" || r.Seat != s.agentSeat {
 		return
 	}
 	s.agentRes.noteSeatAnswered()

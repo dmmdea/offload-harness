@@ -578,7 +578,13 @@ own 30 s cadence under sustained traffic; a probe that STARTED before the write 
 when it lands and still publishes its roster facts. Pinned by `residency_stale_test.go`: fresh beyond the
 band, previous inside it, bounded and logged once on a hung `/running`, a completed call written with no
 probe while a zero-step defer and a foreign-seat result write nothing, no wait across back-to-back finishes
-on a slow `/running`, and an in-flight probe keeping the job's seat facts.
+on a slow `/running`, an in-flight probe keeping the job's seat facts, and the pull-queue door writing it
+too. Both doors write it — the push dispatch (`handleDispatch`'s run closure) and the pull-queue claim loop
+(`claimOne`'s) — because each hand-writes its own run sequence and a write landed on one alone is the
+drift class the register's "agent doors" entry records. On a composite node only the default layer's seat
+(`agent_seat`) has this fast path; another layer's seat is written by no job and read by the probe alone. A
+result that cannot be decoded for the write is logged once per process (it is this node's own producer, so
+that is a wire-shape drift, not a normal outcome) and the cache falls back to `/running` only.
 
 **`GET /fleet/jobs/{id}?wait=<seconds>` is a completion event.** An already-terminal job answers at
 once; anything else blocks on the job store's terminal broadcast — which the store has fired all
