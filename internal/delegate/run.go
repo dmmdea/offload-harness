@@ -2489,7 +2489,16 @@ func (r *runner) dealAutoRemote(contracts []core.AgentContract, localView NodeVi
 	out := make([]spreadSlot, len(contracts))
 	for i, c := range contracts {
 		st := Subtask{Contract: c, EstTokens: EstimateTokens(c)}
-		out[i] = r.placeAutoRemote(mintP2CSeed(), st, localView, views, bases, localBusy, dealt, failed)
+		// Review round 1, MEDIUM item 3: the job id is minted HERE, once, and
+		// used as W-11's P2C draw seed — not a throwaway random string
+		// unrelated to what the result eventually carries. attempt() reuses
+		// this exact id (spreadSlot.jobID) instead of minting a second one,
+		// so the seed the ranking drew on and the id the published
+		// placement/ledger/corpus row names are the SAME value.
+		jobID := mintJobID()
+		slot := r.placeAutoRemote(jobID, st, localView, views, bases, localBusy, dealt, failed)
+		slot.jobID = jobID
+		out[i] = slot
 	}
 	return out
 }
@@ -2625,6 +2634,15 @@ type spreadSlot struct {
 	// unrelated to headroom. attempt() re-derives the exact sentence with
 	// r.noEligibleRemote over the SAME snapshot the deal used.
 	noRemote bool
+	// jobID (review round 1, MEDIUM item 3): the wire job id dealAutoRemote
+	// pre-mints for this subtask and uses as W-11's P2C draw seed — attempt()
+	// REUSES it rather than minting a second, unrelated one, so the seed
+	// recorded in the ranking and the id the published result/ledger/corpus
+	// row carries are the SAME value, matching ADR 0050's "seeded from the
+	// job id" claim literally rather than only in spirit. "" on route=spread
+	// (dealSpread mints no id at deal time) and on the pre-W-06 fallback path
+	// (a caller that reached attempt() without RunWith's precompute).
+	jobID string
 }
 
 // placeSpread deals ONE subtask across the run's fleet snapshot: slot 0 is the
@@ -2917,6 +2935,13 @@ func (r *runner) attempt(ctx context.Context, i int, contract core.AgentContract
 		// case falls to default below, unchanged from before W-06.
 		d := r.autoDeal[i]
 		deadFleet = d.deadFleet
+		if d.jobID != "" {
+			// Review round 1, MEDIUM item 3: reuse the SAME id W-11's P2C
+			// draw was seeded with at deal time, rather than minting an
+			// unrelated one here — the seed the ranking recorded and the id
+			// the published result/ledger/corpus row carries must agree.
+			jobID = d.jobID
+		}
 		switch {
 		case d.capacityWait:
 			// At least one remote was otherwise eligible; every one of them

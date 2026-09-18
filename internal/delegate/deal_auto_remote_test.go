@@ -36,6 +36,51 @@ func dealNode(t *testing.T, id string, maxConcurrent int, jobsRunning int) (*fak
 	return f, url
 }
 
+// TestDealAutoRemotePreMintsAndReusesTheJobID (review round 1, MEDIUM item
+// 3): the job id used as W-11's P2C draw seed is minted ONCE at deal time
+// (dealAutoRemote), not a throwaway random string unrelated to what the run
+// eventually dispatches — the published result's JobID, and the id the
+// remote actually received on the wire, must be the SAME value the deal
+// pre-minted.
+func TestDealAutoRemotePreMintsAndReusesTheJobID(t *testing.T) {
+	compressPolls(t, 5*time.Millisecond, time.Second)
+	node, url := acceptingNode(t, "node-a", "qube answered", nil)
+
+	contract := remoteContract()
+	results, sum, err := Run(context.Background(), testCfg(t), neverLocal(t), []core.AgentContract{contract}, "remote", []string{url})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if sum.Succeeded != 1 {
+		t.Fatalf("summary = %+v, want the subtask to have succeeded", sum)
+	}
+	dispatchedID, _ := node.lastJobID.Load().(string)
+	if dispatchedID == "" {
+		t.Fatal("the node never recorded a dispatched job id")
+	}
+	if results[0].JobID != dispatchedID {
+		t.Fatalf("published JobID = %q, want it to equal the id actually dispatched to the node (%q) — the deal's pre-minted id must be the one reused, not a fresh one minted later in attempt()", results[0].JobID, dispatchedID)
+	}
+}
+
+// TestDealAutoRemoteSlotCarriesAPreMintedJobID is the unit-level twin: a
+// direct dealAutoRemote call must hand every slot a non-empty, well-formed
+// job id, computed BEFORE placeAutoRemote's own ranking runs (so it is
+// available as that ranking's P2C seed).
+func TestDealAutoRemoteSlotCarriesAPreMintedJobID(t *testing.T) {
+	r := &runner{route: "remote"}
+	a := eligibleRemote()
+	a.NodeID = "node-a"
+	contract := remoteContract()
+	slots := r.dealAutoRemote([]core.AgentContract{contract}, localNode(), []NodeView{a}, []string{"http://node-a"}, true, nil)
+	if len(slots) != 1 {
+		t.Fatalf("slots = %v, want 1", slots)
+	}
+	if !strings.HasPrefix(slots[0].jobID, "agd-") {
+		t.Fatalf("slot.jobID = %q, want a well-formed pre-minted id (agd- prefix)", slots[0].jobID)
+	}
+}
+
 // TestRunAutoJointDealSpreadsAcrossThreeDistinctNodes: three eligible remotes
 // (one slot of headroom each), the local seat held by a lease, three
 // route=auto subtasks in one Run — each must land on a DIFFERENT node, not
