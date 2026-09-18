@@ -6,6 +6,8 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.128.1] - 2026-09-17 - the feasibility floor asks only for a minimum viable final, the eta is fitted to the wall, forced-remote refusals carry per-node verdicts
+
 ### Changed
 - Post-#369 cleanup: dropped the now-dead `leaseFences` helper (its logic lives on in
   `leaseFenceReason`, the only caller `eligibilityVerdict` ever used), fixed the `cap` placement
