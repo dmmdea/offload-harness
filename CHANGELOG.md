@@ -6,6 +6,13 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.128.4] - 2026-09-18 - the MP HTTP frontend default moves to 18790
+
+### Changed
+- The `SEAT_MP_HTTP_PORT` default (0.128.3) moves from 18793 to **18790** and the spec default from engine port − 4 to
+  engine port − 7: 18793 is the Qube port file's LiteLLM gateway reservation (`0.0.0.0`, LAN + tailnet), which under WSL2
+  mirrored networking would collide with the seat's loopback bind; 18790 is the safe pick every port file of the fleet lists.
+
 ## [0.128.3] - 2026-09-18 - the vLLM seat launcher binds the LMCache MP HTTP frontend to loopback on its own port
 
 ### Fixed
