@@ -15,26 +15,6 @@ Versioning: [SemVer](https://semver.org/).
   private video-pipeline repo, the dev and cloud drive paths and a tailnet address; the identity lint
   passes. The unredacted originals stay in the operator's `~/.claude/skills`.
 
-## [0.128.4] - 2026-09-18 - the MP HTTP frontend default moves to 18790
-
-### Changed
-- The `SEAT_MP_HTTP_PORT` default (0.128.3) moves from 18793 to **18790** and the spec default from engine port − 4 to
-  engine port − 7: 18793 is the Qube port file's LiteLLM gateway reservation (`0.0.0.0`, LAN + tailnet), which under WSL2
-  mirrored networking would collide with the seat's loopback bind; 18790 is the safe pick every port file of the fleet lists.
-
-## [0.128.3] - 2026-09-18 - the vLLM seat launcher binds the LMCache MP HTTP frontend to loopback on its own port
-
-### Fixed
-- **The LMCache MP server's HTTP frontend was listening on `0.0.0.0:8080`** (register B-01 / L5, found 2026-09-18 while
-  re-measuring the cache tier): LMCache 0.5.x opens an HTTP API beside the ZMQ port and defaults it to `0.0.0.0:8080`, and
-  `seat_fg.sh` never passed `--http-host/--http-port`, so the production MP server logged `Uvicorn running on
-  http://0.0.0.0:8080` — on a WSL2 distro in mirrored networking that is the host's LAN and tailnet, and 8080 is somebody
-  else's port on every box in this fleet. The launcher now passes `--http-host 127.0.0.1 --http-port "$MP_HTTP_PORT"`
-  (`SEAT_MP_HTTP_PORT`, default 18793 — the reference pairing is 18797 engine / 18796 MP ZMQ / 18793 MP HTTP), refuses a
-  squatted HTTP port the way it refuses a squatted engine port, and the seat spec carries `mp_http_port` (0 = engine
-  port − 4) rendered into `seat.env` as `SEAT_MP_HTTP_PORT`. `TestSeatLauncherBindsTheMPHTTPFrontendOnLoopback` pins the
-  three launcher facts, the env token and the default.
-
 ## [0.129.0] - 2026-09-18 - a contract can name the layer it runs on (the Lenovo fast digest seat by name); the digest-adr-hard-8 contract set
 
 ### Added
@@ -57,6 +37,26 @@ Versioning: [SemVer](https://semver.org/).
   document plus a cross-document finding, `min_items:findings:12` and one grounded `regex:` alternation per contract
   built from the 2026-09-17 anchor corpus (195 anchors re-verified against the ADR bytes at build time). Rebuilt
   because the instrument saturated on `digest-8.json` (every 27B-class arm at accuracy ~9, top pair TIE, INV-6).
+
+## [0.128.4] - 2026-09-18 - the MP HTTP frontend default moves to 18790
+
+### Changed
+- The `SEAT_MP_HTTP_PORT` default (0.128.3) moves from 18793 to **18790** and the spec default from engine port − 4 to
+  engine port − 7: 18793 is the Qube port file's LiteLLM gateway reservation (`0.0.0.0`, LAN + tailnet), which under WSL2
+  mirrored networking would collide with the seat's loopback bind; 18790 is the safe pick every port file of the fleet lists.
+
+## [0.128.3] - 2026-09-18 - the vLLM seat launcher binds the LMCache MP HTTP frontend to loopback on its own port
+
+### Fixed
+- **The LMCache MP server's HTTP frontend was listening on `0.0.0.0:8080`** (register B-01 / L5, found 2026-09-18 while
+  re-measuring the cache tier): LMCache 0.5.x opens an HTTP API beside the ZMQ port and defaults it to `0.0.0.0:8080`, and
+  `seat_fg.sh` never passed `--http-host/--http-port`, so the production MP server logged `Uvicorn running on
+  http://0.0.0.0:8080` — on a WSL2 distro in mirrored networking that is the host's LAN and tailnet, and 8080 is somebody
+  else's port on every box in this fleet. The launcher now passes `--http-host 127.0.0.1 --http-port "$MP_HTTP_PORT"`
+  (`SEAT_MP_HTTP_PORT`, default 18793 — the reference pairing is 18797 engine / 18796 MP ZMQ / 18793 MP HTTP), refuses a
+  squatted HTTP port the way it refuses a squatted engine port, and the seat spec carries `mp_http_port` (0 = engine
+  port − 4) rendered into `seat.env` as `SEAT_MP_HTTP_PORT`. `TestSeatLauncherBindsTheMPHTTPFrontendOnLoopback` pins the
+  three launcher facts, the env token and the default.
 
 ## [0.128.4] - 2026-09-18 - the MP HTTP frontend default moves to 18790
 
