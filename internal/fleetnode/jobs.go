@@ -189,9 +189,13 @@ type Jobs struct {
 	// terminal state — the store steward counts turns with it (0.113.16).
 	onFinish func()
 	// onAgentDone, when set, is called (outside the lock) each time an AGENT
-	// job finishes WITHOUT an error — proof the agent seat is loaded right
-	// now; the server invalidates its cached seat state with it (0.128.2).
-	onAgentDone func()
+	// job reaches a terminal state through finish, with ok = it finished
+	// without an error. The server feeds its cached seat state with it
+	// (0.128.2): a success proves the seat is loaded; an error proves nothing
+	// either way (a contract that ran and hit its wall and one the seat never
+	// answered both come back as errors). Drain's verdicts (ErrInterrupted /
+	// ErrNeverStarted) are written directly and never fire it.
+	onAgentDone func(ok bool)
 
 	// served is the tenant round-robin state (0.113.18): tenant → the claim
 	// sequence number at which that tenant was LAST handed a slot. claimLocked
@@ -214,11 +218,10 @@ func (j *Jobs) OnFinish(fn func()) {
 	j.mu.Unlock()
 }
 
-// OnAgentDone registers fn to run after every agent job that reaches JobDone
-// (never on an error: a job that failed because the seat never answered is
-// no proof the seat is loaded). Same contract as OnFinish: called outside
-// the store's lock, must return quickly.
-func (j *Jobs) OnAgentDone(fn func()) {
+// OnAgentDone registers fn to run after every agent job that finishes through
+// finish, with ok = no error. Same contract as OnFinish: called outside the
+// store's lock, must return quickly.
+func (j *Jobs) OnAgentDone(fn func(ok bool)) {
 	j.mu.Lock()
 	j.onAgentDone = fn
 	j.mu.Unlock()
@@ -873,8 +876,8 @@ func (j *Jobs) finish(id string, data json.RawMessage, errStr string) {
 	jb.terminalAt = j.now()
 	jb.finishedAt = jb.terminalAt
 	fn := j.onFinish
-	var agentDone func()
-	if jb.agent && errStr == "" {
+	var agentDone func(bool)
+	if jb.agent {
 		agentDone = j.onAgentDone
 	}
 	// The terminal transition IS the event a long poll waits on (WaitTerminal).
@@ -891,7 +894,7 @@ func (j *Jobs) finish(id string, data json.RawMessage, errStr string) {
 		fn()
 	}
 	if agentDone != nil {
-		agentDone()
+		agentDone(errStr == "")
 	}
 }
 

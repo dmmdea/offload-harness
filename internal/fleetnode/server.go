@@ -74,10 +74,16 @@ const agentResidencyTTL = maxSnapshotAge
 const agentResidencyMaxStale = 2 * agentResidencyTTL
 
 // residencyWaitBound caps how long a too-stale health read waits for the
-// probe it kicked: the probe's own per-read timeout, so a hung llama-swap
-// costs a health request at most one probe timeout and then the previous
-// answer is served. A var so tests can shorten it.
-var residencyWaitBound = agentResidencyProbeTimeout
+// probe it kicked. It is sized for a RESPONSIVE llama-swap — the three
+// refresh legs (/v1/models twice, /running once) answer in milliseconds on a
+// healthy box — and it sits UNDER every health client's own budget: the
+// accelerator router probes each base with 2 s (internal/accelremote), the
+// fleet UI poller with 5 s (internal/fleetview), the delegator with 15 s
+// (internal/delegate fetchNodeViewTimeout). A slow or hung llama-swap costs
+// a health request this much, once per refresh cycle, and then the previous
+// answer is served with a log line — never a client-side timeout. Any new
+// /fleet/health client must budget above this. A var so tests can shorten it.
+var residencyWaitBound = 1500 * time.Millisecond
 
 // errSeatStateUnresolved marks a /running reading that came back without an
 // error and without an ANSWER: the roster could not be read WHILE /running
@@ -255,15 +261,22 @@ type Server struct {
 // requests. The cache exists because BOTH of these hold at once:
 //   - agent_seat_resident must be roster-verified (§S3) — config alone cannot
 //     know whether the seat is actually served;
-//   - the health handler must NEVER block on an HTTP call to llama-swap (the
-//     same rule the reclaim tracker documents — fleet_reclaim.go), and must
-//     not probe per request either.
+//   - the health handler must not block on llama-swap as a matter of course
+//     (the reclaim tracker's rule — fleet_reclaim.go) and must not probe per
+//     request. Since 0.128.2 there is ONE bounded exception, below.
 //
 // So a health request serves the cached answer and, when it is older than
 // agentResidencyTTL, triggers ONE background refresh (inflight = the
-// single-flight latch). Until the first probe lands the answer is false —
-// fail CLOSED: an unverified seat reads as not resident, and the delegator
-// keeps the work local, which is always the safe placement.
+// single-flight latch). Older than agentResidencyMaxStale, never probed, or
+// forgotten by invalidate(), the request WAITS for that refresh — at most
+// residencyWaitBound — then serves whatever is published, and says so on
+// the log once per refresh when the wait ran out. A finished agent job
+// writes what it proves straight into the cache (noteAgentJobDone) and never
+// forces a probe; a probe that started before such a write is DISCARDED
+// when it lands (epoch), so it can never re-publish the pre-job state as
+// fresh. Until the first probe lands the answer is false — fail CLOSED: an
+// unverified seat reads as not resident, and the delegator keeps the work
+// local, which is always the safe placement.
 type agentResidency struct {
 	mu       sync.Mutex
 	resident bool
@@ -283,6 +296,17 @@ type agentResidency struct {
 	seatKnown    bool
 	at           time.Time
 	inflight     bool
+	// timeoutLogged keeps the "served the previous answer after the wait ran
+	// out" line to ONE per refresh cycle: set by the read that logs it, reset
+	// by the publish. Health is polled by every delegator, so a line per
+	// waiting request would be a flood.
+	timeoutLogged bool
+	// epoch counts the facts written into this cache from OUTSIDE a probe
+	// (noteAgentJobDone, invalidate). A refresh snapshots it when it starts
+	// and publishes only if it is unchanged when it lands: a reading taken
+	// before a job finished must not overwrite what the job proved, nor
+	// re-stamp the pre-job state as fresh.
+	epoch uint64
 	// idle broadcasts when inflight clears, so a caller that needs the answer
 	// SYNCHRONOUSLY (RefreshAgentResidency) can wait for the probe already
 	// running instead of starting a second one. Created lazily under mu — a
@@ -340,14 +364,47 @@ func (a *agentResidency) awaitProbeFor(bound time.Duration) {
 }
 
 // invalidate forgets WHEN the cached answer was taken, so the next health read
-// waits (bounded) for a fresh probe instead of serving it. Called after an
-// agent job finishes on this node: the seat it ran on is loaded NOW whatever
-// the cache says, and the next placement deal must not charge a cold load
-// for it. The cached VALUES stay — a read that times out still serves them.
+// waits (bounded) for a fresh probe instead of serving it. Used when the node
+// has reason to doubt the cache but cannot assert the truth itself — an agent
+// job that finished with an error (see onAgentJob). The cached VALUES stay —
+// a read whose wait runs out still serves them. Bumps the epoch, so a probe
+// already in flight cannot re-stamp its pre-doubt reading as fresh.
 func (a *agentResidency) invalidate() {
 	a.mu.Lock()
 	a.at = time.Time{}
+	a.epoch++
 	a.mu.Unlock()
+}
+
+// noteAgentJobDone records what a finished agent job PROVES: the seat it ran
+// on is loaded, not starting, and resident — right now, whatever the last
+// probe said. Written straight into the cache and stamped now, so the next
+// health read serves it without a probe and the next placement deal does not
+// charge a cold load for a seat that just answered (the 0.128.1 census). The
+// served roster list is left as it was: the job proves nothing about it.
+// Bumps the epoch, so a probe that started before the job finished is
+// discarded when it lands instead of overwriting this.
+func (a *agentResidency) noteAgentJobDone() {
+	a.mu.Lock()
+	a.resident = true
+	a.seatLoaded, a.seatStarting, a.seatKnown = true, false, true
+	a.at = time.Now()
+	a.epoch++
+	a.mu.Unlock()
+}
+
+// onAgentJob is the Jobs.OnAgentDone hook. A job that finished WITHOUT an
+// error proves the seat is loaded (noteAgentJobDone). One that finished with
+// an error proves nothing either way — the run closure returns an error both
+// for a contract that ran and hit its wall and for one the seat never
+// answered — so the cache is only invalidated and the next read learns the
+// truth from /running, bounded.
+func (a *agentResidency) onAgentJob(ok bool) {
+	if ok {
+		a.noteAgentJobDone()
+		return
+	}
+	a.invalidate()
 }
 
 // New builds a Server. The supported-task/family lists are computed here, not
@@ -370,9 +427,10 @@ func New(runner Runner, jobs *Jobs, opts Options) *Server {
 	}
 	s.admitting = s.admittingRuns
 	if jobs != nil {
-		// A finished agent job is proof the seat is loaded right now; forget
-		// the cached residency answer so the next health read probes fresh.
-		jobs.OnAgentDone(s.agentRes.invalidate)
+		// A finished agent job tells the residency cache what it proved: a
+		// success writes "loaded, resident" straight in; an error only
+		// invalidates, so the next read probes fresh (bounded).
+		jobs.OnAgentDone(s.agentRes.onAgentJob)
 	}
 	return s
 }
@@ -488,8 +546,9 @@ func swapRosterServedModels(ctx context.Context, endpoint string) ([]string, err
 }
 
 // agentResident returns the cached residency answer, kicking off a background
-// refresh when the cache has aged past agentResidencyTTL. It never blocks and
-// never probes more than once per TTL window regardless of request rate.
+// refresh when the cache has aged past agentResidencyTTL. It never probes more
+// than once per TTL window regardless of request rate, and blocks only on a
+// too-stale, never-probed or invalidated cache — for at most residencyWaitBound.
 func (s *Server) agentResident() bool {
 	a := &s.agentRes
 	a.mu.Lock()
@@ -501,9 +560,10 @@ func (s *Server) agentResident() bool {
 	}
 	// Past the TTL. Inside the stale band (one more window) serve the previous
 	// answer and refresh behind it. Beyond it — or never probed, or forgotten
-	// by invalidate() because a job just finished on the seat — the previous
-	// answer describes a seat that has had time to change state: kick the
-	// refresh if nobody holds it and WAIT for it, bounded, before answering.
+	// by invalidate() because an agent job finished with an error — the
+	// previous answer describes a seat that has had time to change state:
+	// kick the refresh if nobody holds it and WAIT for it, bounded, before
+	// answering.
 	tooStale := a.at.IsZero() || age > agentResidencyMaxStale
 	owner := !a.inflight
 	if owner {
@@ -517,6 +577,7 @@ func (s *Server) agentResident() bool {
 		}
 		return v
 	}
+	previousAt := a.at
 	a.mu.Unlock()
 	if owner {
 		go s.refreshAgentResidency()
@@ -524,6 +585,18 @@ func (s *Server) agentResident() bool {
 	a.awaitProbeFor(residencyWaitBound)
 	a.mu.Lock()
 	v := a.resident
+	if a.at.Equal(previousAt) && !a.timeoutLogged {
+		// Nothing was published inside the bound: the previous answer goes
+		// out, and that is said ONCE per refresh cycle (the publish resets
+		// the flag), never once per waiting request.
+		a.timeoutLogged = true
+		age := "never taken"
+		if !previousAt.IsZero() {
+			age = time.Since(previousAt).Round(time.Second).String() + " old"
+		}
+		log.Printf("fleet: health waited %s for the residency refresh of %q against %s and it had not published; serving the previous answer (%s)",
+			residencyWaitBound, s.agentSeat, s.opts.Cfg.Endpoint, age)
+	}
 	a.mu.Unlock()
 	return v
 }
@@ -666,6 +739,9 @@ func (s *Server) servedModels() []string {
 // cached for a full TTL so a dead endpoint is probed once per window, not
 // hammered per request.
 func (s *Server) refreshAgentResidency() {
+	s.agentRes.mu.Lock()
+	startEpoch := s.agentRes.epoch
+	s.agentRes.mu.Unlock()
 	var resident bool
 	var err error
 	var served []string
@@ -681,11 +757,18 @@ func (s *Server) refreshAgentResidency() {
 	defer func() {
 		a := &s.agentRes
 		a.mu.Lock()
-		a.resident = resident && err == nil
-		a.served = served
-		a.seatLoaded, a.seatStarting, a.seatKnown = seat.Loaded, seat.Starting, seatErr == nil
-		a.at = time.Now()
+		if a.epoch == startEpoch {
+			a.resident = resident && err == nil
+			a.served = served
+			a.seatLoaded, a.seatStarting, a.seatKnown = seat.Loaded, seat.Starting, seatErr == nil
+			a.at = time.Now()
+		}
+		// else: a fact was written while this probe ran (noteAgentJobDone /
+		// invalidate) and this reading predates it — discarded. The job's
+		// write stands, or after an invalidation `at` stays zero so the next
+		// read probes again; the latch and the flag clear either way.
 		a.inflight = false
+		a.timeoutLogged = false
 		a.idleCond().Broadcast() // release any synchronous waiter (RefreshAgentResidency)
 		a.mu.Unlock()
 	}()
@@ -1314,8 +1397,9 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	// same resolved listener, so health can never promise a lane dispatch will
 	// 403. agentResident() is a cached read + at most one background refresh
 	// per TTL; it blocks this handler on llama-swap only when the cached
-	// answer is older than agentResidencyMaxStale (or was invalidated by a
-	// finished job), and then for at most residencyWaitBound.
+	// answer is older than agentResidencyMaxStale, never taken, or was
+	// invalidated by an agent job that finished with an error, and then for
+	// at most residencyWaitBound.
 	if s.agentLane {
 		payload.AgentEnabled = true
 		payload.AgentSeat = s.agentSeat

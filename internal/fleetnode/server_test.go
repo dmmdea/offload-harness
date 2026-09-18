@@ -1002,10 +1002,11 @@ func waitForResidencyProbe(t *testing.T, s *Server) {
 // TestHealthAgentFieldsPresentWhenEnabled drives the §S3 agent advertisement
 // end to end THROUGH THE HEALTH HANDLER, never by calling the refresh: with
 // fleet_agent_enabled the payload carries agent_enabled/agent_seat/
-// agent_ctx_tokens immediately, while agent_seat_resident starts ABSENT
-// (false) — the cache is cold and the handler must NEVER block on a llama-swap
-// round-trip (same rule as the reclaim tracker) — and turns true once the
-// BACKGROUND probe the first GET kicked off lands. The roster hit count pins
+// agent_ctx_tokens immediately, and since 0.128.2 agent_seat_resident is
+// TRUE on that very first GET: a never-probed cache makes the read wait
+// (bounded by residencyWaitBound) for the probe it kicks — the fail-closed
+// absent field survives only when the probe does not land inside the bound
+// (TestHealthBoundsItsWaitOnAHungSeatRead). The roster hit count pins
 // the other half of the cache contract: one refresh cycle, single-flighted,
 // reused by every request inside the TTL — TWO roster GETs per cycle
 // (rosterServes for residency, rosterServedModels for served_models; see the rosterServedModels

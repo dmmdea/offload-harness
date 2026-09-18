@@ -1,10 +1,12 @@
 // residency_stale_test.go: the residency cache's staleness bound (0.128.2).
 // A health read past one extra TTL window, never probed, or invalidated by an
-// agent job that just finished on the seat WAITS (bounded) for a fresh
-// /running answer instead of serving the previous window's — the 0.128.1
-// slot census charged a 28 s cold load in the eta for a seat whose admission
-// wait was 6 ms because the first read after a two-minute quiet period served
-// the answer taken before the last job.
+// agent job that finished with an error WAITS (bounded) for a fresh /running
+// answer instead of serving the previous window's — the 0.128.1 slot census
+// charged a 28 s cold load in the eta for a seat whose admission wait was
+// 6 ms because the first read after a two-minute quiet period served the
+// answer taken before the last job. A job that finished without an error
+// writes what it proves straight into the cache, and a probe that started
+// before such a write is discarded when it lands.
 
 package fleetnode
 
@@ -14,19 +16,23 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
 
 // mutableSwap is a fake llama-swap whose /running answer the test flips, and
-// whose /running can be held open (hang) to model a slow box.
+// whose /running can be held open (hang) or slowed to model a slow box.
 type mutableSwap struct {
 	srv       *httptest.Server
 	mu        sync.Mutex
 	state     string // "" = nothing running, else the state of the canonical model
 	hang      chan struct{}
+	delay     time.Duration
 	canonical string
+	running   atomic.Int64 // /running hits
 }
 
 func newMutableSwap(t *testing.T, canonical, alias string) *mutableSwap {
@@ -38,12 +44,20 @@ func newMutableSwap(t *testing.T, canonical, alias string) *mutableSwap {
 			w.Header().Set("Content-Type", "application/json")
 			fmt.Fprintf(w, `{"object":"list","data":[{"id":%q,"object":"model","meta":{"llamaswap":{"aliases":[%q]}}}]}`, canonical, alias)
 		case "/running":
+			m.running.Add(1)
 			m.mu.Lock()
-			state, hang := m.state, m.hang
+			state, hang, delay := m.state, m.hang, m.delay
 			m.mu.Unlock()
 			if hang != nil {
 				select {
 				case <-hang:
+				case <-r.Context().Done():
+					return
+				}
+			}
+			if delay > 0 {
+				select {
+				case <-time.After(delay):
 				case <-r.Context().Done():
 					return
 				}
@@ -65,6 +79,12 @@ func newMutableSwap(t *testing.T, canonical, alias string) *mutableSwap {
 func (m *mutableSwap) set(state string) {
 	m.mu.Lock()
 	m.state = state
+	m.mu.Unlock()
+}
+
+func (m *mutableSwap) slow(d time.Duration) {
+	m.mu.Lock()
+	m.delay = d
 	m.mu.Unlock()
 }
 
@@ -90,6 +110,25 @@ func ageResidency(s *Server, age time.Duration) {
 	s.agentRes.mu.Unlock()
 }
 
+func residencyStamped(s *Server) bool {
+	s.agentRes.mu.Lock()
+	defer s.agentRes.mu.Unlock()
+	return !s.agentRes.at.IsZero()
+}
+
+func residencyInflight(s *Server) bool {
+	s.agentRes.mu.Lock()
+	defer s.agentRes.mu.Unlock()
+	return s.agentRes.inflight
+}
+
+func shortWaitBound(t *testing.T, d time.Duration) {
+	t.Helper()
+	old := residencyWaitBound
+	residencyWaitBound = d
+	t.Cleanup(func() { residencyWaitBound = old })
+}
+
 func healthOnce(t *testing.T, s *Server) map[string]any {
 	t.Helper()
 	rec := do(t, s, http.MethodGet, "/fleet/health", "", nil)
@@ -97,6 +136,40 @@ func healthOnce(t *testing.T, s *Server) map[string]any {
 		t.Fatalf("health status = %d (body %s)", rec.Code, rec.Body.String())
 	}
 	return decodeMap(t, rec)
+}
+
+func waitUntil(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
+func waitJobTerminal(t *testing.T, jobs *Jobs, id string) {
+	t.Helper()
+	waitUntil(t, "job "+id+" to reach a terminal state", func() bool {
+		jobs.mu.Lock()
+		defer jobs.mu.Unlock()
+		jb := jobs.m[id]
+		return jb != nil && (jb.state == JobDone || jb.state == JobError)
+	})
+}
+
+func finishAgentJob(t *testing.T, jobs *Jobs, id string, err error) {
+	t.Helper()
+	if !jobs.Admit(id, AcceptSpec{Agent: true, Task: "agent-run"}, func(ctx context.Context) (json.RawMessage, error) {
+		if err != nil {
+			return nil, err
+		}
+		return json.RawMessage(`{"ok":true}`), nil
+	}) {
+		t.Fatalf("admit %s: refused", id)
+	}
+	waitJobTerminal(t, jobs, id)
 }
 
 // TestHealthWaitsForAFreshSeatStateBeyondTheStaleBand: the previous answer
@@ -133,28 +206,21 @@ func TestHealthServesThePreviousSeatStateInsideTheStaleBand(t *testing.T) {
 	if m := healthOnce(t, s); m["seat_loaded"] != false {
 		t.Fatalf("seat_loaded = %v inside the stale band, want the previous false: a read one window past the TTL keeps serving while it refreshes", m["seat_loaded"])
 	}
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		if m := healthOnce(t, s); m["seat_loaded"] == true {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("the background refresh never published the loaded seat")
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+	waitUntil(t, "the background refresh to publish the loaded seat", func() bool {
+		return healthOnce(t, s)["seat_loaded"] == true
+	})
 }
 
 // TestHealthBoundsItsWaitOnAHungSeatRead: a too-stale read on a box whose
 // /running hangs costs at most residencyWaitBound, then serves what it has
-// (an unread seat state = both fields absent) — never an open-ended block.
+// (an unread seat state = both fields absent, residency absent = fail
+// closed) — never an open-ended block — and says so ONCE per refresh cycle.
 func TestHealthBoundsItsWaitOnAHungSeatRead(t *testing.T) {
 	swap := newMutableSwap(t, "gemma-4-e4b", "offload-e4b")
 	swap.holdRunning(t)
-	old := residencyWaitBound
-	residencyWaitBound = 150 * time.Millisecond
-	t.Cleanup(func() { residencyWaitBound = old })
+	shortWaitBound(t, 150*time.Millisecond)
 	s, _ := newTestServer(t, agentHealthCfg(swap.srv.URL), &fakeRunner{}, authOpts(true))
+	buf := captureLog(t)
 
 	t0 := time.Now()
 	m := healthOnce(t, s) // never probed: the read waits for the probe it kicks
@@ -168,72 +234,102 @@ func TestHealthBoundsItsWaitOnAHungSeatRead(t *testing.T) {
 	if _, present := m["seat_loaded"]; present {
 		t.Fatalf("seat_loaded = %v while /running is still hung, want the field absent (unread)", m["seat_loaded"])
 	}
-	// Fail-closed survives the bound: nothing has been published, so the
-	// residency verdict is still the unread one (absent = false), never a
-	// guess that the seat is resident.
 	if v, present := m["agent_seat_resident"]; present {
 		t.Fatalf("agent_seat_resident = %v while the probe has not landed, want the field absent (fail closed)", v)
 	}
+	const said = "serving the previous answer"
+	if n := strings.Count(buf.String(), said); n != 1 {
+		t.Fatalf("the timed-out wait was logged %d times after one read, want exactly 1 (log: %s)", n, buf.String())
+	}
+	healthOnce(t, s) // same refresh cycle, still hung: waits again, must NOT log again
+	if n := strings.Count(buf.String(), said); n != 1 {
+		t.Fatalf("the timed-out wait was logged %d times after two reads in ONE refresh cycle, want 1 — health is polled by every delegator", n)
+	}
 }
 
-// TestAFinishedAgentJobInvalidatesTheResidencyCache: the cache is FRESH and
-// says not loaded; an agent job finishes on the seat; the next read must
-// probe again and report loaded. An agent job that ERRORS is no proof and
-// leaves the cache alone.
-func TestAFinishedAgentJobInvalidatesTheResidencyCache(t *testing.T) {
+// TestAFinishedAgentJobWritesItsProofIntoTheResidencyCache: /running says
+// nothing is loaded (so the ONLY possible source of "loaded" is the job); a
+// successful agent job finishes; the very next read reports loaded and
+// resident WITHOUT touching /running. An errored agent job proves nothing:
+// it invalidates instead, and the next read probes fresh.
+func TestAFinishedAgentJobWritesItsProofIntoTheResidencyCache(t *testing.T) {
 	swap := newMutableSwap(t, "gemma-4-e4b", "offload-e4b")
 	s, jobs := newTestServer(t, agentHealthCfg(swap.srv.URL), &fakeRunner{}, authOpts(true))
 	if m := healthAfterProbe(t, s); m["seat_loaded"] != false {
 		t.Fatalf("fixture: seat_loaded = %v, want false with nothing running", m["seat_loaded"])
 	}
-	swap.set("ready")
 
-	// An errored agent job: the cache must stay stamped.
-	if !jobs.Admit("agent-err", AcceptSpec{Agent: true, Task: "agent-run"}, func(ctx context.Context) (json.RawMessage, error) {
-		return nil, fmt.Errorf("seat never answered")
-	}) {
-		t.Fatal("admit agent-err: refused")
+	// An errored agent job: the cache is invalidated, and the next read probes.
+	finishAgentJob(t, jobs, "agent-err", fmt.Errorf("wall timeout after 300s"))
+	if residencyStamped(s) {
+		t.Fatal("an errored agent job left the residency cache stamped: the node cannot tell a wall timeout from a seat that never answered, so it must probe again")
 	}
-	waitJobTerminal(t, jobs, "agent-err")
-	s.agentRes.mu.Lock()
-	stamped := !s.agentRes.at.IsZero()
-	s.agentRes.mu.Unlock()
-	if !stamped {
-		t.Fatal("an ERRORED agent job invalidated the residency cache: a job that failed because the seat never answered proves nothing about the seat")
-	}
+	before := swap.running.Load()
 	if m := healthOnce(t, s); m["seat_loaded"] != false {
-		t.Fatalf("seat_loaded = %v after an errored job on a fresh cache, want the cached false (nothing invalidated it)", m["seat_loaded"])
+		t.Fatalf("seat_loaded = %v after an errored job, want the freshly probed false (nothing is running)", m["seat_loaded"])
+	}
+	if swap.running.Load() == before {
+		t.Fatal("the read after an errored job served the cache without probing /running")
 	}
 
-	// A finished agent job: the next read probes fresh.
-	finish := blockingJob(t, jobs, "agent-ok", AcceptSpec{Agent: true, Task: "agent-run"})
-	finish()
-	waitJobTerminal(t, jobs, "agent-ok")
-	s.agentRes.mu.Lock()
-	stamped = !s.agentRes.at.IsZero()
-	s.agentRes.mu.Unlock()
-	if stamped {
-		t.Fatal("a finished agent job left the residency cache stamped: the next health read would serve the pre-job seat state")
+	// A successful agent job: its proof is written, no probe.
+	finishAgentJob(t, jobs, "agent-ok", nil)
+	if !residencyStamped(s) {
+		t.Fatal("a finished agent job did not stamp the residency cache")
 	}
-	if m := healthOnce(t, s); m["seat_loaded"] != true {
-		t.Fatalf("seat_loaded = %v on the first read after an agent job finished on the seat, want true (payload %v)", m["seat_loaded"], m)
+	before = swap.running.Load()
+	m := healthOnce(t, s)
+	if m["seat_loaded"] != true || m["seat_starting"] != false || m["agent_seat_resident"] != true {
+		t.Fatalf("after a finished agent job: seat_loaded=%v seat_starting=%v agent_seat_resident=%v, want true/false/true — the job is the proof (payload %v)", m["seat_loaded"], m["seat_starting"], m["agent_seat_resident"], m)
+	}
+	if swap.running.Load() != before {
+		t.Fatal("the read after a finished agent job probed /running: the job's own proof must be served without a probe")
 	}
 }
 
-func waitJobTerminal(t *testing.T, jobs *Jobs, id string) {
-	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		jobs.mu.Lock()
-		jb := jobs.m[id]
-		terminal := jb != nil && (jb.state == JobDone || jb.state == JobError)
-		jobs.mu.Unlock()
-		if terminal {
-			return
+// TestBackToBackFinishesNeverWaitOnASlowSeatRead: jobs finishing every few
+// milliseconds on a node whose /running is slow must NOT make each following
+// health read pay the wait bound — a finished job writes the cache itself.
+func TestBackToBackFinishesNeverWaitOnASlowSeatRead(t *testing.T) {
+	swap := newMutableSwap(t, "gemma-4-e4b", "offload-e4b")
+	s, jobs := newTestServer(t, agentHealthCfg(swap.srv.URL), &fakeRunner{}, authOpts(true))
+	healthAfterProbe(t, s)
+	shortWaitBound(t, 150*time.Millisecond)
+	swap.slow(300 * time.Millisecond)
+
+	for i := 0; i < 5; i++ {
+		finishAgentJob(t, jobs, fmt.Sprintf("agent-%d", i), nil)
+		t0 := time.Now()
+		m := healthOnce(t, s)
+		if took := time.Since(t0); took > 75*time.Millisecond {
+			t.Fatalf("read %d after a finished job took %s, want no wait at all (a finished job writes the cache; the slow /running must never be on this path)", i, took)
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("job %s never reached a terminal state", id)
+		if m["seat_loaded"] != true {
+			t.Fatalf("read %d after a finished job: seat_loaded = %v, want true", i, m["seat_loaded"])
 		}
-		time.Sleep(2 * time.Millisecond)
+	}
+}
+
+// TestAProbeThatStartedBeforeAJobFinishedIsDiscarded: a refresh reads
+// /running while the seat is still empty, a job finishes on the seat before
+// that refresh publishes, the refresh lands — and must NOT overwrite the
+// job's proof nor re-stamp the pre-job reading as fresh.
+func TestAProbeThatStartedBeforeAJobFinishedIsDiscarded(t *testing.T) {
+	swap := newMutableSwap(t, "gemma-4-e4b", "offload-e4b")
+	release := swap.holdRunning(t)
+	shortWaitBound(t, 100*time.Millisecond)
+	s, jobs := newTestServer(t, agentHealthCfg(swap.srv.URL), &fakeRunner{}, authOpts(true))
+
+	healthOnce(t, s) // never probed: kicks the refresh, which hangs on /running
+	if !residencyInflight(s) {
+		t.Fatal("fixture: the refresh should still be in flight, hung on /running")
+	}
+	finishAgentJob(t, jobs, "agent-ok", nil) // the fact lands while the probe is stuck
+	release()                                // the stale reading ("nothing running") now publishes
+	waitUntil(t, "the held refresh to land", func() bool { return !residencyInflight(s) })
+
+	m := healthOnce(t, s)
+	if m["seat_loaded"] != true || m["agent_seat_resident"] != true {
+		t.Fatalf("seat_loaded=%v agent_seat_resident=%v after a stale probe landed behind a finished job, want true/true: the reading predates the job and must be discarded (payload %v)", m["seat_loaded"], m["agent_seat_resident"], m)
 	}
 }
