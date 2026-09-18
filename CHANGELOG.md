@@ -6,6 +6,19 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.128.3] - 2026-09-18 - the vLLM seat launcher binds the LMCache MP HTTP frontend to loopback on its own port
+
+### Fixed
+- **The LMCache MP server's HTTP frontend was listening on `0.0.0.0:8080`** (register B-01 / L5, found 2026-09-18 while
+  re-measuring the cache tier): LMCache 0.5.x opens an HTTP API beside the ZMQ port and defaults it to `0.0.0.0:8080`, and
+  `seat_fg.sh` never passed `--http-host/--http-port`, so the production MP server logged `Uvicorn running on
+  http://0.0.0.0:8080` — on a WSL2 distro in mirrored networking that is the host's LAN and tailnet, and 8080 is somebody
+  else's port on every box in this fleet. The launcher now passes `--http-host 127.0.0.1 --http-port "$MP_HTTP_PORT"`
+  (`SEAT_MP_HTTP_PORT`, default 18793 — the reference pairing is 18797 engine / 18796 MP ZMQ / 18793 MP HTTP), refuses a
+  squatted HTTP port the way it refuses a squatted engine port, and the seat spec carries `mp_http_port` (0 = engine
+  port − 4) rendered into `seat.env` as `SEAT_MP_HTTP_PORT`. `TestSeatLauncherBindsTheMPHTTPFrontendOnLoopback` pins the
+  three launcher facts, the env token and the default.
+
 ### Added
 - `contracts/digest-adr-hard-8.json` (register G-36): the harder digest set for the standard quality instrument —
   eight contracts of three ADRs each (24 ADRs disjoint from `digest-8.json`), four verbatim anchored findings per
