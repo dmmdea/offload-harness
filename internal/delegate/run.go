@@ -3875,6 +3875,14 @@ func (r *runner) dispatchDetailed(ctx context.Context, base, jobID string, paylo
 // (the shape this fleet's own nodes send — never the HTTP-date form, which
 // this parser deliberately does not attempt). Empty, unparsable or negative
 // is 0 = no hint, the safe "the caller decides its own pacing" reading.
+// retryAfterUnparsableWarnOnce bounds parseRetryAfterSeconds' log to ONCE per
+// process — review round 1, LOW item 6: a future proxy in front of a node
+// could start sending the HTTP-date form (RFC 9110 §10.2.3), which this
+// parser deliberately does not attempt (this fleet's own nodes only ever
+// send delta-seconds), and that would otherwise silently discard the hint on
+// every single 503 forever with no trace anywhere.
+var retryAfterUnparsableWarnOnce sync.Once
+
 func parseRetryAfterSeconds(v string) int {
 	v = strings.TrimSpace(v)
 	if v == "" {
@@ -3882,6 +3890,9 @@ func parseRetryAfterSeconds(v string) int {
 	}
 	n, err := strconv.Atoi(v)
 	if err != nil || n < 0 {
+		retryAfterUnparsableWarnOnce.Do(func() {
+			log.Printf("delegate: Retry-After %q is not a delta-seconds integer (an HTTP-date form is not parsed); ignoring it as a capacity hint — logged once per process", v)
+		})
 		return 0
 	}
 	return n
