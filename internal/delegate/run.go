@@ -718,15 +718,15 @@ func RunWith(ctx context.Context, cfg config.Config, local LocalRunner, subtasks
 		// now read once so the whole batch agrees. route=remote forces busy
 		// unconditionally: local is never a placement for an explicit remote.
 		busy := route == "remote"
-		local := busyReading{}
+		localBusy := busyReading{}
 		if route == "auto" {
-			local = r.probeLocalBusy(ctx)
-			busy = leaseInfo.Held || local.inflight >= cfg.FleetConcurrencyLimit() || local.loading
+			localBusy = r.probeLocalBusy(ctx)
+			busy = leaseInfo.Held || localBusy.inflight >= cfg.FleetConcurrencyLimit() || localBusy.loading
 			// One line per run, mirroring route=spread's own local-slot log
 			// (review round 1 item 4): before this the identical W-01 read had
 			// no trace at all, so an operator could not tell "busy" from
 			// "idle" without re-deriving it from the placement_reason.
-			log.Printf("delegate: auto local slot: busy=%v inflight=%d loading=%v (%s)", busy, local.inflight, local.loading, local.note)
+			log.Printf("delegate: auto local slot: busy=%v inflight=%d loading=%v (%s)", busy, localBusy.inflight, localBusy.loading, localBusy.note)
 		}
 		var failed map[string]string
 		if busy {

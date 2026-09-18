@@ -392,31 +392,25 @@ func remoteDecision(st Subtask, r NodeView) (placetable.Decision, bool) {
 	return placetable.Decide(placetable.RequestForContract(st.Contract, st.EstTokens, 0), layers, live), true
 }
 
-// leaseFences reports whether r's lease is a HARD refusal for remote
-// placement (W-14, register S-15): an EXCLUSIVE or DRAINING hold — gated to
+// leaseFenceReason reports whether r's lease is a HARD refusal for remote
+// placement (W-14, register S-15) — an EXCLUSIVE or DRAINING hold, gated to
 // TEXT-class leases at creation (gpulease.TryAcquire only ever sets either
 // flag for class=text, never for class=media) — or a lease the node's own
 // verdict reads as long enough (LeaseBusy) that is NOT a plain text
 // reservation. That second clause is what keeps a MEDIA render (a training
 // run, up to hours) fencing exactly as before: a busy, non-text lease can
 // never be Exclusive or Draining by construction, so without this clause it
-// would fall straight through to the demotion this function does NOT grant it.
+// would fall straight through to the demotion this function does NOT grant
+// it. It also returns the one-word D-105 detail for WHICH hold fenced it —
+// read by eligibilityVerdict so the gate and the narration can never name a
+// different reason than the one that actually excluded a node.
 //
-// The ONE case this no longer excludes: a plain (non-exclusive, non-draining)
+// The ONE case this does not fence: a plain (non-exclusive, non-draining)
 // TEXT reservation the node calls busy. Before this it hard-refused on the
 // node's DECLARED window alone — 47 measured contracts burned 300 s each on a
 // lease whose cards were idle in 10 of them (register S-15) — because `busy`
 // says "spoken for until 15:04", not "the cards are working". That case stays
 // eligible and is demoted instead (betterRemote's leaseBusyDemoted key).
-func leaseFences(r NodeView) bool {
-	fenced, _ := leaseFenceReason(r)
-	return fenced
-}
-
-// leaseFenceReason is leaseFences plus the one-word D-105 detail for WHICH
-// hold fenced it — read by eligibilityVerdict so the gate and the narration
-// can never name a different reason than the one that actually excluded a
-// node.
 func leaseFenceReason(r NodeView) (fenced bool, why string) {
 	switch {
 	case r.LeaseExclusive:
@@ -433,7 +427,7 @@ func leaseFenceReason(r NodeView) (fenced bool, why string) {
 // leaseBusyDemoted is betterRemote's read of the ONE lease shape remoteEligible
 // still admits: LeaseBusy alone. Safe to check without re-deriving the
 // exclusive/draining/text conditions, because remoteEligible has already
-// excluded every other LeaseBusy shape (leaseFences) before a node ever
+// excluded every other LeaseBusy shape (leaseFenceReason) before a node ever
 // reaches ranking — a lease-busy survivor here is always the plain-text case.
 func leaseBusyDemoted(v NodeView) bool { return v.LeaseBusy }
 

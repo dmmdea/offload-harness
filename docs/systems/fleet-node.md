@@ -799,7 +799,7 @@ survivors are RANKED and how many of one Run's subtasks one node can take.
   reservation over idle cards no longer routes work away from a node that could run it.
 - **`placement_reason` names every reachable remote with a one-word verdict (item 8, register D-105).** The
   resolved reason (`route=auto → node-a (headroom); node-a: chosen eta 41 s (cold 15 + 26 gen); node-b: slow
-  (fitted final 312 < 1024); node-c: cap (4/4 running)`) keeps the existing `route=remote`/`route=spread`
+  (fitted final 312 < 1024); node-c: cap (4/4 running, headroom 0, dealt 0)`) keeps the existing `route=remote`/`route=spread`
   prefixes byte-identical (`fleet_smoke_cmd.go` parses them) and appends one clause per node from the vocabulary
   `chosen | queue | cap | slow | lease | cold | probe | unfit(ctx) | noschema`, in gate order.
 - **Long-poll and a courtesy Retry-After retry (item 7, register D-106).** The delegator's poll now sends
