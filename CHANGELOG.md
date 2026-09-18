@@ -6,6 +6,8 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.128.0] - 2026-09-17 - placement by expected completion: feasibility from the fitted final, quality-adequate seats ranked by ETA with power-of-two-choices, per-node headroom in the deal, busy means a job in flight, one-word verdicts per node
+
 ### Added
 - **Placement (`route=auto`/`remote`) ranks quality-adequate seats by expected completion, under the
   operator-signed INV-5 rider** (ADR [0050](docs/architecture/decisions/0050-placement-ranks-adequate-seats-by-expected-completion.md);
