@@ -6,6 +6,20 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **A contract can name the layer it runs on** (register A-100, the measured fast-seat lever): the
+  delegation door's subtasks take `layer`, the placement table gains row 4b (a named layer → its
+  agent seat, under the window check and the layer's own guards, naming the loaded seat it displaces
+  on a shared card) and row 5b (a box that declares no pair places the free choice on the `single`
+  layer's agent seat — the planner default under a layer name), and the delegator decides FOR a
+  caller-named layer instead of overwriting it with the free choice, so a node that does not declare
+  the layer is ineligible for that subtask. Before this the table keyed every agent row on the pair
+  and the triple: a one-card box (the ampere-16 Lenovo) that declared layers became ineligible for
+  every contract, and its second layer — the 35B digest seat beside the 27B GSQ (digest-8 164.8 s vs
+  1,597.8 s, blind coverage 4.65 vs 8.53, so by name only, never the default) — deferred "no layer
+  serves an agent contract" when requested. Red tests on both seams
+  (`internal/placement/decide_requested_layer_test.go`, `internal/delegate/gate_requested_layer_test.go`).
+
 ## [0.128.2] - 2026-09-17 - the node's residency cache no longer serves the pre-last-job seat state: a too-stale read waits for the probe, a completed call on the seat writes seat_loaded from both doors
 
 ### Fixed

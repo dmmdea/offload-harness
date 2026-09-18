@@ -384,12 +384,23 @@ func eligibilityVerdict(st Subtask, r NodeView) (eligible bool, word, detail str
 // default (1024) is the conservative side of every seat's real setting. The
 // node re-runs the same decision for the dispatched layer with its OWN live
 // guards, so a verdict carried in the rows is never the last word.
+//
+// A contract that already NAMES a layer (the caller's `layer`, register
+// A-100) is decided FOR that layer, never re-placed by the free choice: a node
+// that does not declare it defers by name and is ineligible for this
+// contract, so the dispatch lands only where the requested seat is served.
+// Before this the free choice overwrote the caller's layer on the dispatched
+// copy, and a request for the Lenovo's fast layer ran on its planner default.
 func remoteDecision(st Subtask, r NodeView) (placetable.Decision, bool) {
 	if len(r.Layers) == 0 {
 		return placetable.Decision{}, false
 	}
 	layers, live := placetable.FromRows(r.Layers)
-	return placetable.Decide(placetable.RequestForContract(st.Contract, st.EstTokens, 0), layers, live), true
+	req := placetable.RequestForContract(st.Contract, st.EstTokens, 0)
+	if st.Contract.Layer != "" {
+		return placetable.DecideOnLayer(req, layers, st.Contract.Layer, live), true
+	}
+	return placetable.Decide(req, layers, live), true
 }
 
 // leaseFenceReason reports whether r's lease is a HARD refusal for remote

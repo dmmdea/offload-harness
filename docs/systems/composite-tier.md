@@ -45,9 +45,24 @@ tier declares it again and nothing else changes.
 4. **An explicit `context_class: long`** → the biggest long-context layer the box declares:
    a three-card layer's long seat where one exists, otherwise the pair's, under the same
    eviction rule as row 6.
+4b. **A contract that names a layer** (`layer` on the delegation door, register A-100) → that
+   layer's agent seat, under the window check and the layer's own guards. The pair keeps row
+   5, and `single` on a box that also declares a pair keeps deferring (council R2: its agent
+   seat is the one-card identity on the pair's own cards, never an agent placement); every
+   other named layer resolves here — this is how a box's SECOND layer, whose agent
+   seat is not the planner default (the ampere-16 Lenovo's `fast` layer = the 35B digest
+   seat beside its 27B GSQ on the one card), is reachable at all. A seat another layer holds
+   loaded on the same card is named as the displacement (recorded, never acted on; llama-swap
+   serialises the swap behind the loaded seat's in-flight work). The delegator decides FOR the
+   named layer too, so a node that does not declare it is ineligible for that contract and the
+   free choice never overwrites the caller's layer on the dispatched copy.
 5. **An agent contract that fits the pair's agent window** → the pair's agent seat, always.
    A saturated pair (in flight ≥ max_num_seqs) is RECORDED in the reason and nothing is
    re-placed: no other layer can hold that contract beside a loaded pair.
+5b. **A box that declares no pair** (one card) → the `single` layer's agent seat: the planner
+   default under a layer name. Without this row a one-card node's first layer declaration made
+   it ineligible for every contract it ran the day before (the delegator's gate is "the table
+   places it"). The free choice never lands on a second layer — that one is by name only.
 6. **Window overflow** → the pair's long seat. If the pair's agent seat is mid-flight, the
    decision asks the caller to WAIT and names the seat it would evict; if it is idle or cold,
    it is displaced with a note.
