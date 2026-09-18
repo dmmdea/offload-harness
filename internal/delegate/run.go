@@ -3193,7 +3193,7 @@ func (r *runner) runLocal(ctx context.Context, jobID string, contract core.Agent
 	// endpoint is another box's engine, whose name the card then carries
 	// (register C-58: PAIR showed the Qube doing the Lenovo's work).
 	pairNode := ""
-	if host := modelaffinity.EndpointHost(r.cfg.Endpoint); host != "" {
+	if host := modelaffinity.EndpointHost(r.cfg.Endpoint, r.cfg.FleetNodeID); host != "" {
 		pairNode = host
 		pr.PlacementReason += "; engine " + r.cfg.Endpoint + " is " + host + "'s (attributed there)"
 	}
@@ -4520,7 +4520,7 @@ func (r *runner) localNodeID() string {
 	// endpoint is the Lenovo's arm) is that box's work: name the node after
 	// the endpoint host, as a remote placement is named after its base
 	// (register C-58: PAIR showed the Qube doing the Lenovo's work).
-	if host := modelaffinity.EndpointHost(r.cfg.Endpoint); host != "" {
+	if host := modelaffinity.EndpointHost(r.cfg.Endpoint, r.cfg.FleetNodeID); host != "" {
 		return host
 	}
 	if r.cfg.FleetNodeID != "" {

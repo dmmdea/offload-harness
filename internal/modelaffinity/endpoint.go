@@ -25,8 +25,10 @@ import (
 
 // EndpointHost returns the lower-cased host of base when base names another
 // box's engine, and "" when base is this box (loopback, "localhost", this
-// machine's hostname or its short form) or unparseable.
-func EndpointHost(base string) string {
+// machine's hostname or its short form, or any of selfNames — the config's
+// fleet_node_id, which names this box on the tailnet and need not equal the
+// OS hostname) or unparseable.
+func EndpointHost(base string, selfNames ...string) string {
 	u, err := url.Parse(strings.TrimSpace(base))
 	if err != nil {
 		return ""
@@ -34,6 +36,15 @@ func EndpointHost(base string) string {
 	host := strings.ToLower(strings.Trim(u.Hostname(), "[]"))
 	if host == "" || host == "localhost" {
 		return ""
+	}
+	for _, n := range selfNames {
+		n = strings.ToLower(strings.TrimSpace(n))
+		if n == "" {
+			continue
+		}
+		if host == n || strings.HasPrefix(host, n+".") {
+			return ""
+		}
 	}
 	if ip := net.ParseIP(host); ip != nil {
 		if ip.IsLoopback() || ip.IsUnspecified() {

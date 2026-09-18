@@ -1621,7 +1621,7 @@ func loadArmed(path string) (Config, error) {
 	// the Lenovo's arm) makes no local load: this box's machine-wide lease has
 	// nothing to protect, and gating on it cordoned runs that never touched a
 	// local card (register C-58). Disarm, and say so once per process.
-	if host := modelaffinity.EndpointHost(c.Endpoint); host != "" {
+	if host := modelaffinity.EndpointHost(c.Endpoint, c.FleetNodeID); host != "" {
 		modelaffinity.DisarmGPULease()
 		remoteEndpointNoteOnce.Do(func() {
 			fmt.Fprintf(os.Stderr, "note: endpoint %s is another box (%s): this box's GPU lease does not gate these runs, and they are attributed to %s\n", c.Endpoint, host, host)

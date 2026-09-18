@@ -49,3 +49,20 @@ func TestDisarmGPULeaseClearsTheArmedDirectory(t *testing.T) {
 		t.Fatal("DisarmGPULease must clear the armed directory")
 	}
 }
+
+// The config's fleet_node_id names this box too (it need not equal the OS
+// hostname): an endpoint addressed by it, or by it plus a domain, is this box.
+func TestEndpointHostTreatsTheFleetNodeIDAsThisBox(t *testing.T) {
+	if got := EndpointHost("http://qube:11434", "qube"); got != "" {
+		t.Fatalf("fleet_node_id host must be this box, got %q", got)
+	}
+	if got := EndpointHost("http://QUBE.tail.net:11434", "qube"); got != "" {
+		t.Fatalf("fleet_node_id with a domain must be this box, got %q", got)
+	}
+	if got := EndpointHost("http://node-b:18797", "qube"); got != "node-b" {
+		t.Fatalf("another box must still read as remote, got %q", got)
+	}
+	if got := EndpointHost("http://node-b:18797", ""); got != "node-b" {
+		t.Fatalf("an empty self name must not match, got %q", got)
+	}
+}
