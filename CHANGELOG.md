@@ -27,6 +27,20 @@ Versioning: [SemVer](https://semver.org/).
   three launcher facts, the env token and the default.
 
 ### Added
+- **A contract can name the layer it runs on** (register A-100, the measured fast-seat lever): the
+  delegation door's subtasks take `layer`, the placement table gains row 4b (a named layer → its
+  agent seat, under the window check and the layer's own guards, naming the loaded seat it displaces
+  on a shared card) and row 5b (a box that declares no pair places the free choice on the `single`
+  layer's agent seat — the planner default under a layer name), and the delegator decides FOR a
+  caller-named layer instead of overwriting it with the free choice — on its own box and over every
+  remote's rows — so a node that does not declare the layer is ineligible for that subtask, an idle
+  local box that does not declare it does not keep it, and with no node declaring it the subtask
+  defers naming the layer (never a silent run on the planner seat). Before this the table keyed every agent row on the pair
+  and the triple: a one-card box (the ampere-16 Lenovo) that declared layers became ineligible for
+  every contract, and its second layer — the 35B digest seat beside the 27B GSQ (digest-8 164.8 s vs
+  1,597.8 s, blind coverage 4.65 vs 8.53, so by name only, never the default) — deferred "no layer
+  serves an agent contract" when requested. Red tests on both seams
+  (`internal/placement/decide_requested_layer_test.go`, `internal/delegate/gate_requested_layer_test.go`).
 - `contracts/digest-adr-hard-8.json` (register G-36): the harder digest set for the standard quality instrument —
   eight contracts of three ADRs each (24 ADRs disjoint from `digest-8.json`), four verbatim anchored findings per
   document plus a cross-document finding, `min_items:findings:12` and one grounded `regex:` alternation per contract

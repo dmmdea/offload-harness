@@ -63,7 +63,11 @@ composite box (ADR 0039) the placement table decides when no per-call model is g
 outranking `agent_model`, while a per-call model that belongs to an OPT-IN layer is admitted
 only if that layer's guards admit it right now: a dormant layer refuses outright and the
 display card refuses by the guard's name, before any seat is touched. Both agent doors take
-`context_class: "long"`, an input to placement rather than a seat name, and every result and
+`context_class: "long"`, an input to placement rather than a seat name; the delegation door's
+subtasks also take `layer`, a composite node's declared layer id whose agent seat the subtask
+runs on (register A-100: the Lenovo's `fast` layer is its 35B digest seat — a node that does
+not declare the layer is ineligible for that subtask, an idle local box that does not declare it
+does not keep it, and with no node declaring it the subtask defers naming the layer), and every result and
 defer on a composite box carries `placed` {tier, layer, role, seat, devices, reason, guard,
 evicts} — absent on a plain box), its default
 timeout honors config `agent_timeout_sec` (else the built-in 180s), and its result reports the
