@@ -6,6 +6,7 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+<<<<<<< HEAD
 ### Fixed
 - **A route=local run against another box's engine was attributed to this box** (register C-58, operator
   2026-09-18: "nvidia pair showing the qube doing lenovo work"). Bench configs on the Qube set `endpoint` to
@@ -18,6 +19,27 @@ Versioning: [SemVer](https://semver.org/).
   that member. The same reading disarms this box's text-load gate in `config.Load` (one note per process):
   a run that never touches a local card is no longer deferred `gpu busy` by this box's lease (8 of 16
   contracts were, in 0.7 s, while the Qube's cards sat under a lease and the work was on the Lenovo).
+=======
+## [0.129.1] - 2026-09-18 - fs_native bindings publish `reachable` from the seat wrapper's own verdict file
+
+### Added
+- **`kv_cache_server[].status_file` (register B-29).** An `fs_native` store is a mounted path with no port to dial, so
+  `offload_status` published `reachable: null, "not validated end to end in this release"` for every such binding since
+  0.113. The seat wrapper already decides the fact at every seat start (mount + 64 MiB write probe) and writes
+  `$WORK/seat-l2.status`; a binding that declares that file (host-visible `//wsl.localhost/<distro>/…` on a WSL2 seat)
+  now reads it: `ok` → `reachable: true`, `degraded` → `reachable: false` + `reachable_error`, unreadable → `null` with
+  a note, undeclared → `null` with the instruction. `status_line` and `status_age_s` ride along.
+  `TestStatusReadsFSNativeReachabilityFromTheSeatStatusFile`.
+
+### Changed
+- **`skill/` tool reference libraries refreshed from the operator's current copies and DaVinci Resolve added** (register J-22):
+  `skill/ffmpeg` (12 files were a week behind: ffmpeg 9.0 traps, NVENC, subtitles, quoting, failure modes),
+  `skill/gimp` (10 files: two hosts measured, text-outline correction), new `skill/davinci-resolve`
+  (Studio 21.1 catalog, CLI + sidecar, playbook, render, failure modes; `PROVENANCE.md` beside it).
+  Scrubbed by the evidence repo's script plus a supplemental pass for the editor's account, the
+  private video-pipeline repo, the dev and cloud drive paths and a tailnet address; the identity lint
+  passes. The unredacted originals stay in the operator's `~/.claude/skills`.
+>>>>>>> origin/main
 
 ## [0.129.0] - 2026-09-18 - a contract can name the layer it runs on (the Lenovo fast digest seat by name); the digest-adr-hard-8 contract set
 

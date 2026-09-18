@@ -64,7 +64,7 @@ Options that matter: `fontfile` (mandatory on this build), `text` | `textfile`, 
 
 Lower third that works (Git Bash shown; PowerShell/cmd identical string in double quotes):
 ```
--vf "drawtext=fontfile='C\:/Windows/Fonts/arialbd.ttf':text='Jane Doe':fontsize=56:fontcolor=white:box=1:boxcolor=black@0.6:boxborderw=16:x=80:y=h-200:enable='between(t,1,3)'"
+-vf "drawtext=fontfile='C\:/Windows/Fonts/arialbd.ttf':text='the operator Martinez':fontsize=56:fontcolor=white:box=1:boxcolor=black@0.6:boxborderw=16:x=80:y=h-200:enable='between(t,1,3)'"
 ```
 (In bash the `\:` needs to reach ffmpeg as one backslash: inside double quotes write `C\\:` or,
 simpler, put the whole `-vf` argument in **single** quotes.)
@@ -94,7 +94,7 @@ expansion; on 8.1.2 Windows it is not — measured, so tagged as a build quirk t
 - `fontfile='C:/…'` — quoted but colon NOT escaped → parse error ("No option name near '/Windows/…'"). Quoting alone does not save you; the `:` is the option separator.
 - **A drive-less path is resolved against the CURRENT DRIVE, not C:.** `fontfile=/Windows/Fonts/arial.ttf` draws fine from a cwd on C: and **segfaults** from a cwd on any drive without `\Windows\Fonts` — measured both ways on the editing rig, whose `TEMP` is `D:\Temp`, so a script's default cwd is on D:. Never ship this form; a pipeline's cwd is not yours to assume.
 - `font=Arial` / no font option, and any unparsable fontfile path, fall back to fontconfig → `Fontconfig error: Cannot load default config file` then **segfault** (0xC0000005 / exit −1073741819 / 139). These Gyan builds carry no fontconfig config on either host. libass (`subtitles=`/`ass=`) is unaffected — it uses DirectWrite.
-- Brand fonts: point `fontfile=` at the .ttf directly (no install), e.g. `<brand fonts dir>\LeagueGothic-Regular.ttf` on the editing rig, written as `'D\:/Editing/Assets/Fonts/LeagueGothic-Regular.ttf'`.
+- Brand fonts: point `fontfile=` at the .ttf directly (no install), e.g. `D:\Editing\Assets\Fonts\LeagueGothic-Regular.ttf` on the editing rig, written as `'D\:/Editing/Assets/Fonts/LeagueGothic-Regular.ttf'`.
 
 ## Overlays with alpha [measured]
 PNG with alpha (logo/watermark), top-right with 40 px margin, last 3 s only:
