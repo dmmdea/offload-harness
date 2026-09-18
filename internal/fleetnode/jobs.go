@@ -188,14 +188,6 @@ type Jobs struct {
 	// onFinish, when set, is called (outside the lock) each time a job reaches a
 	// terminal state — the store steward counts turns with it (0.113.16).
 	onFinish func()
-	// onAgentDone, when set, is called (outside the lock) each time an AGENT
-	// job reaches a terminal state through finish, with ok = it finished
-	// without an error. The server feeds its cached seat state with it
-	// (0.128.2): a success proves the seat is loaded; an error proves nothing
-	// either way (a contract that ran and hit its wall and one the seat never
-	// answered both come back as errors). Drain's verdicts (ErrInterrupted /
-	// ErrNeverStarted) are written directly and never fire it.
-	onAgentDone func(ok bool)
 
 	// served is the tenant round-robin state (0.113.18): tenant → the claim
 	// sequence number at which that tenant was LAST handed a slot. claimLocked
@@ -215,15 +207,6 @@ type Jobs struct {
 func (j *Jobs) OnFinish(fn func()) {
 	j.mu.Lock()
 	j.onFinish = fn
-	j.mu.Unlock()
-}
-
-// OnAgentDone registers fn to run after every agent job that finishes through
-// finish, with ok = no error. Same contract as OnFinish: called outside the
-// store's lock, must return quickly.
-func (j *Jobs) OnAgentDone(fn func(ok bool)) {
-	j.mu.Lock()
-	j.onAgentDone = fn
 	j.mu.Unlock()
 }
 
@@ -876,10 +859,6 @@ func (j *Jobs) finish(id string, data json.RawMessage, errStr string) {
 	jb.terminalAt = j.now()
 	jb.finishedAt = jb.terminalAt
 	fn := j.onFinish
-	var agentDone func(bool)
-	if jb.agent {
-		agentDone = j.onAgentDone
-	}
 	// The terminal transition IS the event a long poll waits on (WaitTerminal).
 	// execute() broadcasts too, but only for the slot it frees and only on the
 	// path that ran a closure — this one fires wherever a job turns terminal,
@@ -892,9 +871,6 @@ func (j *Jobs) finish(id string, data json.RawMessage, errStr string) {
 	// that and TestJobsOnFinishFiresOutsideTheLock hung for 600 s.
 	if fn != nil {
 		fn()
-	}
-	if agentDone != nil {
-		agentDone(errStr == "")
 	}
 }
 

@@ -515,7 +515,7 @@ new is sampled (register C-05 stands: probing an unloaded seat through llama-swa
 | Health field | Type | Meaning |
 |---|---|---|
 | `jobs_admitting` | int, omitted when 0 | The subset of `jobs_running` whose worker has **not started generating**: it is still in the run's admission phase — cordon → swap pre-flight → warm → coherence probe — which the node budgets up to 300 s for. Counted from this process's own `gpuactivity` records with `phase: "admission"` (ADR 0041), never from the job store, which knows a worker took the job but not what that worker is waiting for. The registry is opened at most once per 2 s and **retried** — a briefly unresolvable state root does not silence the field for the life of the process — and a registry that cannot be opened or listed is logged once, because `0` is a legitimate value and silence would make the two indistinguishable. |
-| `seat_loaded` | bool, omitted when unread | llama-swap's `/running` says the agent seat is loaded. Served from the 30 s residency cache; a read older than two windows, never taken, or invalidated by an agent job that finished with an error waits (bounded by `residencyWaitBound`, 1.5 s) for a fresh `/running` before answering; an agent job that finished without an error writes the loaded state straight into the cache (0.128.2, below). |
+| `seat_loaded` | bool, omitted when unread | llama-swap's `/running` says the agent seat is loaded. Served from the 30 s residency cache; a read older than two windows or never taken waits (bounded by `residencyWaitBound`, 1.5 s) for a fresh `/running` before answering; an agent contract that completed a call on this seat writes the loaded state straight into the cache (0.128.2, below). |
 | `seat_starting` | bool, omitted when unread | …and is still LOADING (llama-swap holds `/upstream/<seat>/…` for the whole load — 4m08s on the 27B TP2 seat, register D-92), so "loaded" is not yet "ready". |
 | `lease_exclusive` | bool, omitted when false | The held lease FENCES the cards: no model may be loaded onto them for its duration. |
 | `lease_draining` | bool, omitted when false | The held lease is still draining the seat. |
@@ -562,20 +562,23 @@ however long ago. The 0.128.1 slot census showed the cost: the delegator's eta c
 seat whose admission wait was 6 ms (`chosen eta 326 s (cold 28 + 298 gen)`), because the only health read
 between the smoke that warmed the seat and the census was the census's own, two minutes later, and it got
 the pre-smoke answer. Now a read inside one more window (30–60 s old) keeps that shape; a read older than
-that, one on a never-probed node, or one after an agent job finished WITH an error (`Jobs.OnAgentDone`,
-ok=false — the run closure returns an error both for a contract that ran and hit its wall and for one the
-seat never answered, so the node cannot assert either way) waits for the refresh it kicked, bounded by
-`residencyWaitBound` (1.5 s — sized for a responsive llama-swap, whose three refresh legs answer in
-milliseconds, and under every health client's budget: the accelerator router's 2 s, the fleet UI poller's
-5 s, the delegator's 15 s), and serves whatever is published when the wait ends — the previous answer if
-llama-swap is slow or hung, said once per refresh cycle on the node's log. An agent job that finished
-WITHOUT an error writes what it proves straight into the cache (loaded, not starting, resident, stamped
-now) and never forces a probe, so a busy node never pays the wait per job; a probe that started BEFORE
-such a write is discarded when it lands (an epoch the cache bumps on every outside write), so it can
-never re-publish the pre-job state as fresh. Pinned by `residency_stale_test.go`: fresh beyond the band,
-previous inside it, bounded and logged once on a hung `/running`, written by a finished job with no probe,
-invalidated by an errored one, no wait across back-to-back finishes on a slow `/running`, and an in-flight
-probe discarded behind a finished job.
+that, or one on a never-probed node, waits for the refresh it kicked, bounded by `residencyWaitBound`
+(1.5 s — sized for a responsive llama-swap, whose three refresh legs answer in milliseconds, and under every
+health client's budget: the accelerator router's 2 s, the fleet UI poller's 5 s, the delegator's 15 s), and
+serves whatever is published when the wait ends — the previous answer if llama-swap is slow or hung, said
+once per refresh cycle on the node's log. Separately, the dispatch path reads the one fact a finished agent
+contract proves about the advertised seat — `steps > 0` on a result whose `seat` IS `agent_seat`, i.e. at
+least one completed call on it — and writes `seat_loaded:true` / `seat_starting:false` straight into the
+cache, no probe. Nothing else counts: a defer that never reached the seat (roster-unserved, config,
+contract, a composite guard) finishes as a SUCCESS-shaped job with zero steps (`agenttask`'s `OK` is true
+for every terminal outcome, defers included) and proves nothing; a job error proves nothing either way; a
+contract that ran on another layer's seat proves nothing about this one. That write never touches
+`agent_seat_resident` (roster-verified, always) or the cache's age, so the roster keeps refreshing on its
+own 30 s cadence under sustained traffic; a probe that STARTED before the write keeps the job's seat facts
+when it lands and still publishes its roster facts. Pinned by `residency_stale_test.go`: fresh beyond the
+band, previous inside it, bounded and logged once on a hung `/running`, a completed call written with no
+probe while a zero-step defer and a foreign-seat result write nothing, no wait across back-to-back finishes
+on a slow `/running`, and an in-flight probe keeping the job's seat facts.
 
 **`GET /fleet/jobs/{id}?wait=<seconds>` is a completion event.** An already-terminal job answers at
 once; anything else blocks on the job store's terminal broadcast — which the store has fired all
