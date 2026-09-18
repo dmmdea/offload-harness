@@ -6,6 +6,12 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **A margin escalation is now written to the ledger** (register D-127): the confidence gate's defer returned before
+  `p.record`, so the escalating attempt — a call the seat answered — left no row of its own; `esc_source` counted 4 rows
+  in 9,217 for 43 real firings that lived only in the labels sidecar. The escalating attempt records its row (its tier,
+  its margin, the gate that fired, not deferred) before the defer, under the same `record` gate as a success. Red test
+  `TestMarginEscalationRecordsTheEscalatingAttempt`.
 ## [0.129.0] - 2026-09-18 - a contract can name the layer it runs on (the Lenovo fast digest seat by name); the digest-adr-hard-8 contract set
 
 ### Added
