@@ -6,6 +6,8 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.128.2] - 2026-09-17 - the node's residency cache no longer serves the pre-last-job seat state: a too-stale read waits for the probe, a completed call on the seat writes seat_loaded from both doors
+
 ### Fixed
 - **A node's health served the seat state from before its last job, however long ago** (found by the
   0.128.1 slot census: the delegator's eta charged `cold 28` for a seat whose admission wait was 6 ms). The
