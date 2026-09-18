@@ -6,6 +6,17 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.129.1] - 2026-09-18 - fs_native bindings publish `reachable` from the seat wrapper's own verdict file
+
+### Added
+- **`kv_cache_server[].status_file` (register B-29).** An `fs_native` store is a mounted path with no port to dial, so
+  `offload_status` published `reachable: null, "not validated end to end in this release"` for every such binding since
+  0.113. The seat wrapper already decides the fact at every seat start (mount + 64 MiB write probe) and writes
+  `$WORK/seat-l2.status`; a binding that declares that file (host-visible `//wsl.localhost/<distro>/…` on a WSL2 seat)
+  now reads it: `ok` → `reachable: true`, `degraded` → `reachable: false` + `reachable_error`, unreadable → `null` with
+  a note, undeclared → `null` with the instruction. `status_line` and `status_age_s` ride along.
+  `TestStatusReadsFSNativeReachabilityFromTheSeatStatusFile`.
+
 ### Changed
 - **`skill/` tool reference libraries refreshed from the operator's current copies and DaVinci Resolve added** (register J-22):
   `skill/ffmpeg` (12 files were a week behind: ffmpeg 9.0 traps, NVENC, subtitles, quoting, failure modes),
