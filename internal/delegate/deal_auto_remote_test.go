@@ -226,7 +226,7 @@ func TestPlaceAutoRemoteCapacityWaitNamesEachNodesHeadroom(t *testing.T) {
 	if !slot.capacityWait {
 		t.Fatalf("slot = %+v, want capacityWait", slot)
 	}
-	for _, want := range []string{"node-a: cap (4/4 running, 0 headroom)", "node-b: cap (4/4 running, 0 headroom)"} {
+	for _, want := range []string{"node-a: cap (4/4 running, headroom 0, dealt 0)", "node-b: cap (4/4 running, headroom 0, dealt 0)"} {
 		if !strings.Contains(slot.reason, want) {
 			t.Errorf("capacityWait reason = %q, want it to contain %q", slot.reason, want)
 		}

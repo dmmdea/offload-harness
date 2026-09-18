@@ -28,8 +28,10 @@
 //	           ceiling
 //	queue      saturated(): the node's own admission ceiling says the next
 //	           dispatch is refused right now
-//	cap        W-06: headroom is 0 — this DEAL has already committed as many
-//	           subtasks to it as max_concurrent_jobs − jobs_running allows
+//	cap        W-06: this DEAL has already committed as many subtasks to the
+//	           node as its headroom (max_concurrent_jobs − jobs_running)
+//	           allows — printed as "cap (running/max running, headroom N,
+//	           dealt N)"
 //	cold       eligible, has headroom, not saturated — simply outranked by a
 //	           better candidate (W-11's ranking), named "cold" because the
 //	           overwhelmingly common reason one otherwise-adequate seat loses
@@ -73,11 +75,7 @@ func oneWordVerdict(st Subtask, v NodeView, base, chosenBase string, dealtSoFar 
 		return "queue (saturation.high)"
 	}
 	if headroom(v) <= dealtSoFar {
-		left := headroom(v) - dealtSoFar
-		if left < 0 {
-			left = 0
-		}
-		return fmt.Sprintf("cap (%d/%d running, %d headroom)", v.JobsRunning, v.MaxConcurrentJobs, left)
+		return fmt.Sprintf("cap (%d/%d running, headroom %d, dealt %d)", v.JobsRunning, v.MaxConcurrentJobs, headroom(v), dealtSoFar)
 	}
 	return "cold (outranked)"
 }
