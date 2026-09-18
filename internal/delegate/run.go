@@ -31,6 +31,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/dmmdea/offload-harness/internal/modelaffinity"
 	"io"
 	"log"
 	"maps"
@@ -3188,8 +3189,15 @@ func (r *runner) runLocal(ctx context.Context, jobID string, contract core.Agent
 		pr.Seat = dec.Seat
 	}
 	// A local placement starts the moment it is handed to the runner: no
-	// queue, no ack. "" as the node = this box's PAIR identity.
-	r.pairInflight(&pr, jobID, "", pr.Seat, "running")
+	// queue, no ack. "" as the node = this box's PAIR identity — unless the
+	// endpoint is another box's engine, whose name the card then carries
+	// (register C-58: PAIR showed the Qube doing the Lenovo's work).
+	pairNode := ""
+	if host := modelaffinity.EndpointHost(r.cfg.Endpoint); host != "" {
+		pairNode = host
+		pr.PlacementReason += "; engine " + r.cfg.Endpoint + " is " + host + "'s (attributed there)"
+	}
+	r.pairInflight(&pr, jobID, pairNode, pr.Seat, "running")
 	wire, err := r.local(ctx, contract, opts)
 	if err != nil {
 		pr.Err = "local run: " + err.Error()
@@ -4508,6 +4516,13 @@ func contractIneligible(st Subtask, lanes, advertisedTooSmall, roomiest, unadver
 // OS hostname, so a shared config never bakes one box's name into another's
 // results.
 func (r *runner) localNodeID() string {
+	// A "local" run against another box's engine (a bench config whose
+	// endpoint is the Lenovo's arm) is that box's work: name the node after
+	// the endpoint host, as a remote placement is named after its base
+	// (register C-58: PAIR showed the Qube doing the Lenovo's work).
+	if host := modelaffinity.EndpointHost(r.cfg.Endpoint); host != "" {
+		return host
+	}
 	if r.cfg.FleetNodeID != "" {
 		return r.cfg.FleetNodeID
 	}
