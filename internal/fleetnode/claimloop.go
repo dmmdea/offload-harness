@@ -117,6 +117,15 @@ func (s *Server) claimOne(ctx context.Context, client *http.Client, holder, node
 	run := func(rctx context.Context) (json.RawMessage, error) {
 		defer cleanup()
 		res := s.runner.Run(rctx, breq)
+		if job.TaskType == string(core.TaskAgentRun) && res.OK {
+			// The same seat-proof write the push door makes (server.go's
+			// dispatch run closure): a pulled contract that completed a call
+			// on the advertised seat feeds the residency cache too. The two
+			// doors hand-write this sequence independently — a write landed
+			// on one alone is the drift class the register's "agent doors"
+			// entry records.
+			s.noteAgentResult(res.Data)
+		}
 		if !res.OK {
 			s.settle(ctx, client, holder, cfg, "ack", job.ID, nodeID, nil, res.Reason)
 			return nil, fmt.Errorf("%s", res.Reason)

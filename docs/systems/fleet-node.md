@@ -515,7 +515,7 @@ new is sampled (register C-05 stands: probing an unloaded seat through llama-swa
 | Health field | Type | Meaning |
 |---|---|---|
 | `jobs_admitting` | int, omitted when 0 | The subset of `jobs_running` whose worker has **not started generating**: it is still in the run's admission phase — cordon → swap pre-flight → warm → coherence probe — which the node budgets up to 300 s for. Counted from this process's own `gpuactivity` records with `phase: "admission"` (ADR 0041), never from the job store, which knows a worker took the job but not what that worker is waiting for. The registry is opened at most once per 2 s and **retried** — a briefly unresolvable state root does not silence the field for the life of the process — and a registry that cannot be opened or listed is logged once, because `0` is a legitimate value and silence would make the two indistinguishable. |
-| `seat_loaded` | bool, omitted when unread | llama-swap's `/running` says the agent seat is loaded. |
+| `seat_loaded` | bool, omitted when unread | llama-swap's `/running` says the agent seat is loaded. Served from the 30 s residency cache; a read older than two windows or never taken waits (bounded by `residencyWaitBound`, 1.5 s) for a fresh `/running` before answering; an agent contract that completed a call on this seat writes the loaded state straight into the cache (0.128.2, below). |
 | `seat_starting` | bool, omitted when unread | …and is still LOADING (llama-swap holds `/upstream/<seat>/…` for the whole load — 4m08s on the 27B TP2 seat, register D-92), so "loaded" is not yet "ready". |
 | `lease_exclusive` | bool, omitted when false | The held lease FENCES the cards: no model may be loaded onto them for its duration. |
 | `lease_draining` | bool, omitted when false | The held lease is still draining the seat. |
@@ -553,6 +553,38 @@ seat is not loaded either and no alias resolution is needed to say so, and healt
 `seat_loaded:false`. Only the unknowable case is withheld: absent ≠ idle, the same rule the VRAM
 snapshot and the reclaim verdict follow, with the reason on the node's log so an operator is not left
 guessing at two missing keys.
+
+**The residency cache is stale-while-revalidate with a bound (0.128.2).** The residency refresh
+(`agent_seat_resident`, `served_models`, `seat_loaded`/`seat_starting`) runs at most once per 30 s window,
+and a health read past that window used to serve the previous answer unconditionally while refreshing
+behind it — so the FIRST read after any quiet period reported the seat as it was before the last job,
+however long ago. The 0.128.1 slot census showed the cost: the delegator's eta charged `cold 28` for a
+seat whose admission wait was 6 ms (`chosen eta 326 s (cold 28 + 298 gen)`), because the only health read
+between the smoke that warmed the seat and the census was the census's own, two minutes later, and it got
+the pre-smoke answer. Now a read inside one more window (30–60 s old) keeps that shape; a read older than
+that, or one on a never-probed node, waits for the refresh it kicked, bounded by `residencyWaitBound`
+(1.5 s — sized for a responsive llama-swap, whose three refresh legs answer in milliseconds, and under every
+health client's budget: the accelerator router's 2 s, the fleet UI poller's 5 s, the delegator's 15 s), and
+serves whatever is published when the wait ends — the previous answer if llama-swap is slow or hung, said
+once per refresh cycle on the node's log. Separately, the dispatch path reads the one fact a finished agent
+contract proves about the advertised seat — `steps > 0` on a result whose `seat` IS `agent_seat`, i.e. at
+least one completed call on it — and writes `seat_loaded:true` / `seat_starting:false` straight into the
+cache, no probe. Nothing else counts: a defer that never reached the seat (roster-unserved, config,
+contract, a composite guard) finishes as a SUCCESS-shaped job with zero steps (`agenttask`'s `OK` is true
+for every terminal outcome, defers included) and proves nothing; a job error proves nothing either way; a
+contract that ran on another layer's seat proves nothing about this one. That write never touches
+`agent_seat_resident` (roster-verified, always) or the cache's age, so the roster keeps refreshing on its
+own 30 s cadence under sustained traffic; a probe that STARTED before the write keeps the job's seat facts
+when it lands and still publishes its roster facts. Pinned by `residency_stale_test.go`: fresh beyond the
+band, previous inside it, bounded and logged once on a hung `/running`, a completed call written with no
+probe while a zero-step defer and a foreign-seat result write nothing, no wait across back-to-back finishes
+on a slow `/running`, an in-flight probe keeping the job's seat facts, and the pull-queue door writing it
+too. Both doors write it — the push dispatch (`handleDispatch`'s run closure) and the pull-queue claim loop
+(`claimOne`'s) — because each hand-writes its own run sequence and a write landed on one alone is the
+drift class the register's "agent doors" entry records. On a composite node only the default layer's seat
+(`agent_seat`) has this fast path; another layer's seat is written by no job and read by the probe alone. A
+result that cannot be decoded for the write is logged once per process (it is this node's own producer, so
+that is a wire-shape drift, not a normal outcome) and the cache falls back to `/running` only.
 
 **`GET /fleet/jobs/{id}?wait=<seconds>` is a completion event.** An already-terminal job answers at
 once; anything else blocks on the job store's terminal broadcast — which the store has fired all
@@ -1055,11 +1087,13 @@ resolves, AND the listener posture is one dispatch will accept:
 | `agent_enabled` | The operator opted this node into the lane. |
 | `agent_seat` | The resolved planner seat (`agent_model`, else the workhorse). |
 | `agent_ctx_tokens` | The seat's serving ceiling, **from config** (`agent_ctx_tokens`) — never probed on the health cadence, because the live-window probe can cold-start a multi-GB model. `0` = omitted = "ceiling unknown", which the delegator's gate reads as never-fits. |
-| `agent_seat_resident` | Roster-**verified**: a cached probe of llama-swap's `/v1/models` (alias-aware) saw the seat. The cache refreshes in the background at most once per 30 s; the handler never blocks on llama-swap. |
+| `agent_seat_resident` | Roster-**verified**: a cached probe of llama-swap's `/v1/models` (alias-aware) saw the seat. The cache refreshes in the background at most once per 30 s; the handler blocks on llama-swap only for a too-stale, never-probed or invalidated cache, and then for at most `residencyWaitBound` (1.5 s) — see the seat-state section above (0.128.2). |
 | `served_models` (0.113.0) | The same cached probe's full roster name list — **canonical ids AND every alias** (`swapclient.Roster.Names`, not `IDs` alone) — omitted/empty on a cold cache or a failed fetch (unknown, never a stale list). `internal/delegate/gate.go`'s `seatServed` uses this to check the roster actually names `agent_seat`, a stronger check than `agent_seat_resident` alone: a node can be roster-resident under one alias while its `served_models` list shows a different one after a rename. Publishing aliases too matters because an agent seat is normally bound BY alias (`agent-pool` -> `qwen3.8-27b-vllm`, `offload-e4b` -> `gemma-4-e4b`); an id-only list would have made a correctly-served alias seat read as unserved. A pre-0.113.0 node/delegator pairing is unaffected: an unpublished (empty/absent) `served_models` reads as UNKNOWN, never a refusal. |
 | `tiers` / `layers` (0.123.2, composite only) | What this node IS (every tier it is a complete instance of) and what it can PLACE ON: one row per device layer with the declared seats, each seat's `served` flag from the same cached roster, and the node's own `admissible`/`reason` verdict from its guards. Absent on a plain node; built from cached reads only, so health still never probes. See [composite-tier.md](composite-tier.md). |
 
-Residency **fails closed** twice over: until the first probe lands the answer is `false`, and a
+Residency **fails closed** twice over: until the first probe lands the answer is `false` (since
+0.128.2 the first read WAITS for that probe, bounded, so on a responsive box it is already `true`;
+`false` is what a probe that misses the bound leaves behind), and a
 probe *failure* publishes `false` rather than keeping the last good answer — advertising a seat
 off a stale success while llama-swap is down would route agent work at a node that cannot run
 it, whereas `false` only costs a conservative local placement. The failure is still cached for

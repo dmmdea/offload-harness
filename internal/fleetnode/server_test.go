@@ -1002,10 +1002,11 @@ func waitForResidencyProbe(t *testing.T, s *Server) {
 // TestHealthAgentFieldsPresentWhenEnabled drives the §S3 agent advertisement
 // end to end THROUGH THE HEALTH HANDLER, never by calling the refresh: with
 // fleet_agent_enabled the payload carries agent_enabled/agent_seat/
-// agent_ctx_tokens immediately, while agent_seat_resident starts ABSENT
-// (false) — the cache is cold and the handler must NEVER block on a llama-swap
-// round-trip (same rule as the reclaim tracker) — and turns true once the
-// BACKGROUND probe the first GET kicked off lands. The roster hit count pins
+// agent_ctx_tokens immediately, and since 0.128.2 agent_seat_resident is
+// TRUE on that very first GET: a never-probed cache makes the read wait
+// (bounded by residencyWaitBound) for the probe it kicks — the fail-closed
+// absent field survives only when the probe does not land inside the bound
+// (TestHealthBoundsItsWaitOnAHungSeatRead). The roster hit count pins
 // the other half of the cache contract: one refresh cycle, single-flighted,
 // reused by every request inside the TTL — TWO roster GETs per cycle
 // (rosterServes for residency, rosterServedModels for served_models; see the rosterServedModels
@@ -1035,8 +1036,13 @@ func TestHealthAgentFieldsPresentWhenEnabled(t *testing.T) {
 	if m["agent_ctx_tokens"] != float64(16384) {
 		t.Fatalf("agent_ctx_tokens = %v, want 16384", m["agent_ctx_tokens"])
 	}
-	if v, present := m["agent_seat_resident"]; present {
-		t.Fatalf("agent_seat_resident = %v on the FIRST health (cache cold) — must fail closed until the probe lands, never block the handler", v)
+	// Since 0.128.2 a never-probed node's first read WAITS for the probe it
+	// kicks (bounded by residencyWaitBound) and answers with the probe's
+	// verdict; the fail-closed shape (field absent) survives only when the
+	// probe does not land inside the bound — pinned by
+	// TestHealthBoundsItsWaitOnAHungSeatRead, not here.
+	if m["agent_seat_resident"] != true {
+		t.Fatalf("agent_seat_resident = %v on the FIRST health of a never-probed node, want true: the read waits for the probe it kicks instead of serving an unread answer", m["agent_seat_resident"])
 	}
 	if n := probes.Load(); n > 3 {
 		t.Fatalf("roster probes after ONE health request = %d, want at most 3 (rosterServes + rosterServedModels + the seat-state read's alias resolution)", n)
