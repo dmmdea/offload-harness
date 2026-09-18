@@ -6,6 +6,12 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- Post-#369 cleanup: dropped the now-dead `leaseFences` helper (its logic lives on in
+  `leaseFenceReason`, the only caller `eligibilityVerdict` ever used), fixed the `cap` placement
+  verdict to print real `headroom`/`dealt` numbers instead of an always-zero subtraction, and
+  renamed a `RunWith`-local `busyReading` that shadowed the `local LocalRunner` parameter.
+
 ## [0.128.0] - 2026-09-17 - placement by expected completion: feasibility from the fitted final, quality-adequate seats ranked by ETA with power-of-two-choices, per-node headroom in the deal, busy means a job in flight, one-word verdicts per node
 
 ### Added
