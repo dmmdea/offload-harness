@@ -1,9 +1,10 @@
-// feasibility_test.go: W-05 (PR-5 item 4, register S-03/S-05) — a seat whose
-// FITTED final cannot clear seatrate.FinalBudgetFloor within its own
-// effective wall is refused, naming the arithmetic. This is deliberately NOT
-// the seat's published min_turn_sec (its max-final worst case): the INV-5
-// rider forbids gating on that, only on a floor derived from the contract's
-// own fitted final at the seat's measured rate.
+// feasibility_test.go: W-05 (PR-5 item 4, register S-03/S-05) — a seat that
+// cannot produce one tool step and a minimal (64-token) answer within the
+// contract's own effective wall is refused, naming the arithmetic. This is
+// deliberately NOT the seat's published min_turn_sec (its max-final worst
+// case), and since 0.128.1 not a fit of the configured final against
+// seatrate.FinalBudgetFloor either: the INV-5 rider permits a refusal only
+// "below a minimum viable final"; everything above that is etaFor's ranking.
 
 package delegate
 
@@ -16,8 +17,8 @@ import (
 )
 
 // lenovoShapedSlow is the Lenovo GSQ 27B shape from the diagnosis: 5.4 tok/s,
-// 69 s cold, not currently loaded — the seat that a 300 s explicit wall
-// cannot hold even the floor of a final answer on.
+// 69 s cold, not currently loaded — a seat that holds one step and a minimal
+// answer in a 300 s wall (a ranking matter) but not in a 20 s one (refused).
 func lenovoShapedSlow() NodeView {
 	v := eligibleRemote()
 	loaded := false
@@ -119,10 +120,10 @@ func TestEtaForNeverExceedsColdPlusWall(t *testing.T) {
 
 func TestFeasibleFinalEligibleUnderTimeoutAuto(t *testing.T) {
 	v := lenovoShapedSlow()
-	// The SAME node: only the wall changes, from a tight explicit 300 s to an
-	// auto wall the node's own slow rate sizes generously (clamped to the
-	// wire cap, up to 900 s) — enough room for the fitted final to clear the
-	// floor.
+	// The SAME node under a timeout_auto contract: the wall is sized by the
+	// node's own slow rate (clamped to the wire cap, up to 900 s), and the
+	// feasibility floor reads THAT wall — one step and a minimal answer fit
+	// with room to spare.
 	st := oneStepSchemaContract(0, true)
 	ok, reason := feasibleFinal(st, v)
 	if !ok {

@@ -2,8 +2,8 @@
 // the INV-5 rider's clause (ii)): "an ordering key among seats that have
 // already passed the capability/adequacy gate, with power-of-two-choices
 // among near-ties so independent dispatchers do not herd." It never widens
-// who is eligible — that is remoteEligible/feasibleFinal's job (W-05,
-// fit.go). It only orders the survivors.
+// who is eligible — that is gate.go's eligibilityVerdict, which calls
+// feasibleFinal below (W-05). It only orders the survivors.
 
 package delegate
 
@@ -15,50 +15,51 @@ import (
 	"github.com/dmmdea/offload-harness/internal/seatrate"
 )
 
-// feasibleFinal reports whether v can hold a VIABLE final answer for st
-// within its own effective wall (W-05, register S-03/S-05 — the INV-5
-// rider's clause (i): "a feasibility floor computed from the contract's
-// FITTED final at the seat's published rate — never the seat's max-final
-// min_turn_sec — applied ... as a refusal only below a minimum viable final,
-// naming the arithmetic").
-//
-// ok=true, reason="" — NO OPINION — when the rate is unknown (nil SeatRate,
-// or zero tok_s/samples) or the contract's wall cannot be sized at all: the
-// house rule every other capacity field in this package follows ("unknown is
-// never credited", but also never PENALISED — see AgentCtxTokens==0). ok=true
-// also when the fitted final comfortably holds the configured budget.
-//
-// ok=false with reason naming the arithmetic ("fitted final 312 < floor 1024
-// at 5.4 tok/s in 300 s wall, cold 69 s") when the wall the contract would
-// actually run under — TimeoutSec as given, or seatrate.AutoWallFor's sizing
-// for a timeout_auto contract, exactly as autoPollBound computes it — cannot
-// buy even seatrate.FinalBudgetFloor tokens for the final answer (and its
-// structured re-pack, when the contract carries a schema) at the seat's
-// measured rate. This is a FITTED-final floor, not the seat's published
-// min_turn_sec (its max-final worst case) — the rider forbids gating on that.
-//
-// A composite node's published seat_rate describes its single advertised
-// agent seat, not necessarily whatever layer remoteDecision would dispatch
-// to; this reads it anyway (same imprecision autoPollBound already accepts
-// for the poll bound) rather than inventing a second rate source.
 // minimalFinalTokens is the smallest answer a contract can be said to have:
 // the feasibility floor asks only whether the wall holds one tool step and
 // this many tokens of final at the seat's rate.
 const minimalFinalTokens = 64
 
+// feasibleFinal reports whether v can produce ANY answer for st inside the
+// contract's own effective wall (W-05, register S-03/S-05 — the INV-5
+// rider's clause (i): a wall-time term enters a seat decision "as a refusal
+// only below a minimum viable final, naming the arithmetic"). The question
+// is the smallest one that still means something: one tool step (the read of
+// the context document) plus a minimalFinalTokens-token final at the seat's
+// measured rate — no think block, no structured re-pack, and NO cold load,
+// because admission pays the cold load OUTSIDE the wall (D-64 warms the seat
+// on the admission budget), so a wall shorter than the load is not
+// infeasible. Everything above that floor — how much of the configured final
+// the wall actually buys, the cold load, the queue wait — is a RANKING
+// matter for etaFor, never a refusal.
+//
+// ok=true, reason="" — NO OPINION — when the rate is unknown (nil SeatRate,
+// or zero tok_s/samples) or the contract's wall cannot be sized at all: the
+// house rule every other capacity field in this package follows ("unknown is
+// never credited", but also never PENALISED — see AgentCtxTokens==0).
+//
+// ok=false with reason naming the arithmetic ("one step and a 64-token
+// answer need 42 s at 5.4 tok/s, the wall is 20 s") when the wall the
+// contract would actually run under — TimeoutSec as given, or
+// seatrate.AutoWallFor's sizing for a timeout_auto contract, exactly as
+// autoPollBound computes it — cannot hold even that. This is never the
+// seat's published min_turn_sec (its max-final worst case), which the rider
+// forbids gating on, and since 0.128.1 it is no longer a fit of the
+// configured final against seatrate.FinalBudgetFloor either: 0.128.0 shipped
+// that rule and it refused a cold Aorus a 60 s contract the seat completes
+// in ~25 s ("fitted final 0 < floor 1024").
+//
+// A composite node's published seat_rate describes its single advertised
+// agent seat, not necessarily whatever layer remoteDecision would dispatch
+// to; this reads it anyway (same imprecision autoPollBound already accepts
+// for the poll bound) rather than inventing a second rate source.
 func feasibleFinal(st Subtask, v NodeView) (ok bool, reason string) {
 	policy, in, wallSec, known := seatWallFor(st, v)
 	if !known || wallSec <= 0 {
 		return true, ""
 	}
-	// The refusal is the INV-5 rider's "below a minimum viable final" and nothing
-	// more: can this seat produce ANY answer inside the wall? One tool step (the
-	// read of the context doc) plus a minimal final, no think block, no re-pack,
-	// and NO cold load — admission pays the cold load OUTSIDE the wall (D-64 warm
-	// on the admission budget), so a wall shorter than the load is not infeasible.
-	// Everything above this floor is a RANKING matter for etaFor. (0.128.0 shipped
-	// the fit-to-floor rule here and excluded a cold Aorus from a 60 s smoke
-	// contract it completes in ~25 s; the fitted final belongs to the eta only.)
+	// One tool step plus a minimal final, no think block, no re-pack, no cold
+	// load — the doc comment above says why each of those stays out.
 	min := in
 	min.ColdLoadSec = 0
 	min.MaxSteps = 2 // one tool step, then the final

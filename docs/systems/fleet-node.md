@@ -707,7 +707,7 @@ tokenless) is not a hole: the auth guard `403`s it before `BuildRequest` runs at
 
 | route | placement |
 |---|---|
-| `auto` (default) | `gate.Place`: an idle local seat always wins; remotes are considered only while the local seat is busy — since PR-5 (W-01) that reading is `probeLocalBusy`'s own in-flight count at or past `FleetConcurrencyLimit()`, or a load in progress, OR'd with the GPU lease, read ONCE per Run — and only the ones passing the hard gate (agent lane on, seat resident, contract fits the advertised ctx, output_schema present, origin hop, and — PR-5's W-05 — the seat's FITTED final clears the floor within its own effective wall). No eligible remote → queued-local. See "Expected-completion ranking and the joint deal" below for how `auto`/`remote` now place a WHOLE Run's subtasks in one pass. |
+| `auto` (default) | `gate.Place`: an idle local seat always wins; remotes are considered only while the local seat is busy — since PR-5 (W-01) that reading is `probeLocalBusy`'s own in-flight count at or past `FleetConcurrencyLimit()`, or a load in progress, OR'd with the GPU lease, read ONCE per Run — and only the ones passing the hard gate (agent lane on, seat resident, contract fits the advertised ctx, output_schema present, origin hop, and — PR-5's W-05, as corrected in 0.128.1 — the seat can produce one tool step and a minimal answer inside the contract's own effective wall). No eligible remote → queued-local. See "Expected-completion ranking and the joint deal" below for how `auto`/`remote` now place a WHOLE Run's subtasks in one pass. |
 | `spread` (0.80.0, fit-scored 0.99.0) | one `Run` fetches every remote's health ONCE, then deals the subtasks across the local seat AND every remote that passes the hard gate for that subtask. The deal is computed for the WHOLE run in one pass before dispatch, and within each cycle of `len(nodes)` slots every eligible seat takes at most one subtask — so an N-contract fan-out genuinely runs on N seats at the same time, and the fit score can reorder a cycle but never collapse it (see "Fit-scored remote slots" below). The local rotation slot is never contested by shape: with the local seat IDLE, slot 0 is always the local seat (pinned by `TestDealSpreadKeepsSubtaskZeroLocal`, `TestDealSpreadSameShapedFanOutReachesEverySeat` and `TestRunSpreadDealsAcrossLocalAndEveryEligibleRemote`) and a 2-contract spread with an eligible remote is still guaranteed one local + one remote — the pair shape. It IS contested by load (0.113.20, `agent_spread_local_slot`): a local seat already holding a request at deal time loses its slots to the best-fit eligible remote with room — see "The local slot under load" below. Per-subtask eligibility means a contract failing the gate (no `output_schema`, over-size) silently takes the local slot instead; `results[].placement` names where each landed and, for a remote, which shape the fit score read. Measured before spread existed: `auto` put four concurrent contracts on one box, `remote` put four on the other one. No eligible remote → every subtask runs local and the reason says so. |
 | `local` | forced in-process, no network. |
 | `remote` | forced fleet node; with no eligible remote the subtask DEFERS loudly. |
@@ -771,18 +771,25 @@ survivors are RANKED and how many of one Run's subtasks one node can take.
   them is at headroom right now — routed to the existing `awaitCapacity`, which watches for room to free exactly
   as it already does for a 503 or a held lease); or `noRemote` (nothing in the fleet could ever take it —
   unrelated to headroom, the pre-PR-5 "no eligible remote" outcome, unchanged).
-- **A feasibility floor from the FITTED final, never the seat's worst case (W-05, register S-03/S-05).** A seat
-  whose published `seat_rate` implies it cannot clear `seatrate.FinalBudgetFloor` tokens for the final answer
-  (and its structured re-pack, when the contract carries a schema) within its own EFFECTIVE wall —
-  `timeout_sec` as given, or `seatrate.AutoWallFor`'s own sizing for a `timeout_auto` contract — is excluded,
-  naming the arithmetic ("fitted final 312 < floor 1024 at 5.4 tok/s in 300 s wall, cold 69 s"). This is
-  deliberately NOT the seat's published `min_turn_sec` (its max-final worst case): the INV-5 rider permits a
-  wall-time term only as a feasibility floor on the contract's own fitted final, never a refusal built on a
-  number the contract does not need. An unpublished rate is no opinion — eligible, exactly as before.
+- **A feasibility floor that asks only for a minimum viable final, never the seat's worst case (W-05, register
+  S-03/S-05).** A seat whose published `seat_rate` implies it cannot produce one tool step plus a minimal
+  64-token final within the contract's own EFFECTIVE wall — `timeout_sec` as given, or `seatrate.AutoWallFor`'s
+  own sizing for a `timeout_auto` contract — is excluded, naming the arithmetic ("one step and a 64-token answer
+  need 42 s at 5.4 tok/s, the wall is 20 s"). No think block, no structured re-pack and NO cold load enter that
+  question: admission pays the cold load outside the wall (D-64 warms the seat on the admission budget), so a
+  wall shorter than the load is not infeasible. This is deliberately NOT the seat's published `min_turn_sec`
+  (its max-final worst case), and since 0.128.1 it is no longer a fit of the configured final against
+  `seatrate.FinalBudgetFloor` either: 0.128.0 shipped that rule and it refused a cold Aorus a 60 s smoke
+  contract the seat completes in ~25 s ("fitted final 0 < floor 1024") while printing a 4,682 s eta for the
+  Lenovo on the same wall. The INV-5 rider permits a wall-time term as a refusal only "below a minimum viable
+  final"; how much of the configured final the wall actually buys is the eta's business (next bullet). An
+  unpublished rate is no opinion — eligible, exactly as before.
 - **Expected-completion ranking among quality-adequate seats (W-11, register S-02).** Once a seat is past the
   hard gate, `betterRemote` orders survivors by an ETA — cold load (charged only when `seat_loaded` is KNOWN
   false; a load in progress counts half) plus the node's own queue wait plus the generation time for the
-  FITTED final at the seat's measured rate — with the axis depending on the contract's inferred shape exactly as
+  final FITTED to the whole wall (0.128.1: not the wall minus cold, since admission pays the load outside it) at
+  the seat's measured rate, capped at the wall so an eta never exceeds cold + queue + wall — with the axis
+  depending on the contract's inferred shape exactly as
   `spread`'s fit score already does: reasoning-shaped work still ranks the roomiest window first, eta only as
   its tie-break; mechanical work now ranks the fastest expected completion first (replacing the old
   "smallest adequate seat wins" rule), window as its tie-break. Two candidates whose etas are within 20 % of
@@ -799,7 +806,7 @@ survivors are RANKED and how many of one Run's subtasks one node can take.
   reservation over idle cards no longer routes work away from a node that could run it.
 - **`placement_reason` names every reachable remote with a one-word verdict (item 8, register D-105).** The
   resolved reason (`route=auto → node-a (headroom); node-a: chosen eta 41 s (cold 15 + 26 gen); node-b: slow
-  (fitted final 312 < 1024); node-c: cap (4/4 running, headroom 0, dealt 0)`) keeps the existing `route=remote`/`route=spread`
+  (one step and a 64-token answer need 646 s at 0.3 tok/s, the wall is 300 s); node-c: cap (4/4 running, headroom 0, dealt 0)`) keeps the existing `route=remote`/`route=spread`
   prefixes byte-identical (`fleet_smoke_cmd.go` parses them) and appends one clause per node from the vocabulary
   `chosen | queue | cap | slow | lease | cold | probe | unfit(ctx) | noschema`, in gate order.
 - **Long-poll and a courtesy Retry-After retry (item 7, register D-106).** The delegator's poll now sends

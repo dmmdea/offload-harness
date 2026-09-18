@@ -6,7 +6,12 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
-<<<<<<< HEAD
+### Changed
+- Post-#369 cleanup: dropped the now-dead `leaseFences` helper (its logic lives on in
+  `leaseFenceReason`, the only caller `eligibilityVerdict` ever used), fixed the `cap` placement
+  verdict to print real `headroom`/`dealt` numbers instead of an always-zero subtraction, and
+  renamed a `RunWith`-local `busyReading` that shadowed the `local LocalRunner` parameter.
+
 ### Fixed
 - **The feasibility floor refused seats that answer, and charged a cold load the wall never pays** (0.128.0 regression,
   found by the deploy smoke: a cold Aorus was refused a 60 s contract it completes in ~25 s — `fitted final 0 < floor 1024`
@@ -16,13 +21,6 @@ Versioning: [SemVer](https://semver.org/).
   outside the wall, D-64). Everything above that floor is a ranking matter: `etaFor` fits the final to the WALL (not the
   wall minus cold), keeps the cold load in the eta, and caps generation at the wall, so an eta never exceeds cold + wall.
   The forced-remote "no eligible remote" result now carries the deal's per-node verdict line beside the aggregate text.
-=======
-### Changed
-- Post-#369 cleanup: dropped the now-dead `leaseFences` helper (its logic lives on in
-  `leaseFenceReason`, the only caller `eligibilityVerdict` ever used), fixed the `cap` placement
-  verdict to print real `headroom`/`dealt` numbers instead of an always-zero subtraction, and
-  renamed a `RunWith`-local `busyReading` that shadowed the `local LocalRunner` parameter.
->>>>>>> origin/main
 
 ## [0.128.0] - 2026-09-17 - placement by expected completion: feasibility from the fitted final, quality-adequate seats ranked by ETA with power-of-two-choices, per-node headroom in the deal, busy means a job in flight, one-word verdicts per node
 

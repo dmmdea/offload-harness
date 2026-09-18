@@ -126,7 +126,7 @@ func TestOneWordVerdictAgreesWithTheGateOnSchemaAndDepth(t *testing.T) {
 	}
 	// Two remotes of very different rate/window — under the PRE-FIX order
 	// (feasibility/adequacy checked before schema), the slow one would read
-	// "slow (fitted final ...)" instead of "noschema", contradicting the
+	// "slow (one step and a 64-token answer ...)" instead of "noschema", contradicting the
 	// gate's own "no schema at all" refusal, which never even reaches
 	// feasibility.
 	fast := eligibleRemote()

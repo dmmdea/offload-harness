@@ -42,7 +42,7 @@ func mechanicalSchemaAutoContract() Subtask {
 
 // TestEtaForDoesNotDoubleCountAFittedRepack is the exact worked example from
 // the review: a 900 s auto wall on the Lenovo-shaped seat fits the final to
-// ~2019 tokens: the eta must stay AT OR UNDER the wall it was fitted to, not
+// ~2187 tokens: the eta must stay AT OR UNDER the wall it was fitted to, not
 // ~1960 s from charging the re-pack at its unfitted 8192-token size on top of
 // the fitted final.
 func TestEtaForDoesNotDoubleCountAFittedRepack(t *testing.T) {
@@ -50,7 +50,7 @@ func TestEtaForDoesNotDoubleCountAFittedRepack(t *testing.T) {
 	v := lenovoShapedGSQ()
 
 	// Confirm the fixture actually reaches the auto-wall cap (900 s) and a
-	// genuinely FLOORED-but-not-floored fit, matching the worked example —
+	// final genuinely NARROWED below its configured 8192, matching the worked example —
 	// otherwise this test would not exercise the bug at all.
 	policy, in, wallSec, known := seatWallFor(st, v)
 	if !known {
