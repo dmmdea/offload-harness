@@ -72,8 +72,10 @@ func EstimateTokens(c core.AgentContract) int { return placetable.EstimateTokens
 //     beats ineligible-remote every time.
 //
 // Place is pure: it never probes anything. Callers build the inputs from
-// FetchNodeView + LocalBusy.
-func Place(st Subtask, local NodeView, remotes []NodeView, localBusy bool) NodeView {
+// FetchNodeView + LocalBusy. seed is the W-11 P2C draw's input (the wire job
+// id when the caller has minted one, else any string a caller wants two
+// otherwise-identical calls to agree on) — see betterRemote.
+func Place(seed string, st Subtask, local NodeView, remotes []NodeView, localBusy bool) NodeView {
 	if !localBusy {
 		return local
 	}
@@ -83,7 +85,7 @@ func Place(st Subtask, local NodeView, remotes []NodeView, localBusy bool) NodeV
 		if !remoteEligible(st, r) {
 			continue
 		}
-		if !found || betterRemote(r, best) {
+		if !found || betterRemote(seed, &st, r, best) {
 			best, found = r, true
 		}
 	}
@@ -142,12 +144,43 @@ func Place(st Subtask, local NodeView, remotes []NodeView, localBusy bool) NodeV
 //     neither credited nor blamed (the AgentCtxTokens == 0 rule), so a
 //     pre-0.113.0 node keeps its roster-order tie. A tie-breaker, never a
 //     primary signal — it only ever decides a case QueueDepth left tied.
-func betterRemote(candidate, incumbent NodeView) bool {
+//
+// W-11 (register S-02, INV-5 rider clause (ii), eta.go) inserts a FIFTH key
+// between provablyStartsNow and QueueDepth: expected completion among seats
+// tied on capacity so far — eta.go's betterRanked, fed by st and seeded by
+// `seed` for its power-of-two-choices draw on a near-tie. Undecided (neither
+// side publishes a usable seat_rate, or the two are truly identical) falls
+// through to QueueDepth/GpuUtil exactly as before — "unknown rate keeps
+// today's window ordering" widened to "today's WHOLE ordering".
+//
+// st is a POINTER, and nil is a real, meaningful input: PlaceVision has no
+// agent contract to fit a generation term against (a vision judgment is one
+// call, never an agent loop — "no feasibility term; vision is single-shot"),
+// so nil st runs the SIMPLER visionEtaBetter key (queue-wait only, still
+// P2C-drawn) instead of the full window+generation ranking.
+func betterRemote(seed string, st *Subtask, candidate, incumbent NodeView) bool {
+	// Key 0 (W-14, register S-15): a node still eligible under a lease-busy
+	// verdict loses to any node that is not — "ranked last" means it does not
+	// even get to compete on saturation or queue depth against a clean node.
+	// See leaseBusyDemoted for why checking LeaseBusy alone is safe here: the
+	// gate has already excluded every OTHER lease-busy shape (exclusive,
+	// draining, non-text), so a lease-busy survivor is always the one case
+	// this key exists to demote.
+	if c, i := leaseBusyDemoted(candidate), leaseBusyDemoted(incumbent); c != i {
+		return i // candidate wins only when the incumbent is the demoted one
+	}
 	if c, i := saturated(candidate), saturated(incumbent); c != i {
 		return i // candidate wins only when the incumbent is the saturated one
 	}
 	if c, i := provablyStartsNow(candidate), provablyStartsNow(incumbent); c != i {
 		return c
+	}
+	if st != nil {
+		if better, decided := betterRanked(seed, inferKind(*st), rankFor(*st, candidate), rankFor(*st, incumbent)); decided {
+			return better
+		}
+	} else if better, decided := visionEtaBetter(seed, candidate, incumbent); decided {
+		return better
 	}
 	if candidate.QueueDepth != incumbent.QueueDepth {
 		return candidate.QueueDepth < incumbent.QueueDepth
@@ -276,23 +309,71 @@ func provablyStartsNow(v NodeView) bool {
 //     eligible right now — a capacity condition the wait re-polls, never a
 //     dispatch that evicts a remote's busy seat without asking.
 func remoteEligible(st Subtask, r NodeView) bool {
+	eligible, _, _ := eligibilityVerdict(st, r)
+	return eligible
+}
+
+// eligibilityVerdict is the SINGLE predicate sequence remoteEligible and
+// placement_reason.go's D-105 narration both consume, so the two can never
+// diverge on WHY a node is not the one running a subtask (review round 1,
+// BLOCKER item 1: the narration used to run its OWN copy of this gate in a
+// DIFFERENT order — schema/depth checked LAST instead of early — so a
+// schema-less contract was narrated `slow`/`unfit(ctx)` on every remote
+// instead of `noschema`, contradicting placement_reason.go's own "read-only
+// narration, never re-derives the decision" contract).
+//
+// eligible is byte-for-byte what remoteEligible has always returned. word is
+// the D-105 vocabulary entry for the FIRST disqualifying condition in gate
+// order, detail its one-line arithmetic/context — both empty when eligible
+// (the caller then applies its own RANKING-based verdict: queue/cap/cold,
+// which are about ORDER among eligible seats, never about admission).
+//
+// Order, exactly as remoteEligible has always checked it:
+//
+//	AgentEnabled → lease fence (W-14) → output_schema present → origin hop
+//	(Depth == 0) → feasibility (W-05) → the layer table (composite) OR
+//	residency/served/adequate (plain node).
+func eligibilityVerdict(st Subtask, r NodeView) (eligible bool, word, detail string) {
+	if !r.AgentEnabled {
+		return false, "probe", "agent lane not advertised"
+	}
 	// A node advertising a held TEXT lease is not a target at all (0.113.16):
 	// its card is reserved for a measurement, exactly as Reserved() makes the
 	// LOCAL seat a non-target. Before this a leased Lenovo had to STOP its fleet
 	// node to keep foreign digests off the card, and every in-flight remote job
 	// on it was cut ("Lenovo dropped mid-way", 2026-09-06).
-	// LeaseBusy joined the gate 2026-09-07: the same refusal, extended from
-	// "a text lease" to "a lease long enough that the node itself says place
-	// elsewhere". A short render still never refuses; a multi-hour hold does.
-	if !r.AgentEnabled || r.LeasedText || r.LeaseBusy || len(st.Contract.OutputSchema) == 0 || st.Contract.Depth != 0 {
-		return false
+	// leaseFenceReason (W-14, register S-15) is what decides whether the lease
+	// is a HARD refusal here — see its own doc for the exclusive/draining/media
+	// cases that still fence, and the plain-text-busy case that no longer does.
+	if fenced, why := leaseFenceReason(r); fenced {
+		return false, "lease", why
+	}
+	if len(st.Contract.OutputSchema) == 0 {
+		return false, "noschema", ""
+	}
+	if st.Contract.Depth != 0 {
+		return false, "hop", fmt.Sprintf("depth %d (only an origin contract may travel — hop limit 1)", st.Contract.Depth)
+	}
+	// W-05 (register S-03/S-05, INV-5 rider clause (i)): a seat whose fitted
+	// final cannot clear seatrate.FinalBudgetFloor within its own effective
+	// wall is refused here, naming the arithmetic (fit.go's feasibleFinal).
+	// An unknown rate is no opinion — see its own doc.
+	if ok, reason := feasibleFinal(st, r); !ok {
+		return false, "slow", reason
 	}
 	if dec, ok := remoteDecision(st, r); ok {
-		return !dec.Defer && !dec.Wait
+		if dec.Defer || dec.Wait {
+			return false, "layer", dec.Reason
+		}
+		return true, "", ""
 	}
-	return r.AgentResident &&
-		seatServed(r) &&
-		adequate(st, r)
+	if !r.AgentResident || !seatServed(r) {
+		return false, "probe", "seat not resident on this node's cached roster"
+	}
+	if !adequate(st, r) {
+		return false, "unfit(ctx)", fmt.Sprintf("%d needed > %d advertised", st.EstTokens+specReserve, r.AgentCtxTokens)
+	}
+	return true, "", ""
 }
 
 // remoteDecision runs the placement table over a node's advertised layer rows
@@ -311,6 +392,51 @@ func remoteDecision(st Subtask, r NodeView) (placetable.Decision, bool) {
 	return placetable.Decide(placetable.RequestForContract(st.Contract, st.EstTokens, 0), layers, live), true
 }
 
+// leaseFences reports whether r's lease is a HARD refusal for remote
+// placement (W-14, register S-15): an EXCLUSIVE or DRAINING hold — gated to
+// TEXT-class leases at creation (gpulease.TryAcquire only ever sets either
+// flag for class=text, never for class=media) — or a lease the node's own
+// verdict reads as long enough (LeaseBusy) that is NOT a plain text
+// reservation. That second clause is what keeps a MEDIA render (a training
+// run, up to hours) fencing exactly as before: a busy, non-text lease can
+// never be Exclusive or Draining by construction, so without this clause it
+// would fall straight through to the demotion this function does NOT grant it.
+//
+// The ONE case this no longer excludes: a plain (non-exclusive, non-draining)
+// TEXT reservation the node calls busy. Before this it hard-refused on the
+// node's DECLARED window alone — 47 measured contracts burned 300 s each on a
+// lease whose cards were idle in 10 of them (register S-15) — because `busy`
+// says "spoken for until 15:04", not "the cards are working". That case stays
+// eligible and is demoted instead (betterRemote's leaseBusyDemoted key).
+func leaseFences(r NodeView) bool {
+	fenced, _ := leaseFenceReason(r)
+	return fenced
+}
+
+// leaseFenceReason is leaseFences plus the one-word D-105 detail for WHICH
+// hold fenced it — read by eligibilityVerdict so the gate and the narration
+// can never name a different reason than the one that actually excluded a
+// node.
+func leaseFenceReason(r NodeView) (fenced bool, why string) {
+	switch {
+	case r.LeaseExclusive:
+		return true, "exclusive"
+	case r.LeaseDraining:
+		return true, "draining"
+	case r.LeaseBusy && !r.LeasedText:
+		return true, "busy"
+	default:
+		return false, ""
+	}
+}
+
+// leaseBusyDemoted is betterRemote's read of the ONE lease shape remoteEligible
+// still admits: LeaseBusy alone. Safe to check without re-deriving the
+// exclusive/draining/text conditions, because remoteEligible has already
+// excluded every other LeaseBusy shape (leaseFences) before a node ever
+// reaches ranking — a lease-busy survivor here is always the plain-text case.
+func leaseBusyDemoted(v NodeView) bool { return v.LeaseBusy }
+
 // PlaceVision picks the fleet node that runs ONE vision task (vqa / ocr /
 // assess_image, 0.116.0) when the caller has decided the work leaves the box
 // (route remote, or route auto on a busy local card — that decision is the
@@ -325,26 +451,43 @@ func remoteDecision(st Subtask, r NodeView) (placetable.Decision, bool) {
 // whatever the lane). AgentEnabled, residency, ctx arithmetic and the
 // output_schema rule are agent-contract facts and do not apply to an image.
 //
-// Ranking reuses betterRemote unchanged — not-saturated, then a provably free
-// slot, then queue depth, then GPU utilization, ties in roster order — so a
-// vision placement and an agent placement agree on which of two nodes is the
-// less loaded one.
+// Ranking reuses betterRemote — not-saturated, then a provably free slot,
+// then (W-11) a queue-wait tie-break, then queue depth, then GPU utilization,
+// ties in roster order — so a vision placement and an agent placement agree
+// on which of two nodes is the less loaded one. The seed for W-11's P2C draw
+// is minted once per call (PlaceVision carries no wire job id of its own to
+// thread through — visionremote's caller is outside this PR's scope): the
+// property the draw needs is only that independent CALLS disagree, which a
+// fresh seed per call already gives it.
 //
 // It returns the INDEX into remotes rather than the view, so a caller that
 // holds a parallel slice of base URLs (a NodeView carries no address) can
 // dispatch to the node it chose without matching on node_id — two
 // misconfigured nodes can share one id, and an id is not an address.
 func PlaceVision(remotes []NodeView) (int, bool) {
+	seed := mintP2CSeed()
 	best := -1
 	for i, r := range remotes {
 		if !visionEligible(r) {
 			continue
 		}
-		if best < 0 || betterRemote(r, remotes[best]) {
+		if best < 0 || betterRemote(seed, nil, r, remotes[best]) {
 			best = i
 		}
 	}
 	return best, best >= 0
+}
+
+// visionEtaBetter is PlaceVision's W-11 key: there is no contract to fit a
+// generation term against, so it compares only the node's own queue-wait
+// estimate (queueWaitFor — the same one etaFor folds cold+generation onto for
+// an agent contract), with the same P2C near-tie draw.
+func visionEtaBetter(seed string, candidate, incumbent NodeView) (better, decided bool) {
+	c, i := queueWaitFor(candidate), queueWaitFor(incumbent)
+	if c == i {
+		return false, false
+	}
+	return etaPreferred(seed, c, i), true
 }
 
 // visionEligible is PlaceVision's hard gate: the lane advertised, the card

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -41,6 +42,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/research"
 	"github.com/dmmdea/offload-harness/internal/reviewlane"
 	"github.com/dmmdea/offload-harness/internal/rig"
+	"github.com/dmmdea/offload-harness/internal/seatload"
 	"github.com/dmmdea/offload-harness/internal/swapclient"
 	"github.com/dmmdea/offload-harness/internal/tokclient"
 	"github.com/dmmdea/offload-harness/internal/visionremote"
@@ -929,6 +931,12 @@ func (s *Server) fleetView(ctx context.Context, cfg config.Config) map[string]an
 			// text flag so "idle_agent_nodes 0" is never unexplained.
 			n["gpu_lease_busy"] = true
 		}
+		// W-31 (item 9): the PAIR-adopted in-flight signal — a job registry
+		// count, never utilization or a lease alone — plus the one-word
+		// verdict every surface (gpu status, fleet-ui/top, here) now shares.
+		inFlight, verdict := nodeVerdict(r.view)
+		n["in_flight"] = inFlight
+		n["verdict"] = verdict
 		if r.view.AgentEnabled {
 			capable++
 			if r.view.QueueDepth == 0 {
@@ -944,6 +952,68 @@ func (s *Server) fleetView(ctx context.Context, cfg config.Config) map[string]an
 	out["agent_capable_nodes"] = capable
 	out["idle_agent_nodes"] = idle
 	return out
+}
+
+// nodeVerdict is W-31's in-flight signal + one-word verdict for a REMOTE
+// node (item 9, offload_status only — placement's own busy/eligibility
+// reading lives in internal/delegate and never calls this).
+//
+// in_flight adopts the PAIR semantics the operator asked for (14:0x, "nvidia
+// pair has a feature that lets us know if a gpu has a job in flight or not
+// regardless of GPU usage"): a JOB REGISTRY count, never GPU utilization and
+// never a lease alone. jobs_running counts a job the moment a worker claims
+// it, including the whole admission phase (cordon, swap pre-flight, cold
+// load, coherence probe) where the card may still be idle; jobs_admitting is
+// exactly that subset, so subtracting it is what turns "a worker is nominally
+// busy" into "a card is actually generating".
+//
+// verdict vocabulary: busy (in_flight > 0) | held-idle (a lease is held —
+// exclusive, draining, or a plain reservation the node itself calls busy —
+// and nothing is in flight) | loaded-idle (SeatLoaded known true, idle) |
+// cold (SeatLoaded known false, idle) | unknown (SeatLoaded never
+// published, no lease, idle).
+func nodeVerdict(v delegate.NodeView) (inFlight int, verdict string) {
+	inFlight = v.JobsRunning - v.JobsAdmitting
+	if inFlight < 0 {
+		inFlight = 0
+	}
+	switch {
+	case inFlight > 0:
+		return inFlight, "busy"
+	case v.LeaseExclusive || v.LeaseDraining || v.LeaseBusy:
+		return inFlight, "held-idle"
+	case v.SeatLoaded != nil && *v.SeatLoaded:
+		return inFlight, "loaded-idle"
+	case v.SeatLoaded != nil && !*v.SeatLoaded:
+		return inFlight, "cold"
+	default:
+		return inFlight, "unknown"
+	}
+}
+
+// localSeatVerdict is nodeVerdict's local-seat twin, built from
+// probeLocalBusy's own primitive (seatload.Reading) instead of a NodeView —
+// the local box has no /fleet/health to decode, but seatload.Inflight reads
+// the identical facts (llama-swap's /running state, then the seat's own
+// gauge) that the remote path's SeatLoaded/SeatStarting/JobsRunning already
+// describe. probeErr != nil (the read itself failed) is "unknown", never
+// "cold" — a failed probe must not assert idleness.
+func localSeatVerdict(rd seatload.Reading, probeErr error) (inFlight int, verdict string) {
+	switch {
+	case probeErr != nil, rd.Ambiguous:
+		return 0, "unknown"
+	case rd.Starting:
+		// A load in progress: work is in flight for exactly the reason
+		// probeLocalBusy(W-01) reads it as busy — the engine holds the
+		// triggering request until the load completes.
+		return 0, "busy"
+	case !rd.Loaded:
+		return 0, "cold"
+	case rd.Inflight > 0:
+		return rd.Inflight, "busy"
+	default:
+		return 0, "loaded-idle"
+	}
 }
 
 // localSeatProbeTimeout bounds the local seat probe. It is a NON-loading read
@@ -972,6 +1042,27 @@ const localSeatProbeTimeout = 4 * time.Second
 func localSeatView(ctx context.Context, cfg config.Config) map[string]any {
 	seat := cfg.AgentPlannerModel("")
 	v := map[string]any{"model": seat}
+
+	// W-31 (item 9): in_flight + verdict, from the SAME primitive route=auto's
+	// probeLocalBusy reads (seatload.Inflight) — a job registry count, never a
+	// load average — attached regardless of which branch below the
+	// ContextWindow probe takes, so a cold seat still reports "cold" rather
+	// than silently omitting the two keys.
+	if seat != "" && cfg.Endpoint != "" {
+		lctx, lcancel := context.WithTimeout(ctx, localSeatProbeTimeout)
+		rd, rerr := seatload.Inflight(lctx, &http.Client{Timeout: localSeatProbeTimeout}, cfg.Endpoint, seat)
+		lcancel()
+		inFlight, verdict := localSeatVerdict(rd, rerr)
+		v["in_flight"] = inFlight
+		v["verdict"] = verdict
+		// Review round 1, LOW item 5: mirroring ctx_probe_error below — a
+		// verdict of "unknown" says the read failed, but not WHY, and an
+		// operator reading offload_status has no other way to see the
+		// seatload.Inflight error (it never reaches a log at this call site).
+		if rerr != nil {
+			v["inflight_probe_error"] = rerr.Error()
+		}
+	}
 
 	c, err := swapclient.New(cfg.Endpoint, localSeatProbeTimeout)
 	if err != nil {

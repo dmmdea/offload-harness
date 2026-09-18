@@ -167,6 +167,15 @@ const fitInadequate = math.MinInt32
 // advertised ceiling, which on a composite box is only one layer's. A
 // decision that defers or waits is inadequate here exactly as it is in the
 // gate.
+//
+// W-11 (register S-02, INV-5 rider clause (ii), eta.go): once a seat is
+// adequate, mechanical work is no longer ranked on -window alone — the
+// expected-completion axis (eta.go's etaFor) decides first, window is the
+// tie-break; reasoning keeps window first, eta as its tie-break. An unknown
+// eta (no published seat_rate) degrades to exactly the pre-W-11 rule. The
+// fold into one maximisable int is scoreFitRanked, shared with betterRanked's
+// pairwise comparison so spread and auto/remote/vision order the same fleet
+// identically.
 func scoreFit(st Subtask, v NodeView) int {
 	window := v.AgentCtxTokens
 	if dec, ok := remoteDecision(st, v); ok {
@@ -179,8 +188,6 @@ func scoreFit(st Subtask, v NodeView) int {
 	} else if !adequate(st, v) {
 		return fitInadequate
 	}
-	if inferKind(st) == KindReasoning {
-		return window
-	}
-	return -window
+	eta, etaKnown := etaFor(st, v)
+	return scoreFitRanked(inferKind(st), window, eta, etaKnown)
 }

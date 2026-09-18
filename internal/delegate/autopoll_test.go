@@ -141,10 +141,16 @@ func TestExplicitTimeoutContractIsNeverAutoBounded(t *testing.T) {
 	// End to end: the poll deadline of an explicit contract must read exactly
 	// as it did before D-116 — no "poll bound" clause anywhere.
 	compressPolls(t, 10*time.Millisecond, 100*time.Millisecond)
+	// No seat_rate/seat_budget published here (unlike the unit-level check
+	// above): with a rate published, W-05's feasibility gate (fit.go,
+	// feasibleFinal) correctly refuses this node at PLACEMENT for the 1 s
+	// explicit wall below — that gate is exercised on its own in
+	// feasibility_test.go. This test's job is the D-116 poll-bound wiring
+	// (wall_sec ignored, no bound clause), which needs the dispatch to
+	// actually land and then time out; an unpublished rate is "no opinion"
+	// (eligible), keeping this test's scope unchanged.
 	node := &fakeNode{
 		t: t, agentEnabled: true, resident: true, ctxTokens: 8192, nodeID: "fake-node",
-		seatRate:   map[string]any{"tok_s": 20.0, "cold_load_sec": 30.0, "samples": 5, "min_turn_sec": 235},
-		seatBudget: map[string]any{"step_tokens": 1024, "final_tokens": 4096, "thinking": "auto"},
 		pollState: func(int64) (map[string]any, int) {
 			// It also publishes a wall — an explicit contract must ignore it.
 			return map[string]any{"state": "running", "wall_sec": 800}, http.StatusOK

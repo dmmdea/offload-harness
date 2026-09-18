@@ -111,6 +111,40 @@ type NodeView struct {
 	// single-lane gate (AgentCtxTokens) exactly.
 	Layers []placetable.LayerRow
 	Local  bool
+	// JobsAdmitting is the SUBSET of JobsRunning still in admission (cordon,
+	// swap pre-flight, warm, coherence probe) — health `jobs_admitting`
+	// (0.127). Those jobs hold a capped slot while the card is idle; placement
+	// (W-31) reads it to tell "busy" from "loaded-idle". 0 = none, or a node
+	// too old to publish it — the pre-0.127 reading either way.
+	JobsAdmitting int
+	// SeatLoaded / SeatStarting mirror health `seat_loaded`/`seat_starting`
+	// (0.127): what the node's last /running read said about the agent seat.
+	// POINTERS: nil is UNKNOWN (the read never happened, or failed), and must
+	// never be read as false (idle) — the same tri-state rule the VRAM reclaim
+	// verdict already follows. SeatStarting true means a load is in progress
+	// (not ready even though SeatLoaded may read true too).
+	SeatLoaded, SeatStarting *bool
+	// LeaseExclusive / LeaseDraining are the two lease facts a placement needs
+	// that `LeaseBusy`'s declared-time verdict never carried: whether the
+	// reservation FENCES the cards (no load may land on them) and whether it
+	// is still draining the seat. Health `lease_exclusive`/`lease_draining`
+	// (0.127), top-level, published only while a lease is held and only when
+	// true — a node with no lease, and every node one release behind, decodes
+	// both false.
+	LeaseExclusive, LeaseDraining bool
+	// RecentAgentWallSec is the median wall of this node's last finished agent
+	// jobs — health `recent_agent_wall_sec` (0.127), the completion signal a
+	// node with no seat_rate sample has no other way to publish. 0 = the node
+	// has finished no agent job, or predates the field.
+	RecentAgentWallSec float64
+	// QueueWaitEstimateSec is the node's OWN estimate of how long a new job
+	// would sit in its backlog — health `queue_wait_estimate_sec` (PR-6,
+	// 0.128+). nil on every node at 0.127: W-11's queueWaitFor then falls
+	// back to deriving the same shape from jobs_running/jobs_queued/
+	// max_concurrent_jobs/recent_agent_wall_sec. A POINTER because 0 is a
+	// genuine "no wait right now" answer and must read differently from
+	// "this node does not publish the estimate at all".
+	QueueWaitEstimateSec *float64
 }
 
 // VisionTask is the fleet task_type of the vision lane (0.116.0): a node
@@ -225,6 +259,16 @@ type healthWire struct {
 	// Additive (0.116.0, ADR 0039). nil on a plain or pre-0.116 node; the ONE
 	// row shape fleetnode publishes and offload_status echoes.
 	Layers []placetable.LayerRow `json:"layers"`
+	// Additive (0.127.0, PR-5 item 1). Absent on an older node, decoding to
+	// the zero value — 0/nil/false — which the gate/placement code reads as
+	// UNKNOWN, never as a limit or a verdict.
+	JobsAdmitting        int      `json:"jobs_admitting"`
+	SeatLoaded           *bool    `json:"seat_loaded"`
+	SeatStarting         *bool    `json:"seat_starting"`
+	LeaseExclusive       bool     `json:"lease_exclusive"`
+	LeaseDraining        bool     `json:"lease_draining"`
+	RecentAgentWallSec   float64  `json:"recent_agent_wall_sec"`
+	QueueWaitEstimateSec *float64 `json:"queue_wait_estimate_sec"`
 }
 
 // FetchNodeView reads one node's /fleet/health into a NodeView (Local=false —
@@ -285,6 +329,14 @@ func FetchNodeView(ctx context.Context, base, token string) (NodeView, error) {
 		VisionModel:       w.VisionModel,
 		Layers:            w.Layers,
 		Local:             false,
+
+		JobsAdmitting:        w.JobsAdmitting,
+		SeatLoaded:           w.SeatLoaded,
+		SeatStarting:         w.SeatStarting,
+		LeaseExclusive:       w.LeaseExclusive,
+		LeaseDraining:        w.LeaseDraining,
+		RecentAgentWallSec:   w.RecentAgentWallSec,
+		QueueWaitEstimateSec: w.QueueWaitEstimateSec,
 	}
 	if w.Saturation != nil {
 		v.SaturationKnown = true

@@ -8,17 +8,32 @@ import (
 	"github.com/dmmdea/offload-harness/internal/core"
 )
 
-// TestRemoteEligible_TextLeasedNodeIsIneligible: a node advertising a held TEXT
-// lease is not a placement target; the control arm (lease cleared) is eligible
-// again, so the refusal is the lease's and nothing else's.
+// TestRemoteEligible_TextLeasedNodeIsIneligible: a node advertising a held
+// EXCLUSIVE or DRAINING text lease is not a placement target; the control arm
+// (lease cleared) is eligible again, so the refusal is the lease's and
+// nothing else's.
+//
+// W-14 (register S-15, PR-5 item 3) narrowed this: before, `LeasedText`
+// ALONE — held, whatever the duration or the node's own busy verdict —
+// hard-excluded (the 0.113.16 rule this test originally pinned). That is
+// exactly the declared-window-over-quiet-cards shape S-15 measures (47
+// contracts burned 300 s each; the Qube had zero agent jobs in flight in 10
+// of them): a lease the node has not even called BUSY yet, let alone
+// exclusive or draining, no longer excludes a remote on its own. See
+// busylease_test.go's TestRemoteEligibleExcludesABusyLease for the full
+// exclude/demote matrix this test's fixture is one corner of.
 func TestRemoteEligible_TextLeasedNodeIsIneligible(t *testing.T) {
 	r := eligibleRemote()
 	if !remoteEligible(schemaSubtask(), r) {
 		t.Fatal("control: the baseline remote must be eligible")
 	}
-	r.LeasedText = true
+	r.LeasedText, r.LeaseExclusive = true, true
 	if remoteEligible(schemaSubtask(), r) {
-		t.Fatal("a node whose card is reserved by a text lease must not be placed on")
+		t.Fatal("a node whose card is reserved by an EXCLUSIVE text lease must not be placed on")
+	}
+	r.LeaseExclusive = false
+	if !remoteEligible(schemaSubtask(), r) {
+		t.Fatal("a plain (non-exclusive, non-draining, not-yet-busy) text lease must stay eligible (W-14)")
 	}
 	r.LeasedText = false
 	if !remoteEligible(schemaSubtask(), r) {
@@ -35,7 +50,12 @@ func TestNoEligibleRemoteNamesTheLeasedNode(t *testing.T) {
 	r := &runner{remotes: []string{"http://lenovo:18811"}}
 	v := eligibleRemote()
 	v.NodeID = "lenovo-ampere16"
-	v.LeasedText = true
+	// EXCLUSIVE, not merely held (W-14): a plain held-and-not-yet-busy text
+	// lease no longer excludes on its own (TestRemoteEligible_TextLeasedNodeIsIneligible),
+	// so this fixture must fence the card the way remoteEligible actually
+	// still refuses it — leasedLanes' reporting still names any HELD text
+	// lease by its own rule, which is independent of the gate.
+	v.LeasedText, v.LeaseExclusive = true, true
 	reason, class := r.noEligibleRemote(schemaSubtask(), []NodeView{v}, nil)
 	if !strings.Contains(reason, "text GPU lease") || !strings.Contains(reason, "lenovo-ampere16") || strings.Contains(reason, "please report") {
 		t.Fatalf("reason must name the lease and the node: %q", reason)
@@ -43,7 +63,7 @@ func TestNoEligibleRemoteNamesTheLeasedNode(t *testing.T) {
 	if class != core.DeferClassInfrastructure {
 		t.Fatalf("class = %q, want infrastructure (the box needs a timing decision, not a rewritten contract)", class)
 	}
-	v.LeasedText = false
+	v.LeasedText, v.LeaseExclusive = false, false
 	reason, _ = r.noEligibleRemote(schemaSubtask(), []NodeView{v}, nil)
 	if !strings.Contains(reason, "please report") {
 		t.Fatalf("control: without a lease the defensive line must still be reached, got %q", reason)

@@ -51,6 +51,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -181,6 +182,13 @@ type PlacedResult struct {
 	// a delegator bug rather than any node's answer.
 	refused       bool
 	refusalStatus int
+	// retryAfterNote (item 7, register D-105/D-106) names a 503 dispatch
+	// refusal that carried a Retry-After header and was honored with a
+	// courtesy wait-then-retry to the SAME node, INSIDE runRemote — never
+	// surfaced to placeAndRun as a discrete refusal (the node is not marked
+	// `tried` for it), so this is the only trace of it: appended to
+	// PlacementReason by attempt() when the retry succeeded.
+	retryAfterNote string
 
 	// Replacements counts how many times this subtask was RE-PLACED on a
 	// different node after a node REFUSED it at dispatch. 0 on the
@@ -697,6 +705,35 @@ func RunWith(ctx context.Context, cfg config.Config, local LocalRunner, subtasks
 		// goroutines below: they read it, they never build it.
 		r.spreadDeal = r.dealSpread(subtasks, r.localView())
 	}
+	// route=auto/remote: ONE joint deal over ONE fleet snapshot (W-06,
+	// register S-11/S-13) — the same reason route=spread already probes and
+	// deals once. Before this, every subtask's attempt() probed the fleet and
+	// called Place independently, so runConcurrency siblings could read the
+	// same free slot within milliseconds of each other and pile onto it.
+	if route == "auto" || route == "remote" {
+		leaseInfo := LocalLease(cfg.GPULockPath, cfg.StateDir)
+		// W-01 (register S-01): busy = the lease, OR the local seat's own
+		// in-flight count at or past the fleet's own concurrency cap, OR a
+		// load in progress — the SAME formula attempt() used per-subtask,
+		// now read once so the whole batch agrees. route=remote forces busy
+		// unconditionally: local is never a placement for an explicit remote.
+		busy := route == "remote"
+		local := busyReading{}
+		if route == "auto" {
+			local = r.probeLocalBusy(ctx)
+			busy = leaseInfo.Held || local.inflight >= cfg.FleetConcurrencyLimit() || local.loading
+			// One line per run, mirroring route=spread's own local-slot log
+			// (review round 1 item 4): before this the identical W-01 read had
+			// no trace at all, so an operator could not tell "busy" from
+			// "idle" without re-deriving it from the placement_reason.
+			log.Printf("delegate: auto local slot: busy=%v inflight=%d loading=%v (%s)", busy, local.inflight, local.loading, local.note)
+		}
+		var failed map[string]string
+		if busy {
+			r.autoViews, r.autoBases, r.autoProbeErrs, failed = r.fetchViewsDetailed(ctx)
+		}
+		r.autoDeal = r.dealAutoRemote(subtasks, r.localView(), r.autoViews, r.autoBases, busy, failed)
+	}
 	results := make([]PlacedResult, len(subtasks))
 	sem := make(chan struct{}, runConcurrency)
 	var wg sync.WaitGroup
@@ -885,6 +922,28 @@ type runner struct {
 	// seam tests drive it through; nil = the production probe (seatload).
 	spreadLocalBusy busyReading
 	localBusyProbe  func(ctx context.Context) busyReading
+	// autoLocalBusyOnce/autoLocalBusy cache route=auto's ONE read of the local
+	// seat's load (W-01, register S-01): every subtask of this Run must see
+	// the SAME reading — the same one-probe-per-Run invariant spreadLocalBusy
+	// already holds for route=spread, extended to auto so a busy local seat
+	// (in-flight at or past the fleet's own concurrency cap, or mid-load) is
+	// no longer indistinguishable from an idle one just because no GPU lease
+	// happens to be held.
+	autoLocalBusyOnce sync.Once
+	autoLocalBusy     busyReading
+	// autoViews/autoBases/autoProbeErrs/autoDeal are route=auto/remote's OWN
+	// one-fetch, one-deal snapshot (W-06, register S-11/S-13) — the same
+	// invariant spreadDeal holds for route=spread, extended here so
+	// runConcurrency sibling subtasks stop probing the fleet and calling
+	// Place independently (S-13: "those subtasks probe within milliseconds of
+	// each other — so several of them can read the same free slot and then
+	// compete for it"). Computed once in RunWith before any goroutine starts,
+	// read-only afterwards. Empty/nil on route=local, route=spread and route=
+	// queue, which never touch them.
+	autoViews     []NodeView
+	autoBases     []string
+	autoProbeErrs []string
+	autoDeal      []spreadSlot
 
 	// quarantine is the caller's Quarantine (RunOptions), nil = inert.
 	quarantine  *Quarantine
@@ -1622,6 +1681,11 @@ func probeFailureNote(fails map[string]*probeFailTally) string {
 func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentContract, start time.Time, budget int, pl *placements, seed PlacedResult, refusals []string, why string) PlacedResult {
 	localView := r.localView()
 	st := Subtask{Contract: contract, EstTokens: EstimateTokens(contract)}
+	// p2cSeed is W-11's ranking seed for every betterRemote comparison this
+	// wait makes: minted ONCE so the draw stays consistent across the wait's
+	// own ticks (never named `seed` — that identifier is this function's own
+	// PlacedResult parameter).
+	p2cSeed := mintP2CSeed()
 	waitStart := time.Now()
 	// decided is the composite decision behind the seed (ADR 0039, council
 	// R1): the decided seat exists and holds the contract, it would only evict
@@ -1728,7 +1792,7 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 				if until, ok := refusedUntil[bases[j]]; ok && time.Now().Before(until) {
 					continue
 				}
-				if best < 0 || betterRemote(v, views[best]) {
+				if best < 0 || betterRemote(p2cSeed, &st, v, views[best]) {
 					best = j
 				}
 			}
@@ -2035,7 +2099,7 @@ func (r *runner) replacementNode(ctx context.Context, contract core.AgentContrac
 			views, bases, _ = r.fetchViews(ctx)
 		}
 		freshViews, freshBases := untried(views, bases, pl.tried)
-		if chosen := Place(st, r.localView(), freshViews, true); !chosen.Local {
+		if chosen := Place(mintP2CSeed(), st, r.localView(), freshViews, true); !chosen.Local {
 			return placement{
 				view:   chosen,
 				base:   baseFor(chosen, freshViews, freshBases),
@@ -2285,7 +2349,7 @@ func (r *runner) remoteAlternative(ctx context.Context, st Subtask, pl *placemen
 		views, bases, _ = r.fetchViews(ctx)
 	}
 	freshViews, freshBases := untried(views, bases, pl.tried)
-	chosen := Place(st, r.localView(), freshViews, true)
+	chosen := Place(mintP2CSeed(), st, r.localView(), freshViews, true)
 	if chosen.Local {
 		return NodeView{}, "", false
 	}
@@ -2384,6 +2448,124 @@ func baseFor(chosen NodeView, views []NodeView, bases []string) string {
 	return ""
 }
 
+// unlimitedHeadroom stands in for an unpublished max_concurrent_jobs (0 =
+// unknown, never a limit) — far past any real dealt count, so it can never be
+// mistaken for one.
+const unlimitedHeadroom = 1 << 30
+
+// headroom is a node's remaining execution capacity: max_concurrent_jobs −
+// jobs_running, floored at 0. An unpublished ceiling (0) reads as UNLIMITED —
+// the same convention MaxQueueDepth/MaxConcurrentJobs already follow
+// everywhere in this package (0 = unknown, never a limit), so a pre-0.100.0
+// node's headroom is never artificially exhausted by this key.
+func headroom(v NodeView) int {
+	if v.MaxConcurrentJobs <= 0 {
+		return unlimitedHeadroom
+	}
+	if h := v.MaxConcurrentJobs - v.JobsRunning; h > 0 {
+		return h
+	}
+	return 0
+}
+
+// dealAutoRemote computes route=auto/remote's placement for EVERY subtask of
+// the run in ONE ordered pass over ONE fleet snapshot — auto/remote's own
+// version of dealSpread's invariant (W-06, register S-11/S-13). Before this,
+// attempt() called fetchViews and Place PER SUBTASK, independently, on
+// whichever goroutine reached it first; runConcurrency siblings then probed
+// the fleet within milliseconds of each other and could all read the SAME
+// free slot on the SAME node before any of them had dispatched — gate.go's
+// saturated() DEMOTES rather than excludes a full node precisely because this
+// snapshot is stale by construction, and re-placement (the refusal loop) is
+// the net that used to catch it, one 503 at a time, after the fact.
+//
+// dealt tracks, per dial base, how many subtasks THIS deal has already
+// assigned — placeAutoRemote checks it against headroom(v) before a node is
+// even considered, so a run that fans 8 subtasks at a 4-worker node deals it
+// AT MOST 4, and the rest fall to the next-best eligible node instead of
+// queuing behind siblings that have not even dispatched yet.
+func (r *runner) dealAutoRemote(contracts []core.AgentContract, localView NodeView, views []NodeView, bases []string, localBusy bool, failed map[string]string) []spreadSlot {
+	dealt := make(map[string]int, len(views))
+	out := make([]spreadSlot, len(contracts))
+	for i, c := range contracts {
+		st := Subtask{Contract: c, EstTokens: EstimateTokens(c)}
+		// Review round 1, MEDIUM item 3: the job id is minted HERE, once, and
+		// used as W-11's P2C draw seed — not a throwaway random string
+		// unrelated to what the result eventually carries. attempt() reuses
+		// this exact id (spreadSlot.jobID) instead of minting a second one,
+		// so the seed the ranking drew on and the id the published
+		// placement/ledger/corpus row names are the SAME value.
+		jobID := mintJobID()
+		slot := r.placeAutoRemote(jobID, st, localView, views, bases, localBusy, dealt, failed)
+		slot.jobID = jobID
+		out[i] = slot
+	}
+	return out
+}
+
+// placeAutoRemote deals ONE subtask within dealAutoRemote's joint pass: an
+// idle local seat wins unconditionally (Place's own rule, unchanged); busy,
+// the best REMOTE that passes remoteEligible AND still has headroom over what
+// this deal has already committed to it. A node at 0 headroom gets NOTHING —
+// no floor, no "at least one" — and the next-best candidate is tried.
+//
+//   - Some node had headroom: dealt, resolved, headroom decremented for the
+//     next subtask in this same deal.
+//   - No node had headroom, but at least one was otherwise eligible: the
+//     capacityWait sentinel — attempt() hands it to the existing capacity
+//     wait (awaitCapacity), which watches for room to free the same way it
+//     already watches a 503 refusal or a held lease.
+//   - Nothing was eligible at all (capability, not capacity): the noRemote
+//     sentinel — attempt() re-derives the exact pre-W-06 sentence
+//     (r.noEligibleRemote) over this same snapshot; unrelated to headroom.
+func (r *runner) placeAutoRemote(seed string, st Subtask, localView NodeView, views []NodeView, bases []string, localBusy bool, dealt map[string]int, failed map[string]string) spreadSlot {
+	if !localBusy {
+		return spreadSlot{placement: placement{view: localView, reason: "local idle"}}
+	}
+	var best NodeView
+	var bestBase string
+	found, anyEligible := false, false
+	for j, v := range views {
+		if !remoteEligible(st, v) {
+			continue
+		}
+		anyEligible = true
+		if headroom(v) <= dealt[bases[j]] {
+			continue // W-06: no floor — a node at 0 headroom gets nothing this deal
+		}
+		if !found || betterRemote(seed, &st, v, best) {
+			best, bestBase, found = v, bases[j], true
+		}
+	}
+	// D-105 (review round 1, BLOCKER item 2): the verdict line is built ONCE,
+	// from `dealt` as it stood WHILE scanning (every candidate's headroom read
+	// against the state at decision time, matching what the loop above
+	// actually saw), and printed on EVERY exit — chosen, capacity-waiting, or
+	// nothing eligible at all — not only the happy path. `failed` carries the
+	// dead/unreachable bases from this SAME snapshot, so a node this deal
+	// never even heard from is named too, not silently dropped.
+	verdicts := placementVerdictLine(st, views, bases, bestBase, dealt, failed)
+	if found {
+		dealt[bestBase]++
+		reason := fmt.Sprintf("route=%s → %s (headroom)", r.route, best.NodeID)
+		if verdicts != "" {
+			reason += "; " + verdicts
+		}
+		return spreadSlot{placement: placement{view: best, base: bestBase, reason: reason}}
+	}
+	if anyEligible {
+		reason := fmt.Sprintf("route=%s: every eligible remote is at headroom", r.route)
+		if verdicts != "" {
+			reason += "; " + verdicts
+		}
+		return spreadSlot{
+			placement:    placement{view: localView, reason: reason},
+			capacityWait: true,
+		}
+	}
+	return spreadSlot{placement: placement{view: localView, reason: verdicts}, noRemote: true}
+}
+
 // dealSpread computes the spread placement for EVERY subtask of the run in ONE
 // ordered pass, before any dispatch goroutine starts. It is a deal, not N
 // independent picks, and that is forced rather than stylistic:
@@ -2440,6 +2622,27 @@ type spreadSlot struct {
 	// and no remote was eligible: attempt() must wait on the lease (or defer)
 	// before running it, never run it outright.
 	reserved bool
+	// capacityWait (W-06, register S-11/S-13): at least one remote passed
+	// remoteEligible but every one of them was already dealt to its own
+	// headroom by the time this subtask's turn came — attempt() must hand it
+	// to the capacity wait (awaitCapacity), which watches for room to free,
+	// rather than dispatch to an already-full node or defer a contract the
+	// fleet can plainly run once something clears.
+	capacityWait bool
+	// noRemote marks a subtask for which NO node in the snapshot passed
+	// remoteEligible at all — the pre-W-06 "no eligible remote" outcome,
+	// unrelated to headroom. attempt() re-derives the exact sentence with
+	// r.noEligibleRemote over the SAME snapshot the deal used.
+	noRemote bool
+	// jobID (review round 1, MEDIUM item 3): the wire job id dealAutoRemote
+	// pre-mints for this subtask and uses as W-11's P2C draw seed — attempt()
+	// REUSES it rather than minting a second, unrelated one, so the seed
+	// recorded in the ranking and the id the published result/ledger/corpus
+	// row carries are the SAME value, matching ADR 0050's "seeded from the
+	// job id" claim literally rather than only in spirit. "" on route=spread
+	// (dealSpread mints no id at deal time) and on the pre-W-06 fallback path
+	// (a caller that reached attempt() without RunWith's precompute).
+	jobID string
 }
 
 // placeSpread deals ONE subtask across the run's fleet snapshot: slot 0 is the
@@ -2490,6 +2693,11 @@ type busyReading struct {
 	busy     bool
 	inflight int
 	note     string
+	// loading is true when a load is IN PROGRESS (probeLocalBusy's Starting
+	// branch): the in-flight count is unknown, not zero, and W-01's auto-busy
+	// rule reads it as its own signal — a seat mid-load is not idle, whatever
+	// inflight (0, by construction) says.
+	loading bool
 }
 
 // localBusyProbeTimeout bounds the one-shot read of the local seat's load: two
@@ -2534,7 +2742,7 @@ func (r *runner) probeLocalBusy(ctx context.Context) busyReading {
 		// engine, and the probe deliberately did not ask the upstream (it would
 		// have blocked for the whole load — register D-92). Busy, with the count
 		// unknown rather than zero.
-		return busyReading{busy: true, note: "local seat " + strings.TrimPrefix(rd.Source, "running-state:") + " (a load is in progress)"}
+		return busyReading{busy: true, loading: true, note: "local seat " + strings.TrimPrefix(rd.Source, "running-state:") + " (a load is in progress)"}
 	}
 	return busyReading{busy: rd.Inflight > 0, inflight: rd.Inflight, note: rd.Source}
 }
@@ -2596,16 +2804,16 @@ func (r *runner) placeSpreadWith(i int, st Subtask, localView NodeView, dealt ma
 		if Reserved(r.spreadLease) {
 			// The one placement the lease exists to forbid. Dealt local so the
 			// slot has a view, but flagged: attempt() waits or defers.
-			return spreadSlot{placement{view: localView, reason: "route=spread: local seat reserved (" + HolderLine(r.spreadLease) + "); no eligible remote — " + why}, dead, true}
+			return spreadSlot{placement: placement{view: localView, reason: "route=spread: local seat reserved (" + HolderLine(r.spreadLease) + "); no eligible remote — " + why}, deadFleet: dead, reserved: true}
 		}
-		return spreadSlot{placement{view: localView, reason: "route=spread: no eligible remote — local (" + why + ")"}, dead, false}
+		return spreadSlot{placement: placement{view: localView, reason: "route=spread: no eligible remote — local (" + why + ")"}, deadFleet: dead}
 	}
 	slot := i % len(nodes)
 	if nodes[slot].Local {
 		// A local slot opens a new cycle: the deck of remotes is reshuffled, so
 		// the next len(nodes)-1 subtasks deal one to each seat again.
 		clear(dealt)
-		return spreadSlot{placement{view: localView, reason: fmt.Sprintf("route=spread → local (slot %d of %d)", slot+1, len(nodes))}, false, false}
+		return spreadSlot{placement: placement{view: localView, reason: fmt.Sprintf("route=spread → local (slot %d of %d)", slot+1, len(nodes))}}
 	}
 	k := fitPick(st, nodes, bases, slot, dealt)
 	if k < 0 {
@@ -2622,7 +2830,7 @@ func (r *runner) placeSpreadWith(i int, st Subtask, localView NodeView, dealt ma
 	if skip {
 		reason += fmt.Sprintf("; local seat busy: %d in flight", r.spreadLocalBusy.inflight)
 	}
-	return spreadSlot{placement{view: nodes[k], base: bases[k], reason: reason}, false, false}
+	return spreadSlot{placement: placement{view: nodes[k], base: bases[k], reason: reason}}
 }
 
 // fitPick returns the index of the best-scoring seat in nodes that is neither
@@ -2717,6 +2925,63 @@ func (r *runner) attempt(ctx context.Context, i int, contract core.AgentContract
 			}
 			reason += " — lease cleared, running local"
 		}
+	case (r.route == "auto" || r.route == "remote") && r.autoDeal != nil:
+		// Read, never re-derive: W-06's joint deal (dealAutoRemote), computed
+		// once in RunWith over one fleet snapshot — see its own doc for why a
+		// per-subtask re-probe/re-place here would throw away the very
+		// invariant that makes headroom accounting correct. r.autoDeal is nil
+		// only for a caller that reached attempt() without going through
+		// RunWith (a white-box test driving runOne/attempt directly); that
+		// case falls to default below, unchanged from before W-06.
+		d := r.autoDeal[i]
+		deadFleet = d.deadFleet
+		if d.jobID != "" {
+			// Review round 1, MEDIUM item 3: reuse the SAME id W-11's P2C
+			// draw was seeded with at deal time, rather than minting an
+			// unrelated one here — the seed the ranking recorded and the id
+			// the published result/ledger/corpus row carries must agree.
+			jobID = d.jobID
+		}
+		switch {
+		case d.capacityWait:
+			// At least one remote was otherwise eligible; every one of them
+			// was already dealt to its own headroom by this subtask's turn.
+			// The existing capacity wait watches for room to free — the same
+			// mechanism a 503 refusal or a held lease already sends work to.
+			return PlacedResult{waitCapacity: true, pendingReason: d.reason, PlacementReason: d.reason}
+		case d.noRemote && r.route == "remote":
+			// Nothing in the fleet could ever take this contract (capability,
+			// not capacity): the established "route=remote: no eligible
+			// remote" Unplaced defer, unchanged.
+			why, class := r.noEligibleRemote(st, r.autoViews, r.autoProbeErrs)
+			return finish(PlacedResult{
+				Node: localView.NodeID, Seat: localView.AgentSeat,
+				Unplaced:        true,
+				PlacementReason: "route=remote: no eligible remote",
+				Result: core.AgentWireResult{
+					SchemaVersion: core.AgentWireSchemaVersion,
+					Deferred:      true,
+					DeferClass:    class,
+					Reason:        "route=remote: " + why,
+				},
+			})
+		case d.noRemote:
+			// route=auto, nothing eligible. A TEXT lease held NOW (re-read at
+			// dispatch time — the deal's own snapshot can be minutes stale by
+			// the time this subtask's turn comes, same as the spread case
+			// above) still reserves the seat; otherwise queued-local beats
+			// ineligible-remote, exactly as before W-06.
+			leaseInfo := LocalLease(r.cfg.GPULockPath, r.cfg.StateDir)
+			why, class := r.noEligibleRemote(st, r.autoViews, r.autoProbeErrs)
+			if Reserved(leaseInfo) {
+				return PlacedResult{waitCapacity: true, pendingReason: "local seat reserved (" + HolderLine(leaseInfo) + "); no eligible remote — " + why}
+			}
+			chosen = localView
+			reason = "local busy; no eligible remote — " + why + " (queued-local beats ineligible-remote)"
+			deadFleet = class == core.DeferClassInfrastructure
+		default:
+			chosen, base, reason = d.view, d.base, d.reason
+		}
 	default:
 		// Placement. Health is fetched ONLY when a remote could actually be
 		// chosen (route=remote, or route=auto with the local GPU spoken for):
@@ -2729,7 +2994,19 @@ func (r *runner) attempt(ctx context.Context, i int, contract core.AgentContract
 			busy = true // forced remote behaves as "local unavailable" for Place
 		case "auto":
 			leaseInfo = LocalLease(r.cfg.GPULockPath, r.cfg.StateDir)
-			busy = leaseInfo.Held
+			// W-01 (register S-01): a lease is one way the local seat is
+			// spoken for, but the overwhelming majority of runs hold no lease
+			// at all — and a local seat already carrying more in-flight
+			// requests than the fleet's own concurrency cap is exactly as
+			// unavailable as one under a lease, yet Place never looked at the
+			// fleet for it. probeLocalBusy is read ONCE per Run (cached on
+			// the runner, sync.Once) so runConcurrency sibling subtasks agree
+			// on one reading, the same invariant spreadLocalBusy holds for
+			// route=spread. A probe failure fails OPEN to idle, exactly as
+			// probeLocalBusy always has.
+			r.autoLocalBusyOnce.Do(func() { r.autoLocalBusy = r.probeLocalBusy(ctx) })
+			local := r.autoLocalBusy
+			busy = leaseInfo.Held || local.inflight >= r.cfg.FleetConcurrencyLimit() || local.loading
 		}
 		var views []NodeView
 		var bases []string
@@ -2737,7 +3014,7 @@ func (r *runner) attempt(ctx context.Context, i int, contract core.AgentContract
 		if busy && r.route != "local" {
 			views, bases, probeErrs = r.fetchViews(ctx)
 		}
-		chosen = Place(st, localView, views, busy)
+		chosen = Place(jobID, st, localView, views, busy)
 
 		switch {
 		case r.route == "local":
@@ -2855,6 +3132,9 @@ func (r *runner) attempt(ctx context.Context, i int, contract core.AgentContract
 	pr := r.runRemote(ctx, base, jobID, dispatched, chosen, runSeat)
 	pr.ranBase = base
 	pr.PlacementReason = reason
+	if pr.retryAfterNote != "" {
+		pr.PlacementReason += "; " + pr.retryAfterNote
+	}
 	if pr.Node == "" {
 		pr.Node = chosen.NodeID
 	}
@@ -2944,12 +3224,38 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 		intendedSeat = view.AgentSeat
 	}
 	r.pairInflight(&pr, jobID, pairNodeName(base, view.NodeID), intendedSeat, "queued")
-	if refused, status, err := r.dispatch(ctx, base, jobID, payload); err != nil {
-		pr.Err = err.Error()
+	disp := r.dispatchDetailed(ctx, base, jobID, payload)
+	if disp.refused && disp.status == http.StatusServiceUnavailable && disp.retryAfterSec > 0 {
+		// Item 7 (register D-105/D-106): a 503 carrying its own Retry-After
+		// is the node stating exactly how long to wait, not a generic
+		// capacity refusal — honor it and retry the SAME node ONCE before
+		// falling to the ordinary re-placement loop (placeAndRun's refusal
+		// chain, which would otherwise spend a whole different node's dial
+		// just to avoid a wait the first node already told us to take).
+		// Bounded by what the contract can still afford, so a node with a
+		// generous Retry-After never eats a budget it does not own.
+		wait := time.Duration(disp.retryAfterSec) * pollSecond
+		if budget := time.Duration(executionBudgetSec(contract)) * pollSecond; budget > 0 && wait > budget {
+			wait = budget
+		}
+		select {
+		case <-ctx.Done():
+			pr.Err = "canceled: " + ctx.Err().Error()
+			return pr
+		case <-time.After(wait):
+		}
+		retried := r.dispatchDetailed(ctx, base, jobID, payload)
+		if !retried.refused {
+			pr.retryAfterNote = fmt.Sprintf("dispatch 503 (Retry-After %ds) honored; landed here on retry", disp.retryAfterSec)
+		}
+		disp = retried
+	}
+	if disp.err != nil {
+		pr.Err = disp.err.Error()
 		// Carry the class so runOne can decide whether ANOTHER node is worth
 		// asking. Set here and nowhere else: this is the one moment at which
 		// the node has answered and no seat can possibly hold the contract.
-		pr.refused, pr.refusalStatus = refused, status
+		pr.refused, pr.refusalStatus = disp.refused, disp.status
 		return pr
 	}
 	// The node ACKED: from here the job can be orphaned by delegator death,
@@ -3463,14 +3769,35 @@ func (p *pollFailLog) summarize() {
 	log.Printf("delegate: poll %s at %s: %d failed poll(s) this job (%s)", p.jobID, p.base, p.total, strings.Join(parts, "; "))
 }
 
-// dispatch POSTs the job envelope, expecting the contract's one acceptance
-// shape (202). A transport-level failure is retried ONCE with the same job id
-// — if the first POST actually landed, the node's known-job path re-acks
-// idempotently, so the retry can never buy a second run. That bounded retry
-// (dispatchAttempts) is about DOUBT over one node's transport and is entirely
-// separate from re-placement, which is about a node that answered no.
+// dispatchResult is a node's answer to one dispatch POST — dispatchDetailed's
+// return shape (see its own doc for what each field means and when).
+type dispatchResult struct {
+	refused bool
+	status  int
+	// retryAfterSec is the node's `Retry-After` header on a 503 (capacity)
+	// refusal — a CAPACITY hint, not a promise, so the caller treats it as
+	// advisory. 0 when absent or unparsable, or on any status but 503.
+	retryAfterSec int
+	err           error
+}
+
+// dispatch is dispatchDetailed without the Retry-After hint — the plain
+// 3-value shape every caller but runRemote's 503 courtesy retry (item 7,
+// register D-105/D-106) uses.
+func (r *runner) dispatch(ctx context.Context, base, jobID string, payload json.RawMessage) (refused bool, status int, err error) {
+	res := r.dispatchDetailed(ctx, base, jobID, payload)
+	return res.refused, res.status, res.err
+}
+
+// dispatchDetailed POSTs the job envelope, expecting the contract's one
+// acceptance shape (202). A transport-level failure is retried ONCE with the
+// same job id — if the first POST actually landed, the node's known-job path
+// re-acks idempotently, so the retry can never buy a second run. That bounded
+// retry (dispatchAttempts) is about DOUBT over one node's transport and is
+// entirely separate from re-placement, which is about a node that answered
+// no.
 //
-// The returns say which of three things happened:
+// The result says which of three things happened:
 //
 //	err == nil                     the node acked 202.
 //	err != nil, refused == true    the node DECLINED (status = what it sent) or
@@ -3481,7 +3808,7 @@ func (p *pollFailLog) summarize() {
 //	                               will not marshal, a request that will not
 //	                               build). No node said anything, so there is
 //	                               nothing for another node to say differently.
-func (r *runner) dispatch(ctx context.Context, base, jobID string, payload json.RawMessage) (refused bool, status int, err error) {
+func (r *runner) dispatchDetailed(ctx context.Context, base, jobID string, payload json.RawMessage) dispatchResult {
 	envelope := map[string]any{
 		"job_id":    jobID,
 		"task_type": string(core.TaskAgentRun),
@@ -3498,7 +3825,7 @@ func (r *runner) dispatch(ctx context.Context, base, jobID string, payload json.
 	}
 	env, merr := json.Marshal(envelope)
 	if merr != nil {
-		return false, 0, fmt.Errorf("marshaling dispatch envelope: %w", merr)
+		return dispatchResult{err: fmt.Errorf("marshaling dispatch envelope: %w", merr)}
 	}
 	u := strings.TrimRight(strings.TrimSpace(base), "/") + "/fleet/dispatch"
 	var lastErr error
@@ -3507,7 +3834,7 @@ func (r *runner) dispatch(ctx context.Context, base, jobID string, payload json.
 		req, rerr := http.NewRequestWithContext(rctx, http.MethodPost, u, bytes.NewReader(env))
 		if rerr != nil {
 			cancel()
-			return false, 0, fmt.Errorf("dispatch request: %w", rerr)
+			return dispatchResult{err: fmt.Errorf("dispatch request: %w", rerr)}
 		}
 		req.Header.Set("Content-Type", "application/json")
 		if r.cfg.FleetAuthToken != "" {
@@ -3523,6 +3850,10 @@ func (r *runner) dispatch(ctx context.Context, base, jobID string, payload json.
 			continue // transport doubt → one more POST, same job id
 		}
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxFleetBody))
+		retryAfter := 0
+		if resp.StatusCode == http.StatusServiceUnavailable {
+			retryAfter = parseRetryAfterSeconds(resp.Header.Get("Retry-After"))
+		}
 		resp.Body.Close()
 		cancel()
 		if resp.StatusCode != http.StatusAccepted {
@@ -3530,21 +3861,60 @@ func (r *runner) dispatch(ctx context.Context, base, jobID string, payload json.
 			// answer, not doubt; re-POSTing the same bytes to the SAME node
 			// would get the same answer. Whether ANOTHER node is worth asking
 			// is replaceableRefusal's decision, made from this status.
-			return true, resp.StatusCode, fmt.Errorf("dispatch %s: status %d: %s", u, resp.StatusCode, truncate(body, 256))
+			return dispatchResult{refused: true, status: resp.StatusCode, retryAfterSec: retryAfter,
+				err: fmt.Errorf("dispatch %s: status %d: %s", u, resp.StatusCode, truncate(body, 256))}
 		}
-		return false, resp.StatusCode, nil
+		return dispatchResult{status: resp.StatusCode}
 	}
 	// Both POSTs failed at transport level: the delegator never reached this
 	// node. Status 0 says exactly that — no node authored this answer.
-	return true, 0, lastErr
+	return dispatchResult{refused: true, err: lastErr}
 }
 
-// pollOnce GETs the job state. The error covers transport-level failure only;
-// an HTTP answer (any status) comes back as a jobPoll with a nil error.
+// parseRetryAfterSeconds reads a `Retry-After` header's DELTA-SECONDS form
+// (the shape this fleet's own nodes send — never the HTTP-date form, which
+// this parser deliberately does not attempt). Empty, unparsable or negative
+// is 0 = no hint, the safe "the caller decides its own pacing" reading.
+// retryAfterUnparsableWarnOnce bounds parseRetryAfterSeconds' log to ONCE per
+// process — review round 1, LOW item 6: a future proxy in front of a node
+// could start sending the HTTP-date form (RFC 9110 §10.2.3), which this
+// parser deliberately does not attempt (this fleet's own nodes only ever
+// send delta-seconds), and that would otherwise silently discard the hint on
+// every single 503 forever with no trace anywhere.
+var retryAfterUnparsableWarnOnce sync.Once
+
+func parseRetryAfterSeconds(v string) int {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 {
+		retryAfterUnparsableWarnOnce.Do(func() {
+			log.Printf("delegate: Retry-After %q is not a delta-seconds integer (an HTTP-date form is not parsed); ignoring it as a capacity hint — logged once per process", v)
+		})
+		return 0
+	}
+	return n
+}
+
+// pollWaitSec is what runRemote's poll asks a node to hold ONE connection
+// open for (?wait=12) before answering (item 7): at fleetnode.MaxJobWaitSec,
+// one second inside pollRequestTimeout (15 s) so the long poll always gets an
+// answer before the client gives up on the exchange — a pairing pinned on
+// the node side by a test that can read this package's own source. An older
+// node (pre-0.127) does not read the parameter at all and answers at once,
+// exactly as before: the fallback IS the parameter being a no-op there, not
+// a second code path — the existing pollEvery sleep between polls is
+// unchanged either way.
+const pollWaitSec = 12
+
+// pollOnce GETs the job state, long-polling up to pollWaitSec when the node
+// supports it (`?wait=`). The error covers transport-level failure only; an
+// HTTP answer (any status) comes back as a jobPoll with a nil error.
 func (r *runner) pollOnce(ctx context.Context, base, jobID string) (jobPoll, error) {
-	// One poll implementation, two callers: the recovery pass (intent.go)
-	// polls by these same rules through the shared package function.
-	return pollJobOnce(ctx, r.cfg, base, jobID)
+	u := strings.TrimRight(strings.TrimSpace(base), "/") + "/fleet/jobs/" + jobID + fmt.Sprintf("?wait=%d", pollWaitSec)
+	return pollJobOnceAt(ctx, r.cfg, u)
 }
 
 // EvalAcceptance runs every contract acceptance check against the result —
