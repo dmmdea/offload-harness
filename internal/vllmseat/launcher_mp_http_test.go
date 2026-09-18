@@ -22,7 +22,7 @@ func TestSeatLauncherBindsTheMPHTTPFrontendOnLoopback(t *testing.T) {
 	}
 	s := string(raw)
 	for _, must := range []string{
-		`MP_HTTP_PORT="${SEAT_MP_HTTP_PORT:-18793}"`,
+		`MP_HTTP_PORT="${SEAT_MP_HTTP_PORT:-18790}"`,
 		`if ss -ltnp 2>/dev/null | grep -q ":$MP_HTTP_PORT "; then`,
 		`--http-host 127.0.0.1 --http-port "$MP_HTTP_PORT"`,
 	} {
@@ -38,11 +38,11 @@ func TestSeatLauncherBindsTheMPHTTPFrontendOnLoopback(t *testing.T) {
 		t.Fatalf("seat.env template lost the SEAT_MP_HTTP_PORT render token")
 	}
 	// The renderer fills the token from the spec, defaulted beside the engine port
-	// (18797 engine / 18796 MP ZMQ / 18793 MP HTTP) and never colliding with the
+	// (18797 engine / 18796 MP ZMQ / 18790 MP HTTP) and never colliding with the
 	// benchmark arm's pairing on the reference box (18798 / 18794 / 18795).
 	spec := Spec{ID: "qwen3.8-27b-vllm", Unit: "vllm-agent-seat-27b", Port: 18797, MPPort: 18796}
-	if got := spec.mpHTTPPort(); got != 18793 {
-		t.Fatalf("mpHTTPPort default = %d, want 18793 (engine port - 4)", got)
+	if got := spec.mpHTTPPort(); got != 18790 {
+		t.Fatalf("mpHTTPPort default = %d, want 18790 (engine port - 7)", got)
 	}
 	spec.MPHTTPPort = 18795
 	if got := spec.mpHTTPPort(); got != 18795 {

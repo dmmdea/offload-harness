@@ -76,7 +76,8 @@ type Spec struct {
 	MPPort int `json:"mp_port,omitempty"`
 	// MPHTTPPort is the MP server's HTTP frontend (loopback only). LMCache defaults it to
 	// 0.0.0.0:8080, which under WSL2 mirrored networking is the host's every interface and
-	// on this fleet is always somebody else's port; 0 = Port-4 (18797 engine / 18793 HTTP).
+	// on this fleet is always somebody else's port; 0 = Port-7 (18797 engine / 18790 HTTP,
+	// the safe pick every port file of the fleet lists; 18793 is the Qube's LiteLLM reservation).
 	MPHTTPPort int `json:"mp_http_port,omitempty"`
 	// Device is CUDA_VISIBLE_DEVICES for the engine. It may name SEVERAL cards
 	// ("0,2"), in which case TensorParallel must equal how many — see its comment.
@@ -852,7 +853,7 @@ func (s Spec) mpHTTPPort() int {
 	if s.MPHTTPPort > 0 {
 		return s.MPHTTPPort
 	}
-	return s.Port - 4
+	return s.Port - 7
 }
 
 // launch is the artifact set this seat is started by, defaulted.
