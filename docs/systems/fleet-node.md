@@ -812,7 +812,21 @@ survivors are RANKED and how many of one Run's subtasks one node can take.
 - **`offload_status` reports the same in-flight signal (item 9, W-31).** Each fleet node row and the local seat
   entry publish `in_flight` (a job-registry count — `jobs_running − jobs_admitting` remotely, the seat's own
   gauge locally — never GPU utilization and never a lease alone) and a one-word `verdict`: `busy` (in-flight >
-  0) | `held-idle` (a lease is held, nothing running) | `loaded-idle` | `cold` | `unknown`.
+  0) | `held-idle` (a lease is held, nothing running) | `loaded-idle` | `cold` | `unknown`. **Scope: this PR
+  wires the vocabulary into `offload_status` only.** `gpu status` and `fleet-ui`/`top` keep their existing
+  `gpuactivity`-based verdicts unchanged; the operator's original ask ("one-word verdict vocabulary
+  everywhere") spans all three surfaces, and the other two are a follow-up, not something this PR claims to
+  have done.
+  - **`jobs_admitting` is a DISPLAY and queue-estimate signal, not a headroom exemption.** `in_flight` and
+    `verdict` above subtract it (a job still in admission holds no card, so it must not count as "busy" for
+    a human reading the status), and it is exactly what the node's own `queue_wait_estimate_sec` (preferred by
+    `queueWaitFor` whenever published — see "Expected-completion ranking" above) is computed from. W-06's
+    HEADROOM key (`max_concurrent_jobs − jobs_running`) deliberately does NOT subtract it: an admitting job has
+    already claimed one of the node's `max_concurrent_jobs` workers and WILL occupy the card once its cordon/
+    pre-flight/cold-load/coherence-probe sequence finishes, so dealing another subtask onto that same worker
+    slot would over-commit it. The two readings of the same field are intentional, not an inconsistency: one
+    answers "is the card doing work right now" (display), the other "is this worker slot free to claim"
+    (placement).
 
 ### Contract wire shape (`core.AgentContract`)
 

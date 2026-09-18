@@ -46,7 +46,9 @@ Versioning: [SemVer](https://semver.org/).
   - `offload_status`'s fleet node rows and the local seat entry publish `in_flight`
     (`jobs_running − jobs_admitting` remotely, the seat's own gauge locally — a job-registry count,
     never GPU utilization or a lease alone) and a one-word `verdict` (`busy | held-idle | loaded-idle
-    | cold | unknown`) (W-31).
+    | cold | unknown`) (W-31). **`offload_status` only in this PR** — `gpu status` and
+    `fleet-ui`/`top` keep their existing `gpuactivity`-based vocabulary; adopting the same words
+    there is a follow-up, not shipped here.
 
 ## [0.127.1] - 2026-09-17 - the final's tail and the node's honest backlog: fitted-final re-issue, one bounded re-pack, last attempt decides the class, queue depth = 2x workers with an ETA-bearing Retry-After
 

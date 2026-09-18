@@ -88,7 +88,16 @@ tie-breakers `betterRemote` already had:
    SAME node, invisible to the re-placement loop.
 8. **`offload_status` publishes the same in-flight signal** (item 9, W-31): `in_flight` (a job-registry count,
    never GPU utilization or a lease alone) and a one-word `verdict` on every fleet node row and the local seat
-   entry.
+   entry. **Scoped to `offload_status` in this PR** — the operator's original W-31 ask names `gpu status` and
+   `fleet-ui`/`top` too, which keep their existing `gpuactivity`-based vocabulary unchanged here; adopting the
+   same words there is a follow-up.
+   - `jobs_admitting` is read for TWO different purposes that intentionally disagree: `in_flight`/`verdict`
+     above SUBTRACT it (an admitting job holds no card yet, so it must not read as "busy" to a human), and
+     `queueWaitFor` prefers the node's own `queue_wait_estimate_sec` — computed FROM `jobs_admitting` — when
+     published. W-06's headroom key does NOT subtract it: an admitting job has already claimed one of
+     `max_concurrent_jobs`' worker slots and will occupy the card once admission finishes, so counting it as
+     free headroom would over-commit that worker. Display answers "is the card working right now"; headroom
+     answers "is this worker slot claimable" — different questions, correctly different answers.
 
 ## Consequences
 
