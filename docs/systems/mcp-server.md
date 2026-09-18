@@ -144,9 +144,9 @@ busy; `local`/`remote` force one side; `spread` deals every subtask across the l
 eligible remote in one pass. Since PR-5 (ADR
 [0050](../architecture/decisions/0050-placement-ranks-adequate-seats-by-expected-completion.md)),
 `auto` and `remote` compute that placement for the WHOLE call in one joint deal respecting each
-node's headroom, rank quality-adequate remotes by expected completion (a feasibility floor from the
-contract's own fitted final, then an eta-based ordering with a seeded near-tie draw so parallel
-callers do not herd onto one seat), and demote — rather than exclude — a remote whose only obstacle
+node's headroom, rank quality-adequate remotes by expected completion (a feasibility floor asking only
+whether one tool step and a minimal answer fit the contract's own wall, then an eta-based ordering with a
+seeded near-tie draw so parallel callers do not herd onto one seat), and demote — rather than exclude — a remote whose only obstacle
 is a declared-but-idle lease. `results[].placement` (the published `placement_reason`) names which
 node ran each subtask and, for `auto`/`remote`, a one-word verdict for every OTHER reachable remote
 too (`chosen | queue | cap | slow | lease | cold | probe | unfit(ctx) | noschema`) — read it before

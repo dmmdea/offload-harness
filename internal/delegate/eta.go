@@ -2,8 +2,8 @@
 // the INV-5 rider's clause (ii)): "an ordering key among seats that have
 // already passed the capability/adequacy gate, with power-of-two-choices
 // among near-ties so independent dispatchers do not herd." It never widens
-// who is eligible — that is remoteEligible/feasibleFinal's job (W-05,
-// fit.go). It only orders the survivors.
+// who is eligible — that is gate.go's eligibilityVerdict, which calls
+// feasibleFinal below (W-05). It only orders the survivors.
 
 package delegate
 
@@ -15,27 +15,39 @@ import (
 	"github.com/dmmdea/offload-harness/internal/seatrate"
 )
 
-// feasibleFinal reports whether v can hold a VIABLE final answer for st
-// within its own effective wall (W-05, register S-03/S-05 — the INV-5
-// rider's clause (i): "a feasibility floor computed from the contract's
-// FITTED final at the seat's published rate — never the seat's max-final
-// min_turn_sec — applied ... as a refusal only below a minimum viable final,
-// naming the arithmetic").
+// minimalFinalTokens is the smallest answer a contract can be said to have:
+// the feasibility floor asks only whether the wall holds one tool step and
+// this many tokens of final at the seat's rate.
+const minimalFinalTokens = 64
+
+// feasibleFinal reports whether v can produce ANY answer for st inside the
+// contract's own effective wall (W-05, register S-03/S-05 — the INV-5
+// rider's clause (i): a wall-time term enters a seat decision "as a refusal
+// only below a minimum viable final, naming the arithmetic"). The question
+// is the smallest one that still means something: one tool step (the read of
+// the context document) plus a minimalFinalTokens-token final at the seat's
+// measured rate — no think block, no structured re-pack, and NO cold load,
+// because admission pays the cold load OUTSIDE the wall (D-64 warms the seat
+// on the admission budget), so a wall shorter than the load is not
+// infeasible. Everything above that floor — how much of the configured final
+// the wall actually buys, the cold load, the queue wait — is a RANKING
+// matter for etaFor, never a refusal.
 //
 // ok=true, reason="" — NO OPINION — when the rate is unknown (nil SeatRate,
 // or zero tok_s/samples) or the contract's wall cannot be sized at all: the
 // house rule every other capacity field in this package follows ("unknown is
-// never credited", but also never PENALISED — see AgentCtxTokens==0). ok=true
-// also when the fitted final comfortably holds the configured budget.
+// never credited", but also never PENALISED — see AgentCtxTokens==0).
 //
-// ok=false with reason naming the arithmetic ("fitted final 312 < floor 1024
-// at 5.4 tok/s in 300 s wall, cold 69 s") when the wall the contract would
-// actually run under — TimeoutSec as given, or seatrate.AutoWallFor's sizing
-// for a timeout_auto contract, exactly as autoPollBound computes it — cannot
-// buy even seatrate.FinalBudgetFloor tokens for the final answer (and its
-// structured re-pack, when the contract carries a schema) at the seat's
-// measured rate. This is a FITTED-final floor, not the seat's published
-// min_turn_sec (its max-final worst case) — the rider forbids gating on that.
+// ok=false with reason naming the arithmetic ("one step and a 64-token
+// answer need 42 s at 5.4 tok/s, the wall is 20 s") when the wall the
+// contract would actually run under — TimeoutSec as given, or
+// seatrate.AutoWallFor's sizing for a timeout_auto contract, exactly as
+// autoPollBound computes it — cannot hold even that. This is never the
+// seat's published min_turn_sec (its max-final worst case), which the rider
+// forbids gating on, and since 0.128.1 it is no longer a fit of the
+// configured final against seatrate.FinalBudgetFloor either: 0.128.0 shipped
+// that rule and it refused a cold Aorus a 60 s contract the seat completes
+// in ~25 s ("fitted final 0 < floor 1024").
 //
 // A composite node's published seat_rate describes its single advertised
 // agent seat, not necessarily whatever layer remoteDecision would dispatch
@@ -46,18 +58,19 @@ func feasibleFinal(st Subtask, v NodeView) (ok bool, reason string) {
 	if !known || wallSec <= 0 {
 		return true, ""
 	}
-	cold := fitColdSec(policy, v)
-	fit := seatrate.FitFinalBudget(seatrate.FinalFit{
-		ConfiguredFinal: in.FinalBudget,
-		RemainingSec:    float64(wallSec) - cold,
-		OtherSec:        otherSecExcludingCold(in),
-		TokS:            policy.TokS,
-		Schema:          len(st.Contract.OutputSchema) > 0,
-	})
-	if !fit.Floored {
+	// One tool step plus a minimal final, no think block, no re-pack, no cold
+	// load — the doc comment above says why each of those stays out.
+	min := in
+	min.ColdLoadSec = 0
+	min.MaxSteps = 2 // one tool step, then the final
+	min.FinalBudget = minimalFinalTokens
+	min.RepackBudget = 0
+	min.ThinkingAuto, min.ThinkingOn = false, false
+	need := seatrate.Compute(min).TotalSec
+	if need <= wallSec {
 		return true, ""
 	}
-	return false, fmt.Sprintf("fitted final %d < floor %d at %.1f tok/s in %d s wall, cold %.0f s", fit.Fit, seatrate.FinalBudgetFloor, policy.TokS, wallSec, cold)
+	return false, fmt.Sprintf("one step and a %d-token answer need %d s at %.1f tok/s, the wall is %d s", minimalFinalTokens, need, policy.TokS, wallSec)
 }
 
 // seatWallFor builds the seatrate policy/input for st on v and sizes the
@@ -132,9 +145,11 @@ func etaFor(st Subtask, v NodeView) (etaSec float64, ok bool) {
 	cold := fitColdSec(policy, v)
 	fitBudget := in.FinalBudget
 	if wallSec > 0 {
+		// The final the node will actually budget (D-95): fitted to the WALL, not
+		// to the wall minus the cold load — the wall starts after admission.
 		fit := seatrate.FitFinalBudget(seatrate.FinalFit{
 			ConfiguredFinal: in.FinalBudget,
-			RemainingSec:    float64(wallSec) - cold,
+			RemainingSec:    float64(wallSec),
 			OtherSec:        otherSecExcludingCold(in),
 			TokS:            policy.TokS,
 			Schema:          len(st.Contract.OutputSchema) > 0,
@@ -145,20 +160,14 @@ func etaFor(st Subtask, v NodeView) (etaSec float64, ok bool) {
 	genIn.ColdLoadSec = 0
 	genIn.FinalBudget = fitBudget
 	if in.RepackBudget > 0 {
-		// Round 2 review, BUG item 7: a schema contract's re-pack is the
-		// SECOND TURN of the same fitted split — seatrate.FitFinalBudget's
-		// Schema:true branch already divides the available budget in half
-		// (turns=2) and hands back ONE shared number for both turns. Leaving
-		// RepackBudget at its UNFITTED value (the full configured final —
-		// FinalBudgets sets repack=final before any fit runs) double-counted
-		// the second turn at a size the wall was never proven to hold:
-		// worked example, a Lenovo-shaped {5.4 tok/s, cold 69, final 8192}
-		// seat on a 900 s auto wall fits to 2019 tokens, yet the un-fixed eta
-		// was 69 + 2019/5.4 + 8192/5.4 ~= 1960 s — nearly DOUBLE the wall the
-		// fit just proved feasible.
 		genIn.RepackBudget = fitBudget
 	}
 	gen := float64(seatrate.Compute(genIn).TotalSec)
+	if wallSec > 0 && gen > float64(wallSec) {
+		// The wall is the stop: a run never generates longer than its wall,
+		// whatever the configured budgets add up to (a floored fit still runs).
+		gen = float64(wallSec)
+	}
 	return cold + queueWaitFor(v) + gen, true
 }
 

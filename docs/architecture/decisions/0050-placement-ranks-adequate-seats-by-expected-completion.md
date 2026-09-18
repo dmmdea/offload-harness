@@ -54,17 +54,22 @@ tie-breakers `betterRemote` already had:
    local.inflight >= cfg.FleetConcurrencyLimit() || local.loading`, where `local` is `probeLocalBusy` read ONCE
    per Run and cached on the runner — the same one-probe invariant `route=spread` already held via
    `spreadLocalBusy`.
-2. **A feasibility floor from the fitted final** (W-05): `feasibleFinal` builds a `seatrate.SeatPolicy` from the
-   node's published `seat_rate`/`seat_budget` exactly as the delegator's poll-bound sizing (`autoPollBound`)
-   already does, sizes the contract's EFFECTIVE wall (explicit `timeout_sec`, or `seatrate.AutoWallFor` for a
-   `timeout_auto` contract), and runs `seatrate.FitFinalBudget` over what is left after a tri-state cold-load
-   charge (full only when `seat_loaded` is KNOWN false; half when a load is in progress; nothing when known
-   loaded or unknown — unknown is never credited toward a penalty, the same rule every other capacity field in
-   this package already follows). A floored fit excludes, naming the arithmetic; an unknown rate is no opinion.
+2. **A feasibility floor at the minimum viable final** (W-05, amended 0.128.1): `feasibleFinal` builds a
+   `seatrate.SeatPolicy` from the node's published `seat_rate`/`seat_budget` exactly as the delegator's
+   poll-bound sizing (`autoPollBound`) already does, sizes the contract's EFFECTIVE wall (explicit
+   `timeout_sec`, or `seatrate.AutoWallFor` for a `timeout_auto` contract), and asks one question of it: can
+   the seat produce one tool step plus a minimal 64-token final at its measured rate inside that wall — no
+   think block, no structured re-pack, and no cold-load charge, because admission pays the cold load outside
+   the wall (D-64). A seat that cannot is excluded, naming the arithmetic ("one step and a 64-token answer
+   need 42 s at 5.4 tok/s, the wall is 20 s"); an unknown rate is no opinion. As first shipped (0.128.0) this
+   item fitted the configured final against `seatrate.FinalBudgetFloor` over the wall MINUS a tri-state
+   cold-load charge; the deploy smoke refused a cold Aorus a 60 s contract it completes in ~25 s, so 0.128.1
+   moved the fitted final and the cold load where the rider puts them — into the eta (item 3).
 3. **Expected-completion ranking among quality-adequate seats** (W-11): `etaFor` estimates cold + the node's own
    queue wait (`queueWaitFor`, from `jobs_running`/`jobs_queued`/`max_concurrent_jobs`/`recent_agent_wall_sec`,
-   or the node's own `queue_wait_estimate_sec` when it publishes one) + the generation time for the FITTED
-   final. `betterRemote` and `scoreFit` (route=spread's own ranking axis) both fold this in per the contract's
+   or the node's own `queue_wait_estimate_sec` when it publishes one) + the generation time for the final
+   FITTED to the whole wall (0.128.1: not the wall minus cold; capped at the wall, so an eta never exceeds cold +
+   queue + wall). `betterRemote` and `scoreFit` (route=spread's own ranking axis) both fold this in per the contract's
    inferred shape: reasoning-shaped work still ranks window first, eta only as its tie-break; mechanical work
    now ranks eta first (replacing "smallest adequate seat wins"), window as its tie-break. Two candidates within
    20 % of each other are a near-tie, resolved by a deterministic FNV-1a draw seeded from the job id

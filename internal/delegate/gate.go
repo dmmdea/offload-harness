@@ -354,10 +354,10 @@ func eligibilityVerdict(st Subtask, r NodeView) (eligible bool, word, detail str
 	if st.Contract.Depth != 0 {
 		return false, "hop", fmt.Sprintf("depth %d (only an origin contract may travel — hop limit 1)", st.Contract.Depth)
 	}
-	// W-05 (register S-03/S-05, INV-5 rider clause (i)): a seat whose fitted
-	// final cannot clear seatrate.FinalBudgetFloor within its own effective
-	// wall is refused here, naming the arithmetic (fit.go's feasibleFinal).
-	// An unknown rate is no opinion — see its own doc.
+	// W-05 (register S-03/S-05, INV-5 rider clause (i)): a seat that cannot
+	// produce one tool step and a minimal answer within the contract's own
+	// effective wall is refused here, naming the arithmetic (eta.go's
+	// feasibleFinal). An unknown rate is no opinion — see its own doc.
 	if ok, reason := feasibleFinal(st, r); !ok {
 		return false, "slow", reason
 	}
