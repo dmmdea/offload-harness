@@ -6,6 +6,35 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.129.2] - 2026-09-18 - the lease hand-off is ordered: the warm-back belongs to the last holder, a lost lease never warms, the seat unit never restarts itself
+
+### Fixed
+- **A releasing holder's warm-back raced the next lease's `--unload-seat`** (register D-124, the Lenovo, 2026-09-18
+  02:57): a wrapper whose command had been cut warmed the agent seat after the next queued lease had already taken the
+  card, drained an "idle" seat and unloaded it; the unload killed the engine, the seat unit's `Restart=on-failure`
+  brought it back 20 s later on the new holder's EXCLUSIVE card, and three measurement rows read the seat's 10 GiB
+  as their own fit. Now: a queued `Acquire` registers itself under `<state>/gpu/waiters/` for as long as it polls
+  (pruned on read when the pid is gone; `gpu status` lists them as `queued:`, `offload_status.gpu_lease.queued`
+  carries the count); an unload stamps `<state>/gpu/seat-warm-owed`; a warm-back runs only while the card is still
+  ours (the wrapper checks its epoch, `gpu release --warm-seat --epoch N` checks the record is still N) AND nobody is
+  queued behind us — with a waiter it is skipped and said so, the successor unloads the seat again anyway, and the
+  marker makes the LAST releaser pay the one warm; a holder that lost the card never warms; the warm is heartbeat for
+  its length (a 27B load is minutes, the heartbeat TTL two) and losing the lease mid-warm cancels it loudly. A plain
+  `gpu release` prints a note when a warm is owed. Tests pin the wire order (unload, unload, warm) for two queued
+  `--unload-seat` leases, the no-warm after a lost lease, the heartbeat during the warm, and the same rule on
+  `gpu release --warm-seat`.
+- **The vLLM seat unit template restarted the engine on its own** (`Restart=on-failure`). `vllm-seat-cmd.sh` detaches
+  the moment the unit's invocation changes, so a systemd relaunch is a seat llama-swap no longer tracks and no lease
+  can order — the mechanism that put the 27B under another lease's window above. The template is now `Restart=no`
+  (ADR 0035 amended); a crashed seat is reloaded by llama-swap on the next request, which the lease gate orders like
+  any other load. Deployed by hand on the Lenovo's two seat units (backups beside them).
+- **The drain could read no run at all between two steps.** The run registry rewrites a run's record on every
+  step (tmp + rename, in-place on Windows when the rename meets a reader), and `Registry.List` skipped a record
+  it caught empty, absent or torn — a 2 ms poll then printed a run-less `1 in flight` line (the print-cadence
+  test failed 1 run in 5 on main) and, with the seat's gauge at zero between steps, would have counted the gap
+  toward "drained". `readRecord` now waits a record out (4 × 5 ms) before treating it as unreadable; a young torn
+  record is skipped, never listed and never removed.
+
 ## [0.129.1] - 2026-09-18 - fs_native bindings publish `reachable` from the seat wrapper's own verdict file
 
 ### Added

@@ -351,6 +351,27 @@ the lease (the card stays reserved, work keeps routing elsewhere) and exits non-
 as the fallback). The wrapper form warms the seat back (`GET /upstream/<model>/health`) BEFORE releasing, so the first
 contract placed here again finds a loaded seat; the detach form's counterpart is `gpu release --warm-seat`.
 
+**The warm-back belongs to the LAST holder (0.129.2, register D-124).** On 2026-09-18 02:57 a wrapper whose command
+had been cut warmed the seat while the next queued lease had already taken the card, drained an "idle" seat and unloaded
+it; the unload killed the engine, the seat unit's `Restart=on-failure` brought it back 20 s later on the new holder's
+exclusive card, and three measurement rows read the seat's 10 GiB as their own fit. Three rules now order the hand-off:
+
+- **A queued `Acquire` is visible.** While it polls it keeps a record under `<state>/gpu/waiters/` (pid, class, reason,
+  since; pruned on read when the pid is gone); `gpu status` lists them as `queued:` and `offload_status` carries the count.
+  This is information for the release path, never a claim — `meta.json` stays the sole arbiter.
+- **An unload stamps `<state>/gpu/seat-warm-owed`**, and a warm-back runs only when (1) the card is still ours — the
+  wrapper form checks its own epoch (`Lease.Check`), `gpu release --warm-seat --epoch N` checks the record is still N —
+  and (2) nobody is queued behind us. With a waiter the warm is skipped and said so (`NOT warming … back: N lease(s)
+  queued`): the successor unloads the seat again anyway, and the marker makes the LAST releaser pay the warm. A holder
+  that lost the card (an operator `gpu release`, a reclaim) never warms; the marker stays for the next last holder, and a
+  plain `gpu release` prints a note when a warm is owed.
+- **The warm is heartbeat for its length** (`drainRenewEvery`, 15 s), so a 27B load of several minutes cannot go stale
+  under the 120 s heartbeat TTL; losing the lease mid-warm cancels the request and is reported.
+
+The seat unit template no longer restarts on failure (`Restart=no`): `vllm-seat-cmd.sh` detaches the moment the unit's
+invocation changes, so a systemd relaunch is a seat llama-swap does not track and no lease can order. A crashed seat is
+reloaded by llama-swap on the next request, which the lease gate orders like any other load.
+
 Why: a gate that unloaded the production seat by hand collided with a delegation that made llama-swap reload it mid-profile
 (`No available memory for the cache blocks`, 2026-09-06 15:23), and the Lenovo's measurement windows stopped its fleet node
 outright, cutting in-flight remote work. With the lease advertised and enforced, the window is a lease, not an outage.

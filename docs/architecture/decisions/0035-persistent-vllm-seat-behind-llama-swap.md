@@ -69,7 +69,7 @@ Two ways to do that were on the table:
 
 ## Decision
 
-- The engine is a **system unit** (`vllm-<seat>.service`): ~~enabled at boot~~ **NOT enabled at boot (amended 2026-09-08 — a boot-enabled unit outlives llama-swap's idle window)**, `Restart=on-failure`,
+- The engine is a **system unit** (`vllm-<seat>.service`): ~~enabled at boot~~ **NOT enabled at boot (amended 2026-09-08 — a boot-enabled unit outlives llama-swap's idle window)**, ~~`Restart=on-failure`~~ **`Restart=no` (amended 2026-09-18, register D-124 — `vllm-seat-cmd.sh` detaches on a new invocation, so a systemd relaunch is a seat llama-swap no longer tracks; it put the 27B on a card another lease held exclusively)**,
   `KillMode=mixed` (the engine's worker processes die with the cgroup), binding the **Tailscale IPv4** on
   its port (the tailnet is the trust boundary, as for the fleet node). Its launch line lives in one script
   (`ExecStart`) that waits for the Tailscale address at boot instead of failing into the restart budget.
