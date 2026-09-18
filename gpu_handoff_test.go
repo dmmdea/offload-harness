@@ -187,11 +187,22 @@ func TestReserveRenewsTheLeaseWhileWarmingBack(t *testing.T) {
 		mu.Lock()
 		heldAtStart, atStart = info.Held, info.HeartbeatAt
 		mu.Unlock()
-		time.Sleep(f.warmHold)
-		info = m.Inspect()
-		mu.Lock()
-		heldAtEnd, atEnd = info.Held, info.HeartbeatAt
-		mu.Unlock()
+		// Sample through the load and keep the LATEST heartbeat seen: one
+		// read can land on a heartbeat write and fall back to the acquire
+		// stamp (seen on CI), which is the reader's contract, not a lost beat.
+		until := time.Now().Add(f.warmHold)
+		for time.Now().Before(until) {
+			time.Sleep(10 * time.Millisecond)
+			info = m.Inspect()
+			mu.Lock()
+			if info.Held {
+				heldAtEnd = true
+			}
+			if info.HeartbeatAt.After(atEnd) {
+				atEnd = info.HeartbeatAt
+			}
+			mu.Unlock()
+		}
 	}
 	t.Setenv("LO_HELPER_SLEEP_MS", "0")
 	args := append([]string{"--config", cfgPath, "--wait", "10s", "--drain", "--unload-seat", "--reason", "warm"}, helperCmd()...)

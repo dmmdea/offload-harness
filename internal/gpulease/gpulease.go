@@ -1125,8 +1125,24 @@ func (l *Lease) Renew() error {
 	if err := l.Check(); err != nil {
 		return err
 	}
-	return os.WriteFile(l.mgr.heartbeatPath(l.epoch),
-		[]byte(strconv.FormatInt(l.mgr.now().UnixMilli(), 10)), 0o666)
+	// ATOMIC. A truncate-then-write left a window in which a reader met an
+	// EMPTY heartbeat file, fell back to the acquisition stamp and read a live
+	// holder as hours stale — seen on CI (Linux) by a sampler during a warm-back
+	// (0.128.4). Under a waiter's one-second poll that flicker, combined with
+	// an expired window, is a reclaim of a live lease. Write beside, rename
+	// over; when the rename is refused (Windows, a reader holding the file)
+	// fall back to the in-place write rather than skipping the heartbeat.
+	path := l.mgr.heartbeatPath(l.epoch)
+	b := []byte(strconv.FormatInt(l.mgr.now().UnixMilli(), 10))
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o666); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return os.WriteFile(path, b, 0o666)
+	}
+	return nil
 }
 
 // Restamp rewrites the CURRENT lease record in place: the holder changing its
