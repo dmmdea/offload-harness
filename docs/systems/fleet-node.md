@@ -515,7 +515,7 @@ new is sampled (register C-05 stands: probing an unloaded seat through llama-swa
 | Health field | Type | Meaning |
 |---|---|---|
 | `jobs_admitting` | int, omitted when 0 | The subset of `jobs_running` whose worker has **not started generating**: it is still in the run's admission phase — cordon → swap pre-flight → warm → coherence probe — which the node budgets up to 300 s for. Counted from this process's own `gpuactivity` records with `phase: "admission"` (ADR 0041), never from the job store, which knows a worker took the job but not what that worker is waiting for. The registry is opened at most once per 2 s and **retried** — a briefly unresolvable state root does not silence the field for the life of the process — and a registry that cannot be opened or listed is logged once, because `0` is a legitimate value and silence would make the two indistinguishable. |
-| `seat_loaded` | bool, omitted when unread | llama-swap's `/running` says the agent seat is loaded. |
+| `seat_loaded` | bool, omitted when unread | llama-swap's `/running` says the agent seat is loaded. Served from the 30 s residency cache; a read older than two windows, never taken, or invalidated by an agent job that just finished on the seat waits (bounded by the 5 s probe timeout) for a fresh `/running` before answering (0.128.2, below). |
 | `seat_starting` | bool, omitted when unread | …and is still LOADING (llama-swap holds `/upstream/<seat>/…` for the whole load — 4m08s on the 27B TP2 seat, register D-92), so "loaded" is not yet "ready". |
 | `lease_exclusive` | bool, omitted when false | The held lease FENCES the cards: no model may be loaded onto them for its duration. |
 | `lease_draining` | bool, omitted when false | The held lease is still draining the seat. |
@@ -553,6 +553,20 @@ seat is not loaded either and no alias resolution is needed to say so, and healt
 `seat_loaded:false`. Only the unknowable case is withheld: absent ≠ idle, the same rule the VRAM
 snapshot and the reclaim verdict follow, with the reason on the node's log so an operator is not left
 guessing at two missing keys.
+
+**The residency cache is stale-while-revalidate with a bound (0.128.2).** The residency refresh
+(`agent_seat_resident`, `served_models`, `seat_loaded`/`seat_starting`) runs at most once per 30 s window,
+and a health read past that window used to serve the previous answer unconditionally while refreshing
+behind it — so the FIRST read after any quiet period reported the seat as it was before the last job,
+however long ago. The 0.128.1 slot census showed the cost: the delegator's eta charged `cold 28` for a
+seat whose admission wait was 6 ms (`chosen eta 326 s (cold 28 + 298 gen)`), because the only health read
+between the smoke that warmed the seat and the census was the census's own, two minutes later, and it got
+the pre-smoke answer. Now a read inside one more window (30–60 s old) keeps that shape; a read older than
+that, one on a never-probed node, or one after `Jobs.OnAgentDone` fired (an agent job finished on the seat
+WITHOUT an error — proof the seat is loaded; an errored job proves nothing and does not invalidate) waits
+for the refresh it kicked, bounded by the probe's own 5 s timeout, and serves whatever is published when the
+wait ends — the previous answer if llama-swap hung. Pinned by `residency_stale_test.go`: fresh beyond the
+band, previous inside it, bounded on a hung `/running`, invalidated by a finished job and not by an errored one.
 
 **`GET /fleet/jobs/{id}?wait=<seconds>` is a completion event.** An already-terminal job answers at
 once; anything else blocks on the job store's terminal broadcast — which the store has fired all

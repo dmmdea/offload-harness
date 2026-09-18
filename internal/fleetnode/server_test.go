@@ -1035,8 +1035,13 @@ func TestHealthAgentFieldsPresentWhenEnabled(t *testing.T) {
 	if m["agent_ctx_tokens"] != float64(16384) {
 		t.Fatalf("agent_ctx_tokens = %v, want 16384", m["agent_ctx_tokens"])
 	}
-	if v, present := m["agent_seat_resident"]; present {
-		t.Fatalf("agent_seat_resident = %v on the FIRST health (cache cold) — must fail closed until the probe lands, never block the handler", v)
+	// Since 0.128.2 a never-probed node's first read WAITS for the probe it
+	// kicks (bounded by residencyWaitBound) and answers with the probe's
+	// verdict; the fail-closed shape (field absent) survives only when the
+	// probe does not land inside the bound — pinned by
+	// TestHealthBoundsItsWaitOnAHungSeatRead, not here.
+	if m["agent_seat_resident"] != true {
+		t.Fatalf("agent_seat_resident = %v on the FIRST health of a never-probed node, want true: the read waits for the probe it kicks instead of serving an unread answer", m["agent_seat_resident"])
 	}
 	if n := probes.Load(); n > 3 {
 		t.Fatalf("roster probes after ONE health request = %d, want at most 3 (rosterServes + rosterServedModels + the seat-state read's alias resolution)", n)

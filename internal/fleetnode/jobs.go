@@ -188,6 +188,10 @@ type Jobs struct {
 	// onFinish, when set, is called (outside the lock) each time a job reaches a
 	// terminal state — the store steward counts turns with it (0.113.16).
 	onFinish func()
+	// onAgentDone, when set, is called (outside the lock) each time an AGENT
+	// job finishes WITHOUT an error — proof the agent seat is loaded right
+	// now; the server invalidates its cached seat state with it (0.128.2).
+	onAgentDone func()
 
 	// served is the tenant round-robin state (0.113.18): tenant → the claim
 	// sequence number at which that tenant was LAST handed a slot. claimLocked
@@ -207,6 +211,16 @@ type Jobs struct {
 func (j *Jobs) OnFinish(fn func()) {
 	j.mu.Lock()
 	j.onFinish = fn
+	j.mu.Unlock()
+}
+
+// OnAgentDone registers fn to run after every agent job that reaches JobDone
+// (never on an error: a job that failed because the seat never answered is
+// no proof the seat is loaded). Same contract as OnFinish: called outside
+// the store's lock, must return quickly.
+func (j *Jobs) OnAgentDone(fn func()) {
+	j.mu.Lock()
+	j.onAgentDone = fn
 	j.mu.Unlock()
 }
 
@@ -859,6 +873,10 @@ func (j *Jobs) finish(id string, data json.RawMessage, errStr string) {
 	jb.terminalAt = j.now()
 	jb.finishedAt = jb.terminalAt
 	fn := j.onFinish
+	var agentDone func()
+	if jb.agent && errStr == "" {
+		agentDone = j.onAgentDone
+	}
 	// The terminal transition IS the event a long poll waits on (WaitTerminal).
 	// execute() broadcasts too, but only for the slot it frees and only on the
 	// path that ran a closure — this one fires wherever a job turns terminal,
@@ -871,6 +889,9 @@ func (j *Jobs) finish(id string, data json.RawMessage, errStr string) {
 	// that and TestJobsOnFinishFiresOutsideTheLock hung for 600 s.
 	if fn != nil {
 		fn()
+	}
+	if agentDone != nil {
+		agentDone()
 	}
 }
 

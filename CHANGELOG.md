@@ -6,6 +6,17 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **A node's health served the seat state from before its last job, however long ago** (found by the
+  0.128.1 slot census: the delegator's eta charged `cold 28` for a seat whose admission wait was 6 ms). The
+  residency cache (resident / served roster / `seat_loaded`) was stale-while-revalidate with no bound: any
+  read past the 30 s window served the previous answer and refreshed behind it, so the first read after a
+  quiet period always described the seat as it was before the last job. A read older than two windows,
+  never taken, or invalidated because an agent job just finished on the seat (`Jobs.OnAgentDone`, success
+  only) now waits for the fresh `/running`, bounded by the 5 s probe timeout; a read 30–60 s old keeps the
+  old shape. Both eta directions were affected: a cold charge on a warm seat, and no cold charge on a seat
+  that had idle-unloaded since the cached read.
+
 ## [0.128.1] - 2026-09-17 - the feasibility floor asks only for a minimum viable final, the eta is fitted to the wall, forced-remote refusals carry per-node verdicts
 
 ### Changed
