@@ -28,8 +28,9 @@ MP_PORT="${SEAT_MP_PORT:-18796}"
 # The MP server also opens an HTTP frontend (LMCache 0.5.x: /, cache control, observability). Its upstream default is
 # 0.0.0.0:8080 - on a WSL2 distro in mirrored networking that is the HOST's LAN + tailnet, and 8080 is somebody else's port on
 # every box in this fleet (measured 2026-09-18: the production MP server logged `Uvicorn running on http://0.0.0.0:8080`).
-# Loopback only, on its own port (reference pairing 18797 engine / 18796 MP ZMQ / 18793 MP HTTP); seat.env overrides it.
-MP_HTTP_PORT="${SEAT_MP_HTTP_PORT:-18793}"
+# Loopback only, on its own port (reference pairing 18797 engine / 18796 MP ZMQ / 18790 MP HTTP — 18790 is a listed safe pick
+# on every port file of the fleet; 18793 is the Qube's LiteLLM reservation); seat.env overrides it.
+MP_HTTP_PORT="${SEAT_MP_HTTP_PORT:-18790}"
 L1_GB="${SEAT_L1_GB:-8}"
 CHUNK="${SEAT_CHUNK:-784}"
 # The cache server (L2) is OPT-IN: empty = same-box tier only. `${VAR-default}` (no colon) so that
