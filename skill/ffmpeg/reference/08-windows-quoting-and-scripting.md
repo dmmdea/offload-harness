@@ -37,7 +37,7 @@ PowerShell-specific bites [measured]:
 - PS 5.1 strips embedded `"` from arguments to native programs (variant 12); pwsh 7 (`$PSNativeCommandArgumentPassing=Windows`) passes them. Write text with single quotes inside the graph, never double.
 - `$LASTEXITCODE` after `& ffmpeg … 2>&1 | Select-Object -First 2` was **−1** (5.1) or **0** (7.6) for a run that really exited 0/−22: `Select-Object -First N` stops the pipeline and kills ffmpeg. Capture with `2>$null` or `2>&1 | Out-String` (measured correct in both versions), or redirect stderr to a file.
 - `-f null NUL` and `-passlogfile x` work from PS (files `x-0.log`, `x-0.log.mbtree`); `-f null -` also works.
-- PowerShell 5.1 remote shells (laptop node/editing rig over SSH) have no `&&`; chain with `;` or `if ($LASTEXITCODE -eq 0) {…}`.
+- PowerShell 5.1 remote shells (laptop/editing rig over SSH) have no `&&`; chain with `;` or `if ($LASTEXITCODE -eq 0) {…}`.
 
 cmd-specific [measured]:
 - In a `.cmd`/`.bat` file `%` must be doubled (`%%{pts\:hms}`, `100%%`); on the interactive prompt single `%` is fine. `^` is the escape character; `"` groups.

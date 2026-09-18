@@ -85,7 +85,7 @@ Never call `Gimp.get_pdb().run_procedure(...)` — it does not exist (AttributeE
 - GUI: `new_canvas` (display_opened true), `add_text` (0.53 s), `export_image` (PNG 6303 B,
   verified 320×200 rgb24 72 dpi with ffprobe/Pillow) all worked; `list_fonts(filter="Sans")`
   returned the 453-font list filtered.
-- Through the stdio server (`uv run --directory D:/tools/gimp-mcp gimp_mcp_server.py`):
+- Through the stdio server (`uv run --directory <dev>/tools/gimp-mcp gimp_mcp_server.py`):
   initialize 0.9 s, `check_server` → `{connected:true, gimp_version:"3.2.4"}`,
   `get_image_metadata`, `call_api(api_path="exec", args=["python-fu-eval", ["Gimp.version()"]])`
   → `["3.2.4"]`. With no image open tools raise "No images are currently open in GIMP".

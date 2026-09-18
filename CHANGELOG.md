@@ -6,6 +6,15 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- **`skill/` tool reference libraries refreshed from the operator's current copies and DaVinci Resolve added** (register J-22):
+  `skill/ffmpeg` (12 files were a week behind: ffmpeg 9.0 traps, NVENC, subtitles, quoting, failure modes),
+  `skill/gimp` (10 files: two hosts measured, text-outline correction), new `skill/davinci-resolve`
+  (Studio 21.1 catalog, CLI + sidecar, playbook, render, failure modes; `PROVENANCE.md` beside it).
+  Scrubbed by the evidence repo's script plus a supplemental pass for the editor's account, the
+  private video-pipeline repo, the dev and cloud drive paths and a tailnet address; the identity lint
+  passes. The unredacted originals stay in the operator's `~/.claude/skills`.
+
 ## [0.129.0] - 2026-09-18 - a contract can name the layer it runs on (the Lenovo fast digest seat by name); the digest-adr-hard-8 contract set
 
 ### Added

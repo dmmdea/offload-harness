@@ -9,7 +9,7 @@ All measured 2026-09-01 on the workstation, ffmpeg 8.1.2, `src1080.mp4` (30 fps,
 - `-to` is an END position "in the output"; after an input `-ss` the output timeline starts at 0, so `-to` behaves as a duration unless `-copyts` is set [measured below]. `-t` is a duration. `-sseof -N` seeks relative to end of file.
 - `-copyts` keeps input timestamps (no reset to zero); `-start_at_zero` shifts them back to 0 while keeping the copyts semantics.
 
-What the trac Seeking page adds [doc-trac, digested by the Linux node seat 2026-09-01 and spot-checked]:
+What the trac Seeking page adds [doc-trac, digested by the edge node seat 2026-09-01 and spot-checked]:
 "As of FFmpeg 2.1, when transcoding: `-ss` is also frame-accurate even as input option" (old
 keyframe-only behaviour via `-noaccurate_seek`); "when `-ss` used before `-i` only, the timestamps
 will be reset according to 0, so `-t` and `-to` shall be the same; to keep original timestamps
@@ -125,7 +125,7 @@ Verify: expected frames = source frames × (1/factor) at the same fps; duration 
 | `rubberband=pitch=1.25` | pitch up, same length | 4.000 |
 | `rubberband=tempo=2.0` | 2× speed, pitch preserved (higher quality than atempo) | measured 4.000 with `-t 4` on the output; 2.0 without |
 Rule: put `-t` BEFORE `-i` (input option) when you want "take N seconds of source", after when you want "produce N seconds".
-`rubberband` is present on the workstation and the Linux node [measured].
+`rubberband` is present on the workstation and the edge node [measured].
 
 ## Trim by frame numbers [doc]
 `-vf trim=start_frame=90:end_frame=210,setpts=PTS-STARTPTS` (+ `atrim=start=3:end=7,asetpts=PTS-STARTPTS`) — exact, re-encode only. Or `select='between(n,90,209)'`.
