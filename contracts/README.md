@@ -114,6 +114,28 @@ are pinned `eol=lf` in `.gitattributes` so a seat's LF diff applies on every che
 Eight self-contained digest subtasks (inline `context`: this repo's own ADRs), used by
 `scripts/parallel-sessions-gate.ps1` to run K concurrent 8-wide fan-outs against one llama-swap
 and prove the seat-contention wait fires instead of deferring (ADR 0032). Needs no `--read-root`.
+## `digest-adr-hard-8.json` — the HARDER set: three ADRs per contract, four anchored findings per document (register G-36)
+
+The standard instrument (INV-6) SATURATED on `digest-8.json`: every 27B-class arm scored accuracy ~9 on
+2026-09-18 and the top pair came back TIE, which the instrument names a measurement failure to fix by rebuilding
+the set, never by ranking on speed. This fixture is that rebuild. Each of its eight contracts inlines THREE ADRs
+(24 ADRs, none of the eight `digest-8.json` uses and never 0023 or 0029, whose text the pre-push leak scan refuses; 20-25k chars per contract) and asks, per document, for the
+decision, the enforcing mechanism, the admitted exception and the most consequential number, each quoted
+verbatim and prefixed with the file name, plus one cross-document dependency finding and a two-sentence summary
+(`min_items:findings:12`). The grounded check is ONE `regex:` alternation per contract over one distinctive
+token per document, drawn from the seat-extracted anchor corpus (`Ecosystem/Benchmarks and Optimizations/
+2026-09-17-h04-adr-anchor-corpus/anchors.md`, 195 anchors re-verified verbatim against the ADR bytes when the set
+was built): a figure with four or more digits or a separator (`1568`, `19.53`, `0.307`, `10,338`), else a
+code identifier from the mechanism anchor (`evict_costs`, `LOCAL_OFFLOAD_ORIGIN`, `gpulease.QueueHint`), never a
+one- or two-digit integer. Same inline `context`, `timeout_sec` 900 (three documents on a 4 tok/s seat need it):
+
+```powershell
+local-offload delegate --contract contracts/digest-adr-hard-8.json --route local
+```
+
+Built by `2026-09-01-vllm-lmcache-results/stage3d-drivers/build_adr_hard_set.py` in the results folder; regenerate
+there when an ADR changes, never edit the JSON by hand (the ground truth the judge reads is the inlined bytes).
+
 ## `digest-8-grounded.json` — the same eight digests with a doc-only anchor each (register D-100)
 
 `digest-8.json`'s acceptance is SHAPE-ONLY (`min_items:findings:3` + `nonempty:summary`; the intake lint

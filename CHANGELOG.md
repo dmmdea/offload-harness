@@ -21,6 +21,11 @@ Versioning: [SemVer](https://semver.org/).
   1,597.8 s, blind coverage 4.65 vs 8.53, so by name only, never the default) — deferred "no layer
   serves an agent contract" when requested. Red tests on both seams
   (`internal/placement/decide_requested_layer_test.go`, `internal/delegate/gate_requested_layer_test.go`).
+- `contracts/digest-adr-hard-8.json` (register G-36): the harder digest set for the standard quality instrument —
+  eight contracts of three ADRs each (24 ADRs disjoint from `digest-8.json`), four verbatim anchored findings per
+  document plus a cross-document finding, `min_items:findings:12` and one grounded `regex:` alternation per contract
+  built from the 2026-09-17 anchor corpus (195 anchors re-verified against the ADR bytes at build time). Rebuilt
+  because the instrument saturated on `digest-8.json` (every 27B-class arm at accuracy ~9, top pair TIE, INV-6).
 
 ## [0.128.2] - 2026-09-17 - the node's residency cache no longer serves the pre-last-job seat state: a too-stale read waits for the probe, a completed call on the seat writes seat_loaded from both doors
 
