@@ -1055,6 +1055,13 @@ func localSeatView(ctx context.Context, cfg config.Config) map[string]any {
 		inFlight, verdict := localSeatVerdict(rd, rerr)
 		v["in_flight"] = inFlight
 		v["verdict"] = verdict
+		// Review round 1, LOW item 5: mirroring ctx_probe_error below — a
+		// verdict of "unknown" says the read failed, but not WHY, and an
+		// operator reading offload_status has no other way to see the
+		// seatload.Inflight error (it never reaches a log at this call site).
+		if rerr != nil {
+			v["inflight_probe_error"] = rerr.Error()
+		}
 	}
 
 	c, err := swapclient.New(cfg.Endpoint, localSeatProbeTimeout)
