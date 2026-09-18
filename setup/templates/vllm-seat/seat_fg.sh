@@ -25,6 +25,11 @@ MODEL="${SEAT_MODEL:-RedHatAI/Qwen3.8-27B-INT4}"
 NAME="${SEAT_NAME:-qwen3.8-27b-vllm}"
 PORT="${SEAT_PORT:-18797}"
 MP_PORT="${SEAT_MP_PORT:-18796}"
+# The MP server also opens an HTTP frontend (LMCache 0.5.x: /, cache control, observability). Its upstream default is
+# 0.0.0.0:8080 - on a WSL2 distro in mirrored networking that is the HOST's LAN + tailnet, and 8080 is somebody else's port on
+# every box in this fleet (measured 2026-09-18: the production MP server logged `Uvicorn running on http://0.0.0.0:8080`).
+# Loopback only, on its own port (reference pairing 18797 engine / 18796 MP ZMQ / 18793 MP HTTP); seat.env overrides it.
+MP_HTTP_PORT="${SEAT_MP_HTTP_PORT:-18793}"
 L1_GB="${SEAT_L1_GB:-8}"
 CHUNK="${SEAT_CHUNK:-784}"
 # The cache server (L2) is OPT-IN: empty = same-box tier only. `${VAR-default}` (no colon) so that
@@ -140,6 +145,10 @@ if ss -ltnp 2>/dev/null | grep -q ":$PORT "; then
   echo "seat_fg: REFUSING to start — :$PORT is already bound: $(ss -ltnp 2>/dev/null | grep ":$PORT " | grep -oE 'users:\(.*\)' | head -1)"
   exit 1
 fi
+if ss -ltnp 2>/dev/null | grep -q ":$MP_HTTP_PORT "; then
+  echo "seat_fg: REFUSING to start — the MP HTTP port :$MP_HTTP_PORT is already bound: $(ss -ltnp 2>/dev/null | grep ":$MP_HTTP_PORT " | grep -oE 'users:\(.*\)' | head -1)"
+  exit 1
+fi
 
 # One MP server per engine start, with THIS start's settings (a reused unit keeps stale L1/chunk/L2).
 # The store keeps its pages; only the staging buffer is rebuilt.
@@ -154,7 +163,7 @@ if ! systemd-run --unit="$MP_UNIT" --collect --working-directory="$WORK" -p Time
     -p StandardOutput=append:"$WORK/lmcache-mp.log" -p StandardError=append:"$WORK/lmcache-mp.log" \
     -E CUDA_DEVICE_ORDER=PCI_BUS_ID -E HOME=/root -E LMCACHE_DISABLE_BANNER=1 -E LMCACHE_LOG_LEVEL=INFO \
     -E PATH="$VENV/bin:/usr/local/bin:/usr/bin:/bin" "${PP_ENV[@]}" \
-    "$VENV/bin/lmcache" server --host 127.0.0.1 --port "$MP_PORT" --chunk-size "$CHUNK" \
+    "$VENV/bin/lmcache" server --host 127.0.0.1 --port "$MP_PORT" --http-host 127.0.0.1 --http-port "$MP_HTTP_PORT" --chunk-size "$CHUNK" \
       --separate-object-groups --l1-size-gb "$L1_GB" --eviction-policy LRU --supported-transfer-mode auto "${L2ARG[@]}"; then
   echo "seat_fg: $MP_UNIT failed to start (systemd-run); see $WORK/lmcache-mp.log"; exit 1
 fi

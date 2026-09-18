@@ -74,6 +74,10 @@ type Spec struct {
 	// box MUST take its own, or it serves the production seat's traffic — a day of
 	// measurements was voided that way.
 	MPPort int `json:"mp_port,omitempty"`
+	// MPHTTPPort is the MP server's HTTP frontend (loopback only). LMCache defaults it to
+	// 0.0.0.0:8080, which under WSL2 mirrored networking is the host's every interface and
+	// on this fleet is always somebody else's port; 0 = Port-4 (18797 engine / 18793 HTTP).
+	MPHTTPPort int `json:"mp_http_port,omitempty"`
 	// Device is CUDA_VISIBLE_DEVICES for the engine. It may name SEVERAL cards
 	// ("0,2"), in which case TensorParallel must equal how many — see its comment.
 	Device string `json:"device,omitempty"`
@@ -754,6 +758,7 @@ func (s Spec) tokens(r Runtime) map[string]string {
 		"__POOL_ALIAS__":       pool,
 		"__TENSOR_PARALLEL__":  strconv.Itoa(s.tensorParallel()),
 		"__MP_PORT__":          strconv.Itoa(s.mpPort()),
+		"__MP_HTTP_PORT__":     strconv.Itoa(s.mpHTTPPort()),
 		"__LMCACHE_OVERLAY__":  r.LMCacheOverlay,
 		"__DISTRO__":           r.Distro,
 		"__WSL_SEAT_DIR__":     r.wslSeatDir(),
@@ -840,6 +845,14 @@ func (s Spec) mpPort() int {
 		return s.MPPort
 	}
 	return s.Port - 1
+}
+
+// mpHTTPPort is the MP server's loopback HTTP frontend port, defaulted beside the engine's.
+func (s Spec) mpHTTPPort() int {
+	if s.MPHTTPPort > 0 {
+		return s.MPHTTPPort
+	}
+	return s.Port - 4
 }
 
 // launch is the artifact set this seat is started by, defaulted.
