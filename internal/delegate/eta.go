@@ -144,6 +144,20 @@ func etaFor(st Subtask, v NodeView) (etaSec float64, ok bool) {
 	genIn := in
 	genIn.ColdLoadSec = 0
 	genIn.FinalBudget = fitBudget
+	if in.RepackBudget > 0 {
+		// Round 2 review, BUG item 7: a schema contract's re-pack is the
+		// SECOND TURN of the same fitted split — seatrate.FitFinalBudget's
+		// Schema:true branch already divides the available budget in half
+		// (turns=2) and hands back ONE shared number for both turns. Leaving
+		// RepackBudget at its UNFITTED value (the full configured final —
+		// FinalBudgets sets repack=final before any fit runs) double-counted
+		// the second turn at a size the wall was never proven to hold:
+		// worked example, a Lenovo-shaped {5.4 tok/s, cold 69, final 8192}
+		// seat on a 900 s auto wall fits to 2019 tokens, yet the un-fixed eta
+		// was 69 + 2019/5.4 + 8192/5.4 ~= 1960 s — nearly DOUBLE the wall the
+		// fit just proved feasible.
+		genIn.RepackBudget = fitBudget
+	}
 	gen := float64(seatrate.Compute(genIn).TotalSec)
 	return cold + queueWaitFor(v) + gen, true
 }
