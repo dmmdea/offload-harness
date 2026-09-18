@@ -6,6 +6,16 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **The feasibility floor refused seats that answer, and charged a cold load the wall never pays** (0.128.0 regression,
+  found by the deploy smoke: a cold Aorus was refused a 60 s contract it completes in ~25 s — `fitted final 0 < floor 1024`
+  — while the Lenovo slipped through on the fitter's "no opinion" early return and printed an eta of 4,682 s for a 60 s
+  wall). `feasibleFinal` now asks the INV-5 rider's question and nothing more: can the seat produce one tool step and a
+  minimal 64-token answer inside the wall, with no think block, no re-pack and NO cold load (admission pays the cold load
+  outside the wall, D-64). Everything above that floor is a ranking matter: `etaFor` fits the final to the WALL (not the
+  wall minus cold), keeps the cold load in the eta, and caps generation at the wall, so an eta never exceeds cold + wall.
+  The forced-remote "no eligible remote" result now carries the deal's per-node verdict line beside the aggregate text.
+
 ## [0.128.0] - 2026-09-17 - placement by expected completion: feasibility from the fitted final, quality-adequate seats ranked by ETA with power-of-two-choices, per-node headroom in the deal, busy means a job in flight, one-word verdicts per node
 
 ### Added

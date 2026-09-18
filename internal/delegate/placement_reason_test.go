@@ -21,7 +21,10 @@ func TestRunPlacementReasonNamesEveryRemoteWithAVerdict(t *testing.T) {
 	_, chosenURL := acceptingNode(t, "node-chosen", "qube from chosen", nil)
 
 	slow, slowURL := acceptingNode(t, "node-slow", "qube from slow (must not be dispatched)", func(f *fakeNode) {
-		f.seatRate = map[string]any{"tok_s": 5.4, "cold_load_sec": 69.0, "samples": 4, "min_turn_sec": 1594}
+		// 0.3 tok/s: one tool step and a 64-token answer need ~640 s, so a 300 s
+		// wall cannot hold ANY answer — the rider's refusal, not a slow-but-able
+		// seat (5.4 tok/s answers this class in ~40 s and is a ranking matter).
+		f.seatRate = map[string]any{"tok_s": 0.3, "cold_load_sec": 69.0, "samples": 4, "min_turn_sec": 1594}
 		f.seatBudget = map[string]any{"step_tokens": 8192, "thinking": "off"}
 	})
 

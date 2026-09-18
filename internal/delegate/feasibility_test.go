@@ -47,14 +47,18 @@ func oneStepSchemaContract(timeoutSec int, auto bool) Subtask {
 	}
 }
 
-func TestFeasibleFinalExcludesASeatThatCannotHoldTheFloor(t *testing.T) {
+func TestFeasibleFinalExcludesAWallTooShortForOneStepAndAMinimalAnswer(t *testing.T) {
 	v := lenovoShapedSlow()
-	st := oneStepSchemaContract(300, false)
+	// 5.4 tok/s: one tool step (128 tok + 6 s prefill) and a 64-token final need
+	// ~42 s. A 20 s wall cannot hold ANY answer — that, and only that, is the
+	// INV-5 rider's refusal. (The cold load is NOT charged: admission pays it
+	// outside the wall.)
+	st := oneStepSchemaContract(20, false)
 	ok, reason := feasibleFinal(st, v)
 	if ok {
-		t.Fatalf("a 5.4 tok/s seat with a 300 s explicit wall must not hold the floor; reason=%q", reason)
+		t.Fatalf("a 5.4 tok/s seat cannot produce one step and a minimal answer in 20 s; reason=%q", reason)
 	}
-	for _, want := range []string{"fitted final", "5.4"} {
+	for _, want := range []string{"one step", "5.4", "the wall is 20 s"} {
 		if !strings.Contains(reason, want) {
 			t.Errorf("reason = %q, want it to contain %q", reason, want)
 		}
@@ -62,6 +66,54 @@ func TestFeasibleFinalExcludesASeatThatCannotHoldTheFloor(t *testing.T) {
 	// remoteEligible must refuse on the same arithmetic.
 	if remoteEligible(st, v) {
 		t.Fatal("remoteEligible must refuse a seat feasibleFinal excludes")
+	}
+}
+
+// The 0.128.0 regression, pinned: fleet-smoke's contract (an explicit 60 s wall,
+// the default 12 steps, a schema, thinking auto) reached a COLD Aorus and was
+// refused "fitted final 0 < floor 1024" although the seat completes it in ~25 s;
+// the cold load was subtracted from a wall that never pays it, and a floor sized
+// for a full answer was applied to a one-token reply. Feasibility asks only
+// whether one step and a minimal answer fit; the fitted final is the eta's.
+func TestFeasibleFinalAdmitsAShortExplicitWallOnAColdSeat(t *testing.T) {
+	v := eligibleRemote()
+	loaded := false
+	v.SeatRate = &SeatRateView{TokS: 38.9, ColdLoadSec: 28.4, Samples: 242, MinTurnSec: 134}
+	v.SeatBudget = &SeatBudgetView{StepTokens: 1024, Thinking: "auto"}
+	v.SeatLoaded = &loaded
+	st := oneStepSchemaContract(60, false)
+	st.Contract.MaxSteps = 12
+	st.Contract.Thinking = ""
+	ok, reason := feasibleFinal(st, v)
+	if !ok {
+		t.Fatalf("a cold 38.9 tok/s seat must be eligible for a 60 s contract it completes in ~25 s; reason=%q", reason)
+	}
+	if !remoteEligible(st, v) {
+		t.Fatal("remoteEligible must admit the cold fast seat on a short explicit wall")
+	}
+	// And the slow seat on a 300 s wall is a RANKING matter (eta), not a refusal:
+	// it answered this class of contract in the smoke at 26 s after admission.
+	slow := lenovoShapedSlow()
+	if ok, reason := feasibleFinal(oneStepSchemaContract(300, false), slow); !ok {
+		t.Fatalf("a 5.4 tok/s seat holds one step and a minimal answer in 300 s; reason=%q", reason)
+	}
+}
+
+// The eta never exceeds cold + wall: the wall is the stop, so a floored fit on a
+// slow seat reads as "cold, then the whole wall", never as the configured
+// budgets' arithmetic (0.128.0 printed "eta 4682 s" for a 60 s wall).
+func TestEtaForNeverExceedsColdPlusWall(t *testing.T) {
+	v := lenovoShapedSlow()
+	st := oneStepSchemaContract(60, false)
+	eta, ok := etaFor(st, v)
+	if !ok {
+		t.Fatal("a published rate must yield an eta")
+	}
+	if eta > 69+60+0.5 {
+		t.Fatalf("eta = %.0f s, want <= cold 69 + wall 60", eta)
+	}
+	if eta < 69 {
+		t.Fatalf("eta = %.0f s, want >= the cold load it must pay", eta)
 	}
 }
 

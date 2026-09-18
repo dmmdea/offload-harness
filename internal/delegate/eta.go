@@ -41,23 +41,35 @@ import (
 // agent seat, not necessarily whatever layer remoteDecision would dispatch
 // to; this reads it anyway (same imprecision autoPollBound already accepts
 // for the poll bound) rather than inventing a second rate source.
+// minimalFinalTokens is the smallest answer a contract can be said to have:
+// the feasibility floor asks only whether the wall holds one tool step and
+// this many tokens of final at the seat's rate.
+const minimalFinalTokens = 64
+
 func feasibleFinal(st Subtask, v NodeView) (ok bool, reason string) {
 	policy, in, wallSec, known := seatWallFor(st, v)
 	if !known || wallSec <= 0 {
 		return true, ""
 	}
-	cold := fitColdSec(policy, v)
-	fit := seatrate.FitFinalBudget(seatrate.FinalFit{
-		ConfiguredFinal: in.FinalBudget,
-		RemainingSec:    float64(wallSec) - cold,
-		OtherSec:        otherSecExcludingCold(in),
-		TokS:            policy.TokS,
-		Schema:          len(st.Contract.OutputSchema) > 0,
-	})
-	if !fit.Floored {
+	// The refusal is the INV-5 rider's "below a minimum viable final" and nothing
+	// more: can this seat produce ANY answer inside the wall? One tool step (the
+	// read of the context doc) plus a minimal final, no think block, no re-pack,
+	// and NO cold load — admission pays the cold load OUTSIDE the wall (D-64 warm
+	// on the admission budget), so a wall shorter than the load is not infeasible.
+	// Everything above this floor is a RANKING matter for etaFor. (0.128.0 shipped
+	// the fit-to-floor rule here and excluded a cold Aorus from a 60 s smoke
+	// contract it completes in ~25 s; the fitted final belongs to the eta only.)
+	min := in
+	min.ColdLoadSec = 0
+	min.MaxSteps = 2 // one tool step, then the final
+	min.FinalBudget = minimalFinalTokens
+	min.RepackBudget = 0
+	min.ThinkingAuto, min.ThinkingOn = false, false
+	need := seatrate.Compute(min).TotalSec
+	if need <= wallSec {
 		return true, ""
 	}
-	return false, fmt.Sprintf("fitted final %d < floor %d at %.1f tok/s in %d s wall, cold %.0f s", fit.Fit, seatrate.FinalBudgetFloor, policy.TokS, wallSec, cold)
+	return false, fmt.Sprintf("one step and a %d-token answer need %d s at %.1f tok/s, the wall is %d s", minimalFinalTokens, need, policy.TokS, wallSec)
 }
 
 // seatWallFor builds the seatrate policy/input for st on v and sizes the
@@ -132,9 +144,11 @@ func etaFor(st Subtask, v NodeView) (etaSec float64, ok bool) {
 	cold := fitColdSec(policy, v)
 	fitBudget := in.FinalBudget
 	if wallSec > 0 {
+		// The final the node will actually budget (D-95): fitted to the WALL, not
+		// to the wall minus the cold load — the wall starts after admission.
 		fit := seatrate.FitFinalBudget(seatrate.FinalFit{
 			ConfiguredFinal: in.FinalBudget,
-			RemainingSec:    float64(wallSec) - cold,
+			RemainingSec:    float64(wallSec),
 			OtherSec:        otherSecExcludingCold(in),
 			TokS:            policy.TokS,
 			Schema:          len(st.Contract.OutputSchema) > 0,
@@ -145,20 +159,14 @@ func etaFor(st Subtask, v NodeView) (etaSec float64, ok bool) {
 	genIn.ColdLoadSec = 0
 	genIn.FinalBudget = fitBudget
 	if in.RepackBudget > 0 {
-		// Round 2 review, BUG item 7: a schema contract's re-pack is the
-		// SECOND TURN of the same fitted split — seatrate.FitFinalBudget's
-		// Schema:true branch already divides the available budget in half
-		// (turns=2) and hands back ONE shared number for both turns. Leaving
-		// RepackBudget at its UNFITTED value (the full configured final —
-		// FinalBudgets sets repack=final before any fit runs) double-counted
-		// the second turn at a size the wall was never proven to hold:
-		// worked example, a Lenovo-shaped {5.4 tok/s, cold 69, final 8192}
-		// seat on a 900 s auto wall fits to 2019 tokens, yet the un-fixed eta
-		// was 69 + 2019/5.4 + 8192/5.4 ~= 1960 s — nearly DOUBLE the wall the
-		// fit just proved feasible.
 		genIn.RepackBudget = fitBudget
 	}
 	gen := float64(seatrate.Compute(genIn).TotalSec)
+	if wallSec > 0 && gen > float64(wallSec) {
+		// The wall is the stop: a run never generates longer than its wall,
+		// whatever the configured budgets add up to (a floored fit still runs).
+		gen = float64(wallSec)
+	}
 	return cold + queueWaitFor(v) + gen, true
 }
 

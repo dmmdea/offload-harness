@@ -2954,10 +2954,17 @@ func (r *runner) attempt(ctx context.Context, i int, contract core.AgentContract
 			// not capacity): the established "route=remote: no eligible
 			// remote" Unplaced defer, unchanged.
 			why, class := r.noEligibleRemote(st, r.autoViews, r.autoProbeErrs)
+			// The deal narrated every node it saw (D-105); keep that beside the
+			// aggregate verdict so the operator reads WHICH gate refused WHOM.
+			placementReason := "route=remote: no eligible remote"
+			if strings.TrimSpace(d.reason) != "" {
+				placementReason += "; " + d.reason
+				why += " — " + d.reason
+			}
 			return finish(PlacedResult{
 				Node: localView.NodeID, Seat: localView.AgentSeat,
 				Unplaced:        true,
-				PlacementReason: "route=remote: no eligible remote",
+				PlacementReason: placementReason,
 				Result: core.AgentWireResult{
 					SchemaVersion: core.AgentWireSchemaVersion,
 					Deferred:      true,
