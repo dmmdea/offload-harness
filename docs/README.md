@@ -84,7 +84,7 @@ repo — they keep their locations.
   the coding agent, add a model, diagnose failures, update
 - [FLEET-NODE.md](FLEET-NODE.md) — running a fleet node (`fleet-serve` / `fleet-measure`), including
   the VRAM-footprint validation procedure
-- [ROADMAP.md](ROADMAP.md) — planned direction
+- [ROADMAP.md](ROADMAP.md) — pointer to the plan of record (plan v3, outside the repo) and to the frozen 2026-08-26 roadmap body
 
 Installing the stack is its own runbook: [../setup/SETUP-AGENT.md](../setup/SETUP-AGENT.md).
 
