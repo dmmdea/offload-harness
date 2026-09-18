@@ -861,6 +861,12 @@ func (m *Manager) Acquire(class Class, opts Options) (*Lease, error) {
 		held.Info.ExpiresAt.After(m.now().Add(opts.Wait)) {
 		return nil, err
 	}
+	// Say that we are queued (register D-124): the holder's release path reads
+	// the waiter list to decide whether warming the seat back is worth anything
+	// — a warm the next holder unloads again is a 3-minute load bought for
+	// nothing, and an UNORDERED one lands a seat on a card someone else holds.
+	unregister := m.registerWaiter(class, opts)
+	defer unregister()
 	deadline := m.now().Add(opts.Wait)
 	for {
 		remaining := deadline.Sub(m.now())

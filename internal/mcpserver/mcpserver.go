@@ -667,6 +667,16 @@ func localLeaseView(ctx context.Context, cfg config.Config) map[string]any {
 		"verdict":    act.Verdict,
 		"activity":   act.Map(),
 	}
+	// The line behind the holder and the warm the last of them owes the seat
+	// (0.128.3, register D-124) — read-only, nothing is acquired.
+	if m, err := gpulease.OpenAt(cfg.GPULockPath, cfg.StateDir); err == nil {
+		if ws := m.Waiters(); len(ws) > 0 {
+			view["queued"] = len(ws)
+		}
+		if seat := m.SeatWarmOwed(); seat != "" {
+			view["seat_warm_owed"] = seat
+		}
+	}
 	if !info.Held {
 		view["note"] = "free (unreserved): a bench or training run on this box is exposed until it takes the lease — wrap it in the queue_with command"
 		return view

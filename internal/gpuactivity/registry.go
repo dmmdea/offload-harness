@@ -386,12 +386,8 @@ func (r *Registry) List(now time.Time) []Run {
 			continue
 		}
 		path := filepath.Join(r.dir, name)
-		b, rerr := os.ReadFile(path)
-		if rerr != nil {
-			continue
-		}
-		var run Run
-		if json.Unmarshal(b, &run) != nil {
+		run, ok := readRecord(path)
+		if !ok {
 			// Debris only once it is old enough not to be a write in progress.
 			if fi, serr := e.Info(); serr == nil && now.Sub(fi.ModTime()) > HeartbeatTTL {
 				_ = os.Remove(path)
@@ -406,6 +402,32 @@ func (r *Registry) List(now time.Time) []Run {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].StartedAtMs < out[j].StartedAtMs })
 	return out
+}
+
+// readRecord reads one run record, retrying a read that lands on a write in
+// progress. A record is rewritten on every step (write: tmp + rename, with an
+// in-place fallback on Windows when the rename meets a reader), so a reader
+// polling every few milliseconds can meet a momentarily absent, empty or torn
+// file. Without the retry that read returned NO run, and the drain printed a
+// run-less "1 in flight" line between two steps — and, with the seat's gauge
+// at zero between steps, would have counted the gap toward "drained"
+// (0.128.3, register D-124's gate hunt: 1 in 5 runs of the print-cadence test).
+func readRecord(path string) (Run, bool) {
+	const attempts, pause = 4, 5 * time.Millisecond
+	for i := 0; i < attempts; i++ {
+		b, err := os.ReadFile(path)
+		if err == nil {
+			var run Run
+			if json.Unmarshal(b, &run) == nil {
+				return run, true
+			}
+		} else if os.IsNotExist(err) && i > 0 {
+			// Listed a moment ago, gone now and still gone: ended, not mid-write.
+			return Run{}, false
+		}
+		time.Sleep(pause)
+	}
+	return Run{}, false
 }
 
 // OnSeat is List filtered to the runs on any of the named seats (id or alias,
