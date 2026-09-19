@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -157,15 +158,56 @@ func (s *Server) accelCall(ctx context.Context, id, tool string, args map[string
 // sinceMs is the wall since start in whole milliseconds, for a ledger row.
 func sinceMs(start time.Time) int64 { return time.Since(start).Milliseconds() }
 
-// accelPlacementNode reads placement.node from a forwarded accelerator result
-// (accelremote stamps it), so the ledger row names the node that ran the call.
+// accelPlacementNode names the node that ran a forwarded accelerator call so
+// the ledger row (and the PAIR card built from it) can say where it ran.
+// accelremote stamps the result with a typed Placement — a map only when the
+// value has been through JSON — and the name PAIR knows the node by is the
+// host of its base URL (delegate_remotes are base URLs; PAIR members are
+// hostnames), so that wins over the harness's own node id.
 func accelPlacementNode(out map[string]any) string {
-	if pl, ok := out["placement"].(map[string]any); ok {
+	switch pl := out["placement"].(type) {
+	case accelremote.Placement:
+		if h := hostOfBase(pl.Base); h != "" {
+			return h
+		}
+		return pl.Node
+	case *accelremote.Placement:
+		if pl == nil {
+			return ""
+		}
+		if h := hostOfBase(pl.Base); h != "" {
+			return h
+		}
+		return pl.Node
+	case map[string]any:
+		if b, ok := pl["base"].(string); ok {
+			if h := hostOfBase(b); h != "" {
+				return h
+			}
+		}
 		if n, ok := pl["node"].(string); ok {
 			return n
 		}
 	}
 	return ""
+}
+
+// hostOfBase returns the host of a base URL ("http://node-b:18811" -> "node-b"),
+// or "" when the string is not in that form.
+func hostOfBase(base string) string {
+	s := strings.TrimSpace(base)
+	if i := strings.Index(s, "://"); i >= 0 {
+		s = s[i+3:]
+	} else {
+		return ""
+	}
+	if i := strings.IndexAny(s, "/?#"); i >= 0 {
+		s = s[:i]
+	}
+	if i := strings.LastIndex(s, ":"); i >= 0 && !strings.Contains(s[i:], "]") {
+		s = s[:i]
+	}
+	return strings.Trim(s, "[]")
 }
 
 // handleAccelTool adapts one accelerator tool: parse args, refuse an empty

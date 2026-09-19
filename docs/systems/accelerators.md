@@ -267,7 +267,7 @@ temp_c, loaded:[...], models_missing:[...], runtime:{litert, libedgetpu}}` — r
 ## Limits
 
 - **Single in-flight inference** — one sidecar process serialises NPU access by construction.
-- **NPU calls are in the savings ledger since 0.130.3** (register E-04): one row per accelerator MCP call — task = the sidecar tool, `model_tier` = the device id, `<node>:<device>` for a forwarded call, `<device>@fleet` for a forward that never reached a node — with latency and the defer verdict; an empty required argument writes no row.
+- **NPU calls are in the savings ledger since 0.130.3** (register E-04): one row per accelerator MCP call — task = the sidecar tool, `model_tier` = the device id, `<node>:<device>` for a forwarded call (node = the host of the answering node's base URL, the name PAIR knows the member by), `<device>@fleet` for a forward that never reached a node — with latency and the defer verdict; an empty required argument writes no row. Until 0.130.5 a successful forward was also recorded as `<device>@fleet`: `accelremote` stamps a typed `Placement` and the ledger helper only read a JSON map. The PAIR card built from the row carries the device as its engine and runs on that node (`docs/systems/pair-workloads.md`).
 - **Forwarded calls ship the whole image** (cap 8 MiB, base64 in the job); a fan-out of
   accelerator calls across several nodes is not a thing yet — one call, one node.
 - Windows cannot see the device as an "NPU" (no MCDM driver) — irrelevant to this route, which
