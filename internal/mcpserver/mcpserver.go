@@ -361,7 +361,7 @@ func (s *Server) buildServer(version string) *mcp.Server {
 	srv.AddTool(&mcp.Tool{
 		Name:        "agent_run",
 		Description: "Run the LOCAL autonomous agent loop on a goal: a free local model plans and iterates over read-only tools (list_dir, read_file) plus the offload_* cascade, multi-step, and returns a final answer. NOTE the advertised set may be NARROWED: a box can set a default agent_profile (small-seat tiers do, because an un-narrowed tool list measurably collapses a small planner), and a narrowed profile such as \"research\" drops search_files and the whole offload_* cascade. The response reports the profile applied and the post-narrowing tool count, so check those rather than assuming the full set. DELEGATE a bounded multi-step read-and-reason job — map how X flows through a repo, summarize a doc set, extract facts across many files — to the local stack to keep that work out of your own context. It is READ-ONLY: it cannot write files, run commands, or touch the network. The savings ledger is untouched (the agent's offload calls run record=false). Returns {output, steps, stop_reason, tools, model}; on any failure it returns deferred:true with a reason and you do the task yourself. On a composite box (ADR 0039) the result also carries `placed` — which layer and seat ran it and why — and an explicitly named seat that belongs to an opt-in layer is admitted only if that layer's guards admit it right now.",
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"goal":{"type":"string","description":"the task for the local agent to accomplish"},"read_root":{"type":"string","description":"absolute directory the agent may read; it cannot read outside it (default: the server working dir)"},"max_steps":{"type":"integer","description":"hard step budget (default 12)"},"model":{"type":"string","description":"planner model id; must support tool-calling (default: the tier's agent seat (agent_model), falling back to the configured workhorse)"},"timeout_sec":{"type":"integer","description":"wall-clock budget in seconds (default: the tier's agent_timeout_sec, else 180)"},"context_class":{"type":"string","enum":["","long"],"description":"long = ask for the box's biggest long-context layer (the three-card seat where a box declares one, otherwise the pair's 262k seat) under its display-floor, host-RAM and presence guards and a prefill feasibility check; omit for the default placement"},"setup_actions":{"type":"array","maxItems":8,"items":{"type":"object","properties":{"tool":{"type":"string"},"args":{"type":"object"}},"required":["tool"]},"description":"tool calls REPLAYED before the model's first turn (ADR 0036 P2): each runs through the seat's env rules and dispatch like a model call and lands in the transcript as an assistant tool_call + its result, so the first turn already holds what the model would otherwise spend its first steps fetching (e.g. read_file of the document it must digest). Not charged to max_steps; bounded to half the compaction budget (the rest are recorded not-run). A failing action is an observation, never an abort. Response carries setup_ran and step-0 trace entries with setup:true"},"profile":{"type":"string","enum":["general","edit","build","research","github"],"description":"task profile: narrows the tool list and injects worked examples. MEASURED: a small planner given the full tool set often calls NO tool at all, so a narrowed profile is the single most effective lever. Prefer \"build\" for reading and reasoning over a codebase; \"general\" advertises everything. OMITTING this falls back to the box's configured agent_profile, and only then to \"general\" — so a small-seat tier seeded with a narrowed profile gets it without every caller remembering to ask. Tools this read-only front door does not grant are dropped, along with their examples."},"thinking":{"type":"string","enum":["auto","on","off"],"description":"planner think-block policy (0.115.8). auto (default; or the box's agent_thinking): every step thinks, and an EMPTY final is re-issued once with thinking off at 4x the step budget, then the run stops as reasoning_starved/empty (a defer, never an empty answer). off: every planner call renders in non-thinking mode (chat_template_kwargs enable_thinking:false) — use for grounded extraction on a thinking seat that spends its budget in the think block. on: never send the kwarg"},"judge":{"type":"boolean","description":"end-of-run ADVISORY audit: one extra same-seat completion grading the run's flagged effects (parked/failed/unknown/self-flagged) for the operator review. Never gates anything. Default false"}},"required":["goal"]}`),
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"route":{"type":"string","enum":["","local","auto","remote","spread","queue"],"description":"WHERE the run goes (register C-46): omit/local = this box's agent seat with read_root (the default); remote/auto/spread/queue = one contract through the delegator's placement — read_root and model do NOT travel (the executing node reads its own root and runs its own seat), so use it for self-contained goals and setup_actions; the response names node, placement and seat"},"goal":{"type":"string","description":"the task for the local agent to accomplish"},"read_root":{"type":"string","description":"absolute directory the agent may read; it cannot read outside it (default: the server working dir)"},"max_steps":{"type":"integer","description":"hard step budget (default 12)"},"model":{"type":"string","description":"planner model id; must support tool-calling (default: the tier's agent seat (agent_model), falling back to the configured workhorse)"},"timeout_sec":{"type":"integer","description":"wall-clock budget in seconds (default: the tier's agent_timeout_sec, else 180)"},"context_class":{"type":"string","enum":["","long"],"description":"long = ask for the box's biggest long-context layer (the three-card seat where a box declares one, otherwise the pair's 262k seat) under its display-floor, host-RAM and presence guards and a prefill feasibility check; omit for the default placement"},"setup_actions":{"type":"array","maxItems":8,"items":{"type":"object","properties":{"tool":{"type":"string"},"args":{"type":"object"}},"required":["tool"]},"description":"tool calls REPLAYED before the model's first turn (ADR 0036 P2): each runs through the seat's env rules and dispatch like a model call and lands in the transcript as an assistant tool_call + its result, so the first turn already holds what the model would otherwise spend its first steps fetching (e.g. read_file of the document it must digest). Not charged to max_steps; bounded to half the compaction budget (the rest are recorded not-run). A failing action is an observation, never an abort. Response carries setup_ran and step-0 trace entries with setup:true"},"profile":{"type":"string","enum":["general","edit","build","research","github"],"description":"task profile: narrows the tool list and injects worked examples. MEASURED: a small planner given the full tool set often calls NO tool at all, so a narrowed profile is the single most effective lever. Prefer \"build\" for reading and reasoning over a codebase; \"general\" advertises everything. OMITTING this falls back to the box's configured agent_profile, and only then to \"general\" — so a small-seat tier seeded with a narrowed profile gets it without every caller remembering to ask. Tools this read-only front door does not grant are dropped, along with their examples."},"thinking":{"type":"string","enum":["auto","on","off"],"description":"planner think-block policy (0.115.8). auto (default; or the box's agent_thinking): every step thinks, and an EMPTY final is re-issued once with thinking off at 4x the step budget, then the run stops as reasoning_starved/empty (a defer, never an empty answer). off: every planner call renders in non-thinking mode (chat_template_kwargs enable_thinking:false) — use for grounded extraction on a thinking seat that spends its budget in the think block. on: never send the kwarg"},"judge":{"type":"boolean","description":"end-of-run ADVISORY audit: one extra same-seat completion grading the run's flagged effects (parked/failed/unknown/self-flagged) for the operator review. Never gates anything. Default false"}},"required":["goal"]}`),
 	}, s.handleAgentRun)
 
 	// offload_ask: the ONE-CALL delegation entry. Registered unconditionally and
@@ -376,7 +376,7 @@ func (s *Server) buildServer(version string) *mcp.Server {
 	srv.AddTool(&mcp.Tool{
 		Name:        "offload_ask",
 		Description: "Ask a bounded question ABOUT SPECIFIC FILES and have a FREE local seat answer it — the one-call form of agent_delegate. You supply question + paths and nothing else: the harness builds the whole contract (goal, {answer,evidence} output schema, and an acceptance check ANCHORED to distinctive tokens mined from the files themselves) and runs it on the local agent seat. REACH FOR IT THE MOMENT YOU ARE ABOUT TO OPEN MORE THAN TWO FILES to answer something bounded — that is exactly where reading them yourself costs more than asking. The files are read and inlined by the HARNESS under read_root, so your own context never pays for them. Good fits: \"which key sets the queue cap\" over three config files; \"which function does this handler call before dispatch\" over a handler plus its helpers; \"what changed between these two versions of the spec\". NOT this tool: unbounded exploration with no file list (use agent_run — it searches for its own files); anything that writes or runs (this lane is read-only); a multi-part job needing several contracts (agent_delegate); and above all anything whose answer is a JUDGEMENT rather than a fact the files state — security or credential review, an architecture decision, or the final does-it-actually-work verification. A free seat reports what the files say; it does not own a call you are accountable for. Returns {answer, evidence, verified, acceptance, acceptance_failures?, seat, steps, stop_reason, cache_hit} — evidence is the exact lines the seat relied on so you can spot-check instead of re-reading. verified is a CITATION check, not a correctness verdict: it asks whether the published answer quoted one of a few distinctive tokens mined from these files, never whether the answer is right. Those tokens are chosen to be things only these files would say — real identifiers wherever the files have them — but it is a heuristic, so treat verified:true as \"this answer demonstrably read the files\", not as proof of a verbatim quotation. On verified:false read acceptance_failures (which names the check that did not match) and then the evidence — it is a prompt to look, not proof the answer is wrong, and a question whose subject is a short or question-named identifier can leave nothing anchorable at all. Typical latency is 30-90 s: this buys back the context those files would have cost you, not wall-clock. cache_hit tells you how the answer was obtained: an IDENTICAL repeat within the same session — same question, same read_root, and the same file BYTES — returns the stored answer without spending the seat again, and reports cache_hit:true. A REPEAT DOES NOT RE-ROLL THE SEAT: an identical call after a verified:false answer returns that same unverified answer again, cache_hit:true, with no new seat run — to get a second attempt, change the question, which is a different key and always a fresh run. It is keyed on CONTENT, so editing any attached file also makes the next call a fresh run automatically; a stale answer cannot be served. Do NOT read this as a general speedup: a DIFFERENT question over the same files pays full seat time, because nothing keeps a warm model context between calls. Caps: at most 16 files, 128 KiB per file, 256 KiB total. It REFUSES (deferred:true) when the files hold no token distinctive enough to ground the check, rather than handing back an answer nothing verified. On any failure it returns deferred:true with a reason and you read the files yourself.",
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"question":{"type":"string","description":"the bounded question to answer FROM THESE FILES — one question, answerable from what you attach"},"paths":{"type":"array","items":{"type":"string"},"minItems":1,"maxItems":16,"description":"the files to answer from, relative to read_root or absolute inside it (<=16 files, <=128 KiB each, <=256 KiB total)"},"read_root":{"type":"string","description":"absolute directory the paths are read from; nothing outside it can be read (default: the server working dir)"}},"required":["question","paths"]}`),
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"route":{"type":"string","enum":["","local","auto","remote","spread","queue"],"description":"WHERE the question runs (register C-46): omit/local = this box's agent seat; remote/auto/spread/queue = the delegator's placement (the files ride inline in the contract, so any node can answer); the response names node, placement and seat"},"question":{"type":"string","description":"the bounded question to answer FROM THESE FILES — one question, answerable from what you attach"},"paths":{"type":"array","items":{"type":"string"},"minItems":1,"maxItems":16,"description":"the files to answer from, relative to read_root or absolute inside it (<=16 files, <=128 KiB each, <=256 KiB total)"},"read_root":{"type":"string","description":"absolute directory the paths are read from; nothing outside it can be read (default: the server working dir)"}},"required":["question","paths"]}`),
 	}, s.handleAsk)
 
 	// offload_review_diff: the CLEAN-CONTEXT review lane. Registered
@@ -2025,6 +2025,9 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 		// ContextClass (ADR 0039): "" or "long" — ask the placement table for
 		// the box's biggest long-context layer. Inert on a box with no layers.
 		ContextClass string `json:"context_class"`
+		// Route (register C-46): "" / local = this box; anything else goes
+		// through the delegator as one contract.
+		Route string `json:"route"`
 	}
 	if bad := parseArgs(req.Params.Arguments, &in); bad != nil {
 		return bad, nil
@@ -2035,6 +2038,30 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 	}
 	if err := core.ValidateAgentSetupActions(in.SetupActions); err != nil {
 		return jsonResult(map[string]any{"deferred": true, "reason": err.Error()})
+	}
+	if route := strings.TrimSpace(in.Route); route != "" && route != "local" {
+		// register C-46 (S-27): agent_run always ran local, so a remote seat could
+		// not be named from this door. With a route the goal becomes one contract
+		// through the delegator's single-contract path: read_root and model do
+		// not travel (the executing node reads its own root and runs its own
+		// seat), so this is for self-contained goals and setup_actions.
+		contract := core.AgentContract{SchemaVersion: core.AgentWireSchemaVersion, Goal: in.Goal, MaxSteps: in.MaxSteps, TimeoutSec: in.TimeoutSec,
+			Profile: in.Profile, Thinking: in.Thinking, SetupActions: in.SetupActions, ContextClass: in.ContextClass, Door: "agent_run"}
+		if in.TimeoutSec <= 0 {
+			contract.TimeoutAuto = true
+		}
+		wire, extra, note, ok := s.contractOnFleet(ctx, contract, route, "")
+		if !ok {
+			return jsonResult(map[string]any{"deferred": true, "reason": note, "route": route, "steps": 0})
+		}
+		out := map[string]any{"deferred": wire.Deferred, "output": wire.Output, "steps": wire.Steps, "seat": wire.Seat, "stop_reason": wire.StopReason, "route": route}
+		if wire.Deferred {
+			out["reason"], out["defer_class"] = wire.Reason, wire.DeferClass
+		}
+		if len(wire.Structured) > 0 {
+			out["structured"] = json.RawMessage(wire.Structured)
+		}
+		return jsonResult(withReviewExtra(out, extra))
 	}
 	cfg := s.p.Cfg()
 	readRoot := in.ReadRoot
@@ -2425,6 +2452,7 @@ func (s *Server) handleAsk(ctx context.Context, req *mcp.CallToolRequest) (*mcp.
 		Question string   `json:"question"`
 		Paths    []string `json:"paths"`
 		ReadRoot string   `json:"read_root"`
+		Route    string   `json:"route"`
 	}
 	if bad := parseArgs(req.Params.Arguments, &in); bad != nil {
 		return bad, nil
@@ -2491,9 +2519,22 @@ func (s *Server) handleAsk(ctx context.Context, req *mcp.CallToolRequest) (*mcp.
 	// No context deadline is imposed here: the contract's TimeoutSec is the wall
 	// ceiling and runAgentTask enforces it as its own deadline, so wrapping it
 	// again would give the run two budgets that could disagree.
-	wire, rerr := run(ctx, contract, delegate.LocalOptions{})
-	if rerr != nil {
-		return jsonResult(map[string]any{"deferred": true, "reason": rerr.Error()})
+	var wire core.AgentWireResult
+	var fleetExtra map[string]any
+	if route := strings.TrimSpace(in.Route); route != "" && route != "local" {
+		// register C-46: the contract is self-contained (the files ride inline), so it
+		// can run wherever the delegator places it.
+		w, extra, note, ok := s.contractOnFleet(ctx, contract, route, "")
+		if !ok {
+			return jsonResult(map[string]any{"deferred": true, "reason": note, "route": route})
+		}
+		wire, fleetExtra = w, extra
+	} else {
+		w, rerr := run(ctx, contract, delegate.LocalOptions{})
+		if rerr != nil {
+			return jsonResult(map[string]any{"deferred": true, "reason": rerr.Error()})
+		}
+		wire = w
 	}
 	if wire.Deferred {
 		return jsonResult(map[string]any{
@@ -2585,6 +2626,7 @@ func (s *Server) handleAsk(ctx context.Context, req *mcp.CallToolRequest) (*mcp.
 		// so it is always a fresh run and the field would have nothing to distinguish.
 		"cache_hit": false,
 	}
+	out = withReviewExtra(out, fleetExtra)
 	if len(failures) > 0 {
 		out["acceptance_failures"] = failures
 	}
@@ -2753,6 +2795,15 @@ func (s *Server) handleReviewDiff(ctx context.Context, req *mcp.CallToolRequest)
 // reason every other failure in this lane is a defer: the caller's next action is
 // the same either way.
 func (s *Server) reviewOnFleet(ctx context.Context, contract core.AgentContract, fence string) (core.AgentWireResult, map[string]any, string, bool) {
+	return s.contractOnFleet(ctx, contract, "remote", fence)
+}
+
+// contractOnFleet runs ONE contract through the delegator at the named route —
+// the single-contract RunWith path reviewOnFleet built for the fence, now also
+// behind `route` on agent_run and offload_ask (register C-46, S-27: those doors
+// always ran local, so a remote seat could not be named from this box's door at
+// all). The extras say where it ran.
+func (s *Server) contractOnFleet(ctx context.Context, contract core.AgentContract, route, fence string) (core.AgentWireResult, map[string]any, string, bool) {
 	dispatch := s.reviewFleet // test seam
 	if dispatch == nil {
 		dispatch = delegate.RunWith
@@ -2763,7 +2814,7 @@ func (s *Server) reviewOnFleet(ctx context.Context, contract core.AgentContract,
 	}
 	// remotes nil: RunWith reads the configured delegate_remotes, which is the
 	// fleet this box is a delegator for. A review names no node of its own.
-	results, _, err := dispatch(ctx, s.p.Cfg(), local, []core.AgentContract{contract}, "remote", nil,
+	results, _, err := dispatch(ctx, s.p.Cfg(), local, []core.AgentContract{contract}, route, nil,
 		&delegate.RunOptions{Quarantine: s.quarantine, Tenant: s.tenant})
 	switch {
 	case err != nil:
