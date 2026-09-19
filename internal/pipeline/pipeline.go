@@ -3734,6 +3734,17 @@ func (p *Pipeline) attempt(ctx context.Context, req core.Request, built tasks.Bu
 				if low {
 					meta.LatencyMs = time.Since(start).Milliseconds()
 					meta.EscSource = src
+					// The escalating attempt is a call the seat ANSWERED: its own
+					// row — this tier, this margin, the gate that sent it up —
+					// goes to the ledger before the defer (register D-127). Until
+					// this, the defer returned first and the only trace of a
+					// margin escalation was the successor's row (esc_source
+					// carried, margin 0) plus the labels sidecar: 4 rows in
+					// 9,217 for 43 real firings. Same record gate as a success
+					// (counterfactual RunTier calls write nothing).
+					if record {
+						p.record(req.Task, meta, entryChars)
+					}
 					// a larger, more decisive tier may clear the threshold
 					return core.Deferf(reason, gen.Content, meta), true
 				}

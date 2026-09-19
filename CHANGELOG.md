@@ -7,6 +7,11 @@ Versioning: [SemVer](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- **A margin escalation is now written to the ledger** (register D-127): the confidence gate's defer returned before
+  `p.record`, so the escalating attempt — a call the seat answered — left no row of its own; `esc_source` counted 4 rows
+  in 9,217 for 43 real firings that lived only in the labels sidecar. The escalating attempt records its row (its tier,
+  its margin, the gate that fired, not deferred) before the defer, under the same `record` gate as a success. Red test
+  `TestMarginEscalationRecordsTheEscalatingAttempt`.
 - **`calibrate` had never fitted a threshold, and the cause was file plumbing, not the 60-row floor**
   (register D-126): the only classify/triage label writer appends to the confhead labels sidecar
   (`confhead_labels_path`) while `calibrate` read the ledger alone, whose rows of the same calls carry the
