@@ -6,6 +6,11 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Verified
+- **A vLLM seat's logprobs reach the confidence gate unchanged** (register D-128, measured 2026-09-18 on the Qube pair seat):
+  vLLM's `/v1/chat/completions` answers the OpenAI `logprobs.content[]` shape the client decodes; the legacy
+  `top_logprobs` list-of-dicts belongs to `/v1/completions`, which the harness never calls. Pinned by
+  `TestVLLMChatLogprobShapeDecodesIntoTopAlternatives` and `TestMeasuredVLLMTokenStreamYieldsAMargin`.
 ### Added
 - **Every cascade ledger row now names its door** (register A-102 (e)): `door` on the request, the meta and the ledger row —
   the MCP tool name (`offload_summarize` …), the CLI command (`cli:summarize` …) or `fleet` for a request a node received from
