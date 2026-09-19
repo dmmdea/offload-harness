@@ -108,6 +108,10 @@ answers "is this good enough, and if not, is it worth trying a bigger model?"
   three consumers that compare a margin against stored history — `health` baselines, the exemplar
   harvest gate, and conformal `calibrate` — each keep only the rows on the scale the box emits and
   report what they excluded.
+- **The confhead is the fourth margin reader, and it is NOT scale-filtered.** `confhead.FeatureRow`
+  feeds `margin` to the learned p(correct) head as a raw feature, training on stored rows and
+  predicting on live ones. A flip mid-ledger trains it on a mixture, so retrain the head from
+  single-scale rows after any flip (or leave `confhead_enabled` off until you have).
 - **Flipping the flag is a re-derivation, not a config edit.** Set it only with a threshold derived
   from rows carrying `margin_scale: full`, passed through the openjev / gold-set gate; and re-measure
   the meta-router's mr-verifier CC1 ceilings afterwards — it reads `meta.margin` as a graded

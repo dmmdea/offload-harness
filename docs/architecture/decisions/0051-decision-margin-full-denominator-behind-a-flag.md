@@ -62,6 +62,11 @@ never fires into one that fires on everything.
 - Turning the flag on without a threshold DISABLES the margin gate. That is the intended failure
   mode — a disabled gate that says so beats a gate silently comparing across scales — but it means
   a flip with no threshold loses the escalation signal until one is set.
+- A FOURTH consumer reads margins and is deliberately not filtered here: `confhead.FeatureRow` feeds
+  `margin` to the learned p(correct) head as a raw feature. It trains on stored rows and predicts on
+  live ones, so a flip mid-ledger trains it on a mixture; the head must be retrained from
+  single-scale rows after a flip. Left as a documented flip precondition rather than a silent
+  filter, because the head's threshold is itself derived from the same rows.
 - The meta-router's `mr-verifier` reads `meta.margin` as a graded confidence. Its CC1 ceilings were
   measured on matched-scale numbers and must be re-measured after any flip. No change is made in
   that repo here.

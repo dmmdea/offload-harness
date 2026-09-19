@@ -171,6 +171,8 @@
   "max_retries": 1,
   "classify_min_confidence": 0.88,
   "confidence_margin_threshold": 0.65,
+  "confidence_margin_full_denominator": false,
+  "confidence_margin_threshold_full": 0,
   "max_input_chars": 24000,
   "gcf_compact": true,
   "cache_path": "~/.local-offload/cache.db",
