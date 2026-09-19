@@ -45,6 +45,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/config"
@@ -274,8 +275,10 @@ type restamper func(fn func(*gpulease.Meta)) error
 // maintainSeat runs the --drain / --unload-seat steps against the config's
 // seat: drain until deadline, then turn the DRAINING stamp into EXCLUSIVE when
 // the window asked for it (or just clear it), then unload. Errors are returned
-// as-is; the caller decides what to do with the lease.
-func maintainSeat(cfg config.Config, restamp restamper, drain bool, deadline time.Time, unload, exclusive bool) error {
+// as-is; the caller decides what to do with the lease. owed, when non-nil, is
+// told the seat's name after a successful unload: the warm-owed marker the
+// LAST releasing holder pays (register D-124).
+func maintainSeat(cfg config.Config, restamp restamper, drain bool, deadline time.Time, unload, exclusive bool, owed func(seat string)) error {
 	endpoint, model, err := seatTarget(cfg)
 	if err != nil {
 		return err
@@ -310,21 +313,104 @@ func maintainSeat(cfg config.Config, restamp restamper, drain bool, deadline tim
 		if err := unloadSeat(ctx, maintenanceClient, endpoint, model); err != nil {
 			return err
 		}
+		if owed != nil {
+			owed(model)
+		}
 		fmt.Fprintf(os.Stderr, "gpu reserve: %s unloaded\n", model)
 	}
 	return nil
 }
 
-// warmBack reloads the config's seat and reports the outcome on stderr; a
-// failed warm-back is loud but never fatal (the lease release must still run).
-func warmBack(cfg config.Config) {
+// warmGuard is what a warm-back must hold to be allowed to touch the card
+// (register D-124): a way to prove the card is still ours (held), the list of
+// leases queued behind us (waiters), and the warm-owed marker (owed, clear).
+// A warm that cannot prove ownership, or that has a successor queued, does
+// not run — the successor unloads the seat again anyway, and an unordered
+// warm lands a seat on a card another exclusive lease holds.
+type warmGuard struct {
+	// held returns nil while the card is still ours; it is checked before the
+	// warm and, when renew is set, on every heartbeat during it.
+	held func() error
+	// renew heartbeats the lease during the warm (a 27B load is minutes, the
+	// heartbeat TTL is two): nil for a caller whose lease is heartbeat elsewhere.
+	renew   func() error
+	waiters func() []gpulease.Waiter
+	owed    func() string
+	clear   func()
+}
+
+// warmBackGuarded reloads the config's seat when the guard allows it and
+// reports the decision on out. It never returns an error: a skipped or failed
+// warm-back is loud but not fatal — the lease release must still run (a leaked
+// lease costs every caller, a cold seat costs one on-demand load).
+func warmBackGuarded(cfg config.Config, g warmGuard, out io.Writer) {
 	endpoint, model, err := seatTarget(cfg)
 	if err != nil {
 		return
 	}
-	if err := warmSeat(context.Background(), maintenanceClient, endpoint, model); err != nil {
-		fmt.Fprintf(os.Stderr, "gpu: warm-back of %s failed: %v\n", model, err)
+	if g.held != nil {
+		if herr := g.held(); herr != nil {
+			fmt.Fprintf(out, "gpu: NOT warming %s back: the card is no longer ours (%v); the seat reloads on demand under whoever holds it\n", model, herr)
+			return
+		}
+	}
+	if g.waiters != nil {
+		if ws := g.waiters(); len(ws) > 0 {
+			names := make([]string, 0, len(ws))
+			for _, w := range ws {
+				names = append(names, fmt.Sprintf("pid %d (%s, queued %s)", w.PID, w.Class, time.Since(w.Since()).Round(time.Second)))
+			}
+			fmt.Fprintf(out, "gpu: NOT warming %s back: %d lease(s) queued behind this one — %s; the warm belongs to the last holder\n", model, len(ws), strings.Join(names, ", "))
+			return
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stopRenew := func() {}
+	if g.renew != nil {
+		stopRenew = renewUntilLost(g.renew, drainRenewEvery, func(lerr error) {
+			fmt.Fprintf(out, "gpu: LEASE LOST while warming %s back (%v); abandoning the warm\n", model, lerr)
+			cancel()
+		})
+	}
+	werr := warmSeat(ctx, maintenanceClient, endpoint, model)
+	stopRenew()
+	if werr != nil {
+		fmt.Fprintf(out, "gpu: warm-back of %s failed: %v\n", model, werr)
 		return
 	}
-	fmt.Fprintf(os.Stderr, "gpu: %s warmed back\n", model)
+	if g.clear != nil {
+		g.clear()
+	}
+	fmt.Fprintf(out, "gpu: %s warmed back\n", model)
+}
+
+// renewUntilLost calls renew on a ticker until stop is called; the first
+// failure is reported through lost and ends the loop. stop returns only once
+// the loop has exited, so no renew lands after the caller has moved on to
+// releasing (a late heartbeat file for a released epoch would be debris).
+func renewUntilLost(renew func() error, every time.Duration, lost func(error)) (stop func()) {
+	done := make(chan struct{})
+	exited := make(chan struct{})
+	var once sync.Once
+	go func() {
+		defer close(exited)
+		t := time.NewTicker(every)
+		defer t.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-t.C:
+				if err := renew(); err != nil {
+					lost(err)
+					return
+				}
+			}
+		}
+	}()
+	return func() {
+		once.Do(func() { close(done) })
+		<-exited
+	}
 }

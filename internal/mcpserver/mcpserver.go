@@ -667,6 +667,16 @@ func localLeaseView(ctx context.Context, cfg config.Config) map[string]any {
 		"verdict":    act.Verdict,
 		"activity":   act.Map(),
 	}
+	// The line behind the holder and the warm the last of them owes the seat
+	// (0.129.2, register D-124) — read-only, nothing is acquired.
+	if m, err := gpulease.OpenAt(cfg.GPULockPath, cfg.StateDir); err == nil {
+		if ws := m.Waiters(); len(ws) > 0 {
+			view["queued"] = len(ws)
+		}
+		if seat := m.SeatWarmOwed(); seat != "" {
+			view["seat_warm_owed"] = seat
+		}
+	}
 	if !info.Held {
 		view["note"] = "free (unreserved): a bench or training run on this box is exposed until it takes the lease — wrap it in the queue_with command"
 		return view
@@ -791,8 +801,7 @@ func kvCacheBindingView(ctx context.Context, k *config.KVCacheServer) map[string
 	}
 	switch {
 	case k.StoreName() != "valkey":
-		view["reachable"] = nil
-		view["reachable_note"] = "fs_native: a mounted path, no port to probe; not validated end to end in this release"
+		fsNativeReachability(k, view)
 	case !k.AddressIsIPLiteral():
 		view["reachable"] = nil
 		view["reachable_note"] = "hostname not probed: only an IP-literal store address is dialed (a name is vetted by shape, not by what DNS answers)"
@@ -810,6 +819,48 @@ func kvCacheBindingView(ctx context.Context, k *config.KVCacheServer) map[string
 		}
 	}
 	return view
+}
+
+// fsNativeReachability fills the reachable fields of an fs_native binding from the
+// seat wrapper's own verdict file (B-29). There is no port to dial: the store is a
+// mounted path, and whether it is usable is decided at seat start by seat_fg.sh
+// (mount + 64 MiB write probe), which writes `seat-l2.status` either way. Reading
+// that file is the end-to-end readback; guessing from the path would be the same
+// silence the status field is against.
+func fsNativeReachability(k *config.KVCacheServer, view map[string]any) {
+	view["reachable"] = nil
+	if strings.TrimSpace(k.StatusFile) == "" {
+		view["reachable_note"] = "fs_native: a mounted path, no port to probe; declare status_file (the seat wrapper's seat-l2.status) to publish the wrapper's mount + write-probe verdict here"
+		return
+	}
+	view["status_file"] = k.StatusFile
+	raw, err := os.ReadFile(k.StatusFile)
+	if err != nil {
+		view["reachable_note"] = "status_file unreadable: the seat has not started since it was declared, or the path is wrong (" + err.Error() + ")"
+		return
+	}
+	line := strings.TrimSpace(strings.SplitN(string(raw), "\n", 2)[0])
+	view["status_line"] = line
+	fields := strings.Fields(line)
+	if len(fields) >= 2 {
+		if ts, perr := time.Parse(time.RFC3339, fields[1]); perr == nil {
+			view["status_age_s"] = int(time.Since(ts).Seconds())
+		}
+	}
+	switch {
+	case strings.HasPrefix(line, "ok "):
+		view["reachable"] = true
+		view["reachable_note"] = "fs_native: the seat wrapper mounted the share and its write probe passed at the last seat start (status_line)"
+	case strings.HasPrefix(line, "degraded "):
+		view["reachable"] = false
+		view["reachable_error"] = strings.TrimSpace(strings.TrimPrefix(line[strings.Index(line, "reason=")+len("reason="):], ""))
+		if !strings.Contains(line, "reason=") {
+			view["reachable_error"] = line
+		}
+		view["reachable_note"] = "fs_native: the seat wrapper DEGRADED to L1-only at the last seat start — the store served nothing since; fix the path and restart the seat"
+	default:
+		view["reachable_note"] = "status_file present but unparsed (expected `ok <stamp> …` or `degraded <stamp> reason=…`)"
+	}
 }
 
 // fleetProbeTimeout bounds the whole fleet section. Node health is a CACHED

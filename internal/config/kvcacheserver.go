@@ -88,6 +88,15 @@ type KVCacheServer struct {
 	// only one seat uses.
 	KVDtype        string `json:"kv_dtype,omitempty"`
 	TensorParallel int    `json:"tensor_parallel,omitempty"`
+	// StatusFile is the seat wrapper's own L2 verdict file (seat_fg.sh writes
+	// `$WORK/seat-l2.status`: "ok <stamp> mbps=<n>" after the share mounted and the
+	// write probe passed, "degraded <stamp> reason=<why>" when it fell back to L1
+	// only). An fs_native store is a mounted path with no port to dial, so this file
+	// is the only end-to-end readback the box has (B-29): status publishes it as
+	// `reachable` true/false with the line and its age. On a WSL2 seat the path is
+	// the host-visible one (`//wsl.localhost/<distro>/root/g7/seat-l2.status`).
+	// Empty = not declared; status says so instead of guessing.
+	StatusFile string `json:"status_file,omitempty"`
 }
 
 // StoreName is the L2 adapter with the default applied.
@@ -251,30 +260,4 @@ func privateHost(host string) error {
 		return nil
 	}
 	return fmt.Errorf("%s is neither a private/tailnet address nor a bare, .local or %s hostname", host, suf)
-}
-
-// DeclaresVLLMSeat reports whether `vllm_seats` names id — the box's own
-// answer to "is this seat served by vLLM?", matched case-insensitively
-// because llama-swap resolves seat names that way and a roster id that
-// differs only in case is the same seat.
-//
-// It is the only honest answer available: /v1/models publishes model ids, not
-// engines, so a llama.cpp cascade seat and a vLLM seat are indistinguishable
-// there (see Config.VLLMSeats for why the roster is declared rather than
-// sniffed). Callers that hold an ALIAS must resolve it to its canonical id
-// first — the Qube's agent seat is the alias `agent-pool-3card` of
-// `qwen3.8-27b-vllm-3card`, and only the canonical id is in `vllm_seats`, so
-// an exact match alone would leave that box on a constraint field vLLM
-// discards (register D-129).
-func (c Config) DeclaresVLLMSeat(id string) bool {
-	id = strings.TrimSpace(id)
-	if id == "" {
-		return false
-	}
-	for _, s := range c.VLLMSeats {
-		if strings.EqualFold(strings.TrimSpace(s), id) {
-			return true
-		}
-	}
-	return false
 }

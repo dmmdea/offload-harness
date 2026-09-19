@@ -943,7 +943,8 @@ second device exists:
     "key_prefix": "qube-seat-tp2-fp8",
     "seat": "qwen3.8-27b-vllm",
     "kv_dtype": "fp8",
-    "tensor_parallel": 2
+    "tensor_parallel": 2,
+    "status_file": "//wsl.localhost/freetoken/root/g7/seat-l2.status"
   },
   {
     "seat": "qwen3.8-27b-vllm-3card",
@@ -978,6 +979,12 @@ second device exists:
   seats SHARE a `key_prefix`: the load refuses a prefix shared across different generations, and
   refuses a shared prefix where any binding leaves the generation undeclared (it cannot be shown
   safe). Give each seat its own prefix and neither field is required.
+- **`status_file` is the fs_native readback (0.129.1, register B-29).** An `fs_native` store is a mounted path with
+  no port to dial, so `offload_status` cannot probe it — but the seat wrapper decides the fact at every seat start
+  (mount + 64 MiB write probe) and writes `$WORK/seat-l2.status` (`ok <stamp> mbps=<n>` or `degraded <stamp>
+  reason=<why>`). Declare that file on the binding (on a WSL2 seat, the host-visible `//wsl.localhost/<distro>/…`
+  path) and status publishes `reachable` true/false with `status_line` and `status_age_s`; undeclared or not yet
+  written stays `null` with a note saying which.
 - **Rendering a seat from the box's bindings:** `local-offload install vllm-seat --config
   <config.json> …` picks the binding FOR THAT SEAT by name and renders its adapter, directory,
   namespace, L1 size and chunk into `seat.env`; the tier keeps the mount point, the write floor, the
