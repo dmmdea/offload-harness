@@ -2403,7 +2403,14 @@ func runFleetServe(args []string) error {
 		jobs.OnFinish(func() { steward.JobDone() })
 		storeStatus = steward.Status
 		go steward.Tick()
-		log.Printf("fleet-serve: store steward on %s (cap %.0f GB, tick every %d jobs)", root, cfg.FleetStoreCapGB, cfg.FleetStorePruneEveryJobs)
+		every := time.Duration(cfg.FleetStorePruneEverySec) * time.Second
+		if cfg.FleetStorePruneEverySec == 0 {
+			every = 60 * time.Second
+		}
+		if every > 0 {
+			go storesteward.Every(ctx, every, func() { steward.Tick() })
+		}
+		log.Printf("fleet-serve: store steward on %s (cap %.0f GB, tick every %d jobs and every %s)", root, cfg.FleetStoreCapGB, cfg.FleetStorePruneEveryJobs, every)
 	}
 	// The node's own GPU lease, advertised in health and enforced at dispatch
 	// (0.113.16). Read through THE one resolver (gpulease.LeaseDir) so the

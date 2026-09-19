@@ -6,6 +6,17 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.130.1] - 2026-09-18 - the store steward ticks on a clock, not only on completed jobs
+
+### Fixed
+- **The KV store steward could not fire while a GPU lease kept jobs off the node** (register B-48 / B-16, L5): its
+  scan ran after every `fleet_store_prune_every_jobs` completed jobs or on a health poll above the high mark, and under a
+  lease no fleet job completes — exactly when a bench arm or the pair seat writes pages at ~1 GB/min. Measured
+  2026-09-18 on the Lenovo: a tick at 20:26, then the dataset went 53 → 71 GB (its quota, `ENOSPC`, 15 failed store
+  tasks on the A2 seat) by 20:54 with no tick between. `fleet_store_prune_every_sec` (default 60, negative disables)
+  adds a time tick (`storesteward.Every`); a tick below the high mark is one directory walk and one statfs.
+  `TestEveryTicksOnTimeAndStopsWithTheContext`.
+
 ### Added
 - **A cap on the runs started on the box itself** (register C-42, diagnosis S-07 / W-09). The fleet capped the
   jobs it sent to a node (`fleet_max_concurrent_jobs`, "queue full" 503), but nothing capped the runs the box

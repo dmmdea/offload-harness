@@ -27,6 +27,7 @@
 package storesteward
 
 import (
+	"context"
 	"errors"
 	"io/fs"
 	"os"
@@ -180,6 +181,28 @@ func Prune(files []File, used, target int64, now time.Time, minAge time.Duration
 		}
 	}
 	return removed, freed, err
+}
+
+// Every calls tick every d until ctx ends. It is the steward's TIME tick: the
+// job tick (JobDone) cannot fire while a lease keeps fleet jobs off this node,
+// and a bench arm or the pair seat writes pages at ~1 GB/min in exactly that
+// window (2026-09-18: 53 → 71 GB and ENOSPC between two job ticks). Tick itself
+// is idempotent and no-ops below the high mark, so the cost of a tick that
+// finds nothing to do is one directory walk and one statfs.
+func Every(ctx context.Context, d time.Duration, tick func()) {
+	if d <= 0 {
+		return
+	}
+	t := time.NewTicker(d)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			tick()
+		}
+	}
 }
 
 // Tick runs one scan and, when the store is above its high mark, one prune to
