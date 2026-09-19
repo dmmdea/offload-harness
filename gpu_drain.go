@@ -68,6 +68,14 @@ type drainProbe struct {
 	// hint is the seat's own turn arithmetic, carried on the first progress
 	// line and the deadline error so a caller knows what a longer wait buys.
 	hint string
+	// stuckAfter (register C-50, S-32): how long the seat may show the SAME
+	// busy state — same in-flight count, same runs at the same step and phase
+	// — before the drain gives up on it as stuck, whatever the overall
+	// deadline says. Zero disables it. The overall deadline is the queue
+	// budget (hours, ADR 0041) so a legitimate 12-step run is never cut; this
+	// is the bound on a run that heartbeats but makes no progress, which the
+	// 8 h budget otherwise holds the card for.
+	stuckAfter time.Duration
 }
 
 // drainSeat is the gauge-only drain: the historical signature, kept for the
@@ -89,6 +97,9 @@ func drainUntil(ctx context.Context, p drainProbe, deadline time.Time) error {
 	zeros := 0
 	last, printed := "", ""
 	var lastPrint time.Time
+	// Progress tracking for stuckAfter: the busy-state key last seen and when
+	// it last changed.
+	stuckKey, stuckSince := "", start
 	for {
 		now := time.Now()
 		rd, err := seatload.Inflight(ctx, p.client, p.endpoint, p.model)
@@ -144,6 +155,18 @@ func drainUntil(ctx context.Context, p drainProbe, deadline time.Time) error {
 				printed, lastPrint = key, now
 			}
 		}
+		if p.stuckAfter > 0 && key != "" && key != "confirming" {
+			if key != stuckKey {
+				stuckKey, stuckSince = key, now
+			} else if now.Sub(stuckSince) >= p.stuckAfter {
+				msg := fmt.Sprintf("drain of %s gave up after %s without progress (last: %s): the seat's state has not changed for %s, longer than the seat's own turn arithmetic allows", p.model, now.Sub(start).Round(time.Second), last, now.Sub(stuckSince).Round(time.Second))
+				if p.hint != "" {
+					msg += "; " + p.hint
+				}
+				msg += "; a run that heartbeats but makes no progress does not hold the card for the whole --wait; pass --drain-timeout to wait a fixed time instead; work in flight was not interrupted"
+				return errors.New(msg)
+			}
+		}
 		if !now.Before(deadline) {
 			msg := fmt.Sprintf("drain of %s did not finish within %s (last: %s)", p.model, timeout, last)
 			if p.hint != "" {
@@ -182,34 +205,69 @@ func runsKey(runs []gpuactivity.Run) string {
 	return strings.Join(parts, ",")
 }
 
-// seatTurnHint is the seat's own arithmetic for one completion, from the store
-// the agent runs write (internal/seatrate): what one more step costs and so
-// what a longer wait buys. Empty when the seat has no sample yet.
-func seatTurnHint(cfg config.Config, seat string) string {
+// seatTurn is the seat's own arithmetic for one completion, from the store the
+// agent runs write (internal/seatrate): the seconds one more step costs at the
+// measured rate, the cold load on top when the seat is loading, and the
+// completion size the estimate assumes. ok is false when the seat has no
+// sample yet.
+func seatTurn(cfg config.Config, seat string) (turnSec, coldSec float64, final int, toks float64, ok bool) {
 	root, err := gpulease.ResolveStateRoot(cfg.StateDir)
 	if err != nil {
-		return ""
+		return 0, 0, 0, 0, false
 	}
 	st, lerr := seatrate.Load(seatrate.Path(root))
 	if lerr != nil || st == nil {
-		return ""
+		return 0, 0, 0, 0, false
 	}
 	s := st.Get(seat)
 	if s.TokS <= 0 {
-		return ""
+		return 0, 0, 0, 0, false
 	}
-	final := cfg.AgentMaxTokens * 4
+	final = cfg.AgentMaxTokens * 4
 	if final < 1024 {
 		final = 1024
 	}
 	if final > 8192 {
 		final = 8192
 	}
-	hint := fmt.Sprintf("one seat turn is ~%.0f s at the seat's measured %.1f tok/s (a %d-token completion)", float64(final)/s.TokS, s.TokS, final)
-	if s.ColdLoadSec > 0 {
-		hint += fmt.Sprintf(", plus ~%.0f s if it is loading", s.ColdLoadSec)
+	return float64(final) / s.TokS, s.ColdLoadSec, final, s.TokS, true
+}
+
+// seatTurnHint renders seatTurn for a progress line: what one more step costs
+// and so what a longer wait buys. Empty when the seat has no sample yet.
+func seatTurnHint(cfg config.Config, seat string) string {
+	turn, cold, final, toks, ok := seatTurn(cfg, seat)
+	if !ok {
+		return ""
+	}
+	hint := fmt.Sprintf("one seat turn is ~%.0f s at the seat's measured %.1f tok/s (a %d-token completion)", turn, toks, final)
+	if cold > 0 {
+		hint += fmt.Sprintf(", plus ~%.0f s if it is loading", cold)
 	}
 	return hint
+}
+
+// stuckMultiple is how many seat turns of an UNCHANGED busy state the drain
+// tolerates before calling the run stuck: a turn is the longest legitimate
+// silence (one completion at the seat's rate); two of them with no step
+// advance, no in-flight change and no load finishing is a run that heartbeats
+// without progressing.
+const stuckMultiple = 2
+
+// seatStuckAfter derives the drain's no-progress bound from the seat's own
+// turn arithmetic (register C-50): stuckMultiple turns plus the cold load,
+// never under drainFloor. Zero (disabled) when the seat has no rate sample —
+// the drain then has only the overall deadline, as before.
+func seatStuckAfter(cfg config.Config, seat string) time.Duration {
+	turn, cold, _, _, ok := seatTurn(cfg, seat)
+	if !ok {
+		return 0
+	}
+	d := time.Duration((stuckMultiple*turn + cold) * float64(time.Second))
+	if d < drainFloor {
+		d = drainFloor
+	}
+	return d
 }
 
 // unloadSeat frees the seat through llama-swap: the current API first, the
@@ -285,13 +343,24 @@ func maintainSeat(cfg config.Config, restamp restamper, drain bool, deadline tim
 	}
 	ctx := context.Background()
 	if drain {
-		p := drainProbe{client: maintenanceClient, endpoint: endpoint, model: model, every: 2 * time.Second, out: os.Stderr, hint: seatTurnHint(cfg, model)}
+		p := drainProbe{client: maintenanceClient, endpoint: endpoint, model: model, every: 2 * time.Second, out: os.Stderr, hint: seatTurnHint(cfg, model), stuckAfter: seatStuckAfter(cfg, model)}
 		if reg, rerr := gpuactivity.Open(cfg.GPULockPath, cfg.StateDir); rerr == nil {
 			p.runs = reg.OnSeat
 		} else {
 			fmt.Fprintf(os.Stderr, "gpu reserve: run registry unavailable (%v): draining on the seat's gauge alone\n", rerr)
 		}
 		if err := drainUntil(ctx, p, deadline); err != nil {
+			// A failed drain must not leave the DRAINING stamp on a lease that
+			// stays held (the detach form keeps it): the stamp cordons the seat
+			// — no new run admitted — for the rest of the window, which turned
+			// one failed drain into a box refused for 8 h (register C-50,
+			// S-31). The lease stays held and non-exclusive; the caller says
+			// what to do with it.
+			if restamp != nil {
+				if serr := restamp(func(m *gpulease.Meta) { m.Draining = false }); serr != nil {
+					fmt.Fprintf(os.Stderr, "gpu reserve: could not clear the draining stamp after the failed drain: %v\n", serr)
+				}
+			}
 			return err
 		}
 		fmt.Fprintf(os.Stderr, "gpu reserve: %s drained (no request in flight, no run registered)\n", model)

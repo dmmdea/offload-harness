@@ -61,6 +61,19 @@ Versioning: [SemVer](https://semver.org/).
   `internal/pipeline/vllm_structured_outputs_test.go:TestGrammarNeverReachesADeclaredVLLMSeat`.
 
 ## [0.129.2] - 2026-09-18 - the lease hand-off is ordered: the warm-back belongs to the last holder, a lost lease never warms, the seat unit never restarts itself
+- **A failed drain left the DRAINING stamp on a held lease** (register C-50, diagnosis S-31): the detach form keeps
+  the lease after a drain that misses its deadline, and the stamp cordons the seat — no new run admitted — for the
+  rest of the window, so one failed drain refused the box for up to 8 h. `maintainSeat` now clears `Draining` on the
+  failure path (the lease stays held and non-exclusive, the caller decides); the wrapper form releases as before.
+- **A run that heartbeats without progressing held the drain for the whole queue budget** (S-32): the drain's
+  overall deadline is the `--wait` budget on purpose (ADR 0041, a legitimate 12-step run is never cut), but it had
+  no bound on a seat whose state never changes. The drain now gives up when the busy state — in-flight count, runs
+  at the same step and phase — is unchanged for two seat turns plus the cold load, derived from the seat's own
+  rate sample (`seatStuckAfter`, floor 2 min, disabled without a sample), and says so in words distinct from the
+  deadline error. Progress (a step advance, an in-flight change, a load finishing) resets the bound.
+
+## [0.128.4] - 2026-09-18 - the lease hand-off is ordered: the warm-back belongs to the last holder, a lost lease never warms, the seat unit never restarts itself
+
 
 ### Fixed
 - **A releasing holder's warm-back raced the next lease's `--unload-seat`** (register D-124, the Lenovo, 2026-09-18
