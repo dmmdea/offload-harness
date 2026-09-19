@@ -139,3 +139,5 @@ Both send sites are pinned by
 - [../../systems/offload-pipeline.md](../../systems/offload-pipeline.md)
 - [../../systems/setup-installer.md](../../systems/setup-installer.md) — hardware profiles and flag
   substitution
+
+**Amendment note 2026-09-18 (same day, A-100 proof):** on a vLLM seat the re-pack sends the contract's OWN JSON Schema in `structured_outputs.json`, never the GBNF-typed projection (`gbnf.JSONSchema`), because `internal/gbnf` has no object or array-of-object type and the projection had constrained a nested schema into strings. The GBNF projection remains the llama.cpp path and its documented limit.

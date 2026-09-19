@@ -1218,7 +1218,13 @@ func (p *Pipeline) repackStructured(ctx context.Context, seat string, rawSchema 
 	var structuredOpts []llamaclient.GenOption
 	if p.isVLLMSeat(ctx, seat) {
 		grammar = ""
-		structuredOpts = append(structuredOpts, llamaclient.WithJSONSchema(gbnf.JSONSchema(fields)))
+		// The CONTRACT's schema, not the GBNF projection: internal/gbnf has no
+		// object or array-of-object type, so gbnf.JSONSchema(fields) turned a
+		// nested schema into strings and vLLM then CONSTRAINED the answer into
+		// the wrong shape (A-100 proof, 2026-09-18: three attempts "got string,
+		// want object"). vLLM accepts full JSON Schema; the validator below
+		// checks against the same schema, so the two finally agree.
+		structuredOpts = append(structuredOpts, llamaclient.WithJSONSchema(schema))
 	}
 	// The re-pack IS an extract over the loop's final text — same system/user
 	// shape as tasks.buildExtract, so the seat sees a prompt pattern it
