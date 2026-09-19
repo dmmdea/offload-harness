@@ -6,6 +6,11 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.130.3] - 2026-09-19 - accelerator calls reach the savings ledger (register E-04)
+
+### Added
+- **Every accelerator MCP call writes one ledger row.** The Coral/Hailo tools bypass the pipeline (the sidecar or a fleet node answers directly), so since 0.114.0 nothing they ran reached `ledger.jsonl` or `offload_status`'s savings: `pipeline.RecordAccel` now records task = the sidecar tool (`classify_image`, `object_detect`, `semantic_segment`, `image_embed`), `model_tier` = the device id, `<node>:<device>` for a forwarded call that a fleet node answered, or `<device>@fleet` when the forward failed before a node answered, plus latency and the defer verdict with the caller's reason text. An empty required argument is refused before anything runs and writes no row. Mutation-checked: dropping the fleet record line turns the new test red.
+
 ## [0.130.2] - 2026-09-19 - `route` on agent_run and offload_ask: a call from this box can name where it runs
 
 ### Added

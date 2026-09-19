@@ -139,15 +139,33 @@ func (s *Server) accelSidecar(id string) *accelclient.Sidecar {
 // way); the sidecar's own structured refusals pass through untouched — they
 // are results.
 func (s *Server) accelCall(ctx context.Context, id, tool string, args map[string]any) (*mcp.CallToolResult, error) {
+	start := time.Now()
 	sc := s.accelSidecar(id)
 	if err := sc.Ensure(ctx); err != nil {
+		s.p.RecordAccel(tool, id, sinceMs(start), true, id+": "+err.Error())
 		return jsonResult(map[string]any{"deferred": true, "reason": id + ": " + err.Error()})
 	}
 	out, err := sc.Client().Call(ctx, tool, args)
 	if err != nil {
+		s.p.RecordAccel(tool, id, sinceMs(start), true, id+": "+err.Error())
 		return jsonResult(map[string]any{"deferred": true, "reason": id + ": " + err.Error()})
 	}
+	s.p.RecordAccel(tool, id, sinceMs(start), false, "")
 	return jsonResult(out)
+}
+
+// sinceMs is the wall since start in whole milliseconds, for a ledger row.
+func sinceMs(start time.Time) int64 { return time.Since(start).Milliseconds() }
+
+// accelPlacementNode reads placement.node from a forwarded accelerator result
+// (accelremote stamps it), so the ledger row names the node that ran the call.
+func accelPlacementNode(out map[string]any) string {
+	if pl, ok := out["placement"].(map[string]any); ok {
+		if n, ok := pl["node"].(string); ok {
+			return n
+		}
+	}
+	return ""
 }
 
 // handleAccelTool adapts one accelerator tool: parse args, refuse an empty
@@ -219,10 +237,17 @@ func (s *Server) handleFleetAccelTool(id, tool, requiredArg string) mcp.ToolHand
 		if in[requiredArg] == nil || in[requiredArg] == "" {
 			return jsonResult(map[string]any{"deferred": true, "reason": "empty " + requiredArg})
 		}
+		start := time.Now()
 		out, err := accelremote.Call(ctx, s.p.Cfg(), id, tool, in)
 		if err != nil {
+			s.p.RecordAccel(tool, id+FleetOwnerSuffix, sinceMs(start), true, id+" (fleet): "+err.Error())
 			return jsonResult(map[string]any{"deferred": true, "reason": id + " (fleet): " + err.Error()})
 		}
+		tier := id + FleetOwnerSuffix
+		if n := accelPlacementNode(out); n != "" {
+			tier = n + ":" + id
+		}
+		s.p.RecordAccel(tool, tier, sinceMs(start), false, "")
 		return jsonResult(out)
 	}
 }
