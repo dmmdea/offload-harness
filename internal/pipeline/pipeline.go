@@ -4022,6 +4022,20 @@ func (p *Pipeline) knnPreferLargerEntry(task core.TaskType, input string) bool {
 	return skip
 }
 
+// RecordAccel writes one ledger row for an accelerator call (register E-04).
+// The accelerator MCP tools bypass the pipeline — the sidecar or a fleet node
+// answers directly — so until 0.130.3 nothing they ran reached the savings
+// ledger. task is the sidecar tool (classify_image, …), modelTier the device
+// id ("coral-edgetpu", "hailo-8l"), "<node>:<id>" for a forwarded call, or
+// "<id>@fleet" when the forward failed before a node answered. A nil ledger
+// (held by another process) records nothing, like every other task.
+func (p *Pipeline) RecordAccel(task, modelTier string, latencyMs int64, deferred bool, reason string) {
+	if p == nil || p.led == nil {
+		return
+	}
+	_ = p.led.Record(ledger.Entry{Task: task, ModelTier: modelTier, LatencyMs: latencyMs, Deferred: deferred, Reason: reason})
+}
+
 // entryFrom builds a ledger entry from per-call meta + the enriched signals.
 func entryFrom(task core.TaskType, meta core.Meta, deferred bool, inputChars int) ledger.Entry {
 	return ledger.Entry{
