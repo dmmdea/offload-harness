@@ -6,6 +6,11 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Verified
+- **A vLLM seat's logprobs reach the confidence gate unchanged** (register D-128, measured 2026-09-18 on the Qube pair seat):
+  vLLM's `/v1/chat/completions` answers the OpenAI `logprobs.content[]` shape the client decodes; the legacy
+  `top_logprobs` list-of-dicts belongs to `/v1/completions`, which the harness never calls. Pinned by
+  `TestVLLMChatLogprobShapeDecodesIntoTopAlternatives` and `TestMeasuredVLLMTokenStreamYieldsAMargin`.
 ### Changed
 - **The cascade tools declare themselves the first door for single-shot mechanical text** (register A-102 (a)): the
   `offload_summarize` / `offload_classify` / `offload_extract` / `offload_triage` descriptions and `agent_delegate`'s
