@@ -193,6 +193,33 @@ const (
 	EscRetries EscalationSource = "retries"
 )
 
+// The two decision-margin scales (register D-130). A row's margin means
+// nothing without its scale: MarginScaleMatched normalises over matched class
+// tokens only (historic, ~10x higher), MarginScaleFull over every alternative
+// at the decision position. An EMPTY scale on a stored row predates the flag
+// and reads as matched.
+const (
+	MarginScaleMatched = "matched"
+	MarginScaleFull    = "full"
+)
+
+// MarginScaleOf names the scale a box emits under the full-denominator flag.
+func MarginScaleOf(fullDenominator bool) string {
+	if fullDenominator {
+		return MarginScaleFull
+	}
+	return MarginScaleMatched
+}
+
+// MarginScaleOfRow reads a STORED row's scale, where empty means the row was
+// written before the flag existed and is therefore on the matched scale.
+func MarginScaleOfRow(rowScale string) string {
+	if rowScale == "" {
+		return MarginScaleMatched
+	}
+	return rowScale
+}
+
 type Meta struct {
 	TokensIn  int     `json:"tokens_in"`
 	TokensOut int     `json:"tokens_out"`
@@ -214,6 +241,19 @@ type Meta struct {
 	Reasoning bool `json:"reasoning,omitempty"`
 	// --- self-learning signals (logged to the ledger; free, no extra inference) ---
 	Margin          float64            `json:"margin,omitempty"`           // logprob decision margin (triage/classify); 0 = N/A
+	// MarginScale names WHICH denominator Margin was computed over (register
+	// D-130): "matched" (the historic scale: matched class tokens only) or
+	// "full" (every alternative at the decision position). Empty = no margin was
+	// resolved, and an old ROW without the field reads as "matched". The two
+	// scales differ by ~10x and must never be pooled.
+	MarginScale string `json:"margin_scale,omitempty"`
+	// MarginDeclaredMass is the share of the raw mass that landed on a legal
+	// class (matched/all, 0..1) and MarginAmbiguous the number of alternatives
+	// credited to no class because they prefixed more than one. Both are
+	// computed in BOTH modes, so the data to re-derive a full-scale threshold
+	// accumulates before the flag is ever flipped.
+	MarginDeclaredMass float64 `json:"margin_declared_mass,omitempty"`
+	MarginAmbiguous    int     `json:"margin_ambiguous,omitempty"`
 	Truncated       bool               `json:"truncated,omitempty"`        // hit token limit
 	Grounded        *bool              `json:"grounded,omitempty"`         // extract/summary values appear in source (nil = N/A)
 	EscalatedAgreed *bool              `json:"escalated_agreed,omitempty"` // higher tier agreed with the smaller (nil = no escalation)

@@ -37,6 +37,16 @@ type Entry struct {
 	Deferred  bool    `json:"deferred"`
 	// --- self-learning signals (Phase 0 enrichment) ---
 	Margin          float64            `json:"margin,omitempty"`
+	// MarginScale / MarginDeclaredMass / MarginAmbiguous describe the margin's
+	// denominator (register D-130). Scale is "matched" (matched class tokens
+	// only) or "full" (every alternative); EMPTY ON OLD ROWS READS AS MATCHED,
+	// which is why every consumer that compares a margin against stored history
+	// filters on it rather than pooling the two ~10x-apart scales. The declared
+	// mass and ambiguous count are recorded in both modes so a full-scale
+	// threshold can be re-derived from real rows before anyone flips the flag.
+	MarginScale        string  `json:"margin_scale,omitempty"`
+	MarginDeclaredMass float64 `json:"margin_declared_mass,omitempty"`
+	MarginAmbiguous    int     `json:"margin_ambiguous,omitempty"`
 	ModelTier       string             `json:"model_tier,omitempty"`
 	Escalations     int                `json:"escalations,omitempty"`
 	Reasoning       bool               `json:"reasoning,omitempty"` // produced by the terminal reasoning tier (a reclaimed deferral)

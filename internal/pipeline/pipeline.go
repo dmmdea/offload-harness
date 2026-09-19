@@ -3664,8 +3664,8 @@ func (p *Pipeline) attempt(ctx context.Context, req core.Request, built tasks.Bu
 				}
 			}
 			if v.OK {
-				reason, margin, src, low := p.confidenceGate(req, data, gen.Logprobs)
-				meta.Margin = margin
+				reason, mi, src, low := p.confidenceGate(req, data, gen.Logprobs)
+				mi.apply(&meta)
 				// Confhead correctness gate (opt-in, ADOPT tasks only): if the head
 				// predicts a low p(correct) for this call, treat it as low-confidence
 				// so Run escalates to a larger tier. Only fires when (a) enabled + head
@@ -3720,7 +3720,7 @@ func (p *Pipeline) attempt(ctx context.Context, req core.Request, built tasks.Bu
 				// the unbounded original (sidecar bloat) or a cut carrying
 				// repackMarker, which future prompts would re-inject as few-shot
 				// CONTENT (round-1 review finding).
-				if p.cfg.ExemplarsDir != "" && goodExemplar(meta) && meta.TierPack == "" {
+				if p.cfg.ExemplarsDir != "" && p.goodExemplar(meta) && meta.TierPack == "" {
 					_ = exemplars.Append(p.cfg.ExemplarsDir, string(req.Task), tasks.StableParamsKey(req.Params), req.Input, data, meta.Margin)
 				}
 			}
@@ -3979,6 +3979,7 @@ func entryFrom(task core.TaskType, meta core.Meta, deferred bool, inputChars int
 		LatencyMs: meta.LatencyMs, TokPerSec: meta.TokPerSec, CacheHit: meta.CacheHit,
 		Deferred: deferred,
 		Margin:   meta.Margin, ModelTier: meta.Model, Escalations: meta.Escalations,
+		MarginScale: meta.MarginScale, MarginDeclaredMass: meta.MarginDeclaredMass, MarginAmbiguous: meta.MarginAmbiguous,
 		Reasoning: meta.Reasoning,
 		Retries:   meta.Retries, Truncated: meta.Truncated, Grounded: meta.Grounded,
 		EscalatedAgreed: meta.EscalatedAgreed, ErrClass: meta.ErrClass,
@@ -4054,31 +4055,86 @@ func (p *Pipeline) recordDefer(task core.TaskType, meta core.Meta, inputChars in
 // source is a closed enum the ledger can group by. Without it, "was this the
 // model's self-report or a structural signal?" is unanswerable in aggregate —
 // which is exactly the gap measured on 2026-08-11.
-func (p *Pipeline) confidenceGate(req core.Request, data []byte, lps []llamaclient.TokenLogprob) (string, float64, core.EscalationSource, bool) {
-	var margin float64
+func (p *Pipeline) confidenceGate(req core.Request, data []byte, lps []llamaclient.TokenLogprob) (string, marginInfo, core.EscalationSource, bool) {
+	var mi marginInfo
 	switch req.Task {
 	case core.TaskClassify:
 		if labels := labelClasses(req.Params); len(labels) >= 2 {
-			if m, ok := confidence.Margin(lps, "label", labels); ok {
-				margin = m
-			}
+			mi = p.marginOf(lps, "label", labels)
 		}
 		if conf, low := lowConfidence(data, p.cfg.ClassifyMinConfidence); low {
-			return fmt.Sprintf("low confidence %.2f", conf), margin, core.EscSelfConfidence, true
+			return fmt.Sprintf("low confidence %.2f", conf), mi, core.EscSelfConfidence, true
 		}
-		if t := p.marginThreshold(req.Task); t > 0 && margin > 0 && margin < t {
-			return fmt.Sprintf("low decision margin %.2f<%.2f", margin, t), margin, core.EscMargin, true
+		if t := p.marginGateThreshold(req.Task); t > 0 && mi.Margin > 0 && mi.Margin < t {
+			return fmt.Sprintf("low decision margin %.2f<%.2f", mi.Margin, t), mi, core.EscMargin, true
 		}
 	case core.TaskTriage:
-		if m, ok := confidence.Margin(lps, "decision", []string{"yes", "no", "unsure"}); ok {
-			margin = m
-		}
-		if t := p.marginThreshold(req.Task); t > 0 && margin > 0 && margin < t {
-			return fmt.Sprintf("low decision margin %.2f<%.2f", margin, t), margin, core.EscMargin, true
+		mi = p.marginOf(lps, "decision", []string{"yes", "no", "unsure"})
+		if t := p.marginGateThreshold(req.Task); t > 0 && mi.Margin > 0 && mi.Margin < t {
+			return fmt.Sprintf("low decision margin %.2f<%.2f", mi.Margin, t), mi, core.EscMargin, true
 		}
 	}
-	return "", margin, core.EscNone, false
+	return "", mi, core.EscNone, false
 }
+
+// marginInfo is one decision position as the gate and the ledger see it: the
+// margin ON A NAMED SCALE, plus the two facts that make a full-scale threshold
+// re-derivable (register D-130). Scale is empty when no margin was resolved, so
+// a task that never had one publishes a byte-identical row.
+type marginInfo struct {
+	Margin       float64
+	Scale        string
+	DeclaredMass float64
+	Ambiguous    int
+}
+
+func (mi marginInfo) apply(m *core.Meta) {
+	m.Margin = mi.Margin
+	m.MarginScale = mi.Scale
+	m.MarginDeclaredMass = mi.DeclaredMass
+	m.MarginAmbiguous = mi.Ambiguous
+}
+
+// marginOf resolves the decision position ONCE and publishes the margin on the
+// scale this box currently emits. The declared mass and the ambiguous-token
+// count are recorded in BOTH modes on purpose: the data needed to derive a
+// full-scale threshold has to accumulate BEFORE the flag is flipped, not after.
+func (p *Pipeline) marginOf(lps []llamaclient.TokenLogprob, jsonKey string, classes []string) marginInfo {
+	d, ok := confidence.MarginDetail(lps, jsonKey, classes)
+	if !ok {
+		return marginInfo{}
+	}
+	mi := marginInfo{Scale: core.MarginScaleOf(p.cfg.ConfidenceMarginFullDenominator), DeclaredMass: d.DeclaredMass, Ambiguous: d.Ambiguous}
+	if p.cfg.ConfidenceMarginFullDenominator {
+		mi.Margin = d.Margin
+		return mi
+	}
+	mi.Margin = d.MatchedMargin
+	return mi
+}
+
+// marginGateThreshold is the threshold for the scale in force. On the FULL
+// scale that is confidence_margin_threshold_full and nothing else: the per-task
+// conformal values and the config constant were both derived from matched-scale
+// margins, which run ~10x larger, so applying either here would fire on almost
+// every call. 0 there means the gate never fires — said once, loudly, because a
+// silently disabled gate is exactly the failure this whole change is about.
+func (p *Pipeline) marginGateThreshold(task core.TaskType) float64 {
+	if !p.cfg.ConfidenceMarginFullDenominator {
+		return p.marginThreshold(task)
+	}
+	if p.cfg.ConfidenceMarginThresholdFull <= 0 {
+		warnFullMarginGateDisabled.Do(func() {
+			fmt.Fprintln(os.Stderr, "note: confidence_margin_full_denominator is on with confidence_margin_threshold_full=0 - the decision-margin gate never fires; rows still carry margin_scale: full so a threshold can be re-derived")
+		})
+		return 0
+	}
+	return p.cfg.ConfidenceMarginThresholdFull
+}
+
+// warnFullMarginGateDisabled keeps the disabled-gate note to one line per
+// process: it is a config state, not a per-call event.
+var warnFullMarginGateDisabled sync.Once
 
 // marginThreshold returns the per-task escalation threshold: a data-derived
 // conformal threshold (Phase 2, loaded from thresholds.json into p.thresholds)
@@ -4265,14 +4321,25 @@ func (p *Pipeline) maybeHeal(tier string) {
 
 // goodExemplar gates which successful calls are harvested as few-shot examples:
 // grounded (or N/A) and a confident margin (or N/A).
-func goodExemplar(meta core.Meta) bool {
+//
+// The margin test is SCALE-AWARE (register D-130). The 0.6 constant is a
+// matched-scale number; a full-scale margin runs ~10x smaller, so comparing one
+// against it would harvest nearly nothing. On the full scale the harvest uses
+// the re-derived full threshold, and with no such threshold set it harvests
+// none of the rows that carry a margin at all - a deliberate stop rather than a
+// silent cross-scale comparison.
+func (p *Pipeline) goodExemplar(meta core.Meta) bool {
 	if meta.Grounded != nil && !*meta.Grounded {
 		return false
 	}
-	if meta.Margin > 0 && meta.Margin < 0.6 {
-		return false
+	if meta.Margin <= 0 {
+		return true // no margin for this task - unchanged, harvest on grounding alone
 	}
-	return true
+	if meta.MarginScale == core.MarginScaleFull {
+		t := p.cfg.ConfidenceMarginThresholdFull
+		return t > 0 && meta.Margin >= t
+	}
+	return meta.Margin >= 0.6
 }
 
 // injectExemplars prepends a few-shot block (local-model tokens only) to the
