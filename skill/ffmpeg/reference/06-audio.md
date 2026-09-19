@@ -33,7 +33,7 @@ ffmpeg -y -i in.mp4 -vn -af "loudnorm=I=-16:TP=-1.5:LRA=11:measured_I=…:measur
 verify: I: -16.4 LUFS, LRA 1.6 LU, duration 20.0107 s (mp3 encoder padding)
 ```
 Targets [community, platform docs not re-fetched]: YouTube −14 LUFS (it attenuates louder
-uploads, never boosts quiet ones — a podcast/YouTube channel we run.5 LUFS and sounded 10 LU quiet),
+uploads, never boosts quiet ones — ReadyPep shipped at −24.5 LUFS and sounded 10 LU quiet),
 Spotify/Apple podcasts −16 LUFS stereo (−19 mono), true peak −1 dBTP (−2 for lossy delivery).
 
 ## Dead-air detection and removal
@@ -60,7 +60,8 @@ ffmpeg -y -i gaps.mp4 -filter_complex "[0:v]select='EXPR',setpts=N/FRAME_RATE/TB
 → 16.533 s video, 16.533 s audio, 0 silences > 0.5 s remaining
 ```
 `setpts=N/FRAME_RATE/TB` and `asetpts=N/SR/TB` re-time the kept frames/samples contiguously
-[doc]. For speech, snap cut points to sentence ends (lesson from a shipped podcast: cutting mid-phrase clips words) — the STT word timings from `offload_transcribe` give you those.
+[doc]. For speech, snap cut points to sentence ends (ReadyPep lesson: cutting mid-phrase clips
+words) — the STT word timings from `offload_transcribe` give you those.
 
 ## Ducking music under voice (sidechaincompress) [measured]
 ```

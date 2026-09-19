@@ -206,25 +206,25 @@ func (s *Server) buildServer(version string) *mcp.Server {
 
 	srv.AddTool(&mcp.Tool{
 		Name:        "offload_summarize",
-		Description: "Summarize text on the LOCAL model cascade (free, on-box, no cloud — see offload_status for the live roster). Use for bulk/low-judgment summaries to keep tokens out of your context. Returns {summary, bullets}; if it can't do it confidently it returns deferred:true and you should summarize it yourself. Triggers: summarize / tl;dr / gist / digest / recap / condense a doc, log, transcript, article, or thread.",
+		Description: "Summarize text on the LOCAL model cascade (free, on-box, no cloud — see offload_status for the live roster). THE FIRST DOOR for one text + one mechanical question (register A-102): seconds on the entry rung, automatic climb to the escalation and reasoning rungs on a margin, schema or grounding failure; agent_delegate is for multi-document read-and-reason, and a contract whose goal is to summarize one file is the wrong door. Use for bulk/low-judgment summaries to keep tokens out of your context. Returns {summary, bullets}; if it can't do it confidently it returns deferred:true and you should summarize it yourself. Triggers: summarize / tl;dr / gist / digest / recap / condense a doc, log, transcript, article, or thread.",
 		InputSchema: json.RawMessage(`{"type":"object","properties":{"text":{"type":"string","description":"text to summarize"},"max_points":{"type":"integer","description":"max bullet points (default 5)"}},"required":["text"]}`),
 	}, s.handleSummarize)
 
 	srv.AddTool(&mcp.Tool{
 		Name:        "offload_classify",
-		Description: "Classify text into one of the given labels on the LOCAL model cascade (free, on-box, no cloud). Returns {label, confidence}; low-confidence results are deferred back to you. Triggers: classify / categorize / label / tag / bucket / route text into one of a known set.",
+		Description: "Classify text into one of the given labels on the LOCAL model cascade (free, on-box, no cloud). THE FIRST DOOR for one text + one label set (register A-102): seconds on the entry rung, automatic climb on a low decision margin; never write an agent_delegate contract for a single classification. Returns {label, confidence}; low-confidence results are deferred back to you. Triggers: classify / categorize / label / tag / bucket / route text into one of a known set.",
 		InputSchema: json.RawMessage(`{"type":"object","properties":{"text":{"type":"string","description":"text to classify"},"labels":{"type":"array","items":{"type":"string"},"description":"allowed labels (>=2)"}},"required":["text","labels"]}`),
 	}, s.handleClassify)
 
 	srv.AddTool(&mcp.Tool{
 		Name:        "offload_extract",
-		Description: "Extract structured fields from text on the LOCAL model cascade (free, on-box, no cloud), constrained to the provided JSON schema. Returns the extracted object or defers. Triggers: extract / parse / pull out structured fields from text into a schema (names, dates, amounts, entities).",
+		Description: "Extract structured fields from text on the LOCAL model cascade (free, on-box, no cloud), constrained to the provided JSON schema. THE FIRST DOOR for one text + one schema (register A-102): seconds on the entry rung, grounding-checked, automatic climb on failure; agent_delegate is for extraction that needs reading across several documents. Returns the extracted object or defers. Triggers: extract / parse / pull out structured fields from text into a schema (names, dates, amounts, entities).",
 		InputSchema: json.RawMessage(`{"type":"object","properties":{"text":{"type":"string","description":"text to extract fields from"},"schema":{"type":"object","description":"JSON schema with a properties object describing the fields to extract"}},"required":["text","schema"]}`),
 	}, s.handleExtract)
 
 	srv.AddTool(&mcp.Tool{
 		Name:        "offload_triage",
-		Description: "Answer a yes/no/unsure question about text on the LOCAL model cascade (free, on-box, no cloud). Returns {decision, reason} or defers. Triggers: a yes/no/unsure check on text — 'does this contain X?', 'is this relevant/spam/safe?', 'should this be flagged?'.",
+		Description: "Answer a yes/no/unsure question about text on the LOCAL model cascade (free, on-box, no cloud). THE FIRST DOOR for one text + one yes/no question (register A-102): seconds on the entry rung, automatic climb on a low decision margin; never write an agent_delegate contract for a single check. Returns {decision, reason} or defers. Triggers: a yes/no/unsure check on text — 'does this contain X?', 'is this relevant/spam/safe?', 'should this be flagged?'.",
 		InputSchema: json.RawMessage(`{"type":"object","properties":{"text":{"type":"string","description":"text to evaluate"},"question":{"type":"string","description":"a yes/no question about the text"}},"required":["text","question"]}`),
 	}, s.handleTriage)
 
@@ -401,7 +401,7 @@ func (s *Server) buildServer(version string) *mcp.Server {
 	if s.p != nil && s.p.Cfg().AgentDelegationEnabled {
 		srv.AddTool(&mcp.Tool{
 			Name:        "agent_delegate",
-			Description: "Fan out 1-8 self-contained subtasks to the FREE local delegation engine: each subtask is a contract {goal, context docs, output_schema, acceptance} run by an autonomous read-only agent loop on THIS box or on a fleet node over the operator's tailnet (never cloud). Placement is quality-first: an idle local box always runs the work; a remote node is used only when the local GPU is busy AND the node passes the capability gate (route=auto; force with local|remote). context_paths inlines files DELEGATOR-side (confined to read_root) so your context never pays for them. SIZE CONTRACTS FROM THE LIVE CEILING, never from a remembered or written figure: offload_status's fleet section reports each seat's agent_ctx_tokens. Written guidance drifted to a quarter of the real window and work that fits trivially was declined as 'too big for the seat' for weeks, so a figure you did not just read from offload_status is not a number. acceptance is a machine-checkable DSL evaluated by the delegator before a result counts as done: contains:<s>, not_contains:<s>, regex:<re>, min_items:<field>:<n>, nonempty:<field> — a schema-valid result failing a check comes back as failed_verification, NOT a success. Returns {summary:{succeeded,deferred,failed_verification,failed,infrastructure,corpus_rows_lost,ledger_rows_lost}, results:[{node,seat,placement,job_id,output,structured,deferred,reason,defer_class,failed,acceptance_failures,wall_ms,acceptance_lint}]} — read summary FIRST. results[].acceptance_lint (warn-only, the run still happened) flags acceptance that verifies less than it looks: PARROT-PASSABLE (every content check also matches the goal text, so an echoed question passes as verified and the retry never fires), UNGROUNDED (a contains:/regex: matching nothing in the contract's own context docs — fails right answers), or SHAPE-ONLY (nonempty:/min_items: alone — passes garbage). When present, fix the acceptance (anchor >=1 contains:/regex: to content that appears only in the docs) before reusing the contract. summary.infrastructure counts the results whose story is a broken STACK rather than the work: defers whose defer_class is infrastructure|config, plus a local placement taken while every configured remote failed its health probe. Non-zero means a node is broken or misconfigured, so do NOT read those subtasks as work the local stack honestly could not do — and the call comes back flagged as an error, with this same JSON body intact. defer_class \"contract\" is YOUR contract, not a box: no output_schema for a remote placement, past the origin hop, or bigger than any node's advertised context — rewrite the contract and retry. abstention|budget defers and failed_verification are ordinary result shapes. WRITE DOOR (0.122.0): add write_root to a subtask to hand a seat a small IMPLEMENTATION leg — it gets write_file/edit_file inside that directory of the NODE'S OWN copy of your inlined docs, and the result carries diff + diff_files, a unified patch YOU review and apply (the harness never applies it; that is what makes handing a 4B an edit safe). Needs agent_allow_write on the executing node, else the subtask is refused and re-placed, or defers with defer_class write. Caps: 8 files, 64 KiB written, 192 KiB of diff, and no delete/shell/run/network — past a cap nothing is published at all. Verify it with diff_touches:<path-prefix> and diff_max_files:<n>, which read the write set rather than the prose; neither says the change is CORRECT, so read the diff. On any refusal before placement it returns deferred:true with a reason and you do the work yourself.",
+			Description: "Fan out 1-8 self-contained subtasks to the FREE local delegation engine. NOT the door for single-shot mechanical text: one document + one summarize/classify/extract/triage question goes to the offload_* cascade tool first (seconds; a contract costs a 20-200 s seat run) — this door is for multi-document read-and-reason with context docs, a schema and acceptance checks (register A-102). Each subtask is a contract {goal, context docs, output_schema, acceptance} run by an autonomous read-only agent loop on THIS box or on a fleet node over the operator's tailnet (never cloud). Placement is quality-first: an idle local box always runs the work; a remote node is used only when the local GPU is busy AND the node passes the capability gate (route=auto; force with local|remote). context_paths inlines files DELEGATOR-side (confined to read_root) so your context never pays for them. SIZE CONTRACTS FROM THE LIVE CEILING, never from a remembered or written figure: offload_status's fleet section reports each seat's agent_ctx_tokens. Written guidance drifted to a quarter of the real window and work that fits trivially was declined as 'too big for the seat' for weeks, so a figure you did not just read from offload_status is not a number. acceptance is a machine-checkable DSL evaluated by the delegator before a result counts as done: contains:<s>, not_contains:<s>, regex:<re>, min_items:<field>:<n>, nonempty:<field> — a schema-valid result failing a check comes back as failed_verification, NOT a success. Returns {summary:{succeeded,deferred,failed_verification,failed,infrastructure,corpus_rows_lost,ledger_rows_lost}, results:[{node,seat,placement,job_id,output,structured,deferred,reason,defer_class,failed,acceptance_failures,wall_ms,acceptance_lint}]} — read summary FIRST. results[].acceptance_lint (warn-only, the run still happened) flags acceptance that verifies less than it looks: PARROT-PASSABLE (every content check also matches the goal text, so an echoed question passes as verified and the retry never fires), UNGROUNDED (a contains:/regex: matching nothing in the contract's own context docs — fails right answers), or SHAPE-ONLY (nonempty:/min_items: alone — passes garbage). When present, fix the acceptance (anchor >=1 contains:/regex: to content that appears only in the docs) before reusing the contract. summary.infrastructure counts the results whose story is a broken STACK rather than the work: defers whose defer_class is infrastructure|config, plus a local placement taken while every configured remote failed its health probe. Non-zero means a node is broken or misconfigured, so do NOT read those subtasks as work the local stack honestly could not do — and the call comes back flagged as an error, with this same JSON body intact. defer_class \"contract\" is YOUR contract, not a box: no output_schema for a remote placement, past the origin hop, or bigger than any node's advertised context — rewrite the contract and retry. abstention|budget defers and failed_verification are ordinary result shapes. WRITE DOOR (0.122.0): add write_root to a subtask to hand a seat a small IMPLEMENTATION leg — it gets write_file/edit_file inside that directory of the NODE'S OWN copy of your inlined docs, and the result carries diff + diff_files, a unified patch YOU review and apply (the harness never applies it; that is what makes handing a 4B an edit safe). Needs agent_allow_write on the executing node, else the subtask is refused and re-placed, or defers with defer_class write. Caps: 8 files, 64 KiB written, 192 KiB of diff, and no delete/shell/run/network — past a cap nothing is published at all. Verify it with diff_touches:<path-prefix> and diff_max_files:<n>, which read the write set rather than the prose; neither says the change is CORRECT, so read the diff. On any refusal before placement it returns deferred:true with a reason and you do the work yourself.",
 			InputSchema: json.RawMessage(`{"type":"object","properties":{"subtasks":{"type":"array","minItems":1,"maxItems":8,"description":"the delegation contracts to place and run","items":{"type":"object","properties":{"goal":{"type":"string","description":"the self-contained task for the sub-agent (it sees ONLY this + the context docs)"},"context":{"type":"array","items":{"type":"object","properties":{"name":{"type":"string"},"text":{"type":"string"}},"required":["name","text"]},"description":"inline context documents (name is a flat filename; total across docs <= the box's cap: 256 KiB, which a composite box raises to its largest layer window x 3 bytes)"},"context_paths":{"type":"array","items":{"type":"string"},"description":"files to inline as context docs, read by the DELEGATOR under read_root confinement (<=128 KiB each)"},"output_schema":{"type":"object","description":"JSON Schema with a properties map; the sub-agent's final answer is re-packed into it. REQUIRED for any remote placement"},"acceptance":{"type":"array","items":{"type":"string"},"description":"machine-checkable checks evaluated delegator-side: contains:<s> | not_contains:<s> | regex:<re> | min_items:<field>:<n> | nonempty:<field> | diff_touches:<path-prefix> | diff_max_files:<n> (the last two read the write set of a write_root subtask and FAIL on an empty one)"},"profile":{"type":"string","description":"agent task profile. Default = the EXECUTING box's configured agent_profile, else general — a per-SEAT property: small tiers seed research (narrowing measured 0%->72% there), big planners run un-narrowed (research measured 94% and 5x slower vs general 100% on the 27B). Omit unless the task genuinely needs a specific toolset"},"max_steps":{"type":"integer","description":"loop step budget (default 12, cap 12)"},"write_root":{"type":"string","description":"opens the WRITE door (0.122.0): a directory RELATIVE to the run's read root that the seat may create and change files under, inside the executing node's own throwaway copy of the inlined context docs — relative because the node never sees your filesystem. The result carries diff + diff_files, a unified patch (git apply -p1) that YOU review and apply; the harness never applies it. Requires agent_allow_write on the executing node. Grants create+overwrite only: no delete, no shell, no run, no network. Caps 8 files / 64 KiB written / 192 KiB of diff — past any of them NOTHING is published and the subtask defers with defer_class write. Omit for read-only work, which is everything else"},"setup_actions":{"type":"array","maxItems":8,"items":{"type":"object","properties":{"tool":{"type":"string"},"args":{"type":"object"}},"required":["tool"]},"description":"tool calls the EXECUTING seat replays before its first turn (ADR 0036 P2), e.g. read_file of a context doc by its name — the model's first turn then already holds the document instead of spending two steps finding it (the corpus's dominant 4B failure shape). Not charged to max_steps. A node with agent_seed_context_reads on prepends one read_file per context doc itself; a node one release behind ignores this field and reports no setup_ran"},"thinking":{"type":"string","enum":["auto","on","off"],"description":"planner think-block policy on the EXECUTING seat (0.115.8): auto (default = the executing box's agent_thinking) thinks every step and re-issues an empty final ONCE with thinking off at 4x the step budget, then defers as reasoning_starved/empty; off renders every planner call in non-thinking mode (grounded extraction on a thinking seat); on never sends the kwarg. results[].calls carries per-completion finish_reason / completion_tokens / reasoning_tokens; results[].stop_note the starvation arithmetic"},"context_class":{"type":"string","enum":["","long"],"description":"long = ask for the box's biggest long-context layer (the three-card seat where a box declares one, otherwise the pair's 262k seat) under its display-floor, host-RAM and presence guards and a prefill feasibility check; omit for the default placement"},"layer":{"type":"string","description":"run this subtask on the NAMED layer's agent seat (a layer id a composite node declares, e.g. fast = the Lenovo's 35B digest seat): the placement table decides FOR that layer — a node that does not declare it is ineligible for this subtask, an idle local box that does not declare it does not keep it, and when no node declares it the subtask defers naming the layer (never a silent run on the planner seat). Use for digest / extract / summarize-shaped contracts where the measured fast seat is adequate (blind coverage 4.65 vs the default's 8.53 — judgment and coverage contracts stay on the default). Omit for the default placement"},"timeout_sec":{"type":"integer","description":"EXECUTION budget per subtask (default 300, cap 900), shared by every placement it makes: a cross-seat retry and any re-placement after a node refuses the job run only inside what is LEFT of it, and are skipped with a note under the retry floor (10 s, or the delegator's agent_retry_min_sec); a retry is also skipped after an empty final and never lands on a seat already running another job. Not an end-to-end wall: placement overhead (fleet health probe, dispatch dial) and time the job provably spent queued on a node are bounded but not charged to it, so observed wall can exceed this"}},"required":["goal"]}},"route":{"type":"string","enum":["auto","spread","local","remote","queue"],"description":"placement: auto (default; idle-local wins, busy-local considers remotes), spread (deal the subtasks across the local seat AND every eligible fleet node, concurrently — use for any fan-out of 2+ contracts. The deal is deterministic: subtask 0 ALWAYS lands on the local seat, so a 2-contract spread with an eligible remote is guaranteed one local + one remote — the local+server pair. The REMOTE slots are FIT-SCORED from the goal text, no model call: reasoning-shaped goals (explain/why/trace/compare/across these files) take the roomiest eligible seat, mechanical ones (extract/list/count/summarize/how many) take the smallest eligible seat so the roomier one stays free, a goal matching neither reads as mechanical, and equal seats rotate — phrase the goal with the verb you mean. Eligibility is PER SUBTASK — a contract with no output_schema, or too big for every node, silently deals local; read results[].placement to confirm the pair landed), local (force in-process), remote (force a fleet node; defers if none eligible), queue (ADR 0030, DARK unless fleet_queue_holder is configured: submit every subtask to the consolidated pull queue and let claiming nodes take them — durability lives on the holder; requires output_schema on every subtask). A subtask whose answer fails acceptance (or abstains) is retried once on a different node and the better attempt is published (retried_on / retry_note)"},"read_root":{"type":"string","description":"absolute directory context_paths may be read from (default: the server working dir)"},"remotes":{"type":"array","items":{"type":"string"},"description":"fleet node base URLs, tailnet-only (e.g. http://node-c:18811)"},"priority":{"type":"integer","enum":[-1,0,1],"description":"scheduling band for every subtask (default 0 = production). -1 = SHEDDABLE: measurement/gate traffic that takes idle fleet capacity only — a node without an idle execution slot refuses it and the subtask is re-placed; with no idle node anywhere it is shed at once (deferred, defer_class capacity) instead of waiting or queuing before/behind production work. 1 = urgent (claimed first on every node). Band-0 subtasks that find every node full WAIT for capacity (agent_placement_wait_sec, default 120 s, not charged to timeout_sec) and land on the first node that frees; summary.waited / results[].capacity_wait_sec report it"}},"required":["subtasks"]}`),
 		}, s.handleAgentDelegate)
 
@@ -667,6 +667,16 @@ func localLeaseView(ctx context.Context, cfg config.Config) map[string]any {
 		"verdict":    act.Verdict,
 		"activity":   act.Map(),
 	}
+	// The line behind the holder and the warm the last of them owes the seat
+	// (0.129.2, register D-124) — read-only, nothing is acquired.
+	if m, err := gpulease.OpenAt(cfg.GPULockPath, cfg.StateDir); err == nil {
+		if ws := m.Waiters(); len(ws) > 0 {
+			view["queued"] = len(ws)
+		}
+		if seat := m.SeatWarmOwed(); seat != "" {
+			view["seat_warm_owed"] = seat
+		}
+	}
 	if !info.Held {
 		view["note"] = "free (unreserved): a bench or training run on this box is exposed until it takes the lease — wrap it in the queue_with command"
 		return view
@@ -791,8 +801,7 @@ func kvCacheBindingView(ctx context.Context, k *config.KVCacheServer) map[string
 	}
 	switch {
 	case k.StoreName() != "valkey":
-		view["reachable"] = nil
-		view["reachable_note"] = "fs_native: a mounted path, no port to probe; not validated end to end in this release"
+		fsNativeReachability(k, view)
 	case !k.AddressIsIPLiteral():
 		view["reachable"] = nil
 		view["reachable_note"] = "hostname not probed: only an IP-literal store address is dialed (a name is vetted by shape, not by what DNS answers)"
@@ -810,6 +819,48 @@ func kvCacheBindingView(ctx context.Context, k *config.KVCacheServer) map[string
 		}
 	}
 	return view
+}
+
+// fsNativeReachability fills the reachable fields of an fs_native binding from the
+// seat wrapper's own verdict file (B-29). There is no port to dial: the store is a
+// mounted path, and whether it is usable is decided at seat start by seat_fg.sh
+// (mount + 64 MiB write probe), which writes `seat-l2.status` either way. Reading
+// that file is the end-to-end readback; guessing from the path would be the same
+// silence the status field is against.
+func fsNativeReachability(k *config.KVCacheServer, view map[string]any) {
+	view["reachable"] = nil
+	if strings.TrimSpace(k.StatusFile) == "" {
+		view["reachable_note"] = "fs_native: a mounted path, no port to probe; declare status_file (the seat wrapper's seat-l2.status) to publish the wrapper's mount + write-probe verdict here"
+		return
+	}
+	view["status_file"] = k.StatusFile
+	raw, err := os.ReadFile(k.StatusFile)
+	if err != nil {
+		view["reachable_note"] = "status_file unreadable: the seat has not started since it was declared, or the path is wrong (" + err.Error() + ")"
+		return
+	}
+	line := strings.TrimSpace(strings.SplitN(string(raw), "\n", 2)[0])
+	view["status_line"] = line
+	fields := strings.Fields(line)
+	if len(fields) >= 2 {
+		if ts, perr := time.Parse(time.RFC3339, fields[1]); perr == nil {
+			view["status_age_s"] = int(time.Since(ts).Seconds())
+		}
+	}
+	switch {
+	case strings.HasPrefix(line, "ok "):
+		view["reachable"] = true
+		view["reachable_note"] = "fs_native: the seat wrapper mounted the share and its write probe passed at the last seat start (status_line)"
+	case strings.HasPrefix(line, "degraded "):
+		view["reachable"] = false
+		view["reachable_error"] = strings.TrimSpace(strings.TrimPrefix(line[strings.Index(line, "reason=")+len("reason="):], ""))
+		if !strings.Contains(line, "reason=") {
+			view["reachable_error"] = line
+		}
+		view["reachable_note"] = "fs_native: the seat wrapper DEGRADED to L1-only at the last seat start — the store served nothing since; fix the path and restart the seat"
+	default:
+		view["reachable_note"] = "status_file present but unparsed (expected `ok <stamp> …` or `degraded <stamp> reason=…`)"
+	}
 }
 
 // fleetProbeTimeout bounds the whole fleet section. Node health is a CACHED
@@ -1143,7 +1194,7 @@ func (s *Server) handleSummarize(ctx context.Context, req *mcp.CallToolRequest) 
 	if in.MaxPoints > 0 {
 		params["max_points"] = in.MaxPoints
 	}
-	return result(s.p.Run(ctx, core.Request{Task: core.TaskSummarize, Input: in.Text, Params: params}))
+	return result(s.p.Run(ctx, core.Request{Task: core.TaskSummarize, Door: "offload_summarize", Input: in.Text, Params: params}))
 }
 
 func (s *Server) handleClassify(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -1154,7 +1205,7 @@ func (s *Server) handleClassify(ctx context.Context, req *mcp.CallToolRequest) (
 	if bad := parseArgs(req.Params.Arguments, &in); bad != nil {
 		return bad, nil
 	}
-	return result(s.p.Run(ctx, core.Request{Task: core.TaskClassify, Input: in.Text, Params: map[string]any{"labels": in.Labels}}))
+	return result(s.p.Run(ctx, core.Request{Task: core.TaskClassify, Door: "offload_classify", Input: in.Text, Params: map[string]any{"labels": in.Labels}}))
 }
 
 func (s *Server) handleExtract(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -1165,7 +1216,7 @@ func (s *Server) handleExtract(ctx context.Context, req *mcp.CallToolRequest) (*
 	if bad := parseArgs(req.Params.Arguments, &in); bad != nil {
 		return bad, nil
 	}
-	return result(s.p.Run(ctx, core.Request{Task: core.TaskExtract, Input: in.Text, Params: map[string]any{"schema": in.Schema}}))
+	return result(s.p.Run(ctx, core.Request{Task: core.TaskExtract, Door: "offload_extract", Input: in.Text, Params: map[string]any{"schema": in.Schema}}))
 }
 
 func (s *Server) handleTriage(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -1176,7 +1227,7 @@ func (s *Server) handleTriage(ctx context.Context, req *mcp.CallToolRequest) (*m
 	if bad := parseArgs(req.Params.Arguments, &in); bad != nil {
 		return bad, nil
 	}
-	return result(s.p.Run(ctx, core.Request{Task: core.TaskTriage, Input: in.Text, Params: map[string]any{"question": in.Question}}))
+	return result(s.p.Run(ctx, core.Request{Task: core.TaskTriage, Door: "offload_triage", Input: in.Text, Params: map[string]any{"question": in.Question}}))
 }
 
 func (s *Server) handleVQA(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -1188,7 +1239,7 @@ func (s *Server) handleVQA(ctx context.Context, req *mcp.CallToolRequest) (*mcp.
 	if bad := parseArgs(req.Params.Arguments, &in); bad != nil {
 		return bad, nil
 	}
-	return result(s.visionRun(ctx, core.Request{Task: core.TaskVQA, Image: in.Image, Params: map[string]any{"question": in.Question}}, in.Route))
+	return result(s.visionRun(ctx, core.Request{Task: core.TaskVQA, Door: "offload_vqa", Image: in.Image, Params: map[string]any{"question": in.Question}}, in.Route))
 }
 
 // visionRun is the ONE call behind the three single-image vision tools
@@ -1211,7 +1262,7 @@ func (s *Server) handleVideoDescribe(ctx context.Context, req *mcp.CallToolReque
 	if bad := parseArgs(req.Params.Arguments, &in); bad != nil {
 		return bad, nil
 	}
-	return result(s.p.Run(ctx, core.Request{Task: core.TaskVideoDescribe, Video: in.Video, Params: map[string]any{"question": in.Question}}))
+	return result(s.p.Run(ctx, core.Request{Task: core.TaskVideoDescribe, Door: "offload_video_describe", Video: in.Video, Params: map[string]any{"question": in.Question}}))
 }
 
 func (s *Server) handleVideoWatch(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -1233,7 +1284,7 @@ func (s *Server) handleVideoWatch(ctx context.Context, req *mcp.CallToolRequest)
 	if in.Synthesize != nil {
 		params["synthesize"] = *in.Synthesize
 	}
-	return result(s.p.Run(ctx, core.Request{Task: core.TaskVideoWatch, Video: in.Video, Params: params}))
+	return result(s.p.Run(ctx, core.Request{Task: core.TaskVideoWatch, Door: "offload_video_watch", Video: in.Video, Params: params}))
 }
 
 func (s *Server) handleTranscribe(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -1294,7 +1345,7 @@ func (s *Server) handleTranscribe(ctx context.Context, req *mcp.CallToolRequest)
 	if in.HQ {
 		params["hq"] = true
 	}
-	res := s.p.Run(ctx, core.Request{Task: core.TaskTranscribe, Audio: in.Audio, Params: params})
+	res := s.p.Run(ctx, core.Request{Task: core.TaskTranscribe, Door: "offload_transcribe", Audio: in.Audio, Params: params})
 	if len(in.Select) > 0 {
 		res.Data = core.ProjectFields(res.Data, in.Select)
 	}
@@ -1309,7 +1360,7 @@ func (s *Server) handleExtractImage(ctx context.Context, req *mcp.CallToolReques
 	if bad := parseArgs(req.Params.Arguments, &in); bad != nil {
 		return bad, nil
 	}
-	return result(s.p.Run(ctx, core.Request{Task: core.TaskExtractImage, Image: in.Image, Params: map[string]any{"schema": in.Schema}}))
+	return result(s.p.Run(ctx, core.Request{Task: core.TaskExtractImage, Door: "offload_extract_image", Image: in.Image, Params: map[string]any{"schema": in.Schema}}))
 }
 
 func (s *Server) handleAssessImage(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -1325,7 +1376,7 @@ func (s *Server) handleAssessImage(ctx context.Context, req *mcp.CallToolRequest
 	if in.Brief != "" {
 		params["brief"] = in.Brief
 	}
-	return result(s.visionRun(ctx, core.Request{Task: core.TaskAssessImage, Image: in.Image, Params: params}, in.Route))
+	return result(s.visionRun(ctx, core.Request{Task: core.TaskAssessImage, Door: "offload_assess_image", Image: in.Image, Params: params}, in.Route))
 }
 
 func (s *Server) handleOCR(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -1342,7 +1393,7 @@ func (s *Server) handleOCR(ctx context.Context, req *mcp.CallToolRequest) (*mcp.
 	// read stylised text differently and a silent switch would change results.
 	switch in.Engine {
 	case "", "gpu":
-		return result(s.visionRun(ctx, core.Request{Task: core.TaskOCR, Image: in.Image}, in.Route))
+		return result(s.visionRun(ctx, core.Request{Task: core.TaskOCR, Door: "offload_ocr", Image: in.Image}, in.Route))
 	case "npu":
 		if r, ok := visionremote.NormalizeRoute(in.Route); !ok || r != visionremote.RouteLocal {
 			// The route places the GPU vision model; the NPU path is this box's
@@ -1401,7 +1452,7 @@ func (s *Server) handleGenerateImage(ctx context.Context, req *mcp.CallToolReque
 	if in.Refine != nil && !*in.Refine {
 		params["refine"] = false
 	}
-	return result(s.p.Run(ctx, core.Request{Task: core.TaskGenerateImage, Input: in.Prompt, Params: params}))
+	return result(s.p.Run(ctx, core.Request{Task: core.TaskGenerateImage, Door: "offload_generate_image", Input: in.Prompt, Params: params}))
 }
 
 func (s *Server) handleEditImageGenerative(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -1440,7 +1491,7 @@ func (s *Server) handleEditImageGenerative(ctx context.Context, req *mcp.CallToo
 	if in.Out != "" {
 		params["out"] = in.Out
 	}
-	return result(s.p.Run(ctx, core.Request{Task: core.TaskEditImageGenerative, Input: in.Prompt, Params: params}))
+	return result(s.p.Run(ctx, core.Request{Task: core.TaskEditImageGenerative, Door: "offload_edit_image_generative", Input: in.Prompt, Params: params}))
 }
 
 func (s *Server) handleInpaintImage(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -1483,7 +1534,7 @@ func (s *Server) handleInpaintImage(ctx context.Context, req *mcp.CallToolReques
 	if in.Out != "" {
 		params["out"] = in.Out
 	}
-	return result(s.p.Run(ctx, core.Request{Task: core.TaskInpaintImage, Input: in.Prompt, Params: params}))
+	return result(s.p.Run(ctx, core.Request{Task: core.TaskInpaintImage, Door: "offload_inpaint_image", Input: in.Prompt, Params: params}))
 }
 
 func (s *Server) handleUpscaleImage(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -1523,7 +1574,7 @@ func (s *Server) handleUpscaleImage(ctx context.Context, req *mcp.CallToolReques
 	if in.Out != "" {
 		params["out"] = in.Out
 	}
-	return result(s.p.Run(ctx, core.Request{Task: core.TaskUpscaleImage, Params: params}))
+	return result(s.p.Run(ctx, core.Request{Task: core.TaskUpscaleImage, Door: "offload_upscale_image", Params: params}))
 }
 
 func (s *Server) handleRunGraph(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -1560,7 +1611,7 @@ func (s *Server) handleRunGraph(ctx context.Context, req *mcp.CallToolRequest) (
 		"out_dir":       in.OutDir,
 		"reserve_vram":  in.ReserveVram,
 	}
-	return result(s.p.Run(ctx, core.Request{Task: core.TaskRunGraph, Params: params}))
+	return result(s.p.Run(ctx, core.Request{Task: core.TaskRunGraph, Door: "offload_run_graph", Params: params}))
 }
 
 // materialize returns path if set, else writes inline json to a temp file and returns
@@ -1597,7 +1648,7 @@ func (s *Server) handleGenerateSVG(ctx context.Context, req *mcp.CallToolRequest
 	if in.Out != "" {
 		params["out"] = in.Out
 	}
-	return result(s.p.Run(ctx, core.Request{Task: core.TaskGenerateSVG, Params: params}))
+	return result(s.p.Run(ctx, core.Request{Task: core.TaskGenerateSVG, Door: "offload_generate_svg", Params: params}))
 }
 
 func (s *Server) handleGenerateVideo(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -1662,7 +1713,7 @@ func (s *Server) handleGenerateVideo(ctx context.Context, req *mcp.CallToolReque
 	if in.ReserveVRAM > 0 {
 		params["reserve_vram"] = strconv.FormatFloat(in.ReserveVRAM, 'f', -1, 64)
 	}
-	return result(s.p.Run(ctx, core.Request{Task: core.TaskGenerateVideo, Input: in.Prompt, Image: in.Still, Params: params}))
+	return result(s.p.Run(ctx, core.Request{Task: core.TaskGenerateVideo, Door: "offload_generate_video", Input: in.Prompt, Image: in.Still, Params: params}))
 }
 
 func (s *Server) handleAnimateCharacter(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -1725,7 +1776,7 @@ func (s *Server) handleAnimateCharacter(ctx context.Context, req *mcp.CallToolRe
 	if in.ReserveVRAM > 0 {
 		params["reserve_vram"] = strconv.FormatFloat(in.ReserveVRAM, 'f', -1, 64)
 	}
-	return result(s.p.Run(ctx, core.Request{Task: core.TaskAnimateCharacter, Input: in.Prompt, Image: in.Ref, Video: in.Driver, Params: params}))
+	return result(s.p.Run(ctx, core.Request{Task: core.TaskAnimateCharacter, Door: "offload_animate_character", Input: in.Prompt, Image: in.Ref, Video: in.Driver, Params: params}))
 }
 
 func (s *Server) handleGenerateAudio(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -1772,7 +1823,7 @@ func (s *Server) handleGenerateAudio(ctx context.Context, req *mcp.CallToolReque
 	if in.ReserveVRAM > 0 {
 		params["reserve_vram"] = strconv.FormatFloat(in.ReserveVRAM, 'f', -1, 64)
 	}
-	return result(s.p.Run(ctx, core.Request{Task: core.TaskGenerateAudio, Input: in.Text, Params: params}))
+	return result(s.p.Run(ctx, core.Request{Task: core.TaskGenerateAudio, Door: "offload_generate_audio", Input: in.Text, Params: params}))
 }
 
 func (s *Server) handleEditImage(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -1792,7 +1843,7 @@ func (s *Server) handleEditImage(ctx context.Context, req *mcp.CallToolRequest) 
 	if len(in.Renditions) > 0 {
 		params["renditions"] = in.Renditions
 	}
-	return result(s.p.Run(ctx, core.Request{Task: core.TaskEditImage, Image: in.Image, Params: params}))
+	return result(s.p.Run(ctx, core.Request{Task: core.TaskEditImage, Door: "offload_edit_image", Image: in.Image, Params: params}))
 }
 
 func (s *Server) handleMedia(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -1842,7 +1893,7 @@ func (s *Server) handleMedia(ctx context.Context, req *mcp.CallToolRequest) (*mc
 	if in.Shortest != nil {
 		params["shortest"] = *in.Shortest
 	}
-	return result(s.p.Run(ctx, core.Request{Task: core.TaskMedia, Params: params}))
+	return result(s.p.Run(ctx, core.Request{Task: core.TaskMedia, Door: "offload_media", Params: params}))
 }
 
 func (s *Server) handleNIM(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -2377,6 +2428,7 @@ func (s *Server) handleAsk(ctx context.Context, req *mcp.CallToolRequest) (*mcp.
 	// outside read_root, no groundable anchor — arrives as one typed error from
 	// the builder, so the reason the caller reads is the reason askjob wrote.
 	contract, berr := askjob.BuildContract(in.Question, in.Paths, absRoot)
+	contract.Door = "offload_ask"
 	if berr != nil {
 		return jsonResult(map[string]any{"deferred": true, "reason": berr.Error()})
 	}
@@ -2600,6 +2652,7 @@ func (s *Server) handleReviewDiff(ctx context.Context, req *mcp.CallToolRequest)
 	// ceiling — arrives as one typed error from the builder, so the reason the
 	// caller reads is the reason reviewlane wrote.
 	contract, berr := reviewlane.BuildContract(in.Task, diff)
+	contract.Door = "offload_review_diff"
 	if berr != nil {
 		return jsonResult(map[string]any{"deferred": true, "reason": berr.Error()})
 	}
@@ -2932,6 +2985,7 @@ func (s *Server) handleAgentDelegate(ctx context.Context, req *mcp.CallToolReque
 				WriteRoot:    st.WriteRoot,
 				ContextClass: st.ContextClass,
 				Layer:        st.Layer,
+				Door:         "agent_delegate",
 			},
 			ContextPaths: st.ContextPaths,
 		}, absRoot, s.p.Cfg().AgentContextCapBytes())
@@ -3248,6 +3302,7 @@ func (s *Server) handleResearch(ctx context.Context, req *mcp.CallToolRequest) (
 		if perr != nil {
 			return jsonResult(map[string]any{"deferred": true, "reason": fmt.Sprintf("source %d: %v", resultSources[i], perr), "sources": sources})
 		}
+		c.Door = "offload_research"
 		contracts = append(contracts, c)
 		lints = append(lints, delegate.LintAcceptance(c))
 	}

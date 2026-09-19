@@ -12,6 +12,101 @@ Versioning: [SemVer](https://semver.org/).
   in 9,217 for 43 real firings that lived only in the labels sidecar. The escalating attempt records its row (its tier,
   its margin, the gate that fired, not deferred) before the defer, under the same `record` gate as a success. Red test
   `TestMarginEscalationRecordsTheEscalatingAttempt`.
+- **`calibrate` had never fitted a threshold, and the cause was file plumbing, not the 60-row floor**
+  (register D-126): the only classify/triage label writer appends to the confhead labels sidecar
+  (`confhead_labels_path`) while `calibrate` read the ledger alone, whose rows of the same calls carry the
+  margin and no label — 0 of 9,217 live ledger rows passed its filter. `calibration.RunSources` reads every
+  labeled-row source (ledger + sidecar), a missing file is a 0-row source, and the report names each source
+  with its usable-row count. Red test `TestRunSourcesFitsFromTheLabelsSidecar`.
+### Verified
+- **A vLLM seat's logprobs reach the confidence gate unchanged** (register D-128, measured 2026-09-18 on the Qube pair seat):
+  vLLM's `/v1/chat/completions` answers the OpenAI `logprobs.content[]` shape the client decodes; the legacy
+  `top_logprobs` list-of-dicts belongs to `/v1/completions`, which the harness never calls. Pinned by
+  `TestVLLMChatLogprobShapeDecodesIntoTopAlternatives` and `TestMeasuredVLLMTokenStreamYieldsAMargin`.
+### Changed
+- **The cascade tools declare themselves the first door for single-shot mechanical text** (register A-102 (a)): the
+  `offload_summarize` / `offload_classify` / `offload_extract` / `offload_triage` descriptions and `agent_delegate`'s
+  opener state the door order (one text + one mechanical question → the cascade; multi-document read-and-reason →
+  a contract), because the caller reads the tool text and nothing else. Measured 2026-09-18: the cascade carried
+  0.12 % of 14 days' wall while the agent doors carried 98.2 %; the operator reads that as a routing defect.
+### Added
+- **Every cascade ledger row now names its door** (register A-102 (e)): `door` on the request, the meta and the ledger row —
+  the MCP tool name (`offload_summarize` …), the CLI command (`cli:summarize` …) or `fleet` for a request a node received from
+  a delegator (a forwarded request keeps its origin door); agent-contract rows carry the contract's door on the wire
+  (`agent_delegate`, `offload_ask`, `offload_review_diff`, `offload_research`, `cli:delegate`, `cli:research`, `fleet`)
+  and the composite sub-calls keep their parent's. Before this all 558 cascade rows in the live ledger carried no
+  caller at all, so "which door produced this call" could not be asked of the telemetry. Additive and `omitempty` on every
+  surface: a node one release behind decodes the request unchanged.
+### Fixed
+- **A vLLM seat is no longer constrained by a GBNF grammar it discards** (register D-129, ADR 0002
+  amendment 2026-09-18): the seats `vllm_seats` declares — matched case-insensitively and
+  **alias-resolved through the live llama-swap roster**, so the Qube's `agent-pool-3card` alias of
+  `qwen3.8-27b-vllm-3card` counts — now receive vLLM's own `structured_outputs: {"json": <schema>}`
+  and **no `grammar`** on both send sites (the in-loop tier path in `attempt`, the structured re-pack
+  in `repackStructured`), plus the non-thinking render, since vLLM applies the constraint to the whole
+  output. llama.cpp seats keep the raw GBNF byte-identically, and an unreadable roster keeps the
+  grammar (the pre-fix behaviour) rather than stripping a constraint on a transient probe failure.
+  vLLM's request model allows unknown extras, so it accepted `grammar`, ignored it, and answered
+  unconstrained; the 0.115.14 repair was a downstream trim and coercion, and nine days of the
+  delegation log measured its cost as 1,018 structured re-packs on vLLM seats against 506 on every
+  other seat, with 3-attempt exhaustion at 19.7 % against 12.6 %. `response_format` stays unused on
+  every engine. New: `llamaclient.WithJSONSchema`, `gbnf.JSONSchema` (round-trips with
+  `FromJSONSchema`, declaration order and all), `tasks.Built.Fields`,
+  `config.Config.DeclaresVLLMSeat`, `pipeline.isVLLMSeat` (60 s per-name memo). Ledger rows and
+  `core.Meta` gain `repack_attempts` beside `repack_ms` — the wall alone cannot separate one slow
+  attempt from a three-attempt loop, and the attempt count is what this change is measured on. Red
+  test first:
+  `internal/pipeline/vllm_structured_outputs_test.go:TestGrammarNeverReachesADeclaredVLLMSeat`.
+
+## [0.129.2] - 2026-09-18 - the lease hand-off is ordered: the warm-back belongs to the last holder, a lost lease never warms, the seat unit never restarts itself
+
+### Fixed
+- **A releasing holder's warm-back raced the next lease's `--unload-seat`** (register D-124, the Lenovo, 2026-09-18
+  02:57): a wrapper whose command had been cut warmed the agent seat after the next queued lease had already taken the
+  card, drained an "idle" seat and unloaded it; the unload killed the engine, the seat unit's `Restart=on-failure`
+  brought it back 20 s later on the new holder's EXCLUSIVE card, and three measurement rows read the seat's 10 GiB
+  as their own fit. Now: a queued `Acquire` registers itself under `<state>/gpu/waiters/` for as long as it polls
+  (pruned on read when the pid is gone; `gpu status` lists them as `queued:`, `offload_status.gpu_lease.queued`
+  carries the count); an unload stamps `<state>/gpu/seat-warm-owed`; a warm-back runs only while the card is still
+  ours (the wrapper checks its epoch, `gpu release --warm-seat --epoch N` checks the record is still N) AND nobody is
+  queued behind us — with a waiter it is skipped and said so, the successor unloads the seat again anyway, and the
+  marker makes the LAST releaser pay the one warm; a holder that lost the card never warms; the warm is heartbeat for
+  its length (a 27B load is minutes, the heartbeat TTL two) and losing the lease mid-warm cancels it loudly. A plain
+  `gpu release` prints a note when a warm is owed. Tests pin the wire order (unload, unload, warm) for two queued
+  `--unload-seat` leases, the no-warm after a lost lease, the heartbeat during the warm, and the same rule on
+  `gpu release --warm-seat`.
+- **The vLLM seat unit template restarted the engine on its own** (`Restart=on-failure`). `vllm-seat-cmd.sh` detaches
+  the moment the unit's invocation changes, so a systemd relaunch is a seat llama-swap no longer tracks and no lease
+  can order — the mechanism that put the 27B under another lease's window above. The template is now `Restart=no`
+  (ADR 0035 amended); a crashed seat is reloaded by llama-swap on the next request, which the lease gate orders like
+  any other load. Deployed by hand on the Lenovo's two seat units (backups beside them).
+- **The drain could read no run at all between two steps.** The run registry rewrites a run's record on every
+  step (tmp + rename, in-place on Windows when the rename meets a reader), and `Registry.List` skipped a record
+  it caught empty, absent or torn — a 2 ms poll then printed a run-less `1 in flight` line (the print-cadence
+  test failed 1 run in 5 on main) and, with the seat's gauge at zero between steps, would have counted the gap
+  toward "drained". `readRecord` now waits a record out (4 × 5 ms) before treating it as unreadable; a young torn
+  record is skipped, never listed and never removed.
+
+## [0.129.1] - 2026-09-18 - fs_native bindings publish `reachable` from the seat wrapper's own verdict file
+
+### Added
+- **`kv_cache_server[].status_file` (register B-29).** An `fs_native` store is a mounted path with no port to dial, so
+  `offload_status` published `reachable: null, "not validated end to end in this release"` for every such binding since
+  0.113. The seat wrapper already decides the fact at every seat start (mount + 64 MiB write probe) and writes
+  `$WORK/seat-l2.status`; a binding that declares that file (host-visible `//wsl.localhost/<distro>/…` on a WSL2 seat)
+  now reads it: `ok` → `reachable: true`, `degraded` → `reachable: false` + `reachable_error`, unreadable → `null` with
+  a note, undeclared → `null` with the instruction. `status_line` and `status_age_s` ride along.
+  `TestStatusReadsFSNativeReachabilityFromTheSeatStatusFile`.
+
+### Changed
+- **`skill/` tool reference libraries refreshed from the operator's current copies and DaVinci Resolve added** (register J-22):
+  `skill/ffmpeg` (12 files were a week behind: ffmpeg 9.0 traps, NVENC, subtitles, quoting, failure modes),
+  `skill/gimp` (10 files: two hosts measured, text-outline correction), new `skill/davinci-resolve`
+  (Studio 21.1 catalog, CLI + sidecar, playbook, render, failure modes; `PROVENANCE.md` beside it).
+  Scrubbed by the evidence repo's script plus a supplemental pass for the editor's account, the
+  private video-pipeline repo, the dev and cloud drive paths and a tailnet address; the identity lint
+  passes. The unredacted originals stay in the operator's `~/.claude/skills`.
+
 ## [0.129.0] - 2026-09-18 - a contract can name the layer it runs on (the Lenovo fast digest seat by name); the digest-adr-hard-8 contract set
 
 ### Added

@@ -15,6 +15,10 @@ type GenOption func(*genOpts)
 // behavior, so an absent option can never change a request.
 type genOpts struct {
 	noThinking bool
+	// jsonSchema is the JSON Schema a vLLM seat is constrained by. nil (the
+	// zero value) means nothing was asked for and the request carries no
+	// structured-output field at all — the historical shape.
+	jsonSchema map[string]any
 }
 
 // WithoutThinking asks the server to render the seat's chat template in
@@ -24,6 +28,31 @@ type genOpts struct {
 // but actively destroys the answer.
 func WithoutThinking() GenOption {
 	return func(o *genOpts) { o.noThinking = true }
+}
+
+// WithJSONSchema constrains the answer with vLLM's OWN structured-output
+// field — `structured_outputs: {"json": <schema>}` — and suppresses the raw
+// GBNF `grammar` member for that call.
+//
+// It exists because `grammar` is llama.cpp's request field and vLLM's request
+// model ALLOWS unknown extras: a vLLM seat behind llama-swap accepts the key,
+// discards it, and answers unconstrained. Measured over nine days of the
+// delegation log (register D-129): 1,018 structured re-packs on vLLM seats
+// against 506 on every other seat, and 3-attempt exhaustion at 19.7 % against
+// 12.6 %. ADR 0048 makes vLLM a first-class engine, so it gets the field it
+// actually reads rather than the one it throws away.
+//
+// `structured_outputs` is vLLM's CURRENT name for this (the `guided_json` /
+// `guided_*` family is deprecated); `response_format` stays unused on every
+// engine, as ADR 0002 decided and its 2026-09-18 amendment restates. A nil or
+// empty schema is ignored, so a caller that could not build one falls back to
+// whatever grammar it passed.
+func WithJSONSchema(schema map[string]any) GenOption {
+	return func(o *genOpts) {
+		if len(schema) > 0 {
+			o.jsonSchema = schema
+		}
+	}
 }
 
 // RenderKey names the render an option set asks for, for cache keys: "" for
@@ -66,4 +95,36 @@ func (o genOpts) templateKwargs() *chatTemplateKwargs {
 		return nil
 	}
 	return &chatTemplateKwargs{EnableThinking: false}
+}
+
+// structuredOutputs is vLLM's structured-output request object. Only the
+// `json` arm is modelled: the harness compiles its own JSON Schema
+// (gbnf.JSONSchema), so the `regex`, `choice` and `grammar` (xgrammar EBNF —
+// NOT GBNF) arms have no caller here. `json` is NOT omitempty: an arm-less
+// structured_outputs object is a request error, and the POINTER field on the
+// request struct is what makes the whole object absent when unasked.
+type structuredOutputs struct {
+	JSON map[string]any `json:"json"`
+}
+
+// structured returns the request-body value for this option set, or nil when
+// no schema was asked for — the path every llama.cpp call takes, where the
+// key is absent from the body entirely.
+func (o genOpts) structured() *structuredOutputs {
+	if len(o.jsonSchema) == 0 {
+		return nil
+	}
+	return &structuredOutputs{JSON: o.jsonSchema}
+}
+
+// grammarFor is the ONE place the two constraint fields are arbitrated: a
+// call that carries a JSON schema is bound for a vLLM seat, which ignores
+// `grammar`, so the grammar is DROPPED rather than sent alongside. Sending
+// both would leave the misleading key on the wire for every future reader of
+// a captured request to reason about (register D-129).
+func (o genOpts) grammarFor(grammar string) string {
+	if len(o.jsonSchema) > 0 {
+		return ""
+	}
+	return grammar
 }

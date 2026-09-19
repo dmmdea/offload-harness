@@ -1,7 +1,7 @@
 # 05 — Encoding: NVENC, libx264/x265, SVT-AV1, two-pass, GOP
 
 Measured 2026-09-01 on the workstation (8.1.2, RTX 5060 Ti default NVENC device shared with
-llama-swap at the time) and the Linux node (8.0.1, RTX 3050). Throughput tables: 01. Sources: 02.
+llama-swap at the time) and the edge node (8.0.1, RTX 3050). Throughput tables: 01. Sources: 02.
 Quality numbers below are on synthetic `testsrc2` content — VMAF absolutes (~60) are
 meaningless there; sizes and RELATIVE ordering are what to take away.
 
@@ -57,9 +57,9 @@ needs cq ≈ 34 to reach the same bitrate. Widely used starting points on real f
 libx265 crf 20–26, libsvtav1 crf 28–38 with preset 4–8. Confirm on real footage with VMAF
 (02) before locking a value.
 
-## REAL FOOTAGE: a real-camera review shoot DJI clip, quality vs bitrate [measured 2026-09-01, workstation]
-Source: `<DJI clip>.MP4` (HEVC Main 10, 3840×3840, 59.94 fps, 99.8 Mbps) from
-`<operator footage folder>`. Reference = 8 s copy-cut → `fps=30,scale=1920:-2,format=yuv420p`,
+## REAL FOOTAGE: MyTools Auto Reviews DJI clip, quality vs bitrate [measured 2026-09-01, workstation]
+Source: `DJI_20260213154123_0043_D.MP4` (HEVC Main 10, 3840×3840, 59.94 fps, 99.8 Mbps) from
+`<cloud-drive>\YouTube\MyTools Auto Reviews\0. Temporal`. Reference = 8 s copy-cut → `fps=30,scale=1920:-2,format=yuv420p`,
 libx264 crf 8 (155 Mbps, 240 frames). VMAF = libvmaf `n_subsample=2`, distorted vs that reference.
 These numbers ARE representative (real camera content); the testsrc2 table below is not.
 
@@ -117,7 +117,7 @@ Reading (VMAF ≥ 99 ≈ transparent for delivery, ≥ 97 fine for social):
 -c:v libsvtav1 -preset 6 -crf 32 -pix_fmt yuv420p10le -svtav1-params tune=0:keyint=60
 ```
 Measured cost (1080p, workstation): p7 profile ≈ 100 fps hevc / 195 fps h264; p4 ≈ 300–370 fps; libx264
-slow 112 fps; libx265 medium 61 fps; svtav1 p6 72 fps. On the Linux node (RTX 3050): h264/hevc p4
+slow 112 fps; libx265 medium 61 fps; svtav1 p6 72 fps. On the edge node (RTX 3050): h264/hevc p4
 ≈ 300 fps, x264 medium 104 fps, no AV1 NVENC.
 
 ## Two-pass (CPU, target bitrate) [measured]
@@ -140,7 +140,7 @@ land on whole seconds (03). Verify with the keyframe probe (02).
 ## Full-GPU pipelines [measured]
 ```
 -hwaccel cuda -hwaccel_output_format cuda -i in.mp4 -c:v h264_nvenc …                          # nvdec → nvenc, no CPU frames: 388 fps 1080p
--hwaccel cuda -hwaccel_output_format cuda -i 4k.mp4 -vf "scale_cuda=1920:1080:interp_algo=lanczos" -c:v hevc_nvenc …   # 258 fps (workstation), 43 fps (Linux node)
+-hwaccel cuda -hwaccel_output_format cuda -i 4k.mp4 -vf "scale_cuda=1920:1080:interp_algo=lanczos" -c:v hevc_nvenc …   # 258 fps (workstation), 43 fps (edge node)
 -hwaccel cuda -i in.mp4 -vf "subtitles=x.srt" -c:v h264_nvenc …                                  # GPU decode, CPU filter (frames downloaded automatically), GPU encode — works
 -init_hw_device vulkan -i in.mp4 -vf "hwupload,libplacebo=w=1920:h=1080:downscaler=lanczos,hwdownload,format=yuv420p" -c:v libx264 …   # libplacebo works on the workstation (Vulkan)
 ```
@@ -160,9 +160,9 @@ expected band, keyframes where planned, VMAF/SSIM against the source on real foo
 setting is new, audio untouched (`-c:a copy`) or re-normalized (06).
 
 ## Gaps (not measured here)
-- **editing rig (RTX 5060, ffmpeg 9.0): encoder/filter list MEASURED 2026-09-10 (see 01 — h264/hevc/av1 NVENC all present), throughput still NOT measured.** Deliberate: the editor's console session was Active at probe time, and an encode benchmark on a machine someone is using both disturbs them and produces invalid numbers (a busy host starves the measurement). Run in a quiet window with: `scp reference/measurements-2026-09-01/real.sh <user>@<editing-rig>:D:/Temp/` then a PowerShell equivalent of the 1080p/4K sweep in 01 — and check `query user` + `Get-Process Resolve` first.
-- laptop node (RTX 3070) throughput and encoder list — box was offline on 09-09/09-10; expect h264/hevc NVENC and **no** AV1 NVENC (Ampere, as measured on the Linux node's RTX 3050) [inferred].
+- **editing rig (RTX 5060, ffmpeg 9.0): encoder/filter list MEASURED 2026-09-10 (see 01 — h264/hevc/av1 NVENC all present), throughput still NOT measured.** Deliberate: the editor's console session was Active at probe time, and an encode benchmark on a machine someone is using both disturbs them and produces invalid numbers (a busy host starves the measurement). Run in a quiet window with: `scp reference/measurements-2026-09-01/real.sh <user>@editing-rig:D:/Temp/` then a PowerShell equivalent of the 1080p/4K sweep in 01 — and check `query user` + `Get-Process Resolve` first.
+- laptop (RTX 3070) throughput and encoder list — box was offline on 09-09/09-10; expect h264/hevc NVENC and **no** AV1 NVENC (Ampere, as measured on the edge node's RTX 3050) [inferred].
 - Quality on real footage is measured above on ONE DJI clip (square 360-camera frame, daylight); re-run `measurements-2026-09-01/real.sh` on a talking-head / night clip before locking a CQ for those.
 - ffmpeg 9.x: the trap/behaviour cases ARE now measured (01 § Version deltas, 2026-09-10) and the capability subsets match 8.1.2, but no throughput or quality sweep has been re-run on 9.x — the fps and VMAF tables above remain 8.1.2 numbers.
-- AMF/QSV/MediaFoundation encoders on the workstation (present, unused — NVIDIA-only box) and QSV on the Linux node iGPU.
+- AMF/QSV/MediaFoundation encoders on the workstation (present, unused — NVIDIA-only box) and QSV on the edge node iGPU.
 - `-tune uhq` and `-lookahead_level` effect; NVENC 4:2:2 / 4:4:4 modes; hevc_nvenc B-frame counts per preset.
