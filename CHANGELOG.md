@@ -6,7 +6,10 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
-## [0.130.3] - 2026-09-19 - the re-pack sends the contract's own schema to vLLM seats (nested-object schemas no longer constrained into strings)
+## [0.130.4] - 2026-09-19 - doctor checks the model files behind every ComfyUI route (register F-31)
+
+### Added
+- **`doctor` resolves every configured ComfyUI model name against the class directory its loader node opens**, across `<comfy_dir>/models` and every `extra_model_paths.yaml` root (base_path plus ComfyUI's newline-separated alias lists such as `diffusion_models | unet`): `FOUND`, `MISSING` (no class directory holds it) or `MISPLACED` (present only under a class the graph never loads from — the 2026-08-31 disk-swap shape, when a DiT and a LoRA landed in the wrong class directory and every krea2 file was found by a graph rejection at render time). A subfolder name resolves as the loader opens it; a file that moved one level is still reported in its class. `MISSING`/`MISPLACED` fail doctor like a bound-but-missing route. A box with no models root prints no section. `internal/mediacap.ModelBindings` / `ModelRoots`; the expected-class table is derived from the shipped `render/wf-*.mjs` loader nodes. Mutation-checked: counting a misplaced file as found turns the test red.
 
 ### Fixed
 - **The re-pack on a vLLM seat sends the contract's own schema** (register D-129 follow-up, found by the A-100 proof contract):
@@ -14,10 +17,6 @@ Versioning: [SemVer](https://semver.org/).
   array-of-object type, so a contract whose schema nests objects was constrained into strings on every vLLM seat
   (three re-pack attempts "got string, want object"). vLLM accepts full JSON Schema; llama.cpp seats keep the GBNF
   projection. Red test `TestRepackSendsTheContractsOwnSchemaToAVLLMSeat`.
-## [0.130.4] - 2026-09-19 - doctor checks the model files behind every ComfyUI route (register F-31)
-
-### Added
-- **`doctor` resolves every configured ComfyUI model name against the class directory its loader node opens**, across `<comfy_dir>/models` and every `extra_model_paths.yaml` root (base_path plus ComfyUI's newline-separated alias lists such as `diffusion_models | unet`): `FOUND`, `MISSING` (no class directory holds it) or `MISPLACED` (present only under a class the graph never loads from — the 2026-08-31 disk-swap shape, when a DiT and a LoRA landed in the wrong class directory and every krea2 file was found by a graph rejection at render time). A subfolder name resolves as the loader opens it; a file that moved one level is still reported in its class. `MISSING`/`MISPLACED` fail doctor like a bound-but-missing route. A box with no models root prints no section. `internal/mediacap.ModelBindings` / `ModelRoots`; the expected-class table is derived from the shipped `render/wf-*.mjs` loader nodes. Mutation-checked: counting a misplaced file as found turns the test red.
 
 ## [0.130.4] - 2026-09-18 - the L1 staging default is the measured 2 GB
 
