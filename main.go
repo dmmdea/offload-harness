@@ -43,13 +43,13 @@ import (
 	"github.com/dmmdea/offload-harness/internal/judge"
 	"github.com/dmmdea/offload-harness/internal/knn"
 	"github.com/dmmdea/offload-harness/internal/ledger"
-	"github.com/dmmdea/offload-harness/internal/pairworkloads"
 	"github.com/dmmdea/offload-harness/internal/llamaclient"
 	"github.com/dmmdea/offload-harness/internal/mcpserver"
 	"github.com/dmmdea/offload-harness/internal/mediacap"
 	"github.com/dmmdea/offload-harness/internal/netguard"
 	"github.com/dmmdea/offload-harness/internal/nimclient"
 	"github.com/dmmdea/offload-harness/internal/nimoracle"
+	"github.com/dmmdea/offload-harness/internal/pairworkloads"
 	"github.com/dmmdea/offload-harness/internal/pipeline"
 	"github.com/dmmdea/offload-harness/internal/report"
 	"github.com/dmmdea/offload-harness/internal/research"
@@ -471,7 +471,7 @@ func runTask(task string, args []string) error {
 	}
 	defer cleanup()
 
-	res := p.Run(context.Background(), core.Request{Task: core.TaskType(task), Input: input, Params: params})
+	res := p.Run(context.Background(), core.Request{Task: core.TaskType(task), Door: "cli:" + task, Input: input, Params: params})
 	emitResult(res, *asJSON, *selectFlag, *compactFlag)
 	return nil
 }
@@ -510,6 +510,7 @@ func runVQA(args []string) error {
 
 	res := visionremote.Run(context.Background(), cfg, p, core.Request{
 		Task:   core.TaskVQA,
+		Door:   "cli:vqa",
 		Image:  positional,
 		Params: map[string]any{"question": *question},
 	}, *route)
@@ -558,6 +559,7 @@ func runVideoWatch(args []string) error {
 	defer cleanup()
 	res := p.Run(context.Background(), core.Request{
 		Task:  core.TaskVideoWatch,
+		Door:  "cli:video-watch",
 		Video: positional,
 		Params: map[string]any{
 			"question": *question, "window_sec": *windowSec, "fps": *fps, "max_frames": *maxFrames,
@@ -599,6 +601,7 @@ func runVideoDescribe(args []string) error {
 
 	res := p.Run(context.Background(), core.Request{
 		Task:   core.TaskVideoDescribe,
+		Door:   "cli:video-describe",
 		Video:  positional,
 		Params: map[string]any{"question": *question},
 	})
@@ -642,6 +645,7 @@ func runTranscribe(args []string) error {
 	}
 	res := p.Run(context.Background(), core.Request{
 		Task:   core.TaskTranscribe,
+		Door:   "cli:transcribe",
 		Audio:  positional,
 		Params: params,
 	})
@@ -904,6 +908,7 @@ func runGenerateImage(args []string) error {
 	}
 	res := p.Run(context.Background(), core.Request{
 		Task:   core.TaskGenerateImage,
+		Door:   "cli:generate-image",
 		Input:  positional,
 		Params: params,
 	})
@@ -978,6 +983,7 @@ func runInpaintImage(args []string) error {
 	}
 	res := p.Run(context.Background(), core.Request{
 		Task:   core.TaskInpaintImage,
+		Door:   "cli:inpaint-image",
 		Input:  *prompt,
 		Params: params,
 	})
@@ -1035,7 +1041,7 @@ func runUpscaleImage(args []string) error {
 	if *out != "" {
 		params["out"] = *out
 	}
-	res := p.Run(context.Background(), core.Request{Task: core.TaskUpscaleImage, Params: params})
+	res := p.Run(context.Background(), core.Request{Task: core.TaskUpscaleImage, Door: "cli:upscale-image", Params: params})
 	emitResult(res, *asJSON, "", *compactFlag)
 	return nil
 }
@@ -1072,7 +1078,7 @@ func runRunGraph(args []string) error {
 	}
 	defer cleanup()
 
-	res := p.Run(context.Background(), core.Request{Task: core.TaskRunGraph, Params: params})
+	res := p.Run(context.Background(), core.Request{Task: core.TaskRunGraph, Door: "cli:run-graph", Params: params})
 	emitResult(res, *asJSON, "", *compactFlag)
 	return nil
 }
@@ -1189,7 +1195,7 @@ func runEditImage(args []string) error {
 		}
 		params["renditions"] = rends
 	}
-	res := p.Run(context.Background(), core.Request{Task: core.TaskEditImage, Image: positional, Params: params})
+	res := p.Run(context.Background(), core.Request{Task: core.TaskEditImage, Door: "cli:edit-image", Image: positional, Params: params})
 	emitResult(res, *asJSON, "", *compactFlag)
 	return nil
 }
@@ -1251,7 +1257,7 @@ func runMedia(args []string) error {
 	if *count > 0 {
 		params["count"] = *count
 	}
-	res := p.Run(context.Background(), core.Request{Task: core.TaskMedia, Params: params})
+	res := p.Run(context.Background(), core.Request{Task: core.TaskMedia, Door: "cli:media", Params: params})
 	emitResult(res, *asJSON, "", *compactFlag)
 	return nil
 }
@@ -1296,7 +1302,7 @@ func runGenerateSVG(args []string) error {
 	if *out != "" {
 		params["out"] = *out
 	}
-	res := p.Run(context.Background(), core.Request{Task: core.TaskGenerateSVG, Params: params})
+	res := p.Run(context.Background(), core.Request{Task: core.TaskGenerateSVG, Door: "cli:generate-svg", Params: params})
 	emitResult(res, *asJSON, "", *compactFlag)
 	return nil
 }
@@ -1396,6 +1402,7 @@ func runGenerateAudio(args []string) error {
 	})
 	res := p.Run(context.Background(), core.Request{
 		Task:   core.TaskGenerateAudio,
+		Door:   "cli:generate-audio",
 		Input:  text,
 		Params: params,
 	})
@@ -1522,6 +1529,7 @@ func runGenerateVideo(args []string) error {
 	})
 	res := p.Run(context.Background(), core.Request{
 		Task:   core.TaskGenerateVideo,
+		Door:   "cli:generate-video",
 		Input:  prompt,
 		Image:  still,
 		Params: params,
@@ -1597,6 +1605,7 @@ func runAnimateCharacter(args []string) error {
 	}
 	res := p.Run(context.Background(), core.Request{
 		Task:   core.TaskAnimateCharacter,
+		Door:   "cli:animate-character",
 		Input:  prompt,
 		Image:  ref,
 		Video:  driver,
@@ -1726,6 +1735,7 @@ func runOCR(args []string) error {
 
 	res := visionremote.Run(context.Background(), cfg, p, core.Request{
 		Task:  core.TaskOCR,
+		Door:  "cli:ocr",
 		Image: positional,
 	}, *route)
 	if *asJSON {
@@ -1786,6 +1796,7 @@ func runExtractImage(args []string) error {
 
 	res := p.Run(context.Background(), core.Request{
 		Task:   core.TaskExtractImage,
+		Door:   "cli:extract-image",
 		Image:  positional,
 		Params: map[string]any{"schema": sch},
 	})
@@ -1830,6 +1841,7 @@ func runAssessImage(args []string) error {
 	}
 	res := visionremote.Run(context.Background(), cfg, p, core.Request{
 		Task:   core.TaskAssessImage,
+		Door:   "cli:assess-image",
 		Image:  positional,
 		Params: params,
 	}, *route)
@@ -2514,6 +2526,7 @@ func runFleetMeasure(args []string) error {
 		note("image-gen: rendering 512x512 at 8 steps...")
 		res := p.Run(ctx, core.Request{
 			Task:   core.TaskGenerateImage,
+			Door:   "cli:fleet-measure",
 			Input:  "fleet-measure probe: a plain gray sphere on a white background",
 			Params: map[string]any{"width": 512, "height": 512, "steps": 8},
 		})
@@ -2537,7 +2550,7 @@ func runFleetMeasure(args []string) error {
 	if cfg.VideoGenScript != "" {
 		note("video-gen: rendering the fast recipe at 9 frames...")
 		params := map[string]any{"fast": true, "frames": 9}
-		req := core.Request{Task: core.TaskGenerateVideo, Input: "fleet-measure probe: slow gentle camera pan", Params: params}
+		req := core.Request{Task: core.TaskGenerateVideo, Door: "cli:fleet-measure", Input: "fleet-measure probe: slow gentle camera pan", Params: params}
 		if stillPath != "" {
 			req.Image = stillPath
 		}
@@ -2555,6 +2568,7 @@ func runFleetMeasure(args []string) error {
 		note("audio-gen: rendering 5s of music...")
 		res := p.Run(ctx, core.Request{
 			Task:   core.TaskGenerateAudio,
+			Door:   "cli:fleet-measure",
 			Input:  "fleet-measure probe: soft ambient pad, slow tempo",
 			Params: map[string]any{"kind": "music", "seconds": 5},
 		})

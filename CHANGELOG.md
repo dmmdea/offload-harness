@@ -6,6 +6,12 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **Every cascade ledger row now names its door** (register A-102 (e)): `door` on the request, the meta and the ledger row —
+  the MCP tool name (`offload_summarize` …), the CLI command (`cli:summarize` …) or `fleet` for a request a node received from
+  a delegator (a forwarded request keeps its origin door). Before this all 558 cascade rows in the live ledger carried no
+  caller at all, so "which door produced this call" could not be asked of the telemetry. Additive and `omitempty` on every
+  surface: a node one release behind decodes the request unchanged.
 ## [0.129.1] - 2026-09-18 - fs_native bindings publish `reachable` from the seat wrapper's own verdict file
 
 ### Added

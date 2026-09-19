@@ -71,17 +71,17 @@ type Pipeline struct {
 	// seatRatesPath is the per-seat rate store under the state root, resolved
 	// by seatRates() on each agent run (empty = no usable root).
 	seatRatesPath string
-	cfg        config.Config
-	client     *llamaclient.Client
-	stt        *sttclient.Client  // whisper-server transcribe client (audio never hits the text cascade)
-	cache      *cache.Cache       // may be nil
-	led        *ledger.Ledger     // may be nil
-	thresholds map[string]float64 // per-task conformal margin thresholds (Phase 2); nil = config constant
-	breakers   *breaker.Group     // per-tier circuit breakers (Phase 3)
-	router     *router.Model      // entry-tier router (Phase 5); nil = static rule
-	overrides  *tierOverrides     // health-driven per-tier timeouts/degraded (Phase 4); nil = none
-	healMu     sync.Mutex         // Phase 7 autoheal rate-limit
-	lastHeal   map[string]time.Time
+	cfg           config.Config
+	client        *llamaclient.Client
+	stt           *sttclient.Client  // whisper-server transcribe client (audio never hits the text cascade)
+	cache         *cache.Cache       // may be nil
+	led           *ledger.Ledger     // may be nil
+	thresholds    map[string]float64 // per-task conformal margin thresholds (Phase 2); nil = config constant
+	breakers      *breaker.Group     // per-tier circuit breakers (Phase 3)
+	router        *router.Model      // entry-tier router (Phase 5); nil = static rule
+	overrides     *tierOverrides     // health-driven per-tier timeouts/degraded (Phase 4); nil = none
+	healMu        sync.Mutex         // Phase 7 autoheal rate-limit
+	lastHeal      map[string]time.Time
 	// Phase 2 Task 4: opt-in correctness head + per-task p(correct) thresholds.
 	// Both nil/empty unless cfg.ConfHeadEnabled — the gate is inert otherwise.
 	confhead       *confhead.Model    // nil = no head (gate off)
@@ -334,6 +334,10 @@ type cacheVal struct {
 func (p *Pipeline) Run(ctx context.Context, req core.Request) core.Result {
 	start := time.Now()
 	meta := core.Meta{Model: p.cfg.Model}
+	// Register A-102: carry the caller's door into telemetry so the ledger row
+	// names the surface that admitted the call. Documentary only — nothing below
+	// reads it, and every sub-branch takes meta by value from here.
+	meta.Door = req.Door
 
 	if !req.Task.Valid() {
 		return core.Deferf("unknown task "+string(req.Task), "", meta)
@@ -4005,6 +4009,9 @@ func entryFrom(task core.TaskType, meta core.Meta, deferred bool, inputChars int
 		Steps:      meta.Steps,
 		StopReason: meta.StopReason,
 		RepackMs:   meta.RepackMs,
+		// The surface that admitted the call (A-102): "offload_summarize",
+		// "cli:summarize", "fleet". Empty when no door stamped the request.
+		Door: meta.Door,
 		// Same read the delegation log does (delegate.record): per-row, so a
 		// long-lived process whose environment never changes still labels
 		// every row consistently, and an untagged process writes nothing.

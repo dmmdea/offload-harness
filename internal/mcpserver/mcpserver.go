@@ -1184,7 +1184,7 @@ func (s *Server) handleSummarize(ctx context.Context, req *mcp.CallToolRequest) 
 	if in.MaxPoints > 0 {
 		params["max_points"] = in.MaxPoints
 	}
-	return result(s.p.Run(ctx, core.Request{Task: core.TaskSummarize, Input: in.Text, Params: params}))
+	return result(s.p.Run(ctx, core.Request{Task: core.TaskSummarize, Door: "offload_summarize", Input: in.Text, Params: params}))
 }
 
 func (s *Server) handleClassify(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -1195,7 +1195,7 @@ func (s *Server) handleClassify(ctx context.Context, req *mcp.CallToolRequest) (
 	if bad := parseArgs(req.Params.Arguments, &in); bad != nil {
 		return bad, nil
 	}
-	return result(s.p.Run(ctx, core.Request{Task: core.TaskClassify, Input: in.Text, Params: map[string]any{"labels": in.Labels}}))
+	return result(s.p.Run(ctx, core.Request{Task: core.TaskClassify, Door: "offload_classify", Input: in.Text, Params: map[string]any{"labels": in.Labels}}))
 }
 
 func (s *Server) handleExtract(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -1206,7 +1206,7 @@ func (s *Server) handleExtract(ctx context.Context, req *mcp.CallToolRequest) (*
 	if bad := parseArgs(req.Params.Arguments, &in); bad != nil {
 		return bad, nil
 	}
-	return result(s.p.Run(ctx, core.Request{Task: core.TaskExtract, Input: in.Text, Params: map[string]any{"schema": in.Schema}}))
+	return result(s.p.Run(ctx, core.Request{Task: core.TaskExtract, Door: "offload_extract", Input: in.Text, Params: map[string]any{"schema": in.Schema}}))
 }
 
 func (s *Server) handleTriage(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -1217,7 +1217,7 @@ func (s *Server) handleTriage(ctx context.Context, req *mcp.CallToolRequest) (*m
 	if bad := parseArgs(req.Params.Arguments, &in); bad != nil {
 		return bad, nil
 	}
-	return result(s.p.Run(ctx, core.Request{Task: core.TaskTriage, Input: in.Text, Params: map[string]any{"question": in.Question}}))
+	return result(s.p.Run(ctx, core.Request{Task: core.TaskTriage, Door: "offload_triage", Input: in.Text, Params: map[string]any{"question": in.Question}}))
 }
 
 func (s *Server) handleVQA(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -1229,7 +1229,7 @@ func (s *Server) handleVQA(ctx context.Context, req *mcp.CallToolRequest) (*mcp.
 	if bad := parseArgs(req.Params.Arguments, &in); bad != nil {
 		return bad, nil
 	}
-	return result(s.visionRun(ctx, core.Request{Task: core.TaskVQA, Image: in.Image, Params: map[string]any{"question": in.Question}}, in.Route))
+	return result(s.visionRun(ctx, core.Request{Task: core.TaskVQA, Door: "offload_vqa", Image: in.Image, Params: map[string]any{"question": in.Question}}, in.Route))
 }
 
 // visionRun is the ONE call behind the three single-image vision tools
@@ -1252,7 +1252,7 @@ func (s *Server) handleVideoDescribe(ctx context.Context, req *mcp.CallToolReque
 	if bad := parseArgs(req.Params.Arguments, &in); bad != nil {
 		return bad, nil
 	}
-	return result(s.p.Run(ctx, core.Request{Task: core.TaskVideoDescribe, Video: in.Video, Params: map[string]any{"question": in.Question}}))
+	return result(s.p.Run(ctx, core.Request{Task: core.TaskVideoDescribe, Door: "offload_video_describe", Video: in.Video, Params: map[string]any{"question": in.Question}}))
 }
 
 func (s *Server) handleVideoWatch(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -1274,7 +1274,7 @@ func (s *Server) handleVideoWatch(ctx context.Context, req *mcp.CallToolRequest)
 	if in.Synthesize != nil {
 		params["synthesize"] = *in.Synthesize
 	}
-	return result(s.p.Run(ctx, core.Request{Task: core.TaskVideoWatch, Video: in.Video, Params: params}))
+	return result(s.p.Run(ctx, core.Request{Task: core.TaskVideoWatch, Door: "offload_video_watch", Video: in.Video, Params: params}))
 }
 
 func (s *Server) handleTranscribe(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -1335,7 +1335,7 @@ func (s *Server) handleTranscribe(ctx context.Context, req *mcp.CallToolRequest)
 	if in.HQ {
 		params["hq"] = true
 	}
-	res := s.p.Run(ctx, core.Request{Task: core.TaskTranscribe, Audio: in.Audio, Params: params})
+	res := s.p.Run(ctx, core.Request{Task: core.TaskTranscribe, Door: "offload_transcribe", Audio: in.Audio, Params: params})
 	if len(in.Select) > 0 {
 		res.Data = core.ProjectFields(res.Data, in.Select)
 	}
@@ -1350,7 +1350,7 @@ func (s *Server) handleExtractImage(ctx context.Context, req *mcp.CallToolReques
 	if bad := parseArgs(req.Params.Arguments, &in); bad != nil {
 		return bad, nil
 	}
-	return result(s.p.Run(ctx, core.Request{Task: core.TaskExtractImage, Image: in.Image, Params: map[string]any{"schema": in.Schema}}))
+	return result(s.p.Run(ctx, core.Request{Task: core.TaskExtractImage, Door: "offload_extract_image", Image: in.Image, Params: map[string]any{"schema": in.Schema}}))
 }
 
 func (s *Server) handleAssessImage(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -1366,7 +1366,7 @@ func (s *Server) handleAssessImage(ctx context.Context, req *mcp.CallToolRequest
 	if in.Brief != "" {
 		params["brief"] = in.Brief
 	}
-	return result(s.visionRun(ctx, core.Request{Task: core.TaskAssessImage, Image: in.Image, Params: params}, in.Route))
+	return result(s.visionRun(ctx, core.Request{Task: core.TaskAssessImage, Door: "offload_assess_image", Image: in.Image, Params: params}, in.Route))
 }
 
 func (s *Server) handleOCR(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -1383,7 +1383,7 @@ func (s *Server) handleOCR(ctx context.Context, req *mcp.CallToolRequest) (*mcp.
 	// read stylised text differently and a silent switch would change results.
 	switch in.Engine {
 	case "", "gpu":
-		return result(s.visionRun(ctx, core.Request{Task: core.TaskOCR, Image: in.Image}, in.Route))
+		return result(s.visionRun(ctx, core.Request{Task: core.TaskOCR, Door: "offload_ocr", Image: in.Image}, in.Route))
 	case "npu":
 		if r, ok := visionremote.NormalizeRoute(in.Route); !ok || r != visionremote.RouteLocal {
 			// The route places the GPU vision model; the NPU path is this box's
@@ -1442,7 +1442,7 @@ func (s *Server) handleGenerateImage(ctx context.Context, req *mcp.CallToolReque
 	if in.Refine != nil && !*in.Refine {
 		params["refine"] = false
 	}
-	return result(s.p.Run(ctx, core.Request{Task: core.TaskGenerateImage, Input: in.Prompt, Params: params}))
+	return result(s.p.Run(ctx, core.Request{Task: core.TaskGenerateImage, Door: "offload_generate_image", Input: in.Prompt, Params: params}))
 }
 
 func (s *Server) handleEditImageGenerative(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -1481,7 +1481,7 @@ func (s *Server) handleEditImageGenerative(ctx context.Context, req *mcp.CallToo
 	if in.Out != "" {
 		params["out"] = in.Out
 	}
-	return result(s.p.Run(ctx, core.Request{Task: core.TaskEditImageGenerative, Input: in.Prompt, Params: params}))
+	return result(s.p.Run(ctx, core.Request{Task: core.TaskEditImageGenerative, Door: "offload_edit_image_generative", Input: in.Prompt, Params: params}))
 }
 
 func (s *Server) handleInpaintImage(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -1524,7 +1524,7 @@ func (s *Server) handleInpaintImage(ctx context.Context, req *mcp.CallToolReques
 	if in.Out != "" {
 		params["out"] = in.Out
 	}
-	return result(s.p.Run(ctx, core.Request{Task: core.TaskInpaintImage, Input: in.Prompt, Params: params}))
+	return result(s.p.Run(ctx, core.Request{Task: core.TaskInpaintImage, Door: "offload_inpaint_image", Input: in.Prompt, Params: params}))
 }
 
 func (s *Server) handleUpscaleImage(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -1564,7 +1564,7 @@ func (s *Server) handleUpscaleImage(ctx context.Context, req *mcp.CallToolReques
 	if in.Out != "" {
 		params["out"] = in.Out
 	}
-	return result(s.p.Run(ctx, core.Request{Task: core.TaskUpscaleImage, Params: params}))
+	return result(s.p.Run(ctx, core.Request{Task: core.TaskUpscaleImage, Door: "offload_upscale_image", Params: params}))
 }
 
 func (s *Server) handleRunGraph(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -1601,7 +1601,7 @@ func (s *Server) handleRunGraph(ctx context.Context, req *mcp.CallToolRequest) (
 		"out_dir":       in.OutDir,
 		"reserve_vram":  in.ReserveVram,
 	}
-	return result(s.p.Run(ctx, core.Request{Task: core.TaskRunGraph, Params: params}))
+	return result(s.p.Run(ctx, core.Request{Task: core.TaskRunGraph, Door: "offload_run_graph", Params: params}))
 }
 
 // materialize returns path if set, else writes inline json to a temp file and returns
@@ -1638,7 +1638,7 @@ func (s *Server) handleGenerateSVG(ctx context.Context, req *mcp.CallToolRequest
 	if in.Out != "" {
 		params["out"] = in.Out
 	}
-	return result(s.p.Run(ctx, core.Request{Task: core.TaskGenerateSVG, Params: params}))
+	return result(s.p.Run(ctx, core.Request{Task: core.TaskGenerateSVG, Door: "offload_generate_svg", Params: params}))
 }
 
 func (s *Server) handleGenerateVideo(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -1703,7 +1703,7 @@ func (s *Server) handleGenerateVideo(ctx context.Context, req *mcp.CallToolReque
 	if in.ReserveVRAM > 0 {
 		params["reserve_vram"] = strconv.FormatFloat(in.ReserveVRAM, 'f', -1, 64)
 	}
-	return result(s.p.Run(ctx, core.Request{Task: core.TaskGenerateVideo, Input: in.Prompt, Image: in.Still, Params: params}))
+	return result(s.p.Run(ctx, core.Request{Task: core.TaskGenerateVideo, Door: "offload_generate_video", Input: in.Prompt, Image: in.Still, Params: params}))
 }
 
 func (s *Server) handleAnimateCharacter(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -1766,7 +1766,7 @@ func (s *Server) handleAnimateCharacter(ctx context.Context, req *mcp.CallToolRe
 	if in.ReserveVRAM > 0 {
 		params["reserve_vram"] = strconv.FormatFloat(in.ReserveVRAM, 'f', -1, 64)
 	}
-	return result(s.p.Run(ctx, core.Request{Task: core.TaskAnimateCharacter, Input: in.Prompt, Image: in.Ref, Video: in.Driver, Params: params}))
+	return result(s.p.Run(ctx, core.Request{Task: core.TaskAnimateCharacter, Door: "offload_animate_character", Input: in.Prompt, Image: in.Ref, Video: in.Driver, Params: params}))
 }
 
 func (s *Server) handleGenerateAudio(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -1813,7 +1813,7 @@ func (s *Server) handleGenerateAudio(ctx context.Context, req *mcp.CallToolReque
 	if in.ReserveVRAM > 0 {
 		params["reserve_vram"] = strconv.FormatFloat(in.ReserveVRAM, 'f', -1, 64)
 	}
-	return result(s.p.Run(ctx, core.Request{Task: core.TaskGenerateAudio, Input: in.Text, Params: params}))
+	return result(s.p.Run(ctx, core.Request{Task: core.TaskGenerateAudio, Door: "offload_generate_audio", Input: in.Text, Params: params}))
 }
 
 func (s *Server) handleEditImage(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -1833,7 +1833,7 @@ func (s *Server) handleEditImage(ctx context.Context, req *mcp.CallToolRequest) 
 	if len(in.Renditions) > 0 {
 		params["renditions"] = in.Renditions
 	}
-	return result(s.p.Run(ctx, core.Request{Task: core.TaskEditImage, Image: in.Image, Params: params}))
+	return result(s.p.Run(ctx, core.Request{Task: core.TaskEditImage, Door: "offload_edit_image", Image: in.Image, Params: params}))
 }
 
 func (s *Server) handleMedia(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -1883,7 +1883,7 @@ func (s *Server) handleMedia(ctx context.Context, req *mcp.CallToolRequest) (*mc
 	if in.Shortest != nil {
 		params["shortest"] = *in.Shortest
 	}
-	return result(s.p.Run(ctx, core.Request{Task: core.TaskMedia, Params: params}))
+	return result(s.p.Run(ctx, core.Request{Task: core.TaskMedia, Door: "offload_media", Params: params}))
 }
 
 func (s *Server) handleNIM(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
