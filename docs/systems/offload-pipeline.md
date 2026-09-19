@@ -129,7 +129,13 @@ actually ran; `offload_status`'s roster reports the effective `ocr` model, falli
   one token figure a share reader wants, `cards_tokens` (prompt work plus generation, 0 on a cache hit;
   the key is always present, which is how a reader tells a new row from an unattributed old one). Agent
   and delegate rows add the job behind them (`job_id`, `route`, `placement`, `steps`, `stop_reason`,
-  `repack_ms`, `acceptance_result`).
+  `repack_ms`, `acceptance_result`). Since register A-102 (2026-09-18) every row also carries `door`, the
+  SURFACE that admitted the call — an MCP tool name (`offload_summarize`), a CLI command
+  (`cli:summarize`), or `fleet` for a job a fleet node ran for a delegator: `core.Request.Door` is
+  stamped at each door, carried through `core.Meta` and mapped onto the row, so "which door produced
+  this cascade call" stops being unanswerable. It is documentary and never routes; a forwarded request
+  keeps its origin door, and agent-contract rows carry the contract's door (`agent_delegate`, `offload_ask`, `offload_review_diff`, `offload_research`, `cli:delegate`, `cli:research`, or `fleet` for a contract a node received with none) and the composite sub-calls (extract_image's ocr + extract, inpaint's text-box vqa) keep their parent's; a row with no `door` (every row before the door stamp) reads as UNKNOWN door,
+  never as one of the values above.
 - **Cache** — keyed result reuse. Bypassed on the *recordless* path (`NewRecordlessPipeline`);
   **shared** on the *in-loop* path (`NewInLoopPipeline`) — see Interfaces below for why those are two
   different things.

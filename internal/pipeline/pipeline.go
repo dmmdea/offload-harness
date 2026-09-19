@@ -341,6 +341,10 @@ type cacheVal struct {
 func (p *Pipeline) Run(ctx context.Context, req core.Request) core.Result {
 	start := time.Now()
 	meta := core.Meta{Model: p.cfg.Model}
+	// Register A-102: carry the caller's door into telemetry so the ledger row
+	// names the surface that admitted the call. Documentary only — nothing below
+	// reads it, and every sub-branch takes meta by value from here.
+	meta.Door = req.Door
 
 	if !req.Task.Valid() {
 		return core.Deferf("unknown task "+string(req.Task), "", meta)
@@ -1470,7 +1474,7 @@ func (p *Pipeline) runInpaintImage(ctx context.Context, req core.Request, meta c
 	// cleanly on the vqa load limit. Evidence:
 	// docs/superpowers/evidence/2026-07-17-nightshift-run-graph.md.
 	if mask == "" && paramBool(req.Params, "auto_text") {
-		am, aerr := p.autoTextMask(ctx, image)
+		am, aerr := p.autoTextMask(ctx, image, req.Door)
 		if aerr != nil {
 			return defer1("auto text localization failed: " + aerr.Error() + " — build a mask with edit-image mask_boxes instead")
 		}
@@ -3578,7 +3582,7 @@ func (p *Pipeline) runExtractImage(ctx context.Context, req core.Request, meta c
 	_ = start
 	// 1. OCR the image via the existing ocr task (reuses runVision + the vision
 	//    tier). A propagated defer covers image-load, empty-output, and model-fail.
-	ocrRes := p.Run(ctx, core.Request{Task: core.TaskOCR, Image: req.Image})
+	ocrRes := p.Run(ctx, core.Request{Task: core.TaskOCR, Image: req.Image, Door: req.Door})
 	if !ocrRes.OK {
 		return ocrRes
 	}
@@ -3592,7 +3596,7 @@ func (p *Pipeline) runExtractImage(ctx context.Context, req core.Request, meta c
 	// 3. Run the EXISTING extract on the OCR text — grammar + grounding (against
 	//    ocrText) + schema validation, all reused. The caller's schema rides in
 	//    req.Params exactly as offload_extract passes it.
-	return p.Run(ctx, core.Request{Task: core.TaskExtract, Input: ocrText, Params: req.Params})
+	return p.Run(ctx, core.Request{Task: core.TaskExtract, Input: ocrText, Params: req.Params, Door: req.Door})
 }
 
 // attempt runs the grammar+retry loop for ONE model tier. It returns the result
@@ -4041,6 +4045,9 @@ func entryFrom(task core.TaskType, meta core.Meta, deferred bool, inputChars int
 		StopReason:     meta.StopReason,
 		RepackMs:       meta.RepackMs,
 		RepackAttempts: meta.RepackAttempts,
+		// The surface that admitted the call (A-102): "offload_summarize",
+		// "cli:summarize", "fleet". Empty when no door stamped the request.
+		Door: meta.Door,
 		// Same read the delegation log does (delegate.record): per-row, so a
 		// long-lived process whose environment never changes still labels
 		// every row consistently, and an untagged process writes nothing.
