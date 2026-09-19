@@ -32,7 +32,7 @@ native CPU/disk offloading (measured unusable on the Mamba-hybrid 27B under WSL2
 ## Key concepts
 
 - **Seat** — a llama-swap model entry; here a vLLM engine with the LMCache MP connector.
-- **L1 staging** — LMCache MP's pinned host buffer beside the engine (default 8 GB). A staging
+- **L1 staging** — LMCache MP's pinned host buffer beside the engine (default 2 GB since 0.130.4 — register B-02 measured 2 / 4 / 8 GB restoring the same context at 3.1 / 5.1 / 9.1 GiB of RSS; 8 was the unmeasured seed). A staging
   area, not the tier.
 - **Store (L2)** — the second device's memory behind LMCache's L2 adapter: Valkey (Redis protocol,
   measured) or a filesystem export (`fs_native`).

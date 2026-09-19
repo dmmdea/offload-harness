@@ -382,7 +382,7 @@ func TestStatusReportsKVCacheServer(t *testing.T) {
 		t.Fatalf("one binding must be listed, got %v", on["bindings"])
 	}
 	row := rows[0]
-	if row["seat"] != "qwen3.8-27b-vllm" || row["store"] != "valkey" || row["chunk_size"] != 784 || row["l1_staging_gb"] != 8 || row["key_prefix"] != "qube-seat-v7" {
+	if row["seat"] != "qwen3.8-27b-vllm" || row["store"] != "valkey" || row["chunk_size"] != 784 || row["l1_staging_gb"] != 2 || row["key_prefix"] != "qube-seat-v7" {
 		t.Fatalf("enabled binding row wrong: %v", row)
 	}
 	if row["reachable"] != false || row["reachable_error"] == nil {

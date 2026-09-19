@@ -87,7 +87,7 @@ func TestKVCacheServerAcceptsLANTailnetAndDefaults(t *testing.T) {
 		if k.Address != strings.TrimSpace(addr) {
 			t.Errorf("%q: address not normalized: %q", addr, k.Address)
 		}
-		if k.StoreName() != "valkey" || k.EffectiveL1StagingGB() != 8 || k.EffectiveChunkSize() != 784 || !k.ChunkSizeDefaulted() || k.EffectiveKeyPrefix() != "qwen3.8-27b-vllm" {
+		if k.StoreName() != "valkey" || k.EffectiveL1StagingGB() != 2 || k.EffectiveChunkSize() != 784 || !k.ChunkSizeDefaulted() || k.EffectiveKeyPrefix() != "qwen3.8-27b-vllm" {
 			t.Errorf("%s: defaults not applied: %s %d %d %v %s", addr, k.StoreName(), k.EffectiveL1StagingGB(), k.EffectiveChunkSize(), k.ChunkSizeDefaulted(), k.EffectiveKeyPrefix())
 		}
 	}

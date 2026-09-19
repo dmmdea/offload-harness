@@ -282,12 +282,14 @@ func (c CacheServer) StoreName() string {
 	return "fs_native"
 }
 
-// EffectiveL1StagingGB is the pinned host buffer, defaulted.
+// EffectiveL1StagingGB is the pinned host buffer, defaulted to the measured
+// 2 GB (register B-02, 2026-09-18: L1 size has no capacity effect on what
+// the store restores; RSS ≈ L1 + 1.1 GiB).
 func (c CacheServer) EffectiveL1StagingGB() int {
 	if c.L1StagingGB > 0 {
 		return c.L1StagingGB
 	}
-	return 8
+	return 2
 }
 
 // numWorkers is the fs_native writer count, defaulted.
