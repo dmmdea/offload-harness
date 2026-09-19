@@ -150,3 +150,32 @@ func TestKVCacheServerLoadAttributesTheKey(t *testing.T) {
 		}
 	}
 }
+
+// TestDeclaresVLLMSeat: the box's own answer to "is this seat vLLM?" (register
+// D-129). Case-insensitive exact match against `vllm_seats`, and nothing else
+// — the ALIAS step is the caller's, because only the live llama-swap roster
+// knows which alias maps to which canonical id.
+func TestDeclaresVLLMSeat(t *testing.T) {
+	c := Config{VLLMSeats: []string{"qwen3.8-27b-vllm-3card", "  vllm-a2-seat  "}}
+	for _, tc := range []struct {
+		id   string
+		want bool
+	}{
+		{"qwen3.8-27b-vllm-3card", true},
+		{"QWEN3.8-27B-VLLM-3CARD", true},
+		{"vllm-a2-seat", true},
+		{"  vllm-a2-seat", true},
+		{"agent-pool-3card", false}, // the ALIAS: the caller resolves it first
+		{"gemma-4-e4b", false},
+		{"", false},
+	} {
+		if got := c.DeclaresVLLMSeat(tc.id); got != tc.want {
+			t.Errorf("DeclaresVLLMSeat(%q) = %v, want %v", tc.id, got, tc.want)
+		}
+	}
+	// A box that declares nothing declares no vLLM seat — the default, and the
+	// common case.
+	if (Config{}).DeclaresVLLMSeat("anything") {
+		t.Error("an empty vllm_seats must declare no seat")
+	}
+}

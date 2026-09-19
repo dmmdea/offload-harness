@@ -89,7 +89,10 @@ answers "is this good enough, and if not, is it worth trying a bigger model?"
   `confidence_margin_threshold` (default **0.65**). Both defaults were calibrated 2026-08-14
   from the confcal probe's observed distributions; the prior constants (0.45 / 0.35) sat below
   the entire observed support of their signals and had never fired on probe or production
-  traffic.
+  traffic. `local-offload calibrate` fits the per-task value from BOTH labeled-row sources — the
+  ledger and the confhead labels sidecar (`confhead_labels_path`), where the classify/triage
+  agreement labels are written (register D-126: read from the ledger alone it found 0 usable rows
+  and never fitted anything); the report names each source and its usable-row count.
 - **Confhead gate.** A learned correctness head below its threshold escalates.
 
 An OK result returns immediately. A recoverable failure at a non-final Tier escalates. Infrastructure
@@ -129,7 +132,13 @@ actually ran; `offload_status`'s roster reports the effective `ocr` model, falli
   one token figure a share reader wants, `cards_tokens` (prompt work plus generation, 0 on a cache hit;
   the key is always present, which is how a reader tells a new row from an unattributed old one). Agent
   and delegate rows add the job behind them (`job_id`, `route`, `placement`, `steps`, `stop_reason`,
-  `repack_ms`, `acceptance_result`).
+  `repack_ms`, `acceptance_result`). Since register A-102 (2026-09-18) every row also carries `door`, the
+  SURFACE that admitted the call — an MCP tool name (`offload_summarize`), a CLI command
+  (`cli:summarize`), or `fleet` for a job a fleet node ran for a delegator: `core.Request.Door` is
+  stamped at each door, carried through `core.Meta` and mapped onto the row, so "which door produced
+  this cascade call" stops being unanswerable. It is documentary and never routes; a forwarded request
+  keeps its origin door, and agent-contract rows carry the contract's door (`agent_delegate`, `offload_ask`, `offload_review_diff`, `offload_research`, `cli:delegate`, `cli:research`, or `fleet` for a contract a node received with none) and the composite sub-calls (extract_image's ocr + extract, inpaint's text-box vqa) keep their parent's; a row with no `door` (every row before the door stamp) reads as UNKNOWN door,
+  never as one of the values above.
 - **Cache** — keyed result reuse. Bypassed on the *recordless* path (`NewRecordlessPipeline`);
   **shared** on the *in-loop* path (`NewInLoopPipeline`) — see Interfaces below for why those are two
   different things.
@@ -335,9 +344,12 @@ than compiled in.
 1. **A Defer is a success signal.** Never convert one into an error, and never add a cloud fallback
    to avoid one — see
    [ADR 0001](../architecture/decisions/0001-defer-never-cloud-fallback.md).
-2. **Structured output comes from a raw GBNF grammar field**, never `--json-schema` or
-   `response_format` — see
-   [ADR 0002](../architecture/decisions/0002-grammar-reliable-serving-flags.md).
+2. **Structured output comes from a raw GBNF grammar field** on llama.cpp seats, and from vLLM's own
+   `structured_outputs: {"json": <schema>}` on the seats `vllm_seats` declares (alias-resolved through
+   the llama-swap roster) — because vLLM accepts and DISCARDS the `grammar` field; never
+   `--json-schema` or `response_format` — see
+   [ADR 0002](../architecture/decisions/0002-grammar-reliable-serving-flags.md) and its 2026-09-18
+   amendment (register D-129).
 3. The recordless path writes nothing — no ledger, no cache, no shadow capture.
 4. Infrastructure failures do not escalate.
 5. The reasoning Tier never fabricates a pass: garbage from it still defers.

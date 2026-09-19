@@ -71,17 +71,17 @@ type Pipeline struct {
 	// seatRatesPath is the per-seat rate store under the state root, resolved
 	// by seatRates() on each agent run (empty = no usable root).
 	seatRatesPath string
-	cfg        config.Config
-	client     *llamaclient.Client
-	stt        *sttclient.Client  // whisper-server transcribe client (audio never hits the text cascade)
-	cache      *cache.Cache       // may be nil
-	led        *ledger.Ledger     // may be nil
-	thresholds map[string]float64 // per-task conformal margin thresholds (Phase 2); nil = config constant
-	breakers   *breaker.Group     // per-tier circuit breakers (Phase 3)
-	router     *router.Model      // entry-tier router (Phase 5); nil = static rule
-	overrides  *tierOverrides     // health-driven per-tier timeouts/degraded (Phase 4); nil = none
-	healMu     sync.Mutex         // Phase 7 autoheal rate-limit
-	lastHeal   map[string]time.Time
+	cfg           config.Config
+	client        *llamaclient.Client
+	stt           *sttclient.Client  // whisper-server transcribe client (audio never hits the text cascade)
+	cache         *cache.Cache       // may be nil
+	led           *ledger.Ledger     // may be nil
+	thresholds    map[string]float64 // per-task conformal margin thresholds (Phase 2); nil = config constant
+	breakers      *breaker.Group     // per-tier circuit breakers (Phase 3)
+	router        *router.Model      // entry-tier router (Phase 5); nil = static rule
+	overrides     *tierOverrides     // health-driven per-tier timeouts/degraded (Phase 4); nil = none
+	healMu        sync.Mutex         // Phase 7 autoheal rate-limit
+	lastHeal      map[string]time.Time
 	// Phase 2 Task 4: opt-in correctness head + per-task p(correct) thresholds.
 	// Both nil/empty unless cfg.ConfHeadEnabled — the gate is inert otherwise.
 	confhead       *confhead.Model    // nil = no head (gate off)
@@ -123,6 +123,13 @@ type Pipeline struct {
 	swapMu   sync.Mutex
 	tierSeen map[string]time.Time
 	nowFn    func() time.Time
+	// D-129: per-name memo of "is this seat served by vLLM?" and a once-per-name
+	// record of a roster probe that could not answer. Guarded by vllmSeatMu;
+	// both maps are lazily built, so the zero Pipeline answers "no" for every
+	// name without allocating. See vllmseat.go.
+	vllmSeatMu     sync.Mutex
+	vllmSeatCache  map[string]vllmSeatAnswer
+	vllmSeatWarned map[string]bool
 	// Composite tier (ADR 0039): placementLive is the seam tests use to inject
 	// the machine's live readers (occupancy, free VRAM, host RAM, presence);
 	// nil = the PROCESS-WIDE memoised Snapshot over cfg
@@ -334,6 +341,10 @@ type cacheVal struct {
 func (p *Pipeline) Run(ctx context.Context, req core.Request) core.Result {
 	start := time.Now()
 	meta := core.Meta{Model: p.cfg.Model}
+	// Register A-102: carry the caller's door into telemetry so the ledger row
+	// names the surface that admitted the call. Documentary only — nothing below
+	// reads it, and every sub-branch takes meta by value from here.
+	meta.Door = req.Door
 
 	if !req.Task.Valid() {
 		return core.Deferf("unknown task "+string(req.Task), "", meta)
@@ -1463,7 +1474,7 @@ func (p *Pipeline) runInpaintImage(ctx context.Context, req core.Request, meta c
 	// cleanly on the vqa load limit. Evidence:
 	// docs/superpowers/evidence/2026-07-17-nightshift-run-graph.md.
 	if mask == "" && paramBool(req.Params, "auto_text") {
-		am, aerr := p.autoTextMask(ctx, image)
+		am, aerr := p.autoTextMask(ctx, image, req.Door)
 		if aerr != nil {
 			return defer1("auto text localization failed: " + aerr.Error() + " — build a mask with edit-image mask_boxes instead")
 		}
@@ -3571,7 +3582,7 @@ func (p *Pipeline) runExtractImage(ctx context.Context, req core.Request, meta c
 	_ = start
 	// 1. OCR the image via the existing ocr task (reuses runVision + the vision
 	//    tier). A propagated defer covers image-load, empty-output, and model-fail.
-	ocrRes := p.Run(ctx, core.Request{Task: core.TaskOCR, Image: req.Image})
+	ocrRes := p.Run(ctx, core.Request{Task: core.TaskOCR, Image: req.Image, Door: req.Door})
 	if !ocrRes.OK {
 		return ocrRes
 	}
@@ -3585,7 +3596,7 @@ func (p *Pipeline) runExtractImage(ctx context.Context, req core.Request, meta c
 	// 3. Run the EXISTING extract on the OCR text — grammar + grounding (against
 	//    ocrText) + schema validation, all reused. The caller's schema rides in
 	//    req.Params exactly as offload_extract passes it.
-	return p.Run(ctx, core.Request{Task: core.TaskExtract, Input: ocrText, Params: req.Params})
+	return p.Run(ctx, core.Request{Task: core.TaskExtract, Input: ocrText, Params: req.Params, Door: req.Door})
 }
 
 // attempt runs the grammar+retry loop for ONE model tier. It returns the result
@@ -3628,9 +3639,37 @@ func (p *Pipeline) attempt(ctx context.Context, req core.Request, built tasks.Bu
 		}
 	}
 
+	// D-129: a seat this box declares as vLLM (directly or through its
+	// llama-swap alias) is constrained by vLLM's OWN field — it accepts and
+	// DISCARDS llama.cpp's `grammar`, so this tier was answering unconstrained
+	// and paying for it downstream (1,018 re-packs on vLLM seats over nine
+	// days against 506 on every other seat). Resolved ONCE per attempt loop,
+	// not per retry: the answer is memoized anyway, and a retry must not be
+	// able to change engines mid-call.
+	//
+	// WithoutThinking rides along because vLLM applies the constraint to the
+	// WHOLE output: a thinking seat would have to emit its think block inside
+	// the JSON schema, which is unsatisfiable. The reasoning tier's trick of
+	// putting the think span INSIDE the grammar (gbnf.WrapThinking) is
+	// llama.cpp-only for exactly this reason, so a vLLM rung asks for the
+	// non-thinking render instead.
+	// The render this adds is a function of the MODEL, which every cache key
+	// on this path already carries, so it cannot serve one render's answer to
+	// the other's caller the way RenderKey exists to prevent.
+	grammar, genOpts := built.Grammar, opts
+	if len(built.Fields) > 0 && p.isVLLMSeat(ctx, model) {
+		grammar = ""
+		// A fresh slice, never append-in-place: opts is the CALLER's variadic
+		// array, and growing it under a spare cap would leak this call's
+		// options into the caller's next one.
+		genOpts = make([]llamaclient.GenOption, 0, len(opts)+2)
+		genOpts = append(genOpts, opts...)
+		genOpts = append(genOpts, llamaclient.WithJSONSchema(gbnf.JSONSchema(built.Fields)), llamaclient.WithoutThinking())
+	}
+
 	for i := 0; i < attempts; i++ {
 		meta.Retries = i
-		gen, gerr := p.client.Generate(actx, model, built.System, user, built.Grammar, built.MaxTokens, p.cfg.Temperature, topLP, opts...)
+		gen, gerr := p.client.Generate(actx, model, built.System, user, grammar, built.MaxTokens, p.cfg.Temperature, topLP, genOpts...)
 		if gerr != nil {
 			meta.LatencyMs = time.Since(start).Milliseconds()
 			meta.ErrClass = classifyErr(gerr)
@@ -4000,11 +4039,15 @@ func entryFrom(task core.TaskType, meta core.Meta, deferred bool, inputChars int
 		Layer:              placedLayer(meta.Placed),
 		// The job behind an agent row and the route's placement note (D-101):
 		// empty — omitted — on a plain cascade call.
-		JobID:      meta.JobID,
-		Placement:  meta.Placement,
-		Steps:      meta.Steps,
-		StopReason: meta.StopReason,
-		RepackMs:   meta.RepackMs,
+		JobID:          meta.JobID,
+		Placement:      meta.Placement,
+		Steps:          meta.Steps,
+		StopReason:     meta.StopReason,
+		RepackMs:       meta.RepackMs,
+		RepackAttempts: meta.RepackAttempts,
+		// The surface that admitted the call (A-102): "offload_summarize",
+		// "cli:summarize", "fleet". Empty when no door stamped the request.
+		Door: meta.Door,
 		// Same read the delegation log does (delegate.record): per-row, so a
 		// long-lived process whose environment never changes still labels
 		// every row consistently, and an untagged process writes nothing.

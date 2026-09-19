@@ -258,6 +258,13 @@ type AgentContract struct {
 	// the node uses it as a seat lookup key, and a name that validates there
 	// must always be dispatchable here.
 	Layer string `json:"layer,omitempty"`
+	// Door is the surface that admitted this contract (register A-102 (e)):
+	// an MCP tool name (agent_delegate, offload_ask, offload_review_diff,
+	// offload_research, agent_rig), a CLI command (cli:delegate,
+	// cli:research) or fleet for a contract a node received with none.
+	// Documentary: it travels on the wire so the executing node's ledger row
+	// names the delegator's door, and it never routes anything.
+	Door string `json:"door,omitempty"`
 }
 
 // ContextClassLong is the one non-default context_class a contract may carry:
