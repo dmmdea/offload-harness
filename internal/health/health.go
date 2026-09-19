@@ -8,10 +8,12 @@ package health
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"math"
 	"os"
 	"sort"
 
+	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/ledger"
 )
 
@@ -34,6 +36,13 @@ type TierHealth struct {
 type Report struct {
 	Tiers map[string]TierHealth `json:"tiers"`
 	Notes []string              `json:"notes,omitempty"`
+	// ExcludedByScale counts ledger rows dropped because their margin_scale is
+	// not the scale this box emits (register D-130). Baselines and the collapse
+	// test are comparisons against a tier's own history, and the two scales run
+	// ~10x apart: pooling them would read a flag flip as a quality collapse and
+	// route around a healthy tier. A non-zero count is also the honest answer to
+	// "why is n smaller than my ledger?".
+	ExcludedByScale int `json:"excluded_by_scale,omitempty"`
 }
 
 // outFile is the JSON shape written to outPath.
@@ -45,18 +54,27 @@ type outFile struct {
 // Run reads the ledger at ledgerPath, computes per-tier health statistics,
 // writes a compact JSON summary to outPath, and returns the full Report.
 // A missing ledger file is treated as zero entries (not an error).
-func Run(ledgerPath, outPath string) (Report, error) {
-	entries, err := readLedger(ledgerPath)
+// scale names the margin scale this box currently emits (core.MarginScaleMatched
+// or core.MarginScaleFull; empty reads as matched, the same rule stored rows
+// follow). Rows on any other scale are excluded and counted.
+func Run(ledgerPath, outPath, scale string) (Report, error) {
+	all, err := readLedger(ledgerPath)
 	if err != nil {
 		return Report{}, err
 	}
+	entries, excluded := keepScale(all, scale)
 
 	// Group entries by tier in chronological (TS) order.
 	groups := groupByTier(entries)
 
 	report := Report{
-		Tiers: make(map[string]TierHealth, len(groups)),
-		Notes: nil,
+		Tiers:           make(map[string]TierHealth, len(groups)),
+		Notes:           nil,
+		ExcludedByScale: excluded,
+	}
+	if excluded > 0 {
+		report.Notes = append(report.Notes, fmt.Sprintf("excluded %d ledger row(s) whose margin_scale is not %q (an empty scale reads as matched) - the two decision-margin scales are ~10x apart and must not be pooled",
+			excluded, core.MarginScaleOfRow(scale)))
 	}
 
 	out := outFile{
@@ -121,6 +139,23 @@ func readLedger(path string) ([]ledger.Entry, error) {
 		out = append(out, e)
 	}
 	return out, sc.Err()
+}
+
+// keepScale drops rows written on a different margin scale than the one this
+// box emits, and returns how many it dropped. Both sides go through
+// core.MarginScaleOfRow, so a pre-flag row (empty scale) is matched-scale and a
+// caller that passes "" means matched.
+func keepScale(entries []ledger.Entry, scale string) (kept []ledger.Entry, excluded int) {
+	want := core.MarginScaleOfRow(scale)
+	kept = make([]ledger.Entry, 0, len(entries))
+	for _, e := range entries {
+		if core.MarginScaleOfRow(e.MarginScale) != want {
+			excluded++
+			continue
+		}
+		kept = append(kept, e)
+	}
+	return kept, excluded
 }
 
 // groupByTier partitions entries by ModelTier, preserving insertion order

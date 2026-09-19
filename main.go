@@ -2928,7 +2928,9 @@ func runCalibrate(args []string) error {
 	if dst == "" {
 		dst = cfg.ThresholdsPath
 	}
-	_, report, err := calibration.Run(cfg.LedgerPath, *alpha, cfg.TargetErrorRate, dst)
+	// Calibrate on the scale this box EMITS (D-130): a cutoff derived from a
+	// mix of the two ~10x-apart margin scales belongs to neither.
+	_, report, err := calibration.Run(cfg.LedgerPath, *alpha, cfg.TargetErrorRate, dst, core.MarginScaleOf(cfg.ConfidenceMarginFullDenominator))
 	if err != nil {
 		return err
 	}
@@ -2947,7 +2949,7 @@ func runHealth(args []string) error {
 	if dst == "" {
 		dst = cfg.TierOverridesPath
 	}
-	rep, err := health.Run(cfg.LedgerPath, dst)
+	rep, err := health.Run(cfg.LedgerPath, dst, core.MarginScaleOf(cfg.ConfidenceMarginFullDenominator))
 	if err != nil {
 		return err
 	}
