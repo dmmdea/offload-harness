@@ -3,7 +3,7 @@
 > ⚠️ **HISTORICAL — this is NOT <node-b>'s current hardware.** Generated 2026-07-27, when <node-b> ran a
 > single RTX 5060 Ti (16 GB). On **2026-08-02** a second card (RTX 5070 Ti 16 GB) was installed, so
 > <node-b> then ran the **`blackwell-2x16`** tier with **~32 GB total VRAM across two cards**
-> (32614 MiB measured, `nvidia-smi` 2026-08-05). On **2026-08-31** a THIRD card (RTX 5060 Ti 16 GB) took it to **3× Blackwell 16 GB = 48.9 GB** — a shape no shipped tier id covers (`Get-Profile` files it as `dual-gpu`; `blackwell-3x16` is proposed, not shipped). Kept verbatim as a point-in-time record.
+> (32614 MiB measured, `nvidia-smi` 2026-08-05). On **2026-08-31** a THIRD card (RTX 5060 Ti 16 GB) took it to **3× Blackwell 16 GB = 48.9 GB**, the shape `blackwell-3x16` covers — SHIPPED as a tier id in 0.113.32 and a COMPOSITE tier (ADR 0052) since 0.123.2. Kept verbatim as a point-in-time record.
 > Do not size anything off the numbers below.
 
 | | |

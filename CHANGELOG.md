@@ -20,19 +20,10 @@ Versioning: [SemVer](https://semver.org/).
   that node (`scheduledOn` resolves through PAIR's member list). Red tests: `TestEngineFor` accelerator rows,
   `TestFromLedgerAcceleratorRowNamesDeviceAndNode`.
 
-## [0.130.4] - 2026-09-19 - doctor checks the model files behind every ComfyUI route (register F-31)
+## [0.130.4] - 2026-09-19 - doctor checks the model files behind every ComfyUI route (register F-31); the L1 staging default is the measured 2 GB (register B-02)
 
 ### Added
 - **`doctor` resolves every configured ComfyUI model name against the class directory its loader node opens**, across `<comfy_dir>/models` and every `extra_model_paths.yaml` root (base_path plus ComfyUI's newline-separated alias lists such as `diffusion_models | unet`): `FOUND`, `MISSING` (no class directory holds it) or `MISPLACED` (present only under a class the graph never loads from — the 2026-08-31 disk-swap shape, when a DiT and a LoRA landed in the wrong class directory and every krea2 file was found by a graph rejection at render time). A subfolder name resolves as the loader opens it; a file that moved one level is still reported in its class. `MISSING`/`MISPLACED` fail doctor like a bound-but-missing route. A box with no models root prints no section. `internal/mediacap.ModelBindings` / `ModelRoots`; the expected-class table is derived from the shipped `render/wf-*.mjs` loader nodes. Mutation-checked: counting a misplaced file as found turns the test red.
-
-### Fixed
-- **The re-pack on a vLLM seat sends the contract's own schema** (register D-129 follow-up, found by the A-100 proof contract):
-  `structured_outputs.json` carried the GBNF-typed projection of the schema, and `internal/gbnf` has no object or
-  array-of-object type, so a contract whose schema nests objects was constrained into strings on every vLLM seat
-  (three re-pack attempts "got string, want object"). vLLM accepts full JSON Schema; llama.cpp seats keep the GBNF
-  projection. Red test `TestRepackSendsTheContractsOwnSchemaToAVLLMSeat`.
-
-## [0.130.4] - 2026-09-18 - the L1 staging default is the measured 2 GB
 
 ### Changed
 - **`l1_staging_gb` / `SEAT_L1_GB` default 8 → 2** (register B-02, `Benchmarks and Optimizations/2026-09-18-b02-l1-staging`):
@@ -41,6 +32,13 @@ Versioning: [SemVer](https://semver.org/).
   noise — at 9.1 / 5.1 / 3.1 GiB of MP-server RSS. The smallest at parity is the default (INV-17); the pair profile
   (`blackwell-2x16`) carries 2, the 3-card same-box tier keeps its sized 32. A deployed `seat.env` keeps its
   explicit value until it is re-rendered; the production pair seat moves after an H-24 soak.
+
+### Fixed
+- **The re-pack on a vLLM seat sends the contract's own schema** (register D-129 follow-up, found by the A-100 proof contract):
+  `structured_outputs.json` carried the GBNF-typed projection of the schema, and `internal/gbnf` has no object or
+  array-of-object type, so a contract whose schema nests objects was constrained into strings on every vLLM seat
+  (three re-pack attempts "got string, want object"). vLLM accepts full JSON Schema; llama.cpp seats keep the GBNF
+  projection. Red test `TestRepackSendsTheContractsOwnSchemaToAVLLMSeat`.
 
 ## [0.130.3] - 2026-09-19 - accelerator calls reach the savings ledger (register E-04)
 
@@ -180,9 +178,6 @@ Versioning: [SemVer](https://semver.org/).
   at the same step and phase — is unchanged for two seat turns plus the cold load, derived from the seat's own
   rate sample (`seatStuckAfter`, floor 2 min, disabled without a sample), and says so in words distinct from the
   deadline error. Progress (a step advance, an in-flight change, a load finishing) resets the bound.
-
-## [0.128.4] - 2026-09-18 - the lease hand-off is ordered: the warm-back belongs to the last holder, a lost lease never warms, the seat unit never restarts itself
-
 
 ### Fixed
 - **A releasing holder's warm-back raced the next lease's `--unload-seat`** (register D-124, the Lenovo, 2026-09-18
@@ -1145,7 +1140,7 @@ harness could see.
   the repetition guard (the detector rule, what the caller sees) and for `agent_sampling` / `agent_sampling_final`; the
   agent config reference block names both keys.
 
-## [0.123.2] - 2026-09-14 - one box, three tiers: placement is a per-task decision (ADR 0039)
+## [0.123.2] - 2026-09-14 - one box, three tiers: placement is a per-task decision (ADR 0052)
 
 The reference workstation is not one hardware tier. It is three 16 GB Blackwell cards — a
 measured 5060 Ti pair (devices 0 and 2) and the RTX 5070 Ti that drives the desktop — which makes
@@ -1156,7 +1151,7 @@ its tiers ("Qube = blackwell-16 / 2x16 / 3x16 routed per task") and the design c
 was RESHAPE: window overflow escalates to the PAIR's long seat and only when the pair's agent seat
 is idle, saturation is recorded and never acted on, one placement table serves local and remote
 alike, the display-card guards fail closed with footprint arithmetic, and the display layer ships
-dormant until the operator enables it. Both are recorded in ADR 0039.
+dormant until the operator enables it. Both are recorded in ADR 0052.
 
 ### Added
 - **`composes` + `layers` in the tier table, seeded into config.** `blackwell-3x16` declares the
@@ -1198,7 +1193,7 @@ dormant until the operator enables it. Both are recorded in ADR 0039.
   Documented in CONTRIBUTING.md.
 - **`servingtmpl.CheckComposite`** — a composite render must be the checked union of what it
   composes; `install render` refuses one that is not.
-- **`docs/systems/composite-tier.md`** and **ADR 0039**; `docs/tiers/` pages gain a Composes
+- **`docs/systems/composite-tier.md`** and **ADR 0052**; `docs/tiers/` pages gain a Composes
   section with the layer/seat/guard table.
 
 ### Changed
@@ -1573,7 +1568,6 @@ them, each with the gate that keeps it wired and an assertion that it does NOT a
   whose whole point is that a 32B does not fit one 16 GB card. The three template lines are quoted, and
   `flowItems` now quotes any per-seat env entry containing a flow separator; barewords are kept for everything
   else so the existing rendered text and its assertions are unchanged.
-## [0.121.1] - 2026-09-14 - the result cache opens lazily, and reads without writing
 
 Register D-05 (P1). `offload_status.reuse.result_cache` on this workstation reported `fallback: true ...
 cache.p47084.db`, and the cache directory held **49** per-process sibling files of 32 KB each, accruing at
@@ -5972,6 +5966,10 @@ return.
 
 ## [0.66.0] - 2026-08-17
 
+Multi-node sub-agent delegation. Released as 0.65.0 rather than 0.63.0 because a
+concurrent session shipped 0.63.0 and 0.64.0 from the same repo while this branch
+was in adversarial review; the entries below were written across that review cycle.
+
 ### Added
 
 - **Reliability bands** (`loupe`, memory-frontier R2-14) — per-(task, tier) success/defer/
@@ -6000,12 +5998,6 @@ return.
   - **Obsolescence is evidenced, not asserted:** all 12 occurrences are on `gemma-4-26b`,
     dated 2026-07-23/24, at 8.6k-11.4k tokens — before the cascade seats moved to 131k
     windows. Checked by tier, date and request size.
-
-## [0.66.0] - 2026-08-17
-
-Multi-node sub-agent delegation. Released as 0.65.0 rather than 0.63.0 because a
-concurrent session shipped 0.63.0 and 0.64.0 from the same repo while this branch
-was in adversarial review; the entries below were written across that review cycle.
 
 ### Fixed — delegation lane, round-7 adversarial review (the prose is preserved for the CALLER, not for acceptance)
 

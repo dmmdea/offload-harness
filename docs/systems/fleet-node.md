@@ -1216,6 +1216,15 @@ the MCP `agent_run` handler — run the same steps in the same order, which is t
    is waited for" governs every hold whose answer can still change.
 2. **The cordon** (`modelaffinity.AwaitRunSlot`, register D-93): the same rule, waited out rather than
    refused, for a hold that arrives between the check above and this line.
+2b. **The local run cap** (`modelaffinity.AwaitSeatSlot`, register C-42, 0.130.1). `fleet_max_concurrent_jobs`
+   caps the jobs the fleet SENDS to this node ("queue full" 503); nothing capped the runs the box starts on
+   its OWN seat, and the run registry gated nothing by itself — so sixteen could land on one seat and spend
+   their walls inside the engine's queue. Both locally-started doors now take this wait: the MCP `agent_run`
+   handler and the pipeline's contract runner (`internal/pipeline/agenttask.go` — a delegation's local leg and
+   every fleet job alike). It waits, inside the same admission budget, while the registered runs on the seat
+   (this run's own record excluded) number `FleetConcurrencyLimit` (default 4) or more; a slot that never frees
+   is a capacity defer (`seat busy: …`, re-placeable), never a refusal, and `admission_note` reads `held at the
+   seat cap for the admission budget`. `fleet_max_concurrent_jobs: -1` disables both caps.
 3. **The swap pre-flight** (`awaitSeatAdmission`, ADR 0032). llama-swap queues — with no timeout of
    its own — any request that needs a model it is still loading, so a contract that dialled mid-swap
    spent its whole wall inside that queue. This polls `GET /running` while any model is non-`ready`.

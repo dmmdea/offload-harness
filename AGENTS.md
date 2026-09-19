@@ -28,7 +28,7 @@ Detailed documentation lives in `docs/`. This file only routes you there.
 - [`docs/systems/cache-server.md`](docs/systems/cache-server.md) — the optional second-device KV tier
   (`kv_cache_server`): off by default, capacity at parity cost, the pipeline-layout constraint.
 - [`docs/systems/composite-tier.md`](docs/systems/composite-tier.md) — a box that is several
-  hardware tiers at once (ADR 0039): its device layers, the one placement table, the display-card
+  hardware tiers at once (ADR 0052): its device layers, the one placement table, the display-card
   guards that fail closed, and the `placed` block every result carries.
 - [`docs/systems/fleet-overview.md`](docs/systems/fleet-overview.md) — `fleet-ui` / `top` /
   `fleet-smoke`: the read-only operator page on the delegator, its poller, and the jobs/errors feeds.

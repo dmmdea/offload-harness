@@ -233,7 +233,7 @@ Transport is **stdio**. Every tool returns the full result JSON — and a `{"def
 
 | Tool | Arguments | What it does |
 |---|---|---|
-| `offload_status` | — | **Capability discovery — call first when inspecting.** The LOCAL model roster (workhorse/agent/triage/escalation/reasoning/vision/ocr/stt/stt_hq/embed) + live served models from the local endpoint + this machine's media engines + the (only) remote surface. Everything except `offload_nim` runs on these local models. On a COMPOSITE box (ADR 0039) it also reports `tier_profile`, `tiers` and one `layers[]` row per device layer — the seats, their live occupancy, and whether the layer would admit work right now — plus the same rows for every fleet node that publishes them. |
+| `offload_status` | — | **Capability discovery — call first when inspecting.** The LOCAL model roster (workhorse/agent/triage/escalation/reasoning/vision/ocr/stt/stt_hq/embed) + live served models from the local endpoint + this machine's media engines + the (only) remote surface. Everything except `offload_nim` runs on these local models. On a COMPOSITE box (ADR 0052) it also reports `tier_profile`, `tiers` and one `layers[]` row per device layer — the seats, their live occupancy, and whether the layer would admit work right now — plus the same rows for every fleet node that publishes them. |
 | `offload_summarize` | `text`, `max_points?` | Summarize text → `{summary, bullets}`, or defer. |
 | `offload_classify` | `text`, `labels[]` | Classify into one of the labels → `{label, confidence}`, or defer. |
 | `offload_extract` | `text`, `schema` | Extract schema-constrained fields → object, or defer. Values grounded in the input. |

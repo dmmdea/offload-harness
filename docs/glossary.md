@@ -222,7 +222,7 @@ the Cascade's model Tiers above.
 
 A hardware tier that COMPOSES others: the box is a complete instance of each at once, declares
 them in `composes`, and routes work across device Layers. See
-[systems/composite-tier.md](systems/composite-tier.md) and ADR 0039.
+[systems/composite-tier.md](systems/composite-tier.md) and ADR 0052.
 
 ## Layer
 

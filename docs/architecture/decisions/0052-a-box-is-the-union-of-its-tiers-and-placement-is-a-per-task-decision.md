@@ -3,7 +3,7 @@ status: Accepted
 date: "2026-09-09"
 ---
 
-# 0039 — A box is the union of its tiers, and placement is a per-task decision
+# 0052 — A box is the union of its tiers, and placement is a per-task decision
 
 Release: 0.120.0
 

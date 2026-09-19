@@ -67,7 +67,7 @@ so, because the caller reads them and nothing else.
 
 `agent_run` drives the coding agent loop. Its default planner is the **agent seat** (config
 `agent_model`, else the workhorse `model`; a per-call `model` argument overrides both — and on a
-composite box (ADR 0039) the placement table decides when no per-call model is given, its seat
+composite box (ADR 0052) the placement table decides when no per-call model is given, its seat
 outranking `agent_model`, while a per-call model that belongs to an OPT-IN layer is admitted
 only if that layer's guards admit it right now: a dormant layer refuses outright and the
 display card refuses by the guard's name, before any seat is touched. Both agent doors take
@@ -163,6 +163,15 @@ is a declared-but-idle lease. `results[].placement` (the published `placement_re
 node ran each subtask and, for `auto`/`remote`, a one-word verdict for every OTHER reachable remote
 too (`chosen | queue | cap | slow | lease | cold | probe | unfit(ctx) | noschema`) — read it before
 assuming the fleet was even consulted.
+
+Since 0.130.2 (register C-46) `route` is accepted on **`agent_run` and `offload_ask`** too. Both
+doors ran local unconditionally before, so a remote seat could not be named from this box at all.
+`remote` / `auto` / `spread` / `queue` sends the call as ONE contract through the delegator's
+single-contract path, and the response names `node`, `placement`, `seat` and `executed_on`. The two
+doors put different things on the wire: for `agent_run` neither `read_root` nor `model` travels — the
+executing node reads its own root and runs its own seat, so it is for self-contained goals and
+`setup_actions` — while for `offload_ask` the files ride inline, so any node can answer. Omitted, or
+`local`, keeps the old behaviour exactly.
 
 ### The research lane (`offload_research`)
 
