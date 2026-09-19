@@ -193,6 +193,11 @@ func TestLedgerRowCarriesTheRepackAttemptCount(t *testing.T) {
 		// Attempt 1 fails validation, attempt 2 satisfies the schema: two
 		// seat completions for one re-pack.
 		repack: func(n int64) string {
+			// A measurable wall: two completions answered from memory finish
+			// inside one millisecond on the CI runner and repack_ms truncates
+			// to 0 (main e0e20a27 failed exactly here). The row must carry
+			// the wall beside the count, so the fake spends a visible one.
+			time.Sleep(3 * time.Millisecond)
 			if n == 1 {
 				return `{"wrong":"shape"}`
 			}
