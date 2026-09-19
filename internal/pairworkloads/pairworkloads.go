@@ -198,10 +198,16 @@ func MethodFor(state string) string {
 
 // EngineFor names the real engine behind a harness task and seat with the
 // identifiers PAIR's upstream engine PRs use (llamacpp, vllm) plus the two
-// non-text engines the harness drives (whispercpp, comfyui).
+// non-text engines the harness drives (whispercpp, comfyui) and the
+// accelerators (coral-edgetpu, hailo-8l): an NPU call is not a llama.cpp job,
+// and the card's engine badge is how PAIR tells them apart.
 func EngineFor(task, seat string) string {
 	s := strings.ToLower(seat)
 	switch {
+	case strings.Contains(s, "coral"), strings.Contains(s, "edgetpu"):
+		return "coral-edgetpu"
+	case strings.Contains(s, "hailo"):
+		return "hailo-8l"
 	case strings.Contains(s, "vllm"):
 		return "vllm"
 	case strings.Contains(s, "whisper"), task == "transcribe":
@@ -213,6 +219,16 @@ func EngineFor(task, seat string) string {
 		return "comfyui"
 	}
 	return "llamacpp"
+}
+
+// isAcceleratorEngine reports whether an EngineFor result names an NPU rather
+// than a text / media engine.
+func isAcceleratorEngine(engine string) bool {
+	switch engine {
+	case "coral-edgetpu", "hailo-8l":
+		return true
+	}
+	return false
 }
 
 func (e *Emitter) frame(ev Event) ([]byte, error) {
@@ -376,6 +392,15 @@ func (e *Emitter) FromLedger(row ledger.Entry) Event {
 	if model == "" {
 		model = row.Task
 	}
+	engine := EngineFor(row.Task, model)
+	// A forwarded accelerator call is recorded as "<node>:<device>" (E-04):
+	// the card runs on that node and shows the device, not the pair.
+	node := ""
+	if isAcceleratorEngine(engine) {
+		if i := strings.Index(model, ":"); i > 0 {
+			node, model = model[:i], model[i+1:]
+		}
+	}
 	state, errText := "completed", ""
 	if row.Deferred {
 		state = "failed"
@@ -387,7 +412,8 @@ func (e *Emitter) FromLedger(row ledger.Entry) Event {
 	return Event{
 		JobID:       fmt.Sprintf("led-%d-%d", ts, e.seq.Add(1)),
 		Model:       model,
-		Engine:      EngineFor(row.Task, model),
+		Engine:      engine,
+		Node:        node,
 		State:       state,
 		Error:       errText,
 		Requester:   Requester(row.OriginSession),

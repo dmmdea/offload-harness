@@ -78,6 +78,14 @@ func TestEngineFor(t *testing.T) {
 		{"run_graph", "", "comfyui"},
 		{"summarize", "gemma-4-e4b", "llamacpp"},
 		{"vqa", "qwen3-vl-8b", "llamacpp"},
+		// An NPU call is not a llama.cpp job: the device is the engine, in every
+		// form the ledger records it (local, forwarded "<node>:<device>", failed
+		// forward "<device>@fleet").
+		{"classify", "coral-edgetpu", "coral-edgetpu"},
+		{"classify", "node-b:coral-edgetpu", "coral-edgetpu"},
+		{"classify", "coral-edgetpu@fleet", "coral-edgetpu"},
+		{"object_detect", "hailo-8l", "hailo-8l"},
+		{"face_detect", "node-c:hailo-8l", "hailo-8l"},
 	}
 	for _, c := range cases {
 		if got := EngineFor(c.task, c.seat); got != c.want {
