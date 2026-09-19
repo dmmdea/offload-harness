@@ -6,6 +6,8 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.130.2] - 2026-09-19 - `route` on agent_run and offload_ask: a call from this box can name where it runs
+
 ### Added
 - **`route` on `agent_run` and `offload_ask`** (register C-46, diagnosis S-27): both doors always ran local, so a
   remote seat could not be named from this box at all (the other face of D-125). `route` = `remote` / `auto` /
