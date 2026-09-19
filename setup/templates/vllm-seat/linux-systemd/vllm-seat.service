@@ -3,7 +3,12 @@
 # vllm-seat-cmdstop.sh, so the seat loads on first use and is stopped when llama-swap idles it out. A boot-enabled
 # unit outlives its own front door: llama-swap's TTL can only unload what llama-swap started, so an enabled unit
 # holds the card forever no matter what ttl says — measured on the reference A2 at 10,338 of 15,356 MiB while idle.
-# Restart=on-failure. Binds the TAILSCALE address (the tailnet is the trust boundary, like the fleet
+# Restart=no (was on-failure until 0.129.2, register D-124): systemd must never relaunch the engine on its own.
+# vllm-seat-cmd.sh DETACHES when the unit's invocation changes, so a systemd restart produces a seat llama-swap no
+# longer tracks — on 2026-09-18 02:57 an unload under one GPU lease killed the engine (exit 1), systemd brought it
+# back 20 s later on a card the NEXT lease held exclusively, and three measurement rows read the seat's 10 GiB as
+# their own fit. A crashed seat is reloaded by llama-swap on the next request, which the lease gate orders.
+# Binds the TAILSCALE address (the tailnet is the trust boundary, like the fleet
 # node) — llama-swap's entry proxies to it and owns load/unload through vllm-seat-cmd*.sh (polkit rule
 # 50-llama-swap-vllm-seat.rules). Launch line + rationale: vllm-seat-run.sh.
 # RENDERED, not hand-edited, since 0.113.33: `local-offload install vllm-seat` substitutes the double-underscore tokens
@@ -24,8 +29,7 @@ User=__USER__
 Group=__USER__
 WorkingDirectory=__STACK_DIR__
 ExecStart=__SEAT_DIR__/vllm-seat-run.sh
-Restart=on-failure
-RestartSec=20
+Restart=no
 TimeoutStopSec=90
 KillMode=mixed
 StandardOutput=append:__STACK_DIR__/logs/__UNIT__.log

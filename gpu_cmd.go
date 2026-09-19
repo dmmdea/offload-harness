@@ -80,12 +80,21 @@ func runGPUStatus(args []string) error {
 	// What the cards are DOING (0.117.0, register D-93): the seat's in-flight
 	// count, the registered runs, a utilization sample and one verdict.
 	act := gpuactivity.Snapshot(context.Background(), activityOptions(loadCfg(fs)))
+	// Who is queued (register D-124): the line behind the holder, and whether
+	// the agent seat is owed a warm-back by the last of them.
+	waiters := m.Waiters()
+	warmOwed := m.SeatWarmOwed()
 	if *asJSON {
+		queued := make([]map[string]any, 0, len(waiters))
+		for _, w := range waiters {
+			queued = append(queued, map[string]any{"pid": w.PID, "class": w.Class, "reason": w.Reason, "since": w.Since().Format(time.RFC3339)})
+		}
 		b, _ := json.MarshalIndent(map[string]any{
 			"held": info.Held, "class": info.Class, "epoch": info.Epoch, "pid": info.PID,
 			"age_s": int(info.Age.Seconds()), "reason": info.Reason, "origin": info.Origin,
 			"job_id": info.JobID, "expires_at": info.ExpiresAt.Format(time.RFC3339),
 			"exclusive": info.Exclusive, "draining": info.Draining, "command": info.Command, "state_root": m.Root(),
+			"queued": queued, "seat_warm_owed": warmOwed,
 			"verdict": act.Verdict, "activity": act.Map(),
 			// The next step, spelled out: a session reading "held" used to conclude
 			// "refuse the work"; the honest answer is "queue behind it".
@@ -94,11 +103,27 @@ func runGPUStatus(args []string) error {
 		fmt.Println(string(b))
 		return nil
 	}
+	// The line and the owed warm are printed held or free: a warm can be owed
+	// while the card is free (a fenced-out holder pays nothing; the marker
+	// waits for the next last holder).
+	queueLines := func() {
+		if len(waiters) > 0 {
+			parts := make([]string, 0, len(waiters))
+			for _, w := range waiters {
+				parts = append(parts, fmt.Sprintf("pid %d (%s, %s in line)", w.PID, w.Class, time.Since(w.Since()).Round(time.Second)))
+			}
+			fmt.Printf("  queued: %d — %s\n", len(waiters), strings.Join(parts, ", "))
+		}
+		if warmOwed != "" {
+			fmt.Printf("  seat warm-back owed: %s (paid by the last holder to release)\n", warmOwed)
+		}
+	}
 	if !info.Held {
 		// Say the card is UNRESERVED explicitly. The lease only binds code paths that
 		// take it, so an unreserved card is exactly when a bench is exposed — that
 		// should be visible, not inferred from silence.
 		fmt.Printf("GPU: free (unreserved)  state root: %s\n", m.Root())
+		queueLines()
 		printActivity(act)
 		return nil
 	}
@@ -115,6 +140,7 @@ func runGPUStatus(args []string) error {
 	fmt.Printf("GPU: held by %s  pid %d  epoch %d  for %s  expires %s%s\n  reason: %s\n  queue behind it: %s\n",
 		info.Class, info.PID, info.Epoch, info.Age.Round(time.Second),
 		info.ExpiresAt.Format(time.Kitchen), excl, info.Reason, queueHint)
+	queueLines()
 	printActivity(act)
 	return nil
 }
@@ -201,7 +227,7 @@ func runGPUReserve(args []string) error {
 		// lease held on purpose — the card stays reserved, work keeps routing
 		// elsewhere — and the exit code tells the caller not to start.
 		if *drain || *unload {
-			if err := maintainSeat(loadCfg(fs), func(fn func(*gpulease.Meta)) error { return m.Restamp(epoch, fn) }, *drain, drainDeadline(*drainTimeout, queuedAt, *wait), *unload, exclusiveAfter); err != nil {
+			if err := maintainSeat(loadCfg(fs), func(fn func(*gpulease.Meta)) error { return m.Restamp(epoch, fn) }, *drain, drainDeadline(*drainTimeout, queuedAt, *wait), *unload, exclusiveAfter, markWarmOwed(m)); err != nil {
 				return fmt.Errorf("%w (the lease is still held; `gpu release` frees it)", err)
 			}
 		}
@@ -215,11 +241,16 @@ func runGPUReserve(args []string) error {
 	// Release on the way out no matter how we leave, including Ctrl-C: a leaked text
 	// reservation blocks every render until it expires. When the seat was unloaded
 	// for this window it is warmed back BEFORE the release, so the first contract
-	// placed here again finds a loaded seat.
+	// placed here again finds a loaded seat — but ONLY while the card is still
+	// ours and nobody is queued behind us (register D-124: an unordered warm
+	// after a cut command loaded the seat onto the next lease's exclusive card,
+	// and a warm ahead of a queued --unload-seat is a load bought for nothing).
+	// The warm is heartbeat for its length; the lease outlives the command by
+	// exactly the warm.
 	cfg := loadCfg(fs)
 	finish := func() {
 		if *unload {
-			warmBack(cfg)
+			warmBackGuarded(cfg, leaseWarmGuard(m, lease), os.Stderr)
 		}
 		_ = lease.Release()
 	}
@@ -231,7 +262,7 @@ func runGPUReserve(args []string) error {
 		// --for with no renewal handed the card to the next acquirer mid-wait
 		// (reviewer finding, 0.117.0). Heartbeat for the drain's whole length.
 		stopRenew := renewWhile(lease, drainRenewEvery)
-		merr := maintainSeat(cfg, lease.Restamp, *drain, drainDeadline(*drainTimeout, queuedAt, *wait), *unload, exclusiveAfter)
+		merr := maintainSeat(cfg, lease.Restamp, *drain, drainDeadline(*drainTimeout, queuedAt, *wait), *unload, exclusiveAfter, markWarmOwed(m))
 		stopRenew()
 		if merr != nil {
 			return merr // deferred finish releases the lease (and warms back if it got that far)
@@ -507,8 +538,11 @@ func runGPURelease(args []string) error {
 	// Warm BEFORE the release so the seat is loaded by the time delegators see
 	// the card free again; a failed warm-back is reported and never blocks the
 	// release (a leaked lease costs every caller, a cold seat costs one load).
+	// The warm runs only when the lease being released is the current one and
+	// nobody is queued behind it (register D-124): a successor unloads the seat
+	// again, and a warm against someone else's exclusive lease is the incident.
 	if *warm {
-		warmBack(loadCfg(fs))
+		warmBackGuarded(loadCfg(fs), releaseWarmGuard(m, *epoch), os.Stderr)
 	}
 	released, err := m.ReleaseByEpoch(*epoch)
 	if err != nil {
@@ -519,7 +553,58 @@ func runGPURelease(args []string) error {
 		return nil
 	}
 	fmt.Println("released")
+	if !*warm {
+		if seat := m.SeatWarmOwed(); seat != "" {
+			fmt.Printf("note: %s is owed a warm-back (unloaded for a lease); `gpu release --warm-seat` or the next request loads it\n", seat)
+		}
+	}
 	return nil
+}
+
+// markWarmOwed is the maintainSeat callback that stamps the warm-owed marker
+// after an unload.
+func markWarmOwed(m *gpulease.Manager) func(seat string) {
+	return func(seat string) {
+		if err := m.MarkSeatWarmOwed(seat); err != nil {
+			fmt.Fprintf(os.Stderr, "gpu reserve: could not record that %s is owed a warm-back: %v\n", seat, err)
+		}
+	}
+}
+
+// leaseWarmGuard is the wrapper form's guard: the lease object proves and
+// heartbeats ownership; waiters and the marker come from the manager.
+func leaseWarmGuard(m *gpulease.Manager, l *gpulease.Lease) warmGuard {
+	return warmGuard{
+		held:    l.Check,
+		renew:   l.Renew,
+		waiters: m.Waiters,
+		owed:    m.SeatWarmOwed,
+		clear:   m.ClearSeatWarmOwed,
+	}
+}
+
+// releaseWarmGuard is `gpu release --warm-seat`'s guard: the caller does not
+// hold a Lease object, so ownership is "the record is the epoch I was told to
+// release" (epoch 0 = whatever is held, the operator's override — the warm
+// then runs when the card is free or held by the record being released).
+func releaseWarmGuard(m *gpulease.Manager, epoch uint64) warmGuard {
+	held := func() error {
+		info := m.Inspect()
+		if epoch != 0 && info.Held && info.Epoch != epoch {
+			return fmt.Errorf("the lease has moved on (asked to release epoch %d, current is %d)", epoch, info.Epoch)
+		}
+		return nil
+	}
+	return warmGuard{
+		held: held,
+		// No Lease object to heartbeat here (a detached holder's child does
+		// that), but the ownership check re-runs on the same cadence for the
+		// warm's whole length, so a card that moves on mid-load cancels it.
+		renew:   held,
+		waiters: m.Waiters,
+		owed:    m.SeatWarmOwed,
+		clear:   m.ClearSeatWarmOwed,
+	}
 }
 
 // drainFloor is the least a drain waits, whatever the queue budget says: a
