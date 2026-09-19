@@ -18,6 +18,19 @@ Versioning: [SemVer](https://semver.org/).
   `TestEveryTicksOnTimeAndStopsWithTheContext`.
 
 ### Added
+- **The decision margin can be measured over its FULL denominator, behind a flag** (register D-130, ADR 0051).
+  `internal/confidence` normalised the top-1 vs top-2 gap over MATCHED class tokens only, so mass on unmatched
+  tokens and on legal labels outside the `top_logprobs` window never entered the denominator; research measured the
+  declared (matched) mass at ~0.097 on llama.cpp, i.e. the live classify margin p50 of 0.985 is inflated about
+  tenfold and the gate under-escalates exactly on hard, many-label contracts. `confidence_margin_full_denominator`
+  (default **false**) selects the full scale and `confidence_margin_threshold_full` (default **0**) is its own
+  threshold - 0 means the margin gate never fires there, announced once per process; the matched-scale 0.65 is never
+  applied to the full scale, and a matched-scale value in the full key is warned about at load. Every row now carries
+  `margin_scale` (`matched` | `full`; empty on an old row reads as matched), `margin_declared_mass` and
+  `margin_ambiguous` (alternatives credited to no class because they prefixed more than one), the last two recorded
+  in BOTH modes so a full-scale threshold can be re-derived before anyone flips the flag. `health`, the exemplar
+  harvest gate and conformal `calibrate` each filter to one scale and report the rows they excluded. With the flag
+  off nothing changes but the new omitted-when-zero row fields.
 - **A cap on the runs started on the box itself** (register C-42, diagnosis S-07 / W-09). The fleet capped the
   jobs it sent to a node (`fleet_max_concurrent_jobs`, "queue full" 503), but nothing capped the runs the box
   started on its own seat — `agent_run`, a delegation's local leg — and the run registry "never gated anything

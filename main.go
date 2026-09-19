@@ -2950,9 +2950,11 @@ func runCalibrate(args []string) error {
 	if dst == "" {
 		dst = cfg.ThresholdsPath
 	}
-	// Both label sources (register D-126): the ledger and the confhead labels
-	// sidecar, where the classify/triage agreement labels actually land.
-	_, report, err := calibration.RunSources([]string{cfg.LedgerPath, cfg.ConfHeadLabelsPath}, *alpha, cfg.TargetErrorRate, dst)
+	// Both label sources (register D-126: the ledger and the confhead labels
+	// sidecar, where the classify/triage agreement labels land), calibrated on
+	// the scale this box EMITS (register D-130: a cutoff derived from a mix of
+	// the two ~10x-apart margin scales belongs to neither).
+	_, report, err := calibration.RunSources([]string{cfg.LedgerPath, cfg.ConfHeadLabelsPath}, *alpha, cfg.TargetErrorRate, dst, core.MarginScaleOf(cfg.ConfidenceMarginFullDenominator))
 	if err != nil {
 		return err
 	}
@@ -2971,7 +2973,7 @@ func runHealth(args []string) error {
 	if dst == "" {
 		dst = cfg.TierOverridesPath
 	}
-	rep, err := health.Run(cfg.LedgerPath, dst)
+	rep, err := health.Run(cfg.LedgerPath, dst, core.MarginScaleOf(cfg.ConfidenceMarginFullDenominator))
 	if err != nil {
 		return err
 	}

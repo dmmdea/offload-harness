@@ -73,7 +73,7 @@ func TestStableTierIsOK(t *testing.T) {
 	outPath := filepath.Join(t.TempDir(), "out.json")
 	p := writeLedger(t, stableEntries())
 
-	rpt, err := Run(p, outPath)
+	rpt, err := Run(p, outPath, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +106,7 @@ func TestDegradingTierIsDegraded(t *testing.T) {
 	outPath := filepath.Join(t.TempDir(), "out.json")
 	p := writeLedger(t, degradingEntries())
 
-	rpt, err := Run(p, outPath)
+	rpt, err := Run(p, outPath, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,7 +135,7 @@ func TestMixedTiers(t *testing.T) {
 	outPath := filepath.Join(t.TempDir(), "out.json")
 	p := writeLedger(t, all)
 
-	rpt, err := Run(p, outPath)
+	rpt, err := Run(p, outPath, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -169,7 +169,7 @@ func TestMixedTiers(t *testing.T) {
 
 func TestMissingLedgerIsEmpty(t *testing.T) {
 	outPath := filepath.Join(t.TempDir(), "out.json")
-	rpt, err := Run(filepath.Join(t.TempDir(), "nope.jsonl"), outPath)
+	rpt, err := Run(filepath.Join(t.TempDir(), "nope.jsonl"), outPath, "")
 	if err != nil {
 		t.Fatal("missing ledger should not error:", err)
 	}
@@ -191,7 +191,7 @@ func TestMalformedLinesSkipped(t *testing.T) {
 	f.Close()
 
 	outPath := filepath.Join(tmp, "out.json")
-	rpt, err := Run(p, outPath)
+	rpt, err := Run(p, outPath, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -222,7 +222,7 @@ func TestP95LatencyTimeout(t *testing.T) {
 
 	outPath := filepath.Join(t.TempDir(), "out.json")
 	p := writeLedger(t, es)
-	_, err := Run(p, outPath)
+	_, err := Run(p, outPath, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -249,7 +249,7 @@ func TestEWMADeferRate(t *testing.T) {
 	}
 	outPath := filepath.Join(t.TempDir(), "out.json")
 	p := writeLedger(t, es)
-	rpt, err := Run(p, outPath)
+	rpt, err := Run(p, outPath, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -282,7 +282,7 @@ func driftyButHealthyEntries() []ledger.Entry {
 func TestDriftyTierIsNotRouteSkipped(t *testing.T) {
 	outPath := filepath.Join(t.TempDir(), "out.json")
 	p := writeLedger(t, driftyButHealthyEntries())
-	rpt, err := Run(p, outPath)
+	rpt, err := Run(p, outPath, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -312,7 +312,7 @@ func TestDriftyTierIsNotRouteSkipped(t *testing.T) {
 func TestCollapsedTierIsRouteSkipped(t *testing.T) {
 	outPath := filepath.Join(t.TempDir(), "out.json")
 	p := writeLedger(t, degradingEntries()) // margin 0.9 → 0.05 collapse
-	rpt, err := Run(p, outPath)
+	rpt, err := Run(p, outPath, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -343,7 +343,7 @@ func tokCollapseHealthyMarginEntries() []ledger.Entry {
 func TestTokCollapseIsNotRouteSkipped(t *testing.T) {
 	outPath := filepath.Join(t.TempDir(), "out.json")
 	p := writeLedger(t, tokCollapseHealthyMarginEntries())
-	rpt, err := Run(p, outPath)
+	rpt, err := Run(p, outPath, "")
 	if err != nil {
 		t.Fatal(err)
 	}

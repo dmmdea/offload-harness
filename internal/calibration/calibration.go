@@ -28,6 +28,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/ledger"
 )
 
@@ -44,8 +45,13 @@ type point struct {
 // alphas overrides the per-task target error rate; missing tasks fall back to
 // defaultAlpha. Tasks with fewer than 60 usable labeled rows are omitted from
 // the returned map (pipeline falls back to its hardcoded constant).
-func Run(ledgerPath string, defaultAlpha float64, alphas map[string]float64, outPath string) (thresholds map[string]float64, report string, err error) {
-	return RunSources([]string{ledgerPath}, defaultAlpha, alphas, outPath)
+// scale names the margin scale to calibrate ON (core.MarginScaleMatched or
+// core.MarginScaleFull; empty reads as matched, the rule stored rows follow).
+// Rows on any other scale are excluded and counted in the report: the two
+// scales are ~10x apart (register D-130), and a cutoff derived from a mix of
+// them belongs to neither while still gating production.
+func Run(ledgerPath string, defaultAlpha float64, alphas map[string]float64, outPath, scale string) (thresholds map[string]float64, report string, err error) {
+	return RunSources([]string{ledgerPath}, defaultAlpha, alphas, outPath, scale)
 }
 
 // RunSources is Run over every labeled-row source the box writes (register
@@ -57,25 +63,30 @@ func Run(ledgerPath string, defaultAlpha float64, alphas map[string]float64, out
 // source is a JSONL file of ledger.Entry rows; a missing file is a 0-row
 // source, and the report names each source with its usable-row count so the
 // plumbing is visible in the output rather than inferred from a silent skip.
-func RunSources(paths []string, defaultAlpha float64, alphas map[string]float64, outPath string) (thresholds map[string]float64, report string, err error) {
+func RunSources(paths []string, defaultAlpha float64, alphas map[string]float64, outPath, scale string) (thresholds map[string]float64, report string, err error) {
 	byTask := make(map[string][]point)
 	var sb strings.Builder
 	sb.WriteString("Conformal calibration report\n")
 	sb.WriteString(strings.Repeat("=", 52) + "\n")
+	excludedByScale := 0
 	for _, p := range paths {
 		if strings.TrimSpace(p) == "" {
 			continue
 		}
-		part, err := readLedger(p)
+		part, excl, err := readLedger(p, scale)
 		if err != nil {
 			return nil, "", fmt.Errorf("calibration: read %s: %w", p, err)
 		}
+		excludedByScale += excl
 		usable := 0
 		for task, pts := range part {
 			byTask[task] = append(byTask[task], pts...)
 			usable += len(pts)
 		}
 		fmt.Fprintf(&sb, "  source %-40s usable labeled rows: %d\n", filepath.Base(p), usable)
+	}
+	if excludedByScale > 0 {
+		fmt.Fprintf(&sb, "  excluded %d row(s) whose margin_scale is not %q (an empty scale reads as matched)\n", excludedByScale, core.MarginScaleOfRow(scale))
 	}
 
 	thresholds = make(map[string]float64)
@@ -207,13 +218,15 @@ func uniqueMargins(pts []point) []float64 {
 
 // readLedger reads the JSONL ledger and returns per-task labeled points.
 // Skips: CacheHit, Margin==0, no usable label, malformed lines.
-func readLedger(path string) (map[string][]point, error) {
+func readLedger(path, scale string) (map[string][]point, int, error) {
+	wantScale := core.MarginScaleOfRow(scale)
+	var excluded int
 	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return map[string][]point{}, nil
+			return map[string][]point{}, 0, nil
 		}
-		return nil, err
+		return nil, 0, err
 	}
 	defer f.Close()
 
@@ -237,6 +250,12 @@ func readLedger(path string) (map[string][]point, error) {
 			continue
 		}
 
+		// Filter: a margin on another scale is a different measurement (D-130).
+		if core.MarginScaleOfRow(e.MarginScale) != wantScale {
+			excluded++
+			continue
+		}
+
 		// Determine label.
 		correct, hasLabel := label(e)
 		if !hasLabel {
@@ -245,7 +264,7 @@ func readLedger(path string) (map[string][]point, error) {
 
 		byTask[e.Task] = append(byTask[e.Task], point{margin: e.Margin, correct: correct})
 	}
-	return byTask, sc.Err()
+	return byTask, excluded, sc.Err()
 }
 
 // label extracts the correctness signal from a ledger entry.

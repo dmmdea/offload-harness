@@ -23,7 +23,7 @@ func TestRunSourcesFitsFromTheLabelsSidecar(t *testing.T) {
 	outPath := filepath.Join(t.TempDir(), "thresholds.json")
 
 	// The ledger alone still fits nothing (the live shape).
-	thr, _, err := Run(ledgerPath, 0.10, nil, outPath)
+	thr, _, err := Run(ledgerPath, 0.10, nil, outPath, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -31,7 +31,7 @@ func TestRunSourcesFitsFromTheLabelsSidecar(t *testing.T) {
 		t.Fatalf("the unlabeled ledger alone must not fit a threshold: %v", thr)
 	}
 
-	thr, report, err := RunSources([]string{ledgerPath, labelsPath}, 0.10, nil, outPath)
+	thr, report, err := RunSources([]string{ledgerPath, labelsPath}, 0.10, nil, outPath, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,7 +45,7 @@ func TestRunSourcesFitsFromTheLabelsSidecar(t *testing.T) {
 
 func TestRunSourcesSkipsAMissingSource(t *testing.T) {
 	outPath := filepath.Join(t.TempDir(), "thresholds.json")
-	_, report, err := RunSources([]string{filepath.Join(t.TempDir(), "absent.jsonl")}, 0.10, nil, outPath)
+	_, report, err := RunSources([]string{filepath.Join(t.TempDir(), "absent.jsonl")}, 0.10, nil, outPath, "")
 	if err != nil {
 		t.Fatalf("a missing source is a 0-row source, not an error: %v", err)
 	}

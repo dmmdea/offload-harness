@@ -93,6 +93,32 @@ answers "is this good enough, and if not, is it worth trying a bigger model?"
   ledger and the confhead labels sidecar (`confhead_labels_path`), where the classify/triage
   agreement labels are written (register D-126: read from the ledger alone it found 0 usable rows
   and never fitted anything); the report names each source and its usable-row count.
+- **The decision margin's denominator is a flag** (register D-130). The margin has always been
+  normalised over the MATCHED class tokens only, so mass sitting on unmatched tokens and on legal
+  labels outside the `top_logprobs` window never reached the denominator. Research measured the
+  declared (matched) mass at ~0.097 on llama.cpp: the live classify margin p50 of 0.985 is inflated
+  by about an order of magnitude, and the gate under-escalates exactly on hard, many-label
+  contracts. `confidence_margin_full_denominator` (default **false**) switches the margin to the
+  full denominator, and `confidence_margin_threshold_full` (default **0**, no calibrated value) is
+  its own threshold — with 0 the margin gate NEVER fires on the full scale, said once per process.
+  The matched-scale 0.65 must never be applied to the full scale: on a ~0.1-mass scale it turns
+  never-fires into fires-on-everything.
+- **Every row carries the scale it was measured on.** `margin_scale` is `matched` or `full`
+  (**empty on a pre-flag row reads as matched**), beside `margin_declared_mass` (matched/all, 0..1)
+  and `margin_ambiguous` (alternatives credited to no class because they prefixed more than one —
+  the zeroing taxonomy-shaped label sets like `{billing, billing_dispute}` cause). The last two are
+  computed in BOTH modes, so the data to re-derive a threshold accumulates before any flip. The
+  three consumers that compare a margin against stored history — `health` baselines, the exemplar
+  harvest gate, and conformal `calibrate` — each keep only the rows on the scale the box emits and
+  report what they excluded.
+- **The confhead is the fourth margin reader, and it is NOT scale-filtered.** `confhead.FeatureRow`
+  feeds `margin` to the learned p(correct) head as a raw feature, training on stored rows and
+  predicting on live ones. A flip mid-ledger trains it on a mixture, so retrain the head from
+  single-scale rows after any flip (or leave `confhead_enabled` off until you have).
+- **Flipping the flag is a re-derivation, not a config edit.** Set it only with a threshold derived
+  from rows carrying `margin_scale: full`, passed through the openjev / gold-set gate; and re-measure
+  the meta-router's mr-verifier CC1 ceilings afterwards — it reads `meta.margin` as a graded
+  confidence, so the same number on a new scale silently moves its ceilings.
 - **Confhead gate.** A learned correctness head below its threshold escalates.
 
 An OK result returns immediately. A recoverable failure at a non-final Tier escalates. Infrastructure
@@ -497,6 +523,8 @@ their own unit tests.
 - [`internal/cache/cache.go`](../../internal/cache/cache.go) — the lazy handle, the
   read-through reader, the sibling sweep and the bounded promotion
 - [`internal/ledger/ledger.go`](../../internal/ledger/ledger.go)
+- [`internal/confidence/confidence.go`](../../internal/confidence/confidence.go) — `Margin` (matched
+  scale, unchanged), `MarginDetail` / `MarginFull` (full scale, declared mass, ambiguous count)
 - [`internal/config/config.go`](../../internal/config/config.go) — tier aliases and threshold defaults
 - [`internal/modelaffinity/affinity.go`](../../internal/modelaffinity/affinity.go) — the Model
   Affinity Gate: admission keyed on the resolved base, batching, the bound

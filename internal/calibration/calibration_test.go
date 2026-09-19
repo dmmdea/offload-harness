@@ -106,7 +106,7 @@ func TestRunFullPipeline(t *testing.T) {
 	ledgerPath := writeLedger(t, entries)
 	outPath := filepath.Join(t.TempDir(), "thresholds.json")
 
-	thresholds, report, err := Run(ledgerPath, 0.10, nil, outPath)
+	thresholds, report, err := Run(ledgerPath, 0.10, nil, outPath, "")
 	if err != nil {
 		t.Fatalf("Run error: %v", err)
 	}
@@ -158,7 +158,7 @@ func TestRunSkipsSmallTasks(t *testing.T) {
 	ledgerPath := writeLedger(t, entries)
 	outPath := filepath.Join(t.TempDir(), "thresholds.json")
 
-	thresholds, report, err := Run(ledgerPath, 0.10, nil, outPath)
+	thresholds, report, err := Run(ledgerPath, 0.10, nil, outPath, "")
 	if err != nil {
 		t.Fatalf("Run error: %v", err)
 	}
@@ -193,7 +193,7 @@ func TestCalibrationEmissionBoundary60(t *testing.T) {
 	ledgerPath := writeLedger(t, append(entries60, entries59...))
 	outPath := filepath.Join(t.TempDir(), "thresholds.json")
 
-	thresholds, report, err := Run(ledgerPath, 0.10, nil, outPath)
+	thresholds, report, err := Run(ledgerPath, 0.10, nil, outPath, "")
 	if err != nil {
 		t.Fatalf("Run error: %v", err)
 	}
@@ -237,7 +237,7 @@ func TestRunSkipsCacheHitAndZeroMargin(t *testing.T) {
 	ledgerPath := writeLedger(t, entries)
 	outPath := filepath.Join(t.TempDir(), "thresholds.json")
 
-	thresholds, _, err := Run(ledgerPath, 0.10, nil, outPath)
+	thresholds, _, err := Run(ledgerPath, 0.10, nil, outPath, "")
 	if err != nil {
 		t.Fatalf("Run error: %v", err)
 	}
@@ -258,7 +258,7 @@ func TestRunNoLabel(t *testing.T) {
 	ledgerPath := writeLedger(t, entries)
 	outPath := filepath.Join(t.TempDir(), "thresholds.json")
 
-	thresholds, _, err := Run(ledgerPath, 0.10, nil, outPath)
+	thresholds, _, err := Run(ledgerPath, 0.10, nil, outPath, "")
 	if err != nil {
 		t.Fatalf("Run error: %v", err)
 	}
@@ -294,11 +294,11 @@ func TestRunPerTaskAlpha(t *testing.T) {
 	outStrict := filepath.Join(t.TempDir(), "strict.json")
 	outRelax := filepath.Join(t.TempDir(), "relax.json")
 
-	thrStrict, _, err := Run(ledgerPath, 0.01, map[string]float64{"classify": 0.01}, outStrict)
+	thrStrict, _, err := Run(ledgerPath, 0.01, map[string]float64{"classify": 0.01}, outStrict, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	thrRelax, _, err := Run(ledgerPath, 0.30, map[string]float64{"classify": 0.30}, outRelax)
+	thrRelax, _, err := Run(ledgerPath, 0.30, map[string]float64{"classify": 0.30}, outRelax, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -315,7 +315,7 @@ func TestRunPerTaskAlpha(t *testing.T) {
 // TestRunMissingLedger: a missing ledger file returns empty thresholds, not an error.
 func TestRunMissingLedger(t *testing.T) {
 	outPath := filepath.Join(t.TempDir(), "thresholds.json")
-	thresholds, report, err := Run(filepath.Join(t.TempDir(), "nope.jsonl"), 0.10, nil, outPath)
+	thresholds, report, err := Run(filepath.Join(t.TempDir(), "nope.jsonl"), 0.10, nil, outPath, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -340,7 +340,7 @@ func TestRunMalformedLinesSkipped(t *testing.T) {
 	f.Close()
 
 	outPath := filepath.Join(t.TempDir(), "thresholds.json")
-	thresholds, _, err := Run(p, 0.10, nil, outPath)
+	thresholds, _, err := Run(p, 0.10, nil, outPath, "")
 	if err != nil {
 		t.Fatalf("Run error: %v", err)
 	}
@@ -364,7 +364,7 @@ func TestEscalatedAgreedLabel(t *testing.T) {
 	ledgerPath := writeLedger(t, entries)
 	outPath := filepath.Join(t.TempDir(), "thresholds.json")
 
-	thresholds, _, err := Run(ledgerPath, 0.10, nil, outPath)
+	thresholds, _, err := Run(ledgerPath, 0.10, nil, outPath, "")
 	if err != nil {
 		t.Fatalf("Run error: %v", err)
 	}
