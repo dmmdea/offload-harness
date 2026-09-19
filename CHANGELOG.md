@@ -14,6 +14,20 @@ Versioning: [SemVer](https://semver.org/).
   in 9,217 for 43 real firings that lived only in the labels sidecar. The escalating attempt records its row (its tier,
   its margin, the gate that fired, not deferred) before the defer, under the same `record` gate as a success. Red test
   `TestMarginEscalationRecordsTheEscalatingAttempt`.
+
+### Fixed
+- **A route=local run against another box's engine was attributed to this box** (register C-58, operator
+  2026-09-18: "nvidia pair showing the qube doing lenovo work"). Bench configs on the Qube set `endpoint` to
+  the Lenovo's vLLM arm (`http://node-b:18797`, `agent_model: a2-pool`); the delegator ran the loop
+  here against that engine and stamped the ledger row and the PAIR card with its own hostname — 20 cards on
+  the Qube's UUID for work the Lenovo did (measured: the arm's `prompt_tokens_total` rose by the gate's
+  87,354 tokens, the Qube seat served none). `modelaffinity.EndpointHost` now names the endpoint's box when
+  it is not loopback, `localhost` or this machine; a local run then carries that host as its node, its
+  placement reason says `engine <endpoint> is <host>'s (attributed there)`, and the PAIR card is scheduled on
+  that member. The same reading disarms this box's text-load gate in `config.Load` (one note per process):
+  a run that never touches a local card is no longer deferred `gpu busy` by this box's lease (8 of 16
+  contracts were, in 0.7 s, while the Qube's cards sat under a lease and the work was on the Lenovo).
+
 - **`calibrate` had never fitted a threshold, and the cause was file plumbing, not the 60-row floor**
   (register D-126): the only classify/triage label writer appends to the confhead labels sidecar
   (`confhead_labels_path`) while `calibrate` read the ledger alone, whose rows of the same calls carry the
