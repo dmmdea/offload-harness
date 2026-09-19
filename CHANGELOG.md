@@ -6,6 +6,14 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **A warm-back gave up on a 5xx while the seat was still loading** (register D-124 readback, 2026-09-18
+  19:5x): the 3-card seat's cold load outlasts llama-swap's `healthCheckTimeout`, the warm's health request
+  came back `status 500`, the wrapper reported the warm-back failed and released — and the engine came up
+  minutes later, untracked by the lease that owed it. `warmSeat` now reads the seat's own state after a 5xx
+  (`/running` through `seatload`): a load in progress is waited out (15 min bound, 5 s poll), a ready seat is
+  a warm that succeeded, a seat that never started is the failure, said as such.
+
 ## [0.130.0] - 2026-09-18 - the decide lane's plumbing and the cascade's doors: calibrate reads the labels sidecar, the escalating attempt records its row, vLLM seats get structured_outputs, every row names its door, the cascade tools are the first door
 
 ### Fixed
