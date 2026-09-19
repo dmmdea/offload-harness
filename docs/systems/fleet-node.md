@@ -393,7 +393,7 @@ is `install render`, run by a human.
 (`root, used_gb, cap_gb, high_gb, low_gb, files, last_scan, last_prune, last_removed, last_freed_gb, prunes, jobs_since_tick,
 error`). The steward (internal/storesteward) keeps a persistent KV page store this node owns on disk under a budget the box
 computes — `cap = min(fleet_store_cap_gb, 0.8 × (used + free))`, high 95 %, low 85 %, oldest-first by mtime, files younger
-than 60 s never removed — and runs a scan after every `fleet_store_prune_every_jobs` completed jobs (default 8), on any health
+than 60 s never removed — and runs a scan every `fleet_store_prune_every_sec` seconds (default 60; 0.130.1 — the job tick cannot fire under a GPU lease, and that is when the store fills fastest), after every `fleet_store_prune_every_jobs` completed jobs (default 8), on any health
 poll whose last status was above the high mark, and once at start. At most one scan runs at a time; a health poll never walks
 the directory itself. The root must carry a `.storesteward` marker file (written by the steward into an empty root; a populated root without it is
 refused at start — a mistyped `fleet_store_root` can never become an oldest-first purge of some other tree); every removed page is

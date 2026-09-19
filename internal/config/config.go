@@ -1177,6 +1177,14 @@ type Config struct {
 	// FleetStorePruneEveryJobs is how many completed jobs pass between store
 	// scans; 0 = 8 (one spread).
 	FleetStorePruneEveryJobs int `json:"fleet_store_prune_every_jobs,omitempty"`
+	// FleetStorePruneEverySec is a TIME tick beside the job tick (0.130.1, register
+	// B-48/B-16): under a GPU lease no fleet job completes on this node while a
+	// bench arm or the pair seat writes pages at ~1 GB/min, so the job tick never
+	// fires — measured 2026-09-18: the steward ticked at 20:26 and the dataset
+	// went 53 → 71 GB (its quota, ENOSPC) by 20:54 with no tick between. The scan
+	// is a directory walk plus one statfs and prunes only above the high mark, so
+	// a minute is cheap. 0 = 60; negative disables the time tick.
+	FleetStorePruneEverySec int `json:"fleet_store_prune_every_sec,omitempty"`
 	// ServingConfigPath is the rendered llama-swap config this node actually
 	// serves (K-02). It is a PATH and not a derived default because no default
 	// is right: every node in this fleet keeps it somewhere else (a top-level

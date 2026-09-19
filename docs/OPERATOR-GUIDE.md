@@ -1103,7 +1103,7 @@ only once a cold seat is up — a vLLM seat measured 222 s, and the old 60 s per
 fallback for the whole run. When the probe still cannot answer, the box's `agent_ctx_tokens` is the
 window; when it answers and disagrees with `agent_ctx_tokens`, the served window wins and the note says so.
 
-**Store steward (0.113.16) — `fleet_store_root`, `fleet_store_cap_gb`, `fleet_store_prune_every_jobs`.** A node that owns a
+**Store steward (0.113.16) — `fleet_store_root`, `fleet_store_cap_gb`, `fleet_store_prune_every_jobs`, `fleet_store_prune_every_sec` (0.130.1: a time tick, default 60 s, because under a GPU lease no job completes on the node while a bench arm or the pair seat writes ~1 GB/min; negative disables it).** A node that owns a
 persistent KV page store on disk (the Lenovo's LMCache fs_native dataset) keeps it under budget between its own turns:
 `cap = min(fleet_store_cap_gb, 0.8 × (used + free))`, prune oldest-first from 95 % of cap down to 85 %, after every N completed
 jobs (default 8) and on any health poll that finds it high. `/fleet/health` shows it under `store`. Set the root to the
