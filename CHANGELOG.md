@@ -6,6 +6,15 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **`route` on `agent_run` and `offload_ask`** (register C-46, diagnosis S-27): both doors always ran local, so a
+  remote seat could not be named from this box at all (the other face of D-125). `route` = `remote` / `auto` /
+  `spread` / `queue` sends the call as ONE contract through the delegator's single-contract path (the one the
+  review fence built), and the response names `node`, `placement`, `seat` and `executed_on`. For `agent_run`,
+  `read_root` and `model` do not travel — the executing node reads its own root and runs its own seat — so it is
+  for self-contained goals and `setup_actions`; for `offload_ask` the files ride inline, so any node can answer.
+  Omitted or `local` keeps the old behaviour exactly.
+
 ## [0.130.1] - 2026-09-18 - the store steward ticks on a clock, not only on completed jobs
 
 ### Fixed
