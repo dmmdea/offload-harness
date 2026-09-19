@@ -29,7 +29,7 @@ The `--serve` endpoint is **unauthenticated** and drives write/GitHub tools → 
 | `embeddinggemma` | (memory stack) | Embeddings. |
 | `qwen3vl-4b`, `whisper-stt`, `whisper-stt-hq` | `vision_model` / `stt_model[_hq]` | Vision + speech. All opt-in and DERIVED: a tier declares a `media_seats` entry, which renders the llama-swap seat and writes the binding together. No seat, no binding, route defers. |
 
-On a COMPOSITE box (ADR 0039) these aliases are not the whole story: the box declares device
+On a COMPOSITE box (ADR 0052) these aliases are not the whole story: the box declares device
 LAYERS, and placement picks the layer and seat per task, recording it on every result as
 `placed`. "Tier" in that sentence is the HARDWARE tier, not a row of this table —
 `docs/systems/composite-tier.md` keeps the two apart.
@@ -111,7 +111,7 @@ prompt/exemplars; can only narrow — UNSET resolves to config `agent_profile`, 
    with `&`). The same declaration writes `vision_model`/`stt_model`, so a binding can never name
    a seat that was not rendered. Detail: `docs/systems/setup-installer.md`.
 1b. **The display card is never a `single` or `pair` layer device, and the display layer is
-   dormant until the operator enables it** (ADR 0039). On the three-card reference box device 1
+   dormant until the operator enables it** (ADR 0052). On the three-card reference box device 1
    is the RTX 5070 Ti driving the desktop: no default seat is pinned to it (tests assert the
    tier table and the rendered yaml), the only entries that may name it are the display layer's
    twins, and every placement onto it passes a ≥4 GiB free-minus-footprint floor, a host-RAM

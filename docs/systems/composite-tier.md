@@ -31,6 +31,36 @@ operator rule of 2026-09-10 is that the cards do the inference and RAM is overfl
 declares one gets it, under its guards — so the day a three-card seat fits inside VRAM the
 tier declares it again and nothing else changes.
 
+## The layers on the `ampere-16` node
+
+A composite box does not need more than one card. The `ampere-16` reference node (one NVIDIA A2,
+16 GB) declares two layers on that single device (register A-100, 0.129.0):
+
+| layer | tier | devices | seats | chosen when | state |
+|---|---|---|---|---|---|
+| `single` | `ampere-16` | 0 | agent `qwen38-27b-gsq-vllm` (32,768) | every agent contract the node takes, by row 5b — it is the planner default under a layer name | active |
+| `fast` | `ampere-16` | 0 | agent `qwen36-35b-a3b-gsq-vllm` (32,768, `max_inflight` 8) | only when a contract NAMES it (`layer: "fast"`) or names the model | active |
+
+`fast` is the tier's fast DIGEST layer, not a second general-purpose seat. Judged blind its coverage
+is **4.65 against the `single` seat's 8.53** — faithful, no fabrications, but shallow — so it is never
+the node's agent seat, free choice never lands on it (row 4b: a non-default layer is reached by name
+only), and it is for digest-shaped contracts. It is not a swap for `single`, and a judgment or
+coverage contract does not belong on it.
+
+Every vLLM seat this node declares — all three of them — is **storeless by measured declaration**
+(register B-01, re-measured 2026-09-18), so `doctor` prints a storeless-OK line per seat instead of
+failing it for a missing cache-server binding (ADR
+[0045](../architecture/decisions/0045-a-cache-server-binding-per-vllm-seat.md)): the MP server's own
+~690 MiB CUDA context beside the resident embedder OOMs the engine at `util 0.90` on a 16 GB card,
+and the 27B GSQ seat's cache path is blocked on top of that by LMCache 0.5.4 × vLLM 0.29 (register
+D-117).
+
+> **Not in the installer's table yet.** `setup/templates/profiles.json` carries neither the `fast`
+> layer nor the 35B `vllm_seat` for `ampere-16`, so the declaration above lives only in that node's
+> own config — a fresh render loses it, and [`docs/tiers/ampere-16.md`](../tiers/ampere-16.md), which
+> is GENERATED from that table, cannot state it. Seeding the layer, and a coverage test that fails
+> when a tier's declared layer set shrinks, is an open register row.
+
 ## The decision table
 
 `internal/placement` is the only place a placement is decided. Its rows, in order:
@@ -173,4 +203,4 @@ has no reader of its own, and a live reading always wins.
 | `internal/delegate/` | the local decision, the pair-long wait, per-layer remote placement |
 | `setup/templates/profiles.json` | `composes` and `layers` for `blackwell-3x16` |
 | `setup/install.ps1` | the Windows parity copy of the composite seed |
-| [ADR 0039](../architecture/decisions/0039-a-box-is-the-union-of-its-tiers-and-placement-is-a-per-task-decision.md) | the decision record |
+| [ADR 0052](../architecture/decisions/0052-a-box-is-the-union-of-its-tiers-and-placement-is-a-per-task-decision.md) | the decision record |

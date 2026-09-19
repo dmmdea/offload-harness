@@ -120,6 +120,14 @@ native CPU/disk offloading (measured unusable on the Mamba-hybrid 27B under WSL2
 4a. The seat wrapper (`setup/templates/vllm-seat/seat_fg.sh`) starts the LMCache MP server with the
    L1 size, chunk and L2 adapter, then the engine in the foreground of the llama-swap client, so a
    swap-out reaps the engine while the store keeps the pages.
+4f. The MP server also opens an **HTTP API beside its ZMQ port**, and LMCache defaults it to `0.0.0.0:8080` —
+   which on a WSL2 distro in mirrored networking is the host's LAN and tailnet, and 8080 is somebody else's
+   port on every box in this fleet (found 2026-09-18 while re-measuring the tier: the production MP server was
+   logging `Uvicorn running on http://0.0.0.0:8080`). Since 0.128.3/0.128.4 (register B-50) the wrapper passes
+   `--http-host 127.0.0.1 --http-port "$MP_HTTP_PORT"` — `SEAT_MP_HTTP_PORT`, default **18790**, the reference
+   pairing being 18797 engine / 18796 MP ZMQ / 18790 MP HTTP — refuses a squatted HTTP port the way it refuses
+   a squatted engine port, and the seat spec carries `mp_http_port` (0 = engine port − 7) rendered into
+   `seat.env` as `SEAT_MP_HTTP_PORT`.
 
 ## Important flows
 
