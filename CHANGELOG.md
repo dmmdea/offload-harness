@@ -6,6 +6,27 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **A vLLM seat is no longer constrained by a GBNF grammar it discards** (register D-129, ADR 0002
+  amendment 2026-09-18): the seats `vllm_seats` declares — matched case-insensitively and
+  **alias-resolved through the live llama-swap roster**, so the Qube's `agent-pool-3card` alias of
+  `qwen3.8-27b-vllm-3card` counts — now receive vLLM's own `structured_outputs: {"json": <schema>}`
+  and **no `grammar`** on both send sites (the in-loop tier path in `attempt`, the structured re-pack
+  in `repackStructured`), plus the non-thinking render, since vLLM applies the constraint to the whole
+  output. llama.cpp seats keep the raw GBNF byte-identically, and an unreadable roster keeps the
+  grammar (the pre-fix behaviour) rather than stripping a constraint on a transient probe failure.
+  vLLM's request model allows unknown extras, so it accepted `grammar`, ignored it, and answered
+  unconstrained; the 0.115.14 repair was a downstream trim and coercion, and nine days of the
+  delegation log measured its cost as 1,018 structured re-packs on vLLM seats against 506 on every
+  other seat, with 3-attempt exhaustion at 19.7 % against 12.6 %. `response_format` stays unused on
+  every engine. New: `llamaclient.WithJSONSchema`, `gbnf.JSONSchema` (round-trips with
+  `FromJSONSchema`, declaration order and all), `tasks.Built.Fields`,
+  `config.Config.DeclaresVLLMSeat`, `pipeline.isVLLMSeat` (60 s per-name memo). Ledger rows and
+  `core.Meta` gain `repack_attempts` beside `repack_ms` — the wall alone cannot separate one slow
+  attempt from a three-attempt loop, and the attempt count is what this change is measured on. Red
+  test first:
+  `internal/pipeline/vllm_structured_outputs_test.go:TestGrammarNeverReachesADeclaredVLLMSeat`.
+
 ### Changed
 - **`skill/` tool reference libraries refreshed from the operator's current copies and DaVinci Resolve added** (register J-22):
   `skill/ffmpeg` (12 files were a week behind: ffmpeg 9.0 traps, NVENC, subtitles, quoting, failure modes),

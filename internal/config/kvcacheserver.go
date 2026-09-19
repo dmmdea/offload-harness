@@ -252,3 +252,29 @@ func privateHost(host string) error {
 	}
 	return fmt.Errorf("%s is neither a private/tailnet address nor a bare, .local or %s hostname", host, suf)
 }
+
+// DeclaresVLLMSeat reports whether `vllm_seats` names id — the box's own
+// answer to "is this seat served by vLLM?", matched case-insensitively
+// because llama-swap resolves seat names that way and a roster id that
+// differs only in case is the same seat.
+//
+// It is the only honest answer available: /v1/models publishes model ids, not
+// engines, so a llama.cpp cascade seat and a vLLM seat are indistinguishable
+// there (see Config.VLLMSeats for why the roster is declared rather than
+// sniffed). Callers that hold an ALIAS must resolve it to its canonical id
+// first — the Qube's agent seat is the alias `agent-pool-3card` of
+// `qwen3.8-27b-vllm-3card`, and only the canonical id is in `vllm_seats`, so
+// an exact match alone would leave that box on a constraint field vLLM
+// discards (register D-129).
+func (c Config) DeclaresVLLMSeat(id string) bool {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return false
+	}
+	for _, s := range c.VLLMSeats {
+		if strings.EqualFold(strings.TrimSpace(s), id) {
+			return true
+		}
+	}
+	return false
+}

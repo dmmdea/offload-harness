@@ -12,9 +12,17 @@ import (
 
 // Built is everything the pipeline needs to run one task.
 type Built struct {
-	System    string
-	User      string
-	Grammar   string
+	System  string
+	User    string
+	Grammar string
+	// Fields is the SAME field list Grammar was compiled from, carried
+	// alongside it rather than re-derived: a vLLM seat is constrained by
+	// gbnf.JSONSchema(Fields) instead, because vLLM accepts and DISCARDS
+	// llama.cpp's `grammar` field (register D-129). Nil on the free-text
+	// tasks that set no grammar at all, and every builder that sets one sets
+	// both, pinned by TestBuiltFieldsMatchTheGrammar: the two engines can
+	// never be handed different shapes for one task.
+	Fields    []gbnf.Field
 	Schema    map[string]any // validation schema (extract); nil when grammar suffices
 	MaxTokens int
 }
@@ -74,7 +82,7 @@ func buildVideoWatch(req core.Request) (Built, error) {
 		return Built{}, fmt.Errorf("video_watch requires a question")
 	}
 	return Built{
-		System: "You are watching one time window of a longer video. The images are frames from that window in chronological order, each preceded by its absolute timestamp in the video (e.g. <83.0 seconds>). Write COMPACT timestamped notes that bear on the question: one line per timestamp, at most 20 words each, in the form `<T s> what is shown; on-screen text: \"...\"`. Note what changes between frames, and flag anything that looks wrong (upside down, mirrored text, tilted horizon, camera pointing away from the subject, dark or unreadable). When a frame is the same as the previous one, write `<T s> same` and nothing else. Use ONLY what is visible. No preamble, no summary, no translations.",
+		System:    "You are watching one time window of a longer video. The images are frames from that window in chronological order, each preceded by its absolute timestamp in the video (e.g. <83.0 seconds>). Write COMPACT timestamped notes that bear on the question: one line per timestamp, at most 20 words each, in the form `<T s> what is shown; on-screen text: \"...\"`. Note what changes between frames, and flag anything that looks wrong (upside down, mirrored text, tilted horizon, camera pointing away from the subject, dark or unreadable). When a frame is the same as the previous one, write `<T s> same` and nothing else. Use ONLY what is visible. No preamble, no summary, no translations.",
 		User:      "Question about the whole video: " + q + "\nNotes for this window:",
 		Grammar:   "",
 		MaxTokens: 768,
@@ -118,12 +126,12 @@ func buildOCR(req core.Request) (Built, error) {
 // prompt; with no brief, matches_brief is instructed to true. Grammar+image is
 // proven to coexist on this build.
 func buildAssessImage(req core.Request) (Built, error) {
-	grammar := gbnf.Object([]gbnf.Field{
+	fields := []gbnf.Field{
 		{Name: "has_people", Type: gbnf.TBool},
 		{Name: "has_text", Type: gbnf.TBool},
 		{Name: "matches_brief", Type: gbnf.TBool},
 		{Name: "notes", Type: gbnf.TString},
-	})
+	}
 	user := "Assess the image."
 	if brief := paramString(req.Params, "brief"); brief != "" {
 		user = fmt.Sprintf("Brief: %s. Assess the image.", brief)
@@ -131,7 +139,8 @@ func buildAssessImage(req core.Request) (Built, error) {
 	return Built{
 		System:    "You are a strict image QA assistant. Report exactly what is VISIBLE. has_people=true if any person/face/body part is visible. has_text=true if any readable letters/words/numbers are rendered in the image. matches_brief: if a brief is given, whether the image matches it; if no brief, set true. notes: one short phrase.",
 		User:      user,
-		Grammar:   grammar,
+		Grammar:   gbnf.Object(fields),
+		Fields:    fields,
 		MaxTokens: 128,
 	}, nil
 }
@@ -141,14 +150,15 @@ func buildSummarize(req core.Request) (Built, error) {
 	if n < 1 {
 		n = 1
 	}
-	grammar := gbnf.Object([]gbnf.Field{
+	fields := []gbnf.Field{
 		{Name: "summary", Type: gbnf.TString},
 		{Name: "bullets", Type: gbnf.TStringArray},
-	})
+	}
 	return Built{
-		System:    "You are a precise summarizer. Output ONLY a JSON object. Be faithful to the source; do not invent facts.",
-		User:      fmt.Sprintf("Summarize the text below. Provide a 1-2 sentence \"summary\" and up to %d key points in \"bullets\".\n\nTEXT:\n%s", n, req.Input),
-		Grammar:   grammar,
+		System:  "You are a precise summarizer. Output ONLY a JSON object. Be faithful to the source; do not invent facts.",
+		User:    fmt.Sprintf("Summarize the text below. Provide a 1-2 sentence \"summary\" and up to %d key points in \"bullets\".\n\nTEXT:\n%s", n, req.Input),
+		Grammar: gbnf.Object(fields),
+		Fields:  fields,
 		// Budget SCALES with the number of bullets requested. A flat 512 was the
 		// single largest source of truncation defers in the 2026-08-03 ledger audit
 		// (8 of 34): the caller asks for N points, the model writes them, the budget
@@ -171,14 +181,15 @@ func buildClassify(req core.Request) (Built, error) {
 	if len(labels) < 2 {
 		return Built{}, fmt.Errorf("classify requires at least 2 labels")
 	}
-	grammar := gbnf.Object([]gbnf.Field{
+	fields := []gbnf.Field{
 		{Name: "label", Type: gbnf.TEnum, Enum: labels},
 		{Name: "confidence", Type: gbnf.TNumber},
-	})
+	}
 	return Built{
 		System:    "You are a classifier. Choose exactly one label from the allowed set. Output ONLY a JSON object.",
 		User:      fmt.Sprintf("Classify the text into exactly one of these labels: %s.\nReturn the chosen \"label\" and a \"confidence\" between 0 and 1.\n\nTEXT:\n%s", strings.Join(labels, ", "), req.Input),
-		Grammar:   grammar,
+		Grammar:   gbnf.Object(fields),
+		Fields:    fields,
 		MaxTokens: 64,
 	}, nil
 }
@@ -188,14 +199,15 @@ func buildTriage(req core.Request) (Built, error) {
 	if q == "" {
 		return Built{}, fmt.Errorf("triage requires a question")
 	}
-	grammar := gbnf.Object([]gbnf.Field{
+	fields := []gbnf.Field{
 		{Name: "decision", Type: gbnf.TEnum, Enum: []string{"yes", "no", "unsure"}},
 		{Name: "reason", Type: gbnf.TString},
-	})
+	}
 	return Built{
-		System:    "You triage yes/no/unsure questions about a piece of text. Output ONLY a JSON object.",
-		User:      fmt.Sprintf("Question: %s\nAnswer with \"decision\" (yes, no, or unsure) and a short \"reason\".\n\nTEXT:\n%s", q, req.Input),
-		Grammar:   grammar,
+		System:  "You triage yes/no/unsure questions about a piece of text. Output ONLY a JSON object.",
+		User:    fmt.Sprintf("Question: %s\nAnswer with \"decision\" (yes, no, or unsure) and a short \"reason\".\n\nTEXT:\n%s", q, req.Input),
+		Grammar: gbnf.Object(fields),
+		Fields:  fields,
 		// 256 -> 768: the "reason" field is free text and the 2026-08-03 ledger audit
 		// caught 3 triage calls truncating at exactly 256, which discards a decision
 		// the model had ALREADY made (the enum comes first in the grammar) and defers
@@ -221,6 +233,7 @@ func buildExtract(req core.Request) (Built, error) {
 		System:    "You extract structured data from text. Output ONLY a JSON object with exactly the requested fields. Use empty values when a field is absent.",
 		User:      fmt.Sprintf("Extract these fields from the text: %s.\n\nTEXT:\n%s", strings.Join(names, ", "), req.Input),
 		Grammar:   gbnf.Object(fields),
+		Fields:    fields,
 		Schema:    schema,
 		MaxTokens: 512,
 	}, nil

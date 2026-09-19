@@ -69,3 +69,77 @@ func TestWrapThinking(t *testing.T) {
 		t.Errorf("non-root input should pass through unchanged, got %q", got)
 	}
 }
+
+// TestJSONSchemaRoundTripsThroughFromJSONSchema pins the invariant the two
+// send sites depend on (register D-129): the JSON Schema a vLLM seat is
+// constrained by and the GBNF a llama.cpp seat is constrained by are two
+// renderings of ONE field list — same fields, same types, same ORDER. If they
+// could drift, the same task would constrain differently per engine and the
+// answers would stop being comparable.
+func TestJSONSchemaRoundTripsThroughFromJSONSchema(t *testing.T) {
+	// Every FieldType, and deliberately NOT in alphabetical order: sorted
+	// order would hide an order bug, since orderedKeys falls back to sorting
+	// whatever "required" does not name.
+	fields := []Field{
+		{Name: "zeta", Type: TString},
+		{Name: "alpha", Type: TNumber},
+		{Name: "middle", Type: TInteger},
+		{Name: "flag", Type: TBool},
+		{Name: "bullets", Type: TStringArray},
+		{Name: "label", Type: TEnum, Enum: []string{"yes", "no", "unsure"}},
+	}
+
+	got := FromJSONSchema(JSONSchema(fields))
+	if len(got) != len(fields) {
+		t.Fatalf("round trip returned %d fields, want %d: %+v", len(got), len(fields), got)
+	}
+	for i, want := range fields {
+		if got[i].Name != want.Name {
+			t.Errorf("field %d: name %q, want %q — declaration order did not survive the round trip", i, got[i].Name, want.Name)
+		}
+		if got[i].Type != want.Type {
+			t.Errorf("field %d (%s): type %v, want %v", i, want.Name, got[i].Type, want.Type)
+		}
+		if strings.Join(got[i].Enum, ",") != strings.Join(want.Enum, ",") {
+			t.Errorf("field %d (%s): enum %v, want %v", i, want.Name, got[i].Enum, want.Enum)
+		}
+	}
+
+	// ...and therefore the grammar the round trip produces is the grammar the
+	// original fields produce: one field list, two engines.
+	if a, b := Object(got), Object(fields); a != b {
+		t.Errorf("Object(round trip) != Object(fields):\n got: %s\nwant: %s", a, b)
+	}
+}
+
+// TestJSONSchemaShape pins the three structural claims the schema makes: an
+// object, every field required, and no extra keys — the same closed shape
+// Object's grammar admits.
+func TestJSONSchemaShape(t *testing.T) {
+	s := JSONSchema([]Field{
+		{Name: "summary", Type: TString},
+		{Name: "bullets", Type: TStringArray},
+	})
+	if s["type"] != "object" {
+		t.Errorf("type = %v, want \"object\"", s["type"])
+	}
+	if s["additionalProperties"] != false {
+		t.Errorf("additionalProperties = %v, want false", s["additionalProperties"])
+	}
+	req, ok := s["required"].([]any)
+	if !ok || len(req) != 2 || req[0] != "summary" || req[1] != "bullets" {
+		t.Errorf("required = %v, want [summary bullets] in declaration order", s["required"])
+	}
+	props, ok := s["properties"].(map[string]any)
+	if !ok || len(props) != 2 {
+		t.Fatalf("properties = %v, want 2 entries", s["properties"])
+	}
+	arr, ok := props["bullets"].(map[string]any)
+	if !ok || arr["type"] != "array" {
+		t.Fatalf("bullets property = %v, want an array", props["bullets"])
+	}
+	items, ok := arr["items"].(map[string]any)
+	if !ok || items["type"] != "string" {
+		t.Errorf("bullets items = %v, want {\"type\":\"string\"}", arr["items"])
+	}
+}
