@@ -6,6 +6,20 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.130.5] - 2026-09-19 - a forwarded accelerator call's PAIR card names the device and the node that ran it
+
+### Fixed
+- **A forwarded accelerator call was recorded as `<device>@fleet` even when a node answered**, so its PAIR Jobs
+  card read "llamacpp, ran on <this box>": `accelremote` stamps the result with a typed `Placement`, and the
+  ledger helper only recognised a JSON map, so the node was never seen. The helper now reads the typed value (and
+  the map form), and names the node by the host of its base URL — the name PAIR knows the member by — so the
+  ledger row is `<node>:<device>` (E-04 as documented). Red test: a typed placement whose base is
+  `http://node-b:18811` must yield `node-b`.
+- **The PAIR card for an NPU call carries the device as its engine** (`coral-edgetpu`, `hailo-8l`) instead of
+  `llamacpp`, and `FromLedger` splits `<node>:<device>` so the card shows the device as its model and runs on
+  that node (`scheduledOn` resolves through PAIR's member list). Red tests: `TestEngineFor` accelerator rows,
+  `TestFromLedgerAcceleratorRowNamesDeviceAndNode`.
+
 ## [0.130.4] - 2026-09-19 - doctor checks the model files behind every ComfyUI route (register F-31); the L1 staging default is the measured 2 GB (register B-02)
 
 ### Added
