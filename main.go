@@ -2743,6 +2743,11 @@ func doctorRun(cfg config.Config, routes []mediacap.Route, w io.Writer) error {
 	// them — a doctor that is red for llama-swap and silent about a broken media
 	// binding is the same blind spot in a different disguise.
 	mediaMissing := writeMediaSection(w, routes)
+	// The model files behind the ComfyUI routes (register F-31): a name the graph
+	// will ask ComfyUI to load must sit in the class directory the loader node
+	// opens; a missing or misplaced file used to surface only as a graph
+	// rejection at render time.
+	bindingBroken := writeModelBindingsSection(w, mediacap.ModelBindings(cfg))
 	// Same reasoning, same place in the order: the cache-server verdicts are pure
 	// config too, so a serving layer that happens to be down must never hide them.
 	unbound := writeCacheServerSection(w, cfg)
@@ -2780,6 +2785,9 @@ func doctorRun(cfg config.Config, routes []mediacap.Route, w io.Writer) error {
 	}
 	if mediaMissing > 0 {
 		return fmt.Errorf("%d media route(s) bound to a file that does not exist on this machine", mediaMissing)
+	}
+	if bindingBroken > 0 {
+		return fmt.Errorf("%d ComfyUI model binding(s) missing or misplaced under %s", bindingBroken, filepath.Join(cfg.ComfyDir, "models"))
 	}
 	if unbound > 0 {
 		return fmt.Errorf("%d vLLM seat(s) with no kv_cache_server binding", unbound)
@@ -2891,6 +2899,27 @@ func writeMediaSection(w io.Writer, routes []mediacap.Route) int {
 		fmt.Fprintf(w, "  %-22s %s  %-18s %-15s %s\n", r.Name+":", mark, string(r.State), r.Engine, r.Detail)
 	}
 	return missing
+}
+
+// writeModelBindingsSection prints one line per configured ComfyUI model name
+// with where it was found under <comfy_dir>/models, and returns how many are
+// MISSING or MISPLACED (register F-31). A box with no ComfyUI models directory
+// prints nothing: there is nothing to bind there.
+func writeModelBindingsSection(w io.Writer, bindings []mediacap.Binding) int {
+	if len(bindings) == 0 {
+		return 0
+	}
+	fmt.Fprintln(w, "comfyui model bindings (each name must sit in the class directory its loader node opens; MISSING/MISPLACED = the graph is rejected at render time):")
+	broken := 0
+	for _, b := range bindings {
+		mark := "OK  "
+		if b.State != mediacap.BindingFound {
+			mark = "FAIL"
+			broken++
+		}
+		fmt.Fprintf(w, "  %-26s %s  %-10s %s\n", b.Key+":", mark, string(b.State), b.Detail)
+	}
+	return broken
 }
 
 func runModels(args []string) error {

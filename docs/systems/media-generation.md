@@ -390,6 +390,19 @@ the files they name — the same gates the pipeline routes on. Three verdicts pe
 
 Both reporting surfaces read from it: `local-offload doctor`'s media section (a
 `BOUND-BUT-MISSING` route exits non-zero) and the MCP `offload_status` tool's `media.routes`.
+
+**Model files behind the ComfyUI routes (0.130.4, register F-31).** A route can be `CONFIGURED` while
+the model NAME it hands the graph is absent or in the wrong place, and until 0.130.4 that surfaced only
+as a graph rejection at render time. `doctor` now prints a `comfyui model bindings` section: every
+configured model name (`imagegen_ckpt`, `videogen_unet_high`, `gen_edit_unet`, `upscale_model`, …) is
+resolved against the class directory its loader node opens — `checkpoints` for `CheckpointLoaderSimple`,
+`diffusion_models` (alias `unet`) for the UNET loaders, `vae`, `text_encoders` (alias `clip`),
+`clip_vision`, `loras`, `upscale_models`, `latent_upscale_models` — across `<comfy_dir>/models` and every
+`extra_model_paths.yaml` root exactly as ComfyUI's `folder_paths` reads them. Verdicts: `FOUND`, `MISSING`
+(no class directory holds it), `MISPLACED` (present only under a class the graph never loads from). A
+subfolder name resolves as the loader opens it; a file that moved one level is still reported in its
+class. `MISSING`/`MISPLACED` fail doctor; a box with no models root prints no section.
+
 Neither states an engine as a constant any more. That mattered on a real node: `offload_status`
 hardcoded `"image_engine": "ComfyUI (local)"` and shipped it to an autonomous planner on a box whose
 `imagegen_engine` is `sdcpp` and which has no ComfyUI at all, while `doctor` — checking model
