@@ -6,6 +6,8 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.130.0] - 2026-09-18 - the decide lane's plumbing and the cascade's doors: calibrate reads the labels sidecar, the escalating attempt records its row, vLLM seats get structured_outputs, every row names its door, the cascade tools are the first door
+
 ### Fixed
 - **A margin escalation is now written to the ledger** (register D-127): the confidence gate's defer returned before
   `p.record`, so the escalating attempt — a call the seat answered — left no row of its own; `esc_source` counted 4 rows
