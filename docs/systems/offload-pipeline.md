@@ -89,7 +89,10 @@ answers "is this good enough, and if not, is it worth trying a bigger model?"
   `confidence_margin_threshold` (default **0.65**). Both defaults were calibrated 2026-08-14
   from the confcal probe's observed distributions; the prior constants (0.45 / 0.35) sat below
   the entire observed support of their signals and had never fired on probe or production
-  traffic.
+  traffic. `local-offload calibrate` fits the per-task value from BOTH labeled-row sources — the
+  ledger and the confhead labels sidecar (`confhead_labels_path`), where the classify/triage
+  agreement labels are written (register D-126: read from the ledger alone it found 0 usable rows
+  and never fitted anything); the report names each source and its usable-row count.
 - **Confhead gate.** A learned correctness head below its threshold escalates.
 
 An OK result returns immediately. A recoverable failure at a non-final Tier escalates. Infrastructure
