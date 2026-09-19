@@ -6,6 +6,8 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.130.3] - 2026-09-19 - the re-pack sends the contract's own schema to vLLM seats (nested-object schemas no longer constrained into strings)
+
 ### Fixed
 - **The re-pack on a vLLM seat sends the contract's own schema** (register D-129 follow-up, found by the A-100 proof contract):
   `structured_outputs.json` carried the GBNF-typed projection of the schema, and `internal/gbnf` has no object or
