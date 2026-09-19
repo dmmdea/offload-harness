@@ -14,8 +14,8 @@ Versioning: [SemVer](https://semver.org/).
   the seat (its own record excluded) number the cap or more; a slot that never frees is a capacity defer
   (`seat busy: …`, re-placeable), never a refusal. Wired at the MCP `agent_run` door with the same cap the
   fleet uses (`FleetConcurrencyLimit`, default 4; `fleet_max_concurrent_jobs: -1` disables both). The
-  pipeline's contract runner (`internal/pipeline/agenttask.go`, the delegation's local leg) takes the same
-  call in the L1 lane's next pass.
+  pipeline's contract runner (`internal/pipeline/agenttask.go`, the delegation's local leg and every fleet job) takes the same
+  call in this same cut (the pipeline's contract runner, 0.130.x).
 
 ### Fixed
 - **A warm-back gave up on a 5xx while the seat was still loading** (register D-124 readback, 2026-09-18
