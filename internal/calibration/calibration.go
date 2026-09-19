@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -50,18 +51,45 @@ type point struct {
 // scales are ~10x apart (register D-130), and a cutoff derived from a mix of
 // them belongs to neither while still gating production.
 func Run(ledgerPath string, defaultAlpha float64, alphas map[string]float64, outPath, scale string) (thresholds map[string]float64, report string, err error) {
-	byTask, excludedByScale, err := readLedger(ledgerPath, scale)
-	if err != nil {
-		return nil, "", fmt.Errorf("calibration: read ledger: %w", err)
-	}
+	return RunSources([]string{ledgerPath}, defaultAlpha, alphas, outPath, scale)
+}
 
-	thresholds = make(map[string]float64)
+// RunSources is Run over every labeled-row source the box writes (register
+// D-126): the ledger AND the confhead labels sidecar. The only classify/triage
+// label writer (pipeline.labelAgreement) appends to cfg.ConfHeadLabelsPath,
+// while the ledger row of the same call carries the margin and no label — so
+// a calibration read from the ledger alone found 0 usable rows in 9,217 and
+// never fitted a threshold; the 60-row floor was never the blocker. Every
+// source is a JSONL file of ledger.Entry rows; a missing file is a 0-row
+// source, and the report names each source with its usable-row count so the
+// plumbing is visible in the output rather than inferred from a silent skip.
+func RunSources(paths []string, defaultAlpha float64, alphas map[string]float64, outPath, scale string) (thresholds map[string]float64, report string, err error) {
+	byTask := make(map[string][]point)
 	var sb strings.Builder
 	sb.WriteString("Conformal calibration report\n")
 	sb.WriteString(strings.Repeat("=", 52) + "\n")
+	excludedByScale := 0
+	for _, p := range paths {
+		if strings.TrimSpace(p) == "" {
+			continue
+		}
+		part, excl, err := readLedger(p, scale)
+		if err != nil {
+			return nil, "", fmt.Errorf("calibration: read %s: %w", p, err)
+		}
+		excludedByScale += excl
+		usable := 0
+		for task, pts := range part {
+			byTask[task] = append(byTask[task], pts...)
+			usable += len(pts)
+		}
+		fmt.Fprintf(&sb, "  source %-40s usable labeled rows: %d\n", filepath.Base(p), usable)
+	}
 	if excludedByScale > 0 {
 		fmt.Fprintf(&sb, "  excluded %d row(s) whose margin_scale is not %q (an empty scale reads as matched)\n", excludedByScale, core.MarginScaleOfRow(scale))
 	}
+
+	thresholds = make(map[string]float64)
 
 	// Sort tasks for deterministic output.
 	tasks := make([]string, 0, len(byTask))

@@ -4673,6 +4673,7 @@ func (r *runner) record(contract core.AgentContract, pr PlacedResult) {
 			Steps:            pr.Result.Steps,
 			StopReason:       pr.Result.StopReason,
 			RepackMs:         pr.Result.RepackMs,
+			RepackAttempts:   pr.Result.RepackAttempts,
 			AcceptanceResult: acceptanceResult(pr),
 		}); err != nil {
 			r.ledgerLost.Add(1)

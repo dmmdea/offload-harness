@@ -95,6 +95,13 @@ The ledger entry answers "why did this defer?" — read `reason`, `err_class`, `
 `esc_source`, `margin`, and `grounded` together. A defer with `err_class` set is an infrastructure
 problem, not a quality problem, and the two have completely different remedies.
 
+The **escalating attempt writes its own row** (register D-127): a call the seat answered and the
+confidence gate sent up lands in the ledger as a non-deferred row on ITS tier, with ITS margin and the
+`esc_source` that fired, before the defer that climbs — so a margin escalation is one row per attempt
+(entry tier: `escalations: 0`, `margin` set; successor: `escalations: 1`, the carried `esc_source`).
+Until this the defer returned before the record and the only trace of a margin escalation was the
+successor's row and the labels sidecar (4 `esc_source` rows in 9,217 for 43 real firings).
+
 `esc_source` names WHICH gate sent a call up a tier, and it is the one field written on **successful**
 escalations too — that was the measured gap it closed: a call that escalated and then succeeded
 recorded no reason at all, so "which gate fired" was unreadable from telemetry and no change to the

@@ -121,6 +121,14 @@ type chatReq struct {
 	Temperature float64   `json:"temperature"`
 	MaxTokens   int       `json:"max_tokens,omitempty"`
 	Grammar     string    `json:"grammar,omitempty"`
+	// StructuredOutputs is vLLM's OWN constraint field, and the ONLY one it
+	// reads: llama.cpp's `grammar` above is accepted and discarded by vLLM's
+	// request model (unknown extras are allowed), so a vLLM seat behind
+	// llama-swap answered unconstrained — the defect register D-129 names.
+	// nil, and therefore absent from the body, on every call that does not
+	// pass WithJSONSchema; the two fields are mutually exclusive by
+	// construction (genOpts.grammarFor).
+	StructuredOutputs *structuredOutputs `json:"structured_outputs,omitempty"`
 	// ChatTemplateKwargs is nil for every call that does not ask for it, and
 	// `omitempty` on a POINTER means the key is then absent from the body
 	// entirely — a plain bool field would have serialized `false` into every
@@ -155,6 +163,12 @@ type mmChatReq struct {
 	Temperature float64 `json:"temperature"`
 	MaxTokens   int     `json:"max_tokens,omitempty"`
 	Grammar     string  `json:"grammar,omitempty"`
+	// StructuredOutputs: same contract as chatReq — absent unless the caller
+	// passed WithJSONSchema, and then `grammar` is absent instead. A VISION
+	// seat can be a vLLM seat too (ADR 0048: every tier, every seat), so the
+	// multimodal request carries the field rather than leaving the vision
+	// path on a constraint vLLM ignores.
+	StructuredOutputs *structuredOutputs `json:"structured_outputs,omitempty"`
 	// ChatTemplateKwargs: same contract as chatReq — nil (key absent) unless a
 	// caller passed WithoutThinking(). A THINKING vision template (Qwen3.5-VL and
 	// friends) otherwise spends the whole max_tokens budget in reasoning_content
@@ -212,17 +226,22 @@ func (c *Client) Generate(ctx context.Context, model, system, user, grammar stri
 	if model == "" {
 		model = c.model
 	}
+	o := applyGenOptions(opts)
 	body := chatReq{
 		Model:       model,
 		Temperature: temperature,
 		MaxTokens:   maxTokens,
-		Grammar:     grammar,
+		// grammarFor drops the grammar when a JSON schema was asked for: the
+		// two constraint fields are alternatives, never companions (D-129).
+		Grammar:     o.grammarFor(grammar),
 		CachePrompt: true,
 		Messages:    []chatMsg{},
-		// nil unless a caller passed WithoutThinking(), and nil serializes to
-		// nothing — so an option-free call's body is byte-identical to the
-		// pre-option one (pinned by TestGenerateWithoutOptionOmitsChatTemplateKwargs).
-		ChatTemplateKwargs: applyGenOptions(opts).templateKwargs(),
+		// Both nil unless a caller passed WithoutThinking() / WithJSONSchema(),
+		// and nil serializes to nothing — so an option-free call's body is
+		// byte-identical to the pre-option one (pinned by
+		// TestGenerateWithoutOptionOmitsChatTemplateKwargs).
+		ChatTemplateKwargs: o.templateKwargs(),
+		StructuredOutputs:  o.structured(),
 	}
 	if topLogprobs > 0 {
 		body.Logprobs = true
@@ -317,14 +336,16 @@ func (c *Client) GenerateVision(ctx context.Context, model, system, user string,
 	for _, uri := range imageDataURIs {
 		userParts = append(userParts, contentPart{Type: "image_url", ImageURL: &imageURL{URL: uri}})
 	}
+	o := applyGenOptions(opts)
 	body := mmChatReq{
 		Model:              model,
 		Temperature:        temperature,
 		MaxTokens:          maxTokens,
-		Grammar:            grammar,
-		CachePrompt:        false, // vision: KV reuse across images can corrupt (llama.cpp #17200)
+		Grammar:            o.grammarFor(grammar), // dropped when a JSON schema rides instead (D-129)
+		CachePrompt:        false,                 // vision: KV reuse across images can corrupt (llama.cpp #17200)
 		Messages:           []mmMsg{},
-		ChatTemplateKwargs: applyGenOptions(opts).templateKwargs(),
+		ChatTemplateKwargs: o.templateKwargs(),
+		StructuredOutputs:  o.structured(),
 	}
 	if topLogprobs > 0 {
 		body.Logprobs = true
@@ -365,14 +386,16 @@ func (c *Client) GenerateVisionInterleaved(ctx context.Context, model, system st
 	if trailingUser != "" {
 		userParts = append(userParts, contentPart{Type: "text", Text: trailingUser})
 	}
+	o := applyGenOptions(opts)
 	body := mmChatReq{
 		Model:              model,
 		Temperature:        temperature,
 		MaxTokens:          maxTokens,
-		Grammar:            grammar,
+		Grammar:            o.grammarFor(grammar), // dropped when a JSON schema rides instead (D-129)
 		CachePrompt:        false,
 		Messages:           []mmMsg{},
-		ChatTemplateKwargs: applyGenOptions(opts).templateKwargs(),
+		ChatTemplateKwargs: o.templateKwargs(),
+		StructuredOutputs:  o.structured(),
 	}
 	if topLogprobs > 0 {
 		body.Logprobs = true
