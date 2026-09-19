@@ -152,6 +152,13 @@ type Request struct {
 	Video  string         `json:"video,omitempty"`  // video_describe: a local video file path
 	Audio  string         `json:"audio,omitempty"`  // transcribe: a local audio/video file path
 	Params map[string]any `json:"params,omitempty"` // labels []string, schema map, question string, max_points int
+	// Door names the surface that admitted this call: an MCP tool name
+	// ("offload_summarize"), a CLI command ("cli:summarize"), or "fleet" for a
+	// request a fleet node received from a delegator. Register A-102: every
+	// cascade row in the live ledger carried no door, so nobody could tell which
+	// surface produced a cascade call. Documentary only — it NEVER routes,
+	// gates or selects a tier, and a forwarded request keeps its origin door.
+	Door string `json:"door,omitempty"`
 }
 
 // Meta is per-call telemetry returned to the caller and recorded in the ledger.
@@ -341,6 +348,11 @@ type Meta struct {
 	// anywhere else would be "computed then discarded", the defect class the
 	// prefill fields above were added to close.
 	Placed *Placed `json:"placed,omitempty"`
+	// Door is the Request.Door carried through to telemetry, so the ledger row
+	// names the surface that admitted the call (register A-102). Copied in
+	// Pipeline.Run and mapped onto ledger.Entry.Door; omitempty, so a caller
+	// that stamps no door publishes byte-identically to before.
+	Door string `json:"door,omitempty"`
 }
 
 // Result is the harness outcome. On success Data holds the validated task output.

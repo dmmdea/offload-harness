@@ -140,6 +140,15 @@ type Entry struct {
 	OriginSession string `json:"origin_session,omitempty"`
 	OriginPID     int    `json:"origin_pid,omitempty"`
 	OriginPPID    int    `json:"origin_ppid,omitempty"`
+	// Door names the SURFACE that admitted the call (register A-102): an MCP
+	// tool name ("offload_summarize"), a CLI command ("cli:summarize"), or
+	// "fleet" for a request a fleet node ran for a delegator. Origin* above
+	// names the process; nothing named the door, so all 558 cascade rows in the
+	// live ledger were indistinguishable between an MCP tool call, a hand-run
+	// CLI command and fleet dispatch. Copied from core.Meta.Door; absent on
+	// pre-0.129.x rows and on any writer that stamps none, which a reader must
+	// treat as UNKNOWN DOOR, never as one of the values above.
+	Door string `json:"door,omitempty"`
 	// CardsTokens is the ONE token figure a share reader wants: the tokens the
 	// cards processed for this row — the seat's prompt work (SeatTokensIn on
 	// agent rows, TokensIn on cascade rows: the same measurement under two

@@ -2080,6 +2080,9 @@ func (s *Server) admit(w http.ResponseWriter, r *http.Request, env dispatchEnvel
 		// the record at 0, which is what a pre-D-116 node published.
 		jobID := env.JobID
 		ctx = core.WithWallReport(ctx, func(sec int) { s.jobs.SetWall(jobID, sec) })
+		// Register A-102: stamp the DOOR this call came through so its ledger
+		// row is not one of the door-less cascade rows.
+		req.Door = dispatchDoor(req.Door)
 		res := s.runner.Run(ctx, req)
 		if env.TaskType == string(core.TaskAgentRun) && res.OK {
 			// The one fact this result proves about the advertised seat —
@@ -2454,4 +2457,18 @@ func dispatchedLayer(payload json.RawMessage) string {
 		return ""
 	}
 	return peek.Layer
+}
+
+// dispatchDoor is the door a dispatched job records (register A-102): "fleet"
+// for a job this node was handed with no door of its own, and the delegator's
+// OWN door when it named one — a forwarded request belongs to the surface that
+// admitted it, not to the hop that ran it. Today no payload shape carries a
+// door (BuildRequest builds each request from per-task fields), so every row
+// reads "fleet"; the branch exists so adding one to the wire later does not
+// silently relabel every delegated call as fleet-originated.
+func dispatchDoor(existing string) string {
+	if existing == "" {
+		return "fleet"
+	}
+	return existing
 }

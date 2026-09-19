@@ -6,6 +6,14 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **Every cascade ledger row now names its door** (register A-102 (e)): `door` on the request, the meta and the ledger row —
+  the MCP tool name (`offload_summarize` …), the CLI command (`cli:summarize` …) or `fleet` for a request a node received from
+  a delegator (a forwarded request keeps its origin door); agent-contract rows carry the contract's door on the wire
+  (`agent_delegate`, `offload_ask`, `offload_review_diff`, `offload_research`, `cli:delegate`, `cli:research`, `fleet`)
+  and the composite sub-calls keep their parent's. Before this all 558 cascade rows in the live ledger carried no
+  caller at all, so "which door produced this call" could not be asked of the telemetry. Additive and `omitempty` on every
+  surface: a node one release behind decodes the request unchanged.
 ### Fixed
 - **A vLLM seat is no longer constrained by a GBNF grammar it discards** (register D-129, ADR 0002
   amendment 2026-09-18): the seats `vllm_seats` declares — matched case-insensitively and
