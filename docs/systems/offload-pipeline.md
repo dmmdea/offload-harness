@@ -335,9 +335,12 @@ than compiled in.
 1. **A Defer is a success signal.** Never convert one into an error, and never add a cloud fallback
    to avoid one — see
    [ADR 0001](../architecture/decisions/0001-defer-never-cloud-fallback.md).
-2. **Structured output comes from a raw GBNF grammar field**, never `--json-schema` or
-   `response_format` — see
-   [ADR 0002](../architecture/decisions/0002-grammar-reliable-serving-flags.md).
+2. **Structured output comes from a raw GBNF grammar field** on llama.cpp seats, and from vLLM's own
+   `structured_outputs: {"json": <schema>}` on the seats `vllm_seats` declares (alias-resolved through
+   the llama-swap roster) — because vLLM accepts and DISCARDS the `grammar` field; never
+   `--json-schema` or `response_format` — see
+   [ADR 0002](../architecture/decisions/0002-grammar-reliable-serving-flags.md) and its 2026-09-18
+   amendment (register D-129).
 3. The recordless path writes nothing — no ledger, no cache, no shadow capture.
 4. Infrastructure failures do not escalate.
 5. The reasoning Tier never fabricates a pass: garbage from it still defers.

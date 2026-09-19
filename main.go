@@ -3815,6 +3815,10 @@ func runEval(args []string) error {
 	run := func(c config.Config) []eval.Outcome {
 		p, cleanup, err := openPipeline(c)
 		if err != nil {
+			// Said, never swallowed: a pipeline that cannot open produced a
+			// silent `{}` report on the Aorus (2026-09-18, register A-102 (d)) that
+			// read as "zero cases" for an hour.
+			fmt.Fprintf(os.Stderr, "eval: open pipeline: %v\n", err)
 			return nil
 		}
 		defer cleanup()

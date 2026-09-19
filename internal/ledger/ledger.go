@@ -24,17 +24,17 @@ import (
 // Entry is one offload call. The self-learning fields (margin..feat) are written
 // by the pipeline from core.Meta; old lines without them parse fine (zero values).
 type Entry struct {
-	TS        int64   `json:"ts"`
-	Task      string  `json:"task"`
-	TokensIn  int     `json:"tokens_in"`
-	TokensOut int     `json:"tokens_out"`
+	TS        int64  `json:"ts"`
+	Task      string `json:"task"`
+	TokensIn  int    `json:"tokens_in"`
+	TokensOut int    `json:"tokens_out"`
 	// SeatTokensIn is prompt work a seat did (agent rows), NOT tokens saved:
 	// the summary never adds it to TokensSaved. Absent on pre-0.115.5 rows.
-	SeatTokensIn int `json:"seat_tokens_in,omitempty"`
-	LatencyMs int64   `json:"latency_ms"`
-	TokPerSec float64 `json:"tok_per_s"`
-	CacheHit  bool    `json:"cache_hit"`
-	Deferred  bool    `json:"deferred"`
+	SeatTokensIn int     `json:"seat_tokens_in,omitempty"`
+	LatencyMs    int64   `json:"latency_ms"`
+	TokPerSec    float64 `json:"tok_per_s"`
+	CacheHit     bool    `json:"cache_hit"`
+	Deferred     bool    `json:"deferred"`
 	// --- self-learning signals (Phase 0 enrichment) ---
 	Margin          float64            `json:"margin,omitempty"`
 	ModelTier       string             `json:"model_tier,omitempty"`
@@ -156,12 +156,20 @@ type Entry struct {
 	// has no job. Placement is the delegator's placement note, capped like
 	// Reason; AcceptanceResult is "pass" | "fail" | "" (nothing evaluated: the
 	// run deferred or the wire failed).
-	JobID            string `json:"job_id,omitempty"`
-	Route            string `json:"route,omitempty"`
-	Placement        string `json:"placement,omitempty"`
-	Steps            int    `json:"steps,omitempty"`
-	StopReason       string `json:"stop_reason,omitempty"`
-	RepackMs         int64  `json:"repack_ms,omitempty"`
+	JobID      string `json:"job_id,omitempty"`
+	Route      string `json:"route,omitempty"`
+	Placement  string `json:"placement,omitempty"`
+	Steps      int    `json:"steps,omitempty"`
+	StopReason string `json:"stop_reason,omitempty"`
+	RepackMs   int64  `json:"repack_ms,omitempty"`
+	// RepackAttempts is how many seat completions the structured re-pack
+	// spent. It rides beside RepackMs because the wall alone cannot tell a
+	// slow single attempt from a loop that re-generated three times, and the
+	// engine-route change of register D-129 is measured on exactly that
+	// distinction: a vLLM seat constrained by `structured_outputs` should
+	// finish in one attempt where the discarded `grammar` field cost it two
+	// or three.
+	RepackAttempts   int    `json:"repack_attempts,omitempty"`
 	AcceptanceResult string `json:"acceptance_result,omitempty"`
 }
 
