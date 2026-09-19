@@ -305,11 +305,46 @@ func warmSeat(ctx context.Context, client *http.Client, endpoint, model string) 
 		return fmt.Errorf("warm %s: %w", model, err)
 	}
 	resp.Body.Close()
-	if resp.StatusCode >= 500 {
-		return fmt.Errorf("warm %s: status %d", model, resp.StatusCode)
+	if resp.StatusCode < 500 {
+		return nil
 	}
-	return nil
+	// A 5xx is llama-swap giving up on the health wait, not the load failing:
+	// the 3-card seat's cold load outlasts its healthCheckTimeout, and on
+	// 2026-09-18 19:5x the wrapper reported "status 500" while the engine kept
+	// loading and came up minutes later, untracked by the lease that owed the
+	// warm. Watch the seat's own state instead of trusting the status: a load
+	// in progress is waited out, a ready seat is a warm that succeeded, a seat
+	// that never started is the failure.
+	deadline := time.Now().Add(warmWatch)
+	if dl, ok := ctx.Deadline(); ok && dl.Before(deadline) {
+		deadline = dl
+	}
+	for {
+		rd, rerr := seatload.Inflight(ctx, client, endpoint, model)
+		switch {
+		case rerr == nil && rd.Loaded && !rd.Starting:
+			return nil
+		case rerr == nil && !rd.Loaded && !rd.Starting && !rd.Ambiguous:
+			return fmt.Errorf("warm %s: status %d and the seat is not loading", model, resp.StatusCode)
+		}
+		if !time.Now().Before(deadline) {
+			return fmt.Errorf("warm %s: status %d and the seat did not become ready within %s", model, resp.StatusCode, warmWatch)
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("warm %s: %w", model, ctx.Err())
+		case <-time.After(warmWatchEvery):
+		}
+	}
 }
+
+// warmWatch bounds how long a warm-back watches a load that outlasted
+// llama-swap's own health wait; warmWatchEvery is the poll cadence. Variables
+// so a test can shorten them.
+var (
+	warmWatch      = 15 * time.Minute
+	warmWatchEvery = 5 * time.Second
+)
 
 // seatTarget resolves the seat the maintenance verbs act on: the config's
 // llama-swap endpoint and agent seat alias.
