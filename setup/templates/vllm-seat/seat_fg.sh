@@ -31,7 +31,8 @@ MP_PORT="${SEAT_MP_PORT:-18796}"
 # Loopback only, on its own port (reference pairing 18797 engine / 18796 MP ZMQ / 18790 MP HTTP — 18790 is a listed safe pick
 # on every port file of the fleet; 18793 is the Qube's LiteLLM reservation); seat.env overrides it.
 MP_HTTP_PORT="${SEAT_MP_HTTP_PORT:-18790}"
-L1_GB="${SEAT_L1_GB:-8}"
+# SEAT_L1_GB default 2 (register B-02, measured 2026-09-18 on the pair: 2 / 4 / 8 GB restore the same context, RSS ≈ L1 + 1.1 GiB).
+L1_GB="${SEAT_L1_GB:-2}"
 CHUNK="${SEAT_CHUNK:-784}"
 # The cache server (L2) is OPT-IN: empty = same-box tier only. `${VAR-default}` (no colon) so that
 # SEAT_L2= in seat.env is an explicit "off", not a fall-through to a default.

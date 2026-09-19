@@ -383,7 +383,7 @@
         "cache_server": {
           "store": "fs_native",
           "address": "/mnt/kvcache/lmcache-seat-tp2-fp8",
-          "l1_staging_gb": 8,
+          "l1_staging_gb": 2,
           "chunk_size": 1568,
           "key_prefix": "qube-seat-tp2-fp8",
           "max_capacity_gb": 45,
@@ -634,7 +634,7 @@
         "cache_server": {
           "store": "fs_native",
           "address": "/mnt/kvcache/lmcache-seat-tp2-fp8",
-          "l1_staging_gb": 8,
+          "l1_staging_gb": 2,
           "chunk_size": 1568,
           "key_prefix": "qube-seat-tp2-fp8",
           "max_capacity_gb": 45,

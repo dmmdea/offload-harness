@@ -42,7 +42,7 @@ the store instead of being recomputed, and it survives a seat swap.
 | store | `fs_native` |
 | address | `/mnt/kvcache/lmcache-seat-tp2-fp8` |
 | chunk_size | 1568 — must equal the engine's unified block size at this KV dtype |
-| l1_staging_gb | 8 |
+| l1_staging_gb | 2 |
 | key_prefix | `qube-seat-tp2-fp8` |
 | min_mbps | 200 — below this the seat DEGRADES to the same-box L1 tier, loudly (0.115.1); it never refuses to start |
 

@@ -107,10 +107,14 @@ func (k KVCacheServer) StoreName() string {
 	return strings.ToLower(strings.TrimSpace(k.Store))
 }
 
-// EffectiveL1StagingGB applies the 8 GB default.
+// EffectiveL1StagingGB applies the 2 GB default (register B-02, measured
+// 2026-09-18: 2 / 4 / 8 GB restore the same context from the store — every
+// graded contract passes at every size, 0 preemptions — at 3.1 / 5.1 / 9.1 GiB
+// of MP-server RSS; the smallest at parity is the default. 8 was the
+// unmeasured 0.113 seed).
 func (k KVCacheServer) EffectiveL1StagingGB() int {
 	if k.L1StagingGB <= 0 {
-		return 8
+		return 2
 	}
 	return k.L1StagingGB
 }
@@ -211,7 +215,7 @@ func ValidateKVCacheServer(k *KVCacheServer) error {
 		}
 	}
 	if k.L1StagingGB < 0 {
-		return fmt.Errorf("kv_cache_server.l1_staging_gb: %d must be >= 0 (0 = default 8)", k.L1StagingGB)
+		return fmt.Errorf("kv_cache_server.l1_staging_gb: %d must be >= 0 (0 = default 2)", k.L1StagingGB)
 	}
 	if k.ChunkSize < 0 {
 		return fmt.Errorf("kv_cache_server.chunk_size: %d must be >= 0 (0 = default 784, Qwen3.8-27B fp16 KV)", k.ChunkSize)

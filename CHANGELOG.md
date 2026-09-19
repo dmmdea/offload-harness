@@ -6,6 +6,16 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.130.4] - 2026-09-18 - the L1 staging default is the measured 2 GB
+
+### Changed
+- **`l1_staging_gb` / `SEAT_L1_GB` default 8 → 2** (register B-02, `Benchmarks and Optimizations/2026-09-18-b02-l1-staging`):
+  on the pair seat, 8 / 4 / 2 GB arms (fill + restore against one NVMe store, 24 real contracts) restore the same
+  context — every graded contract passes at every size, 0 preemptions, tier-served tokens within the metric's
+  noise — at 9.1 / 5.1 / 3.1 GiB of MP-server RSS. The smallest at parity is the default (INV-17); the pair profile
+  (`blackwell-2x16`) carries 2, the 3-card same-box tier keeps its sized 32. A deployed `seat.env` keeps its
+  explicit value until it is re-rendered; the production pair seat moves after an H-24 soak.
+
 ## [0.130.3] - 2026-09-19 - accelerator calls reach the savings ledger (register E-04)
 
 ### Added
