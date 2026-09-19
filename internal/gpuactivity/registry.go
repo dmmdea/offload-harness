@@ -254,6 +254,17 @@ func Start(lockOverride, stateDir string, run Run) *Handle {
 }
 
 // Run is a copy of the current record.
+// ID is the run's registry id ("" for a nil handle): what a reader passes to
+// exclude its own record from a count.
+func (h *Handle) ID() string {
+	if h == nil {
+		return ""
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.run.ID
+}
+
 func (h *Handle) Run() Run {
 	if h == nil {
 		return Run{}
