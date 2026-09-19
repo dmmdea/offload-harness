@@ -171,6 +171,7 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		meta.Steps = w.Steps
 		meta.StopReason = w.StopReason
 		meta.RepackMs = w.RepackMs
+		meta.RepackAttempts = w.RepackAttempts
 		if jid, _ := req.Params["job_id"].(string); jid != "" {
 			meta.JobID = jid
 		}
@@ -1193,6 +1194,20 @@ func (p *Pipeline) repackStructured(ctx context.Context, seat string, rawSchema 
 		names = append(names, f.Name)
 	}
 	grammar := gbnf.Object(fields)
+	// D-129: on a seat this box declares as vLLM, the grammar above is dead
+	// weight — vLLM's request model allows unknown extras, so it accepts
+	// `grammar` and discards it, and this re-pack was answering
+	// unconstrained. That is why the trim and the coercion below exist at
+	// all, and why the vLLM seats carried 1,018 re-packs over nine days
+	// against 506 on every other seat with 3-attempt exhaustion at 19.7 %
+	// against 12.6 %. Send vLLM the field it reads instead; llama.cpp seats
+	// keep the raw GBNF byte-identically. WithoutThinking already rides every
+	// attempt, which is also what a whole-output constraint requires.
+	var structuredOpts []llamaclient.GenOption
+	if p.isVLLMSeat(ctx, seat) {
+		grammar = ""
+		structuredOpts = append(structuredOpts, llamaclient.WithJSONSchema(gbnf.JSONSchema(fields)))
+	}
 	// The re-pack IS an extract over the loop's final text — same system/user
 	// shape as tasks.buildExtract, so the seat sees a prompt pattern it
 	// already handles.
@@ -1272,7 +1287,7 @@ func (p *Pipeline) repackStructured(ctx context.Context, seat string, rawSchema 
 		// not a per-attempt one) and would desynchronize this call's
 		// deadline from the wall the caller classifies a failure against.
 		attemptTimeout := repackAttemptDeadline(ctx, p.cfg, budget, repackMaxAttempts-attempts+1)
-		gres, gerr := p.repackClient(p.cfg.CompletionPath, attemptTimeout, gates).Generate(ctx, seat, system, user, grammar, budget, p.cfg.Temperature, 0, llamaclient.WithoutThinking())
+		gres, gerr := p.repackClient(p.cfg.CompletionPath, attemptTimeout, gates).Generate(ctx, seat, system, user, grammar, budget, p.cfg.Temperature, 0, append([]llamaclient.GenOption{llamaclient.WithoutThinking()}, structuredOpts...)...)
 		if gerr != nil {
 			recordFailure(gerr, attemptTimeout, attempts)
 			continue
@@ -1289,10 +1304,15 @@ func (p *Pipeline) repackStructured(ctx context.Context, seat string, rawSchema 
 			budget = agentRepackMaxTokensCap
 			continue
 		}
-		// Trim to the outermost {...} before validating: a seat that honours
-		// the grammar returns exactly the object, but vLLM behind llama-swap
-		// IGNORES llama.cpp's `grammar` field and answers fenced (0.115.14:
-		// "invalid character '`' looking for beginning of value" on the 4B).
+		// Trim to the outermost {...} before validating. This is the BELT, not
+		// the constraint: since D-129 a declared vLLM seat is constrained by
+		// `structured_outputs` and is not sent a `grammar` at all, so the
+		// fenced answers this trim was added for (0.115.14: "invalid
+		// character '`' looking for beginning of value" on the 4B, because
+		// vLLM behind llama-swap ignored llama.cpp's `grammar` field) should
+		// no longer arrive. It stays because an UNDECLARED vLLM seat, or one
+		// whose alias could not be resolved against a dead roster, still
+		// falls back to the grammar path — and because a trim costs nothing.
 		content := []byte(outerObject(gres.Content))
 		if verr := validator.Validate(content, schema); verr != nil {
 			if fixed, ok := coerceToSchema(content, schema); ok {

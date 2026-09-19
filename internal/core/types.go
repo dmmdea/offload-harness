@@ -236,11 +236,15 @@ type Meta struct {
 	// job id, step count, stop reason and structured re-pack wall, copied from
 	// the wire result at finish so the ledger row carries them. All omitempty:
 	// a cascade call publishes byte-identically to before.
-	JobID      string             `json:"job_id,omitempty"`
-	Steps      int                `json:"steps,omitempty"`
-	StopReason string             `json:"stop_reason,omitempty"`
-	RepackMs   int64              `json:"repack_ms,omitempty"`
-	Feat       map[string]float64 `json:"feat,omitempty"` // cheap input features for the entry-tier router
+	JobID      string `json:"job_id,omitempty"`
+	Steps      int    `json:"steps,omitempty"`
+	StopReason string `json:"stop_reason,omitempty"`
+	RepackMs   int64  `json:"repack_ms,omitempty"`
+	// RepackAttempts: the re-pack's completion count beside its wall, so the
+	// ledger row can separate one slow attempt from a three-attempt loop —
+	// the figure the D-129 engine route is measured on.
+	RepackAttempts int                `json:"repack_attempts,omitempty"`
+	Feat           map[string]float64 `json:"feat,omitempty"` // cheap input features for the entry-tier router
 	// TierPack records how a climbed-to tier's input was packed (TO-3): empty
 	// on entry-tier calls; "token-exact (full source)" / "token-exact (cut
 	// K/N tokens)" when the tier re-read the original against its own window;

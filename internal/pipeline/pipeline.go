@@ -123,6 +123,13 @@ type Pipeline struct {
 	swapMu   sync.Mutex
 	tierSeen map[string]time.Time
 	nowFn    func() time.Time
+	// D-129: per-name memo of "is this seat served by vLLM?" and a once-per-name
+	// record of a roster probe that could not answer. Guarded by vllmSeatMu;
+	// both maps are lazily built, so the zero Pipeline answers "no" for every
+	// name without allocating. See vllmseat.go.
+	vllmSeatMu     sync.Mutex
+	vllmSeatCache  map[string]vllmSeatAnswer
+	vllmSeatWarned map[string]bool
 	// Composite tier (ADR 0039): placementLive is the seam tests use to inject
 	// the machine's live readers (occupancy, free VRAM, host RAM, presence);
 	// nil = the PROCESS-WIDE memoised Snapshot over cfg
@@ -3632,9 +3639,37 @@ func (p *Pipeline) attempt(ctx context.Context, req core.Request, built tasks.Bu
 		}
 	}
 
+	// D-129: a seat this box declares as vLLM (directly or through its
+	// llama-swap alias) is constrained by vLLM's OWN field — it accepts and
+	// DISCARDS llama.cpp's `grammar`, so this tier was answering unconstrained
+	// and paying for it downstream (1,018 re-packs on vLLM seats over nine
+	// days against 506 on every other seat). Resolved ONCE per attempt loop,
+	// not per retry: the answer is memoized anyway, and a retry must not be
+	// able to change engines mid-call.
+	//
+	// WithoutThinking rides along because vLLM applies the constraint to the
+	// WHOLE output: a thinking seat would have to emit its think block inside
+	// the JSON schema, which is unsatisfiable. The reasoning tier's trick of
+	// putting the think span INSIDE the grammar (gbnf.WrapThinking) is
+	// llama.cpp-only for exactly this reason, so a vLLM rung asks for the
+	// non-thinking render instead.
+	// The render this adds is a function of the MODEL, which every cache key
+	// on this path already carries, so it cannot serve one render's answer to
+	// the other's caller the way RenderKey exists to prevent.
+	grammar, genOpts := built.Grammar, opts
+	if len(built.Fields) > 0 && p.isVLLMSeat(ctx, model) {
+		grammar = ""
+		// A fresh slice, never append-in-place: opts is the CALLER's variadic
+		// array, and growing it under a spare cap would leak this call's
+		// options into the caller's next one.
+		genOpts = make([]llamaclient.GenOption, 0, len(opts)+2)
+		genOpts = append(genOpts, opts...)
+		genOpts = append(genOpts, llamaclient.WithJSONSchema(gbnf.JSONSchema(built.Fields)), llamaclient.WithoutThinking())
+	}
+
 	for i := 0; i < attempts; i++ {
 		meta.Retries = i
-		gen, gerr := p.client.Generate(actx, model, built.System, user, built.Grammar, built.MaxTokens, p.cfg.Temperature, topLP, opts...)
+		gen, gerr := p.client.Generate(actx, model, built.System, user, grammar, built.MaxTokens, p.cfg.Temperature, topLP, genOpts...)
 		if gerr != nil {
 			meta.LatencyMs = time.Since(start).Milliseconds()
 			meta.ErrClass = classifyErr(gerr)
@@ -4004,11 +4039,12 @@ func entryFrom(task core.TaskType, meta core.Meta, deferred bool, inputChars int
 		Layer:              placedLayer(meta.Placed),
 		// The job behind an agent row and the route's placement note (D-101):
 		// empty — omitted — on a plain cascade call.
-		JobID:      meta.JobID,
-		Placement:  meta.Placement,
-		Steps:      meta.Steps,
-		StopReason: meta.StopReason,
-		RepackMs:   meta.RepackMs,
+		JobID:          meta.JobID,
+		Placement:      meta.Placement,
+		Steps:          meta.Steps,
+		StopReason:     meta.StopReason,
+		RepackMs:       meta.RepackMs,
+		RepackAttempts: meta.RepackAttempts,
 		// The surface that admitted the call (A-102): "offload_summarize",
 		// "cli:summarize", "fleet". Empty when no door stamped the request.
 		Door: meta.Door,

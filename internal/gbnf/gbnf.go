@@ -98,6 +98,61 @@ func WrapThinking(grammar string) string {
 	return `root ::= "<think>" think "</think>" ws ` + prod + thinkRule + rest
 }
 
+// JSONSchema is Object's counterpart for a vLLM seat: the same Fields
+// rendered as the JSON Schema vLLM's `structured_outputs.json` takes, instead
+// of the GBNF llama.cpp's `grammar` takes (register D-129 — vLLM accepts and
+// DISCARDS `grammar`, so a vLLM seat behind llama-swap answered
+// unconstrained). Every field is required and additionalProperties is false,
+// which is exactly what Object constrains: the grammar admits the listed keys
+// in declaration order and nothing else.
+//
+// `required` carries the fields in DECLARATION order, not sorted, because
+// that list is the only place the order survives — a JSON object's keys have
+// none, and orderedKeys reads `required` first when FromJSONSchema turns this
+// back into Fields. So JSONSchema -> FromJSONSchema round-trips, order and
+// all, and the two constraint expressions of one task cannot drift apart in
+// which field comes first.
+func JSONSchema(fields []Field) map[string]any {
+	props := make(map[string]any, len(fields))
+	required := make([]any, 0, len(fields))
+	for _, f := range fields {
+		props[f.Name] = schemaProp(f)
+		required = append(required, f.Name)
+	}
+	return map[string]any{
+		"type":                 "object",
+		"properties":           props,
+		"required":             required,
+		"additionalProperties": false,
+	}
+}
+
+// schemaProp is the JSON Schema for ONE field — the inverse of typeRule.
+func schemaProp(f Field) map[string]any {
+	switch f.Type {
+	case TNumber:
+		return map[string]any{"type": "number"}
+	case TInteger:
+		return map[string]any{"type": "integer"}
+	case TBool:
+		return map[string]any{"type": "boolean"}
+	case TStringArray:
+		return map[string]any{"type": "array", "items": map[string]any{"type": "string"}}
+	case TEnum:
+		if len(f.Enum) == 0 {
+			// typeRule degrades an empty enum to a plain string; keep the two
+			// expressions of the same field saying the same thing.
+			return map[string]any{"type": "string"}
+		}
+		vals := make([]any, 0, len(f.Enum))
+		for _, e := range f.Enum {
+			vals = append(vals, e)
+		}
+		return map[string]any{"type": "string", "enum": vals}
+	}
+	return map[string]any{"type": "string"}
+}
+
 // FromJSONSchema builds Fields from a minimal JSON-schema object (used by the
 // dynamic `extract` task). It handles type: string/number/integer/boolean,
 // arrays of strings, and string enums. Property order follows the schema's

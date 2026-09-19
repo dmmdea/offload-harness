@@ -165,12 +165,20 @@ type Entry struct {
 	// has no job. Placement is the delegator's placement note, capped like
 	// Reason; AcceptanceResult is "pass" | "fail" | "" (nothing evaluated: the
 	// run deferred or the wire failed).
-	JobID            string `json:"job_id,omitempty"`
-	Route            string `json:"route,omitempty"`
-	Placement        string `json:"placement,omitempty"`
-	Steps            int    `json:"steps,omitempty"`
-	StopReason       string `json:"stop_reason,omitempty"`
-	RepackMs         int64  `json:"repack_ms,omitempty"`
+	JobID      string `json:"job_id,omitempty"`
+	Route      string `json:"route,omitempty"`
+	Placement  string `json:"placement,omitempty"`
+	Steps      int    `json:"steps,omitempty"`
+	StopReason string `json:"stop_reason,omitempty"`
+	RepackMs   int64  `json:"repack_ms,omitempty"`
+	// RepackAttempts is how many seat completions the structured re-pack
+	// spent. It rides beside RepackMs because the wall alone cannot tell a
+	// slow single attempt from a loop that re-generated three times, and the
+	// engine-route change of register D-129 is measured on exactly that
+	// distinction: a vLLM seat constrained by `structured_outputs` should
+	// finish in one attempt where the discarded `grammar` field cost it two
+	// or three.
+	RepackAttempts   int    `json:"repack_attempts,omitempty"`
 	AcceptanceResult string `json:"acceptance_result,omitempty"`
 }
 

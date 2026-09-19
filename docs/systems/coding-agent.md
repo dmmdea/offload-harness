@@ -538,7 +538,11 @@ semantics.
 
 The one deliberate difference is `output_schema`: **remote** placement requires it (the gate's
 mechanical-verifiability condition, and the node refuses a schemaless contract at ack), while a
-local run may omit it. A schemaless local contract skips the structured re-pack entirely and
+local run may omit it. The re-pack constrains the seat with a raw GBNF grammar on llama.cpp and with
+vLLM's `structured_outputs: {"json": <schema>}` on a seat `vllm_seats` declares, which is what stopped
+vLLM seats answering unconstrained and then paying for it in re-pack attempts (register D-129; see
+[ADR 0002](../architecture/decisions/0002-grammar-reliable-serving-flags.md)). A schemaless local
+contract skips the structured re-pack entirely and
 returns its `output` with `structured` empty — it is a plain success, not a defer, and the
 contract's text-verb acceptance (`contains:` / `not_contains:` / `regex:`) is what verifies it.
 
