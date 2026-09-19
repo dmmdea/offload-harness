@@ -2183,6 +2183,25 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 		withPlaced(dout, placed)
 		return jsonResult(dout)
 	}
+	// The LOCAL run cap (register C-42): the fleet caps the jobs it sends
+	// here, nothing capped the runs this door starts — sixteen could land on
+	// one seat and spend their walls in the engine's queue. Wait for a slot
+	// among the registered runs on the seat (this run's own record excluded),
+	// inside the same admission budget; a slot that never frees is a capacity
+	// defer, re-placeable, never a refusal.
+	if reg, rerr := gpuactivity.Open(cfg.GPULockPath, cfg.StateDir); rerr == nil {
+		if serr := modelaffinity.AwaitSeatSlot(ctx, reg.OnSeat, model, "", act.ID(), cfg.FleetConcurrencyLimit(), admitDeadline); serr != nil {
+			dout := map[string]any{
+				"deferred":    true,
+				"defer_class": string(core.DeferClassCapacity),
+				"reason":      "seat busy: " + serr.Error(),
+				"steps":       0,
+			}
+			withAdmission(dout, cordonWait(), "held at the seat cap for the admission budget")
+			withPlaced(dout, placed)
+			return jsonResult(dout)
+		}
+	}
 	cordon := cordonWait()
 	// ONE admission total for this door, exactly as the delegation door keeps
 	// one: the cordon, the pre-flight, the warm-up and the coherence probe all

@@ -6,6 +6,17 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **A cap on the runs started on the box itself** (register C-42, diagnosis S-07 / W-09). The fleet capped the
+  jobs it sent to a node (`fleet_max_concurrent_jobs`, "queue full" 503), but nothing capped the runs the box
+  started on its own seat — `agent_run`, a delegation's local leg — and the run registry "never gated anything
+  by itself". `modelaffinity.AwaitSeatSlot` waits, inside the admission budget, while the registered runs on
+  the seat (its own record excluded) number the cap or more; a slot that never frees is a capacity defer
+  (`seat busy: …`, re-placeable), never a refusal. Wired at the MCP `agent_run` door with the same cap the
+  fleet uses (`FleetConcurrencyLimit`, default 4; `fleet_max_concurrent_jobs: -1` disables both). The
+  pipeline's contract runner (`internal/pipeline/agenttask.go`, the delegation's local leg) takes the same
+  call in the L1 lane's next pass.
+
 ### Fixed
 - **A margin escalation is now written to the ledger** (register D-127): the confidence gate's defer returned before
   `p.record`, so the escalating attempt — a call the seat answered — left no row of its own; `esc_source` counted 4 rows
