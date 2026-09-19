@@ -7,6 +7,13 @@ Versioning: [SemVer](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- **A margin escalation is now written to the ledger** (register D-127): the confidence gate's defer returned before
+  `p.record`, so the escalating attempt — a call the seat answered — left no row of its own; `esc_source` counted 4 rows
+  in 9,217 for 43 real firings that lived only in the labels sidecar. The escalating attempt records its row (its tier,
+  its margin, the gate that fired, not deferred) before the defer, under the same `record` gate as a success. Red test
+  `TestMarginEscalationRecordsTheEscalatingAttempt`.
+
+### Fixed
 - **A route=local run against another box's engine was attributed to this box** (register C-58, operator
   2026-09-18: "nvidia pair showing the qube doing lenovo work"). Bench configs on the Qube set `endpoint` to
   the Lenovo's vLLM arm (`http://node-b:18797`, `agent_model: a2-pool`); the delegator ran the loop
