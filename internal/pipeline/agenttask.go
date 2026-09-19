@@ -1107,6 +1107,7 @@ func (p *Pipeline) RunAgentContract(ctx context.Context, contract core.AgentCont
 		Task:   core.TaskAgentRun,
 		Input:  contract.Goal,
 		Params: params,
+		Door:   contract.Door,
 	})
 	if !res.OK {
 		// OK:false is runAgentTask's internal-wiring-bug shape (a defer is a

@@ -9,11 +9,14 @@ package pipeline
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/ledger"
 )
 
 func TestRunCarriesTheDoorIntoMetaAndTheLedgerRow(t *testing.T) {
@@ -87,5 +90,56 @@ func TestRequestDoorIsAdditiveOnTheWire(t *testing.T) {
 	}
 	if back.Door != "cli:summarize" {
 		t.Fatalf("decoded door = %q, want cli:summarize", back.Door)
+	}
+}
+
+// An agent contract's row names the door that admitted the contract, on the
+// box that runs it: the door travels on the wire (core.AgentContract.Door) and
+// RunAgentContract hands it to the run's request, so a node's ledger row for a
+// dispatched contract names the delegator's surface (register A-102 (e), review
+// finding: the agent doors are 98 % of the ledger's wall and were still door-less).
+func TestRunAgentContractStampsTheContractsDoorOnItsRow(t *testing.T) {
+	fake := &agentFake{
+		rosterIDs: []string{agentTestSeat},
+		loop:      func(int64) string { return doneChat("The answer is 42.") },
+		repack:    func(int64) string { return `{"answer":"42"}` },
+	}
+	srv := fake.server(t)
+	defer srv.Close()
+
+	p, home := agentContractPipeline(t, srv.URL)
+	ledgerPath := filepath.Join(home, "ledger.jsonl")
+	led, err := ledger.Open(ledgerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.led = led
+	defer func() { p.led = nil; _ = led.Close() }()
+
+	contract := testContract()
+	contract.Depth = 0
+	contract.Door = "agent_delegate"
+	wire, err := p.RunAgentContract(context.Background(), contract, AgentContractOptions{})
+	if err != nil || wire.Deferred {
+		t.Fatalf("run: err=%v wire=%+v", err, wire)
+	}
+	_ = led.Close()
+	raw, err := os.ReadFile(ledgerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+		var e ledger.Entry
+		if json.Unmarshal([]byte(line), &e) != nil || e.Task != string(core.TaskAgentRun) {
+			continue
+		}
+		found = true
+		if e.Door != "agent_delegate" {
+			t.Fatalf("agent row door = %q, want the contract's door", e.Door)
+		}
+	}
+	if !found {
+		t.Fatalf("no agent_run row in the ledger: %s", raw)
 	}
 }

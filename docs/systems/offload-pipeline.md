@@ -134,7 +134,7 @@ actually ran; `offload_status`'s roster reports the effective `ocr` model, falli
   (`cli:summarize`), or `fleet` for a job a fleet node ran for a delegator: `core.Request.Door` is
   stamped at each door, carried through `core.Meta` and mapped onto the row, so "which door produced
   this cascade call" stops being unanswerable. It is documentary and never routes; a forwarded request
-  keeps its origin door, and a row with no `door` (every row before the door stamp) reads as UNKNOWN door,
+  keeps its origin door, and agent-contract rows carry the contract's door (`agent_delegate`, `offload_ask`, `offload_review_diff`, `offload_research`, `cli:delegate`, `cli:research`, or `fleet` for a contract a node received with none) and the composite sub-calls (extract_image's ocr + extract, inpaint's text-box vqa) keep their parent's; a row with no `door` (every row before the door stamp) reads as UNKNOWN door,
   never as one of the values above.
 - **Cache** — keyed result reuse. Bypassed on the *recordless* path (`NewRecordlessPipeline`);
   **shared** on the *in-loop* path (`NewInLoopPipeline`) — see Interfaces below for why those are two

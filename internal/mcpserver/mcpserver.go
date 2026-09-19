@@ -2428,6 +2428,7 @@ func (s *Server) handleAsk(ctx context.Context, req *mcp.CallToolRequest) (*mcp.
 	// outside read_root, no groundable anchor — arrives as one typed error from
 	// the builder, so the reason the caller reads is the reason askjob wrote.
 	contract, berr := askjob.BuildContract(in.Question, in.Paths, absRoot)
+	contract.Door = "offload_ask"
 	if berr != nil {
 		return jsonResult(map[string]any{"deferred": true, "reason": berr.Error()})
 	}
@@ -2651,6 +2652,7 @@ func (s *Server) handleReviewDiff(ctx context.Context, req *mcp.CallToolRequest)
 	// ceiling — arrives as one typed error from the builder, so the reason the
 	// caller reads is the reason reviewlane wrote.
 	contract, berr := reviewlane.BuildContract(in.Task, diff)
+	contract.Door = "offload_review_diff"
 	if berr != nil {
 		return jsonResult(map[string]any{"deferred": true, "reason": berr.Error()})
 	}
@@ -2983,6 +2985,7 @@ func (s *Server) handleAgentDelegate(ctx context.Context, req *mcp.CallToolReque
 				WriteRoot:    st.WriteRoot,
 				ContextClass: st.ContextClass,
 				Layer:        st.Layer,
+				Door:         "agent_delegate",
 			},
 			ContextPaths: st.ContextPaths,
 		}, absRoot, s.p.Cfg().AgentContextCapBytes())
@@ -3299,6 +3302,7 @@ func (s *Server) handleResearch(ctx context.Context, req *mcp.CallToolRequest) (
 		if perr != nil {
 			return jsonResult(map[string]any{"deferred": true, "reason": fmt.Sprintf("source %d: %v", resultSources[i], perr), "sources": sources})
 		}
+		c.Door = "offload_research"
 		contracts = append(contracts, c)
 		lints = append(lints, delegate.LintAcceptance(c))
 	}

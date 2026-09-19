@@ -2013,6 +2013,7 @@ func runDelegate(args []string) error {
 		if perr != nil {
 			return fmt.Errorf("subtask %d: %w", i, perr)
 		}
+		c.Door = "cli:delegate"
 		contracts = append(contracts, c)
 		// Linted on the PREPARED contract (context_paths already inlined —
 		// grounding is judged against everything the sub-agent will see).
@@ -3974,6 +3975,7 @@ func runResearch(args []string) error {
 		if perr != nil {
 			return fmt.Errorf("source %d: %w", i, perr)
 		}
+		c.Door = "cli:research"
 		contracts = append(contracts, c)
 		lints = append(lints, delegate.LintAcceptance(c))
 	}

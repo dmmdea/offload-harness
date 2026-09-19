@@ -688,6 +688,12 @@ func buildAgentRun(cfg config.Config, payload json.RawMessage) (core.Request, fu
 	if err != nil {
 		return core.Request{}, noop, err
 	}
+	// A contract that arrived with no door was dispatched by a delegator one
+	// release behind; its row still names a door (register A-102 (e)). A
+	// forwarded door is kept: the row names the delegator's surface.
+	if contract.Door == "" {
+		contract.Door = "fleet"
+	}
 	if len(contract.OutputSchema) == 0 {
 		return core.Request{}, noop, fmt.Errorf(
 			"agent contract: output_schema required for remote execution (the delegator must have a mechanical check before merging)")
