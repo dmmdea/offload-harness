@@ -20,12 +20,46 @@ Versioning: [SemVer](https://semver.org/).
   in BOTH modes so a full-scale threshold can be re-derived before anyone flips the flag. `health`, the exemplar
   harvest gate and conformal `calibrate` each filter to one scale and report the rows they excluded. With the flag
   off nothing changes but the new omitted-when-zero row fields.
+- **A cap on the runs started on the box itself** (register C-42, diagnosis S-07 / W-09). The fleet capped the
+  jobs it sent to a node (`fleet_max_concurrent_jobs`, "queue full" 503), but nothing capped the runs the box
+  started on its own seat — `agent_run`, a delegation's local leg — and the run registry "never gated anything
+  by itself". `modelaffinity.AwaitSeatSlot` waits, inside the admission budget, while the registered runs on
+  the seat (its own record excluded) number the cap or more; a slot that never frees is a capacity defer
+  (`seat busy: …`, re-placeable), never a refusal. Wired at the MCP `agent_run` door with the same cap the
+  fleet uses (`FleetConcurrencyLimit`, default 4; `fleet_max_concurrent_jobs: -1` disables both). The
+  pipeline's contract runner (`internal/pipeline/agenttask.go`, the delegation's local leg and every fleet job) takes the same
+  call in this same cut (the pipeline's contract runner, 0.130.x).
+
+### Fixed
+- **A warm-back gave up on a 5xx while the seat was still loading** (register D-124 readback, 2026-09-18
+  19:5x): the 3-card seat's cold load outlasts llama-swap's `healthCheckTimeout`, the warm's health request
+  came back `status 500`, the wrapper reported the warm-back failed and released — and the engine came up
+  minutes later, untracked by the lease that owed it. `warmSeat` now reads the seat's own state after a 5xx
+  (`/running` through `seatload`): a load in progress is waited out (15 min bound, 5 s poll), a ready seat is
+  a warm that succeeded, a seat that never started is the failure, said as such.
+
+## [0.130.0] - 2026-09-18 - the decide lane's plumbing and the cascade's doors: calibrate reads the labels sidecar, the escalating attempt records its row, vLLM seats get structured_outputs, every row names its door, the cascade tools are the first door
+
 ### Fixed
 - **A margin escalation is now written to the ledger** (register D-127): the confidence gate's defer returned before
   `p.record`, so the escalating attempt — a call the seat answered — left no row of its own; `esc_source` counted 4 rows
   in 9,217 for 43 real firings that lived only in the labels sidecar. The escalating attempt records its row (its tier,
   its margin, the gate that fired, not deferred) before the defer, under the same `record` gate as a success. Red test
   `TestMarginEscalationRecordsTheEscalatingAttempt`.
+
+### Fixed
+- **A route=local run against another box's engine was attributed to this box** (register C-58, operator
+  2026-09-18: "nvidia pair showing the qube doing lenovo work"). Bench configs on the Qube set `endpoint` to
+  the Lenovo's vLLM arm (`http://node-b:18797`, `agent_model: a2-pool`); the delegator ran the loop
+  here against that engine and stamped the ledger row and the PAIR card with its own hostname — 20 cards on
+  the Qube's UUID for work the Lenovo did (measured: the arm's `prompt_tokens_total` rose by the gate's
+  87,354 tokens, the Qube seat served none). `modelaffinity.EndpointHost` now names the endpoint's box when
+  it is not loopback, `localhost` or this machine; a local run then carries that host as its node, its
+  placement reason says `engine <endpoint> is <host>'s (attributed there)`, and the PAIR card is scheduled on
+  that member. The same reading disarms this box's text-load gate in `config.Load` (one note per process):
+  a run that never touches a local card is no longer deferred `gpu busy` by this box's lease (8 of 16
+  contracts were, in 0.7 s, while the Qube's cards sat under a lease and the work was on the Lenovo).
+
 - **`calibrate` had never fitted a threshold, and the cause was file plumbing, not the 60-row floor**
   (register D-126): the only classify/triage label writer appends to the confhead labels sidecar
   (`confhead_labels_path`) while `calibrate` read the ledger alone, whose rows of the same calls carry the
@@ -73,6 +107,19 @@ Versioning: [SemVer](https://semver.org/).
   `internal/pipeline/vllm_structured_outputs_test.go:TestGrammarNeverReachesADeclaredVLLMSeat`.
 
 ## [0.129.2] - 2026-09-18 - the lease hand-off is ordered: the warm-back belongs to the last holder, a lost lease never warms, the seat unit never restarts itself
+- **A failed drain left the DRAINING stamp on a held lease** (register C-50, diagnosis S-31): the detach form keeps
+  the lease after a drain that misses its deadline, and the stamp cordons the seat — no new run admitted — for the
+  rest of the window, so one failed drain refused the box for up to 8 h. `maintainSeat` now clears `Draining` on the
+  failure path (the lease stays held and non-exclusive, the caller decides); the wrapper form releases as before.
+- **A run that heartbeats without progressing held the drain for the whole queue budget** (S-32): the drain's
+  overall deadline is the `--wait` budget on purpose (ADR 0041, a legitimate 12-step run is never cut), but it had
+  no bound on a seat whose state never changes. The drain now gives up when the busy state — in-flight count, runs
+  at the same step and phase — is unchanged for two seat turns plus the cold load, derived from the seat's own
+  rate sample (`seatStuckAfter`, floor 2 min, disabled without a sample), and says so in words distinct from the
+  deadline error. Progress (a step advance, an in-flight change, a load finishing) resets the bound.
+
+## [0.128.4] - 2026-09-18 - the lease hand-off is ordered: the warm-back belongs to the last holder, a lost lease never warms, the seat unit never restarts itself
+
 
 ### Fixed
 - **A releasing holder's warm-back raced the next lease's `--unload-seat`** (register D-124, the Lenovo, 2026-09-18

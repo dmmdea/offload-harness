@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/core"
@@ -1635,8 +1636,22 @@ func loadArmed(path string) (Config, error) {
 		fmt.Fprintf(os.Stderr, "warning: GPU load gate disabled: %v\n"+
 			"  Text calls will not wait for a media render to finish with the card.\n", lerr)
 	}
+	// A config whose endpoint is ANOTHER box's engine (a bench config aimed at
+	// the Lenovo's arm) makes no local load: this box's machine-wide lease has
+	// nothing to protect, and gating on it cordoned runs that never touched a
+	// local card (register C-58). Disarm, and say so once per process.
+	if host := modelaffinity.EndpointHost(c.Endpoint, c.FleetNodeID); host != "" {
+		modelaffinity.DisarmGPULease()
+		remoteEndpointNoteOnce.Do(func() {
+			fmt.Fprintf(os.Stderr, "note: endpoint %s is another box (%s): this box's GPU lease does not gate these runs, and they are attributed to %s\n", c.Endpoint, host, host)
+		})
+	}
 	return c, err
 }
+
+// remoteEndpointNoteOnce bounds the remote-endpoint note to one line per
+// process (Load runs per subcommand and per reload).
+var remoteEndpointNoteOnce sync.Once
 
 // load is Load's body: merge, expand, validate. Split out so Load can arm the
 // process-wide gate on every exit without a call before each return.

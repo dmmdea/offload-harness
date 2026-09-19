@@ -310,6 +310,18 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		admitNote = "held at the cordon for the admission budget"
 		return deferWire(core.DeferClassCapacity, "gpu busy: "+lerr.Error())
 	}
+	// The LOCAL run cap (register C-42): the fleet caps the jobs it sends
+	// here; this caps the runs this box starts on its own seat — a
+	// delegation's local leg and a fleet job alike — inside the same
+	// admission budget, own record excluded. A slot that never frees is a
+	// capacity defer, re-placeable, never a refusal.
+	if reg, rerr := gpuactivity.Open(p.cfg.GPULockPath, p.cfg.StateDir); rerr == nil {
+		if serr := modelaffinity.AwaitSeatSlot(ctx, reg.OnSeat, seat, "", act.ID(), p.cfg.FleetConcurrencyLimit(), admissionEnd); serr != nil {
+			admitted = cordonWait(cordonStart)
+			admitNote = "held at the seat cap for the admission budget"
+			return deferWire(core.DeferClassCapacity, "seat busy: "+serr.Error())
+		}
+	}
 	admitted = cordonWait(cordonStart)
 	// Admission pre-flight (2026-09-02): the wall must not pay for ANOTHER
 	// session's model swap. llama-swap queues a request silently while it
