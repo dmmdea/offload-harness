@@ -88,6 +88,15 @@ type KVCacheServer struct {
 	// only one seat uses.
 	KVDtype        string `json:"kv_dtype,omitempty"`
 	TensorParallel int    `json:"tensor_parallel,omitempty"`
+	// StatusFile is the seat wrapper's own L2 verdict file (seat_fg.sh writes
+	// `$WORK/seat-l2.status`: "ok <stamp> mbps=<n>" after the share mounted and the
+	// write probe passed, "degraded <stamp> reason=<why>" when it fell back to L1
+	// only). An fs_native store is a mounted path with no port to dial, so this file
+	// is the only end-to-end readback the box has (B-29): status publishes it as
+	// `reachable` true/false with the line and its age. On a WSL2 seat the path is
+	// the host-visible one (`//wsl.localhost/<distro>/root/g7/seat-l2.status`).
+	// Empty = not declared; status says so instead of guessing.
+	StatusFile string `json:"status_file,omitempty"`
 }
 
 // StoreName is the L2 adapter with the default applied.

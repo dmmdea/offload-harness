@@ -57,6 +57,14 @@ than any number written down:
 side channel and is not part of the Cascade — nothing escalates or falls back into it. See
 [ADR 0001](../architecture/decisions/0001-defer-never-cloud-fallback.md).
 
+**Door order (register A-102, 2026-09-18).** The four cascade tools (`offload_summarize`, `offload_classify`,
+`offload_extract`, `offload_triage`) are the FIRST door for one text + one mechanical question: seconds on the
+entry rung, automatic climb to the escalation and reasoning rungs (bound on every node) on a margin, schema or
+grounding failure. `agent_delegate` is the door for multi-document read-and-reason with context docs, a schema
+and acceptance checks; a contract whose goal is to summarize one file costs a 20–200 s seat run for a 1–5 s
+cascade answer and starves the calibration loop of the rows it fits thresholds from. The tool descriptions say
+so, because the caller reads them and nothing else.
+
 `agent_run` drives the coding agent loop. Its default planner is the **agent seat** (config
 `agent_model`, else the workhorse `model`; a per-call `model` argument overrides both — and on a
 composite box (ADR 0039) the placement table decides when no per-call model is given, its seat

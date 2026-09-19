@@ -152,6 +152,13 @@ type Request struct {
 	Video  string         `json:"video,omitempty"`  // video_describe: a local video file path
 	Audio  string         `json:"audio,omitempty"`  // transcribe: a local audio/video file path
 	Params map[string]any `json:"params,omitempty"` // labels []string, schema map, question string, max_points int
+	// Door names the surface that admitted this call: an MCP tool name
+	// ("offload_summarize"), a CLI command ("cli:summarize"), or "fleet" for a
+	// request a fleet node received from a delegator. Register A-102: every
+	// cascade row in the live ledger carried no door, so nobody could tell which
+	// surface produced a cascade call. Documentary only — it NEVER routes,
+	// gates or selects a tier, and a forwarded request keeps its origin door.
+	Door string `json:"door,omitempty"`
 }
 
 // Meta is per-call telemetry returned to the caller and recorded in the ledger.
@@ -194,16 +201,16 @@ const (
 )
 
 type Meta struct {
-	TokensIn  int     `json:"tokens_in"`
-	TokensOut int     `json:"tokens_out"`
+	TokensIn  int `json:"tokens_in"`
+	TokensOut int `json:"tokens_out"`
 	// SeatTokensIn: prompt tokens an agent seat processed for this task (work,
 	// not savings) — see core.AgentWireResult.SeatTokensIn. Omitted when zero.
-	SeatTokensIn int `json:"seat_tokens_in,omitempty"`
-	LatencyMs int64   `json:"latency_ms"`
-	TokPerSec float64 `json:"tok_per_s"`
-	CacheHit  bool    `json:"cache_hit"`
-	Model     string  `json:"model"`
-	Retries   int     `json:"retries"`
+	SeatTokensIn int     `json:"seat_tokens_in,omitempty"`
+	LatencyMs    int64   `json:"latency_ms"`
+	TokPerSec    float64 `json:"tok_per_s"`
+	CacheHit     bool    `json:"cache_hit"`
+	Model        string  `json:"model"`
+	Retries      int     `json:"retries"`
 	// Escalations counts how many cascade tiers were climbed before this result
 	// (0 = answered by the entry tier; >0 = a bigger local model was needed).
 	Escalations int `json:"escalations,omitempty"`
@@ -213,11 +220,11 @@ type Meta struct {
 	// ledger / `stats` reports.
 	Reasoning bool `json:"reasoning,omitempty"`
 	// --- self-learning signals (logged to the ledger; free, no extra inference) ---
-	Margin          float64            `json:"margin,omitempty"`           // logprob decision margin (triage/classify); 0 = N/A
-	Truncated       bool               `json:"truncated,omitempty"`        // hit token limit
-	Grounded        *bool              `json:"grounded,omitempty"`         // extract/summary values appear in source (nil = N/A)
-	EscalatedAgreed *bool              `json:"escalated_agreed,omitempty"` // higher tier agreed with the smaller (nil = no escalation)
-	ErrClass        string             `json:"err_class,omitempty"`        // oom|timeout|http_5xx|conn_refused on infra failure; gpu_busy = vision call skipped, a gen job held the GPU lock (LO-1)
+	Margin          float64 `json:"margin,omitempty"`           // logprob decision margin (triage/classify); 0 = N/A
+	Truncated       bool    `json:"truncated,omitempty"`        // hit token limit
+	Grounded        *bool   `json:"grounded,omitempty"`         // extract/summary values appear in source (nil = N/A)
+	EscalatedAgreed *bool   `json:"escalated_agreed,omitempty"` // higher tier agreed with the smaller (nil = no escalation)
+	ErrClass        string  `json:"err_class,omitempty"`        // oom|timeout|http_5xx|conn_refused on infra failure; gpu_busy = vision call skipped, a gen job held the GPU lock (LO-1)
 	// Node / Placement say WHERE a vision task ran when the route decided
 	// (0.116.0): Node is the fleet node_id that served it, Placement the
 	// route's reason ("remote: local gpu busy", "remote: forced", "local: no
@@ -229,11 +236,15 @@ type Meta struct {
 	// job id, step count, stop reason and structured re-pack wall, copied from
 	// the wire result at finish so the ledger row carries them. All omitempty:
 	// a cascade call publishes byte-identically to before.
-	JobID      string             `json:"job_id,omitempty"`
-	Steps      int                `json:"steps,omitempty"`
-	StopReason string             `json:"stop_reason,omitempty"`
-	RepackMs   int64              `json:"repack_ms,omitempty"`
-	Feat            map[string]float64 `json:"feat,omitempty"`             // cheap input features for the entry-tier router
+	JobID      string `json:"job_id,omitempty"`
+	Steps      int    `json:"steps,omitempty"`
+	StopReason string `json:"stop_reason,omitempty"`
+	RepackMs   int64  `json:"repack_ms,omitempty"`
+	// RepackAttempts: the re-pack's completion count beside its wall, so the
+	// ledger row can separate one slow attempt from a three-attempt loop —
+	// the figure the D-129 engine route is measured on.
+	RepackAttempts int                `json:"repack_attempts,omitempty"`
+	Feat           map[string]float64 `json:"feat,omitempty"` // cheap input features for the entry-tier router
 	// TierPack records how a climbed-to tier's input was packed (TO-3): empty
 	// on entry-tier calls; "token-exact (full source)" / "token-exact (cut
 	// K/N tokens)" when the tier re-read the original against its own window;
@@ -337,14 +348,19 @@ type Meta struct {
 	// anywhere else would be "computed then discarded", the defect class the
 	// prefill fields above were added to close.
 	Placed *Placed `json:"placed,omitempty"`
+	// Door is the Request.Door carried through to telemetry, so the ledger row
+	// names the surface that admitted the call (register A-102). Copied in
+	// Pipeline.Run and mapped onto ledger.Entry.Door; omitempty, so a caller
+	// that stamps no door publishes byte-identically to before.
+	Door string `json:"door,omitempty"`
 }
 
 // Result is the harness outcome. On success Data holds the validated task output.
 // On a defer, Deferred is true and the caller (Claude) should handle the task itself.
 type Result struct {
-	OK       bool            `json:"ok"`
-	Deferred bool            `json:"deferred,omitempty"`
-	Reason   string          `json:"reason,omitempty"`
+	OK       bool   `json:"ok"`
+	Deferred bool   `json:"deferred,omitempty"`
+	Reason   string `json:"reason,omitempty"`
 	// DeferClass is the defer's class (the DeferClass* vocabulary in
 	// agentwire.go) on the results that carry one — today the vision route's
 	// placement defers (0.116.0), whose "no eligible node" must be branchable

@@ -72,7 +72,8 @@ native CPU/disk offloading (measured unusable on the Mamba-hybrid 27B under WSL2
    passes; an absent binding fails, and so does one merely switched off with no reason. The section
    prints above the health probe, since its verdicts are pure config and a dead serving layer must
    not hide them. A box with no `vllm_seats` prints nothing and fails nothing.
-3. `offload_status.kv_cache_server` LISTS every binding: `bindings[]` (seat, store, address,
+3. `offload_status.kv_cache_server` LISTS every binding (an `fs_native` binding with a `status_file` also
+   publishes `reachable` from the seat wrapper's `seat-l2.status` verdict — B-29, 0.129.1): `bindings[]` (seat, store, address,
    key_prefix, l1_staging_gb, chunk size, declared/enabled — or `storeless` with its reason), plus
    `unbound_seats`, the same list `doctor` fails on, computed by the same `UnboundSeats` so the
    report and the gate cannot disagree. Each enabled Valkey store named by an IP literal carries a

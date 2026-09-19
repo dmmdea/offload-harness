@@ -86,9 +86,9 @@ func round3(f float64) float64 { return math.Round(f*1000) / 1000 }
 
 // videoWatchNote is the per-window output surfaced to the caller.
 type videoWatchNote struct {
-	Start    float64 `json:"start"`
-	End      float64 `json:"end"`
-	Frames   int     `json:"frames"`
+	Start     float64 `json:"start"`
+	End       float64 `json:"end"`
+	Frames    int     `json:"frames"`
 	Notes     string  `json:"notes,omitempty"`
 	Truncated bool    `json:"truncated,omitempty"` // notes are partial (hit max_tokens); still evidence
 	Deferred  bool    `json:"deferred,omitempty"`
@@ -172,7 +172,9 @@ func (p *Pipeline) runVideoWatch(ctx context.Context, req core.Request, built ta
 			if cacheable {
 				extra = fmt.Sprintf("vidw:%s|s=%.3f|d=%.3f|fps=%g|n=%d|w=%d|frames=%d", vidID.Digest, w.Start, wdur, fps, wframes, wwidth, len(frames))
 			}
-			wmeta := core.Meta{Model: p.cfg.VisionModel}
+			// A-102: per-window rows are recorded by runVisionGen from THIS meta,
+			// not the caller-facing one, so the door must be carried here too.
+			wmeta := core.Meta{Model: p.cfg.VisionModel, Door: req.Door}
 			res := p.runVisionGen(ctx, req, built, wmeta, time.Now(), extra, cacheable, func(gctx context.Context) (llamaclient.GenResult, error) {
 				return p.client.GenerateVisionInterleaved(gctx, p.cfg.VisionModel, built.System, labels, frames, built.User, built.Grammar, built.MaxTokens, p.cfg.Temperature, 0, llamaclient.WithoutThinking())
 			})
