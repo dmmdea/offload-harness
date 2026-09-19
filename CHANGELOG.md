@@ -6,6 +6,12 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **The re-pack on a vLLM seat sends the contract's own schema** (register D-129 follow-up, found by the A-100 proof contract):
+  `structured_outputs.json` carried the GBNF-typed projection of the schema, and `internal/gbnf` has no object or
+  array-of-object type, so a contract whose schema nests objects was constrained into strings on every vLLM seat
+  (three re-pack attempts "got string, want object"). vLLM accepts full JSON Schema; llama.cpp seats keep the GBNF
+  projection. Red test `TestRepackSendsTheContractsOwnSchemaToAVLLMSeat`.
 ## [0.130.4] - 2026-09-19 - doctor checks the model files behind every ComfyUI route (register F-31)
 
 ### Added
