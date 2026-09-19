@@ -44,9 +44,9 @@ type Entry struct {
 	// filters on it rather than pooling the two ~10x-apart scales. The declared
 	// mass and ambiguous count are recorded in both modes so a full-scale
 	// threshold can be re-derived from real rows before anyone flips the flag.
-	MarginScale        string  `json:"margin_scale,omitempty"`
-	MarginDeclaredMass float64 `json:"margin_declared_mass,omitempty"`
-	MarginAmbiguous    int     `json:"margin_ambiguous,omitempty"`
+	MarginScale        string             `json:"margin_scale,omitempty"`
+	MarginDeclaredMass float64            `json:"margin_declared_mass,omitempty"`
+	MarginAmbiguous    int                `json:"margin_ambiguous,omitempty"`
 	ModelTier       string             `json:"model_tier,omitempty"`
 	Escalations     int                `json:"escalations,omitempty"`
 	Reasoning       bool               `json:"reasoning,omitempty"` // produced by the terminal reasoning tier (a reclaimed deferral)
