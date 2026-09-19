@@ -902,6 +902,25 @@ type Config struct {
 	// 0.985 there). The prior 0.35 sat below the entire observed support
 	// (min 0.372) and never fired.
 	ConfidenceMarginThreshold float64 `json:"confidence_margin_threshold"`
+	// ConfidenceMarginFullDenominator switches the decision margin to the FULL
+	// denominator (register D-130). Default false = today's MATCHED denominator,
+	// which normalises over matched class tokens only and so excludes mass on
+	// unmatched tokens and on legal labels outside the top_logprobs window.
+	// Research measured the declared (matched) mass at ~0.097 on llama.cpp, so
+	// the matched margin runs about an order of magnitude high and the gate
+	// under-escalates exactly on hard, many-label contracts.
+	//
+	// It ships behind a flag because THREE consumers (health baselines, the
+	// exemplar harvest gate, conformal calibration) compare a margin against
+	// stored history, and the two scales are not comparable. Every ledger row
+	// carries margin_scale so the re-derivation data accumulates before a flip.
+	ConfidenceMarginFullDenominator bool `json:"confidence_margin_full_denominator,omitempty"`
+	// ConfidenceMarginThresholdFull is the escalation threshold ON THE FULL
+	// SCALE. It has NO calibrated default: 0 (the default) means the margin gate
+	// never fires while the full denominator is on. The matched-scale 0.65 must
+	// never be reused here - on a ~0.097-mass scale it turns never-fires into
+	// fires-on-everything. Derive it from rows carrying margin_scale: full.
+	ConfidenceMarginThresholdFull float64 `json:"confidence_margin_threshold_full,omitempty"`
 	// MaxInputChars caps input length before context-budget trimming.
 	MaxInputChars int `json:"max_input_chars"`
 
@@ -1900,18 +1919,35 @@ func warnMediaGenBindingTrapsTo(c Config, w io.Writer) {
 	}
 }
 
-func warnDeadThresholds(c Config) {
+func warnDeadThresholds(c Config) { warnDeadThresholdsTo(c, os.Stderr) }
+
+// warnDeadThresholdsTo is warnDeadThresholds with the sink injected so the
+// warnings are testable (same seam as warnMediaGenBindingTrapsTo).
+func warnDeadThresholdsTo(c Config, w io.Writer) {
 	const (
 		minObservedConfidence = 0.85  // lowest self-reported classify confidence ever observed
 		minObservedMargin     = 0.372 // lowest logprob decision margin ever observed
 	)
 	if c.ClassifyMinConfidence > 0 && c.ClassifyMinConfidence <= minObservedConfidence {
-		fmt.Fprintf(os.Stderr, "warning: classify_min_confidence %.2f is at/below the lowest observed self-confidence (%.2f) — the gate cannot fire; calibrated default is 0.88 (remove the key to inherit it)\n",
+		fmt.Fprintf(w, "warning: classify_min_confidence %.2f is at/below the lowest observed self-confidence (%.2f) — the gate cannot fire; calibrated default is 0.88 (remove the key to inherit it)\n",
 			c.ClassifyMinConfidence, minObservedConfidence)
 	}
-	if c.ConfidenceMarginThreshold > 0 && c.ConfidenceMarginThreshold <= minObservedMargin {
-		fmt.Fprintf(os.Stderr, "warning: confidence_margin_threshold %.2f is at/below the lowest observed decision margin (%.3f) — as the fallback gate it cannot fire (per-task conformal thresholds from thresholds.json, when loaded, override it); calibrated default is 0.65 (remove the key to inherit it)\n",
+	if !c.ConfidenceMarginFullDenominator && c.ConfidenceMarginThreshold > 0 && c.ConfidenceMarginThreshold <= minObservedMargin {
+		fmt.Fprintf(w, "warning: confidence_margin_threshold %.2f is at/below the lowest observed decision margin (%.3f) — as the fallback gate it cannot fire (per-task conformal thresholds from thresholds.json, when loaded, override it); calibrated default is 0.65 (remove the key to inherit it)\n",
 			c.ConfidenceMarginThreshold, minObservedMargin)
+	}
+	// The full scale (D-130) is a DIFFERENT distribution: minObservedMargin and
+	// the 0.65 constant above describe the matched scale only and say nothing
+	// about this one, so neither is reused here.
+	switch {
+	case c.ConfidenceMarginFullDenominator && c.ConfidenceMarginThresholdFull <= 0:
+		fmt.Fprintln(w, "warning: confidence_margin_full_denominator is on but confidence_margin_threshold_full is 0 - the decision-margin gate is DISABLED on the full scale; it stays disabled until a threshold re-derived from rows carrying margin_scale: full is set (the matched-scale 0.65 must NOT be reused: on a ~0.1-mass scale it fires on everything)")
+	case c.ConfidenceMarginFullDenominator && c.ConfidenceMarginThresholdFull >= minObservedMargin:
+		fmt.Fprintf(w, "warning: confidence_margin_threshold_full %.2f is a matched-scale value on the full scale (the lowest matched margin ever observed is %.3f, and full margins run ~10x smaller) - it would fire on nearly every call; re-derive it from rows carrying margin_scale: full\n",
+			c.ConfidenceMarginThresholdFull, minObservedMargin)
+	case !c.ConfidenceMarginFullDenominator && c.ConfidenceMarginThresholdFull > 0:
+		fmt.Fprintf(w, "warning: confidence_margin_threshold_full %.3f is set but confidence_margin_full_denominator is off - the value is dead config; the matched-scale confidence_margin_threshold is what gates\n",
+			c.ConfidenceMarginThresholdFull)
 	}
 }
 
