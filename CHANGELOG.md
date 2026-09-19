@@ -6,6 +6,12 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- **The cascade tools declare themselves the first door for single-shot mechanical text** (register A-102 (a)): the
+  `offload_summarize` / `offload_classify` / `offload_extract` / `offload_triage` descriptions and `agent_delegate`'s
+  opener state the door order (one text + one mechanical question → the cascade; multi-document read-and-reason →
+  a contract), because the caller reads the tool text and nothing else. Measured 2026-09-18: the cascade carried
+  0.12 % of 14 days' wall while the agent doors carried 98.2 %; the operator reads that as a routing defect.
 ### Added
 - **Every cascade ledger row now names its door** (register A-102 (e)): `door` on the request, the meta and the ledger row —
   the MCP tool name (`offload_summarize` …), the CLI command (`cli:summarize` …) or `fleet` for a request a node received from
