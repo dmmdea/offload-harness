@@ -162,6 +162,9 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		w.CoherenceNote = coherenceNote
 		if w.SeatTokS > 0 {
 			meta.TokPerSec = w.SeatTokS // the ledger's tok_per_s column, empty on agent rows until 0.115.21
+			if meta.TokPerSec == 0 {
+				meta.TokPerSec = w.ObservedTokS // 0.131.1: the observed rate when no calibrated sample exists
+			}
 		}
 		meta.LatencyMs = w.WallMs
 		meta.TokensOut = w.TokensOut
@@ -735,8 +738,9 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	res, rerr := built.Loop.Run(cctx, contract.Goal)
 	// The run's last liveness reading rides the wire on every branch below —
 	// a `stalled:` or `ceiling` reason reads against these.
-	if _, _, last, allow := live.Snapshot(); allow > 0 {
+	if _, tokS, last, allow := live.Snapshot(); allow > 0 {
 		wire.StallAllowanceSec, wire.LastProgressMs = int(allow.Seconds()), last.UnixMilli()
+		wire.ObservedTokS = tokS
 	}
 	wire.Steps = res.Steps
 	wire.StopReason = res.StopReason
@@ -763,7 +767,16 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		wire.SeatTokS = tokS
 	}
 	pf := res.Prefill
-	if p.seatRatesPath != "" && (wire.SeatTokS > 0 || coldLoad > 0 || pf.PrefillTokens > 0) {
+	// The largest time-to-first-delta sample of the run (0.131.1): engine-
+	// neutral, and present on a DEFERRED run too — a stalled prefill on an
+	// unmeasured seat is measured by the very run it cost.
+	var bestSample agent.PrefillSample
+	for _, s := range res.PrefillSamples {
+		if s.Tokens > bestSample.Tokens {
+			bestSample = s
+		}
+	}
+	if p.seatRatesPath != "" && (wire.SeatTokS > 0 || coldLoad > 0 || pf.PrefillTokens > 0 || bestSample.Tokens > 0) {
 		// Load-observe-save under the store's lock (seatrate.Update): the
 		// pre-loop read above was a snapshot for the estimate; another process
 		// may have written since. The prefill rate (0.131.0) sizes the next
@@ -771,6 +784,7 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		if uerr := seatrate.Update(p.seatRatesPath, func(s *seatrate.Store) {
 			s.Observe(seat, wire.SeatTokS, coldLoad.Seconds(), time.Now())
 			s.ObservePrefill(seat, pf.PrefillTokens, pf.PrefillMS, time.Now())
+			s.ObservePrefill(seat, bestSample.Tokens, bestSample.MS, time.Now())
 		}); uerr != nil {
 			log.Printf("agent task: seat-rates store not updated: %v", uerr)
 		}

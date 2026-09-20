@@ -21,10 +21,12 @@ const (
 )
 
 const (
-	// assumedPrefillTokS is a slow seat's prefill rate when none is measured
-	// yet — the Lenovo 27B GSQ class, not the pair. Measured rates replace it
-	// after the first run (seatrate.ObservePrefill).
-	assumedPrefillTokS = 400.0
+	// assumedPrefillTokS is a SLOW seat's prefill rate when none is measured
+	// yet. 400 was the first guess and it filed a false stall on the very seat
+	// this exists for (2026-09-20, Lenovo 27B GSQ on an A2: ~12k uncached tokens
+	// took >94 s = ~130 tok/s). 100 errs generous; a measured rate (time to
+	// first delta, any engine) replaces it after one run.
+	assumedPrefillTokS = 100.0
 	// assumedTokS is the decode rate assumed when none is measured: 1 tok/s
 	// makes the decoding allowance the floor, which is the generous reading.
 	assumedTokS = 1.0

@@ -350,6 +350,12 @@ type AgentWireResult struct {
 	RepackAttempts  int     `json:"repack_attempts,omitempty"`
 	RepackNote      string  `json:"repack_note,omitempty"`
 	SeatTokS        float64 `json:"seat_tok_s,omitempty"`
+	// ObservedTokS (0.131.1) is the liveness monitor's smoothed decode rate over
+	// the run's streamed deltas — descriptive, present on short runs the
+	// calibrated SeatTokS (>= 1,024-token completions only) skips. The ledger's
+	// tok_per_s prefers SeatTokS, then this; the seat-rates store reads only
+	// SeatTokS, so a short sample never taints calibration.
+	ObservedTokS float64 `json:"observed_tok_s,omitempty"`
 	WallEstimateSec int     `json:"wall_estimate_sec,omitempty"`
 	MinTurnSec      int     `json:"min_turn_sec,omitempty"`
 	WallNote        string  `json:"wall_note,omitempty"`

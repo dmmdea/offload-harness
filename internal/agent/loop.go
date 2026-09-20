@@ -45,6 +45,11 @@ type Msg struct {
 // ("tool_calls" => the loop must execute tools and continue; anything else =>
 // the loop stops).
 type Completion struct {
+	// FirstDeltaMS (0.131.1) is the time from the request being sent to the
+	// first streamed delta — the engine-neutral PREFILL measurement (llama.cpp
+	// reports prompt_ms in timings; vLLM reports nothing). With the prompt's
+	// uncached token count it yields the seat's prefill_tok_s. 0 = not observed.
+	FirstDeltaMS float64
 	// Serve is the SERVER's accounting for this completion (KV reuse, real
 	// token counts, prefill/decode ms) when the backend reports it — nil when
 	// it does not. Purely observational: the loop never reads it; the Phase D
@@ -169,6 +174,9 @@ type Result struct {
 	// reports no timings yields ObservedSteps 0 and Basis "insufficient_data"
 	// rather than a fabricated 0% reuse.
 	Prefill PrefillReport
+	// PrefillSamples (0.131.1): per-call (uncached prompt tokens, ms to first
+	// delta) — see PrefillSample. Present on deferred runs too.
+	PrefillSamples []PrefillSample
 	// Pager is the context-pager instrument's report for this run (R2-13,
 	// contextpager.go): how much evicted content the agent came BACK for. It is
 	// the gate that closes — or opens — the whole pager family, and it can only
@@ -276,6 +284,7 @@ type Loop struct {
 	parkRecord    func(tool, args, risk string) // durable park record (ask queue); nil = ledger only
 	observer      RunObserver                   // WithObserver: per-step progress for the run registry (gpuactivity); nil = none
 	live          *Monitor                      // WithLiveness: the run's stall/ceiling watch (0.131.0); nil = none
+	prefillSamples []PrefillSample              // per-call prefill measurements (0.131.1), published on Result
 	batchJudge    bool                          // end-of-run advisory judge pass (WithBatchJudge; batchjudge.go)
 	ctxTokens     int                           // model context window in tokens; input budget derives from it
 	keepRecent    int                           // most-recent turns kept full during compaction
@@ -854,7 +863,32 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 		res.FinalBudgetFit, res.BudgetNote = bs.fit, bs.note
 	}
 	res.FinalReissue = bs.reissue
+	res.PrefillSamples = l.prefillSamples
 	return res, err
+}
+
+// PrefillSample is one seat call's prefill measurement (0.131.1): the tokens
+// the engine actually had to prefill (prompt minus the cached prefix) and the
+// milliseconds to the first streamed delta. The pipeline folds the largest
+// sample of a run into the seat-rates store as prefill_tok_s — on every
+// engine, since it needs no timings block — and on DEFERRED runs too, so a
+// stalled prefill on an unmeasured seat is measured by the very run it cost.
+type PrefillSample struct {
+	Tokens int64
+	MS     float64
+}
+
+// notePrefill records a completed call's prefill sample; a call with no usage,
+// no delta timing or a fully cached prompt contributes nothing.
+func (l *Loop) notePrefill(comp Completion) {
+	if comp.Serve == nil || comp.FirstDeltaMS <= 0 {
+		return
+	}
+	tokens := int64(comp.Serve.UsagePromptTokens - comp.Serve.UsageCachedTokens)
+	if tokens <= 0 {
+		return
+	}
+	l.prefillSamples = append(l.prefillSamples, PrefillSample{Tokens: tokens, MS: comp.FirstDeltaMS})
 }
 
 func (l *Loop) run(ctx context.Context, objective string, bs *budgetState) (Result, error) {
@@ -1262,6 +1296,7 @@ func (l *Loop) run(ctx context.Context, objective string, bs *budgetState) (Resu
 			}
 		}
 		noteUsage(comp)
+		l.notePrefill(comp)
 		callRec := recordOf(step+1, stepMax, comp)
 		callRec.ForcedFinal = finalStep
 		callRec.Sampling = samp.Summary()
