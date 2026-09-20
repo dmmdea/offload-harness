@@ -5,7 +5,7 @@ date: "2026-09-20"
 
 # ADR 0055 — llama.cpp prompt-cache tiers: host-RAM cache per RAM tier, SSD slot save/restore driven by the harness
 
-Status: ACCEPTED (Layer 1 shipped 0.131.2, 2026-09-20; Layer 2 planned — `plans/2026-09-20-llamacpp-prompt-cache-tiers.md`, operator-approved 2026-09-20)
+Status: ACCEPTED (Layer 1 shipped 0.131.3, 2026-09-20; Layer 2 planned — `plans/2026-09-20-llamacpp-prompt-cache-tiers.md`, operator-approved 2026-09-20)
 
 ## Context
 

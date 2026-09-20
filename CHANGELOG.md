@@ -6,7 +6,7 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
-## [0.131.2] - 2026-09-20 - llama.cpp prompt cache sized per RAM tier (ADR 0055, Layer 1)
+## [0.131.3] - 2026-09-20 - llama.cpp prompt cache sized per RAM tier (ADR 0055, Layer 1)
 
 - Every llama.cpp seat renders `--cache-ram __CACHE_RAM__` from the new top-level profiles map
   `cache_ram_mib_by_ram_tier` (min 1024 / low 2048 / mid 6144 / high 12288 MiB; starting values,
@@ -20,6 +20,14 @@ Versioning: [SemVer](https://semver.org/).
   (the RAM prompt cache at work). The installer self-test row follows.
 - Plan: `plans/2026-09-20-llamacpp-prompt-cache-tiers.md` (operator-approved 2026-09-20); Layer 2
   (harness-driven `--slot-save-path` SSD save/restore) follows in its own releases.
+## [0.131.2] - 2026-09-20 - PAIR cards: a remote job's card stays on the node that ran it
+
+### Fixed
+- **Every completed remote delegation was shown in PAIR's Jobs list as running on the delegator.** The in-flight frames named the node by its dispatch host (a PAIR member name, 0.126.1), but the terminal frame named it by what the node reported on the wire — its configured `fleet_node_id` — which PAIR's `members.json` cannot resolve, and an unresolvable name fell back to *this box*. So the card was right while running and re-pointed at the delegator on completion (measured 2026-09-20 in the PAIR history: ~300 cards of remote-only seats attributed to the delegator; the operator saw the connection line land on the wrong node). A node dispatched by an address literal never resolved at all and showed on the delegator for its whole life.
+- The emitter now resolves a node from **all the names it goes by** (`Event.NodeAliases`: the dispatch host, the fleet node id, the wire name) against PAIR's member names **and member addresses**, remembers per job what the in-flight frame resolved to so the terminal frame keeps the card there, and when nothing resolves stamps **no node** (`scheduledOn: null` — PAIR draws no line and names no node) instead of the delegator, logging the unresolved name set once. `pairTerminal` names the node the in-flight frame named and demotes the wire name to an alias.
+
+### Tests
+- `TestResolvesAliasesAddressesAndRemembers`: fleet id + hostname alias, address literal, in-flight resolved then terminal unresolvable (card stays; memory dies with the terminal frame), nothing resolvable (no node, not self), local (self). The old "unknown name falls back to self" expectation is inverted.
 
 ## [0.131.1] - 2026-09-20 - Liveness walls: the unmeasured prefill prior was 4x too optimistic, and vLLM seats were never measured
 

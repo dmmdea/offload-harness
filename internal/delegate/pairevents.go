@@ -43,9 +43,10 @@ func pairNodeName(base, fallback string) string {
 // two cards, one stuck "running" until PAIR's staleness sweep failed it.
 
 // pairInflight emits the queued / running frame for a subtask and pins the
-// card identity on pr. node is the harness node name ("" = this box); seat is
-// the seat the placement intends to run on.
-func (r *runner) pairInflight(pr *PlacedResult, jobID, node, seat, state string) {
+// card identity on pr. node is the harness node name ("" = this box), aliases
+// the other names the same node goes by (its fleet node id, the name it
+// reported); seat is the seat the placement intends to run on.
+func (r *runner) pairInflight(pr *PlacedResult, jobID, node string, aliases []string, seat, state string) {
 	if r.pair == nil || !r.pair.Enabled() {
 		return
 	}
@@ -58,20 +59,22 @@ func (r *runner) pairInflight(pr *PlacedResult, jobID, node, seat, state string)
 		pr.pairEngine = pairworkloads.EngineFor("agent_delegate", pr.pairModel)
 		pr.pairCreated = now
 	}
+	pr.pairNode, pr.pairAliases = node, aliases
 	started := int64(0)
 	if state == "running" {
 		pr.pairStarted = now
 		started = now
 	}
 	r.pair.Emit(pairworkloads.Event{
-		JobID:     jobID,
-		Model:     pr.pairModel,
-		Engine:    pr.pairEngine,
-		Node:      node,
-		State:     state,
-		Requester: pairworkloads.Requester(ledger.ProcessOrigin().Session),
-		CreatedAt: pr.pairCreated,
-		StartedAt: started,
+		JobID:       jobID,
+		Model:       pr.pairModel,
+		Engine:      pr.pairEngine,
+		Node:        node,
+		NodeAliases: aliases,
+		State:       state,
+		Requester:   pairworkloads.Requester(ledger.ProcessOrigin().Session),
+		CreatedAt:   pr.pairCreated,
+		StartedAt:   started,
 	})
 }
 
@@ -95,11 +98,30 @@ func (r *runner) pairTerminal(jobID string, pr *PlacedResult) {
 	case len(pr.AcceptanceFailures) > 0:
 		state, errText = "failed", "failed verification: "+pr.AcceptanceFailures[0]
 	}
+	// The card stays on the node the in-flight frame put it on. A node names
+	// itself on the wire by its fleet node id when one is configured, which
+	// PAIR cannot resolve — before 0.131.2 that name re-pointed every remote
+	// card at the delegator on completion — so the wire name is only an
+	// alias behind the dispatch host, and a local placement keeps "" (this
+	// box) or the endpoint host the in-flight frame named (C-58).
+	node, aliases := pr.pairNode, append([]string(nil), pr.pairAliases...)
+	if pr.ranBase != "" {
+		if h := pairNodeName(pr.ranBase, ""); h != "" && h != node {
+			aliases = append(aliases, h)
+		}
+		if pr.Node != "" && pr.Node != node {
+			aliases = append(aliases, pr.Node)
+		}
+		if node == "" && len(aliases) > 0 {
+			node, aliases = aliases[0], aliases[1:]
+		}
+	}
 	r.pair.Emit(pairworkloads.Event{
 		JobID:       jobID,
 		Model:       pr.pairModel,
 		Engine:      pr.pairEngine,
-		Node:        pr.Node,
+		Node:        node,
+		NodeAliases: aliases,
 		State:       state,
 		Error:       errText,
 		Requester:   pairworkloads.Requester(ledger.ProcessOrigin().Session),
