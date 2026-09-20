@@ -106,6 +106,9 @@ func renderParams(prof servingProfile, goos string) servingtmpl.Params {
 		IncludeQ354B: prof.IncludeQwen354B, IncludeQ359B: prof.IncludeQwen359B,
 		IncludeQ3827B: prof.IncludeQwen3827B,
 		Seats:         prof.MediaSeats, Home: "/opt/offload", GOOS: goos, GPUEnv: prof.GPUEnv,
+		// Backend was missing until 2026-09-20: without it every closure render treated the
+		// cpu tier as a GPU tier (seats gained -ngl/--flash-attn the installer never emits).
+		Backend: prof.Backend,
 	}
 }
 

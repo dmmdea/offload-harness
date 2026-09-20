@@ -1,0 +1,84 @@
+# llama-swap.linux-cpu.yaml — offload-harness family on the llama.cpp CPU backend
+# (Linux; no GPU offload). Rendered by `local-offload install render`, which substitutes
+# the __CTX__ / __KV_K__ / __KV_V__ / __MOE_26B__ / __LLAMA_BIN__ / __MODELS__ /
+# __NTHREADS__ / __LISTEN__ tokens from the detected tier and drops the 26B block
+# entirely when the tier (or the RAM gate: cpu_moe on low/min) drops it.
+#
+# Added 2026-09-20 beside linux-vulkan: the `cpu` profile existed with only a Windows
+# template, so a Linux box with no usable GPU could not be installed at all — and the
+# first dual-route node (binxarn: Vulkan iGPU AND a CPU route on the same box, operator
+# direction 2026-09-20) needs this file as the second seat family.
+#
+# Serving invariants (grammar reliability — do NOT change): --jinja, no MTP,
+# reasoning off. All layers run on CPU: no -ngl, no --flash-attn (the CPU backend has
+# neither). --threads is the physical-core count the renderer supplies. Context size +
+# KV type are PROFILE-DRIVEN (the 'cpu' profile projects 8K/f16). The 26B MoE tier is
+# OPTIONAL on CPU: it needs >= 48 GB RAM, so it stays only when ram_tier is mid or high.
+#
+# LINUX-SPECIFIC AND LOAD-BEARING: every seat carries LD_LIBRARY_PATH pointing at the
+# llama.cpp bin dir — both a self-built llama-server and the official release tarball
+# link libggml-cpu.so beside the binary.
+healthCheckTimeout: 300
+logLevel: info
+listen: __LISTEN__
+
+macros:
+  common: >-
+    --ctx-size __CTX__ --cache-type-k __KV_K__ --cache-type-v __KV_V__
+    --threads __NTHREADS__ --jinja --reasoning off --port ${PORT} --host 127.0.0.1
+  ld: "LD_LIBRARY_PATH=__LLAMA_BIN__:${LD_LIBRARY_PATH:-}"
+
+models:
+  offload-e4b:
+    aliases: [gemma4-e4b, offload]
+    env: ["${ld}"]
+    cmd: >-
+      __LLAMA_BIN__/llama-server --model __MODELS__/gemma-4-E4B-it-qat-UD-Q4_K_XL.gguf
+      --parallel 1 ${common}
+    checkEndpoint: /health
+    ttl: 300
+  gemma4-e2b:
+    aliases: [e2b]
+    env: ["${ld}"]
+    cmd: >-
+      __LLAMA_BIN__/llama-server --model __MODELS__/gemma-4-E2B-it-qat-UD-Q4_K_XL.gguf
+      ${common}
+    checkEndpoint: /health
+    ttl: 300
+  # gemma4-26b-a4b: OPTIONAL on CPU — needs >= 48 GB RAM. The renderer removes this
+  # block, its matrix var and its set membership when the tier drops the 26B.
+  gemma4-26b-a4b:
+    env: ["${ld}"]
+    cmd: >-
+      __LLAMA_BIN__/llama-server --model __MODELS__/gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf
+      --parallel 1 ${common}
+    checkEndpoint: /health
+    ttl: 300
+  embeddinggemma:
+    aliases: [text-embedding, local-embed]
+    env: ["${ld}"]
+    cmd: >-
+      __LLAMA_BIN__/llama-server --model __MODELS__/embeddinggemma-300M-Q8_0.gguf
+      --embeddings --pooling mean --ctx-size 2048 --batch-size 2048 --ubatch-size 2048
+      --threads __NTHREADS__ --port ${PORT} --host 127.0.0.1
+    checkEndpoint: /health
+    ttl: 300
+
+# This template accepts tier-declared media seats (a residency ROLE, never a set name).
+# `env` is the loader-path macro every llama-backed seat carries on Linux. A template
+# WITHOUT this directive renders no seats and refuses by name rather than dropping them.
+# offload-seats: swappable resident env=${ld}
+# RESIDENCY IS DECLARED WITH `matrix:`, NOT `groups:` (llama-swap >= v202). Residents
+# appear in EVERY set; the chat tiers stay mutually exclusive — on a CPU tier a reload
+# is paid in RAM bandwidth rather than VRAM, but it is the same wasted work.
+matrix:
+  vars:
+    emb: embeddinggemma
+    e4b: offload-e4b
+    e2b: gemma4-e2b
+    m26: gemma4-26b-a4b
+  evict_costs:
+    emb: 1000
+  sets:
+    residents: "emb__SEATS_RESIDENT__"
+    interactive: "+residents & (e4b | e2b__M26_ALT____SEATS_SWAPPABLE__)"
