@@ -278,6 +278,7 @@ func (c *LLMClient) Chat(ctx context.Context, msgs []Msg, tools []ToolSpec, maxT
 	// load, and a parked ticket would only wedge this process's other lanes.
 	budget := seatwait.FromContext(ctx)
 	var resp *http.Response
+	var sent time.Time // when the accepted request left: the prefill clock starts here
 	for {
 		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+"/v1/chat/completions", bytes.NewReader(buf))
 		if err != nil {
@@ -309,6 +310,7 @@ func (c *LLMClient) Chat(ctx context.Context, msgs []Msg, tools []ToolSpec, maxT
 			cp.Timeout = 0
 			hc = &cp
 		}
+		sent = time.Now()
 		r, err := hc.Do(httpReq)
 		if err != nil {
 			tk.Release()
@@ -342,10 +344,16 @@ func (c *LLMClient) Chat(ctx context.Context, msgs []Msg, tools []ToolSpec, maxT
 	}
 	defer resp.Body.Close()
 	var wr wireResp
+	var firstDeltaMS float64 // the prefill measurement (Completion.FirstDeltaMS)
 	if strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream") {
-		var onDelta func(int)
-		if fn := ProgressFromContext(ctx); fn != nil {
-			onDelta = func(n int) { fn(n) }
+		fn := ProgressFromContext(ctx)
+		onDelta := func(n int) {
+			if firstDeltaMS == 0 {
+				firstDeltaMS = float64(time.Since(sent).Microseconds()) / 1000
+			}
+			if fn != nil {
+				fn(n)
+			}
 		}
 		w, err := decodeSSE(resp.Body, onDelta)
 		if err != nil {
@@ -355,6 +363,10 @@ func (c *LLMClient) Chat(ctx context.Context, msgs []Msg, tools []ToolSpec, maxT
 	} else if err := json.NewDecoder(resp.Body).Decode(&wr); err != nil {
 		// a proxy that ignores `stream` still answers JSON — the old path, kept
 		return Completion{}, err
+	} else {
+		// no deltas to time: the whole answer arrived at once, which bounds the
+		// prefill from above (prefill + decode) — honest, only ever generous
+		firstDeltaMS = float64(time.Since(sent).Microseconds()) / 1000
 	}
 	if len(wr.Choices) == 0 {
 		return Completion{}, fmt.Errorf("no choices in response")
@@ -395,7 +407,7 @@ func (c *LLMClient) Chat(ctx context.Context, msgs []Msg, tools []ToolSpec, maxT
 	for _, tc := range ch.Message.ToolCalls {
 		out.ToolCalls = append(out.ToolCalls, ToolCall{ID: tc.ID, Name: tc.Function.Name, Args: tc.Function.Arguments})
 	}
-	comp := Completion{Msg: out, FinishReason: ch.FinishReason, Reasoning: reasoning, ReasoningKey: reasoningKey, ThinkingOff: thinkingOff}
+	comp := Completion{Msg: out, FinishReason: ch.FinishReason, Reasoning: reasoning, ReasoningKey: reasoningKey, ThinkingOff: thinkingOff, FirstDeltaMS: firstDeltaMS}
 	// Attach server accounting only when the backend actually reported some —
 	// nil means "this backend does not tell us", which a measurement must
 	// report as unmeasured rather than as zero reuse.

@@ -6,6 +6,11 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.131.1] - 2026-09-20 - Liveness walls: the unmeasured prefill prior was 4x too optimistic, and vLLM seats were never measured
+
+### Fixed
+- **The first live proof of 0.131.0 filed a FALSE STALL on the Lenovo 27B GSQ seat** — `stalled: no progress for 94s in prefill (allowed 94s: 17041 tok / 400 tok/s assumed x 1.5 + 30s)` — while the seat was prefilling ~12k uncached tokens at its real ~130 tok/s. Two defects: the unmeasured prior (400 tok/s) was 3-4x too optimistic for a 3-bit GSQ seat on an A2, and `prefill_tok_s` could never be MEASURED on a vLLM seat because the prefill accounting read llama.cpp `timings` only. Now the prior is 100 tok/s, and every streamed completion records its time to first delta (`Completion.FirstDeltaMS`); the loop publishes per-call `(uncached prompt tokens, first-delta ms)` samples on `Result.PrefillSamples`, and the pipeline folds the largest into the seat-rates store on EVERY run, deferred ones included — the run a false stall costs is the run that measures the seat.
+
 ## [0.131.0] - 2026-09-20 - Liveness walls: a run is ended by a stall or a ceiling, never by its wall expiring while the seat produces
 
 ### Changed

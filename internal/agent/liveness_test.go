@@ -31,8 +31,8 @@ func TestAllowanceArithmetic(t *testing.T) {
 		t.Fatalf("a 0.1 tok/s seat gets 200s between deltas, got %s", got)
 	}
 	unknown := StallPolicy{Floor: 60 * time.Second, Slack: 30 * time.Second}
-	if got := unknown.Allowance(PhasePrefill, 400*100); got != 150*time.Second+30*time.Second {
-		t.Fatalf("unknown prefill rate must assume 400 tok/s, got %s", got)
+	if got := unknown.Allowance(PhasePrefill, 100*100); got != 150*time.Second+30*time.Second {
+		t.Fatalf("unknown prefill rate must assume %.0f tok/s, got %s", assumedPrefillTokS, got)
 	}
 	if got := unknown.Allowance(PhaseTool, 0); got != 60*time.Second {
 		t.Fatalf("tool with no timeout floors, got %s", got)
@@ -94,7 +94,7 @@ func TestMonitorPrefillNoteAndAssumedRate(t *testing.T) {
 	m.mu.Lock()
 	note := m.note()
 	m.mu.Unlock()
-	if note != ": 10 tok / 400 tok/s assumed x 1.5 + 30s" {
+	if note != ": 10 tok / 100 tok/s assumed x 1.5 + 30s" {
 		t.Fatalf("note = %q", note)
 	}
 }

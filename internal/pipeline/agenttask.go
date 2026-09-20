@@ -763,7 +763,16 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		wire.SeatTokS = tokS
 	}
 	pf := res.Prefill
-	if p.seatRatesPath != "" && (wire.SeatTokS > 0 || coldLoad > 0 || pf.PrefillTokens > 0) {
+	// The largest time-to-first-delta sample of the run (0.131.1): engine-
+	// neutral, and present on a DEFERRED run too — a stalled prefill on an
+	// unmeasured seat is measured by the very run it cost.
+	var bestSample agent.PrefillSample
+	for _, s := range res.PrefillSamples {
+		if s.Tokens > bestSample.Tokens {
+			bestSample = s
+		}
+	}
+	if p.seatRatesPath != "" && (wire.SeatTokS > 0 || coldLoad > 0 || pf.PrefillTokens > 0 || bestSample.Tokens > 0) {
 		// Load-observe-save under the store's lock (seatrate.Update): the
 		// pre-loop read above was a snapshot for the estimate; another process
 		// may have written since. The prefill rate (0.131.0) sizes the next
@@ -771,6 +780,7 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		if uerr := seatrate.Update(p.seatRatesPath, func(s *seatrate.Store) {
 			s.Observe(seat, wire.SeatTokS, coldLoad.Seconds(), time.Now())
 			s.ObservePrefill(seat, pf.PrefillTokens, pf.PrefillMS, time.Now())
+			s.ObservePrefill(seat, bestSample.Tokens, bestSample.MS, time.Now())
 		}); uerr != nil {
 			log.Printf("agent task: seat-rates store not updated: %v", uerr)
 		}

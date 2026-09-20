@@ -45,7 +45,7 @@ determine if a job is truly still going" — was not met by any of the three sur
    `agent.Monitor` owns the run's liveness:
    - **Stall** = no progress event inside the phase's allowance. The allowance is dynamic:
      admission → the admission budget; **prefill** → `pending prompt tokens ÷ the seat's
-     measured prefill rate × 1.5 + 30 s` (400 tok/s assumed until measured); **decoding** →
+     measured prefill rate × 1.5 + 30 s` (100 tok/s assumed until measured — 400 was the first guess and filed a false stall on the Lenovo GSQ seat, 0.131.1); **decoding** →
      `20 deltas ÷ decode rate`; **tool** → the tool's own cap + 30 s (an uncapped tool: 1 h);
      **re-pack** → its chat timeout; all floored at 60 s. A stall is filed
      `stalled: no progress for Xs in <phase> (allowed Ys: <arithmetic>)` as
