@@ -6,6 +6,15 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.130.7] - 2026-09-20 - amd-gcn gets the Qwen3.5-4B agent seat (measured on the first Linux AMD node)
+
+### Changed
+- **`amd-gcn` declares `include_qwen35_4b: true`.** On binxarn the fleet's grounded smoke contract fails on the tier's
+  gemma4-e2b planner (no tool call, 18.6 s) and on the offload-e4b workhorse (same shape, 31 s), and passes on the
+  Qwen3.5-4B agent seat (44.7 s). Rendered configs for this tier now carry `qwen3.5-4b-agent`; the installer downloads its
+  GGUF. Nodes on this tier should publish `agent_seat_tok_s` (10 on binxarn) so the wall is sized from a rate — the first run
+  without one deferred at the grammar re-pack with 1 s of wall left. (#421)
+
 ## [0.130.6] - 2026-09-20 - the first Linux AMD node: detect, templates and a Linux GPU memory provider
 
 ### Added
