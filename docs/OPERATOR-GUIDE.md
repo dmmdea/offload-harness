@@ -847,7 +847,7 @@ carries any measured override to apply.
 | `amd-rdna3` | `offload-e4b` (Vulkan) | 16384 (floor; canary → 32768) | f16 (floor; canary → q8_0) | `--cpu-moe` floor; canary → full-offload `-ngl 99` (~20–25 t/s on dual-channel DDR5) — see SETUP-AGENT.md, AMD RDNA3 chapter |
 | `amd-rdna3-dgpu` | `gemma4-26b-a4b` (Vulkan, discrete RX 7900-class ≥12 GB) | 32768 | q8_0 | full-GPU `-ngl 99` resident |
 | `ampere-6` | `offload-e4b` | 32768 | q8_0 (conservative default; f16 measured viable) | dropped (architectural — see the tier page) |
-| `amd-gcn` | `gemma4-e2b` (Vulkan) | 8192 | f16, flash-attn off | dropped |
+| `amd-gcn` | `gemma4-e2b` (Vulkan; CPU alt route `alt_backends: [cpu]`, ADR 0054; agent seat `qwen3.5-4b-agent`) | 8192 | f16, flash-attn on (measured 2026-09-20 on binxarn: +4 % pp, neutral on Lucienne; the lane is DDR-bandwidth-bound, every RADV/ubatch/KV knob within ±4 %) | dropped |
 | `cpu` | `offload-e4b` (CPU) | 8192 | f16, flash-attn off | `--cpu-moe` when RAM ≥ ~56 GB; else dropped |
 
 Notes: q8_0 KV keeps the KV cache ~half the size (V-quant needs flash-attn on, which the CUDA/Vulkan

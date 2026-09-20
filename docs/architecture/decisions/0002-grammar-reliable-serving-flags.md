@@ -44,7 +44,7 @@ Two things that are deliberately **not** universal, and are frequently misrememb
   hardware profile. `q8_0` is the majority (8 of 13 profiles); `f16` is used on the remaining five —
   the large-VRAM Blackwell tiers, the two AMD/Vulkan profiles, and CPU. K and V are always kept
   symmetric, and a `q8_0` V cache requires flash-attention to be on.
-- **Flash-attention is profile-driven.** On for eleven profiles, off for `amd-gcn`; the CPU template
+- **Flash-attention is profile-driven.** On for every GPU profile (`amd-gcn` was the one exception until 2026-09-20, when two GCN boxes measured FA neutral-to-positive); the CPU template
   omits the flag entirely rather than passing `off`, because the CPU backend has neither `-ngl` nor
   `--flash-attn`.
 
