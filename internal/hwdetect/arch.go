@@ -42,8 +42,12 @@ var archRules = []struct {
 	{regexp.MustCompile(`(?i)\b7\d{2}M\b`), "rdna3"},
 	{regexp.MustCompile(`(?i)RX\s*7\d{3}`), "rdna3"},
 	{regexp.MustCompile(`(?i)RDNA\s*3`), "rdna3"},
-	// AMD GCN / Vega (older iGPU + discrete). "Vega 7" is a Ryzen APU iGPU.
+	// AMD GCN / Vega (older iGPU + discrete). "Vega 7" is a Ryzen APU iGPU. On Linux lspci
+	// names the SILICON, not the marketing part: a Ryzen 5 5625U's Vega 7 shows up as plain
+	// "Barcelo" (measured 2026-09-20 on binxarn). The Vega-era APU family is
+	// Raven/Picasso/Renoir/Lucienne/Cezanne/Barcelo — all gfx90x GCN5.
 	{regexp.MustCompile(`(?i)\bVega\b`), "gcn"},
+	{regexp.MustCompile(`(?i)\b(Barcelo|Cezanne|Lucienne|Renoir|Picasso|Raven)\b`), "gcn"},
 	{regexp.MustCompile(`(?i)\bGCN\b`), "gcn"},
 	// A recognised vendor whose generation we do not classify.
 	{regexp.MustCompile(`(?i)NVIDIA|GeForce|Quadro|Tesla|AMD|Radeon`), "other"},
@@ -59,6 +63,9 @@ func VendorFromName(name string) string {
 	case regexp.MustCompile(`(?i)NVIDIA|GeForce|Quadro|Tesla`).MatchString(name):
 		return "nvidia"
 	case regexp.MustCompile(`(?i)\bAMD\b|Radeon`).MatchString(name):
+		return "amd"
+	// Linux lspci codenames carry no vendor word; these silicon names are AMD's alone.
+	case regexp.MustCompile(`(?i)\b(Barcelo|Cezanne|Lucienne|Renoir|Picasso|Raven|Rembrandt|Phoenix|Strix)\b`).MatchString(name):
 		return "amd"
 	}
 	return "none"

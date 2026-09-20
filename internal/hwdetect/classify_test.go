@@ -27,6 +27,11 @@ func TestArchFromNameMatchesTheShippedTable(t *testing.T) {
 		{"AMD Radeon 780M Graphics", "rdna3"},
 		{"AMD Radeon RX 7900 XTX", "rdna3"},
 		{"AMD Radeon Vega 7 Graphics", "gcn"},
+		// Linux lspci names the silicon: a 5625U's Vega 7 is just "Barcelo" (binxarn, 2026-09-20).
+		{"Barcelo", "gcn"},
+		{"Cezanne", "gcn"},
+		{"Lucienne", "gcn"},
+		{"Renoir", "gcn"},
 		{"", "none"},
 	} {
 		if got := ArchFromName(tc.name); got != tc.want {
@@ -204,5 +209,18 @@ func TestVerdictCarriesAccelerators(t *testing.T) {
 	b, _ := json.Marshal(v)
 	if strings.Contains(string(b), `"accelerators":null`) {
 		t.Fatalf("nil accelerators must be omitted from JSON, got %s", b)
+	}
+}
+
+// TestVendorFromNameKnowsAMDCodenames: the codename alone must not read as "none" — that is
+// the exact input that demoted an AMD APU to profile "cpu" on binxarn (2026-09-20).
+func TestVendorFromNameKnowsAMDCodenames(t *testing.T) {
+	for _, n := range []string{"Barcelo", "Cezanne", "Lucienne", "Renoir", "Phoenix", "AMD Radeon Graphics"} {
+		if got := VendorFromName(n); got != "amd" {
+			t.Errorf("VendorFromName(%q) = %q, want amd", n, got)
+		}
+	}
+	if got := VendorFromName("Unknown Adapter"); got != "none" {
+		t.Errorf("VendorFromName(unknown) = %q, want none", got)
 	}
 }
