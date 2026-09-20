@@ -275,6 +275,7 @@ type Loop struct {
 	parkHighRisk  bool                          // unattended: park self-flagged high-risk effectful calls (WithParkHighRisk)
 	parkRecord    func(tool, args, risk string) // durable park record (ask queue); nil = ledger only
 	observer      RunObserver                   // WithObserver: per-step progress for the run registry (gpuactivity); nil = none
+	live          *Monitor                      // WithLiveness: the run's stall/ceiling watch (0.131.0); nil = none
 	batchJudge    bool                          // end-of-run advisory judge pass (WithBatchJudge; batchjudge.go)
 	ctxTokens     int                           // model context window in tokens; input budget derives from it
 	keepRecent    int                           // most-recent turns kept full during compaction
@@ -606,10 +607,60 @@ func (l *Loop) WithParkRecorder(f func(tool, args, risk string)) *Loop { l.parkR
 type RunObserver interface {
 	OnStep(step, tokensOut int)
 	OnPhase(phase string)
+	// OnProgress hears every streamed delta with the run's token total so far
+	// (0.131.0, liveness walls): what a status reader shows as "producing".
+	OnProgress(tokensOut int)
+	// OnAllowance hears the liveness phase and the stall bound the run is
+	// under, so the reader can say "silent 187 s of 214 s allowed in prefill".
+	OnAllowance(phase string, allowance time.Duration)
 }
 
 // WithObserver installs a RunObserver. nil = none.
 func (l *Loop) WithObserver(o RunObserver) *Loop { l.observer = o; return l }
+
+// WithLiveness installs the run's stall/ceiling watch (0.131.0). nil = none:
+// the loop then runs under whatever deadline its context carries, as before.
+func (l *Loop) WithLiveness(m *Monitor) *Loop { l.live = m; return l }
+
+// phase moves the liveness watch and tells the observer where the run is.
+// A phase change is progress: the tool started, the seat is prefilling.
+func (l *Loop) phase(ph Phase, pendingPromptTokens int) {
+	if l.live != nil {
+		l.live.Phase(ph, pendingPromptTokens)
+		l.tellAllowance(ph)
+	}
+}
+
+// toolPhase is phase(PhaseTool) with the tool's own cap as the bound.
+func (l *Loop) toolPhase(cap time.Duration) {
+	if l.live != nil {
+		l.live.ToolPhase(cap)
+		l.tellAllowance(PhaseTool)
+	}
+}
+
+func (l *Loop) tellAllowance(ph Phase) {
+	if l.observer != nil {
+		_, _, _, allow := l.live.Snapshot()
+		l.observer.OnAllowance(string(ph), allow)
+	}
+}
+
+// progressFunc is the per-call ProgressFunc installed on a step's context:
+// every streamed delta feeds the watch and the observer.
+func (l *Loop) progressFunc(runTotalBefore int) ProgressFunc {
+	if l.live == nil && l.observer == nil {
+		return nil
+	}
+	return func(n int) {
+		if l.live != nil {
+			l.live.Progress(n)
+		}
+		if l.observer != nil {
+			l.observer.OnProgress(runTotalBefore + n)
+		}
+	}
+}
 
 // WithContextTokens sets the model context window (in tokens) that transcript
 // compaction budgets against. Default is defaultCtxTokens (8192, matching the
@@ -1105,6 +1156,14 @@ func (l *Loop) run(ctx context.Context, objective string, bs *budgetState) (Resu
 		// planner policy on the tool steps, where greedy decoding is right.
 		samp := l.samplingFor(finalStep || thisIsReissue)
 		stepCtx = ContextWithSampling(stepCtx, samp)
+		// Liveness (0.131.0): the seat is about to prefill this transcript —
+		// the stall allowance is sized from its length — and every streamed
+		// delta of the completion is a progress event. The same stepCtx serves
+		// the empty-final re-issue below, so it inherits both.
+		l.phase(PhasePrefill, estimateTokens(msgs))
+		if fn := l.progressFunc(tokOut); fn != nil {
+			stepCtx = ContextWithProgress(stepCtx, fn)
+		}
 		callStart := time.Now()
 		comp, err := l.client.Chat(stepCtx, msgs, specs, stepMax)
 		if err != nil {
@@ -1629,6 +1688,15 @@ func (l *Loop) dispatch(ctx context.Context, call ToolCall) (string, bool, Effec
 	if budget <= 0 {
 		budget = l.toolTimeout
 	}
+	// Liveness (0.131.0): a tool call is progress, and while it runs the stall
+	// allowance is the tool's own cap (the select below) plus slack — an
+	// uncapped tool (budget <= 0, capping explicitly disabled) gets an hour.
+	toolCap := budget
+	if toolCap <= 0 {
+		toolCap = -1
+	}
+	l.toolPhase(toolCap)
+	defer l.phase(PhaseDecoding, 0)
 	if budget <= 0 {
 		out, err := t.Exec(ctx, call.Args) // capping explicitly disabled
 		if err != nil {

@@ -4,12 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+	"time"
 )
 
 type recordingObserver struct {
-	steps  []int
-	tokens []int
-	phases []string
+	steps      []int
+	tokens     []int
+	phases     []string
+	progress   []int    // OnProgress: run token totals per streamed delta
+	allowances []string // OnAllowance: liveness phases as they were set
 }
 
 func (r *recordingObserver) OnStep(step, tokensOut int) {
@@ -17,6 +20,12 @@ func (r *recordingObserver) OnStep(step, tokensOut int) {
 	r.tokens = append(r.tokens, tokensOut)
 }
 func (r *recordingObserver) OnPhase(p string) { r.phases = append(r.phases, p) }
+func (r *recordingObserver) OnProgress(tokensOut int) {
+	r.progress = append(r.progress, tokensOut)
+}
+func (r *recordingObserver) OnAllowance(phase string, allowance time.Duration) {
+	r.allowances = append(r.allowances, phase)
+}
 
 // The loop reports each completed step with the seat's running token total,
 // and announces the forced final step — what the run registry publishes so a

@@ -571,12 +571,15 @@ func TestRunAgentTaskSchemalessContractReturnsOutput(t *testing.T) {
 // TestRunAgentTaskTimeoutDefersNotErrors: the contract's TimeoutSec is a ctx
 // deadline; hitting it yields a DEFERRED wire result on a job-level success —
 // the fleet job must land terminal-done, never error.
-func TestRunAgentTaskTimeoutDefersNotErrors(t *testing.T) {
+// Liveness walls (0.131.0, ADR 0055): the contract's wall is the EXPECTATION.
+// A seat that answers 2.5 s into a declared 1 s wall is slow, not dead — the
+// run completes. Until 0.130.x this exact fixture was the wall-timeout test.
+func TestRunAgentTaskSlowSeatOutlivesTheDeclaredWall(t *testing.T) {
 	fake := &agentFake{
 		rosterIDs: []string{agentTestSeat},
 		loop: func(int64) string {
-			time.Sleep(2500 * time.Millisecond) // well past the 1s wall
-			return doneChat("too late")
+			time.Sleep(2500 * time.Millisecond) // well past the 1s "wall"
+			return doneChat("not too late any more")
 		},
 		repack: func(int64) string { return `{"answer":"x"}` },
 	}
@@ -588,15 +591,89 @@ func TestRunAgentTaskTimeoutDefersNotErrors(t *testing.T) {
 	res := agentTestPipeline(t, srv.URL).Run(context.Background(), agentTestRequest(t, contract))
 	wire := decodeWire(t, res)
 
-	if !wire.Deferred {
-		t.Fatalf("want deferred, got: %+v", wire)
+	if wire.Deferred {
+		t.Fatalf("a producing run was killed by its expectation: %q (%s)", wire.Reason, wire.DeferClass)
 	}
-	if !strings.Contains(wire.Reason, "timeout") {
-		t.Fatalf("reason = %q, want a wall-timeout reason", wire.Reason)
+	if wire.WallSec != 0 && wire.WallSec != 1 {
+		t.Fatalf("wall_sec = %d, the expectation must still be reported", wire.WallSec)
+	}
+	if wire.CeilingSec < core.AgentCeilingSecFloor || wire.StallAllowanceSec == 0 || wire.LastProgressMs == 0 {
+		t.Fatalf("liveness telemetry missing on the wire: ceiling=%d allowance=%d last=%d", wire.CeilingSec, wire.StallAllowanceSec, wire.LastProgressMs)
+	}
+}
+
+// A seat that accepts the request and never answers is a STALL: filed as
+// infrastructure (the seat's health), with the allowance arithmetic in the
+// reason, never as the budget signal the delegator sizes from.
+func TestRunAgentTaskSilentSeatIsAStallNotABudgetDefer(t *testing.T) {
+	restore := compressLiveness(t, 200*time.Millisecond, 100*time.Millisecond, core.AgentCeilingSecCap)
+	defer restore()
+	fake := &agentFake{
+		rosterIDs: []string{agentTestSeat},
+		loop: func(int64) string {
+			time.Sleep(8 * time.Second) // far past any prefill allowance a test prompt earns
+			return doneChat("never read")
+		},
+		repack: func(int64) string { return `{"answer":"x"}` },
+	}
+	srv := fake.server(t)
+	defer srv.Close()
+
+	contract := testContract()
+	res := agentTestPipeline(t, srv.URL).Run(context.Background(), agentTestRequest(t, contract))
+	wire := decodeWire(t, res)
+
+	if !wire.Deferred || !strings.HasPrefix(wire.Reason, "stalled: no progress for ") {
+		t.Fatalf("want a stall, got deferred=%v reason=%q", wire.Deferred, wire.Reason)
+	}
+	if wire.DeferClass != core.DeferClassInfrastructure {
+		t.Fatalf("defer_class = %q, want %q — a silent seat is the seat's health, not the contract's budget", wire.DeferClass, core.DeferClassInfrastructure)
+	}
+	if !strings.Contains(wire.Reason, "in prefill (allowed ") {
+		t.Fatalf("the reason must carry the phase and the allowance: %q", wire.Reason)
+	}
+}
+
+// A run that reaches the safety ceiling is a BUDGET defer with the ceiling's
+// own words — the sizing signal — never the retired "wall timeout".
+func TestRunAgentTaskCeilingIsABudgetDefer(t *testing.T) {
+	restore := compressLiveness(t, 60*time.Second, 30*time.Second, 2) // ceiling capped at 2 s
+	defer restore()
+	fake := &agentFake{
+		rosterIDs: []string{agentTestSeat},
+		loop: func(int64) string {
+			time.Sleep(4 * time.Second) // past the 2 s ceiling, inside the 60 s stall floor
+			return doneChat("past the ceiling")
+		},
+		repack: func(int64) string { return `{"answer":"x"}` },
+	}
+	srv := fake.server(t)
+	defer srv.Close()
+
+	contract := testContract()
+	contract.TimeoutSec = 1
+	res := agentTestPipeline(t, srv.URL).Run(context.Background(), agentTestRequest(t, contract))
+	wire := decodeWire(t, res)
+
+	if !wire.Deferred || !strings.HasPrefix(wire.Reason, "ceiling ") {
+		t.Fatalf("want the ceiling defer, got deferred=%v reason=%q", wire.Deferred, wire.Reason)
 	}
 	if wire.DeferClass != core.DeferClassBudget {
-		t.Fatalf("defer_class = %q, want %q — a wall ceiling is a BUDGET defer, not a broken box", wire.DeferClass, core.DeferClassBudget)
+		t.Fatalf("defer_class = %q, want %q", wire.DeferClass, core.DeferClassBudget)
 	}
+	if strings.Contains(wire.Reason, "wall timeout") {
+		t.Fatalf("the retired reason must not come back: %q", wire.Reason)
+	}
+}
+
+// compressLiveness sets the package's liveness knobs for one test and hands
+// back the restore. Production values: floor 60 s, slack 30 s, ceiling floor
+// core.AgentCeilingSecFloor.
+func compressLiveness(t *testing.T, floor, slack time.Duration, ceilingCap int) func() {
+	t.Helper()
+	f, s, fl, c := livenessFloor, livenessSlack, ceilingFloorSec, ceilingCapSec
+	livenessFloor, livenessSlack, ceilingFloorSec, ceilingCapSec = floor, slack, 1, ceilingCap
+	return func() { livenessFloor, livenessSlack, ceilingFloorSec, ceilingCapSec = f, s, fl, c }
 }
 
 // TestRunAgentTaskSchemaFailRetriesOnceThenDefers: the structured re-pack
@@ -838,7 +915,9 @@ func TestRunAgentTaskRepackParentCancellation(t *testing.T) {
 // it — grammar AND the chat fallback — or an early, fast-failing lane (the
 // old fixture's un-configured chat fallback, a fast 404) would let the run
 // finish with wall to spare and never exercise the wall-timeout shape at all.
-func TestRunAgentTaskRepackDeadlineIsAWallTimeout(t *testing.T) {
+func TestRunAgentTaskRepackDeadlineIsACeilingDefer(t *testing.T) {
+	restore := compressLiveness(t, 60*time.Second, 30*time.Second, 2) // ceiling capped at 2 s: under the 2.5 s re-pack delays
+	defer restore()
 	fake := &agentFake{
 		rosterIDs:         []string{agentTestSeat},
 		loop:              func(int64) string { return doneChat("The answer is 42.") },
@@ -855,8 +934,8 @@ func TestRunAgentTaskRepackDeadlineIsAWallTimeout(t *testing.T) {
 	res := agentTestPipeline(t, srv.URL).Run(context.Background(), agentTestRequest(t, contract))
 	wire := decodeWire(t, res)
 
-	if !wire.Deferred || !strings.HasPrefix(wire.Reason, "wall timeout after") {
-		t.Fatalf("deferred/reason = %v/%q, want the wall-timeout defer", wire.Deferred, wire.Reason)
+	if !wire.Deferred || !strings.HasPrefix(wire.Reason, "ceiling ") {
+		t.Fatalf("deferred/reason = %v/%q, want the ceiling defer", wire.Deferred, wire.Reason)
 	}
 	if wire.DeferClass != core.DeferClassBudget {
 		t.Fatalf("defer_class = %q, want %q", wire.DeferClass, core.DeferClassBudget)

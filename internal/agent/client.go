@@ -141,6 +141,11 @@ type wireReq struct {
 	MaxTokens   int           `json:"max_tokens,omitempty"`
 	Temperature float64       `json:"temperature"`
 	Stream      bool          `json:"stream"`
+	// StreamOptions asks the engine for the usage frame at the end of a
+	// stream (OpenAI `stream_options.include_usage`; vLLM and llama.cpp both
+	// honour it), so a streamed completion carries the same exact token
+	// counts a JSON one does.
+	StreamOptions *wireStreamOptions `json:"stream_options,omitempty"`
 	// The rest of the decoding policy (sampling.go, register D-95b). Pointers
 	// with omitempty: an unset knob is ABSENT from the body, which is what
 	// lets a seat keep its own default — sending a zero would be an opinion,
@@ -158,6 +163,10 @@ type wireReq struct {
 	// historical request, byte for byte.
 	ChatTemplateKwargs map[string]any `json:"chat_template_kwargs,omitempty"`
 }
+type wireStreamOptions struct {
+	IncludeUsage bool `json:"include_usage"`
+}
+
 type wireResp struct {
 	Choices []struct {
 		Message      wireMsg `json:"message"`
@@ -223,7 +232,12 @@ func (c *LLMClient) Chat(ctx context.Context, msgs []Msg, tools []ToolSpec, maxT
 		Model:     c.model,
 		Messages:  make([]wireMsg, 0, len(msgs)),
 		MaxTokens: maxTokens,
-		Stream:    false,
+		// Streamed since 0.131.0 (liveness walls): every delta is a progress
+		// event for the run's stall watch (ProgressFromContext), so the node
+		// can tell a 500k-token prefill from a dead engine while it happens.
+		// The decoded result is the same wireResp the JSON path produces.
+		Stream:        true,
+		StreamOptions: &wireStreamOptions{IncludeUsage: true},
 	}
 	for _, m := range msgs {
 		wm := wireMsg{Role: m.Role, Content: m.Content, ToolCallID: m.ToolCallID}
@@ -283,7 +297,19 @@ func (c *LLMClient) Chat(ctx context.Context, msgs []Msg, tools []ToolSpec, maxT
 		if err != nil {
 			return Completion{}, err
 		}
-		r, err := c.http.Do(httpReq)
+		// Under liveness (a ProgressFunc on ctx, 0.131.0) the CONTEXT owns the
+		// deadline: the stall watch cancels a silent request and the ceiling
+		// bounds a producing one. The client-level Timeout covers the whole
+		// body read, so on a streamed answer it would cut a long completion
+		// mid-stream — exactly the pre-run clock this release retires. Callers
+		// without liveness (the CLI doors, the probes) keep it as before.
+		hc := c.http
+		if hc.Timeout != 0 && ProgressFromContext(ctx) != nil {
+			cp := *hc
+			cp.Timeout = 0
+			hc = &cp
+		}
+		r, err := hc.Do(httpReq)
 		if err != nil {
 			tk.Release()
 			return Completion{}, err
@@ -301,6 +327,11 @@ func (c *LLMClient) Chat(ctx context.Context, msgs []Msg, tools []ToolSpec, maxT
 		tk.Release()
 		if seatwait.Retryable(r.StatusCode, string(b)) {
 			if d, ok := budget.NextFor(r.StatusCode, retryAfter); ok {
+				// The seat ANSWERED (busy): liveness, not a token. A touch keeps
+				// the stall watch from reading a counted wait as a dead seat.
+				if fn := ProgressFromContext(ctx); fn != nil {
+					fn(0)
+				}
 				if serr := budget.Sleep(ctx, d); serr != nil {
 					return Completion{}, serr
 				}
@@ -311,7 +342,18 @@ func (c *LLMClient) Chat(ctx context.Context, msgs []Msg, tools []ToolSpec, maxT
 	}
 	defer resp.Body.Close()
 	var wr wireResp
-	if err := json.NewDecoder(resp.Body).Decode(&wr); err != nil {
+	if strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream") {
+		var onDelta func(int)
+		if fn := ProgressFromContext(ctx); fn != nil {
+			onDelta = func(n int) { fn(n) }
+		}
+		w, err := decodeSSE(resp.Body, onDelta)
+		if err != nil {
+			return Completion{}, err
+		}
+		wr = w
+	} else if err := json.NewDecoder(resp.Body).Decode(&wr); err != nil {
+		// a proxy that ignores `stream` still answers JSON — the old path, kept
 		return Completion{}, err
 	}
 	if len(wr.Choices) == 0 {

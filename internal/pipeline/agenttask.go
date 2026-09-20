@@ -491,8 +491,19 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	// ever ran. (Safe to move: `wall_sec` ships for the first time in this
 	// same release, so no deployed node ever published the earlier meaning.)
 	core.ReportWall(ctx, timeoutSec)
-	cctx, cancel := context.WithTimeout(ctx, wall)
-	defer cancel()
+	// Liveness walls (0.131.0, ADR 0055): the wall above is the EXPECTATION.
+	// The run is ended by a STALL (no progress inside the seat's dynamic
+	// allowance) or by the safety CEILING — never by the expectation expiring
+	// while the seat is still producing. The estimate is computed here, not
+	// after admission's readbacks below, because the ceiling needs it.
+	est := wallEstimateFor(p.cfg, contract, seat, rates.Get(seat), coldLoad.Seconds(), timeoutSec)
+	ceilingSec := CeilingFor(timeoutSec, est)
+	wire.CeilingSec = ceilingSec
+	livePolicy := LivenessPolicyFor(p.cfg, rates.Get(seat), admissionBudget(p.cfg.AgentAdmissionWaitSec))
+	cctx, live := agent.NewMonitor(ctx, livePolicy, time.Duration(ceilingSec)*time.Second)
+	defer live.Stop()
+	log.Printf("agent task: liveness for %s: ceiling %d s (wall %d s, estimate %d s), floor %s, prefill %.0f tok/s, decode %.1f tok/s",
+		seat, ceilingSec, timeoutSec, est.TotalSec, livePolicy.Floor, livePolicy.PrefillTokS, livePolicy.TokS)
 	// One busy-seat budget for the WHOLE contract (seatwait): every chat step
 	// and the re-pack draw on it, so a 10-step loop cannot spend ten budgets,
 	// and the wait it consumed is reported on the wire (contention_wait_sec).
@@ -648,7 +659,7 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	// beside the run (wall_estimate_sec / min_turn_sec / wall_note) and log
 	// when the contract's wall is under it. Never changes the wall: sizing is
 	// data for the caller and the operator, not a silent override.
-	est := wallEstimateFor(p.cfg, contract, seat, rates.Get(seat), coldLoad.Seconds(), timeoutSec)
+	// (est was computed where the liveness ceiling was sized, above.)
 	wire.WallEstimateSec, wire.MinTurnSec, wire.WallNote = est.TotalSec, est.MinTurnSec, est.Note
 	if wire.WallSec > 0 {
 		wire.WallNote = "auto wall (timeout_auto): " + wire.WallNote
@@ -719,9 +730,14 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		)
 	}
 
-	built.Loop.WithObserver(act)
+	built.Loop.WithObserver(newProgressObserver(ctx, act, ceilingSec)).WithLiveness(live)
 	act.Phase("running")
 	res, rerr := built.Loop.Run(cctx, contract.Goal)
+	// The run's last liveness reading rides the wire on every branch below —
+	// a `stalled:` or `ceiling` reason reads against these.
+	if _, _, last, allow := live.Snapshot(); allow > 0 {
+		wire.StallAllowanceSec, wire.LastProgressMs = int(allow.Seconds()), last.UnixMilli()
+	}
 	wire.Steps = res.Steps
 	wire.StopReason = res.StopReason
 	// Seat usage — set HERE, before every defer branch, for the same reason as
@@ -746,12 +762,15 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	if tokS, n := seatrate.Rate(rateCalls(res.Calls)); n > 0 {
 		wire.SeatTokS = tokS
 	}
-	if p.seatRatesPath != "" && (wire.SeatTokS > 0 || coldLoad > 0) {
+	pf := res.Prefill
+	if p.seatRatesPath != "" && (wire.SeatTokS > 0 || coldLoad > 0 || pf.PrefillTokens > 0) {
 		// Load-observe-save under the store's lock (seatrate.Update): the
 		// pre-loop read above was a snapshot for the estimate; another process
-		// may have written since.
+		// may have written since. The prefill rate (0.131.0) sizes the next
+		// run's stall allowance while the seat prefills.
 		if uerr := seatrate.Update(p.seatRatesPath, func(s *seatrate.Store) {
 			s.Observe(seat, wire.SeatTokS, coldLoad.Seconds(), time.Now())
+			s.ObservePrefill(seat, pf.PrefillTokens, pf.PrefillMS, time.Now())
 		}); uerr != nil {
 			log.Printf("agent task: seat-rates store not updated: %v", uerr)
 		}
@@ -811,7 +830,18 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	if rerr != nil {
 		// Wall timeout is its own defer shape — the delegator sizes future
 		// contracts off it, so it must be distinguishable from a planner error.
-		if errors.Is(cctx.Err(), context.DeadlineExceeded) {
+		if se := stallOf(live); se != nil {
+			// The seat STOPPED producing for this run (0.131.0): no streamed
+			// delta, tool call or phase change inside its allowance. The
+			// contract was fine — this is the seat's health, so it is filed as
+			// infrastructure, never as the budget signal the delegator sizes
+			// from. The stall text carries the arithmetic a reader can check.
+			return deferWire(core.DeferClassInfrastructure, se.Error())
+		}
+		// The CEILING (0.131.0) cancels with a typed cause, not a deadline —
+		// it is checked by cause, before the clock. A bare DeadlineExceeded
+		// here is the CALLER's deadline (ceilingReason says so).
+		if ceilingOf(live) != nil || errors.Is(cctx.Err(), context.DeadlineExceeded) {
 			if contention.CausedTimeout(wall) {
 				// The wall was eaten by WAITING on peers, not by the model's own
 				// work: filing it as a budget defer would poison the delegator's
@@ -821,7 +851,7 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 				r, _ := contendedReason(seat, contention)
 				return deferWire(core.DeferClassInfrastructure, r+"; the wall expired during the wait")
 			}
-			return deferWire(core.DeferClassBudget, fmt.Sprintf("wall timeout after %ds", timeoutSec))
+			return deferWire(core.DeferClassBudget, ceilingReason(live, timeoutSec))
 		}
 		if errors.Is(cctx.Err(), context.Canceled) {
 			// The PARENT went away mid-loop — the same shape the re-pack branch
@@ -984,7 +1014,10 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	}
 	repackStart := time.Now()
 	act.Phase("repack")
-	structured, tokensOut, transport, attempts, serr := p.repackStructured(cctx, seat, contract.OutputSchema, res.Output, repackAttemptFloor(wall))
+	// Liveness (0.131.0): the re-pack is its own phase (allowance = its chat
+	// timeout) and its streamed deltas feed the same watch as the loop's.
+	live.Phase(agent.PhaseRepack, 0)
+	structured, tokensOut, transport, attempts, serr := p.repackStructured(agent.ContextWithProgress(cctx, live.Progress), seat, contract.OutputSchema, res.Output, repackAttemptFloor(wall))
 	wire.RepackMs = time.Since(repackStart).Milliseconds()
 	wire.RepackAttempts = attempts
 	if serr != nil {
@@ -997,7 +1030,7 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		// when !wire.Deferred — so no check can ever read it on this path.
 		cutoff, isCutoff := asRepackCutoff(serr)
 		switch {
-		case errors.Is(cctx.Err(), context.DeadlineExceeded):
+		case ceilingOf(live) != nil || errors.Is(cctx.Err(), context.DeadlineExceeded):
 			// The wall expired DURING the re-pack. That is the timeout shape,
 			// not a schema shape — reporting it as "output failed schema" sends
 			// the operator to rewrite a schema that was never the problem.
@@ -1007,7 +1040,11 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 				r, _ := contendedReason(seat, contention)
 				return deferWire(core.DeferClassInfrastructure, "structured re-pack unreachable: "+r+"; the wall expired during the wait")
 			}
-			return deferWire(core.DeferClassBudget, fmt.Sprintf("wall timeout after %ds", timeoutSec))
+			return deferWire(core.DeferClassBudget, ceilingReason(live, timeoutSec))
+		case stallOf(live) != nil:
+			// The seat stopped producing DURING the re-pack (0.131.0): the
+			// seat's health, not the schema's — same class as the loop arm.
+			return deferWire(core.DeferClassInfrastructure, "structured re-pack unreachable: "+stallOf(live).Error())
 		case errors.Is(cctx.Err(), context.Canceled):
 			// The PARENT went away mid-re-pack (the delegator abandoned the
 			// poll, the node is shutting down). The failed request looks exactly
@@ -1196,7 +1233,7 @@ func (p *Pipeline) repackStructured(ctx context.Context, seat string, rawSchema 
 			return true
 		}
 		if left := time.Until(dl); left < floor {
-			err = fmt.Errorf("re-pack stopped before the %s: %.0fs of the wall left, under the %.0fs an attempt needs", what, left.Seconds(), floor.Seconds())
+			err = fmt.Errorf("re-pack stopped before the %s: %.0fs of the ceiling left, under the %.0fs an attempt needs", what, left.Seconds(), floor.Seconds())
 			return false
 		}
 		return true
@@ -1308,6 +1345,13 @@ func (p *Pipeline) repackStructured(ctx context.Context, seat string, rawSchema 
 		gres, gerr := p.repackClient(p.cfg.CompletionPath, attemptTimeout, gates).Generate(ctx, seat, system, user, grammar, budget, p.cfg.Temperature, 0, append([]llamaclient.GenOption{llamaclient.WithoutThinking()}, structuredOpts...)...)
 		if gerr != nil {
 			recordFailure(gerr, attemptTimeout, attempts)
+			if seatBusyExhausted(gerr) {
+				// The contract's busy-seat budget is spent: the seat answered
+				// 429 past every counted wait. Another attempt cannot reach it
+				// and would only turn the verdict into "the chat lane refused"
+				// — this IS the last attempt, and it is a transport one.
+				break
+			}
 			continue
 		}
 		if gres.Truncated {
@@ -1355,14 +1399,16 @@ func (p *Pipeline) repackStructured(ctx context.Context, seat string, rawSchema 
 	if !wallLeft("chat re-pack") {
 		return nil, 0, false, attempts, err
 	}
-	attempts++
-	chatTimeout := repackAttemptDeadline(ctx, p.cfg, budget, repackMaxAttempts-attempts+1)
-	chatClient := p.repackClient("/v1/chat/completions", chatTimeout, gates)
-	structured, tokensOut, cerr := p.repackViaChat(ctx, chatClient, seat, schema, output)
-	if cerr == nil {
-		return structured, tokensOut, false, attempts, nil
+	if !seatBusyExhausted(lastRaw) {
+		attempts++
+		chatTimeout := repackAttemptDeadline(ctx, p.cfg, budget, repackMaxAttempts-attempts+1)
+		chatClient := p.repackClient("/v1/chat/completions", chatTimeout, gates)
+		structured, tokensOut, cerr := p.repackViaChat(ctx, chatClient, seat, schema, output)
+		if cerr == nil {
+			return structured, tokensOut, false, attempts, nil
+		}
+		recordFailure(cerr, chatTimeout, attempts)
 	}
-	recordFailure(cerr, chatTimeout, attempts)
 
 	// Every attempt has now run and failed. lastRaw/lastBound/lastAttemptNum
 	// describe the FINAL one — its own nature alone decides the verdict
@@ -2068,6 +2114,17 @@ func contendedReason(seat string, b *seatwait.Budget) (string, bool) {
 // A CANCELLATION is not transport either. It arrives wrapped in a *url.Error
 // like any dial failure, but nothing on this box failed — the caller went away
 // — and the caller (runAgentTask) has its own arm for it.
+// seatBusyExhausted reports a 429 that came back AFTER the contract's
+// busy-seat budget (seatwait) was spent: the seat is alive but not reachable
+// for this contract any more, and no further re-pack attempt can change that.
+// Until 0.130.x the wall cut this wait and the contention arm filed it; under
+// liveness (0.131.0) the budget decides, and the 429 is the LAST attempt by
+// construction so the verdict stays the transport one.
+func seatBusyExhausted(err error) bool {
+	var se *llamaclient.StatusError
+	return errors.As(err, &se) && se.StatusCode == http.StatusTooManyRequests
+}
+
 func genErrIsTransport(err error) bool {
 	if err == nil || errors.Is(err, context.Canceled) {
 		return false

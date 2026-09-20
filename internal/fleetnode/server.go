@@ -2090,6 +2090,11 @@ func (s *Server) admit(w http.ResponseWriter, r *http.Request, env dispatchEnvel
 		// the record at 0, which is what a pre-D-116 node published.
 		jobID := env.JobID
 		ctx = core.WithWallReport(ctx, func(sec int) { s.jobs.SetWall(jobID, sec) })
+		// The liveness report (0.131.0): the executing lane publishes the
+		// run's progress (last token, tok/s, phase, allowance, ceiling) onto
+		// every poll of the RUNNING job, so the delegator can keep polling a
+		// producing job past any clock it sized in advance.
+		ctx = core.WithProgressReport(ctx, func(p core.LiveProgress) { s.jobs.SetProgress(jobID, p) })
 		// Register A-102: stamp the DOOR this call came through so its ledger
 		// row is not one of the door-less cascade rows.
 		req.Door = dispatchDoor(req.Door)
@@ -2389,6 +2394,12 @@ type jobWire struct {
 	State JobState        `json:"state"`
 	Data  json.RawMessage `json:"data,omitempty"`
 	Error string          `json:"error,omitempty"`
+	// Progress (0.131.0, liveness walls): the run's last liveness report while
+	// it runs. Additive and omitempty, like WallSec below: a delegator that
+	// does not read it polls exactly as before.
+	Progress          *core.LiveProgress `json:"progress,omitempty"`
+	StallAllowanceSec int                `json:"stall_allowance_sec,omitempty"`
+	CeilingSec        int                `json:"ceiling_sec,omitempty"`
 	// WallSec (register D-116) is the wall the run reported it is executing
 	// under, published WHILE THE JOB RUNS so a delegator polling a
 	// timeout_auto contract can bound its clock by this node's sized wall
@@ -2399,7 +2410,14 @@ type jobWire struct {
 }
 
 func writeJobView(w http.ResponseWriter, status int, v *JobView) {
-	writeJSON(w, status, jobWire{JobID: v.ID, State: v.State, Data: v.Data, Error: v.Error, WallSec: v.WallSec})
+	out := jobWire{JobID: v.ID, State: v.State, Data: v.Data, Error: v.Error, WallSec: v.WallSec, Progress: v.Progress}
+	if p := v.Progress; p != nil {
+		// Top-level twins of the two bounds, for a reader that wants them
+		// without descending into progress.
+		out.StallAllowanceSec = int(p.AllowanceMs / 1000)
+		out.CeilingSec = p.CeilingSec
+	}
+	writeJSON(w, status, out)
 }
 
 // writeAck emits the ONLY acceptance shape the contract allows: 202 + exact

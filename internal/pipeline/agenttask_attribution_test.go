@@ -14,10 +14,15 @@ import (
 // as contention: the wall was spent by the model's own work, and the operator
 // must be sent to the budget, not to concurrencyLimit (review, 2026-09-02).
 func TestRunAgentTaskEarlyResolvedContentionDoesNotRelabelAGenuineTimeout(t *testing.T) {
+	// 0.131.0: the wall no longer ends a run; the CEILING does. Capped at 2 s
+	// here so the seat's 2.5 s silence reaches it — the attribution question
+	// (an early-resolved 429 must not relabel it) is unchanged.
+	restore := compressLiveness(t, 60*time.Second, 30*time.Second, 2)
+	defer restore()
 	fake := &agentFake{
 		rosterIDs: []string{agentTestSeat},
 		loop: func(int64) string {
-			time.Sleep(2500 * time.Millisecond) // well past the 1 s wall, and no 429 in sight
+			time.Sleep(2500 * time.Millisecond) // past the 2 s ceiling, and no 429 in sight
 			return doneChat("too late")
 		},
 		repack: func(int64) string { return `{"answer":"x"}` },
@@ -36,8 +41,8 @@ func TestRunAgentTaskEarlyResolvedContentionDoesNotRelabelAGenuineTimeout(t *tes
 	contract.TimeoutSec = 1
 	res := contentionTestPipeline(t, srv.URL, 30).Run(context.Background(), agentTestRequest(t, contract))
 	wire := decodeWire(t, res)
-	if !wire.Deferred || wire.DeferClass != core.DeferClassBudget || !strings.Contains(wire.Reason, "wall timeout") {
-		t.Fatalf("a genuine wall timeout stays a budget defer: %+v", wire)
+	if !wire.Deferred || wire.DeferClass != core.DeferClassBudget || !strings.HasPrefix(wire.Reason, "ceiling ") {
+		t.Fatalf("a genuine ceiling stays a budget defer: %+v", wire)
 	}
 }
 

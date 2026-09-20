@@ -78,7 +78,10 @@ func TestChatRequestBodyUnchangedByInstrumentation(t *testing.T) {
 	if _, err := c.Chat(context.Background(), []Msg{{Role: "user", Content: "hi"}}, nil, 7); err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]bool{"model": true, "messages": true, "max_tokens": true, "temperature": true, "stream": true}
+	// stream_options joined the request in 0.131.0 (liveness walls) — a wire
+	// change of its own, not instrumentation: it is what makes a STREAMED
+	// completion carry the same exact usage a JSON one does.
+	want := map[string]bool{"model": true, "messages": true, "max_tokens": true, "temperature": true, "stream": true, "stream_options": true}
 	for k := range got {
 		if !want[k] {
 			t.Errorf("request grew an unexpected field %q — instrumentation must not change the wire request", k)

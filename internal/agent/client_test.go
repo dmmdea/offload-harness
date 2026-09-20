@@ -46,8 +46,12 @@ func TestLLMClientMapsWireAndParsesToolCalls(t *testing.T) {
 	if body["model"] != "gemma4-e2b" {
 		t.Errorf("model = %v", body["model"])
 	}
-	if body["stream"] != false {
-		t.Errorf("stream must be false, got %v", body["stream"])
+	// Streamed since 0.131.0 (liveness walls): every delta is a progress event.
+	if body["stream"] != true {
+		t.Errorf("stream must be true, got %v", body["stream"])
+	}
+	if so, _ := body["stream_options"].(map[string]any); so["include_usage"] != true {
+		t.Errorf("stream_options.include_usage must be requested so a streamed answer carries exact usage, got %v", body["stream_options"])
 	}
 	tools, _ := body["tools"].([]any)
 	if len(tools) != 1 {
