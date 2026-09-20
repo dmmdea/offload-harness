@@ -121,6 +121,38 @@ type Run struct {
 	MaxSteps    int    `json:"max_steps,omitempty"`
 	TokensOut   int    `json:"tokens_out,omitempty"`
 	HeartbeatMs int64  `json:"heartbeat_ms"`
+	// Job liveness (0.131.0, liveness walls) — DISTINCT from HeartbeatMs, which
+	// is the holder PROCESS ticking (register C-32: a hung job with a live
+	// holder used to look healthy). LastProgressMs is the last streamed delta,
+	// tool call or phase change; TokS the smoothed decode rate over deltas;
+	// LivePhase/AllowanceMs the stall bound the run is under right now.
+	LastProgressMs int64   `json:"last_progress_ms,omitempty"`
+	TokS           float64 `json:"tok_s,omitempty"`
+	LivePhase      string  `json:"live_phase,omitempty"`
+	AllowanceMs    int64   `json:"allowance_ms,omitempty"`
+}
+
+// Liveness is the one-line reading of a run's job liveness, shared by every
+// status renderer so they cannot drift: "producing 3.4 tok/s, last token 2s
+// ago (allowed 60s in decoding)", "silent 187s of 214s allowed in prefill",
+// or "" when the run never reported progress (a pre-0.131.0 node).
+func (r Run) Liveness(now time.Time) string {
+	if r.LastProgressMs == 0 {
+		return ""
+	}
+	silent := now.Sub(time.UnixMilli(r.LastProgressMs))
+	if silent < 0 {
+		silent = 0
+	}
+	allowed := time.Duration(r.AllowanceMs) * time.Millisecond
+	phase := r.LivePhase
+	if phase == "" {
+		phase = "running"
+	}
+	if r.TokS > 0 && silent < 10*time.Second {
+		return fmt.Sprintf("producing %.1f tok/s, last token %.0fs ago (allowed %.0fs in %s)", r.TokS, silent.Seconds(), allowed.Seconds(), phase)
+	}
+	return fmt.Sprintf("silent %.0fs of %.0fs allowed in %s", silent.Seconds(), allowed.Seconds(), phase)
 }
 
 // Age is how long the run has been in flight.
@@ -148,6 +180,9 @@ func (r Run) Summary(now time.Time) string {
 	}
 	if r.TokensOut > 0 {
 		fmt.Fprintf(&b, " %d tokens", r.TokensOut)
+	}
+	if lv := r.Liveness(now); lv != "" {
+		fmt.Fprintf(&b, " — %s", lv)
 	}
 	fmt.Fprintf(&b, " %s in", r.Age(now).Round(time.Second))
 	if r.Origin != "" {
@@ -310,6 +345,51 @@ func (h *Handle) OnStep(step, tokensOut int) {
 
 // OnPhase implements the agent loop's RunObserver.
 func (h *Handle) OnPhase(p string) { h.Phase(p) }
+
+// OnProgress implements the agent loop's RunObserver (0.131.0): a streamed
+// delta with the run's token total. The decode rate is an EWMA over deltas.
+func (h *Handle) OnProgress(tokensOut int) {
+	if h == nil {
+		return
+	}
+	h.Update(func(r *Run) {
+		now := h.reg.now()
+		if d := tokensOut - r.TokensOut; d > 0 && r.LastProgressMs > 0 {
+			if dt := float64(now.UnixMilli()-r.LastProgressMs) / 1000; dt > 0 {
+				inst := float64(d) / dt
+				if r.TokS == 0 {
+					r.TokS = inst
+				} else {
+					r.TokS = 0.2*inst + 0.8*r.TokS
+				}
+			}
+		}
+		if tokensOut > r.TokensOut {
+			r.TokensOut = tokensOut
+		}
+		r.LastProgressMs = now.UnixMilli()
+		if r.LivePhase == "prefill" {
+			r.LivePhase = "decoding"
+		}
+		if r.Phase == PhaseAdmission || r.Phase == PhaseColdLoad ||
+			r.Phase == PhaseCoherenceProbe || r.Phase == PhaseWindowProbe {
+			r.Phase = PhaseRunning
+		}
+	})
+}
+
+// OnAllowance implements the agent loop's RunObserver (0.131.0): the liveness
+// phase and the stall bound the run is under. A phase change is progress.
+func (h *Handle) OnAllowance(phase string, allowance time.Duration) {
+	if h == nil {
+		return
+	}
+	h.Update(func(r *Run) {
+		r.LivePhase = phase
+		r.AllowanceMs = allowance.Milliseconds()
+		r.LastProgressMs = h.reg.now().UnixMilli()
+	})
+}
 
 // End removes the record and stops the heartbeat. Idempotent.
 func (h *Handle) End() {

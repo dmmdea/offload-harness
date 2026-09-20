@@ -20,6 +20,37 @@ import "context"
 // (fleetnode.Server) are three call frames apart through an interface, and a
 // node door that sets no reporter simply reports nothing — the previous
 // behaviour, exactly.
+// LiveProgress is a running job's liveness as the executing lane reports it
+// and the fleet node publishes it on every poll (0.131.0): the delegator
+// keeps polling while LastProgressMs keeps moving inside AllowanceMs.
+type LiveProgress struct {
+	Step           int     `json:"step,omitempty"`
+	TokensOut      int     `json:"tokens_out,omitempty"`
+	TokS           float64 `json:"tok_s,omitempty"`
+	Phase          string  `json:"phase,omitempty"`
+	LastProgressMs int64   `json:"last_progress_ms,omitempty"`
+	AllowanceMs    int64   `json:"allowance_ms,omitempty"`
+	CeilingSec     int     `json:"ceiling_sec,omitempty"`
+}
+
+type progressReportKey struct{}
+
+// WithProgressReport installs the sink a lane reports its LiveProgress to —
+// the fleet node's job record. Same shape as WithWallReport.
+func WithProgressReport(ctx context.Context, fn func(LiveProgress)) context.Context {
+	if fn == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, progressReportKey{}, fn)
+}
+
+// ReportProgress hands p to the installed sink, if any.
+func ReportProgress(ctx context.Context, p LiveProgress) {
+	if fn, _ := ctx.Value(progressReportKey{}).(func(LiveProgress)); fn != nil {
+		fn(p)
+	}
+}
+
 type wallReportKey struct{}
 
 // WithWallReport returns a context whose ReportWall calls fn. fn must be safe

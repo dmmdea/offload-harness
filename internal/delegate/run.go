@@ -3375,6 +3375,12 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 	// budget than either clock granted. queuedCredit itself keeps accumulating
 	// for the operator-facing message, which reports an observed fact.
 	var deadline time.Time
+	// Liveness (0.131.0): progressUntil is how far the node's reported progress
+	// holds the poll open past `deadline`; the loop stops only when BOTH have
+	// passed. lastProgress/lastAllowance feed the deadline message.
+	var progressUntil, lastProgress time.Time
+	var lastAllowance time.Duration
+	extendedOnProgress := 0
 	setDeadline := func() {
 		credit := queuedCredit
 		if wallAnchored {
@@ -3424,7 +3430,7 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 			pr.orphanable = true // the node may still finish it — recovery's case
 			return pr
 		}
-		if time.Now().After(deadline) {
+		if now := time.Now(); now.After(deadline) && now.After(progressUntil) {
 			if !sawJobOwned {
 				// Never a defer: nothing on that node ever reported OWNING this
 				// job, so there is no defer to report. A FAILURE (Summary.Failed,
@@ -3439,6 +3445,15 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 			// The wording says only what is known: it acked and it never reached
 			// a terminal state — not that it "could not complete the contract".
 			reason := fmt.Sprintf("poll deadline after %s%s: node accepted the job but did not reach a terminal state%s", pollBudget, queuedNote(queuedCredit), boundNote(pollNote, slack))
+			if !lastProgress.IsZero() {
+				// The node reported liveness and it went STALE: say when it
+				// last moved and what it was allowed, so the reader can tell a
+				// node that stopped reporting from one that never did.
+				reason += fmt.Sprintf("; the node's last progress was %.0fs ago against a %.0fs allowance", time.Since(lastProgress).Seconds(), lastAllowance.Seconds())
+				if extendedOnProgress > 0 {
+					reason += fmt.Sprintf(" (the poll was extended on progress %d time(s) past its %s budget)", extendedOnProgress, pollBudget)
+				}
+			}
 			// A node that answered every poll normally simply ran out of clock:
 			// a BUDGET defer. One whose last answer we could not use (a 5xx, an
 			// unknown state) is a broken box, and classing the two alike is how
@@ -3464,6 +3479,31 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 		}
 		poll, perr := r.pollOnce(ctx, base, jobID)
 		state, data, jobErr, status := poll.State, poll.Data, poll.JobErr, poll.Status
+		// Liveness (0.131.0, ADR 0055): a node that reports PROGRESS is polled
+		// past any clock sized in advance — the job stays alive while its last
+		// progress event is inside the node's own stall allowance (+ grace),
+		// bounded by the node's ceiling. A node that reports none is polled
+		// exactly as before; a node whose report goes stale is not extended.
+		if status == http.StatusOK && poll.Progress != nil && poll.Progress.LastProgressMs > 0 {
+			lastProgress = time.UnixMilli(poll.Progress.LastProgressMs)
+			allow := time.Duration(poll.Progress.AllowanceMs) * time.Millisecond
+			if allow <= 0 {
+				allow = 60 * pollSecond
+			}
+			lastAllowance = allow
+			until := lastProgress.Add(allow + pollGrace)
+			if poll.Progress.CeilingSec > 0 {
+				if cap := anchor.Add(time.Duration(poll.Progress.CeilingSec)*pollSecond + pollGrace); until.After(cap) {
+					until = cap
+				}
+			}
+			if until.After(progressUntil) {
+				if until.After(deadline) && !progressUntil.After(deadline) {
+					extendedOnProgress++
+				}
+				progressUntil = until
+			}
+		}
 		// The node's OWN wall, published while the job runs (jobWire
 		// `wall_sec`, register D-116), beats every estimate: it is the number
 		// the run is actually executing under. It can only RAISE the bound —
@@ -4674,6 +4714,10 @@ func (r *runner) record(contract core.AgentContract, pr PlacedResult) {
 			// savings would double-count the node-side agent row.
 			TokensOut:    pr.Result.TokensOut,
 			SeatTokensIn: pr.Result.SeatTokensIn,
+			// tok_per_s on the DELEGATE row (0.131.0): until now only the
+			// node's own `agent` twin row carried it, so the row the operator
+			// reads showed 0 on a job that produced 6,236 tokens.
+			TokPerSec: pr.Result.SeatTokS,
 			Deferred:     pr.Result.Deferred || pr.Err != "" || len(pr.AcceptanceFailures) > 0,
 			Reason:       reason,
 			// ModelTier carries placement:seat — the ledger has no placement

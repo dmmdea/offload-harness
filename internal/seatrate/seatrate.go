@@ -58,6 +58,12 @@ type Seat struct {
 	// TokS is the effective decode rate (completion tokens per second of call
 	// wall over completions of ≥ minSampleTokens), an EMA over runs.
 	TokS float64 `json:"tok_s"`
+	// PrefillTokS is the seat's measured PREFILL rate (prompt tokens per
+	// second, an EMA over runs), observed from the loop's prefill accounting
+	// (0.131.0, liveness walls). It sizes the stall allowance while the seat
+	// is prefilling: a 214k-token prompt at 2,000 tok/s is 160 s of
+	// legitimate silence. 0 = never measured (the policy assumes 400 tok/s).
+	PrefillTokS float64 `json:"prefill_tok_s,omitempty"`
 	// ColdLoadSec is the slowest of the last coldLoadWindow observed loads.
 	ColdLoadSec float64   `json:"cold_load_sec,omitempty"`
 	ColdLoads   []float64 `json:"cold_loads,omitempty"`
@@ -104,6 +110,36 @@ func (s *Store) Get(seat string) Seat {
 // Observe folds one run's measurement in: tokS (0 = no rate sample this run)
 // and coldLoadSec (0 = the seat was already loaded). Returns whether anything
 // changed.
+// minPrefillSampleTokens / minPrefillSampleMS reject prefill samples too
+// small to measure: a cached-prefix hit prefills a few hundred tokens in
+// tens of milliseconds and says nothing about the seat's rate.
+const (
+	minPrefillSampleTokens = 1000
+	minPrefillSampleMS     = 200
+)
+
+// ObservePrefill folds one run's prefill measurement (prompt tokens and the
+// milliseconds the engine reported for them) into the seat's PrefillTokS.
+// Returns false when the sample is too small to count.
+func (s *Store) ObservePrefill(seat string, promptTokens int64, promptMS float64, now time.Time) bool {
+	if s == nil || strings.TrimSpace(seat) == "" || promptTokens < minPrefillSampleTokens || promptMS < minPrefillSampleMS {
+		return false
+	}
+	if s.Seats == nil {
+		s.Seats = map[string]Seat{}
+	}
+	cur := s.Seats[seat]
+	rate := float64(promptTokens) / (promptMS / 1000)
+	if cur.PrefillTokS <= 0 {
+		cur.PrefillTokS = rate
+	} else {
+		cur.PrefillTokS = emaWeight*rate + (1-emaWeight)*cur.PrefillTokS
+	}
+	cur.Updated = now
+	s.Seats[seat] = cur
+	return true
+}
+
 func (s *Store) Observe(seat string, tokS, coldLoadSec float64, now time.Time) bool {
 	if s == nil || strings.TrimSpace(seat) == "" || (tokS <= 0 && coldLoadSec <= 0) {
 		return false

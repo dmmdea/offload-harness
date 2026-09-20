@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/dmmdea/offload-harness/internal/agent"
 	"github.com/dmmdea/offload-harness/internal/config"
@@ -86,6 +87,10 @@ func TestRunAgentTaskListCapReissueRefusesWhenTheFittedTurnDoesNotFit(t *testing
 	srv := fake.server(t)
 	defer srv.Close()
 
+	// 0.131.0: the fit gate reads the run's deadline, which is now the CEILING;
+	// cap it at 5 s so the premise ("the fitted turn cannot fit") still holds.
+	restore := compressLiveness(t, 60*time.Second, 30*time.Second, 5)
+	defer restore()
 	contract := testContract()
 	contract.TimeoutSec = 5 // far under even the fitted turn's own cost at 5 tok/s
 	p := agentTestPipelineWithSeatRate(t, srv.URL, 5)

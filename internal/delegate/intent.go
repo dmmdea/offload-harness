@@ -37,6 +37,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/dmmdea/offload-harness/internal/config"
+	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
 )
 
@@ -248,7 +249,12 @@ type jobPoll struct {
 	// (jobWire `wall_sec`, register D-116). 0 on a node too old to publish it,
 	// or on a lane that reports none — never read as "no wall".
 	WallSec int
-	Status  int
+	// Progress (0.131.0) is the node's liveness report for the running job
+	// (jobWire `progress`): the delegator keeps polling while LastProgressMs
+	// keeps moving inside AllowanceMs, bounded by CeilingSec. nil from a node
+	// that reports none.
+	Progress *core.LiveProgress
+	Status   int
 }
 
 // pollJobOnce is runner.pollOnce lifted to package level so the recovery pass
@@ -282,15 +288,16 @@ func pollJobOnceAt(ctx context.Context, cfg config.Config, u string) (jobPoll, e
 		return jobPoll{}, err
 	}
 	var wire struct {
-		State   string          `json:"state"`
-		Data    json.RawMessage `json:"data"`
-		Error   string          `json:"error"`
-		WallSec int             `json:"wall_sec"`
+		State    string             `json:"state"`
+		Data     json.RawMessage    `json:"data"`
+		Error    string             `json:"error"`
+		WallSec  int                `json:"wall_sec"`
+		Progress *core.LiveProgress `json:"progress"`
 	}
 	if resp.StatusCode == http.StatusOK {
 		if uerr := json.Unmarshal(body, &wire); uerr != nil {
 			return jobPoll{}, fmt.Errorf("job poll %s: not JSON: %w", u, uerr)
 		}
 	}
-	return jobPoll{State: wire.State, Data: wire.Data, JobErr: wire.Error, WallSec: wire.WallSec, Status: resp.StatusCode}, nil
+	return jobPoll{State: wire.State, Data: wire.Data, JobErr: wire.Error, WallSec: wire.WallSec, Progress: wire.Progress, Status: resp.StatusCode}, nil
 }

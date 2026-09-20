@@ -65,8 +65,8 @@ func TestRepackStopsAttemptsTheWallCannotHold(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), agentRepackAttemptFloor/2)
 	defer cancel()
 	_, _, _, attempts, err := p.repackStructured(ctx, agentTestSeat, schema, "The answer is 42.", agentRepackAttemptFloor)
-	if err == nil || !strings.Contains(err.Error(), "of the wall left") || attempts != 0 {
-		t.Fatalf("attempts=%d err=%v, want 0 attempts and the wall named", attempts, err)
+	if err == nil || !strings.Contains(err.Error(), "of the ceiling left") || attempts != 0 {
+		t.Fatalf("attempts=%d err=%v, want 0 attempts and the ceiling named", attempts, err)
 	}
 	if got := fake.grammarCNT.Load() + fake.chatFallbackCNT.Load(); got != 0 {
 		t.Fatalf("seat completions = %d, want 0 under a spent wall", got)
@@ -88,7 +88,7 @@ func TestRepackStopsAttemptsTheWallCannotHold(t *testing.T) {
 	ctx2, cancel2 := context.WithTimeout(context.Background(), agentRepackAttemptFloor+agentRepackAttemptFloor/8)
 	defer cancel2()
 	_, _, _, attempts, err = p.repackStructured(ctx2, agentTestSeat, schema, "The answer is 42.", agentRepackAttemptFloor)
-	if attempts != 1 || err == nil || !strings.Contains(err.Error(), "of the wall left") {
+	if attempts != 1 || err == nil || !strings.Contains(err.Error(), "of the ceiling left") {
 		t.Fatalf("attempts=%d err=%v, want exactly the one attempt the wall could hold", attempts, err)
 	}
 	// The floor scales with the contract: a tenth of the wall, capped.

@@ -54,6 +54,15 @@ const (
 	AgentTimeoutSecDefault = 300
 	AgentTimeoutSecCap     = 900
 
+	// AgentCeilingSecCap (0.131.0, liveness walls) bounds the SAFETY ceiling a
+	// node runs a contract under. Since 0.131.0 the wall above is the
+	// EXPECTATION the node reports as wall_sec; what ends a run is a STALL (no
+	// progress inside the seat's dynamic allowance) or this ceiling —
+	// max(3 x estimate, 2 x wall, 1800 s), never above 4 h. A token-bounded
+	// loop (max_steps x max_tokens + final + re-pack) at 1 tok/s ends before it.
+	AgentCeilingSecCap   = 14400
+	AgentCeilingSecFloor = 1800
+
 	// AgentAdmissionSecDefault is the node's default ADMISSION budget — the
 	// window a contract may spend at the cordon, in the llama-swap pre-flight,
 	// in the seat's cold-load warm-up and in the coherence probe BEFORE its
@@ -350,6 +359,12 @@ type AgentWireResult struct {
 	// too (what WOULD have run). Omitted when the contract named its own
 	// timeout_sec, or when the seat had no rate yet and the wire default ran.
 	WallSec int `json:"wall_sec,omitempty"`
+	// Liveness (0.131.0): the ceiling the run executed under, the stall
+	// allowance it was under when it ended (or was ended), and its last
+	// progress event. A `stalled:` or `ceiling` reason reads against these.
+	CeilingSec        int   `json:"ceiling_sec,omitempty"`
+	StallAllowanceSec int   `json:"stall_allowance_sec,omitempty"`
+	LastProgressMs    int64 `json:"last_progress_ms,omitempty"`
 	// Final-budget fit (0.122.1, register D-95). FinalBudgetFit is the
 	// final-answer completion budget the run actually opened at once the
 	// REMAINING wall was taken into account — never above the configured rule

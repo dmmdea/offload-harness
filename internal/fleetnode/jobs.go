@@ -68,6 +68,10 @@ type JobView struct {
 	// authoritative, and a delegator must never abandon a job the node is
 	// still running inside it.
 	WallSec int
+	// Progress (0.131.0, liveness walls) is the run's last liveness report
+	// (core.ReportProgress), published WHILE THE JOB RUNS so the delegator
+	// polls on progress rather than on a clock. nil until the lane reports one.
+	Progress *core.LiveProgress
 	// Gated marks a job whose poll rides the SAME bearer rule as an agent
 	// job without being one (0.116.0: the vision lane — its result is the
 	// caller's image judged in prose). Kept apart from Agent so the jobs feed
@@ -91,6 +95,7 @@ type job struct {
 	gated      bool      // AcceptSpec.Gated → poll auth applies without the agent marker (vision lane)
 	terminalAt time.Time // set when state turns done|error; drives ttl eviction
 	wallSec    int       // the wall the run reported (register D-116); 0 = none reported
+	progress   *core.LiveProgress // the run's last liveness report (0.131.0); nil = none yet
 	// task/model/acceptedAt/startedAt/finishedAt are the /fleet/jobs feed's
 	// metadata (see AcceptSpec). Written under mu exactly like every other
 	// field here: acceptedAt in Admit, startedAt in claimLocked's
@@ -594,7 +599,7 @@ func (j *Jobs) viewLocked(id string) (*JobView, bool) {
 	if !ok {
 		return nil, false
 	}
-	return &JobView{ID: id, State: jb.state, Data: jb.data, Error: jb.err, Agent: jb.agent, Gated: jb.gated, WallSec: jb.wallSec}, true
+	return &JobView{ID: id, State: jb.state, Data: jb.data, Error: jb.err, Agent: jb.agent, Gated: jb.gated, WallSec: jb.wallSec, Progress: jb.progress}, true
 }
 
 // Terminal reports whether a state is one a job never leaves (write-once).
@@ -682,6 +687,20 @@ func (j *Jobs) FinishedAgentWalls(n int) []time.Duration {
 // a TERMINAL job is never rewritten: the result carries its own wall from
 // there on, and a late report must not edit a finished record. The last
 // report before a job turns terminal wins — a wall is stamped once today.
+// SetProgress records the run's latest liveness report on a RUNNING job
+// (0.131.0). A terminal job ignores it, as SetWall does: a late report must
+// not resurrect a record the delegator has already read as done.
+func (j *Jobs) SetProgress(id string, p core.LiveProgress) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	jb, ok := j.m[id]
+	if !ok || jb.state == JobDone || jb.state == JobError {
+		return
+	}
+	cp := p
+	jb.progress = &cp
+}
+
 func (j *Jobs) SetWall(id string, sec int) {
 	if sec <= 0 {
 		return
