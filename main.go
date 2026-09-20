@@ -2453,6 +2453,10 @@ func runFleetServe(args []string) error {
 		},
 		GpuVendor: prov.Vendor,
 		GpuArch:   prov.Arch,
+		// ADR 0054: the serving backends this install rendered, primary first — a
+		// dual-route node (Vulkan iGPU + CPU family) advertises both so a caller can
+		// pick the route by seat id. nil (no manifest backend) omits the field.
+		Backends: info.Backends(),
 		// ADR 0024: the manifest's additive-device list, advertised verbatim so
 		// a delegator can route NPU-owned work here. A hand-built node has no
 		// installed.json (the Lenovo, verified) and would never list its device;

@@ -20,7 +20,7 @@ import (
 // live? The answer was previously "$HOME", i.e. the OS drive, on every machine.
 func runInstall(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("install needs a subcommand: detect, plan, render, volumes, seed, vllm-seat")
+		return fmt.Errorf("install needs a subcommand: detect, plan, render, volumes, seed, vllm-seat, tier-info")
 	}
 	switch args[0] {
 	case "detect":
@@ -35,8 +35,10 @@ func runInstall(args []string) error {
 		return runInstallSeed(args[1:])
 	case "vllm-seat":
 		return runInstallVLLMSeat(args[1:])
+	case "tier-info":
+		return runInstallTierInfo(args[1:])
 	default:
-		return fmt.Errorf("unknown install subcommand %q (have: detect, plan, render, volumes, seed, vllm-seat)", args[0])
+		return fmt.Errorf("unknown install subcommand %q (have: detect, plan, render, volumes, seed, vllm-seat, tier-info)", args[0])
 	}
 }
 
@@ -266,4 +268,41 @@ func homeOr(flag, env, home, sub string) string {
 		return ""
 	}
 	return strings.TrimRight(strings.ReplaceAll(home, `\`, "/"), "/") + "/" + sub
+}
+
+// runInstallTierInfo prints one tier's serving identity from the embedded table —
+// backend and alt_backends — so a shell installer can write an honest manifest
+// without parsing profiles.json itself. --json is the only shape (the wrappers pipe
+// it to jq); a human reads the tier docs instead.
+func runInstallTierInfo(args []string) error {
+	fs := flag.NewFlagSet("install tier-info", flag.ExitOnError)
+	profileID := fs.String("profile", "", "tier id (required)")
+	asJSON := fs.Bool("json", false, "emit JSON")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *profileID == "" {
+		return fmt.Errorf("install tier-info: --profile is required")
+	}
+	var doc struct {
+		Profiles map[string]servingProfile `json:"profiles"`
+	}
+	if err := json.Unmarshal(embeddedProfiles, &doc); err != nil {
+		return err
+	}
+	p, ok := doc.Profiles[*profileID]
+	if !ok {
+		return fmt.Errorf("install tier-info: unknown tier %q", *profileID)
+	}
+	alts := p.AltBackends
+	if alts == nil {
+		alts = []string{}
+	}
+	out := map[string]any{"profile": *profileID, "backend": p.Backend, "alt_backends": alts}
+	if !*asJSON {
+		fmt.Printf("profile: %s\nbackend: %s\nalt_backends: %v\n", *profileID, p.Backend, alts)
+		return nil
+	}
+	enc := json.NewEncoder(os.Stdout)
+	return enc.Encode(out)
 }

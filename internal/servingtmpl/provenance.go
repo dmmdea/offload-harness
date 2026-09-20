@@ -166,6 +166,7 @@ type ParamsBasis struct {
 	DisplayLayer      *config.LayerSpec `json:"display_layer"`
 	GPUEnv            []string          `json:"gpu_env"`
 	Backend           string            `json:"backend"`
+	AltCPULlamaBin    string            `json:"alt_cpu_llama_bin,omitempty"`
 	DisableCUDAGraphs bool              `json:"disable_cuda_graphs"`
 	VLLMSeat          *vllmseat.Spec    `json:"vllm_seat"`
 	VLLMRuntime       vllmseat.Runtime  `json:"vllm_runtime"`
@@ -180,7 +181,7 @@ func BasisOf(p Params) ParamsBasis {
 		IncludeQ354B: p.IncludeQ354B, IncludeQ359B: p.IncludeQ359B,
 		IncludeQ3827B: p.IncludeQ3827B,
 		Seats:         p.Seats, Home: p.Home, GOOS: p.GOOS, DisplayLayer: p.DisplayLayer, GPUEnv: p.GPUEnv,
-		Backend: p.Backend, DisableCUDAGraphs: p.DisableCUDAGraphs,
+		Backend: p.Backend, AltCPULlamaBin: p.AltCPULlamaBin, DisableCUDAGraphs: p.DisableCUDAGraphs,
 		VLLMSeat: p.VLLMSeat, VLLMRuntime: p.VLLMRuntime,
 	}
 }
@@ -197,7 +198,7 @@ func (b ParamsBasis) Params() Params {
 		IncludeQ354B: b.IncludeQ354B, IncludeQ359B: b.IncludeQ359B,
 		IncludeQ3827B: b.IncludeQ3827B,
 		Seats:         b.Seats, Home: b.Home, GOOS: b.GOOS, DisplayLayer: b.DisplayLayer, GPUEnv: b.GPUEnv,
-		Backend: b.Backend, DisableCUDAGraphs: b.DisableCUDAGraphs,
+		Backend: b.Backend, AltCPULlamaBin: b.AltCPULlamaBin, DisableCUDAGraphs: b.DisableCUDAGraphs,
 		VLLMSeat: b.VLLMSeat, VLLMRuntime: b.VLLMRuntime,
 	}
 }

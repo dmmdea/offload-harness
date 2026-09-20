@@ -2,6 +2,7 @@
   "_comment": "H2 profile -> serving-params map. PROJECTED defaults encoding the 12-config hardware matrix (docs/superpowers/plans/2026-07-11-agent-capabilities-and-hardware-matrix.md). install.ps1 Step 6 reads the profile id + ram_tier emitted by detect.ps1 and renders the backend llama-swap template with these values. H3 (selftest.ps1) MEASURES on each real box and refines these numbers; nothing here is measured yet.",
   "_fields": {
     "ctx_size": "--ctx-size served window (tokens).",
+  "alt_backends": "optional: extra serving backends this tier renders BESIDE its primary one on the same box (today only [\"cpu\"]: the CPU seat family — the tier's chat weights as <id>-cpu entries run by a CPU llama-server build, joined to the interactive set; rendered only when `install render --llama-bin-cpu <dir>` is given). Declared per tier and MEASURED before it ships: binxarn amd-gcn 2026-09-20.",
     "long_ctx_size": "optional: the LONG window a tier serves on a dedicated opt-in twin seat (the `-262k` entry the template renders with a literal --ctx-size), for tiers whose extra cards buy context. 0/absent = no long twin. The composite tier routes window overflow to it.",
     "kv_type": "q8_0|f16 -> --cache-type-k/--cache-type-v (kept symmetric; q8_0 V requires flash-attn on).",
     "agent_ctx_tokens": "value for the agent's -ctx-tokens (compaction budget); matches ctx_size.",
@@ -1344,6 +1345,7 @@
       "moe_26b": "drop",
       "flash_attn": "off",
       "backend": "vulkan",
+      "alt_backends": ["cpu"],
       "config_seed": {
         "escalation_model": "",
         "reasoning_model": ""

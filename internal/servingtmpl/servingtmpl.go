@@ -103,6 +103,11 @@ type Params struct {
 	// GPU flags (-ngl, --flash-attn) UNLESS this is "cpu", where the template's own
 	// chat models carry neither and a GPU-less build would only ignore them.
 	Backend string
+	// AltCPULlamaBin, when set, is the directory of a CPU llama-server build and asks
+	// for the CPU seat family (altcpu.go): the tier's chat weights as `<id>-cpu`
+	// entries beside the GPU seats, joined to the interactive set. Empty = the plain
+	// tier, byte-identical to a render without this field. Refused on a cpu tier.
+	AltCPULlamaBin string
 
 	// DisableCUDAGraphs emits GGML_CUDA_DISABLE_GRAPHS=1 on the 26B seats.
 	//
@@ -242,6 +247,16 @@ func Render(tmpl string, p Params) (string, error) {
 	out, seatFrag, err := insertSeats(out, p)
 	if err != nil {
 		return "", err
+	}
+	// The CPU seat family (a dual-route node) goes in after the media seats, in the
+	// same token vocabulary, and joins the swappable fragment so the one substitution
+	// pass below places it in the interactive set beside them.
+	if p.AltCPULlamaBin != "" {
+		var frag string
+		if out, frag, err = insertAltCPUSeats(out, p); err != nil {
+			return "", err
+		}
+		seatFrag[roleSwappable] += frag
 	}
 	// The display layer's fences resolve AFTER the seats, because the display
 	// set names the vLLM seat by the matrix var insertVLLMSeat just allocated,

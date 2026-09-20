@@ -125,6 +125,11 @@ type Options struct {
 	Reclaim   func(freeGiB, totalGiB float64) ReclaimVerdict
 	GpuVendor string
 	GpuArch   string
+	// Backends is the serving-backend list from the installer's manifest
+	// (InstalledInfo.Backends: primary first, then the alternates this install
+	// rendered — a dual-route node advertises ["vulkan","cpu"]). nil omits the
+	// field, so every node without a manifest backend is byte-identical.
+	Backends []string
 	// Accelerators is the additive-device list from the installer's manifest
 	// (installed.json `accelerators`, ADR 0024) — advertised verbatim in health
 	// so a delegator can route NPU-owned work to this node. Empty = omitted.
@@ -1010,6 +1015,10 @@ type healthPayload struct {
 	SchemaVersion int    `json:"schema_version"`
 	GpuVendor     string `json:"gpu_vendor"`
 	GpuArch       string `json:"gpu_arch"`
+	// Backends lists the serving backends this node serves, primary first
+	// (["vulkan","cpu"] on a dual-route node); a caller picks a route by seat id
+	// (`gemma4-e2b` vs `gemma4-e2b-cpu`). Additive + omitempty (ADR 0054).
+	Backends []string `json:"backends,omitempty"`
 	// Accelerators is the installer-manifest additive-device list (ADR 0024).
 	// Additive + omitempty: a node with none emits a byte-identical payload.
 	Accelerators []string `json:"accelerators,omitempty"`
@@ -1344,6 +1353,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		SchemaVersion:         1,
 		GpuVendor:             s.opts.GpuVendor,
 		GpuArch:               s.opts.GpuArch,
+		Backends:              s.opts.Backends,
 		Accelerators:          s.opts.Accelerators,
 		VramTotalGb:           snap.TotalGiB,
 		VramFreeGb:            snap.FreeGiB,

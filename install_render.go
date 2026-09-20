@@ -60,11 +60,16 @@ func profilesJSON(root string) ([]byte, error) {
 // servingProfile is the slice of a profiles.json entry that decides how a tier
 // SERVES. (The media half lives in internal/tierseed.)
 type servingProfile struct {
-	CtxSize    int    `json:"ctx_size"`
-	KVType     string `json:"kv_type"`
-	FlashAttn  string `json:"flash_attn"`
-	Backend    string `json:"backend"`
-	Include26B bool   `json:"include_26b"`
+	CtxSize   int    `json:"ctx_size"`
+	KVType    string `json:"kv_type"`
+	FlashAttn string `json:"flash_attn"`
+	Backend   string `json:"backend"`
+	// AltBackends lists the extra serving backends a tier may render BESIDE its
+	// primary one on the same box (today: ["cpu"] — the CPU seat family, rendered
+	// when --llama-bin-cpu names a CPU build). Declared per tier so a box never
+	// grows a second route the tier table does not know about.
+	AltBackends []string `json:"alt_backends,omitempty"`
+	Include26B  bool     `json:"include_26b"`
 	// IncludeQwen38 gates the Qwen3.8-27B coder/agent entry (and, in install.ps1,
 	// its GGUF+mmproj downloads) the same way Include26B gates the 26B. Absent =
 	// false: only the tiers that measured (or project) the seat set it.
@@ -326,6 +331,9 @@ type renderRequest struct {
 	Home      string
 	Threads   int
 	VLLM      vllmRuntimeFlags
+	// AltLlamaBinCPU (--llama-bin-cpu) is the CPU build's dir; non-empty renders the
+	// CPU seat family, which the tier must declare via alt_backends.
+	AltLlamaBinCPU string
 	// PinnedVLLM, when set, REPLACES the vLLM seat resolution instead of running
 	// it. Only the replay sets it: vllmSeatFor inspects the LOCAL box (does this
 	// machine have the hand-built venv and the snapshot?), so re-running the
@@ -419,6 +427,14 @@ func deriveRender(profilesRaw []byte, req renderRequest) (renderResult, error) {
 	if err != nil {
 		return renderResult{}, err
 	}
+	// A second route is a per-tier declaration, not a per-box flag: the flag renders
+	// it, the table permits it. Either half alone is an error the operator sees.
+	if req.AltLlamaBinCPU != "" && !hasAltBackend(p, "cpu") {
+		return renderResult{}, fmt.Errorf("tier %s: --llama-bin-cpu given but the tier declares no alt_backends [cpu] — add it to profiles.json (measured) or drop the flag", id)
+	}
+	if req.AltLlamaBinCPU == "" && hasAltBackend(p, "cpu") {
+		fmt.Fprintf(os.Stderr, "note: tier %s declares alt_backends [cpu]; pass --llama-bin-cpu <dir of a CPU llama-server build> to render its CPU seat family\n", id)
+	}
 
 	n := req.Threads
 	if n <= 0 {
@@ -449,6 +465,7 @@ func deriveRender(profilesRaw []byte, req renderRequest) (renderResult, error) {
 		IncludeQ354B: p.IncludeQwen354B, IncludeQ359B: p.IncludeQwen359B,
 		IncludeQ3827B: p.IncludeQwen3827B,
 		Seats:         p.MediaSeats, Home: req.Home, GOOS: target, GPUEnv: p.GPUEnv, Backend: p.Backend,
+		AltCPULlamaBin:    req.AltLlamaBinCPU,
 		DisableCUDAGraphs: p.DisableCUDAGraphs,
 		VLLMSeat:          seat, VLLMRuntime: seatRT,
 		DisplayLayer: displayLayerOf(layers),
@@ -479,6 +496,7 @@ func runInstallRender(args []string) error {
 	fs := flag.NewFlagSet("install render", flag.ExitOnError)
 	profileID := fs.String("profile", "", "tier id (default: classify this machine)")
 	llamaBin := fs.String("llama-bin", "", "directory holding llama-server and its shared objects")
+	altLlamaBinCPU := fs.String("llama-bin-cpu", "", "directory of a CPU llama-server build: renders the tier's CPU seat family beside its GPU seats (tier must declare alt_backends [cpu])")
 	modelsDir := fs.String("models", "", "directory holding the GGUF model files")
 	listen := fs.String("listen", "127.0.0.1:11436", "llama-swap listen address")
 	threads := fs.Int("threads", 0, "--threads per server (default: half the logical CPUs)")
@@ -505,7 +523,8 @@ func runInstallRender(args []string) error {
 	res, err := deriveRender(raw, renderRequest{
 		TierID: *profileID, Fallback: *fallback, RAMTier: *ramTier, GOOS: *goos,
 		LlamaBin: *llamaBin, ModelsDir: *modelsDir, Listen: *listen, Home: *home, Threads: *threads,
-		VLLM: vllmRuntimeFlags{user: *vllmUser, proxyHost: *vllmProxy, venv: *vllmVenv, seatDir: *vllmSeatDir, hfHome: *hfHome},
+		AltLlamaBinCPU: *altLlamaBinCPU,
+		VLLM:           vllmRuntimeFlags{user: *vllmUser, proxyHost: *vllmProxy, venv: *vllmVenv, seatDir: *vllmSeatDir, hfHome: *hfHome},
 	})
 	if err != nil {
 		return err
@@ -771,4 +790,14 @@ func servingConfigReporter(path string) func() (string, string) {
 		cachedID, cachedSt = rep.SpecSHA256, string(rep.State)
 		return cachedID, cachedSt
 	}
+}
+
+// hasAltBackend reports whether the tier declares b among its alt_backends.
+func hasAltBackend(p servingProfile, b string) bool {
+	for _, x := range p.AltBackends {
+		if x == b {
+			return true
+		}
+	}
+	return false
 }
