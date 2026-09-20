@@ -24,9 +24,15 @@ func Detect() Facts {
 		smi.OS, smi.RAMGb = f.OS, f.RAMGb
 		return smi
 	}
-	if name, vram := probeFallbackGPU(); name != "" {
+	if name, vram, vendorHint := probeFallbackGPU(); name != "" {
 		f.GPUName = name
 		f.Vendor = VendorFromName(name)
+		if f.Vendor == "none" && vendorHint != "" {
+			// The PCI vendor id is authoritative; the marketing/codename string only
+			// refines the arch. Without this, "Barcelo" (lspci for a Vega 7) turned an
+			// AMD APU into profile "cpu" — binxarn, 2026-09-20.
+			f.Vendor = vendorHint
+		}
 		f.Arch = ArchFromName(name)
 		f.VRAMGb = vram
 		if f.Vendor != "none" {
@@ -74,19 +80,22 @@ func probeNvidiaSMI() Facts {
 // probeFallbackGPU finds a non-NVIDIA adapter. It matters for exactly the case the
 // Windows-only detector never had to handle: an AMD box, where guessing "cpu" would
 // cost the machine its whole Vulkan serving path.
-func probeFallbackGPU() (name string, vramGb float64) {
+//
+// The third result is the vendor the PROBE itself knows (the PCI id on Linux), "" when
+// it does not; Detect falls back to it when the name alone is unrecognised.
+func probeFallbackGPU() (name string, vramGb float64, vendorHint string) {
 	if runtime.GOOS == "windows" {
 		out, err := run(15*time.Second, "powershell", "-NoProfile", "-Command",
 			"Get-CimInstance Win32_VideoController | Sort-Object AdapterRAM -Descending | Select-Object -First 1 -Property Name,AdapterRAM | ForEach-Object { \"$($_.Name)|$($_.AdapterRAM)\" }")
 		if err != nil {
-			return "", 0
+			return "", 0, ""
 		}
 		parts := strings.SplitN(strings.TrimSpace(out), "|", 2)
 		if len(parts) == 2 {
 			b, _ := strconv.ParseFloat(strings.TrimSpace(parts[1]), 64)
-			return strings.TrimSpace(parts[0]), b / (1 << 30)
+			return strings.TrimSpace(parts[0]), b / (1 << 30), ""
 		}
-		return strings.TrimSpace(parts[0]), 0
+		return strings.TrimSpace(parts[0]), 0, ""
 	}
 
 	// Linux: the DRM sysfs tree names the vendor by PCI id and, on amdgpu, exposes
@@ -101,9 +110,9 @@ func probeFallbackGPU() (name string, vramGb float64) {
 		var label string
 		switch strings.TrimSpace(string(vendor)) {
 		case "0x1002":
-			label = "AMD Radeon"
+			label, vendorHint = "AMD Radeon", "amd"
 		case "0x10de":
-			label = "NVIDIA"
+			label, vendorHint = "NVIDIA", "nvidia"
 		default:
 			continue
 		}
@@ -120,9 +129,9 @@ func probeFallbackGPU() (name string, vramGb float64) {
 				label = s
 			}
 		}
-		return label, vramGb
+		return label, vramGb, vendorHint
 	}
-	return "", 0
+	return "", 0, ""
 }
 
 // ramGb is total physical memory, rounded down — the dual-gpu band keys on it.
