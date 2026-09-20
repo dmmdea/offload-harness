@@ -13,7 +13,7 @@
 # Serving invariants (grammar reliability — do NOT change): --jinja, no MTP,
 # reasoning off — the reasoning-off invariant binds the CASCADE seats; the *-agent
 # entries below are explicitly reasoning/thinking seats (agent loop). Context size,
-# KV type and flash-attn are PROFILE-DRIVEN: amd-gcn renders 8K/f16/FA-off (measured
+# KV type and flash-attn are PROFILE-DRIVEN: amd-gcn renders 8K/f16/FA-on (measured
 # performance-NEUTRAL on RADV/Renoir at b9934, kept off as the tier's declared floor);
 # amd-rdna3 renders 16K/f16/FA-on.
 #

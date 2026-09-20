@@ -126,7 +126,7 @@ projected per-profile serving choices — `selftest.ps1` measures and refines th
 | `amd-rdna3` | #7 (780M + 64 GB, Vulkan) | `offload-e4b` | 16K (floor; canary → 32K) | f16 (floor; canary → q8_0) | `--cpu-moe` floor; canary → full-offload `-ngl 99` (~20–25 t/s measured elsewhere) — see the [AMD RDNA3 chapter](#amd-rdna3--the-780m-class-runbook-for-the-installing-agent) |
 | `amd-rdna3-dgpu` | discrete RDNA3 ≥12 GB (RX 7900-class, Vulkan) | `gemma4-26b-a4b` | 32K | q8_0 | full-GPU `-ngl 99` (on 12 GB the OOM remediation flips it to `--cpu-moe`) |
 | `ampere-6` | #10/#11 (3050 6 GB) | `offload-e4b` | 32K | q8_0 (conservative default; f16 measured viable) | dropped |
-| `amd-gcn` | #12 (Vega 7 + 32 GB, Vulkan) | `gemma4-e2b` | 8K | f16, FA off | dropped |
+| `amd-gcn` | #12 (Vega 7 + 32 GB, Vulkan + CPU alt route) | `gemma4-e2b` (agent `qwen3.5-4b-agent`) | 8K | f16, FA on (measured 2026-09-20) | dropped |
 | `cpu` | no GPU | `offload-e4b` (CPU) | 8K | f16, FA off | `--cpu-moe` if RAM ≥ ~56 GB, else dropped |
 
 **Big-VRAM Blackwell tiers (#13–15, added 2026-07-16):** cards ≥24 GB render the

@@ -8,7 +8,7 @@
 # / MOE-26B tokens from setup/templates/profiles.json. amd-rdna3 renders 16K/f16/
 # FA-on as the SAFE FLOOR (selftest's H3 canaries measure the promotions: ctx 32K,
 # q8_0 KV, 26B full-offload — the agent applies them canary-gated per SETUP-AGENT.md);
-# amd-rdna3-dgpu renders 32K/q8_0 (discrete card); amd-gcn renders 8K/f16/FA-off
+# amd-rdna3-dgpu renders 32K/q8_0 (discrete card); amd-gcn renders 8K/f16/FA-on (FA measured +4 % pp on binxarn 2026-09-20)
 # (weakest path). If the selftest hits allocation failures, the 26B profile switches
 # to cpu-moe (experts in RAM).
 #

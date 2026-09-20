@@ -88,7 +88,7 @@ confusion:
 - **Profile-driven:** `--cache-type-k` / `--cache-type-v` (`q8_0` on nine profiles; `f16` on the
   remaining five — the two large-VRAM Blackwell tiers, the two AMD floor profiles (`amd-rdna3`,
   `amd-gcn`), and CPU — K and V always symmetric, and `q8_0` for V requires flash-attention on)
-  and `--flash-attn` (on for twelve profiles, off for `amd-gcn`, and omitted entirely by the CPU
+  and `--flash-attn` (on for every GPU profile since 2026-09-20 — `amd-gcn` was the exception until it was measured — and omitted entirely by the CPU
   template because that backend has neither `-ngl` nor `--flash-attn`). On `amd-rdna3` the f16/16K
   values are an explicit SAFE FLOOR: the selftest's H3 canary suite (`fa_q8kv`, `ctx_sweep`,
   `moe_full_offload`) measures the q8_0/32K/26B-full-offload promotions on the real box, and the
