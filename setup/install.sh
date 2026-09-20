@@ -256,6 +256,11 @@ User=$SERVICE_USER
 WorkingDirectory=$PREFIX
 Environment=HOME=$PREFIX
 Environment=LOCAL_OFFLOAD_CONFIG=$CONFIG
+# OFFLOAD_HOME is where fleet-serve looks for installed.json (the tier manifest that
+# names vendor/arch and the UMA memory model). Without it the node resolved
+# $HOME/offload-stack/installed.json, found nothing, and advertised vendor=unknown
+# with a non-UMA composition on an APU (binxarn, 2026-09-20).
+Environment=OFFLOAD_HOME=$PREFIX
 ExecStart=/bin/sh -c '$PREFIX/bin/local-offload fleet-serve --listen "\$(tailscale ip -4)":18811 --listen-trusted-network --node-id $NODE_ID'
 Restart=on-failure
 
