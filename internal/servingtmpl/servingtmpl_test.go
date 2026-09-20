@@ -271,3 +271,32 @@ func TestIncludeQ354BOnAnEntrylessTemplateIsRefused(t *testing.T) {
 		t.Fatalf("IncludeQ354B=false must still render an entryless template: %v", err)
 	}
 }
+
+// TestCacheRAMFollowsTheRAMTier: every llama.cpp seat renders --cache-ram from the
+// tier-resolved figure, and an unset figure renders the llama-server default (8192)
+// rather than 0, which would switch the prompt cache off (ADR 0055).
+func TestCacheRAMFollowsTheRAMTier(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		mib  int
+		want string
+	}{
+		{"mid tier figure", 6144, "--cache-ram 6144"},
+		{"unset falls back to the server default", 0, "--cache-ram 8192"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := params()
+			p.CacheRAMMiB = tc.mib
+			got, err := Render(linuxCUDA(t), p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(got, tc.want) {
+				t.Errorf("want %q in the render", tc.want)
+			}
+			if strings.Contains(got, "--cache-ram 0") || strings.Contains(got, "__CACHE_RAM__") {
+				t.Errorf("render disabled the prompt cache or left the token: %s", got)
+			}
+		})
+	}
+}

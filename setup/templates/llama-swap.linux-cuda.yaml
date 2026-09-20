@@ -22,7 +22,7 @@ listen: __LISTEN__
 
 macros:
   common: >-
-    --ctx-size __CTX__ --flash-attn __FLASH_ATTN__ --cache-type-k __KV_K__ --cache-type-v __KV_V__
+    --ctx-size __CTX__ --flash-attn __FLASH_ATTN__ --cache-type-k __KV_K__ --cache-type-v __KV_V__ --cache-ram __CACHE_RAM__
     --threads __NTHREADS__ --jinja --reasoning off --port ${PORT} --host 127.0.0.1
   ld: "LD_LIBRARY_PATH=__LLAMA_BIN__:${LD_LIBRARY_PATH:-}"
 
@@ -62,7 +62,7 @@ models:
     cmd: >-
       __LLAMA_BIN__/llama-server --model __MODELS__/gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf
       __MOE_26B__ --parallel 1 --ctx-size __CTX__ --flash-attn __FLASH_ATTN__
-      --cache-type-k __KV_K__ --cache-type-v __KV_V__ --threads __NTHREADS__
+      --cache-type-k __KV_K__ --cache-type-v __KV_V__ --cache-ram __CACHE_RAM__ --threads __NTHREADS__
       --jinja --reasoning on --port ${PORT} --host 127.0.0.1
     checkEndpoint: /health
     ttl: 300
@@ -87,7 +87,7 @@ models:
     cmd: >-
       __LLAMA_BIN__/llama-server --model __MODELS__/Qwen3.5-4B-UD-Q4_K_XL.gguf
       --n-gpu-layers 99 --parallel 1 --ctx-size __CTX__ --flash-attn __FLASH_ATTN__
-      --cache-type-k __KV_K__ --cache-type-v __KV_V__ --threads __NTHREADS__
+      --cache-type-k __KV_K__ --cache-type-v __KV_V__ --cache-ram __CACHE_RAM__ --threads __NTHREADS__
       --jinja --port ${PORT} --host 127.0.0.1
     checkEndpoint: /health
     ttl: 300
@@ -123,7 +123,7 @@ models:
     cmd: >-
       __LLAMA_BIN__/llama-server --model __MODELS__/Qwen3.5-9B-UD-Q4_K_XL.gguf
       --n-gpu-layers 999 --parallel 1 --ctx-size 32768 --flash-attn __FLASH_ATTN__
-      --cache-type-k __KV_K__ --cache-type-v __KV_V__ --threads __NTHREADS__
+      --cache-type-k __KV_K__ --cache-type-v __KV_V__ --cache-ram __CACHE_RAM__ --threads __NTHREADS__
       --jinja --port ${PORT} --host 127.0.0.1
     checkEndpoint: /health
     ttl: 300
@@ -144,7 +144,7 @@ models:
       __LLAMA_BIN__/llama-server --model __MODELS__/Qwen3.8-27B-UD-IQ3_S.gguf
       --spec-type draft-mtp --spec-draft-n-max 3
       --n-gpu-layers 999 --parallel 1 --ctx-size 49152 --flash-attn __FLASH_ATTN__
-      --cache-type-k __KV_K__ --cache-type-v __KV_V__ --threads __NTHREADS__
+      --cache-type-k __KV_K__ --cache-type-v __KV_V__ --cache-ram __CACHE_RAM__ --threads __NTHREADS__
       --jinja --reasoning off --port ${PORT} --host 127.0.0.1
     checkEndpoint: /health
     ttl: 300

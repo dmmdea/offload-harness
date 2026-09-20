@@ -12,7 +12,7 @@ logLevel: info
 
 macros:
   common: >-
-    --ctx-size __CTX__ --cache-type-k __KV_K__ --cache-type-v __KV_V__
+    --ctx-size __CTX__ --cache-type-k __KV_K__ --cache-type-v __KV_V__ --cache-ram __CACHE_RAM__
     --jinja --reasoning off --threads __NTHREADS__ --port ${PORT} --host 127.0.0.1
 
 models:

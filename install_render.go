@@ -390,6 +390,8 @@ func deriveRender(profilesRaw []byte, req renderRequest) (renderResult, error) {
 
 	var doc struct {
 		Profiles map[string]servingProfile `json:"profiles"`
+		// CacheRAMMiBByRAMTier: top-level map ram_tier -> --cache-ram MiB (ADR 0055).
+		CacheRAMMiBByRAMTier map[string]int `json:"cache_ram_mib_by_ram_tier"`
 	}
 	if err := json.Unmarshal(profilesRaw, &doc); err != nil {
 		return renderResult{}, fmt.Errorf("profiles.json: %w", err)
@@ -465,6 +467,7 @@ func deriveRender(profilesRaw []byte, req renderRequest) (renderResult, error) {
 		LlamaBin: req.LlamaBin, ModelsDir: req.ModelsDir, Listen: req.Listen,
 		Ctx: p.CtxSize, KVType: p.KVType, FlashAttn: p.FlashAttn,
 		MoE26B: moe, Threads: n, Include26B: include26B, IncludeQ38: p.IncludeQwen38,
+		CacheRAMMiB:  cacheRAMFor(doc.CacheRAMMiBByRAMTier, ramTier),
 		IncludeQ354B: p.IncludeQwen354B, IncludeQ359B: p.IncludeQwen359B,
 		IncludeQ3827B: p.IncludeQwen3827B,
 		Seats:         p.MediaSeats, Home: req.Home, GOOS: target, GPUEnv: p.GPUEnv, Backend: p.Backend,
@@ -803,4 +806,17 @@ func hasAltBackend(p servingProfile, b string) bool {
 		}
 	}
 	return false
+}
+
+// cacheRAMFor picks the --cache-ram MiB for a RAM tier from the profiles document.
+// An unknown or empty tier, or a missing map, yields 0 so the renderer falls back to
+// the llama-server default (8192) instead of switching the prompt cache off.
+func cacheRAMFor(byTier map[string]int, ramTier string) int {
+	if byTier == nil {
+		return 0
+	}
+	if v, ok := byTier[strings.ToLower(strings.TrimSpace(ramTier))]; ok && v > 0 {
+		return v
+	}
+	return 0
 }

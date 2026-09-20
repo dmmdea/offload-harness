@@ -151,6 +151,7 @@ type ParamsBasis struct {
 	FlashAttn     string           `json:"flash_attn"`
 	MoE26B        string           `json:"moe_26b"`
 	Threads       int              `json:"threads"`
+	CacheRAMMiB   int              `json:"cache_ram_mib"`
 	Include26B    bool             `json:"include_26b"`
 	IncludeQ38    bool             `json:"include_qwen38"`
 	IncludeQ354B  bool             `json:"include_qwen35_4b"`
@@ -177,7 +178,7 @@ func BasisOf(p Params) ParamsBasis {
 	return ParamsBasis{
 		LlamaBin: p.LlamaBin, ModelsDir: p.ModelsDir, Listen: p.Listen,
 		Ctx: p.Ctx, KVType: p.KVType, FlashAttn: p.FlashAttn, MoE26B: p.MoE26B,
-		Threads: p.Threads, Include26B: p.Include26B, IncludeQ38: p.IncludeQ38,
+		Threads: p.Threads, CacheRAMMiB: p.CacheRAMMiB, Include26B: p.Include26B, IncludeQ38: p.IncludeQ38,
 		IncludeQ354B: p.IncludeQ354B, IncludeQ359B: p.IncludeQ359B,
 		IncludeQ3827B: p.IncludeQ3827B,
 		Seats:         p.Seats, Home: p.Home, GOOS: p.GOOS, DisplayLayer: p.DisplayLayer, GPUEnv: p.GPUEnv,
@@ -194,7 +195,7 @@ func (b ParamsBasis) Params() Params {
 	return Params{
 		LlamaBin: b.LlamaBin, ModelsDir: b.ModelsDir, Listen: b.Listen,
 		Ctx: b.Ctx, KVType: b.KVType, FlashAttn: b.FlashAttn, MoE26B: b.MoE26B,
-		Threads: b.Threads, Include26B: b.Include26B, IncludeQ38: b.IncludeQ38,
+		Threads: b.Threads, CacheRAMMiB: b.CacheRAMMiB, Include26B: b.Include26B, IncludeQ38: b.IncludeQ38,
 		IncludeQ354B: b.IncludeQ354B, IncludeQ359B: b.IncludeQ359B,
 		IncludeQ3827B: b.IncludeQ3827B,
 		Seats:         b.Seats, Home: b.Home, GOOS: b.GOOS, DisplayLayer: b.DisplayLayer, GPUEnv: b.GPUEnv,

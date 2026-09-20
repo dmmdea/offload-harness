@@ -6,6 +6,21 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.131.2] - 2026-09-20 - llama.cpp prompt cache sized per RAM tier (ADR 0055, Layer 1)
+
+- Every llama.cpp seat renders `--cache-ram __CACHE_RAM__` from the new top-level profiles map
+  `cache_ram_mib_by_ram_tier` (min 1024 / low 2048 / mid 6144 / high 12288 MiB; starting values,
+  measured and revised by Task 3 of the prompt-cache plan). llama-server's host-RAM prompt cache
+  had been running at its fixed 8192 default on every box; a 4 GB Vivobook and a 64 GB Lenovo got
+  the same figure. An unset figure renders 8192, never 0 (`Params.cacheRAMMiB()`), so an older
+  caller cannot switch the cache off by omission. vLLM seats are untouched (LMCache, ADR 0045).
+- `render.tests.ps1` asserts the flag on the ampere-8/mid row; `TestCacheRAMFollowsTheRAMTier`.
+- `amd-gcn` window 8192 → 32768 (`ctx_size` + `agent_ctx_tokens`), measured on binxarn: a 23,889-token
+  prompt in 277.5 s at 86 tok/s on the Vulkan agent seat with 3.9 GiB of GTT, and 8.4 s on the repeat
+  (the RAM prompt cache at work). The installer self-test row follows.
+- Plan: `plans/2026-09-20-llamacpp-prompt-cache-tiers.md` (operator-approved 2026-09-20); Layer 2
+  (harness-driven `--slot-save-path` SSD save/restore) follows in its own releases.
+
 ## [0.131.1] - 2026-09-20 - Liveness walls: the unmeasured prefill prior was 4x too optimistic, and vLLM seats were never measured
 
 ### Fixed

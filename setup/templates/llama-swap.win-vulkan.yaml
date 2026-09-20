@@ -8,7 +8,7 @@
 # / MOE-26B tokens from setup/templates/profiles.json. amd-rdna3 renders 16K/f16/
 # FA-on as the SAFE FLOOR (selftest's H3 canaries measure the promotions: ctx 32K,
 # q8_0 KV, 26B full-offload — the agent applies them canary-gated per SETUP-AGENT.md);
-# amd-rdna3-dgpu renders 32K/q8_0 (discrete card); amd-gcn renders 8K/f16/FA-on (FA measured +4 % pp on binxarn 2026-09-20)
+# amd-rdna3-dgpu renders 32K/q8_0 (discrete card); amd-gcn renders 32K/f16/FA-on (32K + FA measured +4 % pp on binxarn 2026-09-20)
 # (weakest path). If the selftest hits allocation failures, the 26B profile switches
 # to cpu-moe (experts in RAM).
 #
@@ -27,7 +27,7 @@ logLevel: info
 
 macros:
   common: >-
-    --ctx-size __CTX__ --flash-attn __FLASH_ATTN__ --cache-type-k __KV_K__ --cache-type-v __KV_V__
+    --ctx-size __CTX__ --flash-attn __FLASH_ATTN__ --cache-type-k __KV_K__ --cache-type-v __KV_V__ --cache-ram __CACHE_RAM__
     --jinja --reasoning off --port ${PORT} --host 127.0.0.1
 
 models:
@@ -61,7 +61,7 @@ models:
     cmd: >-
       __LLAMA_BIN__/llama-server.exe -m __MODELS__/gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf
       __MOE_26B__ --parallel 1 --ctx-size __CTX__ --flash-attn __FLASH_ATTN__
-      --cache-type-k __KV_K__ --cache-type-v __KV_V__ --jinja --reasoning on
+      --cache-type-k __KV_K__ --cache-type-v __KV_V__ --cache-ram __CACHE_RAM__ --jinja --reasoning on
       --port ${PORT} --host 127.0.0.1
     ttl: 300
   # AGENT seat for the SMALL tiers: Qwen3.5-4B, gated on the tier's include_qwen35_4b
@@ -78,7 +78,7 @@ models:
     cmd: >-
       __LLAMA_BIN__/llama-server.exe -m __MODELS__/Qwen3.5-4B-UD-Q4_K_XL.gguf
       -ngl 999 --parallel 1 --ctx-size __CTX__ --flash-attn __FLASH_ATTN__
-      --cache-type-k __KV_K__ --cache-type-v __KV_V__ --jinja --port ${PORT} --host 127.0.0.1
+      --cache-type-k __KV_K__ --cache-type-v __KV_V__ --cache-ram __CACHE_RAM__ --jinja --port ${PORT} --host 127.0.0.1
     ttl: 300
   embeddinggemma:
     env: [GGML_VK_VISIBLE_DEVICES=0]
