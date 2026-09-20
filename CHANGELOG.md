@@ -6,6 +6,31 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.130.6] - 2026-09-20 - the first Linux AMD node: detect, templates and a Linux GPU memory provider
+
+### Added
+- **Linux serving templates for the `vulkan` and `cpu` backends** (`setup/templates/llama-swap.linux-vulkan.yaml`,
+  `llama-swap.linux-cpu.yaml`). A tier is a hardware class, but both backends shipped Windows templates only, so a
+  Linux AMD box carrying the MEASURED `amd-gcn` tier could not be installed (`install.sh`: "no serving template for
+  linux/vulkan"). `TestVulkanAndCPUTiersRenderOnLinux` keeps every vulkan/cpu tier rendering on both OSes with its
+  seats present. (#416)
+- **`linux-amdgpu` GPU memory provider** (ADR 0053): `fleet-serve` on Linux reads `/sys/class/drm/card*/device/mem_info_*`
+  — VRAM plus, on a UMA profile, the driver's own GTT pool as the shared budget — instead of refusing with "no working
+  GPU memory source". The generic source is now named per OS (`linux-amdgpu` / `windows-generic`) in the banner and
+  the gate error; `ResolveProvider`'s signature and label are unchanged. (#417)
+
+### Fixed
+- **An unrecognised `lspci` device name erased the PCI vendor the Linux probe had already read**, classifying a Ryzen
+  APU ("Barcelo") as profile `cpu`. The probe now keeps the PCI-id vendor as a hint, and the arch/vendor rules know the
+  Vega-era APU codenames (Barcelo, Cezanne, Lucienne, Renoir, Picasso, Raven). (#415)
+- **`install.sh`'s fleet-node unit never exported `OFFLOAD_HOME`**, so the node resolved `$HOME/offload-stack/installed.json`,
+  found no manifest and advertised `vendor=unknown` with a non-UMA composition. (#417)
+- **`seat_closure_test.renderParams` never set `Backend`**, so every closure render treated the `cpu` tier as a GPU tier
+  (seats gained `-ngl`/`--flash-attn` the installer never emits). (#416)
+
+Measured on the first node (binxarn, Ryzen 5 5625U / Vega 7, Ubuntu 26.04, llama.cpp `b9934` release builds, 512 MiB
+carve-out): Vulkan E2B pp512 256 / tg128 22.8 t/s, E4B 129 / 11.9; CPU E2B 109 / 21.5. Six protocol tasks 0/6 deferred.
+
 ## [0.130.5] - 2026-09-19 - a forwarded accelerator call's PAIR card names the device and the node that ran it
 
 ### Fixed
