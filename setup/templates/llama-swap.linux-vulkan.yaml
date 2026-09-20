@@ -1,0 +1,175 @@
+# llama-swap.linux-vulkan.yaml — offload-harness family on the llama.cpp VULKAN backend
+# (Linux; AMD Radeon iGPU/dGPU — GCN5 APUs such as Barcelo/Cezanne/Renoir "Vega",
+# RDNA3 780M/7000-series — or any Vulkan GPU via RADV/AMDVLK/ANV). Rendered by
+# `local-offload install render`, which substitutes the __CTX__ / __KV_K__ / __KV_V__ /
+# __FLASH_ATTN__ / __MOE_26B__ / __LLAMA_BIN__ / __MODELS__ / __NTHREADS__ / __LISTEN__
+# tokens from the detected tier and drops the 26B block entirely on a tier whose
+# include_26b is false (amd-gcn drops it; amd-rdna3 keeps it cpu-moe).
+#
+# Added 2026-09-20: until then the ONLY Vulkan template was win-vulkan, so an AMD box
+# on Linux had a measured tier (amd-gcn, 2026-07-17) and no way to render it —
+# `install.sh` died at "no serving template for linux/vulkan" (binxarn, Ryzen 5 5625U).
+#
+# Serving invariants (grammar reliability — do NOT change): --jinja, no MTP,
+# reasoning off — the reasoning-off invariant binds the CASCADE seats; the *-agent
+# entries below are explicitly reasoning/thinking seats (agent loop). Context size,
+# KV type and flash-attn are PROFILE-DRIVEN: amd-gcn renders 8K/f16/FA-off (measured
+# performance-NEUTRAL on RADV/Renoir at b9934, kept off as the tier's declared floor);
+# amd-rdna3 renders 16K/f16/FA-on.
+#
+# VULKAN-SPECIFIC AND LOAD-BEARING:
+#   * GGML_VK_VISIBLE_DEVICES=0 pins ONE Vulkan device deterministically (a box can
+#     enumerate iGPU + discrete + llvmpipe in varying order). If
+#     `llama-server --list-devices` shows the wrong adapter first, change the index.
+#   * On an APU the "VRAM" is the BIOS carve-out (often 512 MiB); RADV allocates
+#     HOST_VISIBLE memory from GTT, so -ngl 999 still offloads every layer — measured
+#     2026-09-20 on a 512 MiB carve-out (E2B pp128 252 t/s vs 121 on the CPU build).
+#
+# LINUX-SPECIFIC AND LOAD-BEARING: every seat carries LD_LIBRARY_PATH pointing at the
+# llama.cpp bin dir. Both a self-built llama-server and the official release tarball
+# link their own shared objects (libggml-vulkan.so beside the binary); without it the
+# process dies at exec with a loader error that looks nothing like a config problem.
+healthCheckTimeout: 300
+logLevel: info
+listen: __LISTEN__
+
+macros:
+  common: >-
+    --ctx-size __CTX__ --flash-attn __FLASH_ATTN__ --cache-type-k __KV_K__ --cache-type-v __KV_V__
+    --threads __NTHREADS__ --jinja --reasoning off --port ${PORT} --host 127.0.0.1
+  ld: "LD_LIBRARY_PATH=__LLAMA_BIN__:${LD_LIBRARY_PATH:-}"
+  vk: "GGML_VK_VISIBLE_DEVICES=0"
+
+models:
+  offload-e4b:
+    aliases: [gemma4-e4b, offload]
+    env: ["${ld}", "${vk}"]
+    cmd: >-
+      __LLAMA_BIN__/llama-server --model __MODELS__/gemma-4-E4B-it-qat-UD-Q4_K_XL.gguf
+      --n-gpu-layers 999 --parallel 1 ${common}
+    checkEndpoint: /health
+    ttl: 300
+  gemma4-e2b:
+    aliases: [e2b]
+    env: ["${ld}", "${vk}"]
+    cmd: >-
+      __LLAMA_BIN__/llama-server --model __MODELS__/gemma-4-E2B-it-qat-UD-Q4_K_XL.gguf
+      --n-gpu-layers 999 ${common}
+    checkEndpoint: /health
+    ttl: 300
+  gemma4-26b-a4b:
+    env: ["${ld}", "${vk}"]
+    cmd: >-
+      __LLAMA_BIN__/llama-server --model __MODELS__/gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf
+      __MOE_26B__ --parallel 1 ${common}
+    checkEndpoint: /health
+    ttl: 300
+  # AGENT seat: same 26B weights and geometry as the cascade seat above; the ONLY
+  # difference is reasoning ON (thinking agent loop). Flags written explicitly
+  # rather than via ${common} because the macro pins reasoning off. Exists whenever
+  # the 26B exists: the renderer strips it together with the 26B when a tier (or
+  # the RAM gate) drops it. A tier is a HARDWARE class, so the seat the Windows
+  # Vulkan template serves must exist here too — same tier, same capabilities.
+  gemma-4-26b-agent:
+    aliases: [26b-agent, gemma4-26b-agent]
+    env: ["${ld}", "${vk}"]
+    cmd: >-
+      __LLAMA_BIN__/llama-server --model __MODELS__/gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf
+      __MOE_26B__ --parallel 1 --ctx-size __CTX__ --flash-attn __FLASH_ATTN__
+      --cache-type-k __KV_K__ --cache-type-v __KV_V__ --threads __NTHREADS__
+      --jinja --reasoning on --port ${PORT} --host 127.0.0.1
+    checkEndpoint: /health
+    ttl: 300
+  # AGENT seat for the SMALL tiers: Qwen3.5-4B, gated on the tier's include_qwen35_4b
+  # exactly as on linux-cuda (the renderer strips the block, its matrix var and its
+  # set membership together). Flags EXPLICIT, not ${common}: every score this seat was
+  # chosen on was measured under llama.cpp's DEFAULT reasoning behaviour. NO sampling
+  # flags: the agent loop sends `temperature: 0` on every request.
+  qwen3.5-4b-agent:
+    aliases: [qwen35-4b, agent-seat]
+    env: ["${ld}", "${vk}"]
+    cmd: >-
+      __LLAMA_BIN__/llama-server --model __MODELS__/Qwen3.5-4B-UD-Q4_K_XL.gguf
+      --n-gpu-layers 999 --parallel 1 --ctx-size __CTX__ --flash-attn __FLASH_ATTN__
+      --cache-type-k __KV_K__ --cache-type-v __KV_V__ --threads __NTHREADS__
+      --jinja --port ${PORT} --host 127.0.0.1
+    checkEndpoint: /health
+    ttl: 300
+  # AGENT seat for the 8GB tiers: Qwen3.5-9B, gated on include_qwen35_9b; mutually
+  # exclusive with the 4B seat (shared `agent-seat` alias). Thinking pinned OFF via
+  # the env twin — the CLI form is stripped by llama-swap's tokenizer (see linux-cuda).
+  qwen3.5-9b-agent:
+    aliases: [qwen35-9b, agent-seat]
+    env: ["${ld}", "${vk}", 'LLAMA_ARG_CHAT_TEMPLATE_KWARGS={"enable_thinking":false}']
+    cmd: >-
+      __LLAMA_BIN__/llama-server --model __MODELS__/Qwen3.5-9B-UD-Q4_K_XL.gguf
+      --n-gpu-layers 999 --parallel 1 --ctx-size 32768 --flash-attn __FLASH_ATTN__
+      --cache-type-k __KV_K__ --cache-type-v __KV_V__ --threads __NTHREADS__
+      --jinja --port ${PORT} --host 127.0.0.1
+    checkEndpoint: /health
+    ttl: 300
+  # AGENT seat for the 16GB class: Qwen3.8-27B, gated on include_qwen38_27b. Same
+  # literal 49,152 window as linux-cuda (measured fit on a 16 GB card); a Vulkan dGPU
+  # tier that declares this seat inherits that measurement, not a Vulkan-specific one.
+  qwen38-27b-agent:
+    aliases: [qwen38-27b, 27b-agent]
+    env: ["${ld}", "${vk}"]
+    cmd: >-
+      __LLAMA_BIN__/llama-server --model __MODELS__/Qwen3.8-27B-UD-IQ3_S.gguf
+      --spec-type draft-mtp --spec-draft-n-max 3
+      --n-gpu-layers 999 --parallel 1 --ctx-size 49152 --flash-attn __FLASH_ATTN__
+      --cache-type-k __KV_K__ --cache-type-v __KV_V__ --threads __NTHREADS__
+      --jinja --reasoning off --port ${PORT} --host 127.0.0.1
+    checkEndpoint: /health
+    ttl: 300
+  embeddinggemma:
+    aliases: [text-embedding, local-embed]
+    env: ["${ld}", "${vk}"]
+    cmd: >-
+      __LLAMA_BIN__/llama-server --model __MODELS__/embeddinggemma-300M-Q8_0.gguf
+      --embeddings --pooling mean --ctx-size 2048 --batch-size 2048 --ubatch-size 2048
+      --n-gpu-layers 999 --port ${PORT} --host 127.0.0.1
+    checkEndpoint: /health
+    ttl: 300
+  bge-reranker-v2-m3:
+    aliases: [reranker-v2-m3]
+    env: ["${ld}", "${vk}"]
+    cmd: >-
+      __LLAMA_BIN__/llama-server --model __MODELS__/bge-reranker-v2-m3-Q4_K_M.gguf
+      --reranking --pooling rank --ctx-size 8192 --batch-size 4096 --ubatch-size 4096
+      --n-gpu-layers 999 --port ${PORT} --host 127.0.0.1
+    checkEndpoint: /health
+    ttl: 300
+
+# This template accepts tier-declared media seats. A tier declares a residency ROLE,
+# never a set or group name: those are per-template, while a tier is a hardware class
+# that renders into several templates. The SEATS_SWAPPABLE / SEATS_RESIDENT markers in
+# the set expressions below (each wrapped in double underscores) say WHERE a seat of
+# that role joins the matrix; this directive says WHICH roles are accepted at all.
+# `env` is the macro a llama-backed seat carries — the loader path, which only the
+# Linux templates need. A seat's own gpu_env (the tier's GGML_VK_VISIBLE_DEVICES pin)
+# rides in the seat declaration. A template WITHOUT this directive renders no seats and
+# refuses by name rather than dropping them silently.
+# offload-seats: swappable resident env=${ld}
+# RESIDENCY IS DECLARED WITH `matrix:`, NOT `groups:` (llama-swap >= v202; a config
+# uses one or the other, never both — the measured `persistent`-group failure is
+# recorded in linux-cuda). Residents appear in EVERY set, so the solver may never evict
+# them; the chat tiers stay mutually exclusive. On an APU every seat shares the same
+# DDR pool, so exclusivity is also what keeps one model's weights from paging another's.
+matrix:
+  vars:
+    emb: embeddinggemma
+    rer: bge-reranker-v2-m3
+    e4b: offload-e4b
+    e2b: gemma4-e2b
+    m26: gemma4-26b-a4b
+    a26: gemma-4-26b-agent
+    q354: qwen3.5-4b-agent
+    q359: qwen3.5-9b-agent
+    q3827: qwen38-27b-agent
+  evict_costs:
+    emb: 1000
+    rer: 1000
+  sets:
+    residents: "emb & rer__SEATS_RESIDENT__"
+    interactive: "+residents & (e4b | e2b__M26_ALT____Q354B_ALT____Q359B_ALT____Q3827B_ALT____SEATS_SWAPPABLE__)"
