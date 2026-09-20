@@ -6,6 +6,9 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- **vLLM-CPU measured on the first Linux AMD node** (`cpu` and `amd-gcn` notes): builds and seats only with `--enforce-eager` + a 4 GB KV pool on a 30 GB box, at 3.1 tok/s vs 9.27 for llama.cpp CPU on the same family — recorded, not seated. (#422)
+
 ## [0.130.7] - 2026-09-20 - amd-gcn gets the Qwen3.5-4B agent seat (measured on the first Linux AMD node)
 
 ### Changed
