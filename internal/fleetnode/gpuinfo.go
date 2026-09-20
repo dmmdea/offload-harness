@@ -73,6 +73,27 @@ type InstalledInfo struct {
 	// Accelerators are the additive devices the installer detected (ADR 0024);
 	// advertised so a delegator can route NPU-owned work here.
 	Accelerators []string `json:"accelerators,omitempty"`
+	// AltBackends are the extra serving backends THIS install rendered beside the
+	// primary one (today: ["cpu"] when install.sh was given --llama-bin-cpu). The
+	// installer writes only what it rendered, so health never advertises a route
+	// the box cannot serve.
+	AltBackends []string `json:"alt_backends,omitempty"`
+}
+
+// Backends is the ordered list health advertises: the primary backend first,
+// then the alternates the install rendered. Empty (omitted from health) when
+// the manifest carries no backend — every pre-manifest node stays byte-identical.
+func (i InstalledInfo) Backends() []string {
+	if i.Backend == "" {
+		return nil
+	}
+	out := []string{i.Backend}
+	for _, b := range i.AltBackends {
+		if b != "" && b != i.Backend {
+			out = append(out, b)
+		}
+	}
+	return out
 }
 
 // ReadInstalledInfo loads InstalledInfo from an installed.json path. A missing

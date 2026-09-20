@@ -27,6 +27,7 @@ set -euo pipefail
 
 PREFIX=""
 LLAMA_BIN=""
+LLAMA_BIN_CPU=""
 MODELS=""
 LISTEN="127.0.0.1:11436"
 NODE_ID="$(hostname)"
@@ -67,6 +68,8 @@ Usage: install.sh [options]
   --prefix DIR        install root. Default: chosen by `install volumes` — the volume with
                       the most free space, never the OS volume.
   --llama-bin DIR     directory holding llama-server and its shared objects (required)
+  --llama-bin-cpu DIR directory of a CPU llama-server build: renders the tier's CPU seat family
+                      beside its GPU seats (only for a tier that declares alt_backends [cpu])
   --models DIR        directory holding the GGUF files (default: <prefix>/models)
   --listen ADDR       llama-swap listen address (default 127.0.0.1:11436)
   --node-id NAME      fleet node id (default: hostname)
@@ -90,6 +93,7 @@ while [ $# -gt 0 ]; do
     --bin) BIN="${2:?}"; shift 2 ;;
     --prefix) PREFIX="${2:?}"; shift 2 ;;
     --llama-bin) LLAMA_BIN="${2:?}"; shift 2 ;;
+    --llama-bin-cpu) LLAMA_BIN_CPU="${2:?}"; shift 2 ;;
     --models) MODELS="${2:?}"; shift 2 ;;
     --listen) LISTEN="${2:?}"; shift 2 ;;
     --node-id) NODE_ID="${2:?}"; shift 2 ;;
@@ -195,8 +199,12 @@ fi
 # Written once; the node falls back to config.json's list when it is absent (Coral D6).
 MANIFEST="$PREFIX/installed.json"
 if [ ! -f "$MANIFEST" ] && [ "$DRY_RUN" -eq 0 ]; then
-  jq -n --arg profile "$TIER" --arg accel "$ACCELERATORS" \
-    '{profile: $profile, accelerators: ($accel | if . == "" then [] else split(",") end)}' > "$MANIFEST"
+  # backend from the tier table; alt_backends lists only what THIS install rendered (the CPU family
+  # needs --llama-bin-cpu), so health never advertises a route the box cannot serve.
+  BACKEND="$("$BIN" install tier-info --profile "$TIER" --json | jq -r .backend)"
+  ALT=""; [ -n "$LLAMA_BIN_CPU" ] && ALT="cpu"
+  jq -n --arg profile "$TIER" --arg accel "$ACCELERATORS" --arg backend "$BACKEND" --arg alt "$ALT" \
+    '{profile: $profile, backend: $backend, accelerators: ($accel | if . == "" then [] else split(",") end), alt_backends: ($alt | if . == "" then [] else split(",") end)}' > "$MANIFEST"
   say "manifest:  $MANIFEST written"
 fi
 
@@ -212,7 +220,7 @@ else
     --ram-tier "$RAM_TIER" \
     --vllm-user "$SERVICE_USER" --vllm-proxy-host "$TS_IP" \
     --vllm-venv "$VLLM_VENV" --hf-home "$HF_HOME_DIR" \
-    --llama-bin "$LLAMA_BIN" --models "$MODELS" --listen "$LISTEN" --out "$SWAP_YAML"
+    --llama-bin "$LLAMA_BIN" ${LLAMA_BIN_CPU:+--llama-bin-cpu "$LLAMA_BIN_CPU"} --models "$MODELS" --listen "$LISTEN" --out "$SWAP_YAML"
 fi
 
 # ---- 5b. the persistent vLLM agent seat (ADR 0035), when this box can run it ----
