@@ -28,14 +28,17 @@ local-offload fleet-serve --listen 100.64.0.10:18811 --listen-trusted-network
 ```
 
 Startup resolves a **GPU memory provider** (J3): `nvidia-smi` first (a working NVIDIA node
-behaves exactly as before), else the **windows-generic WDDM source** — capacity from the
-display-class registry (`qwMemorySize`), usage from the `\GPU Adapter Memory` PDH counters,
-vendor/arch from the installer's `installed.json` profile, and the UMA memory model from the
-profile (an iGPU advertises carve-out + the ~RAM/2 WDDM shared budget as its total, and
-Dedicated+Shared as usage). Only when **no memory source works** does `fleet-serve` refuse to
-start: the contract treats `vram_total_gb <= 0` as a broken node, and refusing loudly beats
-advertising an empty GPU. The serve log names the resolved source
-(`... via nvidia-smi|windows-generic, vendor=... arch=...`). Ctrl-C drains: dispatches for a
+behaves exactly as before), else the OS's generic source — on Windows the **windows-generic
+WDDM source** (capacity from the display-class registry `qwMemorySize`, usage from the
+`\GPU Adapter Memory` PDH counters), on Linux the **linux-amdgpu sysfs source** (since
+0.130.6: `/sys/class/drm/card*/device/mem_info_vram_*` plus, on a UMA profile, the driver's
+own `mem_info_gtt_*` pool — the real shared budget, not a RAM/2 estimate). Vendor/arch come
+from the installer's `installed.json` profile, and the UMA memory model from the profile (an
+iGPU advertises carve-out + shared budget as its total, and dedicated+shared as usage). Only
+when **no memory source works** does `fleet-serve` refuse to start: the contract treats
+`vram_total_gb <= 0` as a broken node, and refusing loudly beats advertising an empty GPU.
+The serve log names the resolved source
+(`... via nvidia-smi|windows-generic|linux-amdgpu, vendor=... arch=...`). Ctrl-C drains: dispatches for a
 job_id this node has never seen get 503; a re-dispatch of a job_id this node already knows
 about (running, done, or previously failed) still re-acks 202 — or 409 if it previously
 failed — even mid-drain, since that's not new work.
