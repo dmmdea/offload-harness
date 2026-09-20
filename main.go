@@ -18,6 +18,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -2317,13 +2318,21 @@ func runFleetServe(args []string) error {
 			umaSrc = "heuristic"
 		}
 	}
-	// A cpu-profile box means detect found NO usable GPU: it must not fleet-serve
-	// off iGPU-adjacent WDDM counters — only a working nvidia-smi may qualify it.
-	generic := fleetnode.GenericWindowsProbe(uma)
-	if info.Profile == "cpu" {
-		generic = nil
+	// The generic source is per-OS: the WDDM registry+PDH provider on Windows, the
+	// amdgpu sysfs provider on Linux (vram_linux_amdgpu.go — the seam ADR 0014 left
+	// open; without it an AMD APU on Linux with a measured tier could not fleet-serve
+	// at all, binxarn 2026-09-20). Both compose UMA the same way (carve-out + shared
+	// budget); Linux uses the driver's own GTT pool instead of the RAM/2 heuristic.
+	generic := fleetnode.GenericProvider{Probe: fleetnode.GenericWindowsProbe(uma), Source: "windows-generic"}
+	if runtime.GOOS == "linux" {
+		generic = fleetnode.GenericProvider{Probe: fleetnode.AmdgpuSysfsProbe("/sys/class/drm", uma), Source: "linux-amdgpu"}
 	}
-	prov, perr := fleetnode.ResolveProvider(
+	// A cpu-profile box means detect found NO usable GPU: it must not fleet-serve
+	// off iGPU-adjacent counters — only a working nvidia-smi may qualify it.
+	if info.Profile == "cpu" {
+		generic.Probe = nil
+	}
+	prov, perr := fleetnode.ResolveProviderNamed(
 		fleetnode.SmiProbe(nvidiaSmiMemory),
 		generic,
 		func() (string, string) { return "nvidia", gpuArchFromName(nvidiaSmiGPUName()) },
