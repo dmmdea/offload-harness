@@ -162,6 +162,9 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		w.CoherenceNote = coherenceNote
 		if w.SeatTokS > 0 {
 			meta.TokPerSec = w.SeatTokS // the ledger's tok_per_s column, empty on agent rows until 0.115.21
+			if meta.TokPerSec == 0 {
+				meta.TokPerSec = w.ObservedTokS // 0.131.1: the observed rate when no calibrated sample exists
+			}
 		}
 		meta.LatencyMs = w.WallMs
 		meta.TokensOut = w.TokensOut
@@ -735,8 +738,9 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	res, rerr := built.Loop.Run(cctx, contract.Goal)
 	// The run's last liveness reading rides the wire on every branch below —
 	// a `stalled:` or `ceiling` reason reads against these.
-	if _, _, last, allow := live.Snapshot(); allow > 0 {
+	if _, tokS, last, allow := live.Snapshot(); allow > 0 {
 		wire.StallAllowanceSec, wire.LastProgressMs = int(allow.Seconds()), last.UnixMilli()
+		wire.ObservedTokS = tokS
 	}
 	wire.Steps = res.Steps
 	wire.StopReason = res.StopReason

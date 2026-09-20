@@ -4717,7 +4717,7 @@ func (r *runner) record(contract core.AgentContract, pr PlacedResult) {
 			// tok_per_s on the DELEGATE row (0.131.0): until now only the
 			// node's own `agent` twin row carried it, so the row the operator
 			// reads showed 0 on a job that produced 6,236 tokens.
-			TokPerSec: pr.Result.SeatTokS,
+			TokPerSec: firstNonZero(pr.Result.SeatTokS, pr.Result.ObservedTokS),
 			Deferred:     pr.Result.Deferred || pr.Err != "" || len(pr.AcceptanceFailures) > 0,
 			Reason:       reason,
 			// ModelTier carries placement:seat — the ledger has no placement
@@ -4782,4 +4782,13 @@ func appendDelegationLog(baseDir string, line delegationLogLine) error {
 	defer f.Close()
 	_, err = f.Write(val)
 	return err
+}
+
+// firstNonZero is the ledger's tok_per_s preference: the calibrated seat rate,
+// else the run's observed decode rate (0.131.1).
+func firstNonZero(a, b float64) float64 {
+	if a > 0 {
+		return a
+	}
+	return b
 }
