@@ -99,7 +99,7 @@ prompt/exemplars; can only narrow — UNSET resolves to config `agent_profile`, 
    crash the model; the harness passes a raw GBNF `grammar` field. `--reasoning off` is mandatory or
    output comes back empty. **Profile-driven, NOT universal:** `--cache-type-k/v` is `q8_0` on 9 of
    13 profiles (`f16` only on blackwell-48/72, both AMD, and cpu; K and V always symmetric, and
-   `q8_0` V requires flash-attn on), and `--flash-attn` is on for 11 profiles, off for `amd-gcn`,
+   `q8_0` V requires flash-attn on), and `--flash-attn` is on for every GPU profile (`amd-gcn` joined 2026-09-20, measured),
    and omitted entirely by the cpu template. The `embeddinggemma` entry bypasses the shared flag
    macro altogether. **Residency is declared with `matrix:`, never legacy `groups:`** (ADR 0020):
    sets are the valid CONCURRENT COMBINATIONS and the memory stack appears in every set, so no

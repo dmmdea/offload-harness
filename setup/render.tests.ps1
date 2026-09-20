@@ -338,12 +338,12 @@ foreach ($band in @('low','mid')) {
   $bw8Functional = (($r.yaml -split "`r?`n") | Where-Object { $_.Trim() -and $_.Trim() -notmatch '^#' }) -join "`n"
   if ($bw8Functional -notmatch 'qwen3\.5-4b-agent' -and $bw8Functional -notmatch '\bq354\b' -and $bw8Functional -notmatch '__Q354B_') { Ok "blackwell-8/$band qwen3.5-4b seat stays stripped (9B holds the agent-seat alias)" } else { Bad "blackwell-8/$band qwen3.5-4b leaked in beside the 9B" }
 }
-Write-Host "== amd-gcn - 8192 / f16 / flash-attn off (vulkan) =="
+Write-Host "== amd-gcn - 8192 / f16 / flash-attn on (vulkan; measured 2026-09-20) =="
 $r = Invoke-Render -Backend 'vulkan' -ProfileId 'amd-gcn' -RamTier 'low' -BigRam $false
 $macro = Get-CommonMacro $r.yaml
 if ($macro -match '--ctx-size 8192')                           { Ok 'amd-gcn ctx=8192' } else { Bad "amd-gcn ctx (got: $macro)" }
 if ($macro -match '--cache-type-k f16' -and $macro -match '--cache-type-v f16') { Ok 'amd-gcn KV=f16' } else { Bad 'amd-gcn KV f16' }
-if ($macro -match '--flash-attn off')                          { Ok 'amd-gcn flash-attn off' } else { Bad "amd-gcn flash-attn off (got: $macro)" }
+if ($macro -match '--flash-attn on')                           { Ok 'amd-gcn flash-attn on' } else { Bad "amd-gcn flash-attn on (got: $macro)" }
 if ($r.yaml -notmatch 'gemma4-26b-a4b')                        { Ok 'amd-gcn NO 26B' } else { Bad 'amd-gcn 26B absent' }
 
 Write-Host "== dual-gpu - two groups + per-GPU CUDA_VISIBLE_DEVICES, no exclusive swap =="

@@ -12,6 +12,18 @@ Versioning: [SemVer](https://semver.org/).
 - **Liveness walls (ADR 0055): a contract is ended by a STALL or by a safety CEILING, never by its wall expiring while the seat is still producing.** Every seat completion now streams (`stream: true`, `stream_options.include_usage`), and each delta is a progress event; the wall (`timeout_sec` / the auto wall) is the EXPECTATION, still reported as `wall_sec`, no longer a kill. The stall allowance is dynamic per phase — prefill at the seat's measured prefill rate (new `prefill_tok_s` in the seat-rates store), decoding at 20 deltas of the decode rate, a tool's own cap + slack, all floored at 60 s — and a stall is filed `stalled: …` as infrastructure with the arithmetic in the reason; the ceiling is `max(3 × estimate, 2 × wall, 1800 s)` capped at 4 h and filed `ceiling …` as budget. `wall timeout after Ns` is retired from the node's vocabulary. Telemetry: the run registry and `gpu status` / `offload_status` carry `last_progress_ms`, `tok_s`, `live_phase`, `allowance_ms` beside the process heartbeat (C-32); `/fleet/jobs/{id}` publishes `progress` + `stall_allowance_sec` + `ceiling_sec`; the wire result carries `ceiling_sec` / `stall_allowance_sec` / `last_progress_ms`; the ledger's `agent_delegate` row fills `tok_per_s`. The delegator polls while the node reports progress, bounded by the node's ceiling. Measured cause: on 2026-09-20 every wall timeout in the ledger was a producing job (949 tok in 984 s on the Lenovo 27B; 6,236 tok in 769 s on the Qube pair).
 - **vLLM-CPU measured on the first Linux AMD node** (`cpu` and `amd-gcn` notes): builds and seats only with `--enforce-eager` + a 4 GB KV pool on a 30 GB box, at 3.1 tok/s vs 9.27 for llama.cpp CPU on the same family — recorded, not seated. (#422)
 
+## [0.130.8] - 2026-09-20 - amd-gcn: flash-attn ON, measured; the iGPU lane's optimization pass is on the record
+
+- `amd-gcn` renders `--flash-attn on`. The tier had carried `off` on an untested "older Vulkan FA unreliable"
+  claim; two GCN boxes now say otherwise at b9934 — neutral on the Lucienne laptop (2026-07-17) and
+  +4 % pp512 / +1 % tg128 on binxarn (2026-09-20: 266.2/23.1 vs 256.1/22.8, E2B UD-Q4_K_XL).
+- The tier notes carry the research-first optimization pass (RADV guide #23295, Vulkan thread #10879, the
+  Vega APU toolkit, the amdttm GTT posts) and its measured sweep: `RADV_PERFTEST=nogttspill`, ubatch
+  128..1024, q8_0 KV, DPM `high`, ryzenadj fclk pins — every knob within ±4 %; the lane is
+  DDR4-2667-bandwidth-bound. The whisper.cpp Vulkan STT seat is recorded as built and live.
+- Prose surfaces that said "off for amd-gcn" (CLAUDE.md, ADR 0002, setup-installer, SETUP-AGENT, the
+  OPERATOR-GUIDE tier table, both Vulkan template headers) now say on; `docs/tiers/` regenerated.
+
 ## [0.130.7] - 2026-09-20 - amd-gcn gets the Qwen3.5-4B agent seat (measured on the first Linux AMD node)
 
 ### Changed
