@@ -102,6 +102,7 @@ Write-Host "   common: $macro"
 if ($macro -match '--ctx-size 32768')                          { Ok 'ampere-8/mid ctx=32768' }        else { Bad "ampere-8/mid ctx (got: $macro)" }
 if ($macro -match '--cache-type-k q8_0' -and $macro -match '--cache-type-v q8_0') { Ok 'ampere-8/mid KV=q8_0 (symmetric)' } else { Bad 'ampere-8/mid KV q8_0' }
 if ($macro -match '--flash-attn on')                           { Ok 'ampere-8/mid flash-attn on' }    else { Bad 'ampere-8/mid flash-attn' }
+if ($macro -match '--cache-ram 6144')                          { Ok 'ampere-8/mid cache-ram 6144 (ADR 0055)' } else { Bad "ampere-8/mid cache-ram (got: $macro)" }
 if ($r.yaml -match '(?m)^\s{2}gemma4-26b-a4b:')                 { Ok 'ampere-8/mid includes 26B tier' } else { Bad 'ampere-8/mid 26B present' }
 $b26 = Get-ModelCmd -Yaml $r.yaml -ModelKey 'gemma4-26b-a4b'
 if ($b26 -match '--cpu-moe')                                   { Ok 'ampere-8/mid 26B uses --cpu-moe (ram=mid)' } else { Bad "ampere-8/mid 26B --cpu-moe (got: $b26)" }
@@ -338,10 +339,10 @@ foreach ($band in @('low','mid')) {
   $bw8Functional = (($r.yaml -split "`r?`n") | Where-Object { $_.Trim() -and $_.Trim() -notmatch '^#' }) -join "`n"
   if ($bw8Functional -notmatch 'qwen3\.5-4b-agent' -and $bw8Functional -notmatch '\bq354\b' -and $bw8Functional -notmatch '__Q354B_') { Ok "blackwell-8/$band qwen3.5-4b seat stays stripped (9B holds the agent-seat alias)" } else { Bad "blackwell-8/$band qwen3.5-4b leaked in beside the 9B" }
 }
-Write-Host "== amd-gcn - 8192 / f16 / flash-attn on (vulkan; measured 2026-09-20) =="
+Write-Host "== amd-gcn - 32768 / f16 / flash-attn on (vulkan; measured 2026-09-20) =="
 $r = Invoke-Render -Backend 'vulkan' -ProfileId 'amd-gcn' -RamTier 'low' -BigRam $false
 $macro = Get-CommonMacro $r.yaml
-if ($macro -match '--ctx-size 8192')                           { Ok 'amd-gcn ctx=8192' } else { Bad "amd-gcn ctx (got: $macro)" }
+if ($macro -match '--ctx-size 32768')                          { Ok 'amd-gcn ctx=32768' } else { Bad "amd-gcn ctx (got: $macro)" }
 if ($macro -match '--cache-type-k f16' -and $macro -match '--cache-type-v f16') { Ok 'amd-gcn KV=f16' } else { Bad 'amd-gcn KV f16' }
 if ($macro -match '--flash-attn on')                           { Ok 'amd-gcn flash-attn on' } else { Bad "amd-gcn flash-attn on (got: $macro)" }
 if ($r.yaml -notmatch 'gemma4-26b-a4b')                        { Ok 'amd-gcn NO 26B' } else { Bad 'amd-gcn 26B absent' }

@@ -25,7 +25,7 @@ logLevel: info
 
 macros:
   common: >-
-    --ctx-size __CTX__ --flash-attn __FLASH_ATTN__ --cache-type-k __KV_K__ --cache-type-v __KV_V__
+    --ctx-size __CTX__ --flash-attn __FLASH_ATTN__ --cache-type-k __KV_K__ --cache-type-v __KV_V__ --cache-ram __CACHE_RAM__
     --jinja --reasoning off --port ${PORT} --host 127.0.0.1
 
 models:
@@ -63,7 +63,7 @@ models:
     cmd: >-
       __LLAMA_BIN__/llama-server.exe -m __MODELS__/gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf
       __MOE_26B__ --parallel 1 --ctx-size __CTX__ --flash-attn __FLASH_ATTN__
-      --cache-type-k __KV_K__ --cache-type-v __KV_V__ --jinja --reasoning on
+      --cache-type-k __KV_K__ --cache-type-v __KV_V__ --cache-ram __CACHE_RAM__ --jinja --reasoning on
       --port ${PORT} --host 127.0.0.1
     ttl: 300
   # Embeddings — device 1 (small; shares the editor card).

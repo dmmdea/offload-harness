@@ -38,6 +38,9 @@ type Params struct {
 	FlashAttn string // "on"/"off"
 	MoE26B    string // the flag form the tier chose: -ngl 99 | --cpu-moe | --n-cpu-moe N
 	Threads   int
+	// CacheRAMMiB is llama-server's host-RAM prompt cache (--cache-ram). 0 renders the
+	// server default (8192) so an older caller never turns the cache OFF by omission.
+	CacheRAMMiB int
 	// Include26B false removes the 26B seat entirely — model block, matrix var, and
 	// set membership. A set naming a var that does not exist, or a var naming a model
 	// that does not exist, is a config llama-swap rejects at startup, so dropping one
@@ -396,6 +399,7 @@ func Render(tmpl string, p Params) (string, error) {
 		"__FLASH_ATTN__":      p.FlashAttn,
 		"__MOE_26B__":         p.MoE26B,
 		"__NTHREADS__":        fmt.Sprint(p.Threads),
+		"__CACHE_RAM__":       fmt.Sprint(p.cacheRAMMiB()),
 	} {
 		out = strings.ReplaceAll(out, from, to)
 	}
@@ -1191,4 +1195,13 @@ func uniqueTokens(s string) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// cacheRAMMiB resolves the --cache-ram value: the tier-resolved figure, else the
+// llama-server default (8192 MiB) — never 0, which would disable the prompt cache.
+func (p Params) cacheRAMMiB() int {
+	if p.CacheRAMMiB > 0 {
+		return p.CacheRAMMiB
+	}
+	return 8192
 }

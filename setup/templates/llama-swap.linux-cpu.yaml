@@ -24,7 +24,7 @@ listen: __LISTEN__
 
 macros:
   common: >-
-    --ctx-size __CTX__ --cache-type-k __KV_K__ --cache-type-v __KV_V__
+    --ctx-size __CTX__ --cache-type-k __KV_K__ --cache-type-v __KV_V__ --cache-ram __CACHE_RAM__
     --threads __NTHREADS__ --jinja --reasoning off --port ${PORT} --host 127.0.0.1
   ld: "LD_LIBRARY_PATH=__LLAMA_BIN__:${LD_LIBRARY_PATH:-}"
 

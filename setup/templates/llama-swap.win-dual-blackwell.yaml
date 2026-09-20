@@ -29,7 +29,7 @@ logLevel: info
 
 macros:
   common: >-
-    --ctx-size __CTX__ --flash-attn __FLASH_ATTN__ --cache-type-k __KV_K__ --cache-type-v __KV_V__
+    --ctx-size __CTX__ --flash-attn __FLASH_ATTN__ --cache-type-k __KV_K__ --cache-type-v __KV_V__ --cache-ram __CACHE_RAM__
     --jinja --reasoning off --port ${PORT} --host 127.0.0.1
 
 models:
@@ -63,7 +63,7 @@ models:
     cmd: >-
       __LLAMA_BIN__/llama-server.exe -m __MODELS__/gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf
       __MOE_26B__ --parallel 1 --ctx-size __CTX__ --flash-attn __FLASH_ATTN__
-      --cache-type-k __KV_K__ --cache-type-v __KV_V__ --jinja --reasoning on
+      --cache-type-k __KV_K__ --cache-type-v __KV_V__ --cache-ram __CACHE_RAM__ --jinja --reasoning on
       --port ${PORT} --host 127.0.0.1
     ttl: 300
   # CODER + AGENT seat: Seat Frontier Leg 1 winner (2026-08-14) — Qwen3.8-27B
@@ -76,7 +76,7 @@ models:
     cmd: >-
       __LLAMA_BIN__/llama-server.exe -m __MODELS__/Qwen3.8-27B-UD-Q4_K_XL.gguf
       --mmproj __MODELS__/mmproj-Qwen3.8-27B-F16.gguf -ngl 999 -sm layer --parallel 1
-      --jinja --flash-attn __FLASH_ATTN__ --cache-type-k __KV_K__ --cache-type-v __KV_V__
+      --jinja --flash-attn __FLASH_ATTN__ --cache-type-k __KV_K__ --cache-type-v __KV_V__ --cache-ram __CACHE_RAM__
       --ctx-size __CTX__ --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0
       --port ${PORT} --host 127.0.0.1
     ttl: 300
@@ -104,7 +104,7 @@ models:
     cmd: >-
       __LLAMA_BIN__/llama-server.exe -m __MODELS__/Qwen3.8-27B-UD-Q4_K_XL.gguf
       --mmproj __MODELS__/mmproj-Qwen3.8-27B-F16.gguf -ngl 999 -sm layer --parallel 8
-      --jinja --flash-attn __FLASH_ATTN__ --cache-type-k __KV_K__ --cache-type-v __KV_V__
+      --jinja --flash-attn __FLASH_ATTN__ --cache-type-k __KV_K__ --cache-type-v __KV_V__ --cache-ram __CACHE_RAM__
       --ctx-size __CTX__ --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0
       --port ${PORT} --host 127.0.0.1
     ttl: 300
