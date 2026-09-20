@@ -73,10 +73,16 @@ func FromConfig(cfg config.Config) Config {
 // runId so the store key (origin, engine, runId, id) is unique per harness
 // job. Timestamps are epoch milliseconds; StartedAt / CompletedAt 0 = null.
 type Event struct {
-	JobID       string
-	Model       string
-	Engine      string
-	Node        string // harness node name; "" = this box
+	JobID  string
+	Model  string
+	Engine string
+	Node   string // harness node name; "" = this box
+	// NodeAliases are other names the same node is known by (the fleet node
+	// id from its health, the host of its dispatch URL, the name it reported
+	// on the wire). The frame resolves Node first, then each alias, against
+	// PAIR's member names and addresses; a remote run none of them resolves
+	// is stamped with NO node rather than with this box (0.131.2).
+	NodeAliases []string
 	State       string // queued | running | completed | failed
 	Error       string
 	Requester   string
@@ -95,9 +101,16 @@ type Emitter struct {
 	idAt     time.Time
 	selfUUID string
 	members  map[string]string // lower(name) -> uuid
-	warnOnce sync.Once
-	inflight sync.WaitGroup
-	seq      atomic.Int64
+	byAddr   map[string]string // lower(ipAddress) -> uuid
+	// resolved remembers, per job, the node UUID an in-flight frame resolved
+	// to, so a terminal frame whose names resolve to nothing (a node that
+	// reports its fleet id, not its hostname) keeps the card where the job
+	// ran instead of re-pointing it. Entries die with the terminal frame.
+	resolved   map[string]string
+	unresolved map[string]struct{} // name sets already warned about
+	warnOnce   sync.Once
+	inflight   sync.WaitGroup
+	seq        atomic.Int64
 }
 
 // New builds an emitter. It reads nothing until the first use.
@@ -147,39 +160,122 @@ func (e *Emitter) Enabled() bool {
 }
 
 func (e *Emitter) identity() (self string, members map[string]string) {
+	self, members, _ = e.identityFull()
+	return self, members
+}
+
+// identityFull is identity plus the member address map (lower(ipAddress) ->
+// uuid), for a node whose dispatch base is an address literal.
+func (e *Emitter) identityFull() (self string, members, byAddr map[string]string) {
 	e.idMu.Lock()
 	defer e.idMu.Unlock()
 	if !e.idAt.IsZero() && time.Since(e.idAt) < identityTTL {
-		return e.selfUUID, e.members
+		return e.selfUUID, e.members, e.byAddr
 	}
 	e.idAt = time.Now()
-	e.selfUUID, e.members = "", nil
+	e.selfUUID, e.members, e.byAddr = "", nil, nil
 	raw, err := os.ReadFile(filepath.Join(e.appDir, "node-id.json"))
 	if err != nil {
-		return "", nil
+		return "", nil, nil
 	}
 	var nid struct {
 		NodeUUID string `json:"node_uuid"`
 	}
 	if json.Unmarshal(raw, &nid) != nil || nid.NodeUUID == "" {
-		return "", nil
+		return "", nil, nil
 	}
 	e.selfUUID = nid.NodeUUID
 	e.members = map[string]string{}
+	e.byAddr = map[string]string{}
 	if raw, err := os.ReadFile(filepath.Join(e.appDir, "cluster", "members.json")); err == nil {
 		var list []struct {
-			Name     string `json:"name"`
-			NodeUUID string `json:"nodeUuid"`
+			Name      string `json:"name"`
+			NodeUUID  string `json:"nodeUuid"`
+			IPAddress string `json:"ipAddress"`
 		}
 		if json.Unmarshal(raw, &list) == nil {
 			for _, m := range list {
-				if m.Name != "" && m.NodeUUID != "" {
+				if m.NodeUUID == "" {
+					continue
+				}
+				if m.Name != "" {
 					e.members[strings.ToLower(m.Name)] = m.NodeUUID
+				}
+				if a := strings.ToLower(strings.TrimSpace(m.IPAddress)); a != "" && a != "127.0.0.1" && a != "::1" {
+					e.byAddr[a] = m.NodeUUID
 				}
 			}
 		}
 	}
-	return e.selfUUID, e.members
+	return e.selfUUID, e.members, e.byAddr
+}
+
+// resolveNode turns the names a job's node is known by into the PAIR UUID
+// the frame stamps as scheduledOn. "" as Node means this box. Otherwise the
+// first of Node + NodeAliases that matches a member name or address wins;
+// failing that, the UUID an earlier frame of the same job resolved to; and
+// failing THAT the job is stamped with no node at all (ok=false) — PAIR then
+// draws no line and names no node, which is true, where naming this box was
+// not (2026-09-20: every terminal frame of a node that reports its fleet id
+// re-pointed the card at the delegator; a node dispatched by address never
+// got a line). Each unresolved name set is logged once.
+func (e *Emitter) resolveNode(ev Event) (uuid string, ok bool) {
+	self, members, byAddr := e.identityFull()
+	node := strings.ToLower(strings.TrimSpace(ev.Node))
+	if node == "" {
+		return self, true
+	}
+	names := make([]string, 0, 1+len(ev.NodeAliases))
+	names = append(names, node)
+	for _, a := range ev.NodeAliases {
+		if a = strings.ToLower(strings.TrimSpace(a)); a != "" {
+			names = append(names, a)
+		}
+	}
+	terminal := ev.State == "completed" || ev.State == "failed"
+	e.idMu.Lock()
+	defer e.idMu.Unlock()
+	for _, n := range names {
+		if u, hit := members[n]; hit {
+			e.remember(ev.JobID, u, terminal)
+			return u, true
+		}
+		if u, hit := byAddr[n]; hit {
+			e.remember(ev.JobID, u, terminal)
+			return u, true
+		}
+	}
+	if u, hit := e.resolved[ev.JobID]; hit {
+		if terminal {
+			delete(e.resolved, ev.JobID)
+		}
+		return u, true
+	}
+	key := strings.Join(names, "|")
+	if e.unresolved == nil {
+		e.unresolved = map[string]struct{}{}
+	}
+	if _, seen := e.unresolved[key]; !seen {
+		e.unresolved[key] = struct{}{}
+		log.Printf("pairworkloads: no PAIR member is named %q; its jobs get no node in PAIR's Jobs list (members: %d)", key, len(members))
+	}
+	return "", false
+}
+
+// remember records (or, on a terminal frame, forgets) a job's resolved node.
+// Caller holds idMu.
+func (e *Emitter) remember(jobID, uuid string, terminal bool) {
+	if jobID == "" {
+		return
+	}
+	if terminal {
+		delete(e.resolved, jobID)
+		return
+	}
+	if e.resolved == nil {
+		e.resolved = map[string]string{}
+	}
+	e.resolved[jobID] = uuid
 }
 
 // MethodFor maps a workload state to the lifecycle method PAIR expects.
@@ -232,17 +328,15 @@ func isAcceleratorEngine(engine string) bool {
 }
 
 func (e *Emitter) frame(ev Event) ([]byte, error) {
-	self, members := e.identity()
+	self, _ := e.identity()
 	if self == "" {
 		return nil, fmt.Errorf("pairworkloads: PAIR identity unavailable under %s", e.appDir)
 	}
-	scheduledOn := self
-	if n := strings.ToLower(strings.TrimSpace(ev.Node)); n != "" {
-		if u, ok := members[n]; ok {
-			scheduledOn = u
-		}
-	}
 	null := json.RawMessage("null")
+	scheduledOn := null
+	if u, ok := e.resolveNode(ev); ok {
+		scheduledOn = mustJSON(u)
+	}
 	ms := func(v int64) json.RawMessage {
 		if v == 0 {
 			return null
@@ -267,7 +361,7 @@ func (e *Emitter) frame(ev Event) ([]byte, error) {
 		"runId":          mustJSON(ev.JobID),
 		"state":          mustJSON(ev.State),
 		"originatedFrom": mustJSON(self),
-		"scheduledOn":    mustJSON(scheduledOn),
+		"scheduledOn":    scheduledOn,
 		"createdAt":      json.RawMessage(fmt.Sprint(created)),
 		"startedAt":      ms(ev.StartedAt),
 		"completedAt":    ms(ev.CompletedAt),

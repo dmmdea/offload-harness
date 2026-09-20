@@ -134,6 +134,11 @@ type PlacedResult struct {
 	pairEngine  string
 	pairCreated int64
 	pairStarted int64
+	// pairNode / pairAliases are the node names the in-flight frame carried
+	// ("" = this box); the terminal frame names the same node, plus whatever
+	// the node called itself on the wire, so the card never moves.
+	pairNode    string
+	pairAliases []string
 	// remotesUnreachable marks a LOCAL placement that happened while the
 	// configured fleet was failing its health probe. The work is fine (an idle
 	// or queued local box is the quality-first placement either way) but the
@@ -3197,7 +3202,7 @@ func (r *runner) runLocal(ctx context.Context, jobID string, contract core.Agent
 		pairNode = host
 		pr.PlacementReason += "; engine " + r.cfg.Endpoint + " is " + host + "'s (attributed there)"
 	}
-	r.pairInflight(&pr, jobID, pairNode, pr.Seat, "running")
+	r.pairInflight(&pr, jobID, pairNode, nil, pr.Seat, "running")
 	wire, err := r.local(ctx, contract, opts)
 	if err != nil {
 		pr.Err = "local run: " + err.Error()
@@ -3253,7 +3258,7 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 	if intendedSeat == "" {
 		intendedSeat = view.AgentSeat
 	}
-	r.pairInflight(&pr, jobID, pairNodeName(base, view.NodeID), intendedSeat, "queued")
+	r.pairInflight(&pr, jobID, pairNodeName(base, view.NodeID), []string{view.NodeID}, intendedSeat, "queued")
 	disp := r.dispatchDetailed(ctx, base, jobID, payload)
 	if disp.refused && disp.status == http.StatusServiceUnavailable && disp.retryAfterSec > 0 {
 		// Item 7 (register D-105/D-106): a 503 carrying its own Retry-After
@@ -3292,7 +3297,7 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 	// so persist the intent before any polling (Option A, intent.go).
 	r.intent.dispatched(jobID, base, contract.Goal)
 	pr.intentRecorded = true
-	r.pairInflight(&pr, jobID, pairNodeName(base, view.NodeID), intendedSeat, "running")
+	r.pairInflight(&pr, jobID, pairNodeName(base, view.NodeID), []string{view.NodeID}, intendedSeat, "running")
 
 	timeoutSec := executionBudgetSec(contract)
 	// pollBudget is the budget for WORK. Before the node gained a real queue
