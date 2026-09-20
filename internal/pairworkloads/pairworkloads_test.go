@@ -25,7 +25,7 @@ func writePairAppDir(t *testing.T) string {
 	if err := os.MkdirAll(filepath.Join(dir, "cluster"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	members := `[{"id":"node-b","nodeUuid":"node-b-uuid","name":"node-b"},{"id":"node-a","nodeUuid":"self-uuid","name":"node-a"}]`
+	members := `[{"id":"node-b","nodeUuid":"node-b-uuid","name":"node-b","ipAddress":"10.9.9.2"},{"id":"node-a","nodeUuid":"self-uuid","name":"node-a","ipAddress":"127.0.0.1"}]`
 	if err := os.WriteFile(filepath.Join(dir, "cluster", "members.json"), []byte(members), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -149,7 +149,7 @@ func TestSendResolvesNodesAndShape(t *testing.T) {
 	if wi["requesterId"] != "offload-harness/s1" || wi["createdAt"].(float64) != 1000 || wi["startedAt"].(float64) != 1000 {
 		t.Fatalf("bad attribution/timestamps: %v", wi)
 	}
-	// Local node ("") schedules on self; an unknown node name also falls back to self.
+	// Local node ("") schedules on self; an unknown node name schedules on NO node (never on self).
 	if err := e.Send(context.Background(), Event{JobID: "led-2", Model: "gemma-4-e4b", Engine: "llamacpp", State: "completed", CreatedAt: 1, StartedAt: 1, CompletedAt: 2}); err != nil {
 		t.Fatal(err)
 	}
@@ -161,8 +161,56 @@ func TestSendResolvesNodesAndShape(t *testing.T) {
 		t.Fatal(err)
 	}
 	wi = c.info(2)
-	if wi["scheduledOn"] != "self-uuid" || wi["error"] != "boom" || c.method(2) != "workload:errored" {
+	if wi["scheduledOn"] != nil || wi["error"] != "boom" || c.method(2) != "workload:errored" {
 		t.Fatalf("failed frame wrong: %v %v", c.method(2), wi)
+	}
+}
+
+// A node is known by several names — the host it is dispatched at, the fleet
+// node id its health and wire carry, an address literal in the fleet config —
+// and only one of them is a PAIR member name. Every frame must land on the
+// node that ran the job, and a terminal frame must never re-point the card at
+// the delegator (2026-09-20: ~300 cards of remote-only seats were shown running
+// on the delegator because the terminal frame named the fleet id).
+func TestResolvesAliasesAddressesAndRemembers(t *testing.T) {
+	c := &capture{}
+	srv := httptest.NewServer(http.HandlerFunc(c.handler))
+	defer srv.Close()
+	e := New(Config{Enabled: true, Endpoint: srv.URL, AppDir: writePairAppDir(t)})
+	send := func(ev Event) map[string]any {
+		t.Helper()
+		if err := e.Send(context.Background(), ev); err != nil {
+			t.Fatal(err)
+		}
+		return c.info(c.count() - 1)
+	}
+	// Fleet id as the node, hostname as an alias: the alias resolves.
+	if wi := send(Event{JobID: "agd-a", Model: "m", Engine: "llamacpp", Node: "node-b-fleet16", NodeAliases: []string{"NODE-B"}, State: "completed", CreatedAt: 1, CompletedAt: 2}); wi["scheduledOn"] != "node-b-uuid" {
+		t.Fatalf("alias not resolved: %v", wi)
+	}
+	// An address literal (the dispatch base was an IP) resolves through the
+	// member address.
+	if wi := send(Event{JobID: "agd-b", Model: "m", Engine: "llamacpp", Node: "10.9.9.2", State: "running", CreatedAt: 1, StartedAt: 1}); wi["scheduledOn"] != "node-b-uuid" {
+		t.Fatalf("address not resolved: %v", wi)
+	}
+	// In-flight resolved, terminal names only the fleet id: the card stays
+	// where the job ran — and the memory is released with the terminal frame.
+	if wi := send(Event{JobID: "agd-c", Model: "m", Engine: "llamacpp", Node: "node-b", State: "running", CreatedAt: 1, StartedAt: 1}); wi["scheduledOn"] != "node-b-uuid" {
+		t.Fatalf("in-flight frame wrong: %v", wi)
+	}
+	if wi := send(Event{JobID: "agd-c", Model: "m", Engine: "llamacpp", Node: "node-b-fleet16", State: "completed", CreatedAt: 1, StartedAt: 1, CompletedAt: 2}); wi["scheduledOn"] != "node-b-uuid" {
+		t.Fatalf("terminal frame re-pointed the card: %v", wi)
+	}
+	if wi := send(Event{JobID: "agd-c", Model: "m", Engine: "llamacpp", Node: "node-b-fleet16", State: "failed", Error: "late", CreatedAt: 1, CompletedAt: 3}); wi["scheduledOn"] != nil {
+		t.Fatalf("memory must die with the terminal frame: %v", wi)
+	}
+	// Nothing resolves and nothing is remembered: no node, not self.
+	if wi := send(Event{JobID: "agd-d", Model: "m", Engine: "llamacpp", Node: "node-b-fleet16", NodeAliases: []string{"203.0.113.9"}, State: "running", CreatedAt: 1, StartedAt: 1}); wi["scheduledOn"] != nil {
+		t.Fatalf("unresolved remote run must carry no node: %v", wi)
+	}
+	// The local box ("") still schedules on self.
+	if wi := send(Event{JobID: "led-e", Model: "m", Engine: "llamacpp", State: "completed", CreatedAt: 1, StartedAt: 1, CompletedAt: 2}); wi["scheduledOn"] != "self-uuid" {
+		t.Fatalf("local frame wrong: %v", wi)
 	}
 }
 
