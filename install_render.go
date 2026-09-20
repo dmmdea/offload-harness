@@ -433,7 +433,10 @@ func deriveRender(profilesRaw []byte, req renderRequest) (renderResult, error) {
 		return renderResult{}, fmt.Errorf("tier %s: --llama-bin-cpu given but the tier declares no alt_backends [cpu] — add it to profiles.json (measured) or drop the flag", id)
 	}
 	if req.AltLlamaBinCPU == "" && hasAltBackend(p, "cpu") {
-		fmt.Fprintf(os.Stderr, "note: tier %s declares alt_backends [cpu]; pass --llama-bin-cpu <dir of a CPU llama-server build> to render its CPU seat family\n", id)
+		// stdout on purpose: install.ps1's render self-test runs under
+		// $ErrorActionPreference = Stop, where any native stderr line is a
+		// NativeCommandError (installer-windows went red on #419, 2026-09-20).
+		fmt.Printf("note: tier %s declares alt_backends [cpu]; pass --llama-bin-cpu <dir of a CPU llama-server build> to render its CPU seat family\n", id)
 	}
 
 	n := req.Threads
