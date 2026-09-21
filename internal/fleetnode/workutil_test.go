@@ -2,7 +2,6 @@ package fleetnode
 
 import (
 	"encoding/json"
-	"errors"
 	"net/http"
 	"testing"
 	"time"
@@ -17,55 +16,47 @@ const (
 )
 
 // qubeDevices is the Qube while its operator plays a game: 33% on the display
-// card, 0% on both cards the harness can use.
+// card, 0% on both cards the harness can use. display_active comes straight
+// from the device query every reader already runs, so a device sample carries
+// the answer with it.
 func qubeDevices() []GPUDevice {
 	return []GPUDevice{
 		{Index: 0, UUID: wuCard0, Name: "RTX 5060 Ti", TotalGiB: 15.9, FreeGiB: 15.4, UtilPct: 0, UtilKnown: true},
-		{Index: 1, UUID: wuCard1, Name: "RTX 5070 Ti", TotalGiB: 15.9, FreeGiB: 2.2, UtilPct: 33, UtilKnown: true},
+		{Index: 1, UUID: wuCard1, Name: "RTX 5070 Ti", TotalGiB: 15.9, FreeGiB: 2.2, UtilPct: 33, UtilKnown: true, DisplayActive: true},
 		{Index: 2, UUID: wuCard2, Name: "RTX 5060 Ti", TotalGiB: 15.9, FreeGiB: 15.9, UtilPct: 0, UtilKnown: true},
 	}
 }
 
-// qubeDesktop is the Qube's real --query-compute-apps shape: graphics rows,
-// all on the display card, with no memory figure.
-func qubeDesktop() []gpuprobe.ComputeApp {
-	return []gpuprobe.ComputeApp{{GPUUUID: wuCard1}, {GPUUUID: wuCard1}, {GPUUUID: wuCard1}}
-}
-
-// TestSamplerRefreshesTheDisplaySetSlowlyAndCarriesItForward: which card drives
-// the desktop is hardware plus a login session, so the probe runs on tick 0 and
-// every displayEvery ticks after — not on every 2 s health tick — and a failed
-// probe keeps the previous set rather than suddenly re-counting the desktop.
-func TestSamplerRefreshesTheDisplaySetSlowlyAndCarriesItForward(t *testing.T) {
+// TestSamplerDerivesTheDisplaySetFromTheSameSample: the display set is read off
+// the devices the tick already fetched, so it needs no second nvidia-smi, no
+// separate cadence and no carry-forward — and it follows the hardware
+// immediately when a card stops driving a screen.
+func TestSamplerDerivesTheDisplaySetFromTheSameSample(t *testing.T) {
 	calls := 0
-	fail := false
-	s := &Sampler{displayProbe: func() ([]gpuprobe.ComputeApp, error) {
+	devices := qubeDevices()
+	probe := func() ([]GPUDevice, error) {
 		calls++
-		if fail {
-			return nil, errors.New("nvidia-smi hiccup")
-		}
-		return qubeDesktop(), nil
-	}}
-	probe := func() ([]GPUDevice, error) { return qubeDevices(), nil }
-
-	for i := 0; i < displayEvery+1; i++ {
-		s.sampleDevices(probe)
+		return devices, nil
 	}
-	if calls != 2 {
-		t.Fatalf("display probe ran %d times over %d ticks, want 2 (tick 0 and tick %d)", calls, displayEvery+1, displayEvery)
+	s := &Sampler{}
+
+	s.sampleDevices(probe)
+	if calls != 1 {
+		t.Fatalf("device probe ran %d times for one tick, want 1 — the display set must ride the same sample", calls)
 	}
 	snap, ok := s.Load()
 	if !ok || !snap.DisplayUUIDs[wuCard1] || snap.DisplayUUIDs[wuCard0] || snap.DisplayUUIDs[wuCard2] {
 		t.Fatalf("snapshot display set = %v, want only card 1", snap.DisplayUUIDs)
 	}
 
-	fail = true
-	for i := 0; i < displayEvery; i++ {
-		s.sampleDevices(probe)
-	}
+	// The operator logs out and the card drives nothing: the very next tick
+	// scores it again, with no stale set to expire first.
+	devices = qubeDevices()
+	devices[1].DisplayActive = false
+	s.sampleDevices(probe)
 	snap, _ = s.Load()
-	if !snap.DisplayUUIDs[wuCard1] {
-		t.Fatal("a failed display probe must keep the previous set, not re-count the desktop as harness work")
+	if len(snap.DisplayUUIDs) != 0 {
+		t.Fatalf("display set = %v after the card stopped driving a display, want empty on the very next tick", snap.DisplayUUIDs)
 	}
 }
 
@@ -74,7 +65,7 @@ func TestSamplerRefreshesTheDisplaySetSlowlyAndCarriesItForward(t *testing.T) {
 // and the PAIR rule want exactly that), and work_util_pct is the busiest card
 // the harness can run a seat on.
 func TestHealthWorkUtilSkipsTheDisplayCardAndGpuUtilKeepsItsContract(t *testing.T) {
-	display := gpuprobe.DisplayCardUUIDs([]string{wuCard0, wuCard1, wuCard2}, qubeDesktop())
+	display := gpuprobe.DisplayCardUUIDs(qubeDevices())
 	opts := &Options{
 		NodeID: "qube",
 		Snapshot: func() (Snapshot, bool) {
@@ -105,10 +96,14 @@ func TestHealthWorkUtilSkipsTheDisplayCardAndGpuUtilKeepsItsContract(t *testing.
 
 // TestHealthWorkUtilOnASingleGPUBoxCountsItsOnlyCard: a laptop runs its seats
 // on its display card by necessity, so nothing is excluded and the two figures
-// agree.
+// agree. This is the guard inside DisplayCardUUIDs, asserted through the health
+// payload that would otherwise advertise a saturated node as idle.
 func TestHealthWorkUtilOnASingleGPUBoxCountsItsOnlyCard(t *testing.T) {
-	only := []GPUDevice{{Index: 0, UUID: wuCard1, Name: "RTX 3070 Laptop", TotalGiB: 8, FreeGiB: 2, UtilPct: 90, UtilKnown: true}}
-	display := gpuprobe.DisplayCardUUIDs([]string{wuCard1}, qubeDesktop())
+	only := []GPUDevice{{Index: 0, UUID: wuCard1, Name: "RTX 3070 Laptop", TotalGiB: 8, FreeGiB: 2, UtilPct: 90, UtilKnown: true, DisplayActive: true}}
+	display := gpuprobe.DisplayCardUUIDs(only)
+	if len(display) != 0 {
+		t.Fatalf("display set = %v on a single-GPU box, want empty — excluding its only card leaves nothing to score", display)
+	}
 	opts := &Options{NodeID: "aorus", Snapshot: func() (Snapshot, bool) {
 		return Snapshot{TotalGiB: 8, FreeGiB: 2, Devices: only, DisplayUUIDs: display, At: time.Now()}, true
 	}}

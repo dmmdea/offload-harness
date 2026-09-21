@@ -321,88 +321,65 @@ func TestHostFreeRAMGiBIsPlausibleWhereSupported(t *testing.T) {
 	}
 }
 
-// TestDisplayCardUUIDs is the one rule both the lease verdict and the fleet
-// node's placement figure use.
+// TestDisplayCardUUIDs is the ONE rule both the lease verdict and the node's
+// placement figure read. It is the card property (nvidia-smi display_active),
+// not an inference from which processes happen to be visible: `[N/A]` memory is
+// a WDDM property, so a native-Windows CUDA seat looks exactly like the desktop
+// and the earlier heuristic would have flagged the card the harness works on.
 func TestDisplayCardUUIDs(t *testing.T) {
 	const (
 		c0 = "GPU-3ee161b5-c188-495b-eaeb-291e6e6e1d97"
 		c1 = "GPU-2a44210f-6739-2d89-0e21-44cd5143faf7" // the Qube's display card
 		c2 = "GPU-0c3843d3-5721-d9f7-47fe-89fdb8373e24"
 	)
-	// The Qube's real --query-compute-apps output (gpu_uuid,used_memory): every
-	// row is a WDDM graphics process on card 1, and the harness's own resident
-	// seat on card 0 produces no row at all.
-	qubeOut := c1 + ", [N/A]\n" + c1 + ", [N/A]\n" + c1 + ", [N/A]\n"
-	apps := ParseComputeApps(qubeOut)
-	if len(apps) != 3 || apps[0].GPUUUID != c1 || apps[0].UsedKnown {
-		t.Fatalf("parse of the Qube's sample: %+v", apps)
+	qube := []Device{
+		{Index: 0, UUID: c0, DisplayActive: false},
+		{Index: 1, UUID: c1, DisplayActive: true},
+		{Index: 2, UUID: c2, DisplayActive: false},
 	}
-	if got := DisplayCardUUIDs([]string{c0, c1, c2}, apps); !got[c1] || got[c0] || got[c2] || len(got) != 1 {
+	got := DisplayCardUUIDs(qube)
+	if !got[c1] || got[c0] || got[c2] || len(got) != 1 {
 		t.Fatalf("Qube: want only card 1 flagged, got %v", got)
 	}
 	// Single-GPU box: its only card IS the display card, and it runs seats there.
-	if got := DisplayCardUUIDs([]string{c1}, apps); got != nil {
+	if got := DisplayCardUUIDs([]Device{{Index: 0, UUID: c1, DisplayActive: true}}); got != nil {
 		t.Fatalf("single-GPU box must exclude nothing, got %v", got)
 	}
-	// Linux: only CUDA processes, with real memory — nothing is a display card.
-	linux := ParseComputeApps(c1 + ", 9000\n" + c0 + ", 4096\n")
-	if len(linux) != 2 || !linux[0].UsedKnown {
-		t.Fatalf("parse of a Linux sample: %+v", linux)
+	// Headless Linux / a laptop whose screen is on the iGPU: nothing is Enabled.
+	if got := DisplayCardUUIDs([]Device{{UUID: c0}, {UUID: c1}}); got != nil {
+		t.Fatalf("no display card must exclude nothing, got %v", got)
 	}
-	if got := DisplayCardUUIDs([]string{c0, c1, c2}, linux); got != nil {
-		t.Fatalf("CUDA rows with known memory must flag nothing, got %v", got)
-	}
-	// Garbage and blank lines are skipped, never guessed at.
-	if got := ParseComputeApps("\n  \nNo running processes found\nnot-a-uuid, [N/A]\n"); len(got) != 0 {
-		t.Fatalf("unattributable lines must be skipped, got %+v", got)
-	}
-	if DisplayCardUUIDs([]string{c0}, nil) != nil {
-		t.Fatal("no processes must exclude nothing")
+	if DisplayCardUUIDs(nil) != nil {
+		t.Fatal("no devices must exclude nothing")
 	}
 }
 
-// TestHarnessEnginesNeverMarkTheirOwnCard: `[N/A]` memory is a WDDM property,
-// not a graphics-process property — nvidia-smi cannot size ANY process there,
-// compute included. On the Qube the harness's seats happen to be invisible to
-// this query (llama-swap runs in session 0, the fleet node in the operator's
-// session), but that is a session accident. On a node where they share one, a
-// CUDA seat would look exactly like the desktop and its card would drop out of
-// the placement figure — making a BUSY node advertise itself as idle, which is
-// worse than the tie it used to lose. So our own engines never mark a card.
-func TestHarnessEnginesNeverMarkTheirOwnCard(t *testing.T) {
-	const work = "GPU-3ee161b5-c188-495b-eaeb-291e6e6e1d97"
-	const desk = "GPU-2a44210f-6739-2d89-0e21-44cd5143faf7"
-
-	// A harness seat, unsized because WDDM, on the card the harness works on.
-	seat := ParseComputeApps(work + `, [N/A], C:\llama.cpp-b10964\llama-server.exe` + "\n")
-	if len(seat) != 1 || seat[0].Name == "" || seat[0].UsedKnown {
-		t.Fatalf("parse: %+v", seat)
-	}
-	if got := DisplayCardUUIDs([]string{work, desk}, seat); got != nil {
-		t.Fatalf("a card hosting only our own engine must NOT be flagged, got %v", got)
-	}
-	// The desktop on the other card still marks it.
-	mixed := ParseComputeApps(
-		work + `, [N/A], C:\llama.cpp-b10964\llama-server.exe` + "\n" +
-			desk + `, [N/A], C:\Windows\explorer.exe` + "\n" +
-			desk + `, [N/A], V:\Battle.net\World of Warcraft\_classic_beta_\WowB.exe` + "\n")
-	got := DisplayCardUUIDs([]string{work, desk}, mixed)
-	if !got[desk] || got[work] || len(got) != 1 {
-		t.Fatalf("want only the desktop card flagged, got %v", got)
-	}
-	// Every engine name we launch, however nvidia-smi spells it.
-	for _, n := range []string{
-		`C:\llama.cpp\llama-server.exe`, "llama-server", "/opt/llama-vulkan/llama-server",
-		`C:\Python311\python.exe`, "python3", "/opt/offload/vllm-cpu-env/bin/vllm",
-		"whisper-server", `D:\ComfyUI\.venv\Scripts\python.exe`,
+// TestDisplayActiveParsesOnlyAnExactEnabled: a driver that does not report the
+// field answers "[Not Supported]", and an older launcher's line has no column
+// at all. Neither may read as "this is the operator's screen" — the point of
+// excluding a card is that we are SURE.
+func TestDisplayActiveParsesOnlyAnExactEnabled(t *testing.T) {
+	const uuid = "GPU-2a44210f-6739-2d89-0e21-44cd5143faf7"
+	for _, tc := range []struct {
+		name string
+		line string
+		want bool
+	}{
+		{"enabled", "1, " + uuid + ", RTX 5070 Ti, 16303, 14027, 33, Enabled", true},
+		{"disabled", "1, " + uuid + ", RTX 5070 Ti, 16303, 14027, 33, Disabled", false},
+		{"not supported", "1, " + uuid + ", RTX 5070 Ti, 16303, 14027, 33, [Not Supported]", false},
+		{"n/a", "1, " + uuid + ", RTX 5070 Ti, 16303, 14027, 33, [N/A]", false},
+		{"older launcher, no column", "1, " + uuid + ", RTX 5070 Ti, 16303, 14027, 33", false},
+		{"older launcher, no util either", "1, " + uuid + ", RTX 5070 Ti, 16303, 14027", false},
 	} {
-		if !isHarnessEngine(n) {
-			t.Errorf("isHarnessEngine(%q) = false, want true", n)
-		}
-	}
-	for _, n := range []string{`C:\Windows\explorer.exe`, "WowB.exe", "chrome.exe", "Discord.exe", ""} {
-		if isHarnessEngine(n) {
-			t.Errorf("isHarnessEngine(%q) = true, want false", n)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			devs, err := ParseSmiMemoryDevices(tc.line)
+			if err != nil || len(devs) != 1 {
+				t.Fatalf("parse %q: %v (%d devices)", tc.line, err, len(devs))
+			}
+			if devs[0].DisplayActive != tc.want {
+				t.Fatalf("DisplayActive = %v, want %v", devs[0].DisplayActive, tc.want)
+			}
+		})
 	}
 }

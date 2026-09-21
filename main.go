@@ -2372,16 +2372,7 @@ func runFleetServe(args []string) error {
 	var sampler *fleetnode.Sampler
 	switch chooseSamplerKind(prov.Source) {
 	case samplerKindDevice:
-		// The display probe is the SAME rule the lease verdict uses
-		// (gpuprobe.DisplayCardUUIDs), sampled every 30 s rather than every 2 s:
-		// it feeds work_util_pct, the placement figure that skips the operator's
-		// desktop. Bounded so a wedged driver cannot stall a sampler tick.
-		displayProbe := func() ([]gpuprobe.ComputeApp, error) {
-			dctx, cancel := context.WithTimeout(ctx, 4*time.Second)
-			defer cancel()
-			return gpuprobe.ReadComputeApps(dctx)
-		}
-		sampler = fleetnode.StartDeviceProbeSamplerWithDisplay(ctx, 2*time.Second, fleetnode.SmiDeviceProbe(nvidiaSmiMemoryDevices), cfg.PrimaryGPUUUID, displayProbe)
+		sampler = fleetnode.StartDeviceProbeSampler(ctx, 2*time.Second, fleetnode.SmiDeviceProbe(nvidiaSmiMemoryDevices), cfg.PrimaryGPUUUID)
 	default:
 		sampler = fleetnode.StartProbeSampler(ctx, 2*time.Second, prov.Probe)
 	}

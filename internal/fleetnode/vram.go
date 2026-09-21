@@ -165,20 +165,13 @@ type Snapshot struct {
 	// DisallowUnknownFields anywhere in its internal/) breaks on the new
 	// field appearing.
 	Devices []GPUDevice
-	// DisplayUUIDs is the set of cards this box can PROVE are display cards
-	// (gpuprobe.DisplayCardUUIDs), so the placement figure can skip them. It is
-	// refreshed on a SLOW cadence (displayEvery ticks), not every 2 s: which card
-	// drives the desktop is hardware plus a login session, not something that
-	// changes between health polls, and a second nvidia-smi on every tick of every
-	// node would double the driver calls for no information. Carried forward
-	// across the ticks in between; nil = exclude nothing.
+	// DisplayUUIDs is the set of cards driving a display (gpuprobe.DisplayCardUUIDs
+	// over this same sample's display_active), so the placement figure can skip
+	// them. Derived from the devices this Snapshot already carries — no second
+	// nvidia-smi, nothing to go stale, nothing to carry forward. nil = exclude nothing.
 	DisplayUUIDs map[string]bool
 	At           time.Time
 }
-
-// displayEvery is how many device-sample ticks pass between display-card
-// refreshes: 15 x the 2 s health interval = 30 s.
-const displayEvery = 15
 
 // Sampler publishes the latest good Snapshot via an atomic.Value so the health
 // handler never blocks on (or spawns) nvidia-smi.
@@ -193,12 +186,6 @@ type Sampler struct {
 	// though snap itself is atomic.
 	primaryGPUUUID    string
 	warnedMissingUUID bool
-	// displayProbe, displayTick and display back the slow display-card refresh.
-	// Same single-goroutine timeline as the fields above (sampleDevices only),
-	// so no lock is needed. A nil probe means "never exclude a card".
-	displayProbe func() ([]gpuprobe.ComputeApp, error)
-	displayTick  int
-	display      map[string]bool
 }
 
 // Load returns the latest snapshot. ok is false until a sample has succeeded —
@@ -243,21 +230,7 @@ func (s *Sampler) sampleDevices(probe DeviceProbe) {
 		fmt.Fprintf(os.Stderr, "[fleet-serve] warning: %s\n", warning)
 		s.warnedMissingUUID = true
 	}
-	if s.displayProbe != nil {
-		if s.displayTick%displayEvery == 0 {
-			// A failed probe keeps the previous set: an nvidia-smi hiccup must not
-			// suddenly re-count the operator's desktop as harness work.
-			if apps, perr := s.displayProbe(); perr == nil {
-				uuids := make([]string, 0, len(devices))
-				for _, d := range devices {
-					uuids = append(uuids, d.UUID)
-				}
-				s.display = gpuprobe.DisplayCardUUIDs(uuids, apps)
-			}
-		}
-		s.displayTick++
-	}
-	s.snap.Store(Snapshot{TotalGiB: head.TotalGiB, FreeGiB: head.FreeGiB, Devices: devices, DisplayUUIDs: s.display, At: time.Now()})
+	s.snap.Store(Snapshot{TotalGiB: head.TotalGiB, FreeGiB: head.FreeGiB, Devices: devices, DisplayUUIDs: gpuprobe.DisplayCardUUIDs(devices), At: time.Now()})
 }
 
 // runSamplerLoop is the shared scaffolding both StartProbeSampler and
@@ -314,15 +287,7 @@ func StartProbeSampler(ctx context.Context, interval time.Duration, probe MemPro
 // and a primaryGPUUUID has no effect there (there is nothing to match it
 // against).
 func StartDeviceProbeSampler(ctx context.Context, interval time.Duration, probe DeviceProbe, primaryGPUUUID string) *Sampler {
-	return StartDeviceProbeSamplerWithDisplay(ctx, interval, probe, primaryGPUUUID, nil)
-}
-
-// StartDeviceProbeSamplerWithDisplay is StartDeviceProbeSampler plus a slow
-// display-card probe (gpuprobe.ReadComputeApps in production), so the health
-// payload can publish a placement figure that skips the operator's desktop.
-// A nil displayProbe is exactly StartDeviceProbeSampler.
-func StartDeviceProbeSamplerWithDisplay(ctx context.Context, interval time.Duration, probe DeviceProbe, primaryGPUUUID string, displayProbe func() ([]gpuprobe.ComputeApp, error)) *Sampler {
-	s := &Sampler{primaryGPUUUID: primaryGPUUUID, displayProbe: displayProbe}
+	s := &Sampler{primaryGPUUUID: primaryGPUUUID}
 	runSamplerLoop(ctx, interval, func() { s.sampleDevices(probe) })
 	return s
 }

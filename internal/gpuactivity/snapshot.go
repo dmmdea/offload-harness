@@ -265,20 +265,16 @@ func describeCard(g GPU) string {
 	return fmt.Sprintf("%d%% on card %d (%s)", g.UtilPct, g.Index, g.Name)
 }
 
-// displayCards returns, by UUID, the cards this box can PROVE are display cards
-// — utilization there is never a lease holder's work. The rule itself lives in
+// displayCards returns, by UUID, the cards driving a display — utilization
+// there is never a lease holder's work. The rule itself lives in
 // gpuprobe.DisplayCardUUIDs so the fleet node's placement figure uses the SAME
 // one; this is only the adapter from a View's readings.
 func displayCards(v View) map[string]bool {
-	uuids := make([]string, 0, len(v.GPUs))
+	devs := make([]gpuprobe.Device, 0, len(v.GPUs))
 	for _, g := range v.GPUs {
-		uuids = append(uuids, g.UUID)
+		devs = append(devs, gpuprobe.Device{UUID: g.UUID, DisplayActive: g.DisplayActive})
 	}
-	apps := make([]gpuprobe.ComputeApp, 0, len(v.Processes))
-	for _, p := range v.Processes {
-		apps = append(apps, gpuprobe.ComputeApp{GPUUUID: p.GPUUUID, UsedKnown: p.UsedKnown, Name: p.Name})
-	}
-	return gpuprobe.DisplayCardUUIDs(uuids, apps)
+	return gpuprobe.DisplayCardUUIDs(devs)
 }
 
 func describeWork(v View, now time.Time) string {

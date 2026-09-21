@@ -249,9 +249,9 @@ func TestHeldWorkingNeedsACardTheHarnessCanRunOn(t *testing.T) {
 		card1 = "GPU-2a44210f-6739-2d89-0e21-44cd5143faf7" // 5070 Ti, the display card
 		card2 = "GPU-0c3843d3-5721-d9f7-47fe-89fdb8373e24" // 5060 Ti, harness
 	)
-	// The Qube's real sample: every process nvidia-smi lists is a WDDM GRAPHICS
-	// process on the display card with `[N/A]` memory, and the harness's own
-	// resident seat on card 0 produces no row at all.
+	// The Qube's real sample: nvidia-smi types every one of these desktop rows
+	// `C+G` and can size none of them, so the process list proves nothing
+	// either way. What marks card 1 is the card's own display_active property.
 	desktop := []GPUProcess{
 		{PID: 18396, Name: `C:\Windows\explorer.exe`, GPUUUID: card1},
 		{PID: 65980, Name: `V:\Battle.net\World of Warcraft\_classic_beta_\WowB.exe`, GPUUUID: card1},
@@ -260,7 +260,7 @@ func TestHeldWorkingNeedsACardTheHarnessCanRunOn(t *testing.T) {
 	qube := func(u0, u1, u2 int) []GPU {
 		return []GPU{
 			{Index: 0, UUID: card0, Name: "NVIDIA GeForce RTX 5060 Ti", UtilPct: u0, UtilKnown: true, MemTotalMiB: 16311},
-			{Index: 1, UUID: card1, Name: "NVIDIA GeForce RTX 5070 Ti", UtilPct: u1, UtilKnown: true, MemTotalMiB: 16303},
+			{Index: 1, UUID: card1, Name: "NVIDIA GeForce RTX 5070 Ti", UtilPct: u1, UtilKnown: true, MemTotalMiB: 16303, DisplayActive: true},
 			{Index: 2, UUID: card2, Name: "NVIDIA GeForce RTX 5060 Ti", UtilPct: u2, UtilKnown: true, MemTotalMiB: 16311},
 		}
 	}
@@ -294,19 +294,24 @@ func TestHeldWorkingNeedsACardTheHarnessCanRunOn(t *testing.T) {
 			// necessity. Excluding it would make held-working unreachable there.
 			name: "a single-GPU box still reports held-working on its only card",
 			view: View{At: now, Held: true, Holder: holder, Seat: idleSeat,
-				GPUs:      []GPU{{Index: 0, UUID: card1, Name: "RTX 3070 Laptop", UtilPct: 90, UtilKnown: true, MemTotalMiB: 8192}},
+				GPUs:      []GPU{{Index: 0, UUID: card1, Name: "RTX 3070 Laptop", UtilPct: 90, UtilKnown: true, MemTotalMiB: 8192, DisplayActive: true}},
 				Processes: desktop},
 			verdict: VerdictHeldWorking,
 			want:    []string{"90% on card 0", "the holder's own job"},
 		},
 		{
-			// Linux: --query-compute-apps lists only CUDA processes, with real
-			// memory. Nothing is flagged, so every card stays eligible.
-			name: "a CUDA process with known memory never marks its card as a display",
-			view: View{At: now, Held: true, Holder: holder, Seat: idleSeat, GPUs: qube(0, 88, 0),
-				Processes: []GPUProcess{{PID: 900, Name: "/opt/llama/llama-server", UsedMiB: 9000, UsedKnown: true, GPUUUID: card1}}},
+			// Headless Linux: every card answers Disabled, so nothing is excluded
+			// and a busy card is the holder's work wherever it sits. Measured on
+			// the Lenovo's A2 on 2026-09-21.
+			name: "a card driving no display is the holder working wherever it sits",
+			view: View{At: now, Held: true, Holder: holder, Seat: idleSeat,
+				GPUs: []GPU{
+					{Index: 0, UUID: card0, Name: "NVIDIA A2", UtilPct: 88, UtilKnown: true, MemTotalMiB: 15356},
+					{Index: 1, UUID: card2, Name: "NVIDIA A2", UtilPct: 0, UtilKnown: true, MemTotalMiB: 15356},
+				},
+				Processes: []GPUProcess{{PID: 900, Name: "/opt/llama/llama-server", UsedMiB: 9000, UsedKnown: true, GPUUUID: card0}}},
 			verdict: VerdictHeldWorking,
-			want:    []string{"88% on card 1", "the holder's own job"},
+			want:    []string{"88% on card 0", "the holder's own job"},
 		},
 		{
 			// Unleased, the game IS the answer to "is anything using this box".
