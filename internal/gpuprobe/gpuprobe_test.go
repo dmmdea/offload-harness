@@ -360,3 +360,49 @@ func TestDisplayCardUUIDs(t *testing.T) {
 		t.Fatal("no processes must exclude nothing")
 	}
 }
+
+// TestHarnessEnginesNeverMarkTheirOwnCard: `[N/A]` memory is a WDDM property,
+// not a graphics-process property — nvidia-smi cannot size ANY process there,
+// compute included. On the Qube the harness's seats happen to be invisible to
+// this query (llama-swap runs in session 0, the fleet node in the operator's
+// session), but that is a session accident. On a node where they share one, a
+// CUDA seat would look exactly like the desktop and its card would drop out of
+// the placement figure — making a BUSY node advertise itself as idle, which is
+// worse than the tie it used to lose. So our own engines never mark a card.
+func TestHarnessEnginesNeverMarkTheirOwnCard(t *testing.T) {
+	const work = "GPU-3ee161b5-c188-495b-eaeb-291e6e6e1d97"
+	const desk = "GPU-2a44210f-6739-2d89-0e21-44cd5143faf7"
+
+	// A harness seat, unsized because WDDM, on the card the harness works on.
+	seat := ParseComputeApps(work + `, [N/A], C:\llama.cpp-b10964\llama-server.exe` + "\n")
+	if len(seat) != 1 || seat[0].Name == "" || seat[0].UsedKnown {
+		t.Fatalf("parse: %+v", seat)
+	}
+	if got := DisplayCardUUIDs([]string{work, desk}, seat); got != nil {
+		t.Fatalf("a card hosting only our own engine must NOT be flagged, got %v", got)
+	}
+	// The desktop on the other card still marks it.
+	mixed := ParseComputeApps(
+		work + `, [N/A], C:\llama.cpp-b10964\llama-server.exe` + "\n" +
+			desk + `, [N/A], C:\Windows\explorer.exe` + "\n" +
+			desk + `, [N/A], V:\Battle.net\World of Warcraft\_classic_beta_\WowB.exe` + "\n")
+	got := DisplayCardUUIDs([]string{work, desk}, mixed)
+	if !got[desk] || got[work] || len(got) != 1 {
+		t.Fatalf("want only the desktop card flagged, got %v", got)
+	}
+	// Every engine name we launch, however nvidia-smi spells it.
+	for _, n := range []string{
+		`C:\llama.cpp\llama-server.exe`, "llama-server", "/opt/llama-vulkan/llama-server",
+		`C:\Python311\python.exe`, "python3", "/opt/offload/vllm-cpu-env/bin/vllm",
+		"whisper-server", `D:\ComfyUI\.venv\Scripts\python.exe`,
+	} {
+		if !isHarnessEngine(n) {
+			t.Errorf("isHarnessEngine(%q) = false, want true", n)
+		}
+	}
+	for _, n := range []string{`C:\Windows\explorer.exe`, "WowB.exe", "chrome.exe", "Discord.exe", ""} {
+		if isHarnessEngine(n) {
+			t.Errorf("isHarnessEngine(%q) = true, want false", n)
+		}
+	}
+}

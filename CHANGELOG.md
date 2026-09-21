@@ -26,6 +26,15 @@ Versioning: [SemVer](https://semver.org/).
   `[N/A]` memory; on Linux it lists only CUDA processes with real memory, so nothing is flagged.
   A display card is excluded only when a non-display card exists (a single-GPU box runs its seats
   there by necessity).
+- **An engine the harness launches never marks its own card.** `[N/A]` memory is a WDDM property,
+  not a graphics-process property — nvidia-smi cannot size ANY process there, compute included. On
+  the Qube the harness's seats happen to be invisible to that query (llama-swap runs in session 0,
+  the fleet node in the operator's session), but that is a session accident: on a node where they
+  share one, a CUDA seat would look exactly like the desktop and its card would drop out of the
+  placement figure, making a BUSY node advertise itself as idle. Over-flagging sends work to a
+  loaded box; under-flagging only costs the tie the node used to lose — so the rule now reads the
+  process name and needs positive evidence of something that is not ours. Found by an adversarial
+  review of this change, and confirmed against the live driver.
 - **Cadence:** the display set refreshes every 15 ticks of the 2 s sampler (30 s), not every tick —
   which card drives the desktop is hardware plus a login session, not something that changes between
   health polls — and a failed probe keeps the previous set rather than re-counting the desktop.

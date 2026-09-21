@@ -276,7 +276,7 @@ func displayCards(v View) map[string]bool {
 	}
 	apps := make([]gpuprobe.ComputeApp, 0, len(v.Processes))
 	for _, p := range v.Processes {
-		apps = append(apps, gpuprobe.ComputeApp{GPUUUID: p.GPUUUID, UsedKnown: p.UsedKnown})
+		apps = append(apps, gpuprobe.ComputeApp{GPUUUID: p.GPUUUID, UsedKnown: p.UsedKnown, Name: p.Name})
 	}
 	return gpuprobe.DisplayCardUUIDs(uuids, apps)
 }
