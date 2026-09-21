@@ -83,13 +83,13 @@ type View struct {
 
 // Verdict vocabulary.
 const (
-	VerdictFree        = "free"          // no lease, seat idle or absent, cards quiet
-	VerdictLoadedIdle  = "loaded-idle"   // no lease; the seat is resident with nothing in flight (unloads at its ttl)
-	VerdictWorking     = "working"       // a request or a registered run is in flight on the seat
-	VerdictHeldWorking = "held-working"  // a lease is held and the cards are busy under it (the holder's own job)
-	VerdictHeldIdle    = "held-idle"     // a lease is held and NOTHING is running: seat idle, cards quiet
-	VerdictBusyOutside = "busy-outside"  // no lease, seat idle, but the cards are busy — work the harness does not own
-	VerdictStaleHolder = "stale-holder"  // a lease record whose holder is gone; the next acquirer reclaims it
+	VerdictFree        = "free"         // no lease, seat idle or absent, cards quiet
+	VerdictLoadedIdle  = "loaded-idle"  // no lease; the seat is resident with nothing in flight (unloads at its ttl)
+	VerdictWorking     = "working"      // a request or a registered run is in flight on the seat
+	VerdictHeldWorking = "held-working" // a lease is held and the cards are busy under it (the holder's own job)
+	VerdictHeldIdle    = "held-idle"    // a lease is held and NOTHING is running: seat idle, cards quiet
+	VerdictBusyOutside = "busy-outside" // no lease, seat idle, but the cards are busy — work the harness does not own
+	VerdictStaleHolder = "stale-holder" // a lease record whose holder is gone; the next acquirer reclaims it
 	// utilBusyPct is the utilization above which a card counts as working for
 	// the verdict. Below it a lease is held over an idle card.
 	utilBusyPct = 15
@@ -170,8 +170,22 @@ func Assess(v View) (verdict, note string) {
 	}
 	seatBusy := v.Seat.Starting || v.Seat.Inflight > 0
 	runs := len(v.Runs)
-	maxUtil, utilKnown := -1, false
-	busyCard := ""
+
+	// TWO readings, because "a card is busy" and "the HOLDER is working" are not
+	// the same claim. maxUtil is every card, and answers "is anything using this
+	// box" (busy-outside). workUtil skips cards the harness provably cannot run
+	// on, and is the only thing allowed to say the holder is working.
+	//
+	// 2026-09-20, the Qube, while the operator played a game: the verdict read
+	// `held-working — 33% on card 1 (RTX 5070 Ti)` while the lease holder had
+	// burned 4 SECONDS of CPU in 141 minutes and the two cards it actually
+	// fenced sat at 0%. Card 1 is the display card and that 33% was the game.
+	// Because held-working outranks held-idle, the verdict that exists for
+	// exactly this case could never fire on a box anyone was using, and three
+	// jobs queued behind a holder that was doing nothing.
+	display := displayCards(v)
+	maxUtil, utilKnown, busyCard := -1, false, ""
+	workUtil, workKnown, workCard := -1, false, ""
 	for _, g := range v.GPUs {
 		if !g.UtilKnown {
 			continue
@@ -179,10 +193,25 @@ func Assess(v View) (verdict, note string) {
 		utilKnown = true
 		if g.UtilPct > maxUtil {
 			maxUtil = g.UtilPct
-			busyCard = fmt.Sprintf("%d%% on card %d (%s)", g.UtilPct, g.Index, g.Name)
+			busyCard = describeCard(g)
+		}
+		if display[g.UUID] {
+			continue
+		}
+		workKnown = true
+		if g.UtilPct > workUtil {
+			workUtil = g.UtilPct
+			workCard = describeCard(g)
 		}
 	}
 	cardsBusy := utilKnown && maxUtil >= utilBusyPct
+	workCardsBusy := workKnown && workUtil >= utilBusyPct
+	// What the operator's own machine is doing, named, so a reader never has to
+	// re-derive why a busy box still reads idle under the lease.
+	foreignTail := ""
+	if cardsBusy && !workCardsBusy {
+		foreignTail = " — the cards ARE busy (" + busyCard + ") but that is the display card, which the harness never places a seat on, so it is not the holder's work"
+	}
 
 	work := describeWork(v, now)
 	// A stale record never outranks live work: on 2026-09-14 the Lenovo read
@@ -196,18 +225,21 @@ func Assess(v View) (verdict, note string) {
 	switch {
 	case v.Held && (seatBusy || runs > 0):
 		return VerdictWorking, "the lease is held AND work is in flight on the seat: " + work + holderTail(v)
-	case v.Held && cardsBusy:
-		return VerdictHeldWorking, "the lease is held and the cards are busy under it — " + busyCard + "; the seat is idle, so this is the holder's own job" + holderTail(v)
+	case v.Held && workCardsBusy:
+		return VerdictHeldWorking, "the lease is held and the cards are busy under it — " + workCard + "; the seat is idle, so this is the holder's own job" + holderTail(v)
 	case v.Held:
 		n := "the lease is held but NOTHING is running on the cards right now: no request in flight on the seat"
 		if v.Seat.Name == "" {
 			n = "the lease is held but nothing the harness can see is running"
 		}
-		if utilKnown {
+		if workKnown {
+			n += fmt.Sprintf(", GPU utilization at most %d%% on the cards it can run on", workUtil)
+		} else if utilKnown {
 			n += fmt.Sprintf(", GPU utilization at most %d%%", maxUtil)
 		} else if v.GPUErr != "" {
 			n += " (GPU utilization unknown: " + v.GPUErr + ")"
 		}
+		n += foreignTail
 		n += " — the holder is waiting (a drain, a queue), loading, or stalled" + holderTail(v)
 		return VerdictHeldIdle, n
 	case seatBusy || runs > 0:
@@ -225,6 +257,51 @@ func Assess(v View) (verdict, note string) {
 	default:
 		return VerdictFree, "no lease, no request in flight, cards quiet"
 	}
+}
+
+// describeCard is the one phrasing for "which card, how busy".
+func describeCard(g GPU) string {
+	return fmt.Sprintf("%d%% on card %d (%s)", g.UtilPct, g.Index, g.Name)
+}
+
+// displayCards returns, by UUID, the cards this box can PROVE are display cards
+// — the ones the 3-card law forbids seats from using, so utilization there is
+// never a lease holder's work.
+//
+// The evidence is the process sample, not config: on Windows/WDDM nvidia-smi
+// reports GRAPHICS processes under --query-compute-apps with `[N/A]` memory
+// (UsedKnown false), and those are the desktop and whatever the operator is
+// running. Measured on the Qube 2026-09-20: all 28 such rows sat on card 1, the
+// 5070 Ti, while the harness's own resident seat on card 0 produced NO row at
+// all. On Linux that query lists only CUDA processes with real memory, so
+// nothing is flagged and every card stays eligible — the behaviour this fix
+// preserves everywhere except the case it exists for.
+//
+// The guard matters as much as the rule: a box whose ONLY card is its display
+// card runs its seats there by necessity (a single-GPU laptop, an iGPU node).
+// Excluding it would make held-working unreachable on those boxes and turn a
+// genuine bench into held-idle, so a display card is only ever excluded when a
+// non-display card exists to run on.
+func displayCards(v View) map[string]bool {
+	graphics := make(map[string]bool)
+	for _, p := range v.Processes {
+		if !p.UsedKnown && p.GPUUUID != "" {
+			graphics[p.GPUUUID] = true
+		}
+	}
+	if len(graphics) == 0 {
+		return nil
+	}
+	eligible := 0
+	for _, g := range v.GPUs {
+		if !graphics[g.UUID] {
+			eligible++
+		}
+	}
+	if eligible == 0 {
+		return nil // every card is a display card: this box works on them anyway
+	}
+	return graphics
 }
 
 func describeWork(v View, now time.Time) string {
