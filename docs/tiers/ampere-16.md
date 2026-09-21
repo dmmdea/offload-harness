@@ -66,11 +66,18 @@ The installer seeds this tier's media bindings (`config_seed`):
 
 | key | value |
 |---|---|
+| `gen_edit_preset` | `lightning8` |
+| `gen_edit_script` | `render/comfy-edit.mjs` |
+| `gen_edit_unet` | `qwen-image-edit-2511-Q5_1.gguf` |
 | `imagegen_ckpt` | `hidream_o1_image_bf16.safetensors` |
 | `imagegen_family` | `hidream-o1` |
+| `imagegen_script` | `render/comfy-generate.mjs` |
 | `imagegen_timeout_sec` | `3600` |
 | `imagegen_vae` | `builtin` |
+| `inpaint_ckpt` | `RealVisXL_V5.0_fp16.safetensors` |
+| `inpaint_script` | `render/comfy-inpaint.mjs` |
 | `upscale_model` | `4x-UltraSharp.pth` |
+| `upscale_script` | `render/comfy-upscale.mjs` |
 | `videogen_frames` | `81` |
 | `videogen_height` | `720` |
 | `videogen_text_encoder` | `umt5_xxl_fp16.safetensors` |
@@ -92,6 +99,7 @@ here so they are never mistaken for a media capability:
 | `agent_max_tokens` | `1024` |
 | `agent_model` | `qwen3.5-4b-agent` |
 | `agent_profile` | `research` |
+| `animategen_script` | `render/comfy-animate.mjs` |
 | `escalation_model` | `` |
 | `reasoning_model` | `` |
 

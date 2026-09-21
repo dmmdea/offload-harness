@@ -170,12 +170,17 @@ box, set the same keys in its config.json. Model download set (SHA256 from the H
 ComfyUI ≥ v0.21.1 (the HiDream-O1 nodes) and ≥~48GB system RAM for the offload path.
 
 The **≥16GB image-EDIT primitive is Qwen-Image-Edit-2511** (Apache-2.0, commercial-safe — the
-8GB→16GB compositing/edit unlock). On the ≥16GB tiers this is a *recommended-model designation*,
-**not** a `config_seed` binding: edit workflows (e.g. the creative-marketing-pipelines scene-swap)
-run through `run-graph` with the model set declared in their own node manifest, so the harness binds
-no edit checkpoint in `config.json` there. **Exception (2026-08-23): `blackwell-8` DOES seed
-`gen_edit_unet`/`gen_edit_preset` + `inpaint_ckpt` in its RAM-conditional layer** — measured on its
-reference box, see the 8GB section below. HiDream-O1 (t2i) and Wan (video) stay the config_seed
+8GB→16GB compositing/edit unlock). **Since 0.132.5 every ≥16GB ComfyUI tier SEEDS it** —
+`gen_edit_script` `render/comfy-edit.mjs`, `gen_edit_unet` `qwen-image-edit-2511-Q5_1.gguf`, `gen_edit_preset`
+`lightning8` — plus inpaint (`render/comfy-inpaint.mjs` + `RealVisXL_V5.0_fp16.safetensors`) and animate
+(`render/comfy-animate.mjs`, WAN-Animate-2 int8, 15.9 GB on one 16 GB card). Until then this read "a
+*recommended-model designation*, not a `config_seed` binding", because edit workflows run through
+`run-graph` with their own node manifest — true for those workflows, but it left the harness's own
+`edit_image_generative` route NOT CONFIGURED on every fresh ≥16GB install while the SMALLER blackwell-8
+tier had it, and the Qube served it only by hand-wiring. Binding it is additive: run-graph workflows
+still declare their own models. **Make sure these three models are in ComfyUI** (the installer does
+not fetch ComfyUI models). `blackwell-8` seeds its own edit/inpaint in its RAM-conditional layer —
+see the 8GB section below. HiDream-O1 (t2i) and Wan (video) stay the config_seed
 bindings; RealVisXL is the SDXL-class inpaint binding. **FLUX-family stays prohibited** (BFL
 non-commercial — ADR 0011).
 
