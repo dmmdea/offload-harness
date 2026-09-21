@@ -58,14 +58,18 @@ describe("options", () => {
 });
 
 describe("hooks", () => {
-  it("system transform injects the protocol once", async () => {
-    const h = createHooks(opts());
-    const out = { system: ["base"] };
-    await h["experimental.chat.system.transform"]!({ model: {} as any }, out);
-    await h["experimental.chat.system.transform"]!({ model: {} as any }, out);
-    expect(out.system.length).toBe(2);
-    expect(out.system[1]).toContain("harness_agent_delegate");
-    expect(out.system[1]).toContain('route:"spread"');
+  it("system transform injects the protocol once (both tool-exposure modes)", async () => {
+    for (const primaryTools of ["tier1", "all"] as const) {
+      const h = createHooks(opts({ primaryTools }));
+      const out = { system: ["base"] };
+      await h["experimental.chat.system.transform"]!({ model: {} as any }, out);
+      await h["experimental.chat.system.transform"]!({ model: {} as any }, out);
+      expect(out.system.length).toBe(2);
+      if (primaryTools === "all") {
+        expect(out.system[1]).toContain("harness_agent_delegate");
+        expect(out.system[1]).toContain('route:"spread"');
+      }
+    }
   });
   it("system transform respects the option", async () => {
     const h = createHooks(opts({ systemProtocol: false }));
@@ -241,7 +245,8 @@ describe("review-round fixes", () => {
     expect(typeof res.diagnostics.instrument.failures).toBe("number");
   });
   it("offload agent prompt and protocol name only prefixed, existing harness tools", async () => {
-    const h = createHooks(opts());
+    // "all" is the mode whose protocol names every harness tool; tier1 is covered separately.
+    const h = createHooks(opts({ primaryTools: "all" }));
     const cfg: any = {};
     await h.config!(cfg);
     const prompt: string = cfg.agent.offload.prompt;
@@ -329,5 +334,82 @@ describe("review round 2", () => {
     expect(rb.diagnostics.envOptionsError).toBeNull();
     expect(ra.diagnostics.instrument.failures).toBe(0);
     expect(rb.diagnostics.instrument.failures).toBe(1);
+  });
+});
+
+// Primary-agent tool exposure. opencode sends EVERY enabled MCP tool schema up front (it has
+// no deferred tool search), so the harness's ~25 tools cost a 64k local primary ~18k tokens
+// on every session before the first message. Measured on opencode 1.18.31 with this very
+// permission shape: all tools 30,856 -> tier-1 only 12,528 -> no harness MCP 11,661.
+// Everything beyond Tier 1 stays reachable through the offload subagent.
+describe("primary tool exposure (tier1)", () => {
+  const TIER1 = ["offload_summarize", "offload_classify", "offload_extract", "offload_triage"];
+
+  it("defaults to tier1", () => {
+    expect(DEFAULTS.primaryTools).toBe("tier1");
+  });
+
+  it("tier1 denies the harness prefix for the primary and allows exactly the four Tier-1 tools", async () => {
+    const h = createHooks(opts());
+    const cfg: any = {};
+    await h.config!(cfg);
+    expect(cfg.permission["harness_*"]).toBe("deny");
+    for (const t of TIER1) expect(cfg.permission[`harness_${t}`]).toBe("allow");
+    // the broad deny must precede the specific allows: opencode applies them in order
+    const keys = Object.keys(cfg.permission);
+    for (const t of TIER1) expect(keys.indexOf(`harness_${t}`)).toBeGreaterThan(keys.indexOf("harness_*"));
+  });
+
+  it("tier1 keeps every harness tool on the offload subagent", async () => {
+    const h = createHooks(opts());
+    const cfg: any = {};
+    await h.config!(cfg);
+    expect(cfg.agent.offload.permission["harness_*"]).toBe("allow");
+  });
+
+  it("tier1 also opens the harness on a user-defined offload agent it did not create", async () => {
+    const h = createHooks(opts());
+    const cfg: any = { agent: { offload: { mode: "subagent", permission: { edit: "deny" } } } };
+    await h.config!(cfg);
+    expect(cfg.agent.offload.permission["harness_*"]).toBe("allow");
+    expect(cfg.agent.offload.permission.edit).toBe("deny"); // user keys untouched
+  });
+
+  it("tier1 never overrides a permission the user set", async () => {
+    const h = createHooks(opts());
+    const cfg: any = { permission: { "harness_*": "allow", harness_offload_triage: "ask" } };
+    await h.config!(cfg);
+    expect(cfg.permission["harness_*"]).toBe("allow");
+    expect(cfg.permission.harness_offload_triage).toBe("ask");
+  });
+
+  it("all leaves permissions exactly as the user had them", async () => {
+    const h = createHooks(opts({ primaryTools: "all" }));
+    const cfg: any = {};
+    await h.config!(cfg);
+    expect(cfg.permission).toBeUndefined();
+  });
+
+  it("tier1 protocol names only the Tier-1 tools and routes the rest to the offload subagent", async () => {
+    const h = createHooks(opts());
+    const out: any = { system: [] };
+    await (h as any)["experimental.chat.system.transform"]({}, out);
+    const text = out.system.join("\n");
+    for (const t of TIER1) expect(text).toContain(`harness_${t}`);
+    for (const hidden of ["harness_agent_delegate", "harness_agent_run", "harness_offload_vqa", "harness_offload_research"])
+      expect(text).not.toContain(hidden); // the primary cannot see these; never tell it to call them
+    expect(text).toContain('subagent_type "offload"');
+  });
+
+  // Compared against FIXED expectations, not against protocolText() itself: comparing the
+  // function to itself can never fail (a mutation changes both sides equally).
+  it("all mode keeps the full three-lane protocol and differs from tier1", async () => {
+    const { protocolText } = await import("../src/protocol.ts");
+    const all = protocolText("harness", "offload", "all");
+    expect(all.startsWith("# local-offload harness — three-lane dispatch (house protocol, always on)")).toBe(true);
+    for (const t of ["agent_delegate", "agent_run", "offload_vqa", "offload_research", "offload_status"])
+      expect(all).toContain(`harness_${t}`);
+    expect(all).toContain('route:"spread"');
+    expect(all).not.toBe(protocolText("harness", "offload", "tier1"));
   });
 });

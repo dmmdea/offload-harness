@@ -20,9 +20,9 @@ import type { Hooks, Plugin, PluginInput } from "@opencode-ai/plugin";
 import { tool } from "@opencode-ai/plugin";
 import { classifyLeg, READ_TOOLS, type LegClass } from "./classify.ts";
 import { appendDispatchLog, DEFAULT_LOG, newInstrumentStats, type InstrumentStats } from "./instrument.ts";
-import { protocolText, taskDescriptionAddendum } from "./protocol.ts";
+import { PROTOCOL_MARKER, protocolText, taskDescriptionAddendum } from "./protocol.ts";
 
-export const VERSION = "0.1.0";
+export const VERSION = "0.2.0";
 
 export type Options = {
   /** MCP server name the harness is registered under in opencode.jsonc (tool prefix). */
@@ -42,7 +42,17 @@ export type Options = {
   readNudgeTiers: number[];
   /** Cross-harness dispatch instrument path. */
   dispatchLog: string;
+  /**
+   * Which harness tools the PRIMARY agent sees. opencode sends every enabled MCP tool schema
+   * up front (no deferred tool search), so all ~25 harness tools cost a 64k local primary ~18k
+   * tokens every session. "tier1" exposes only the four mechanical-text tools to the primary
+   * and keeps the whole harness on the offload subagent; "all" is the previous behaviour.
+   */
+  primaryTools: "tier1" | "all";
 };
+
+/** The four single-shot mechanical-text tools the primary keeps in "tier1" mode. */
+export const TIER1_TOOLS = ["offload_summarize", "offload_classify", "offload_extract", "offload_triage"];
 
 export const DEFAULTS: Options = {
   mcp: "harness",
@@ -54,6 +64,7 @@ export const DEFAULTS: Options = {
   nudges: true,
   readNudgeTiers: [12, 40],
   dispatchLog: DEFAULT_LOG,
+  primaryTools: "tier1",
 };
 
 // Options arrive either from the config `plugin: [[name, {...}]]` form or, for a
@@ -81,6 +92,7 @@ export function resolveOptions(raw?: Record<string, unknown>, diag?: Diagnostics
   }
   const merged = { ...DEFAULTS, ...env, ...(raw ?? {}) } as Options;
   if (!Array.isArray(merged.readNudgeTiers) || merged.readNudgeTiers.length === 0) merged.readNudgeTiers = DEFAULTS.readNudgeTiers;
+  if (merged.primaryTools !== "all" && merged.primaryTools !== "tier1") merged.primaryTools = DEFAULTS.primaryTools;
   return merged;
 }
 
@@ -115,6 +127,27 @@ export function offloadAgentDefinition(o: Options) {
     // it alone — the primary agent keeps opencode's default ask.
     permission: { edit: "deny", bash: "deny", webfetch: "deny", external_directory: "allow" },
   };
+}
+
+// Tier-1 exposure through opencode permissions (opencode 1.18 merged `tools` into
+// `permission`; a denied tool's schema is not sent to the model). Rules apply in order, so the
+// broad deny is written before the specific allows. Keys the user already set are never
+// touched: an explicit user permission always wins over this default.
+export function applyTier1Permissions(c: Record<string, any>, o: Options) {
+  c.permission ??= {};
+  const prefix = `${o.mcp}_*`;
+  if (!(prefix in c.permission)) c.permission[prefix] = "deny";
+  for (const t of TIER1_TOOLS) {
+    const k = `${o.mcp}_${t}`;
+    if (!(k in c.permission)) c.permission[k] = "allow";
+  }
+  // The offload subagent must keep the WHOLE harness, including a user-defined one the plugin
+  // did not create -- otherwise the global deny would strand every non-Tier-1 lane.
+  const agent = c.agent?.[o.offloadAgent];
+  if (agent) {
+    agent.permission ??= {};
+    if (!(prefix in agent.permission)) agent.permission[prefix] = "allow";
+  }
 }
 
 export function offloadCommands(o: Options) {
@@ -179,6 +212,7 @@ export function createHooks(o: Options, diagnostics: Diagnostics = newDiagnostic
         for (const [name, def] of Object.entries(offloadCommands(o))) {
           if (!c.command[name]) c.command[name] = def;
         }
+        if (o.primaryTools === "tier1") applyTier1Permissions(c, o);
         if (!c.small_model && o.smallModel) {
           c.small_model = o.smallModel;
           diagnostics.smallModelDefaulted = true;
@@ -230,8 +264,8 @@ export function createHooks(o: Options, diagnostics: Diagnostics = newDiagnostic
     "experimental.chat.system.transform": async (_input, output) => {
       try {
         if (!o.systemProtocol) return;
-        const text = protocolText(o.mcp, o.offloadAgent);
-        if (!output.system.some((s) => s.includes("three-lane dispatch (house protocol"))) output.system.push(text);
+        const text = protocolText(o.mcp, o.offloadAgent, o.primaryTools);
+        if (!output.system.some((s) => s.includes(PROTOCOL_MARKER))) output.system.push(text);
       } catch (e) {
         warn("system.transform hook", e);
       }

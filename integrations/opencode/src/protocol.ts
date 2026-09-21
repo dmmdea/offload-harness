@@ -3,8 +3,13 @@
 // sits in the cached prefix and its hooks fire after a parallel burst is already composed.
 // Here the protocol is present in the generation that composes the dispatch. Kept compact:
 // this text is paid every turn.
-export function protocolText(mcp: string, offloadAgent: string): string {
+// Both protocol variants carry this marker; the system transform de-duplicates on it. A variant
+// without it was injected twice per turn (caught by "injects the protocol once").
+export const PROTOCOL_MARKER = "(house protocol, always on)";
+
+export function protocolText(mcp: string, offloadAgent: string, primaryTools: "tier1" | "all" = "all"): string {
   const t = (name: string) => `${mcp}_${name}`;
+  if (primaryTools === "tier1") return tier1ProtocolText(mcp, offloadAgent);
   return [
     `# local-offload harness — three-lane dispatch (house protocol, always on)`,
     `Free local lanes are wired as MCP tools (prefix \`${mcp}_\`) and as the \`${offloadAgent}\` subagent. UNDER-use is the measured failure mode; use them by default.`,
@@ -22,4 +27,19 @@ export function protocolText(mcp: string, offloadAgent: string): string {
 
 export function taskDescriptionAddendum(offloadAgent: string, mcp: string): string {
   return `\n\nOFFLOAD ROUTE: read-only legs (recon, sweep, digest, extract, inventory, audit over LOCAL files) belong on subagent_type "${offloadAgent}" — a free local seat with the ${mcp}_* harness tools; two or more such legs are better as ONE ${mcp}_agent_delegate route:"spread" call. Keep judgment/web/write legs on the default agent.`;
+}
+
+// Tier-1 mode: the primary sees only the four mechanical-text tools, so it must never be told
+// to call a tool it cannot see. Everything else is reached by handing a task leg to the offload
+// subagent, which holds the whole harness. Shorter than the full text: it is paid every turn.
+function tier1ProtocolText(mcp: string, offloadAgent: string): string {
+  const t = (name: string) => `${mcp}_${name}`;
+  return [
+    `# local-offload harness — dispatch (house protocol, always on)`,
+    `Free local lanes. UNDER-use is the measured failure mode; use them by default.`,
+    `Direct (single-shot mechanical text): ${t("offload_summarize")} · ${t("offload_classify")} · ${t("offload_extract")} · ${t("offload_triage")}.`,
+    `Everything else — multi-file recon, digests, audits, extraction over local files, vision, media, web research over given URLs, roster/health — goes to the local offload seat: issue a task call with subagent_type "${offloadAgent}" and hand it NAMED FILES and one bounded question. It holds the whole harness (agent_delegate, agent_run, vision, media, research).`,
+    `Several independent read-only legs: issue them as separate "${offloadAgent}" task calls in the SAME message so they run concurrently.`,
+    `Keep here: judgment, design, review, writes, commands. A local seat's output is not load-bearing until you spot-check the consequential parts.`,
+  ].join("\n");
 }
