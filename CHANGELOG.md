@@ -6,6 +6,45 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.132.3] - 2026-09-21 - the display card is a card PROPERTY, and placement is one order
+
+- **`display_active`, not a guess from the process list (ADR 0057 revised).** 0.132.2 decided
+  which card drove a display by inference: "`nvidia-smi` could not size this process, so it is the
+  desktop". That was wrong twice over. `[N/A]` memory is a WDDM property, not a graphics-process
+  property — `nvidia-smi` types all 24 of the Qube's desktop rows `C+G` and can size none of them —
+  and a native-Windows CUDA seat (ComfyUI, which the 3-card law pins to card 0 or 2) produces the
+  same shape. The heuristic would have flagged the card the harness was WORKING on, dropped it from
+  `work_util_pct`, and made a saturated node advertise itself as idle — inverting the defect it was
+  written to cure. `--query-gpu=display_active` answers it directly and rides the per-device query
+  every reader already runs, so it costs no extra `nvidia-smi` call. Measured 2026-09-21: Qube
+  (3 cards, operator gaming) `Disabled/ENABLED/Disabled`; Lenovo (headless Linux A2) `Disabled`;
+  Aorus (laptop, screen on the iGPU) `Disabled`.
+- **Less machinery, not more.** Because the answer now rides the device sample the health tick
+  already takes, the fleet node's separate display probe, its 30 s cadence and its carry-forward
+  are all gone. Nothing to go stale, nothing to expire, one fewer driver call.
+- **Placement is ONE order again.** Two defects made `betterRemote` return orderings that depend on
+  the order of the roster it is folded over — Go requires a strict weak ordering from any
+  comparison used to order a set, transitive incomparability included:
+  - the 0.132.2 tie-break chose `work_util_pct` vs `gpu_util_pct` per COMPARISON, so a mixed fleet
+    mid-rollout ranked the same three nodes on two different metrics depending on who was being
+    compared, and cycled. `placementUtil` now picks the figure per NODE.
+  - the P2C near-tie draw hashed the SEED ALONE, so it answered the same whichever way round it was
+    asked: `betterRemote(P, Q)` and `betterRemote(Q, P)` were both true, and the fold kept whichever
+    near-tied seat came last in the roster. The draw is now a bounded jitter on the seat's own eta,
+    derived from the seed AND the node id, so the ordering is total by construction while near-tied
+    seats still come out differently per Run. It spreads across any number of tied seats, not two.
+- **An unmeasured seat is ranked, not parked.** A node publishing no `seat_rate` used to make its
+  comparisons fall back to window for that PAIR only — the same per-pair defect, and the third
+  source of cycles. It is now ranked as if it ran at the FLEET'S MEDIAN published rate, keeping its
+  own backlog and cold load, exactly as `agent.assumedPrefillTokS` assumes a rate for a stall wall
+  until one is measured. A constant would have been either "unmeasured wins everything" or "never
+  gets work, so never earns samples"; the median is neither and adapts as the fleet does. With no
+  node publishing a rate there is no prior, every seat is unranked, and the ordering falls to
+  window for all of them — the original rule, applied uniformly.
+- Tests: a brute-force strict-weak-ordering check over a 16-node roster (measured and unmeasured,
+  four window sizes, backlogs, cold loads) across 40 seeds; both new guards verified to go RED on
+  the defects they pin.
+
 ## [0.132.2] - 2026-09-21 - placement scores the cards the harness can use, not the operator's screen (ADR 0057)
 
 - **The other half of 0.132.1.** That release stopped the GPU lease verdict from calling the

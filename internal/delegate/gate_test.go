@@ -326,15 +326,15 @@ func TestBetterRemote_UtilizationBreaksQueueTies(t *testing.T) {
 	a.NodeID, b.NodeID = "a", "b"
 	a.GpuUtilPct, a.GpuUtilKnown = 80, true
 	b.GpuUtilPct, b.GpuUtilKnown = 10, true
-	if !betterRemote("seed", &st, b, a) || betterRemote("seed", &st, a, b) {
+	if !betterRemote("seed", &st, 0, b, a) || betterRemote("seed", &st, 0, a, b) {
 		t.Fatal("lower known utilization must win an otherwise equal pair")
 	}
 	// queue depth still outranks utilization
 	b.QueueDepth = a.QueueDepth + 1
-	if betterRemote("seed", &st, b, a) {
+	if betterRemote("seed", &st, 0, b, a) {
 		t.Fatal("utilization must never override QueueDepth")
 	}
-	if !betterRemote("seed", &st, a, b) {
+	if !betterRemote("seed", &st, 0, a, b) {
 		t.Fatal("a's lower QueueDepth must still win once QueueDepth is no longer tied")
 	}
 }
@@ -343,7 +343,7 @@ func TestBetterRemote_UnknownUtilizationNeverLoses(t *testing.T) {
 	st := schemaSubtask()
 	known, unknown := eligibleRemote(), eligibleRemote()
 	known.GpuUtilPct, known.GpuUtilKnown = 5, true
-	if betterRemote("seed", &st, known, unknown) || betterRemote("seed", &st, unknown, known) {
+	if betterRemote("seed", &st, 0, known, unknown) || betterRemote("seed", &st, 0, unknown, known) {
 		t.Fatal("an unknown utilization is neither credited nor blamed — roster order keeps the tie")
 	}
 }
@@ -364,10 +364,10 @@ func TestBetterRemote_TieBreakSkipsTheOperatorsDesktop(t *testing.T) {
 	// The other node has no desktop load but its harness card is genuinely working.
 	busy.GpuUtilPct, busy.GpuUtilKnown = 20, true
 	busy.WorkUtilPct, busy.WorkUtilKnown = 20, true
-	if !betterRemote("seed", &st, gaming, busy) {
+	if !betterRemote("seed", &st, 0, gaming, busy) {
 		t.Fatal("the node whose HARNESS cards are idle must win, even though its desktop makes the whole box read busier")
 	}
-	if betterRemote("seed", &st, busy, gaming) {
+	if betterRemote("seed", &st, 0, busy, gaming) {
 		t.Fatal("the node doing real harness work must not beat an idle one on a desktop-inflated figure")
 	}
 }
@@ -406,7 +406,7 @@ func TestBetterRemote_MixedFleetRanksOnOneFigurePerNode(t *testing.T) {
 			if a.NodeID == b.NodeID {
 				continue
 			}
-			if betterRemote("seed", &st, a, b) && betterRemote("seed", &st, b, a) {
+			if betterRemote("seed", &st, 0, a, b) && betterRemote("seed", &st, 0, b, a) {
 				t.Fatalf("%s and %s each beat the other", a.NodeID, b.NodeID)
 			}
 		}
@@ -414,8 +414,8 @@ func TestBetterRemote_MixedFleetRanksOnOneFigurePerNode(t *testing.T) {
 	for _, a := range all {
 		for _, b := range all {
 			for _, c := range all {
-				if betterRemote("seed", &st, a, b) && betterRemote("seed", &st, b, c) &&
-					betterRemote("seed", &st, c, a) {
+				if betterRemote("seed", &st, 0, a, b) && betterRemote("seed", &st, 0, b, c) &&
+					betterRemote("seed", &st, 0, c, a) {
 					t.Fatalf("preference cycle: %s > %s > %s > %s", a.NodeID, b.NodeID, c.NodeID, a.NodeID)
 				}
 			}
@@ -426,7 +426,7 @@ func TestBetterRemote_MixedFleetRanksOnOneFigurePerNode(t *testing.T) {
 	fold := func(rs []NodeView) string {
 		best, found := NodeView{}, false
 		for _, r := range rs {
-			if !found || betterRemote("seed", &st, r, best) {
+			if !found || betterRemote("seed", &st, 0, r, best) {
 				best, found = r, true
 			}
 		}

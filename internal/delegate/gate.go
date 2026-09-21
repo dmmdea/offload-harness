@@ -84,13 +84,16 @@ func Place(seed string, st Subtask, local NodeView, remotes []NodeView, localBus
 	if !localBusy && (st.Contract.Layer == "" || declaresLayer(local, st.Contract.Layer)) {
 		return local
 	}
+	// The rate assumption is computed ONCE, from this roster, and used for every
+	// comparison in this decision — never per pair. See fleetTokSPrior.
+	prior := fleetTokSPrior(remotes)
 	var best NodeView
 	found := false
 	for _, r := range remotes {
 		if !remoteEligible(st, r) {
 			continue
 		}
-		if !found || betterRemote(seed, &st, r, best) {
+		if !found || betterRemote(seed, &st, prior, r, best) {
 			best, found = r, true
 		}
 	}
@@ -175,7 +178,7 @@ func declaresLayer(v NodeView, name string) bool {
 // call, never an agent loop — "no feasibility term; vision is single-shot"),
 // so nil st runs the SIMPLER visionEtaBetter key (queue-wait only, still
 // P2C-drawn) instead of the full window+generation ranking.
-func betterRemote(seed string, st *Subtask, candidate, incumbent NodeView) bool {
+func betterRemote(seed string, st *Subtask, priorTokS float64, candidate, incumbent NodeView) bool {
 	// Key 0 (W-14, register S-15): a node still eligible under a lease-busy
 	// verdict loses to any node that is not — "ranked last" means it does not
 	// even get to compete on saturation or queue depth against a clean node.
@@ -193,7 +196,7 @@ func betterRemote(seed string, st *Subtask, candidate, incumbent NodeView) bool 
 		return c
 	}
 	if st != nil {
-		if better, decided := betterRanked(seed, inferKind(*st), rankFor(*st, candidate), rankFor(*st, incumbent)); decided {
+		if better, decided := betterRanked(seed, inferKind(*st), rankFor(*st, candidate, priorTokS), rankFor(*st, incumbent, priorTokS)); decided {
 			return better
 		}
 	} else if better, decided := visionEtaBetter(seed, candidate, incumbent); decided {
@@ -536,7 +539,7 @@ func PlaceVision(remotes []NodeView) (int, bool) {
 		if !visionEligible(r) {
 			continue
 		}
-		if best < 0 || betterRemote(seed, nil, r, remotes[best]) {
+		if best < 0 || betterRemote(seed, nil, 0, r, remotes[best]) {
 			best = i
 		}
 	}
@@ -549,10 +552,17 @@ func PlaceVision(remotes []NodeView) (int, bool) {
 // an agent contract), with the same P2C near-tie draw.
 func visionEtaBetter(seed string, candidate, incumbent NodeView) (better, decided bool) {
 	c, i := queueWaitFor(candidate), queueWaitFor(incumbent)
+	// Two nodes with the SAME estimate stay undecided here and fall through to
+	// QueueDepth below, which is what orders the vision lane's common case: a
+	// roster where nobody publishes a wall, so every estimate is 0.
 	if c == i {
 		return false, false
 	}
-	return etaPreferred(seed, c, i), true
+	cd, id := etaDrawn(seed, candidate.NodeID, c), etaDrawn(seed, incumbent.NodeID, i)
+	if cd != id {
+		return cd < id, true
+	}
+	return candidate.NodeID < incumbent.NodeID, candidate.NodeID != incumbent.NodeID
 }
 
 // visionEligible is PlaceVision's hard gate: the lane advertised, the card

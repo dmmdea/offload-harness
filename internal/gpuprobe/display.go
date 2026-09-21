@@ -40,8 +40,14 @@ func DisplayCardUUIDs(devices []Device) map[string]bool {
 	display := make(map[string]bool)
 	eligible := 0
 	for _, d := range devices {
-		if d.DisplayActive && d.UUID != "" {
-			display[d.UUID] = true
+		if d.DisplayActive {
+			// A display card with no UUID cannot be keyed, so it cannot be
+			// excluded — but it is still not a card the harness may place a seat
+			// on, so counting it as one would let the guard below exclude the
+			// REAL display cards on a box that has nothing left to score.
+			if d.UUID != "" {
+				display[d.UUID] = true
+			}
 			continue
 		}
 		eligible++

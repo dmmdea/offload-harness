@@ -160,3 +160,119 @@ func TestQueueWaitForFormula(t *testing.T) {
 		t.Fatalf("queueWaitFor must prefer the node's own published estimate: got %v, want 7.5", got)
 	}
 }
+
+// TestEtaRankingIsAStrictWeakOrdering brute-forces the property the ranking
+// has to have and twice did not. bestRemote FOLDS betterRemote over a roster,
+// and Go states the requirement for any comparison used to order a set
+// (slices.SortFunc: a strict weak ordering, transitive incomparability
+// included). Two defects broke it:
+//
+//   - the near-tie coin hashed the SEED alone, so it answered the same
+//     whichever way round it was asked and P beat Q while Q beat P;
+//   - a seat with no measured rate fell back to comparing WINDOWS for that pair
+//     only, so a mixed roster was ranked on two different metrics depending on
+//     who was being compared, and cycled.
+//
+// The roster mixes measured and unmeasured seats, four window sizes, backlogs
+// and cold loads — the shapes a real fleet mid-rollout actually has.
+func TestEtaRankingIsAStrictWeakOrdering(t *testing.T) {
+	st := oneStepSubtask("extract every field from the report", 300)
+	mk := func(id string, ctx int, tokS float64) NodeView { return etaFixtureRemote(id, ctx, tokS, 0) }
+	nodes := []NodeView{
+		mk("a", 8192, 10), mk("b", 8192, 11), mk("c", 8192, 12), mk("d", 8192, 13),
+		mk("e", 32768, 10), mk("f", 8192, 34), mk("g", 8192, 5),
+		mk("h", 4096, 10), mk("i", 16384, 11), mk("j", 32768, 12),
+	}
+	for _, nr := range []struct {
+		id  string
+		ctx int
+	}{{"norate-small", 4096}, {"norate-mid", 8192}, {"norate-big", 16384}, {"norate-huge", 32768}} {
+		v := eligibleRemote()
+		v.NodeID, v.AgentCtxTokens = nr.id, nr.ctx
+		nodes = append(nodes, v)
+	}
+	busy := mk("busy", 8192, 10)
+	busy.JobsRunning, busy.JobsQueued, busy.RecentAgentWallSec = 2, 3, 90
+	cold := mk("cold", 8192, 10)
+	notLoaded := false
+	cold.SeatLoaded = &notLoaded
+	cold.SeatRate.ColdLoadSec = 120
+	coldNoRate := eligibleRemote()
+	coldNoRate.NodeID, coldNoRate.SeatLoaded = "cold-norate", &notLoaded
+	busyNoRate := eligibleRemote()
+	busyNoRate.NodeID = "busy-norate"
+	busyNoRate.JobsRunning, busyNoRate.JobsQueued, busyNoRate.RecentAgentWallSec = 2, 3, 90
+	nodes = append(nodes, busy, cold, coldNoRate, busyNoRate)
+
+	prior := fleetTokSPrior(nodes)
+	if prior <= 0 {
+		t.Fatal("fixture bug: this roster publishes rates, so it must have a prior")
+	}
+	for i := 0; i < 40; i++ {
+		seed := "job-" + string(rune('a'+i%26)) + string(rune('0'+i/26))
+		better := func(x, y NodeView) bool {
+			ok, _ := betterRanked(seed, inferKind(st), rankFor(st, x, prior), rankFor(st, y, prior))
+			return ok
+		}
+		for _, a := range nodes {
+			for _, b := range nodes {
+				if a.NodeID != b.NodeID && better(a, b) && better(b, a) {
+					t.Fatalf("seed %s: %s and %s each beat the other", seed, a.NodeID, b.NodeID)
+				}
+				for _, c := range nodes {
+					if better(a, b) && better(b, c) && better(c, a) {
+						t.Fatalf("seed %s: cycle %s > %s > %s > %s", seed, a.NodeID, b.NodeID, c.NodeID, a.NodeID)
+					}
+				}
+			}
+		}
+	}
+}
+
+// TestFleetPriorRanksAnUnmeasuredSeatAmongTheRest: a seat that publishes no
+// rate is ranked as if it ran at the fleet's median, keeping its own backlog —
+// not parked at one end of the order by a constant. A constant is what makes an
+// unmeasured seat either win everything (and take placements from seats known
+// to be fast) or win nothing (and never earn the samples that would rank it).
+func TestFleetPriorRanksAnUnmeasuredSeatAmongTheRest(t *testing.T) {
+	st := oneStepSubtask("extract every field from the report", 300)
+	slow := etaFixtureRemote("slow", 8192, 5, 0)
+	fast := etaFixtureRemote("fast", 8192, 50, 0)
+	mid := etaFixtureRemote("mid", 8192, 25, 0)
+	quiet := eligibleRemote()
+	quiet.NodeID = "unmeasured"
+	loaded := eligibleRemote()
+	loaded.NodeID = "unmeasured-backlogged"
+	loaded.JobsRunning, loaded.JobsQueued, loaded.MaxConcurrentJobs, loaded.RecentAgentWallSec = 1, 4, 1, 120
+
+	roster := []NodeView{slow, fast, mid, quiet, loaded}
+	prior := fleetTokSPrior(roster)
+	if prior != 25 {
+		t.Fatalf("fleet prior = %v, want the median published rate (25 tok/s)", prior)
+	}
+	if r := rankFor(st, quiet, prior); !r.etaKnown {
+		t.Fatal("an unmeasured seat must be ranked on the assumed rate, not left unranked")
+	}
+	// Its own backlog still counts against it.
+	quietEta := rankFor(st, quiet, prior).eta
+	loadedEta := rankFor(st, loaded, prior).eta
+	if !(loadedEta > quietEta) {
+		t.Fatalf("a backlogged unmeasured seat (%.1fs) must rank behind an idle one (%.1fs)", loadedEta, quietEta)
+	}
+	// A measured seat is never displaced by the assumption: the fleet's fastest
+	// still beats a seat we know nothing about.
+	if !betterRemote("seed", &st, prior, fast, quiet) {
+		t.Fatal("the fastest measured seat must still beat an unmeasured one")
+	}
+
+	// With nobody publishing a rate there is no prior, every seat is unranked,
+	// and the ordering falls to window for ALL of them — the original rule,
+	// applied uniformly, which is still a total order.
+	none := []NodeView{quiet, loaded}
+	if p := fleetTokSPrior(none); p != 0 {
+		t.Fatalf("a roster with no published rate must have no prior; got %v", p)
+	}
+	if r := rankFor(st, quiet, 0); r.etaKnown {
+		t.Fatal("with no prior available a seat must stay unranked, not be invented a rate")
+	}
+}
