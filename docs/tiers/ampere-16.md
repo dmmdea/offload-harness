@@ -24,7 +24,7 @@ one declaration, so the seat and the lane routing to it cannot disagree.
 |---|---|---|
 | id | `qwen38-27b-gsq-vllm` | the llama-swap model id, `--served-model-name`, and what `agent_model` binds to |
 | cards | `0` | `CUDA_VISIBLE_DEVICES`, in PCI order |
-| tensor_parallel | 0 | `--tensor-parallel-size`; must equal how many cards are listed |
+| tensor_parallel | 0 | `--tensor-parallel-size`; tensor x pipeline must equal how many cards are listed |
 | max_model_len | 32768 | the served window |
 | gpu_memory_utilization | 0.90 | the engine's share of the card — chosen WITH the seat's co-residents in mind, not alone |
 | kv_cache_dtype | `fp8_e5m2` | KV precision — backend-dependent, not free everywhere |

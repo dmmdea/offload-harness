@@ -24,6 +24,35 @@ Versioning: [SemVer](https://semver.org/).
 - Tests: 55 pass. Five mutants, each confirmed to typecheck first, are all caught — including one
   that first slipped past a vacuous test comparing `protocolText()` with itself (replaced by fixed
   expectations).
+## [0.132.6] - 2026-09-21 - the three-card seat is the flagship agent seat
+
+- **The operator's order, finally in the table.** 2026-09-19: "the 3 card tier as the agent seat now and the 2 card
+  tier to be the opt in one ... biggest context window and keeps the LMCache server ... leave around 20% of the 5070ti
+  free ... gpu 0 gets a bit less load than gpu 2". The 3-card seat had been measured and hand-wired several times, and
+  every time the blackwell-3x16 seed still described the 2-card pair, so the next install or audit put it back.
+  blackwell-3x16 now seeds `qwen3.8-27b-vllm-3card` as `agent-pool`: pipeline-parallel 3 on devices `2,1,0`, layers
+  `28,13,23`, fp8 KV pinned at 3.75 GiB per card, window **262,144** (pool 269,676).
+- **Why that layout** (W1 campaign, 8 sweeps). Qwen3.8-27B has 4 KV heads, so three cards means a pipeline, and its
+  lm_head is untied (2.37 GiB bf16) — the last stage carries it, the first carries the embedding plus the vision tower.
+  Order `2,1,0` puts the 5070 Ti (the display card) in the MIDDLE, where it holds neither: it keeps 18-22% free with a
+  2.6-3.3 GB desktop (~13% with a 4.1 GB one). Card 0 runs 23 layers plus the head (~26 layer-equivalents), card 2
+  runs 28. 28 layers per rank is the ceiling for 262k at this KV budget (29 caps the window at 235,200). Order `0,1,2`
+  failed LMCache `register_kv_caches` on the card-2 last rank twice; a two-process IPC probe cleared card 2 itself.
+- **Schema.** `vllm_seat` gains `pipeline_parallel`, `layer_partition` and `kv_cache_memory_bytes`, rendered into
+  `SEAT_PP`, `SEAT_PARTITION` and `--kv-cache-memory-bytes` for the windows-wsl launcher (refused on linux-systemd,
+  which renders no pipeline flags). A seat that spans the display card must pin its KV bytes and keep the display
+  card off the first and last stage (`TestTripleBlackwellVLLMSeatSpansTheDisplayCardOnlyWithABoundedFootprint`,
+  replacing the blanket "never span it" rule the order overturned).
+  `fallback_agent_device` names the pin the llama.cpp fallback renders on ("0,2") when it differs from the seat's
+  own ("2,1,0"); the Go seed and the installer's PowerShell fill both honour it (render tests caught the mismatch).
+- **Placement.** The free agent choice goes to the `triple` layer when it carries a non-opt-in agent seat; the pair is
+  opt-in by name (`contract.layer: pair`). A box whose triple is opt-in or absent keeps the pair, unchanged.
+- **The pair.** The Qube keeps serving the 2-card tp2 seat as the opt-in `agent-pool-2card` (163,840). The seed holds
+  one vLLM seat per tier (register A-113), so on a fresh install the pair's agent seat is the llama.cpp 27B the tier
+  renders on the same cards.
+- **Open.** LMCache stores the flagship's pages in the Lenovo store (~205 MB per 1568-token chunk), but the pipeline
+  lookup serves none back after eviction (0 external hits) — a miss recomputes, no worse than the storeless seat it
+  replaces. The L1 staging is 8 GB, not the 2 GB default: a 2 GB L1 failed this model's stores.
 
 ## [0.132.5] - 2026-09-21 - every seeded media model now has the script that runs it
 

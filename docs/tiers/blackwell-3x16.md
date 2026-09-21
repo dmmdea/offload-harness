@@ -12,7 +12,7 @@
 | kv_type | `q8_0` | `--cache-type-k/v`, kept symmetric |
 | flash_attn | `on` | `--flash-attn` (required for a q8_0 V cache) |
 | resident_tier | `gemma4-26b-a4b` | the model that stays hot; seeds the agent planner seat (agent_model) when it differs from the workhorse |
-| agent_ctx_tokens | 163840 | the agent's `-ctx-tokens` compaction budget |
+| agent_ctx_tokens | 262144 | the agent's `-ctx-tokens` compaction budget |
 | 26B-A4B | `gpu` | whether the 26B MoE is served, and where its experts live |
 
 ## Composes
@@ -30,8 +30,9 @@ operator enables it; an opt-in layer is entered only on an explicit ask, under i
 | layer | tier | devices | seats | guards | state |
 |---|---|---|---|---|---|
 | `single` | `blackwell-16` | `0` / `2` | router (device 0) — the cascade's own rungs<br>agent → `gemma-4-26b-agent` (device 0, window 131072)<br>ocr → `qwen3-vl-8b` (device 2, window 16384)<br>stt → `whisper-stt` (device 2) | — | active |
-| `pair` | `blackwell-2x16` | `0,2` | agent → the tier's vLLM seat<br>long → `qwen3.8-27b-262k` (device 0,2, window 262144)<br>vision → `qwen3-vl-32b` (device 0,2, window 16384) | — | active |
+| `pair` | `blackwell-2x16` | `0,2` | agent → `qwen3.8-27b` (device 0,2, window 131072)<br>long → `qwen3.8-27b-262k` (device 0,2, window 262144)<br>vision → `qwen3-vl-32b` (device 0,2, window 16384) | — | opt-in |
 | `display` | `blackwell-16` | `1` | router (device 1): triage → `gemma-4-e2b-display`, workhorse → `gemma-4-e4b-display` | display_floor, presence (display device 1, floor 4 GiB) | **dormant** (operator enables) |
+| `triple` | `blackwell-3x16` | `2,1,0` | agent → the tier's vLLM seat | — | active |
 
 ## Agent seat
 
@@ -41,11 +42,14 @@ one declaration, so the seat and the lane routing to it cannot disagree.
 
 | setting | value | what it controls |
 |---|---|---|
-| id | `qwen3.8-27b-vllm` | the llama-swap model id, `--served-model-name`, and what `agent_model` binds to |
-| cards | `0,2` | `CUDA_VISIBLE_DEVICES`, in PCI order |
-| tensor_parallel | 2 | `--tensor-parallel-size`; must equal how many cards are listed |
-| max_model_len | 163840 | the served window |
-| gpu_memory_utilization | 0.90 | the engine's share of the card — chosen WITH the seat's co-residents in mind, not alone |
+| id | `qwen3.8-27b-vllm-3card` | the llama-swap model id, `--served-model-name`, and what `agent_model` binds to |
+| cards | `2,1,0` | `CUDA_VISIBLE_DEVICES`, in PCI order |
+| tensor_parallel | 0 | `--tensor-parallel-size`; tensor x pipeline must equal how many cards are listed |
+| pipeline_parallel | 3 | `--pipeline-parallel-size`: the model is split across the cards in listed order |
+| layer_partition | `28,13,23` | layers per pipeline stage (`VLLM_PP_LAYER_PARTITION`), in card order |
+| kv_cache_memory_bytes | 4026531840 | fixed KV budget per card (`--kv-cache-memory-bytes`) instead of a profiled share: how a seat on a display card leaves the desktop its room |
+| max_model_len | 262144 | the served window |
+| gpu_memory_utilization | 0.84 | the engine's share of the card — chosen WITH the seat's co-residents in mind, not alone |
 | kv_cache_dtype | `fp8` | KV precision — backend-dependent, not free everywhere |
 | ttl_seconds | 300 | idle window before the seat unloads and frees its cards |
 | launch | `windows-wsl` | which artifact set starts it |
@@ -59,16 +63,16 @@ the store instead of being recomputed, and it survives a seat swap.
 | setting | value |
 |---|---|
 | store | `fs_native` |
-| address | `/mnt/kvcache/lmcache-seat-tp2-fp8` |
+| address | `/mnt/kvcache/lmcache-seat-3card-fp8` |
 | chunk_size | 1568 — must equal the engine's unified block size at this KV dtype |
-| l1_staging_gb | 2 |
-| key_prefix | `qube-seat-tp2-fp8` |
+| l1_staging_gb | 8 |
+| key_prefix | `qube-seat-3card-fp8` |
 | min_mbps | 200 — below this the seat DEGRADES to the same-box L1 tier, loudly (0.115.1); it never refuses to start |
 
 The store is a second device and stays **optional**: a box without one runs the seat on
 VRAM plus the L1 staging buffer.
 
-> RTX 5060 Ti pair (devices 0 and 2 in PCI order) on the 3-card reference workstation, vLLM 0.28.0 + LMCache MP 0.5.5rc3 in the `freetoken` WSL distro, fp8 KV with the PR #4253 overlay. THE TIER SHIPPED NO vLLM SEAT AT ALL UNTIL NOW: llama-swap.win-triple-blackwell.yaml contained no seat entry, no agent-pool alias and no cache server, so a fresh install of the tier whose reference box IS this workstation fell back to the llama.cpp `qwen3.8-27b` seat while the box itself served the vLLM seat with a 50 GB warm store — the same defect ADR 0035 and PR #267 fixed for ampere-16, one tier over. Operating point is the live seat-tp2.env: window 163,840 at util 0.90 (fp8 pool 177,766 tokens, ~1.08x margin; fp16 served 100,352), batched 3135, seqs 32. Cache server measured 2026-09-04 Phase 8: fs_native over SMB 3.1.1 to the Lenovo export, 23.7k tokens restored in 0.56-0.70 s (44x) against 3.8 s through the Valkey adapter; the wired path measured 570 MB/s, so SEAT_L2_MIN_MBPS 200 refuses the WireGuard (124) and Wi-Fi (4.6) paths. THE THIRD CARD IS NOT IN THIS SEAT AND THAT IS THE MEASURED CHOICE, not an omission: the 3-card pipeline layout (pp 26/26/12) serves a SMALLER window (100,352), costs 32 GB of host RAM instead of 8, draws in the display card, and can use no cache server at all — LMCache documents per-TP-rank behaviour and never addresses pipeline parallelism. It also FAILED the delegation gate, deferring at 300,010 ms on a real digest contract the 2-card seat finished in 272 s. It stays what the tier notes call it: opt-in long-context work, not the delegation lane. Records: Benchmarks and Optimizations/2026-09-01-vllm-lmcache-results/, 2026-09-02-lmcache-research-pass.md, and the live /root/g7/seat-tp2.env.
+> THE FLAGSHIP (operator 2026-09-19: "the 3 card tier as the agent seat now and the 2 card tier to be the opt in one ... biggest context window and keeps the LMCache server ... leave around 20% of the 5070ti free ... gpu 0 gets a bit less load than gpu 2"). Measured 2026-09-21 in the W1 campaign (8 sweeps, vLLM 0.28.0 + LMCache MP with the PR #4253 overlay, fp8 e4m3 KV) on the 3-card reference workstation (5060 Ti = CUDA 0 and 2, 5070 Ti = CUDA 1, the display card). Qwen3.8-27B-INT4 has 64 layers, 4 KV heads (so TP3 is impossible: pipeline), full attention every 4th layer, and an UNTIED bf16 lm_head (248,320 x 5,120 = 2.37 GiB) — the last stage carries it and the first carries the embedding (2.37) plus the vision tower (0.86). Order 2,1,0 puts the 5070 Ti in the MIDDLE, where it holds neither; order 0,1,2 failed LMCache register_kv_caches on the card-2 last rank twice. 28 layers per rank is the ceiling for a 262,144 window at 3.75 GiB of KV per card (pool 269,676; 29 layers caps it at 235,200). Card 0's compute = 23 layers + lm_head (~3 layer-equivalents) = 26 < card 2's 28. The 5070 Ti keeps 18-22% free with a 2.6-3.3 GB desktop and ~13% with a 4.1 GB one: the seat's own share is ~10 GB, most of it fixed per-process cost (vLLM + NCCL + the LMCache server's context), not layers. Needle 23.7k: cold 16.6 s, warm 0.48 s. L1 staging 8 GB is required, not a default: this hybrid model stores ~205 MB per 1568-token chunk and a 2 GB L1 failed its stores. OPEN: the evict phase gets 0 external hits (the Lenovo store holds the pages; the pipeline lookup serves none), so a miss recomputes. The 2-card pair (tp2 on 0,2, 163,840) stays served as the opt-in agent-pool-2card seat; this schema holds one vLLM seat per tier (register A-113), so the pair is declared in the layers below and wired by hand. Records: plans/offload-harness/2026-09-21-wiring-debt/, /root/g7/w1/results/.
 
 ## Media
 

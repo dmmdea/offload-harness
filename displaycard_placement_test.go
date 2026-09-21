@@ -208,17 +208,24 @@ func TestEveryDefaultTripleBlackwellSeatNamesItsCards(t *testing.T) {
 	t.Logf("checked %d default seats", checked)
 }
 
-// The tier's vLLM AGENT seat is now a schedulable thing too, and the gate above only
-// ever looked at media seats. A seat spanning the display card is the same 2026-09-04
-// failure by another route: at util 0.90 a three-card engine left the 5070 Ti under
-// 1 GB, Windows fell to a 720p-class mode, and the operator had to reboot (clean event
-// log, no TDR — starvation, not a crash).
+// The tier's vLLM AGENT seat is a schedulable thing too, and the gate above only ever
+// looked at media seats. A seat spanning the display card SIZED BY UTILIZATION is the
+// 2026-09-04 failure by another route: at util 0.90 a three-card engine left the 5070 Ti
+// under 1 GB, Windows fell to a 720p-class mode, and the operator had to reboot (clean
+// event log, no TDR — starvation, not a crash).
+//
+// The operator then ordered the three-card seat INTO the flagship role (2026-09-19: "the 3
+// card tier as the agent seat now ... leave around 20% of the 5070ti free"), so the rule
+// is no longer "never span the display card" but "never span it with an unbounded
+// footprint": a seat that includes it must pin kv_cache_memory_bytes (vLLM then skips the
+// utilization profile and every rank's KV is a fixed number), and run it as a pipeline so
+// the lm_head and the embedding can be kept off it (W1 campaign, 2026-09-21).
 //
 // The seat's device list is CUDA_VISIBLE_DEVICES under CUDA_DEVICE_ORDER=PCI_BUS_ID,
 // which is the ordering where the display card is index 1. Two orderings are in play on
 // this box and the display card has a different index in each, so the ordering is named
 // here rather than left to the reader.
-func TestTripleBlackwellVLLMSeatNeverSpansTheDisplayCard(t *testing.T) {
+func TestTripleBlackwellVLLMSeatSpansTheDisplayCardOnlyWithABoundedFootprint(t *testing.T) {
 	const tier = "blackwell-3x16"
 	const displayByPCI = "1"
 
@@ -229,10 +236,13 @@ func TestTripleBlackwellVLLMSeatNeverSpansTheDisplayCard(t *testing.T) {
 	var doc struct {
 		Profiles map[string]struct {
 			VLLMSeat *struct {
-				ID             string `json:"id"`
-				Device         string `json:"device"`
-				TensorParallel int    `json:"tensor_parallel"`
-				TTLSeconds     int    `json:"ttl_seconds"`
+				ID                 string `json:"id"`
+				Device             string `json:"device"`
+				TensorParallel     int    `json:"tensor_parallel"`
+				PipelineParallel   int    `json:"pipeline_parallel"`
+				LayerPartition     string `json:"layer_partition"`
+				KVCacheMemoryBytes int64  `json:"kv_cache_memory_bytes"`
+				TTLSeconds         int    `json:"ttl_seconds"`
 				CacheServer    *struct {
 					Store   string `json:"store"`
 					Address string `json:"address"`
@@ -255,17 +265,25 @@ func TestTripleBlackwellVLLMSeatNeverSpansTheDisplayCard(t *testing.T) {
 	s := p.VLLMSeat
 
 	cards := strings.Split(s.Device, ",")
-	for _, c := range cards {
-		if strings.TrimSpace(c) == displayByPCI {
-			t.Errorf("vllm_seat %s spans device %s, the 5070 Ti DISPLAY card (PCI order): "+
-				"a three-card engine starved the desktop to a 720p-class mode on 2026-09-04 "+
-				"and forced a reboot. The 5070 Ti is context/KV only; no tier seat is pinned to it",
-				s.ID, displayByPCI)
+	tp, pp := max(s.TensorParallel, 1), max(s.PipelineParallel, 1)
+	for i, c := range cards {
+		if strings.TrimSpace(c) != displayByPCI {
+			continue
+		}
+		if s.KVCacheMemoryBytes <= 0 {
+			t.Errorf("vllm_seat %s spans device %s, the 5070 Ti DISPLAY card (PCI order), with no "+
+				"kv_cache_memory_bytes: a utilization-sized engine starved the desktop to a 720p-class "+
+				"mode on 2026-09-04 and forced a reboot", s.ID, displayByPCI)
+		}
+		if pp < 2 || i == 0 || i == len(cards)-1 {
+			t.Errorf("vllm_seat %s puts the display card at stage %d of %d: the first stage carries the "+
+				"embedding + vision tower (3.2 GiB) and the last the untied lm_head (2.4 GiB); the display "+
+				"card must be a MIDDLE pipeline stage", s.ID, i, len(cards))
 		}
 	}
-	if len(cards) != s.TensorParallel {
-		t.Errorf("vllm_seat %s names %d card(s) but tensor_parallel is %d — they are two "+
-			"statements of one fact and must agree", s.ID, len(cards), s.TensorParallel)
+	if len(cards) != tp*pp {
+		t.Errorf("vllm_seat %s names %d card(s) but tensor_parallel x pipeline_parallel is %d x %d — "+
+			"they are two statements of one fact and must agree", s.ID, len(cards), tp, pp)
 	}
 	// The seat holds both cards while up. ttl 0 is "never unload" and 1800 was the
 	// standing live value; both are withdrawn — "no model gets to be loaded for more

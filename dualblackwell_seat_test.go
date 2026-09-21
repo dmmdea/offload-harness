@@ -72,22 +72,25 @@ func TestDualBlackwellSeedsThePairSeatWithTheCacheServer(t *testing.T) {
 	if s.CacheServer == nil || s.CacheServer.Store != "fs_native" || s.CacheServer.Address == "" {
 		t.Errorf("vllm_seat has no fs_native cache server — every Qube-class tier benefits from the Lenovo store (got %+v)", s.CacheServer)
 	}
-	// Same operating point as the 3-card tier's pair seat: the numbers were measured on
-	// this exact silicon, so a divergence is a typo, not a decision.
+	// Same operating point as the Qube's 2-card pair seat (seat-tp2.env): the numbers were
+	// measured on this exact silicon, so a divergence is a typo, not a decision. Until
+	// 2026-09-21 the 3-card tier seeded that pair and this test compared the two tiers
+	// directly; the 3-card tier now seeds the three-card FLAGSHIP (operator 2026-09-19) and
+	// the pair became its opt-in seat, so the pair's figures are pinned here instead.
 	r := three.VLLMSeat
 	for _, c := range []struct{ name, got, want string }{
-		{"id", s.ID, r.ID},
+		{"id", s.ID, "qwen3.8-27b-vllm"},
 		{"model_repo", s.ModelRepo, r.ModelRepo},
 		{"kv_cache_dtype", s.KVCacheDtype, r.KVCacheDtype},
-		{"cache_server.address", s.CacheServer.Address, r.CacheServer.Address},
+		{"cache_server.address", s.CacheServer.Address, "/mnt/kvcache/lmcache-seat-tp2-fp8"},
 	} {
 		if c.got != c.want {
-			t.Errorf("vllm_seat.%s = %q, differs from blackwell-3x16's %q", c.name, c.got, c.want)
+			t.Errorf("vllm_seat.%s = %q, want %q", c.name, c.got, c.want)
 		}
 	}
-	if s.MaxModelLen != r.MaxModelLen || s.TTLSeconds != r.TTLSeconds {
-		t.Errorf("vllm_seat operating point (max_model_len %d, ttl %d) differs from blackwell-3x16's (%d, %d)",
-			s.MaxModelLen, s.TTLSeconds, r.MaxModelLen, r.TTLSeconds)
+	if s.MaxModelLen != 163840 || s.TTLSeconds != r.TTLSeconds {
+		t.Errorf("vllm_seat operating point (max_model_len %d, ttl %d) differs from the pair's measured (163840, %d)",
+			s.MaxModelLen, s.TTLSeconds, r.TTLSeconds)
 	}
 	// UTILIZATION IS THE ONE NUMBER THAT LEGITIMATELY DIFFERS, and it used to be in the
 	// list above (A-22: the 2-card seat carried 0.9 copied from the 3-card tier). vLLM
@@ -113,11 +116,10 @@ func TestDualBlackwellSeedsThePairSeatWithTheCacheServer(t *testing.T) {
 			"two-card box it is taken out of the card that also draws the desktop",
 			s.GPUMemoryUtilization, pairUtil, tripleUtil)
 	}
-	if r.GPUMemoryUtilization != tripleUtil {
-		t.Errorf("blackwell-3x16 vllm_seat gpu_memory_utilization = %.2f, want %.2f: the sweep on THAT box found "+
-			"0.90 stable over 10/10 cold loads and a 20-minute soak, 0.92 unstable and 0.95 impossible. The "+
-			"two-card seat's 0.85 is a different box, not a correction to this one", r.GPUMemoryUtilization, tripleUtil)
-	}
+	// tripleUtil was the 3-card tier's PAIR seat (display card outside it). The tier's seat
+	// is now the pipeline flagship, which pins kv_cache_memory_bytes and so ignores
+	// utilization; 0.90 stays the figure for the Qube's opt-in pair, recorded in seat-tp2.env.
+	_ = tripleUtil
 	if !strings.Contains(s.Aliases[0]+strings.Join(s.Aliases, ","), "agent-pool") {
 		t.Errorf("vllm_seat aliases %v lack agent-pool — the harness binds to that alias", s.Aliases)
 	}
