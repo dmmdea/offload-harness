@@ -352,8 +352,8 @@ func TestBetterRemote_UnknownUtilizationNeverLoses(t *testing.T) {
 // the 2026-09-20 defect. GpuUtilPct is the busiest card on the WHOLE box, so a
 // node whose operator is gaming advertised that load and lost the tie to a node
 // it should have beaten — on the Qube a game read 33% on the display card while
-// every card the harness could use sat at 0%. WorkUtilPct skips a proven display
-// card, and when both nodes publish it, it decides.
+// every card the harness could use sat at 0%. WorkUtilPct skips a card reporting
+// display_active, and placementUtil picks the figure per node.
 func TestBetterRemote_TieBreakSkipsTheOperatorsDesktop(t *testing.T) {
 	st := schemaSubtask()
 	gaming, busy := eligibleRemote(), eligibleRemote()

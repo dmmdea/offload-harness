@@ -963,7 +963,7 @@ func (s *Server) fleetView(ctx context.Context, cfg config.Config) map[string]an
 			n["gpu_util_pct"] = r.view.GpuUtilPct
 		}
 		// work_util_pct is the figure PLACEMENT compares (ADR 0057): the busiest
-		// card the harness can run a seat on, with a proven display card skipped.
+		// card the harness can run a seat on, with a display-active card skipped.
 		// gpu_util_pct beside it is the busiest card on the whole box, so on a node
 		// whose operator is using it the two differ — and a caller reading only the
 		// first would mis-read a free node as busy, the same misread this ends.
