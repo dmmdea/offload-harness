@@ -962,6 +962,15 @@ func (s *Server) fleetView(ctx context.Context, cfg config.Config) map[string]an
 		if r.view.GpuUtilKnown {
 			n["gpu_util_pct"] = r.view.GpuUtilPct
 		}
+		// work_util_pct is the figure PLACEMENT compares (ADR 0057): the busiest
+		// card the harness can run a seat on, with a proven display card skipped.
+		// gpu_util_pct beside it is the busiest card on the whole box, so on a node
+		// whose operator is using it the two differ — and a caller reading only the
+		// first would mis-read a free node as busy, the same misread this ends.
+		// Absent on a node that predates the field.
+		if r.view.WorkUtilKnown {
+			n["work_util_pct"] = r.view.WorkUtilPct
+		}
 		// Saturation + lease (0.113.18): the node's own one-word verdicts. A
 		// node that publishes neither is older; the keys are simply absent.
 		if r.view.SaturationKnown {
