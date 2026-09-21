@@ -1208,7 +1208,7 @@ func (p Params) cacheRAMMiB() int {
 }
 
 // slotSaveFlag renders NOTHING, on purpose, and the token stays wired so that
-// turning it back on is this one function (ADR 0055 Layer 2).
+// turning it back on is this one function (ADR 0056 Layer 2).
 //
 // MEASURED 2026-09-21 on binxarn (llama.cpp b9934), the two reasons:
 //

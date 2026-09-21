@@ -202,6 +202,18 @@ func betterRemote(seed string, st *Subtask, candidate, incumbent NodeView) bool 
 	if candidate.QueueDepth != incumbent.QueueDepth {
 		return candidate.QueueDepth < incumbent.QueueDepth
 	}
+	// The last key compares how busy each node's HARNESS cards are, not its
+	// whole box. GpuUtilPct is the busiest card anywhere, so a node whose
+	// operator is using the desktop — or gaming — advertised that load and lost
+	// ties to an idler node it should have won (2026-09-20: a node read 33% from
+	// a game while every card the harness could use was at 0%). WorkUtilPct
+	// skips a proven display card. Both nodes must publish it to compare on it;
+	// otherwise the comparison stays on the old figure for both, so a mixed
+	// fleet during a rollout never compares one node's desktop-free number with
+	// another's desktop-inclusive one.
+	if candidate.WorkUtilKnown && incumbent.WorkUtilKnown {
+		return candidate.WorkUtilPct < incumbent.WorkUtilPct
+	}
 	if candidate.GpuUtilKnown && incumbent.GpuUtilKnown {
 		return candidate.GpuUtilPct < incumbent.GpuUtilPct
 	}

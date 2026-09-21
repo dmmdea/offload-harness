@@ -145,7 +145,7 @@ type Options struct {
 	// media lane never consults it.
 	LoopbackListener bool
 	Cfg              config.Config
-	// KVSlotDir is the directory the seats' --slot-save-path points at (ADR 0055
+	// KVSlotDir is the directory the seats' --slot-save-path points at (ADR 0056
 	// Layer 2); empty = the kvslot lane answers 501. KVSlotCapGiB bounds it (0 = 8).
 	KVSlotDir    string
 	KVSlotCapGiB int
@@ -1026,7 +1026,7 @@ type healthPayload struct {
 	// (`gemma4-e2b` vs `gemma4-e2b-cpu`). Additive + omitempty (ADR 0054).
 	Backends []string `json:"backends,omitempty"`
 	// KVSlot is true when this node renders a slot directory and answers the
-	// /fleet/kvslot/save|restore lane (ADR 0055 Layer 2).
+	// /fleet/kvslot/save|restore lane (ADR 0056 Layer 2).
 	KVSlot bool `json:"kvslot,omitempty"`
 	// Accelerators is the installer-manifest additive-device list (ADR 0024).
 	// Additive + omitempty: a node with none emits a byte-identical payload.
@@ -1047,8 +1047,20 @@ type healthPayload struct {
 	// present (never omitempty); when GpuUtilKnown is false, the value is 0
 	// and meaningless. GpuUtilKnown is the validity flag: true means nvidia-smi
 	// reported this, false means it was not queried or the query failed.
-	GpuUtilPct            int              `json:"gpu_util_pct"`
-	GpuUtilKnown          bool             `json:"gpu_util_known"`
+	GpuUtilPct   int  `json:"gpu_util_pct"`
+	GpuUtilKnown bool `json:"gpu_util_known"`
+	// WorkUtilPct answers a DIFFERENT question from GpuUtilPct and exists because
+	// placement was asking the wrong one. GpuUtilPct is the busiest card on the
+	// box, deliberately (the dashboard and the PAIR rule want exactly that), so it
+	// counts the operator's desktop or game on the display card. WorkUtilPct is the
+	// busiest card the harness can actually run a seat on — the display card is
+	// skipped when gpuprobe.DisplayCardUUIDs can prove which one it is. That is the
+	// figure a placement tie-break needs: on 2026-09-20 a node whose operator was
+	// gaming read 33% while every card the harness could use sat at 0%.
+	// WorkUtilKnown is its validity flag; a node that predates the field omits
+	// both, and a consumer then falls back to GpuUtilPct.
+	WorkUtilPct           int              `json:"work_util_pct"`
+	WorkUtilKnown         bool             `json:"work_util_known"`
 	SupportedTaskTypes    []string         `json:"supported_task_types"`
 	LoadableModelFamilies []string         `json:"loadable_model_families"`
 	ModelFootprints       []FootprintEntry `json:"model_footprints"`
@@ -1393,6 +1405,14 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		payload.GpuUtilKnown = true
 		if d.UtilPct > payload.GpuUtilPct {
 			payload.GpuUtilPct = d.UtilPct
+		}
+		// The placement figure skips a proven display card and nothing else.
+		if snap.DisplayUUIDs[d.UUID] {
+			continue
+		}
+		payload.WorkUtilKnown = true
+		if d.UtilPct > payload.WorkUtilPct {
+			payload.WorkUtilPct = d.UtilPct
 		}
 	}
 	// Reclaim is advertised ONLY when measured. An unknown verdict omits both

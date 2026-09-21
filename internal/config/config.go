@@ -1247,7 +1247,7 @@ type Config struct {
 	// so it must never be reachable unauthenticated beyond the box itself.
 	// Set the SAME value on every node and in the delegator's config.
 	FleetAuthToken string `json:"fleet_auth_token,omitempty"`
-	// KVSlotCapGiB bounds the node's kvslots/ directory (ADR 0055 Layer 2); 0 = 8 GiB.
+	// KVSlotCapGiB bounds the node's kvslots/ directory (ADR 0056 Layer 2); 0 = 8 GiB.
 	KVSlotCapGiB int `json:"kvslot_cap_gib,omitempty"`
 	// FleetAgentEnabled opts this NODE into executing fleet "agent" tasks
 	// (docs/specs/2026-08-16-multi-node-agent-delegation.md). Default false:

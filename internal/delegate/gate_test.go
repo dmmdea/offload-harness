@@ -227,10 +227,10 @@ func TestPlace(t *testing.T) {
 // the raw schema bytes + every acceptance string.
 func TestEstimateTokensSumsEveryContractPart(t *testing.T) {
 	c := core.AgentContract{
-		Goal:         "abc",                                       // 3
+		Goal:         "abc",                                         // 3
 		Context:      []core.ContextDoc{{Name: "doc", Text: "xyz"}}, // 3 + 3
-		OutputSchema: json.RawMessage(`{"a":1}`),                  // 7
-		Acceptance:   []string{"ab"},                              // 2
+		OutputSchema: json.RawMessage(`{"a":1}`),                    // 7
+		Acceptance:   []string{"ab"},                                // 2
 	}
 	// total chars = 3 + 3 + 3 + 7 + 2 = 18 -> ceil(18/3) = 6
 	if got := EstimateTokens(c); got != 6 {
@@ -345,5 +345,48 @@ func TestBetterRemote_UnknownUtilizationNeverLoses(t *testing.T) {
 	known.GpuUtilPct, known.GpuUtilKnown = 5, true
 	if betterRemote("seed", &st, known, unknown) || betterRemote("seed", &st, unknown, known) {
 		t.Fatal("an unknown utilization is neither credited nor blamed — roster order keeps the tie")
+	}
+}
+
+// TestBetterRemote_TieBreakSkipsTheOperatorsDesktop pins the placement half of
+// the 2026-09-20 defect. GpuUtilPct is the busiest card on the WHOLE box, so a
+// node whose operator is gaming advertised that load and lost the tie to a node
+// it should have beaten — on the Qube a game read 33% on the display card while
+// every card the harness could use sat at 0%. WorkUtilPct skips a proven display
+// card, and when both nodes publish it, it decides.
+func TestBetterRemote_TieBreakSkipsTheOperatorsDesktop(t *testing.T) {
+	st := schemaSubtask()
+	gaming, busy := eligibleRemote(), eligibleRemote()
+	gaming.NodeID, busy.NodeID = "gaming", "busy"
+	// The gaming node LOOKS busier on the whole box, but its harness cards are idle.
+	gaming.GpuUtilPct, gaming.GpuUtilKnown = 33, true
+	gaming.WorkUtilPct, gaming.WorkUtilKnown = 0, true
+	// The other node has no desktop load but its harness card is genuinely working.
+	busy.GpuUtilPct, busy.GpuUtilKnown = 20, true
+	busy.WorkUtilPct, busy.WorkUtilKnown = 20, true
+	if !betterRemote("seed", &st, gaming, busy) {
+		t.Fatal("the node whose HARNESS cards are idle must win, even though its desktop makes the whole box read busier")
+	}
+	if betterRemote("seed", &st, busy, gaming) {
+		t.Fatal("the node doing real harness work must not beat an idle one on a desktop-inflated figure")
+	}
+}
+
+// TestBetterRemote_MixedFleetNeverComparesTwoDifferentFigures: during a rollout
+// one node publishes work_util and another does not. Comparing one node's
+// desktop-free number with the other's desktop-inclusive one would be
+// meaningless, so the comparison stays on the old figure for BOTH.
+func TestBetterRemote_MixedFleetNeverComparesTwoDifferentFigures(t *testing.T) {
+	st := schemaSubtask()
+	upgraded, older := eligibleRemote(), eligibleRemote()
+	upgraded.NodeID, older.NodeID = "upgraded", "older"
+	upgraded.GpuUtilPct, upgraded.GpuUtilKnown = 80, true
+	upgraded.WorkUtilPct, upgraded.WorkUtilKnown = 0, true // would win on this...
+	older.GpuUtilPct, older.GpuUtilKnown = 10, true        // ...but the older node publishes no work_util
+	if betterRemote("seed", &st, upgraded, older) {
+		t.Fatal("with only one node publishing work_util, the tie-break must use gpu_util_pct for both")
+	}
+	if !betterRemote("seed", &st, older, upgraded) {
+		t.Fatal("on the common figure (gpu_util_pct) the older node's 10% beats 80%")
 	}
 }

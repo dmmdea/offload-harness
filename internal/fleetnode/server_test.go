@@ -168,6 +168,7 @@ func TestHealthGoldenShape(t *testing.T) {
 		"gpu_vendor": "nvidia", "gpu_arch": "blackwell",
 		"vram_total_gb": 16, "vram_free_gb": 12.5,
 		"gpu_util_pct": 0, "gpu_util_known": false,
+		"work_util_pct": 0, "work_util_known": false,
 		"supported_task_types": ["image-gen", "run-graph"],
 		"loadable_model_families": ["sdxl", "comfy-graph"],
 		"model_footprints": [{"model_family":"sdxl","quant":"bf16","task_type":"image-gen","vram_peak_gb":9.6}],

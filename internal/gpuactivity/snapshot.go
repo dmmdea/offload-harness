@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/gpulease"
+	"github.com/dmmdea/offload-harness/internal/gpuprobe"
 	"github.com/dmmdea/offload-harness/internal/seatload"
 )
 
@@ -265,43 +266,19 @@ func describeCard(g GPU) string {
 }
 
 // displayCards returns, by UUID, the cards this box can PROVE are display cards
-// — the ones the 3-card law forbids seats from using, so utilization there is
-// never a lease holder's work.
-//
-// The evidence is the process sample, not config: on Windows/WDDM nvidia-smi
-// reports GRAPHICS processes under --query-compute-apps with `[N/A]` memory
-// (UsedKnown false), and those are the desktop and whatever the operator is
-// running. Measured on the Qube 2026-09-20: all 28 such rows sat on card 1, the
-// 5070 Ti, while the harness's own resident seat on card 0 produced NO row at
-// all. On Linux that query lists only CUDA processes with real memory, so
-// nothing is flagged and every card stays eligible — the behaviour this fix
-// preserves everywhere except the case it exists for.
-//
-// The guard matters as much as the rule: a box whose ONLY card is its display
-// card runs its seats there by necessity (a single-GPU laptop, an iGPU node).
-// Excluding it would make held-working unreachable on those boxes and turn a
-// genuine bench into held-idle, so a display card is only ever excluded when a
-// non-display card exists to run on.
+// — utilization there is never a lease holder's work. The rule itself lives in
+// gpuprobe.DisplayCardUUIDs so the fleet node's placement figure uses the SAME
+// one; this is only the adapter from a View's readings.
 func displayCards(v View) map[string]bool {
-	graphics := make(map[string]bool)
-	for _, p := range v.Processes {
-		if !p.UsedKnown && p.GPUUUID != "" {
-			graphics[p.GPUUUID] = true
-		}
-	}
-	if len(graphics) == 0 {
-		return nil
-	}
-	eligible := 0
+	uuids := make([]string, 0, len(v.GPUs))
 	for _, g := range v.GPUs {
-		if !graphics[g.UUID] {
-			eligible++
-		}
+		uuids = append(uuids, g.UUID)
 	}
-	if eligible == 0 {
-		return nil // every card is a display card: this box works on them anyway
+	apps := make([]gpuprobe.ComputeApp, 0, len(v.Processes))
+	for _, p := range v.Processes {
+		apps = append(apps, gpuprobe.ComputeApp{GPUUUID: p.GPUUUID, UsedKnown: p.UsedKnown})
 	}
-	return graphics
+	return gpuprobe.DisplayCardUUIDs(uuids, apps)
 }
 
 func describeWork(v View, now time.Time) string {

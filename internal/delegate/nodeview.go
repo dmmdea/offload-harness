@@ -72,6 +72,14 @@ type NodeView struct {
 	// a tie-breaker, never a primary signal (operator decision 2026-09-03).
 	GpuUtilPct   int
 	GpuUtilKnown bool
+	// WorkUtilPct is the busiest card the harness can actually run a seat on —
+	// the node skips a display card it can prove (gpuprobe.DisplayCardUUIDs).
+	// GpuUtilPct is the busiest card on the whole box, so it counts the
+	// operator's desktop or game; WorkUtilPct does not, and it is what the
+	// tie-break should compare. WorkUtilKnown is false on a node that predates
+	// the field, and the tie-break then falls back to GpuUtilPct.
+	WorkUtilPct   int
+	WorkUtilKnown bool
 	// LeasedText is true when the node publishes a held TEXT-class GPU lease
 	// (health "lease", 0.113.16): its card is reserved for a measurement and the
 	// gate treats it as ineligible. Absent (older node) or a media lease decodes
@@ -233,6 +241,9 @@ type healthWire struct {
 	Accelerators []string `json:"accelerators"`
 	GpuUtilPct   int      `json:"gpu_util_pct"`
 	GpuUtilKnown bool     `json:"gpu_util_known"`
+	// Additive (0.132.2): the placement figure that skips a proven display card.
+	WorkUtilPct   int  `json:"work_util_pct"`
+	WorkUtilKnown bool `json:"work_util_known"`
 	// Additive (0.117.2). nil on a node that publishes neither.
 	SeatRate   *SeatRateView   `json:"seat_rate"`
 	SeatBudget *SeatBudgetView `json:"seat_budget"`
@@ -323,6 +334,8 @@ func FetchNodeView(ctx context.Context, base, token string) (NodeView, error) {
 		SeatBudget:        w.SeatBudget,
 		GpuUtilPct:        w.GpuUtilPct,
 		GpuUtilKnown:      w.GpuUtilKnown,
+		WorkUtilPct:       w.WorkUtilPct,
+		WorkUtilKnown:     w.WorkUtilKnown,
 		LeasedText:        w.Lease != nil && w.Lease.Held && strings.EqualFold(w.Lease.Class, "text"),
 		LeaseBusy:         w.Lease != nil && w.Lease.Held && w.Lease.Busy,
 		Tasks:             w.SupportedTaskTypes,

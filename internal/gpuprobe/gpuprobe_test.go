@@ -320,3 +320,43 @@ func TestHostFreeRAMGiBIsPlausibleWhereSupported(t *testing.T) {
 		t.Fatalf("free host RAM = %v GiB, not plausible", free)
 	}
 }
+
+// TestDisplayCardUUIDs is the one rule both the lease verdict and the fleet
+// node's placement figure use.
+func TestDisplayCardUUIDs(t *testing.T) {
+	const (
+		c0 = "GPU-3ee161b5-c188-495b-eaeb-291e6e6e1d97"
+		c1 = "GPU-2a44210f-6739-2d89-0e21-44cd5143faf7" // the Qube's display card
+		c2 = "GPU-0c3843d3-5721-d9f7-47fe-89fdb8373e24"
+	)
+	// The Qube's real --query-compute-apps output (gpu_uuid,used_memory): every
+	// row is a WDDM graphics process on card 1, and the harness's own resident
+	// seat on card 0 produces no row at all.
+	qubeOut := c1 + ", [N/A]\n" + c1 + ", [N/A]\n" + c1 + ", [N/A]\n"
+	apps := ParseComputeApps(qubeOut)
+	if len(apps) != 3 || apps[0].GPUUUID != c1 || apps[0].UsedKnown {
+		t.Fatalf("parse of the Qube's sample: %+v", apps)
+	}
+	if got := DisplayCardUUIDs([]string{c0, c1, c2}, apps); !got[c1] || got[c0] || got[c2] || len(got) != 1 {
+		t.Fatalf("Qube: want only card 1 flagged, got %v", got)
+	}
+	// Single-GPU box: its only card IS the display card, and it runs seats there.
+	if got := DisplayCardUUIDs([]string{c1}, apps); got != nil {
+		t.Fatalf("single-GPU box must exclude nothing, got %v", got)
+	}
+	// Linux: only CUDA processes, with real memory — nothing is a display card.
+	linux := ParseComputeApps(c1 + ", 9000\n" + c0 + ", 4096\n")
+	if len(linux) != 2 || !linux[0].UsedKnown {
+		t.Fatalf("parse of a Linux sample: %+v", linux)
+	}
+	if got := DisplayCardUUIDs([]string{c0, c1, c2}, linux); got != nil {
+		t.Fatalf("CUDA rows with known memory must flag nothing, got %v", got)
+	}
+	// Garbage and blank lines are skipped, never guessed at.
+	if got := ParseComputeApps("\n  \nNo running processes found\nnot-a-uuid, [N/A]\n"); len(got) != 0 {
+		t.Fatalf("unattributable lines must be skipped, got %+v", got)
+	}
+	if DisplayCardUUIDs([]string{c0}, nil) != nil {
+		t.Fatal("no processes must exclude nothing")
+	}
+}
