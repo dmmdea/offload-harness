@@ -1,7 +1,6 @@
 ---
 status: Accepted
 date: "2026-09-21"
-supersedes-own-first-cut: "0.132.2 (display heuristic, per-pair tie-break)"
 ---
 
 # ADR 0057 — Placement scores the cards the harness can use, not the operator's screen
