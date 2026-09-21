@@ -6,6 +6,28 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.132.0] - 2026-09-21 - the node can save and restore a seat's KV to disk — and the measurement that says it buys nothing yet (ADR 0055 Layer 2, node side)
+
+- `POST /fleet/kvslot/save` and `POST /fleet/kvslot/restore` on the fleet node, bearer-gated like
+  the chat lane, proxy llama-server's slot API through llama-swap. The key is `k1-<sha256 hex>` and
+  nothing else, so the file name it derives cannot escape the slot directory; an optional
+  `seat_pin_sha256` that disagrees with the live `/props` pin is a `409`, so a file is only ever
+  restored into the identical seat shape. Absent file = `404` "miss"; a seat rendered without
+  `--slot-save-path` = `501`, which is how an older node tells a caller to fall through. A 2xx whose
+  body does not parse, or which reports zero tokens, never reads as `ok` — a caller that believed
+  either would skip a prefill it never restored.
+- Every llama.cpp chat/agent seat (and its CPU twin) renders `--slot-save-path <home>/kvslots/`;
+  whisper, embedding and reranker entries do not. Both installers create the directory; an LRU
+  sweeper bounded by `kvslot_cap_gib` (0 = 8 GiB) runs after every save. Health advertises `kvslot`.
+- **MEASURED INERT on b9934 and the delegator side is BLOCKED because of it.** On binxarn, a
+  restore of 3,231 tokens (151 MB, 25 ms) leaves the next identical request paying the full
+  27.2 s prefill — same as no restore, in all three call shapes — while the same run's control
+  shows the 0.131.3 RAM cache cutting 27.2 s to 4.6 s. `GET /slots` shows why: a restore
+  populates the KV cells and none of the prompt bookkeeping the prefix matcher reads. Upstream
+  ggml-org/llama.cpp #25913, fix open in #26004. The endpoints ship because they are correct and
+  verified; nothing calls them, and nothing will until that fix lands and the ADR's table is
+  re-run with the restore arm beating the baseline.
+
 ## [0.131.3] - 2026-09-20 - llama.cpp prompt cache sized per RAM tier (ADR 0055, Layer 1)
 
 - Every llama.cpp seat renders `--cache-ram __CACHE_RAM__` from the new top-level profiles map

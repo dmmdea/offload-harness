@@ -192,19 +192,48 @@ func (s *Server) handleKVSlot(w http.ResponseWriter, r *http.Request, action str
 		writeJSON(w, code, out)
 		return
 	}
+	// The upstream body is the ONLY evidence that anything happened. Parsing it
+	// with a discarded error would turn a changed field name — or a truncated
+	// read — into status:"ok" with zero tokens, and a delegator that trusted
+	// that would skip a prefill it never actually restored. Measured shape
+	// (llama.cpp b9934, binxarn 2026-09-21):
+	//   save    {"id_slot":0,"filename":"…","n_saved":3240,"n_written":158937840,…}
+	//   restore {"id_slot":0,"filename":"…","n_restored":3240,"n_read":158937840,…}
 	var up struct {
 		NSaved    int   `json:"n_saved"`
 		NRestored int   `json:"n_restored"`
 		NWritten  int64 `json:"n_written"`
 		NRead     int64 `json:"n_read"`
 	}
-	_ = json.Unmarshal(raw, &up)
-	out.Status = "ok"
+	if err := json.Unmarshal(raw, &up); err != nil {
+		out.Status = "unparsed"
+		out.Note = fmt.Sprintf("upstream answered 2xx but its body did not parse (%v): %.300s", err, string(raw))
+		writeJSON(w, http.StatusBadGateway, out)
+		return
+	}
 	if action == "save" {
 		out.Tokens, out.Bytes = up.NSaved, up.NWritten
-		s.sweepKVSlots()
 	} else {
 		out.Tokens, out.Bytes = up.NRestored, up.NRead
+	}
+	if out.Tokens <= 0 {
+		// Zero tokens is not a transport failure, so it is not an error — but it
+		// is not a hit either. A restore that moved nothing MUST read as a miss,
+		// or the caller skips a prefill that never happened.
+		if action == "restore" {
+			out.Status = "miss"
+			out.Note = "upstream restored 0 tokens — the caller must prefill normally"
+			writeJSON(w, http.StatusNotFound, out)
+			return
+		}
+		out.Status = "empty"
+		out.Note = "the seat's slot 0 held nothing to save"
+		writeJSON(w, http.StatusOK, out)
+		return
+	}
+	out.Status = "ok"
+	if action == "save" {
+		s.sweepKVSlots()
 	}
 	writeJSON(w, http.StatusOK, out)
 }

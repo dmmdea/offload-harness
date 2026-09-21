@@ -103,6 +103,7 @@ if ($macro -match '--ctx-size 32768')                          { Ok 'ampere-8/mi
 if ($macro -match '--cache-type-k q8_0' -and $macro -match '--cache-type-v q8_0') { Ok 'ampere-8/mid KV=q8_0 (symmetric)' } else { Bad 'ampere-8/mid KV q8_0' }
 if ($macro -match '--flash-attn on')                           { Ok 'ampere-8/mid flash-attn on' }    else { Bad 'ampere-8/mid flash-attn' }
 if ($macro -match '--cache-ram 6144')                          { Ok 'ampere-8/mid cache-ram 6144 (ADR 0055)' } else { Bad "ampere-8/mid cache-ram (got: $macro)" }
+if ($macro -match '--slot-save-path \S+/kvslots/') { Ok 'ampere-8/mid slot-save-path (ADR 0055 L2)' } else { Bad "ampere-8/mid slot-save-path (got: $macro)" }
 if ($r.yaml -match '(?m)^\s{2}gemma4-26b-a4b:')                 { Ok 'ampere-8/mid includes 26B tier' } else { Bad 'ampere-8/mid 26B present' }
 $b26 = Get-ModelCmd -Yaml $r.yaml -ModelKey 'gemma4-26b-a4b'
 if ($b26 -match '--cpu-moe')                                   { Ok 'ampere-8/mid 26B uses --cpu-moe (ram=mid)' } else { Bad "ampere-8/mid 26B --cpu-moe (got: $b26)" }

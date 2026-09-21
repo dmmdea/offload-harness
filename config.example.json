@@ -239,6 +239,7 @@
   "fleet_queue_holder": "",
   "fleet_queue_claim": false,
   "fleet_auth_token": "",
+  "kvslot_cap_gib": 0,
   "fleet_agent_enabled": false,
   "agent_delegation_enabled": false,
   "delegate_remotes": null,

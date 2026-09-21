@@ -1015,7 +1015,11 @@ if ($RenderOnly) {
   if ($RenderOut) { $renderOutParent = Split-Path -Parent $RenderOut } else { $renderOutParent = $HOME_DIR }
   if ($renderOutParent) { New-Item -ItemType Directory -Force -Path $renderOutParent | Out-Null }
 } else {
-  foreach ($d in @($HOME_DIR, $llamaDir, $swapDir, $modelDir, $harnessDir, $stageDir)) {
+  # kvslots\ is the directory the seats' --slot-save-path points at (ADR 0055 Layer 2).
+  # Without it llama-server refuses every save with a 501 and the node's kvslot lane
+  # answers 501 too — the POSIX installer creates the same directory.
+  $kvSlotDir = Join-Path $HOME_DIR 'kvslots'
+  foreach ($d in @($HOME_DIR, $llamaDir, $swapDir, $modelDir, $harnessDir, $stageDir, $kvSlotDir)) {
     New-Item -ItemType Directory -Force -Path $d | Out-Null
   }
 }

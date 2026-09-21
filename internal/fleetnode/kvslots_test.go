@@ -98,6 +98,51 @@ func TestKVSlotSaveThenRestoreRoundTrip(t *testing.T) {
 	}
 }
 
+// TestKVSlotNeverReportsOkWithoutEvidence: a 2xx from llama-server is not proof
+// that anything moved. A body that does not parse (a renamed field, a truncated
+// read) and a body that reports zero tokens must BOTH fail to produce
+// status:"ok" — a delegator that believed either would skip a prefill it never
+// restored. This is the defect the free-seat reviewer pointed at.
+func TestKVSlotNeverReportsOkWithoutEvidence(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		body       string
+		action     string
+		path       string
+		wantCode   int
+		wantStatus string
+	}{
+		{"unparseable save body", `not json at all`, "save", KVSlotSavePath, http.StatusBadGateway, "unparsed"},
+		{"unparseable restore body", `{"n_restored":`, "restore", KVSlotRestorePath, http.StatusBadGateway, "unparsed"},
+		{"renamed save field reads as zero", `{"id_slot":0,"tokens_saved":3240}`, "save", KVSlotSavePath, http.StatusOK, "empty"},
+		{"restore of zero tokens is a miss", `{"id_slot":0,"n_restored":0,"n_read":0}`, "restore", KVSlotRestorePath, http.StatusNotFound, "miss"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			// the restore cases need the file present, or the handler 404s before the upstream call
+			if err := os.WriteFile(filepath.Join(dir, kvTestKey+".bin"), []byte("x"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/v1/models" {
+					_ = json.NewEncoder(w).Encode(map[string]any{"data": []map[string]string{{"id": "seat-x"}}})
+					return
+				}
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer up.Close()
+			h := kvSlotServer(t, up.URL, dir).Handler()
+			code, out := kvSlotPost(t, h, tc.path, KVSlotRequest{Seat: "seat-x", Key: kvTestKey})
+			if code != tc.wantCode || out.Status != tc.wantStatus {
+				t.Fatalf("want %d/%q, got %d/%q (note %q)", tc.wantCode, tc.wantStatus, code, out.Status, out.Note)
+			}
+			if out.Status == "ok" {
+				t.Fatal(`reported "ok" without evidence`)
+			}
+		})
+	}
+}
+
 func TestKVSlotRefusesBadKeysAndUnknownSeats(t *testing.T) {
 	dir := t.TempDir()
 	up := kvSlotStub(t, "qwen3.5-4b-agent", dir)
