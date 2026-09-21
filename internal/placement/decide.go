@@ -31,9 +31,10 @@ const (
 	// extract / triage): the cascade's router rung on the single layer, or the
 	// display layer's twin when the pair holds the cards and the layer is awake.
 	ClassMechanical Class = "mechanical"
-	// ClassAgent is a delegation contract: the pair's agent seat by default,
-	// the pair's long seat on window overflow, the triple's long seat on an
-	// explicit context_class long.
+	// ClassAgent is a delegation contract: the home agent seat by default (the
+	// flagship triple when it carries one, else the pair), the pair's long seat
+	// on window overflow, the triple's long seat on an explicit context_class
+	// long.
 	ClassAgent Class = "agent"
 	// ClassOCR is the ocr vision role (single layer, device 2 on the Qube).
 	ClassOCR Class = "ocr"
@@ -334,10 +335,25 @@ func (t table) admissible(l config.LayerSpec, s config.LayerSeat) (ok bool, reas
 	return ok, reason, guard
 }
 
-// pairAgentModel names the pair's agent seat for eviction/time-share notes;
-// "" when the box has none.
-func (t table) pairAgentModel() string {
-	if l, ok := findLayer(t.layers, LayerPair); ok {
+// agentHome names the layer whose agent seat takes the free choice: the triple
+// when it declares an agent seat and is neither opt-in nor dormant, otherwise
+// the pair. The Qube's flagship is the three-card seat (operator 2026-09-19:
+// "the 3 card tier as the agent seat now and the 2 card tier to be the opt in
+// one"), so a triple that carries the agent seat is the default and the pair is
+// entered by name; a box whose triple is opt-in (or absent) keeps the pair.
+func (t table) agentHome() string {
+	if l, ok := findLayer(t.layers, LayerTriple); ok && !l.OptIn && !l.Dormant {
+		if _, ok := findSeat(l, RoleAgent); ok {
+			return LayerTriple
+		}
+	}
+	return LayerPair
+}
+
+// homeAgentModel names the default agent seat (agentHome's) for eviction and
+// time-share notes; "" when the box has none.
+func (t table) homeAgentModel() string {
+	if l, ok := findLayer(t.layers, t.agentHome()); ok {
 		if s, ok := findSeat(l, RoleAgent); ok {
 			return s.Model
 		}
@@ -348,7 +364,8 @@ func (t table) pairAgentModel() string {
 // mechanical is row 2: the single router, or the display twin when the pair
 // holds the cards and the display layer is awake and its guards pass.
 func (t table) mechanical() Decision {
-	pair := t.occupancy(LayerPair, RoleAgent)
+	home := t.agentHome()
+	pair := t.occupancy(home, RoleAgent)
 	pairLoaded := pair.Known && pair.Loaded
 	single, router, haveSingle := t.seat(LayerSingle, RoleRouter)
 
@@ -360,7 +377,7 @@ func (t table) mechanical() Decision {
 		} else if ok, reason, guard := t.admissible(display, twin); ok {
 			return Decision{Placed: core.Placed{
 				Tier: display.Tier, Layer: display.Name, Role: RoleRouter, Seat: seat, Devices: twin.DeviceList(),
-				Reason: fmt.Sprintf("mechanical text → display layer (router twin %s on device %s; the pair holds its cards): %s", seat, twin.Device, reason),
+				Reason: fmt.Sprintf("mechanical text → display layer (router twin %s on device %s; the %s holds its cards): %s", seat, twin.Device, home, reason),
 			}}
 		} else {
 			refusal = fmt.Sprintf("display layer refused (%s: %s)", guard, reason)
@@ -375,8 +392,8 @@ func (t table) mechanical() Decision {
 	reason := fmt.Sprintf("mechanical text → single layer (router rung on device %s)", router.Device)
 	d := Decision{Placed: core.Placed{Tier: single.Tier, Layer: single.Name, Role: RoleRouter, Devices: router.DeviceList()}}
 	if pairLoaded {
-		reason += "; the single layer time-shares the pair's cards — the rung waits behind or displaces the pair seat"
-		d.Evicts = t.pairAgentModel()
+		reason += fmt.Sprintf("; the single layer time-shares the %s's cards — the rung waits behind or displaces the %s seat", home, home)
+		d.Evicts = t.homeAgentModel()
 	}
 	if refusal != "" {
 		reason += "; " + refusal
@@ -427,8 +444,9 @@ func (t table) agent() Decision {
 	// one-card identity on the pair's own cards, never an agent placement
 	// (council R2: overflow is recorded, not moved), and the request keeps
 	// deferring as it always did.
-	_, hasPair := findLayer(t.layers, LayerPair)
-	if t.only != "" && t.only != LayerPair && !(t.only == LayerSingle && hasPair) {
+	home := t.agentHome()
+	_, hasHome := findLayer(t.layers, home)
+	if t.only != "" && t.only != home && !(t.only == LayerSingle && hasHome) {
 		if l, s, ok := t.seat(t.only, RoleAgent); ok {
 			return t.requestedAgent(l, s, need)
 		}
@@ -439,20 +457,21 @@ func (t table) agent() Decision {
 			largest, largestLayer = s.CtxTokens, layer
 		}
 	}
-	// Row 5: fits the pair's agent seat — always, saturation recorded only.
-	if l, s, ok := t.seat(LayerPair, RoleAgent); ok {
+	// Row 5: fits the home agent seat (agentHome: the flagship triple, or the
+	// pair) — always, saturation recorded only.
+	if l, s, ok := t.seat(home, RoleAgent); ok {
 		note(s, l.Name)
 		if need <= s.CtxTokens {
 			d := Decision{Placed: core.Placed{Tier: l.Tier, Layer: l.Name, Role: RoleAgent, Seat: s.Model, Devices: s.DeviceList(), CtxTokens: s.CtxTokens}}
-			reason := fmt.Sprintf("agent contract (~%d tokens) fits the pair's agent seat %s (window %d)", need, s.Model, s.CtxTokens)
+			reason := fmt.Sprintf("agent contract (~%d tokens) fits the %s's agent seat %s (window %d)", need, l.Name, s.Model, s.CtxTokens)
 			st := t.occupancy(l.Name, RoleAgent)
 			if st.Known && st.Loaded && s.MaxInflight > 0 && st.Inflight >= s.MaxInflight {
-				reason += fmt.Sprintf("; pair at %d/%d in flight — queued in the seat (recorded, not re-placed: no other layer can hold this contract beside a loaded pair)", st.Inflight, s.MaxInflight)
+				reason += fmt.Sprintf("; %s at %d/%d in flight — queued in the seat (recorded, not re-placed: no other layer can hold this contract beside a loaded %s)", l.Name, st.Inflight, s.MaxInflight, l.Name)
 			}
 			d.Reason = reason
 			return d
 		}
-	} else if l, s, ok := t.seat(LayerSingle, RoleAgent); ok && !hasPair {
+	} else if l, s, ok := t.seat(LayerSingle, RoleAgent); ok && !hasHome {
 		// Row 5b: a box that declares no pair (one card — the ampere-16 Lenovo)
 		// places the free choice on the single layer's agent seat, the planner
 		// default under a layer name. Without this row the node's first layer
@@ -510,8 +529,10 @@ func (t table) pairLong(need int, head string) (Decision, bool) {
 	}
 	d := Decision{Placed: core.Placed{Tier: l.Tier, Layer: l.Name, Role: RoleLong, Seat: s.Model, Devices: s.DeviceList(), CtxTokens: s.CtxTokens}}
 	head = fmt.Sprintf("%s (%s, window %d)", head, s.Model, s.CtxTokens)
-	agent := t.pairAgentModel()
-	st := t.occupancy(l.Name, RoleAgent)
+	// The seat it evicts is the box's home agent seat: the pair's own, or the
+	// flagship triple's, which spans the pair's cards as well.
+	agent := t.homeAgentModel()
+	st := t.occupancy(t.agentHome(), RoleAgent)
 	switch {
 	case agent == "":
 		d.Reason = head + " — the pair has no agent seat to evict"

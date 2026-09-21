@@ -90,16 +90,35 @@ type Spec struct {
 	// one-card list with tensor_parallel 2 refuses to start at all. Both are
 	// authoring mistakes a tier table can catch for free.
 	//
-	// PIPELINE parallelism is deliberately absent. The reference 3-card box can run
-	// the 27B across three cards (pipeline 26/26/12), and that layout measured WORSE
-	// on every axis this seat exists for: 100,352 served window against the 2-card
-	// tensor-parallel seat's 163,072, 32 GB of host RAM against 8, the display card
-	// drawn into the engine, and NO cache server — LMCache's documentation addresses
-	// tensor parallelism (it "classifies per-TP-rank") and never mentions pipeline
-	// parallelism at all, so the store has no per-stage story upstream. The 3-card
-	// layout stays what the tier notes already call it: opt-in long-context work,
-	// started by hand, not the delegation lane.
+	// A seat may ALSO be pipeline-parallel (PipelineParallel below): Device then names
+	// tensor_parallel x pipeline_parallel cards.
 	TensorParallel int `json:"tensor_parallel,omitempty"`
+	// PipelineParallel is --pipeline-parallel-size (0 and 1 both mean no pipeline).
+	//
+	// This field did not exist until 0.132.6, and its absence was the whole reason the
+	// operator's flagship order ("the 3 card tier as the agent seat", 2026-09-19, given
+	// at least six times) could never be wired: a pipeline seat was unrepresentable, so
+	// every "3-card" seed fell back to a copy of the 2-card tensor-parallel pair. The
+	// comment that stood here called pipeline "WORSE on every axis" — measured against
+	// the weakest 3-card config ever run (fp16 KV, a fixed 3 GiB cache: a 100,352
+	// window and a 32 GB L1). With fp8 e4m3 KV the same three cards hold the model's
+	// full 262,144 window (a 287,755-token pool, 2026-09-21 wiring-debt W1.1).
+	//
+	// Only the full-attention layers hold paged KV (Qwen3.8-27B: 16 of 64, every 4th),
+	// and vLLM's KV budget is the same on every rank, so the window is bound by the
+	// stage holding the MOST full-attention layers. LayerPartition is how that is set.
+	PipelineParallel int `json:"pipeline_parallel,omitempty"`
+	// LayerPartition is VLLM_PP_LAYER_PARTITION: layers per pipeline stage, in Device
+	// order ("25,29,10"). It must list exactly pipeline_parallel stages. Empty = vLLM's
+	// even split.
+	LayerPartition string `json:"layer_partition,omitempty"`
+	// KVCacheMemoryBytes is --kv-cache-memory-bytes: a FIXED KV budget per GPU instead
+	// of a profiled share of each card. It is how a pipeline seat that includes a
+	// DISPLAY card leaves that card room for the desktop: gpu_memory_utilization is one
+	// fraction for every rank, so profiling at the value the other cards can afford
+	// starves the display card (2026-09-04: the desktop fell to a 720p-class mode and
+	// needed a reboot).
+	KVCacheMemoryBytes int64 `json:"kv_cache_memory_bytes,omitempty"`
 	// Launch selects the artifact set, because a seat is started differently on a
 	// Linux node and on a Windows box whose engine lives in WSL. Empty = the
 	// historical LaunchLinuxSystemd.
@@ -509,15 +528,27 @@ func (s Spec) Validate(tier string) error {
 			s.Launch, LaunchLinuxSystemd, LaunchWindowsWSL))
 	}
 	req(s.TensorParallel >= 0, fmt.Sprintf("tensor_parallel %d cannot be negative", s.TensorParallel))
+	req(s.PipelineParallel >= 0, fmt.Sprintf("pipeline_parallel %d cannot be negative", s.PipelineParallel))
+	req(s.KVCacheMemoryBytes >= 0, fmt.Sprintf("kv_cache_memory_bytes %d cannot be negative", s.KVCacheMemoryBytes))
+	if s.pipelineParallel() > 1 || s.KVCacheMemoryBytes > 0 {
+		// The linux-systemd run script renders neither the pipeline flags nor the extra
+		// arguments, so a seat there would silently run as something else. Refuse it.
+		req(s.launch() == LaunchWindowsWSL, fmt.Sprintf(
+			"pipeline_parallel / kv_cache_memory_bytes are rendered only by the %s launch, not %q", LaunchWindowsWSL, s.launch()))
+	}
+	if st := s.partitionStages(); st > 0 && st != s.pipelineParallel() {
+		problems = append(problems, fmt.Sprintf("layer_partition %q lists %d stage(s) but pipeline_parallel is %d",
+			s.LayerPartition, st, s.pipelineParallel()))
+	}
 	// The device list and the parallel width are two statements of the same fact, and
 	// a tier that lets them disagree ships an engine that ignores a card or refuses to
 	// start. Check them against each other rather than trusting the author.
-	if n := len(s.devices()); n > 0 && s.tensorParallel() != n {
+	if n, want := len(s.devices()), s.tensorParallel()*s.pipelineParallel(); n > 0 && want != n {
 		problems = append(problems, fmt.Sprintf(
-			"device %q names %d card(s) but tensor_parallel is %d — the engine would %s",
-			s.Device, n, s.tensorParallel(),
-			map[bool]string{true: "load the whole model onto the first card and ignore the rest",
-				false: "refuse to start"}[s.tensorParallel() < n]))
+			"device %q names %d card(s) but tensor_parallel x pipeline_parallel is %d — the engine would %s",
+			s.Device, n, want,
+			map[bool]string{true: "load the whole model onto too few cards and ignore the rest",
+				false: "refuse to start"}[want < n]))
 	}
 	if s.CacheServer != nil {
 		if err := s.CacheServer.Validate(); err != nil {
@@ -757,9 +788,16 @@ func (s Spec) tokens(r Runtime) map[string]string {
 		}
 	}
 	return map[string]string{
-		"__SEAT_ID__":          s.ID,
-		"__POOL_ALIAS__":       pool,
-		"__TENSOR_PARALLEL__":  strconv.Itoa(s.tensorParallel()),
+		"__SEAT_ID__":         s.ID,
+		"__POOL_ALIAS__":      pool,
+		"__TENSOR_PARALLEL__": strconv.Itoa(s.tensorParallel()),
+		"__PIPELINE_PARALLEL__": func() string {
+			if s.pipelineParallel() > 1 {
+				return strconv.Itoa(s.pipelineParallel())
+			}
+			return "" // the launcher reads an EMPTY SEAT_PP as "tensor-parallel seat"
+		}(),
+		"__PARTITION__":        s.LayerPartition,
 		"__MP_PORT__":          strconv.Itoa(s.mpPort()),
 		"__MP_HTTP_PORT__":     strconv.Itoa(s.mpHTTPPort()),
 		"__LMCACHE_OVERLAY__":  r.LMCacheOverlay,
@@ -814,6 +852,22 @@ func (s Spec) devices() []string {
 	return out
 }
 
+// pipelineParallel is --pipeline-parallel-size, defaulted to no pipeline.
+func (s Spec) pipelineParallel() int {
+	if s.PipelineParallel > 0 {
+		return s.PipelineParallel
+	}
+	return 1
+}
+
+// partitionStages counts LayerPartition's stages (0 when unset).
+func (s Spec) partitionStages() int {
+	if strings.TrimSpace(s.LayerPartition) == "" {
+		return 0
+	}
+	return len(strings.Split(s.LayerPartition, ","))
+}
+
 // tensorParallel is --tensor-parallel-size, defaulted to one card.
 func (s Spec) tensorParallel() int {
 	if s.TensorParallel > 0 {
@@ -838,6 +892,9 @@ func (s Spec) extraArgs() string {
 	}
 	if s.KVCacheDtype != "" {
 		args = append(args, "--kv-cache-dtype", s.KVCacheDtype)
+	}
+	if s.KVCacheMemoryBytes > 0 {
+		args = append(args, "--kv-cache-memory-bytes", strconv.FormatInt(s.KVCacheMemoryBytes, 10))
 	}
 	return strings.Join(args, " ")
 }

@@ -471,7 +471,14 @@ func agentSeatSection(p Profile) string {
 		"| setting | value | what it controls |\n|---|---|---|\n")
 	fmt.Fprintf(&b, "| id | `%s` | the llama-swap model id, `--served-model-name`, and what `agent_model` binds to |\n", s.ID)
 	fmt.Fprintf(&b, "| cards | `%s` | `CUDA_VISIBLE_DEVICES`, in PCI order |\n", dash(s.Device))
-	fmt.Fprintf(&b, "| tensor_parallel | %d | `--tensor-parallel-size`; must equal how many cards are listed |\n", s.TensorParallel)
+	fmt.Fprintf(&b, "| tensor_parallel | %d | `--tensor-parallel-size`; tensor x pipeline must equal how many cards are listed |\n", s.TensorParallel)
+	if s.PipelineParallel > 1 {
+		fmt.Fprintf(&b, "| pipeline_parallel | %d | `--pipeline-parallel-size`: the model is split across the cards in listed order |\n", s.PipelineParallel)
+		fmt.Fprintf(&b, "| layer_partition | `%s` | layers per pipeline stage (`VLLM_PP_LAYER_PARTITION`), in card order |\n", dash(s.LayerPartition))
+	}
+	if s.KVCacheMemoryBytes > 0 {
+		fmt.Fprintf(&b, "| kv_cache_memory_bytes | %d | fixed KV budget per card (`--kv-cache-memory-bytes`) instead of a profiled share: how a seat on a display card leaves the desktop its room |\n", s.KVCacheMemoryBytes)
+	}
 	fmt.Fprintf(&b, "| max_model_len | %d | the served window |\n", s.MaxModelLen)
 	fmt.Fprintf(&b, "| gpu_memory_utilization | %.2f | the engine's share of the card — chosen WITH the seat's co-residents in mind, not alone |\n", s.GPUMemoryUtilization)
 	fmt.Fprintf(&b, "| kv_cache_dtype | `%s` | KV precision — backend-dependent, not free everywhere |\n", dash(s.KVCacheDtype))
