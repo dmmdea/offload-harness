@@ -71,6 +71,7 @@ func TestClassifyConfigDriftSeesABindingNoTierSeeds(t *testing.T) {
 		"animategen_script": "D:/render/animate.py",
 		"comfy_dir":         "D:/ComfyUI",
 		"endpoint":          "http://127.0.0.1:11436",
+		"tts_endpoint":      "http://127.0.0.1:3900", // this box's own service URL, not a seat
 	}
 	got := map[string]configDriftClass{}
 	for _, f := range classifyConfigDrift(map[string]any{}, live, map[string]bool{}, isBindingKey) {
@@ -81,7 +82,7 @@ func TestClassifyConfigDriftSeesABindingNoTierSeeds(t *testing.T) {
 			t.Errorf("%s classified %q, want UNSEEDED — a hand-wired route no tier carries is exactly the win a fresh install loses", k, got[k])
 		}
 	}
-	for _, k := range []string{"comfy_dir", "endpoint"} {
+	for _, k := range []string{"comfy_dir", "endpoint", "tts_endpoint"} {
 		if c, ok := got[k]; ok {
 			t.Errorf("%s is node-local and must not be reported, got %q", k, c)
 		}

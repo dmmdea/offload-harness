@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"sort"
 	"testing"
+
+	"github.com/dmmdea/offload-harness/internal/config"
 )
 
 // seedRulesDoc is the slice of profiles.json the house seed rules read.
@@ -77,13 +79,12 @@ func TestNoGPUTierParksTheMoEExpertsInRAM(t *testing.T) {
 // (qwen3.5-4b-agent) existed only as a hand edit on the node, so every fresh install lost it.
 func TestEveryAgentSeatIsChosenNotDerived(t *testing.T) {
 	doc := loadSeedRulesDoc(t)
-	const defaultWorkhorse = "offload-e4b"
 	for _, name := range sortedTiers(doc) {
 		p := doc.Profiles[name]
 		if _, explicit := p.ConfigSeed["agent_model"]; explicit || p.VLLMSeat != nil || p.ResidentTier == "" {
 			continue
 		}
-		workhorse := defaultWorkhorse
+		workhorse := config.Default().Model // the same fallback tierseed.Resolve compares against
 		if raw, ok := p.ConfigSeed["model"]; ok {
 			var m string
 			if json.Unmarshal(raw, &m) == nil && m != "" {

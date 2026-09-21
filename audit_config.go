@@ -47,13 +47,16 @@ const (
 // isBindingKey reports whether a config key names a seat, model or media route (as opposed to a
 // node-local endpoint, path or port). It is a suffix rule on purpose: every binding the harness has
 // grown so far ends in one of these, and a key that does not is left to the seed-owned comparison.
+// `_endpoint` is deliberately NOT in the list: tts_endpoint and pair_workloads_endpoint are this
+// box's own service URLs (opt-in, empty = the lane is absent), and hailo_/coral_endpoint are owned
+// by the accelerator seeds — flagging any of them as a hand-wired seat was a false positive.
 func isBindingKey(k string) bool {
 	// The remote NIM lane is account configuration (an opt-in cloud escalation), not a tier seat.
 	if strings.HasPrefix(k, "nim_") {
 		return false
 	}
 	for _, suf := range []string{"_model", "_script", "_unet", "_ckpt", "_family", "_engine", "_preset",
-		"_transformer", "_text_encoder", "_vae", "_endpoint"} {
+		"_transformer", "_text_encoder", "_vae"} {
 		if strings.HasSuffix(k, suf) {
 			return true
 		}
@@ -148,6 +151,17 @@ func seedOwnedKeys(doc tierseed.Doc, home string) map[string]bool {
 			continue
 		}
 		for k := range seed {
+			owned[k] = true
+		}
+	}
+	// Accelerator rows (hailo-8l, coral-edgetpu) seed their own keys; without them an accelerator
+	// box would report its seeded endpoint as drift.
+	ids := make([]string, 0, len(doc.Accelerators))
+	for id := range doc.Accelerators {
+		ids = append(ids, id)
+	}
+	if accSeed, err := tierseed.ResolveAccelerators(doc.Accelerators, ids, tierseed.Options{Home: home}); err == nil {
+		for k := range accSeed {
 			owned[k] = true
 		}
 	}
