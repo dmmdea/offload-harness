@@ -1466,7 +1466,7 @@ func Default() Config {
 		CompletionPath:      "/v1/chat/completions", // chat route: server applies the Gemma template; we pass a raw "grammar" field
 		Model:               "offload-e4b",
 		TriageModel:         "gemma4-e2b",     // fast tier for triage/classify
-		EscalationModel:     "gemma4-26b-a4b", // MoE escalation tier (experts in RAM via --cpu-moe); part of the served offload family.
+		EscalationModel:     "gemma4-26b-a4b", // MoE escalation tier, fully on the card (moe_26b "gpu"); a tier that cannot fit it drops it and seeds its own rungs — never --cpu-moe (RAM is overflow only).
 		ReasoningModel:      "gemma4-26b-a4b", // terminal local reasoning tier (think-wrapped grammar) before defer-to-cloud. "" disables.
 		VisionModel:         "",               // opt-in: set the machine's VLM alias (empty = vision defers, no phantom)
 		VisionMaxImageBytes: 6000000,          // ~6MB cap per image
