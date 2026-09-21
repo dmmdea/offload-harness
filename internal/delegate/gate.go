@@ -207,17 +207,42 @@ func betterRemote(seed string, st *Subtask, candidate, incumbent NodeView) bool 
 	// operator is using the desktop — or gaming — advertised that load and lost
 	// ties to an idler node it should have won (2026-09-20: a node read 33% from
 	// a game while every card the harness could use was at 0%). WorkUtilPct
-	// skips a proven display card. Both nodes must publish it to compare on it;
-	// otherwise the comparison stays on the old figure for both, so a mixed
-	// fleet during a rollout never compares one node's desktop-free number with
-	// another's desktop-inclusive one.
-	if candidate.WorkUtilKnown && incumbent.WorkUtilKnown {
-		return candidate.WorkUtilPct < incumbent.WorkUtilPct
-	}
-	if candidate.GpuUtilKnown && incumbent.GpuUtilKnown {
-		return candidate.GpuUtilPct < incumbent.GpuUtilPct
+	// skips a display card, so it is the figure to compare on.
+	//
+	// placementUtil picks which figure PER NODE, never per pair. An earlier cut
+	// fell back to GpuUtilPct whenever either side lacked WorkUtilPct, meaning
+	// the same three nodes were ranked on two different metrics depending on who
+	// was being compared — and during a rollout, which is the only time a mixed
+	// fleet exists, that produced a strict CYCLE: a gaming upgraded node beat a
+	// lightly loaded upgraded node on work_util, which beat an old node on
+	// gpu_util, which beat the gaming node on gpu_util. bestRemote folds this
+	// relation over a slice, so the winner became whichever node the slice
+	// happened to start from.
+	cu, ck := placementUtil(candidate)
+	iu, ik := placementUtil(incumbent)
+	if ck && ik && cu != iu {
+		return cu < iu
 	}
 	return false
+}
+
+// placementUtil is the ONE busy-ness figure a placement comparison reads off a
+// node: work_util_pct when the node publishes it (0.132.2 and later, which
+// skips a card driving a display), the box-wide gpu_util_pct when it does not.
+//
+// Choosing it per node rather than per pair is what keeps betterRemote's last
+// key a total order across a mixed fleet; see the cycle described there. The
+// cost is that during a rollout an upgraded node's desktop-free figure is
+// compared against an old node's desktop-inclusive one — which biases toward
+// the upgraded node, the one whose number is actually true.
+func placementUtil(v NodeView) (int, bool) {
+	if v.WorkUtilKnown {
+		return v.WorkUtilPct, true
+	}
+	if v.GpuUtilKnown {
+		return v.GpuUtilPct, true
+	}
+	return 0, false
 }
 
 // saturated reports whether v's own advertisement says the next dispatch will

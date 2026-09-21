@@ -372,21 +372,74 @@ func TestBetterRemote_TieBreakSkipsTheOperatorsDesktop(t *testing.T) {
 	}
 }
 
-// TestBetterRemote_MixedFleetNeverComparesTwoDifferentFigures: during a rollout
-// one node publishes work_util and another does not. Comparing one node's
-// desktop-free number with the other's desktop-inclusive one would be
-// meaningless, so the comparison stays on the old figure for BOTH.
-func TestBetterRemote_MixedFleetNeverComparesTwoDifferentFigures(t *testing.T) {
+// TestBetterRemote_MixedFleetRanksOnOneFigurePerNode pins the defect the first
+// cut of the work_util tie-break introduced. It chose the figure PER PAIR —
+// work_util when both sides had it, gpu_util otherwise — so during a rollout,
+// the only time a mixed fleet exists, three nodes formed a strict cycle:
+//
+//	gaming (work 0, gpu 80) beats light (work 5, gpu 5)   on work_util
+//	light  (work 5, gpu 5)  beats older  (gpu 10)         on gpu_util
+//	older  (gpu 10)         beats gaming (work 0, gpu 80) on gpu_util
+//
+// bestRemote folds this relation over a slice, so the winner was whichever node
+// the slice started from. placementUtil picks the figure per NODE instead,
+// which makes the key a total order at the cost of comparing an upgraded node's
+// desktop-free number against an old node's desktop-inclusive one — a bias
+// toward the node whose number is true.
+func TestBetterRemote_MixedFleetRanksOnOneFigurePerNode(t *testing.T) {
 	st := schemaSubtask()
-	upgraded, older := eligibleRemote(), eligibleRemote()
-	upgraded.NodeID, older.NodeID = "upgraded", "older"
-	upgraded.GpuUtilPct, upgraded.GpuUtilKnown = 80, true
-	upgraded.WorkUtilPct, upgraded.WorkUtilKnown = 0, true // would win on this...
-	older.GpuUtilPct, older.GpuUtilKnown = 10, true        // ...but the older node publishes no work_util
-	if betterRemote("seed", &st, upgraded, older) {
-		t.Fatal("with only one node publishing work_util, the tie-break must use gpu_util_pct for both")
+	mk := func(id string, gpu, work int, workKnown bool) NodeView {
+		v := eligibleRemote()
+		v.NodeID = id
+		v.GpuUtilPct, v.GpuUtilKnown = gpu, true
+		v.WorkUtilPct, v.WorkUtilKnown = work, workKnown
+		return v
 	}
-	if !betterRemote("seed", &st, older, upgraded) {
-		t.Fatal("on the common figure (gpu_util_pct) the older node's 10% beats 80%")
+	gaming := mk("gaming", 80, 0, true) // upgraded, harness cards idle behind a game
+	light := mk("light", 5, 5, true)    // upgraded, genuinely doing a little work
+	older := mk("older", 10, 0, false)  // pre-0.132.2: publishes no work_util
+
+	// Antisymmetry and transitivity over every pair and triple.
+	all := []NodeView{gaming, light, older}
+	for _, a := range all {
+		for _, b := range all {
+			if a.NodeID == b.NodeID {
+				continue
+			}
+			if betterRemote("seed", &st, a, b) && betterRemote("seed", &st, b, a) {
+				t.Fatalf("%s and %s each beat the other", a.NodeID, b.NodeID)
+			}
+		}
+	}
+	for _, a := range all {
+		for _, b := range all {
+			for _, c := range all {
+				if betterRemote("seed", &st, a, b) && betterRemote("seed", &st, b, c) &&
+					betterRemote("seed", &st, c, a) {
+					t.Fatalf("preference cycle: %s > %s > %s > %s", a.NodeID, b.NodeID, c.NodeID, a.NodeID)
+				}
+			}
+		}
+	}
+
+	// And the fold the cycle actually broke: the winner cannot depend on order.
+	fold := func(rs []NodeView) string {
+		best, found := NodeView{}, false
+		for _, r := range rs {
+			if !found || betterRemote("seed", &st, r, best) {
+				best, found = r, true
+			}
+		}
+		return best.NodeID
+	}
+	for _, order := range [][]NodeView{
+		{gaming, light, older},
+		{older, light, gaming},
+		{light, gaming, older},
+	} {
+		if got := fold(order); got != "gaming" {
+			t.Fatalf("fold(%s, %s, %s) = %s, want gaming — the node with the idlest HARNESS cards",
+				order[0].NodeID, order[1].NodeID, order[2].NodeID, got)
+		}
 	}
 }
