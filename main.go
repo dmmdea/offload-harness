@@ -2469,6 +2469,8 @@ func runFleetServe(args []string) error {
 		// a loopback bind is still loopback.
 		LoopbackListener: loopbackListener,
 		Cfg:              cfg,
+		KVSlotDir:        filepath.Join(filepath.Dir(fleetnode.InstalledJSONPath()), "kvslots"),
+		KVSlotCapGiB:     cfg.KVSlotCapGiB,
 		Host:             host.Load,
 	})
 

@@ -37,7 +37,7 @@ var altCPUSeats = []struct {
 // (setup/templates/llama-swap.linux-cpu.yaml / win-cpu.yaml): no -ngl, no
 // --flash-attn. Rendered inline rather than via ${common} because the host
 // template's ${common} carries the GPU flags.
-const altCPUCommon = "--ctx-size __CTX__ --cache-type-k __KV_K__ --cache-type-v __KV_V__ --cache-ram __CACHE_RAM__ " +
+const altCPUCommon = "--ctx-size __CTX__ --cache-type-k __KV_K__ --cache-type-v __KV_V__ --cache-ram __CACHE_RAM__ __SLOT_SAVE__ " +
 	"--threads __NTHREADS__ --jinja --reasoning off --port ${PORT} --host 127.0.0.1"
 
 // insertAltCPUSeats appends the CPU seat family to a rendered-in-progress

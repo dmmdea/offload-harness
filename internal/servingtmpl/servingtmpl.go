@@ -400,6 +400,7 @@ func Render(tmpl string, p Params) (string, error) {
 		"__MOE_26B__":         p.MoE26B,
 		"__NTHREADS__":        fmt.Sprint(p.Threads),
 		"__CACHE_RAM__":       fmt.Sprint(p.cacheRAMMiB()),
+		"__SLOT_SAVE__":       p.slotSaveFlag(),
 	} {
 		out = strings.ReplaceAll(out, from, to)
 	}
@@ -1204,4 +1205,15 @@ func (p Params) cacheRAMMiB() int {
 		return p.CacheRAMMiB
 	}
 	return 8192
+}
+
+// slotSaveFlag renders --slot-save-path <home>/kvslots/ (ADR 0055 Layer 2) when the
+// render knows its install home, else nothing: a caller without a home renders a
+// seat that answers 501 on the kvslot lane instead of a broken flag.
+func (p Params) slotSaveFlag() string {
+	home := strings.TrimRight(strings.ReplaceAll(strings.TrimSpace(p.Home), `\`, "/"), "/")
+	if home == "" {
+		return ""
+	}
+	return "--slot-save-path " + home + "/kvslots/"
 }
