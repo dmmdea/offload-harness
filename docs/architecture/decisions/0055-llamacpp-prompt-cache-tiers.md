@@ -25,7 +25,12 @@ the llama.cpp side of the same idea.
 
 **Layer 1 (this release):** the renderer emits `--cache-ram __CACHE_RAM__` on every llama.cpp
 seat, resolved from a top-level `profiles.json` map `cache_ram_mib_by_ram_tier` keyed by the
-`hwdetect` RAM tier (min / low / mid / high). Starting values 1024 / 2048 / 6144 / 12288 MiB.
+`hwdetect` RAM tier (min / low / mid / high). Values 1024 / 8192 / 16384 / 24576 MiB, under a floor rule: **this map may never hand a box less
+than llama-server's own 8192 MiB default unless its RAM cannot carry it.** The first cut broke that
+rule — 2048 on the 32 GB nodes, 6144 on the 64 GB one — which would have been a silent cut below what
+those boxes had been running on, in the name of "sizing per tier". Only the min tier (a 4 GB
+Vivobook, where 8 GiB was never reachable) goes below the default. The figures are still unmeasured
+against a real contract stream; that is Task 3a.
 An unresolvable tier renders the server default (8192) — the renderer never emits `0`, which
 would disable the cache. vLLM proxy entries never carry the flag.
 

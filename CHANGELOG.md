@@ -19,6 +19,11 @@ Versioning: [SemVer](https://semver.org/).
 - Every llama.cpp chat/agent seat (and its CPU twin) renders `--slot-save-path <home>/kvslots/`;
   whisper, embedding and reranker entries do not. Both installers create the directory; an LRU
   sweeper bounded by `kvslot_cap_gib` (0 = 8 GiB) runs after every save. Health advertises `kvslot`.
+- **Layer 1 tier map corrected before it could bite:** 1024 / 8192 / 16384 / 24576 MiB, under a floor
+  rule that the map may never hand a box less than llama-server's own 8192 default unless its RAM
+  cannot carry it. 0.131.3 shipped 1024 / 2048 / 6144 / 12288, which silently CUT the 32 GB and 64 GB
+  nodes below the default they had been running on — sizing per tier in the losing direction. Only the
+  min tier (a 4 GB box) stays under the default, which is the case the map existed for.
 - **MEASURED INERT on b9934 and the delegator side is BLOCKED because of it.** On binxarn, a
   restore of 3,231 tokens (151 MB, 25 ms) leaves the next identical request paying the full
   27.2 s prefill — same as no restore, in all three call shapes — while the same run's control
