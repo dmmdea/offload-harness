@@ -1406,7 +1406,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		if d.UtilPct > payload.GpuUtilPct {
 			payload.GpuUtilPct = d.UtilPct
 		}
-		// The placement figure skips a proven display card and nothing else.
+		// The placement figure skips a card reporting display_active, nothing else.
 		if snap.DisplayUUIDs[d.UUID] {
 			continue
 		}

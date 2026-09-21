@@ -241,7 +241,8 @@ type healthWire struct {
 	Accelerators []string `json:"accelerators"`
 	GpuUtilPct   int      `json:"gpu_util_pct"`
 	GpuUtilKnown bool     `json:"gpu_util_known"`
-	// Additive (0.132.2): the placement figure that skips a proven display card.
+	// Additive (0.132.2): the placement figure that skips a card reporting
+	// display_active.
 	WorkUtilPct   int  `json:"work_util_pct"`
 	WorkUtilKnown bool `json:"work_util_known"`
 	// Additive (0.117.2). nil on a node that publishes neither.
