@@ -69,16 +69,23 @@ The installer seeds this tier's media bindings (`config_seed`):
 
 | key | value |
 |---|---|
+| `gen_edit_preset` | `lightning8` |
+| `gen_edit_script` | `render/comfy-edit.mjs` |
+| `gen_edit_unet` | `qwen-image-edit-2511-Q5_1.gguf` |
 | `imagegen_cfg` | `1` |
 | `imagegen_ckpt` | `krea2_turbo_bf16.safetensors` |
 | `imagegen_family` | `krea2` |
 | `imagegen_pool_compute` | `cuda:0` |
 | `imagegen_pool_donor` | `cuda:1` |
 | `imagegen_pool_vvram_gb` | `12` |
+| `imagegen_script` | `render/comfy-generate.mjs` |
 | `imagegen_steps` | `8` |
 | `imagegen_timeout_sec` | `3600` |
 | `imagegen_vae` | `qwen_image_vae.safetensors` |
+| `inpaint_ckpt` | `RealVisXL_V5.0_fp16.safetensors` |
+| `inpaint_script` | `render/comfy-inpaint.mjs` |
 | `upscale_model` | `4x-UltraSharp.pth` |
+| `upscale_script` | `render/comfy-upscale.mjs` |
 | `videogen_audio_vae` | `ltx-2.5-audio-vae-bf16.safetensors` |
 | `videogen_family` | `ltx25` |
 | `videogen_fps` | `24` |
@@ -107,6 +114,7 @@ here so they are never mistaken for a media capability:
 | `agent_max_tokens` | `4096` |
 | `agent_model` | `qwen3.8-27b` |
 | `agent_timeout_sec` | `600` |
+| `animategen_script` | `render/comfy-animate.mjs` |
 
 ## Operator notes
 

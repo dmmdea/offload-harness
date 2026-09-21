@@ -41,22 +41,25 @@ honestly serves text only.
 | key | value |
 |---|---|
 | `gen_edit_preset` | `lightning8` |
+| `gen_edit_script` | `render/comfy-edit.mjs` |
 | `gen_edit_unet` | `qwen-image-edit-2511-Q5_1.gguf` |
 | `imagegen_cfg` | `1` |
 | `imagegen_ckpt` | `hidream_o1_image_dev_mxfp8.safetensors` |
 | `imagegen_engine` | `` |
 | `imagegen_family` | `hidream-o1-dev` |
-| `imagegen_script` | `__OFFLOAD_HOME__/render/comfy-generate.mjs` |
+| `imagegen_script` | `render/comfy-generate.mjs` |
 | `imagegen_steps` | `28` |
 | `imagegen_timeout_sec` | `900` |
 | `imagegen_vae` | `builtin` |
 | `inpaint_ckpt` | `RealVisXL_V5.0_fp16.safetensors` |
+| `inpaint_script` | `render/comfy-inpaint.mjs` |
 | `inpaint_vae` | `builtin` |
 | `sdcpp_bin` | `__OFFLOAD_HOME__/sdcpp/sd-cli__EXE__` |
 | `sdcpp_llm` | `__OFFLOAD_HOME__/models/Qwen3-4B-Instruct-2507-Q4_K_M.gguf` |
 | `sdcpp_model` | `__OFFLOAD_HOME__/models/z_image_turbo-Q8_0.gguf` |
 | `sdcpp_model_kind` | `diffusion` |
 | `sdcpp_vae` | `__OFFLOAD_HOME__/models/zimage_ae.safetensors` |
+| `upscale_script` | `render/comfy-upscale.mjs` |
 | `vae_mode` | `tiling` |
 | `videogen_family` | `wan22` |
 | `videogen_fps` | `16` |

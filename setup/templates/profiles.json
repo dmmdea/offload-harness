@@ -112,6 +112,14 @@
         "CUDA_MODULE_LOADING=LAZY"
       ],
       "config_seed": {
+        "imagegen_script": "render/comfy-generate.mjs",
+        "upscale_script": "render/comfy-upscale.mjs",
+        "gen_edit_script": "render/comfy-edit.mjs",
+        "gen_edit_unet": "qwen-image-edit-2511-Q5_1.gguf",
+        "gen_edit_preset": "lightning8",
+        "inpaint_script": "render/comfy-inpaint.mjs",
+        "inpaint_ckpt": "RealVisXL_V5.0_fp16.safetensors",
+        "animategen_script": "render/comfy-animate.mjs",
         "upscale_model": "4x-UltraSharp.pth",
         "imagegen_family": "hidream-o1",
         "imagegen_ckpt": "hidream_o1_image_bf16.safetensors",
@@ -215,6 +223,14 @@
         "CUDA_MODULE_LOADING=LAZY"
       ],
       "config_seed": {
+        "imagegen_script": "render/comfy-generate.mjs",
+        "upscale_script": "render/comfy-upscale.mjs",
+        "gen_edit_script": "render/comfy-edit.mjs",
+        "gen_edit_unet": "qwen-image-edit-2511-Q5_1.gguf",
+        "gen_edit_preset": "lightning8",
+        "inpaint_script": "render/comfy-inpaint.mjs",
+        "inpaint_ckpt": "RealVisXL_V5.0_fp16.safetensors",
+        "animategen_script": "render/comfy-animate.mjs",
         "agent_model": "gemma4-26b-a4b",
         "upscale_model": "4x-UltraSharp.pth",
         "imagegen_family": "krea2",
@@ -290,6 +306,14 @@
         "CUDA_MODULE_LOADING=LAZY"
       ],
       "config_seed": {
+        "imagegen_script": "render/comfy-generate.mjs",
+        "upscale_script": "render/comfy-upscale.mjs",
+        "gen_edit_script": "render/comfy-edit.mjs",
+        "gen_edit_unet": "qwen-image-edit-2511-Q5_1.gguf",
+        "gen_edit_preset": "lightning8",
+        "inpaint_script": "render/comfy-inpaint.mjs",
+        "inpaint_ckpt": "RealVisXL_V5.0_fp16.safetensors",
+        "animategen_script": "render/comfy-animate.mjs",
         "upscale_model": "4x-UltraSharp.pth",
         "imagegen_family": "krea2",
         "imagegen_ckpt": "krea2_turbo_bf16.safetensors",
@@ -513,6 +537,14 @@
         }
       ],
       "config_seed": {
+        "imagegen_script": "render/comfy-generate.mjs",
+        "upscale_script": "render/comfy-upscale.mjs",
+        "gen_edit_script": "render/comfy-edit.mjs",
+        "gen_edit_unet": "qwen-image-edit-2511-Q5_1.gguf",
+        "gen_edit_preset": "lightning8",
+        "inpaint_script": "render/comfy-inpaint.mjs",
+        "inpaint_ckpt": "RealVisXL_V5.0_fp16.safetensors",
+        "animategen_script": "render/comfy-animate.mjs",
         "upscale_model": "4x-UltraSharp.pth",
         "imagegen_family": "krea2",
         "imagegen_ckpt": "krea2_turbo_bf16.safetensors",
@@ -669,6 +701,14 @@
         "CUDA_MODULE_LOADING=LAZY"
       ],
       "config_seed": {
+        "imagegen_script": "render/comfy-generate.mjs",
+        "upscale_script": "render/comfy-upscale.mjs",
+        "gen_edit_script": "render/comfy-edit.mjs",
+        "gen_edit_unet": "qwen-image-edit-2511-Q5_1.gguf",
+        "gen_edit_preset": "lightning8",
+        "inpaint_script": "render/comfy-inpaint.mjs",
+        "inpaint_ckpt": "RealVisXL_V5.0_fp16.safetensors",
+        "animategen_script": "render/comfy-animate.mjs",
         "upscale_model": "4x-UltraSharp.pth",
         "agent_model": "qwen3.8-27b",
         "agent_timeout_sec": 600,
@@ -745,6 +785,14 @@
         "CUDA_MODULE_LOADING=LAZY"
       ],
       "config_seed": {
+        "imagegen_script": "render/comfy-generate.mjs",
+        "upscale_script": "render/comfy-upscale.mjs",
+        "gen_edit_script": "render/comfy-edit.mjs",
+        "gen_edit_unet": "qwen-image-edit-2511-Q5_1.gguf",
+        "gen_edit_preset": "lightning8",
+        "inpaint_script": "render/comfy-inpaint.mjs",
+        "inpaint_ckpt": "RealVisXL_V5.0_fp16.safetensors",
+        "animategen_script": "render/comfy-animate.mjs",
         "upscale_model": "4x-UltraSharp.pth",
         "agent_model": "qwen3.8-27b",
         "agent_timeout_sec": 600,
@@ -857,6 +905,14 @@
       "flash_attn": "on",
       "backend": "cuda",
       "config_seed": {
+        "imagegen_script": "render/comfy-generate.mjs",
+        "upscale_script": "render/comfy-upscale.mjs",
+        "gen_edit_script": "render/comfy-edit.mjs",
+        "gen_edit_unet": "qwen-image-edit-2511-Q5_1.gguf",
+        "gen_edit_preset": "lightning8",
+        "inpaint_script": "render/comfy-inpaint.mjs",
+        "inpaint_ckpt": "RealVisXL_V5.0_fp16.safetensors",
+        "animategen_script": "render/comfy-animate.mjs",
         "upscale_model": "4x-UltraSharp.pth",
         "imagegen_family": "hidream-o1",
         "imagegen_ckpt": "hidream_o1_image_bf16.safetensors",
@@ -923,6 +979,14 @@
       "flash_attn": "on",
       "backend": "cuda",
       "config_seed": {
+        "imagegen_script": "render/comfy-generate.mjs",
+        "upscale_script": "render/comfy-upscale.mjs",
+        "gen_edit_script": "render/comfy-edit.mjs",
+        "gen_edit_unet": "qwen-image-edit-2511-Q5_1.gguf",
+        "gen_edit_preset": "lightning8",
+        "inpaint_script": "render/comfy-inpaint.mjs",
+        "inpaint_ckpt": "RealVisXL_V5.0_fp16.safetensors",
+        "animategen_script": "render/comfy-animate.mjs",
         "upscale_model": "4x-UltraSharp.pth",
         "imagegen_family": "hidream-o1",
         "imagegen_ckpt": "hidream_o1_image_bf16.safetensors",
@@ -999,9 +1063,10 @@
         "reasoning_model": "qwen3.5-9b-agent"
       },
       "config_seed_ram_mid_high": {
+        "upscale_script": "render/comfy-upscale.mjs",
         "imagegen_family": "hidream-o1",
         "imagegen_ckpt": "hidream_o1_image_bf16.safetensors",
-        "imagegen_script": "__OFFLOAD_HOME__/render/comfy-generate.mjs",
+        "imagegen_script": "render/comfy-generate.mjs",
         "imagegen_vae": "builtin",
         "imagegen_timeout_sec": 3600
       },
@@ -1065,10 +1130,13 @@
         "reasoning_model": "qwen3.5-9b-agent"
       },
       "config_seed_ram_mid_high": {
+        "upscale_script": "render/comfy-upscale.mjs",
+        "gen_edit_script": "render/comfy-edit.mjs",
+        "inpaint_script": "render/comfy-inpaint.mjs",
         "imagegen_engine": "",
         "imagegen_family": "hidream-o1-dev",
         "imagegen_ckpt": "hidream_o1_image_dev_mxfp8.safetensors",
-        "imagegen_script": "__OFFLOAD_HOME__/render/comfy-generate.mjs",
+        "imagegen_script": "render/comfy-generate.mjs",
         "imagegen_steps": 28,
         "imagegen_cfg": 1,
         "imagegen_vae": "builtin",

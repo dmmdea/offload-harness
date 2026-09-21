@@ -6,6 +6,28 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.132.5] - 2026-09-21 - every seeded media model now has the script that runs it
+
+- **Image generation and upscale deferred on every fresh 16 GB+ install.** A ComfyUI route needs BOTH
+  the model the tier chose and the script that runs it — `internal/mediacap` reports the route NOT
+  CONFIGURED when either is empty, and there is no default. Eight tiers (blackwell-16/32/2x16/3x16/48/72,
+  ampere-16, volta-16) seeded an image model with no `imagegen_script`, and thirteen seeded
+  `upscale_model` while no tier anywhere seeded `upscale_script`. The Qube served both only because they
+  were wired by hand. Every ComfyUI tier now seeds both halves.
+- **The two 8 GB tiers' image script pointed at a directory that does not exist.** ampere-8 and
+  blackwell-8 seeded `__OFFLOAD_HOME__/render/comfy-generate.mjs`; both installers put `render/` next to the
+  BINARY (`<home>/bin/render`), and a relative script resolves there (`gpugen.ResolveScriptIn`). Measured on
+  the Aorus: `D:/offload-stack/render` absent, `D:/offload-stack/bin/render` present — the Aorus worked
+  only because it was hand-set. Seeds now use the relative `render/…` form.
+- **Edit, inpaint and animate are seeded on every 16 GB+ ComfyUI tier** — the three routes that were
+  measured, kept and served on the Qube and seeded nowhere: Qwen-Image-Edit-2511 Q5_1 + lightning8
+  ("frontier confirmed ≥16GB edit primitive"), RealVisXL V5 inpaint, WAN-Animate-2 int8 (15.9 GB on one
+  16 GB card; operator 2026-08-27 "route WAN-Animate as a media capability"). blackwell-8 already seeded
+  the edit UNET and inpaint checkpoint but not their scripts, so both routes deferred there too.
+  `SETUP-AGENT.md` no longer calls the ≥16 GB edit model a "designation, not a binding".
+- **Gates.** `TestEveryComfyMediaModelHasItsScript`, `TestMediaScriptsResolveNextToTheBinary`,
+  `TestSixteenGBComfyTiersSeedTheMeasuredEditInpaintAnimateRoutes` — 70 violations on the previous seeds.
+
 ## [0.132.4] - 2026-09-21 - seeds carry what was measured, and two house rules become gates
 
 - **The AMD tier's agent seat was the one model measured to fail.** `amd-gcn` named no
