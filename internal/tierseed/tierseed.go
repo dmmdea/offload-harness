@@ -80,6 +80,13 @@ type Profile struct {
 	// ResidentTier is the tier's preferred hot model. It SEEDS the agent planner
 	// seat (agent_model) when it differs from the workhorse — see Resolve.
 	ResidentTier string `json:"resident_tier"`
+	// AgentCtxTokens is the tier's agent context window. Resolve seeds it as
+	// agent_ctx_tokens unless config_seed or a vLLM seat binding already set it. It used
+	// to reach a config only through install.ps1, which wrote the tier field directly;
+	// install.sh never did, so every fresh LINUX node (binxarn, the Lenovo) got the code
+	// default instead of the window its tier was measured at. Seeding it here gives both
+	// installers the same value from one place.
+	AgentCtxTokens int `json:"agent_ctx_tokens"`
 	// MediaSeats are the tier's alias-backed media capabilities. They are the SOLE
 	// writer of the config keys they bind — see mediaseat.Bindings.
 	MediaSeats []mediaseat.Seat `json:"media_seats"`
@@ -307,6 +314,9 @@ func Resolve(p Profile, id string, opt Options) (map[string]any, error) {
 		for k, v := range b {
 			merged[k] = v
 		}
+	}
+	if _, set := merged["agent_ctx_tokens"]; !set && p.AgentCtxTokens > 0 {
+		merged["agent_ctx_tokens"] = p.AgentCtxTokens
 	}
 	if _, explicit := merged["agent_model"]; !explicit && p.ResidentTier != "" {
 		workhorse := config.Default().Model

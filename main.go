@@ -152,6 +152,8 @@ func main() {
 		err = runDoctor(args)
 	case "audit-yaml":
 		err = runAuditYAML(args)
+	case "audit-config":
+		err = runAuditConfig(args)
 	case "report":
 		err = runReport(args)
 	case "acceptance":
@@ -283,6 +285,8 @@ Usage:
   local-offload audit-yaml [--against-render] FILE...
                                          check live llama-swap config(s) against the operator rules (INV-1/INV-2: no -ngl 0, no empty CUDA_VISIBLE_DEVICES, ttl 300 everywhere, no persistent group, no preload).
                                          --against-render also re-derives each file from THIS binary's tier seeds and reports MATCH / STALE(keys) / UNSTAMPED / HAND-EDITED.
+  local-offload audit-config [--config PATH] [--tier NAME] [--json] [--all]
+                                         compare this node's live config.json against the seed its tier would install; lists every seed-owned key that is DIFFERENT, LIVE-ONLY (hand-wired, never written back to profiles.json) or SEED-ONLY. Exit 1 on drift.
                                          Exit 1 on a violation, a STALE config or a HAND-EDITED one; UNSTAMPED prints as a finding and does not fail. Flags come BEFORE the files.
   local-offload report [--out FILE]      READ-ONLY capability report for this machine (tier, serving, media routes) — Markdown, safe to send
   local-offload acceptance [--json]      the gate: EXERCISE every bound capability as this identity (lease writable, interpreters runnable, aliases live). Non-zero when a node must not be handed work.

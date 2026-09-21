@@ -215,6 +215,7 @@
         "CUDA_MODULE_LOADING=LAZY"
       ],
       "config_seed": {
+        "agent_model": "gemma4-26b-a4b",
         "upscale_model": "4x-UltraSharp.pth",
         "imagegen_family": "krea2",
         "imagegen_ckpt": "krea2_turbo_bf16.safetensors",
@@ -981,9 +982,9 @@
       "kv_type": "q8_0",
       "agent_ctx_tokens": 32768,
       "resident_tier": "offload-e4b",
-      "include_26b": true,
+      "include_26b": false,
       "include_qwen35_9b": true,
-      "moe_26b": "cpu_moe",
+      "moe_26b": "drop",
       "flash_attn": "on",
       "backend": "cuda",
       "gpu_env": [
@@ -993,7 +994,9 @@
       "config_seed": {
         "upscale_model": "4x-UltraSharp.pth",
         "agent_model": "qwen3.5-9b-agent",
-        "agent_profile": "research"
+        "agent_profile": "research",
+        "escalation_model": "qwen3.5-9b-agent",
+        "reasoning_model": "qwen3.5-9b-agent"
       },
       "config_seed_ram_mid_high": {
         "imagegen_family": "hidream-o1",
@@ -1045,9 +1048,9 @@
       "kv_type": "q8_0",
       "agent_ctx_tokens": 32768,
       "resident_tier": "offload-e4b",
-      "include_26b": true,
+      "include_26b": false,
       "include_qwen35_9b": true,
-      "moe_26b": "cpu_moe",
+      "moe_26b": "drop",
       "flash_attn": "on",
       "backend": "cuda",
       "gpu_env": [
@@ -1057,7 +1060,9 @@
       "config_seed": {
         "upscale_model": "4x-UltraSharp.pth",
         "agent_model": "qwen3.5-9b-agent",
-        "agent_profile": "research"
+        "agent_profile": "research",
+        "escalation_model": "qwen3.5-9b-agent",
+        "reasoning_model": "qwen3.5-9b-agent"
       },
       "config_seed_ram_mid_high": {
         "imagegen_engine": "",
@@ -1206,7 +1211,7 @@
       "agent_ctx_tokens": 16384,
       "resident_tier": "offload-e4b",
       "include_26b": true,
-      "moe_26b": "cpu_moe",
+      "moe_26b": "gpu",
       "flash_attn": "on",
       "backend": "vulkan",
       "config_seed": {
@@ -1224,7 +1229,7 @@
         "imagegen_cfg": 1,
         "imagegen_timeout_sec": 900
       },
-      "notes": "Config #7 (780M/gfx1103 iGPU + 64GB dual-channel DDR5, Vulkan UMA). SAFE FLOOR: f16 KV + 16K ctx + 26B cpu-moe (ram_tier mid/high; else dropped). Research 2026-07-23 (J1): the floor is deliberately BELOW what this hardware measures elsewhere - 26B-A4B Q4_K_M runs FULLY OFFLOADED (-ngl 99, weights in GTT/shared memory) at ~20-25 tok/s tg on a 780M with dual-channel DDR5 (two independent community measurements; the earlier 'cpu-moe = very slow' note was wrong for dual-channel boxes), and Vulkan FA + q8_0 KV is production-supported since the Feb-Mar 2026 AMD tuning PRs. selftest.ps1's H3 canaries (fa_q8kv / moe_full_offload / ctx_sweep) MEASURE all three promotions on the real box; the agent applies them canary-gated per SETUP-AGENT.md (amd-rdna3 chapter). REQUIRES a llama.cpp win-vulkan build >= Mar-2026 (the pinned tag satisfies this - it is the frontier snapshot, never downgrade below the floor) and flash-attn EXPLICITLY 'on' (never auto: a silent FA-off then fails quantized-V loads on Gemma). Single-channel RAM is a clean ~2x tg loss - confirm dual-channel at install. PROJECTED until receipts return. J-media 2026-07-28 (Juan's tier - the D9 audit gap): STT via the whisper.cpp Vulkan build. Vision reuses this tier's resident E4B + mmproj, so no extra multi-GB download on a UMA box. Vision keeps the CLIP encoder on CPU (--no-mmproj-offload). The REASON, stated accurately: llama.cpp #20081 reports mmproj quality degradation on Vulkan, but the maintainer could not reproduce it across several devices and the reporter closed it inconclusively - so quality alone is weak evidence. The load-bearing fact is in the same thread: running model + mmproj both on the Vulkan backend of a Radeon 780M iGPU gives a hard vk::DeviceLostError immediately after 'decoding image batch 1/8', reproducibly, on the exact silicon this tier targets. Keeping the encoder on CPU avoids that crash path and costs only encoder throughput; the LLM still decodes on the GPU. Both seats pin GGML_VK_VISIBLE_DEVICES=0 (multi-ICD boxes). REQUIRES a whisper.cpp Vulkan build + the whisper weights, which install.ps1's amd-* asset table does NOT fetch - `install render` warns by exact path. PROJECTED. TIER-DOCTRINE PASS 2026-08-16: reviewed; seats are the best that fit — no change.",
+      "notes": "Config #7 (780M/gfx1103 iGPU + 64GB dual-channel DDR5, Vulkan UMA). SAFE FLOOR: f16 KV + 16K ctx + 26B [SUPERSEDED 2026-09-21 (wiring-debt W4): this read 'cpu-moe'; RAM is overflow only (operator rule 2026-09-10), and this is a unified-memory iGPU, so the 26B now runs on the iGPU - moe_26b 'gpu'. PROJECTED: no amd-rdna3 box has run it yet] (ram_tier mid/high; else dropped). Research 2026-07-23 (J1): the floor is deliberately BELOW what this hardware measures elsewhere - 26B-A4B Q4_K_M runs FULLY OFFLOADED (-ngl 99, weights in GTT/shared memory) at ~20-25 tok/s tg on a 780M with dual-channel DDR5 (two independent community measurements; the earlier 'cpu-moe = very slow' note was wrong for dual-channel boxes), and Vulkan FA + q8_0 KV is production-supported since the Feb-Mar 2026 AMD tuning PRs. selftest.ps1's H3 canaries (fa_q8kv / moe_full_offload / ctx_sweep) MEASURE all three promotions on the real box; the agent applies them canary-gated per SETUP-AGENT.md (amd-rdna3 chapter). REQUIRES a llama.cpp win-vulkan build >= Mar-2026 (the pinned tag satisfies this - it is the frontier snapshot, never downgrade below the floor) and flash-attn EXPLICITLY 'on' (never auto: a silent FA-off then fails quantized-V loads on Gemma). Single-channel RAM is a clean ~2x tg loss - confirm dual-channel at install. PROJECTED until receipts return. J-media 2026-07-28 (Juan's tier - the D9 audit gap): STT via the whisper.cpp Vulkan build. Vision reuses this tier's resident E4B + mmproj, so no extra multi-GB download on a UMA box. Vision keeps the CLIP encoder on CPU (--no-mmproj-offload). The REASON, stated accurately: llama.cpp #20081 reports mmproj quality degradation on Vulkan, but the maintainer could not reproduce it across several devices and the reporter closed it inconclusively - so quality alone is weak evidence. The load-bearing fact is in the same thread: running model + mmproj both on the Vulkan backend of a Radeon 780M iGPU gives a hard vk::DeviceLostError immediately after 'decoding image batch 1/8', reproducibly, on the exact silicon this tier targets. Keeping the encoder on CPU avoids that crash path and costs only encoder throughput; the LLM still decodes on the GPU. Both seats pin GGML_VK_VISIBLE_DEVICES=0 (multi-ICD boxes). REQUIRES a whisper.cpp Vulkan build + the whisper weights, which install.ps1's amd-* asset table does NOT fetch - `install render` warns by exact path. PROJECTED. TIER-DOCTRINE PASS 2026-08-16: reviewed; seats are the best that fit — no change.",
       "media_seats": [
         {
           "kind": "vision",
@@ -1342,7 +1347,7 @@
       "ctx_size": 32768,
       "kv_type": "f16",
       "agent_ctx_tokens": 32768,
-      "resident_tier": "gemma4-e2b",
+      "resident_tier": "offload-e4b",
       "include_26b": false,
       "moe_26b": "drop",
       "flash_attn": "on",
@@ -1350,10 +1355,15 @@
       "alt_backends": ["cpu"],
       "include_qwen35_4b": true,
       "config_seed": {
+        "agent_model": "qwen3.5-4b-agent",
+        "agent_seat_tok_s": 10,
+        "agent_max_tokens": 2048,
+        "agent_timeout_sec": 900,
+        "fleet_agent_enabled": true,
         "escalation_model": "",
         "reasoning_model": ""
       },
-      "notes": "vLLM-CPU MEASURED 2026-09-20 on binxarn (Ryzen 5 5625U, 30 GB, AVX2 only): vLLM main 49ee12d + torch 2.13.0+cpu builds from source (PyTorch CPU index, requirements/build/cpu.txt, libnuma-dev) and seats Qwen3.5-4B bf16 ONLY with --enforce-eager, VLLM_CPU_KVCACHE_SPACE=4, --max-model-len 4096 (the default config OOM-kills at 28.9 GB + 7.7 GB swap) — 3.1 tok/s generation vs 9.27 tg128 for llama.cpp CPU on the same family (UD-Q4_K_XL), ~0.3x. NOT seated; the venv stays as the tier's measured vLLM wiring. AGENT SEAT MEASURED 2026-09-20 on binxarn (Ryzen 5 5625U / Vega 7, b9934 Vulkan, UMA 512 MiB): the fleet-smoke grounded contract FAILS on gemma4-e2b (18.6 s, replies 'please provide the document', tool_calls_parsed=0) and on offload-e4b (31 s, same shape) — neither makes the read tool call — and PASSES on qwen3.5-4b-agent (44.7 s, agent_seat_tok_s 10 published so the node sizes its wall; the first run without a rate deferred at the grammar re-pack with 1 s of wall left). So include_qwen35_4b is ON for this tier: the small-tier agent seat the table documents, on a box whose workhorse cannot plan. Config #12 (Vega 7/GCN + 32GB, Vulkan). Weakest path: E2B, 8K f16, flash-attn OFF (older Vulkan FA unreliable), 26B dropped. PROJECTED. J-media 2026-07-28: STT via the whisper.cpp Vulkan build (solid). Vision reuses E4B + mmproj but keeps the CLIP encoder on CPU (--no-mmproj-offload) because mmproj on the Vulkan backend is degraded (llama.cpp #20081); the LLM still decodes on the iGPU. flash-attn off (tier). Both pin GGML_VK_VISIBLE_DEVICES=0. MEASURED 2026-07-17 on real GCN silicon — this clause used to read 'PROJECTED — no GCN box measured' and it was WRONG for over a month while this repo's OWN measurement record sat in docs/specs/2026-07-17-hardware-scope-linux-and-low-end-design.md. Box: a collaborator's Lenovo laptop on CachyOS Linux 6.18 — Ryzen 5 5500U 6C/12T, Radeon Lucienne (Vega/GCN gfx90c-class, RADV RENOIR, 'matrix cores: none'), 2.0 GiB VRAM carve-out + 10.7 GiB GTT, 21 GiB system RAM (ram_tier min, BELOW the 32GB this profile assumes, so the 26B path was never exercised). llama-bench at the pinned b9934 Vulkan build with the byte-identical pinned E2B: pp512 213.31 +/- 1.12 / tg128 14.86 +/- 0.79 t/s (-ngl 99, FA off, desktop loaded); quiesced control 208.64 / 14.63; FA ON 209.82 / 14.94, i.e. flash-attn is performance-NEUTRAL here — the FA-off default costs nothing, but its stated reason ('older Vulkan FA unreliable') remains untested on this stack. CPU -ngl 0 measured 169.58 / 10.69, so the iGPU buys only 1.26x on prompt processing, NOT the README's ~4x: that figure is RDNA3/WMMA guidance and does not carry to Vega ('matrix cores: none'). Six end-to-end tasks through the real local-offload CLI at this tier's own invariants: classify 500ch 3 s, triage 500ch 6 s, summarize 5,000ch 20 s, triage 19,162ch 39 s, summarize 19,162ch 51 s, summarize 24,000ch 59 s; doctor OK, 0 of 6 deferred, every answer correct. STILL OPEN: a whisper.cpp Vulkan build for the STT seat. TIER-DOCTRINE PASS 2026-08-16: reviewed; seats are the best that fit — no change. iGPU LANE OPTIMIZED 2026-09-20 on binxarn (research-first: llama.cpp #23295 RADV guide, #10879, the daimonionnn Vega APU toolkit — the only gfx90c source — and the amdttm GTT posts; then a measured sweep, Mesa 26.0.8, THP always, quiesced): RADV_PERFTEST=nogttspill flat (264.6/23.0 vs 263.5/23.0), -ub 128/256/1024 within -3 %, q8_0 KV -4 % pp / -1.5 % tg, amdgpu DPM 'high' +1 % pp / +3 % tg (pp_dpm_mclk reads 800 MHz under load with 1333 unused, but pinning it gains 3 %: an SMU fabric readout, the DRAM stays at 2667 MT/s), ryzenadj fclk pins change nothing. The lane is DDR4-2667-bandwidth-bound: -fa on / -ub 512 / f16 KV / DPM auto is the envelope. FLASH-ATTN ON since this pass: measured 266.2/23.1 vs 256.1/22.8 FA-off on binxarn (+4 % pp, +1 % tg) and neutral on the Lucienne box 2026-07-17 — the 'older Vulkan FA unreliable' reason never reproduced on two GCN boxes across b9934. UMA carve-out size is irrelevant for this lane (512 MiB measured, VRAM allocates on the fly). Levers left are hardware: DDR4-3200 SODIMMs (+15-20 % both, Cezanne's rated max) and a ROCm 7 gfx900-backport lane (Vega toolkit: +30-39 % dense prefill, worse decode; recorded, not scheduled). whisper.cpp Vulkan STT seat: BUILT and live on binxarn (/opt/offload/build/whisper.cpp, large-v3-turbo + silero VAD) — the 'STILL OPEN' clause above is CLOSED. 32K WINDOW MEASURED 2026-09-20 on binxarn (standalone Vulkan llama-server, Qwen3.5-4B UD-Q4_K_XL, FA on, f16 KV, --ctx-size 32768, GTT cap raised to 24 GiB via ttm.pages_limit): a 23,889-token prompt read in 277.5 s at 86.1 tok/s, generation 14.6 tok/s, GTT used 3.9 GiB, correct reply; the same prompt again answered in 8.4 s (llama-server's host-RAM prompt cache, --cache-ram). ctx_size and agent_ctx_tokens 8192 -> 32768 (the 8K was the projected weakest-path figure; the node's agent_timeout_sec 900 holds a full-window read with margin).",
+      "notes": "vLLM-CPU MEASURED 2026-09-20 on binxarn (Ryzen 5 5625U, 30 GB, AVX2 only): vLLM main 49ee12d + torch 2.13.0+cpu builds from source (PyTorch CPU index, requirements/build/cpu.txt, libnuma-dev) and seats Qwen3.5-4B bf16 ONLY with --enforce-eager, VLLM_CPU_KVCACHE_SPACE=4, --max-model-len 4096 (the default config OOM-kills at 28.9 GB + 7.7 GB swap) — 3.1 tok/s generation vs 9.27 tg128 for llama.cpp CPU on the same family (UD-Q4_K_XL), ~0.3x. NOT seated; the venv stays as the tier's measured vLLM wiring. AGENT SEAT MEASURED 2026-09-20 on binxarn (Ryzen 5 5625U / Vega 7, b9934 Vulkan, UMA 512 MiB): the fleet-smoke grounded contract FAILS on gemma4-e2b (18.6 s, replies 'please provide the document', tool_calls_parsed=0) and on offload-e4b (31 s, same shape) — neither makes the read tool call — and PASSES on qwen3.5-4b-agent (44.7 s, agent_seat_tok_s 10 published so the node sizes its wall; the first run without a rate deferred at the grammar re-pack with 1 s of wall left). So include_qwen35_4b is ON for this tier: the small-tier agent seat the table documents, on a box whose workhorse cannot plan. Config #12 (Vega 7/GCN + 32GB, Vulkan). SUPERSEDED 2026-09-21 (wiring-debt W2): this clause read 'Weakest path: E2B, 8K f16, flash-attn OFF, PROJECTED' long after binxarn measured every one of those values wrong - the E4B is the hot model (Vulkan pp512 129.08 / tg128 11.93), 32K, flash-attn on - and resident_tier stayed gemma4-e2b, which the tierseed fallback then made the AGENT seat: the one model measured to FAIL the agent contract (18.6 s). resident_tier is now offload-e4b and the agent seat is named explicitly (qwen3.5-4b-agent, PASS x3) with the four lane keys the node needed live (receipt plans/receipts/2026-09-20-binxarn-firmware-and-tune.md). 26B dropped. J-media 2026-07-28: STT via the whisper.cpp Vulkan build (solid). Vision reuses E4B + mmproj but keeps the CLIP encoder on CPU (--no-mmproj-offload) because mmproj on the Vulkan backend is degraded (llama.cpp #20081); the LLM still decodes on the iGPU. flash-attn off (tier). Both pin GGML_VK_VISIBLE_DEVICES=0. MEASURED 2026-07-17 on real GCN silicon — this clause used to read 'PROJECTED — no GCN box measured' and it was WRONG for over a month while this repo's OWN measurement record sat in docs/specs/2026-07-17-hardware-scope-linux-and-low-end-design.md. Box: a collaborator's Lenovo laptop on CachyOS Linux 6.18 — Ryzen 5 5500U 6C/12T, Radeon Lucienne (Vega/GCN gfx90c-class, RADV RENOIR, 'matrix cores: none'), 2.0 GiB VRAM carve-out + 10.7 GiB GTT, 21 GiB system RAM (ram_tier min, BELOW the 32GB this profile assumes, so the 26B path was never exercised). llama-bench at the pinned b9934 Vulkan build with the byte-identical pinned E2B: pp512 213.31 +/- 1.12 / tg128 14.86 +/- 0.79 t/s (-ngl 99, FA off, desktop loaded); quiesced control 208.64 / 14.63; FA ON 209.82 / 14.94, i.e. flash-attn is performance-NEUTRAL here — the FA-off default costs nothing, but its stated reason ('older Vulkan FA unreliable') remains untested on this stack. CPU -ngl 0 measured 169.58 / 10.69, so the iGPU buys only 1.26x on prompt processing, NOT the README's ~4x: that figure is RDNA3/WMMA guidance and does not carry to Vega ('matrix cores: none'). Six end-to-end tasks through the real local-offload CLI at this tier's own invariants: classify 500ch 3 s, triage 500ch 6 s, summarize 5,000ch 20 s, triage 19,162ch 39 s, summarize 19,162ch 51 s, summarize 24,000ch 59 s; doctor OK, 0 of 6 deferred, every answer correct. STILL OPEN: a whisper.cpp Vulkan build for the STT seat. TIER-DOCTRINE PASS 2026-08-16: reviewed; seats are the best that fit — no change. iGPU LANE OPTIMIZED 2026-09-20 on binxarn (research-first: llama.cpp #23295 RADV guide, #10879, the daimonionnn Vega APU toolkit — the only gfx90c source — and the amdttm GTT posts; then a measured sweep, Mesa 26.0.8, THP always, quiesced): RADV_PERFTEST=nogttspill flat (264.6/23.0 vs 263.5/23.0), -ub 128/256/1024 within -3 %, q8_0 KV -4 % pp / -1.5 % tg, amdgpu DPM 'high' +1 % pp / +3 % tg (pp_dpm_mclk reads 800 MHz under load with 1333 unused, but pinning it gains 3 %: an SMU fabric readout, the DRAM stays at 2667 MT/s), ryzenadj fclk pins change nothing. The lane is DDR4-2667-bandwidth-bound: -fa on / -ub 512 / f16 KV / DPM auto is the envelope. FLASH-ATTN ON since this pass: measured 266.2/23.1 vs 256.1/22.8 FA-off on binxarn (+4 % pp, +1 % tg) and neutral on the Lucienne box 2026-07-17 — the 'older Vulkan FA unreliable' reason never reproduced on two GCN boxes across b9934. UMA carve-out size is irrelevant for this lane (512 MiB measured, VRAM allocates on the fly). Levers left are hardware: DDR4-3200 SODIMMs (+15-20 % both, Cezanne's rated max) and a ROCm 7 gfx900-backport lane (Vega toolkit: +30-39 % dense prefill, worse decode; recorded, not scheduled). whisper.cpp Vulkan STT seat: BUILT and live on binxarn (/opt/offload/build/whisper.cpp, large-v3-turbo + silero VAD) — the 'STILL OPEN' clause above is CLOSED. 32K WINDOW MEASURED 2026-09-20 on binxarn (standalone Vulkan llama-server, Qwen3.5-4B UD-Q4_K_XL, FA on, f16 KV, --ctx-size 32768, GTT cap raised to 24 GiB via ttm.pages_limit): a 23,889-token prompt read in 277.5 s at 86.1 tok/s, generation 14.6 tok/s, GTT used 3.9 GiB, correct reply; the same prompt again answered in 8.4 s (llama-server's host-RAM prompt cache, --cache-ram). ctx_size and agent_ctx_tokens 8192 -> 32768 (the 8K was the projected weakest-path figure; the node's agent_timeout_sec 900 holds a full-window read with margin).",
       "media_seats": [
         {
           "kind": "vision",

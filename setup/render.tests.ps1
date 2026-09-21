@@ -104,13 +104,14 @@ if ($macro -match '--cache-type-k q8_0' -and $macro -match '--cache-type-v q8_0'
 if ($macro -match '--flash-attn on')                           { Ok 'ampere-8/mid flash-attn on' }    else { Bad 'ampere-8/mid flash-attn' }
 if ($macro -match '--cache-ram 16384')                         { Ok 'ampere-8/mid cache-ram 16384 (ADR 0056, never below the 8192 upstream default)' } else { Bad "ampere-8/mid cache-ram (got: $macro)" }
 if ($macro -notmatch '--slot-save-path')                      { Ok 'ampere-8/mid renders NO slot-save-path (ADR 0056: llama-server REFUSES TO START when the path is missing, and the par8 seat has 8 slots)' } else { Bad "ampere-8/mid must not render slot-save-path (got: $macro)" }
-if ($r.yaml -match '(?m)^\s{2}gemma4-26b-a4b:')                 { Ok 'ampere-8/mid includes 26B tier' } else { Bad 'ampere-8/mid 26B present' }
-$b26 = Get-ModelCmd -Yaml $r.yaml -ModelKey 'gemma4-26b-a4b'
-if ($b26 -match '--cpu-moe')                                   { Ok 'ampere-8/mid 26B uses --cpu-moe (ram=mid)' } else { Bad "ampere-8/mid 26B --cpu-moe (got: $b26)" }
-# Residency is `matrix:` now (ADR 0020), so the 26B is a VAR referenced by a SET
-# rather than an entry in a `members:` list. Both halves must be there: llama-swap
-# rejects a set naming an unknown var, and a var naming an undefined model.
-if ($r.yaml -match '(?m)^\s{4}m26:\s*gemma4-26b-a4b\s*$' -and $r.yaml -match '(?m)^\s{4}interactive:.*\bm26\b') { Ok 'ampere-8/mid 26B is a matrix var referenced by the interactive set' } else { Bad 'ampere-8/mid 26B matrix membership' }
+# RAM is overflow only (operator rule 2026-09-10; wiring-debt W4, 0.132.4): an 8 GB card cannot hold the
+# 26B without parking its experts in RAM, and --cpu-moe parks ALL of them. This block used to assert the
+# opposite - that ampere-8/mid renders the 26B WITH --cpu-moe - which is how the Aorus served it live.
+if ($r.yaml -notmatch '(?m)^\s{2}gemma4-26b-a4b:' -and $r.yaml -notmatch '(?m)^\s{2}gemma-4-26b-agent:') { Ok 'ampere-8/mid renders NO 26B (RAM is overflow only)' } else { Bad 'ampere-8/mid still renders a 26B entry' }
+$cpuMoeLines = @($r.yaml -split "`r?`n" | Where-Object { $_ -match '--cpu-moe' -and $_ -notmatch '^\s*#' })
+if ($cpuMoeLines.Count -eq 0)                                  { Ok 'ampere-8/mid renders no --cpu-moe anywhere' } else { Bad "ampere-8/mid still renders --cpu-moe ($($cpuMoeLines.Count) line(s))" }
+# llama-swap rejects a set naming an unknown var, so the vars must go with the entries.
+if ($r.yaml -notmatch '(?m)^\s{4}m26:' -and $r.yaml -notmatch '(?m)^\s{4}a26:') { Ok 'ampere-8/mid carries no 26B matrix vars' } else { Bad 'ampere-8/mid still declares a 26B matrix var' }
 if ($r.yaml -notmatch '__[A-Z0-9_]+__')                        { Ok 'ampere-8/mid no unsubstituted tokens' } else { Bad 'ampere-8/mid leftover tokens' }
 if ($r.verdict -and [int]$r.verdict.agent_ctx_tokens -eq 32768) { Ok 'ampere-8/mid agent_ctx_tokens=32768' } else { Bad 'ampere-8/mid agent_ctx_tokens' }
 # gpu_env on ampere-8 is INTENTIONAL as of the 2026-08-19 8GB hygiene pass (H3): the
@@ -151,12 +152,14 @@ if ($graphLines.Count -eq 0) {
 if ($r.yaml -match '(?m)^\s{4}env: \[CUDA_VISIBLE_DEVICES=0, CUDA_MODULE_LOADING=LAZY\]$') {
   Ok 'blackwell-16 26B env is the tier gpu_env alone (no empty env: [] left behind)' } else { Bad 'blackwell-16 26B merged env list' }
 
-# The flag must SURVIVE on a tier that was never measured without it. ampere-8 is the
-# one that both serves the 26B and has no graphs-on measurement, so it is the guard.
-$ra = Invoke-Render -Backend 'cuda' -ProfileId 'ampere-8' -RamTier 'mid' -BigRam $true
+# The flag must SURVIVE on a tier that was never measured without it. It only ever applies to the 26B
+# seats (servingtmpl: DisableCUDAGraphs emits it on the 26B), so the guard is a tier that both SERVES the
+# 26B and has no graphs-on measurement. That was ampere-8 until 0.132.4 dropped its 26B under the RAM
+# rule; volta-16 is now the only such tier.
+$ra = Invoke-Render -Backend 'cuda' -ProfileId 'volta-16' -RamTier 'mid' -BigRam $true
 $graphLinesA = @($ra.yaml -split "`r?`n" | Where-Object { $_ -match '^\s{4}env: \[' -and $_ -match 'GGML_CUDA_DISABLE_GRAPHS=1' })
 if ($graphLinesA.Count -ge 1) {
-  Ok 'ampere-8 KEEPS GGML_CUDA_DISABLE_GRAPHS (never measured with graphs on)' } else { Bad 'ampere-8 lost GGML_CUDA_DISABLE_GRAPHS - the sm_120 measurement does not transfer to Ampere' }
+  Ok 'volta-16 KEEPS GGML_CUDA_DISABLE_GRAPHS (never measured with graphs on)' } else { Bad 'volta-16 lost GGML_CUDA_DISABLE_GRAPHS - the sm_120 measurement does not transfer to Volta' }
 
 Write-Host "== blackwell-72 - ALL-RESIDENT big-VRAM tier (cuda-resident template, cfg15) =="
 $r = Invoke-Render -Backend 'cuda' -ProfileId 'blackwell-72' -RamTier 'high' -BigRam $false

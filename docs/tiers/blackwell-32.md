@@ -60,6 +60,16 @@ The installer seeds this tier's media bindings (`config_seed`):
 
 `__OFFLOAD_HOME__` is replaced with the install root at render time.
 
+## Installer-seeded config (non-media)
+
+These `config_seed` keys are applied to a FRESH harness config exactly like the media
+seed, but they bind no media route — the agent/cascade seats and per-node knobs live
+here so they are never mistaken for a media capability:
+
+| key | value |
+|---|---|
+| `agent_model` | `gemma4-26b-a4b` |
+
 ## Operator notes
 
 Recorded with the profile — several are measurements from real hardware,

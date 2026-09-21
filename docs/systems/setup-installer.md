@@ -278,6 +278,52 @@ the served config is unchanged and only the stamp is behind.
 `UNSTAMPED` deliberately does not exit 1: every config on the fleet predates stamping, and a
 gate that is red on every box from day one is a gate nobody reads.
 
+#### The config half: `audit-config`
+
+`audit-yaml` audits the serving YAML. It never looked at `config.json`, and that is where the
+drift actually lived. Measured winners were wired **by hand into a node's config** and never
+written back to `profiles.json`:
+
+- binxarn's `qwen3.5-4b-agent` seat and its four lane keys;
+- the Lenovo's layers, its 35B digest seat and its cascade rungs;
+- the Qube's image-edit, inpaint and animate routes.
+
+The node kept working, the seed kept the loser, and every fresh install lost the win. Every
+regeneration of the tier matrix, which reads the seed, erased it from the record too. The
+2026-09-21 wiring-debt audit found this pattern on every node it read.
+
+```
+local-offload audit-config                                   # this node, its own tier
+local-offload audit-config --config node.json --tier ampere-16 --home /srv/x     --goos linux --ram-tier mid --vllm-seat-active true      # a node read over SSH
+```
+
+It resolves the tier seed **exactly as `install seed` does**, with the same `--goos`,
+`--ram-tier` and vLLM-seat detection. Skip them and the audit compares the node against a seed
+the installer would never have written, such as a vLLM box against its fallback agent, and
+reports drift that is its own artifact. `--vllm-seat-active auto` runs the installer's own
+detection, which is right for the local box. Pass `true` or `false` for a remote one.
+
+It reports only **seed-owned** keys: every key some tier's resolved seed can write, plus live
+bindings no tier seeds at all. A config also holds keys that are legitimately this machine's
+own, such as endpoints, install paths and ports. A report that flagged those would bury the
+drift it exists to show.
+
+| class | means |
+|---|---|
+| `DIFFERENT` | both set, values differ |
+| `LIVE-ONLY` | set by hand on the node; this tier's seed does not write it; a fresh install loses it |
+| `UNSEEDED` | a live binding (a key ending in `_model`, `_script`, `_unet`, `_ckpt`, …) that **no** tier seeds |
+| `SEED-ONLY` | the seed writes it; the node does not have it |
+| `MATCH` | agrees (listed with `--all`) |
+
+`UNSEEDED` exists because a seed-owned comparison alone was blind to the worst case. A media
+route that no tier carries is invisible to a check that reads only what seeds can write. That
+is exactly how the Qube's image-edit and animate wins stayed node-only. Empty-string values
+are unbound routes and are not reported. `nim_*` keys are the cloud escalation account, not a
+seat, and are not reported either.
+
+Exit 1 on any drift.
+
 **Verified end to end on the Linux node:** the rendered `ampere-6` config was handed to the
 node's own `llama-swap` on a throwaway port, which accepted it and listed exactly
 `offload-e4b`, `gemma4-e2b`, `embeddinggemma`, `bge-reranker-v2-m3` — the 26B correctly

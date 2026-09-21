@@ -6,6 +6,43 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.132.4] - 2026-09-21 - seeds carry what was measured, and two house rules become gates
+
+- **The AMD tier's agent seat was the one model measured to fail.** `amd-gcn` named no
+  `agent_model`, so the tierseed fallback made its `resident_tier` — `gemma4-e2b` — the agent planner
+  seat on every fresh install. On binxarn, `gemma4-e2b` FAILED the agent contract in 18.6 s and
+  `offload-e4b` in 31 s, while `qwen3.5-4b-agent` passed three times (smoke 44.7 s, a real contract
+  188 s, a 32k contract 143 s) — and existed only as a hand edit on the node. `resident_tier` is now
+  `offload-e4b` (Vulkan pp512 129.08 / tg128 11.93 measured there), and the tier seeds the agent seat
+  explicitly with the four lane keys the node needed live: `agent_seat_tok_s` 10 (the first run
+  without it deferred with 1 s of wall left), `agent_max_tokens` 2048, `agent_timeout_sec` 900,
+  `fleet_agent_enabled`. The note's "Weakest path: E2B … PROJECTED" clause, overturned by those
+  measurements, is marked superseded.
+- **RAM is overflow only, now in the seeds.** `ampere-8` and `blackwell-8` (8 GB discrete cards)
+  seeded the 26B with `moe_26b: "cpu_moe"` — every expert in RAM — and the Aorus served it that way,
+  against the operator's 2026-09-10 rule. Both tiers now drop the 26B, and seed their escalation and
+  reasoning rungs explicitly on `qwen3.5-9b-agent` (the largest model the tier serves) instead of
+  falling to a code default that would name a model no longer rendered. Rung quality on the 9B is
+  UNMEASURED; the per-rung cascade eval owns that. `amd-rdna3` is a unified-memory iGPU, so its 26B
+  runs on the iGPU (`gpu`), not the CPU. The `cpu` tier is exempt: it has no card to overflow from.
+- **Two gates so neither comes back.** `TestNoGPUTierParksTheMoEExpertsInRAM` fails any GPU tier
+  that seeds `cpu_moe`. `TestEveryAgentSeatIsChosenNotDerived` fails any tier whose agent seat comes
+  from the silent `resident_tier` fallback; `blackwell-32` (projected, no box) now names the seat it
+  used to derive, with no behaviour change. `TestAmdGcnSeedsTheSeatItWasMeasuredOn` pins the binxarn
+  measurements. All three were RED on the previous seeds and name the defects exactly.
+- **`audit-config`: the drift check that was missing.** `audit-yaml --against-render` audits the
+  serving YAML; nothing compared a node's `config.json` against its tier seed, and that is where
+  every measured win was being wired by hand and never written back. It resolves the seed exactly as
+  `install seed` does (`--goos`, `--ram-tier`, the vLLM-seat detection) and reports seed-owned keys
+  as DIFFERENT / LIVE-ONLY / UNSEEDED / SEED-ONLY. First fleet run: binxarn 0 drifted keys after this
+  release's AMD fix, the Qube 28, the Aorus 12, the Lenovo 30 — the wiring-debt program works those
+  down. Reports under `plans/offload-harness/2026-09-21-wiring-debt/drift-*.txt`.
+- **A Linux install now gets its tier's agent window.** `install.ps1` wrote `agent_ctx_tokens` from
+  the tier field directly; `install.sh` never did, and the seed did not carry it, so every fresh
+  Linux node ran the code default instead of the window its tier was measured at. The seed now
+  carries it (unless `config_seed` or a vLLM seat binding sets it first), so both installers get it
+  from one place.
+
 ## [0.132.3] - 2026-09-21 - the display card is a card PROPERTY, and placement is one order
 
 - **`display_active`, not a guess from the process list (ADR 0057 revised).** 0.132.2 decided
