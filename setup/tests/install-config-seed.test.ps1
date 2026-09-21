@@ -144,7 +144,10 @@ foreach ($t in @($profiles.PSObject.Properties.Name)) {
 }
 $s32 = $profiles.'blackwell-32'.config_seed
 Assert ($s32.videogen_width -eq 1280 -and $s32.videogen_height -eq 704)     'blackwell-32 seeds REDUCED-RES 1280x704 video (doctrine-conformant recipe)'
-Assert ($null -eq $s32.agent_model)                                         'blackwell-32 agent stays derived (no explicit agent_model)'
+# 0.132.4 (wiring-debt W0.1): no tier may get its agent seat from the silent resident_tier fallback
+# (TestEveryAgentSeatIsChosenNotDerived) - that fallback is how amd-gcn shipped a seat measured to FAIL.
+# blackwell-32 now NAMES the seat it used to derive, so its behaviour is unchanged.
+Assert ($s32.agent_model -eq 'gemma4-26b-a4b')                           'blackwell-32 names its agent seat explicitly (the value it used to derive)'
 Assert ($null -eq $profiles.'blackwell-32'.include_qwen38)                  'blackwell-32 include_qwen38 stays absent'
 Assert ($profiles.'blackwell-32'.media_seats[0].name -eq 'qwen3-vl-8b')     'blackwell-32 vision seat promoted to qwen3-vl-8b (parity with the 16GB tiers)'
 # 8GB tiers: the BASE seed stays media-free (low-RAM boxes have no offload path);

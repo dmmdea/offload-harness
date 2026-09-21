@@ -97,8 +97,10 @@ try {
   # ampere-8's served window was raised 16384 -> 32768 on its own 2026-08-24 on-reference
   # measurement (9B seat 6111 MiB @32K q8_0, tg 56.6 t/s). This assertion reads the REAL
   # profiles.json, so it has to track the seed; it was left at 16384 and had been failing.
-  Assert ($null -ne $p -and $p.ctx_size -eq 32768 -and $p.kv_type -eq 'q8_0' -and $p.moe_26b -eq 'cpu_moe' -and $p.resident_tier -eq 'offload-e4b' -and $p.include_26b -eq $true) `
-    'Get-ProjectedProfile(ampere-8) = ctx32768/q8_0/cpu_moe/e4b/include26b (matches profiles.json)'
+  # 0.132.4 (wiring-debt W4): the 26B is DROPPED on ampere-8 - RAM is overflow only (operator rule
+  # 2026-09-10), and on an 8 GB card --cpu-moe parked every expert in RAM.
+  Assert ($null -ne $p -and $p.ctx_size -eq 32768 -and $p.kv_type -eq 'q8_0' -and $p.moe_26b -eq 'drop' -and $p.resident_tier -eq 'offload-e4b' -and $p.include_26b -eq $false) `
+    'Get-ProjectedProfile(ampere-8) = ctx32768/q8_0/drop/e4b/no-26B (matches profiles.json)'
   $pdual = Get-ProjectedProfile -ProfileId 'dual-gpu' -ProfilesJsonPath $realProfiles
   Assert ($null -ne $pdual -and $pdual.dual_resident -eq $true) 'Get-ProjectedProfile(dual-gpu) has dual_resident=true'
   $pu = Get-ProjectedProfile -ProfileId 'does-not-exist' -ProfilesJsonPath $realProfiles
