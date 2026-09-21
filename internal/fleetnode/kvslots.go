@@ -1,6 +1,6 @@
 package fleetnode
 
-// KV-slot save/restore lane (ADR 0055, Layer 2). llama-server can write one
+// KV-slot save/restore lane (ADR 0056, Layer 2). llama-server can write one
 // slot's KV cache to a file under --slot-save-path and read it back
 // (POST /slots/{id}?action=save|restore). The harness never drove it; this
 // lane wraps the two calls so the delegator can skip the prefill of context
@@ -300,7 +300,7 @@ func (s *Server) sweepKVSlots(keep string) {
 // file on restore, so a hot key that is read often and never rewritten ages out
 // like a cold one. That is a known limitation of this pass, not an oversight —
 // fixing it needs a read-side touch, which belongs with the delegator work that
-// is blocked (ADR 0055).
+// is blocked (ADR 0056).
 func SweepKVSlotDir(dir string, capBytes int64, keep string) error {
 	entries, err := os.ReadDir(dir)
 	if err != nil {

@@ -154,6 +154,29 @@ The advertisement (`/fleet/health` `supported_task_types`) is derived from the n
 config at process start — a route bound in the config after the process started (e.g. adding
 `imagegen_script`) does not advertise until the process is restarted the hard way above.
 
+## Two utilization figures, and which one answers which question
+
+`/fleet/health` publishes both, and they are not interchangeable:
+
+| field | means | who reads it |
+|---|---|---|
+| `gpu_util_pct` | the busiest card on the WHOLE box (PAIR's multi-GPU rule — the shared card is the one that matters) | the fleet overview, any dashboard |
+| `work_util_pct` | the busiest card **the harness can actually run a seat on** | the delegator's placement tie-break |
+
+They differ exactly when someone is using the machine. On 2026-09-20 the Qube read
+`gpu_util_pct: 33` from a game on its display card while every card the harness could use sat at
+0%, and because placement broke ties on that number the node lost work it should have won. A
+display card is identified from evidence, not config: on Windows/WDDM
+`nvidia-smi --query-compute-apps` lists GRAPHICS processes with `[N/A]` memory, and that sample
+(refreshed every 30 s, not every tick) is what `gpuprobe.DisplayCardUUIDs` reads — the SAME
+function the GPU lease verdict uses. On Linux the query lists only CUDA processes with real
+memory, so nothing is flagged and the two figures agree.
+
+A display card is excluded only when a non-display card exists: a single-GPU box runs its seats
+on its display card by necessity, and there the two figures are equal by construction.
+`work_util_known` is the validity flag — a node that predates the field publishes neither, and a
+delegator then falls back to `gpu_util_pct` for both sides of the comparison. See ADR 0057.
+
 ## Multi-GPU: `gpu_devices[]` and the headline VRAM numbers
 
 On any node whose VRAM source is `nvidia-smi`, `/fleet/health` always adds a per-device
@@ -242,7 +265,7 @@ source, which has no `gpu_devices[]` to match against. Implementation:
 | `fleet_agent_enabled` | `false` | Opts this node into executing fleet **agent** jobs (see [The agent task](#the-agent-task-task_type-agent)). Explicit opt-in: the binding (an agent seat) exists on every tier, the worker ROLE is a per-box decision. Off = the task is not advertised and health is byte-identical to a pre-0.65 node. |
 | `fleet_auth_token` | `""` | Bearer token for the **agent lane only** (agent dispatches + polls of agent-created jobs; media stays tokenless in v1). Same value on every node and in the delegator's config. Empty + non-loopback listener = agent dispatches refused 403. |
 | `agent_ctx_tokens` | `0` | The agent seat's served context window, advertised in health for the delegator's placement arithmetic. From config, never probed (a live probe could cold-start a multi-GB model on the health cadence). `0` = not advertised = this node is never chosen for remote agent work. |
-| `kvslot_cap_gib` | `0` (= 8 GiB) | Cap on the node's `kvslots/` directory, the KV-slot files `POST /fleet/kvslot/save` writes (ADR 0055 Layer 2). An LRU sweep after every save deletes the least recently modified files past the cap. The directory is created by the installer; without it the lane answers `501` and the delegator falls through. |
+| `kvslot_cap_gib` | `0` (= 8 GiB) | Cap on the node's `kvslots/` directory, the KV-slot files `POST /fleet/kvslot/save` writes (ADR 0056 Layer 2). An LRU sweep after every save deletes the least recently modified files past the cap. The directory is created by the installer; without it the lane answers `501` and the delegator falls through. |
 
 ## Binding guidance (read before exposing anything)
 

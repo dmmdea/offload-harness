@@ -320,3 +320,66 @@ func TestHostFreeRAMGiBIsPlausibleWhereSupported(t *testing.T) {
 		t.Fatalf("free host RAM = %v GiB, not plausible", free)
 	}
 }
+
+// TestDisplayCardUUIDs is the ONE rule both the lease verdict and the node's
+// placement figure read. It is the card property (nvidia-smi display_active),
+// not an inference from which processes happen to be visible: `[N/A]` memory is
+// a WDDM property, so a native-Windows CUDA seat looks exactly like the desktop
+// and the earlier heuristic would have flagged the card the harness works on.
+func TestDisplayCardUUIDs(t *testing.T) {
+	const (
+		c0 = "GPU-3ee161b5-c188-495b-eaeb-291e6e6e1d97"
+		c1 = "GPU-2a44210f-6739-2d89-0e21-44cd5143faf7" // the Qube's display card
+		c2 = "GPU-0c3843d3-5721-d9f7-47fe-89fdb8373e24"
+	)
+	qube := []Device{
+		{Index: 0, UUID: c0, DisplayActive: false},
+		{Index: 1, UUID: c1, DisplayActive: true},
+		{Index: 2, UUID: c2, DisplayActive: false},
+	}
+	got := DisplayCardUUIDs(qube)
+	if !got[c1] || got[c0] || got[c2] || len(got) != 1 {
+		t.Fatalf("Qube: want only card 1 flagged, got %v", got)
+	}
+	// Single-GPU box: its only card IS the display card, and it runs seats there.
+	if got := DisplayCardUUIDs([]Device{{Index: 0, UUID: c1, DisplayActive: true}}); got != nil {
+		t.Fatalf("single-GPU box must exclude nothing, got %v", got)
+	}
+	// Headless Linux / a laptop whose screen is on the iGPU: nothing is Enabled.
+	if got := DisplayCardUUIDs([]Device{{UUID: c0}, {UUID: c1}}); got != nil {
+		t.Fatalf("no display card must exclude nothing, got %v", got)
+	}
+	if DisplayCardUUIDs(nil) != nil {
+		t.Fatal("no devices must exclude nothing")
+	}
+}
+
+// TestDisplayActiveParsesOnlyAnExactEnabled: a driver that does not report the
+// field answers "[Not Supported]", and an older launcher's line has no column
+// at all. Neither may read as "this is the operator's screen" — the point of
+// excluding a card is that we are SURE.
+func TestDisplayActiveParsesOnlyAnExactEnabled(t *testing.T) {
+	const uuid = "GPU-2a44210f-6739-2d89-0e21-44cd5143faf7"
+	for _, tc := range []struct {
+		name string
+		line string
+		want bool
+	}{
+		{"enabled", "1, " + uuid + ", RTX 5070 Ti, 16303, 14027, 33, Enabled", true},
+		{"disabled", "1, " + uuid + ", RTX 5070 Ti, 16303, 14027, 33, Disabled", false},
+		{"not supported", "1, " + uuid + ", RTX 5070 Ti, 16303, 14027, 33, [Not Supported]", false},
+		{"n/a", "1, " + uuid + ", RTX 5070 Ti, 16303, 14027, 33, [N/A]", false},
+		{"older launcher, no column", "1, " + uuid + ", RTX 5070 Ti, 16303, 14027, 33", false},
+		{"older launcher, no util either", "1, " + uuid + ", RTX 5070 Ti, 16303, 14027", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			devs, err := ParseSmiMemoryDevices(tc.line)
+			if err != nil || len(devs) != 1 {
+				t.Fatalf("parse %q: %v (%d devices)", tc.line, err, len(devs))
+			}
+			if devs[0].DisplayActive != tc.want {
+				t.Fatalf("DisplayActive = %v, want %v", devs[0].DisplayActive, tc.want)
+			}
+		})
+	}
+}

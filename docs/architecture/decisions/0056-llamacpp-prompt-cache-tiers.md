@@ -3,7 +3,7 @@ status: Accepted
 date: "2026-09-20"
 ---
 
-# ADR 0055 — llama.cpp prompt-cache tiers: host-RAM cache per RAM tier, SSD slot save/restore driven by the harness
+# ADR 0056 — llama.cpp prompt-cache tiers: host-RAM cache per RAM tier, SSD slot save/restore driven by the harness
 
 Status: ACCEPTED (Layer 1 shipped 0.131.3, 2026-09-20; Layer 2 node side shipped 0.132.0, 2026-09-21; its delegator side planned — `plans/2026-09-20-llamacpp-prompt-cache-tiers.md`, operator-approved 2026-09-20)
 

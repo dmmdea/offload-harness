@@ -274,7 +274,7 @@ func TestIncludeQ354BOnAnEntrylessTemplateIsRefused(t *testing.T) {
 
 // TestCacheRAMFollowsTheRAMTier: every llama.cpp seat renders --cache-ram from the
 // tier-resolved figure, and an unset figure renders the llama-server default (8192)
-// rather than 0, which would switch the prompt cache off (ADR 0055).
+// rather than 0, which would switch the prompt cache off (ADR 0056).
 func TestCacheRAMFollowsTheRAMTier(t *testing.T) {
 	for _, tc := range []struct {
 		name string

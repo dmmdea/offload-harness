@@ -37,13 +37,21 @@ type Device struct {
 	// older launcher); consumers must never treat an unknown as idle.
 	UtilPct   int  `json:"util_pct"`
 	UtilKnown bool `json:"util_known"`
+	// DisplayActive is nvidia-smi's display_active for this card: whether a
+	// display is attached and being driven by it. It is the DIRECT answer to
+	// "is this the operator's screen" — the property itself, not an inference
+	// from which processes happen to be visible — and it costs no extra
+	// nvidia-smi call because it rides the one per-device query every reader
+	// already runs. False for a driver that does not report it and for a line
+	// from an older launcher that lacks the column: absent is never "yes".
+	DisplayActive bool `json:"display_active,omitempty"`
 }
 
 // smiQueryArgs is the ONE per-device query every reader in the harness runs
 // (fleet-serve's 2 s health sampler and the placement guards alike): the uuid
 // is there so a card can be pinned across reboots/reseats, utilization so a
 // busy card can be told from an idle one.
-var smiQueryArgs = []string{"--query-gpu=index,uuid,name,memory.total,memory.used,utilization.gpu", "--format=csv,noheader,nounits"}
+var smiQueryArgs = []string{"--query-gpu=index,uuid,name,memory.total,memory.used,utilization.gpu,display_active", "--format=csv,noheader,nounits"}
 
 // ParseSmiMemoryDevices parses `nvidia-smi --query-gpu=index,uuid,name,
 // memory.total,memory.used[,utilization.gpu] --format=csv,noheader,nounits`
@@ -85,7 +93,9 @@ func ParseSmiMemoryDevices(out string) ([]Device, error) {
 			continue
 		}
 		fields := strings.Split(line, ",")
-		if len(fields) != 5 && len(fields) != 6 {
+		// 5 = an older launcher (no utilization), 6 = with utilization, 7 = with
+		// display_active as well. A line outside that range is not this query's.
+		if len(fields) < 5 || len(fields) > 7 {
 			continue
 		}
 		idx, err := strconv.Atoi(strings.TrimSpace(fields[0]))
@@ -125,7 +135,7 @@ func ParseSmiMemoryDevices(out string) ([]Device, error) {
 			TotalGiB: totalMiB / 1024,
 			FreeGiB:  (totalMiB - usedMiB) / 1024,
 		}
-		if len(fields) == 6 {
+		if len(fields) >= 6 {
 			u, err := strconv.Atoi(strings.TrimSpace(fields[5]))
 			if err == nil && u >= 0 && u <= 100 {
 				d.UtilPct, d.UtilKnown = u, true
@@ -133,6 +143,13 @@ func ParseSmiMemoryDevices(out string) ([]Device, error) {
 			// If the 6th field is malformed or out-of-range, keep the device
 			// with UtilKnown=false; don't skip the whole device just for bad
 			// utilization data.
+		}
+		if len(fields) >= 7 {
+			// Only an exact "Enabled" is a yes. A driver that does not support the
+			// field answers "[Not Supported]" and older ones "[N/A]"; both mean "we
+			// do not know", which must never read as "this is the operator's screen"
+			// — the whole point of excluding a display card is that we are SURE.
+			d.DisplayActive = strings.EqualFold(strings.TrimSpace(fields[6]), "Enabled")
 		}
 		devices = append(devices, d)
 	}

@@ -227,10 +227,10 @@ func TestPlace(t *testing.T) {
 // the raw schema bytes + every acceptance string.
 func TestEstimateTokensSumsEveryContractPart(t *testing.T) {
 	c := core.AgentContract{
-		Goal:         "abc",                                       // 3
+		Goal:         "abc",                                         // 3
 		Context:      []core.ContextDoc{{Name: "doc", Text: "xyz"}}, // 3 + 3
-		OutputSchema: json.RawMessage(`{"a":1}`),                  // 7
-		Acceptance:   []string{"ab"},                              // 2
+		OutputSchema: json.RawMessage(`{"a":1}`),                    // 7
+		Acceptance:   []string{"ab"},                                // 2
 	}
 	// total chars = 3 + 3 + 3 + 7 + 2 = 18 -> ceil(18/3) = 6
 	if got := EstimateTokens(c); got != 6 {
@@ -326,15 +326,15 @@ func TestBetterRemote_UtilizationBreaksQueueTies(t *testing.T) {
 	a.NodeID, b.NodeID = "a", "b"
 	a.GpuUtilPct, a.GpuUtilKnown = 80, true
 	b.GpuUtilPct, b.GpuUtilKnown = 10, true
-	if !betterRemote("seed", &st, b, a) || betterRemote("seed", &st, a, b) {
+	if !betterRemote("seed", &st, 0, b, a) || betterRemote("seed", &st, 0, a, b) {
 		t.Fatal("lower known utilization must win an otherwise equal pair")
 	}
 	// queue depth still outranks utilization
 	b.QueueDepth = a.QueueDepth + 1
-	if betterRemote("seed", &st, b, a) {
+	if betterRemote("seed", &st, 0, b, a) {
 		t.Fatal("utilization must never override QueueDepth")
 	}
-	if !betterRemote("seed", &st, a, b) {
+	if !betterRemote("seed", &st, 0, a, b) {
 		t.Fatal("a's lower QueueDepth must still win once QueueDepth is no longer tied")
 	}
 }
@@ -343,7 +343,103 @@ func TestBetterRemote_UnknownUtilizationNeverLoses(t *testing.T) {
 	st := schemaSubtask()
 	known, unknown := eligibleRemote(), eligibleRemote()
 	known.GpuUtilPct, known.GpuUtilKnown = 5, true
-	if betterRemote("seed", &st, known, unknown) || betterRemote("seed", &st, unknown, known) {
+	if betterRemote("seed", &st, 0, known, unknown) || betterRemote("seed", &st, 0, unknown, known) {
 		t.Fatal("an unknown utilization is neither credited nor blamed — roster order keeps the tie")
+	}
+}
+
+// TestBetterRemote_TieBreakSkipsTheOperatorsDesktop pins the placement half of
+// the 2026-09-20 defect. GpuUtilPct is the busiest card on the WHOLE box, so a
+// node whose operator is gaming advertised that load and lost the tie to a node
+// it should have beaten — on the Qube a game read 33% on the display card while
+// every card the harness could use sat at 0%. WorkUtilPct skips a proven display
+// card, and when both nodes publish it, it decides.
+func TestBetterRemote_TieBreakSkipsTheOperatorsDesktop(t *testing.T) {
+	st := schemaSubtask()
+	gaming, busy := eligibleRemote(), eligibleRemote()
+	gaming.NodeID, busy.NodeID = "gaming", "busy"
+	// The gaming node LOOKS busier on the whole box, but its harness cards are idle.
+	gaming.GpuUtilPct, gaming.GpuUtilKnown = 33, true
+	gaming.WorkUtilPct, gaming.WorkUtilKnown = 0, true
+	// The other node has no desktop load but its harness card is genuinely working.
+	busy.GpuUtilPct, busy.GpuUtilKnown = 20, true
+	busy.WorkUtilPct, busy.WorkUtilKnown = 20, true
+	if !betterRemote("seed", &st, 0, gaming, busy) {
+		t.Fatal("the node whose HARNESS cards are idle must win, even though its desktop makes the whole box read busier")
+	}
+	if betterRemote("seed", &st, 0, busy, gaming) {
+		t.Fatal("the node doing real harness work must not beat an idle one on a desktop-inflated figure")
+	}
+}
+
+// TestBetterRemote_MixedFleetRanksOnOneFigurePerNode pins the defect the first
+// cut of the work_util tie-break introduced. It chose the figure PER PAIR —
+// work_util when both sides had it, gpu_util otherwise — so during a rollout,
+// the only time a mixed fleet exists, three nodes formed a strict cycle:
+//
+//	gaming (work 0, gpu 80) beats light (work 5, gpu 5)   on work_util
+//	light  (work 5, gpu 5)  beats older  (gpu 10)         on gpu_util
+//	older  (gpu 10)         beats gaming (work 0, gpu 80) on gpu_util
+//
+// bestRemote folds this relation over a slice, so the winner was whichever node
+// the slice started from. placementUtil picks the figure per NODE instead,
+// which makes the key a total order at the cost of comparing an upgraded node's
+// desktop-free number against an old node's desktop-inclusive one — a bias
+// toward the node whose number is true.
+func TestBetterRemote_MixedFleetRanksOnOneFigurePerNode(t *testing.T) {
+	st := schemaSubtask()
+	mk := func(id string, gpu, work int, workKnown bool) NodeView {
+		v := eligibleRemote()
+		v.NodeID = id
+		v.GpuUtilPct, v.GpuUtilKnown = gpu, true
+		v.WorkUtilPct, v.WorkUtilKnown = work, workKnown
+		return v
+	}
+	gaming := mk("gaming", 80, 0, true) // upgraded, harness cards idle behind a game
+	light := mk("light", 5, 5, true)    // upgraded, genuinely doing a little work
+	older := mk("older", 10, 0, false)  // pre-0.132.2: publishes no work_util
+
+	// Antisymmetry and transitivity over every pair and triple.
+	all := []NodeView{gaming, light, older}
+	for _, a := range all {
+		for _, b := range all {
+			if a.NodeID == b.NodeID {
+				continue
+			}
+			if betterRemote("seed", &st, 0, a, b) && betterRemote("seed", &st, 0, b, a) {
+				t.Fatalf("%s and %s each beat the other", a.NodeID, b.NodeID)
+			}
+		}
+	}
+	for _, a := range all {
+		for _, b := range all {
+			for _, c := range all {
+				if betterRemote("seed", &st, 0, a, b) && betterRemote("seed", &st, 0, b, c) &&
+					betterRemote("seed", &st, 0, c, a) {
+					t.Fatalf("preference cycle: %s > %s > %s > %s", a.NodeID, b.NodeID, c.NodeID, a.NodeID)
+				}
+			}
+		}
+	}
+
+	// And the fold the cycle actually broke: the winner cannot depend on order.
+	fold := func(rs []NodeView) string {
+		best, found := NodeView{}, false
+		for _, r := range rs {
+			if !found || betterRemote("seed", &st, 0, r, best) {
+				best, found = r, true
+			}
+		}
+		return best.NodeID
+	}
+	for _, order := range [][]NodeView{
+		{gaming, light, older},
+		{older, light, gaming},
+		{light, gaming, older},
+	} {
+		if got := fold(order); got != "gaming" {
+			t.Fatalf("fold(%s, %s, %s) = %s, want gaming — the node with the idlest HARNESS cards",
+				order[0].NodeID, order[1].NodeID, order[2].NodeID, got)
+		}
 	}
 }

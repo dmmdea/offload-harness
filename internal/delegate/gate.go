@@ -84,13 +84,16 @@ func Place(seed string, st Subtask, local NodeView, remotes []NodeView, localBus
 	if !localBusy && (st.Contract.Layer == "" || declaresLayer(local, st.Contract.Layer)) {
 		return local
 	}
+	// The rate assumption is computed ONCE, from this roster, and used for every
+	// comparison in this decision — never per pair. See fleetTokSPrior.
+	prior := fleetTokSPrior(remotes)
 	var best NodeView
 	found := false
 	for _, r := range remotes {
 		if !remoteEligible(st, r) {
 			continue
 		}
-		if !found || betterRemote(seed, &st, r, best) {
+		if !found || betterRemote(seed, &st, prior, r, best) {
 			best, found = r, true
 		}
 	}
@@ -175,7 +178,7 @@ func declaresLayer(v NodeView, name string) bool {
 // call, never an agent loop — "no feasibility term; vision is single-shot"),
 // so nil st runs the SIMPLER visionEtaBetter key (queue-wait only, still
 // P2C-drawn) instead of the full window+generation ranking.
-func betterRemote(seed string, st *Subtask, candidate, incumbent NodeView) bool {
+func betterRemote(seed string, st *Subtask, priorTokS float64, candidate, incumbent NodeView) bool {
 	// Key 0 (W-14, register S-15): a node still eligible under a lease-busy
 	// verdict loses to any node that is not — "ranked last" means it does not
 	// even get to compete on saturation or queue depth against a clean node.
@@ -193,7 +196,7 @@ func betterRemote(seed string, st *Subtask, candidate, incumbent NodeView) bool 
 		return c
 	}
 	if st != nil {
-		if better, decided := betterRanked(seed, inferKind(*st), rankFor(*st, candidate), rankFor(*st, incumbent)); decided {
+		if better, decided := betterRanked(seed, inferKind(*st), rankFor(*st, candidate, priorTokS), rankFor(*st, incumbent, priorTokS)); decided {
 			return better
 		}
 	} else if better, decided := visionEtaBetter(seed, candidate, incumbent); decided {
@@ -202,10 +205,47 @@ func betterRemote(seed string, st *Subtask, candidate, incumbent NodeView) bool 
 	if candidate.QueueDepth != incumbent.QueueDepth {
 		return candidate.QueueDepth < incumbent.QueueDepth
 	}
-	if candidate.GpuUtilKnown && incumbent.GpuUtilKnown {
-		return candidate.GpuUtilPct < incumbent.GpuUtilPct
+	// The last key compares how busy each node's HARNESS cards are, not its
+	// whole box. GpuUtilPct is the busiest card anywhere, so a node whose
+	// operator is using the desktop — or gaming — advertised that load and lost
+	// ties to an idler node it should have won (2026-09-20: a node read 33% from
+	// a game while every card the harness could use was at 0%). WorkUtilPct
+	// skips a display card, so it is the figure to compare on.
+	//
+	// placementUtil picks which figure PER NODE, never per pair. An earlier cut
+	// fell back to GpuUtilPct whenever either side lacked WorkUtilPct, meaning
+	// the same three nodes were ranked on two different metrics depending on who
+	// was being compared — and during a rollout, which is the only time a mixed
+	// fleet exists, that produced a strict CYCLE: a gaming upgraded node beat a
+	// lightly loaded upgraded node on work_util, which beat an old node on
+	// gpu_util, which beat the gaming node on gpu_util. bestRemote folds this
+	// relation over a slice, so the winner became whichever node the slice
+	// happened to start from.
+	cu, ck := placementUtil(candidate)
+	iu, ik := placementUtil(incumbent)
+	if ck && ik && cu != iu {
+		return cu < iu
 	}
 	return false
+}
+
+// placementUtil is the ONE busy-ness figure a placement comparison reads off a
+// node: work_util_pct when the node publishes it (0.132.2 and later, which
+// skips a card driving a display), the box-wide gpu_util_pct when it does not.
+//
+// Choosing it per node rather than per pair is what keeps betterRemote's last
+// key a total order across a mixed fleet; see the cycle described there. The
+// cost is that during a rollout an upgraded node's desktop-free figure is
+// compared against an old node's desktop-inclusive one — which biases toward
+// the upgraded node, the one whose number is actually true.
+func placementUtil(v NodeView) (int, bool) {
+	if v.WorkUtilKnown {
+		return v.WorkUtilPct, true
+	}
+	if v.GpuUtilKnown {
+		return v.GpuUtilPct, true
+	}
+	return 0, false
 }
 
 // saturated reports whether v's own advertisement says the next dispatch will
@@ -499,7 +539,7 @@ func PlaceVision(remotes []NodeView) (int, bool) {
 		if !visionEligible(r) {
 			continue
 		}
-		if best < 0 || betterRemote(seed, nil, r, remotes[best]) {
+		if best < 0 || betterRemote(seed, nil, 0, r, remotes[best]) {
 			best = i
 		}
 	}
@@ -512,10 +552,17 @@ func PlaceVision(remotes []NodeView) (int, bool) {
 // an agent contract), with the same P2C near-tie draw.
 func visionEtaBetter(seed string, candidate, incumbent NodeView) (better, decided bool) {
 	c, i := queueWaitFor(candidate), queueWaitFor(incumbent)
+	// Two nodes with the SAME estimate stay undecided here and fall through to
+	// QueueDepth below, which is what orders the vision lane's common case: a
+	// roster where nobody publishes a wall, so every estimate is 0.
 	if c == i {
 		return false, false
 	}
-	return etaPreferred(seed, c, i), true
+	cd, id := etaDrawn(seed, candidate.NodeID, c), etaDrawn(seed, incumbent.NodeID, i)
+	if cd != id {
+		return cd < id, true
+	}
+	return candidate.NodeID < incumbent.NodeID, candidate.NodeID != incumbent.NodeID
 }
 
 // visionEligible is PlaceVision's hard gate: the lane advertised, the card

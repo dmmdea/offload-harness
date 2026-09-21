@@ -390,7 +390,7 @@ func deriveRender(profilesRaw []byte, req renderRequest) (renderResult, error) {
 
 	var doc struct {
 		Profiles map[string]servingProfile `json:"profiles"`
-		// CacheRAMMiBByRAMTier: top-level map ram_tier -> --cache-ram MiB (ADR 0055).
+		// CacheRAMMiBByRAMTier: top-level map ram_tier -> --cache-ram MiB (ADR 0056).
 		CacheRAMMiBByRAMTier map[string]int `json:"cache_ram_mib_by_ram_tier"`
 	}
 	if err := json.Unmarshal(profilesRaw, &doc); err != nil {

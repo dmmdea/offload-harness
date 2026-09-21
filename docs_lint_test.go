@@ -109,3 +109,42 @@ func TestDocsLint(t *testing.T) {
 		t.Fatalf("walking docs/: %v", err)
 	}
 }
+
+// TestADRNumbersAreUnique: every decision record owns its number. On 2026-09-20
+// two sessions each filed an ADR 0055 within ninety minutes — liveness walls
+// (PR #424) and the llama.cpp prompt-cache tiers (PR #426) — and nothing
+// failed, because TestDocsLint checks each record's frontmatter but never that
+// its number is free. Code and docs then carried "ADR 0055" meaning two
+// different decisions. The second was renumbered to 0056; this is what stops a
+// third. It also requires the index to link every record, which the same
+// incident showed can silently lapse.
+func TestADRNumbersAreUnique(t *testing.T) {
+	entries, err := os.ReadDir(filepath.FromSlash("docs/architecture/decisions"))
+	if err != nil {
+		t.Fatalf("reading decisions/: %v", err)
+	}
+	numbered := regexp.MustCompile(`^(\d{4})-.+\.md$`)
+	owner := make(map[string]string)
+	var files []string
+	for _, e := range entries {
+		m := numbered.FindStringSubmatch(e.Name())
+		if m == nil {
+			continue
+		}
+		files = append(files, e.Name())
+		if prev, dup := owner[m[1]]; dup {
+			t.Errorf("ADR %s is claimed twice: %s and %s — renumber the later one to the next free number and move its references", m[1], prev, e.Name())
+			continue
+		}
+		owner[m[1]] = e.Name()
+	}
+	index, err := os.ReadFile(filepath.FromSlash("docs/architecture/decisions/README.md"))
+	if err != nil {
+		t.Fatalf("reading the ADR index: %v", err)
+	}
+	for _, f := range files {
+		if !strings.Contains(string(index), "("+f+")") {
+			t.Errorf("ADR %s is not linked from docs/architecture/decisions/README.md", f)
+		}
+	}
+}

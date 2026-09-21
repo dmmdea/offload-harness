@@ -17,6 +17,10 @@ type GPU struct {
 	UtilKnown   bool   `json:"util_known"`
 	MemUsedMiB  int    `json:"mem_used_mib"`
 	MemTotalMiB int    `json:"mem_total_mib"`
+	// DisplayActive is nvidia-smi's display_active: this card drives a screen,
+	// so its utilization is never a lease holder's work — see
+	// gpuprobe.DisplayCardUUIDs, the one rule both surfaces read.
+	DisplayActive bool `json:"display_active,omitempty"`
 }
 
 // GPUProcess is one process nvidia-smi lists on a card. On Windows (WDDM) the
@@ -44,7 +48,7 @@ var smiRun = func(ctx context.Context, args ...string) (string, error) {
 func SampleGPUs(ctx context.Context) ([]GPU, error) {
 	sctx, cancel := context.WithTimeout(ctx, smiTimeout)
 	defer cancel()
-	out, err := smiRun(sctx, "--query-gpu=index,uuid,name,utilization.gpu,memory.used,memory.total", "--format=csv,noheader,nounits")
+	out, err := smiRun(sctx, "--query-gpu=index,uuid,name,utilization.gpu,memory.used,memory.total,display_active", "--format=csv,noheader,nounits")
 	if err != nil {
 		return nil, err
 	}
@@ -88,6 +92,12 @@ func ParseGPUs(out string) []GPU {
 		g := GPU{Index: idx, UUID: f[1], Name: f[2], MemUsedMiB: used, MemTotalMiB: total}
 		if u, err := strconv.Atoi(f[3]); err == nil && u >= 0 && u <= 100 {
 			g.UtilPct, g.UtilKnown = u, true
+		}
+		if len(f) >= 7 {
+			// Only an exact "Enabled" is a yes: a driver that does not report the
+			// field answers "[Not Supported]", which must never read as "this is the
+			// operator's screen".
+			g.DisplayActive = strings.EqualFold(f[6], "Enabled")
 		}
 		gpus = append(gpus, g)
 	}

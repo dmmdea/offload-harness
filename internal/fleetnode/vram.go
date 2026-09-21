@@ -165,7 +165,12 @@ type Snapshot struct {
 	// DisallowUnknownFields anywhere in its internal/) breaks on the new
 	// field appearing.
 	Devices []GPUDevice
-	At      time.Time
+	// DisplayUUIDs is the set of cards driving a display (gpuprobe.DisplayCardUUIDs
+	// over this same sample's display_active), so the placement figure can skip
+	// them. Derived from the devices this Snapshot already carries — no second
+	// nvidia-smi, nothing to go stale, nothing to carry forward. nil = exclude nothing.
+	DisplayUUIDs map[string]bool
+	At           time.Time
 }
 
 // Sampler publishes the latest good Snapshot via an atomic.Value so the health
@@ -225,7 +230,7 @@ func (s *Sampler) sampleDevices(probe DeviceProbe) {
 		fmt.Fprintf(os.Stderr, "[fleet-serve] warning: %s\n", warning)
 		s.warnedMissingUUID = true
 	}
-	s.snap.Store(Snapshot{TotalGiB: head.TotalGiB, FreeGiB: head.FreeGiB, Devices: devices, At: time.Now()})
+	s.snap.Store(Snapshot{TotalGiB: head.TotalGiB, FreeGiB: head.FreeGiB, Devices: devices, DisplayUUIDs: gpuprobe.DisplayCardUUIDs(devices), At: time.Now()})
 }
 
 // runSamplerLoop is the shared scaffolding both StartProbeSampler and

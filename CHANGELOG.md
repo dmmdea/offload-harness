@@ -6,6 +6,84 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.132.3] - 2026-09-21 - the display card is a card PROPERTY, and placement is one order
+
+- **`display_active`, not a guess from the process list (ADR 0057 revised).** 0.132.2 decided
+  which card drove a display by inference: "`nvidia-smi` could not size this process, so it is the
+  desktop". That was wrong twice over. `[N/A]` memory is a WDDM property, not a graphics-process
+  property — `nvidia-smi` types all 24 of the Qube's desktop rows `C+G` and can size none of them —
+  and a native-Windows CUDA seat (ComfyUI, which the 3-card law pins to card 0 or 2) produces the
+  same shape. The heuristic would have flagged the card the harness was WORKING on, dropped it from
+  `work_util_pct`, and made a saturated node advertise itself as idle — inverting the defect it was
+  written to cure. `--query-gpu=display_active` answers it directly and rides the per-device query
+  every reader already runs, so it costs no extra `nvidia-smi` call. Measured 2026-09-21: Qube
+  (3 cards, operator gaming) `Disabled/ENABLED/Disabled`; Lenovo (headless Linux A2) `Disabled`;
+  Aorus (laptop, screen on the iGPU) `Disabled`.
+- **Less machinery, not more.** Because the answer now rides the device sample the health tick
+  already takes, the fleet node's separate display probe, its 30 s cadence and its carry-forward
+  are all gone. Nothing to go stale, nothing to expire, one fewer driver call.
+- **Placement is ONE order again.** Two defects made `betterRemote` return orderings that depend on
+  the order of the roster it is folded over — Go requires a strict weak ordering from any
+  comparison used to order a set, transitive incomparability included:
+  - the 0.132.2 tie-break chose `work_util_pct` vs `gpu_util_pct` per COMPARISON, so a mixed fleet
+    mid-rollout ranked the same three nodes on two different metrics depending on who was being
+    compared, and cycled. `placementUtil` now picks the figure per NODE.
+  - the P2C near-tie draw hashed the SEED ALONE, so it answered the same whichever way round it was
+    asked: `betterRemote(P, Q)` and `betterRemote(Q, P)` were both true, and the fold kept whichever
+    near-tied seat came last in the roster. The draw is now a bounded jitter on the seat's own eta,
+    derived from the seed AND the node id, so the ordering is total by construction while near-tied
+    seats still come out differently per Run. It spreads across any number of tied seats, not two.
+- **An unmeasured seat is ranked, not parked.** A node publishing no `seat_rate` used to make its
+  comparisons fall back to window for that PAIR only — the same per-pair defect, and the third
+  source of cycles. It is now ranked as if it ran at the FLEET'S MEDIAN published rate, keeping its
+  own backlog and cold load, exactly as `agent.assumedPrefillTokS` assumes a rate for a stall wall
+  until one is measured. A constant would have been either "unmeasured wins everything" or "never
+  gets work, so never earns samples"; the median is neither and adapts as the fleet does. With no
+  node publishing a rate there is no prior, every seat is unranked, and the ordering falls to
+  window for all of them — the original rule, applied uniformly.
+- Tests: a brute-force strict-weak-ordering check over a 16-node roster (measured and unmeasured,
+  four window sizes, backlogs, cold loads) across 40 seeds; both new guards verified to go RED on
+  the defects they pin.
+
+## [0.132.2] - 2026-09-21 - placement scores the cards the harness can use, not the operator's screen (ADR 0057)
+
+- **The other half of 0.132.1.** That release stopped the GPU lease verdict from calling the
+  operator's desktop the holder's work, and named the same bug class on the node's
+  `gpu_util_pct` — which `delegate/gate.go` uses to BREAK PLACEMENT TIES — without fixing it. A
+  Windows node whose operator was gaming advertised that load and lost ties to a node it should
+  have beaten. This fixes it.
+- **Two questions, two figures.** `gpu_util_pct` keeps its documented meaning (the busiest card on
+  the box; the fleet overview and the PAIR multi-GPU rule want exactly that, and changing a field's
+  meaning under its readers would break a stated contract). New additive `work_util_pct` +
+  `work_util_known` is the busiest card the harness can actually run a seat on. The tie-break uses
+  `work_util_pct` only when BOTH nodes publish it, so a mixed fleet mid-rollout never compares one
+  node's desktop-free number with another's desktop-inclusive one.
+- **One rule, in the leaf.** `gpuprobe.DisplayCardUUIDs` now decides which card is a display card,
+  and BOTH the lease verdict and the node's placement figure call it — a second copy of the rule
+  would have been a second chance to get it wrong, which is how 0.132.1 left this half standing.
+  Evidence, not config: on Windows/WDDM `--query-compute-apps` reports graphics processes with
+  `[N/A]` memory; on Linux it lists only CUDA processes with real memory, so nothing is flagged.
+  A display card is excluded only when a non-display card exists (a single-GPU box runs its seats
+  there by necessity).
+- **An engine the harness launches never marks its own card.** `[N/A]` memory is a WDDM property,
+  not a graphics-process property — nvidia-smi cannot size ANY process there, compute included. On
+  the Qube the harness's seats happen to be invisible to that query (llama-swap runs in session 0,
+  the fleet node in the operator's session), but that is a session accident: on a node where they
+  share one, a CUDA seat would look exactly like the desktop and its card would drop out of the
+  placement figure, making a BUSY node advertise itself as idle. Over-flagging sends work to a
+  loaded box; under-flagging only costs the tie the node used to lose — so the rule now reads the
+  process name and needs positive evidence of something that is not ours. Found by an adversarial
+  review of this change, and confirmed against the live driver.
+- **Cadence:** the display set refreshes every 15 ticks of the 2 s sampler (30 s), not every tick —
+  which card drives the desktop is hardware plus a login session, not something that changes between
+  health polls — and a failed probe keeps the previous set rather than re-counting the desktop.
+- **ADR numbering repaired.** The llama.cpp prompt-cache record was filed as a second **ADR 0055**
+  while ADR 0055 (liveness walls, PR #424) already existed on main; both numbers were live in code
+  and docs at once. The prompt-cache record is now **ADR 0056** and its 17 references moved with it;
+  the liveness record keeps 0055. `TestADRNumbersAreUnique` makes the collision unmergeable and also
+  requires the index to link every record — which caught four records (0028–0031) that had silently
+  never been indexed.
+
 ## [0.132.1] - 2026-09-21 - the lease verdict counted the operator's own screen as the holder working
 
 - `held-working` now requires a busy card the harness can actually run a seat on. It used to take
@@ -36,7 +114,7 @@ Versioning: [SemVer](https://semver.org/).
   the devices the node's layers declare, or add a process sample to the background refresh) and
   its own tests in a path polled every few seconds; it is not folded in silently here.
 
-## [0.132.0] - 2026-09-21 - the node can save and restore a seat's KV to disk — and the measurement that says it buys nothing yet (ADR 0055 Layer 2, node side)
+## [0.132.0] - 2026-09-21 - the node can save and restore a seat's KV to disk — and the measurement that says it buys nothing yet (ADR 0056 Layer 2, node side)
 
 - `POST /fleet/kvslot/save` and `POST /fleet/kvslot/restore` on the fleet node, bearer-gated like
   the chat lane, proxy llama-server's slot API through llama-swap. The key is `k1-<sha256 hex>` and
@@ -58,7 +136,7 @@ Versioning: [SemVer](https://semver.org/).
   binxarn's 32k seat: at `--cache-ram 1024` the repeat of A re-processes all 11,606 tokens
   (110.8 s), at 8192 it re-processes 516 (6.2 s). The cache only matters when several contexts
   share a seat — the shape of a delegation stream — and the 0.131.3 map put the fleet's two 32 GB
-  nodes at 2048, between those arms. That is what 0.131.4's floor rule prevents; ADR 0055 carries
+  nodes at 2048, between those arms. That is what 0.131.4's floor rule prevents; ADR 0056 carries
   the table.
 - **The `--slot-save-path` flag is NOT rendered, from a second measurement.** A rendered path that
   does not exist makes llama-server refuse to START (`not a directory`), which would take every
@@ -96,7 +174,7 @@ Versioning: [SemVer](https://semver.org/).
   does and an empty or budget-silent note does not; the timing bounds are unchanged. Verified by
   mutation: swapping the substring for one no note contains turns the test red.
 
-## [0.131.3] - 2026-09-20 - llama.cpp prompt cache sized per RAM tier (ADR 0055, Layer 1)
+## [0.131.3] - 2026-09-20 - llama.cpp prompt cache sized per RAM tier (ADR 0056, Layer 1)
 
 - Every llama.cpp seat renders `--cache-ram __CACHE_RAM__` from the new top-level profiles map
   `cache_ram_mib_by_ram_tier` (min 1024 / low 2048 / mid 6144 / high 12288 MiB; starting values,

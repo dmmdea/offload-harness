@@ -1806,6 +1806,7 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 				f.n, f.last = f.n+1, why
 			}
 			best := -1
+			prior := fleetTokSPrior(views)
 			for j, v := range views {
 				if !remoteEligible(st, v) || !hasRoom(v, false) || pl.excluded[bases[j]] {
 					continue
@@ -1813,7 +1814,7 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 				if until, ok := refusedUntil[bases[j]]; ok && time.Now().Before(until) {
 					continue
 				}
-				if best < 0 || betterRemote(p2cSeed, &st, v, views[best]) {
+				if best < 0 || betterRemote(p2cSeed, &st, prior, v, views[best]) {
 					best = j
 				}
 			}
@@ -2546,6 +2547,7 @@ func (r *runner) placeAutoRemote(seed string, st Subtask, localView NodeView, vi
 	var best NodeView
 	var bestBase string
 	found, anyEligible := false, false
+	prior := fleetTokSPrior(views)
 	for j, v := range views {
 		if !remoteEligible(st, v) {
 			continue
@@ -2554,7 +2556,7 @@ func (r *runner) placeAutoRemote(seed string, st Subtask, localView NodeView, vi
 		if headroom(v) <= dealt[bases[j]] {
 			continue // W-06: no floor — a node at 0 headroom gets nothing this deal
 		}
-		if !found || betterRemote(seed, &st, v, best) {
+		if !found || betterRemote(seed, &st, prior, v, best) {
 			best, bestBase, found = v, bases[j], true
 		}
 	}
@@ -4723,8 +4725,8 @@ func (r *runner) record(contract core.AgentContract, pr PlacedResult) {
 			// node's own `agent` twin row carried it, so the row the operator
 			// reads showed 0 on a job that produced 6,236 tokens.
 			TokPerSec: firstNonZero(pr.Result.SeatTokS, pr.Result.ObservedTokS),
-			Deferred:     pr.Result.Deferred || pr.Err != "" || len(pr.AcceptanceFailures) > 0,
-			Reason:       reason,
+			Deferred:  pr.Result.Deferred || pr.Err != "" || len(pr.AcceptanceFailures) > 0,
+			Reason:    reason,
 			// ModelTier carries placement:seat — the ledger has no placement
 			// column, and "which node/seat ran it" is the row's whole story.
 			ModelTier: pr.Node + ":" + pr.Seat,
