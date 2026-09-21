@@ -5,9 +5,19 @@
   "model": "llamacpp/qwen3.8-27b",
   "small_model": "llamacpp/gemma-4-e4b",
 
-  // House rules parity: every ~/.claude/rules/*.md auto-loads. Do NOT add a global
-  // ~/.config/opencode/AGENTS.md if you rely on ~/.claude/CLAUDE.md — it would replace it.
-  "instructions": ["C:/Users/you/.claude/rules/*.md"],
+  // House rules: keep harness-neutral rules in ~/.config/opencode/AGENTS.md. It is FIRST in
+  // opencode's global rules list, so it REPLACES the ~/.claude/CLAUDE.md fallback — which is
+  // what a small-context local model needs: that fallback carries Claude-specific material
+  // (skills, MCP tool guidance) the local model cannot use. Keep ONE canonical rules file and
+  // sync its copies; two hand-maintained versions drift.
+  //
+  // Skills: on a small-context model also set OPENCODE_DISABLE_CLAUDE_CODE_SKILLS=1 in the
+  // environment. Without it opencode lists every skill under ~/.claude/skills — measured on a
+  // real install at 199 skills, ~20.5k tokens, 31% of a 64k window before the first message
+  // (a generated-copy skill layout is counted twice).
+  //
+  // "instructions" remains available for extra rule files; there is no need to point it at
+  // Claude Code's config directory.
 
   // The harness MCP: the same launch Claude Code uses. Keys come from the environment.
   "mcp": {
