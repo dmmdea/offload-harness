@@ -24,6 +24,12 @@ Versioning: [SemVer](https://semver.org/).
   cannot carry it. 0.131.3 shipped 1024 / 2048 / 6144 / 12288, which silently CUT the 32 GB and 64 GB
   nodes below the default they had been running on — sizing per tier in the losing direction. Only the
   min tier (a 4 GB box) stays under the default, which is the case the map existed for.
+- **Layer 1's size is now measured and it is worth 18x.** A, B, C, A with ~11.6k-token prompts on
+  binxarn's 32k seat: at `--cache-ram 1024` the repeat of A re-processes all 11,606 tokens
+  (110.8 s), at 8192 it re-processes 516 (6.2 s). The cache only matters when several contexts
+  share a seat — the shape of a delegation stream — and the 0.131.3 map put the fleet's two 32 GB
+  nodes at 2048, between those arms. That is what 0.131.4's floor rule prevents; ADR 0055 carries
+  the table.
 - **The `--slot-save-path` flag is NOT rendered, from a second measurement.** A rendered path that
   does not exist makes llama-server refuse to START (`not a directory`), which would take every
   chat and agent seat on that node down with it — and the node's slot directory (`OFFLOAD_HOME`,

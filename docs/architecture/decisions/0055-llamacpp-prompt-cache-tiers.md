@@ -55,6 +55,29 @@ best-effort with a 2 s timeout; a contract never blocks on the cache.
 - `setup/render.tests.ps1` asserts the flag; changing the map is a profiles.json change and goes
   matrix-first like every tier change.
 
+## Layer 1 is MEASURED, and the size is worth 18x (binxarn, 2026-09-21)
+
+The first cut of the tier map was sized by intuition and this measurement is why that was
+dangerous. The cache holds slot states EVICTED by a newer request, so it does nothing for one
+conversation and everything for several contexts sharing a seat — which is exactly the shape of
+a delegation stream. Sequence A, B, C, A with ~11.6k-token prompts on the 32k Qwen3.5-4B seat,
+one llama-server per arm, nothing else changed:
+
+| `--cache-ram` | A (first) | B | C | **A again** | tokens re-processed on the repeat |
+|---|---|---|---|---|---|
+| 1024 MiB | 110,769 ms | 111,527 | 110,979 | **110,782 ms** | 11,606 of 11,606 — the whole prefill |
+| 8192 MiB | 112,050 ms | 115,788 | 115,139 | **6,160 ms** | 516 of 11,606 — 96 % skipped |
+
+**18x on the repeat, from one flag.** A's state is ~380 MB; with a 1 GiB cache B and C evict it
+and the second A pays everything again, with 8 GiB it survives and the repeat is nearly free.
+
+Two things follow. First, the floor rule is not conservatism, it is this number: the 0.131.3 map
+(low = 2048 MiB) sat between these two arms on the fleet's two 32 GB nodes, so it could have cost
+most of this on every re-delegated context — which is why 0.131.4's map may never hand a box less
+than llama-server's own 8192 default unless its RAM cannot carry it. Second, the remaining open
+question is no longer "does size matter" but "where does each tier stop paying", which needs the
+same sweep at 16384 and 24576 on the 62 GB and 128 GB boxes (plan Task 3a).
+
 ## Layer 2 as shipped on the node (0.132.0) — and the measurement that stops it there
 
 The endpoints are built, tested and correct against the real API. The capability underneath
