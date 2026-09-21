@@ -1207,13 +1207,26 @@ func (p Params) cacheRAMMiB() int {
 	return 8192
 }
 
-// slotSaveFlag renders --slot-save-path <home>/kvslots/ (ADR 0055 Layer 2) when the
-// render knows its install home, else nothing: a caller without a home renders a
-// seat that answers 501 on the kvslot lane instead of a broken flag.
+// slotSaveFlag renders NOTHING, on purpose, and the token stays wired so that
+// turning it back on is this one function (ADR 0055 Layer 2).
+//
+// MEASURED 2026-09-21 on binxarn (llama.cpp b9934), the two reasons:
+//
+//  1. llama-server REFUSES TO START when the path does not exist —
+//     `error while handling argument "--slot-save-path": not a directory: …`.
+//     A node that renders the flag against a directory nobody created loses
+//     EVERY chat and agent seat, not just this lane. The node's slot directory
+//     comes from OFFLOAD_HOME at runtime while the flag comes from the render's
+//     --home, and the Windows fleet-node launcher sets neither, so those two
+//     agreeing is a coincidence rather than a guarantee.
+//  2. `qwen3.8-27b-par8` on both Blackwell pair templates runs --parallel 8,
+//     where slot 0 belongs to whichever of eight concurrent requests last held
+//     it — so a save there stores someone else's context under this key.
+//
+// Neither is worth carrying while the capability the flag exists for is itself
+// inert (a restore buys zero prefill on this build; upstream #25913). When a
+// build with #26004 beats the cold baseline, this returns the flag again AND
+// the render must create the directory it names.
 func (p Params) slotSaveFlag() string {
-	home := strings.TrimRight(strings.ReplaceAll(strings.TrimSpace(p.Home), `\`, "/"), "/")
-	if home == "" {
-		return ""
-	}
-	return "--slot-save-path " + home + "/kvslots/"
+	return ""
 }

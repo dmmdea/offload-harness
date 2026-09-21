@@ -22,6 +22,10 @@ func kvSlotStub(t *testing.T, seat string, slotDir string) *httptest.Server {
 		switch {
 		case r.URL.Path == "/v1/models":
 			_ = json.NewEncoder(w).Encode(map[string]any{"data": []map[string]string{{"id": seat}}})
+		case r.URL.Path == "/running":
+			// The lane refuses to START a seat, so every happy-path case needs one
+			// that /running already reports ready.
+			_ = json.NewEncoder(w).Encode(map[string]any{"running": []map[string]any{{"model": seat, "state": "ready", "cmd": "x"}}})
 		case strings.HasPrefix(r.URL.Path, "/upstream/"+seat+"/slots/0"):
 			var body struct {
 				Filename string `json:"filename"`
@@ -128,6 +132,10 @@ func TestKVSlotNeverReportsOkWithoutEvidence(t *testing.T) {
 					_ = json.NewEncoder(w).Encode(map[string]any{"data": []map[string]string{{"id": "seat-x"}}})
 					return
 				}
+				if r.URL.Path == "/running" {
+					_ = json.NewEncoder(w).Encode(map[string]any{"running": []map[string]any{{"model": "seat-x", "state": "ready", "cmd": "x"}}})
+					return
+				}
 				_, _ = w.Write([]byte(tc.body))
 			}))
 			defer up.Close()
@@ -203,7 +211,7 @@ func TestSweepKVSlotDirDeletesOldestFirst(t *testing.T) {
 	mk("k1-mid.bin", 2*time.Hour)
 	mk("k1-new.bin", time.Hour)
 	_ = os.WriteFile(filepath.Join(dir, "not-a-slot.txt"), []byte("keep"), 0o644)
-	if err := SweepKVSlotDir(dir, 1500); err != nil {
+	if err := SweepKVSlotDir(dir, 1500, ""); err != nil {
 		t.Fatal(err)
 	}
 	for name, want := range map[string]bool{"k1-old.bin": false, "k1-mid.bin": false, "k1-new.bin": true, "not-a-slot.txt": true} {
@@ -211,5 +219,81 @@ func TestSweepKVSlotDirDeletesOldestFirst(t *testing.T) {
 		if (err == nil) != want {
 			t.Errorf("%s: exists=%v, want %v", name, err == nil, want)
 		}
+	}
+}
+
+// TestKVSlotRefusesToStartAColdSeat: `/upstream/<seat>/…` STARTS an unloaded
+// seat, so without a residency gate this lane is a model-load primitive — it
+// would defeat the 5-minute idle unload, ignore a drain or a GPU lease, and
+// save an EMPTY slot over a good file. A seat /running does not list is a 409.
+func TestKVSlotRefusesToStartAColdSeat(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, kvTestKey+".bin"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var upstreamHits int
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/v1/models":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []map[string]string{{"id": "seat-x"}}})
+		case r.URL.Path == "/running":
+			_ = json.NewEncoder(w).Encode(map[string]any{"running": []map[string]any{}}) // nothing loaded
+		default:
+			upstreamHits++
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer up.Close()
+	h := kvSlotServer(t, up.URL, dir).Handler()
+	for _, p := range []string{KVSlotSavePath, KVSlotRestorePath} {
+		code, out := kvSlotPost(t, h, p, KVSlotRequest{Seat: "seat-x", Key: kvTestKey})
+		if code != http.StatusConflict || out.Status != "seat-cold" {
+			t.Errorf("%s on a cold seat: want 409 seat-cold, got %d %q", p, code, out.Status)
+		}
+	}
+	if upstreamHits != 0 {
+		t.Fatalf("the lane reached /upstream %d times against a cold seat — that STARTS the model", upstreamHits)
+	}
+}
+
+// TestKVSlotRejectsNonJSONContentType: a cross-origin browser fetch sends
+// text/plain by default, which is a CORS simple request — no preflight, the
+// side effect lands. The sibling lanes reject exactly that; so must this one.
+func TestKVSlotRejectsNonJSONContentType(t *testing.T) {
+	dir := t.TempDir()
+	up := kvSlotStub(t, "qwen3.5-4b-agent", dir)
+	defer up.Close()
+	h := kvSlotServer(t, up.URL, dir).Handler()
+	b, _ := json.Marshal(KVSlotRequest{Seat: "qwen3.5-4b-agent", Key: kvTestKey})
+	req := httptest.NewRequest(http.MethodPost, KVSlotSavePath, bytes.NewReader(b))
+	req.Header.Set("Content-Type", "text/plain;charset=UTF-8")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("want 400 for a text/plain POST, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+// TestSweepNeverDeletesTheFileTheSaveJustWrote: the just-written file is the
+// newest by mtime, so the LRU pass reaches it only when it ALONE exceeds the
+// cap — and a full 32k slot is ~1.1 GB, so that is reachable. Deleting it while
+// the response says ok with a byte count would be a lie.
+func TestSweepNeverDeletesTheFileTheSaveJustWrote(t *testing.T) {
+	dir := t.TempDir()
+	fresh := filepath.Join(dir, "k1-fresh.bin")
+	if err := os.WriteFile(fresh, bytes.Repeat([]byte{1}, 4000), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := SweepKVSlotDir(dir, 10, fresh); err != nil { // cap far below the file
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(fresh); err != nil {
+		t.Fatal("the sweep deleted the file the save just wrote")
+	}
+	if err := SweepKVSlotDir(dir, 10, ""); err != nil { // unprotected: it goes
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(fresh); err == nil {
+		t.Fatal("without the guard the file must be evicted — the test would not bite")
 	}
 }

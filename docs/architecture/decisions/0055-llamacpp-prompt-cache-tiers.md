@@ -93,9 +93,35 @@ loses all prompt reuse — checkpoints are never persisted"; the in-memory cache
 not) with an open fix in PR #26004, and issue #24746 ("explicit slot requests bypass prompt
 cache restore"), which is why the `id_slot` arm is the slowest of the three.
 
+**The flag is not rendered at all, and that is a second measurement, not caution.**
+An adversarial review of the lane put two defects in the RENDERING path that have nothing to
+do with whether a restore works, and both were then confirmed on the hardware:
+
+- `--slot-save-path` pointing at a directory that does not exist makes llama-server **refuse to
+  start**: `error while handling argument "--slot-save-path": not a directory: …` (binxarn,
+  b9934). A node that renders it without that directory loses EVERY chat and agent seat, not
+  just this lane. And the two ends are not tied: the node's slot directory comes from
+  `OFFLOAD_HOME` at runtime, the flag from the render's `--home`, and the Windows fleet-node
+  launcher sets neither — so them agreeing is a coincidence, not a guarantee.
+- `qwen3.8-27b-par8` on both Blackwell pair templates runs `--parallel 8`, where slot 0 belongs
+  to whichever of eight concurrent requests last held it. A save there stores someone else's
+  context under this key.
+
+Carrying a live-serving risk for a capability measured at zero is a bad trade in any direction,
+so `slotSaveFlag()` returns nothing and the installer self-test asserts the flag's ABSENCE.
+The token and the plumbing stay wired: turning it back on is that one function — plus, at that
+point, the render creating the directory it names and the parallel seats being excluded.
+
 **Consequences, decided:**
 - The node lane ships as built: correct, bearer-gated, 501-safe, and called by nobody.
-  Reverting it would throw away verified work and guarantee we rediscover all of this.
+  Reverting it would throw away verified work and guarantee we rediscover all of this. Four
+  endpoint defects the review found are fixed rather than deferred: the siblings' Content-Type
+  gate (a cross-origin `fetch` sends text/plain, which is a CORS simple request — no preflight,
+  the side effect lands); `health`'s `kvslot` is now the lane's real admissibility predicate
+  instead of "a directory exists", the rule the chat lane states; the lane REFUSES to start a
+  cold seat (`/upstream/<seat>/…` starts one, which would defeat the 5-minute idle unload,
+  ignore a drain or a GPU lease, and save an empty slot over a good file); and the post-save
+  sweep never evicts the file that save just wrote.
 - **The delegator side of Layer 2 is BLOCKED**, not deferred. Building key computation,
   restore-before-first-turn and the ledger fields on top of a capability measured at zero
   would be work that cannot pay, and a `kvslot_restore: hit` on a ledger row would be a lie.

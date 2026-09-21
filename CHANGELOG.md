@@ -24,6 +24,20 @@ Versioning: [SemVer](https://semver.org/).
   cannot carry it. 0.131.3 shipped 1024 / 2048 / 6144 / 12288, which silently CUT the 32 GB and 64 GB
   nodes below the default they had been running on — sizing per tier in the losing direction. Only the
   min tier (a 4 GB box) stays under the default, which is the case the map existed for.
+- **The `--slot-save-path` flag is NOT rendered, from a second measurement.** A rendered path that
+  does not exist makes llama-server refuse to START (`not a directory`), which would take every
+  chat and agent seat on that node down with it — and the node's slot directory (`OFFLOAD_HOME`,
+  runtime) and the rendered flag (`--home`, render time) are never tied, with the Windows
+  fleet-node launcher setting neither. Separately, `qwen3.8-27b-par8` on both Blackwell pair
+  templates runs `--parallel 8`, where slot 0 holds whichever of eight requests last touched it.
+  Neither risk is worth carrying for a capability measured at zero, so the installer self-test now
+  asserts the flag is ABSENT; the plumbing stays wired behind one function.
+- Four endpoint defects fixed from an adversarial review: the siblings' Content-Type gate (a
+  cross-origin `fetch` sends text/plain — a CORS simple request, no preflight, side effect lands);
+  `health`'s `kvslot` is the lane's real admissibility predicate, not "a directory exists"; the
+  lane refuses to start a COLD seat, because `/upstream/<seat>/…` starts one and that would defeat
+  the 5-minute idle unload, ignore a drain or a GPU lease, and save an empty slot over a good file;
+  and the post-save sweep never evicts the file that save just wrote.
 - **MEASURED INERT on b9934 and the delegator side is BLOCKED because of it.** On binxarn, a
   restore of 3,231 tokens (151 MB, 25 ms) leaves the next identical request paying the full
   27.2 s prefill — same as no restore, in all three call shapes — while the same run's control

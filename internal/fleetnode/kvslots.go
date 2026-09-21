@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -73,10 +74,17 @@ type KVSlotResponse struct {
 	Upstream string `json:"upstream_status,omitempty"`
 }
 
-// kvSlotEnabled reports whether this node renders a slot directory: the
-// installer creates it and the seats carry --slot-save-path pointing at it.
+// kvSlotEnabled is THE predicate behind this lane on BOTH sides of the wire —
+// health's `kvslot` and this handler's refusals — exactly as ChatLaneAdmissible
+// is for the chat lane. Health must never advertise a lane the handler would
+// refuse. The per-seat roster and residency checks stay per call, the same way
+// the chat lane has no model condition. The os.Stat is not cached in New: the
+// installer can create the directory after the node starts.
 func (s *Server) kvSlotEnabled() bool {
-	if strings.TrimSpace(s.opts.KVSlotDir) == "" {
+	if strings.TrimSpace(s.opts.KVSlotDir) == "" || strings.TrimSpace(s.opts.Cfg.Endpoint) == "" {
+		return false
+	}
+	if !AgentLaneSafelyReachable(s.opts.Cfg, s.opts.LoopbackListener) {
 		return false
 	}
 	st, err := os.Stat(s.opts.KVSlotDir)
@@ -103,10 +111,23 @@ func (s *Server) handleKVSlot(w http.ResponseWriter, r *http.Request, action str
 		return
 	}
 	if !s.kvSlotEnabled() {
-		writeError(w, http.StatusNotImplemented, "kvslot lane is not enabled on this node (no slot directory rendered — an older install; the delegator falls through)")
+		writeError(w, http.StatusNotImplemented, "kvslot lane is not enabled on this node (no slot directory, or no llama-swap endpoint, or a listener this lane will not serve unauthenticated — the caller falls through)")
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, kvSlotBodyCap)
+	// The siblings' Content-Type gate, verbatim (chat_lane.go, handleVision).
+	// It is load-bearing, not hygiene: a cross-origin `fetch` with a body sends
+	// text/plain by default, which is a CORS *simple* request — no preflight, the
+	// request lands, and only the RESPONSE is hidden from the script. The side
+	// effect still happens. On the one unauthenticated configuration this lane
+	// blesses (loopback listener, no token) that would let any page the operator
+	// has open drive the lane.
+	if ct := r.Header.Get("Content-Type"); ct != "" {
+		if mt, _, err := mime.ParseMediaType(ct); err != nil || mt != "application/json" {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("content-type must be application/json (got %q)", ct))
+			return
+		}
+	}
 	var req KVSlotRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "malformed kvslot body: "+err.Error())
@@ -138,6 +159,24 @@ func (s *Server) handleKVSlot(w http.ResponseWriter, r *http.Request, action str
 	}
 	if !serves {
 		writeError(w, http.StatusNotFound, fmt.Sprintf("this node does not serve seat %q", req.Seat))
+		return
+	}
+	// NEVER load a model. `/upstream/<seat>/…` STARTS an unloaded seat (the same
+	// trap server.go documents for the residency read), so without this an
+	// unauthenticated loopback POST is a model-load primitive against the cards:
+	// it defeats the 5-minute idle unload, ignores a drain or a GPU lease, and on
+	// a save it would then store an EMPTY slot over a good file and call it ok.
+	// A cold seat also has nothing worth saving and nowhere useful to restore to.
+	lctx, lcancel := context.WithTimeout(r.Context(), agentResidencyProbeTimeout)
+	reading, lerr := swapSeatRunning(lctx, s.opts.Cfg.Endpoint, req.Seat)
+	lcancel()
+	if lerr != nil {
+		writeError(w, http.StatusServiceUnavailable, fmt.Sprintf("seat state unreadable: %v", lerr))
+		return
+	}
+	if !reading.Loaded {
+		writeJSON(w, http.StatusConflict, KVSlotResponse{Status: "seat-cold", Seat: req.Seat, Key: req.Key, Action: action,
+			Note: "the seat is not loaded and this lane never starts one; warm it through the normal path first"})
 		return
 	}
 	if req.SeatPinSHA256 != "" {
@@ -233,7 +272,12 @@ func (s *Server) handleKVSlot(w http.ResponseWriter, r *http.Request, action str
 	}
 	out.Status = "ok"
 	if action == "save" {
-		s.sweepKVSlots()
+		// Never the file this request just wrote: it is the newest by mtime, so
+		// the LRU pass reaches it only when it ALONE exceeds the cap — and then
+		// the response would still say ok with a byte count for a file that no
+		// longer exists. A full 32k slot is ~1.1 GB, so that is reachable, not
+		// theoretical.
+		s.sweepKVSlots(file)
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -241,17 +285,23 @@ func (s *Server) handleKVSlot(w http.ResponseWriter, r *http.Request, action str
 // sweepKVSlots keeps the slot directory under the node's cap by deleting the
 // least recently used files first. Cap 0 = the default 8 GiB; the plan's
 // per-tier caps land in profiles.json once measured (Task 3).
-func (s *Server) sweepKVSlots() {
+func (s *Server) sweepKVSlots(keep string) {
 	capGiB := s.opts.KVSlotCapGiB
 	if capGiB <= 0 {
 		capGiB = 8
 	}
-	_ = SweepKVSlotDir(s.opts.KVSlotDir, int64(capGiB)<<30)
+	_ = SweepKVSlotDir(s.opts.KVSlotDir, int64(capGiB)<<30, keep)
 }
 
 // SweepKVSlotDir deletes the oldest-modified *.bin files under dir until the
-// total is at or under capBytes. Only slot files are touched.
-func SweepKVSlotDir(dir string, capBytes int64) error {
+// total is at or under capBytes. Only slot files are touched, and never `keep`
+// (the file the caller just wrote). Eviction is by MODIFICATION time, which is
+// least-recently-WRITTEN, not least-recently-used: llama.cpp does not touch a
+// file on restore, so a hot key that is read often and never rewritten ages out
+// like a cold one. That is a known limitation of this pass, not an oversight —
+// fixing it needs a read-side touch, which belongs with the delegator work that
+// is blocked (ADR 0055).
+func SweepKVSlotDir(dir string, capBytes int64, keep string) error {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return err
@@ -265,6 +315,9 @@ func SweepKVSlotDir(dir string, capBytes int64) error {
 	var total int64
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), kvSlotFileSuffix) {
+			continue
+		}
+		if keep != "" && filepath.Join(dir, e.Name()) == keep {
 			continue
 		}
 		info, err := e.Info()
