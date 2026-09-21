@@ -235,3 +235,102 @@ func TestALaterPhaseSurvivesAStep(t *testing.T) {
 		t.Fatalf("phase = %q, want the loop's own %q kept", got, "final")
 	}
 }
+
+// TestHeldWorkingNeedsACardTheHarnessCanRunOn pins the 2026-09-20 defect: on the
+// Qube, while the operator played a game, `gpu status` read
+// `held-working — 33% on card 1 (RTX 5070 Ti)` although the lease holder had
+// spent 4 SECONDS of CPU in 141 minutes and the two cards it fenced were at 0%.
+// Card 1 is the display card and the 33% was the game. held-working outranks
+// held-idle, so the verdict that exists for a stalled holder could never fire on
+// a box anyone was using, and three jobs queued behind a holder doing nothing.
+func TestHeldWorkingNeedsACardTheHarnessCanRunOn(t *testing.T) {
+	const (
+		card0 = "GPU-3ee161b5-c188-495b-eaeb-291e6e6e1d97" // 5060 Ti, harness
+		card1 = "GPU-2a44210f-6739-2d89-0e21-44cd5143faf7" // 5070 Ti, the display card
+		card2 = "GPU-0c3843d3-5721-d9f7-47fe-89fdb8373e24" // 5060 Ti, harness
+	)
+	// The Qube's real sample: every process nvidia-smi lists is a WDDM GRAPHICS
+	// process on the display card with `[N/A]` memory, and the harness's own
+	// resident seat on card 0 produces no row at all.
+	desktop := []GPUProcess{
+		{PID: 18396, Name: `C:\Windows\explorer.exe`, GPUUUID: card1},
+		{PID: 65980, Name: `V:\Battle.net\World of Warcraft\_classic_beta_\WowB.exe`, GPUUUID: card1},
+		{PID: 11988, Name: `C:\Program Files\Google\Chrome\Application\chrome.exe`, GPUUUID: card1},
+	}
+	qube := func(u0, u1, u2 int) []GPU {
+		return []GPU{
+			{Index: 0, UUID: card0, Name: "NVIDIA GeForce RTX 5060 Ti", UtilPct: u0, UtilKnown: true, MemTotalMiB: 16311},
+			{Index: 1, UUID: card1, Name: "NVIDIA GeForce RTX 5070 Ti", UtilPct: u1, UtilKnown: true, MemTotalMiB: 16303},
+			{Index: 2, UUID: card2, Name: "NVIDIA GeForce RTX 5060 Ti", UtilPct: u2, UtilKnown: true, MemTotalMiB: 16311},
+		}
+	}
+	idleSeat := SeatState{Name: "agent-pool"}
+	holder := &Holder{PID: 26464, Alive: true, Class: "text", AgeSec: 8456, Reason: "seat-gate-a107-armA-tuned"}
+	now := time.Now()
+
+	for _, c := range []struct {
+		name    string
+		view    View
+		verdict string
+		want    []string
+		absent  []string
+	}{
+		{
+			name:    "the game on the display card is NOT the holder working",
+			view:    View{At: now, Held: true, Holder: holder, Seat: idleSeat, GPUs: qube(0, 33, 0), Processes: desktop},
+			verdict: VerdictHeldIdle,
+			want:    []string{"NOTHING is running", "display card", "not the holder's work", "33% on card 1", "held 8456s"},
+			absent:  []string{"this is the holder's own job"},
+		},
+		{
+			name:    "a busy card the harness CAN use is the holder working",
+			view:    View{At: now, Held: true, Holder: holder, Seat: idleSeat, GPUs: qube(90, 33, 0), Processes: desktop},
+			verdict: VerdictHeldWorking,
+			want:    []string{"90% on card 0", "the holder's own job"},
+			absent:  []string{"card 1"},
+		},
+		{
+			// The guard: a single-GPU box runs its seats on its display card by
+			// necessity. Excluding it would make held-working unreachable there.
+			name: "a single-GPU box still reports held-working on its only card",
+			view: View{At: now, Held: true, Holder: holder, Seat: idleSeat,
+				GPUs:      []GPU{{Index: 0, UUID: card1, Name: "RTX 3070 Laptop", UtilPct: 90, UtilKnown: true, MemTotalMiB: 8192}},
+				Processes: desktop},
+			verdict: VerdictHeldWorking,
+			want:    []string{"90% on card 0", "the holder's own job"},
+		},
+		{
+			// Linux: --query-compute-apps lists only CUDA processes, with real
+			// memory. Nothing is flagged, so every card stays eligible.
+			name: "a CUDA process with known memory never marks its card as a display",
+			view: View{At: now, Held: true, Holder: holder, Seat: idleSeat, GPUs: qube(0, 88, 0),
+				Processes: []GPUProcess{{PID: 900, Name: "/opt/llama/llama-server", UsedMiB: 9000, UsedKnown: true, GPUUUID: card1}}},
+			verdict: VerdictHeldWorking,
+			want:    []string{"88% on card 1", "the holder's own job"},
+		},
+		{
+			// Unleased, the game IS the answer to "is anything using this box".
+			name:    "with no lease the display card still reads busy-outside",
+			view:    View{At: now, Seat: idleSeat, GPUs: qube(0, 33, 0), Processes: desktop},
+			verdict: VerdictBusyOutside,
+			want:    []string{"33% on card 1", "work the harness does not own"},
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			verdict, note := Assess(c.view)
+			if verdict != c.verdict {
+				t.Fatalf("verdict = %q, want %q\nnote: %s", verdict, c.verdict, note)
+			}
+			for _, w := range c.want {
+				if !strings.Contains(note, w) {
+					t.Errorf("note missing %q\ngot: %s", w, note)
+				}
+			}
+			for _, a := range c.absent {
+				if strings.Contains(note, a) {
+					t.Errorf("note must not contain %q\ngot: %s", a, note)
+				}
+			}
+		})
+	}
+}

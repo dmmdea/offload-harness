@@ -6,6 +6,36 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.132.1] - 2026-09-21 - the lease verdict counted the operator's own screen as the holder working
+
+- `held-working` now requires a busy card the harness can actually run a seat on. It used to take
+  the MAX utilization across every card, so on a box anyone was using the desktop or a game kept
+  the verdict pinned at `held-working` — and because that outranks `held-idle`, the verdict built
+  for a stalled holder could never fire there.
+  Measured on the Qube 2026-09-20 while the operator played a game: `gpu status` read
+  `held-working — 33% on card 1 (RTX 5070 Ti)` while the lease holder had spent **4 seconds of CPU
+  in 141 minutes**, had spawned nothing, and the two cards it actually fenced sat at 0%. Card 1 is
+  the display card and that 33% was the game. Three jobs queued behind a holder doing nothing, and
+  telling that apart took reading the holder's CPU time and children by hand.
+- Which card is a display card is taken from EVIDENCE, not config: on Windows/WDDM nvidia-smi
+  reports graphics processes under `--query-compute-apps` with `[N/A]` memory, and those are the
+  desktop. On the Qube all 28 such rows sat on card 1 while the harness's own resident seat on
+  card 0 produced no row at all. On Linux that query lists only CUDA processes with real memory, so
+  nothing is flagged and every card stays eligible — unchanged everywhere but the case this fixes.
+- A display card is excluded ONLY when a non-display card exists. A single-GPU box (a laptop, an
+  iGPU node) runs its seats on its display card by necessity, and excluding it would have made
+  `held-working` unreachable there and turned a genuine bench into `held-idle`.
+- `held-idle` now names what IS using the box ("the cards ARE busy (33% on card 1) but that is the
+  display card … so it is not the holder's work") and reports utilization "on the cards it can run
+  on", so nobody re-derives why a busy machine reads idle under the lease. `busy-outside` still
+  scores every card, which is correct: unleased, the game IS the answer to "is anything using this".
+- KNOWN, NOT FIXED HERE: the same bug class exists on the fleet node's health `gpu_util_pct`
+  (`internal/fleetnode/server.go`, the busiest-device loop), which `internal/delegate/gate.go`
+  uses to break placement ties — so a Windows fleet node whose operator is gaming advertises
+  inflated utilization and loses placements it should win. Fixing it needs its own design (score
+  the devices the node's layers declare, or add a process sample to the background refresh) and
+  its own tests in a path polled every few seconds; it is not folded in silently here.
+
 ## [0.132.0] - 2026-09-21 - the node can save and restore a seat's KV to disk — and the measurement that says it buys nothing yet (ADR 0055 Layer 2, node side)
 
 - `POST /fleet/kvslot/save` and `POST /fleet/kvslot/restore` on the fleet node, bearer-gated like
