@@ -6,6 +6,52 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.132.0] - 2026-09-21 - the node can save and restore a seat's KV to disk — and the measurement that says it buys nothing yet (ADR 0055 Layer 2, node side)
+
+- `POST /fleet/kvslot/save` and `POST /fleet/kvslot/restore` on the fleet node, bearer-gated like
+  the chat lane, proxy llama-server's slot API through llama-swap. The key is `k1-<sha256 hex>` and
+  nothing else, so the file name it derives cannot escape the slot directory; an optional
+  `seat_pin_sha256` that disagrees with the live `/props` pin is a `409`, so a file is only ever
+  restored into the identical seat shape. Absent file = `404` "miss"; a seat rendered without
+  `--slot-save-path` = `501`, which is how an older node tells a caller to fall through. A 2xx whose
+  body does not parse, or which reports zero tokens, never reads as `ok` — a caller that believed
+  either would skip a prefill it never restored.
+- Every llama.cpp chat/agent seat (and its CPU twin) renders `--slot-save-path <home>/kvslots/`;
+  whisper, embedding and reranker entries do not. Both installers create the directory; an LRU
+  sweeper bounded by `kvslot_cap_gib` (0 = 8 GiB) runs after every save. Health advertises `kvslot`.
+- **Layer 1 tier map corrected before it could bite:** 1024 / 8192 / 16384 / 24576 MiB, under a floor
+  rule that the map may never hand a box less than llama-server's own 8192 default unless its RAM
+  cannot carry it. 0.131.3 shipped 1024 / 2048 / 6144 / 12288, which silently CUT the 32 GB and 64 GB
+  nodes below the default they had been running on — sizing per tier in the losing direction. Only the
+  min tier (a 4 GB box) stays under the default, which is the case the map existed for.
+- **Layer 1's size is now measured and it is worth 18x.** A, B, C, A with ~11.6k-token prompts on
+  binxarn's 32k seat: at `--cache-ram 1024` the repeat of A re-processes all 11,606 tokens
+  (110.8 s), at 8192 it re-processes 516 (6.2 s). The cache only matters when several contexts
+  share a seat — the shape of a delegation stream — and the 0.131.3 map put the fleet's two 32 GB
+  nodes at 2048, between those arms. That is what 0.131.4's floor rule prevents; ADR 0055 carries
+  the table.
+- **The `--slot-save-path` flag is NOT rendered, from a second measurement.** A rendered path that
+  does not exist makes llama-server refuse to START (`not a directory`), which would take every
+  chat and agent seat on that node down with it — and the node's slot directory (`OFFLOAD_HOME`,
+  runtime) and the rendered flag (`--home`, render time) are never tied, with the Windows
+  fleet-node launcher setting neither. Separately, `qwen3.8-27b-par8` on both Blackwell pair
+  templates runs `--parallel 8`, where slot 0 holds whichever of eight requests last touched it.
+  Neither risk is worth carrying for a capability measured at zero, so the installer self-test now
+  asserts the flag is ABSENT; the plumbing stays wired behind one function.
+- Four endpoint defects fixed from an adversarial review: the siblings' Content-Type gate (a
+  cross-origin `fetch` sends text/plain — a CORS simple request, no preflight, side effect lands);
+  `health`'s `kvslot` is the lane's real admissibility predicate, not "a directory exists"; the
+  lane refuses to start a COLD seat, because `/upstream/<seat>/…` starts one and that would defeat
+  the 5-minute idle unload, ignore a drain or a GPU lease, and save an empty slot over a good file;
+  and the post-save sweep never evicts the file that save just wrote.
+- **MEASURED INERT on b9934 and the delegator side is BLOCKED because of it.** On binxarn, a
+  restore of 3,231 tokens (151 MB, 25 ms) leaves the next identical request paying the full
+  27.2 s prefill — same as no restore, in all three call shapes — while the same run's control
+  shows the 0.131.3 RAM cache cutting 27.2 s to 4.6 s. `GET /slots` shows why: a restore
+  populates the KV cells and none of the prompt bookkeeping the prefix matcher reads. Upstream
+  ggml-org/llama.cpp #25913, fix open in #26004. The endpoints ship because they are correct and
+  verified; nothing calls them, and nothing will until that fix lands and the ADR's table is
+  re-run with the restore arm beating the baseline.
 ## [0.131.4] - 2026-09-21 - the admission-budget test asserted a sentence, not the behaviour
 
 - `TestRunAgentTaskWarmUpIsBoundedByTheAdmissionBudget` required the note to contain

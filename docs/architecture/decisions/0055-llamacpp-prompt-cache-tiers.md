@@ -5,7 +5,7 @@ date: "2026-09-20"
 
 # ADR 0055 — llama.cpp prompt-cache tiers: host-RAM cache per RAM tier, SSD slot save/restore driven by the harness
 
-Status: ACCEPTED (Layer 1 shipped 0.131.3, 2026-09-20; Layer 2 planned — `plans/2026-09-20-llamacpp-prompt-cache-tiers.md`, operator-approved 2026-09-20)
+Status: ACCEPTED (Layer 1 shipped 0.131.3, 2026-09-20; Layer 2 node side shipped 0.132.0, 2026-09-21; its delegator side planned — `plans/2026-09-20-llamacpp-prompt-cache-tiers.md`, operator-approved 2026-09-20)
 
 ## Context
 
@@ -25,11 +25,16 @@ the llama.cpp side of the same idea.
 
 **Layer 1 (this release):** the renderer emits `--cache-ram __CACHE_RAM__` on every llama.cpp
 seat, resolved from a top-level `profiles.json` map `cache_ram_mib_by_ram_tier` keyed by the
-`hwdetect` RAM tier (min / low / mid / high). Starting values 1024 / 2048 / 6144 / 12288 MiB.
+`hwdetect` RAM tier (min / low / mid / high). Values 1024 / 8192 / 16384 / 24576 MiB, under a floor rule: **this map may never hand a box less
+than llama-server's own 8192 MiB default unless its RAM cannot carry it.** The first cut broke that
+rule — 2048 on the 32 GB nodes, 6144 on the 64 GB one — which would have been a silent cut below what
+those boxes had been running on, in the name of "sizing per tier". Only the min tier (a 4 GB
+Vivobook, where 8 GiB was never reachable) goes below the default. The figures are still unmeasured
+against a real contract stream; that is Task 3a.
 An unresolvable tier renders the server default (8192) — the renderer never emits `0`, which
 would disable the cache. vLLM proxy entries never carry the flag.
 
-**Layer 2 (planned):** templates add `--slot-save-path <prefix>/kvslots/<seat>/`; the fleet
+**Layer 2, node side (0.132.0):** templates add `--slot-save-path <prefix>/kvslots/<seat>/`; the fleet
 node gains `POST /fleet/kvslot/save|restore {seat, key}` wrapping the server's slot API, with
 the key = `k1-` + sha256 over `model_file, ctx, kv_k, kv_v, build_family` + the byte-exact
 system prompt and context docs in contract order, so a file is only ever restored into the
@@ -49,3 +54,111 @@ best-effort with a 2 s timeout; a contract never blocks on the cache.
   single-node gain is on the record.
 - `setup/render.tests.ps1` asserts the flag; changing the map is a profiles.json change and goes
   matrix-first like every tier change.
+
+## Layer 1 is MEASURED, and the size is worth 18x (binxarn, 2026-09-21)
+
+The first cut of the tier map was sized by intuition and this measurement is why that was
+dangerous. The cache holds slot states EVICTED by a newer request, so it does nothing for one
+conversation and everything for several contexts sharing a seat — which is exactly the shape of
+a delegation stream. Sequence A, B, C, A with ~11.6k-token prompts on the 32k Qwen3.5-4B seat,
+one llama-server per arm, nothing else changed:
+
+| `--cache-ram` | A (first) | B | C | **A again** | tokens re-processed on the repeat |
+|---|---|---|---|---|---|
+| 1024 MiB | 110,769 ms | 111,527 | 110,979 | **110,782 ms** | 11,606 of 11,606 — the whole prefill |
+| 8192 MiB | 112,050 ms | 115,788 | 115,139 | **6,160 ms** | 516 of 11,606 — 96 % skipped |
+
+**18x on the repeat, from one flag.** A's state is ~380 MB; with a 1 GiB cache B and C evict it
+and the second A pays everything again, with 8 GiB it survives and the repeat is nearly free.
+
+Two things follow. First, the floor rule is not conservatism, it is this number: the 0.131.3 map
+(low = 2048 MiB) sat between these two arms on the fleet's two 32 GB nodes, so it could have cost
+most of this on every re-delegated context — which is why 0.131.4's map may never hand a box less
+than llama-server's own 8192 default unless its RAM cannot carry it. Second, the remaining open
+question is no longer "does size matter" but "where does each tier stop paying", which needs the
+same sweep at 16384 and 24576 on the 62 GB and 128 GB boxes (plan Task 3a).
+
+## Layer 2 as shipped on the node (0.132.0) — and the measurement that stops it there
+
+The endpoints are built, tested and correct against the real API. The capability underneath
+them is INERT on the build the fleet runs, and this section is the measurement that says so,
+taken on binxarn (llama.cpp b9934, Qwen3.5-4B UD-Q4_K_XL, 32k window, Vulkan) 2026-09-21.
+
+The call shape is right — measured, not assumed:
+
+    save    {"id_slot":0,"filename":"…","n_saved":3231,"n_written":158642712,"timings":{"save_ms":255}}
+    restore {"id_slot":0,"filename":"…","n_restored":3231,"n_read":158642712,"timings":{"restore_ms":25}}
+
+and a server started without `--slot-save-path` refuses with
+`501 "This server does not support slots action"`, which is why the flag is rendered per seat
+and why the node's own 501 means "older render, fall through".
+
+**The restore buys nothing.** One prompt of 3,230 tokens, every arm on a freshly started seat:
+
+| arm | prompt_ms | tokens actually processed |
+|---|---|---|
+| cold, no restore (the baseline) | 27,218 | 3,230 |
+| restore, then the same prompt | 27,217 | 3,230 |
+| restore, then the same prompt pinned with `id_slot: 0` | 27,716 | 3,230 |
+| restore, then the same prompt through the raw `/completion` endpoint | 27,198 | 3,218 |
+| **control — same process, same prompt twice (the Layer 1 RAM cache)** | **27,237 → 4,551** | **3,230 → 516** |
+
+Three independent call shapes, one null result; the control in the same run shows the RAM
+cache doing exactly what Layer 1 promises (6x, 84 % of the prefill skipped). `GET /slots` names
+the mechanism: after a normal request slot 0 carries `n_prompt_tokens`,
+`n_prompt_tokens_processed` and `n_prompt_tokens_cache`; after a restore of the same 3,231
+tokens it carries **none of them**. The file restores the KV cells and not the bookkeeping the
+prefix matcher reads, so the next request re-prefills from zero.
+
+This is upstream, not ours: ggml-org/llama.cpp issue #25913 ("/slots save/restore silently
+loses all prompt reuse — checkpoints are never persisted"; the in-memory cache stores a whole
+`server_prompt` WITH checkpoints, which is precisely why RAM reuse works and disk reuse does
+not) with an open fix in PR #26004, and issue #24746 ("explicit slot requests bypass prompt
+cache restore"), which is why the `id_slot` arm is the slowest of the three.
+
+**The flag is not rendered at all, and that is a second measurement, not caution.**
+An adversarial review of the lane put two defects in the RENDERING path that have nothing to
+do with whether a restore works, and both were then confirmed on the hardware:
+
+- `--slot-save-path` pointing at a directory that does not exist makes llama-server **refuse to
+  start**: `error while handling argument "--slot-save-path": not a directory: …` (binxarn,
+  b9934). A node that renders it without that directory loses EVERY chat and agent seat, not
+  just this lane. And the two ends are not tied: the node's slot directory comes from
+  `OFFLOAD_HOME` at runtime, the flag from the render's `--home`, and the Windows fleet-node
+  launcher sets neither — so them agreeing is a coincidence, not a guarantee.
+- `qwen3.8-27b-par8` on both Blackwell pair templates runs `--parallel 8`, where slot 0 belongs
+  to whichever of eight concurrent requests last held it. A save there stores someone else's
+  context under this key.
+
+Carrying a live-serving risk for a capability measured at zero is a bad trade in any direction,
+so `slotSaveFlag()` returns nothing and the installer self-test asserts the flag's ABSENCE.
+The token and the plumbing stay wired: turning it back on is that one function — plus, at that
+point, the render creating the directory it names and the parallel seats being excluded.
+
+**Consequences, decided:**
+- The node lane ships as built: correct, bearer-gated, 501-safe, and called by nobody.
+  Reverting it would throw away verified work and guarantee we rediscover all of this. Four
+  endpoint defects the review found are fixed rather than deferred: the siblings' Content-Type
+  gate (a cross-origin `fetch` sends text/plain, which is a CORS simple request — no preflight,
+  the side effect lands); `health`'s `kvslot` is now the lane's real admissibility predicate
+  instead of "a directory exists", the rule the chat lane states; the lane REFUSES to start a
+  cold seat (`/upstream/<seat>/…` starts one, which would defeat the 5-minute idle unload,
+  ignore a drain or a GPU lease, and save an empty slot over a good file); and the post-save
+  sweep never evicts the file that save just wrote.
+- **The delegator side of Layer 2 is BLOCKED**, not deferred. Building key computation,
+  restore-before-first-turn and the ledger fields on top of a capability measured at zero
+  would be work that cannot pay, and a `kvslot_restore: hit` on a ledger row would be a lie.
+- The unblock condition is explicit: a llama.cpp build carrying PR #26004 (or equivalent),
+  re-run the table above on binxarn, and only a row where the restore arm beats the baseline
+  reopens the delegator work.
+- Layer 1 is unaffected and is where the measured win lives today.
+
+What the renderer does NOT do: the whisper, embedding and reranker entries take neither flag
+(they build their own command lines and have no chat KV worth saving); only the chat and agent
+seats and their CPU twins carry them. On a tier whose render knows no install home the
+slot flag is empty, so an older caller renders exactly what it rendered before.
+
+One operational number for whoever unblocks this: a slot file is roughly 50 MB fixed plus
+33 KB per cached token — 61 MB for 344 tokens, 151 MB for 3,231, and about 1.1 GB for a full
+32k window. The 8 GiB default cap therefore holds ~7 full-window slots, and the per-tier caps
+in the plan need to be set from that arithmetic, not guessed.

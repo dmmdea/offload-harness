@@ -281,7 +281,7 @@ func TestCacheRAMFollowsTheRAMTier(t *testing.T) {
 		mib  int
 		want string
 	}{
-		{"mid tier figure", 6144, "--cache-ram 6144"},
+		{"mid tier figure", 16384, "--cache-ram 16384"},
 		{"unset falls back to the server default", 0, "--cache-ram 8192"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

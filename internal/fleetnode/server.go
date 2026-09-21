@@ -145,6 +145,10 @@ type Options struct {
 	// media lane never consults it.
 	LoopbackListener bool
 	Cfg              config.Config
+	// KVSlotDir is the directory the seats' --slot-save-path points at (ADR 0055
+	// Layer 2); empty = the kvslot lane answers 501. KVSlotCapGiB bounds it (0 = 8).
+	KVSlotDir    string
+	KVSlotCapGiB int
 	// Host reports the last host CPU/RAM sample (hostsample.Sampler.Load).
 	// nil omits the host_* fields; the handler never samples itself.
 	Host func() (hostsample.Sample, bool)
@@ -884,6 +888,8 @@ func (s *Server) Handler() http.Handler {
 	// job store, and why this node's loopback-only llama-swap needs a door of
 	// its own at all.
 	mux.HandleFunc("POST "+ChatLanePath, s.handleChat)
+	mux.HandleFunc("POST "+KVSlotSavePath, s.handleKVSlotSave)
+	mux.HandleFunc("POST "+KVSlotRestorePath, s.handleKVSlotRestore)
 	mux.HandleFunc("GET /fleet/jobs/{id}", s.handleJob)
 	// GET /fleet/jobs (no {id}) is a distinct ServeMux pattern from the one
 	// above — unauthenticated is deliberate: unlike /fleet/jobs/{id}, this
@@ -1019,6 +1025,9 @@ type healthPayload struct {
 	// (["vulkan","cpu"] on a dual-route node); a caller picks a route by seat id
 	// (`gemma4-e2b` vs `gemma4-e2b-cpu`). Additive + omitempty (ADR 0054).
 	Backends []string `json:"backends,omitempty"`
+	// KVSlot is true when this node renders a slot directory and answers the
+	// /fleet/kvslot/save|restore lane (ADR 0055 Layer 2).
+	KVSlot bool `json:"kvslot,omitempty"`
 	// Accelerators is the installer-manifest additive-device list (ADR 0024).
 	// Additive + omitempty: a node with none emits a byte-identical payload.
 	Accelerators []string `json:"accelerators,omitempty"`
@@ -1354,6 +1363,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		GpuVendor:             s.opts.GpuVendor,
 		GpuArch:               s.opts.GpuArch,
 		Backends:              s.opts.Backends,
+		KVSlot:                s.kvSlotEnabled(),
 		Accelerators:          s.opts.Accelerators,
 		VramTotalGb:           snap.TotalGiB,
 		VramFreeGb:            snap.FreeGiB,

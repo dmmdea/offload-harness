@@ -157,7 +157,7 @@ fi
 [ -n "$MODELS" ] || MODELS="$PREFIX/models"
 
 # ---- 3. lay out the tree ----------------------------------------------------
-for d in "$PREFIX" "$PREFIX/etc" "$PREFIX/state" "$PREFIX/bin" "$MODELS"; do
+for d in "$PREFIX" "$PREFIX/etc" "$PREFIX/state" "$PREFIX/bin" "$PREFIX/kvslots" "$MODELS"; do
   run mkdir -p "$d"
 done
 run install -m 0755 "$BIN" "$PREFIX/bin/local-offload"
