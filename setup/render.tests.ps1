@@ -447,12 +447,15 @@ $obj3 = $merged3 | ConvertFrom-Json
 if ($obj3.tier_profile -eq 'blackwell-3x16') { Ok 'b3x16 seed writes tier_profile' } else { Bad "b3x16 tier_profile (got: '$($obj3.tier_profile)')" }
 if (@($obj3.tiers).Count -eq 3 -and @($obj3.tiers)[0] -eq 'blackwell-16' -and @($obj3.tiers)[2] -eq 'blackwell-3x16') {
   Ok 'b3x16 seed writes tiers = composes + itself' } else { Bad "b3x16 tiers (got: $(@($obj3.tiers) -join ','))" }
-if (@($obj3.layers).Count -eq 3) { Ok 'b3x16 seed writes all three layers' } else { Bad "b3x16 layers count (got: $(@($obj3.layers).Count))" }
-$pairAgent = @($obj3.layers | Where-Object { $_.name -eq 'pair' }).seats | Where-Object { $_.role -eq 'agent' }
+if (@($obj3.layers).Count -eq 4) { Ok 'b3x16 seed writes all four layers (single, pair, display, triple flagship)' } else { Bad "b3x16 layers count (got: $(@($obj3.layers).Count))" }
+# The bare agent seat is the flagship triple's since 0.132.6 (operator 2026-09-19); the pair is opt-in and names its own.
+$pairAgent = @($obj3.layers | Where-Object { $_.name -eq 'triple' }).seats | Where-Object { $_.role -eq 'agent' }
 if ($pairAgent -and [string]$pairAgent.model -eq [string]$row3.vllm_seat.fallback_agent_model) {
   Ok "b3x16 seed fills the bare pair/agent seat from the tier's fallback ($($pairAgent.model)) - the seat the render actually serves" }
   else { Bad "b3x16 pair/agent model (got: '$($pairAgent.model)', want '$($row3.vllm_seat.fallback_agent_model)')" }
-if ([string]$pairAgent.device -eq [string]$row3.vllm_seat.device) { Ok 'b3x16 seed fills the pair/agent device pin from vllm_seat' } else { Bad "b3x16 pair/agent device (got: '$($pairAgent.device)')" }
+$wantDev = [string]$row3.vllm_seat.device
+if ($row3.vllm_seat.PSObject.Properties['fallback_agent_device']) { $wantDev = [string]$row3.vllm_seat.fallback_agent_device }
+if ([string]$pairAgent.device -eq $wantDev) { Ok "b3x16 seed fills the triple/agent device pin from the fallback's own pin ($wantDev)" } else { Bad "b3x16 triple/agent device (got: '$($pairAgent.device)', want '$wantDev')" }
 # A plain tier seeds NONE of it: every non-composite box must stay byte-identical.
 $row2 = $seedProfiles.'blackwell-2x16'
 $merged2 = Merge-ConfigSeed -ConfigText $seedTpl -Seed $row2.config_seed

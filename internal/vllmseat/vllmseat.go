@@ -205,6 +205,11 @@ type Spec struct {
 	Fallback string `json:"fallback_agent_model"`
 	// FallbackCtx is the window the fallback seat serves.
 	FallbackCtx int `json:"fallback_agent_ctx_tokens,omitempty"`
+	// FallbackDevice is the device pin the fallback seat renders on, when it differs from
+	// the vLLM seat's. A pipeline seat spans every card ("2,1,0") while the llama.cpp
+	// fallback runs on the pair ("0,2"); without it a layer that stands for the seat
+	// declares a pin its fallback never renders. Empty = the seat's own Device.
+	FallbackDevice string `json:"fallback_agent_device,omitempty"`
 	// AgentCtxTokens is the window the harness advertises when the vLLM seat runs.
 	AgentCtxTokens int `json:"agent_ctx_tokens,omitempty"`
 

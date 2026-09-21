@@ -560,6 +560,9 @@ func fillPairAgent(layers []config.LayerSpec, seat *vllmseat.Spec, active bool) 
 				if s.CtxTokens == 0 {
 					s.CtxTokens = seat.FallbackCtx
 				}
+				if s.Device == "" && seat.FallbackDevice != "" {
+					s.Device = seat.FallbackDevice
+				}
 			}
 			if s.Device == "" {
 				s.Device = seat.Device

@@ -787,7 +787,7 @@ function Get-CompositeSeed {
       if ($null -eq $s -or [string]$s.role -ne 'agent') { continue }
       if ($s.PSObject.Properties['model'] -and [string]$s.model) { continue }
       if ($null -eq $seat) { continue }
-      $model = ''; $ctx = 0; $inflight = 0
+      $model = ''; $ctx = 0; $inflight = 0; $dev = ''
       if ($VLLMSeatActive) {
         $model = [string]$seat.id
         if ($seat.PSObject.Properties['aliases'] -and @($seat.aliases).Count -gt 0) { $model = [string]@($seat.aliases)[0] }
@@ -796,6 +796,8 @@ function Get-CompositeSeed {
       } else {
         if ($seat.PSObject.Properties['fallback_agent_model']) { $model = [string]$seat.fallback_agent_model }
         if ($seat.PSObject.Properties['fallback_agent_ctx_tokens']) { $ctx = [int]$seat.fallback_agent_ctx_tokens }
+        # a pipeline seat spans every card while its llama.cpp fallback runs on the pair (tierseed FallbackDevice)
+        if ($seat.PSObject.Properties['fallback_agent_device']) { $dev = [string]$seat.fallback_agent_device }
       }
       if (-not $model) { continue }
       Add-OrSet-Property -Object $s -Name 'model' -Value $model
@@ -805,8 +807,9 @@ function Get-CompositeSeed {
       if ($inflight -gt 0 -and -not ($s.PSObject.Properties['max_inflight'] -and [int]$s.max_inflight -gt 0)) {
         Add-OrSet-Property -Object $s -Name 'max_inflight' -Value $inflight
       }
-      if (-not ($s.PSObject.Properties['device'] -and [string]$s.device) -and $seat.PSObject.Properties['device']) {
-        Add-OrSet-Property -Object $s -Name 'device' -Value ([string]$seat.device)
+      if (-not $dev -and $seat.PSObject.Properties['device']) { $dev = [string]$seat.device }
+      if (-not ($s.PSObject.Properties['device'] -and [string]$s.device) -and $dev) {
+        Add-OrSet-Property -Object $s -Name 'device' -Value $dev
       }
     }
   }
