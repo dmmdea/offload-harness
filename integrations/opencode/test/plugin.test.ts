@@ -413,3 +413,42 @@ describe("primary tool exposure (tier1)", () => {
     expect(all).not.toBe(protocolText("harness", "offload", "tier1"));
   });
 });
+
+// Review finding on this PR: the protocol was tier1-aware, but two OTHER strings the plugin
+// shows the primary (the read nudge, the task-tool description addendum) still named
+// harness_agent_run / harness_agent_delegate / harness_offload_ask -- tools a tier1 primary
+// cannot see. This guard scans EVERY surface the plugin writes toward the primary, so a new
+// string cannot reintroduce the class.
+describe("tier1: nothing the primary reads names a tool it cannot see", () => {
+  const TIER1 = new Set(["harness_offload_summarize", "harness_offload_classify", "harness_offload_extract", "harness_offload_triage"]);
+  const hiddenNames = (text: string) => (text.match(/harness_[a-z_]+/g) ?? []).filter((n) => !TIER1.has(n));
+
+  async function primarySurfaces(primaryTools: "tier1" | "all") {
+    const h = createHooks(opts({ primaryTools }));
+    const sys = { system: [] as string[] };
+    await h["experimental.chat.system.transform"]!({ model: {} as any }, sys);
+    const task = { description: "Launch a subagent.", parameters: {} };
+    await h["tool.definition"]!({ toolID: "task" }, task);
+    let nudge = "";
+    for (let i = 0; i < 12; i++) {
+      const out = { title: "", output: "x", metadata: {} };
+      await h["tool.execute.after"]!({ tool: "read", sessionID: "g1", callID: "r" + i, args: {} }, out);
+      nudge += out.output;
+    }
+    expect(nudge).toContain("[offload] 12 file reads"); // the nudge really fired
+    return { protocol: sys.system.join("\n"), task: task.description, nudge };
+  }
+
+  it("tier1: protocol, task description and read nudge name only Tier-1 tools", async () => {
+    const s = await primarySurfaces("tier1");
+    for (const [surface, text] of Object.entries(s)) expect({ surface, hidden: hiddenNames(text) }).toEqual({ surface, hidden: [] });
+    expect(s.nudge).toContain('subagent_type "offload"');
+    expect(s.task).toContain('subagent_type "offload"');
+  });
+
+  it("all: the same surfaces still name the full harness (control arm)", async () => {
+    const s = await primarySurfaces("all");
+    expect(s.nudge).toContain("harness_agent_run");
+    expect(s.task).toContain("harness_agent_delegate");
+  });
+});

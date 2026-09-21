@@ -25,7 +25,11 @@ export function protocolText(mcp: string, offloadAgent: string, primaryTools: "t
   ].join("\n");
 }
 
-export function taskDescriptionAddendum(offloadAgent: string, mcp: string): string {
+export function taskDescriptionAddendum(offloadAgent: string, mcp: string, primaryTools: "tier1" | "all" = "all"): string {
+  if (primaryTools === "tier1") {
+    // The primary cannot call agent_delegate in tier1; several legs = several offload task calls.
+    return `\n\nOFFLOAD ROUTE: read-only legs (recon, sweep, digest, extract, inventory, audit over LOCAL files) belong on subagent_type "${offloadAgent}" — a free local seat that holds the whole harness. Several such legs: issue them as separate "${offloadAgent}" task calls in the SAME message. Keep judgment/web/write legs on the default agent.`;
+  }
   return `\n\nOFFLOAD ROUTE: read-only legs (recon, sweep, digest, extract, inventory, audit over LOCAL files) belong on subagent_type "${offloadAgent}" — a free local seat with the ${mcp}_* harness tools; two or more such legs are better as ONE ${mcp}_agent_delegate route:"spread" call. Keep judgment/web/write legs on the default agent.`;
 }
 

@@ -274,7 +274,7 @@ export function createHooks(o: Options, diagnostics: Diagnostics = newDiagnostic
     "tool.definition": async (input, output) => {
       try {
         if (input.toolID === "task" && !output.description.includes("OFFLOAD ROUTE:")) {
-          output.description += taskDescriptionAddendum(o.offloadAgent, o.mcp);
+          output.description += taskDescriptionAddendum(o.offloadAgent, o.mcp, o.primaryTools);
         }
       } catch (e) {
         warn("tool.definition hook", e);
@@ -340,7 +340,13 @@ export function createHooks(o: Options, diagnostics: Diagnostics = newDiagnostic
         if (tier && !s.nudged.has(tier)) {
           s.nudged.add(tier);
           log({ event: "nudge", sid: input.sessionID, tier, reads: s.reads });
-          output.output += `\n\n[offload] ${s.reads} file reads this session, local-offload unused. Bounded read-and-reason legs (repo recon, doc sweep, log scan, classify/extract/OCR) run for free on the local seat: ${o.mcp}_offload_ask (cheapest — just a question plus the paths you were about to open), ${o.mcp}_agent_run for one leg that must find its own files, ${o.mcp}_agent_delegate route:"spread" for 2+, or task subagent_type "${o.offloadAgent}". Ignore if every read feeds your own judgment.`;
+          // tier1: the primary cannot see agent_run / agent_delegate / offload_ask, so the nudge
+          // names only the route it can take -- a task leg to the offload subagent.
+          const route =
+            o.primaryTools === "tier1"
+              ? `hand them to task subagent_type "${o.offloadAgent}" with the NAMED files and one bounded question`
+              : `${o.mcp}_offload_ask (cheapest — just a question plus the paths you were about to open), ${o.mcp}_agent_run for one leg that must find its own files, ${o.mcp}_agent_delegate route:"spread" for 2+, or task subagent_type "${o.offloadAgent}"`;
+          output.output += `\n\n[offload] ${s.reads} file reads this session, local-offload unused. Bounded read-and-reason legs (repo recon, doc sweep, log scan, classify/extract/OCR) run for free on the local seat: ${route}. Ignore if every read feeds your own judgment.`;
         }
       } catch (e) {
         warn("tool.execute.after hook", e);
