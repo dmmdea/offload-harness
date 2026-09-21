@@ -824,11 +824,15 @@ survivors are RANKED and how many of one Run's subtasks one node can take.
   depending on the contract's inferred shape exactly as
   `spread`'s fit score already does: reasoning-shaped work still ranks the roomiest window first, eta only as
   its tie-break; mechanical work now ranks the fastest expected completion first (replacing the old
-  "smallest adequate seat wins" rule), window as its tie-break. Two candidates whose etas are within 20 % of
-  each other are a near-tie, decided by a deterministic **power-of-two-choices draw** seeded from the wire job
-  id (or a fresh seed on the two re-placement/retry selection paths, which have no job id in hand yet) — so K
-  independent dispatchers spread across near-tied seats instead of all converging on the single fastest one.
-  An unknown rate on either side keeps today's window-only ordering; `PlaceVision` gets the same eta tie-break
+  "smallest adequate seat wins" rule), window as its tie-break. Two candidates whose etas are close are a near-tie, decided by a
+  deterministic **power-of-two-choices draw** seeded from the wire job id (or a fresh seed on the two
+  re-placement/retry selection paths, which have no job id in hand yet) — so K independent dispatchers spread
+  across near-tied seats instead of all converging on the single fastest one. Since 0.132.3 that draw is
+  bounded JITTER on each seat's own eta, derived from the seed and the seat's node id, rather than one coin
+  flipped for the pair: a coin hashed from the seed alone answered the same whichever way round it was asked,
+  so two near-tied seats each beat the other and the roster's order decided the winner (ADR 0057). A seat that
+  publishes no rate is ranked on the fleet's median published rate, keeping its own backlog and cold load;
+  window decides only when no node on the roster publishes a rate; `PlaceVision` gets the same eta tie-break
   after its own existing keys (no generation term — a vision judgment is one call, not an agent loop).
 - **A quiet lease demotes instead of excluding (W-14, register S-15).** `LeaseBusy` alone — a node's DECLARED
   reservation window, not a measurement of the cards — used to hard-exclude a remote exactly like a held TEXT

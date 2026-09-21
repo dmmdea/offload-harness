@@ -166,16 +166,20 @@ config at process start — a route bound in the config after the process starte
 They differ exactly when someone is using the machine. On 2026-09-20 the Qube read
 `gpu_util_pct: 33` from a game on its display card while every card the harness could use sat at
 0%, and because placement broke ties on that number the node lost work it should have won. A
-display card is identified from evidence, not config: on Windows/WDDM
-`nvidia-smi --query-compute-apps` lists GRAPHICS processes with `[N/A]` memory, and that sample
-(refreshed every 30 s, not every tick) is what `gpuprobe.DisplayCardUUIDs` reads — the SAME
-function the GPU lease verdict uses. On Linux the query lists only CUDA processes with real
-memory, so nothing is flagged and the two figures agree.
+display card is identified by the card's OWN property, not by config and not by inference:
+`nvidia-smi --query-gpu=display_active` rides the per-device query the health sampler already
+runs, and `gpuprobe.DisplayCardUUIDs` reads it — the SAME function the GPU lease verdict uses.
+Only an exact `Enabled` counts; `[Not Supported]` and `[N/A]` mean "we do not know", which never
+reads as "this is the operator's screen". Nothing is refreshed on a separate cadence and nothing
+is carried forward: the answer comes from the sample the tick already took. On a headless box
+every card answers `Disabled`, nothing is flagged, and the two figures agree.
 
 A display card is excluded only when a non-display card exists: a single-GPU box runs its seats
 on its display card by necessity, and there the two figures are equal by construction.
-`work_util_known` is the validity flag — a node that predates the field publishes neither, and a
-delegator then falls back to `gpu_util_pct` for both sides of the comparison. See ADR 0057.
+`work_util_known` is the validity flag. A node that predates the field publishes neither, and the
+delegator then ranks THAT node on `gpu_util_pct` — the choice is made per node, never per pair.
+Picking the figure per comparison is what made the ordering cycle on a mixed fleet mid-rollout;
+see ADR 0057.
 
 ## Multi-GPU: `gpu_devices[]` and the headline VRAM numbers
 

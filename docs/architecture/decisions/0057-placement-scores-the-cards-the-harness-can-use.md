@@ -114,8 +114,9 @@ on roster order:
 - A Windows fleet node stops losing placements to its operator's desktop, and the Qube's lease
   verdict stops calling a game the holder's work — through the same function.
 - `gpu_util_pct` is unchanged, so the fleet overview and every existing reader see what they saw.
-- A pre-0.132.2 delegator ignores `work_util_pct` and behaves as before; a 0.132.2 delegator talking
-  to an older node falls back to `gpu_util_pct`. Both directions of a rollout are safe.
+- A pre-0.132.2 delegator ignores `work_util_pct` and behaves as before; a 0.132.3 delegator ranks an
+  older node on `gpu_util_pct` and an upgraded one on `work_util_pct` — per node, not per pair. Both
+  directions of a rollout are safe, and the mixed state in between is a well-formed ordering.
 - The health golden-shape test now pins the two new fields.
 - Placement is a strict weak ordering, pinned by a brute-force check over a 16-node roster (measured
   and unmeasured seats, four window sizes, backlogs, cold loads) across 40 seeds. Three separate

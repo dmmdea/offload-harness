@@ -72,9 +72,18 @@ tie-breakers `betterRemote` already had:
    queue + wall). `betterRemote` and `scoreFit` (route=spread's own ranking axis) both fold this in per the contract's
    inferred shape: reasoning-shaped work still ranks window first, eta only as its tie-break; mechanical work
    now ranks eta first (replacing "smallest adequate seat wins"), window as its tie-break. Two candidates within
-   20 % of each other are a near-tie, resolved by a deterministic FNV-1a draw seeded from the job id
+   20 % of each other are a near-tie, resolved by a deterministic draw seeded from the job id
    (power-of-two-choices) so K independent dispatchers spread across near-tied seats. An unknown rate on either
    side keeps today's window-only ordering.
+
+   > **Revised by ADR 0057 (0.132.3).** Both mechanisms named in this clause were not a strict weak
+   > ordering and are replaced. The draw hashed the SEED ALONE, so it answered the same whichever way
+   > round it was asked and two near-tied seats each beat the other; and "near-tie" as a pairwise
+   > distance test is not transitive. The draw is now bounded jitter applied to each seat's own eta,
+   > derived from the seed AND that seat's node id (`etaDrawn`), so it is part of the key rather than a
+   > branch on the pair. "An unknown rate keeps window-only ordering" was the same per-pair mistake: an
+   > unmeasured seat is now ranked on `fleetTokSPrior`, the median rate the roster publishes, and window
+   > decides only when NO node publishes a rate.
 4. **One joint deal for route=auto/remote, respecting per-node headroom** (W-06): `RunWith` now computes the
    WHOLE Run's `auto`/`remote` placement in one pass over one fleet snapshot (`dealAutoRemote`), the same
    invariant `route=spread`'s `dealSpread` already held. Per-node headroom (`max_concurrent_jobs − jobs_running
@@ -138,8 +147,9 @@ tie-breakers `betterRemote` already had:
 
 ## Related code
 
-- `internal/delegate/eta.go` — `etaFor`, `queueWaitFor`, `feasibleFinal`, `betterRanked`, `etaPreferred`,
-  `p2cDraw`, `scoreFitRanked`.
+- `internal/delegate/eta.go` — `etaFor`, `queueWaitFor`, `feasibleFinal`, `betterRanked`, `scoreFitRanked`,
+  and (since ADR 0057 / 0.132.3, replacing `etaPreferred` + `p2cDraw`) `etaDrawn`, `p2cRank`,
+  `fleetTokSPrior`.
 - `internal/delegate/gate.go` — `Place`, `betterRemote`, `leaseFences`, `leaseBusyDemoted`, `PlaceVision`,
   `visionEtaBetter`.
 - `internal/delegate/fit.go` — `scoreFit`.
