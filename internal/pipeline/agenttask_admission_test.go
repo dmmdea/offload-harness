@@ -168,7 +168,19 @@ func TestRunAgentTaskWarmUpIsBoundedByTheAdmissionBudget(t *testing.T) {
 	if wire.Deferred {
 		t.Fatalf("a spent warm-up budget proceeds into the wall; got: %s", wire.Reason)
 	}
-	if wire.AdmissionWaitSec < 2.9 || wire.AdmissionWaitSec > 4.5 || !strings.Contains(wire.AdmissionNote, "exceeded the admission budget") {
+	// WHICH consumer spends the budget is not part of this test's contract, and
+	// pinning one phrasing made the assertion depend on it. The window probe runs
+	// first and is charged to admission (agenttask.go, `admitted += time.Since(
+	// probeStart)`), so with an upstream that sleeps past the budget the probe
+	// consumes it and the warm-up reports "no admission budget left for the
+	// warm-up" (agenttask.go:1915) rather than "cold load exceeded the admission
+	// budget" (agenttask.go:1967). Both are true, both proceed into the wall, and
+	// which one appears depends on how the runner's timing splits 3 s between the
+	// two — which is why this failed on one machine and passed on another. What
+	// the test is actually for is the behaviour in its own doc comment: do not
+	// block, and say in the note that the ADMISSION BUDGET is what ran out. Assert
+	// that, not the sentence. An empty or budget-silent note still fails.
+	if wire.AdmissionWaitSec < 2.9 || wire.AdmissionWaitSec > 4.5 || !strings.Contains(wire.AdmissionNote, "admission budget") {
 		t.Fatalf("admission=%v note=%q, want the budget named", wire.AdmissionWaitSec, wire.AdmissionNote)
 	}
 }

@@ -46,6 +46,19 @@ Versioning: [SemVer](https://semver.org/).
   ggml-org/llama.cpp #25913, fix open in #26004. The endpoints ship because they are correct and
   verified; nothing calls them, and nothing will until that fix lands and the ADR's table is
   re-run with the restore arm beating the baseline.
+## [0.131.4] - 2026-09-21 - the admission-budget test asserted a sentence, not the behaviour
+
+- `TestRunAgentTaskWarmUpIsBoundedByTheAdmissionBudget` required the note to contain
+  "exceeded the admission budget". The window probe runs first and is charged to admission
+  (`admitted += time.Since(probeStart)`), so against an upstream that sleeps past the budget the
+  PROBE spends it and the warm-up correctly reports "no admission budget left for the warm-up"
+  instead. Both notes are true and both proceed into the wall, which is what the test's own doc
+  comment says it is for — so which sentence appears came down to how the runner split 3 s between
+  the two consumers. It passed on the CI runner for #425 and failed 3/3 on a developer machine and
+  again on CI afterwards, leaving `build` red on main.
+- The assertion now requires the note to name the ADMISSION BUDGET, which every legitimate path
+  does and an empty or budget-silent note does not; the timing bounds are unchanged. Verified by
+  mutation: swapping the substring for one no note contains turns the test red.
 
 ## [0.131.3] - 2026-09-20 - llama.cpp prompt cache sized per RAM tier (ADR 0055, Layer 1)
 
