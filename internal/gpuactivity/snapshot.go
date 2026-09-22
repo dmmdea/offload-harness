@@ -211,7 +211,7 @@ func Assess(v View) (verdict, note string) {
 	// re-derive why a busy box still reads idle under the lease.
 	foreignTail := ""
 	if cardsBusy && !workCardsBusy {
-		foreignTail = " — the cards ARE busy (" + busyCard + ") but that is the display card, which the harness never places a seat on, so it is not the holder's work"
+		foreignTail = " — the cards ARE busy (" + busyCard + ") but that is the display card, and with no seat request in flight that load is the desktop's, not the holder's work"
 	}
 
 	work := describeWork(v, now)
