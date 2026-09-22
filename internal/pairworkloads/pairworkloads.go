@@ -37,6 +37,7 @@ import (
 
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/ledger"
+	"github.com/dmmdea/offload-harness/internal/swapclient"
 )
 
 const (
@@ -49,6 +50,12 @@ const (
 	// milliseconds; anything slower is PAIR being down, and the harness's own
 	// result must never wait on it.
 	sendTimeout = 2 * time.Second
+	// engineTTL bounds how long a local seat's resolved engine is trusted; a
+	// failed roster read is retried sooner (engineRetryTTL) so a llama-swap
+	// restart does not pin the wrong label for the full window.
+	engineTTL      = 10 * time.Minute
+	engineRetryTTL = 30 * time.Second
+	rosterTimeout  = 2 * time.Second
 )
 
 // Config is the emitter's configuration, normally built by FromConfig.
@@ -58,6 +65,13 @@ type Config struct {
 	// AppDir overrides PAIR's per-user app-data dir (tests). "" = the
 	// platform default, mirroring PAIR's shared/appdir.
 	AppDir string
+	// VLLMSeats is the box's declared `vllm_seats` and SwapEndpoint the
+	// llama-swap its seats sit behind. Together they label a LOCAL seat bound
+	// by alias: the Qube's agent seat is `agent-pool`, an alias of
+	// `qwen3.8-27b-vllm-3card`, so the name alone reads as llama.cpp and PAIR
+	// showed a vLLM job as "llamacpp".
+	VLLMSeats    []string
+	SwapEndpoint string
 }
 
 // FromConfig reads the two harness config keys.
@@ -66,7 +80,8 @@ func FromConfig(cfg config.Config) Config {
 	if ep == "" {
 		ep = DefaultEndpoint
 	}
-	return Config{Enabled: cfg.PairWorkloadsEnabled, Endpoint: ep}
+	return Config{Enabled: cfg.PairWorkloadsEnabled, Endpoint: ep,
+		VLLMSeats: cfg.VLLMSeats, SwapEndpoint: cfg.Endpoint}
 }
 
 // Event is one workload lifecycle frame's content. JobID doubles as PAIR's
@@ -111,6 +126,17 @@ type Emitter struct {
 	warnOnce   sync.Once
 	inflight   sync.WaitGroup
 	seq        atomic.Int64
+
+	engineMu    sync.Mutex
+	engineCache map[string]engineAnswer // lower(seat) -> resolved local engine
+	// fetchRoster reads the llama-swap roster; swapclient.FetchRoster unless a
+	// test swaps it.
+	fetchRoster func(ctx context.Context, endpoint string, timeout time.Duration) (swapclient.Roster, error)
+}
+
+type engineAnswer struct {
+	vllm bool
+	exp  time.Time
 }
 
 // New builds an emitter. It reads nothing until the first use.
@@ -118,7 +144,8 @@ func New(c Config) *Emitter {
 	if c.Endpoint == "" {
 		c.Endpoint = DefaultEndpoint
 	}
-	e := &Emitter{cfg: c, client: &http.Client{Timeout: sendTimeout}, appDir: c.AppDir}
+	e := &Emitter{cfg: c, client: &http.Client{Timeout: sendTimeout}, appDir: c.AppDir,
+		fetchRoster: swapclient.FetchRoster}
 	if e.appDir == "" {
 		// OFFLOAD_PAIR_APPDIR points at a PAIR data dir that is not at the
 		// platform default (a portable install, a test fixture).
@@ -317,6 +344,71 @@ func EngineFor(task, seat string) string {
 	return "llamacpp"
 }
 
+// LocalEngine is EngineFor for a seat served by THIS box's llama-swap: a seat
+// the name reads as llama.cpp is labelled vllm when the box declares it in
+// vllm_seats, directly or through the alias the roster resolves it to. Only a
+// local seat can be resolved — a remote node's aliases live in ITS roster —
+// so remote placements keep EngineFor. A roster that cannot be read leaves
+// the name-based answer, which is what every card carried before.
+func (e *Emitter) LocalEngine(task, seat string) string {
+	engine := EngineFor(task, seat)
+	if engine != "llamacpp" || e == nil || len(e.cfg.VLLMSeats) == 0 {
+		return engine
+	}
+	if e.localVLLM(seat) {
+		return "vllm"
+	}
+	return engine
+}
+
+func (e *Emitter) localVLLM(seat string) bool {
+	seat = strings.TrimSpace(seat)
+	if seat == "" {
+		return false
+	}
+	if declaresVLLM(e.cfg.VLLMSeats, seat) {
+		return true
+	}
+	key := strings.ToLower(seat)
+	now := time.Now()
+	e.engineMu.Lock()
+	if a, ok := e.engineCache[key]; ok && now.Before(a.exp) {
+		e.engineMu.Unlock()
+		return a.vllm
+	}
+	e.engineMu.Unlock()
+
+	ans := engineAnswer{exp: now.Add(engineRetryTTL)}
+	if e.fetchRoster != nil && e.cfg.SwapEndpoint != "" {
+		roster, err := e.fetchRoster(context.Background(), e.cfg.SwapEndpoint, rosterTimeout)
+		if err == nil {
+			canonical, _ := roster.Canonical(seat)
+			ans = engineAnswer{vllm: declaresVLLM(e.cfg.VLLMSeats, canonical), exp: now.Add(engineTTL)}
+		}
+	}
+	e.engineMu.Lock()
+	if e.engineCache == nil {
+		e.engineCache = map[string]engineAnswer{}
+	}
+	e.engineCache[key] = ans
+	e.engineMu.Unlock()
+	return ans.vllm
+}
+
+// declaresVLLM mirrors config.DeclaresVLLMSeat over the copied list.
+func declaresVLLM(seats []string, id string) bool {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return false
+	}
+	for _, s := range seats {
+		if strings.EqualFold(strings.TrimSpace(s), id) {
+			return true
+		}
+	}
+	return false
+}
+
 // isAcceleratorEngine reports whether an EngineFor result names an NPU rather
 // than a text / media engine.
 func isAcceleratorEngine(engine string) bool {
@@ -466,7 +558,13 @@ func (e *Emitter) AttachLedger(l *ledger.Ledger) {
 		if row.CacheHit {
 			return
 		}
-		e.Emit(e.FromLedger(row))
+		// FromLedger may read the llama-swap roster (LocalEngine); keep that
+		// off the ledger writer's path.
+		e.inflight.Add(1)
+		go func() {
+			defer e.inflight.Done()
+			e.Emit(e.FromLedger(row))
+		}()
 	})
 }
 
@@ -486,7 +584,7 @@ func (e *Emitter) FromLedger(row ledger.Entry) Event {
 	if model == "" {
 		model = row.Task
 	}
-	engine := EngineFor(row.Task, model)
+	engine := e.LocalEngine(row.Task, model)
 	// A forwarded accelerator call is recorded as "<node>:<device>" (E-04):
 	// the card runs on that node and shows the device, not the pair.
 	node := ""

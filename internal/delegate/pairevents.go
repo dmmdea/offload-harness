@@ -45,8 +45,10 @@ func pairNodeName(base, fallback string) string {
 // pairInflight emits the queued / running frame for a subtask and pins the
 // card identity on pr. node is the harness node name ("" = this box), aliases
 // the other names the same node goes by (its fleet node id, the name it
-// reported); seat is the seat the placement intends to run on.
-func (r *runner) pairInflight(pr *PlacedResult, jobID, node string, aliases []string, seat, state string) {
+// reported); seat is the seat the placement intends to run on; local says the
+// seat is behind this box's own endpoint, so its alias can be resolved to an
+// engine (a remote node's aliases live in its own roster).
+func (r *runner) pairInflight(pr *PlacedResult, jobID, node string, aliases []string, seat, state string, local bool) {
 	if r.pair == nil || !r.pair.Enabled() {
 		return
 	}
@@ -56,7 +58,11 @@ func (r *runner) pairInflight(pr *PlacedResult, jobID, node string, aliases []st
 		if pr.pairModel == "" {
 			pr.pairModel = "agent-seat"
 		}
-		pr.pairEngine = pairworkloads.EngineFor("agent_delegate", pr.pairModel)
+		if local {
+			pr.pairEngine = r.pair.LocalEngine("agent_delegate", pr.pairModel)
+		} else {
+			pr.pairEngine = pairworkloads.EngineFor("agent_delegate", pr.pairModel)
+		}
 		pr.pairCreated = now
 	}
 	pr.pairNode, pr.pairAliases = node, aliases

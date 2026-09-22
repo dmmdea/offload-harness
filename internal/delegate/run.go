@@ -3204,7 +3204,7 @@ func (r *runner) runLocal(ctx context.Context, jobID string, contract core.Agent
 		pairNode = host
 		pr.PlacementReason += "; engine " + r.cfg.Endpoint + " is " + host + "'s (attributed there)"
 	}
-	r.pairInflight(&pr, jobID, pairNode, nil, pr.Seat, "running")
+	r.pairInflight(&pr, jobID, pairNode, nil, pr.Seat, "running", true)
 	wire, err := r.local(ctx, contract, opts)
 	if err != nil {
 		pr.Err = "local run: " + err.Error()
@@ -3260,7 +3260,7 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 	if intendedSeat == "" {
 		intendedSeat = view.AgentSeat
 	}
-	r.pairInflight(&pr, jobID, pairNodeName(base, view.NodeID), []string{view.NodeID}, intendedSeat, "queued")
+	r.pairInflight(&pr, jobID, pairNodeName(base, view.NodeID), []string{view.NodeID}, intendedSeat, "queued", false)
 	disp := r.dispatchDetailed(ctx, base, jobID, payload)
 	if disp.refused && disp.status == http.StatusServiceUnavailable && disp.retryAfterSec > 0 {
 		// Item 7 (register D-105/D-106): a 503 carrying its own Retry-After
@@ -3299,7 +3299,7 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 	// so persist the intent before any polling (Option A, intent.go).
 	r.intent.dispatched(jobID, base, contract.Goal)
 	pr.intentRecorded = true
-	r.pairInflight(&pr, jobID, pairNodeName(base, view.NodeID), []string{view.NodeID}, intendedSeat, "running")
+	r.pairInflight(&pr, jobID, pairNodeName(base, view.NodeID), []string{view.NodeID}, intendedSeat, "running", false)
 
 	timeoutSec := executionBudgetSec(contract)
 	// pollBudget is the budget for WORK. Before the node gained a real queue
