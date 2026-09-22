@@ -192,6 +192,35 @@ non-commercial — ADR 0011).
 > creative-marketing-pipelines session: **Q5_1 (15.4GB) + fp8 Qwen2.5-VL encoder fits 16GB with
 > block-swap** — composite peak **15,757 MiB** (HiDream for comparison: 15,688 MiB). A manifest that
 > pins a K-quant will download 15GB and then fail at load time, so pin the `_1` quant explicitly.
+
+**Qwen-Image-2.1 — an OPT-IN, NON-COMMERCIAL family (ADR 0058), never seeded.** The weights are
+under the **Qwen Research License** (§2.a: "FOR NON-COMMERCIAL PURPOSES ONLY"), so no tier seeds
+them and the installer never downloads them. A node that should offer it binds it as a named
+`imagegen_families` / `gen_edit_families` overlay with `"license": "Qwen Research License",
+"commercial_use": false` (how-to: `docs/OPERATOR-GUIDE.md` §3 "Add a named image or edit family";
+graph, schedules and launch profile: `docs/systems/media-generation.md`). Requirements: **ComfyUI ≥
+v0.37.0** (the 2.1 nodes; master ≥ `95539f56` recommended for the KV-cache placement fix), torch
+cu130 for the int8 files. Files, from `Comfy-Org/Qwen-Image-2.1` at revision
+`5dc5850eb514a3685f6a03a2641728a8f7549c69` — the repo's folder names ARE the ComfyUI model classes,
+so `--local-dir <model_root>` lands each file where its loader looks (size and sha256 = the HF LFS
+oid; verify with `sha256sum` after download):
+
+| set | file (→ `<model_root>/<same path>`) | bytes | sha256 |
+|---|---|---|---|
+| quality (bf16) | `diffusion_models/qwen_image_2.1_bf16.safetensors` | 14,230,280,616 | `89f4158d066cc33906a199fca85634f766892dd78f49b6698dabf187ac86c4bc` |
+| quality (bf16) | `text_encoders/qwen3vl_8b_bf16.safetensors` | 17,534,334,616 | `68bdc82bc1b66851162ae656225e7e2068166b603db19bd5d5a3b90eb12669a9` |
+| quality (bf16) | `vae/qwen_image_2.1_vae_bf16.safetensors` | 675,509,688 | `bb21f7473051e1ac368515dd3f2e15cd44d7a11748ee8823e1ddca3e4876b7c9` |
+| speed (int8) | `diffusion_models/qwen_image_2.1_int8_convrot.safetensors` | 7,256,783,064 | `cb74113cb03faecd79611b01fd7fd642f0aa60d6f0b95086abee214d75eaa57d` |
+| speed (int8) | `text_encoders/qwen3vl_8b_int8_convrot.safetensors` | 9,350,798,360 | `8bfd0f6e12abf2d2d697ecc888e5e90b0d6741d6708f05799f53afa560452e8f` |
+| optional | `text_encoders/qwen3vl_8b_w4a8.safetensors` | 6,312,105,364 | `7754425e55e7bea2bfde4dde59a4cc236cb44e5ee9c215ea66ef8d47012824eb` |
+
+The quality set is 32.44 GB; with the int8 pair, 49.05 GB. The bf16 text encoder alone (17.5 GB)
+is larger than one 16 GB card, so a single-card bf16 binding needs ComfyUI's dynamic VRAM
+(`comfy_dynamic_vram: "on"` on the family) to stream it. Example (not run by the installer):
+`hf download Comfy-Org/Qwen-Image-2.1 diffusion_models/qwen_image_2.1_bf16.safetensors
+text_encoders/qwen3vl_8b_bf16.safetensors vae/qwen_image_2.1_vae_bf16.safetensors --revision
+5dc5850eb514a3685f6a03a2641728a8f7549c69 --local-dir <model_root>` (it leaves a
+`.cache/huggingface/` beside the files; remove it). No GGUF loader is wired for this family.
 8GB tiers: **VERIFIED** — O1 bf16 @2048 runs on an 8GB 3070 with 64GB RAM (5.9 min/render,
 an 8GB 3070 + 64GB RAM box, 2026-07-16). **J4: this binding is now AUTOMATIC on fresh installs** —
 `ampere-8`/`blackwell-8` carry a `config_seed_ram_mid_high` layer that install.ps1 merges only when

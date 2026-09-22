@@ -134,7 +134,7 @@ func TestFamilyRouteReportsAnUnresolvableOrScriptlessOverlay(t *testing.T) {
 	}
 }
 
-// Preset-implied files (register D7): the Qube's 2511 edit route was bound to
+// Preset-implied files (register D7): the reference box's 2511 edit route was bound to
 // preset lightning8 with gen_edit_lora unset, and the Lightning LoRA that preset
 // loads was on no models root while doctor stayed green. The files a binding's
 // graph opens WITHOUT a key naming them — a preset's LoRA, a builder's default

@@ -235,7 +235,7 @@ func ModelBindings(cfg config.Config) []Binding {
 	}
 	// Files the default bindings' graphs load WITHOUT a key naming them: a builder's
 	// default text encoder/VAE and a preset's distillation LoRA. These were invisible —
-	// the Qube's 2511 edit route is bound to preset lightning8 with gen_edit_lora unset,
+	// the reference box's 2511 edit route is bound to preset lightning8 with gen_edit_lora unset,
 	// and the Lightning LoRA that preset loads was absent from every models root while
 	// doctor stayed green. Only routes that are actually bound are checked.
 	if cfg.ImageGenScript != "" && cfg.ImageGenEngine != "sdcpp" {

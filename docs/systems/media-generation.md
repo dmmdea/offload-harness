@@ -26,12 +26,14 @@ the recorded warm-swap upgrade path — deliberately not wired yet.
 - Which of the three edit-shaped routes fits a given change?
 - When is batching worth it?
 - Why is FLUX not an option?
+- How does a non-commercial model (Qwen-Image-2.1) ship, and how is every result it makes tagged?
+- Which card does a ComfyUI route render on, and how is that pinned per binding?
 
 ## Scope
 
 The generation verbs and MCP tools, the GPU lock and zero-warm lifecycle, warm batch mode, the
-inpainting route, the generative instruction-edit route, the edit-operation pack, and per-machine
-model bindings.
+inpainting route, the generative instruction-edit route, the edit-operation pack, per-machine
+model bindings, named license-tagged families, and the per-binding ComfyUI launch profile.
 
 ## Non-scope
 
@@ -45,6 +47,9 @@ model bindings.
 **GPU Lock** — a single-slot, cross-process lock; only one GPU-heavy job runs at a time per machine.
 **Zero-Warm** — no GPU residency persists between jobs. **Warm Batch** — an opt-in session where the
 checkpoint loads once for N renders. **Op** — one image-editing operation inside `edit-image`.
+**Named family** — an opt-in image or edit binding beside the node's default one, selected per
+request by `family` and carrying its own license (ADR 0058). **Launch profile** — the ComfyUI launch
+flags a binding needs (`comfy_cuda_device`, `comfy_dynamic_vram`, `comfy_extra_args`).
 
 ## How the system works
 
@@ -179,8 +184,10 @@ it snowing heavily", "turn the leather into fur". A Qwen-Image-Edit-class model 
 through its own vision encoder and re-renders the whole frame, so fine detail outside the intended
 change will shift — prefer inpainting whenever a mask is possible. The route is bound per machine by
 the `gen_edit_*` keys (named `gen_edit`, not `edit`, because `edit_*` is the deterministic PIL
-route); no tier seeds them, so it defers until a machine binds `gen_edit_script`
-(`render/comfy-edit.mjs`) and `gen_edit_unet`. `gen_edit_preset` pairs steps+cfg+LoRA as a matched
+route). Since 0.132.5 every ≥16 GB ComfyUI tier seeds them (and `blackwell-8` in its RAM layer):
+`gen_edit_script` `render/comfy-edit.mjs`, `gen_edit_unet` `qwen-image-edit-2511-Q5_1.gguf`,
+`gen_edit_preset` `lightning8`. A box without that seed defers until it binds `gen_edit_script`
+and `gen_edit_unet`. `gen_edit_preset` pairs steps+cfg+LoRA as a matched
 triple (`full` | `lightning8`, the default | `lightning4`), because a Lightning LoRA at full
 steps/cfg produces mush and the base at 4 steps produces noise, and either renders "successfully".
 The builder itself defaults neither steps nor cfg — it throws if either is missing
@@ -233,7 +240,9 @@ assumptions, all default-preserving: `COMFY_COMPUTE_DEVICE` overrides the DisTor
 `compute_device` in the Wan graph (was hardcoded `cuda:0`); `COMFY_EXTRA_ARGS` appends verbatim
 flags to the managed ComfyUI launch (whitespace-split — a flag VALUE containing spaces is
 inexpressible, fine for ComfyUI-style flags); `TTS_DEVICE` overrides the
-Chatterbox worker's torch device auto-pick.
+Chatterbox worker's torch device auto-pick. Since the launch profile (below), `COMFY_EXTRA_ARGS`
+can also come from the config (`comfy_extra_args`), and the harness sets `COMFY_CUDA_DEVICE` /
+`COMFY_DYNAMIC_VRAM` per binding.
 
 ## Data and state
 
@@ -243,8 +252,10 @@ observations are recorded as a side effect of successful renders — see
 
 ## Interfaces and entry points
 
-CLI verbs `generate-image`, `inpaint-image`, `generate-video`, `generate-audio`, `generate-svg`,
-`edit-image`, `media`, `run-graph`; the matching `offload_*` MCP tools. The generative instruction
+CLI verbs `generate-image` (`--family`, `--transparent`), `inpaint-image`, `generate-video`,
+`generate-audio`, `generate-svg`, `edit-image`, `media`, `run-graph`; the matching `offload_*` MCP
+tools (`family` / `transparent` on `offload_generate_image`; `family` / `images` / `transparent` on
+`offload_edit_image_generative`). The generative instruction
 edit is MCP-only (`offload_edit_image_generative`); ad-hoc runs use `render/comfy-edit.mjs`
 directly.
 
@@ -288,11 +299,15 @@ Bound per machine through flat config keys, so the same code serves different ha
 | Upscale | `upscale_script` (shipped default `render/comfy-upscale.mjs`), `upscale_model` (ComfyUI `upscale_models/` filename; empty = `videogen_upscale_model`), `upscale_timeout_sec` (600) |
 | Video | `videogen_family` (`""`/`wan22` = Wan 2.2; `ltx25` = LTX-2.5 joint-AV), `videogen_unet_high`, `videogen_unet_low`, `videogen_text_encoder`, `videogen_upscale_model` (Wan keys); `videogen_transformer`, `videogen_video_vae`, `videogen_audio_vae`, `videogen_latent_upscaler`, `videogen_fps`, `videogen_pool_vvram_gb/pool_compute/pool_donor` (LTX-2.5 keys) |
 | Audio | `voicegen_*`, `musicgen_script`; `tts_endpoint` / `tts_model` (default `tts-1`) / `tts_voice` / `tts_api_key` (0.113.25: an OpenAI-compatible speech SERVER for `generate_audio kind=voice` — `voice: endpoint`, or the default on a box with no `voicegen_script`; `internal/ttsclient` POSTs `/v1/audio/speech`, writes the WAV atomically, defers naming the server's words on any non-audio answer, takes no media lease because the server owns its GPU; e.g. VoiceStudio on `http://127.0.0.1:3900`) |
-| ComfyUI | `comfy_dir`, per-task `*_script` and `*_timeout_sec` |
+| Qwen-Image-2.1 (family `qwen-image-2.1`) | `imagegen_ckpt` + `imagegen_clip` + `imagegen_vae` (all three REQUIRED — the builder has no defaults), `imagegen_schedule` (`official` default / `comfy`), `imagegen_steps/cfg` (both or neither; official 40 / 1.0); edit: `gen_edit_family: "qwen-image-2.1"`, `gen_edit_unet/clip/vae`, `gen_edit_resolution` (0 = 1024), `gen_edit_cache_device` (`auto`/`gpu`/`cpu`/`off`) |
+| Named families + license (ADR 0058) | `imagegen_families`, `gen_edit_families` (name → overlay + `license` + `commercial_use`); `imagegen_license`/`imagegen_commercial_use`, `gen_edit_license`/`gen_edit_commercial_use` (the default binding's own tag, both or neither) |
+| ComfyUI | `comfy_dir`, per-task `*_script` and `*_timeout_sec`; launch profile `comfy_cuda_device`, `comfy_dynamic_vram` (`on`/`off`/`""`), `comfy_extra_args` |
 
-Hardware profiles seed these. Tiers at 16 GB and above bind **HiDream-O1 bf16** via
-`imagegen_family` — the official graph for that DiT, never the generic SDXL graph — and **Wan 2.2
-Q8_0** experts with an fp16 text encoder. **RealVisXL** is the SDXL-class inpainting default. The 8 GB
+Hardware profiles seed these. The single-card 16 GB tiers (`blackwell-16`, `ampere-16`, `volta-16`)
+and the 8 GB tiers' RAM layer bind **HiDream-O1** via `imagegen_family` — the official graph for that
+DiT, never the generic SDXL graph; the pooled and 32 GB-class Blackwell tiers (`blackwell-2x16`,
+`-3x16`, `-32`, `-48`, `-72`) bind **Krea 2 Turbo** (below). No tier seeds a non-commercial family.
+The Wan 2.2 video tiers bind **Wan 2.2 Q8_0** experts with an fp16 text encoder. **RealVisXL** is the SDXL-class inpainting default. The 8 GB
 tiers stay SDXL-class for image generation until O1 on 8 GB is verified on real hardware.
 
 **LTX-2.5** (`videogen_family: "ltx25"`) is the measured 32 GB-class video seat (2026-08-12
@@ -355,7 +370,7 @@ never by shared code. **Windows multi-GPU visibility (ComfyUI >= 0.34):** upstre
 The recommended **≥16 GB image-*edit* primitive is Qwen-Image-Edit-2511** (Apache-2.0). Since the
 generative-edit route landed (0.44.0) it is a first-class `gen_edit_*` config binding — set
 `gen_edit_unet` to the 2511 file and the harness drives it through `render/comfy-edit.mjs` /
-`render/wf-qwen-image-edit.mjs`; no tier seeds it, so binding remains a per-machine decision.
+`render/wf-qwen-image-edit.mjs`; since 0.132.5 the ≥16 GB ComfyUI tiers seed it (see above).
 Callers with their own graphs can still reach the model through
 [run-graph](../flows/run-graph-manifest-satisfaction.md) with the model set declared in the node
 manifest (e.g. the creative-marketing-pipelines scene-swap). **Pin a `_1` GGUF quant
@@ -364,6 +379,136 @@ manifest (e.g. the creative-marketing-pipelines scene-swap). **Pin a `_1` GGUF q
 `blackwell-16` (<node-b>, then a single RTX 5060 Ti 16 GB) 2026-07-19: Q5_1 (15.4 GB) + fp8 encoder fits 16 GB with block-swap, composite peak
 15,757 MiB. FLUX-family models remain prohibited
 ([ADR 0011](../architecture/decisions/0011-flux-family-license-prohibition.md)).
+
+## Named families, launch profiles and license tags (ADR 0058)
+
+A node has ONE default image binding (`imagegen_*`) and ONE default edit binding (`gen_edit_*`).
+`imagegen_families` and `gen_edit_families` add **named** bindings beside them. A request selects one
+with `family` — `offload_generate_image` / `offload_edit_image_generative`, `generate-image --family`,
+the fleet `image-gen` payload — and a request without it renders exactly what it rendered before
+families existed. This is the only way a model whose license forbids commercial use ships in this
+repository ([ADR 0058](../architecture/decisions/0058-non-commercial-model-families-ship-only-as-named-license-tagged-opt-ins.md),
+amending the reasoning of [ADR 0011](../architecture/decisions/0011-flux-family-license-prohibition.md)
+for named, tagged families): never a default, never a seed default, always an explicit per-request
+opt-in whose result carries its license.
+
+**An overlay is a complete binding.** It is a JSON object of the route's own keys — image:
+`imagegen_*`, `sdcpp_*`, `comfy_*`; edit: `gen_edit_*`, `comfy_*` — plus two REQUIRED meta keys,
+`license` (string) and `commercial_use` (bool). Resolution (`config.ResolveImageFamily` /
+`ResolveEditFamily`) starts from the node's config, **clears every model-binding key** of that route
+(checkpoint, family, VAE, text encoder, LoRA, preset, sampler knobs, pool keys, sdcpp model files),
+keeps the route keys (script, engine, timeout, reserve) and the launch keys, then applies the
+overlay. So a family never inherits the default's LoRA or pool by accident. The config load refuses:
+an overlay key outside those prefixes or not a config key (typo), a forbidden key (`*_families`,
+`*_license`, the prompt refiner), a missing/empty `license`, a missing `commercial_use`, a family name
+outside `[a-z0-9._-]`, or a name that collides with the default binding's own family. Every family is
+also checked by the same binding-trap warnings as the default, with its name in front.
+
+**Every result is tagged.** Results carry `family` (the default binding's own name for an unnamed
+request), and `license` + `commercial_use` whenever the binding declares them; a `commercial_use:
+false` result also carries `license_note` ("research/evaluation use only under <license>; not for
+commercial work"). The ledger row carries `license` (`ledger.Entry.License`; absent = UNKNOWN, never
+"safe"). `offload_status` lists `media.image_families` / `media.edit_families` — name, graph family,
+engine, checkpoint, license, commercial_use (null = undeclared) and the route verdict — and
+`/fleet/health` publishes `image_families` with the same license flags. `width`/`height` in a
+`generate_image` or `edit_image_generative` result are **measured** from the written file
+(`imagegen.OutputSize`), not echoed from the request.
+
+**Unknown family, unsupported flag.** An unknown `family` defers with the list this node serves.
+`transparent` is honoured only by the `qwen-image-2.1` graph on ComfyUI (the only RGBA VAE); any other
+binding defers rather than render opaque. `images` (multi-reference) needs a 2.1 edit family and is
+capped at 10 images in all, target included; a 2511 `preset` on a 2.1 edit defers by name. The render
+runner closes the same gap one layer down: `comfy-render.mjs --family` is a closed set, and an
+unknown value exits 2 before any GPU work — it used to render the generic SDXL graph silently.
+`generate-image --batch` renders the default binding only; `--family` with `--batch` is refused.
+
+**`doctor` sees the whole family.** `media.routes` gains `generate_image:<name>` and
+`edit_image_generative:<name>`: CONFIGURED only when the family's script resolves AND every model file
+its graph opens sits in the class directory the loader reads (resolved under the family's own
+`comfy_dir`); the verdict leads with `NON-COMMERCIAL (<license>)` for a research family. The `comfyui
+model bindings` section also resolves the files a binding's graph loads WITHOUT a key naming them — a
+preset's Lightning LoRA (`qwen-image` `lightning4`, 2511 `lightning8`/`lightning4`) and a builder's
+default text encoder and VAE — so an edit route bound to preset `lightning8` with its LoRA on no models
+root is a `MISSING` row instead of a green doctor and a failed render.
+
+### Qwen-Image-2.1 (`render/wf-qwen-image-21.mjs`)
+
+A 7B single-stream DiT with a Qwen3-VL-8B encoder and a new 4-channel (RGBA) VAE — not a variant of
+Qwen-Image 2512, whose graph cannot drive it. Needs **ComfyUI ≥ v0.37.0** (the nodes arrived in PR
+#16400; master ≥ `95539f56` adds the KV-cache placement fix #16429). Weights: **Qwen Research License**
+(non-commercial) — bind it only as a named family with `"license": "Qwen Research License",
+"commercial_use": false`. The download set is in `setup/SETUP-AGENT.md`.
+
+- **T2I graph:** `UNETLoader` + `CLIPLoader(type "qwen_image")` + `VAELoader` → `TextEncodeQwenImage21`
+  → sampler → `VAEDecode` (4-channel) → `SplitImageWithAlpha` (opaque RGB, the default) → `SaveImage`.
+  `EmptyLatentImage` (the sampler reshapes it to the model's 64-channel /16 latent); no
+  `ModelSamplingAuraFlow`, no SD3 latent. Width/height snap DOWN to /32 (floor 256); default 2048×2048,
+  40 steps, cfg 1.0, euler — the official recipe. `--ckpt`, `--clip` and `--vae` are all required; a
+  builtin VAE, a `.gguf` UNET (no GGUF loader is wired; 2.1 GGUFs need the leejet ComfyUI-GGUF fork)
+  and pool flags (v1 is single-card) are refused.
+- **Schedules (`imagegen_schedule`):** `official` (default) = the model repo's diffusers
+  `FlowMatchEulerDiscreteScheduler` — dynamic mu from the target token count on the 256→8192 line
+  (extrapolated past it: 2048² → mu 1.3129), exponential time shift, `shift_terminal` 0.02 — computed
+  in JS and fed through `ManualSigmas` + `SamplerCustomAdvanced` (`BasicGuider` at cfg 1, `CFGGuider`
+  otherwise). Golden-tested to 1e-6 against the real diffusers scheduler
+  (`render/testdata/qwen-image-21-sigmas.golden.json`, generator beside it). Values are printed
+  fixed-point because `ManualSigmas`' parser has no exponent support. `comfy` = `KSampler(euler,
+  simple)` with ComfyUI's fixed model shift (0.69 at every size). ComfyUI #16447 contests which looks
+  better at 2K; the binding picks.
+- **Transparency:** `transparent: true` wraps the prompt in the official RGBA template ("This is an
+  RGBA image with transparency. … The image has alpha channel and the background is transparent.")
+  and keeps the alpha channel; the default splits it off, so an ordinary prompt never hands a
+  partially-transparent PNG to a compositor.
+- **Edit graph (`gen_edit_family: "qwen-image-2.1"`):** `LoadImage` per image → `TextEncodeQwenImage21`
+  with `vae` and `images.image_1..N` (image_1 = the edit target; references are `<image2>`…`<image10>`
+  in the prompt) → `QwenImage21Cache(device, dtype)` on the model path → `KSampler` on the encoder's
+  own latent (output 2, on the target's grid) → decode. `comfy-edit.mjs --ref` repeats, each staged
+  into `<COMFY_DIR>/input` and removed afterwards. `gen_edit_resolution` (default 1024; 0 keeps each
+  image's size) and `gen_edit_cache_device` (`gpu`/`off` stay out of the host-RAM prefetch path that
+  ComfyUI #16443 aborts in on dynamic-VRAM edits) are its knobs; the 2511-only flags (preset, LoRA,
+  megapixels) are refused on it.
+- **Footprint key:** `qwen-image-2.1` renders are bucketed by the precision in the DiT's filename
+  (`bf16`, `int8`, `nvfp4`, …) — the peaks differ about 2×.
+- **Known open upstream defects (2026-09-22):** #16435 (grid-dependent noise on some edit grids) and
+  #16443 (dynamic-VRAM edit abort, fix PR #16450 open). Both are why 2511 stays the default edit seat.
+
+### Launch profile (`comfy_cuda_device`, `comfy_dynamic_vram`, `comfy_extra_args`)
+
+The harness launches ComfyUI on demand (`render/comfy-lifecycle.mjs`). Before this, every launch
+took its flags from the process's `COMFY_EXTRA_ARGS` alone, with every card visible and no device
+flag, so every single-card graph rendered on ComfyUI's default device — on a mixed box its
+**fastest** card, which on the three-card tier is the display card. A binding now carries a profile,
+handed to the runner as env:
+
+| key | env | launch effect |
+|---|---|---|
+| `comfy_cuda_device` | `COMFY_CUDA_DEVICE` | `--cuda-device <n>` (index or comma list, in **ComfyUI's device order** — the order the `*_pool_*` `cuda:N` keys use, fastest-first unless `CUDA_DEVICE_ORDER` says otherwise, NOT nvidia-smi's PCI order). It hides every other card. Never `--default-device`: that only reorders the visible list and silently re-maps what every pool key means. |
+| `comfy_dynamic_vram` | `COMFY_DYNAMIC_VRAM` | `on` strips `--disable-dynamic-vram` from the extra args (a bf16 DiT larger than one card streams instead of partial-offloading); `off` adds it (DisTorch2 pooled seats need it off, MultiGPU #191); `""` leaves the args alone |
+| `comfy_extra_args` | `COMFY_EXTRA_ARGS` | verbatim extra flags; `""` = inherit the process env, as before. A `--cuda-device`/`--default-device` here loses to `comfy_cuda_device` |
+
+**Where the pin applies.** `comfy_cuda_device` is applied ONLY to the single-card routes — image
+generation when the binding does not pool, generative edit, upscale, inpaint, animate and music. It is
+never applied to a pooled image or video seat (the pool keys name its cards, and the blackwell-3x16
+video pool must COMPUTE on `cuda:0`, the MultiGPU #220 exception a pin would hide), and never to
+`run-graph` (the caller's graph owns its placement; it still gets the launch-wide keys). The
+`COMFY_CUDA_DEVICE` / `COMFY_DYNAMIC_VRAM` env is always set (empty when unbound), so a value in the
+operator's shell can never pin a route whose binding did not ask for it. A family overlay may carry
+its own `comfy_*` keys: the recipe planned for 2.1 on a three-card box is `comfy_cuda_device "1"` +
+`comfy_dynamic_vram "on"` on the family only, so the pooled default keeps `--disable-dynamic-vram`
+(UNMEASURED until the family's arms run). The config load warns on `comfy_dynamic_vram "on"` or a
+`comfy_cuda_device` together with pool keys.
+
+**A running ComfyUI that contradicts the profile is never reused silently.** Before reusing an
+instance already listening, the runner reads `GET /system_stats` `system.argv`. If a device pin or a
+dynamic-VRAM setting is requested and the argv does not honour it: a harness-launched instance
+(fingerprint: pid + exact argv, `render/comfy-ownership.mjs`) whose owner is gone is stopped and
+relaunched with the right flags; anything else fails with a greppable
+`COMFY-PROFILE-MISMATCH: …` line and the render defers — a foreign instance is never killed. An
+unreadable argv with a profile requested is a mismatch, never a pass.
+
+**blackwell-3x16 seeds `comfy_cuda_device: "1"`** (the first 5060 Ti in ComfyUI's order; `cuda:0` is
+the 5070 Ti display card), and `TestTripleBlackwellNeverSchedulesOntoTheDisplayCard` fails a tier that
+seeds a single-card ComfyUI route without a non-display pin.
 
 ## Error handling
 
@@ -376,6 +521,12 @@ Generation runs local. `run-graph` executes caller-supplied graphs and provision
 node packs, which is a trusted-caller interface by design — see
 [ADR 0007](../architecture/decisions/0007-host-torch-pinned-additive-provisioning.md) for what
 protects the environment from it.
+
+**Licenses.** A non-commercial family's output is tagged (`license`, `commercial_use: false`,
+`license_note`) and its ledger row carries the license, but the tag is informational: nothing stops
+a caller from republishing the file. Do not route brand or client work to a family whose
+`commercial_use` is false, and read an absent license as UNKNOWN
+([ADR 0058](../architecture/decisions/0058-non-commercial-model-families-ship-only-as-named-license-tagged-opt-ins.md)).
 
 ## Capability is derived, never declared
 
@@ -466,7 +617,14 @@ recorded as known offenders with their reason rather than silently skipped — a
 ## Source map
 
 - [`render/gpu-lock.mjs`](../../render/gpu-lock.mjs) — slot, free step, teardown
-- [`render/comfy-lifecycle.mjs`](../../render/comfy-lifecycle.mjs) — cold start, warm flag
+- [`render/comfy-lifecycle.mjs`](../../render/comfy-lifecycle.mjs) — cold start, warm flag, the
+  launch profile (`launchFlags`, `reuseVerdict`, `COMFY-PROFILE-MISMATCH`)
+- [`render/comfy-ownership.mjs`](../../render/comfy-ownership.mjs) — the harness-launch fingerprint
+- [`render/comfy-render.mjs`](../../render/comfy-render.mjs) — the image family switch (closed
+  `KNOWN_FAMILIES`; unknown `--family` exits 2)
+- [`render/wf-qwen-image-21.mjs`](../../render/wf-qwen-image-21.mjs) — the Qwen-Image-2.1 T2I and
+  multi-reference edit graphs and the official sigma schedule
+  ([golden fixture](../../render/testdata/qwen-image-21-sigmas.golden.json))
 - [`render/comfy-generate.mjs`](../../render/comfy-generate.mjs) — single and batch render
 - [`render/comfy-edit.mjs`](../../render/comfy-edit.mjs) /
   [`render/wf-qwen-image-edit.mjs`](../../render/wf-qwen-image-edit.mjs) — the generative edit
@@ -479,12 +637,17 @@ recorded as known offenders with their reason rather than silently skipped — a
 - [`internal/imagegen/`](../../internal/imagegen/), [`internal/gpugen/`](../../internal/gpugen/)
 - [`internal/mediacap/mediacap.go`](../../internal/mediacap/mediacap.go) — derived capability, one
   source for both `doctor` and `offload_status`
+- [`internal/mediacap/families.go`](../../internal/mediacap/families.go) — per-family route verdicts,
+  preset/builder-implied model files, the family rows `offload_status` publishes
+- [`internal/config/families.go`](../../internal/config/families.go) — family overlay validation and
+  resolution, license notes (ADR 0058)
 
 ## Related docs
 
 - [../flows/zero-warm-generation.md](../flows/zero-warm-generation.md)
 - [../architecture/decisions/0009-zero-warm-gpu-lifecycle.md](../architecture/decisions/0009-zero-warm-gpu-lifecycle.md)
 - [../architecture/decisions/0011-flux-family-license-prohibition.md](../architecture/decisions/0011-flux-family-license-prohibition.md)
+- [../architecture/decisions/0058-non-commercial-model-families-ship-only-as-named-license-tagged-opt-ins.md](../architecture/decisions/0058-non-commercial-model-families-ship-only-as-named-license-tagged-opt-ins.md)
 
 ## Re-encoding ops and `ffmpeg_video_encoder` (0.113.10)
 

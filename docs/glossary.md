@@ -113,6 +113,14 @@ not gated at all. The gate reads that lease, never acquires it. See
 [architecture/decisions/0025-model-residency-is-arbitrated-in-process-by-base.md](architecture/decisions/0025-model-residency-is-arbitrated-in-process-by-base.md)
 and [architecture/decisions/0026-text-load-admissions-wait-for-the-media-lease.md](architecture/decisions/0026-text-load-admissions-wait-for-the-media-lease.md).
 
+## Named family
+
+An opt-in media binding beside a node's default one (`imagegen_families` / `gen_edit_families`),
+selected per request by `family`. Narrower than "model family": it is a whole binding (script,
+engine, model files, launch keys) that must declare `license` and `commercial_use`, and every result
+it produces carries its license. The only way a non-commercial model ships in this repository — see
+[ADR 0058](architecture/decisions/0058-non-commercial-model-families-ship-only-as-named-license-tagged-opt-ins.md).
+
 ## Node Manifest
 
 The declaration accompanying a run-graph request: which ComfyUI custom node packs are required (at
@@ -223,6 +231,14 @@ the Cascade's model Tiers above.
 A hardware tier that COMPOSES others: the box is a complete instance of each at once, declares
 them in `composes`, and routes work across device Layers. See
 [systems/composite-tier.md](systems/composite-tier.md) and ADR 0052.
+
+## Launch profile
+
+The ComfyUI launch flags one media binding needs — `comfy_cuda_device` (`--cuda-device`, in
+ComfyUI's device order), `comfy_dynamic_vram` and `comfy_extra_args` — handed to the render runner as
+env. The device pin applies to single-card routes only, never to a pooled seat or run-graph, and a
+running ComfyUI whose argv contradicts the profile is never reused silently
+(`COMFY-PROFILE-MISMATCH`). See [systems/media-generation.md](systems/media-generation.md).
 
 ## Layer
 

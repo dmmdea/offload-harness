@@ -313,8 +313,94 @@ mask with `mask_boxes` yourself when it does.
 For edits that have **no drawable region** ("make it snowing heavily", "turn the leather
 into fur") the third edit route is the maskless **generative instruction edit** — MCP-only
 (`offload_edit_image_generative`, no CLI verb), bound per machine by the `gen_edit_*`
-config keys and unbound by default. See
+config keys — seeded on every ≥16 GB ComfyUI tier since 0.132.5 (Qwen-Image-Edit 2511,
+preset `lightning8`), unbound elsewhere. See
 [systems/media-generation.md](systems/media-generation.md).
+
+### Add a named image or edit family (license-tagged opt-in, ADR 0058) ✅
+
+A family is a second (third, …) binding beside the box's default one, selected per request
+with `family`. It is how a non-commercial model such as **Qwen-Image-2.1** (Qwen Research
+License) is offered at all: never as the default, always tagged. Put the weights in the
+ComfyUI class directories first (download set: `setup/SETUP-AGENT.md`), back up the config,
+then add the overlay:
+
+```json
+"imagegen_families": {
+  "qwen-image-2.1": {
+    "license": "Qwen Research License",
+    "commercial_use": false,
+    "imagegen_family": "qwen-image-2.1",
+    "imagegen_ckpt": "qwen_image_2.1_bf16.safetensors",
+    "imagegen_clip": "qwen3vl_8b_bf16.safetensors",
+    "imagegen_vae": "qwen_image_2.1_vae_bf16.safetensors",
+    "imagegen_timeout_sec": 2400,
+    "comfy_cuda_device": "1",
+    "comfy_dynamic_vram": "on"
+  }
+},
+"gen_edit_families": {
+  "qwen-image-2.1": {
+    "license": "Qwen Research License",
+    "commercial_use": false,
+    "gen_edit_family": "qwen-image-2.1",
+    "gen_edit_unet": "qwen_image_2.1_bf16.safetensors",
+    "gen_edit_clip": "qwen3vl_8b_bf16.safetensors",
+    "gen_edit_vae": "qwen_image_2.1_vae_bf16.safetensors",
+    "gen_edit_cache_device": "gpu",
+    "comfy_cuda_device": "1",
+    "comfy_dynamic_vram": "on"
+  }
+}
+```
+
+Rules the load enforces (a violation refuses the config by name): `license` (non-empty
+string) and `commercial_use` (bool) are required; image overlays take only `imagegen_*`,
+`sdcpp_*`, `comfy_*` keys, edit overlays only `gen_edit_*`, `comfy_*`, and every key must be
+a real config key; a family does NOT inherit the default's checkpoint, LoRA, preset, sampler
+knobs or pool — it inherits the script, engine, timeout and launch keys unless it sets them.
+The values above for timeout, device and dynamic VRAM are the planned starting point for a
+three-card box, not measurements — replace them with the node's own measured values.
+
+Verify: `local-offload doctor` shows a `generate_image:qwen-image-2.1` route (CONFIGURED only
+when every model file is where the loader looks, prefixed `NON-COMMERCIAL (Qwen Research
+License)`) and the family's files in `comfyui model bindings`; `offload_status` lists it under
+`media.image_families`. Render through it:
+
+```powershell
+local-offload generate-image "a neon shop sign on a rainy street at night" --family qwen-image-2.1 --json
+local-offload generate-image "a glass perfume bottle" --family qwen-image-2.1 --transparent --json
+```
+
+The result carries `family`, `license`, `commercial_use: false` and `license_note`, and the
+ledger row the license. **Never use a `commercial_use: false` family for brand or client
+work.** A bare `generate-image` (no `--family`) still renders the default binding unchanged.
+To tag the default binding too, set `imagegen_license` + `imagegen_commercial_use` (both or
+neither; edit: `gen_edit_license` + `gen_edit_commercial_use`).
+
+### Pin a box's ComfyUI routes to a card (launch profile) ✅
+
+`comfy_cuda_device` launches ComfyUI with `--cuda-device <n>` for the single-card routes
+(un-pooled image generation, generative edit, upscale, inpaint, animate, music). The index is
+in **ComfyUI's device order** — the order the `*_pool_*` `cuda:N` keys use, fastest card first
+unless `CUDA_DEVICE_ORDER` is set — not nvidia-smi's PCI order. On the three-card tier
+`cuda:0` is the 5070 Ti display card, so the tier seeds `"1"`; an existing box sets it by
+hand. Pooled image/video seats never take the pin (their pool keys place them) and neither does
+`run-graph`.
+
+```json
+"comfy_cuda_device": "1",
+"comfy_dynamic_vram": "",
+"comfy_extra_args": ""
+```
+
+`comfy_dynamic_vram` `on` strips `--disable-dynamic-vram` from the launch (weight streaming for
+a DiT larger than one card), `off` adds it (required by DisTorch2 pooled seats), `""` leaves
+`COMFY_EXTRA_ARGS` alone; `comfy_extra_args` replaces the inherited `COMFY_EXTRA_ARGS` env when
+set. Keep `on` out of a binding that pools — every config load (so every CLI verb, doctor included) warns on stderr. If a ComfyUI is already running
+with other flags, a render that needs a different profile relaunches it when the harness
+started it and nobody holds it, and otherwise defers with `COMFY-PROFILE-MISMATCH: …` naming
+the difference — stop that instance (or start it with the binding's flags) and retry.
 
 ### Deterministic post-production (edit-image op pack) ✅
 
