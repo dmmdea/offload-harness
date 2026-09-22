@@ -24,6 +24,16 @@ Versioning: [SemVer](https://semver.org/).
 - Tests: 55 pass. Five mutants, each confirmed to typecheck first, are all caught — including one
   that first slipped past a vacuous test comparing `protocolText()` with itself (replaced by fixed
   expectations).
+## [0.132.7] - 2026-09-22 - PAIR cards name vLLM for an alias-bound vLLM seat
+
+- **PAIR labelled the Qube's flagship jobs `llamacpp`.** `EngineFor` reads the engine off the seat
+  NAME, and the agent seat is bound as `agent-pool`, an alias of `qwen3.8-27b-vllm-3card`. The
+  emitter now carries the box's `vllm_seats` and endpoint; `Emitter.LocalEngine` labels a local seat
+  `vllm` when it is declared directly or its roster canonical id is (cached 10 min, 30 s after a
+  failed roster read, which keeps the name-based answer). Local delegate placements and ledger rows
+  use it; remote placements keep `EngineFor`. The ledger observer builds its frame off the writer's
+  goroutine because the first lookup per seat may read the roster.
+
 ## [0.132.6] - 2026-09-21 - the three-card seat is the flagship agent seat
 
 - **The operator's order, finally in the table.** 2026-09-19: "the 3 card tier as the agent seat now and the 2 card
