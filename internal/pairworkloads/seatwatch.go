@@ -8,7 +8,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -16,6 +15,7 @@ import (
 
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/seatinflight"
+	"github.com/dmmdea/offload-harness/internal/seatload"
 	"github.com/dmmdea/offload-harness/internal/swapclient"
 )
 
@@ -33,6 +33,14 @@ import (
 // vLLM seats only: their /metrics count is exact, and the llama.cpp seats on
 // these boxes are the cascade rungs and the mem0 embedder, whose direct callers
 // would turn the Jobs list into noise.
+//
+// The seat's /metrics is read at the seat's OWN address — the `proxy` that
+// llama-swap's /running reports for the model it lists as ready — and never
+// through llama-swap's /upstream/<model>/… passthrough. llama-swap counts every
+// /upstream request as activity, so a 2-second poll through it reset the
+// seat's idle timer forever and the seat never reached its ttl unload. The
+// address is taken from /running, not from a port in config: two vLLM seats
+// can share one port, and only the one /running lists owns it right now.
 
 const (
 	// seatPollInterval is how often the seats are read. Two polls in a row
@@ -149,7 +157,8 @@ func (w *SeatWatcher) Poll(ctx context.Context) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	seen := map[string]bool{}
-	for _, seat := range running {
+	for _, rs := range running {
+		seat := rs.model
 		seen[seat] = true
 		st := w.seats[seat]
 		if st == nil {
@@ -165,7 +174,7 @@ func (w *SeatWatcher) Poll(ctx context.Context) {
 			// nor fails while the answer is unknown.
 			continue
 		}
-		total, ok := w.readLoad(ctx, seat)
+		total, ok := w.readLoad(ctx, rs.proxy)
 		if !ok {
 			st.busyStreak = 0
 			if st.open != nil {
@@ -245,9 +254,16 @@ func (w *SeatWatcher) emit(seat string, ep *seatEpisode, state, reason string, c
 	})
 }
 
-// readRunning lists the canonical ids of the declared vLLM seats llama-swap
-// reports ready.
-func (w *SeatWatcher) readRunning(ctx context.Context) ([]string, error) {
+// runningSeat is one declared vLLM seat llama-swap reports ready: its canonical
+// id and the address llama-swap forwards it to (its config `proxy:`).
+type runningSeat struct {
+	model string
+	proxy string
+}
+
+// readRunning lists the declared vLLM seats llama-swap reports ready, each with
+// the proxy address /running reports for it.
+func (w *SeatWatcher) readRunning(ctx context.Context) ([]runningSeat, error) {
 	body, err := w.get(ctx, w.swapBase+"/running")
 	if err != nil {
 		return nil, err
@@ -256,24 +272,31 @@ func (w *SeatWatcher) readRunning(ctx context.Context) ([]string, error) {
 		Running []struct {
 			Model string `json:"model"`
 			State string `json:"state"`
+			Proxy string `json:"proxy"`
 		} `json:"running"`
 	}
 	if err := json.Unmarshal(body, &doc); err != nil {
 		return nil, fmt.Errorf("pairworkloads: /running: %w", err)
 	}
-	var out []string
+	var out []runningSeat
 	for _, m := range doc.Running {
 		if m.State == "ready" && declaresVLLM(w.vllmSeats, m.Model) {
-			out = append(out, m.Model)
+			out = append(out, runningSeat{model: m.Model, proxy: m.Proxy})
 		}
 	}
 	return out, nil
 }
 
-// readLoad is the seat's live request count: running plus waiting. ok is
-// false when the metrics cannot be read or carry neither gauge.
-func (w *SeatWatcher) readLoad(ctx context.Context, seat string) (int, bool) {
-	body, err := w.get(ctx, w.swapBase+"/upstream/"+url.PathEscape(seat)+"/metrics")
+// readLoad is the seat's live request count: running plus waiting, read at
+// the seat's own address (proxy, from /running) — never via /upstream, which
+// would reset the seat's idle unload timer on every poll. ok is false when the
+// address is unknown, or the metrics cannot be read or carry neither gauge.
+func (w *SeatWatcher) readLoad(ctx context.Context, proxy string) (int, bool) {
+	seatBase, err := seatload.SeatURL(w.swapBase, proxy)
+	if err != nil {
+		return 0, false
+	}
+	body, err := w.get(ctx, seatBase+"/metrics")
 	if err != nil {
 		return 0, false
 	}

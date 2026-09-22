@@ -186,6 +186,26 @@ type Spec struct {
 	// fails at once with `"auto" tool choice requires --enable-auto-tool-choice`.
 	ToolCallParser  string `json:"tool_call_parser"`
 	ReasoningParser string `json:"reasoning_parser"`
+	// ChatTemplate is --chat-template: the chat template the engine renders prompts
+	// with instead of the model's own. Two forms:
+	//
+	//   - the FILE NAME of a template this repo ships under
+	//     setup/templates/vllm-seat/chat-templates/ (e.g. "qwen3-fold-system.jinja").
+	//     Artifacts then emits the file as templates/<name> beside the seat env, and
+	//     the flag names its installed path inside the WSL seat directory;
+	//   - an ABSOLUTE path on the serving box, for a template kept there by hand.
+	//
+	// Empty = the model's own template. It exists for the fold template: clients such
+	// as opencode send their system prompt as two or more LEADING system messages, the
+	// Qwen3-family template raises on any system message that is not first, and vLLM
+	// answers every such request 400. The shipped template folds a leading run of
+	// system messages into one and renders a single-system conversation exactly as the
+	// model's own template does.
+	ChatTemplate string `json:"chat_template,omitempty"`
+	// EnablePromptTokensDetails is --enable-prompt-tokens-details: the usage block
+	// then carries prompt_tokens_details.cached_tokens, the per-request prefix-cache
+	// hit count, which is the only per-request evidence that a cache tier served.
+	EnablePromptTokensDetails bool `json:"enable_prompt_tokens_details,omitempty"`
 
 	// HealthCheckTimeout is llama-swap's GLOBAL setting, raised because the vLLM
 	// cold load is 125-250 s; the default 120 kills the attach mid-load and cmdStop
@@ -260,8 +280,9 @@ type CacheServer struct {
 	// Address is the mount point for fs_native, or host:port for valkey.
 	Address string `json:"address"`
 	// L1StagingGB is LMCache MP's pinned host buffer beside the engine. It is a
-	// staging area, not the tier itself: 8 GB restored a 24k context entirely from
-	// the store. 0 = 8.
+	// staging area, not the tier itself. 0 = 2 (EffectiveL1StagingGB, register B-02).
+	// A hybrid-attention model stages far more per chunk and needs more: the
+	// reference two-card seat runs 8 and the three-card pipeline seat 16.
 	L1StagingGB int `json:"l1_staging_gb,omitempty"`
 	// ChunkSize is LMCache's chunk in TOKENS and MUST equal the engine's unified
 	// block size for this model and KV dtype (1568 for Qwen3.8-27B with fp8 KV, 784
@@ -541,6 +562,23 @@ func (s Spec) Validate(tier string) error {
 		req(s.launch() == LaunchWindowsWSL, fmt.Sprintf(
 			"pipeline_parallel / kv_cache_memory_bytes are rendered only by the %s launch, not %q", LaunchWindowsWSL, s.launch()))
 	}
+	if s.ChatTemplate != "" || s.EnablePromptTokensDetails {
+		// Same reason as above: only the windows-wsl env renders the argument tail.
+		req(s.launch() == LaunchWindowsWSL, fmt.Sprintf(
+			"chat_template / enable_prompt_tokens_details are rendered only by the %s launch, not %q", LaunchWindowsWSL, s.launch()))
+	}
+	if t := s.ChatTemplate; t != "" {
+		// The flag travels inside SEAT_EXTRA_ARGS, which the launcher splits on
+		// whitespace: a space in the path would split it into two arguments.
+		req(!strings.ContainsAny(t, " \t\n\"'\\"), fmt.Sprintf("chat_template %q must not contain whitespace, quotes or backslashes", t))
+		if s.shippedChatTemplate() {
+			req(safeID.MatchString(t) && strings.HasSuffix(t, ".jinja"), fmt.Sprintf(
+				"chat_template %q names a shipped template, which must be a plain *.jinja file name under setup/templates/vllm-seat/%s", t, ChatTemplatesDir))
+		} else {
+			req(strings.HasPrefix(t, "/"), fmt.Sprintf(
+				"chat_template %q must be a shipped template's file name or an ABSOLUTE path on the serving box", t))
+		}
+	}
 	if st := s.partitionStages(); st > 0 && st != s.pipelineParallel() {
 		problems = append(problems, fmt.Sprintf("layer_partition %q lists %d stage(s) but pipeline_parallel is %d",
 			s.LayerPartition, st, s.pipelineParallel()))
@@ -818,7 +856,7 @@ func (s Spec) tokens(r Runtime) map[string]string {
 		"__MOUNT_OPTS__":       mountOpts,
 		"__PRUNE_GB__":         prune,
 		"__MIN_MBPS__":         minMBPS,
-		"__EXTRA_ARGS__":       s.extraArgs(),
+		"__EXTRA_ARGS__":       s.extraArgs(r),
 		"__SERVED_NAMES__":     strings.Join(served, " "),
 		"__ALIASES__":          strings.Join(quoted, ", "),
 		"__UNIT__":             s.Unit,
@@ -887,7 +925,7 @@ func (s Spec) tensorParallel() int {
 // The two parser flags are NOT optional for an agent seat and they travel together:
 // the harness's agent loop sends tool_choice=auto, and vLLM answers 400 unless BOTH
 // --enable-auto-tool-choice and a parser are present.
-func (s Spec) extraArgs() string {
+func (s Spec) extraArgs(r Runtime) string {
 	args := []string{"--enable-auto-tool-choice"}
 	if s.ToolCallParser != "" {
 		args = append(args, "--tool-call-parser", s.ToolCallParser)
@@ -901,7 +939,37 @@ func (s Spec) extraArgs() string {
 	if s.KVCacheMemoryBytes > 0 {
 		args = append(args, "--kv-cache-memory-bytes", strconv.FormatInt(s.KVCacheMemoryBytes, 10))
 	}
+	if p := s.chatTemplatePath(r); p != "" {
+		args = append(args, "--chat-template", p)
+	}
+	if s.EnablePromptTokensDetails {
+		args = append(args, "--enable-prompt-tokens-details")
+	}
 	return strings.Join(args, " ")
+}
+
+// ChatTemplatesDir is the directory under setup/templates/vllm-seat/ that holds the
+// chat templates this repo ships, and the directory (under the WSL seat directory)
+// they are installed into.
+const ChatTemplatesDir = "chat-templates"
+
+// installedChatTemplatesDir is where a shipped chat template lands beside the seat's
+// env file (an artifact path, relative to the seat directory).
+const installedChatTemplatesDir = "templates"
+
+// shippedChatTemplate reports whether ChatTemplate names a template this repo ships
+// (a bare file name) rather than a path on the serving box.
+func (s Spec) shippedChatTemplate() bool {
+	return s.ChatTemplate != "" && !strings.ContainsAny(s.ChatTemplate, "/\\")
+}
+
+// chatTemplatePath is the --chat-template value: a shipped template's INSTALLED path
+// inside the WSL seat directory, or the operator's absolute path as given. "" = none.
+func (s Spec) chatTemplatePath(r Runtime) string {
+	if !s.shippedChatTemplate() {
+		return s.ChatTemplate
+	}
+	return path.Join(r.wslSeatDir(), installedChatTemplatesDir, s.ChatTemplate)
 }
 
 // mpPort is the LMCache MP server's loopback port, defaulted beside the engine's.
@@ -1079,6 +1147,19 @@ func (s Spec) Artifacts(templatesDir string, r Runtime) (map[string]string, erro
 				"a half-rendered unit starts and misbehaves instead of failing", s.ID, src, line, body[i:])
 		}
 		out[dst] = body
+	}
+	if s.shippedChatTemplate() {
+		// Copied VERBATIM — no token substitution and no token sweep: a chat template is
+		// the model's prompt format, and its promise (a single-system conversation renders
+		// exactly as the model's own template) holds only byte for byte. Line endings are
+		// normalized to LF because a Windows checkout may carry CRLF, and a CR inside a
+		// template string literal would reach the prompt.
+		src := filepath.Join(filepath.Dir(templatesDir), ChatTemplatesDir, s.ChatTemplate)
+		raw, err := os.ReadFile(src)
+		if err != nil {
+			return nil, fmt.Errorf("vllm seat %s: chat_template %q: %w", s.ID, s.ChatTemplate, err)
+		}
+		out[installedChatTemplatesDir+"/"+s.ChatTemplate] = strings.ReplaceAll(string(raw), "\r\n", "\n")
 	}
 	return out, nil
 }

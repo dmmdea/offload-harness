@@ -42,7 +42,7 @@ type vllmSeatAnswer struct {
 // declared id itself.
 //
 // The alias step is not defensive padding — it is the common case on the
-// reference boxes. The Qube's agent seat is bound as `agent-pool-3card`, an
+// reference boxes. The 3-card box's agent seat is bound as `agent-pool`, an
 // alias of `qwen3.8-27b-vllm-3card`, and it is the CANONICAL id that appears
 // in `vllm_seats`. An exact-match-only gate would therefore have left the
 // three-card box, the single largest consumer of the re-pack path, on the

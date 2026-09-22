@@ -193,7 +193,12 @@ func runInstallVLLMSeat(args []string) error {
 		if vllmseat.Executable(n) {
 			mode = 0o755
 		}
-		dst := filepath.Join(dir, n)
+		dst := filepath.Join(dir, filepath.FromSlash(n))
+		// An artifact may live in a subdirectory (a shipped chat template lands in
+		// templates/), so its parent is created here rather than assumed.
+		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+			return err
+		}
 		if err := os.WriteFile(dst, []byte(files[n]), mode); err != nil {
 			return err
 		}

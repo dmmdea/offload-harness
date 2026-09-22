@@ -9,9 +9,13 @@
 //
 // The read is deliberately two-step: llama-swap's /running says whether the
 // seat is loaded at all, and ONLY a loaded seat is asked for /metrics (or
-// /slots) through /upstream/<model>/… — that path loads a model on demand, so
-// probing it on an unloaded seat would do the exact thing a drain exists to
-// avoid.
+// /slots) — at the seat's OWN address (the `proxy` /running reports for it),
+// never through /upstream/<model>/…. That path is wrong twice over: it loads a
+// model on demand, so probing it on an unloaded seat would do the exact thing
+// a drain exists to avoid; and llama-swap counts every /upstream request as
+// activity, so a gauge read through it resets the seat's idle timer — a
+// reader that polls (the PAIR seat watcher, a status line, a drain) would keep
+// an idle seat resident forever and defeat the 5-minute idle unload.
 //
 // /running lists CANONICAL ids, while the harness binds seats by ALIAS on the
 // reference deployment (agent-pool -> qwen3.8-27b-vllm, offload-e4b ->
@@ -29,12 +33,16 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/swapclient"
@@ -86,6 +94,176 @@ type Reading struct {
 	// request until the load completes (register D-92). A load in progress is
 	// work in flight for the drain and "not yet a target" for the spread deal.
 	Starting bool
+	// Proxy is the seat's own address as llama-swap's /running reports it —
+	// the `proxy:` of the model entry that is running, after macro expansion.
+	// It is what Inflight reads the gauge from. Empty when the seat is not
+	// listed or the llama-swap build does not report it.
+	Proxy string
+}
+
+// ErrNoSeatAddress is Inflight's answer for a LOADED seat whose /running entry
+// carries no `proxy`: the gauge has nowhere to be read from except
+// /upstream/<seat>/…, and that path resets the seat's idle timer (see the
+// package comment), so the reader reports "could not read" instead.
+//
+// Every llama-swap build this repo's client models (tools/llamaswap) reports
+// `proxy` in /running, so a missing field means a llama-swap too old to say
+// where its seat listens; the message names the fix, because the drain prints
+// it at its deadline and `gpu status` / offload_status show it as the seat's
+// error — a silent drain timeout is what it replaces.
+var ErrNoSeatAddress = errors.New("llama-swap /running reports no `proxy` address for the seat (a llama-swap build too old to report it: upgrade llama-swap); the gauge is read at the seat itself, never through /upstream (which resets the idle unload timer), so it cannot be read")
+
+// ErrRemoteSeatUnreachable is Inflight's answer when the llama-swap endpoint is
+// ANOTHER machine, /running reports the seat at a loopback address there, and
+// the re-pointed address (that machine's host, the seat's port) refuses or
+// times out. The reference launcher binds the engine to 127.0.0.1 only
+// (seat_fg.sh `--host 127.0.0.1`), so its gauge can be read only by a harness
+// on llama-swap's own machine; /upstream would reach it across machines but
+// resets the seat's idle unload timer on every read, so it is not a fallback.
+// A seat that binds a routable address on that machine is read directly.
+var ErrRemoteSeatUnreachable = errors.New("the seat runs behind a llama-swap on another machine and its own address is not reachable from here (a seat bound to 127.0.0.1, as the reference launcher binds it, can be read only by a harness on llama-swap's machine; /upstream is never used because it resets the idle unload timer)")
+
+// SeatURL resolves the address a seat's gauges are read at from the `proxy`
+// llama-swap's /running reports for it. The proxy is written from llama-swap's
+// point of view, so a loopback or unspecified host means "llama-swap's box".
+// When the endpoint names THIS box — loopback, this machine's hostname, or a
+// name or address that resolves to one of its interfaces (a MagicDNS name for
+// itself) — a loopback proxy is kept as it is: the reference seat binds
+// 127.0.0.1 only (seat_fg.sh `--host 127.0.0.1`), so re-pointing it at the
+// box's own hostname would be refused on every read. Only a llama-swap on
+// ANOTHER box has its loopback proxy re-pointed at that box's host — which
+// reaches the seat only when it binds a routable address there; a
+// loopback-bound seat on another box refuses, and Inflight reports that as
+// ErrRemoteSeatUnreachable. The port is never guessed: two seats may share one
+// port, and only the one /running lists as running owns it now.
+func SeatURL(endpoint, proxy string) (string, error) {
+	s, _, err := seatURL(endpoint, proxy)
+	return s, err
+}
+
+// seatURL is SeatURL that also reports whether the proxy was re-pointed at
+// ANOTHER machine's host, so a failed read there can say why.
+func seatURL(endpoint, proxy string) (string, bool, error) {
+	p := strings.TrimSpace(proxy)
+	if p == "" {
+		return "", false, ErrNoSeatAddress
+	}
+	u, err := url.Parse(p)
+	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+		return "", false, fmt.Errorf("seat proxy %q is not an http(s) URL", proxy)
+	}
+	host := u.Hostname()
+	remote := false
+	if isLocalHost(host) {
+		target := ""
+		if e, eerr := url.Parse(swapclient.BaseURL(endpoint)); eerr == nil && e.Hostname() != "" && !isLocalHost(e.Hostname()) && !endpointIsThisHost(e.Hostname()) {
+			target, remote = e.Hostname(), true
+		} else if ip := net.ParseIP(host); ip != nil && ip.IsUnspecified() {
+			target = "127.0.0.1"
+		}
+		if target != "" {
+			if port := u.Port(); port != "" {
+				u.Host = net.JoinHostPort(target, port)
+			} else if strings.Contains(target, ":") {
+				u.Host = "[" + target + "]"
+			} else {
+				u.Host = target
+			}
+		}
+	}
+	return strings.TrimRight(u.String(), "/"), remote, nil
+}
+
+// endpointIsThisHost reports whether a (non-loopback) llama-swap endpoint host
+// names the machine this process runs on. A variable so tests can stand in for
+// the host's own name and interfaces.
+var endpointIsThisHost = hostIsThisMachine
+
+// thisHostCache holds the answer per endpoint host with an expiry. Every
+// answer is cached, a failed lookup included: the seat watcher polls every
+// 2 s while holding its lock, and an uncached lookup that times out would add
+// its full timeout to every poll. A definite answer is kept longer than a
+// failed lookup, and neither forever — a box's interface addresses (a tailnet
+// address, a DHCP lease) can change under a long-running process.
+var thisHostCache sync.Map // host (lower-case) -> thisHostAnswer
+
+type thisHostAnswer struct {
+	mine    bool
+	expires time.Time
+}
+
+const (
+	// thisHostLookupTimeout bounds the one name lookup per endpoint host.
+	thisHostLookupTimeout = 2 * time.Second
+	// thisHostTTL is how long a definite answer is kept.
+	thisHostTTL = 5 * time.Minute
+	// thisHostFailTTL is how long a failed lookup (or an unreadable interface
+	// list) is kept as "not this machine" before it is retried.
+	thisHostFailTTL = 30 * time.Second
+)
+
+// hostIsThisMachine: the host equals this machine's hostname (or its first
+// label), or it is — or resolves to — an address on one of this machine's
+// interfaces.
+func hostIsThisMachine(host string) bool {
+	h := strings.ToLower(strings.TrimSuffix(host, "."))
+	now := time.Now()
+	if v, ok := thisHostCache.Load(h); ok {
+		if a := v.(thisHostAnswer); now.Before(a.expires) {
+			return a.mine
+		}
+	}
+	remember := func(mine bool, ttl time.Duration) bool {
+		thisHostCache.Store(h, thisHostAnswer{mine: mine, expires: now.Add(ttl)})
+		return mine
+	}
+	if name, err := os.Hostname(); err == nil && name != "" {
+		name = strings.ToLower(name)
+		short, _, _ := strings.Cut(name, ".")
+		if h == name || h == short {
+			return remember(true, thisHostTTL)
+		}
+	}
+	local := map[string]bool{}
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return remember(false, thisHostFailTTL)
+	}
+	for _, a := range addrs {
+		if ipn, ok := a.(*net.IPNet); ok {
+			local[ipn.IP.String()] = true
+		}
+	}
+	var ips []net.IP
+	if ip := net.ParseIP(h); ip != nil {
+		ips = []net.IP{ip}
+	} else {
+		ctx, cancel := context.WithTimeout(context.Background(), thisHostLookupTimeout)
+		found, lerr := net.DefaultResolver.LookupIPAddr(ctx, h)
+		cancel()
+		if lerr != nil {
+			return remember(false, thisHostFailTTL)
+		}
+		for _, f := range found {
+			ips = append(ips, f.IP)
+		}
+	}
+	for _, ip := range ips {
+		if local[ip.String()] {
+			return remember(true, thisHostTTL)
+		}
+	}
+	return remember(false, thisHostTTL)
+}
+
+// isLocalHost reports a loopback or unspecified host (the forms a llama-swap
+// `proxy:` uses for a seat on its own box).
+func isLocalHost(h string) bool {
+	if strings.EqualFold(h, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(h)
+	return ip != nil && (ip.IsLoopback() || ip.IsUnspecified())
 }
 
 // Running answers the FIRST half of Inflight and stops there: what llama-swap's
@@ -118,16 +296,25 @@ func Inflight(ctx context.Context, client *http.Client, endpoint, seat string) (
 	if err != nil || done {
 		return rd, err
 	}
-	// The upstream path is addressed by the name the caller bound (llama-swap
-	// resolves aliases there); the canonical id would work too, but the bound
-	// name is what every other harness call uses, so a proxy rule keyed on it
-	// behaves the same here.
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/upstream/"+url.PathEscape(seat)+"/metrics", nil)
+	// The gauge is read at the seat's own address, never through
+	// /upstream/<seat>/…: llama-swap counts an /upstream request as activity,
+	// so a polled read there would keep an idle seat loaded past its ttl.
+	seatBase, remote, err := seatURL(base, rd.Proxy)
+	if err != nil {
+		return rd, fmt.Errorf("seat metrics: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, seatBase+"/metrics", nil)
 	if err != nil {
 		return rd, err
 	}
 	resp, err := client.Do(req)
 	if err != nil {
+		if remote && ctx.Err() == nil {
+			// The address is another machine's host and the seat's port: a
+			// loopback-bound seat there refuses every read. Say so, rather than
+			// leave a bare "connection refused" for the operator to decode.
+			return rd, fmt.Errorf("seat metrics at %s: %w: %v", seatBase, ErrRemoteSeatUnreachable, err)
+		}
 		return rd, fmt.Errorf("seat metrics: %w", err)
 	}
 	defer resp.Body.Close()
@@ -143,7 +330,7 @@ func Inflight(ctx context.Context, client *http.Client, endpoint, seat string) (
 		// is_processing, which is the in-flight count for a slot-based server.
 		// Only these two statuses fall back: a 500 or a timeout is "could not
 		// read" and must never pass as idle.
-		n, serr := slotsInflight(ctx, client, base, seat, resp.StatusCode)
+		n, serr := slotsInflight(ctx, client, seatBase, resp.StatusCode)
 		if serr != nil {
 			return rd, serr
 		}
@@ -163,7 +350,10 @@ func running(ctx context.Context, client *http.Client, endpoint, seat string) (R
 	rd := Reading{}
 	names := []string{seat}
 	rctx, cancel := context.WithTimeout(ctx, rosterTimeout)
-	roster, rerr := swapclient.FetchRoster(rctx, endpoint, rosterTimeout)
+	// The roster is read over the CALLER's client, like /running and the gauge:
+	// one transport for every read of one observation (a test's dialer, a
+	// guarded transport), never a second client the caller cannot see.
+	roster, rerr := swapclient.FetchRosterWith(rctx, client, endpoint, rosterTimeout)
 	cancel()
 	if rerr != nil {
 		rd.RosterErr = rerr
@@ -185,6 +375,7 @@ func running(ctx context.Context, client *http.Client, endpoint, seat string) (R
 		Running []struct {
 			Model string `json:"model"`
 			State string `json:"state"`
+			Proxy string `json:"proxy"`
 		} `json:"running"`
 	}
 	derr := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&listed)
@@ -204,6 +395,7 @@ func running(ctx context.Context, client *http.Client, endpoint, seat string) (R
 		}
 		if matched {
 			rd.Loaded = true
+			rd.Proxy = m.Proxy
 			// A seat that is STARTING or STOPPING is listed, but its upstream is
 			// not there to ask: llama-swap holds `/upstream/<seat>/…` until the
 			// load completes (4m08s on the 27B TP2 seat, 2026-09-11, llama-swap
@@ -226,13 +418,14 @@ func running(ctx context.Context, client *http.Client, endpoint, seat string) (R
 	return rd, rd.Starting, nil
 }
 
-// slotsInflight reads llama-server's GET /slots through llama-swap and counts
-// the slots that are processing. A queued request (llama-server's deferred
+// slotsInflight reads llama-server's GET /slots at the seat's own address
+// (seatBase, from SeatURL — never /upstream) and counts the slots that are
+// processing. A queued request (llama-server's deferred
 // task queue) is not listed by /slots — it becomes a processing slot the
 // instant one frees — which is why a drain asks for TWO consecutive idle reads
 // before it calls the seat drained.
-func slotsInflight(ctx context.Context, client *http.Client, base, seat string, metricsStatus int) (int, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/upstream/"+url.PathEscape(seat)+"/slots", nil)
+func slotsInflight(ctx context.Context, client *http.Client, seatBase string, metricsStatus int) (int, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, seatBase+"/slots", nil)
 	if err != nil {
 		return 0, err
 	}

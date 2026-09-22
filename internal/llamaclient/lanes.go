@@ -505,8 +505,9 @@ func LocalSwapBusy(endpoint string) func(model string) (bool, string) {
 
 // probeLocalSwap reads this box's llama-swap once: the roster (for alias
 // resolution), /running (what holds the cards), and — for every loaded model
-// past its load — the in-flight gauge through seatload.Inflight, the same
-// reader `gpu status` prints "N request(s) in flight" from and the drain waits
+// past its load — the in-flight gauge through seatload.Inflight (read at each
+// seat's own /running `proxy`, never through /upstream, so this probe does not
+// reset any seat's idle unload timer), the same reader `gpu status` prints "N request(s) in flight" from and the drain waits
 // on. ok=false means the reading could not be completed and the caller must
 // treat the box as free.
 func probeLocalSwap(endpoint string, client *http.Client) (swapclient.Roster, []swapOccupant, bool) {
@@ -514,7 +515,7 @@ func probeLocalSwap(endpoint string, client *http.Client) (swapclient.Roster, []
 	defer cancel()
 	// The llama-swap ROOT, once: config `endpoint` may carry the trailing /v1
 	// (swapclient.BaseURL is the one rule for that), and seatload reads
-	// /running and /upstream/<id>/… off the root without normalizing itself.
+	// /running off the root without normalizing itself.
 	endpoint = swapclient.BaseURL(endpoint)
 	sc, err := swapclient.New(endpoint, laneBusyProbeTimeout)
 	if err != nil {

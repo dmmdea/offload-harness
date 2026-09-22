@@ -94,8 +94,13 @@ directly — a curl soak, opencode's own chat model, codex pointed at `:11436` �
 cards for hours on 2026-09-22 with an empty Jobs list. With `pair_seat_activity_enabled`,
 fleet-serve's **seat watcher** closes that gap:
 
-- Every 2 s it reads llama-swap `/running` and, for each ready seat declared in `vllm_seats`,
-  `/upstream/<seat>/metrics`: live load = `vllm:num_requests_running` + `vllm:num_requests_waiting`.
+- Every 2 s it reads llama-swap `/running` and, for each ready seat declared in `vllm_seats`, the
+  seat's own `/metrics` at the `proxy` address `/running` reports for it: live load =
+  `vllm:num_requests_running` + `vllm:num_requests_waiting`. Never `/upstream/<seat>/metrics`:
+  llama-swap counts every `/upstream` request as activity, so a 2 s poll there kept every seat
+  loaded past its 300 s idle unload. A llama-swap whose `/running` carries no `proxy` leaves the
+  seat unread (no card), and so does a seat that binds 127.0.0.1 behind a llama-swap on another
+  machine — the gauge is readable only on llama-swap's own box (`seatload.SeatURL`).
 - It subtracts the harness's own requests on that seat. Every on-box admission
   (`modelaffinity.Admit`, i.e. every cascade, repack and agent-loop call) and every fleet
   chat-lane proxy writes one marker file under `<state root>/seat-inflight/` for as long as

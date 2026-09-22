@@ -950,16 +950,22 @@ second device exists:
     "address": "/mnt/kvcache/lmcache-seat-tp2-fp8",
     "l1_staging_gb": 8,
     "chunk_size": 1568,
-    "key_prefix": "qube-seat-tp2-fp8",
+    "key_prefix": "seat-tp2-fp8",
     "seat": "qwen3.8-27b-vllm",
     "kv_dtype": "fp8",
     "tensor_parallel": 2,
-    "status_file": "//wsl.localhost/freetoken/root/g7/seat-l2.status"
+    "status_file": "//wsl.localhost/<distro>/root/g7/seat-l2-qwen3.8-27b-vllm.status"
   },
   {
+    "enabled": true,
+    "store": "fs_native",
+    "address": "/mnt/kvcache/lmcache-seat-3card-fp8",
+    "l1_staging_gb": 16,
+    "chunk_size": 1568,
+    "key_prefix": "seat-3card-fp8",
     "seat": "qwen3.8-27b-vllm-3card",
-    "storeless": true,
-    "reason": "three-stage pipeline seat: LMCache's L2 adapter has no working layout for it (see the layout constraint below)"
+    "kv_dtype": "fp8",
+    "status_file": "//wsl.localhost/<distro>/root/g7/seat-l2-qwen3.8-27b-vllm-3card.status"
   }
 ]
 ```
@@ -991,8 +997,10 @@ second device exists:
   safe). Give each seat its own prefix and neither field is required.
 - **`status_file` is the fs_native readback (0.129.1, register B-29).** An `fs_native` store is a mounted path with
   no port to dial, so `offload_status` cannot probe it — but the seat wrapper decides the fact at every seat start
-  (mount + 64 MiB write probe) and writes `$WORK/seat-l2.status` (`ok <stamp> mbps=<n>` or `degraded <stamp>
-  reason=<why>`). Declare that file on the binding (on a WSL2 seat, the host-visible `//wsl.localhost/<distro>/…`
+  (mount + 64 MiB write probe) and writes the file `SEAT_L2_STATUS_FILE` names (`ok <stamp> mbps=<n>` or
+  `degraded <stamp> reason=<why>`): `seat-l2-<seat id>.status` in a rendered seat env, `$WORK/seat-l2.status`
+  only when the env sets none. A binding that still names `seat-l2.status` must be repointed after a re-render.
+  Declare that file on the binding (on a WSL2 seat, the host-visible `//wsl.localhost/<distro>/…`
   path) and status publishes `reachable` true/false with `status_line` and `status_age_s`; undeclared or not yet
   written stays `null` with a note saying which.
 - **Rendering a seat from the box's bindings:** `local-offload install vllm-seat --config
@@ -1000,6 +1008,12 @@ second device exists:
   namespace, L1 size and chunk into `seat.env`; the tier keeps the mount point, the write floor, the
   prune target, the writer count and the cap, which are properties of the share rather than the
   namespace.
+- **A seat that names a shipped chat template (`chat_template`, e.g. the blackwell-3x16 seat's
+  `qwen3-fold-system.jinja`):** the render includes `templates/<name>` beside `<seat id>.env`, and
+  `SEAT_EXTRA_ARGS` passes `--chat-template <WSL seat dir>/templates/<name>`. Copy the whole render —
+  `templates/` included — into the distro's seat directory. `seat_fg.sh` refuses to start and names the
+  file when it is missing, before the MP server is touched; vLLM would refuse the path too, but only after
+  the wrapper had restarted the MP server, with the reason in a traceback and HTTP 500 on the lane.
 
 The measured transport of choice is `fs_native` over a network share of the store's RAM disk (0.112.1+;
 Lenovo tmpfs over SMB 3.1.1: a 23.7k-token prefix back in 0.56–0.70 s vs 3.8 s through Valkey, 2026-09-04).
@@ -1024,6 +1038,7 @@ SEAT_L2_MOUNT_SRC=//cache-server/kvcache   # a HOSTNAME this box resolves (tailn
 SEAT_L2_MOUNT_DIR=/mnt/kvcache
 SEAT_L2_MOUNT_OPTS=credentials=/root/.smbcred,vers=3.1.1,rsize=4194304,wsize=4194304,cache=none,actimeo=1,noserverino,nobrl
 SEAT_L2_MIN_MBPS=200                       # optional write floor: refuse to start on a crawling path (0 = off)
+SEAT_L2_MOUNT_SRCADDR=auto                 # optional: pin the CIFS source to the lowest-metric default route (two NICs on one subnet)
 SEAT_LMCACHE_PYTHONPATH=/root/g7/lmcache-overlay   # optional: load LMCache from an overlay (an unreleased fix), not the venv
 ```
 
@@ -1077,12 +1092,19 @@ under daytime co-resident growth. Prove the tier with vLLM's own `vllm:external_
 after-eviction request, and prove fidelity with a planted needle retrieved verbatim after eviction
 and after a restart — hit counters alone do not prove the context came back intact.
 
-**Layout constraint (measured 2026-09-03):** LMCache's Valkey adapter sizes L2 reads from one layout
-per model, so a pipeline-parallel seat whose stages hold different numbers of full-attention layers
-(three stages of a 64-layer / 16-attention model: 6/5/5 in any split) fails L2 reads for the odd rank.
-Two-card tensor-parallel seats use the store; a three-card seat uses the same-box L1 tier
-(`l1_staging_gb` sized as the tier, no store) until an upstream fix — `fs_native` is validated for two-card
-(tensor-parallel) seats only.
+**Pipeline seats and the store (measured 2026-09-03, served since 2026-09-22):** stock LMCache sizes L2
+reads from one layout per model, but the stages of a pipeline-parallel seat hold different numbers of
+full-attention layers — the 3-card agent seat's 28,13,23 split of a 64-layer model with full attention every
+4th layer puts **7/3/6** attention layers on its three ranks — so reads failed for every rank whose layout
+differed and the evict phase got 0 external hits. With the per-rank layout overlay patch (each rank's layout
+bound to its own pages; loaded through `SEAT_LMCACHE_PYTHONPATH`) the 3-card pipeline seat is bound to its
+own `fs_native` store, as in the example above, and serves L2 hits. **Caveat, still open:** the FIRST
+request after an MP server start gets 0 L2 hits — it recomputes — until register-time binding lands; later
+requests hit. Each seat writes its own wrapper status file (`SEAT_L2_STATUS_FILE`: a rendered seat env names
+`seat-l2-<seat id>.status` beside it, e.g. `seat-l2-qwen3.8-27b-vllm-3card.status`; a hand-kept env may name
+another), and the binding's `status_file` must name exactly the file that seat's env names.
+L1 staging for this hybrid model is 8 GB on the two-card seat and 16 GB on the three-card seat (2 GB, the
+default, fails its stores; 8 GB on the three-card seat left too little free to stage an L2 hit back).
 Details: [`docs/systems/cache-server.md`](systems/cache-server.md), ADR 0033 (the tier), ADR 0045 (a binding per seat).
 
 ### Delegate subtasks across fleet nodes (`agent_delegate` / `delegate`)

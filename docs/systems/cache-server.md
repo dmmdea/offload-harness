@@ -73,7 +73,7 @@ native CPU/disk offloading (measured unusable on the Mamba-hybrid 27B under WSL2
    prints above the health probe, since its verdicts are pure config and a dead serving layer must
    not hide them. A box with no `vllm_seats` prints nothing and fails nothing.
 3. `offload_status.kv_cache_server` LISTS every binding (an `fs_native` binding with a `status_file` also
-   publishes `reachable` from the seat wrapper's `seat-l2.status` verdict — B-29, 0.129.1): `bindings[]` (seat, store, address,
+   publishes `reachable` from the seat wrapper's verdict file, `SEAT_L2_STATUS_FILE`, which is `seat-l2-<seat id>.status` in a rendered seat env — B-29, 0.129.1): `bindings[]` (seat, store, address,
    key_prefix, l1_staging_gb, chunk size, declared/enabled — or `storeless` with its reason), plus
    `unbound_seats`, the same list `doctor` fails on, computed by the same `UnboundSeats` so the
    report and the gate cannot disagree. Each enabled Valkey store named by an IP literal carries a
@@ -87,10 +87,12 @@ native CPU/disk offloading (measured unusable on the Mamba-hybrid 27B under WSL2
    23.7k-token prefix back in 2.6–2.9 s at fp16 and 0.80 s at fp8 KV, vs 3.8 / 0.92 s through Valkey;
    `--l2-prefetch-policy` / `--l2-store-policy` variants gained nothing; the legacy `fs` adapter was slower).
    The seat wrapper mounts the share before the MP server starts when `SEAT_L2_MOUNT_SRC` / `SEAT_L2_MOUNT_DIR`
-   (and optionally `SEAT_L2_MOUNT_OPTS`, `SEAT_L2_MOUNT_TYPE`, default `cifs`) are set. When the mount fails the
+   (and optionally `SEAT_L2_MOUNT_OPTS`, `SEAT_L2_MOUNT_TYPE`, default `cifs`, and `SEAT_L2_MOUNT_SRCADDR` — `auto` pins the
+   CIFS source address to the lowest-metric default-route interface, for a box with a wired and a Wi-Fi NIC on one subnet
+   whose store allow-list names only the wired address) are set. When the mount fails the
    seat **degrades to the same-box tier** (0.115.1): `SEAT_L2` is emptied so the MP server registers no store — an
    unmounted base_path is a local directory the adapter would write into while the tier held nothing — the log says
-   `CACHE SERVER DEGRADED — <why>`, and `$WORK/seat-l2.status` records `degraded <when> reason=<why>` (or `ok <when>
+   `CACHE SERVER DEGRADED — <why>`, and the seat's `SEAT_L2_STATUS_FILE` (default `$WORK/seat-l2.status`) records `degraded <when> reason=<why>` (or `ok <when>
    mbps=<n>`) for readback. Refusing to start was the 0.113.x behaviour; on 2026-09-09 it took the whole agent lane
    down for hours (llama-swap turns every start failure into HTTP 500) over a cache accelerator that was merely slow. The share is named by a hostname the box resolves (tailnet
    MagicDNS or static DNS), never a DHCP address — a vanished lease refused every seat start for hours on
@@ -98,8 +100,10 @@ native CPU/disk offloading (measured unusable on the Mamba-hybrid 27B under WSL2
    `SEAT_L2_MIN_MBPS` (default off) is a write floor measured with a 64 MiB fsync probe after the mount: a path
    that crawls (4.6 MB/s over a Wi-Fi hop, measured; ~36 MB/s behind a degraded WSL datapath, 2026-09-09) makes
    the tier slower than recompute, so the share is NOT used — the seat degrades to the same-box tier and says so,
-   never refuses. Fix the path and restart the seat to get the cache server back. A three-stage pipeline seat gets
-   nothing from any L2 (Valkey or fs_native): keep it on the same-box tier.
+   never refuses. Fix the path and restart the seat to get the cache server back. A three-stage pipeline seat
+   gets L2 hits only with the per-rank layout overlay patch (see the layout constraint below); with it the
+   3-card agent seat is bound to its own fs_native store, and each seat writes its own status file
+   (`SEAT_L2_STATUS_FILE`, so two seats on one box never overwrite each other's verdict).
 4b. The seat wrapper refuses to start when its port is already bound (a foreign listener would otherwise pass
    llama-swap's health check and serve the seat's traffic — measured 2026-09-03), and names its MP server unit
    from `SEAT_MP_UNIT` (default `lmcache-mp`). A benchmark or scratch engine in the same box must run on its own
@@ -114,9 +118,13 @@ native CPU/disk offloading (measured unusable on the Mamba-hybrid 27B under WSL2
    seat devices back and warns, naming the holders, when they still hold VRAM. A stop that arrives mid-request
    left an EngineCore alive for 8 minutes on 2026-09-05 with the port free — llama-swap saw a clean unload.
 4c. Before the engine starts, the wrapper waits (`SEAT_VRAM_WAIT_SEC`, default 60) for every seat device to
-   fall below `SEAT_VRAM_FLOOR_MIB` (default 1024) and names the holders if they do not — a start a few
-   seconds after a swap-out found the cards still holding the previous engine and vLLM refused the KV pool
-   (two cold loads in a row, 2026-09-04). It warns; the engine's own error stays the final word.
+   fall below its floor and names the holders if they do not — a start a few seconds after a swap-out found
+   the cards still holding the previous engine and vLLM refused the KV pool (two cold loads in a row,
+   2026-09-04). It warns; the engine's own error stays the final word. The floor is per device:
+   `SEAT_VRAM_FLOOR_MIB_<index>` (the CUDA index in `SEAT_DEVICES`) wins over `SEAT_VRAM_FLOOR_MIB` (default
+   1024), because a display card never drops below the desktop's own 2-4 GB. The check runs AFTER the old MP
+   server unit is stopped and BEFORE the new one starts: it used to run after the start, so it measured the new
+   MP server's own CUDA contexts and burned the full wait on every start.
 4a. The seat wrapper (`setup/templates/vllm-seat/seat_fg.sh`) starts the LMCache MP server with the
    L1 size, chunk and L2 adapter, then the engine in the foreground of the llama-swap client, so a
    swap-out reaps the engine while the store keeps the pages.
@@ -136,6 +144,10 @@ native CPU/disk offloading (measured unusable on the Mamba-hybrid 27B under WSL2
   `vllm:external_prefix_cache_hits` counter, never time-to-first-token alone.
 - **Swap-in** — llama-swap restarts the seat; the store still holds the pages; the first requests
   refill VRAM at parity cost instead of recomputing.
+- **Caveat — the first request after an MP server start** (every seat start restarts its MP server)
+  gets 0 L2 hits on a pipeline seat and recomputes its prefix; the requests after it hit. This stays
+  open until register-time binding lands (the per-rank layout is bound when the first request
+  arrives, not when the engine registers its KV caches).
 
 ## Data and state
 
@@ -174,12 +186,14 @@ eviction and after a restart — hit counters alone do not prove fidelity).
 - One namespace per stack generation.
 - One binding per seat; at most one box default. A seat with no binding FAILS `doctor` — an
   unexplained absence is not an opt-out, and the tier stays optional through the explicit one.
-- **Layout constraint (measured 2026-09-03):** LMCache's Valkey adapter sizes L2 reads from one
-  layout per model. A pipeline-parallel seat whose stages hold different numbers of full-attention
-  layers (three stages of a 64-layer model with attention every 4th layer: 6/5/5 in any split)
-  fails L2 reads with `value size exceeds buffer capacity` for the odd rank and the tier serves
-  nothing. Tensor-parallel (uniform ranks) works; three-stage pipeline seats can use the
-  L1-only (same-box RAM) tier until this is fixed upstream or the `fs_native` adapter is validated.
+- **Layout constraint (measured 2026-09-03):** stock LMCache sizes L2 reads from one layout per
+  model. A pipeline-parallel seat's stages hold different numbers of full-attention layers, and the
+  count depends on the split — the 3-card agent seat's 28,13,23 split of a 64-layer model with full
+  attention every 4th layer puts 7/3/6 on its ranks — so reads failed with `value size exceeds buffer
+  capacity` for every rank whose layout differed and the tier served nothing. Tensor-parallel (uniform
+  ranks) works stock. Pipeline seats serve L2 hits with the per-rank layout overlay patch (each
+  rank's layout bound to its own pages), loaded through `SEAT_LMCACHE_PYTHONPATH`; the first request
+  after an MP server start still gets 0 L2 hits until register-time binding lands.
 
 ## Error handling
 

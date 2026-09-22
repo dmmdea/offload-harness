@@ -46,8 +46,9 @@ type KVCacheServer struct {
 	// rule enforced here. Surrounding whitespace is trimmed at load.
 	Address string `json:"address,omitempty"`
 	// L1StagingGB is LMCache MP's pinned host buffer beside the engine (GB). It is a
-	// staging area, not the tier: 8 GB restored a 24k context entirely from the store.
-	// 0 = 8.
+	// staging area, not the tier. 0 = 2 (EffectiveL1StagingGB, register B-02). A
+	// hybrid-attention model stages far more per chunk and needs more: the reference
+	// two-card seat runs 8, the three-card pipeline seat 16.
 	L1StagingGB int `json:"l1_staging_gb,omitempty"`
 	// ChunkSize is LMCache's chunk in tokens and must equal the engine's unified block
 	// size for the seat's model ("Setting attention block size to N tokens" in the
@@ -75,9 +76,9 @@ type KVCacheServer struct {
 	// Reason is required with it, and the store fields must be empty, so an opt-out
 	// can never be a half-configured store that looks deliberate.
 	Storeless bool `json:"storeless,omitempty"`
-	// Reason is WHY this seat has no store ("three-stage pipeline seat: no L2
-	// layout works for it, see docs/systems/cache-server.md"). Required with
-	// Storeless, refused without it.
+	// Reason is WHY this seat has no store ("a scratch seat on a box whose store
+	// device is offline for maintenance"). Required with Storeless, refused
+	// without it.
 	Reason string `json:"reason,omitempty"`
 	// KVDtype and TensorParallel declare the STACK GENERATION that writes this
 	// namespace — the KV dtype ("fp8", "fp16") and the tensor-parallel width. They
@@ -88,14 +89,20 @@ type KVCacheServer struct {
 	// only one seat uses.
 	KVDtype        string `json:"kv_dtype,omitempty"`
 	TensorParallel int    `json:"tensor_parallel,omitempty"`
-	// StatusFile is the seat wrapper's own L2 verdict file (seat_fg.sh writes
-	// `$WORK/seat-l2.status`: "ok <stamp> mbps=<n>" after the share mounted and the
-	// write probe passed, "degraded <stamp> reason=<why>" when it fell back to L1
-	// only). An fs_native store is a mounted path with no port to dial, so this file
-	// is the only end-to-end readback the box has (B-29): status publishes it as
-	// `reachable` true/false with the line and its age. On a WSL2 seat the path is
-	// the host-visible one (`//wsl.localhost/<distro>/root/g7/seat-l2.status`).
-	// Empty = not declared; status says so instead of guessing.
+	// StatusFile is the seat wrapper's own L2 verdict file: seat_fg.sh writes the
+	// file SEAT_L2_STATUS_FILE names ("ok <stamp> mbps=<n>" after the share mounted
+	// and the write probe passed, "degraded <stamp> reason=<why>" when it fell back
+	// to L1 only). A rendered seat env names one file PER SEAT,
+	// `seat-l2-<seat id>.status` beside the env; `$WORK/seat-l2.status` is only the
+	// wrapper's fallback when the env sets none, and two seats sharing it overwrite
+	// each other's verdict. An fs_native store is a mounted path with no port to
+	// dial, so this file is the only end-to-end readback the box has (B-29): status
+	// publishes it as `reachable` true/false with the line and its age. On a WSL2
+	// seat the path is the host-visible one
+	// (`//wsl.localhost/<distro>/root/g7/seat-l2-<seat id>.status`). A binding that
+	// still names `seat-l2.status` reads a file a re-rendered seat no longer writes
+	// (a frozen verdict, or unreadable): repoint it. Empty = not declared; status
+	// says so instead of guessing.
 	StatusFile string `json:"status_file,omitempty"`
 }
 

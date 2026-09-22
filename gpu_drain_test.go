@@ -12,10 +12,12 @@ import (
 	"time"
 )
 
-// drainSwap is a llama-swap stand-in: /running lists the seat when loaded, and
-// /upstream/<model>/metrics serves a vLLM-shaped exposition with the in-flight
-// count the test controls. It also records whether the upstream path was ever
-// touched while the seat was NOT loaded — the one thing a drain must never do.
+// drainSwap is a llama-swap stand-in: /running lists the seat when loaded, with
+// the seat's own address as `proxy`, where /metrics serves a vLLM-shaped
+// exposition with the in-flight count the test controls (the gauge is read at
+// the seat, never through /upstream, which resets llama-swap's idle timer). It
+// also records whether the seat was ever asked while NOT loaded — the one
+// thing a drain must never do.
 type drainSwap struct {
 	loaded                    atomic.Bool
 	inflight                  atomic.Int64
@@ -43,11 +45,11 @@ func (f *drainSwap) handler(model string) http.Handler {
 			if f.starting.Load() {
 				state = "starting"
 			}
-			running = append(running, map[string]string{"model": model, "state": state})
+			running = append(running, map[string]string{"model": model, "state": state, "proxy": "http://" + r.Host + "/direct/" + model})
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"running": running})
 	})
-	mux.HandleFunc("/upstream/"+model+"/slots", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/direct/"+model+"/slots", func(w http.ResponseWriter, r *http.Request) {
 		if !f.loaded.Load() {
 			f.upstreamHitsWhileUnloaded.Add(1)
 		}
@@ -59,7 +61,7 @@ func (f *drainSwap) handler(model string) http.Handler {
 		}
 		_ = json.NewEncoder(w).Encode(slots)
 	})
-	mux.HandleFunc("/upstream/"+model+"/metrics", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/direct/"+model+"/metrics", func(w http.ResponseWriter, r *http.Request) {
 		if !f.loaded.Load() {
 			f.upstreamHitsWhileUnloaded.Add(1)
 		}

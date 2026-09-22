@@ -25,8 +25,9 @@ import (
 // yet" is busy, per model, alias-aware, and fail-closed.
 
 // localSwap is a fake of THIS box's llama-swap: the roster (/v1/models, with
-// llama-swap's alias shape), /running, and the per-model metrics exposition
-// behind /upstream/<id>/metrics that seatload reads the in-flight count from.
+// llama-swap's alias shape), /running (each row with its seat's own address as
+// `proxy`), and the per-model metrics exposition at that address that seatload
+// reads the in-flight count from — never through /upstream.
 type localSwap struct {
 	srv *httptest.Server
 
@@ -74,14 +75,14 @@ func newLocalSwap(t *testing.T) *localSwap {
 			rows := make([]string, 0, len(running))
 			for _, e := range running {
 				id, state, _ := strings.Cut(e, ":")
-				rows = append(rows, fmt.Sprintf(`{"model":%q,"state":%q}`, id, state))
+				rows = append(rows, fmt.Sprintf(`{"model":%q,"state":%q,"proxy":%q}`, id, state, "http://"+r.Host+"/direct/"+id))
 			}
 			w.Header().Set("Content-Type", "application/json")
 			if _, err := fmt.Fprintf(w, `{"running":[%s]}`, strings.Join(rows, ",")); err != nil {
 				t.Errorf("write running: %v", err)
 			}
-		case strings.HasPrefix(r.URL.Path, "/upstream/") && strings.HasSuffix(r.URL.Path, "/metrics"):
-			id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/upstream/"), "/metrics")
+		case strings.HasPrefix(r.URL.Path, "/direct/") && strings.HasSuffix(r.URL.Path, "/metrics"):
+			id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/direct/"), "/metrics")
 			w.Header().Set("Content-Type", "text/plain")
 			fmt.Fprintf(w, "# HELP vllm:num_requests_running running\nvllm:num_requests_running %d\n", inflight[id])
 		default:

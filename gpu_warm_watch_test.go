@@ -31,7 +31,8 @@ func TestWarmWatchesALoadThatOutlastsLlamaSwapsHealthWait(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"running": running})
 	})
 	mux.HandleFunc("/upstream/seat/metrics", func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte("vllm:num_requests_running{engine=\"0\"} 0\nvllm:num_requests_waiting{engine=\"0\"} 0\n"))
+		t.Error("the warm watch read the seat's gauge through /upstream; it needs /running only")
+		w.WriteHeader(http.StatusTeapot)
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()

@@ -6,6 +6,76 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed — seat gauges never reset the idle timer; opencode sends one system message; seat renderer catches up
+
+- **The PAIR seat watcher kept every vLLM seat loaded forever.** It polled
+  `/upstream/<seat>/metrics` through llama-swap every 2 s, and llama-swap counts every `/upstream`
+  request as activity, so the seat's 300 s idle unload never fired. The watcher now reads the
+  seat's `/metrics` at the seat's own address — the `proxy` that llama-swap's `/running` reports
+  for the model it lists as ready (never a port from config: two vLLM seats can share one port).
+  The same fix lands in `seatload.Inflight`, the shared gauge reader behind the drain, the spread
+  deal, `gpu status` / `offload_status`, the cascade lane busy probe and the placement snapshot;
+  the `/slots` fallback reads the seat directly too, and a `/running` entry with no `proxy` is
+  "could not read" (`seatload.ErrNoSeatAddress`), never a fall-back through `/upstream`. The warm
+  watch after a lease reads `/running` only. Audit of every other `/upstream` reader: the agent
+  window/pin probes, the KV slot lane, the tokenizer and STT clients, the tier re-pack probe and
+  the warm-up all act for the request about to run on that seat; `offload_status`'s context-window
+  read is one-shot and operator-initiated (documented at the call). Tests assert the watcher and
+  `Inflight` never request an `/upstream` path.
+- **opencode sent two leading system messages.** The plugin's `experimental.chat.system.transform`
+  pushed the protocol as a new element; opencode folds the array only when it holds more than two,
+  so a vLLM seat serving the model family's upstream chat template answered 400. The protocol is
+  now appended to the last existing element (pushed only into an empty array); the length is
+  unchanged and the marker appears once.
+- **vLLM seat schema: `chat_template` and `enable_prompt_tokens_details`.** A seat can name a
+  chat template the repo ships (rendered as `templates/<name>` beside the seat env, passed as
+  `--chat-template <installed path>`) or an absolute path on the serving box, and can enable
+  `--enable-prompt-tokens-details`. Ships `setup/templates/vllm-seat/chat-templates/qwen3-fold-system.jinja`:
+  the Qwen3-family template plus a block that folds 2+ leading system messages into one; checked
+  with the transformers Jinja environment to render single-system and no-system conversations
+  byte-identically to the upstream template. `*.jinja` is LF by `.gitattributes`.
+- **blackwell-3x16 tier text caught up with the 3-card agent seat:** `l1_staging_gb` 8 -> 16, the
+  seat renders the fold template and prompt-token details, and the stale notes (an OPEN 0-hit
+  pipeline note, `agent_ctx_tokens 163840`, "the agent seat stays the 2-card pair", "the TRIPLE
+  layer ships no seat") now say what runs: the 3-card pipeline seat is the agent seat at 262,144
+  context, L1 16 GB, serving L2 hits after the per-rank layout overlay patch, with the first
+  request after an MP server start still getting 0 L2 hits until register-time binding lands.
+  OPERATOR-GUIDE and `docs/systems/cache-server.md` say the same, and correct the attention layers
+  per rank to 7/3/6 for a 28,13,23 split (not "6/5/5 in any split").
+- **Launcher (`setup/templates/vllm-seat/seat_fg.sh`):** the VRAM precheck runs after the old MP
+  server unit is stopped and before the new one starts (it measured the new server's own CUDA
+  contexts and burned the full wait every start), and honours a per-device floor
+  `SEAT_VRAM_FLOOR_MIB_<index>`; `seat_stop.sh`'s VRAM readback honours it too. The seat env
+  template exports `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=120` and names a per-seat
+  `SEAT_L2_STATUS_FILE` (`seat-l2-<seat id>.status` beside the env). **Migration:** after
+  re-rendering a seat, repoint its `kv_cache_server` binding's `status_file` from `seat-l2.status`
+  to the per-seat file. The old file is no longer written, so status would show a frozen verdict
+  or "unreadable". The `status_file` comment, the `offload_status` `reachable_note` and the docs
+  name the per-seat file; the `seat_fg.sh` header now describes the pipeline seat serving L2
+  through the per-rank overlay (the first request after an MP start still gets 0 hits) and fp8 KV
+  at 262k on three cards.
+- **Gauge reads on a box whose endpoint names itself.** `seatload.SeatURL` re-points a loopback
+  seat `proxy` at the endpoint's host only when that host is ANOTHER machine. An endpoint that is
+  this machine's hostname, or resolves to one of its interface addresses (a MagicDNS name for
+  itself), keeps the loopback proxy: the reference seat binds 127.0.0.1 only. The same-machine
+  answer is cached per host (5 min; a failed lookup 30 s), so the 2 s seat-watcher poll never pays
+  a lookup timeout on every read.
+- **Gauge reads behind a llama-swap on another machine say why they fail.** The re-pointed address
+  reaches only a seat bound to a routable address there; a loopback-bound seat refuses, and
+  `Inflight` now reports `seatload.ErrRemoteSeatUnreachable` (the drain prints it at its deadline,
+  `gpu status` / `offload_status` show it as the seat's error) instead of a bare "connection
+  refused". `/upstream` stays excluded as a fallback: it resets the idle unload timer.
+  `ErrNoSeatAddress` now says the llama-swap build is too old to report `proxy` and to upgrade it.
+- **The alias roster is read over the caller's HTTP client** (`swapclient.FetchRosterWith`), like
+  `/running` and the gauge — one transport per observation.
+- **`seat_fg.sh` refuses a missing `--chat-template` file** before it touches the MP server, naming
+  the file; the rendered env header and OPERATOR-GUIDE say to copy the render's `templates/` into
+  the WSL seat directory. `docs/systems/gpu-lease.md` and `docs/systems/pair-workloads.md` no longer
+  describe the gauge read as `/upstream/<seat>/metrics`. The OPERATOR-GUIDE binding examples name the
+  rendered per-seat status files (`seat-l2-<seat id>.status`).
+- Comments: the default L1 staging is 2 GB (`EffectiveL1StagingGB`), not 8; the 3-card box's
+  agent alias is `agent-pool`.
+
 ### Changed — opencode integration 0.2.0: the primary agent sees only the Tier-1 tools
 
 - **opencode loaded every harness tool schema into every local session.** opencode has no

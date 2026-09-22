@@ -22,7 +22,7 @@ other on a single shared card.
 | `gpu_cmd.go` | the `gpu status\|reserve\|release\|hold` verbs, wrapper and `--detach` forms |
 | `gpu_drain.go` | `--drain`: waits until the seat's gauge AND the run registry are empty, inside the queue budget; restamps `draining` → `exclusive`; unload / warm-back |
 | `internal/gpuactivity` | the RUN REGISTRY (`<state root>/gpu/activity/`, one record per agent loop in flight) and the activity reading behind `gpu status` / `offload_status.gpu_lease` (`verdict`, `activity`) — ADR 0041 |
-| `internal/seatload` | the seat's in-flight reading through llama-swap (`/running`, then `/upstream/<seat>/metrics` or `/slots`); a `starting` seat is reported without touching the upstream |
+| `internal/seatload` | the seat's in-flight reading: llama-swap's `/running` (and the roster, for an alias), then the loaded seat's own `/metrics` or `/slots` at the `proxy` `/running` reports — never through `/upstream`, which resets the idle unload timer; a `starting` seat is reported without touching the seat |
 | `gpu_hide_windows.go`, `gpu_hide_other.go` | hidden spawn for the detached holder (a visible console gets closed, killing the hold) |
 | `render/gpu-lock.mjs` | READ-ONLY participant: honours + fences an inherited lease, elects one unloader, drains, ComfyUI lifecycle. **Does not acquire.** |
 | `internal/gpulock` | the read-only vision gate; delegates wholesale to `gpulease.InspectDir` |
@@ -340,8 +340,14 @@ Taking a text lease already makes the node a non-target (health `lease`, dispatc
 before the lease can still be in flight. `--drain` waits, after the lease is taken, until the agent seat reports nothing
 running or waiting: llama-swap's `/running` is read first — an unloaded seat is idle by definition, and its `/upstream/<model>/…`
 path is NEVER probed on an unloaded seat because that path loads the model on demand — then the loaded seat's own gauges
-(`vllm:num_requests_running|waiting`, `llamacpp:requests_processing|deferred`) through `/upstream/<model>/metrics`, two
-consecutive zeros required. A llama.cpp seat started without `--metrics` answers that path `501` (older builds `404`); since
+(`vllm:num_requests_running|waiting`, `llamacpp:requests_processing|deferred`) read at the seat's own address — the
+`proxy` llama-swap's `/running` reports for it, never `/upstream/<model>/metrics`, because llama-swap counts every
+`/upstream` request as activity and a polled read there would keep an idle seat loaded — two consecutive zeros required.
+The seat address is read where llama-swap runs: a loopback `proxy` stays loopback when the endpoint is this machine (by
+loopback, hostname or an address on one of its interfaces); behind a llama-swap on ANOTHER machine it is re-pointed at that
+host, which reaches only a seat bound to a routable address there — the reference seat binds 127.0.0.1, so that drain
+reports `seatload.ErrRemoteSeatUnreachable` and fails at the deadline instead of calling the seat idle. A llama-swap whose
+`/running` carries no `proxy` is reported the same way (`ErrNoSeatAddress`: upgrade llama-swap). A llama.cpp seat started without `--metrics` answers that path `501` (older builds `404`); since
 0.113.19 the drain then reads llama-server's `GET /slots` and counts `is_processing` slots — llama-server's deferred queue is
 not listed there, and the two-consecutive-zeros rule is what covers it (a queued request becomes a processing slot the instant
 one frees). Any other non-200 from `/metrics` is still "could not read", never idle: the drain fails at the deadline. At

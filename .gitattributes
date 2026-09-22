@@ -25,3 +25,7 @@ tools/**        text eol=lf
 # The write door's gate fixtures: a seat returns an LF unified diff and the gate applies it to a copy of these
 # files on whatever box runs it — a CRLF checkout would make every context line miss.
 contracts/write-door/** text eol=lf
+
+# Chat templates are the model's prompt format, copied verbatim into a seat directory on a Linux
+# engine: a CR inside a template string literal would reach every prompt.
+*.jinja         text eol=lf

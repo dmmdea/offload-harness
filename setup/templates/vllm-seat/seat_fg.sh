@@ -6,13 +6,19 @@
 # swap-out. The LMCache MP server (L1 staging + optional cache-server L2) is a transient systemd unit
 # that outlives the engine; seat_stop.sh (llama-swap `cmdStop`) stops both.
 #
-# Layouts measured 2026-09-02/03 on Qwen3.8-27B INT4 (vLLM 0.28.0, LMCache 0.5.4):
-#   SEAT_TP=2 (two cards, tensor parallel)  — the ONLY layout that can use a cache server (L2 store):
-#     24k-token context back from the store at parity cost, all tokens; MTP possible here.
-#   SEAT_PP=3 (three cards, pipeline)       — uses the same-box RAM tier only (SEAT_L1_GB sized as the
-#     tier, SEAT_L2 empty): 24k back in 0.53 s (26x). A pipeline seat of a 64-layer / 16-attention model
-#     cannot hold equal attention counts per stage, and LMCache's Valkey adapter then fails L2 reads.
-#   fp8 KV and 262k measured infeasible on 16 GB cards for this model; MTP has no pipeline support.
+# Layouts on Qwen3.8-27B INT4 (first measured 2026-09-02/03 on vLLM 0.28.0, LMCache 0.5.4):
+#   SEAT_TP=2 (two cards, tensor parallel)  — uses a cache server (L2 store) with stock LMCache: 24k-token
+#     context back from the store at parity cost, all tokens; MTP possible here.
+#   SEAT_PP=3 (three cards, pipeline)       — the stages hold different counts of full-attention layers
+#     (7/3/6 for a 28,13,23 split of the 64-layer model, full attention every 4th layer), and stock LMCache
+#     sizes L2 reads from one layout per model, so they fail for the ranks that differ. With the per-rank
+#     layout overlay on SEAT_LMCACHE_PYTHONPATH (below) the pipeline seat is bound to its own L2 store and
+#     serves hits, except the FIRST request after an MP server start, which gets 0 L2 hits and recomputes
+#     (open until register-time binding lands). Without the overlay, run it on the same-box RAM tier only
+#     (SEAT_L2 empty): 24k back in 0.53 s (26x).
+#   fp8 KV at 262,144 context runs on the three-card pipeline seat (the blackwell-3x16 tier profile); the
+#     2026-09-03 "fp8 KV and 262k infeasible" result was the two-card layout on vLLM 0.28. MTP has no
+#     pipeline support.
 # Every knob is overridden from seat.env (SEAT_* variables) without editing this file. The values
 # below are placeholders for a generic box; the operator's real ones live in seat.env, next to the
 # harness's config.json `kv_cache_server` block, which is what `offload_status` reports — keep them
@@ -63,7 +69,8 @@ exec > >(tee -a "$LOG") 2>&1
 # instead of refusing to start. 2026-09-09: the write floor refused every start for hours while the share
 # crawled at ~36 MB/s, and llama-swap turned each refusal into HTTP 500 — the whole agent lane died over a
 # cache ACCELERATOR being slow. A slow share is still never used (that is what the floor is for); the seat
-# just runs without it and says so, here and in $WORK/seat-l2.status (readback for health/status).
+# just runs without it and says so, here and in the file SEAT_L2_STATUS_FILE names (a rendered env names
+# seat-l2-<seat id>.status per seat; default $WORK/seat-l2.status) — the readback for health/status.
 L2_STATUS="${SEAT_L2_STATUS_FILE:-$WORK/seat-l2.status}"
 degrade_l2() {
   echo "seat_fg: CACHE SERVER DEGRADED — $1 — serving the same-box tier (L1 ${L1_GB} GB, no L2). Fix the path and restart the seat to get the cache server back."
@@ -74,8 +81,23 @@ degrade_l2() {
 L2_DEGRADED=0
 if [ -n "${SEAT_L2_MOUNT_SRC:-}" ] && [ -n "${SEAT_L2_MOUNT_DIR:-}" ]; then
   mkdir -p "$SEAT_L2_MOUNT_DIR"
+  # SEAT_L2_MOUNT_SRCADDR: pin the CIFS client's source address. On a box with two NICs on one subnet (wired +
+  # Wi-Fi) the mount was measured leaving from the Wi-Fi address even while `ip route get` chose the wire, and a store
+  # whose allow-list names only the wired address refused it — the seat then ran without its cache server for that
+  # whole start. "auto" = the IPv4 of the lowest-metric default-route interface; or give an explicit address.
+  MOUNT_OPTS="${SEAT_L2_MOUNT_OPTS:-}"; SRCADDR=""
+  case "${SEAT_L2_MOUNT_SRCADDR:-}" in
+    "") ;;
+    auto)
+      dev="$(ip -4 route show default 2>/dev/null | awk '{m=1e9; for(i=1;i<NF;i++) if($i=="metric") m=$(i+1); print m, $0}' | sort -n | head -1 | awk '{for(i=1;i<NF;i++) if($i=="dev") print $(i+1)}')"
+      [ -n "$dev" ] && SRCADDR="$(ip -4 -o addr show dev "$dev" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1)" ;;
+    *) SRCADDR="$SEAT_L2_MOUNT_SRCADDR" ;;
+  esac
+  if [ -n "$SRCADDR" ] && [ "${SEAT_L2_MOUNT_TYPE:-cifs}" = cifs ]; then
+    MOUNT_OPTS="${MOUNT_OPTS:+$MOUNT_OPTS,}srcaddr=$SRCADDR"; echo "seat_fg: cache-server mount source address pinned to $SRCADDR"
+  fi
   if ! mountpoint -q "$SEAT_L2_MOUNT_DIR"; then
-    if ! timeout 30 mount -t "${SEAT_L2_MOUNT_TYPE:-cifs}" "$SEAT_L2_MOUNT_SRC" "$SEAT_L2_MOUNT_DIR" -o "${SEAT_L2_MOUNT_OPTS:-}"; then
+    if ! timeout 30 mount -t "${SEAT_L2_MOUNT_TYPE:-cifs}" "$SEAT_L2_MOUNT_SRC" "$SEAT_L2_MOUNT_DIR" -o "$MOUNT_OPTS"; then
       # Say WHY, in the terms the operator can act on: name resolution, reachability, or the share itself.
       host="${SEAT_L2_MOUNT_SRC#//}"; host="${host%%:*}"; host="${host%%/*}"
       case "${SEAT_L2_MOUNT_TYPE:-cifs}" in nfs|nfs4) port=2049 ;; *) port=445 ;; esac
@@ -88,7 +110,7 @@ if [ -n "${SEAT_L2_MOUNT_SRC:-}" ] && [ -n "${SEAT_L2_MOUNT_DIR:-}" ]; then
       elif ! timeout 3 bash -c "</dev/tcp/$resolved/$port" 2>/dev/null; then
         why="'$host' = $resolved, port $port unreachable (store down, wrong interface, or the address moved)"
       else
-        why="'$host' = $resolved answers on $port — check credentials, the share name, and the store's allow-list"
+        why="'$host' = $resolved answers on $port — check credentials, the share name, and the store's allow-list (source address ${SRCADDR:-unpinned; set SEAT_L2_MOUNT_SRCADDR=auto})"
       fi
       degrade_l2 "share $SEAT_L2_MOUNT_SRC did not mount at $SEAT_L2_MOUNT_DIR: $why"
     fi
@@ -152,9 +174,63 @@ if ss -ltnp 2>/dev/null | grep -q ":$MP_HTTP_PORT "; then
   exit 1
 fi
 
+# Chat template precheck. A --chat-template in SEAT_EXTRA_ARGS names a file; vLLM (0.29 validate_chat_template) refuses a
+# path-like value that does not exist, but only after this wrapper has stopped the old MP unit, waited out the VRAM
+# precheck and started a new MP server, and the reason is buried in a traceback while llama-swap answers the lane with
+# HTTP 500. A rendered seat names a shipped template at <seat dir>/templates/<name>: the renderer emits templates/<name>
+# beside the env, and BOTH must be copied into the distro's seat directory. Refuse at once, before the MP server is
+# touched, and name the file.
+CT_ARGS=()
+[ -n "${SEAT_EXTRA_ARGS:-}" ] && read -r -a CT_ARGS <<< "$SEAT_EXTRA_ARGS"
+for ((ct_i = 0; ct_i < ${#CT_ARGS[@]}; ct_i++)); do
+  case "${CT_ARGS[$ct_i]}" in
+    --chat-template)   ct_path="${CT_ARGS[$((ct_i + 1))]:-}" ;;
+    --chat-template=*) ct_path="${CT_ARGS[$ct_i]#--chat-template=}" ;;
+    *) continue ;;
+  esac
+  case "$ct_path" in
+    /*) if [ ! -r "$ct_path" ]; then
+          echo "seat_fg: REFUSING to start — --chat-template $ct_path does not exist (copy the rendered templates/ directory into $(dirname "$(dirname "$ct_path")") beside the seat env)"
+          exit 1
+        fi ;;
+    "") echo "seat_fg: REFUSING to start — --chat-template has no value in SEAT_EXTRA_ARGS"; exit 1 ;;
+  esac
+done
+
 # One MP server per engine start, with THIS start's settings (a reused unit keeps stale L1/chunk/L2).
 # The store keeps its pages; only the staging buffer is rebuilt.
 systemctl stop "$MP_UNIT" 2>/dev/null; systemctl reset-failed "$MP_UNIT" 2>/dev/null
+# VRAM precheck (0.113.9). A start that follows a swap-out by a few seconds can find the seat's cards still
+# holding the previous engine's memory (or a co-resident seat); vLLM then sizes its KV pool against a smaller
+# card and refuses ("… KV cache is needed, which is larger than the available KV cache memory") — measured
+# 2026-09-04: two cold loads in a row failed at util 0.90 on cards that gate clean 10/10, both ~12 s after the
+# previous engine died; 30 s later the same cards read 0 MiB. Wait up to SEAT_VRAM_WAIT_SEC (default 60) for
+# every seat device to drop below its floor, and name the holders if it does not.
+# A warning, never a refusal: the engine's own error is the final word.
+# ORDER (2026-09-22): this runs AFTER the old MP server unit is stopped and BEFORE the new one is started. It used
+# to run after the start, so it measured the NEW MP server's own CUDA contexts and burned the full wait on every
+# start. PER-DEVICE FLOOR: SEAT_VRAM_FLOOR_MIB_<index> (the CUDA index as listed in SEAT_DEVICES) wins over
+# SEAT_VRAM_FLOOR_MIB (default 1024) — a display card never drops below the desktop's own 2-4 GB, so one global
+# floor either never clears there or is too loose to catch a previous engine on the other cards.
+DEVS="${SEAT_DEVICES:-0,1}"; VWAIT="${SEAT_VRAM_WAIT_SEC:-60}"; VFLOOR="${SEAT_VRAM_FLOOR_MIB:-1024}"
+if command -v nvidia-smi >/dev/null 2>&1 && [ "$VWAIT" -gt 0 ] 2>/dev/null; then
+  deadline=$(( $(date +%s) + VWAIT )); busy=""
+  while :; do
+    busy=""
+    for d in ${DEVS//,/ }; do
+      vf_var="SEAT_VRAM_FLOOR_MIB_$d"; vf="${!vf_var:-$VFLOOR}"   # per-device floor, else the global one
+      used="$(CUDA_DEVICE_ORDER=PCI_BUS_ID nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits -i "$d" 2>/dev/null | head -1 | tr -d ' ')"
+      if [ -n "$used" ] && [ "$used" -gt "$vf" ] 2>/dev/null; then busy="$busy dev$d=${used}MiB>${vf}"; fi
+    done
+    [ -z "$busy" ] && break
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+      echo "seat_fg: WARNING — seat devices still hold VRAM above their floor after ${VWAIT} s:$busy — holders: $(nvidia-smi --query-compute-apps=gpu_uuid,pid,process_name,used_memory --format=csv,noheader 2>/dev/null | tr '\n' ';')"
+      break
+    fi
+    sleep 2
+  done
+  [ -z "$busy" ] && echo "seat_fg: seat devices $DEVS below their VRAM floor (default ${VFLOOR} MiB) — VRAM clear"
+fi
 L2ARG=(); [ -n "$L2" ] && L2ARG=(--l2-adapter "$L2")
 # SEAT_LMCACHE_PYTHONPATH (optional): a directory prepended to PYTHONPATH so the MP server (and the engine, below) import
 # LMCache from an overlay instead of the installed package — used to run an unreleased upstream fix without touching the
@@ -184,32 +260,6 @@ else
   else
     echo "seat_fg: same-box tier only (L1 ${L1_GB} GB), no cache server"
   fi
-fi
-
-# VRAM precheck (0.113.9). A start that follows a swap-out by a few seconds can find the seat's cards still
-# holding the previous engine's memory (or a co-resident seat); vLLM then sizes its KV pool against a smaller
-# card and refuses ("… KV cache is needed, which is larger than the available KV cache memory") — measured
-# 2026-09-04: two cold loads in a row failed at util 0.90 on cards that gate clean 10/10, both ~12 s after the
-# previous engine died; 30 s later the same cards read 0 MiB. Wait up to SEAT_VRAM_WAIT_SEC (default 60) for
-# every seat device to drop below SEAT_VRAM_FLOOR_MIB (default 1024), and name the holders if it does not.
-# A warning, never a refusal: the engine's own error is the final word.
-DEVS="${SEAT_DEVICES:-0,1}"; VWAIT="${SEAT_VRAM_WAIT_SEC:-60}"; VFLOOR="${SEAT_VRAM_FLOOR_MIB:-1024}"
-if command -v nvidia-smi >/dev/null 2>&1 && [ "$VWAIT" -gt 0 ] 2>/dev/null; then
-  deadline=$(( $(date +%s) + VWAIT )); busy=""
-  while :; do
-    busy=""
-    for d in ${DEVS//,/ }; do
-      used="$(CUDA_DEVICE_ORDER=PCI_BUS_ID nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits -i "$d" 2>/dev/null | head -1 | tr -d ' ')"
-      if [ -n "$used" ] && [ "$used" -gt "$VFLOOR" ] 2>/dev/null; then busy="$busy dev$d=${used}MiB"; fi
-    done
-    [ -z "$busy" ] && break
-    if [ "$(date +%s)" -ge "$deadline" ]; then
-      echo "seat_fg: WARNING — seat devices still hold VRAM above ${VFLOOR} MiB after ${VWAIT} s:$busy — holders: $(nvidia-smi --query-compute-apps=gpu_uuid,pid,process_name,used_memory --format=csv,noheader 2>/dev/null | tr '\n' ';')"
-      break
-    fi
-    sleep 2
-  done
-  [ -z "$busy" ] && echo "seat_fg: seat devices $DEVS below ${VFLOOR} MiB — VRAM clear"
 fi
 
 export CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES="${SEAT_DEVICES:-0,1}" NCCL_CUMEM_ENABLE=0 NCCL_P2P_DISABLE=1 HF_HUB_OFFLINE=1
