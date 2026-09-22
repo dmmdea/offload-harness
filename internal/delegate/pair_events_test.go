@@ -201,8 +201,14 @@ func TestRunWithFlushesPAIRFramesBeforeReturning(t *testing.T) {
 	if _, _, err := RunWith(context.Background(), cfg, local, []core.AgentContract{{Goal: "say done"}}, "local", nil, nil); err != nil {
 		t.Fatal(err)
 	}
+	// Sends are concurrent, so arrival order is not fixed; PAIR's store is
+	// monotonic (queued < running < terminal) and ignores a late "running".
 	frames := c.snapshot()
-	if len(frames) != 2 || frames[1]["method"] != "workload:errored" {
-		t.Fatalf("frames delivered by return = %d %v, want running + errored", len(frames), frames)
+	methods := map[any]bool{}
+	for _, f := range frames {
+		methods[f["method"]] = true
+	}
+	if len(frames) != 2 || !methods["workload:started"] || !methods["workload:errored"] {
+		t.Fatalf("frames delivered by return = %d %v, want started + errored", len(frames), frames)
 	}
 }
