@@ -14,7 +14,10 @@
 // seat rendering single-card through every harness path while 249 tests
 // stayed green).
 export const JOB_PARAM_FLAGS = ["negative", "width", "height", "steps", "seed"];
-export const SHARED_BINDING_FLAGS = ["ckpt", "vae", "cfg", "sampler", "scheduler", "family", "preset", "clip", "lora", "lora-strength", "shift", "pool-vvram", "pool-compute", "pool-donor"];
+// schedule/transparent (qwen-image-2.1) ride this list for the same reason: the
+// wrapper's collector is derived from it, so a flag missing here is a flag the
+// harness sends and comfy-render never sees.
+export const SHARED_BINDING_FLAGS = ["ckpt", "vae", "cfg", "sampler", "scheduler", "family", "preset", "clip", "lora", "lora-strength", "shift", "pool-vvram", "pool-compute", "pool-donor", "schedule", "transparent"];
 const JOB_PARAMS = JOB_PARAM_FLAGS;
 const SHARED_ONLY = SHARED_BINDING_FLAGS;
 
