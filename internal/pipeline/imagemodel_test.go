@@ -31,6 +31,10 @@ func TestImageModelFromConfig(t *testing.T) {
 		ImageGenPoolVvramGB:  12,
 		ImageGenPoolCompute:  "cuda:0",
 		ImageGenPoolDonor:    "cuda:1",
+		ImageGenSchedule:     "official",
+		ComfyCudaDevice:      "2",
+		ComfyDynamicVRAM:     "off",
+		ComfyExtraArgs:       "--verbose",
 	}
 	m := imageModelFromConfig(cfg)
 
@@ -40,7 +44,8 @@ func TestImageModelFromConfig(t *testing.T) {
 		m.Preset != cfg.ImageGenPreset || m.CLIP != cfg.ImageGenCLIP ||
 		m.LoRA != cfg.ImageGenLoRA || m.LoRAStrength != cfg.ImageGenLoRAStrength ||
 		m.Shift != cfg.ImageGenShift || m.PoolVvramGB != cfg.ImageGenPoolVvramGB ||
-		m.PoolCompute != cfg.ImageGenPoolCompute || m.PoolDonor != cfg.ImageGenPoolDonor {
+		m.PoolCompute != cfg.ImageGenPoolCompute || m.PoolDonor != cfg.ImageGenPoolDonor ||
+		m.Schedule != cfg.ImageGenSchedule || m.Launch.DynamicVRAM != cfg.ComfyDynamicVRAM || m.Launch.ExtraArgs != cfg.ComfyExtraArgs {
 		t.Fatalf("field mapping mismatch: %+v", m)
 	}
 
@@ -54,5 +59,19 @@ func TestImageModelFromConfig(t *testing.T) {
 				"mapped in imageModelFromConfig (and/or not set in this test's cfg)",
 				v.Type().Field(i).Name)
 		}
+	}
+}
+
+// The device pin is for the SINGLE-CARD shape only: a pooled seat is placed by its pool
+// keys, and a --cuda-device pin would hide the donor card from the DisTorch2 loader.
+func TestImageModelLaunchPinsOnlyTheSingleCardShape(t *testing.T) {
+	pooled := config.Config{ImageGenPoolVvramGB: 12, ImageGenPoolCompute: "cuda:1", ImageGenPoolDonor: "cuda:2",
+		ComfyCudaDevice: "1", ComfyDynamicVRAM: "off"}
+	if got := imageModelFromConfig(pooled).Launch; got.CudaDevice != "" || got.DynamicVRAM != "off" {
+		t.Fatalf("pooled seat: launch = %+v, want no pin and the launch-wide keys kept", got)
+	}
+	single := config.Config{ComfyCudaDevice: " 1 ", ComfyDynamicVRAM: "on"}
+	if got := imageModelFromConfig(single).Launch; got.CudaDevice != "1" || got.DynamicVRAM != "on" {
+		t.Fatalf("single-card seat: launch = %+v, want the pin", got)
 	}
 }

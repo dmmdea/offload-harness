@@ -1245,13 +1245,32 @@ func mediaBase(mediaDir, audioPath, ident string) string {
 // prompt, ComfyUI down, render error, timeout) defers to Claude. params: negative (string),
 // width/height/steps/seed (int).
 func (p *Pipeline) runGenerateImage(ctx context.Context, req core.Request, meta core.Meta, start time.Time) core.Result {
+	// Named families (ADR 0058): the request's `family` selects the binding. Absent (or
+	// the default binding's own family name) = the node's default binding, byte-for-byte
+	// what every request rendered before families existed; a named overlay renders
+	// under its own config copy and tags the result with its license. Resolved BEFORE
+	// the engine seam: a family may bind a different engine than the default.
+	cfg, fam, ferr := p.cfg.ResolveImageFamily(paramStr(req.Params, "family"))
+	if ferr != nil {
+		meta.LatencyMs = time.Since(start).Milliseconds()
+		p.recordDefer(req.Task, meta, len(req.Input), ferr.Error())
+		return core.Deferf(ferr.Error(), "", meta)
+	}
+	meta.License = fam.License
+	if paramBool(req.Params, "transparent") && !cfg.SupportsTransparentImage() {
+		reason := fmt.Sprintf("transparent output needs the %s graph on ComfyUI (the only family with an RGBA VAE); family %s renders opaque — pass a %s family or drop transparent",
+			config.FamilyQwenImage21, familyLabel(fam), config.FamilyQwenImage21)
+		meta.LatencyMs = time.Since(start).Milliseconds()
+		p.recordDefer(req.Task, meta, len(req.Input), reason)
+		return core.Deferf(reason, "", meta)
+	}
 	// J2: per-machine media-engine seam. "sdcpp" routes to the stable-diffusion.cpp
 	// runner (single Vulkan binary, no ComfyUI) — its own function so the ComfyUI
 	// path below stays byte-for-byte unchanged. ""/"comfy" = the standing default.
-	if p.cfg.ImageGenEngine == "sdcpp" {
-		return p.runGenerateImageSdcpp(ctx, req, meta, start)
+	if cfg.ImageGenEngine == "sdcpp" {
+		return p.runGenerateImageSdcpp(ctx, req, meta, start, cfg, fam)
 	}
-	if p.cfg.ImageGenScript == "" {
+	if cfg.ImageGenScript == "" {
 		meta.LatencyMs = time.Since(start).Milliseconds()
 		p.recordDefer(req.Task, meta, len(req.Input), "no image-gen route configured")
 		return core.Deferf("no image-gen route configured", "", meta)
@@ -1264,7 +1283,7 @@ func (p *Pipeline) runGenerateImage(ctx context.Context, req core.Request, meta 
 	}
 	// LO-2: resolve a relative script path against the exe dir (an MCP host spawns
 	// us with no meaningful cwd) and defer with a distinct reason when missing.
-	script, serr := gpugen.ResolveScript(p.cfg.ImageGenScript)
+	script, serr := gpugen.ResolveScript(cfg.ImageGenScript)
 	if serr != nil {
 		meta.LatencyMs = time.Since(start).Milliseconds()
 		p.recordDefer(req.Task, meta, len(req.Input), serr.Error())
@@ -1277,8 +1296,8 @@ func (p *Pipeline) runGenerateImage(ctx context.Context, req core.Request, meta 
 	// and an existing machine's ledger/health tiers (health.groupByTier keys on this
 	// string) must not fragment into a second tier just because it pulled this code.
 	meta.Model = "comfyui-sdxl"
-	if p.cfg.ImageGenCkpt != "" {
-		meta.Model = "comfyui:" + p.cfg.ImageGenCkpt
+	if cfg.ImageGenCkpt != "" {
+		meta.Model = "comfyui:" + cfg.ImageGenCkpt
 	}
 
 	// Pin a concrete seed BEFORE the render so the reported seed matches what ComfyUI actually
@@ -1312,20 +1331,20 @@ func (p *Pipeline) runGenerateImage(ctx context.Context, req core.Request, meta 
 	// sampled at temperature and would fragment the output path).
 	renderPrompt, refined, refineNote, _ := p.maybeRefinePrompt(ctx, prompt, refineExplicitlyOff(req.Params))
 
-	timeout := time.Duration(p.cfg.ImageGenTimeoutSec) * time.Second
+	timeout := time.Duration(cfg.ImageGenTimeoutSec) * time.Second
 	// This machine's image-model binding (per-machine config; never hardcoded here —
 	// an 8GB box runs SDXL, a 16GB box may run an all-in-one DiT). All fields are
 	// optional: a zero Model passes no flags and the renderer keeps its own defaults.
-	model := imageModelFromConfig(p.cfg)
+	model := imageModelFromConfig(cfg)
 	// Passive fleet footprint: key this render by the machine's image binding
 	// (family + the O1 bf16 quant) so measured peaks accumulate during normal use.
-	imgFamily, imgQuant := imageFootprintKey(p.cfg)
+	imgFamily, imgQuant := imageFootprintKey(cfg)
 	leaseEnv, releaseLease, lerr := p.acquireMediaLease("image-gen", timeout, p.gpuWait())
 	if lerr != nil {
 		return p.deferForLease(lerr, req.Task, meta, len(req.Input), start)
 	}
 	defer releaseLease()
-	outPath, gerr := imagegen.Generate(ctx, p.cfg.NodePath, script, p.cfg.ComfyDir, out, renderPrompt, req.Params, model, timeout,
+	outPath, gerr := imagegen.Generate(ctx, cfg.NodePath, script, cfg.ComfyDir, out, renderPrompt, req.Params, model, timeout,
 		p.footprintSampling(imgFamily, imgQuant, "image-gen"), leaseEnv...)
 	if gerr != nil {
 		meta.LatencyMs = time.Since(start).Milliseconds()
@@ -1334,39 +1353,86 @@ func (p *Pipeline) runGenerateImage(ctx context.Context, req core.Request, meta 
 		return core.Deferf("image generation failed: "+gerr.Error(), "", meta)
 	}
 	meta.LatencyMs = time.Since(start).Milliseconds()
-	payload := map[string]any{
-		"image_path": outPath,
-		"width":      paramIntOr(req.Params, "width", 1024),
-		"height":     paramIntOr(req.Params, "height", 1024),
-		"seed":       seed,
-	}
+	payload := imageResultPayload(outPath, req.Params, seed, fam)
 	addRefineData(payload, p.cfg.ImageGenRefinerModel, refined, renderPrompt, refineNote)
 	data, _ := json.Marshal(payload)
 	p.record(req.Task, meta, len(prompt))
 	return core.Result{OK: true, Data: data, Meta: meta}
 }
 
+// imageResultPayload is the generate_image result both engines return. width/height
+// are MEASURED from the written file: the request value (or a 1024 guess) was wrong for
+// every family with a native size (qwen-image 1328, HiDream/qwen-image-2.1 2048) and
+// for every size a builder snaps (2.1 floors to /32). The request is the fallback only
+// when the header cannot be read. The family and its license ride every result; a
+// non-commercial family also carries license_note.
+func imageResultPayload(outPath string, params map[string]any, seed int, fam config.FamilyInfo) map[string]any {
+	w, h := imagegen.OutputSize(outPath)
+	if w <= 0 || h <= 0 {
+		w, h = paramIntOr(params, "width", 1024), paramIntOr(params, "height", 1024)
+	}
+	payload := map[string]any{
+		"image_path": outPath,
+		"width":      w,
+		"height":     h,
+		"seed":       seed,
+		"family":     fam.Name,
+	}
+	if paramBool(params, "transparent") {
+		payload["transparent"] = true
+	}
+	addLicenseData(payload, fam)
+	return payload
+}
+
+// addLicenseData stamps a result with the binding's license (ADR 0058): license and
+// commercial_use when the binding declares them, and license_note — the sentence a
+// reader cannot miss — when commercial_use is false.
+func addLicenseData(payload map[string]any, fam config.FamilyInfo) {
+	if fam.License != "" {
+		payload["license"] = fam.License
+	}
+	if fam.CommercialUse != nil {
+		payload["commercial_use"] = *fam.CommercialUse
+	}
+	if note := fam.LicenseNote(); note != "" {
+		payload["license_note"] = note
+	}
+}
+
+// familyLabel names a resolved binding in a defer reason.
+func familyLabel(fam config.FamilyInfo) string {
+	switch {
+	case fam.Name == "" && fam.Default:
+		return "(the default binding)"
+	case fam.Default:
+		return fmt.Sprintf("%q (the default binding)", fam.Name)
+	}
+	return fmt.Sprintf("%q", fam.Name)
+}
+
 // runGenerateImageSdcpp renders req.Input via stable-diffusion.cpp (J2): a single
 // native binary spawned per job under the same GPU lock — zero-warm by construction,
 // no ComfyUI anywhere on the path (no COMFY_DIR in the env, no post-run /free). The
-// AMD/Vulkan tier's engine; any failure defers exactly like the ComfyUI path.
-func (p *Pipeline) runGenerateImageSdcpp(ctx context.Context, req core.Request, meta core.Meta, start time.Time) core.Result {
+// AMD/Vulkan tier's engine; any failure defers exactly like the ComfyUI path. cfg is
+// the resolved binding (the default, or a named family's overlay).
+func (p *Pipeline) runGenerateImageSdcpp(ctx context.Context, req core.Request, meta core.Meta, start time.Time, cfg config.Config, fam config.FamilyInfo) core.Result {
 	deferf := func(reason string) core.Result {
 		meta.LatencyMs = time.Since(start).Milliseconds()
 		p.recordDefer(req.Task, meta, len(req.Input), reason)
 		return core.Deferf(reason, "", meta)
 	}
-	if p.cfg.SdcppBin == "" {
+	if cfg.SdcppBin == "" {
 		return deferf("imagegen_engine is sdcpp but sdcpp_bin is not configured")
 	}
-	if p.cfg.SdcppModel == "" {
+	if cfg.SdcppModel == "" {
 		return deferf("imagegen_engine is sdcpp but sdcpp_model is not configured")
 	}
 	prompt := strings.TrimSpace(req.Input)
 	if prompt == "" {
 		return deferf("empty image prompt")
 	}
-	scriptCfg := p.cfg.SdcppScript
+	scriptCfg := cfg.SdcppScript
 	if scriptCfg == "" {
 		scriptCfg = "render/sdcpp-generate.mjs"
 	}
@@ -1376,7 +1442,7 @@ func (p *Pipeline) runGenerateImageSdcpp(ctx context.Context, req core.Request, 
 	}
 	// Ledger/health tier: the sdcpp engine is its own tier keyed by the bound model
 	// file — never the ComfyUI labels (health.groupByTier must not merge engines).
-	meta.Model = "sdcpp:" + filepath.Base(p.cfg.SdcppModel)
+	meta.Model = "sdcpp:" + filepath.Base(cfg.SdcppModel)
 	// Same seed-pinning contract as the ComfyUI path: the reported seed must be the
 	// seed actually rendered, so mint one before the run when the caller sent none.
 	seed := paramIntOr(req.Params, "seed", 0)
@@ -1403,40 +1469,35 @@ func (p *Pipeline) runGenerateImageSdcpp(ctx context.Context, req core.Request, 
 	// Opt-in prompt refiner — same shared decision point as the ComfyUI path
 	// (refiner.go), same raw-prompt-derived, refine-knob-stripped `out` rationale.
 	renderPrompt, refined, refineNote, _ := p.maybeRefinePrompt(ctx, prompt, refineExplicitlyOff(req.Params))
-	timeout := time.Duration(p.cfg.ImageGenTimeoutSec) * time.Second
+	timeout := time.Duration(cfg.ImageGenTimeoutSec) * time.Second
 	m := imagegen.SdcppModel{
-		Bin:       p.cfg.SdcppBin,
-		Model:     p.cfg.SdcppModel,
-		ModelKind: p.cfg.SdcppModelKind,
-		VAE:       p.cfg.SdcppVAE,
-		ClipL:     p.cfg.SdcppClipL,
-		ClipG:     p.cfg.SdcppClipG,
-		T5:        p.cfg.SdcppT5,
-		LLM:       p.cfg.SdcppLLM,
-		Steps:     p.cfg.ImageGenSteps,
-		CFG:       p.cfg.ImageGenCFG,
-		Sampler:   p.cfg.ImageGenSampler,
-		ExtraArgs: p.cfg.SdcppExtraArgs,
+		Bin:       cfg.SdcppBin,
+		Model:     cfg.SdcppModel,
+		ModelKind: cfg.SdcppModelKind,
+		VAE:       cfg.SdcppVAE,
+		ClipL:     cfg.SdcppClipL,
+		ClipG:     cfg.SdcppClipG,
+		T5:        cfg.SdcppT5,
+		LLM:       cfg.SdcppLLM,
+		Steps:     cfg.ImageGenSteps,
+		CFG:       cfg.ImageGenCFG,
+		Sampler:   cfg.ImageGenSampler,
+		ExtraArgs: cfg.SdcppExtraArgs,
 	}
-	imgFamily, imgQuant := imageFootprintKey(p.cfg)
+	imgFamily, imgQuant := imageFootprintKey(cfg)
 	leaseEnv, releaseLease, lerr := p.acquireMediaLease("image-gen (sdcpp)", timeout, p.gpuWait())
 	if lerr != nil {
 		return p.deferForLease(lerr, req.Task, meta, len(req.Input), start)
 	}
 	defer releaseLease()
-	outPath, gerr := imagegen.GenerateSdcpp(ctx, p.cfg.NodePath, script, out, renderPrompt, req.Params, m, timeout,
+	outPath, gerr := imagegen.GenerateSdcpp(ctx, cfg.NodePath, script, out, renderPrompt, req.Params, m, timeout,
 		p.footprintSampling(imgFamily, imgQuant, "image-gen"), leaseEnv...)
 	if gerr != nil {
 		meta.ErrClass = classifyErr(gerr)
 		return deferf("image generation failed: " + gerr.Error())
 	}
 	meta.LatencyMs = time.Since(start).Milliseconds()
-	payload := map[string]any{
-		"image_path": outPath,
-		"width":      paramIntOr(req.Params, "width", 1024),
-		"height":     paramIntOr(req.Params, "height", 1024),
-		"seed":       seed,
-	}
+	payload := imageResultPayload(outPath, req.Params, seed, fam)
 	addRefineData(payload, p.cfg.ImageGenRefinerModel, refined, renderPrompt, refineNote)
 	data, _ := json.Marshal(payload)
 	p.record(req.Task, meta, len(prompt))
@@ -1514,7 +1575,9 @@ func (p *Pipeline) runInpaintImage(ctx context.Context, req core.Request, meta c
 		return p.deferForLease(lerr, req.Task, meta, len(req.Input), start)
 	}
 	defer releaseLease()
-	outPath, gerr := imagegen.Inpaint(ctx, p.cfg.NodePath, script, p.cfg.ComfyDir, out, image, mask, prompt, req.Params, m, timeout, leaseEnv...)
+	// Single-card route: the device pin applies (comfyLaunch).
+	outPath, gerr := imagegen.Inpaint(ctx, p.cfg.NodePath, script, p.cfg.ComfyDir, out, image, mask, prompt, req.Params, m, timeout,
+		append(leaseEnv, comfyLaunch(p.cfg, true).Env()...)...)
 	if gerr != nil {
 		meta.ErrClass = classifyErr(gerr)
 		return defer1("inpaint failed: " + gerr.Error())
@@ -1611,7 +1674,9 @@ func (p *Pipeline) runUpscaleImage(ctx context.Context, req core.Request, meta c
 		return p.deferForLease(lerr, req.Task, meta, len(req.Input), start)
 	}
 	defer releaseLease()
-	outPath, gerr := imagegen.Upscale(ctx, p.cfg.NodePath, script, p.cfg.ComfyDir, out, image, req.Params, imagegen.UpscaleModel{Model: model}, timeout, leaseEnv...)
+	// Single-card route: the device pin applies (comfyLaunch).
+	outPath, gerr := imagegen.Upscale(ctx, p.cfg.NodePath, script, p.cfg.ComfyDir, out, image, req.Params, imagegen.UpscaleModel{Model: model}, timeout,
+		append(leaseEnv, comfyLaunch(p.cfg, true).Env()...)...)
 	if gerr != nil {
 		meta.ErrClass = classifyErr(gerr)
 		return defer1("upscale failed: " + gerr.Error())
@@ -1712,7 +1777,15 @@ func (p *Pipeline) runEditImageGenerative(ctx context.Context, req core.Request,
 		p.recordDefer(req.Task, meta, len(req.Input), reason)
 		return core.Deferf(reason, "", meta)
 	}
-	if p.cfg.GenEditScript == "" || p.cfg.GenEditUnet == "" {
+	// Named edit families (ADR 0058), same contract as generate_image: absent (or
+	// the default's own name) = the node's default edit binding; a named overlay
+	// renders under its own config copy and tags the result with its license.
+	cfg, fam, ferr := p.cfg.ResolveEditFamily(paramStr(req.Params, "family"))
+	if ferr != nil {
+		return defer1(ferr.Error())
+	}
+	meta.License = fam.License
+	if cfg.GenEditScript == "" || cfg.GenEditUnet == "" {
 		return defer1("no generative edit route configured")
 	}
 	prompt := strings.TrimSpace(req.Input)
@@ -1723,11 +1796,36 @@ func (p *Pipeline) runEditImageGenerative(ctx context.Context, req core.Request,
 	if image == "" {
 		return defer1("generative edit requires params.image")
 	}
-	script, serr := gpugen.ResolveScript(p.cfg.GenEditScript)
+	is21 := cfg.GenEditFamily == config.FamilyQwenImage21
+	// Multi-reference: `image` stays the edit TARGET (image_1); `images` are the
+	// references after it (image_2..). The graph takes 10 in all, the target included.
+	refs := imagegenStrings(req.Params["images"])
+	if len(refs) > 0 && !is21 {
+		return defer1(fmt.Sprintf("multi-reference edits need a %s edit family; %s takes one image (pass family, or drop images)",
+			config.FamilyQwenImage21, familyLabel(fam)))
+	}
+	if 1+len(refs) > maxEditImages {
+		return defer1(fmt.Sprintf("a %s edit takes at most %d images in all (the target plus %d references); got %d",
+			config.FamilyQwenImage21, maxEditImages, maxEditImages-1, 1+len(refs)))
+	}
+	for _, r := range refs {
+		if fi, err := os.Stat(r); err != nil || fi.IsDir() {
+			return defer1("reference image not found: " + r)
+		}
+	}
+	if paramBool(req.Params, "transparent") && !cfg.SupportsTransparentEdit() {
+		return defer1(fmt.Sprintf("transparent output needs a %s edit family (the only RGBA VAE); %s renders opaque",
+			config.FamilyQwenImage21, familyLabel(fam)))
+	}
+	if is21 && paramStr(req.Params, "preset") != "" {
+		return defer1(fmt.Sprintf("preset is a Qwen-Image-Edit 2511 steps+cfg+LoRA pairing; the %s edit graph has none (its recipe is 40 steps / cfg 1 — pass steps and cfg together to change it)",
+			config.FamilyQwenImage21))
+	}
+	script, serr := gpugen.ResolveScript(cfg.GenEditScript)
 	if serr != nil {
 		return defer1(serr.Error())
 	}
-	meta.Model = "comfyui-edit:" + p.cfg.GenEditUnet
+	meta.Model = "comfyui-edit:" + cfg.GenEditUnet
 	// Pin a concrete seed BEFORE the render, same reproducibility rule as
 	// runGenerateImage/runInpaintImage: otherwise the runner mints its own and the
 	// reported seed would not reproduce the image.
@@ -1745,27 +1843,70 @@ func (p *Pipeline) runEditImageGenerative(ctx context.Context, req core.Request,
 		out = filepath.Join(p.cfg.MediaDir, "edit-"+sha256hex(image + prompt + tasks.StableParamsKey(req.Params))[:8]+".png")
 	}
 	m := imagegen.EditModel{
-		Unet: p.cfg.GenEditUnet, Preset: p.cfg.GenEditPreset, LoRA: p.cfg.GenEditLoRA,
-		LoRAStrength: p.cfg.GenEditLoRAStrength, CLIP: p.cfg.GenEditCLIP, VAE: p.cfg.GenEditVAE,
-		Steps: p.cfg.GenEditSteps, CFG: p.cfg.GenEditCFG,
-		Sampler: p.cfg.GenEditSampler, Scheduler: p.cfg.GenEditScheduler,
-		Megapixels: p.cfg.GenEditMegapixels,
+		Unet: cfg.GenEditUnet, Preset: cfg.GenEditPreset, LoRA: cfg.GenEditLoRA,
+		LoRAStrength: cfg.GenEditLoRAStrength, CLIP: cfg.GenEditCLIP, VAE: cfg.GenEditVAE,
+		Steps: cfg.GenEditSteps, CFG: cfg.GenEditCFG,
+		Sampler: cfg.GenEditSampler, Scheduler: cfg.GenEditScheduler,
+		Megapixels:  cfg.GenEditMegapixels,
+		Family:      cfg.GenEditFamily,
+		Resolution:  cfg.GenEditResolution,
+		CacheDevice: cfg.GenEditCacheDevice,
+		// The edit route renders on ONE card: the device pin applies.
+		Launch: comfyLaunch(cfg, true),
 	}
-	timeout := time.Duration(p.cfg.GenEditTimeoutSec) * time.Second
+	timeout := time.Duration(cfg.GenEditTimeoutSec) * time.Second
 	leaseEnv, releaseLease, lerr := p.acquireMediaLease("edit", timeout, p.gpuWait())
 	if lerr != nil {
 		return p.deferForLease(lerr, req.Task, meta, len(req.Input), start)
 	}
 	defer releaseLease()
-	outPath, gerr := imagegen.Edit(ctx, p.cfg.NodePath, script, p.cfg.ComfyDir, out, image, prompt, req.Params, m, timeout, leaseEnv...)
+	outPath, gerr := imagegen.Edit(ctx, cfg.NodePath, script, cfg.ComfyDir, out, image, prompt, req.Params, m, timeout, leaseEnv...)
 	if gerr != nil {
 		meta.ErrClass = classifyErr(gerr)
 		return defer1("generative edit failed: " + gerr.Error())
 	}
 	meta.LatencyMs = time.Since(start).Milliseconds()
-	data, _ := json.Marshal(map[string]any{"image_path": outPath, "seed": seed})
+	payload := map[string]any{"image_path": outPath, "seed": seed, "family": fam.Name}
+	// Measured, like generate_image: the output size follows the source (2511 canvas)
+	// or the target's grid (2.1), never a value the caller could have predicted.
+	if w, h := imagegen.OutputSize(outPath); w > 0 && h > 0 {
+		payload["width"], payload["height"] = w, h
+	}
+	if len(refs) > 0 {
+		payload["images"] = 1 + len(refs)
+	}
+	if paramBool(req.Params, "transparent") {
+		payload["transparent"] = true
+	}
+	addLicenseData(payload, fam)
+	data, _ := json.Marshal(payload)
 	p.record(req.Task, meta, len(prompt))
 	return core.Result{OK: true, Data: data, Meta: meta}
+}
+
+// maxEditImages is the Qwen-Image-2.1 reference limit, target included (the model's
+// official limit; render/wf-qwen-image-21.mjs QWEN_IMAGE_21_MAX_REFS).
+const maxEditImages = 10
+
+// imagegenStrings reads a []string param from its Go shape or the []any a JSON
+// decode produces, dropping empty entries.
+func imagegenStrings(v any) []string {
+	var out []string
+	switch t := v.(type) {
+	case []string:
+		for _, s := range t {
+			if s != "" {
+				out = append(out, s)
+			}
+		}
+	case []any:
+		for _, e := range t {
+			if s, ok := e.(string); ok && s != "" {
+				out = append(out, s)
+			}
+		}
+	}
+	return out
 }
 
 // ImageBatchJob is one line of a generate-image --batch JSONL: a prompt plus the
@@ -2011,7 +2152,9 @@ func (p *Pipeline) RunImageBatch(ctx context.Context, jobs []ImageBatchJob) ([]I
 		}
 		// Ledger input-chars parity with the single path: the RAW prompt is the
 		// caller's input (jobs[i]; norm[i].Prompt may hold the refined text).
-		meta := core.Meta{Model: modelLabel, LatencyMs: it.Ms}
+		// Batches render the DEFAULT binding (no family param on this path), so its
+		// declared license, if any, is the one every row carries.
+		meta := core.Meta{Model: modelLabel, LatencyMs: it.Ms, License: p.cfg.ImageGenLicense}
 		if it.OK {
 			p.record(core.TaskGenerateImage, meta, len(jobs[i].Prompt))
 		} else {
@@ -2099,8 +2242,10 @@ func (p *Pipeline) runRunGraph(ctx context.Context, req core.Request, meta core.
 		return p.deferForLease(lerr, req.Task, meta, len(req.Input), start)
 	}
 	defer releaseLease()
+	// run-graph gets the launch-wide keys but never the device pin: the caller's graph
+	// owns its placement (comfyLaunch).
 	env, gerr := rungraph.Run(ctx, p.cfg.NodePath, script, p.cfg.ComfyDir, params, timeout,
-		p.footprintSampling(runGraphFootprintFamily(req.Params), "", "run-graph"), leaseEnv...)
+		p.footprintSampling(runGraphFootprintFamily(req.Params), "", "run-graph"), append(leaseEnv, comfyLaunch(p.cfg, false).Env()...)...)
 	if gerr != nil {
 		meta.ErrClass = gpugen.ClassifyErr(gerr)
 		return p.deferGen(req, meta, start, len(req.Input), "run-graph failed: "+gerr.Error())
@@ -2488,7 +2633,9 @@ func (p *Pipeline) runGenerateVideo(ctx context.Context, req core.Request, meta 
 	// COMFY_WAIT_SEC aligns the render script's poll budget with the harness timeout
 	// (quality-first: the native recipe at 720p legitimately exceeds the script's old
 	// hardcoded ceiling; the Go timeout stays the hard stop).
-	env := append(p.genEnv(), leaseEnv...)
+	// Never the device pin: a pooled video seat is placed by its pool keys, and the
+	// 3x16 pool must compute on ComfyUI's default device (MultiGPU #220).
+	env := append(p.comfyGenEnv(false), leaseEnv...)
 	if timeout > 0 {
 		env = append(env, "COMFY_WAIT_SEC="+strconv.Itoa(int(timeout/time.Second)))
 	}
@@ -2617,7 +2764,8 @@ func (p *Pipeline) runAnimateCharacter(ctx context.Context, req core.Request, me
 		return p.deferForLease(lerr, req.Task, meta, len(req.Input), start)
 	}
 	defer releaseLease()
-	env := append(p.genEnv(), leaseEnv...)
+	// Single-card route: the device pin applies (comfyLaunch).
+	env := append(p.comfyGenEnv(true), leaseEnv...)
 	if timeout > 0 {
 		env = append(env, "COMFY_WAIT_SEC="+strconv.Itoa(int(timeout/time.Second)))
 	}
@@ -2775,12 +2923,17 @@ func (p *Pipeline) runGenerateAudio(ctx context.Context, req core.Request, meta 
 	}
 	defer releaseLease()
 	// voice never starts ComfyUI → skip the post-run ComfyUI /free (still tree-kills
-	// the python worker on timeout). music drives ComfyUI → keep the /free.
+	// the python worker on timeout). music drives ComfyUI → keep the /free, and take the
+	// launch profile (a single-card route: the device pin applies).
+	audioGenEnv := p.genEnv()
+	if kind == "music" {
+		audioGenEnv = p.comfyGenEnv(true)
+	}
 	spec := gpugen.Spec{
 		Exe:           p.cfg.NodePath,
 		Script:        script,
 		Args:          args,
-		Env:           append(p.genEnv(), leaseEnv...),
+		Env:           append(audioGenEnv, leaseEnv...),
 		Out:           out,
 		Timeout:       timeout,
 		SkipFreeComfy: kind == "voice",
@@ -3230,7 +3383,36 @@ func imageModelFromConfig(cfg config.Config) imagegen.Model {
 		PoolVvramGB:  cfg.ImageGenPoolVvramGB,
 		PoolCompute:  cfg.ImageGenPoolCompute,
 		PoolDonor:    cfg.ImageGenPoolDonor,
+		Schedule:     cfg.ImageGenSchedule,
+		// A pooled seat is placed by its pool keys; the device pin is for the
+		// single-card shape only (see comfyLaunch).
+		Launch: comfyLaunch(cfg, !cfg.ImagePooled()),
 	}
+}
+
+// comfyLaunch maps a binding's comfy_* keys onto the runner's launch profile.
+//
+// singleCard decides whether comfy_cuda_device applies. It is true for the routes that
+// render on ONE card — image generation when the binding does not pool, generative
+// edit, upscale, inpaint, animate, music — and false for:
+//   - a pooled image/video seat: its pool keys name the cards, and the blackwell-3x16
+//     video pool must COMPUTE on cuda:0 (ComfyUI-MultiGPU #220: an int8 DiT cannot
+//     compute on a non-default device), which a --cuda-device pin would hide;
+//   - run-graph: the caller's graph owns its placement.
+//
+// Dynamic VRAM and the extra args are launch-wide and apply to every ComfyUI route.
+func comfyLaunch(cfg config.Config, singleCard bool) imagegen.ComfyLaunch {
+	l := imagegen.ComfyLaunch{DynamicVRAM: cfg.ComfyDynamicVRAM, ExtraArgs: cfg.ComfyExtraArgs}
+	if singleCard {
+		l.CudaDevice = strings.ReplaceAll(cfg.ComfyCudaDevice, " ", "")
+	}
+	return l
+}
+
+// comfyGenEnv is genEnv plus the launch profile, for the ComfyUI-backed runners that
+// build their env from genEnv (video, animate, music).
+func (p *Pipeline) comfyGenEnv(singleCard bool) []string {
+	return append(p.genEnv(), comfyLaunch(p.cfg, singleCard).Env()...)
 }
 
 // imageFootprintKey is this box's image-render footprint identity: the
@@ -3263,6 +3445,19 @@ func imageFootprintKey(cfg config.Config) (family, quant string) {
 	}
 	if strings.HasPrefix(family, "hidream-o1") {
 		quant = "bf16"
+	}
+	// qwen-image-2.1 ships in several precisions (bf16, int8_convrot, community
+	// fp8/nvfp4/int4) whose VRAM peaks differ ~2x; one footprint bucket would average
+	// them into a number true of neither. The precision is read from the bound DiT's
+	// basename, most specific token first.
+	if family == config.FamilyQwenImage21 {
+		base := strings.ToLower(filepath.Base(cfg.ImageGenCkpt))
+		for _, q := range []string{"nvfp4", "int8", "int4", "bf16", "fp16", "fp8"} {
+			if strings.Contains(base, q) {
+				quant = q
+				break
+			}
+		}
 	}
 	return family, quant
 }
@@ -4074,6 +4269,8 @@ func entryFrom(task core.TaskType, meta core.Meta, deferred bool, inputChars int
 		// The surface that admitted the call (A-102): "offload_summarize",
 		// "cli:summarize", "fleet". Empty when no door stamped the request.
 		Door: meta.Door,
+		// The media binding's license (ADR 0058); empty on text rows.
+		License: meta.License,
 		// Same read the delegation log does (delegate.record): per-row, so a
 		// long-lived process whose environment never changes still labels
 		// every row consistently, and an untagged process writes nothing.

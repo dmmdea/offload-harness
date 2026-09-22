@@ -393,6 +393,11 @@ type Meta struct {
 	// Pipeline.Run and mapped onto ledger.Entry.Door; omitempty, so a caller
 	// that stamps no door publishes byte-identically to before.
 	Door string `json:"door,omitempty"`
+	// License is the license of the media binding that produced this result (ADR
+	// 0058: a named family always declares one; a default binding may). Mapped onto
+	// ledger.Entry.License so the ledger can answer "which renders came out of a
+	// non-commercial model?"; omitempty, so a text call publishes byte-identically.
+	License string `json:"license,omitempty"`
 }
 
 // Result is the harness outcome. On success Data holds the validated task output.
