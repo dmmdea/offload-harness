@@ -272,8 +272,8 @@ func (s *Server) buildServer(version string) *mcp.Server {
 
 	srv.AddTool(&mcp.Tool{
 		Name:        "offload_generate_image",
-		Description: "Generate an IMAGE from a text prompt on THIS machine's LOCAL image engine for FREE — no cloud, runs on the local GPU, using its configured model at its highest-quality settings (the engine is ComfyUI or stable-diffusion.cpp per machine; offload_status media.routes reports which one is bound here — e.g. HiDream-O1 bf16 at native 2048 via its official graph, SDXL on smaller boxes). QUALITY-FIRST: renders can take many minutes — that is intended; do not lower steps/resolution to speed things up unless the caller explicitly asks for a draft. prompt is required (prose sentences beat tag lists on DiT models; quoted text renders as literal text); optional: negative (active on models served with real CFG), width/height (default = the model's native resolution), steps, seed, out. It takes the shared single-slot GPU lock (and, on the ComfyUI engine, auto-starts ComfyUI), so it serializes with other local gen/inference and may wait. Where this machine configures a prompt-refiner model (imagegen_refiner_model), the prompt is first expanded with photographic detail on the free local text tier. Double-quoted text spans (straight or curly quotes) are guarded: if the refined text drops or alters one, or adds new quoted text, the raw prompt is rendered instead — same fallback as on any refiner error, recorded in the result as refine_fallback. The result then carries refined (plus refined_prompt when true); set refine=false to render your prompt verbatim. Caveat: unpaired quote marks used as inch marks can pair into unintended spans and force the (safe) raw-prompt fallback — spell out inches when a prompt also quotes text. Returns {image_path, width, height, seed}. On any failure it returns deferred:true — then generate the image another way.",
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"prompt":{"type":"string","description":"positive text prompt describing the image"},"negative":{"type":"string","description":"hard exclusions, e.g. people, text, watermark"},"out":{"type":"string","description":"output PNG path (optional; default under the media dir)"},"width":{"type":"integer","description":"width px (default 1024)"},"height":{"type":"integer","description":"height px (default 1024)"},"steps":{"type":"integer","description":"sampler steps (default 30)"},"seed":{"type":"integer","description":"RNG seed for reproducibility"},"refine":{"type":"boolean","description":"set false to skip this machine's opt-in prompt refiner and render the prompt verbatim (default: refine when a refiner model is configured; no-op otherwise)"}},"required":["prompt"]}`),
+		Description: "Generate an IMAGE from a text prompt on THIS machine's LOCAL image engine for FREE — no cloud, runs on the local GPU, using its configured model at its highest-quality settings (the engine is ComfyUI or stable-diffusion.cpp per machine; offload_status media.routes reports which one is bound here — e.g. HiDream-O1 bf16 at native 2048 via its official graph, SDXL on smaller boxes). QUALITY-FIRST: renders can take many minutes — that is intended; do not lower steps/resolution to speed things up unless the caller explicitly asks for a draft. prompt is required (prose sentences beat tag lists on DiT models; quoted text renders as literal text); optional: negative (active on models served with real CFG), width/height (default = the model's native resolution), steps, seed, out. It takes the shared single-slot GPU lock (and, on the ComfyUI engine, auto-starts ComfyUI), so it serializes with other local gen/inference and may wait. Where this machine configures a prompt-refiner model (imagegen_refiner_model), the prompt is first expanded with photographic detail on the free local text tier. Double-quoted text spans (straight or curly quotes) are guarded: if the refined text drops or alters one, or adds new quoted text, the raw prompt is rendered instead — same fallback as on any refiner error, recorded in the result as refine_fallback. The result then carries refined (plus refined_prompt when true); set refine=false to render your prompt verbatim. Caveat: unpaired quote marks used as inch marks can pair into unintended spans and force the (safe) raw-prompt fallback — spell out inches when a prompt also quotes text. NAMED FAMILIES: family selects one of this machine's opt-in bindings (offload_status media.image_families lists them); omit it for the default binding, which is what every call without it renders. A family whose license is non-commercial (e.g. qwen-image-2.1, Qwen Research License) is an explicit research/evaluation opt-in: its result comes back license-tagged (license, commercial_use:false, license_note) — never use it for brand or client work. transparent=true keeps an alpha channel (only a qwen-image-2.1 family has an RGBA VAE; any other binding defers rather than render opaque). Returns {image_path, width, height, seed, family} plus license/commercial_use (and license_note when not commercial) when the binding declares a license — width/height are MEASURED from the written file (a family snaps sizes, e.g. qwen-image-2.1 floors to /32 and defaults to 2048x2048). On any failure (unknown family, transparent on a family without alpha, render error) it returns deferred:true — then generate the image another way.",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"prompt":{"type":"string","description":"positive text prompt describing the image"},"negative":{"type":"string","description":"hard exclusions, e.g. people, text, watermark"},"out":{"type":"string","description":"output PNG path (optional; default under the media dir)"},"width":{"type":"integer","description":"width px (default 1024)"},"height":{"type":"integer","description":"height px (default 1024)"},"steps":{"type":"integer","description":"sampler steps (default 30)"},"seed":{"type":"integer","description":"RNG seed for reproducibility"},"refine":{"type":"boolean","description":"set false to skip this machine's opt-in prompt refiner and render the prompt verbatim (default: refine when a refiner model is configured; no-op otherwise)"},"family":{"type":"string","description":"OPTIONAL named image family (offload_status media.image_families); omit for this machine's default binding. Non-commercial families return license-tagged results"},"transparent":{"type":"boolean","description":"keep an alpha channel (RGBA PNG with a transparent background; the prompt is wrapped in the model's official RGBA template). Only a qwen-image-2.1 family supports it; default false = opaque RGB"}},"required":["prompt"]}`),
 	}, s.handleGenerateImage)
 
 	srv.AddTool(&mcp.Tool{
@@ -326,8 +326,8 @@ func (s *Server) buildServer(version string) *mcp.Server {
 
 	srv.AddTool(&mcp.Tool{
 		Name:        "offload_edit_image_generative",
-		Description: "Rewrite a local image from a TEXT INSTRUCTION on the LOCAL ComfyUI for FREE — no mask (Qwen-Image-Edit class: the model reads the source through its own vision encoder and re-renders the whole frame). This is the route for instruction edits that have no drawable region: \"make it snowing heavily\", \"turn the leather into fur\", \"make it night\", \"change the sofa to green\". Pick between the three edit routes by what you have: offload_edit_image for DETERMINISTIC ops (crop/resize/text/composite — free, CPU, exact); offload_inpaint_image when you can supply a MASK and want the rest untouched pixel-for-pixel; THIS when the change is global or diffuse and you cannot draw a mask. Note it re-renders everything, so fine detail outside the intended change will shift — prefer inpaint when a mask is possible. Output is snapped to ~1MP (a 2048x2048 source returns ~1024x1024). preset trades speed for fidelity: lightning8 (default, ~4x faster) or full. Takes the shared single-slot GPU lock (serializes with other local gen); expect several minutes, most of it fixed model-load overhead. Returns {image_path, seed}. On any failure (no edit binding on this machine, missing file, render error) it returns deferred:true.",
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"image":{"type":"string","description":"local path of the source image"},"prompt":{"type":"string","description":"the edit INSTRUCTION, e.g. 'make it snowing heavily, winter atmosphere' — describe the change, not the whole scene"},"negative":{"type":"string","description":"hard exclusions"},"preset":{"type":"string","description":"full | lightning8 | lightning4 — a MATCHED steps+cfg+LoRA triple. Prefer switching preset over setting steps/cfg by hand: half-overriding the pairing renders successfully and looks wrong"},"steps":{"type":"integer","description":"sampler steps (advanced; overrides the preset — see preset)"},"cfg":{"type":"number","description":"guidance (advanced; a Lightning preset needs 1.0 — see preset)"},"seed":{"type":"integer","description":"RNG seed for reproducibility"},"out":{"type":"string","description":"output PNG path (optional; default under the media dir)"}},"required":["image","prompt"]}`),
+		Description: "Rewrite a local image from a TEXT INSTRUCTION on the LOCAL ComfyUI for FREE — no mask (Qwen-Image-Edit class: the model reads the source through its own vision encoder and re-renders the whole frame). This is the route for instruction edits that have no drawable region: \"make it snowing heavily\", \"turn the leather into fur\", \"make it night\", \"change the sofa to green\". Pick between the three edit routes by what you have: offload_edit_image for DETERMINISTIC ops (crop/resize/text/composite — free, CPU, exact); offload_inpaint_image when you can supply a MASK and want the rest untouched pixel-for-pixel; THIS when the change is global or diffuse and you cannot draw a mask. Note it re-renders everything, so fine detail outside the intended change will shift — prefer inpaint when a mask is possible. On the default (Qwen-Image-Edit 2511) binding the working canvas follows the source within 0.9-2.0 MP (a smaller source is scaled up to ~0.9 MP, a larger one down to 2 MP, unless the machine pins gen_edit_megapixels); preset trades speed for fidelity there: lightning8 (default, ~4x faster) or full. NAMED FAMILIES: family selects one of this machine's opt-in edit bindings (offload_status media.edit_families); omit it for the default. A qwen-image-2.1 family edits with MULTIPLE references: image stays the edit TARGET (<image1> in the prompt) and images adds up to 9 references after it (<image2>..<image10>, 10 images in all); it has no presets (40 steps / cfg 1) and transparent=true keeps alpha. qwen-image-2.1 is non-commercial (Qwen Research License): its result comes back license-tagged (license, commercial_use:false, license_note) — research/evaluation only, never brand or client work. Takes the shared single-slot GPU lock (serializes with other local gen); expect several minutes, most of it fixed model-load overhead. Returns {image_path, seed, family, width, height} (MEASURED output size) plus images (the count, on a multi-reference edit) and license/commercial_use/license_note when the binding declares a license. On any failure (no edit binding on this machine, unknown family, images on a single-image family, more than 10 images, missing file, preset on a 2.1 family, render error) it returns deferred:true.",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"image":{"type":"string","description":"local path of the source image"},"prompt":{"type":"string","description":"the edit INSTRUCTION, e.g. 'make it snowing heavily, winter atmosphere' — describe the change, not the whole scene"},"negative":{"type":"string","description":"hard exclusions"},"preset":{"type":"string","description":"full | lightning8 | lightning4 — a MATCHED steps+cfg+LoRA triple (2511 binding only; a qwen-image-2.1 family has no presets). Prefer switching preset over setting steps/cfg by hand: half-overriding the pairing renders successfully and looks wrong"},"steps":{"type":"integer","description":"sampler steps (advanced; overrides the preset — see preset)"},"cfg":{"type":"number","description":"guidance (advanced; a Lightning preset needs 1.0 — see preset)"},"seed":{"type":"integer","description":"RNG seed for reproducibility"},"out":{"type":"string","description":"output PNG path (optional; default under the media dir)"},"family":{"type":"string","description":"OPTIONAL named edit family (offload_status media.edit_families); omit for this machine's default edit binding"},"images":{"type":"array","items":{"type":"string"},"maxItems":9,"description":"extra REFERENCE image paths after the target (qwen-image-2.1 families only; the target plus these is at most 10). Address them in the prompt as <image2>..<image10>; image is <image1>"},"transparent":{"type":"boolean","description":"keep an alpha channel in the output (qwen-image-2.1 families only)"}},"required":["image","prompt"]}`),
 	}, s.handleEditImageGenerative)
 
 	srv.AddTool(&mcp.Tool{
@@ -477,8 +477,14 @@ func (s *Server) handleStatus(ctx context.Context, req *mcp.CallToolRequest) (*m
 	// autonomous planner on a node whose imagegen_engine is stable-diffusion.cpp
 	// and which has no ComfyUI installed at all. A capability map the planner acts
 	// on is worse wrong than absent.
+	mediaRoutes := mediacap.Routes(cfg)
 	media := map[string]any{
-		"routes":              mediacap.Map(mediacap.Routes(cfg)),
+		"routes": mediacap.Map(mediaRoutes),
+		// Every binding a request's `family` param can select (ADR 0058), the
+		// default first, each with its license and its route verdict — a planner
+		// picks a family from here, and a null license means UNKNOWN, not safe.
+		"image_families":      mediacap.ImageFamilyRows(cfg, mediaRoutes),
+		"edit_families":       mediacap.EditFamilyRows(cfg, mediaRoutes),
 		"image_ckpt":          cfg.ImageGenCkpt, // "" = the render script's default checkpoint
 		"video_upscale_model": cfg.VideoGenUpscaleModel,
 		"svg_engine":          "deterministic component kit (in-process Go, no model, no engine)",
@@ -1435,19 +1441,29 @@ func (s *Server) handleOCR(ctx context.Context, req *mcp.CallToolRequest) (*mcp.
 
 func (s *Server) handleGenerateImage(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	var in struct {
-		Prompt   string `json:"prompt"`
-		Negative string `json:"negative"`
-		Out      string `json:"out"`
-		Width    int    `json:"width"`
-		Height   int    `json:"height"`
-		Steps    int    `json:"steps"`
-		Seed     int    `json:"seed"`
-		Refine   *bool  `json:"refine"`
+		Prompt      string `json:"prompt"`
+		Negative    string `json:"negative"`
+		Out         string `json:"out"`
+		Width       int    `json:"width"`
+		Height      int    `json:"height"`
+		Steps       int    `json:"steps"`
+		Seed        int    `json:"seed"`
+		Refine      *bool  `json:"refine"`
+		Family      string `json:"family"`
+		Transparent bool   `json:"transparent"`
 	}
 	if bad := parseArgs(req.Params.Arguments, &in); bad != nil {
 		return bad, nil
 	}
 	params := map[string]any{}
+	// Named family (ADR 0058): absent = the default binding, byte-for-byte what a
+	// call without it rendered before families existed.
+	if in.Family != "" {
+		params["family"] = in.Family
+	}
+	if in.Transparent {
+		params["transparent"] = true
+	}
 	if in.Negative != "" {
 		params["negative"] = in.Negative
 	}
@@ -1484,6 +1500,11 @@ func (s *Server) handleEditImageGenerative(ctx context.Context, req *mcp.CallToo
 		CFG      float64 `json:"cfg"`
 		Seed     int     `json:"seed"`
 		Out      string  `json:"out"`
+		// Named edit family (ADR 0058) and its multi-reference inputs: Images are the
+		// references AFTER the target (Image stays image_1).
+		Family      string   `json:"family"`
+		Images      []string `json:"images"`
+		Transparent bool     `json:"transparent"`
 	}
 	if bad := parseArgs(req.Params.Arguments, &in); bad != nil {
 		return bad, nil
@@ -1491,6 +1512,17 @@ func (s *Server) handleEditImageGenerative(ctx context.Context, req *mcp.CallToo
 	params := map[string]any{}
 	if in.Image != "" {
 		params["image"] = in.Image
+	}
+	if in.Family != "" {
+		params["family"] = in.Family
+	}
+	// The pipeline owns the limit (target + references <= 10) and the per-family
+	// check, so an over-long list reaches it and defers with the reason there.
+	if len(in.Images) > 0 {
+		params["images"] = in.Images
+	}
+	if in.Transparent {
+		params["transparent"] = true
 	}
 	if in.Negative != "" {
 		params["negative"] = in.Negative

@@ -2,6 +2,7 @@ package mediacap
 
 import (
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -296,4 +297,95 @@ func licenseDetail(fi config.FamilyInfo) string {
 		return fmt.Sprintf("license %s; ", fi.License)
 	}
 	return ""
+}
+
+// FamilyRow is one binding a request's `family` param can select, as offload_status
+// (media.image_families / media.edit_families) and /fleet/health publish it. The
+// default binding comes first. License and CommercialUse are null when the binding
+// declares none (a default binding that never set imagegen_license): a reader must
+// treat that as UNKNOWN, never as commercial-safe. State is the binding's route
+// verdict from the same derivation as media.routes.
+type FamilyRow struct {
+	Name          string  `json:"name"`
+	Family        string  `json:"family"`
+	Engine        string  `json:"engine"`
+	Ckpt          string  `json:"ckpt"`
+	License       *string `json:"license"`
+	CommercialUse *bool   `json:"commercial_use"`
+	Default       bool    `json:"default"`
+	State         string  `json:"state"`
+}
+
+// ImageFamilyRows lists this box's image bindings with their verdicts (routes is
+// Routes(cfg), passed in so one status call derives the filesystem view once).
+func ImageFamilyRows(cfg config.Config, routes []Route) []FamilyRow {
+	byRoute := map[string]Route{}
+	for _, r := range routes {
+		byRoute[r.Name] = r
+	}
+	var out []FamilyRow
+	for _, fi := range cfg.ImageFamilies() {
+		fcfg, _, err := cfg.ResolveImageFamily(fi.Name)
+		if fi.Default {
+			fcfg, err = cfg, nil
+		}
+		if err != nil {
+			continue
+		}
+		rn := "generate_image"
+		if !fi.Default {
+			rn = ImageFamilyRoute(fi.Name)
+		}
+		ckpt := fcfg.ImageGenCkpt
+		if fcfg.ImageGenEngine == "sdcpp" {
+			ckpt = filepathBase(fcfg.SdcppModel)
+		}
+		out = append(out, familyRow(fi, ckpt, byRoute[rn]))
+	}
+	return out
+}
+
+// EditFamilyRows is ImageFamilyRows for the generative edit route.
+func EditFamilyRows(cfg config.Config, routes []Route) []FamilyRow {
+	byRoute := map[string]Route{}
+	for _, r := range routes {
+		byRoute[r.Name] = r
+	}
+	var out []FamilyRow
+	for _, fi := range cfg.EditFamilies() {
+		fcfg, _, err := cfg.ResolveEditFamily(fi.Name)
+		if fi.Default {
+			fcfg, err = cfg, nil
+		}
+		if err != nil {
+			continue
+		}
+		rn := "edit_image_generative"
+		if !fi.Default {
+			rn = EditFamilyRoute(fi.Name)
+		}
+		out = append(out, familyRow(fi, fcfg.GenEditUnet, byRoute[rn]))
+	}
+	return out
+}
+
+func familyRow(fi config.FamilyInfo, ckpt string, r Route) FamilyRow {
+	row := FamilyRow{Name: fi.Name, Family: fi.Family, Engine: fi.Engine, Ckpt: ckpt,
+		CommercialUse: fi.CommercialUse, Default: fi.Default, State: string(r.State)}
+	if fi.License != "" {
+		lic := fi.License
+		row.License = &lic
+	}
+	if row.State == "" {
+		row.State = string(NotConfigured)
+	}
+	return row
+}
+
+// filepathBase is filepath.Base that keeps "" as "".
+func filepathBase(p string) string {
+	if p == "" {
+		return ""
+	}
+	return filepath.Base(p)
 }
