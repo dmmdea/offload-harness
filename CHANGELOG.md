@@ -24,6 +24,25 @@ Versioning: [SemVer](https://semver.org/).
 - Tests: 55 pass. Five mutants, each confirmed to typecheck first, are all caught — including one
   that first slipped past a vacuous test comparing `protocolText()` with itself (replaced by fixed
   expectations).
+## [0.133.0] - 2026-09-22 - PAIR shows direct traffic on the vLLM seats
+
+- **Seat load that bypassed the harness never reached PAIR.** On 2026-09-22 the Qube's three
+  cards sat at 100 % for hours under a curl soak against llama-swap while PAIR's Jobs list was
+  empty: PAIR only shows work somebody reports, and only the harness reports. New
+  `pair_seat_activity_enabled` (off by default): fleet-serve polls each ready `vllm_seats` seat's
+  `num_requests_running` + `num_requests_waiting` every 2 s and shows the direct part as one PAIR
+  card per busy stretch (requester `llama-swap/direct`, engine `vllm`).
+- **No duplicates.** The harness's own requests are subtracted: `modelaffinity.Admit` and the
+  fleet chat lane write one marker per in-flight request under `<state root>/seat-inflight/`
+  (`internal/seatinflight`), resolved through the llama-swap roster so an alias counts against
+  its seat. Two agreeing polls open or close a card, so a request ending between the two reads
+  never becomes one.
+- Tests: seat watcher (direct card lifecycle, harness-only load raises nothing, one-poll blips,
+  seat exit, unreadable metrics, shutdown, disabled), marker register (count, dead/stale markers),
+  Admit marks on-box and not off-box. Mutants on the subtraction, the Admit marker and the debounce
+  each go red. Live: the watcher's readers against the Qube's llama-swap read the 3-card seat's
+  load (1, the soak) with 0 harness markers.
+
 ## [0.132.8] - 2026-09-22 - PAIR frames are delivered before a CLI process exits
 
 - **A delegate run from the CLI left its PAIR card "running".** Frames are sent on background

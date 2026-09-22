@@ -40,6 +40,7 @@ import (
 
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/netguard"
+	"github.com/dmmdea/offload-harness/internal/seatinflight"
 	"github.com/dmmdea/offload-harness/internal/swapclient"
 )
 
@@ -208,6 +209,11 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ureq.Header.Set("Content-Type", "application/json")
+	// Another box's harness request on this box's seat: mark it for the PAIR
+	// seat watcher, which must not report it as direct traffic (the asking box
+	// reports it). Held until the answer is copied out, like the seat itself.
+	endMark := seatinflight.Begin(model)
+	defer endMark()
 	resp, err := chatUpstream.Do(ureq)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, fmt.Sprintf("forwarding to %s: %v", upstream, err))

@@ -73,6 +73,8 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/dmmdea/offload-harness/internal/seatinflight"
 )
 
 // defaultBudget is the per-batch drain allowance used when a caller passes a
@@ -83,12 +85,22 @@ const defaultBudget = 120 * time.Second
 
 // Ticket is the admission a caller holds while its request is in flight. The
 // zero Ticket is a no-op, so `defer tk.Release()` is safe on the error path.
-type Ticket struct{ g *gate }
+//
+// end closes the request's seatinflight marker (on-box admissions only): the
+// machine-wide count of the harness's own seat requests that fleet-serve's PAIR
+// seat watcher subtracts, so a harness job never shows twice in PAIR.
+type Ticket struct {
+	g   *gate
+	end func()
+}
 
 // Release ends the caller's in-flight window and, when it was the last of its
 // batch, hands the base to whoever is parked. It is safe on a zero Ticket and
 // must be called exactly once per successful Admit.
 func (t Ticket) Release() {
+	if t.end != nil {
+		t.end()
+	}
 	if t.g != nil {
 		t.g.release()
 	}
@@ -164,7 +176,11 @@ func gateFor(base string) *gate {
 // queue below, and before it the machine-wide GPU lease (gpuwait.go), because
 // a load here can move VRAM a render or a measurement is using.
 func Admit(ctx context.Context, base, model string, budget time.Duration) (Ticket, error) {
-	return admit(ctx, base, model, budget, true)
+	tk, err := admit(ctx, base, model, budget, true)
+	if err == nil {
+		tk.end = seatinflight.Begin(model)
+	}
+	return tk, err
 }
 
 // AdmitOffBox is Admit for an endpoint that is NOT this machine's llama-swap — a

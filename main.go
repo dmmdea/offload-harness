@@ -2401,6 +2401,17 @@ func runFleetServe(args []string) error {
 	reclaim := startReclaimTracking(ctx, cfg, sampler.Load, 5*time.Second)
 	// Host CPU/RAM, same background-sampler rule: health only ever Loads.
 	host := hostsample.Start(ctx, 5*time.Second)
+	// PAIR seat activity (0.133.0): direct traffic on this box's vLLM seats
+	// becomes PAIR cards. Stopped and flushed before fleet-serve returns, so
+	// an open card is closed rather than left running.
+	if cfg.PairSeatActivityEnabled {
+		watcher := pairworkloads.NewSeatWatcher(pairworkloads.New(pairworkloads.SeatWatchConfig(cfg)), cfg)
+		wctx, wcancel := context.WithCancel(ctx)
+		watchDone := make(chan struct{})
+		go func() { watcher.Run(wctx); close(watchDone) }()
+		defer func() { wcancel(); <-watchDone }()
+		pairworkloads.LogSeatWatch(cfg)
+	}
 	// One resolved answer, used by BOTH the server and the startup banner: the
 	// agent lane's advertisement keys on it (fleetnode.AgentLaneAdmissible), so
 	// a banner computing it separately from the config could print a task list

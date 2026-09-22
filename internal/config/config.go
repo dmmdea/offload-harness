@@ -17,6 +17,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/modelaffinity"
 	"github.com/dmmdea/offload-harness/internal/netguard"
+	"github.com/dmmdea/offload-harness/internal/seatinflight"
 )
 
 // PipelineSpec describes one externally-provided pipeline CLI this node can run
@@ -327,6 +328,13 @@ type Config struct {
 	// PairWorkloadsEndpoint is the ingress URL; the default is the port every
 	// node's workload-ingress.json binds.
 	PairWorkloadsEndpoint string `json:"pair_workloads_endpoint,omitempty"`
+	// PairSeatActivityEnabled (0.133.0) makes fleet-serve report traffic that
+	// reaches this box's vLLM seats WITHOUT the harness (a curl soak, an editor
+	// pointed at llama-swap) as PAIR cards, one per busy stretch of a seat. The
+	// harness's own requests are subtracted (internal/seatinflight), so a
+	// harness job never shows twice. Unlike pair_workloads_enabled it belongs on
+	// every box that SERVES a vLLM seat. Off by default; same ingress URL.
+	PairSeatActivityEnabled bool `json:"pair_seat_activity_enabled,omitempty"`
 	// TierProfile (0.116.0, ADR 0039) is the tier this box is INSTALLED as
 	// (installed.json's profile, e.g. "blackwell-3x16"), seeded by tierseed so
 	// status, health and every placement record carry the identity from CONFIG
@@ -1650,8 +1658,13 @@ func loadArmed(path string) (Config, error) {
 	// the Lenovo's arm) makes no local load: this box's machine-wide lease has
 	// nothing to protect, and gating on it cordoned runs that never touched a
 	// local card (register C-58). Disarm, and say so once per process.
+	// The register of the harness's own seat requests (PAIR seat watcher) lives
+	// under the same machine-wide root. Unresolvable = unarmed, silently: it only
+	// ever feeds a PAIR card, and the lease warning above already names the root.
+	_ = seatinflight.Arm(c.StateDir)
 	if host := modelaffinity.EndpointHost(c.Endpoint, c.FleetNodeID); host != "" {
 		modelaffinity.DisarmGPULease()
+		seatinflight.Disarm()
 		remoteEndpointNoteOnce.Do(func() {
 			fmt.Fprintf(os.Stderr, "note: endpoint %s is another box (%s): this box's GPU lease does not gate these runs, and they are attributed to %s\n", c.Endpoint, host, host)
 		})
