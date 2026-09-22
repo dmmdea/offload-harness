@@ -244,6 +244,51 @@ func Families(cfg config.Config) []string {
 			seen[f] = true
 			out = append(out, f)
 		}
+		// A named image family (ADR 0058) is a graph this node can load too; its
+		// NAME and license ride health's image_families (ImageFamilies below).
+		if t == "image-gen" {
+			for _, fi := range cfg.ImageFamilies() {
+				if !fi.Default && fi.Family != "" && !seen[fi.Family] {
+					seen[fi.Family] = true
+					out = append(out, fi.Family)
+				}
+			}
+		}
+	}
+	return out
+}
+
+// ImageFamily is one image binding a fleet dispatcher can select with the
+// image-gen payload's `family`, as /fleet/health publishes it. License and
+// CommercialUse are null when the binding declares none (UNKNOWN, never
+// "commercial-safe"); a dispatcher must not route brand work to a family whose
+// commercial_use is false.
+type ImageFamily struct {
+	Name          string  `json:"name"`
+	Family        string  `json:"family"`
+	Engine        string  `json:"engine"`
+	License       *string `json:"license"`
+	CommercialUse *bool   `json:"commercial_use"`
+	Default       bool    `json:"default"`
+}
+
+// ImageFamilies lists this node's image bindings — the default first, then every
+// named family — when the image-gen task is served; nil otherwise (health then
+// omits the key, the pre-0.134 shape). Config-derived like the task list; the
+// per-family file verdicts live in offload_status/doctor on the node itself.
+func ImageFamilies(cfg config.Config) []ImageFamily {
+	if !cfg.ImageRouteConfigured() || len(cfg.ImageGenFamilies) == 0 {
+		return nil
+	}
+	var out []ImageFamily
+	for _, fi := range cfg.ImageFamilies() {
+		f := ImageFamily{Name: fi.Name, Family: fi.Family, Engine: fi.Engine,
+			CommercialUse: fi.CommercialUse, Default: fi.Default}
+		if fi.License != "" {
+			lic := fi.License
+			f.License = &lic
+		}
+		out = append(out, f)
 	}
 	return out
 }
@@ -320,6 +365,11 @@ func buildImageGen(payload json.RawMessage) (core.Request, func(), error) {
 		Height   int    `json:"height"`
 		Steps    int    `json:"steps"`
 		Seed     int    `json:"seed"`
+		// Named family (ADR 0058) + alpha, exactly as the MCP handler maps them: the
+		// pipeline resolves the name against THIS node's families and defers on an
+		// unknown one with the list it serves (health's image_families).
+		Family      string `json:"family"`
+		Transparent bool   `json:"transparent"`
 	}
 	if err := json.Unmarshal(payload, &in); err != nil {
 		return core.Request{}, noop, fmt.Errorf("image-gen payload: %w", err)
@@ -328,6 +378,12 @@ func buildImageGen(payload json.RawMessage) (core.Request, func(), error) {
 		return core.Request{}, noop, fmt.Errorf("image-gen payload: prompt required")
 	}
 	params := map[string]any{}
+	if in.Family != "" {
+		params["family"] = in.Family
+	}
+	if in.Transparent {
+		params["transparent"] = true
+	}
 	if in.Negative != "" {
 		params["negative"] = in.Negative
 	}

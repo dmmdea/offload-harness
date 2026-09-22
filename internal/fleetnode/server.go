@@ -180,6 +180,9 @@ type Server struct {
 	queue    *fleetqueue.Queue
 	tasks    []string
 	families []string
+	// imageFamilies is the named-family advertisement (ADR 0058), computed once
+	// like families; nil on a node without named families (key omitted).
+	imageFamilies []ImageFamily
 	// agentSeat is the resolved agent planner seat (config.AgentPlannerModel:
 	// agent_model > workhorse Model), computed once here like tasks/families —
 	// the config cannot change under a running server. Advertised (and probed
@@ -432,6 +435,7 @@ func New(runner Runner, jobs *Jobs, opts Options) *Server {
 		opts:               opts,
 		tasks:              SupportedTasksFor(opts.Cfg, opts.LoopbackListener),
 		families:           Families(opts.Cfg),
+		imageFamilies:      ImageFamilies(opts.Cfg),
 		agentSeat:          opts.Cfg.AgentPlannerModel(""),
 		agentLane:          AgentLaneAdmissible(opts.Cfg, opts.LoopbackListener),
 		visionLane:         VisionLaneAdmissible(opts.Cfg, opts.LoopbackListener),
@@ -1064,6 +1068,11 @@ type healthPayload struct {
 	SupportedTaskTypes    []string         `json:"supported_task_types"`
 	LoadableModelFamilies []string         `json:"loadable_model_families"`
 	ModelFootprints       []FootprintEntry `json:"model_footprints"`
+	// ImageFamilies are the bindings an image-gen payload's `family` can select
+	// (ADR 0058), each with its license: a dispatcher routing brand work must skip
+	// a family whose commercial_use is false, and read a null license as UNKNOWN.
+	// Omitted on a node with no named families — the pre-0.134 shape.
+	ImageFamilies []ImageFamily `json:"image_families,omitempty"`
 	// QueueDepth keeps its ORIGINAL meaning and shape across the 0.100.0
 	// backlog/concurrency split: accepted + running, i.e. every job this node
 	// owns that has not reached a terminal state. Every existing reader (the
@@ -1382,6 +1391,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		GpuDevices:            snap.Devices,
 		SupportedTaskTypes:    tasks,
 		LoadableModelFamilies: families,
+		ImageFamilies:         s.imageFamilies,
 		ModelFootprints:       fps,
 		QueueDepth:            queued + running,
 		JobsQueued:            queued,
