@@ -403,7 +403,8 @@ func openPipeline(cfg config.Config) (*pipeline.Pipeline, func(), error) {
 	// Every non-delegation tool row becomes one card in NVIDIA PAIR's Jobs
 	// list (docs/systems/pair-workloads.md); inert unless
 	// pair_workloads_enabled and PAIR is installed on this box.
-	pairworkloads.New(pairworkloads.FromConfig(cfg)).AttachLedger(led)
+	pair := pairworkloads.New(pairworkloads.FromConfig(cfg))
+	pair.AttachLedger(led)
 	return pipeline.New(cfg, client, ca, led), func() {
 		if ca != nil {
 			ca.Close()
@@ -411,6 +412,9 @@ func openPipeline(cfg config.Config) (*pipeline.Pipeline, func(), error) {
 		if led != nil {
 			led.Close()
 		}
+		// A one-shot CLI task exits right after this: deliver its PAIR card
+		// first (each send is bounded at 2 s), or the frame dies in flight.
+		pair.Wait()
 		// The embed memo's persisted hit/miss totals are written ONLY here. A
 		// process that exits without this leaves them at zero, and every reporting
 		// surface then states — in the one number the Phase 0.4 gate reads — that

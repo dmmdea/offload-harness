@@ -132,3 +132,7 @@ appears in PAIR's Jobs list on this box **and** on the node that ran it, reading
 - **Nothing appears**: the key is off, PAIR is not installed (no `node-id.json`), or the
   stock worker is back after a PAIR update (`curl` returns connection refused on 14324).
   The first failed send logs one `pairworkloads:` line.
+
+**Delivery before exit (0.132.8).** Frames go out on background goroutines; `delegate.RunWith` waits
+for its emitter before returning and the one-shot CLI cleanup waits for the ledger emitter, so a
+short-lived process never exits with a card's terminal frame still in flight.

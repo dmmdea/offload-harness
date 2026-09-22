@@ -178,3 +178,31 @@ func TestFailedLocalPlacementReportsErrored(t *testing.T) {
 		t.Fatalf("terminal frame wrong: %v", info)
 	}
 }
+
+// TestRunWithFlushesPAIRFramesBeforeReturning: the delegate CLI is a
+// short-lived process, and a frame still in flight when RunWith returns dies
+// with it — PAIR kept the card "running" until its staleness sweep failed it
+// (a deferred CLI run's terminal frame never arrived). Every frame must be
+// delivered by the time RunWith returns, with no polling by the caller.
+func TestRunWithFlushesPAIRFramesBeforeReturning(t *testing.T) {
+	pairAppDir(t)
+	c := &pairCapture{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(300 * time.Millisecond) // a slow ingress, well inside the 2 s send budget
+		c.handler(w, r)
+	}))
+	defer srv.Close()
+	cfg := testCfg(t)
+	cfg.PairWorkloadsEnabled = true
+	cfg.PairWorkloadsEndpoint = srv.URL
+	local := LocalRunner(func(ctx context.Context, ac core.AgentContract, _ LocalOptions) (core.AgentWireResult, error) {
+		return core.AgentWireResult{SchemaVersion: core.AgentWireSchemaVersion, Deferred: true, Reason: "stalled"}, nil
+	})
+	if _, _, err := RunWith(context.Background(), cfg, local, []core.AgentContract{{Goal: "say done"}}, "local", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	frames := c.snapshot()
+	if len(frames) != 2 || frames[1]["method"] != "workload:errored" {
+		t.Fatalf("frames delivered by return = %d %v, want running + errored", len(frames), frames)
+	}
+}
