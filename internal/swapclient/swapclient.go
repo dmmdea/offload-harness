@@ -123,6 +123,30 @@ func FetchRoster(ctx context.Context, endpoint string, timeout time.Duration) (R
 	return Roster{models: models}, nil
 }
 
+// FetchRosterWith is FetchRoster over the caller's own HTTP client, for a
+// reader that already holds one for the other reads of the same observation
+// (seatload reads /running and the seat's gauge over it): one transport for
+// every read, so a caller's dialer or guarded transport also covers the roster.
+// The client's own Timeout is honored as-is (pkg/llamaswap); timeout and ctx
+// still bound the read. A nil client is FetchRoster.
+func FetchRosterWith(ctx context.Context, client *http.Client, endpoint string, timeout time.Duration) (Roster, error) {
+	if client == nil {
+		return FetchRoster(ctx, endpoint, timeout)
+	}
+	if timeout <= 0 {
+		timeout = DefaultTimeout
+	}
+	c, err := llamaswap.New(BaseURL(endpoint), &llamaswap.Options{Timeout: timeout, HTTPClient: client})
+	if err != nil {
+		return Roster{}, err
+	}
+	models, err := c.Models(ctx)
+	if err != nil {
+		return Roster{}, err
+	}
+	return Roster{models: models}, nil
+}
+
 // NewRoster wraps an already-fetched model list. For callers that hold a client.
 func NewRoster(models []llamaswap.Model) Roster { return Roster{models: models} }
 

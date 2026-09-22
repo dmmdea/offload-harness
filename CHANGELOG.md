@@ -47,7 +47,32 @@ Versioning: [SemVer](https://semver.org/).
   contexts and burned the full wait every start), and honours a per-device floor
   `SEAT_VRAM_FLOOR_MIB_<index>`; `seat_stop.sh`'s VRAM readback honours it too. The seat env
   template exports `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=120` and names a per-seat
-  `SEAT_L2_STATUS_FILE`.
+  `SEAT_L2_STATUS_FILE` (`seat-l2-<seat id>.status` beside the env). **Migration:** after
+  re-rendering a seat, repoint its `kv_cache_server` binding's `status_file` from `seat-l2.status`
+  to the per-seat file. The old file is no longer written, so status would show a frozen verdict
+  or "unreadable". The `status_file` comment, the `offload_status` `reachable_note` and the docs
+  name the per-seat file; the `seat_fg.sh` header now describes the pipeline seat serving L2
+  through the per-rank overlay (the first request after an MP start still gets 0 hits) and fp8 KV
+  at 262k on three cards.
+- **Gauge reads on a box whose endpoint names itself.** `seatload.SeatURL` re-points a loopback
+  seat `proxy` at the endpoint's host only when that host is ANOTHER machine. An endpoint that is
+  this machine's hostname, or resolves to one of its interface addresses (a MagicDNS name for
+  itself), keeps the loopback proxy: the reference seat binds 127.0.0.1 only. The same-machine
+  answer is cached per host (5 min; a failed lookup 30 s), so the 2 s seat-watcher poll never pays
+  a lookup timeout on every read.
+- **Gauge reads behind a llama-swap on another machine say why they fail.** The re-pointed address
+  reaches only a seat bound to a routable address there; a loopback-bound seat refuses, and
+  `Inflight` now reports `seatload.ErrRemoteSeatUnreachable` (the drain prints it at its deadline,
+  `gpu status` / `offload_status` show it as the seat's error) instead of a bare "connection
+  refused". `/upstream` stays excluded as a fallback: it resets the idle unload timer.
+  `ErrNoSeatAddress` now says the llama-swap build is too old to report `proxy` and to upgrade it.
+- **The alias roster is read over the caller's HTTP client** (`swapclient.FetchRosterWith`), like
+  `/running` and the gauge — one transport per observation.
+- **`seat_fg.sh` refuses a missing `--chat-template` file** before it touches the MP server, naming
+  the file; the rendered env header and OPERATOR-GUIDE say to copy the render's `templates/` into
+  the WSL seat directory. `docs/systems/gpu-lease.md` and `docs/systems/pair-workloads.md` no longer
+  describe the gauge read as `/upstream/<seat>/metrics`. The OPERATOR-GUIDE binding examples name the
+  rendered per-seat status files (`seat-l2-<seat id>.status`).
 - Comments: the default L1 staging is 2 GB (`EffectiveL1StagingGB`), not 8; the 3-card box's
   agent alias is `agent-pool`.
 

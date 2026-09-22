@@ -73,7 +73,7 @@ native CPU/disk offloading (measured unusable on the Mamba-hybrid 27B under WSL2
    prints above the health probe, since its verdicts are pure config and a dead serving layer must
    not hide them. A box with no `vllm_seats` prints nothing and fails nothing.
 3. `offload_status.kv_cache_server` LISTS every binding (an `fs_native` binding with a `status_file` also
-   publishes `reachable` from the seat wrapper's `seat-l2.status` verdict — B-29, 0.129.1): `bindings[]` (seat, store, address,
+   publishes `reachable` from the seat wrapper's verdict file, `SEAT_L2_STATUS_FILE`, which is `seat-l2-<seat id>.status` in a rendered seat env — B-29, 0.129.1): `bindings[]` (seat, store, address,
    key_prefix, l1_staging_gb, chunk size, declared/enabled — or `storeless` with its reason), plus
    `unbound_seats`, the same list `doctor` fails on, computed by the same `UnboundSeats` so the
    report and the gate cannot disagree. Each enabled Valkey store named by an IP literal carries a
@@ -90,7 +90,7 @@ native CPU/disk offloading (measured unusable on the Mamba-hybrid 27B under WSL2
    (and optionally `SEAT_L2_MOUNT_OPTS`, `SEAT_L2_MOUNT_TYPE`, default `cifs`) are set. When the mount fails the
    seat **degrades to the same-box tier** (0.115.1): `SEAT_L2` is emptied so the MP server registers no store — an
    unmounted base_path is a local directory the adapter would write into while the tier held nothing — the log says
-   `CACHE SERVER DEGRADED — <why>`, and `$WORK/seat-l2.status` records `degraded <when> reason=<why>` (or `ok <when>
+   `CACHE SERVER DEGRADED — <why>`, and the seat's `SEAT_L2_STATUS_FILE` (default `$WORK/seat-l2.status`) records `degraded <when> reason=<why>` (or `ok <when>
    mbps=<n>`) for readback. Refusing to start was the 0.113.x behaviour; on 2026-09-09 it took the whole agent lane
    down for hours (llama-swap turns every start failure into HTTP 500) over a cache accelerator that was merely slow. The share is named by a hostname the box resolves (tailnet
    MagicDNS or static DNS), never a DHCP address — a vanished lease refused every seat start for hours on

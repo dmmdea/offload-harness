@@ -824,13 +824,14 @@ func kvCacheBindingView(ctx context.Context, k *config.KVCacheServer) map[string
 // fsNativeReachability fills the reachable fields of an fs_native binding from the
 // seat wrapper's own verdict file (B-29). There is no port to dial: the store is a
 // mounted path, and whether it is usable is decided at seat start by seat_fg.sh
-// (mount + 64 MiB write probe), which writes `seat-l2.status` either way. Reading
+// (mount + 64 MiB write probe), which writes the file SEAT_L2_STATUS_FILE names
+// (`seat-l2-<seat id>.status` in a rendered seat env) either way. Reading
 // that file is the end-to-end readback; guessing from the path would be the same
 // silence the status field is against.
 func fsNativeReachability(k *config.KVCacheServer, view map[string]any) {
 	view["reachable"] = nil
 	if strings.TrimSpace(k.StatusFile) == "" {
-		view["reachable_note"] = "fs_native: a mounted path, no port to probe; declare status_file (the seat wrapper's seat-l2.status) to publish the wrapper's mount + write-probe verdict here"
+		view["reachable_note"] = "fs_native: a mounted path, no port to probe; declare status_file (this seat's wrapper verdict file, SEAT_L2_STATUS_FILE in its seat env: seat-l2-<seat id>.status when rendered) to publish the wrapper's mount + write-probe verdict here"
 		return
 	}
 	view["status_file"] = k.StatusFile

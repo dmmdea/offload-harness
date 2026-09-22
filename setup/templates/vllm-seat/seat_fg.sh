@@ -6,13 +6,19 @@
 # swap-out. The LMCache MP server (L1 staging + optional cache-server L2) is a transient systemd unit
 # that outlives the engine; seat_stop.sh (llama-swap `cmdStop`) stops both.
 #
-# Layouts measured 2026-09-02/03 on Qwen3.8-27B INT4 (vLLM 0.28.0, LMCache 0.5.4):
-#   SEAT_TP=2 (two cards, tensor parallel)  — the ONLY layout that can use a cache server (L2 store):
-#     24k-token context back from the store at parity cost, all tokens; MTP possible here.
-#   SEAT_PP=3 (three cards, pipeline)       — uses the same-box RAM tier only (SEAT_L1_GB sized as the
-#     tier, SEAT_L2 empty): 24k back in 0.53 s (26x). A pipeline seat of a 64-layer / 16-attention model
-#     cannot hold equal attention counts per stage, and LMCache's Valkey adapter then fails L2 reads.
-#   fp8 KV and 262k measured infeasible on 16 GB cards for this model; MTP has no pipeline support.
+# Layouts on Qwen3.8-27B INT4 (first measured 2026-09-02/03 on vLLM 0.28.0, LMCache 0.5.4):
+#   SEAT_TP=2 (two cards, tensor parallel)  — uses a cache server (L2 store) with stock LMCache: 24k-token
+#     context back from the store at parity cost, all tokens; MTP possible here.
+#   SEAT_PP=3 (three cards, pipeline)       — the stages hold different counts of full-attention layers
+#     (7/3/6 for a 28,13,23 split of the 64-layer model, full attention every 4th layer), and stock LMCache
+#     sizes L2 reads from one layout per model, so they fail for the ranks that differ. With the per-rank
+#     layout overlay on SEAT_LMCACHE_PYTHONPATH (below) the pipeline seat is bound to its own L2 store and
+#     serves hits, except the FIRST request after an MP server start, which gets 0 L2 hits and recomputes
+#     (open until register-time binding lands). Without the overlay, run it on the same-box RAM tier only
+#     (SEAT_L2 empty): 24k back in 0.53 s (26x).
+#   fp8 KV at 262,144 context runs on the three-card pipeline seat (the blackwell-3x16 tier profile); the
+#     2026-09-03 "fp8 KV and 262k infeasible" result was the two-card layout on vLLM 0.28. MTP has no
+#     pipeline support.
 # Every knob is overridden from seat.env (SEAT_* variables) without editing this file. The values
 # below are placeholders for a generic box; the operator's real ones live in seat.env, next to the
 # harness's config.json `kv_cache_server` block, which is what `offload_status` reports — keep them
@@ -63,7 +69,8 @@ exec > >(tee -a "$LOG") 2>&1
 # instead of refusing to start. 2026-09-09: the write floor refused every start for hours while the share
 # crawled at ~36 MB/s, and llama-swap turned each refusal into HTTP 500 — the whole agent lane died over a
 # cache ACCELERATOR being slow. A slow share is still never used (that is what the floor is for); the seat
-# just runs without it and says so, here and in $WORK/seat-l2.status (readback for health/status).
+# just runs without it and says so, here and in the file SEAT_L2_STATUS_FILE names (a rendered env names
+# seat-l2-<seat id>.status per seat; default $WORK/seat-l2.status) — the readback for health/status.
 L2_STATUS="${SEAT_L2_STATUS_FILE:-$WORK/seat-l2.status}"
 degrade_l2() {
   echo "seat_fg: CACHE SERVER DEGRADED — $1 — serving the same-box tier (L1 ${L1_GB} GB, no L2). Fix the path and restart the seat to get the cache server back."
@@ -151,6 +158,29 @@ if ss -ltnp 2>/dev/null | grep -q ":$MP_HTTP_PORT "; then
   echo "seat_fg: REFUSING to start — the MP HTTP port :$MP_HTTP_PORT is already bound: $(ss -ltnp 2>/dev/null | grep ":$MP_HTTP_PORT " | grep -oE 'users:\(.*\)' | head -1)"
   exit 1
 fi
+
+# Chat template precheck. A --chat-template in SEAT_EXTRA_ARGS names a file; vLLM (0.29 validate_chat_template) refuses a
+# path-like value that does not exist, but only after this wrapper has stopped the old MP unit, waited out the VRAM
+# precheck and started a new MP server, and the reason is buried in a traceback while llama-swap answers the lane with
+# HTTP 500. A rendered seat names a shipped template at <seat dir>/templates/<name>: the renderer emits templates/<name>
+# beside the env, and BOTH must be copied into the distro's seat directory. Refuse at once, before the MP server is
+# touched, and name the file.
+CT_ARGS=()
+[ -n "${SEAT_EXTRA_ARGS:-}" ] && read -r -a CT_ARGS <<< "$SEAT_EXTRA_ARGS"
+for ((ct_i = 0; ct_i < ${#CT_ARGS[@]}; ct_i++)); do
+  case "${CT_ARGS[$ct_i]}" in
+    --chat-template)   ct_path="${CT_ARGS[$((ct_i + 1))]:-}" ;;
+    --chat-template=*) ct_path="${CT_ARGS[$ct_i]#--chat-template=}" ;;
+    *) continue ;;
+  esac
+  case "$ct_path" in
+    /*) if [ ! -r "$ct_path" ]; then
+          echo "seat_fg: REFUSING to start — --chat-template $ct_path does not exist (copy the rendered templates/ directory into $(dirname "$(dirname "$ct_path")") beside the seat env)"
+          exit 1
+        fi ;;
+    "") echo "seat_fg: REFUSING to start — --chat-template has no value in SEAT_EXTRA_ARGS"; exit 1 ;;
+  esac
+done
 
 # One MP server per engine start, with THIS start's settings (a reused unit keeps stale L1/chunk/L2).
 # The store keeps its pages; only the staging buffer is rebuilt.
