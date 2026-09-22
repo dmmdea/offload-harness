@@ -24,7 +24,9 @@ pending work on the node that runs it. Off by default; two config keys turn it o
 | `internal/ledger/ledger.go` | `Ledger.Observe`, called after every durable `Record` |
 | `internal/config/config.go` | `PairWorkloadsEnabled`, `PairWorkloadsEndpoint` |
 | `main.go` | attaches the ledger observer where the CLI/MCP ledger is opened |
-| `internal/pairworkloads/pairworkloads_test.go`, `internal/delegate/pair_events_test.go` | the contract tests |
+| `internal/pairworkloads/seatwatch.go` | the seat watcher (0.133.0): direct traffic on this box's vLLM seats as cards, run by fleet-serve |
+| `internal/seatinflight/seatinflight.go` | the machine-wide register of the harness's own seat requests, written by `modelaffinity.Admit` and the fleet chat lane; the watcher subtracts it |
+| `internal/pairworkloads/pairworkloads_test.go`, `internal/delegate/pair_events_test.go`, `internal/pairworkloads/seatwatch_test.go` | the contract tests |
 
 ## What problem this solves
 
@@ -82,7 +84,47 @@ result. PAIR being absent (no `node-id.json`) or down is normal.
 |---|---|---|
 | `pair_workloads_enabled` | `false` | opt in. Enable on **delegator** boxes (the ones whose MCP sessions place work). A fleet-only node that also reported the delegation it serves would show the same job twice, once per origin |
 | `pair_workloads_endpoint` | `http://127.0.0.1:14324/v1/workloads/events` | the ingress URL |
+| `pair_seat_activity_enabled` | `false` | fleet-serve reports DIRECT traffic on this box's vLLM seats (see *Seat activity* below). Enable on every box that **serves** a vLLM seat; independent of `pair_workloads_enabled` |
 | env `OFFLOAD_PAIR_APPDIR` | platform default | PAIR's app-data dir when it is not at `%LOCALAPPDATA%\Nvidia Corporation\Personal AI Router` (Windows) / `~/.config/Nvidia Corporation/Personal AI Router` (Linux); tests use it |
+
+## Seat activity: traffic that bypasses the harness (0.133.0)
+
+The two sources above only see work the harness does. A client that calls llama-swap
+directly — a curl soak, opencode's own chat model, codex pointed at `:11436` — loaded the
+cards for hours on 2026-09-22 with an empty Jobs list. With `pair_seat_activity_enabled`,
+fleet-serve's **seat watcher** closes that gap:
+
+- Every 2 s it reads llama-swap `/running` and, for each ready seat declared in `vllm_seats`,
+  `/upstream/<seat>/metrics`: live load = `vllm:num_requests_running` + `vllm:num_requests_waiting`.
+- It subtracts the harness's own requests on that seat. Every on-box admission
+  (`modelaffinity.Admit`, i.e. every cascade, repack and agent-loop call) and every fleet
+  chat-lane proxy writes one marker file under `<state root>/seat-inflight/` for as long as
+  the request is held (`internal/seatinflight`); marker names are resolved through the
+  llama-swap roster, so `agent-pool` counts against `qwen3.8-27b-vllm-3card`. **A harness job
+  is never shown twice** — it already has its delegation or ledger card.
+- What is left is direct traffic. Two agreeing polls open a card (`seat-<seat>-<ms>`, model =
+  the seat, engine `vllm`, requester `llama-swap/direct`, on this box); two idle polls complete
+  it at the last busy poll. The seat leaving `/running` with a card open fails it ("seat exited
+  while serving direct traffic"), as do metrics unreadable for a minute. Stopping fleet-serve
+  completes open cards.
+- One card per busy **stretch** of a seat, not per request: a seat's gauge counts requests, it
+  does not name them.
+- vLLM seats only. The llama.cpp seats here are cascade rungs and the mem0 embedder, whose
+  direct callers would flood the list.
+- A marker whose process died is removed on the next read; any marker older than an hour is
+  ignored. A leak can only hide direct traffic, never invent a card.
+- **A poll that cannot attribute a marker reports nothing for that seat** — no card opens, and
+  an open one neither closes nor fails. A marker names the alias the request used, so resolving
+  it needs the roster; an unresolved alias would subtract zero and publish a harness request as
+  direct traffic. The last roster read is kept across a failed refresh (aliases do not change
+  while llama-swap is merely busy), so only a box whose roster never answered goes quiet.
+- **The marker register is armed only where the key is on** (`config.Load`): `modelaffinity.Admit`
+  is the gate every text call passes, and a box that runs no watcher must not pay a file create
+  and remove per request. Set the key in the config **all** the box's harness processes read —
+  the MCP servers write the markers, fleet-serve reads them.
+- Marker removal retries in the background: on Windows the watcher's own read holds the file
+  without delete sharing, and one dropped removal would hide that seat's direct traffic for an
+  hour.
 
 ## The PAIR side (what has to be true on the box)
 
