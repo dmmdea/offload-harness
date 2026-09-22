@@ -265,7 +265,16 @@ export function createHooks(o: Options, diagnostics: Diagnostics = newDiagnostic
       try {
         if (!o.systemProtocol) return;
         const text = protocolText(o.mcp, o.offloadAgent, o.primaryTools);
-        if (!output.system.some((s) => s.includes(PROTOCOL_MARKER))) output.system.push(text);
+        if (output.system.some((s) => s.includes(PROTOCOL_MARKER))) return;
+        // APPEND to the last existing system element, never push a new one. opencode folds
+        // the system array into one message only when it holds MORE than two elements, so a
+        // pushed element next to the usual single base prompt went out as TWO leading
+        // system messages — and a vLLM seat serving the model family's upstream chat
+        // template rejects that request with a 400 (it accepts one system message, and
+        // only first). Appending keeps output.system.length unchanged.
+        const last = output.system.length - 1;
+        if (last < 0) output.system.push(text);
+        else output.system[last] = `${output.system[last]}\n\n${text}`;
       } catch (e) {
         warn("system.transform hook", e);
       }

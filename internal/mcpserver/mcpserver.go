@@ -1136,6 +1136,15 @@ func localSeatView(ctx context.Context, cfg config.Config) map[string]any {
 	// a vLLM seat needs: no /props (404) → its /v1/models max_model_len. Before
 	// 0.113.14 the agent-pool seat reported ctx_probe_error "HTTP 404" here
 	// every time it was warm.
+	//
+	// Idle-timer audit (2026-09-22): on a LOADED seat this is one read through
+	// llama-swap's /upstream/<seat>/props (then /v1/models), and llama-swap
+	// counts an /upstream request as activity, so it restarts the seat's idle
+	// countdown once. That is acceptable here and only here because the call
+	// is operator-initiated and one-shot (an offload_status request), never a
+	// poll: nothing in the harness calls it on a timer. The in-flight read
+	// above (seatload.Inflight) reads the seat's own address and touches no
+	// /upstream path. A caller that wants to poll this view must not.
 	n, err := c.ContextWindow(pctx, seat)
 	switch {
 	case errors.Is(err, llamaswap.ErrNotLoaded):

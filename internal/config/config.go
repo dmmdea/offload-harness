@@ -2374,8 +2374,8 @@ func (c Config) EnsureDirs() error {
 // engines, so a llama.cpp cascade seat and a vLLM seat are indistinguishable
 // there (see Config.VLLMSeats for why the roster is declared rather than
 // sniffed). Callers that hold an ALIAS must resolve it to its canonical id
-// first — the Qube's agent seat is the alias `agent-pool-3card` of
-// `qwen3.8-27b-vllm-3card`, and only the canonical id is in `vllm_seats`, so
+// first — the 3-card reference box's agent seat is bound by the alias
+// `agent-pool` of `qwen3.8-27b-vllm-3card`, and only the canonical id is in `vllm_seats`, so
 // an exact match alone would leave that box on a constraint field vLLM
 // discards (register D-129).
 func (c Config) DeclaresVLLMSeat(id string) bool {

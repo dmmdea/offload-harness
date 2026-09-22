@@ -3,6 +3,7 @@ package seatload
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -13,10 +14,12 @@ import (
 
 // fakeSwap is a llama-swap stand-in: /v1/models serves a roster (an id with
 // aliases), /running lists the seat by CANONICAL id when loaded, and
-// /upstream/<name>/metrics serves a vLLM-shaped exposition with the in-flight
-// count the test controls (llama-swap resolves aliases on /upstream, so the
-// fake answers for both names). It records whether the upstream path was ever
-// touched while the seat was NOT loaded — the one thing a reader must never do.
+// each /running entry carries the seat's own address (`proxy`, as llama-swap
+// reports it), where /metrics serves a vLLM-shaped exposition with the
+// in-flight count the test controls. It records whether the seat was ever
+// asked while NOT loaded, and every /upstream/… request at all: a gauge read
+// through /upstream resets llama-swap's idle timer, so a reader must never
+// issue one.
 type fakeSwap struct {
 	id, alias                 string
 	roster                    bool // serve /v1/models at all (false = roster unreadable)
@@ -25,7 +28,9 @@ type fakeSwap struct {
 	inflight                  atomic.Int64
 	upstreamHitsWhileUnloaded atomic.Int64
 	metricsStatus             atomic.Int64
-	metricsHits               atomic.Int64 // every /upstream/<name>/metrics request, loaded or not
+	metricsHits               atomic.Int64 // every seat /metrics request, loaded or not
+	upstreamHits              atomic.Int64 // every /upstream/… request (must stay 0)
+	noProxy                   bool         // /running omits the seat's proxy (an old llama-swap)
 }
 
 func (f *fakeSwap) handler() http.Handler {
@@ -44,7 +49,11 @@ func (f *fakeSwap) handler() http.Handler {
 			if f.starting.Load() {
 				state = "starting"
 			}
-			running = append(running, map[string]string{"model": f.id, "state": state})
+			entry := map[string]string{"model": f.id, "state": state}
+			if !f.noProxy {
+				entry["proxy"] = "http://" + r.Host + "/direct/" + f.id
+			}
+			running = append(running, entry)
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"running": running})
 	})
@@ -72,10 +81,12 @@ func (f *fakeSwap) handler() http.Handler {
 		}
 		_ = json.NewEncoder(w).Encode(out)
 	}
-	for _, name := range []string{f.id, f.alias} {
-		mux.HandleFunc("/upstream/"+name+"/metrics", metrics)
-		mux.HandleFunc("/upstream/"+name+"/slots", slots)
-	}
+	mux.HandleFunc("/direct/"+f.id+"/metrics", metrics)
+	mux.HandleFunc("/direct/"+f.id+"/slots", slots)
+	mux.HandleFunc("/upstream/", func(w http.ResponseWriter, r *http.Request) {
+		f.upstreamHits.Add(1)
+		http.Error(w, "the reader must not use /upstream", http.StatusTeapot)
+	})
 	return mux
 }
 
@@ -252,5 +263,76 @@ func TestRunningReadsTheSeatStateWithoutEverAskingTheUpstream(t *testing.T) {
 	}
 	if n := f.metricsHits.Load(); n != 0 {
 		t.Fatalf("Running issued %d upstream metrics request(s): probing a seat through /upstream is what LOADS it (C-05)", n)
+	}
+}
+
+// TestInflightNeverReadsThroughUpstream: the gauge of a LOADED seat is read at
+// the seat's own address (/running's `proxy`), never via /upstream/<seat>/…,
+// which llama-swap counts as activity — a polled read there keeps an idle seat
+// resident past its ttl. Both the metrics path and the /slots fallback.
+func TestInflightNeverReadsThroughUpstream(t *testing.T) {
+	f := &fakeSwap{id: "qwen3.8-27b-vllm-3card", alias: "agent-pool", roster: true}
+	f.loaded.Store(true)
+	f.inflight.Store(1)
+	srv := httptest.NewServer(f.handler())
+	defer srv.Close()
+	for i := 0; i < 3; i++ {
+		rd, err := Inflight(context.Background(), srv.Client(), srv.URL, "agent-pool")
+		if err != nil || rd.Inflight != 1 || rd.Source != "metrics" {
+			t.Fatalf("read %d: reading = %+v, err %v; want 1 in flight via metrics", i, rd, err)
+		}
+		if !strings.HasSuffix(rd.Proxy, "/direct/qwen3.8-27b-vllm-3card") {
+			t.Fatalf("reading.Proxy = %q, want the /running proxy of the seat", rd.Proxy)
+		}
+	}
+	f.metricsStatus.Store(http.StatusNotImplemented)
+	if rd, err := Inflight(context.Background(), srv.Client(), srv.URL, "agent-pool"); err != nil || rd.Source != "slots" {
+		t.Fatalf("slots fallback: reading = %+v, err %v", rd, err)
+	}
+	if f.metricsHits.Load() == 0 {
+		t.Fatal("the seat's own /metrics was never read")
+	}
+	if n := f.upstreamHits.Load(); n != 0 {
+		t.Fatalf("Inflight issued %d /upstream request(s): that path resets the seat's idle unload timer", n)
+	}
+}
+
+// TestInflightWithoutAProxyIsAnErrorNotAnUpstreamRead: a llama-swap that does
+// not report the seat's proxy leaves no address to read — "could not read",
+// never a fall-back through /upstream and never "idle".
+func TestInflightWithoutAProxyIsAnErrorNotAnUpstreamRead(t *testing.T) {
+	f := &fakeSwap{id: "seat", alias: "seat-alias", roster: true, noProxy: true}
+	f.loaded.Store(true)
+	srv := httptest.NewServer(f.handler())
+	defer srv.Close()
+	rd, err := Inflight(context.Background(), srv.Client(), srv.URL, "seat-alias")
+	if !errors.Is(err, ErrNoSeatAddress) || !rd.Loaded {
+		t.Fatalf("reading = %+v, err %v; want loaded + ErrNoSeatAddress", rd, err)
+	}
+	if f.upstreamHits.Load() != 0 {
+		t.Fatal("a missing proxy fell back to /upstream")
+	}
+}
+
+func TestSeatURLResolvesTheProxyFromLlamaSwapsBox(t *testing.T) {
+	cases := []struct{ endpoint, proxy, want string }{
+		{"http://127.0.0.1:11436", "http://127.0.0.1:18797", "http://127.0.0.1:18797"},
+		{"http://127.0.0.1:11436/v1", "http://localhost:18797/", "http://localhost:18797"},
+		{"http://127.0.0.1:11436", "http://0.0.0.0:18797", "http://127.0.0.1:18797"},
+		// A remote llama-swap: its loopback proxy means ITS box.
+		{"http://node-b:11436/v1", "http://127.0.0.1:18797", "http://node-b:18797"},
+		{"http://node-b:11436", "http://seat-host:18797", "http://seat-host:18797"},
+	}
+	for _, c := range cases {
+		got, err := SeatURL(c.endpoint, c.proxy)
+		if err != nil || got != c.want {
+			t.Errorf("SeatURL(%q, %q) = %q, %v; want %q", c.endpoint, c.proxy, got, err, c.want)
+		}
+	}
+	if _, err := SeatURL("http://127.0.0.1:11436", ""); !errors.Is(err, ErrNoSeatAddress) {
+		t.Errorf("empty proxy: err = %v, want ErrNoSeatAddress", err)
+	}
+	if _, err := SeatURL("http://127.0.0.1:11436", "not a url"); err == nil {
+		t.Error("a proxy that is not an http(s) URL must be an error")
 	}
 }

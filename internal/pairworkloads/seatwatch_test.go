@@ -17,13 +17,19 @@ import (
 )
 
 // fakeSwap is a llama-swap with one controllable vLLM seat (and one llama.cpp
-// seat that must never be watched).
+// seat that must never be watched). The vLLM seat's /metrics is served by a
+// SEPARATE server — the seat's own address, reported as `proxy` in /running
+// exactly as llama-swap does — and every path either server is asked for is
+// recorded, so a test can prove the watcher never goes through /upstream.
 type fakeSwap struct {
 	mu       sync.Mutex
 	loaded   bool
 	running  int
 	waiting  int
 	badStats bool
+	seatURL  string   // the vLLM seat's own server (its `proxy:`)
+	swapHits []string // every path asked of llama-swap
+	seatHits []string // every path asked of the seat
 }
 
 func (f *fakeSwap) set(fn func(*fakeSwap)) {
@@ -35,14 +41,27 @@ func (f *fakeSwap) set(fn func(*fakeSwap)) {
 func (f *fakeSwap) handler(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.swapHits = append(f.swapHits, r.URL.Path)
 	switch {
 	case r.URL.Path == "/running":
-		models := `{"model":"qwen3.5-9b-agent","state":"ready"}`
+		models := `{"model":"qwen3.5-9b-agent","state":"ready","proxy":"http://127.0.0.1:1"}`
 		if f.loaded {
-			models = `{"model":"qwen3.8-27b-vllm-3card","state":"ready"},` + models
+			models = fmt.Sprintf(`{"model":"qwen3.8-27b-vllm-3card","state":"ready","proxy":%q},`, f.seatURL) + models
 		}
 		fmt.Fprintf(w, `{"running":[%s]}`, models)
-	case r.URL.Path == "/upstream/qwen3.8-27b-vllm-3card/metrics":
+	default:
+		t := "unexpected " + r.URL.Path
+		http.Error(w, t, http.StatusNotFound)
+	}
+}
+
+// seatHandler is the vLLM seat itself, at the address /running reports.
+func (f *fakeSwap) seatHandler(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.seatHits = append(f.seatHits, r.URL.Path)
+	switch {
+	case r.URL.Path == "/metrics":
 		if f.badStats {
 			w.WriteHeader(http.StatusBadGateway)
 			return
@@ -71,6 +90,9 @@ func newSeatRig(t *testing.T) *seatRig {
 	rig := &seatRig{swap: &fakeSwap{loaded: true}, pair: &capture{}, harness: map[string]int{}, clock: time.UnixMilli(1_000_000)}
 	swapSrv := httptest.NewServer(http.HandlerFunc(rig.swap.handler))
 	t.Cleanup(swapSrv.Close)
+	seatSrv := httptest.NewServer(http.HandlerFunc(rig.swap.seatHandler))
+	t.Cleanup(seatSrv.Close)
+	rig.swap.seatURL = seatSrv.URL
 	pairSrv := httptest.NewServer(http.HandlerFunc(rig.pair.handler))
 	t.Cleanup(pairSrv.Close)
 
@@ -362,5 +384,60 @@ func TestSeatWatcherHoldsAnOpenCardWhileHarnessLoadIsUnknown(t *testing.T) {
 	}
 	if n := rig.pair.count(); n != 1 {
 		t.Fatalf("the open card changed state on unresolvable polls: %v", rig.states())
+	}
+}
+
+// TestSeatWatcherNeverRequestsUpstream: the watcher reads the seat's /metrics
+// at the seat's own address (the `proxy` /running reports), never through
+// llama-swap's /upstream/<model>/… — llama-swap counts every /upstream request
+// as activity, so a 2-second poll there kept the seat loaded forever and its
+// 5-minute idle unload never fired. Asked of llama-swap: /running only.
+func TestSeatWatcherNeverRequestsUpstream(t *testing.T) {
+	rig := newSeatRig(t)
+	rig.poll()
+	rig.swap.set(func(f *fakeSwap) { f.running = 1 })
+	rig.poll()
+	rig.poll()
+	rig.swap.set(func(f *fakeSwap) { f.running = 0 })
+	rig.poll()
+	rig.poll()
+	if got := rig.states(); len(got) != 2 || got[0] != "running" || got[1] != "completed" {
+		t.Fatalf("frames = %v, want [running completed] (the metrics must still be read)", got)
+	}
+	rig.swap.mu.Lock()
+	defer rig.swap.mu.Unlock()
+	for _, p := range rig.swap.swapHits {
+		if strings.HasPrefix(p, "/upstream") || p != "/running" {
+			t.Fatalf("the watcher asked llama-swap for %q; only /running is allowed (an /upstream read resets the seat's idle timer)", p)
+		}
+	}
+	if len(rig.swap.seatHits) != 5 {
+		t.Fatalf("seat reads = %v, want one /metrics per poll (5)", rig.swap.seatHits)
+	}
+	for _, p := range rig.swap.seatHits {
+		if p != "/metrics" {
+			t.Fatalf("the watcher asked the seat for %q", p)
+		}
+	}
+}
+
+// TestSeatWatcherWithoutAProxyReadsNothing: a /running entry with no proxy
+// leaves no address — the read is "unreadable" (no card), never a fall-back
+// through /upstream.
+func TestSeatWatcherWithoutAProxyReadsNothing(t *testing.T) {
+	rig := newSeatRig(t)
+	rig.swap.set(func(f *fakeSwap) { f.seatURL, f.running = "", 1 })
+	rig.poll()
+	rig.poll()
+	rig.poll()
+	if n := rig.pair.count(); n != 0 {
+		t.Fatalf("%d frame(s) with no seat address; want none", n)
+	}
+	rig.swap.mu.Lock()
+	defer rig.swap.mu.Unlock()
+	for _, p := range rig.swap.swapHits {
+		if p != "/running" {
+			t.Fatalf("the watcher asked llama-swap for %q", p)
+		}
 	}
 }

@@ -320,7 +320,9 @@ func warmSeat(ctx context.Context, client *http.Client, endpoint, model string) 
 		deadline = dl
 	}
 	for {
-		rd, rerr := seatload.Inflight(ctx, client, endpoint, model)
+		// State only (/running): the watch needs loaded/starting, never the
+		// gauge, so it reads nothing at the seat.
+		rd, rerr := seatload.Running(ctx, client, endpoint, model)
 		switch {
 		case rerr == nil && rd.Loaded && !rd.Starting:
 			return nil

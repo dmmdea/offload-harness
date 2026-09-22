@@ -9,9 +9,13 @@
 //
 // The read is deliberately two-step: llama-swap's /running says whether the
 // seat is loaded at all, and ONLY a loaded seat is asked for /metrics (or
-// /slots) through /upstream/<model>/… — that path loads a model on demand, so
-// probing it on an unloaded seat would do the exact thing a drain exists to
-// avoid.
+// /slots) — at the seat's OWN address (the `proxy` /running reports for it),
+// never through /upstream/<model>/…. That path is wrong twice over: it loads a
+// model on demand, so probing it on an unloaded seat would do the exact thing
+// a drain exists to avoid; and llama-swap counts every /upstream request as
+// activity, so a gauge read through it resets the seat's idle timer — a
+// reader that polls (the PAIR seat watcher, a status line, a drain) would keep
+// an idle seat resident forever and defeat the 5-minute idle unload.
 //
 // /running lists CANONICAL ids, while the harness binds seats by ALIAS on the
 // reference deployment (agent-pool -> qwen3.8-27b-vllm, offload-e4b ->
@@ -29,8 +33,10 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -86,6 +92,63 @@ type Reading struct {
 	// request until the load completes (register D-92). A load in progress is
 	// work in flight for the drain and "not yet a target" for the spread deal.
 	Starting bool
+	// Proxy is the seat's own address as llama-swap's /running reports it —
+	// the `proxy:` of the model entry that is running, after macro expansion.
+	// It is what Inflight reads the gauge from. Empty when the seat is not
+	// listed or the llama-swap build does not report it.
+	Proxy string
+}
+
+// ErrNoSeatAddress is Inflight's answer for a LOADED seat whose /running entry
+// carries no `proxy`: the gauge has nowhere to be read from except
+// /upstream/<seat>/…, and that path resets the seat's idle timer (see the
+// package comment), so the reader reports "could not read" instead.
+var ErrNoSeatAddress = errors.New("llama-swap /running reports no proxy address for the seat; its gauge is read at the seat itself, never through /upstream (which resets the idle unload timer)")
+
+// SeatURL resolves the address a seat's gauges are read at from the `proxy`
+// llama-swap's /running reports for it. The proxy is written from llama-swap's
+// point of view, so a loopback or unspecified host is re-pointed at the host
+// of the llama-swap endpoint when that endpoint is not itself loopback (the
+// seat and its llama-swap share a box). The port is never guessed: two seats
+// may share one port, and only the one /running lists as running owns it now.
+func SeatURL(endpoint, proxy string) (string, error) {
+	p := strings.TrimSpace(proxy)
+	if p == "" {
+		return "", ErrNoSeatAddress
+	}
+	u, err := url.Parse(p)
+	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+		return "", fmt.Errorf("seat proxy %q is not an http(s) URL", proxy)
+	}
+	host := u.Hostname()
+	if isLocalHost(host) {
+		target := ""
+		if e, eerr := url.Parse(swapclient.BaseURL(endpoint)); eerr == nil && e.Hostname() != "" && !isLocalHost(e.Hostname()) {
+			target = e.Hostname()
+		} else if ip := net.ParseIP(host); ip != nil && ip.IsUnspecified() {
+			target = "127.0.0.1"
+		}
+		if target != "" {
+			if port := u.Port(); port != "" {
+				u.Host = net.JoinHostPort(target, port)
+			} else if strings.Contains(target, ":") {
+				u.Host = "[" + target + "]"
+			} else {
+				u.Host = target
+			}
+		}
+	}
+	return strings.TrimRight(u.String(), "/"), nil
+}
+
+// isLocalHost reports a loopback or unspecified host (the forms a llama-swap
+// `proxy:` uses for a seat on its own box).
+func isLocalHost(h string) bool {
+	if strings.EqualFold(h, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(h)
+	return ip != nil && (ip.IsLoopback() || ip.IsUnspecified())
 }
 
 // Running answers the FIRST half of Inflight and stops there: what llama-swap's
@@ -118,11 +181,14 @@ func Inflight(ctx context.Context, client *http.Client, endpoint, seat string) (
 	if err != nil || done {
 		return rd, err
 	}
-	// The upstream path is addressed by the name the caller bound (llama-swap
-	// resolves aliases there); the canonical id would work too, but the bound
-	// name is what every other harness call uses, so a proxy rule keyed on it
-	// behaves the same here.
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/upstream/"+url.PathEscape(seat)+"/metrics", nil)
+	// The gauge is read at the seat's own address, never through
+	// /upstream/<seat>/…: llama-swap counts an /upstream request as activity,
+	// so a polled read there would keep an idle seat loaded past its ttl.
+	seatBase, err := SeatURL(base, rd.Proxy)
+	if err != nil {
+		return rd, fmt.Errorf("seat metrics: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, seatBase+"/metrics", nil)
 	if err != nil {
 		return rd, err
 	}
@@ -143,7 +209,7 @@ func Inflight(ctx context.Context, client *http.Client, endpoint, seat string) (
 		// is_processing, which is the in-flight count for a slot-based server.
 		// Only these two statuses fall back: a 500 or a timeout is "could not
 		// read" and must never pass as idle.
-		n, serr := slotsInflight(ctx, client, base, seat, resp.StatusCode)
+		n, serr := slotsInflight(ctx, client, seatBase, resp.StatusCode)
 		if serr != nil {
 			return rd, serr
 		}
@@ -185,6 +251,7 @@ func running(ctx context.Context, client *http.Client, endpoint, seat string) (R
 		Running []struct {
 			Model string `json:"model"`
 			State string `json:"state"`
+			Proxy string `json:"proxy"`
 		} `json:"running"`
 	}
 	derr := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&listed)
@@ -204,6 +271,7 @@ func running(ctx context.Context, client *http.Client, endpoint, seat string) (R
 		}
 		if matched {
 			rd.Loaded = true
+			rd.Proxy = m.Proxy
 			// A seat that is STARTING or STOPPING is listed, but its upstream is
 			// not there to ask: llama-swap holds `/upstream/<seat>/…` until the
 			// load completes (4m08s on the 27B TP2 seat, 2026-09-11, llama-swap
@@ -226,13 +294,14 @@ func running(ctx context.Context, client *http.Client, endpoint, seat string) (R
 	return rd, rd.Starting, nil
 }
 
-// slotsInflight reads llama-server's GET /slots through llama-swap and counts
-// the slots that are processing. A queued request (llama-server's deferred
+// slotsInflight reads llama-server's GET /slots at the seat's own address
+// (seatBase, from SeatURL — never /upstream) and counts the slots that are
+// processing. A queued request (llama-server's deferred
 // task queue) is not listed by /slots — it becomes a processing slot the
 // instant one frees — which is why a drain asks for TWO consecutive idle reads
 // before it calls the seat drained.
-func slotsInflight(ctx context.Context, client *http.Client, base, seat string, metricsStatus int) (int, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/upstream/"+url.PathEscape(seat)+"/slots", nil)
+func slotsInflight(ctx context.Context, client *http.Client, seatBase string, metricsStatus int) (int, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, seatBase+"/slots", nil)
 	if err != nil {
 		return 0, err
 	}

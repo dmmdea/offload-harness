@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { classifyLeg } from "../src/classify.ts";
+import { PROTOCOL_MARKER } from "../src/protocol.ts";
 import { appendDispatchLog, newInstrumentStats } from "../src/instrument.ts";
 import { createHooks, DEFAULTS, delegateDigest, LocalOffloadPlugin, resolveOptions, taskEscalated, taskFailed, type Options } from "../src/plugin.ts";
 
@@ -64,12 +65,26 @@ describe("hooks", () => {
       const out = { system: ["base"] };
       await h["experimental.chat.system.transform"]!({ model: {} as any }, out);
       await h["experimental.chat.system.transform"]!({ model: {} as any }, out);
-      expect(out.system.length).toBe(2);
+      // Appended to the existing element: a second element would reach the seat as a
+      // second leading system message, which the upstream chat template rejects (400).
+      expect(out.system.length).toBe(1);
+      expect(out.system[0].startsWith("base\n\n")).toBe(true);
+      expect(out.system[0].split(PROTOCOL_MARKER).length - 1).toBe(1);
       if (primaryTools === "all") {
-        expect(out.system[1]).toContain("harness_agent_delegate");
-        expect(out.system[1]).toContain('route:"spread"');
+        expect(out.system[0]).toContain("harness_agent_delegate");
+        expect(out.system[0]).toContain('route:"spread"');
       }
     }
+  });
+  it("system transform appends to the LAST element and never grows the array", async () => {
+    const h = createHooks(opts());
+    const out = { system: ["header", "base prompt"] };
+    await h["experimental.chat.system.transform"]!({ model: {} as any }, out);
+    await h["experimental.chat.system.transform"]!({ model: {} as any }, out);
+    expect(out.system.length).toBe(2);
+    expect(out.system[0]).toBe("header");
+    expect(out.system[1].startsWith("base prompt\n\n")).toBe(true);
+    expect(out.system.join("\n").split(PROTOCOL_MARKER).length - 1).toBe(1);
   });
   it("system transform respects the option", async () => {
     const h = createHooks(opts({ systemProtocol: false }));

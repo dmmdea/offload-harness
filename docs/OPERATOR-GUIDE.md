@@ -950,16 +950,22 @@ second device exists:
     "address": "/mnt/kvcache/lmcache-seat-tp2-fp8",
     "l1_staging_gb": 8,
     "chunk_size": 1568,
-    "key_prefix": "qube-seat-tp2-fp8",
+    "key_prefix": "seat-tp2-fp8",
     "seat": "qwen3.8-27b-vllm",
     "kv_dtype": "fp8",
     "tensor_parallel": 2,
-    "status_file": "//wsl.localhost/freetoken/root/g7/seat-l2.status"
+    "status_file": "//wsl.localhost/<distro>/root/g7/seat-l2-tp2.status"
   },
   {
+    "enabled": true,
+    "store": "fs_native",
+    "address": "/mnt/kvcache/lmcache-seat-3card-fp8",
+    "l1_staging_gb": 16,
+    "chunk_size": 1568,
+    "key_prefix": "seat-3card-fp8",
     "seat": "qwen3.8-27b-vllm-3card",
-    "storeless": true,
-    "reason": "three-stage pipeline seat: LMCache's L2 adapter has no working layout for it (see the layout constraint below)"
+    "kv_dtype": "fp8",
+    "status_file": "//wsl.localhost/<distro>/root/g7/seat-l2-pp3.status"
   }
 ]
 ```
@@ -1077,12 +1083,18 @@ under daytime co-resident growth. Prove the tier with vLLM's own `vllm:external_
 after-eviction request, and prove fidelity with a planted needle retrieved verbatim after eviction
 and after a restart — hit counters alone do not prove the context came back intact.
 
-**Layout constraint (measured 2026-09-03):** LMCache's Valkey adapter sizes L2 reads from one layout
-per model, so a pipeline-parallel seat whose stages hold different numbers of full-attention layers
-(three stages of a 64-layer / 16-attention model: 6/5/5 in any split) fails L2 reads for the odd rank.
-Two-card tensor-parallel seats use the store; a three-card seat uses the same-box L1 tier
-(`l1_staging_gb` sized as the tier, no store) until an upstream fix — `fs_native` is validated for two-card
-(tensor-parallel) seats only.
+**Pipeline seats and the store (measured 2026-09-03, served since 2026-09-22):** stock LMCache sizes L2
+reads from one layout per model, but the stages of a pipeline-parallel seat hold different numbers of
+full-attention layers — the 3-card agent seat's 28,13,23 split of a 64-layer model with full attention every
+4th layer puts **7/3/6** attention layers on its three ranks — so reads failed for every rank whose layout
+differed and the evict phase got 0 external hits. With the per-rank layout overlay patch (each rank's layout
+bound to its own pages; loaded through `SEAT_LMCACHE_PYTHONPATH`) the 3-card pipeline seat is bound to its
+own `fs_native` store, as in the example above, and serves L2 hits. **Caveat, still open:** the FIRST
+request after an MP server start gets 0 L2 hits — it recomputes — until register-time binding lands; later
+requests hit. Each seat writes its own wrapper status file (`SEAT_L2_STATUS_FILE`, e.g.
+`seat-l2-tp2.status` / `seat-l2-pp3.status`), and the binding's `status_file` must name that seat's file.
+L1 staging for this hybrid model is 8 GB on the two-card seat and 16 GB on the three-card seat (2 GB, the
+default, fails its stores; 8 GB on the three-card seat left too little free to stage an L2 hit back).
 Details: [`docs/systems/cache-server.md`](systems/cache-server.md), ADR 0033 (the tier), ADR 0045 (a binding per seat).
 
 ### Delegate subtasks across fleet nodes (`agent_delegate` / `delegate`)

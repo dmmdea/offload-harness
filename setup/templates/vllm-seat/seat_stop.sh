@@ -53,8 +53,9 @@ DEVS="${SEAT_DEVICES:-0,1}"; VFLOOR="${SEAT_VRAM_FLOOR_MIB:-1024}"; held=""
 if command -v nvidia-smi >/dev/null 2>&1; then
   sleep 2
   for d in ${DEVS//,/ }; do
+    vf_var="SEAT_VRAM_FLOOR_MIB_$d"; vf="${!vf_var:-$VFLOOR}"   # per-device floor (seat_fg.sh): a display card keeps the desktop
     used="$(CUDA_DEVICE_ORDER=PCI_BUS_ID nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits -i "$d" 2>/dev/null | head -1 | tr -d ' ')"
-    if [ -n "$used" ] && [ "$used" -gt "$VFLOOR" ] 2>/dev/null; then held="$held dev$d=${used}MiB"; fi
+    if [ -n "$used" ] && [ "$used" -gt "$vf" ] 2>/dev/null; then held="$held dev$d=${used}MiB>${vf}"; fi
   done
   [ -n "$held" ] && echo "seat_stop: WARN seat devices still hold VRAM after the stop:$held — holders: $(nvidia-smi --query-compute-apps=gpu_uuid,pid,process_name,used_memory --format=csv,noheader 2>/dev/null | tr '\n' ';')"
 fi

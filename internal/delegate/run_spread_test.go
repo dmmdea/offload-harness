@@ -299,16 +299,17 @@ func TestWireCarriesRetryFields(t *testing.T) {
 }
 
 // busySwap is a llama-swap stand-in for the LOCAL seat: /running lists the seat
-// as ready and /upstream/<seat>/metrics reports the in-flight count the test
-// sets. No /v1/models — the reader's roster fallback (bare-name match) is the
+// as ready with its own address as `proxy`, and the seat's /metrics there
+// reports the in-flight count the test sets (read at the seat, never through
+// /upstream). No /v1/models — the reader's roster fallback (bare-name match) is the
 // path exercised here, exactly as an id-bound seat would be read.
 func busySwap(t *testing.T, seat string, inflight int) string {
 	t.Helper()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/running", func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`{"running":[{"model":"` + seat + `","state":"ready"}]}`))
+		_, _ = w.Write([]byte(`{"running":[{"model":"` + seat + `","state":"ready","proxy":"http://` + r.Host + `/direct/` + seat + `"}]}`))
 	})
-	mux.HandleFunc("/upstream/"+seat+"/metrics", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/direct/"+seat+"/metrics", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("vllm:num_requests_running{engine=\"0\"} " + strconv.Itoa(inflight) + "\nvllm:num_requests_waiting{engine=\"0\"} 0\n"))
 	})
 	srv := httptest.NewServer(mux)
