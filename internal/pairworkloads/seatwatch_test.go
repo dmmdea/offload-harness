@@ -280,3 +280,87 @@ func TestParseVLLMLoad(t *testing.T) {
 		t.Fatal("a body without the vLLM gauges parsed as a reading")
 	}
 }
+
+// TestSeatWatcherReportsNothingWhenHarnessLoadIsUnresolvable is the review
+// finding this guards (2026-09-22): a marker names the ALIAS the request used
+// (`agent-pool`), /running names the canonical seat, and the translation needs
+// the llama-swap roster. A roster read that fails — most likely exactly when
+// the seat is hammered — used to leave the alias unresolved, subtract zero and
+// publish the harness's own request as a direct card.
+func TestSeatWatcherReportsNothingWhenHarnessLoadIsUnresolvable(t *testing.T) {
+	rig := newSeatRig(t)
+	rig.w.fetchRoster = func(context.Context, string, time.Duration) (swapclient.Roster, error) {
+		return swapclient.Roster{}, fmt.Errorf("llama-swap busy")
+	}
+	rig.harness["agent-pool"] = 1
+	rig.swap.set(func(f *fakeSwap) { f.running = 1 })
+	for i := 0; i < 5; i++ {
+		rig.poll()
+	}
+	if n := rig.pair.count(); n != 0 {
+		t.Fatalf("an unresolvable harness marker raised %d frame(s): %v", n, rig.states())
+	}
+	// A marker the roster does not know is equally unattributable.
+	rig.w.fetchRoster = func(context.Context, string, time.Duration) (swapclient.Roster, error) {
+		return swapclient.NewRoster([]llamaswap.Model{{ID: "some-other-seat"}}), nil
+	}
+	rig.harness = map[string]int{"a-seat-nobody-lists": 1}
+	for i := 0; i < 3; i++ {
+		rig.poll()
+	}
+	if n := rig.pair.count(); n != 0 {
+		t.Fatalf("an unknown marker name raised %d frame(s)", n)
+	}
+}
+
+// TestSeatWatcherKeepsLastRosterAcrossAFailedRefresh: aliases do not change
+// while llama-swap is busy, so one failed refresh must not blind the
+// subtraction (and must not stop direct traffic being reported).
+func TestSeatWatcherKeepsLastRosterAcrossAFailedRefresh(t *testing.T) {
+	rig := newSeatRig(t)
+	good := rig.w.fetchRoster
+	rig.harness["agent-pool"] = 1
+	rig.swap.set(func(f *fakeSwap) { f.running = 1 })
+	rig.poll() // warms the roster; harness-only load
+	rig.w.fetchRoster = func(context.Context, string, time.Duration) (swapclient.Roster, error) {
+		return swapclient.Roster{}, fmt.Errorf("timeout")
+	}
+	rig.clock = rig.clock.Add(2 * seatRosterTTL) // force a refresh, which fails
+	rig.poll()
+	rig.poll()
+	if n := rig.pair.count(); n != 0 {
+		t.Fatalf("a failed roster REFRESH lost the cached aliases: %d frame(s)", n)
+	}
+	// Direct traffic beside the harness request is still reported.
+	rig.swap.set(func(f *fakeSwap) { f.running = 2 })
+	rig.poll()
+	rig.poll()
+	if got := rig.states(); len(got) != 1 || got[0] != "running" {
+		t.Fatalf("frames = %v, want [running]", got)
+	}
+	rig.w.fetchRoster = good
+}
+
+// TestSeatWatcherHoldsAnOpenCardWhileHarnessLoadIsUnknown: an unresolvable
+// poll must not close or fail a card either — it says nothing, so nothing
+// about the card changes.
+func TestSeatWatcherHoldsAnOpenCardWhileHarnessLoadIsUnknown(t *testing.T) {
+	rig := newSeatRig(t)
+	rig.swap.set(func(f *fakeSwap) { f.running = 1 })
+	rig.poll()
+	rig.poll()
+	if got := rig.states(); len(got) != 1 || got[0] != "running" {
+		t.Fatalf("frames = %v, want [running]", got)
+	}
+	rig.w.fetchRoster = func(context.Context, string, time.Duration) (swapclient.Roster, error) {
+		return swapclient.Roster{}, fmt.Errorf("gone")
+	}
+	rig.harness["agent-pool"] = 1
+	rig.swap.set(func(f *fakeSwap) { f.running = 0 })
+	for i := 0; i < 4; i++ {
+		rig.poll()
+	}
+	if n := rig.pair.count(); n != 1 {
+		t.Fatalf("the open card changed state on unresolvable polls: %v", rig.states())
+	}
+}

@@ -143,7 +143,7 @@ func (w *SeatWatcher) Poll(ctx context.Context) {
 		// llama-swap itself unreadable: nothing is known, nothing changes.
 		return
 	}
-	harness := w.harnessBySeat(ctx)
+	harness, harnessKnown := w.harnessBySeat(ctx)
 	now := w.now().UnixMilli()
 
 	w.mu.Lock()
@@ -155,6 +155,15 @@ func (w *SeatWatcher) Poll(ctx context.Context) {
 		if st == nil {
 			st = &seatState{}
 			w.seats[seat] = st
+		}
+		if !harnessKnown {
+			// The harness's own load on this seat cannot be resolved (the
+			// roster is unreadable and a marker names an alias). Subtracting
+			// what we have would report a harness request as direct traffic —
+			// the one thing this watcher must never do — so the seat is left
+			// exactly as it was: no card opens, and an open one neither closes
+			// nor fails while the answer is unknown.
+			continue
 		}
 		total, ok := w.readLoad(ctx, seat)
 		if !ok {
@@ -305,25 +314,38 @@ func parseVLLMLoad(body []byte) (int, bool) {
 }
 
 // harnessBySeat folds the harness's in-flight markers onto canonical seat ids
-// (lower-cased): a marker carries the name the request used, which may be an
-// alias (`agent-pool`). An unreadable roster leaves the names as they are.
-func (w *SeatWatcher) harnessBySeat(ctx context.Context) map[string]int {
+// (lower-cased): a marker carries the name the request used, which is usually
+// an ALIAS (`agent-pool` for `qwen3.8-27b-vllm-3card`), while /running names
+// the canonical id.
+//
+// known is false when a marker cannot be resolved to a seat — no roster, or a
+// roster that does not know the name. The caller then reports nothing for that
+// poll rather than subtracting a count it knows is short: an unresolved alias
+// subtracts zero, which is exactly how a harness request becomes a "direct"
+// card. The roster fetch is most likely to time out when the seat is hammered,
+// which is the very situation this watcher was built for.
+func (w *SeatWatcher) harnessBySeat(ctx context.Context) (counts map[string]int, known bool) {
 	raw := w.harness()
 	if len(raw) == 0 {
-		return raw
+		return raw, true
 	}
 	roster, ok := w.rosterFor(ctx)
+	if !ok {
+		return nil, false
+	}
 	out := make(map[string]int, len(raw))
 	for name, n := range raw {
 		key := name
-		if ok {
-			if c, hit := roster.Canonical(name); hit && c != "" {
-				key = strings.ToLower(c)
-			}
+		if c, hit := roster.Canonical(name); hit && c != "" {
+			key = strings.ToLower(c)
+		} else if !declaresVLLM(w.vllmSeats, name) {
+			// Neither an alias the roster knows nor a declared seat id: the
+			// marker cannot be attributed, so nothing may be reported.
+			return nil, false
 		}
 		out[key] += n
 	}
-	return out
+	return out, true
 }
 
 func (w *SeatWatcher) rosterFor(ctx context.Context) (swapclient.Roster, bool) {
@@ -335,16 +357,27 @@ func (w *SeatWatcher) rosterFor(ctx context.Context) (swapclient.Roster, bool) {
 	}
 	w.mu.Unlock()
 	if w.fetchRoster == nil {
-		return swapclient.Roster{}, false
+		return w.lastRoster()
 	}
 	r, err := w.fetchRoster(ctx, w.swapBase, seatHTTPTimeout)
 	if err != nil {
-		return swapclient.Roster{}, false
+		// A failed REFRESH is not a reason to forget what the roster said: a
+		// seat's aliases do not change while llama-swap is merely busy, and
+		// dropping them would blind the subtraction above exactly when the
+		// seat is loaded. Only a box that has never answered has no roster.
+		return w.lastRoster()
 	}
 	w.mu.Lock()
 	w.roster, w.rosterOK, w.rosterAt = r, true, w.now()
 	w.mu.Unlock()
 	return r, true
+}
+
+// lastRoster is the newest roster this watcher ever read, however old.
+func (w *SeatWatcher) lastRoster() (swapclient.Roster, bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.roster, w.rosterOK
 }
 
 func (w *SeatWatcher) get(ctx context.Context, u string) ([]byte, error) {

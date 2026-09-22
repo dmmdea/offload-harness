@@ -56,7 +56,16 @@ var (
 // state_dir resolves to (the same root the GPU lease uses), and is called from
 // config.Load beside modelaffinity.SetGPULease. A root that cannot be resolved
 // disarms and returns the reason.
-func Arm(stateDir string) error {
+//
+// enabled is the box's pair_seat_activity_enabled: with the feature off NOTHING
+// reads this register, so nothing should pay for it. modelaffinity.Admit is the
+// gate EVERY text call passes, and a file create plus a remove per request for a
+// consumer that does not exist is exactly the cost that gate refuses to carry.
+func Arm(stateDir string, enabled bool) error {
+	if !enabled {
+		Disarm()
+		return nil
+	}
 	root, err := gpulease.ResolveStateRoot(stateDir)
 	mu.Lock()
 	defer mu.Unlock()
@@ -112,7 +121,42 @@ func Begin(model string) (end func()) {
 		return func() {}
 	}
 	var once sync.Once
-	return func() { once.Do(func() { _ = os.Remove(path) }) }
+	return func() { once.Do(func() { remove(path) }) }
+}
+
+// removeRetries and removeBackoff bound the retry below.
+const (
+	removeRetries = 6
+	removeBackoff = 50 * time.Millisecond
+)
+
+// removeFn is os.Remove, a var so the retry can be tested without provoking a
+// real sharing violation.
+var removeFn = os.Remove
+
+// remove deletes a marker, retrying in the background when the first attempt
+// fails.
+//
+// WINDOWS, AND IT IS NOT THEORETICAL. os.ReadFile opens without
+// FILE_SHARE_DELETE and os.Remove is one DeleteFile with no retry, so a marker
+// being read by the watcher's Count at the instant its owner ends the request
+// fails to delete. Dropping that error would leave a marker claiming a harness
+// request is in flight until MaxAge — an hour of direct traffic hidden from
+// PAIR, caused by the watcher's own 2 s read loop rather than by any crash. The
+// collision window is sub-millisecond, so a few backed-off retries close it.
+// The retry is off the caller's path: Release is on every text request.
+func remove(path string) {
+	if err := removeFn(path); err == nil || os.IsNotExist(err) {
+		return
+	}
+	go func() {
+		for i := 0; i < removeRetries; i++ {
+			time.Sleep(removeBackoff)
+			if err := removeFn(path); err == nil || os.IsNotExist(err) {
+				return
+			}
+		}
+	}()
 }
 
 // Count returns the live markers in d per lower-cased model name. A marker

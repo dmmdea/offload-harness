@@ -1661,7 +1661,7 @@ func loadArmed(path string) (Config, error) {
 	// The register of the harness's own seat requests (PAIR seat watcher) lives
 	// under the same machine-wide root. Unresolvable = unarmed, silently: it only
 	// ever feeds a PAIR card, and the lease warning above already names the root.
-	_ = seatinflight.Arm(c.StateDir)
+	_ = seatinflight.Arm(c.StateDir, c.PairSeatActivityEnabled)
 	if host := modelaffinity.EndpointHost(c.Endpoint, c.FleetNodeID); host != "" {
 		modelaffinity.DisarmGPULease()
 		seatinflight.Disarm()

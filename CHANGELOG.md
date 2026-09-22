@@ -37,6 +37,13 @@ Versioning: [SemVer](https://semver.org/).
   (`internal/seatinflight`), resolved through the llama-swap roster so an alias counts against
   its seat. Two agreeing polls open or close a card, so a request ending between the two reads
   never becomes one.
+- Review fixes (all three with a regression test and a red mutant): an unresolvable marker now
+  suppresses the seat's reporting for that poll instead of subtracting zero and publishing a
+  harness request as direct traffic (the roster read fails most easily when the seat is loaded);
+  the last roster survives a failed refresh; the register is armed only where the key is on, so a
+  box without the watcher pays nothing on `modelaffinity.Admit`; marker removal retries in the
+  background (the watcher's own read blocks delete on Windows, which would hide a seat's direct
+  traffic for an hour).
 - Tests: seat watcher (direct card lifecycle, harness-only load raises nothing, one-poll blips,
   seat exit, unreadable metrics, shutdown, disabled), marker register (count, dead/stale markers),
   Admit marks on-box and not off-box. Mutants on the subtraction, the Admit marker and the debounce

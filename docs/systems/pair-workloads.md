@@ -113,6 +113,18 @@ fleet-serve's **seat watcher** closes that gap:
   direct callers would flood the list.
 - A marker whose process died is removed on the next read; any marker older than an hour is
   ignored. A leak can only hide direct traffic, never invent a card.
+- **A poll that cannot attribute a marker reports nothing for that seat** — no card opens, and
+  an open one neither closes nor fails. A marker names the alias the request used, so resolving
+  it needs the roster; an unresolved alias would subtract zero and publish a harness request as
+  direct traffic. The last roster read is kept across a failed refresh (aliases do not change
+  while llama-swap is merely busy), so only a box whose roster never answered goes quiet.
+- **The marker register is armed only where the key is on** (`config.Load`): `modelaffinity.Admit`
+  is the gate every text call passes, and a box that runs no watcher must not pay a file create
+  and remove per request. Set the key in the config **all** the box's harness processes read —
+  the MCP servers write the markers, fleet-serve reads them.
+- Marker removal retries in the background: on Windows the watcher's own read holds the file
+  without delete sharing, and one dropped removal would hide that seat's direct traffic for an
+  hour.
 
 ## The PAIR side (what has to be true on the box)
 

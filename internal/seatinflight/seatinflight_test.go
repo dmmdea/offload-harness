@@ -1,9 +1,11 @@
 package seatinflight
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 )
@@ -73,3 +75,58 @@ func TestUnarmedIsNoop(t *testing.T) {
 }
 
 func itoa(v int64) string { return strconv.FormatInt(v, 10) }
+
+// TestArmIsOffWhenTheFeatureIs: modelaffinity.Admit is the gate every text
+// call passes, so a box that does not run the seat watcher must not pay a
+// file create and remove per request.
+func TestArmIsOffWhenTheFeatureIs(t *testing.T) {
+	t.Cleanup(Disarm)
+	if err := Arm(t.TempDir(), false); err != nil {
+		t.Fatal(err)
+	}
+	if d := Dir(); d != "" {
+		t.Fatalf("Dir = %q with the feature off, want unarmed", d)
+	}
+	end := Begin("agent-pool")
+	end()
+	if err := Arm(t.TempDir(), true); err != nil {
+		t.Fatal(err)
+	}
+	if Dir() == "" {
+		t.Fatal("Arm(enabled) left the register unarmed")
+	}
+}
+
+// TestRemoveRetriesAfterASharingViolation: on Windows os.ReadFile opens a
+// marker without FILE_SHARE_DELETE, so the watcher's own 2 s read collides
+// with a request ending and DeleteFile fails. Dropping that error hid direct
+// traffic for an hour (review finding, 2026-09-22).
+func TestRemoveRetriesAfterASharingViolation(t *testing.T) {
+	d := t.TempDir()
+	ArmAt(d)
+	t.Cleanup(Disarm)
+	var mu sync.Mutex
+	fails := 2
+	real := removeFn
+	removeFn = func(path string) error {
+		mu.Lock()
+		defer mu.Unlock()
+		if fails > 0 {
+			fails--
+			return errors.New("ERROR_SHARING_VIOLATION")
+		}
+		return real(path)
+	}
+	t.Cleanup(func() { removeFn = real })
+
+	end := Begin("agent-pool")
+	end()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(Count(d, time.Now(), func(int) bool { return true })) == 0 {
+			return
+		}
+		time.Sleep(removeBackoff)
+	}
+	t.Fatal("a marker whose first removals failed was never removed")
+}
