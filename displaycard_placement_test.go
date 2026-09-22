@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -126,7 +127,55 @@ func TestTripleBlackwellNeverSchedulesOntoTheDisplayCard(t *testing.T) {
 			"too leaves the desktop nothing", tier, string(v))
 	}
 
-	// 4. The three-card tier must not be a silent copy of the two-card one. That copy
+	// 4. Every SINGLE-CARD ComfyUI route renders on whatever card ComfyUI calls its
+	//    default device unless the launch pins one — and in ComfyUI's fastest-first
+	//    order that default is cuda:0, the display card. The harness launched ComfyUI
+	//    with every card visible and no device flag, so the generative edit (a 15.4 GB
+	//    GGUF), upscale, inpaint, animate and music routes all rendered on the 5070 Ti
+	//    (critic 2026-09-22 row 17, measured enumeration). comfy_cuda_device becomes
+	//    `--cuda-device <n>`, which HIDES every other card; the tier must seed it, and
+	//    it must name only non-display cards. The pooled image/video seats are placed
+	//    by their pool keys instead (checks 2 and 3) and never take the pin.
+	singleCard := map[string]string{
+		"gen_edit_script":   "generative edit",
+		"upscale_script":    "upscale",
+		"inpaint_script":    "inpaint",
+		"animategen_script": "animate",
+		"musicgen_script":   "music",
+	}
+	if _, pooled := p.ConfigSeed["imagegen_pool_vvram_gb"]; !pooled {
+		singleCard["imagegen_script"] = "image generation (un-pooled)"
+	}
+	var routes []string
+	for key, route := range singleCard {
+		if v, ok := p.ConfigSeed[key]; ok && string(v) != `""` {
+			routes = append(routes, route)
+		}
+	}
+	sort.Strings(routes)
+	if len(routes) > 0 {
+		var pin string
+		if v, ok := p.ConfigSeed["comfy_cuda_device"]; ok {
+			_ = json.Unmarshal(v, &pin)
+		}
+		pin = strings.ReplaceAll(pin, " ", "")
+		if pin == "" {
+			t.Errorf("%s seeds single-card ComfyUI routes (%s) but no comfy_cuda_device — unpinned, ComfyUI renders "+
+				"them on its default device, %s, which on this box is the RTX 5070 Ti driving the display",
+				tier, strings.Join(routes, ", "), displayByComfy)
+		}
+		for _, dev := range strings.Split(pin, ",") {
+			if dev != "" && "cuda:"+dev == displayByComfy {
+				t.Errorf("%s seeds comfy_cuda_device = %q, which includes ComfyUI device %s — the display card in "+
+					"ComfyUI's fastest-first order (not nvidia-smi's: there the display card is %s)", tier, pin, dev, displayByPCI)
+			}
+		}
+		if v, ok := p.ConfigSeed["comfy_extra_args"]; ok && regexp.MustCompile(`--(cuda|default)-device[= ]+0\b`).Match(v) {
+			t.Errorf("%s seeds comfy_extra_args = %s, which points ComfyUI at device 0, the display card", tier, string(v))
+		}
+	}
+
+	// 5. The three-card tier must not be a silent copy of the two-card one. That copy
 	//    is the whole defect: identical media placement is what made the third card
 	//    measure no different from two.
 	two, ok := doc.Profiles["blackwell-2x16"]
