@@ -87,7 +87,9 @@ native CPU/disk offloading (measured unusable on the Mamba-hybrid 27B under WSL2
    23.7k-token prefix back in 2.6–2.9 s at fp16 and 0.80 s at fp8 KV, vs 3.8 / 0.92 s through Valkey;
    `--l2-prefetch-policy` / `--l2-store-policy` variants gained nothing; the legacy `fs` adapter was slower).
    The seat wrapper mounts the share before the MP server starts when `SEAT_L2_MOUNT_SRC` / `SEAT_L2_MOUNT_DIR`
-   (and optionally `SEAT_L2_MOUNT_OPTS`, `SEAT_L2_MOUNT_TYPE`, default `cifs`) are set. When the mount fails the
+   (and optionally `SEAT_L2_MOUNT_OPTS`, `SEAT_L2_MOUNT_TYPE`, default `cifs`, and `SEAT_L2_MOUNT_SRCADDR` — `auto` pins the
+   CIFS source address to the lowest-metric default-route interface, for a box with a wired and a Wi-Fi NIC on one subnet
+   whose store allow-list names only the wired address) are set. When the mount fails the
    seat **degrades to the same-box tier** (0.115.1): `SEAT_L2` is emptied so the MP server registers no store — an
    unmounted base_path is a local directory the adapter would write into while the tier held nothing — the log says
    `CACHE SERVER DEGRADED — <why>`, and the seat's `SEAT_L2_STATUS_FILE` (default `$WORK/seat-l2.status`) records `degraded <when> reason=<why>` (or `ok <when>

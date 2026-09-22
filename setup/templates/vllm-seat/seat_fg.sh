@@ -81,8 +81,23 @@ degrade_l2() {
 L2_DEGRADED=0
 if [ -n "${SEAT_L2_MOUNT_SRC:-}" ] && [ -n "${SEAT_L2_MOUNT_DIR:-}" ]; then
   mkdir -p "$SEAT_L2_MOUNT_DIR"
+  # SEAT_L2_MOUNT_SRCADDR: pin the CIFS client's source address. On a box with two NICs on one subnet (wired +
+  # Wi-Fi) the mount was measured leaving from the Wi-Fi address even while `ip route get` chose the wire, and a store
+  # whose allow-list names only the wired address refused it — the seat then ran without its cache server for that
+  # whole start. "auto" = the IPv4 of the lowest-metric default-route interface; or give an explicit address.
+  MOUNT_OPTS="${SEAT_L2_MOUNT_OPTS:-}"; SRCADDR=""
+  case "${SEAT_L2_MOUNT_SRCADDR:-}" in
+    "") ;;
+    auto)
+      dev="$(ip -4 route show default 2>/dev/null | awk '{m=1e9; for(i=1;i<NF;i++) if($i=="metric") m=$(i+1); print m, $0}' | sort -n | head -1 | awk '{for(i=1;i<NF;i++) if($i=="dev") print $(i+1)}')"
+      [ -n "$dev" ] && SRCADDR="$(ip -4 -o addr show dev "$dev" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1)" ;;
+    *) SRCADDR="$SEAT_L2_MOUNT_SRCADDR" ;;
+  esac
+  if [ -n "$SRCADDR" ] && [ "${SEAT_L2_MOUNT_TYPE:-cifs}" = cifs ]; then
+    MOUNT_OPTS="${MOUNT_OPTS:+$MOUNT_OPTS,}srcaddr=$SRCADDR"; echo "seat_fg: cache-server mount source address pinned to $SRCADDR"
+  fi
   if ! mountpoint -q "$SEAT_L2_MOUNT_DIR"; then
-    if ! timeout 30 mount -t "${SEAT_L2_MOUNT_TYPE:-cifs}" "$SEAT_L2_MOUNT_SRC" "$SEAT_L2_MOUNT_DIR" -o "${SEAT_L2_MOUNT_OPTS:-}"; then
+    if ! timeout 30 mount -t "${SEAT_L2_MOUNT_TYPE:-cifs}" "$SEAT_L2_MOUNT_SRC" "$SEAT_L2_MOUNT_DIR" -o "$MOUNT_OPTS"; then
       # Say WHY, in the terms the operator can act on: name resolution, reachability, or the share itself.
       host="${SEAT_L2_MOUNT_SRC#//}"; host="${host%%:*}"; host="${host%%/*}"
       case "${SEAT_L2_MOUNT_TYPE:-cifs}" in nfs|nfs4) port=2049 ;; *) port=445 ;; esac
@@ -95,7 +110,7 @@ if [ -n "${SEAT_L2_MOUNT_SRC:-}" ] && [ -n "${SEAT_L2_MOUNT_DIR:-}" ]; then
       elif ! timeout 3 bash -c "</dev/tcp/$resolved/$port" 2>/dev/null; then
         why="'$host' = $resolved, port $port unreachable (store down, wrong interface, or the address moved)"
       else
-        why="'$host' = $resolved answers on $port — check credentials, the share name, and the store's allow-list"
+        why="'$host' = $resolved answers on $port — check credentials, the share name, and the store's allow-list (source address ${SRCADDR:-unpinned; set SEAT_L2_MOUNT_SRCADDR=auto})"
       fi
       degrade_l2 "share $SEAT_L2_MOUNT_SRC did not mount at $SEAT_L2_MOUNT_DIR: $why"
     fi
