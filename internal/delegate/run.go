@@ -683,6 +683,11 @@ func RunWith(ctx context.Context, cfg config.Config, local LocalRunner, subtasks
 	// this run places or reports.
 	maybeRecoverOrphans(cfg)
 	r := &runner{cfg: cfg, local: local, route: route, remotes: remotes, intent: openIntentLedger(cfg), led: led, ledgerUnopened: ledgerUnopened, pair: pairworkloads.New(pairworkloads.FromConfig(cfg))}
+	// Deliver every PAIR frame before returning: the delegate CLI exits right
+	// after this, and a frame still in flight dies with the process — PAIR then
+	// shows the card "running" until its staleness sweep fails it. Each send is
+	// bounded (2 s), so this cannot hold a run hostage to a down PAIR.
+	defer r.pair.Wait()
 	if opts != nil {
 		r.quarantine = opts.Quarantine
 		r.priority = core.ClampBand(opts.Priority)

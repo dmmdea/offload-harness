@@ -24,6 +24,16 @@ Versioning: [SemVer](https://semver.org/).
 - Tests: 55 pass. Five mutants, each confirmed to typecheck first, are all caught — including one
   that first slipped past a vacuous test comparing `protocolText()` with itself (replaced by fixed
   expectations).
+## [0.132.8] - 2026-09-22 - PAIR frames are delivered before a CLI process exits
+
+- **A delegate run from the CLI left its PAIR card "running".** Frames are sent on background
+  goroutines and nothing waited for them, so the terminal frame of a short-lived process died in
+  flight (seen live: a deferred `local-offload delegate` run produced the running frame only; PAIR
+  fails such a card by staleness sweep much later). `RunWith` now waits for its emitter before
+  returning, and the one-shot task cleanup in `main.go` waits for the ledger emitter. Each send is
+  bounded at 2 s, so a down PAIR cannot hold a run. Test: a 300 ms ingress must have both frames
+  by the time `RunWith` returns (fails with the wait removed).
+
 ## [0.132.7] - 2026-09-22 - PAIR cards name vLLM for an alias-bound vLLM seat
 
 - **PAIR labelled the Qube's flagship jobs `llamacpp`.** `EngineFor` reads the engine off the seat
