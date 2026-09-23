@@ -77,6 +77,14 @@ type errDetailer interface{ LastErr() string }
 // second implementation gets the two-strike behavior, never a harsher one.
 type definitiveFailer interface{ LastFailDefinitive() bool }
 
+// fencedFailer is the optional seam for implementations that can say the last
+// failure was the GPU-lease fence refusing the request (tokclient.Client: a
+// render or an exclusive hold owned the card and the seat was not resident, so
+// /tokenize — which would LOAD the seat — was never sent). Such a failure says
+// nothing about the endpoint and is never counted toward a downgrade: two steps
+// under one render must not cost the run its exact tokenizer for good.
+type fencedFailer interface{ LastFailFenced() bool }
+
 // stickyStrikeLimit is how many CONSECUTIVE transient failures downgrade the
 // run to the legacy rung. Two: the first may be a cold start or a model swap;
 // two in a row on a live ctx is an endpoint that cannot currently serve the
@@ -89,6 +97,9 @@ func (s *stickyTokenizer) Pieces(ctx context.Context, text string) ([]int, bool)
 	}
 	lens, ok := s.inner.Pieces(ctx, text)
 	if !ok {
+		if ff, hasFence := s.inner.(fencedFailer); hasFence && ff.LastFailFenced() {
+			return nil, false // the card was held, not the route broken: no strike
+		}
 		if ctx.Err() == nil {
 			why := "tokenizer failed (no detail available)"
 			if d, hasDetail := s.inner.(errDetailer); hasDetail {
@@ -304,7 +315,7 @@ func cutMiddleTurns(ctx context.Context, tok Tokenizer, msgs []Msg, realBudget, 
 	if contentBudget < 0 {
 		contentBudget = 0 // only forced keeps survive; honest overflow
 	}
-	headEnd := contentBudget / 2               // tokens [0, headEnd) are the head window
+	headEnd := contentBudget / 2                // tokens [0, headEnd) are the head window
 	tailStart := totalContent - contentBudget/2 // tokens [tailStart, totalContent) are the tail window
 
 	// Unitize: an assistant turn with tool calls owns every tool result whose

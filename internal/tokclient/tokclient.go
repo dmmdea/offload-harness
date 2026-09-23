@@ -11,8 +11,11 @@
 // serves POST /tokenize at the server root, and llama-swap proxies it
 // per model under /upstream/{model}/tokenize (which may cold-start the model —
 // acceptable for the same reason as the window probe: the caller is about to
-// use exactly that model). A trailing /v1 on base is stripped via the one
-// endpoint-normalization rule in internal/swapclient.
+// use exactly that model — and never onto a card a GPU lease fences: the
+// passthrough is built by modelaffinity.AwaitUpstream, which refuses it while
+// a render or an exclusive hold owns the card and the seat is not resident).
+// A trailing /v1 on base is stripped via the one endpoint-normalization rule
+// in internal/swapclient.
 //
 // FAIL-OPEN CONTRACT: every method returns ok=false on any failure (transport,
 // non-200, malformed payload, a piece accounting that does not reconstruct the
@@ -28,11 +31,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"strings"
 	"sync/atomic"
 	"time"
 
+	"github.com/dmmdea/offload-harness/internal/modelaffinity"
 	"github.com/dmmdea/offload-harness/internal/swapclient"
 )
 
@@ -63,7 +66,18 @@ type Client struct {
 	// upstreamOnly restricts post() to the per-model passthrough route (see
 	// NewUpstreamOnly).
 	upstreamOnly bool
+	// lastFenced marks the most recent failure as the GPU-lease fence refusing
+	// the per-model passthrough (a render or an exclusive hold owned the card
+	// and the seat was not resident), so the loading request was never sent.
+	// It says nothing about the endpoint; see LastFailFenced.
+	lastFenced atomic.Bool
 }
+
+// LastFailFenced reports whether the most recent failure was the GPU-lease
+// fence refusing the per-model passthrough rather than the endpoint failing.
+// The agent loop's sticky wrapper never counts such a failure toward a
+// downgrade: the card frees when the render ends and the route is healthy.
+func (c *Client) LastFailFenced() bool { return c.lastFenced.Load() }
 
 // LastFailDefinitive reports whether the most recent failure was a definitive
 // route absence (all candidates 404/405) rather than a transient failure.
@@ -79,6 +93,7 @@ func (c *Client) LastErr() string {
 
 func (c *Client) fail(format string, args ...any) {
 	c.lastDefinitive.Store(false) // only post()'s all-404/405 branch marks definitive, after this
+	c.lastFenced.Store(false)     // likewise only post()'s fenced branch marks fenced, after this
 	c.lastErr.Store(fmt.Sprintf(format, args...))
 }
 
@@ -223,13 +238,6 @@ func (c *Client) post(ctx context.Context, req tokenizeReq) ([]byte, bool) {
 	// 1-byte/token responses and re-opened the self-disable it claimed to
 	// close). A hostile/looping server is still bounded.
 	limit := int64(len(req.Content))*32 + (1 << 20)
-	candidates := []string{
-		c.base + "/upstream/" + url.PathEscape(c.model) + "/tokenize",
-		c.base + "/tokenize",
-	}
-	if c.upstreamOnly {
-		candidates = candidates[:1]
-	}
 	// Per-candidate failures are collected, not swallowed: when BOTH routes
 	// fail the recorded reason names each one, so a permanent downgrade is
 	// diagnosable after the fact (which route 404'd vs timed out).
@@ -237,6 +245,25 @@ func (c *Client) post(ctx context.Context, req tokenizeReq) ([]byte, bool) {
 	// 404/405 — a positive "this route does not exist" from the server.
 	var reasons []string
 	definitive := true
+	fenced := false
+	// The per-model passthrough STARTS a seat that is not loaded, so it passes
+	// the GPU-lease fence first (2026-09-22), in its no-wait form: under a
+	// render or an exclusive hold over a cold seat the tokenizer fails open at
+	// once — the loop falls back to its estimate for this step, and the
+	// completion that follows is the request that waits for the card. The
+	// bare-root route stays a candidate: llama-swap serves no root /tokenize
+	// (a 404, nothing loaded), and a bare llama-server holds one resident model.
+	var candidates []string
+	if u, ferr := modelaffinity.AwaitUpstream(ctx, c.base, c.model, "/tokenize", time.Now()); ferr != nil {
+		reasons = append(reasons, fmt.Sprintf("per-model passthrough for %s: %v", c.model, ferr))
+		definitive = false
+		fenced = modelaffinity.IsLeaseRefusal(ferr)
+	} else {
+		candidates = append(candidates, u)
+	}
+	if !c.upstreamOnly {
+		candidates = append(candidates, c.base+"/tokenize")
+	}
 	for _, u := range candidates {
 		hr, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(buf))
 		if err != nil {
@@ -279,9 +306,11 @@ func (c *Client) post(ctx context.Context, req tokenizeReq) ([]byte, bool) {
 			definitive = false
 			continue
 		}
+		c.lastFenced.Store(false)
 		return body, true
 	}
 	c.fail("no /tokenize route answered: %s", strings.Join(reasons, "; "))
 	c.lastDefinitive.Store(definitive)
+	c.lastFenced.Store(fenced)
 	return nil, false
 }

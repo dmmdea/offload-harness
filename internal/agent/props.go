@@ -23,12 +23,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"path"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/dmmdea/offload-harness/internal/modelaffinity"
 	"github.com/dmmdea/offload-harness/internal/swapclient"
 )
 
@@ -86,7 +86,10 @@ type seatPinBasis struct {
 // milliseconds between a run finishing and its probe, which the 5-min-TTL
 // eviction policy makes narrow. This client cannot prove llama-swap's
 // disconnect handling either way; claiming more would be asserting another
-// process's behavior from this one's timeout.
+// process's behavior from this one's timeout. Under a GPU-lease fence (a render
+// or an exclusive hold) the request is not sent at all unless the seat is
+// resident (modelaffinity.AwaitUpstream), so the residue is confined to an
+// unfenced box, where a stray warm seat costs GPU-seconds and nothing else.
 var seatPinClient = &http.Client{Timeout: 3 * time.Second}
 
 // ProbeSeatPin GETs the llama-swap per-model /props passthrough (upstream
@@ -110,7 +113,15 @@ func ProbeSeatPin(ctx context.Context, base, model string) (SeatPin, bool) {
 	// of a fresh one each. A caller's own shorter deadline still wins.
 	ctx, cancel := context.WithTimeout(ctx, seatPinClient.Timeout)
 	defer cancel()
-	u := b + "/upstream/" + url.PathEscape(model) + "/props"
+	// The GPU-lease fence, in its no-wait form (2026-09-22). A pin is telemetry:
+	// under a render or an exclusive hold over a seat that is not resident, the
+	// request would START the seat on the held card, and the 3 s client would
+	// then hang up mid-load (llama-swap logs "failed: aborted"). No pin is the
+	// honest answer; waiting would spend the returned result's latency on it.
+	u, ferr := modelaffinity.AwaitUpstream(ctx, base, model, "/props", time.Now())
+	if ferr != nil {
+		return SeatPin{}, false
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return SeatPin{}, false
@@ -273,10 +284,13 @@ type vllmPinBasis struct {
 // hashed over empty strings. ok=false on any transport, status or decode
 // failure.
 func probeVLLMSeatPin(ctx context.Context, b, model string) (SeatPin, bool) {
-	up := b + "/upstream/" + url.PathEscape(model)
-
 	get := func(path string) ([]byte, bool) {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, up+path, nil)
+		// Fenced per request, no wait — the same rule as the /props request.
+		u, ferr := modelaffinity.AwaitUpstream(ctx, b, model, path, time.Now())
+		if ferr != nil {
+			return nil, false
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 		if err != nil {
 			return nil, false
 		}

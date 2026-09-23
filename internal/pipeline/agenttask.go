@@ -450,10 +450,21 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	act.Phase(gpuactivity.PhaseWindowProbe)
 	probeStart := time.Now()
 	pctx, pcancel := context.WithDeadline(ctx, admissionEnd)
-	probed, probeOK := agent.ProbeServedWindow(pctx, p.cfg.Endpoint, seat)
+	probed, probeOK, probeFence := agent.ProbeServedWindowChecked(pctx, p.cfg.Endpoint, seat)
 	probeCtxErr := pctx.Err() // read BEFORE the cancel below, which would mask a spent deadline
 	pcancel()
 	admitted += time.Since(probeStart)
+	if probeFence != nil {
+		// A render or an exclusive hold took the card AFTER this run passed the
+		// cordon, and the seat is not resident (2026-09-22). The probe's route
+		// would have loaded the seat onto the held card, so it was never sent,
+		// and it waited for the card inside the admission budget. Starting the
+		// run now would only move the same wait into the wall — every request it
+		// makes waits behind the same fence — so it defers `capacity` with the
+		// holder named, before any wall exists, and the delegator re-places it.
+		admitNote = joinAdmissionNotes(admitNote, "window probe held behind the GPU lease for the admission budget")
+		return deferWire(core.DeferClassCapacity, "gpu busy: "+probeFence.Error())
+	}
 	// WHICH window the loop is about to budget against, and where it came from.
 	// agent.ResolveContextTokens has always returned that line and both doors
 	// dropped it (`effCtx, _ :=`), so a run that silently compacted at the 8,192
@@ -842,6 +853,16 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		wire.PrefillMS = pf.PrefillMS
 	}
 	if rerr != nil {
+		// A GPU-lease refusal FIRST (2026-09-22): a render or an exclusive hold
+		// took the card mid-run, the run's next request waited for it and the
+		// wait ran out. Whichever clock ended the wait — the request's own
+		// budget, the stall watch, the ceiling — the cause is the held card, and
+		// the honest class is `capacity`, which the delegator re-places. Filed as
+		// a stall it would blame the seat; as a budget defer it would poison the
+		// delegator's contract sizing.
+		if modelaffinity.IsLeaseRefusal(rerr) {
+			return deferWire(core.DeferClassCapacity, "gpu busy: "+rerr.Error())
+		}
 		// Wall timeout is its own defer shape — the delegator sizes future
 		// contracts off it, so it must be distinguishable from a planner error.
 		if se := stallOf(live); se != nil {
@@ -1956,7 +1977,19 @@ func warmSeat(ctx context.Context, endpoint, seat string, budget time.Duration) 
 	}
 	wctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
-	req, rerr := http.NewRequestWithContext(wctx, http.MethodGet, b+"/upstream/"+url.PathEscape(seat)+"/v1/models", nil)
+	// The warm-up is a deliberate LOAD, so it passes the GPU-lease fence first
+	// (2026-09-22): a render or an exclusive hold taken after this run's cordon
+	// must not get the seat loaded onto its cards. It waits for the card inside
+	// the warm-up budget; still fenced at the end, it warms nothing, says so,
+	// and the served-window probe — the next gated step — defers the run.
+	wu, ferr := modelaffinity.AwaitUpstream(wctx, endpoint, seat, "/v1/models", start.Add(budget))
+	if ferr != nil {
+		if modelaffinity.IsLeaseRefusal(ferr) {
+			return time.Since(start), joinAdmissionNotes(m.note, "warm-up held behind the GPU lease (nothing loaded onto the held card): "+ferr.Error()), false
+		}
+		return 0, joinAdmissionNotes(m.note, "warm-up could not build its request (proceeding; the seat may still be cold): "+ferr.Error()), false
+	}
+	req, rerr := http.NewRequestWithContext(wctx, http.MethodGet, wu, nil)
 	if rerr != nil {
 		return 0, joinAdmissionNotes(m.note, "warm-up request could not be built (proceeding; the seat may still be cold): "+rerr.Error()), false
 	}

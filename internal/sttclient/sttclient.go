@@ -23,6 +23,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/dmmdea/offload-harness/internal/modelaffinity"
 	"github.com/dmmdea/offload-harness/internal/swapclient"
 	"llamaswap-pp-cli/pkg/llamaswap"
 )
@@ -112,6 +113,24 @@ type Client struct {
 	http *http.Client
 }
 
+// fenceBudget is how long a transcription waits for a fenced card when the
+// client carries no timeout of its own.
+const fenceBudget = 120 * time.Second
+
+// fencedURL builds the whisper upstream's URL behind the GPU-lease fence
+// (2026-09-22). The passthrough STARTS the whisper model when it is not loaded,
+// so under a render or an exclusive hold the request waits for the card — the
+// same bound a text admission uses: the client's own timeout, then ctx — and on
+// exhaustion returns the fence's *modelaffinity.LeaseError, which the pipeline
+// defers as congestion ("timeout"). A resident whisper model is served at once.
+func (c *Client) fencedURL(ctx context.Context, model, path string) (string, error) {
+	budget := c.http.Timeout
+	if budget <= 0 {
+		budget = fenceBudget
+	}
+	return modelaffinity.AwaitUpstream(ctx, c.base, model, path, time.Now().Add(budget))
+}
+
 // New builds a client. timeout bounds one transcription (long audio).
 func New(base string, timeout time.Duration) *Client {
 	return &Client{
@@ -133,7 +152,10 @@ func (c *Client) Transcribe(ctx context.Context, model, wavPath string, p Params
 		return Result{}, fmt.Errorf("sttclient: build form: %w", err)
 	}
 	// Target the subpath directly; the bare /upstream/<model> form 301-redirects.
-	url := c.base + "/upstream/" + model + "/inference"
+	url, err := c.fencedURL(ctx, model, "/inference")
+	if err != nil {
+		return Result{}, err
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, body)
 	if err != nil {
 		return Result{}, err
@@ -342,7 +364,10 @@ func (c *Client) TranscribeOAI(ctx context.Context, model, wavPath string) (Resu
 		return Result{}, err
 	}
 
-	url := c.base + "/upstream/" + model + "/v1/audio/transcriptions"
+	url, err := c.fencedURL(ctx, model, "/v1/audio/transcriptions")
+	if err != nil {
+		return Result{}, err
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, &body)
 	if err != nil {
 		return Result{}, err

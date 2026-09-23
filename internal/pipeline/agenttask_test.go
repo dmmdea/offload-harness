@@ -155,6 +155,13 @@ type agentFake struct {
 	// (0 = 200) — the transport-failure arm, which must FAIL OPEN.
 	probeStatus func(n int64) int
 	probeCNT    atomic.Int64
+	// upstreamAll counts EVERY request to the per-model passthrough
+	// /upstream/<model>/… — on a real llama-swap each one starts the model when
+	// it is not loaded, which is what the GPU-lease fence tests count.
+	upstreamAll atomic.Int64
+	// tokenize, when set, serves the seat's /upstream/<seat>/tokenize
+	// passthrough (a warm seat's real tokenizer); nil keeps the historical 404.
+	tokenize http.HandlerFunc
 }
 
 // isCoherenceProbeCall recognises the D-118 probe request by its shape. It must
@@ -214,6 +221,9 @@ func (f *agentFake) server(t *testing.T) *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if os.Getenv("AGENTFAKE_TRACE") != "" {
 			log.Printf("FAKE %s %s", r.Method, r.URL.Path)
+		}
+		if strings.HasPrefix(r.URL.Path, "/upstream/") {
+			f.upstreamAll.Add(1)
 		}
 		switch r.URL.Path {
 		case "/running":
@@ -360,6 +370,10 @@ func (f *agentFake) server(t *testing.T) *httptest.Server {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":` + string(content) + `},"finish_reason":"` + finish + `"}],"usage":{"prompt_tokens":10,"completion_tokens":7}}`))
 		default:
+			if f.tokenize != nil && r.URL.Path == "/upstream/"+f.seat()+"/tokenize" {
+				f.tokenize(w, r)
+				return
+			}
 			if f.props != nil && r.URL.Path == "/upstream/"+f.seat()+"/props" {
 				if f.propsCNT.Add(1) == 1 && f.propsDelay > 0 {
 					time.Sleep(f.propsDelay)

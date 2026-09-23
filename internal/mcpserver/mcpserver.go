@@ -2422,10 +2422,25 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 	// exactly the call that pays for it.
 	probeStart := time.Now()
 	pctx, pcancel := context.WithDeadline(ctx, admitDeadline)
-	probed, probeOK := agent.ProbeServedWindow(pctx, cfg.Endpoint, model)
+	probed, probeOK, probeFence := agent.ProbeServedWindowChecked(pctx, cfg.Endpoint, model)
 	probeCtxErr := pctx.Err() // read BEFORE the cancel, which would mask a spent deadline
 	pcancel()
 	admitted += time.Since(probeStart)
+	if probeFence != nil {
+		// A render or an exclusive hold took the card after the cordon and the
+		// seat is not resident (2026-09-22): the probe was never sent (its route
+		// would load the seat onto the held card) and waited out the admission
+		// budget. The delegation door defers the same way, for the same reason.
+		dout := map[string]any{
+			"deferred":    true,
+			"defer_class": string(core.DeferClassCapacity),
+			"reason":      "gpu busy: " + probeFence.Error(),
+			"steps":       0,
+		}
+		withAdmission(dout, admitted, joinAdmissionNotes(admitNote, "window probe held behind the GPU lease for the admission budget"))
+		withPlaced(dout, placed)
+		return jsonResult(dout)
+	}
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	built.Loop.WithObserver(act)
@@ -2478,6 +2493,12 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 		// the run whose caller must not blindly retry. Dropping the ledger here
 		// would hide the one record that matters most.
 		dout := map[string]any{"deferred": true, "reason": rerr.Error(), "steps": res.Steps}
+		if modelaffinity.IsLeaseRefusal(rerr) {
+			// A render or an exclusive hold took the card mid-run and the run's
+			// next request waited it out (2026-09-22): congestion, re-placeable.
+			dout["defer_class"] = string(core.DeferClassCapacity)
+			dout["reason"] = "gpu busy: " + rerr.Error()
+		}
 		withAdmission(dout, admitted, admitNote)
 		withCoherence(dout, coherenceNote)
 		withPlaced(dout, placed)

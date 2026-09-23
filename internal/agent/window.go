@@ -13,9 +13,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"time"
 
+	"github.com/dmmdea/offload-harness/internal/modelaffinity"
 	"github.com/dmmdea/offload-harness/internal/swapclient"
 )
 
@@ -45,7 +45,10 @@ var probeRequestTimeout = 60 * time.Second
 //
 //  1. {base}/upstream/{model}/props — llama-swap's per-model passthrough (the
 //     production topology; may cold-start the model, which is acceptable: the
-//     caller is about to use exactly that model);
+//     caller is about to use exactly that model — EXCEPT under a GPU-lease
+//     fence, where modelaffinity.AwaitUpstream holds the request until the
+//     card frees or the caller's deadline ends, and it is never sent onto a
+//     card a render or an exclusive hold owns);
 //  2. {base}/props — a bare llama-server.
 //
 // A trailing /v1 on base is stripped first (props lives at the server root), via
@@ -64,6 +67,23 @@ var probeRequestTimeout = 60 * time.Second
 // here: llama-swap resolves aliases on /upstream itself (verified live: both
 // /upstream/embeddinggemma/props and /upstream/local-embed/props answer 200).
 func ProbeServedWindow(ctx context.Context, base, model string) (int, bool) {
+	n, ok, _ := probeWindow(ctx, base, model, false)
+	return n, ok
+}
+
+// ProbeServedWindowChecked is ProbeServedWindow that also says WHY it did not
+// answer when the reason is the GPU-lease fence (2026-09-22): a render, or an
+// exclusive hold, owns the card and the seat is not resident, so the probe —
+// whose route would LOAD the seat — was never sent. err is then the fence's
+// *modelaffinity.LeaseError (modelaffinity.IsLeaseRefusal), and nil on every
+// other outcome, which keeps the fail-open contract for a broken endpoint. The
+// run launchers use it to defer `capacity` instead of starting a run whose
+// every request would wait behind the same fence.
+//
+// The fence waits for the card inside ctx's deadline (and coldStartWait), so a
+// render that ends within the caller's admission budget costs a wait, not a
+// defer.
+func ProbeServedWindowChecked(ctx context.Context, base, model string) (int, bool, error) {
 	return probeWindow(ctx, base, model, false)
 }
 
@@ -74,15 +94,15 @@ func ProbeServedWindow(ctx context.Context, base, model string) (int, bool) {
 // tier's window (review finding 2026-08-14). Single-model callers keep
 // ProbeServedWindow's fallback.
 func ProbeUpstreamWindow(ctx context.Context, base, model string) (int, bool) {
-	return probeWindow(ctx, base, model, true)
+	n, ok, _ := probeWindow(ctx, base, model, true)
+	return n, ok
 }
 
-func probeWindow(ctx context.Context, base, model string, upstreamOnly bool) (int, bool) {
+func probeWindow(ctx context.Context, base, model string, upstreamOnly bool) (int, bool, error) {
 	b := swapclient.BaseURL(base)
 	if b == "" {
-		return 0, false
+		return 0, false, nil
 	}
-	up := b + "/upstream/" + url.PathEscape(model)
 	// Per-model passthrough first, in two shapes: llama-server's /props (n_ctx),
 	// then the backend's own /v1/models — a vLLM seat behind llama-swap has NO
 	// /props (404) but reports max_model_len there, and before 0.113.14 every run
@@ -90,11 +110,11 @@ func probeWindow(ctx context.Context, base, model string, upstreamOnly bool) (in
 	// 163,840-token window. llama-server's /v1/models carries no max_model_len,
 	// so the order is safe: the second probe answers only where the first cannot.
 	upstream := []struct {
-		u     string
+		path  string
 		fetch func(context.Context, *http.Client, string) (int, bool)
 	}{
-		{up + "/props", fetchNCtx},
-		{up + "/v1/models", func(ctx context.Context, c *http.Client, u string) (int, bool) {
+		{"/props", fetchNCtx},
+		{"/v1/models", func(ctx context.Context, c *http.Client, u string) (int, bool) {
 			return fetchMaxModelLen(ctx, c, u, model)
 		}},
 	}
@@ -103,16 +123,30 @@ func probeWindow(ctx context.Context, base, model string, upstreamOnly bool) (in
 	// the load, and the other then answers from a loaded seat in milliseconds.
 	uctx, cancel := context.WithTimeout(ctx, coldStartWait)
 	defer cancel()
+	deadline, _ := uctx.Deadline()
 	coldClient := &http.Client{}
 	for _, c := range upstream {
-		if n, ok := c.fetch(uctx, coldClient, c.u); ok {
-			return n, true
+		// EVERY request passes the GPU-lease fence, not the probe once: a render
+		// can take the card while the first request is absorbing a cold start,
+		// and the second would then start the seat again on top of it.
+		u, ferr := modelaffinity.AwaitUpstream(uctx, base, model, c.path, deadline)
+		if ferr != nil {
+			if modelaffinity.IsLeaseRefusal(ferr) {
+				// No bare-root fallback under a fence: the root answers for
+				// whatever is loaded, and the honest answer is "the card is held".
+				return 0, false, ferr
+			}
+			return 0, false, nil
+		}
+		if n, ok := c.fetch(uctx, coldClient, u); ok {
+			return n, true, nil
 		}
 	}
 	if upstreamOnly {
-		return 0, false
+		return 0, false, nil
 	}
-	return fetchNCtx(ctx, &http.Client{Timeout: probeRequestTimeout}, b+"/props")
+	n, ok := fetchNCtx(ctx, &http.Client{Timeout: probeRequestTimeout}, b+"/props")
+	return n, ok, nil
 }
 
 // fetchMaxModelLen GETs a per-model /v1/models URL and extracts the served
