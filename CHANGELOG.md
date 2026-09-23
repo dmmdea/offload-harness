@@ -95,6 +95,8 @@ Versioning: [SemVer](https://semver.org/).
   that first slipped past a vacuous test comparing `protocolText()` with itself (replaced by fixed
   expectations).
 
+## [0.134.0] - 2026-09-22 - Qwen-Image-2.1 ships as a named, license-tagged opt-in family
+
 ### Added — Qwen-Image-2.1 as a named, license-tagged opt-in family; per-binding ComfyUI launch profile (ADR 0058)
 
 - **Named families (ADR 0058, Proposed).** `imagegen_families` / `gen_edit_families` add opt-in
