@@ -122,7 +122,10 @@ const starvedReasoningShare = 0.9
 // content. kind is StopReasoningStarved when the budget went to hidden
 // reasoning, StopEmpty when the seat simply closed with nothing; basis is the
 // one-line evidence. ok=false when the completion is not empty at all.
-func (c Completion) Starvation() (kind, basis string, ok bool) {
+// maxTokens is the budget the call was sent with: a completion that used all
+// of it was cut by the budget whatever finish reason the engine reported
+// (cutByBudget); 0 = unknown, and then only finish "length" counts.
+func (c Completion) Starvation(maxTokens int) (kind, basis string, ok bool) {
 	if len(c.Msg.ToolCalls) > 0 || strings.TrimSpace(c.Msg.Content) != "" {
 		return "", "", false
 	}
@@ -131,16 +134,17 @@ func (c Completion) Starvation() (kind, basis string, ok bool) {
 		rTok, cTok = c.Serve.UsageReasoningTokens, c.Serve.UsageCompletionTokens
 	}
 	rChars := len(strings.TrimSpace(c.Reasoning))
+	cut := cutByBudget(c, maxTokens)
 	switch {
 	case cTok > 0 && rTok > 0 && float64(rTok) >= starvedReasoningShare*float64(cTok):
 		return StopReasoningStarved, fmt.Sprintf("finish %s, %d of %d completion tokens were reasoning (%q), 0 visible", c.FinishReason, rTok, cTok, c.ReasoningKey), true
-	case c.FinishReason == "length" && rChars > 0:
-		return StopReasoningStarved, fmt.Sprintf("finish length, %d chars of hidden reasoning (%q), 0 visible", rChars, c.ReasoningKey), true
-	case c.FinishReason == "length":
+	case cut && rChars > 0:
+		return StopReasoningStarved, fmt.Sprintf("%s, %d chars of hidden reasoning (%q), 0 visible", cutLabel(c, maxTokens), rChars, c.ReasoningKey), true
+	case cut:
 		// Cut with nothing in either channel that this client can see: the
 		// budget was spent on something the seat did not return. Starved by
 		// shape — the 0.113.5 raise fired on exactly this — and named so.
-		return StopReasoningStarved, "finish length, no content and no reasoning channel reported", true
+		return StopReasoningStarved, cutLabel(c, maxTokens) + ", no content and no reasoning channel reported", true
 	case rChars > 0:
 		return StopEmpty, fmt.Sprintf("finish %s, %d chars of hidden reasoning (%q) and no answer", c.FinishReason, rChars, c.ReasoningKey), true
 	}

@@ -47,7 +47,7 @@ func TestChatDecodesVLLMReasoningFieldAndReasoningTokens(t *testing.T) {
 	if comp.Serve == nil || comp.Serve.UsageReasoningTokens != 200 || comp.Serve.UsageCompletionTokens != 200 {
 		t.Fatalf("serve = %+v; reasoning_tokens not decoded", comp.Serve)
 	}
-	if kind, _, ok := comp.Starvation(); !ok || kind != StopReasoningStarved {
+	if kind, _, ok := comp.Starvation(0); !ok || kind != StopReasoningStarved {
 		t.Fatalf("starvation = %q/%v, want %q", kind, ok, StopReasoningStarved)
 	}
 }

@@ -47,7 +47,9 @@ func runTool(pol *Policy, worktree, scratch string, run shellRunner) Tool {
 				Command string   `json:"command"`
 				Args    []string `json:"args"`
 			}
-			_ = json.Unmarshal([]byte(args), &in)
+			if err := decodeToolArgs("run", args, &in); err != nil {
+				return "", err
+			}
 			cmd := strings.TrimSpace(in.Command)
 			if cmd == "" {
 				return "", fmt.Errorf("run requires a command")

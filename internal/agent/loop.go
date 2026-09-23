@@ -28,6 +28,13 @@ type ToolCall struct {
 	ID   string
 	Name string
 	Args string // raw JSON arguments
+	// wireOK is the Args value the client proved the engine can parse when
+	// the call arrived (validToolArgs). A later Chat that finds Args still
+	// equal to it (the same string: an O(1) comparison) skips re-validating
+	// the call; anything else — a caller-built call, rewritten arguments — is
+	// validated on every request. Unexported: never on the wire, never in a
+	// corpus record.
+	wireOK string
 }
 
 // Msg is one chat message in the loop's running transcript. Role is
@@ -1372,7 +1379,7 @@ func (l *Loop) run(ctx context.Context, objective string, bs *budgetState) (Resu
 		// repair). Re-issue it once at the final budget like an empty step;
 		// a second cut is accepted and flagged OutputTruncated. A repetition
 		// loop is treated as exactly the same event.
-		if (comp.FinishReason == "length" || repLoop != "") && len(comp.Msg.ToolCalls) == 0 && strings.TrimSpace(comp.Msg.Content) != "" {
+		if (cutByBudget(comp, stepMax) || repLoop != "") && len(comp.Msg.ToolCalls) == 0 && strings.TrimSpace(comp.Msg.Content) != "" {
 			// D-95 (0.122.1): on a SCHEMA contract a cut final is an answer the
 			// seat over-sized, and 0.115.23 (D-91) rightly refuses to re-pack a
 			// partial — but abstaining there throws away a run that read the
@@ -1415,7 +1422,7 @@ func (l *Loop) run(ctx context.Context, objective string, bs *budgetState) (Resu
 				repCut = true
 			}
 		}
-		if kind, basis, empty := comp.Starvation(); empty {
+		if kind, basis, empty := comp.Starvation(stepMax); empty {
 			// An empty completion — no tool call, no visible content — is never an
 			// answer. Two shapes, one classifier (thinking.go): the seat spent its
 			// budget inside the think block (StopReasoningStarved: finish "length"
@@ -1482,7 +1489,7 @@ func (l *Loop) run(ctx context.Context, objective string, bs *budgetState) (Resu
 				return Result{Steps: step + 1, StopReason: "unparsed_tool_call", Transcript: msgs, TokensIn: tokIn, TokensOut: tokOut, Pager: l.pager.Report(), Effects: effects, RuleHits: ruleHits, Calls: calls},
 					fmt.Errorf("%w: the seat returned %q as text (its --tool-call-parser does not match the model's chat template)", ErrUnparsedToolCall, marker)
 			}
-			res := Result{Output: comp.Msg.Content, Steps: step + 1, StopReason: "done", OutputTruncated: comp.FinishReason == "length" || repCut, Transcript: msgs, TokensIn: tokIn, TokensOut: tokOut, CompactionsExhausted: exhausted, TokenCal: l.calReport(), Prefill: l.prefill.Report(), Pager: l.pager.Report(), TokenizerPath: l.tokPath(), Effects: effects, RuleHits: ruleHits, Calls: calls}
+			res := Result{Output: comp.Msg.Content, Steps: step + 1, StopReason: "done", OutputTruncated: cutByBudget(comp, stepMax) || repCut, Transcript: msgs, TokensIn: tokIn, TokensOut: tokOut, CompactionsExhausted: exhausted, TokenCal: l.calReport(), Prefill: l.prefill.Report(), Pager: l.pager.Report(), TokenizerPath: l.tokPath(), Effects: effects, RuleHits: ruleHits, Calls: calls}
 			if l.batchJudge {
 				res.JudgeReport = l.batchJudgeReport(ctx, objective, effects)
 			}
@@ -1972,36 +1979,31 @@ func cutArgSizeFromErr(err error) int {
 // at 8,192 tokens arrived as "tool_calls", and the next request died on HTTP
 // 400 "Unterminated string"). So an argument that does not parse is a cut when
 // ANY of these holds:
-//   - finish_reason is "length";
-//   - the server's completion count reached maxTokens (the cap was hit);
+//   - the completion was cut by the budget (cutByBudget: finish_reason
+//     "length", or the server's completion count reached maxTokens);
 //   - the JSON ends mid-value (unterminated), which only a cut produces.
 //
 // A complete-but-malformed argument below the cap is the seat's own mistake,
-// not the budget: it is dispatched and the tool reports the error, and the
-// client's wire guard (wireToolArgs) keeps it from reaching the engine.
+// not the budget: it is dispatched, the tool refuses it (decodeToolArgs), and
+// the client's wire guard (wireToolArgs) keeps it from reaching the engine.
+// Each argument is parsed at most once; one the client already proved valid
+// on arrival (ToolCall.wireOK) is not parsed again.
 func cutToolCallInCompletion(c Completion, maxTokens int) (int, bool) {
-	atCap := c.FinishReason == "length" ||
-		(maxTokens > 0 && c.Serve != nil && c.Serve.UsageCompletionTokens >= maxTokens)
+	atCap := cutByBudget(c, maxTokens)
 	for _, tc := range c.Msg.ToolCalls {
-		if strings.TrimSpace(tc.Args) == "" || json.Valid([]byte(tc.Args)) {
+		if tc.Args == tc.wireOK {
 			continue
 		}
-		if atCap || jsonUnterminated(tc.Args) {
+		switch classifyToolArgs(tc.Args) {
+		case argsUnterminated:
 			return len(tc.Args), true
+		case argsMalformed:
+			if atCap {
+				return len(tc.Args), true
+			}
 		}
 	}
 	return 0, false
-}
-
-// jsonUnterminated reports text that is a JSON PREFIX cut before its end — an
-// open string, object or array — as opposed to text that is malformed
-// somewhere in the middle. encoding/json names exactly that case "unexpected
-// end of JSON input".
-func jsonUnterminated(s string) bool {
-	var v any
-	err := json.Unmarshal([]byte(s), &v)
-	var se *json.SyntaxError
-	return errors.As(err, &se) && strings.Contains(se.Error(), "unexpected end of JSON input")
 }
 
 // cutCallRecord is the corpus record of an attempt the ENGINE refused: no

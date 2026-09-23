@@ -78,7 +78,9 @@ func (s *scope) searchFiles(ctx context.Context, args string) (string, error) {
 		Glob    string `json:"glob"`
 		Mode    string `json:"mode"`
 	}
-	_ = json.Unmarshal([]byte(args), &in)
+	if err := decodeToolArgs("search_files", args, &in); err != nil {
+		return "", err
+	}
 	if strings.TrimSpace(in.Pattern) == "" {
 		return "", fmt.Errorf("search_files requires a pattern")
 	}

@@ -48,7 +48,9 @@ func shellTool(pol *Policy, worktree, scratch string, run shellRunner) Tool {
 			var in struct {
 				Command string `json:"command"`
 			}
-			_ = json.Unmarshal([]byte(args), &in)
+			if err := decodeToolArgs("run_shell", args, &in); err != nil {
+				return "", err
+			}
 			if strings.TrimSpace(in.Command) == "" {
 				return "", fmt.Errorf("run_shell requires a command")
 			}

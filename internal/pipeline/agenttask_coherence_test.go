@@ -338,7 +338,7 @@ func TestAThinkingSeatIsNotJudgedIncoherent(t *testing.T) {
 	}
 	// The loop's verdict on this exact completion, for the record: the two
 	// rules in this repo must agree about one shape.
-	if kind, _, ok := comp.Starvation(); !ok || kind != agent.StopReasoningStarved {
+	if kind, _, ok := comp.Starvation(0); !ok || kind != agent.StopReasoningStarved {
 		t.Fatalf("the loop classifies this completion as %q (ok=%v); the test's premise is wrong", kind, ok)
 	}
 	v := JudgeCoherence(comp, 1200*time.Millisecond)

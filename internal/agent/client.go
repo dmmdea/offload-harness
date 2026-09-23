@@ -261,10 +261,12 @@ type ServeStats struct {
 // other path — a malformed call the seat wrote below the cap, a replayed or
 // caller-supplied transcript. Invalid arguments go out as "{}" (the tool's own
 // error result, which follows in the transcript, tells the seat what went
-// wrong); valid and empty arguments go out byte-for-byte.
-func wireToolArgs(args string) string {
-	if strings.TrimSpace(args) == "" || json.Valid([]byte(args)) {
-		return args
+// wrong); valid and empty arguments go out byte-for-byte. A call the client
+// already proved valid when it arrived (wireOK still equal to Args) is not
+// re-scanned on every later request; every other call is.
+func wireToolArgs(tc ToolCall) string {
+	if tc.Args == tc.wireOK || validToolArgs(tc.Args) {
+		return tc.Args
 	}
 	return "{}"
 }
@@ -287,7 +289,7 @@ func (c *LLMClient) Chat(ctx context.Context, msgs []Msg, tools []ToolSpec, maxT
 		for _, tc := range m.ToolCalls {
 			wm.ToolCalls = append(wm.ToolCalls, wireToolCall{
 				ID: tc.ID, Type: "function",
-				Function: wireFn{Name: tc.Name, Arguments: wireToolArgs(tc.Args)},
+				Function: wireFn{Name: tc.Name, Arguments: wireToolArgs(tc)},
 			})
 		}
 		req.Messages = append(req.Messages, wm)
@@ -450,11 +452,16 @@ func (c *LLMClient) Chat(ctx context.Context, msgs []Msg, tools []ToolSpec, maxT
 	// Process: 1. Analyze the request…" to the structured re-pack as if it were
 	// the answer would be worse than the silence it replaces. The loop reads
 	// Completion.Reasoning to classify that turn as reasoning-starved instead.
-	if out.Content == "" && len(ch.Message.ToolCalls) == 0 && reasoning != "" && ch.FinishReason != "length" {
-		out.Content = reasoning
-	}
+	//
+	// "Cut" is cutByBudget, not the finish reason alone: an engine may report
+	// a completion that used the whole budget as "stop" (0.140.2), so the
+	// check runs after the server's accounting is attached below.
 	for _, tc := range ch.Message.ToolCalls {
-		out.ToolCalls = append(out.ToolCalls, ToolCall{ID: tc.ID, Name: tc.Function.Name, Args: tc.Function.Arguments})
+		call := ToolCall{ID: tc.ID, Name: tc.Function.Name, Args: tc.Function.Arguments}
+		if validToolArgs(call.Args) {
+			call.wireOK = call.Args // proven once, here, as the call enters the transcript
+		}
+		out.ToolCalls = append(out.ToolCalls, call)
 	}
 	comp := Completion{Msg: out, FinishReason: ch.FinishReason, Reasoning: reasoning, ReasoningKey: reasoningKey, ThinkingOff: thinkingOff, FirstDeltaMS: firstDeltaMS}
 	// Attach server accounting only when the backend actually reported some —
@@ -470,6 +477,9 @@ func (c *LLMClient) Chat(ctx context.Context, msgs []Msg, tools []ToolSpec, maxT
 			UsageCompletionTokens: wr.Usage.CompletionTokens,
 			UsageReasoningTokens:  wr.Usage.CompletionTokensDetails.ReasoningTokens,
 		}
+	}
+	if comp.Msg.Content == "" && len(comp.Msg.ToolCalls) == 0 && reasoning != "" && !cutByBudget(comp, maxTokens) {
+		comp.Msg.Content = reasoning
 	}
 	return comp, nil
 }

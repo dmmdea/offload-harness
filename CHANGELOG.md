@@ -146,7 +146,32 @@ Versioning: [SemVer](https://semver.org/).
   that first slipped past a vacuous test comparing `protocolText()` with itself (replaced by fixed
   expectations).
 
-## [0.140.2] - 2026-09-23 - a tool call cut at the cap is a cut, whatever finish reason vLLM reports
+## [0.140.2] - 2026-09-23 - a tool call cut at the cap is a cut, whatever finish reason vLLM reports; a tool refuses arguments of the wrong type
+
+### Fixed — a tool call with a wrong-typed argument ran with that field empty (data loss)
+
+- **Every agent tool decoded its arguments with `_ = json.Unmarshal(...)`.** A syntax error leaves the struct
+  zero and the required-field checks caught it, but a TYPE error does not: `encoding/json` fills every field it
+  can and reports the first mismatch. `edit_file` with `{"path":"x","old_string":"foo","new_string":123}` ran with
+  `new_string` empty, deleted `foo` from the file and reported success; `write_file` with a non-string `content`
+  wrote an empty file. Every tool that decoded this way (`write_file`, `edit_file`, `delete_file`, `read_file`,
+  `list_dir`, `summarize_file`, `search_files`, `update_plan`, `run`, `run_shell`, `web_fetch`, `web_search`,
+  `github_api`, `github_create_repo`, `github_upload_file`) now goes through one decoder that refuses the call on
+  ANY decode error, as `NOT performed: <tool> arguments do not match the tool's schema (…)`, before any policy,
+  filesystem or network step. Empty arguments are still a zero-valued call (a no-argument call on some engines).
+  The offload and accelerator tools already checked the error and are unchanged.
+
+### Fixed — every "cut by the budget" test trusted `finish_reason: length` alone
+
+- The same engine behaviour reached four more places: the truncated-final re-issue, `OutputTruncated`, the
+  starvation classifier (`Completion.Starvation`, which now takes the call's budget) and the client's
+  reasoning fallback (a think block cut at the cap could be promoted to the answer when the engine said `stop`).
+  One helper, `cutByBudget` (finish `length`, or the server's `completion_tokens` reached the call's
+  `max_tokens`), now decides at all of them and in the tool-call cut check. A stop note built on the token count
+  says so (`finish stop at the 1024-token cap (1024 completion tokens)`).
+- The client proves a returned tool call's arguments once, when the call arrives, and does not re-scan it on
+  every later request while its arguments are unchanged; a caller-built or rewritten call is validated on
+  every request, so invalid arguments still never reach the engine.
 
 ### Fixed — vLLM reports a cut tool call as `tool_calls`, and the fragment went into the transcript
 

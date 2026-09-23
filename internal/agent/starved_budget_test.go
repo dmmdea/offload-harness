@@ -117,7 +117,7 @@ func TestStarvationClassifierNamesTheShape(t *testing.T) {
 		{"mostly-answer-under-share", Completion{FinishReason: "length", Msg: Msg{Content: "partial"}, Serve: &ServeStats{UsageCompletionTokens: 100, UsageReasoningTokens: 95}}, "", false},
 	}
 	for _, c := range cases {
-		kind, basis, ok := c.c.Starvation()
+		kind, basis, ok := c.c.Starvation(0)
 		if ok != c.ok || kind != c.kind {
 			t.Errorf("%s: kind=%q ok=%v (basis %q), want kind=%q ok=%v", c.name, kind, ok, basis, c.kind, c.ok)
 		}

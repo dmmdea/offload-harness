@@ -113,7 +113,9 @@ func fetchTool(pol *Policy, client *http.Client) Tool {
 			var in struct {
 				URL string `json:"url"`
 			}
-			_ = json.Unmarshal([]byte(args), &in)
+			if err := decodeToolArgs("web_fetch", args, &in); err != nil {
+				return "", err
+			}
 			if strings.TrimSpace(in.URL) == "" {
 				return "", fmt.Errorf("web_fetch requires a url")
 			}

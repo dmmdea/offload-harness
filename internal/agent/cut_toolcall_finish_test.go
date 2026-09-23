@@ -244,3 +244,51 @@ func TestInvalidToolCallArgsAtTheCapAreACutWhateverTheirShape(t *testing.T) {
 		t.Errorf("the cut tool call was appended to the transcript: %q", a)
 	}
 }
+
+// The wire cache (review item 3): a call the client proved valid on arrival
+// is not re-scanned while its Args are unchanged, but a call whose Args were
+// rewritten afterwards is validated again, so the cache can never let invalid
+// arguments through.
+func TestWireCacheRevalidatesRewrittenArguments(t *testing.T) {
+	var sent []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Messages []struct {
+				ToolCalls []struct {
+					Function struct {
+						Arguments string `json:"arguments"`
+					} `json:"function"`
+				} `json:"tool_calls"`
+			} `json:"messages"`
+		}
+		b, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(b, &body)
+		for _, m := range body.Messages {
+			for _, c := range m.ToolCalls {
+				sent = append(sent, c.Function.Arguments)
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"","tool_calls":[{"id":"x1","type":"function","function":{"name":"write_file","arguments":"{\"path\":\"a\"}"}}]},"finish_reason":"tool_calls"}]}`)
+	}))
+	defer srv.Close()
+	c := NewLLMClient(srv.URL, "m", "", 5*time.Second)
+	comp, err := c.Chat(context.Background(), []Msg{{Role: "user", Content: "go"}}, nil, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(comp.Msg.ToolCalls) != 1 || comp.Msg.ToolCalls[0].wireOK != `{"path":"a"}` {
+		t.Fatalf("a valid call must arrive proven: %+v", comp.Msg.ToolCalls)
+	}
+	proven := comp.Msg
+	rewritten := Msg{Role: "assistant", ToolCalls: []ToolCall{proven.ToolCalls[0]}}
+	rewritten.ToolCalls[0].Args = cutFragment // wireOK still names the old value
+	msgs := []Msg{{Role: "user", Content: "go"}, proven, {Role: "tool", ToolCallID: "x1", Content: "ok"}, rewritten, {Role: "tool", ToolCallID: "x1", Content: "ok"}}
+	sent = nil
+	if _, err := c.Chat(context.Background(), msgs, nil, 64); err != nil {
+		t.Fatal(err)
+	}
+	if len(sent) != 2 || sent[0] != `{"path":"a"}` || !json.Valid([]byte(sent[1])) {
+		t.Fatalf("sent arguments = %q: want the proven call unchanged and the rewritten one sanitized", sent)
+	}
+}
