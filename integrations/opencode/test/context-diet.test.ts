@@ -532,3 +532,138 @@ describe("O4: title and compaction requests think less on Qwen-family models", (
     expect(out.maxOutputTokens).toBe(32);
   });
 });
+
+// Silent-failure review of PR #452: every failure path is visible in offload_plugin_status, and
+// one failing step never takes the others down with it.
+describe("review: no silent failures", () => {
+  let cfgHome: string;
+  let agentsPath: string;
+  const AGENTS = "# rules\n\nNever mix accounts.\n";
+  const prevXdg = process.env.XDG_CONFIG_HOME;
+  beforeEach(() => {
+    cfgHome = mkdtempSync(join(tmpdir(), "olo-xdg-r-"));
+    mkdirSync(join(cfgHome, "opencode"), { recursive: true });
+    agentsPath = resolve(join(cfgHome, "opencode", "AGENTS.md"));
+    writeFileSync(agentsPath, AGENTS);
+    process.env.XDG_CONFIG_HOME = cfgHome;
+  });
+  afterEach(() => {
+    if (prevXdg === undefined) delete process.env.XDG_CONFIG_HOME;
+    else process.env.XDG_CONFIG_HOME = prevXdg;
+  });
+
+  it("a failing config step is recorded and the later steps still run", async () => {
+    const h = createHooks(opts());
+    const cfg: any = { permission: Object.freeze({}) }; // the Tier-1 step cannot write here
+    await h.config!(cfg);
+    expect(h._diagnostics.configStepFailed.some((f: string) => f.startsWith("tier1Permissions:"))).toBe(true);
+    // the offload scoping step ran anyway: the offload agent is not stranded
+    expect(enabledHarnessTools(cfg, "offload").slice().sort()).toEqual(RECON_EXPECTED.slice().sort());
+    expect(cfg.agent["offload-media"]).toBeDefined();
+    expect(cfg.command["offload-recon"]).toBeDefined();
+  });
+
+  it("a permission value that is not an object is reported, not silently skipped", async () => {
+    const h = createHooks(opts());
+    const cfg: any = { agent: { offload: { mode: "subagent", permission: "allow" } } };
+    await h.config!(cfg);
+    expect(cfg.agent.offload.permission).toBe("allow"); // left as the user wrote it
+    expect(h._diagnostics.permissionRejected).toContain("agent.offload.permission");
+  });
+
+  it("a write that fails half-way restores the user's rules instead of wiping them", async () => {
+    const h = createHooks(opts());
+    const target: Record<string, any> = { skill: { "*": "allow" }, edit: "deny" };
+    const perm = new Proxy(target, {
+      set(t, k, v) {
+        if (k === "harness_offload_triage") throw new Error("refused");
+        t[k as string] = v;
+        return true;
+      },
+    });
+    const cfg: any = { permission: perm };
+    await h.config!(cfg);
+    expect({ ...target }).toEqual({ skill: { "*": "allow" }, edit: "deny" });
+    expect(Object.keys(target)).toEqual(["skill", "edit"]);
+    expect(h._diagnostics.configStepFailed.some((f: string) => f.startsWith("tier1Permissions:"))).toBe(true);
+  });
+
+  const roArgs = () => ({ description: "Doc sweep", prompt: "read the files under docs and list every decision.", subagent_type: "general" });
+
+  it("a failed rerouted leg gets the FAILED note even when the child agent is unconfirmed", async () => {
+    const h = createHooks(opts());
+    await h["tool.execute.before"]!({ tool: "task", sessionID: "u1", callID: "c1" }, { args: roArgs() });
+    const after = { title: "", output: "Error: Subagent failed (task_id: x): model not served", metadata: {} };
+    await h["tool.execute.after"]!({ tool: "task", sessionID: "u1", callID: "c1", args: {} }, after);
+    expect(after.output).toContain("FAILED");
+    expect(after.output).not.toContain('on the "offload" seat');
+  });
+
+  it("an escalating rerouted leg gets the needs-primary note even when unconfirmed, without claiming the seat", async () => {
+    const h = createHooks(opts());
+    await h["tool.execute.before"]!({ tool: "task", sessionID: "u2", callID: "c2" }, { args: roArgs() });
+    const after = { title: "", output: "Findings...\n[needs-primary] this needs the web.", metadata: {} };
+    await h["tool.execute.after"]!({ tool: "task", sessionID: "u2", callID: "c2", args: {} }, after);
+    expect(after.output).toContain("needs the primary agent");
+    expect(after.output).not.toContain("ran on the free local");
+  });
+
+  it("a reroute is recorded only when the prompt suffix also took", async () => {
+    const o = opts();
+    const h = createHooks(o);
+    const target: Record<string, any> = roArgs();
+    const args = new Proxy(target, {
+      set(t, k, v) {
+        if (k !== "prompt") t[k as string] = v; // silently drops the prompt write
+        return true;
+      },
+    });
+    await h["tool.execute.before"]!({ tool: "task", sessionID: "u3", callID: "c3" }, { args });
+    expect(logRows(o.dispatchLog).some((e) => e.event === "task_reroute")).toBe(false);
+    expect(logRows(o.dispatchLog).some((e) => e.event === "task_reroute_skipped")).toBe(true);
+  });
+
+  it("an offload child whose rules header is never located is counted apart from a content mismatch", async () => {
+    const h = createHooks(opts());
+    await h.event!({ event: { type: "session.created", properties: { info: { id: "c-nohdr", parentID: "root", agent: "offload" } } } } as any);
+    const out = { system: ["You are the OFFLOAD subagent.\nno rules file here"] };
+    await h["experimental.chat.system.transform"]!({ sessionID: "c-nohdr", model: {} as any }, out);
+    expect(h._diagnostics.systemTransform.childHeaderMissing).toBe(1);
+    expect(h._diagnostics.systemTransform.childFailOpen).toBe(0);
+  });
+
+  it("a request for a session never announced by session.created is counted", async () => {
+    const h = createHooks(opts());
+    await h["experimental.chat.system.transform"]!({ sessionID: "never-seen", model: {} as any }, { system: ["base"] });
+    expect(h._diagnostics.systemTransform.unknownSession).toBe(1);
+    await h.event!({ event: { type: "session.created", properties: { info: { id: "root-1" } } } } as any);
+    await h["experimental.chat.system.transform"]!({ sessionID: "root-1", model: {} as any }, { system: ["base"] });
+    expect(h._diagnostics.systemTransform.unknownSession).toBe(1);
+  });
+
+  const qwen = { id: "qwen3.8-27b", providerID: "p", api: { id: "qwen3.8-27b" } } as any;
+  const gemma = { id: "gemma-4-e4b", providerID: "p", api: { id: "gemma-4-e4b" } } as any;
+  const params = (options: Record<string, any> = {}) => ({ temperature: 0, topP: 1, topK: 0, maxOutputTokens: 32000 as number | undefined, options });
+  const cp = (h: ReturnType<typeof createHooks>, agent: string, model: any, out: any) => h["chat.params"]!({ sessionID: "s", agent, model, provider: {} as any, message: {} as any }, out);
+
+  it("chat.params counts applied and each skip reason", async () => {
+    const h = createHooks(opts());
+    await cp(h, "title", qwen, params());
+    await cp(h, "build", qwen, params());
+    await cp(h, "compaction", gemma, params());
+    await cp(h, "compaction", qwen, params({ chat_template_kwargs: { reasoning_effort: "medium" } }));
+    expect(h._diagnostics.chatParams).toMatchObject({ applied: 1, skippedNotAux: 1, skippedNotQwen: 1, skippedUserSet: 1 });
+  });
+
+  it("title/compaction seen by prompt and by agent are both counted, so a drift shows as a mismatch", async () => {
+    const h = createHooks(opts());
+    const title = "You are a title generator. You output ONLY a thread title. Nothing else.";
+    await h["experimental.chat.system.transform"]!({ sessionID: "s", model: {} as any }, { system: [title] });
+    await cp(h, "title", qwen, params());
+    expect(h._diagnostics.auxAgreement.title).toEqual({ byPrompt: 1, byAgent: 1 });
+    // opencode rewords its title prompt: the prompt sniff misses, the agent name does not
+    await h["experimental.chat.system.transform"]!({ sessionID: "s", model: {} as any }, { system: ["You generate titles."] });
+    await cp(h, "title", qwen, params());
+    expect(h._diagnostics.auxAgreement.title).toEqual({ byPrompt: 1, byAgent: 2 });
+  });
+});

@@ -62,10 +62,24 @@ applies the last matching rule).
 ## Verify
 
 Ask opencode: *"Call the offload_plugin_status tool"* → JSON with `plugin`, `version`, hooks, and
-`diagnostics.systemTransform` (protocol / child / childDigest / childFailOpen / aux counters — a
-non-zero `childFailOpen` means opencode's instruction format drifted and the child kept the full
-rules). `/offload-recon <question>` runs on the offload seat. A rerouted read-only `task` shows
-`[local-offload] This leg ran on the free local "offload" seat` in its result.
+`diagnostics`. Every failure path the plugin fails open on is counted there, so "clean" means
+clean:
+
+| Field | Non-zero means |
+|---|---|
+| `configStepFailed[]` | a `config` step threw (`"<step>: <message>"`); every other step still ran. A `tier1Permissions` or `offloadToolScopes` entry means a tool scope was not applied |
+| `permissionRejected[]` | a `permission` value is not an object (e.g. `"allow"`), so the plugin could not scope it; it was left as written |
+| `systemTransform.protocol` / `child` / `childDigest` / `aux` | primary requests that got the protocol; offload child requests; child requests whose global rules file became the digest; title/compaction requests left untouched |
+| `systemTransform.childFailOpen` | the rules segment did not match the file on disk (format or content drift); the child kept the full rules |
+| `systemTransform.childHeaderMissing` | an offload child had no global `Instructions from:` header at all (no global rules file, or a changed header format) |
+| `systemTransform.unknownSession` | a request came from a session no `session.created` event announced — the event arrived late or was missed, so child detection could not apply |
+| `chatParams.applied` / `skippedNotAux` / `skippedNotQwen` / `skippedUserSet` | title/compaction requests given `enable_thinking: false`; requests skipped because they are not title/compaction, not a Qwen-family model, or the user set the kwargs |
+| `auxAgreement.title` / `.compaction` `{byPrompt, byAgent}` | the same requests seen by prompt text (system transform) and by agent name (`chat.params`); `byPrompt < byAgent` means opencode reworded the prompt and the protocol is being injected into those requests again |
+| `instrument.failures` | dispatch-log writes that failed |
+
+`/offload-recon <question>` runs on the offload seat. A rerouted read-only `task` shows
+`[local-offload] This leg ran on the free local "offload" seat` in its result — only when the child
+session really is `offload`; a failure or an escalation is reported either way.
 `opencode debug agent offload` prints the resolved permission rules.
 
 ## Develop

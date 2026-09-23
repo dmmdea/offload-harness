@@ -165,10 +165,26 @@ Versioning: [SemVer](https://semver.org/).
   media routing line; a title request 812 → 609 prompt tokens, `max_tokens` 4,096 → 64, and 0
   reasoning tokens instead of 573-1,372; a compaction request on the same seat went from 1,580 of
   1,964 completion tokens reasoning (173 s to the next request) to 0 of 462 (27 s).
+- **No silent failures (review round).** Each `config` step runs on its own, so one that throws
+  (a frozen permission object, an odd user value) no longer skips the offload scoping after it —
+  which would have stranded the offload agent behind the Tier-1 deny; failures are listed in
+  `diagnostics.configStepFailed`, and a permission value that is not an object in
+  `permissionRejected`. The permission rewrite computes the new order first and restores the
+  user's original rules if the write fails part-way. A rerouted leg's FAILED and needs-primary
+  notes are written whether or not the child agent was confirmed; only the "ran on the offload
+  seat" claim needs the confirmation, and a reroute counts only when both the agent and the prompt
+  suffix took. New counters: `systemTransform.childHeaderMissing` and `unknownSession`,
+  `chatParams` (applied and each skip reason), and `auxAgreement` (title/compaction requests seen
+  by prompt text versus by agent name, so a reworded opencode prompt shows up as a mismatch).
+- **The reroute works on both of opencode's task paths** (checked in the bundle and live): a
+  model tool call (`SessionTools.resolve`) and a subtask part (`SessionPrompt.handleSubtask`, a
+  `/command` with `subtask: true`), which runs the registry's `task` tool with the very args object
+  the hook changed. On the subtask path the parent's stored task part keeps the command's agent
+  name; the child session is the source of truth.
 - Docs: `docs/systems/opencode-integration.md` gains the measured tool surface, the recon /
   offload-media split, the permission precedence rule, the one-system-message shape, the
   title/compaction parameters and the 1,568-token cache-block granularity; the plugin README gains
-  the options table (`primaryTools`, `offloadTools`). Plugin 0.3.0; 99 bun tests; 35 mutants, each
+  the options table (`primaryTools`, `offloadTools`). Plugin 0.3.0; 109 bun tests; 49 mutants, each
   confirmed to typecheck, all caught.
 
 ## [0.135.1] - 2026-09-22 - a GPU lease fences in-flight probes, the chat lane and the embedder; a media drain no longer deadlocks

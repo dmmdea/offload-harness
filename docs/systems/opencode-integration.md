@@ -49,8 +49,18 @@ rendered with the Qwen3.8 seat template and tokenizer (the control's 24,588 is w
   file, from the child's very first request. `offload-media`: 27 tools (22 harness), 13,110.
 - `opencode debug agent` resolves `offload` to exactly the twelve recon tools, `offload-media` to
   the other 22, the primary to the four Tier-1 tools (control: `offload` held all 34).
-- A read-only `task` sent to `general`: the child session is `offload` and the result is stamped
-  as such. Control: the child ran as `general` and the result still said it ran on `offload`.
+- A read-only `task` the MODEL sent to `general` (the proxy scripted the model's reply): the child
+  session's row and its assistant message both say `offload`, and its first request carried the
+  offload prompt and the recon tool list. Control: the same call ran as `general` (provider prompt,
+  13 tools) and the result still said it ran on `offload`. opencode reaches `task` two ways and the
+  in-place change redirects both: a model tool call goes through `SessionTools.resolve`
+  (`trigger(…, {args: b})`, then `execute(b)`), and a subtask part (a `/command` with
+  `subtask: true`, an `@agent` mention) goes through `SessionPrompt.handleSubtask`, which hands the
+  hook `{args: ie}` and then runs the registry's `task` tool with that same `ie`, so the agent is
+  read from `ie.subagent_type`. Checked live with a subtask command aimed at `general`: the child
+  ran as `offload`. On that path the parent's stored task part and assistant message keep the
+  command's agent name (`general`), because opencode records them before the hook runs; the child
+  session is the source of truth.
 - A `harness_agent_delegate` result stored in opencode.db now starts with
   `[local-offload] delegate placement: 0 local, 1 remote of 1.` (control: no digest).
 - Title request: no protocol (812 → 609 tokens), `max_tokens` 64, `chat_template_kwargs:

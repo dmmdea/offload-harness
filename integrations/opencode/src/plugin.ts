@@ -156,12 +156,43 @@ export type SystemTransformStats = {
   childDigest: number;
   /** offload child requests where the rules segment did not match the file on disk (left as-is) */
   childFailOpen: number;
+  /** offload child requests where no global `Instructions from:` header was found at all */
+  childHeaderMissing: number;
   /** title / compaction requests left untouched */
   aux: number;
+  /** requests for a session no session.created event announced (makes the event-ordering race visible) */
+  unknownSession: number;
 };
-export type Diagnostics = { envOptionsError: string | null; smallModelDefaulted: boolean; instrument: InstrumentStats; systemTransform: SystemTransformStats };
+export type ChatParamsStats = { applied: number; skippedNotAux: number; skippedNotQwen: number; skippedUserSet: number };
+/**
+ * Title/compaction requests counted by the two signals the plugin has: system.transform only sees
+ * the prompt text, chat.params only sees the agent name. Both hooks run once per request, so the
+ * two counts agree unless opencode's prompt wording drifted (byPrompt < byAgent).
+ */
+export type AuxAgreement = { title: { byPrompt: number; byAgent: number }; compaction: { byPrompt: number; byAgent: number } };
+export type Diagnostics = {
+  envOptionsError: string | null;
+  smallModelDefaulted: boolean;
+  instrument: InstrumentStats;
+  systemTransform: SystemTransformStats;
+  chatParams: ChatParamsStats;
+  auxAgreement: AuxAgreement;
+  /** config steps that threw, as "<step>: <message>" (the other steps still ran) */
+  configStepFailed: string[];
+  /** permission values that are not an object, which the plugin cannot scope (left as written) */
+  permissionRejected: string[];
+};
 export function newDiagnostics(): Diagnostics {
-  return { envOptionsError: null, smallModelDefaulted: false, instrument: newInstrumentStats(), systemTransform: { protocol: 0, child: 0, childDigest: 0, childFailOpen: 0, aux: 0 } };
+  return {
+    envOptionsError: null,
+    smallModelDefaulted: false,
+    instrument: newInstrumentStats(),
+    systemTransform: { protocol: 0, child: 0, childDigest: 0, childFailOpen: 0, childHeaderMissing: 0, aux: 0, unknownSession: 0 },
+    chatParams: { applied: 0, skippedNotAux: 0, skippedNotQwen: 0, skippedUserSet: 0 },
+    auxAgreement: { title: { byPrompt: 0, byAgent: 0 }, compaction: { byPrompt: 0, byAgent: 0 } },
+    configStepFailed: [],
+    permissionRejected: [],
+  };
 }
 
 // A malformed env option string must be visible, not silently replaced by defaults (it is
@@ -246,41 +277,57 @@ export function offloadMediaAgentDefinition(o: Options) {
  * the harness namespace (every user harness rule stays after them and keeps winning), or appended
  * when the user has none (so a user catch-all such as `"*": "allow"` does not re-open the tools the
  * plugin scopes). Keys already present are never written. The object is reordered in place: its
- * identity is kept for anything that already holds it.
+ * identity is kept for anything that already holds it. The new order is computed before the object
+ * is touched, and if the rewrite fails part-way the original entries are put back in their original
+ * order before the error is rethrown, so a failure can never leave the user's rules half-deleted.
  */
 export function mergePermissionDefaults(perm: Record<string, any>, defaults: Array<[string, string]>, mcp: string): void {
   const add = defaults.filter(([k]) => !Object.prototype.hasOwnProperty.call(perm, k));
   if (add.length === 0) return;
   const ns = `${mcp}_`;
-  const entries = Object.entries(perm);
-  const at = entries.findIndex(([k]) => k.startsWith(ns));
-  const ordered = at < 0 ? [...entries, ...add] : [...entries.slice(0, at), ...add, ...entries.slice(at)];
-  for (const k of Object.keys(perm)) delete perm[k];
-  for (const [k, v] of ordered) perm[k] = v;
+  const original = Object.entries(perm);
+  const at = original.findIndex(([k]) => k.startsWith(ns));
+  const ordered = at < 0 ? [...original, ...add] : [...original.slice(0, at), ...add, ...original.slice(at)];
+  try {
+    for (const k of Object.keys(perm)) delete perm[k];
+    for (const [k, v] of ordered) perm[k] = v;
+  } catch (e) {
+    try {
+      for (const k of Object.keys(perm)) delete perm[k];
+      for (const [k, v] of original) perm[k] = v;
+    } catch (restoreError) {
+      throw new Error(`permission rewrite failed (${(e as Error)?.message ?? e}) and the original rules could not be restored (${(restoreError as Error)?.message ?? restoreError})`);
+    }
+    throw e;
+  }
 }
 
-function permissionObject(holder: Record<string, any>): Record<string, any> | null {
+/** The permission object of a config node, or null (reported in diagnostics) when it is not one. */
+function permissionObject(holder: Record<string, any>, where: string, diagnostics?: Diagnostics): Record<string, any> | null {
   holder.permission ??= {};
   const p = holder.permission;
-  return p && typeof p === "object" && !Array.isArray(p) ? p : null;
+  if (p && typeof p === "object" && !Array.isArray(p)) return p;
+  diagnostics?.permissionRejected.push(where);
+  warn("config", `${where} is not an object (${Array.isArray(p) ? "array" : typeof p}); the harness tool scope was not applied to it`);
+  return null;
 }
 
 // Tier-1 exposure through opencode permissions (opencode 1.18 merged `tools` into
 // `permission`; a denied tool's schema is not sent to the model). Keys the user already set are
 // never touched and keep their precedence (mergePermissionDefaults).
-export function applyTier1Permissions(c: Record<string, any>, o: Options) {
-  const perm = permissionObject(c);
+export function applyTier1Permissions(c: Record<string, any>, o: Options, diagnostics?: Diagnostics) {
+  const perm = permissionObject(c, "permission", diagnostics);
   if (!perm) return;
   mergePermissionDefaults(perm, [[`${o.mcp}_*`, "deny"], ...TIER1_TOOLS.map((t): [string, string] => [`${o.mcp}_${t}`, "allow"])], o.mcp);
 }
 
 // The offload subagents' harness scope. Agent rules come after the global ones in opencode's
 // ruleset, so an agent-level allow re-opens what the Tier-1 global deny closed.
-export function applyOffloadToolScopes(c: Record<string, any>, o: Options) {
+export function applyOffloadToolScopes(c: Record<string, any>, o: Options, diagnostics?: Diagnostics) {
   const prefix = `${o.mcp}_*`;
   const offload = c.agent?.[o.offloadAgent];
   if (offload) {
-    const perm = permissionObject(offload);
+    const perm = permissionObject(offload, `agent.${o.offloadAgent}.permission`, diagnostics);
     if (perm) {
       if (o.offloadTools === "recon") mergePermissionDefaults(perm, [[prefix, "deny"], ...RECON_TOOLS.map((t): [string, string] => [`${o.mcp}_${t}`, "allow"])], o.mcp);
       // "all": the whole harness, including on a user-defined agent the plugin did not create --
@@ -291,7 +338,7 @@ export function applyOffloadToolScopes(c: Record<string, any>, o: Options) {
   if (o.offloadTools !== "recon") return;
   const media = c.agent?.[mediaAgentName(o)];
   if (media) {
-    const perm = permissionObject(media);
+    const perm = permissionObject(media, `agent.${mediaAgentName(o)}.permission`, diagnostics);
     // The complement of the recon set, so a tool the harness adds later lands here, never nowhere.
     if (perm) mergePermissionDefaults(perm, [[prefix, "allow"], ...RECON_TOOLS.map((t): [string, string] => [`${o.mcp}_${t}`, "deny"])], o.mcp);
   }
@@ -408,26 +455,42 @@ export function createHooks(o: Options, diagnostics: Diagnostics = newDiagnostic
     _state: sessions,
     _diagnostics: diagnostics,
 
+    // Each step is independent and fails on its own: one throwing step (a frozen permission object,
+    // an odd user value) must not skip the next — a skipped offload scope would strand the offload
+    // agent behind the Tier-1 deny. Failures land in diagnostics.configStepFailed.
     config: async (config) => {
-      try {
-        const c = config as unknown as Record<string, any>;
+      const c = config as unknown as Record<string, any>;
+      const tryStep = (name: string, fn: () => void) => {
+        try {
+          fn();
+        } catch (e) {
+          diagnostics.configStepFailed.push(`${name}: ${(e as Error)?.message ?? e}`);
+          warn(`config step ${name}`, e);
+        }
+      };
+      tryStep("offloadAgent", () => {
         c.agent ??= {};
         if (!c.agent[o.offloadAgent]) c.agent[o.offloadAgent] = offloadAgentDefinition(o);
+      });
+      tryStep("offloadMediaAgent", () => {
+        c.agent ??= {};
         if (o.offloadTools === "recon" && !c.agent[mediaAgentName(o)]) c.agent[mediaAgentName(o)] = offloadMediaAgentDefinition(o);
+      });
+      tryStep("commands", () => {
         c.command ??= {};
         for (const [name, def] of Object.entries(offloadCommands(o))) {
           if (!c.command[name]) c.command[name] = def;
         }
-        if (o.primaryTools === "tier1") applyTier1Permissions(c, o);
-        applyOffloadToolScopes(c, o);
+      });
+      if (o.primaryTools === "tier1") tryStep("tier1Permissions", () => applyTier1Permissions(c, o, diagnostics));
+      tryStep("offloadToolScopes", () => applyOffloadToolScopes(c, o, diagnostics));
+      tryStep("smallModel", () => {
         if (!c.small_model && o.smallModel) {
           c.small_model = o.smallModel;
           diagnostics.smallModelDefaulted = true;
           log({ event: "config_default_applied", key: "small_model", value: o.smallModel });
         }
-      } catch (e) {
-        warn("config hook", e);
-      }
+      });
     },
 
     dispose: async () => {
@@ -474,28 +537,33 @@ export function createHooks(o: Options, diagnostics: Diagnostics = newDiagnostic
       try {
         const system = output.system;
         if (!Array.isArray(system)) return;
+        const sid = input?.sessionID;
+        if (sid && !children.has(sid) && !sessions.has(sid)) diagnostics.systemTransform.unknownSession++;
         // Title and compaction requests carry only their agent prompt; the protocol there is
         // pure cost (and a title request is on the critical path of the first turn).
-        if (auxRequestKind(system)) {
+        const aux = auxRequestKind(system);
+        if (aux) {
           diagnostics.systemTransform.aux++;
+          diagnostics.auxAgreement[aux].byPrompt++;
           return;
         }
-        const childAgent = input?.sessionID ? children.get(input.sessionID) : undefined;
+        const childAgent = sid ? children.get(sid) : undefined;
         if (childAgent !== undefined && offloadFamily.has(childAgent)) {
           // An offload child: task is denied to subagents, so the dispatch protocol ("issue a
           // task call") would contradict its own tools; and its read-only shape needs three of
           // the global rules, not all of them.
           diagnostics.systemTransform.child++;
           const paths = globalInstructionPaths();
-          for (let i = 0; i < system.length; i++) {
-            if (!paths.some((p) => system[i].includes(`Instructions from: ${p}\n`))) continue;
+          const i = system.findIndex((s) => typeof s === "string" && paths.some((p) => s.includes(`Instructions from: ${p}\n`)));
+          // No header at all: no global rules file, or opencode changed the header format.
+          if (i < 0) diagnostics.systemTransform.childHeaderMissing++;
+          else {
             const swapped = replaceGlobalInstructions(system[i], paths);
             if (swapped === null) diagnostics.systemTransform.childFailOpen++;
             else {
               system[i] = swapped;
               diagnostics.systemTransform.childDigest++;
             }
-            break;
           }
           return;
         }
@@ -526,14 +594,24 @@ export function createHooks(o: Options, diagnostics: Diagnostics = newDiagnostic
     "chat.params": async (input, output) => {
       try {
         const kind = input?.agent === "title" ? "title" : input?.agent === "compaction" ? "compaction" : null;
-        if (!kind || !isQwenFamily(input.model)) return;
+        const cp = diagnostics.chatParams;
+        if (!kind) {
+          cp.skippedNotAux++;
+          return;
+        }
+        diagnostics.auxAgreement[kind].byAgent++;
+        if (!isQwenFamily(input.model)) {
+          cp.skippedNotQwen++;
+          return;
+        }
         output.options ??= {};
         const current = output.options.chat_template_kwargs;
         const kw: Record<string, unknown> = current && typeof current === "object" && !Array.isArray(current) ? { ...current } : {};
         if (!("enable_thinking" in kw) && !("reasoning_effort" in kw)) {
           kw.enable_thinking = false;
           output.options.chat_template_kwargs = kw;
-        }
+          cp.applied++;
+        } else cp.skippedUserSet++;
         const cap = kind === "title" ? TITLE_MAX_OUTPUT_TOKENS : COMPACTION_MAX_OUTPUT_TOKENS;
         if (typeof output.maxOutputTokens !== "number" || output.maxOutputTokens > cap) output.maxOutputTokens = cap;
       } catch (e) {
@@ -580,8 +658,8 @@ export function createHooks(o: Options, diagnostics: Diagnostics = newDiagnostic
           log({ event: "task_reroute_skipped", sid: input.sessionID, reason: `args not writable: ${(e as Error)?.message ?? e}`, desc: String(args.description ?? "").slice(0, 80) });
           return;
         }
-        if (String(args.subagent_type ?? args.agent ?? "") !== o.offloadAgent) {
-          log({ event: "task_reroute_skipped", sid: input.sessionID, reason: "args did not take the new agent", desc: String(args.description ?? "").slice(0, 80) });
+        if (String(args.subagent_type ?? args.agent ?? "") !== o.offloadAgent || args.prompt !== patch.prompt) {
+          log({ event: "task_reroute_skipped", sid: input.sessionID, reason: "args did not take the new agent and prompt", desc: String(args.description ?? "").slice(0, 80) });
           return;
         }
         s.rerouted.add(input.callID);
@@ -602,17 +680,20 @@ export function createHooks(o: Options, diagnostics: Diagnostics = newDiagnostic
           const meta = (output as { metadata?: { sessionId?: unknown } }).metadata;
           const childSid = typeof meta?.sessionId === "string" ? meta.sessionId : /<task id="([^"]+)"/.exec(text)?.[1];
           const childAgent = childSid ? children.get(childSid) : undefined;
-          if (childAgent !== o.offloadAgent) {
-            log({ event: "task_reroute_unconfirmed", sid: input.sessionID, child: childSid ?? null, agent: childAgent ?? null });
-            return;
-          }
+          const confirmed = childAgent === o.offloadAgent;
+          if (!confirmed) log({ event: "task_reroute_unconfirmed", sid: input.sessionID, child: childSid ?? null, agent: childAgent ?? null });
+          // Failure and escalation are read from the text whatever the confirmation says: the
+          // model must never miss them. Only the claim of WHERE the leg ran needs the proof.
+          const where = confirmed ? ` on the "${o.offloadAgent}" seat` : "";
           if (taskFailed(text)) {
             // Never stamp a failure with a success banner: say what happened and what to do.
-            output.output += `\n\n[local-offload] The rerouted leg FAILED on the "${o.offloadAgent}" seat (see the error above). Re-run it on the default agent, or check that agent "${o.offloadAgent}" exists and its model is served.`;
+            output.output += `\n\n[local-offload] The rerouted leg FAILED${where} (see the error above). Re-run it on the default agent, or check that agent "${o.offloadAgent}" exists and its model is served.`;
             log({ event: "task_reroute_failed", sid: input.sessionID, desc: String(input.args?.description ?? "").slice(0, 80) });
           } else if (taskEscalated(text)) {
-            output.output += `\n\n[local-offload] This leg ran on the free local "${o.offloadAgent}" seat and reports it needs the primary agent for part of the work (web, writes, or a judgment call) — see its note above.`;
-          } else {
+            output.output += confirmed
+              ? `\n\n[local-offload] This leg ran on the free local "${o.offloadAgent}" seat and reports it needs the primary agent for part of the work (web, writes, or a judgment call) — see its note above.`
+              : `\n\n[local-offload] This rerouted leg reports it needs the primary agent for part of the work (web, writes, or a judgment call) — see its note above.`;
+          } else if (confirmed) {
             output.output += `\n\n[local-offload] This leg ran on the free local "${o.offloadAgent}" seat (rerouted: read-only over local files).`;
           }
           return;
@@ -666,7 +747,7 @@ export function createHooks(o: Options, diagnostics: Diagnostics = newDiagnostic
               options: { ...o, dispatchLog: o.dispatchLog },
               session: s ? { reads: s.reads, rerouted: s.rerouted.size, delegateCalls: s.delegateCalls, nudged: [...s.nudged] } : null,
               hooks: ["experimental.chat.system.transform", "chat.params", "tool.definition", "tool.execute.before", "tool.execute.after", "config", "event"],
-              diagnostics: { ...diagnostics, instrument: { ...diagnostics.instrument }, systemTransform: { ...diagnostics.systemTransform } },
+              diagnostics: JSON.parse(JSON.stringify(diagnostics)),
             },
             null,
             2,
