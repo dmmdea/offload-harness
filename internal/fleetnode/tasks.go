@@ -28,7 +28,7 @@ import (
 
 // fleetTaskOrder is the advertisement order (stable for health payloads + error
 // messages). Membership is decided per-config by taskConfiguredFor.
-var fleetTaskOrder = []string{"image-gen", "video-gen", "animate", "stt", "audio-gen", "run-graph", "agent", "accel", VisionTask}
+var fleetTaskOrder = []string{"image-gen", "video-gen", "animate", "stt", "audio-gen", "run-graph", ComposeTask, "agent", "accel", VisionTask}
 
 // taskConfiguredFor reports whether THIS box actually serves taskType — the same
 // route gates the pipeline uses (empty script/model = the task defers there, so
@@ -57,6 +57,10 @@ func taskConfiguredFor(cfg config.Config, taskType string, loopbackListener bool
 		return cfg.VoiceGenScript != "" || cfg.MusicGenScript != ""
 	case "run-graph":
 		return cfg.RunGraphScript != ""
+	case ComposeTask:
+		// The composition lane: the runner, the pinned install and the pinned browser
+		// all bound — config.ComposeRouteConfigured, the pipeline's own gate.
+		return cfg.ComposeRouteConfigured()
 	case "agent":
 		return AgentLaneAdmissible(cfg, loopbackListener)
 	case "accel":
@@ -336,6 +340,8 @@ func BuildRequest(ctx context.Context, cfg config.Config, loopbackListener bool,
 		return buildAudioGen(payload)
 	case "run-graph":
 		return buildRunGraph(payload)
+	case ComposeTask:
+		return buildComposeVideo(payload)
 	case "agent":
 		return buildAgentRun(cfg, payload)
 	case "accel":

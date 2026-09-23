@@ -11,6 +11,7 @@ import (
 
 	"github.com/dmmdea/offload-harness/internal/acceptance"
 	"github.com/dmmdea/offload-harness/internal/config"
+	"github.com/dmmdea/offload-harness/internal/gpugen"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
 	"github.com/dmmdea/offload-harness/internal/mediacap"
 	"github.com/dmmdea/offload-harness/internal/mediaops"
@@ -60,6 +61,14 @@ func runAcceptance(args []string) error {
 	}
 	if cfg.ImageGenEngine == "sdcpp" {
 		rep.Add(acceptance.Runnable(ctx, "sdcpp", cfg.SdcppBin, "--help"))
+	}
+	// The composition lane (ADR 0059): run the pinned CLI as this identity, through the
+	// runner — the same allowlisted env and --json every render uses — so a node whose
+	// install exists but cannot execute is caught here, not by the first composition.
+	if cfg.ComposeRouteConfigured() {
+		if script, err := gpugen.ResolveScript(cfg.ComposeScript); err == nil {
+			rep.Add(acceptance.Runnable(ctx, "hyperframes (compose runner)", cfg.NodePath, script, "version", "--hyperframes-dir", cfg.HyperframesDir))
+		}
 	}
 
 	// 3. The derived media routes. A route bound to a file that is not there is a

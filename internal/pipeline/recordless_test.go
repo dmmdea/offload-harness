@@ -28,7 +28,7 @@ func TestOnlyTheFourTextTasksMayTakeTheSingleTierPath(t *testing.T) {
 		core.TaskVQA, core.TaskOCR, core.TaskAssessImage, core.TaskVideoDescribe,
 		core.TaskTranscribe, core.TaskGenerateImage, core.TaskInpaintImage,
 		core.TaskGenerateVideo, core.TaskGenerateAudio, core.TaskRunGraph,
-		core.TaskEditImage, core.TaskMedia, core.TaskExtractImage, core.TaskGenerateSVG,
+		core.TaskEditImage, core.TaskMedia, core.TaskExtractImage, core.TaskGenerateSVG, core.TaskComposeVideo,
 		core.TaskType("some_future_task"),
 	} {
 		if textOnlyTask(task) {

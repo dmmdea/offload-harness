@@ -114,6 +114,8 @@ func main() {
 		err = runEditImage(args)
 	case "media":
 		err = runMedia(args)
+	case "compose-video":
+		err = runComposeVideo(args)
 	case "nim":
 		err = runNim(args)
 	case "ocr":
@@ -270,6 +272,10 @@ Usage:
   local-offload generate-video <out.mp4> <still.png> "<prompt>" [--model hunyuan|wan] [--frames 49] [--seed N] [--reserve-vram F]
   local-offload animate-character <out.mp4> <ref.png> <driver.mp4> "<prompt>" [--motion-prompt "..."] [--frames 81] [--seed N]
   local-offload run-graph --graph <g.json> [--manifest <m.json>] [--out-dir <d>] [--reserve-vram F] [--json]
+  local-offload compose-video --template <name> [--variables '<json>'] | --html <file> | --project-dir <dir>
+                              [--format mp4|webm|mov|png-sequence|gif] [--fps N] [--quality draft|standard|high]
+                              [--resolution landscape|...] [--workers N] [--strict=false] [--snapshots 1,2.5] [--out path] [--json]
+                                         HTML/CSS motion graphics -> video with HyperFrames (CPU-class, no GPU lock; ADR 0059)
   local-offload nim <file|-|"text"> [--model id] [--base url] [--system "..."] [--max-tokens N] [--temp F] [--json]
   local-offload nim --list-models        list a NIM endpoint's model ids (free hosted catalog or self-hosted)
   local-offload mcp                      run as an MCP server (stdio)
@@ -1295,6 +1301,112 @@ func runMedia(args []string) error {
 		params["count"] = *count
 	}
 	res := p.Run(context.Background(), core.Request{Task: core.TaskMedia, Door: "cli:media", Params: params})
+	emitResult(res, *asJSON, "", *compactFlag)
+	return nil
+}
+
+// composeFlags is the parsed CLI input for `compose-video`. Factored out so the
+// param building (buildComposeParams) is unit-testable without a render.
+type composeFlags struct {
+	template, variables, variablesFile, htmlFile, projectDir, composition string
+	out, format, quality, resolution, snapshots                           string
+	fps, workers                                                          int
+	strict                                                                bool
+}
+
+// buildComposeParams maps `compose-video` flags onto the params offload_compose_video
+// sends, so the CLI and the MCP door hand the pipeline the same shapes. --html reads
+// the file: the pipeline's html param is the page itself, never a path.
+func buildComposeParams(f composeFlags) (map[string]any, error) {
+	params := map[string]any{}
+	for k, v := range map[string]string{"template": f.template, "project_dir": f.projectDir, "composition": f.composition,
+		"out": f.out, "format": f.format, "quality": f.quality, "resolution": f.resolution} {
+		if v != "" {
+			params[k] = v
+		}
+	}
+	if f.htmlFile != "" {
+		b, err := os.ReadFile(f.htmlFile)
+		if err != nil {
+			return nil, fmt.Errorf("compose-video: --html: %w", err)
+		}
+		params["html"] = string(b)
+	}
+	vars := f.variables
+	if vars != "" && f.variablesFile != "" {
+		return nil, fmt.Errorf("compose-video: use --variables or --variables-file, not both")
+	}
+	if f.variablesFile != "" {
+		b, err := os.ReadFile(f.variablesFile)
+		if err != nil {
+			return nil, fmt.Errorf("compose-video: --variables-file: %w", err)
+		}
+		vars = string(b)
+	}
+	if vars != "" {
+		var obj map[string]any
+		if err := json.Unmarshal([]byte(vars), &obj); err != nil || obj == nil {
+			return nil, fmt.Errorf("compose-video: variables must be a JSON object")
+		}
+		params["variables"] = obj
+	}
+	if f.fps > 0 {
+		params["fps"] = f.fps
+	}
+	if f.workers > 0 {
+		params["workers"] = f.workers
+	}
+	if !f.strict {
+		params["strict"] = false
+	}
+	if f.snapshots != "" {
+		var ts []float64
+		for _, s := range strings.Split(f.snapshots, ",") {
+			v, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
+			if err != nil {
+				return nil, fmt.Errorf("compose-video: --snapshots %q: %w", f.snapshots, err)
+			}
+			ts = append(ts, v)
+		}
+		params["snapshots"] = ts
+	}
+	return params, nil
+}
+
+// runComposeVideo is `local-offload compose-video` — the CLI door of the composition
+// lane (ADR 0059), the same pipeline path offload_compose_video takes.
+func runComposeVideo(args []string) error {
+	fs := flag.NewFlagSet("compose-video", flag.ExitOnError)
+	fs.String("config", "", "config file path")
+	asJSON := fs.Bool("json", false, "print full result JSON")
+	compactFlag := fs.Bool("compact", false, "compact (minified) JSON output")
+	var f composeFlags
+	fs.StringVar(&f.template, "template", "", "a vetted template on this machine (title-card, lower-third, ...)")
+	fs.StringVar(&f.variables, "variables", "", "template variables as a JSON object")
+	fs.StringVar(&f.variablesFile, "variables-file", "", "path to a JSON file with the template variables")
+	fs.StringVar(&f.htmlFile, "html", "", "path to a single-file composition (trusted code only)")
+	fs.StringVar(&f.projectDir, "project-dir", "", "a local composition directory with index.html (trusted code only)")
+	fs.StringVar(&f.composition, "composition", "", "a composition file relative to --project-dir")
+	fs.StringVar(&f.out, "out", "", "output path (a directory for png-sequence; default under the media dir)")
+	fs.StringVar(&f.format, "format", "", "mp4 (default) | webm | mov | png-sequence | gif")
+	fs.StringVar(&f.quality, "quality", "", "draft | standard | high (default: compose_quality)")
+	fs.StringVar(&f.resolution, "resolution", "", "landscape | portrait | landscape-4k | portrait-4k | square | square-4k")
+	fs.StringVar(&f.snapshots, "snapshots", "", "comma-separated seconds to also save as PNG frames")
+	fs.IntVar(&f.fps, "fps", 0, "frame rate 1-240 (default: the composition's data-fps)")
+	fs.IntVar(&f.workers, "workers", 0, "Chrome workers 1-24 (default: compose_workers, else auto)")
+	fs.BoolVar(&f.strict, "strict", true, "fail on lint errors / a failed check (--strict=false to report only)")
+	_ = fs.Parse(args)
+	params, perr := buildComposeParams(f)
+	if perr != nil {
+		return perr
+	}
+	cfg := loadCfg(fs)
+	p, cleanup, err := openPipeline(cfg)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	res := p.Run(context.Background(), core.Request{Task: core.TaskComposeVideo, Door: "cli:compose-video", Params: params})
 	emitResult(res, *asJSON, "", *compactFlag)
 	return nil
 }

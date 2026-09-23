@@ -44,6 +44,7 @@ func bare() config.Config {
 	cfg.ImageGenEngine, cfg.SdcppBin, cfg.SdcppModel, cfg.SdcppScript = "", "", "", ""
 	cfg.EditPython, cfg.GimpConsolePath, cfg.FFmpegPath, cfg.NodePath = "", "", "", ""
 	cfg.ComfyDir = ""
+	cfg.ComposeScript, cfg.HyperframesDir, cfg.HyperframesBrowserPath = "", "", ""
 	return cfg
 }
 
@@ -213,7 +214,7 @@ func TestDefaultConfigNamesEveryShippedRoute(t *testing.T) {
 	for _, want := range []string{
 		"generate_image", "inpaint_image", "generate_video",
 		"generate_audio:voice", "generate_audio:music", "run_graph",
-		"edit_image", "flatten_design", "media", "upscale_image",
+		"edit_image", "flatten_design", "media", "upscale_image", "compose_video",
 	} {
 		if _, ok := got[want]; !ok {
 			t.Errorf("no route reported for %s", want)

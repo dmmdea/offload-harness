@@ -337,6 +337,12 @@ func (s *Server) buildServer(version string) *mcp.Server {
 	}, s.handleMedia)
 
 	srv.AddTool(&mcp.Tool{
+		Name:        "offload_compose_video",
+		Description: "COMPOSE designed motion graphics into VIDEO locally for FREE with HyperFrames — deterministic HTML/CSS -> MP4/WebM/MOV (alpha)/GIF/PNG sequence: title cards, lower thirds, kinetic type, stat cards, overlays to lay over b-roll. CPU-class: software GL + CPU encode, NO GPU lock (runs beside every render and text seat), local only, never cloud (HyperFrames' cloud/lambda/capture paths are not wired). Give ONE input: template + variables (the vetted templates on this box — offload_status media.routes.compose_video lists them; shipped: title-card, lower-third; variables are the template's declared text/colors/duration, typed and escaped), OR html (an inline single-file composition), OR project_dir (a local composition dir). html and project_dir are TRUSTED CODE ONLY: HyperFrames' Chrome runs without a sandbox, so never pass third-party pages. Every render is gated: lint (0 errors), check (runtime/layout/contrast), then ffprobe measures the output (codec, size, fps, duration, alpha) — the returned fields are measured, not requested. format webm (VP9) or mov (ProRes 4444) carries alpha; mp4 is opaque H.264. quality defaults to this machine's compose_quality (high = libx264 slow CRF 15). snapshots = seconds to also save as PNG frames for a visual check. Same inputs render byte-identical frames. Returns {video_path | frames_dir, duration_sec, fps, frames, width, height, has_alpha, has_audio, codec, render_ms, lint:{errors,warnings}, check:{ok,findings}, snapshots[]}. On any failure it returns deferred:true with a typed reason (BAD_INPUT, LINT_ERRORS, CHECK_FAILED, RENDER_FAILED, BROWSER_MISSING, FFMPEG_MISSING, CLI_MISSING, SPAWN_EBUSY, DISK_HEADROOM, TIMEOUT, or no composition route on this machine).",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"template":{"type":"string","description":"a vetted template name on this machine (e.g. title-card, lower-third); give exactly one of template, html, project_dir"},"variables":{"type":"object","description":"values for the template's declared variables, e.g. {\"title\":\"Q3 results\",\"accent\":\"#22c55e\",\"duration\":6}; an undeclared or mistyped key defers BAD_INPUT"},"html":{"type":"string","description":"an inline single-file HyperFrames composition (TRUSTED code only: Chrome runs it without a sandbox)"},"project_dir":{"type":"string","description":"a local composition directory holding index.html (TRUSTED code only)"},"composition":{"type":"string","description":"a composition file relative to project_dir to render instead of index.html"},"out":{"type":"string","description":"output path (a directory for png-sequence; optional, default under the media dir)"},"format":{"type":"string","enum":["mp4","webm","mov","png-sequence","gif"],"description":"mp4 (default, H.264), webm (VP9 with alpha), mov (ProRes 4444 with alpha), png-sequence (RGBA frames), gif"},"fps":{"type":"integer","description":"frame rate 1-240 (default: the composition's data-fps, else 30)"},"quality":{"type":"string","enum":["draft","standard","high"],"description":"encoder preset (default: this machine's compose_quality, shipped high)"},"resolution":{"type":"string","enum":["landscape","portrait","landscape-4k","portrait-4k","square","square-4k"],"description":"output size preset; the aspect must match the composition (4k = integer supersampling)"},"workers":{"type":"integer","description":"parallel Chrome workers 1-24 (default: this machine's compose_workers, else auto)"},"strict":{"type":"boolean","description":"fail on lint errors / a failed check (default true)"},"snapshots":{"type":"array","items":{"type":"number"},"description":"seconds to also save as PNG frames next to the output (up to 16)"}}}`),
+	}, s.handleComposeVideo)
+
+	srv.AddTool(&mcp.Tool{
 		Name:        "offload_nim",
 		Description: "Send a prompt to a remote OpenAI-compatible NVIDIA NIM endpoint — NVIDIA's hosted build.nvidia.com catalog (dozens of FREE models: nemotron, llama, gpt-oss, qwen, deepseek, glm, kimi…) by default, or a self-hosted NIM via base. This is the ONLY cloud/remote tool on this server — every other offload_* tool runs on the LOCAL models (see offload_status for that roster). It is OPT-IN (the hosted endpoint needs NVIDIA_API_KEY in the server env; a self-hosted NIM via base is keyless): use it deliberately for a stronger model than the local cascade, NOT for routine grunt work. The local GBNF grammar path and the savings ledger are untouched (NIM calls are never ledgered). Set list_models=true to browse available model ids. Returns {model, content, reasoning_content, tokens_in, tokens_out, truncated}; on any failure (no key, endpoint down, bad model) it returns deferred:true with a reason and you handle the prompt yourself.",
 		InputSchema: json.RawMessage(`{"type":"object","properties":{"prompt":{"type":"string","description":"the user prompt"},"model":{"type":"string","description":"model id (default from config; set list_models=true to browse)"},"system":{"type":"string","description":"optional system prompt"},"base":{"type":"string","description":"override the OpenAI-compatible base URL incl. /v1 (e.g. a self-hosted NIM http://host:8000/v1)"},"max_tokens":{"type":"integer","description":"max completion tokens (default from config; reasoning models need headroom)"},"temperature":{"type":"number","description":"sampling temperature (default 0)"},"list_models":{"type":"boolean","description":"list available model ids instead of generating"}},"required":["prompt"]}`),
@@ -1945,6 +1951,52 @@ func (s *Server) handleMedia(ctx context.Context, req *mcp.CallToolRequest) (*mc
 		params["shortest"] = *in.Shortest
 	}
 	return result(s.p.Run(ctx, core.Request{Task: core.TaskMedia, Door: "offload_media", Params: params}))
+}
+
+// handleComposeVideo — offload_compose_video (ADR 0059). The pipeline validates the
+// one-input rule and every enum; this handler only decodes and forwards what was set.
+func (s *Server) handleComposeVideo(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	var in struct {
+		Template    string         `json:"template"`
+		Variables   map[string]any `json:"variables"`
+		HTML        string         `json:"html"`
+		ProjectDir  string         `json:"project_dir"`
+		Composition string         `json:"composition"`
+		Out         string         `json:"out"`
+		Format      string         `json:"format"`
+		FPS         float64        `json:"fps"`
+		Quality     string         `json:"quality"`
+		Resolution  string         `json:"resolution"`
+		Workers     float64        `json:"workers"`
+		Strict      *bool          `json:"strict"`
+		Snapshots   []float64      `json:"snapshots"`
+	}
+	if bad := parseArgs(req.Params.Arguments, &in); bad != nil {
+		return bad, nil
+	}
+	params := map[string]any{}
+	for k, v := range map[string]string{"template": in.Template, "html": in.HTML, "project_dir": in.ProjectDir,
+		"composition": in.Composition, "out": in.Out, "format": in.Format, "quality": in.Quality, "resolution": in.Resolution} {
+		if v != "" {
+			params[k] = v
+		}
+	}
+	if in.Variables != nil {
+		params["variables"] = in.Variables
+	}
+	if in.FPS != 0 {
+		params["fps"] = in.FPS
+	}
+	if in.Workers != 0 {
+		params["workers"] = in.Workers
+	}
+	if in.Strict != nil {
+		params["strict"] = *in.Strict
+	}
+	if len(in.Snapshots) > 0 {
+		params["snapshots"] = in.Snapshots
+	}
+	return result(s.p.Run(ctx, core.Request{Task: core.TaskComposeVideo, Door: "offload_compose_video", Params: params}))
 }
 
 func (s *Server) handleNIM(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {

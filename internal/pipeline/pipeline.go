@@ -468,6 +468,12 @@ func (p *Pipeline) Run(ctx context.Context, req core.Request) core.Result {
 	if req.Task == core.TaskMedia {
 		return p.runMedia(ctx, req, meta, start)
 	}
+	// compose_video renders an HTML/CSS composition with HyperFrames (composevideo.go):
+	// CPU-class like media — software GL + CPU encode, NO GPU lease and no withGpuSlot
+	// (ADR 0026/0059), only its own in-process compose slot.
+	if req.Task == core.TaskComposeVideo {
+		return p.runComposeVideo(ctx, req, meta, start)
+	}
 
 	// Vision tasks (vqa) take a SEPARATE branch: the input is an image, not text,
 	// so they skip the trivial-input gate, the context-budget trim, and the whole

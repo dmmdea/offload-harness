@@ -32,6 +32,7 @@
       "offload_upscale_image",
       "offload_edit_image_generative",
       "offload_media",
+      "offload_compose_video",
       "offload_nim",
       "agent_rig",
       "agent_run",

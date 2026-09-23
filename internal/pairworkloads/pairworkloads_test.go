@@ -76,6 +76,7 @@ func TestEngineFor(t *testing.T) {
 		{"generate_video", "", "comfyui"},
 		{"edit_image_generative", "", "comfyui"},
 		{"run_graph", "", "comfyui"},
+		{"compose_video", "hyperframes", "hyperframes"},
 		{"summarize", "gemma-4-e4b", "llamacpp"},
 		{"vqa", "qwen3-vl-8b", "llamacpp"},
 		// An NPU call is not a llama.cpp job: the device is the engine, in every
