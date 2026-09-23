@@ -60,6 +60,7 @@ type SeatState struct {
 	Canonical string `json:"canonical,omitempty"`
 	Loaded    bool   `json:"loaded"`
 	Starting  bool   `json:"starting"`
+	Stopping  bool   `json:"stopping,omitempty"`
 	Inflight  int    `json:"inflight"`
 	Source    string `json:"source,omitempty"`
 	Err       string `json:"error,omitempty"`
@@ -134,7 +135,7 @@ func Snapshot(ctx context.Context, opts Options) View {
 		sctx, cancel := context.WithTimeout(ctx, to)
 		rd, err := seatload.Inflight(sctx, &http.Client{Timeout: to}, opts.Endpoint, opts.Seat)
 		cancel()
-		v.Seat = SeatState{Name: opts.Seat, Canonical: rd.Canonical, Loaded: rd.Loaded, Starting: rd.Starting, Inflight: rd.Inflight, Source: rd.Source}
+		v.Seat = SeatState{Name: opts.Seat, Canonical: rd.Canonical, Loaded: rd.Loaded, Starting: rd.Starting, Stopping: rd.Stopping, Inflight: rd.Inflight, Source: rd.Source}
 		if err != nil {
 			v.Seat.Err = err.Error()
 		}
@@ -169,7 +170,9 @@ func Assess(v View) (verdict, note string) {
 	if now.IsZero() {
 		now = time.Now()
 	}
-	seatBusy := v.Seat.Starting || v.Seat.Inflight > 0
+	// A seat that is STOPPING is on its way out, not work: counting it made a
+	// ttl unload read "WORKING — agent-pool is loading" (2026-09-23).
+	seatBusy := (v.Seat.Starting && !v.Seat.Stopping) || v.Seat.Inflight > 0
 	runs := len(v.Runs)
 
 	// TWO readings, because "a card is busy" and "the HOLDER is working" are not
@@ -253,6 +256,8 @@ func Assess(v View) (verdict, note string) {
 		return VerdictStaleHolder, "a lease record is left over from a holder that is gone" + who + "; the next `gpu reserve` reclaims it — nothing is running under it"
 	case cardsBusy:
 		return VerdictBusyOutside, "no lease and the seat is idle, but the cards are busy — " + busyCard + "; that is work the harness does not own" + processTail(v) + staleTail
+	case v.Seat.Stopping:
+		return VerdictLoadedIdle, fmt.Sprintf("no lease; %s is unloading (its ttl ran out or an unload was asked), nothing in flight", v.Seat.Name) + staleTail
 	case v.Seat.Loaded:
 		return VerdictLoadedIdle, fmt.Sprintf("no lease; %s is resident with nothing in flight and unloads at its ttl", v.Seat.Name) + staleTail
 	default:
@@ -280,6 +285,8 @@ func displayCards(v View) map[string]bool {
 func describeWork(v View, now time.Time) string {
 	var parts []string
 	switch {
+	case v.Seat.Stopping:
+		parts = append(parts, fmt.Sprintf("%s is unloading", v.Seat.Name))
 	case v.Seat.Starting:
 		parts = append(parts, fmt.Sprintf("%s is loading", v.Seat.Name))
 	case v.Seat.Inflight > 0:
@@ -386,6 +393,8 @@ func (v View) Lines() []string {
 		switch {
 		case v.Seat.Err != "":
 			s += " unreadable (" + v.Seat.Err + ")"
+		case v.Seat.Stopping:
+			s += " unloading"
 		case v.Seat.Starting:
 			s += " loading"
 		case !v.Seat.Loaded:

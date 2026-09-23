@@ -28,6 +28,7 @@ type fakeSwap struct {
 	roster                    bool // serve /v1/models at all (false = roster unreadable)
 	loaded                    atomic.Bool
 	starting                  atomic.Bool // loaded AND listed as `starting` (a load in progress)
+	stopping                  atomic.Bool // loaded AND listed as `stopping` (an unload in progress)
 	inflight                  atomic.Int64
 	upstreamHitsWhileUnloaded atomic.Int64
 	metricsStatus             atomic.Int64
@@ -52,6 +53,9 @@ func (f *fakeSwap) handler() http.Handler {
 			state := "ready"
 			if f.starting.Load() {
 				state = "starting"
+			}
+			if f.stopping.Load() {
+				state = "stopping"
 			}
 			entry := map[string]string{"model": f.id, "state": state}
 			if !f.noProxy {
@@ -233,6 +237,29 @@ func TestInflightReportsAStartingSeatWithoutTouchingTheUpstream(t *testing.T) {
 	rd, err = Inflight(context.Background(), srv.Client(), srv.URL, "agent-pool")
 	if err != nil || rd.Starting || rd.Inflight != 7 || rd.Source != "metrics" {
 		t.Fatalf("after ready: reading = %+v err=%v; want 7 in flight via metrics", rd, err)
+	}
+}
+
+// A seat llama-swap lists as `stopping` (its ttl ran out) is in transition like
+// a starting one, but it is leaving: the reading says so, so nothing reports a
+// ttl unload as "loading" (2026-09-23) or owes it a warm-back.
+func TestRunningTellsAStoppingSeatFromALoadingOne(t *testing.T) {
+	f := &fakeSwap{id: "qwen3.8-27b-vllm", alias: "agent-pool", roster: true}
+	f.loaded.Store(true)
+	f.stopping.Store(true)
+	srv := httptest.NewServer(f.handler())
+	defer srv.Close()
+	rd, err := Running(context.Background(), srv.Client(), srv.URL, "agent-pool")
+	if err != nil {
+		t.Fatalf("Running: %v", err)
+	}
+	if !rd.Loaded || !rd.Starting || !rd.Stopping || rd.Source != "running-state:stopping" {
+		t.Fatalf("reading = %+v; want loaded + in transition + stopping", rd)
+	}
+	f.stopping.Store(false)
+	f.starting.Store(true)
+	if rd, err = Running(context.Background(), srv.Client(), srv.URL, "agent-pool"); err != nil || rd.Stopping || !rd.Starting {
+		t.Fatalf("a loading seat is not stopping: %+v err=%v", rd, err)
 	}
 }
 

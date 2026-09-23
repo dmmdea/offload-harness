@@ -130,6 +130,29 @@ func TestReserveLeavesTheWarmBackToTheLastHolderWhenALeaseIsQueued(t *testing.T)
 	}
 }
 
+// A lease over a COLD seat must not load it at release: nothing was unloaded
+// for the window, so no warm-back is owed (2026-09-23, the Qube: a video render
+// under --unload-seat brought the 3-card 27B up on all three cards afterwards,
+// with nothing asking for it, until its ttl).
+func TestReserveDoesNotWarmASeatThatWasNotLoaded(t *testing.T) {
+	f := &orderedSwap{drainSwap: &drainSwap{}}
+	cfgPath, m := handoffFixture(t, f)
+	t.Setenv("LO_HELPER_SLEEP_MS", "0")
+	args := append([]string{"--config", cfgPath, "--wait", "10s", "--drain", "--unload-seat", "--reason", "cold"}, helperCmd()...)
+	if err := runGPUReserve(args); err != nil {
+		t.Fatalf("reserve: %v", err)
+	}
+	if f.warms.Load() != 0 {
+		t.Fatalf("a seat that was not loaded must not be warmed back, warms=%d events=%v", f.warms.Load(), f.log())
+	}
+	if f.loaded.Load() {
+		t.Fatal("the seat must still be cold after the lease")
+	}
+	if owed := m.SeatWarmOwed(); owed != "" {
+		t.Fatalf("no warm is owed for a cold seat, marker %q", owed)
+	}
+}
+
 // A holder whose lease was taken away (an operator `gpu release`, a reclaim)
 // must not warm the seat onto a card that is no longer its own; the warm stays
 // owed for the holder that ends up last.

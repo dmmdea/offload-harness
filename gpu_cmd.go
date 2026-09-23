@@ -575,11 +575,12 @@ func markWarmOwed(m *gpulease.Manager) func(seat string) {
 // heartbeats ownership; waiters and the marker come from the manager.
 func leaseWarmGuard(m *gpulease.Manager, l *gpulease.Lease) warmGuard {
 	return warmGuard{
-		held:    l.Check,
-		renew:   l.Renew,
-		waiters: m.Waiters,
-		owed:    m.SeatWarmOwed,
-		clear:   m.ClearSeatWarmOwed,
+		held:       l.Check,
+		renew:      l.Renew,
+		waiters:    m.Waiters,
+		owed:       m.SeatWarmOwed,
+		clear:      m.ClearSeatWarmOwed,
+		onlyIfOwed: true,
 	}
 }
 
