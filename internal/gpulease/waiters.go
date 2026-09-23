@@ -398,7 +398,9 @@ func (m *Manager) Waiters() []Waiter {
 		w.path = p
 		out = append(out, w)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].SinceMs < out[j].SinceMs })
+	// The same order isFrontOfQueue serves (waiterBefore), so `gpu status` lists the line
+	// exactly as it will be granted, exact-millisecond ties included.
+	sort.Slice(out, func(i, j int) bool { return waiterBefore(out[i], out[j]) })
 	return out
 }
 

@@ -116,8 +116,8 @@ Versioning: [SemVer](https://semver.org/).
 ### Fixed — the GPU lease queue serves waiters FIFO instead of racing them
 
 - **A queued `gpu reserve` could lose to a later arrival indefinitely.** Measured live
-  2026-09-22: a text reservation queued at 19:10 was still waiting at 20:50 while two media
-  reservations that queued LATER (18:41, 19:06) each took the card ahead of it. Root cause:
+  2026-09-22: a text reservation queued at ~18:40 was still waiting at 20:24 while two media
+  reservations that queued after it (~18:40, 19:06) each took the card ahead of it. Root cause:
   `Acquire`'s retry loop had every waiting process poll `TryAcquire` once a second with no
   ordering between them — `registerWaiter`/`Waiters()` recorded who was queued, but nothing
   in the acquire path ever consulted that record before racing for the `O_EXCL` claim, so
