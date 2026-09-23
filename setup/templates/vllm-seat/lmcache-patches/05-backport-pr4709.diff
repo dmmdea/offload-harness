@@ -1,0 +1,28 @@
+# HOUSE-BACKPORT-PR4709, reduced for LMCache 0.5.5 (2026-09-22). The adapter hunks
+# (error_block_ids.update(r_block_ids) in get_finished / get_finished_with_lazy_offload)
+# are upstream in 0.5.5 (PR #4709 merge 23cca679 is an ancestor of v0.5.5); only the
+# house scheduler-start warning about kv_load_failure_policy remains.
+--- a/lmcache/integration/vllm/lmcache_mp_connector.py
++++ b/lmcache/integration/vllm/lmcache_mp_connector.py
+@@ -491,6 +491,21 @@
+ 
+         assert vllm_config.kv_transfer_config is not None
+ 
++        # HOUSE-BACKPORT-PR4709 2026-09-22: a retrieve the server answers False is
++        # reported to vLLM as failed blocks (LMCache PR #4709, upstream since 0.5.5;
++        # before it, vLLM ran on blocks that were never loaded). vLLM then
++        # recomputes ONLY under kv_load_failure_policy=
++        # "recompute"; its default "fail" finishes the request with an error. Say so
++        # once, loudly, at scheduler start instead of on the first failed retrieve.
++        _policy = getattr(vllm_config.kv_transfer_config, "kv_load_failure_policy", None)
++        if role == KVConnectorRole.SCHEDULER and _policy not in (None, "recompute"):
++            logger.warning(
++                "kv_load_failure_policy=%r: a failed LMCache retrieve will FAIL the "
++                "request instead of recomputing it. Add "
++                '"kv_load_failure_policy":"recompute" to --kv-transfer-config.',
++                _policy,
++            )
++
+         self._eager_prefetch: bool = bool(
+             vllm_config.kv_transfer_config.get_from_extra_config(
+                 "lmcache.mp.eager_prefetch", False

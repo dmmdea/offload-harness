@@ -1,0 +1,167 @@
+# HOUSE-PP-LAYOUT, ported to LMCache 0.5.5 (2026-09-22). Same semantics as patches-v2/02.
+# Port: lookup.py hunk hand-ported (0.5.5 replaced extra_count with num_kv_readers in
+# PrefetchRequestSpec); other hunks re-diffed against 0.5.5 + 01.
+--- a/lmcache/v1/multiprocess/engine_context.py
++++ b/lmcache/v1/multiprocess/engine_context.py
+@@ -47,6 +47,12 @@
+     order. Defaults to a single full-attention group."""
+     group_layout_descs: dict[int, MemoryLayoutDesc] | None = None
+     """Per-group layout descriptors, or ``None`` if all share ``layout_desc``."""
++    # HOUSE-PP-LAYOUT 2026-09-22: under pipeline parallelism every rank holds a different layer
++    # set, so each rank's objects have a different size; the single entry above only keeps the
++    # LAST registration. ``heterogeneous`` flips when two registrations disagree, and
++    # ``rank_group_layout_descs`` maps kv_rank -> {object_group_id: layout}, bound at first store.
++    heterogeneous: bool = False
++    rank_group_layout_descs: dict | None = None
+ 
+ 
+ class LayoutDescRegistry:
+@@ -105,6 +111,8 @@
+                 )
+                 return
+ 
++            if entry.group_layout_descs != group_layout_descs:
++                entry.heterogeneous = True  # HOUSE-PP-LAYOUT: ranks disagree (pipeline parallel)
+             entry.layout_desc = layout_desc
+             entry.attn_desc = attn_desc
+             entry.group_layout_descs = group_layout_descs
+@@ -148,6 +156,32 @@
+                 return None
+             return entry.layout_desc
+ 
++    def bind_rank_layouts(
++        self,
++        model_name: str,
++        world_size: int,
++        kv_rank: int,
++        group_layout_descs: dict[int, MemoryLayoutDesc],
++    ) -> None:
++        """HOUSE-PP-LAYOUT: record the layouts of the rank that owns ``kv_rank``."""
++        with self._lock:
++            entry = self._registry.get((model_name, world_size))
++            if entry is None:
++                return
++            if entry.rank_group_layout_descs is None:
++                entry.rank_group_layout_descs = {}
++            entry.rank_group_layout_descs[kv_rank] = dict(group_layout_descs)
++
++    def find_rank_layouts(
++        self, model_name: str, world_size: int
++    ) -> tuple[bool, dict]:
++        """HOUSE-PP-LAYOUT: ``(heterogeneous, {kv_rank: {group: layout}})`` for a pair."""
++        with self._lock:
++            entry = self._registry.get((model_name, world_size))
++            if entry is None:
++                return False, {}
++            return entry.heterogeneous, dict(entry.rank_group_layout_descs or {})
++
+     def find_group_layout_descs(
+         self, model_name: str, world_size: int
+     ) -> dict[int, MemoryLayoutDesc] | None:
+--- a/lmcache/v1/multiprocess/modules/lmcache_driven_transfer.py
++++ b/lmcache/v1/multiprocess/modules/lmcache_driven_transfer.py
+@@ -1097,6 +1097,25 @@
+             key, list(range(num_object_groups))
+         )
+         num_chunks = len(obj_keys_per_obj_group[0])
++        # HOUSE-PP-LAYOUT 2026-09-22: bind this instance's own per-group layouts to its kv_rank
++        # (the key carries the rank; REGISTER does not), once per instance.
++        _bound = self.__dict__.setdefault("_house_rank_bound", set())
++        if num_chunks and instance_id not in _bound:
++            try:
++                _kr = obj_keys_per_obj_group[0][0].kv_rank
++                self._ctx.layout_desc_registry.bind_rank_layouts(
++                    model_name,
++                    entry.world_size,
++                    _kr,
++                    {
++                        gid: get_layout_desc(cache_context, self._ctx.chunk_size, object_group_id=gid)
++                        for gid in range(num_object_groups)
++                    },
++                )
++                _bound.add(instance_id)
++                logger.info("HOUSE-PP-LAYOUT bound kv_rank=%#010x for instance %d (%d groups)", _kr, instance_id, num_object_groups)
++            except Exception as _e:  # never break a store over bookkeeping
++                logger.warning("HOUSE-PP-LAYOUT bind failed: %r", _e)
+ 
+         # NOTE: different engine groups may have different block sizes, so
+         # ``blocks_per_chunk[i]`` is the number of blocks in one chunk for
+--- a/lmcache/v1/multiprocess/modules/lookup.py
++++ b/lmcache/v1/multiprocess/modules/lookup.py
+@@ -290,12 +290,16 @@
+             )
+             return
+ 
++        # HOUSE-PP-LAYOUT 2026-09-22: per-rank layouts (pipeline-parallel ranks differ in size)
++        _het, _rank_layouts = self._ctx.layout_desc_registry.find_rank_layouts(model_name, world_size)
+         handle = self._ctx.storage_manager.submit_prefetch_task(
+             PrefetchRequestSpec(
+                 keys=obj_keys,
+                 group_layout_descs=group_layout_descs,
+                 num_kv_readers=num_kv_readers,
+                 attn_desc=attn_desc,
++                rank_group_layout_descs=_rank_layouts,
++                require_rank_layouts=_het,
+             ),
+             external_request_id=key.request_id,
+         )
+--- a/lmcache/v1/distributed/api.py
++++ b/lmcache/v1/distributed/api.py
+@@ -440,6 +440,11 @@
+     policy: TrimPolicy = TrimPolicy.PREFIX
+     attn_desc: AttnWindowDesc = DEFAULT_ATTN_WINDOW_DESC
+     mode: PrefetchMode = PrefetchMode.LOOKUP
++    # HOUSE-PP-LAYOUT 2026-09-22: kv_rank -> {object_group_id: layout}; when
++    # ``require_rank_layouts`` is set (ranks registered different layouts), keys whose rank has
++    # no bound layout are not loaded from L2 rather than loaded into a wrongly sized buffer.
++    rank_group_layout_descs: dict | None = None
++    require_rank_layouts: bool = False
+ 
+     def __post_init__(self) -> None:
+         if self.num_kv_readers < 1:
+--- a/lmcache/v1/distributed/storage_controllers/prefetch_controller.py
++++ b/lmcache/v1/distributed/storage_controllers/prefetch_controller.py
+@@ -237,6 +237,9 @@
+     group_layout_descs: dict[int, MemoryLayoutDesc] = field(default_factory=dict)
+     """Maps object_group_id to that group's layout (one ``MemoryLayoutDesc``
+     describes a single group's MemoryObj). Covers every object group."""
++    # HOUSE-PP-LAYOUT 2026-09-22 (see PrefetchRequestSpec)
++    rank_group_layout_descs: dict | None = None
++    require_rank_layouts: bool = False
+ 
+     def all_lookups_done(self) -> bool:
+         return len(self.pending_lookup_tasks) == 0
+@@ -894,6 +897,8 @@
+             mode=spec.mode,
+             group_layout_descs=spec.group_layout_descs,
+             l1_readlocks=l1_readlocks,
++            rank_group_layout_descs=spec.rank_group_layout_descs,
++            require_rank_layouts=spec.require_rank_layouts,
+         )
+ 
+         # Skip adapters being drained so a new request never locks keys on
+@@ -1070,10 +1075,21 @@
+         # Batch reserve_write by object_group_id so each group uses its own
+         # tensor shapes.
+         write_results: dict[ObjectKey, tuple[L1Error, MemoryObj | None]] = {}
+-        by_group = sorted(keys_to_reserve, key=attrgetter("object_group_id"))
+-        for gid, group_iter in groupby(by_group, key=attrgetter("object_group_id")):
++        # HOUSE-PP-LAYOUT 2026-09-22: batch by (object_group_id, kv_rank) so each rank's objects
++        # get that rank's own shapes (pipeline-parallel ranks differ in size).
++        _rank_map = request.rank_group_layout_descs or {}
++        _gk = attrgetter("object_group_id", "kv_rank")
++        by_group = sorted(keys_to_reserve, key=_gk)
++        for (gid, _kr), group_iter in groupby(by_group, key=_gk):
+             group_keys = list(group_iter)
+-            gld = request.group_layout_descs[gid]
++            gld = (_rank_map.get(_kr) or {}).get(gid)
++            if gld is None:
++                if request.require_rank_layouts:
++                    # Unknown layout for this rank: skip the L2 load (falls back to the L1 hit).
++                    for _k in group_keys:
++                        write_results[_k] = (L1Error.KEY_NOT_WRITABLE, None)
++                    continue
++                gld = request.group_layout_descs[gid]
+             gr = self._l1_manager.reserve_write(
+                 keys=group_keys,
+                 is_temporary=[not retention_map[k] for k in group_keys],

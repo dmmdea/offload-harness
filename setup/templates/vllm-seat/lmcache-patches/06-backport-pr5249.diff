@@ -1,0 +1,82 @@
+# BACKPORT LMCache PR #5249 (merged 1a4b40b1, NOT in v0.5.5), ported to 0.5.5 (2026-09-22)
+# following the upstream placement (mamba mode read next to group_tokens_per_block;
+# request_configs kwarg kept at both lookup call sites).
+--- a/lmcache/v1/multiprocess/modules/lookup.py
++++ b/lmcache/v1/multiprocess/modules/lookup.py
+@@ -201,7 +201,12 @@
+ 
+         num_kv_readers = key.require_num_kv_readers()
+ 
+-        chunk_hashes = self._ctx.token_hasher.compute_chunk_hashes(list(key.token_ids))
++        # BACKPORT LMCache PR #5249: honor the IPC key's end boundary, so a client
++        # that reserves the last prompt token (Mamba align/all) is not handed a
++        # full-prompt hit anyway.
++        chunk_hashes = self._ctx.token_hasher.compute_chunk_hashes(
++            list(key.token_ids), end=key.end
++        )
+         if not chunk_hashes:
+             self._register_prefetch_job(
+                 _PrefetchJob(
+--- a/lmcache/integration/vllm/vllm_multi_process_adapter.py
++++ b/lmcache/integration/vllm/vllm_multi_process_adapter.py
+@@ -774,7 +774,8 @@
+         token_ids: list[int],
+         cache_salt: str = "",
+         request_configs: dict[str, Any] | None = None,
+-    ):
++        reserve_last_token: bool = False,
++    ) -> None:
+         """
+         Submit a new lookup request to LMCache if there is no ongoing request.
+ 
+@@ -790,6 +791,8 @@
+                 cache_salt values produce separate cache entries.
+             request_configs: Optional LMCache request configs to include in
+                 the IPC key.
++            reserve_last_token: Whether to exclude the final token before
++                aligning the lookup range (BACKPORT LMCache PR #5249).
+ 
+         Returns:
+             None
+@@ -810,8 +813,9 @@
+             # Skip if there is already a lookup request
+             return
+ 
++        lookup_tokens = max(0, len(token_ids) - int(reserve_last_token))
+         aligned_end = (
+-            len(token_ids) // self.lmcache_tokens_per_chunk
++            lookup_tokens // self.lmcache_tokens_per_chunk
+         ) * self.lmcache_tokens_per_chunk
+ 
+         key = self._create_key(
+--- a/lmcache/integration/vllm/lmcache_mp_connector.py
++++ b/lmcache/integration/vllm/lmcache_mp_connector.py
+@@ -484,6 +484,12 @@
+         group_tokens_per_block = get_group_tokens_per_block(
+             vllm_config, kv_cache_config
+         )
++        # BACKPORT LMCache PR #5249: in Mamba "align"/"all" cache modes the
++        # restored recurrent checkpoint already includes the last prompt token,
++        # which vLLM recomputes after a full external hit (applying it twice).
++        # Exclude the final token from the lookup range in those modes.
++        mamba_cache_mode = getattr(vllm_config.cache_config, "mamba_cache_mode", "none")
++        self._reserve_last_token_for_lookup = mamba_cache_mode in ("align", "all")
+         scheduler_block_size = get_vllm_scheduler_block_size(
+             vllm_config, kv_cache_config
+         )
+@@ -1065,6 +1071,7 @@
+             token_ids=tracker.get_token_ids(),
+             cache_salt=tracker.cache_salt,
+             request_configs=tracker.request_configs,
++            reserve_last_token=self._reserve_last_token_for_lookup,
+         )
+ 
+         ret = self.scheduler_adapter.check_lookup_result(request.request_id)
+@@ -1121,6 +1128,7 @@
+             token_ids=tracker.get_token_ids(),
+             cache_salt=tracker.cache_salt,
+             request_configs=tracker.request_configs,
++            reserve_last_token=self._reserve_last_token_for_lookup,
+         )
+ 
+     def update_state_after_alloc(

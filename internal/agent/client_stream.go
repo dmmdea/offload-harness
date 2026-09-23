@@ -57,7 +57,7 @@ const sseMaxFrame = 16 << 20
 // frame's exact completion_tokens overwrites it at the end. A frame carrying
 // generated token ids (vLLM `return_token_ids`) counts by its ids instead,
 // whether or not it carries a delta: that is how a tool-call argument the
-// parser is still holding stays visible as progress (0.139.4).
+// parser is still holding stays visible as progress (0.140.1).
 func decodeSSE(r io.Reader, onDelta func(tokensSoFar int)) (wireResp, error) {
 	var wr wireResp
 	sc := bufio.NewScanner(r)

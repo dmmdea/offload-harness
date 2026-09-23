@@ -31,7 +31,7 @@ type LLMClient struct {
 }
 
 // WithStreamTokenIDs turns on the engine's per-token progress signal for
-// streamed calls that carry a ProgressFunc (0.139.4). vLLM's parser HOLDS
+// streamed calls that carry a ProgressFunc (0.140.1). vLLM's parser HOLDS
 // output while the model writes some tool-call arguments — a trailing
 // non-string parameter (an object, an array, a number) until it closes, a call
 // to a name the request did not offer for its whole length — and sends no

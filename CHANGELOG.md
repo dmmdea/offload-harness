@@ -6,6 +6,31 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added — the LMCache overlay kit ships with the seat template; two launcher knobs
+
+- **`setup/templates/vllm-seat/lmcache-patches/`: the patch set a pipeline-parallel vLLM seat loads through
+  `SEAT_LMCACHE_PYTHONPATH`, and the script that builds it.** Base LMCache 0.5.5: #4253 (fp8 stores on hybrids),
+  the per-rank L2 layout patch, register-time layout binding, and backports of #4709 and #5249, plus a CPU-only
+  smoke test. `repatch-lmcache-overlay.sh` builds beside the live overlay, skips a patch already in the base,
+  checks one import marker per patch and the smoke test, records each patch's sha256, and swaps only while no
+  MP server has the old tree loaded. The kit is named apart from the overlay it builds (default
+  `<seat dir>/lmcache-overlay`) so a build never swaps its own kit away. `.gitattributes` keeps it LF.
+- **`SEAT_KV_LOAD_FAILURE_POLICY` (seat env, optional):** `recompute` or `fail`, spliced into
+  `--kv-transfer-config`; empty leaves vLLM's default (`fail`). An invalid value refuses the start before the MP
+  server is touched. The kit's deploy gate now reads it from each seat env that names the overlay (it used to
+  grep the launcher for a hard-coded policy).
+- **`SEAT_MP_EXTRA_ARGS` (seat env, optional):** extra `lmcache server` arguments, appended after the launcher's.
+- **The launcher reports two hazards at start, without refusing:** dxg residency / VA failures in the distro's
+  kernel log (`make_resident: Ioctl failed: -12`, `reserve_gpu_va … -75`), and the count of `Store task … failed`
+  lines the unit's previous MP generation left in `lmcache-mp.log` (a per-unit offset file).
+
+### Fixed — the 0.28 V2-runner record
+
+- The launcher comment, ADR 0048 and the runner test said the production pair seat logs `Using V2 Model Runner` on
+  vLLM 0.28.0. Those lines are `gpu_worker.py:429`, which exists only in 0.29.0; the production seats serve on
+  0.28's V1 runner. The version gate stands: 0.28's V2 runner does run on WSL2 (the TP2 DFlash spec-decode arms
+  logged `gpu_worker.py:396`, the 0.28 line, and served).
+
 ### Added — opencode context instrument
 
 - **`go run ./cmd/opencode-context`: the before/after gate for what opencode sends a seat.** It copies
@@ -111,7 +136,7 @@ Versioning: [SemVer](https://semver.org/).
   that first slipped past a vacuous test comparing `protocolText()` with itself (replaced by fixed
   expectations).
 
-## [0.139.4] - 2026-09-23 - a tool call the vLLM parser is still holding is progress, not a stall
+## [0.140.1] - 2026-09-23 - a tool call the vLLM parser is still holding is progress, not a stall
 
 ### Fixed — the liveness watch read a vLLM seat writing a held tool-call argument as silence
 
@@ -153,6 +178,67 @@ Versioning: [SemVer](https://semver.org/).
   and survives a hold longer than the allowance; the same seat undeclared gets the historical body
   and stalls). Red before the fix; mutating either the call site (`StreamTokenIDs: false`) or the
   decoder's id count fails them.
+
+## [0.140.0] - 2026-09-23 - a seat that is LOADING is not a prefill stall
+
+### Fixed — the liveness wall filed a normal cold load as a prefill stall
+
+- **A seat reloading mid-run deferred the contract as `stalled: no progress for 60s in prefill`.**
+  Measured on the reference workstation's 3-card vLLM seat (harness 0.139.0, `offload_review_diff`, a
+  43 KB diff, ~11.8k prompt tokens): the admission warm-up loaded the seat and step 1 answered
+  (4,096 tokens), then another model's swap on the same llama-swap evicted the seat, and the loop's next
+  request sat in llama-swap while the seat reloaded (~180 s; cold vLLM loads measure 188–282 s). The
+  prefill clock — sized from the prefill rate alone (`11784 tok / 1986 tok/s x 1.5 + 30s`, floored at
+  60 s) — ran through the reload and filed it as a stall, twice in a row. The same call on a warm seat
+  finished in 12 steps. The same happens after the 5-minute idle unload during a long tool call. The
+  "4096 tok so far" in that reason is the run's streamed-delta count (step 1's output), not an estimate.
+- **Fixed: while the seat is loading, the stall clock does not run; after it loads, a short bound
+  applies.** `agent.Monitor` gains a `cold-load` phase and a seat probe (`WithSeatProbe`). While a
+  request waits for its first byte (admission, prefill or re-pack), the node reads llama-swap's
+  `/running` every 5 s and once more before filing a stall. The hold has two parts:
+  - **Loading.** The hold enters this part only on positive evidence that a load is in progress, in
+    llama-swap's own states: the seat's row is `starting` or `stopping`, or the seat is absent while
+    another row is `starting` or `stopping` (a swap in progress). **Absence alone is not evidence.** A
+    removed seat, a renamed alias, or a restarted llama-swap answering `{"running":[]}` keeps the normal
+    stall clock. This part gets the **cold-load ceiling**:
+    - `max(600 s, 2 x the seat's measured cold_load_sec)`, counted from when the request went silent;
+    - never longer than the run's own ceiling, so a load that outlasts the run is still filed as
+      infrastructure, not budget;
+    - past it the defer reads `stalled: seat still loading after Ns in cold-load (allowed Ms:
+      cold-load ceiling = max(600s floor, 2 x 226s measured cold load); the seat read "starting", …)`.
+  - **Post-ready.** This part starts once a load the probe saw is over, or after the admission warm-up
+    loaded the seat (`MarkSeatLoaded`). The first completion gets its own short bound,
+    `max(120 s, 2 x the waiting phase's own allowance)`, never the rest of the cold-load ceiling, so a
+    seat that wedges right after loading is seen within about two minutes. Past it the defer reads
+    `stalled: no byte for Ns after the seat read ready, in cold-load (allowed Ms: post-ready bound = …)`.
+    If the probe errors, the reason names the unreadable `/running` and never claims the seat read
+    ready.
+  - **The hold ends on the first byte**, or when the call completes.
+
+  An unreadable `/running` with no load seen counts as "cannot tell", and the prefill clock runs
+  exactly as before. Status readers and the delegator's progress poll see the `cold-load` phase and
+  its allowance, and the first byte moves them to `decoding`.
+- **Admission is covered as well.** With the admission warm-up off, the load ran under the loop's
+  own tokenizer probe in the monitor's `admission` phase and was filed `stalled: no progress for 60s
+  in admission`. That phase is held the same way.
+- **Every door is covered.** `agent_run`, `agent_delegate` (local leg), `offload_ask`,
+  `offload_review_diff` and fleet jobs all run through `runAgentTask`, which installs the probe. Known
+  residual: the grammar re-pack's own per-request HTTP timeout (`repackTimeout`, at least 120 s) is a
+  client timeout outside the monitor, so a seat evicted between the loop's last step and the re-pack can
+  still cut that attempt. The monitor no longer files it as a stall.
+- Tests: six pipeline tests run against a fake llama-swap:
+  - a load is not a prefill stall;
+  - a seat stuck `starting` defers with the cold-load reason;
+  - the first completion after the warm-up is held;
+  - a seat absent with nothing loading stalls at the floor;
+  - silence after `ready` defers at the post-ready bound;
+  - a silent ready seat is still a prefill stall (the guard).
+
+  There are nine `agent.Monitor` unit tests, including an unreadable `/running` mid-hold being
+  reported honestly and the hold clamped to the run ceiling. Seven mutants are caught: dropping the
+  call-site probe wiring, dropping `MarkSeatLoaded`, a probe that reads `starting` as ready, absence
+  counted as loading, the post-ready part given the cold-load ceiling, no run-ceiling clamp, and an
+  unreadable probe labelled ready.
 
 ## [0.139.3] - 2026-09-23 - a music render with dead air re-renders once, then defers; every clip is loudness-normalized; whisper's no-speech crash defers calmly
 
