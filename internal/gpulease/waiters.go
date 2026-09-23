@@ -54,6 +54,40 @@ package gpulease
 // budget; neither says anything about acquisition order), so text and media
 // waiters interleave in pure arrival order.
 //
+// ALIVE BUT NOT POLLING (2026-09-22, lead review of D-13x before ship). Pid
+// liveness alone cannot tell "queued and actively polling" from "queued,
+// still alive, and never going to poll again" — a process suspended by the
+// OS, wedged in another goroutine, paused in a debugger, or an OLDER harness
+// binary whose Acquire loop exited without unregistering (a bug, a panic that
+// skipped the defer, a crash the OS hasn't reaped yet). Under a naive "oldest
+// LIVE waiter wins" rule that waiter is the permanent, unbreakable head of the
+// line: every other process defers to it forever, because its pid genuinely
+// never dies. So being alive is necessary but not sufficient — a live waiter
+// must also keep PROVING it is still actually queued. Every poll tick,
+// win-or-lose, a waiter re-stamps its own record's mtime (refreshWaiter, via
+// the same beside-then-rename-over pattern as Renew/Restamp — this file is
+// read by every OTHER waiter on every one of their ticks, so the Windows
+// rename-vs-concurrent-reader retry is not optional here either). A reader
+// that finds a record older than waiterStaleWindow (10x the poll interval,
+// floor 15s — generous: normal jitter under load is one or two missed ticks,
+// not ten) treats it exactly like a dead pid: skipped for ordering, pruned
+// best-effort so nobody re-judges it every read. This is also what keeps a
+// MIXED-VERSION rollout safe: an older binary's waiter file is the same JSON
+// shape (no schema change here) so a newer reader parses it fine, but the
+// older code never calls refreshWaiter — it only ever raced TryAcquire, never
+// honoured order — so its record goes stale on the same clock and stops
+// affecting anyone's ordering decision. It cannot wedge the line; it just
+// keeps racing as it always did, which is the documented, accepted limit for
+// an old process, not a new one.
+//
+// Pid recycling is covered the same way it is everywhere else in this
+// package: StartTimeMs, stamped from procStart at registration, is compared
+// against the CURRENT process behind that pid on every read (Waiters(),
+// below) — the identical check Reclaimable uses for the lease holder itself.
+// A record whose pid was handed to an unrelated process reads as dead, not
+// alive, so a recycled pid can neither hold the lease nor jump the waiter
+// queue.
+//
 // Seat-warm-owed: a holder that unloaded the seat stamps <gpu>/seat-warm-owed
 // with the seat's name. The LAST releasing holder — the one with no waiter
 // behind it — clears it by warming; every other releaser leaves it in place.
@@ -77,6 +111,15 @@ const (
 	waitersDirName     = "waiters"
 	seatWarmOwedName   = "seat-warm-owed"
 	waiterStaleAfterMs = 12 * 60 * 60 * 1000 // a waiter older than the longest --wait is debris
+
+	// waiterHeartbeatMultiple x the poll interval, floored at
+	// waiterHeartbeatFloor, is the default heartbeat staleness window (see
+	// waiterStaleWindow). Ten missed ticks is generous slack for ordinary
+	// scheduling jitter under load while still catching a genuinely wedged
+	// waiter — and an old-version waiter, which never refreshes at all —
+	// within a bounded time instead of forever.
+	waiterHeartbeatMultiple = 10
+	waiterHeartbeatFloor    = 15 * time.Second
 )
 
 // Waiter is one process queued for the card.
@@ -190,15 +233,69 @@ func (m *Manager) isFrontOfQueue(self Waiter) bool {
 	return true
 }
 
+// waiterStaleWindow is how long a waiter's record may go unrefreshed before a
+// reader stops trusting it as "still actually queued" (see the ALIVE BUT NOT
+// POLLING section atop this file). waiterHeartbeatTTL, when set, overrides the
+// computed default for tests; production always uses the formula.
+func (m *Manager) waiterStaleWindow() time.Duration {
+	if m.waiterHeartbeatTTL > 0 {
+		return m.waiterHeartbeatTTL
+	}
+	w := waiterHeartbeatMultiple * m.pollInterval()
+	if w < waiterHeartbeatFloor {
+		w = waiterHeartbeatFloor
+	}
+	return w
+}
+
+// refreshWaiter re-stamps self's own record so it reads as freshly polled.
+// Called every poll tick regardless of front-of-queue status: a live process
+// proves it is still actually queued by continuing to do this, not merely by
+// having a pid that has not exited. The content never changes (same pid,
+// class, reason, since) — only the file's mtime, which IS the heartbeat, so
+// this is a plain re-write rather than a schema change; an older binary's
+// record (which is never refreshed) and a newer one are byte-identical in
+// shape.
+//
+// Beside-then-rename-over, exactly like Renew/Restamp: a bare in-place
+// rewrite is not needed for atomicity here (the content is unchanged), but
+// the RENAME still has to survive a concurrent reader. This file is read by
+// every OTHER waiter on every one of ITS ticks — Waiters() opens it with
+// os.ReadFile, which on Windows blocks a delete/replace exactly like it does
+// for meta.json — so renameReplacing's retry is load-bearing, not decoration.
+// self.path=="" (registration failed) is a silent no-op, matching
+// isFrontOfQueue's fail-soft treatment of the same case.
+func (m *Manager) refreshWaiter(self Waiter) {
+	if self.path == "" {
+		return
+	}
+	b, err := json.Marshal(self)
+	if err != nil {
+		return
+	}
+	tmp := self.path + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o666); err != nil {
+		return
+	}
+	if err := renameReplacing(tmp, self.path); err != nil {
+		_ = os.Remove(tmp)
+	}
+}
+
 // Waiters lists the processes queued for the card, oldest first. Records whose
-// process is gone (or whose pid was recycled) are pruned as they are read, so a
-// waiter killed mid-queue never defers a warm forever.
+// process is gone, whose pid was recycled, or which have not been refreshed
+// within waiterStaleWindow (an alive process that has stopped actually
+// polling — suspended, wedged, an old binary that never refreshes at all) are
+// pruned as they are read, so neither a dead waiter nor a merely stalled one
+// ever blocks the line or defers a warm forever.
 func (m *Manager) Waiters() []Waiter {
 	entries, err := os.ReadDir(m.waitersDir())
 	if err != nil {
 		return nil
 	}
-	nowMs := m.now().UnixMilli()
+	now := m.now()
+	nowMs := now.UnixMilli()
+	staleWindow := m.waiterStaleWindow()
 	var out []Waiter
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
@@ -221,6 +318,21 @@ func (m *Manager) Waiters() []Waiter {
 			}
 		}
 		if !alive || nowMs-w.SinceMs > waiterStaleAfterMs {
+			_ = os.Remove(p)
+			continue
+		}
+		// HEARTBEAT STALENESS. A live, non-recycled pid is not enough: the
+		// process behind it may have stopped polling altogether (suspended,
+		// wedged in another goroutine, an OLD binary that registered once and
+		// never calls refreshWaiter at all). Every legitimate waiter re-stamps
+		// its own record's mtime on every poll tick, so a record older than
+		// staleWindow has stopped proving it is still actually in line —
+		// treated the same as a dead waiter: skipped for ordering, pruned
+		// best-effort. os.Stat failing here (the file vanished between the
+		// ReadFile above and this Stat — another reader's prune, or the
+		// owner's own unregister landing mid-loop) is read the same way: gone
+		// is gone.
+		if fi, serr := os.Stat(p); serr != nil || now.Sub(fi.ModTime()) > staleWindow {
 			_ = os.Remove(p)
 			continue
 		}

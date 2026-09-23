@@ -252,6 +252,11 @@ type Manager struct {
 	pollEvery time.Duration
 	procStart func(pid int) (int64, bool)
 	pid       int
+	// waiterHeartbeatTTL overrides waiterStaleWindow's computed default (10x the
+	// poll interval, floor 15s) — zero means "use the computed default". Tests
+	// set this directly to observe heartbeat staleness without a real 15s wait,
+	// the same seam pattern as sleep/pollEvery.
+	waiterHeartbeatTTL time.Duration
 }
 
 // pause waits between Acquire probes, tolerating a Manager built without a sleep seam.
@@ -886,11 +891,21 @@ func (m *Manager) Acquire(class Class, opts Options) (*Lease, error) {
 		}
 		m.pause(pause)
 
-		// FIFO: only the oldest live waiter attempts the claim this tick. Every
-		// other waiter just loops back to sleep — attempting anyway is exactly
-		// the unordered race that let a later arrival win a just-freed card out
-		// from under an earlier one. This costs nothing when uncontested: a
-		// waiter alone in the queue is always front-of-queue.
+		// Prove we are still actually polling, whether or not we are front of
+		// queue this tick: an alive-but-wedged waiter (suspended, stuck in
+		// another goroutine, an old binary whose loop exited without
+		// unregistering) would otherwise read as a live waiter FOREVER — pid
+		// liveness alone cannot see the difference between "queued" and
+		// "queued and no longer actually trying". See isFrontOfQueue /
+		// waiterStaleWindow for the reader side.
+		m.refreshWaiter(self)
+
+		// FIFO: only the oldest live, RECENTLY-POLLING waiter attempts the
+		// claim this tick. Every other waiter just loops back to sleep —
+		// attempting anyway is exactly the unordered race that let a later
+		// arrival win a just-freed card out from under an earlier one. This
+		// costs nothing when uncontested: a waiter alone in the queue is
+		// always front-of-queue.
 		if !m.isFrontOfQueue(self) {
 			continue
 		}
