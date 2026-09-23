@@ -12,12 +12,16 @@
 //        [--lyrics "..."] [--seconds N] [--seed N] [--steps N] [--cfg X] [--shift X] \
 //        [--unet name.safetensors] [--reserve-vram X] [--api http://127.0.0.1:8188] \
 //        [--no-lock] [--keep-comfy]   |   <out.flac> --graph wf.json
-import { writeFileSync, readFileSync } from "node:fs";
+import { writeFileSync, readFileSync, renameSync, unlinkSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { withGpuSlot } from "./gpu-lock.mjs";
 import { firstOutputFile } from "./comfy-output.mjs";
 import { buildAceStep } from "./wf-acestep.mjs";
 import { resolveCli, submitGraph, pollOutputs, fetchView, finalizeRun } from "./comfy-submit.mjs";
+import {
+  resolveFfmpeg, resolveFfprobe, measure, assessDeadAir, normalizeLoudness, rewireSeed,
+  LOUDNESS_TARGET_LUFS, TRUE_PEAK_TARGET_DBTP,
+} from "./audio-qa.mjs";
 
 // ACE-Step's 3.5B all-in-one checkpoint is far lighter than the 14B video models, so the
 // generic 1.0 reserve (held back for the Windows display/WDDM) fits comfortably on 8GB.
@@ -59,12 +63,13 @@ export function buildGraphFromArgs(pos, flags) {
   return { graph: buildAceStep(common), seed };
 }
 
-// generate: submit the graph to ComfyUI, poll /history, fetch the produced audio via
-// /view, write it to out. ComfyUI is already up (ensureComfy ran inside withGpuSlot).
-// Submission/polling/retrieval are the shared comfy-submit.mjs layer: CLI-preferred
-// submit with byte-identical raw fallback; hardened poll loop (dead-server watchdog).
-async function generate(out, API, graph, seed) {
-  const cli = resolveCli();
+// renderOnce: submit the graph to ComfyUI, poll /history, fetch the produced audio
+// via /view, write it to out. ComfyUI is already up (ensureComfy ran inside
+// withGpuSlot). Submission/polling/retrieval are the shared comfy-submit.mjs layer:
+// CLI-preferred submit with byte-identical raw fallback; hardened poll loop
+// (dead-server watchdog). Split out of generate() so the audio-QA retry (below) can
+// call it a second time with a re-seeded graph without duplicating this plumbing.
+async function renderOnce(out, API, graph, seed, cli) {
   const { promptId } = await submitGraph({ api: API, graph, clientId: "music-" + seed, cli });
   console.log("queued", promptId, "ace-step seed", seed);
   // waitSec 1200 = the historical fixed 600 x 2s polls (~20 min; TextEncodeAceStepAudio
@@ -80,6 +85,51 @@ async function generate(out, API, graph, seed) {
   writeFileSync(out, await fetchView({ api: API, file }));
   console.log("WROTE", out);
   await finalizeRun({ api: API, promptId, cli });
+}
+
+// generate: renderOnce, then the audio-QA gate (F-35 regression follow-up,
+// 2026-09-23 — see audio-qa.mjs for the root-cause writeup). Dead air (trailing/
+// leading silence > 1.0s, or > 10% of the clip silent) gets exactly ONE re-render
+// with a fresh seed; if it persists the run fails with a DEAD_AIR-tagged error so
+// gpugen.ClassifyErr (Go side) can defer it typed rather than as a bare timeout/other.
+// The accepted render is always loudness-normalized (independent of the dead-air
+// verdict — the unmanaged 0 dBFS true peak measured on the original defect renders
+// is a separate issue). ffmpeg/ffprobe unavailable = the gate skips itself entirely;
+// it never turns an otherwise-successful render into a failure just because the
+// measuring tool is missing.
+async function generate(out, API, graph, seed) {
+  const cli = resolveCli();
+  await renderOnce(out, API, graph, seed, cli);
+
+  const ffmpeg = resolveFfmpeg();
+  const ffprobe = ffmpeg ? resolveFfprobe(ffmpeg) : "";
+  if (!ffmpeg || !ffprobe) {
+    console.error("audio-qa: ffmpeg/ffprobe not available (set FFMPEG_PATH or put ffmpeg on PATH) — skipping the dead-air/loudness gate");
+    return;
+  }
+
+  let verdict = assessDeadAir(measure(ffmpeg, ffprobe, out));
+  const seedsTried = [seed];
+  if (verdict.deadAir) {
+    const retrySeed = Math.floor(Math.random() * 1e15);
+    seedsTried.push(retrySeed);
+    console.error(`audio-qa: dead air detected (${verdict.reason}) — retrying once with seed ${retrySeed}`);
+    await renderOnce(out, API, rewireSeed(graph, retrySeed), retrySeed, cli);
+    verdict = assessDeadAir(measure(ffmpeg, ffprobe, out));
+    if (verdict.deadAir) {
+      throw new Error(`DEAD_AIR: dead air persisted after a retry (${verdict.reason}); seeds tried: ${seedsTried.join(", ")}`);
+    }
+    console.error(`audio-qa: retry clean (${verdict.reason})`);
+  }
+
+  const tmpOut = out + ".loudnorm.tmp" + (out.match(/\.[^.]+$/)?.[0] || ".flac");
+  if (normalizeLoudness(ffmpeg, out, tmpOut)) {
+    unlinkSync(out);
+    renameSync(tmpOut, out);
+    console.error(`audio-qa: loudness-normalized to I=${LOUDNESS_TARGET_LUFS} LUFS / TP=${TRUE_PEAK_TARGET_DBTP} dBTP`);
+  } else {
+    console.error("audio-qa: loudness normalization failed or skipped — shipping the un-normalized render (never withhold an already-produced render)");
+  }
 }
 
 // main: the executable path. Only runs when this file is invoked directly (so importing

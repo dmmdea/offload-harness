@@ -111,6 +111,50 @@ Versioning: [SemVer](https://semver.org/).
   that first slipped past a vacuous test comparing `protocolText()` with itself (replaced by fixed
   expectations).
 
+## [0.139.3] - 2026-09-23 - a music render with dead air re-renders once, then defers; every clip is loudness-normalized; whisper's no-speech crash defers calmly
+
+### Fixed — ACE-Step music dead air + a genuine whisper-server crash surfaced calmly (F-35 regression follow-up)
+
+- **Music (`render/wf-acestep.mjs` + `render/comfy-music.mjs`): short instrumental renders reliably
+  went dead partway through.** Root-caused 2026-09-23 on 4 independent 15s renders (the two original
+  defect clips plus two fresh reproductions — plain empty lyrics and an `"[instrumental]"` lyric tag,
+  which does NOT fix it): real content for ~9-11s then a clean, near-silent tail for the rest.
+  Traced to `comfy/ldm/ace/ace_step15.py`'s `AceStepConditionGenerationModel.prepare_condition` — an
+  instrumental (no-lyrics) render's actual content is driven entirely by the `generate_audio_codes`
+  LLM planner's own output, which degrades to a near-constant low-energy code well before the
+  requested duration; disabling the planner is not a workaround either — by source-code trace (the
+  live confirmation render hit unrelated GPU-lease contention and was not retried) the model falls
+  back to the pure silence-latent reference for the whole clip instead. No graph/parameter change fixes
+  this — the harness already matches the official `audio_ace_step1_5_xl_turbo` Comfy-Org template
+  field for field, and no shipped official template exercises the instrumental/no-lyrics case at
+  all. Separately, true peak measured at a literal 0.0 dBFS (clipping) on two of the three renders —
+  no loudness normalization existed anywhere in the pipeline.
+  **Fix: a new post-render QA gate, `render/audio-qa.mjs`.** Measures trailing/leading silence
+  (ffmpeg `silencedetect`) and true peak/integrated loudness (`ebur128`) after every render; a dead
+  clip (>1.0s edge silence, or >10% of the clip silent) gets exactly one automatic re-render with a
+  fresh seed (the planner's output does vary by seed); still dead after the retry fails the run with
+  a `DEAD_AIR`-tagged error (`internal/gpugen`'s `ClassifyErr` gains a `dead_air` class, so
+  `runGenerateAudio` defers it typed instead of shipping — or silently timing out on — a broken
+  clip). Every accepted render is loudness-normalized to -14 LUFS / -1 dBTP regardless of the
+  dead-air verdict. `Pipeline.genEnv()` now threads `FFMPEG_PATH` to every ComfyUI-backed render
+  script (previously only the Go-side `internal/audioio` transcribe path had it configured).
+  Docs: `docs/systems/media-generation.md` → "ACE-Step 1.5 music".
+- **`offload_transcribe` (`internal/sttclient`): a genuine whisper-server crash surfaced as an
+  alarming "transcribe call failed" error instead of a calm no-speech result.** whisper-server
+  (`whisper.cpp` build-v194) reliably exits mid-request — confirmed via `llama-swap.log`'s "upstream
+  process exited unexpectedly" — on audio with no speech content. This is NOT the cold-load/
+  near-silence-specific behavior the existing code comment assumed: direct `/inference` calls
+  reproduced the crash 100% of the time, repeatedly, well outside any cold-restart window, on (a) a
+  near-silent ACE-Step tail, (b) the identical clip with the per-request `vad` field both on and off
+  (the server always loads with `--vad` baked into its launch command, so the field cannot disable
+  it), and (c) a plain loud 440 Hz sine tone with no ACE-Step involvement at all — the common factor
+  is no speech content, not loudness or a cold load. This is an upstream whisper.cpp bug outside
+  this repo (not something a retry works around — the same audio crashes the server again every
+  time). The harness-side fix: `sttclient.Transcribe` now wraps the crash-signature error in a new
+  `ErrUpstreamNoSpeech` sentinel, and `runTranscribe` (`internal/pipeline/pipeline.go`) maps it to
+  the SAME calm "empty transcript (no speech detected)" defer the clean no-speech case already uses,
+  instead of the alarming "transcribe call failed: ... upstream crashed" wording.
+
 ## [0.139.2] - 2026-09-23 - sd.cpp Qwen-Image-2.1 renders opaque by default, a family-only node takes fleet image-gen, HyperFrames browser ensure prefers IPv4
 
 ### Fixed — sdcpp alpha default, family-only fleet gate, HyperFrames browser-ensure IPv6 hang

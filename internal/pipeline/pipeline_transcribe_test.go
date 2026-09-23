@@ -2,6 +2,8 @@ package pipeline
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -29,6 +31,46 @@ func TestTranscribeBadAudioDefers(t *testing.T) {
 	res := p.Run(context.Background(), core.Request{Task: core.TaskTranscribe, Audio: "no-such-file.mp3"})
 	if res.OK || !res.Deferred {
 		t.Fatalf("want deferred on bad audio, got OK=%v Deferred=%v", res.OK, res.Deferred)
+	}
+}
+
+// TestTranscribeNoSpeechCrashDefersCleanly guards the fix (F-35 regression follow-up,
+// 2026-09-23): whisper-server's crash signature (empty-body 5xx) on audio with no
+// speech content must surface as the SAME calm "empty transcript" defer the clean
+// no-speech case already uses — never the alarming "transcribe call failed: ...
+// upstream crashed" wording, and never OK:true with fabricated content. Mutation
+// check: reverting the errors.Is branch in runTranscribe (pipeline.go) makes this
+// fail because Reason reverts to the "transcribe call failed" text.
+func TestTranscribeNoSpeechCrashDefersCleanly(t *testing.T) {
+	ffmpeg := lookFFmpeg()
+	if ffmpeg == "" {
+		t.Skip("ffmpeg not on PATH; this test needs a real convert to reach the STT call")
+	}
+	wav := makeSilentWav(t, ffmpeg)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway) // 502, empty body — the whisper-server crash signature
+	}))
+	defer srv.Close()
+
+	cfg := gateCfg(t)
+	cfg.MediaDir = t.TempDir()
+	cfg.FFmpegPath = ffmpeg
+	cfg.Endpoint = srv.URL
+	p := gatePipeline(t, cfg, gateCache(t))
+
+	res := p.Run(context.Background(), core.Request{Task: core.TaskTranscribe, Audio: wav})
+	if res.OK {
+		t.Fatalf("want deferred (no speech found), got OK=true with data=%s", res.Data)
+	}
+	if !res.Deferred {
+		t.Fatal("want Deferred=true on the crash-signature response")
+	}
+	if res.Reason != "empty transcript (no speech detected)" {
+		t.Errorf("reason = %q, want the calm no-speech defer, not the alarming crash wording", res.Reason)
+	}
+	if strings.Contains(res.Reason, "call failed") || strings.Contains(res.Reason, "crashed") {
+		t.Errorf("reason leaked the raw crash wording to the caller: %q", res.Reason)
 	}
 }
 

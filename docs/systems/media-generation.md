@@ -505,6 +505,66 @@ Qwen-Image 2512, whose graph cannot drive it. Needs **ComfyUI ≥ v0.37.0** (the
 - **Known open upstream defects (2026-09-22):** #16435 (grid-dependent noise on some edit grids) and
   #16443 (dynamic-VRAM edit abort, fix PR #16450 open). Both are why 2511 stays the default edit seat.
 
+### ACE-Step 1.5 music (`render/wf-acestep.mjs`, `render/comfy-music.mjs`, `render/audio-qa.mjs`)
+
+`offload_generate_audio kind=music` / CLI `generate-audio` renders through the ACE-Step v1.5
+**split** stack (UNETLoader DiT + `DualCLIPLoader(type "ace")` qwen 0.6b/4b encoders + VAELoader —
+NOT the retired v1 all-in-one checkpoint): `TextEncodeAceStepAudio1.5` (tags/lyrics/bpm/duration/
+keyscale + the `generate_audio_codes` LLM planner) → `ConditioningZeroOut` (negative) →
+`EmptyAceStep1.5LatentAudio` → `ModelSamplingAuraFlow` → `KSampler` → `VAEDecodeAudio` →
+`SaveAudio` (FLAC). Every default (cfg 1.0, steps 8, shift 3.0, `generate_audio_codes` true,
+`cfg_scale` 2.0, temperature 0.85, top_p 0.9) is verified against the official
+`audio_ace_step1_5_xl_turbo` Comfy-Org template (`comfyui_workflow_templates` package) field for
+field — the harness does not diverge from the template on any shared parameter.
+
+**Known defect (F-35 regression follow-up, root-caused 2026-09-23): short INSTRUMENTAL renders
+reliably go dead partway through.** Measured on 4 independent 15s renders under the harness's own
+default instrumental path (empty lyrics, `generate_audio_codes: true`) — the two original defect
+clips plus two fresh reproductions, one with plain empty lyrics and one with an `"[instrumental]"`
+lyric tag (which does NOT fix it) — every one has real content for roughly the first 9-11s then
+drops to a clean, highly periodic near-silent tail for the remainder (measured amplitude ≈
+-60 to -70 dBFS, no NaN/Inf — not garbage, a genuinely quiet signal). Root cause is upstream, in
+`comfy/ldm/ace/ace_step15.py`'s `AceStepConditionGenerationModel.prepare_condition`: instrumental
+content is driven entirely by `lm_hints` derived from the `generate_audio_codes` LLM's
+autoregressive output (`comfy/text_encoders/ace15.py`'s `sample_manual_loop_no_classes`); with no
+lyrics to plan a song structure against, the planner's own output evidently degrades to a
+near-constant low-energy code for the tail well before the requested duration. Turning
+`generate_audio_codes` **off** is not a workaround either — by source-code trace (not independently
+re-measured live: the confirmation render hit unrelated GPU-lease contention from a concurrent
+session and was not retried) `is_covers` then falls back to the pure silence-latent reference
+(`get_silence_latent`, `comfy/model_base.py`'s `ACEStep15.extra_conds`) for the WHOLE clip — i.e.
+disabling the planner does not recover real content, it trades a partial dead tail for total
+silence. **No parameter/graph change fixes this** (the harness already matches the
+official template, and the official templates never demonstrate the instrumental/no-lyrics case at
+all — every shipped template uses full lyrics). Separately, true peak was measured at a literal
+0.0 dBFS (clipping-level) on two of the three renders with no loudness normalization anywhere in
+the pipeline — an independent defect from the dead air.
+
+**The fix is a post-render QA gate (`render/audio-qa.mjs`), not a graph change**, run from
+`comfy-music.mjs`'s `generate()` after every render:
+1. Measure trailing/leading silence (`ffmpeg silencedetect`, -45 dB / 0.5 s) and true peak +
+   integrated loudness (`ffmpeg ebur128=peak=true`) in one combined ffmpeg pass, plus duration via
+   ffprobe. `assessDeadAir()` flags dead air when trailing OR leading silence exceeds 1.0 s, or more
+   than 10% of the clip is silent.
+2. On a flagged render: re-render exactly ONCE with a freshly minted seed (`rewireSeed()` rewrites
+   every node's `inputs.seed`, id-agnostic so it also works on a caller-supplied `--graph`) — the LM
+   planner's output does vary by seed (the two reproduction renders' silence onset differed by
+   ~0.5s despite fixed inputs), so a retry sometimes lands on a seed whose planned content happens
+   to fill the duration.
+3. Still dead air after the retry: the render fails with an error tagged `DEAD_AIR:` (mapped to
+   `gpugen.ClassifyErr`'s `dead_air` class), which `runGenerateAudio` (`internal/pipeline/pipeline.go`)
+   turns into a typed defer — never a silently-shipped dead clip.
+4. The accepted render is always loudness-normalized (`ffmpeg loudnorm`, single-pass, target -14
+   LUFS integrated / -1 dBTP true peak — the common streaming convention, with headroom below 0
+   dBFS so a downstream lossy re-encode's peak overshoot cannot clip), independent of the dead-air
+   verdict.
+
+ffmpeg/ffprobe are resolved via `$FFMPEG_PATH` (threaded from `Pipeline.genEnv()` — the same
+per-machine `ffmpeg_path` config `internal/audioio` already uses for transcribe) with a PATH probe
+fallback. Either missing degrades the gate to a no-op skip — it never turns an otherwise-successful
+render into a failure just because the measuring tool is absent, and it never withholds an
+already-produced render (house content-preservation rule).
+
 ### Launch profile (`comfy_cuda_device`, `comfy_dynamic_vram`, `comfy_extra_args`)
 
 The harness launches ComfyUI on demand (`render/comfy-lifecycle.mjs`). Before this, every launch

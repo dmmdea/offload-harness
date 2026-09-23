@@ -74,6 +74,13 @@ func TestTranscribeEmptyBody502IsDescriptive(t *testing.T) {
 	if !strings.Contains(err.Error(), "crashed") || !strings.Contains(err.Error(), "empty body") {
 		t.Errorf("empty-body 502 error should be descriptive (crash / no-speech hint); got: %v", err)
 	}
+	// F-35 regression follow-up (2026-09-23): the error must be MACHINE-detectable
+	// as "no speech", not just human-readable, so the pipeline can map it to the
+	// same calm defer the clean empty-transcript case uses instead of surfacing it
+	// as an infrastructure failure.
+	if !errors.Is(err, ErrUpstreamNoSpeech) {
+		t.Errorf("empty-body 502 must wrap ErrUpstreamNoSpeech so callers can errors.Is() it; got: %v", err)
+	}
 }
 
 func TestSRT(t *testing.T) {
