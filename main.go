@@ -863,6 +863,21 @@ func runGenerateImage(args []string) error {
 			}
 		}
 		payload := map[string]any{"count": len(items), "succeeded": ok, "failed": len(items) - ok, "items": items}
+		// A batch renders the DEFAULT binding, so the whole batch carries that
+		// binding's family and license (ADR 0058) at the top level too — the same
+		// keys a single render returns — and every item repeats them.
+		if _, fam, ferr := p.Cfg().ResolveImageFamily(""); ferr == nil {
+			payload["family"] = fam.Name
+			if fam.License != "" {
+				payload["license"] = fam.License
+			}
+			if fam.CommercialUse != nil {
+				payload["commercial_use"] = *fam.CommercialUse
+			}
+			if note := fam.LicenseNote(); note != "" {
+				payload["license_note"] = note
+			}
+		}
 		// Surface the refiner fallback count in the batch summary whenever a
 		// refiner is configured (0 = all jobs refined or opted out) — absent
 		// otherwise, keeping the refiner-less payload byte-identical.

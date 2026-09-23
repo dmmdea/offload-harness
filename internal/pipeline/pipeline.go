@@ -1941,6 +1941,28 @@ type ImageBatchItem struct {
 	Refined        *bool  `json:"refined,omitempty"`
 	RefinedPrompt  string `json:"refined_prompt,omitempty"`
 	RefineFallback string `json:"refine_fallback,omitempty"`
+	// The binding that rendered the item and its license (ADR 0058), the same keys
+	// the single path's imageResultPayload carries. A batch always renders the
+	// DEFAULT binding (there is no family seam on this path), so every item carries
+	// that binding's family and — when imagegen_license declares one — its license,
+	// commercial_use and, for a non-commercial binding, license_note. Absent license
+	// = the binding declares none (UNKNOWN, never "commercial-safe").
+	Family        string `json:"family"`
+	License       string `json:"license,omitempty"`
+	CommercialUse *bool  `json:"commercial_use,omitempty"`
+	LicenseNote   string `json:"license_note,omitempty"`
+}
+
+// tagLicense stamps a batch item with the rendering binding's family and license —
+// the batch twin of addLicenseData.
+func (it *ImageBatchItem) tagLicense(fam config.FamilyInfo) {
+	it.Family = fam.Name
+	it.License = fam.License
+	if fam.CommercialUse != nil {
+		v := *fam.CommercialUse
+		it.CommercialUse = &v
+	}
+	it.LicenseNote = fam.LicenseNote()
 }
 
 // normalizeImageBatch fills the per-job invariants the single-render path enforces
@@ -2137,7 +2159,11 @@ func (p *Pipeline) RunImageBatch(ctx context.Context, jobs []ImageBatchJob) ([]I
 
 	raw, _ := os.ReadFile(resultsPath) // best-effort even on gerr: partial results are real work
 	items := parseBatchResults(raw, norm)
+	// The default binding (""), exactly what the single path resolves for a request
+	// without a family: every item is tagged with it (ADR 0058).
+	_, fam, _ := p.cfg.ResolveImageFamily("")
 	for i, it := range items {
+		items[i].tagLicense(fam)
 		// Refiner outcome onto the item (single-path result-key parity: with a
 		// refiner configured every item says refined true/false). Set BEFORE the
 		// ledger loop reads `items` so callers and records agree.
@@ -2154,7 +2180,7 @@ func (p *Pipeline) RunImageBatch(ctx context.Context, jobs []ImageBatchJob) ([]I
 		// caller's input (jobs[i]; norm[i].Prompt may hold the refined text).
 		// Batches render the DEFAULT binding (no family param on this path), so its
 		// declared license, if any, is the one every row carries.
-		meta := core.Meta{Model: modelLabel, LatencyMs: it.Ms, License: p.cfg.ImageGenLicense}
+		meta := core.Meta{Model: modelLabel, LatencyMs: it.Ms, License: fam.License}
 		if it.OK {
 			p.record(core.TaskGenerateImage, meta, len(jobs[i].Prompt))
 		} else {
@@ -3399,6 +3425,13 @@ func imageModelFromConfig(cfg config.Config) imagegen.Model {
 //     video pool must COMPUTE on cuda:0 (ComfyUI-MultiGPU #220: an int8 DiT cannot
 //     compute on a non-default device), which a --cuda-device pin would hide;
 //   - run-graph: the caller's graph owns its placement.
+//
+// generate_video NEVER takes the pin, pooled or not (runGenerateVideo passes false,
+// pinned by TestLaunchProfileReachesEveryComfyRouteAndThePinOnlyTheSingleCardOnes):
+// every seeded video seat is pooled and owns its placement through its pool keys. A
+// future tier with an un-pooled video seat on a multi-card box must add the pin for
+// that shape deliberately — until then an un-pooled video render lands on ComfyUI's
+// default device.
 //
 // Dynamic VRAM and the extra args are launch-wide and apply to every ComfyUI route.
 func comfyLaunch(cfg config.Config, singleCard bool) imagegen.ComfyLaunch {

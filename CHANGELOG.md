@@ -133,6 +133,9 @@ Versioning: [SemVer](https://semver.org/).
   that seeds a single-card route without a non-display pin.
 - **Fixed: an unknown `--family` rendered the SDXL graph.** `comfy-render.mjs` / `comfy-edit.mjs`
   exit 2 on a family outside their closed set, before any GPU work.
+- **Batch results are license-tagged too.** `generate-image --batch` items and the batch payload
+  carry the default binding's `family` / `license` / `commercial_use` / `license_note`, as a single
+  render does (before, only the ledger rows carried the license).
 - **Fixed: `generate_image` reported the request's (or a guessed 1024) size.** `width`/`height` are
   now measured from the written file on both engines; `edit_image_generative` reports them too.
 - **Fixed: doctor could not see preset-implied model files.** `comfyui model bindings` now resolves

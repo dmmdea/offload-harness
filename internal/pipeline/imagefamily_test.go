@@ -348,3 +348,46 @@ func TestLaunchProfileReachesEveryComfyRouteAndThePinOnlyTheSingleCardOnes(t *te
 		})
 	}
 }
+
+// A batch renders the DEFAULT binding, and its results must carry that binding's
+// license exactly as a single render does (ADR 0058: every result is tagged). Before
+// the fix only the ledger rows carried it; the items the caller reads did not.
+func TestImageBatchItemsCarryTheDefaultBindingsLicense(t *testing.T) {
+	requireNodePipeline(t)
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.ImageGenScript = writeBatchArgvStub(t, dir)
+	cfg.MediaDir = dir
+	cfg.ImageGenFamily = "krea2"
+	cfg.ImageGenLicense = "Research-Only Test License"
+	no := false
+	cfg.ImageGenCommercialUse = &no
+	p := refinerTestPipeline(t, cfg)
+	items, err := p.RunImageBatch(context.Background(), []ImageBatchJob{{Prompt: "a red bike"}, {Prompt: "a blue car"}})
+	if err != nil {
+		t.Fatalf("batch failed: %v", err)
+	}
+	for i, it := range items {
+		if it.Family != "krea2" || it.License != "Research-Only Test License" || it.CommercialUse == nil || *it.CommercialUse ||
+			!strings.Contains(it.LicenseNote, "research/evaluation use only under Research-Only Test License") {
+			t.Errorf("item %d = %+v, want the default binding's family, license, commercial_use:false and license_note", i, it)
+		}
+		b, _ := json.Marshal(it)
+		for _, k := range []string{`"family":"krea2"`, `"license":"Research-Only Test License"`, `"commercial_use":false`, `"license_note":`} {
+			if !strings.Contains(string(b), k) {
+				t.Errorf("item %d JSON lacks %s: %s", i, k, b)
+			}
+		}
+	}
+
+	// A default binding that declares no license tags nothing but the family —
+	// never an invented commercial_use.
+	cfg.ImageGenLicense, cfg.ImageGenCommercialUse = "", nil
+	items, err = refinerTestPipeline(t, cfg).RunImageBatch(context.Background(), []ImageBatchJob{{Prompt: "a green boat"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := json.Marshal(items[0]); strings.Contains(string(b), "license") || strings.Contains(string(b), "commercial_use") {
+		t.Errorf("an undeclared license must not be tagged: %s", b)
+	}
+}

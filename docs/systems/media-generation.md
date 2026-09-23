@@ -410,7 +410,10 @@ false` result also carries `license_note` ("research/evaluation use only under <
 commercial work"). The ledger row carries `license` (`ledger.Entry.License`; absent = UNKNOWN, never
 "safe"). `offload_status` lists `media.image_families` / `media.edit_families` — name, graph family,
 engine, checkpoint, license, commercial_use (null = undeclared) and the route verdict — and
-`/fleet/health` publishes `image_families` with the same license flags. `width`/`height` in a
+`/fleet/health` publishes `image_families` with the same license flags. A warm batch
+(`generate-image --batch`) always renders the default binding, so every batch item — and the batch
+payload's top level — carries that binding's `family` and, when declared, its `license`,
+`commercial_use` and `license_note`. `width`/`height` in a
 `generate_image` or `edit_image_generative` result are **measured** from the written file
 (`imagegen.OutputSize`), not echoed from the request.
 
