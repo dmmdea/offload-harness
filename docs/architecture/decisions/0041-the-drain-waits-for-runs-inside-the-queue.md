@@ -106,6 +106,17 @@ before building its local loop and routes the review to an eligible fleet seat (
 `remoteEligible`'s ctx-fit floor); the wait-then-`capacity` path remains for the holder's own inherited lease
 and for the case where no remote qualifies, and its reason now carries the holder's declared window.
 
+**Extended 2026-09-22 (media holds):** decision 2 now holds for `gpu reserve --class media --drain` too.
+The lease record used to drop the draining stamp on a media lease (`Draining: opts.Draining && class ==
+ClassText`), so a media drain fenced the runs in flight from acquire — every request of the run the drain was
+waiting for waited on the drain: this ADR's deadlock, reopened for the media class, ended only by the run's own
+budget, while the run's unfenced probes loaded the seat onto the held cards. The stamp is now recorded for
+either class; `blocksLoad` never blocks under a draining hold that is not exclusive, `BlocksNewRun` cordons a
+draining hold of either class, and the media class fences once `maintainSeat` clears the stamp. Pinned by
+`TestADrainingMediaHoldAdmitsRunningWorkAndFencesAfterTheDrain` and
+`TestDrainingIsRecordedForEitherClassAndTheCommandIsClipped`. The probes themselves pass the fence since the
+same change (ADR 0026, extended 2026-09-22).
+
 ## Evidence
 
 llama-swap log 2026-09-14 (two drain windows of 61 polls at 7 ms each, the 3m26.9s
