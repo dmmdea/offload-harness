@@ -159,6 +159,14 @@ Versioning: [SemVer](https://semver.org/).
   `github_api`, `github_create_repo`, `github_upload_file`) now goes through one decoder that refuses the call on
   ANY decode error, as `NOT performed: <tool> arguments do not match the tool's schema (…)`, before any policy,
   filesystem or network step. Empty arguments are still a zero-valued call (a no-argument call on some engines).
+- **A wrong type in a NON-string field is coerced once, never refused outright.** On a type error only, one pass
+  driven by the target struct's field types rewrites a JSON string sent for a number (`"offset":"5"`), a bool
+  (`"private":"true"`, case-insensitive) or a list of strings (`"args":"./..."` becomes `["./..."]`), then
+  decodes strictly again. Small models send those shapes, and they used to work with the field silently dropped
+  (`"private":"true"` was read as `false`); refusing them would spend the seat's same-tool retries. A string
+  field is never coerced: a number, object, array or bool where a string is declared (`new_string`, `content`, a
+  github `body`, a path) is still refused, because coercing it could change what is written. A string that is not
+  a number or bool literal, and `"null"`, are refused too. Unknown fields stay ignored.
   The offload and accelerator tools already checked the error and are unchanged.
 
 ### Fixed — every "cut by the budget" test trusted `finish_reason: length` alone
