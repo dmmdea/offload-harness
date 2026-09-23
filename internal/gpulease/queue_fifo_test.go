@@ -576,3 +576,59 @@ func TestWaiterUnregisterSurvivesAConcurrentReader(t *testing.T) {
 		t.Fatal("the waiter record survived removal under a concurrent reader — the Windows delete-retry path did not cover this call site")
 	}
 }
+
+// FOUND VIA -count=10 (lead review point 1 verification, 2026-09-22): once
+// refreshWaiter started rewriting a waiter's own file every poll tick, and
+// every OTHER waiter reads that same file at the same cadence,
+// TestMixedClassWaitersAreServedInArrivalOrder started failing intermittently
+// — NOT from timing jitter (a diagnostic run confirmed the recorded SinceMs
+// values stayed perfectly ordered every time) but because Waiters()'s
+// os.ReadFile/os.Stat had no retry: a transient failure racing a concurrent
+// rename silently excluded a live, correctly-refreshing, genuinely-earlier
+// waiter from ONE reader's view — enough for a later waiter to wrongly
+// compute itself as front-of-queue for that one tick and win the race. This
+// pins the fix (readWaiterFile/statWaiterFile) directly, mirroring
+// TestRenameReplacingSurvivesAConcurrentReader's own reader-vs-writer stress
+// pattern but with the roles reversed: here a tight concurrent RENAMER must
+// never make a READ give up.
+func TestWaiterReadSurvivesAConcurrentRename(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "waiter.json")
+	if err := os.WriteFile(path, []byte(`{"pid":1,"class":"text","since_ms":1}`), 0o666); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	stop := make(chan struct{})
+	var writerRunning sync.WaitGroup
+	writerRunning.Add(1)
+	go func() {
+		defer writerRunning.Done()
+		i := 0
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			tmp := path + ".tmp"
+			if err := os.WriteFile(tmp, []byte(strconv.Itoa(i)), 0o666); err == nil {
+				_ = renameReplacing(tmp, path)
+			}
+			i++
+		}
+	}()
+	defer func() {
+		close(stop)
+		writerRunning.Wait()
+	}()
+
+	const iterations = 300
+	for i := 0; i < iterations; i++ {
+		if _, err := readWaiterFile(path); err != nil {
+			t.Fatalf("readWaiterFile failed under a concurrent renamer (iteration %d): %v", i, err)
+		}
+		if _, err := statWaiterFile(path); err != nil {
+			t.Fatalf("statWaiterFile failed under a concurrent renamer (iteration %d): %v", i, err)
+		}
+	}
+}

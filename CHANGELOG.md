@@ -51,6 +51,27 @@ Versioning: [SemVer](https://semver.org/).
   `TestRenameReplacingSurvivesAConcurrentReader`'s tight-reader-loop pattern. Every new check
   was mutation-tested: disabling the heartbeat-staleness check, the tie-break, or reverting
   to a bare `os.Remove` each turns its matching test red.
+- **`-count=10` caught a real race the review's own fix introduced: `Waiters()`'s read had no
+  retry against a now-much-more-frequent concurrent rename.** Once every waiter rewrites its
+  own record every poll tick (the heartbeat above), a plain `os.ReadFile`/`os.Stat` can
+  transiently fail on Windows while that rename is in flight — the exact class of ephemeral
+  error `renameReplacing`/`removeClaim` already retry, just never on this read path. Treating
+  the failure as "this waiter isn't here" silently hid a live, genuinely-earlier waiter from
+  one reader for one tick — enough for a later arrival to see itself as front-of-queue and win.
+  A diagnostic run confirmed the recorded `SinceMs` values stayed perfectly ordered throughout
+  (`[0 1 2 3 4 5]`) even in a failing trial (`acquisition=[0 1 3 2 4 5]`), ruling out timing
+  jitter and pointing at the read path itself. The `os.Stat` call was worse: it deleted the
+  file on ANY error, not only a confirmed absence, so a transient failure could permanently
+  destroy a live waiter's queue position. `readWaiterFile`/`statWaiterFile` retry a transient
+  failure (`removeClaim`'s budget) and return `os.IsNotExist` unretried; `Waiters()` now prunes
+  only on a confirmed absence or a confirmed stale/dead/recycled record, never a retry-exhausted
+  transient one. `TestQueuedWaitersAreServedInArrivalOrder`/`TestMixedClassWaitersAreServedInArrivalOrder`
+  ran clean 30/30 at `-count=30` after the fix (previously ~1 in 10 failed); a new dedicated
+  test, `TestWaiterReadSurvivesAConcurrentRename` (mirroring
+  `TestRenameReplacingSurvivesAConcurrentReader` with the reader/writer roles reversed), catches
+  the regression directly and fast — mutation-tested: reverting to bare `os.ReadFile`/`os.Stat`
+  fails it 5/5 in under a second, and reproduces the original `[0 2 1 3 4 5]`-style symptom in
+  the FIFO order tests at `-count=10`.
 
 ### Added — opencode context instrument
 

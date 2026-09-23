@@ -282,12 +282,64 @@ func (m *Manager) refreshWaiter(self Waiter) {
 	}
 }
 
+// waiterIOAttempts x waiterIOPause bound a retry on a TRANSIENT read/stat
+// failure against a waiter file. refreshWaiter now rewrites a waiter's own
+// record roughly once per poll interval, and every OTHER waiter reads that
+// same file at the same cadence — on Windows, a plain read can transiently
+// fail while a concurrent rename is in flight over the same path, the same
+// class of ephemeral error renameReplacing/removeClaim already retry
+// elsewhere. Sized identically to removeAttempts/removePause: a handful of
+// 5ms retries is orders of magnitude more than the rename itself takes.
+const (
+	waiterIOAttempts = 20
+	waiterIOPause    = 5 * time.Millisecond
+)
+
+// readWaiterFile retries a transient read failure. os.IsNotExist is returned
+// immediately (unretried) — the file is genuinely gone, not racing a rename,
+// and the caller must not treat retry-exhaustion the same as confirmed
+// absence: one is "try again next read", the other is "safe to prune".
+func readWaiterFile(path string) ([]byte, error) {
+	var b []byte
+	var err error
+	for attempt := 0; attempt < waiterIOAttempts; attempt++ {
+		b, err = os.ReadFile(path)
+		if err == nil || os.IsNotExist(err) {
+			return b, err
+		}
+		time.Sleep(waiterIOPause)
+	}
+	return b, err
+}
+
+// statWaiterFile is readWaiterFile's twin for the heartbeat mtime check.
+func statWaiterFile(path string) (os.FileInfo, error) {
+	var fi os.FileInfo
+	var err error
+	for attempt := 0; attempt < waiterIOAttempts; attempt++ {
+		fi, err = os.Stat(path)
+		if err == nil || os.IsNotExist(err) {
+			return fi, err
+		}
+		time.Sleep(waiterIOPause)
+	}
+	return fi, err
+}
+
 // Waiters lists the processes queued for the card, oldest first. Records whose
 // process is gone, whose pid was recycled, or which have not been refreshed
 // within waiterStaleWindow (an alive process that has stopped actually
 // polling — suspended, wedged, an old binary that never refreshes at all) are
 // pruned as they are read, so neither a dead waiter nor a merely stalled one
 // ever blocks the line or defers a warm forever.
+//
+// TRANSIENT read/stat failures NEVER prune. Confirmed-gone (os.IsNotExist)
+// does; a retry-exhausted transient error is treated as "skip this entry for
+// THIS read only, try again next time" — reproduced directly (2026-09-22):
+// treating any os.Stat error as "prune it" made a live, correctly-refreshing
+// waiter's record vanish PERMANENTLY the one time its owner's rename and
+// another goroutine's Stat overlapped, which is ordinary traffic once every
+// waiter is reading every other waiter's file every poll tick.
 func (m *Manager) Waiters() []Waiter {
 	entries, err := os.ReadDir(m.waitersDir())
 	if err != nil {
@@ -302,9 +354,12 @@ func (m *Manager) Waiters() []Waiter {
 			continue
 		}
 		p := filepath.Join(m.waitersDir(), e.Name())
-		b, rerr := os.ReadFile(p)
+		b, rerr := readWaiterFile(p)
 		if rerr != nil {
-			continue
+			if os.IsNotExist(rerr) {
+				continue // confirmed gone: nothing to prune, nothing to list
+			}
+			continue // retries exhausted on a transient error: try again next read
 		}
 		var w Waiter
 		if json.Unmarshal(b, &w) != nil || w.PID <= 0 {
@@ -328,11 +383,15 @@ func (m *Manager) Waiters() []Waiter {
 		// its own record's mtime on every poll tick, so a record older than
 		// staleWindow has stopped proving it is still actually in line —
 		// treated the same as a dead waiter: skipped for ordering, pruned
-		// best-effort. os.Stat failing here (the file vanished between the
-		// ReadFile above and this Stat — another reader's prune, or the
-		// owner's own unregister landing mid-loop) is read the same way: gone
-		// is gone.
-		if fi, serr := os.Stat(p); serr != nil || now.Sub(fi.ModTime()) > staleWindow {
+		// best-effort.
+		fi, serr := statWaiterFile(p)
+		if serr != nil {
+			if os.IsNotExist(serr) {
+				continue // confirmed gone
+			}
+			continue // transient: do not prune a record we could not actually check
+		}
+		if now.Sub(fi.ModTime()) > staleWindow {
 			_ = os.Remove(p)
 			continue
 		}
