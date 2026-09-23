@@ -31,13 +31,13 @@ func (s *scriptedSeat) probe(context.Context) (bool, string, error) {
 func coldPolicy(ceiling time.Duration) StallPolicy {
 	p := msPolicy() // prefill of a 10-token prompt floors at 40 ms
 	p.ColdLoad, p.ColdLoadBasis, p.ColdLoadPoll = ceiling, "test ceiling", 10*time.Millisecond
+	p.PostReady = 250 * time.Millisecond
 	return p
 }
 
-// While the seat reads loading the prefill clock does not run, and a seat
-// that has loaded is still held until its FIRST byte: the first completion
-// after a load is the engine's warm-up (measured live: `ready`, then 60 s of
-// silence on a ~12k-token prompt). The first delta ends the hold.
+// While the seat reads loading the prefill clock does not run. Once it reads
+// ready the first completion gets the short post-ready bound (250 ms here),
+// not the rest of the cold-load ceiling; the first delta ends the hold.
 func TestMonitorColdLoadHoldLastsUntilTheFirstByte(t *testing.T) {
 	seat := &scriptedSeat{}
 	seat.loading.Store(true)
@@ -55,7 +55,7 @@ func TestMonitorColdLoadHoldLastsUntilTheFirstByte(t *testing.T) {
 		t.Fatalf("phase = %s, want %s", m.CurrentPhase(), PhaseColdLoad)
 	}
 	seat.loading.Store(false)          // ready, but no byte yet
-	time.Sleep(300 * time.Millisecond) // many ticks, 7x the prefill allowance
+	time.Sleep(120 * time.Millisecond) // many ticks, 3x the prefill allowance, inside the post-ready bound
 	if ctx.Err() != nil || m.CurrentPhase() != PhaseColdLoad {
 		t.Fatalf("a freshly loaded seat's first completion must stay held: phase=%s cause=%v", m.CurrentPhase(), context.Cause(ctx))
 	}
@@ -82,11 +82,12 @@ func TestMonitorColdLoadHoldLastsUntilTheFirstByte(t *testing.T) {
 }
 
 // MarkSeatLoaded (the admission warm-up loaded the seat): the first request
-// is held even though /running reads ready, and the hold is bounded by the
-// ceiling with the warm-up named in the reason.
+// is held even though /running reads ready, under the SHORT post-ready bound
+// (250 ms here), never the 5 s cold-load ceiling, and the reason names
+// post-ready silence (review finding, PR #458).
 func TestMonitorMarkSeatLoadedHoldsTheFirstCompletion(t *testing.T) {
 	seat := &scriptedSeat{} // reads ready throughout
-	ctx, m := NewMonitor(context.Background(), coldPolicy(300*time.Millisecond), 5*time.Second)
+	ctx, m := NewMonitor(context.Background(), coldPolicy(5*time.Second), 10*time.Second)
 	defer m.Stop()
 	m.WithSeatProbe(seat.probe, nil)
 	m.MarkSeatLoaded()
@@ -101,7 +102,8 @@ func TestMonitorMarkSeatLoadedHoldsTheFirstCompletion(t *testing.T) {
 		t.Fatal("the warm-up hold was not bounded")
 	}
 	var se *StallError
-	if !errors.As(m.Cause(), &se) || se.Phase != PhaseColdLoad || !strings.Contains(se.Error(), "engine warm-up") {
+	if !errors.As(m.Cause(), &se) || se.Phase != PhaseColdLoad || !strings.Contains(se.Error(), "after the seat read ready") ||
+		se.Allowed != 250*time.Millisecond {
 		t.Fatalf("cause = %v", m.Cause())
 	}
 }
@@ -199,5 +201,58 @@ func TestMonitorWithoutColdLoadCeilingNeverHolds(t *testing.T) {
 	}
 	if seat.calls.Load() != 0 {
 		t.Fatalf("the probe ran %d times without a cold-load ceiling", seat.calls.Load())
+	}
+}
+
+// Review finding 2 (PR #458): a probe that ERRORS mid-hold must not be
+// reported as the seat reading ready. The reason names the unreadable
+// /running, and the post-ready bound (not the cold-load ceiling) applies.
+func TestMonitorColdLoadUnreadableMidHoldIsReportedHonestly(t *testing.T) {
+	seat := &scriptedSeat{}
+	seat.loading.Store(true)
+	pol := coldPolicy(5 * time.Second)
+	pol.PostReady = 150 * time.Millisecond
+	ctx, m := NewMonitor(context.Background(), pol, 10*time.Second)
+	defer m.Stop()
+	m.WithSeatProbe(seat.probe, nil)
+	m.Phase(PhasePrefill, 10)
+	time.Sleep(100 * time.Millisecond)
+	if m.CurrentPhase() != PhaseColdLoad {
+		t.Fatalf("phase = %s", m.CurrentPhase())
+	}
+	seat.fail.Store(true)
+	select {
+	case <-ctx.Done():
+	case <-time.After(3 * time.Second):
+		t.Fatal("an unreadable /running mid-hold was held toward the cold-load ceiling")
+	}
+	var se *StallError
+	if !errors.As(m.Cause(), &se) {
+		t.Fatalf("cause = %v", m.Cause())
+	}
+	msg := se.Error()
+	if strings.Contains(msg, `read "ready`) || !strings.Contains(msg, "unreadable") {
+		t.Fatalf("the reason must name the unreadable /running, not a ready seat: %q", msg)
+	}
+}
+
+// Review finding 3 (PR #458): the hold never outlives the run's own ceiling,
+// so a load that outlasts the run is still filed as a cold-load stall
+// (infrastructure), not as the run ceiling (budget).
+func TestMonitorColdLoadHoldIsClampedToTheRunCeiling(t *testing.T) {
+	seat := &scriptedSeat{}
+	seat.loading.Store(true)
+	ctx, m := NewMonitor(context.Background(), coldPolicy(5*time.Second), 400*time.Millisecond)
+	defer m.Stop()
+	m.WithSeatProbe(seat.probe, nil)
+	m.Phase(PhasePrefill, 10)
+	select {
+	case <-ctx.Done():
+	case <-time.After(3 * time.Second):
+		t.Fatal("nothing ended the run")
+	}
+	var se *StallError
+	if !errors.As(m.Cause(), &se) || se.Phase != PhaseColdLoad {
+		t.Fatalf("a load outlasting the run must file a cold-load stall, got %v", m.Cause())
 	}
 }

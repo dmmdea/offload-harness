@@ -203,3 +203,94 @@ func TestRunAgentTaskFirstCompletionAfterWarmUpIsNotAPrefillStall(t *testing.T) 
 		t.Fatalf("the first completion after a warm-up load was filed as a stall: %s / %q", wire.DeferClass, wire.Reason)
 	}
 }
+
+// compressPostReady sets the post-ready floor for one test (production 120 s).
+func compressPostReady(t *testing.T, d time.Duration) func() {
+	t.Helper()
+	p := postReadyFloor
+	postReadyFloor = d
+	return func() { postReadyFloor = p }
+}
+
+// Review finding 1 (PR #458): ABSENCE is not evidence of a load. The seat
+// resolves (it is listed ready at admission), then /running goes `[]` while
+// the request is out and nothing is starting: a removed seat, a renamed
+// alias, a restarted llama-swap. That is a stall at the prefill floor, not a
+// hold to the cold-load ceiling.
+func TestRunAgentTaskSeatAbsentWithNothingLoadingIsAPrefillStall(t *testing.T) {
+	defer compressLiveness(t, 200*time.Millisecond, 100*time.Millisecond, core.AgentCeilingSecCap)()
+	defer compressColdLoad(t, 50*time.Millisecond, 5*time.Second)()
+	defer compressPostReady(t, 2*time.Second)()
+	var gone atomic.Bool
+	fake := &agentFake{
+		rosterIDs: []string{agentTestSeat},
+		running: func(int64) string {
+			if gone.Load() {
+				return `{"running":[]}`
+			}
+			return `{"running":[{"model":"` + agentTestSeat + `","state":"ready","cmd":"x"}]}`
+		},
+		loop: func(int64) string {
+			gone.Store(true)
+			time.Sleep(8 * time.Second)
+			return doneChat("never read")
+		},
+		repack: func(int64) string { return `{"answer":"x"}` },
+	}
+	srv := fake.server(t)
+	defer srv.Close()
+
+	start := time.Now()
+	res := coldLoadTestPipeline(t, srv.URL).Run(context.Background(), agentTestRequest(t, testContract()))
+	wire := decodeWire(t, res)
+	el := time.Since(start)
+	if !wire.Deferred || !strings.HasPrefix(wire.Reason, "stalled: no progress for ") || !strings.Contains(wire.Reason, "in prefill (allowed ") {
+		t.Fatalf("an absent seat with nothing loading must be a prefill stall, got deferred=%v reason=%q", wire.Deferred, wire.Reason)
+	}
+	if el > 3*time.Second {
+		t.Fatalf("an absent seat was held like a load: %s (the ceiling is 5 s, the floor 200 ms)", el)
+	}
+}
+
+// Review finding 2 (PR #458): once the seat reads ready after a load, the
+// silence gets its OWN short bound (max(post-ready floor, 2 x prefill
+// allowance)), never the rest of the cold-load ceiling, and the reason says
+// it was post-ready silence.
+func TestRunAgentTaskSilenceAfterReadyDefersAtThePostReadyBound(t *testing.T) {
+	defer compressLiveness(t, 200*time.Millisecond, 100*time.Millisecond, core.AgentCeilingSecCap)()
+	defer compressColdLoad(t, 50*time.Millisecond, 20*time.Second)()
+	defer compressPostReady(t, 700*time.Millisecond)()
+	var loadingUntil atomic.Int64
+	fake := &agentFake{
+		rosterIDs: []string{agentTestSeat},
+		running: func(int64) string {
+			if u := loadingUntil.Load(); u != 0 && time.Now().UnixNano() < u {
+				return `{"running":[{"model":"` + agentTestSeat + `","state":"starting","cmd":"x"}]}`
+			}
+			return `{"running":[{"model":"` + agentTestSeat + `","state":"ready","cmd":"x"}]}`
+		},
+		loop: func(int64) string {
+			loadingUntil.Store(time.Now().Add(500 * time.Millisecond).UnixNano())
+			time.Sleep(10 * time.Second) // loads for 0.5 s, then ready and silent
+			return doneChat("never read")
+		},
+		repack: func(int64) string { return `{"answer":"x"}` },
+	}
+	srv := fake.server(t)
+	defer srv.Close()
+
+	start := time.Now()
+	res := coldLoadTestPipeline(t, srv.URL).Run(context.Background(), agentTestRequest(t, testContract()))
+	wire := decodeWire(t, res)
+	el := time.Since(start)
+	t.Logf("reason: %s (after %s)", wire.Reason, el)
+	if !wire.Deferred || !strings.Contains(wire.Reason, "after the seat read ready") {
+		t.Fatalf("want a post-ready silence defer, got deferred=%v reason=%q", wire.Deferred, wire.Reason)
+	}
+	if wire.DeferClass != core.DeferClassInfrastructure {
+		t.Fatalf("defer_class = %q", wire.DeferClass)
+	}
+	if el > 6*time.Second {
+		t.Fatalf("post-ready silence was held toward the 20 s cold-load ceiling: %s", el)
+	}
+}

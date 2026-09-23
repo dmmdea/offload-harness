@@ -44,6 +44,12 @@ var (
 	// coldLoadPoll is how often the monitor reads /running while a request
 	// waits for its first byte. Tests compress it.
 	coldLoadPoll = 5 * time.Second
+	// postReadyFloor is the least time a request may stay silent AFTER its
+	// seat reads ready (a load the probe saw, or the admission warm-up): the
+	// engine's first completion after a load is slower than a warm one, but
+	// only the `starting` part of a load gets the cold-load ceiling. The bound
+	// is max(this, 2 x the waiting phase's own allowance). Tests compress it.
+	postReadyFloor = 120 * time.Second
 )
 
 // LivenessPolicyFor is THIS seat's stall policy: the admission budget while
@@ -67,6 +73,7 @@ func LivenessPolicyFor(cfg config.Config, known seatrate.Seat, admission time.Du
 		ColdLoad:      coldLoad,
 		ColdLoadBasis: basis,
 		ColdLoadPoll:  coldLoadPoll,
+		PostReady:     postReadyFloor,
 	}
 }
 
@@ -89,7 +96,20 @@ func coldLoadCeiling(known seatrate.Seat) (time.Duration, string) {
 	return d, basis
 }
 
-// seatLoadProbe is the monitor's view of whether llama-swap is serving the
+// ClampColdLoadToRun keeps the cold-load ceiling inside the run's own
+// ceiling (review finding, PR #458): a hold that outlived the run would be
+// filed as the run ceiling (budget) instead of a cold-load stall
+// (infrastructure). The monitor also clamps the live timer; this makes the
+// reason's arithmetic say so.
+func ClampColdLoadToRun(pol *agent.StallPolicy, ceilingSec int) {
+	c := time.Duration(ceilingSec) * time.Second
+	if c > 0 && pol.ColdLoad > c {
+		pol.ColdLoad = c
+		pol.ColdLoadBasis += fmt.Sprintf(", clamped to the run's %ds ceiling", ceilingSec)
+	}
+}
+
+// seatLoadProbe is the monitor's view of whether llama-swap is LOADING the
 // run's seat (0.140.0). A request whose seat is `starting` — a cold start
 // after the idle unload, or a reload after another model's swap evicted the
 // seat between two steps (2026-09-23: whisper-stt evicted the 3-card seat
@@ -97,11 +117,18 @@ func coldLoadCeiling(known seatrate.Seat) (time.Duration, string) {
 // ~180 s reload) — gets no byte until the load finishes, so its silence is a
 // cold load, not a stall.
 //
-// loading is reported only on POSITIVE evidence: the seat's /running row in
-// a non-ready state, or the seat absent from /running once its alias has been
-// resolved (llama-swap is holding the request while another model runs). An
-// unreadable /running, or an alias that could not be resolved, is "cannot
-// tell" (an error), and the prefill clock keeps running as before.
+// loading is reported only on POSITIVE evidence of a load in progress, in
+// llama-swap's own vocabulary (/running `state`: stopped | starting | ready |
+// stopping | shutdown):
+//   - the seat's own row is `starting` or `stopping` (a stopping seat is being
+//     evicted, and the waiting request will load it again);
+//   - the seat is absent (its alias resolved) while some other row is
+//     `starting` or `stopping`: a swap is in progress on the endpoint.
+//
+// ABSENCE alone is not evidence (review finding, PR #458): a removed seat, a
+// renamed alias or a restarted llama-swap answering `{"running":[]}` keeps
+// the normal stall clock. An unreadable /running, or an absent seat whose
+// alias could not be resolved, is "cannot tell" (an error).
 func seatLoadProbe(endpoint, seat string) agent.SeatProbe {
 	if endpoint == "" || seat == "" {
 		return nil
@@ -131,20 +158,25 @@ func seatLoadProbe(endpoint, seat string) agent.SeatProbe {
 		if !ok && m.resolve(ctx) {
 			st, ok = find()
 		}
-		switch {
-		case ok && st == "ready":
-			return false, st, nil
-		case ok:
-			return true, st, nil
-		case !m.resolved:
+		if ok {
+			return swapInProgress(st), st, nil
+		}
+		if !m.resolved {
 			return false, "", fmt.Errorf("seat %s is not listed on /running and its alias could not be resolved", seat)
 		}
-		busy := "nothing else listed"
-		if len(rows) > 0 {
-			busy = rows[0].ID + " " + rows[0].State
+		for _, r := range rows {
+			if swapInProgress(r.State) {
+				return true, "not resident; " + r.ID + " " + r.State + " (a swap is in progress)", nil
+			}
 		}
-		return true, "not resident (" + busy + ")", nil
+		return false, "not resident, nothing loading", nil
 	}
+}
+
+// swapInProgress: the llama-swap states that mean a model is being loaded
+// or evicted right now.
+func swapInProgress(state string) bool {
+	return state == "starting" || state == "stopping"
 }
 
 // stallOf is the monitor's cause when it is a stall, else nil.

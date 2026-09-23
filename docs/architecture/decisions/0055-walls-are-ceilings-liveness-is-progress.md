@@ -83,18 +83,25 @@ determine if a job is truly still going" — was not met by any of the three sur
    2026-09-23 the 3-card seat's ~180 s reload deferred an `offload_review_diff` twice at 60 s. While a
    request may be waiting for its first byte (**admission**, **prefill** or **re-pack**), the monitor
    reads llama-swap's `/running` through a seat probe every 5 s, and once more before filing a stall.
-   The run moves into a **`cold-load`** phase on positive evidence of a load: the seat's row is not
-   `ready`, or the seat is absent while its alias resolved. It also moves there when the admission
-   warm-up just loaded the seat (`MarkSeatLoaded`). In that phase the stall clock is suspended, and a
-   **cold-load ceiling** `max(600 s, 2 × measured cold_load_sec)` bounds the wait from the moment the
-   request went silent. 600 s is llama-swap's `healthCheckTimeout` on the reference boxes. The hold
-   ends on the seat's **first byte** (or a completed call), never on `ready` alone. That rule was
-   measured live on the 3-card seat: `ready` after a 177 s load, then 60 s of silence on the first
-   ~12k-token completion (the engine's first-request warm-up). At the ceiling the run is filed
-   `stalled: seat still loading after Xs in cold-load (allowed Ys: cold-load ceiling = …; the seat read
-   "<state>", …)` as infrastructure. The `stalled: ` prefix is kept on purpose, so every reader keyed on
-   it classifies the defer the same way. With no load seen, an unreadable `/running` or an unresolved
-   alias counts as "cannot tell", and the prefill clock runs as before. The wait is never open-ended.
+   The run then enters a **`cold-load`** phase with two parts:
+   - **Loading.** This part is entered only on positive evidence that a load is in progress: the
+     seat's row is `starting` or `stopping`, or the seat is absent while another row is `starting` or
+     `stopping` (a swap). Absence alone keeps the normal stall clock: a removed seat or a restarted
+     llama-swap must fail at the floor, not hold. This part is bounded by the **cold-load ceiling**
+     `max(600 s, 2 × measured cold_load_sec)`, counted from the silence and clamped to the run's own
+     ceiling. 600 s is llama-swap's `healthCheckTimeout` on the reference boxes.
+   - **Post-ready.** This part starts when the load the probe saw is over, or when the admission
+     warm-up just loaded the seat (`MarkSeatLoaded`). The first completion gets a short bound,
+     `max(120 s, 2 × the waiting phase's allowance)`, so a seat that wedges right after loading is
+     visible within minutes. It is deliberately not sized to cover the separate warm-seat silence
+     under investigation.
+   - **The hold ends on the seat's first byte.**
+
+   Defers read `stalled: seat still loading after Xs in cold-load (…)` or `stalled: no byte for Xs
+   after the seat read ready, in cold-load (…)`, filed as infrastructure. The `stalled: ` prefix is
+   kept on purpose, so every reader keyed on it classifies them unchanged. An unreadable `/running` is
+   named as such in the reason, never reported as a ready seat. With no load seen it counts as
+   "cannot tell", and the prefill clock runs as before. The wait is never open-ended.
 
 ## Consequences
 

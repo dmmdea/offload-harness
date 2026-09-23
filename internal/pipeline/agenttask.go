@@ -517,6 +517,7 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	ceilingSec := CeilingFor(timeoutSec, est)
 	wire.CeilingSec = ceilingSec
 	livePolicy := LivenessPolicyFor(p.cfg, rates.Get(seat), admissionBudget(p.cfg.AgentAdmissionWaitSec))
+	ClampColdLoadToRun(&livePolicy, ceilingSec)
 	cctx, live := agent.NewMonitor(ctx, livePolicy, time.Duration(ceilingSec)*time.Second)
 	defer live.Stop()
 	// The cold-load hold (0.140.0): the admission warm-up above loads a seat
@@ -535,11 +536,11 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		})
 		if coldLoaded {
 			// The warm-up just loaded the seat. Its FIRST completion is still
-			// cold cost: measured 2026-09-23, the 3-card seat read `ready` after
-			// a 177 s load and then sent nothing for 60 s on a ~12k-token prompt
-			// (the engine's first-request warm-up), which the prefill clock
-			// filed as a stall. Until the first byte, that wait is held under
-			// the cold-load ceiling too.
+			// cold cost (measured 2026-09-23: the 3-card seat read `ready`
+			// after a 177 s load, then sent nothing for 60 s on a ~12k-token
+			// prompt). Until the first byte that wait gets the SHORT post-ready
+			// bound, max(120 s, 2 x the prefill allowance), not the cold-load
+			// ceiling, so a seat that wedges right after loading is seen fast.
 			live.MarkSeatLoaded()
 		}
 	}
