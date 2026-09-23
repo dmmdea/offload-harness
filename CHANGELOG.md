@@ -111,6 +111,50 @@ Versioning: [SemVer](https://semver.org/).
   that first slipped past a vacuous test comparing `protocolText()` with itself (replaced by fixed
   expectations).
 
+### Added — `offload_compose_video`: HyperFrames motion graphics as a CPU-class lane (ADR 0059, Proposed)
+
+- **The harness could not produce designed, text-exact motion graphics.** New tool
+  `offload_compose_video`, CLI verb `compose-video` and fleet task `compose-video` render an
+  HTML/CSS composition to MP4, WebM (VP9 alpha), MOV (ProRes 4444 alpha), GIF or a PNG sequence
+  with HyperFrames (npm `hyperframes` 0.8.61, Apache-2.0). Inputs: a vetted template plus typed
+  variables (`title-card`, `lower-third`; `render/compose-templates/`), an inline `html` page, or a
+  `project_dir`.
+- **CPU-class, no GPU lease.** Software GL (`--no-browser-gpu`) and CPU encode; `--gpu`,
+  `--browser-gpu` and `--docker` are refused. The pipeline serializes compositions on its own
+  in-process slot (`compose_busy` after `gpu_wait_ms`), never `mediaSlot` or `withGpuSlot`
+  (ADR 0026), and the fleet task is exempt from the text concurrency cap.
+- **One door, env-scrubbed.** `render/compose-hyperframes.mjs` is the only way the CLI runs:
+  - an allowlisted child env (no `*_API_KEY`, token, `NODE_OPTIONS` or `GPU_LEASE_*`) with
+    telemetry, update checks, auto-install and skills off;
+  - `--json` on every invocation, because only `--json` skips the npm and GitHub pings;
+  - a subcommand allowlist (`lint`, `check`, `render`, `snapshot`, `browser ensure|path`,
+    `--version`); `snapshot` always carries `--describe false`;
+  - a fresh empty cwd (no `.env` autoload) and a harness-owned HOME.
+  The Go side adds the same allowlist to the runner's own env (new `gpugen.Spec.EnvExact`).
+- **Gated and typed.** `lint` (0 errors), then `check`, then `render --batch` (one manifest row),
+  then an ffprobe gate on codec, size, fps, duration, alpha and audio. The payload is what ffprobe
+  measured. Failures defer with a class: `BAD_INPUT`, `LINT_ERRORS`, `CHECK_FAILED`,
+  `RENDER_FAILED`, `BROWSER_MISSING`, `FFMPEG_MISSING`, `CLI_MISSING`, `SPAWN_EBUSY` (retried
+  once, hyperframes#4058), `DISK_HEADROOM` or `TIMEOUT`.
+- **Trusted code only.** HyperFrames' Chrome runs without a sandbox, so the fleet task refuses
+  `html`, `project_dir` and `png-sequence` at ack time and renders only the node's vetted templates.
+- **Pinned install.** `setup/hyperframes/` holds the exact-version lockfile. `install.ps1` (Step 7b)
+  and `install.sh` (3b) run `npm ci --ignore-scripts`, `npm audit signatures` (fatal on failure),
+  `npm rebuild esbuild` and `browser ensure` through the runner on nodes with Node >= 22, then seed
+  `compose_script`, `hyperframes_dir` and `hyperframes_browser_path`. Older nodes print a SKIP line
+  and the lane stays NOT CONFIGURED. The 14 CUDA and Vulkan tiers that ship the render tree seed
+  `compose_script` (`render/compose-hyperframes.mjs`; `dual-gpu` and `cpu` do not); the installer
+  un-binds it where it could not install. The runner refuses an install that is not its pin
+  (`CLI_MISSING`); a test holds `PINNED_VERSION`, `package.json` and the lock's integrity together.
+- **New config keys** (all empty = NOT CONFIGURED): `compose_script`, `hyperframes_dir`,
+  `hyperframes_browser_path`, `compose_timeout_sec` (1800), `compose_workers` (`""`/`auto` or
+  1-24), `compose_cache_dir`, `compose_quality` (`high`). `doctor`, `offload_status` and
+  `acceptance` report the `compose_video` route (BOUND-BUT-MISSING per missing piece, with the
+  template list when bound).
+- Docs: ADR 0059 (Proposed), media-generation "Composition (HyperFrames)" with a Security
+  subsection, OPERATOR-GUIDE, SETUP-AGENT, README, mcp-server (Composition family row; tool count now 29),
+  glossary "Composition".
+
 ## [0.134.0] - 2026-09-22 - Qwen-Image-2.1 ships as a named, license-tagged opt-in family
 
 ### Added — Qwen-Image-2.1 as a named, license-tagged opt-in family; per-binding ComfyUI launch profile (ADR 0058)

@@ -35,9 +35,10 @@ The server runs over **stdio** and registers its tools at startup. A calling age
 calls them with JSON arguments, and receives JSON results — including Defers, which are successful
 results, not errors.
 
-**Twenty-eight tools** are registered on every box, in families. The advertised set is per-box and
-larger elsewhere: `agent_delegate` is gated on `agent_delegation_enabled`, and a box listing an
-accelerator registers 11 more (see [accelerators.md](accelerators.md)). Read `tools/list` rather
+**Twenty-nine tools** are registered on every box, in families. `.printing-press.json` lists all 31
+the code can register, and a drift test holds the two together. The advertised set is per-box:
+`agent_delegate` and `offload_research` are gated on `agent_delegation_enabled`, and a box listing
+an accelerator registers 11 more (see [accelerators.md](accelerators.md)). Read `tools/list` rather
 than any number written down:
 
 | Family | Tools |
@@ -47,6 +48,7 @@ than any number written down:
 | Speech / OCR | `offload_transcribe`, `offload_ocr` |
 | Media generation | `offload_generate_image`, `offload_generate_video`, `offload_animate_character`, `offload_generate_audio`, `offload_generate_svg` |
 | Media editing | `offload_edit_image`, `offload_inpaint_image`, `offload_edit_image_generative`, `offload_upscale_image`, `offload_media` |
+| Composition (CPU-class, no GPU lock; ADR 0059) | `offload_compose_video` |
 | Graph execution | `offload_run_graph` |
 | Agent | `agent_run`, `offload_ask`, `offload_review_diff`, `agent_rig` |
 | Delegation (opt-in: `agent_delegation_enabled`) | `agent_delegate`, `offload_research` |
