@@ -121,6 +121,12 @@ func drainUntil(ctx context.Context, p drainProbe, deadline time.Time) error {
 			last = fmt.Sprintf("cannot tell whether %s is loaded: roster unreadable (%v) and /running lists %d other model(s)", p.model, rd.RosterErr, rd.RunningOthers)
 			key = "ambiguous"
 			zeros = 0
+		case rd.Stopping:
+			// Leaving, not loading (its ttl ran out): no request waits on it, but
+			// the drain still lets the unload finish before it counts idle zeros.
+			last = "seat stopping (an unload is in progress; waiting for it to finish)" + runsClause(runs, now)
+			key = "stopping:" + runsKey(runs)
+			zeros = 0
 		case rd.Starting:
 			// A load in progress IS work in flight: the request that triggered
 			// it is waiting on the engine. seatload never touched the upstream
