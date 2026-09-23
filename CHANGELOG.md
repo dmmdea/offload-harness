@@ -6,6 +6,45 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed — sdcpp alpha default, family-only fleet gate, HyperFrames browser-ensure IPv6 hang
+
+- **sd.cpp's qwen-image-2.1 render was never byte-opaque by default, and `transparent` was refused
+  on every sdcpp binding regardless of family.** `SplitImageWithAlpha` — the ComfyUI graph's
+  channel-drop step D5 specifies for the non-transparent default — had no sdcpp equivalent, so an
+  ordinary prompt on the sdcpp engine handed back a PNG with a real (if visually subtle) alpha
+  channel (measured live on binxarn: 5.53% of pixels < 255 on a non-RGBA prompt). Separately,
+  `config.SupportsTransparentImage` excluded the sdcpp engine unconditionally
+  (`ImageGenEngine != "sdcpp"`), so `transparent:true` was refused for qwen-image-2.1 on sdcpp even
+  though sd.cpp's build of the model carries the identical RGBA VAE — the refusal message also
+  wrongly implied the fix was "run this on ComfyUI." Fixed: `SupportsTransparentImage` now follows
+  the FAMILY, not the engine; `render/sdcpp-generate.mjs` flattens the default render to opaque RGB
+  after sd-cli writes it (`render/png-alpha.mjs`, a new dependency-free RGB/RGBA PNG codec — no
+  compositing, a straight channel drop, matching `SplitImageWithAlpha`'s own behavior) and wraps the
+  prompt in the official RGBA template (`wf-qwen-image-21.mjs`'s `rgbaPrompt`, reused not
+  duplicated) when `transparent:true`; `internal/imagegen.sdcppArgs` now carries the `--transparent`
+  flag through to the runner, mirroring the ComfyUI path's `buildArgs`.
+- **The fleet HTTP door could not see or reach an image-gen family on a node with no default image
+  binding** — the shape every non-commercial opt-in family requires (ADR 0058: never the default).
+  `fleetnode.taskConfiguredFor`'s `"image-gen"` case and the `/fleet/health` `image_families`
+  advertiser both gated on the default binding alone (`config.ImageRouteConfigured`), so
+  `POST /fleet/dispatch` refused `generate_image` with `unsupported task_type` even when
+  `local-offload doctor` showed the family fully CONFIGURED and it rendered correctly through the
+  CLI door. Fixed with a new `config.ImageGenAdvertisable` (default binding OR any named family);
+  the advertised `loadable_model_families`/`image_families` no longer claim a phantom `sdxl` default
+  or an unconfigured default row for a family-only node. A request with no `family` on such a node
+  still gets the same "no image-gen route configured" defer any unconfigured node gets — never a
+  silent render of a named family as if it were the default.
+- **HyperFrames' `browser ensure` could hang indefinitely on a host with a dead IPv6 route** to
+  `storage.googleapis.com` (chrome-headless-shell's download CDN): plain `dns.lookup`'s default
+  result order returns whatever the OS resolver gives back first, with no `curl`-style
+  happy-eyeballs failover, so an IPv6 address up front stalls the whole download. `render/
+  compose-hyperframes.mjs` now passes `--dns-result-order=ipv4first` as a NODE flag (not env — the
+  scrubbed child-env allowlist is untouched) on the `browser ensure` spawn only; `browser path` and
+  every other subcommand are unaffected. The existing per-op deadline (`--timeout-sec`, default
+  900s) and typed `TIMEOUT`/`BROWSER_MISSING` `COMPOSE-FAIL` classes already bound and classify a
+  stuck ensure — both installers (`setup/install.sh`, `setup/install.ps1`) call this same runner for
+  `browser ensure`, so they inherit the fix with no changes of their own.
+
 ### Added — opencode context instrument
 
 - **`go run ./cmd/opencode-context`: the before/after gate for what opencode sends a seat.** It copies
