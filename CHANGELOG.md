@@ -111,6 +111,8 @@ Versioning: [SemVer](https://semver.org/).
   that first slipped past a vacuous test comparing `protocolText()` with itself (replaced by fixed
   expectations).
 
+## [0.135.0] - 2026-09-22 - HyperFrames motion graphics as a CPU-class composition lane
+
 ### Added — `offload_compose_video`: HyperFrames motion graphics as a CPU-class lane (ADR 0059, Proposed)
 
 - **The harness could not produce designed, text-exact motion graphics.** New tool
