@@ -15,8 +15,9 @@ Versioning: [SemVer](https://semver.org/).
   Traced to `comfy/ldm/ace/ace_step15.py`'s `AceStepConditionGenerationModel.prepare_condition` — an
   instrumental (no-lyrics) render's actual content is driven entirely by the `generate_audio_codes`
   LLM planner's own output, which degrades to a near-constant low-energy code well before the
-  requested duration; disabling the planner does not recover real content either (the model falls
-  back to the pure silence-latent reference for the whole clip). No graph/parameter change fixes
+  requested duration; disabling the planner is not a workaround either — by source-code trace (the
+  live confirmation render hit unrelated GPU-lease contention and was not retried) the model falls
+  back to the pure silence-latent reference for the whole clip instead. No graph/parameter change fixes
   this — the harness already matches the official `audio_ace_step1_5_xl_turbo` Comfy-Org template
   field for field, and no shipped official template exercises the instrumental/no-lyrics case at
   all. Separately, true peak measured at a literal 0.0 dBFS (clipping) on two of the three renders —

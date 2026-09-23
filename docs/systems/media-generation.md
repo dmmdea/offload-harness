@@ -528,11 +528,13 @@ drops to a clean, highly periodic near-silent tail for the remainder (measured a
 content is driven entirely by `lm_hints` derived from the `generate_audio_codes` LLM's
 autoregressive output (`comfy/text_encoders/ace15.py`'s `sample_manual_loop_no_classes`); with no
 lyrics to plan a song structure against, the planner's own output evidently degrades to a
-near-constant low-energy code for the tail well before the requested duration. This reproduces with
-`generate_audio_codes` **disabled** too — is_covers then falls back to the pure silence-latent
-reference (`get_silence_latent`, `comfy/model_base.py`'s `ACEStep15.extra_conds`) for the WHOLE
-clip, i.e. disabling the planner does not recover real content, it just makes the render entirely
-silent from the start. **No parameter/graph change fixes this** (the harness already matches the
+near-constant low-energy code for the tail well before the requested duration. Turning
+`generate_audio_codes` **off** is not a workaround either — by source-code trace (not independently
+re-measured live: the confirmation render hit unrelated GPU-lease contention from a concurrent
+session and was not retried) `is_covers` then falls back to the pure silence-latent reference
+(`get_silence_latent`, `comfy/model_base.py`'s `ACEStep15.extra_conds`) for the WHOLE clip — i.e.
+disabling the planner does not recover real content, it trades a partial dead tail for total
+silence. **No parameter/graph change fixes this** (the harness already matches the
 official template, and the official templates never demonstrate the instrumental/no-lyrics case at
 all — every shipped template uses full lyrics). Separately, true peak was measured at a literal
 0.0 dBFS (clipping-level) on two of the three renders with no loudness normalization anywhere in
