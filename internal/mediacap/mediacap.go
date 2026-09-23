@@ -142,6 +142,11 @@ func routesIn(cfg config.Config, exeDir string) []Route {
 		out = append(out, r)
 	}
 
+	// --- named families (ADR 0058): one verdict per family, model files included ---
+	fr, famComfy, famNode := familyRoutes(cfg, exeDir)
+	out = append(out, fr...)
+	comfyUsed, nodeUsed = comfyUsed || famComfy, nodeUsed || famNode
+
 	// --- upscale_image: script AND an ESRGAN filename, matching the pipeline's gate
 	// (config.EffectiveUpscaleModel: upscale_model, else videogen_upscale_model). The
 	// filename is a ComfyUI model NAME, reported but never stat'd — same rule as inpaint_ckpt.

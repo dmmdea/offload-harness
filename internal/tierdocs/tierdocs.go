@@ -385,12 +385,16 @@ func mediaSeedKey(k string) bool {
 	for _, p := range []string{
 		"imagegen_", "videogen_", "musicgen_", "voicegen_", "sdcpp_",
 		"inpaint_", "gen_edit_", "run_graph_", "upscale_",
+		// comfy_*: the ComfyUI install and its launch profile (comfy_dir,
+		// comfy_cuda_device, comfy_dynamic_vram, comfy_extra_args) place every
+		// ComfyUI route, so they belong on the Media heading.
+		"comfy_",
 	} {
 		if strings.HasPrefix(k, p) {
 			return true
 		}
 	}
-	return k == "vae_mode" || k == "comfy_dir" || k == "edit_python"
+	return k == "vae_mode" || k == "edit_python"
 }
 
 // mediaSeed returns the subset of seed that binds media routes — the only

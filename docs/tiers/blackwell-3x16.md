@@ -93,6 +93,7 @@ The installer seeds this tier's media bindings (`config_seed`):
 
 | key | value |
 |---|---|
+| `comfy_cuda_device` | `2` |
 | `gen_edit_preset` | `lightning8` |
 | `gen_edit_script` | `render/comfy-edit.mjs` |
 | `gen_edit_unet` | `qwen-image-edit-2511-Q5_1.gguf` |

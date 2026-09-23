@@ -60,6 +60,37 @@ type Model struct {
 	PoolVvramGB float64
 	PoolCompute string
 	PoolDonor   string
+	// Schedule is the qwen-image-2.1 sigma schedule ("official" | "comfy"; "" = the
+	// builder default). Other families never read it.
+	Schedule string
+	// Launch is this binding's ComfyUI launch profile (env for the runner). The
+	// pipeline decides it — it knows whether the binding pools, and a pooled seat's
+	// placement belongs to its pool keys, never to a device pin.
+	Launch ComfyLaunch
+}
+
+// ComfyLaunch is a binding's ComfyUI launch profile, handed to the render runner as
+// env (render/comfy-lifecycle.mjs reads it when it launches ComfyUI).
+type ComfyLaunch struct {
+	// CudaDevice becomes `--cuda-device <n>` (ComfyUI device order). "" = no pin.
+	CudaDevice string
+	// DynamicVRAM is "on" | "off" | "" (leave the extra args alone).
+	DynamicVRAM string
+	// ExtraArgs are verbatim ComfyUI flags; "" = inherit the process's COMFY_EXTRA_ARGS.
+	ExtraArgs string
+}
+
+// Env renders the profile. COMFY_CUDA_DEVICE and COMFY_DYNAMIC_VRAM are ALWAYS set,
+// empty when unbound, so a value inherited from the operator's shell can never pin
+// or reshape a route whose binding did not ask for it (the child env takes the last
+// entry per key). COMFY_EXTRA_ARGS is set only when bound, because inheriting it IS
+// the documented behaviour of an unbound box.
+func (l ComfyLaunch) Env() []string {
+	env := []string{"COMFY_CUDA_DEVICE=" + l.CudaDevice, "COMFY_DYNAMIC_VRAM=" + l.DynamicVRAM}
+	if l.ExtraArgs != "" {
+		env = append(env, "COMFY_EXTRA_ARGS="+l.ExtraArgs)
+	}
+	return env
 }
 
 // Generate runs `node <script> <out> <prompt> [--negative ..] [--width ..] ...` and
@@ -81,6 +112,7 @@ func Generate(ctx context.Context, node, script, comfyDir, out, prompt string, p
 	if timeout > 0 {
 		env = append(env, "COMFY_WAIT_SEC="+strconv.Itoa(int(timeout/time.Second)))
 	}
+	env = append(env, m.Launch.Env()...)
 	spec := gpugen.Spec{
 		Exe:     node,
 		Script:  script,
@@ -104,6 +136,11 @@ func buildArgs(out, prompt string, params map[string]any, m Model) []string {
 		if v := gpugen.AsInt(params[k]); v > 0 {
 			args = append(args, "--"+k, strconv.Itoa(v))
 		}
+	}
+	// Per-request alpha (qwen-image-2.1): every runner flag carries a value, so the
+	// boolean rides as "1". Absent/false emits nothing — the builder default is opaque.
+	if paramTrue(params["transparent"]) {
+		args = append(args, "--transparent", "1")
 	}
 	// This machine's model binding. Steps is applied only when the request did not
 	// set it (the request wins), so a caller can still tune a single render.
@@ -178,7 +215,46 @@ func bindingArgs(m Model) []string {
 	if m.PoolDonor != "" {
 		args = append(args, "--pool-donor", m.PoolDonor)
 	}
+	if m.Schedule != "" {
+		args = append(args, "--schedule", m.Schedule)
+	}
 	return args
+}
+
+// paramTrue reads a boolean request param the way every door delivers it: a JSON
+// bool, or the strings a CLI/fleet payload may carry.
+func paramTrue(v any) bool {
+	switch t := v.(type) {
+	case bool:
+		return t
+	case string:
+		switch t {
+		case "1", "true", "TRUE", "True", "yes", "on":
+			return true
+		}
+	}
+	return false
+}
+
+// paramStrings reads a []string request param from either its Go shape or the
+// []any a JSON decode produces. Empty entries are dropped.
+func paramStrings(v any) []string {
+	var out []string
+	switch t := v.(type) {
+	case []string:
+		for _, s := range t {
+			if s != "" {
+				out = append(out, s)
+			}
+		}
+	case []any:
+		for _, e := range t {
+			if s, ok := e.(string); ok && s != "" {
+				out = append(out, s)
+			}
+		}
+	}
+	return out
 }
 
 // SdcppModel is this machine's stable-diffusion.cpp binding (J2: the AMD/Vulkan
@@ -337,7 +413,18 @@ type EditModel struct {
 	// Megapixels pins the working canvas (= the output resolution). 0 means "let the
 	// runner keep the source's own resolution, capped" — see config.GenEditMegapixels.
 	Megapixels float64
+	// Family selects the edit graph in comfy-edit.mjs ("" = the 2511 default;
+	// "qwen-image-2.1" = the multi-reference graph). Resolution and CacheDevice are
+	// that graph's knobs; the 2511-only binding knobs (preset, LoRA, megapixels) are
+	// NOT emitted for it, because the runner refuses a flag its graph never reads.
+	Family      string
+	Resolution  int
+	CacheDevice string
+	Launch      ComfyLaunch
 }
+
+// EditFamilyQwenImage21 is the multi-reference 2.1 edit graph's family name.
+const EditFamilyQwenImage21 = "qwen-image-2.1"
 
 // editArgs assembles the comfy-edit.mjs argv. Pure; unit-tested. Request steps
 // wins over m.Steps (same rule as buildArgs/inpaintArgs).
@@ -359,8 +446,18 @@ func editArgs(out, image, prompt string, params map[string]any, m EditModel) []s
 	if m.Unet != "" {
 		args = append(args, "--unet", m.Unet)
 	}
-	// A per-request preset is the supported way to trade speed for fidelity.
+	if m.Family != "" {
+		args = append(args, "--family", m.Family)
+	}
+	is21 := m.Family == EditFamilyQwenImage21
+	// A per-request preset is the supported way to trade speed for fidelity. The
+	// BINDING's preset is a 2511 pairing and never rides a 2.1 edit (Default() binds
+	// lightning8 on every box); a request that names one still reaches the runner,
+	// which refuses it by name — never silently ignored.
 	preset := m.Preset
+	if is21 {
+		preset = ""
+	}
 	if s, ok := params["preset"].(string); ok && s != "" {
 		preset = s
 	}
@@ -379,11 +476,11 @@ func editArgs(out, image, prompt string, params map[string]any, m EditModel) []s
 		if s, ok := lora.(string); ok {
 			args = append(args, "--lora", s)
 		}
-	} else if m.LoRA != "" {
+	} else if m.LoRA != "" && !is21 {
 		args = append(args, "--lora", m.LoRA)
 	}
 	// != 0 for the same inverse-LoRA reason as bindingArgs above.
-	if m.LoRAStrength != 0 {
+	if m.LoRAStrength != 0 && !is21 {
 		args = append(args, "--lora-strength", strconv.FormatFloat(m.LoRAStrength, 'g', -1, 64))
 	}
 	if reqSteps := gpugen.AsInt(params["steps"]); reqSteps > 0 {
@@ -405,8 +502,22 @@ func editArgs(out, image, prompt string, params map[string]any, m EditModel) []s
 	// Omitted when unset so the runner keeps its source-measuring default. Sending a
 	// zero would be a schema violation downstream (the node's floor is 0.01), and
 	// sending the cap instead would upscale every small source.
-	if m.Megapixels > 0 {
+	if m.Megapixels > 0 && !is21 {
 		args = append(args, "--megapixels", strconv.FormatFloat(m.Megapixels, 'g', -1, 64))
+	}
+	// The multi-reference graph's inputs. References follow the target in order
+	// (images.image_2..N); the runner stages and removes each one.
+	for _, ref := range paramStrings(params["images"]) {
+		args = append(args, "--ref", ref)
+	}
+	if m.Resolution > 0 {
+		args = append(args, "--resolution", strconv.Itoa(m.Resolution))
+	}
+	if m.CacheDevice != "" {
+		args = append(args, "--cache-device", m.CacheDevice)
+	}
+	if paramTrue(params["transparent"]) {
+		args = append(args, "--transparent", "1")
 	}
 	return args
 }
@@ -418,6 +529,7 @@ func Edit(ctx context.Context, node, script, comfyDir, out, image, prompt string
 	if timeout > 0 {
 		env = append(env, "COMFY_WAIT_SEC="+strconv.Itoa(int(timeout/time.Second)))
 	}
+	env = append(env, m.Launch.Env()...)
 	return gpugen.Generate(ctx, gpugen.Spec{
 		Exe:     node,
 		Script:  script,
@@ -461,6 +573,7 @@ func GenerateBatch(ctx context.Context, node, script, comfyDir, jobsPath, result
 	if timeout > 0 {
 		env = append(env, "COMFY_WAIT_SEC="+strconv.Itoa(int(timeout/time.Second)))
 	}
+	env = append(env, m.Launch.Env()...)
 	_, err := gpugen.Generate(ctx, gpugen.Spec{
 		Exe:     node,
 		Script:  script,

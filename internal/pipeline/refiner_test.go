@@ -470,8 +470,10 @@ func TestRunGenerateImage_RefinerOffByteCompat(t *testing.T) {
 			t.Errorf("refiner-off result data must omit %q (byte-compat), got %v", k, data)
 		}
 	}
-	if len(data) != 4 { // image_path, width, height, seed — exactly today's shape
-		t.Errorf("result data keys = %v, want exactly the pre-refiner four", data)
+	// image_path, width, height, seed — and family, which every image result carries
+	// since ADR 0058 (the binding that answered: here the unnamed default).
+	if len(data) != 5 || data["family"] != "" {
+		t.Errorf("result data keys = %v, want exactly the pre-refiner four plus family", data)
 	}
 }
 

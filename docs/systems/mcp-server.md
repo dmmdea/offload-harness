@@ -35,7 +35,7 @@ The server runs over **stdio** and registers its tools at startup. A calling age
 calls them with JSON arguments, and receives JSON results — including Defers, which are successful
 results, not errors.
 
-**Twenty-six tools** are registered on every box, in families. The advertised set is per-box and
+**Twenty-eight tools** are registered on every box, in families. The advertised set is per-box and
 larger elsewhere: `agent_delegate` is gated on `agent_delegation_enabled`, and a box listing an
 accelerator registers 11 more (see [accelerators.md](accelerators.md)). Read `tools/list` rather
 than any number written down:
@@ -48,10 +48,19 @@ than any number written down:
 | Media generation | `offload_generate_image`, `offload_generate_video`, `offload_animate_character`, `offload_generate_audio`, `offload_generate_svg` |
 | Media editing | `offload_edit_image`, `offload_inpaint_image`, `offload_edit_image_generative`, `offload_upscale_image`, `offload_media` |
 | Graph execution | `offload_run_graph` |
-| Agent | `agent_run`, `offload_ask`, `offload_review_diff` |
+| Agent | `agent_run`, `offload_ask`, `offload_review_diff`, `agent_rig` |
 | Delegation (opt-in: `agent_delegation_enabled`) | `agent_delegate`, `offload_research` |
 | Remote (opt-in) | `offload_nim` |
 | Status | `offload_status` |
+
+**Named media families (ADR 0058).** `offload_generate_image` and `offload_edit_image_generative`
+take a `family` param that selects one of the box's opt-in bindings beside its default one; the
+edit tool also takes `images` (multi-reference, qwen-image-2.1 families) and both take
+`transparent`. `offload_status` lists what a `family` can name under `media.image_families` /
+`media.edit_families` (license, `commercial_use`, route verdict). A result from a family whose
+`commercial_use` is false carries `license`, `commercial_use:false` and `license_note`; the tool
+descriptions say so, so a calling agent never has to guess which outputs are research-only. See
+[media-generation.md](media-generation.md#named-families-launch-profiles-and-license-tags-adr-0058).
 
 `offload_nim` is the **only** tool that reaches a remote service. It is an explicit, caller-invoked
 side channel and is not part of the Cascade — nothing escalates or falls back into it. See

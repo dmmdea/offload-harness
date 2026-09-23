@@ -263,7 +263,7 @@ Usage:
   local-offload extract-image <image-path> --schema schema.json [--json]
   local-offload assess-image <image-path> [--brief "..."] [--json]
   local-offload generate-audio <out> "<text>" [--kind voice|music] [--voice generalist|finetuned|endpoint] [--tts-voice NAME] [--clone ref.wav] [--lang es] [--seconds N] [--seed N]
-  local-offload generate-image "<prompt>" [--negative "..."] [--width N] [--height N] [--steps N] [--seed N] [--out path] [--refine=false]
+  local-offload generate-image "<prompt>" [--negative "..."] [--width N] [--height N] [--steps N] [--seed N] [--out path] [--refine=false] [--family NAME] [--transparent]
   local-offload generate-image --batch jobs.jsonl    N prompts through ONE warm ComfyUI session (checkpoint loads once)
   local-offload inpaint-image <image> --mask m.png --prompt "..."   re-render ONLY the masked region (white=repaint)
   local-offload upscale-image <image> [--scale F] [--width N --height N] [--method lanczos] [--model name] [--out path]   ESRGAN enlarge (this machine's upscale_model)
@@ -803,11 +803,13 @@ func runGenerateImage(args []string) error {
 	seed := fs.Int("seed", 0, "RNG seed (default random)")
 	refine := fs.Bool("refine", true, "set --refine=false (the =form is required) to render the prompt verbatim, skipping this machine's opt-in prompt refiner; on --batch it applies to every job without its own \"refine\" value (no-op unless imagegen_refiner_model is configured)")
 	compactFlag := fs.Bool("compact", false, "compact (minified) JSON output")
+	family := fs.String("family", "", "named image family to render with (ADR 0058; offload_status media.image_families / doctor list them); default = this machine's default binding. A non-commercial family's result carries license, commercial_use:false and license_note")
+	transparent := fs.Bool("transparent", false, "keep an alpha channel (RGBA PNG; qwen-image-2.1 families only — any other binding defers)")
 	batchFile := fs.String("batch", "", "render a JSONL batch of jobs through ONE warm ComfyUI session (one line per job: {\"prompt\":...,\"out\"?,\"negative\"?,\"width\"?,\"height\"?,\"steps\"?,\"seed\"?,\"refine\"?})")
 	positional, flagArgs := splitArgs(args, map[string]bool{
 		"config": true, "negative": true, "out": true,
 		"width": true, "height": true, "steps": true, "seed": true,
-		"batch": true,
+		"batch": true, "family": true,
 	})
 	_ = fs.Parse(flagArgs)
 	// Boolean flags in space form ("--refine false") make the value a stray
@@ -818,6 +820,11 @@ func runGenerateImage(args []string) error {
 	}
 
 	if *batchFile != "" {
+		// A batch renders the DEFAULT binding through one warm session (RunImageBatch
+		// has no family seam); a family flag here would be silently ignored, so refuse.
+		if *family != "" || *transparent {
+			return fmt.Errorf("generate-image: --family/--transparent select a named binding for ONE render; --batch renders this machine's default binding")
+		}
 		raw, rerr := os.ReadFile(*batchFile)
 		if rerr != nil {
 			return rerr
@@ -856,6 +863,21 @@ func runGenerateImage(args []string) error {
 			}
 		}
 		payload := map[string]any{"count": len(items), "succeeded": ok, "failed": len(items) - ok, "items": items}
+		// A batch renders the DEFAULT binding, so the whole batch carries that
+		// binding's family and license (ADR 0058) at the top level too — the same
+		// keys a single render returns — and every item repeats them.
+		if _, fam, ferr := p.Cfg().ResolveImageFamily(""); ferr == nil {
+			payload["family"] = fam.Name
+			if fam.License != "" {
+				payload["license"] = fam.License
+			}
+			if fam.CommercialUse != nil {
+				payload["commercial_use"] = *fam.CommercialUse
+			}
+			if note := fam.LicenseNote(); note != "" {
+				payload["license_note"] = note
+			}
+		}
 		// Surface the refiner fallback count in the batch summary whenever a
 		// refiner is configured (0 = all jobs refined or opted out) — absent
 		// otherwise, keeping the refiner-less payload byte-identical.
@@ -914,6 +936,12 @@ func runGenerateImage(args []string) error {
 	// refiner's only request-level knob turns it off; the default is inert).
 	if !*refine {
 		params["refine"] = false
+	}
+	if *family != "" {
+		params["family"] = *family
+	}
+	if *transparent {
+		params["transparent"] = true
 	}
 	res := p.Run(context.Background(), core.Request{
 		Task:   core.TaskGenerateImage,

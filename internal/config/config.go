@@ -508,6 +508,27 @@ type Config struct {
 	// ComfyDir is the local ComfyUI install dir (passed to the script as COMFY_DIR).
 	// Default: "C:/ComfyUI" on Windows, "" (unbound) elsewhere — see DefaultComfyDir.
 	ComfyDir string `json:"comfy_dir,omitempty"`
+	// --- ComfyUI launch profile (the harness launches ComfyUI on demand) ---
+	// ComfyCudaDevice pins the SINGLE-CARD ComfyUI routes to one card: the render
+	// runner launches ComfyUI with `--cuda-device <n>`, which hides every other card.
+	// The index is in ComfyUI's own order (fastest first unless CUDA_DEVICE_ORDER says
+	// otherwise) — the SAME order the *_pool_* "cuda:N" keys use, which is NOT
+	// nvidia-smi's PCI order on a mixed box. A comma list ("1,2") is accepted. Applied
+	// to image generation when the binding is not pooled, generative edit, upscale,
+	// inpaint, animate and music; never to a pooled image/video seat (the pool keys
+	// place those) and never to run-graph (the caller's graph owns its placement).
+	// "" = no pin: ComfyUI's default device, i.e. its fastest card.
+	ComfyCudaDevice string `json:"comfy_cuda_device,omitempty"`
+	// ComfyDynamicVRAM is ComfyUI's dynamic VRAM (weight streaming) for launches this
+	// binding makes: "on" strips --disable-dynamic-vram from the extra args (a bf16 DiT
+	// larger than one card streams instead of falling back to partial offload), "off"
+	// adds it (DisTorch2 pooled seats need it off, ComfyUI-MultiGPU #191), "" leaves
+	// the extra args alone.
+	ComfyDynamicVRAM string `json:"comfy_dynamic_vram,omitempty"`
+	// ComfyExtraArgs are extra ComfyUI launch flags, whitespace-split, handed to the
+	// runner as COMFY_EXTRA_ARGS. "" = inherit the process's COMFY_EXTRA_ARGS env, the
+	// only seam before this key existed. Device flags here lose to comfy_cuda_device.
+	ComfyExtraArgs string `json:"comfy_extra_args,omitempty"`
 	// ImageGenTimeoutSec bounds one render: ComfyUI cold-start (~4min) + first SDXL
 	// render (~6min) + margin. Default 720 (12min).
 	ImageGenTimeoutSec int `json:"imagegen_timeout_sec,omitempty"`
@@ -578,6 +599,28 @@ type Config struct {
 	ImageGenPoolVvramGB float64 `json:"imagegen_pool_vvram_gb,omitempty"`
 	ImageGenPoolCompute string  `json:"imagegen_pool_compute,omitempty"`
 	ImageGenPoolDonor   string  `json:"imagegen_pool_donor,omitempty"`
+	// ImageGenSchedule picks the qwen-image-2.1 sigma schedule: "official" (the
+	// model repo's diffusers scheduler — dynamic mu, exponential shift,
+	// shift_terminal 0.02 — computed by the builder), "comfy" (ComfyUI's fixed model
+	// shift, KSampler) or "" (the builder default, official). Other families ignore it.
+	ImageGenSchedule string `json:"imagegen_schedule,omitempty"`
+	// ImageGenLicense / ImageGenCommercialUse declare the license of THIS box's default
+	// image binding (ADR 0058). When set, every generate_image result from the default
+	// binding carries them (and a license_note when commercial_use is false). Both or
+	// neither: a license with no commercial_use verdict is refused at load. Named
+	// families declare their own inside imagegen_families.
+	ImageGenLicense       string `json:"imagegen_license,omitempty"`
+	ImageGenCommercialUse *bool  `json:"imagegen_commercial_use,omitempty"`
+	// ImageGenFamilies are NAMED, opt-in image bindings beside the default one
+	// (ADR 0058): name -> an overlay of imagegen_*/sdcpp_*/comfy_* keys plus the
+	// REQUIRED "license" (string) and "commercial_use" (bool). A request selects one
+	// with the `family` param; the default binding answers when it is absent. An
+	// overlay starts from this config with every model-binding key cleared (see
+	// imageBindingKeys) — so a family is a complete binding and never inherits the
+	// default's checkpoint, LoRA or pool — keeps the route keys (script, engine,
+	// timeout, reserve) and the launch keys (comfy_*), then applies its own keys.
+	// Unknown/forbidden keys or a missing license refuse the load.
+	ImageGenFamilies map[string]FamilyOverlay `json:"imagegen_families,omitempty"`
 	// --- opt-in prompt refiner (generate_image; all engines + batch) ---
 	// ImageGenRefinerModel is the llama-swap model id (e.g. "gemma-4-12b") that
 	// expands an image prompt with concrete photographic detail before the render.
@@ -685,6 +728,27 @@ type Config struct {
 	// 2-card 16 GB box: ~4.5 min of fixed overhead (ComfyUI cold start + a 15.4 GB
 	// GGUF load) before sampling starts, then ~7 s/step.
 	GenEditTimeoutSec int `json:"gen_edit_timeout_sec,omitempty"`
+	// GenEditFamily selects the edit graph: "" / "qwen-image-edit-2511" = the 2511
+	// graph (one image, presets), "qwen-image-2.1" = the 2.1 multi-reference graph
+	// (up to 10 images, the first the target; no presets). The 2.1 weights are
+	// non-commercial, so bind it as a named gen_edit_families overlay (ADR 0058).
+	GenEditFamily string `json:"gen_edit_family,omitempty"`
+	// GenEditResolution is the 2.1 encoder's reference size (px, a multiple of 32 up
+	// to 4096; references are resized to about resolution^2). 0 = the builder default,
+	// 1024 (the official default). qwen-image-2.1 only.
+	GenEditResolution int `json:"gen_edit_resolution,omitempty"`
+	// GenEditCacheDevice places the 2.1 prefix KV cache (QwenImage21Cache): auto |
+	// gpu | cpu | off; "" = auto. "gpu" and "off" stay out of the host-RAM prefetch
+	// path that ComfyUI #16443 aborts in on dynamic-VRAM edits. qwen-image-2.1 only.
+	GenEditCacheDevice string `json:"gen_edit_cache_device,omitempty"`
+	// GenEditLicense / GenEditCommercialUse: the default edit binding's license tag,
+	// same contract as imagegen_license / imagegen_commercial_use.
+	GenEditLicense       string `json:"gen_edit_license,omitempty"`
+	GenEditCommercialUse *bool  `json:"gen_edit_commercial_use,omitempty"`
+	// GenEditFamilies are NAMED, opt-in edit bindings (gen_edit_*/comfy_* overlays +
+	// license + commercial_use), selected by the edit request's `family` param. Same
+	// rules as ImageGenFamilies; the cleared set is editBindingKeys.
+	GenEditFamilies map[string]FamilyOverlay `json:"gen_edit_families,omitempty"`
 	// --- ESRGAN-family image upscale (upscale_image) ---
 	// UpscaleScript is the path to render/comfy-upscale.mjs; shipped as a default like
 	// RunGraphScript because the runner is generic — only the MODEL is per-machine.
@@ -1717,6 +1781,12 @@ func load(path string) (Config, error) {
 	if err := validatePipelines(c.Pipelines); err != nil {
 		return c, err
 	}
+	// Named media families (ADR 0058) and the launch-profile enums: a typo'd overlay
+	// key or a family with no license would otherwise surface only as a render that
+	// silently used the wrong binding, or a result with no license tag.
+	if err := validateFamilies(c); err != nil {
+		return c, err
+	}
 	// Install the operator's tailnet zone BEFORE any endpoint is vetted — the
 	// endpoint checks below consult it, so setting it afterwards would judge this
 	// load's endpoints against the PREVIOUS value (empty on a first load, i.e.
@@ -1929,31 +1999,119 @@ func warnImageGenBindingTraps(c Config) {
 // identical MultiGPU #191 requirement as the image one, and warning on only one
 // of them meant a pooled video seat could silently un-pool with no signal.
 func warnMediaGenBindingTrapsTo(c Config, w io.Writer) {
-	if c.ImageGenFamily == "krea2" && (c.ImageGenSteps > 0) != (c.ImageGenCFG > 0) {
-		fmt.Fprintf(w, "warning: imagegen_steps/imagegen_cfg are half-bound (%d / %g) on the krea2 seat — the render route rejects the half-pair and EVERY render will defer; bind both (turbo recipe: 8 / 1.0) or neither\n",
-			c.ImageGenSteps, c.ImageGenCFG)
-	}
-	poolAux := c.ImageGenPoolCompute != "" || c.ImageGenPoolDonor != ""
-	if c.ImageGenPoolVvramGB < 0 {
-		fmt.Fprintf(w, "warning: imagegen_pool_vvram_gb %g is negative — no pool flag is emitted and the seat renders SINGLE-GPU despite the pool config\n", c.ImageGenPoolVvramGB)
-	} else if poolAux && c.ImageGenPoolVvramGB == 0 {
-		fmt.Fprintln(w, "warning: imagegen_pool_compute/donor are set but imagegen_pool_vvram_gb is 0 — pooling never engages and the seat renders SINGLE-GPU; set the vvram GiB to pool")
-	}
-	if c.ImageGenPoolVvramGB > 0 && c.ImageGenFamily != "krea2" {
-		fmt.Fprintf(w, "warning: imagegen_pool_vvram_gb is set but imagegen_family is %q — pooled loading is wired for the krea2 family only; the flags are parsed and never consulted\n", c.ImageGenFamily)
-	}
-	dynVRAMDisabled := strings.Contains(os.Getenv("COMFY_EXTRA_ARGS"), "--disable-dynamic-vram")
-	if c.ImageGenPoolVvramGB > 0 && !dynVRAMDisabled {
-		fmt.Fprintln(w, "warning: pooled image seat configured but COMFY_EXTRA_ARGS does not carry --disable-dynamic-vram — ComfyUI DynamicVRAM silently un-pools every safetensor DisTorch2 load (MultiGPU #191) unless the launch carries the flag some other way")
-	}
+	warnImageBindingTo(c, w, "")
+	warnEditBindingTo(c, w, "")
 	// The pooled VIDEO seat carries the IDENTICAL MultiGPU #191 requirement
 	// (docs/tiers/blackwell-2x16.md; render/wf-ltx25-i2v.mjs). Un-pooled, an
 	// int8 DiT that upcasts to ~39 GB at compute no longer fits the virtual pool
 	// it was measured against, so the render OOMs or silently loads single-card.
 	// Warn-only, same reasoning as the image case: a manually-started server may
 	// carry the flag, so an absent env var is a smell rather than proof.
-	if c.VideoGenPoolVvramGB > 0 && !dynVRAMDisabled {
-		fmt.Fprintln(w, "warning: pooled video seat configured but COMFY_EXTRA_ARGS does not carry --disable-dynamic-vram — ComfyUI DynamicVRAM silently un-pools every safetensor DisTorch2 load (MultiGPU #191) unless the launch carries the flag some other way")
+	if c.VideoGenPoolVvramGB > 0 {
+		switch {
+		case c.ComfyDynamicVRAM == "on":
+			fmt.Fprintln(w, "warning: comfy_dynamic_vram is on while the video seat pools (videogen_pool_vvram_gb) — ComfyUI DynamicVRAM silently un-pools every safetensor DisTorch2 load (MultiGPU #191); set it off (or \"\") on a pooled box")
+		case !c.DynamicVRAMDisabled():
+			fmt.Fprintln(w, "warning: pooled video seat configured but COMFY_EXTRA_ARGS does not carry --disable-dynamic-vram — ComfyUI DynamicVRAM silently un-pools every safetensor DisTorch2 load (MultiGPU #191) unless the launch carries the flag some other way (comfy_dynamic_vram \"off\" or comfy_extra_args)")
+		}
+		if c.ComfyCudaDevice != "" {
+			fmt.Fprintf(w, "warning: comfy_cuda_device %q is not applied to the pooled video seat — its pool keys (videogen_pool_compute/donor) place it; the pin applies to the single-card routes only\n", c.ComfyCudaDevice)
+		}
+	}
+	// Every named family is checked as the binding it resolves to, with its name in
+	// front, so a family's own traps are as loud as the default binding's. An overlay
+	// that does not resolve is skipped here: the load refuses it by name right after.
+	for _, name := range sortedFamilyNames(c.ImageGenFamilies) {
+		if cp, _, _, err := applyOverlay(c, name, c.ImageGenFamilies[name], imageOverlay); err == nil {
+			warnImageBindingTo(cp, w, fmt.Sprintf("imagegen_families[%q]: ", name))
+		}
+	}
+	for _, name := range sortedFamilyNames(c.GenEditFamilies) {
+		if cp, _, _, err := applyOverlay(c, name, c.GenEditFamilies[name], editOverlay); err == nil {
+			warnEditBindingTo(cp, w, fmt.Sprintf("gen_edit_families[%q]: ", name))
+		}
+	}
+}
+
+// DynamicVRAMDisabled reports whether a ComfyUI launched for this binding runs with
+// dynamic VRAM off: comfy_dynamic_vram decides when set, else the extra args do
+// (comfy_extra_args, else the inherited COMFY_EXTRA_ARGS env — the seam the runner
+// itself falls back to).
+func (c Config) DynamicVRAMDisabled() bool {
+	switch c.ComfyDynamicVRAM {
+	case "off":
+		return true
+	case "on":
+		return false
+	}
+	extra := c.ComfyExtraArgs
+	if extra == "" {
+		extra = os.Getenv("COMFY_EXTRA_ARGS")
+	}
+	return strings.Contains(extra, "--disable-dynamic-vram")
+}
+
+// warnImageBindingTo carries the image seat's traps for one (effective) binding.
+// where is "" for the default binding (the message text is unchanged from before the
+// families existed) or `imagegen_families["x"]: ` for a named family.
+func warnImageBindingTo(c Config, w io.Writer, where string) {
+	if c.ImageGenFamily == "krea2" && (c.ImageGenSteps > 0) != (c.ImageGenCFG > 0) {
+		fmt.Fprintf(w, "warning: %simagegen_steps/imagegen_cfg are half-bound (%d / %g) on the krea2 seat — the render route rejects the half-pair and EVERY render will defer; bind both (turbo recipe: 8 / 1.0) or neither\n",
+			where, c.ImageGenSteps, c.ImageGenCFG)
+	}
+	if c.ImageGenFamily == FamilyQwenImage21 && (c.ImageGenSteps > 0) != (c.ImageGenCFG > 0) {
+		fmt.Fprintf(w, "warning: %simagegen_steps/imagegen_cfg are half-bound (%d / %g) on the qwen-image-2.1 binding — the render route rejects the half-pair and EVERY render will defer; bind both (official recipe: 40 / 1.0) or neither\n",
+			where, c.ImageGenSteps, c.ImageGenCFG)
+	}
+	if c.ImageGenSchedule != "" && c.ImageGenFamily != FamilyQwenImage21 {
+		fmt.Fprintf(w, "warning: %simagegen_schedule %q is set but imagegen_family is %q — only the qwen-image-2.1 graph reads a schedule; the flag is parsed and never consulted\n",
+			where, c.ImageGenSchedule, c.ImageGenFamily)
+	}
+	if where == "" && c.ImageGenFamily == FamilyQwenImage21 {
+		fmt.Fprintln(w, "warning: imagegen_family is qwen-image-2.1 on the DEFAULT image binding — its weights are non-commercial (Qwen Research License) and ADR 0058 ships them only as a named imagegen_families opt-in; every un-named request on this box now renders research-only output")
+	}
+	poolAux := c.ImageGenPoolCompute != "" || c.ImageGenPoolDonor != ""
+	if c.ImageGenPoolVvramGB < 0 {
+		fmt.Fprintf(w, "warning: %simagegen_pool_vvram_gb %g is negative — no pool flag is emitted and the seat renders SINGLE-GPU despite the pool config\n", where, c.ImageGenPoolVvramGB)
+	} else if poolAux && c.ImageGenPoolVvramGB == 0 {
+		fmt.Fprintf(w, "warning: %simagegen_pool_compute/donor are set but imagegen_pool_vvram_gb is 0 — pooling never engages and the seat renders SINGLE-GPU; set the vvram GiB to pool\n", where)
+	}
+	if c.ImageGenPoolVvramGB > 0 && c.ImageGenFamily != "krea2" {
+		fmt.Fprintf(w, "warning: %simagegen_pool_vvram_gb is set but imagegen_family is %q — pooled loading is wired for the krea2 family only; the flags are parsed and never consulted\n", where, c.ImageGenFamily)
+	}
+	if c.ImageGenPoolVvramGB > 0 {
+		switch {
+		case c.ComfyDynamicVRAM == "on":
+			fmt.Fprintf(w, "warning: %scomfy_dynamic_vram is on while the image seat pools (imagegen_pool_vvram_gb) — ComfyUI DynamicVRAM silently un-pools every safetensor DisTorch2 load (MultiGPU #191); set it off (or \"\") on a pooled binding\n", where)
+		case !c.DynamicVRAMDisabled():
+			fmt.Fprintf(w, "warning: %spooled image seat configured but COMFY_EXTRA_ARGS does not carry --disable-dynamic-vram — ComfyUI DynamicVRAM silently un-pools every safetensor DisTorch2 load (MultiGPU #191) unless the launch carries the flag some other way (comfy_dynamic_vram \"off\" or comfy_extra_args)\n", where)
+		}
+		if c.ComfyCudaDevice != "" {
+			fmt.Fprintf(w, "warning: %scomfy_cuda_device %q is not applied to the pooled image seat — its pool keys (imagegen_pool_compute/donor) place it; the pin applies to the single-card routes only\n", where, c.ComfyCudaDevice)
+		}
+	}
+}
+
+// warnEditBindingTo carries the edit seat's traps for one (effective) binding.
+func warnEditBindingTo(c Config, w io.Writer, where string) {
+	if c.GenEditFamily != FamilyQwenImage21 {
+		if c.GenEditCacheDevice != "" {
+			fmt.Fprintf(w, "warning: %sgen_edit_cache_device is set but gen_edit_family is %q — only the qwen-image-2.1 edit graph has a prefix cache; the runner refuses the flag and EVERY edit will defer\n", where, c.defaultEditName())
+		}
+		if c.GenEditResolution != 0 {
+			fmt.Fprintf(w, "warning: %sgen_edit_resolution is set but gen_edit_family is %q — only the qwen-image-2.1 edit graph reads it; the runner refuses the flag and EVERY edit will defer (the 2511 canvas is gen_edit_megapixels)\n", where, c.defaultEditName())
+		}
+	} else {
+		if (c.GenEditSteps > 0) != (c.GenEditCFG > 0) {
+			fmt.Fprintf(w, "warning: %sgen_edit_steps/gen_edit_cfg are half-bound (%d / %g) on the qwen-image-2.1 edit binding — the runner rejects the half-pair and EVERY edit will defer; bind both (official recipe: 40 / 1.0) or neither\n",
+				where, c.GenEditSteps, c.GenEditCFG)
+		}
+		if c.GenEditMegapixels != 0 {
+			fmt.Fprintf(w, "warning: %sgen_edit_megapixels is set on the qwen-image-2.1 edit binding — that graph sizes by gen_edit_resolution; the runner refuses the flag and EVERY edit will defer\n", where)
+		}
+		if where == "" {
+			fmt.Fprintln(w, "warning: gen_edit_family is qwen-image-2.1 on the DEFAULT edit binding — its weights are non-commercial (Qwen Research License) and ADR 0058 ships them only as a named gen_edit_families opt-in")
+		}
 	}
 }
 

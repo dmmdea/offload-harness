@@ -64,6 +64,27 @@ func TestImageFootprintKey(t *testing.T) {
 	}
 }
 
+// TestImageFootprintKeyQwenImage21Precision: the 2.1 family ships in precisions whose
+// VRAM peaks differ ~2x, so the footprint bucket carries the DiT's precision token read
+// from its basename (most specific first; a directory name never counts).
+func TestImageFootprintKeyQwenImage21Precision(t *testing.T) {
+	for ckpt, want := range map[string]string{
+		"qwen_image_2.1_bf16.safetensors":         "bf16",
+		"qwen_image_2.1_int8_convrot.safetensors": "int8",
+		"Qwen-Image-2.1-NVFP4.safetensors":        "nvfp4",
+		"qwen_image_2.1_int4_convrot.safetensors": "int4",
+		"qwen_image_2.1.safetensors":              "",
+		"models-bf16/qwen_image_2.1.safetensors":  "",
+	} {
+		cfg := config.Default()
+		cfg.ImageGenFamily = config.FamilyQwenImage21
+		cfg.ImageGenCkpt = ckpt
+		if fam, quant := imageFootprintKey(cfg); fam != "qwen-image-2.1" || quant != want {
+			t.Errorf("imageFootprintKey(%q) = (%q, %q), want (qwen-image-2.1, %q)", ckpt, fam, quant, want)
+		}
+	}
+}
+
 // TestVideoFootprintQuant: q8_0 only when the bound Wan expert weights are the
 // Q8_0 GGUFs (either unet; case-insensitive), else node default.
 func TestVideoFootprintQuant(t *testing.T) {

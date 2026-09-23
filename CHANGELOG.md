@@ -110,6 +110,61 @@ Versioning: [SemVer](https://semver.org/).
 - Tests: 55 pass. Five mutants, each confirmed to typecheck first, are all caught — including one
   that first slipped past a vacuous test comparing `protocolText()` with itself (replaced by fixed
   expectations).
+
+## [0.134.0] - 2026-09-22 - Qwen-Image-2.1 ships as a named, license-tagged opt-in family
+
+### Added — Qwen-Image-2.1 as a named, license-tagged opt-in family; per-binding ComfyUI launch profile (ADR 0058)
+
+- **Named families (ADR 0058, Proposed).** `imagegen_families` / `gen_edit_families` add opt-in
+  bindings beside a node's default one, selected per request by `family` (`offload_generate_image`,
+  `offload_edit_image_generative`, `generate-image --family`, the fleet `image-gen` payload). An
+  overlay is a complete binding — every model-binding key is cleared before its own keys apply — and
+  MUST declare `license` + `commercial_use`; an unknown/forbidden key, a missing license or a name
+  colliding with the default refuses the config load by name. A request without `family` renders
+  exactly what it did before.
+- **Every result is license-tagged.** Results carry `family`, and `license` / `commercial_use` when
+  the binding declares them; `commercial_use:false` adds `license_note` ("research/evaluation use
+  only under <license>; not for commercial work"). The ledger row carries `license` (absent = unknown).
+  `offload_status` gains `media.image_families` / `media.edit_families` and `/fleet/health` gains
+  `image_families`, each with its license flags. Default bindings may declare `imagegen_license` /
+  `imagegen_commercial_use` (edit: `gen_edit_*`), both or neither.
+- **Qwen-Image-2.1 graphs** (`render/wf-qwen-image-21.mjs`, family `qwen-image-2.1`, needs ComfyUI
+  ≥ v0.37.0): T2I (`TextEncodeQwenImage21`, `EmptyLatentImage`, 4-channel `VAEDecode`, /32 snap,
+  default 2048², 40 steps / cfg 1 / euler) and a multi-reference edit (up to 10 images, target first,
+  `QwenImage21Cache`). `imagegen_schedule` `official` computes diffusers' dynamic-mu exponential
+  schedule with `shift_terminal` in JS (`ManualSigmas`), golden-tested to 1e-6 against the real
+  diffusers scheduler; `comfy` uses ComfyUI's fixed shift. `transparent` wraps the official RGBA
+  prompt template and keeps alpha; otherwise the output is opaque RGB. Edit knobs:
+  `gen_edit_family`, `gen_edit_resolution`, `gen_edit_cache_device`; `offload_edit_image_generative`
+  gains `images`. No tier seeds it.
+- **Per-binding ComfyUI launch profile.** `comfy_cuda_device` (`--cuda-device`, ComfyUI device
+  order; single-card routes only — never a pooled seat, never run-graph), `comfy_dynamic_vram`
+  (`on` strips `--disable-dynamic-vram`, `off` adds it) and `comfy_extra_args`. A running ComfyUI
+  whose `/system_stats` argv contradicts the profile is relaunched when the harness owns it and
+  nobody holds it, otherwise the render defers with `COMFY-PROFILE-MISMATCH: …` — never reused
+  silently. The config load warns on `on` or a device pin together with pool keys.
+- **Fixed: blackwell-3x16's single-card ComfyUI routes rendered on the display card.** ComfyUI was
+  launched with every card visible and no device flag, so edit / upscale / inpaint / animate ran on
+  `cuda:0` — the 5070 Ti driving the desktop in ComfyUI's fastest-first order. The tier now seeds
+  `comfy_cuda_device: "2"` (the 5060 Ti at PCI B5:00.0, the better-cooled card of the pair — operator
+  choice), and `TestTripleBlackwellNeverSchedulesOntoTheDisplayCard` fails a tier
+  that seeds a single-card route without a non-display pin.
+- **Fixed: an unknown `--family` rendered the SDXL graph.** `comfy-render.mjs` / `comfy-edit.mjs`
+  exit 2 on a family outside their closed set, before any GPU work.
+- **Batch results are license-tagged too.** `generate-image --batch` items and the batch payload
+  carry the default binding's `family` / `license` / `commercial_use` / `license_note`, as a single
+  render does (before, only the ledger rows carried the license).
+- **Fixed: `generate_image` reported the request's (or a guessed 1024) size.** `width`/`height` are
+  now measured from the written file on both engines; `edit_image_generative` reports them too.
+- **Fixed: doctor could not see preset-implied model files.** `comfyui model bindings` now resolves
+  a preset's Lightning LoRA and a builder's default text encoder/VAE, so a 2511 edit bound to
+  `lightning8` with its LoRA absent is a `MISSING` row; every named family gets its own
+  `generate_image:<name>` / `edit_image_generative:<name>` route verdict with its model files.
+- `offload_edit_image_generative`'s description no longer claims a ~1 MP snap (the 2511 canvas
+  follows the source within 0.9–2.0 MP). Docs: media-generation (families, 2.1, launch profile,
+  license), OPERATOR-GUIDE how-tos, SETUP-AGENT 2.1 download set with sha256, mcp-server (tool count
+  and `agent_rig` corrected), glossary ("Named family", "Launch profile"), ADR 0058.
+
 ## [0.133.1] - 2026-09-22 - the harness closes PAIR cards its dead processes left running
 
 - **A killed harness process left its PAIR card "Running" until PAIR restarted.** A `local-offload

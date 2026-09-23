@@ -366,3 +366,76 @@ func TestSdcppArgs_RequestStepsWinAndZeroBinding(t *testing.T) {
 	hasNot(t, zargs, "--vae")
 	hasNot(t, zargs, "--extra")
 }
+
+// TestBuildArgs_QwenImage21TransparentAndSchedule: transparent is a per-request flag
+// carrying a value (the runner parser consumes one), schedule a binding flag; both are
+// absent unless asked for, so every other binding renders the same command.
+func TestBuildArgs_QwenImage21TransparentAndSchedule(t *testing.T) {
+	m := Model{Ckpt: "qwen_image_2.1_bf16.safetensors", Family: "qwen-image-2.1", Schedule: "official"}
+	args := buildArgs("out.png", "p", map[string]any{"transparent": true}, m)
+	has(t, args, "--transparent", "1")
+	has(t, args, "--schedule", "official")
+	for _, off := range []map[string]any{{}, {"transparent": false}, {"transparent": "no"}} {
+		hasNot(t, buildArgs("out.png", "p", off, m), "--transparent")
+	}
+	has(t, buildArgs("out.png", "p", map[string]any{"transparent": "true"}, m), "--transparent", "1")
+	hasNot(t, buildArgs("out.png", "p", map[string]any{}, Model{Family: "krea2"}), "--schedule")
+	// schedule rides the shared binding emitter, so the batch path carries it too.
+	has(t, batchArgs("j.jsonl", "r.jsonl", m), "--schedule", "official")
+}
+
+// TestEditArgs_QwenImage21Family: the multi-reference graph's inputs thread through in
+// order, and the 2511-only BINDING knobs stay off its command line (Default() binds
+// preset lightning8 on every box — the runner would refuse it and every edit defer).
+func TestEditArgs_QwenImage21Family(t *testing.T) {
+	m := EditModel{Unet: "qwen_image_2.1_bf16.safetensors", Family: "qwen-image-2.1", CLIP: "qwen3vl_8b_bf16.safetensors",
+		VAE: "qwen_image_2.1_vae_bf16.safetensors", Preset: "lightning8", LoRA: "l.safetensors", LoRAStrength: 0.8,
+		Megapixels: 2, Resolution: 992, CacheDevice: "gpu"}
+	params := map[string]any{"images": []any{"b.png", "", "c.png"}, "transparent": true}
+	args := editArgs("o.png", "a.png", "edit", params, m)
+	has(t, args, "--family", "qwen-image-2.1")
+	has(t, args, "--resolution", "992")
+	has(t, args, "--cache-device", "gpu")
+	has(t, args, "--transparent", "1")
+	for _, f := range []string{"--preset", "--lora", "--lora-strength", "--megapixels"} {
+		hasNot(t, args, f)
+	}
+	var refs []string
+	for i, a := range args {
+		if a == "--ref" {
+			refs = append(refs, args[i+1])
+		}
+	}
+	if strings.Join(refs, ",") != "b.png,c.png" {
+		t.Fatalf("--ref order/filtering = %v in %s", refs, argv(args))
+	}
+	if args[1] != "a.png" {
+		t.Fatalf("the target stays positional: %s", argv(args))
+	}
+	// []string (a Go caller) reads the same as []any (a JSON decode).
+	if a2 := editArgs("o.png", "a.png", "e", map[string]any{"images": []string{"x.png"}}, m); !strings.Contains(argv(a2), "--ref x.png") {
+		t.Fatalf("[]string refs: %s", argv(a2))
+	}
+	// A REQUEST preset still reaches the runner, which refuses it by name.
+	has(t, editArgs("o.png", "a.png", "e", map[string]any{"preset": "full"}, m), "--preset", "full")
+	// The 2511 default keeps its binding knobs exactly as before.
+	d := editArgs("o.png", "a.png", "e", map[string]any{}, EditModel{Unet: "u.gguf", Preset: "lightning8", Megapixels: 2})
+	has(t, d, "--preset", "lightning8")
+	has(t, d, "--megapixels", "2")
+	hasNot(t, d, "--family")
+	hasNot(t, d, "--ref")
+}
+
+// TestComfyLaunchEnv: the pin and the dynamic-VRAM switch are ALWAYS set (empty when
+// unbound, so an inherited shell value cannot reach a route that did not ask for it);
+// the extra args only when bound (inheriting COMFY_EXTRA_ARGS is the unbound contract).
+func TestComfyLaunchEnv(t *testing.T) {
+	if got := argv(ComfyLaunch{}.Env()); got != "COMFY_CUDA_DEVICE= COMFY_DYNAMIC_VRAM=" {
+		t.Fatalf("unbound env = %q", got)
+	}
+	got := ComfyLaunch{CudaDevice: "1", DynamicVRAM: "on", ExtraArgs: "--verbose INFO"}.Env()
+	want := []string{"COMFY_CUDA_DEVICE=1", "COMFY_DYNAMIC_VRAM=on", "COMFY_EXTRA_ARGS=--verbose INFO"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("env = %v, want %v", got, want)
+	}
+}

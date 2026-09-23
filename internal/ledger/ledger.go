@@ -159,6 +159,12 @@ type Entry struct {
 	// pre-0.129.x rows and on any writer that stamps none, which a reader must
 	// treat as UNKNOWN DOOR, never as one of the values above.
 	Door string `json:"door,omitempty"`
+	// License is the license of the media binding that rendered the row (ADR 0058),
+	// copied from core.Meta.License: a named family always declares one, a default
+	// binding may. Absent = the binding declared none (every text row, and every
+	// pre-0.134 media row) — which a reader must treat as UNKNOWN LICENSE, never as
+	// commercial-safe.
+	License string `json:"license,omitempty"`
 	// CardsTokens is the ONE token figure a share reader wants: the tokens the
 	// cards processed for this row — the seat's prompt work (SeatTokensIn on
 	// agent rows, TokensIn on cascade rows: the same measurement under two

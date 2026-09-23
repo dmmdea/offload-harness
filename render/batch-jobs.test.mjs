@@ -2,6 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert";
 import { parseJobs, jobArgs, resultLine, JOB_PARAM_FLAGS, SHARED_BINDING_FLAGS } from "./batch-jobs.mjs";
+import { buildRenderGraph, parseRenderArgs } from "./comfy-render.mjs";
 
 test("parseJobs: valid JSONL, skips blank lines", () => {
   const jobs = parseJobs('{"prompt":"a red bike","out":"a.png","seed":7}\n\n{"prompt":"a green apple","out":"b.png"}\n');
@@ -53,6 +54,23 @@ test("jobArgs: EVERY exported binding + job flag is emitted — the composed cha
   for (const k of ["pool-vvram", "pool-compute", "pool-donor"]) {
     assert.ok(SHARED_BINDING_FLAGS.includes(k), k + " must stay in the binding list (the pooled-seat regression)");
   }
+});
+
+test("jobArgs -> comfy-render: the qwen-image-2.1 flags survive the wrapper hop and reach the graph", () => {
+  for (const k of ["schedule", "transparent"]) {
+    assert.ok(SHARED_BINDING_FLAGS.includes(k), k + " must be in the binding list or comfy-generate drops it");
+  }
+  // The composed chain, not per-hop lists: what comfy-generate emits is exactly what
+  // comfy-render parses into a graph.
+  const shared = {
+    family: "qwen-image-2.1", ckpt: "qwen_image_2.1_bf16.safetensors", clip: "qwen3vl_8b_bf16.safetensors",
+    vae: "qwen_image_2.1_vae_bf16.safetensors", schedule: "comfy", transparent: "1",
+  };
+  const argv = jobArgs({ prompt: "a sticker of a fox", out: "o.png", seed: 3 }, shared);
+  const { graph } = buildRenderGraph({ ...parseRenderArgs(argv), env: {} });
+  const types = Object.values(graph).map((n) => n.class_type);
+  assert.ok(types.includes("KSampler") && !types.includes("ManualSigmas"), "--schedule comfy reached the builder");
+  assert.ok(!types.includes("SplitImageWithAlpha"), "--transparent 1 reached the builder");
 });
 
 test("jobArgs: an EMPTY shared lora still forwards — it strips a preset's LoRA downstream", () => {

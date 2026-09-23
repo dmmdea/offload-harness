@@ -9,6 +9,7 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { spawn as nodeSpawn, spawnSync as nodeSpawnSync } from "node:child_process";
+import { readLaunchOwner, writeLaunchOwner, clearLaunchOwner, harnessLaunched, pidAlive as defaultPidAlive } from "./comfy-ownership.mjs";
 
 // resolveComfyDir: the ComfyUI install this machine drives. The old default was
 // "C:/ComfyUI" on EVERY platform, so a Linux node reported an install it cannot have and
@@ -73,13 +74,180 @@ export async function comfyUp(api = process.env.COMFY_API || "http://127.0.0.1:8
   try { const r = await fetch(api + "/system_stats", { signal: AbortSignal.timeout(8000) }); return r.ok; } catch { return false; }
 }
 
-// ensureComfy: if ComfyUI is already up, return null (don't manage someone else's).
-// Otherwise launch it on-demand with the zero-always-warm flags and poll until ready
-// (~4 min: 120 polls × 2s), returning the spawned child so the caller can kill it.
+// --- launch profile (per-binding ComfyUI launch, plan D6) ---------------------------
+//
+// The Go harness threads a binding's launch profile through the child env:
+//   COMFY_CUDA_DEVICE  — `--cuda-device <n>` (ComfyUI device order, comma list allowed).
+//                        --cuda-device HIDES every other card (main.py rewrites
+//                        CUDA_VISIBLE_DEVICES to exactly this list), so a single-card
+//                        route cannot land on a card it was not given — notably the
+//                        display card, which ComfyUI's fastest-first order makes cuda:0
+//                        on a mixed box. Never --default-device: that only REORDERS the
+//                        visible list and silently re-maps what every "cuda:N" pool key
+//                        means.
+//   COMFY_DYNAMIC_VRAM — "on" strips --disable-dynamic-vram from the extra args (a box
+//                        whose user env disables it for DisTorch2 pooling can still
+//                        stream a bf16 DiT larger than one card); "off" adds it; unset
+//                        leaves COMFY_EXTRA_ARGS alone.
+//   COMFY_EXTRA_ARGS   — verbatim extra flags (config comfy_extra_args, else the
+//                        inherited env), as before.
+// Unset profile = byte-identical launch to before.
+
+/** Flags that turn ComfyUI's dynamic VRAM off (comfy/cli_args.py enables_dynamic_vram). */
+export const DYNAMIC_VRAM_DISABLERS = Object.freeze(["--disable-dynamic-vram", "--highvram", "--gpu-only", "--novram", "--cpu"]);
+
+/** resolveLaunchProfile reads the profile from env, refusing values ComfyUI would not take. */
+export function resolveLaunchProfile(env = process.env) {
+  const cudaDevice = String(env.COMFY_CUDA_DEVICE ?? "").replace(/\s+/g, "");
+  if (cudaDevice && !/^\d+(,\d+)*$/.test(cudaDevice)) {
+    throw new Error(`COMFY_CUDA_DEVICE must be a ComfyUI device index or a comma list of them (e.g. "1" or "1,2"), got '${env.COMFY_CUDA_DEVICE}'`);
+  }
+  const dynamicVram = String(env.COMFY_DYNAMIC_VRAM ?? "").trim().toLowerCase();
+  if (dynamicVram && dynamicVram !== "on" && dynamicVram !== "off") {
+    throw new Error(`COMFY_DYNAMIC_VRAM must be on, off or unset, got '${env.COMFY_DYNAMIC_VRAM}'`);
+  }
+  return { cudaDevice, dynamicVram };
+}
+
+const profileRequested = (p) => !!(p && (p.cudaDevice || p.dynamicVram));
+
+/** Remove every `flag value` pair (and a `flag=value` form) from an argv list. */
+function stripValued(args, flag) {
+  const out = [];
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === flag) { i++; continue; }
+    if (args[i].startsWith(flag + "=")) continue;
+    out.push(args[i]);
+  }
+  return out;
+}
+
+/**
+ * launchFlags is the exact argv tail ensureComfy spawns main.py with. Base flags
+ * first, then the profile's --cuda-device, then the extra args LAST (the J4 seam's
+ * contract: extra args are the tail). The profile's device wins over a --cuda-device
+ * or --default-device the extra args carry — argparse takes the last occurrence, so
+ * leaving them in would silently override the binding.
+ */
+export function launchFlags({ reserveVram = "1.0", warm = false, extraArgs = "", profile = { cudaDevice: "", dynamicVram: "" }, warn = () => {} } = {}) {
+  const flags = ["--disable-smart-memory"];
+  // warm: a BATCH session keeps ComfyUI's model cache ON so the checkpoint loads once
+  // for N renders; the caller still tears the whole session down at the batch boundary
+  // (zero-always-warm moves from per-render to per-batch). Default stays cache-none.
+  if (!warm) flags.push("--cache-none");
+  flags.push("--reserve-vram", String(reserveVram || "1.0"));
+  // J4 seam: COMFY_EXTRA_ARGS appends verbatim (whitespace-split) launch flags —
+  // the per-box escape hatch for non-CUDA backends (--directml, device pinning)
+  // without touching shared code. Empty/unset = byte-identical launch.
+  let extra = String(extraArgs || "").split(/\s+/).filter(Boolean);
+  if (profile.cudaDevice) {
+    extra = stripValued(stripValued(extra, "--cuda-device"), "--default-device");
+    flags.push("--cuda-device", profile.cudaDevice);
+  }
+  if (profile.dynamicVram === "on") {
+    extra = extra.filter((f) => f !== "--disable-dynamic-vram");
+    const still = extra.filter((f) => DYNAMIC_VRAM_DISABLERS.includes(f));
+    if (still.length) {
+      warn(`COMFY-PROFILE-WARN: comfy_dynamic_vram=on but the extra args still carry ${still.join(" ")}, which also turns dynamic VRAM off`);
+    }
+  } else if (profile.dynamicVram === "off" && !extra.includes("--disable-dynamic-vram")) {
+    extra.push("--disable-dynamic-vram");
+  }
+  flags.push(...extra);
+  return flags;
+}
+
+/** argvFlagValue: the value of the LAST `flag v` / `flag=v` in an argv (argparse semantics). */
+function argvFlagValue(argv, flag) {
+  let v = null;
+  for (let i = 0; i < argv.length; i++) {
+    const a = String(argv[i]);
+    if (a === flag && i + 1 < argv.length) v = String(argv[i + 1]);
+    else if (a.startsWith(flag + "=")) v = a.slice(flag.length + 1);
+  }
+  return v;
+}
+
+/** argvDynamicVram: would a ComfyUI launched with this argv run dynamic VRAM (NVIDIA, torch >= 2.8)? */
+export function argvDynamicVram(argv) {
+  const a = argv.map(String);
+  if (a.includes("--enable-dynamic-vram")) return true;
+  return !a.some((f) => DYNAMIC_VRAM_DISABLERS.includes(f));
+}
+
+/**
+ * profileMismatch explains why a running ComfyUI launched with `argv` cannot serve a
+ * binding that needs `profile` ("" = it can). An unreadable argv cannot prove anything,
+ * so with a profile requested it is a mismatch, never a pass.
+ */
+export function profileMismatch(argv, profile) {
+  if (!profileRequested(profile)) return "";
+  if (!Array.isArray(argv)) {
+    return "the running ComfyUI does not report its launch argv (/system_stats system.argv), so it cannot be shown to honour this binding's launch profile";
+  }
+  const why = [];
+  if (profile.cudaDevice) {
+    const got = argvFlagValue(argv, "--cuda-device");
+    if ((got || "").replace(/\s+/g, "") !== profile.cudaDevice) {
+      why.push(`it runs with ${got ? "--cuda-device " + got : "no --cuda-device (every visible card, ComfyUI's default device first)"}; this binding needs --cuda-device ${profile.cudaDevice}`);
+    }
+  }
+  if (profile.dynamicVram) {
+    const on = argvDynamicVram(argv);
+    if ((profile.dynamicVram === "on") !== on) {
+      why.push(`it runs with dynamic VRAM ${on ? "on" : "off"}; this binding needs it ${profile.dynamicVram}`);
+    }
+  }
+  return why.join("; ");
+}
+
+/** fetchSystemArgv: the running server's sys.argv from GET /system_stats, or null. */
+export async function fetchSystemArgv(api) {
+  try {
+    const r = await fetch(api + "/system_stats", { signal: AbortSignal.timeout(8000) });
+    if (!r.ok) return null;
+    const j = await r.json();
+    const argv = j?.system?.argv;
+    return Array.isArray(argv) ? argv : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * reuseVerdict decides what to do with a ComfyUI that is ALREADY listening:
+ *   { reuse: true }                  — no profile requested, or its argv honours it;
+ *   { restart: true, pid, reason }   — the harness launched it (fingerprint match), its
+ *                                      spawner is gone, and its profile is wrong: ours
+ *                                      to replace;
+ *   { reuse: false, reason }         — anything else: refuse (COMFY-PROFILE-MISMATCH).
+ * A foreign instance is never killed — the harness cannot know what else it serves.
+ */
+export async function reuseVerdict({ api, comfyDir, profile, systemArgv = fetchSystemArgv, readLaunch = readLaunchOwner, alive = defaultPidAlive }) {
+  if (!profileRequested(profile)) return { reuse: true };
+  const argv = await systemArgv(api);
+  const reason = profileMismatch(argv, profile);
+  if (!reason) return { reuse: true };
+  const marker = comfyDir ? readLaunch(comfyDir) : null;
+  if (harnessLaunched(marker, argv, alive)) {
+    if (typeof marker.ownerPid === "number" && marker.ownerPid !== process.pid && alive(marker.ownerPid)) {
+      return { reuse: false, reason: `${reason} — it is harness-launched but still in use by process ${marker.ownerPid}` };
+    }
+    return { restart: true, pid: marker.pid, reason };
+  }
+  return { reuse: false, reason: `${reason} — it was not started by this harness, so it is not reused (stop it, or start it with the binding's flags)` };
+}
+
+// ensureComfy: if ComfyUI is already up, reuse it — unless this binding carries a launch
+// profile the running instance contradicts (then: restart it when the harness launched
+// it and nobody holds it, otherwise refuse with a COMFY-PROFILE-MISMATCH line; never
+// render a single-card binding on whatever card a foreign instance happens to default
+// to). Otherwise launch it on-demand with the zero-always-warm flags and poll until
+// ready, returning the spawned child so the caller can kill it.
 // --reserve-vram holds VRAM back for the Windows display/WDDM; 1.0 leaves the most for
 // the GGUF model on 8GB — it is PER-WORKFLOW-OVERRIDABLE (invariant 5: raise to 1.5-2.0
-// for Wan; ACE-Step differs). Deps (comfyUp/spawn/timing) are injectable for tests only;
-// production calls use the real defaults.
+// for Wan; ACE-Step differs). Deps (comfyUp/spawn/timing/profile readers) are injectable
+// for tests only; production calls use the real defaults.
 export async function ensureComfy(opts = {}) {
   const {
     api = process.env.COMFY_API || "http://127.0.0.1:8188",
@@ -90,32 +258,58 @@ export async function ensureComfy(opts = {}) {
     comfyUp: up = comfyUp,
     spawn = nodeSpawn,
     envFor = cudaVisibleEnv,
+    env = process.env,
+    systemArgv = fetchSystemArgv,
+    readLaunch = readLaunchOwner,
+    writeLaunch = writeLaunchOwner,
+    clearLaunch = clearLaunchOwner,
+    alive = defaultPidAlive,
+    killPid = (pid) => process.kill(pid),
+    log = (line) => console.error(line),
     pollMs = 2000,
     // Startup budget: a laptop cold start (custom nodes + models on a slow disk)
     // legitimately exceeds the old hardcoded ~4 min. Default 10 min, env-tunable
     // (COMFY_START_WAIT_SEC) — same pattern as the render polls' COMFY_WAIT_SEC.
     maxPolls = Math.max(1, Math.ceil(Number(process.env.COMFY_START_WAIT_SEC || 600) * 1000 / 2000)),
+    stopPolls = 15,
   } = opts;
-  if (await up(api)) return null; // already running — don't manage it
+  const profile = resolveLaunchProfile(env);
+  if (await up(api)) {
+    const v = await reuseVerdict({ api, comfyDir, profile, systemArgv, readLaunch, alive });
+    if (v.reuse) return null; // already running and fit for this binding — don't manage it
+    if (!v.restart) {
+      const line = "COMFY-PROFILE-MISMATCH: ComfyUI on " + api + ": " + v.reason;
+      log(line);
+      throw new Error(line);
+    }
+    // Ours, orphaned (a --keep-comfy session or a crashed teardown), wrong profile:
+    // replace it rather than render on the wrong card.
+    log(`COMFY-PROFILE-RESTART: stopping harness-launched ComfyUI pid ${v.pid} on ${api} (${v.reason})`);
+    try { killPid(v.pid); } catch {}
+    let down = false;
+    for (let i = 0; i < stopPolls; i++) {
+      await new Promise((r) => setTimeout(r, pollMs));
+      if (!(await up(api))) { down = true; break; }
+    }
+    if (!down) {
+      const line = `COMFY-PROFILE-MISMATCH: ComfyUI on ${api} (harness-launched pid ${v.pid}) did not stop after a kill: ${v.reason}`;
+      log(line);
+      throw new Error(line);
+    }
+    try { clearLaunch(comfyDir); } catch {}
+  }
   // An unbound COMFY_DIR must fail with its reason, not with a bad cwd from spawn(): on a
   // machine with no ComfyUI binding the caller's defer should say WHY.
   if (!comfyDir) {
     throw new Error("COMFY_DIR is not set — this machine has no ComfyUI install bound (set comfy_dir in the harness config)");
   }
-  const reserve = String(reserveVram || "1.0");
-  // warm: a BATCH session keeps ComfyUI's model cache ON so the checkpoint loads once
-  // for N renders; the caller still tears the whole session down at the batch boundary
-  // (zero-always-warm moves from per-render to per-batch). Default stays cache-none.
-  const flags = ["--disable-smart-memory"];
-  if (!warm) flags.push("--cache-none");
-  flags.push("--reserve-vram", reserve);
-  // J4 seam: COMFY_EXTRA_ARGS appends verbatim (whitespace-split) launch flags —
-  // the per-box escape hatch for non-CUDA backends (--directml, device pinning)
-  // without touching shared code. Empty/unset = byte-identical launch.
-  if (process.env.COMFY_EXTRA_ARGS) {
-    flags.push(...process.env.COMFY_EXTRA_ARGS.split(/\s+/).filter(Boolean));
-  }
-  const spawnEnv = envFor();
+  const flags = launchFlags({ reserveVram, warm, extraArgs: env.COMFY_EXTRA_ARGS, profile, warn: log });
+  // A --cuda-device launch has already scoped the cards (main.py rewrites
+  // CUDA_VISIBLE_DEVICES to it), so the multi-GPU visibility restore below does not
+  // apply — and neither does its --disable-pinned-memory: one visible card is not the
+  // multi-device pinned-transfer case, and pinned memory is what keeps a streamed
+  // (dynamic VRAM) bf16 DiT fast.
+  const spawnEnv = flags.includes("--cuda-device") ? env : envFor();
   // Upstream's own guidance for the multi-GPU Windows path it now hides by default:
   // "pass --cuda-device all --disable-pinned-memory" — pinned memory with multiple
   // visible devices risks CUDA host-transfer failures on Windows (#15737). We restore
@@ -125,6 +319,12 @@ export async function ensureComfy(opts = {}) {
     flags.push("--disable-pinned-memory");
   }
   const child = spawn(py, ["main.py", ...flags], { cwd: comfyDir, stdio: "ignore", detached: false, env: spawnEnv });
+  // Record the launch so a later job can tell this instance from a foreign one (the
+  // fingerprint is pid + this exact argv). Best-effort: without it, a later profile
+  // mismatch refuses instead of restarting — the safe direction.
+  if (child && typeof child.pid === "number") {
+    try { writeLaunch(comfyDir, { pid: child.pid, ownerPid: process.pid, args: ["main.py", ...flags], profile }); } catch {}
+  }
   for (let i = 0; i < maxPolls; i++) {
     await new Promise((r) => setTimeout(r, pollMs));
     if (await up(api)) return child;

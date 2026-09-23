@@ -1,6 +1,7 @@
 package mediacap
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -231,6 +232,49 @@ func ModelBindings(cfg config.Config) []Binding {
 			continue
 		}
 		out = append(out, resolveBinding(roots, key, name, expectedClasses[key]))
+	}
+	// Files the default bindings' graphs load WITHOUT a key naming them: a builder's
+	// default text encoder/VAE and a preset's distillation LoRA. These were invisible —
+	// the reference box's 2511 edit route is bound to preset lightning8 with gen_edit_lora unset,
+	// and the Lightning LoRA that preset loads was absent from every models root while
+	// doctor stayed green. Only routes that are actually bound are checked.
+	if cfg.ImageGenScript != "" && cfg.ImageGenEngine != "sdcpp" {
+		out = append(out, familyModelBindings(roots, cfg, "", nil, impliedImageFiles(cfg))...)
+	}
+	if cfg.GenEditScript != "" && cfg.GenEditUnet != "" {
+		out = append(out, familyModelBindings(roots, cfg, "", nil, impliedEditFiles(cfg))...)
+	}
+	// Every named family's files, labelled with the family's config path, resolved
+	// under the family's own comfy_dir (an overlay may point at a side-by-side install).
+	for _, fi := range cfg.ImageFamilies() {
+		if fi.Default {
+			continue
+		}
+		fcfg, _, err := cfg.ResolveImageFamily(fi.Name)
+		if err != nil || fcfg.ImageGenEngine == "sdcpp" {
+			continue // sd.cpp binds full paths, stat'd by the family's route verdict
+		}
+		froots := ModelRoots(fcfg.ComfyDir)
+		if len(froots) == 0 {
+			continue
+		}
+		out = append(out, familyModelBindings(froots, fcfg, fmt.Sprintf("imagegen_families[%q].", fi.Name),
+			imageFamilyModelKeys, impliedImageFiles(fcfg))...)
+	}
+	for _, fi := range cfg.EditFamilies() {
+		if fi.Default {
+			continue
+		}
+		fcfg, _, err := cfg.ResolveEditFamily(fi.Name)
+		if err != nil {
+			continue
+		}
+		froots := ModelRoots(fcfg.ComfyDir)
+		if len(froots) == 0 {
+			continue
+		}
+		out = append(out, familyModelBindings(froots, fcfg, fmt.Sprintf("gen_edit_families[%q].", fi.Name),
+			editFamilyModelKeys, impliedEditFiles(fcfg))...)
 	}
 	return out
 }
