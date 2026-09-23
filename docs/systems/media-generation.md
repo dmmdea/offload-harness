@@ -777,7 +777,9 @@ and `lower-third` webm at 30.4 s. Neither worker setting wins consistently on a 
   isolation disabled. `html` and `project_dir` are accepted only from the local MCP and CLI doors, the
   same trusted-caller posture as `run-graph`. The fleet door is not token-gated
   ([ADR 0023](../architecture/decisions/0023-agent-lane-tailnet-auth-and-locality.md)), so it refuses
-  both at ack time and renders only the node's vetted templates. Template variables reach the page
+  both at ack time and renders only the node's vetted templates. It also ignores a caller's `out`:
+  the node writes `<media_dir>/compose-<hash8>.<ext>`, the same rule every fleet media task follows
+  ([fleet-node.md](fleet-node.md)). Template variables reach the page
   as text (`data-var-text`) and as sanitized CSS custom properties, never as markup.
 - **No cloud path is wired.** The runner allows only `lint`, `check`, `render`, `snapshot`,
   `browser ensure|path` and `--version`. `init`, `skills`, `cloud`, `lambda`, `cloudrun`, `capture`,

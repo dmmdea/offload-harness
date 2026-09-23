@@ -83,8 +83,11 @@ its runner.
 6. **Trusted code.** Compositions run in an unsandboxed Chrome. `html` and `project_dir` are
    accepted from the local MCP and CLI doors, which are trusted callers like `run_graph`. The fleet
    door, which is not token-gated, accepts **only** the node's vetted templates, with typed and
-   escaped variables. Vetted templates declare their fonts locally and reference no URL, so a render
-   is offline.
+   escaped variables. For the same reason it drops a caller's `out`, so a tailnet peer can never
+   name the file the node writes or overwrites. The output goes to
+   `<media_dir>/compose-<hash8>.<ext>`, which `/fleet/media` serves by bare name. Every fleet media
+   task follows the same rule. Vetted templates declare their fonts locally and reference no URL,
+   so a render is offline.
 
 ## Consequences
 

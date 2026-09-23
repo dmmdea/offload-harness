@@ -931,8 +931,15 @@ never a local run. `meta.node` / `meta.placement` on the result say where it ran
   field addition needs a node upgrade first. (The agent contract **inside** the envelope is
   the deliberate exception — its payload decoder ignores unknown fields so staggered node
   deploys interoperate; version skew is caught by its explicit `schema_version` instead.)
-- **Payload paths (`out` / `out_dir` / `still` / `audio`) are node-local writable paths**,
-  taken as given. That's the tailnet-trust posture restated: anyone who can dispatch can
+- **A remote media task never chooses where the node writes.** Media dispatch carries no token,
+  so a caller's `out` (image-gen, video-gen, animate, audio-gen, compose-video) or `out_dir`
+  (run-graph) is ignored. It is not refused, so an older payload keeps working. The node writes
+  its own `<media_dir>/<task>-<hash8>.<ext>` (run-graph: `<media_dir>`), and the result names that
+  path. The caller fetches it by bare name from `GET /fleet/media/{name}`, which only ever served
+  files directly inside `media_dir`. Before this rule, a caller-named path let any tailnet peer
+  make the node overwrite any file its account could write.
+- **Payload input paths (`still`, `ref`, `driver`, `clone`, `audio`) are node-local readable
+  paths**, taken as given. That's the tailnet-trust posture restated: anyone who can dispatch can
   already run renders; don't extend reach beyond the tailnet.
 - `priority` is accepted and ignored (contract-reserved).
 - **Media lanes carry no auth** — the trusted-network posture above is the boundary; revisit

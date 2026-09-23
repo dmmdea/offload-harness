@@ -155,6 +155,25 @@ Versioning: [SemVer](https://semver.org/).
   subsection, OPERATOR-GUIDE, SETUP-AGENT, README, mcp-server (Composition family row; tool count now 29),
   glossary "Composition".
 
+### Security — a remote media task's output never leaves the node's media dir
+
+- **Any tailnet peer could make a fleet node overwrite any file its account could write.** Media
+  dispatch is not token-gated (ADR 0023), and the fleet builders forwarded a caller's `out`
+  verbatim: `buildImageGen`, `buildVideoGen`, `buildAnimate`, `buildAudioGen` and the new
+  `compose-video` task. `buildRunGraph` did the same with `out_dir`. The pipeline wrote there, and
+  the compose runner replaces an existing file.
+- The builders now drop those keys and the pipeline writes its own
+  `<media_dir>/<task>-<hash8>.<ext>` (run-graph: `<media_dir>`). A stray key is ignored, not
+  refused, so older payloads keep working. No current caller changes: results are fetched by
+  bare name from `GET /fleet/media/{name}`, which only serves files directly inside `media_dir`.
+  The console client reads the returned path's basename. The local MCP and CLI doors keep `out`.
+- Tests: `TestRemoteMediaTaskOutNeverReachesThePipeline` tries absolute, `..`, UNC,
+  drive-relative, existing-file and bare-name targets against every writer.
+  `TestEveryFleetWriterIsCoveredByTheOutRule` fails on a new file-writing task left out of that
+  table. `TestFleetComposeWritesOnlyUnderTheMediaDir` runs a hostile dispatch end to end through
+  `Pipeline.Run` and checks the named file is untouched. Docs: FLEET-NODE, fleet-node.md,
+  ADR 0059.
+
 ## [0.134.0] - 2026-09-22 - Qwen-Image-2.1 ships as a named, license-tagged opt-in family
 
 ### Added — Qwen-Image-2.1 as a named, license-tagged opt-in family; per-binding ComfyUI launch profile (ADR 0058)

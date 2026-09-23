@@ -59,7 +59,7 @@ func TestBuildRequestComposeVideo(t *testing.T) {
 		t.Fatalf("task = %q", req.Task)
 	}
 	want := map[string]any{"template": "lower-third", "variables": map[string]any{"name": "A", "duration": 5.0}, "format": "webm",
-		"fps": 30.0, "quality": "high", "workers": 2.0, "strict": false, "snapshots": []float64{1, 2.5}, "out": "/x/lt.webm"}
+		"fps": 30.0, "quality": "high", "workers": 2.0, "strict": false, "snapshots": []float64{1, 2.5}}
 	if !reflect.DeepEqual(req.Params, want) {
 		t.Fatalf("params = %#v\nwant %#v", req.Params, want)
 	}

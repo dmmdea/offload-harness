@@ -25,6 +25,10 @@ import (
 // templates (render/compose-templates) with typed, escaped variables are the fleet
 // surface. png-sequence is refused too: it writes a DIRECTORY, which /fleet/media
 // (bare file names only) cannot serve back.
+//
+// A caller's `out` is dropped for the same trust-boundary reason (see the media-builder
+// comment in tasks.go): the node writes to <media_dir>/compose-<hash8>.<ext>, with the
+// snapshots beside it, and never to a path a tailnet peer named.
 const ComposeTask = "compose-video"
 
 var composeFleetTemplate = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,63}$`)
@@ -37,7 +41,6 @@ func buildComposeVideo(payload json.RawMessage) (core.Request, func(), error) {
 		Variables  map[string]any  `json:"variables"`
 		HTML       json.RawMessage `json:"html"`
 		ProjectDir json.RawMessage `json:"project_dir"`
-		Out        string          `json:"out"`
 		Format     string          `json:"format"`
 		FPS        float64         `json:"fps"`
 		Quality    string          `json:"quality"`
@@ -65,7 +68,7 @@ func buildComposeVideo(payload json.RawMessage) (core.Request, func(), error) {
 	if in.Variables != nil {
 		params["variables"] = in.Variables
 	}
-	for k, v := range map[string]string{"out": in.Out, "format": in.Format, "quality": in.Quality, "resolution": in.Resolution} {
+	for k, v := range map[string]string{"format": in.Format, "quality": in.Quality, "resolution": in.Resolution} {
 		if v != "" {
 			params[k] = v
 		}

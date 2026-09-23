@@ -11,6 +11,7 @@ import (
 
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/fleetnode"
 )
 
 // composeProbe is what the stub compose runner reports about how it was spawned.
@@ -317,5 +318,45 @@ func TestComposeLaneIsNotAGPURunner(t *testing.T) {
 	}
 	if callsWithGpuSlot(string(b)) || strings.Contains(string(b), "gpu-lock.mjs") {
 		t.Fatal("render/compose-hyperframes.mjs takes a GPU slot; the compose lane is CPU-class and must not")
+	}
+}
+
+// TestFleetComposeWritesOnlyUnderTheMediaDir is the fleet trust boundary end to end: a
+// remote compose-video dispatch naming an EXISTING file outside media_dir (and a `..`
+// escape) as its out goes through fleetnode.BuildRequest and Pipeline.Run, and the runner
+// is told to write under media_dir — the named file is never touched.
+func TestFleetComposeWritesOnlyUnderTheMediaDir(t *testing.T) {
+	requireNodePipeline(t)
+	for _, name := range []string{"existing file", "traversal"} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			cfg := composeCfg(t, dir, writeComposeStub(t, dir, "ok"))
+			victim := filepath.Join(dir, "victim.mp4")
+			if err := os.WriteFile(victim, []byte("do not overwrite"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			target := victim
+			if name == "traversal" {
+				target = filepath.Join(cfg.MediaDir, "..", "victim.mp4")
+			}
+			raw, _ := json.Marshal(map[string]any{"template": "title-card", "out": target})
+			req, cleanup, err := fleetnode.BuildRequest(context.Background(), cfg, true, fleetnode.ComposeTask, raw)
+			if err != nil {
+				t.Fatalf("BuildRequest: %v", err)
+			}
+			defer cleanup()
+			res := (&Pipeline{cfg: cfg}).Run(context.Background(), req)
+			if !res.OK {
+				t.Fatalf("deferred: %s", res.Reason)
+			}
+			out, _ := argAfter(readComposeProbe(t, dir).Argv, "--out")
+			rel, err := filepath.Rel(cfg.MediaDir, out)
+			if err != nil || filepath.IsAbs(rel) || strings.HasPrefix(rel, "..") || filepath.Dir(rel) != "." {
+				t.Fatalf("the runner was told to write %q, not directly under media_dir %q", out, cfg.MediaDir)
+			}
+			if b, _ := os.ReadFile(victim); string(b) != "do not overwrite" {
+				t.Fatalf("the caller-named file was overwritten: %q", b)
+			}
+		})
 	}
 }
