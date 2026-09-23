@@ -91,6 +91,30 @@ Versioning: [SemVer](https://semver.org/).
   rendered per-seat status files (`seat-l2-<seat id>.status`).
 - Comments: the default L1 staging is 2 GB (`EffectiveL1StagingGB`), not 8; the 3-card box's
   agent alias is `agent-pool`.
+
+### Changed — opencode integration 0.2.0: the primary agent sees only the Tier-1 tools
+
+- **opencode loaded every harness tool schema into every local session.** opencode has no
+  deferred tool search, so the ~25 harness MCP tools cost a 64k local primary ~18k tokens before
+  the first message. Measured on opencode 1.18.31, first-turn input tokens: all tools **30,856**,
+  Tier-1 only **12,528**, no harness MCP **11,661**.
+- New plugin option `primaryTools` (default `"tier1"`). The `config` hook writes `permission`
+  rules — `<mcp>_*` deny, the four Tier-1 tools allow (broad deny first: rules apply in order),
+  and `<mcp>_*` allow on the offload subagent, including a user-defined one the plugin did not
+  create. Keys the user already set are never touched. `"all"` restores the previous behaviour.
+- The injected protocol has a Tier-1 variant: the four tools directly, everything else as `task`
+  legs to the offload subagent. It never names a tool the primary cannot see.
+- Fixed while wiring it: the protocol de-duplication keyed on the literal
+  `three-lane dispatch (house protocol`; a variant without it was injected twice per turn. Both
+  variants now carry the exported `PROTOCOL_MARKER`, and the test asserts once-only in both modes.
+- Tests: 55 pass. Five mutants, each confirmed to typecheck first, are all caught — including one
+  that first slipped past a vacuous test comparing `protocolText()` with itself (replaced by fixed
+  expectations).
+
+## [0.135.2] - 2026-09-22 - the GPU lease survives a concurrent reader on Windows
+
+### Fixed — the lease record's rename-over retries the Windows sharing race
+
 - **The GPU lease's rename-over could fail on Windows under an ordinary concurrent reader.**
   `Manager.Restamp` (the DRAINING -> EXCLUSIVE stamp `gpu reserve --drain` applies once the seat
   goes idle) renamed a fresh record over `meta.json` with a single `os.Rename`; on Windows,
@@ -112,25 +136,6 @@ Versioning: [SemVer](https://semver.org/).
   `TestDrainGivesUpOnAnUnchangedBusyStateBeforeTheDeadline`'s one observed flake (under full-suite
   load, 8/8 clean alone) does not touch `gpulease` at all — a different cause, a tight no-progress
   timing bound (`stuckAfter: 80ms`) under CPU contention, not this race.
-
-### Changed — opencode integration 0.2.0: the primary agent sees only the Tier-1 tools
-
-- **opencode loaded every harness tool schema into every local session.** opencode has no
-  deferred tool search, so the ~25 harness MCP tools cost a 64k local primary ~18k tokens before
-  the first message. Measured on opencode 1.18.31, first-turn input tokens: all tools **30,856**,
-  Tier-1 only **12,528**, no harness MCP **11,661**.
-- New plugin option `primaryTools` (default `"tier1"`). The `config` hook writes `permission`
-  rules — `<mcp>_*` deny, the four Tier-1 tools allow (broad deny first: rules apply in order),
-  and `<mcp>_*` allow on the offload subagent, including a user-defined one the plugin did not
-  create. Keys the user already set are never touched. `"all"` restores the previous behaviour.
-- The injected protocol has a Tier-1 variant: the four tools directly, everything else as `task`
-  legs to the offload subagent. It never names a tool the primary cannot see.
-- Fixed while wiring it: the protocol de-duplication keyed on the literal
-  `three-lane dispatch (house protocol`; a variant without it was injected twice per turn. Both
-  variants now carry the exported `PROTOCOL_MARKER`, and the test asserts once-only in both modes.
-- Tests: 55 pass. Five mutants, each confirmed to typecheck first, are all caught — including one
-  that first slipped past a vacuous test comparing `protocolText()` with itself (replaced by fixed
-  expectations).
 
 ## [0.135.1] - 2026-09-22 - a GPU lease fences in-flight probes, the chat lane and the embedder; a media drain no longer deadlocks
 
