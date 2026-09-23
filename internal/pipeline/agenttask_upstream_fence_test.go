@@ -89,7 +89,8 @@ func TestALeaseTakenDuringAdmissionLoadsNothingAndDefersCapacity(t *testing.T) {
 	fake.running = func(int64) string { ll.take(t, fake); return `{"running":[]}` }
 	srv := fake.server(t)
 	defer srv.Close()
-	p := lateLeasePipeline(t, srv.URL, root, 2)
+	// 5 s: over one admission poll (3 s), so the warm-up runs — and holds.
+	p := lateLeasePipeline(t, srv.URL, root, 5)
 
 	contract := testContract()
 	wire, err := p.RunAgentContract(context.Background(), contract, AgentContractOptions{})
@@ -112,6 +113,13 @@ func TestALeaseTakenDuringAdmissionLoadsNothingAndDefersCapacity(t *testing.T) {
 	}
 	if loops.Load() != 0 {
 		t.Errorf("the loop ran %d time(s) behind the fence", loops.Load())
+	}
+	// The warm-up held behind the fence, and that wait is admission time.
+	if !strings.Contains(wire.AdmissionNote, "warm-up held behind the GPU lease") {
+		t.Errorf("admission_note must say the warm-up held behind the lease: %q", wire.AdmissionNote)
+	}
+	if wire.AdmissionWaitSec < 4 {
+		t.Errorf("admission_wait_sec = %v, want the ~5 s the warm-up spent behind the fence", wire.AdmissionWaitSec)
 	}
 }
 

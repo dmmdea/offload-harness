@@ -352,12 +352,15 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	var coldLoaded bool        // the warm-up ATTEMPTED a load this run (D-118 reads this, never coldLoad > 0: a sub-tick load measures 0)
 	act.Phase("cold-load")
 	warmed, warmNote, warmAttempted := warmSeat(ctx, p.cfg.Endpoint, seat, admissionBudget(p.cfg.AgentAdmissionWaitSec)-admitted)
+	// Admission time whether or not a load was attempted: a warm-up held behind
+	// a GPU lease (2026-09-22) spends the budget waiting and loads nothing. Every
+	// other non-attempt returns zero, so this changes nothing else.
+	admitted += warmed
 	if warmAttempted {
 		// coldLoaded is "the warm-up ATTEMPTED a load", and warmSeat is the only
 		// thing that knows it: a sub-tick load measures 0 and, since W-08, a note
 		// is also returned by exits that warmed nothing. Deriving it from either
 		// silently un-fired the D-118 coherence probe on a fast box.
-		admitted += warmed
 		coldLoad = warmed
 		coldLoaded = true
 	}
