@@ -505,3 +505,43 @@ func TestRunGenerateAudio_UnknownVoiceDefers(t *testing.T) {
 		t.Fatalf("unknown voice must defer, got ok=%v", res.OK)
 	}
 }
+
+// TestRunGenerateVideo_PassesWanSplitAndFast: the Wan DisTorch2 split is this box's
+// config (videogen_wan_virtual_vram_gb), not a constant in the graph builder — the
+// pipeline hands the runner the configured value, the default config hands it the
+// builder's own 7, and 0 hands it nothing. fast=true reaches the runner as --fast.
+func TestRunGenerateVideo_PassesWanSplitAndFast(t *testing.T) {
+	requireNodePipeline(t)
+	run := func(t *testing.T, vvram float64, params map[string]any) []string {
+		t.Helper()
+		dir := t.TempDir()
+		cfg := config.Default()
+		cfg.VideoGenScript = writeArgStub(t, dir)
+		cfg.MediaDir = dir
+		cfg.VideoGenWanVirtualVramGB = vvram
+		p := &Pipeline{cfg: cfg}
+		res := p.Run(context.Background(), core.Request{Task: core.TaskGenerateVideo, Input: "a slow push in", Params: params})
+		if !res.OK {
+			t.Fatalf("expected ok via stub, got defer: %s", res.Reason)
+		}
+		var out struct {
+			VideoPath string `json:"video_path"`
+		}
+		if err := json.Unmarshal(res.Data, &out); err != nil {
+			t.Fatal(err)
+		}
+		return readArgs(t, out.VideoPath)
+	}
+	if args := run(t, 4.5, nil); !hasFlagVal(args, "wan-vvram-gb", "4.5") {
+		t.Fatalf("a measured split must reach the runner as --wan-vvram-gb 4.5; args=%v", args)
+	}
+	if args := run(t, config.Default().VideoGenWanVirtualVramGB, nil); !hasFlagVal(args, "wan-vvram-gb", "7") {
+		t.Fatalf("the default config must pass the builder's 7; args=%v", args)
+	}
+	if args := run(t, 0, nil); hasFlag(args, "wan-vvram-gb") {
+		t.Fatalf("0 must pass no split (the builder keeps its default); args=%v", args)
+	}
+	if args := run(t, 7, map[string]any{"fast": true}); !hasFlag(args, "fast") {
+		t.Fatalf("fast=true must reach the runner as --fast; args=%v", args)
+	}
+}

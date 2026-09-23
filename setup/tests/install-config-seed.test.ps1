@@ -299,6 +299,40 @@ foreach ($t in @($profiles.PSObject.Properties.Name)) {
   }
 }
 
+# --- The 26B download follows the resolved include_26b (OptiPlex parity audit, 2026-09-23) --
+# Step 5 added 'model-26b' on the family gate alone, so blackwell-8 (include_26b false,
+# moe_26b drop) downloaded 14.25 GB the rendered yaml never serves.
+Write-Host ""
+Write-Host "== Get-FamilyModelKeys: the 26B download honours the tier =="
+Assert ([bool](Get-Command Get-FamilyModelKeys -ErrorAction SilentlyContinue)) 'dot-source seam defines Get-FamilyModelKeys'
+$fam26 = @(Get-FamilyModelKeys -WithFamily $true -Include26B $true)
+Assert (($fam26 -contains 'model-e2b') -and ($fam26 -contains 'model-26b') -and $fam26.Count -eq 2) 'family + include_26b -> E2B and 26B'
+$famNo26 = @(Get-FamilyModelKeys -WithFamily $true -Include26B $false)
+Assert (($famNo26 -contains 'model-e2b') -and -not ($famNo26 -contains 'model-26b')) 'include_26b false -> E2B only, never the 26B'
+Assert (@(Get-FamilyModelKeys -WithFamily $false -Include26B $true).Count -eq 0) 'a lean install downloads neither (the family gate still rules)'
+
+# End to end through the pure resolver, on the tier the audit found downloading it.
+$profilesPath = Join-Path (Join-Path $setupDir 'templates') 'profiles.json'
+foreach ($rt in @('min', 'low', 'mid', 'high')) {
+  $ppB8 = Resolve-ProfileParams -ProfileId 'blackwell-8' -RamTier $rt -BigRam $false -ProfilesJsonPath $profilesPath -Backend 'cuda'
+  Assert (-not $ppB8.include_26b) "blackwell-8 ram_tier=$rt resolves include_26b false"
+  Assert (-not (@(Get-FamilyModelKeys -WithFamily $true -Include26B ([bool]$ppB8.include_26b)) -contains 'model-26b')) "blackwell-8 ram_tier=$rt downloads no 26B"
+}
+# Every tier: the 26B is downloaded exactly when the resolved profile keeps it.
+foreach ($t in @($profiles.PSObject.Properties.Name)) {
+  $ppT = Resolve-ProfileParams -ProfileId $t -RamTier 'high' -BigRam $true -ProfilesJsonPath $profilesPath -Backend 'cuda'
+  $dl = @(Get-FamilyModelKeys -WithFamily $true -Include26B ([bool]$ppT.include_26b)) -contains 'model-26b'
+  Assert ($dl -eq [bool]$ppT.include_26b) "tier $t downloads the 26B iff include_26b ($([bool]$ppT.include_26b))"
+}
+# The main flow (below the seam, so not executable here) must take its family download
+# set from Get-FamilyModelKeys fed the resolved $pp.include_26b, resolved before Step 5.
+$installText = Get-Content -Raw (Join-Path $setupDir 'install.ps1')
+Assert ($installText -match '\$modelKeys \+= @\(Get-FamilyModelKeys -WithFamily \$withFamily -Include26B \(\[bool\]\$pp\.include_26b\)\)') 'Step 5 builds the family set from Get-FamilyModelKeys + $pp.include_26b'
+Assert (([regex]::Matches($installText, "'model-26b'")).Count -eq 3) "'model-26b' appears only in PINNED, Get-FamilyModelKeys and its comment (no hard-coded download)"
+$ppAt = $installText.IndexOf('$pp = Resolve-ProfileParams')
+$step5At = $installText.IndexOf('$modelKeys = @(')
+Assert (($ppAt -gt 0) -and ($ppAt -lt $step5At)) '$pp is resolved before the Step 5 download set'
+
 # --- Task 6: accelerator seed (ADR 0024) ----------------------------------------------
 Write-Host ""
 Write-Host "== accelerator seed: merged after the tier seed, __HAILO_HOME__ expanded =="

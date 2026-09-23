@@ -899,6 +899,17 @@ type Config struct {
 	VideoGenUnetHigh    string `json:"videogen_unet_high,omitempty"`
 	VideoGenUnetLow     string `json:"videogen_unet_low,omitempty"`
 	VideoGenTextEncoder string `json:"videogen_text_encoder,omitempty"`
+	// VideoGenWanVirtualVramGB is the Wan 2.2 graph's DisTorch2 `virtual_vram_gb`: GiB of
+	// EACH expert the loader parks in system RAM (donor "cpu"), so the card holds the
+	// rest. It was a constant 7 in render/wf-wan22-i2v.mjs, which is a per-card number:
+	// on an 8 GB card under the driver's "Prefer No Sysmem Fallback" policy, 7 on a
+	// 15.4 GB Q8_0 expert asks for ~8.4 GB and OOMs (OptiPlex reg3b, 2026-09-22), while
+	// 11 got through the load and hung the card. Each node sets its MEASURED value.
+	// Default 7 = the builder's value, so a config without the key renders exactly as
+	// before; 0 or unset passes nothing and the builder keeps its own default; negative
+	// is a config finding. Not the LTX-2.5 pool (videogen_pool_vvram_gb): that one is
+	// VRAM borrowed from a donor CARD, this one is RAM.
+	VideoGenWanVirtualVramGB float64 `json:"videogen_wan_virtual_vram_gb,omitempty"`
 	// VideoGenFamily selects the I2V graph family the video route renders with:
 	// "" or "wan22" = the Wan 2.2 two-expert graph (legacy default, unchanged);
 	// "ltx25" = the LTX-2.5 22B distilled joint-audio two-pass graph (the measured
@@ -1647,6 +1658,7 @@ func Default() Config {
 		VoiceGenFTRepetitionPenalty: 0,
 		MusicGenScript:              "render/comfy-music.mjs", // B3 ACE-Step music worker; "" => music defers
 		VideoGenTimeoutSec:          1500,
+		VideoGenWanVirtualVramGB:    7, // render/wf-wan22-i2v.mjs's own default; per-card, measured per node
 		AnimateGenScript:            "render/comfy-animate.mjs",
 		AnimateGenTimeoutSec:        1800, // cold ComfyUI + one 81f Motion Transfer chunk (298.5s warm measured) + margin
 		AudioGenTimeoutSec:          720,

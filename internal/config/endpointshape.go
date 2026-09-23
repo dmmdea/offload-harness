@@ -272,6 +272,12 @@ func endpointPort(c Config) string {
 func (c Config) Findings() []string {
 	out := EndpointWarnings(c)
 	out = append(out, gpuWaitFindings(c)...)
+	// A negative Wan split is not a split: the pipeline passes only a positive value, so
+	// the render silently uses the builder's default while the file names another number.
+	if c.VideoGenWanVirtualVramGB < 0 {
+		out = append(out, fmt.Sprintf("videogen_wan_virtual_vram_gb %g is negative — no split is passed and the Wan graph uses its builder default (%g GiB per expert in RAM) while the file says otherwise; set this card's measured value, or 0 to mean the default",
+			c.VideoGenWanVirtualVramGB, Default().VideoGenWanVirtualVramGB))
+	}
 	for _, k := range c.RetiredKeys {
 		out = append(out, fmt.Sprintf("config key %q is retired and ignored — %s; delete it so the file stops describing behaviour the harness no longer has", k, retiredKeys[k]))
 	}

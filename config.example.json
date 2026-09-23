@@ -164,6 +164,7 @@
   "videogen_unet_high": "",
   "videogen_unet_low": "",
   "videogen_text_encoder": "",
+  "videogen_wan_virtual_vram_gb": 7,
   "videogen_family": "",
   "videogen_transformer": "",
   "videogen_video_vae": "",

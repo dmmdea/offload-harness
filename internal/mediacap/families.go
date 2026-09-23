@@ -169,9 +169,10 @@ func requiredEditKeys(cfg config.Config) []string {
 
 // familyRoutes derives one route per named family: script + engine binding like the
 // default route, then (ComfyUI) every model file resolved under the family's own
-// comfy_dir, or (sdcpp) every bound file stat'd. Reports whether any family drives
-// ComfyUI / node, so the prereq rows stay honest.
-func familyRoutes(cfg config.Config, exeDir string) (out []Route, comfyUsed, nodeUsed bool) {
+// comfy_dir, or (sdcpp) every bound file stat'd, then (ComfyUI) the custom-node classes
+// its graph names. Reports whether any family drives ComfyUI / node, so the prereq rows
+// stay honest.
+func familyRoutes(cfg config.Config, exeDir string, nodes NodeChecker) (out []Route, comfyUsed, nodeUsed bool) {
 	names := make([]string, 0, len(cfg.ImageGenFamilies))
 	for n := range cfg.ImageGenFamilies {
 		names = append(names, n)
@@ -220,6 +221,7 @@ func familyRoutes(cfg config.Config, exeDir string) (out []Route, comfyUsed, nod
 				r = withModelFiles(r, fcfg, fmt.Sprintf("imagegen_families[%q].", name),
 					requiredImageKeys(fcfg), imageFamilyModelKeys, impliedImageFiles(fcfg))
 			}
+			r = withNeeds(r, fcfg.ComfyDir, nil, imageNodeClasses(fcfg), nil, nodes)
 		}
 		r.Detail = licenseDetail(fi) + r.Detail
 		out = append(out, r)
@@ -248,6 +250,7 @@ func familyRoutes(cfg config.Config, exeDir string) (out []Route, comfyUsed, nod
 			r = withModelFiles(r, fcfg, fmt.Sprintf("gen_edit_families[%q].", name),
 				requiredEditKeys(fcfg), editFamilyModelKeys, impliedEditFiles(fcfg))
 		}
+		r = withNeeds(r, fcfg.ComfyDir, nil, editNodeClasses(fcfg), nil, nodes)
 		r.Detail = licenseDetail(fi) + r.Detail
 		out = append(out, r)
 	}

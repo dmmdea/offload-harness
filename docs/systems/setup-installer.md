@@ -218,7 +218,12 @@ Rendering **refuses to emit a config that still contains a token**. `install.ps1
 comment about that exact failure; a llama-swap started with a literal `--ctx-size __CTX__`
 fails in a way that looks like a model problem. A tier that drops the 26B has its model
 block **and** its group membership removed together — llama-swap rejects a config whose
-group names a model that does not exist.
+group names a model that does not exist. The **download** follows the same flag: Step 5
+resolves the profile (`Resolve-ProfileParams`, the RAM gate included) before it builds the
+download set, and `Get-FamilyModelKeys` adds `model-26b` only when the resolved
+`include_26b` is true. It used to add it on the family gate alone, so `blackwell-8`
+(`include_26b: false`) fetched 14.25 GB the rendered yaml never serves (OptiPlex parity
+audit, 2026-09-23).
 
 #### The provenance stamp (0.123.0, ADR 0043)
 

@@ -269,7 +269,7 @@ Usage:
   local-offload generate-image --batch jobs.jsonl    N prompts through ONE warm ComfyUI session (checkpoint loads once)
   local-offload inpaint-image <image> --mask m.png --prompt "..."   re-render ONLY the masked region (white=repaint)
   local-offload upscale-image <image> [--scale F] [--width N --height N] [--method lanczos] [--model name] [--out path]   ESRGAN enlarge (this machine's upscale_model)
-  local-offload generate-video <out.mp4> <still.png> "<prompt>" [--model hunyuan|wan] [--frames 49] [--seed N] [--reserve-vram F]
+  local-offload generate-video <out.mp4> <still.png> "<prompt>" [--model hunyuan|wan] [--frames 49] [--seed N] [--reserve-vram F] [--fast] [--upscale]
   local-offload animate-character <out.mp4> <ref.png> <driver.mp4> "<prompt>" [--motion-prompt "..."] [--frames 81] [--seed N]
   local-offload run-graph --graph <g.json> [--manifest <m.json>] [--out-dir <d>] [--reserve-vram F] [--json]
   local-offload compose-video --template <name> [--variables '<json>'] | --html <file> | --project-dir <dir>
@@ -1572,6 +1572,7 @@ type videoFlags struct {
 	steps       int
 	seed        int
 	reserveVRAM float64
+	fast        bool
 	hero        bool
 	upscale     bool
 }
@@ -1618,6 +1619,9 @@ func buildVideoParams(f videoFlags) map[string]any {
 	if f.reserveVRAM > 0 {
 		params["reserve_vram"] = strconv.FormatFloat(f.reserveVRAM, 'f', -1, 64)
 	}
+	if f.fast {
+		params["fast"] = true
+	}
 	if f.hero {
 		params["hero"] = true
 	}
@@ -1627,63 +1631,95 @@ func buildVideoParams(f videoFlags) map[string]any {
 	return params
 }
 
-// runGenerateVideo handles `local-offload generate-video <out.mp4> <still.png>
-// "<prompt>" [--model hunyuan|wan] [--frames 49] [--width N] [--height N]
-// [--steps N] [--seed N] [--negative "..."] [--reserve-vram F] [--json]`. The
-// THREE positionals are the output path, the input still (I2V needs an image),
-// and the prompt — mirroring the raw `node render/comfy-video.mjs out.mp4 still.png
-// "prompt"` CLI. It animates the still into a short clip on the LOCAL ComfyUI for
-// free via the same runGenerateVideo pipeline branch the MCP tool uses. Steps,
-// shift, and VAE temporal tiling are SETTLED inside the workflow builder and are
-// intentionally NOT exposed here so a caller can't regress them.
-func runGenerateVideo(args []string) error {
-	fs := flag.NewFlagSet("generate-video", flag.ExitOnError)
+// generateVideoCLI is one parsed `generate-video` command line.
+type generateVideoCLI struct {
+	fs      *flag.FlagSet
+	video   videoFlags
+	prompt  string
+	asJSON  bool
+	compact bool
+}
+
+// generateVideoValueFlags are the flags that consume the next token. Bool flags
+// (--fast, --hero, --upscale, --json, --compact) must NOT be listed: splitThreeArgs
+// would take the following positional as their value.
+var generateVideoValueFlags = map[string]bool{
+	"config": true, "model": true, "negative": true, "frames": true,
+	"width": true, "height": true, "steps": true, "seed": true, "reserve-vram": true,
+}
+
+// parseGenerateVideo parses the generate-video command line. The CLI carries every
+// option the offload_generate_video MCP tool takes (prompt, still, out, model,
+// negative, frames, width, height, steps, seed, reserve_vram, fast, hero, upscale):
+// --fast was the missing one, which left the distilled Wan recipe reachable only
+// through MCP (OptiPlex parity audit, 2026-09-23).
+func parseGenerateVideo(args []string, errorHandling flag.ErrorHandling) (generateVideoCLI, error) {
+	fs := flag.NewFlagSet("generate-video", errorHandling)
 	fs.String("config", "", "config file path")
 	asJSON := fs.Bool("json", false, "print full result JSON")
 	model := fs.String("model", "", "family override: wan | ltx25 | h3 | hunyuan (h3: still optional — t2v without). Empty = the machine's videogen_family seat (falls back to wan when no family is configured)")
 	negative := fs.String("negative", "", "hard exclusions, e.g. 'blurry, distorted'")
-	frames := fs.Int("frames", 0, "frame count (default ~33; realistic ceiling ~49)")
+	frames := fs.Int("frames", 0, "frame count (16fps; 81 ≈ 5s is the native ceiling)")
 	width := fs.Int("width", 0, "width px")
 	height := fs.Int("height", 0, "height px")
-	steps := fs.Int("steps", 0, "sampler steps (0 = builder default: wan 4 fast / 20 hero)")
+	steps := fs.Int("steps", 0, "sampler steps (0 = builder default: wan 20 native / 8 fast)")
 	seed := fs.Int("seed", 0, "RNG seed for reproducibility")
 	reserveVRAM := fs.Float64("reserve-vram", 0, "VRAM held back for the display (default per-workflow; ~2.0 for Hunyuan/Wan)")
-	hero := fs.Bool("hero", false, "native no-LoRA quality pass (wan; slower, better motion for realistic b-roll)")
+	fast := fs.Bool("fast", false, "OPT-IN draft mode: 8-step lightx2v distill (wan; visibly weaker motion). The default is the native quality recipe")
+	hero := fs.Bool("hero", false, "deprecated: the native quality pass IS the default now; accepted as a no-op")
 	upscale := fs.Bool("upscale", false, "post-decode upscale using this machine's configured upscale model (e.g. 720p->1080p)")
 	compactFlag := fs.Bool("compact", false, "compact (minified) JSON output")
 
 	// generate-video takes THREE positionals (out path, still image, prompt); the
 	// rest are flags.
-	out, still, prompt, flagArgs := splitThreeArgs(args, map[string]bool{
-		"config": true, "model": true, "negative": true, "frames": true,
-		"width": true, "height": true, "steps": true, "seed": true, "reserve-vram": true,
-	})
-	_ = fs.Parse(flagArgs)
-
+	out, still, prompt, flagArgs := splitThreeArgs(args, generateVideoValueFlags)
+	if err := fs.Parse(flagArgs); err != nil {
+		return generateVideoCLI{}, err
+	}
 	if out == "" || prompt == "" {
-		return fmt.Errorf("generate-video requires an output path, a still image, and a prompt: local-offload generate-video <out.mp4> <still.png> \"<prompt>\" [--model hunyuan|wan] [--frames 49]")
+		return generateVideoCLI{}, fmt.Errorf("generate-video requires an output path, a still image, and a prompt: local-offload generate-video <out.mp4> <still.png> \"<prompt>\" [--model hunyuan|wan] [--frames 49] [--fast]")
+	}
+	return generateVideoCLI{
+		fs: fs,
+		video: videoFlags{
+			model: *model, still: still, negative: *negative, out: out,
+			frames: *frames, width: *width, height: *height, steps: *steps,
+			seed: *seed, reserveVRAM: *reserveVRAM, fast: *fast, hero: *hero, upscale: *upscale,
+		},
+		prompt: prompt, asJSON: *asJSON, compact: *compactFlag,
+	}, nil
+}
+
+// runGenerateVideo handles `local-offload generate-video <out.mp4> <still.png>
+// "<prompt>" [--model hunyuan|wan] [--frames 49] [--width N] [--height N]
+// [--steps N] [--seed N] [--negative "..."] [--reserve-vram F] [--fast] [--upscale]
+// [--json]`. The THREE positionals are the output path, the input still (I2V needs
+// an image), and the prompt — mirroring the raw `node render/comfy-video.mjs out.mp4
+// still.png "prompt"` CLI. It animates the still into a short clip on the LOCAL
+// ComfyUI for free via the same runGenerateVideo pipeline branch the MCP tool uses.
+// Shift and VAE temporal tiling are SETTLED inside the workflow builder and are
+// intentionally NOT exposed here so a caller can't regress them.
+func runGenerateVideo(args []string) error {
+	c, err := parseGenerateVideo(args, flag.ExitOnError)
+	if err != nil {
+		return err
 	}
 
-	cfg := loadCfg(fs)
+	cfg := loadCfg(c.fs)
 	p, cleanup, err := openPipeline(cfg)
 	if err != nil {
 		return err
 	}
 	defer cleanup()
 
-	params := buildVideoParams(videoFlags{
-		model: *model, still: still, negative: *negative, out: out,
-		frames: *frames, width: *width, height: *height, steps: *steps,
-		seed: *seed, reserveVRAM: *reserveVRAM, hero: *hero, upscale: *upscale,
-	})
 	res := p.Run(context.Background(), core.Request{
 		Task:   core.TaskGenerateVideo,
 		Door:   "cli:generate-video",
-		Input:  prompt,
-		Image:  still,
-		Params: params,
+		Input:  c.prompt,
+		Image:  c.video.still,
+		Params: buildVideoParams(c.video),
 	})
-	emitResult(res, *asJSON, "", *compactFlag)
+	emitResult(res, c.asJSON, "", c.compact)
 	return nil
 }
 
@@ -2841,7 +2877,7 @@ func runDoctor(args []string) error {
 	// that produced it, so a file that FAILED validation is named here, verbatim, before
 	// anything else is printed.
 	tainted := doctorConfigRow(src, os.Stdout)
-	err := doctorRun(cfg, mediacap.Routes(cfg), os.Stdout)
+	err := doctorRun(cfg, mediacap.RoutesChecked(cfg, mediacap.LiveNodeChecker(doctorComfyAPI(), 3*time.Second)), os.Stdout)
 	if err != nil {
 		return err
 	}
@@ -2849,6 +2885,17 @@ func runDoctor(args []string) error {
 		return fmt.Errorf("config at %s failed validation: %w", src.Path, src.LoadErr)
 	}
 	return nil
+}
+
+// doctorComfyAPI is the ComfyUI endpoint doctor asks for its node classes: the one the
+// render runners use (COMFY_API, else ComfyUI's default port). doctor never starts
+// ComfyUI; when nothing answers there, the node classes are decided from
+// <comfy_dir>/custom_nodes on disk (mediacap.LiveNodeChecker).
+func doctorComfyAPI() string {
+	if v := strings.TrimSpace(os.Getenv("COMFY_API")); v != "" {
+		return v
+	}
+	return "http://127.0.0.1:8188"
 }
 
 // doctorConfigRow prints doctor's config-source disclosure and, when the file
@@ -2971,7 +3018,7 @@ func doctorRun(cfg config.Config, routes []mediacap.Route, w io.Writer) error {
 		return fmt.Errorf("%d configured model alias(es) missing from %s/v1/models", missing, cfg.Endpoint)
 	}
 	if mediaMissing > 0 {
-		return fmt.Errorf("%d media route(s) bound to a file that does not exist on this machine", mediaMissing)
+		return fmt.Errorf("%d media route(s) bound to something that is not on this machine (a script, model file, custom node class or TTS python/weights)", mediaMissing)
 	}
 	if bindingBroken > 0 {
 		return fmt.Errorf("%d ComfyUI model binding(s) missing or misplaced under %s", bindingBroken, filepath.Join(cfg.ComfyDir, "models"))
@@ -3064,15 +3111,17 @@ func writeCacheServerSection(w io.Writer, cfg config.Config) int {
 }
 
 // writeMediaSection prints this machine's DERIVED media capability and returns
-// the number of routes bound to a file that is absent. Only that class is a
-// failure: NOT CONFIGURED is a legitimate machine (the task defers by design),
-// while BOUND-BUT-MISSING is a config that promises a capability the box cannot
-// deliver — which until now surfaced only as a defer at call time.
+// the number of routes bound to something that is absent — the script, a model
+// file its graph loads, a custom-node class, or (voice) the TTS python, its
+// packages and weights. Only that class is a failure: NOT CONFIGURED is a
+// legitimate machine (the task defers by design), while BOUND-BUT-MISSING is a
+// config that promises a capability the box cannot deliver — which until now
+// surfaced only as a defer at call time.
 func writeMediaSection(w io.Writer, routes []mediacap.Route) int {
 	if len(routes) == 0 {
 		return 0
 	}
-	fmt.Fprintln(w, "media routes (derived from this config; a bound file that is absent means the task DEFERS when called):")
+	fmt.Fprintln(w, "media routes (derived from this config; anything a route loads that is absent — script, model file, custom node class, TTS python/weights — means the task DEFERS when called):")
 	missing := 0
 	for _, r := range routes {
 		mark := "OK  "

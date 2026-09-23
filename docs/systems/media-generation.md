@@ -260,7 +260,8 @@ observations are recorded as a side effect of successful renders — see
 
 ## Interfaces and entry points
 
-CLI verbs `generate-image` (`--family`, `--transparent`), `inpaint-image`, `generate-video`,
+CLI verbs `generate-image` (`--family`, `--transparent`), `inpaint-image`, `generate-video`
+(every `offload_generate_video` option, `--fast` included),
 `generate-audio`, `generate-svg`, `edit-image`, `media`, `run-graph`, `compose-video`; the matching
 `offload_*` MCP tools (`family` / `transparent` on `offload_generate_image`; `family` / `images` /
 `transparent` on `offload_edit_image_generative`). The generative instruction edit is MCP-only
@@ -307,7 +308,7 @@ Bound per machine through flat config keys, so the same code serves different ha
 | Inpaint | `inpaint_ckpt`, `inpaint_vae`, `inpaint_steps/cfg/sampler/scheduler` |
 | Generative edit | `gen_edit_script`, `gen_edit_unet`, `gen_edit_preset` (`full`/`lightning8`/`lightning4`), `gen_edit_clip/vae/lora/lora_strength`, `gen_edit_steps/cfg/sampler/scheduler`, `gen_edit_megapixels` (0 = follow the source, held within 0.9-2.0), `gen_edit_timeout_sec` |
 | Upscale | `upscale_script` (shipped default `render/comfy-upscale.mjs`), `upscale_model` (ComfyUI `upscale_models/` filename; empty = `videogen_upscale_model`), `upscale_timeout_sec` (600) |
-| Video | `videogen_family` (`""`/`wan22` = Wan 2.2; `ltx25` = LTX-2.5 joint-AV), `videogen_unet_high`, `videogen_unet_low`, `videogen_text_encoder`, `videogen_upscale_model` (Wan keys); `videogen_transformer`, `videogen_video_vae`, `videogen_audio_vae`, `videogen_latent_upscaler`, `videogen_fps`, `videogen_pool_vvram_gb/pool_compute/pool_donor` (LTX-2.5 keys) |
+| Video | `videogen_family` (`""`/`wan22` = Wan 2.2; `ltx25` = LTX-2.5 joint-AV), `videogen_unet_high`, `videogen_unet_low`, `videogen_text_encoder`, `videogen_upscale_model`, `videogen_wan_virtual_vram_gb` (Wan keys); `videogen_transformer`, `videogen_video_vae`, `videogen_audio_vae`, `videogen_latent_upscaler`, `videogen_fps`, `videogen_pool_vvram_gb/pool_compute/pool_donor` (LTX-2.5 keys) |
 | Audio | `voicegen_*`, `musicgen_script`; `tts_endpoint` / `tts_model` (default `tts-1`) / `tts_voice` / `tts_api_key` (0.113.25: an OpenAI-compatible speech SERVER for `generate_audio kind=voice` — `voice: endpoint`, or the default on a box with no `voicegen_script`; `internal/ttsclient` POSTs `/v1/audio/speech`, writes the WAV atomically, defers naming the server's words on any non-audio answer, takes no media lease because the server owns its GPU; e.g. VoiceStudio on `http://127.0.0.1:3900`) |
 | Qwen-Image-2.1 (family `qwen-image-2.1`) | `imagegen_ckpt` + `imagegen_clip` + `imagegen_vae` (all three REQUIRED — the builder has no defaults), `imagegen_schedule` (`official` default / `comfy`), `imagegen_steps/cfg` (both or neither; official 40 / 1.0); edit: `gen_edit_family: "qwen-image-2.1"`, `gen_edit_unet/clip/vae`, `gen_edit_resolution` (0 = 1024), `gen_edit_cache_device` (`auto`/`gpu`/`cpu`/`off`) |
 | Named families + license (ADR 0058) | `imagegen_families`, `gen_edit_families` (name → overlay + `license` + `commercial_use`); `imagegen_license`/`imagegen_commercial_use`, `gen_edit_license`/`gen_edit_commercial_use` (the default binding's own tag, both or neither) |
@@ -320,6 +321,16 @@ DiT, never the generic SDXL graph; the pooled and 32 GB-class Blackwell tiers (`
 `-3x16`, `-32`, `-48`, `-72`) bind **Krea 2 Turbo** (below). No tier seeds a non-commercial family.
 The Wan 2.2 video tiers bind **Wan 2.2 Q8_0** experts with an fp16 text encoder. **RealVisXL** is the SDXL-class inpainting default. The 8 GB
 tiers stay SDXL-class for image generation until O1 on 8 GB is verified on real hardware.
+
+**The Wan DisTorch2 split is per card** (`videogen_wan_virtual_vram_gb`, default 7 = the builder's
+value). Both Wan experts load through DisTorch2 with `virtual_vram_gb` GiB parked in system RAM; the card
+holds the rest. It was a constant 7 in `render/wf-wan22-i2v.mjs`, and on an 8 GB card under the driver's
+"Prefer No Sysmem Fallback" policy 7 asks ~8.4 GB of a 15.4 GB Q8_0 expert and OOMs, while 11 got through
+the load and hung the card (OptiPlex reg3b/reg3c, 2026-09-22). Each node sets the value it MEASURED; the
+pipeline passes it as `--wan-vvram-gb`. It is not the LTX-2.5 pool key: that one borrows VRAM from a
+donor card, this one parks weights in RAM. The runner also asks the running ComfyUI for every node class
+the graph names before submitting (`render/comfy-nodes.mjs`), so a missing pack is a one-line
+`MISSING_NODE` defer naming the class and pack, with nothing POSTed.
 
 **LTX-2.5** (`videogen_family: "ltx25"`) is the measured 32 GB-class video seat (2026-08-12
 three-way, bound 2026-08-14, behavior-proven 2026-08-15): the 22B distilled int8 DiT renders
@@ -632,12 +643,40 @@ the files they name — the same gates the pipeline routes on. Three verdicts pe
 
 | Verdict | Meaning | Is it a fault? |
 |---|---|---|
-| `CONFIGURED` | bound, and every file it names exists | no |
+| `CONFIGURED` | bound, and every file it names exists — for a render-script route, everything the script loads too | no |
 | `NOT CONFIGURED` | no binding on this box; the task defers by design | no |
-| `BOUND-BUT-MISSING` | the config names a file that is not there | **yes** — the task defers at call time |
+| `BOUND-BUT-MISSING` | the config names a file that is not there, or the route's graph/worker loads something that is not | **yes** — the task defers at call time |
 
 Both reporting surfaces read from it: `local-offload doctor`'s media section (a
 `BOUND-BUT-MISSING` route exits non-zero) and the MCP `offload_status` tool's `media.routes`.
+
+**What a render-script route loads (OptiPlex parity audit, 2026-09-23).** `generate_video`,
+`animate_character` and both `generate_audio` kinds used to be `CONFIGURED` as soon as their script
+existed; on the 8 GB reference box that was three green rows over routes that failed when called. The
+verdict now covers what the script loads (`internal/mediacap/routeneeds.go`):
+
+- **Model files** of the route's graph: every file the config binds AND the builder default it falls
+  back to when a key is unset (`videogen_text_encoder` unset still loads umt5; the Wan VAE has no key
+  at all). The video set follows `videogen_family` exactly as the runner dispatches (Wan 2.2, `ltx25`,
+  `h3`, `hunyuan`); animate checks the four WAN-Animate-2 files, music the four ACE-Step files. Files
+  only a per-request mode loads (Wan `fast=true`'s lightx2v LoRAs) are named when absent, never a
+  failure. `TestRouteNeedsMirrorTheRenderBuilders` parses the `render/wf-*.mjs` defaults so the two
+  cannot drift.
+- **Custom-node classes** the graph names: `VHS_VideoCombine` (ComfyUI-VideoHelperSuite) for Wan and
+  Hunyuan, the DisTorch2 loaders (ComfyUI-MultiGPU, plus ComfyUI-GGUF for a `.gguf` expert), and
+  `UnetLoaderGGUF` (ComfyUI-GGUF) for a `.gguf` image/edit UNET. `doctor` asks a ComfyUI that is
+  already running (`GET /object_info/<class>` on `COMFY_API`, default `127.0.0.1:8188`), which also
+  sees a pack that failed to import; when nothing answers it decides from `<comfy_dir>/custom_nodes`
+  on disk (an active pack directory with `__init__.py`, matched by name or by its marker class) and
+  says which it used. `offload_status` and `acceptance` use the disk check only. Nothing starts
+  ComfyUI or loads a model.
+- **Voice**: the python `render/tts.mjs` will spawn (`TTS_PY`, else `<repo>/.tts-venv`, else `python`
+  on PATH), the `chatterbox` and `torch` packages in its site-packages, and the Chatterbox weights in
+  the Hugging Face hub cache (`HF_HUB_CACHE`, else `HF_HOME/hub`, else `~/.cache/huggingface/hub`).
+  These resolve from the environment of the process asking; a server started with another `TTS_PY` or
+  `HF_HOME` resolves its own.
+
+Every missing item is listed on the route's line, so one doctor pass is the whole fix list.
 
 **Model files behind the ComfyUI routes (0.130.4, register F-31).** A route can be `CONFIGURED` while
 the model NAME it hands the graph is absent or in the wrong place, and until 0.130.4 that surfaced only

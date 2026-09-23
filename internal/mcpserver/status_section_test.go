@@ -116,6 +116,17 @@ func statusFixture(t *testing.T) (*Server, config.Config, func(string) string) {
 	cfg.EditPython, cfg.GimpConsolePath, cfg.FFmpegPath = "", "", ""
 	cfg.NodePath = tmp + "/node"
 	cfg.ComfyDir = tmp
+	// The video route's graph names custom-node classes (mediacap routeneeds.go):
+	// install their packs so the route stays CONFIGURED and its detail carries no
+	// OS-specific path (the golden is compared on every CI OS).
+	for _, pack := range []string{"ComfyUI-VideoHelperSuite", "ComfyUI-MultiGPU", "ComfyUI-GGUF"} {
+		if err := os.MkdirAll(filepath.Join(tmp, "custom_nodes", pack), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(tmp, "custom_nodes", pack, "__init__.py"), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 
 	escaped, _ := json.Marshal(tmp)
 	tmpJSON := strings.Trim(string(escaped), `"`)

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"flag"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -277,6 +278,11 @@ func TestBuildVideoParams(t *testing.T) {
 			videoFlags{model: "wan", still: "s.png", hero: true, upscale: true},
 			map[string]any{"model": "wan", "still": "s.png", "hero": true, "upscale": true},
 		},
+		{
+			"fast emits the MCP tool's fast param (the distilled Wan recipe)",
+			videoFlags{still: "s.png", fast: true},
+			map[string]any{"still": "s.png", "fast": true},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -285,6 +291,38 @@ func TestBuildVideoParams(t *testing.T) {
 				t.Fatalf("buildVideoParams(%+v) = %v; want %v", tc.in, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestParseGenerateVideoFast: --fast is a real CLI flag (the fast Wan recipe was
+// reachable only through the MCP tool), it is a BOOL — wherever it sits it never eats
+// a positional — and it lands in the request params exactly as the MCP tool's fast.
+func TestParseGenerateVideoFast(t *testing.T) {
+	for _, argv := range [][]string{
+		{"o.mp4", "s.png", "push in", "--fast"},
+		{"o.mp4", "--fast", "s.png", "push in", "--seed", "7"},
+		{"--fast", "o.mp4", "s.png", "push in"},
+	} {
+		c, err := parseGenerateVideo(argv, flag.ContinueOnError)
+		if err != nil {
+			t.Fatalf("parseGenerateVideo(%v): %v", argv, err)
+		}
+		if !c.video.fast || c.video.out != "o.mp4" || c.video.still != "s.png" || c.prompt != "push in" {
+			t.Fatalf("parseGenerateVideo(%v) = %+v prompt %q; want fast with out/still/prompt intact", argv, c.video, c.prompt)
+		}
+		if got := buildVideoParams(c.video); got["fast"] != true {
+			t.Fatalf("params %v must carry fast=true", got)
+		}
+	}
+	c, err := parseGenerateVideo([]string{"o.mp4", "s.png", "p"}, flag.ContinueOnError)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := buildVideoParams(c.video)["fast"]; ok {
+		t.Fatal("no --fast must mean no fast param: the native recipe is the default")
+	}
+	if generateVideoValueFlags["fast"] {
+		t.Fatal("fast must not be a value flag: splitThreeArgs would swallow the next positional")
 	}
 }
 
@@ -297,10 +335,10 @@ func TestSplitThreeArgs(t *testing.T) {
 		"width": true, "height": true, "steps": true, "seed": true, "reserve-vram": true,
 	}
 	cases := []struct {
-		name                      string
-		in                        []string
-		wantA, wantB, wantC       string
-		wantFlags                 []string
+		name                string
+		in                  []string
+		wantA, wantB, wantC string
+		wantFlags           []string
 	}{
 		{
 			"three positionals then flags",
