@@ -1086,7 +1086,7 @@ func (m *Manager) writeEpoch(v uint64) error {
 	if err := os.WriteFile(tmp, []byte(strconv.FormatUint(v, 10)), 0o666); err != nil {
 		return fmt.Errorf("gpulease: writing epoch: %w", err)
 	}
-	if err := os.Rename(tmp, m.epochPath()); err != nil {
+	if err := renameReplacing(tmp, m.epochPath()); err != nil {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("gpulease: publishing epoch: %w", err)
 	}
@@ -1134,15 +1134,18 @@ func (l *Lease) Renew() error {
 	// holder as hours stale — seen on CI (Linux) by a sampler during a warm-back
 	// (0.129.2). Under a waiter's one-second poll that flicker, combined with
 	// an expired window, is a reclaim of a live lease. Write beside, rename
-	// over; when the rename is refused (Windows, a reader holding the file)
-	// fall back to the in-place write rather than skipping the heartbeat.
+	// over — renameReplacing retries the Windows sharing/access-denied error a
+	// concurrent reader's open handle produces (a poller's Inspect(), `gpu
+	// status`, any other process reading the same heartbeat file); if even
+	// that is exhausted, fall back to the in-place write rather than skipping
+	// the heartbeat.
 	path := l.mgr.heartbeatPath(l.epoch)
 	b := []byte(strconv.FormatInt(l.mgr.now().UnixMilli(), 10))
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, b, 0o666); err != nil {
 		return err
 	}
-	if err := os.Rename(tmp, path); err != nil {
+	if err := renameReplacing(tmp, path); err != nil {
 		_ = os.Remove(tmp)
 		return os.WriteFile(path, b, 0o666)
 	}
@@ -1175,7 +1178,17 @@ func (m *Manager) Restamp(epoch uint64, fn func(*Meta)) error {
 		if werr := os.WriteFile(tmp, b, 0o666); werr != nil {
 			return fmt.Errorf("gpulease: restamp: %w", werr)
 		}
-		if rerr := os.Rename(tmp, m.metaPath()); rerr != nil {
+		// renameReplacing retries the Windows sharing/access-denied error a
+		// concurrent reader's open handle on meta.json produces — Inspect()
+		// polling from this or another process (a drain's own heartbeat
+		// loop, `gpu status`, offload_status) has no coordination with this
+		// write. Without the retry this rename failed outright under that
+		// race (TestReserveRenewsTheLeaseWhileDraining,
+		// TestReserveRenewsTheLeaseWhileWarmingBack, ~1/24 full Windows
+		// runs) — a PRODUCTION defect too: a failed restamp here means the
+		// DRAINING stamp never clears, cordoning the seat for the rest of
+		// the lease's window (register C-50/S-31).
+		if rerr := renameReplacing(tmp, m.metaPath()); rerr != nil {
 			_ = os.Remove(tmp)
 			return fmt.Errorf("gpulease: restamp: %w", rerr)
 		}

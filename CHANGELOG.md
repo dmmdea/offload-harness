@@ -91,6 +91,27 @@ Versioning: [SemVer](https://semver.org/).
   rendered per-seat status files (`seat-l2-<seat id>.status`).
 - Comments: the default L1 staging is 2 GB (`EffectiveL1StagingGB`), not 8; the 3-card box's
   agent alias is `agent-pool`.
+- **The GPU lease's rename-over could fail on Windows under an ordinary concurrent reader.**
+  `Manager.Restamp` (the DRAINING -> EXCLUSIVE stamp `gpu reserve --drain` applies once the seat
+  goes idle) renamed a fresh record over `meta.json` with a single `os.Rename`; on Windows,
+  `os.Rename` is `MoveFileEx`, which must delete the destination's directory entry to replace it,
+  and Go's `os.Open` never grants the `FILE_SHARE_DELETE` bit its readers would need for that to
+  succeed while they hold the file open (`os.ReadFile`/`Inspect()`, `gpu status`,
+  `offload_status`, any other reader — none of them coordinate with a writer's rename). A reader
+  mid-flight at the exact rename instant made it fail outright with `ERROR_ACCESS_DENIED` /
+  `ERROR_SHARING_VIOLATION` — intermittently, ~1 run in 24 (`TestReserveRenewsTheLeaseWhileDraining`,
+  `TestReserveRenewsTheLeaseWhileWarmingBack`), and in production the same failure leaves the
+  DRAINING stamp on a held lease, cordoning the seat for the rest of the lease's window (register
+  C-50/S-31 territory) or drops a heartbeat renewal. `internal/gpulease/renamesafe.go` adds
+  `renameReplacing`, a Windows-only bounded retry (2 s, mirroring the epoch lock's own wedge
+  bound) on the two ephemeral errnos — the same pattern `cmd/internal/robustio` uses in the Go
+  toolchain, and the rename-side twin of this package's existing `removeClaim` retry for the
+  analogous `os.Remove` case. `Restamp`, the epoch counter's `writeEpoch`, and the heartbeat's
+  `Renew` all route through it; Linux/macOS behaviour is unchanged (`isEphemeralRenameError` is
+  unconditionally false there, so `renameReplacing` is exactly one `os.Rename`).
+  `TestDrainGivesUpOnAnUnchangedBusyStateBeforeTheDeadline`'s one observed flake (under full-suite
+  load, 8/8 clean alone) does not touch `gpulease` at all — a different cause, a tight no-progress
+  timing bound (`stuckAfter: 80ms`) under CPU contention, not this race.
 
 ### Changed — opencode integration 0.2.0: the primary agent sees only the Tier-1 tools
 
