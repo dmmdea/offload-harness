@@ -252,6 +252,11 @@ type Manager struct {
 	pollEvery time.Duration
 	procStart func(pid int) (int64, bool)
 	pid       int
+	// waiterHeartbeatTTL overrides waiterStaleWindow's computed default (10x the
+	// poll interval, floor 15s) — zero means "use the computed default". Tests
+	// set this directly to observe heartbeat staleness without a real 15s wait,
+	// the same seam pattern as sleep/pollEvery.
+	waiterHeartbeatTTL time.Duration
 }
 
 // pause waits between Acquire probes, tolerating a Manager built without a sleep seam.
@@ -869,7 +874,10 @@ func (m *Manager) Acquire(class Class, opts Options) (*Lease, error) {
 	// the waiter list to decide whether warming the seat back is worth anything
 	// — a warm the next holder unloads again is a 3-minute load bought for
 	// nothing, and an UNORDERED one lands a seat on a card someone else holds.
-	unregister := m.registerWaiter(class, opts)
+	// Since D-13x (2026-09-22) the SAME record also arbitrates who gets to TRY
+	// next — see the FIFO comment atop waiters.go for why that was missing and
+	// what it cost.
+	self, unregister := m.registerWaiter(class, opts)
 	defer unregister()
 	deadline := m.now().Add(opts.Wait)
 	for {
@@ -882,6 +890,25 @@ func (m *Manager) Acquire(class Class, opts Options) (*Lease, error) {
 			pause = remaining
 		}
 		m.pause(pause)
+
+		// Prove we are still actually polling, whether or not we are front of
+		// queue this tick: an alive-but-wedged waiter (suspended, stuck in
+		// another goroutine, an old binary whose loop exited without
+		// unregistering) would otherwise read as a live waiter FOREVER — pid
+		// liveness alone cannot see the difference between "queued" and
+		// "queued and no longer actually trying". See isFrontOfQueue /
+		// waiterStaleWindow for the reader side.
+		m.refreshWaiter(self)
+
+		// FIFO: only the oldest live, RECENTLY-POLLING waiter attempts the
+		// claim this tick. Every other waiter just loops back to sleep —
+		// attempting anyway is exactly the unordered race that let a later
+		// arrival win a just-freed card out from under an earlier one. This
+		// costs nothing when uncontested: a waiter alone in the queue is
+		// always front-of-queue.
+		if !m.isFrontOfQueue(self) {
+			continue
+		}
 
 		got, aerr := m.TryAcquire(class, opts)
 		if aerr == nil {

@@ -381,7 +381,58 @@ exclusive card, and three measurement rows read the seat's 10 GiB as their own f
 
 - **A queued `Acquire` is visible.** While it polls it keeps a record under `<state>/gpu/waiters/` (pid, class, reason,
   since; pruned on read when the pid is gone); `gpu status` lists them as `queued:` and `offload_status` carries the count.
-  This is information for the release path, never a claim — `meta.json` stays the sole arbiter.
+  `meta.json` stays the sole arbiter of who HOLDS the card — a stale or missing waiter record can never grant
+  possession, only affect who is allowed to TRY next (see FIFO below) or defer one warm to the next holder.
+- **The queue is FIFO (register D-13x, 2026-09-22).** Measured live 2026-09-22: a text reservation queued at
+  ~18:40 was still waiting at 20:24 while two media reservations — one queued seconds after it (~18:40) and one
+  25 minutes later (19:06) — each took the card ahead of it — every waiting process polled `TryAcquire` once a second with no ordering between them,
+  so whichever process's poll tick landed first after a release won, and a waiter could lose that race
+  indefinitely. Each poll now checks whether the caller is the OLDEST live waiter recorded under
+  `<state>/gpu/waiters/`; only that one attempts the claim, so the instant the holder releases, the front of the
+  line takes it uncontested by the others. A dead waiter's record is pruned on read (as before) and never blocks
+  the line; a waiter whose own `--wait` expires removes its record and leaves the line for whoever is behind it.
+  Class carries no priority in the queue — text and media waiters interleave in pure arrival order; no ADR
+  documents a queue-level class priority (0026 gates text LOADS behind a media lease, 0041 sizes the drain
+  budget, neither says anything about acquisition order). This governs ordering among REGISTERED waiters only: a
+  brand-new `Acquire`'s very first, pre-registration probe (and any bare `TryAcquire` that never sets `Wait`) can
+  still land in the narrow window between a release and the front waiter's next poll — the same residual race
+  every poll-based queue has, bounded by one poll interval, and unrelated to the hours-long starvation this fixes.
+- **Accepted residual — a forward wall-clock jump.** A waiter's heartbeat is its record's mtime, compared with
+  the reader's wall clock (file times carry no monotonic reading). A forward clock step larger than the staleness
+  window (10× the poll interval, floor 15 s) — an NTP correction after a laptop resumes, a manual clock change —
+  makes every live waiter look stale for ONE poll, so on that tick they all try the claim as they did before FIFO.
+  It is bounded and self-healing: `meta.json`'s O_EXCL claim still grants exactly one holder, the refreshed
+  records restore the order on the very next poll, and no waiter loses its place (its `SinceMs` is unchanged).
+- **A waiter must keep proving it is still polling, not merely alive.** Pid liveness alone cannot tell "queued
+  and actively polling" from "queued, still alive, and never polling again" — a suspended process, one wedged in
+  another goroutine, or an OLDER harness binary whose `Acquire` loop exited without unregistering (it only ever
+  raced `TryAcquire`, so a queue-ordering bug in the old code cost it nothing there, but would make its leftover
+  record an unbreakable head of the new FIFO line). Every poll, win-or-lose, a waiter re-stamps its own record's
+  mtime (beside-then-rename-over, the same Windows-safe pattern as `Renew`/`Restamp` — this file is read by every
+  OTHER waiter on every one of ITS ticks). A reader treats a record not refreshed within 10x the poll interval
+  (floor 15 s) exactly like a dead pid: skipped for ordering, pruned best-effort. This is also what keeps a
+  MIXED-VERSION rollout safe — an older binary's record is the identical JSON shape (no schema change), so a
+  newer reader parses it fine, but the older code never refreshes it, so it goes stale on the same clock and
+  stops affecting anyone's order; it cannot wedge the line, it just keeps racing exactly as it always did. Pid
+  RECYCLING is covered the same way the lease holder itself is: `StartTimeMs`, stamped from `procStart` at
+  registration, is compared against the current process behind that pid on every read, so a pid handed to an
+  unrelated process reads as dead. Same-process concurrency (two goroutines in one process each calling `Acquire`
+  independently — not the in-process `mediaSlot` path, which never touches `<state>/gpu/waiters/` at all) shares
+  one real pid across two+ waiter records; a same-millisecond tie resolves to exactly one front-of-queue via the
+  random-token filename tie-break, never both (a livelock) and never neither.
+- **The heartbeat itself needed the SAME read-side retry the write side already had.** Once every waiter started
+  rewriting its own record every poll tick, `-count=10` caught a real, non-jitter race:
+  `Waiters()`'s plain `os.ReadFile`/`os.Stat` had no retry, and on Windows a read can transiently fail while a
+  concurrent rename is in flight over the same path (the same class of ephemeral error `renameReplacing`/
+  `removeClaim` already retry elsewhere). Treating that as "this waiter isn't here" silently excluded a live,
+  correctly-refreshing, genuinely-earlier waiter from ONE reader's view — one unlucky tick was enough for a
+  later-arrived waiter to see itself, wrongly, as front-of-queue and win the race (measured: a diagnostic
+  confirmed the recorded `SinceMs` values stayed perfectly ordered every time — the algorithm, not the clock, was
+  the defect). Worse for the `os.Stat` call specifically: the code deleted the file on ANY stat error, not only a
+  confirmed absence, so a transient failure could permanently destroy a live waiter's queue position rather than
+  merely skip it for one read. `readWaiterFile`/`statWaiterFile` now retry a transient failure (the same budget as
+  `removeClaim`) and return `os.IsNotExist` immediately unretried, and `Waiters()` only prunes on a CONFIRMED
+  absence or a confirmed stale/dead/recycled record — never on a retry-exhausted transient error.
 - **An unload stamps `<state>/gpu/seat-warm-owed`**, and a warm-back runs only when (1) the card is still ours — the
   wrapper form checks its own epoch (`Lease.Check`), `gpu release --warm-seat --epoch N` checks the record is still N —
   and (2) nobody is queued behind us. With a waiter the warm is skipped and said so (`NOT warming … back: N lease(s)

@@ -111,6 +111,75 @@ Versioning: [SemVer](https://semver.org/).
   that first slipped past a vacuous test comparing `protocolText()` with itself (replaced by fixed
   expectations).
 
+## [0.139.1] - 2026-09-22 - the GPU lease queue serves waiters in arrival order
+
+### Fixed — the GPU lease queue serves waiters FIFO instead of racing them
+
+- **A queued `gpu reserve` could lose to a later arrival indefinitely.** Measured live
+  2026-09-22: a text reservation queued at ~18:40 was still waiting at 20:24 while two media
+  reservations that queued after it (~18:40, 19:06) each took the card ahead of it. Root cause:
+  `Acquire`'s retry loop had every waiting process poll `TryAcquire` once a second with no
+  ordering between them — `registerWaiter`/`Waiters()` recorded who was queued, but nothing
+  in the acquire path ever consulted that record before racing for the `O_EXCL` claim, so
+  whichever process's poll tick landed first after a release won; arrival order was pure
+  scheduling luck. Each poll now checks `isFrontOfQueue`: only the OLDEST live waiter
+  attempts the claim, everyone else keeps waiting, so the front of the line takes a
+  just-freed card uncontested. A dead waiter's record is pruned on read (unchanged) and
+  never blocks the line; a waiter whose own `--wait` expires leaves the line for whoever is
+  behind it; class carries no priority (no ADR documents one for the queue itself), so text
+  and media waiters interleave in pure arrival order. `registerWaiter`'s file name now mixes
+  in a random token so two registrations from the same pid in the same millisecond cannot
+  collide, and its removal goes through `removeClaim`'s Windows-safe retry — a bare
+  `os.Remove` was safe when the waiters directory was read only occasionally, but the FIFO
+  gate now reads it on every poll from every waiter, and a removal a concurrent reader
+  blocked (the same sharing-violation window `meta.json` and the epoch lock already retry)
+  left a phantom, un-removable "front of queue" that starved everyone behind it. Docs:
+  `docs/systems/gpu-lease.md` ("A held card is a place in line" → the new FIFO bullet).
+- **Lead review before ship: an alive-but-not-polling waiter could still wedge the FIFO
+  queue forever.** Pid liveness cannot distinguish "queued and actively polling" from
+  "queued, still alive, and never polling again" — a suspended process, one wedged in
+  another goroutine, or an older harness binary whose `Acquire` loop exited without
+  unregistering. Every waiter now re-stamps its own record's mtime on every poll tick
+  (`refreshWaiter`, the same beside-then-rename-over pattern as `Renew`/`Restamp`, since this
+  file is read by every OTHER waiter on every one of ITS ticks); `Waiters()` treats a record
+  unrefreshed for 10x the poll interval (floor 15 s, both overridable in tests via
+  `waiterHeartbeatTTL`) the same as a dead pid — skipped for ordering, pruned best-effort.
+  This doubles as mixed-version safety during a rollout: an older binary's record is the
+  identical JSON shape (no schema change) so a newer reader parses it fine, but the old code
+  never refreshes it, so it goes stale on the same clock and cannot wedge a new-version
+  waiter behind it. Pid recycling was already covered (`StartTimeMs` vs. the current
+  `procStart`, the same check `Reclaimable` uses for the lease holder) — added a dedicated
+  regression test. Added a same-process concurrency test (several goroutines, one real pid,
+  zero stagger, to force `SinceMs` ties) confirming the random-token filename tie-break
+  always resolves to exactly one front-of-queue, never both (livelock) or neither; the
+  in-process `mediaSlot` path never touches the waiters directory and was unaffected either
+  way. Added a dedicated concurrent-reader test for `registerWaiter`'s unregister call site
+  (`removeClaim`, not the `os.Remove` this round replaced) mirroring
+  `TestRenameReplacingSurvivesAConcurrentReader`'s tight-reader-loop pattern. Every new check
+  was mutation-tested: disabling the heartbeat-staleness check, the tie-break, or reverting
+  to a bare `os.Remove` each turns its matching test red.
+- **`-count=10` caught a real race the review's own fix introduced: `Waiters()`'s read had no
+  retry against a now-much-more-frequent concurrent rename.** Once every waiter rewrites its
+  own record every poll tick (the heartbeat above), a plain `os.ReadFile`/`os.Stat` can
+  transiently fail on Windows while that rename is in flight — the exact class of ephemeral
+  error `renameReplacing`/`removeClaim` already retry, just never on this read path. Treating
+  the failure as "this waiter isn't here" silently hid a live, genuinely-earlier waiter from
+  one reader for one tick — enough for a later arrival to see itself as front-of-queue and win.
+  A diagnostic run confirmed the recorded `SinceMs` values stayed perfectly ordered throughout
+  (`[0 1 2 3 4 5]`) even in a failing trial (`acquisition=[0 1 3 2 4 5]`), ruling out timing
+  jitter and pointing at the read path itself. The `os.Stat` call was worse: it deleted the
+  file on ANY error, not only a confirmed absence, so a transient failure could permanently
+  destroy a live waiter's queue position. `readWaiterFile`/`statWaiterFile` retry a transient
+  failure (`removeClaim`'s budget) and return `os.IsNotExist` unretried; `Waiters()` now prunes
+  only on a confirmed absence or a confirmed stale/dead/recycled record, never a retry-exhausted
+  transient one. `TestQueuedWaitersAreServedInArrivalOrder`/`TestMixedClassWaitersAreServedInArrivalOrder`
+  ran clean 30/30 at `-count=30` after the fix (previously ~1 in 10 failed); a new dedicated
+  test, `TestWaiterReadSurvivesAConcurrentRename` (mirroring
+  `TestRenameReplacingSurvivesAConcurrentReader` with the reader/writer roles reversed), catches
+  the regression directly and fast — mutation-tested: reverting to bare `os.ReadFile`/`os.Stat`
+  fails it 5/5 in under a second, and reproduces the original `[0 2 1 3 4 5]`-style symptom in
+  the FIFO order tests at `-count=10`.
+
 ## [0.139.0] - 2026-09-22 - a Tier-1 cascade call never evicts a loaded vLLM seat
 
 - **A summarize / classify / extract / triage call could unload the loaded vLLM seat.** On the
