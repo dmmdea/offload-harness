@@ -6,39 +6,6 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
-### Fixed — a GPU lease fences the probes of runs already in flight; a media drain no longer deadlocks
-
-- **In-flight agent runs loaded the agent seat onto a render's cards.** llama-swap starts any model a
-  request under `/upstream/<model>/…` names, and the served-window probe, the seat-pin probe, the
-  tokenizer, the warm-up, the whisper transcription and the KV-slot lane each built that route outside
-  every gate. A run admitted just before a video render kept sending them: the 3-card seat started
-  repeatedly mid-render, 14.3 GB landed on a card the render held, and the render took 895 s against a
-  usual 228-324 s. `modelaffinity.AwaitUpstream` is now the one builder of an `/upstream` URL: under a
-  media or exclusive lease it lets a request through only when `/running` lists the model `ready`, and
-  otherwise waits for the card inside the caller's deadline and returns the typed `*LeaseError`. The
-  window probe and warm-up wait inside the admission budget and the run defers `capacity` (holder
-  named, no bare-root fallback); the seat pin and the per-step tokenizer do not wait (no pin; the
-  tokenizer fails open without a sticky strike, `LastFailFenced`); the cascade's per-tier re-pack
-  neither waits nor caches a fenced answer (`ProbeUpstreamWindowNow`); transcription waits its client
-  timeout. A run whose generation ran out its wait mid-run is filed `capacity` on both run doors,
-  before the stall and ceiling branches. `TestUpstreamURLsAreBuiltOnlyBehindTheFence` fails on any
-  other file that spells the route; the lease holder's own warm-back uses the one unfenced builder,
-  `HolderUpstreamURL`, from `gpu_drain.go` only. ADR 0026 extended.
-- **The fleet chat lane and the embedder loaded models past the lease too.** `/v1/chat/completions` and
-  `/v1/embeddings` are model-dispatched llama-swap routes that swap the named model in. `POST /fleet/chat`
-  forwarded another box's cascade call there with no gate, and the embedder (kNN pre-filter,
-  `shadow-label`) posted outside `Admit`. Both now build the URL with `modelaffinity.AwaitModelRoute`
-  (the same fence). The chat lane waits inside the caller's budget and answers `503` with the typed lease
-  refusal (filed `timeout`, congestion) when the render outlasts it. The embedder waits its own timeout,
-  and the kNN pre-filter fails open. `TestModelDispatchedRoutesAreBuiltOnlyBehindAGate` fails on any
-  ungated literal of a model-dispatched route.
-- **`gpu reserve --class media --drain` blocked the runs it was waiting for.** The lease record
-  dropped the draining stamp on a media lease, so the media class fenced the runs in flight from
-  acquire and the drain waited on work it was itself holding up (ADR 0041's deadlock, for the media
-  class). The stamp is recorded for either class, a draining hold blocks no load, a new run is
-  cordoned under a draining hold of either class, and the media class fences once the drain clears
-  the stamp. ADR 0041 extended.
-
 ### Added — opencode context instrument
 
 - **`go run ./cmd/opencode-context`: the before/after gate for what opencode sends a seat.** It copies
@@ -143,6 +110,41 @@ Versioning: [SemVer](https://semver.org/).
 - Tests: 55 pass. Five mutants, each confirmed to typecheck first, are all caught — including one
   that first slipped past a vacuous test comparing `protocolText()` with itself (replaced by fixed
   expectations).
+
+## [0.135.1] - 2026-09-22 - a GPU lease fences in-flight probes, the chat lane and the embedder; a media drain no longer deadlocks
+
+### Fixed — a GPU lease fences the probes of runs already in flight; a media drain no longer deadlocks
+
+- **In-flight agent runs loaded the agent seat onto a render's cards.** llama-swap starts any model a
+  request under `/upstream/<model>/…` names, and the served-window probe, the seat-pin probe, the
+  tokenizer, the warm-up, the whisper transcription and the KV-slot lane each built that route outside
+  every gate. A run admitted just before a video render kept sending them: the 3-card seat started
+  repeatedly mid-render, 14.3 GB landed on a card the render held, and the render took 895 s against a
+  usual 228-324 s. `modelaffinity.AwaitUpstream` is now the one builder of an `/upstream` URL: under a
+  media or exclusive lease it lets a request through only when `/running` lists the model `ready`, and
+  otherwise waits for the card inside the caller's deadline and returns the typed `*LeaseError`. The
+  window probe and warm-up wait inside the admission budget and the run defers `capacity` (holder
+  named, no bare-root fallback); the seat pin and the per-step tokenizer do not wait (no pin; the
+  tokenizer fails open without a sticky strike, `LastFailFenced`); the cascade's per-tier re-pack
+  neither waits nor caches a fenced answer (`ProbeUpstreamWindowNow`); transcription waits its client
+  timeout. A run whose generation ran out its wait mid-run is filed `capacity` on both run doors,
+  before the stall and ceiling branches. `TestUpstreamURLsAreBuiltOnlyBehindTheFence` fails on any
+  other file that spells the route; the lease holder's own warm-back uses the one unfenced builder,
+  `HolderUpstreamURL`, from `gpu_drain.go` only. ADR 0026 extended.
+- **The fleet chat lane and the embedder loaded models past the lease too.** `/v1/chat/completions` and
+  `/v1/embeddings` are model-dispatched llama-swap routes that swap the named model in. `POST /fleet/chat`
+  forwarded another box's cascade call there with no gate, and the embedder (kNN pre-filter,
+  `shadow-label`) posted outside `Admit`. Both now build the URL with `modelaffinity.AwaitModelRoute`
+  (the same fence). The chat lane waits inside the caller's budget and answers `503` with the typed lease
+  refusal (filed `timeout`, congestion) when the render outlasts it. The embedder waits its own timeout,
+  and the kNN pre-filter fails open. `TestModelDispatchedRoutesAreBuiltOnlyBehindAGate` fails on any
+  ungated literal of a model-dispatched route.
+- **`gpu reserve --class media --drain` blocked the runs it was waiting for.** The lease record
+  dropped the draining stamp on a media lease, so the media class fenced the runs in flight from
+  acquire and the drain waited on work it was itself holding up (ADR 0041's deadlock, for the media
+  class). The stamp is recorded for either class, a draining hold blocks no load, a new run is
+  cordoned under a draining hold of either class, and the media class fences once the drain clears
+  the stamp. ADR 0041 extended.
 
 ## [0.135.0] - 2026-09-22 - HyperFrames motion graphics as a CPU-class composition lane
 
