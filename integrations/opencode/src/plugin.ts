@@ -60,14 +60,14 @@ export type Options = {
   dispatchLog: string;
   /**
    * Which harness tools the PRIMARY agent sees. opencode sends every enabled MCP tool schema
-   * up front (no deferred tool search): the 35 harness tools of 0.135.0 are 20,754 tokens of
+   * up front (no deferred tool search): the 35 harness tools of 0.137.0 are 20,868 tokens of
    * schema on every call. "tier1" exposes only the four mechanical-text tools to the primary (847) and
    * reaches the rest through the offload subagents; "all" is the previous behaviour.
    */
   primaryTools: "tier1" | "all";
   /**
    * Which harness tools the OFFLOAD subagent sees. "recon" (default) gives it the twelve
-   * read-and-digest lanes (8,151 tokens of schema instead of 20,754) and provides a second
+   * read-and-digest lanes (8,265 tokens of schema instead of 20,868) and provides a second
    * subagent, `<offloadAgent>-media`, holding every other harness tool (generation, editing,
    * audio/video, image checks, NIM, rig, diff review), so each tool is on exactly one of them.
    * "all" keeps the whole harness on the offload subagent and provides no media subagent.
@@ -82,8 +82,8 @@ export const TIER1_TOOLS = ["offload_summarize", "offload_classify", "offload_ex
  * The offload subagent's lanes in "recon" mode: every tool its own prompt names (offload_ask,
  * agent_delegate, agent_run, the cascade, ocr / vqa / extract_image), plus offload_status (its
  * usual first call: 2 of its 5 harness calls in 35 sessions) and offload_research (the Tier-1
- * protocol routes web research over given URLs to it). On the 35-tool harness of 0.135.0 these
- * twelve are 8,151 tokens of schema and the other 23 are 12,603; none of those was called in the
+ * protocol routes web research over given URLs to it). On the 35-tool harness of 0.137.0 these
+ * twelve are 8,265 tokens of schema and the other 23 are 12,603; none of those was called in the
  * 35 recorded opencode sessions.
  */
 export const RECON_TOOLS = [

@@ -312,9 +312,9 @@ describe("O1: offloadTools recon | all, and the offload-media subagent", () => {
     expect(cfg.agent["offload-media"].permission.edit).toBe("deny");
   });
 
-  // harness #444 adds offload_status {section:"brief"} (fleet block + one-line verdicts, ~4.4 KB
-  // instead of ~17.9 KB); an older harness ignores the argument and returns the full dump
-  // (checked on 0.133.0), so the wording is right before and after #444 merges.
+  // harness 0.137.0 (#453) gives offload_status {section:"brief"} (fleet block + one-line
+  // verdicts); a harness before it ignores the argument and returns the full dump (checked on
+  // 0.133.0), so the wording is right on either.
   it("the offload prompt and the all-mode protocol name the brief roster check", async () => {
     const { protocolText } = await import("../src/protocol.ts");
     const h = createHooks(opts());
