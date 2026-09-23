@@ -69,7 +69,11 @@ D-117).
 2. **Mechanical text** (summarize / classify / extract / triage) → the `single` layer's router
    rung. When the pair's agent seat is LOADED, the reason says the single layer time-shares
    the pair's cards and names what it displaces; if the display layer is awake and its guards
-   pass, the rung is substituted onto the display twin instead and nothing is displaced.
+   pass, the rung is substituted onto the display twin instead and nothing is displaced. The
+   note is documentary. What keeps a rung from actually evicting a loaded vLLM seat is the
+   cascade seat guard, which runs on every box, composite or not
+   ([offload-pipeline.md](offload-pipeline.md)). A display twin that the matrix runs beside the
+   seat passes it untouched.
 3. **ocr / vision** → the layer and role that declare them (documentary: media placement is
    not routed through this table).
 4. **An explicit `context_class: long`** → the biggest long-context layer the box declares:

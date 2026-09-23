@@ -23,6 +23,17 @@ The pipeline, the configured model Tiers served by llama-swap, the grammar compi
    Tiers with an open circuit breaker are skipped, and a fully pruned chain falls back to the
    workhorse model alone.
 
+1b. **Guard the chain** (`internal/seatguard`, on by default). This step applies only while a
+   seat named in `vllm_seats` is loaded on this box. Every rung, and the terminal reasoning Tier,
+   is checked against llama-swap's own routing (read from `serving_config_path`). A rung whose
+   load would unload the seat keeps its model and rides its `cascade_remote_lanes` lane when the
+   lane serves it. Otherwise the loaded seat replaces it as the rung (a D-129 vLLM rung). A
+   protected reasoning Tier with no lane runs its attempt on the loaded seat (step 5's shape, with
+   the seat's `structured_outputs` instead of the think-wrapped grammar), unless that seat already
+   answered the call. An unknown reading fails toward the seat.
+   With no vLLM seat loaded, the chain is untouched. See
+   [../systems/offload-pipeline.md](../systems/offload-pipeline.md).
+
 2. **Compile the grammar.** The task's JSON Schema becomes GBNF, passed as a raw `grammar` field on
    the completion request — never `--json-schema` or `response_format`
    ([ADR 0002](../architecture/decisions/0002-grammar-reliable-serving-flags.md)).
@@ -84,6 +95,9 @@ credentials.
 3. The reasoning Tier never fabricates a pass — garbage from it still defers.
 4. Grounding gates extract only.
 5. The recordless path writes nothing.
+6. While a declared vLLM seat is loaded and `cascade_seat_guard` is on, no rung whose load would
+   evict it is sent to this box's llama-swap. That includes the window probe of a climb, whose
+   `/upstream/<rung>/props` read would load the rung.
 
 ## Security and privacy notes
 
@@ -127,7 +141,9 @@ right — model, quantization, profile, serving flags — not whether the thresh
 
 ## Testing notes
 
-`internal/pipeline/pipeline_reasoning_test.go` (including that garbage output still defers),
+`internal/pipeline/seatguard_test.go` for step 1b (a loaded seat, the no-seat control, the two
+unknown readings, the no-lane case served by the seat, the lane, the climb's window probe and the
+reasoning Tier), `internal/pipeline/pipeline_reasoning_test.go` (including that garbage output still defers),
 `pipeline_confhead_test.go`, `knn_prefilter_test.go`, `runtier_test.go` for the no-side-effect
 invariant, `escsource_test.go` for the `esc_source` stamping and its only-if-unset carry across
 tiers, and per-task defer suites.
@@ -136,6 +152,11 @@ tiers, and per-task defer suites.
 
 - [`internal/pipeline/pipeline.go`](../../internal/pipeline/pipeline.go) — chain, gates, reasoning
   tier, defer sites
+- [`internal/pipeline/seatguard.go`](../../internal/pipeline/seatguard.go) — step 1b, the seat
+  guard over one call's chain
+- [`internal/seatguard/guard.go`](../../internal/seatguard/guard.go) and
+  [`internal/seatguard/residency.go`](../../internal/seatguard/residency.go) — the readings, the
+  verdict, and llama-swap's routing solver
 - [`internal/core/types.go`](../../internal/core/types.go) — `Result`, `Meta`, `EscalationSource`,
   `Deferf`
 - [`internal/grounding/grounding.go`](../../internal/grounding/grounding.go)

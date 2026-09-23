@@ -111,6 +111,85 @@ Versioning: [SemVer](https://semver.org/).
   that first slipped past a vacuous test comparing `protocolText()` with itself (replaced by fixed
   expectations).
 
+## [0.139.0] - 2026-09-22 - a Tier-1 cascade call never evicts a loaded vLLM seat
+
+- **A summarize / classify / extract / triage call could unload the loaded vLLM seat.** On the
+  reference box the three-card seat shares the mutually exclusive `interactive` matrix set with
+  every cascade rung. The llama-swap log recorded four matrix evictions of it, one by the e4b rung:
+  `model=gemma-4-e4b set=interactive … evict=[qwen3.8-27b-vllm-3card]`. Each cost a 3–5 minute cold
+  load and the seat's whole prefix cache in the middle of a long session. The C-41 lane never
+  fired, because a loaded seat with nothing in flight is not "busy": llama-swap swaps it out at once.
+- **New `internal/seatguard`, on by default (`cascade_seat_guard`, `*bool`; `false` turns it
+  off; inert without `vllm_seats`).** Per rung it reads which models hold the cards from llama-swap's
+  `/running`, through the new `seatload.Occupants`. That is the same decode `Running` / `Inflight`
+  (`offload_status.local_agent_seat`, `gpu status`, the drain) now share. It then asks whether
+  loading the rung would unload a declared seat, using llama-swap's OWN routing read from
+  `serving_config_path`:
+  - matrix `vars` / `sets` / `evict_costs`, in the legacy top-level form or under
+    `routing.router.settings`, expanded with `&` `|` `()` `+ref` and solved as llama-swap solves it
+    (the lowest-cost combination holding the rung; a tie reports the union; a model in no set runs
+    alone);
+  - or `groups` (swap / exclusive / persistent, and the default group).
+
+  No model name is compiled in. Checked against the live config, it reproduces all four logged
+  evictions line for line.
+- **The pipeline gives a protected rung the first non-evicting door.** Its `cascade_remote_lanes`
+  lane is used when that lane serves the SAME model, sent with the new `llamaclient.WithLocalBusy`
+  (the send takes the lane although neither busy gate fires; residency is still required). Otherwise
+  the loaded seat itself serves as the rung, a D-129 vLLM rung with `structured_outputs` and the
+  non-thinking render. A busy seat queues the call, and nothing is refused.
+- **The terminal reasoning tier is guarded the same way.** A protected reasoning tier with no lane
+  runs its ATTEMPT on the loaded seat. It is still one attempt, with the reasoning budget, marked
+  `Reasoning`, and behind the grammar and truncation gate. It uses the seat's `structured_outputs`
+  and the non-thinking render instead of the think-wrapped GBNF, which a vLLM seat cannot take. It is
+  skipped when that seat already answered the call. (Review round 2 found a first cut that appended
+  the seat to the ordinary chain as a plain rung. That lost the budget and the `Reasoning` mark, and
+  a matrix where only the reasoning tier is exclusive exposed it.)
+- **A rung served off the box no longer probes its window here.** The climb's `tierNCtx` asks
+  `/upstream/<rung>/props` on this box, which LOADS the rung. Such a rung now reads the entry
+  packing, recorded as `tier_pack: entry-inherited (seat guard: …)`.
+- **Unknown readings fail toward the seat.**
+  - An unreadable serving config treats every other model as evicting a loaded seat, and the line
+    names every loaded seat.
+  - A `/running` that cannot be refreshed keeps the last reading that saw a seat loaded for 300 s.
+    A non-2xx `/running`, or one with no `running` list, now counts as unreadable. It used to decode
+    as "nothing running"; this also hardens `seatload.Running` / `Inflight`, which share the read.
+  - **Known residual risk:** past 300 s, or with no usable reading at all, the guard names no seat.
+    The rung rides its lane when one serves it, and otherwise runs as configured, unguarded. That
+    can evict a seat that is in fact loaded. It is kept because the guard never refuses a call, and
+    it is logged on every such call.
+- **A lane lost between plan and send never falls through to this box.** A `WithLocalBusy` call
+  whose lane stopped serving the model is refused before any request
+  (`llamaclient.ErrLaneUnavailable`). The pipeline then serves the rung, or the reasoning tier, from
+  the loaded seat and logs the divergence.
+- **`seatguard.Shared` checks its cache first.** It used to build, and discard, a Guard and its
+  HTTP client on every call, once per contract.
+- **Tie caveat.** On a genuine cost tie, the guard's `set=` / `target=` / `evict=` can differ from
+  llama-swap's log line. llama-swap picks one set by definition order; the guard unions the tied
+  sets on purpose. Var names fold case, while llama-swap matches them exactly (commented in
+  `residency.go`).
+- **Log lines.** Guard warnings are rate-limited per cause and text, so a changed failure reason is
+  logged at once. A model in no matrix set, which llama-swap runs alone and which evicts everything,
+  is warned about once per model.
+- **With no vLLM seat loaded, the chain and every request body are byte-identical to the guard-off
+  build** (pinned by test). One serve-log line per call per door, in llama-swap's own shape:
+  `cascade seat guard: model=gemma-4-e4b set=interactive evict=[qwen3.8-27b-vllm-3card] target=[…]
+  cost=1 -> served by the loaded seat qwen3.8-27b-vllm-3card (no lane serves …)`.
+- New `llamaclient.Client.OffBoxFor` answers whether a lane or pin would carry a model, without
+  side effects.
+- Tests:
+  - the solver (both engines, both config shapes, costs, ties, expansion, rejected configs);
+  - the guard (inert, control, loaded / starting / stopping, alias-declared seat, stale, unknown,
+    unreadable config, config reload, one read per window, process-wide sharing);
+  - `seatload.Occupants`, and the client hooks;
+  - seven `Run` scenarios over a real config file: loaded seat, no-seat control, unknown readings,
+    no alternative served by the seat, lane, the climb's window probe, and the reasoning tier.
+
+  Nine compiling mutants of the solver, the verdict, staleness, the doors, the probe skip, the
+  reasoning skip and the forced lane are each killed. An E2E through the built binary, against a
+  fixture `/running` and the box's real serving config, logs the decision line above and shows the
+  single completion going to the seat with `structured_outputs`.
+
 ## [0.138.0] - 2026-09-22 - opencode: the offload subagent's prompt diet, and three hook fixes for 1.18.32
 
 - **The delegate placement digest never reached the model.** For MCP tools opencode 1.18.32 hands

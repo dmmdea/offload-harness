@@ -68,6 +68,55 @@ The triage Tier is only included for `triage` and `classify` tasks, and can be s
 entry-tier router. Duplicate aliases collapse, Tiers whose circuit breaker is open are skipped, and
 if everything is pruned the chain falls back to the workhorse model alone.
 
+**A loaded vLLM seat is never evicted by a rung (the seat guard, `internal/seatguard`).** The
+guard is on by default (`cascade_seat_guard`) and inert without `vllm_seats`. Once the chain is
+built, every rung, and the terminal reasoning Tier, is checked against two readings:
+
+- **Which models hold the cards.** llama-swap's `/running`, read through `seatload.Occupants`,
+  the same decode behind `offload_status.local_agent_seat` and `gpu status`. It is cached 5 s.
+- **Whether loading the rung would unload a declared vLLM seat.** This is llama-swap's own
+  routing, read from `serving_config_path`: matrix `vars` / `sets` / `evict_costs` (legacy
+  top-level or `routing.router.settings`), or `groups`. It is solved with llama-swap's own rule:
+  among the combinations that contain the rung, the one whose evictions cost least, and on a tie
+  the union. A model in no set runs alone. On a genuine cost tie, llama-swap picks one set by
+  definition order and logs only that one. The guard's `set=` / `target=` / `evict=` can then
+  differ from llama-swap's line, and `evict=` only ever lists more. The reference config has such
+  a tie: `qwen3.8-27b` is in both `interactive` and `qwen_aux`.
+
+No model name is compiled in. A rung the guard protects takes the first non-evicting door: its
+`cascade_remote_lanes` lane when that lane serves the SAME model (sent `WithLocalBusy`, because
+an idle loaded seat is not "busy" to either C-41 gate), else the loaded seat itself as the rung.
+D-129 made a vLLM seat an eligible rung (`structured_outputs`, non-thinking render), and a busy
+seat queues the call. A protected reasoning Tier with no lane gives its ATTEMPT to the loaded seat.
+That is still the reasoning attempt: one try, the reasoning budget, `Reasoning: true`, behind the same
+grammar and truncation gate. It uses the seat's `structured_outputs` and the non-thinking render
+instead of the think-wrapped GBNF, which a vLLM seat discards. It is skipped only when that seat
+already answered the call.
+
+A rung served off this box also skips the climb's window probe. `tierNCtx` asks this box's
+`/upstream/<rung>/props`, which LOADS the rung. It reads the entry packing instead, recorded as
+`tier_pack: entry-inherited (seat guard: …)`.
+
+Unknown readings fail toward the seat and never into a refusal:
+
+- An unreadable serving config treats every other model as evicting the loaded seat.
+- A `/running` that cannot be refreshed keeps the last reading that saw a seat loaded for 300 s.
+- A non-2xx `/running`, or one without a `running` list, is unknown, never "nothing loaded"
+  (`seatload.Occupants`). The same holds for `Running` / `Inflight`, which share that read.
+- With no usable reading, the guard still protects, naming no seat. The rung rides its lane when
+  one serves it, and otherwise **runs as configured, unguarded**. This is the one residual
+  eviction path, kept because the guard never refuses a call.
+- Every seat at risk is named (`Verdict.Seats`); `Seat` is the one substituted.
+
+A lane chosen at the plan is re-checked at the send. When it no longer serves the rung, the client
+refuses before any request (`llamaclient.ErrLaneUnavailable`), rather than falling through to this
+box. The pipeline then serves the rung, or the reasoning tier, from the loaded seat, and logs the
+divergence. A model in no matrix set runs alone under llama-swap's rule; the guard warns once per
+such model.
+
+With no vLLM seat loaded, the chain and every request body are byte-identical to the guard-off
+build (pinned by test).
+
 What fills those slots — and the separate terminal reasoning tier described below — is a
 per-machine choice; the validated recommendation per hardware tier lives in the model matrix
 (`setup/SETUP-AGENT.md`, "Text-cascade matrix"). As of 2026-07-21 the ≥16GB recommendation binds
@@ -383,6 +432,9 @@ than compiled in.
    through the Model Affinity Gate (`internal/modelaffinity`) before it is sent. Same model on the
    same base is concurrent; a different model parks until the in-flight batch drains. See
    [ADR 0025](../architecture/decisions/0025-model-residency-is-arbitrated-in-process-by-base.md).
+7. **A cascade rung never evicts a loaded vLLM seat** while `cascade_seat_guard` is on. The rung
+   rides its lane or is served by the seat, and an unknown reading fails toward the seat. With no
+   vLLM seat loaded, the cascade is unchanged.
 
 ## Error handling
 
@@ -413,7 +465,8 @@ least one request in flight. That second trigger is the measured C-41 symptom, w
 lease at all: an agent seat loaded by another session, a mutually-exclusive `interactive` set, so
 every cascade tier needs a swap — and llama-swap swaps only once the loaded model's in-flight
 requests finish (300–900 s contracts), so the tier sat in that queue until its own HTTP deadline
-and deferred. A loaded but IDLE model is not busy (llama-swap swaps it out at once), the
+and deferred. A loaded but IDLE model is not busy (llama-swap swaps it out at once; when that
+model is a declared vLLM seat, the seat guard above keeps the swap from happening at all), the
 requested model being the loaded one is never busy (no swap at all), and every unreadable probe
 — `/running`, the roster, the gauge — reads as NOT busy: "could not tell" never moves a call off
 this machine. One reading is cached 5 s per base.
@@ -499,8 +552,10 @@ phantom restarts and has already produced one retracted root cause.
 
 `internal/pipeline/` carries focused suites per concern: `runtier_test.go` (the no-side-effect
 invariant), `pipeline_reasoning_test.go`, `pipeline_confhead_test.go`, `knn_prefilter_test.go`
-(entry-tier selection), plus per-task defer tests. `internal/grounding/` and `internal/ledger/` have
-their own unit tests.
+(entry-tier selection), `seatguard_test.go` (the seat guard end to end through `Run` over a real
+llama-swap config file), plus per-task defer tests. `internal/seatguard/` pins the llama-swap
+routing solver and the guard's reading and staleness rules. `internal/grounding/` and
+`internal/ledger/` have their own unit tests.
 
 ## Common pitfalls
 
@@ -518,6 +573,10 @@ their own unit tests.
   walk, gates, reasoning tier
 - [`internal/pipeline/recordless.go`](../../internal/pipeline/recordless.go) — the nil-store
   construction
+- [`internal/pipeline/seatguard.go`](../../internal/pipeline/seatguard.go) — the seat guard
+  applied to one call's chain (the three doors and the decision log line)
+- [`internal/seatguard/`](../../internal/seatguard/guard.go) — the guard's readings and verdict
+  (`guard.go`) and llama-swap's routing solver over the serving config (`residency.go`)
 - [`internal/core/types.go`](../../internal/core/types.go) — `Result`, `Meta`, `Deferf`
 - [`internal/grounding/grounding.go`](../../internal/grounding/grounding.go)
 - [`internal/cache/cache.go`](../../internal/cache/cache.go) — the lazy handle, the

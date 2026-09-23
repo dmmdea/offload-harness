@@ -363,27 +363,11 @@ func running(ctx context.Context, client *http.Client, endpoint, seat string) (R
 			names = append(names, id)
 		}
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/running", nil)
+	rows, err := Occupants(ctx, client, base)
 	if err != nil {
 		return rd, true, err
 	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return rd, true, fmt.Errorf("llama-swap /running: %w", err)
-	}
-	var listed struct {
-		Running []struct {
-			Model string `json:"model"`
-			State string `json:"state"`
-			Proxy string `json:"proxy"`
-		} `json:"running"`
-	}
-	derr := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&listed)
-	resp.Body.Close()
-	if derr != nil {
-		return rd, true, fmt.Errorf("llama-swap /running: %w", derr)
-	}
-	for _, m := range listed.Running {
+	for _, m := range rows {
 		if m.State == "stopped" || m.State == "shutdown" {
 			continue
 		}
@@ -416,6 +400,61 @@ func running(ctx context.Context, client *http.Client, endpoint, seat string) (R
 		return rd, true, nil
 	}
 	return rd, rd.Starting, nil
+}
+
+// Occupant is one row of llama-swap's GET /running: a model holding (or
+// loading onto, or leaving) the cards, by its CANONICAL id.
+type Occupant struct {
+	Model string `json:"model"`
+	State string `json:"state"`
+	Proxy string `json:"proxy"`
+}
+
+// Occupants reads llama-swap's /running ONCE and returns every row, whatever
+// its state. It is the read behind Running and Inflight (their first half),
+// exported for the caller that needs the WHOLE picture rather than one seat's
+// line in it: the cascade seat guard (internal/seatguard) must know every
+// model holding the cards to reproduce llama-swap's eviction choice, and it
+// reads that from this same decode so "is the seat loaded" means the same
+// thing there as in offload_status and `gpu status`. It touches no seat and no
+// /upstream path. endpoint is the llama-swap ROOT (swapclient.BaseURL); an
+// unreadable or malformed answer is an error, never an empty list.
+func Occupants(ctx context.Context, client *http.Client, endpoint string) ([]Occupant, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(endpoint, "/")+"/running", nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("llama-swap /running: %w", err)
+	}
+	// A non-2xx answer is never a reading, whatever its body says: a
+	// restarting or failing llama-swap can send a JSON body that decodes into
+	// "nothing running" (`{"running":null}` on a 503, an `{"error":…}` object),
+	// and "nothing running" is exactly the answer that lets an evicting request
+	// through. A 2xx body must carry the `running` field; null inside it is an
+	// empty list (Go encodes an empty slice that way).
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
+		resp.Body.Close()
+		return nil, fmt.Errorf("llama-swap /running: status %d", resp.StatusCode)
+	}
+	var listed struct {
+		Running json.RawMessage `json:"running"`
+	}
+	derr := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&listed)
+	resp.Body.Close()
+	if derr != nil {
+		return nil, fmt.Errorf("llama-swap /running: %w", derr)
+	}
+	if len(listed.Running) == 0 {
+		return nil, fmt.Errorf("llama-swap /running: the answer carries no running list")
+	}
+	var rows []Occupant
+	if err := json.Unmarshal(listed.Running, &rows); err != nil {
+		return nil, fmt.Errorf("llama-swap /running: %w", err)
+	}
+	return rows, nil
 }
 
 // slotsInflight reads llama-server's GET /slots at the seat's own address
