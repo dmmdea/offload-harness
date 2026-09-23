@@ -19,6 +19,7 @@ plus one lever Claude Code cannot offer: the three-lane dispatch protocol is inj
 | Offload subagent | `agent.offload` | `mode: subagent`, pinned to the local agent seat, `edit`/`bash`/`webfetch` denied, `external_directory` allowed (read-only recon anywhere) |
 | Commands | `/offload-recon` `/offload-digest` `/offload-pair` | `subtask: true` on the offload agent |
 | Instrument | `~/.claude/state/dispatch-log.jsonl` | Rows tagged `harness:"opencode"` — one adherence read across both harnesses; the Claude Code hooks own the file's rotation, the plugin is append-only |
+| Context instrument | [`cmd/opencode-context`](../../cmd/opencode-context/) over [`internal/occontext`](../../internal/occontext/) | Read-only per-call token, cache, growth, compaction and TTFT report from a copy of opencode's session db — see [Measuring context](#measuring-context) |
 
 ## Behavior (verified live 2026-08-24, local primaries)
 
@@ -29,6 +30,60 @@ plus one lever Claude Code cannot offer: the three-lane dispatch protocol is inj
   (`task_reroute` row), which returned a line-numbered export inventory from the local 27B seat.
 - `/offload-recon …` → `harness_agent_run` completed (~3.5 min) with a correct analysis.
 - `harness_agent_delegate` `route:"spread"` with two contracts → `succeeded: 2, infrastructure: 0`.
+
+## Measuring context
+
+`go run ./cmd/opencode-context` is the before/after gate for anything that changes what opencode
+sends a seat (tool allowlists, the child-session diet, prune and compaction settings, the rules
+file). It never opens opencode's database: it copies `opencode.db` with its `-wal` and `-shm` into a
+temp dir (a live session keeps its newest rows in the WAL, so the main file alone is behind), copies
+again when the source changed during the copy, requires `PRAGMA quick_check` = `ok` on the copy, and
+deletes the copy on exit.
+
+```
+go run ./cmd/opencode-context --last 5 --cache-block 1568 --cache-valid-since qwen3.8-27b-vllm-3card=2026-09-22T17:31:00Z
+go run ./cmd/opencode-context --session <ses_id> --json > before.json
+```
+
+The default db is `$XDG_DATA_HOME/opencode/opencode.db`, else `~/.local/share/opencode/opencode.db`
+(on Windows `%USERPROFILE%\.local\share\opencode\opencode.db`); `--db` overrides it. `--last N`
+takes the N newest primary sessions with their child sessions; `--session`, `--since` and `--model`
+narrow further.
+
+Per session (primary, or child through `session.parent_id` — never through the agent name) and per
+agent it reports:
+
+| Figure | How |
+|---|---|
+| Per-call prompt / cached / output / reasoning | The message's `tokens`: one assistant message is one LLM call; prompt = `input + cache.read + cache.write`; opencode's `output` excludes `reasoning`. A zero-token assistant message (the subtask launcher, an abort) is a stub, not a call. When a server reports reasoning 0 but stored reasoning text (llama.cpp counts it inside output), the row shows a `~` byte estimate beside the server's figures |
+| First-call prompt | The first call per session and agent: the fixed prefix (system prompt, rules, tool schemas) |
+| Cache-read % | cached / prompt over calls whose cache figures count: overall; excluding each session's first call; excluding only cold first calls (cached 0), since a warm first call is a cross-session prefix hit |
+| Growth split | prompt(n) − prompt(n−1) = the previous call's reasoning and output (server counts, replayed into history when the chat template preserves thinking) + tool outputs + user text (byte estimates: `--tool-bytes-per-token 2.7`, `--text-bytes-per-token 3.5`, calibrated on the Qwen3.8 tokenizer over 84 tool outputs and 83 reasoning texts) + a residual (template wrapping, attachments, estimate error). Pairs across a compaction or a model switch are skipped. Session and group lines give each category's share, so "reasoning's share of growth" and "tool-output share" read off directly |
+| Compaction events | The `compaction` agent's summary call: the prompt and total before it (the total is what opencode compares with the usable window), the summary call's prompt, output, reasoning and wall time, and the prompt of the call after it |
+| TTFT | First reasoning or text part start − message created; it includes a cold seat load after an idle unload |
+| Model | provider/model per call |
+
+Two server facts shape the cache figures; both are parameters, not constants:
+
+- `--cache-valid-since [MODEL=]TIME` (repeatable). A server that does not return
+  `prompt_tokens_details` logs cached 0 even on a hit. The blackwell-3x16 3-card seat began reporting
+  cached tokens only after `enable_prompt_tokens_details` (`--enable-prompt-tokens-details`) went live,
+  at 2026-09-22 17:31 UTC; its earlier rows are reporting artifacts. Calls before a cutoff stay listed
+  (marked `*`) but leave every ratio. With no cutoff, the report prints a hint when a model's warm calls
+  logged 0 before its first cache hit, with the interval the cutoff lies in.
+- `--cache-block N`. vLLM caches whole blocks, so cached counts are multiples of the block (1,568
+  tokens on the 3-card seat: the hybrid model's unified block at fp8 KV) and every call recomputes its
+  trailing partial block. A cached count that is not a whole number of blocks is flagged: the block is
+  wrong for that seat.
+
+The report carries ids, counts and times only — no session text or tool output — so it is safe to
+paste; `--titles` adds session titles.
+
+Baseline read by the tool from the 2026-09-22 db (opencode 1.18.32, 3-card seat), matching the hand
+audit it replaces: main-agent first call 11,773 and 12,265 tokens; offload subagent first call 24,680
+(24,639–24,800 across four sessions); cache 66.0% of prompt tokens overall and 92.2% excluding the
+cold first calls (93.0% excluding every session's first call — one of them was a warm cross-session
+hit); every cached count a whole number of 1,568-token blocks.
 
 ## Caveats
 
