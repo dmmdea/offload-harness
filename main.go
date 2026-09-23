@@ -2412,6 +2412,19 @@ func runFleetServe(args []string) error {
 		defer func() { wcancel(); <-watchDone }()
 		pairworkloads.LogSeatWatch(cfg)
 	}
+	// PAIR orphan sweep (0.133.1): a harness process killed between a card's
+	// running frame and its terminal frame leaves the card "Running" in PAIR
+	// until PAIR restarts. The long-lived node closes such cards every
+	// OrphanSweepInterval (every other emitting process sweeps once itself).
+	if cfg.PairWorkloadsEnabled || cfg.PairSeatActivityEnabled {
+		sctx, scancel := context.WithCancel(ctx)
+		sweepDone := make(chan struct{})
+		go func() {
+			pairworkloads.RunOrphanSweeper(sctx, pairworkloads.New(pairworkloads.OrphanSweepConfig(cfg)), pairworkloads.OrphanSweepInterval)
+			close(sweepDone)
+		}()
+		defer func() { scancel(); <-sweepDone }()
+	}
 	// One resolved answer, used by BOTH the server and the startup banner: the
 	// agent lane's advertisement keys on it (fleetnode.AgentLaneAdmissible), so
 	// a banner computing it separately from the config could print a task list

@@ -26,7 +26,8 @@ pending work on the node that runs it. Off by default; two config keys turn it o
 | `main.go` | attaches the ledger observer where the CLI/MCP ledger is opened |
 | `internal/pairworkloads/seatwatch.go` | the seat watcher (0.133.0): direct traffic on this box's vLLM seats as cards, run by fleet-serve |
 | `internal/seatinflight/seatinflight.go` | the machine-wide register of the harness's own seat requests, written by `modelaffinity.Admit` and the fleet chat lane; the watcher subtracts it |
-| `internal/pairworkloads/pairworkloads_test.go`, `internal/delegate/pair_events_test.go`, `internal/pairworkloads/seatwatch_test.go` | the contract tests |
+| `internal/pairworkloads/orphans.go` | the open-card register (0.133.1): one marker per in-flight card under `<state root>/pair-open/`, and the sweep that closes the cards of a dead process (`SweepOrphans`, `RunOrphanSweeper`) |
+| `internal/pairworkloads/pairworkloads_test.go`, `internal/delegate/pair_events_test.go`, `internal/pairworkloads/seatwatch_test.go`, `internal/pairworkloads/orphans_test.go` | the contract tests |
 
 ## What problem this solves
 
@@ -131,6 +132,46 @@ fleet-serve's **seat watcher** closes that gap:
   without delete sharing, and one dropped removal would hide that seat's direct traffic for an
   hour.
 
+## Orphaned cards: a producer that dies mid-job (0.133.1)
+
+A card opens with an in-flight frame and closes with the terminal frame from the **same
+process**. A process killed in between (2026-09-22: a `local-offload delegate` CLI run killed by
+its parent after its running frame) leaves the card "Running" until PAIR restarts: PAIR's workload
+manager keeps local-ingress records with no expiry and re-asserts them on its anti-entropy
+heartbeat, and the broker's staleness sweep exempts records of its own origin. Nothing on PAIR's
+side can know the producer died, so the harness retires its own orphans:
+
+- **Register.** Every in-flight frame (`queued`, `running`) writes one marker
+  `<state root>/pair-open/<pid>-<job id>.json` — the machine-wide root `seat-inflight/` and the GPU
+  lease use — holding the frame's workloadInfo, the writer's pid and its process start identity.
+  The terminal frame removes it once delivered. A terminal frame that could **not** be delivered
+  (PAIR restarting, an answer slower than 2 s) replaces the marker as a *pending* terminal frame,
+  which the next sweep resends as it is — the job's real verdict — without waiting for the
+  producer to exit (dropping it would lose the only record of a card PAIR still shows running;
+  keeping the in-flight marker would later close a finished job as `failed`). The marker is written atomically
+  (temp + rename) on the caller's goroutine, so a job's markers follow its frames in order; every
+  error is swallowed (a marker that cannot be written only means a card that cannot be closed after
+  a crash — never a failed or slowed job).
+- **Sweep.** A marker is an orphan when its pid is dead (`gpulease.PIDAlive`), its pid now belongs
+  to a different process (`gpulease.ProcessStart` differs), or it is older than 24 h
+  (`OpenMaxAge`, the leak cap). The sweep sends the terminal frame the producer never sent — state
+  `failed`, error "harness process exited before the job finished", the in-flight frame's id,
+  origin, node, engine, requester and timestamps unchanged (the same card), `completedAt` = now —
+  then deletes the marker.
+- **Who sweeps.** Every emitter once, on its first `Emit` (so every harness process that reports
+  anything closes what a dead one left open; the process's `Wait` covers it), and fleet-serve
+  every 45 s when `pair_workloads_enabled` or `pair_seat_activity_enabled` is on.
+- **Racing sweepers.** A claim is an O_EXCL `<marker>.lock`; the winner re-checks the marker,
+  posts, removes the marker, then the lock — so one frame per orphan. Rename-to-claim does not
+  work on Windows: two sweepers that opened the marker before either renamed it both succeed. A
+  failed post (PAIR down) releases the lock and keeps the marker for the next sweep; a marker PAIR
+  has not accepted for 48 h is dropped. A lock whose sweeper died, or older than 5 min, is removed
+  by a later pass.
+- **Seat-watch cards** go through the same `Emit`, so a fleet-serve killed with a direct-traffic
+  card open leaves a marker the next sweep closes. A clean stop still completes open cards
+  (`closeAll`).
+- A disabled emitter (key off, or PAIR not installed) writes and sweeps nothing.
+
 ## The PAIR side (what has to be true on the box)
 
 PAIR 0.1.1's stock workload manager has no ingress for a third-party producer: its only
@@ -174,8 +215,11 @@ appears in PAIR's Jobs list on this box **and** on the node that ran it, reading
 - **Two cards for one job**: the in-flight and terminal frames named different
   models/engines. Source 1 pins the identity on the `PlacedResult` for exactly this reason;
   a new emit site must reuse `pairInflight` / `pairTerminal`, never build its own frame.
-- **A card stuck `running`**: the terminal frame was never sent (process died) — PAIR's
-  staleness sweep fails it after its origin goes silent; nothing to do.
+- **A card stuck `running`**: the terminal frame was never sent because the process died. PAIR
+  does **not** clean this up for a local-ingress card (see *Orphaned cards* below); the harness's
+  sweep closes it as `failed` within one fleet-serve sweep interval (45 s), or on the next emit of
+  any harness process on the box. A card still stuck: check `<state root>/pair-open/` for its
+  marker (`<pid>-<job id>.json`) and whether a harness process on the box has either key on.
 - **Nothing appears**: the key is off, PAIR is not installed (no `node-id.json`), or the
   stock worker is back after a PAIR update (`curl` returns connection refused on 14324).
   The first failed send logs one `pairworkloads:` line.

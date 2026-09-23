@@ -36,6 +36,7 @@ import (
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/config"
+	"github.com/dmmdea/offload-harness/internal/gpulease"
 	"github.com/dmmdea/offload-harness/internal/ledger"
 	"github.com/dmmdea/offload-harness/internal/swapclient"
 )
@@ -72,6 +73,12 @@ type Config struct {
 	// showed a vLLM job as "llamacpp".
 	VLLMSeats    []string
 	SwapEndpoint string
+	// StateDir is the operator's state_dir: the open-card register (orphans.go)
+	// lives under the machine-wide state root it resolves to, beside
+	// seat-inflight. OpenDir, when set, names the register directory outright
+	// (tests).
+	StateDir string
+	OpenDir  string
 }
 
 // FromConfig reads the two harness config keys.
@@ -81,7 +88,7 @@ func FromConfig(cfg config.Config) Config {
 		ep = DefaultEndpoint
 	}
 	return Config{Enabled: cfg.PairWorkloadsEnabled, Endpoint: ep,
-		VLLMSeats: cfg.VLLMSeats, SwapEndpoint: cfg.Endpoint}
+		VLLMSeats: cfg.VLLMSeats, SwapEndpoint: cfg.Endpoint, StateDir: cfg.StateDir}
 }
 
 // Event is one workload lifecycle frame's content. JobID doubles as PAIR's
@@ -132,6 +139,21 @@ type Emitter struct {
 	// fetchRoster reads the llama-swap roster; swapclient.FetchRoster unless a
 	// test swaps it.
 	fetchRoster func(ctx context.Context, endpoint string, timeout time.Duration) (swapclient.Roster, error)
+
+	// The open-card register (orphans.go): one marker per job this process
+	// has an in-flight frame out for, so a process that dies before the
+	// terminal frame leaves a card another process can close.
+	openDirOnce sync.Once
+	openDir     string // "" = no register
+	openMu      sync.Mutex
+	open        map[string]string // job id -> marker path
+	selfOnce    sync.Once
+	selfStart   int64
+	sweepOnce   sync.Once
+	// Seams (tests): process liveness, process start identity, the clock.
+	alive     func(pid int) bool
+	procStart func(pid int) (int64, bool)
+	now       func() time.Time
 }
 
 type engineAnswer struct {
@@ -145,7 +167,8 @@ func New(c Config) *Emitter {
 		c.Endpoint = DefaultEndpoint
 	}
 	e := &Emitter{cfg: c, client: &http.Client{Timeout: sendTimeout}, appDir: c.AppDir,
-		fetchRoster: swapclient.FetchRoster}
+		fetchRoster: swapclient.FetchRoster,
+		alive:       gpulease.PIDAlive, procStart: gpulease.ProcessStart, now: time.Now}
 	if e.appDir == "" {
 		// OFFLOAD_PAIR_APPDIR points at a PAIR data dir that is not at the
 		// platform default (a portable install, a test fixture).
@@ -420,9 +443,17 @@ func isAcceleratorEngine(engine string) bool {
 }
 
 func (e *Emitter) frame(ev Event) ([]byte, error) {
+	body, _, err := e.build(ev)
+	return body, err
+}
+
+// build is frame plus the workloadInfo it carries, which the open-card
+// register keeps so an orphan's terminal frame names exactly the card PAIR
+// holds (same origin, node, engine, ids and timestamps).
+func (e *Emitter) build(ev Event) ([]byte, map[string]json.RawMessage, error) {
 	self, _ := e.identity()
 	if self == "" {
-		return nil, fmt.Errorf("pairworkloads: PAIR identity unavailable under %s", e.appDir)
+		return nil, nil, fmt.Errorf("pairworkloads: PAIR identity unavailable under %s", e.appDir)
 	}
 	null := json.RawMessage("null")
 	scheduledOn := null
@@ -460,9 +491,15 @@ func (e *Emitter) frame(ev Event) ([]byte, error) {
 		"error":          errRaw,
 		"requesterId":    reqRaw,
 	}
+	body, err := frameBody(MethodFor(ev.State), info)
+	return body, info, err
+}
+
+// frameBody wraps a workloadInfo in the JSON-RPC notification PAIR expects.
+func frameBody(method string, info map[string]json.RawMessage) ([]byte, error) {
 	return json.Marshal(map[string]any{
 		"jsonrpc": "2.0",
-		"method":  MethodFor(ev.State),
+		"method":  method,
 		"params":  map[string]any{"workloadInfo": info},
 	})
 }
@@ -490,14 +527,24 @@ func mustJSON(v any) json.RawMessage {
 }
 
 // Send posts one frame synchronously. A disabled emitter is a silent no-op.
+// An in-flight frame is recorded in the open-card register before it is
+// posted; a terminal frame's marker is removed once the post was attempted.
 func (e *Emitter) Send(ctx context.Context, ev Event) error {
 	if !e.Enabled() {
 		return nil
 	}
-	body, err := e.frame(ev)
+	body, info, err := e.build(ev)
 	if err != nil {
 		return err
 	}
+	done := e.track(ev, info)
+	err = e.post(ctx, body)
+	e.untrack(done, info, err)
+	return err
+}
+
+// post delivers one built frame within sendTimeout.
+func (e *Emitter) post(ctx context.Context, body []byte) error {
 	ctx, cancel := context.WithTimeout(ctx, sendTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, e.cfg.Endpoint, bytes.NewReader(body))
@@ -516,16 +563,35 @@ func (e *Emitter) Send(ctx context.Context, ev Event) error {
 	return nil
 }
 
-// Emit posts in the background and never blocks the caller. The first failure
-// per process logs one line; later ones are silent — PAIR being down is normal.
+// Emit posts in the background and never blocks the caller on PAIR. The first
+// failure per process logs one line; later ones are silent — PAIR being down
+// is normal.
+//
+// The frame is built and the open-card register updated HERE, on the caller's
+// goroutine, so a job's markers follow its frames in order (queued, running,
+// terminal) whatever order the background posts finish in. The first Emit of
+// an emitter also sweeps the register once for cards a dead process left open.
 func (e *Emitter) Emit(ev Event) {
 	if !e.Enabled() {
 		return
 	}
+	e.SweepOrphansAsync()
+	body, info, err := e.build(ev)
+	done := ""
+	if err == nil {
+		done = e.track(ev, info)
+	}
 	e.inflight.Add(1)
 	go func() {
 		defer e.inflight.Done()
-		if err := e.Send(context.Background(), ev); err != nil {
+		if err == nil {
+			err = e.post(context.Background(), body)
+		}
+		// The terminal marker goes only after the post was attempted: a
+		// process killed in between still leaves a marker to close the card,
+		// and a post that failed leaves the terminal frame for the sweep.
+		e.untrack(done, info, err)
+		if err != nil {
 			e.warnOnce.Do(func() {
 				log.Printf("pairworkloads: PAIR ingress unreachable; harness jobs will not appear in PAIR's Jobs list (%v)", err)
 			})

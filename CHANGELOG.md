@@ -94,6 +94,42 @@ Versioning: [SemVer](https://semver.org/).
 - Tests: 55 pass. Five mutants, each confirmed to typecheck first, are all caught — including one
   that first slipped past a vacuous test comparing `protocolText()` with itself (replaced by fixed
   expectations).
+## [0.133.1] - 2026-09-22 - the harness closes PAIR cards its dead processes left running
+
+- **A killed harness process left its PAIR card "Running" until PAIR restarted.** A `local-offload
+  delegate` CLI run killed by its parent after its running frame (job `agd-91c2ad1201b33033ab20dbfa`)
+  never sent the terminal frame, and nothing on PAIR's side can know the producer died: the workload
+  manager keeps local-ingress records with no expiry and re-asserts them on its anti-entropy
+  heartbeat, and the broker's staleness sweep exempts records of its own origin. The 0.132.8 note
+  that PAIR's sweep fails such a card was wrong for local-ingress cards.
+- **New open-card register** (`internal/pairworkloads/orphans.go`): every in-flight frame
+  (queued / running) writes one marker under `<state root>/pair-open/` (beside `seat-inflight/`)
+  holding the frame's workloadInfo, the writer's pid and its process start identity; the terminal
+  frame removes it once delivered. A terminal frame that could not be delivered (PAIR restarting, a
+  reply slower than 2 s) replaces it as a pending marker that the next sweep resends with the job's
+  real verdict (review finding: dropping it lost the only record of a card PAIR still showed running). Written atomically (temp + rename) on the caller's
+  goroutine, so a job's markers follow its frames in order; every error is swallowed.
+- **The sweep**: a marker whose process is dead, whose pid now belongs to a different process
+  (start identity differs), or that is older than 24 h gets the terminal frame the producer never
+  sent — state `failed`, error "harness process exited before the job finished", the in-flight
+  frame's id / origin / node / engine / timestamps unchanged, `completedAt` = now — and is deleted.
+  Runs once per emitter on its first `Emit` (every harness process that reports anything), and every
+  45 s in fleet-serve when `pair_workloads_enabled` or `pair_seat_activity_enabled` is on. A
+  disabled emitter writes and sweeps nothing.
+- **Racing sweepers send one frame per orphan**: a claim is an O_EXCL `<marker>.lock`, and the
+  winner removes the marker before its lock. Rename-to-claim was tried first and the race test sent
+  every card twice: on Windows two sweepers that opened the marker before either renamed it both
+  succeed. PAIR down: the lock is released, the marker stays, the next sweep retries.
+- **Seat-watch cards are covered the same way**: they go through `Emit`, so a fleet-serve killed
+  with a direct-traffic card open leaves a marker the next sweep closes (a clean stop still
+  completes them via `closeAll`).
+- Tests: marker lifecycle, dead producer closed once with the original identity, live producer
+  untouched, recycled pid, leak cap, disabled emitter, PAIR down keeps the marker, two racing
+  sweepers, first-Emit sweep, killed seat watcher, an undelivered terminal frame resent with its
+  verdict, and a real child process killed after its running frame and swept with the production
+  liveness rule. Mutants (sweep never judges orphaned; marker never written; undelivered terminal
+  marker dropped) each turn tests red.
+
 ## [0.133.0] - 2026-09-22 - PAIR shows direct traffic on the vLLM seats
 
 - **Seat load that bypassed the harness never reached PAIR.** On 2026-09-22 the Qube's three
