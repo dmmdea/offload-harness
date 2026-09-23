@@ -29,3 +29,6 @@ contracts/write-door/** text eol=lf
 # Chat templates are the model's prompt format, copied verbatim into a seat directory on a Linux
 # engine: a CR inside a template string literal would reach every prompt.
 *.jinja         text eol=lf
+
+# Vendored font files (render/compose-templates/_shared/fonts): binary, never line-converted.
+*.woff2 binary

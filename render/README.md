@@ -194,3 +194,38 @@ size or a bad `--method` exits 2 **before** the GPU slot is taken. Same lifecycl
 single-slot GPU lock, on-demand ComfyUI, zero-always-warm teardown. The harness route is
 `local-offload upscale-image` / `offload_upscale_image` (binding `upscale_model`, falling back to
 `videogen_upscale_model`).
+
+---
+
+# Composition — HTML/CSS motion graphics to video (HyperFrames, `compose-hyperframes.mjs`)
+
+```bash
+node render/compose-hyperframes.mjs render --hyperframes-dir <dir> --browser <chrome-headless-shell> \
+  --ffmpeg <ffmpeg> --template title-card --out card.mp4
+node render/compose-hyperframes.mjs render ... --template lower-third --format webm \
+  --variables-file vars.json --snapshots 1,2.5 --out lt.webm
+node render/compose-hyperframes.mjs browser --hyperframes-dir <dir>   # pinned Chrome (installer step)
+node render/compose-hyperframes.mjs version --hyperframes-dir <dir>   # acceptance check
+```
+
+This is the only door to the pinned HyperFrames CLI (npm `hyperframes`, installed from the
+lockfile in `setup/hyperframes/`). It is **CPU-class**: software GL and CPU encode, with no
+`withGpuSlot` and no GPU lease (ADR 0059).
+
+Every call goes through the same guards:
+
+- **Allowlisted child env.** No cloud key, `NODE_OPTIONS` or `GPU_LEASE_*` reaches the CLI.
+- **Telemetry, updates and skills off.**
+- **`--json` on every invocation.** It is what skips the CLI's npm and GitHub update pings.
+- **Subcommand allowlist.** Only `lint`, `check`, `render`, `snapshot`, `browser ensure|path` and
+  `--version` run.
+- **Fresh empty work dir as cwd**, so no `.env` is ever loaded.
+- **Harness-owned HOME** at `<hyperframes_dir>/home`.
+
+The pipeline is `lint` → `check` → `render --batch` (one row) → an ffprobe gate → optional
+`snapshot`. Retry covers only `spawn EBUSY`, and only once. Each failure prints one typed line,
+`COMPOSE-FAIL: <CLASS>: <detail>`, then a final JSON result that is also written to `--result`.
+Templates, and the contract each one keeps, are in
+[`compose-templates/`](compose-templates/README.md). The harness routes are
+`offload_compose_video`, `local-offload compose-video` and the fleet task `compose-video`. See
+[`docs/systems/media-generation.md`](../docs/systems/media-generation.md#composition-hyperframes).

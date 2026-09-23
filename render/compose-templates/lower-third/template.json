@@ -1,0 +1,10 @@
+{
+  "name": "lower-third",
+  "description": "Transparent broadcast lower third: an accent stripe, a panel revealed left to right, a name and a role sliding in, and an exit 0.5 s before the end. Render to webm or mov for alpha.",
+  "width": 1920,
+  "height": 1080,
+  "fps": 30,
+  "alpha": true,
+  "duration_variable": "duration",
+  "formats": ["webm", "mov", "png-sequence", "mp4"]
+}

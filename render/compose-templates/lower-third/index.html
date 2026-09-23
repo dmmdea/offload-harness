@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>lower-third</title>
+    <style>
+      /* Same shared font kit as every vetted template (see ../_shared/README.md): declared here so
+         the producer never falls back to a Google Fonts request at render time. */
+      @font-face { font-family: "Inter"; src: url("shared/fonts/inter-latin-400-normal.woff2") format("woff2"); font-weight: 400; font-style: normal; }
+      @font-face { font-family: "Inter"; src: url("shared/fonts/inter-latin-700-normal.woff2") format("woff2"); font-weight: 700; font-style: normal; }
+
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      /* Transparent all the way down: rendered to webm (VP9 yuva420p) or mov (ProRes 4444) the
+         frame outside the panel carries alpha 0, ready to lay over footage. */
+      html, body { width: 1920px; height: 1080px; overflow: hidden; background: transparent; }
+
+      #root {
+        position: relative;
+        width: 1920px;
+        height: 1080px;
+        overflow: hidden;
+        background: transparent;
+        font-family: "Inter", sans-serif;
+      }
+
+      .lt {
+        position: absolute;
+        left: 120px;
+        bottom: 150px;
+        display: flex;
+        align-items: stretch;
+        animation: out 0.5s cubic-bezier(0.4, 0, 1, 1) calc(var(--duration, 6) * 1s - 0.5s) forwards;
+      }
+
+      .stripe {
+        width: 12px;
+        border-radius: 6px 0 0 6px;
+        background: var(--accent, #f59e0b);
+        transform-origin: 50% 100%;
+        animation: stripe-in 0.45s cubic-bezier(0.16, 1, 0.3, 1) 0.1s both;
+      }
+
+      .panel {
+        min-width: 560px;
+        max-width: 1200px;
+        padding: 30px 48px 32px 36px;
+        border-radius: 0 10px 10px 0;
+        background: var(--panel, rgba(15, 23, 42, 0.9));
+        color: var(--text_color, #f8fafc);
+        animation: reveal 0.6s cubic-bezier(0.16, 1, 0.3, 1) 0.3s both;
+      }
+
+      .name {
+        font-size: 60px;
+        font-weight: 700;
+        line-height: 1.08;
+        letter-spacing: -0.02em;
+        white-space: nowrap;
+        animation: slide 0.6s cubic-bezier(0.16, 1, 0.3, 1) 0.5s both;
+      }
+
+      .role {
+        margin-top: 10px;
+        font-size: 34px;
+        font-weight: 400;
+        line-height: 1.2;
+        white-space: nowrap;
+        opacity: 0.85;
+        animation: slide-soft 0.6s cubic-bezier(0.16, 1, 0.3, 1) 0.7s both;
+      }
+
+      @keyframes stripe-in { from { transform: scaleY(0); } to { transform: scaleY(1); } }
+      @keyframes reveal { from { clip-path: inset(0 100% 0 0); } to { clip-path: inset(0 0 0 0); } }
+      @keyframes slide { from { opacity: 0; transform: translateX(-28px); } to { opacity: 1; transform: translateX(0); } }
+      @keyframes slide-soft { from { opacity: 0; transform: translateX(-20px); } to { opacity: 0.85; transform: translateX(0); } }
+      @keyframes out { from { opacity: 1; transform: translateX(0); } to { opacity: 0; transform: translateX(-40px); } }
+    </style>
+  </head>
+  <body>
+    <div
+      id="root"
+      data-composition-id="lower-third"
+      data-start="0"
+      data-duration="6"
+      data-width="1920"
+      data-height="1080"
+      data-fps="30"
+      data-no-timeline
+      data-composition-variables='[{"id":"name","type":"string","label":"Name","description":"The person or subject named on screen.","maxLength":48,"default":"Alex Rivera"},{"id":"role","type":"string","label":"Role","description":"One line under the name: title, place or context.","maxLength":72,"default":"Head of Research"},{"id":"accent","type":"color","label":"Accent","description":"The vertical stripe.","default":"#f59e0b"},{"id":"panel","type":"color","label":"Panel","description":"The panel behind the text; a translucent color keeps the footage visible.","default":"rgba(15, 23, 42, 0.9)"},{"id":"text_color","type":"color","label":"Text color","default":"#f8fafc"},{"id":"duration","type":"number","label":"Duration (seconds)","description":"Total length; the exit starts 0.5 s before the end.","min":2,"max":60,"default":6}]'
+    >
+      <div class="lt">
+        <div class="stripe"></div>
+        <div class="panel">
+          <div class="name" data-var-text="name">Alex Rivera</div>
+          <div class="role" data-var-text="role">Head of Research</div>
+        </div>
+      </div>
+    </div>
+    <script>
+      // CSS keyframes only, seeked by HyperFrames' CSS adapter; no clock, no randomness.
+      window.__timelines = window.__timelines || {};
+    </script>
+  </body>
+</html>

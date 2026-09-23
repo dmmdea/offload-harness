@@ -1,0 +1,10 @@
+{
+  "name": "title-card",
+  "description": "Full-frame opaque title card: a growing accent bar, a headline and a subtitle rising in, a slow background glow, and a fade out 0.6 s before the end.",
+  "width": 1920,
+  "height": 1080,
+  "fps": 30,
+  "alpha": false,
+  "duration_variable": "duration",
+  "formats": ["mp4", "webm", "mov", "png-sequence", "gif"]
+}
