@@ -6,6 +6,22 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added — opencode context instrument
+
+- **`go run ./cmd/opencode-context`: the before/after gate for what opencode sends a seat.** It copies
+  opencode's session db with its `-wal` and `-shm` (copying again when a live writer lands mid-copy;
+  `quick_check` on the copy; the source is never opened by SQLite), then reports per session (primary or
+  child, by `parent_id`) and agent: first-call prompt, per-call prompt / cached / output / reasoning,
+  cache-read % overall, excluding session-first calls and excluding cold first calls, the split of
+  prompt growth into replayed reasoning, output, tool output and user text, compaction events with the
+  prompt before and after, TTFT and the model id — as a table or `--json`, with no session content.
+  `--cache-valid-since [MODEL=]TIME` drops reporting artifacts (a seat logs cached 0 until
+  `--enable-prompt-tokens-details` is live) and `--cache-block` checks whole-block cached counts.
+  Read from the 2026-09-22 db it reproduces the hand audit: first calls 11,773 / 12,265 (main) and
+  24,680 (offload), 66.0% / 92.2% cached. Tests run on a synthetic fixture built on opencode's DDL
+  (`internal/occontext/testdata/schema.sql`); `modernc.org/sqlite` becomes a direct dependency (it
+  was already in `go.sum`). Docs: `docs/systems/opencode-integration.md` → "Measuring context".
+
 ### Fixed — seat gauges never reset the idle timer; opencode sends one system message; seat renderer catches up
 
 - **The PAIR seat watcher kept every vLLM seat loaded forever.** It polled
