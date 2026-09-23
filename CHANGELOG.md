@@ -24,6 +24,14 @@ Versioning: [SemVer](https://semver.org/).
   before the stall and ceiling branches. `TestUpstreamURLsAreBuiltOnlyBehindTheFence` fails on any
   other file that spells the route; the lease holder's own warm-back uses the one unfenced builder,
   `HolderUpstreamURL`, from `gpu_drain.go` only. ADR 0026 extended.
+- **The fleet chat lane and the embedder loaded models past the lease too.** `/v1/chat/completions` and
+  `/v1/embeddings` are model-dispatched llama-swap routes that swap the named model in. `POST /fleet/chat`
+  forwarded another box's cascade call there with no gate, and the embedder (kNN pre-filter,
+  `shadow-label`) posted outside `Admit`. Both now build the URL with `modelaffinity.AwaitModelRoute`
+  (the same fence). The chat lane waits inside the caller's budget and answers `503` with the typed lease
+  refusal (filed `timeout`, congestion) when the render outlasts it. The embedder waits its own timeout,
+  and the kNN pre-filter fails open. `TestModelDispatchedRoutesAreBuiltOnlyBehindAGate` fails on any
+  ungated literal of a model-dispatched route.
 - **`gpu reserve --class media --drain` blocked the runs it was waiting for.** The lease record
   dropped the draining stamp on a media lease, so the media class fenced the runs in flight from
   acquire and the drain waited on work it was itself holding up (ADR 0041's deadlock, for the media

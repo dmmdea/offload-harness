@@ -126,6 +126,18 @@ is the request that waits); transcription waits its client timeout. The one unfe
 generation that ran out its wait mid-run is filed `capacity` on both run doors, before the stall and ceiling
 branches.
 
+**The model-dispatched routes too.** `/v1/chat/completions`, `/v1/embeddings` and the other routes llama-swap
+dispatches by the model named in the body load that model exactly as `/upstream` does. The generation
+clients take `Admit` there; two senders did not. The fleet chat lane (`POST /fleet/chat`) forwarded
+another box's cascade call to this node's llama-swap with no gate, so a node running media under a lease
+could have a remote cascade call load a model onto the leased cards. The embedder (the kNN pre-filter,
+`shadow-label`) posted outside `Admit`. Both now build the URL with `modelaffinity.AwaitModelRoute`, the same
+fence with the same residency exemption. The chat lane waits inside the caller's budget: its caller has no
+lane-to-local fallback and the lane leaves queueing to the node. Exhausted, it answers `503` with the
+refusal's text, filed as `timeout` on the caller. It does not take `Admit`'s per-base arbitration, which the
+lane has always left to llama-swap. `TestModelDispatchedRoutesAreBuiltOnlyBehindAGate` extends the structural
+rule to these routes.
+
 **Why not residency-by-probe, which this ADR rejected.** The rejection was of a probe on EVERY admission to
 learn what the lease already implies. This read is taken only when a fence is up, and it answers a different
 question — whether this one request can start anything — that the lease cannot answer: a resident cascade

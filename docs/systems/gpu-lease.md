@@ -27,7 +27,7 @@ other on a single shared card.
 | `render/gpu-lock.mjs` | READ-ONLY participant: honours + fences an inherited lease, elects one unloader, drains, ComfyUI lifecycle. **Does not acquire.** |
 | `internal/gpulock` | the read-only vision gate; delegates wholesale to `gpulease.InspectDir` |
 | `internal/modelaffinity/gpuwait.go` | READ-ONLY: text admissions that would make llama-swap load a model wait out a `media` holder (ADR 0026); armed from `config.Load` via `LeaseDir` |
-| `internal/modelaffinity/upstream.go` | READ-ONLY: `AwaitUpstream`, the ONE builder of a llama-swap `/upstream/<model>/…` URL — every probe, tokenizer, warm-up and transcription passes the same fence as a generation (see "Probes pass the fence too") |
+| `internal/modelaffinity/upstream.go` | READ-ONLY: `AwaitUpstream`, the ONE builder of a llama-swap `/upstream/<model>/…` URL, and `AwaitModelRoute`, the builder for a model-dispatched route (`/v1/chat/completions`, `/v1/embeddings`, …) sent without `Admit` — every probe, tokenizer, warm-up, transcription, chat-lane forward and embedding passes the same fence as a generation (see "Probes pass the fence too") |
 | `internal/config` | `state_dir`, `gpu_lock_path` |
 
 ## Why it exists
@@ -474,11 +474,25 @@ literal that spells the route anywhere else), and it:
 | tokenizer (`/tokenize`) | none | fails open for that step and is **not** counted toward the sticky downgrade (`LastFailFenced`); the completion that follows is the request that waits |
 | whisper transcription | the client's timeout | a `timeout`-class defer naming the holder |
 | KV-slot lane | none | `409 seat-cold` |
+| fleet chat lane (`POST /fleet/chat` → `/v1/chat/completions`) | the caller's own budget (the request context) and `ChatProxyTimeout` | `503` whose body is the lease refusal ("gpu-lease timeout …"): the caller files it as congestion (`timeout`), never as a broken stack |
+| embedder (`/v1/embeddings`: the kNN pre-filter, `shadow-label`) | the embedder's own timeout | an error the kNN pre-filter fails open on, as on a slow embedder |
 | `gpu reserve` warm-back | — | the holder's own sanctioned load: `HolderUpstreamURL`, the one unfenced builder, callable only from `gpu_drain.go` |
 
 A run that took the card's refusal mid-run — its next completion waited at `Admit` and ran out — is filed
 `capacity` ("gpu busy: …") on both doors, before the stall and ceiling branches: the cause is the held card,
 whichever clock ended the wait.
+
+**Model-dispatched routes.** llama-swap also loads the model a request names in its BODY on
+`/v1/chat/completions`, `/v1/embeddings`, `/v1/completions`, `/completion`, `/infill`, `/v1/rerank`,
+`/v1/audio/*`, `/v1/images/*` and `/sdapi/*` (v251 `modelPostJSONRoutes` and siblings). The harness's
+generation clients (`llamaclient`, `agent.LLMClient`) take `Admit` there already; the fleet chat lane forwarded
+another box's cascade call with no gate, and the embedder posted outside `Admit`. Both now build the URL with
+`modelaffinity.AwaitModelRoute`. The chat lane WAITS rather than refusing, because the lane leaves queueing to
+the node by design, its caller has no lane-to-local fallback, and a short render clears inside the caller's
+budget; it does not take `Admit`'s per-base arbitration, which the lane has always left to llama-swap.
+`TestModelDispatchedRoutesAreBuiltOnlyBehindAGate` fails on a literal that spells one of these routes outside
+a gated builder call or a listed file (each listed with its reason; the two `Admit` clients are checked to
+still take it).
 
 **What is not covered.** The same one-read check-then-act window ADR 0026 names: a lease taken microseconds
 after the fence's read, or a ready model evicted by its own ttl between the `/running` read and the request.
