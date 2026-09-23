@@ -19,7 +19,7 @@ import (
 type Source struct {
 	Path     string // the resolved candidate ("" = nothing resolved, built-in defaults)
 	NotFound bool   // Path was explicit (--config/env) but no file exists there
-	LoadErr  error  // the file existed but failed to load/parse (defaults returned)
+	LoadErr  error  // the file existed but failed: a *ParseError (nothing from it in effect, built-in defaults) or a validation refusal (its other settings in effect)
 }
 
 // Loaded reports whether cfg values actually came from Path.
@@ -74,6 +74,16 @@ func WarnOnDefaults(src Source, w io.Writer) bool {
 	case src.NotFound:
 		fmt.Fprintf(w, "WARNING: config file NOT FOUND at %s (from --config/$LOCAL_OFFLOAD_CONFIG) — running on BUILT-IN DEFAULTS; machine bindings are inactive. Fix the path.\n", src.Path)
 		return true
+	case IsParseError(src.LoadErr):
+		// The file could not be DECODED, so Load returned the built-in defaults: the
+		// opposite of the validation case below. This branch used to fall into that one
+		// and print "the file's other settings ARE in effect" while the process ran on
+		// defaults (OptiPlex, 2026-09-23: a BOM-prefixed config, a run-graph on defaults).
+		fmt.Fprintf(w, "WARNING: config at %s could NOT BE PARSED: %v\n"+
+			"  NOTHING from this file is in effect — this process runs on BUILT-IN DEFAULTS; machine bindings (vision, media, cascade tiers) are inactive and those calls will defer.\n"+
+			"  fleet-serve refuses to start on it; the MCP server starts but defers every tool except offload_status; one-shot CLI verbs proceed on the defaults. Fix the JSON.\n",
+			src.Path, src.LoadErr)
+		return true
 	case src.LoadErr != nil:
 		// NOT "built-in defaults": Load returns the FILE's settings with only the
 		// five composite keys stripped, so this process runs on that file — which
@@ -99,6 +109,9 @@ func SourceLine(src Source) string {
 		return "config:     BUILT-IN DEFAULTS (no config file found)"
 	case src.NotFound:
 		return "config:     BUILT-IN DEFAULTS (file not found: " + src.Path + ")"
+	case IsParseError(src.LoadErr):
+		// Nothing from the file is in effect: say defaults, and name the file and why.
+		return "config:     BUILT-IN DEFAULTS (" + src.Path + " could not be parsed: " + src.LoadErr.Error() + ")"
 	case src.LoadErr != nil:
 		// Same correction as WarnOnDefaults above, on the line doctor prints
 		// FIRST: this config came from the file, it just did not pass validation,
@@ -107,4 +120,14 @@ func SourceLine(src Source) string {
 	default:
 		return "config:     BUILT-IN DEFAULTS (" + src.Path + " was not read)"
 	}
+}
+
+// LoadFailure names how a config load failed, for messages that wrap LoadErr: a file
+// that could not be parsed (nothing from it in effect) or one that failed validation
+// (its other settings in effect).
+func LoadFailure(err error) string {
+	if IsParseError(err) {
+		return "could not be parsed"
+	}
+	return "failed validation"
 }

@@ -2882,7 +2882,7 @@ func runDoctor(args []string) error {
 		return err
 	}
 	if tainted {
-		return fmt.Errorf("config at %s failed validation: %w", src.Path, src.LoadErr)
+		return fmt.Errorf("config at %s %s: %w", src.Path, config.LoadFailure(src.LoadErr), src.LoadErr)
 	}
 	return nil
 }
@@ -2916,7 +2916,7 @@ func doctorConfigRow(src config.Source, w io.Writer) bool {
 	if src.LoadErr == nil {
 		return false
 	}
-	fmt.Fprintf(w, "config:     FAIL  FAILED validation — %v\n", src.LoadErr)
+	fmt.Fprintf(w, "config:     FAIL  %s — %v\n", strings.ToUpper(config.LoadFailure(src.LoadErr)), src.LoadErr)
 	return true
 }
 
@@ -2938,7 +2938,7 @@ func fleetServeConfigGate(src config.Source) error {
 	if src.LoadErr == nil {
 		return nil
 	}
-	return fmt.Errorf("refusing to serve: config at %s failed validation: %w", src.Path, src.LoadErr)
+	return fmt.Errorf("refusing to serve: config at %s %s: %w", src.Path, config.LoadFailure(src.LoadErr), src.LoadErr)
 }
 
 // aliasCheck pairs a config key with its configured llama-swap model alias.

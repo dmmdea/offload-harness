@@ -59,3 +59,24 @@ func TestShippedEnvRulesExampleLoads(t *testing.T) {
 		t.Fatalf("example decoded empty: %+v", got)
 	}
 }
+
+// TestAgentRuleFilesAcceptAUTF8BOM: --env-rules / --setup files are operator-written
+// JSON too, and PowerShell 5.1 saves them with a byte-order mark.
+func TestAgentRuleFilesAcceptAUTF8BOM(t *testing.T) {
+	dir := t.TempDir()
+	rules := filepath.Join(dir, "rules.json")
+	if err := os.WriteFile(rules, []byte("\xEF\xBB\xBF"+`{"max_calls_per_tool":{"list_dir":2}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := resolveEnvRules(rules, config.Config{})
+	if err != nil || got == nil || got.MaxCallsPerTool["list_dir"] != 2 {
+		t.Fatalf("a BOM-prefixed --env-rules file must load: %+v %v", got, err)
+	}
+	setup := filepath.Join(dir, "setup.json")
+	if err := os.WriteFile(setup, []byte("\xEF\xBB\xBF[]"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolveSetupActions(setup); err != nil {
+		t.Fatalf("a BOM-prefixed --setup file must load: %v", err)
+	}
+}

@@ -6,9 +6,9 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
-### Fixed — OptiPlex parity: doctor checks what a route loads, the 26B download honours the tier, `generate-video --fast`, the Wan lane defers cleanly
+### Fixed — OptiPlex parity: doctor checks what a route loads, the 26B download honours the tier, `generate-video --fast`, the Wan lane defers cleanly, a BOM config loads
 
-Four harness defects from the OptiPlex 7060 (blackwell-8) media parity audit, 2026-09-23.
+Five harness defects from the OptiPlex 7060 (blackwell-8) media parity audit, 2026-09-23.
 
 - **`doctor` (and `offload_status` / `acceptance`) no longer call a route CONFIGURED because its script
   exists.** `generate_video`, `animate_character` and both `generate_audio` kinds now also check what
@@ -40,6 +40,13 @@ Four harness defects from the OptiPlex 7060 (blackwell-8) media parity audit, 20
   `virtual_vram_gb` is per card, so each node sets its measured value; the pipeline passes it as
   `--wan-vvram-gb`. 7 OOMs an 8 GB card under "Prefer No Sysmem Fallback". A negative value is a config
   finding. Separate from `videogen_pool_vvram_gb` (LTX-2.5: VRAM borrowed from a donor card).
+- **A config.json saved with a UTF-8 byte-order mark loads, and a config that cannot be parsed says the truth.**
+  PowerShell 5.1 writes a BOM; `encoding/json` refused it, and the warning then said "the file's other settings
+  ARE in effect" while the process ran on built-in defaults (a run-graph on the OptiPlex did exactly that). The
+  loader strips a leading BOM (`config.StripBOM`, also used by `audit-config` and local-agent's `--env-rules` /
+  `--setup` files). A file that still does not decode is a `config.ParseError`: the value is exactly the built-in
+  defaults (a JSON type error used to leave a half-read file), and the stderr warning, doctor's `config:` rows and
+  fleet-serve's refusal all say nothing from the file is in effect. Validation failures keep their own wording.
 
 ### Fixed — the launcher's dxg warning reports what is new, not everything since the distro started
 

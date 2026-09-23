@@ -120,3 +120,30 @@ func TestLoadErrDisclosureIsTrue(t *testing.T) {
 		}
 	}
 }
+
+// TestDoctorAndFleetServeNameAnUnparseableConfig: a config that could not be DECODED is
+// not a validation failure — nothing from it is in effect. doctor's rows and fleet-serve's
+// refusal must say which failure it was, and doctor must still exit non-zero.
+func TestDoctorAndFleetServeNameAnUnparseableConfig(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(p, []byte(`{"model": }`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, src := config.LoadWithSource(p)
+	var buf bytes.Buffer
+	if !doctorConfigRow(src, &buf) {
+		t.Fatal("an unparseable config must make doctor exit non-zero")
+	}
+	got := buf.String()
+	for _, want := range []string{"BUILT-IN DEFAULTS", "COULD NOT BE PARSED", "NOTHING from the file is in effect"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("doctor's config rows must say %q; got:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "FAILED validation") {
+		t.Errorf("an unparseable file did not fail validation; got:\n%s", got)
+	}
+	if err := fleetServeConfigGate(src); err == nil || !strings.Contains(err.Error(), "could not be parsed") {
+		t.Fatalf("fleet-serve must refuse, naming the parse failure: %v", err)
+	}
+}

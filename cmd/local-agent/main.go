@@ -700,7 +700,7 @@ func resolveSetupActions(flagPath string) ([]core.AgentSetupAction, error) {
 		return nil, fmt.Errorf("--setup: %w", err)
 	}
 	var actions []core.AgentSetupAction
-	dec := json.NewDecoder(bytes.NewReader(b))
+	dec := json.NewDecoder(bytes.NewReader(config.StripBOM(b))) // PowerShell 5.1 writes a BOM
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&actions); err != nil {
 		return nil, fmt.Errorf("--setup %s: %w", flagPath, err)
@@ -728,7 +728,7 @@ func resolveEnvRules(flagPath string, cfg config.Config) (*core.AgentEnvRules, e
 		return nil, fmt.Errorf("--env-rules: %w", err)
 	}
 	var r core.AgentEnvRules
-	dec := json.NewDecoder(bytes.NewReader(b))
+	dec := json.NewDecoder(bytes.NewReader(config.StripBOM(b))) // PowerShell 5.1 writes a BOM
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&r); err != nil {
 		return nil, fmt.Errorf("--env-rules %s: %w", flagPath, err)

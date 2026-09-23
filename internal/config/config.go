@@ -1821,8 +1821,13 @@ func load(path string) (Config, error) {
 		}
 		return c, err
 	}
+	// A PowerShell 5.1-written file starts with a UTF-8 BOM; strip it, then decode.
+	// A file that still does not decode is a ParseError and the value is the plain
+	// defaults: json.Unmarshal fills fields as it goes on a TYPE error, and a half-read
+	// file that skipped expansion and validation is neither the file nor the defaults.
+	b = StripBOM(b)
 	if err := json.Unmarshal(b, &c); err != nil {
-		return c, err
+		return Default(), &ParseError{Err: err}
 	}
 	// primary_gpu_uuid is meant to be copy-pasted straight out of a running
 	// node's /fleet/health gpu_devices[] — trim whitespace an editor/terminal
