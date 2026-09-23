@@ -1,0 +1,736 @@
+# HOUSE-PP-REGISTER-BIND, ported to LMCache 0.5.5 (2026-09-22). Same semantics as patches-v2/04.
+# Port: 0.5.5 sends REGISTER through a transport RequestClient (transport/base.py,
+# transport/zmq_impl/client.py) instead of send_request(mq_client, ...): the optional
+# kv_worker_id is threaded through RequestClient.register_kv_cache and appended as the
+# 8th frame only when not None; mq.py outbound check re-applied inside 0.5.5's try block.
+--- a/lmcache/v1/multiprocess/engine_context.py
++++ b/lmcache/v1/multiprocess/engine_context.py
+@@ -50,7 +50,8 @@
+     # HOUSE-PP-LAYOUT 2026-09-22: under pipeline parallelism every rank holds a different layer
+     # set, so each rank's objects have a different size; the single entry above only keeps the
+     # LAST registration. ``heterogeneous`` flips when two registrations disagree, and
+-    # ``rank_group_layout_descs`` maps kv_rank -> {object_group_id: layout}, bound at first store.
++    # ``rank_group_layout_descs`` maps kv_rank -> {object_group_id: layout}, bound at REGISTER when
++    # the client sends its kv_worker_id (HOUSE-PP-REGISTER-BIND), else at the instance's first store.
+     heterogeneous: bool = False
+     rank_group_layout_descs: dict | None = None
+ 
+@@ -162,15 +163,21 @@
+         world_size: int,
+         kv_rank: int,
+         group_layout_descs: dict[int, MemoryLayoutDesc],
+-    ) -> None:
+-        """HOUSE-PP-LAYOUT: record the layouts of the rank that owns ``kv_rank``."""
++    ) -> bool:
++        """HOUSE-PP-LAYOUT: record the layouts of the rank that owns ``kv_rank``.
++
++        Returns:
++            ``True`` when the layouts were bound, ``False`` when no registration
++            exists for ``(model_name, world_size)`` (nothing was recorded).
++        """
+         with self._lock:
+             entry = self._registry.get((model_name, world_size))
+             if entry is None:
+-                return
++                return False
+             if entry.rank_group_layout_descs is None:
+                 entry.rank_group_layout_descs = {}
+             entry.rank_group_layout_descs[kv_rank] = dict(group_layout_descs)
++            return True
+ 
+     def find_rank_layouts(
+         self, model_name: str, world_size: int
+--- a/lmcache/v1/multiprocess/modules/lmcache_driven_transfer.py
++++ b/lmcache/v1/multiprocess/modules/lmcache_driven_transfer.py
+@@ -931,6 +931,7 @@
+         engine_type: EngineType,
+         layout_hints: LayoutHints,
+         engine_group_infos: list[EngineGroupInfo],
++        kv_worker_id: int | None = None,
+     ) -> None:
+         """Register the KV cache tensors for a given GPU instance ID.
+ 
+@@ -946,6 +947,11 @@
+                 GPUCacheContext for GPU KV format detection.
+             engine_group_infos: Engine-neutral KV cache group metadata
+                 (already msgspec-decoded by the message queue).
++            kv_worker_id: HOUSE-PP-REGISTER-BIND: optional kv worker id of the
++                registering worker (the ``worker_id`` its STORE keys carry).
++                When given, the rank's per-group layouts are bound right here
++                instead of at the instance's first STORE; ``None`` (old
++                clients) keeps the store-time bind.
+         """
+         now = time.monotonic()
+         # NOOP-register: an already-registered instance (e.g. a recovering
+@@ -960,7 +966,23 @@
+                     "Instance %d already registered; refreshing liveness",
+                     instance_id,
+                 )
+-                return
++        if existing is not None:
++            if (
++                kv_worker_id is not None
++                and instance_id not in self._house_bound_ranks()
++            ):
++                self._house_bind_rank_layouts(
++                    instance_id,
++                    existing.cache_context,
++                    existing.model_name,
++                    existing.world_size,
++                    kv_worker_id,
++                    "register(noop)",
++                )
++            return
++        # HOUSE-PP-REGISTER-BIND: a NEW registration (first, or after a reap /
++        # unregister reusing the id) must bind again; forget any stale bind.
++        self._house_bound_ranks().pop(instance_id, None)
+ 
+         # Build the context and layout descriptor outside the lock.
+         cache_context = create_cache_context(
+@@ -995,6 +1017,19 @@
+             attn_desc,
+             group_layout_descs=group_layout_descs,
+         )
++        # HOUSE-PP-REGISTER-BIND 2026-09-22: bind this rank's layouts now, so
++        # the very first lookup after a server start already has every rank's
++        # layout (the store-time bind in ``store`` stays as the fallback).
++        if kv_worker_id is not None:
++            self._house_bind_rank_layouts(
++                instance_id,
++                cache_context,
++                model_name,
++                world_size,
++                kv_worker_id,
++                "register",
++                group_layout_descs=group_layout_descs,
++            )
+ 
+         with self._lock:
+             self._cache_contexts[instance_id] = ContextEntry(
+@@ -1012,6 +1047,129 @@
+             cache_context.num_layers,
+         )
+ 
++    def _house_bound_ranks(self) -> dict[int, int]:
++        """HOUSE-PP-LAYOUT: instance id -> the kv_rank its layouts are bound to."""
++        return self.__dict__.setdefault("_house_rank_bound", {})
++
++    def _house_bind_rank_layouts(
++        self,
++        instance_id: int,
++        cache_context: BaseCacheContext,
++        model_name: str,
++        world_size: int,
++        kv_worker_id: int | None,
++        source: str,
++        *,
++        kv_rank: int | None = None,
++        group_layout_descs: dict[int, MemoryLayoutDesc] | None = None,
++    ) -> bool:
++        """HOUSE-PP-REGISTER-BIND: bind an instance's per-group layouts to its
++        kv_rank in the layout registry.
++
++        ``kv_rank`` is taken as given (store path: read off the store key) or
++        computed from ``kv_worker_id`` with the same formula the object keys
++        use (``ipc_key_to_object_keys``). The instance is recorded as bound
++        only when the registry accepted the bind. Never raises: a failed bind
++        is logged and the store-time fallback retries it.
++
++        Returns:
++            Whether the layouts were bound.
++        """
++        try:
++            if kv_rank is None:
++                if kv_worker_id is None:
++                    raise ValueError("neither kv_rank nor kv_worker_id given")
++                # Only a worker id the keys could carry is trusted; anything else
++                # stays unbound and the store-time bind reads the rank off the key.
++                if not 0 <= kv_worker_id < world_size:
++                    raise ValueError(
++                        f"kv_worker_id={kv_worker_id} outside [0, {world_size})"
++                    )
++                kv_rank = ObjectKey.ComputeKVRank(
++                    world_size=world_size,
++                    global_rank=kv_worker_id,
++                    local_world_size=world_size,
++                    local_rank=kv_worker_id,
++                )
++            if group_layout_descs is None:
++                num_object_groups = (
++                    cache_context.kv_layer_groups_manager.num_object_groups
++                )
++                group_layout_descs = {
++                    gid: get_layout_desc(
++                        cache_context, self._ctx.chunk_size, object_group_id=gid
++                    )
++                    for gid in range(num_object_groups)
++                }
++            bound = self._ctx.layout_desc_registry.bind_rank_layouts(
++                model_name, world_size, kv_rank, group_layout_descs
++            )
++        except Exception as e:  # never break a register/store over bookkeeping
++            logger.warning(
++                "HOUSE-PP-LAYOUT bind failed at %s for instance %d: %r",
++                source,
++                instance_id,
++                e,
++            )
++            return False
++        if not bound:
++            logger.warning(
++                "HOUSE-PP-LAYOUT bind at %s found no registration for "
++                "(%s, %d); instance %d stays unbound (store-time fallback)",
++                source,
++                model_name,
++                world_size,
++                instance_id,
++            )
++            return False
++        self._house_bound_ranks()[instance_id] = kv_rank
++        logger.info(
++            "HOUSE-PP-LAYOUT bound kv_rank=%#010x for instance %d at %s (%d groups)",
++            kv_rank,
++            instance_id,
++            source,
++            len(group_layout_descs),
++        )
++        return True
++
++    def _house_store_bind(
++        self,
++        instance_id: int,
++        cache_context: BaseCacheContext,
++        model_name: str,
++        world_size: int,
++        key_rank: int,
++    ) -> None:
++        """HOUSE-PP-REGISTER-BIND: store-time bind and check. The store key's
++        kv_rank is the ground truth: bind when the instance is unbound, and
++        rebind when a register-time bind chose a different rank."""
++        bound = self._house_bound_ranks()
++        was = bound.get(instance_id)
++        if was == key_rank:
++            return
++        if was is not None:
++            # The register-time rank disagrees with the keys, so that bind may
++            # have overwritten ANOTHER rank's layouts: forget every mark so each
++            # instance rebinds from its own store keys at its next store.
++            logger.warning(
++                "HOUSE-PP-LAYOUT instance %d was bound at kv_rank=%#010x but its "
++                "store keys carry kv_rank=%#010x; rebinding every instance from "
++                "its store keys",
++                instance_id,
++                was,
++                key_rank,
++            )
++            bound.clear()
++        self._house_bind_rank_layouts(
++            instance_id,
++            cache_context,
++            model_name,
++            world_size,
++            None,
++            "store",
++            kv_rank=key_rank,
++        )
++
+     def unregister_kv_cache(self, instance_id: int) -> None:
+         """Unregister the KV cache tensors for a given GPU instance ID.
+ 
+@@ -1098,24 +1256,19 @@
+         )
+         num_chunks = len(obj_keys_per_obj_group[0])
+         # HOUSE-PP-LAYOUT 2026-09-22: bind this instance's own per-group layouts to its kv_rank
+-        # (the key carries the rank; REGISTER does not), once per instance.
+-        _bound = self.__dict__.setdefault("_house_rank_bound", set())
+-        if num_chunks and instance_id not in _bound:
+-            try:
+-                _kr = obj_keys_per_obj_group[0][0].kv_rank
+-                self._ctx.layout_desc_registry.bind_rank_layouts(
+-                    model_name,
+-                    entry.world_size,
+-                    _kr,
+-                    {
+-                        gid: get_layout_desc(cache_context, self._ctx.chunk_size, object_group_id=gid)
+-                        for gid in range(num_object_groups)
+-                    },
+-                )
+-                _bound.add(instance_id)
+-                logger.info("HOUSE-PP-LAYOUT bound kv_rank=%#010x for instance %d (%d groups)", _kr, instance_id, num_object_groups)
+-            except Exception as _e:  # never break a store over bookkeeping
+-                logger.warning("HOUSE-PP-LAYOUT bind failed: %r", _e)
++        # (the key carries the rank), once per instance. HOUSE-PP-REGISTER-BIND: normally
++        # already bound at REGISTER; this is the fallback for clients that do not send
++        # ``kv_worker_id`` and for a bind that found no registry entry, and the CHECK of a
++        # register-time bind: the key's kv_rank is the ground truth, so a bind under any
++        # other rank is redone here.
++        if num_chunks:
++            self._house_store_bind(
++                instance_id,
++                cache_context,
++                model_name,
++                entry.world_size,
++                obj_keys_per_obj_group[0][0].kv_rank,
++            )
+ 
+         # NOTE: different engine groups may have different block sizes, so
+         # ``blocks_per_chunk[i]`` is the number of blocks in one chunk for
+--- a/lmcache/v1/distributed/storage_controllers/prefetch_controller.py
++++ b/lmcache/v1/distributed/storage_controllers/prefetch_controller.py
+@@ -1080,15 +1080,43 @@
+         _rank_map = request.rank_group_layout_descs or {}
+         _gk = attrgetter("object_group_id", "kv_rank")
+         by_group = sorted(keys_to_reserve, key=_gk)
++        if request.require_rank_layouts:
++            # HOUSE-PP-REGISTER-BIND 2026-09-22: a rank with no bound layout cannot be
++            # loaded into a correctly sized buffer. Decide BEFORE reserving anything:
++            # the load is all-or-nothing, so reserving the bound ranks' buffers would
++            # only churn L1. Report it under its own reason (not ``l1_contended``) and
++            # reserve nothing; the caller (``_transition_to_load_phase``) then sees
++            # ``len(reserved) < len(keys_to_reserve)`` and ``_finish_request`` returns
++            # every L2 lock and reports the L1-only hit (no write reservations exist).
++            # The event lists only the unbound ranks' keys (the l1_oom / l1_contended
++            # convention: the keys that CAUSED the skip, not every key abandoned with them).
++            unbound_keys = [
++                k
++                for k in by_group
++                if (_rank_map.get(k.kv_rank) or {}).get(k.object_group_id) is None
++            ]
++            if unbound_keys:
++                logger.info(
++                    "Prefetch request %d: %d/%d L2 keys belong to kv_ranks with no "
++                    "bound layout (%s); skipping the L2 load, L1-only hit",
++                    request.request_id,
++                    len(unbound_keys),
++                    len(keys_to_reserve),
++                    sorted({hex(k.kv_rank) for k in unbound_keys}),
++                )
++                self._event_bus.publish(
++                    Event(
++                        event_type=EventType.L2_PREFETCH_FAILED,
++                        metadata={"reason": "rank_layout_unbound", "keys": unbound_keys},
++                    )
++                )
++                return set()
+         for (gid, _kr), group_iter in groupby(by_group, key=_gk):
+             group_keys = list(group_iter)
+             gld = (_rank_map.get(_kr) or {}).get(gid)
+             if gld is None:
+-                if request.require_rank_layouts:
+-                    # Unknown layout for this rank: skip the L2 load (falls back to the L1 hit).
+-                    for _k in group_keys:
+-                        write_results[_k] = (L1Error.KEY_NOT_WRITABLE, None)
+-                    continue
++                # Only reachable without require_rank_layouts (homogeneous ranks):
++                # every rank shares the registered group layout.
+                 gld = request.group_layout_descs[gid]
+             gr = self._l1_manager.reserve_write(
+                 keys=group_keys,
+--- a/lmcache/integration/vllm/vllm_multi_process_adapter.py
++++ b/lmcache/integration/vllm/vllm_multi_process_adapter.py
+@@ -1481,6 +1481,10 @@
+                 layout_hints=layout_hints,
+                 engine_group_infos=self.engine_group_infos,
+                 engine_type=EngineType.VLLM,
++                # HOUSE-PP-REGISTER-BIND 2026-09-22: the kv worker id its STORE
++                # keys carry, so the server binds this rank's layouts at REGISTER
++                # (pipeline-parallel ranks differ in object size).
++                kv_worker_id=self.worker_id,
+             )
+         except TimeoutError:
+             raise ConnectionError(
+--- a/lmcache/v1/mp_observability/subscribers/metrics/l2_failures.py
++++ b/lmcache/v1/mp_observability/subscribers/metrics/l2_failures.py
+@@ -13,6 +13,11 @@
+     * ``not_found``    — L2 reported the key present during lookup but the
+       load returned no data (adapter-level inconsistency, e.g. concurrent
+       delete).
++    * ``rank_layout_unbound`` — HOUSE-PP-REGISTER-BIND: ranks registered
++      different layouts (pipeline parallel) and a key's kv_rank has no bound
++      layout yet, so no correctly sized buffer exists; the load was skipped.
++      Like ``l1_oom`` / ``l1_contended``, only the keys that caused the skip
++      are counted, not the rest of the all-or-nothing load abandoned with them.
+ 
+ The ``serde_failure`` reason is intentionally omitted until the serde PR
+ lands; once it does, it becomes an additive third value of the same tag
+@@ -46,7 +51,7 @@
+             description=(
+                 "Count of keys that were expected in L2 but failed to load "
+                 "into L1. Tagged by ``reason`` = l1_oom | l1_contended | "
+-                "not_found and ``model_name``."
++                "not_found | rank_layout_unbound and ``model_name``."
+             ),
+             unit="chunks",
+         )
+--- a/lmcache/v1/multiprocess/mq.py
++++ b/lmcache/v1/multiprocess/mq.py
+@@ -28,6 +28,7 @@
+ from lmcache.v1.multiprocess.protocol import (
+     HandlerType,
+     RequestType,
++    get_min_payload_count,
+     get_payload_classes,
+     get_response_class,
+ )
+@@ -50,16 +51,43 @@
+     return msgspec.msgpack.decode(b_uid, type=RequestUID)
+ 
+ 
++def min_payload_count(request_type: RequestType) -> int:
++    """HOUSE-PP-REGISTER-BIND: the fewest payloads a request of this type may
++    carry. Equal to the payload-class count (the exact-count rule) unless the
++    request type's ProtocolDefinition declares ``optional_trailing_payloads``
++    (only REGISTER_KV_CACHE does)."""
++    return get_min_payload_count(request_type)
++
++
++def _handler_min_count(
++    request_type: RequestType, payload_clss: list[Any]
++) -> Optional[int]:
++    """HOUSE-PP-REGISTER-BIND: the min payload count a server handler accepts,
++    or ``None`` (exact count) when the handler's classes are not the protocol's
++    own list or the request type declares no optional trailing payloads."""
++    if len(payload_clss) != len(get_payload_classes(request_type)):
++        return None
++    n = min_payload_count(request_type)
++    return None if n == len(payload_clss) else n
++
++
+ def unwrap_request_payloads(
+-    b_payloads: list[bytes], payload_clss: list[Any]
++    b_payloads: list[bytes],
++    payload_clss: list[Any],
++    min_count: Optional[int] = None,
+ ) -> list[Any]:
+-    if len(b_payloads) != len(payload_clss):
++    # HOUSE-PP-REGISTER-BIND: ``min_count`` (``min_payload_count`` of the request
++    # type) admits omitted optional trailing payloads; ``None`` = exact count.
++    lo = len(payload_clss) if min_count is None else min_count
++    if not lo <= len(b_payloads) <= len(payload_clss):
+         raise ValueError("Payload count does not match expected count")
+ 
+     decoded_payloads = [
+         msgspec_decode(payload, cls=cls)
+         for payload, cls in zip(b_payloads, payload_clss, strict=False)
+     ]
++    # HOUSE-PP-REGISTER-BIND: pad omitted optional trailing payloads.
++    decoded_payloads.extend([None] * (len(payload_clss) - len(b_payloads)))
+     return decoded_payloads
+ 
+ 
+@@ -305,8 +333,18 @@
+                         wrapped_request.request_type, cls=RequestType
+                     )
+                     payload_classes = get_payload_classes(wrapped_request.request_type)
+-                    if len(payload_classes) != len(wrapped_request.request_payloads):
+-                        expected_classes = [cls.__name__ for cls in payload_classes]
++                    n_payloads = len(wrapped_request.request_payloads)
++                    if not (
++                        # HOUSE-PP-REGISTER-BIND: declared optional trailing payloads
++                        min_payload_count(wrapped_request.request_type)
++                        <= n_payloads
++                        <= len(payload_classes)
++                    ):
++                        # ``int | None`` (types.UnionType) has no ``__name__``.
++                        expected_classes = [
++                            getattr(cls, "__name__", repr(cls))
++                            for cls in payload_classes
++                        ]
+                         actual_classes = [
+                             type(payload).__name__
+                             for payload in wrapped_request.request_payloads
+@@ -429,13 +467,18 @@
+         payload_clss: list[Any],
+         response_cls: ResponseType,
+         handler: Callable[..., ResponseType],
++        min_count: Optional[int] = None,
+     ):
+         self.payload_clss = payload_clss
+         self.response_cls = response_cls
+         self.handler = handler
++        # HOUSE-PP-REGISTER-BIND: None = exact payload count
++        self.min_count = min_count
+ 
+     def __call__(self, payloads: list[bytes]) -> ResponseType:
+-        return self.handler(*unwrap_request_payloads(payloads, self.payload_clss))
++        return self.handler(
++            *unwrap_request_payloads(payloads, self.payload_clss, self.min_count)
++        )
+ 
+     def get_response_class(self) -> ResponseType:
+         return self.response_cls
+@@ -459,11 +502,14 @@
+         payload_clss: list[Any],
+         response_cls: ResponseType,
+         handler: Callable[..., ResponseType],
++        min_count: Optional[int] = None,
+     ):
+         self.executor: ThreadPoolExecutor | AffinityThreadPool | None = None
+         self.payload_clss = payload_clss
+         self.handler = handler
+         self.response_cls = response_cls
++        # HOUSE-PP-REGISTER-BIND: None = exact payload count
++        self.min_count = min_count
+ 
+     def __call__(
+         self, payloads: list[bytes], affinity_key: int = 0
+@@ -472,7 +518,9 @@
+             "BlockingRequestHandler has no executor assigned. "
+             "Call add_normal_thread_pool or add_affinity_thread_pool first."
+         )
+-        decoded_payloads = unwrap_request_payloads(payloads, self.payload_clss)
++        decoded_payloads = unwrap_request_payloads(
++            payloads, self.payload_clss, self.min_count
++        )
+         if isinstance(self.executor, AffinityThreadPool):
+             return self.executor.submit(
+                 self.handler, *decoded_payloads, affinity_key=affinity_key
+@@ -757,7 +805,10 @@
+     ) -> None:
+         response_cls = get_response_class(request_type)
+         self.handlers[request_type] = SyncRequestHandler(
+-            payload_clss, response_cls, handler
++            payload_clss,
++            response_cls,
++            handler,
++            min_count=_handler_min_count(request_type, payload_clss),
+         )
+ 
+     def add_blocking_handler(
+@@ -765,7 +816,10 @@
+     ) -> None:
+         response_cls = get_response_class(request_type)
+         self.handlers[request_type] = BlockingRequestHandler(
+-            payload_clss, response_cls, handler
++            payload_clss,
++            response_cls,
++            handler,
++            min_count=_handler_min_count(request_type, payload_clss),
+         )
+ 
+     def add_nonblocking_handler(
+--- a/lmcache/v1/multiprocess/protocol.py
++++ b/lmcache/v1/multiprocess/protocol.py
+@@ -48,6 +48,21 @@
+         raise ValueError(f"Invalid request type: {req_type}")
+ 
+ 
++def get_min_payload_count(req_type: RequestType) -> int:
++    """
++    HOUSE-PP-REGISTER-BIND 2026-09-22: the fewest payloads a request of this
++    type may carry: ``len(payload_classes)`` minus the request type's declared
++    ``optional_trailing_payloads`` (0 for every type that did not opt in).
++
++    Raises:
++        ValueError: If the request type is not recognized
++    """
++    if pd := _PROTOCOL_DEFINITIONS.get(req_type, None):
++        return len(pd.payload_classes) - pd.optional_trailing_payloads
++    else:
++        raise ValueError(f"Invalid request type: {req_type}")
++
++
+ def get_response_class(req_type: RequestType) -> Optional[Any]:
+     """
+     Get the expected response class for a request type.
+--- a/lmcache/v1/multiprocess/protocols/base.py
++++ b/lmcache/v1/multiprocess/protocols/base.py
+@@ -5,7 +5,7 @@
+ 
+ # Standard
+ from dataclasses import dataclass
+-from typing import Any, Optional
++from typing import Any, Optional, get_args
+ import enum
+ 
+ 
+@@ -106,8 +106,27 @@
+         payload_classes: List of expected payload types in order
+         response_class: Expected response type, or None if no response
+         handler_type: How the handler should be executed (SYNC/BLOCKING/NON_BLOCKING)
++        optional_trailing_payloads: HOUSE-PP-REGISTER-BIND 2026-09-22: how many
++            TRAILING payloads a sender may omit (the receiver pads them with
++            ``None``). 0 (the default) keeps the exact-count rule; it is opted
++            into per request type, never inferred from ``X | None`` classes.
+     """
+ 
+     payload_classes: list[Any]
+     response_class: Optional[Any]
+     handler_type: HandlerType
++    optional_trailing_payloads: int = 0
++
++    def __post_init__(self) -> None:
++        n = self.optional_trailing_payloads
++        if not 0 <= n <= len(self.payload_classes):
++            raise ValueError(
++                f"optional_trailing_payloads={n} out of range for "
++                f"{len(self.payload_classes)} payload classes"
++            )
++        for cls in self.payload_classes[len(self.payload_classes) - n :]:
++            if cls is not None and type(None) not in get_args(cls):
++                raise ValueError(
++                    f"optional trailing payload class {cls!r} must admit None "
++                    "(omitted payloads are padded with None)"
++                )
+--- a/lmcache/v1/multiprocess/protocols/engine.py
++++ b/lmcache/v1/multiprocess/protocols/engine.py
+@@ -73,6 +73,13 @@
+         #   - layout_hints: LayoutHints - See custom_types.LayoutHints.
+         #   - engine_group_infos: list[EngineGroupInfo] - Engine-neutral KV cache
+         #     group metadata (msgspec-encoded by the message queue).
++        #   - kv_worker_id: int | None - HOUSE-PP-REGISTER-BIND 2026-09-22:
++        #     OPTIONAL trailing payload, the worker's kv worker id (the value
++        #     its STORE keys carry as ``worker_id``), so the server can bind
++        #     the rank's layouts at register time. Old clients (and new ones
++        #     with no id) omit the frame; this is the ONLY request type that
++        #     declares an optional trailing payload (``optional_trailing_payloads``
++        #     below), and the message queue pads it with ``None``.
+         # Returns: None
+         "REGISTER_KV_CACHE": ProtocolDefinition(
+             payload_classes=[
+@@ -83,9 +90,11 @@
+                 EngineType,
+                 LayoutHints,
+                 list[EngineGroupInfo],
++                int | None,
+             ],
+             response_class=None,
+             handler_type=HandlerType.SYNC,
++            optional_trailing_payloads=1,
+         ),
+         # Unregister KV Cache
+         # Payload:
+--- a/lmcache/v1/multiprocess/transfer_context/worker_transfer.py
++++ b/lmcache/v1/multiprocess/transfer_context/worker_transfer.py
+@@ -218,6 +218,7 @@
+         layout_hints: LayoutHints | None = None,
+         engine_group_infos: Sequence[EngineGroupInfo] = (),
+         engine_type: EngineType = EngineType.VLLM,
++        kv_worker_id: int | None = None,
+     ) -> None:
+         """Register KV caches with the server and wait for ACK.
+ 
+@@ -236,6 +237,10 @@
+                 own :class:`EngineType` so this transport stays engine-
+                 neutral. Defaults to :attr:`EngineType.VLLM` for
+                 backwards compatibility.
++            kv_worker_id: HOUSE-PP-REGISTER-BIND: the worker's kv worker id
++                (the ``worker_id`` its STORE keys carry). Lets the server
++                bind this rank's layouts at register time; ``None`` keeps
++                the store-time bind.
+ 
+         Raises:
+             TimeoutError: If server registration does not complete before
+@@ -431,6 +436,7 @@
+         layout_hints: LayoutHints | None = None,
+         engine_group_infos: Sequence[EngineGroupInfo] = (),
+         engine_type: EngineType = EngineType.VLLM,
++        kv_worker_id: int | None = None,
+     ) -> None:
+         """Register the worker KV cache with the LMCache server.
+ 
+@@ -445,6 +451,12 @@
+             layout_hints: Optional KV-layout metadata.
+             engine_group_infos: Optional engine KV-group metadata.
+             engine_type: Serving engine that produced the caches.
++            kv_worker_id: HOUSE-PP-REGISTER-BIND: optional kv worker id, sent
++                as the trailing optional REGISTER_KV_CACHE payload (omitted
++                from the request when ``None``). A server older than this
++                overlay drops a REGISTER that carries it, so server and
++                engine must load the same overlay (seat_fg.sh starts both
++                from ``SEAT_LMCACHE_PYTHONPATH``).
+ 
+         Raises:
+             RuntimeError: If event IPC is unsupported for the KV-cache device.
+@@ -455,6 +467,13 @@
+         event_backend.check_event_support(device)
+ 
+         self._req_client = req_client
++        # HOUSE-PP-REGISTER-BIND: pass the id only when there is one, so a caller
++        # without one stays byte-compatible with a server that predates the
++        # optional 8th frame (such a server drops an 8-frame REGISTER), and a
++        # RequestClient without the keyword keeps working.
++        extra: dict[str, int] = (
++            {} if kv_worker_id is None else {"kv_worker_id": kv_worker_id}
++        )
+         future = req_client.register_kv_cache(
+             instance_id,
+             wrap_kv_caches(kv_caches),
+@@ -463,6 +482,7 @@
+             engine_type,
+             layout_hints,
+             list(engine_group_infos),
++            **extra,
+         )
+         future.result(timeout=mq_timeout)
+         self._device = device
+@@ -687,6 +707,7 @@
+         layout_hints: LayoutHints | None = None,
+         engine_group_infos: Sequence[EngineGroupInfo] = (),
+         engine_type: EngineType = EngineType.VLLM,
++        kv_worker_id: int | None = None,
+     ) -> None:
+         """Register KV caches with the non-GPU context server.
+ 
+@@ -697,6 +718,7 @@
+         ``_single_group_block_ids``).
+         """
+         del engine_type  # unused on the engine-driven path
++        del kv_worker_id  # HOUSE-PP-REGISTER-BIND: LMCache-driven path only
+         # TODO: per-group compression (EngineGroupInfo.tokens_per_block vs
+         # the tensor-detected slot count, e.g. DeepSeek V4) is only handled
+         # on the CUDA path. The non-CUDA path is yet to be implemented.
+--- a/lmcache/v1/multiprocess/transport/base.py
++++ b/lmcache/v1/multiprocess/transport/base.py
+@@ -11,6 +11,9 @@
+ class RequestClient(Protocol):
+     """Base class for method-oriented multiprocess request clients."""
+ 
++    # HOUSE-PP-REGISTER-BIND 2026-09-22: ``kv_worker_id`` is the optional
++    # trailing REGISTER_KV_CACHE payload (the worker id its STORE keys carry);
++    # implementations send it only when it is not ``None``.
+     def register_kv_cache(
+         self,
+         instance_id: int,
+@@ -20,6 +23,7 @@
+         engine_type: Any,
+         layout_hints: Any,
+         engine_group_infos: list[Any],
++        kv_worker_id: int | None = None,
+     ) -> MessagingFuture[Any]: ...
+ 
+     def unregister_kv_cache(self, instance_id: int) -> MessagingFuture[Any]: ...
+--- a/lmcache/v1/multiprocess/transport/zmq_impl/client.py
++++ b/lmcache/v1/multiprocess/transport/zmq_impl/client.py
+@@ -37,10 +37,16 @@
+         engine_type: Any,
+         layout_hints: Any,
+         engine_group_infos: list[Any],
++        kv_worker_id: int | None = None,
+     ) -> MessagingFuture[Any]:
+-        """Register a worker KV cache with the multiprocess server."""
+-        return self._call(
+-            RequestType.REGISTER_KV_CACHE,
++        """Register a worker KV cache with the multiprocess server.
++
++        HOUSE-PP-REGISTER-BIND 2026-09-22: ``kv_worker_id`` (the worker id its
++        STORE keys carry) is sent as the optional 8th payload only when it is
++        not ``None``; without it the request stays the 7-payload REGISTER an
++        older server accepts.
++        """
++        payloads: list[Any] = [
+             instance_id,
+             kv_cache,
+             model_name,
+@@ -48,7 +54,10 @@
+             engine_type,
+             layout_hints,
+             engine_group_infos,
+-        )
++        ]
++        if kv_worker_id is not None:
++            payloads.append(kv_worker_id)
++        return self._call(RequestType.REGISTER_KV_CACHE, *payloads)
+ 
+     def unregister_kv_cache(self, instance_id: int) -> MessagingFuture[Any]:
+         """Unregister a worker KV cache."""

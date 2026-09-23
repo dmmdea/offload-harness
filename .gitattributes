@@ -26,6 +26,10 @@ tools/**        text eol=lf
 # files on whatever box runs it — a CRLF checkout would make every context line miss.
 contracts/write-door/** text eol=lf
 
+# The LMCache overlay kit's patches are applied with patch(1) inside the Linux distro, and its script and smoke test run
+# there: a CRLF checkout would make every context line of a diff miss and put a CR into the Python.
+setup/templates/vllm-seat/lmcache-patches/** text eol=lf
+
 # Chat templates are the model's prompt format, copied verbatim into a seat directory on a Linux
 # engine: a CR inside a template string literal would reach every prompt.
 *.jinja         text eol=lf

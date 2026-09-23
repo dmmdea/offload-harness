@@ -50,9 +50,24 @@ WORK="${SEAT_WORKDIR:-/root/g7}"
 # check pass against the arm, so other sessions' contracts were served by an engine without the tool-call flags,
 # and every seat start stopped the arm's MP server in turn. seat_stop.sh reads the same variable.
 MP_UNIT="${SEAT_MP_UNIT:-lmcache-mp}"
+# SEAT_KV_LOAD_FAILURE_POLICY (optional): vLLM's kv_load_failure_policy for the LMCache connector, "recompute" or
+# "fail" (vLLM's own default, used when this is empty). The shipped overlay's patch 05 (LMCache #4709,
+# lmcache-patches/) reports the blocks of a failed L2 retrieve to vLLM instead of serving them; vLLM recomputes them
+# only under "recompute" and fails the request under "fail". On vLLM 0.28 a hybrid model raises in the scheduler on
+# ANY flagged block whatever the policy (vLLM #50388, fixed in 0.30), so "recompute" means something from 0.30 on.
+# lmcache-patches/repatch-lmcache-overlay.sh refuses to put 05 into an overlay a seat env names unless that env sets
+# "recompute".
+KV_POLICY="${SEAT_KV_LOAD_FAILURE_POLICY:-}"
+# SEAT_MP_EXTRA_ARGS (optional): extra `lmcache server` arguments, appended after the ones below (e.g.
+# "--max-gpu-workers 3"), so an MP-server arm needs no edit here. Empty = none.
+MPX=(); [ -n "${SEAT_MP_EXTRA_ARGS:-}" ] && read -r -a MPX <<< "$SEAT_MP_EXTRA_ARGS"
 
 # Everything the engine prints must reach llama-swap's per-model log AND the seat log.
 exec > >(tee -a "$LOG") 2>&1
+case "$KV_POLICY" in
+  ""|recompute|fail) ;;
+  *) echo "seat_fg: REFUSING to start — SEAT_KV_LOAD_FAILURE_POLICY=$KV_POLICY (want recompute, fail, or empty)"; exit 1 ;;
+esac
 
 # fs_native over a network share (measured 2026-09-04: the Lenovo tmpfs over SMB 3.1.1 recovers a 23.7k-token prefix
 # in 2.6-2.9 s at fp16 and 0.80 s at fp8 KV, vs 3.8 / 0.92 s through Valkey). The share must be mounted BEFORE the
@@ -231,6 +246,31 @@ if command -v nvidia-smi >/dev/null 2>&1 && [ "$VWAIT" -gt 0 ] 2>/dev/null; then
   done
   [ -z "$busy" ] && echo "seat_fg: seat devices $DEVS below their VRAM floor (default ${VFLOOR} MiB) — VRAM clear"
 fi
+# WSL2 GPU-paravirtualization hazards (information, never a refusal). `make_resident: Ioctl failed: -12` (the host ran
+# out of residency) and `reserve_gpu_va … -75` in the distro's kernel log mean the dxg path is degraded until the distro
+# restarts, and an engine started on it fails later with a CUDA error that names neither. The recurring
+# `query_adapter_info: Ioctl failed: -2` and dxgvmbus FORTIFY lines are noise and are not counted.
+if grep -qi microsoft /proc/version 2>/dev/null; then
+  dxg_n=$(dmesg 2>/dev/null | grep -cE "make_resident: Ioctl failed: -12|reserve_gpu_va.*-75")
+  [ "${dxg_n:-0}" -gt 0 ] && echo "seat_fg: WARNING — the kernel log holds $dxg_n dxg residency/VA failure(s) since the distro started; a CUDA error in this start points there first (last: $(dmesg 2>/dev/null | grep -E "make_resident: Ioctl failed: -12|reserve_gpu_va.*-75" | tail -1 | cut -c1-160)). Restart the distro to clear it."
+fi
+# L2 store failures of this unit's PREVIOUS generation (information, never a refusal). A store that fails is a silent
+# miss for every later lookup of those chunks, and nothing else surfaces the count: it sits in the MP log as
+# `Store task N to adapter 0 failed` warnings. The offset of the log at each start is kept per unit, so the count
+# covers the lines written since this unit's previous start (another stack's unit appending to the same log is
+# counted too; the units rarely run together).
+MP_LOG="$WORK/lmcache-mp.log"; MP_OFF_FILE="$WORK/.$MP_UNIT.log-offset"
+if [ -f "$MP_LOG" ] && [ -f "$MP_OFF_FILE" ]; then
+  mp_off=$(cat "$MP_OFF_FILE" 2>/dev/null); mp_size=$(stat -c %s "$MP_LOG" 2>/dev/null || echo 0)
+  # Digits only, read in base 10: a hand-edited or corrupt file ("-5", "089") would otherwise reach $(( )) as octal
+  # or `tail -c +-4` and drop the note without a word. A log shorter than the offset was rotated: skip the count.
+  case "$mp_off" in ''|*[!0-9]*) mp_off="" ;; esac
+  if [ -n "$mp_off" ] && [ "$(( 10#$mp_off ))" -le "$mp_size" ]; then
+    st_fail=$(tail -c +$(( 10#$mp_off + 1 )) "$MP_LOG" | grep -a -cE "Store task [0-9]+ to adapter [0-9]+ failed")
+    [ "${st_fail:-0}" -gt 0 ] && echo "seat_fg: note — the previous $MP_UNIT generation logged $st_fail failed L2 store task(s) (\"Store task … failed\" in $MP_LOG); those chunks miss on every later lookup"
+  fi
+fi
+stat -c %s "$MP_LOG" > "$MP_OFF_FILE" 2>/dev/null || echo 0 > "$MP_OFF_FILE"
 L2ARG=(); [ -n "$L2" ] && L2ARG=(--l2-adapter "$L2")
 # SEAT_LMCACHE_PYTHONPATH (optional): a directory prepended to PYTHONPATH so the MP server (and the engine, below) import
 # LMCache from an overlay instead of the installed package — used to run an unreleased upstream fix without touching the
@@ -242,10 +282,11 @@ if ! systemd-run --unit="$MP_UNIT" --collect --working-directory="$WORK" -p Time
     -E CUDA_DEVICE_ORDER=PCI_BUS_ID -E HOME=/root -E LMCACHE_DISABLE_BANNER=1 -E LMCACHE_LOG_LEVEL=INFO \
     -E PATH="$VENV/bin:/usr/local/bin:/usr/bin:/bin" "${PP_ENV[@]}" \
     "$VENV/bin/lmcache" server --host 127.0.0.1 --port "$MP_PORT" --http-host 127.0.0.1 --http-port "$MP_HTTP_PORT" --chunk-size "$CHUNK" \
-      --separate-object-groups --l1-size-gb "$L1_GB" --eviction-policy LRU --supported-transfer-mode auto "${L2ARG[@]}"; then
+      --separate-object-groups --l1-size-gb "$L1_GB" --eviction-policy LRU --supported-transfer-mode auto "${L2ARG[@]}" "${MPX[@]}"; then
   echo "seat_fg: $MP_UNIT failed to start (systemd-run); see $WORK/lmcache-mp.log"; exit 1
 fi
 [ -n "${SEAT_LMCACHE_PYTHONPATH:-}" ] && echo "seat_fg: LMCache overlay ON: PYTHONPATH=$SEAT_LMCACHE_PYTHONPATH (MP server + engine)"
+[ ${#MPX[@]} -gt 0 ] && echo "seat_fg: MP server extra args (SEAT_MP_EXTRA_ARGS): ${MPX[*]}"
 for i in $(seq 1 60); do
   ss -ltn 2>/dev/null | grep -q ":$MP_PORT " && break
   systemctl is-active --quiet "$MP_UNIT" || { echo "seat_fg: $MP_UNIT died during start; see $WORK/lmcache-mp.log"; exit 1; }
@@ -268,9 +309,12 @@ export PATH="$VENV/bin:/usr/local/bin:/usr/bin:/bin"
 # WSL2 + vLLM >= 0.29: 0.29 selects its V2 GPU model runner by default and that runner needs UVA (pinned host memory),
 # which vLLM reports unavailable under WSL2; with VLLM_WSL2_ENABLE_PIN_MEMORY=1 it starts and then dies in kernel warm-up
 # (CUDA error: invalid device ordinal, measured 2026-09-17 on a 5060 Ti). The V1 runner is the one that serves there, so a
-# WSL2 launch of a >= 0.29 venv pins it unless the env file already chose. 0.28 is NOT touched: its V2 runner runs on WSL2
-# (the production pair seat logs "Using V2 Model Runner" on 0.28.0), and native Linux is untouched at any version (the
-# Lenovo A2 runs the V2 runner on 0.29). The version is read from the venv's dist-info name: importing vllm costs seconds.
+# WSL2 launch of a >= 0.29 venv pins it unless the env file already chose. 0.28 is NOT touched: it picks its runner per
+# configuration and its V2 runner runs on WSL2 (the 2026-09-04 TP2 DFlash spec-decode arms logged `gpu_worker.py:396]
+# Using V2 Model Runner` and served), while the production seats serve on its V1 runner (corrected 2026-09-23: the V2
+# lines once credited to the production pair seat are `gpu_worker.py:429`, a 0.29.0 line). Native Linux is untouched
+# at any version (a native 0.29 box runs the V2 runner). The version is read from the venv's dist-info name: importing
+# vllm costs seconds.
 if grep -qi microsoft /proc/version 2>/dev/null; then
   vllm_di="$(ls -d "$VENV"/lib/python3*/site-packages/vllm-*.dist-info 2>/dev/null | head -1)"
   vllm_ver="${vllm_di##*/vllm-}"; vllm_ver="${vllm_ver%.dist-info}"; vllm_major="${vllm_ver%%.*}"; vllm_rest="${vllm_ver#*.}"; vllm_minor="${vllm_rest%%.*}"
@@ -329,10 +373,12 @@ if [ -n "${SEAT_KV_HEADROOM_GIB:-}" ] && [ -n "$NVSMI" ]; then
     echo "seat_fg: WARNING — SEAT_KV_HEADROOM_GIB set but $NVSMI answered nothing for devices ${DEVS}; falling back to --gpu-memory-utilization ${SEAT_UTIL:-0.88} — the pool is NOT pinned"
   fi
 fi
+KV_POLICY_JSON=""; [ -n "$KV_POLICY" ] && KV_POLICY_JSON=",\"kv_load_failure_policy\":\"$KV_POLICY\""
+[ -n "$KV_POLICY" ] && echo "seat_fg: kv_load_failure_policy=$KV_POLICY (SEAT_KV_LOAD_FAILURE_POLICY)"
 exec "$VENV/bin/vllm" serve "$MODEL" \
   --host 127.0.0.1 --port "$PORT" --served-model-name "$NAME" "${SEAT_ALIAS:-agent-pool}" \
   --max-model-len "${SEAT_MAX_LEN:-131072}" "${PAR[@]}" --gpu-memory-utilization "${SEAT_UTIL:-0.88}" \
   --max-num-seqs "${SEAT_SEQS:-32}" \
   --mamba-cache-mode align --enable-prefix-caching --max-num-batched-tokens "${SEAT_BATCHED:-1567}" "${KVPIN[@]}" \
-  --kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\",\"kv_role\":\"kv_both\",\"kv_connector_extra_config\":{\"lmcache.mp.server_urls\":\"127.0.0.1:$MP_PORT\"}}" \
+  --kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\",\"kv_role\":\"kv_both\"$KV_POLICY_JSON,\"kv_connector_extra_config\":{\"lmcache.mp.server_urls\":\"127.0.0.1:$MP_PORT\"}}" \
   "${EXTRA[@]}"

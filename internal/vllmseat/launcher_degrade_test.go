@@ -39,12 +39,14 @@ func TestSeatLauncherDegradesInsteadOfRefusingOnACacheServerFault(t *testing.T) 
 			t.Errorf("seat_fg.sh lost the degrade path: %q missing", must)
 		}
 	}
-	// Every REFUSING line left must be the port-bound refusal or the missing
-	// chat-template refusal (a file vLLM itself refuses at argument validation,
-	// so refusing first only names it) — a cache-server fault may never again
-	// end the start.
+	// Every REFUSING line left must be the port-bound refusal, the missing
+	// chat-template refusal or an invalid SEAT_KV_LOAD_FAILURE_POLICY (values
+	// vLLM itself refuses at argument validation — kv_load_failure_policy is a
+	// Literal["recompute", "fail"] — so refusing first only names them) — a
+	// cache-server fault may never again end the start.
 	for _, line := range regexp.MustCompile(`(?m)^.*REFUSING to start.*$`).FindAllString(s, -1) {
-		if !strings.Contains(line, "already bound") && !strings.Contains(line, "--chat-template") {
+		if !strings.Contains(line, "already bound") && !strings.Contains(line, "--chat-template") &&
+			!strings.Contains(line, "SEAT_KV_LOAD_FAILURE_POLICY=") {
 			t.Errorf("a cache-server fault still refuses the seat: %s", strings.TrimSpace(line))
 		}
 	}
