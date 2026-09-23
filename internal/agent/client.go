@@ -24,6 +24,29 @@ type LLMClient struct {
 	model  string
 	apiKey string
 	http   *http.Client
+	// streamTokenIDs asks a vLLM seat for `return_token_ids` on a streamed call
+	// that has a progress listener (WithStreamTokenIDs). Off = the request
+	// this client has always sent, byte for byte.
+	streamTokenIDs bool
+}
+
+// WithStreamTokenIDs turns on the engine's per-token progress signal for
+// streamed calls that carry a ProgressFunc (0.140.1). vLLM's parser HOLDS
+// output while the model writes some tool-call arguments — a trailing
+// non-string parameter (an object, an array, a number) until it closes, a call
+// to a name the request did not offer for its whole length — and sends no
+// frame at all meanwhile: measured on the 3-card seat, an offload_extract call
+// with a 40-property `schema` streamed nothing for 62.8 s while the engine
+// generated 1,460 tokens, which the liveness floor (60 s) files as a stall.
+// With `return_token_ids` the same engine sends one frame per engine step
+// carrying the generated ids even when the parser emits no delta (max gap
+// under 0.05 s on the same call), and those ids are exactly the progress the
+// stall watch needs. Only a vLLM seat is asked: other OpenAI-compatible
+// servers may reject an unknown key, and llama.cpp streams its own partial
+// tool-call arguments.
+func (c *LLMClient) WithStreamTokenIDs(on bool) *LLMClient {
+	c.streamTokenIDs = on
+	return c
 }
 
 // StatusError is a non-200 from the seat's chat route, typed so callers key
@@ -162,6 +185,10 @@ type wireReq struct {
 	// since 0.81.0 (llamaclient.WithoutThinking). nil = key absent = the
 	// historical request, byte for byte.
 	ChatTemplateKwargs map[string]any `json:"chat_template_kwargs,omitempty"`
+	// ReturnTokenIDs is vLLM's `return_token_ids` (LLMClient.WithStreamTokenIDs):
+	// every streamed engine step then carries its generated ids, including the
+	// steps whose text the tool parser is still holding. Absent unless asked.
+	ReturnTokenIDs bool `json:"return_token_ids,omitempty"`
 }
 type wireStreamOptions struct {
 	IncludeUsage bool `json:"include_usage"`
@@ -252,6 +279,12 @@ func (c *LLMClient) Chat(ctx context.Context, msgs []Msg, tools []ToolSpec, maxT
 	req.Tools = wireToolDefs(tools)
 	if len(req.Tools) > 0 {
 		req.ToolChoice = "auto"
+	}
+	// The engine's per-token progress signal, only where something listens
+	// for progress: a call without a ProgressFunc (the CLI doors, the probes)
+	// keeps its historical body.
+	if c.streamTokenIDs && ProgressFromContext(ctx) != nil {
+		req.ReturnTokenIDs = true
 	}
 	thinkingOff := IsThinkingOff(ctx)
 	if thinkingOff {

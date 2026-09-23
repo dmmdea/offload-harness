@@ -103,6 +103,20 @@ determine if a job is truly still going" — was not met by any of the three sur
    named as such in the reason, never reported as a ready seat. With no load seen it counts as
    "cannot tell", and the prefill clock runs as before. The wait is never open-ended.
 
+7. **On vLLM, a progress event is a generated token, not a visible delta (0.140.1).** Item 1
+   counted content, reasoning and tool-call-argument deltas. vLLM's tool parser holds some of those
+   back: a trailing non-string argument (an object, an array, a number) until it closes, and a call
+   to a name the request did not offer for its whole length. `serving.py` sends no frame while it
+   holds. Measured on the 3-card seat on 2026-09-23: one `offload_extract` call with a 40-property
+   `schema` object streamed nothing for 62.8 s while the engine generated 1,460 tokens, past the
+   60 s floor. So on a seat the box declares as vLLM (`vllm_seats`, alias resolved through the
+   roster) the loop asks for `return_token_ids`, and vLLM then sends one frame per engine step
+   carrying the generated ids whether or not the parser emits a delta (the same call: 1,462 frames,
+   largest gap under 0.05 s). The decoder counts ids as progress. A tool-call frame carrying only
+   the tool name counts as well. Every other seat keeps the request it always sent. Sizing the
+   allowance from an expected tool-call length was rejected: the engine has a real signal, and an
+   estimate would either cut long calls or blind the watch to a hung engine for minutes.
+
 ## Consequences
 
 - A 27B seat at 1 tok/s finishes its contract. A seat that dies mid-stream (an engine error

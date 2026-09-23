@@ -69,6 +69,11 @@ type BuildConfig struct {
 	// "" = ThinkingAuto. Validated by the caller (core.ValidateThinking /
 	// ParseThinkingMode) — an unparseable value fails the build by name.
 	Thinking string
+	// StreamTokenIDs asks the seat for its per-token progress signal on the
+	// streamed planner calls (LLMClient.WithStreamTokenIDs). Set ONLY for a
+	// seat this box declares as vLLM: its tool parser holds some tool-call
+	// arguments back and the stall watch would otherwise see silence.
+	StreamTokenIDs bool
 
 	AllowWrite bool // P2: write_file/delete_file in the worktree
 	// WriteLimit caps how many files and bytes ONE run may write (the D-06
@@ -338,7 +343,7 @@ func Build(cfg BuildConfig) (*BuildResult, error) {
 		}
 	}
 
-	client := NewLLMClient(cfg.PlannerBase, cfg.Model, "", timeout) // local planner, keyless
+	client := NewLLMClient(cfg.PlannerBase, cfg.Model, "", timeout).WithStreamTokenIDs(cfg.StreamTokenIDs) // local planner, keyless
 	// The system prompt advertises only what was actually granted — ShellGranted,
 	// not the raw flag, so a cage-refused shell is never advertised to the model. A
 	// SystemPromptOverride (P6 flywheel replay of a candidate prompt) replaces it.

@@ -607,6 +607,13 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		Unattended:  true,
 		EnvRules:    p.cfg.AgentEnvRules,
 		Thinking:    thinkingFor(p.cfg, contract), // contract > this box's agent_thinking > auto
+		// A vLLM seat's tool parser holds a trailing non-string argument (and
+		// a call to an unoffered name) until it closes and streams NOTHING
+		// meanwhile: 62.8 s of silence for one 1,460-token call on the 3-card
+		// seat, filed by the 60 s liveness floor as a prefill/decoding stall
+		// (2026-09-23). return_token_ids makes the engine send its generated
+		// ids every step, held or not, and the stall watch counts them.
+		StreamTokenIDs: p.isVLLMSeat(ctx, seat),
 		// The executing node's own decoding policy (D-95b): a sampling setting
 		// is a fact about THIS seat, measured here, so it is never carried on
 		// the contract.
