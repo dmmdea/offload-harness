@@ -6,6 +6,29 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed — the GPU lease queue serves waiters FIFO instead of racing them
+
+- **A queued `gpu reserve` could lose to a later arrival indefinitely.** Measured live
+  2026-09-22: a text reservation queued at 19:10 was still waiting at 20:50 while two media
+  reservations that queued LATER (18:41, 19:06) each took the card ahead of it. Root cause:
+  `Acquire`'s retry loop had every waiting process poll `TryAcquire` once a second with no
+  ordering between them — `registerWaiter`/`Waiters()` recorded who was queued, but nothing
+  in the acquire path ever consulted that record before racing for the `O_EXCL` claim, so
+  whichever process's poll tick landed first after a release won; arrival order was pure
+  scheduling luck. Each poll now checks `isFrontOfQueue`: only the OLDEST live waiter
+  attempts the claim, everyone else keeps waiting, so the front of the line takes a
+  just-freed card uncontested. A dead waiter's record is pruned on read (unchanged) and
+  never blocks the line; a waiter whose own `--wait` expires leaves the line for whoever is
+  behind it; class carries no priority (no ADR documents one for the queue itself), so text
+  and media waiters interleave in pure arrival order. `registerWaiter`'s file name now mixes
+  in a random token so two registrations from the same pid in the same millisecond cannot
+  collide, and its removal goes through `removeClaim`'s Windows-safe retry — a bare
+  `os.Remove` was safe when the waiters directory was read only occasionally, but the FIFO
+  gate now reads it on every poll from every waiter, and a removal a concurrent reader
+  blocked (the same sharing-violation window `meta.json` and the epoch lock already retry)
+  left a phantom, un-removable "front of queue" that starved everyone behind it. Docs:
+  `docs/systems/gpu-lease.md` ("A held card is a place in line" → the new FIFO bullet).
+
 ### Added — opencode context instrument
 
 - **`go run ./cmd/opencode-context`: the before/after gate for what opencode sends a seat.** It copies

@@ -869,7 +869,10 @@ func (m *Manager) Acquire(class Class, opts Options) (*Lease, error) {
 	// the waiter list to decide whether warming the seat back is worth anything
 	// — a warm the next holder unloads again is a 3-minute load bought for
 	// nothing, and an UNORDERED one lands a seat on a card someone else holds.
-	unregister := m.registerWaiter(class, opts)
+	// Since D-13x (2026-09-22) the SAME record also arbitrates who gets to TRY
+	// next — see the FIFO comment atop waiters.go for why that was missing and
+	// what it cost.
+	self, unregister := m.registerWaiter(class, opts)
 	defer unregister()
 	deadline := m.now().Add(opts.Wait)
 	for {
@@ -882,6 +885,15 @@ func (m *Manager) Acquire(class Class, opts Options) (*Lease, error) {
 			pause = remaining
 		}
 		m.pause(pause)
+
+		// FIFO: only the oldest live waiter attempts the claim this tick. Every
+		// other waiter just loops back to sleep — attempting anyway is exactly
+		// the unordered race that let a later arrival win a just-freed card out
+		// from under an earlier one. This costs nothing when uncontested: a
+		// waiter alone in the queue is always front-of-queue.
+		if !m.isFrontOfQueue(self) {
+			continue
+		}
 
 		got, aerr := m.TryAcquire(class, opts)
 		if aerr == nil {
