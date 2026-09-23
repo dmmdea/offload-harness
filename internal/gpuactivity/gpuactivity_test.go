@@ -152,6 +152,8 @@ func TestAssessVocabulary(t *testing.T) {
 		{"busy outside", View{At: now, GPUs: busy, Seat: SeatState{Name: "agent-pool"}, Processes: []GPUProcess{{PID: 9, Name: `C:\x\game.exe`}}}, VerdictBusyOutside, []string{"does not own", "game.exe (pid 9)"}},
 		{"stale", View{At: now, Stale: true, Holder: &Holder{PID: 5, Reason: "bench"}}, VerdictStaleHolder, []string{"holder that is gone", "pid 5", "reclaims it"}},
 		{"stale record beside a loading seat", View{At: now, Stale: true, Holder: &Holder{PID: 5, Reason: "bench"}, Seat: SeatState{Name: "agent-pool", Loaded: true, Starting: true}}, VerdictWorking, []string{"agent-pool is loading", "pid 5", "reclaims it"}},
+		// A ttl unload is not work (2026-09-23: this read "WORKING — agent-pool is loading").
+		{"seat stopping", View{At: now, Seat: SeatState{Name: "agent-pool", Loaded: true, Starting: true, Stopping: true}, GPUs: quiet}, VerdictLoadedIdle, []string{"agent-pool is unloading", "ttl"}},
 		{"stale record beside a registered run", View{At: now, Stale: true, Holder: &Holder{PID: 5}, Runs: []Run{run}}, VerdictWorking, []string{"1 registered run(s)", "left over"}},
 	}
 	for _, c := range cases {
@@ -164,6 +166,16 @@ func TestAssessVocabulary(t *testing.T) {
 				t.Errorf("%s: note lacks %q: %s", c.name, want, note)
 			}
 		}
+	}
+}
+
+// The seat line names an unload as an unload, never as a load.
+func TestLinesSayUnloadingForAStoppingSeat(t *testing.T) {
+	v := View{At: time.Now(), Seat: SeatState{Name: "agent-pool", Loaded: true, Starting: true, Stopping: true}}
+	v.Verdict, v.Note = Assess(v)
+	lines := strings.Join(v.Lines(), "\n")
+	if !strings.Contains(lines, "seat agent-pool: unloading") || strings.Contains(lines, ": loading") || strings.Contains(lines, "is loading") {
+		t.Fatalf("lines: %s", lines)
 	}
 }
 

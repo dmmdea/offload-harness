@@ -94,6 +94,12 @@ type Reading struct {
 	// request until the load completes (register D-92). A load in progress is
 	// work in flight for the drain and "not yet a target" for the spread deal.
 	Starting bool
+	// Stopping is the `stopping` half of Starting: the seat is on its way OUT
+	// (its ttl ran out, or an unload was asked), not loading. Starting stays
+	// true with it, because the upstream is just as unaskable; callers that
+	// report or act on "a load is happening" must tell the two apart (the
+	// 2026-09-23 `gpu status` read "agent-pool is loading" during a ttl unload).
+	Stopping bool
 	// Proxy is the seat's own address as llama-swap's /running reports it —
 	// the `proxy:` of the model entry that is running, after macro expansion.
 	// It is what Inflight reads the gauge from. Empty when the seat is not
@@ -389,6 +395,7 @@ func running(ctx context.Context, client *http.Client, endpoint, seat string) (R
 			// caller polls /running until the state settles (register D-92).
 			if st := strings.ToLower(m.State); st == "starting" || st == "stopping" {
 				rd.Starting = true
+				rd.Stopping = st == "stopping"
 				rd.Source = "running-state:" + st
 			}
 		} else {

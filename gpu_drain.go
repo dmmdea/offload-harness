@@ -121,6 +121,12 @@ func drainUntil(ctx context.Context, p drainProbe, deadline time.Time) error {
 			last = fmt.Sprintf("cannot tell whether %s is loaded: roster unreadable (%v) and /running lists %d other model(s)", p.model, rd.RosterErr, rd.RunningOthers)
 			key = "ambiguous"
 			zeros = 0
+		case rd.Stopping:
+			// Leaving, not loading (its ttl ran out): no request waits on it, but
+			// the drain still lets the unload finish before it counts idle zeros.
+			last = "seat stopping (an unload is in progress; waiting for it to finish)" + runsClause(runs, now)
+			key = "stopping:" + runsKey(runs)
+			zeros = 0
 		case rd.Starting:
 			// A load in progress IS work in flight: the request that triggered
 			// it is waiting on the engine. seatload never touched the upstream
@@ -425,8 +431,19 @@ func maintainSeat(cfg config.Config, restamp restamper, drain bool, deadline tim
 		}
 	}
 	if unload {
+		// Read the seat BEFORE unloading: only a seat that was resident is owed a
+		// warm-back. Marking it owed unconditionally made a lease over a cold
+		// seat LOAD it at release — on 2026-09-23 the Qube's 3-card 27B came up
+		// on all three cards after a video render, with nothing asking for it,
+		// and sat there until its ttl. A reading that fails or is ambiguous keeps
+		// the old behaviour (owed): "could not tell" must not cost a warm seat.
+		wasLoaded := seatWasResident(ctx, endpoint, model)
 		if err := unloadSeat(ctx, maintenanceClient, endpoint, model); err != nil {
 			return err
+		}
+		if !wasLoaded {
+			fmt.Fprintf(os.Stderr, "gpu reserve: %s was not loaded; nothing to warm back after the window\n", model)
+			return nil
 		}
 		if owed != nil {
 			owed(model)
@@ -434,6 +451,17 @@ func maintainSeat(cfg config.Config, restamp restamper, drain bool, deadline tim
 		fmt.Fprintf(os.Stderr, "gpu reserve: %s unloaded\n", model)
 	}
 	return nil
+}
+
+// seatWasResident reports whether the seat is loaded and staying: loaded or
+// loading counts, a seat already STOPPING (its ttl ran out) does not. Read
+// state only (/running), so the reading never resets the seat's idle timer.
+func seatWasResident(ctx context.Context, endpoint, model string) bool {
+	rd, err := seatload.Running(ctx, maintenanceClient, endpoint, model)
+	if err != nil || rd.Ambiguous {
+		return true
+	}
+	return rd.Loaded && !rd.Stopping
 }
 
 // warmGuard is what a warm-back must hold to be allowed to touch the card
@@ -452,6 +480,10 @@ type warmGuard struct {
 	waiters func() []gpulease.Waiter
 	owed    func() string
 	clear   func()
+	// onlyIfOwed skips the warm when no warm-back is owed (the seat was not
+	// resident when a lease unloaded it). The wrapper's automatic warm sets it;
+	// an explicit `gpu release --warm-seat` is the operator asking, and loads.
+	onlyIfOwed bool
 }
 
 // warmBackGuarded reloads the config's seat when the guard allows it and
@@ -461,6 +493,10 @@ type warmGuard struct {
 func warmBackGuarded(cfg config.Config, g warmGuard, out io.Writer) {
 	endpoint, model, err := seatTarget(cfg)
 	if err != nil {
+		return
+	}
+	if g.onlyIfOwed && g.owed != nil && g.owed() == "" {
+		fmt.Fprintf(out, "gpu: not warming %s back: it was not loaded when the lease took the card\n", model)
 		return
 	}
 	if g.held != nil {
