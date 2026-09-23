@@ -19,6 +19,13 @@ export const JUDGMENT =
 export const NEEDS_NETWORK =
   /\b(web ?search|webfetch|fetch (the )?(url|page|site|docs?)|browse|online|internet|https?:\/\/|github\.com|npm view|api docs)\b/i;
 
+// Media-shaped legs (audio/video work, generation, rendering). With offloadTools "recon" the
+// offload agent holds no media tool, so such a leg is never forced onto it; the media tools
+// live on the offload-media subagent. Image reading (OCR, VQA) is NOT media here: the recon
+// agent keeps those tools.
+export const MEDIA_LEG =
+  /\b(transcri\w*|videos?|audio|podcasts?|voice-?overs?|mp3|mp4|wav|m4a|mov|mkv|webm|upscal\w*|inpaint\w*|animat\w*|b-roll|(generate|render|draw|edit) (an? |the )?(image|picture|photo|video|clip|audio|svg)s?|nim)\b/i;
+
 export const HEAD_CHARS = 600;
 
 export type LegClass = "read-only" | "judgment" | "network" | "other";
