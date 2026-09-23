@@ -34,9 +34,11 @@ func coldPolicy(ceiling time.Duration) StallPolicy {
 	return p
 }
 
-// While the seat reads loading the prefill clock does not run; once it reads
-// ready the prefill allowance starts afresh.
-func TestMonitorColdLoadHoldSuspendsThePrefillClock(t *testing.T) {
+// While the seat reads loading the prefill clock does not run, and a seat
+// that has loaded is still held until its FIRST byte: the first completion
+// after a load is the engine's warm-up (measured live: `ready`, then 60 s of
+// silence on a ~12k-token prompt). The first delta ends the hold.
+func TestMonitorColdLoadHoldLastsUntilTheFirstByte(t *testing.T) {
 	seat := &scriptedSeat{}
 	seat.loading.Store(true)
 	var mu sync.Mutex
@@ -52,16 +54,17 @@ func TestMonitorColdLoadHoldSuspendsThePrefillClock(t *testing.T) {
 	if m.CurrentPhase() != PhaseColdLoad {
 		t.Fatalf("phase = %s, want %s", m.CurrentPhase(), PhaseColdLoad)
 	}
-	seat.loading.Store(false)
-	time.Sleep(25 * time.Millisecond) // one or two probe ticks
-	if m.CurrentPhase() != PhasePrefill {
-		t.Fatalf("a ready seat must resume the prefill clock, phase = %s", m.CurrentPhase())
+	seat.loading.Store(false)          // ready, but no byte yet
+	time.Sleep(300 * time.Millisecond) // many ticks, 7x the prefill allowance
+	if ctx.Err() != nil || m.CurrentPhase() != PhaseColdLoad {
+		t.Fatalf("a freshly loaded seat's first completion must stay held: phase=%s cause=%v", m.CurrentPhase(), context.Cause(ctx))
 	}
-	_, _, last, allow := m.Snapshot()
-	if allow != 40*time.Millisecond || time.Since(last) > 30*time.Millisecond {
-		t.Fatalf("the prefill clock must restart fresh: allow=%s since=%s", allow, time.Since(last))
+	m.Progress(1)
+	if m.CurrentPhase() != PhaseDecoding {
+		t.Fatalf("the first byte must end the hold, phase = %s", m.CurrentPhase())
 	}
-	// The prefill clock runs again: a ready, silent seat stalls in prefill.
+	// The next prefill has no load behind it: a ready, silent seat stalls.
+	m.Phase(PhasePrefill, 10)
 	select {
 	case <-ctx.Done():
 	case <-time.After(2 * time.Second):
@@ -73,8 +76,48 @@ func TestMonitorColdLoadHoldSuspendsThePrefillClock(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if len(seen) != 2 || seen[0] != PhaseColdLoad || seen[1] != PhasePrefill {
-		t.Fatalf("hook must hear exactly the two transitions, got %v", seen)
+	if len(seen) != 1 || seen[0] != PhaseColdLoad {
+		t.Fatalf("hook must hear exactly the transition into the hold, got %v", seen)
+	}
+}
+
+// MarkSeatLoaded (the admission warm-up loaded the seat): the first request
+// is held even though /running reads ready, and the hold is bounded by the
+// ceiling with the warm-up named in the reason.
+func TestMonitorMarkSeatLoadedHoldsTheFirstCompletion(t *testing.T) {
+	seat := &scriptedSeat{} // reads ready throughout
+	ctx, m := NewMonitor(context.Background(), coldPolicy(300*time.Millisecond), 5*time.Second)
+	defer m.Stop()
+	m.WithSeatProbe(seat.probe, nil)
+	m.MarkSeatLoaded()
+	m.Phase(PhasePrefill, 10)
+	time.Sleep(150 * time.Millisecond) // past the 40 ms prefill allowance, inside the ceiling
+	if ctx.Err() != nil {
+		t.Fatalf("the first completion after a load was stalled: %v", context.Cause(ctx))
+	}
+	select {
+	case <-ctx.Done():
+	case <-time.After(3 * time.Second):
+		t.Fatal("the warm-up hold was not bounded")
+	}
+	var se *StallError
+	if !errors.As(m.Cause(), &se) || se.Phase != PhaseColdLoad || !strings.Contains(se.Error(), "engine warm-up") {
+		t.Fatalf("cause = %v", m.Cause())
+	}
+}
+
+// The load can also happen before the loop's first step: its own probes (the
+// tokenizer) go through llama-swap in PhaseAdmission. Measured live with the
+// admission warm-up off: "stalled: no progress for 60s in admission".
+func TestMonitorColdLoadHoldCoversAdmission(t *testing.T) {
+	seat := &scriptedSeat{}
+	seat.loading.Store(true)
+	ctx, m := NewMonitor(context.Background(), coldPolicy(2*time.Second), 5*time.Second) // admission allowance 80 ms
+	defer m.Stop()
+	m.WithSeatProbe(seat.probe, nil)
+	time.Sleep(300 * time.Millisecond)
+	if ctx.Err() != nil || m.CurrentPhase() != PhaseColdLoad {
+		t.Fatalf("a load during admission was not held: phase=%s cause=%v", m.CurrentPhase(), context.Cause(ctx))
 	}
 }
 

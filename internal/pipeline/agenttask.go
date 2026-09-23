@@ -533,6 +533,15 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 			log.Printf("agent task: liveness for %s: %s (allowed %.0fs)", seat, ph, allow.Seconds())
 			obs.OnAllowance(string(ph), allow)
 		})
+		if coldLoaded {
+			// The warm-up just loaded the seat. Its FIRST completion is still
+			// cold cost: measured 2026-09-23, the 3-card seat read `ready` after
+			// a 177 s load and then sent nothing for 60 s on a ~12k-token prompt
+			// (the engine's first-request warm-up), which the prefill clock
+			// filed as a stall. Until the first byte, that wait is held under
+			// the cold-load ceiling too.
+			live.MarkSeatLoaded()
+		}
 	}
 	log.Printf("agent task: liveness for %s: ceiling %d s (wall %d s, estimate %d s), floor %s, prefill %.0f tok/s, decode %.1f tok/s, cold-load ceiling %s (%s)",
 		seat, ceilingSec, timeoutSec, est.TotalSec, livePolicy.Floor, livePolicy.PrefillTokS, livePolicy.TokS, livePolicy.ColdLoad, livePolicy.ColdLoadBasis)

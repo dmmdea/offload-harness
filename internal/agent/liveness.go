@@ -192,20 +192,21 @@ type Monitor struct {
 	// The cold-load hold (0.140.0). probe reads the seat while a request
 	// waits for its first byte; probeT is its cadence. While the seat reads
 	// loading the run sits in PhaseColdLoad: holdStart is when the silence
-	// began, holdState the last state the probe saw, and resume/resumePending
-	// the phase the prefill clock restarts in once the seat reads ready.
+	// began, holdState the last state the probe saw.
 	// epoch counts phase changes so a probe answer about an older phase is
 	// never applied to a newer one. onHold tells the run's observer about a
 	// phase change the monitor made itself (status readers, the delegator).
-	probe         SeatProbe
-	onHold        func(Phase, time.Duration)
-	probeT        *time.Timer
-	probing       bool // a probe is in flight (at most one at a time)
-	holdStart     time.Time
-	holdState     string
-	resume        Phase
-	resumePending int
-	epoch         uint64
+	probe     SeatProbe
+	onHold    func(Phase, time.Duration)
+	probeT    *time.Timer
+	probing   bool // a probe is in flight (at most one at a time)
+	holdStart time.Time
+	holdState string
+	epoch     uint64
+	// warming: the seat loaded for this run (admission warm-up, or a load the
+	// probe saw) and has not sent a byte since. Cleared by the first delta or
+	// by a completed call (the loop moving to a tool or decoding).
+	warming bool
 }
 
 // NewMonitor wraps parent with a ceiling deadline and a stall watch. The
@@ -261,24 +262,39 @@ func (m *Monitor) onStall() {
 		return
 	}
 	// A request still waiting for its first byte may be waiting for its seat
-	// to LOAD (a cold start after the idle unload, or another model's swap
-	// evicting the seat between steps). Ask once more before calling it a
-	// stall: a loading seat moves the run into the cold-load hold instead.
-	if m.awaitingByteLocked() && m.probeArmedLocked() && !m.probing {
-		epoch, last, probe := m.epoch, m.last, m.probe
-		m.probing = true
-		m.mu.Unlock()
-		loading, state, err := runSeatProbe(probe, m.pol.coldLoadPoll())
-		m.mu.Lock()
-		m.probing = false
-		if m.stopped || m.cause != nil || m.epoch != epoch || !m.last.Equal(last) {
-			// Progress or a phase change arrived during the probe: its own
-			// timer reset governs now.
+	// to LOAD (a cold start after the idle unload, another model's swap
+	// evicting the seat between steps), or for the first completion after a
+	// load (the engine's own warm-up). Ask once more before calling it a
+	// stall: either moves the run into the cold-load hold instead.
+	if m.awaitingByteLocked() && m.pol.ColdLoad > 0 {
+		if m.probing {
+			// A tick is reading the seat right now; let it decide.
+			m.timer.Reset(m.pol.coldLoadPoll())
 			m.mu.Unlock()
 			return
 		}
-		if err == nil && loading {
-			hook, ph, allow := m.enterHoldLocked(state)
+		loading, state := false, ""
+		if m.probe != nil {
+			epoch, last, probe := m.epoch, m.last, m.probe
+			m.probing = true
+			m.mu.Unlock()
+			var err error
+			loading, state, err = runSeatProbe(probe, m.pol.coldLoadPoll())
+			m.mu.Lock()
+			m.probing = false
+			if m.stopped || m.cause != nil || m.epoch != epoch || !m.last.Equal(last) {
+				// Progress or a phase change arrived during the probe: its own
+				// timer reset governs now.
+				m.mu.Unlock()
+				return
+			}
+			loading = loading && err == nil
+		}
+		if loading || m.warming {
+			if !loading {
+				state = warmupState
+			}
+			hook, ph, allow := m.enterHoldLocked(state, loading)
 			m.mu.Unlock()
 			notify(hook, ph, allow)
 			return
@@ -287,6 +303,13 @@ func (m *Monitor) onStall() {
 	m.fileStallLocked()
 	m.mu.Unlock()
 }
+
+// warmupState is the hold's state when the seat reads ready but has not
+// answered its first request since it loaded. Measured 2026-09-23 on the
+// 3-card vLLM seat: /running read `ready` after a 177 s load, and the first
+// ~12k-token completion then sent nothing for 60 s: the engine's first-request
+// warm-up, which /running cannot see.
+const warmupState = "ready, first completion since the load (engine warm-up)"
 
 // fileStallLocked cancels the run with a StallError for the current phase.
 // In PhaseColdLoad it is the cold-load ceiling: Silent counts from when the
@@ -300,10 +323,12 @@ func (m *Monitor) fileStallLocked() {
 	m.cancel(m.cause)
 }
 
-// awaitingByteLocked: a request is out and no byte of its answer has arrived
-// yet — the phases where a seat load can be the reason for the silence.
+// awaitingByteLocked: a request may be out with no byte of its answer back
+// yet, the phases where a seat load can be the reason for the silence.
+// Admission is one of them: the loop's own pre-step probes (the tokenizer,
+// the window) go through llama-swap and wait out a cold seat too.
 func (m *Monitor) awaitingByteLocked() bool {
-	return m.phase == PhasePrefill || m.phase == PhaseRepack
+	return m.phase == PhasePrefill || m.phase == PhaseRepack || m.phase == PhaseAdmission
 }
 
 func (m *Monitor) probeArmedLocked() bool {
@@ -312,14 +337,18 @@ func (m *Monitor) probeArmedLocked() bool {
 
 // enterHoldLocked moves the run into the cold-load hold (or refreshes it).
 // The ceiling counts from the moment the request went silent, so the time
-// spent before the probe noticed is not free. Returns the observer hook to
-// call once the lock is released — only on the transition INTO the hold, so
-// a 4-minute load is one status event, not one per poll.
-func (m *Monitor) enterHoldLocked(state string) (func(Phase, time.Duration), Phase, time.Duration) {
+// spent before the probe noticed is not free. loaded = the probe SAW a load,
+// so the first completion after it is warm-up too and the hold lasts until
+// the first byte. Returns the observer hook to call once the lock is
+// released, only on the transition INTO the hold, so a 4-minute load is one
+// status event, not one per poll.
+func (m *Monitor) enterHoldLocked(state string, loaded bool) (func(Phase, time.Duration), Phase, time.Duration) {
 	m.holdState = state
+	if loaded {
+		m.warming = true
+	}
 	entered := m.phase != PhaseColdLoad
 	if entered {
-		m.resume, m.resumePending = m.phase, m.pending
 		m.holdStart = m.last
 		m.phase = PhaseColdLoad
 		m.epoch++
@@ -334,19 +363,6 @@ func (m *Monitor) enterHoldLocked(state string) (func(Phase, time.Duration), Pha
 	if !entered {
 		return nil, m.phase, m.allow
 	}
-	return m.onHold, m.phase, m.allow
-}
-
-// exitHoldLocked: the seat reads ready (or can no longer be read). The run
-// goes back to the phase it was waiting in, with that phase's FULL allowance
-// from now: the prefill clock starts when the seat can prefill.
-func (m *Monitor) exitHoldLocked() (func(Phase, time.Duration), Phase, time.Duration) {
-	m.phase, m.pending = m.resume, m.resumePending
-	m.allow = m.pol.Allowance(m.phase, m.pending)
-	m.last = time.Now()
-	m.epoch++
-	m.timer.Reset(m.allow)
-	m.armProbeLocked()
 	return m.onHold, m.phase, m.allow
 }
 
@@ -368,9 +384,10 @@ func (m *Monitor) stopProbeLocked() {
 }
 
 // onProbeTick reads the seat while a request waits for its first byte. It is
-// what notices a load early (inside the prefill allowance) and what ends the
-// hold when the seat reads ready; onStall's own probe covers a load the tick
-// has not seen yet.
+// what notices a load early (inside the prefill allowance) and what keeps the
+// hold's state current; onStall's own probe covers a load the tick has not
+// seen yet. A hold ends on the first byte (Progress) or on a phase change,
+// never on a /running read alone: the first completion after a load is warm-up.
 func (m *Monitor) onProbeTick() {
 	m.mu.Lock()
 	if m.stopped || m.cause != nil || m.probing || !m.probeArmedLocked() ||
@@ -397,23 +414,26 @@ func (m *Monitor) onProbeTick() {
 		m.mu.Unlock()
 		return
 	}
+	loading = loading && err == nil
 	var hook func(Phase, time.Duration)
 	var ph Phase
 	var allow time.Duration
 	switch {
-	case err == nil && loading:
-		if m.phase == PhaseColdLoad && time.Since(m.holdStart) >= m.pol.ColdLoad {
+	case m.phase == PhaseColdLoad && time.Since(m.holdStart) >= m.pol.ColdLoad:
+		if loading {
 			m.holdState = state
-			m.fileStallLocked()
-			m.mu.Unlock()
-			return
 		}
-		hook, ph, allow = m.enterHoldLocked(state)
+		m.fileStallLocked()
+		m.mu.Unlock()
+		return
+	case loading:
+		hook, ph, allow = m.enterHoldLocked(state, true)
 	case m.phase == PhaseColdLoad:
-		// Ready — or unreadable, which is "cannot tell": the prefill clock
-		// resumes either way, so a probe that breaks mid-hold can never keep
-		// a run past today's stall rule.
-		hook, ph, allow = m.exitHoldLocked()
+		// Loaded (or unreadable) but not yet answering: the first completion
+		// after a load is still cold cost, so the hold lasts until the first
+		// byte. The ceiling, counted from the silence, bounds it.
+		m.holdState = warmupState
+		m.armProbeLocked()
 	default:
 		m.armProbeLocked()
 	}
@@ -439,9 +459,11 @@ func runSeatProbe(p SeatProbe, poll time.Duration) (bool, string, error) {
 }
 
 // WithSeatProbe installs the cold-load hold's seat probe (0.140.0) and the
-// hook that hears the phase changes the monitor makes on its own (into and
-// out of PhaseColdLoad). Without it — or with StallPolicy.ColdLoad 0 — the
-// monitor behaves exactly as before: a silent prefill is a stall.
+// hook that hears the phase change the monitor makes on its own (into
+// PhaseColdLoad; the first byte ends the hold through the loop's own
+// progress events). With StallPolicy.ColdLoad 0 there is no hold at all, and
+// without a probe only a MarkSeatLoaded warm-up is held: otherwise a silent
+// prefill is a stall, as before.
 func (m *Monitor) WithSeatProbe(p SeatProbe, onHold func(Phase, time.Duration)) *Monitor {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -452,6 +474,17 @@ func (m *Monitor) WithSeatProbe(p SeatProbe, onHold func(Phase, time.Duration)) 
 	return m
 }
 
+// MarkSeatLoaded tells the monitor the seat was just loaded for this run
+// (the admission warm-up loaded it). Until the seat's first byte, silence
+// while a request waits is the engine's first-request warm-up, held under
+// the cold-load ceiling instead of the prefill clock. A no-op without a
+// cold-load ceiling.
+func (m *Monitor) MarkSeatLoaded() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.warming = true
+}
+
 // note spells the prefill arithmetic so a reader can check the allowance.
 func (m *Monitor) note() string {
 	if m.phase == PhaseColdLoad {
@@ -459,7 +492,7 @@ func (m *Monitor) note() string {
 		if basis != "" {
 			basis = " = " + basis
 		}
-		return fmt.Sprintf(": cold-load ceiling%s; /running read the seat %q, so no byte could arrive", basis, m.holdState)
+		return fmt.Sprintf(": cold-load ceiling%s; the seat read %q, so no byte could arrive", basis, m.holdState)
 	}
 	if m.phase != PhasePrefill {
 		return ""
@@ -483,6 +516,7 @@ func (m *Monitor) ToolPhase(cap time.Duration) {
 	m.callTok = 0
 	m.phase, m.pending = PhaseTool, 0
 	m.epoch++
+	m.warming = false
 	m.stopProbeLocked()
 	if cap == 0 {
 		cap = m.pol.ToolTimeout
@@ -510,6 +544,7 @@ func (m *Monitor) Phase(ph Phase, pendingPromptTokens int) {
 	if m.awaitingByteLocked() {
 		m.armProbeLocked()
 	} else {
+		m.warming = false // a call completed: the seat has answered since its load
 		m.stopProbeLocked()
 	}
 }
@@ -533,6 +568,7 @@ func (m *Monitor) Progress(tokensSoFar int) {
 			}
 		}
 		m.callTok = tokensSoFar
+		m.warming = false
 		if m.phase == PhasePrefill || m.phase == PhaseColdLoad {
 			// A byte arrived, so the seat is serving: any cold-load hold is over.
 			m.phase, m.allow = PhaseDecoding, m.pol.Allowance(PhaseDecoding, 0)

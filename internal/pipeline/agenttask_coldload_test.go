@@ -83,7 +83,7 @@ func loadingSeatFake(load time.Duration) *agentFake {
 
 // A seat that loads for 1.5 s while the prefill allowance is 200 ms must NOT
 // produce a prefill-stall defer: the stall clock does not run while the seat
-// reads `starting`, and starts once it reads ready.
+// reads `starting`, and the hold lasts until the seat sends its first byte.
 func TestRunAgentTaskColdLoadIsNotAPrefillStall(t *testing.T) {
 	defer compressLiveness(t, 200*time.Millisecond, 100*time.Millisecond, core.AgentCeilingSecCap)()
 	defer compressColdLoad(t, 50*time.Millisecond, 5*time.Second)()
@@ -159,5 +159,47 @@ func TestRunAgentTaskReadySeatSilentIsStillAPrefillStall(t *testing.T) {
 	}
 	if el := time.Since(start); el > 4*time.Second {
 		t.Fatalf("a ready seat's stall was held like a load: %s", el)
+	}
+}
+
+// The live shape the E2E found (2026-09-23): the admission warm-up loads an
+// absent seat, /running reads ready, and the FIRST completion after the load
+// still sends nothing for longer than the prefill allowance (the engine's
+// first-request warm-up). Until the seat's first byte that wait is held under
+// the cold-load ceiling, not filed as a prefill stall.
+func TestRunAgentTaskFirstCompletionAfterWarmUpIsNotAPrefillStall(t *testing.T) {
+	defer compressLiveness(t, 200*time.Millisecond, 100*time.Millisecond, core.AgentCeilingSecCap)()
+	defer compressColdLoad(t, 50*time.Millisecond, 5*time.Second)()
+	var loaded atomic.Bool
+	fake := &agentFake{
+		rosterIDs: []string{agentTestSeat},
+		running: func(int64) string {
+			if !loaded.Load() {
+				return `{"running":[]}`
+			}
+			return `{"running":[{"model":"` + agentTestSeat + `","state":"ready","cmd":"x"}]}`
+		},
+		upstreamModels: func(int64) string {
+			loaded.Store(true) // the warm-up's passthrough GET loads the seat
+			return `{"object":"list","data":[{"id":"` + agentTestSeat + `"}]}`
+		},
+		loop: func(n int64) string {
+			if n == 1 {
+				time.Sleep(1500 * time.Millisecond) // ready, but the first completion is slow
+			}
+			return doneChat("answered after the engine warmed up")
+		},
+		repack: func(int64) string { return `{"answer":"42"}` },
+	}
+	srv := fake.server(t)
+	defer srv.Close()
+
+	res := coldLoadTestPipeline(t, srv.URL).Run(context.Background(), agentTestRequest(t, testContract()))
+	wire := decodeWire(t, res)
+	if fake.upstreamCNT.Load() == 0 {
+		t.Fatal("the warm-up never loaded the seat; the test is not exercising the warm-up shape")
+	}
+	if wire.Deferred {
+		t.Fatalf("the first completion after a warm-up load was filed as a stall: %s / %q", wire.DeferClass, wire.Reason)
 	}
 }

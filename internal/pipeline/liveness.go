@@ -228,7 +228,7 @@ func (o *progressObserver) OnProgress(tokensOut int) {
 		if tokensOut > p.TokensOut {
 			p.TokensOut = tokensOut
 		}
-		if p.Phase == string(agent.PhasePrefill) {
+		if p.Phase == string(agent.PhasePrefill) || p.Phase == string(agent.PhaseColdLoad) {
 			p.Phase = string(agent.PhaseDecoding)
 		}
 		p.LastProgressMs = now

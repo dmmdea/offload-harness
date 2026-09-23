@@ -124,30 +124,40 @@ Versioning: [SemVer](https://semver.org/).
   60 s) — ran through the reload and filed it as a stall, twice in a row. The same call on a warm seat
   finished in 12 steps. The same happens after the 5-minute idle unload during a long tool call. The
   "4096 tok so far" in that reason is the run's streamed-delta count (step 1's output), not an estimate.
-- **Fixed: while the seat is loading, the stall clock does not run.** `agent.Monitor` gains a
-  `cold-load` phase and a seat probe (`WithSeatProbe`). While a request waits for its first byte
-  (prefill or re-pack), the node reads llama-swap's `/running` every 5 s and once more before filing a
-  stall. A seat row that is not `ready`, or a seat that is absent while its alias resolved (llama-swap
-  holding the request for a swap), moves the run into `cold-load`: the prefill clock stops and a
-  **cold-load ceiling** applies instead: `max(600 s, 2 x the seat's measured cold_load_sec)`, capped at
-  the run ceiling cap. A seat that reads `ready` resumes the prefill clock with its full allowance from
-  that moment. A seat still loading at the ceiling defers as infrastructure with its own reason:
-  `stalled: seat still loading after Ns in cold-load (allowed Ms: cold-load ceiling = max(600s floor,
-  2 x 226s measured cold load); /running read the seat "starting", so no byte could arrive; …)`. The
-  wait is always bounded, and a run still ends only on a stall or a ceiling. An unreadable `/running`
-  or an unresolvable alias counts as "cannot tell", and the prefill clock runs exactly as before. Status
-  readers and the delegator's progress poll see the `cold-load` phase and its allowance.
+- **Fixed: while the seat is loading, and until its first byte after a load, the stall clock does
+  not run.** `agent.Monitor` gains a `cold-load` phase and a seat probe (`WithSeatProbe`). While a
+  request waits for its first byte (admission, prefill or re-pack), the node reads llama-swap's
+  `/running` every 5 s and once more before filing a stall. The run moves into `cold-load` in two
+  cases. First, a seat row that is not `ready`, or a seat that is absent while its alias resolved
+  (llama-swap holding the request for a swap). Second, a seat the admission warm-up just loaded
+  (`MarkSeatLoaded`). In `cold-load` the prefill clock stops and a **cold-load ceiling** applies
+  instead: `max(600 s, 2 x the seat's measured cold_load_sec)`, capped at the run ceiling cap and
+  counted from when the request went silent. The hold ends on the seat's first byte (or a completed
+  call), not on `ready` alone. The live E2E measured why: after a 177 s load the seat read `ready`,
+  then sent nothing for 60 s on the first ~12k-token completion (the engine's first-request warm-up),
+  and a `ready`-only release filed that as a prefill stall. A seat still loading or warming at the
+  ceiling defers as infrastructure with its own reason: `stalled: seat still loading after Ns in
+  cold-load (allowed Ms: cold-load ceiling = max(600s floor, 2 x 226s measured cold load); the seat
+  read "starting", so no byte could arrive; …)`. The wait is always bounded, and a run still ends only
+  on a stall or a ceiling. With no load seen, an unreadable `/running` or an unresolvable alias counts
+  as "cannot tell", and the prefill clock runs exactly as before. Status readers and the delegator's
+  progress poll see the `cold-load` phase and its allowance, and the first byte moves them to
+  `decoding`.
+- **Admission is covered as well.** With the admission warm-up off, the load ran under the loop's
+  own tokenizer probe in the monitor's `admission` phase and was filed `stalled: no progress for 60s
+  in admission`. That phase is held the same way.
 - **Every door is covered.** `agent_run`, `agent_delegate` (local leg), `offload_ask`,
   `offload_review_diff` and fleet jobs all run through `runAgentTask`, which installs the probe. Known
   residual: the grammar re-pack's own per-request HTTP timeout (`repackTimeout`, at least 120 s) is a
   client timeout outside the monitor, so a seat evicted between the loop's last step and the re-pack can
   still cut that attempt. The monitor no longer files it as a stall.
-- Tests: `TestRunAgentTaskColdLoadIsNotAPrefillStall`,
-  `TestRunAgentTaskSeatStuckStartingDefersWithAColdLoadReason` and
-  `TestRunAgentTaskReadySeatSilentIsStillAPrefillStall` run against a fake llama-swap whose `/running`
-  reads `starting` while it holds the request. The first two fail on 0.139.x with the production reason.
-  There are five `agent.Monitor` unit tests. Two mutants are caught: dropping the call-site wiring, and
-  a probe that reads `starting` as ready.
+- Tests: four pipeline tests run against a fake llama-swap: `TestRunAgentTaskColdLoadIsNotAPrefillStall`,
+  `TestRunAgentTaskSeatStuckStartingDefersWithAColdLoadReason`,
+  `TestRunAgentTaskFirstCompletionAfterWarmUpIsNotAPrefillStall` and
+  `TestRunAgentTaskReadySeatSilentIsStillAPrefillStall` (the guard). Three of them fail on 0.139.x
+  with the production reason. There are seven `agent.Monitor` unit tests. Three mutants are caught:
+  dropping the call-site probe wiring, dropping the `MarkSeatLoaded` call, and a probe that reads
+  `starting` as ready.
 
 ## [0.139.3] - 2026-09-23 - a music render with dead air re-renders once, then defers; every clip is loudness-normalized; whisper's no-speech crash defers calmly
 
