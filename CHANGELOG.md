@@ -6,6 +6,16 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed — the launcher's dxg warning reports what is new, not everything since the distro started
+
+- `seat_fg.sh` counted `make_resident: Ioctl failed: -12` / `reserve_gpu_va … -75` over the whole kernel log, so after
+  one failed WSL2 start every later start repeated "the kernel log holds N failures … restart the distro", including
+  starts that serve normally (measured 2026-09-23: 56 failures from three failed vLLM 0.30 starts, then a healthy 0.28
+  start that still printed the warning). The count now lives in `$WORK/.dxg-failures`; a start warns only about
+  failures new since the previous start (which is when a failed start leaves them), resets when the log shrinks (the
+  distro restarted), and otherwise prints a one-line note. The comment now says what the lines mean: Windows refused
+  residency, and CUDA reports it as "out of memory" at an unrelated call.
+
 ### Added — the LMCache overlay kit ships with the seat template; two launcher knobs
 
 - **`setup/templates/vllm-seat/lmcache-patches/`: the patch set a pipeline-parallel vLLM seat loads through
