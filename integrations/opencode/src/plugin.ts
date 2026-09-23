@@ -16,6 +16,10 @@
 //                                       small_model default, so the plugin alone brings parity
 //   event                               session heartbeat into the cross-harness dispatch log
 //   tool.offload_plugin_status          load proof + doctor
+//
+// Host contract (read from the opencode 1.18.32 bundle, pinned by test/context-diet.test.ts):
+//   - For MCP tools tool.execute.after receives the RAW MCP result ({content: [...]}); opencode
+//     joins its text parts into the model-visible output AFTER the hook and head-truncates it.
 import type { Hooks, Plugin, PluginInput } from "@opencode-ai/plugin";
 import { tool } from "@opencode-ai/plugin";
 import { classifyLeg, READ_TOOLS, type LegClass } from "./classify.ts";
@@ -336,9 +340,16 @@ export function createHooks(o: Options, diagnostics: Diagnostics = newDiagnostic
         if (input.tool === delegateTool) {
           s.delegateCalls++;
           log({ event: "delegate", sid: input.sessionID, n: Array.isArray(input.args?.subtasks) ? input.args.subtasks.length : -1, route: String(input.args?.route ?? "auto") });
-          const digest = delegateDigest(String(output.output ?? ""));
+          // An MCP result arrives raw ({content: [...]}) and opencode renders the model text from
+          // `content` after this hook, so a note on output.output would never be seen.
+          const content = (output as { content?: unknown }).content;
+          const parts = Array.isArray(content) ? (content as Array<{ type?: string; text?: unknown }>) : null;
+          const raw = parts ? parts.filter((p) => p?.type === "text" && typeof p.text === "string").map((p) => p.text as string).join("\n\n") : String(output.output ?? "");
           // The verification step must be visibly present or visibly impossible — never absent.
-          output.output += `\n\n${digest ?? "[local-offload] could not verify placement: the delegate output did not parse as the harness result JSON — read results[].placement and summary.infrastructure yourself before trusting the answers."}`;
+          const note = delegateDigest(raw) ?? "[local-offload] could not verify placement: the delegate output did not parse as the harness result JSON — read results[].placement and summary.infrastructure yourself before trusting the answers.";
+          // FIRST, not last: opencode head-truncates tool output past tool_output.max_bytes.
+          if (parts) parts.unshift({ type: "text", text: note });
+          else output.output += `\n\n${note}`;
           return;
         }
         if (children.has(input.sessionID)) return; // subagent context: no meter, no nudge
