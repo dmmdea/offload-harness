@@ -90,7 +90,9 @@ func GitHubTools(pol *Policy, token, defaultRepo, worktreeRoot string) []Tool {
 				return "", NotPerformed(msg)
 			}
 			var in struct{ Method, Path, Body string }
-			_ = json.Unmarshal([]byte(args), &in)
+			if err := decodeToolArgs("github_api", args, &in); err != nil {
+				return "", err
+			}
 			if strings.TrimSpace(in.Method) == "" || strings.TrimSpace(in.Path) == "" {
 				return "", NotPerformed("NOT performed: github_api requires method and path")
 			}
@@ -122,7 +124,9 @@ func GitHubTools(pol *Policy, token, defaultRepo, worktreeRoot string) []Tool {
 				Private     bool   `json:"private"`
 				Description string `json:"description"`
 			}
-			_ = json.Unmarshal([]byte(args), &in)
+			if err := decodeToolArgs("github_create_repo", args, &in); err != nil {
+				return "", err
+			}
 			if strings.TrimSpace(in.Name) == "" {
 				return "", NotPerformed("NOT performed: github_create_repo requires name")
 			}
@@ -155,7 +159,9 @@ func GitHubTools(pol *Policy, token, defaultRepo, worktreeRoot string) []Tool {
 				return "", NotPerformed(msg)
 			}
 			var in struct{ Path, Repo, Dest, Message string }
-			_ = json.Unmarshal([]byte(args), &in)
+			if err := decodeToolArgs("github_upload_file", args, &in); err != nil {
+				return "", err
+			}
 			if strings.TrimSpace(in.Path) == "" {
 				return "", NotPerformed("NOT performed: github_upload_file requires path")
 			}

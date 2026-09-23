@@ -50,7 +50,9 @@ func WriteToolsLimited(worktreeRoot string, pol *Policy, limit *WriteLimit) ([]T
 				Path    string `json:"path"`
 				Content string `json:"content"`
 			}
-			_ = json.Unmarshal([]byte(args), &in)
+			if err := decodeToolArgs("write_file", args, &in); err != nil {
+				return "", err
+			}
 			if strings.TrimSpace(in.Path) == "" {
 				return "", fmt.Errorf("write_file requires a path")
 			}
@@ -112,7 +114,9 @@ func WriteToolsLimited(worktreeRoot string, pol *Policy, limit *WriteLimit) ([]T
 			var in struct {
 				Path string `json:"path"`
 			}
-			_ = json.Unmarshal([]byte(args), &in)
+			if err := decodeToolArgs("delete_file", args, &in); err != nil {
+				return "", err
+			}
 			if strings.TrimSpace(in.Path) == "" {
 				return "", fmt.Errorf("delete_file requires a path")
 			}
@@ -148,7 +152,9 @@ func WriteToolsLimited(worktreeRoot string, pol *Policy, limit *WriteLimit) ([]T
 				OldString string `json:"old_string"`
 				NewString string `json:"new_string"`
 			}
-			_ = json.Unmarshal([]byte(args), &in)
+			if err := decodeToolArgs("edit_file", args, &in); err != nil {
+				return "", err
+			}
 			if strings.TrimSpace(in.Path) == "" {
 				return "", fmt.Errorf("edit_file requires a path")
 			}

@@ -92,7 +92,9 @@ func searchTool(pol *Policy, client *http.Client) Tool {
 				Query      string `json:"query"`
 				MaxResults int    `json:"max_results"`
 			}
-			_ = json.Unmarshal([]byte(args), &in)
+			if err := decodeToolArgs("web_search", args, &in); err != nil {
+				return "", err
+			}
 			if strings.TrimSpace(in.Query) == "" {
 				return "", fmt.Errorf("web_search requires a query")
 			}

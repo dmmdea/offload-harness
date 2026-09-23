@@ -110,7 +110,9 @@ func summarizeFileTool(s *scope, offload OffloadFunc) Tool {
 				Path      string `json:"path"`
 				MaxPoints int    `json:"max_points"`
 			}
-			_ = json.Unmarshal([]byte(args), &in)
+			if err := decodeToolArgs("summarize_file", args, &in); err != nil {
+				return "", err
+			}
 			if strings.TrimSpace(in.Path) == "" {
 				return "", fmt.Errorf("summarize_file requires a path")
 			}
@@ -182,7 +184,9 @@ func (s *scope) listDir(_ context.Context, args string) (string, error) {
 	var in struct {
 		Path string `json:"path"`
 	}
-	_ = json.Unmarshal([]byte(args), &in)
+	if err := decodeToolArgs("list_dir", args, &in); err != nil {
+		return "", err
+	}
 	r, rel, err := s.open(in.Path)
 	if err != nil {
 		return "", err
@@ -223,7 +227,9 @@ func (s *scope) readFile(_ context.Context, args string) (string, error) {
 		Offset int    `json:"offset"` // 1-indexed start line; 0/absent => 1
 		Limit  int    `json:"limit"`  // number of lines; 0/absent => defaultReadLimit
 	}
-	_ = json.Unmarshal([]byte(args), &in)
+	if err := decodeToolArgs("read_file", args, &in); err != nil {
+		return "", err
+	}
 	if strings.TrimSpace(in.Path) == "" {
 		return "", fmt.Errorf("read_file requires a path")
 	}

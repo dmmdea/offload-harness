@@ -146,6 +146,63 @@ Versioning: [SemVer](https://semver.org/).
   that first slipped past a vacuous test comparing `protocolText()` with itself (replaced by fixed
   expectations).
 
+## [0.140.2] - 2026-09-23 - a tool call cut at the cap is a cut, whatever finish reason vLLM reports; a tool refuses arguments of the wrong type
+
+### Fixed — a tool call with a wrong-typed argument ran with that field empty (data loss)
+
+- **Every agent tool decoded its arguments with `_ = json.Unmarshal(...)`.** A syntax error leaves the struct
+  zero and the required-field checks caught it, but a TYPE error does not: `encoding/json` fills every field it
+  can and reports the first mismatch. `edit_file` with `{"path":"x","old_string":"foo","new_string":123}` ran with
+  `new_string` empty, deleted `foo` from the file and reported success; `write_file` with a non-string `content`
+  wrote an empty file. Every tool that decoded this way (`write_file`, `edit_file`, `delete_file`, `read_file`,
+  `list_dir`, `summarize_file`, `search_files`, `update_plan`, `run`, `run_shell`, `web_fetch`, `web_search`,
+  `github_api`, `github_create_repo`, `github_upload_file`) now goes through one decoder that refuses the call on
+  ANY decode error, as `NOT performed: <tool> arguments do not match the tool's schema (…)`, before any policy,
+  filesystem or network step. Empty arguments are still a zero-valued call (a no-argument call on some engines).
+- **A wrong type in a NON-string field is coerced once, never refused outright.** On a type error only, one pass
+  driven by the target struct's field types rewrites a JSON string sent for a number (`"offset":"5"`), a bool
+  (`"private":"true"`, case-insensitive) or a list of strings (`"args":"./..."` becomes `["./..."]`), then
+  decodes strictly again. Small models send those shapes, and they used to work with the field silently dropped
+  (`"private":"true"` was read as `false`); refusing them would spend the seat's same-tool retries. A string
+  field is never coerced: a number, object, array or bool where a string is declared (`new_string`, `content`, a
+  github `body`, a path) is still refused, because coercing it could change what is written. A string that is not
+  a number or bool literal, and `"null"`, are refused too. Unknown fields stay ignored.
+  The offload and accelerator tools already checked the error and are unchanged.
+
+### Fixed — every "cut by the budget" test trusted `finish_reason: length` alone
+
+- The same engine behaviour reached four more places: the truncated-final re-issue, `OutputTruncated`, the
+  starvation classifier (`Completion.Starvation`, which now takes the call's budget) and the client's
+  reasoning fallback (a think block cut at the cap could be promoted to the answer when the engine said `stop`).
+  One helper, `cutByBudget` (finish `length`, or the server's `completion_tokens` reached the call's
+  `max_tokens`), now decides at all of them and in the tool-call cut check. A stop note built on the token count
+  says so (`finish stop at the 1024-token cap (1024 completion tokens)`).
+- The client proves a returned tool call's arguments once, when the call arrives, and does not re-scan it on
+  every later request while its arguments are unchanged; a caller-built or rewritten call is validated on
+  every request, so invalid arguments still never reach the engine.
+
+### Fixed — vLLM reports a cut tool call as `tool_calls`, and the fragment went into the transcript
+
+- **A tool call cut at the completion cap arrived with `finish_reason: "tool_calls"`, not `length`.** vLLM
+  rewrites the finish reason to `tool_calls` whenever a tool call was streamed, cap or no cap. Measured on a
+  warm vLLM seat (harness 0.140.x): a streamed call hit the 8,192-token cap in the middle of an
+  `offload_triage` argument, `cutToolCallInCompletion` checked only for `length`, the unterminated argument
+  was appended to the transcript, and the next request failed with HTTP 400 `Unterminated string` from the
+  engine's own parse of the argument it was handed back. The loop recovered on the following step, but the
+  step was wasted and the transcript carried invalid tool-call JSON.
+- **Fixed: the cut is read from the arguments, not the finish reason alone.** A non-empty argument that is
+  not valid JSON is a cut when the finish reason is `length`, when the server's `completion_tokens` reached
+  the step's `max_tokens`, or when the JSON ends mid-value (an open string, object or array: only a cut
+  leaves that). A cut takes the existing path: the turn is dropped, the step is re-issued once at the final
+  budget, and a second cut stops on `tool_call_cut`. A complete but malformed argument below the cap is the
+  seat's own mistake, not the budget: it is dispatched as before and the tool reports the error.
+- **The client never sends invalid tool-call arguments to the engine.** Every assistant tool call the request
+  carries goes out with valid JSON arguments: arguments that do not parse go out as `{}` (the tool's error
+  result follows in the transcript), while valid and empty arguments go out byte for byte. That covers the
+  paths the loop's cut check does not: a malformed call below the cap, a replayed or caller-supplied
+  transcript. The caller's transcript is not modified.
+- Legitimate tool calls are unchanged: valid arguments with `tool_calls` at the cap run as before (tested).
+
 ## [0.140.1] - 2026-09-23 - a tool call the vLLM parser is still holding is progress, not a stall
 
 ### Fixed — the liveness watch read a vLLM seat writing a held tool-call argument as silence

@@ -105,7 +105,9 @@ func updatePlanTool(worktree string) Tool {
 			var in struct {
 				Plan string `json:"plan"`
 			}
-			_ = json.Unmarshal([]byte(args), &in)
+			if err := decodeToolArgs("update_plan", args, &in); err != nil {
+				return "", err
+			}
 			if strings.TrimSpace(in.Plan) == "" {
 				return "NOT recorded: plan is empty; provide the current plan as a terse checklist", nil
 			}
