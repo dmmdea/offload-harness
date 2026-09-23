@@ -2426,6 +2426,20 @@ func (c Config) ImageRouteConfigured() bool {
 	return c.ImageGenScript != ""
 }
 
+// ImageGenAdvertisable reports whether this box serves generate_image AT ALL: its
+// default binding (ImageRouteConfigured) OR at least one named family
+// (imagegen_families — ADR 0058). A family-only node deliberately has NO default
+// binding (a non-commercial family, e.g. Qwen-Image-2.1, must never be the default —
+// D1), so gating fleet advertisement/admission on ImageRouteConfigured alone made the
+// fleet HTTP door invisible to every request naming a family, even though
+// `local-offload doctor` showed the family fully CONFIGURED and it rendered correctly
+// through the CLI (binxarn wave session 5d227d30 §2a). The fleet capability gate
+// (fleetnode.taskConfiguredFor) and the health advertiser (fleetnode.ImageFamilies)
+// both key on this instead of ImageRouteConfigured alone.
+func (c Config) ImageGenAdvertisable() bool {
+	return c.ImageRouteConfigured() || len(c.ImageGenFamilies) > 0
+}
+
 // ComposeRouteConfigured reports whether THIS box serves compose_video: the
 // runner, the pinned install and the pinned browser are ALL bound. One predicate
 // for the pipeline gate and the fleet advertisement, so health never promises a

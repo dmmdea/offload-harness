@@ -33,7 +33,7 @@ import { fileURLToPath } from "node:url";
 const here = dirname(fileURLToPath(import.meta.url));
 const argv = process.argv.slice(2);
 const b = JSON.parse(readFileSync(join(here, "behavior.json"), "utf8"));
-appendFileSync(join(here, "calls.jsonl"), JSON.stringify({ argv, env: process.env, cwd: process.cwd(), cwdEntries: readdirSync(process.cwd()) }) + "\n");
+appendFileSync(join(here, "calls.jsonl"), JSON.stringify({ argv, execArgv: process.execArgv, env: process.env, cwd: process.cwd(), cwdEntries: readdirSync(process.cwd()) }) + "\n");
 const counter = (name) => { const f = join(here, name + ".count"); const n = existsSync(f) ? Number(readFileSync(f, "utf8")) + 1 : 1; writeFileSync(f, String(n)); return n; };
 const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 const flag = (n) => { const i = argv.indexOf(n); return i >= 0 ? argv[i + 1] : undefined; };
@@ -399,6 +399,13 @@ test("version and browser ops run through the same allowlist and env", () => {
   assert.equal(r.last.browser_path, fx.browserPath);
   const calls = fx.calls();
   assert.deepEqual(calls.map((c) => c.argv.slice(0, 2).join(" ")), ["--version --json", "browser ensure", "browser path"]);
+  // --dns-result-order=ipv4first (D-defect: binxarn wave session 5d227d30 §5a — a
+  // dead IPv6 route to storage.googleapis.com hung `browser ensure` with no
+  // failover) reaches the node PROCESS that runs "browser ensure" and nothing
+  // else: not --version, not "browser path", not lint/check/render/snapshot.
+  assert.deepEqual(calls[1].execArgv, ["--dns-result-order=ipv4first"], "browser ensure must carry the node flag");
+  assert.deepEqual(calls[0].execArgv, [], "--version must not carry it");
+  assert.deepEqual(calls[2].execArgv, [], "browser path must not carry it (no network access)");
   for (const c of calls) {
     assert.ok(c.argv.includes("--json"));
     assert.equal(c.env.OPENROUTER_API_KEY, undefined);

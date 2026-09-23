@@ -1343,7 +1343,7 @@ func (p *Pipeline) runGenerateImage(ctx context.Context, req core.Request, meta 
 	}
 	meta.License = fam.License
 	if paramBool(req.Params, "transparent") && !cfg.SupportsTransparentImage() {
-		reason := fmt.Sprintf("transparent output needs the %s graph on ComfyUI (the only family with an RGBA VAE); family %s renders opaque — pass a %s family or drop transparent",
+		reason := fmt.Sprintf("transparent output needs the %s family (the only one with an RGBA VAE, on either engine); family %s has no alpha channel — pass family:%q or drop transparent",
 			config.FamilyQwenImage21, familyLabel(fam), config.FamilyQwenImage21)
 		meta.LatencyMs = time.Since(start).Milliseconds()
 		p.recordDefer(req.Task, meta, len(req.Input), reason)

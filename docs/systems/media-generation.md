@@ -421,7 +421,14 @@ false` result also carries `license_note` ("research/evaluation use only under <
 commercial work"). The ledger row carries `license` (`ledger.Entry.License`; absent = UNKNOWN, never
 "safe"). `offload_status` lists `media.image_families` / `media.edit_families` — name, graph family,
 engine, checkpoint, license, commercial_use (null = undeclared) and the route verdict — and
-`/fleet/health` publishes `image_families` with the same license flags. A warm batch
+`/fleet/health` publishes `image_families` with the same license flags — including on a node with NO
+default image binding at all, opt-in-family-only (e.g. an sdcpp tier that only serves
+`qwen-image-2.1`): `image-gen` is advertised and admitted whenever the default binding OR any named
+family is configured (`config.ImageGenAdvertisable`), and `image_families`/`loadable_model_families`
+list only the families that are genuinely bound — never a phantom default row or an invented `sdxl`
+label for a route this node does not serve. A dispatch naming no `family` on such a node still gets
+the plain "no image-gen route configured" defer (same as any unconfigured node), never a silent
+render of one family as if it were the default. A warm batch
 (`generate-image --batch`) always renders the default binding, so every batch item — and the batch
 payload's top level — carries that binding's `family` and, when declared, its `license`,
 `commercial_use` and `license_note`. `width`/`height` in a
@@ -429,8 +436,16 @@ payload's top level — carries that binding's `family` and, when declared, its 
 (`imagegen.OutputSize`), not echoed from the request.
 
 **Unknown family, unsupported flag.** An unknown `family` defers with the list this node serves.
-`transparent` is honoured only by the `qwen-image-2.1` graph on ComfyUI (the only RGBA VAE); any other
-binding defers rather than render opaque. `images` (multi-reference) needs a 2.1 edit family and is
+`transparent` is honoured only by the `qwen-image-2.1` family (the only one with an RGBA VAE) —
+on EITHER engine: the ComfyUI graph and sd.cpp's own build of the model carry the identical VAE, so
+`SupportsTransparentImage` follows the family, not the engine. On sdcpp, `transparent` has no CLI
+flag of its own — the runner (`render/sdcpp-generate.mjs`) wraps the prompt in the official RGBA
+template instead (the same constant the ComfyUI builder uses) and leaves the written PNG's alpha
+channel untouched; the DEFAULT (no `transparent`) instead flattens the output to opaque RGB after
+sd-cli writes it, because sd.cpp's qwen-image-2.1 VAE emits RGBA unconditionally regardless of the
+prompt (`render/png-alpha.mjs`, a dependency-free channel-drop — never a composite onto a
+background, matching `SplitImageWithAlpha`'s own behavior). Any other binding defers rather than
+render opaque. `images` (multi-reference) needs a 2.1 edit family and is
 capped at 10 images in all, target included; a 2511 `preset` on a 2.1 edit defers by name. The render
 runner closes the same gap one layer down: `comfy-render.mjs --family` is a closed set, and an
 unknown value exits 2 before any GPU work — it used to render the generic SDXL graph silently.
@@ -472,7 +487,11 @@ Qwen-Image 2512, whose graph cannot drive it. Needs **ComfyUI ≥ v0.37.0** (the
 - **Transparency:** `transparent: true` wraps the prompt in the official RGBA template ("This is an
   RGBA image with transparency. … The image has alpha channel and the background is transparent.")
   and keeps the alpha channel; the default splits it off, so an ordinary prompt never hands a
-  partially-transparent PNG to a compositor.
+  partially-transparent PNG to a compositor. The same contract holds on the sdcpp engine
+  (`render/sdcpp-generate.mjs` reuses `rgbaPrompt`/`RGBA_PROMPT_PREFIX`/`RGBA_PROMPT_SUFFIX` from
+  this file rather than duplicating the template): sd.cpp's qwen-image-2.1 VAE always emits RGBA,
+  so the runner flattens the default case to opaque RGB itself (`render/png-alpha.mjs`) instead of
+  refusing transparency or shipping a partially-transparent PNG as the "opaque" result.
 - **Edit graph (`gen_edit_family: "qwen-image-2.1"`):** `LoadImage` per image → `TextEncodeQwenImage21`
   with `vae` and `images.image_1..N` (image_1 = the edit target; references are `<image2>`…`<image10>`
   in the prompt) → `QwenImage21Cache(device, dtype)` on the model path → `KSampler` on the encoder's
@@ -802,8 +821,13 @@ and `lower-third` webm at 30.4 s. Neither worker setting wins consistently on a 
 - **Pinned and verified.** The install is `npm ci --ignore-scripts` from the committed lockfile
   (`setup/hyperframes/`, `hyperframes` exact). `npm audit signatures` is fatal on failure.
   `npm rebuild esbuild` runs the one postinstall the CLI needs. `browser ensure` fetches the CLI's
-  pinned chrome-headless-shell, and `hyperframes_browser_path` binds it explicitly, because the CLI's
-  own lookup prefers a newer build in `~/.cache/puppeteer`. The installer never runs
+  pinned chrome-headless-shell from `storage.googleapis.com`, and `hyperframes_browser_path` binds it
+  explicitly, because the CLI's own lookup prefers a newer build in `~/.cache/puppeteer`. That
+  `ensure` spawn alone carries the node flag `--dns-result-order=ipv4first` (not env — the allowlist
+  above stays exact): plain `dns.lookup`'s default order can hand back an unreachable IPv6 address
+  first with no fast failover, hanging the download on a box with a dead IPv6 route to that host even
+  though a plain `curl` recovers in seconds; the existing per-op deadline (`--timeout-sec`, default
+  900s) still bounds the call and fails it typed `TIMEOUT`/`BROWSER_MISSING` either way. The installer never runs
   `npm install -g`: a global HyperFrames self-upgrades in a detached process. The runner refuses an
   install whose version is not its own pin (`PINNED_VERSION`, held equal to the lockfile by a test)
   with `CLI_MISSING`, because every guard here was read in the pinned source. `acceptance` runs

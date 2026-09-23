@@ -225,9 +225,82 @@ func TestGenerateImageRefusesUnknownFamilyAndUnsupportedTransparency(t *testing.
 	}
 	res = p.Run(context.Background(), core.Request{Task: core.TaskGenerateImage, Input: "x",
 		Params: map[string]any{"transparent": true}})
-	if !res.Deferred || !strings.Contains(res.Reason, "transparent output needs the qwen-image-2.1 graph") ||
+	if !res.Deferred || !strings.Contains(res.Reason, "transparent output needs the qwen-image-2.1 family") ||
 		!strings.Contains(res.Reason, `"krea2" (the default binding)`) {
 		t.Fatalf("transparent on krea2: %+v", res)
+	}
+}
+
+// TestSdcppQwenImage21FamilyOnlyNodeRendersTransparent is D5's end-to-end regression:
+// a family-only node (binxarn's shape — NO default image binding, only a named sdcpp
+// family; the same shape defect 2's fleet-gate fix admits) must actually carry
+// transparent:true through to the sdcpp runner instead of the old unconditional
+// engine-based refusal (families.go's SupportsTransparentImage used to read
+// `ImageGenEngine != "sdcpp"` and refuse every sdcpp binding regardless of family).
+func TestSdcppQwenImage21FamilyOnlyNodeRendersTransparent(t *testing.T) {
+	requireNodePipeline(t)
+	dir := t.TempDir()
+	stub := writeProbeRunner(t, dir)
+	probe := filepath.Join(dir, "probe.json")
+	src := filepath.Join(dir, "src.png")
+	writePNG(t, src, 16, 16)
+	t.Setenv("RUNNER_PROBE", probe)
+	t.Setenv("PNG_SRC", src)
+	stubJSON, _ := json.Marshal(stub)
+	cfg := config.Default()
+	cfg.MediaDir = dir
+	// No cfg.ImageGenScript / cfg.ImageGenEngine at all — the family is the ONLY
+	// image binding this node has.
+	cfg.ImageGenFamilies = map[string]config.FamilyOverlay{
+		"qwen-image-2.1": {
+			"license": []byte(`"Qwen Research License"`), "commercial_use": []byte(`false`),
+			"imagegen_family": []byte(`"qwen-image-2.1"`),
+			"imagegen_engine": []byte(`"sdcpp"`),
+			"sdcpp_bin":       []byte(`"sd-cli"`),
+			"sdcpp_script":    stubJSON,
+			"sdcpp_model":     []byte(`"qwen_image_2.1-Q8_0.gguf"`),
+		},
+	}
+	p := &Pipeline{cfg: cfg}
+	res := p.Run(context.Background(), core.Request{Task: core.TaskGenerateImage, Input: "a fox sticker",
+		Params: map[string]any{"family": "qwen-image-2.1", "transparent": true}})
+	if !res.OK {
+		t.Fatalf("deferred: %s", res.Reason)
+	}
+	got := readProbe(t, probe)
+	if v, ok := flagVal(got.Argv, "--transparent"); !ok || v != "1" {
+		t.Errorf("--transparent must reach the sdcpp runner (D5 fix): argv %v", got.Argv)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(res.Data, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["license"] != "Qwen Research License" || payload["commercial_use"] != false || payload["transparent"] != true {
+		t.Errorf("payload = %v", payload)
+	}
+}
+
+// TestGenerateImageFamilyOnlyNodeNoFamilyStillDefers: a family-only node (no default
+// binding — ADR 0058/D1) with no `family` in the request falls through to the SAME
+// generic "no image-gen route configured" defer an unconfigured node always gave — it
+// must never silently render a named family as if it were the default.
+func TestGenerateImageFamilyOnlyNodeNoFamilyStillDefers(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.MediaDir = dir
+	cfg.ImageGenFamilies = map[string]config.FamilyOverlay{
+		"qwen-image-2.1": {
+			"license": []byte(`"Qwen Research License"`), "commercial_use": []byte(`false`),
+			"imagegen_family": []byte(`"qwen-image-2.1"`),
+			"imagegen_engine": []byte(`"sdcpp"`),
+			"sdcpp_bin":       []byte(`"sd-cli"`),
+			"sdcpp_model":     []byte(`"qwen_image_2.1-Q8_0.gguf"`),
+		},
+	}
+	p := &Pipeline{cfg: cfg}
+	res := p.Run(context.Background(), core.Request{Task: core.TaskGenerateImage, Input: "x"})
+	if !res.Deferred || res.Reason != "no image-gen route configured" {
+		t.Fatalf("a family-only node with no family param must defer with the existing message, got %+v", res)
 	}
 }
 

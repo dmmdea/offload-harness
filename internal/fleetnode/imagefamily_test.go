@@ -75,3 +75,39 @@ func TestHealthAdvertisesImageFamiliesWithLicenseFlags(t *testing.T) {
 		t.Errorf("a node without named families must omit image_families: %s", body)
 	}
 }
+
+// TestHealthAdvertisesImageGenOnAFamilyOnlyNode is the fleet-door defect's health-side
+// regression: a node with NO default image binding (only a named, non-commercial
+// family — ADR 0058/D1 forbids a family ever becoming the default) must still
+// advertise image-gen and its one real family, never a phantom default row.
+func TestHealthAdvertisesImageGenOnAFamilyOnlyNode(t *testing.T) {
+	s, _ := newTestServer(t, familyOnlyImageCfg(), &fakeRunner{}, nil)
+	rec := do(t, s, http.MethodGet, "/fleet/health", "", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	var got struct {
+		Tasks         []string         `json:"supported_task_types"`
+		Families      []string         `json:"loadable_model_families"`
+		ImageFamilies []map[string]any `json:"image_families"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(got.Tasks, ","), "image-gen") {
+		t.Fatalf("supported_task_types = %v, want image-gen advertised for the family-only node", got.Tasks)
+	}
+	if len(got.ImageFamilies) != 1 {
+		t.Fatalf("image_families = %v, want exactly the one named family (no phantom default row)", got.ImageFamilies)
+	}
+	row := got.ImageFamilies[0]
+	if row["name"] != "qwen-image-2.1" || row["default"] != false || row["license"] != "Qwen Research License" || row["commercial_use"] != false {
+		t.Errorf("row = %v", row)
+	}
+	if !strings.Contains(strings.Join(got.Families, ","), "qwen-image-2.1") {
+		t.Errorf("loadable_model_families = %v, want qwen-image-2.1", got.Families)
+	}
+	if strings.Contains(strings.Join(got.Families, ","), "sdxl") {
+		t.Errorf("loadable_model_families = %v, must not claim sdxl — this node has no default binding", got.Families)
+	}
+}

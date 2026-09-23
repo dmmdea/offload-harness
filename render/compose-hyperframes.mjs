@@ -638,12 +638,12 @@ function scriptRunner(exe) {
   return /\.(mjs|cjs|js)$/i.test(exe) ? { exe: process.execPath, pre: [exe] } : { exe, pre: [] };
 }
 
-async function invokeCli(ctx, args, { cwd, env, deadline, log }) {
+async function invokeCli(ctx, args, { cwd, env, deadline, log, nodeArgs = [] }) {
   assertAllowedInvocation(args);
   let attempt = 0;
   for (;;) {
     attempt++;
-    const r = await runProcess(ctx.node, [ctx.entry, ...args], { cwd, env, deadline });
+    const r = await runProcess(ctx.node, [...nodeArgs, ctx.entry, ...args], { cwd, env, deadline });
     const text = `${r.stdout}\n${r.stderr}\n${r.spawnError ? r.spawnError.code + " " + r.spawnError.message : ""}`;
     const ebusy = (r.spawnError && r.spawnError.code === "EBUSY") || (r.code !== 0 && /\bEBUSY\b/.test(text));
     if (ebusy && attempt === 1 && !r.timedOut) {
@@ -747,7 +747,15 @@ export async function runCompose(argv, { log = (s) => process.stdout.write(s + "
     const cwd = mkdtempSync(join(tmpdir(), "offload-compose-b-"));
     const deadline = Date.now() + numberOr(f["timeout-sec"], 900) * 1000;
     try {
-      const ens = await invokeCli(ctx, buildBrowserArgs("ensure"), { cwd, env, deadline, log });
+      // --dns-result-order=ipv4first (node flag, not env: the child env stays the
+      // allowlisted PASSTHROUGH_ENV_KEYS set): browser ensure downloads chrome-
+      // headless-shell from storage.googleapis.com, and plain dns.lookup's default
+      // "verbatim" order can hand back an IPv6 address first with no fast failover
+      // on a box with a dead IPv6 route — a real hang measured on binxarn (wave
+      // session 5d227d30 §5a: curl's happy-eyeballs recovered in ~3s; the bare
+      // download hung 7+ minutes). "ensure" only — path/lint/check/render/snapshot
+      // touch no network.
+      const ens = await invokeCli(ctx, buildBrowserArgs("ensure"), { cwd, env, deadline, log, nodeArgs: ["--dns-result-order=ipv4first"] });
       if (ens.code !== 0) {
         const e = failFrom("browser ensure", ens);
         throw new ComposeError(e.cls === "TIMEOUT" ? "TIMEOUT" : "BROWSER_MISSING", e.detail);

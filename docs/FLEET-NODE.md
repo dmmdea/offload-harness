@@ -376,7 +376,7 @@ is not advertised, so the dispatcher can't send work the box would defer:
 
 | Fleet `task_type` | Pipeline task | Advertised when | Footprint family |
 |---|---|---|---|
-| `image-gen` | `generate_image` | `imagegen_script` set | `imagegen_family` (else `sdxl`); quant `bf16` for the HiDream-O1 binding |
+| `image-gen` | `generate_image` | `imagegen_script`/sdcpp engine bound (the default binding) OR any `imagegen_families` entry configured — a family-only node (no default binding, e.g. a non-commercial opt-in family) is advertised too | `imagegen_family` (else `sdxl`, only when the default binding is actually configured); quant `bf16` for the HiDream-O1 binding |
 | `video-gen` | `generate_video` | `videogen_script` set | the `videogen_family` binding (`ltx25`, …), else `wan2.2` for the runner default; quant `q8_0` only for the Wan family, when the bound unets are the Q8_0 GGUFs |
 | `stt` | `transcribe` | `stt_model` set | `whisper` (llama-swap-resident — no footprint sampling) |
 | `audio-gen` | `generate_audio` | voice or music script set | `acestep` (music) / `chatterbox` (voice) |
