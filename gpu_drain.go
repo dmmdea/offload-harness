@@ -51,6 +51,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/gpuactivity"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
+	"github.com/dmmdea/offload-harness/internal/modelaffinity"
 	"github.com/dmmdea/offload-harness/internal/seatload"
 	"github.com/dmmdea/offload-harness/internal/seatrate"
 )
@@ -297,9 +298,17 @@ func unloadSeat(ctx context.Context, client *http.Client, endpoint, model string
 // warmSeat loads the seat back through llama-swap's on-demand path (/upstream)
 // by asking the upstream for its health; llama-swap loads the model to answer.
 // The client's timeout bounds the load (a 27B tp2 seat takes ~3 min).
+//
+// This is the lease HOLDER's own load — the warm-back the reservation was taken
+// to schedule — so it builds its URL with modelaffinity.HolderUpstreamURL, the
+// one unfenced builder: this process holds the lease the fence would make it
+// wait on (only its child carries GPU_LEASE_EPOCH).
 func warmSeat(ctx context.Context, client *http.Client, endpoint, model string) error {
-	base := strings.TrimRight(endpoint, "/")
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, base+"/upstream/"+url.PathEscape(model)+"/health", nil)
+	wu, uerr := modelaffinity.HolderUpstreamURL(endpoint, model, "/health")
+	if uerr != nil {
+		return fmt.Errorf("warm %s: %w", model, uerr)
+	}
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, wu, nil)
 	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("warm %s: %w", model, err)

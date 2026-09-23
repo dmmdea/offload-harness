@@ -29,8 +29,8 @@ import (
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/agent"
+	"github.com/dmmdea/offload-harness/internal/modelaffinity"
 	"github.com/dmmdea/offload-harness/internal/netguard"
-	"github.com/dmmdea/offload-harness/internal/swapclient"
 )
 
 const (
@@ -196,7 +196,15 @@ func (s *Server) handleKVSlot(w http.ResponseWriter, r *http.Request, action str
 	s.extendWrite(w, kvSlotCallTimeout+chatWriteSlack, "the kvslot lane")
 	uctx, ucancel := context.WithTimeout(r.Context(), kvSlotCallTimeout)
 	defer ucancel()
-	upstream := swapclient.BaseURL(s.opts.Cfg.Endpoint) + "/upstream/" + req.Seat + "/slots/0?action=" + action
+	// The residency read above already refuses a cold seat; the GPU-lease fence
+	// (no-wait form) closes the window between that read and this request for a
+	// fenced card, and is the one builder of an /upstream URL in the harness.
+	upstream, ferr := modelaffinity.AwaitUpstream(uctx, s.opts.Cfg.Endpoint, req.Seat, "/slots/0?action="+action, time.Now())
+	if ferr != nil {
+		writeJSON(w, http.StatusConflict, KVSlotResponse{Status: "seat-cold", Seat: req.Seat, Key: req.Key, Action: action,
+			Note: "a GPU lease holds the card and the seat is not resident; this lane never starts one: " + ferr.Error()})
+		return
+	}
 	body, _ := json.Marshal(map[string]string{"filename": req.Key + kvSlotFileSuffix})
 	ureq, err := http.NewRequestWithContext(uctx, http.MethodPost, upstream, bytes.NewReader(body))
 	if err != nil {

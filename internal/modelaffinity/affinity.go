@@ -58,14 +58,15 @@
 // lanes inside it (delegate's fan-out, the MCP server's concurrent tool calls,
 // the agent loop running beside a cascade call).
 //
-// RESIDUAL, NAMED. Two llama-swap routes outside this gate can still force a
-// load: internal/agent's /upstream/{model}/props probes (window.go, props.go —
-// ProbeSeatPin exists precisely to warm a seat, so gating it would fight its
-// purpose) and internal/tokclient's /upstream/{model}/tokenize. Both are affine
-// to their own caller's seat and neither is a burst source, but a tokenize is a
-// separate admission from the generation that follows it, so gating it could not
-// batch the two anyway — holding one admission across tokenize-then-generate is
-// a different, larger change through internal/pipeline.
+// THE /upstream ROUTES. llama-swap's per-model passthrough (/upstream/{model}/…)
+// starts the model it names, and the probes that use it — internal/agent's
+// window and pin probes, internal/tokclient's /tokenize, the warm-up, the STT
+// client, the KV-slot lane — are not generation requests and do not take this
+// gate's per-base admission (a tokenize is a separate request from the
+// generation after it, so it could not batch with it anyway). They DO pass the
+// machine-wide half since 2026-09-22: upstream.go's AwaitUpstream is the one
+// builder of that URL, and under a media or exclusive lease it refuses a
+// request for a model that is not resident (ADR 0026, extended 2026-09-22).
 package modelaffinity
 
 import (

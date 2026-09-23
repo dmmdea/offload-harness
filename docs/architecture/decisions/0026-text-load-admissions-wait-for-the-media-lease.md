@@ -89,15 +89,70 @@ contends with our own render", and `runPipelineJob` takes only the in-process `m
   admission that is not a join. Tens of microseconds against a call budgeted at ~46 ms.
 - The cross-process limit named in ADR 0025 is unchanged for text-vs-text. Text-vs-media is now
   machine-wide, because the lease it reads is.
-- Two routes that can force a load still bypass this, exactly as they bypass ADR 0025's gate:
+- ~~Two routes that can force a load still bypass this, exactly as they bypass ADR 0025's gate:
   `internal/agent`'s `/upstream/{model}/props` probes (`ProbeSeatPin` exists to warm a seat) and
-  `internal/tokclient`'s `/upstream/{model}/tokenize`.
+  `internal/tokclient`'s `/upstream/{model}/tokenize`.~~ **Closed 2026-09-22** — see the extension
+  below. Every `/upstream` request now passes this gate's lease predicate.
 - **A check-then-act window remains, and is inherent.** A render started in the microseconds between
   the lease read and the request going out is not caught. Closing it would mean holding the lease
   across the call, which is the cost ADR 0018 refused for text. The window is one lease read wide and
   points the same way the pre-0.103.0 behaviour did, so it strictly improves on it.
 - A test process is a process: `go test` on a box with a live render will see text admissions wait.
   That is the mechanism working, not a flake.
+
+## Extended 2026-09-22: every `/upstream` request passes the fence
+
+**What happened.** The residual named above was not small. An agent run admitted just before a video
+render kept sending its per-model probes — `/upstream/<seat>/props`, `/tokenize`, `/v1/models` — and
+llama-swap (v251, `handleUpstream`) answers that route by starting the model. The 3-card agent seat started
+repeatedly on the render's cards (`starting` / `failed: aborted` / `upstream command exited prematurely` /
+finally `Health check passed`), 14.3 GB landed on a card the render held, and the render ran 895 s against
+its usual 228-324 s. The run's generation requests were waiting at this gate the whole time; its probes were
+not. The same was true of the warm-up, the whisper transcription and the KV-slot lane, and of the runs a
+`gpu reserve --class media --drain` hold was waiting for (ADR 0041, extended 2026-09-22).
+
+**Decision.** The invariant is stated for requests, not admissions: **while `blocksLoad` holds, no harness
+request may make llama-swap load a model.** `modelaffinity.AwaitUpstream` is the one builder of an
+`/upstream` URL, enforced by `TestUpstreamURLsAreBuiltOnlyBehindTheFence` (a string literal spelling the
+route anywhere else fails the suite). Under a fence it reads `/running` — never `/upstream` — and lets a
+model listed `ready` through, because a request to a resident model starts nothing; any other request waits
+for the fence inside the caller's own deadline and then returns this ADR's `*LeaseError`. Each caller picks
+its deadline: the window probe and the warm-up wait inside the admission budget and the run defers
+`capacity` (the probe's bare-root fallback is skipped under a fence); the seat pin, the per-step
+tokenizer and the cascade's per-tier re-pack probes do not wait, and the re-pack caches no fenced
+answer (no pin; the tokenizer fails open without a sticky strike, and the completion after it
+is the request that waits); transcription waits its client timeout. The one unfenced builder,
+`HolderUpstreamURL`, is the lease holder's own warm-back in `gpu_drain.go`, restricted by the same test. A
+generation that ran out its wait mid-run is filed `capacity` on both run doors, before the stall and ceiling
+branches.
+
+**The model-dispatched routes too.** `/v1/chat/completions`, `/v1/embeddings` and the other routes llama-swap
+dispatches by the model named in the body load that model exactly as `/upstream` does. The generation
+clients take `Admit` there; two senders did not. The fleet chat lane (`POST /fleet/chat`) forwarded
+another box's cascade call to this node's llama-swap with no gate, so a node running media under a lease
+could have a remote cascade call load a model onto the leased cards. The embedder (the kNN pre-filter,
+`shadow-label`) posted outside `Admit`. Both now build the URL with `modelaffinity.AwaitModelRoute`, the same
+fence with the same residency exemption. The chat lane waits inside the caller's budget: its caller has no
+lane-to-local fallback and the lane leaves queueing to the node. Exhausted, it answers `503` with the
+refusal's text, filed as `timeout` on the caller. It does not take `Admit`'s per-base arbitration, which the
+lane has always left to llama-swap. `TestModelDispatchedRoutesAreBuiltOnlyBehindAGate` extends the structural
+rule to these routes.
+
+**Why not residency-by-probe, which this ADR rejected.** The rejection was of a probe on EVERY admission to
+learn what the lease already implies. This read is taken only when a fence is up, and it answers a different
+question — whether this one request can start anything — that the lease cannot answer: a resident cascade
+rung on a box whose seat was cleared must keep working.
+
+**Why not drain the media lease.** A harness media job takes its lease without draining: the render needs
+the card now, and the text side waits (this ADR's trade). Making every render wait out the agent runs in
+flight would move minutes of agent work in front of every image. The runs in flight wait or defer typed
+instead, which is what this extension guarantees.
+
+**Residual.** The one-read check-then-act window above, now also from the other side: a `ready` model
+evicted by its own ttl between the `/running` read and the request. Code: `internal/modelaffinity/upstream.go`;
+tests: `internal/modelaffinity/upstream_test.go`, `internal/agent/upstream_fence_test.go`,
+`internal/tokclient/fence_test.go`, `internal/sttclient/fence_test.go`,
+`internal/pipeline/agenttask_upstream_fence_test.go`, `upstream_fence_lint_test.go`.
 
 ## Alternatives considered
 

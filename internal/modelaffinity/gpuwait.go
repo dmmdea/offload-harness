@@ -177,16 +177,24 @@ func awaitLease(ctx context.Context, base, model string, deadline time.Time, blo
 // call with a cascade remote lane rides the lane, one without waits its own
 // budget and is told who holds the card. Media stays the class that clears the
 // card and needs it kept clear regardless of any flag.
+//
+// A DRAINING hold of either class does not block a load (2026-09-22). The holder
+// has not touched the cards yet — it is waiting for the runs in flight to finish
+// — and blocking their requests is the 2026-09-14 deadlock: the drain waits for
+// runs that wait for the drain. That was fixed for text holds and stayed open
+// for `gpu reserve --class media --drain`, because the lease record dropped the
+// draining stamp on a media lease and the media class then blocked from acquire.
+// The fence starts when maintainSeat clears the stamp, exactly as for text.
 func blocksLoad(info gpulease.Info) bool {
-	if !info.Held || insideLease(info) {
+	if !info.Held || insideLease(info) || (info.Draining && !info.Exclusive) {
 		return false
 	}
 	return info.Class == gpulease.ClassMedia || (info.Class == gpulease.ClassText && info.Exclusive)
 }
 
 // BlocksNewRun decides whether info describes a card no NEW agent run may start
-// on: everything blocksLoad refuses, plus a text holder that is DRAINING the
-// seat (0.117.0, register D-93). The distinction is the whole fix: a drain must
+// on: everything blocksLoad refuses, plus a holder that is DRAINING the seat
+// (0.117.0, register D-93; either class since 2026-09-22). The distinction is the whole fix: a drain must
 // stop new work from landing (or it never converges under K sessions) while
 // letting the runs already in flight finish their remaining steps (or it
 // blocks the very work it is waiting for — the 2026-09-14 deadlock, resolved
@@ -196,7 +204,7 @@ func BlocksNewRun(info gpulease.Info) bool {
 	if blocksLoad(info) {
 		return true
 	}
-	return info.Held && !insideLease(info) && info.Class == gpulease.ClassText && info.Draining
+	return info.Held && !insideLease(info) && info.Draining
 }
 
 // insideLease reports whether this process is running UNDER the very lease that
@@ -316,7 +324,7 @@ func leaseError(base, model string, info gpulease.Info, waited, bound time.Durat
 		JobID:     info.JobID,
 		HeldFor:   info.Age,
 		Waited:    waited,
-		Draining:  info.Draining && info.Class == gpulease.ClassText && !info.Exclusive,
+		Draining:  info.Draining && !info.Exclusive,
 		ExpiresAt: info.ExpiresAt,
 		Bound:     bound,
 		cause:     cause,

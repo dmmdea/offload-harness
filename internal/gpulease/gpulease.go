@@ -225,7 +225,11 @@ type Options struct {
 	// 2026-09-09: a `gpu reserve --wait 2m` behind a `--for 3m` holder was refused
 	// at once, and the holder released six seconds later.
 	WaitOut bool
-	// Draining stamps Meta.Draining on a TEXT lease (see Meta.Draining).
+	// Draining stamps Meta.Draining (see Meta.Draining). Both classes: a media
+	// holder that drains (`gpu reserve --class media --drain`) must let the runs
+	// in flight finish exactly as a text holder does. Until 2026-09-22 the stamp
+	// was dropped on a media lease, so the media class fenced those runs from
+	// acquire and the drain waited on work it was itself blocking.
 	Draining bool
 	// Command is recorded as Meta.Command (clipped to commandClip runes).
 	Command string
@@ -925,7 +929,7 @@ func (m *Manager) record(epoch uint64, class Class, opts Options) ([]byte, error
 		ExpiresAtMs:  now.Add(ttl).UnixMilli(),
 		RenewedAtMs:  now.UnixMilli(),
 		Exclusive:    opts.Exclusive && class == ClassText,
-		Draining:     opts.Draining && class == ClassText,
+		Draining:     opts.Draining,
 		Command:      clipCommand(opts.Command),
 	}
 	b, err := json.Marshal(&meta)

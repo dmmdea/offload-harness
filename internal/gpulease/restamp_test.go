@@ -54,16 +54,19 @@ func TestRestampRefusesAFencedOutEpoch(t *testing.T) {
 	}
 }
 
-// Draining and Command are text-lease facts: a media lease never carries them,
-// and the command is clipped.
-func TestDrainingAndCommandAreRecordedForTextOnlyAndClipped(t *testing.T) {
+// Draining is recorded for EITHER class (2026-09-22): `gpu reserve --class media
+// --drain` must cordon new runs while the runs in flight finish, exactly as a text
+// drain does. Dropping the stamp on a media lease — the behaviour this test used to
+// pin — made the media class fence those runs from acquire, so the drain waited on
+// work it was itself blocking. The command is clipped either way.
+func TestDrainingIsRecordedForEitherClassAndTheCommandIsClipped(t *testing.T) {
 	m, _ := newTestManager(t)
 	long := strings.Repeat("x", 500)
 	l, err := m.TryAcquire(ClassMedia, Options{Reason: "render", Draining: true, Command: long})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info := m.Inspect(); info.Draining || len([]rune(info.Command)) > commandClip {
+	if info := m.Inspect(); !info.Draining || info.Exclusive || len([]rune(info.Command)) > commandClip {
 		t.Fatalf("media lease: %+v", info)
 	}
 	_ = l.Release()

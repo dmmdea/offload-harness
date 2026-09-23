@@ -67,6 +67,38 @@ func TestAnExclusiveHoldRefusesBothNewRunsAndRequests(t *testing.T) {
 	}
 }
 
+// `gpu reserve --class media --drain` (2026-09-22): a MEDIA holder that drains
+// must behave like a text one — runs in flight keep their requests, new runs are
+// cordoned — and fence every load once maintainSeat clears the stamp. Before the
+// fix the lease record dropped the draining stamp on a media lease, the media
+// class blocked the in-flight runs from acquire, and the drain waited on work it
+// was itself holding up: the ADR 0041 deadlock, reopened for the media class.
+func TestADrainingMediaHoldAdmitsRunningWorkAndFencesAfterTheDrain(t *testing.T) {
+	m := armLease(t)
+	l, err := m.TryAcquire(gpulease.ClassMedia, gpulease.Options{Reason: "video render", Draining: true, TTL: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = l.Release() }()
+
+	tk := admitFast(t, "http://127.0.0.1:1", "agent-pool")
+	tk.Release()
+
+	err = AwaitRunSlot(context.Background(), "http://127.0.0.1:1", "agent-pool", time.Now().Add(30*time.Millisecond))
+	var le *LeaseError
+	if !errors.As(err, &le) || !le.Draining || le.Class != gpulease.ClassMedia {
+		t.Fatalf("a new run under a draining media hold must be cordoned with a draining LeaseError, got %v", err)
+	}
+
+	// The drain completes: maintainSeat clears the stamp. The media class fences.
+	if err := l.Restamp(func(meta *gpulease.Meta) { meta.Draining = false }); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Admit(context.Background(), "http://127.0.0.1:1", "agent-pool", 20*time.Millisecond); err == nil {
+		t.Fatal("a load under a media hold whose drain completed must wait")
+	}
+}
+
 // A draining hold releases mid-wait: the queued run starts.
 func TestARunSlotOpensWhenTheDrainingHoldReleases(t *testing.T) {
 	m := armLease(t)

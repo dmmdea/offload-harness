@@ -6,12 +6,15 @@ package judge
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"math"
 	"net/http"
 	"time"
+
+	"github.com/dmmdea/offload-harness/internal/modelaffinity"
 )
 
 type Embedder struct {
@@ -58,7 +61,22 @@ func (e *Embedder) embed(inputs []string) ([][]float64, error) {
 	if err != nil {
 		return nil, fmt.Errorf("embed: marshal: %w", err)
 	}
-	req, err := http.NewRequest("POST", e.endpoint+"/v1/embeddings", bytes.NewReader(body))
+	// /v1/embeddings is a model-dispatched llama-swap route: it swaps the
+	// embedding model in. Under a GPU-lease fence over a cold embedder the
+	// request is not sent (2026-09-22); the wait for the card is bounded by this
+	// embedder's own timeout, so the kNN pre-filter on the request path fails
+	// open exactly as it does on a slow embedder. A resident embedder is served.
+	budget := e.hc.Timeout
+	if budget <= 0 {
+		budget = 30 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
+	u, err := modelaffinity.AwaitModelRoute(ctx, e.endpoint, e.model, "/v1/embeddings", time.Now().Add(budget))
+	if err != nil {
+		return nil, fmt.Errorf("embed: %w", err)
+	}
+	req, err := http.NewRequest("POST", u, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
