@@ -170,6 +170,49 @@ Versioning: [SemVer](https://semver.org/).
   transcript. The caller's transcript is not modified.
 - Legitimate tool calls are unchanged: valid arguments with `tool_calls` at the cap run as before (tested).
 
+## [0.140.1] - 2026-09-23 - a tool call the vLLM parser is still holding is progress, not a stall
+
+### Fixed — the liveness watch read a vLLM seat writing a held tool-call argument as silence
+
+- **A vLLM seat that is writing some tool calls sends no SSE frame at all until the call closes.**
+  vLLM's tool parser (the unified parser engine that serves `--tool-call-parser qwen3_xml` on 0.28)
+  streams a string argument token by token, but holds a trailing non-string argument (an object, an
+  array, a number) until the next parameter or the closing tag: `_safe_arg_prefix` drops the trailing
+  value unless the schema types it as a string. It holds a call to a name the request did not offer
+  for the call's whole length. While it holds, `serving.py` sends nothing (`delta_message is None` →
+  `continue`). Measured on the reference workstation's 3-card seat (`agent-pool`, thinking off, the
+  harness's own request shape): an `offload_extract` call with a 40-property `schema` object sent 12
+  frames, and between the `"schema": ` frame at 1.9 s and the whole object at 64.7 s there were
+  **62.8 s with no frame**, while the engine generated 1,460 tokens. The liveness floor is 60 s, so
+  the watch files that as `stalled: no progress for 60s in …` — an infrastructure defer of a seat
+  that was producing at ~23 tok/s.
+- **Fixed: a vLLM seat is asked for its per-token signal, and the decoder counts it.** On a seat this
+  box declares in `vllm_seats` (alias resolved through the roster, the same gate the structured
+  re-pack uses), the agent loop's streamed calls carry `"return_token_ids": true`. vLLM then sends a
+  frame per engine step with the generated ids even when the parser emits no delta (the same call:
+  1,462 frames, largest gap under 0.05 s). `decodeSSE` counts a frame's `token_ids` as progress, by
+  the number of ids, whether or not the frame carries a delta. A tool-call frame that carries only
+  the tool's id and name (vLLM sends the name in a frame of its own) now counts as progress too.
+  Every other seat, and every call with no progress listener (the CLI doors, the probes), sends the
+  request it always sent, byte for byte: other OpenAI-compatible servers may reject an unknown key.
+- Side effect, a correction: the loop's prefill measurement (`FirstDeltaMS`, the seat-rates store's
+  `prefill_tok_s`) is the time to the first frame the decoder counts. A call that opened with a held
+  argument measured the hold as prefill; it now measures the first generated token.
+- Cost: with `return_token_ids` vLLM also puts the prompt's ids in the first frame of each call,
+  about 4.5 bytes per prompt token (measured: 78 KB for the 17.5k-token review prompt; ~1.2 MB at the
+  262k window), on loopback, once per step.
+- Live E2E on the 3-card seat (the same 44.8 KB `offload_review_diff`, warm seat, this build): 11
+  steps, `done`, 10 findings in 293 s, every loop call carrying `return_token_ids`. Even ordinary
+  `read_file` calls are partly held: the re-issue's call sent 63 frames for 61 tokens, 19 of them with
+  a visible delta, so the largest gap between frames the watch counts fell from 0.5 s to 0.05 s.
+- Tests: `internal/agent/client_heldtool_test.go` (the decoder on the captured wire shape; a fake
+  vLLM seat that sends per-step frames only when asked, run under a real `Monitor`: completes with
+  the signal, files the stall without it), and
+  `internal/pipeline/agenttask_heldtool_test.go` (the real call site: a declared vLLM seat is asked
+  and survives a hold longer than the allowance; the same seat undeclared gets the historical body
+  and stalls). Red before the fix; mutating either the call site (`StreamTokenIDs: false`) or the
+  decoder's id count fails them.
+
 ## [0.140.0] - 2026-09-23 - a seat that is LOADING is not a prefill stall
 
 ### Fixed — the liveness wall filed a normal cold load as a prefill stall
