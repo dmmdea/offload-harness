@@ -57,3 +57,67 @@ describe("O2a: the delegate placement digest reaches the model for MCP results",
     expect(rendered.slice(0, 200)).toContain("[local-offload] delegate placement: 1 local, 0 remote of 1");
   });
 });
+
+describe("O2b: the read-only task reroute takes effect on opencode 1.18.32", () => {
+  const roArgs = () => ({ description: "Doc sweep", prompt: "read the files under docs and list every decision.", subagent_type: "general" });
+
+  it("mutates output.args IN PLACE (opencode executes the object it passed and ignores a replacement)", async () => {
+    const h = createHooks(opts());
+    const args = roArgs();
+    const out = { args };
+    await h["tool.execute.before"]!({ tool: "task", sessionID: "r1", callID: "c1" }, out);
+    expect(out.args).toBe(args); // same object
+    expect(args.subagent_type).toBe("offload");
+    expect(args.prompt).toContain("[local-offload] This leg was routed");
+  });
+
+  it("an args object that cannot be changed is not recorded as rerouted and never stamped", async () => {
+    const o = opts();
+    const h = createHooks(o);
+    const args = Object.freeze(roArgs());
+    await h["tool.execute.before"]!({ tool: "task", sessionID: "r2", callID: "c2" }, { args });
+    expect(args.subagent_type).toBe("general");
+    const rows = logRows(o.dispatchLog);
+    expect(rows.some((e) => e.event === "task_reroute")).toBe(false);
+    expect(rows.some((e) => e.event === "task_reroute_skipped")).toBe(true);
+    const after = { title: "", output: "result", metadata: {} };
+    await h["tool.execute.after"]!({ tool: "task", sessionID: "r2", callID: "c2", args }, after);
+    expect(after.output).toBe("result");
+  });
+
+  it("stamps 'ran on the offload seat' only when the child session's agent really is offload", async () => {
+    const o = opts();
+    const h = createHooks(o);
+    // child created by the task tool for ANOTHER agent (e.g. the reroute did not take)
+    await h["tool.execute.before"]!({ tool: "task", sessionID: "p1", callID: "c1" }, { args: roArgs() });
+    await h.event!({ event: { type: "session.created", properties: { info: { id: "ch-general", parentID: "p1", agent: "general" } } } } as any);
+    const wrong = { title: "", output: '<task id="ch-general" state="completed">\n<task_result>\nok\n</task_result>\n</task>', metadata: { sessionId: "ch-general" } };
+    await h["tool.execute.after"]!({ tool: "task", sessionID: "p1", callID: "c1", args: {} }, wrong);
+    expect(wrong.output).not.toContain("ran on the free local");
+    expect(logRows(o.dispatchLog).some((e) => e.event === "task_reroute_unconfirmed")).toBe(true);
+    // the same flow with an offload child is stamped
+    await h["tool.execute.before"]!({ tool: "task", sessionID: "p1", callID: "c2" }, { args: roArgs() });
+    await h.event!({ event: { type: "session.created", properties: { info: { id: "ch-offload", parentID: "p1", agent: "offload" } } } } as any);
+    const right = { title: "", output: '<task id="ch-offload" state="completed">\n<task_result>\nok\n</task_result>\n</task>', metadata: { sessionId: "ch-offload" } };
+    await h["tool.execute.after"]!({ tool: "task", sessionID: "p1", callID: "c2", args: {} }, right);
+    expect(right.output).toContain('ran on the free local "offload" seat');
+  });
+
+  it("an unknown child (no session.created seen) is never stamped", async () => {
+    const h = createHooks(opts());
+    await h["tool.execute.before"]!({ tool: "task", sessionID: "p2", callID: "c1" }, { args: roArgs() });
+    const after = { title: "", output: "result", metadata: {} };
+    await h["tool.execute.after"]!({ tool: "task", sessionID: "p2", callID: "c1", args: {} }, after);
+    expect(after.output).toBe("result");
+  });
+
+  it("the child's agent falls back to opencode's '(@<agent> subagent)' title when info.agent is absent", async () => {
+    const h = createHooks(opts());
+    await h["tool.execute.before"]!({ tool: "task", sessionID: "p3", callID: "c1" }, { args: roArgs() });
+    await h.event!({ event: { type: "session.created", properties: { info: { id: "ch-t", parentID: "p3", title: "Doc sweep (@offload subagent)" } } } } as any);
+    const after = { title: "", output: "ok", metadata: { sessionId: "ch-t" } };
+    await h["tool.execute.after"]!({ tool: "task", sessionID: "p3", callID: "c1", args: {} }, after);
+    expect(after.output).toContain("ran on the free local");
+  });
+
+});

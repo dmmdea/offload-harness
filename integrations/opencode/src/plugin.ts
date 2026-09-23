@@ -11,13 +11,16 @@
 //   tool.execute.before (task)          FORCING FUNCTION: read-only-shaped subagent legs are
 //                                       rerouted to the `offload` subagent (option-gated)
 //   tool.execute.after                  H14 read-counter nudge; delegate placement digest;
-//                                       "ran on the offload seat" note on rerouted tasks
+//                                       "ran on the offload seat" note on confirmed reroutes
 //   config                              idempotently provides the offload agent + commands,
 //                                       small_model default, so the plugin alone brings parity
-//   event                               session heartbeat into the cross-harness dispatch log
+//   event                               session heartbeat into the cross-harness dispatch log;
+//                                       child-session → agent map
 //   tool.offload_plugin_status          load proof + doctor
 //
 // Host contract (read from the opencode 1.18.32 bundle, pinned by test/context-diet.test.ts):
+//   - tool.execute.before hands the hook {args: b} and then executes b itself, so only an IN-PLACE
+//     change of output.args reaches the tool; assigning a new output.args object is ignored.
 //   - For MCP tools tool.execute.after receives the RAW MCP result ({content: [...]}); opencode
 //     joins its text parts into the model-visible output AFTER the hook and head-truncates it.
 import type { Hooks, Plugin, PluginInput } from "@opencode-ai/plugin";
@@ -104,7 +107,7 @@ type SessionState = {
   reads: number;
   readOnlySpawns: number;
   nudged: Set<number>;
-  rerouted: Set<string>; // callIDs rerouted to the offload agent; consumed by tool.execute.after
+  rerouted: Set<string>; // callIDs whose reroute took effect; consumed by tool.execute.after
   delegateCalls: number;
 };
 
@@ -179,14 +182,17 @@ export function offloadCommands(o: Options) {
   };
 }
 
+// opencode names a subagent session "<description> (@<agent> subagent)".
+const SUBAGENT_TITLE = /\(@([^()\s]+) subagent\)\s*$/;
+
 // Pure hook logic exported for tests; the plugin function wires it to opencode.
 export function createHooks(o: Options, diagnostics: Diagnostics = newDiagnostics()): Hooks & { _state: Map<string, SessionState>; _diagnostics: Diagnostics } {
   const sessions = new Map<string, SessionState>();
   const log = (ev: Parameters<typeof appendDispatchLog>[0]) => appendDispatchLog(ev, o.dispatchLog, diagnostics.instrument);
-  // Subagent (child) sessions: no heartbeat, no read-counter nudges (a nudge telling the
-  // offload seat to offload to itself is noise in a small model's context and a false
-  // under-use row in the shared log).
-  const children = new Set<string>();
+  // Subagent (child) sessions → their agent name ("" when opencode did not say). No heartbeat,
+  // no read-counter nudges there (a nudge telling the offload seat to offload to itself is noise
+  // in a small model's context and a false under-use row in the shared log).
+  const children = new Map<string, string>();
   const st = (sid: string): SessionState => {
     let s = sessions.get(sid);
     if (!s) {
@@ -200,6 +206,14 @@ export function createHooks(o: Options, diagnostics: Diagnostics = newDiagnostic
       }
     }
     return s;
+  };
+  const addChild = (sid: string, agent: string) => {
+    children.set(sid, agent);
+    while (children.size > MAX_SESSIONS) {
+      const oldest = children.keys().next().value;
+      if (oldest === undefined) break;
+      children.delete(oldest);
+    }
   };
   const delegateTool = `${o.mcp}_agent_delegate`;
 
@@ -236,7 +250,7 @@ export function createHooks(o: Options, diagnostics: Diagnostics = newDiagnostic
     // rejected promise opencode would surface.
     event: async (arg) => {
       try {
-        const ev = (arg as { event?: unknown } | undefined)?.event as { type?: string; properties?: { info?: { id?: string; parentID?: string }; sessionID?: string } } | undefined;
+        const ev = (arg as { event?: unknown } | undefined)?.event as { type?: string; properties?: { info?: { id?: string; parentID?: string; agent?: string; title?: string }; sessionID?: string } } | undefined;
         // Prune ONLY on deletion: "idle" is a transient per-turn status (idle → busy every
         // turn), and pruning there would wipe the read counters after every turn.
         if (ev?.type === "session.deleted") {
@@ -248,11 +262,13 @@ export function createHooks(o: Options, diagnostics: Diagnostics = newDiagnostic
           return;
         }
         if (ev?.type === "session.created") {
-          const sid = ev.properties?.info?.id ?? ev.properties?.sessionID ?? "unknown";
+          const info = ev.properties?.info;
+          const sid = info?.id ?? ev.properties?.sessionID ?? "unknown";
           // Subagent (child) sessions carry a parentID; only top-level sessions count as a
           // heartbeat so the weekly read's denominator is not inflated by every task call.
-          if (ev.properties?.info?.parentID) {
-            children.add(sid);
+          if (info?.parentID) {
+            const agent = typeof info.agent === "string" && info.agent ? info.agent : (SUBAGENT_TITLE.exec(String(info.title ?? ""))?.[1] ?? "");
+            addChild(sid, agent);
             return;
           }
           if (!sessions.has(sid)) {
@@ -297,9 +313,8 @@ export function createHooks(o: Options, diagnostics: Diagnostics = newDiagnostic
     "tool.execute.before": async (input, output) => {
       try {
         if (input.tool !== "task") return;
-        // Copy before mutating: a frozen or shared args object must not turn a reroute into
-        // a thrown (and therefore silently skipped) hook.
-        const args = { ...((output.args ?? {}) as Record<string, any>) };
+        const args = output?.args as Record<string, any> | undefined;
+        if (!args || typeof args !== "object") return;
         const current = String(args.subagent_type ?? args.agent ?? "");
         const cls: LegClass = classifyLeg(args.description, args.prompt);
         const s = st(input.sessionID);
@@ -308,11 +323,23 @@ export function createHooks(o: Options, diagnostics: Diagnostics = newDiagnostic
           log({ event: "readonly_spawn", sid: input.sessionID, n: s.readOnlySpawns, desc: String(args.description ?? "").slice(0, 80), target: current || "default" });
         }
         if (!o.routeReadOnlyTasks || cls !== "read-only" || current === o.offloadAgent) return;
-        // The forcing function: route the leg to the free local seat.
-        if ("subagent_type" in args || !("agent" in args)) args.subagent_type = o.offloadAgent;
-        if ("agent" in args) args.agent = o.offloadAgent;
-        args.prompt = `${String(args.prompt ?? "")}\n\n[local-offload] This leg was routed to the free local offload seat because it is read-only over local files. Use the ${o.mcp}_* harness tools; if it turns out to need the web, writes, or a judgment call, say so and return what you could establish read-only.`;
-        output.args = args;
+        // The forcing function: route the leg to the free local seat. IN PLACE — opencode 1.18.32
+        // executes the very object it handed this hook and ignores a replaced output.args. The
+        // agent field is written first so a refused write leaves the prompt untouched.
+        const patch: Record<string, string> = {};
+        if ("subagent_type" in args || !("agent" in args)) patch.subagent_type = o.offloadAgent;
+        if ("agent" in args) patch.agent = o.offloadAgent;
+        patch.prompt = `${String(args.prompt ?? "")}\n\n[local-offload] This leg was routed to the free local offload seat because it is read-only over local files. Use the ${o.mcp}_* harness tools; if it turns out to need the web, writes, or a judgment call, say so and return what you could establish read-only.`;
+        try {
+          Object.assign(args, patch);
+        } catch (e) {
+          log({ event: "task_reroute_skipped", sid: input.sessionID, reason: `args not writable: ${(e as Error)?.message ?? e}`, desc: String(args.description ?? "").slice(0, 80) });
+          return;
+        }
+        if (String(args.subagent_type ?? args.agent ?? "") !== o.offloadAgent) {
+          log({ event: "task_reroute_skipped", sid: input.sessionID, reason: "args did not take the new agent", desc: String(args.description ?? "").slice(0, 80) });
+          return;
+        }
         s.rerouted.add(input.callID);
         log({ event: "task_reroute", sid: input.sessionID, from: current || "default", to: o.offloadAgent, desc: String(args.description ?? "").slice(0, 80) });
       } catch (e) {
@@ -326,6 +353,15 @@ export function createHooks(o: Options, diagnostics: Diagnostics = newDiagnostic
         if (input.tool === "task" && s.rerouted.has(input.callID)) {
           s.rerouted.delete(input.callID); // consumed
           const text = String(output.output ?? "");
+          // The stamp claims where the leg ran, so it needs proof: the child session the task
+          // tool created (metadata.sessionId, or the <task id="…"> envelope) must be an offload one.
+          const meta = (output as { metadata?: { sessionId?: unknown } }).metadata;
+          const childSid = typeof meta?.sessionId === "string" ? meta.sessionId : /<task id="([^"]+)"/.exec(text)?.[1];
+          const childAgent = childSid ? children.get(childSid) : undefined;
+          if (childAgent !== o.offloadAgent) {
+            log({ event: "task_reroute_unconfirmed", sid: input.sessionID, child: childSid ?? null, agent: childAgent ?? null });
+            return;
+          }
           if (taskFailed(text)) {
             // Never stamp a failure with a success banner: say what happened and what to do.
             output.output += `\n\n[local-offload] The rerouted leg FAILED on the "${o.offloadAgent}" seat (see the error above). Re-run it on the default agent, or check that agent "${o.offloadAgent}" exists and its model is served.`;

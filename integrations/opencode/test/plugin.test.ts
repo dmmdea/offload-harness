@@ -110,7 +110,9 @@ describe("hooks", () => {
     expect(out.args.prompt).toContain("[local-offload]");
     const ev = lines(o.dispatchLog);
     expect(ev.some((e) => e.event === "task_reroute" && e.to === "offload" && e.harness === "opencode")).toBe(true);
-    const after = { title: "", output: "result", metadata: {} };
+    // the stamp needs proof: the task tool's child session is an offload one
+    await h.event!({ event: { type: "session.created", properties: { info: { id: "ch-s1", parentID: "s1", agent: "offload" } } } } as any);
+    const after = { title: "", output: "result", metadata: { sessionId: "ch-s1" } };
     await h["tool.execute.after"]!({ tool: "task", sessionID: "s1", callID: "c1", args: out.args }, after);
     expect(after.output).toContain("ran on the free local");
   });
@@ -195,7 +197,8 @@ describe("review-round fixes", () => {
     const h = createHooks(o);
     const out = { args: { description: "Doc sweep", prompt: "read the files under docs and list every decision.", subagent_type: "general" } };
     await h["tool.execute.before"]!({ tool: "task", sessionID: "f1", callID: "c1" }, out);
-    const after = { title: "", output: "Error: Subagent failed (task_id: x): The user rejected permission to use this specific tool call.", metadata: {} };
+    await h.event!({ event: { type: "session.created", properties: { info: { id: "ch-f1", parentID: "f1", agent: "offload" } } } } as any);
+    const after = { title: "", output: "Error: Subagent failed (task_id: x): The user rejected permission to use this specific tool call.", metadata: { sessionId: "ch-f1" } };
     await h["tool.execute.after"]!({ tool: "task", sessionID: "f1", callID: "c1", args: out.args }, after);
     expect(after.output).toContain("FAILED on the");
     expect(after.output).not.toContain("ran on the free local");
@@ -209,7 +212,8 @@ describe("review-round fixes", () => {
     const h = createHooks(opts());
     const out = { args: { description: "Doc sweep", prompt: "read the files under docs and list every decision.", subagent_type: "general" } };
     await h["tool.execute.before"]!({ tool: "task", sessionID: "f2", callID: "c2" }, out);
-    const after = { title: "", output: "Findings: ... This leg needs the web to confirm the upstream version.", metadata: {} };
+    await h.event!({ event: { type: "session.created", properties: { info: { id: "ch-f2", parentID: "f2", agent: "offload" } } } } as any);
+    const after = { title: "", output: "Findings: ... This leg needs the web to confirm the upstream version.", metadata: { sessionId: "ch-f2" } };
     await h["tool.execute.after"]!({ tool: "task", sessionID: "f2", callID: "c2", args: out.args }, after);
     expect(after.output).toContain("needs the primary agent");
   });

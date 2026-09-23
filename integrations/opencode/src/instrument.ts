@@ -9,7 +9,7 @@ import { dirname, join } from "node:path";
 export const DEFAULT_LOG = join(homedir(), ".claude", "state", "dispatch-log.jsonl");
 
 export type DispatchEvent = {
-  event: "session" | "readonly_spawn" | "task_reroute" | "task_reroute_failed" | "delegate" | "nudge" | "config_default_applied";
+  event: "session" | "readonly_spawn" | "task_reroute" | "task_reroute_failed" | "task_reroute_skipped" | "task_reroute_unconfirmed" | "delegate" | "nudge" | "config_default_applied";
   sid?: string;
   [k: string]: unknown;
 };
