@@ -1311,7 +1311,10 @@ func (l *Loop) run(ctx context.Context, objective string, bs *budgetState) (Resu
 		// are a JSON fragment. Nothing can execute it, and appending it to the
 		// transcript would poison the re-issue — so the cut turn is dropped and
 		// the step re-issued at the final budget, exactly as on the 500 above.
-		if n, cut := cutToolCallInCompletion(comp); cut {
+		// vLLM reports that cut as finish_reason "tool_calls" (it rewrites the
+		// reason whenever a tool call was streamed), so the classifier reads
+		// the ARGUMENTS and the completion count, not the reason alone.
+		if n, cut := cutToolCallInCompletion(comp, stepMax); cut {
 			l.prefill.Observe(comp.Serve)
 			if !cutReissued {
 				cutReissued = true
@@ -1958,23 +1961,47 @@ func cutArgSizeFromErr(err error) int {
 }
 
 // cutToolCallInCompletion reports a completion that WAS returned but carries
-// the same defect: cut at the budget (finish_reason "length") with a tool call
-// whose arguments do not parse. Returns the partial argument's size. An EMPTY
-// argument is not a cut — that is how a no-argument tool call arrives on some
-// engines, and treating it as one would re-issue every such step.
-func cutToolCallInCompletion(c Completion) (int, bool) {
-	if c.FinishReason != "length" {
-		return 0, false
-	}
+// the same defect: a tool call cut at the completion budget, its arguments a
+// JSON fragment. Returns the partial argument's size. An EMPTY argument is not
+// a cut — that is how a no-argument tool call arrives on some engines, and
+// treating it as one would re-issue every such step.
+//
+// The finish reason alone cannot say so. llama.cpp reports the cut as
+// "length"; vLLM rewrites the reason to "tool_calls" whenever a tool call was
+// streamed, cap or no cap (measured 2026-09-23: an offload_triage argument cut
+// at 8,192 tokens arrived as "tool_calls", and the next request died on HTTP
+// 400 "Unterminated string"). So an argument that does not parse is a cut when
+// ANY of these holds:
+//   - finish_reason is "length";
+//   - the server's completion count reached maxTokens (the cap was hit);
+//   - the JSON ends mid-value (unterminated), which only a cut produces.
+//
+// A complete-but-malformed argument below the cap is the seat's own mistake,
+// not the budget: it is dispatched and the tool reports the error, and the
+// client's wire guard (wireToolArgs) keeps it from reaching the engine.
+func cutToolCallInCompletion(c Completion, maxTokens int) (int, bool) {
+	atCap := c.FinishReason == "length" ||
+		(maxTokens > 0 && c.Serve != nil && c.Serve.UsageCompletionTokens >= maxTokens)
 	for _, tc := range c.Msg.ToolCalls {
-		if strings.TrimSpace(tc.Args) == "" {
+		if strings.TrimSpace(tc.Args) == "" || json.Valid([]byte(tc.Args)) {
 			continue
 		}
-		if !json.Valid([]byte(tc.Args)) {
+		if atCap || jsonUnterminated(tc.Args) {
 			return len(tc.Args), true
 		}
 	}
 	return 0, false
+}
+
+// jsonUnterminated reports text that is a JSON PREFIX cut before its end — an
+// open string, object or array — as opposed to text that is malformed
+// somewhere in the middle. encoding/json names exactly that case "unexpected
+// end of JSON input".
+func jsonUnterminated(s string) bool {
+	var v any
+	err := json.Unmarshal([]byte(s), &v)
+	var se *json.SyntaxError
+	return errors.As(err, &se) && strings.Contains(se.Error(), "unexpected end of JSON input")
 }
 
 // cutCallRecord is the corpus record of an attempt the ENGINE refused: no

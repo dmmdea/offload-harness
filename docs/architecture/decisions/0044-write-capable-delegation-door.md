@@ -72,7 +72,9 @@ A write the seat cannot fit into ONE completion is a BUDGET defect, not a broken
 engine refuses a tool call whose JSON argument the step budget cut mid-string, the loop re-issues that step
 once at the final budget and, cut again, stops on `tool_call_cut` with both budgets and the partial argument
 size in `stop_note` - so the fix reads as "ask for a smaller write, or raise the step budget" instead of
-blaming the stack. `contracts/write-door/t4` is that shape as a gate leg.
+blaming the stack. An engine that returns the cut completion instead of refusing it is recognised by the
+argument, not the finish reason: vLLM reports a call cut at the cap as `tool_calls` (0.140.2), so a
+non-parsing argument at the cap, or one that ends mid-value, takes the same path. `contracts/write-door/t4` is that shape as a gate leg.
 
 A write contract dispatched to a node that has not opted in costs one wasted round trip before it is
 re-placed. Advertising `agent_allow_write` on `/fleet/health` would remove that, at the price of

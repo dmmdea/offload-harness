@@ -226,6 +226,22 @@ type ServeStats struct {
 	UsageReasoningTokens int `json:"usage_reasoning_tokens,omitempty"`
 }
 
+// wireToolArgs is the engine boundary for a tool call's arguments. The engine
+// PARSES the arguments of every assistant tool call it is handed back, and one
+// it cannot parse fails the whole request (vLLM: HTTP 400 "Unterminated
+// string", measured 2026-09-23). The loop drops a CUT call before it reaches
+// the transcript (cutToolCallInCompletion); this is the guarantee for every
+// other path — a malformed call the seat wrote below the cap, a replayed or
+// caller-supplied transcript. Invalid arguments go out as "{}" (the tool's own
+// error result, which follows in the transcript, tells the seat what went
+// wrong); valid and empty arguments go out byte-for-byte.
+func wireToolArgs(args string) string {
+	if strings.TrimSpace(args) == "" || json.Valid([]byte(args)) {
+		return args
+	}
+	return "{}"
+}
+
 // Chat sends the running transcript + tool specs and returns the next completion.
 func (c *LLMClient) Chat(ctx context.Context, msgs []Msg, tools []ToolSpec, maxTokens int) (Completion, error) {
 	req := wireReq{
@@ -244,7 +260,7 @@ func (c *LLMClient) Chat(ctx context.Context, msgs []Msg, tools []ToolSpec, maxT
 		for _, tc := range m.ToolCalls {
 			wm.ToolCalls = append(wm.ToolCalls, wireToolCall{
 				ID: tc.ID, Type: "function",
-				Function: wireFn{Name: tc.Name, Arguments: tc.Args},
+				Function: wireFn{Name: tc.Name, Arguments: wireToolArgs(tc.Args)},
 			})
 		}
 		req.Messages = append(req.Messages, wm)

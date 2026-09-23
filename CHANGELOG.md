@@ -146,6 +146,30 @@ Versioning: [SemVer](https://semver.org/).
   that first slipped past a vacuous test comparing `protocolText()` with itself (replaced by fixed
   expectations).
 
+## [0.140.2] - 2026-09-23 - a tool call cut at the cap is a cut, whatever finish reason vLLM reports
+
+### Fixed — vLLM reports a cut tool call as `tool_calls`, and the fragment went into the transcript
+
+- **A tool call cut at the completion cap arrived with `finish_reason: "tool_calls"`, not `length`.** vLLM
+  rewrites the finish reason to `tool_calls` whenever a tool call was streamed, cap or no cap. Measured on a
+  warm vLLM seat (harness 0.140.x): a streamed call hit the 8,192-token cap in the middle of an
+  `offload_triage` argument, `cutToolCallInCompletion` checked only for `length`, the unterminated argument
+  was appended to the transcript, and the next request failed with HTTP 400 `Unterminated string` from the
+  engine's own parse of the argument it was handed back. The loop recovered on the following step, but the
+  step was wasted and the transcript carried invalid tool-call JSON.
+- **Fixed: the cut is read from the arguments, not the finish reason alone.** A non-empty argument that is
+  not valid JSON is a cut when the finish reason is `length`, when the server's `completion_tokens` reached
+  the step's `max_tokens`, or when the JSON ends mid-value (an open string, object or array: only a cut
+  leaves that). A cut takes the existing path: the turn is dropped, the step is re-issued once at the final
+  budget, and a second cut stops on `tool_call_cut`. A complete but malformed argument below the cap is the
+  seat's own mistake, not the budget: it is dispatched as before and the tool reports the error.
+- **The client never sends invalid tool-call arguments to the engine.** Every assistant tool call the request
+  carries goes out with valid JSON arguments: arguments that do not parse go out as `{}` (the tool's error
+  result follows in the transcript), while valid and empty arguments go out byte for byte. That covers the
+  paths the loop's cut check does not: a malformed call below the cap, a replayed or caller-supplied
+  transcript. The caller's transcript is not modified.
+- Legitimate tool calls are unchanged: valid arguments with `tool_calls` at the cap run as before (tested).
+
 ## [0.140.0] - 2026-09-23 - a seat that is LOADING is not a prefill stall
 
 ### Fixed — the liveness wall filed a normal cold load as a prefill stall
