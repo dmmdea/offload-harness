@@ -246,13 +246,25 @@ if command -v nvidia-smi >/dev/null 2>&1 && [ "$VWAIT" -gt 0 ] 2>/dev/null; then
   done
   [ -z "$busy" ] && echo "seat_fg: seat devices $DEVS below their VRAM floor (default ${VFLOOR} MiB) — VRAM clear"
 fi
-# WSL2 GPU-paravirtualization hazards (information, never a refusal). `make_resident: Ioctl failed: -12` (the host ran
-# out of residency) and `reserve_gpu_va … -75` in the distro's kernel log mean the dxg path is degraded until the distro
-# restarts, and an engine started on it fails later with a CUDA error that names neither. The recurring
-# `query_adapter_info: Ioctl failed: -2` and dxgvmbus FORTIFY lines are noise and are not counted.
+# WSL2 GPU-paravirtualization hazards (information, never a refusal). `make_resident: Ioctl failed: -12` (Windows refused
+# to make an allocation resident: the GPU's residency budget, not the card's free memory) and `reserve_gpu_va … -75` are
+# what a WSL2 engine start hits when it asks for more than the host will back; CUDA then reports "out of memory" at an
+# unrelated call (measured 2026-09-23: vLLM 0.30 died in LMCache's IPC export, `_share_cuda_`, with 16-22 of these per
+# failed start, while the next 0.28 start on the same distro logged none and served). What matters is what appeared
+# SINCE THE PREVIOUS START — the count is kept in $WORK/.dxg-failures so an old failure is not reported forever. The
+# recurring `query_adapter_info: Ioctl failed: -2` and dxgvmbus FORTIFY lines are noise and are not counted.
 if grep -qi microsoft /proc/version 2>/dev/null; then
-  dxg_n=$(dmesg 2>/dev/null | grep -cE "make_resident: Ioctl failed: -12|reserve_gpu_va.*-75")
-  [ "${dxg_n:-0}" -gt 0 ] && echo "seat_fg: WARNING — the kernel log holds $dxg_n dxg residency/VA failure(s) since the distro started; a CUDA error in this start points there first (last: $(dmesg 2>/dev/null | grep -E "make_resident: Ioctl failed: -12|reserve_gpu_va.*-75" | tail -1 | cut -c1-160)). Restart the distro to clear it."
+  DXG_RE="make_resident: Ioctl failed: -12|reserve_gpu_va.*-75"
+  dxg_all=$(dmesg 2>/dev/null | grep -cE "$DXG_RE"); DXG_FILE="$WORK/.dxg-failures"
+  dxg_prev=$(cat "$DXG_FILE" 2>/dev/null); case "$dxg_prev" in ''|*[!0-9]*) dxg_prev=0 ;; esac
+  [ "${dxg_all:-0}" -lt "$((10#$dxg_prev))" ] && dxg_prev=0   # fewer than last time: the distro restarted
+  dxg_new=$(( ${dxg_all:-0} - 10#$dxg_prev ))
+  if [ "$dxg_new" -gt 0 ]; then
+    echo "seat_fg: WARNING — $dxg_new new dxg residency/VA failure(s) in the kernel log since the previous seat start ($dxg_all since the distro started; last: $(dmesg 2>/dev/null | grep -E "$DXG_RE" | tail -1 | cut -c1-120)). If THAT start died with a CUDA out-of-memory, this is why: the host refused residency."
+  elif [ "${dxg_all:-0}" -gt 0 ]; then
+    echo "seat_fg: note — $dxg_all older dxg residency/VA failure(s) in the kernel log, none since the previous seat start"
+  fi
+  echo "${dxg_all:-0}" > "$DXG_FILE" 2>/dev/null || true
 fi
 # L2 store failures of this unit's PREVIOUS generation (information, never a refusal). A store that fails is a silent
 # miss for every later lookup of those chunks, and nothing else surfaces the count: it sits in the MP log as

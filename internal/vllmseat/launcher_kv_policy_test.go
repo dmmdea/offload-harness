@@ -85,6 +85,25 @@ func TestLauncherAppendsMPServerExtraArgs(t *testing.T) {
 	}
 }
 
+// TestLauncherReportsDxgFailuresSinceThePreviousStart (2026-09-23). The dxg residency failures a failed WSL2 start leaves
+// in the kernel log stay there until the distro restarts, so a count "since the distro started" repeats the same
+// warning at every later start — including starts that are perfectly healthy (measured: the 0.28 start after three
+// failed 0.30 starts served normally while the old count read 56). The launcher keeps the last count in a file and
+// warns only about NEW failures, resetting when the log shrinks (the distro restarted).
+func TestLauncherReportsDxgFailuresSinceThePreviousStart(t *testing.T) {
+	s := readLauncher(t)
+	for _, must := range []string{
+		`DXG_FILE="$WORK/.dxg-failures"`,
+		`dxg_new=$(( ${dxg_all:-0} - 10#$dxg_prev ))`,
+		`[ "${dxg_all:-0}" -lt "$((10#$dxg_prev))" ] && dxg_prev=0`,
+		`echo "${dxg_all:-0}" > "$DXG_FILE"`,
+	} {
+		if !strings.Contains(s, must) {
+			t.Fatalf("seat_fg.sh no longer reports dxg failures as a delta since the previous start: %q missing", must)
+		}
+	}
+}
+
 // TestShippedLMCacheOverlayIsComplete (2026-09-23). The overlay a pipeline-parallel seat needs is built from the patch
 // set shipped beside the rebuild script (lmcache-patches/, named apart from the overlay it builds — the default
 // output is <seat dir>/lmcache-overlay, and a kit of the same name would be swapped away by its own build). Every
