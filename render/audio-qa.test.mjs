@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   parseSilences, parseLoudness, assessDeadAir, rewireSeed,
-  resolveFfmpeg, resolveFfprobe, measure, normalizeLoudness,
+  resolveFfmpeg, resolveFfprobe, measure, normalizeLoudness, trimToSeconds,
   LOUDNESS_TARGET_LUFS,
 } from "./audio-qa.mjs";
 
@@ -197,4 +197,45 @@ test("fixture: normalizeLoudness moves a loud clip's measured loudness toward th
 test("resolveFfmpeg: an explicit FFMPEG_PATH to a nonexistent file resolves to empty, not a bad path", () => {
   const got = resolveFfmpeg({ FFMPEG_PATH: "Z:/nonexistent/ffmpeg.exe" });
   assert.equal(got, "");
+});
+
+// ---- trimToSeconds (over-render mitigation, 2026-09-23) --------------------------
+// comfy-music.mjs renders over-length to dodge the ACE-Step LM's early planned
+// ending (see audio-qa.mjs's header), then calls this to cut back to what the
+// caller asked for before the dead-air gate above ever measures the file.
+
+test("trimToSeconds: a nonexistent ffmpeg path or a non-positive seconds fails cleanly (no throw)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "audio-qa-trim-"));
+  assert.equal(trimToSeconds("", join(dir, "in.wav"), 10, join(dir, "out.wav")), false);
+  assert.equal(trimToSeconds("ffmpeg", join(dir, "in.wav"), 0, join(dir, "out.wav")), false);
+  assert.equal(trimToSeconds("ffmpeg", join(dir, "in.wav"), -5, join(dir, "out.wav")), false);
+});
+
+test("fixture: trimToSeconds cuts an over-length clip down to exactly the requested duration", (t) => {
+  const bins = haveFfmpeg();
+  if (!bins) return t.skip("ffmpeg/ffprobe not on PATH");
+  const dir = mkdtempSync(join(tmpdir(), "audio-qa-trim-"));
+  // Mirrors the real defect shape: over-length render (36s) that must come back down
+  // to the requested 30s, same as comfy-music.mjs's computeRenderSeconds(30) = 36.
+  const file = makeToneWav(bins.ffmpeg, dir, "over-length.wav", 36, 0);
+  const tmpOut = join(dir, "trimmed.wav");
+  const ok = trimToSeconds(bins.ffmpeg, file, 30, tmpOut);
+  assert.ok(ok, "trimToSeconds should succeed on a valid fixture");
+  const measured = measure(bins.ffmpeg, bins.ffprobe, tmpOut);
+  assert.ok(measured, "the trimmed file must still be measurable");
+  assert.ok(Math.abs(measured.duration - 30) < 0.3, `trimmed duration = ${measured.duration}, want ~30`);
+});
+
+test("fixture: trimToSeconds's default 1.0s fade-out means the very end of the cut measures quieter than the tone", (t) => {
+  const bins = haveFfmpeg();
+  if (!bins) return t.skip("ffmpeg/ffprobe not on PATH");
+  const dir = mkdtempSync(join(tmpdir(), "audio-qa-trim-"));
+  const file = makeToneWav(bins.ffmpeg, dir, "steady-tone.wav", 20, 0);
+  const tmpOut = join(dir, "trimmed-fade.wav");
+  assert.ok(trimToSeconds(bins.ffmpeg, file, 10, tmpOut), "trim should succeed");
+  // A ramped fade-out is not silence, so this must NOT trip the dead-air gate — the
+  // whole point is a clean, non-abrupt cut, unlike the LM's own hard silence cut.
+  const measured = measure(bins.ffmpeg, bins.ffprobe, tmpOut);
+  const verdict = assessDeadAir(measured);
+  assert.equal(verdict.deadAir, false, `a faded trim must not read as dead air, got: ${JSON.stringify(verdict)}`);
 });

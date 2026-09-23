@@ -1,15 +1,28 @@
 // audio-qa.mjs — post-render QA gate for generated audio (F-35 regression follow-up,
-// 2026-09-23). Root cause: the ACE-Step v1.5 music route (wf-acestep.mjs +
-// comfy-music.mjs) reliably produces a DEAD-AIR TAIL on short instrumental renders —
-// measured on the original defect renders AND reproduced fresh on three independent
-// A/B variants (default instrumental, an "[instrumental]" lyric tag, both with
-// generate_audio_codes left at its default true) — plus an unmanaged true peak (0.0
-// dBFS on two of the three, i.e. clipping-level, no loudness normalization anywhere
-// in the pipeline). Root-causing the ACE-Step model/LM internals further (why the
-// tail goes quiet) is out of scope for a harness fix — this module is the
-// defense-in-depth the constitution's media-QA-gate carve-out calls for: measure,
-// retry once with a new seed, then typed-defer if it persists; always normalize
-// loudness to a safe target on the accepted result.
+// 2026-09-23; root cause refined 2026-09-23 on an 8GB box, ComfyUI 95539f56, ACE-Step
+// 1.5 XL turbo, the harness's own render/wf-acestep.mjs graph). Root cause: with
+// generate_audio_codes true, comfy/text_encoders/ace15.py's ACE-Step LM always emits
+// exactly duration*5 audio codes (min=max) and reliably PLANS the song to end 2-6s
+// BEFORE the requested duration, filling the remainder with silence codes — a hard
+// cut to about -65 dBFS, not a fade. Measured per-second RMS at 30s requested (same
+// prompt, two seeds): seed 7 -> real music to 27.99s, then 2.01s silence; seed
+// 759155896809805 -> music to 24.89s, then 5.11s silence (17% of the clip). Asking for
+// MORE than the target duration avoids it: at 36s requested, three independent seeds
+// put music across the WHOLE requested span (seed 7 to 31.11s; seed 759155896809805 to
+// 30.24s; seed 11 to about 34s then a natural fade) — the LM's early-ending behavior
+// scales with the requested length, not with wall-clock content. Turning
+// generate_audio_codes off removes the planned ending but drops the LM the model card
+// names as the quality path and let one seed's level pump 15dB second-to-second — not
+// an option. render/comfy-music.mjs's generate() therefore renders OVER-LENGTH
+// (renderSeconds = seconds + max(6, ceil(0.2*seconds)), see computeRenderSeconds
+// there) whenever the graph is built from args and ffmpeg/ffprobe resolve, then this
+// module's trimToSeconds() cuts the file back to the requested seconds (1.0s
+// fade-out on the cut) BEFORE the gate below ever measures it. What follows is the
+// defense-in-depth the constitution's media-QA-gate carve-out calls for, for whatever
+// the trim doesn't catch (a seed whose cut lands inside the trimmed window, or a
+// caller-supplied --graph that skips the over-render since its duration is opaque to
+// this module): measure, retry once with a new seed, then typed-defer if it persists;
+// always normalize loudness to a safe target on the accepted result.
 //
 // Dependency-free (Node 18+, matches the render/*.mjs convention): shells out to
 // ffmpeg/ffprobe exactly the way audioio.go does on the Go side (same configured
@@ -157,6 +170,30 @@ export function normalizeLoudness(ffmpegPath, file, tmpOut) {
   const r = spawnSync(ffmpegPath, [
     "-hide_banner", "-loglevel", "error", "-y", "-i", file,
     "-af", `loudnorm=I=${LOUDNESS_TARGET_LUFS}:TP=${TRUE_PEAK_TARGET_DBTP}:LRA=${LOUDNESS_RANGE_TARGET_LU}`,
+    tmpOut,
+  ], { encoding: "utf8" });
+  return !r.error && r.status === 0 && existsSync(tmpOut);
+}
+
+// trimToSeconds: re-encodes `file` down to exactly `seconds` long, with a
+// fadeSec-long fade-out (ffmpeg afade=t=out) ending exactly at the cut, writing the
+// result to `tmpOut` (caller renames over the original — same convention as
+// normalizeLoudness; ffmpeg cannot read and write the same file). This is the
+// over-render mitigation's other half (see the module header and
+// comfy-music.mjs's computeRenderSeconds): comfy-music.mjs renders LONGER than the
+// caller asked for, and this cuts it back to exactly what was requested before the
+// dead-air gate below ever sees the file, so the ACE-Step LM's own silence-padded
+// tail never reaches the measurement. Best-effort: returns false (leaves `file`
+// untouched) on any ffmpeg failure or a non-positive `seconds`, rather than
+// throwing — the house rule that a QA/post-processing hiccup never costs an
+// already-produced render applies here exactly as it does to normalizeLoudness.
+export function trimToSeconds(ffmpegPath, file, seconds, tmpOut, { fadeSec = 1.0 } = {}) {
+  if (!ffmpegPath || !(seconds > 0)) return false;
+  const fadeStart = Math.max(0, seconds - fadeSec);
+  const r = spawnSync(ffmpegPath, [
+    "-hide_banner", "-loglevel", "error", "-y", "-i", file,
+    "-t", String(seconds),
+    "-af", `afade=t=out:st=${fadeStart}:d=${fadeSec}`,
     tmpOut,
   ], { encoding: "utf8" });
   return !r.error && r.status === 0 && existsSync(tmpOut);

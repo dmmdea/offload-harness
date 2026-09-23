@@ -7,6 +7,18 @@
 // DualCLIP qwen encoders + music VAE). Seed-reproducible, so --seed is honored and
 // reported. Output is FLAC via SaveAudio. Dependency-free (Node 18+).
 //
+// Over-render + trim (2026-09-23, see audio-qa.mjs's header for the root cause and
+// the measured per-second RMS data this is built from): the ACE-Step LM plans short
+// instrumental renders to end 2-6s before the requested duration and pads the rest
+// with near-silent codes. When the graph is built from args (not a verbatim --graph
+// passthrough) and ffmpeg/ffprobe resolve, generate() asks buildAceStep for
+// renderSeconds = seconds + max(6, ceil(0.2*seconds)) (computeRenderSeconds below)
+// instead of the requested seconds, then trims the produced file back down to
+// exactly what was asked for (1.0s fade-out on the cut, via audio-qa.mjs's
+// trimToSeconds) BEFORE the dead-air gate measures it. A --graph passthrough, or
+// ffmpeg/ffprobe being unavailable, renders the requested seconds exactly, as
+// before this fix.
+//
 // Usage:
 //   node render/comfy-music.mjs <out.flac> "<style tags>" \
 //        [--lyrics "..."] [--seconds N] [--seed N] [--steps N] [--cfg X] [--shift X] \
@@ -20,7 +32,7 @@ import { buildAceStep } from "./wf-acestep.mjs";
 import { resolveCli, submitGraph, pollOutputs, fetchView, finalizeRun } from "./comfy-submit.mjs";
 import {
   resolveFfmpeg, resolveFfprobe, measure, assessDeadAir, normalizeLoudness, rewireSeed,
-  LOUDNESS_TARGET_LUFS, TRUE_PEAK_TARGET_DBTP,
+  trimToSeconds, LOUDNESS_TARGET_LUFS, TRUE_PEAK_TARGET_DBTP,
 } from "./audio-qa.mjs";
 
 // ACE-Step's 3.5B all-in-one checkpoint is far lighter than the 14B video models, so the
@@ -42,25 +54,46 @@ export function parseArgs(argv) {
   return { pos, flags };
 }
 
+// computeRenderSeconds: the over-length target for a requested `seconds`, per the
+// measured ACE-Step LM behavior in audio-qa.mjs's header (short instrumental
+// renders reliably end 2-6s early). +6s minimum (below which a 2-6s early ending
+// would eat the whole clip) or +20% for longer requests, whichever is larger — the
+// 36s-vs-30s measurement that motivated this (audio-qa.mjs header) is +6s, i.e.
+// exactly this floor.
+export function computeRenderSeconds(seconds) {
+  return seconds + Math.max(6, Math.ceil(0.2 * seconds));
+}
+
 // buildGraphFromArgs: resolve the ACE-Step graph + the concrete seed from parsed args.
-// --graph wins (verbatim passthrough). Otherwise the prompt (style tags) is pos[1] (or
-// --prompt), --lyrics/--seconds/--steps/--cfg/--shift flow into wf-acestep. A missing
-// --seed mints a positive one so the render is still reproducible AND reported. Throws on
-// a missing prompt (the Go wrapper maps a non-zero exit → a clean defer, invariant 4).
-export function buildGraphFromArgs(pos, flags) {
+// --graph wins (verbatim passthrough) and is never over-rendered (its duration is
+// opaque to this function). Otherwise the prompt (style tags) is pos[1] (or --prompt),
+// --lyrics/--seconds/--steps/--cfg/--shift flow into wf-acestep. A missing --seed mints
+// a positive one so the render is still reproducible AND reported. Throws on a missing
+// prompt (the Go wrapper maps a non-zero exit → a clean defer, invariant 4).
+//
+// opts.trim (default false; the caller passes true only when ffmpeg/ffprobe resolve —
+// see main()) makes buildAceStep's `seconds` (and so both TextEncodeAceStepAudio1.5's
+// duration and EmptyAceStep1.5LatentAudio's seconds) the over-length
+// computeRenderSeconds(seconds) instead of the requested seconds; the caller trims the
+// produced file back down afterward. The returned `seconds`/`renderSeconds` tell the
+// caller what to trim to and whether trimming applies at all (undefined = no trim,
+// either because opts.trim was false or because --graph was used).
+export function buildGraphFromArgs(pos, flags, { trim = false } = {}) {
   const seed = Number(flags.seed || Math.floor(Math.random() * 1e15));
   if (flags.graph) {
     return { graph: JSON.parse(readFileSync(flags.graph, "utf8")), seed };
   }
   const prompt = pos[1] || flags.prompt;
   if (!prompt) throw new Error('comfy-music: a "<style tags>" prompt is required (e.g. "calm lo-fi piano, soft rain")');
-  const common = { prompt, seed, seconds: Number(flags.seconds || 30) };
+  const seconds = Number(flags.seconds || 30);
+  const renderSeconds = trim ? computeRenderSeconds(seconds) : seconds;
+  const common = { prompt, seed, seconds: renderSeconds };
   if (flags.lyrics != null) common.lyrics = flags.lyrics;
   if (flags.steps) common.steps = Number(flags.steps);
   if (flags.cfg) common.cfg = Number(flags.cfg);
   if (flags.shift) common.shift = Number(flags.shift);
   if (flags.unet) common.unet = flags.unet; // v1.5 UNET override (was --ckpt in the retired v1 graph)
-  return { graph: buildAceStep(common), seed };
+  return { graph: buildAceStep(common), seed, seconds, renderSeconds: trim ? renderSeconds : undefined };
 }
 
 // renderOnce: submit the graph to ComfyUI, poll /history, fetch the produced audio
@@ -87,26 +120,49 @@ async function renderOnce(out, API, graph, seed, cli) {
   await finalizeRun({ api: API, promptId, cli });
 }
 
-// generate: renderOnce, then the audio-QA gate (F-35 regression follow-up,
-// 2026-09-23 — see audio-qa.mjs for the root-cause writeup). Dead air (trailing/
-// leading silence > 1.0s, or > 10% of the clip silent) gets exactly ONE re-render
-// with a fresh seed; if it persists the run fails with a DEAD_AIR-tagged error so
-// gpugen.ClassifyErr (Go side) can defer it typed rather than as a bare timeout/other.
-// The accepted render is always loudness-normalized (independent of the dead-air
-// verdict — the unmanaged 0 dBFS true peak measured on the original defect renders
-// is a separate issue). ffmpeg/ffprobe unavailable = the gate skips itself entirely;
-// it never turns an otherwise-successful render into a failure just because the
-// measuring tool is missing.
-async function generate(out, API, graph, seed) {
+// applyTrim: best-effort in-place trim of `out` down to `seconds` (write-to-tmp then
+// rename over the original — ffmpeg cannot read and write the same file, same
+// convention normalizeLoudness below uses). Called once per render (the initial one
+// and the dead-air retry, if any) whenever generate() over-rendered. Never throws —
+// a trim failure falls through to measuring/shipping the over-length file as-is
+// (house rule: a QA/post-processing hiccup never costs an already-produced render).
+function applyTrim(ffmpeg, out, seconds) {
+  const tmpOut = out + ".trim.tmp" + (out.match(/\.[^.]+$/)?.[0] || ".flac");
+  if (trimToSeconds(ffmpeg, out, seconds, tmpOut)) {
+    unlinkSync(out);
+    renameSync(tmpOut, out);
+    console.error(`audio-qa: trimmed the over-length render to the requested ${seconds}s (1.0s fade-out on the cut)`);
+  } else {
+    console.error("audio-qa: trim to the requested length failed — measuring the over-length render as-is");
+  }
+}
+
+// generate: renderOnce, then (when over-rendered — see comfy-music.mjs's header and
+// computeRenderSeconds) trim back to the requested length, then the audio-QA gate
+// (F-35 regression follow-up, 2026-09-23 — see audio-qa.mjs for the root-cause
+// writeup). Dead air (trailing/leading silence > 1.0s, or > 10% of the clip silent)
+// gets exactly ONE re-render with a fresh seed, trimmed the same way; if it persists
+// the run fails with a DEAD_AIR-tagged error so gpugen.ClassifyErr (Go side) can defer
+// it typed rather than as a bare timeout/other. The accepted render is always
+// loudness-normalized (independent of the dead-air verdict — the unmanaged 0 dBFS
+// true peak measured on the original defect renders is a separate issue). ffmpeg/
+// ffprobe unavailable = no over-render happened (buildGraphFromArgs never got
+// opts.trim) and the gate skips itself entirely; it never turns an otherwise-
+// successful render into a failure just because the measuring tool is missing.
+async function generate(out, API, graph, seed, { ffmpeg, ffprobe, seconds, renderSeconds } = {}) {
   const cli = resolveCli();
   await renderOnce(out, API, graph, seed, cli);
 
-  const ffmpeg = resolveFfmpeg();
-  const ffprobe = ffmpeg ? resolveFfprobe(ffmpeg) : "";
   if (!ffmpeg || !ffprobe) {
     console.error("audio-qa: ffmpeg/ffprobe not available (set FFMPEG_PATH or put ffmpeg on PATH) — skipping the dead-air/loudness gate");
     return;
   }
+
+  // renderSeconds is only set when buildGraphFromArgs actually over-rendered (args-
+  // built graph + ffmpeg/ffprobe resolved at build time); a --graph passthrough never
+  // sets it, so trimsApply stays false and the file is measured exactly as produced.
+  const trimsApply = renderSeconds != null && seconds != null && renderSeconds !== seconds;
+  if (trimsApply) applyTrim(ffmpeg, out, seconds);
 
   let verdict = assessDeadAir(measure(ffmpeg, ffprobe, out));
   const seedsTried = [seed];
@@ -115,6 +171,7 @@ async function generate(out, API, graph, seed) {
     seedsTried.push(retrySeed);
     console.error(`audio-qa: dead air detected (${verdict.reason}) — retrying once with seed ${retrySeed}`);
     await renderOnce(out, API, rewireSeed(graph, retrySeed), retrySeed, cli);
+    if (trimsApply) applyTrim(ffmpeg, out, seconds);
     verdict = assessDeadAir(measure(ffmpeg, ffprobe, out));
     if (verdict.deadAir) {
       throw new Error(`DEAD_AIR: dead air persisted after a retry (${verdict.reason}); seeds tried: ${seedsTried.join(", ")}`);
@@ -139,10 +196,16 @@ async function main() {
   const out = pos[0];
   const API = flags.api || process.env.COMFY_API || "http://127.0.0.1:8188";
   if (!out) { console.error('usage: node comfy-music.mjs <out.flac> "<style tags>" [--lyrics "..."] [--seconds N] [--seed N] [--reserve-vram X]   |   <out.flac> --graph wf.json'); process.exit(2); }
-  const { graph, seed } = buildGraphFromArgs(pos, flags);
+  // Resolved once, up front: whether to over-render (and later trim) depends on
+  // ffmpeg/ffprobe being available, and buildAceStep's `seconds` has to be decided
+  // at graph-build time (below) — before ComfyUI/the GPU lock are even touched.
+  const ffmpeg = resolveFfmpeg();
+  const ffprobe = ffmpeg ? resolveFfprobe(ffmpeg) : "";
+  const trim = !flags.graph && !!ffmpeg && !!ffprobe;
+  const { graph, seed, seconds, renderSeconds } = buildGraphFromArgs(pos, flags, { trim });
   await withGpuSlot(
     { noLock: flags["no-lock"], keepComfy: flags["keep-comfy"], comfyManaged: true, reserveVram: flags["reserve-vram"] || RESERVE_VRAM_DEFAULT },
-    () => generate(out, API, graph, seed),
+    () => generate(out, API, graph, seed, { ffmpeg, ffprobe, seconds, renderSeconds }),
   );
 }
 
