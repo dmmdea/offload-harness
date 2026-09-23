@@ -17,6 +17,7 @@ package llamaclient
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -122,6 +123,9 @@ type endpointChoice struct {
 	// GPU lease. Measured 2026-09-15: the lane fired and the call then sat the
 	// whole lease bound at home, and the node never saw it.
 	offBox bool
+	// err refuses the request before it is made: a WithLocalBusy call that no
+	// other box can take (ErrLaneUnavailable). Every sender checks it first.
+	err error
 }
 
 // resolveEndpoint decides, ONCE per request, both the base URL and the HTTP
@@ -140,12 +144,25 @@ type endpointChoice struct {
 //  3. the default base on the default client — including every failure of
 //     the gates above (fail-closed to local).
 func (c *Client) resolveEndpoint(model string) endpointChoice {
+	return c.resolveEndpointWith(model, "")
+}
+
+// resolveEndpointWith is resolveEndpoint with the caller's own busy reason
+// (WithLocalBusy): when set it stands in for the two busy gates — the caller
+// has already decided this box must not serve the call — and residency is
+// still required, so the call never leaves for a lane that does not serve the
+// model.
+func (c *Client) resolveEndpointWith(model, localBusy string) endpointChoice {
 	if model == "" {
 		model = c.model
 	}
 	if base, ok := c.remoteLanes[model]; ok {
 		if _, pinned := c.seatEndpoints[model]; !pinned {
-			if why := c.laneWhyBusy(model); why != "" && c.laneResident(base, model) {
+			why := localBusy
+			if why == "" {
+				why = c.laneWhyBusy(model)
+			}
+			if why != "" && c.laneResident(base, model) {
 				path, token, suffix := c.path, "", ""
 				if c.laneRoute != nil {
 					// A node lane speaks /fleet/chat with a bearer; a plain
@@ -162,11 +179,52 @@ func (c *Client) resolveEndpoint(model string) endpointChoice {
 			}
 		}
 	}
-	// The static seat/default resolution, unchanged.
 	// The static seat/default resolution, unchanged — except that a seat pinned to
 	// another node (seat_endpoints) is off-box too (register C-41c).
 	base := c.BaseFor(model)
+	if localBusy != "" && base == c.base {
+		// The caller ruled this box out and no other box can take the call:
+		// refuse, never fall through to the local endpoint (the eviction the
+		// caller planned around). Logged here because it is a divergence
+		// from the caller's plan; the caller logs the door it takes instead.
+		why := "no cascade lane is configured for it"
+		if _, laned := c.remoteLanes[model]; laned {
+			why = "its cascade lane no longer serves it"
+		}
+		log.Printf("cascade remote lane: %s was sent off this box (%s) but %s; refused before any request, the caller picks another door", model, localBusy, why)
+		return endpointChoice{err: fmt.Errorf("%w: %s: %s", ErrLaneUnavailable, model, why)}
+	}
 	return endpointChoice{base: base, path: c.path, client: c.httpFor(model), offBox: base != c.base}
+}
+
+// ErrLaneUnavailable is the send's answer to a call made WithLocalBusy that
+// no other box can take right now: its lane stopped serving the model between
+// the caller's plan and the send, or there is no lane (and no pin) at all. The
+// caller had ruled THIS box out — the guard that set the option knows the
+// local load would evict a loaded seat — so the send refuses before making
+// any request rather than falling through to the local endpoint; the caller
+// then takes its own non-evicting door.
+var ErrLaneUnavailable = errors.New("cascade lane unavailable for a call this box must not serve")
+
+// OffBoxFor reports whether a call for model would be served by ANOTHER box
+// if this one declined it: a seat pinned to another node (seat_endpoints), or
+// a configured lane whose residency probe says it serves the SAME model. It
+// asks residency only — never the busy gates — and logs nothing; the probe is
+// the lane's own cached one (laneResidencyTTL), so the send that follows reads
+// the same answer. The cascade seat guard asks it to choose between keeping a
+// rung (and sending it WithLocalBusy) and substituting the loaded seat.
+func (c *Client) OffBoxFor(model string) bool {
+	if model == "" {
+		model = c.model
+	}
+	if base, pinned := c.seatEndpoints[model]; pinned {
+		return base != c.base
+	}
+	base, ok := c.remoteLanes[model]
+	if !ok || c.laneResident == nil {
+		return false
+	}
+	return c.laneResident(base, model)
 }
 
 // laneWhyBusy asks both busy gates and returns the reason the lane fires, or

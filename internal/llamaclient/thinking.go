@@ -19,6 +19,23 @@ type genOpts struct {
 	// zero value) means nothing was asked for and the request carries no
 	// structured-output field at all — the historical shape.
 	jsonSchema map[string]any
+	// localBusy, when set, is the caller's own reason the call must not load
+	// on this box (WithLocalBusy). It changes WHERE the call goes, never the
+	// body, so it is not part of RenderKey.
+	localBusy string
+}
+
+// WithLocalBusy tells the send that THIS box must not serve the call, for the
+// given reason: the call rides its cascade lane (cascade_remote_lanes) when
+// the lane verifiably serves the same model, exactly as it would under a held
+// GPU lease or a busy seat — the reason is what the lane's serve-log line
+// prints. It exists for the cascade seat guard (internal/seatguard): a rung
+// whose load would EVICT a loaded vLLM seat, where the seat is idle and so is
+// not "busy" to either lane gate. The residency check still applies — a lane
+// that does not serve the model is never taken, and the call stays local — and
+// a client with no lanes ignores the option. An empty reason is no option.
+func WithLocalBusy(reason string) GenOption {
+	return func(o *genOpts) { o.localBusy = reason }
 }
 
 // WithoutThinking asks the server to render the seat's chat template in

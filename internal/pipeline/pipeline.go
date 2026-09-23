@@ -53,6 +53,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/placement"
 	"github.com/dmmdea/offload-harness/internal/router"
 	"github.com/dmmdea/offload-harness/internal/rungraph"
+	"github.com/dmmdea/offload-harness/internal/seatguard"
 	"github.com/dmmdea/offload-harness/internal/shadow"
 	"github.com/dmmdea/offload-harness/internal/sttclient"
 	"github.com/dmmdea/offload-harness/internal/svgkit"
@@ -183,6 +184,11 @@ type Pipeline struct {
 	// green, which is exactly the refactor they exist to catch.
 	mediaDigest    func(path string) (mediahash.Ident, error)
 	mediaUnchanged func(id mediahash.Ident, path string) bool
+	// Cascade seat guard (seatguard.go): seatGuard is the process-wide guard
+	// for this box (nil = inert: no vllm_seats, or cascade_seat_guard off),
+	// seatVerdictFn the test seam that replaces it.
+	seatGuard     *seatguard.Guard
+	seatVerdictFn func(ctx context.Context, model string) seatguard.Verdict
 }
 
 // digestMedia resolves a media file's content identity (test seam aware).
@@ -268,6 +274,9 @@ func New(cfg config.Config, c *llamaclient.Client, ca *cache.Cache, l *ledger.Le
 	p.router = router.Load(cfg.RouterWeightsPath)        // Phase 5
 	p.overrides = loadOverrides(cfg.TierOverridesPath)   // Phase 4
 	p.breakers = breaker.NewGroup(5, 10, 20*time.Second) // Phase 3: 5 infra-fails / 10-window, 20s cooldown
+	// Cascade seat guard: nil (inert) unless this box declares a vLLM seat and
+	// the guard is on; process-wide, so every pipeline shares one reading.
+	p.seatGuard = seatguard.Shared(cfg)
 	// Phase 2 Task 4: opt-in correctness gate. Loading is graceful — a missing
 	// weights/thresholds file leaves the head nil / map empty, so the gate is
 	// inert. Off entirely unless cfg.ConfHeadEnabled.
@@ -591,12 +600,29 @@ func (p *Pipeline) Run(ctx context.Context, req core.Request) core.Result {
 	// chain is built from it and every rung's result is stamped with it.
 	placed := p.cascadePlacement()
 	chain := p.modelChainOn(req.Task, meta.Feat, knnSkip, placed)
+	// The terminal reasoning tier has no display twin: on the display layer it
+	// is skipped (it would evict the pair seat from device 0).
+	reasoningModel := ""
+	if p.cfg.ReasoningModel != "" && (placed == nil || placed.Layer != placement.LayerDisplay) {
+		reasoningModel = p.cfg.ReasoningModel
+	}
+	// Cascade seat guard (seatguard.go): no rung whose load would evict a
+	// loaded vLLM seat reaches this box's llama-swap. Inactive = chain as is.
+	guard := p.planSeatGuard(ctx, chain, reasoningModel)
+	chain = guard.chain
 	var last core.Result
 	// Task 1.5: entry-tier (ci==0) snapshot + candidate, so a later agreeing tier
 	// can record a cascade-agreement correctness-proxy label for classify/triage.
 	var entrySnapshot *ledger.Entry // value copy — safe vs meta mutation across iterations
 	var entryCandidate string       // entry-tier candidate JSON (its Partial)
+	// tried: models this call already sent a completion to — a lane rung whose
+	// lane was gone at send is served by the seat, and the seat is then not
+	// asked again later in the same chain.
+	tried := map[string]bool{}
 	for ci, model := range chain {
+		if tried[model] {
+			continue
+		}
 		meta.Model = model
 		meta.Placed = rungPlaced(placed, model)
 		meta.Escalations = ci
@@ -605,7 +631,15 @@ func (p *Pipeline) Run(ctx context.Context, req core.Request) core.Result {
 		// entry packing — byte-identical to the pre-TO-3 behavior — with the
 		// disposition recorded on the row (tier_pack). The entry tier (ci==0)
 		// is untouched: no probes, no tokenize round-trips on the hot path.
-		if ci > 0 {
+		if _, offBox := guard.lane[model]; ci > 0 && offBox {
+			// The window probe behind packForTier asks THIS box's
+			// /upstream/<rung>/props, which loads the rung here — the eviction
+			// the guard is keeping this rung off the box to avoid. The lane
+			// rung reads the entry packing instead (fail-open, labelled).
+			meta.TierPack = "entry-inherited (seat guard: the rung is served off this box, and probing its window here would load it)"
+			req.Input = entryPacked
+			built = entryBuilt
+		} else if ci > 0 {
 			tierInput, packPath := p.packForTier(ctx, model, orig, entryPacked, req, built.MaxTokens, decorate)
 			meta.TierPack = packPath
 			if tierInput != req.Input {
@@ -622,7 +656,17 @@ func (p *Pipeline) Run(ctx context.Context, req core.Request) core.Result {
 			}
 		}
 		likelyColdSwap := p.noteTierCall(model) // LO-9: before the attempt, so the window is per-call
-		res, escalatable := p.attempt(ctx, req, built, ck, model, meta, start, true, entryLen)
+		res, escalatable := p.attempt(ctx, req, built, ck, model, meta, start, true, entryLen, guard.opts(model)...)
+		if res.Meta.ErrClass == errClassLaneGone {
+			// The plan sent this rung to its lane; at the send the lane no
+			// longer served it and the client refused rather than evict the
+			// seat here. Take the guard's next door instead (seatguard.go).
+			model = guard.laneGone(model)
+			meta.Model = model
+			meta.Placed = rungPlaced(placed, model)
+			res, escalatable = p.attempt(ctx, req, built, ck, model, meta, start, true, entryLen)
+		}
+		tried[model] = true
 		// Phase 3/7: the breaker tracks INFRA health only (ErrClass set); a quality
 		// defer means the tier physically worked. Autoheal fires on infra failure.
 		// LO-9: a TIMEOUT on the first call to an idle tier is exempted from
@@ -670,8 +714,21 @@ func (p *Pipeline) Run(ctx context.Context, req core.Request) core.Result {
 	// The reasoning model has no display twin either: on the display layer it
 	// is skipped for the same reason the escalation rung is dropped (it would
 	// evict the pair seat from device 0 — the eviction the layer exists to avoid).
-	if p.cfg.ReasoningModel != "" && built.Grammar != "" && !last.Meta.Truncated && (placed == nil || placed.Layer != placement.LayerDisplay) {
-		meta.Placed = rungPlaced(placed, p.cfg.ReasoningModel)
+	// The seat guard keeps it on its lane, or — when its load would evict a
+	// loaded vLLM seat with no lane to carry it — gives the reasoning ATTEMPT
+	// to that seat (guard.reasoningOn): still one attempt, the reasoning
+	// budget, marked Reasoning, behind this same gate. It is not run at all
+	// when that seat already answered this call.
+	reasoningTarget := reasoningModel
+	if guard.reasoningOn != "" {
+		reasoningTarget = guard.reasoningOn
+	}
+	if reasoningModel != "" && guard.reasoningOn != "" && tried[guard.reasoningOn] {
+		log.Printf("cascade seat guard: reasoning %s -> not run: the loaded seat %s it would be served by already answered this call", reasoningModel, guard.reasoningOn)
+		reasoningModel = ""
+	}
+	if reasoningModel != "" && built.Grammar != "" && !last.Meta.Truncated {
+		meta.Placed = rungPlaced(placed, reasoningTarget)
 		// TO-3: the terminal reasoning tier is a callee too — re-pack from the
 		// original against ITS served window (same fail-open contract). Its
 		// REAL completion request is MaxTokens+reasoningThinkBudget (the
@@ -679,21 +736,43 @@ func (p *Pipeline) Run(ctx context.Context, req core.Request) core.Result {
 		// round-1 CRITICAL finding: budgeting against bare MaxTokens overshot
 		// the served window by ~384 tokens on exactly the large inputs this
 		// feature exists for.
-		rInput, rPath := p.packForTier(ctx, p.cfg.ReasoningModel, orig, entryPacked, req, built.MaxTokens+reasoningThinkBudget, decorate)
-		meta.TierPack = rPath
-		if rInput != req.Input {
-			treq := req
-			treq.Input = rInput
-			if b2, berr := tasks.Build(treq); berr == nil {
-				req.Input = rInput
-				built = decorate(b2)
-			} else {
-				meta.TierPack = "entry-inherited (rebuild: " + berr.Error() + ")"
-				req.Input = entryPacked
-				built = entryBuilt
+		if guard.reasoningLane != "" {
+			// Served off this box: its window probe here would load it here.
+			meta.TierPack = "entry-inherited (seat guard: the rung is served off this box, and probing its window here would load it)"
+			req.Input = entryPacked
+			built = entryBuilt
+		} else {
+			rInput, rPath := p.packForTier(ctx, reasoningTarget, orig, entryPacked, req, built.MaxTokens+reasoningThinkBudget, decorate)
+			meta.TierPack = rPath
+			if rInput != req.Input {
+				treq := req
+				treq.Input = rInput
+				if b2, berr := tasks.Build(treq); berr == nil {
+					req.Input = rInput
+					built = decorate(b2)
+				} else {
+					meta.TierPack = "entry-inherited (rebuild: " + berr.Error() + ")"
+					req.Input = entryPacked
+					built = entryBuilt
+				}
 			}
 		}
-		rres, ok := p.attemptReasoning(ctx, req, built, ck, meta, start, entryLen)
+		rres, ok := p.attemptReasoningOn(ctx, reasoningTarget, req, built, ck, meta, start, entryLen, guard.reasoningOpts()...)
+		if !ok && rres.Meta.ErrClass == errClassLaneGone {
+			// Its lane was gone at the send: the seat takes the reasoning
+			// attempt when one is known and has not answered yet; with no seat
+			// known the reasoning tier runs as configured (the guard's
+			// documented residual).
+			switch seat := guard.reasoningLaneGone(p.cfg.ReasoningModel, tried); {
+			case seat != "":
+				meta.Placed = rungPlaced(placed, seat)
+				rres, ok = p.attemptReasoningOn(ctx, seat, req, built, ck, meta, start, entryLen)
+			case guard.reasoningSeat == "":
+				rres, ok = p.attemptReasoning(ctx, req, built, ck, meta, start, entryLen)
+			default:
+				rres = last // the seat already answered this call: keep its outcome
+			}
+		}
 		if ok {
 			return rres
 		}
@@ -4041,14 +4120,33 @@ const reasoningThinkBudget = 512
 // escalate to; a valid answer here reclaims a cloud deferral, an invalid one falls through to
 // the normal defer-to-Opus). Returns (result, ok). On ok the result is recorded + cached; a
 // defer is NOT recorded (Run records the final one once).
-func (p *Pipeline) attemptReasoning(ctx context.Context, req core.Request, built tasks.Built, ck string, meta core.Meta, start time.Time, entryChars int) (core.Result, bool) {
-	meta.Model = p.cfg.ReasoningModel
+func (p *Pipeline) attemptReasoning(ctx context.Context, req core.Request, built tasks.Built, ck string, meta core.Meta, start time.Time, entryChars int, opts ...llamaclient.GenOption) (core.Result, bool) {
+	return p.attemptReasoningOn(ctx, p.cfg.ReasoningModel, req, built, ck, meta, start, entryChars, opts...)
+}
+
+// attemptReasoningOn is the terminal reasoning attempt on a given model: the
+// configured reasoning tier, or the loaded vLLM seat the cascade seat guard
+// substitutes for it when the reasoning tier's load would evict that seat.
+// Either way it is ONE attempt with the reasoning budget, marked Reasoning,
+// with no confidence gate. The think span differs by engine: llama.cpp gets
+// the think-wrapped GBNF; a vLLM seat cannot take it — it discards `grammar`
+// and constrains the WHOLE output (ADR 0002, 2026-09-18 amendment) — so it
+// gets its own structured_outputs and the non-thinking render, and the extra
+// budget is answer headroom there.
+func (p *Pipeline) attemptReasoningOn(ctx context.Context, model string, req core.Request, built tasks.Built, ck string, meta core.Meta, start time.Time, entryChars int, opts ...llamaclient.GenOption) (core.Result, bool) {
+	meta.Model = model
 	meta.Reasoning = true // tag every reasoning-tier outcome so a reclaim is distinguishable from an escalation answer (same model)
-	wrapped := gbnf.WrapThinking(built.Grammar)
+	grammar, genOpts := gbnf.WrapThinking(built.Grammar), opts
+	if len(built.Fields) > 0 && p.isVLLMSeat(ctx, model) {
+		grammar = ""
+		genOpts = make([]llamaclient.GenOption, 0, len(opts)+2)
+		genOpts = append(genOpts, opts...)
+		genOpts = append(genOpts, llamaclient.WithJSONSchema(gbnf.JSONSchema(built.Fields)), llamaclient.WithoutThinking())
+	}
 	// The wrapped grammar emits a <think> span BEFORE the JSON, so the task's native token
 	// budget (classify=64, assess=128) would truncate the reasoning before any answer. Give the
 	// think span headroom on top of the original budget.
-	gen, gerr := p.client.Generate(ctx, p.cfg.ReasoningModel, built.System, built.User, wrapped, built.MaxTokens+reasoningThinkBudget, p.cfg.Temperature, 0)
+	gen, gerr := p.client.Generate(ctx, model, built.System, built.User, grammar, built.MaxTokens+reasoningThinkBudget, p.cfg.Temperature, 0, genOpts...)
 	if gerr != nil {
 		meta.LatencyMs = time.Since(start).Milliseconds()
 		meta.ErrClass = classifyErr(gerr)
@@ -4556,6 +4654,9 @@ func breakerFailure(errClass string, likelyColdSwap bool) bool {
 
 // classifyErr buckets an infra error for the ledger + circuit breaker (Phase 3).
 func classifyErr(err error) string {
+	if errors.Is(err, llamaclient.ErrLaneUnavailable) {
+		return errClassLaneGone
+	}
 	s := strings.ToLower(err.Error())
 	switch {
 	case strings.Contains(s, "out of memory") || strings.Contains(s, "cudamalloc") || strings.Contains(s, "oom"):

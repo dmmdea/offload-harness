@@ -257,7 +257,10 @@ func (c *Client) Generate(ctx context.Context, model, system, user, grammar stri
 		return GenResult{}, err
 	}
 	start := time.Now()
-	ep := c.resolveEndpoint(model) // ONE decision: base, path, credential and client must never split (lanes.go)
+	ep := c.resolveEndpointWith(model, o.localBusy) // ONE decision: base, path, credential and client must never split (lanes.go)
+	if ep.err != nil {
+		return GenResult{}, ep.err
+	}
 	return c.sendWithSeatWait(ctx, ep, model, buf, start)
 }
 
@@ -361,7 +364,10 @@ func (c *Client) GenerateVision(ctx context.Context, model, system, user string,
 		return GenResult{}, err
 	}
 	start := time.Now()
-	ep := c.resolveEndpoint(model) // ONE decision: base, path, credential and client must never split (lanes.go)
+	ep := c.resolveEndpointWith(model, o.localBusy) // ONE decision: base, path, credential and client must never split (lanes.go)
+	if ep.err != nil {
+		return GenResult{}, ep.err
+	}
 	return c.sendWithSeatWait(ctx, ep, model, buf, start)
 }
 
@@ -411,7 +417,10 @@ func (c *Client) GenerateVisionInterleaved(ctx context.Context, model, system st
 		return GenResult{}, err
 	}
 	start := time.Now()
-	ep := c.resolveEndpoint(model) // ONE decision: base, path, credential and client must never split (lanes.go)
+	ep := c.resolveEndpointWith(model, o.localBusy) // ONE decision: base, path, credential and client must never split (lanes.go)
+	if ep.err != nil {
+		return GenResult{}, ep.err
+	}
 	return c.sendWithSeatWait(ctx, ep, model, buf, start)
 }
 

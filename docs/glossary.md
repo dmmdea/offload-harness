@@ -201,6 +201,14 @@ The generic primitive that executes a caller-supplied ComfyUI graph against a No
 returning node-addressed outputs. It is the boundary that lets a workflow repository own graph
 authoring while the harness owns execution.
 
+## Seat guard
+
+The cascade's rule that a Tier-1 rung never evicts a loaded vLLM seat (`internal/seatguard`,
+`cascade_seat_guard`, on by default). While a seat named in `vllm_seats` is loaded, a rung whose
+load llama-swap's own routing (`serving_config_path`) says would unload it rides its cascade lane
+(the same model elsewhere). Otherwise the loaded seat serves as the rung. With no vLLM seat
+loaded it changes nothing. See [systems/offload-pipeline.md](systems/offload-pipeline.md).
+
 ## Setup action
 
 One entry of a contract's `setup_actions` (ADR 0036 P2, 0.113.24): a `{tool, args}` call the coding-agent

@@ -1590,6 +1590,74 @@ Lane URLs pass the same tailnet guard as everything else here (loopback, `100.64
 dotless MagicDNS, or your own tailnet zone; validated at config load naming the key, and
 again at every dial).
 
+### A cascade call never evicts a loaded vLLM seat (`cascade_seat_guard`)
+
+The lane rule above does not fire for a loaded seat with nothing in flight — llama-swap swaps an
+idle model out at once, so it is not "busy". On a box whose cascade rungs share an exclusive
+matrix set with a vLLM seat, that swap IS the damage: the reference box's llama-swap log showed
+`model=gemma-4-e4b set=interactive … evict=[qwen3.8-27b-vllm-3card]`. The session using the seat
+paid a 3–5 minute cold load and lost the seat's whole prefix cache.
+
+The seat guard closes it. It is **on by default** and inert on a box that declares no
+`vllm_seats`. While a seat `vllm_seats` names is loaded (`ready` or `starting` in `/running`),
+every rung of a summarize / classify / extract / triage call is checked against llama-swap's own
+routing. The routing is read from `serving_config_path` (matrix sets and evict costs, or groups)
+and solved the way llama-swap solves it. A rung whose load would unload the seat takes the first
+non-evicting door:
+
+1. **its `cascade_remote_lanes` lane**, when the lane serves the SAME model (the rule above);
+2. otherwise **the loaded seat itself**, as the rung (vLLM seats are cascade rungs since D-129:
+   `structured_outputs`, non-thinking render). A busy seat queues the call, and nothing is refused;
+3. the terminal reasoning tier, when neither door applies, runs its attempt on the loaded seat.
+   It keeps the reasoning budget and is marked `reasoning` in the ledger. It uses the seat's own
+   `structured_outputs` in place of the think-wrapped grammar, which a vLLM seat cannot take. It is
+   skipped when the seat has already answered the call.
+
+With no vLLM seat loaded the cascade is exactly what it was. The serve log carries one line per
+call that the guard touched, in llama-swap's own shape, so the two logs can be read side by side:
+
+```
+cascade seat guard: model=gemma-4-e4b set=interactive evict=[qwen3.8-27b-vllm-3card] target=[bge-reranker-v2-m3 embeddinggemma gemma-4-e4b] cost=1 -> served by the loaded seat qwen3.8-27b-vllm-3card (no lane serves gemma-4-e4b, gemma-4-12b, reasoning gemma-4-26b)
+cascade seat guard: model=gemma-4-e4b … -> served off this box by the cascade lane that serves each rung (…)
+cascade remote lane: gemma-4-e4b -> http://<node-b>:18811/fleet/chat (cascade seat guard: model=gemma-4-e4b …)
+```
+
+On a genuine cost tie, llama-swap chooses one set by definition order and logs that set. The
+guard unions the tied sets on purpose, so there its `set=` / `target=` / `evict=` can differ from
+llama-swap's line (`evict=` only ever lists more). The reference config has one such tie:
+`qwen3.8-27b` is in both `interactive` and `qwen_aux`.
+
+The guard needs `serving_config_path` set. Without the file (unset, missing, or unparseable),
+co-residency is unknown, and while a seat is loaded every other model is treated as evicting it.
+When co-residency is unknown and several seats are loaded, the log line names all of them.
+
+A `/running` that cannot be read is also unknown. So is any non-2xx answer, and any answer without
+a `running` list, even when its JSON body looks like an empty list. The last reading that saw the
+seat loaded keeps protecting it for 300 s.
+
+**Known residual risk.** Past those 300 s, and before any good reading, the guard cannot name a seat.
+The call rides its lane when one serves it; otherwise **the configured rung runs unguarded**. If a
+seat really is loaded at that moment, that rung can evict it. This is deliberate: the guard never
+refuses a call, and substituting a seat it cannot see would ask an unreadable llama-swap to
+cold-load the flagship. The line `-> the configured rung runs: … no loaded seat is known to
+substitute` marks every such call.
+
+**A lane that disappears between the plan and the send.** The guard reads lane residency from the
+lane's 30 s cache, and the send checks it again. If the lane stopped serving the rung in between,
+the call is refused before any request is made. The client logs `… was sent off this box … but its
+cascade lane no longer serves it`. The rung then takes the loaded seat instead (`… lane gone at
+send -> served by the loaded seat …`). With no seat known it runs as configured, the residual above.
+It never falls through to this box silently.
+
+**A model that appears in no matrix set runs alone.** That is llama-swap's rule, not the guard's.
+Such a model evicts every loaded model, including the residents, so the guard protects the seat from
+it and warns once per model: `… appears in no matrix set of …`. For a cascade rung this is almost
+always a config gap. Add the rung to a set.
+
+To switch it off, set `"cascade_seat_guard": false`. It is worth doing on a box whose vLLM seat is
+much slower than its cascade rungs, where a cold load costs less than serving Tier-1 calls from
+the seat.
+
 ---
 
 ## 5. Add / replace a model in llama-swap.yaml

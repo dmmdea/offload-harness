@@ -134,6 +134,19 @@ type Config struct {
 	// vetted by the same double guard as SeatEndpoints: netguard.TailnetURL at
 	// load (naming the key) and the SafeTransport dial gate on every request.
 	CascadeRemoteLanes map[string]string `json:"cascade_remote_lanes,omitempty"`
+	// CascadeSeatGuard keeps a Tier-1 cascade call (summarize / classify /
+	// extract / triage) from EVICTING a loaded vLLM seat (internal/seatguard):
+	// while a seat `vllm_seats` declares is loaded on this box, a rung whose
+	// load llama-swap's own routing (serving_config_path: matrix sets or
+	// groups) says would unload that seat is served off this box through its
+	// cascade_remote_lanes lane when one is resident, and otherwise by the
+	// loaded seat itself (a vLLM seat is an eligible cascade rung since D-129).
+	// Measured cost of the eviction it prevents on the reference box: a 3–5
+	// minute cold load and the loss of the seat's whole prefix cache in the
+	// middle of a long session. With no vLLM seat loaded, or none declared,
+	// the cascade is exactly what it was. *bool because the guard defaults ON
+	// and an absent key must not read as an opt-out; false switches it off.
+	CascadeSeatGuard *bool `json:"cascade_seat_guard,omitempty"`
 	// Model is the default workhorse (E4B) — used for summarize/extract and as
 	// the fallback for any task without a specific route. Empty = dedicated server.
 	Model string `json:"model"`
@@ -2620,6 +2633,13 @@ func (c Config) EnsureDirs() error {
 		}
 	}
 	return nil
+}
+
+// CascadeSeatGuardOn reports whether the cascade seat guard runs: on unless
+// cascade_seat_guard is explicitly false. It is inert anyway on a box that
+// declares no vllm_seats — there is no seat to protect.
+func (c Config) CascadeSeatGuardOn() bool {
+	return c.CascadeSeatGuard == nil || *c.CascadeSeatGuard
 }
 
 // DeclaresVLLMSeat reports whether `vllm_seats` names id — the box's own
