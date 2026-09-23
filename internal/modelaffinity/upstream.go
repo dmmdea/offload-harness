@@ -20,6 +20,11 @@
 // and completes one. The render's card took 14.3 GB of seat weights
 // mid-video and the render ran 895 s against its usual 228-324 s.
 //
+// The same holds for llama-swap's MODEL-DISPATCHED routes (/v1/chat/completions,
+// /v1/embeddings, …), which load the model named in the body: the fleet chat
+// lane forwarded another box's cascade call there with no gate at all, and the
+// embedder posted there outside Admit. AwaitModelRoute is their builder.
+//
 // THE INVARIANT. While blocksLoad holds — a media lease, or a text lease stamped
 // exclusive, that this process does not inherit — no harness request may make
 // llama-swap load a model. AwaitUpstream is the one builder of an /upstream URL
@@ -88,6 +93,35 @@ func AwaitUpstream(ctx context.Context, endpoint, model, path string, deadline t
 		return "", err
 	}
 	return u, nil
+}
+
+// AwaitModelRoute is AwaitUpstream for llama-swap's MODEL-DISPATCHED routes —
+// /v1/chat/completions, /v1/embeddings, /v1/completions, /completion, /infill,
+// /v1/rerank, /v1/audio/*, … — where the model is named in the request body
+// rather than the path, and which load that model exactly as /upstream does
+// (llama-swap v251 internal/server/server.go modelPostJSONRoutes: the request is
+// dispatched to the local router, which swaps the named model in). It returns
+// endpoint's root + route once the fence (the same rule, the same residency
+// exemption, the same typed refusal as AwaitUpstream) lets the request through.
+//
+// It is the builder for a request that does NOT take a per-base admission
+// (Admit): the fleet chat lane, which leaves queueing to the node's llama-swap
+// by design, and the embedder. Clients that do take Admit — agent.LLMClient,
+// llamaclient — are already fenced by it, which is why
+// TestModelDispatchedRoutesAreBuiltOnlyBehindAGate lists them by name and checks
+// that each still takes Admit.
+func AwaitModelRoute(ctx context.Context, endpoint, model, route string, deadline time.Time) (string, error) {
+	b := swapclient.BaseURL(endpoint)
+	if b == "" {
+		return "", ErrNoUpstreamRoot
+	}
+	if !strings.HasPrefix(route, "/") {
+		route = "/" + route
+	}
+	if err := awaitUpstream(ctx, endpoint, model, deadline); err != nil {
+		return "", err
+	}
+	return b + route, nil
 }
 
 // HolderUpstreamURL builds the same URL with NO fence. It exists for exactly

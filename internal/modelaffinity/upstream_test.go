@@ -231,3 +231,25 @@ func TestAwaitUpstreamRejectsAnEmptyEndpoint(t *testing.T) {
 		t.Fatalf("err = %v, want ErrNoUpstreamRoot", err)
 	}
 }
+
+// AwaitModelRoute is the same fence for a model-dispatched route: the URL is the
+// root plus the route, and a cold model under a render is refused.
+func TestAwaitModelRouteFencesAColdModel(t *testing.T) {
+	m := armLease(t)
+	s := newStubSwap(t, map[string][]string{"gemma": nil})
+	u, err := AwaitModelRoute(context.Background(), s.srv.URL+"/v1", "gemma", "v1/embeddings", time.Now())
+	if err != nil || u != s.srv.URL+"/v1/embeddings" {
+		t.Fatalf("unfenced: (%q, %v), want the root + route", u, err)
+	}
+	holdLease(t, m, gpulease.ClassMedia, gpulease.Options{Reason: "render"})
+	if _, err := AwaitModelRoute(context.Background(), s.srv.URL, "gemma", "/v1/embeddings", time.Now()); !IsLeaseRefusal(err) {
+		t.Fatalf("fenced cold model: err = %v, want a lease refusal", err)
+	}
+	s.running.Store(`{"running":[{"model":"gemma","state":"ready"}]}`)
+	if _, err := AwaitModelRoute(context.Background(), s.srv.URL, "gemma", "/v1/embeddings", time.Now()); err != nil {
+		t.Fatalf("fenced resident model: err = %v, want the route", err)
+	}
+	if _, err := AwaitModelRoute(context.Background(), "", "gemma", "/v1/embeddings", time.Now()); !errors.Is(err, ErrNoUpstreamRoot) {
+		t.Fatalf("empty endpoint: err = %v, want ErrNoUpstreamRoot", err)
+	}
+}

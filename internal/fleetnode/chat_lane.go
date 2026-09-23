@@ -39,9 +39,9 @@ import (
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/config"
+	"github.com/dmmdea/offload-harness/internal/modelaffinity"
 	"github.com/dmmdea/offload-harness/internal/netguard"
 	"github.com/dmmdea/offload-harness/internal/seatinflight"
-	"github.com/dmmdea/offload-harness/internal/swapclient"
 )
 
 // ChatLanePath is this lane's route. llamaclient.FleetChatPath is the caller's
@@ -129,8 +129,9 @@ type chatRequestHead struct {
 // Refusals are distinct on purpose, because the caller's fallback differs:
 // 401/403 is a credential problem the operator must fix, 404 says this node
 // does not serve that model (the caller should stop routing it here), 503 says
-// the roster could not be read right now (retryable), 502 says the forward
-// itself failed.
+// the roster could not be read right now (retryable) or that this node's GPU
+// lease held the card for the caller's whole budget (congestion: the body is
+// the lease refusal, "gpu-lease timeout …"), 502 says the forward itself failed.
 func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	// AUTH FIRST — see the package comment. Nothing about this decision needs
 	// the body, so an unauthorized caller never reaches a validation 400 it
@@ -202,7 +203,33 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	s.extendWrite(w, ChatProxyTimeout+chatWriteSlack, "the chat lane")
 	pctx, pcancel := context.WithTimeout(r.Context(), ChatProxyTimeout)
 	defer pcancel()
-	upstream := swapclient.BaseURL(s.opts.Cfg.Endpoint) + "/v1/chat/completions"
+	// THE GPU-LEASE FENCE (2026-09-22). /v1/chat/completions is a model-
+	// dispatched llama-swap route: it swaps the named model in. A node that runs
+	// media under a lease must not have an inbound cascade call load a model
+	// onto the cards the render holds, so the forward is built behind the same
+	// fence as every other harness request (modelaffinity.AwaitModelRoute): a
+	// model llama-swap lists as ready is forwarded at once; any other waits for
+	// the card.
+	//
+	// WAIT, NOT REFUSE — the lane's contract read from this file and ADR 0026.
+	// The lane leaves queueing to the node (see the package comment), its caller
+	// has no lane-to-local fallback (llamaclient returns the lane's answer as the
+	// tier's answer), and a short render clears inside the caller's budget. So
+	// the wait is bounded by the CALLER's budget — the request context, which
+	// ends when the caller gives up — and by ChatProxyTimeout. Exhausted, the
+	// node answers 503 with the lease refusal's text; its "timeout" wording is
+	// what pipeline.classifyErr files as congestion on the caller, never as a
+	// broken stack.
+	//
+	// Deliberately NOT modelaffinity.Admit: Admit also arbitrates models per
+	// base, parking a different model behind the node's own in-flight batch,
+	// and this lane has always left that queueing to llama-swap. Only the
+	// machine-wide half — the lease — is this defect.
+	upstream, ferr := modelaffinity.AwaitModelRoute(pctx, s.opts.Cfg.Endpoint, model, "/v1/chat/completions", time.Now().Add(ChatProxyTimeout))
+	if ferr != nil {
+		writeError(w, http.StatusServiceUnavailable, "chat lane held behind this node's GPU lease: "+ferr.Error())
+		return
+	}
 	ureq, err := http.NewRequestWithContext(pctx, http.MethodPost, upstream, bytes.NewReader(body))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "building upstream request: "+err.Error())
