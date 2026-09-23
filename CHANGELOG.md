@@ -128,7 +128,8 @@ Versioning: [SemVer](https://semver.org/).
 - **Fixed: blackwell-3x16's single-card ComfyUI routes rendered on the display card.** ComfyUI was
   launched with every card visible and no device flag, so edit / upscale / inpaint / animate ran on
   `cuda:0` — the 5070 Ti driving the desktop in ComfyUI's fastest-first order. The tier now seeds
-  `comfy_cuda_device: "1"`, and `TestTripleBlackwellNeverSchedulesOntoTheDisplayCard` fails a tier
+  `comfy_cuda_device: "2"` (the 5060 Ti at PCI B5:00.0, the better-cooled card of the pair — operator
+  choice), and `TestTripleBlackwellNeverSchedulesOntoTheDisplayCard` fails a tier
   that seeds a single-card route without a non-display pin.
 - **Fixed: an unknown `--family` rendered the SDXL graph.** `comfy-render.mjs` / `comfy-edit.mjs`
   exit 2 on a family outside their closed set, before any GPU work.

@@ -493,7 +493,7 @@ video pool must COMPUTE on `cuda:0`, the MultiGPU #220 exception a pin would hid
 `run-graph` (the caller's graph owns its placement; it still gets the launch-wide keys). The
 `COMFY_CUDA_DEVICE` / `COMFY_DYNAMIC_VRAM` env is always set (empty when unbound), so a value in the
 operator's shell can never pin a route whose binding did not ask for it. A family overlay may carry
-its own `comfy_*` keys: the recipe planned for 2.1 on a three-card box is `comfy_cuda_device "1"` +
+its own `comfy_*` keys: the recipe planned for 2.1 on a three-card box is `comfy_cuda_device "2"` +
 `comfy_dynamic_vram "on"` on the family only, so the pooled default keeps `--disable-dynamic-vram`
 (UNMEASURED until the family's arms run). The config load warns on `comfy_dynamic_vram "on"` or a
 `comfy_cuda_device` together with pool keys.
@@ -506,8 +506,10 @@ relaunched with the right flags; anything else fails with a greppable
 `COMFY-PROFILE-MISMATCH: …` line and the render defers — a foreign instance is never killed. An
 unreadable argv with a profile requested is a mismatch, never a pass.
 
-**blackwell-3x16 seeds `comfy_cuda_device: "1"`** (the first 5060 Ti in ComfyUI's order; `cuda:0` is
-the 5070 Ti display card), and `TestTripleBlackwellNeverSchedulesOntoTheDisplayCard` fails a tier that
+**blackwell-3x16 seeds `comfy_cuda_device: "2"`** — `cuda:2` in ComfyUI's order is the 5060 Ti at
+PCI B5:00.0 (nvidia-smi index 2). `cuda:0` is the 5070 Ti display card and is excluded by rule;
+between the two 5060 Tis the B5:00.0 card is the operator's choice (2026-09-22) because it cools
+far better (the 17:00.0 card, `cuda:1`, reached 82 °C under a 2.1 render). And `TestTripleBlackwellNeverSchedulesOntoTheDisplayCard` fails a tier that
 seeds a single-card ComfyUI route without a non-display pin.
 
 ## Error handling

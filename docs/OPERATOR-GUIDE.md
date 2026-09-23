@@ -335,7 +335,7 @@ then add the overlay:
     "imagegen_clip": "qwen3vl_8b_bf16.safetensors",
     "imagegen_vae": "qwen_image_2.1_vae_bf16.safetensors",
     "imagegen_timeout_sec": 2400,
-    "comfy_cuda_device": "1",
+    "comfy_cuda_device": "2",
     "comfy_dynamic_vram": "on"
   }
 },
@@ -348,7 +348,7 @@ then add the overlay:
     "gen_edit_clip": "qwen3vl_8b_bf16.safetensors",
     "gen_edit_vae": "qwen_image_2.1_vae_bf16.safetensors",
     "gen_edit_cache_device": "gpu",
-    "comfy_cuda_device": "1",
+    "comfy_cuda_device": "2",
     "comfy_dynamic_vram": "on"
   }
 }
@@ -384,12 +384,14 @@ neither; edit: `gen_edit_license` + `gen_edit_commercial_use`).
 (un-pooled image generation, generative edit, upscale, inpaint, animate, music). The index is
 in **ComfyUI's device order** — the order the `*_pool_*` `cuda:N` keys use, fastest card first
 unless `CUDA_DEVICE_ORDER` is set — not nvidia-smi's PCI order. On the three-card tier
-`cuda:0` is the 5070 Ti display card, so the tier seeds `"1"`; an existing box sets it by
-hand. Pooled image/video seats never take the pin (their pool keys place them) and neither does
+`cuda:0` is the 5070 Ti display card and must never carry a single-card route; the tier seeds
+`"2"` — the 5060 Ti at PCI B5:00.0, the better-cooled of the pair (operator choice 2026-09-22:
+`cuda:1`, the 5060 Ti at 17:00.0, ran at 82 °C under a Qwen-Image-2.1 render). An existing box
+sets it by hand. Pooled image/video seats never take the pin (their pool keys place them) and neither does
 `run-graph`.
 
 ```json
-"comfy_cuda_device": "1",
+"comfy_cuda_device": "2",
 "comfy_dynamic_vram": "",
 "comfy_extra_args": ""
 ```

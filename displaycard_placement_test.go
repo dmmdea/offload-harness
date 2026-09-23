@@ -41,6 +41,11 @@ import (
 // Operator decision 2026-09-07: the 5070 Ti is CONTEXT/KV ONLY. It may grow the KV
 // pool for long-context seats (78,506 -> 137,898 tokens across three cards) and the
 // named opt-in over-2-card seats may span it, but no tier seat is pinned to it.
+//
+// Operator direction 2026-09-22: single-card media work goes to the 5060 Ti at PCI
+// B5:00.0 (ComfyUI cuda:2, nvidia-smi 2), not the one at 17:00.0 — the B5:00.0 card has
+// much better cooling. Check 4 enforces the display-card rule; the seed carries the
+// cooling choice.
 func TestTripleBlackwellNeverSchedulesOntoTheDisplayCard(t *testing.T) {
 	const tier = "blackwell-3x16"
 	// PCI_BUS_ID order, for gpu_env.
@@ -136,6 +141,13 @@ func TestTripleBlackwellNeverSchedulesOntoTheDisplayCard(t *testing.T) {
 	//    `--cuda-device <n>`, which HIDES every other card; the tier must seed it, and
 	//    it must name only non-display cards. The pooled image/video seats are placed
 	//    by their pool keys instead (checks 2 and 3) and never take the pin.
+	//
+	//    The RULE is only "never the display card". WHICH 5060 Ti carries the single-card
+	//    routes is the operator's choice, and the seed is "2": cuda:2 in ComfyUI's order =
+	//    the 5060 Ti at PCI B5:00.0 (nvidia-smi 2), which cools far better than the one at
+	//    17:00.0 (cuda:1, nvidia-smi 0 — 82 C under a Qwen-Image-2.1 render, 2026-09-22;
+	//    "--cuda-device 2" verified live to land the render on nvidia-smi 2). This test
+	//    does not pin that choice, so moving it back is a seed edit, not a test edit.
 	singleCard := map[string]string{
 		"gen_edit_script":   "generative edit",
 		"upscale_script":    "upscale",

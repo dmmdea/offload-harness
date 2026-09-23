@@ -35,7 +35,7 @@ func TestOperatorGuideFamilyExampleLoads(t *testing.T) {
 		t.Fatalf("the OPERATOR-GUIDE family example does not load: %v\n%s", err, block)
 	}
 	fc, fi, err := c.ResolveImageFamily("qwen-image-2.1")
-	if err != nil || !fi.NonCommercial() || fc.ImageGenFamily != FamilyQwenImage21 || fc.ComfyCudaDevice != "1" || fc.ComfyDynamicVRAM != "on" {
+	if err != nil || !fi.NonCommercial() || fc.ImageGenFamily != FamilyQwenImage21 || fc.ComfyCudaDevice != "2" || fc.ComfyDynamicVRAM != "on" {
 		t.Errorf("image family: %+v %+v %v", fi, fc.ImageGenFamily, err)
 	}
 	if !fc.SupportsTransparentImage() {
