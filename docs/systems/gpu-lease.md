@@ -384,8 +384,8 @@ exclusive card, and three measurement rows read the seat's 10 GiB as their own f
   `meta.json` stays the sole arbiter of who HOLDS the card — a stale or missing waiter record can never grant
   possession, only affect who is allowed to TRY next (see FIFO below) or defer one warm to the next holder.
 - **The queue is FIFO (register D-13x, 2026-09-22).** Measured live 2026-09-22: a text reservation queued at
-  19:10 was still waiting at 20:50 while two media reservations that queued LATER (18:41 and 19:06) each took
-  the card ahead of it — every waiting process polled `TryAcquire` once a second with no ordering between them,
+  ~18:40 was still waiting at 20:24 while two media reservations — one queued seconds after it (~18:40) and one
+  25 minutes later (19:06) — each took the card ahead of it — every waiting process polled `TryAcquire` once a second with no ordering between them,
   so whichever process's poll tick landed first after a release won, and a waiter could lose that race
   indefinitely. Each poll now checks whether the caller is the OLDEST live waiter recorded under
   `<state>/gpu/waiters/`; only that one attempts the claim, so the instant the holder releases, the front of the
@@ -397,6 +397,12 @@ exclusive card, and three measurement rows read the seat's 10 GiB as their own f
   brand-new `Acquire`'s very first, pre-registration probe (and any bare `TryAcquire` that never sets `Wait`) can
   still land in the narrow window between a release and the front waiter's next poll — the same residual race
   every poll-based queue has, bounded by one poll interval, and unrelated to the hours-long starvation this fixes.
+- **Accepted residual — a forward wall-clock jump.** A waiter's heartbeat is its record's mtime, compared with
+  the reader's wall clock (file times carry no monotonic reading). A forward clock step larger than the staleness
+  window (10× the poll interval, floor 15 s) — an NTP correction after a laptop resumes, a manual clock change —
+  makes every live waiter look stale for ONE poll, so on that tick they all try the claim as they did before FIFO.
+  It is bounded and self-healing: `meta.json`'s O_EXCL claim still grants exactly one holder, the refreshed
+  records restore the order on the very next poll, and no waiter loses its place (its `SinceMs` is unchanged).
 - **A waiter must keep proving it is still polling, not merely alive.** Pid liveness alone cannot tell "queued
   and actively polling" from "queued, still alive, and never polling again" — a suspended process, one wedged in
   another goroutine, or an OLDER harness binary whose `Acquire` loop exited without unregistering (it only ever
