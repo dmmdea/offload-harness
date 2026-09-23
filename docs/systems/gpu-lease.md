@@ -414,6 +414,19 @@ exclusive card, and three measurement rows read the seat's 10 GiB as their own f
   independently — not the in-process `mediaSlot` path, which never touches `<state>/gpu/waiters/` at all) shares
   one real pid across two+ waiter records; a same-millisecond tie resolves to exactly one front-of-queue via the
   random-token filename tie-break, never both (a livelock) and never neither.
+- **The heartbeat itself needed the SAME read-side retry the write side already had.** Once every waiter started
+  rewriting its own record every poll tick, `-count=10` caught a real, non-jitter race:
+  `Waiters()`'s plain `os.ReadFile`/`os.Stat` had no retry, and on Windows a read can transiently fail while a
+  concurrent rename is in flight over the same path (the same class of ephemeral error `renameReplacing`/
+  `removeClaim` already retry elsewhere). Treating that as "this waiter isn't here" silently excluded a live,
+  correctly-refreshing, genuinely-earlier waiter from ONE reader's view — one unlucky tick was enough for a
+  later-arrived waiter to see itself, wrongly, as front-of-queue and win the race (measured: a diagnostic
+  confirmed the recorded `SinceMs` values stayed perfectly ordered every time — the algorithm, not the clock, was
+  the defect). Worse for the `os.Stat` call specifically: the code deleted the file on ANY stat error, not only a
+  confirmed absence, so a transient failure could permanently destroy a live waiter's queue position rather than
+  merely skip it for one read. `readWaiterFile`/`statWaiterFile` now retry a transient failure (the same budget as
+  `removeClaim`) and return `os.IsNotExist` immediately unretried, and `Waiters()` only prunes on a CONFIRMED
+  absence or a confirmed stale/dead/recycled record — never on a retry-exhausted transient error.
 - **An unload stamps `<state>/gpu/seat-warm-owed`**, and a warm-back runs only when (1) the card is still ours — the
   wrapper form checks its own epoch (`Lease.Check`), `gpu release --warm-seat --epoch N` checks the record is still N —
   and (2) nobody is queued behind us. With a waiter the warm is skipped and said so (`NOT warming … back: N lease(s)
