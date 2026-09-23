@@ -175,7 +175,11 @@ func TestLiveNodeCheckerAsksRunningComfyThenFallsBack(t *testing.T) {
 }
 
 // TestLtx25NeedsMultiGPUOnlyWhenPooled: the single-card LTX graph is core; the pooled
-// one loads through ComfyUI-MultiGPU.
+// one loads through ComfyUI-MultiGPU. "Core" is checked, not assumed: every LTXV* class
+// render/wf-ltx25-i2v.mjs emits (LTXVPreprocess, LTXVConditioning, LTXVImgToVideoInplace,
+// LTXVDualCFGGuider, LTXVLatentUpsampler, LTXVAudioVAEDecode, ...) is defined in ComfyUI's
+// comfy_extras/nodes_lt*.py at 95539f56, and the reference box renders ltx25 with no
+// ComfyUI-LTXVideo pack installed. That pack is NOT a requirement of this graph.
 func TestLtx25NeedsMultiGPUOnlyWhenPooled(t *testing.T) {
 	cfg := bare()
 	cfg.VideoGenFamily = "ltx25"
