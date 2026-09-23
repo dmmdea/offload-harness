@@ -9,12 +9,15 @@ that composes a fan-out**, not in a hook that fires after the burst is already d
 
 | Surface | Hook | Behavior |
 |---|---|---|
-| Plan-time protocol | `experimental.chat.system.transform` | Appends the three-lane dispatch protocol + harness tool map to every turn |
+| Plan-time protocol | `experimental.chat.system.transform` | Appends the dispatch protocol + harness tool map to every primary turn (into the one system element opencode sends) |
+| Child / title / compaction diet | `experimental.chat.system.transform` | Offload child sessions get no dispatch protocol (subagents cannot call `task`) and a 3-line read-only digest instead of the global rules file; title and compaction requests get nothing injected. Fails open: an unrecognised format is left as it is |
+| Cheap title / compaction | `chat.params` | On Qwen-family models, title and compaction requests run with `chat_template_kwargs.enable_thinking: false`; titles are capped at 64 output tokens, compaction at 16,384. Keys the user set are never overwritten |
 | Task routing | `tool.definition` | The built-in `task` description names the offload route |
-| **Forcing function** | `tool.execute.before` (`task`) | Read-only-shaped subagent legs are rerouted to the `offload` subagent (free local seat). Judgment and network legs are never touched. Option-gated. |
+| **Forcing function** | `tool.execute.before` (`task`) | Read-only-shaped subagent legs are rerouted to the `offload` subagent (free local seat), by changing the call's arguments in place. Judgment, network and (with `offloadTools: "recon"`) media-shaped legs are never touched. Option-gated. |
 | H14 nudge | `tool.execute.after` | Read counter (12 / 40) appends the offload nudge; silent once the session delegates |
-| Placement digest | `tool.execute.after` (`<mcp>_agent_delegate`) | States whether the local+server pair landed, flags `infrastructure`, counts defers |
-| Parity provisioning | `config` | Idempotently provides the `offload` agent, `/offload-recon` `/offload-digest` `/offload-pair`, and a local `small_model` |
+| Placement digest | `tool.execute.after` (`<mcp>_agent_delegate`) | States whether the local+server pair landed, flags `infrastructure`, counts defers. Added as the first text part of the MCP result, which is what opencode renders |
+| Reroute note | `tool.execute.after` (`task`) | "This leg ran on the free local offload seat" — only when the child session the task created really is an `offload` session |
+| Parity provisioning | `config` | Idempotently provides the `offload` agent (and `offload-media` with `offloadTools: "recon"`), `/offload-recon` `/offload-digest` `/offload-pair`, a local `small_model`, and the tool-scope `permission` rules |
 | Instrument | `event` + hooks | Appends to `~/.claude/state/dispatch-log.jsonl` tagged `harness:"opencode"` — one adherence read across both harnesses |
 | Doctor | tool `offload_plugin_status` | Load proof: version, options, per-session counters |
 
@@ -37,15 +40,33 @@ WITH the harness (one harness for every agent; never a separate package to keep 
    ```
 4. Options (optional) via `OPENCODE_LOCAL_OFFLOAD_OPTIONS` (JSON), e.g. `{"routeReadOnlyTasks":false}`.
 
-Options: `mcp` (default `harness`), `offloadAgent` (`offload`), `offloadModel`
-(`llamacpp/qwen3.8-27b`), `smallModel` (`llamacpp/gemma-4-e4b`), `routeReadOnlyTasks` (true),
-`systemProtocol` (true), `nudges` (true), `readNudgeTiers` ([12,40]), `dispatchLog`.
+Options:
+
+| Option | Default | Meaning |
+|---|---|---|
+| `mcp` | `harness` | MCP server name the harness is registered under (tool prefix `<mcp>_`) |
+| `offloadAgent` | `offload` | The read-only offload subagent; the media subagent is `<offloadAgent>-media` |
+| `offloadModel` | `llamacpp/qwen3.8-27b` | Model for the offload subagents |
+| `smallModel` | `llamacpp/gemma-4-e4b` | `small_model` applied when the config has none |
+| `primaryTools` | `tier1` | Harness tools the PRIMARY agent sees: `tier1` = the four mechanical-text tools (`offload_summarize` / `classify` / `extract` / `triage`), everything else through the offload subagents; `all` = every harness tool |
+| `offloadTools` | `recon` | Harness tools the OFFLOAD subagent sees: `recon` = the twelve read-and-digest lanes (`agent_delegate`, `agent_run`, `offload_ask`, `offload_status`, `offload_research`, the four cascade tools, `offload_ocr`, `offload_vqa`, `offload_extract_image`) and an `offload-media` subagent holding every other harness tool; `all` = the whole harness on `offload`, no media subagent |
+| `routeReadOnlyTasks` | `true` | Reroute read-only-shaped `task` legs to the offload subagent |
+| `systemProtocol` | `true` | Inject the dispatch protocol on primary turns |
+| `nudges` / `readNudgeTiers` | `true` / `[12,40]` | H14-style read-counter nudges |
+| `dispatchLog` | `~/.claude/state/dispatch-log.jsonl` | Cross-harness dispatch instrument |
+
+The `permission` rules the plugin writes never change a key you set, and never shadow one: they
+are inserted before your first `<mcp>_…` key, so your own harness rules keep winning (opencode
+applies the last matching rule).
 
 ## Verify
 
-Ask opencode: *"Call the offload_plugin_status tool"* → JSON with `plugin`, `version`, hooks.
-`/offload-recon <question>` runs on the offload seat. A read-only `task` shows
+Ask opencode: *"Call the offload_plugin_status tool"* → JSON with `plugin`, `version`, hooks, and
+`diagnostics.systemTransform` (protocol / child / childDigest / childFailOpen / aux counters — a
+non-zero `childFailOpen` means opencode's instruction format drifted and the child kept the full
+rules). `/offload-recon <question>` runs on the offload seat. A rerouted read-only `task` shows
 `[local-offload] This leg ran on the free local "offload" seat` in its result.
+`opencode debug agent offload` prints the resolved permission rules.
 
 ## Develop
 

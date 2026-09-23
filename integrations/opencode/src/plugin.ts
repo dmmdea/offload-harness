@@ -38,7 +38,7 @@ import { classifyLeg, MEDIA_LEG, READ_TOOLS, type LegClass } from "./classify.ts
 import { appendDispatchLog, DEFAULT_LOG, newInstrumentStats, type InstrumentStats } from "./instrument.ts";
 import { PROTOCOL_MARKER, protocolText, taskDescriptionAddendum } from "./protocol.ts";
 
-export const VERSION = "0.2.0";
+export const VERSION = "0.3.0";
 
 export type Options = {
   /** MCP server name the harness is registered under in opencode.jsonc (tool prefix). */

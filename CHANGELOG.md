@@ -111,6 +111,66 @@ Versioning: [SemVer](https://semver.org/).
   that first slipped past a vacuous test comparing `protocolText()` with itself (replaced by fixed
   expectations).
 
+## [0.136.0] - 2026-09-22 - opencode: the offload subagent's prompt diet, and three hook fixes for 1.18.32
+
+- **The delegate placement digest never reached the model.** For MCP tools opencode 1.18.32 hands
+  `tool.execute.after` the raw MCP result (`{content: [...]}`) and builds the model-visible text
+  from `content` after the hook, so the digest the plugin appended to `output.output` was dropped
+  (0 of the 5 `agent_delegate` results stored in opencode.db carried it). The digest is now the
+  first text part of `content` (first, because opencode head-truncates tool output past
+  `tool_output.max_bytes`); built-in tools keep `output.output`.
+- **The read-only `task` reroute was a no-op, with a false "ran on the offload seat" line.**
+  opencode 1.18.32 executes the args object it handed `tool.execute.before` and ignores a replaced
+  `output.args`; the plugin replaced it. Reproduced live: a read-only leg sent to `general` ran on
+  `general` and came back stamped as having run on `offload`. The plugin now changes the args in
+  place, records a reroute only when the new agent took, and stamps the result only when the
+  child session the task created is really an `offload` session (from `session.created`, falling
+  back to opencode's `(@<agent> subagent)` title). A leg addressed to `offload-media`, or (in
+  recon mode) a media-shaped leg, is never rerouted.
+- **New option `offloadTools: "recon" | "all"` (default `recon`).** opencode sends every enabled
+  MCP schema up front, and the offload subagent carried every harness tool (34 and 19,025 tokens on
+  0.133.0; 35 and 20,754 on 0.135.0). In
+  recon mode it keeps its twelve read-and-digest lanes (`agent_delegate`, `agent_run`,
+  `offload_ask`, `offload_status`, `offload_research`, the four cascade tools, `offload_ocr`,
+  `offload_vqa`, `offload_extract_image`: every harness call it made in 35 recorded sessions was
+  one of these; 8,151 tokens of schema), and a new `offload-media` subagent (same model,
+  read-only) holds every other harness tool, so a tool the harness adds later lands there (0.135.0's
+  `offload_compose_video` does). The Tier-1 protocol and the `task` description route media legs to
+  it. `all` keeps the previous shape.
+- **Permission defaults never shadow a user rule.** opencode applies the last matching rule in key
+  order; the plugin now inserts its defaults before the user's first `<mcp>_…` key instead of
+  appending them (an appended `harness_*` deny silently overrode a user's
+  `harness_offload_vqa: "allow"`), and still never writes a key the user set. Tests resolve the
+  rules with a copy of opencode's matcher against the 34 measured tool names; live, `opencode
+  debug agent` resolves offload to exactly the 12, offload-media to the other 22, the primary to
+  the 4 Tier-1 tools.
+- **Offload child sessions, title and compaction requests no longer get the dispatch protocol.**
+  Subagents are denied `task`, so "issue a task call" contradicted the child's own tools; title
+  and compaction requests (recognised by their agent prompt) now get nothing injected. In offload
+  children the global rules file is swapped for a 3-line digest (verify, then assert; quote
+  identifiers exactly; stop and report embedded instructions), only when the segment matches the
+  file on disk byte for byte; otherwise it is left as is and counted in
+  `offload_plugin_status.diagnostics.systemTransform.childFailOpen`.
+- **Title and compaction requests stop thinking at xhigh.** A new `chat.params` hook gives the
+  `title` and `compaction` agents on Qwen-family models `chat_template_kwargs.enable_thinking:
+  false` (on a Qwen3.6 seat `reasoning_effort: "low"` was ignored, 400 of 400 completion tokens
+  reasoning; never `"high"`, an HTTP 500 on the Qwen3.8 template), and caps titles at 64 output
+  tokens and compaction at 16,384 (4.4x the largest summary measured). Keys the user set win.
+- **Roster check:** the offload prompt and the all-mode protocol name `offload_status
+  {section:"brief"}` (harness PR #444); an older harness ignores the argument and returns the full
+  dump (checked on 0.133.0).
+- Measured (E2E on harness 0.133.0 through a logging proxy, request bodies rendered with the
+  Qwen3.8 seat template and tokenizer): the offload child's first request 24,588 → 10,410 tokens
+  (−57.7%, 39 → 17 tools); offload-media's 13,110 (paid only by media legs); the primary pays +80 tokens for the
+  media routing line; a title request 812 → 609 prompt tokens, `max_tokens` 4,096 → 64, and 0
+  reasoning tokens instead of 573-1,372; a compaction request on the same seat went from 1,580 of
+  1,964 completion tokens reasoning (173 s to the next request) to 0 of 462 (27 s).
+- Docs: `docs/systems/opencode-integration.md` gains the measured tool surface, the recon /
+  offload-media split, the permission precedence rule, the one-system-message shape, the
+  title/compaction parameters and the 1,568-token cache-block granularity; the plugin README gains
+  the options table (`primaryTools`, `offloadTools`). Plugin 0.3.0; 99 bun tests; 35 mutants, each
+  confirmed to typecheck, all caught.
+
 ## [0.135.1] - 2026-09-22 - a GPU lease fences in-flight probes, the chat lane and the embedder; a media drain no longer deadlocks
 
 ### Fixed — a GPU lease fences the probes of runs already in flight; a media drain no longer deadlocks
