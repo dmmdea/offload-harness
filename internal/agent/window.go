@@ -67,7 +67,7 @@ var probeRequestTimeout = 60 * time.Second
 // here: llama-swap resolves aliases on /upstream itself (verified live: both
 // /upstream/embeddinggemma/props and /upstream/local-embed/props answer 200).
 func ProbeServedWindow(ctx context.Context, base, model string) (int, bool) {
-	n, ok, _ := probeWindow(ctx, base, model, false)
+	n, ok, _ := probeWindow(ctx, base, model, false, true)
 	return n, ok
 }
 
@@ -84,7 +84,7 @@ func ProbeServedWindow(ctx context.Context, base, model string) (int, bool) {
 // render that ends within the caller's admission budget costs a wait, not a
 // defer.
 func ProbeServedWindowChecked(ctx context.Context, base, model string) (int, bool, error) {
-	return probeWindow(ctx, base, model, false)
+	return probeWindow(ctx, base, model, false, true)
 }
 
 // ProbeUpstreamWindow is ProbeServedWindow restricted to the llama-swap
@@ -94,11 +94,22 @@ func ProbeServedWindowChecked(ctx context.Context, base, model string) (int, boo
 // tier's window (review finding 2026-08-14). Single-model callers keep
 // ProbeServedWindow's fallback.
 func ProbeUpstreamWindow(ctx context.Context, base, model string) (int, bool) {
-	n, ok, _ := probeWindow(ctx, base, model, true)
+	n, ok, _ := probeWindow(ctx, base, model, true, true)
 	return n, ok
 }
 
-func probeWindow(ctx context.Context, base, model string, upstreamOnly bool) (int, bool, error) {
+// ProbeUpstreamWindowNow is ProbeUpstreamWindow that does NOT wait behind a
+// GPU-lease fence (2026-09-22): under a render or an exclusive hold over a model
+// that is not resident it returns at once with the fence's *LeaseError, and a
+// cold start is still absorbed when nothing fences the card. For a caller whose
+// NEXT request is a generation that waits at modelaffinity.Admit anyway (the
+// cascade's per-tier re-pack): waiting here too would spend the caller's time
+// twice, and a fenced answer must not be cached as "this tier has no window".
+func ProbeUpstreamWindowNow(ctx context.Context, base, model string) (int, bool, error) {
+	return probeWindow(ctx, base, model, true, false)
+}
+
+func probeWindow(ctx context.Context, base, model string, upstreamOnly, waitFence bool) (int, bool, error) {
 	b := swapclient.BaseURL(base)
 	if b == "" {
 		return 0, false, nil
@@ -124,6 +135,9 @@ func probeWindow(ctx context.Context, base, model string, upstreamOnly bool) (in
 	uctx, cancel := context.WithTimeout(ctx, coldStartWait)
 	defer cancel()
 	deadline, _ := uctx.Deadline()
+	if !waitFence {
+		deadline = time.Now()
+	}
 	coldClient := &http.Client{}
 	for _, c := range upstream {
 		// EVERY request passes the GPU-lease fence, not the probe once: a render

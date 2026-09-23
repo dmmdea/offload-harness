@@ -18,7 +18,8 @@ Versioning: [SemVer](https://semver.org/).
   otherwise waits for the card inside the caller's deadline and returns the typed `*LeaseError`. The
   window probe and warm-up wait inside the admission budget and the run defers `capacity` (holder
   named, no bare-root fallback); the seat pin and the per-step tokenizer do not wait (no pin; the
-  tokenizer fails open without a sticky strike, `LastFailFenced`); transcription waits its client
+  tokenizer fails open without a sticky strike, `LastFailFenced`); the cascade's per-tier re-pack
+  neither waits nor caches a fenced answer (`ProbeUpstreamWindowNow`); transcription waits its client
   timeout. A run whose generation ran out its wait mid-run is filed `capacity` on both run doors,
   before the stall and ceiling branches. `TestUpstreamURLsAreBuiltOnlyBehindTheFence` fails on any
   other file that spells the route; the lease holder's own warm-back uses the one unfenced builder,

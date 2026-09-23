@@ -468,6 +468,8 @@ literal that spells the route anywhere else), and it:
 |---|---|---|
 | served-window probe (both run doors) | the admission budget | the run defers `capacity` with the holder named, before any wall; no bare-root fallback |
 | warm-up | the warm-up budget | nothing loaded, the note says so; the window probe then defers |
+| cascade per-tier re-pack (window probe + tokenizer) | none | the tier re-packs from the entry cut; the fenced answer is **not** cached; the tier's generation is the request that waits (`Admit`) |
+| CLI window probes (`local-agent`, compaction eval) | ctx and the 10-minute cold-start budget | falls back to the configured window, as an unanswered probe always has |
 | seat-pin probe | none (one inspection) | no pin — the honest answer for telemetry |
 | tokenizer (`/tokenize`) | none | fails open for that step and is **not** counted toward the sticky downgrade (`LastFailFenced`); the completion that follows is the request that waits |
 | whisper transcription | the client's timeout | a `timeout`-class defer naming the holder |

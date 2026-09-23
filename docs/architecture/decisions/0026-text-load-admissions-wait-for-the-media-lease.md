@@ -118,8 +118,9 @@ route anywhere else fails the suite). Under a fence it reads `/running` — neve
 model listed `ready` through, because a request to a resident model starts nothing; any other request waits
 for the fence inside the caller's own deadline and then returns this ADR's `*LeaseError`. Each caller picks
 its deadline: the window probe and the warm-up wait inside the admission budget and the run defers
-`capacity` (the probe's bare-root fallback is skipped under a fence); the seat pin and the per-step
-tokenizer do not wait (no pin; the tokenizer fails open without a sticky strike, and the completion after it
+`capacity` (the probe's bare-root fallback is skipped under a fence); the seat pin, the per-step
+tokenizer and the cascade's per-tier re-pack probes do not wait, and the re-pack caches no fenced
+answer (no pin; the tokenizer fails open without a sticky strike, and the completion after it
 is the request that waits); transcription waits its client timeout. The one unfenced builder,
 `HolderUpstreamURL`, is the lease holder's own warm-back in `gpu_drain.go`, restricted by the same test. A
 generation that ran out its wait mid-run is filed `capacity` on both run doors, before the stall and ceiling

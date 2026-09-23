@@ -147,7 +147,7 @@ func (p *Pipeline) packForTier(ctx context.Context, model string, orig, entryPac
 	prompt := built.System + "\n" + built.User
 	tokFull, ok := tok.Count(ctx, prompt)
 	if !ok {
-		return entryPacked, p.noteTokFail(model, tok.LastErr())
+		return entryPacked, p.noteTokFail(model, tok)
 	}
 	allowance := nCtx - genBudget - tierReserveTokens
 	if tokFull <= allowance {
@@ -156,7 +156,7 @@ func (p *Pipeline) packForTier(ctx context.Context, model string, orig, entryPac
 
 	tokOrig, ok := tok.Count(ctx, orig)
 	if !ok {
-		return entryPacked, p.noteTokFail(model, tok.LastErr())
+		return entryPacked, p.noteTokFail(model, tok)
 	}
 	inputAllowance := allowance - (tokFull - tokOrig)
 	if inputAllowance < minRepackTokens {
@@ -169,7 +169,7 @@ func (p *Pipeline) packForTier(ctx context.Context, model string, orig, entryPac
 	// against the entry view's own token count, not a constant.
 	tokEntry, ok := tok.Count(ctx, entryPacked)
 	if !ok {
-		return entryPacked, p.noteTokFail(model, tok.LastErr())
+		return entryPacked, p.noteTokFail(model, tok)
 	}
 	if inputAllowance <= tokEntry {
 		return entryPacked, fmt.Sprintf("entry-inherited (callee window buys no view: allowance %d <= entry view %d)", inputAllowance, tokEntry)
@@ -177,7 +177,7 @@ func (p *Pipeline) packForTier(ctx context.Context, model string, orig, entryPac
 
 	packed, kept, ok := cutTokenExact(ctx, tok, orig, inputAllowance)
 	if !ok {
-		return entryPacked, p.noteTokFail(model, tok.LastErr())
+		return entryPacked, p.noteTokFail(model, tok)
 	}
 	// kept under-reports the shipped size by the marker's ~16 tokens plus
 	// retokenization drift at the two seams — absorbed by tierReserveTokens,
@@ -203,7 +203,14 @@ func (p *Pipeline) tokFailFresh(model string) (string, bool) {
 // escalation cadence is low, the fallback is the safe entry packing, and a
 // transient 503 suppressing repacks for one TTL window is a bounded cost —
 // simpler beats a second classifier here.
-func (p *Pipeline) noteTokFail(model, why string) string {
+func (p *Pipeline) noteTokFail(model string, tok *tokclient.Client) string {
+	why := tok.LastErr()
+	if tok.LastFailFenced() {
+		// A GPU lease held the card over a cold tier (2026-09-22): the
+		// tokenizer's loading request was never sent. That says nothing about
+		// the route, so it is not cached — the next escalation asks again.
+		return "entry-inherited (tokenize held behind the GPU lease: " + why + ")"
+	}
 	p.tierPack.mu.Lock()
 	if p.tierPack.tokFails == nil {
 		p.tierPack.tokFails = map[string]tierProbe{}
@@ -235,7 +242,15 @@ func (p *Pipeline) tierNCtx(ctx context.Context, model string) (int, string) {
 	// about to run exactly that model. On a bare llama-server (no /upstream)
 	// this probe fails and the repack stays entry-inherited — honest, and a
 	// single-model server cannot meaningfully repack per-tier anyway.
-	n, ok := agent.ProbeUpstreamWindow(ctx, p.cfg.Endpoint, model)
+	//
+	// Under a GPU-lease fence over a cold tier the probe is not sent and does
+	// not wait (ProbeUpstreamWindowNow): the tier's generation waits for the
+	// card at modelaffinity.Admit, and a fenced answer is not cached — it says
+	// nothing about the tier's window (2026-09-22).
+	n, ok, fence := agent.ProbeUpstreamWindowNow(ctx, p.cfg.Endpoint, model)
+	if fence != nil {
+		return 0, "the GPU lease holds the card and the tier is not resident; window not probed"
+	}
 	fresh := tierProbe{nCtx: n, at: now}
 	if !ok {
 		fresh.nCtx = 0
