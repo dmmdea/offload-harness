@@ -9,7 +9,9 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -837,6 +839,44 @@ type Config struct {
 	EditPython      string `json:"edit_python,omitempty"`
 	GimpConsolePath string `json:"gimp_console_path,omitempty"`
 	EditTimeoutSec  int    `json:"edit_timeout_sec,omitempty"`
+	// --- composition (offload_compose_video / compose-video; ADR 0059) ---
+	// A CPU-class lane: HyperFrames renders an HTML/CSS composition to video with
+	// headless Chrome in SOFTWARE GL + ffmpeg, so it takes NO GPU lease and no
+	// withGpuSlot (ADR 0026: a media lease would stall text-seat loads) — only its
+	// own in-process slot. Every key defaults EMPTY: the route is NOT CONFIGURED
+	// until the installer's hyperframes step (or an operator) binds all three of
+	// compose_script, hyperframes_dir and hyperframes_browser_path.
+	//
+	// ComposeScript is the runner, render/compose-hyperframes.mjs — the ONLY door
+	// to the HyperFrames CLI (env allowlist, --json on every call, subcommand
+	// allowlist, typed COMPOSE-FAIL classes).
+	ComposeScript string `json:"compose_script,omitempty"`
+	// HyperframesDir holds the pinned project-local install
+	// (<dir>/node_modules/hyperframes, from setup/hyperframes' lockfile). Never a
+	// global npm install: a global HyperFrames self-upgrades in a detached process.
+	// HyperFrames' own state (~/.hyperframes, the managed Chrome cache) lives in
+	// <dir>/home — the runner gives the CLI that directory as HOME.
+	HyperframesDir string `json:"hyperframes_dir,omitempty"`
+	// HyperframesBrowserPath is the pinned chrome-headless-shell the installer's
+	// `browser ensure` step downloaded (HYPERFRAMES_BROWSER_PATH). Explicit because
+	// the CLI's own resolution prefers a NEWER build in ~/.cache/puppeteer over its pin.
+	HyperframesBrowserPath string `json:"hyperframes_browser_path,omitempty"`
+	// ComposeTimeoutSec bounds one composition end to end (lint + check + render +
+	// verify + snapshots). Default 1800.
+	ComposeTimeoutSec int `json:"compose_timeout_sec,omitempty"`
+	// ComposeWorkers is the render worker count: "" or "auto" = HyperFrames' own
+	// sizing, else an integer 1-24 (each worker is one Chrome, ~256 MB). A request's
+	// workers wins. On the 36-thread reference box neither setting wins consistently for
+	// a 150-frame 1080p card (two sessions: 1 worker 21.2 s vs auto 24-25 s, then 16.4 s
+	// vs 14.6-15.3 s), so the default stays HyperFrames' own sizing.
+	ComposeWorkers string `json:"compose_workers,omitempty"`
+	// ComposeCacheDir holds the runner's work dirs, HyperFrames' extracted-frame
+	// cache and its temp frames (#4060: the disk-capture headroom gate refuses a
+	// render on a small system drive). "" = <media_dir>/.compose-cache.
+	ComposeCacheDir string `json:"compose_cache_dir,omitempty"`
+	// ComposeQuality is the default encoder preset: draft | standard | high.
+	// Default "high" (libx264 slow, CRF 15) — quality first; a request may ask for less.
+	ComposeQuality string `json:"compose_quality,omitempty"`
 	// VideoGenUnetHigh / VideoGenUnetLow / VideoGenTextEncoder bind THIS machine's Wan 2.2
 	// expert weights + text encoder by filename (quality-first weight binding — e.g. a box
 	// with the VRAM/RAM headroom names fp8_scaled/fp16 files instead of the render script's
@@ -1602,6 +1642,8 @@ func Default() Config {
 		GPULockPath:                 "",    // runners' default (GPU_LOCK env, else <state_dir>/gpu/lease)
 		StateDir:                    "",    // platform default: %ProgramData%\local-offload | /var/lib/local-offload
 		VisionGPUWaitSec:            90,    // LO-1: bounded wait for the gen lock before a vision call defers
+		ComposeTimeoutSec:           1800,
+		ComposeQuality:              "high",
 		MemoryStack:                 []string{"embeddinggemma", "bge-reranker-v2-m3"},
 		EmbedModelName:              "embeddinggemma", // explicit; reorder-proof (not MemoryStack position)
 		Temperature:                 0,
@@ -1769,6 +1811,7 @@ func load(path string) (Config, error) {
 	warnBadEnumValues(c)
 	warnDeadThresholds(c)
 	warnImageGenBindingTraps(c)
+	warnComposeBindings(c)
 	if home, herr := os.UserHomeDir(); herr == nil {
 		c.Home = ExpandTilde(c.Home, home)
 		expandUserPaths(&c, home)
@@ -2223,6 +2266,7 @@ func pathFields(c *Config) []*string {
 		&c.VideoGenScript, &c.AnimateGenScript, &c.RunGraphScript, &c.VoiceGenScript, &c.MusicGenScript, &c.GPULockPath, &c.StateDir,
 		&c.VoiceGenRef, &c.VoiceGenFTModel, &c.VoiceGenFTBaseDir, &c.VoiceGenFTRef,
 		&c.EditPython, &c.GimpConsolePath,
+		&c.ComposeScript, &c.HyperframesDir, &c.HyperframesBrowserPath, &c.ComposeCacheDir,
 		&c.CachePath, &c.LedgerPath,
 		&c.ThresholdsPath, &c.TierOverridesPath, &c.RouterWeightsPath,
 		&c.ConfHeadPath, &c.RouterLabelsPath, &c.ConfHeadLabelsPath,
@@ -2367,6 +2411,61 @@ func (c Config) ImageRouteConfigured() bool {
 		return c.SdcppBin != "" && c.SdcppModel != ""
 	}
 	return c.ImageGenScript != ""
+}
+
+// ComposeRouteConfigured reports whether THIS box serves compose_video: the
+// runner, the pinned install and the pinned browser are ALL bound. One predicate
+// for the pipeline gate and the fleet advertisement, so health never promises a
+// composition lane dispatch would defer.
+func (c Config) ComposeRouteConfigured() bool {
+	return c.ComposeScript != "" && c.HyperframesDir != "" && c.HyperframesBrowserPath != ""
+}
+
+// EffectiveComposeCacheDir is where the compose runner keeps its work dirs, the
+// extracted-frame cache and HyperFrames' temp frames: compose_cache_dir, else
+// <media_dir>/.compose-cache (a dot-dir, so /fleet/media can never serve it).
+func (c Config) EffectiveComposeCacheDir() string {
+	if c.ComposeCacheDir != "" {
+		return c.ComposeCacheDir
+	}
+	return filepath.Join(c.MediaDir, ".compose-cache")
+}
+
+// ComposeQualities / ComposeFormats are the closed sets the compose lane accepts
+// (HyperFrames' own names; `looks`/`delivery` aliases and `hls` are deliberately
+// not exposed). Exported so the pipeline, the MCP schema tests and the config
+// warning share one list.
+var (
+	ComposeQualities = []string{"draft", "standard", "high"}
+	ComposeFormats   = []string{"mp4", "webm", "mov", "png-sequence", "gif"}
+)
+
+// ValidComposeWorkers reports whether a compose_workers value is one the runner
+// accepts: "" / "auto", or an integer 1-24 (HyperFrames caps --workers at 24).
+func ValidComposeWorkers(v string) bool {
+	v = strings.TrimSpace(v)
+	if v == "" || v == "auto" {
+		return true
+	}
+	n, err := strconv.Atoi(v)
+	return err == nil && n >= 1 && n <= 24
+}
+
+func warnComposeBindings(c Config) { warnComposeBindingsTo(c, os.Stderr) }
+
+// warnComposeBindingsTo flags compose keys that load cleanly and then defer
+// every call: a half-bound route (the runner without its install or pinned
+// browser), a worker count or quality the runner refuses.
+func warnComposeBindingsTo(c Config, w io.Writer) {
+	if c.ComposeScript != "" && (c.HyperframesDir == "" || c.HyperframesBrowserPath == "") {
+		fmt.Fprintln(w, "warning: compose_script is set but hyperframes_dir/hyperframes_browser_path is not — compose_video defers on every call; run the installer's hyperframes step (it needs node >= 22)")
+	}
+	if !ValidComposeWorkers(c.ComposeWorkers) {
+		fmt.Fprintf(w, "warning: compose_workers %q is not \"auto\" or an integer 1-24 — every compose_video call without its own workers will defer BAD_INPUT\n", c.ComposeWorkers)
+	}
+	if c.ComposeQuality != "" && !slices.Contains(ComposeQualities, c.ComposeQuality) {
+		fmt.Fprintf(w, "warning: compose_quality %q is not one of %v — every compose_video call without its own quality will defer BAD_INPUT\n", c.ComposeQuality, ComposeQualities)
+	}
 }
 
 // PipelineNames returns the sorted task_type keys of every VALID pipelines

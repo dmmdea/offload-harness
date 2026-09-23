@@ -2,6 +2,7 @@ package gpugen
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -334,4 +335,45 @@ func itoa(n int) string {
 		b[i] = '-'
 	}
 	return string(b[i:])
+}
+
+// TestGenerateEnvExactInheritsNothing: EnvExact makes Spec.Env the child's WHOLE
+// environment (the compose route's allowlist, ADR 0059) — a secret or a lease token in
+// this process must not reach the child — while the default keeps inheriting.
+func TestGenerateEnvExactInheritsNothing(t *testing.T) {
+	requireNode(t)
+	t.Setenv("GPUGEN_PROBE_SECRET", "must-not-leak")
+	dump := `require('fs').writeFileSync(process.argv[1], JSON.stringify(process.env))`
+	keep := []string{"GPUGEN_PROBE_ALLOWED=yes"}
+	for _, k := range []string{"PATH", "SYSTEMROOT"} {
+		if v, ok := os.LookupEnv(k); ok {
+			keep = append(keep, k+"="+v)
+		}
+	}
+	run := func(exact bool) map[string]string {
+		out := filepath.Join(t.TempDir(), "env.json")
+		if _, err := Generate(context.Background(), Spec{Exe: "node", Script: "-e", Args: []string{dump, out},
+			Env: keep, EnvExact: exact, Out: out, Timeout: 10 * time.Second, SkipFreeComfy: true}); err != nil {
+			t.Fatalf("Generate(exact=%v): %v", exact, err)
+		}
+		b, err := os.ReadFile(out)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var env map[string]string
+		if err := json.Unmarshal(b, &env); err != nil {
+			t.Fatal(err)
+		}
+		return env
+	}
+	exact := run(true)
+	if exact["GPUGEN_PROBE_SECRET"] != "" {
+		t.Fatalf("EnvExact child inherited a parent secret: %v", exact["GPUGEN_PROBE_SECRET"])
+	}
+	if exact["GPUGEN_PROBE_ALLOWED"] != "yes" {
+		t.Fatalf("EnvExact child lost its own env: %v", exact)
+	}
+	if inherited := run(false); inherited["GPUGEN_PROBE_SECRET"] != "must-not-leak" {
+		t.Fatal("the default path must keep inheriting the parent environment")
+	}
 }

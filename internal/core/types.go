@@ -98,6 +98,15 @@ const (
 	// mux_audio/probe) via internal/mediaops. Pure CPU — NO GPU lock. Own branch
 	// in pipeline.Run. Returns op-specific JSON.
 	TaskMedia TaskType = "media"
+	// TaskComposeVideo renders an HTML/CSS COMPOSITION (a vetted template + variables,
+	// an inline single-file html, or a project dir) to video with HyperFrames —
+	// headless Chrome in software GL + ffmpeg, deterministic frame by frame. CPU-class:
+	// NO GPU lease and no withGpuSlot (ADR 0026), only its own in-process slot. Its own
+	// branch in pipeline.Run — it shells out to render/compose-hyperframes.mjs, the
+	// only door to the pinned, env-scrubbed CLI (ADR 0059). Returns {video_path |
+	// frames_dir, duration_sec, fps, frames, width, height, has_alpha, has_audio,
+	// codec, render_ms, lint, check, snapshots}.
+	TaskComposeVideo TaskType = "compose_video"
 	// TaskRunGraph executes an arbitrary ComfyUI API-format graph + satisfies its node
 	// manifest on the LOCAL ComfyUI. 100% generic — the caller owns graph semantics.
 	// Its own branch in pipeline.Run — it shells out to render/comfy-run-graph.mjs via
@@ -138,7 +147,7 @@ const AccelImageCap = 8 << 20
 // Valid reports whether t is a known task type.
 func (t TaskType) Valid() bool {
 	switch t {
-	case TaskSummarize, TaskClassify, TaskExtract, TaskTriage, TaskVQA, TaskOCR, TaskExtractImage, TaskAssessImage, TaskVideoDescribe, TaskVideoWatch, TaskTranscribe, TaskGenerateImage, TaskInpaintImage, TaskEditImageGenerative, TaskUpscaleImage, TaskGenerateSVG, TaskGenerateVideo, TaskAnimateCharacter, TaskGenerateAudio, TaskEditImage, TaskMedia, TaskRunGraph, TaskPipelineJob, TaskAgentRun, TaskAccel:
+	case TaskSummarize, TaskClassify, TaskExtract, TaskTriage, TaskVQA, TaskOCR, TaskExtractImage, TaskAssessImage, TaskVideoDescribe, TaskVideoWatch, TaskTranscribe, TaskGenerateImage, TaskInpaintImage, TaskEditImageGenerative, TaskUpscaleImage, TaskGenerateSVG, TaskGenerateVideo, TaskAnimateCharacter, TaskGenerateAudio, TaskEditImage, TaskMedia, TaskComposeVideo, TaskRunGraph, TaskPipelineJob, TaskAgentRun, TaskAccel:
 		return true
 	}
 	return false
