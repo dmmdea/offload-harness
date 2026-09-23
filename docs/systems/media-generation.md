@@ -545,23 +545,42 @@ re-measured live: the confirmation render hit unrelated GPU-lease contention fro
 session and was not retried) `is_covers` then falls back to the pure silence-latent reference
 (`get_silence_latent`, `comfy/model_base.py`'s `ACEStep15.extra_conds`) for the WHOLE clip — i.e.
 disabling the planner does not recover real content, it trades a partial dead tail for total
-silence. **No parameter/graph change fixes this** (the harness already matches the
-official template, and the official templates never demonstrate the instrumental/no-lyrics case at
-all — every shipped template uses full lyrics). Separately, true peak was measured at a literal
-0.0 dBFS (clipping-level) on two of the three renders with no loudness normalization anywhere in
-the pipeline — an independent defect from the dead air.
+silence. Separately, true peak was measured at a literal 0.0 dBFS (clipping-level) on two of the
+three renders with no loudness normalization anywhere in the pipeline — an independent defect from
+the dead air.
 
-**The fix is a post-render QA gate (`render/audio-qa.mjs`), not a graph change**, run from
-`comfy-music.mjs`'s `generate()` after every render:
+**Root cause, refined 2026-09-23 (0.140.3):** `comfy/text_encoders/ace15.py`'s ACE-Step LM always
+emits exactly `duration*5` audio codes (min=max) and reliably plans the song to end 2-6s BEFORE the
+requested duration, filling the remainder with silence codes — a hard cut, not a fade, matching the
+`-60` to `-70` dBFS tail measured above. Per-second RMS on 30s requests (same prompt): seed 7 ->
+real music to 27.99s then 2.01s silence; seed 759155896809805 -> music to 24.89s then 5.11s silence
+(17% of the clip). Asking for MORE than the target duration avoids the defect: at 36s requested, all
+three seeds tried put music across the whole requested span (seed 7 to 31.11s; seed
+759155896809805 to 30.24s; seed 11 to ~34s then a natural fade). **So a parameter change DOES fix
+this** — over-rendering, not a graph shape change, which is why the earlier "no parameter/graph
+change fixes this" conclusion held only while duration itself was held fixed.
+
+**The fix has two layers: over-render + trim (0.140.3), then the 0.139.3 post-render QA gate
+(`render/audio-qa.mjs`) as defense-in-depth**, both run from `comfy-music.mjs`'s `generate()`:
+0. **Over-render + trim.** When the graph is built from args (not a verbatim `--graph` passthrough)
+   and ffmpeg/ffprobe resolve, `generate()` asks `buildAceStep` for
+   `renderSeconds = seconds + max(6, ceil(0.2*seconds))` (`computeRenderSeconds`) instead of the
+   requested seconds — both `TextEncodeAceStepAudio1.5`'s `duration` and
+   `EmptyAceStep1.5LatentAudio`'s `seconds` get the over-length value, so the LM plans against a
+   longer song. The produced file is then trimmed back to exactly the requested seconds with a 1.0s
+   fade-out on the cut (`audio-qa.mjs`'s `trimToSeconds`, same FLAC container) BEFORE step 1 below
+   ever measures it. ffmpeg unavailable, or a caller-supplied `--graph` (its duration is opaque to
+   `buildGraphFromArgs`), renders the requested seconds exactly, with no trim — same as before
+   0.140.3.
 1. Measure trailing/leading silence (`ffmpeg silencedetect`, -45 dB / 0.5 s) and true peak +
    integrated loudness (`ffmpeg ebur128=peak=true`) in one combined ffmpeg pass, plus duration via
    ffprobe. `assessDeadAir()` flags dead air when trailing OR leading silence exceeds 1.0 s, or more
    than 10% of the clip is silent.
 2. On a flagged render: re-render exactly ONCE with a freshly minted seed (`rewireSeed()` rewrites
-   every node's `inputs.seed`, id-agnostic so it also works on a caller-supplied `--graph`) — the LM
-   planner's output does vary by seed (the two reproduction renders' silence onset differed by
-   ~0.5s despite fixed inputs), so a retry sometimes lands on a seed whose planned content happens
-   to fill the duration.
+   every node's `inputs.seed`, id-agnostic so it also works on a caller-supplied `--graph`), over-
+   rendering and trimming the same way as step 0 — the LM planner's output does vary by seed (the
+   two reproduction renders' silence onset differed by ~0.5s despite fixed inputs), so a retry
+   sometimes lands on a seed whose planned content happens to fill the duration.
 3. Still dead air after the retry: the render fails with an error tagged `DEAD_AIR:` (mapped to
    `gpugen.ClassifyErr`'s `dead_air` class), which `runGenerateAudio` (`internal/pipeline/pipeline.go`)
    turns into a typed defer — never a silently-shipped dead clip.

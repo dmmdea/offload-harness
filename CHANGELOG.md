@@ -188,6 +188,39 @@ Five harness defects from the OptiPlex 7060 (blackwell-8) media parity audit, 20
   that first slipped past a vacuous test comparing `protocolText()` with itself (replaced by fixed
   expectations).
 
+## [0.140.3] - 2026-09-23 - a short music render dodges its own dead air by rendering longer than asked, then trimming back
+
+### Fixed — the ACE-Step dead-air gate (0.139.3) was defense-in-depth for a defect the render could avoid outright
+
+Measured on an 8GB box, ComfyUI 95539f56, ACE-Step 1.5 XL turbo, the harness's own `render/wf-acestep.mjs`
+graph, prompt "upbeat latin pop instrumental, acoustic guitar, congas, bright brass, 110 bpm":
+`generate_audio kind=music` was hitting the 0.139.3 DEAD_AIR gate on essentially every short instrumental
+request, even after its one re-seeded retry.
+
+- **Root cause, refined from the 0.139.3 writeup:** with `generate_audio_codes` true,
+  `comfy/text_encoders/ace15.py`'s ACE-Step LM always emits exactly `duration*5` audio codes (min=max) and
+  reliably plans the song to END 2-6s BEFORE the requested duration, filling the remainder with silence
+  codes — a hard cut to about -65 dBFS, not a fade. Per-second RMS: 30s requested, seed 7 -> music to
+  27.99s then 2.01s silence; seed 759155896809805 -> music to 24.89s then 5.11s silence (17% silent). At
+  36s requested (same prompt) all three seeds tried put music across the WHOLE requested span (seed 7 to
+  31.11s; seed 759155896809805 to 30.24s; seed 11 to ~34s then a natural fade) — asking for more than
+  needed avoids the defect outright. `generate_audio_codes=false` has no planned ending and is 5-8x
+  faster, but drops the LM the model card names as the quality path and pumped one seed's level 15dB
+  second-to-second — not a substitute.
+- **`render/comfy-music.mjs` now over-renders and trims.** When the graph is built from args (not a
+  verbatim `--graph` passthrough) and ffmpeg/ffprobe resolve, `generate()` asks `buildAceStep` for
+  `renderSeconds = seconds + max(6, ceil(0.2*seconds))` (`computeRenderSeconds`) instead of the requested
+  seconds, then trims the produced file back to exactly what was asked for with a 1.0s fade-out on the cut
+  (`audio-qa.mjs`'s new `trimToSeconds`, same FLAC container) — before the 0.139.3 dead-air gate ever
+  measures the file. The re-seeded retry trims the same way. ffmpeg unavailable, or a caller-supplied
+  `--graph` (its duration is opaque to `buildGraphFromArgs`), renders the requested seconds exactly, as
+  before this fix — the gate itself, the retry, and loudness normalization are unchanged.
+- Tests: `render/comfy-music.test.mjs` covers `computeRenderSeconds` against the measured 30s/36s example
+  and the +6s-floor-vs-20% crossover, the over-length graph build, the default-false (unchanged) path, and
+  the `--graph` passthrough ignoring `trim`. `render/audio-qa.test.mjs` adds fixture coverage for
+  `trimToSeconds` (real ffmpeg: cuts to the exact requested length; the fade-out itself never reads as dead
+  air) plus its invalid-input handling.
+
 ## [0.140.2] - 2026-09-23 - a tool call cut at the cap is a cut, whatever finish reason vLLM reports; a tool refuses arguments of the wrong type
 
 ### Fixed — a tool call with a wrong-typed argument ran with that field empty (data loss)

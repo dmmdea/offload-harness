@@ -8,7 +8,7 @@ import assert from "node:assert";
 import { writeFileSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseArgs, buildGraphFromArgs, RESERVE_VRAM_DEFAULT } from "./comfy-music.mjs";
+import { parseArgs, buildGraphFromArgs, computeRenderSeconds, RESERVE_VRAM_DEFAULT } from "./comfy-music.mjs";
 
 test("parseArgs: positionals + flags (out, prompt, --seconds/--seed/--lyrics/--reserve-vram)", () => {
   const { pos, flags } = parseArgs([
@@ -82,4 +82,57 @@ test("buildGraphFromArgs: --graph <file> passthrough uses the supplied graph ver
 test("RESERVE_VRAM_DEFAULT: an ACE-Step-appropriate default is exported (overridable)", () => {
   // ACE-Step's 3.5B all-in-one is lighter than Wan 14B; a conservative reserve still fits 8GB.
   assert.ok(typeof RESERVE_VRAM_DEFAULT === "string" && Number(RESERVE_VRAM_DEFAULT) > 0, "a numeric string default");
+});
+
+// ---- over-render + trim (dead-air mitigation, 2026-09-23) -----------------------
+// See audio-qa.mjs's header for the root cause (ACE-Step's LM plans short
+// instrumental renders to end 2-6s early) and the measured numbers these cases pin.
+
+test("computeRenderSeconds: matches the measured 30s->36s example (a +6s floor, not +20%)", () => {
+  // The defect writeup measured 30s requests reliably finishing music by ~24-28s;
+  // 36s requests (30 + 6, the floor, since 20% of 30 is exactly 6) put music across
+  // the whole span in 3/3 seeds.
+  assert.equal(computeRenderSeconds(30), 36);
+});
+
+test("computeRenderSeconds: the +6s floor governs short requests (20% would be too small)", () => {
+  assert.equal(computeRenderSeconds(8), 14); // ceil(0.2*8)=2 < 6, so +6
+  assert.equal(computeRenderSeconds(5), 11); // ceil(0.2*5)=1 < 6, so +6
+});
+
+test("computeRenderSeconds: 20% takes over once it exceeds the +6s floor", () => {
+  assert.equal(computeRenderSeconds(60), 72); // ceil(0.2*60)=12 > 6, so +12
+});
+
+test("buildGraphFromArgs: trim:true builds the graph at the over-length renderSeconds, not the requested seconds", () => {
+  const { pos, flags } = parseArgs(["out.flac", "upbeat latin pop instrumental", "--seconds", "30"]);
+  const { graph, seconds, renderSeconds } = buildGraphFromArgs(pos, flags, { trim: true });
+  assert.equal(seconds, 30, "the requested seconds is still reported (the caller trims back to it)");
+  assert.equal(renderSeconds, 36, "renderSeconds is the over-length target");
+  // Both consumers of "seconds" in wf-acestep.mjs must get the OVER-length value —
+  // the whole point is the LM plans against a longer duration.
+  const enc = Object.values(graph).find((n) => n.class_type === "TextEncodeAceStepAudio1.5");
+  assert.equal(enc.inputs.duration, 36, "TextEncodeAceStepAudio1.5.duration gets renderSeconds");
+  const lat = Object.values(graph).find((n) => n.class_type === "EmptyAceStep1.5LatentAudio");
+  assert.equal(lat.inputs.seconds, 36, "EmptyAceStep1.5LatentAudio.seconds gets renderSeconds");
+});
+
+test("buildGraphFromArgs: trim defaults to false — unchanged behavior for an existing caller that doesn't pass it", () => {
+  const { pos, flags } = parseArgs(["out.flac", "ambient drone", "--seconds", "30"]);
+  const { seconds, renderSeconds } = buildGraphFromArgs(pos, flags);
+  assert.equal(seconds, 30);
+  assert.equal(renderSeconds, undefined, "no over-render requested = no trim needed downstream");
+  const { graph } = buildGraphFromArgs(pos, flags);
+  const lat = Object.values(graph).find((n) => n.class_type === "EmptyAceStep1.5LatentAudio");
+  assert.equal(lat.inputs.seconds, 30, "graph is built at the requested seconds, exactly as before this fix");
+});
+
+test("buildGraphFromArgs: --graph passthrough ignores trim:true (its duration is opaque to this function)", () => {
+  const customGraph = { "1": { class_type: "CheckpointLoaderSimple", inputs: { ckpt_name: "x.safetensors" } } };
+  const gf = join(mkdtempSync(join(tmpdir(), "music-graph-trim-")), "wf.json");
+  writeFileSync(gf, JSON.stringify(customGraph));
+  const { graph, seconds, renderSeconds } = buildGraphFromArgs(["out.flac"], { graph: gf, seed: "5" }, { trim: true });
+  assert.deepEqual(graph, customGraph);
+  assert.equal(seconds, undefined, "a --graph passthrough never reports a requested seconds");
+  assert.equal(renderSeconds, undefined, "and so never triggers a downstream trim");
 });
