@@ -31,6 +31,11 @@ type sseChunk struct {
 			} `json:"tool_calls"`
 		} `json:"delta"`
 		FinishReason string `json:"finish_reason"`
+		// TokenIDs is vLLM's per-step generated ids (`return_token_ids`,
+		// LLMClient.WithStreamTokenIDs). A frame can carry ids and NO delta:
+		// the tool parser is holding the text of an argument it cannot emit
+		// yet. Those ids are the engine's real progress.
+		TokenIDs []int `json:"token_ids"`
 	} `json:"choices"`
 	Usage   *json.RawMessage `json:"usage"`
 	Timings *json.RawMessage `json:"timings"`
@@ -49,7 +54,10 @@ const sseMaxFrame = 16 << 20
 // with the JSON path. onDelta (nil = none) is called with the running token
 // count after every frame that carried generated text. The count is DELTAS,
 // not characters — one delta is one token on both engines — and the usage
-// frame's exact completion_tokens overwrites it at the end.
+// frame's exact completion_tokens overwrites it at the end. A frame carrying
+// generated token ids (vLLM `return_token_ids`) counts by its ids instead,
+// whether or not it carries a delta: that is how a tool-call argument the
+// parser is still holding stays visible as progress (0.139.4).
 func decodeSSE(r io.Reader, onDelta func(tokensSoFar int)) (wireResp, error) {
 	var wr wireResp
 	sc := bufio.NewScanner(r)
@@ -115,6 +123,9 @@ func decodeSSE(r io.Reader, onDelta func(tokensSoFar int)) (wireResp, error) {
 				}
 				if t.Function.Name != "" {
 					cur.name = t.Function.Name
+					// the tool name is generated output; vLLM sends it in a
+					// frame of its own, before any argument
+					ticked = true
 				}
 				if t.Function.Arguments != "" {
 					cur.args += t.Function.Arguments
@@ -124,8 +135,13 @@ func decodeSSE(r io.Reader, onDelta func(tokensSoFar int)) (wireResp, error) {
 			if ch.FinishReason != "" {
 				finish = ch.FinishReason
 			}
-			if ticked {
+			if n := len(ch.TokenIDs); n > 0 {
+				tokens += n
+				ticked = true
+			} else if ticked {
 				tokens++
+			}
+			if ticked {
 				if onDelta != nil {
 					onDelta(tokens)
 				}
