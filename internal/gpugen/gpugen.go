@@ -345,6 +345,8 @@ func ClassifyErr(err error) string {
 		return "conn_refused"
 	case strings.Contains(s, "llama-server 5"): // "llama-server 5xx: ..."
 		return "http_5xx"
+	case strings.Contains(s, "dead_air"): // render/audio-qa.mjs's QA gate, F-35 follow-up 2026-09-23
+		return "dead_air"
 	default:
 		return "other"
 	}

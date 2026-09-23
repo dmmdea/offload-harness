@@ -1212,6 +1212,20 @@ func (p *Pipeline) runTranscribe(ctx context.Context, req core.Request, meta cor
 		ucancel()
 	}
 	if terr != nil {
+		// ErrUpstreamNoSpeech (root-caused 2026-09-23): whisper-server's crash
+		// signature on audio with no speech content — music, tone, near-silence
+		// alike, confirmed NOT a cold-load or loudness effect (sttclient doc
+		// comment has the reproduction). This is semantically the same outcome as
+		// the clean "empty transcript" case just below (no speech found), so it
+		// gets the identical calm defer reason instead of the generic "transcribe
+		// call failed" wording, which reads as an infrastructure failure it is
+		// not. Retrying is deliberately not attempted: the same audio reliably
+		// crashes the server again.
+		if errors.Is(terr, sttclient.ErrUpstreamNoSpeech) {
+			meta.LatencyMs = time.Since(start).Milliseconds()
+			p.recordDefer(req.Task, meta, len(req.Audio), "empty transcript (no speech detected)")
+			return core.Deferf("empty transcript (no speech detected)", "", meta)
+		}
 		meta.LatencyMs = time.Since(start).Milliseconds()
 		meta.ErrClass = classifyErr(terr)
 		p.recordDefer(req.Task, meta, len(req.Audio), "transcribe call failed: "+terr.Error())
@@ -3097,6 +3111,17 @@ func (p *Pipeline) genEnv() []string {
 	env := []string{"COMFY_DIR=" + p.cfg.ComfyDir}
 	if len(p.cfg.MemoryStack) > 0 {
 		env = append(env, "MEMORY_STACK="+strings.Join(p.cfg.MemoryStack, ","))
+	}
+	// FFMPEG_PATH (F-35 regression follow-up, 2026-09-23): the music route's
+	// post-render QA gate (render/comfy-music.mjs — silence/true-peak measurement
+	// and loudness normalization) shells out to ffmpeg the same way audioio.go
+	// already does for transcribe. Threading the SAME configured binary here
+	// keeps both call sites honoring one per-machine ffmpeg_path instead of the
+	// script guessing its own "ffmpeg"-on-PATH default when a config already
+	// names the real one. Empty when unconfigured — the script falls back to
+	// PATH resolution and degrades the QA gate to a skip (never fails the render).
+	if p.cfg.FFmpegPath != "" {
+		env = append(env, "FFMPEG_PATH="+p.cfg.FFmpegPath)
 	}
 	return env
 }

@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -34,6 +35,14 @@ import (
 // mutex is process-global (the single server is a single shared resource, regardless
 // of how many Client values exist), so it holds even across concurrent callers.
 var inferMu sync.Mutex
+
+// ErrUpstreamNoSpeech marks the whisper-server crash-signature (empty-body 5xx) that
+// Transcribe wraps its error in. Root-caused 2026-09-23: whisper-server reliably exits
+// when the audio has no speech content (music, tone, near-silence alike — not a
+// loudness/cold-load effect; see the call site for the reproduction). Callers should
+// treat this as "no speech found", not as an infrastructure failure — never retry it
+// (the same audio crashes the server again) and never surface "call failed" wording.
+var ErrUpstreamNoSpeech = errors.New("stt upstream: no speech content (whisper-server exits on non-speech audio)")
 
 // Word is one timestamped word with whisper's per-word confidence. whisper-server
 // emits words[] in verbose_json BY DEFAULT (no extra request field needed — adding
@@ -173,12 +182,26 @@ func (c *Client) Transcribe(ctx context.Context, model, wavPath string, p Params
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 400))
-		// An empty-body 5xx is the crash signature: whisper-server SIGSEGV'd (a
-		// cold-load on near-silent/no-speech audio is the known trigger) and
-		// llama-swap is cold-restarting it. Surface a distinct, descriptive error so
-		// the caller defers with an accurate reason instead of a bare status code.
+		// An empty-body 5xx is the crash signature: whisper-server (whisper.cpp
+		// build-v194) exits mid-request and llama-swap's proxy sees the connection
+		// reset ("upstream process exited unexpectedly" in llama-swap.log).
+		// Root-caused 2026-09-23 (F-35 regression follow-up): this is NOT a
+		// cold-load fluke and NOT specific to near-silence. Direct /inference calls
+		// reproduced it 100% of the time (repeated attempts, no cold-restart window)
+		// on (a) a near-silent ACE-Step-generated tail, (b) the same clip with the
+		// per-request vad field both on and off (the server always loads with
+		// --vad baked into its launch command, so the per-request field cannot
+		// disable it), and (c) a plain loud 440 Hz sine tone with no ACE-Step
+		// involvement at all. The common factor across all three is NO SPEECH
+		// CONTENT, not loudness — whisper.cpp's decode/beam-search path hits a
+		// fatal state (~28-30s in) when there is nothing speech-like to
+		// transcribe. This is an upstream whisper.cpp bug outside this repo; the
+		// harness-side mitigation is to treat this signature as a clean "no
+		// speech found" outcome (see runTranscribe) rather than retry it
+		// (retrying just re-triggers the same crash on the same audio) or
+		// surface it as an infrastructure failure.
 		if resp.StatusCode >= 500 && len(bytes.TrimSpace(b)) == 0 {
-			return Result{}, fmt.Errorf("whisper-server %d (empty body): upstream crashed — likely near-silent/no-speech audio on a cold load; cold-restart in progress", resp.StatusCode)
+			return Result{}, fmt.Errorf("whisper-server %d (empty body): upstream crashed — no speech content in the audio (confirmed reproducible on music/tone, not silence-specific, not a cold-load fluke): %w", resp.StatusCode, ErrUpstreamNoSpeech)
 		}
 		return Result{}, fmt.Errorf("whisper-server %d: %s", resp.StatusCode, string(b))
 	}
