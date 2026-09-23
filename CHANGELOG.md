@@ -139,9 +139,13 @@ Versioning: [SemVer](https://semver.org/).
 - Side effect, a correction: the loop's prefill measurement (`FirstDeltaMS`, the seat-rates store's
   `prefill_tok_s`) is the time to the first frame the decoder counts. A call that opened with a held
   argument measured the hold as prefill; it now measures the first generated token.
-- Cost: with `return_token_ids` vLLM also puts the prompt's ids in the first frame of each call
-  (~6 bytes per prompt token: ~110 KB for the 18k-token review prompt, ~1.6 MB at the 262k window),
-  on loopback, once per step.
+- Cost: with `return_token_ids` vLLM also puts the prompt's ids in the first frame of each call,
+  about 4.5 bytes per prompt token (measured: 78 KB for the 17.5k-token review prompt; ~1.2 MB at the
+  262k window), on loopback, once per step.
+- Live E2E on the 3-card seat (the same 44.8 KB `offload_review_diff`, warm seat, this build): 11
+  steps, `done`, 10 findings in 293 s, every loop call carrying `return_token_ids`. Even ordinary
+  `read_file` calls are partly held: the re-issue's call sent 63 frames for 61 tokens, 19 of them with
+  a visible delta, so the largest gap between frames the watch counts fell from 0.5 s to 0.05 s.
 - Tests: `internal/agent/client_heldtool_test.go` (the decoder on the captured wire shape; a fake
   vLLM seat that sends per-step frames only when asked, run under a real `Monitor`: completes with
   the signal, files the stall without it), and
