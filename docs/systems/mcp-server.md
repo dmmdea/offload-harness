@@ -381,6 +381,11 @@ errors it will try to work around.
    contribution after the manifest had silently drifted to claiming four tools.
 2. A Defer is a successful result. Do not map it to an MCP error.
 3. `offload_nim` is the only remote surface, and it is opt-in.
+4. `offload_status` with no argument answers byte-for-byte what it answered before `section`
+   existed. A golden captured from the pre-change handler on a fixture that owns every
+   machine-dependent input pins it (`TestStatusDefaultIsByteIdenticalToTheGolden`). A deliberate
+   change to the full payload regenerates it with `OFFLOAD_UPDATE_GOLDEN=1` and says so in the
+   changelog.
 
 ## Error handling
 
@@ -409,6 +414,22 @@ read-only unless deliberately widened. See
   load — occupancy stops at `/running` for a cold seat — and the render is bounded: a stalled
   probe degrades to the spec rows rather than dropping the table. See
   [composite-tier.md](composite-tier.md).
+- **One block, or the brief form (0.134.0).** `offload_status` takes one optional argument,
+  `section`. No argument (or `all`) is the whole payload, byte-identical to the answer before the
+  argument existed. A block name (`local`, `media`, `remote`, `accelerators`, `reuse`, `fleet`,
+  `kv_cache_server`, `gpu_lease`) returns `{<block>: …}` and computes nothing else: the fleet block
+  runs no nvidia-smi, the lease block probes no node. `accelerators` asked for by name on a box that
+  lists none is `{}`, never `null`. `brief` is the sizing answer: the whole `fleet` block plus two
+  one-line strings under their own keys, so nothing that decodes `gpu_lease` or `local` as an object
+  meets a string there. `gpu_lease_verdict` leads with the verdict word, then what the cards are
+  doing, the holder and its reason, the queue length and the queue command. `local_verdict` gives
+  the local endpoint's state and served count, the local agent seat's verdict, and the roster
+  entries that are empty and so defer here. An unknown section, an unknown argument or a wrong type
+  is a defer that lists the valid values, never a fall-back to the full dump. `config_error`, when
+  set, stays the first key of every answer. The block table in `status_section.go` feeds both the
+  dispatch and the schema's enum. Measured on the reference box (2026-09-22, three fleet nodes, a
+  media lease held): full 17,927 bytes, `brief` 4,443 (24.8%), `fleet` 3,813 (21.3%), `gpu_lease`
+  7,721 (43.1% of the full answer).
 - `local-offload doctor` checks the serving layer the tools depend on, and prints the same derived
   media routes — a route bound to a file that is absent exits non-zero.
 - **The most common operational surprise:** an MCP client holds its server process for the session,
@@ -421,6 +442,10 @@ read-only unless deliberately widened. See
 `agentrun_e2e_test.go` exercises the agent tool end to end. The manifest drift test
 (`TestPrintingPressManifestListsEveryTool`) lives in `main_test.go` at the repo root, since the
 manifest is a repo-root file.
+`status_section_test.go` covers `offload_status`'s `section` argument over the in-memory MCP
+transport: the default against the golden in `testdata/`, each block alone, the brief form, the
+refusals, `config_error` ordering, the schema's enum, and that the fleet section never samples the
+GPUs.
 
 ## Common pitfalls
 
@@ -433,6 +458,8 @@ manifest is a repo-root file.
 
 - [`internal/mcpserver/mcpserver.go`](../../internal/mcpserver/mcpserver.go) — registration and
   handlers
+- [`internal/mcpserver/status_section.go`](../../internal/mcpserver/status_section.go) —
+  `offload_status`'s block table, `section` parsing and the brief lines
 - [`internal/askjob`](../../internal/askjob/ask.go) — `offload_ask`’s contract builder (goal,
   output schema, and the grounded acceptance anchor)
 - [`internal/askcache`](../../internal/askcache/askcache.go) — `offload_ask`’s content-addressed,
