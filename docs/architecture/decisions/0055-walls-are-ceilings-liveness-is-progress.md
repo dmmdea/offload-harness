@@ -76,6 +76,23 @@ determine if a job is truly still going" — was not met by any of the three sur
 5. The seat-rates store records the seat's **prefill rate** (`prefill_tok_s`) from the loop's
    prefill accounting, so the prefill allowance is measured after the first run, not assumed.
 
+6. **A seat that is loading is not stalled (0.140.0).** The prefill allowance is sized from the
+   prefill rate, so a request that waits for its seat to LOAD was filed as a prefill stall. The
+   admission warm-up covers a seat that is absent when the run starts, but not one evicted mid-run
+   (another model's swap between two steps, or the idle unload during a long tool call). On
+   2026-09-23 the 3-card seat's ~180 s reload deferred an `offload_review_diff` twice at 60 s. While a
+   request waits for its first byte (**prefill** or **re-pack**), the monitor reads llama-swap's
+   `/running` through a seat probe every 5 s, and once more before filing a stall. On positive evidence
+   the run moves into a **`cold-load`** phase: the seat's row is not `ready`, or the seat is absent
+   while its alias resolved. In that phase the stall clock is suspended, and a **cold-load ceiling**
+   `max(600 s, 2 × measured cold_load_sec)` bounds the wait from the moment the request went silent.
+   600 s is llama-swap's `healthCheckTimeout` on the reference boxes. When the seat reads `ready`, the
+   waiting phase resumes with its full allowance from that moment. At the ceiling the run is filed
+   `stalled: seat still loading after Xs in cold-load (allowed Ys: cold-load ceiling = …; /running read
+   the seat "<state>", …)` as infrastructure. The `stalled: ` prefix is kept on purpose, so every reader
+   keyed on it classifies the defer the same way. An unreadable `/running` or an unresolved alias counts
+   as "cannot tell", and the prefill clock runs as before. The wait is never open-ended.
+
 ## Consequences
 
 - A 27B seat at 1 tok/s finishes its contract. A seat that dies mid-stream (an engine error

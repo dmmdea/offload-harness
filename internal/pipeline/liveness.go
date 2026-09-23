@@ -12,6 +12,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/gpuactivity"
 	"github.com/dmmdea/offload-harness/internal/seatrate"
+	"github.com/dmmdea/offload-harness/internal/swapclient"
 )
 
 // Liveness walls (0.131.0, ADR 0055). Until 0.130.x a contract ran under ONE
@@ -35,25 +36,114 @@ var (
 	// ceilingFloorSec / ceilingCapSec bound the ceiling; tests compress them.
 	ceilingFloorSec = core.AgentCeilingSecFloor
 	ceilingCapSec   = core.AgentCeilingSecCap
+	// coldLoadCeilingFloor is the least time a seat may spend LOADING while a
+	// run's request waits for its first byte (0.140.0). Ten minutes is
+	// llama-swap's healthCheckTimeout on the reference boxes: past it
+	// llama-swap gives up on the load itself. Tests compress it.
+	coldLoadCeilingFloor = 10 * time.Minute
+	// coldLoadPoll is how often the monitor reads /running while a request
+	// waits for its first byte. Tests compress it.
+	coldLoadPoll = 5 * time.Second
 )
 
 // LivenessPolicyFor is THIS seat's stall policy: the admission budget while
 // the run is admitted / cold-loaded / probed, the measured prefill and decode
 // rates (else the assumed slow-seat values inside the policy), the loop's
-// per-tool cap and the re-pack's bound.
+// per-tool cap, the re-pack's bound and the cold-load ceiling.
 func LivenessPolicyFor(cfg config.Config, known seatrate.Seat, admission time.Duration) agent.StallPolicy {
 	tokS := known.TokS
 	if tokS <= 0 {
 		tokS = cfg.AgentSeatTokS
 	}
+	coldLoad, basis := coldLoadCeiling(known)
 	return agent.StallPolicy{
-		Admission:   admission,
-		PrefillTokS: known.PrefillTokS,
-		TokS:        tokS,
-		ToolTimeout: 0, // the loop hands each tool's own cap to the monitor (Loop.dispatch)
-		Repack:      agentRepackChatTimeout,
-		Floor:       livenessFloor,
-		Slack:       livenessSlack,
+		Admission:     admission,
+		PrefillTokS:   known.PrefillTokS,
+		TokS:          tokS,
+		ToolTimeout:   0, // the loop hands each tool's own cap to the monitor (Loop.dispatch)
+		Repack:        agentRepackChatTimeout,
+		Floor:         livenessFloor,
+		Slack:         livenessSlack,
+		ColdLoad:      coldLoad,
+		ColdLoadBasis: basis,
+		ColdLoadPoll:  coldLoadPoll,
+	}
+}
+
+// coldLoadCeiling bounds one seat load observed mid-run (0.140.0): twice the
+// seat's measured cold load (seat-rates.json, the slowest of the recent
+// loads), never under coldLoadCeilingFloor, never above the run's ceiling
+// cap. The load wait is bounded, never open-ended: past it the run defers
+// with a cold-load stall.
+func coldLoadCeiling(known seatrate.Seat) (time.Duration, string) {
+	d, basis := coldLoadCeilingFloor, fmt.Sprintf("the %.0fs floor", coldLoadCeilingFloor.Seconds())
+	if known.ColdLoadSec > 0 {
+		basis = fmt.Sprintf("max(%.0fs floor, 2 x %.0fs measured cold load)", coldLoadCeilingFloor.Seconds(), known.ColdLoadSec)
+		if m := time.Duration(2 * known.ColdLoadSec * float64(time.Second)); m > d {
+			d = m
+		}
+	}
+	if c := time.Duration(ceilingCapSec) * time.Second; c > 0 && d > c {
+		d, basis = c, basis+fmt.Sprintf(", capped at %.0fs", c.Seconds())
+	}
+	return d, basis
+}
+
+// seatLoadProbe is the monitor's view of whether llama-swap is serving the
+// run's seat (0.140.0). A request whose seat is `starting` — a cold start
+// after the idle unload, or a reload after another model's swap evicted the
+// seat between two steps (2026-09-23: whisper-stt evicted the 3-card seat
+// after step 1, and the re-issue's 60 s prefill clock ran out inside the
+// ~180 s reload) — gets no byte until the load finishes, so its silence is a
+// cold load, not a stall.
+//
+// loading is reported only on POSITIVE evidence: the seat's /running row in
+// a non-ready state, or the seat absent from /running once its alias has been
+// resolved (llama-swap is holding the request while another model runs). An
+// unreadable /running, or an alias that could not be resolved, is "cannot
+// tell" (an error), and the prefill clock keeps running as before.
+func seatLoadProbe(endpoint, seat string) agent.SeatProbe {
+	if endpoint == "" || seat == "" {
+		return nil
+	}
+	sc, err := swapclient.New(endpoint, admissionPoll)
+	if err != nil {
+		return nil
+	}
+	var mu sync.Mutex // the matcher latches state; the monitor may probe from two timers
+	m := newSeatMatcher(endpoint, seat)
+	return func(ctx context.Context) (bool, string, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		rows, rerr := sc.Running(ctx)
+		if rerr != nil {
+			return false, "", rerr
+		}
+		find := func() (string, bool) {
+			for _, r := range rows {
+				if m.matches(r.ID) {
+					return r.State, true
+				}
+			}
+			return "", false
+		}
+		st, ok := find()
+		if !ok && m.resolve(ctx) {
+			st, ok = find()
+		}
+		switch {
+		case ok && st == "ready":
+			return false, st, nil
+		case ok:
+			return true, st, nil
+		case !m.resolved:
+			return false, "", fmt.Errorf("seat %s is not listed on /running and its alias could not be resolved", seat)
+		}
+		busy := "nothing else listed"
+		if len(rows) > 0 {
+			busy = rows[0].ID + " " + rows[0].State
+		}
+		return true, "not resident (" + busy + ")", nil
 	}
 }
 
