@@ -9,6 +9,8 @@
 //   experimental.chat.system.transform  the dispatch protocol + tool map on primary turns; a
 //                                       read-only diet for offload child sessions; nothing on
 //                                       title and compaction requests
+//   chat.params                         title / compaction requests on Qwen-family models think
+//                                       less and are output-capped
 //   tool.definition                     the built-in `task` description names the offload route
 //   tool.execute.before (task)          FORCING FUNCTION: read-only-shaped subagent legs are
 //                                       rerouted to the `offload` subagent (option-gated)
@@ -26,7 +28,7 @@
 //   - For MCP tools tool.execute.after receives the RAW MCP result ({content: [...]}); opencode
 //     joins its text parts into the model-visible output AFTER the hook and head-truncates it.
 //   - LLMRequestPrep.prepare joins agent prompt, env, instruction files and skills into ONE system
-//     element and runs experimental.chat.system.transform on it.
+//     element, runs experimental.chat.system.transform on it, then chat.params.
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
@@ -98,6 +100,16 @@ export const RECON_TOOLS = [
   "offload_vqa",
   "offload_extract_image",
 ];
+
+/** Title requests: thinking off, and a title is ≤50 characters (≈15 tokens). */
+export const TITLE_MAX_OUTPUT_TOKENS = 64;
+/**
+ * Compaction requests: 4.4x the largest summary measured (3,681 tokens of summary text on
+ * 2026-09-18) and above the largest whole compaction output measured at xhigh (13,774), so it
+ * never cuts a summary even when the user turns thinking back on; it halves a runaway decode
+ * against the 32,000 default (about 10 instead of 20 minutes at 23-27 tok/s).
+ */
+export const COMPACTION_MAX_OUTPUT_TOKENS = 16384;
 
 // The first sentence of opencode 1.18.32's title and compaction agent prompts. Those requests
 // carry nothing but that prompt as their system text, so the protocol would be pure cost there.
@@ -351,6 +363,11 @@ export function auxRequestKind(system: string[]): "title" | "compaction" | null 
   return null;
 }
 
+export function isQwenFamily(model: unknown): boolean {
+  const m = model as { id?: unknown; modelID?: unknown; api?: { id?: unknown } } | undefined;
+  return [m?.id, m?.modelID, m?.api?.id].some((s) => typeof s === "string" && /qwen/i.test(s));
+}
+
 // opencode names a subagent session "<description> (@<agent> subagent)".
 const SUBAGENT_TITLE = /\(@([^()\s]+) subagent\)\s*$/;
 
@@ -500,6 +517,30 @@ export function createHooks(o: Options, diagnostics: Diagnostics = newDiagnostic
       }
     },
 
+    // Title and compaction requests think at the model's default effort (xhigh on Qwen3.8): on
+    // 2026-09-18 each compaction spent 4.5-10.1k reasoning tokens and 2.6-6 min. Both get
+    // enable_thinking false, the one switch every Qwen3.x template honours (measured 2026-09-22 on
+    // a Qwen3.6 seat: reasoning_effort "low" was ignored, 400 of 400 tokens were reasoning, while
+    // enable_thinking false gave 0). Only keys the user did not set are written, and never a
+    // reasoning_effort (Qwen3.8's template accepts only xhigh / medium / low; "high" is an HTTP 500).
+    "chat.params": async (input, output) => {
+      try {
+        const kind = input?.agent === "title" ? "title" : input?.agent === "compaction" ? "compaction" : null;
+        if (!kind || !isQwenFamily(input.model)) return;
+        output.options ??= {};
+        const current = output.options.chat_template_kwargs;
+        const kw: Record<string, unknown> = current && typeof current === "object" && !Array.isArray(current) ? { ...current } : {};
+        if (!("enable_thinking" in kw) && !("reasoning_effort" in kw)) {
+          kw.enable_thinking = false;
+          output.options.chat_template_kwargs = kw;
+        }
+        const cap = kind === "title" ? TITLE_MAX_OUTPUT_TOKENS : COMPACTION_MAX_OUTPUT_TOKENS;
+        if (typeof output.maxOutputTokens !== "number" || output.maxOutputTokens > cap) output.maxOutputTokens = cap;
+      } catch (e) {
+        warn("chat.params hook", e);
+      }
+    },
+
     "tool.definition": async (input, output) => {
       try {
         if (input.toolID === "task" && !output.description.includes("OFFLOAD ROUTE:")) {
@@ -624,7 +665,7 @@ export function createHooks(o: Options, diagnostics: Diagnostics = newDiagnostic
               version: VERSION,
               options: { ...o, dispatchLog: o.dispatchLog },
               session: s ? { reads: s.reads, rerouted: s.rerouted.size, delegateCalls: s.delegateCalls, nudged: [...s.nudged] } : null,
-              hooks: ["experimental.chat.system.transform", "tool.definition", "tool.execute.before", "tool.execute.after", "config", "event"],
+              hooks: ["experimental.chat.system.transform", "chat.params", "tool.definition", "tool.execute.before", "tool.execute.after", "config", "event"],
               diagnostics: { ...diagnostics, instrument: { ...diagnostics.instrument }, systemTransform: { ...diagnostics.systemTransform } },
             },
             null,

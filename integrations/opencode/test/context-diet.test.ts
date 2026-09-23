@@ -14,7 +14,7 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { PROTOCOL_MARKER } from "../src/protocol.ts";
-import { createHooks, DEFAULTS, RECON_TOOLS, resolveOptions, type Options } from "../src/plugin.ts";
+import { COMPACTION_MAX_OUTPUT_TOKENS, createHooks, DEFAULTS, RECON_TOOLS, resolveOptions, TITLE_MAX_OUTPUT_TOKENS, type Options } from "../src/plugin.ts";
 
 const tmpLog = () => join(mkdtempSync(join(tmpdir(), "olo-diet-")), "dispatch-log.jsonl");
 const opts = (over: Partial<Options> = {}): Options => ({ ...DEFAULTS, dispatchLog: tmpLog(), ...over });
@@ -469,5 +469,66 @@ describe("O3: child, title and compaction requests", () => {
     const out = { system: ["You are a titler (reworded upstream)."] };
     await h["experimental.chat.system.transform"]!({ sessionID: "root", model: {} as any }, out);
     expect(out.system[0]).toContain(PROTOCOL_MARKER);
+  });
+});
+
+describe("O4: title and compaction requests think less on Qwen-family models", () => {
+  const qwen = { id: "qwen3.8-27b-vllm-3card", providerID: "llamacpp", api: { id: "qwen3.8-27b-vllm-3card" } } as any;
+  const gemma = { id: "gemma-4-e4b", providerID: "llamacpp", api: { id: "gemma-4-e4b" } } as any;
+  const params = (over: Record<string, any> = {}) => ({ temperature: 0.5, topP: 1, topK: 0, maxOutputTokens: 32000 as number | undefined, options: {} as Record<string, any>, ...over });
+  const call = async (h: ReturnType<typeof createHooks>, agent: string, model: any, out: ReturnType<typeof params>) =>
+    h["chat.params"]!({ sessionID: "s", agent, model, provider: {} as any, message: {} as any }, out as any);
+
+  it("title: thinking off and output capped", async () => {
+    const h = createHooks(opts());
+    const out = params();
+    await call(h, "title", qwen, out);
+    expect(out.options.chat_template_kwargs).toEqual({ enable_thinking: false });
+    expect(out.maxOutputTokens).toBe(TITLE_MAX_OUTPUT_TOKENS);
+    expect(TITLE_MAX_OUTPUT_TOKENS).toBeLessThanOrEqual(64);
+  });
+
+  // enable_thinking, not reasoning_effort: measured 2026-09-22 on a Qwen3.6 vLLM seat, the
+  // template ignores reasoning_effort "low" (400 of 400 completion tokens were reasoning, same as
+  // no kwarg) while enable_thinking false gives 0; Qwen3.8's template honours both.
+  it("compaction: thinking off (honoured by every Qwen3.x template), never high, with room for the summary", async () => {
+    const h = createHooks(opts());
+    const out = params();
+    await call(h, "compaction", qwen, out);
+    expect(out.options.chat_template_kwargs).toEqual({ enable_thinking: false });
+    expect(JSON.stringify(out.options)).not.toContain('"high"');
+    expect(out.maxOutputTokens).toBe(COMPACTION_MAX_OUTPUT_TOKENS);
+    // the largest measured compaction output (09-18, xhigh) was 13,774 tokens; the cap must not cut it
+    expect(COMPACTION_MAX_OUTPUT_TOKENS).toBeGreaterThan(13_774);
+  });
+
+  it("other agents and non-Qwen models are untouched", async () => {
+    const h = createHooks(opts());
+    for (const [agent, model] of [["build", qwen], ["offload", qwen], ["title", gemma], ["compaction", gemma]] as const) {
+      const out = params();
+      await call(h, agent, model, out);
+      expect(out).toEqual(params());
+    }
+  });
+
+  it("keys the user set win: an explicit effort or thinking flag is left alone", async () => {
+    const h = createHooks(opts());
+    const a = params({ options: { chat_template_kwargs: { reasoning_effort: "medium" } } });
+    await call(h, "compaction", qwen, a);
+    expect(a.options.chat_template_kwargs).toEqual({ reasoning_effort: "medium" });
+    const b = params({ options: { chat_template_kwargs: { enable_thinking: true } } });
+    await call(h, "title", qwen, b);
+    expect(b.options.chat_template_kwargs).toEqual({ enable_thinking: true });
+  });
+
+  it("other options survive, the user's kwargs object is not mutated, and a lower cap is never raised", async () => {
+    const h = createHooks(opts());
+    const userKw = { preserve_thinking: true };
+    const out = params({ maxOutputTokens: 32, options: { apiKey: "local", chat_template_kwargs: userKw } });
+    await call(h, "title", qwen, out);
+    expect(out.options.apiKey).toBe("local");
+    expect(out.options.chat_template_kwargs).toEqual({ preserve_thinking: true, enable_thinking: false });
+    expect(userKw).toEqual({ preserve_thinking: true });
+    expect(out.maxOutputTokens).toBe(32);
   });
 });
