@@ -262,8 +262,11 @@ fi
 MP_LOG="$WORK/lmcache-mp.log"; MP_OFF_FILE="$WORK/.$MP_UNIT.log-offset"
 if [ -f "$MP_LOG" ] && [ -f "$MP_OFF_FILE" ]; then
   mp_off=$(cat "$MP_OFF_FILE" 2>/dev/null); mp_size=$(stat -c %s "$MP_LOG" 2>/dev/null || echo 0)
-  if [ "${mp_off:-x}" -le "$mp_size" ] 2>/dev/null; then
-    st_fail=$(tail -c +$(( mp_off + 1 )) "$MP_LOG" | grep -a -cE "Store task [0-9]+ to adapter [0-9]+ failed")
+  # Digits only, read in base 10: a hand-edited or corrupt file ("-5", "089") would otherwise reach $(( )) as octal
+  # or `tail -c +-4` and drop the note without a word. A log shorter than the offset was rotated: skip the count.
+  case "$mp_off" in ''|*[!0-9]*) mp_off="" ;; esac
+  if [ -n "$mp_off" ] && [ "$(( 10#$mp_off ))" -le "$mp_size" ]; then
+    st_fail=$(tail -c +$(( 10#$mp_off + 1 )) "$MP_LOG" | grep -a -cE "Store task [0-9]+ to adapter [0-9]+ failed")
     [ "${st_fail:-0}" -gt 0 ] && echo "seat_fg: note — the previous $MP_UNIT generation logged $st_fail failed L2 store task(s) (\"Store task … failed\" in $MP_LOG); those chunks miss on every later lookup"
   fi
 fi
