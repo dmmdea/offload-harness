@@ -17,6 +17,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -235,5 +236,343 @@ func TestExpiredWaitLeavesTheLineForTheNextWaiter(t *testing.T) {
 	}
 	if err := <-second; err != nil {
 		t.Fatalf("second waiter did not acquire: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Lead review before ship (2026-09-22): alive-but-stuck waiters, mixed
+// versions, in-process concurrency, and the Windows delete-retry path.
+// ---------------------------------------------------------------------------
+
+// A waiter can be genuinely ALIVE (same pid, same start time — not recycled)
+// and still have stopped actually polling: suspended by the OS, wedged in
+// another goroutine, paused in a debugger, or an older binary whose Acquire
+// loop exited without ever unregistering. Under "oldest LIVE waiter wins"
+// alone that record is the permanent, unbreakable head of the line — pid
+// liveness can never distinguish it from a legitimately queued waiter.
+// registerWaiter is called directly (bypassing Acquire) to build exactly that
+// record and then, deliberately, never refreshed.
+func TestAliveButNotPollingWaiterDoesNotBlockTheQueue(t *testing.T) {
+	m := realClockManager(t)
+	m.waiterHeartbeatTTL = 30 * time.Millisecond // fast staleness window for the test
+	holder, err := m.TryAcquire(ClassMedia, Options{Reason: "seed", TTL: time.Hour})
+	if err != nil {
+		t.Fatalf("setup acquire: %v", err)
+	}
+
+	stuck, stuckUnregister := m.registerWaiter(ClassText, Options{Reason: "stuck"})
+	t.Cleanup(stuckUnregister)
+	if stuck.path == "" {
+		t.Fatal("the stuck waiter failed to register — test cannot proceed")
+	}
+
+	// Outlive the (shortened) staleness window without ever refreshing —
+	// simulating a suspended process or an old binary that registers once and
+	// never calls refreshWaiter.
+	time.Sleep(100 * time.Millisecond)
+
+	live := make(chan error, 1)
+	go func() {
+		l, aerr := m.Acquire(ClassText, Options{Reason: "live waiter", Wait: 5 * time.Second})
+		if aerr == nil {
+			_ = l.Release()
+		}
+		live <- aerr
+	}()
+	// The stuck record is already on disk with an EARLIER SinceMs than the
+	// live waiter will get, so len(Waiters()) briefly includes it until a read
+	// prunes it; wait for the LIVE one specifically to show up by polling
+	// until the count is nonzero and the stuck one is gone.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		ws := m.Waiters()
+		found := false
+		for _, w := range ws {
+			if w.path == stuck.path {
+				found = true
+			}
+		}
+		if !found && len(ws) >= 1 {
+			break
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+
+	if err := holder.Release(); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+	if err := <-live; err != nil {
+		t.Fatalf("live waiter never acquired behind an alive-but-stuck record: %v", err)
+	}
+	if _, statErr := os.Stat(stuck.path); !os.IsNotExist(statErr) {
+		t.Fatal("the stuck waiter's record survived a read after going heartbeat-stale; it should have been pruned")
+	}
+}
+
+// The dead-pid case (TestDeadWaiterRecordNeverBlocksTheLine) and the
+// heartbeat-stale case (above) are different code paths; pid RECYCLING is a
+// third: the pid is alive, but it now belongs to an unrelated process.
+// Waiters() must catch this the same way Reclaimable does for the lease
+// holder itself — by comparing the recorded process-start identity against
+// the current one — so a recycled pid can neither hold the lease nor jump the
+// waiter queue.
+func TestRecycledPidWaiterRecordNeverBlocksTheLine(t *testing.T) {
+	m := realClockManager(t)
+	holder, err := m.TryAcquire(ClassMedia, Options{Reason: "seed", TTL: time.Hour})
+	if err != nil {
+		t.Fatalf("setup acquire: %v", err)
+	}
+
+	const recycledPID = 999998
+	origAlive := pidAliveFn
+	pidAliveFn = func(pid int) bool {
+		if pid == recycledPID {
+			return true // a process with this pid IS running — just not the original one
+		}
+		return origAlive(pid)
+	}
+	t.Cleanup(func() { pidAliveFn = origAlive })
+	origStart := m.procStart
+	m.procStart = func(pid int) (int64, bool) {
+		if pid == recycledPID {
+			return 424242, true // different start time than the record below: recycled
+		}
+		return origStart(pid)
+	}
+
+	if err := os.MkdirAll(m.waitersDir(), 0o777); err != nil {
+		t.Fatalf("mkdir waiters: %v", err)
+	}
+	old := Waiter{PID: recycledPID, StartTimeMs: 111111, Class: ClassText,
+		Reason: "original holder of this pid, long gone", SinceMs: m.now().Add(-time.Hour).UnixMilli()}
+	b, merr := json.Marshal(old)
+	if merr != nil {
+		t.Fatalf("marshal: %v", merr)
+	}
+	oldPath := filepath.Join(m.waitersDir(), "999998.recycled.json")
+	if err := os.WriteFile(oldPath, b, 0o666); err != nil {
+		t.Fatalf("seed recycled-pid waiter: %v", err)
+	}
+
+	live := make(chan error, 1)
+	go func() {
+		l, aerr := m.Acquire(ClassText, Options{Reason: "live waiter", Wait: 5 * time.Second})
+		if aerr == nil {
+			_ = l.Release()
+		}
+		live <- aerr
+	}()
+	waitAllRegistered(t, m, 1, 2*time.Second)
+
+	if err := holder.Release(); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+	if err := <-live; err != nil {
+		t.Fatalf("live waiter never acquired behind a recycled-pid record: %v", err)
+	}
+	if _, statErr := os.Stat(oldPath); !os.IsNotExist(statErr) {
+		t.Fatal("the recycled-pid waiter record survived a read; it should have been pruned")
+	}
+}
+
+// MIXED VERSIONS: an older harness binary's waiter record is the OLD file
+// name shape ("pid.sincems.json" — two segments, no random token) and, since
+// old code only ever raced TryAcquire and never knew about ordering, it is
+// NEVER refreshed after creation. The new reader must still parse it (no
+// schema change) and must not let its presence — nor its earlier SinceMs —
+// wedge a new-version waiter behind it forever: it goes heartbeat-stale on
+// the same clock as any other stuck record and stops affecting anyone's
+// order.
+func TestOldVersionWaiterRecordIsReadableAndCannotWedgeTheLine(t *testing.T) {
+	m := realClockManager(t)
+	m.waiterHeartbeatTTL = 30 * time.Millisecond
+	holder, err := m.TryAcquire(ClassMedia, Options{Reason: "seed", TTL: time.Hour})
+	if err != nil {
+		t.Fatalf("setup acquire: %v", err)
+	}
+
+	if err := os.MkdirAll(m.waitersDir(), 0o777); err != nil {
+		t.Fatalf("mkdir waiters: %v", err)
+	}
+	oldPid := os.Getpid() // a real, alive pid; old code carried no random token either
+	old := Waiter{PID: oldPid, Class: ClassText, Reason: "pre-upgrade waiter", SinceMs: m.now().Add(-time.Minute).UnixMilli()}
+	if st, ok := m.procStart(oldPid); ok {
+		old.StartTimeMs = st
+	}
+	b, merr := json.Marshal(old)
+	if merr != nil {
+		t.Fatalf("marshal: %v", merr)
+	}
+	// The OLD two-segment name, exactly what a pre-D-13x registerWaiter wrote.
+	oldPath := filepath.Join(m.waitersDir(), strconv.Itoa(oldPid)+"."+strconv.FormatInt(old.SinceMs, 10)+".json")
+	if err := os.WriteFile(oldPath, b, 0o666); err != nil {
+		t.Fatalf("seed old-format waiter: %v", err)
+	}
+
+	// Outlive the staleness window; old code never rewrites this file.
+	time.Sleep(100 * time.Millisecond)
+
+	live := make(chan error, 1)
+	go func() {
+		l, aerr := m.Acquire(ClassText, Options{Reason: "new-version waiter", Wait: 5 * time.Second})
+		if aerr == nil {
+			_ = l.Release()
+		}
+		live <- aerr
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		ws := m.Waiters()
+		found := false
+		for _, w := range ws {
+			if w.path == oldPath {
+				found = true
+			}
+		}
+		if !found && len(ws) >= 1 {
+			break
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+
+	if err := holder.Release(); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+	if err := <-live; err != nil {
+		t.Fatalf("a new-version waiter never acquired behind an old-format record: %v", err)
+	}
+	if _, statErr := os.Stat(oldPath); !os.IsNotExist(statErr) {
+		t.Fatal("the old-format waiter record survived a read; it should go stale and be pruned like any other")
+	}
+}
+
+// A deterministic tie: two waiters registered at the EXACT same instant (a
+// fixed fake clock, so SinceMs is forced identical) must resolve to exactly
+// one front-of-queue — never both, never neither. Both/neither is a livelock:
+// "both front" races them against each other again (the original bug),
+// "neither front" means nobody ever attempts the claim.
+func TestTiedWaitersResolveToExactlyOneFrontOfQueue(t *testing.T) {
+	m, _ := newTestManager(t) // fixed clock: both registrations land on the same millisecond
+	if _, err := m.TryAcquire(ClassMedia, Options{Reason: "seed", TTL: time.Hour}); err != nil {
+		t.Fatalf("setup acquire: %v", err)
+	}
+
+	a, unregA := m.registerWaiter(ClassText, Options{Reason: "a"})
+	defer unregA()
+	b, unregB := m.registerWaiter(ClassMedia, Options{Reason: "b"})
+	defer unregB()
+
+	if a.SinceMs != b.SinceMs {
+		t.Fatalf("test setup did not produce a tie: SinceMs %d vs %d", a.SinceMs, b.SinceMs)
+	}
+	if a.path == b.path {
+		t.Fatal("two registrations collided on the same file — the random token did not disambiguate a same-millisecond tie")
+	}
+
+	aFront := m.isFrontOfQueue(a)
+	bFront := m.isFrontOfQueue(b)
+	if aFront == bFront {
+		t.Fatalf("exactly one of two tied waiters must be front-of-queue, got a=%v b=%v (both or neither is a livelock)", aFront, bFront)
+	}
+}
+
+// The in-process slot path aside (which never calls registerWaiter — it
+// arbitrates purely in-process, see docs/systems/gpu-lease.md "Two jobs in
+// the SAME process"), nothing stops two goroutines in ONE process from each
+// calling Acquire directly, and doing so shares one real pid across two
+// waiter records. With zero stagger, several of them are likely to tie on
+// SinceMs at once. None of that may deadlock: every one of them must
+// eventually acquire and release in turn.
+func TestSameProcessConcurrentWaitersDoNotDeadlock(t *testing.T) {
+	m := realClockManager(t)
+	holder, err := m.TryAcquire(ClassMedia, Options{Reason: "seed", TTL: time.Hour})
+	if err != nil {
+		t.Fatalf("setup acquire: %v", err)
+	}
+
+	const n = 8
+	var mu sync.Mutex
+	completed := 0
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			class := ClassText
+			if i%2 == 1 {
+				class = ClassMedia
+			}
+			// Deliberately NO stagger: every goroutine calls Acquire from the
+			// same real pid at once, maximizing SinceMs ties.
+			l, aerr := m.Acquire(class, Options{Reason: "job", Wait: 15 * time.Second})
+			if aerr != nil {
+				t.Errorf("waiter %d: %v", i, aerr)
+				return
+			}
+			time.Sleep(time.Millisecond)
+			if rerr := l.Release(); rerr != nil {
+				t.Errorf("waiter %d release: %v", i, rerr)
+				return
+			}
+			mu.Lock()
+			completed++
+			mu.Unlock()
+		}(i)
+	}
+
+	waitAllRegistered(t, m, n, 3*time.Second)
+	if err := holder.Release(); err != nil {
+		t.Fatalf("release seed holder: %v", err)
+	}
+	wg.Wait()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if completed != n {
+		t.Fatalf("only %d of %d same-process waiters completed — the rest deadlocked", completed, n)
+	}
+}
+
+// The expired-wait test earlier in this file proves the record is REMOVED
+// (its content is gone by the time Acquire returns). It does not prove that
+// removal SURVIVES a concurrent reader — and every OTHER waiter's Waiters()
+// call does exactly that (a plain os.ReadFile) against this same path, on
+// every one of its poll ticks. On Windows a reader blocks a delete; this
+// pins that registerWaiter's unregister (removeClaim, not a bare os.Remove)
+// actually retries through it rather than merely being reviewed as if it
+// did. Modelled on TestRenameReplacingSurvivesAConcurrentReader's tight
+// reader-loop pattern, the proven way to reproduce the Windows race reliably
+// without a sleep-based wait.
+func TestWaiterUnregisterSurvivesAConcurrentReader(t *testing.T) {
+	m := realClockManager(t)
+	self, unregister := m.registerWaiter(ClassText, Options{Reason: "expiring"})
+	if self.path == "" {
+		t.Fatal("failed to register — test cannot proceed")
+	}
+
+	stop := make(chan struct{})
+	var readerRunning sync.WaitGroup
+	readerRunning.Add(1)
+	go func() {
+		defer readerRunning.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			_, _ = os.ReadFile(self.path)
+		}
+	}()
+	defer func() {
+		close(stop)
+		readerRunning.Wait()
+	}()
+
+	time.Sleep(5 * time.Millisecond) // let the reader actually start spinning
+	unregister()
+
+	if _, statErr := os.Stat(self.path); !os.IsNotExist(statErr) {
+		t.Fatal("the waiter record survived removal under a concurrent reader — the Windows delete-retry path did not cover this call site")
 	}
 }

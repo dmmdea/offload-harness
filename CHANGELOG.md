@@ -28,6 +28,29 @@ Versioning: [SemVer](https://semver.org/).
   blocked (the same sharing-violation window `meta.json` and the epoch lock already retry)
   left a phantom, un-removable "front of queue" that starved everyone behind it. Docs:
   `docs/systems/gpu-lease.md` ("A held card is a place in line" → the new FIFO bullet).
+- **Lead review before ship: an alive-but-not-polling waiter could still wedge the FIFO
+  queue forever.** Pid liveness cannot distinguish "queued and actively polling" from
+  "queued, still alive, and never polling again" — a suspended process, one wedged in
+  another goroutine, or an older harness binary whose `Acquire` loop exited without
+  unregistering. Every waiter now re-stamps its own record's mtime on every poll tick
+  (`refreshWaiter`, the same beside-then-rename-over pattern as `Renew`/`Restamp`, since this
+  file is read by every OTHER waiter on every one of ITS ticks); `Waiters()` treats a record
+  unrefreshed for 10x the poll interval (floor 15 s, both overridable in tests via
+  `waiterHeartbeatTTL`) the same as a dead pid — skipped for ordering, pruned best-effort.
+  This doubles as mixed-version safety during a rollout: an older binary's record is the
+  identical JSON shape (no schema change) so a newer reader parses it fine, but the old code
+  never refreshes it, so it goes stale on the same clock and cannot wedge a new-version
+  waiter behind it. Pid recycling was already covered (`StartTimeMs` vs. the current
+  `procStart`, the same check `Reclaimable` uses for the lease holder) — added a dedicated
+  regression test. Added a same-process concurrency test (several goroutines, one real pid,
+  zero stagger, to force `SinceMs` ties) confirming the random-token filename tie-break
+  always resolves to exactly one front-of-queue, never both (livelock) or neither; the
+  in-process `mediaSlot` path never touches the waiters directory and was unaffected either
+  way. Added a dedicated concurrent-reader test for `registerWaiter`'s unregister call site
+  (`removeClaim`, not the `os.Remove` this round replaced) mirroring
+  `TestRenameReplacingSurvivesAConcurrentReader`'s tight-reader-loop pattern. Every new check
+  was mutation-tested: disabling the heartbeat-staleness check, the tie-break, or reverting
+  to a bare `os.Remove` each turns its matching test red.
 
 ### Added — opencode context instrument
 

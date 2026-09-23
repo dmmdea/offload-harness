@@ -397,6 +397,23 @@ exclusive card, and three measurement rows read the seat's 10 GiB as their own f
   brand-new `Acquire`'s very first, pre-registration probe (and any bare `TryAcquire` that never sets `Wait`) can
   still land in the narrow window between a release and the front waiter's next poll — the same residual race
   every poll-based queue has, bounded by one poll interval, and unrelated to the hours-long starvation this fixes.
+- **A waiter must keep proving it is still polling, not merely alive.** Pid liveness alone cannot tell "queued
+  and actively polling" from "queued, still alive, and never polling again" — a suspended process, one wedged in
+  another goroutine, or an OLDER harness binary whose `Acquire` loop exited without unregistering (it only ever
+  raced `TryAcquire`, so a queue-ordering bug in the old code cost it nothing there, but would make its leftover
+  record an unbreakable head of the new FIFO line). Every poll, win-or-lose, a waiter re-stamps its own record's
+  mtime (beside-then-rename-over, the same Windows-safe pattern as `Renew`/`Restamp` — this file is read by every
+  OTHER waiter on every one of ITS ticks). A reader treats a record not refreshed within 10x the poll interval
+  (floor 15 s) exactly like a dead pid: skipped for ordering, pruned best-effort. This is also what keeps a
+  MIXED-VERSION rollout safe — an older binary's record is the identical JSON shape (no schema change), so a
+  newer reader parses it fine, but the older code never refreshes it, so it goes stale on the same clock and
+  stops affecting anyone's order; it cannot wedge the line, it just keeps racing exactly as it always did. Pid
+  RECYCLING is covered the same way the lease holder itself is: `StartTimeMs`, stamped from `procStart` at
+  registration, is compared against the current process behind that pid on every read, so a pid handed to an
+  unrelated process reads as dead. Same-process concurrency (two goroutines in one process each calling `Acquire`
+  independently — not the in-process `mediaSlot` path, which never touches `<state>/gpu/waiters/` at all) shares
+  one real pid across two+ waiter records; a same-millisecond tie resolves to exactly one front-of-queue via the
+  random-token filename tie-break, never both (a livelock) and never neither.
 - **An unload stamps `<state>/gpu/seat-warm-owed`**, and a warm-back runs only when (1) the card is still ours — the
   wrapper form checks its own epoch (`Lease.Check`), `gpu release --warm-seat --epoch N` checks the record is still N —
   and (2) nobody is queued behind us. With a waiter the warm is skipped and said so (`NOT warming … back: N lease(s)
