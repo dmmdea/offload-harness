@@ -9,10 +9,11 @@
 //   element, runs experimental.chat.system.transform on it, then chat.params.
 // - Instruction files are rendered as `Instructions from: <abs path>\n<file text>`.
 // - Title and compaction requests carry only their agent prompt as the system text.
-import { describe, expect, it } from "bun:test";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { PROTOCOL_MARKER } from "../src/protocol.ts";
 import { createHooks, DEFAULTS, RECON_TOOLS, resolveOptions, type Options } from "../src/plugin.ts";
 
 const tmpLog = () => join(mkdtempSync(join(tmpdir(), "olo-diet-")), "dispatch-log.jsonl");
@@ -342,5 +343,131 @@ describe("O1: offloadTools recon | all, and the offload-media subagent", () => {
     const task = { description: "Launch a subagent.", parameters: {} };
     await h["tool.definition"]!({ toolID: "task" }, task);
     expect(task.description).toContain('"offload-media"');
+  });
+});
+
+describe("O3: child, title and compaction requests", () => {
+  let cfgHome: string;
+  let agentsPath: string;
+  const AGENTS = "# AGENTS.md — house rules\n\n## Prime directive\nDeliver working, verified results.\n\n## Git\nNever mix accounts.\n";
+  const prevXdg = process.env.XDG_CONFIG_HOME;
+  beforeEach(() => {
+    cfgHome = mkdtempSync(join(tmpdir(), "olo-xdg-"));
+    mkdirSync(join(cfgHome, "opencode"), { recursive: true });
+    agentsPath = resolve(join(cfgHome, "opencode", "AGENTS.md"));
+    writeFileSync(agentsPath, AGENTS);
+    process.env.XDG_CONFIG_HOME = cfgHome;
+  });
+  afterEach(() => {
+    if (prevXdg === undefined) delete process.env.XDG_CONFIG_HOME;
+    else process.env.XDG_CONFIG_HOME = prevXdg;
+  });
+  // opencode 1.18.32 builds ONE element: agent prompt, env, instruction files, skills, joined by "\n"
+  const ENV = "You are powered by the model named m. The exact model ID is p/m\nHere is some useful information about the environment you are running in:\n<env>\n  Working directory: /w\n</env>";
+  const PROJECT = "Instructions from: /w/AGENTS.md\nproject rule: tests first\n";
+  const SKILLS = "Skills provide specialized instructions and workflows for specific tasks.\nUse the skill tool to load a skill when a task matches its description.";
+  const system = (prompt: string) => [[prompt, ENV, `Instructions from: ${agentsPath}\n${AGENTS}`, PROJECT, SKILLS].join("\n")];
+
+  async function child(h: ReturnType<typeof createHooks>, id: string, agent: string) {
+    await h.event!({ event: { type: "session.created", properties: { info: { id, parentID: "root", agent } } } } as any);
+  }
+
+  it("offload child: no dispatch protocol, and the global AGENTS.md segment becomes a 3-line digest", async () => {
+    const h = createHooks(opts());
+    await child(h, "c-off", "offload");
+    const out = { system: system("You are the OFFLOAD subagent.") };
+    await h["experimental.chat.system.transform"]!({ sessionID: "c-off", model: {} as any }, out);
+    const s = out.system[0];
+    expect(out.system.length).toBe(1);
+    expect(s).not.toContain(PROTOCOL_MARKER);
+    expect(s).not.toContain("Never mix accounts.");
+    expect(s).not.toContain(`Instructions from: ${agentsPath}`);
+    const digest = s.slice(s.indexOf("House rules (read-only digest)"), s.indexOf(PROJECT));
+    expect(digest.trim().split("\n").length).toBeLessThanOrEqual(3);
+    expect(digest).toMatch(/verify, then assert/i);
+    expect(digest).toMatch(/quote/i);
+    expect(digest).toMatch(/instructions addressed to you/i);
+    // everything around the segment is intact, in order
+    expect(s.startsWith("You are the OFFLOAD subagent.\n" + ENV + "\n")).toBe(true);
+    expect(s.endsWith(PROJECT + "\n" + SKILLS)).toBe(true);
+  });
+
+  it("offload-media child gets the same diet", async () => {
+    const h = createHooks(opts());
+    await child(h, "c-med", "offload-media");
+    const out = { system: system("You are the OFFLOAD-MEDIA subagent.") };
+    await h["experimental.chat.system.transform"]!({ sessionID: "c-med", model: {} as any }, out);
+    expect(out.system[0]).not.toContain(PROTOCOL_MARKER);
+    expect(out.system[0]).not.toContain("Never mix accounts.");
+  });
+
+  it("a child of another agent (general) keeps the full rules and the protocol", async () => {
+    const h = createHooks(opts());
+    await child(h, "c-gen", "general");
+    const out = { system: system("You are general.") };
+    await h["experimental.chat.system.transform"]!({ sessionID: "c-gen", model: {} as any }, out);
+    expect(out.system[0]).toContain("Never mix accounts.");
+    expect(out.system[0]).toContain(PROTOCOL_MARKER);
+  });
+
+  it("the main session is unchanged: full AGENTS.md plus the protocol, one element", async () => {
+    const h = createHooks(opts());
+    const out = { system: system("You are opencode.") };
+    await h["experimental.chat.system.transform"]!({ sessionID: "root", model: {} as any }, out);
+    expect(out.system.length).toBe(1);
+    expect(out.system[0]).toContain("Never mix accounts.");
+    expect(out.system[0].split(PROTOCOL_MARKER).length - 1).toBe(1);
+  });
+
+  it("fails open when the segment does not match the file on disk (format or content drift)", async () => {
+    const h = createHooks(opts());
+    await child(h, "c-drift", "offload");
+    const drifted = [["You are the OFFLOAD subagent.", ENV, `Instructions from: ${agentsPath}\n${AGENTS.replace("verified", "VERIFIED")}`, SKILLS].join("\n")];
+    const out = { system: drifted.slice() };
+    await h["experimental.chat.system.transform"]!({ sessionID: "c-drift", model: {} as any }, out);
+    expect(out.system[0]).toBe(drifted[0]); // untouched, not truncated at a guessed boundary
+    expect(h._diagnostics.systemTransform.childFailOpen).toBe(1);
+  });
+
+  it("a rules file saved with a byte-order mark still matches the text the host decoded without it", async () => {
+    writeFileSync(agentsPath, String.fromCharCode(0xfeff) + AGENTS);
+    const h = createHooks(opts());
+    await child(h, "c-bom", "offload");
+    const out = { system: system("You are the OFFLOAD subagent.") }; // the host's text carries no BOM
+    await h["experimental.chat.system.transform"]!({ sessionID: "c-bom", model: {} as any }, out);
+    expect(out.system[0]).not.toContain("Never mix accounts.");
+    expect(out.system[0]).toContain("House rules (read-only digest)");
+  });
+
+  it("the project AGENTS.md is never touched, only the global one", async () => {
+    const h = createHooks(opts());
+    await child(h, "c-proj", "offload");
+    const out = { system: system("You are the OFFLOAD subagent.") };
+    await h["experimental.chat.system.transform"]!({ sessionID: "c-proj", model: {} as any }, out);
+    expect(out.system[0]).toContain(PROJECT);
+  });
+
+  // The two prompts below are copied verbatim (first sentence) from the opencode 1.18.32 bundle.
+  it("title request: nothing is injected", async () => {
+    const h = createHooks(opts());
+    const title = "You are a title generator. You output ONLY a thread title. Nothing else.\n\n<task>\nGenerate a brief title";
+    const out = { system: [title] };
+    await h["experimental.chat.system.transform"]!({ sessionID: "root", model: {} as any }, out);
+    expect(out.system).toEqual([title]);
+  });
+
+  it("compaction request: nothing is injected", async () => {
+    const h = createHooks(opts());
+    const comp = "You are a context summarization agent. You are given a conversation between a user and an agent.";
+    const out = { system: [comp] };
+    await h["experimental.chat.system.transform"]!({ sessionID: "root", model: {} as any }, out);
+    expect(out.system).toEqual([comp]);
+  });
+
+  it("an unrecognised system prompt fails open: the protocol is injected as before", async () => {
+    const h = createHooks(opts());
+    const out = { system: ["You are a titler (reworded upstream)."] };
+    await h["experimental.chat.system.transform"]!({ sessionID: "root", model: {} as any }, out);
+    expect(out.system[0]).toContain(PROTOCOL_MARKER);
   });
 });
