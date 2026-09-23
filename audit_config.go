@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -198,9 +197,9 @@ func runAuditConfig(args []string) error {
 	if err != nil {
 		return fmt.Errorf("audit-config: read %s: %w", path, err)
 	}
-	// PowerShell writes UTF-8 WITH a BOM; encoding/json rejects one. Every Windows node's config
-	// would otherwise fail to parse here while the harness itself reads it fine.
-	rawCfg = bytes.TrimPrefix(rawCfg, []byte{0xEF, 0xBB, 0xBF})
+	// PowerShell 5.1 writes UTF-8 WITH a BOM; encoding/json rejects one. The harness's own
+	// loader strips it the same way (config.StripBOM), so this audit reads what it reads.
+	rawCfg = config.StripBOM(rawCfg)
 	var live map[string]any
 	if err := json.Unmarshal(rawCfg, &live); err != nil {
 		return fmt.Errorf("audit-config: %s is not valid JSON: %w", path, err)

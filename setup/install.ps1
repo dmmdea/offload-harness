@@ -631,6 +631,22 @@ function Select-CudaBuild {
 # seeded seat whose weights never download, or a download whose seat nothing renders.
 # Previously this lived inline in the main flow, below the dot-source test seam, so no
 # test could reach it and deleting the qwen3.5-4b line left the whole suite green.
+# Get-FamilyModelKeys: the family half of the Step 5 download set. The E2B rides the
+# family gate alone; the 26B also needs the resolved profile's include_26b (the value
+# Resolve-ProfileParams returns AFTER its RAM gate - moe_26b drop, or cpu_moe with no
+# RAM path). Step 5 used to add 'model-26b' on the family gate alone, so a tier that
+# drops the 26B (blackwell-8: include_26b false) still downloaded 14.25 GB that the
+# rendered yaml never serves (OptiPlex parity audit, 2026-09-23). Download set and
+# served roster now come from the same flag, like the other gated seats.
+function Get-FamilyModelKeys {
+  param([bool]$WithFamily, [bool]$Include26B)
+  $keys = @()
+  if (-not $WithFamily) { return $keys }
+  $keys += 'model-e2b'
+  if ($Include26B) { $keys += 'model-26b' }
+  return $keys
+}
+
 function Get-GatedModelKeys {
   param([bool]$IncludeQwen38, [bool]$IncludeQwen354B, [bool]$IncludeQwen359B, [bool]$IncludeQwen3827B, [bool]$WithFamily)
   $keys = @()
@@ -1171,6 +1187,13 @@ if ($backend -notin @('cuda','vulkan','cpu')) { throw "unsupported backend '$bac
 if (-not $ramTier) { $ramTier = 'min' }   # conservative default when unknown (drops the RAM-gated 26B path)
 Write-Host "OK    backend = $backend | profile = $(if ($profileId) { $profileId } else { '(none - backend defaults)' }) | ram_tier = $ramTier$(if ($bigRam) { ' | big_ram' } else { '' })" -ForegroundColor Green
 
+# The profile's render values are resolved HERE, before any download and on the
+# -RenderOnly path too: Step 5 downloads the 26B only when the resolved include_26b
+# (after the RAM gate) says the yaml Step 6 renders will serve it. Resolve-ProfileParams
+# is pure (profiles.json + the detect verdict); Step 6 reuses $pp as is.
+$profilesJson = Join-Path (Join-Path $scriptDir 'templates') 'profiles.json'
+$pp = Resolve-ProfileParams -ProfileId $profileId -RamTier $ramTier -BigRam $bigRam -ProfilesJsonPath $profilesJson -Backend $backend
+
 # -RenderOnly skips all artifact acquisition (Steps 2-5): it renders the config
 # from the templates + profiles.json only. Test-Go126 is defined outside the guard
 # so Step 7 (also guarded) can still reference it in a normal run.
@@ -1258,8 +1281,13 @@ $manifestComponents['llama-swap'] = $SWAP_TAG
 # R3.4: SKIP test hashes once (cached via <file>.sha-ok) against the pinned sha; a pin bump
 # (different sha) invalidates both the sentinel comparison and the manifest version check.
 # ---------------------------------------------------------------------------
+# $pp (resolved above the artifact steps) decides the 26B: it is fetched only when the
+# yaml Step 6 renders will serve it (include_26b after the RAM gate).
 $modelKeys = @('model-e4b', 'model-embed')
-if ($withFamily) { $modelKeys += @('model-e2b', 'model-26b') }
+$modelKeys += @(Get-FamilyModelKeys -WithFamily $withFamily -Include26B ([bool]$pp.include_26b))
+if ($withFamily -and -not $pp.include_26b) {
+  Write-Host "SKIP  model: gemma-4-26B (profile '$profileId' drops the 26B: moe_26b=$($pp.moe_mode), ram_tier=$ramTier)" -ForegroundColor DarkGray
+}
 $includeQwen38 = $false
 $includeQwen354B = $false
 $includeQwen359B = $false
@@ -1422,10 +1450,8 @@ function Resolve-HarnessExe {
 # R3.6: rendered paths use forward slashes - llama-swap on Windows chokes on backslash
 # escapes inside its YAML string scalars; Windows APIs accept forward slashes natively.
 # ---------------------------------------------------------------------------
-$profilesJson = Join-Path (Join-Path $scriptDir 'templates') 'profiles.json'
-
-
-$pp = Resolve-ProfileParams -ProfileId $profileId -RamTier $ramTier -BigRam $bigRam -ProfilesJsonPath $profilesJson -Backend $backend
+# $profilesJson and $pp were resolved above the artifact steps (the 26B download
+# follows the same include_26b this step renders from).
 # The template to render: the profile's backend (dual-gpu -> dual-cuda; the
 # blackwell-32/48/72 all-resident tiers -> cuda-resident), else the fallback's
 # backend (= the detected backend). Both are CUDA-only; guard a stray override.

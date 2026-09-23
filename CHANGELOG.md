@@ -6,6 +6,48 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed — OptiPlex parity: doctor checks what a route loads, the 26B download honours the tier, `generate-video --fast`, the Wan lane defers cleanly, a BOM config loads
+
+Five harness defects from the OptiPlex 7060 (blackwell-8) media parity audit, 2026-09-23.
+
+- **`doctor` (and `offload_status` / `acceptance`) no longer call a route CONFIGURED because its script
+  exists.** `generate_video`, `animate_character` and both `generate_audio` kinds now also check what
+  the script loads (`internal/mediacap/routeneeds.go`): the model files of the route's graph (bound keys
+  AND the builder defaults an unset key falls back to, per `videogen_family`), the custom-node classes
+  the graph names (`VHS_VideoCombine`, the DisTorch2 loaders, `UnetLoaderGGUF`; also on the image/edit
+  routes), and for voice the python `tts.mjs` spawns, its `chatterbox` + `torch` packages and the
+  Chatterbox weights in the HF cache. Every missing item is named on the route's line (class + pack +
+  URL, file + class directory). `doctor` asks a ComfyUI that is already running (`/object_info`) and
+  falls back to `<comfy_dir>/custom_nodes` on disk; nothing starts ComfyUI or loads a model.
+  `TestRouteNeedsMirrorTheRenderBuilders` pins the Go copies to the `render/wf-*.mjs` defaults. The
+  default `offload_status` payload changes deliberately: `media.routes` details carry the same checks
+  (golden `offload_status_default.golden.json` regenerated for the `generate_video` detail only).
+- **`install.ps1` no longer downloads the Gemma 26B on a tier that drops it.** Step 5 added
+  `model-26b` on the family gate alone, so blackwell-8 (`include_26b: false`) fetched 14.25 GB the
+  rendered yaml never serves. The profile is resolved before the download set, and
+  `Get-FamilyModelKeys` adds the 26B only when the resolved `include_26b` (RAM gate included) is true.
+- **`local-offload generate-video --fast`**: the CLI now carries every `offload_generate_video`
+  option; the distilled Wan recipe was MCP-only. Stale help text (`wan 4 fast / 20 hero`) corrected.
+- **`render/comfy-video.mjs` parsed `--fast` as a value flag**, so the harness's trailing `--fast`
+  read as undefined and rendered the native recipe, and `--fast --upscale-model X` swallowed the
+  upscale flag. It is a boolean now; the runner is import-safe with tests (`comfy-video.test.mjs`).
+- **The Wan lane defers cleanly on a missing custom node.** Before the POST the runner asks the running
+  ComfyUI for every class the graph names (`render/comfy-nodes.mjs`); a missing one is a one-line
+  `MISSING_NODE: … VHS_VideoCombine (custom node pack ComfyUI-VideoHelperSuite …)` defer and nothing is
+  submitted. The failure path sets `process.exitCode` instead of `process.exit()`, which tripped the
+  Windows libuv `UV_HANDLE_CLOSING` abort (exit 0xc0000409) on the reg3 run.
+- **New key `videogen_wan_virtual_vram_gb`** (default 7 = the builder's old constant): the Wan DisTorch2
+  `virtual_vram_gb` is per card, so each node sets its measured value; the pipeline passes it as
+  `--wan-vvram-gb`. 7 OOMs an 8 GB card under "Prefer No Sysmem Fallback". A negative value is a config
+  finding. Separate from `videogen_pool_vvram_gb` (LTX-2.5: VRAM borrowed from a donor card).
+- **A config.json saved with a UTF-8 byte-order mark loads, and a config that cannot be parsed says the truth.**
+  PowerShell 5.1 writes a BOM; `encoding/json` refused it, and the warning then said "the file's other settings
+  ARE in effect" while the process ran on built-in defaults (a run-graph on the OptiPlex did exactly that). The
+  loader strips a leading BOM (`config.StripBOM`, also used by `audit-config` and local-agent's `--env-rules` /
+  `--setup` files). A file that still does not decode is a `config.ParseError`: the value is exactly the built-in
+  defaults (a JSON type error used to leave a half-read file), and the stderr warning, doctor's `config:` rows and
+  fleet-serve's refusal all say nothing from the file is in effect. Validation failures keep their own wording.
+
 ### Fixed — the launcher's dxg warning reports what is new, not everything since the distro started
 
 - `seat_fg.sh` counted `make_resident: Ioctl failed: -12` / `reserve_gpu_va … -75` over the whole kernel log, so after

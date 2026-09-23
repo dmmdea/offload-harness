@@ -115,6 +115,9 @@ func TestRelativeScriptResolvesAgainstExeDir(t *testing.T) {
 	cfg.ComfyDir = t.TempDir()
 	cfg.NodePath = "node"
 	touch(t, exeDir, "render/comfy-video.mjs")
+	// The Wan graph's custom-node packs (routeneeds.go); no models root, so the model
+	// names are reported as not checked rather than missing.
+	installPacks(t, cfg.ComfyDir, "ComfyUI-VideoHelperSuite", "ComfyUI-MultiGPU", "ComfyUI-GGUF")
 
 	got := byName(routesIn(cfg, exeDir))
 	if got["generate_video"].State != Configured {

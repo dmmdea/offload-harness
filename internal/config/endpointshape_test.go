@@ -394,3 +394,38 @@ func TestEndpointWarningsSkipsBlankEntries(t *testing.T) {
 		t.Fatalf("a non-blank unusable delegate_remotes value must still produce a finding")
 	}
 }
+
+// TestFindingsWanVirtualVramNegative: videogen_wan_virtual_vram_gb is a per-card split
+// the pipeline passes only when positive. A negative value renders with the builder's
+// default while the file names another number, so doctor names it. The default and an
+// explicit 0 ("use the builder's value") stay silent, and a config without the key
+// loads the builder's own 7.
+func TestFindingsWanVirtualVramNegative(t *testing.T) {
+	cfg := Default()
+	cfg.VideoGenWanVirtualVramGB = -2
+	joined := strings.Join(cfg.Findings(), "\n")
+	for _, want := range []string{"videogen_wan_virtual_vram_gb", "-2", "negative"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("findings %q must name %q", joined, want)
+		}
+	}
+	zero := Default()
+	zero.VideoGenWanVirtualVramGB = 0
+	if f := zero.Findings(); len(f) != 0 {
+		t.Fatalf("0 means the builder default and must not fire; got %q", f)
+	}
+	loaded, err := Load(writeShapeCfg(t, `{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.VideoGenWanVirtualVramGB != 7 {
+		t.Fatalf("a config without the key must load the builder's 7, got %g", loaded.VideoGenWanVirtualVramGB)
+	}
+	measured, err := Load(writeShapeCfg(t, `{"videogen_wan_virtual_vram_gb": 9.5}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if measured.VideoGenWanVirtualVramGB != 9.5 {
+		t.Fatalf("a measured value must load as written, got %g", measured.VideoGenWanVirtualVramGB)
+	}
+}

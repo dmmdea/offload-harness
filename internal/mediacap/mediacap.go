@@ -11,7 +11,10 @@
 //
 // Three verdicts, and the middle one is the whole point:
 //
-//   - CONFIGURED — bound, and every file it names exists.
+//   - CONFIGURED — bound, and every file it names exists. For the render-script
+//     routes that includes what the script loads: the model files of its graph,
+//     the custom-node classes it names, and the TTS python + weights for voice
+//     (routeneeds.go) — a script on disk over missing weights is not a capability.
 //   - NOT CONFIGURED — no binding on this box. The task defers by design; that is
 //     a legitimate state, not a fault.
 //   - BOUND-BUT-MISSING — the config names a file that is not there. The task
@@ -69,17 +72,30 @@ func (r Route) OK() bool { return r.State == Configured }
 
 // Routes derives every file-backed media route for cfg against the real
 // filesystem, resolving relative script paths against the running executable's
-// directory exactly like the pipeline does.
+// directory exactly like the pipeline does. Custom-node classes are decided from
+// <comfy_dir>/custom_nodes on disk (DiskNodeCheck): offload_status and acceptance call
+// this, and neither may make a network call per route.
 func Routes(cfg config.Config) []Route {
+	return RoutesChecked(cfg, DiskNodeCheck)
+}
+
+// RoutesChecked is Routes with the custom-node decision injected: `doctor` passes
+// LiveNodeChecker, which asks a ComfyUI that is already running and falls back to disk.
+func RoutesChecked(cfg config.Config, nodes NodeChecker) []Route {
 	exeDir := ""
 	if exe, err := os.Executable(); err == nil {
 		exeDir = filepath.Dir(exe)
 	}
-	return routesIn(cfg, exeDir)
+	return routesWith(cfg, exeDir, nodes)
 }
 
 // routesIn is Routes with an injectable executable dir (unit-testable).
 func routesIn(cfg config.Config, exeDir string) []Route {
+	return routesWith(cfg, exeDir, DiskNodeCheck)
+}
+
+// routesWith derives the routes with both seams injected.
+func routesWith(cfg config.Config, exeDir string, nodes NodeChecker) []Route {
 	var out []Route
 	comfyUsed := false // any bound route that drives a ComfyUI install
 	nodeUsed := false  // any bound route that shells out to a render script
@@ -107,9 +123,10 @@ func routesIn(cfg config.Config, exeDir string) []Route {
 			Detail: "imagegen_script is unset"})
 	} else {
 		comfyUsed, nodeUsed = true, true
-		out = append(out, fileRoute("generate_image", "comfyui", exeDir,
+		r := fileRoute("generate_image", "comfyui", exeDir,
 			binding{key: "imagegen_script", value: cfg.ImageGenScript, kind: scriptBinding},
-		))
+		)
+		out = append(out, withNeeds(r, cfg.ComfyDir, nil, imageNodeClasses(cfg), nil, nodes))
 	}
 
 	// --- inpaint_image: script AND checkpoint, matching the pipeline's gate.
@@ -140,11 +157,11 @@ func routesIn(cfg config.Config, exeDir string) []Route {
 		)
 		r.Detail += fmt.Sprintf("; gen_edit_unet=%s preset=%s (ComfyUI model name, not checked here)",
 			cfg.GenEditUnet, cfg.GenEditPreset)
-		out = append(out, r)
+		out = append(out, withNeeds(r, cfg.ComfyDir, nil, editNodeClasses(cfg), nil, nodes))
 	}
 
 	// --- named families (ADR 0058): one verdict per family, model files included ---
-	fr, famComfy, famNode := familyRoutes(cfg, exeDir)
+	fr, famComfy, famNode := familyRoutes(cfg, exeDir, nodes)
 	out = append(out, fr...)
 	comfyUsed, nodeUsed = comfyUsed || famComfy, nodeUsed || famNode
 
@@ -167,16 +184,31 @@ func routesIn(cfg config.Config, exeDir string) []Route {
 		out = append(out, r)
 	}
 
-	// --- the plain script routes ---
+	// --- the render-script routes: the script, then what its graph or worker loads
+	// (routeneeds.go). run_graph runs the CALLER's graph, so its script is the whole
+	// binding; its manifest satisfaction is the runner's own preflight.
+	family, vFiles, vClasses, vOptional := videoNeeds(cfg)
 	for _, s := range []struct {
 		name, engine, key, value string
 		comfy                    bool
+		derive                   func(Route) Route
 	}{
-		{"generate_video", "comfyui", "videogen_script", cfg.VideoGenScript, true},
-		{"animate_character", "comfyui", "animategen_script", cfg.AnimateGenScript, true},
-		{"generate_audio:voice", "chatterbox-tts", "voicegen_script", cfg.VoiceGenScript, false},
-		{"generate_audio:music", "acestep", "musicgen_script", cfg.MusicGenScript, true},
-		{"run_graph", "comfyui", "run_graph_script", cfg.RunGraphScript, true},
+		{"generate_video", "comfyui", "videogen_script", cfg.VideoGenScript, true, func(r Route) Route {
+			if r.State == Configured {
+				r.Detail += "; family=" + family
+			}
+			return withNeeds(r, cfg.ComfyDir, vFiles, vClasses, vOptional, nodes)
+		}},
+		{"animate_character", "comfyui", "animategen_script", cfg.AnimateGenScript, true, func(r Route) Route {
+			return withNeeds(r, cfg.ComfyDir, animateNeeds(cfg), nil, nil, nodes)
+		}},
+		{"generate_audio:voice", "chatterbox-tts", "voicegen_script", cfg.VoiceGenScript, false, func(Route) Route {
+			return voiceRoute(cfg, exeDir)
+		}},
+		{"generate_audio:music", "acestep", "musicgen_script", cfg.MusicGenScript, true, func(r Route) Route {
+			return withNeeds(r, cfg.ComfyDir, musicNeeds(), nil, nil, nodes)
+		}},
+		{"run_graph", "comfyui", "run_graph_script", cfg.RunGraphScript, true, nil},
 	} {
 		if s.value == "" {
 			out = append(out, Route{Name: s.name, Engine: s.engine, State: NotConfigured,
@@ -185,9 +217,13 @@ func routesIn(cfg config.Config, exeDir string) []Route {
 		}
 		nodeUsed = true
 		comfyUsed = comfyUsed || s.comfy
-		out = append(out, fileRoute(s.name, s.engine, exeDir,
+		r := fileRoute(s.name, s.engine, exeDir,
 			binding{key: s.key, value: s.value, kind: scriptBinding},
-		))
+		)
+		if s.derive != nil {
+			r = s.derive(r)
+		}
+		out = append(out, r)
 	}
 
 	// --- edit_image (PIL): an explicit python is a binding; an unset one derives

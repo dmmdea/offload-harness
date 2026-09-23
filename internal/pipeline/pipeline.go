@@ -2706,6 +2706,12 @@ func (p *Pipeline) runGenerateVideo(ctx context.Context, req core.Request, meta 
 	if p.cfg.VideoGenTextEncoder != "" {
 		args = append(args, "--text-encoder", p.cfg.VideoGenTextEncoder)
 	}
+	// This card's DisTorch2 split for the Wan experts (GiB of each parked in RAM). A
+	// per-card measurement, so it is config, never a constant in the graph builder; only
+	// the Wan graph reads it. 0/negative passes nothing: the builder keeps its default.
+	if p.cfg.VideoGenWanVirtualVramGB > 0 {
+		args = append(args, "--wan-vvram-gb", strconv.FormatFloat(p.cfg.VideoGenWanVirtualVramGB, 'f', -1, 64))
+	}
 	// LTX-2.5 family bindings (quality-first weight binding, same pattern as the
 	// Wan flags above): filenames + fps + the pooled-DiT placement from config.
 	if p.cfg.VideoGenTransformer != "" {
