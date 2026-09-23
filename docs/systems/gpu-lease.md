@@ -278,10 +278,26 @@ concurrency test rather than by reading:
 - **A reader blocks a delete.** `os.ReadFile` opens without `FILE_SHARE_DELETE`, so `os.Remove`
   on the claim fails while anyone is inspecting it. A failed release *leaks* the lease until both
   halves of the reclaim rule fire, so removal retries.
+- **A reader blocks a rename-over, too.** `os.Rename` on Windows is `MoveFileEx` with
+  `MOVEFILE_REPLACE_EXISTING`, which must delete the destination's directory entry the same way —
+  so it fails with `ERROR_ACCESS_DENIED` / `ERROR_SHARING_VIOLATION` while anyone holds the
+  destination open for a plain read, exactly like the delete case above. Every in-place rewrite
+  (`Restamp`'s stamp change, the heartbeat's `Renew`, the epoch counter's `writeEpoch`) writes
+  beside the file and renames over it, and nothing coordinates that with a concurrent `Inspect()`
+  — this process's own drain-renewal loop, another process's `gpu status`, `offload_status`, or
+  any other reader. `renameReplacing` (`internal/gpulease/renamesafe.go`) retries both errnos with
+  the same bound as the epoch lock's wedge detection (2 s); off Windows it is exactly one
+  `os.Rename`, since POSIX `rename(2)` is atomic and never blocked by a concurrent reader. Measured
+  directly (`TestRenameReplacingSurvivesAConcurrentReader`, `internal/gpulease/renamesafe_test.go`):
+  a bare `os.Rename` against a tight concurrent reader loop failed ~53–58% of iterations; with the
+  retry, 0. Before this fix the same race intermittently failed
+  `TestReserveRenewsTheLeaseWhileDraining` / `TestReserveRenewsTheLeaseWhileWarmingBack` (~1 run in
+  24) and, in production, could leave the `draining` stamp on a held lease (cordoning the seat for
+  the rest of its window) or drop a heartbeat renewal.
 
-Neither is defensive padding: with waiters polling once a second, both races are ordinary
-traffic. Measured under six concurrent acquire/release workers, 1 in 48 cycles failed before the
-retries were added.
+Neither of the first two is defensive padding: with waiters polling once a second, both races are
+ordinary traffic. Measured under six concurrent acquire/release workers, 1 in 48 cycles failed
+before the retries were added.
 
 ## Node interop
 
