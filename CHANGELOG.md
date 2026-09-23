@@ -111,6 +111,31 @@ Versioning: [SemVer](https://semver.org/).
   that first slipped past a vacuous test comparing `protocolText()` with itself (replaced by fixed
   expectations).
 
+## [0.137.0] - 2026-09-22 - offload_status answers one block, or the brief form
+
+### Added
+
+- **`offload_status` takes one optional argument, `section`.** The full answer is ~19 KB (4.7k tokens
+  by a 4-chars/token estimate; a tokenizer measured an earlier 16 KB answer at 6.1k), and it is the
+  usual FIRST call of a delegating session. Sizing a contract needs only the fleet block, and 43%
+  of the dump is `gpu_lease` (every process on every card). `section:"brief"` returns the whole
+  `fleet` block plus one-line `gpu_lease_verdict` and `local_verdict`: 4,426 bytes against 18,768
+  on the reference box (23.6%). A block name (`local`, `media`, `remote`, `accelerators`, `reuse`,
+  `fleet`, `kv_cache_server`, `gpu_lease`) returns that block alone, and computes only that block:
+  the fleet section runs no nvidia-smi. The two brief lines have their own keys, so nothing that
+  decodes `gpu_lease` or `local` as an object meets a string. `config_error` stays the first key of
+  every answer.
+- **The default is unchanged, byte for byte.** No argument, `{}`, `section:"all"` and `section:""`
+  answer exactly what the handler answered before. A golden captured from the pre-change handler
+  on a fixture that owns every machine-dependent input pins it. Two mutations proved the pin bites:
+  a block emitted as `null` when absent, and one changed character in a note.
+- **A wrong call is a defer, not the full dump.** An unknown section (`"gpu"`), an unknown argument
+  (`brief:true`) or a wrong type now defers with the valid values listed. The old handler ignored
+  every argument, so a guessed one silently cost the whole ~19 KB.
+- `agent_delegate`'s sizing guidance now names `offload_status {section:"brief"}`, and
+  `offload_status`'s description names the brief form. The schema's enum is built from the same
+  block table the handler dispatches on.
+
 ## [0.135.2] - 2026-09-22 - the GPU lease survives a concurrent reader on Windows
 
 ### Fixed — the lease record's rename-over retries the Windows sharing race
