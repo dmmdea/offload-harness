@@ -381,7 +381,22 @@ exclusive card, and three measurement rows read the seat's 10 GiB as their own f
 
 - **A queued `Acquire` is visible.** While it polls it keeps a record under `<state>/gpu/waiters/` (pid, class, reason,
   since; pruned on read when the pid is gone); `gpu status` lists them as `queued:` and `offload_status` carries the count.
-  This is information for the release path, never a claim — `meta.json` stays the sole arbiter.
+  `meta.json` stays the sole arbiter of who HOLDS the card — a stale or missing waiter record can never grant
+  possession, only affect who is allowed to TRY next (see FIFO below) or defer one warm to the next holder.
+- **The queue is FIFO (register D-13x, 2026-09-22).** Measured live 2026-09-22: a text reservation queued at
+  19:10 was still waiting at 20:50 while two media reservations that queued LATER (18:41 and 19:06) each took
+  the card ahead of it — every waiting process polled `TryAcquire` once a second with no ordering between them,
+  so whichever process's poll tick landed first after a release won, and a waiter could lose that race
+  indefinitely. Each poll now checks whether the caller is the OLDEST live waiter recorded under
+  `<state>/gpu/waiters/`; only that one attempts the claim, so the instant the holder releases, the front of the
+  line takes it uncontested by the others. A dead waiter's record is pruned on read (as before) and never blocks
+  the line; a waiter whose own `--wait` expires removes its record and leaves the line for whoever is behind it.
+  Class carries no priority in the queue — text and media waiters interleave in pure arrival order; no ADR
+  documents a queue-level class priority (0026 gates text LOADS behind a media lease, 0041 sizes the drain
+  budget, neither says anything about acquisition order). This governs ordering among REGISTERED waiters only: a
+  brand-new `Acquire`'s very first, pre-registration probe (and any bare `TryAcquire` that never sets `Wait`) can
+  still land in the narrow window between a release and the front waiter's next poll — the same residual race
+  every poll-based queue has, bounded by one poll interval, and unrelated to the hours-long starvation this fixes.
 - **An unload stamps `<state>/gpu/seat-warm-owed`**, and a warm-back runs only when (1) the card is still ours — the
   wrapper form checks its own epoch (`Lease.Check`), `gpu release --warm-seat --epoch N` checks the record is still N —
   and (2) nobody is queued behind us. With a waiter the warm is skipped and said so (`NOT warming … back: N lease(s)
