@@ -33,8 +33,13 @@ binding can never name a seat that was not rendered:
 A seat still needs its weights on the box — model downloads stay out-of-band, as with
 every seed.
 
-It ships no file-backed media seed, so `generate_image` / `generate_video` /
-`generate_audio` / `run_graph` report `NOT CONFIGURED` until an operator binds them.
+The installer seeds this tier's media bindings (`config_seed`):
+
+| key | value |
+|---|---|
+| `compose_script` | `render/compose-hyperframes.mjs` |
+
+`__OFFLOAD_HOME__` is replaced with the install root at render time.
 
 ## Installer-seeded config (non-media)
 

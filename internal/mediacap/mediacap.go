@@ -28,6 +28,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/gpugen"
@@ -232,6 +233,15 @@ func routesIn(cfg config.Config, exeDir string) []Route {
 		binRoute("media", "ffmpeg", "ffmpeg_path", cfg.FFmpegPath),
 	)
 
+	// --- compose_video (ADR 0059): a CPU-class route with FOUR things to be true —
+	// the runner, the pinned project-local HyperFrames install, the pinned Chrome and
+	// ffmpeg+ffprobe. The pipeline gate is config.ComposeRouteConfigured (all three
+	// keys set), so a runner bound without its install is the middle verdict, not
+	// "not configured": that box defers every composition and nothing else says why.
+	compose, composeBound := composeRoute(cfg, exeDir)
+	out = append(out, compose)
+	nodeUsed = nodeUsed || composeBound
+
 	// --- prereqs: reported only when something on this box actually needs them,
 	// so an sdcpp-only node is never told it is missing ComfyUI.
 	if nodeUsed {
@@ -244,6 +254,82 @@ func routesIn(cfg config.Config, exeDir string) []Route {
 		out = append(out, comfyDirRoute(cfg.ComfyDir))
 	}
 	return out
+}
+
+// composeRoute derives the compose_video verdict. used reports whether the route is
+// bound at all (so the node prereq is reported for it).
+func composeRoute(cfg config.Config, exeDir string) (Route, bool) {
+	const name, engine = "compose_video", "hyperframes"
+	if cfg.ComposeScript == "" {
+		return Route{Name: name, Engine: engine, State: NotConfigured,
+			Detail: "compose_script is unset (the installer's hyperframes step binds it when node >= 22)"}, false
+	}
+	for _, k := range []struct{ key, value string }{
+		{"hyperframes_dir", cfg.HyperframesDir},
+		{"hyperframes_browser_path", cfg.HyperframesBrowserPath},
+	} {
+		if k.value == "" {
+			return Route{Name: name, Engine: engine, State: BoundButMissing,
+				Detail: "compose_script is bound but " + k.key + " is unset — every composition defers; run the installer's hyperframes step (npm ci + browser ensure)"}, true
+		}
+	}
+	entry := filepath.Join(cfg.HyperframesDir, "node_modules", "hyperframes", "bin", "hyperframes.mjs")
+	r := fileRoute(name, engine, exeDir,
+		binding{key: "compose_script", value: cfg.ComposeScript, kind: scriptBinding},
+		binding{key: "hyperframes_dir (pinned CLI)", value: entry, kind: fileBinding},
+		binding{key: "hyperframes_browser_path", value: cfg.HyperframesBrowserPath, kind: fileBinding},
+		binding{key: "ffmpeg_path", value: cfg.FFmpegPath, kind: binaryBinding},
+	)
+	if r.State != Configured {
+		return r, true
+	}
+	probe := ""
+	if p, ok := binaryPresent(cfg.FFmpegPath); ok {
+		if sib := filepath.Join(filepath.Dir(p), "ffprobe"+filepath.Ext(p)); fileExists(sib) {
+			probe = sib
+		}
+	}
+	if probe == "" {
+		if p, ok := binaryPresent("ffprobe"); ok {
+			probe = p
+		}
+	}
+	if probe == "" {
+		return Route{Name: name, Engine: engine, State: BoundButMissing,
+			Detail: "ffprobe not found next to ffmpeg_path or on PATH — the compose gate measures every output with it"}, true
+	}
+	r.Detail += "; ffprobe=" + probe
+	if script, err := gpugen.ResolveScriptIn(cfg.ComposeScript, exeDir); err == nil {
+		if names := composeTemplates(filepath.Join(filepath.Dir(script), "compose-templates")); len(names) > 0 {
+			r.Detail += "; templates=" + strings.Join(names, ",")
+		}
+	}
+	return r, true
+}
+
+// composeTemplates lists the vetted templates shipped beside the runner: directories
+// with an index.html whose name the runner accepts (so _shared never lists).
+func composeTemplates(dir string) []string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, e := range entries {
+		n := e.Name()
+		if !e.IsDir() || n == "" || n[0] == '_' || n[0] == '.' {
+			continue
+		}
+		if fileExists(filepath.Join(dir, n, "index.html")) {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+func fileExists(p string) bool {
+	fi, err := os.Stat(p)
+	return err == nil && !fi.IsDir()
 }
 
 // bindingKind selects how a configured value's presence is decided.

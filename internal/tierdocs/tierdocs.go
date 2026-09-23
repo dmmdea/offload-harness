@@ -389,6 +389,8 @@ func mediaSeedKey(k string) bool {
 		// comfy_cuda_device, comfy_dynamic_vram, comfy_extra_args) place every
 		// ComfyUI route, so they belong on the Media heading.
 		"comfy_",
+		// the composition lane (ADR 0059): compose_script + the hyperframes_* install keys
+		"compose_", "hyperframes_",
 	} {
 		if strings.HasPrefix(k, p) {
 			return true
@@ -418,6 +420,17 @@ func mediaSummary(seed map[string]any) string {
 	}
 	if f, ok := seed["imagegen_family"].(string); ok && f != "" {
 		return "comfyui (" + f + ")"
+	}
+	// A tier whose only media binding is the composition lane (ADR 0059) ships no image
+	// engine — name the lane rather than a bare "yes" that reads as an image route.
+	onlyCompose := len(seed) > 0
+	for k := range seed {
+		if !strings.HasPrefix(k, "compose_") && !strings.HasPrefix(k, "hyperframes_") {
+			onlyCompose = false
+		}
+	}
+	if onlyCompose {
+		return "compose only"
 	}
 	return "yes"
 }

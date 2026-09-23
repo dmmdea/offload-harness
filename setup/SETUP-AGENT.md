@@ -641,6 +641,45 @@ and append `"accelerators": ["hailo-8l"]` to `installed.json` so `/fleet/health`
 the device. Values: see the `accelerators.hailo-8l.config_seed` block in
 `setup/templates/profiles.json` (back both files up first).
 
+### Composition lane (HyperFrames; `offload_compose_video`, ADR 0059)
+
+The installer step `hyperframes (compose lane)` (Step 7b in `install.ps1`, 3b in `install.sh`)
+installs HyperFrames, which renders HTML/CSS motion graphics to video on the CPU. It needs
+**Node >= 22** and npm on PATH. Below that it prints a line like
+`SKIP  hyperframes (compose lane): node v20.19.1 found, HyperFrames needs >= 22` and leaves the
+route unbound (`compose_script: ""`, NOT CONFIGURED). A skipped lane is a legitimate state, not a
+failure. What the step does:
+
+1. Copies `setup/hyperframes/package.json` + `package-lock.json` (npm `hyperframes`, exact pin,
+   lock integrity `sha512-OZec…FPmw==` for 0.8.61) to `<OFFLOAD_HOME>/hyperframes`.
+2. `npm ci --ignore-scripts`, which installs the lockfile's exact tree with no install script.
+3. `npm audit signatures`, which checks the registry signatures and SLSA provenance. **A failure is
+   fatal and the installer stops.** Do not work around it. Surface it to the human, because the
+   package or the registry answer is not what the lockfile promises.
+4. `npm rebuild esbuild`, the one postinstall the CLI needs, run on purpose after verification.
+5. `node render/compose-hyperframes.mjs browser --hyperframes-dir <dir>`, which runs `browser ensure`
+   through the harness runner. The env is scrubbed and HyperFrames' state lands in
+   `<dir>/home`. It downloads the CLI's pinned chrome-headless-shell from Chrome for Testing
+   (152.0.7977.30 for 0.8.61; 270 MB on disk on win64) and prints its path.
+6. Seeds `compose_script`, `hyperframes_dir` and `hyperframes_browser_path` into a **fresh**
+   config. An existing config is never rewritten; the installer prints the three keys to add by
+   hand.
+
+Rules for the installing agent:
+
+- **Never** `npm install -g hyperframes`, `npx hyperframes`, `hyperframes init` or
+  `npx skills add heygen-com/hyperframes`. A global install self-upgrades in a detached process.
+  `init` and `skills` write agent skills into `~/.claude` and every other agent's skills dir.
+- Do not substitute a lookalike package (`dsh-hyperframes`, `hyfrme`, `framevox`, `framepack`). The
+  lockfile names `hyperframes` and `@hyperframes/*` only.
+- Verify with `local-offload doctor` (expect `compose_video CONFIGURED … templates=lower-third,title-card`)
+  and `local-offload acceptance` (a `hyperframes (compose runner)` row, which runs the pinned CLI's
+  `--version` as this identity).
+- On a Linux node, chrome-headless-shell needs the usual Chrome shared libraries (`libnss3`,
+  `libatk-bridge2.0-0`, `libgbm1`, …). If one is missing, Chrome fails to launch, and the defer
+  detail carries the launch error, which names the library. This is expected from Puppeteer's
+  launch error; no Linux node has been verified yet.
+
 ---
 
 ## Step 2 — selftest (the integrity gate)

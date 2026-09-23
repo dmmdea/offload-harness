@@ -172,6 +172,46 @@ else
   say "           BOUND-BUT-MISSING until the render runners are placed in $PREFIX/bin/render/"
 fi
 
+# ---- 3b. the composition lane (HyperFrames; ADR 0059) ------------------------
+# The pinned, project-local install from setup/hyperframes' committed lockfile —
+# never `npm install -g` (a global HyperFrames self-upgrades in a detached process).
+# node >= 22 gates it; below that the tier's compose_script is UN-bound ("") so the
+# route reads NOT CONFIGURED instead of BOUND-BUT-MISSING. An integrity failure
+# (npm audit signatures) is FATAL: an unverifiable install is never bound.
+HF_SEED='{"compose_script":""}'
+HF_DIR="$PREFIX/hyperframes"
+HF_PIN="$(jq -r '.dependencies.hyperframes' "$REPO_ROOT/setup/hyperframes/package.json")"
+NODE_VER="$(node --version 2>/dev/null || true)"
+NODE_MAJOR="$(printf '%s' "$NODE_VER" | sed -n 's/^v\([0-9][0-9]*\)\..*/\1/p')"
+if [ -z "$NODE_MAJOR" ]; then
+  say "SKIP  hyperframes (compose lane): no node on PATH — compose_video stays unbound"
+elif [ "$NODE_MAJOR" -lt 22 ]; then
+  say "SKIP  hyperframes (compose lane): node $NODE_VER found, HyperFrames needs >= 22 — compose_video stays unbound"
+elif ! command -v npm >/dev/null 2>&1; then
+  say "SKIP  hyperframes (compose lane): node $NODE_VER found but no npm beside it — compose_video stays unbound"
+elif [ "$DRY_RUN" -eq 1 ]; then
+  say "  would install hyperframes $HF_PIN into $HF_DIR (npm ci --ignore-scripts, npm audit signatures, npm rebuild esbuild, browser ensure)"
+else
+  mkdir -p "$HF_DIR"
+  cp "$REPO_ROOT/setup/hyperframes/package.json" "$REPO_ROOT/setup/hyperframes/package-lock.json" "$HF_DIR/"
+  HF_HAVE="$(jq -r '.version // empty' "$HF_DIR/node_modules/hyperframes/package.json" 2>/dev/null || true)"
+  if [ "$HF_HAVE" != "$HF_PIN" ]; then
+    (cd "$HF_DIR" && npm ci --ignore-scripts --no-audit --no-fund) || die "npm ci (hyperframes $HF_PIN) failed"
+  fi
+  (cd "$HF_DIR" && npm audit signatures) || die "npm audit signatures FAILED for the hyperframes install — registry signature or provenance check did not pass; refusing to bind the compose lane"
+  (cd "$HF_DIR" && npm rebuild esbuild) || die "npm rebuild esbuild failed"
+  # browser ensure runs through the harness runner: the scrubbed env, --json, and
+  # HyperFrames' state in $HF_DIR/home — never the service account's real home.
+  HF_RUNNER="$PREFIX/bin/render/compose-hyperframes.mjs"
+  [ -f "$HF_RUNNER" ] || HF_RUNNER="$REPO_ROOT/render/compose-hyperframes.mjs"
+  HF_JSON="$(node "$HF_RUNNER" browser --hyperframes-dir "$HF_DIR" | tail -n1 || true)"
+  HF_BROWSER="$(printf '%s' "$HF_JSON" | jq -r 'select(.ok == true) | .browser_path // empty' 2>/dev/null || true)"
+  [ -n "$HF_BROWSER" ] || die "hyperframes browser ensure failed: $HF_JSON"
+  HF_SEED="$(jq -n --arg dir "$HF_DIR" --arg browser "$HF_BROWSER" \
+    '{compose_script: "render/compose-hyperframes.mjs", hyperframes_dir: $dir, hyperframes_browser_path: $browser}')"
+  say "hyperframes: $HF_PIN, chrome-headless-shell $(printf '%s' "$HF_JSON" | jq -r .chrome_version) at $HF_BROWSER"
+fi
+
 # ---- 4. the harness config: one home key plus this tier's media bindings -----
 # A seed failure is FATAL, never a silent '{}': an install that quietly ships no
 # media bindings is exactly the drift this path exists to end. A tier that
@@ -182,9 +222,15 @@ if ! SEED="$("$BIN" install seed --profile "$TIER" --home "$PREFIX" --os linux -
   die "could not resolve the media seed for tier $TIER"
 fi
 case "$SEED" in *"ships no media"*) SEED='{}'; say "media:     tier $TIER ships none — text only until bound by hand" ;; esac
+# The composition lane (3b) binds or un-binds itself over the tier seed.
+SEED="$(printf '%s' "$SEED" | jq --argjson hf "$HF_SEED" '. + $hf')"
 CONFIG="$PREFIX/etc/config.json"
 if [ -f "$CONFIG" ] && [ "$DRY_RUN" -eq 0 ]; then
   say "config:    $CONFIG exists — left untouched (delete it to regenerate)"
+  # A box that just gained the composition lane is told exactly which keys bind it.
+  if [ -n "${HF_BROWSER:-}" ] && ! jq -e '(.hyperframes_dir // "") != ""' "$CONFIG" >/dev/null 2>&1; then
+    say "NOTE  compose lane installed but $CONFIG predates it — add: $(printf '%s' "$HF_SEED" | jq -c .)"
+  fi
 else
   BODY="$(printf '%s' "$SEED" | jq --arg home "$PREFIX" '. + {home: $home}')"
   if [ "$DRY_RUN" -eq 1 ]; then

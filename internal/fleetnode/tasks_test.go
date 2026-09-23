@@ -125,7 +125,7 @@ func TestBuildRequestImageGen(t *testing.T) {
 		if req.Task != core.TaskGenerateImage || req.Input != "a red fox" {
 			t.Fatalf("req = %+v", req)
 		}
-		want := map[string]any{"negative": "people", "out": "C:/x.png", "width": 1024, "height": 768, "steps": 30, "seed": 7}
+		want := map[string]any{"negative": "people", "width": 1024, "height": 768, "steps": 30, "seed": 7}
 		if !reflect.DeepEqual(req.Params, want) {
 			t.Fatalf("params = %#v, want %#v", req.Params, want)
 		}
@@ -156,7 +156,7 @@ func TestBuildRequestVideoGen(t *testing.T) {
 			t.Fatalf("req = %+v", req)
 		}
 		want := map[string]any{
-			"still": "C:/s.png", "model": "wan", "negative": "blurry", "out": "C:/v.mp4",
+			"still": "C:/s.png", "model": "wan", "negative": "blurry",
 			"frames": 33, "width": 960, "height": 544, "steps": 4, "seed": 9,
 			"reserve_vram": "2.5", // stringified, matching the MCP wire shape
 			"fast":         true, "hero": true, "upscale": true,
@@ -211,7 +211,7 @@ func TestBuildRequestAudioGen(t *testing.T) {
 		}
 		want := map[string]any{
 			"kind": "music", "voice": "finetuned", "clone": "C:/ref.wav", "lang": "es",
-			"seconds": 20, "out": "C:/o.wav", "seed": 3, "reserve_vram": "1.5",
+			"seconds": 20, "seed": 3, "reserve_vram": "1.5",
 		}
 		if !reflect.DeepEqual(req.Params, want) {
 			t.Fatalf("params = %#v, want %#v", req.Params, want)
@@ -255,8 +255,8 @@ func TestBuildRequestRunGraphValid(t *testing.T) {
 	if b, err := os.ReadFile(mp); err != nil || string(b) != manifest {
 		t.Fatalf("materialized manifest = %q (%v)", b, err)
 	}
-	if req.Params["out_dir"] != "C:/outs" || req.Params["reserve_vram"] != "2.0" {
-		t.Fatalf("params = %#v", req.Params)
+	if _, ok := req.Params["out_dir"]; ok || req.Params["reserve_vram"] != "2.0" {
+		t.Fatalf("params = %#v (a remote out_dir must be dropped: outputs land in the node's media_dir)", req.Params)
 	}
 
 	cleanup()
@@ -287,7 +287,7 @@ func TestBuildRequestRunGraphManifestOptional(t *testing.T) {
 	if mp, _ := req.Params["manifest_path"].(string); mp != "" {
 		t.Fatalf("absent manifest must map to empty manifest_path, got %q", mp)
 	}
-	if req.Params["out_dir"] != "" || req.Params["reserve_vram"] != "" {
+	if _, ok := req.Params["out_dir"]; ok || req.Params["reserve_vram"] != "" {
 		t.Fatalf("params = %#v", req.Params)
 	}
 }

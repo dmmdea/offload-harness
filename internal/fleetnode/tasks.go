@@ -28,7 +28,7 @@ import (
 
 // fleetTaskOrder is the advertisement order (stable for health payloads + error
 // messages). Membership is decided per-config by taskConfiguredFor.
-var fleetTaskOrder = []string{"image-gen", "video-gen", "animate", "stt", "audio-gen", "run-graph", "agent", "accel", VisionTask}
+var fleetTaskOrder = []string{"image-gen", "video-gen", "animate", "stt", "audio-gen", "run-graph", ComposeTask, "agent", "accel", VisionTask}
 
 // taskConfiguredFor reports whether THIS box actually serves taskType — the same
 // route gates the pipeline uses (empty script/model = the task defers there, so
@@ -57,6 +57,10 @@ func taskConfiguredFor(cfg config.Config, taskType string, loopbackListener bool
 		return cfg.VoiceGenScript != "" || cfg.MusicGenScript != ""
 	case "run-graph":
 		return cfg.RunGraphScript != ""
+	case ComposeTask:
+		// The composition lane: the runner, the pinned install and the pinned browser
+		// all bound — config.ComposeRouteConfigured, the pipeline's own gate.
+		return cfg.ComposeRouteConfigured()
 	case "agent":
 		return AgentLaneAdmissible(cfg, loopbackListener)
 	case "accel":
@@ -336,6 +340,8 @@ func BuildRequest(ctx context.Context, cfg config.Config, loopbackListener bool,
 		return buildAudioGen(payload)
 	case "run-graph":
 		return buildRunGraph(payload)
+	case ComposeTask:
+		return buildComposeVideo(payload)
 	case "agent":
 		return buildAgentRun(cfg, payload)
 	case "accel":
@@ -354,13 +360,25 @@ func BuildRequest(ctx context.Context, cfg config.Config, loopbackListener bool,
 		taskType, strings.Join(SupportedTasksFor(cfg, loopbackListener), ", "))
 }
 
-// buildImageGen mirrors mcpserver.handleGenerateImage.
+// A remote media task's output path is the NODE's choice, never the caller's.
+//
+// Media dispatch is not token-gated (ADR 0023), so a caller-supplied `out` (or
+// run-graph's `out_dir`) would let any tailnet peer that reaches /fleet/dispatch make
+// this node write — and overwrite — any file its account can write. Every media
+// builder below therefore drops those keys and the pipeline derives the path itself:
+// `<media_dir>/<task>-<hash8>.<ext>` (run-graph: <media_dir>). Nothing a current caller
+// does changes: a result is fetched back by BARE NAME from GET /fleet/media/{name},
+// which only serves files directly inside media_dir, so a path outside it was never
+// fetchable to begin with. The keys are ignored, not refused, so a payload that still
+// carries one keeps working. Local doors (MCP, CLI) keep their `out` — they are trusted
+// callers on this box.
+
+// buildImageGen mirrors mcpserver.handleGenerateImage, minus `out` (see above).
 func buildImageGen(payload json.RawMessage) (core.Request, func(), error) {
 	noop := func() {}
 	var in struct {
 		Prompt   string `json:"prompt"`
 		Negative string `json:"negative"`
-		Out      string `json:"out"`
 		Width    int    `json:"width"`
 		Height   int    `json:"height"`
 		Steps    int    `json:"steps"`
@@ -387,9 +405,6 @@ func buildImageGen(payload json.RawMessage) (core.Request, func(), error) {
 	if in.Negative != "" {
 		params["negative"] = in.Negative
 	}
-	if in.Out != "" {
-		params["out"] = in.Out
-	}
 	if in.Width > 0 {
 		params["width"] = in.Width
 	}
@@ -405,7 +420,7 @@ func buildImageGen(payload json.RawMessage) (core.Request, func(), error) {
 	return core.Request{Task: core.TaskGenerateImage, Input: in.Prompt, Params: params}, noop, nil
 }
 
-// buildVideoGen mirrors mcpserver.handleGenerateVideo (incl. the LO-19
+// buildVideoGen mirrors mcpserver.handleGenerateVideo, minus `out` (incl. the LO-19
 // fast/hero/upscale flow and the stringified reserve_vram wire shape).
 func buildVideoGen(payload json.RawMessage) (core.Request, func(), error) {
 	noop := func() {}
@@ -414,7 +429,6 @@ func buildVideoGen(payload json.RawMessage) (core.Request, func(), error) {
 		Still       string  `json:"still"`
 		Model       string  `json:"model"`
 		Negative    string  `json:"negative"`
-		Out         string  `json:"out"`
 		Frames      int     `json:"frames"`
 		Width       int     `json:"width"`
 		Height      int     `json:"height"`
@@ -450,9 +464,6 @@ func buildVideoGen(payload json.RawMessage) (core.Request, func(), error) {
 	if in.Negative != "" {
 		params["negative"] = in.Negative
 	}
-	if in.Out != "" {
-		params["out"] = in.Out
-	}
 	if in.Frames > 0 {
 		params["frames"] = in.Frames
 	}
@@ -474,8 +485,8 @@ func buildVideoGen(payload json.RawMessage) (core.Request, func(), error) {
 	return core.Request{Task: core.TaskGenerateVideo, Input: in.Prompt, Params: params}, noop, nil
 }
 
-// buildAnimate mirrors mcpserver.handleAnimateCharacter. Paths in the payload
-// (ref/driver/out) are node-local, like every other fleet media payload.
+// buildAnimate mirrors mcpserver.handleAnimateCharacter, minus `out`. The input paths in
+// the payload (ref/driver) are node-local, like every other fleet media payload.
 func buildAnimate(payload json.RawMessage) (core.Request, func(), error) {
 	noop := func() {}
 	var in struct {
@@ -484,7 +495,6 @@ func buildAnimate(payload json.RawMessage) (core.Request, func(), error) {
 		Prompt       string  `json:"prompt"`
 		MotionPrompt string  `json:"motion_prompt"`
 		Negative     string  `json:"negative"`
-		Out          string  `json:"out"`
 		Width        int     `json:"width"`
 		Height       int     `json:"height"`
 		Frames       int     `json:"frames"`
@@ -509,9 +519,6 @@ func buildAnimate(payload json.RawMessage) (core.Request, func(), error) {
 	}
 	if in.Negative != "" {
 		params["negative"] = in.Negative
-	}
-	if in.Out != "" {
-		params["out"] = in.Out
 	}
 	if in.Width > 0 {
 		params["width"] = in.Width
@@ -565,8 +572,8 @@ func buildSTT(payload json.RawMessage) (core.Request, func(), error) {
 	return core.Request{Task: core.TaskTranscribe, Audio: in.Audio, Params: params}, noop, nil
 }
 
-// buildAudioGen mirrors mcpserver.handleGenerateAudio (kind defaulting is the
-// pipeline's business; zero/empty optionals are omitted).
+// buildAudioGen mirrors mcpserver.handleGenerateAudio, minus `out` (kind defaulting is
+// the pipeline's business; zero/empty optionals are omitted).
 func buildAudioGen(payload json.RawMessage) (core.Request, func(), error) {
 	noop := func() {}
 	var in struct {
@@ -576,7 +583,6 @@ func buildAudioGen(payload json.RawMessage) (core.Request, func(), error) {
 		Clone       string  `json:"clone"`
 		Lang        string  `json:"lang"`
 		Seconds     int     `json:"seconds"`
-		Out         string  `json:"out"`
 		Seed        int     `json:"seed"`
 		ReserveVRAM float64 `json:"reserve_vram"`
 	}
@@ -602,9 +608,6 @@ func buildAudioGen(payload json.RawMessage) (core.Request, func(), error) {
 	if in.Seconds > 0 {
 		params["seconds"] = in.Seconds
 	}
-	if in.Out != "" {
-		params["out"] = in.Out
-	}
 	if in.Seed > 0 {
 		params["seed"] = in.Seed
 	}
@@ -619,13 +622,13 @@ func buildAudioGen(payload json.RawMessage) (core.Request, func(), error) {
 // graph present, decodable, non-empty JSON object; manifest optional but, when
 // present, a JSON object too. Valid payloads are materialized to temp files (the
 // runner reads files — mcpserver.materialize's pattern) whose removal is the
-// returned cleanup's job.
+// returned cleanup's job. A caller's `out_dir` is dropped: outputs land in the node's
+// media_dir, the only directory /fleet/media serves.
 func buildRunGraph(payload json.RawMessage) (core.Request, func(), error) {
 	noop := func() {}
 	var in struct {
 		Graph       json.RawMessage `json:"graph"`
 		Manifest    json.RawMessage `json:"manifest"`
-		OutDir      string          `json:"out_dir"`
 		ReserveVram string          `json:"reserve_vram"`
 		// ModelFamily is the payload-declared footprint family for THIS graph
 		// (the spec's run-graph row): threaded to the pipeline so the passive
@@ -673,7 +676,6 @@ func buildRunGraph(payload json.RawMessage) (core.Request, func(), error) {
 	params := map[string]any{
 		"graph_path":    graphPath,
 		"manifest_path": manifestPath,
-		"out_dir":       in.OutDir,
 		"reserve_vram":  in.ReserveVram,
 	}
 	if in.ModelFamily != "" {

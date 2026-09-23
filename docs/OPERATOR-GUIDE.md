@@ -455,6 +455,53 @@ renders); GIMP is needed only for `flatten_design`/`instantiate_design` (headles
   A layer-name mismatch is THE common failure — the error surfaces GIMP's stderr
   naming the failing lookup; check names with `flatten_design`'s `layers` output.
 
+### Compose motion graphics (compose-video, HyperFrames)
+
+```powershell
+# a vetted template + typed variables (the only form the fleet task accepts)
+local-offload compose-video --template title-card --variables '{"title":"Launch day","subtitle":"Everything that shipped","accent":"#22c55e","duration":6}' --json
+# a transparent lower third for an editor (ProRes 4444) or the web (VP9 alpha), with two check frames
+local-offload compose-video --template lower-third --format webm --variables-file lt.json --snapshots 1,2.5 --out D:/renders/lt.webm
+# your own single-file composition (trusted code only: Chrome runs it without a sandbox)
+local-offload compose-video --html card.html --quality draft --workers 1
+```
+
+This renders an HTML/CSS composition to video with the pinned HyperFrames CLI. It runs on the CPU:
+software GL and CPU encode, with no GPU lock, so it runs next to every render and text seat. The
+steps are `lint`, then `check`, then `render`, then an ffprobe gate. Every returned field is
+measured. Any failure defers with a typed class (`BAD_INPUT`, `LINT_ERRORS`, `CHECK_FAILED`,
+`RENDER_FAILED`, `BROWSER_MISSING`, `FFMPEG_MISSING`, `CLI_MISSING`, `SPAWN_EBUSY`,
+`DISK_HEADROOM`, `TIMEOUT`).
+
+**Binding the lane.** The installer's hyperframes step does this on a box with Node >= 22. It
+installs the lockfile into `<home>/hyperframes`, runs `npm audit signatures` (fatal on failure) and
+`browser ensure`, and writes three keys into a FRESH config. An existing config is never rewritten,
+so the installer prints the three keys instead. To bind by hand:
+
+```json
+"compose_script": "render/compose-hyperframes.mjs",
+"hyperframes_dir": "D:/offload-stack/hyperframes",
+"hyperframes_browser_path": "<the path `node render/compose-hyperframes.mjs browser --hyperframes-dir <dir>` prints as browser_path>"
+```
+
+`ffmpeg_path` must name an ffmpeg with ffprobe beside it. `local-offload doctor` then reports
+`compose_video CONFIGURED` with the template list, and `local-offload acceptance` runs the pinned
+CLI's `--version` through the runner as this identity. Optional keys: `compose_quality` (`high`
+default), `compose_workers` (`auto` default; on the reference box neither 1 nor `auto` wins consistently),
+`compose_timeout_sec` (1800) and `compose_cache_dir` (work dirs and frame cache; move it to a large
+drive if a render defers `DISK_HEADROOM`).
+
+**Adding a template.** Follow the contract in
+[`render/compose-templates/README.md`](../render/compose-templates/README.md): offline, deterministic,
+declared variables, a duration variable, and a README with a measured render. Lint and check must
+be clean, the frames must be looked at, and `framemd5` must match across two renders.
+
+**Bumping HyperFrames.** Change the exact version in `setup/hyperframes/package.json` and
+`PINNED_VERSION` in the runner. Regenerate the lock with `npm install --package-lock-only
+--ignore-scripts` and verify the new integrity against `npm view hyperframes@<v> dist.integrity`.
+Then re-run the installer step and a two-template smoke. Never `npm install -g hyperframes`: a
+global HyperFrames self-upgrades in a detached process.
+
 ## 4. Drive the coding agent
 
 The agent plans with a local model and acts through tools confined to a workspace. Build it once:

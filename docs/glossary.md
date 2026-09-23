@@ -19,6 +19,15 @@ The ordered set of model Tiers an offload task walks, entering at the smallest c
 escalating only when a result fails validation or lands below a confidence threshold. Exhausting the
 Cascade produces a Defer rather than an error. The Cascade never calls a remote model.
 
+## Composition
+
+An HTML/CSS page that HyperFrames renders to video frame by frame: a root element carrying
+`data-composition-id`, `data-width`, `data-height`, `data-fps` and `data-duration`, with its
+animation seeked rather than played, so the same inputs give the same frames. The
+`offload_compose_video` lane renders one, CPU-class and with no GPU lock (ADR 0059). A Composition
+is code that runs in an unsandboxed Chrome, so the fleet door renders only the vetted templates under
+`render/compose-templates/`. Not a ComfyUI graph, and not generation: nothing is sampled.
+
 ## Config seed
 
 The default model bindings a hardware Profile supplies at install time — which image checkpoint,

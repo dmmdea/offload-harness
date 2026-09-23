@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>title-card</title>
+    <style>
+      /* Fonts are declared HERE, from the shared kit copied beside this file: Inter 400/700/900
+         (latin), byte-identical to the faces HyperFrames' producer embeds. A family the page does
+         not declare with @font-face is resolved by the producer through a Google Fonts request,
+         which is a network call at render time — so every family used below is declared. */
+      @font-face { font-family: "Inter"; src: url("shared/fonts/inter-latin-400-normal.woff2") format("woff2"); font-weight: 400; font-style: normal; }
+      @font-face { font-family: "Inter"; src: url("shared/fonts/inter-latin-700-normal.woff2") format("woff2"); font-weight: 700; font-style: normal; }
+      @font-face { font-family: "Inter"; src: url("shared/fonts/inter-latin-900-normal.woff2") format("woff2"); font-weight: 900; font-style: normal; }
+
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { width: 1920px; height: 1080px; overflow: hidden; background: #000; }
+
+      /* Every variable arrives as a --<id> custom property on the root (HyperFrames applies scalar
+         variables there), so all colors and the exit timing read from the root. */
+      #root {
+        position: relative;
+        width: 1920px;
+        height: 1080px;
+        overflow: hidden;
+        background: var(--background, #0f172a);
+        font-family: "Inter", sans-serif;
+        color: var(--text_color, #f8fafc);
+      }
+
+      /* A slow drift across the whole duration keeps the hold alive (check's sweep flags a card
+         that never moves) without drawing the eye from the type. */
+      .glow {
+        position: absolute;
+        width: 1400px;
+        height: 1400px;
+        left: -300px;
+        top: -560px;
+        border-radius: 50%;
+        background: radial-gradient(circle, var(--accent, #38bdf8) 0%, transparent 62%);
+        opacity: 0.16;
+        animation: drift calc(var(--duration, 5) * 1s) linear both;
+      }
+
+      .content {
+        position: absolute;
+        left: 180px;
+        right: 180px;
+        top: 50%;
+        transform: translateY(-50%);
+        animation: out 0.6s cubic-bezier(0.4, 0, 1, 1) calc(var(--duration, 5) * 1s - 0.6s) forwards;
+      }
+
+      .bar {
+        width: 0;
+        height: 12px;
+        border-radius: 6px;
+        background: var(--accent, #38bdf8);
+        margin-bottom: 44px;
+        animation: grow 0.7s cubic-bezier(0.16, 1, 0.3, 1) 0.2s both;
+      }
+
+      .title {
+        font-size: 128px;
+        font-weight: 900;
+        line-height: 1.02;
+        letter-spacing: -0.035em;
+        overflow-wrap: anywhere;
+        animation: rise 0.8s cubic-bezier(0.16, 1, 0.3, 1) 0.35s both;
+      }
+
+      .subtitle {
+        margin-top: 32px;
+        font-size: 48px;
+        font-weight: 400;
+        line-height: 1.25;
+        opacity: 0.86;
+        overflow-wrap: anywhere;
+        animation: rise-soft 0.8s cubic-bezier(0.16, 1, 0.3, 1) 0.65s both;
+      }
+
+      @keyframes grow { from { width: 0; } to { width: 220px; } }
+      @keyframes rise { from { opacity: 0; transform: translateY(40px); } to { opacity: 1; transform: translateY(0); } }
+      @keyframes rise-soft { from { opacity: 0; transform: translateY(24px); } to { opacity: 0.86; transform: translateY(0); } }
+      @keyframes out { from { opacity: 1; } to { opacity: 0; } }
+      @keyframes drift { from { transform: translate(0, 0) scale(1); } to { transform: translate(260px, 120px) scale(1.12); } }
+    </style>
+  </head>
+  <body>
+    <div
+      id="root"
+      data-composition-id="title-card"
+      data-start="0"
+      data-duration="5"
+      data-width="1920"
+      data-height="1080"
+      data-fps="30"
+      data-no-timeline
+      data-composition-variables='[{"id":"title","type":"string","label":"Title","description":"The headline, one or two short lines.","maxLength":80,"default":"Quarterly results"},{"id":"subtitle","type":"string","label":"Subtitle","description":"One supporting line under the headline.","maxLength":140,"default":"What changed, and why it matters"},{"id":"background","type":"color","label":"Background","default":"#0f172a"},{"id":"accent","type":"color","label":"Accent","description":"The bar and the background glow.","default":"#38bdf8"},{"id":"text_color","type":"color","label":"Text color","default":"#f8fafc"},{"id":"duration","type":"number","label":"Duration (seconds)","description":"Total length; the exit fade starts 0.6 s before the end.","min":2,"max":60,"default":5}]'
+    >
+      <div class="glow"></div>
+      <div class="content">
+        <div class="bar"></div>
+        <h1 class="title" data-var-text="title">Quarterly results</h1>
+        <p class="subtitle" data-var-text="subtitle">What changed, and why it matters</p>
+      </div>
+    </div>
+    <script>
+      // No timeline library: the CSS keyframes above are seeked frame by frame by HyperFrames'
+      // CSS adapter (data-no-timeline on the root). Nothing here may read the clock or randomness.
+      window.__timelines = window.__timelines || {};
+    </script>
+  </body>
+</html>

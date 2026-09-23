@@ -18,9 +18,16 @@ mapping from the harness's generic flags to sd.cpp's CLI, so a pin bump fixes fl
 `.mjs` file, never in Go. `sd-server` (OpenAI/A1111-compatible, ships in the same pinned zip) is
 the recorded warm-swap upgrade path — deliberately not wired yet.
 
+**Composition lane (ADR 0059).** `offload_compose_video` / `compose-video` renders
+designed HTML/CSS motion graphics to video with **HyperFrames**: title cards, lower thirds, kinetic
+type and alpha overlays. It is CPU-class: software GL and CPU encode, with no GPU lease. It is
+pinned, env-scrubbed and machine-gated. See
+[Composition (HyperFrames)](#composition-hyperframes).
+
 ## Questions this doc answers
 
 - What happens to the GPU during a render, and what state is the machine left in?
+- How does the composition lane stay local, pinned and off the GPU?
 - Which models are bound, and where is that configured?
 - What are the image-editing operations, and how are they invoked?
 - Which of the three edit-shaped routes fits a given change?
@@ -33,7 +40,8 @@ the recorded warm-swap upgrade path — deliberately not wired yet.
 
 The generation verbs and MCP tools, the GPU lock and zero-warm lifecycle, warm batch mode, the
 inpainting route, the generative instruction-edit route, the edit-operation pack, per-machine
-model bindings, named license-tagged families, and the per-binding ComfyUI launch profile.
+model bindings, named license-tagged families, the per-binding ComfyUI launch profile, and the
+CPU-class composition lane (HyperFrames).
 
 ## Non-scope
 
@@ -253,16 +261,18 @@ observations are recorded as a side effect of successful renders — see
 ## Interfaces and entry points
 
 CLI verbs `generate-image` (`--family`, `--transparent`), `inpaint-image`, `generate-video`,
-`generate-audio`, `generate-svg`, `edit-image`, `media`, `run-graph`; the matching `offload_*` MCP
-tools (`family` / `transparent` on `offload_generate_image`; `family` / `images` / `transparent` on
-`offload_edit_image_generative`). The generative instruction
-edit is MCP-only (`offload_edit_image_generative`); ad-hoc runs use `render/comfy-edit.mjs`
-directly.
+`generate-audio`, `generate-svg`, `edit-image`, `media`, `run-graph`, `compose-video`; the matching
+`offload_*` MCP tools (`family` / `transparent` on `offload_generate_image`; `family` / `images` /
+`transparent` on `offload_edit_image_generative`). The generative instruction edit is MCP-only
+(`offload_edit_image_generative`); ad-hoc runs use `render/comfy-edit.mjs` directly. The
+composition lane is also a fleet task (`compose-video`), restricted to vetted templates.
 
 ## Dependencies
 
 A local ComfyUI installation (`comfy_dir`), the model files named by the bindings below, GIMP for the
-design ops, and the Node renderer scripts under `render/`.
+design ops, and the Node renderer scripts under `render/`. The composition lane needs Node >= 22,
+the pinned HyperFrames install (`setup/hyperframes/` lockfile), its pinned chrome-headless-shell,
+and ffmpeg + ffprobe.
 
 ## Downstream effects
 
@@ -302,6 +312,7 @@ Bound per machine through flat config keys, so the same code serves different ha
 | Qwen-Image-2.1 (family `qwen-image-2.1`) | `imagegen_ckpt` + `imagegen_clip` + `imagegen_vae` (all three REQUIRED — the builder has no defaults), `imagegen_schedule` (`official` default / `comfy`), `imagegen_steps/cfg` (both or neither; official 40 / 1.0); edit: `gen_edit_family: "qwen-image-2.1"`, `gen_edit_unet/clip/vae`, `gen_edit_resolution` (0 = 1024), `gen_edit_cache_device` (`auto`/`gpu`/`cpu`/`off`) |
 | Named families + license (ADR 0058) | `imagegen_families`, `gen_edit_families` (name → overlay + `license` + `commercial_use`); `imagegen_license`/`imagegen_commercial_use`, `gen_edit_license`/`gen_edit_commercial_use` (the default binding's own tag, both or neither) |
 | ComfyUI | `comfy_dir`, per-task `*_script` and `*_timeout_sec`; launch profile `comfy_cuda_device`, `comfy_dynamic_vram` (`on`/`off`/`""`), `comfy_extra_args` |
+| Composition (HyperFrames) | `compose_script` (`render/compose-hyperframes.mjs`), `hyperframes_dir` (the pinned install), `hyperframes_browser_path` (the pinned chrome-headless-shell), `compose_timeout_sec` (1800), `compose_workers` (`""`/`auto` or 1-24), `compose_cache_dir` (`""` = `<media_dir>/.compose-cache`), `compose_quality` (`high`); `ffmpeg_path` (ffprobe beside it). All three route keys empty = NOT CONFIGURED; the installer binds them |
 
 Hardware profiles seed these. The single-card 16 GB tiers (`blackwell-16`, `ampere-16`, `volta-16`)
 and the 8 GB tiers' RAM layer bind **HiDream-O1** via `imagegen_family` — the official graph for that
@@ -525,7 +536,9 @@ render error defers with detail. The batch path records per-job failures and con
 Generation runs local. `run-graph` executes caller-supplied graphs and provisions caller-specified
 node packs, which is a trusted-caller interface by design — see
 [ADR 0007](../architecture/decisions/0007-host-torch-pinned-additive-provisioning.md) for what
-protects the environment from it.
+protects the environment from it. `compose_video`'s `html` and `project_dir` inputs are the same
+kind of trusted-caller interface: the page runs in a Chrome without a sandbox. The fleet door
+therefore accepts vetted templates only. See [Security](#security) below.
 
 **Licenses.** A non-commercial family's output is tagged (`license`, `commercial_use: false`,
 `license_note`) and its ledger row carries the license, but the tag is informational: nothing stops
@@ -646,6 +659,17 @@ recorded as known offenders with their reason rather than silently skipped — a
   preset/builder-implied model files, the family rows `offload_status` publishes
 - [`internal/config/families.go`](../../internal/config/families.go) — family overlay validation and
   resolution, license notes (ADR 0058)
+- [`render/compose-hyperframes.mjs`](../../render/compose-hyperframes.mjs) — the composition runner:
+  env allowlist, subcommand allowlist, `--json` everywhere, lint → check → render → ffprobe gate,
+  typed `COMPOSE-FAIL` classes
+- [`render/compose-templates/`](../../render/compose-templates/README.md) — the vetted templates and
+  the shared, locally declared font kit
+- [`internal/pipeline/composevideo.go`](../../internal/pipeline/composevideo.go) — `runComposeVideo`:
+  the compose slot, the runner env allowlist (`gpugen.Spec.EnvExact`), typed defers
+- [`internal/fleetnode/compose_task.go`](../../internal/fleetnode/compose_task.go) — the
+  template-only `compose-video` fleet task
+- [`setup/hyperframes/`](../../setup/hyperframes/package.json) — the pinned lockfile the installers
+  install from
 
 ## Related docs
 
@@ -653,6 +677,7 @@ recorded as known offenders with their reason rather than silently skipped — a
 - [../architecture/decisions/0009-zero-warm-gpu-lifecycle.md](../architecture/decisions/0009-zero-warm-gpu-lifecycle.md)
 - [../architecture/decisions/0011-flux-family-license-prohibition.md](../architecture/decisions/0011-flux-family-license-prohibition.md)
 - [../architecture/decisions/0058-non-commercial-model-families-ship-only-as-named-license-tagged-opt-ins.md](../architecture/decisions/0058-non-commercial-model-families-ship-only-as-named-license-tagged-opt-ins.md)
+- [../architecture/decisions/0059-external-cli-media-tool-runs-cpu-class-pinned-env-scrubbed.md](../architecture/decisions/0059-external-cli-media-tool-runs-cpu-class-pinned-env-scrubbed.md)
 
 ## Re-encoding ops and `ffmpeg_video_encoder` (0.113.10)
 
@@ -663,3 +688,126 @@ which frees CPU threads and does not touch CUDA cores, so a re-encode no longer 
 for the processor. Stream-copy ops (`trim` default, `concat`, `mux_audio`), `extract_frames` and `probe` are
 unaffected. NVENC at a given bitrate trails a slow x264 preset, so final deliverables should stay on the CPU
 encoder unless a side-by-side viewing says otherwise; an ffmpeg without the encoder fails the op loudly.
+
+## Composition (HyperFrames)
+
+`offload_compose_video` (CLI `compose-video`, fleet task `compose-video`) turns an HTML/CSS
+composition into video with [HyperFrames](https://github.com/heygen-com/hyperframes) (npm
+`hyperframes`, Apache-2.0). HyperFrames serves the page locally, seeks headless Chrome one frame at a
+time and pipes the frames through ffmpeg. The same inputs therefore produce the same frames: this is
+designed, text-exact motion graphics, not generation. Use it for title cards, lower thirds, kinetic
+type, stat cards and captions on word timings. With `webm` (VP9 `yuva420p`) or `mov`
+(ProRes 4444) it produces alpha overlays that lay over LTX b-roll or talking-head footage.
+
+**Class: CPU.** The lane renders in software GL (`--no-browser-gpu`,
+`PRODUCER_BROWSER_GPU_MODE=software`) with CPU encode, so it takes **no GPU lease and no
+`withGpuSlot`**. A media lease would make load-triggering text admissions wait
+([ADR 0026](../architecture/decisions/0026-text-load-admissions-wait-for-the-media-lease.md)) for
+work that never touches a card. One composition runs at a time per process, on its own compose slot
+(not `mediaSlot`). A second call waits `gpu_wait_ms` and then defers `compose_busy`. On the fleet,
+`compose-video` is exempt from the text concurrency cap for the same reason `accel` is.
+
+**Inputs: exactly one.**
+
+| input | meaning | fleet |
+|---|---|---|
+| `template` + `variables` | a vetted template under `render/compose-templates/` (shipped: `title-card`, `lower-third`) plus values for its declared variables | yes, the only form |
+| `html` | an inline single-file composition, staged as the work dir's `index.html` | no |
+| `project_dir` (+ `composition`) | a local composition directory, rendered in place | no |
+
+A template's variables are typed: `string`, `color`, `number`, `boolean` or `enum`. The runner
+merges them into the declared defaults in its own copy of the page, so `lint` and `check` judge the
+caller's real text and colors. An undeclared or mistyped value defers `BAD_INPUT`. `duration` is a
+template parameter: HyperFrames reads a composition's total length from source and never from a
+variable, so the runner rewrites the root's `data-duration`.
+
+**Pipeline** (`render/compose-hyperframes.mjs`):
+
+1. `lint --json`, which must report `errorCount` 0.
+2. `check --json --no-browser-gpu`, which must exit 0. It covers runtime errors, layout, motion
+   and WCAG contrast.
+3. `render --batch <one row> --json`. Only `--batch` makes `--json` produce the manifest. The call
+   carries `--format`, `--quality`, `--workers`, `--no-browser-gpu`, `--strict`,
+   `--strict-variables` and `--no-best-effort`.
+4. An ffprobe gate on codec, size, fps, duration (±1 frame), alpha for `webm`/`mov`/`png-sequence`,
+   and an audio stream when the page carries `<audio>`.
+5. With `snapshots`, `snapshot --at … --describe false --json`, whose frames are saved next to the
+   output.
+
+`strict: false` reports lint and check findings without failing on them. The payload is what
+ffprobe measured, not what was requested.
+
+**Failure classes.** Every failure is a `deferred:true` whose reason starts
+`compose_video: <CLASS>:`. The runner prints the same class as `COMPOSE-FAIL: <CLASS>: <detail>`
+and writes it into its result file.
+
+| class | cause |
+|---|---|
+| `BAD_INPUT` | the request broke a rule (inputs, enums, template name, variables), decided before any spawn |
+| `LINT_ERRORS` / `CHECK_FAILED` | the composition failed its own gates |
+| `RENDER_FAILED` | a failed row, or an output that failed the ffprobe gate |
+| `BROWSER_MISSING` / `FFMPEG_MISSING` / `CLI_MISSING` | the pinned Chrome, ffmpeg/ffprobe or the pinned CLI is absent |
+| `SPAWN_EBUSY` | an antivirus lock on ffmpeg ([hyperframes#4058](https://github.com/heygen-com/hyperframes/issues/4058)); retried once, then this class |
+| `DISK_HEADROOM` | the frame-storage gate ([#4060](https://github.com/heygen-com/hyperframes/issues/4060)); move `compose_cache_dir` to a larger drive |
+| `TIMEOUT` | `compose_timeout_sec` elapsed; the process tree is killed |
+
+**Measured on the reference box** (36 threads, Windows, software GL confirmed on the running
+Chrome's command line, quality `high`, 2026-09-22). Render time is HyperFrames' own `renderTimeMs`.
+The whole call, with lint, check and the ffprobe gate, took 27-38 s.
+
+| composition | frames | 1 worker | `auto` |
+|---|---|---|---|
+| `title-card` 1080p mp4 | 150 | 16.4 s | 15.3 s, 14.6 s |
+| `lower-third` 1080p mp4 | 150 | 14.4 s | 17.5 s |
+| `lower-third` 1080p webm with alpha | 150 | 22.0 s | 18.1 s |
+
+An earlier session on the same box measured `title-card` at 21.2 s (1 worker) and 24-25 s (`auto`),
+and `lower-third` webm at 30.4 s. Neither worker setting wins consistently on a 150-frame card, so
+`compose_workers` defaults to HyperFrames' own sizing. Determinism held in both sessions:
+
+- three `title-card` renders (1 worker, `auto`, `auto`) were byte-identical files with identical
+  `framemd5` over all 150 frames;
+- the `lower-third` mp4 renders were byte-identical;
+- the two webm files differed in container bytes, but their decoded `yuva420p` frames were
+  identical (`framemd5`).
+
+### Security
+
+- **Compositions are trusted code.** HyperFrames' Chrome launches with `--no-sandbox` and site
+  isolation disabled. `html` and `project_dir` are accepted only from the local MCP and CLI doors, the
+  same trusted-caller posture as `run-graph`. The fleet door is not token-gated
+  ([ADR 0023](../architecture/decisions/0023-agent-lane-tailnet-auth-and-locality.md)), so it refuses
+  both at ack time and renders only the node's vetted templates. It also ignores a caller's `out`:
+  the node writes `<media_dir>/compose-<hash8>.<ext>`, the same rule every fleet media task follows
+  ([fleet-node.md](fleet-node.md)). Template variables reach the page
+  as text (`data-var-text`) and as sanitized CSS custom properties, never as markup.
+- **No cloud path is wired.** The runner allows only `lint`, `check`, `render`, `snapshot`,
+  `browser ensure|path` and `--version`. `init`, `skills`, `cloud`, `lambda`, `cloudrun`, `capture`,
+  `upgrade` and `publish` are refused before any spawn, and so are `--gpu`, `--browser-gpu` and
+  `--docker`. `snapshot` always carries `--describe false`, because describe calls Gemini
+  ([ADR 0001](../architecture/decisions/0001-defer-never-cloud-fallback.md)).
+- **Allowlisted environment, twice.** The CLI gets PATH, the Windows system variables, temp, home and
+  the app-data dirs. The runner sets `HYPERFRAMES_NO_TELEMETRY=1`, `DO_NOT_TRACK=1`,
+  `HYPERFRAMES_NO_UPDATE_CHECK=1`, `HYPERFRAMES_NO_AUTO_INSTALL=1`, `HYPERFRAMES_SKIP_SKILLS=1`,
+  `PRODUCER_BROWSER_GPU_MODE=software` and the pinned ffmpeg, ffprobe, browser and cache paths.
+  Nothing else passes: no `*_API_KEY` or token (`capture` would prefer `OPENROUTER_API_KEY`),
+  `NODE_OPTIONS` or `GPU_LEASE_*`. The Go side applies the same allowlist to the runner itself
+  (`gpugen.Spec.EnvExact`).
+- **`--json` on every call.** It is the only switch that skips the CLI's npm-registry and GitHub
+  update checks. `HYPERFRAMES_NO_UPDATE_CHECK=1` alone stops the self-install, not the pings.
+- **No stray state.** The cwd is a fresh, empty work dir, so the CLI's `./.env` autoload finds
+  nothing and an `ffmpeg.exe` planted in a cwd can never win the binary scan. HOME is
+  `<hyperframes_dir>/home`, so HyperFrames' own state (`~/.hyperframes` and the managed Chrome cache)
+  stays harness-owned and nothing it writes reaches the operator's `~/.claude`.
+- **Pinned and verified.** The install is `npm ci --ignore-scripts` from the committed lockfile
+  (`setup/hyperframes/`, `hyperframes` exact). `npm audit signatures` is fatal on failure.
+  `npm rebuild esbuild` runs the one postinstall the CLI needs. `browser ensure` fetches the CLI's
+  pinned chrome-headless-shell, and `hyperframes_browser_path` binds it explicitly, because the CLI's
+  own lookup prefers a newer build in `~/.cache/puppeteer`. The installer never runs
+  `npm install -g`: a global HyperFrames self-upgrades in a detached process. The runner refuses an
+  install whose version is not its own pin (`PINNED_VERSION`, held equal to the lockfile by a test)
+  with `CLI_MISSING`, because every guard here was read in the pinned source. `acceptance` runs
+  that check as the node's identity.
+- **Offline renders.** Vetted templates reference no URL, and every font family they use is declared
+  with `@font-face` from the shared kit. An undeclared family makes the compiler request the Google
+  Fonts CSS API, with the page's character set in the query.

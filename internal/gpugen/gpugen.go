@@ -86,6 +86,12 @@ type Spec struct {
 	// Env are extra "K=V" entries appended to the current environment (e.g.
 	// COMFY_DIR, MEMORY_STACK, GPU_LOCK_WAIT_MS). nil = inherit only.
 	Env []string
+	// EnvExact, when true, makes Env the child's COMPLETE environment: nothing
+	// is inherited from this process. The compose route (ADR 0059) sets it so an
+	// external CLI's runner starts from an allowlist — no cloud key, lease token
+	// (GPU_LEASE_*) or NODE_OPTIONS in the server's env can reach it. false keeps
+	// the inherit-and-append behavior every other runner relies on.
+	EnvExact bool
 	// Out is the file the runner must produce; a missing/empty Out after a clean
 	// exit is treated as failure (the caller defers). Required.
 	Out string
@@ -168,7 +174,12 @@ func Generate(ctx context.Context, spec Spec) (string, error) {
 	args := append([]string{spec.Script}, spec.Args...)
 	cmd := exec.CommandContext(cctx, exe, args...)
 	cmd.Dir = spec.Dir
-	cmd.Env = append(os.Environ(), spec.Env...)
+	if spec.EnvExact {
+		// A non-nil empty slice, never nil: os/exec treats a nil Env as "inherit".
+		cmd.Env = append([]string{}, spec.Env...)
+	} else {
+		cmd.Env = append(os.Environ(), spec.Env...)
+	}
 	// On timeout/cancel kill the WHOLE process tree (invariant 3): a bare kill on
 	// Windows orphans the ComfyUI python grandchild and bypasses node's finally.
 	cmd.Cancel = func() error { return killTree(cmd.Process) }

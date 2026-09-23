@@ -69,6 +69,7 @@ The installer seeds this tier's media bindings (`config_seed`):
 
 | key | value |
 |---|---|
+| `compose_script` | `render/compose-hyperframes.mjs` |
 | `gen_edit_preset` | `lightning8` |
 | `gen_edit_script` | `render/comfy-edit.mjs` |
 | `gen_edit_unet` | `qwen-image-edit-2511-Q5_1.gguf` |

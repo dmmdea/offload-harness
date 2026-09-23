@@ -58,3 +58,17 @@ func TestTaskPipelineJobValid(t *testing.T) {
 		t.Fatal("unknown task must be invalid")
 	}
 }
+
+// TestTaskComposeVideoValid: the composition task (ADR 0059) is a known task, and its
+// wire name is the one the MCP door, the CLI and the ledger all record.
+func TestTaskComposeVideoValid(t *testing.T) {
+	if !TaskComposeVideo.Valid() {
+		t.Fatal("TaskComposeVideo should be Valid()")
+	}
+	if string(TaskComposeVideo) != "compose_video" {
+		t.Fatalf("TaskComposeVideo = %q, want compose_video", TaskComposeVideo)
+	}
+	if TaskType("compose-video").Valid() {
+		t.Fatal("the fleet spelling is not a pipeline task type")
+	}
+}

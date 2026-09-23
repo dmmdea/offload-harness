@@ -363,6 +363,9 @@ func EngineFor(task, seat string) string {
 	case "generate_image", "inpaint_image", "edit_image_generative", "upscale_image",
 		"generate_video", "animate_character", "generate_audio", "run_graph":
 		return "comfyui"
+	case "compose_video":
+		// HyperFrames on the CPU (ADR 0059): no model and no llama.cpp job.
+		return "hyperframes"
 	}
 	return "llamacpp"
 }

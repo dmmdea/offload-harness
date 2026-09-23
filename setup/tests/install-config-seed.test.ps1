@@ -369,5 +369,30 @@ Assert ($null -eq (Get-HostToolSeed -GimpConsole '' -PythonExe '' -PythonHasPil 
 $hsMerged = (Merge-ConfigSeed -ConfigText $tplText -Seed $hs) | ConvertFrom-Json
 Assert ($hsMerged.gimp_console_path -eq 'C:/Program Files/GIMP 3/bin/gimp-console.exe') 'host-tool seed merges into the shipped config'
 
+# --- Composition lane (ADR 0059): node gate + the bind/un-bind seed rule -------------
+Write-Host ""
+Write-Host "== Get-NodeMajor / Get-HyperframesSeed: the compose lane seed (pure half) =="
+Assert ([bool](Get-Command Get-HyperframesSeed -ErrorAction SilentlyContinue)) 'dot-source seam defines Get-HyperframesSeed'
+Assert ((Get-NodeMajor -VersionText 'v26.7.0') -eq 26)   'node v26.7.0 -> 26'
+Assert ((Get-NodeMajor -VersionText 'v20.19.1') -eq 20)  'node v20 -> 20 (below the HyperFrames floor)'
+Assert ((Get-NodeMajor -VersionText '') -eq 0)           'no node -> 0'
+Assert ((Get-NodeMajor -VersionText 'garbage') -eq 0)    'unparsable -> 0'
+Assert ($HYPERFRAMES_MIN_NODE -eq 22)                     'HyperFrames engines floor is node >= 22'
+$hfOk = Get-HyperframesSeed -Installed $true -HyperframesDir 'D:\stack\hyperframes' -BrowserPath 'D:\stack\hyperframes\chrome\chs.exe'
+Assert ($hfOk.compose_script -eq 'render/compose-hyperframes.mjs')    'installed -> compose_script bound to the relative runner'
+Assert ($hfOk.hyperframes_dir -eq 'D:/stack/hyperframes')             'installed -> hyperframes_dir with forward slashes'
+Assert ($hfOk.hyperframes_browser_path -eq 'D:/stack/hyperframes/chrome/chs.exe') 'installed -> the pinned browser path'
+$hfSkip = Get-HyperframesSeed -Installed $false -HyperframesDir '' -BrowserPath ''
+Assert ($hfSkip.compose_script -eq '' -and $null -eq $hfSkip.PSObject.Properties['hyperframes_dir']) 'skipped -> compose_script un-bound, nothing else written'
+$hfNoBrowser = Get-HyperframesSeed -Installed $true -HyperframesDir 'D:\x' -BrowserPath ''
+Assert ($hfNoBrowser.compose_script -eq '') 'installed without a browser -> un-bound (never a BOUND-BUT-MISSING route)'
+$tierSeeded = Merge-ConfigSeed -ConfigText $tplText -Seed ([pscustomobject]@{ compose_script = 'render/compose-hyperframes.mjs' })
+Assert (((Merge-ConfigSeed -ConfigText $tierSeeded -Seed $hfSkip) | ConvertFrom-Json).compose_script -eq '') 'the un-bind overrides the tier seed'
+Assert (((Merge-ConfigSeed -ConfigText $tierSeeded -Seed $hfOk) | ConvertFrom-Json).hyperframes_dir -eq 'D:/stack/hyperframes') 'the bind merges over the tier seed'
+foreach ($t in @('blackwell-3x16', 'blackwell-8', 'ampere-8', 'amd-gcn')) {
+  Assert ($profiles.$t.config_seed.compose_script -eq 'render/compose-hyperframes.mjs') "$t seeds compose_script (render tree ships)"
+}
+Assert ($null -eq $profiles.cpu.config_seed -or $null -eq $profiles.cpu.config_seed.PSObject.Properties['compose_script']) 'cpu tier seeds no compose lane'
+
 if ($failures -eq 0) { Write-Host 'ALL PASS' -ForegroundColor Green; exit 0 }
 Write-Host "FAILURES: $failures" -ForegroundColor Red; exit 1

@@ -74,7 +74,16 @@ func TestNonMediaSeedDoesNotRenderAsMedia(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rendering tier docs: %v", err)
 	}
-	for _, tier := range []string{"dual-gpu", "amd-gcn"} {
+	// amd-gcn left this list when it began seeding the composition lane (compose_script,
+	// ADR 0059): that IS a file-backed media binding, so its page must now render it as one.
+	gcn := got[filepath.Join("docs", "tiers", "amd-gcn.md")]
+	if !strings.Contains(gcn, "media bindings (`config_seed`)") || !strings.Contains(gcn, "| `compose_script` | `render/compose-hyperframes.mjs` |") {
+		t.Error("amd-gcn seeds compose_script, a media route key: its page must render it under the media heading")
+	}
+	if !strings.Contains(gcn, "## Installer-seeded config (non-media)") {
+		t.Error("amd-gcn's cascade blank-outs must still render under the non-media heading")
+	}
+	for _, tier := range []string{"dual-gpu"} {
 		page, ok := got[filepath.Join("docs", "tiers", tier+".md")]
 		if !ok {
 			t.Fatalf("no page rendered for tier %s", tier)

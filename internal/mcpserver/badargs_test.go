@@ -71,6 +71,7 @@ func TestAllHandlersSurfaceBadArguments(t *testing.T) {
 		{"status", s.handleStatus, `[1,2,3]`},
 		{"edit_image", s.handleEditImage, `{"image":1,"ops":[]}`},
 		{"media", s.handleMedia, `{"op":["not","a","string"]}`},
+		{"compose_video", s.handleComposeVideo, `{"template":"title-card","variables":"not-an-object"}`},
 		{"run_graph", s.handleRunGraph, `{"graph_path":123}`}, // wrong type → clean error, no panic
 		{"truncated json", s.handleSummarize, `{"text":"unterminated`},
 	}

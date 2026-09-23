@@ -1810,6 +1810,14 @@ func (s *Server) concurrencyCapped(taskType string) bool {
 	// five-minute digest contract would be the cap protecting nothing.
 	case "accel":
 		return false
+	// compose-video (ADR 0059) never touches the text endpoint either: HyperFrames
+	// renders on the CPU (software GL + CPU encode) and the pipeline serializes it
+	// in-process on its own compose slot (capacity one), whose bounded wait defers
+	// `compose_busy`. Capped, a composition would hold a fleet execution slot for up
+	// to compose_timeout_sec (30 min) doing work the cap does not protect — starving
+	// the agent lane, the exact failure the exemption rule above exists to prevent.
+	case ComposeTask:
+		return false
 	}
 	// Config-driven pipeline routes run through runPipelineJob, which takes the
 	// same mediaSlot. Their names are operator-chosen, so they cannot be listed

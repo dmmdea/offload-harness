@@ -1060,6 +1060,16 @@ the token entirely, so already-deployed tokenless media clients keep working byt
 (pinned by test); whole-fleet enforcement is a recorded follow-up
 ([ADR 0023](../architecture/decisions/0023-agent-lane-tailnet-auth-and-locality.md)).
 
+**Because media dispatch is tokenless, a remote media task never picks the node's output path.**
+The builders in `internal/fleetnode/tasks.go` and `compose_task.go` drop a caller's `out`, and
+run-graph's `out_dir`. The pipeline then writes `<media_dir>/<task>-<hash8>.<ext>` (run-graph:
+`<media_dir>`). Results come back by bare name through `GET /fleet/media/{name}`, which serves only
+files directly inside `media_dir`, so no working caller ever depended on a path outside it. A stray
+key is ignored, not refused. `TestRemoteMediaTaskOutNeverReachesThePipeline` tries absolute,
+`..`, UNC, drive-relative, existing-file and bare-name targets against every writer.
+`TestEveryFleetWriterIsCoveredByTheOutRule` fails when a new file-writing task is not in that
+table. The local MCP and CLI doors keep `out`, because they are trusted callers on the box.
+
 ### Context doc names
 
 A `context[].name` is a future FILENAME on the receiving node, and the delegator and the node
