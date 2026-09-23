@@ -6,6 +6,31 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added — the LMCache overlay kit ships with the seat template; two launcher knobs
+
+- **`setup/templates/vllm-seat/lmcache-patches/`: the patch set a pipeline-parallel vLLM seat loads through
+  `SEAT_LMCACHE_PYTHONPATH`, and the script that builds it.** Base LMCache 0.5.5: #4253 (fp8 stores on hybrids),
+  the per-rank L2 layout patch, register-time layout binding, and backports of #4709 and #5249, plus a CPU-only
+  smoke test. `repatch-lmcache-overlay.sh` builds beside the live overlay, skips a patch already in the base,
+  checks one import marker per patch and the smoke test, records each patch's sha256, and swaps only while no
+  MP server has the old tree loaded. The kit is named apart from the overlay it builds (default
+  `<seat dir>/lmcache-overlay`) so a build never swaps its own kit away. `.gitattributes` keeps it LF.
+- **`SEAT_KV_LOAD_FAILURE_POLICY` (seat env, optional):** `recompute` or `fail`, spliced into
+  `--kv-transfer-config`; empty leaves vLLM's default (`fail`). An invalid value refuses the start before the MP
+  server is touched. The kit's deploy gate now reads it from each seat env that names the overlay (it used to
+  grep the launcher for a hard-coded policy).
+- **`SEAT_MP_EXTRA_ARGS` (seat env, optional):** extra `lmcache server` arguments, appended after the launcher's.
+- **The launcher reports two hazards at start, without refusing:** dxg residency / VA failures in the distro's
+  kernel log (`make_resident: Ioctl failed: -12`, `reserve_gpu_va … -75`), and the count of `Store task … failed`
+  lines the unit's previous MP generation left in `lmcache-mp.log` (a per-unit offset file).
+
+### Fixed — the 0.28 V2-runner record
+
+- The launcher comment, ADR 0048 and the runner test said the production pair seat logs `Using V2 Model Runner` on
+  vLLM 0.28.0. Those lines are `gpu_worker.py:429`, which exists only in 0.29.0; the production seats serve on
+  0.28's V1 runner. The version gate stands: 0.28's V2 runner does run on WSL2 (the TP2 DFlash spec-decode arms
+  logged `gpu_worker.py:396`, the 0.28 line, and served).
+
 ### Added — opencode context instrument
 
 - **`go run ./cmd/opencode-context`: the before/after gate for what opencode sends a seat.** It copies

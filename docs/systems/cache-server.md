@@ -194,6 +194,13 @@ eviction and after a restart — hit counters alone do not prove fidelity).
   ranks) works stock. Pipeline seats serve L2 hits with the per-rank layout overlay patch (each
   rank's layout bound to its own pages), loaded through `SEAT_LMCACHE_PYTHONPATH`; the first request
   after an MP server start still gets 0 L2 hits until register-time binding lands.
+- **The overlay kit ships in `setup/templates/vllm-seat/lmcache-patches/`** (base LMCache 0.5.5): the
+  fp8-store fix (#4253), the per-rank layout patch, register-time binding, the #4709 and #5249
+  backports, a CPU-only smoke test and `repatch-lmcache-overlay.sh`, which builds the overlay beside
+  the live one, verifies one marker per patch and swaps it in only while no MP server has it loaded
+  (its README has the steps). With the #4709 backport a failed L2 load is handed back to vLLM:
+  `SEAT_KV_LOAD_FAILURE_POLICY=recompute` in the seat env recomputes it, vLLM's default fails the
+  request, and the script refuses to deploy the backport into a seat without `recompute`.
 
 ## Error handling
 

@@ -118,8 +118,11 @@ It was NOT paid by copying ampere-16's declaration, and the measurement is why t
 - **WSL2 launches of a vLLM ≥ 0.29 venv pin the V1 model runner.** 0.29's default V2 runner needs UVA; `seat_fg.sh`
   now exports `VLLM_USE_V2_MODEL_RUNNER=0` when `/proc/version` says microsoft AND the venv's vLLM (read from its
   dist-info name) is ≥ 0.29, unless the env file already chose. The version gate is load-bearing: 0.28's V2 runner runs
-  on WSL2 — the production pair seat logs `Using V2 Model Runner` on 0.28.0 — so a WSL-only pin would have silently
-  moved that seat to V1 (caught in review). vLLM's own `VLLM_WSL2_ENABLE_PIN_MEMORY=1` lets 0.29's V2 runner start on
+  on WSL2 — 0.28 picks it per configuration, and the TP2 DFlash spec-decode arms logged `gpu_worker.py:396] Using V2
+  Model Runner` and served — so a WSL-only pin would have silently moved such a 0.28 seat to V1 (caught in review).
+  *Corrected 2026-09-23:* this line first said the production pair seat logs the V2 runner on 0.28.0; those lines are
+  `gpu_worker.py:429`, which exists only in 0.29.0, and the production seats serve on 0.28's V1 runner. The gate stands
+  on the DFlash evidence. vLLM's own `VLLM_WSL2_ENABLE_PIN_MEMORY=1` lets 0.29's V2 runner start on
   WSL2 and it then dies in kernel warm-up (`CUDA error: invalid device ordinal`), so the pin is the working path there.
 - **The tier's llama.cpp lane gets a seeded budget too.** `TestAReasoningSeatSeedsItsCompletionBudget` asks every tier
   with a reasoning vLLM seat for `config_seed.agent_max_tokens`, because that value is what a fresh install runs when the
