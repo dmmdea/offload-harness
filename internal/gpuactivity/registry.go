@@ -368,7 +368,7 @@ func (h *Handle) OnProgress(tokensOut int) {
 			r.TokensOut = tokensOut
 		}
 		r.LastProgressMs = now.UnixMilli()
-		if r.LivePhase == "prefill" {
+		if r.LivePhase == "prefill" || r.LivePhase == "cold-load" { // the first byte ends a prefill and a cold-load hold alike
 			r.LivePhase = "decoding"
 		}
 		if r.Phase == PhaseAdmission || r.Phase == PhaseColdLoad ||

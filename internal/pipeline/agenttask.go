@@ -517,10 +517,35 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	ceilingSec := CeilingFor(timeoutSec, est)
 	wire.CeilingSec = ceilingSec
 	livePolicy := LivenessPolicyFor(p.cfg, rates.Get(seat), admissionBudget(p.cfg.AgentAdmissionWaitSec))
+	ClampColdLoadToRun(&livePolicy, ceilingSec)
 	cctx, live := agent.NewMonitor(ctx, livePolicy, time.Duration(ceilingSec)*time.Second)
 	defer live.Stop()
-	log.Printf("agent task: liveness for %s: ceiling %d s (wall %d s, estimate %d s), floor %s, prefill %.0f tok/s, decode %.1f tok/s",
-		seat, ceilingSec, timeoutSec, est.TotalSec, livePolicy.Floor, livePolicy.PrefillTokS, livePolicy.TokS)
+	// The cold-load hold (0.140.0): the admission warm-up above loads a seat
+	// that is absent when the run STARTS, but the seat can also be evicted
+	// between two steps (another model's swap; the 5-minute idle unload during
+	// a long tool call). Its next request then waits in llama-swap for the
+	// reload, and a prefill clock sized from the prefill rate alone filed that
+	// normal load as a stall. While /running reads the seat loading, the
+	// monitor suspends the stall clock under a bounded cold-load ceiling, and
+	// tells the observer so status readers and the delegator see the phase.
+	obs := newProgressObserver(ctx, act, ceilingSec)
+	if probe := seatLoadProbe(p.cfg.Endpoint, seat); probe != nil {
+		live.WithSeatProbe(probe, func(ph agent.Phase, allow time.Duration) {
+			log.Printf("agent task: liveness for %s: %s (allowed %.0fs)", seat, ph, allow.Seconds())
+			obs.OnAllowance(string(ph), allow)
+		})
+		if coldLoaded {
+			// The warm-up just loaded the seat. Its FIRST completion is still
+			// cold cost (measured 2026-09-23: the 3-card seat read `ready`
+			// after a 177 s load, then sent nothing for 60 s on a ~12k-token
+			// prompt). Until the first byte that wait gets the SHORT post-ready
+			// bound, max(120 s, 2 x the prefill allowance), not the cold-load
+			// ceiling, so a seat that wedges right after loading is seen fast.
+			live.MarkSeatLoaded()
+		}
+	}
+	log.Printf("agent task: liveness for %s: ceiling %d s (wall %d s, estimate %d s), floor %s, prefill %.0f tok/s, decode %.1f tok/s, cold-load ceiling %s (%s)",
+		seat, ceilingSec, timeoutSec, est.TotalSec, livePolicy.Floor, livePolicy.PrefillTokS, livePolicy.TokS, livePolicy.ColdLoad, livePolicy.ColdLoadBasis)
 	// One busy-seat budget for the WHOLE contract (seatwait): every chat step
 	// and the re-pack draw on it, so a 10-step loop cannot spend ten budgets,
 	// and the wait it consumed is reported on the wire (contention_wait_sec).
@@ -747,7 +772,7 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		)
 	}
 
-	built.Loop.WithObserver(newProgressObserver(ctx, act, ceilingSec)).WithLiveness(live)
+	built.Loop.WithObserver(obs).WithLiveness(live)
 	act.Phase("running")
 	res, rerr := built.Loop.Run(cctx, contract.Goal)
 	// The run's last liveness reading rides the wire on every branch below —
