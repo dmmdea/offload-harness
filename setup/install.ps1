@@ -885,6 +885,81 @@ function Get-HostToolSeed {
   return [pscustomobject]$out
 }
 
+# ---------------------------------------------------------------------------
+# Composition lane (offload_compose_video, ADR 0059): HyperFrames needs Node >= 22.
+# Get-NodeMajor parses `node --version` ("v26.7.0" -> 26; anything unparsable -> 0).
+# Get-HyperframesSeed is the PURE seeding rule; Install-Hyperframes is the impure
+# step. The tier seed ships compose_script, so a box that could NOT install the
+# lane must un-bind it ("" = NOT CONFIGURED) rather than ship a route that reports
+# BOUND-BUT-MISSING and fails acceptance.
+# ---------------------------------------------------------------------------
+$HYPERFRAMES_MIN_NODE = 22
+function Get-NodeMajor {
+  param([string]$VersionText)
+  if ($VersionText -match '^\s*v?(\d+)\.') { return [int]$Matches[1] }
+  return 0
+}
+
+function Get-HyperframesSeed {
+  param([bool]$Installed, [string]$HyperframesDir, [string]$BrowserPath)
+  if ($Installed -and $HyperframesDir -and $BrowserPath) {
+    return [pscustomobject][ordered]@{
+      compose_script           = 'render/compose-hyperframes.mjs'
+      hyperframes_dir          = $HyperframesDir.Replace('\', '/')
+      hyperframes_browser_path = $BrowserPath.Replace('\', '/')
+    }
+  }
+  return [pscustomobject]@{ compose_script = '' }
+}
+
+# Install-Hyperframes: the pinned, project-local HyperFrames install. Copies the
+# committed package.json + package-lock.json (setup/hyperframes) to $Dest, then
+#   npm ci --ignore-scripts   (the lockfile's exact tree; no install script runs)
+#   npm audit signatures      (registry signatures + SLSA provenance; a failure is FATAL)
+#   npm rebuild esbuild       (the one postinstall the CLI needs, run deliberately)
+# and resolves the pinned chrome-headless-shell through the harness runner's
+# `browser` op, so `browser ensure` runs under the scrubbed env and HyperFrames'
+# state lands in $Dest/home. Never `npm install -g` (a global HyperFrames
+# self-upgrades in a detached process). Returns @{ dir; browser; version }.
+function Install-Hyperframes {
+  param([string]$RepoRoot, [string]$Dest, [string]$NodeExe)
+  $src = Join-Path (Join-Path $RepoRoot 'setup') 'hyperframes'
+  New-Item -ItemType Directory -Force -Path $Dest | Out-Null
+  foreach ($f in @('package.json', 'package-lock.json')) {
+    Copy-Item -Force (Join-Path $src $f) (Join-Path $Dest $f)
+  }
+  $entry = Join-Path $Dest 'node_modules/hyperframes/bin/hyperframes.mjs'
+  $pinned = (Get-Content -Raw (Join-Path $src 'package.json') | ConvertFrom-Json).dependencies.hyperframes
+  $have = ''
+  $pkg = Join-Path $Dest 'node_modules/hyperframes/package.json'
+  if (Test-Path $pkg) { $have = (Get-Content -Raw $pkg | ConvertFrom-Json).version }
+  # npm writes warnings to stderr; under 'Stop' PS 5.1 would turn them into a throw.
+  # Exit codes are checked explicitly instead.
+  $prevEapHf = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  Push-Location $Dest
+  try {
+    if (-not (Test-Path $entry) -or $have -ne $pinned) {
+      & npm ci --ignore-scripts --no-audit --no-fund
+      if ($LASTEXITCODE -ne 0) { throw "npm ci (hyperframes $pinned) failed (exit $LASTEXITCODE)" }
+    }
+    & npm audit signatures
+    if ($LASTEXITCODE -ne 0) { throw "npm audit signatures FAILED for the hyperframes install - registry signature or provenance check did not pass; refusing to bind the compose lane" }
+    & npm rebuild esbuild
+    if ($LASTEXITCODE -ne 0) { throw "npm rebuild esbuild failed (exit $LASTEXITCODE)" }
+  } finally {
+    Pop-Location
+    $ErrorActionPreference = $prevEapHf
+  }
+  $runner = Join-Path (Join-Path $RepoRoot 'render') 'compose-hyperframes.mjs'
+  $out = & $NodeExe $runner browser --hyperframes-dir $Dest
+  $line = @($out | ForEach-Object { "$_" } | Where-Object { $_ -match '^\{' }) | Select-Object -Last 1
+  if (-not $line) { throw "hyperframes browser ensure produced no result: $($out -join ' ')" }
+  $res = $line | ConvertFrom-Json
+  if (-not $res.ok) { throw "hyperframes browser ensure failed: $($res.class): $($res.detail)" }
+  return @{ dir = $Dest; browser = $res.browser_path; version = $pinned; chrome = $res.chrome_version }
+}
+
 # Locate a gimp-console executable: newest GIMP major first ("GIMP 3" sorts
 # after "GIMP 2"), and within one install prefer the UNVERSIONED exe name
 # (shortest) — versioned paths rot when GIMP updates in place.
@@ -1496,6 +1571,33 @@ Step 'build local-agent.exe' `
 $manifestComponents['local-agent'] = $repoVersion
 
 # ---------------------------------------------------------------------------
+# Step 7b: the composition lane (HyperFrames; ADR 0059). Skipped with a reason on a
+# box without node >= 22 (the lane then stays unbound); FATAL on an integrity
+# failure (npm audit signatures) - an unverifiable install is never bound.
+# ---------------------------------------------------------------------------
+$hfResult = $null
+$hfSkipWhy = ''
+$nodeCmd = Get-Command node -ErrorAction SilentlyContinue
+$nodeVer = ''
+if ($nodeCmd) { $nodeVer = "$(& $nodeCmd.Source --version 2>$null | Select-Object -First 1)".Trim() }
+$nodeMajor = Get-NodeMajor -VersionText $nodeVer
+if (-not $nodeCmd) {
+  $hfSkipWhy = 'no node on PATH'
+} elseif ($nodeMajor -lt $HYPERFRAMES_MIN_NODE) {
+  $hfSkipWhy = "node $nodeVer found, HyperFrames needs >= $HYPERFRAMES_MIN_NODE"
+} elseif (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
+  $hfSkipWhy = "node $nodeVer found but no npm beside it"
+}
+if ($hfSkipWhy) {
+  Write-Host "SKIP  hyperframes (compose lane): $hfSkipWhy - compose_video stays unbound (NOT CONFIGURED)" -ForegroundColor Yellow
+} else {
+  Write-Host "DO    hyperframes (compose lane, node $nodeVer)" -ForegroundColor Cyan
+  $hfResult = Install-Hyperframes -RepoRoot $repoRoot -Dest (Join-Path $HOME_DIR 'hyperframes') -NodeExe $nodeCmd.Source
+  $manifestComponents['hyperframes'] = $hfResult.version
+  Write-Host "OK    hyperframes $($hfResult.version) (chrome-headless-shell $($hfResult.chrome) at $($hfResult.browser))" -ForegroundColor Green
+}
+
+# ---------------------------------------------------------------------------
 # Step 8: harness config -> ~/.local-offload/config.json (no overwrite)
 # ---------------------------------------------------------------------------
 $cfgDir  = Join-Path $HOME '.local-offload'
@@ -1606,6 +1708,14 @@ Step 'harness config -> ~/.local-offload/config.json' `
                    else        { 'no python found (install Python 3 + pip install pillow, or set edit_python)' }
       Write-Host "      host tools: edit_image stays unbound - $whyNoEdit" -ForegroundColor Yellow
     }
+    # Composition lane (Step 7b): bind the three compose keys when the pinned install
+    # and browser are in place; otherwise un-bind the tier's compose_script so the
+    # route reads NOT CONFIGURED instead of BOUND-BUT-MISSING.
+    $hfDir = ''; $hfBrowser = ''
+    if ($hfResult) { $hfDir = $hfResult.dir; $hfBrowser = $hfResult.browser }
+    $hfSeed = Get-HyperframesSeed -Installed ([bool]$hfResult) -HyperframesDir $hfDir -BrowserPath $hfBrowser
+    $cfgText = Merge-ConfigSeed -ConfigText $cfgText -Seed $hfSeed
+    Write-Host "      compose lane: $(@($hfSeed.PSObject.Properties | ForEach-Object { "$($_.Name)=$($_.Value)" }) -join ', ')" -ForegroundColor DarkGray
     # Accelerator seed LAST (ADR 0024): merged after every tier layer so an
     # accelerator key can never be overwritten by the GPU tier's own seed.
     $accSeed = Get-AcceleratorSeed -ProfilesDoc $pdoc -Ids $accelerators -HailoHome $HAILO_HOME
@@ -1616,6 +1726,15 @@ Step 'harness config -> ~/.local-offload/config.json' `
     $noBomCfg = New-Object System.Text.UTF8Encoding($false)
     [System.IO.File]::WriteAllText($cfgDest, $cfgText, $noBomCfg)
   }
+
+# An EXISTING config is never rewritten, so a box that just gained the lane is told
+# exactly which three keys bind it.
+if ($hfResult -and (Test-Path $cfgDest)) {
+  $cfgNow = Get-Content -Raw $cfgDest | ConvertFrom-Json
+  if (-not $cfgNow.PSObject.Properties['hyperframes_dir'] -or -not $cfgNow.hyperframes_dir) {
+    Write-Host "NOTE  compose lane installed but $cfgDest predates it - add: compose_script=render/compose-hyperframes.mjs, hyperframes_dir=$($hfResult.dir.Replace('\','/')), hyperframes_browser_path=$($hfResult.browser.Replace('\','/'))" -ForegroundColor Yellow
+  }
+}
 
 # ---------------------------------------------------------------------------
 # Step 8b: run-graph satisfier tooling (best-effort). offload_run_graph provisions a

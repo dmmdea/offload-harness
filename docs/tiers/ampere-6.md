@@ -37,6 +37,7 @@ The installer seeds this tier's media bindings (`config_seed`):
 
 | key | value |
 |---|---|
+| `compose_script` | `render/compose-hyperframes.mjs` |
 | `imagegen_cfg` | `1` |
 | `imagegen_engine` | `sdcpp` |
 | `imagegen_family` | `sdxl-turbo` |

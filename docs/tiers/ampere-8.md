@@ -50,6 +50,7 @@ The installer seeds this tier's media bindings (`config_seed`):
 
 | key | value |
 |---|---|
+| `compose_script` | `render/compose-hyperframes.mjs` |
 | `upscale_model` | `4x-UltraSharp.pth` |
 
 `__OFFLOAD_HOME__` is replaced with the install root at render time.

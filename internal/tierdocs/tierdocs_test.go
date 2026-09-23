@@ -16,6 +16,7 @@ func TestMediaSeedKeyCoversMediacapRouteKeys(t *testing.T) {
 		"gen_edit_script", "gen_edit_unet", "gen_edit_preset",
 		"run_graph_script", "comfy_dir", "edit_python",
 		"upscale_script", "upscale_model",
+		"compose_script", "hyperframes_dir", "hyperframes_browser_path", "compose_workers",
 		// spawn-per-job seed families:
 		"imagegen_family", "imagegen_ckpt", "imagegen_pool_vvram_gb",
 		"videogen_family", "videogen_transformer", "videogen_width",
