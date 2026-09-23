@@ -350,6 +350,22 @@ func TestSdcppArgs_FullBinding(t *testing.T) {
 	}
 }
 
+// TestSdcppArgs_Transparent mirrors TestBuildArgs_QwenImage21TransparentAndSchedule
+// for the sdcpp engine (D5): sd.cpp has no --transparent flag of its own (the runner
+// maps it to the RGBA prompt template / alpha-flatten step, tested in
+// render/sdcpp-generate.test.mjs), but the OUR-flag surface must still carry it
+// through so the runner sees the request — this was the exact gap (imagegen.go
+// sdcppArgs had no equivalent of buildArgs' transparent handling).
+func TestSdcppArgs_Transparent(t *testing.T) {
+	m := SdcppModel{Model: "m.gguf"}
+	args := sdcppArgs("o.png", "p", map[string]any{"transparent": true}, m)
+	has(t, args, "--transparent", "1")
+	for _, off := range []map[string]any{{}, {"transparent": false}, {"transparent": "no"}} {
+		hasNot(t, sdcppArgs("o.png", "p", off, m), "--transparent")
+	}
+	has(t, sdcppArgs("o.png", "p", map[string]any{"transparent": "true"}, m), "--transparent", "1")
+}
+
 // TestSdcppArgs_RequestStepsWinAndZeroBinding: a per-request steps overrides the
 // binding's steps (same contract as the ComfyUI path), and a zero binding passes
 // no binding flags at all.

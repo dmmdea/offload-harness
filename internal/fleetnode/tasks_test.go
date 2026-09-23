@@ -24,6 +24,27 @@ func fullCfg() config.Config {
 	}
 }
 
+// familyOnlyImageCfg: the binxarn shape (binxarn wave session 5d227d30 §2a) — NO
+// default image binding at all (ImageGenScript/ImageGenEngine both unset, deliberate
+// per ADR 0058/D1: a non-commercial family must never become the default), ONLY a
+// named, fully-configured sdcpp family. Before the fix, cfg.ImageRouteConfigured()
+// (the default-only gate) was false here, so the fleet door treated this node as
+// having NO image-gen route at all despite the family being complete.
+func familyOnlyImageCfg() config.Config {
+	return config.Config{
+		ImageGenFamilies: map[string]config.FamilyOverlay{
+			"qwen-image-2.1": {
+				"license":         json.RawMessage(`"Qwen Research License"`),
+				"commercial_use":  json.RawMessage(`false`),
+				"imagegen_family": json.RawMessage(`"qwen-image-2.1"`),
+				"imagegen_engine": json.RawMessage(`"sdcpp"`),
+				"sdcpp_bin":       json.RawMessage(`"/opt/offload/sdcpp/sd-cli"`),
+				"sdcpp_model":     json.RawMessage(`"/opt/offload/models/qwen-image-2.1/qwen_image_2.1-Q8_0.gguf"`),
+			},
+		},
+	}
+}
+
 // --- SupportedTasks / Families derivation (advertised = actually configured) ---
 
 func TestSupportedTasksDerivation(t *testing.T) {
@@ -40,6 +61,7 @@ func TestSupportedTasksDerivation(t *testing.T) {
 		{"audio via voice", config.Config{VoiceGenScript: "tts.mjs"}, []string{"audio-gen"}},
 		{"audio via music", config.Config{MusicGenScript: "music.mjs"}, []string{"audio-gen"}},
 		{"run-graph only", config.Config{RunGraphScript: "rg.mjs"}, []string{"run-graph"}},
+		{"family-only image (no default binding)", familyOnlyImageCfg(), []string{"image-gen"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -104,6 +126,15 @@ func TestFamiliesDerivation(t *testing.T) {
 			t.Fatalf("Families = %v, want nil", got)
 		}
 	})
+	t.Run("family-only image: no spurious sdxl label, the named family is loadable", func(t *testing.T) {
+		// Before the fix this also required proving taskConfiguredFor's own change
+		// didn't reintroduce a false "sdxl" claim: once image-gen became advertised
+		// for a family-only node, familyFor's unconditional "else sdxl" fallback
+		// would otherwise have claimed a default route this node never renders.
+		if got := Families(familyOnlyImageCfg()); !reflect.DeepEqual(got, []string{"qwen-image-2.1"}) {
+			t.Fatalf("Families = %v, want [qwen-image-2.1] (no sdxl — this node has no default binding)", got)
+		}
+	})
 }
 
 // --- BuildRequest: per-task translation (mirrors the MCP handlers) ---
@@ -141,6 +172,24 @@ func TestBuildRequestImageGen(t *testing.T) {
 		_, _, err := BuildRequest(context.Background(), fullCfg(), true, "image-gen", json.RawMessage(`{"width":512}`))
 		if err == nil || !strings.Contains(err.Error(), "prompt") {
 			t.Fatalf("err = %v, want prompt-required", err)
+		}
+	})
+	t.Run("admitted on a family-only node when the payload names the family", func(t *testing.T) {
+		// The regression this defect is about: before the fix, taskConfiguredFor
+		// gated solely on cfg.ImageRouteConfigured() (the DEFAULT binding), so this
+		// dispatch 400'd with "unsupported task_type" even though the named family
+		// was fully configured (binxarn wave session 5d227d30 §2a, reproduced live
+		// against the deployed fleet door).
+		req, cleanup := mustBuild(t, familyOnlyImageCfg(), "image-gen", `{"prompt":"a fox sticker","family":"qwen-image-2.1"}`)
+		defer cleanup()
+		if req.Task != core.TaskGenerateImage || req.Params["family"] != "qwen-image-2.1" {
+			t.Fatalf("req = %+v", req)
+		}
+	})
+	t.Run("a totally unconfigured node still refuses (no default, no families)", func(t *testing.T) {
+		_, _, err := BuildRequest(context.Background(), config.Config{}, true, "image-gen", json.RawMessage(`{"prompt":"p"}`))
+		if err == nil || !strings.Contains(err.Error(), `unsupported task_type "image-gen"`) {
+			t.Fatalf("err = %v, want the unsupported-task_type refusal", err)
 		}
 	})
 }

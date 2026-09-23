@@ -281,6 +281,14 @@ type SdcppModel struct {
 // rule as buildArgs).
 func sdcppArgs(out, prompt string, params map[string]any, m SdcppModel) []string {
 	args := []string{out, prompt}
+	// Per-request alpha (D5, ADR 0058): same contract as buildArgs' ComfyUI arm —
+	// the runner reads the flag to (a) wrap the prompt in the official RGBA template
+	// and (b) keep the alpha channel it would otherwise flatten to opaque RGB. The
+	// pipeline gate (SupportsTransparentImage) already refuses this for any family
+	// but qwen-image-2.1, so sdcppArgs never has to re-check the family itself.
+	if paramTrue(params["transparent"]) {
+		args = append(args, "--transparent", "1")
+	}
 	if n, ok := params["negative"].(string); ok && n != "" {
 		args = append(args, "--negative", n)
 	}

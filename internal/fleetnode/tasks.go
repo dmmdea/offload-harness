@@ -46,7 +46,12 @@ var fleetTaskOrder = []string{"image-gen", "video-gen", "animate", "stt", "audio
 func taskConfiguredFor(cfg config.Config, taskType string, loopbackListener bool) bool {
 	switch taskType {
 	case "image-gen":
-		return cfg.ImageRouteConfigured() // ComfyUI script OR the sdcpp engine (J2)
+		// The default binding (ComfyUI script OR the sdcpp engine, J2) OR at least one
+		// named family (ADR 0058) — a family-only node (no default binding by design,
+		// e.g. binxarn's Qwen-Image-2.1) must still be admitted and advertised, or the
+		// fleet HTTP door can neither reach nor advertise a family doctor shows fully
+		// CONFIGURED (binxarn wave session 5d227d30 §2a).
+		return cfg.ImageGenAdvertisable()
 	case "video-gen":
 		return cfg.VideoGenScript != ""
 	case "animate":
@@ -199,7 +204,16 @@ func familyFor(cfg config.Config, taskType string) string {
 		if cfg.ImageGenFamily != "" {
 			return cfg.ImageGenFamily
 		}
-		return "sdxl"
+		// "sdxl" is the DEFAULT binding's generic-graph label — real only when a
+		// default binding actually exists. A family-only node (ADR 0058) has no
+		// default at all, so labeling it "sdxl" would advertise a route this node
+		// never renders; image_families (below) carries its real, named families
+		// instead, and the base label here is silently omitted (D1: never invent a
+		// default, commercial-safe or not).
+		if cfg.ImageRouteConfigured() {
+			return "sdxl"
+		}
+		return ""
 	case "video-gen":
 		// Must agree EXACTLY with what the pipeline WRITES into the footprint
 		// store (pipeline.videoFootprintFamily): the ADVERTISED family and the
@@ -276,16 +290,31 @@ type ImageFamily struct {
 	Default       bool    `json:"default"`
 }
 
-// ImageFamilies lists this node's image bindings — the default first, then every
-// named family — when the image-gen task is served; nil otherwise (health then
-// omits the key, the pre-0.134 shape). Config-derived like the task list; the
-// per-family file verdicts live in offload_status/doctor on the node itself.
+// ImageFamilies lists this node's image bindings — the default first (when there is
+// one — a family-only node has none, D1), then every named family — whenever this
+// node has at least one NAMED family bound. A default-only node (no families) keeps
+// health's pre-0.134 shape (no image_families key at all): the old gate here also
+// required ImageRouteConfigured() (the DEFAULT binding), which made this nil for a
+// family-only node even though its families were fully configured and reachable
+// through the CLI door (binxarn wave session 5d227d30 §2a) — the two binding sets
+// (default vs. named) are independent, so only the family count gates this.
+// Config-derived like the task list; the per-family file verdicts live in
+// offload_status/doctor on the node itself.
 func ImageFamilies(cfg config.Config) []ImageFamily {
-	if !cfg.ImageRouteConfigured() || len(cfg.ImageGenFamilies) == 0 {
+	if len(cfg.ImageGenFamilies) == 0 {
 		return nil
 	}
 	var out []ImageFamily
 	for _, fi := range cfg.ImageFamilies() {
+		// cfg.ImageFamilies() always PREPENDS a default-binding row, even one this
+		// node never configured (a family-only node's default is blank: Name/Family
+		// ""). Advertising that row would claim a default route exists — D1's "never
+		// silently imply a default" applies here just as much as to picking a
+		// non-commercial family as one: skip it when there is genuinely nothing
+		// bound at the default route.
+		if fi.Default && !cfg.ImageRouteConfigured() {
+			continue
+		}
 		f := ImageFamily{Name: fi.Name, Family: fi.Family, Engine: fi.Engine,
 			CommercialUse: fi.CommercialUse, Default: fi.Default}
 		if fi.License != "" {

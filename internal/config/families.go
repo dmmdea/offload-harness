@@ -435,9 +435,15 @@ func familyList(fs []FamilyInfo) string {
 }
 
 // SupportsTransparentImage reports whether this (effective) image binding can keep
-// an alpha channel: only the qwen-image-2.1 graph on ComfyUI has an RGBA VAE.
+// an alpha channel: only the qwen-image-2.1 model has an RGBA VAE — true on EITHER
+// engine (the ComfyUI graph's SplitImageWithAlpha and the sdcpp runner's own
+// alpha-flatten step both key off this same predicate to decide whether to keep or
+// drop the channel). Engine-independent on purpose: sd.cpp's build of the model
+// carries the identical RGBA VAE, so refusing transparency for the sdcpp engine was
+// never a model limit, only a gap in the runner (D5, binxarn wave session
+// 5d227d30 §3b/§3c).
 func (c Config) SupportsTransparentImage() bool {
-	return c.ImageGenEngine != "sdcpp" && c.ImageGenFamily == FamilyQwenImage21
+	return c.ImageGenFamily == FamilyQwenImage21
 }
 
 // SupportsTransparentEdit is SupportsTransparentImage for the edit route.

@@ -135,6 +135,61 @@ func TestEditFamilyOverlayResolves(t *testing.T) {
 	}
 }
 
+// A binxarn-shaped node: no default image binding at all (family-only, sdcpp
+// engine) — the family-only tier the fleet gate defect (D1) covers, distinct from
+// TestImageFamilyOverlayResolvesAsACompleteBinding's pooled-krea2-plus-family node.
+const sdcppFamilyOnlyCfg = `{
+  "model": "x",
+  "imagegen_families": {
+    "qwen-image-2.1": {
+      "license": "Qwen Research License", "commercial_use": false,
+      "imagegen_family": "qwen-image-2.1",
+      "imagegen_engine": "sdcpp",
+      "sdcpp_bin": "/opt/offload/sdcpp/sd-cli",
+      "sdcpp_model": "/opt/offload/models/qwen-image-2.1/diffusion_models/qwen_image_2.1-Q8_0.gguf",
+      "sdcpp_model_kind": "diffusion"
+    },
+    "z-image": {
+      "license": "Apache-2.0", "commercial_use": true,
+      "imagegen_family": "z-image",
+      "imagegen_engine": "sdcpp",
+      "sdcpp_bin": "/opt/offload/sdcpp/sd-cli",
+      "sdcpp_model": "/opt/offload/models/z-image/z_image_turbo-Q8_0.gguf"
+    }
+  }
+}`
+
+// TestSdcppQwenImage21SupportsTransparent: D5's root cause — SupportsTransparentImage
+// used to unconditionally exclude the sdcpp engine (`ImageGenEngine != "sdcpp"`),
+// refusing transparent:true on every sdcpp binding regardless of family, even though
+// sd.cpp's qwen-image-2.1 build carries the identical RGBA VAE (binxarn wave session
+// 5d227d30 §3b/§3c: P1/P8 both came out RGBA from sd.cpp with zero ComfyUI involved).
+// A sibling sdcpp family with no RGBA VAE (z-image) must still be refused, so the fix
+// is "follow the family", not "always allow sdcpp".
+func TestSdcppQwenImage21SupportsTransparent(t *testing.T) {
+	c, err := Load(writeCfg(t, sdcppFamilyOnlyCfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	q, _, err := c.ResolveImageFamily("qwen-image-2.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if q.ImageGenEngine != "sdcpp" {
+		t.Fatalf("fixture must resolve to the sdcpp engine: %+v", q)
+	}
+	if !q.SupportsTransparentImage() {
+		t.Error("sd.cpp's qwen-image-2.1 build has the same RGBA VAE as the ComfyUI graph — must support transparent")
+	}
+	z, _, err := c.ResolveImageFamily("z-image")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if z.SupportsTransparentImage() {
+		t.Error("a non-2.1 sdcpp family has no RGBA VAE and must stay refused")
+	}
+}
+
 func TestUnknownFamilyNameListsWhatTheNodeServes(t *testing.T) {
 	c, err := Load(writeCfg(t, familiesCfg))
 	if err != nil {
