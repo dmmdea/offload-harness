@@ -13,7 +13,7 @@ import { describe, expect, it } from "bun:test";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createHooks, DEFAULTS, type Options } from "../src/plugin.ts";
+import { createHooks, DEFAULTS, RECON_TOOLS, resolveOptions, type Options } from "../src/plugin.ts";
 
 const tmpLog = () => join(mkdtempSync(join(tmpdir(), "olo-diet-")), "dispatch-log.jsonl");
 const opts = (over: Partial<Options> = {}): Options => ({ ...DEFAULTS, dispatchLog: tmpLog(), ...over });
@@ -24,6 +24,63 @@ const logRows = (p: string) => {
     return [] as any[];
   }
 };
+
+// The harness MCP server's tools/list, measured 2026-09-22 (34 tools, harness 0.133.0).
+const MEASURED_HARNESS_TOOLS = [
+  "agent_delegate", "agent_rig", "agent_run", "offload_animate_character", "offload_ask", "offload_assess_image",
+  "offload_classify", "offload_classify_image", "offload_edit_image", "offload_edit_image_generative", "offload_extract",
+  "offload_extract_image", "offload_generate_audio", "offload_generate_image", "offload_generate_svg",
+  "offload_generate_video", "offload_image_embed", "offload_inpaint_image", "offload_media", "offload_nim",
+  "offload_object_detect", "offload_ocr", "offload_research", "offload_review_diff", "offload_run_graph",
+  "offload_semantic_segment", "offload_status", "offload_summarize", "offload_transcribe", "offload_triage",
+  "offload_upscale_image", "offload_video_describe", "offload_video_watch", "offload_vqa",
+].map((t) => `harness_${t}`);
+const RECON_EXPECTED = [
+  "agent_delegate", "agent_run", "offload_ask", "offload_status", "offload_research", "offload_summarize",
+  "offload_classify", "offload_extract", "offload_triage", "offload_ocr", "offload_vqa", "offload_extract_image",
+].map((t) => `harness_${t}`);
+const TIER1_EXPECTED = ["offload_summarize", "offload_classify", "offload_extract", "offload_triage"].map((t) => `harness_${t}`);
+
+// ---- a replica of opencode 1.18.32's permission resolution (bundle: Wildcard.match, Permission
+// fromConfig / merge / disabled). Rules are defaults, then the global config, then the agent's own
+// config, in object-key order; the LAST matching rule wins; a tool whose last match is a deny with
+// pattern "*" is removed from the request.
+type Rule = { permission: string; pattern: string; action: string };
+// Same semantics as opencode's Wildcard.match (anchored, case-insensitive, `*` = any run, `?` = one
+// character, backslashes read as `/`, a trailing " *" also matches nothing), without building a
+// RegExp from config text.
+function globMatch(v: string, p: string): boolean {
+  let i = 0, j = 0, star = -1, mark = 0;
+  while (i < v.length) {
+    if (j < p.length && (p[j] === "?" || p[j] === v[i])) { i++; j++; }
+    else if (j < p.length && p[j] === "*") { star = j++; mark = i; }
+    else if (star >= 0) { j = star + 1; i = ++mark; }
+    else return false;
+  }
+  while (j < p.length && p[j] === "*") j++;
+  return j === p.length;
+}
+function wildcardMatch(value: string, pattern: string): boolean {
+  const v = value.replaceAll("\\", "/").toLowerCase();
+  const p = pattern.replaceAll("\\", "/").toLowerCase();
+  if (p.endsWith(" *") && globMatch(v, p.slice(0, -2))) return true;
+  return globMatch(v, p);
+}
+function fromConfig(obj: Record<string, any> | undefined): Rule[] {
+  const rules: Rule[] = [];
+  for (const [k, v] of Object.entries(obj ?? {})) {
+    if (typeof v === "string") rules.push({ permission: k, action: v, pattern: "*" });
+    else for (const [p, a] of Object.entries(v as Record<string, string>)) rules.push({ permission: k, pattern: p, action: a });
+  }
+  return rules;
+}
+function enabledHarnessTools(cfg: Record<string, any>, agent: string | null): string[] {
+  const ruleset: Rule[] = [{ permission: "*", action: "allow", pattern: "*" }, ...fromConfig(cfg.permission), ...(agent ? fromConfig(cfg.agent?.[agent]?.permission) : [])];
+  return MEASURED_HARNESS_TOOLS.filter((t) => {
+    const last = ruleset.findLast((r) => wildcardMatch(t, r.permission));
+    return !(last?.pattern === "*" && last.action === "deny");
+  });
+}
 
 describe("O2a: the delegate placement digest reaches the model for MCP results", () => {
   const pairJSON = '{"summary":{"succeeded":2,"infrastructure":0},"results":[{"placement":"local"},{"placement":"route=spread → fleet node (slot 2 of 2)"}]}';
@@ -120,4 +177,170 @@ describe("O2b: the read-only task reroute takes effect on opencode 1.18.32", () 
     expect(after.output).toContain("ran on the free local");
   });
 
+  it("a leg addressed to offload-media is never rerouted to offload", async () => {
+    const h = createHooks(opts());
+    const args = { ...roArgs(), subagent_type: "offload-media" };
+    await h["tool.execute.before"]!({ tool: "task", sessionID: "r5", callID: "c5" }, { args });
+    expect(args.subagent_type).toBe("offload-media");
+  });
+
+  it("recon mode: a media-shaped read-only leg is not forced onto the recon-only offload agent", async () => {
+    const leg = () => ({ description: "Summarize the recording", prompt: "transcribe the video at clips/intro.mp4 and summarize what is said.", subagent_type: "general" });
+    const recon = createHooks(opts());
+    const a = leg();
+    await recon["tool.execute.before"]!({ tool: "task", sessionID: "r6", callID: "c6" }, { args: a });
+    expect(a.subagent_type).toBe("general");
+    const all = createHooks(opts({ offloadTools: "all" })); // control: offload holds the whole harness
+    const b = leg();
+    await all["tool.execute.before"]!({ tool: "task", sessionID: "r7", callID: "c7" }, { args: b });
+    expect(b.subagent_type).toBe("offload");
+  });
+});
+
+describe("O1: offloadTools recon | all, and the offload-media subagent", () => {
+  it("defaults to recon; anything else falls back to recon; all is accepted", () => {
+    expect(DEFAULTS.offloadTools).toBe("recon");
+    expect(resolveOptions({ offloadTools: "bogus" } as any).offloadTools).toBe("recon");
+    expect(resolveOptions({ offloadTools: "all" }).offloadTools).toBe("all");
+  });
+
+  it("the recon set is the twelve read-and-digest lanes", () => {
+    expect([...RECON_TOOLS].sort()).toEqual(RECON_EXPECTED.map((t) => t.replace(/^harness_/, "")).sort());
+  });
+
+  it("recon: offload resolves to exactly the recon tools, offload-media to every other harness tool, the primary to Tier 1", async () => {
+    const h = createHooks(opts());
+    const cfg: any = {};
+    await h.config!(cfg);
+    expect(enabledHarnessTools(cfg, null)).toEqual(TIER1_EXPECTED.slice().sort((a, b) => MEASURED_HARNESS_TOOLS.indexOf(a) - MEASURED_HARNESS_TOOLS.indexOf(b)));
+    const offload = enabledHarnessTools(cfg, "offload");
+    const media = enabledHarnessTools(cfg, "offload-media");
+    expect(offload.slice().sort()).toEqual(RECON_EXPECTED.slice().sort());
+    expect(media.length).toBe(22);
+    for (const t of MEASURED_HARNESS_TOOLS) expect([offload.includes(t), media.includes(t)].filter(Boolean).length).toBe(1); // never stranded, never doubled
+    for (const t of ["generate_image", "generate_video", "generate_audio", "edit_image", "transcribe", "video_watch", "nim"]) expect(media).toContain(`harness_offload_${t}`);
+    expect(media).toContain("harness_agent_rig");
+  });
+
+  it("a tool the harness adds later lands on offload-media, never nowhere (0.135.0 added offload_compose_video)", async () => {
+    const h = createHooks(opts());
+    const cfg: any = {};
+    await h.config!(cfg);
+    const resolveFor = (agent: string, tool: string) => {
+      const rules: Rule[] = [{ permission: "*", action: "allow", pattern: "*" }, ...fromConfig(cfg.permission), ...fromConfig(cfg.agent[agent].permission)];
+      const last = rules.findLast((r) => wildcardMatch(tool, r.permission));
+      return !(last?.pattern === "*" && last.action === "deny");
+    };
+    expect(resolveFor("offload-media", "harness_offload_compose_video")).toBe(true);
+    expect(resolveFor("offload", "harness_offload_compose_video")).toBe(false);
+  });
+
+  it("recon: offload-media is a read-only subagent on the offload model", async () => {
+    const h = createHooks(opts({ offloadModel: "prov/seat" }));
+    const cfg: any = {};
+    await h.config!(cfg);
+    const m = cfg.agent["offload-media"];
+    expect(m.mode).toBe("subagent");
+    expect(m.model).toBe("prov/seat");
+    expect(m.permission).toMatchObject({ edit: "deny", bash: "deny", webfetch: "deny", external_directory: "allow" });
+  });
+
+  it("all: offload keeps the whole harness and no offload-media agent is provided", async () => {
+    const h = createHooks(opts({ offloadTools: "all" }));
+    const cfg: any = {};
+    await h.config!(cfg);
+    expect(enabledHarnessTools(cfg, "offload")).toEqual(MEASURED_HARNESS_TOOLS);
+    expect(cfg.agent["offload-media"]).toBeUndefined();
+  });
+
+  it("recon also trims a user-defined offload agent, leaving every user key untouched", async () => {
+    const h = createHooks(opts());
+    const cfg: any = { agent: { offload: { mode: "subagent", prompt: "mine", permission: { edit: "deny", bash: "deny", webfetch: "deny", external_directory: "allow" } } } };
+    await h.config!(cfg);
+    expect(cfg.agent.offload.prompt).toBe("mine");
+    expect(cfg.agent.offload.permission).toMatchObject({ edit: "deny", bash: "deny", webfetch: "deny", external_directory: "allow" });
+    expect(enabledHarnessTools(cfg, "offload").slice().sort()).toEqual(RECON_EXPECTED.slice().sort());
+  });
+
+  it("a harness key the user set on the agent keeps its value AND wins (inserted defaults never shadow it)", async () => {
+    const h = createHooks(opts());
+    const cfg: any = { agent: { offload: { mode: "subagent", permission: { edit: "deny", harness_offload_generate_image: "allow" } } } };
+    await h.config!(cfg);
+    expect(cfg.agent.offload.permission.harness_offload_generate_image).toBe("allow");
+    expect(enabledHarnessTools(cfg, "offload")).toContain("harness_offload_generate_image");
+  });
+
+  it("a user harness_* deny on the agent is never re-opened by the plugin's allows", async () => {
+    const h = createHooks(opts());
+    const cfg: any = { agent: { offload: { mode: "subagent", permission: { "harness_*": "deny" } } } };
+    await h.config!(cfg);
+    expect(cfg.agent.offload.permission["harness_*"]).toBe("deny");
+    expect(enabledHarnessTools(cfg, "offload")).toEqual([]);
+  });
+
+  it("tier1: a user global allow for one harness tool keeps winning over the plugin's global deny", async () => {
+    const h = createHooks(opts());
+    const cfg: any = { permission: { skill: { "*": "allow" }, harness_offload_vqa: "allow" } };
+    await h.config!(cfg);
+    expect(enabledHarnessTools(cfg, null)).toContain("harness_offload_vqa");
+    expect(Object.keys(cfg.permission)[0]).toBe("skill"); // user order kept
+  });
+
+  it("a user '*' catch-all declared first does not re-open the trimmed tools (#24335 order shape)", async () => {
+    const h = createHooks(opts());
+    const cfg: any = { permission: { "*": "allow" }, agent: { offload: { permission: { "*": "allow" } } } };
+    await h.config!(cfg);
+    expect(enabledHarnessTools(cfg, null)).toEqual(TIER1_EXPECTED.slice().sort((a, b) => MEASURED_HARNESS_TOOLS.indexOf(a) - MEASURED_HARNESS_TOOLS.indexOf(b)));
+    expect(enabledHarnessTools(cfg, "offload").slice().sort()).toEqual(RECON_EXPECTED.slice().sort());
+  });
+
+  it("agent-level allows win over the root harness_* deny (#47946 shape)", async () => {
+    const h = createHooks(opts());
+    const cfg: any = {};
+    await h.config!(cfg);
+    expect(cfg.permission["harness_*"]).toBe("deny");
+    expect(enabledHarnessTools(cfg, "offload")).toContain("harness_agent_delegate");
+    expect(enabledHarnessTools(cfg, "offload-media")).toContain("harness_offload_generate_image");
+  });
+
+  it("a user-defined offload-media agent is kept as written (only missing harness keys are added)", async () => {
+    const h = createHooks(opts());
+    const cfg: any = { agent: { "offload-media": { mode: "subagent", model: "x/y", prompt: "mine", permission: { edit: "deny" } } } };
+    await h.config!(cfg);
+    expect(cfg.agent["offload-media"]).toMatchObject({ mode: "subagent", model: "x/y", prompt: "mine" });
+    expect(cfg.agent["offload-media"].permission.edit).toBe("deny");
+  });
+
+  // harness #444 adds offload_status {section:"brief"} (fleet block + one-line verdicts, ~4.4 KB
+  // instead of ~17.9 KB); an older harness ignores the argument and returns the full dump
+  // (checked on 0.133.0), so the wording is right before and after #444 merges.
+  it("the offload prompt and the all-mode protocol name the brief roster check", async () => {
+    const { protocolText } = await import("../src/protocol.ts");
+    const h = createHooks(opts());
+    const cfg: any = {};
+    await h.config!(cfg);
+    expect(cfg.agent.offload.prompt).toContain('harness_offload_status {section:"brief"}');
+    expect(protocolText("harness", "offload", "all")).toContain('harness_offload_status {section:"brief"}');
+  });
+
+  it("the plugin's offload prompt names only tools the recon agent can call", async () => {
+    const h = createHooks(opts());
+    const cfg: any = {};
+    await h.config!(cfg);
+    const named = (cfg.agent.offload.prompt.match(/harness_[a-z_]+/g) ?? []) as string[];
+    expect(named.length).toBeGreaterThan(0);
+    for (const n of named) expect(RECON_EXPECTED).toContain(n);
+  });
+
+  it("tier1 + recon: the protocol routes media legs to offload-media and still names no hidden tool", async () => {
+    const h = createHooks(opts());
+    const out = { system: ["base"] };
+    await h["experimental.chat.system.transform"]!({ sessionID: "main", model: {} as any }, out);
+    expect(out.system[0]).toContain('subagent_type "offload-media"');
+    const hidden = (out.system[0].match(/harness_[a-z_]+/g) ?? []).filter((n) => !TIER1_EXPECTED.includes(n));
+    expect(hidden).toEqual([]);
+    const task = { description: "Launch a subagent.", parameters: {} };
+    await h["tool.definition"]!({ toolID: "task" }, task);
+    expect(task.description).toContain('"offload-media"');
+  });
 });

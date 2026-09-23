@@ -12,8 +12,8 @@
 //                                       rerouted to the `offload` subagent (option-gated)
 //   tool.execute.after                  H14 read-counter nudge; delegate placement digest;
 //                                       "ran on the offload seat" note on confirmed reroutes
-//   config                              idempotently provides the offload agent + commands,
-//                                       small_model default, so the plugin alone brings parity
+//   config                              idempotently provides the offload agents + commands,
+//                                       small_model default and the tool-scope permissions
 //   event                               session heartbeat into the cross-harness dispatch log;
 //                                       child-session → agent map
 //   tool.offload_plugin_status          load proof + doctor
@@ -25,7 +25,7 @@
 //     joins its text parts into the model-visible output AFTER the hook and head-truncates it.
 import type { Hooks, Plugin, PluginInput } from "@opencode-ai/plugin";
 import { tool } from "@opencode-ai/plugin";
-import { classifyLeg, READ_TOOLS, type LegClass } from "./classify.ts";
+import { classifyLeg, MEDIA_LEG, READ_TOOLS, type LegClass } from "./classify.ts";
 import { appendDispatchLog, DEFAULT_LOG, newInstrumentStats, type InstrumentStats } from "./instrument.ts";
 import { PROTOCOL_MARKER, protocolText, taskDescriptionAddendum } from "./protocol.ts";
 
@@ -36,7 +36,7 @@ export type Options = {
   mcp: string;
   /** Name of the bundled read-only subagent pinned to a local seat. */
   offloadAgent: string;
-  /** Model for the offload subagent (provider/model). */
+  /** Model for the offload subagents (provider/model). */
   offloadModel: string;
   /** Default small_model applied when the config has none. */
   smallModel: string;
@@ -51,15 +51,46 @@ export type Options = {
   dispatchLog: string;
   /**
    * Which harness tools the PRIMARY agent sees. opencode sends every enabled MCP tool schema
-   * up front (no deferred tool search), so all ~25 harness tools cost a 64k local primary ~18k
-   * tokens every session. "tier1" exposes only the four mechanical-text tools to the primary
-   * and keeps the whole harness on the offload subagent; "all" is the previous behaviour.
+   * up front (no deferred tool search): the 35 harness tools of 0.135.0 are 20,754 tokens of
+   * schema on every call. "tier1" exposes only the four mechanical-text tools to the primary (847) and
+   * reaches the rest through the offload subagents; "all" is the previous behaviour.
    */
   primaryTools: "tier1" | "all";
+  /**
+   * Which harness tools the OFFLOAD subagent sees. "recon" (default) gives it the twelve
+   * read-and-digest lanes (8,151 tokens of schema instead of 20,754) and provides a second
+   * subagent, `<offloadAgent>-media`, holding every other harness tool (generation, editing,
+   * audio/video, image checks, NIM, rig, diff review), so each tool is on exactly one of them.
+   * "all" keeps the whole harness on the offload subagent and provides no media subagent.
+   */
+  offloadTools: "recon" | "all";
 };
 
 /** The four single-shot mechanical-text tools the primary keeps in "tier1" mode. */
 export const TIER1_TOOLS = ["offload_summarize", "offload_classify", "offload_extract", "offload_triage"];
+
+/**
+ * The offload subagent's lanes in "recon" mode: every tool its own prompt names (offload_ask,
+ * agent_delegate, agent_run, the cascade, ocr / vqa / extract_image), plus offload_status (its
+ * usual first call: 2 of its 5 harness calls in 35 sessions) and offload_research (the Tier-1
+ * protocol routes web research over given URLs to it). On the 35-tool harness of 0.135.0 these
+ * twelve are 8,151 tokens of schema and the other 23 are 12,603; none of those was called in the
+ * 35 recorded opencode sessions.
+ */
+export const RECON_TOOLS = [
+  "agent_delegate",
+  "agent_run",
+  "offload_ask",
+  "offload_status",
+  "offload_research",
+  "offload_summarize",
+  "offload_classify",
+  "offload_extract",
+  "offload_triage",
+  "offload_ocr",
+  "offload_vqa",
+  "offload_extract_image",
+];
 
 export const DEFAULTS: Options = {
   mcp: "harness",
@@ -72,7 +103,10 @@ export const DEFAULTS: Options = {
   readNudgeTiers: [12, 40],
   dispatchLog: DEFAULT_LOG,
   primaryTools: "tier1",
+  offloadTools: "recon",
 };
+
+export const mediaAgentName = (o: Pick<Options, "offloadAgent">) => `${o.offloadAgent}-media`;
 
 // Options arrive either from the config `plugin: [[name, {...}]]` form or, for a
 // plugins-dir install (no options channel), from OPENCODE_LOCAL_OFFLOAD_OPTIONS (JSON).
@@ -100,6 +134,7 @@ export function resolveOptions(raw?: Record<string, unknown>, diag?: Diagnostics
   const merged = { ...DEFAULTS, ...env, ...(raw ?? {}) } as Options;
   if (!Array.isArray(merged.readNudgeTiers) || merged.readNudgeTiers.length === 0) merged.readNudgeTiers = DEFAULTS.readNudgeTiers;
   if (merged.primaryTools !== "all" && merged.primaryTools !== "tier1") merged.primaryTools = DEFAULTS.primaryTools;
+  if (merged.offloadTools !== "all" && merged.offloadTools !== "recon") merged.offloadTools = DEFAULTS.offloadTools;
   return merged;
 }
 
@@ -117,16 +152,18 @@ type SessionState = {
 const MAX_SESSIONS = 500;
 
 export function offloadAgentDefinition(o: Options) {
+  const t = (name: string) => `${o.mcp}_${name}`;
+  const recon = o.offloadTools === "recon";
   return {
     description: "Free local read-only specialist: reconnaissance, doc sweeps, digests, extraction over LOCAL files using the local-offload harness tools. Never edits, never runs commands, never browses.",
     mode: "subagent",
     model: o.offloadModel,
     prompt: [
       "You are the OFFLOAD subagent: a read-only reconnaissance and digest specialist running on a free local seat.",
-      `Use the ${o.mcp}_* harness tools for bulk work: ${o.mcp}_offload_ask (question + paths, the harness writes the whole contract) the moment you have NAMED FILES and one bounded question, ${o.mcp}_agent_delegate (route:"spread", 2+ contracts with context_paths + output_schema + content acceptance) for multi-file legs, ${o.mcp}_agent_run for one bounded leg, the ${o.mcp}_offload_summarize / ${o.mcp}_offload_classify / ${o.mcp}_offload_extract / ${o.mcp}_offload_triage cascade for mechanical text, ${o.mcp}_offload_ocr / ${o.mcp}_offload_vqa / ${o.mcp}_offload_extract_image for images.`,
+      `Use the ${o.mcp}_* harness tools for bulk work: ${t("offload_ask")} (question + paths, the harness writes the whole contract) the moment you have NAMED FILES and one bounded question, ${t("agent_delegate")} (route:"spread", 2+ contracts with context_paths + output_schema + content acceptance) for multi-file legs, ${t("agent_run")} for one bounded leg, the ${t("offload_summarize")} / ${t("offload_classify")} / ${t("offload_extract")} / ${t("offload_triage")} cascade for mechanical text, ${t("offload_ocr")} / ${t("offload_vqa")} / ${t("offload_extract_image")} for images, ${t("offload_research")} to digest given URLs, ${t("offload_status")} {section:"brief"} for the live roster.`,
       "Read files with your own read/glob/grep tools when a leg is small. Hand the harness NAMED FILES, never a search problem.",
       "Return structured findings with exact file paths and line references. Quote, do not paraphrase, identifiers.",
-      "If a leg needs the web, writes, or a judgment call (review, design, architecture), start a line with the exact marker [needs-primary] saying what is needed, and return what you could establish read-only; the primary agent owns those legs.",
+      `If a leg needs the web, writes, or a judgment call (review, design, architecture)${recon ? ", or media work (generating or editing images, video or audio; transcribing or describing audio/video)" : ""}, start a line with the exact marker [needs-primary] saying what is needed, and return what you could establish read-only; the primary agent owns those legs.`,
       "You never edit files, never run shell commands, never publish.",
     ].join("\n"),
     // Read-only by construction; reading OUTSIDE the project directory is this agent's whole
@@ -136,24 +173,80 @@ export function offloadAgentDefinition(o: Options) {
   };
 }
 
+// The media half of the split: every harness tool outside RECON_TOOLS. Same seat and the same
+// read-only shape as the offload agent; its prompt names no tool, the tool list itself does.
+export function offloadMediaAgentDefinition(o: Options) {
+  return {
+    description: "Free local media specialist: image, video and audio generation and editing, audio/video transcription and description, image checks, and the opt-in NVIDIA NIM surface, on the local-offload harness. Never edits files, never runs commands, never browses.",
+    mode: "subagent",
+    model: o.offloadModel,
+    prompt: [
+      "You are the OFFLOAD-MEDIA subagent: a media specialist running on a free local seat.",
+      `Use the ${o.mcp}_* harness tools the leg needs: generation, editing, audio/video transcription and description, image checks; the NIM tool only when the leg explicitly asks for the remote NIM surface.`,
+      "Return the output file paths and the tool's own report; quote paths and figures exactly.",
+      "If a leg needs the web, writes, or a judgment call, start a line with the exact marker [needs-primary] saying what is needed, and return what you could establish.",
+      "You never edit files, never run shell commands, never publish.",
+    ].join("\n"),
+    permission: { edit: "deny", bash: "deny", webfetch: "deny", external_directory: "allow" },
+  };
+}
+
+/**
+ * Adds permission defaults to a config permission object WITHOUT changing what any key the user
+ * set means. opencode 1.18.32 turns the object into rules in key order and the LAST matching rule
+ * wins, so appending a `harness_*` deny after a user's `harness_x: "allow"` would silently override
+ * that user rule. Defaults are therefore inserted as one block right BEFORE the first user key in
+ * the harness namespace (every user harness rule stays after them and keeps winning), or appended
+ * when the user has none (so a user catch-all such as `"*": "allow"` does not re-open the tools the
+ * plugin scopes). Keys already present are never written. The object is reordered in place: its
+ * identity is kept for anything that already holds it.
+ */
+export function mergePermissionDefaults(perm: Record<string, any>, defaults: Array<[string, string]>, mcp: string): void {
+  const add = defaults.filter(([k]) => !Object.prototype.hasOwnProperty.call(perm, k));
+  if (add.length === 0) return;
+  const ns = `${mcp}_`;
+  const entries = Object.entries(perm);
+  const at = entries.findIndex(([k]) => k.startsWith(ns));
+  const ordered = at < 0 ? [...entries, ...add] : [...entries.slice(0, at), ...add, ...entries.slice(at)];
+  for (const k of Object.keys(perm)) delete perm[k];
+  for (const [k, v] of ordered) perm[k] = v;
+}
+
+function permissionObject(holder: Record<string, any>): Record<string, any> | null {
+  holder.permission ??= {};
+  const p = holder.permission;
+  return p && typeof p === "object" && !Array.isArray(p) ? p : null;
+}
+
 // Tier-1 exposure through opencode permissions (opencode 1.18 merged `tools` into
-// `permission`; a denied tool's schema is not sent to the model). Rules apply in order, so the
-// broad deny is written before the specific allows. Keys the user already set are never
-// touched: an explicit user permission always wins over this default.
+// `permission`; a denied tool's schema is not sent to the model). Keys the user already set are
+// never touched and keep their precedence (mergePermissionDefaults).
 export function applyTier1Permissions(c: Record<string, any>, o: Options) {
-  c.permission ??= {};
+  const perm = permissionObject(c);
+  if (!perm) return;
+  mergePermissionDefaults(perm, [[`${o.mcp}_*`, "deny"], ...TIER1_TOOLS.map((t): [string, string] => [`${o.mcp}_${t}`, "allow"])], o.mcp);
+}
+
+// The offload subagents' harness scope. Agent rules come after the global ones in opencode's
+// ruleset, so an agent-level allow re-opens what the Tier-1 global deny closed.
+export function applyOffloadToolScopes(c: Record<string, any>, o: Options) {
   const prefix = `${o.mcp}_*`;
-  if (!(prefix in c.permission)) c.permission[prefix] = "deny";
-  for (const t of TIER1_TOOLS) {
-    const k = `${o.mcp}_${t}`;
-    if (!(k in c.permission)) c.permission[k] = "allow";
+  const offload = c.agent?.[o.offloadAgent];
+  if (offload) {
+    const perm = permissionObject(offload);
+    if (perm) {
+      if (o.offloadTools === "recon") mergePermissionDefaults(perm, [[prefix, "deny"], ...RECON_TOOLS.map((t): [string, string] => [`${o.mcp}_${t}`, "allow"])], o.mcp);
+      // "all": the whole harness, including on a user-defined agent the plugin did not create --
+      // otherwise the Tier-1 global deny would strand every non-Tier-1 lane.
+      else if (o.primaryTools === "tier1") mergePermissionDefaults(perm, [[prefix, "allow"]], o.mcp);
+    }
   }
-  // The offload subagent must keep the WHOLE harness, including a user-defined one the plugin
-  // did not create -- otherwise the global deny would strand every non-Tier-1 lane.
-  const agent = c.agent?.[o.offloadAgent];
-  if (agent) {
-    agent.permission ??= {};
-    if (!(prefix in agent.permission)) agent.permission[prefix] = "allow";
+  if (o.offloadTools !== "recon") return;
+  const media = c.agent?.[mediaAgentName(o)];
+  if (media) {
+    const perm = permissionObject(media);
+    // The complement of the recon set, so a tool the harness adds later lands here, never nowhere.
+    if (perm) mergePermissionDefaults(perm, [[prefix, "allow"], ...RECON_TOOLS.map((t): [string, string] => [`${o.mcp}_${t}`, "deny"])], o.mcp);
   }
 }
 
@@ -193,6 +286,7 @@ export function createHooks(o: Options, diagnostics: Diagnostics = newDiagnostic
   // no read-counter nudges there (a nudge telling the offload seat to offload to itself is noise
   // in a small model's context and a false under-use row in the shared log).
   const children = new Map<string, string>();
+  const offloadFamily = new Set([o.offloadAgent, mediaAgentName(o)]);
   const st = (sid: string): SessionState => {
     let s = sessions.get(sid);
     if (!s) {
@@ -226,11 +320,13 @@ export function createHooks(o: Options, diagnostics: Diagnostics = newDiagnostic
         const c = config as unknown as Record<string, any>;
         c.agent ??= {};
         if (!c.agent[o.offloadAgent]) c.agent[o.offloadAgent] = offloadAgentDefinition(o);
+        if (o.offloadTools === "recon" && !c.agent[mediaAgentName(o)]) c.agent[mediaAgentName(o)] = offloadMediaAgentDefinition(o);
         c.command ??= {};
         for (const [name, def] of Object.entries(offloadCommands(o))) {
           if (!c.command[name]) c.command[name] = def;
         }
         if (o.primaryTools === "tier1") applyTier1Permissions(c, o);
+        applyOffloadToolScopes(c, o);
         if (!c.small_model && o.smallModel) {
           c.small_model = o.smallModel;
           diagnostics.smallModelDefaulted = true;
@@ -284,7 +380,7 @@ export function createHooks(o: Options, diagnostics: Diagnostics = newDiagnostic
     "experimental.chat.system.transform": async (_input, output) => {
       try {
         if (!o.systemProtocol) return;
-        const text = protocolText(o.mcp, o.offloadAgent, o.primaryTools);
+        const text = protocolText(o.mcp, o.offloadAgent, o.primaryTools, o.offloadTools);
         if (output.system.some((s) => s.includes(PROTOCOL_MARKER))) return;
         // APPEND to the last existing system element, never push a new one. opencode folds
         // the system array into one message only when it holds MORE than two elements, so a
@@ -303,7 +399,7 @@ export function createHooks(o: Options, diagnostics: Diagnostics = newDiagnostic
     "tool.definition": async (input, output) => {
       try {
         if (input.toolID === "task" && !output.description.includes("OFFLOAD ROUTE:")) {
-          output.description += taskDescriptionAddendum(o.offloadAgent, o.mcp, o.primaryTools);
+          output.description += taskDescriptionAddendum(o.offloadAgent, o.mcp, o.primaryTools, o.offloadTools);
         }
       } catch (e) {
         warn("tool.definition hook", e);
@@ -322,7 +418,10 @@ export function createHooks(o: Options, diagnostics: Diagnostics = newDiagnostic
           s.readOnlySpawns++;
           log({ event: "readonly_spawn", sid: input.sessionID, n: s.readOnlySpawns, desc: String(args.description ?? "").slice(0, 80), target: current || "default" });
         }
-        if (!o.routeReadOnlyTasks || cls !== "read-only" || current === o.offloadAgent) return;
+        if (!o.routeReadOnlyTasks || cls !== "read-only" || offloadFamily.has(current)) return;
+        // In recon mode the offload agent has no media tools: a media-shaped leg stays where the
+        // model sent it rather than landing on an agent that cannot do it.
+        if (o.offloadTools === "recon" && MEDIA_LEG.test(`${args.description ?? ""} ${args.prompt ?? ""}`)) return;
         // The forcing function: route the leg to the free local seat. IN PLACE — opencode 1.18.32
         // executes the very object it handed this hook and ignores a replaced output.args. The
         // agent field is written first so a refused write leaves the prompt untouched.

@@ -379,15 +379,17 @@ describe("primary tool exposure (tier1)", () => {
     for (const t of TIER1) expect(keys.indexOf(`harness_${t}`)).toBeGreaterThan(keys.indexOf("harness_*"));
   });
 
-  it("tier1 keeps every harness tool on the offload subagent", async () => {
-    const h = createHooks(opts());
+  // offloadTools "all": the offload subagent keeps the WHOLE harness (the recon split is covered
+  // in context-diet.test.ts).
+  it("tier1 + offloadTools all keeps every harness tool on the offload subagent", async () => {
+    const h = createHooks(opts({ offloadTools: "all" }));
     const cfg: any = {};
     await h.config!(cfg);
     expect(cfg.agent.offload.permission["harness_*"]).toBe("allow");
   });
 
-  it("tier1 also opens the harness on a user-defined offload agent it did not create", async () => {
-    const h = createHooks(opts());
+  it("tier1 + offloadTools all also opens the harness on a user-defined offload agent it did not create", async () => {
+    const h = createHooks(opts({ offloadTools: "all" }));
     const cfg: any = { agent: { offload: { mode: "subagent", permission: { edit: "deny" } } } };
     await h.config!(cfg);
     expect(cfg.agent.offload.permission["harness_*"]).toBe("allow");
