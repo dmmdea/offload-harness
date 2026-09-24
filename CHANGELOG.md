@@ -6,6 +6,38 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.140.12] - 2026-09-24 - blackwell-8 and ampere-16 tier seeds carry the 2026-09-23/24 reference-box measurements
+
+### Changed — blackwell-8 and ampere-16 tier seeds carry the 2026-09-23/24 reference-box measurements
+
+Both reference boxes (OptiPlex 7060 / blackwell-8, Lenovo M720q A2 / ampere-16) got a harness
+remediation pass on 2026-09-23/24; a fresh install of either tier now gets what was measured
+instead of the prior provisional defaults. `docs/tiers/ampere-16.md` and `docs/tiers/blackwell-8.md`
+regenerated (`go run ./cmd/gentiers`).
+
+- **blackwell-8** (`config_seed_ram_mid_high` unless noted): `imagegen_timeout_sec` 900 -> 2400
+  (the qwen-image-2.1 binding's own measured max wall is 678.1s, so 900 left only ~1.3x margin);
+  `sdcpp_extra_args` added for z-image-turbo, the measured-working graph-cut arm
+  (`--vae-tiling --offload-to-cpu --diffusion-fa --max-vram 6.5 --stream-layers`, 56-69s/1024²
+  image) after two failed arms (bare `--vae-tiling` silently ran on the Intel iGPU; an all-VRAM
+  placement OOM'd at 565-608s/step); `videogen_wan_virtual_vram_gb` added at 12 (measured: 7 OOMs
+  at lower values under the no-sysmem-fallback policy); `videogen_timeout_sec` 3600 -> 4500 =
+  ceil(2,970.3 × 1.5) from a measured cold native 81-frame render; `audiogen_timeout_sec` added
+  at 1500 in `config_seed` (was unbound), sized from a measured cold ACE-Step render + its
+  dead-air retry + loudnorm (~870s measured, ×1.5 rounded up); `imagegen_families` adds two named,
+  opt-in bindings beside the default pair (ADR 0058): `qwen-image-2.1` (the canonical bf16 overlay,
+  A2 evaluation CLEARED 16/16) and `qwen-image` / Qwen-Image-2512 (Apache-2.0, commercial; measured
+  190.9s at 1328²).
+- **ampere-16**: `videogen_wan_virtual_vram_gb` added at 9 (the tier declared Wan I2V keys but
+  never this one, so a fresh install silently rendered the graph script's own default of 7); a
+  live smoke render measured a peak of 9.6 of 15.0 GiB across the full render at 9 GiB, 5.4 GiB
+  headroom, zero OOM — a measured-safe floor, not yet a measured optimum.
+
+Confirmed unchanged, already correct: blackwell-3x16's `comfy_cuda_device` `"2"` and
+`videogen_pool_compute` `"cuda:0"`. Not touched: ampere-8's `comfy_extra_args` temp/output-dir
+redirect (measured, but a literal per-box drive path, not a tier-general rule) and `ffmpeg_path`
+on any tier (PR #471 already makes a bare `"ffmpeg"` resolve via PATH).
+
 ### Fixed — OptiPlex parity: doctor checks what a route loads, the 26B download honours the tier, `generate-video --fast`, the Wan lane defers cleanly, a BOM config loads
 
 Five harness defects from the OptiPlex 7060 (blackwell-8) media parity audit, 2026-09-23.
