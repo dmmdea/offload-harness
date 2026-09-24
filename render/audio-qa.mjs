@@ -26,25 +26,58 @@
 //
 // Dependency-free (Node 18+, matches the render/*.mjs convention): shells out to
 // ffmpeg/ffprobe exactly the way audioio.go does on the Go side (same configured
-// binary — comfy-music.mjs receives FFMPEG_PATH from Pipeline.genEnv()). ffmpeg
-// missing is NEVER a render failure — the gate degrades to a skip (best-effort,
-// never withholds an already-produced render per the house content-preservation
-// rule).
+// binary — comfy-music.mjs receives FFMPEG_PATH from Pipeline.genEnv()).
+//
+// F-38 policy change, 2026-09-24: ffmpeg/ffprobe missing used to never be a
+// render failure — the gate degraded to a silent skip and shipped ComfyUI's raw
+// output. That silently defeated the whole over-render/trim/dead-air fix above
+// on every fleet node that had not set an explicit ffmpeg_path (config.go's
+// default is the bare name "ffmpeg"; genEnv() always set FFMPEG_PATH=ffmpeg,
+// and existsSync("ffmpeg") is false — reproduced identically on the Lenovo and
+// the Aorus). comfy-music.mjs's main() now calls assertFfmpegAvailable() below
+// BEFORE touching the GPU lock or ComfyUI: a music render nobody can verify is
+// not a usable result, so the lane fails loudly with a typed error instead.
 import { spawnSync } from "node:child_process";
 import { dirname, join, extname } from "node:path";
 import { existsSync } from "node:fs";
 
 // resolveFfmpeg: $FFMPEG_PATH (threaded from Pipeline.genEnv on a configured
-// machine) > "ffmpeg" on PATH (probed by actually spawning it — a bare existsSync
-// can't see PATH resolution). Returns "" when neither works, never throws — the
-// caller treats "" as "skip the gate".
+// machine — F-38: now a PATH-resolved absolute path when genEnv could resolve
+// one) > that value tried as a literal file > that value probed as a
+// PATH-searchable command name (covers a caller that sets FFMPEG_PATH to a bare
+// name directly, and any FFMPEG_PATH genEnv could not resolve to an absolute
+// path but which is still valid on THIS process's own PATH) > "ffmpeg" on PATH
+// (probed by actually spawning it — a bare existsSync can't see PATH
+// resolution). Returns "" only when nothing at all resolves, never throws — the
+// caller now treats "" as fatal (see assertFfmpegAvailable), not as "skip".
 export function resolveFfmpeg(env = process.env) {
   const explicit = env.FFMPEG_PATH;
   if (explicit) {
-    return existsSync(explicit) ? explicit : "";
+    if (existsSync(explicit)) return explicit;
+    const probe = spawnSync(explicit, ["-version"], { stdio: "ignore" });
+    return probe.error ? "" : explicit;
   }
   const probe = spawnSync("ffmpeg", ["-version"], { stdio: "ignore" });
   return probe.error ? "" : "ffmpeg";
+}
+
+// assertFfmpegAvailable: throws a typed FFMPEG_UNAVAILABLE error when either
+// tool failed to resolve. Pure/unit-testable — no spawning. comfy-music.mjs's
+// main() calls this before doing anything else (F-38, 2026-09-24): the music
+// lane's over-render/trim/dead-air QA gate is the actual fix for the ACE-Step LM
+// dead-air defect this file's header documents, not optional polish, so a box
+// that cannot run it must not ship an unverified render. gpugen.ClassifyErr (Go
+// side) maps the "FFMPEG_UNAVAILABLE" prefix to the "ffmpeg_unavailable" error
+// class, mirroring how "DEAD_AIR" already maps to "dead_air".
+export function assertFfmpegAvailable(ffmpeg, ffprobe) {
+  if (!ffmpeg || !ffprobe) {
+    throw new Error(
+      "FFMPEG_UNAVAILABLE: ffmpeg/ffprobe could not be resolved on this box " +
+      "(set ffmpeg_path in config.json, or install ffmpeg+ffprobe and put them " +
+      "on PATH) — refusing to return a music render whose over-render/trim/" +
+      "dead-air QA gate never ran"
+    );
+  }
 }
 
 // resolveFfprobe: sibling of the resolved ffmpeg (same dir, same extension) if that

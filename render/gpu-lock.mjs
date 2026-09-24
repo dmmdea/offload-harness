@@ -22,7 +22,7 @@
 // No npm dependencies.
 import { writeFileSync, readFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
-import { ensureComfy as defaultEnsureComfy } from "./comfy-lifecycle.mjs";
+import { ensureComfy as defaultEnsureComfy, tailComfyLog, comfyLogPath, COMFY_LOG_TAIL_LINES } from "./comfy-lifecycle.mjs";
 
 function metaPath(lockPath) {
   return join(lockPath, "meta.json");
@@ -302,8 +302,8 @@ export async function freeComfy(api = process.env.COMFY_API || "http://127.0.0.1
 //   3. optionally ensureComfy(); warm:true is the BATCH-SESSION mode,
 //   4. await fn(),
 //   5. run ONE guarded teardown: freeComfy() + kill a ComfyUI we spawned.
-// Deps (freeLlamaSwap/ensureComfy/freeComfy/checkLease/claimUnload) are injectable for
-// tests only.
+// Deps (freeLlamaSwap/ensureComfy/freeComfy/checkLease/claimUnload/tailLog) are
+// injectable for tests only.
 export async function withGpuSlot(opts, fn) {
   const {
     noLock = false,
@@ -317,6 +317,7 @@ export async function withGpuSlot(opts, fn) {
     lease = inheritedLease(),
     claimUnload = claimLeaseUnload,
     checkLease = checkInheritedLease,
+    tailLog = tailComfyLog,
   } = opts || {};
 
   // No lease, and not explicitly opted out => refuse. Acquiring here is exactly the
@@ -362,7 +363,30 @@ export async function withGpuSlot(opts, fn) {
         ...(warm ? { warm: true } : {}),
       });
     }
-    return await fn({ comfyChild, lease });
+    try {
+      return await fn({ comfyChild, lease });
+    } catch (err) {
+      // F-38 audit: ComfyUI's own console output used to be discarded entirely
+      // (`stdio: "ignore"`), so a render failure carried no diagnostic beyond a
+      // terse execution_error JSON — finding the real cause (once, a plain disk-
+      // space error) took a hand-built bypass copy of render/ that captured
+      // stdout. comfyChild is only non-null when THIS run launched ComfyUI itself
+      // (never on a reused foreign instance — comfy-lifecycle.mjs's reuse branch
+      // returns null), so the tail is always this render's own console, never
+      // another job's leftover output.
+      if (comfyManaged && comfyChild) {
+        const tail = tailLog();
+        if (tail) {
+          const enriched = new Error(
+            `${err.message}\n\n--- last ${COMFY_LOG_TAIL_LINES} line(s) of ComfyUI's own console (${comfyLogPath()}) ---\n${tail}`,
+            { cause: err },
+          );
+          enriched.stack = err.stack;
+          throw enriched;
+        }
+      }
+      throw err;
+    }
   } finally {
     await cleanup();
     for (const sig of ["SIGINT", "SIGTERM", "SIGBREAK"]) process.removeListener(sig, onSig);

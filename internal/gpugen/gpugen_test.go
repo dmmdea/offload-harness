@@ -122,10 +122,12 @@ func TestKillTreeNilProcess(t *testing.T) {
 // TestClassifyErr maps common failure substrings to err classes (mirrors pipeline).
 func TestClassifyErr(t *testing.T) {
 	cases := map[string]string{
-		"CUDA out of memory":            "oom",
-		"context deadline exceeded":     "timeout",
-		"dial tcp: connection refused":  "conn_refused",
-		"something else entirely":       "other",
+		"CUDA out of memory":                                   "oom",
+		"context deadline exceeded":                            "timeout",
+		"dial tcp: connection refused":                         "conn_refused",
+		"DEAD_AIR: dead air persisted after a retry":           "dead_air",
+		"FFMPEG_UNAVAILABLE: ffmpeg/ffprobe could not resolve": "ffmpeg_unavailable",
+		"something else entirely":                              "other",
 	}
 	for msg, want := range cases {
 		if got := ClassifyErr(errString(msg)); got != want {
@@ -161,8 +163,8 @@ func TestGenerateFootprintReportsPeakOnSuccess(t *testing.T) {
 	var sampledPid int
 	_, err := Generate(context.Background(), Spec{
 		Exe: exe, Script: script, Args: args,
-		Out:     out,
-		Timeout: 20 * time.Second,
+		Out:       out,
+		Timeout:   20 * time.Second,
 		Footprint: &FootprintKey{Family: "sdxl", Quant: "bf16", Task: "image-gen"},
 		SampleFunc: func(pid int) (float64, error) {
 			mu.Lock()
@@ -207,10 +209,10 @@ func TestGenerateFootprintNotReportedOnFailure(t *testing.T) {
 	called := false
 	_, err := Generate(context.Background(), Spec{
 		Exe: exe, Script: script, Args: args,
-		Out:       filepath.Join(t.TempDir(), "never.txt"),
-		Timeout:   10 * time.Second,
-		Footprint: &FootprintKey{Family: "sdxl", Task: "image-gen"},
-		SampleFunc: func(pid int) (float64, error) { return 5.0, nil },
+		Out:         filepath.Join(t.TempDir(), "never.txt"),
+		Timeout:     10 * time.Second,
+		Footprint:   &FootprintKey{Family: "sdxl", Task: "image-gen"},
+		SampleFunc:  func(pid int) (float64, error) { return 5.0, nil },
 		OnFootprint: func(peak float64) { called = true },
 	})
 	if err == nil {
@@ -232,10 +234,10 @@ func TestGenerateFootprintChildErrorNotReported(t *testing.T) {
 	called := false
 	_, err := Generate(context.Background(), Spec{
 		Exe: "node", Script: "-e", Args: []string{"process.exit(3)"},
-		Out:       filepath.Join(t.TempDir(), "never.txt"),
-		Timeout:   10 * time.Second,
-		Footprint: &FootprintKey{Family: "whisper", Task: "stt"},
-		SampleFunc: func(pid int) (float64, error) { return 5.0, nil },
+		Out:         filepath.Join(t.TempDir(), "never.txt"),
+		Timeout:     10 * time.Second,
+		Footprint:   &FootprintKey{Family: "whisper", Task: "stt"},
+		SampleFunc:  func(pid int) (float64, error) { return 5.0, nil },
 		OnFootprint: func(peak float64) { called = true },
 	})
 	if err == nil {

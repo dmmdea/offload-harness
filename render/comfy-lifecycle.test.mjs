@@ -5,10 +5,15 @@
 // 5); and a never-ready spawn is killed + throws.
 import { test } from "node:test";
 import assert from "node:assert";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ensureComfy, resolveComfyPy, resolveComfyDir, cudaVisibleEnv } from "./comfy-lifecycle.mjs";
+import { PassThrough } from "node:stream";
+import { EventEmitter } from "node:events";
+import {
+  ensureComfy, resolveComfyPy, resolveComfyDir, cudaVisibleEnv,
+  comfyLogPath, rotateComfyLog, tailComfyLog, COMFY_LOG_TAIL_LINES,
+} from "./comfy-lifecycle.mjs";
 
 // A bound ComfyUI dir, injected so the lifecycle tests exercise the SPAWN path on
 // every OS. Without it they inherited the platform default — "C:/ComfyUI" on Windows,
@@ -224,4 +229,133 @@ test("multi-GPU spawn env carries --disable-pinned-memory (upstream #15737 guida
   assert.ok(got, "spawn was not called");
   assert.ok(got.args.includes("--disable-pinned-memory"), "flag missing: " + got.args.join(" "));
   assert.equal(got.env.CUDA_VISIBLE_DEVICES, "0,1");
+});
+
+// ---- ComfyUI console capture (F-38 audit, 2026-09-24) ---------------------------
+// `stdio: "ignore"` used to discard every line ComfyUI itself ever printed, so the
+// only diagnostic signal for a failed render was the terse /history execution_error
+// JSON — finding a real cause (once, a plain disk-space error) took a hand-built
+// stdout-capturing bypass copy of render/. These tests exercise the rotating,
+// size-bounded capture end to end through ensureComfy's real (non-injected) capture
+// wiring, using a fake child with REAL stream objects (spawn itself stays injected —
+// no real ComfyUI/network — but the streams are genuine PassThrough/EventEmitter so
+// the capture code under test runs unmodified).
+
+function fakeChildWithStreams() {
+  const child = new EventEmitter();
+  child.stdout = new PassThrough();
+  child.stderr = new PassThrough();
+  child.kill = () => {};
+  return child;
+}
+
+test("comfyLogPath: beside the ComfyUI install, matching the .offload-*.json marker convention", () => {
+  assert.equal(comfyLogPath("/some/comfy"), join("/some/comfy", "offload-comfyui.log"));
+});
+
+test("ensureComfy captures a spawned ComfyUI's stdout+stderr to the rotating log file", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "comfy-log-"));
+  let ups = 0;
+  const child = await ensureComfy({
+    comfyUp: async () => (ups++ > 0), // first poll: down (spawns); then up
+    spawn: () => {
+      const c = fakeChildWithStreams();
+      setImmediate(() => {
+        c.stdout.write("hello from comfyui stdout\n");
+        c.stderr.write("[Errno 28] No space left on device\n");
+        c.emit("exit", 1);
+      });
+      return c;
+    },
+    envFor: () => process.env,
+    comfyDir: dir,
+    pollMs: 1,
+  });
+  assert.ok(child, "ensureComfy still returns the spawned child");
+  // Give the async pipeline (PassThrough -> fs write stream) a moment to land.
+  await new Promise((r) => setTimeout(r, 300));
+  const logged = readFileSync(comfyLogPath(dir), "utf8");
+  assert.ok(logged.includes("hello from comfyui stdout"), `log missing stdout line: ${logged}`);
+  assert.ok(logged.includes("[Errno 28] No space left on device"), `log missing stderr line: ${logged}`);
+});
+
+test("captured ComfyUI output is capped so a long-lived batch session cannot grow the log unbounded", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "comfy-log-cap-"));
+  let ups = 0;
+  await ensureComfy({
+    comfyUp: async () => (ups++ > 0),
+    spawn: () => {
+      const c = fakeChildWithStreams();
+      setImmediate(() => {
+        const big = "x".repeat(1024 * 1024); // 1MB chunks
+        for (let i = 0; i < 8; i++) c.stdout.write(big); // 8MB total, over the 5MB cap
+        c.emit("exit", 0);
+      });
+      return c;
+    },
+    envFor: () => process.env,
+    comfyDir: dir,
+    pollMs: 1,
+  });
+  await new Promise((r) => setTimeout(r, 400));
+  const size = statSync(comfyLogPath(dir)).size;
+  assert.ok(size < 6 * 1024 * 1024, `log grew past its 5MB cap: ${size} bytes`);
+});
+
+test("rotateComfyLog: ages out old numbered logs, keeping only the configured number of previous runs", () => {
+  const dir = mkdtempSync(join(tmpdir(), "comfy-log-rotate-"));
+  const base = comfyLogPath(dir);
+  writeFileSync(base, "run-current\n");
+  writeFileSync(`${base}.1`, "run-1\n");
+  writeFileSync(`${base}.2`, "run-2\n");
+  writeFileSync(`${base}.3`, "run-3 (oldest, must be dropped)\n");
+  rotateComfyLog(dir);
+  assert.equal(existsSync(base), false, "the slot is free for the new run");
+  assert.equal(readFileSync(`${base}.1`, "utf8"), "run-current\n");
+  assert.equal(readFileSync(`${base}.2`, "utf8"), "run-1\n");
+  assert.equal(readFileSync(`${base}.3`, "utf8"), "run-2\n");
+  assert.equal(existsSync(`${base}.4`), false, "only the configured number of previous runs are kept");
+});
+
+test("rotateComfyLog: a totally fresh comfyDir (first run ever) is a safe no-op", () => {
+  const dir = mkdtempSync(join(tmpdir(), "comfy-log-rotate-fresh-"));
+  assert.doesNotThrow(() => rotateComfyLog(dir));
+});
+
+test("tailComfyLog: the last N lines; empty string (never a throw) when nothing has been captured", () => {
+  const dir = mkdtempSync(join(tmpdir(), "comfy-log-tail-"));
+  assert.equal(tailComfyLog(dir), "", "no log yet = empty, not a throw");
+  const lines = Array.from({ length: 30 }, (_, i) => `line ${i}`);
+  writeFileSync(comfyLogPath(dir), lines.join("\n") + "\n");
+  assert.deepEqual(tailComfyLog(dir, 5).split("\n"), lines.slice(-5));
+  assert.equal(tailComfyLog(dir).split("\n").length, COMFY_LOG_TAIL_LINES, "default tail length");
+});
+
+// TestCaptureComfyOutput handles a stream-level "error" event (e.g. EPIPE when
+// withGpuSlot's teardown kills the child mid-write) the same way it already
+// handles the write stream's own "error" — never an unhandled crash. Node's
+// EventEmitter throws synchronously for an "error" event with no listener, so
+// this test IS the assertion: reaching the end without an uncaught exception
+// (node:test fails the test itself on one) proves the listener is attached.
+test("captureComfyOutput never crashes on a stdout/stderr stream error (EPIPE-class)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "comfy-log-streamerr-"));
+  let ups = 0;
+  const child = await ensureComfy({
+    comfyUp: async () => (ups++ > 0),
+    spawn: () => {
+      const c = fakeChildWithStreams();
+      setImmediate(() => {
+        c.stdout.emit("error", new Error("EPIPE: simulated"));
+        c.stderr.emit("error", new Error("EPIPE: simulated"));
+        c.stdout.write("line survives after the error event\n");
+        c.emit("exit", 1);
+      });
+      return c;
+    },
+    envFor: () => process.env,
+    comfyDir: dir,
+    pollMs: 1,
+  });
+  assert.ok(child, "ensureComfy still returns the spawned child");
+  await new Promise((r) => setTimeout(r, 200));
 });

@@ -637,10 +637,15 @@ change fixes this" conclusion held only while duration itself was held fixed.
    verdict.
 
 ffmpeg/ffprobe are resolved via `$FFMPEG_PATH` (threaded from `Pipeline.genEnv()` — the same
-per-machine `ffmpeg_path` config `internal/audioio` already uses for transcribe) with a PATH probe
-fallback. Either missing degrades the gate to a no-op skip — it never turns an otherwise-successful
-render into a failure just because the measuring tool is absent, and it never withholds an
-already-produced render (house content-preservation rule).
+per-machine `ffmpeg_path` config `internal/audioio` already uses for transcribe), which resolves a
+bare name (the shipped `ffmpeg_path` default) through PATH via `internal/mediaops.ResolveBinary`
+before threading it, then a PATH probe fallback on the JS side. **Either missing is now a fatal,
+typed `FFMPEG_UNAVAILABLE` error raised by `main()` before the GPU lock or ComfyUI are ever touched
+(F-38, 2026-09-24), not a silent skip** — the pre-fix behavior (degrade to a no-op skip and ship the
+raw, unverified render) let the gate go silently inert fleet-wide on every node that never set an
+explicit `ffmpeg_path`, since the config default `"ffmpeg"` is a bare name that `existsSync()`
+always read as missing (reproduced identically on the Lenovo and the Aorus). `gpugen.ClassifyErr`
+maps `FFMPEG_UNAVAILABLE` to the `ffmpeg_unavailable` class, mirroring `dead_air` below.
 
 **A `gpugen`-killed timeout is a typed `timeout`, not a generic failure (found 2026-09-23).**
 `gpugen.Generate` tree-kills the child on its context timeout (`killTree`); on Windows that is
