@@ -110,8 +110,10 @@ func TestEveryAgentSeatIsChosenNotDerived(t *testing.T) {
 //     qwen3.5-4b-agent stays include_qwen35_4b true and rendered as the un-aliased ROLLBACK
 //     seat: smoke PASS 44.7 s, a real contract PASS 188 s, a 32k contract PASS 143 s.
 //     gemma4-e2b FAILED in 18.6 s and offload-e4b FAILED in 31 s (neither is a candidate).
-//   - agent_seat_tok_s 10 is load-bearing: the first run without it deferred with 1 s of wall left,
-//     because the wall was sized from a rate this iGPU does not reach.
+//   - agent_seat_tok_s is load-bearing: the first run without it deferred with 1 s of wall left,
+//     because the wall was sized from a rate this iGPU does not reach. It is the SEAT's rate, so it
+//     moved with the seat: 10 was the 4B's; 6.57 is MiMo-9B's llama-bench tg128 on this box
+//     (Vulkan, llama.cpp b11153, 2026-09-24). A stale 10 would size MiMo's walls ~1/3 too short.
 func TestAmdGcnSeedsTheSeatItWasMeasuredOn(t *testing.T) {
 	doc := loadSeedRulesDoc(t)
 	p, ok := doc.Profiles["amd-gcn"]
@@ -123,7 +125,7 @@ func TestAmdGcnSeedsTheSeatItWasMeasuredOn(t *testing.T) {
 	}
 	want := map[string]any{
 		"agent_model":         "mimo-9b-agent",
-		"agent_seat_tok_s":    float64(10),
+		"agent_seat_tok_s":    float64(6.57),
 		"agent_max_tokens":    float64(2048),
 		"agent_timeout_sec":   float64(900),
 		"fleet_agent_enabled": true,

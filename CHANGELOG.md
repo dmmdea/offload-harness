@@ -238,6 +238,14 @@ a bare name, with regression tests (`TestResolveBinary_ExplicitPathMissing`,
 
 ## [0.140.11] - 2026-09-24 - mimo-9b-agent becomes amd-gcn's bound agent seat, and the 4B/mimo pairing that PR #472 refused now renders instead
 
+### Changed — amd-gcn `agent_seat_tok_s` 10 -> 6.57 (the rate follows the seat)
+
+`agent_seat_tok_s` sizes every agent contract's wall until the seat has recorded a measured rate of its
+own. 10 was the qwen3.5-4b-agent seat's rate; the new seat `mimo-9b-agent` has no recorded rate yet,
+so a fresh install would have sized MiMo's walls from a rate this iGPU does not reach (~1/3 too short —
+the exact failure the seed exists to prevent). 6.57 is MiMo-9B's llama-bench tg128 on the reference
+box (Vulkan, llama.cpp b11153). `TestAmdGcnSeedsTheSeatItWasMeasuredOn` pins it (proven red at 10).
+
 ### Changed — `include_mimo_9b` + `include_qwen35_4b` render TOGETHER; the refusal moves to a rollback alias drop
 
 PR #472 shipped `include_mimo_9b` refusing outright alongside `include_qwen35_4b` (both claim the

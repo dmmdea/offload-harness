@@ -1467,7 +1467,7 @@
       "config_seed": {
         "compose_script": "render/compose-hyperframes.mjs",
         "agent_model": "mimo-9b-agent",
-        "agent_seat_tok_s": 10,
+        "agent_seat_tok_s": 6.57,
         "agent_max_tokens": 2048,
         "agent_timeout_sec": 900,
         "fleet_agent_enabled": true,
