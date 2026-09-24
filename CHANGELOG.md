@@ -6,6 +6,33 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed — pooled krea2/LTX-2.5 text encoder and VAE no longer load onto the display card
+
+The stock `CLIPLoader`/`VAELoader` nodes' `device` input only ever offers `"default"`/`"cpu"`;
+`"default"` is ComfyUI's own fastest-first device pick, entirely independent of
+`imagegen_pool_compute`/`imagegen_pool_donor` (or the `videogen_*` equivalents) — on the 3x16
+reference tier that IS the display card. Measured A/B (2026-09-24,
+`multigpu-archival-actions-2026-09-24.md`): every pooled krea2 render put the ~12 GiB
+Qwen3-VL-4B encoder there regardless of which two cards the DiT's own pool keys named. Fixed
+in `render/wf-krea2.mjs` and `render/wf-ltx25-i2v.mjs`: when pooled, the text encoder and
+VAE(s) now load through ComfyUI-MultiGPU's `CLIPLoaderMultiGPU`/`VAELoaderMultiGPU`, pinned to
+the pool's donor device — never the unnamed default. Unpooled builds are unchanged.
+`render/comfy-nodes.mjs` (`NODE_PACKS`) and `internal/mediacap/routeneeds.go`
+(`nodePacks`/`classPacks`/`imageNodeClasses`/`videoNeeds`) now name the two new node classes.
+
+### Fixed — foreign-GPU-memory warning no longer fires on an ordinary desktop session
+
+`gpu status`/`gpu reserve`'s foreign-GPU-memory warning (PR #469) flagged the operator's own
+desktop apps (Code.exe, chrome.exe, SnippingTool.exe, explorer.exe, ...) on the Qube because
+the Windows PDH source it reads has no per-card identity and the noise floor (64 MiB) let
+ordinary desktop residents through. Fixed: the per-process floor rises to 512 MiB (configurable
+via `foreign_gpu_min_mib`), the OS shell/desktop denylist grows (csrss, explorer, and the
+shell-experience hosts), and — the actual multi-card fix — a resident whose every known GPU is
+a display card (`gpuprobe.DisplayCardUUIDs`, cross-referenced against nvidia-smi's compute-apps
+`gpu_uuid` per pid) is dropped, but only on a box that has a non-display card to actually score
+(a single-GPU box still warns on a Resolve-class hog on its only card). `gpu_foreign.go` /
+`gpu_foreign_test.go`.
+
 ### Changed — ComfyUI-MultiGPU pinned + mirrored ahead of its 2026-09-30 archival
 
 `pollockjj/ComfyUI-MultiGPU` archives 2026-09-30 (issue #223, no successor endorsed) with no

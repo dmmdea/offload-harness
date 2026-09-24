@@ -33,6 +33,11 @@ export const NODE_PACKS = Object.freeze({
   UnetLoaderGGUFDisTorch2MultiGPU:
     `ComfyUI-MultiGPU (https://github.com/pollockjj/ComfyUI-MultiGPU) together with ComfyUI-GGUF (https://github.com/city96/ComfyUI-GGUF)${MULTIGPU_ARCHIVAL_NOTE}`,
   UnetLoaderGGUF: "ComfyUI-GGUF (https://github.com/city96/ComfyUI-GGUF)",
+  // Device-pinned CLIP/VAE loaders (2026-09-24, the pooled display-card-CLIP
+  // fix — see wf-krea2.mjs/wf-ltx25-i2v.mjs): same pack, same pin, as the
+  // DiT's own DisTorch2 loader above.
+  CLIPLoaderMultiGPU: `ComfyUI-MultiGPU (https://github.com/pollockjj/ComfyUI-MultiGPU)${MULTIGPU_ARCHIVAL_NOTE}`,
+  VAELoaderMultiGPU: `ComfyUI-MultiGPU (https://github.com/pollockjj/ComfyUI-MultiGPU)${MULTIGPU_ARCHIVAL_NOTE}`,
 });
 
 // graphClasses: the distinct class_type values of an API-format graph, in first-seen order.
