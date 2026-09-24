@@ -39,7 +39,7 @@ when **no memory source works** does `fleet-serve` refuse to start: the contract
 `vram_total_gb <= 0` as a broken node, and refusing loudly beats advertising an empty GPU.
 The serve log names the resolved source
 (`... via nvidia-smi|windows-generic|linux-amdgpu, vendor=... arch=...`). A **dual-route node**
-(ADR 0054: a tier with `alt_backends`, installed with `--llama-bin-cpu`) advertises `backends`
+(ADR 0054: a tier with `alt_backends`, installed with `--llama-bin-cpu`; no tier declares the CPU route since 2026-09-24) advertises `backends`
 in health, primary first (`["vulkan","cpu"]`), and serves the CPU family as `<seat>-cpu` ids —
 a caller picks the route by seat id. Ctrl-C drains: dispatches for a
 job_id this node has never seen get 503; a re-dispatch of a job_id this node already knows
