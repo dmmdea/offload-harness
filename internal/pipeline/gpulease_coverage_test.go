@@ -177,6 +177,19 @@ func gpuLeaseCases() []gpuLeaseCase {
 			invoke: genReq(core.TaskGenerateVideo, nil),
 		},
 		{
+			// Same route, pooled: the pin must stay OFF here (MultiGPU #220) — only
+			// the un-pooled "generate_video" case above should take it.
+			name:   "generate_video (pooled)",
+			runner: "comfy-video.mjs",
+			setup: func(_ *testing.T, cfg *config.Config, stub, _ string) {
+				cfg.VideoGenScript = stub
+				cfg.VideoGenPoolVvramGB = 30
+				cfg.VideoGenPoolCompute = "cuda:0"
+				cfg.VideoGenPoolDonor = "cuda:2"
+			},
+			invoke: genReq(core.TaskGenerateVideo, nil),
+		},
+		{
 			name:   "animate_character",
 			runner: "comfy-animate.mjs",
 			setup: func(t *testing.T, cfg *config.Config, stub, dir string) {

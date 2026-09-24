@@ -2794,9 +2794,12 @@ func (p *Pipeline) runGenerateVideo(ctx context.Context, req core.Request, meta 
 	// COMFY_WAIT_SEC aligns the render script's poll budget with the harness timeout
 	// (quality-first: the native recipe at 720p legitimately exceeds the script's old
 	// hardcoded ceiling; the Go timeout stays the hard stop).
-	// Never the device pin: a pooled video seat is placed by its pool keys, and the
-	// 3x16 pool must compute on ComfyUI's default device (MultiGPU #220).
-	env := append(p.comfyGenEnv(false), leaseEnv...)
+	// The device pin applies when NOT pooled (see comfyLaunch's doc comment): a pooled
+	// video seat is placed by its pool keys, and the 3x16 pool must compute on
+	// ComfyUI's default device (MultiGPU #220) — an un-pooled seat has no pool keys to
+	// place it and must not silently land on ComfyUI's default device instead, which
+	// on this box's enumeration is the display card.
+	env := append(p.comfyGenEnv(!p.cfg.VideoPooled()), leaseEnv...)
 	if timeout > 0 {
 		env = append(env, "COMFY_WAIT_SEC="+strconv.Itoa(int(timeout/time.Second)))
 	}
@@ -3583,18 +3586,24 @@ func imageModelFromConfig(cfg config.Config) imagegen.Model {
 //
 // singleCard decides whether comfy_cuda_device applies. It is true for the routes that
 // render on ONE card — image generation when the binding does not pool, generative
-// edit, upscale, inpaint, animate, music — and false for:
+// edit, upscale, inpaint, animate, music, and (since the 2026-09-24 A/B measurement
+// below) video generation when the binding does not pool — and false for:
 //   - a pooled image/video seat: its pool keys name the cards, and the blackwell-3x16
 //     video pool must COMPUTE on cuda:0 (ComfyUI-MultiGPU #220: an int8 DiT cannot
 //     compute on a non-default device), which a --cuda-device pin would hide;
 //   - run-graph: the caller's graph owns its placement.
 //
-// generate_video NEVER takes the pin, pooled or not (runGenerateVideo passes false,
-// pinned by TestLaunchProfileReachesEveryComfyRouteAndThePinOnlyTheSingleCardOnes):
-// every seeded video seat is pooled and owns its placement through its pool keys. A
-// future tier with an un-pooled video seat on a multi-card box must add the pin for
-// that shape deliberately — until then an un-pooled video render lands on ComfyUI's
-// default device.
+// generate_video used to NEVER take the pin, pooled or not, on the theory that "every
+// seeded video seat is pooled." That was false on the blackwell-3x16 tier's own
+// ComfyUI device ordering: an un-pooled LTX-2.5 render (videogen_pool_vvram_gb=0,
+// comfy_dynamic_vram=on) measured landing on ComfyUI's DEFAULT device, which on this
+// box's 3-card enumeration is nvidia-smi index 1 — the DISPLAY card, not card 2 as
+// comfy_cuda_device="2" intends (15.7 GiB loaded onto it, confirmed via nvidia-smi;
+// pinned to card 2 correctly once this fix landed). runGenerateVideo now passes
+// !cfg.VideoPooled(), matching the image route's !cfg.ImagePooled() (pinned by
+// TestLaunchProfileReachesEveryComfyRouteAndThePinOnlyTheSingleCardOnes): a pooled
+// video seat still owns its placement through its pool keys (unaffected, still
+// false); an un-pooled one now takes the pin like every other single-card route.
 //
 // Dynamic VRAM and the extra args are launch-wide and apply to every ComfyUI route.
 func comfyLaunch(cfg config.Config, singleCard bool) imagegen.ComfyLaunch {
