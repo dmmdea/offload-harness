@@ -2977,6 +2977,18 @@ func doctorRun(cfg config.Config, routes []mediacap.Route, w io.Writer) error {
 	// them — a doctor that is red for llama-swap and silent about a broken media
 	// binding is the same blind spot in a different disguise.
 	mediaMissing := writeMediaSection(w, routes)
+	// sdcpp's Vulkan device pin (register: OptiPlex remediation 2026-09-23): a box
+	// with an enabled integrated GPU enumerates it as Vulkan0, ahead of the
+	// discrete card, and the render script used to pin device 0 whenever the
+	// environment left it unset — every sdcpp render then ran on the iGPU at
+	// 100x the discrete card's speed with no error, nothing red anywhere. The
+	// render script now auto-picks the discrete adapter itself; this just tells
+	// the operator, without guessing, which device is actually about to be used
+	// and flags it loudly when that is still an iGPU (an explicit env override,
+	// or a box with no discrete adapter at all). Informational only — it never
+	// changes doctor's exit code, because a working-but-slow iGPU render is not
+	// the same class of failure as a missing binding.
+	writeSdcppDeviceSection(w, cfg)
 	// The model files behind the ComfyUI routes (register F-31): a name the graph
 	// will ask ComfyUI to load must sit in the class directory the loader node
 	// opens; a missing or misplaced file used to surface only as a graph
@@ -3135,6 +3147,35 @@ func writeMediaSection(w io.Writer, routes []mediacap.Route) int {
 		fmt.Fprintf(w, "  %-22s %s  %-18s %-15s %s\n", r.Name+":", mark, string(r.State), r.Engine, r.Detail)
 	}
 	return missing
+}
+
+// writeSdcppDeviceSection reports which Vulkan device an sdcpp generate_image
+// render will use on this box (mediacap.DetectSdcppDevice mirrors
+// render/sdcpp-generate.mjs's own device-resolution order exactly), and flags it
+// when that device is an integrated GPU. Prints nothing when sdcpp is not this
+// box's image-gen engine or its binary is unbound — writeMediaSection already
+// says so.
+func writeSdcppDeviceSection(w io.Writer, cfg config.Config) {
+	if cfg.ImageGenEngine != "sdcpp" || cfg.SdcppBin == "" {
+		return
+	}
+	d := mediacap.DetectSdcppDevice(cfg.SdcppBin, os.Getenv("GGML_VK_VISIBLE_DEVICES"), nil)
+	switch {
+	case d.ProbeErr != "" && d.Name == "":
+		fmt.Fprintf(w, "sdcpp device: ?     could not determine the Vulkan device (%s) — GGML_VK_VISIBLE_DEVICES=%s will be used as-is\n", d.ProbeErr, d.Index)
+	case d.IsIGPU:
+		src := "auto-selected (no discrete adapter found)"
+		if d.EnvOverride {
+			src = "from GGML_VK_VISIBLE_DEVICES"
+		}
+		fmt.Fprintf(w, "sdcpp device: WARN  Vulkan%s %s is an INTEGRATED GPU (%s) — renders will be slow; set GGML_VK_VISIBLE_DEVICES to the discrete adapter's index to override\n", d.Index, d.Name, src)
+	default:
+		how := "auto-selected discrete adapter"
+		if d.EnvOverride {
+			how = "from GGML_VK_VISIBLE_DEVICES"
+		}
+		fmt.Fprintf(w, "sdcpp device: OK    Vulkan%s %s (%s)\n", d.Index, d.Name, how)
+	}
 }
 
 // writeModelBindingsSection prints one line per configured ComfyUI model name

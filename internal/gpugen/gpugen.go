@@ -209,6 +209,22 @@ func Generate(ctx context.Context, spec Spec) (string, error) {
 		peak, err = runSampled(cmd, tw, spec.SampleFunc)
 	}
 	if err != nil {
+		// cctx.Err() is OUR OWN derived context, so this is authoritative regardless
+		// of what the OS reports as the child's exit status. Without this check the
+		// classification depended on the killed process's exit text containing
+		// "timeout"/"deadline"/"killed"/"signal:" (ClassifyErr's patterns) — but
+		// killTree's Windows path (taskkill /T /F) terminates via TerminateProcess,
+		// which reports exit code 1, so cmd.Wait() returned a plain "exit status 1"
+		// with none of those words in it. A cold ACE-Step music retry killed at
+		// audiogen_timeout_sec surfaced that way (OptiPlex remediation, 2026-09-23):
+		// a real timeout, reported as a generic failure indistinguishable from any
+		// other crash. Folding "deadline exceeded" into the error text here makes
+		// EVERY gpugen caller's ClassifyErr(gerr) == "timeout" reliable, on every OS
+		// and whatever exit code the kill happens to produce — not just audio.
+		if cctx.Err() == context.DeadlineExceeded {
+			return "", fmt.Errorf("gpugen: %s timeout after %s (deadline exceeded, process tree killed): %w (%s)",
+				baseName(spec.Script), spec.Timeout, err, tailDetail(tw))
+		}
 		return "", fmt.Errorf("gpugen: %s failed: %w (%s)", baseName(spec.Script), err, tailDetail(tw))
 	}
 	if fi, statErr := os.Stat(spec.Out); statErr != nil || fi.Size() == 0 {

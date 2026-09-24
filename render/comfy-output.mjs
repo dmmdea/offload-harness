@@ -4,8 +4,24 @@
 // SaveAudio (ACE-Step music / TTS) uses node.audio; image nodes use node.images. The
 // descriptor shape {filename,subfolder,type} is identical for all, so /view fetches any
 // of them the same way. Returns {filename, subfolder, type} or null.
-export function firstOutputFile(outputs) {
-  for (const node of Object.values(outputs || {})) {
+//
+// `graph` (optional, second arg) is the API-format node map the caller submitted — the
+// same object it built with a wf-*.mjs builder (or loaded via --graph) and already holds
+// at the call site. When given, any node whose graph class_type starts with "Load" is
+// skipped even if its /history outputs entry carries a file. Measured 2026-09-23: the
+// native `LoadVideo` node echoes a UI preview of its OWN input into its outputs entry —
+// same shape as a real Save* result — and outputs is keyed by node id, which
+// Object.values()/Object.entries() enumerate in ASCENDING NUMERIC order regardless of
+// insertion order. wf-wan-animate2.mjs's `LoadVideo` node "240" therefore sorted before
+// its own `SaveVideo` node "246", and firstOutputFile silently returned the driving
+// video unmodified — full render time elapsed, exit 0, "WROTE <out>" printed. A loader
+// never legitimately produces the result, whatever kind of file it happens to echo, so
+// excluding every Load* class is the general fix, not a WAN-Animate-2 special case.
+// Callers that hold a graph should always pass it; without one the scan falls back to
+// the pre-fix behavior (needed only for ad-hoc/legacy callers with no graph in scope).
+export function firstOutputFile(outputs, graph) {
+  for (const [nodeId, node] of Object.entries(outputs || {})) {
+    if (graph && /^Load/.test(graph[nodeId]?.class_type || "")) continue;
     const f = node?.gifs?.[0] || node?.videos?.[0] || node?.audio?.[0] || node?.images?.[0];
     if (f) return { filename: f.filename, subfolder: f.subfolder || "", type: f.type || "output" };
   }

@@ -18,6 +18,19 @@ mapping from the harness's generic flags to sd.cpp's CLI, so a pin bump fixes fl
 `.mjs` file, never in Go. `sd-server` (OpenAI/A1111-compatible, ships in the same pinned zip) is
 the recorded warm-swap upgrade path — deliberately not wired yet.
 
+**Vulkan device selection is auto, not pinned to 0 (found 2026-09-23).** `GGML_VK_VISIBLE_DEVICES`
+used to default to `"0"` whenever unset, on the assumption that device 0 is the render GPU. On a
+box with an enabled integrated GPU, ggml-Vulkan can enumerate the iGPU FIRST (measured: Vulkan0 =
+Intel UHD 630, Vulkan1 = an RTX 5060) — every render then ran on the iGPU with no error, just
+100×+ slower. `render/sdcpp-generate.mjs` now runs `<sdcpp_bin> --list-devices` and picks the first
+discrete (NVIDIA/AMD) adapter when the env is unset, falling back to device 0 only when none is
+found or the probe fails; an explicit `GGML_VK_VISIBLE_DEVICES` in the environment always wins and
+is never second-guessed. `local-offload doctor` reports which device an sdcpp render will actually
+use and prints a `WARN` line when that device is an integrated GPU
+(`internal/mediacap/sdcppdevice.go`, mirroring the same resolution order in Go) — this is a live
+subprocess probe, so it is invoked directly from `doctor`, not from `mediacap.Routes` (which stays
+a pure config/filesystem derivation for `offload_status`/`acceptance`).
+
 **Composition lane (ADR 0059).** `offload_compose_video` / `compose-video` renders
 designed HTML/CSS motion graphics to video with **HyperFrames**: title cards, lower thirds, kinetic
 type and alpha overlays. It is CPU-class: software GL and CPU encode, with no GPU lease. It is
@@ -100,6 +113,22 @@ release the GPU slot when the server stops answering) and the suspend/resume fen
 CLI's `wait` does not provide; `/view` bytes are fetched raw for exact file fidelity. All six
 runners now share that hardened loop.
 
+**Picking the produced file from `/history` never trusts node-id order alone (found 2026-09-23).**
+`comfy-output.mjs`'s `firstOutputFile()` scans the `/history` outputs object for the first node
+carrying a file descriptor; JS enumerates integer-like object keys in ASCENDING NUMERIC order
+regardless of insertion order. The native `LoadVideo` node echoes a UI preview of its own input
+into its own `outputs` entry — the same shape as a real result — and `wf-wan-animate2.mjs`'s
+`LoadVideo` node ("240") sorts before its own `SaveVideo` node ("246"), so `animate_character`
+always returned the raw driver video unmodified: full render time elapsed, exit 0, "WROTE `<out>`"
+printed, and the delivered file byte-identical to the input. `firstOutputFile` now takes the
+caller's own API-format graph as an optional second argument and skips any node whose `class_type`
+starts with `Load` — a loader never legitimately produces the result. Every runner
+(`comfy-animate.mjs`, `comfy-video.mjs`, `comfy-edit.mjs`, `comfy-inpaint.mjs`, `comfy-music.mjs`,
+`comfy-upscale.mjs`) passes its graph. Audited every other `wf-*.mjs` builder: only WAN-Animate-2
+uses a `LoadVideo` node; every other video lane's `LoadImage` does not register a preview entry in
+ComfyUI's execution outputs. `allOutputsByNode` (the `run_graph` lane, which addresses a specific
+node id from its own manifest rather than guessing) was not affected.
+
 **Warm batch.** `generate-image --batch` takes a jobs file and runs N renders in one session. The
 only behavioral change is omitting ComfyUI's `--cache-none`, so the checkpoint loads once; teardown
 still happens exactly once, at the batch boundary. A failed render is recorded and the batch
@@ -139,6 +168,15 @@ and should come **last** — sharpening before a resize is undone by the resampl
 caller convention that the validator documents, not an ordering it enforces (mask and rendition
 chains may legitimately follow). `renditions` is a top-level parameter, not an op: it re-runs the
 pipeline once per export target.
+
+`crop`'s (and `composite`'s/`text`'s) `x`/`y` are anchored coordinates, and `0` is a legitimate,
+common value — a crop or paste at the image origin. `EditOp.X`/`Y` (`internal/mediaops/editimage.go`)
+carry no `omitempty` for exactly that reason: an `int` field with `omitempty` drops an explicit zero
+from the JSON entirely, and `render/edit_image.py`'s worker then saw a missing `"x"` key and raised
+`pipeline failed: 'x'` — every crop/composite/text anchored at `0,0` failed outright (found 2026-09-23).
+The Python side also defaults safely (`op.get("x") or 0`) as defense in depth. `Width`/`Height` keep
+`omitempty`: `0` is never a valid dimension (`ValidateOps` rejects it), so there is no zero-vs-absent
+ambiguity to protect against there.
 
 **Inpainting** (`inpaint-image` / `offload_inpaint_image`) takes a mask, or builds one from
 `mask_boxes`. `--auto-text` localizes rendered-text regions with the vision model and inpaints them.
@@ -581,9 +619,18 @@ change fixes this" conclusion held only while duration itself was held fixed.
    rendering and trimming the same way as step 0 — the LM planner's output does vary by seed (the
    two reproduction renders' silence onset differed by ~0.5s despite fixed inputs), so a retry
    sometimes lands on a seed whose planned content happens to fill the duration.
-3. Still dead air after the retry: the render fails with an error tagged `DEAD_AIR:` (mapped to
-   `gpugen.ClassifyErr`'s `dead_air` class), which `runGenerateAudio` (`internal/pipeline/pipeline.go`)
-   turns into a typed defer — never a silently-shipped dead clip.
+3. Still dead air after the retry: `generate()` first removes the stray output file (best-effort,
+   `cleanupFailedDeadAirOutput()`) — `renderOnce` always writes ComfyUI's raw `SaveAudio` bytes
+   (unconditionally FLAC) straight to `out`, whatever extension the caller requested; step 0's
+   `applyTrim` re-mixes it to match that extension when it runs and succeeds, but not on a `--graph`
+   passthrough (`renderSeconds` never set) and not when its own ffmpeg call fails (logged, never
+   fatal). Left in place, that stray file is either genuinely mismatched-container bytes ("FLAC bytes
+   in a .wav name", found 2026-09-23) or a correctly-muxed file that still failed content QA —
+   neither belongs at the caller's path, so cleanup removes it unconditionally rather than only in the
+   narrower mismatched-container case. The render then fails with an error tagged `DEAD_AIR:` (mapped
+   to `gpugen.ClassifyErr`'s `dead_air` class), which `runGenerateAudio`
+   (`internal/pipeline/pipeline.go`) turns into a typed defer — never a silently-shipped dead clip,
+   and never a leftover file at the requested path.
 4. The accepted render is always loudness-normalized (`ffmpeg loudnorm`, single-pass, target -14
    LUFS integrated / -1 dBTP true peak — the common streaming convention, with headroom below 0
    dBFS so a downstream lossy re-encode's peak overshoot cannot clip), independent of the dead-air
@@ -594,6 +641,17 @@ per-machine `ffmpeg_path` config `internal/audioio` already uses for transcribe)
 fallback. Either missing degrades the gate to a no-op skip — it never turns an otherwise-successful
 render into a failure just because the measuring tool is absent, and it never withholds an
 already-produced render (house content-preservation rule).
+
+**A `gpugen`-killed timeout is a typed `timeout`, not a generic failure (found 2026-09-23).**
+`gpugen.Generate` tree-kills the child on its context timeout (`killTree`); on Windows that is
+`taskkill /T /F`, which terminates through `TerminateProcess` reporting exit code 1 — `cmd.Wait()`
+then returned a plain `"exit status 1"` containing none of `ClassifyErr`'s recognized substrings
+(`timeout`/`deadline`/`killed`/`signal:`), so a cold ACE-Step retry killed at `audiogen_timeout_sec`
+surfaced as an indistinguishable generic failure instead of a timeout. `Generate` now checks its
+OWN derived context's `DeadlineExceeded` directly — authoritative regardless of what the OS reports
+for the child's exit code — and folds "timeout"/"deadline exceeded" into the returned error text, so
+`ClassifyErr(gerr) == "timeout"` is reliable for every `gpugen`-based lane (image, video, audio), not
+just the one that happened to reproduce it.
 
 ### Launch profile (`comfy_cuda_device`, `comfy_dynamic_vram`, `comfy_extra_args`)
 

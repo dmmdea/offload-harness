@@ -279,6 +279,23 @@ func TestValidateRenditions_NegativeAndSuffix(t *testing.T) {
 	}
 }
 
+// Remediation fix (2026-09-23): a crop/composite/text anchored at the image origin
+// (x:0, y:0) must survive the struct round-trip. Before the fix, X/Y carried
+// `omitempty`, so this exact JSON dropped both keys and render/edit_image.py's
+// `int(op["x"])` raised KeyError ("pipeline failed: 'x'") — any crop at the origin
+// failed outright. Same class of bug as TestFinishSharpenZeroRoundTrip above.
+func TestCropOriginZeroRoundTrip(t *testing.T) {
+	b, err := json.Marshal(EditOp{Op: "crop", X: 0, Y: 0, Width: 100, Height: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"x":0`, `"y":0`} {
+		if !strings.Contains(string(b), want) {
+			t.Fatalf("round-trip lost %s (omitempty dropped the origin coordinate): %s", want, b)
+		}
+	}
+}
+
 // Review fix: an explicit sharpen zero survives the struct round-trip (pointer
 // fields) — percent 0 must re-marshal as 0, not vanish into the worker default.
 func TestFinishSharpenZeroRoundTrip(t *testing.T) {

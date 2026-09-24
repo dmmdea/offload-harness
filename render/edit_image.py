@@ -117,7 +117,10 @@ def _find_coeffs(pa, pb):
 def apply_op(img, op):
     kind = op.get("op")
     if kind == "crop":
-        x, y = int(op["x"]), int(op["y"])
+        # .get(...) or 0, not op["x"]: a crop anchored at the image origin is a
+        # legitimate request, and the Go side may omit an explicit-zero key on an
+        # older/hand-built call — default safely rather than KeyError (2026-09-23).
+        x, y = int(op.get("x") or 0), int(op.get("y") or 0)
         w, h = int(op["width"]), int(op["height"])
         if x + w > img.width or y + h > img.height:
             raise ValueError("crop box %dx%d+%d+%d exceeds image %dx%d"

@@ -14,9 +14,16 @@ var renditionSuffixRe = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 // in order by render/edit_image.py (PIL); flatten_design runs first via GIMP.
 type EditOp struct {
 	Op string `json:"op"`
-	// crop / composite / text placement
-	X      int `json:"x,omitempty"`
-	Y      int `json:"y,omitempty"`
+	// crop / composite / text placement. X/Y have NO omitempty: a crop or composite
+	// anchored at the image origin (x:0, y:0) is a legitimate, common request, and
+	// omitempty on an int drops the zero value from the JSON entirely — the worker
+	// (render/edit_image.py) then saw a missing "x" key and failed the whole pipeline
+	// with `pipeline failed: 'x'` (KeyError) instead of cropping/compositing at 0,0
+	// (found 2026-09-23 on the OptiPlex remediation pass). Width/Height keep
+	// omitempty: 0 is never valid for them (ValidateOps rejects it), so there is no
+	// zero-vs-absent ambiguity to protect against.
+	X      int `json:"x"`
+	Y      int `json:"y"`
 	Width  int `json:"width,omitempty"`
 	Height int `json:"height,omitempty"`
 	// resize
