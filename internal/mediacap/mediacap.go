@@ -29,7 +29,6 @@ package mediacap
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -264,9 +263,14 @@ func routesWith(cfg config.Config, exeDir string, nodes NodeChecker) []Route {
 	}
 
 	// --- the CPU tools: flatten_design (GIMP) and offload_media (ffmpeg) ---
+	// ffprobe is its own route (F-38 audit): offload_media's probe/extract_frames
+	// ops and the music QA gate (render/audio-qa.mjs) both need it, and a box can
+	// have a working ffmpeg with no ffprobe beside it or on PATH — that used to
+	// stay invisible until the first such call deferred at runtime.
 	out = append(out,
 		binRoute("flatten_design", "gimp", "gimp_console_path", cfg.GimpConsolePath),
 		binRoute("media", "ffmpeg", "ffmpeg_path", cfg.FFmpegPath),
+		ffprobeRoute(cfg.FFmpegPath),
 	)
 
 	// --- compose_video (ADR 0059): a CPU-class route with FOUR things to be true —
@@ -319,18 +323,8 @@ func composeRoute(cfg config.Config, exeDir string) (Route, bool) {
 	if r.State != Configured {
 		return r, true
 	}
-	probe := ""
-	if p, ok := binaryPresent(cfg.FFmpegPath); ok {
-		if sib := filepath.Join(filepath.Dir(p), "ffprobe"+filepath.Ext(p)); fileExists(sib) {
-			probe = sib
-		}
-	}
-	if probe == "" {
-		if p, ok := binaryPresent("ffprobe"); ok {
-			probe = p
-		}
-	}
-	if probe == "" {
+	probe, ok := resolveFfprobeBinding(cfg.FFmpegPath)
+	if !ok {
 		return Route{Name: name, Engine: engine, State: BoundButMissing,
 			Detail: "ffprobe not found next to ffmpeg_path or on PATH — the compose gate measures every output with it"}, true
 	}
@@ -433,6 +427,36 @@ func binRoute(name, engine, key, value string) Route {
 		Detail: key + "=" + value + " not found (no such file, and not on PATH)"}
 }
 
+// resolveFfprobeBinding finds ffprobe the way render/audio-qa.mjs's
+// resolveFfprobe() does: beside a resolved ffmpeg binary first (same install,
+// same extension), else on PATH. ffmpegPath="" never resolves — ffprobe is not
+// useful without a paired ffmpeg.
+func resolveFfprobeBinding(ffmpegPath string) (string, bool) {
+	if p, ok := binaryPresent(ffmpegPath); ok {
+		if sib := filepath.Join(filepath.Dir(p), "ffprobe"+filepath.Ext(p)); fileExists(sib) {
+			return sib, true
+		}
+	}
+	return binaryPresent("ffprobe")
+}
+
+// ffprobeRoute reports whether ffprobe resolves alongside the media route's
+// ffmpeg binding. Before this route existed (F-38 audit), doctor checked only
+// ffmpeg for the generic offload_media/music lanes — a box with ffmpeg but no
+// ffprobe anywhere stayed green while offload_media's probe/extract_frames ops
+// and the music QA gate (render/audio-qa.mjs) deferred or skipped at call time.
+func ffprobeRoute(ffmpegPath string) Route {
+	const name, engine = "media:ffprobe", "ffprobe"
+	if ffmpegPath == "" {
+		return Route{Name: name, Engine: engine, State: NotConfigured, Detail: "ffmpeg_path is unset"}
+	}
+	if p, ok := resolveFfprobeBinding(ffmpegPath); ok {
+		return Route{Name: name, Engine: engine, State: Configured, Detail: "ffprobe=" + p}
+	}
+	return Route{Name: name, Engine: engine, State: BoundButMissing,
+		Detail: "ffprobe not found next to ffmpeg_path=" + ffmpegPath + " or on PATH — offload_media probes and the music QA gate need it"}
+}
+
 // comfyDirRoute checks the ComfyUI install every comfy-backed route drives.
 func comfyDirRoute(dir string) Route {
 	r := Route{Name: "comfyui", Engine: "runtime", Prereq: true}
@@ -449,18 +473,12 @@ func comfyDirRoute(dir string) Route {
 
 // binaryPresent resolves an executable binding the way the runners spawn it: an
 // explicit path is stat'd, a bare name (the shipped "node"/"ffmpeg" defaults) is
-// looked up on PATH.
+// looked up on PATH. internal/mediaops.ResolveBinary is the single source of
+// this logic (F-38) — every render-script and Go call site that resolves a
+// binary binding shares it now, instead of each keeping its own stat-only or
+// PATH-only half.
 func binaryPresent(bin string) (string, bool) {
-	if bin == "" {
-		return "", false
-	}
-	if fi, err := os.Stat(bin); err == nil && !fi.IsDir() {
-		return bin, true
-	}
-	if p, err := exec.LookPath(bin); err == nil {
-		return p, true
-	}
-	return "", false
+	return mediaops.ResolveBinary(bin)
 }
 
 func joinDetail(parts []string) string {

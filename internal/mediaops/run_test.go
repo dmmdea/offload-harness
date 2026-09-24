@@ -98,6 +98,32 @@ func TestRunMedia_EngineAbsent(t *testing.T) {
 	}
 }
 
+// TestRunMedia_BareFFmpegOnPath is the regression test for F-38: a bare
+// config-default-shaped name ("ffmpeg") that resolves via PATH (not via a
+// literal os.Stat of the current directory) must NOT be treated as engine-
+// absent. Before the ResolveBinary fix, RunMedia rejected every bare name with
+// ErrEngineAbsent even when it was genuinely installed and on PATH.
+func TestRunMedia_BareFFmpegOnPath(t *testing.T) {
+	dir := t.TempDir()
+	name := "fake-ffmpeg-runmedia-f38"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	_, err := RunMedia(context.Background(), MediaConfig{FFmpeg: "fake-ffmpeg-runmedia-f38"}, MediaRequest{Op: "probe", In: "x.mp4"})
+	// The stub is not a real ffmpeg, so the probe itself still fails downstream —
+	// the point is that it must fail for a DIFFERENT reason than ErrEngineAbsent,
+	// proving the binary was actually found and invoked rather than rejected as
+	// "not found" before ever reaching exec.
+	if errors.Is(err, ErrEngineAbsent) {
+		t.Fatalf("a bare name resolvable on PATH must not be ErrEngineAbsent, got %v", err)
+	}
+}
+
 // TestWorkerSelftest shells render/edit_image.py --selftest on the resolved edit
 // python. Skips cleanly on boxes without a PIL python (CI parity with the render
 // tests' hardware gating).

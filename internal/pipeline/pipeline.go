@@ -49,6 +49,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/ledger"
 	"github.com/dmmdea/offload-harness/internal/llamaclient"
 	"github.com/dmmdea/offload-harness/internal/mediahash"
+	"github.com/dmmdea/offload-harness/internal/mediaops"
 	"github.com/dmmdea/offload-harness/internal/parser"
 	"github.com/dmmdea/offload-harness/internal/placement"
 	"github.com/dmmdea/offload-harness/internal/router"
@@ -77,6 +78,7 @@ type Pipeline struct {
 	stt           *sttclient.Client  // whisper-server transcribe client (audio never hits the text cascade)
 	cache         *cache.Cache       // may be nil
 	led           *ledger.Ledger     // may be nil
+	tracker       CallTracker        // nil = no PAIR running cards
 	thresholds    map[string]float64 // per-task conformal margin thresholds (Phase 2); nil = config constant
 	breakers      *breaker.Group     // per-tier circuit breakers (Phase 3)
 	router        *router.Model      // entry-tier router (Phase 5); nil = static rule
@@ -347,8 +349,36 @@ type cacheVal struct {
 // Result (success or structured defer). Fast tasks (triage/classify) enter at
 // the small tier; on a quality failure the request climbs to the next-larger
 // local model before ever deferring to Opus. Infra errors do not escalate.
-func (p *Pipeline) Run(ctx context.Context, req core.Request) core.Result {
+// CallTracker opens a PAIR Jobs card when a long call starts and closes it
+// when the call ends (pairworkloads.Emitter.Begin). working turns the card
+// running once the lane holds its engine (core.MarkWorking); both are nil when
+// nothing was opened.
+type CallTracker interface {
+	Begin(task, door string) (working func(), end func(deferred bool, reason string))
+}
+
+// SetCallTracker wires the tracker Run reports call starts to; nil = none.
+func (p *Pipeline) SetCallTracker(t CallTracker) { p.tracker = t }
+
+// closeCall closes a tracked call's card with the call's outcome. Deferred
+// directly (recover works only there): a panic leaves the result zero, which
+// would read as success, so the card closes failed and the panic goes on.
+func closeCall(end func(deferred bool, reason string), res *core.Result) {
+	if r := recover(); r != nil {
+		end(true, fmt.Sprintf("panic: %v", r))
+		panic(r)
+	}
+	end(res.Deferred, res.Reason)
+}
+
+func (p *Pipeline) Run(ctx context.Context, req core.Request) (res core.Result) {
 	start := time.Now()
+	if p.tracker != nil && req.Task.Valid() {
+		if working, end := p.tracker.Begin(string(req.Task), req.Door); end != nil {
+			ctx = core.WithWorkingMark(ctx, working)
+			defer closeCall(end, &res)
+		}
+	}
 	meta := core.Meta{Model: p.cfg.Model}
 	// Register A-102: carry the caller's door into telemetry so the ledger row
 	// names the surface that admitted the call. Documentary only — nothing below
@@ -1438,7 +1468,7 @@ func (p *Pipeline) runGenerateImage(ctx context.Context, req core.Request, meta 
 	// Passive fleet footprint: key this render by the machine's image binding
 	// (family + the O1 bf16 quant) so measured peaks accumulate during normal use.
 	imgFamily, imgQuant := imageFootprintKey(cfg)
-	leaseEnv, releaseLease, lerr := p.acquireMediaLease("image-gen", timeout, p.gpuWait())
+	leaseEnv, releaseLease, lerr := p.acquireMediaLease(ctx, "image-gen", timeout, p.gpuWait())
 	if lerr != nil {
 		return p.deferForLease(lerr, req.Task, meta, len(req.Input), start)
 	}
@@ -1584,7 +1614,7 @@ func (p *Pipeline) runGenerateImageSdcpp(ctx context.Context, req core.Request, 
 		ExtraArgs: cfg.SdcppExtraArgs,
 	}
 	imgFamily, imgQuant := imageFootprintKey(cfg)
-	leaseEnv, releaseLease, lerr := p.acquireMediaLease("image-gen (sdcpp)", timeout, p.gpuWait())
+	leaseEnv, releaseLease, lerr := p.acquireMediaLease(ctx, "image-gen (sdcpp)", timeout, p.gpuWait())
 	if lerr != nil {
 		return p.deferForLease(lerr, req.Task, meta, len(req.Input), start)
 	}
@@ -1669,7 +1699,7 @@ func (p *Pipeline) runInpaintImage(ctx context.Context, req core.Request, meta c
 		CFG: p.cfg.InpaintCFG, Sampler: p.cfg.InpaintSampler, Scheduler: p.cfg.InpaintScheduler,
 	}
 	timeout := time.Duration(p.cfg.InpaintTimeoutSec) * time.Second
-	leaseEnv, releaseLease, lerr := p.acquireMediaLease("inpaint", timeout, p.gpuWait())
+	leaseEnv, releaseLease, lerr := p.acquireMediaLease(ctx, "inpaint", timeout, p.gpuWait())
 	if lerr != nil {
 		return p.deferForLease(lerr, req.Task, meta, len(req.Input), start)
 	}
@@ -1768,7 +1798,7 @@ func (p *Pipeline) runUpscaleImage(ctx context.Context, req core.Request, meta c
 		out = filepath.Join(p.cfg.MediaDir, "upscale-"+sha256hex(image + tasks.StableParamsKey(req.Params))[:8]+".png")
 	}
 	timeout := time.Duration(p.cfg.UpscaleTimeoutSec) * time.Second
-	leaseEnv, releaseLease, lerr := p.acquireMediaLease("upscale", timeout, p.gpuWait())
+	leaseEnv, releaseLease, lerr := p.acquireMediaLease(ctx, "upscale", timeout, p.gpuWait())
 	if lerr != nil {
 		return p.deferForLease(lerr, req.Task, meta, len(req.Input), start)
 	}
@@ -1954,7 +1984,7 @@ func (p *Pipeline) runEditImageGenerative(ctx context.Context, req core.Request,
 		Launch: comfyLaunch(cfg, true),
 	}
 	timeout := time.Duration(cfg.GenEditTimeoutSec) * time.Second
-	leaseEnv, releaseLease, lerr := p.acquireMediaLease("edit", timeout, p.gpuWait())
+	leaseEnv, releaseLease, lerr := p.acquireMediaLease(ctx, "edit", timeout, p.gpuWait())
 	if lerr != nil {
 		return p.deferForLease(lerr, req.Task, meta, len(req.Input), start)
 	}
@@ -2249,7 +2279,7 @@ func (p *Pipeline) RunImageBatch(ctx context.Context, jobs []ImageBatchJob) ([]I
 	// 3,356 unloads in the server log.
 	// This helper returns items+error rather than a core.Result, so a busy card surfaces
 	// as an error for the caller to classify — no items were produced.
-	leaseEnv, releaseLease, lerr := p.acquireMediaLease("image-gen batch", timeout, p.gpuWait())
+	leaseEnv, releaseLease, lerr := p.acquireMediaLease(ctx, "image-gen batch", timeout, p.gpuWait())
 	if lerr != nil {
 		return nil, lerr
 	}
@@ -2362,7 +2392,7 @@ func (p *Pipeline) runRunGraph(ctx context.Context, req core.Request, meta core.
 	timeout := time.Duration(p.cfg.ImageGenTimeoutSec) * time.Second
 	// Passive fleet footprint: family from a payload-declared model_family (the
 	// fleet dispatch path threads it) else the generic comfy-graph bucket.
-	leaseEnv, releaseLease, lerr := p.acquireMediaLease("run-graph", timeout, p.gpuWait())
+	leaseEnv, releaseLease, lerr := p.acquireMediaLease(ctx, "run-graph", timeout, p.gpuWait())
 	if lerr != nil {
 		return p.deferForLease(lerr, req.Task, meta, len(req.Input), start)
 	}
@@ -2756,7 +2786,7 @@ func (p *Pipeline) runGenerateVideo(ctx context.Context, req core.Request, meta 
 	}
 
 	timeout := time.Duration(p.cfg.VideoGenTimeoutSec) * time.Second
-	leaseEnv, releaseLease, lerr := p.acquireMediaLease("video-gen", timeout, p.gpuWait())
+	leaseEnv, releaseLease, lerr := p.acquireMediaLease(ctx, "video-gen", timeout, p.gpuWait())
 	if lerr != nil {
 		return p.deferForLease(lerr, req.Task, meta, len(req.Input), start)
 	}
@@ -2890,7 +2920,7 @@ func (p *Pipeline) runAnimateCharacter(ctx context.Context, req core.Request, me
 	}
 
 	timeout := time.Duration(p.cfg.AnimateGenTimeoutSec) * time.Second
-	leaseEnv, releaseLease, lerr := p.acquireMediaLease("animate", timeout, p.gpuWait())
+	leaseEnv, releaseLease, lerr := p.acquireMediaLease(ctx, "animate", timeout, p.gpuWait())
 	if lerr != nil {
 		return p.deferForLease(lerr, req.Task, meta, len(req.Input), start)
 	}
@@ -3048,7 +3078,7 @@ func (p *Pipeline) runGenerateAudio(ctx context.Context, req core.Request, meta 
 	}
 
 	timeout := time.Duration(p.cfg.AudioGenTimeoutSec) * time.Second
-	leaseEnv, releaseLease, lerr := p.acquireMediaLease("audio-gen ("+kind+")", timeout, p.gpuWait())
+	leaseEnv, releaseLease, lerr := p.acquireMediaLease(ctx, "audio-gen ("+kind+")", timeout, p.gpuWait())
 	if lerr != nil {
 		return p.deferForLease(lerr, req.Task, meta, len(req.Input), start)
 	}
@@ -3118,16 +3148,29 @@ func (p *Pipeline) genEnv() []string {
 	if len(p.cfg.MemoryStack) > 0 {
 		env = append(env, "MEMORY_STACK="+strings.Join(p.cfg.MemoryStack, ","))
 	}
-	// FFMPEG_PATH (F-35 regression follow-up, 2026-09-23): the music route's
-	// post-render QA gate (render/comfy-music.mjs — silence/true-peak measurement
-	// and loudness normalization) shells out to ffmpeg the same way audioio.go
-	// already does for transcribe. Threading the SAME configured binary here
-	// keeps both call sites honoring one per-machine ffmpeg_path instead of the
-	// script guessing its own "ffmpeg"-on-PATH default when a config already
-	// names the real one. Empty when unconfigured — the script falls back to
-	// PATH resolution and degrades the QA gate to a skip (never fails the render).
-	if p.cfg.FFmpegPath != "" {
-		env = append(env, "FFMPEG_PATH="+p.cfg.FFmpegPath)
+	// FFMPEG_PATH (F-35 regression follow-up, 2026-09-23; F-38 fix, 2026-09-24): the
+	// music route's post-render QA gate (render/comfy-music.mjs / audio-qa.mjs —
+	// over-render/trim, silence/true-peak measurement, loudness normalization)
+	// shells out to ffmpeg the same way audioio.go already does for transcribe.
+	// Threading the SAME configured binary here keeps both call sites honoring one
+	// per-machine ffmpeg_path instead of the script guessing its own default.
+	//
+	// F-38: config.Default's FFmpegPath is the bare name "ffmpeg" (a genuinely
+	// unconfigured box never sets one), so the old `!= ""` check was ALWAYS true
+	// and every child got FFMPEG_PATH=ffmpeg — a bare name, not a path.
+	// audio-qa.mjs's resolveFfmpeg() treats a set FFMPEG_PATH as an exact file via
+	// existsSync(), which cannot see PATH resolution, so it read "ffmpeg" as
+	// missing and silently skipped the entire QA gate on every fleet node that
+	// never set an explicit ffmpeg_path (reproduced identically on the Lenovo and
+	// the Aorus, 2026-09-23/24). mediaops.ResolveBinary resolves it here in Go —
+	// the same PATH-aware lookup doctor's media route already uses — so the child
+	// always receives either a real absolute path (existsSync succeeds directly)
+	// or nothing at all. Omitted (not "ffmpeg") when it cannot be resolved on this
+	// box at all: the script's own resolveFfmpeg() then does its own PATH probe,
+	// which will reach the identical answer, and main() now fails loudly rather
+	// than silently skipping the gate when neither side can find it.
+	if resolved, ok := mediaops.ResolveBinary(p.cfg.FFmpegPath); ok {
+		env = append(env, "FFMPEG_PATH="+resolved)
 	}
 	return env
 }
@@ -3302,7 +3345,7 @@ func (p *Pipeline) deferForLease(err error, task core.TaskType, meta core.Meta, 
 // have waited and timed out. The heartbeat keeps a long render's lease alive; the
 // reclaim rule needs both a stale heartbeat and an expired window, so a missed tick
 // inside the declared window is harmless.
-func (p *Pipeline) acquireMediaLease(reason string, ttl, wait time.Duration) ([]string, func(), error) {
+func (p *Pipeline) acquireMediaLease(ctx context.Context, reason string, ttl, wait time.Duration) ([]string, func(), error) {
 	noop := func() {}
 	start := time.Now()
 
@@ -3333,6 +3376,8 @@ func (p *Pipeline) acquireMediaLease(reason string, ttl, wait time.Duration) ([]
 		// lease that is not ours. The slot is still ours to give back.
 		slotHeld = false
 		var once sync.Once
+		// The card is ours from here: the call's PAIR card turns running.
+		core.MarkWorking(ctx)
 		return append(inherited, p.lockEnv()...), func() { once.Do(releaseMediaSlot) }, nil
 	}
 	m, err := gpulease.OpenAt(p.cfg.GPULockPath, p.cfg.StateDir)
@@ -3391,6 +3436,8 @@ func (p *Pipeline) acquireMediaLease(reason string, ttl, wait time.Duration) ([]
 		})
 	}
 	slotHeld = false
+	// The card is ours from here: the call's PAIR card turns running.
+	core.MarkWorking(ctx)
 	env := []string{
 		"GPU_LEASE_DIR=" + lease.Dir(),
 		"GPU_LEASE_EPOCH=" + strconv.FormatUint(lease.Epoch(), 10),

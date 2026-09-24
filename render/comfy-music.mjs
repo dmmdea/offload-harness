@@ -15,9 +15,12 @@
 // renderSeconds = seconds + max(6, ceil(0.2*seconds)) (computeRenderSeconds below)
 // instead of the requested seconds, then trims the produced file back down to
 // exactly what was asked for (1.0s fade-out on the cut, via audio-qa.mjs's
-// trimToSeconds) BEFORE the dead-air gate measures it. A --graph passthrough, or
-// ffmpeg/ffprobe being unavailable, renders the requested seconds exactly, as
-// before this fix.
+// trimToSeconds) BEFORE the dead-air gate measures it. A --graph passthrough
+// renders the requested seconds exactly (its duration is opaque to this file).
+// ffmpeg/ffprobe being unavailable is no longer a runtime shape at all (F-38,
+// 2026-09-24): main() calls audio-qa.mjs's assertFfmpegAvailable() up front and
+// refuses to render rather than shipping an unverified file — see that file's
+// header for the fleet-wide bug this closes.
 //
 // Usage:
 //   node render/comfy-music.mjs <out.flac> "<style tags>" \
@@ -31,8 +34,8 @@ import { firstOutputFile } from "./comfy-output.mjs";
 import { buildAceStep } from "./wf-acestep.mjs";
 import { resolveCli, submitGraph, pollOutputs, fetchView, finalizeRun } from "./comfy-submit.mjs";
 import {
-  resolveFfmpeg, resolveFfprobe, measure, assessDeadAir, normalizeLoudness, rewireSeed,
-  trimToSeconds, LOUDNESS_TARGET_LUFS, TRUE_PEAK_TARGET_DBTP,
+  resolveFfmpeg, resolveFfprobe, assertFfmpegAvailable, measure, assessDeadAir,
+  normalizeLoudness, rewireSeed, trimToSeconds, LOUDNESS_TARGET_LUFS, TRUE_PEAK_TARGET_DBTP,
 } from "./audio-qa.mjs";
 
 // ACE-Step's 3.5B all-in-one checkpoint is far lighter than the 14B video models, so the
@@ -172,17 +175,12 @@ export function cleanupFailedDeadAirOutput(out, { unlink = unlinkSync } = {}) {
 // it typed rather than as a bare timeout/other. The accepted render is always
 // loudness-normalized (independent of the dead-air verdict — the unmanaged 0 dBFS
 // true peak measured on the original defect renders is a separate issue). ffmpeg/
-// ffprobe unavailable = no over-render happened (buildGraphFromArgs never got
-// opts.trim) and the gate skips itself entirely; it never turns an otherwise-
-// successful render into a failure just because the measuring tool is missing.
+// ffprobe are guaranteed available here (F-38, 2026-09-24): main() calls
+// assertFfmpegAvailable() before this function is ever invoked, so a box that
+// cannot run the QA gate never reaches renderOnce at all.
 async function generate(out, API, graph, seed, { ffmpeg, ffprobe, seconds, renderSeconds } = {}) {
   const cli = resolveCli();
   await renderOnce(out, API, graph, seed, cli);
-
-  if (!ffmpeg || !ffprobe) {
-    console.error("audio-qa: ffmpeg/ffprobe not available (set FFMPEG_PATH or put ffmpeg on PATH) — skipping the dead-air/loudness gate");
-    return;
-  }
 
   // renderSeconds is only set when buildGraphFromArgs actually over-rendered (args-
   // built graph + ffmpeg/ffprobe resolved at build time); a --graph passthrough never
@@ -226,8 +224,12 @@ async function main() {
   // Resolved once, up front: whether to over-render (and later trim) depends on
   // ffmpeg/ffprobe being available, and buildAceStep's `seconds` has to be decided
   // at graph-build time (below) — before ComfyUI/the GPU lock are even touched.
+  // F-38, 2026-09-24: assertFfmpegAvailable fails loudly here, before the graph is
+  // even built, rather than letting a box with no working ffmpeg/ffprobe spend a
+  // GPU lease on a render whose QA gate can never run.
   const ffmpeg = resolveFfmpeg();
   const ffprobe = ffmpeg ? resolveFfprobe(ffmpeg) : "";
+  assertFfmpegAvailable(ffmpeg, ffprobe);
   const trim = !flags.graph && !!ffmpeg && !!ffprobe;
   const { graph, seed, seconds, renderSeconds } = buildGraphFromArgs(pos, flags, { trim });
   await withGpuSlot(

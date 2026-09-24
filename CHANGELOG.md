@@ -188,7 +188,7 @@ Five harness defects from the OptiPlex 7060 (blackwell-8) media parity audit, 20
   that first slipped past a vacuous test comparing `protocolText()` with itself (replaced by fixed
   expectations).
 
-## [0.140.5] - 2026-09-23 - the GPU lease queue is strictly FIFO for a returning holder, a blocked seat/text-load admission gets a fair turn, `--unload-seat` clears every resident model, and `gpu reserve`/`gpu status` name foreign VRAM holders
+## [0.140.8] - 2026-09-24 - the GPU lease queue is strictly FIFO for a returning holder, a blocked seat/text-load admission gets a fair turn, `--unload-seat` clears every resident model, and `gpu reserve`/`gpu status` name foreign VRAM holders
 
 Four GPU-lease fairness defects measured live during the OptiPlex 7060 remediation (2026-09-23,
 `REMEDIATION-2026-09-23.md` sections R2-R4 and the noise-repro notes), each pinned by a test broken
@@ -233,6 +233,105 @@ then restored at its real call site.
   denylisted-name/floor-MiB filter keeps the harness's own processes and small residents out of the
   warning: `gpu reserve: WARNING foreign GPU memory holders: Resolve pid 9416 1450 MiB`. Nothing is
   ever killed.
+
+## [0.140.7] - 2026-09-24 - the music QA gate stopped silently skipping itself fleet-wide, ComfyUI's own console output is captured for failed renders, and doctor catches a model file still mid-copy
+
+Three media-lane defects found during the 2026-09-23/24 Lenovo/Aorus/OptiPlex media-route
+remediation (`infra/routes-lenovo-2026-09-23.md`, `infra/routes-qube-aorus-2026-09-23.md`).
+
+### Fixed
+
+- **The music route's over-render/trim/dead-air QA gate (PR #466) was silently skipped on every
+  node that never set an explicit `ffmpeg_path`.** `config.Default()`'s `FFmpegPath` is the bare
+  name `"ffmpeg"`, so `Pipeline.genEnv()`'s `!= ""` check was always true and every render child
+  got `FFMPEG_PATH=ffmpeg` — a bare name, not a path. `render/audio-qa.mjs`'s `resolveFfmpeg()`
+  treated a set `FFMPEG_PATH` as an exact file via `existsSync()`, which cannot see PATH
+  resolution, so it read `"ffmpeg"` as missing and the whole gate degraded to a silent skip,
+  shipping the raw, unverified render with its known ACE-Step dead-air tail (reproduced
+  identically on the Lenovo and the Aorus). `genEnv()` now resolves `ffmpeg_path` through PATH
+  (`internal/mediaops.ResolveBinary`, shared with `mediacap.binaryPresent` and
+  `internal/mediaops.RunMedia`, which had the identical bug) and threads the resolved absolute
+  path; `resolveFfmpeg()` also now tries a set-but-bare `FFMPEG_PATH` as a PATH-searchable command.
+  When ffmpeg/ffprobe genuinely cannot be found anywhere, the music lane now fails loudly with a
+  typed `FFMPEG_UNAVAILABLE` error (`gpugen.ClassifyErr` maps it, mirroring `DEAD_AIR`) instead of
+  silently shipping an unverified file. `doctor` gained a `media:ffprobe` route (it previously
+  checked only `ffmpeg`, so a box with ffmpeg but no ffprobe stayed green while `offload_media`
+  and the music gate deferred at call time).
+- **ComfyUI's own stdout/stderr were discarded** (`stdio: "ignore"`), so a ComfyUI-side failure
+  (e.g. `[Errno 28] No space left on device` on the Aorus) surfaced only as a terse
+  `/history execution_error` JSON — finding the real cause took a hand-built stdout-capturing
+  bypass copy of `render/`. `render/comfy-lifecycle.mjs` now captures a harness-launched ComfyUI's
+  console to a rotating, 5 MB-bounded log file beside the install (`offload-comfyui.log`, up to 3
+  previous runs kept), and `withGpuSlot` (`render/gpu-lock.mjs`) appends its last ~20 lines to a
+  render failure's error message — never for a reused foreign instance.
+- **`doctor`'s model-binding check was `os.Stat`-only**, so it reported a route `OK CONFIGURED`
+  the instant a same-named file of any size existed — reproduced live on the Qube: a 16.65 GB
+  WAN-Animate-2 unet read as configured at ~70% copied. `internal/mediacap/resolveBinding` now
+  compares the file's size against `knownModelSizes` (mirroring `setup/install.ps1`'s `$PINNED`
+  models, cross-checked by `TestKnownModelSizesMatchInstaller`) whenever the configured name is
+  one the harness's own installer pins, and reports `INCOMPLETE (have X of Y bytes)` on a
+  mismatch. Never hashes a file — cheap by construction. A name the installer does not pin (the
+  overwhelming majority of ComfyUI weights, sourced ad hoc between fleet boxes) is unaffected.
+
+## [0.140.6] - 2026-09-23 - every node reports its own work to PAIR, lease jobs get a card, and a media card reads "running" only once it holds the GPU
+
+### Fixed — PAIR showed only the Qube's delegations while the other nodes ran at 84-100 %
+
+Operator report 2026-09-23 ("work is not being properly shown as routed"): every open card read
+"Running on Qube" while the Aorus ran a seat bench and a ComfyUI diagnostic, the Lenovo a Wan 2.2
+smoke render and binxarn a tuning sweep. None of it was delegation, and none of it reached PAIR.
+
+- **Jobs under `gpu reserve -- <cmd>` get a card** (`gpu_leasecard.go`). The lease queue is where
+  the house runs every bench, render and measurement on every node. The wrapper now owns one card:
+  `queued` while it waits in the queue and drains the seat, `running` once the command starts,
+  closed with the exit (`exit status N`, `(interrupted)`, `(lease lost)`). The model is the
+  harness verb (`generate-video`) or the script (`seatbench.ps1`) or the program; the requester is
+  `--origin`. A one-shot harness verb run directly under the lease gets
+  `OFFLOAD_PAIR_UNDER_LEASE=1` and adds no second card; a session (`mcp`, `fleet-serve`), shell or
+  interpreter under a lease keeps its own reporting (review finding: the flag would otherwise
+  silence a wrapped MCP session for its whole life).
+- **`pair_workloads_enabled` is safe on every box.** Work a fleet node serves for another box
+  (the `fleet` door) is now skipped by `Begin` and by the ledger observer, as `agent` rows always
+  were, so enabling reporting on a fleet node no longer shows a delegation twice, and the node's
+  OWN work (a CLI render started over ssh, a lease job) reaches PAIR. Enabled on the Lenovo and
+  binxarn in the same deploy (backups `*.pre-pair-workloads`).
+- **A media call's card opens `queued` and turns `running` when the lane holds the GPU**
+  (`core.MarkWorking`, fired by `acquireMediaLease` and the compose slot). 0.140.5 opened it
+  `running`, so a call waiting behind another job read "Running" through the wait; a transcription
+  waiting minutes for whisper behind the 3-card seat did exactly that. `transcribe` cannot see its
+  engine start (the wait is a load inside llama-swap), so its card stays queued until it ends.
+- Not covered: work started outside the harness altogether (binxarn's root tuning scripts). Run it
+  under `gpu reserve -- <cmd>` and it gets a card.
+
+## [0.140.5] - 2026-09-23 - PAIR's Jobs list shows long media calls while they run, and a delegation reads "running" only once its seat works
+
+### Fixed — PAIR cards that said nothing, or said "Running" over an idle card
+
+Three gaps between what the fleet was doing and what NVIDIA PAIR's Jobs list showed, found
+against live cards on 2026-09-23 (docs/systems/pair-workloads.md).
+
+- **A long tool call now has a card while it runs.** A tool call reached PAIR only through its
+  ledger row, written when the call ENDS, so a ten-minute `animate_character` render on the
+  OptiPlex held its GPU at 100 % with no card at all. `Pipeline.Run` now opens a `running` card
+  when a media call starts (`pairworkloads.Emitter.Begin`, `internal/pairworkloads/calls.go`) and
+  the call's own ledger row closes THAT card: same id, engine and start, the row's model and
+  outcome. A call that writes no row (a cache hit) is closed by the return of `Run`, and a call that
+  panics closes it failed (`closeCall`) rather than as the zero result's "completed". Only tasks
+  whose engine the task alone decides open one (`comfyui`, `hyperframes`, `whispercpp` lanes):
+  PAIR keys a card on its engine, and a text or vision call learns llamacpp vs vllm only as it
+  runs, so those short calls keep the single terminal card.
+- **A delegation reads "running" only once the seat is working on it.** The running frame went
+  out at the node's ack (remote) or the hand-off to the runner (local), so the Qube's agent-pool
+  and the Lenovo 27B showed "Running" through a 2-minute seat load while their cards sat at
+  0 %. The card now stays `queued` through admission and cold load and turns `running` on the
+  first sign the seat is serving the request (`seatWorking`, `internal/delegate/pairevents.go`):
+  a streamed token, a decode, a tool call, a re-pack, or a prefill older than 8 s (the seat
+  probe names a load within 5 s). Remote runs read it from the poll's `progress`, local runs from
+  their own progress reports; a run that reports no progress at all turns running after 30 s. A
+  run that never worked closes with no `startedAt`.
+- The third gap was configuration, not code: the OptiPlex's config lacked
+  `pair_workloads_enabled`, so none of its own calls ever reached PAIR. Enabled there
+  (backup `config.json.pre-pair-workloads`); it serves no delegations, so no job shows twice.
 
 ## [0.140.4] - 2026-09-23 - four media-lane defects from the OptiPlex remediation: animate_character's silent no-op, a crop at the origin, sdcpp's iGPU pin, an untyped audio timeout
 

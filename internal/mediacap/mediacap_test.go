@@ -174,6 +174,37 @@ func TestBinaryBindingUsesPathLookup(t *testing.T) {
 	}
 }
 
+// TestFfprobeRoute: F-38 audit — a box can have a working ffmpeg with no
+// ffprobe anywhere, and doctor used to stay silent about it (only the
+// compose_video route checked ffprobe). media:ffprobe now reports it the same
+// way: unset ffmpeg_path -> NOT CONFIGURED, resolvable -> CONFIGURED naming the
+// resolved path, unresolvable -> BOUND-BUT-MISSING.
+func TestFfprobeRoute(t *testing.T) {
+	cfg := bare()
+	if got := byName(routesIn(cfg, t.TempDir()))["media:ffprobe"]; got.State != NotConfigured {
+		t.Errorf("unset ffmpeg_path: media:ffprobe = %q, want NOT CONFIGURED (%s)", got.State, got.Detail)
+	}
+
+	dir := t.TempDir()
+	ext := ""
+	if runtime.GOOS == "windows" {
+		ext = ".exe"
+	}
+	ffmpeg := touch(t, dir, "bin/ffmpeg"+ext)
+	touch(t, dir, "bin/ffprobe"+ext)
+	cfg.FFmpegPath = ffmpeg
+	if got := byName(routesIn(cfg, t.TempDir()))["media:ffprobe"]; got.State != Configured || !strings.Contains(got.Detail, "ffprobe=") {
+		t.Errorf("ffprobe beside ffmpeg: media:ffprobe = %q (%s), want CONFIGURED naming ffprobe", got.State, got.Detail)
+	}
+
+	lone := touch(t, t.TempDir(), "bin2/ffmpeg"+ext)
+	cfg.FFmpegPath = lone
+	t.Setenv("PATH", t.TempDir())
+	if got := byName(routesIn(cfg, t.TempDir()))["media:ffprobe"]; got.State != BoundButMissing {
+		t.Errorf("ffmpeg with no sibling/PATH ffprobe: media:ffprobe = %q, want BOUND-BUT-MISSING (%s)", got.State, got.Detail)
+	}
+}
+
 // TestEditPythonExplicitVsDerived: an explicit edit_python that does not exist
 // is a broken promise; an unset one that finds no venv is simply a box without
 // the PIL engine.
@@ -217,7 +248,7 @@ func TestDefaultConfigNamesEveryShippedRoute(t *testing.T) {
 	for _, want := range []string{
 		"generate_image", "inpaint_image", "generate_video",
 		"generate_audio:voice", "generate_audio:music", "run_graph",
-		"edit_image", "flatten_design", "media", "upscale_image", "compose_video",
+		"edit_image", "flatten_design", "media", "media:ffprobe", "upscale_image", "compose_video",
 	} {
 		if _, ok := got[want]; !ok {
 			t.Errorf("no route reported for %s", want)

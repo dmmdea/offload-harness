@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   parseSilences, parseLoudness, assessDeadAir, rewireSeed,
-  resolveFfmpeg, resolveFfprobe, measure, normalizeLoudness, trimToSeconds,
+  resolveFfmpeg, resolveFfprobe, assertFfmpegAvailable, measure, normalizeLoudness, trimToSeconds,
   LOUDNESS_TARGET_LUFS,
 } from "./audio-qa.mjs";
 
@@ -197,6 +197,53 @@ test("fixture: normalizeLoudness moves a loud clip's measured loudness toward th
 test("resolveFfmpeg: an explicit FFMPEG_PATH to a nonexistent file resolves to empty, not a bad path", () => {
   const got = resolveFfmpeg({ FFMPEG_PATH: "Z:/nonexistent/ffmpeg.exe" });
   assert.equal(got, "");
+});
+
+// ---- F-38 regression, 2026-09-24: a bare FFMPEG_PATH must resolve via PATH ------
+// config.go's FFmpegPath default is the bare name "ffmpeg" (not a path), and
+// Pipeline.genEnv() used to thread it verbatim into every GPU-gen child as
+// FFMPEG_PATH=ffmpeg regardless of whether ffmpeg_path was ever configured. The
+// pre-fix resolveFfmpeg() treated ANY set FFMPEG_PATH as an exact file via
+// existsSync — existsSync("ffmpeg") is false, so this silently skipped the
+// entire over-render/trim/dead-air QA gate on every fleet node that had not
+// explicitly set ffmpeg_path (reproduced identically on the Lenovo and the
+// Aorus). resolveFfmpeg() must now also try an explicit-but-not-a-literal-file
+// FFMPEG_PATH as a PATH-searchable command name.
+
+test("resolveFfmpeg: a bare FFMPEG_PATH that is NOT a literal file but IS resolvable on PATH must resolve (F-38)", (t) => {
+  const bins = haveFfmpeg();
+  if (!bins) return t.skip("ffmpeg not on PATH in this environment");
+  // "ffmpeg" itself is never a real file in the current directory, so this proves
+  // the PATH-search fallback fires for a set-but-bare FFMPEG_PATH, not just the
+  // no-FFMPEG_PATH branch.
+  const got = resolveFfmpeg({ FFMPEG_PATH: "ffmpeg" });
+  assert.equal(got, "ffmpeg", "a bare name resolvable on PATH must resolve, not read as missing");
+});
+
+test("resolveFfmpeg: a bare FFMPEG_PATH resolvable on NEITHER a literal file NOR PATH stays empty (F-38)", () => {
+  const got = resolveFfmpeg({ FFMPEG_PATH: "definitely-not-a-real-binary-audioqa-f38" });
+  assert.equal(got, "", "an unresolvable bare name must not be reported as available");
+});
+
+// ---- assertFfmpegAvailable (F-38 fail-loud policy, 2026-09-24) ------------------
+// comfy-music.mjs's main() now calls this before touching the GPU lock/ComfyUI at
+// all: ffmpeg/ffprobe missing used to be a silent skip of the whole QA gate
+// (shipping an unverified raw render); it is now a typed, fatal error instead.
+
+test("assertFfmpegAvailable: throws a typed FFMPEG_UNAVAILABLE error when ffmpeg is missing", () => {
+  assert.throws(() => assertFfmpegAvailable("", "ffprobe"), /FFMPEG_UNAVAILABLE/);
+});
+
+test("assertFfmpegAvailable: throws a typed FFMPEG_UNAVAILABLE error when ffprobe is missing", () => {
+  assert.throws(() => assertFfmpegAvailable("ffmpeg", ""), /FFMPEG_UNAVAILABLE/);
+});
+
+test("assertFfmpegAvailable: throws when both are missing", () => {
+  assert.throws(() => assertFfmpegAvailable("", ""), /FFMPEG_UNAVAILABLE/);
+});
+
+test("assertFfmpegAvailable: does not throw when both resolved", () => {
+  assert.doesNotThrow(() => assertFfmpegAvailable("ffmpeg", "ffprobe"));
 });
 
 // ---- trimToSeconds (over-render mitigation, 2026-09-23) --------------------------

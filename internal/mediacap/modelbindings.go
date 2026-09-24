@@ -35,6 +35,11 @@ const (
 	// BindingMisplaced — the file exists under a models root, but only in a
 	// class directory the graph never loads from (the 2026-08-31 krea2 shape).
 	BindingMisplaced BindingState = "MISPLACED"
+	// BindingIncomplete — a file of this name sits at the expected path, but its
+	// size does not match knownModelSizes: a copy or download still in progress
+	// (or a truncated one), not a usable weight file. Only reported for a name
+	// knownModelSizes actually pins — F-38.
+	BindingIncomplete BindingState = "INCOMPLETE"
 )
 
 // Binding is one configured model file and where it was (or was not) found.
@@ -313,6 +318,7 @@ func resolveBinding(roots []ModelRoot, key, name string, expected []string) Bind
 	rel := filepath.FromSlash(name)
 	base := filepath.Base(rel)
 	seen := map[string]bool{}
+	var incomplete *Binding // set on a size-known mismatch; only reported if nothing better ever turns up
 	var searched []string
 	for _, r := range roots {
 		searched = append(searched, r.Dir)
@@ -322,6 +328,29 @@ func resolveBinding(roots []ModelRoot, key, name string, expected []string) Bind
 				continue
 			}
 			if fi, err := os.Stat(filepath.Join(dir, rel)); err == nil && !fi.IsDir() {
+				// F-38: a bare "it exists" reports FOUND the instant a same-named
+				// file of ANY size lands, including one still mid-copy. When this
+				// exact name is one the harness's own installer pins a known-good
+				// size for, a mismatch here is suspicious — but a multi-root config
+				// (extra_model_paths.yaml, ADR 0058 families) can genuinely hold a
+				// second, complete copy of the same name in another root or class,
+				// so this does NOT return immediately: it keeps scanning, and only
+				// wins if no root/class ever resolves a correctly-sized (or at
+				// least basename-present) copy of this name.
+				if want, known := knownModelSizes[base]; known && fi.Size() != want {
+					// Every size-known mismatch, in every root, skips straight to the
+					// next candidate — only the FIRST one is kept for the report, but
+					// a LATER mismatch must never be treated as "not a mismatch" and
+					// fall through to the found/seen path below.
+					if incomplete == nil {
+						incomplete = &Binding{
+							Key: key, Name: name, Expected: expected, State: BindingIncomplete,
+							FoundIn: []string{class},
+							Detail:  fmt.Sprintf("%s=%s in %s is INCOMPLETE (have %d of %d bytes) — looks like a copy or download still in progress, or a truncated one", key, name, class, fi.Size(), want),
+						}
+					}
+					continue
+				}
 				seen[class] = true
 				continue
 			}
@@ -329,6 +358,9 @@ func resolveBinding(roots []ModelRoot, key, name string, expected []string) Bind
 				seen[class] = true
 			}
 		}
+	}
+	if len(seen) == 0 && incomplete != nil {
+		return *incomplete
 	}
 	for c := range seen {
 		b.FoundIn = append(b.FoundIn, c)
