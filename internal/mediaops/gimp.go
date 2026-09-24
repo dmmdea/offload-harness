@@ -3,7 +3,6 @@ package mediaops
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -150,7 +149,10 @@ func sortedKeys(m map[string]string) []string {
 // the script from a file removes the text from argv entirely, so the fix does
 // not depend on any particular GIMP build's own argv-handling being correct.
 func GimpArgs(scriptFile string) []string {
-	load := fmt.Sprintf(`(load "%s")`, filepath.ToSlash(scriptFile))
+	// explicit, not filepath.ToSlash: ToSlash only rewrites the HOST separator, so on a
+	// Linux host a Windows-style path would keep its backslashes — which are escapes
+	// inside a Scheme string literal. Same convention as the path helper above.
+	load := fmt.Sprintf(`(load "%s")`, strings.ReplaceAll(scriptFile, `\`, "/"))
 	return []string{"-i", "--batch-interpreter=plug-in-script-fu-eval", "-b", load, "-b", "(gimp-quit 0)"}
 }
 
