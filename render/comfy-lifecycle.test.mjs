@@ -107,6 +107,55 @@ test("never ready => kills the child and throws", async () => {
   assert.equal(killed, 1, "spawned child killed when it never came up");
 });
 
+test("ensureComfy: a child that dies before ever answering fails fast, not after the full poll budget", async () => {
+  // OptiPlex stall (bigger-models-2026-09-24.md "Phase 2 round 2" item 4): a
+  // spawn that never actually produces a working ComfyUI (bad cwd/python path,
+  // an early crash) used to be indistinguishable from a slow cold boot — the
+  // loop just kept polling comfyUp() for the entire maxPolls budget. comfyUp
+  // NEVER returns true here, so the only way this test's promise can settle is
+  // via the dead-child watchdog (fast) or the old maxPolls timeout (which, at
+  // pollMs:1 and maxPolls:10000, would take ~10s and say "did not become
+  // ready" instead) — asserting BOTH the distinct error text and a low call
+  // count proves the fast path fired, not the slow one.
+  const child = new EventEmitter();
+  child.kill = () => {};
+  let comfyUpCalls = 0;
+  await assert.rejects(
+    ensureComfy({
+      comfyUp: async () => { comfyUpCalls++; return false; },
+      spawn: () => {
+        setImmediate(() => child.emit("exit", 1, null));
+        return child;
+      },
+      envFor: () => process.env,
+      comfyDir: BOUND_DIR,
+      pollMs: 1,
+      maxPolls: 10000,
+    }),
+    /COMFY-BOOT-FAILED.*exited before answering.*code 1/s
+  );
+  assert.ok(comfyUpCalls < 50, `should fail within a few polls, not grind through maxPolls (comfyUp called ${comfyUpCalls} times)`);
+});
+
+test("ensureComfy: a spawn() that errors (e.g. ENOENT from a bad cwd/python) fails fast with the spawn error", async () => {
+  const child = new EventEmitter();
+  child.kill = () => {};
+  await assert.rejects(
+    ensureComfy({
+      comfyUp: async () => false,
+      spawn: () => {
+        setImmediate(() => child.emit("error", new Error("spawn ENOENT")));
+        return child;
+      },
+      envFor: () => process.env,
+      comfyDir: BOUND_DIR,
+      pollMs: 1,
+      maxPolls: 10000,
+    }),
+    /COMFY-BOOT-FAILED.*spawn error: spawn ENOENT/s
+  );
+});
+
 test("COMFY_EXTRA_ARGS appends verbatim launch flags (J4 seam); unset = byte-identical", async () => {
   let spawnedArgs = null;
   process.env.COMFY_EXTRA_ARGS = "--directml --some-flag 1";

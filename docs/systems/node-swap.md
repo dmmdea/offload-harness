@@ -42,15 +42,25 @@ restart, verify, automatic rollback on any failure) and, as an option, its rende
 
 - **Building or staging the new binary.** `node-swap` takes an already-staged exe and its
   expected sha256; it never builds, fetches, or verifies provenance beyond that hash.
-- **Linux nodes.** The Linux swap pattern (`cp` to a `.new` sibling, `mv -f` over the running
-  inode — see any `deploy-*.md` record under `Benchmarks and Optimizations/.../infra/`) needs
-  none of this tool's Windows-specific rename-holder diagnosis; a live Linux binary can be
-  renamed out from under a running process with no lock at all.
+- **A Linux process-holder diagnosis.** The `internal/nodeswap` engine itself is
+  OS-agnostic Go and runs on Linux too (`GOOS=linux` builds ship it); what stays
+  Windows-only is the rename-holder diagnosis (`FindProcessesByExe`/`StopProcess`,
+  CIM-based) — a live Linux binary can be renamed out from under a running process
+  with no lock at all, so that class of problem does not exist there. Linux deploys
+  use [`setup/linux-node-swap-launch.sh`](#interfaces-and-entry-points), the
+  detached-launch sibling of the PowerShell one, which drives the SAME engine —
+  never a separate, hand-rolled polling implementation (the deploy-d5207011 Lenovo
+  incident this fixes: an ad-hoc bash script's own health-poll hardcoded
+  `127.0.0.1` while fleet-serve there bound only its tailnet address, and an
+  unguarded fallback read every failed poll as "still busy" for ~46 minutes).
 - **Deciding WHEN to deploy, or building the go binary/render tarball.** Those stay operator
   and deploy-record concerns; this tool is the mechanical last mile.
-- **The OptiPlex's own campaign scheduling.** `node-swap` runs fine on a standalone node (no
-  `--health-url`, no `--restart-task`/`--restart-command`), but nothing here decides when that
-  node is idle enough to touch — the caller still checks its GPU lease state first.
+- **The OptiPlex's own campaign scheduling** (which release to deploy, when). What
+  `node-swap` DOES now own for a standalone node (no `--health-url`, no
+  `--restart-task`/`--restart-command`): it waits for this node's own GPU lease to
+  clear before touching the binary — the check a standalone-node deploy previously
+  left to the operator's own `gpu status` (deploy-d5207011 OptiPlex section). See
+  "GPU-lease wait (standalone nodes)" below.
 
 ## Key concepts
 
@@ -59,8 +69,24 @@ restart, verify, automatic rollback on any failure) and, as an option, its rende
   (`Steps[]`, `OK`, `Error`, `RolledBack`, `RollbackOK`, the old/new sha256, the final PID and
   image hash). The `--result` file IS an `Outcome`.
 - **Standalone node** — no `--health-url` and neither `--restart-task` nor `--restart-command`:
-  the OptiPlex pattern (binary-only swap, no fleet-serve to wait on or restart). Idle-wait and
-  the health half of post-restart verification are skipped; the swap is still proven by hash.
+  the OptiPlex pattern (binary-only swap, no fleet-serve to wait on or restart). The health
+  half of post-restart verification is skipped (the swap is still proven by hash), but the
+  wait step is NOT skipped: it waits for this node's own GPU lease to clear instead (see
+  "GPU-lease wait" below) — a standalone node has no queue depth to read, but it can still
+  be mid-render under a caller's own `gpu reserve`.
+- **GPU-lease wait (standalone nodes)** — `Plan.GPULockPath`/`GPUStateDir`
+  (`internal/gpulease.OpenAt` under the hood, the same resolution `gpu status` uses) are
+  polled with the SAME timeout/interval shape as the fleet-serve idle-wait, refusing to
+  proceed while the lease is held. `Deps.InspectGPULease == nil` (an older caller) skips
+  this exactly as before it existed — never a nil-function panic.
+- **Auto-resolved `--health-url`** — when the caller leaves `--health-url` empty,
+  `runNodeSwap` reads THIS node's own config `fleet_listen` (`--config`, same resolution
+  precedence as every other command) and fills it in automatically — but ONLY when that
+  address already clears loopback/wildcard (`resolveNodeSwapDefaults`,
+  `loopbackOrWildcardHost` in `node_swap_cmd.go`). A config that still carries the
+  built-in loopback default gets no health URL, never a wrong one that reads as a false
+  "not idle" forever — the exact failure class of the Lenovo deploy-d5207011 incident. An
+  explicit `--health-url` always wins outright.
 - **Idle MCP holder** — a Windows-only class of rename blocker: a `local-offload.exe mcp`
   process from another session holds an OS-level handle on the exe with no active job. Only a
   process matching `--mcp-match` (default `" mcp"`) and **not** also matching `--process-match`
@@ -130,8 +156,14 @@ when step 4 itself failed — nothing was ever moved, so the original binary is 
   DIR] [--dry-run] [--result out.json] [--log out.log] [--json]` — the engine; runs
   synchronously, returns its own exit code.
 - [`setup/windows-node-swap-launch.ps1`](../../setup/windows-node-swap-launch.ps1) — the
-  detached launcher: registers the above via `Win32_Process.Create`, prints the log/result
-  paths, and returns immediately so the caller's session may disconnect safely.
+  Windows detached launcher: registers the above via `Win32_Process.Create`, prints the
+  log/result paths, and returns immediately so the caller's session may disconnect safely.
+- [`setup/linux-node-swap-launch.sh`](../../setup/linux-node-swap-launch.sh) — the Linux
+  sibling: `setsid nohup <node-swap engine binary> node-swap ... &`, disowned, with the same
+  post-launch liveness check and log/result-path printout. Its `--restart-command` is the
+  Linux equivalent of the Windows launcher's `-RestartTask` (a systemd unit restart, e.g.
+  `systemctl restart offload-fleet-node.service`, matching every deploy record's own
+  pattern); omitting it (and `--health-url`) is the standalone/OptiPlex-on-Linux shape.
 
 ## Dependencies
 
@@ -190,7 +222,8 @@ holder left alone, backup-old failure -> restart-only recovery (nothing was ever
 install-new failure -> restore + restart, restart failure -> rollback, verify failure ->
 rollback, a rollback whose OWN restore fails surfacing `RollbackOK:false` rather than a false
 recovery, render-tree swap rolled back on a later failure, standalone-node hash-only
-verification) and the real
+verification, the standalone GPU-lease wait clearing/timing out, `backupPathFor`'s
+doubled-`bak-` guard) and the real
 cross-platform primitives (hashing, health-read incl. the pre-0.100.0 `queue_depth` fallback,
 tar.gz extraction incl. a path-escape refusal). `node_swap_cmd_test.go` covers CLI flag
 parsing. Everything above builds and passes on both `GOOS=linux` (CI) and `GOOS=windows`
@@ -203,21 +236,31 @@ platform split `crossplatform_lint_test.go` expects.
   how every deploy record already worked (a running Windows exe can be renamed away as long as
   no process holds a blocking handle on it); the tool's own holder diagnosis exists for the
   case where that assumption breaks.
-- Forgetting `--health-url` on a real fleet node — the swap still "succeeds" (hash-only
-  verification), but skips the idle-wait that protects an in-flight render from being
-  interrupted.
+- Forgetting `--health-url` on a real fleet node — auto-resolve now fills it in from this
+  node's own config `fleet_listen` WHEN that config already names a real (non-loopback)
+  bind address; a node whose config was never told its real address still skips the
+  idle-wait exactly as before (hash-only verification, no false sense of safety). Passing
+  `--health-url` explicitly always overrides the auto-resolve either way.
 - Setting both `--restart-task` and `--restart-command` — rejected up front
   (`nodeswap.validatePlan`); pick one restart mechanism per node.
+- Passing a `--backup-suffix` that already starts with `bak-` (e.g.
+  `--backup-suffix bak-2026-09-24-pre-<sha>`) — `backupPathFor` strips one redundant
+  leading `bak-` before prepending its own, so this no longer doubles into
+  `<target>.bak-bak-...`; harmless either way (the backup is still found and restored by
+  its exact name), but the plain suffix (`2026-09-24-pre-<sha>`) reads cleaner.
 
 ## Source map
 
-- `internal/nodeswap/nodeswap.go` — the sequence, `Plan`/`Outcome`/`Deps`, rollback.
+- `internal/nodeswap/nodeswap.go` — the sequence, `Plan`/`Outcome`/`Deps`, rollback, the
+  standalone GPU-lease wait (`waitGPUFree`), `backupPathFor`'s doubled-`bak-` guard.
 - `internal/nodeswap/deps.go` — cross-platform real implementations (hash, health, rename,
-  tar.gz extraction).
+  tar.gz extraction, `InspectGPULease` via `internal/gpulease`).
 - `internal/nodeswap/deps_windows.go` / `deps_other.go` — the CIM process-enumeration /
   `taskkill` split.
-- `node_swap_cmd.go` — the CLI (`local-offload node-swap`).
-- `setup/windows-node-swap-launch.ps1` — the detached launcher.
+- `node_swap_cmd.go` — the CLI (`local-offload node-swap`), the config-driven
+  `--health-url`/GPU-lease-path auto-resolve (`resolveNodeSwapDefaults`).
+- `setup/windows-node-swap-launch.ps1` — the Windows detached launcher.
+- `setup/linux-node-swap-launch.sh` — the Linux detached launcher.
 
 ## Related docs
 

@@ -157,11 +157,20 @@ func videoNeeds(cfg config.Config) (family string, files []needFile, classes []s
 		bound("videogen_text_encoder", cfg.VideoGenTextEncoder, "wan22", wanDefaults.textEncoder, classTextEnc),
 		{label: "wan vae (builder default)", classes: classVAE, name: wanDefaults.vae},
 	}
-	// The builder picks each expert's DisTorch2 loader by extension (wf-wan22-i2v.mjs).
+	// The builder picks each expert's loader by extension AND videogen_wan_loader
+	// (wf-wan22-i2v.mjs): "gguf-distorch" forces the DisTorch2/MultiGPU wrapper on
+	// both experts (the historical behavior, still the default for a .gguf file
+	// under "auto"/unset); "native" (or "auto" on a .safetensors expert) uses the
+	// plain core UNETLoader, which needs NO custom-node class at all.
+	wanLoader := strings.TrimSpace(cfg.VideoGenWanLoader)
 	seen := map[string]bool{}
 	for _, u := range []string{high.name, low.name} {
+		gguf := isGGUF(u)
+		if !gguf && wanLoader != "gguf-distorch" {
+			continue // native: core UNETLoader, no pack needed
+		}
 		c := "UNETLoaderDisTorch2MultiGPU"
-		if isGGUF(u) {
+		if gguf {
 			c = "UnetLoaderGGUFDisTorch2MultiGPU"
 		}
 		if !seen[c] {
@@ -175,6 +184,91 @@ func videoNeeds(cfg config.Config) (family string, files []needFile, classes []s
 		{label: "fast mode low lora (builder default)", classes: classLoRA, name: wanDefaults.lowLora},
 	}
 	return "wan22", files, classes, optional
+}
+
+// videoFamilyFiles resolves the model files ONE family's graph loads, given its
+// EFFECTIVE binding (fb: an explicit videogen_families[family] override when
+// one is bound, else this box's flat videogen_* keys unchanged — which may
+// belong to a DIFFERENT family as the back-compat fallback — see
+// config.Config.ResolveVideoFamilyBinding). It mirrors the SAME builder-default
+// tables videoNeeds (above) uses for the box's own default family, so "what
+// would this box load for family X" and "what does the box's bound family
+// need" can never name two different files for the same builder default.
+func videoFamilyFiles(family string, fb config.VideoFamilyBinding) []needFile {
+	switch family {
+	case "ltx25":
+		return []needFile{
+			bound("transformer", fb.Transformer, "ltx25", ltxDefaults.transformer, classDiffusion),
+			bound("text_encoder", fb.TextEncoder, "ltx25", ltxDefaults.textEncoder, classTextEnc),
+			bound("video_vae", fb.VideoVAE, "ltx25", ltxDefaults.videoVae, classVAE),
+			bound("audio_vae", fb.AudioVAE, "ltx25", ltxDefaults.audioVae, classVAE),
+			bound("latent_upscaler", fb.LatentUpscaler, "ltx25", ltxDefaults.latentUpscaler, classLatentUp),
+		}
+	case "h3":
+		// The runner's h3 branch binds no per-machine weights (routeneeds' own
+		// videoNeeds, above, is the same shape) — reported as builder defaults only.
+		return []needFile{
+			{label: "h3 transformer (builder default)", classes: classDiffusion, name: h3Defaults.transformer},
+			{label: "h3 text encoder (builder default)", classes: classTextEnc, name: h3Defaults.textEncoder},
+			{label: "h3 video vae (builder default)", classes: classVAE, name: h3Defaults.videoVae},
+			{label: "h3 audio vae (builder default)", classes: classVAE, name: h3Defaults.audioVae},
+			{label: "h3 turbo lora (builder default)", classes: classLoRA, name: h3Defaults.turboLora},
+		}
+	case "hunyuan":
+		return []needFile{
+			{label: "hunyuan unet (builder default)", classes: classDiffusion, name: hunyuanDefaults.unet},
+			{label: "hunyuan vae (builder default)", classes: classVAE, name: hunyuanDefaults.vae},
+			{label: "hunyuan clip vision (builder default)", classes: classClipVis, name: hunyuanDefaults.clipVision},
+			bound("text_encoder", fb.TextEncoder, "hunyuan", hunyuanDefaults.textEncoder, classTextEnc),
+			{label: "hunyuan glyph encoder (builder default)", classes: classTextEnc, name: hunyuanDefaults.glyphEncoder},
+		}
+	default: // wan22
+		return []needFile{
+			bound("unet_high", fb.UnetHigh, "wan22", wanDefaults.highUnet, classDiffusion),
+			bound("unet_low", fb.UnetLow, "wan22", wanDefaults.lowUnet, classDiffusion),
+			bound("text_encoder", fb.TextEncoder, "wan22", wanDefaults.textEncoder, classTextEnc),
+			{label: "wan vae (builder default)", classes: classVAE, name: wanDefaults.vae},
+		}
+	}
+}
+
+// videoFamilyNames is the CLOSED set VideoFamilyBindingRows reports on — the same
+// families videoNeeds (above) and render/comfy-video.mjs dispatch on, minus "ace"
+// (its video-route graph binds no per-machine weight file today, so there is
+// nothing for a per-family override to resolve).
+var videoFamilyNames = []string{"wan22", "ltx25", "hunyuan", "h3"}
+
+// VideoFamilyBindingRow is one video family's resolved model bindings — what THIS
+// machine would actually load if a request rendered that family, independent of
+// which family is the box's own default (cfg.VideoGenFamily). Doctor/offload_status
+// report one row per videoFamilyNames entry (gap: every videogen_* weight key used
+// to be a single machine-wide value silently applied to whichever family actually
+// rendered — bigger-models-2026-09-24.md "Interim Phase 2 round 2" — these rows are
+// what makes the fix's effect provable from the outside, not just from the diff).
+type VideoFamilyBindingRow struct {
+	Family  string            `json:"family"`
+	Default bool              `json:"default"`
+	Files   map[string]string `json:"files"`
+}
+
+// VideoFamilyBindingRows lists the resolved per-family video bindings (label ->
+// file name) for every family in videoFamilyNames, marking this box's own
+// configured default family (cfg.VideoGenFamily, "" meaning wan22).
+func VideoFamilyBindingRows(cfg config.Config) []VideoFamilyBindingRow {
+	defaultFamily := strings.TrimSpace(cfg.VideoGenFamily)
+	if defaultFamily == "" {
+		defaultFamily = "wan22"
+	}
+	out := make([]VideoFamilyBindingRow, 0, len(videoFamilyNames))
+	for _, name := range videoFamilyNames {
+		fb := cfg.ResolveVideoFamilyBinding(name)
+		files := make(map[string]string, 4)
+		for _, f := range videoFamilyFiles(name, fb) {
+			files[f.label] = f.name
+		}
+		out = append(out, VideoFamilyBindingRow{Family: name, Default: name == defaultFamily, Files: files})
+	}
+	return out
 }
 
 // animateNeeds: WAN-Animate-2's four files (the runner passes the animategen_* keys).

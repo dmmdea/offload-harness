@@ -72,6 +72,111 @@ func (f FamilyInfo) LicenseNote() string {
 	return fmt.Sprintf("research/evaluation use only under %s; not for commercial work", f.License)
 }
 
+// VideoFamilyBinding is one video family's per-machine weight/behavior override,
+// an entry of Config.VideoGenFamilies. Every field mirrors a top-level videogen_*
+// key, scoped to ONE family (ADR: bigger-models-2026-09-24.md "Interim Phase 2
+// round 2"). All fields are optional; an empty field means "the render script's
+// own builder default for this family", never another family's bound value —
+// see (Config).ResolveVideoFamilyBinding for how this is resolved against a
+// request's family choice.
+type VideoFamilyBinding struct {
+	UnetHigh         string  `json:"unet_high,omitempty"`
+	UnetLow          string  `json:"unet_low,omitempty"`
+	TextEncoder      string  `json:"text_encoder,omitempty"`
+	Transformer      string  `json:"transformer,omitempty"`
+	VideoVAE         string  `json:"video_vae,omitempty"`
+	AudioVAE         string  `json:"audio_vae,omitempty"`
+	LatentUpscaler   string  `json:"latent_upscaler,omitempty"`
+	WanVirtualVramGB float64 `json:"wan_virtual_vram_gb,omitempty"`
+	WanLoader        string  `json:"wan_loader,omitempty"`
+	FPS              int     `json:"fps,omitempty"`
+	Width            int     `json:"width,omitempty"`
+	Height           int     `json:"height,omitempty"`
+	Frames           int     `json:"frames,omitempty"`
+	PoolVvramGB      float64 `json:"pool_vvram_gb,omitempty"`
+	PoolCompute      string  `json:"pool_compute,omitempty"`
+	PoolDonor        string  `json:"pool_donor,omitempty"`
+	UpscaleModel     string  `json:"upscale_model,omitempty"`
+	UpscaleWidth     int     `json:"upscale_width,omitempty"`
+	UpscaleHeight    int     `json:"upscale_height,omitempty"`
+}
+
+// videoFamilyWanSentinel mirrors internal/pipeline's own unexported constant of
+// the same value (render/comfy-video.mjs's runner default family). Both packages
+// pin it independently — config must not import pipeline (it would cycle back:
+// pipeline already imports config) — and TestVideoFamilyWanSentinelMirrorsPipeline
+// keeps the two from drifting apart.
+const videoFamilyWanSentinel = "wan22"
+
+// knownVideoFamilies is the runner's CLOSED dispatch set (render/comfy-video.mjs:
+// `flags.model === "ace"|"h3"|"ltx25"|"hunyuan"`, else Wan), mirrored so a
+// videogen_families key typo is refused at load time instead of silently never
+// matching. "ace" renders on the video route too (an I2V "style tags" mode driven
+// by ACE-Step) but VideoFamilyBinding has no ACE-specific fields (its graph binds
+// no per-machine weights today), so it is a valid key that simply never resolves
+// a non-empty binding.
+var knownVideoFamilies = map[string]bool{
+	videoFamilyWanSentinel: true, "ltx25": true, "h3": true, "hunyuan": true, "ace": true,
+}
+
+// defaultVideoFamily is this box's OWN configured family, canonicalized to the
+// spelling videogen_families is keyed by ("" -> "wan22", matching videogen_family's
+// own documented default).
+func (c Config) defaultVideoFamily() string {
+	if fam := strings.TrimSpace(c.VideoGenFamily); fam != "" {
+		return fam
+	}
+	return videoFamilyWanSentinel
+}
+
+// VideoDefaultFamilyBinding is this box's default video family's binding, built
+// from the flat videogen_* keys — i.e. exactly what every render used before
+// videogen_families existed. A request that renders this box's OWN configured
+// family (no override, or an override naming the same family) always uses this,
+// never a videogen_families entry — back-compat for every config that predates
+// per-family binding.
+func (c Config) VideoDefaultFamilyBinding() VideoFamilyBinding {
+	return VideoFamilyBinding{
+		UnetHigh: c.VideoGenUnetHigh, UnetLow: c.VideoGenUnetLow, TextEncoder: c.VideoGenTextEncoder,
+		Transformer: c.VideoGenTransformer, VideoVAE: c.VideoGenVideoVAE, AudioVAE: c.VideoGenAudioVAE,
+		LatentUpscaler: c.VideoGenLatentUpscaler, WanVirtualVramGB: c.VideoGenWanVirtualVramGB,
+		WanLoader: c.VideoGenWanLoader, FPS: c.VideoGenFPS, Width: c.VideoGenWidth, Height: c.VideoGenHeight,
+		Frames: c.VideoGenFrames, PoolVvramGB: c.VideoGenPoolVvramGB, PoolCompute: c.VideoGenPoolCompute,
+		PoolDonor: c.VideoGenPoolDonor, UpscaleModel: c.VideoGenUpscaleModel,
+		UpscaleWidth: c.VideoGenUpscaleWidth, UpscaleHeight: c.VideoGenUpscaleHeight,
+	}
+}
+
+// ResolveVideoFamilyBinding returns the effective per-family binding for a
+// RESOLVED render family (renderFamily — already canonicalized against the
+// runner's dispatch set by the caller, e.g. internal/pipeline.canonicalVideoFamily;
+// "" is treated as this box's own default family, matching resolveVideoFamily's
+// "nothing bound anywhere" case).
+//
+// An EXPLICIT videogen_families[renderFamily] entry, when present, always wins
+// for a family other than this box's own default — that is the opt-in fix for a
+// SPECIFIC cross-family leak (e.g. an ltx25-seated box's text encoder reaching an
+// overridden Wan render; bigger-models-2026-09-24.md). Absent an explicit entry —
+// this box's own default family, or any other family nobody has scoped yet —
+// resolution falls back to the flat videogen_* keys UNCHANGED. That fallback is
+// deliberate back-compat, not a gap: it preserves the pre-existing, documented
+// pattern of a box's flat keys carrying a DIFFERENT family's weights as an
+// intentional fallback (e.g. Wan GGUF files left bound on videogen_unet_high/low
+// on an ltx25-seated box specifically so a bare `model:"wan"` override still
+// renders with them — TestRunGenerateVideo_OverrideProvenanceEndToEnd). A config
+// that has never set videogen_families therefore behaves byte-for-byte as before
+// this key existed; an operator closes a specific leak by adding ONLY the keys
+// that need their own family-distinct value, nothing else has to change.
+func (c Config) ResolveVideoFamilyBinding(renderFamily string) VideoFamilyBinding {
+	renderFamily = strings.TrimSpace(renderFamily)
+	if renderFamily != "" && renderFamily != c.defaultVideoFamily() {
+		if ov, ok := c.VideoGenFamilies[renderFamily]; ok {
+			return ov
+		}
+	}
+	return c.VideoDefaultFamilyBinding()
+}
+
 // overlayKind is the per-route contract for one families map.
 type overlayKind struct {
 	key       string   // the config key ("imagegen_families")
@@ -264,7 +369,52 @@ func validateMediaEnums(c Config, where string) error {
 	if r := c.GenEditResolution; r < 0 || r > 4096 || r%32 != 0 {
 		return fmt.Errorf("%sgen_edit_resolution: %d must be 0 (the builder default, 1024) or a multiple of 32 up to 4096", where, r)
 	}
+	switch c.VideoGenWanLoader {
+	case "", "auto", "native", "gguf-distorch":
+	default:
+		return fmt.Errorf("%svideogen_wan_loader: %q is not \"\", \"auto\", \"native\" or \"gguf-distorch\"", where, c.VideoGenWanLoader)
+	}
 	return nil
+}
+
+// validateVideoFamilies refuses an unknown videogen_families key by name — the
+// same "typo caught at the config door, not as a silently-ignored override"
+// reasoning as validateFamilies below. Unlike imagegen_families/gen_edit_families,
+// a video family binding carries no license overlay (video family selection was
+// never a licensing feature — every family is reachable per-request via `model`
+// with no commercial-use gate), so this only checks the map's own keys and each
+// entry's wan_loader enum. The native-vs-gguf mismatch (wan_loader:"native" with
+// a .gguf expert file) cannot be caught here — it depends on which unet actually
+// applies once an empty override falls back to the family's builder default —
+// so the builder (render/wf-wan22-i2v.mjs) refuses that combination itself, at
+// render time, with a named error.
+func validateVideoFamilies(c Config) error {
+	for _, name := range sortedVideoFamilyNames(c.VideoGenFamilies) {
+		if !knownVideoFamilies[name] {
+			names := make([]string, 0, len(knownVideoFamilies))
+			for n := range knownVideoFamilies {
+				names = append(names, n)
+			}
+			sort.Strings(names)
+			return fmt.Errorf("videogen_families[%q]: unknown video family (valid: %s)", name, strings.Join(names, ", "))
+		}
+		b := c.VideoGenFamilies[name]
+		switch b.WanLoader {
+		case "", "auto", "native", "gguf-distorch":
+		default:
+			return fmt.Errorf("videogen_families[%q].wan_loader: %q is not \"\", \"auto\", \"native\" or \"gguf-distorch\"", name, b.WanLoader)
+		}
+	}
+	return nil
+}
+
+func sortedVideoFamilyNames(m map[string]VideoFamilyBinding) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // validateFamilies is the load-time door for everything ADR 0058 adds: the new enum
@@ -278,6 +428,9 @@ func validateFamilies(c Config) error {
 		return err
 	}
 	if err := licensePair("gen_edit", c.GenEditLicense, c.GenEditCommercialUse); err != nil {
+		return err
+	}
+	if err := validateVideoFamilies(c); err != nil {
 		return err
 	}
 	for _, kind := range []struct {

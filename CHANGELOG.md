@@ -6,6 +6,95 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added — Wan 2.2 native loader (fp8-scaled safetensors, no MultiGPU) as a supported variant
+
+`render/wf-wan22-i2v.mjs` used to wrap EVERY Wan expert (GGUF *and* safetensors) in the
+DisTorch2/MultiGPU loader. `videogen_wan_loader` ("" / "auto" | "native" | "gguf-distorch")
+now selects per box (or per `videogen_families[wan22]` override): "auto" keeps a `.gguf`
+expert on the historical DisTorch2/MultiGPU wrapper (DynamicVRAM streaming cannot load GGUF)
+but a `.safetensors` expert now loads through the plain, un-wrapped `UNETLoader` — no
+`virtual_vram_gb`, ComfyUI's own dynamic-VRAM streaming does the offload instead (measured
+~27.6% faster wall-clock than the GGUF/DisTorch2 path, "Interim Phase 2 round 2" item 1,
+`bigger-models-2026-09-24.md`). "native" forces the plain loader (refused on a `.gguf` expert
+with a named error); "gguf-distorch" forces the historical wrapper on both experts regardless
+of extension — the escape hatch for a card too small for native streaming. `--fast` and
+`--upscale` work identically on both paths. `internal/mediacap/routeneeds.go`'s doctor
+preflight now reports the correct node-class requirement (none, for a native safetensors
+expert) instead of always demanding the MultiGPU pack.
+
+### Added — LTX-2.5 transformer per-request override (`--transformer` / MCP `transformer`)
+
+The study's recommendation (int8 default, bf16 opt-in for a hero render) needed a way to pick
+the transformer file per request, not just per config edit. `generate-video`'s CLI and the
+`offload_generate_video` MCP tool now accept `transformer`, which wins over this box's (or the
+resolved family's) bound file for that one render; a no-op on any family other than `ltx25`.
+
+### Fixed — `videogen_text_encoder` and its siblings were not family-scoped
+
+Every `videogen_*` weight/behavior key (text encoder, transformer/unet high/low, VAEs, latent
+upscaler, wan_virtual_vram_gb, frames/fps/width/height, the upscale model) was a single
+machine-wide value applied to WHICHEVER family actually rendered — so a request's documented
+`model` override (e.g. `wan` on an `ltx25`-bound box) could silently hand that other family's
+transformer/text-encoder to the graph it built ("Interim Phase 2 round 2", `bigger-models-
+2026-09-24.md`: exactly this, worked around by hand-patching the graph builder and passing
+`--text-encoder` explicitly). Added a `videogen_families` config block (keyed like
+`imagegen_families`, but without the licensing overlay — video family selection has never
+been a licensing feature): an EXPLICIT `videogen_families[name]` entry, when present, now
+wins outright for any family other than this box's own default — the opt-in fix for a
+specific cross-family leak. Absent one, resolution falls back to the flat `videogen_*` keys
+unchanged, which is deliberate back-compat: it preserves the pre-existing, documented pattern
+of a box's flat keys intentionally carrying a DIFFERENT family's weights as a fallback (e.g.
+Wan GGUF files left bound on `videogen_unet_high`/`_low` on an `ltx25`-seated box specifically
+so a bare `model:"wan"` override still renders with them). A config that has never set
+`videogen_families` is therefore byte-for-byte unaffected; an operator closes a leak by
+adding only the keys that need their own family-distinct value. `doctor` and `offload_status`
+(`media.video_family_bindings`) now report the resolved per-family bindings by name.
+`internal/config/families.go` (`VideoFamilyBinding`, `ResolveVideoFamilyBinding`),
+`internal/mediacap/routeneeds.go` (`VideoFamilyBindingRows`), `internal/pipeline/pipeline.go`.
+
+### Fixed — a ComfyUI boot that made no progress could hang up to ~10 minutes with no signal
+
+`ensureComfy` (`render/comfy-lifecycle.mjs`) spawned `python main.py` and then only ever
+polled the HTTP health check — a child that failed to start (bad cwd/python path — reproduced
+via the OptiPlex fp8-native study's direct `comfy-video.mjs --graph` invocation, "Interim
+Phase 2 round 2" item 4) or crashed on the way up looked identical to a slow cold boot: no
+process tree, 0% GPU, port never open, the GPU lease held the whole time, and the loop kept
+silently polling for the entire `COMFY_START_WAIT_SEC` budget (default 10 min) before failing
+at all. `ensureComfy` now listens for the child's own `error`/early `exit` and fails within one
+poll interval, naming the spawn command, the failure detail, and the tail of this run's own
+ComfyUI console log (PR #471) — a boot that makes no progress now fails loudly and fast
+instead of reading like an unusually slow one.
+
+### Added — `render/comfy-render.mjs` self-manages its ComfyUI lifecycle (launch, reuse, GPU slot, teardown)
+
+Unlike `comfy-video.mjs`/`comfy-edit.mjs`, this runner only ever called `waitServer()` and
+required an already-running ComfyUI — the qwen-image-2512 bf16-vs-GGUF A/B (`bigger-models-
+2026-09-24.md` item 3) failed twice through the normal path with "RENDER FAILED: ComfyUI not
+reachable" before ComfyUI was booted by hand. It now wraps its render in the same
+`withGpuSlot` lifecycle every other runner uses (launch on demand, reuse an already-fit
+instance, take the shared GPU lease, tear down after) when run standalone. A new
+`--no-lifecycle` flag keeps `comfy-generate.mjs`'s existing wrapped-child invocation
+byte-behavior-identical (its own `withGpuSlot` already owns the lifecycle for that call path —
+without this flag, this file's own teardown would free/unload the model after every job in a
+`--batch` session, defeating the warm-session optimization).
+
+### Added — `local-offload node-swap` gaps closed: Linux launcher, standalone GPU-lease wait, auto-resolved health URL, doubled backup-suffix fix
+
+(`deploy-d5207011.md` findings.) (a) `setup/linux-node-swap-launch.sh`, the detached-launch
+sibling of the Windows PowerShell launcher (`setsid nohup ... &`, the same
+`local-offload node-swap` engine, no separate hand-rolled polling script) — the Lenovo's own
+ad-hoc deploy script hardcoded `curl http://127.0.0.1:.../fleet/health` while fleet-serve
+there binds only its tailnet address, and an unguarded fallback read every failed poll as
+"still busy" for ~46 minutes; `--health-url` is now also auto-resolved from this node's own
+config `fleet_listen` when left unset (`resolveNodeSwapDefaults`, `node_swap_cmd.go`) — never
+from a guess, and never when that address is still loopback/wildcard. (b) A standalone node
+(no `--health-url`) now waits for its own GPU lease to clear before swapping
+(`internal/nodeswap.waitGPUFree`, the same `internal/gpulease` resolution `gpu status` uses) —
+previously the caller had to check `gpu status` by hand. (c) `backupPathFor` strips one
+redundant leading `bak-` from an operator-supplied `--backup-suffix` before prepending its
+own, so a suffix that already reads `bak-...` (the exact d5207011 Qube deploy mistake) no
+longer doubles into `<target>.bak-bak-...`.
+
 ### Fixed — pooled krea2/LTX-2.5 text encoder and VAE no longer load onto the display card
 
 The stock `CLIPLoader`/`VAELoader` nodes' `device` input only ever offers `"default"`/`"cpu"`;

@@ -20,6 +20,10 @@ type fakeState struct {
 	procs []ProcessInfo
 	// health is called on each ReadHealth; nil = not configured (test doesn't set HealthURL)
 	health func() (HealthInfo, error)
+	// gpuHeld is called on each InspectGPULease; nil leaves Deps.InspectGPULease
+	// nil too (byte-identical to every test written before it existed — only a
+	// test that explicitly sets this one exercises the standalone GPU-lease wait).
+	gpuHeld func() (GPULeaseInfo, error)
 
 	restartCalled   int
 	restartFail     bool
@@ -45,7 +49,7 @@ func newFakeState() *fakeState {
 }
 
 func (s *fakeState) deps() Deps {
-	return Deps{
+	d := Deps{
 		Hash: func(path string) (string, error) {
 			h, ok := s.files[path]
 			if !ok {
@@ -128,6 +132,10 @@ func (s *fakeState) deps() Deps {
 			return s.clock
 		},
 	}
+	if s.gpuHeld != nil {
+		d.InspectGPULease = func(lockPath, stateDir string) (GPULeaseInfo, error) { return s.gpuHeld() }
+	}
+	return d
 }
 
 func TestRun_HappyPath(t *testing.T) {
@@ -588,6 +596,96 @@ func TestRun_StandaloneNodeSkipsRestartAndVerifiesByHashAlone(t *testing.T) {
 	}
 	if out.FinalImageSHA256 != "NEWHASH" {
 		t.Errorf("FinalImageSHA256 = %q, want NEWHASH", out.FinalImageSHA256)
+	}
+}
+
+// TestRun_StandaloneNodeWaitsForGPULeaseToClear: gap 6b (d5207011 deploy
+// record, OptiPlex) — a standalone node has no fleet-serve queue depth to
+// read, but it CAN still be mid-render under a caller's own `gpu reserve`;
+// this used to be the operator's own manual "gpu status" check before the
+// swap. Same shape as TestRun_WaitsForIdleBeforeSwapping, GPU-lease flavored.
+func TestRun_StandaloneNodeWaitsForGPULeaseToClear(t *testing.T) {
+	s := newFakeState()
+	s.files["staged.exe"] = "NEWHASH"
+	s.files["target.exe"] = "OLDHASH"
+	calls := 0
+	s.gpuHeld = func() (GPULeaseInfo, error) {
+		calls++
+		if calls < 3 {
+			return GPULeaseInfo{Held: true, Reason: "media render in flight"}, nil
+		}
+		return GPULeaseInfo{Held: false}, nil
+	}
+	plan := Plan{
+		Staged: "staged.exe", Target: "target.exe", ExpectedSHA256: "NEWHASH", BackupSuffix: "t",
+		IdlePollInterval: time.Millisecond, WaitIdleTimeout: time.Minute,
+	}
+	out := Run(context.Background(), plan, s.deps(), NewLogger(nil))
+	if !out.OK {
+		t.Fatalf("expected the swap to proceed once the lease clears, got error=%q steps=%+v", out.Error, out.Steps)
+	}
+	if calls < 3 {
+		t.Errorf("expected at least 3 lease polls, got %d", calls)
+	}
+	if s.files["target.exe"] != "NEWHASH" {
+		t.Error("standalone swap did not touch target.exe after the lease cleared")
+	}
+}
+
+// TestRun_StandaloneNodeGPULeaseNeverClearsTimesOut: the failure twin —
+// a lease held the whole timeout window must refuse the swap, never touch
+// the binary. Same shape as TestRun_NeverIdleTimesOut.
+func TestRun_StandaloneNodeGPULeaseNeverClearsTimesOut(t *testing.T) {
+	s := newFakeState()
+	s.files["staged.exe"] = "NEWHASH"
+	s.files["target.exe"] = "OLDHASH"
+	s.gpuHeld = func() (GPULeaseInfo, error) { return GPULeaseInfo{Held: true, Reason: "media render in flight"}, nil }
+	plan := Plan{
+		Staged: "staged.exe", Target: "target.exe", ExpectedSHA256: "NEWHASH", BackupSuffix: "t",
+		WaitIdleTimeout: 3 * time.Second, IdlePollInterval: time.Second,
+	}
+	out := Run(context.Background(), plan, s.deps(), NewLogger(nil))
+	if out.OK {
+		t.Fatal("expected timeout failure when the GPU lease never clears")
+	}
+	if !strings.Contains(out.Error, "GPU lease never cleared") {
+		t.Errorf("Error = %q, want a GPU-lease timeout message", out.Error)
+	}
+	if s.files["target.exe"] != "OLDHASH" {
+		t.Error("target.exe was touched despite the GPU lease never clearing")
+	}
+}
+
+// TestRun_StandaloneNodeSkipsGPUWaitWhenDepsHasNone: a caller using the older
+// Deps shape (InspectGPULease left nil, e.g. a not-yet-updated test or tool)
+// must keep today's exact behavior — skip straight through, never a nil-
+// function-pointer panic.
+func TestRun_StandaloneNodeSkipsGPUWaitWhenDepsHasNone(t *testing.T) {
+	s := newFakeState()
+	s.files["staged.exe"] = "NEWHASH"
+	s.files["target.exe"] = "OLDHASH"
+	plan := Plan{Staged: "staged.exe", Target: "target.exe", ExpectedSHA256: "NEWHASH", BackupSuffix: "t"}
+	out := Run(context.Background(), plan, s.deps(), NewLogger(nil)) // s.gpuHeld left nil
+	if !out.OK {
+		t.Fatalf("expected success with InspectGPULease unset, got error=%q", out.Error)
+	}
+}
+
+func TestBackupPathFor(t *testing.T) {
+	cases := []struct{ suffix, want string }{
+		{"2026-09-24-pre-d5207011", "target.exe.bak-2026-09-24-pre-d5207011"},
+		// The d5207011 Qube deploy record's exact mistake: a suffix that ALREADY
+		// carries the tool's own "bak-" prefix must not double it.
+		{"bak-2026-09-24-pre-d5207011", "target.exe.bak-2026-09-24-pre-d5207011"},
+		{"BAK-2026-09-24", "target.exe.bak-2026-09-24"},
+		// "bakery-run" starts with "bake", not the literal 4-char "bak-" (hyphen,
+		// not 'e') — must NOT be trimmed; only an exact "bak-" prefix is stripped.
+		{"bakery-run", "target.exe.bak-bakery-run"},
+	}
+	for _, c := range cases {
+		if got := backupPathFor("target.exe", c.suffix); got != c.want {
+			t.Errorf("backupPathFor(target.exe, %q) = %q, want %q", c.suffix, got, c.want)
+		}
 	}
 }
 

@@ -89,20 +89,20 @@ func TestImageFootprintKeyQwenImage21Precision(t *testing.T) {
 // Q8_0 GGUFs (either unet; case-insensitive), else node default.
 func TestVideoFootprintQuant(t *testing.T) {
 	cfg := config.Default()
-	if q := videoFootprintQuant(cfg, "wan22"); q != "" {
+	if q := videoFootprintQuant(cfg.VideoDefaultFamilyBinding(), "wan22"); q != "" {
 		t.Errorf("unbound unets: quant = %q, want \"\"", q)
 	}
 	cfg.VideoGenUnetHigh = "wan2.2_i2v_high_noise_14B_Q8_0.gguf"
-	if q := videoFootprintQuant(cfg, "wan22"); q != "q8_0" {
+	if q := videoFootprintQuant(cfg.VideoDefaultFamilyBinding(), "wan22"); q != "q8_0" {
 		t.Errorf("Q8_0 high unet: quant = %q, want \"q8_0\"", q)
 	}
 	cfg.VideoGenUnetHigh = "wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors"
 	cfg.VideoGenUnetLow = "wan2.2_i2v_low_noise_14B_q8_0.gguf"
-	if q := videoFootprintQuant(cfg, "wan22"); q != "q8_0" {
+	if q := videoFootprintQuant(cfg.VideoDefaultFamilyBinding(), "wan22"); q != "q8_0" {
 		t.Errorf("q8_0 low unet (lowercase): quant = %q, want \"q8_0\"", q)
 	}
 	cfg.VideoGenUnetLow = "wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors"
-	if q := videoFootprintQuant(cfg, "wan22"); q != "" {
+	if q := videoFootprintQuant(cfg.VideoDefaultFamilyBinding(), "wan22"); q != "" {
 		t.Errorf("fp8 binding: quant = %q, want \"\" (node default)", q)
 	}
 }

@@ -196,19 +196,45 @@ func TestVideoFootprintQuantIsScopedToWan(t *testing.T) {
 	cfg.VideoGenUnetLow = "Wan2.2-I2V-A14B-LowNoise-Q8_0.gguf"
 
 	// The Wan family still reports its quant — the original behavior, preserved.
-	if q := videoFootprintQuant(cfg, "wan22"); q != "q8_0" {
+	if q := videoFootprintQuant(cfg.VideoDefaultFamilyBinding(), "wan22"); q != "q8_0" {
 		t.Errorf("wan22 with Q8_0 unets: quant = %q, want \"q8_0\"", q)
 	}
 	// An unbound box renders Wan, so it keeps the Wan quant too.
-	if q := videoFootprintQuant(cfg, ""); q != "q8_0" {
+	if q := videoFootprintQuant(cfg.VideoDefaultFamilyBinding(), ""); q != "q8_0" {
 		t.Errorf("unbound (renders Wan) with Q8_0 unets: quant = %q, want \"q8_0\"", q)
 	}
 	// Every other family must NOT inherit Wan's quant. This is the live shape on
 	// the reference box: family ltx25 with the Wan GGUFs still configured.
 	for _, fam := range []string{"ltx25", "hunyuan", "ace"} {
-		if q := videoFootprintQuant(cfg, fam); q != "" {
+		if q := videoFootprintQuant(cfg.VideoDefaultFamilyBinding(), fam); q != "" {
 			t.Errorf("family %q must not inherit the Wan quant, got %q", fam, q)
 		}
+	}
+}
+
+// TestVideoFootprintQuantUsesTheResolvedFamilyBindingNotTheFlatKeys: a box whose
+// OWN default family is ltx25 but which binds videogen_families["wan22"] with
+// Q8_0 experts must report q8_0 for a Wan-override render — reading the flat
+// (unset, on this box) cfg.VideoGenUnetHigh/Low directly would silently report
+// "" instead, the exact cross-family leak class gap 1 fixes everywhere else,
+// reintroduced here if this footprint helper ever went back to reading cfg.
+func TestVideoFootprintQuantUsesTheResolvedFamilyBindingNotTheFlatKeys(t *testing.T) {
+	cfg := config.Default()
+	cfg.VideoGenFamily = "ltx25" // this box's own default family — NOT wan22
+	cfg.VideoGenFamilies = map[string]config.VideoFamilyBinding{
+		"wan22": {
+			UnetHigh: "Wan2.2-I2V-A14B-HighNoise-Q8_0.gguf",
+			UnetLow:  "Wan2.2-I2V-A14B-LowNoise-Q8_0.gguf",
+		},
+	}
+	fb := cfg.ResolveVideoFamilyBinding("wan22")
+	if q := videoFootprintQuant(fb, "wan22"); q != "q8_0" {
+		t.Errorf("wan22 override with Q8_0 experts: quant = %q, want \"q8_0\" (resolved from videogen_families, not the box's flat/unset keys)", q)
+	}
+	// The box's OWN default family (ltx25) resolves to its own binding, which
+	// has no Wan unets at all — must not inherit the wan22 override's quant.
+	if q := videoFootprintQuant(cfg.VideoDefaultFamilyBinding(), "ltx25"); q != "" {
+		t.Errorf("ltx25 (this box's default) must not report a quant, got %q", q)
 	}
 }
 

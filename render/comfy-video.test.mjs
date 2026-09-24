@@ -51,6 +51,23 @@ test("--wan-vvram-gb threads into both Wan DisTorch2 loaders; absent keeps the b
   assert.deepEqual(split(["o.mp4", "s.png", "p"]), [7, 7], "the builder default is unchanged");
 });
 
+test("--wan-loader threads through to the builder's loader choice", () => {
+  const classesFor = (argv) => {
+    const { pos, flags } = parseArgs(argv);
+    const g = buildGraphFromArgs(pos, flags, { stage }).graph;
+    return new Set([g["7"].class_type, g["9"].class_type]);
+  };
+  // default filenames are GGUF: --wan-loader native must refuse them
+  assert.throws(
+    () => buildGraphFromArgs(...Object.values(parseArgs(["o.mp4", "s.png", "p", "--wan-loader", "native"])), { stage }),
+    /loader:"native" cannot load a GGUF expert/,
+  );
+  // with safetensors experts bound, native produces the plain loader, no flag = unchanged (GGUF/DisTorch2)
+  const nativeArgv = ["o.mp4", "s.png", "p", "--high-unet", "high.safetensors", "--low-unet", "low.safetensors", "--wan-loader", "native"];
+  assert.deepEqual(classesFor(nativeArgv), new Set(["UNETLoader"]));
+  assert.deepEqual(classesFor(["o.mp4", "s.png", "p"]), new Set(["UnetLoaderGGUFDisTorch2MultiGPU"]), "unset --wan-loader keeps the historical default");
+});
+
 test("wanVvramGb refuses a value that is not a positive number", () => {
   assert.equal(wanVvramGb({}), undefined);
   assert.equal(wanVvramGb({ "wan-vvram-gb": "11" }), 11);

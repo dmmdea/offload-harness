@@ -16,6 +16,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/dmmdea/offload-harness/internal/gpulease"
 )
 
 // DefaultDeps wires the real, cross-platform half of Deps. The two
@@ -26,16 +28,17 @@ import (
 // crossplatform_lint_test.go convention.
 func DefaultDeps() Deps {
 	d := Deps{
-		Hash:         hashFile,
-		ReadHealth:   readHealth,
-		RenameFile:   renameFile,
-		RemoveAll:    os.RemoveAll,
-		Exists:       fileExists,
-		MkdirAll:     func(path string) error { return os.MkdirAll(path, 0o755) },
-		RunCommand:   runPowerShell,
-		ExtractTarGz: extractTarGz,
-		Sleep:        time.Sleep,
-		Now:          time.Now,
+		Hash:            hashFile,
+		ReadHealth:      readHealth,
+		InspectGPULease: inspectGPULease,
+		RenameFile:      renameFile,
+		RemoveAll:       os.RemoveAll,
+		Exists:          fileExists,
+		MkdirAll:        func(path string) error { return os.MkdirAll(path, 0o755) },
+		RunCommand:      runPowerShell,
+		ExtractTarGz:    extractTarGz,
+		Sleep:           time.Sleep,
+		Now:             time.Now,
 	}
 	platformDeps(&d)
 	return d
@@ -107,6 +110,20 @@ func readHealth(ctx context.Context, url string) (HealthInfo, error) {
 		running = r.QueueDepth
 	}
 	return HealthInfo{OK: true, NodeID: r.NodeID, Version: r.HarnessVersion, RunningJobs: running, QueuedJobs: queued}, nil
+}
+
+// inspectGPULease is InspectGPULease's real implementation — the same
+// resolution `local-offload gpu status` uses (internal/gpulease.OpenAt with
+// the node's own gpu_lock_path/state_dir, "" meaning the harness's built-in
+// defaults). Opening is cheap (no held file handle; Inspect() reads the lease
+// meta file fresh each call), so this is safe to call once per poll.
+func inspectGPULease(lockPath, stateDir string) (GPULeaseInfo, error) {
+	m, err := gpulease.OpenAt(lockPath, stateDir)
+	if err != nil {
+		return GPULeaseInfo{}, err
+	}
+	info := m.Inspect()
+	return GPULeaseInfo{Held: info.Held, Reason: info.Reason}, nil
 }
 
 // runPowerShell shells out with no visible window — every spawned console on

@@ -9,13 +9,17 @@
 //   node render/comfy-video.mjs <out.mp4> <still.(png|jpg)> "<prompt>" \
 //        [--model wan|hunyuan] [--frames 49] [--width 832] [--height 480] \
 //        [--steps N] [--cfg X] [--fast] [--hero] [--seed N] [--negative "..."] \
-//        [--wan-vvram-gb 7] \
+//        [--wan-vvram-gb 7] [--wan-loader auto|native|gguf-distorch] \
 //        [--upscale-model name.pth] [--upscale-width 1920] [--upscale-height 1080] \
 //        [--api http://127.0.0.1:8188] [--no-lock] [--keep-comfy]   |   <out.mp4> --graph wf.json
 //   --fast: OPT-IN distilled speed path (wan; 8-step lightx2v, weaker motion). --hero:
 //   accepted for compatibility; the native no-LoRA pass IS the default. --wan-vvram-gb:
 //   GiB of each Wan expert DisTorch2 parks in system RAM (the harness passes this box's
-//   videogen_wan_virtual_vram_gb). --upscale-model: post-decode ESRGAN upscale
+//   videogen_wan_virtual_vram_gb; ignored by an expert on the native loader). --wan-loader:
+//   auto (default, decides per expert file by extension) | native (plain UNETLoader, no
+//   DisTorch2/MultiGPU, dynamic-VRAM streaming does the offload; refused on a .gguf
+//   expert) | gguf-distorch (forces the historical DisTorch2/MultiGPU wrapper on both
+//   experts). --upscale-model: post-decode ESRGAN upscale
 //   (+ --upscale-width/height to resize, e.g. 720p->1080p).
 //
 // Before anything is submitted, every node class the graph names is checked against the
@@ -147,6 +151,9 @@ export function buildGraphFromArgs(pos, flags, { stage = stageInput } = {}) {
     // unset = the builder's default. Measured per card — never a shared constant.
     const vvram = wanVvramGb(flags);
     if (vvram !== undefined) common.virtualVramGb = vvram;
+    // videogen_wan_loader (this box's, or a videogen_families[wan22] override):
+    // "auto" (unset) decides per expert file by extension, unchanged behavior.
+    if (flags["wan-loader"]) common.loader = flags["wan-loader"];
     if (flags["upscale-model"]) {       // optional post-decode upscale (wan)
       common.upscaleModel = flags["upscale-model"];
       if (flags["upscale-width"]) common.upscaleWidth = Number(flags["upscale-width"]);

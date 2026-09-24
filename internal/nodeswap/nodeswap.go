@@ -51,13 +51,26 @@ type Plan struct {
 	BackupSuffix string
 
 	// HealthURL is this node's own /fleet/health. Empty means a standalone
-	// node with no fleet-serve endpoint (the OptiPlex pattern): idle-wait and
-	// the health half of post-restart verification are both skipped, but PID
-	// + image-hash verification still runs whenever a restart mechanism is
-	// configured.
+	// node with no fleet-serve endpoint (the OptiPlex pattern): the
+	// fleet-serve idle-wait and the health half of post-restart verification
+	// are both skipped — instead the GPU LEASE is waited on (GPULockPath/
+	// GPUStateDir below), since a standalone node has no queue depth to read
+	// but can still be mid-render under a caller's own `gpu reserve`. PID +
+	// image-hash verification still runs whenever a restart mechanism is
+	// configured, regardless of which wait path applied.
 	HealthURL        string
 	WaitIdleTimeout  time.Duration // default 10m
 	IdlePollInterval time.Duration // default 5s
+
+	// GPULockPath / GPUStateDir override the GPU lease directory a STANDALONE
+	// node (HealthURL == "") waits to clear before swapping — the check the
+	// deploy record for d5207011 notes the operator had to do by hand ("gpu
+	// status" before and right before the swap). Empty = the harness's own
+	// built-in defaults (internal/gpulease.LeaseDir), the same resolution
+	// `local-offload gpu status` uses. Ignored when HealthURL is set (a
+	// fleet-serve node's own wait-idle already covers this).
+	GPULockPath string
+	GPUStateDir string
 
 	// Exactly one of RestartTaskName / RestartCommand should be set for a
 	// fleet node; both empty means a standalone binary-only swap (no restart
@@ -153,6 +166,15 @@ type HealthInfo struct {
 	QueuedJobs  int
 }
 
+// GPULeaseInfo is the minimal GPU-lease signal a standalone node's swap needs
+// before touching the binary — a package-local mirror of gpulease.Info
+// (Held/Reason only) so this package and its tests never need the full
+// gpulease.Info shape or a real lease directory.
+type GPULeaseInfo struct {
+	Held   bool
+	Reason string
+}
+
 // Deps is the OS/network seam. Every field is a plain function so Run is
 // fully unit-testable with fakes; DefaultDeps (deps.go, plus the
 // platform-suffixed deps_windows.go / deps_other.go files) wires the real
@@ -160,6 +182,7 @@ type HealthInfo struct {
 type Deps struct {
 	Hash               func(path string) (string, error)
 	ReadHealth         func(ctx context.Context, url string) (HealthInfo, error)
+	InspectGPULease    func(lockPath, stateDir string) (GPULeaseInfo, error)
 	FindProcessesByExe func(exePath string) ([]ProcessInfo, error)
 	StopProcess        func(pid int) error
 	RenameFile         func(oldPath, newPath string) error
@@ -192,8 +215,20 @@ func (l *Logger) Printf(format string, args ...any) {
 	l.w(fmt.Sprintf(format, args...))
 }
 
+// backupPathFor builds "<target>.bak-<suffix>". A caller-supplied suffix that
+// ITSELF already starts with "bak-" (case-insensitive) is trimmed of that
+// prefix first — the exact doubled "bak-bak-" mistake the d5207011 Qube
+// deploy record flagged (an operator passed --backup-suffix
+// "bak-2026-09-24-pre-d5207011", not knowing this function prepends its own
+// "bak-" too). Cosmetic-only either way (the file is still found and
+// restored correctly by its exact name), but a suffix that already reads
+// "bak-..." should never become "bak-bak-...".
 func backupPathFor(target, suffix string) string {
-	return target + ".bak-" + suffix
+	trimmed := suffix
+	if len(trimmed) >= 4 && strings.EqualFold(trimmed[:4], "bak-") {
+		trimmed = trimmed[4:]
+	}
+	return target + ".bak-" + trimmed
 }
 
 // Run executes the full swap sequence. It never panics on a bad Plan; every
@@ -261,12 +296,19 @@ func Run(ctx context.Context, plan Plan, deps Deps, log *Logger) Outcome {
 	}
 
 	// 2. Wait for the node to be idle (queue 0, nothing running) before
-	// stopping it. Standalone nodes (no HealthURL) skip straight through.
+	// stopping it. A standalone node (no HealthURL) has no queue to read, so
+	// it waits on the GPU LEASE instead — it can still be mid-render under a
+	// caller's own `gpu reserve` even with no fleet-serve to ask.
 	if plan.HealthURL != "" {
 		if err := waitIdle(ctx, plan, deps, log); err != nil {
 			return fail("wait-idle", err.Error())
 		}
 		step("wait-idle", true, "queue depth 0")
+	} else if deps.InspectGPULease != nil {
+		if err := waitGPUFree(ctx, plan, deps, log); err != nil {
+			return fail("wait-idle", err.Error())
+		}
+		step("wait-idle", true, "standalone node (no --health-url); waited for the GPU lease to clear")
 	} else {
 		step("wait-idle", true, "standalone node (no --health-url); skipped")
 	}
@@ -415,6 +457,51 @@ func waitIdle(ctx context.Context, plan Plan, deps Deps, log *Logger) error {
 	}
 }
 
+// waitGPUFree is waitIdle's counterpart for a STANDALONE node (no fleet-serve
+// queue depth to read): it polls the GPU lease instead, refusing to proceed
+// while it is held — the check a standalone-node deploy previously left to
+// the operator's own judgment ("gpu status" by hand, before and right before
+// the swap). Same timeout/interval/logging shape as waitIdle on purpose, so
+// the two paths read alike in --log.
+func waitGPUFree(ctx context.Context, plan Plan, deps Deps, log *Logger) error {
+	if deps.InspectGPULease == nil {
+		// No dep wired (an older caller, or a test that only exercises the
+		// fleet-serve path): behave exactly as before this field existed —
+		// nothing to wait on, standalone swap proceeds unchecked.
+		return nil
+	}
+	timeout := plan.WaitIdleTimeout
+	if timeout <= 0 {
+		timeout = 10 * time.Minute
+	}
+	interval := plan.IdlePollInterval
+	if interval <= 0 {
+		interval = 5 * time.Second
+	}
+	deadline := deps.Now().Add(timeout)
+	var lastErr error
+	var lastReason string
+	for {
+		info, err := deps.InspectGPULease(plan.GPULockPath, plan.GPUStateDir)
+		if err == nil && !info.Held {
+			return nil
+		}
+		if err != nil {
+			lastErr = err
+		} else {
+			lastReason = info.Reason
+		}
+		if deps.Now().After(deadline) {
+			if lastErr != nil {
+				return fmt.Errorf("GPU lease never cleared within %s: last read failed: %w", timeout, lastErr)
+			}
+			return fmt.Errorf("GPU lease never cleared within %s: held (%s)", timeout, lastReason)
+		}
+		log.Printf("wait-gpu-free: still held (%s) err=%v; retrying", lastReason, lastErr)
+		deps.Sleep(interval)
+	}
+}
+
 func procMatch(plan Plan) string {
 	if plan.ProcessMatch != "" {
 		return plan.ProcessMatch
@@ -520,7 +607,7 @@ func swapRenderTree(plan Plan, deps Deps, log *Logger) (backupPath string, err e
 	if suffix == "" {
 		suffix = "render-" + deps.Now().Format("20060102-150405")
 	}
-	backupPath = plan.RenderDir + ".bak-" + suffix
+	backupPath = backupPathFor(plan.RenderDir, suffix)
 	hadExisting := deps.Exists(plan.RenderDir)
 	if hadExisting {
 		if err := deps.RenameFile(plan.RenderDir, backupPath); err != nil {

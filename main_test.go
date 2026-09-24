@@ -283,6 +283,11 @@ func TestBuildVideoParams(t *testing.T) {
 			videoFlags{still: "s.png", fast: true},
 			map[string]any{"still": "s.png", "fast": true},
 		},
+		{
+			"transformer (gap 5: per-request LTX-2.5 transformer override) is carried when set, omitted when empty",
+			videoFlags{model: "ltx25", still: "s.png", transformer: "ltx-2.5-22b-distilled-transformer-bf16.safetensors"},
+			map[string]any{"model": "ltx25", "still": "s.png", "transformer": "ltx-2.5-22b-distilled-transformer-bf16.safetensors"},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -291,6 +296,33 @@ func TestBuildVideoParams(t *testing.T) {
 				t.Fatalf("buildVideoParams(%+v) = %v; want %v", tc.in, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestParseGenerateVideoTransformer: --transformer is a value flag (never eats a
+// positional) and lands in the request params exactly as the MCP tool's transformer
+// (gap 5, bigger-models-2026-09-24.md: an opt-in bf16 LTX transformer for one hero
+// render, without a config edit).
+func TestParseGenerateVideoTransformer(t *testing.T) {
+	c, err := parseGenerateVideo([]string{"o.mp4", "s.png", "push in", "--transformer", "ltx-2.5-22b-distilled-transformer-bf16.safetensors", "--model", "ltx25"}, flag.ContinueOnError)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.video.transformer != "ltx-2.5-22b-distilled-transformer-bf16.safetensors" || c.video.out != "o.mp4" || c.video.still != "s.png" || c.prompt != "push in" {
+		t.Fatalf("parseGenerateVideo = %+v prompt %q; want transformer with out/still/prompt intact", c.video, c.prompt)
+	}
+	if got := buildVideoParams(c.video)["transformer"]; got != "ltx-2.5-22b-distilled-transformer-bf16.safetensors" {
+		t.Fatalf("params must carry transformer, got %v", got)
+	}
+	if !generateVideoValueFlags["transformer"] {
+		t.Fatal("transformer must be a value flag, or splitThreeArgs would swallow its argument as a positional")
+	}
+	c2, err := parseGenerateVideo([]string{"o.mp4", "s.png", "p"}, flag.ContinueOnError)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := buildVideoParams(c2.video)["transformer"]; ok {
+		t.Fatal("no --transformer must mean no transformer param: this box's bound file (or the render script's default) applies")
 	}
 }
 

@@ -37,11 +37,16 @@ for (let i = 0; i < argv.length; i++) {
 const out = pos[0], prompt = pos[1];
 const API = flags.api || process.env.COMFY_API || "http://127.0.0.1:8188";
 
-// Delegate the actual render to the proven, unmodified comfy-render.mjs (ComfyUI is up now).
-// comfy-render reads seed/width/height as flags OR positionals, so flags alone suffice.
+// Delegate the actual render to the proven comfy-render.mjs (ComfyUI is up now — THIS
+// file's own withGpuSlot, below, already booted/confirmed it). comfy-render reads
+// seed/width/height as flags OR positionals, so flags alone suffice.
 // runRenderArgs: spawn comfy-render.mjs with a prebuilt argv tail (out, prompt, flags).
+// --no-lifecycle is ALWAYS added: this file is always the lifecycle owner in this call
+// path (comfy-render.mjs can also self-manage when run standalone — gap 4 — but here
+// it must not, or its own teardown would free/unload ComfyUI's model after EVERY job
+// in a --batch session, defeating the whole point of the warm session).
 function runRenderArgs(tail) {
-  const args = [join(__dirname, "comfy-render.mjs"), ...tail];
+  const args = [join(__dirname, "comfy-render.mjs"), ...tail, "--no-lifecycle"];
   return new Promise((resolve, reject) => {
     const c = spawn("node", args, { stdio: "inherit" });
     c.on("exit", (code) => (code === 0 ? resolve() : reject(new Error("comfy-render exited " + code))));

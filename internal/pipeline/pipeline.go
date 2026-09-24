@@ -2658,6 +2658,17 @@ func (p *Pipeline) runGenerateVideo(ctx context.Context, req core.Request, meta 
 	// are now one call.
 	argModel, renderFamily := resolveVideoFamily(p.cfg, paramStr(req.Params, "model"))
 	meta.Model = videoModelLabel(renderFamily)
+	// The per-family weight/behavior binding for whatever family ACTUALLY
+	// renders. An explicit videogen_families[renderFamily] entry, when bound,
+	// wins outright for a family other than this box's own default; absent one
+	// (including the box's own default family), it falls back to the flat
+	// videogen_* keys unchanged — back-compat, since those keys may
+	// intentionally carry a different family's weights as a fallback (e.g. Wan
+	// GGUF files bound here on an ltx25-seated box for a bare `model:"wan"`
+	// override). See gap: before videogen_families existed there was no way to
+	// scope a leak away — an ltx25-bound box's text encoder could reach an
+	// overridden Wan render with no opt-out at all (bigger-models-2026-09-24.md).
+	fb := p.cfg.ResolveVideoFamilyBinding(renderFamily)
 
 	seed := paramIntOr(req.Params, "seed", 0)
 	if seed <= 0 {
@@ -2709,8 +2720,10 @@ func (p *Pipeline) runGenerateVideo(ctx context.Context, req core.Request, meta 
 	// Per-machine resolution/frame defaults (this box may run 720p; the 8GB laptop
 	// stays at the builder's 480p default). A per-request value always wins; a 0
 	// config default means "use the builder default". steps/seed have no machine
-	// default (map lookup -> 0 -> unaffected).
-	machineDefault := map[string]int{"width": p.cfg.VideoGenWidth, "height": p.cfg.VideoGenHeight, "frames": p.cfg.VideoGenFrames}
+	// default (map lookup -> 0 -> unaffected). Sourced from fb (the family that
+	// ACTUALLY renders), not the flat keys directly, so an explicit family
+	// override never inherits another family's resolution/frame defaults either.
+	machineDefault := map[string]int{"width": fb.Width, "height": fb.Height, "frames": fb.Frames}
 	for _, k := range []string{"frames", "width", "height", "steps", "seed"} {
 		v := paramIntOr(req.Params, k, 0)
 		if v <= 0 {
@@ -2727,45 +2740,59 @@ func (p *Pipeline) runGenerateVideo(ctx context.Context, req core.Request, meta 
 	}
 	// Per-machine Wan weight binding (quality-first): this box's configured expert weights
 	// + text encoder, by filename. Unset = the render script's defaults (unchanged).
-	if p.cfg.VideoGenUnetHigh != "" {
-		args = append(args, "--high-unet", p.cfg.VideoGenUnetHigh)
+	if fb.UnetHigh != "" {
+		args = append(args, "--high-unet", fb.UnetHigh)
 	}
-	if p.cfg.VideoGenUnetLow != "" {
-		args = append(args, "--low-unet", p.cfg.VideoGenUnetLow)
+	if fb.UnetLow != "" {
+		args = append(args, "--low-unet", fb.UnetLow)
 	}
-	if p.cfg.VideoGenTextEncoder != "" {
-		args = append(args, "--text-encoder", p.cfg.VideoGenTextEncoder)
+	if fb.TextEncoder != "" {
+		args = append(args, "--text-encoder", fb.TextEncoder)
 	}
 	// This card's DisTorch2 split for the Wan experts (GiB of each parked in RAM). A
 	// per-card measurement, so it is config, never a constant in the graph builder; only
 	// the Wan graph reads it. 0/negative passes nothing: the builder keeps its default.
-	if p.cfg.VideoGenWanVirtualVramGB > 0 {
-		args = append(args, "--wan-vvram-gb", strconv.FormatFloat(p.cfg.VideoGenWanVirtualVramGB, 'f', -1, 64))
+	if fb.WanVirtualVramGB > 0 {
+		args = append(args, "--wan-vvram-gb", strconv.FormatFloat(fb.WanVirtualVramGB, 'f', -1, 64))
+	}
+	// videogen_wan_loader (this box's, or the resolved family's, override): auto
+	// (unset) lets the builder decide per expert file by extension, unchanged.
+	if fb.WanLoader != "" {
+		args = append(args, "--wan-loader", fb.WanLoader)
 	}
 	// LTX-2.5 family bindings (quality-first weight binding, same pattern as the
 	// Wan flags above): filenames + fps + the pooled-DiT placement from config.
-	if p.cfg.VideoGenTransformer != "" {
-		args = append(args, "--transformer", p.cfg.VideoGenTransformer)
+	// Gap 5: an explicit per-request `transformer` param wins over this box's
+	// (or the resolved family's) bound file — a caller can pick e.g. the bf16
+	// LTX transformer for one hero render without a config edit (the study's
+	// recommendation: int8 default, bf16 opt-in). Harmless on any other family's
+	// graph, which never reads --transformer.
+	transformer := fb.Transformer
+	if t := paramStr(req.Params, "transformer"); t != "" {
+		transformer = t
 	}
-	if p.cfg.VideoGenVideoVAE != "" {
-		args = append(args, "--video-vae", p.cfg.VideoGenVideoVAE)
+	if transformer != "" {
+		args = append(args, "--transformer", transformer)
 	}
-	if p.cfg.VideoGenAudioVAE != "" {
-		args = append(args, "--audio-vae", p.cfg.VideoGenAudioVAE)
+	if fb.VideoVAE != "" {
+		args = append(args, "--video-vae", fb.VideoVAE)
 	}
-	if p.cfg.VideoGenLatentUpscaler != "" {
-		args = append(args, "--latent-upscaler", p.cfg.VideoGenLatentUpscaler)
+	if fb.AudioVAE != "" {
+		args = append(args, "--audio-vae", fb.AudioVAE)
 	}
-	if p.cfg.VideoGenFPS > 0 {
-		args = append(args, "--fps", strconv.Itoa(p.cfg.VideoGenFPS))
+	if fb.LatentUpscaler != "" {
+		args = append(args, "--latent-upscaler", fb.LatentUpscaler)
 	}
-	if p.cfg.VideoGenPoolVvramGB > 0 {
-		args = append(args, "--pool-vvram-gb", strconv.FormatFloat(p.cfg.VideoGenPoolVvramGB, 'f', -1, 64))
-		if p.cfg.VideoGenPoolCompute != "" {
-			args = append(args, "--pool-compute", p.cfg.VideoGenPoolCompute)
+	if fb.FPS > 0 {
+		args = append(args, "--fps", strconv.Itoa(fb.FPS))
+	}
+	if fb.PoolVvramGB > 0 {
+		args = append(args, "--pool-vvram-gb", strconv.FormatFloat(fb.PoolVvramGB, 'f', -1, 64))
+		if fb.PoolCompute != "" {
+			args = append(args, "--pool-compute", fb.PoolCompute)
 		}
-		if p.cfg.VideoGenPoolDonor != "" {
-			args = append(args, "--pool-donor", p.cfg.VideoGenPoolDonor)
+		if fb.PoolDonor != "" {
+			args = append(args, "--pool-donor", fb.PoolDonor)
 		}
 	}
 	// hero: native no-LoRA quality pass (per-request). upscale: use THIS machine's configured
@@ -2778,10 +2805,10 @@ func (p *Pipeline) runGenerateVideo(ctx context.Context, req core.Request, meta 
 	if paramBool(req.Params, "fast") {
 		args = append(args, "--fast")
 	}
-	if paramBool(req.Params, "upscale") && p.cfg.VideoGenUpscaleModel != "" {
-		args = append(args, "--upscale-model", p.cfg.VideoGenUpscaleModel)
-		if p.cfg.VideoGenUpscaleWidth > 0 && p.cfg.VideoGenUpscaleHeight > 0 {
-			args = append(args, "--upscale-width", strconv.Itoa(p.cfg.VideoGenUpscaleWidth), "--upscale-height", strconv.Itoa(p.cfg.VideoGenUpscaleHeight))
+	if paramBool(req.Params, "upscale") && fb.UpscaleModel != "" {
+		args = append(args, "--upscale-model", fb.UpscaleModel)
+		if fb.UpscaleWidth > 0 && fb.UpscaleHeight > 0 {
+			args = append(args, "--upscale-width", strconv.Itoa(fb.UpscaleWidth), "--upscale-height", strconv.Itoa(fb.UpscaleHeight))
 		}
 	}
 
@@ -2819,7 +2846,7 @@ func (p *Pipeline) runGenerateVideo(ctx context.Context, req core.Request, meta 
 	// nothing like it (measured: an int8-convrot LTX-2.5 render logged 24.1 GiB
 	// under Wan's key). The quant only means anything for the Wan GGUF recipe, so
 	// it is reported for that family alone rather than guessed for the others.
-	p.footprintSampling(videoFootprintFamily(renderFamily), videoFootprintQuant(p.cfg, renderFamily), "video-gen").ApplyTo(&spec)
+	p.footprintSampling(videoFootprintFamily(renderFamily), videoFootprintQuant(fb, renderFamily), "video-gen").ApplyTo(&spec)
 	outPath, gerr := gpugen.Generate(ctx, spec)
 	if gerr != nil {
 		meta.ErrClass = gpugen.ClassifyErr(gerr)
@@ -3764,9 +3791,11 @@ func videoFootprintFamily(renderFamily string) string {
 	return renderFamily
 }
 
-// videoFootprintQuant reports "q8_0" when this box's bound Wan expert weights
-// are the Q8_0 GGUFs, else "" (node default — fp8_scaled/fp16 bindings and the
-// script's own defaults).
+// videoFootprintQuant reports "q8_0" when the EFFECTIVE Wan expert weights for
+// the family that actually rendered (fb — the same per-family binding
+// runGenerateVideo resolved via ResolveVideoFamilyBinding, never the box's flat
+// keys directly) are the Q8_0 GGUFs, else "" (node default — fp8_scaled/fp16
+// bindings and the script's own defaults).
 //
 // It is scoped to the Wan family ON PURPOSE. The Wan GGUF keys stay bound on a
 // box whose seat is another family (they are the recorded fallback), so before
@@ -3774,14 +3803,21 @@ func videoFootprintFamily(renderFamily string) string {
 // int8-convrot — a quant the render never used, stamped on a store the fleet
 // reads. Other families carry their quant in their own weight filenames; until a
 // family declares one, "" (unknown) is the honest answer.
-func videoFootprintQuant(cfg config.Config, renderFamily string) string {
+//
+// Taking fb (not cfg) matters once videogen_families is in play: an operator
+// binding videogen_families["wan22"].unet_high on a box whose OWN default
+// family is something else must have THAT override reflected here — reading
+// the box's flat cfg.VideoGenUnetHigh/Low directly would report a quant that
+// does not match what the render actually used (the exact cross-family leak
+// class this PR's gap 1 fix exists to close everywhere else).
+func videoFootprintQuant(fb config.VideoFamilyBinding, renderFamily string) string {
 	// Gate on the CONFIG-namespace family, not on videoFootprintFamily's return:
 	// that helper now yields "wan2.2", so comparing it to the "wan22" sentinel
 	// would be false for every input and silently suppress the quant everywhere.
 	if renderFamily != "" && renderFamily != videoFamilyWanSentinel {
 		return ""
 	}
-	if strings.Contains(strings.ToUpper(cfg.VideoGenUnetHigh+cfg.VideoGenUnetLow), "Q8_0") {
+	if strings.Contains(strings.ToUpper(fb.UnetHigh+fb.UnetLow), "Q8_0") {
 		return "q8_0"
 	}
 	return ""
