@@ -188,6 +188,36 @@ Five harness defects from the OptiPlex 7060 (blackwell-8) media parity audit, 20
   that first slipped past a vacuous test comparing `protocolText()` with itself (replaced by fixed
   expectations).
 
+## [0.140.5] - 2026-09-23 - PAIR's Jobs list shows long media calls while they run, and a delegation reads "running" only once its seat works
+
+### Fixed — PAIR cards that said nothing, or said "Running" over an idle card
+
+Three gaps between what the fleet was doing and what NVIDIA PAIR's Jobs list showed, found
+against live cards on 2026-09-23 (docs/systems/pair-workloads.md).
+
+- **A long tool call now has a card while it runs.** A tool call reached PAIR only through its
+  ledger row, written when the call ENDS, so a ten-minute `animate_character` render on the
+  OptiPlex held its GPU at 100 % with no card at all. `Pipeline.Run` now opens a `running` card
+  when a media call starts (`pairworkloads.Emitter.Begin`, `internal/pairworkloads/calls.go`) and
+  the call's own ledger row closes THAT card: same id, engine and start, the row's model and
+  outcome. A call that writes no row (a cache hit) is closed by the return of `Run`, and a call that
+  panics closes it failed (`closeCall`) rather than as the zero result's "completed". Only tasks
+  whose engine the task alone decides open one (`comfyui`, `hyperframes`, `whispercpp` lanes):
+  PAIR keys a card on its engine, and a text or vision call learns llamacpp vs vllm only as it
+  runs, so those short calls keep the single terminal card.
+- **A delegation reads "running" only once the seat is working on it.** The running frame went
+  out at the node's ack (remote) or the hand-off to the runner (local), so the Qube's agent-pool
+  and the Lenovo 27B showed "Running" through a 2-minute seat load while their cards sat at
+  0 %. The card now stays `queued` through admission and cold load and turns `running` on the
+  first sign the seat is serving the request (`seatWorking`, `internal/delegate/pairevents.go`):
+  a streamed token, a decode, a tool call, a re-pack, or a prefill older than 8 s (the seat
+  probe names a load within 5 s). Remote runs read it from the poll's `progress`, local runs from
+  their own progress reports; a run that reports no progress at all turns running after 30 s. A
+  run that never worked closes with no `startedAt`.
+- The third gap was configuration, not code: the OptiPlex's config lacked
+  `pair_workloads_enabled`, so none of its own calls ever reached PAIR. Enabled there
+  (backup `config.json.pre-pair-workloads`); it serves no delegations, so no job shows twice.
+
 ## [0.140.4] - 2026-09-23 - four media-lane defects from the OptiPlex remediation: animate_character's silent no-op, a crop at the origin, sdcpp's iGPU pin, an untyped audio timeout
 
 Four defects surfaced by the OptiPlex 7060 media-lane remediation (2026-09-23), each reproduced from the

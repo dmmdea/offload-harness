@@ -411,7 +411,10 @@ func openPipeline(cfg config.Config) (*pipeline.Pipeline, func(), error) {
 	// pair_workloads_enabled and PAIR is installed on this box.
 	pair := pairworkloads.New(pairworkloads.FromConfig(cfg))
 	pair.AttachLedger(led)
-	return pipeline.New(cfg, client, ca, led), func() {
+	p := pipeline.New(cfg, client, ca, led)
+	// A long media call opens its card when it starts (calls.go).
+	p.SetCallTracker(pair)
+	return p, func() {
 		if ca != nil {
 			ca.Close()
 		}
