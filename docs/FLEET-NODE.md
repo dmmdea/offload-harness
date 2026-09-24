@@ -150,6 +150,16 @@ Three measured gotchas the template encodes — do not "simplify" them away:
    the OLD process keeps serving the OLD config, while the task reports success. To pick up a
    config change: kill the `local-offload` process, then start the task.
 
+**Swapping this node's binary to a new release: use `local-offload node-swap`, launched via
+`setup/windows-node-swap-launch.ps1`, never a hand-adapted one-off script.** It verifies the
+staged exe's hash, waits for the queue to be idle, stops the task, renames the old exe to a
+backup (diagnosing and clearing only an idle MCP-helper holder if the rename fails — never a
+live server), installs the new one, restarts the task, and proves the swap by PID + running
+image sha256 + `/fleet/health` within a timeout — rolling back automatically on any failure.
+Launched through the WMI/CIM path, it survives the launching SSH session ending, which a
+`Start-Process`-based script does not (see [systems/node-swap.md](systems/node-swap.md) for
+the 2026-09-24 outage this replaces the risk of repeating).
+
 The advertisement (`/fleet/health` `supported_task_types`) is derived from the node's OWN
 config at process start — a route bound in the config after the process started (e.g. adding
 `imagegen_script`) does not advertise until the process is restarted the hard way above.

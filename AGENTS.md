@@ -32,6 +32,9 @@ Detailed documentation lives in `docs/`. This file only routes you there.
   guards that fail closed, and the `placed` block every result carries.
 - [`docs/systems/fleet-overview.md`](docs/systems/fleet-overview.md) — `fleet-ui` / `top` /
   `fleet-smoke`: the read-only operator page on the delegator, its poller, and the jobs/errors feeds.
+- [`docs/systems/node-swap.md`](docs/systems/node-swap.md) — `node-swap`: the reusable Windows
+  fleet-node binary/render-tree swap tool (hash verify, idle wait, backup+rename, restart,
+  verify, automatic rollback) and its detached, SSH-drop-proof launcher.
 - [`docs/systems/opencode-integration.md`](docs/systems/opencode-integration.md) — the harness inside
   opencode: MCP registration, rules parity, and the `opencode-local-offload` plugin.
 - [`docs/architecture/decisions/`](docs/architecture/decisions/README.md) — Architecture Decision

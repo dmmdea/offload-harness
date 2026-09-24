@@ -170,6 +170,8 @@ func main() {
 		err = runHealth(args)
 	case "gpu":
 		err = runGPU(args)
+	case "node-swap":
+		err = runNodeSwap(args)
 	case "train-router":
 		err = runTrainRouter(args)
 	case "shadow-label":
@@ -308,6 +310,8 @@ Usage:
   local-offload stats                    observational per-task ledger telemetry
   local-offload loupe [--since N] [--json]  call-identity ledger view: duplicate rate,
                                          prefix reuse, exemplar histogram, artifact A/B arms
+  local-offload node-swap --staged NEW.exe --target LIVE.exe --sha256 HEX [--restart-task NAME | --restart-command "..."] [--health-url URL] [--render-tarball t.tar.gz --render-dir DIR] [--dry-run] [--result out.json] [--log out.log] [--json]
+                                         the reusable Windows fleet-node binary swap: verify hash -> wait idle -> backup+rename -> restart -> verify PID+hash+health -> auto-rollback on any failure (docs/systems/node-swap.md; launch detached via setup/windows-node-swap-launch.ps1 so an SSH drop cannot orphan it)
   local-offload version
 
 Global: --config <path> (or $LOCAL_OFFLOAD_CONFIG)
