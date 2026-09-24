@@ -185,6 +185,7 @@
   "audiogen_timeout_sec": 720,
   "gpu_wait_ms": 90000,
   "gpu_lock_path": "",
+  "foreign_gpu_min_mib": 0,
   "home": "",
   "state_dir": "",
   "vision_gpu_wait_sec": 90,
