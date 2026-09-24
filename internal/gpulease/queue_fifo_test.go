@@ -185,6 +185,19 @@ func TestSeatWaiterBlocksANewAcquireUntilItUnregisters(t *testing.T) {
 	}
 
 	refresh, unregister := RegisterSeatWaiter(m.leaseDir(), "transcribe voice_es.wav")
+	// Guarantee the seat waiter's SinceMs (millisecond resolution) strictly
+	// precedes the media Acquire's own registration below — found live on
+	// CI (a fast Linux runner, 2026-09-24): with no gap, RegisterSeatWaiter
+	// and the media goroutine's own registerWaiter call (after Release, a
+	// fresh goroutine spawn, and Acquire's own setup) could land in the SAME
+	// millisecond, and waiterBefore's tie-break (the random file-name token)
+	// is then a coin flip — the documented, ACCEPTED behaviour for a real
+	// same-millisecond tie (see waiterBefore's doc and
+	// TestTiedWaitersResolveToExactlyOneFrontOfQueue), but not what THIS
+	// test needs to pin the ordering it claims to test. Matches the same
+	// stagger TestReturningHolderCannotJumpAnAlreadyRegisteredWaiter already
+	// uses for the same reason.
+	time.Sleep(5 * time.Millisecond)
 	stop := make(chan struct{})
 	refreshDone := make(chan struct{})
 	go func() {
