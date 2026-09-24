@@ -109,7 +109,12 @@ rollback branch is unit-tested with fakes, no real Windows box required):
 4. **Backup the old binary** — rename `Target` to `Target.bak-<suffix>`. On failure, enumerate
    holders via CIM (`Win32_Process` filtered by `ExecutablePath`); stop only an idle MCP
    holder and retry once; anything else is reported, never touched.
-5. **Install the new binary** — rename `Staged` over `Target`.
+5. **Install the new binary** — rename `Staged` over `Target`. When the two paths are on
+   different volumes/filesystems (Windows: a different drive letter; Linux/macOS: EXDEV), the
+   plain rename cannot cross that boundary — falls back to copying `Staged` into a temp file
+   next to `Target` (same directory, so the final move is same-device), re-hashing the copy
+   before trusting it, and cleaning up the temp file on any failure (2026-09-24 Aorus rollout:
+   staged at `C:\tmp\` against a `D:\` target rolled back cleanly but never actually swapped).
 6. **Optional render-tree swap** — backup the render dir, extract the tarball, verify at least
    one file landed; any failure here rolls the whole run back (binary included).
 7. **Restart** — `Start-ScheduledTask`, or run `--restart-command` (e.g. the Qube's
@@ -164,6 +169,19 @@ when step 4 itself failed — nothing was ever moved, so the original binary is 
   Linux equivalent of the Windows launcher's `-RestartTask` (a systemd unit restart, e.g.
   `systemctl restart offload-fleet-node.service`, matching every deploy record's own
   pattern); omitting it (and `--health-url`) is the standalone/OptiPlex-on-Linux shape.
+- **Both launchers' `--runner-exe`/`-RunnerExe` default to the STAGED binary** (the engine
+  actually being deployed), never the currently-installed one — verified against
+  `--sha256`/`-Sha256` by the launcher itself before it ever runs, since node-swap's own hash
+  check happens INSIDE the process the launcher is about to start. Falls back to the
+  currently-installed binary, with a clear log line, only when the staged build does not
+  support the `node-swap` subcommand at all (a very old staged build). This matters because a
+  fix TO the swap engine (like the cross-device fallback above) cannot take effect while a
+  launcher keeps running the OLD installed code to perform the swap — the exact 2026-09-24
+  failure mode on the Lenovo/binxarn: their installed build still carried the pre-fix
+  `deps_other.go` stub, so running node-swap FROM it re-triggered the very bug the staged build
+  had already fixed. `resolve_runner_exe`/`Resolve-RunnerExe` in each launcher are the
+  unit-tested seam (`setup/linux-node-swap-launch.tests.sh`,
+  `setup/windows-node-swap-launch.ps1 -SelfTest`).
 
 ## Dependencies
 
@@ -191,6 +209,10 @@ Go panic.
   `--no-rollback` exists for tests only and is never set in production.
 - `Deps` has no direct filesystem/process calls outside `internal/nodeswap/deps*.go` — the
   sequencing in `nodeswap.go` is OS-agnostic and fully fake-testable by design.
+- A cross-device copy (step 5's fallback) is never trusted on bytes-landed-somewhere alone: its
+  sha256 is re-verified against the staged binary's own hash before the temp file is renamed
+  into place, and the temp file is removed on any failure along that path — a corrupted or
+  incomplete copy is treated exactly like a rename failure, never installed.
 
 ## Error handling
 
@@ -223,12 +245,19 @@ install-new failure -> restore + restart, restart failure -> rollback, verify fa
 rollback, a rollback whose OWN restore fails surfacing `RollbackOK:false` rather than a false
 recovery, render-tree swap rolled back on a later failure, standalone-node hash-only
 verification, the standalone GPU-lease wait clearing/timing out, `backupPathFor`'s
-doubled-`bak-` guard) and the real
+doubled-`bak-` guard, the cross-device install fallback — happy path, copy failure, corruption
+caught before install, an ordinary rename failure never taking the copy path, and a Deps with
+no fallback wired surfacing the original error unchanged) and the real
 cross-platform primitives (hashing, health-read incl. the pre-0.100.0 `queue_depth` fallback,
-tar.gz extraction incl. a path-escape refusal). `node_swap_cmd_test.go` covers CLI flag
+tar.gz extraction incl. a path-escape refusal, `copyFile`, and `isCrossDeviceRenameErr` against
+both a synthetic Linux `EXDEV` and — on Windows only — a synthetic and a REAL cross-drive
+rename's `ERROR_NOT_SAME_DEVICE`). `node_swap_cmd_test.go` covers CLI flag
 parsing. Everything above builds and passes on both `GOOS=linux` (CI) and `GOOS=windows`
 (cross-compiled) — see `internal/nodeswap/deps_windows.go` / `deps_other.go` for the
-platform split `crossplatform_lint_test.go` expects.
+platform split `crossplatform_lint_test.go` expects. The launchers' own runner-selection logic
+is covered separately by `setup/linux-node-swap-launch.tests.sh` (CI, ubuntu-latest) and
+`setup/windows-node-swap-launch.tests.ps1` (CI, `installer-windows`) — both synthetic/fake-only,
+no real binary or fleet node needed.
 
 ## Common pitfalls
 
@@ -248,6 +277,15 @@ platform split `crossplatform_lint_test.go` expects.
   leading `bak-` before prepending its own, so this no longer doubles into
   `<target>.bak-bak-...`; harmless either way (the backup is still found and restored by
   its exact name), but the plain suffix (`2026-09-24-pre-<sha>`) reads cleaner.
+- Staging the new binary on a different drive/filesystem than `--target` (e.g. `C:\tmp\` while
+  the node runs from `D:\`) — no longer a hard stop: step 5 falls back to a verified copy into
+  `--target`'s own directory. Still worth staging on the SAME volume when practical (a plain
+  rename is faster and needs no extra disk headroom for the temp copy).
+- Relying on a launcher's `--runner-exe`/`-RunnerExe` default without upgrading the node
+  first — no longer applicable: both launchers now default to the STAGED (new) binary,
+  hash-verified, so a fix landing in the very build being staged takes effect on the FIRST
+  swap that uses it, not the one after. `--runner-exe`/`-RunnerExe` still exists to force a
+  specific exe when that default is wrong for some other reason.
 
 ## Source map
 
@@ -259,8 +297,12 @@ platform split `crossplatform_lint_test.go` expects.
   `taskkill` split.
 - `node_swap_cmd.go` — the CLI (`local-offload node-swap`), the config-driven
   `--health-url`/GPU-lease-path auto-resolve (`resolveNodeSwapDefaults`).
-- `setup/windows-node-swap-launch.ps1` — the Windows detached launcher.
-- `setup/linux-node-swap-launch.sh` — the Linux detached launcher.
+- `setup/windows-node-swap-launch.ps1` — the Windows detached launcher, incl.
+  `Resolve-RunnerExe`/`Test-NodeSwapSupport` (runner selection) and its own `-SelfTest`.
+- `setup/linux-node-swap-launch.sh` — the Linux detached launcher, incl. `resolve_runner_exe`/
+  `real_supports_node_swap` (runner selection); only runs `main` when executed directly (see
+  its `BASH_SOURCE` guard), so `setup/linux-node-swap-launch.tests.sh` can `source` it for
+  fake-driven unit tests.
 
 ## Related docs
 

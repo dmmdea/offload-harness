@@ -193,6 +193,23 @@ type Deps struct {
 	ExtractTarGz       func(tarGzPath, destDir string) (filesWritten int, err error)
 	Sleep              func(d time.Duration)
 	Now                func() time.Time
+
+	// CopyFile and IsCrossDeviceRenameErr back installNewBinary's fallback
+	// for a same-directory-only rename: RenameFile(Staged, Target) fails
+	// outright when the two paths are not on the same volume/filesystem
+	// (Windows: a different drive letter — "The system cannot move the file
+	// to a different disk drive"; Linux/macOS: EXDEV, "invalid cross-device
+	// link"). The 2026-09-24 Aorus rollout hit this staging the new exe at
+	// C:\tmp\ against a D:\ target: the swap rolled back cleanly, but never
+	// happened. IsCrossDeviceRenameErr classifies a RenameFile error as this
+	// specific, recoverable shape (never any other failure); CopyFile
+	// performs the byte-for-byte copy installNewBinary re-hashes before
+	// trusting it. Either left nil (an older caller's Deps, or a test that
+	// only exercises the same-device path) makes installNewBinary behave
+	// exactly as before this fallback existed: the original rename error
+	// surfaces unchanged, never a silent no-op.
+	CopyFile               func(src, dst string) error
+	IsCrossDeviceRenameErr func(err error) bool
 }
 
 // Logger is the minimal --log sink: every step and every rollback action is
@@ -354,8 +371,10 @@ func Run(ctx context.Context, plan Plan, deps Deps, log *Logger) Outcome {
 	// 5. Move the new binary into place. A failure here ALSO happens after
 	// stop-node, so it routes through the same rollback (which restores
 	// backupPath -> Target, then restarts and verifies) instead of the
-	// restore-only-no-restart handling this used to have.
-	if err := deps.RenameFile(plan.Staged, plan.Target); err != nil {
+	// restore-only-no-restart handling this used to have. installNewBinary
+	// transparently falls back to a verified copy when Staged and Target are
+	// on different volumes (see CopyFile/IsCrossDeviceRenameErr above).
+	if err := installNewBinary(plan, deps, log, backupSuffix); err != nil {
 		r := rollback(ctx, plan, deps, log, backupPath, "", fmt.Sprintf("moving staged binary into place: %v", err))
 		return mergeAndFail(r)
 	}
@@ -599,6 +618,64 @@ func renameWithRetry(plan Plan, deps Deps, log *Logger, from, to string) error {
 	if rerr := deps.RenameFile(from, to); rerr != nil {
 		return fmt.Errorf("rename still failed after stopping idle holder(s) %v: %v (also holding: %s)", stopped, rerr, strings.Join(left, "; "))
 	}
+	return nil
+}
+
+// installNewBinary moves the staged binary into place (Run's step 5). The
+// common case is a same-device rename: fast and atomic, deps.RenameFile
+// succeeds on the first try and this returns immediately.
+//
+// When Staged and Target are staged on different volumes — Windows: a
+// different drive letter (os.Rename fails with "The system cannot move the
+// file to a different disk drive", raw Win32 ERROR_NOT_SAME_DEVICE; Linux/
+// macOS: EXDEV, "invalid cross-device link") — it falls back to copying the
+// staged binary into a temp file next to Target, IN TARGET'S OWN DIRECTORY
+// (same-device by construction, so the final move can use the fast rename
+// path), re-hashing the copy before ever trusting it, and cleaning up the
+// temp file on any failure along the way: a copy that fails outright, or one
+// that silently corrupts in transit, is treated exactly like a rename
+// failure — never installed. suffix names the temp file (".new-<suffix>",
+// the same run-suffix Run's backup file uses) so concurrent runs against the
+// same Target never collide.
+//
+// A Deps with IsCrossDeviceRenameErr or CopyFile left nil (an older caller,
+// or a test exercising only the same-device path) gets the ORIGINAL rename
+// error back unchanged — this is a fallback, never a silent no-op.
+func installNewBinary(plan Plan, deps Deps, log *Logger, suffix string) error {
+	renameErr := deps.RenameFile(plan.Staged, plan.Target)
+	if renameErr == nil {
+		return nil
+	}
+	if deps.IsCrossDeviceRenameErr == nil || !deps.IsCrossDeviceRenameErr(renameErr) {
+		return renameErr
+	}
+	if deps.CopyFile == nil {
+		return fmt.Errorf("staged binary is on a different volume than the target (%v) and no cross-device copy fallback is wired", renameErr)
+	}
+	log.Printf("install-new: rename failed (%v) — %s and %s are on different volumes; copying instead", renameErr, plan.Staged, plan.Target)
+	srcHash, err := deps.Hash(plan.Staged)
+	if err != nil {
+		return fmt.Errorf("rename failed (%v) and re-hashing the staged binary for a cross-device copy also failed: %v", renameErr, err)
+	}
+	tmp := plan.Target + ".new-" + suffix
+	if err := deps.CopyFile(plan.Staged, tmp); err != nil {
+		_ = deps.RemoveAll(tmp)
+		return fmt.Errorf("cross-device copy of staged binary failed: %v (original rename error: %v)", err, renameErr)
+	}
+	gotHash, err := deps.Hash(tmp)
+	if err != nil {
+		_ = deps.RemoveAll(tmp)
+		return fmt.Errorf("hashing the cross-device copy failed: %v", err)
+	}
+	if !strings.EqualFold(gotHash, srcHash) {
+		_ = deps.RemoveAll(tmp)
+		return fmt.Errorf("cross-device copy corrupted in transit: copy sha256 %s does not match staged binary's %s", gotHash, srcHash)
+	}
+	if err := deps.RenameFile(tmp, plan.Target); err != nil {
+		_ = deps.RemoveAll(tmp)
+		return fmt.Errorf("installing the verified cross-device copy failed: %v", err)
+	}
+	log.Printf("install-new: cross-device copy verified (sha256 %s) and installed at %s", gotHash, plan.Target)
 	return nil
 }
 

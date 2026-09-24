@@ -31,7 +31,25 @@ type fakeState struct {
 	renameFailOnce  map[string]bool
 	clock           time.Time
 	launchOnRestart func()
+
+	// crossDeviceRenameOnce/copyFail/copyCorrupt drive installNewBinary's
+	// cross-device fallback (nodeswap.go): a path in crossDeviceRenameOnce
+	// makes RenameFile fail exactly once with errFakeCrossDevice (the fake's
+	// stand-in for a real "different disk drive"/EXDEV error — see
+	// IsCrossDeviceRenameErr below), copyFail/copyCorrupt make the
+	// subsequent CopyFile fail outright or silently corrupt the bytes.
+	crossDeviceRenameOnce map[string]bool
+	copyFail              bool
+	copyCorrupt           bool
 }
+
+// errFakeCrossDevice stands in for the real, platform-specific cross-device
+// rename error (Windows ERROR_NOT_SAME_DEVICE / Linux EXDEV) that
+// isCrossDeviceRenameErr (deps.go) actually decodes on a live OS — see
+// TestIsCrossDeviceRenameErr_EXDEV / _WindowsErrno17 in deps_test.go for
+// that real decoding. Here, Run-level tests only need SOME error the fake's
+// own IsCrossDeviceRenameErr recognizes as this specific, recoverable shape.
+var errFakeCrossDevice = errors.New("fake: cannot move the file to a different disk drive")
 
 // launchOnRestartFn registers a callback fired every time RunCommand runs a
 // Start-ScheduledTask (i.e. every restart attempt, including rollback's own
@@ -41,10 +59,11 @@ func (s *fakeState) launchOnRestartFn(fn func()) { s.launchOnRestart = fn }
 
 func newFakeState() *fakeState {
 	return &fakeState{
-		files:          map[string]string{},
-		stopFail:       map[int]bool{},
-		renameFailOnce: map[string]bool{},
-		clock:          time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+		files:                 map[string]string{},
+		stopFail:              map[int]bool{},
+		renameFailOnce:        map[string]bool{},
+		crossDeviceRenameOnce: map[string]bool{},
+		clock:                 time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
 	}
 }
 
@@ -86,6 +105,10 @@ func (s *fakeState) deps() Deps {
 			return nil
 		},
 		RenameFile: func(oldPath, newPath string) error {
+			if s.crossDeviceRenameOnce[oldPath] {
+				delete(s.crossDeviceRenameOnce, oldPath)
+				return errFakeCrossDevice
+			}
 			if s.renameFailOnce[oldPath] {
 				delete(s.renameFailOnce, oldPath)
 				return errors.New("Access is denied")
@@ -97,6 +120,23 @@ func (s *fakeState) deps() Deps {
 			delete(s.files, oldPath)
 			s.files[newPath] = h
 			return nil
+		},
+		CopyFile: func(src, dst string) error {
+			if s.copyFail {
+				return errors.New("fake: copy failed")
+			}
+			h, ok := s.files[src]
+			if !ok {
+				return errors.New("copy: source missing: " + src)
+			}
+			if s.copyCorrupt {
+				h += "-CORRUPTED"
+			}
+			s.files[dst] = h
+			return nil
+		},
+		IsCrossDeviceRenameErr: func(err error) bool {
+			return errors.Is(err, errFakeCrossDevice)
 		},
 		RemoveAll: func(path string) error {
 			delete(s.files, path)
@@ -438,6 +478,188 @@ func TestRun_InstallNewFailureRestartsOldBinary(t *testing.T) {
 	}
 	if s.restartCalled == 0 {
 		t.Error("expected the node to be restarted after the failed install — the bug this fix closes left it down with the file restored but nothing running")
+	}
+}
+
+// TestRun_CrossDeviceInstallCopiesVerifiesAndInstalls pins the fallback
+// itself: when RenameFile(staged, target) fails with a cross-device error
+// (Windows: a different drive letter; Linux: EXDEV), Run copies the staged
+// binary into place instead, re-verifies the copy's sha256 before trusting
+// it, and installs from there — the 2026-09-24 Aorus rollout's "staged at
+// C:\tmp\ against a D:\ target" case, which used to roll back cleanly but
+// never actually swap anything.
+func TestRun_CrossDeviceInstallCopiesVerifiesAndInstalls(t *testing.T) {
+	s := newFakeState()
+	s.files["staged.exe"] = "NEWHASH"
+	s.files["target.exe"] = "OLDHASH"
+	s.crossDeviceRenameOnce["staged.exe"] = true
+
+	plan := Plan{Staged: "staged.exe", Target: "target.exe", ExpectedSHA256: "NEWHASH", BackupSuffix: "t"}
+	out := Run(context.Background(), plan, s.deps(), NewLogger(nil))
+	if !out.OK {
+		t.Fatalf("expected the cross-device copy fallback to succeed, got error=%q steps=%+v", out.Error, out.Steps)
+	}
+	if s.files["target.exe"] != "NEWHASH" {
+		t.Errorf("target.exe = %q, want NEWHASH installed via the copy fallback", s.files["target.exe"])
+	}
+	// This is a COPY fallback, not a move: the original staged.exe must be
+	// left in place (only the temporary .new- copy is consumed by the final
+	// same-device rename).
+	if s.files["staged.exe"] != "NEWHASH" {
+		t.Errorf("staged.exe should be left untouched by the copy fallback, got %q", s.files["staged.exe"])
+	}
+	for path := range s.files {
+		if strings.Contains(path, ".new-") {
+			t.Errorf("temporary cross-device copy %q should have been consumed by the final rename, not left behind", path)
+		}
+	}
+}
+
+// TestRun_CrossDeviceCopyFailureRollsBack: the copy itself fails (disk full,
+// permission, whatever) after the cross-device rename was already detected —
+// Run must roll back exactly like any other install-new failure, and must
+// never leave a partial temp file behind.
+func TestRun_CrossDeviceCopyFailureRollsBack(t *testing.T) {
+	s := newFakeState()
+	s.files["staged.exe"] = "NEWHASH"
+	s.files["target.exe"] = "OLDHASH"
+	s.crossDeviceRenameOnce["staged.exe"] = true
+	s.copyFail = true
+	s.health = func() (HealthInfo, error) { return HealthInfo{OK: true}, nil }
+	newPID := 950
+	s.launchOnRestartFn(func() {
+		s.procs = append(s.procs, ProcessInfo{PID: newPID, CommandLine: "target.exe fleet-serve", ExecutablePath: "target.exe"})
+	})
+
+	plan := Plan{
+		Staged: "staged.exe", Target: "target.exe", ExpectedSHA256: "NEWHASH",
+		HealthURL: "http://node/fleet/health", RestartTaskName: "offload-fleet-node",
+		BackupSuffix: "t", RestartTimeout: time.Second,
+	}
+	out := Run(context.Background(), plan, s.deps(), NewLogger(nil))
+	if out.OK {
+		t.Fatal("expected failure: the cross-device copy itself failed")
+	}
+	if !out.RolledBack || !out.RollbackOK {
+		t.Fatalf("expected a successful recovery restart, got RolledBack=%v RollbackOK=%v error=%q", out.RolledBack, out.RollbackOK, out.Error)
+	}
+	if s.files["target.exe"] != "OLDHASH" {
+		t.Errorf("target.exe = %q, want OLDHASH restored", s.files["target.exe"])
+	}
+	for path := range s.files {
+		if strings.Contains(path, ".new-") {
+			t.Errorf("temporary cross-device copy %q was not cleaned up after the failure", path)
+		}
+	}
+}
+
+// TestRun_CrossDeviceCopyCorruptionIsCaughtBeforeInstall pins the
+// re-verify-the-copy's-sha256 requirement directly: a copy that silently
+// corrupts in transit must never be trusted just because bytes landed
+// somewhere. Run must catch the mismatch, clean up the temp file, and roll
+// back exactly as if the copy step had failed outright.
+func TestRun_CrossDeviceCopyCorruptionIsCaughtBeforeInstall(t *testing.T) {
+	s := newFakeState()
+	s.files["staged.exe"] = "NEWHASH"
+	s.files["target.exe"] = "OLDHASH"
+	s.crossDeviceRenameOnce["staged.exe"] = true
+	s.copyCorrupt = true
+	s.health = func() (HealthInfo, error) { return HealthInfo{OK: true}, nil }
+	newPID := 951
+	s.launchOnRestartFn(func() {
+		s.procs = append(s.procs, ProcessInfo{PID: newPID, CommandLine: "target.exe fleet-serve", ExecutablePath: "target.exe"})
+	})
+
+	plan := Plan{
+		Staged: "staged.exe", Target: "target.exe", ExpectedSHA256: "NEWHASH",
+		HealthURL: "http://node/fleet/health", RestartTaskName: "offload-fleet-node",
+		BackupSuffix: "t", RestartTimeout: time.Second,
+	}
+	out := Run(context.Background(), plan, s.deps(), NewLogger(nil))
+	if out.OK {
+		t.Fatal("expected failure: the cross-device copy was corrupted in transit")
+	}
+	if !strings.Contains(out.Error, "corrupted") {
+		t.Errorf("Error = %q, want it to explain the copy was corrupted", out.Error)
+	}
+	if !out.RolledBack || !out.RollbackOK {
+		t.Fatalf("expected a successful recovery restart, got RolledBack=%v RollbackOK=%v error=%q", out.RolledBack, out.RollbackOK, out.Error)
+	}
+	if s.files["target.exe"] != "OLDHASH" {
+		t.Errorf("target.exe = %q, want OLDHASH restored", s.files["target.exe"])
+	}
+	for path := range s.files {
+		if strings.Contains(path, ".new-") {
+			t.Errorf("temporary cross-device copy %q was not cleaned up after the corruption was caught", path)
+		}
+	}
+}
+
+// TestRun_OrdinaryRenameFailureNeverAttemptsCrossDeviceCopy pins the guard
+// the other way: an ORDINARY install-new failure (not cross-device — e.g. a
+// genuinely missing/locked source) must never take the copy fallback at
+// all, so CopyFile is never even called, and the original error surfaces
+// unchanged — exactly the pre-fix TestRun_InstallNewFailureRestartsOldBinary
+// behavior, now proven to still hold with the fallback wired in.
+func TestRun_OrdinaryRenameFailureNeverAttemptsCrossDeviceCopy(t *testing.T) {
+	s := newFakeState()
+	s.files["target.exe"] = "OLDHASH"
+	// staged.exe deliberately absent: RenameFile(staged, target) fails with
+	// an ordinary "source missing" error, which the fake's
+	// IsCrossDeviceRenameErr must reject (it only recognizes
+	// errFakeCrossDevice).
+	s.health = func() (HealthInfo, error) { return HealthInfo{OK: true}, nil }
+	newPID := 952
+	s.launchOnRestartFn(func() {
+		s.procs = append(s.procs, ProcessInfo{PID: newPID, CommandLine: "target.exe fleet-serve", ExecutablePath: "target.exe"})
+	})
+	d := s.deps()
+	copyCalled := false
+	realCopy := d.CopyFile
+	d.CopyFile = func(src, dst string) error {
+		copyCalled = true
+		return realCopy(src, dst)
+	}
+
+	plan := Plan{
+		Staged: "staged.exe", Target: "target.exe", ExpectedSHA256: "OLDHASH", SkipHashCheck: true,
+		HealthURL: "http://node/fleet/health", RestartTaskName: "offload-fleet-node",
+		BackupSuffix: "t", RestartTimeout: time.Second,
+	}
+	out := Run(context.Background(), plan, d, NewLogger(nil))
+	if out.OK {
+		t.Fatal("expected failure: install-new itself failed (staged.exe missing)")
+	}
+	if copyCalled {
+		t.Error("CopyFile must never be called for a non-cross-device rename failure")
+	}
+	if !strings.Contains(out.Error, "source missing") {
+		t.Errorf("Error = %q, want the original rename error preserved unchanged", out.Error)
+	}
+}
+
+// TestRun_NilCrossDeviceHooksSurfaceTheOriginalErrorUnchanged covers a Deps
+// with no CopyFile/IsCrossDeviceRenameErr wired at all (an older caller, or
+// any test that only exercises the same-device path elsewhere in this
+// file): installNewBinary must degrade to the pre-fix behavior — the
+// original rename error, unchanged — rather than panicking on a nil func
+// value or silently swallowing the failure.
+func TestRun_NilCrossDeviceHooksSurfaceTheOriginalErrorUnchanged(t *testing.T) {
+	s := newFakeState()
+	s.files["staged.exe"] = "NEWHASH"
+	s.files["target.exe"] = "OLDHASH"
+	s.crossDeviceRenameOnce["staged.exe"] = true
+	d := s.deps()
+	d.IsCrossDeviceRenameErr = nil
+	d.CopyFile = nil
+
+	plan := Plan{Staged: "staged.exe", Target: "target.exe", ExpectedSHA256: "NEWHASH", BackupSuffix: "t"}
+	out := Run(context.Background(), plan, d, NewLogger(nil))
+	if out.OK {
+		t.Fatal("expected failure: no cross-device fallback wired, the cross-device error must surface unchanged")
+	}
+	if !strings.Contains(out.Error, "cannot move the file to a different disk drive") {
+		t.Errorf("Error = %q, want the original cross-device error preserved (no fallback wired)", out.Error)
 	}
 }
 

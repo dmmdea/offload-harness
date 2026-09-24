@@ -14,7 +14,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/gpulease"
@@ -28,17 +30,19 @@ import (
 // crossplatform_lint_test.go convention.
 func DefaultDeps() Deps {
 	d := Deps{
-		Hash:            hashFile,
-		ReadHealth:      readHealth,
-		InspectGPULease: inspectGPULease,
-		RenameFile:      renameFile,
-		RemoveAll:       os.RemoveAll,
-		Exists:          fileExists,
-		MkdirAll:        func(path string) error { return os.MkdirAll(path, 0o755) },
-		RunCommand:      runPowerShell,
-		ExtractTarGz:    extractTarGz,
-		Sleep:           time.Sleep,
-		Now:             time.Now,
+		Hash:                   hashFile,
+		ReadHealth:             readHealth,
+		InspectGPULease:        inspectGPULease,
+		RenameFile:             renameFile,
+		CopyFile:               copyFile,
+		IsCrossDeviceRenameErr: isCrossDeviceRenameErr,
+		RemoveAll:              os.RemoveAll,
+		Exists:                 fileExists,
+		MkdirAll:               func(path string) error { return os.MkdirAll(path, 0o755) },
+		RunCommand:             runPowerShell,
+		ExtractTarGz:           extractTarGz,
+		Sleep:                  time.Sleep,
+		Now:                    time.Now,
 	}
 	platformDeps(&d)
 	return d
@@ -70,6 +74,71 @@ func hashFile(path string) (string, error) {
 // retries, this stays a thin wrapper.
 func renameFile(oldPath, newPath string) error {
 	return os.Rename(oldPath, newPath)
+}
+
+// copyFile is CopyFile's real implementation, used only on installNewBinary's
+// cross-device rename fallback (nodeswap.go): a plain byte-for-byte copy that
+// preserves the source's file mode (the staged binary must keep +x on Linux)
+// and Syncs before Close so every byte is actually on disk before the caller
+// re-hashes it. The destination is created fresh (O_EXCL): installNewBinary
+// always names it with a run-unique suffix, so an existing file at that path
+// is unexpected and safer to refuse than to silently overwrite.
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	info, err := in.Stat()
+	if err != nil {
+		return err
+	}
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_EXCL|os.O_WRONLY, info.Mode().Perm())
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		return err
+	}
+	if err := out.Sync(); err != nil {
+		out.Close()
+		return err
+	}
+	return out.Close()
+}
+
+// isCrossDeviceRenameErr is IsCrossDeviceRenameErr's real implementation. It
+// reports whether err is the specific, recoverable "source and destination
+// are not on the same volume/filesystem" rename failure — never any other
+// error — so installNewBinary can safely fall back to a copy for exactly
+// this shape and nothing else.
+//
+// On Linux/macOS this is syscall.EXDEV ("invalid cross-device link"),
+// exactly what a real os.Rename across a mount boundary returns.
+//
+// On Windows this is NOT syscall.EXDEV, despite the name: the E* constants
+// the Go windows syscall package defines (EXDEV included) are "invented
+// values" in the reserved APPLICATION_ERROR range, for package os's
+// internal use, and are never actually returned by any real Win32 API
+// (measured on a live cross-drive os.Rename, C:\ staged against a D:\
+// target — the exact 2026-09-24 Aorus rollout failure: errors.Is(err,
+// syscall.EXDEV) is false; the error unwraps to syscall.Errno(17),
+// ERROR_NOT_SAME_DEVICE, "The system cannot move the file to a different
+// disk drive"). errno 17 is checked only when actually running on Windows —
+// on every other OS it is just some other errno with no special meaning.
+func isCrossDeviceRenameErr(err error) bool {
+	if errors.Is(err, syscall.EXDEV) {
+		return true
+	}
+	if runtime.GOOS == "windows" {
+		const errorNotSameDevice = 17
+		var errno syscall.Errno
+		if errors.As(err, &errno) {
+			return errno == errorNotSameDevice
+		}
+	}
+	return false
 }
 
 // fleetHealthResponse is the subset of GET /fleet/health this package reads
