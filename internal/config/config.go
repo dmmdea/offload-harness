@@ -978,6 +978,12 @@ type Config struct {
 	// runner as the GPU_LOCK env, so the Go-side vision gate (LO-1) and the Node runners
 	// always contend on the SAME lock.
 	GPULockPath string `json:"gpu_lock_path,omitempty"`
+	// ForeignGPUMinMiB overrides the per-process VRAM floor `gpu status`/`gpu
+	// reserve`'s foreign-GPU-memory warning (gpu_foreign.go) uses to decide a
+	// resident desktop process is worth a line — see foreignDefaultMinMiB for
+	// the built-in default and the incident (D-1xx-4 follow-up, 2026-09-24)
+	// that set it. 0/negative = the built-in default.
+	ForeignGPUMinMiB int `json:"foreign_gpu_min_mib,omitempty"`
 	// Home is the install root every DERIVED path hangs off: the cache, ledger,
 	// media/svg output, exemplars, thresholds and the router/confhead stores. Empty =
 	// $LOCAL_OFFLOAD_HOME, else ~/.local-offload.
@@ -1667,6 +1673,7 @@ func Default() Config {
 		EditTimeoutSec:              300,   // edit_image / media ops (CPU; no GPU lock)
 		GPUWaitMs:                   90000, // 90s — queue behind a holder, then defer with an ETA
 		GPULockPath:                 "",    // runners' default (GPU_LOCK env, else <state_dir>/gpu/lease)
+		ForeignGPUMinMiB:            0,     // 0 = built-in default (512 MiB, gpu_foreign.go)
 		StateDir:                    "",    // platform default: %ProgramData%\local-offload | /var/lib/local-offload
 		VisionGPUWaitSec:            90,    // LO-1: bounded wait for the gen lock before a vision call defers
 		ComposeTimeoutSec:           1800,

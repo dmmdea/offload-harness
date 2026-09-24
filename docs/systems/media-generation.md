@@ -382,7 +382,9 @@ pooling OOMs at every `virtual_vram_gb` (weights fit above ~25, but full-resolut
 activations then don't). At 1280×704 with `videogen_pool_vvram_gb: 30` the pooled render is
 behavior-proven (5 s + joint audio in ~190 s, both cards loaded, zero OOM); pooled serving
 requires the `--disable-dynamic-vram` launch flag (MultiGPU #191), same as the krea2 image
-seat. Full-resolution 1920×1088 remains available as a per-deployment STREAMING alternative
+seat. **Text encoder / both VAEs (fixed 2026-09-24, same defect and fix as krea2 above):**
+when pooled they load through `CLIPLoaderMultiGPU`/`VAELoaderMultiGPU` pinned to
+`videogen_pool_donor`, never the stock nodes' `"default"` device. Full-resolution 1920×1088 remains available as a per-deployment STREAMING alternative
 (pool keys unset, dynamic VRAM on — measured ~210 s and 1.65–2.3× faster for bf16 graphs).
 The builder deliberately drops the template's gemma4_e2b prompt-enhancer branch (the
 harness's own planner does prompt expansion) and pairs the convrot transformer with the
@@ -450,7 +452,17 @@ byte-expert allocation string is deliberately unused (its reservation half is a 
 no-op — the node reads only the post-`#` segment expert mode leaves empty). Pooled
 safetensor serving additionally requires launching ComfyUI with `--disable-dynamic-vram`
 until ComfyUI-MultiGPU #191 lands — carried per-box by the `COMFY_EXTRA_ARGS` launch seam,
-never by shared code. **Windows multi-GPU visibility (ComfyUI >= 0.34):** upstream hides every CUDA device but the first on Windows unless devices are explicitly selected; `ensureComfy` restores full visibility for the spawned child via `cudaVisibleEnv()` (env-based; multi-GPU spawns also get `--disable-pinned-memory` per upstream guidance) whenever the operator has not already scoped devices — without this, every pooled graph fails prompt validation with `donor_device: 'cuda:1' not in ['cpu', 'cuda:0']`. Zero/empty pool keys render single-GPU (the small-fleet shape).
+never by shared code. **Text encoder / VAE device (fixed 2026-09-24):** the stock
+`CLIPLoader`/`VAELoader` nodes' `device` input only ever offers `"default"`/`"cpu"`, and
+`"default"` is ComfyUI's own fastest-first device pick, entirely independent of
+`imagegen_pool_compute`/`imagegen_pool_donor` — on the 3x16 reference tier that IS the
+display card (measured A/B, `multigpu-archival-actions-2026-09-24.md`: the ~12 GiB
+Qwen3-VL-4B encoder loaded there on every pooled render regardless of which two cards the
+DiT's own pool keys named). When pooled, `wf-krea2.mjs` now routes both through
+ComfyUI-MultiGPU's `CLIPLoaderMultiGPU`/`VAELoaderMultiGPU`, pinned to
+`imagegen_pool_donor` — never the unnamed default. Unpooled builds are unaffected (the
+plain nodes, `device: "default"`, are correct there: `comfy_cuda_device` already pins the
+whole process to one card). **Windows multi-GPU visibility (ComfyUI >= 0.34):** upstream hides every CUDA device but the first on Windows unless devices are explicitly selected; `ensureComfy` restores full visibility for the spawned child via `cudaVisibleEnv()` (env-based; multi-GPU spawns also get `--disable-pinned-memory` per upstream guidance) whenever the operator has not already scoped devices — without this, every pooled graph fails prompt validation with `donor_device: 'cuda:1' not in ['cpu', 'cuda:0']`. Zero/empty pool keys render single-GPU (the small-fleet shape).
 
 The recommended **≥16 GB image-*edit* primitive is Qwen-Image-Edit-2511** (Apache-2.0). Since the
 generative-edit route landed (0.44.0) it is a first-class `gen_edit_*` config binding — set

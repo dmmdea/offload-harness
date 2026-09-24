@@ -187,8 +187,26 @@ func TestLtx25NeedsMultiGPUOnlyWhenPooled(t *testing.T) {
 		t.Fatalf("single-card ltx25 needs no custom nodes, got %v", classes)
 	}
 	cfg.VideoGenPoolVvramGB = 30
-	if _, _, classes, _ := videoNeeds(cfg); strings.Join(classes, ",") != "UNETLoaderDisTorch2MultiGPU" {
-		t.Fatalf("pooled ltx25 needs the MultiGPU loader, got %v", classes)
+	// The text encoder and both VAEs also pin off ComfyUI's default device
+	// when pooled (2026-09-24 fix) — same pack as the DiT loader.
+	if _, _, classes, _ := videoNeeds(cfg); strings.Join(classes, ",") != "UNETLoaderDisTorch2MultiGPU,CLIPLoaderMultiGPU,VAELoaderMultiGPU" {
+		t.Fatalf("pooled ltx25 needs the MultiGPU loader plus the device-pinned CLIP/VAE loaders, got %v", classes)
+	}
+}
+
+// TestKrea2NeedsMultiGPUOnlyWhenPooled: same rule as ltx25 (above) — a single-card krea2
+// graph is core; a pooled one loads the DiT AND (2026-09-24 fix) the text encoder/VAE
+// through ComfyUI-MultiGPU, since the stock CLIPLoader/VAELoader "device" input can only
+// say "default"/"cpu", never a pool card.
+func TestKrea2NeedsMultiGPUOnlyWhenPooled(t *testing.T) {
+	cfg := bare()
+	cfg.ImageGenFamily = "krea2"
+	if classes := imageNodeClasses(cfg); len(classes) != 0 {
+		t.Fatalf("single-card krea2 needs no custom nodes, got %v", classes)
+	}
+	cfg.ImageGenPoolVvramGB = 12
+	if classes := imageNodeClasses(cfg); strings.Join(classes, ",") != "UNETLoaderDisTorch2MultiGPU,CLIPLoaderMultiGPU,VAELoaderMultiGPU" {
+		t.Fatalf("pooled krea2 needs the MultiGPU loader plus the device-pinned CLIP/VAE loaders, got %v", classes)
 	}
 }
 

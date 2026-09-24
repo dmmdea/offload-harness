@@ -74,6 +74,45 @@ test("pooled loading: DisTorch2 ratio mode when poolVvramGb > 0, plain UNETLoade
   assert.ok(!Object.values(plain).find((n) => n.class_type === "UNETLoaderDisTorch2MultiGPU"));
 });
 
+// The display-card CLIP-loader defect (2026-09-24, same root cause as
+// wf-krea2.mjs — see that file's test for the measured A/B): the stock
+// CLIPLoader/VAELoader's "device" input only offers "default"/"cpu", and
+// "default" is ComfyUI's own fastest-first pick — the display card on the
+// reference tier, wherever poolCompute/poolDonor actually point.
+test("pooling: text encoder + both VAEs pin to a pool device, never the plain loaders", () => {
+  const g = buildLtx25I2V({ imagePath: "s.png", prompt: "p", poolVvramGb: 20, poolCompute: "cuda:0", poolDonor: "cuda:2" });
+  assert.ok(!Object.values(g).some((n) => n.class_type === "CLIPLoader"),
+    "pooled build must not leave the plain CLIPLoader (its device is stuck at 'default')");
+  assert.ok(!Object.values(g).some((n) => n.class_type === "VAELoader"),
+    "pooled build must not leave the plain VAELoader");
+  const clip = Object.values(g).find((n) => n.class_type === "CLIPLoaderMultiGPU");
+  assert.ok(clip, "pooled build loads the text encoder through CLIPLoaderMultiGPU");
+  assert.equal(clip.inputs.type, "ltxv");
+  assert.equal(clip.inputs.device, "cuda:2", "pinned to a pool device (donor), never 'default'");
+  const vaes = Object.values(g).filter((n) => n.class_type === "VAELoaderMultiGPU");
+  assert.equal(vaes.length, 2, "both the video and audio VAE pin through VAELoaderMultiGPU");
+  for (const v of vaes) assert.equal(v.inputs.device, "cuda:2");
+
+  // Unpooled stays exactly as before: the plain nodes, "default" device.
+  const plain = buildLtx25I2V({ imagePath: "s.png", prompt: "p" });
+  const plainClip = Object.values(plain).find((n) => n.class_type === "CLIPLoader");
+  assert.equal(plainClip.inputs.device, "default");
+  assert.ok(!Object.values(plain).some((n) => n.class_type === "CLIPLoaderMultiGPU"));
+  assert.ok(!Object.values(plain).some((n) => n.class_type === "VAELoaderMultiGPU"));
+});
+
+// Task's own gate: a pooled graph must never leave ANY loader on ComfyUI's
+// "default" device. Iterates every node rather than naming classes.
+test("pooled graph: no loader is left on ComfyUI's default device", () => {
+  const g = buildLtx25I2V({ imagePath: "s.png", prompt: "p", poolVvramGb: 20, poolCompute: "cuda:0", poolDonor: "cuda:2" });
+  for (const [id, node] of Object.entries(g)) {
+    if (node.inputs && Object.prototype.hasOwnProperty.call(node.inputs, "device")) {
+      assert.notEqual(node.inputs.device, "default",
+        `node ${id} (${node.class_type}) is left on ComfyUI's default device in a pooled graph`);
+    }
+  }
+});
+
 test("guards: required inputs and dimension alignment", () => {
   assert.throws(() => buildLtx25I2V({ prompt: "p" }), /imagePath/);
   assert.throws(() => buildLtx25I2V({ imagePath: "s.png" }), /prompt/);

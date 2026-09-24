@@ -37,6 +37,16 @@
 // on this node — see wf-krea2.mjs; pooled serving also requires the
 // --disable-dynamic-vram launch flag until MultiGPU #191 lands upstream).
 // poolVvramGb <= 0 loads the plain UNETLoader (single-big-card fleet tiers).
+//
+// TEXT ENCODER / VAE DEVICE (fixed 2026-09-24, same defect as wf-krea2.mjs —
+// see that file's header for the measured A/B): the stock `CLIPLoader`/
+// `VAELoader` nodes' "device" input only offers "default"/"cpu", and
+// "default" is ComfyUI's own fastest-first pick, independent of
+// poolCompute/poolDonor — on the reference tier that is the display card.
+// When poolVvramGb > 0 the Gemma text encoder and both VAEs (video + audio)
+// load through ComfyUI-MultiGPU's `CLIPLoaderMultiGPU`/`VAELoaderMultiGPU`
+// pinned to poolDonor instead. poolVvramGb <= 0 keeps the plain nodes
+// (comfy_cuda_device already pins the whole process to one card there).
 
 /** Distilled two-pass schedules from the official template (fixed, part of the recipe). */
 export const LTX25_BASE_SIGMAS = "1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875, 0.0";
@@ -94,10 +104,16 @@ export function buildLtx25I2V({
     "2": { class_type: "ResizeImageMaskNode", inputs: { resize_type: "scale longer dimension", "resize_type.longer_size": resizeLonger, scale_method: "lanczos", input: ["1", 0] } },
     "3": { class_type: "LTXVPreprocess", inputs: { img_compression: imgCompression, image: ["2", 0] } },
     // models
-    "4": { class_type: "CLIPLoader", inputs: { clip_name: textEncoder, type: "ltxv", device: "default" } },
+    "4": poolVvramGb > 0
+      ? { class_type: "CLIPLoaderMultiGPU", inputs: { clip_name: textEncoder, type: "ltxv", device: poolDonor } }
+      : { class_type: "CLIPLoader", inputs: { clip_name: textEncoder, type: "ltxv", device: "default" } },
     "5": loader,
-    "6": { class_type: "VAELoader", inputs: { vae_name: videoVae } },
-    "7": { class_type: "VAELoader", inputs: { vae_name: audioVae } },
+    "6": poolVvramGb > 0
+      ? { class_type: "VAELoaderMultiGPU", inputs: { vae_name: videoVae, device: poolDonor } }
+      : { class_type: "VAELoader", inputs: { vae_name: videoVae } },
+    "7": poolVvramGb > 0
+      ? { class_type: "VAELoaderMultiGPU", inputs: { vae_name: audioVae, device: poolDonor } }
+      : { class_type: "VAELoader", inputs: { vae_name: audioVae } },
     "8": { class_type: "LatentUpscaleModelLoader", inputs: { model_name: latentUpscaler } },
     // conditioning (LTXVConditioning stamps the frame rate into both branches)
     "9": { class_type: "CLIPTextEncode", inputs: { text: prompt, clip: ["4", 0] } },

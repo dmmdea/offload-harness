@@ -75,6 +75,49 @@ test("pooling: poolVvramGb > 0 loads through DisTorch2 in RATIO mode with the pr
   assert.throws(() => buildKrea2({ ...base, poolVvramGb: -1 }), /poolVvramGb must be >= 0/);
 });
 
+// The display-card CLIP-loader defect (2026-09-24, measured A/B:
+// multigpu-archival-actions-2026-09-24.md): the stock CLIPLoader/VAELoader's
+// "device" input only ever says "default"/"cpu" — "default" is ComfyUI's OWN
+// fastest-first pick, independent of the pool keys, and on the reference
+// tier that IS the display card. A pooled build must route the text encoder
+// and VAE through the MultiGPU device-pinned loaders instead.
+test("pooling: text encoder + VAE pin to a pool device, never the plain CLIPLoader/VAELoader", () => {
+  const g = buildKrea2({ ...base, poolVvramGb: 12, poolCompute: "cuda:1", poolDonor: "cuda:2" });
+  assert.ok(!Object.values(g).some((n) => n.class_type === "CLIPLoader"),
+    "pooled build must not leave the plain CLIPLoader (its device is stuck at 'default')");
+  assert.ok(!Object.values(g).some((n) => n.class_type === "VAELoader"),
+    "pooled build must not leave the plain VAELoader");
+  const clip = Object.values(g).find((n) => n.class_type === "CLIPLoaderMultiGPU");
+  assert.ok(clip, "pooled build loads the text encoder through CLIPLoaderMultiGPU");
+  assert.equal(clip.inputs.type, "krea2");
+  assert.equal(clip.inputs.device, "cuda:2", "pinned to a pool device (donor), never 'default'");
+  const vae = Object.values(g).find((n) => n.class_type === "VAELoaderMultiGPU");
+  assert.ok(vae, "pooled build loads the VAE through VAELoaderMultiGPU");
+  assert.equal(vae.inputs.device, "cuda:2");
+
+  // Unpooled stays exactly as before: the plain nodes, "default" device.
+  const single = buildKrea2({ ...base, poolVvramGb: 0 });
+  const singleClip = Object.values(single).find((n) => n.class_type === "CLIPLoader");
+  assert.equal(singleClip.inputs.device, "default");
+  assert.ok(!Object.values(single).some((n) => n.class_type === "CLIPLoaderMultiGPU"));
+  assert.ok(!Object.values(single).some((n) => n.class_type === "VAELoaderMultiGPU"));
+});
+
+// Task's own gate: a pooled graph must never leave ANY loader on ComfyUI's
+// "default" device — that default is the display card whenever the pool
+// devices exclude it (the whole point of naming compute/donor explicitly).
+// Iterates every node rather than naming classes, so a future loader added
+// to this graph is covered without editing this test.
+test("pooled graph: no loader is left on ComfyUI's default device", () => {
+  const g = buildKrea2({ ...base, poolVvramGb: 12, poolCompute: "cuda:1", poolDonor: "cuda:2" });
+  for (const [id, node] of Object.entries(g)) {
+    if (node.inputs && Object.prototype.hasOwnProperty.call(node.inputs, "device")) {
+      assert.notEqual(node.inputs.device, "default",
+        `node ${id} (${node.class_type}) is left on ComfyUI's default device in a pooled graph`);
+    }
+  }
+});
+
 test("empty negative becomes ConditioningZeroOut of the POSITIVE, never an encoded empty string", () => {
   const g = buildKrea2({ ...base });
   const zero = Object.values(g).find((n) => n.class_type === "ConditioningZeroOut");

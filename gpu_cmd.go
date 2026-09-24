@@ -89,7 +89,7 @@ func runGPUStatus(args []string) error {
 	// D-1xx-4, 2026-09-23): visible here too, not only at acquire, because a
 	// session reading `gpu status` mid-investigation deserves the same
 	// evidence a fresh `gpu reserve` would have printed.
-	foreign := foreignGPUHolders(context.Background())
+	foreign := foreignGPUHolders(context.Background(), loadCfg(fs))
 	if *asJSON {
 		queued := make([]map[string]any, 0, len(waiters))
 		for _, w := range waiters {
@@ -236,7 +236,7 @@ func runGPUReserve(args []string) error {
 		if err != nil {
 			return err
 		}
-		printForeignGPUWarning(os.Stderr)
+		printForeignGPUWarning(os.Stderr, loadCfg(fs))
 		// The lease is held by the hidden child FIRST (so no new work is placed
 		// here), then the seat is drained and unloaded. A failed drain leaves the
 		// lease held on purpose — the card stays reserved, work keeps routing
@@ -258,7 +258,7 @@ func runGPUReserve(args []string) error {
 		card.finish(err)
 		return err
 	}
-	printForeignGPUWarning(os.Stderr)
+	printForeignGPUWarning(os.Stderr, cfg)
 	// Release on the way out no matter how we leave, including Ctrl-C: a leaked text
 	// reservation blocks every render until it expires. When the seat was unloaded
 	// for this window it is warmed back BEFORE the release, so the first contract

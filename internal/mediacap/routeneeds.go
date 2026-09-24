@@ -126,7 +126,9 @@ func videoNeeds(cfg config.Config) (family string, files []needFile, classes []s
 			bound("videogen_latent_upscaler", cfg.VideoGenLatentUpscaler, "ltx25", ltxDefaults.latentUpscaler, classLatentUp),
 		}
 		if cfg.VideoGenPoolVvramGB > 0 {
-			classes = []string{"UNETLoaderDisTorch2MultiGPU"}
+			// The text encoder and both VAEs pin off ComfyUI's default device too
+			// (2026-09-24 fix, wf-ltx25-i2v.mjs) — same pack as the DiT loader.
+			classes = []string{"UNETLoaderDisTorch2MultiGPU", "CLIPLoaderMultiGPU", "VAELoaderMultiGPU"}
 		}
 		return "ltx25", files, classes, nil
 	case "h3":
@@ -204,7 +206,9 @@ func imageNodeClasses(cfg config.Config) []string {
 	case cfg.ImageGenFamily == "qwen-image" && isGGUF(cfg.ImageGenCkpt):
 		return []string{"UnetLoaderGGUF"}
 	case cfg.ImageGenFamily == "krea2" && cfg.ImagePooled():
-		return []string{"UNETLoaderDisTorch2MultiGPU"}
+		// The text encoder and VAE pin off ComfyUI's default device too
+		// (2026-09-24 fix, wf-krea2.mjs) — same pack as the DiT loader.
+		return []string{"UNETLoaderDisTorch2MultiGPU", "CLIPLoaderMultiGPU", "VAELoaderMultiGPU"}
 	}
 	return nil
 }
@@ -255,6 +259,8 @@ var classPacks = map[string][]string{
 	"UNETLoaderDisTorch2MultiGPU":     {"ComfyUI-MultiGPU"},
 	"UnetLoaderGGUFDisTorch2MultiGPU": {"ComfyUI-MultiGPU", "ComfyUI-GGUF"},
 	"UnetLoaderGGUF":                  {"ComfyUI-GGUF"},
+	"CLIPLoaderMultiGPU":              {"ComfyUI-MultiGPU"},
+	"VAELoaderMultiGPU":               {"ComfyUI-MultiGPU"},
 }
 
 // NodeCheck answers "can this ComfyUI build these node classes?".

@@ -36,6 +36,23 @@
 // LAUNCH concern, not a graph concern). poolVvramGb <= 0 loads through the
 // plain UNETLoader — the single-GPU fleet shape.
 //
+// TEXT ENCODER / VAE DEVICE (fixed 2026-09-24, measured A/B:
+// multigpu-archival-actions-2026-09-24.md): the stock `CLIPLoader`/`VAELoader`
+// nodes' "device" input only ever offers "default"/"cpu" — "default" is
+// ComfyUI's OWN device pick (fastest-first cuda:0), entirely independent of
+// poolCompute/poolDonor. On the Qube's 3x16 tier that "default" IS the
+// display card, so every pooled krea2 render put the ~12 GiB Qwen3-VL-4B text
+// encoder there regardless of which two cards the DiT's own pool keys named —
+// unmeasured until this A/B, and not something either pool key could have
+// caught (neither ever names cuda:0 on that tier). When poolVvramGb > 0 this
+// builder instead uses ComfyUI-MultiGPU's `CLIPLoaderMultiGPU`/
+// `VAELoaderMultiGPU` (the same package as the DiT's DisTorch2 loader, a
+// simple device-pin variant — no ratio split, the encoder/VAE are small
+// enough to sit whole on one card) pinned to poolDonor: never the pool's
+// unnamed default, never the display card. poolVvramGb <= 0 keeps the plain
+// nodes — a single-GPU/unpooled box has no "default is the wrong card"
+// problem (comfy_cuda_device already pins the whole process to one card).
+//
 // Negative-prompt semantics: same house idiom as wf-qwen-image.mjs — no baked
 // prompt content; an empty/whitespace negative becomes ConditioningZeroOut of
 // the positive, a real negative is encoded (active at cfg > 1, i.e. only when
@@ -88,8 +105,12 @@ export function buildKrea2({
           },
         }
       : { class_type: "UNETLoader", inputs: { unet_name: unet, weight_dtype: "default" } },
-    "2": { class_type: "CLIPLoader", inputs: { clip_name: clip, type: "krea2", device: "default" } },
-    "3": { class_type: "VAELoader", inputs: { vae_name: vae } },
+    "2": poolVvramGb > 0
+      ? { class_type: "CLIPLoaderMultiGPU", inputs: { clip_name: clip, type: "krea2", device: poolDonor } }
+      : { class_type: "CLIPLoader", inputs: { clip_name: clip, type: "krea2", device: "default" } },
+    "3": poolVvramGb > 0
+      ? { class_type: "VAELoaderMultiGPU", inputs: { vae_name: vae, device: poolDonor } }
+      : { class_type: "VAELoader", inputs: { vae_name: vae } },
     "6": { class_type: "CLIPTextEncode", inputs: { text: prompt, clip: ["2", 0] } },
   };
   g["7"] = String(negative).trim()
