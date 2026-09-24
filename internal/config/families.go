@@ -452,3 +452,10 @@ func (c Config) SupportsTransparentEdit() bool { return c.GenEditFamily == Famil
 // ImagePooled reports an image binding that loads through the DisTorch2 pool — the
 // pool keys, not comfy_cuda_device, place it.
 func (c Config) ImagePooled() bool { return c.ImageGenPoolVvramGB > 0 }
+
+// VideoPooled reports a video binding that loads through the DisTorch2 pool — same
+// rule as ImagePooled. An un-pooled video seat (videogen_pool_vvram_gb <= 0, the
+// native/streaming shape) is a single-card route like image generation, so
+// comfy_cuda_device DOES apply to it; a pooled one still must not be pinned (the
+// blackwell-3x16 pool computes on ComfyUI's default device, MultiGPU #220).
+func (c Config) VideoPooled() bool { return c.VideoGenPoolVvramGB > 0 }
