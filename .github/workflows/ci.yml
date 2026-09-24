@@ -113,6 +113,15 @@ jobs:
         shell: powershell
         run: .\setup\tests\install-config-seed.test.ps1
 
+      # Quote-ArgForNativeArgv encodes every node-swap argument for a
+      # Win32_Process.Create command-line string; a bad escape there silently
+      # corrupts argv for the Go binary on the other end (PR #476 review). The
+      # self-test round-trips its output through the real CommandLineToArgvW
+      # Win32 API, so this needs no Go build — pure PowerShell + Win32.
+      - name: windows-node-swap-launch.ps1 argv-quoting self-test
+        shell: powershell
+        run: .\setup\windows-node-swap-launch.tests.ps1
+
   # Printed CLIs under tools/ are SEPARATE Go modules (docs/systems/printed-clis.md),
   # so the `build` job's `./...` does not reach them — Go excludes nested modules from a
   # parent's package pattern. Without a job of their own they would be vendored code that

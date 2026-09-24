@@ -25,6 +25,9 @@ where the code lives.
   job semantics, VRAM sampling
 - [systems/fleet-overview.md](systems/fleet-overview.md) — `fleet-ui` / `top` / `fleet-smoke`: the
   read-only operator page, its poller, and the jobs/errors feeds
+- [systems/node-swap.md](systems/node-swap.md) — `node-swap`: the reusable Windows fleet-node
+  binary swap (verify hash, wait idle, backup+rename, restart, verify, auto-rollback), and its
+  detached launcher for an SSH-session-proof run
 - [systems/accelerators.md](systems/accelerators.md) — devices beside the GPU tier (hailo-8l NPU):
   detection, seeding, the on-demand sidecar, tool ownership
 - [systems/cache-server.md](systems/cache-server.md) — the optional second-device KV tier for a vLLM seat:
