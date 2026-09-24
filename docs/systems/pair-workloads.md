@@ -21,6 +21,8 @@ pending work on the node that runs it. Off by default; two config keys turn it o
 | `internal/pairworkloads/pairworkloads.go` | the emitter: PAIR identity from `node-id.json` / `cluster/members.json`, `EngineFor`, `MethodFor`, frame building, `Send` / `Emit`, the ledger observer (`AttachLedger`, `FromLedger`) |
 | `internal/delegate/pairevents.go` | `pairInflight` / `pairTerminal`: the delegation frames and the card identity pinned on `PlacedResult` |
 | `internal/delegate/run.go` | the call sites: `runRemote` (queued; running from the poll loop), `runLocal` (queued; running through `pairStartGate`), `attempt().finish` (terminal); `runner.pair` |
+| `gpu_leasecard.go` | the lease card: `leaseCardIdentity`, `newLeaseCard`, `running`, `finish`; wired into `runGPUReserve` (`gpu_cmd.go`) |
+| `internal/core/workmark.go` | `WithWorkingMark` / `MarkWorking`: the lane's "my work started" signal a call card turns running on |
 | `internal/pairworkloads/calls.go` | running cards for long tool calls: `Begin`, the per-task open-card queue the ledger observer `claim`s from |
 | `internal/pipeline/pipeline.go` | `CallTracker`, `SetCallTracker`, the `Begin` at the top of `Run` |
 | `internal/ledger/ledger.go` | `Ledger.Observe`, called after every durable `Record` |
@@ -82,17 +84,45 @@ and the harness has nothing to gain by sending them.
    `startedAt` = that minus the latency. Skipped on purpose: `agent_delegate` rows (source 1
    owns them), `agent` rows (this box serving someone else's delegation, already reported by
    the box that asked), cache hits (no GPU work).
-3. **Long tool calls while they run** (0.140.5, `internal/pairworkloads/calls.go`). A row is
-   written when a call ends, so source 2 alone left a ten-minute render with no card until it
-   finished. `Pipeline.Run` calls `Emitter.Begin(task)` (the pipeline's `CallTracker`, wired in
-   `openPipeline`), which emits a `running` frame (`id` = `call-<ms>-<n>`) for the tasks whose
-   engine the task alone names: the `comfyui` lanes, `compose_video` (`hyperframes`) and
-   `transcribe` (`whispercpp`). The call's own ledger row then closes THAT card (`claim`, oldest
-   first per task): same id, engine and start, the row's model and outcome. A call that wrote no
+3. **Long tool calls while they run** (0.140.5; queued-then-running 0.140.6,
+   `internal/pairworkloads/calls.go`). A row is written when a call ends, so source 2 alone left
+   a ten-minute render with no card until it finished. `Pipeline.Run` calls
+   `Emitter.Begin(task, door)` (the pipeline's `CallTracker`, wired in `openPipeline`), which emits
+   a `queued` frame (`id` = `call-<ms>-<n>`) for the tasks whose engine the task alone names: the
+   `comfyui` lanes, `compose_video` (`hyperframes`) and `transcribe` (`whispercpp`). The card turns
+   `running` when the lane marks its work started (`core.MarkWorking`): the media lanes do it the
+   moment `acquireMediaLease` hands them the GPU, `compose_video` when it takes its slot. A render
+   waiting behind another job's lease therefore reads "queued", not "Running". `transcribe` never
+   marks (its wait is a whisper load inside llama-swap, which the lane cannot see), so its card
+   stays queued until it ends. The call's own ledger row then closes THAT card (`claim`, oldest
+   first per task): same id, engine and creation, the start the mark recorded (none if it never
+   started), the row's model and outcome. A call that wrote no
    row (a cache hit) is closed when `Run` returns (`closeCall`; a panic closes it failed). Rows are
    matched to open cards per task, not per call: two concurrent calls of one task (they serialize
    on the media slot) can trade model and timings, but both cards close. Text and vision calls open
    nothing: PAIR keys a card on its engine, and they learn llamacpp vs vllm only as they run.
+4. **Jobs under the GPU lease** (0.140.6, `gpu_leasecard.go`). `gpu reserve -- <cmd>` is how every
+   bench, render and measurement runs on every node, and none of it reached PAIR: on 2026-09-23 the
+   Aorus ran a seat bench and a ComfyUI diagnostic and the Lenovo a Wan 2.2 smoke render, each at
+   84-100 % on its card, while the Jobs list showed only the Qube's delegations. The wrapper now
+   owns one card (`id` = `lease-<ms>-<pid>`): `queued` from the moment it joins the lease queue and
+   through the drain, `running` once the command starts, `completed` on exit 0 or `failed` with
+   `exit status N` (plus `(interrupted)` / `(lease lost)`). The model is the harness verb
+   (`generate-video`, on that verb's engine) or the script an interpreter runs (`seatbench.ps1`,
+   `acestep_diag.py`) or the program (`llama-bench`), on the engine `gpu-lease`; the requester is
+   `--origin` when given. A ONE-SHOT harness verb run directly under the lease
+   (`gpu reserve -- local-offload generate-video …`) gets `OFFLOAD_PAIR_UNDER_LEASE=1`, which turns
+   the emitter off in it (`FromConfig`), so it adds no second card (`silencesWrapped`). A shell, an
+   interpreter or a long-running harness verb (`mcp`, `fleet-serve`, the documented
+   `gpu reserve … -- <session>` form) never gets it: the flag would be inherited by everything
+   that process starts, for as long as it runs, and silence a whole session. The
+   `--detach` form holds a card for nobody's command and opens none.
+
+**Served work is the asker's card** (0.140.6): a fleet node stamps work it runs FOR another box
+with the door `fleet` (`pairworkloads.FleetDoor`); `Begin` opens nothing for it and the ledger
+observer skips its rows, exactly as it always skipped `agent` rows. That is what makes
+`pair_workloads_enabled` safe on EVERY box, fleet nodes included: their own work (a CLI render
+started over ssh, a lease job) reports, the delegations and dispatches they serve do not.
 
 The emitter (`internal/pairworkloads.Emitter`) is fire-and-forget: a goroutine per frame with
 a 2 s timeout, one warning per process on the first failure, nothing ever changes a harness
@@ -102,7 +132,7 @@ result. PAIR being absent (no `node-id.json`) or down is normal.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `pair_workloads_enabled` | `false` | opt in. Enable on **delegator** boxes (the ones whose MCP sessions place work). A fleet-only node that also reported the delegation it serves would show the same job twice, once per origin |
+| `pair_workloads_enabled` | `false` | opt in. Enable on **every** box with PAIR installed (0.140.6). Work a fleet node serves for another box (`agent` rows, the `fleet` door) is skipped, so a job never shows twice; before 0.140.6 this was delegator-only, and every fleet node's own work was invisible |
 | `pair_workloads_endpoint` | `http://127.0.0.1:14324/v1/workloads/events` | the ingress URL |
 | `pair_seat_activity_enabled` | `false` | fleet-serve reports DIRECT traffic on this box's vLLM seats (see *Seat activity* below). Enable on every box that **serves** a vLLM seat; independent of `pair_workloads_enabled` |
 | env `OFFLOAD_PAIR_APPDIR` | platform default | PAIR's app-data dir when it is not at `%LOCALAPPDATA%\Nvidia Corporation\Personal AI Router` (Windows) / `~/.config/Nvidia Corporation/Personal AI Router` (Linux); tests use it |

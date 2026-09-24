@@ -349,10 +349,11 @@ type cacheVal struct {
 // the small tier; on a quality failure the request climbs to the next-larger
 // local model before ever deferring to Opus. Infra errors do not escalate.
 // CallTracker opens a PAIR Jobs card when a long call starts and closes it
-// when the call ends (pairworkloads.Emitter.Begin). Begin returns nil when it
-// opened nothing.
+// when the call ends (pairworkloads.Emitter.Begin). working turns the card
+// running once the lane holds its engine (core.MarkWorking); both are nil when
+// nothing was opened.
 type CallTracker interface {
-	Begin(task string) func(deferred bool, reason string)
+	Begin(task, door string) (working func(), end func(deferred bool, reason string))
 }
 
 // SetCallTracker wires the tracker Run reports call starts to; nil = none.
@@ -372,7 +373,8 @@ func closeCall(end func(deferred bool, reason string), res *core.Result) {
 func (p *Pipeline) Run(ctx context.Context, req core.Request) (res core.Result) {
 	start := time.Now()
 	if p.tracker != nil && req.Task.Valid() {
-		if end := p.tracker.Begin(string(req.Task)); end != nil {
+		if working, end := p.tracker.Begin(string(req.Task), req.Door); end != nil {
+			ctx = core.WithWorkingMark(ctx, working)
 			defer closeCall(end, &res)
 		}
 	}
@@ -1465,7 +1467,7 @@ func (p *Pipeline) runGenerateImage(ctx context.Context, req core.Request, meta 
 	// Passive fleet footprint: key this render by the machine's image binding
 	// (family + the O1 bf16 quant) so measured peaks accumulate during normal use.
 	imgFamily, imgQuant := imageFootprintKey(cfg)
-	leaseEnv, releaseLease, lerr := p.acquireMediaLease("image-gen", timeout, p.gpuWait())
+	leaseEnv, releaseLease, lerr := p.acquireMediaLease(ctx, "image-gen", timeout, p.gpuWait())
 	if lerr != nil {
 		return p.deferForLease(lerr, req.Task, meta, len(req.Input), start)
 	}
@@ -1611,7 +1613,7 @@ func (p *Pipeline) runGenerateImageSdcpp(ctx context.Context, req core.Request, 
 		ExtraArgs: cfg.SdcppExtraArgs,
 	}
 	imgFamily, imgQuant := imageFootprintKey(cfg)
-	leaseEnv, releaseLease, lerr := p.acquireMediaLease("image-gen (sdcpp)", timeout, p.gpuWait())
+	leaseEnv, releaseLease, lerr := p.acquireMediaLease(ctx, "image-gen (sdcpp)", timeout, p.gpuWait())
 	if lerr != nil {
 		return p.deferForLease(lerr, req.Task, meta, len(req.Input), start)
 	}
@@ -1696,7 +1698,7 @@ func (p *Pipeline) runInpaintImage(ctx context.Context, req core.Request, meta c
 		CFG: p.cfg.InpaintCFG, Sampler: p.cfg.InpaintSampler, Scheduler: p.cfg.InpaintScheduler,
 	}
 	timeout := time.Duration(p.cfg.InpaintTimeoutSec) * time.Second
-	leaseEnv, releaseLease, lerr := p.acquireMediaLease("inpaint", timeout, p.gpuWait())
+	leaseEnv, releaseLease, lerr := p.acquireMediaLease(ctx, "inpaint", timeout, p.gpuWait())
 	if lerr != nil {
 		return p.deferForLease(lerr, req.Task, meta, len(req.Input), start)
 	}
@@ -1795,7 +1797,7 @@ func (p *Pipeline) runUpscaleImage(ctx context.Context, req core.Request, meta c
 		out = filepath.Join(p.cfg.MediaDir, "upscale-"+sha256hex(image + tasks.StableParamsKey(req.Params))[:8]+".png")
 	}
 	timeout := time.Duration(p.cfg.UpscaleTimeoutSec) * time.Second
-	leaseEnv, releaseLease, lerr := p.acquireMediaLease("upscale", timeout, p.gpuWait())
+	leaseEnv, releaseLease, lerr := p.acquireMediaLease(ctx, "upscale", timeout, p.gpuWait())
 	if lerr != nil {
 		return p.deferForLease(lerr, req.Task, meta, len(req.Input), start)
 	}
@@ -1981,7 +1983,7 @@ func (p *Pipeline) runEditImageGenerative(ctx context.Context, req core.Request,
 		Launch: comfyLaunch(cfg, true),
 	}
 	timeout := time.Duration(cfg.GenEditTimeoutSec) * time.Second
-	leaseEnv, releaseLease, lerr := p.acquireMediaLease("edit", timeout, p.gpuWait())
+	leaseEnv, releaseLease, lerr := p.acquireMediaLease(ctx, "edit", timeout, p.gpuWait())
 	if lerr != nil {
 		return p.deferForLease(lerr, req.Task, meta, len(req.Input), start)
 	}
@@ -2276,7 +2278,7 @@ func (p *Pipeline) RunImageBatch(ctx context.Context, jobs []ImageBatchJob) ([]I
 	// 3,356 unloads in the server log.
 	// This helper returns items+error rather than a core.Result, so a busy card surfaces
 	// as an error for the caller to classify — no items were produced.
-	leaseEnv, releaseLease, lerr := p.acquireMediaLease("image-gen batch", timeout, p.gpuWait())
+	leaseEnv, releaseLease, lerr := p.acquireMediaLease(ctx, "image-gen batch", timeout, p.gpuWait())
 	if lerr != nil {
 		return nil, lerr
 	}
@@ -2389,7 +2391,7 @@ func (p *Pipeline) runRunGraph(ctx context.Context, req core.Request, meta core.
 	timeout := time.Duration(p.cfg.ImageGenTimeoutSec) * time.Second
 	// Passive fleet footprint: family from a payload-declared model_family (the
 	// fleet dispatch path threads it) else the generic comfy-graph bucket.
-	leaseEnv, releaseLease, lerr := p.acquireMediaLease("run-graph", timeout, p.gpuWait())
+	leaseEnv, releaseLease, lerr := p.acquireMediaLease(ctx, "run-graph", timeout, p.gpuWait())
 	if lerr != nil {
 		return p.deferForLease(lerr, req.Task, meta, len(req.Input), start)
 	}
@@ -2783,7 +2785,7 @@ func (p *Pipeline) runGenerateVideo(ctx context.Context, req core.Request, meta 
 	}
 
 	timeout := time.Duration(p.cfg.VideoGenTimeoutSec) * time.Second
-	leaseEnv, releaseLease, lerr := p.acquireMediaLease("video-gen", timeout, p.gpuWait())
+	leaseEnv, releaseLease, lerr := p.acquireMediaLease(ctx, "video-gen", timeout, p.gpuWait())
 	if lerr != nil {
 		return p.deferForLease(lerr, req.Task, meta, len(req.Input), start)
 	}
@@ -2917,7 +2919,7 @@ func (p *Pipeline) runAnimateCharacter(ctx context.Context, req core.Request, me
 	}
 
 	timeout := time.Duration(p.cfg.AnimateGenTimeoutSec) * time.Second
-	leaseEnv, releaseLease, lerr := p.acquireMediaLease("animate", timeout, p.gpuWait())
+	leaseEnv, releaseLease, lerr := p.acquireMediaLease(ctx, "animate", timeout, p.gpuWait())
 	if lerr != nil {
 		return p.deferForLease(lerr, req.Task, meta, len(req.Input), start)
 	}
@@ -3075,7 +3077,7 @@ func (p *Pipeline) runGenerateAudio(ctx context.Context, req core.Request, meta 
 	}
 
 	timeout := time.Duration(p.cfg.AudioGenTimeoutSec) * time.Second
-	leaseEnv, releaseLease, lerr := p.acquireMediaLease("audio-gen ("+kind+")", timeout, p.gpuWait())
+	leaseEnv, releaseLease, lerr := p.acquireMediaLease(ctx, "audio-gen ("+kind+")", timeout, p.gpuWait())
 	if lerr != nil {
 		return p.deferForLease(lerr, req.Task, meta, len(req.Input), start)
 	}
@@ -3329,7 +3331,7 @@ func (p *Pipeline) deferForLease(err error, task core.TaskType, meta core.Meta, 
 // have waited and timed out. The heartbeat keeps a long render's lease alive; the
 // reclaim rule needs both a stale heartbeat and an expired window, so a missed tick
 // inside the declared window is harmless.
-func (p *Pipeline) acquireMediaLease(reason string, ttl, wait time.Duration) ([]string, func(), error) {
+func (p *Pipeline) acquireMediaLease(ctx context.Context, reason string, ttl, wait time.Duration) ([]string, func(), error) {
 	noop := func() {}
 	start := time.Now()
 
@@ -3360,6 +3362,8 @@ func (p *Pipeline) acquireMediaLease(reason string, ttl, wait time.Duration) ([]
 		// lease that is not ours. The slot is still ours to give back.
 		slotHeld = false
 		var once sync.Once
+		// The card is ours from here: the call's PAIR card turns running.
+		core.MarkWorking(ctx)
 		return append(inherited, p.lockEnv()...), func() { once.Do(releaseMediaSlot) }, nil
 	}
 	m, err := gpulease.OpenAt(p.cfg.GPULockPath, p.cfg.StateDir)
@@ -3418,6 +3422,8 @@ func (p *Pipeline) acquireMediaLease(reason string, ttl, wait time.Duration) ([]
 		})
 	}
 	slotHeld = false
+	// The card is ours from here: the call's PAIR card turns running.
+	core.MarkWorking(ctx)
 	env := []string{
 		"GPU_LEASE_DIR=" + lease.Dir(),
 		"GPU_LEASE_EPOCH=" + strconv.FormatUint(lease.Epoch(), 10),

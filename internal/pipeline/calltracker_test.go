@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -41,5 +42,28 @@ func TestCloseCallCarriesOutcome(t *testing.T) {
 	}()
 	if !gotDeferred || !strings.Contains(got, "comfy unreachable") {
 		t.Fatalf("deferred=%v reason=%q", gotDeferred, got)
+	}
+}
+
+type recTracker struct {
+	task, door string
+	ended      int
+	deferred   bool
+}
+
+func (r *recTracker) Begin(task, door string) (func(), func(bool, string)) {
+	r.task, r.door = task, door
+	return func() {}, func(d bool, _ string) { r.ended++; r.deferred = d }
+}
+
+// Run hands the tracker the call's door (so a fleet-served call can be
+// skipped) and closes the card with the call's outcome.
+func TestRunPassesDoorAndClosesCard(t *testing.T) {
+	rt := &recTracker{}
+	p := &Pipeline{}
+	p.SetCallTracker(rt)
+	res := p.Run(context.Background(), core.Request{Task: core.TaskGenerateImage, Door: "fleet", Input: "a cat"})
+	if rt.task != "generate_image" || rt.door != "fleet" || rt.ended != 1 || rt.deferred != res.Deferred {
+		t.Fatalf("tracker = %+v (result deferred=%v)", rt, res.Deferred)
 	}
 }

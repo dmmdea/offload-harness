@@ -81,13 +81,20 @@ type Config struct {
 	OpenDir  string
 }
 
+// UnderLeaseEnv is set by `gpu reserve -- <cmd>` on the command it wraps. The
+// lease owns that job's card (queued in the lease queue, running once the
+// command starts, closed with its exit), so a harness command running under it
+// reports nothing of its own: one job, one card (0.140.6).
+const UnderLeaseEnv = "OFFLOAD_PAIR_UNDER_LEASE"
+
 // FromConfig reads the two harness config keys.
 func FromConfig(cfg config.Config) Config {
 	ep := strings.TrimSpace(cfg.PairWorkloadsEndpoint)
 	if ep == "" {
 		ep = DefaultEndpoint
 	}
-	return Config{Enabled: cfg.PairWorkloadsEnabled, Endpoint: ep,
+	enabled := cfg.PairWorkloadsEnabled && strings.TrimSpace(os.Getenv(UnderLeaseEnv)) == ""
+	return Config{Enabled: enabled, Endpoint: ep,
 		VLLMSeats: cfg.VLLMSeats, SwapEndpoint: cfg.Endpoint, StateDir: cfg.StateDir}
 }
 
@@ -627,6 +634,11 @@ func (e *Emitter) AttachLedger(l *ledger.Ledger) {
 		case "agent_delegate", "agent", "":
 			return
 		}
+		// Work this box served FOR another (a fleet dispatch) is the asking
+		// box's card, not a second one here.
+		if row.Door == FleetDoor {
+			return
+		}
 		if row.CacheHit {
 			return
 		}
@@ -634,13 +646,13 @@ func (e *Emitter) AttachLedger(l *ledger.Ledger) {
 		// off the ledger writer's path.
 		// A call that opened a running card (Begin) is closed by its own
 		// row, on the same card; claim it here, in row order.
-		open := e.claim(row.Task)
+		open, started := e.claim(row.Task)
 		e.inflight.Add(1)
 		go func() {
 			defer e.inflight.Done()
 			ev := e.FromLedger(row)
 			if open != nil {
-				ev = closeWith(ev, open)
+				ev = closeWith(ev, open, started)
 			}
 			e.Emit(ev)
 		}()

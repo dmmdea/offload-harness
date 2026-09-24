@@ -36,6 +36,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/gpuactivity"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
+	"github.com/dmmdea/offload-harness/internal/pairworkloads"
 )
 
 func runGPU(args []string) error {
@@ -234,8 +235,13 @@ func runGPUReserve(args []string) error {
 		return nil
 	}
 
+	// The job's PAIR card: queued now, in the lease queue and through the
+	// drain; running once the command starts; closed with its exit.
+	cfg := loadCfg(fs)
+	card := newLeaseCard(cfg, cmdArgs, *origin)
 	lease, err := acquireQueued(m, gpulease.Class(*class), opts, *wait)
 	if err != nil {
+		card.finish(err)
 		return err
 	}
 	// Release on the way out no matter how we leave, including Ctrl-C: a leaked text
@@ -247,7 +253,6 @@ func runGPUReserve(args []string) error {
 	// and a warm ahead of a queued --unload-seat is a load bought for nothing).
 	// The warm is heartbeat for its length; the lease outlives the command by
 	// exactly the warm.
-	cfg := loadCfg(fs)
 	finish := func() {
 		if *unload {
 			warmBackGuarded(cfg, leaseWarmGuard(m, lease), os.Stderr)
@@ -265,6 +270,7 @@ func runGPUReserve(args []string) error {
 		merr := maintainSeat(cfg, lease.Restamp, *drain, drainDeadline(*drainTimeout, queuedAt, *wait), *unload, exclusiveAfter, markWarmOwed(m))
 		stopRenew()
 		if merr != nil {
+			card.finish(merr)
 			return merr // deferred finish releases the lease (and warms back if it got that far)
 		}
 	}
@@ -284,9 +290,18 @@ func runGPUReserve(args []string) error {
 		// path (claimLeaseUnload), so exactly one job per lease tears the tier down.
 		"GPU_LEASE_CLASS="+string(lease.Class()),
 	)
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("starting wrapped command: %w", err)
+	if silencesWrapped(cmdArgs) {
+		// This lease's card stands for the command: a one-shot harness verb
+		// under it reports no card of its own.
+		cmd.Env = append(cmd.Env, pairworkloads.UnderLeaseEnv+"=1")
 	}
+	if err := cmd.Start(); err != nil {
+		err = fmt.Errorf("starting wrapped command: %w", err)
+		card.finish(err)
+		return err
+	}
+	card.running()
+	why := "" // what cut the command short, for the card
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
 
@@ -299,11 +314,14 @@ func runGPUReserve(args []string) error {
 		case err := <-done:
 			var ee *exec.ExitError
 			if errors.As(err, &ee) {
+				card.finish(fmt.Errorf("exit status %d%s", ee.ExitCode(), why))
 				finish()               // os.Exit skips defers: warm back + release explicitly
 				os.Exit(ee.ExitCode()) // propagate so shell loops branch correctly
 			}
+			card.finish(err)
 			return err
 		case <-sigc:
+			why = " (interrupted)"
 			_ = cmd.Process.Kill()
 		case <-tick.C:
 			// LOSING THE LEASE MUST BE LOUD. Discarding this error left the wrapped
@@ -314,6 +332,7 @@ func runGPUReserve(args []string) error {
 			if err := lease.Renew(); err != nil {
 				fmt.Fprintf(os.Stderr,
 					"gpu reserve: LEASE LOST (%v) — the GPU is no longer reserved for this command; killing it\n", err)
+				why = " (lease lost)"
 				_ = cmd.Process.Kill()
 			}
 		}
