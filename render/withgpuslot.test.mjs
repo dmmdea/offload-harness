@@ -46,6 +46,58 @@ test("throw path: cleanup STILL runs, error propagates", async () => {
   assert.equal(h.killed.n, 1, "spawned ComfyUI killed on throw");
 });
 
+// ---- F-38 audit, 2026-09-24: a render failure now carries ComfyUI's own console ----
+// tail, instead of a bare error with no diagnostic beyond the caller's own message
+// (the Aorus disk-space defect took a hand-built stdout-capturing bypass to find).
+
+test("throw path: comfyChild present + a captured log => the error is enriched with its tail", async () => {
+  const h = harness(); // comfyChild defaults to a truthy fake — we launched ComfyUI ourselves
+  await assert.rejects(
+    withGpuSlot({ ...h.opts, ...h.deps, tailLog: () => "[Errno 28] No space left on device" },
+      async () => { throw new Error("boom"); }),
+    (err) => {
+      assert.match(err.message, /boom/);
+      assert.match(err.message, /\[Errno 28\] No space left on device/, `error not enriched: ${err.message}`);
+      assert.equal(err.cause?.message, "boom", "the original error is preserved as .cause");
+      return true;
+    },
+  );
+});
+
+test("throw path: no captured log (nothing to add) => the error is unchanged, not padded with an empty section", async () => {
+  const h = harness();
+  await assert.rejects(
+    withGpuSlot({ ...h.opts, ...h.deps, tailLog: () => "" },
+      async () => { throw new Error("boom"); }),
+    (err) => {
+      assert.equal(err.message, "boom", `error must be untouched when there is no log to add: ${err.message}`);
+      return true;
+    },
+  );
+});
+
+test("throw path: comfyManaged:false (TTS lane) never calls tailLog — there is no ComfyUI to have logged anything", async () => {
+  const h = harness({ comfyManaged: false });
+  let tailLogCalled = false;
+  await assert.rejects(
+    withGpuSlot({ ...h.opts, ...h.deps, tailLog: () => { tailLogCalled = true; return "should not matter"; } },
+      async () => { throw new Error("boom"); }),
+    (err) => { assert.equal(err.message, "boom"); return true; },
+  );
+  assert.equal(tailLogCalled, false, "tailLog must not run for a non-ComfyUI-managed lane");
+});
+
+test("throw path: ComfyUI was REUSED (comfyChild null — a foreign instance, not one we launched) => tailLog is never called", async () => {
+  const h = harness({ comfyChild: null }); // ensureComfy returned null: already up, reused
+  let tailLogCalled = false;
+  await assert.rejects(
+    withGpuSlot({ ...h.opts, ...h.deps, tailLog: () => { tailLogCalled = true; return "should not matter"; } },
+      async () => { throw new Error("boom"); }),
+    (err) => { assert.equal(err.message, "boom"); return true; },
+  );
+  assert.equal(tailLogCalled, false, "a reused foreign ComfyUI's log (if any) is never someone else's to report");
+});
+
 // THE COLLAPSE, asserted. A runner with no lease must refuse rather than grab the card:
 // re-adding acquisition here is exactly the duplicate implementation that was deleted,
 // and rendering unarbitrated is what tore the text tier down in the first place.

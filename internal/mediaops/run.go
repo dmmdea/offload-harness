@@ -185,9 +185,14 @@ func RunMedia(ctx context.Context, cfg MediaConfig, req MediaRequest) (MediaResu
 	if cfg.FFmpeg == "" {
 		return res, fmt.Errorf("media ops need ffmpeg (ffmpeg_path unset): %w", ErrEngineAbsent)
 	}
-	if _, err := os.Stat(cfg.FFmpeg); err != nil {
+	// F-38: os.Stat alone missed the shipped bare "ffmpeg" config default (not a
+	// file in the current directory) even when ffmpeg was correctly installed and
+	// on PATH — ResolveBinary resolves it the way the actual exec below will.
+	resolved, ok := ResolveBinary(cfg.FFmpeg)
+	if !ok {
 		return res, fmt.Errorf("ffmpeg_path %q not found: %w", cfg.FFmpeg, ErrEngineAbsent)
 	}
+	cfg.FFmpeg = resolved
 	if req.VideoEncoder == "" {
 		req.VideoEncoder = cfg.VideoEncoder // the box's binding; a caller may still name one explicitly
 	}

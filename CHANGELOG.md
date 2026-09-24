@@ -188,6 +188,45 @@ Five harness defects from the OptiPlex 7060 (blackwell-8) media parity audit, 20
   that first slipped past a vacuous test comparing `protocolText()` with itself (replaced by fixed
   expectations).
 
+## [0.140.7] - 2026-09-24 - the music QA gate stopped silently skipping itself fleet-wide, ComfyUI's own console output is captured for failed renders, and doctor catches a model file still mid-copy
+
+Three media-lane defects found during the 2026-09-23/24 Lenovo/Aorus/OptiPlex media-route
+remediation (`infra/routes-lenovo-2026-09-23.md`, `infra/routes-qube-aorus-2026-09-23.md`).
+
+### Fixed
+
+- **The music route's over-render/trim/dead-air QA gate (PR #466) was silently skipped on every
+  node that never set an explicit `ffmpeg_path`.** `config.Default()`'s `FFmpegPath` is the bare
+  name `"ffmpeg"`, so `Pipeline.genEnv()`'s `!= ""` check was always true and every render child
+  got `FFMPEG_PATH=ffmpeg` — a bare name, not a path. `render/audio-qa.mjs`'s `resolveFfmpeg()`
+  treated a set `FFMPEG_PATH` as an exact file via `existsSync()`, which cannot see PATH
+  resolution, so it read `"ffmpeg"` as missing and the whole gate degraded to a silent skip,
+  shipping the raw, unverified render with its known ACE-Step dead-air tail (reproduced
+  identically on the Lenovo and the Aorus). `genEnv()` now resolves `ffmpeg_path` through PATH
+  (`internal/mediaops.ResolveBinary`, shared with `mediacap.binaryPresent` and
+  `internal/mediaops.RunMedia`, which had the identical bug) and threads the resolved absolute
+  path; `resolveFfmpeg()` also now tries a set-but-bare `FFMPEG_PATH` as a PATH-searchable command.
+  When ffmpeg/ffprobe genuinely cannot be found anywhere, the music lane now fails loudly with a
+  typed `FFMPEG_UNAVAILABLE` error (`gpugen.ClassifyErr` maps it, mirroring `DEAD_AIR`) instead of
+  silently shipping an unverified file. `doctor` gained a `media:ffprobe` route (it previously
+  checked only `ffmpeg`, so a box with ffmpeg but no ffprobe stayed green while `offload_media`
+  and the music gate deferred at call time).
+- **ComfyUI's own stdout/stderr were discarded** (`stdio: "ignore"`), so a ComfyUI-side failure
+  (e.g. `[Errno 28] No space left on device` on the Aorus) surfaced only as a terse
+  `/history execution_error` JSON — finding the real cause took a hand-built stdout-capturing
+  bypass copy of `render/`. `render/comfy-lifecycle.mjs` now captures a harness-launched ComfyUI's
+  console to a rotating, 5 MB-bounded log file beside the install (`offload-comfyui.log`, up to 3
+  previous runs kept), and `withGpuSlot` (`render/gpu-lock.mjs`) appends its last ~20 lines to a
+  render failure's error message — never for a reused foreign instance.
+- **`doctor`'s model-binding check was `os.Stat`-only**, so it reported a route `OK CONFIGURED`
+  the instant a same-named file of any size existed — reproduced live on the Qube: a 16.65 GB
+  WAN-Animate-2 unet read as configured at ~70% copied. `internal/mediacap/resolveBinding` now
+  compares the file's size against `knownModelSizes` (mirroring `setup/install.ps1`'s `$PINNED`
+  models, cross-checked by `TestKnownModelSizesMatchInstaller`) whenever the configured name is
+  one the harness's own installer pins, and reports `INCOMPLETE (have X of Y bytes)` on a
+  mismatch. Never hashes a file — cheap by construction. A name the installer does not pin (the
+  overwhelming majority of ComfyUI weights, sourced ad hoc between fleet boxes) is unaffected.
+
 ## [0.140.6] - 2026-09-23 - every node reports its own work to PAIR, lease jobs get a card, and a media card reads "running" only once it holds the GPU
 
 ### Fixed — PAIR showed only the Qube's delegations while the other nodes ran at 84-100 %

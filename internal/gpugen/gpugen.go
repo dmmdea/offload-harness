@@ -363,6 +363,8 @@ func ClassifyErr(err error) string {
 		return "http_5xx"
 	case strings.Contains(s, "dead_air"): // render/audio-qa.mjs's QA gate, F-35 follow-up 2026-09-23
 		return "dead_air"
+	case strings.Contains(s, "ffmpeg_unavailable"): // render/comfy-music.mjs main(), F-38 fix 2026-09-24
+		return "ffmpeg_unavailable"
 	default:
 		return "other"
 	}

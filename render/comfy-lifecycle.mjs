@@ -6,7 +6,7 @@
 // caller still tears the session down at the batch boundary). tts.mjs does
 // NOT use this (its Chatterbox worker is not ComfyUI; it passes comfyManaged:false to
 // withGpuSlot). Dependency-free; deps are injectable purely for tests.
-import { existsSync } from "node:fs";
+import { existsSync, createWriteStream, renameSync, rmSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { spawn as nodeSpawn, spawnSync as nodeSpawnSync } from "node:child_process";
 import { readLaunchOwner, writeLaunchOwner, clearLaunchOwner, harnessLaunched, pidAlive as defaultPidAlive } from "./comfy-ownership.mjs";
@@ -238,6 +238,104 @@ export async function reuseVerdict({ api, comfyDir, profile, systemArgv = fetchS
   return { reuse: false, reason: `${reason} — it was not started by this harness, so it is not reused (stop it, or start it with the binding's flags)` };
 }
 
+// --- ComfyUI console capture (F-38 audit, 2026-09-24) ---------------------------
+//
+// `spawn(..., { stdio: "ignore" })` used to discard every line ComfyUI itself ever
+// printed — memory-management decisions, node-level errors, the actual OS error
+// behind a failed render. The Aorus disk-space defect ("[Errno 28] No space left
+// on device") cost real diagnostic time because the ONLY signal available for a
+// failed production render was the terse /history execution_error JSON; the real
+// error was found only by building a stdout-capturing bypass copy of render/ by
+// hand and re-running the exact same graph outside the harness.
+//
+// This captures the harness's OWN ComfyUI launches (never a reused foreign
+// instance — see ensureComfy's reuse branch, which never calls this) to a single
+// rotating, size-bounded log file beside the ComfyUI install, and withGpuSlot
+// (gpu-lock.mjs) appends its last ~20 lines to a render failure's error message.
+
+const COMFY_LOG_CAP_BYTES = 5 * 1024 * 1024; // per run — generous for console text, never unbounded
+const COMFY_LOG_KEEP = 3; // previous runs kept as .1..3 (logrotate-style) beside the current file
+export const COMFY_LOG_TAIL_LINES = 20;
+
+/** comfyLogPath: this run's ComfyUI console capture, beside the install (matches the
+ * .offload-owned.json / .offload-launch.json convention in comfy-ownership.mjs). */
+export function comfyLogPath(comfyDir = COMFY_DIR) {
+  return join(comfyDir, "offload-comfyui.log");
+}
+
+/** rotateComfyLog: age out old numbered logs and free the current filename for the
+ * new run, so a long-lived box never accumulates unbounded ComfyUI console history.
+ * Best-effort: a rotation failure (e.g. a concurrent reader holding the file open on
+ * Windows) must never block a render. */
+export function rotateComfyLog(comfyDir = COMFY_DIR) {
+  const base = comfyLogPath(comfyDir);
+  try {
+    const oldest = `${base}.${COMFY_LOG_KEEP}`;
+    if (existsSync(oldest)) rmSync(oldest, { force: true });
+    for (let i = COMFY_LOG_KEEP - 1; i >= 1; i--) {
+      const from = `${base}.${i}`;
+      if (existsSync(from)) renameSync(from, `${base}.${i + 1}`);
+    }
+    if (existsSync(base)) renameSync(base, `${base}.1`);
+  } catch {}
+}
+
+/** tailComfyLog: the last `n` lines of THIS run's ComfyUI console capture, or ""
+ * when there is none (no harness-managed launch this run, or nothing captured yet).
+ * Synchronous — only ever called once, on a render failure, never on the happy path. */
+export function tailComfyLog(comfyDir = COMFY_DIR, n = COMFY_LOG_TAIL_LINES) {
+  try {
+    const text = readFileSync(comfyLogPath(comfyDir), "utf8");
+    const lines = text.split(/\r?\n/);
+    if (lines.length && lines[lines.length - 1] === "") lines.pop();
+    return lines.slice(-n).join("\n");
+  } catch {
+    return "";
+  }
+}
+
+/** captureComfyOutput: pipes a just-spawned ComfyUI child's stdout+stderr into the
+ * rotating log file, capped at COMFY_LOG_CAP_BYTES so a long batch session cannot
+ * grow it without bound. Every step is best-effort and defensive against a fake
+ * `spawn` (tests inject one that returns a bare `{ kill() {} }`, with no
+ * stdout/stderr/once) — a logging failure must never take down, or even alter the
+ * behaviour of, the render it exists to help diagnose. */
+function captureComfyOutput(child, comfyDir) {
+  if (!child) return;
+  rotateComfyLog(comfyDir);
+  let ws;
+  try {
+    ws = createWriteStream(comfyLogPath(comfyDir), { flags: "a" });
+    // createWriteStream's own open() failure (e.g. a synthetic test comfyDir that
+    // does not exist on disk) surfaces asynchronously as an "error" event, not a
+    // thrown exception — an unhandled one would crash the whole process. Swallow
+    // it: logging is diagnostic best-effort, never load-bearing for the render.
+    ws.on("error", () => {});
+  } catch { return; }
+  let bytes = 0, capped = false;
+  const onData = (chunk) => {
+    if (capped) return;
+    bytes += chunk.length;
+    if (bytes > COMFY_LOG_CAP_BYTES) {
+      capped = true;
+      try { ws.write("\n... [offload-comfyui.log capped at 5MB for this run] ...\n"); } catch {}
+      return;
+    }
+    try { ws.write(chunk); } catch {}
+  };
+  // child.stdout/stderr are Readables and can themselves emit "error" (e.g. EPIPE
+  // when withGpuSlot's teardown kills the child mid-write) — same class of
+  // unhandled-event crash as the write stream's own "error" above, on the OTHER
+  // end of the pipe. An unhandled one here would crash the whole render process,
+  // which is exactly the invariant this function exists to never violate.
+  const onStreamError = () => {};
+  try { child.stdout?.on?.("data", onData); child.stdout?.on?.("error", onStreamError); } catch {}
+  try { child.stderr?.on?.("data", onData); child.stderr?.on?.("error", onStreamError); } catch {}
+  const close = () => { try { ws.end(); } catch {} };
+  try { child.once?.("exit", close); } catch {}
+  try { child.once?.("error", close); } catch {}
+}
+
 // ensureComfy: if ComfyUI is already up, reuse it — unless this binding carries a launch
 // profile the running instance contradicts (then: restart it when the harness launched
 // it and nobody holds it, otherwise refuse with a COMFY-PROFILE-MISMATCH line; never
@@ -318,7 +416,8 @@ export async function ensureComfy(opts = {}) {
       && !flags.includes("--disable-pinned-memory")) {
     flags.push("--disable-pinned-memory");
   }
-  const child = spawn(py, ["main.py", ...flags], { cwd: comfyDir, stdio: "ignore", detached: false, env: spawnEnv });
+  const child = spawn(py, ["main.py", ...flags], { cwd: comfyDir, stdio: ["ignore", "pipe", "pipe"], detached: false, env: spawnEnv });
+  captureComfyOutput(child, comfyDir);
   // Record the launch so a later job can tell this instance from a foreign one (the
   // fingerprint is pid + this exact argv). Best-effort: without it, a later profile
   // mismatch refuses instead of restarting — the safe direction.

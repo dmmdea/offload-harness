@@ -49,6 +49,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/ledger"
 	"github.com/dmmdea/offload-harness/internal/llamaclient"
 	"github.com/dmmdea/offload-harness/internal/mediahash"
+	"github.com/dmmdea/offload-harness/internal/mediaops"
 	"github.com/dmmdea/offload-harness/internal/parser"
 	"github.com/dmmdea/offload-harness/internal/placement"
 	"github.com/dmmdea/offload-harness/internal/router"
@@ -3147,16 +3148,29 @@ func (p *Pipeline) genEnv() []string {
 	if len(p.cfg.MemoryStack) > 0 {
 		env = append(env, "MEMORY_STACK="+strings.Join(p.cfg.MemoryStack, ","))
 	}
-	// FFMPEG_PATH (F-35 regression follow-up, 2026-09-23): the music route's
-	// post-render QA gate (render/comfy-music.mjs — silence/true-peak measurement
-	// and loudness normalization) shells out to ffmpeg the same way audioio.go
-	// already does for transcribe. Threading the SAME configured binary here
-	// keeps both call sites honoring one per-machine ffmpeg_path instead of the
-	// script guessing its own "ffmpeg"-on-PATH default when a config already
-	// names the real one. Empty when unconfigured — the script falls back to
-	// PATH resolution and degrades the QA gate to a skip (never fails the render).
-	if p.cfg.FFmpegPath != "" {
-		env = append(env, "FFMPEG_PATH="+p.cfg.FFmpegPath)
+	// FFMPEG_PATH (F-35 regression follow-up, 2026-09-23; F-38 fix, 2026-09-24): the
+	// music route's post-render QA gate (render/comfy-music.mjs / audio-qa.mjs —
+	// over-render/trim, silence/true-peak measurement, loudness normalization)
+	// shells out to ffmpeg the same way audioio.go already does for transcribe.
+	// Threading the SAME configured binary here keeps both call sites honoring one
+	// per-machine ffmpeg_path instead of the script guessing its own default.
+	//
+	// F-38: config.Default's FFmpegPath is the bare name "ffmpeg" (a genuinely
+	// unconfigured box never sets one), so the old `!= ""` check was ALWAYS true
+	// and every child got FFMPEG_PATH=ffmpeg — a bare name, not a path.
+	// audio-qa.mjs's resolveFfmpeg() treats a set FFMPEG_PATH as an exact file via
+	// existsSync(), which cannot see PATH resolution, so it read "ffmpeg" as
+	// missing and silently skipped the entire QA gate on every fleet node that
+	// never set an explicit ffmpeg_path (reproduced identically on the Lenovo and
+	// the Aorus, 2026-09-23/24). mediaops.ResolveBinary resolves it here in Go —
+	// the same PATH-aware lookup doctor's media route already uses — so the child
+	// always receives either a real absolute path (existsSync succeeds directly)
+	// or nothing at all. Omitted (not "ffmpeg") when it cannot be resolved on this
+	// box at all: the script's own resolveFfmpeg() then does its own PATH probe,
+	// which will reach the identical answer, and main() now fails loudly rather
+	// than silently skipping the gate when neither side can find it.
+	if resolved, ok := mediaops.ResolveBinary(p.cfg.FFmpegPath); ok {
+		env = append(env, "FFMPEG_PATH="+resolved)
 	}
 	return env
 }
