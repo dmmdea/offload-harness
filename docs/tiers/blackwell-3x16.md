@@ -94,6 +94,7 @@ The installer seeds this tier's media bindings (`config_seed`):
 | key | value |
 |---|---|
 | `comfy_cuda_device` | `2` |
+| `comfy_dynamic_vram` | `on` |
 | `compose_script` | `render/compose-hyperframes.mjs` |
 | `gen_edit_preset` | `lightning8` |
 | `gen_edit_script` | `render/comfy-edit.mjs` |
@@ -101,9 +102,6 @@ The installer seeds this tier's media bindings (`config_seed`):
 | `imagegen_cfg` | `1` |
 | `imagegen_ckpt` | `krea2_turbo_bf16.safetensors` |
 | `imagegen_family` | `krea2` |
-| `imagegen_pool_compute` | `cuda:1` |
-| `imagegen_pool_donor` | `cuda:2` |
-| `imagegen_pool_vvram_gb` | `12` |
 | `imagegen_script` | `render/comfy-generate.mjs` |
 | `imagegen_steps` | `8` |
 | `imagegen_timeout_sec` | `3600` |
@@ -118,9 +116,6 @@ The installer seeds this tier's media bindings (`config_seed`):
 | `videogen_frames` | `121` |
 | `videogen_height` | `704` |
 | `videogen_latent_upscaler` | `ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors` |
-| `videogen_pool_compute` | `cuda:0` |
-| `videogen_pool_donor` | `cuda:2` |
-| `videogen_pool_vvram_gb` | `30` |
 | `videogen_text_encoder` | `gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors` |
 | `videogen_timeout_sec` | `5400` |
 | `videogen_transformer` | `ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors` |
