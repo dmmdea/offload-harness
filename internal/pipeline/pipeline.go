@@ -77,6 +77,7 @@ type Pipeline struct {
 	stt           *sttclient.Client  // whisper-server transcribe client (audio never hits the text cascade)
 	cache         *cache.Cache       // may be nil
 	led           *ledger.Ledger     // may be nil
+	tracker       CallTracker        // nil = no PAIR running cards
 	thresholds    map[string]float64 // per-task conformal margin thresholds (Phase 2); nil = config constant
 	breakers      *breaker.Group     // per-tier circuit breakers (Phase 3)
 	router        *router.Model      // entry-tier router (Phase 5); nil = static rule
@@ -347,8 +348,34 @@ type cacheVal struct {
 // Result (success or structured defer). Fast tasks (triage/classify) enter at
 // the small tier; on a quality failure the request climbs to the next-larger
 // local model before ever deferring to Opus. Infra errors do not escalate.
-func (p *Pipeline) Run(ctx context.Context, req core.Request) core.Result {
+// CallTracker opens a PAIR Jobs card when a long call starts and closes it
+// when the call ends (pairworkloads.Emitter.Begin). Begin returns nil when it
+// opened nothing.
+type CallTracker interface {
+	Begin(task string) func(deferred bool, reason string)
+}
+
+// SetCallTracker wires the tracker Run reports call starts to; nil = none.
+func (p *Pipeline) SetCallTracker(t CallTracker) { p.tracker = t }
+
+// closeCall closes a tracked call's card with the call's outcome. Deferred
+// directly (recover works only there): a panic leaves the result zero, which
+// would read as success, so the card closes failed and the panic goes on.
+func closeCall(end func(deferred bool, reason string), res *core.Result) {
+	if r := recover(); r != nil {
+		end(true, fmt.Sprintf("panic: %v", r))
+		panic(r)
+	}
+	end(res.Deferred, res.Reason)
+}
+
+func (p *Pipeline) Run(ctx context.Context, req core.Request) (res core.Result) {
 	start := time.Now()
+	if p.tracker != nil && req.Task.Valid() {
+		if end := p.tracker.Begin(string(req.Task)); end != nil {
+			defer closeCall(end, &res)
+		}
+	}
 	meta := core.Meta{Model: p.cfg.Model}
 	// Register A-102: carry the caller's door into telemetry so the ledger row
 	// names the surface that admitted the call. Documentary only — nothing below

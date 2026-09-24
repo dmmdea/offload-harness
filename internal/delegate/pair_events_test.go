@@ -80,10 +80,11 @@ func pairAppDir(t *testing.T) {
 }
 
 // TestLocalPlacementReportsOneCardToPAIR drives one contract through a local
-// placement and checks the PAIR frames: a running frame when the run starts
-// and a completed frame when it finishes, both under the SAME id, model and
-// engine (PAIR's store keys a card on that identity — two identities would be
-// two cards, one stuck running).
+// placement and checks the PAIR frames: queued when it is handed to the
+// runner, running when the run reports the seat working (0.140.5), completed
+// when it finishes, all under the SAME id, model and engine (PAIR's store keys
+// a card on that identity — two identities would be two cards, one stuck
+// running).
 func TestLocalPlacementReportsOneCardToPAIR(t *testing.T) {
 	pairAppDir(t)
 	c := &pairCapture{}
@@ -93,6 +94,7 @@ func TestLocalPlacementReportsOneCardToPAIR(t *testing.T) {
 	cfg.PairWorkloadsEnabled = true
 	cfg.PairWorkloadsEndpoint = srv.URL
 	local := LocalRunner(func(ctx context.Context, ac core.AgentContract, _ LocalOptions) (core.AgentWireResult, error) {
+		core.ReportProgress(ctx, core.LiveProgress{Phase: "decoding", TokensOut: 4, LastProgressMs: time.Now().UnixMilli()})
 		return core.AgentWireResult{SchemaVersion: core.AgentWireSchemaVersion, Output: "done", Seat: "gemma-4-e4b"}, nil
 	})
 	res, sum, err := RunWith(context.Background(), cfg, local, []core.AgentContract{{Goal: "say done"}}, "local", nil, nil)
@@ -104,22 +106,23 @@ func TestLocalPlacementReportsOneCardToPAIR(t *testing.T) {
 	}
 	// Emission is asynchronous; the runner is gone, so wait through the capture.
 	deadline := 50
-	for len(c.snapshot()) < 2 && deadline > 0 {
+	for len(c.snapshot()) < 3 && deadline > 0 {
 		deadline--
 		waitABit()
 	}
 	frames := c.snapshot()
-	if len(frames) != 2 {
-		t.Fatalf("frames = %d, want 2 (running, completed): %v", len(frames), frames)
+	byMethod := framesByMethod(frames)
+	if len(frames) != 3 || byMethod["workload:submitted"] == nil || byMethod["workload:started"] == nil || byMethod["workload:completed"] == nil {
+		t.Fatalf("frames = %d, want queued, running, completed: %v", len(frames), frames)
 	}
-	if frames[0]["method"] != "workload:started" || frames[1]["method"] != "workload:completed" {
-		t.Fatalf("methods = %v, %v", frames[0]["method"], frames[1]["method"])
-	}
-	a, b := pairInfo(frames[0]), pairInfo(frames[1])
+	q, a, b := pairInfo(byMethod["workload:submitted"]), pairInfo(byMethod["workload:started"]), pairInfo(byMethod["workload:completed"])
 	for _, k := range []string{"id", "runId", "model", "engine", "originatedFrom", "scheduledOn", "createdAt"} {
-		if a[k] != b[k] {
-			t.Fatalf("identity field %q differs between frames: %v vs %v", k, a[k], b[k])
+		if a[k] != b[k] || q[k] != a[k] {
+			t.Fatalf("identity field %q differs between frames: %v / %v / %v", k, q[k], a[k], b[k])
 		}
+	}
+	if q["startedAt"] != nil {
+		t.Fatalf("the queued frame must carry no start: %v", q)
 	}
 	if a["id"] != res[0].JobID || a["engine"] != "llamacpp" || a["scheduledOn"] != "self-uuid" {
 		t.Fatalf("card identity wrong: %v (job %s)", a, res[0].JobID)
@@ -208,7 +211,138 @@ func TestRunWithFlushesPAIRFramesBeforeReturning(t *testing.T) {
 	for _, f := range frames {
 		methods[f["method"]] = true
 	}
-	if len(frames) != 2 || !methods["workload:started"] || !methods["workload:errored"] {
-		t.Fatalf("frames delivered by return = %d %v, want started + errored", len(frames), frames)
+	// The run reported no progress, so the card never turned running.
+	if len(frames) != 2 || !methods["workload:submitted"] || !methods["workload:errored"] {
+		t.Fatalf("frames delivered by return = %d %v, want submitted + errored", len(frames), frames)
+	}
+}
+
+// framesByMethod indexes frames by JSON-RPC method (one frame per method).
+func framesByMethod(frames []map[string]any) map[string]map[string]any {
+	out := map[string]map[string]any{}
+	for _, f := range frames {
+		if m, ok := f["method"].(string); ok {
+			out[m] = f
+		}
+	}
+	return out
+}
+
+// TestSeatWorking pins when a card may read "running": the seat is serving
+// the request, never while the run is admitting or its seat is loading.
+func TestSeatWorking(t *testing.T) {
+	now := time.Now()
+	ago := func(d time.Duration) int64 { return now.Add(-d).UnixMilli() }
+	cases := []struct {
+		name  string
+		p     *core.LiveProgress
+		since time.Time
+		want  bool
+	}{
+		{"admission", &core.LiveProgress{Phase: "admission", LastProgressMs: ago(time.Minute)}, now.Add(-time.Minute), false},
+		{"cold-load, however long", &core.LiveProgress{Phase: "cold-load", LastProgressMs: ago(3 * time.Minute)}, now.Add(-3 * time.Minute), false},
+		{"fresh prefill may still be a load", &core.LiveProgress{Phase: "prefill", LastProgressMs: ago(2 * time.Second)}, time.Time{}, false},
+		{"prefill past the grace", &core.LiveProgress{Phase: "prefill", LastProgressMs: ago(pairPrefillGrace + time.Second)}, time.Time{}, true},
+		{"decoding", &core.LiveProgress{Phase: "decoding"}, time.Time{}, true},
+		{"tool", &core.LiveProgress{Phase: "tool"}, time.Time{}, true},
+		{"tokens already streamed", &core.LiveProgress{Phase: "cold-load", TokensOut: 12}, time.Time{}, true},
+		{"no progress yet, just started", nil, now.Add(-time.Second), false},
+		{"no progress ever (old node)", nil, now.Add(-pairNoProgressGrace - time.Second), true},
+		{"no progress, not started", nil, time.Time{}, false},
+	}
+	for _, tc := range cases {
+		if got := seatWorking(tc.p, tc.since, now); got != tc.want {
+			t.Errorf("%s: seatWorking = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestLocalColdLoadStaysQueued: a local run that only ever admitted and
+// loaded its seat never reads running (the 2026-09-23 "Running" card over a
+// 0 % card), and its terminal frame carries no start.
+func TestLocalColdLoadStaysQueued(t *testing.T) {
+	pairAppDir(t)
+	c := &pairCapture{}
+	srv := httptest.NewServer(http.HandlerFunc(c.handler))
+	defer srv.Close()
+	cfg := testCfg(t)
+	cfg.PairWorkloadsEnabled = true
+	cfg.PairWorkloadsEndpoint = srv.URL
+	local := LocalRunner(func(ctx context.Context, ac core.AgentContract, _ LocalOptions) (core.AgentWireResult, error) {
+		now := time.Now().UnixMilli()
+		core.ReportProgress(ctx, core.LiveProgress{Phase: "admission", LastProgressMs: now})
+		core.ReportProgress(ctx, core.LiveProgress{Phase: "cold-load", LastProgressMs: now})
+		return core.AgentWireResult{SchemaVersion: core.AgentWireSchemaVersion, Deferred: true, Reason: "stalled: seat still loading"}, nil
+	})
+	if _, _, err := RunWith(context.Background(), cfg, local, []core.AgentContract{{Goal: "say done"}}, "local", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	frames := c.snapshot()
+	byMethod := framesByMethod(frames)
+	if len(frames) != 2 || byMethod["workload:submitted"] == nil || byMethod["workload:errored"] == nil {
+		t.Fatalf("frames = %v, want queued + errored and no running", frames)
+	}
+	if info := pairInfo(byMethod["workload:errored"]); info["startedAt"] != nil {
+		t.Fatalf("a run that never worked must carry no start: %v", info)
+	}
+}
+
+// TestRemoteCardTurnsRunningOnWork: past the node's ack the card stays
+// queued while the node reports admission / cold-load, and turns running on
+// the first poll that shows the seat working.
+func TestRemoteCardTurnsRunningOnWork(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		workAt      int64 // poll number that first reports decoding; 0 = never
+		wantStarted bool
+	}{
+		{"loads then decodes", 3, true},
+		{"only ever loading", 0, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			compressPolls(t, 5*time.Millisecond, time.Second)
+			pairAppDir(t)
+			c := &pairCapture{}
+			pairSrv := httptest.NewServer(http.HandlerFunc(c.handler))
+			defer pairSrv.Close()
+			node := &fakeNode{
+				t: t, token: "sekrit", agentEnabled: true, resident: true, ctxTokens: 8192, nodeID: "fake-node",
+				pollState: func(n int64) (map[string]any, int) {
+					if n >= 5 {
+						return doneWire(t, remoteWire("the qube answer", `{"answer":"42"}`)), http.StatusOK
+					}
+					phase := "cold-load"
+					if n <= 1 {
+						phase = "admission"
+					}
+					if tc.workAt > 0 && n >= tc.workAt {
+						phase = "decoding"
+					}
+					return map[string]any{"state": "running", "progress": map[string]any{
+						"phase": phase, "last_progress_ms": time.Now().UnixMilli(), "allowance_ms": 60000}}, http.StatusOK
+				},
+			}
+			srv := node.server()
+			cfg := testCfg(t)
+			cfg.FleetAuthToken = "sekrit"
+			cfg.PairWorkloadsEnabled = true
+			cfg.PairWorkloadsEndpoint = pairSrv.URL
+			if _, _, err := Run(t.Context(), cfg, neverLocal(t), []core.AgentContract{remoteContract()}, "remote", []string{srv.URL}); err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			frames := c.snapshot()
+			byMethod := framesByMethod(frames)
+			if byMethod["workload:submitted"] == nil || byMethod["workload:completed"] == nil {
+				t.Fatalf("frames = %v, want queued and completed", frames)
+			}
+			started := byMethod["workload:started"] != nil
+			if started != tc.wantStarted {
+				t.Fatalf("running frame sent = %v, want %v: %v", started, tc.wantStarted, frames)
+			}
+			done := pairInfo(byMethod["workload:completed"])
+			if (done["startedAt"] != nil) != tc.wantStarted {
+				t.Fatalf("terminal startedAt = %v, want set only when the seat worked", done["startedAt"])
+			}
+		})
 	}
 }

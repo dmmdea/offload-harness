@@ -3,8 +3,10 @@ package delegate
 import (
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/ledger"
 	"github.com/dmmdea/offload-harness/internal/pairworkloads"
 )
@@ -135,4 +137,106 @@ func (r *runner) pairTerminal(jobID string, pr *PlacedResult) {
 		StartedAt:   pr.pairStarted,
 		CompletedAt: time.Now().UnixMilli(),
 	})
+}
+
+// A delegation card reads "running" only once the seat is WORKING on it
+// (0.140.5). Before, the frame went out at the node's ack (remote) or the
+// hand-off to the runner (local), so a card said "Running on <node>"
+// through a 2-minute seat load while the card sat at 0 % (2026-09-23). The
+// card now stays "queued" through admission and cold load, and turns
+// "running" on the first sign the seat is serving the request: a streamed
+// token, a decode, a tool call or a re-pack. A prefill counts once it has
+// lasted pairPrefillGrace without the seat probe (5 s cadence) calling it a
+// load. A run that reports no progress at all (a node too old to publish it)
+// turns running pairNoProgressGrace after it started, as before, give or take.
+const (
+	pairPrefillGrace    = 8 * time.Second
+	pairNoProgressGrace = 30 * time.Second
+)
+
+// seatWorking reads one progress report. since is when the job was first
+// seen started; now is the reading's time.
+func seatWorking(p *core.LiveProgress, since, now time.Time) bool {
+	if p == nil {
+		return !since.IsZero() && now.Sub(since) >= pairNoProgressGrace
+	}
+	if p.TokensOut > 0 {
+		return true
+	}
+	switch p.Phase {
+	case "decoding", "tool", "repack":
+		return true
+	case "prefill":
+		return p.LastProgressMs > 0 && now.Sub(time.UnixMilli(p.LastProgressMs)) >= pairPrefillGrace
+	}
+	return false
+}
+
+// pairStartGate flips a local placement's card to running once, from the
+// run's own progress reports (core.WithProgressReport) or a timer, and never
+// after the run returned.
+type pairStartGate struct {
+	mu      sync.Mutex
+	fired   bool
+	done    bool
+	last    *core.LiveProgress
+	started time.Time
+	timer   *time.Timer
+	fire    func()
+}
+
+func newPairStartGate(fire func()) *pairStartGate {
+	g := &pairStartGate{fire: fire, started: time.Now()}
+	g.mu.Lock()
+	g.timer = time.AfterFunc(pairNoProgressGrace, g.recheck)
+	g.mu.Unlock()
+	return g
+}
+
+// observe is the progress sink.
+func (g *pairStartGate) observe(p core.LiveProgress) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.fired || g.done {
+		return
+	}
+	g.last = &p
+	if seatWorking(g.last, g.started, time.Now()) {
+		g.fireLocked()
+		return
+	}
+	if p.Phase == "prefill" && p.LastProgressMs > 0 {
+		// Silent prefill sends no further report: re-read at the grace.
+		wait := time.Until(time.UnixMilli(p.LastProgressMs).Add(pairPrefillGrace))
+		g.timer.Reset(wait + 100*time.Millisecond)
+	}
+}
+
+func (g *pairStartGate) recheck() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.fired || g.done {
+		return
+	}
+	var since time.Time
+	if g.last == nil {
+		since = g.started
+	}
+	if seatWorking(g.last, since, time.Now()) {
+		g.fireLocked()
+	}
+}
+
+func (g *pairStartGate) fireLocked() {
+	g.fired = true
+	g.timer.Stop()
+	g.fire()
+}
+
+// stop ends the gate: nothing fires after it returns.
+func (g *pairStartGate) stop() {
+	g.mu.Lock()
+	g.done = true
+	g.timer.Stop()
+	g.mu.Unlock()
 }

@@ -20,7 +20,9 @@ pending work on the node that runs it. Off by default; two config keys turn it o
 |---|---|
 | `internal/pairworkloads/pairworkloads.go` | the emitter: PAIR identity from `node-id.json` / `cluster/members.json`, `EngineFor`, `MethodFor`, frame building, `Send` / `Emit`, the ledger observer (`AttachLedger`, `FromLedger`) |
 | `internal/delegate/pairevents.go` | `pairInflight` / `pairTerminal`: the delegation frames and the card identity pinned on `PlacedResult` |
-| `internal/delegate/run.go` | the three call sites: `runRemote` (queued, running), `runLocal` (running), `attempt().finish` (terminal); `runner.pair` |
+| `internal/delegate/run.go` | the call sites: `runRemote` (queued; running from the poll loop), `runLocal` (queued; running through `pairStartGate`), `attempt().finish` (terminal); `runner.pair` |
+| `internal/pairworkloads/calls.go` | running cards for long tool calls: `Begin`, the per-task open-card queue the ledger observer `claim`s from |
+| `internal/pipeline/pipeline.go` | `CallTracker`, `SetCallTracker`, the `Begin` at the top of `Run` |
 | `internal/ledger/ledger.go` | `Ledger.Observe`, called after every durable `Record` |
 | `internal/config/config.go` | `PairWorkloadsEnabled`, `PairWorkloadsEndpoint` |
 | `main.go` | attaches the ledger observer where the CLI/MCP ledger is opened |
@@ -59,9 +61,15 @@ and the harness has nothing to gain by sending them.
 
 ## The two sources
 
-1. **Delegations** (`internal/delegate`, `pairevents.go`). A remote placement emits `queued`
-   before the dispatch and `running` when the node acks; a local placement emits `running`
-   when it is handed to the runner. `attempt()`'s `finish` emits the terminal frame with the
+1. **Delegations** (`internal/delegate`, `pairevents.go`). A placement emits `queued` before
+   the dispatch (remote) or when it is handed to the runner (local), and `running` only once the
+   seat is WORKING on it (0.140.5, `seatWorking`): a streamed token, a decode, a tool call, a
+   re-pack, or a prefill older than `pairPrefillGrace` (8 s; the seat probe names a load within
+   5 s). Admission and cold load stay `queued`, so a card no longer reads "Running" over a seat
+   that is still loading. A remote run reads it from the poll's `progress`, a local run from its
+   own progress reports (`core.WithProgressReport`, `pairStartGate`); a run that reports no
+   progress at all turns `running` after `pairNoProgressGrace` (30 s). A run that never worked
+   closes with `startedAt` null. `attempt()`'s `finish` emits the terminal frame with the
    verdict the ledger row carries (a wire failure, a defer or a failed acceptance check is
    `failed`). The model and engine are **fixed at the first frame and carried on the
    `PlacedResult`** (`pairModel`, `pairEngine`, `pairCreated`, `pairStarted`): the node may end
@@ -74,6 +82,17 @@ and the harness has nothing to gain by sending them.
    `startedAt` = that minus the latency. Skipped on purpose: `agent_delegate` rows (source 1
    owns them), `agent` rows (this box serving someone else's delegation, already reported by
    the box that asked), cache hits (no GPU work).
+3. **Long tool calls while they run** (0.140.5, `internal/pairworkloads/calls.go`). A row is
+   written when a call ends, so source 2 alone left a ten-minute render with no card until it
+   finished. `Pipeline.Run` calls `Emitter.Begin(task)` (the pipeline's `CallTracker`, wired in
+   `openPipeline`), which emits a `running` frame (`id` = `call-<ms>-<n>`) for the tasks whose
+   engine the task alone names: the `comfyui` lanes, `compose_video` (`hyperframes`) and
+   `transcribe` (`whispercpp`). The call's own ledger row then closes THAT card (`claim`, oldest
+   first per task): same id, engine and start, the row's model and outcome. A call that wrote no
+   row (a cache hit) is closed when `Run` returns (`closeCall`; a panic closes it failed). Rows are
+   matched to open cards per task, not per call: two concurrent calls of one task (they serialize
+   on the media slot) can trade model and timings, but both cards close. Text and vision calls open
+   nothing: PAIR keys a card on its engine, and they learn llamacpp vs vllm only as they run.
 
 The emitter (`internal/pairworkloads.Emitter`) is fire-and-forget: a goroutine per frame with
 a 2 s timeout, one warning per process on the first failure, nothing ever changes a harness

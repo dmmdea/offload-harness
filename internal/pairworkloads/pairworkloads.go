@@ -150,6 +150,9 @@ type Emitter struct {
 	selfOnce    sync.Once
 	selfStart   int64
 	sweepOnce   sync.Once
+	// Open running cards for long tool calls (calls.go), by task.
+	callMu sync.Mutex
+	calls  map[string][]*openCall
 	// Seams (tests): process liveness, process start identity, the clock.
 	alive     func(pid int) bool
 	procStart func(pid int) (int64, bool)
@@ -629,10 +632,17 @@ func (e *Emitter) AttachLedger(l *ledger.Ledger) {
 		}
 		// FromLedger may read the llama-swap roster (LocalEngine); keep that
 		// off the ledger writer's path.
+		// A call that opened a running card (Begin) is closed by its own
+		// row, on the same card; claim it here, in row order.
+		open := e.claim(row.Task)
 		e.inflight.Add(1)
 		go func() {
 			defer e.inflight.Done()
-			e.Emit(e.FromLedger(row))
+			ev := e.FromLedger(row)
+			if open != nil {
+				ev = closeWith(ev, open)
+			}
+			e.Emit(ev)
 		}()
 	})
 }

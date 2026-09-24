@@ -3209,8 +3209,12 @@ func (r *runner) runLocal(ctx context.Context, jobID string, contract core.Agent
 		pairNode = host
 		pr.PlacementReason += "; engine " + r.cfg.Endpoint + " is " + host + "'s (attributed there)"
 	}
-	r.pairInflight(&pr, jobID, pairNode, nil, pr.Seat, "running", true)
-	wire, err := r.local(ctx, contract, opts)
+	// Queued until the seat is working on it (seatWorking): the run's own
+	// progress reports flip the card, so a cold load does not read "running".
+	r.pairInflight(&pr, jobID, pairNode, nil, pr.Seat, "queued", true)
+	gate := newPairStartGate(func() { r.pairInflight(&pr, jobID, pairNode, nil, pr.Seat, "running", true) })
+	wire, err := r.local(core.WithProgressReport(ctx, gate.observe), contract, opts)
+	gate.stop()
 	if err != nil {
 		pr.Err = "local run: " + err.Error()
 		return pr
@@ -3304,7 +3308,10 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 	// so persist the intent before any polling (Option A, intent.go).
 	r.intent.dispatched(jobID, base, contract.Goal)
 	pr.intentRecorded = true
-	r.pairInflight(&pr, jobID, pairNodeName(base, view.NodeID), []string{view.NodeID}, intendedSeat, "running", false)
+	// The card stays queued past the ack: it turns running when a poll shows
+	// the node's seat working on the job (seatWorking), not at the ack.
+	pairRunning := false
+	var pairSince time.Time
 
 	timeoutSec := executionBudgetSec(contract)
 	// pollBudget is the budget for WORK. Before the node gained a real queue
@@ -3514,6 +3521,15 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 					extendedOnProgress++
 				}
 				progressUntil = until
+			}
+		}
+		if !pairRunning && perr == nil && status == http.StatusOK && state == "running" {
+			if pairSince.IsZero() {
+				pairSince = time.Now()
+			}
+			if seatWorking(poll.Progress, pairSince, time.Now()) {
+				pairRunning = true
+				r.pairInflight(&pr, jobID, pairNodeName(base, view.NodeID), []string{view.NodeID}, intendedSeat, "running", false)
 			}
 		}
 		// The node's OWN wall, published while the job runs (jobWire
