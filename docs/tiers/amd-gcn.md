@@ -51,7 +51,7 @@ here so they are never mistaken for a media capability:
 |---|---|
 | `agent_max_tokens` | `2048` |
 | `agent_model` | `mimo-9b-agent` |
-| `agent_seat_tok_s` | `10` |
+| `agent_seat_tok_s` | `6.57` |
 | `agent_timeout_sec` | `900` |
 | `escalation_model` | `` |
 | `fleet_agent_enabled` | `true` |
