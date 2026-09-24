@@ -5,10 +5,13 @@
 // invoked as the main module (so importing it here has no side effects).
 import { test } from "node:test";
 import assert from "node:assert";
-import { writeFileSync, mkdtempSync } from "node:fs";
+import { writeFileSync, mkdtempSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseArgs, buildGraphFromArgs, computeRenderSeconds, RESERVE_VRAM_DEFAULT } from "./comfy-music.mjs";
+import {
+  parseArgs, buildGraphFromArgs, computeRenderSeconds, RESERVE_VRAM_DEFAULT,
+  cleanupFailedDeadAirOutput,
+} from "./comfy-music.mjs";
 
 test("parseArgs: positionals + flags (out, prompt, --seconds/--seed/--lyrics/--reserve-vram)", () => {
   const { pos, flags } = parseArgs([
@@ -135,4 +138,32 @@ test("buildGraphFromArgs: --graph passthrough ignores trim:true (its duration is
   assert.deepEqual(graph, customGraph);
   assert.equal(seconds, undefined, "a --graph passthrough never reports a requested seconds");
   assert.equal(renderSeconds, undefined, "and so never triggers a downstream trim");
+});
+
+// ---- cleanupFailedDeadAirOutput (R1 follow-up, 2026-09-23) ----------------------
+// renderOnce writes ComfyUI's raw SaveAudio bytes (always FLAC) straight to `out`;
+// only normalizeLoudness transcodes to match the requested extension, and it never
+// runs once dead air persists after the retry. Before this fix, a persistent-dead-
+// air music request with a "*.wav" out path left FLAC bytes under that .wav name on
+// disk after the DEAD_AIR defer — reproduced R1, 2026-09-23. generate() now calls
+// this before throwing; these tests pin the cleanup decision itself.
+test("cleanupFailedDeadAirOutput: removes the stray file left by a failed render", () => {
+  const dir = mkdtempSync(join(tmpdir(), "music-deadair-"));
+  const p = join(dir, "out.wav");
+  writeFileSync(p, "flac-bytes-under-a-wav-name");
+  assert.equal(existsSync(p), true, "fixture file must exist before cleanup");
+  cleanupFailedDeadAirOutput(p);
+  assert.equal(existsSync(p), false, "the stray mismatched-container file must be gone");
+});
+
+test("cleanupFailedDeadAirOutput: best-effort — an unlink failure never throws (the DEAD_AIR error matters more)", () => {
+  assert.doesNotThrow(() => {
+    cleanupFailedDeadAirOutput("whatever.wav", { unlink: () => { throw new Error("EPERM: simulated"); } });
+  });
+});
+
+test("cleanupFailedDeadAirOutput: calls the injected unlink with the exact output path", () => {
+  let called = null;
+  cleanupFailedDeadAirOutput("D:/media/music-abc123.wav", { unlink: (p) => { called = p; } });
+  assert.equal(called, "D:/media/music-abc123.wav");
 });

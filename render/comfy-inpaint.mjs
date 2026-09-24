@@ -164,7 +164,7 @@ async function renderJob(job, batchMode = false) {
     try {
       h = await pollOutputs({
         api: API, promptId, waitSec,
-        isDone: (entry) => !!firstOutputFile(entry.outputs),
+        isDone: (entry) => !!firstOutputFile(entry.outputs, graph),
         noOutputMsg: "no inpainted image produced in time",
         onExecError: () => finalizeRun({ api: API, promptId, cli }),
       });
@@ -174,7 +174,7 @@ async function renderJob(job, batchMode = false) {
       }
       throw e;
     }
-    const file = firstOutputFile(h.outputs);
+    const file = firstOutputFile(h.outputs, graph);
     mkdirSync(dirname(job.out) || ".", { recursive: true });
     writeFileSync(job.out, await fetchView({ api: API, file }));
     console.log("WROTE", job.out);

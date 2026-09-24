@@ -110,11 +110,11 @@ async function renderOnce(out, API, graph, seed, cli) {
   // never honored it, and preserving that is part of the step-4 exact-behavior contract.
   const h = await pollOutputs({
     api: API, promptId, waitSec: 1200,
-    isDone: (entry) => !!firstOutputFile(entry.outputs),
+    isDone: (entry) => !!firstOutputFile(entry.outputs, graph),
     noOutputMsg: "no audio produced in time",
     onExecError: () => finalizeRun({ api: API, promptId, cli }),
   });
-  const file = firstOutputFile(h.outputs);
+  const file = firstOutputFile(h.outputs, graph);
   writeFileSync(out, await fetchView({ api: API, file }));
   console.log("WROTE", out);
   await finalizeRun({ api: API, promptId, cli });
@@ -134,6 +134,27 @@ function applyTrim(ffmpeg, out, seconds) {
     console.error(`audio-qa: trimmed the over-length render to the requested ${seconds}s (1.0s fade-out on the cut)`);
   } else {
     console.error("audio-qa: trim to the requested length failed — measuring the over-length render as-is");
+  }
+}
+
+// cleanupFailedDeadAirOutput: best-effort removal of a failed render's leftover
+// file. renderOnce always writes ComfyUI's raw SaveAudio bytes (FLAC, unconditionally
+// — see the file header) straight to `out`, whatever extension the caller requested;
+// the ONLY step that transcodes to match the requested extension is
+// normalizeLoudness below, and it never runs when dead air persists after the
+// retry (the function throws first). Left in place, that stray file has the wrong
+// container for its name — exactly the "FLAC bytes in a .wav name" finding (R1,
+// 2026-09-23 OptiPlex remediation): a caller that inspects a failed music render's
+// requested output path finds a file, playable by nothing that trusts its
+// extension. `unlink` is injectable so this decision is unit-tested without a live
+// ComfyUI; failures are swallowed on purpose — a cleanup hiccup must never hide the
+// real DEAD_AIR error the caller needs.
+export function cleanupFailedDeadAirOutput(out, { unlink = unlinkSync } = {}) {
+  try {
+    unlink(out);
+  } catch {
+    // best-effort: the file may already be gone, or removal may be denied; either
+    // way the caller is about to see the real DEAD_AIR error, which matters more.
   }
 }
 
@@ -174,6 +195,7 @@ async function generate(out, API, graph, seed, { ffmpeg, ffprobe, seconds, rende
     if (trimsApply) applyTrim(ffmpeg, out, seconds);
     verdict = assessDeadAir(measure(ffmpeg, ffprobe, out));
     if (verdict.deadAir) {
+      cleanupFailedDeadAirOutput(out);
       throw new Error(`DEAD_AIR: dead air persisted after a retry (${verdict.reason}); seeds tried: ${seedsTried.join(", ")}`);
     }
     console.error(`audio-qa: retry clean (${verdict.reason})`);

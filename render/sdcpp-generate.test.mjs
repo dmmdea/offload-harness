@@ -7,7 +7,11 @@ import assert from "node:assert";
 import { mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseArgs, buildSdArgs, postprocessOutput } from "./sdcpp-generate.mjs";
+import {
+  parseArgs, buildSdArgs, postprocessOutput,
+  parseVulkanDeviceList, isIntegratedGpuName, isDiscreteGpuName,
+  pickDiscreteVulkanDevice, resolveVulkanDevice,
+} from "./sdcpp-generate.mjs";
 import { encodePng, decodePng } from "./png-alpha.mjs";
 import { RGBA_PROMPT_PREFIX, RGBA_PROMPT_SUFFIX } from "./wf-qwen-image-21.mjs";
 
@@ -125,4 +129,58 @@ test("postprocessOutput: transparent:true keeps the file (and its alpha) exactly
 test("wf-qwen-image-21.mjs's RGBA template constants are what buildSdArgs reuses (no drift)", () => {
   assert.equal(RGBA_PROMPT_PREFIX, "This is an RGBA image with transparency. ");
   assert.equal(RGBA_PROMPT_SUFFIX, ". The image has alpha channel and the background is transparent.");
+});
+
+// --- Vulkan device auto-pick (2026-09-23 OptiPlex fix): this runner used to pin
+// GGML_VK_VISIBLE_DEVICES=0 whenever unset, which on a box with an enabled
+// integrated GPU pinned the iGPU (Vulkan0 there) instead of the discrete card
+// (Vulkan1) — every render ran 100x slower with no error. These tests fix that
+// class of regression at the seam resolveVulkanDevice actually decides through.
+const TWO_DEVICE_LISTING = "Vulkan0 Intel(R) UHD Graphics 630\nVulkan1 NVIDIA GeForce RTX 5060\n";
+
+test("parseVulkanDeviceList: parses VulkanN <name> lines, ignores anything else", () => {
+  const got = parseVulkanDeviceList(TWO_DEVICE_LISTING);
+  assert.deepEqual(got, [
+    { index: "0", name: "Intel(R) UHD Graphics 630" },
+    { index: "1", name: "NVIDIA GeForce RTX 5060" },
+  ]);
+  assert.deepEqual(parseVulkanDeviceList("garbage\nnot a device line\n"), []);
+  assert.deepEqual(parseVulkanDeviceList(""), []);
+});
+
+test("isIntegratedGpuName / isDiscreteGpuName classify Intel iGPUs vs NVIDIA/AMD discrete cards", () => {
+  for (const n of ["Intel(R) UHD Graphics 630", "Intel Iris Xe Graphics", "Intel(R) Arc(TM) A750 Graphics"]) {
+    assert.equal(isIntegratedGpuName(n), true, n);
+    assert.equal(isDiscreteGpuName(n), false, n);
+  }
+  for (const n of ["NVIDIA GeForce RTX 5060", "AMD Radeon RX 7900 XTX"]) {
+    assert.equal(isIntegratedGpuName(n), false, n);
+    assert.equal(isDiscreteGpuName(n), true, n);
+  }
+});
+
+test("pickDiscreteVulkanDevice: returns the first discrete adapter's index; null when only an iGPU is listed", () => {
+  assert.equal(pickDiscreteVulkanDevice(parseVulkanDeviceList(TWO_DEVICE_LISTING)), "1");
+  assert.equal(pickDiscreteVulkanDevice(parseVulkanDeviceList("Vulkan0 Intel(R) UHD Graphics 630\n")), null);
+  assert.equal(pickDiscreteVulkanDevice([]), null);
+});
+
+test("resolveVulkanDevice: OptiPlex shape — iGPU at Vulkan0, RTX at Vulkan1 — auto-picks the RTX, never device 0", () => {
+  const got = resolveVulkanDevice("sd-cli", "", { list: () => TWO_DEVICE_LISTING });
+  assert.equal(got, "1");
+});
+
+test("resolveVulkanDevice: an explicit env override always wins, even over a listed discrete adapter", () => {
+  const got = resolveVulkanDevice("sd-cli", "0", { list: () => TWO_DEVICE_LISTING });
+  assert.equal(got, "0");
+});
+
+test("resolveVulkanDevice: no discrete adapter listed (iGPU-only box) falls back to device 0", () => {
+  const got = resolveVulkanDevice("sd-cli", "", { list: () => "Vulkan0 Intel(R) UHD Graphics 630\n" });
+  assert.equal(got, "0");
+});
+
+test("resolveVulkanDevice: a --list-devices probe failure falls back to device 0, never throws", () => {
+  const got = resolveVulkanDevice("sd-cli", "", { list: () => { throw new Error("spawn ENOENT"); } });
+  assert.equal(got, "0");
 });

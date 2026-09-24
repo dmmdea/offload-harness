@@ -91,11 +91,11 @@ async function render() {
     const waitSec = Number(process.env.COMFY_WAIT_SEC || 600);
     const h = await pollOutputs({
       api: API, promptId, waitSec,
-      isDone: (entry) => !!firstOutputFile(entry.outputs),
+      isDone: (entry) => !!firstOutputFile(entry.outputs, graph),
       noOutputMsg: "no upscaled image produced in time",
       onExecError: () => finalizeRun({ api: API, promptId, cli }),
     });
-    const file = firstOutputFile(h.outputs);
+    const file = firstOutputFile(h.outputs, graph);
     mkdirSync(dirname(out) || ".", { recursive: true });
     writeFileSync(out, await fetchView({ api: API, file }));
     console.log("WROTE", out);

@@ -77,6 +77,16 @@ func TestGenerateEmptyOutputErrors(t *testing.T) {
 // TestGenerateTimeoutKillsTree: a command that sleeps past the timeout is cancelled,
 // killTree terminates it, and Generate returns a timeout-classified error. This is the
 // invariant-3 process-tree-kill guard (video/audio now get it via gpugen).
+//
+// This assertion USED TO BE a t.Logf "best-effort" note, because the classification
+// depended on the killed child's own exit text, and on Windows killTree's taskkill
+// /T /F terminates via TerminateProcess, which reports exit code 1 — cmd.Wait()
+// then returns a plain "exit status 1" containing none of ClassifyErr's substrings
+// ("timeout"/"deadline"/"killed"/"signal:"). A cold ACE-Step music retry killed at
+// audiogen_timeout_sec hit exactly this (OptiPlex remediation, 2026-09-23): a real
+// timeout reported as an indistinguishable generic failure. Generate now checks its
+// OWN derived context's DeadlineExceeded directly (authoritative regardless of the
+// child's exit code), so this is now a HARD assertion, not a note.
 func TestGenerateTimeoutKillsTree(t *testing.T) {
 	requireNode(t)
 	exe, script, args := sleepCmd(30)
@@ -94,10 +104,14 @@ func TestGenerateTimeoutKillsTree(t *testing.T) {
 	if elapsed := time.Since(start); elapsed > 20*time.Second {
 		t.Fatalf("timeout did not kill the process promptly (took %v)", elapsed)
 	}
+	if !strings.Contains(err.Error(), "timeout") {
+		t.Fatalf("Generate's error must name the timeout explicitly, got: %v", err)
+	}
 	if ClassifyErr(err) != "timeout" {
-		t.Logf("note: ClassifyErr=%q (timeout classification is best-effort on the wrapped error)", ClassifyErr(err))
+		t.Fatalf("ClassifyErr(err) = %q, want \"timeout\" (got error: %v)", ClassifyErr(err), err)
 	}
 }
+
 
 // TestKillTreeNilProcess: killTree(nil) is a safe no-op (never panics).
 func TestKillTreeNilProcess(t *testing.T) {

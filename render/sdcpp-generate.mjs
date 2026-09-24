@@ -37,7 +37,7 @@
 // The pipeline's SupportsTransparentImage gate already restricts --transparent to the
 // qwen-image-2.1 family before this script ever runs, so no family check happens here.
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { withGpuSlot } from "./gpu-lock.mjs";
 import { rgbaPrompt } from "./wf-qwen-image-21.mjs";
@@ -126,6 +126,79 @@ export function postprocessOutput(out, transparent) {
   return true;
 }
 
+// parseVulkanDeviceList: `<bin> --list-devices` prints one "VulkanN <adapter
+// name>" line per ICD-visible device (any other line is ignored). Pure.
+export function parseVulkanDeviceList(text) {
+  const devices = [];
+  const re = /^\s*Vulkan(\d+)\s+(.+?)\s*$/;
+  for (const line of String(text || "").split(/\r?\n/)) {
+    const m = re.exec(line);
+    if (m) devices.push({ index: m[1], name: m[2] });
+  }
+  return devices;
+}
+
+// isIntegratedGpuName: a known Intel-integrated part — never the adapter to pick
+// for a diffusion render (measured 2026-09-23 on the OptiPlex: 565-608 s/step on
+// an Intel UHD 630 vs 4.85 s/step on the same box's RTX 5060).
+export function isIntegratedGpuName(name) {
+  return /\bintel\b|\buhd\b|\biris\b|\barc\b/i.test(name || "");
+}
+
+// isDiscreteGpuName: a discrete NVIDIA/AMD adapter — the one worth pinning.
+export function isDiscreteGpuName(name) {
+  return /\bnvidia\b|\bgeforce\b|\bquadro\b|\bamd\b|\bradeon\b/i.test(name || "") && !isIntegratedGpuName(name);
+}
+
+// pickDiscreteVulkanDevice: the first discrete adapter's index in listed order,
+// null when none of devices is discrete. Pure.
+export function pickDiscreteVulkanDevice(devices) {
+  const d = (devices || []).find((d) => isDiscreteGpuName(d.name));
+  return d ? d.index : null;
+}
+
+// resolveVulkanDevice picks the GGML_VK_VISIBLE_DEVICES value this render will
+// use: an explicit env override always wins (never guessed around); otherwise the
+// first discrete adapter `<bin> --list-devices` reports; otherwise device "0"
+// (ggml-Vulkan's own default — the pre-fix behavior when nothing better can be
+// determined). `list` is injectable for tests (no real spawn).
+//
+// No memoization here: this whole script is spawn-per-job (header) and main()
+// calls this exactly once per process, so "cached per process" falls out of the
+// architecture rather than needing a module-level cache — which would also wrongly
+// leak a stale device across unrelated node:test cases sharing this process.
+//
+// Fixes the OptiPlex defect (2026-09-23, REMEDIATION R8): this runner used to pin
+// device 0 unconditionally whenever the environment left it unset. On a box with
+// an enabled integrated GPU, ggml-Vulkan enumerates the iGPU FIRST (Vulkan0 =
+// Intel UHD 630, Vulkan1 = the RTX 5060 there), so every render silently ran on
+// the iGPU — no error, exit 0, just 100x slower (565-608 s/step vs 4.85 s/step).
+export function resolveVulkanDevice(bin, envValue, { list = defaultListDevices } = {}) {
+  if (envValue) return envValue;
+  let devices = [];
+  try {
+    devices = parseVulkanDeviceList(list(bin));
+  } catch (e) {
+    console.error("sdcpp-generate: --list-devices probe failed (" + e.message + ") — defaulting to Vulkan device 0");
+    return "0";
+  }
+  const discrete = pickDiscreteVulkanDevice(devices);
+  if (discrete != null) return discrete;
+  console.error("sdcpp-generate: no discrete (NVIDIA/AMD) Vulkan device found — defaulting to Vulkan device 0" +
+    (devices.length ? " (" + devices.map((d) => `Vulkan${d.index} ${d.name}`).join("; ") + ")" : " (--list-devices reported nothing)"));
+  return "0";
+}
+
+// defaultListDevices: the real probe, `<bin> --list-devices`, combined
+// stdout+stderr (sd.cpp release builds have printed device enumeration to either
+// stream across versions). Synchronous — this runs once, before the GPU slot is
+// even taken, and every other step in main() is already sequential.
+function defaultListDevices(bin) {
+  const r = spawnSync(bin, ["--list-devices"], { encoding: "utf8", timeout: 15000 });
+  if (r.error) throw r.error;
+  return (r.stdout || "") + "\n" + (r.stderr || "");
+}
+
 async function main() {
   const { pos, flags, extra } = parseArgs(process.argv.slice(2));
   const out = pos[0];
@@ -139,10 +212,15 @@ async function main() {
     console.error("SDCPP FAILED: SDCPP_BIN not set or missing: " + (bin || "(unset)"));
     process.exit(1);
   }
-  // Pin ONE Vulkan device deterministically, matching the J1 text-tier pin (the
-  // llama-swap template and the selftest both pin device 0). An operator override
-  // already in the environment wins. Multi-ICD boxes otherwise enumerate unstably.
-  if (!process.env.GGML_VK_VISIBLE_DEVICES) process.env.GGML_VK_VISIBLE_DEVICES = "0";
+  // Pick ONE Vulkan device deterministically: an operator override already in the
+  // environment always wins; otherwise auto-detect the discrete adapter (see
+  // resolveVulkanDevice's header — device 0 is NOT safe to assume, an enabled
+  // iGPU enumerates first on some boxes). Multi-ICD boxes otherwise enumerate
+  // unstably, which pinning ONE value (rather than leaving it to ggml's own
+  // default) still protects against.
+  if (!process.env.GGML_VK_VISIBLE_DEVICES) {
+    process.env.GGML_VK_VISIBLE_DEVICES = resolveVulkanDevice(bin, "");
+  }
   const args = buildSdArgs(out, prompt, flags, extra);
   await withGpuSlot({ noLock: flags["no-lock"], comfyManaged: false }, async () => {
     const code = await new Promise((res) => spawn(bin, args, { stdio: "inherit" }).on("close", res));

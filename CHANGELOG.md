@@ -188,6 +188,62 @@ Five harness defects from the OptiPlex 7060 (blackwell-8) media parity audit, 20
   that first slipped past a vacuous test comparing `protocolText()` with itself (replaced by fixed
   expectations).
 
+## [0.140.4] - 2026-09-23 - four media-lane defects from the OptiPlex remediation: animate_character's silent no-op, a crop at the origin, sdcpp's iGPU pin, an untyped audio timeout
+
+Four defects surfaced by the OptiPlex 7060 media-lane remediation (2026-09-23), each reproduced from the
+code path (not just observed live) and covered by a test broken-then-restored at its real call site.
+
+- **`animate_character` returned the driving video unmodified, on every box, every time — a harness
+  defect, not a box fault.** `render/comfy-output.mjs`'s `firstOutputFile()` scanned a ComfyUI `/history`
+  outputs object with a plain `for (const node of Object.values(outputs))`, and JS objects enumerate
+  integer-like keys in ASCENDING NUMERIC order regardless of insertion order. The native `LoadVideo` node
+  echoes a UI preview of its own input into its `outputs` entry — the same shape as a real result — and
+  in `wf-wan-animate2.mjs` that loader's id ("240") sorts before the real `SaveVideo` node's id ("246"),
+  so the loader's echoed preview was always picked first: full 806s render, exit 0, "WROTE `<out>`"
+  printed, and the file on disk byte-identical to the driver video (measured on the OptiPlex; confirmed
+  by sha256 + frame inspection). `firstOutputFile` now takes an optional second argument, the API-format
+  graph the caller already holds, and skips any node whose graph `class_type` starts with `Load` — a
+  loader never legitimately produces the result, whatever kind of file it echoes. Every caller
+  (`comfy-animate.mjs`, `comfy-video.mjs`, `comfy-edit.mjs`, `comfy-inpaint.mjs`, `comfy-music.mjs`,
+  `comfy-upscale.mjs`) now passes its graph. Audited every other `wf-*.mjs` builder for the same shape:
+  only WAN-Animate-2's graph uses a `LoadVideo` node; every other video lane uses `LoadImage`, which does
+  not register a preview entry in ComfyUI's execution outputs.
+- **`edit_image` crop at `x:0` or `y:0` failed with `pipeline failed: 'x'`.** `internal/mediaops/editimage.go`
+  tagged `EditOp.X`/`Y` `json:"x,omitempty"`/`"y,omitempty"`, so an explicit zero coordinate was dropped
+  from the JSON entirely, and `render/edit_image.py`'s `int(op["x"])` then raised `KeyError` — any
+  crop/composite/text op anchored at the image origin failed outright. Both sides fixed: the Go tags drop
+  `omitempty` on X/Y (Width/Height keep it — 0 is never valid there), and the Python side now defaults
+  safely (`op.get("x") or 0`) as defense in depth, matching the pattern the composite/text ops already used.
+- **sdcpp (stable-diffusion.cpp / Vulkan) pinned device 0 whenever `GGML_VK_VISIBLE_DEVICES` was unset,
+  which is the integrated GPU on any box with one enabled.** Measured on the OptiPlex: Vulkan0 = Intel UHD
+  630, Vulkan1 = the RTX 5060; every Z-Image render silently ran on the iGPU at 565-608s/step (the same
+  recipe runs at 4.85s/step on the RTX). `render/sdcpp-generate.mjs` now parses `<bin> --list-devices`
+  and auto-picks the first discrete (NVIDIA/AMD) adapter when the env is unset, falling back to device 0
+  only when none is found or the probe fails; an explicit env override still always wins. `doctor` now
+  reports which Vulkan device an sdcpp render will actually use (`internal/mediacap/sdcppdevice.go`,
+  doctor-only — it makes a live subprocess call, so it stays out of `mediacap.Routes` proper) and prints a
+  `WARN` line when that device is an integrated GPU.
+- **A music/audio timeout was reported as a generic `exit status 1`, not the typed timeout other lanes
+  rely on.** `internal/gpugen.Generate` kills the whole process tree on a context timeout via
+  `taskkill /T /F` on Windows, which terminates through `TerminateProcess` — reporting exit code 1 with
+  none of `ClassifyErr`'s recognized substrings (`timeout`/`deadline`/`killed`/`signal:`). `Generate` now
+  checks its OWN derived context's `DeadlineExceeded` directly (authoritative regardless of the child's
+  exit code) and folds "timeout"/"deadline exceeded" into the returned error text, so `ClassifyErr(gerr)
+  == "timeout"` is reliable for EVERY `gpugen`-based lane (audio, video, image), not just the one that
+  happened to reproduce it. `TestGenerateTimeoutKillsTree`'s classification assertion, previously a
+  `t.Logf` "best-effort" note because of exactly this flakiness, is now a hard `t.Fatalf`.
+  Also (a narrower, related finding from the same report): a music request whose dead-air retry still
+  fails left the retry's raw ComfyUI bytes (SaveAudio always emits FLAC) under the caller's requested
+  output path — a mismatched container under whatever extension was asked for ("FLAC bytes in a .wav
+  name", 2026-09-23). `render/comfy-music.mjs`'s dead-air-persists branch now removes that stray file
+  (best-effort; `cleanupFailedDeadAirOutput`) before throwing the typed `DEAD_AIR` error, so a failed
+  render never leaves a misleadingly-named file behind. The "FLAC bytes under a .wav name" symptom on a
+  *successful* render did NOT reproduce on 0.140.3 (confirmed: a real RIFF/pcm_s16le file) — not fixed,
+  since it could not be reproduced from the code path on that branch.
+- Tests: `internal/mediaops/editimage_test.go` (`TestCropOriginZeroRoundTrip`), `internal/gpugen/gpugen_test.go`
+  (hardened `TestGenerateTimeoutKillsTree`), `internal/mediacap/sdcppdevice_test.go` (new),
+  `render/comfy-output.test.mjs`, `render/sdcpp-generate.test.mjs`, `render/comfy-music.test.mjs`.
+
 ## [0.140.3] - 2026-09-23 - a short music render dodges its own dead air by rendering longer than asked, then trimming back
 
 ### Fixed — the ACE-Step dead-air gate (0.139.3) was defense-in-depth for a defect the render could avoid outright

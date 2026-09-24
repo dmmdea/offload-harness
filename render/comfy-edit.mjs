@@ -233,11 +233,11 @@ async function main() {
       const waitSec = Number(process.env.COMFY_WAIT_SEC || 1800);
       const h = await pollOutputs({
         api: API, promptId, waitSec,
-        isDone: (entry) => !!firstOutputFile(entry.outputs),
+        isDone: (entry) => !!firstOutputFile(entry.outputs, graph),
         noOutputMsg: "no edited image produced in time",
         onExecError: () => finalizeRun({ api: API, promptId, cli }),
       });
-      const file = firstOutputFile(h.outputs);
+      const file = firstOutputFile(h.outputs, graph);
       writeFileSync(out, await fetchView({ api: API, file }));
       console.log("WROTE", out);
       await finalizeRun({ api: API, promptId, cli });
