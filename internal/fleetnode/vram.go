@@ -20,6 +20,16 @@ import (
 	"github.com/dmmdea/offload-harness/internal/gpuprobe"
 )
 
+// ProcessDedicated is one \GPU Process Memory(pid_*)\Dedicated Usage
+// instance, raw: no tree filter, no summing, no name resolution — the return
+// shape of AllProcessDedicatedMiB (vram_windows.go's real implementation,
+// vram_other.go's always-erroring stub). Declared here, in the portable
+// file, so a non-Windows build can still name the type its own stub returns.
+type ProcessDedicated struct {
+	PID int
+	MiB int
+}
+
 // ParseSmiMemory parses `nvidia-smi --query-gpu=memory.total,memory.used
 // --format=csv,noheader,nounits` output ("16384, 1234", MiB) into GiB values.
 // Whitespace and CRLF are tolerated (nvidia-smi emits \r\n on Windows); on a

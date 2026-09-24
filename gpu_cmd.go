@@ -84,10 +84,19 @@ func runGPUStatus(args []string) error {
 	// the agent seat is owed a warm-back by the last of them.
 	waiters := m.Waiters()
 	warmOwed := m.SeatWarmOwed()
+	// Non-harness processes holding significant VRAM right now (register
+	// D-1xx-4, 2026-09-23): visible here too, not only at acquire, because a
+	// session reading `gpu status` mid-investigation deserves the same
+	// evidence a fresh `gpu reserve` would have printed.
+	foreign := foreignGPUHolders(context.Background())
 	if *asJSON {
 		queued := make([]map[string]any, 0, len(waiters))
 		for _, w := range waiters {
 			queued = append(queued, map[string]any{"pid": w.PID, "class": w.Class, "reason": w.Reason, "since": w.Since().Format(time.RFC3339)})
+		}
+		foreignJSON := make([]map[string]any, 0, len(foreign))
+		for _, h := range foreign {
+			foreignJSON = append(foreignJSON, map[string]any{"name": h.Name, "pid": h.PID, "mib": h.MiB})
 		}
 		b, _ := json.MarshalIndent(map[string]any{
 			"held": info.Held, "class": info.Class, "epoch": info.Epoch, "pid": info.PID,
@@ -95,7 +104,8 @@ func runGPUStatus(args []string) error {
 			"job_id": info.JobID, "expires_at": info.ExpiresAt.Format(time.RFC3339),
 			"exclusive": info.Exclusive, "draining": info.Draining, "command": info.Command, "state_root": m.Root(),
 			"queued": queued, "seat_warm_owed": warmOwed,
-			"verdict": act.Verdict, "activity": act.Map(),
+			"foreign_gpu_holders": foreignJSON,
+			"verdict":             act.Verdict, "activity": act.Map(),
 			// The next step, spelled out: a session reading "held" used to conclude
 			// "refuse the work"; the honest answer is "queue behind it".
 			"queue_with": queueHint,
@@ -116,6 +126,9 @@ func runGPUStatus(args []string) error {
 		}
 		if warmOwed != "" {
 			fmt.Printf("  seat warm-back owed: %s (paid by the last holder to release)\n", warmOwed)
+		}
+		if w := formatForeignWarning(foreign); w != "" {
+			fmt.Printf("  %s\n", w)
 		}
 	}
 	if !info.Held {
@@ -222,6 +235,7 @@ func runGPUReserve(args []string) error {
 		if err != nil {
 			return err
 		}
+		printForeignGPUWarning(os.Stderr)
 		// The lease is held by the hidden child FIRST (so no new work is placed
 		// here), then the seat is drained and unloaded. A failed drain leaves the
 		// lease held on purpose — the card stays reserved, work keeps routing
@@ -238,6 +252,7 @@ func runGPUReserve(args []string) error {
 	if err != nil {
 		return err
 	}
+	printForeignGPUWarning(os.Stderr)
 	// Release on the way out no matter how we leave, including Ctrl-C: a leaked text
 	// reservation blocks every render until it expires. When the seat was unloaded
 	// for this window it is warmed back BEFORE the release, so the first contract

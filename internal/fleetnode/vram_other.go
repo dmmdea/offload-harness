@@ -35,3 +35,19 @@ func GenericWindowsProbe(uma bool) MemProbe {
 func DedicatedVramTotalGiB() (float64, error) {
 	return 0, fmt.Errorf("dedicated VRAM capacity read requires the Windows display-class registry")
 }
+
+// AllProcessDedicatedMiB is the non-Windows stub for the foreign-GPU-holder
+// read (D-1xx-4, 2026-09-23): the "\GPU Process Memory" counter set is a WDDM
+// facility. Off-Windows the caller (internal/gpuactivity) falls back to
+// nvidia-smi's compute-apps query, which DOES report real per-process names
+// and memory on Linux — the gap this exists to close is Windows-only (on
+// WDDM, nvidia-smi's own per-process memory is `[N/A]`).
+func AllProcessDedicatedMiB() ([]ProcessDedicated, error) {
+	return nil, fmt.Errorf("per-process GPU memory sampling requires Windows PDH counters")
+}
+
+// ProcessNames is the non-Windows stub; the caller falls back to
+// nvidia-smi's own process_name column, which needs no separate lookup.
+func ProcessNames() (map[int]string, error) {
+	return nil, fmt.Errorf("process name enumeration requires Windows CreateToolhelp32Snapshot")
+}

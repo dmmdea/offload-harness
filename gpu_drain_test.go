@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -281,5 +284,153 @@ func TestDrainErrorsAtTheDeadlineWhileStarting(t *testing.T) {
 	}
 	if f.upstreamHitsWhileStarting.Load() != 0 {
 		t.Fatal("drain read /upstream while the seat was starting")
+	}
+}
+
+// multiSeatSwap is a llama-swap stand-in listing SEVERAL resident models at
+// once (drainSwap above only ever models one) — the fixture the defect-3 fix
+// needs: `gpu reserve --unload-seat` must unload every OTHER resident model
+// on the box, not only the configured agent seat (register D-1xx-3,
+// 2026-09-23; R2/R3 measured on the OptiPlex: another client's vision seat
+// `qwen3.5-9b-vl` stayed resident through an entire media lease on an 8 GB
+// card and only aged out at its own ttl).
+type multiSeatSwap struct {
+	mu           sync.Mutex
+	loaded       map[string]bool
+	unloadCalls  []string // every model /api/models/unload/<model> was hit for, in order
+	runningReads int
+	runningFail  bool // when true, GET /running answers a body Occupants cannot parse
+}
+
+func newMultiSeatSwap(models ...string) *multiSeatSwap {
+	f := &multiSeatSwap{loaded: map[string]bool{}}
+	for _, m := range models {
+		f.loaded[m] = true
+	}
+	return f
+}
+
+func (f *multiSeatSwap) handler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/running", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		f.runningReads++
+		if f.runningFail {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		var running []map[string]string
+		for m, ok := range f.loaded {
+			if ok {
+				running = append(running, map[string]string{"model": m, "state": "ready", "proxy": "http://" + r.Host + "/direct/" + m})
+			}
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"running": running})
+	})
+	mux.HandleFunc("/api/models/unload/", func(w http.ResponseWriter, r *http.Request) {
+		model := strings.TrimPrefix(r.URL.Path, "/api/models/unload/")
+		f.mu.Lock()
+		f.loaded[model] = false
+		f.unloadCalls = append(f.unloadCalls, model)
+		f.mu.Unlock()
+		w.WriteHeader(200)
+	})
+	// Nothing besides the agent seat's own warm-back may ever be asked to
+	// warm: a hit here for anything else means the harness tried to reload a
+	// foreign model, which PR #464's rule ("warm back only the seat that was
+	// loaded") never permits.
+	mux.HandleFunc("/upstream/", func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "unexpected warm-back of a foreign resident: "+r.URL.Path, http.StatusTeapot)
+	})
+	return mux
+}
+
+// TestUnloadSeatAlsoUnloadsOtherResidentModels is the headline case: three
+// models resident (the configured agent seat plus two loaded by OTHER
+// clients), `--unload-seat` must clear all three, and only the agent seat is
+// ever recorded as owed a warm-back.
+func TestUnloadSeatAlsoUnloadsOtherResidentModels(t *testing.T) {
+	f := newMultiSeatSwap("agent-pool", "qwen3.5-9b-vl", "embeddinggemma")
+	srv := httptest.NewServer(f.handler())
+	defer srv.Close()
+
+	old := maintenanceClient
+	maintenanceClient = srv.Client()
+	t.Cleanup(func() { maintenanceClient = old })
+
+	root := t.TempDir()
+	cfgPath := filepath.Join(root, "config.json")
+	cfg := `{"state_dir": ` + strconv.Quote(root) + `, "endpoint": ` + strconv.Quote(srv.URL) + `, "agent_model": "agent-pool"}`
+	if err := os.WriteFile(cfgPath, []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var owedSeat string
+	if err := maintainSeat(loadCfgPath(cfgPath), nil, false, time.Time{}, true, false, func(seat string) { owedSeat = seat }); err != nil {
+		t.Fatalf("maintainSeat: %v", err)
+	}
+	if owedSeat != "agent-pool" {
+		t.Fatalf("warm-owed marker = %q, want only the configured agent seat", owedSeat)
+	}
+
+	f.mu.Lock()
+	stillLoaded := map[string]bool{}
+	for m, ok := range f.loaded {
+		if ok {
+			stillLoaded[m] = true
+		}
+	}
+	calls := append([]string(nil), f.unloadCalls...)
+	f.mu.Unlock()
+
+	if len(stillLoaded) != 0 {
+		t.Fatalf("model(s) still resident after --unload-seat: %v", stillLoaded)
+	}
+	want := []string{"agent-pool", "qwen3.5-9b-vl", "embeddinggemma"}
+	for _, m := range want {
+		found := false
+		for _, c := range calls {
+			if c == m {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("model %q was never asked to unload; unload calls = %v", m, calls)
+		}
+	}
+}
+
+// TestUnloadSeatDegradesGracefullyWhenRunningIsUnreadable is the best-effort
+// half of the same fix: an unreadable /running must never block the agent
+// seat's own unload, only leave the OTHER residents untouched (with a loud
+// stderr note — not asserted here, the CONFIG contract that follows-through
+// is).
+func TestUnloadSeatDegradesGracefullyWhenRunningIsUnreadable(t *testing.T) {
+	f := newMultiSeatSwap("agent-pool", "qwen3.5-9b-vl")
+	f.runningFail = true
+	srv := httptest.NewServer(f.handler())
+	defer srv.Close()
+
+	old := maintenanceClient
+	maintenanceClient = srv.Client()
+	t.Cleanup(func() { maintenanceClient = old })
+
+	root := t.TempDir()
+	cfgPath := filepath.Join(root, "config.json")
+	cfg := `{"state_dir": ` + strconv.Quote(root) + `, "endpoint": ` + strconv.Quote(srv.URL) + `, "agent_model": "agent-pool"}`
+	if err := os.WriteFile(cfgPath, []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// seatWasResident (which the agent seat's own unload decision relies on)
+	// treats an ambiguous /running the same as "assume loaded", so this must
+	// still succeed and still unload the agent seat itself.
+	var owedSeat string
+	if err := maintainSeat(loadCfgPath(cfgPath), nil, false, time.Time{}, true, false, func(seat string) { owedSeat = seat }); err != nil {
+		t.Fatalf("an unreadable /running must not block the agent seat's own unload: %v", err)
+	}
+	if owedSeat != "agent-pool" {
+		t.Fatalf("warm-owed marker = %q, want the agent seat still recorded", owedSeat)
 	}
 }

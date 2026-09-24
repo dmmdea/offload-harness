@@ -436,3 +436,69 @@ func (m *Manager) SeatWarmOwed() string {
 func (m *Manager) ClearSeatWarmOwed() {
 	_ = os.Remove(m.seatWarmOwedPath())
 }
+
+// managerAt builds a throwaway Manager bound to an explicit lease directory,
+// for a package-level helper that operates on a directory string rather than
+// an owned Manager — InspectDir's own pattern (gpulease.go), extended here to
+// the waiters queue so a caller with only a resolved `dir` (modelaffinity,
+// which arms its gate from config.Load and never opens a full Manager) can
+// still register a waiter. now/procStart use the real clock/OS exactly like
+// OpenAt's Manager; only tests need the injectable seams, and they build
+// their Manager directly.
+func managerAt(leaseDir string) *Manager {
+	return &Manager{
+		leaseOverride: leaseDir,
+		root:          filepath.Dir(filepath.Dir(leaseDir)),
+		heartbeatTTL:  DefaultHeartbeatTTL,
+		now:           time.Now,
+		procStart:     processStart,
+		pid:           os.Getpid(),
+	}
+}
+
+// RegisterSeatWaiter marks a blocked seat/text-load admission as queued for
+// the lease at leaseDir (register D-1xx-2, 2026-09-23; R2 2026-09-23: "seat
+// starvation behind chained media leases").
+//
+// THE INCIDENT. A `transcribe` call's admission (modelaffinity.awaitLease)
+// waited 15+ minutes behind another client's back-to-back media leases and
+// was never admitted between them: epoch 111 (music) released and epoch 112
+// (music) was re-acquired by the SAME client with no gap the admission's own
+// 1 s poll ever caught free — seat/text-load admission had no representation
+// in the lease queue at all, so a fresh media Acquire (once D-1xx's FIFO fix
+// makes it queue behind registered waiters) still had nothing to queue
+// BEHIND in this case, because the admission was not one.
+//
+// THE FIX reuses the SAME waiters/ directory and Waiter record a lease
+// Acquire itself registers (waiters.go's FIFO doctrine), tagged ClassSeat so
+// `gpu status` and the queue log can tell it apart. Because isFrontOfQueue /
+// Waiters() are class-agnostic (no ADR gives the queue a class priority —
+// see waiters.go), a media/text Acquire that reaches its own front-of-queue
+// check automatically yields to a live ClassSeat entry exactly as it yields
+// to a real lease waiter, with NO changes needed to the ordering algorithm
+// itself.
+//
+// WHY THIS CANNOT DEADLOCK OR STARVE THE LEASE. A ClassSeat waiter NEVER
+// itself calls TryAcquire — it is not competing FOR the lease, only for a
+// fair turn once the card frees — so it can only ever DELAY another
+// acquirer's first successful claim, never block it forever: once the
+// admission notices the lease free (its own leasePollInterval-cadenced
+// InspectDir, independent of this registration) it proceeds and the CALLER
+// unregisters via the returned func, freeing the front of the queue for the
+// next real Acquire loop within at most one of the admission's own poll
+// ticks. While the lease is genuinely held by someone else, a ClassSeat
+// entry changes nothing: TryAcquire already refuses on its own, registered
+// waiter or not.
+//
+// refresh must be called on every one of the caller's own poll ticks — a
+// long wait's record otherwise goes heartbeat-stale (waiterStaleWindow, see
+// the ALIVE BUT NOT POLLING section atop this file) and stops protecting the
+// admission's place in line, exactly like an Acquire loop's own
+// refreshWaiter call. unregister is safe to call more than once and must run
+// via defer so a cancelled or timed-out admission never leaks a waiter that
+// would otherwise sit at the front of the queue until it goes stale.
+func RegisterSeatWaiter(leaseDir, reason string) (refresh func(), unregister func()) {
+	m := managerAt(leaseDir)
+	self, unreg := m.registerWaiter(ClassSeat, Options{Reason: reason})
+	return func() { m.refreshWaiter(self) }, unreg
+}

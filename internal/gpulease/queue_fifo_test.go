@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -88,6 +89,161 @@ func TestQueuedWaitersAreServedInArrivalOrder(t *testing.T) {
 				"waiter %d was served at position %d, meaning a later arrival won the card first",
 				order, n-1, got, i)
 		}
+	}
+}
+
+// THE RETURNING-HOLDER DEFECT (register D-1xx, 2026-09-23), measured live on
+// the OptiPlex: waiter pid 7864 registered at 15:30:28 behind holder pid
+// 13832's epoch 111 (a media lease). The holder released epoch 111 and
+// immediately re-acquired — a fresh Acquire call from the SAME process, as a
+// wrapper script chaining two `gpu reserve -- cmd` invocations back to back —
+// as epoch 113 (~15:31) and again as epoch 114 (~16:01), each time winning
+// the just-freed card ahead of the already-registered waiter. Pid 7864 sat
+// "queued ... 41m in line" the whole time and only got the card at 16:12:20.
+//
+// The cause: Acquire's very first attempt ran UNREGISTERED, before
+// isFrontOfQueue could ever apply to it — so a process that just released
+// the card, calling Acquire again with zero delay, always won that race
+// against a poll-based waiter whose own next tick was up to one poll
+// interval away. This reproduces the shape directly, with no goroutine
+// timing to race: a waiter registers and is the only one in line, then a
+// SECOND Acquire call — simulating the returning holder's own fresh
+// invocation — must queue behind it rather than winning the freed card, so
+// with nobody ever actually claiming on the first waiter's behalf, the
+// second call's own bounded wait must time out.
+func TestReturningHolderCannotJumpAnAlreadyRegisteredWaiter(t *testing.T) {
+	m := realClockManager(t)
+	holder, err := m.TryAcquire(ClassMedia, Options{Reason: "audio-gen (music)", TTL: time.Hour})
+	if err != nil {
+		t.Fatalf("setup acquire: %v", err)
+	}
+
+	// Seed a registered waiter directly, as if it queued earlier and is still
+	// actively polling elsewhere (queue_fifo_test.go's own pattern, used by
+	// TestAliveButNotPollingWaiterDoesNotBlockTheQueue among others).
+	queued, unregisterQueued := m.registerWaiter(ClassMedia, Options{Reason: "music2 waiter"})
+	defer unregisterQueued()
+	if queued.path == "" {
+		t.Fatal("failed to register the queued waiter — test cannot proceed")
+	}
+	time.Sleep(5 * time.Millisecond) // guarantee queued.SinceMs strictly precedes the next Acquire call
+
+	if err := holder.Release(); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+
+	// The card is free. A brand-new Acquire — standing in for the returning
+	// holder's own next command — must NOT win it while `queued` is still the
+	// registered front of the line: it must queue behind it instead, and
+	// since nothing here ever calls TryAcquire on `queued`'s behalf, a short
+	// bounded wait must time out rather than silently succeeding. The timeout
+	// error is deliberately NOT a *ErrHeld here (the card is genuinely free —
+	// there is no holder to describe as "held"); it must instead name the
+	// waiter still ahead in line, and — the regression this pins alongside
+	// the ordering itself — it must be a REAL, non-nil error paired with a
+	// nil lease, never Acquire's old (nil, nil) fall-through for a waiter
+	// that never once reached front-of-queue (that silently read as success
+	// and panicked the next line, `lease.Release()`, on every caller that
+	// trusted a nil error).
+	start := time.Now()
+	lease, err2 := m.Acquire(ClassMedia, Options{Reason: "edit", Wait: 150 * time.Millisecond})
+	elapsed := time.Since(start)
+	if err2 == nil || lease != nil {
+		t.Fatalf("a new Acquire won the free card ahead of an already-registered waiter (lease=%v err=%v) — the returning-holder defect is back", lease, err2)
+	}
+	if !strings.Contains(err2.Error(), "music2 waiter") {
+		t.Fatalf("timeout error does not name the waiter still ahead in line: %v", err2)
+	}
+	if elapsed < 100*time.Millisecond {
+		t.Fatalf("gave up after only %s — it must have actually queued behind the registered waiter for the full wait, not won or failed instantly", elapsed)
+	}
+}
+
+// SEAT FAIRNESS (register D-1xx-2, 2026-09-23; R2 "seat starvation behind
+// chained media leases"). A ClassSeat entry never itself calls TryAcquire —
+// it is registered by RegisterSeatWaiter around a BLOCKED seat/text-load
+// admission (modelaffinity.awaitLease) — but it must still hold the front of
+// the queue against a fresh media Acquire exactly like a real lease waiter,
+// so a chained media re-acquire cannot win the gap before the admission's
+// own poll ever notices the card free. And it must NOT be able to starve the
+// lease outright: once the registration is cleared (the admission proceeding
+// once it sees the card free, or giving up), a queued Acquire must get in.
+func TestSeatWaiterBlocksANewAcquireUntilItUnregisters(t *testing.T) {
+	m := realClockManager(t)
+	// RegisterSeatWaiter builds its OWN throwaway Manager (managerAt) that
+	// always stamps/reads a waiter's StartTimeMs with the REAL processStart,
+	// exactly like production. realClockManager's own procStart is a fixed
+	// stub (4242 for any pid) so its OTHER tests can control recycled-pid
+	// scenarios directly; left in place here it disagrees with the real
+	// stamp RegisterSeatWaiter's manager writes, and m.Waiters() reads that
+	// mismatch as a recycled pid and silently prunes the seat waiter. Use
+	// the real one so this test observes what production actually does.
+	m.procStart = processStart
+	holder, err := m.TryAcquire(ClassMedia, Options{Reason: "audio-gen (music)", TTL: time.Hour})
+	if err != nil {
+		t.Fatalf("setup acquire: %v", err)
+	}
+
+	refresh, unregister := RegisterSeatWaiter(m.leaseDir(), "transcribe voice_es.wav")
+	stop := make(chan struct{})
+	refreshDone := make(chan struct{})
+	go func() {
+		defer close(refreshDone)
+		ticker := time.NewTicker(2 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+				refresh()
+			}
+		}
+	}()
+
+	if err := holder.Release(); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+
+	type acquireResult struct {
+		l   *Lease
+		err error
+	}
+	result := make(chan acquireResult, 1)
+	go func() {
+		l, aerr := m.Acquire(ClassMedia, Options{Reason: "edit", Wait: 2 * time.Second})
+		result <- acquireResult{l, aerr}
+	}()
+
+	// Several poll ticks' worth of real time: the media Acquire must still be
+	// blocked, even though the card itself has been free this whole time.
+	time.Sleep(60 * time.Millisecond)
+	select {
+	case r := <-result:
+		close(stop)
+		<-refreshDone
+		unregister()
+		if r.l != nil {
+			_ = r.l.Release()
+		}
+		t.Fatalf("a media Acquire won the freed card while a ClassSeat waiter was registered and refreshing (err=%v) — seat fairness is broken", r.err)
+	default:
+	}
+
+	// The "admission" notices the card is free and lets go of its place in
+	// line — the queued Acquire must be admitted promptly, not starved.
+	close(stop)
+	<-refreshDone
+	unregister()
+
+	select {
+	case r := <-result:
+		if r.err != nil {
+			t.Fatalf("Acquire never succeeded after the seat waiter unregistered: %v", r.err)
+		}
+		_ = r.l.Release()
+	case <-time.After(2 * time.Second):
+		t.Fatal("Acquire never returned after the seat waiter unregistered — a non-acquiring waiter starved the lease itself")
 	}
 }
 

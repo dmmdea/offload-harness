@@ -188,6 +188,52 @@ Five harness defects from the OptiPlex 7060 (blackwell-8) media parity audit, 20
   that first slipped past a vacuous test comparing `protocolText()` with itself (replaced by fixed
   expectations).
 
+## [0.140.5] - 2026-09-23 - the GPU lease queue is strictly FIFO for a returning holder, a blocked seat/text-load admission gets a fair turn, `--unload-seat` clears every resident model, and `gpu reserve`/`gpu status` name foreign VRAM holders
+
+Four GPU-lease fairness defects measured live during the OptiPlex 7060 remediation (2026-09-23,
+`REMEDIATION-2026-09-23.md` sections R2-R4 and the noise-repro notes), each pinned by a test broken
+then restored at its real call site.
+
+- **The lease queue is now strictly FIFO for a returning holder.** `gpulease.Acquire` used to try
+  once, UNREGISTERED, before ever consulting the waiters queue — so a process that had just released
+  the card could call `Acquire` again and win a just-freed card ahead of an already-registered waiter,
+  indefinitely, because that first attempt was never gated by `isFrontOfQueue`. Measured: waiter pid
+  7864 queued 15:30:28 behind holder pid 13832 (epoch 111); the holder released and immediately
+  re-acquired as epoch 113 (~15:31) and epoch 114 (~16:01) while 7864 sat "queued ... 41m in line",
+  only getting the card at 16:12:20. `Acquire` now registers BEFORE its first claim attempt and gates
+  that attempt through the same `isFrontOfQueue` check as every later poll — fixing this also exposed
+  (and fixed) a `NEVER WAIT FOR SOMETHING THAT CANNOT HAPPEN` short-circuit that must fire once, against
+  the holder at CALL time, never against whatever a later, gated attempt happens to see once the waiter
+  reaches the front of the queue — and a real `(nil, nil)` bug: a waiter blocked the WHOLE wait window
+  behind another registered, non-acquiring entry (see the seat-fairness fix below) used to fall through
+  Acquire's timeout path with no error ever captured, returning a nil lease alongside a nil error.
+- **A blocked seat/text-load admission now gets a fair turn instead of starving behind chained media
+  leases.** `modelaffinity.awaitLease` (the gate a `transcribe`/`assess_image`/any llama-swap load waits
+  on while a media lease holds the card) never itself held a place in gpulease's waiters queue, so two
+  back-to-back media leases from the SAME client left it no gap it could ever observe as free — measured
+  15+ minutes, never admitted between epochs 111 and 112. A blocked admission now registers a
+  `gpulease.ClassSeat` waiter (`gpulease.RegisterSeatWaiter`) for as long as it polls; it never itself
+  calls `TryAcquire` (so it cannot starve the lease outright), but the FIFO fix above makes a fresh
+  media/text `Acquire` queue behind it exactly like a real lease waiter, guaranteeing the admission is
+  noticed and released before the next chained lease can retake the card.
+- **`gpu reserve --unload-seat` now unloads every OTHER resident llama-swap model, not only the
+  configured agent seat.** Measured: the OptiPlex vision seat `qwen3.5-9b-vl`, loaded by another
+  client, stayed resident through an entire media lease on an 8 GB card and only aged out at its ttl.
+  `maintainSeat` now reads `/running` before unloading and unloads every other model it lists (best-
+  effort: an unreadable `/running` never blocks the agent seat's own unload), and reports what it
+  unloaded. The PR #464 rule is unchanged: only the configured agent seat is ever warmed back
+  automatically, and only if it was loaded.
+- **`gpu reserve` and `gpu status` now name non-harness processes holding significant dedicated VRAM.**
+  Idle DaVinci Resolve held 1,450 MiB of an 8 GB card and nothing reported it: nvidia-smi's
+  per-process memory is `[N/A]` on Windows/WDDM, so the existing `gpuactivity.SampleProcesses` source
+  had nothing to show there. A new Windows source reads the `\GPU Process Memory(*)\Dedicated Usage`
+  perf counter by pid (`internal/fleetnode.AllProcessDedicatedMiB`, alongside a `ProcessNames` pid->exe
+  lookup); nvidia-smi's compute-apps query remains the Linux/NVIDIA path, where it does report real
+  per-process memory. Both are best-effort and time-bounded (never fatal, never gate GPU work). A
+  denylisted-name/floor-MiB filter keeps the harness's own processes and small residents out of the
+  warning: `gpu reserve: WARNING foreign GPU memory holders: Resolve pid 9416 1450 MiB`. Nothing is
+  ever killed.
+
 ## [0.140.4] - 2026-09-23 - four media-lane defects from the OptiPlex remediation: animate_character's silent no-op, a crop at the origin, sdcpp's iGPU pin, an untyped audio timeout
 
 Four defects surfaced by the OptiPlex 7060 media-lane remediation (2026-09-23), each reproduced from the

@@ -120,6 +120,100 @@ func TreeDedicatedPlusSharedGiB(rootPid int) (float64, error) {
 	return ded + sh, nil
 }
 
+// AllProcessDedicatedMiB enumerates EVERY \GPU Process Memory(pid_*)\Dedicated
+// Usage instance on the box — the foreign-GPU-holder read (D-1xx-4,
+// 2026-09-23; R4/noise-repro: idle DaVinci Resolve held 1,450 MiB of an 8 GB
+// card and nothing reported it, because nvidia-smi's per-process memory is
+// `[N/A]` on Windows/WDDM — see GPUProcess's doc comment in
+// internal/gpuactivity/smi.go — so a WDDM box has NO other per-process VRAM
+// source). Unlike TreeDedicatedGiB/TreeDedicatedPlusSharedGiB above, this
+// does NOT filter to one process's tree: the whole point is every OTHER
+// process holding VRAM, harness-owned or not — that filtering (by name, by
+// tree) is the caller's job (internal/gpuactivity or its caller), because
+// this package has no notion of "the harness" to filter by.
+//
+// Same PDH plumbing as treeCounterGiB, deliberately NOT refactored to share
+// it: that helper's unsafe struct layout carries a dated warning about a
+// previous padding bug that broke a live smoke, and duplicating the (short,
+// already-tested-shape) loop here is safer than threading a new return path
+// through code with that history. Best-effort like every other PDH reader in
+// this file: an error here means "no per-process source", never a crash —
+// see AllProcessDedicatedMiB's caller for the fallback.
+func AllProcessDedicatedMiB() ([]ProcessDedicated, error) {
+	var q uintptr
+	if r, _, _ := pdhOpenQuery.Call(0, 0, uintptr(unsafe.Pointer(&q))); r != 0 {
+		return nil, fmt.Errorf("PdhOpenQuery: 0x%x", r)
+	}
+	defer pdhCloseQuery.Call(q)
+	path, _ := syscall.UTF16PtrFromString(`\GPU Process Memory(*)\Dedicated Usage`)
+	var c uintptr
+	if r, _, _ := pdhAddEnglishCounter.Call(q, uintptr(unsafe.Pointer(path)), 0, uintptr(unsafe.Pointer(&c))); r != 0 {
+		return nil, fmt.Errorf("PdhAddEnglishCounter: 0x%x", r)
+	}
+	if r, _, _ := pdhCollectQueryData.Call(q); r != 0 {
+		return nil, fmt.Errorf("PdhCollectQueryData: 0x%x", r)
+	}
+	var bufLen, itemCount uint32
+	pdhGetFormattedCounterArr.Call(c, pdhFmtDouble, uintptr(unsafe.Pointer(&bufLen)), uintptr(unsafe.Pointer(&itemCount)), 0)
+	if bufLen == 0 {
+		return nil, fmt.Errorf("no GPU Process Memory instances")
+	}
+	buf := make([]byte, bufLen)
+	if r, _, _ := pdhGetFormattedCounterArr.Call(c, pdhFmtDouble, uintptr(unsafe.Pointer(&bufLen)), uintptr(unsafe.Pointer(&itemCount)), uintptr(unsafe.Pointer(&buf[0]))); r != 0 {
+		return nil, fmt.Errorf("PdhGetFormattedCounterArray: 0x%x", r)
+	}
+	// Same bound-check as treeCounterGiB, for the same reason: a garbage count
+	// would index past buf and panic in a status path that must never crash
+	// the caller (a lease acquire, `gpu status`).
+	if itemCount == 0 || itemCount > 1<<16 || uintptr(itemCount)*unsafe.Sizeof(pdhFmtCountervalueItemDouble{}) > uintptr(bufLen) {
+		return nil, fmt.Errorf("pdh: implausible item count %d (buf %d)", itemCount, bufLen)
+	}
+	items := (*[1 << 16]pdhFmtCountervalueItemDouble)(unsafe.Pointer(&buf[0]))[:itemCount:itemCount]
+	out := make([]ProcessDedicated, 0, itemCount)
+	for _, it := range items {
+		if it.Val.CStatus != 0 {
+			continue
+		}
+		name := syscall.UTF16ToString((*[256]uint16)(unsafe.Pointer(it.Name))[:])
+		pid := pidFromInstance(name)
+		if pid == 0 {
+			continue
+		}
+		out = append(out, ProcessDedicated{PID: int(pid), MiB: int(it.Val.Double / (1 << 20))})
+	}
+	return out, nil
+}
+
+// ProcessNames maps every currently running pid to its executable's base
+// name (e.g. "Resolve.exe"), via one CreateToolhelp32Snapshot pass — the
+// SAME snapshot mechanism descendants() (above) already walks for pid/ppid
+// pairs, here also keeping each entry's ExeFile. Best-effort: a pid with no
+// resolvable name (raced past between the snapshot and the read, or a
+// permission boundary) is simply absent from the map, never an error for the
+// whole call.
+func ProcessNames() (map[int]string, error) {
+	snap, _, _ := procCreateToolhelp32Snap.Call(th32csSnapProcess, 0)
+	if syscall.Handle(snap) == syscall.InvalidHandle {
+		return nil, fmt.Errorf("CreateToolhelp32Snapshot failed")
+	}
+	defer procCloseHandle.Call(snap)
+	out := map[int]string{}
+	var e processEntry32
+	e.Size = uint32(unsafe.Sizeof(e))
+	if r, _, _ := procProcess32FirstW.Call(snap, uintptr(unsafe.Pointer(&e))); r != 0 {
+		for {
+			name := syscall.UTF16ToString(e.ExeFile[:])
+			if name != "" {
+				out[int(e.ProcessID)] = name
+			}
+			if r, _, _ := procProcess32NextW.Call(snap, uintptr(unsafe.Pointer(&e))); r == 0 {
+				break
+			}
+		}
+	}
+	return out, nil
+}
+
 // treeCounterGiB sums the given per-process GPU counter over rootPid's tree.
 func treeCounterGiB(rootPid int, counterPath string) (float64, error) {
 	var q uintptr

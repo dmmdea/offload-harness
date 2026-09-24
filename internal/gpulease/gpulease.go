@@ -64,10 +64,21 @@ const (
 	// holder unloads nothing; it exists so media work WAITS rather than tearing the
 	// text tier down mid-measurement.
 	ClassText Class = "text"
+	// ClassSeat (register D-1xx-2, 2026-09-23) is NOT a lease class — Valid()
+	// deliberately excludes it, so nothing can Acquire with it and it can
+	// never itself hold the card. It exists only to appear in the WAITERS
+	// queue: a blocked seat/text-load admission (modelaffinity.awaitLease)
+	// registers one via RegisterSeatWaiter while it polls for the lease to
+	// free, so a chained media Acquire yields to it exactly as it yields to
+	// any other registered waiter — see RegisterSeatWaiter's doc for why a
+	// seat request otherwise starved behind back-to-back media leases that
+	// left it no gap to ever be noticed in.
+	ClassSeat Class = "seat"
 )
 
-// Valid reports whether c is a known class. Unknown classes are refused at the
-// boundary so a typo can never create a third, unarbitrated category.
+// Valid reports whether c is a known LEASE class — one that may Acquire the
+// card. ClassSeat is deliberately excluded: it labels a waiters-queue entry
+// that never itself holds the lease, never mind acquires it.
 func (c Class) Valid() bool { return c == ClassMedia || c == ClassText }
 
 const (
@@ -846,66 +857,119 @@ func (m *Manager) holderInfo(meta *Meta) Info {
 // Only *ErrHeld is retried. An unwritable or cloud-synced lease location is returned
 // immediately: it is a configuration fault, and waiting cannot fix it.
 func (m *Manager) Acquire(class Class, opts Options) (*Lease, error) {
-	lease, err := m.TryAcquire(class, opts)
-	if err == nil || opts.Wait <= 0 {
-		return lease, err
+	if opts.Wait <= 0 {
+		return m.TryAcquire(class, opts)
 	}
-	var held *ErrHeld
-	if !errors.As(err, &held) {
-		return nil, err
-	}
-	// NEVER WAIT FOR SOMETHING THAT CANNOT HAPPEN. A `text` reservation carries an
-	// operator's DECLARED duration (`gpu reserve --for 45m`), so if it outlasts our
-	// whole window there is nothing to wait for: polling for 90 s first only delays the
-	// identical answer and keeps a waiter doing file reads for no reason.
+	deadline := m.now().Add(opts.Wait)
+
+	// NEVER WAIT FOR SOMETHING THAT CANNOT HAPPEN, checked ONCE against
+	// whoever holds the card AT THE MOMENT Acquire WAS CALLED — a read-only
+	// Inspect, never a claim attempt, so it costs no epoch and cannot race.
+	// A `text` reservation carries an operator's DECLARED duration (`gpu
+	// reserve --for 45m`), so if it outlasts our whole window there is
+	// nothing to wait for: polling first only delays the identical answer
+	// and keeps a waiter doing file reads for no reason.
 	//
-	// A `media` lease is deliberately NOT treated this way. Its expiry is a timeout
-	// CEILING, not a promise — a video job declares a 25-minute budget and routinely
-	// finishes in three — so short-circuiting on it would drop jobs that were about to
-	// be served.
+	// DELIBERATE ABOUT *WHEN*: this must run BEFORE registering as a waiter,
+	// against an Inspect taken right now — never against whatever a later
+	// CLAIM attempt happens to see once we reach the front of the queue.
+	// Those are different holders in general: several waiters can cycle
+	// through the SAME card during one waiter's queue time (five short-lived
+	// text holders in TestQueuedWaitersAreServedInArrivalOrder), each with
+	// its own default declared TTL, and a waiter's own first CLAIM attempt
+	// only fires once it is front-of-queue — by which point "whoever
+	// currently holds it" is routinely a fellow waiter's own brief hold, not
+	// the long-lived holder that was here when we started waiting. Gating
+	// this check on a later claim attempt (tried and reverted) fired the
+	// short-circuit against those brief fellow-waiter holds and gave up
+	// early even though every one of them released within milliseconds —
+	// reproduced directly: 2 of 5, then 2 of 6 waiters failed with "declared
+	// until ..." though nothing outlasted their real budget. Checking the
+	// CALL-TIME holder instead restores the original meaning: "is it
+	// pointless to even start queueing" — not "is whatever I happen to see
+	// once it is my turn."
 	//
-	// Unless the caller said WaitOut: for it the window is information, not a
-	// verdict (see Options.WaitOut).
-	if !opts.WaitOut && held.Info.Class == ClassText && !held.Info.ExpiresAt.IsZero() &&
-		held.Info.ExpiresAt.After(m.now().Add(opts.Wait)) {
-		return nil, err
+	// A `media` lease is deliberately NOT treated this way. Its expiry is a
+	// timeout CEILING, not a promise — a video job declares a 25-minute
+	// budget and routinely finishes in three — so short-circuiting on it
+	// would drop jobs that were about to be served.
+	//
+	// Unless the caller said WaitOut: for it the window is information, not
+	// a verdict (see Options.WaitOut).
+	if info := m.Inspect(); info.Held && !opts.WaitOut && info.Class == ClassText &&
+		!info.ExpiresAt.IsZero() && info.ExpiresAt.After(deadline) {
+		return nil, &ErrHeld{Info: info}
 	}
-	// Say that we are queued (register D-124): the holder's release path reads
-	// the waiter list to decide whether warming the seat back is worth anything
-	// — a warm the next holder unloads again is a 3-minute load bought for
-	// nothing, and an UNORDERED one lands a seat on a card someone else holds.
-	// Since D-13x (2026-09-22) the SAME record also arbitrates who gets to TRY
-	// next — see the FIFO comment atop waiters.go for why that was missing and
-	// what it cost.
+
+	// REGISTER BEFORE THE FIRST CLAIM ATTEMPT, not after it (register D-1xx,
+	// 2026-09-23). The old code tried once, unregistered, and only registered
+	// as a waiter once THAT try failed — so a brand-new Acquire's very first
+	// TryAcquire was never gated by isFrontOfQueue at all, whatever else was
+	// already queued. Measured live: waiter pid 7864 registered at 15:30:28
+	// behind holder pid 13832's epoch 111; the holder released epoch 111 and
+	// immediately re-acquired as epoch 113 (~15:31) and again as epoch 114
+	// (~16:01) — each time its OWN fresh Acquire call won the just-freed card
+	// via this unregistered fast path, because nothing about the front-of-queue
+	// check ever applied to it. Pid 7864 sat "queued ... 41m in line" the whole
+	// time and only got the card at 16:12:20, once the other session finally
+	// stopped chaining leases. A process that just released has no inherent
+	// disadvantage against a poll-based waiter — it can call Acquire again in
+	// the same instant, with none of the up-to-one-poll-interval delay a
+	// genuinely new arrival would have — so "bounded by one poll interval" was
+	// never true for exactly this shape of caller, only for an unrelated one.
+	//
+	// Registering unconditionally, before ever probing the card, costs nothing
+	// in the common uncontested case: with no other waiters, isFrontOfQueue is
+	// immediately true and the first attempt below still fires without
+	// waiting a single poll interval, exactly like the old fast path did.
 	self, unregister := m.registerWaiter(class, opts)
 	defer unregister()
-	deadline := m.now().Add(opts.Wait)
-	for {
-		remaining := deadline.Sub(m.now())
-		if remaining <= 0 {
-			return nil, err // the most recent holder, not the first one we saw
-		}
-		pause := m.pollInterval()
-		if remaining < pause {
-			pause = remaining
-		}
-		m.pause(pause)
+	var err error
+	for first := true; ; first = false {
+		if !first {
+			remaining := deadline.Sub(m.now())
+			if remaining <= 0 {
+				if err != nil {
+					return nil, err // the most recent holder, not the first one we saw
+				}
+				// NEVER a bare (nil, nil): with the front-of-queue gate now
+				// covering the very first attempt too, a waiter that never
+				// once reached front-of-queue for its whole window (blocked
+				// the entire time behind another registered entry that never
+				// itself calls TryAcquire — e.g. RegisterSeatWaiter's seat/
+				// text-load admission, register D-1xx-2) falls straight
+				// through to here with err still at its zero value. Returning
+				// that nil error alongside a nil *Lease reads as SUCCESS to
+				// every caller that checks err before touching the lease —
+				// reproduced directly (TestReturningHolderCannotJumpAn
+				// AlreadyRegisteredWaiter): a nil-error return panicked the
+				// very next line, l.Release(), on a nil *Lease.
+				return nil, queueTimeoutErr(m, self)
+			}
+			pause := m.pollInterval()
+			if remaining < pause {
+				pause = remaining
+			}
+			m.pause(pause)
 
-		// Prove we are still actually polling, whether or not we are front of
-		// queue this tick: an alive-but-wedged waiter (suspended, stuck in
-		// another goroutine, an old binary whose loop exited without
-		// unregistering) would otherwise read as a live waiter FOREVER — pid
-		// liveness alone cannot see the difference between "queued" and
-		// "queued and no longer actually trying". See isFrontOfQueue /
-		// waiterStaleWindow for the reader side.
-		m.refreshWaiter(self)
+			// Prove we are still actually polling, whether or not we are front
+			// of queue this tick: an alive-but-wedged waiter (suspended, stuck
+			// in another goroutine, an old binary whose loop exited without
+			// unregistering) would otherwise read as a live waiter FOREVER —
+			// pid liveness alone cannot see the difference between "queued"
+			// and "queued and no longer actually trying". See isFrontOfQueue /
+			// waiterStaleWindow for the reader side. The very first iteration
+			// needs no refresh: registerWaiter just stamped SinceMs.
+			m.refreshWaiter(self)
+		}
 
 		// FIFO: only the oldest live, RECENTLY-POLLING waiter attempts the
-		// claim this tick. Every other waiter just loops back to sleep —
+		// claim this tick — including on the very first iteration, which is
+		// the whole fix above. Every other waiter just loops back to sleep —
 		// attempting anyway is exactly the unordered race that let a later
-		// arrival win a just-freed card out from under an earlier one. This
-		// costs nothing when uncontested: a waiter alone in the queue is
-		// always front-of-queue.
+		// arrival (or a returning holder's own fresh call) win a just-freed
+		// card out from under an earlier one. This costs nothing when
+		// uncontested: a waiter alone in the queue is always front-of-queue.
 		if !m.isFrontOfQueue(self) {
 			continue
 		}
@@ -914,11 +978,37 @@ func (m *Manager) Acquire(class Class, opts Options) (*Lease, error) {
 		if aerr == nil {
 			return got, nil
 		}
-		if !errors.As(aerr, &held) {
+		if !errors.As(aerr, new(*ErrHeld)) {
 			return nil, aerr
 		}
 		err = aerr
 	}
+}
+
+// queueTimeoutErr builds Acquire's timeout error for the case where this
+// waiter's whole window elapsed without it EVER reaching front-of-queue —
+// so there is no captured *ErrHeld from a real attempt to fall back on. The
+// card itself can be completely FREE at this instant (a non-attempting
+// registrant, such as a seat/text-load admission's RegisterSeatWaiter, can
+// hold the front of the line indefinitely without ever claiming), so a bare
+// m.Inspect() would misreport "not held" and the true reason — queued behind
+// an entry that never tries — would be silently lost. Named after whichever
+// OTHER waiter is still ahead of self, when Inspect itself has nothing to say.
+func queueTimeoutErr(m *Manager, self Waiter) error {
+	if info := m.Inspect(); info.Held {
+		return &ErrHeld{Info: info}
+	}
+	for _, w := range m.Waiters() {
+		if w.path == self.path {
+			continue
+		}
+		return fmt.Errorf("gpulease: gave up waiting for the card: still queued behind pid %d (%s, reason %q), which has not claimed it", w.PID, w.Class, w.Reason)
+	}
+	// The card is free and no one else is in line: isFrontOfQueue would have
+	// been true and TryAcquire would have run, setting err — this is
+	// unreachable in practice, kept only so the function can never fall
+	// through to a bare nil.
+	return &ErrHeld{Info: Info{Reason: "gave up waiting for the card for an undetermined reason"}}
 }
 
 // claimGrace is how long a present-but-unparseable meta.json is treated as a claim in
