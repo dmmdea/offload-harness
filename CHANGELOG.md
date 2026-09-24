@@ -233,13 +233,17 @@ code path (not just observed live) and covered by a test broken-then-restored at
   happened to reproduce it. `TestGenerateTimeoutKillsTree`'s classification assertion, previously a
   `t.Logf` "best-effort" note because of exactly this flakiness, is now a hard `t.Fatalf`.
   Also (a narrower, related finding from the same report): a music request whose dead-air retry still
-  fails left the retry's raw ComfyUI bytes (SaveAudio always emits FLAC) under the caller's requested
-  output path — a mismatched container under whatever extension was asked for ("FLAC bytes in a .wav
-  name", 2026-09-23). `render/comfy-music.mjs`'s dead-air-persists branch now removes that stray file
-  (best-effort; `cleanupFailedDeadAirOutput`) before throwing the typed `DEAD_AIR` error, so a failed
-  render never leaves a misleadingly-named file behind. The "FLAC bytes under a .wav name" symptom on a
-  *successful* render did NOT reproduce on 0.140.3 (confirmed: a real RIFF/pcm_s16le file) — not fixed,
-  since it could not be reproduced from the code path on that branch.
+  fails could leave the retry's raw ComfyUI bytes (SaveAudio always emits FLAC) under the caller's
+  requested output path — a mismatched container under whatever extension was asked for ("FLAC bytes
+  in a .wav name", 2026-09-23) whenever the over-render trim step didn't run (a `--graph` passthrough)
+  or its own ffmpeg call failed; when the trim step DOES run and succeed it already re-mixes to match
+  the requested extension, so the file left behind is not always literally raw FLAC — either way it is
+  a render that failed content QA and should never be left at the caller's path.
+  `render/comfy-music.mjs`'s dead-air-persists branch now removes that stray file unconditionally
+  (best-effort; `cleanupFailedDeadAirOutput`) before throwing the typed `DEAD_AIR` error. The "FLAC
+  bytes under a .wav name" symptom on a *successful* render did NOT reproduce on 0.140.3 (confirmed: a
+  real RIFF/pcm_s16le file) — not fixed, since it could not be reproduced from the code path on that
+  branch.
 - Tests: `internal/mediaops/editimage_test.go` (`TestCropOriginZeroRoundTrip`), `internal/gpugen/gpugen_test.go`
   (hardened `TestGenerateTimeoutKillsTree`), `internal/mediacap/sdcppdevice_test.go` (new),
   `render/comfy-output.test.mjs`, `render/sdcpp-generate.test.mjs`, `render/comfy-music.test.mjs`.

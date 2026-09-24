@@ -138,17 +138,22 @@ function applyTrim(ffmpeg, out, seconds) {
 }
 
 // cleanupFailedDeadAirOutput: best-effort removal of a failed render's leftover
-// file. renderOnce always writes ComfyUI's raw SaveAudio bytes (FLAC, unconditionally
-// — see the file header) straight to `out`, whatever extension the caller requested;
-// the ONLY step that transcodes to match the requested extension is
-// normalizeLoudness below, and it never runs when dead air persists after the
-// retry (the function throws first). Left in place, that stray file has the wrong
-// container for its name — exactly the "FLAC bytes in a .wav name" finding (R1,
-// 2026-09-23 OptiPlex remediation): a caller that inspects a failed music render's
-// requested output path finds a file, playable by nothing that trusts its
-// extension. `unlink` is injectable so this decision is unit-tested without a live
-// ComfyUI; failures are swallowed on purpose — a cleanup hiccup must never hide the
-// real DEAD_AIR error the caller needs.
+// file at `out`. renderOnce always writes ComfyUI's raw SaveAudio bytes (FLAC,
+// unconditionally — see the file header) straight to `out`, whatever extension
+// the caller requested; applyTrim above re-muxes it to match that extension when
+// it runs and succeeds (it re-encodes for the fade-out regardless, so ffmpeg
+// picks the container from `out`'s own name), but it does NOT run on a `--graph`
+// passthrough (renderSeconds is never set — see buildGraphFromArgs) and can fail
+// silently on its own ffmpeg call (logged, never fatal — the over-length render
+// ships as-is per house content-preservation rule). Either way, `out` at the
+// point of a persisting DEAD_AIR is EITHER genuinely mismatched-container bytes
+// (no trim ran, or it failed) — exactly the "FLAC bytes in a .wav name" finding
+// (R1, 2026-09-23 OptiPlex remediation) — OR a correctly-muxed file that still
+// failed content QA. Neither is a result to leave at the caller's requested
+// path, so cleanup removes it unconditionally rather than only in the narrower
+// mismatched-container case. `unlink` is injectable so this decision is unit-
+// tested without a live ComfyUI; failures are swallowed on purpose — a cleanup
+// hiccup must never hide the real DEAD_AIR error the caller needs.
 export function cleanupFailedDeadAirOutput(out, { unlink = unlinkSync } = {}) {
   try {
     unlink(out);

@@ -10,7 +10,7 @@ import { join } from "node:path";
 import {
   parseArgs, buildSdArgs, postprocessOutput,
   parseVulkanDeviceList, isIntegratedGpuName, isDiscreteGpuName,
-  pickDiscreteVulkanDevice, resolveVulkanDevice,
+  pickDiscreteVulkanDevice, resolveVulkanDevice, interpretListDevicesResult,
 } from "./sdcpp-generate.mjs";
 import { encodePng, decodePng } from "./png-alpha.mjs";
 import { RGBA_PROMPT_PREFIX, RGBA_PROMPT_SUFFIX } from "./wf-qwen-image-21.mjs";
@@ -149,7 +149,7 @@ test("parseVulkanDeviceList: parses VulkanN <name> lines, ignores anything else"
 });
 
 test("isIntegratedGpuName / isDiscreteGpuName classify Intel iGPUs vs NVIDIA/AMD discrete cards", () => {
-  for (const n of ["Intel(R) UHD Graphics 630", "Intel Iris Xe Graphics", "Intel(R) Arc(TM) A750 Graphics"]) {
+  for (const n of ["Intel(R) UHD Graphics 630", "Intel Iris Xe Graphics", "Intel(R) Arc(TM) Graphics"]) {
     assert.equal(isIntegratedGpuName(n), true, n);
     assert.equal(isDiscreteGpuName(n), false, n);
   }
@@ -157,6 +157,29 @@ test("isIntegratedGpuName / isDiscreteGpuName classify Intel iGPUs vs NVIDIA/AMD
     assert.equal(isIntegratedGpuName(n), false, n);
     assert.equal(isDiscreteGpuName(n), true, n);
   }
+});
+
+// Intel's "Arc" brand covers a real discrete desktop/mobile GPU line (Alchemist
+// A380/A580/A750/A770, Battlemage B570/B580) as well as an integrated one — a
+// bare "arc" substring match would misclassify these as integrated (review
+// finding, 2026-09-23: the classifier's own first version did exactly that on
+// "Intel(R) Arc(TM) A750 Graphics", a real shipping discrete card).
+test("isDiscreteGpuName / isIntegratedGpuName: a discrete Intel Arc card (with a model number) is discrete, not integrated", () => {
+  for (const n of ["Intel(R) Arc(TM) A750 Graphics", "Intel Arc A770", "Intel(R) Arc(TM) A380 Graphics", "Intel Arc B580"]) {
+    assert.equal(isDiscreteGpuName(n), true, n);
+    assert.equal(isIntegratedGpuName(n), false, n);
+  }
+  // bare "Arc Graphics" (no model number — Meteor Lake/Lunar Lake's integrated
+  // naming) stays integrated.
+  for (const n of ["Intel(R) Arc(TM) Graphics", "Intel Arc Graphics"]) {
+    assert.equal(isDiscreteGpuName(n), false, n);
+    assert.equal(isIntegratedGpuName(n), true, n);
+  }
+});
+
+test("pickDiscreteVulkanDevice: a discrete Intel Arc card is picked over an Intel iGPU listed first", () => {
+  const devices = parseVulkanDeviceList("Vulkan0 Intel(R) UHD Graphics 630\nVulkan1 Intel(R) Arc(TM) A750 Graphics\n");
+  assert.equal(pickDiscreteVulkanDevice(devices), "1");
 });
 
 test("pickDiscreteVulkanDevice: returns the first discrete adapter's index; null when only an iGPU is listed", () => {
@@ -183,4 +206,39 @@ test("resolveVulkanDevice: no discrete adapter listed (iGPU-only box) falls back
 test("resolveVulkanDevice: a --list-devices probe failure falls back to device 0, never throws", () => {
   const got = resolveVulkanDevice("sd-cli", "", { list: () => { throw new Error("spawn ENOENT"); } });
   assert.equal(got, "0");
+});
+
+// --- interpretListDevicesResult (review finding, 2026-09-23): spawnSync's THREE
+// failure shapes — spawn failure, timeout (both set `.error`), and a nonzero exit
+// (which does NOT set `.error` and was silently treated as "parsed zero devices"
+// before this fix, misreporting a broken probe as "no discrete GPU found").
+test("interpretListDevicesResult: r.error (spawn failure or timeout) is thrown as-is", () => {
+  const err = new Error("spawnSync sd-cli ETIMEDOUT");
+  assert.throws(() => interpretListDevicesResult({ error: err, status: null, signal: "SIGTERM" }), /ETIMEDOUT/);
+});
+
+test("interpretListDevicesResult: a nonzero exit throws, even with no r.error set", () => {
+  assert.throws(
+    () => interpretListDevicesResult({ error: null, status: 1, signal: null, stdout: "", stderr: "vulkan init failed\n" }),
+    /exited 1.*vulkan init failed/s,
+  );
+});
+
+test("interpretListDevicesResult: a nonzero exit with no stderr falls back to stdout for the detail", () => {
+  assert.throws(
+    () => interpretListDevicesResult({ error: null, status: 2, signal: null, stdout: "usage: sd-cli ...\n", stderr: "" }),
+    /exited 2.*usage: sd-cli/s,
+  );
+});
+
+test("interpretListDevicesResult: killed by a signal is named alongside the exit status", () => {
+  assert.throws(
+    () => interpretListDevicesResult({ error: null, status: null, signal: "SIGKILL", stdout: "", stderr: "" }),
+    /signal SIGKILL/,
+  );
+});
+
+test("interpretListDevicesResult: a clean exit (status 0) returns the combined stdout+stderr", () => {
+  const got = interpretListDevicesResult({ error: null, status: 0, signal: null, stdout: TWO_DEVICE_LISTING, stderr: "" });
+  assert.match(got, /NVIDIA GeForce RTX 5060/);
 });

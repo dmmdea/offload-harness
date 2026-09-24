@@ -21,10 +21,20 @@
 package mediacap
 
 import (
+	"context"
 	"os/exec"
 	"regexp"
 	"strings"
+	"time"
 )
+
+// sdcppDeviceListTimeout bounds the `--list-devices` probe (review finding,
+// 2026-09-23): unlike its JS mirror (spawnSync with a 15s timeout) and unlike
+// doctor's own adjacent ComfyUI /object_info check (3s), the first version of
+// this probe had no timeout at all — a hung sd-cli would hang `doctor` forever,
+// on exactly the kind of broken box doctor exists to diagnose. Matches the JS
+// side's bound.
+const sdcppDeviceListTimeout = 15 * time.Second
 
 // VulkanDevice is one line of `sd-cli --list-devices` output.
 type VulkanDevice struct {
@@ -36,6 +46,15 @@ var (
 	vulkanDeviceLineRe = regexp.MustCompile(`(?m)^\s*Vulkan(\d+)\s+(.+?)\s*$`)
 	igpuNameRe         = regexp.MustCompile(`(?i)\bintel\b|\buhd\b|\biris\b|\barc\b`)
 	discreteNameRe     = regexp.MustCompile(`(?i)\bnvidia\b|\bgeforce\b|\bquadro\b|\bamd\b|\bradeon\b`)
+	// Intel's "Arc" brand names BOTH a discrete desktop/mobile GPU line (Alchemist
+	// A380/A580/A750/A770, Battlemage B570/B580 — real, shipping since 2022, not
+	// hypothetical) and an integrated one (Meteor Lake/Lunar Lake's bare "Arc
+	// Graphics" / "Arc 130V"/"140V"). A plain "arc" substring match would wrongly
+	// call a discrete Arc card integrated (review finding, 2026-09-23) — match the
+	// discrete line's model-number shape explicitly so "Arc A750"/"Arc B580" read
+	// as discrete while a bare "Arc Graphics" still reads as integrated. Mirrors
+	// render/sdcpp-generate.mjs's DISCRETE_INTEL_ARC_RE exactly.
+	discreteIntelArcRe = regexp.MustCompile(`(?i)\barc\b[^0-9]{0,20}\b[ab]\d{3}\b`)
 )
 
 // ParseVulkanDeviceList parses `sd-cli --list-devices` output ("VulkanN <adapter
@@ -52,10 +71,19 @@ func ParseVulkanDeviceList(text string) []VulkanDevice {
 // IsIntegratedGpuName reports whether name is a known Intel-integrated part —
 // never the adapter to pick for a diffusion render (measured 2026-09-23:
 // 565-608 s/step on an Intel UHD 630 vs 4.85 s/step on the same box's RTX 5060).
-func IsIntegratedGpuName(name string) bool { return igpuNameRe.MatchString(name) }
+func IsIntegratedGpuName(name string) bool {
+	if discreteIntelArcRe.MatchString(name) {
+		return false
+	}
+	return igpuNameRe.MatchString(name)
+}
 
-// IsDiscreteGpuName reports whether name is a discrete NVIDIA/AMD adapter.
+// IsDiscreteGpuName reports whether name is a discrete NVIDIA/AMD adapter, or a
+// discrete Intel Arc card (see discreteIntelArcRe above).
 func IsDiscreteGpuName(name string) bool {
+	if discreteIntelArcRe.MatchString(name) {
+		return true
+	}
 	return discreteNameRe.MatchString(name) && !igpuNameRe.MatchString(name)
 }
 
@@ -95,9 +123,12 @@ type sdcppDeviceLister func(bin string) (string, error)
 
 // ExecSdcppDeviceLister is the real lister: `<bin> --list-devices`, combined
 // stdout+stderr (sd.cpp release builds have printed device enumeration to
-// either stream across versions).
+// either stream across versions), bounded by sdcppDeviceListTimeout so a wedged
+// binary cannot hang doctor.
 func ExecSdcppDeviceLister(bin string) (string, error) {
-	out, err := exec.Command(bin, "--list-devices").CombinedOutput()
+	ctx, cancel := context.WithTimeout(context.Background(), sdcppDeviceListTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, bin, "--list-devices").CombinedOutput()
 	return string(out), err
 }
 

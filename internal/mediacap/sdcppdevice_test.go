@@ -26,7 +26,7 @@ func TestParseVulkanDeviceList(t *testing.T) {
 }
 
 func TestIsIntegratedAndDiscreteGpuName(t *testing.T) {
-	igpu := []string{"Intel(R) UHD Graphics 630", "Intel Iris Xe Graphics", "Intel(R) Arc(TM) A750 Graphics"}
+	igpu := []string{"Intel(R) UHD Graphics 630", "Intel Iris Xe Graphics", "Intel(R) Arc(TM) Graphics"}
 	for _, n := range igpu {
 		if !IsIntegratedGpuName(n) {
 			t.Errorf("%q should be recognized as an iGPU", n)
@@ -46,6 +46,34 @@ func TestIsIntegratedAndDiscreteGpuName(t *testing.T) {
 	}
 }
 
+// TestDiscreteIntelArc: Intel's "Arc" brand covers a real discrete desktop/mobile
+// GPU line (Alchemist A380/A580/A750/A770, Battlemage B570/B580) as well as an
+// integrated one — a bare "arc" substring match would misclassify these as
+// integrated (review finding, 2026-09-23: the classifier's own first version did
+// exactly that on "Intel(R) Arc(TM) A750 Graphics", a real shipping discrete card).
+func TestDiscreteIntelArc(t *testing.T) {
+	discrete := []string{"Intel(R) Arc(TM) A750 Graphics", "Intel Arc A770", "Intel(R) Arc(TM) A380 Graphics", "Intel Arc B580"}
+	for _, n := range discrete {
+		if !IsDiscreteGpuName(n) {
+			t.Errorf("%q (a discrete Arc SKU) should be recognized as discrete", n)
+		}
+		if IsIntegratedGpuName(n) {
+			t.Errorf("%q (a discrete Arc SKU) must never be classified as an iGPU", n)
+		}
+	}
+	// bare "Arc Graphics" (no model number — Meteor Lake/Lunar Lake's integrated
+	// naming) stays integrated.
+	igpu := []string{"Intel(R) Arc(TM) Graphics", "Intel Arc Graphics"}
+	for _, n := range igpu {
+		if IsDiscreteGpuName(n) {
+			t.Errorf("%q (bare Arc Graphics, no model number) must never be classified as discrete", n)
+		}
+		if !IsIntegratedGpuName(n) {
+			t.Errorf("%q (bare Arc Graphics, no model number) should be recognized as an iGPU", n)
+		}
+	}
+}
+
 func TestPickDiscreteVulkanDevice(t *testing.T) {
 	devices := ParseVulkanDeviceList(twoDeviceListing)
 	if got := PickDiscreteVulkanDevice(devices); got != "1" {
@@ -54,6 +82,10 @@ func TestPickDiscreteVulkanDevice(t *testing.T) {
 	onlyIgpu := ParseVulkanDeviceList("Vulkan0 Intel(R) UHD Graphics 630\n")
 	if got := PickDiscreteVulkanDevice(onlyIgpu); got != "" {
 		t.Fatalf("PickDiscreteVulkanDevice with only an iGPU = %q, want \"\"", got)
+	}
+	arc := ParseVulkanDeviceList("Vulkan0 Intel(R) UHD Graphics 630\nVulkan1 Intel(R) Arc(TM) A750 Graphics\n")
+	if got := PickDiscreteVulkanDevice(arc); got != "1" {
+		t.Fatalf("PickDiscreteVulkanDevice must pick the discrete Arc card over the iGPU listed first, got %q", got)
 	}
 }
 

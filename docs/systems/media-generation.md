@@ -621,13 +621,16 @@ change fixes this" conclusion held only while duration itself was held fixed.
    sometimes lands on a seed whose planned content happens to fill the duration.
 3. Still dead air after the retry: `generate()` first removes the stray output file (best-effort,
    `cleanupFailedDeadAirOutput()`) — `renderOnce` always writes ComfyUI's raw `SaveAudio` bytes
-   (unconditionally FLAC) straight to `out`, whatever extension the caller requested, and the only
-   step that transcodes to match the requested extension (`normalizeLoudness`, step 4 below) never
-   runs on this path; left in place, that stray file has the wrong container for its name ("FLAC
-   bytes in a .wav name", found 2026-09-23). The render then fails with an error tagged `DEAD_AIR:`
-   (mapped to `gpugen.ClassifyErr`'s `dead_air` class), which `runGenerateAudio`
+   (unconditionally FLAC) straight to `out`, whatever extension the caller requested; step 0's
+   `applyTrim` re-mixes it to match that extension when it runs and succeeds, but not on a `--graph`
+   passthrough (`renderSeconds` never set) and not when its own ffmpeg call fails (logged, never
+   fatal). Left in place, that stray file is either genuinely mismatched-container bytes ("FLAC bytes
+   in a .wav name", found 2026-09-23) or a correctly-muxed file that still failed content QA —
+   neither belongs at the caller's path, so cleanup removes it unconditionally rather than only in the
+   narrower mismatched-container case. The render then fails with an error tagged `DEAD_AIR:` (mapped
+   to `gpugen.ClassifyErr`'s `dead_air` class), which `runGenerateAudio`
    (`internal/pipeline/pipeline.go`) turns into a typed defer — never a silently-shipped dead clip,
-   and never a leftover mismatched-container file at the requested path.
+   and never a leftover file at the requested path.
 4. The accepted render is always loudness-normalized (`ffmpeg loudnorm`, single-pass, target -14
    LUFS integrated / -1 dBTP true peak — the common streaming convention, with headroom below 0
    dBFS so a downstream lossy re-encode's peak overshoot cannot clip), independent of the dead-air

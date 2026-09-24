@@ -112,7 +112,6 @@ func TestGenerateTimeoutKillsTree(t *testing.T) {
 	}
 }
 
-
 // TestKillTreeNilProcess: killTree(nil) is a safe no-op (never panics).
 func TestKillTreeNilProcess(t *testing.T) {
 	if err := killTree(nil); err != nil {

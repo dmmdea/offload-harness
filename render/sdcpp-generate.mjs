@@ -138,16 +138,29 @@ export function parseVulkanDeviceList(text) {
   return devices;
 }
 
+// Intel's "Arc" brand names BOTH a discrete desktop/mobile GPU line (Alchemist
+// A380/A580/A750/A770, Battlemage B570/B580 — real, shipping since 2022, not
+// hypothetical) and an integrated one (Meteor Lake/Lunar Lake's bare "Arc
+// Graphics" / "Arc 130V"/"140V"). A plain "arc" substring match would wrongly
+// call a discrete Arc card integrated (review finding, 2026-09-23) — match the
+// discrete line's model-number shape explicitly so "Arc A750"/"Arc B580" read
+// as discrete while a bare "Arc Graphics" still reads as integrated.
+const DISCRETE_INTEL_ARC_RE = /\barc\b[^0-9]{0,20}\b[ab]\d{3}\b/i;
+
 // isIntegratedGpuName: a known Intel-integrated part — never the adapter to pick
 // for a diffusion render (measured 2026-09-23 on the OptiPlex: 565-608 s/step on
 // an Intel UHD 630 vs 4.85 s/step on the same box's RTX 5060).
 export function isIntegratedGpuName(name) {
-  return /\bintel\b|\buhd\b|\biris\b|\barc\b/i.test(name || "");
+  const n = name || "";
+  if (DISCRETE_INTEL_ARC_RE.test(n)) return false;
+  return /\bintel\b|\buhd\b|\biris\b|\barc\b/i.test(n);
 }
 
-// isDiscreteGpuName: a discrete NVIDIA/AMD adapter — the one worth pinning.
+// isDiscreteGpuName: a discrete NVIDIA/AMD adapter, or a discrete Intel Arc
+// card (see DISCRETE_INTEL_ARC_RE above) — the one worth pinning.
 export function isDiscreteGpuName(name) {
-  return /\bnvidia\b|\bgeforce\b|\bquadro\b|\bamd\b|\bradeon\b/i.test(name || "") && !isIntegratedGpuName(name);
+  const n = name || "";
+  return DISCRETE_INTEL_ARC_RE.test(n) || (/\bnvidia\b|\bgeforce\b|\bquadro\b|\bamd\b|\bradeon\b/i.test(n) && !isIntegratedGpuName(n));
 }
 
 // pickDiscreteVulkanDevice: the first discrete adapter's index in listed order,
@@ -184,19 +197,35 @@ export function resolveVulkanDevice(bin, envValue, { list = defaultListDevices }
   }
   const discrete = pickDiscreteVulkanDevice(devices);
   if (discrete != null) return discrete;
-  console.error("sdcpp-generate: no discrete (NVIDIA/AMD) Vulkan device found — defaulting to Vulkan device 0" +
+  console.error("sdcpp-generate: no discrete (NVIDIA/AMD/Arc) Vulkan device found — defaulting to Vulkan device 0" +
     (devices.length ? " (" + devices.map((d) => `Vulkan${d.index} ${d.name}`).join("; ") + ")" : " (--list-devices reported nothing)"));
   return "0";
+}
+
+// interpretListDevicesResult: pure interpretation of a spawnSync-shaped result
+// object. spawnSync has three distinct failure shapes: a spawn failure and a
+// timeout both set `.error` (Node's own documented contract for the returned
+// object), but a nonzero exit does NOT — that had to be checked explicitly
+// (review finding, 2026-09-23): a broken sd-cli invocation that printed no
+// device lines on a nonzero exit otherwise read as "no discrete device found"
+// instead of "the probe itself failed", the same misleading-diagnostic shape
+// ClassifyErr was hardened against elsewhere in this fix. Exported/pure so this
+// is unit-tested without spawning a real process.
+export function interpretListDevicesResult(r) {
+  if (r.error) throw r.error;
+  if (r.status !== 0) {
+    const detail = String(r.stderr || r.stdout || "").trim().slice(0, 200);
+    throw new Error(`--list-devices exited ${r.status}` + (r.signal ? ` (signal ${r.signal})` : "") + (detail ? `: ${detail}` : ""));
+  }
+  return (r.stdout || "") + "\n" + (r.stderr || "");
 }
 
 // defaultListDevices: the real probe, `<bin> --list-devices`, combined
 // stdout+stderr (sd.cpp release builds have printed device enumeration to either
 // stream across versions). Synchronous — this runs once, before the GPU slot is
 // even taken, and every other step in main() is already sequential.
-function defaultListDevices(bin) {
-  const r = spawnSync(bin, ["--list-devices"], { encoding: "utf8", timeout: 15000 });
-  if (r.error) throw r.error;
-  return (r.stdout || "") + "\n" + (r.stderr || "");
+export function defaultListDevices(bin) {
+  return interpretListDevicesResult(spawnSync(bin, ["--list-devices"], { encoding: "utf8", timeout: 15000 }));
 }
 
 async function main() {
