@@ -5,10 +5,13 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
+	"syscall"
 	"testing"
 )
 
@@ -207,5 +210,124 @@ func TestRenameFile(t *testing.T) {
 	}
 	if _, err := os.Stat(src); !os.IsNotExist(err) {
 		t.Error("source should no longer exist after rename")
+	}
+}
+
+func TestCopyFile(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "a")
+	dst := filepath.Join(dir, "b")
+	if err := os.WriteFile(src, []byte("payload"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := copyFile(src, dst); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(dst)
+	if err != nil || string(got) != "payload" {
+		t.Errorf("dst content = %q, %v", got, err)
+	}
+	// A copy, never a move: installNewBinary (nodeswap.go) still needs the
+	// original staged binary at its own path afterward.
+	if _, err := os.Stat(src); err != nil {
+		t.Errorf("source should still exist after copyFile (it is a copy, not a move): %v", err)
+	}
+}
+
+func TestCopyFile_MissingSource(t *testing.T) {
+	dir := t.TempDir()
+	if err := copyFile(filepath.Join(dir, "nope"), filepath.Join(dir, "dst")); err == nil {
+		t.Fatal("expected an error copying a missing source file")
+	}
+}
+
+func TestCopyFile_RefusesToOverwriteAnExistingDestination(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "a")
+	dst := filepath.Join(dir, "b")
+	if err := os.WriteFile(src, []byte("new"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dst, []byte("already here"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := copyFile(src, dst); err == nil {
+		t.Fatal("expected copyFile to refuse overwriting an existing destination (O_EXCL)")
+	}
+	got, _ := os.ReadFile(dst)
+	if string(got) != "already here" {
+		t.Errorf("destination was overwritten despite the refusal: %q", got)
+	}
+}
+
+// TestIsCrossDeviceRenameErr_EXDEV pins the Linux/macOS half: a real
+// os.Rename across a mount boundary returns *os.LinkError wrapping
+// syscall.EXDEV directly, and isCrossDeviceRenameErr must recognize that
+// shape on every OS this package ships to (the check runs unconditionally,
+// before the Windows-only errno branch).
+func TestIsCrossDeviceRenameErr_EXDEV(t *testing.T) {
+	err := &os.LinkError{Op: "rename", Old: "a", New: "b", Err: syscall.EXDEV}
+	if !isCrossDeviceRenameErr(err) {
+		t.Fatal("expected EXDEV to be detected as a cross-device rename error")
+	}
+}
+
+// TestIsCrossDeviceRenameErr_WindowsErrno17 pins the Windows half: measured
+// on this dev machine (a real cross-drive os.Rename, C:\ staged against a
+// D:\ target), the failure decodes to syscall.Errno(17)
+// (ERROR_NOT_SAME_DEVICE), NOT syscall.EXDEV — see the isCrossDeviceRenameErr
+// doc comment (deps.go) for the measured detail. Skipped off Windows: errno
+// 17 has no special meaning on any other OS, and the function's own
+// runtime.GOOS guard means this branch is dead code there anyway.
+func TestIsCrossDeviceRenameErr_WindowsErrno17(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("ERROR_NOT_SAME_DEVICE (errno 17) is a Windows-only failure shape")
+	}
+	err := &os.LinkError{Op: "rename", Old: "a", New: "b", Err: syscall.Errno(17)}
+	if !isCrossDeviceRenameErr(err) {
+		t.Fatal("expected Windows errno 17 (ERROR_NOT_SAME_DEVICE) to be detected as cross-device")
+	}
+}
+
+// TestIsCrossDeviceRenameErr_RealCrossDriveRename is the live end-to-end
+// check on Windows: an actual os.Rename from one drive letter to another,
+// through renameFile (not a synthetic error), must be classified as
+// cross-device. Skipped when a second drive letter isn't available to test
+// against (any CI runner, and any single-drive dev box).
+func TestIsCrossDeviceRenameErr_RealCrossDriveRename(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("drive letters are a Windows concept")
+	}
+	other := os.Getenv("NODESWAP_TEST_OTHER_DRIVE_TEMP") // e.g. D:\tmp, set only for manual local runs
+	if other == "" {
+		t.Skip("NODESWAP_TEST_OTHER_DRIVE_TEMP not set — no known second drive to rename across in this environment")
+	}
+	dir := t.TempDir()
+	src := filepath.Join(dir, "a")
+	if err := os.WriteFile(src, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(other, "nodeswap-crossdrive-test")
+	defer os.Remove(dst)
+	err := renameFile(src, dst)
+	if err == nil {
+		t.Skip("rename unexpectedly succeeded — src and the configured other-drive path are on the same volume")
+	}
+	if !isCrossDeviceRenameErr(err) {
+		t.Fatalf("expected a real cross-drive rename failure to be classified as cross-device, got: %v", err)
+	}
+}
+
+// TestIsCrossDeviceRenameErr_OrdinaryErrorIsNotCrossDevice guards the other
+// direction: installNewBinary (nodeswap.go) must only take the copy fallback
+// for THIS specific failure shape — an ordinary error (a missing file, a
+// permission error, anything else) must never be misdetected as
+// cross-device and silently routed into a copy it was never meant to take.
+func TestIsCrossDeviceRenameErr_OrdinaryErrorIsNotCrossDevice(t *testing.T) {
+	if isCrossDeviceRenameErr(errors.New("permission denied")) {
+		t.Fatal("an ordinary error must not be misdetected as cross-device")
+	}
+	if isCrossDeviceRenameErr(&os.LinkError{Op: "rename", Old: "a", New: "b", Err: syscall.Errno(5)}) {
+		t.Fatal("an unrelated errno (5 = ERROR_ACCESS_DENIED on Windows) must not be misdetected as cross-device")
 	}
 }

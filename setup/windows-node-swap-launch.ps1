@@ -46,11 +46,19 @@ param(
   [string]$VerifyTimeout = '90s',
   [switch]$DryRun,
   [switch]$SkipHashCheck,
-  # The exe used to RUN `node-swap` itself. Defaults to Target: the currently
-  # installed binary is what performs its own replacement (matching every
-  # prior deploy record's pattern of renaming a live exe out from under
-  # itself). Override only for a first-ever rollout of this tool onto a node
-  # that does not have `node-swap` in its current build yet.
+  # The exe used to RUN `node-swap` itself. Defaults to STAGED — the NEW
+  # engine, verified by hash before it ever runs (Resolve-RunnerExe below) —
+  # not Target, the currently-installed binary. This inverts the tool's
+  # original default (Target) after the 2026-09-24 rollout hit it directly:
+  # a fix to the swap engine itself (e.g. a node-swap bug fixed in the very
+  # build being staged) can never take effect while the launcher keeps
+  # running the OLD installed code to perform the swap — see
+  # docs/systems/node-swap.md and internal/nodeswap's deps_other.go history.
+  # Falls back to Target only when Staged demonstrably does not support the
+  # node-swap subcommand at all (a very old staged build — an intentional
+  # downgrade, or the first-ever rollout of this tool in the OTHER
+  # direction). Pass -RunnerExe explicitly to bypass all of this and trust a
+  # specific exe outright.
   [string]$RunnerExe = '',
   [string]$LogDir = '',
   [switch]$SelfTest
@@ -114,6 +122,85 @@ function Quote-ArgForNativeArgv([string]$s) {
     [void]$sb.Append('"')
   }
   return $sb.ToString()
+}
+
+# Resolve-RunnerExe implements the runner-selection half of the 2026-09-24
+# fix (docs/systems/node-swap.md): default the exe used to EXECUTE
+# `node-swap` to the STAGED binary, verified by hash first (node-swap's own
+# --sha256 check happens INSIDE the process this chooses to start — trusting
+# an unverified staged exe to self-check would mean running arbitrary staged
+# bytes first), falling back to the currently-installed Target — with a
+# clear log line — only when Staged does not support node-swap at all (a
+# very old staged build). An explicit -RunnerExe always wins outright and
+# skips every check here, exactly like the tool's original override
+# contract. $HashFile/$SupportsNodeSwap/$Log are injected (scriptblocks)
+# purely so this is unit-testable below (-SelfTest) with fakes — no real
+# binary, no real process spawn needed to exercise the branch logic; the
+# production caller wires real ones (Get-FileHash, Test-NodeSwapSupport,
+# Write-Host).
+function Resolve-RunnerExe {
+  param(
+    [string]$RunnerExe,
+    [string]$Staged,
+    [string]$Target,
+    [string]$Sha256,
+    [switch]$SkipHashCheck,
+    [scriptblock]$HashFile,
+    [scriptblock]$SupportsNodeSwap,
+    [scriptblock]$Log
+  )
+  if ($RunnerExe) { return $RunnerExe }
+  if (-not $SkipHashCheck) {
+    if (-not $Sha256) {
+      throw "-Sha256 is required to verify the staged binary before it can run as the default node-swap runner (pass -RunnerExe to override, or -SkipHashCheck for testing only)"
+    }
+    $gotHash = & $HashFile $Staged
+    if ($gotHash -ne $Sha256) {
+      throw "staged binary $Staged sha256 $gotHash does not match -Sha256 $Sha256 - refusing to use it as the node-swap runner"
+    }
+  }
+  if (& $SupportsNodeSwap $Staged) {
+    return $Staged
+  }
+  & $Log "staged binary $Staged does not support node-swap (very old build) - falling back to the currently-installed $Target as the runner"
+  return $Target
+}
+
+# Test-NodeSwapSupport is SupportsNodeSwap's real implementation: `node-swap`
+# called with no flags is always a RECOGNIZED subcommand (it just fails
+# Plan validation — --staged/--target are required — which main.go routes
+# through the ordinary `error` path, exit code 1); an entirely UNRECOGNIZED
+# subcommand falls to main.go's own `default:` case, which prints usage and
+# calls os.Exit(2) directly. So "supported" is a NARROW allowlist — exit
+# code 0 or 1, the only two codes a real local-offload.exe build can
+# produce for this exact call — never a broad "anything but 2", because a
+# staged exe that is corrupt, wrong-architecture, or crashes on launch
+# (.NET reports this as a large/negative exit code, never a clean 1 or 2)
+# is a DIFFERENT failure than "doesn't support node-swap" and must not be
+# misread as safe to run as the launcher's own runner (code review finding,
+# 2026-09-24 rollout PR): falling back to the currently-installed target is
+# the safe response to ANY of those, exactly as it is to a
+# confirmed-unsupported (exit 2) staged build.
+#
+# The try/catch matters: a staged file that is not a valid Win32 executable
+# at all (corrupt, wrong architecture, a truncated download) never reaches
+# the point of setting $LASTEXITCODE — CreateProcess itself fails, and
+# PowerShell's `&` call operator surfaces that as a TERMINATING
+# ApplicationFailedException (measured: "Program '...' failed to run: ..."),
+# which the script-wide `$ErrorActionPreference = 'Stop'` would otherwise let
+# propagate straight out of this function and abort the whole launcher —
+# instead of falling back to the installed target like every other
+# unsupported-staged-build case (code review finding). Never touches
+# --staged/--target either way (Plan validation is the FIRST thing
+# node-swap's own Run() does, before any file is read), so this is safe to
+# run against any exe.
+function Test-NodeSwapSupport([string]$path) {
+  try {
+    & $path node-swap *> $null
+  } catch {
+    return $false
+  }
+  return ($LASTEXITCODE -eq 0) -or ($LASTEXITCODE -eq 1)
 }
 
 if ($SelfTest) {
@@ -191,6 +278,109 @@ public static class NodeSwapArgvTest {
     Assert-Eq $decoded[1] $case "round-trip: $case"
   }
 
+  Write-Host '== Resolve-RunnerExe (runner-selection: staged-by-default, hash-verified, fallback) =='
+  function Assert-Throws([scriptblock]$block, [string]$label) {
+    try { & $block; Write-Host "FAIL $label`: expected a throw, got none"; $script:fail++ }
+    catch { Write-Host "PASS $label (threw: $($_.Exception.Message))" }
+  }
+  $hashOk    = { param($p) 'ABC123' }         # matches -Sha256 ABC123 case-insensitively
+  $hashBad   = { param($p) 'DEADBEEF' }       # never matches
+  $supportsYes = { param($p) $true }
+  $supportsNo  = { param($p) $false }
+  $noopLog = { param($m) }
+
+  # 1. An explicit -RunnerExe always wins; HashFile/SupportsNodeSwap must
+  #    never even be called (both wired to throw here to prove it).
+  $throwIfCalled = { param($p) throw "must not be called: explicit -RunnerExe should short-circuit" }
+  $got = Resolve-RunnerExe -RunnerExe 'explicit.exe' -Staged 'staged.exe' -Target 'target.exe' -Sha256 '' `
+    -HashFile $throwIfCalled -SupportsNodeSwap $throwIfCalled -Log $noopLog
+  Assert-Eq $got 'explicit.exe' 'explicit -RunnerExe wins outright'
+
+  # 2. No override, hash matches, staged supports node-swap -> staged.
+  $got = Resolve-RunnerExe -RunnerExe '' -Staged 'staged.exe' -Target 'target.exe' -Sha256 'ABC123' `
+    -HashFile $hashOk -SupportsNodeSwap $supportsYes -Log $noopLog
+  Assert-Eq $got 'staged.exe' 'defaults to the staged binary'
+
+  # 3. Hash mismatch -> refuses outright (never silently falls back to
+  #    either binary with an unverified staged exe).
+  Assert-Throws { Resolve-RunnerExe -RunnerExe '' -Staged 'staged.exe' -Target 'target.exe' -Sha256 'ABC123' `
+    -HashFile $hashBad -SupportsNodeSwap $supportsYes -Log $noopLog } 'hash mismatch refuses to run the staged binary'
+
+  # 4. Staged does not support node-swap (a very old staged build) -> falls
+  #    back to Target, and logs why.
+  $logged = ''
+  $captureLog = { param($m) $script:logged = $m }
+  $got = Resolve-RunnerExe -RunnerExe '' -Staged 'staged.exe' -Target 'target.exe' -Sha256 'ABC123' `
+    -HashFile $hashOk -SupportsNodeSwap $supportsNo -Log $captureLog
+  Assert-Eq $got 'target.exe' 'falls back to the installed target when staged lacks node-swap'
+  if ($logged -like '*does not support node-swap*') { Write-Host 'PASS fallback logs why' }
+  else { Write-Host "FAIL fallback logs why: got [$logged]"; $fail++ }
+
+  # 5. -SkipHashCheck bypasses hash verification but still probes support.
+  $got = Resolve-RunnerExe -RunnerExe '' -Staged 'staged.exe' -Target 'target.exe' -Sha256 '' -SkipHashCheck `
+    -HashFile $throwIfCalled -SupportsNodeSwap $supportsYes -Log $noopLog
+  Assert-Eq $got 'staged.exe' '-SkipHashCheck bypasses hash verification'
+
+  # 6. Missing -Sha256 with no override and no -SkipHashCheck -> refuses.
+  Assert-Throws { Resolve-RunnerExe -RunnerExe '' -Staged 'staged.exe' -Target 'target.exe' -Sha256 '' `
+    -HashFile $hashOk -SupportsNodeSwap $supportsYes -Log $noopLog } 'missing -Sha256 refuses'
+
+  Write-Host '== Test-NodeSwapSupport (real exit-code classification, no fakes) =='
+  # "supported" must be a narrow allowlist (exit 0 or 1 only), never a broad
+  # "anything but 2" (code review finding, 2026-09-24 rollout PR): a staged
+  # exe that is corrupt, wrong-architecture, or crashes on launch reports a
+  # large/negative exit code (never a clean 1 or 2) and must fall back to
+  # the installed target, exactly like a confirmed-unsupported build. These
+  # drive Test-NodeSwapSupport against tiny throwaway .cmd files standing in
+  # for a local-offload.exe build — real process spawns, real exit codes.
+  $fakeBinDir = Join-Path ([System.IO.Path]::GetTempPath()) ("node-swap-selftest-" + [guid]::NewGuid().ToString('N'))
+  New-Item -ItemType Directory -Path $fakeBinDir -Force | Out-Null
+  try {
+    function New-FakeBin([string]$name, [long]$code) {
+      $p = Join-Path $fakeBinDir $name
+      Set-Content -Path $p -Value "@echo off`r`nexit /b $code" -Encoding ASCII
+      return $p
+    }
+    $exit0 = New-FakeBin 'exit0.cmd' 0
+    $exit1 = New-FakeBin 'exit1.cmd' 1
+    $exit2 = New-FakeBin 'exit2.cmd' 2
+    # -1073741819 is 0xC0000005 (STATUS_ACCESS_VIOLATION) read as a signed
+    # 32-bit exit code - the real shape a genuinely crashing exe reports.
+    $exitCrash = New-FakeBin 'exitcrash.cmd' (-1073741819)
+
+    if (Test-NodeSwapSupport $exit0) { Write-Host 'PASS Test-NodeSwapSupport: exit 0 is supported' }
+    else { Write-Host 'FAIL Test-NodeSwapSupport: exit 0 is supported: returned false'; $fail++ }
+
+    if (Test-NodeSwapSupport $exit1) { Write-Host 'PASS Test-NodeSwapSupport: exit 1 (validation error) is supported' }
+    else { Write-Host 'FAIL Test-NodeSwapSupport: exit 1 (validation error) is supported: returned false'; $fail++ }
+
+    if (Test-NodeSwapSupport $exit2) { Write-Host 'FAIL Test-NodeSwapSupport: exit 2 (unrecognized subcommand) is NOT supported: returned true'; $fail++ }
+    else { Write-Host 'PASS Test-NodeSwapSupport: exit 2 (unrecognized subcommand) is NOT supported' }
+
+    if (Test-NodeSwapSupport $exitCrash) { Write-Host 'FAIL Test-NodeSwapSupport: a crash exit code is NOT supported: returned true'; $fail++ }
+    else { Write-Host 'PASS Test-NodeSwapSupport: a crash exit code is NOT supported' }
+
+    # A plain text file renamed .exe is not a valid Win32 executable at all -
+    # CreateProcess itself fails, so this never even reaches the point of
+    # setting $LASTEXITCODE (unlike every .cmd case above, which all DO
+    # start a real process). PowerShell's `&` surfaces that as a TERMINATING
+    # ApplicationFailedException; without the try/catch in Test-NodeSwapSupport
+    # this throws straight through and aborts the whole self-test run (and,
+    # in production, the whole launcher) instead of returning $false (code
+    # review finding, 2026-09-24 rollout PR).
+    $notAnExe = Join-Path $fakeBinDir 'not-a-real.exe'
+    Set-Content -Path $notAnExe -Value 'this is not a valid PE executable' -Encoding ASCII
+    try {
+      if (Test-NodeSwapSupport $notAnExe) { Write-Host 'FAIL Test-NodeSwapSupport: a non-PE file is NOT supported: returned true'; $fail++ }
+      else { Write-Host 'PASS Test-NodeSwapSupport: a non-PE file is NOT supported (and does not throw)' }
+    } catch {
+      Write-Host "FAIL Test-NodeSwapSupport: a non-PE file is NOT supported (and does not throw): THREW instead - $($_.Exception.GetType().Name): $($_.Exception.Message)"
+      $fail++
+    }
+  } finally {
+    Remove-Item -Recurse -Force $fakeBinDir -ErrorAction SilentlyContinue
+  }
+
   if ($fail -eq 0) { Write-Host 'ALL PASS'; exit 0 }
   Write-Host "FAILURES: $fail"
   exit 1
@@ -199,7 +389,10 @@ public static class NodeSwapArgvTest {
 if (-not $Staged -or -not $Target -or -not $Sha256) {
   throw "-Staged, -Target and -Sha256 are required (or pass -SelfTest to run the argv-quoting unit checks only)"
 }
-if (-not $RunnerExe) { $RunnerExe = $Target }
+$RunnerExe = Resolve-RunnerExe -RunnerExe $RunnerExe -Staged $Staged -Target $Target -Sha256 $Sha256 -SkipHashCheck:$SkipHashCheck `
+  -HashFile { param($p) (Get-FileHash -Algorithm SHA256 -Path $p).Hash } `
+  -SupportsNodeSwap ${function:Test-NodeSwapSupport} `
+  -Log { param($m) Write-Host "[node-swap-launch] $m" }
 
 if (-not (Test-Path $RunnerExe)) { throw "RunnerExe not found: $RunnerExe" }
 if (-not $LogDir) { $LogDir = Split-Path -Parent $Target }

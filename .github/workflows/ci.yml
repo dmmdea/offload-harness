@@ -58,6 +58,15 @@ jobs:
       - name: Test
         run: go test ./...
 
+      # resolve_runner_exe (linux-node-swap-launch.sh) is pure/synthetic like the
+      # windows-node-swap-launch.tests.ps1 job below: fakes stand in for
+      # hash/support/log, no real binary or process spawn, so ubuntu-latest is a
+      # valid host with no fleet node needed. This is the 2026-09-24 fix's Linux
+      # half — see internal/nodeswap and the sibling installer-windows job's
+      # windows-node-swap-launch self-test for the Windows half.
+      - name: linux-node-swap-launch.sh runner-selection self-test
+        run: bash ./setup/linux-node-swap-launch.tests.sh
+
       # The render runners are ~170 node:test assertions that were never in CI.
       - name: Set up Node
         uses: actions/setup-node@v4
