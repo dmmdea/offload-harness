@@ -223,12 +223,27 @@ func editNodeClasses(cfg config.Config) []string {
 // directory name.
 type nodePack struct {
 	name, url, marker string
+	// note carries an operator-facing addendum to the hint (pin/archival/mirror). Empty
+	// for a normally-maintained pack.
+	note string
 }
 
+// pollockjj/ComfyUI-MultiGPU archives 2026-09-30 (issue #223, no successor endorsed).
+// The pinned commit is upstream v2.6.4's last code commit (b51c99a525e9607e43545ee2a8b7694c74a4775a,
+// pyproject.toml version "2.6.4") PLUS one local fix already carried by the fleet
+// (ed1ffaef7cec1a66f35106c6a4c7a40927c2dc83, "fix(p2p): platform-aware cudart load +
+// fail-closed P2P on Windows/WDDM" — the first-stage fix for upstream issue #220's
+// libcudart.so-on-Windows crash). Mirrored (private) at dmmdea/ComfyUI-MultiGPU-mirror
+// since upstream becomes read-only. See docs/systems/media-generation.md "Archival".
+const multiGPUPinnedCommit = "ed1ffaef7cec1a66f35106c6a4c7a40927c2dc83"
+const multiGPUMirrorURL = "https://github.com/dmmdea/ComfyUI-MultiGPU-mirror"
+
+var multiGPUArchivalNote = " — ARCHIVED upstream 2026-09-30 (no successor); pinned " + multiGPUPinnedCommit[:12] + ", mirror " + multiGPUMirrorURL
+
 var nodePacks = map[string]nodePack{
-	"ComfyUI-VideoHelperSuite": {"ComfyUI-VideoHelperSuite", "https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite", "VHS_VideoCombine"},
-	"ComfyUI-MultiGPU":         {"ComfyUI-MultiGPU", "https://github.com/pollockjj/ComfyUI-MultiGPU", "UNETLoaderDisTorch2MultiGPU"},
-	"ComfyUI-GGUF":             {"ComfyUI-GGUF", "https://github.com/city96/ComfyUI-GGUF", "UnetLoaderGGUF"},
+	"ComfyUI-VideoHelperSuite": {"ComfyUI-VideoHelperSuite", "https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite", "VHS_VideoCombine", ""},
+	"ComfyUI-MultiGPU":         {"ComfyUI-MultiGPU", "https://github.com/pollockjj/ComfyUI-MultiGPU", "UNETLoaderDisTorch2MultiGPU", multiGPUArchivalNote},
+	"ComfyUI-GGUF":             {"ComfyUI-GGUF", "https://github.com/city96/ComfyUI-GGUF", "UnetLoaderGGUF", ""},
 }
 
 // classPacks maps every non-core class a shipped builder emits to the packs that must
@@ -395,7 +410,8 @@ func objectInfoHas(client *http.Client, api, class string) (bool, error) {
 func packHint(class string) string {
 	var parts []string
 	for _, p := range classPacks[class] {
-		parts = append(parts, nodePacks[p].name+" ("+nodePacks[p].url+")")
+		np := nodePacks[p]
+		parts = append(parts, np.name+" ("+np.url+")"+np.note)
 	}
 	if len(parts) == 0 {
 		return "a core ComfyUI class — update ComfyUI"

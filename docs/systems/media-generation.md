@@ -388,6 +388,31 @@ The builder deliberately drops the template's gemma4_e2b prompt-enhancer branch 
 harness's own planner does prompt expansion) and pairs the convrot transformer with the
 **conv** video VAE. Wan 2.2 stays available per-request via `model: "wan"`.
 
+**ComfyUI-MultiGPU archival (2026-09-30) — pin + mirror.** Upstream `pollockjj/ComfyUI-MultiGPU`
+archives 2026-09-30 (issue #223: final code state v2.6.4, no successor endorsed; full research
+in `Ecosystem/Benchmarks and Optimizations/2026-09-22-qwen-image-21-hyperframes/research/comfyui-multigpu-archival-2026-09-24.md`).
+Neither native Dynamic VRAM nor `SelectModelDevice`/"MultiGPU Work Units" reproduce this pack's
+donor+compute `virtual_vram_gb` weight-sharding (needed by the Wan GGUF lane and the pooled
+krea2/LTX-2.5 seats), so the harness stays on MultiGPU for those and pins rather than migrates
+blind. **Pinned commit: `ed1ffaef7cec1a66f35106c6a4c7a40927c2dc83`** — upstream v2.6.4's last
+code commit (`b51c99a525e9607e43545ee2a8b7694c74a4775a`) plus one already-deployed local fix
+(`fix(p2p): platform-aware cudart load + fail-closed P2P on Windows/WDDM`, Daniel, 2026-09-01 —
+the first-stage fix for upstream issue #220's `libcudart.so`-on-Windows crash; the second-stage
+`illegal memory access` in the int8 dispatch path itself, hit only when `compute_device` is a
+*non-default* CUDA device, remains open and unfixable upstream — this is why the pooled LTX-2.5
+seat keeps `compute cuda:0`). **Fallback source once upstream goes read-only:** private mirror
+`https://github.com/dmmdea/ComfyUI-MultiGPU-mirror` (full `git clone --mirror`, all branches/tags,
+plus this pinned commit). `render/comfy-nodes.mjs` (`NODE_PACKS`) and
+`internal/mediacap/routeneeds.go` (`nodePacks`/`packHint`) both carry the pin+mirror note in the
+operator-facing `MISSING_NODE` hint, so a box missing the pack is told where to get the frozen,
+patched code, not just the (soon read-only) upstream URL. All four fleet Windows/Linux ComfyUI
+installs (Qube, OptiPlex, Aorus, Lenovo) are aligned to this commit (2026-09-24) — see the
+per-node rev table and the A/B seat-switch decision in
+`Ecosystem/Benchmarks and Optimizations/2026-09-22-qwen-image-21-hyperframes/infra/multigpu-archival-actions-2026-09-24.md`
+(operator's Drive, not this repo). Re-check the archive-coordination thread (#223)
+and `city96/ComfyUI-GGUF#427` (GGUF+DynamicVRAM, open/stalled) periodically before investing
+further in this pack; if a fork gains independent commits and traction, re-evaluate.
+
 **Qwen-Image 2512** (Apache-2.0) is the prompt-adherence *generation* alternative at ≥16 GB:
 `imagegen_family: "qwen-image"` selects its model-correct graph — SD3-class 16-channel latent
 (`EmptySD3LatentImage`, never the SDXL latent), `ModelSamplingAuraFlow` shift, split
