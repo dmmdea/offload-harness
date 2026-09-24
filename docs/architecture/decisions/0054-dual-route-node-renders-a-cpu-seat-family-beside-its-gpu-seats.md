@@ -5,6 +5,17 @@ date: "2026-09-20"
 
 # A dual-route node renders a CPU seat family beside its GPU seats, declared per tier
 
+> **Amended 2026-09-24 — the CPU route is withdrawn from every tier.** The operator's standing
+> rule is that no model runs on CPU: inference belongs on the cards, and system RAM is only the
+> spill space for a model that does not fit its card. `amd-gcn` no longer declares
+> `alt_backends: ["cpu"]`, so `install render --llama-bin-cpu` now refuses on it by name
+> (decision 2's "flag without the declaration is an error"), and the one node that carried the
+> family had its `offload-e4b-cpu` / `gemma4-e2b-cpu` entries removed and its manifest's
+> `alt_backends` dropped, so `/fleet/health` reports `backends: ["vulkan"]`. The mechanism
+> below — declaration, render, manifest, health — is unchanged and stays available for a
+> non-CPU alternate (for example `alt_backends: ["vulkan"]` on a CUDA tier). Declaring
+> `["cpu"]` on any tier again needs an explicit operator decision, not a measurement.
+
 ## Context
 
 The operator's direction for the first Linux AMD node (binxarn, Ryzen 5 5625U / Vega 7,

@@ -6,6 +6,15 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Removed — the amd-gcn tier's CPU alt route (`alt_backends: ["cpu"]`)
+
+Operator order, 2026-09-24: no model runs on CPU. `amd-gcn` no longer declares the CPU seat
+family, so `install render --llama-bin-cpu` refuses on it by name and a re-render cannot bring
+`offload-e4b-cpu` / `gemma4-e2b-cpu` back. The node that carried them had the two entries, the
+`ldcpu` macro and their matrix vars removed from its live config and `alt_backends` dropped from
+its manifest; its `/fleet/health` now reports `backends: ["vulkan"]`. ADR 0054 is amended, not
+superseded: the declare-render-advertise mechanism stays for a non-CPU alternate.
+
 ### Added — Wan 2.2 native loader (fp8-scaled safetensors, no MultiGPU) as a supported variant
 
 `render/wf-wan22-i2v.mjs` used to wrap EVERY Wan expert (GGUF *and* safetensors) in the
