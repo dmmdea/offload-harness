@@ -379,6 +379,26 @@ if ($macro -match '--cache-type-k f16' -and $macro -match '--cache-type-v f16') 
 if ($macro -match '--flash-attn on')                           { Ok 'amd-gcn flash-attn on' } else { Bad "amd-gcn flash-attn on (got: $macro)" }
 if ($r.yaml -notmatch 'gemma4-26b-a4b')                        { Ok 'amd-gcn NO 26B' } else { Bad 'amd-gcn 26B absent' }
 
+# mimo-9b-agent ADOPTED as amd-gcn's bound agent seat (include_mimo_9b, 2026-09-24 8GB
+# agent-seat bake: equal quality to qwen3.5-4b-agent within the test's resolution at
+# roughly HALF the wall). qwen3.5-4b-agent stays include_qwen35_4b true and renders as
+# the un-aliased ROLLBACK seat. On this Vulkan UMA tier the entry follows the TIER's
+# OWN window/KV/flash-attn (32768/f16/on) — NOT the CUDA 8GB tiers' literal 65536/q8_0
+# pin — exactly like this template's qwen3.5-4b-agent block.
+if ($r.yaml -match '(?m)^\s{2}mimo-9b-agent:')                 { Ok 'amd-gcn mimo-9b-agent seat present (include_mimo_9b)' } else { Bad 'amd-gcn mimo-9b-agent seat missing' }
+if ($r.yaml -match '(?m)^\s{4}interactive:.*\bmimo9\b')        { Ok 'amd-gcn mimo-9b-agent joins the interactive set' } else { Bad 'amd-gcn mimo9 set membership' }
+if ($r.yaml -notmatch '__MIMO9B_')                             { Ok 'amd-gcn: no unsubstituted MIMO9B token' } else { Bad 'amd-gcn left __MIMO9B_ALT__' }
+if ($r.yaml -notmatch '__Q354B_AGENT_ALIAS__')                 { Ok 'amd-gcn: no unsubstituted Q354B_AGENT_ALIAS token' } else { Bad 'amd-gcn left __Q354B_AGENT_ALIAS__' }
+$mimoCmd = ([regex]::Match($r.yaml, '(?ms)^\s{2}mimo-9b-agent:.*?(?=^\s{2}\S|\Z)')).Value
+if ($mimoCmd -and $mimoCmd -match '--reasoning\s+off')         { Ok 'amd-gcn mimo seat pins --reasoning off' } else { Bad "amd-gcn mimo seat lost --reasoning off (got: $mimoCmd)" }
+if ($mimoCmd -and $mimoCmd -match '--ctx-size 32768')          { Ok 'amd-gcn mimo seat serves the TIER window (32768), not the CUDA-tier literal 65536' } else { Bad "amd-gcn mimo seat ctx wrong (got: $mimoCmd)" }
+if ($mimoCmd -and $mimoCmd -notmatch '--ctx-size 65536')       { Ok 'amd-gcn mimo seat carries no CUDA-tier literal window' } else { Bad "amd-gcn mimo seat still carries the literal 65536 (got: $mimoCmd)" }
+if ($mimoCmd -and $mimoCmd -match '--cache-type-k f16' -and $mimoCmd -match '--cache-type-v f16') { Ok 'amd-gcn mimo seat serves the TIER KV type (f16)' } else { Bad "amd-gcn mimo seat KV type wrong (got: $mimoCmd)" }
+if ($mimoCmd -and $mimoCmd -match 'aliases:.*mimo-9b.*agent-seat') { Ok 'amd-gcn mimo seat holds mimo-9b + agent-seat aliases' } else { Bad "amd-gcn mimo seat aliases wrong: $mimoCmd" }
+$q354CmdWithMimo = ([regex]::Match($r.yaml, '(?ms)^\s{2}qwen3\.5-4b-agent:.*?(?=^\s{2}\S|\Z)')).Value
+if ($q354CmdWithMimo -and $q354CmdWithMimo -match 'aliases:\s*\[qwen35-4b\]') { Ok 'amd-gcn qwen3.5-4b-agent lost the agent-seat alias to mimo-9b-agent (stays the rollback seat)' } else { Bad "amd-gcn qwen3.5-4b-agent aliases wrong (still claims agent-seat?): $q354CmdWithMimo" }
+if ($r.verdict -and $r.verdict.agent_ctx_tokens -eq 32768)     { Ok 'amd-gcn agent_ctx_tokens=32768 (matches what mimo-9b-agent serves on this tier)' } else { Bad "amd-gcn agent_ctx_tokens (got: $($r.verdict.agent_ctx_tokens))" }
+
 Write-Host "== dual-gpu - two groups + per-GPU CUDA_VISIBLE_DEVICES, no exclusive swap =="
 $r = Invoke-Render -Backend 'cuda' -ProfileId 'dual-gpu' -RamTier 'mid' -BigRam $false
 # Under `matrix:` the point of this tier is expressed DIRECTLY: one set listing every

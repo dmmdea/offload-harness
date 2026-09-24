@@ -236,6 +236,77 @@ a bare name, with regression tests (`TestResolveBinary_ExplicitPathMissing`,
   on PATH, or when the current console code page happens not to reproduce the defect); proven able
   to fail by reverting `SafeScriptArgs` to skip the `Console.OutputEncoding` prefix.
 
+## [0.140.11] - 2026-09-24 - mimo-9b-agent becomes amd-gcn's bound agent seat, and the 4B/mimo pairing that PR #472 refused now renders instead
+
+### Changed — amd-gcn `agent_seat_tok_s` 10 -> 6.57 (the rate follows the seat)
+
+`agent_seat_tok_s` sizes every agent contract's wall until the seat has recorded a measured rate of its
+own. 10 was the qwen3.5-4b-agent seat's rate; the new seat `mimo-9b-agent` has no recorded rate yet,
+so a fresh install would have sized MiMo's walls from a rate this iGPU does not reach (~1/3 too short —
+the exact failure the seed exists to prevent). 6.57 is MiMo-9B's llama-bench tg128 on the reference
+box (Vulkan, llama.cpp b11153). `TestAmdGcnSeedsTheSeatItWasMeasuredOn` pins it (proven red at 10).
+
+### Changed — `include_mimo_9b` + `include_qwen35_4b` render TOGETHER; the refusal moves to a rollback alias drop
+
+PR #472 shipped `include_mimo_9b` refusing outright alongside `include_qwen35_4b` (both claim the
+shared `agent-seat` alias). The amd-gcn onboarding needed the SAME shape #472 already gave the
+mimo/9B pair: render both, and strip the alias from whichever smaller entry is also present.
+
+- **`servingtmpl.Params.validate()` no longer refuses `IncludeMimo9B && IncludeQ354B`.** A new
+  `__Q354B_AGENT_ALIAS__` token (mirroring `__Q359B_AGENT_ALIAS__`) drops qwen3.5-4b-agent's own
+  claim on `agent-seat` precisely when mimo-9b-agent also renders, so the smaller entry stays in the
+  config as an un-aliased ROLLBACK seat instead of vanishing. The pre-existing `include_qwen35_4b` +
+  `include_qwen35_9b` mutual exclusion is untouched — that pair still refuses, independent of mimo.
+- Replaced `TestMimoAndQwen354BAreRefused` with `TestMimoAndQwen354BRenderTogetherQwenLosesTheAlias`
+  (mirrors the existing 9B test) plus `TestMimoWithBothSmallerSeatsStillRefusedOnTheirOwnRule` (pins
+  that the 4B/9B rule itself did not loosen).
+- Wired the new token into every template carrying `qwen3.5-4b-agent`:
+  `llama-swap.{win,linux}-cuda.yaml`, `llama-swap.{win,linux}-vulkan.yaml`.
+
+### Added — amd-gcn (Ryzen 5 5625U / Vega 7 iGPU, Vulkan) seats mimo-9b-agent as its agent lane
+
+MEASURED 2026-09-24 on the amd-gcn reference box (llama.cpp b11153 Vulkan, engine
+upgrade from b9934 replayed clean with no regression across the whole roster): mimo-9b-agent ties
+qwen3.5-4b-agent on quality within the agent-seat bake's resolution (shape B 18/18 x2 vs 17/18 x2;
+shape C 4/5 x2 vs 5/5 x2) at roughly HALF the wall-clock (333 s vs 614 s total, fewer agent-loop
+steps despite a slower raw decode rate — llama-bench tg128 6.57 tok/s). `amd-gcn` now sets
+`include_mimo_9b: true` (keeping `include_qwen35_4b: true` as the rollback) and binds
+`config_seed.agent_model` to `mimo-9b-agent`; `agent_ctx_tokens` stays 32768 (unchanged — it
+already matched `ctx_size`, and continues to on the tier-driven entry below).
+
+- **`llama-swap.linux-vulkan.yaml`'s mimo-9b-agent block now serves the TIER's own
+  window/KV/flash-attn/cache-ram** (`__CTX__`/`__KV_K__`/`__KV_V__`/`__FLASH_ATTN__`/`__CACHE_RAM__`,
+  the same tokens that template's `qwen3.5-4b-agent` block already uses) instead of the CUDA 8GB
+  tiers' literal `65536`/`q8_0` pin: a Vulkan UMA box has no fixed 8GB-class fit to pin to, unlike
+  the fixed-VRAM cards that literal was measured on. `--reasoning off --jinja` stay explicit. The
+  `win-cuda` and `linux-cuda` mimo-9b-agent blocks are UNCHANGED (still the literal CUDA pin).
+- **`llama-swap.win-vulkan.yaml` gained a mimo-9b-agent entry** (tier-token-driven, matching the new
+  linux-vulkan shape) it never had before, plus the `__Q354B_AGENT_ALIAS__` token on its existing
+  `qwen3.5-4b-agent` block. Required for OS parity, not originally scoped: `TestEveryBoundAliasIsServed`
+  and `TestVulkanAndCPUTiersRenderOnLinux` both assert every "vulkan"-backend tier renders on BOTH
+  operating systems ("a tier is a hardware class; the OS it boots must not decide whether it
+  exists") — amd-gcn setting `include_mimo_9b` without this addition made the Windows render of the
+  tier refuse outright, the exact OS-decides-capability failure those two gates exist to catch.
+  `amd-rdna3` and `amd-rdna3-dgpu` (the other two `vulkan`-backend tiers) are unaffected: neither sets
+  `include_mimo_9b`, so the new block strips out of their renders exactly as before.
+- **REQUIRES llama.cpp >= b11102** (upstream llama.cpp #29319, same floor #472 documented for the
+  CUDA 8GB tiers) — amd-gcn's pinned Vulkan build (b11153) already satisfies it.
+- `TestAgentWindowMatchesWhatTheAgentSeatServes` (agent_window_test.go) now resolves a tier's agent
+  seat window from the template its OWN `backend` actually renders (`llama-swap.linux-vulkan.yaml`
+  for `vulkan`, `llama-swap.win-cuda.yaml` for everything else) instead of always reading
+  `win-cuda.yaml` — a latent bug the mimo/vulkan combination exposed: `win-cuda.yaml`'s mimo entry
+  is a LITERAL 65536 while amd-gcn's own linux-vulkan entry is `__CTX__` (32768), so the old
+  always-win-cuda lookup would have demanded the wrong number for any vulkan-backend tier bound to
+  mimo-9b-agent.
+- `docs/tiers/amd-gcn.md` regenerated (`go generate ./...`).
+
+### Fixed — a table-wide test assertion that pinned the refusal this PR removed
+
+`setup/tests/install-config-seed.test.ps1` asserted `include_qwen35_4b` and `include_mimo_9b` were
+mutually exclusive across the WHOLE tier table — exactly the rule this PR changes. Replaced with
+amd-gcn-specific assertions (mirroring the existing blackwell-8/ampere-8 ones) and dropped the
+now-false blanket check; the `include_qwen35_4b`/`include_qwen35_9b` blanket check is untouched.
+
 ## [0.140.9] - 2026-09-24 - a second 8GB-class agent seat, mimo-9b-agent, joins qwen3.5-9b-agent on blackwell-8 and ampere-8
 
 ### Added — `mimo-9b-agent`: a coin-flip-tie second 8GB agent seat, encoded exactly like `include_qwen35_9b`

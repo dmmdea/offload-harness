@@ -145,14 +145,26 @@ Assert ([bool]$profiles.'ampere-8'.include_mimo_9b)                        'ampe
 Assert ([bool]$profiles.'ampere-8'.include_qwen35_9b)                      'ampere-8 KEEPS include_qwen35_9b true (qwen3.5-9b-agent stays the rollback seat)'
 Assert ($profiles.'ampere-8'.agent_ctx_tokens -eq 65536)                   'ampere-8 agent_ctx_tokens raised to 65536 (mimo-9b-agent literal --ctx-size)'
 Assert ($profiles.'ampere-8'.ctx_size -eq 32768)                           'ampere-8 serves 32K (measured on-reference: E4B 3187 MiB, 9B 6111 MiB @32K)'
+# amd-gcn: mimo-9b-agent ADOPTED as this tier's bound agent seat (operator-approved,
+# MEASURED 2026-09-24 on binxarn): equal quality to qwen3.5-4b-agent within the test's
+# resolution at roughly HALF the wall (333 s vs 614 s). qwen3.5-4b-agent stays
+# include_qwen35_4b true and renders as the un-aliased ROLLBACK seat - the SAME
+# both-halves-move-together rule as blackwell-8/ampere-8, one weight class down.
+$sAmdGcn = $profiles.'amd-gcn'.config_seed
+Assert ($sAmdGcn.agent_model -eq 'mimo-9b-agent')                          'amd-gcn seats mimo-9b-agent (2026-09-24 bake, ~half the wall of qwen3.5-4b-agent)'
+Assert ([bool]$profiles.'amd-gcn'.include_mimo_9b)                         'amd-gcn sets include_mimo_9b (yaml entry + download gate)'
+Assert ([bool]$profiles.'amd-gcn'.include_qwen35_4b)                       'amd-gcn KEEPS include_qwen35_4b true (qwen3.5-4b-agent stays the rollback seat)'
+Assert ($profiles.'amd-gcn'.agent_ctx_tokens -eq 32768)                    'amd-gcn agent_ctx_tokens stays 32768 (mimo-9b-agent serves the TIER window on Vulkan, not the CUDA literal 65536)'
+Assert ($profiles.'amd-gcn'.agent_ctx_tokens -eq $profiles.'amd-gcn'.ctx_size) 'amd-gcn agent_ctx_tokens matches ctx_size (the mimo entry renders __CTX__ on linux-vulkan/win-vulkan)'
 # The 4B and 9B seats are mutually exclusive EVERYWHERE (shared agent-seat alias;
 # the Go renderer refuses both) - pin the whole table so a future tier cannot ship it.
+# mimo-9b-agent shares the SAME alias as the 4B and the 9B, but pairing it with EITHER
+# is no longer mutually exclusive (2026-09-24, the amd-gcn onboarding, superseding the
+# 4B/mimo refusal blackwell-8/ampere-8 shipped with this seat's own introduction): the
+# renderer moves the shared alias to mimo and strips it from whichever smaller entry is
+# also present, so mimo may render beside the 4B, the 9B, or neither.
 foreach ($t in @($profiles.PSObject.Properties.Name)) {
   Assert (-not (($profiles.$t.include_qwen35_4b -eq $true) -and ($profiles.$t.include_qwen35_9b -eq $true))) "tier ${t}: include_qwen35_4b and include_qwen35_9b are mutually exclusive"
-  # mimo-9b-agent shares the SAME alias as the 4B, so it is mutually exclusive with it
-  # too - but NOT with include_qwen35_9b, which mimo may render alongside (the renderer
-  # moves the shared alias to mimo and strips it from qwen3.5-9b-agent).
-  Assert (-not (($profiles.$t.include_qwen35_4b -eq $true) -and ($profiles.$t.include_mimo_9b -eq $true))) "tier ${t}: include_qwen35_4b and include_mimo_9b are mutually exclusive"
 }
 $s32 = $profiles.'blackwell-32'.config_seed
 Assert ($s32.videogen_width -eq 1280 -and $s32.videogen_height -eq 704)     'blackwell-32 seeds REDUCED-RES 1280x704 video (doctrine-conformant recipe)'

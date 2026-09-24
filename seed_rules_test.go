@@ -103,10 +103,17 @@ func TestEveryAgentSeatIsChosenNotDerived(t *testing.T) {
 //
 //   - the E4B is the hot model (resident == workhorse offload-e4b): Vulkan pp512 129.08 / tg128
 //     11.93. The E2B "weakest path" the tier carried was a projection that was never replaced.
-//   - the agent seat is qwen3.5-4b-agent: smoke PASS 44.7 s, a real contract PASS 188 s, a 32k
-//     contract PASS 143 s. gemma4-e2b FAILED in 18.6 s and offload-e4b FAILED in 31 s.
-//   - agent_seat_tok_s 10 is load-bearing: the first run without it deferred with 1 s of wall left,
-//     because the wall was sized from a rate this iGPU does not reach.
+//   - the agent seat is mimo-9b-agent (2026-09-24 8GB agent-seat bake, superseding the
+//     qwen3.5-4b-agent binding this tier shipped with): equal quality to qwen3.5-4b-agent
+//     within the test's resolution (shape B 18/18 x2, shape C 4/5 x2 vs the 4B's 17/18 x2
+//     and 5/5 x2) at roughly HALF the wall (333 s vs 614 s total, fewer agent-loop steps).
+//     qwen3.5-4b-agent stays include_qwen35_4b true and rendered as the un-aliased ROLLBACK
+//     seat: smoke PASS 44.7 s, a real contract PASS 188 s, a 32k contract PASS 143 s.
+//     gemma4-e2b FAILED in 18.6 s and offload-e4b FAILED in 31 s (neither is a candidate).
+//   - agent_seat_tok_s is load-bearing: the first run without it deferred with 1 s of wall left,
+//     because the wall was sized from a rate this iGPU does not reach. It is the SEAT's rate, so it
+//     moved with the seat: 10 was the 4B's; 6.57 is MiMo-9B's llama-bench tg128 on this box
+//     (Vulkan, llama.cpp b11153, 2026-09-24). A stale 10 would size MiMo's walls ~1/3 too short.
 func TestAmdGcnSeedsTheSeatItWasMeasuredOn(t *testing.T) {
 	doc := loadSeedRulesDoc(t)
 	p, ok := doc.Profiles["amd-gcn"]
@@ -117,8 +124,8 @@ func TestAmdGcnSeedsTheSeatItWasMeasuredOn(t *testing.T) {
 		t.Errorf("amd-gcn resident_tier = %q, want \"offload-e4b\" (the E4B measured on binxarn)", p.ResidentTier)
 	}
 	want := map[string]any{
-		"agent_model":         "qwen3.5-4b-agent",
-		"agent_seat_tok_s":    float64(10),
+		"agent_model":         "mimo-9b-agent",
+		"agent_seat_tok_s":    float64(6.57),
 		"agent_max_tokens":    float64(2048),
 		"agent_timeout_sec":   float64(900),
 		"fleet_agent_enabled": true,

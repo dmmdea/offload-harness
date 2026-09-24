@@ -57,7 +57,10 @@ type Params struct {
 	// (the __Q354B_ALT__ token renders empty). It comes from the tier's
 	// include_qwen35_4b field and defaults to false. This is the SMALL-tier agent
 	// seat: 3.5GB of VRAM on a 6GB card, for tiers whose workhorse plans poorly but
-	// which have no room for a 27B.
+	// which have no room for a 27B. A tier may also set IncludeMimo9B alongside this
+	// (2026-09-24, the amd-gcn onboarding): the 4B entry then stays rendered as the
+	// un-aliased ROLLBACK seat (its own aliases line carries the __Q354B_AGENT_ALIAS__
+	// token, which drops its claim on `agent-seat` precisely when IncludeMimo9B is set).
 	IncludeQ354B bool
 	// IncludeQ359B gates the Qwen3.5-9B AGENT entry exactly as IncludeQ354B gates
 	// the 4B: false removes the model block, its matrix var, and its set membership
@@ -72,11 +75,13 @@ type Params struct {
 	// Qwen3.5-9B one: false removes the model block, its matrix var and its set
 	// membership (the __MIMO9B_ALT__ token renders empty). It comes from the tier's
 	// include_mimo_9b field and defaults to false. It claims the SAME `agent-seat`
-	// alias as IncludeQ354B/IncludeQ359B do, so validate() refuses IncludeMimo9B
-	// together with IncludeQ354B — but NOT together with IncludeQ359B: the two 8GB-class
-	// seats may render side by side, with qwen3.5-9b-agent kept as the un-aliased
-	// rollback (its own aliases line carries the __Q359B_AGENT_ALIAS__ token, which
-	// drops the shared alias precisely when IncludeMimo9B is set).
+	// alias as IncludeQ354B/IncludeQ359B do, so it can never render alongside either
+	// of THEM holding that same alias — but neither pairing is a render REFUSAL any
+	// more (2026-09-24, the amd-gcn onboarding): both the 4B and the 9B entry stay
+	// rendered as un-aliased ROLLBACK seats when mimo-9b-agent is also included, each
+	// losing its own claim on `agent-seat` via its own alias token
+	// (__Q354B_AGENT_ALIAS__ / __Q359B_AGENT_ALIAS__) precisely when IncludeMimo9B is
+	// set, so mimo-9b-agent ends up the sole holder of the shared alias either way.
 	IncludeMimo9B bool
 	// IncludeQ3827B gates the Qwen3.8-27B AGENT entry (UD-IQ3_S weights + the MTP
 	// head embedded in the same GGUF, drafted with --spec-type draft-mtp). False
@@ -408,6 +413,16 @@ func Render(tmpl string, p Params) (string, error) {
 	if p.IncludeMimo9B {
 		q359bAgentAlias = ""
 	}
+	// qwen3.5-4b-agent's OWN `agent-seat` alias mirrors q359bAgentAlias exactly
+	// (2026-09-24, the amd-gcn onboarding): mimo-9b-agent and qwen3.5-4b-agent render
+	// TOGETHER — the 4B entry is the tier's declared ROLLBACK seat, kept in the config
+	// so an operator can switch config_seed.agent_model back to it without a re-render
+	// — and it loses its claim on the shared alias to mimo-9b-agent the same way
+	// qwen3.5-9b-agent does. Computed unconditionally, same harmless-no-op rule.
+	q354bAgentAlias := ", agent-seat"
+	if p.IncludeMimo9B {
+		q354bAgentAlias = ""
+	}
 	// The Qwen3.8-27B agent membership mirrors Q359B exactly. Same refusal-by-name rule.
 	q3827balt := ""
 	if p.IncludeQ3827B {
@@ -426,6 +441,7 @@ func Render(tmpl string, p Params) (string, error) {
 		"__Q38_ALT__":           q38alt,
 		"__Q38_AND__":           q38and,
 		"__Q354B_ALT__":         q354balt,
+		"__Q354B_AGENT_ALIAS__": q354bAgentAlias,
 		"__Q359B_ALT__":         q359balt,
 		"__Q359B_AGENT_ALIAS__": q359bAgentAlias,
 		"__MIMO9B_ALT__":        mimo9balt,
@@ -487,15 +503,12 @@ func (p Params) validate() error {
 		missing = append(missing, "a single agent seat (include_qwen35_4b and include_qwen35_9b are both set, "+
 			"but the 4B and 9B entries share the `agent-seat` alias — pick one)")
 	}
-	// mimo-9b-agent claims the SAME `agent-seat` alias as the 4B, so the two must never
-	// render together either — exactly the existing 4B/9B rule, extended to the new
-	// seat. Unlike the 4B/9B pair, IncludeMimo9B WITH IncludeQ359B is allowed: the
-	// __Q359B_AGENT_ALIAS__ token drops qwen3.5-9b-agent's own claim on the alias so
-	// only mimo-9b-agent carries it, avoiding the duplicate.
-	if p.IncludeMimo9B && p.IncludeQ354B {
-		missing = append(missing, "a single agent seat (include_mimo_9b and include_qwen35_4b are both set, "+
-			"but the mimo-9b-agent and qwen3.5-4b-agent entries share the `agent-seat` alias — pick one)")
-	}
+	// mimo-9b-agent claims the SAME `agent-seat` alias as the 4B, but — UNLIKE the
+	// 4B/9B pair above — that is no longer a render refusal (2026-09-24, the amd-gcn
+	// onboarding): IncludeMimo9B WITH IncludeQ354B renders BOTH entries, with the 4B
+	// kept as the tier's un-aliased ROLLBACK seat. The __Q354B_AGENT_ALIAS__ token
+	// (mirroring __Q359B_AGENT_ALIAS__) drops qwen3.5-4b-agent's own claim on the
+	// alias so only mimo-9b-agent carries it, avoiding the duplicate.
 	if len(p.Seats) > 0 && p.Home == "" && seatsNeedHome(p.Seats) {
 		missing = append(missing, "install home (a media seat names a path under "+tokenHome+")")
 	}
