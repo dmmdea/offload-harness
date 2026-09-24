@@ -36,9 +36,24 @@ export function buildWan22I2V({
   upscaleModel = "", upscaleWidth = 0, upscaleHeight = 0, upscaleMethod = "lanczos",
   textEncoder = "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
   vae = "wan_2.1_vae.safetensors", frameRate = 16,
+  // loader (config: videogen_wan_loader, "" == "auto"): "auto" decides PER EXPERT
+  // by file extension — a .gguf expert keeps the historical DisTorch2/MultiGPU
+  // wrapper (ComfyUI's DynamicVRAM streaming does not support GGUF — bigger-models-
+  // 2026-09-24.md), a .safetensors expert loads through the plain, un-wrapped
+  // UNETLoader (no virtual_vram; ComfyUI's own dynamic-VRAM streaming does the
+  // offload instead, measured ~27.6% faster wall-clock than the GGUF/DisTorch2
+  // path on the Qube, "Interim Phase 2 round 2" item 1). "native" FORCES the plain
+  // loader on both experts (refused on a .gguf file — it cannot stream). "gguf-
+  // distorch" FORCES the DisTorch2/MultiGPU wrapper on both experts regardless of
+  // extension — the historical, always-worked behavior, still available for a
+  // card too small for native streaming or a mixed-precision box.
+  loader = "auto",
 } = {}) {
   if (!imagePath) throw new Error("buildWan22I2V: imagePath is required");
   if (!prompt) throw new Error("buildWan22I2V: prompt is required");
+  if (!["auto", "native", "gguf-distorch"].includes(loader)) {
+    throw new Error(`buildWan22I2V: loader must be auto|native|gguf-distorch, got ${JSON.stringify(loader)}`);
+  }
   void hero; // accepted, ignored: the native path is the default
   const useLora = !!fast;
   if (!negative) negative = WAN_OFFICIAL_NEGATIVE;
@@ -50,17 +65,30 @@ export function buildWan22I2V({
   const lowCfg = cfg || (useLora ? 1.0 : 3.5);
   const highLoraStrength = 0.7, lowLoraStrength = 1.0;
   if (boundaryStep === undefined) boundaryStep = Math.floor(steps / 2);
-  // Loader keyed off the weight file extension (quality-first weight binding): GGUF quants
-  // load through the GGUF DisTorch2 node; full/fp8 .safetensors weights through the native
-  // UNETLoader DisTorch2 variant — SAME RAM-offload params, weight_dtype "default" (never
-  // down-cast: the file's own precision is the point of binding it).
-  // J4 seam: the compute device is env-overridable (COMFY_COMPUTE_DEVICE) — the
-  // hardcoded cuda:0 assumed an NVIDIA box; non-CUDA ComfyUI backends name their
-  // devices differently. Default unchanged.
+  // Loader keyed off the weight file extension (quality-first weight binding), per
+  // expert, gated by `loader`. J4 seam: the compute device is env-overridable
+  // (COMFY_COMPUTE_DEVICE) — the hardcoded cuda:0 assumed an NVIDIA box; non-CUDA
+  // ComfyUI backends name their devices differently. Default unchanged.
   const computeDevice = process.env.COMFY_COMPUTE_DEVICE || "cuda:0";
   const distorch = (unet) => /\.gguf$/i.test(unet)
     ? { class_type: "UnetLoaderGGUFDisTorch2MultiGPU", inputs: { unet_name: unet, compute_device: computeDevice, virtual_vram_gb: virtualVramGb, donor_device: "cpu", eject_models: true } }
     : { class_type: "UNETLoaderDisTorch2MultiGPU", inputs: { unet_name: unet, weight_dtype: "default", compute_device: computeDevice, virtual_vram_gb: virtualVramGb, donor_device: "cpu", eject_models: true } };
+  // native: the core, un-wrapped loader — no DisTorch2, no virtual_vram, no
+  // MultiGPU dependency. ComfyUI's own dynamic-VRAM streaming (comfy_dynamic_vram
+  // on the launch profile, not a graph input) does the RAM/VRAM offload instead.
+  const native = (unet) => ({ class_type: "UNETLoader", inputs: { unet_name: unet, weight_dtype: "default" } });
+  const loaderFor = (unet) => {
+    const isGguf = /\.gguf$/i.test(unet);
+    if (loader === "native") {
+      if (isGguf) {
+        throw new Error(`buildWan22I2V: loader:"native" cannot load a GGUF expert (${unet}) — ComfyUI's DynamicVRAM streaming does not support GGUF; use loader:"gguf-distorch" (or "auto") for a GGUF-bound box`);
+      }
+      return native(unet);
+    }
+    if (loader === "gguf-distorch") return distorch(unet);
+    // auto
+    return isGguf ? distorch(unet) : native(unet);
+  };
 
   const g = {
     "1": { class_type: "LoadImage", inputs: { image: imagePath } },
@@ -69,8 +97,8 @@ export function buildWan22I2V({
     "4": { class_type: "CLIPTextEncode", inputs: { clip: ["3", 0], text: prompt } },
     "5": { class_type: "CLIPTextEncode", inputs: { clip: ["3", 0], text: negative } },
     "6": { class_type: "WanImageToVideo", inputs: { positive: ["4", 0], negative: ["5", 0], vae: ["2", 0], width, height, length, batch_size: 1, start_image: ["1", 0] } },
-    "7": distorch(highUnet),
-    "9": distorch(lowUnet),
+    "7": loaderFor(highUnet),
+    "9": loaderFor(lowUnet),
     // model-sampling reads the LoRA output (fast) or the raw UNET (hero)
     "8": { class_type: "ModelSamplingSD3", inputs: { model: useLora ? ["15", 0] : ["7", 0], shift } },
     "10": { class_type: "ModelSamplingSD3", inputs: { model: useLora ? ["16", 0] : ["9", 0], shift } },

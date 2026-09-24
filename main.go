@@ -1573,6 +1573,7 @@ type videoFlags struct {
 	still       string
 	negative    string
 	out         string
+	transformer string
 	frames      int
 	width       int
 	height      int
@@ -1607,6 +1608,9 @@ func buildVideoParams(f videoFlags) map[string]any {
 	}
 	if f.out != "" {
 		params["out"] = f.out
+	}
+	if f.transformer != "" {
+		params["transformer"] = f.transformer
 	}
 	if f.frames > 0 {
 		params["frames"] = f.frames
@@ -1653,6 +1657,7 @@ type generateVideoCLI struct {
 var generateVideoValueFlags = map[string]bool{
 	"config": true, "model": true, "negative": true, "frames": true,
 	"width": true, "height": true, "steps": true, "seed": true, "reserve-vram": true,
+	"transformer": true,
 }
 
 // parseGenerateVideo parses the generate-video command line. The CLI carries every
@@ -1666,6 +1671,7 @@ func parseGenerateVideo(args []string, errorHandling flag.ErrorHandling) (genera
 	asJSON := fs.Bool("json", false, "print full result JSON")
 	model := fs.String("model", "", "family override: wan | ltx25 | h3 | hunyuan (h3: still optional — t2v without). Empty = the machine's videogen_family seat (falls back to wan when no family is configured)")
 	negative := fs.String("negative", "", "hard exclusions, e.g. 'blurry, distorted'")
+	transformer := fs.String("transformer", "", "OPTIONAL per-request LTX-2.5 transformer file override (e.g. the bf16 transformer for one hero render — int8 stays this box's default; gap 5, bigger-models-2026-09-24.md). Wins over this box's (or the resolved family's) bound file; a no-op on any other family's graph")
 	frames := fs.Int("frames", 0, "frame count (16fps; 81 ≈ 5s is the native ceiling)")
 	width := fs.Int("width", 0, "width px")
 	height := fs.Int("height", 0, "height px")
@@ -1689,7 +1695,7 @@ func parseGenerateVideo(args []string, errorHandling flag.ErrorHandling) (genera
 	return generateVideoCLI{
 		fs: fs,
 		video: videoFlags{
-			model: *model, still: still, negative: *negative, out: out,
+			model: *model, still: still, negative: *negative, out: out, transformer: *transformer,
 			frames: *frames, width: *width, height: *height, steps: *steps,
 			seed: *seed, reserveVRAM: *reserveVRAM, fast: *fast, hero: *hero, upscale: *upscale,
 		},
@@ -2996,6 +3002,15 @@ func doctorRun(cfg config.Config, routes []mediacap.Route, w io.Writer) error {
 	// changes doctor's exit code, because a working-but-slow iGPU render is not
 	// the same class of failure as a missing binding.
 	writeSdcppDeviceSection(w, cfg)
+	// Gap 1 (videogen_text_encoder etc. were not family-scoped): report, by name,
+	// what EACH video family actually resolves to on this box — an explicit
+	// videogen_families[name] entry when one is bound, else the box's flat
+	// videogen_* keys (which may intentionally belong to a DIFFERENT family, the
+	// back-compat fallback — see ResolveVideoFamilyBinding). Informational only,
+	// like the sdcpp device line above: an operator can now SEE, by name, exactly
+	// which files a `model` override would reach for each family on this box,
+	// instead of having to read the config and reason through the precedence.
+	writeVideoFamilyBindingsSection(w, mediacap.VideoFamilyBindingRows(cfg))
 	// The model files behind the ComfyUI routes (register F-31): a name the graph
 	// will ask ComfyUI to load must sit in the class directory the loader node
 	// opens; a missing or misplaced file used to surface only as a graph
@@ -3182,6 +3197,35 @@ func writeSdcppDeviceSection(w io.Writer, cfg config.Config) {
 			how = "from GGML_VK_VISIBLE_DEVICES"
 		}
 		fmt.Fprintf(w, "sdcpp device: OK    Vulkan%s %s (%s)\n", d.Index, d.Name, how)
+	}
+}
+
+// writeVideoFamilyBindingsSection prints the RESOLVED per-family video bindings
+// (gap: videogen_text_encoder and its siblings used to be a single machine-wide
+// value applied to whichever family actually rendered — an explicit per-request
+// `model` override could silently inherit the box's OTHER family's transformer/
+// text-encoder/VAEs; bigger-models-2026-09-24.md "Interim Phase 2 round 2").
+// Sorted key order for a stable diff between doctor runs. Purely informational —
+// it never changes doctor's exit code, matching the sdcpp device line above.
+func writeVideoFamilyBindingsSection(w io.Writer, rows []mediacap.VideoFamilyBindingRow) {
+	if len(rows) == 0 {
+		return
+	}
+	fmt.Fprintln(w, "video family bindings (what THIS machine resolves for each family, independent of which one a request actually selects):")
+	for _, r := range rows {
+		tag := ""
+		if r.Default {
+			tag = " (this box's default)"
+		}
+		fmt.Fprintf(w, "  %s%s:\n", r.Family, tag)
+		keys := make([]string, 0, len(r.Files))
+		for k := range r.Files {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			fmt.Fprintf(w, "    %-55s %s\n", k+":", r.Files[k])
+		}
 	}
 }
 

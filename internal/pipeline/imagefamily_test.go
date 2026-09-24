@@ -381,6 +381,11 @@ func TestLaunchProfileReachesEveryComfyRouteAndThePinOnlyTheSingleCardOnes(t *te
 	pinned := map[string]bool{
 		"generate_image (comfy)": true, "edit_image_generative": true, "inpaint_image": true, "upscale_image": true,
 		"image batch": true, "animate_character": true, "generate_audio (music)": true,
+		// Same route shape as "generate_image (comfy)" — a single-card image
+		// generation route (gap 4: comfy-render.mjs, reachable directly via
+		// imagegen_script for e.g. the qwen-image-2512 family) — expects the
+		// same device pin.
+		"generate_image (comfy-render direct)": true,
 		// generate_video is un-pooled by default (config.Default() leaves
 		// videogen_pool_vvram_gb at 0), so it takes the single-card pin like image
 		// generation does when un-pooled — see comfyLaunch's doc comment (2026-09-24
@@ -389,7 +394,7 @@ func TestLaunchProfileReachesEveryComfyRouteAndThePinOnlyTheSingleCardOnes(t *te
 		// A pooled video seat still must NOT be pinned (MultiGPU #220: the pool
 		// computes on ComfyUI's default device, which a --cuda-device pin would hide).
 		"generate_video (pooled)": false,
-		"generate_image (sdcpp)": false, "run_graph": false, "generate_audio (voice)": false,
+		"generate_image (sdcpp)":  false, "run_graph": false, "generate_audio (voice)": false,
 	}
 	comfyRoute := map[string]bool{"generate_image (sdcpp)": false, "generate_audio (voice)": false}
 	for _, tc := range gpuLeaseCases() {

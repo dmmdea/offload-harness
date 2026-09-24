@@ -19,13 +19,15 @@
 // render against such exclusions. (Nothing here assumes you want them; the default
 // negative is empty.)
 //
-// Requires: Node 18+ (built-in fetch) and a running ComfyUI (default :8188). No npm deps.
+// Requires: Node 18+ (built-in fetch). Self-manages ComfyUI: launches it on demand,
+// reuses an already-fit running instance, takes the shared single-slot GPU lease, tears
+// down after — the same lifecycle as render/comfy-video.mjs / comfy-edit.mjs. No npm deps.
 //
 // Usage:
 //   node comfy-render.mjs <out.png> "<prompt>" [seed] [width] [height] \
 //        [--negative "..."] [--ckpt name.safetensors] [--vae name.safetensors] \
 //        [--steps 30] [--cfg 7] [--sampler dpmpp_2m] [--scheduler karras] \
-//        [--api http://127.0.0.1:8188]
+//        [--api http://127.0.0.1:8188] [--no-lock] [--keep-comfy] [--reserve-vram F]
 //   node comfy-render.mjs <out.png> --graph my-workflow.json [--api ...]
 //   node comfy-render.mjs <out.png> "<prompt>" --family qwen-image --ckpt qwen-image-2512-Q5_1.gguf \
 //        [--preset full|lightning4] [--clip te.safetensors] [--lora l.safetensors] [--shift 3.1]
@@ -37,9 +39,17 @@
 // ComfyUI work: it used to fall through to the SDXL graph silently, so a typo'd
 // binding rendered the wrong model family (or died in ComfyUI validation after the
 // GPU lease and a cold start had been paid for).
+//
+// --no-lifecycle: this run is a CHILD of a caller that already owns the GPU slot +
+// ComfyUI lifecycle — comfy-generate.mjs's runRenderArgs passes it when spawning this
+// file, so a --batch session's warm ComfyUI (checkpoint loads once for N renders) is
+// never torn down between jobs. Standalone callers (a direct `node comfy-render.mjs
+// ...`, or imagegen_script bound straight at this file) omit it and get the full
+// self-managed lifecycle.
 
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
+import { withGpuSlot } from "./gpu-lock.mjs";
 import { buildHiDreamO1 } from "./wf-hidream-o1.mjs";
 import { buildKrea2 } from "./wf-krea2.mjs";
 import { buildQwenImage, QWEN_IMAGE_PRESETS } from "./wf-qwen-image.mjs";
@@ -48,6 +58,20 @@ import { resolveCli, submitGraph, pollOutputs, fetchView, finalizeRun } from "./
 
 /** A caller mistake: main() prints the message and exits 2 (never 1, never a render). */
 export class UsageError extends Error {}
+
+// BOOL_FLAGS take no value (same trap comfy-video.mjs's own BOOL_FLAGS list documents:
+// without this, the parser below takes the NEXT token as the flag's value, so a
+// mid-argv `--no-lock --family qwen-image` would read family as "--family"'s STRING
+// and swallow "qwen-image" as a stray positional).
+//   --no-lock / --keep-comfy: forwarded to withGpuSlot exactly like the other runners.
+//   --no-lifecycle: this run is a CHILD of a caller that already owns the GPU slot +
+//     ComfyUI lifecycle (comfy-generate.mjs's runRenderArgs, spawning this file after
+//     its OWN withGpuSlot already booted ComfyUI) — skip withGpuSlot entirely and keep
+//     today's exact behavior (wait for the already-running server, render, done). This
+//     is what keeps a --batch session's "checkpoint loads once for N renders" intact:
+//     without it, THIS file's own teardown would free/unload the model after every
+//     single job in the batch, defeating the whole point of the warm session.
+export const BOOL_FLAGS = Object.freeze(["no-lock", "keep-comfy", "no-lifecycle"]);
 
 /**
  * Every --family this runner builds a graph for. "sdxl" (and an absent flag) is the
@@ -68,7 +92,11 @@ export function parseRenderArgs(argv) {
   const pos = [];
   const flags = {};
   for (let i = 0; i < argv.length; i++) {
-    if (argv[i].startsWith("--")) { flags[argv[i].slice(2)] = argv[i + 1]; i++; }
+    if (argv[i].startsWith("--")) {
+      const k = argv[i].slice(2);
+      if (BOOL_FLAGS.includes(k)) flags[k] = true;
+      else { flags[k] = argv[i + 1]; i++; }
+    }
     else pos.push(argv[i]);
   }
   return { pos, flags };
@@ -306,32 +334,15 @@ const firstImage = (outputs) => {
   return null;
 };
 
-async function main() {
-  const { pos, flags } = parseRenderArgs(process.argv.slice(2));
-  const out = pos[0];
-  const API = flags.api || process.env.COMFY_API || "http://127.0.0.1:8188";
-  if (!out) { console.error('usage: node comfy-render.mjs <out.png> "<prompt>" [seed] [w] [h] [flags]   |   <out.png> --graph wf.json'); process.exit(2); }
-  // Create the output parent UP-FRONT: a bad path must fail in 0s, not after the
-  // render — an ENOENT at the write site used to discard a finished image after
-  // every second of GPU work had succeeded (it cost a full A/B arm, 2026-08-10).
-  mkdirSync(dirname(out) || ".", { recursive: true });
-
-  // Build the graph: either the caller's full workflow, or a family / SDXL graph.
-  let built;
-  try {
-    built = buildRenderGraph({ pos, flags });
-  } catch (e) {
-    if (e instanceof UsageError) { console.error(e.message); process.exit(2); }
-    throw e;
-  }
+// generate: submission + polling + retrieval, once ComfyUI is confirmed up (either
+// by this run's own withGpuSlot/ensureComfy, or — --no-lifecycle — by whatever
+// spawned this process). Lives in comfy-submit.mjs (shared by every runner):
+// submission prefers the vendored comfyui-pp-cli (idempotent lease, typed outcomes,
+// node_errors verbatim, run-row provenance) with raw POST as the byte-identical
+// fallback; polling keeps the dead-server watchdog + suspend/resume fence documented
+// there (2026-07-30 incident class).
+async function generate(out, API, built, flags) {
   const { graph, seed, width, height } = built;
-
-  await waitServer(API);
-  // Submission + polling + retrieval live in comfy-submit.mjs (shared by every runner):
-  // submission prefers the vendored comfyui-pp-cli (idempotent lease, typed outcomes,
-  // node_errors verbatim, run-row provenance) with raw POST as the byte-identical
-  // fallback; polling keeps the dead-server watchdog + suspend/resume fence documented
-  // there (2026-07-30 incident class).
   const cli = resolveCli();
   const { promptId } = await submitGraph({ api: API, graph, clientId: "render-" + seed, cli });
   console.log("queued", promptId, flags.graph ? `(graph: ${flags.graph})` : `seed ${seed} ${width}x${height}`);
@@ -356,9 +367,51 @@ async function main() {
   await finalizeRun({ api: API, promptId, cli });
 }
 
-// Run only as a script (comfy-generate.mjs spawns this file), never on import — the
-// test imports buildRenderGraph. endsWith, not a URL comparison: the harness may reach
-// render/ through a junction, and Node reports the main module by its real path.
+async function main() {
+  const { pos, flags } = parseRenderArgs(process.argv.slice(2));
+  const out = pos[0];
+  const API = flags.api || process.env.COMFY_API || "http://127.0.0.1:8188";
+  if (!out) { console.error('usage: node comfy-render.mjs <out.png> "<prompt>" [seed] [w] [h] [flags]   |   <out.png> --graph wf.json'); process.exit(2); }
+  // Create the output parent UP-FRONT: a bad path must fail in 0s, not after the
+  // render — an ENOENT at the write site used to discard a finished image after
+  // every second of GPU work had succeeded (it cost a full A/B arm, 2026-08-10).
+  mkdirSync(dirname(out) || ".", { recursive: true });
+
+  // Build the graph: either the caller's full workflow, or a family / SDXL graph.
+  let built;
+  try {
+    built = buildRenderGraph({ pos, flags });
+  } catch (e) {
+    if (e instanceof UsageError) { console.error(e.message); process.exit(2); }
+    throw e;
+  }
+
+  if (flags["no-lifecycle"]) {
+    // A CHILD of a caller that already owns the GPU slot + ComfyUI lifecycle
+    // (comfy-generate.mjs) — today's exact behavior, unchanged: wait for the
+    // already-running server, render, done. No withGpuSlot here, so a batch
+    // session's warm ComfyUI is never torn down between jobs.
+    await waitServer(API);
+    await generate(out, API, built, flags);
+    return;
+  }
+  // Standalone invocation (gap: this runner used to REQUIRE an already-running
+  // ComfyUI no matter what — the qwen-image-2512 A/B in bigger-models-2026-09-24.md
+  // "Interim Phase 2 round 2" item 3 failed twice through the normal path with
+  // "RENDER FAILED: ComfyUI not reachable" and had to manually boot ComfyUI first).
+  // Same self-managed lifecycle as comfy-video.mjs/comfy-edit.mjs: launch on demand,
+  // reuse an already-fit running instance (comfy-lifecycle's reuse guard), take the
+  // GPU slot, tear down after.
+  await withGpuSlot(
+    { noLock: flags["no-lock"], keepComfy: flags["keep-comfy"], comfyManaged: true, reserveVram: flags["reserve-vram"] },
+    () => generate(out, API, built, flags),
+  );
+}
+
+// Run only as a script — spawned by comfy-generate.mjs (--no-lifecycle) or standalone
+// (self-managed lifecycle, gap 4) — never on import: the test imports buildRenderGraph.
+// endsWith, not a URL comparison: the harness may reach render/ through a junction, and
+// Node reports the main module by its real path.
 if (process.argv[1] && /comfy-render\.mjs$/.test(process.argv[1])) {
   main().catch(e => { console.error("RENDER FAILED:", e.message); process.exit(1); });
 }

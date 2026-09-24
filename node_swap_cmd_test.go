@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/nodeswap"
 )
 
@@ -260,4 +261,147 @@ func contains(s, substr string) bool {
 		}
 		return false
 	})()
+}
+
+func TestLoopbackOrWildcardHost(t *testing.T) {
+	cases := []struct {
+		hostport string
+		want     bool
+	}{
+		{"127.0.0.1:18811", true},
+		{"localhost:18811", true},
+		{"LOCALHOST:18811", true},
+		{"0.0.0.0:18811", true},
+		{"[::]:18811", true},
+		{"[::1]:18811", true},
+		{"", true},
+		// A genuine tailnet bind (the deploy-d5207011 incident's shape — a
+		// fleet node bound to its tailnet address, not loopback) must NOT be
+		// classified as loopback/wildcard. 192.0.2.0/24 (RFC 5737 TEST-NET-1) is
+		// this repo's own established placeholder for "a real example address"
+		// (already used above and in setup/windows-node-swap-launch.ps1).
+		{"192.0.2.10:18811", false},
+		{"fleet-node-b.tailnnnnnn.ts.net:18811", false},
+		{"192.168.1.50:18811", false},
+	}
+	for _, c := range cases {
+		if got := loopbackOrWildcardHost(c.hostport); got != c.want {
+			t.Errorf("loopbackOrWildcardHost(%q) = %v, want %v", c.hostport, got, c.want)
+		}
+	}
+}
+
+// TestResolveNodeSwapDefaults_AutoFillsFromConfig: gap 6a (d5207011 deploy
+// record — an ad-hoc deploy script hardcoded 127.0.0.1 while fleet-serve
+// bound only its tailnet address, and an unguarded fallback read every
+// failed poll as "not idle" for ~46 minutes). --health-url is now
+// auto-resolved from THIS node's own config fleet_listen, never guessed.
+func TestResolveNodeSwapDefaults_AutoFillsFromConfig(t *testing.T) {
+	var logged []string
+	log := func(s string) { logged = append(logged, s) }
+
+	plan := resolveNodeSwapDefaults(nodeswap.Plan{}, config.Config{
+		FleetListen: "192.0.2.10:18811", GPULockPath: "/lease/lock", StateDir: "/lease/state",
+	}, log)
+	if plan.HealthURL != "http://192.0.2.10:18811/fleet/health" {
+		t.Errorf("HealthURL = %q, want the tailnet address, never loopback", plan.HealthURL)
+	}
+	if plan.GPULockPath != "/lease/lock" || plan.GPUStateDir != "/lease/state" {
+		t.Errorf("GPU lease paths not carried from config: %+v", plan)
+	}
+	if len(logged) == 0 {
+		t.Error("expected the auto-resolve to log what it did")
+	}
+}
+
+func TestResolveNodeSwapDefaults_ExplicitHealthURLAlwaysWins(t *testing.T) {
+	plan := resolveNodeSwapDefaults(nodeswap.Plan{HealthURL: "http://explicit/fleet/health"}, config.Config{
+		FleetListen: "192.0.2.10:18811",
+	}, nil)
+	if plan.HealthURL != "http://explicit/fleet/health" {
+		t.Errorf("HealthURL = %q, an explicit flag must never be overridden", plan.HealthURL)
+	}
+}
+
+func TestResolveNodeSwapDefaults_LoopbackConfigNeverAutoResolves(t *testing.T) {
+	// A config that never told this tool its real bind address (still the
+	// built-in default, or genuinely loopback) must leave HealthURL empty —
+	// never fabricate a URL that will silently fail every poll, which is
+	// the exact failure class this fix exists to prevent.
+	for _, fl := range []string{"", "127.0.0.1:18811", "0.0.0.0:18811", "localhost:18811"} {
+		plan := resolveNodeSwapDefaults(nodeswap.Plan{}, config.Config{FleetListen: fl}, nil)
+		if plan.HealthURL != "" {
+			t.Errorf("fleet_listen=%q auto-resolved to %q, want left empty (standalone/no-op, not a guess)", fl, plan.HealthURL)
+		}
+	}
+}
+
+func TestScanConfigFlag(t *testing.T) {
+	cases := []struct {
+		args []string
+		want string
+	}{
+		{[]string{"--staged", "s", "--config", "c.json"}, "c.json"},
+		{[]string{"--config=c.json", "--staged", "s"}, "c.json"},
+		{[]string{"-config", "c.json"}, "c.json"},
+		{[]string{"-config=c.json"}, "c.json"},
+		{[]string{"--staged", "s"}, ""},
+		{[]string{"--config"}, ""}, // dangling flag, no value: tolerant, no panic
+	}
+	for _, c := range cases {
+		if got := scanConfigFlag(c.args); got != c.want {
+			t.Errorf("scanConfigFlag(%v) = %q, want %q", c.args, got, c.want)
+		}
+	}
+}
+
+// TestRunNodeSwap_ConfigAutoResolveIsHermeticWithAnExplicitConfigFlag: the
+// new config.LoadWithSource call inside runNodeSwap must never reach outside
+// an EXPLICIT --config path (this repo's own test machine has a real
+// ~/.local-offload/config.json AND a real machine-wide GPU lease directory —
+// if runNodeSwap ever fell back to either one here, this test would become
+// non-hermetic, and possibly flaky/slow, on exactly that machine). The
+// --config here points at a file this test writes itself, pinning both
+// fleet_listen (loopback — --health-url must stay unset) and the GPU-lease
+// paths to a throwaway temp dir (guaranteed unheld, so the standalone
+// GPU-lease wait this same PR adds resolves on its very first poll).
+func TestRunNodeSwap_ConfigAutoResolveIsHermeticWithAnExplicitConfigFlag(t *testing.T) {
+	dir := t.TempDir()
+	staged := filepath.Join(dir, "staged.exe")
+	target := filepath.Join(dir, "target.exe")
+	if err := os.WriteFile(staged, []byte("new"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	leaseDir := filepath.Join(dir, "lease-state")
+	if err := os.MkdirAll(leaseDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := filepath.Join(dir, "config.json")
+	cfgJSON := `{"fleet_listen": "127.0.0.1:18811", "state_dir": ` + `"` + filepath.ToSlash(leaseDir) + `"}`
+	if err := os.WriteFile(cfgPath, []byte(cfgJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	resultPath := filepath.Join(dir, "result.json")
+	err := runNodeSwap([]string{
+		"--staged", staged, "--target", target, "--sha256", "h", "--skip-hash-check",
+		"--config", cfgPath, // explicit, sandboxed -> never the real machine's config or lease dir
+		"--result", resultPath,
+	})
+	if err != nil {
+		t.Fatalf("standalone swap should succeed: %v", err)
+	}
+	b, rerr := os.ReadFile(resultPath)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	if !contains(string(b), `"ok": true`) {
+		t.Errorf("result.json = %s, want ok:true", b)
+	}
+	got, gerr := os.ReadFile(target)
+	if gerr != nil || string(got) != "new" {
+		t.Errorf("target.exe = %q (err %v), want the staged content swapped in", got, gerr)
+	}
 }

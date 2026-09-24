@@ -912,12 +912,46 @@ type Config struct {
 	// is a config finding. Not the LTX-2.5 pool (videogen_pool_vvram_gb): that one is
 	// VRAM borrowed from a donor CARD, this one is RAM.
 	VideoGenWanVirtualVramGB float64 `json:"videogen_wan_virtual_vram_gb,omitempty"`
+	// VideoGenWanLoader picks the Wan 2.2 expert loader (render/wf-wan22-i2v.mjs):
+	// "" or "auto" = decide per expert file by extension, exactly as before this
+	// key existed (.gguf -> the DisTorch2/MultiGPU wrapper, .safetensors -> the
+	// plain native UNETLoader — no virtual_vram, ComfyUI's own dynamic-VRAM
+	// streaming does the offload instead); "native" forces the plain loader
+	// (refused if either expert is a .gguf — DynamicVRAM cannot stream GGUF, see
+	// videogen_family's doc); "gguf-distorch" forces the DisTorch2/MultiGPU
+	// wrapper on BOTH experts regardless of extension (the historical behavior,
+	// still needed on a card too small for the native/streaming path or while
+	// ComfyUI-MultiGPU still serves a mixed-precision box). A config that never
+	// sets this key renders byte-identical to before the key existed.
+	VideoGenWanLoader string `json:"videogen_wan_loader,omitempty"`
 	// VideoGenFamily selects the I2V graph family the video route renders with:
 	// "" or "wan22" = the Wan 2.2 two-expert graph (legacy default, unchanged);
 	// "ltx25" = the LTX-2.5 22B distilled joint-audio two-pass graph (the measured
 	// 2026-08-12 video-seat verdict, bound by Seat Frontier Leg 3). Mirrors the
 	// imagegen_family switch introduced for the krea2 image seat.
 	VideoGenFamily string `json:"videogen_family,omitempty"`
+	// VideoGenFamilies binds PER-FAMILY weight/behavior overrides, keyed by the
+	// same family spelling as videogen_family (ltx25 | wan22 | hunyuan | h3) —
+	// see VideoFamilyBinding. It exists because every videogen_* weight key below
+	// (transformer, text encoder, VAEs, unet high/low, frames/fps/width/height)
+	// used to be a SINGLE machine-wide value applied to whichever family actually
+	// rendered — so a request's explicit `model` override (offload_generate_video's
+	// documented per-request family switch) silently handed a DIFFERENT family's
+	// text encoder/transformer to the graph it built (bigger-models-2026-09-24.md,
+	// "Interim Phase 2 round 2": a bare Wan override on an ltx25-bound Qube would
+	// have received the LTX Gemma text encoder). videogen_families[name] is
+	// consulted ONLY when the resolved render family differs from this box's own
+	// videogen_family; the box's default family keeps reading the flat keys above
+	// exactly as before. A family with no entry here — including the box's own
+	// default, and any OTHER family nobody has scoped yet — falls back to those
+	// same flat keys unchanged: deliberate back-compat, since a box's flat keys
+	// may intentionally carry a DIFFERENT family's weights as a fallback (e.g.
+	// Wan GGUF files bound here on an ltx25-seated box so a bare `model:"wan"`
+	// override still renders with them). A config that has never set
+	// videogen_families is therefore byte-for-byte unaffected; an operator closes
+	// one family's cross-family leak by adding only that family's entry here —
+	// see (Config).ResolveVideoFamilyBinding.
+	VideoGenFamilies map[string]VideoFamilyBinding `json:"videogen_families,omitempty"`
 	// LTX-2.5 per-machine weight bindings (filenames under the ComfyUI model dirs;
 	// empty = the render script's family defaults). Transformer = the int8 convrot
 	// DiT; the conv VIDEO VAE pairs with it; the AUDIO VAE and ×2 latent spatial

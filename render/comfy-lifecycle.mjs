@@ -424,9 +424,35 @@ export async function ensureComfy(opts = {}) {
   if (child && typeof child.pid === "number") {
     try { writeLaunch(comfyDir, { pid: child.pid, ownerPid: process.pid, args: ["main.py", ...flags], profile }); } catch {}
   }
+  // Fail-fast dead-child watchdog (OptiPlex stall, bigger-models-2026-09-24.md
+  // "Phase 2 round 2" item 4): the poll loop below only ever asked "is the HTTP
+  // port open yet?" — a child that never actually started (ENOENT from a bad cwd
+  // or a python that does not exist at `py`, which node_child_process reports
+  // asynchronously via 'error', not by throwing spawn() itself) or one that
+  // crashed on the way up looked IDENTICAL to a slow cold boot: no process tree,
+  // 0% GPU, port never open, GPU lease held the whole time — and the loop kept
+  // silently polling for the FULL maxPolls budget (~10min default) before
+  // failing at all. Listening for the child's own 'error'/early 'exit' turns
+  // that into a failure within one poll interval, with the reason named instead
+  // of a bare timeout — a boot that makes no progress now fails loudly, fast,
+  // rather than reading like an unusually slow one until the budget runs out.
+  let earlyExit = null;
+  try {
+    child?.once?.("error", (err) => { if (!earlyExit) earlyExit = { detail: `spawn error: ${err && err.message ? err.message : err}` }; });
+    child?.once?.("exit", (code, signal) => {
+      if (!earlyExit) earlyExit = { detail: `exited before answering on ${api} (code ${code}, signal ${signal || "none"})` };
+    });
+  } catch {}
   for (let i = 0; i < maxPolls; i++) {
     await new Promise((r) => setTimeout(r, pollMs));
     if (await up(api)) return child;
+    if (earlyExit) {
+      const tail = tailComfyLog(comfyDir);
+      const seeLog = tail
+        ? `\nlast ComfyUI console output (${comfyLogPath(comfyDir)}):\n${tail}`
+        : `\n(no ComfyUI console output captured — see ${comfyLogPath(comfyDir)})`;
+      throw new Error(`COMFY-BOOT-FAILED: ${py} main.py in ${comfyDir} ${earlyExit.detail}${seeLog}`);
+    }
   }
   try { child.kill(); } catch {}
   throw new Error("ComfyUI did not become ready on " + api + " after ~" + Math.round(maxPolls * pollMs / 60000) + "min (COMFY_START_WAIT_SEC to extend)");

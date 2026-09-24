@@ -78,6 +78,22 @@ func gpuLeaseCases() []gpuLeaseCase {
 			invoke: genReq(core.TaskGenerateImage, nil),
 		},
 		{
+			// comfy-render.mjs now self-manages its own GPU slot too (gap 4:
+			// it used to require an already-running ComfyUI with no lifecycle
+			// of its own at all). It is reachable the SAME way comfy-generate.mjs
+			// is — imagegen_script bound directly at it, the qwen-image-2512
+			// family's own binding pattern (bigger-models-2026-09-24.md
+			// "Interim Phase 2 round 2" item 3) — so it needs its own case here
+			// even though the setup/invoke shape is identical to the one above;
+			// the completeness guard below keys on the runner FILENAME.
+			name:   "generate_image (comfy-render direct)",
+			runner: "comfy-render.mjs",
+			setup: func(_ *testing.T, cfg *config.Config, stub, _ string) {
+				cfg.ImageGenScript = stub
+			},
+			invoke: genReq(core.TaskGenerateImage, nil),
+		},
+		{
 			name:   "generate_image (sdcpp)",
 			runner: "sdcpp-generate.mjs",
 			setup: func(_ *testing.T, cfg *config.Config, stub, _ string) {
@@ -204,7 +220,7 @@ func gpuLeaseCases() []gpuLeaseCase {
 			invoke: func(t *testing.T, p *Pipeline, dir string) {
 				t.Helper()
 				p.Run(context.Background(), core.Request{Task: core.TaskAnimateCharacter,
-					Input: "a toy astronaut in a studio",
+					Input:  "a toy astronaut in a studio",
 					Params: map[string]any{"ref": filepath.Join(dir, "ref.png"), "driver": filepath.Join(dir, "drive.mp4")}})
 			},
 		},

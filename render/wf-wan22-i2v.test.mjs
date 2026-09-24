@@ -87,22 +87,38 @@ test("weight binding: custom unet/text-encoder names plumb through (quality-firs
   assert.equal(clip.inputs.clip_name, "umt5_xxl_fp16.safetensors");
 });
 
-test("weight binding: .safetensors unets use the safetensors DisTorch2 loader (same offload)", () => {
+test("weight binding: .safetensors unets go native by default (auto); loader:gguf-distorch keeps the old wrapped path", () => {
+  // auto (default, gap: bigger-models-2026-09-24.md "Interim Phase 2 round 2" item
+  // 1 — the builder used to wrap EVERY unet, including safetensors, in the
+  // DisTorch2/MultiGPU node; auto now goes native for safetensors instead, same as
+  // the Qwen builders' own .gguf-vs-.safetensors branch).
   const g = buildWan22I2V({
     imagePath: "s.png", prompt: "p",
     highUnet: "wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors",
     lowUnet: "wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors",
-    virtualVramGb: 9.5,
+    virtualVramGb: 9.5, // ignored by the native loader — no virtual_vram input on it
   });
   assert.equal(Object.values(g).filter((n) => n.class_type === "UnetLoaderGGUFDisTorch2MultiGPU").length, 0, "no GGUF loader for safetensors weights");
-  const loaders = Object.values(g).filter((n) => n.class_type === "UNETLoaderDisTorch2MultiGPU");
-  assert.equal(loaders.length, 2, "safetensors DisTorch2 loader per expert");
-  assert.ok(loaders.every((l) => l.inputs.virtual_vram_gb === 9.5 && l.inputs.donor_device === "cpu"), "offload params preserved");
-  assert.ok(loaders.every((l) => l.inputs.weight_dtype === "default"), "no dtype down-cast — quality-first");
-  // mixed case still splits correctly per expert
+  assert.equal(Object.values(g).filter((n) => n.class_type === "UNETLoaderDisTorch2MultiGPU").length, 0, "auto no longer wraps safetensors in DisTorch2/MultiGPU");
+  const native = Object.values(g).filter((n) => n.class_type === "UNETLoader");
+  assert.equal(native.length, 2, "plain native loader per safetensors expert");
+  assert.ok(native.every((l) => l.inputs.weight_dtype === "default"), "no dtype down-cast — quality-first");
+  // mixed case (auto) still splits correctly per expert: gguf keeps the wrapper, safetensors goes native
   const mixed = buildWan22I2V({ imagePath: "s.png", prompt: "p", highUnet: "high.safetensors", lowUnet: "low.gguf" });
-  assert.equal(Object.values(mixed).filter((n) => n.class_type === "UNETLoaderDisTorch2MultiGPU").length, 1);
+  assert.equal(Object.values(mixed).filter((n) => n.class_type === "UNETLoader").length, 1);
   assert.equal(Object.values(mixed).filter((n) => n.class_type === "UnetLoaderGGUFDisTorch2MultiGPU").length, 1);
+  // explicit loader:gguf-distorch is the back-compat escape hatch: same safetensors
+  // files, forced onto the historical DisTorch2/MultiGPU wrapper, offload params intact.
+  const wrapped = buildWan22I2V({
+    imagePath: "s.png", prompt: "p", loader: "gguf-distorch",
+    highUnet: "wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors",
+    lowUnet: "wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors",
+    virtualVramGb: 9.5,
+  });
+  const wrappedLoaders = Object.values(wrapped).filter((n) => n.class_type === "UNETLoaderDisTorch2MultiGPU");
+  assert.equal(wrappedLoaders.length, 2, "gguf-distorch forces the safetensors DisTorch2 loader per expert");
+  assert.ok(wrappedLoaders.every((l) => l.inputs.virtual_vram_gb === 9.5 && l.inputs.donor_device === "cpu"), "offload params preserved");
+  assert.ok(wrappedLoaders.every((l) => l.inputs.weight_dtype === "default"), "no dtype down-cast — quality-first");
 });
 
 test("upscale: model-based upscale + resize chained after decode; combine reads the last stage", () => {
@@ -135,4 +151,68 @@ test("COMFY_COMPUTE_DEVICE overrides the DisTorch2 compute device (J4 seam); uns
   assert.equal(g["9"].inputs.compute_device, "xpu:0");
   const g2 = buildWan22I2V({ imagePath: "in.png", prompt: "p" });
   assert.equal(g2["7"].inputs.compute_device, "cuda:0");
+});
+
+test("loader:auto (default) — safetensors experts go native (plain UNETLoader, no DisTorch2/MultiGPU)", () => {
+  const g = buildWan22I2V({
+    imagePath: "s.png", prompt: "p",
+    highUnet: "wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors",
+    lowUnet: "wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors",
+  });
+  const loaders = Object.values(g).filter((n) => n.class_type === "UNETLoader");
+  assert.equal(loaders.length, 2, "both safetensors experts load through the plain native loader");
+  assert.ok(loaders.every((l) => l.inputs.weight_dtype === "default"));
+  assert.equal(Object.values(g).filter((n) => /DisTorch2/.test(n.class_type)).length, 0, "no DisTorch2/MultiGPU node at all — native, no virtual_vram");
+  // GGUF experts still keep the historical wrapper under auto (unchanged default behavior)
+  const gguf = buildWan22I2V({ imagePath: "s.png", prompt: "p" }); // default filenames are .gguf
+  assert.equal(Object.values(gguf).filter((n) => n.class_type === "UnetLoaderGGUFDisTorch2MultiGPU").length, 2);
+});
+
+test("loader:native forces the plain loader even for a mixed-extension pair, and refuses a .gguf expert", () => {
+  const g = buildWan22I2V({
+    imagePath: "s.png", prompt: "p", loader: "native",
+    highUnet: "wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors",
+    lowUnet: "wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors",
+  });
+  assert.equal(Object.values(g).filter((n) => n.class_type === "UNETLoader").length, 2);
+  assert.throws(
+    () => buildWan22I2V({ imagePath: "s.png", prompt: "p", loader: "native", highUnet: "wan2.2_i2v_high_noise_14B_Q4_K_S.gguf" }),
+    /loader:"native" cannot load a GGUF expert/,
+  );
+});
+
+test("loader:gguf-distorch forces the DisTorch2/MultiGPU wrapper even on safetensors experts (historical path, still available)", () => {
+  const g = buildWan22I2V({
+    imagePath: "s.png", prompt: "p", loader: "gguf-distorch",
+    highUnet: "wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors",
+    lowUnet: "wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors",
+    virtualVramGb: 9.5,
+  });
+  const loaders = Object.values(g).filter((n) => n.class_type === "UNETLoaderDisTorch2MultiGPU");
+  assert.equal(loaders.length, 2, "forced wrapper on both safetensors experts");
+  assert.ok(loaders.every((l) => l.inputs.virtual_vram_gb === 9.5));
+});
+
+test("loader: an unrecognized value is refused rather than silently defaulting", () => {
+  assert.throws(
+    () => buildWan22I2V({ imagePath: "s.png", prompt: "p", loader: "bogus" }),
+    /loader must be auto\|native\|gguf-distorch/,
+  );
+});
+
+test("loader:native works with --fast (lightx2v LoRA still applies) and with post-decode upscale", () => {
+  const gFast = buildWan22I2V({
+    imagePath: "s.png", prompt: "p", loader: "native", fast: true,
+    highUnet: "high.safetensors", lowUnet: "low.safetensors",
+  });
+  const loras = Object.values(gFast).filter((n) => n.class_type === "LoraLoaderModelOnly");
+  assert.equal(loras.length, 2, "LoRA loaders still attach on top of the native raw UNETs");
+  assert.deepEqual(gFast["15"].inputs.model, ["7", 0]);
+  assert.deepEqual(gFast["16"].inputs.model, ["9", 0]);
+  const gUpscale = buildWan22I2V({
+    imagePath: "s.png", prompt: "p", loader: "native",
+    highUnet: "high.safetensors", lowUnet: "low.safetensors",
+    upscaleModel: "4x-UltraSharp.pth", upscaleWidth: 1920, upscaleHeight: 1080,
+  });
+  assert.ok(Object.values(gUpscale).find((n) => n.class_type === "UpscaleModelLoader"), "upscale chain still builds under the native loader");
 });

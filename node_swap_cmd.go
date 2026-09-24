@@ -24,10 +24,12 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"net"
 	"os"
 	"strings"
 	"time"
 
+	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/nodeswap"
 )
 
@@ -102,6 +104,86 @@ func parseNodeSwapFlags(args []string) (nodeswap.Plan, nodeSwapOutput, error) {
 	return plan, out, nil
 }
 
+// loopbackOrWildcardHost reports a host that cannot be dialed FROM ANOTHER
+// MACHINE (loopback, or an unspecified/wildcard bind like 0.0.0.0/[::]) — the
+// exact host class that made the Lenovo's own ad-hoc deploy script silently
+// fail every health poll (it hardcoded 127.0.0.1 while fleet-serve bound only
+// the tailnet address; d5207011 deploy record). A resolvable, specific host
+// (a tailnet IP, a hostname) is never in this set — resolveNodeSwapDefaults
+// only auto-fills --health-url when the config's OWN listen address already
+// clears this bar.
+func loopbackOrWildcardHost(hostport string) bool {
+	host, _, err := net.SplitHostPort(hostport)
+	if err != nil {
+		host = hostport // no port present — judge the bare host
+	}
+	host = strings.Trim(host, "[]")
+	if host == "" || host == "0.0.0.0" || host == "::" || strings.EqualFold(host, "localhost") {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback() || ip.IsUnspecified()
+	}
+	return false
+}
+
+// resolveNodeSwapDefaults fills in what an operator previously had to compute
+// and pass by hand, from THIS node's own config — never from a guess, and
+// never overriding an explicit flag:
+//
+//   - HealthURL: when empty, built from cfg.FleetListen (the SAME address
+//     fleet-serve itself binds absent a CLI override) — but ONLY when that
+//     address already clears loopbackOrWildcardHost, so a node whose config
+//     still carries the built-in loopback default (i.e. never told this tool
+//     its real bind address) gets no health URL, not a wrong one that reads
+//     as a false "not idle" forever (the Lenovo incident, d5207011 deploy
+//     record: ~46 minutes lost to exactly that silent-failure shape).
+//   - GPULockPath / GPUStateDir: always carried from cfg.GPULockPath /
+//     cfg.StateDir (harmless when HealthURL ends up set — nodeswap only
+//     consults them for a standalone, HealthURL=="" node).
+//
+// A caller-supplied --health-url always wins outright; this never touches a
+// value the operator already set. Pure (no I/O) so it is unit-testable with
+// an in-memory config.Config, independent of parseNodeSwapFlags/scanConfigFlag.
+func resolveNodeSwapDefaults(plan nodeswap.Plan, cfg config.Config, log func(string)) nodeswap.Plan {
+	if log == nil {
+		log = func(string) {}
+	}
+	if plan.HealthURL == "" {
+		if fl := strings.TrimSpace(cfg.FleetListen); fl != "" && !loopbackOrWildcardHost(fl) {
+			plan.HealthURL = "http://" + fl + "/fleet/health"
+			log(fmt.Sprintf("resolved --health-url from this node's config fleet_listen: %s", plan.HealthURL))
+		} else if fl != "" {
+			log(fmt.Sprintf("config fleet_listen=%q is loopback/wildcard — not auto-resolving --health-url (pass it explicitly if this node runs fleet-serve on a tailnet address)", fl))
+		}
+	}
+	plan.GPULockPath = cfg.GPULockPath
+	plan.GPUStateDir = cfg.StateDir
+	return plan
+}
+
+// scanConfigFlag is scanEarlyOutputFlags' pattern applied to --config: a
+// tolerant, best-effort pre-scan (space or = form) done OUTSIDE
+// parseNodeSwapFlags on purpose — parseNodeSwapFlags stays pure/I-O-free (its
+// own unit tests rely on that), while runNodeSwap's config auto-resolve is
+// real I/O that only the CLI entry point performs, exactly like the existing
+// --result/--log pre-scan above it.
+func scanConfigFlag(args []string) string {
+	for i, a := range args {
+		switch {
+		case strings.HasPrefix(a, "--config="):
+			return strings.TrimPrefix(a, "--config=")
+		case strings.HasPrefix(a, "-config="):
+			return strings.TrimPrefix(a, "-config=")
+		case a == "-config" || a == "--config":
+			if i+1 < len(args) {
+				return args[i+1]
+			}
+		}
+	}
+	return ""
+}
+
 func runNodeSwap(args []string) error {
 	// Find --result/--log BEFORE the real flag parse can fail (PR #476
 	// review): this command is normally launched DETACHED via
@@ -125,6 +207,19 @@ func runNodeSwap(args []string) error {
 	}
 	defer closeLog()
 	logger := nodeswap.NewLogger(logf)
+
+	// Auto-resolve --health-url / the GPU-lease paths from this node's OWN
+	// config, when the caller left them unset — never overriding an explicit
+	// flag. Same resolution precedence as every other command (flag > env >
+	// cwd > home; loadCfgWithSource in main.go). A config that fails to parse
+	// still returns usable defaults (config.LoadWithSource's own contract) —
+	// this is diagnostic-only, never fatal to the swap.
+	cfg, cfgSrc := config.LoadWithSource(scanConfigFlag(args))
+	if cfgSrc.LoadErr != nil {
+		logger.Printf("config auto-resolve: %s failed to load (%v) — --health-url and the GPU-lease paths stay exactly as passed", cfgSrc.Path, cfgSrc.LoadErr)
+	} else {
+		plan = resolveNodeSwapDefaults(plan, cfg, func(s string) { logger.Printf("%s", s) })
+	}
 
 	outcome := nodeswap.Run(context.Background(), plan, nodeswap.DefaultDeps(), logger)
 

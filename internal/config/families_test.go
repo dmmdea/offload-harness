@@ -456,3 +456,58 @@ func TestFamilyBindingWarnings(t *testing.T) {
 		t.Errorf("2.1 as the default binding must warn (ADR 0058), got %q", out)
 	}
 }
+
+// TestResolveVideoFamilyBindingFallsBackToFlatKeysUnlessExplicitlyOverridden
+// pins gap 1's back-compat contract (bigger-models-2026-09-24.md): a config
+// that never sets videogen_families must resolve EVERY family — including one
+// other than this box's own default — to the flat videogen_* keys, byte-for-
+// byte as before this feature existed. That is not a residual gap; it is the
+// pre-existing, documented pattern a live box already depends on (Wan GGUF
+// weights left bound on videogen_unet_high/low as the deliberate fallback for
+// an ltx25-seated box's `model:"wan"` override —
+// TestRunGenerateVideo_OverrideProvenanceEndToEnd, internal/pipeline). An
+// EXPLICIT videogen_families[name] entry is the opt-in that scopes ONE family
+// away from that fallback without changing anything else.
+func TestResolveVideoFamilyBindingFallsBackToFlatKeysUnlessExplicitlyOverridden(t *testing.T) {
+	c := Config{
+		VideoGenFamily:      "ltx25",
+		VideoGenUnetHigh:    "wan2.2_i2v_high_noise_14B_Q8_0.gguf",
+		VideoGenTextEncoder: "gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors",
+	}
+
+	// No videogen_families at all: every family, including "wan22" (NOT this
+	// box's own default), falls back to the flat keys unchanged.
+	for _, fam := range []string{"", "ltx25", "wan22", "hunyuan"} {
+		fb := c.ResolveVideoFamilyBinding(fam)
+		if fb.UnetHigh != c.VideoGenUnetHigh || fb.TextEncoder != c.VideoGenTextEncoder {
+			t.Errorf("family %q with no videogen_families: fb = %+v, want the flat keys (UnetHigh=%q TextEncoder=%q)",
+				fam, fb, c.VideoGenUnetHigh, c.VideoGenTextEncoder)
+		}
+	}
+
+	// An explicit videogen_families["wan22"] entry closes the leak for THAT
+	// family only — its own text_encoder wins, never the box's ltx25 one.
+	c.VideoGenFamilies = map[string]VideoFamilyBinding{
+		"wan22": {TextEncoder: "umt5_xxl_fp8_e4m3fn_scaled.safetensors"},
+	}
+	wan := c.ResolveVideoFamilyBinding("wan22")
+	if wan.TextEncoder != "umt5_xxl_fp8_e4m3fn_scaled.safetensors" {
+		t.Errorf("wan22 with an explicit override: TextEncoder = %q, want the override's own value, not the box's ltx25 one", wan.TextEncoder)
+	}
+	if wan.UnetHigh != "" {
+		t.Errorf("wan22 override: UnetHigh = %q, want \"\" — the override REPLACES the binding wholesale, it does not merge with the flat keys", wan.UnetHigh)
+	}
+
+	// The box's OWN default family (ltx25) is never affected by an override
+	// named for a DIFFERENT family, and still reads the flat keys even if an
+	// override happened to exist under its own name (unusual, but must not
+	// change what the default binding already does).
+	def := c.ResolveVideoFamilyBinding("ltx25")
+	if def.UnetHigh != c.VideoGenUnetHigh || def.TextEncoder != c.VideoGenTextEncoder {
+		t.Errorf("this box's own default family (ltx25) = %+v, want the flat keys unchanged", def)
+	}
+	c.VideoGenFamilies["ltx25"] = VideoFamilyBinding{TextEncoder: "should-never-apply.safetensors"}
+	if def := c.ResolveVideoFamilyBinding("ltx25"); def.TextEncoder != c.VideoGenTextEncoder {
+		t.Errorf("an override named for this box's OWN default family must be ignored, got TextEncoder = %q", def.TextEncoder)
+	}
+}
