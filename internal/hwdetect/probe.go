@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 // Detect reports what THIS machine is. nvidia-smi is authoritative when present
@@ -85,8 +87,12 @@ func probeNvidiaSMI() Facts {
 // it does not; Detect falls back to it when the name alone is unrecognised.
 func probeFallbackGPU() (name string, vramGb float64, vendorHint string) {
 	if runtime.GOOS == "windows" {
-		out, err := run(15*time.Second, "powershell", "-NoProfile", "-Command",
-			"Get-CimInstance Win32_VideoController | Sort-Object AdapterRAM -Descending | Select-Object -First 1 -Property Name,AdapterRAM | ForEach-Object { \"$($_.Name)|$($_.AdapterRAM)\" }")
+		// winexec.SafeScriptArgs (F-41): a GPU name is free-form text a vendor
+		// controls (trademark/registered-mark glyphs, non-English adapter names on
+		// a localized driver) — captured stdout must not depend on this box's
+		// legacy code page happening to round-trip it.
+		out, err := run(15*time.Second, "powershell", winexec.SafeScriptArgs(
+			"Get-CimInstance Win32_VideoController | Sort-Object AdapterRAM -Descending | Select-Object -First 1 -Property Name,AdapterRAM | ForEach-Object { \"$($_.Name)|$($_.AdapterRAM)\" }")...)
 		if err != nil {
 			return "", 0, ""
 		}
@@ -137,8 +143,8 @@ func probeFallbackGPU() (name string, vramGb float64, vendorHint string) {
 // ramGb is total physical memory, rounded down — the dual-gpu band keys on it.
 func ramGb() int {
 	if runtime.GOOS == "windows" {
-		out, err := run(15*time.Second, "powershell", "-NoProfile", "-Command",
-			"(Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory")
+		out, err := run(15*time.Second, "powershell", winexec.SafeScriptArgs(
+			"(Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory")...)
 		if err == nil {
 			if b, err := strconv.ParseFloat(strings.TrimSpace(out), 64); err == nil {
 				return int(b / (1 << 30))

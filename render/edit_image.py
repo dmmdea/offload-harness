@@ -19,6 +19,63 @@ except Exception as e:  # PIL missing = defer-class: the harness reports "engine
     sys.exit(3)
 
 
+# F-40 (2026-09-24, reproduced): the harness writes this worker's request as
+# UTF-8 JSON on stdin (internal/mediaops.runEditWorker marshals with Go's
+# encoding/json, always UTF-8), but sys.stdin's default encoding follows the
+# HOST'S PREFERRED LOCALE ENCODING, not UTF-8 - confirmed cp1252 on a plain
+# Windows box here. Decoding UTF-8 bytes as cp1252 does not raise; it silently
+# produces the WRONG codepoints (e.g. the two UTF-8 bytes for "A" with an
+# acute accent decode as an unrelated cp1252 character followed by a lone
+# surrogate for the undefined byte 0x81) - "VOLVERA" and "ROTACION" losing
+# their accents is this defect, not a font problem, on the PIL route.
+# reconfigure(encoding="utf-8") makes the decode locale-independent; see
+# _load_request's docstring and its selftest for the proof.
+def _load_request(stream):
+    """Decode one offload_edit_image/offload_media request from a
+    byte-oriented text stream as UTF-8, regardless of the host's default
+    locale encoding. Pure aside from the stream read - takes any object with
+    reconfigure()+read() (real sys.stdin, or a synthetic io.TextIOWrapper in
+    tests) so the plumbing is testable without spawning a subprocess."""
+    if hasattr(stream, "reconfigure"):
+        stream.reconfigure(encoding="utf-8")
+    return json.load(stream)
+
+
+# F-40: candidate system fonts with Latin-1 Supplement coverage (A-grave/acute/
+# tilde/umlaut/n-tilde etc.), tried in order before falling back to Pillow's
+# OWN bundled default font. Reproduced 2026-09-24: PIL.ImageFont.load_default()
+# ships a subsetted "Aileron" font with NO Latin-1 Supplement glyphs at all -
+# every one of "AAAAAAAAAAeeeeiiii..." (Latin-1 Supplement letters) measured
+# the SAME empty/tofu glyph bbox, so accented text silently disappears
+# whenever a caller doesn't pass an explicit `font`, even once the encoding
+# above is fixed.
+_FALLBACK_FONT_CANDIDATES = (
+    "C:/Windows/Fonts/arial.ttf",                                   # Windows
+    "C:/Windows/Fonts/segoeui.ttf",                                  # Windows
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",               # Debian/Ubuntu
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",  # RHEL/Fedora
+    "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+    "/System/Library/Fonts/Supplemental/Arial.ttf",                  # macOS
+    "/System/Library/Fonts/Helvetica.ttc",                           # macOS
+)
+
+
+def _default_text_font(size):
+    """The font the "text" op uses when the caller does not pass `font`: the
+    first candidate above that this host actually has, else Pillow's bundled
+    default (last resort - accented glyphs will not render, see the module
+    note above)."""
+    for path in _FALLBACK_FONT_CANDIDATES:
+        try:
+            return ImageFont.truetype(path, size)
+        except Exception:
+            continue
+    try:
+        return ImageFont.load_default(size=size)
+    except TypeError:  # older PIL: no size kwarg
+        return ImageFont.load_default()
+
+
 def _levels_lut(black=0, white=255, gamma=1.0):
     # float LUT for a levels adjustment; quantized ONCE by _compose8 (banding discipline)
     span = max(1, white - black)
@@ -160,14 +217,10 @@ def apply_op(img, op):
         base = img.convert("RGBA")
         draw = ImageDraw.Draw(base)
         size = int(op.get("size") or 32)
-        font = None
         if op.get("font"):
             font = ImageFont.truetype(op["font"], size)
         else:
-            try:
-                font = ImageFont.load_default(size=size)
-            except TypeError:  # older PIL: no size kwarg
-                font = ImageFont.load_default()
+            font = _default_text_font(size)
         draw.text((int(op.get("x") or 0), int(op.get("y") or 0)), op["text"],
                   fill=op.get("color") or "#ffffff", font=font,
                   anchor=op.get("anchor") or None)
@@ -428,6 +481,43 @@ def selftest():
         raise SystemExit("unknown-op check failed to fire")
     except ValueError:
         pass
+    # F-40: _load_request must decode UTF-8 stdin correctly no matter what the
+    # host's default locale encoding is. Simulate the "before" (a stream with
+    # no reconfigure, forced to a legacy code page - stands in for the
+    # cp1252-default Windows box this was reproduced on) and the "after"
+    # (this module's actual fix) against the SAME UTF-8 bytes a real Go caller
+    # sends, and require only the fixed path to round-trip. This proves the
+    # fix can go red: comment out the reconfigure() call in _load_request and
+    # the "after" assertion below fails.
+    import io
+    accented = "¿VOLVERÁ EL ROTATIVO? ñ ü é"  # ¿VOLVERÁ EL ROTATIVO? ñ ü é
+    # ensure_ascii=False: Go's encoding/json (the real caller, internal/mediaops.
+    # runEditWorker) keeps UTF-8 bytes literal rather than \uXXXX-escaping them -
+    # the default ensure_ascii=True would make this payload pure ASCII and the
+    # whole test moot (no encoding could mangle it).
+    payload = json.dumps({"image": "in.png", "ops": [{"op": "text", "text": accented}], "out": "o.png"},
+                          ensure_ascii=False).encode("utf-8")
+    # errors="surrogateescape" matches real sys.stdin's default on this box
+    # (confirmed 2026-09-24: sys.stdin.errors == "surrogateescape") rather than
+    # TextIOWrapper's own "strict" default, which would just raise instead of
+    # silently mangling.
+    legacy_stream = io.TextIOWrapper(io.BytesIO(payload), encoding="cp1252", errors="surrogateescape")
+    mangled = json.load(legacy_stream)["ops"][0]["text"]
+    assert mangled != accented, "test setup invalid: cp1252 must mangle this UTF-8 payload"
+    fixed_stream = io.TextIOWrapper(io.BytesIO(payload), encoding="cp1252", errors="surrogateescape")
+    recovered = _load_request(fixed_stream)["ops"][0]["text"]
+    assert recovered == accented, \
+        "_load_request must decode UTF-8 regardless of the stream's original encoding: %r" % recovered
+    # F-40: the default text font must carry Latin-1 Supplement glyphs whenever
+    # this host has ANY of the candidate fonts (every dev/prod box this ships
+    # to does) - only a bare container with zero system fonts falls through to
+    # Pillow's glyph-less bundled default, which this check tolerates by only
+    # asserting glyph coverage when a REAL candidate resolved.
+    fallback_font = _default_text_font(32)
+    bundled_font = ImageFont.load_default(size=32)
+    if getattr(fallback_font, "path", None) != getattr(bundled_font, "path", None):
+        bbox = fallback_font.getmask("Á").getbbox()  # Á
+        assert bbox is not None, "a resolved system fallback font must render Latin-1 Supplement glyphs"
     print("SELFTEST PASS")
     return 0
 
@@ -436,7 +526,7 @@ def main():
     if "--selftest" in sys.argv:
         sys.exit(selftest())
     try:
-        req = json.load(sys.stdin)
+        req = _load_request(sys.stdin)
         image, ops, out = req["image"], req["ops"], req["out"]
     except Exception as e:
         print(json.dumps({"error": "bad request: %s" % e}))

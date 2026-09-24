@@ -2,6 +2,7 @@ package mediaops
 
 import (
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -132,10 +133,53 @@ func sortedKeys(m map[string]string) []string {
 	return keys
 }
 
-// GimpArgs wraps a built script in the gimp-console batch argv (always ends with
-// gimp-quit so the console exits).
-func GimpArgs(script string) []string {
-	return []string{"-i", "--batch-interpreter=plug-in-script-fu-eval", "-b", script, "-b", "(gimp-quit 0)"}
+// GimpArgs wraps a script FILE (already written to disk by WriteScriptFile) in
+// the gimp-console batch argv via (load ...), always ending with gimp-quit so
+// the console exits.
+//
+// F-40 (2026-09-24): a built script can carry caller-supplied text — set_text
+// copy for instantiate_design, e.g. Spanish headlines with accents — and this
+// used to be passed as the batch command's own argv element (`-b script`
+// directly). That depends on the child process decoding a non-ASCII argv
+// correctly, which the harness does not control and cannot assume: Windows
+// PowerShell 5.1 was reproduced doing exactly this wrong on the same box
+// (CreateProcess carries clean UTF-16 all the way to the child, but the
+// child's OWN command-line decoding can still re-narrow it through a legacy
+// code page — see internal/winexec's doc comment for the live repro). Loading
+// the script from a file removes the text from argv entirely, so the fix does
+// not depend on any particular GIMP build's own argv-handling being correct.
+func GimpArgs(scriptFile string) []string {
+	// explicit, not filepath.ToSlash: ToSlash only rewrites the HOST separator, so on a
+	// Linux host a Windows-style path would keep its backslashes — which are escapes
+	// inside a Scheme string literal. Same convention as the path helper above.
+	load := fmt.Sprintf(`(load "%s")`, strings.ReplaceAll(scriptFile, `\`, "/"))
+	return []string{"-i", "--batch-interpreter=plug-in-script-fu-eval", "-b", load, "-b", "(gimp-quit 0)"}
+}
+
+// WriteScriptFile writes a TinyScheme/script-fu program to a fresh temp .scm
+// file, UTF-8, no BOM (script-fu string literals are byte-based and GIMP's
+// text-layer PDB calls expect UTF-8) — the file GimpArgs then references by
+// path so caller-supplied text never has to survive a child process's argv
+// decoding. The caller MUST invoke the returned cleanup (safe to call once
+// the console has exited; also safe to call on an error path before the file
+// was ever created).
+func WriteScriptFile(script string) (path string, cleanup func(), err error) {
+	f, err := os.CreateTemp("", "giscript-*.scm")
+	if err != nil {
+		return "", func() {}, err
+	}
+	path = f.Name()
+	cleanup = func() { _ = os.Remove(path) }
+	if _, err = f.WriteString(script); err != nil {
+		_ = f.Close()
+		cleanup()
+		return "", func() {}, err
+	}
+	if err = f.Close(); err != nil {
+		cleanup()
+		return "", func() {}, err
+	}
+	return path, cleanup, nil
 }
 
 // ParseLayerList parses the sidecar layer file ("LAYER:<name>|visible|hidden" per
