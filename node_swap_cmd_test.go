@@ -168,6 +168,89 @@ func TestWriteSwapResult_AtomicViaRename(t *testing.T) {
 	}
 }
 
+func TestScanEarlyOutputFlags(t *testing.T) {
+	cases := []struct {
+		name       string
+		args       []string
+		wantResult string
+		wantLog    string
+	}{
+		{"space form", []string{"--staged", "s", "--result", "r.json", "--log", "l.log"}, "r.json", "l.log"},
+		{"single-dash space form", []string{"-result", "r2.json", "-log", "l2.log"}, "r2.json", "l2.log"},
+		{"equals form", []string{"--result=r3.json", "--log=l3.log"}, "r3.json", "l3.log"},
+		{"single-dash equals form", []string{"-result=r4.json", "-log=l4.log"}, "r4.json", "l4.log"},
+		{"missing", []string{"--staged", "s"}, "", ""},
+		{"dangling flag with no value", []string{"--result"}, "", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			gotResult, gotLog := scanEarlyOutputFlags(c.args)
+			if gotResult != c.wantResult || gotLog != c.wantLog {
+				t.Errorf("scanEarlyOutputFlags(%v) = (%q, %q), want (%q, %q)", c.args, gotResult, gotLog, c.wantResult, c.wantLog)
+			}
+		})
+	}
+}
+
+// TestRunNodeSwap_BadFlagStillWritesAResult pins the fix for the SHOULD-FIX
+// review finding on PR #476: a flag-parsing failure must not exit silently
+// with neither --log nor --result written, because this command is launched
+// DETACHED (no attached console) and a poller cannot tell "crashed before
+// writing anything" apart from "still running".
+func TestRunNodeSwap_BadFlagStillWritesAResult(t *testing.T) {
+	dir := t.TempDir()
+	resultPath := filepath.Join(dir, "result.json")
+	logPath := filepath.Join(dir, "swap.log")
+
+	err := runNodeSwap([]string{
+		"--staged", "s", "--target", "t", "--sha256", "h",
+		"--this-flag-does-not-exist", "boom",
+		"--result", resultPath, "--log", logPath,
+	})
+	if err == nil {
+		t.Fatal("expected an error from an unrecognized flag")
+	}
+	b, rerr := os.ReadFile(resultPath)
+	if rerr != nil {
+		t.Fatalf("expected --result to be written despite the parse failure: %v", rerr)
+	}
+	if !contains(string(b), `"ok": false`) {
+		t.Errorf("result.json = %s, want ok:false", b)
+	}
+	lb, lerr := os.ReadFile(logPath)
+	if lerr != nil {
+		t.Fatalf("expected --log to be written despite the parse failure: %v", lerr)
+	}
+	if !contains(string(lb), "startup") {
+		t.Errorf("log = %s, want a startup failure line", lb)
+	}
+}
+
+// TestRunNodeSwap_UnopenableLogStillWritesAResult covers the second early
+// failure point: parsing succeeds but --log cannot be opened (a bad
+// directory). --result must still be written.
+func TestRunNodeSwap_UnopenableLogStillWritesAResult(t *testing.T) {
+	dir := t.TempDir()
+	resultPath := filepath.Join(dir, "result.json")
+	badLogPath := filepath.Join(dir, "no-such-subdir", "swap.log") // parent dir never created
+
+	err := runNodeSwap([]string{
+		"--staged", filepath.Join(dir, "staged.exe"), "--target", filepath.Join(dir, "target.exe"),
+		"--sha256", "h", "--skip-hash-check",
+		"--result", resultPath, "--log", badLogPath,
+	})
+	if err == nil {
+		t.Fatal("expected an error: --log's parent directory does not exist")
+	}
+	b, rerr := os.ReadFile(resultPath)
+	if rerr != nil {
+		t.Fatalf("expected --result to be written despite the log-open failure: %v", rerr)
+	}
+	if !contains(string(b), `"ok": false`) {
+		t.Errorf("result.json = %s, want ok:false", b)
+	}
+}
+
 func contains(s, substr string) bool {
 	return len(s) >= len(substr) && (func() bool {
 		for i := 0; i+len(substr) <= len(s); i++ {

@@ -342,6 +342,142 @@ func TestRenameWithRetry_StopsOnlyTheIdleMCPHolder(t *testing.T) {
 	}
 }
 
+// TestRun_BackupOldFailureRestartsOldBinary pins the fix for the blocking
+// review finding on PR #476: a failure at the backup-old step (step 4)
+// happens AFTER stop-node (step 3) has already stopped the node. Before the
+// fix, this returned straight to the caller with the node left DOWN and
+// nobody ever restarting it — the exact outage class this tool exists to
+// prevent. renameWithRetry never moves anything on failure (Target still
+// holds the original binary untouched), so recovery is a restart+verify
+// with no file restore needed.
+func TestRun_BackupOldFailureRestartsOldBinary(t *testing.T) {
+	s := newFakeState()
+	s.files["staged.exe"] = "NEWHASH"
+	s.files["target.exe"] = "OLDHASH"
+	s.health = func() (HealthInfo, error) { return HealthInfo{OK: true}, nil }
+	// No holders at all: renameWithRetry fails immediately with "no
+	// CIM-visible process holds ..." and never touches target.exe.
+	s.renameFailOnce["target.exe"] = true
+	newPID := 900
+	s.launchOnRestartFn(func() {
+		s.procs = append(s.procs, ProcessInfo{PID: newPID, CommandLine: "target.exe fleet-serve", ExecutablePath: "target.exe"})
+	})
+
+	plan := Plan{
+		Staged: "staged.exe", Target: "target.exe", ExpectedSHA256: "NEWHASH",
+		HealthURL: "http://node/fleet/health", RestartTaskName: "offload-fleet-node",
+		BackupSuffix: "t", RestartTimeout: time.Second,
+	}
+	out := Run(context.Background(), plan, s.deps(), NewLogger(nil))
+	if out.OK {
+		t.Fatal("expected failure: backup-old itself failed")
+	}
+	if !out.RolledBack || !out.RollbackOK {
+		t.Fatalf("expected a successful recovery restart, got RolledBack=%v RollbackOK=%v error=%q steps=%+v", out.RolledBack, out.RollbackOK, out.Error, out.Steps)
+	}
+	if s.files["target.exe"] != "OLDHASH" {
+		t.Errorf("target.exe = %q, want OLDHASH (it was never moved by the failed backup)", s.files["target.exe"])
+	}
+	if s.files["staged.exe"] != "NEWHASH" {
+		t.Errorf("staged.exe should be untouched (install-new never ran), got %q", s.files["staged.exe"])
+	}
+	if s.restartCalled == 0 {
+		t.Error("expected the node to be restarted after the failed backup — this is the bug the fix closes: the node must never be left down")
+	}
+	found := false
+	for _, st := range out.Steps {
+		if st.Name == "restore-backup" && st.OK {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected a passing restore-backup step noting there was nothing to restore")
+	}
+}
+
+// TestRun_InstallNewFailureRestartsOldBinary is the install-new (step 5)
+// counterpart: before the fix, a failure moving the staged binary into
+// place restored the backup FILE inline but never restarted the node,
+// leaving it down with the correct binary back in place but no running
+// process. It must now restart and re-verify like every other failure from
+// step 4 onward.
+func TestRun_InstallNewFailureRestartsOldBinary(t *testing.T) {
+	s := newFakeState()
+	s.files["target.exe"] = "OLDHASH"
+	// staged.exe deliberately absent: the RenameFile(staged, target) call
+	// fails because the source does not exist, exactly like a staged file
+	// that vanished or was already consumed.
+	s.health = func() (HealthInfo, error) { return HealthInfo{OK: true}, nil }
+	newPID := 901
+	s.launchOnRestartFn(func() {
+		s.procs = append(s.procs, ProcessInfo{PID: newPID, CommandLine: "target.exe fleet-serve", ExecutablePath: "target.exe"})
+	})
+
+	plan := Plan{
+		Staged: "staged.exe", Target: "target.exe", ExpectedSHA256: "OLDHASH", SkipHashCheck: true,
+		HealthURL: "http://node/fleet/health", RestartTaskName: "offload-fleet-node",
+		BackupSuffix: "t", RestartTimeout: time.Second,
+	}
+	out := Run(context.Background(), plan, s.deps(), NewLogger(nil))
+	if out.OK {
+		t.Fatal("expected failure: install-new itself failed (staged.exe missing)")
+	}
+	if !out.RolledBack || !out.RollbackOK {
+		t.Fatalf("expected a successful recovery restart, got RolledBack=%v RollbackOK=%v error=%q steps=%+v", out.RolledBack, out.RollbackOK, out.Error, out.Steps)
+	}
+	if s.files["target.exe"] != "OLDHASH" {
+		t.Errorf("target.exe = %q, want OLDHASH restored from the backup", s.files["target.exe"])
+	}
+	if s.restartCalled == 0 {
+		t.Error("expected the node to be restarted after the failed install — the bug this fix closes left it down with the file restored but nothing running")
+	}
+}
+
+// TestRun_RollbackRestoreItselfFails: when the rollback's OWN restore
+// (backupPath -> Target) fails, Outcome must surface RolledBack=false /
+// RollbackOK=false rather than silently reporting a clean recovery — the
+// caller (a human or the next deploy) needs to know the box may be in a
+// broken state, not just that the swap itself failed.
+func TestRun_RollbackRestoreItselfFails(t *testing.T) {
+	s := newFakeState()
+	s.files["staged.exe"] = "NEWHASH"
+	s.files["target.exe"] = "OLDHASH"
+	s.health = func() (HealthInfo, error) { return HealthInfo{OK: true}, nil }
+	s.restartFail = true // forces the MAIN restart-node step to fail, triggering rollback
+	backupPath := "target.exe.bak-t"
+	// The rollback's OWN restore attempt (RenameFile(backupPath, target))
+	// is the SECOND time this exact rename pair is invoked in the run (the
+	// first was backup-old's target->backupPath rename, a different
+	// direction) — renameFailOnce is keyed by source path, so failing the
+	// source "target.exe.bak-t" only affects the restore call.
+	s.renameFailOnce[backupPath] = true
+
+	plan := Plan{
+		Staged: "staged.exe", Target: "target.exe", ExpectedSHA256: "NEWHASH",
+		HealthURL: "http://node/fleet/health", RestartTaskName: "offload-fleet-node",
+		BackupSuffix: "t", RestartTimeout: time.Second,
+	}
+	out := Run(context.Background(), plan, s.deps(), NewLogger(nil))
+	if out.OK {
+		t.Fatal("expected failure")
+	}
+	if out.RolledBack {
+		t.Error("RolledBack should be false: the rollback's own restore-backup step failed")
+	}
+	if out.RollbackOK {
+		t.Error("RollbackOK should be false: the box may be left without the old binary in place")
+	}
+	found := false
+	for _, st := range out.Steps {
+		if st.Name == "restore-backup" && !st.OK {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected a FAILING restore-backup step recorded in the rollback's own steps")
+	}
+}
+
 func TestRun_RestartFailureRollsBack(t *testing.T) {
 	s := newFakeState()
 	s.files["staged.exe"] = "NEWHASH"

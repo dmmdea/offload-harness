@@ -103,14 +103,24 @@ func parseNodeSwapFlags(args []string) (nodeswap.Plan, nodeSwapOutput, error) {
 }
 
 func runNodeSwap(args []string) error {
+	// Find --result/--log BEFORE the real flag parse can fail (PR #476
+	// review): this command is normally launched DETACHED via
+	// setup/windows-node-swap-launch.ps1 with no attached console, so a
+	// failure before either file exists is indistinguishable to a poller
+	// from "still running". A bad flag combination or a --log path the
+	// process cannot create must still leave a result a poller can read.
+	earlyResultPath, earlyLogPath := scanEarlyOutputFlags(args)
+
 	plan, out, err := parseNodeSwapFlags(args)
 	if err != nil {
+		writeEarlyFailure(earlyResultPath, earlyLogPath, "parsing flags: "+err.Error())
 		return err
 	}
 	resultPath, logPath, asJSON := out.resultPath, out.logPath, out.asJSON
 
 	logf, closeLog, err := openSwapLog(logPath)
 	if err != nil {
+		writeEarlyFailure(resultPath, "", fmt.Sprintf("opening --log %s: %v", logPath, err))
 		return fmt.Errorf("opening --log %s: %w", logPath, err)
 	}
 	defer closeLog()
@@ -137,6 +147,53 @@ func runNodeSwap(args []string) error {
 		return fmt.Errorf("node-swap failed: %s", outcome.Error)
 	}
 	return nil
+}
+
+// scanEarlyOutputFlags does a tolerant, best-effort pre-scan for -result/
+// --result and -log/--log (space or = form) BEFORE the real flag.Parse runs.
+// It never errors: a malformed flag set here just means the corresponding
+// path stays empty, which is exactly the situation the real parse is about
+// to report properly. This exists ONLY so a parse failure still has
+// somewhere to write news of itself.
+func scanEarlyOutputFlags(args []string) (resultPath, logPath string) {
+	get := func(name string) string {
+		flagEq := "-" + name + "="
+		for i, a := range args {
+			switch {
+			case strings.HasPrefix(a, "--"+name+"="):
+				return strings.TrimPrefix(a, "--"+name+"=")
+			case strings.HasPrefix(a, flagEq):
+				return strings.TrimPrefix(a, flagEq)
+			case a == "-"+name || a == "--"+name:
+				if i+1 < len(args) {
+					return args[i+1]
+				}
+			}
+		}
+		return ""
+	}
+	return get("result"), get("log")
+}
+
+// writeEarlyFailure records a minimal nodeswap.Outcome-shaped failure to
+// whatever output paths were found — best-effort on every step, since this
+// runs precisely when something has already gone wrong and it must never
+// itself panic or mask the real error being returned to the caller.
+func writeEarlyFailure(resultPath, logPath, reason string) {
+	now := time.Now()
+	if resultPath != "" {
+		outcome := nodeswap.Outcome{
+			OK: false, Error: reason, StartedAt: now, FinishedAt: now,
+			Steps: []nodeswap.StepResult{{Name: "startup", OK: false, Detail: reason, At: now}},
+		}
+		_ = writeSwapResult(resultPath, outcome)
+	}
+	if logPath != "" {
+		if f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644); err == nil {
+			fmt.Fprintf(f, "%s [startup] ok=false %s\n", now.Format(time.RFC3339), reason)
+			_ = f.Close()
+		}
+	}
 }
 
 func openSwapLog(path string) (write func(string), closeFn func(), err error) {

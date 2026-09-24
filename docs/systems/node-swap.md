@@ -92,8 +92,13 @@ rollback branch is unit-tested with fakes, no real Windows box required):
    to what was just installed, and (when configured) a healthy `/fleet/health`, within
    `--verify-timeout`.
 
-**Any failure from step 6 onward triggers automatic rollback**: stop whatever is running,
-restore the render tree and binary backups, restart, and re-verify the OLD binary is back up.
+**Any failure from step 4 onward triggers automatic rollback** — including backing up the old
+exe (step 4) and installing the new one (step 5), both of which happen AFTER the node was
+already stopped in step 3: leaving those failures unrecovered would strand a stopped node with
+nobody restarting it, exactly the outage class this tool exists to prevent. Recovery stops
+whatever is running, restores the render tree and binary backups (skipping the binary restore
+when step 4 itself failed — nothing was ever moved, so the original binary is still sitting at
+`Target` untouched), restarts, and re-verifies the OLD binary is back up.
 `Outcome.RolledBack`/`RollbackOK` record whether that recovery itself succeeded.
 
 ## Important flows
@@ -149,8 +154,9 @@ Go panic.
 - The staged binary's sha256 is verified BEFORE any file or process is touched.
 - A rename failure never stops a process matching `--process-match` (a live server) — only an
   idle helper matching `--mcp-match` and not also `--process-match`.
-- Every failure from the render-tree swap onward attempts an automatic rollback; `--no-rollback`
-  exists for tests only and is never set in production.
+- Every failure from step 4 onward (the node already stopped) attempts an automatic rollback —
+  backup-old and install-new included, not only the render-tree swap and later steps;
+  `--no-rollback` exists for tests only and is never set in production.
 - `Deps` has no direct filesystem/process calls outside `internal/nodeswap/deps*.go` — the
   sequencing in `nodeswap.go` is OS-agnostic and fully fake-testable by design.
 
@@ -180,8 +186,11 @@ operator-authored restart script path (e.g. `fleet-node-restart.ps1`), never unt
 
 `internal/nodeswap/nodeswap_test.go` and `deps_test.go` cover the sequence (happy path, hash
 mismatch, never-idle timeout, rename-retry with an idle MCP holder vs. a live fleet-serve
-holder left alone, restart failure -> rollback, verify failure -> rollback, render-tree swap
-rolled back on a later failure, standalone-node hash-only verification) and the real
+holder left alone, backup-old failure -> restart-only recovery (nothing was ever moved), 
+install-new failure -> restore + restart, restart failure -> rollback, verify failure ->
+rollback, a rollback whose OWN restore fails surfacing `RollbackOK:false` rather than a false
+recovery, render-tree swap rolled back on a later failure, standalone-node hash-only
+verification) and the real
 cross-platform primitives (hashing, health-read incl. the pre-0.100.0 `queue_depth` fallback,
 tar.gz extraction incl. a path-escape refusal). `node_swap_cmd_test.go` covers CLI flag
 parsing. Everything above builds and passes on both `GOOS=linux` (CI) and `GOOS=windows`

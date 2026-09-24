@@ -293,22 +293,29 @@ func Run(ctx context.Context, plan Plan, deps Deps, log *Logger) Outcome {
 	// 4. Rename the old exe to a backup. On failure, diagnose the holder and
 	// — ONLY for an idle MCP helper sharing the exe, never anything else —
 	// stop it and retry once.
+	//
+	// A failure here happens AFTER stop-node (step 3) has already stopped the
+	// node, so simply returning would leave a stopped node with nobody ever
+	// restarting it — the exact outage class this tool exists to prevent.
+	// renameWithRetry either fully succeeds or leaves Target untouched (a
+	// Windows same-volume rename is atomic), so recovery is: restart the
+	// binary that is still sitting at Target. Passing "" as the backup path
+	// tells rollback there is nothing to restore FROM — Target was never
+	// moved — so it goes straight to restart+verify.
 	if err := renameWithRetry(plan, deps, log, plan.Target, backupPath); err != nil {
-		return fail("backup-old", err.Error())
+		r := rollback(ctx, plan, deps, log, "", "", "backing up the old binary failed: "+err.Error())
+		return mergeAndFail(r)
 	}
 	out.BackupPath = backupPath
 	step("backup-old", true, backupPath)
 
-	// 5. Move the new binary into place.
+	// 5. Move the new binary into place. A failure here ALSO happens after
+	// stop-node, so it routes through the same rollback (which restores
+	// backupPath -> Target, then restarts and verifies) instead of the
+	// restore-only-no-restart handling this used to have.
 	if err := deps.RenameFile(plan.Staged, plan.Target); err != nil {
-		restoreErr := deps.RenameFile(backupPath, plan.Target)
-		detail := fmt.Sprintf("moving staged binary into place: %v", err)
-		if restoreErr != nil {
-			detail += fmt.Sprintf(" (AND restoring the backup failed: %v — %s is MISSING, backup is at %s)", restoreErr, plan.Target, backupPath)
-		} else {
-			detail += fmt.Sprintf(" (old binary restored from %s)", backupPath)
-		}
-		return fail("install-new", detail)
+		r := rollback(ctx, plan, deps, log, backupPath, "", fmt.Sprintf("moving staged binary into place: %v", err))
+		return mergeAndFail(r)
 	}
 	step("install-new", true, plan.Target)
 
@@ -675,16 +682,33 @@ func rollback(ctx context.Context, plan Plan, deps Deps, log *Logger, backupPath
 		}
 	}
 
-	if err := deps.RemoveAll(plan.Target); err != nil {
-		log.Printf("rollback: clearing %s before restore: %v (continuing — RenameFile below will surface a real failure if this matters)", plan.Target, err)
-	}
-	if err := deps.RenameFile(backupPath, plan.Target); err != nil {
-		step("restore-backup", false, err.Error())
+	// backupPath is "" (or does not exist on disk) when the failure that
+	// triggered this rollback happened BEFORE anything was ever moved (the
+	// backup-old step itself failing — see Run's step 4) — Target still
+	// holds the original binary untouched, so there is nothing to restore
+	// FROM, and restoring would only fail on a missing source file. Only a
+	// genuinely broken state (no backup AND Target missing) is reported as
+	// a real restore failure.
+	switch {
+	case backupPath != "" && deps.Exists(backupPath):
+		if err := deps.RemoveAll(plan.Target); err != nil {
+			log.Printf("rollback: clearing %s before restore: %v (continuing — RenameFile below will surface a real failure if this matters)", plan.Target, err)
+		}
+		if err := deps.RenameFile(backupPath, plan.Target); err != nil {
+			step("restore-backup", false, err.Error())
+			out.RolledBack = false
+			out.RollbackOK = false
+			return out
+		}
+		step("restore-backup", true, plan.Target)
+	case deps.Exists(plan.Target):
+		step("restore-backup", true, "no backup to restore — "+plan.Target+" was never moved")
+	default:
+		step("restore-backup", false, fmt.Sprintf("no backup at %q and %q is missing — cannot recover the binary", backupPath, plan.Target))
 		out.RolledBack = false
 		out.RollbackOK = false
 		return out
 	}
-	step("restore-backup", true, plan.Target)
 	out.RolledBack = true
 
 	if err := restartNode(ctx, plan, deps, log); err != nil {
