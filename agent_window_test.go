@@ -56,6 +56,7 @@ func TestAgentWindowMatchesWhatTheAgentSeatServes(t *testing.T) {
 		"qwen3.5-4b-agent": ctxExprFor(t, string(tmplRaw), "qwen3.5-4b-agent"),
 		"qwen3.5-9b-agent": ctxExprFor(t, string(tmplRaw), "qwen3.5-9b-agent"),
 		"qwen38-27b-agent": ctxExprFor(t, string(tmplRaw), "qwen38-27b-agent"),
+		"mimo-9b-agent":    ctxExprFor(t, string(tmplRaw), "mimo-9b-agent"),
 	}
 
 	checked := 0

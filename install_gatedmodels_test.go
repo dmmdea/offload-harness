@@ -30,12 +30,13 @@ const (
 	weightQ354B  = "Qwen3.5-4B-UD-Q4_K_XL.gguf"
 	weightQ359B  = "Qwen3.5-9B-UD-Q4_K_XL.gguf"
 	weightQ3827B = "Qwen3.8-27B-UD-IQ3_S.gguf"
+	weightMimo9B = "MiMo-V2.6-Distill-Qwen-9B-Q4_K_M.gguf"
 )
 
-func gatedWarn(t *testing.T, in26B, inQ38, inQ354B, inQ359B, inQ3827B bool, dir, target string) string {
+func gatedWarn(t *testing.T, in26B, inQ38, inQ354B, inQ359B, inQ3827B, inMimo9B bool, dir, target string) string {
 	t.Helper()
 	var buf bytes.Buffer
-	warnMissingGatedModelsTo(in26B, inQ38, inQ354B, inQ359B, inQ3827B, dir, target, &buf)
+	warnMissingGatedModelsTo(in26B, inQ38, inQ354B, inQ359B, inQ3827B, inMimo9B, dir, target, &buf)
 	return buf.String()
 }
 
@@ -52,7 +53,7 @@ func TestWarnMissingGatedModelsNamesOnlyAbsentGatedWeights(t *testing.T) {
 	touchWeight(t, dir, weightQ38)
 	touchWeight(t, dir, mmprojQ38)
 
-	out := gatedWarn(t, false, true, true, true, false, dir, runtime.GOOS)
+	out := gatedWarn(t, false, true, true, true, false, false, dir, runtime.GOOS)
 
 	if strings.Contains(out, weightQ38) || strings.Contains(out, mmprojQ38) {
 		t.Fatalf("a PRESENT gated weight must not be reported missing:\n%s", out)
@@ -75,7 +76,7 @@ func TestWarnMissingGatedModelsNamesOnlyAbsentGatedWeights(t *testing.T) {
 
 func TestWarnMissingGatedModelsCountsEachMissingFileIncludingMmproj(t *testing.T) {
 	dir := t.TempDir() // nothing on disk at all
-	out := gatedWarn(t, true, true, true, true, false, dir, runtime.GOOS)
+	out := gatedWarn(t, true, true, true, true, false, false, dir, runtime.GOOS)
 
 	// 26B weight + Q38 weight + Q38 mmproj + Q354B weight + Q359B weight = 5. The
 	// mmproj is a SEPARATE check: a vision entry with its weights but no projector
@@ -101,13 +102,13 @@ func TestWarnMissingGatedModelsSilentArms(t *testing.T) {
 	touchWeight(t, dir, weightQ359B)
 
 	// 1. Everything gated is present => silence.
-	if out := gatedWarn(t, true, true, true, true, false, dir, runtime.GOOS); strings.TrimSpace(out) != "" {
+	if out := gatedWarn(t, true, true, true, true, false, false, dir, runtime.GOOS); strings.TrimSpace(out) != "" {
 		t.Fatalf("all gated weights present must be silent, got:\n%s", out)
 	}
 
 	// 2. No gates set => silence, even on an empty dir. A tier that asked for
 	//    nothing cannot be missing anything.
-	if out := gatedWarn(t, false, false, false, false, false, t.TempDir(), runtime.GOOS); strings.TrimSpace(out) != "" {
+	if out := gatedWarn(t, false, false, false, false, false, false, t.TempDir(), runtime.GOOS); strings.TrimSpace(out) != "" {
 		t.Fatalf("no gates set must be silent, got:\n%s", out)
 	}
 
@@ -120,12 +121,12 @@ func TestWarnMissingGatedModelsSilentArms(t *testing.T) {
 	if runtime.GOOS == "linux" {
 		otherOS = "windows"
 	}
-	if out := gatedWarn(t, true, true, true, true, false, t.TempDir(), otherOS); strings.TrimSpace(out) != "" {
+	if out := gatedWarn(t, true, true, true, true, false, false, t.TempDir(), otherOS); strings.TrimSpace(out) != "" {
 		t.Fatalf("cross-machine render must be silent, got:\n%s", out)
 	}
 
 	// 4. Empty modelsDir => silence (nothing to resolve a relative path against).
-	if out := gatedWarn(t, true, true, true, true, false, "", runtime.GOOS); strings.TrimSpace(out) != "" {
+	if out := gatedWarn(t, true, true, true, true, false, false, "", runtime.GOOS); strings.TrimSpace(out) != "" {
 		t.Fatalf("empty modelsDir must be silent, got:\n%s", out)
 	}
 }
@@ -140,18 +141,50 @@ func TestWarnMissingGatedModelsSilentArms(t *testing.T) {
 func TestWarnMissingGatedModelsCoversThe27BAgentSeat(t *testing.T) {
 	dir := t.TempDir()
 	// Gate ON, weight absent -> it must be named.
-	out := gatedWarn(t, false, false, false, false, true, dir, runtime.GOOS)
+	out := gatedWarn(t, false, false, false, false, true, false, dir, runtime.GOOS)
 	if !strings.Contains(out, weightQ3827B) {
 		t.Errorf("include_qwen38_27b is set and %s is absent, but the warning does not name it:\n%s",
 			weightQ3827B, out)
 	}
 	// Weight present -> silent, so the warning cannot cry wolf on a complete install.
 	touchWeight(t, dir, weightQ3827B)
-	if out := gatedWarn(t, false, false, false, false, true, dir, runtime.GOOS); strings.TrimSpace(out) != "" {
+	if out := gatedWarn(t, false, false, false, false, true, false, dir, runtime.GOOS); strings.TrimSpace(out) != "" {
 		t.Errorf("every gated weight is present, want silence, got:\n%s", out)
 	}
 	// Gate OFF -> silent even with the weight absent, or every non-16GB tier would warn.
-	if out := gatedWarn(t, false, false, false, false, false, t.TempDir(), runtime.GOOS); strings.TrimSpace(out) != "" {
+	if out := gatedWarn(t, false, false, false, false, false, false, t.TempDir(), runtime.GOOS); strings.TrimSpace(out) != "" {
 		t.Errorf("include_qwen38_27b is unset, want silence, got:\n%s", out)
+	}
+}
+
+// TestWarnMissingGatedModelsCoversTheMimoSeat is TestWarnMissingGatedModelsCoversThe27BAgentSeat's
+// mirror for mimo-9b-agent: the second 8GB-class agent seat must get the same
+// last-line-of-defence coverage the first one (qwen3.5-9b-agent) already has —
+// both entries can render into the roster while the GGUF sits undownloaded, and
+// llama-swap's CONFIG-sourced /v1/models makes doctor/acceptance blind to that.
+func TestWarnMissingGatedModelsCoversTheMimoSeat(t *testing.T) {
+	dir := t.TempDir()
+	// Gate ON, weight absent -> it must be named.
+	out := gatedWarn(t, false, false, false, false, false, true, dir, runtime.GOOS)
+	if !strings.Contains(out, weightMimo9B) {
+		t.Errorf("include_mimo_9b is set and %s is absent, but the warning does not name it:\n%s",
+			weightMimo9B, out)
+	}
+	// Weight present -> silent, so the warning cannot cry wolf on a complete install.
+	touchWeight(t, dir, weightMimo9B)
+	if out := gatedWarn(t, false, false, false, false, false, true, dir, runtime.GOOS); strings.TrimSpace(out) != "" {
+		t.Errorf("every gated weight is present, want silence, got:\n%s", out)
+	}
+	// Gate OFF -> silent even with the weight absent, or every tier without the seat would warn.
+	if out := gatedWarn(t, false, false, false, false, false, false, t.TempDir(), runtime.GOOS); strings.TrimSpace(out) != "" {
+		t.Errorf("include_mimo_9b is unset, want silence, got:\n%s", out)
+	}
+	// Both 8GB-class agent seats gated on and absent -> both are named, distinctly.
+	both := gatedWarn(t, false, false, false, true, false, true, t.TempDir(), runtime.GOOS)
+	if !strings.Contains(both, weightQ359B) || !strings.Contains(both, weightMimo9B) {
+		t.Errorf("both qwen3.5-9b-agent and mimo-9b-agent gated and absent must both be named:\n%s", both)
+	}
+	if !strings.Contains(both, "2 gated model weight(s)") {
+		t.Errorf("want a count of exactly 2, got:\n%s", both)
 	}
 }

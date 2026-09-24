@@ -82,6 +82,18 @@ type servingProfile struct {
 	// Mutually exclusive with IncludeQwen354B (shared `agent-seat` alias) —
 	// servingtmpl.Render refuses a tier that sets both.
 	IncludeQwen359B bool `json:"include_qwen35_9b"`
+	// IncludeMimo9B gates the mimo-9b-agent entry (XiaomiMiMo/MiMo-V2.6-Distill-Qwen-9B,
+	// bartowski GGUF) — a second 8GB-class agent seat, measured 2026-09-24 a coin-flip
+	// tie against IncludeQwen359B on quality (18/18 shape B x6 both reference boxes;
+	// shape C 5/5 vs 4/5, splitting by box). It claims the SAME `agent-seat` alias, so
+	// it is mutually exclusive with IncludeQwen354B exactly like IncludeQwen359B is —
+	// but NOT with IncludeQwen359B itself: the two may render TOGETHER, with
+	// qwen3.5-9b-agent kept as the rollback seat and stripped of the `agent-seat` alias
+	// (servingtmpl.Render moves the alias to whichever of the two is present, and
+	// refuses only the 4B+Mimo combination). REQUIRES llama.cpp >= b11102: on b10964
+	// the chat-template auto-detector misroutes MiMo's compact tool-call XML to the
+	// Qwen3-Coder parser and every tool call runs to the token cap (upstream #29319).
+	IncludeMimo9B bool `json:"include_mimo_9b"`
 	// IncludeQwen3827B gates the Qwen3.8-27B agent entry (UD-IQ3_S + the MTP head
 	// embedded in the same GGUF) — the 16GB-class agent seat measured in ADR 0047.
 	// Unlike the 4B/9B pair it does NOT claim the `agent-seat` alias, so it is not
@@ -244,14 +256,14 @@ func warnMissingSeatModels(seats []mediaseat.Seat, modelsDir, target string) {
 // contract (the same names install.ps1's $PINNED table downloads to).
 // Same shape as the seat warning: a warning, never an error, and skipped when
 // rendering for another machine, where a local miss means nothing.
-func warnMissingGatedModels(include26B, includeQ38, includeQ354B, includeQ359B, includeQ3827B bool, modelsDir, target string) {
-	warnMissingGatedModelsTo(include26B, includeQ38, includeQ354B, includeQ359B, includeQ3827B, modelsDir, target, os.Stderr)
+func warnMissingGatedModels(include26B, includeQ38, includeQ354B, includeQ359B, includeQ3827B, includeMimo9B bool, modelsDir, target string) {
+	warnMissingGatedModelsTo(include26B, includeQ38, includeQ354B, includeQ359B, includeQ3827B, includeMimo9B, modelsDir, target, os.Stderr)
 }
 
 // warnMissingGatedModelsTo carries the body with an injectable sink so the warning
 // is testable (it had no coverage at all — 0.72.0 review finding I-2). The wrapper
 // above keeps every production call site unchanged.
-func warnMissingGatedModelsTo(include26B, includeQ38, includeQ354B, includeQ359B, includeQ3827B bool, modelsDir, target string, w io.Writer) {
+func warnMissingGatedModelsTo(include26B, includeQ38, includeQ354B, includeQ359B, includeQ3827B, includeMimo9B bool, modelsDir, target string, w io.Writer) {
 	if modelsDir == "" || target != runtime.GOOS {
 		return
 	}
@@ -277,6 +289,9 @@ func warnMissingGatedModelsTo(include26B, includeQ38, includeQ354B, includeQ359B
 	}
 	if includeQ3827B {
 		check("qwen38-27b-agent", "model", "Qwen3.8-27B-UD-IQ3_S.gguf")
+	}
+	if includeMimo9B {
+		check("mimo-9b-agent", "model", "MiMo-V2.6-Distill-Qwen-9B-Q4_K_M.gguf")
 	}
 	if len(missing) == 0 {
 		return
@@ -469,8 +484,8 @@ func deriveRender(profilesRaw []byte, req renderRequest) (renderResult, error) {
 		MoE26B: moe, Threads: n, Include26B: include26B, IncludeQ38: p.IncludeQwen38,
 		CacheRAMMiB:  cacheRAMFor(doc.CacheRAMMiBByRAMTier, ramTier),
 		IncludeQ354B: p.IncludeQwen354B, IncludeQ359B: p.IncludeQwen359B,
-		IncludeQ3827B: p.IncludeQwen3827B,
-		Seats:         p.MediaSeats, Home: req.Home, GOOS: target, GPUEnv: p.GPUEnv, Backend: p.Backend,
+		IncludeQ3827B: p.IncludeQwen3827B, IncludeMimo9B: p.IncludeMimo9B,
+		Seats: p.MediaSeats, Home: req.Home, GOOS: target, GPUEnv: p.GPUEnv, Backend: p.Backend,
 		AltCPULlamaBin:    req.AltLlamaBinCPU,
 		DisableCUDAGraphs: p.DisableCUDAGraphs,
 		VLLMSeat:          seat, VLLMRuntime: seatRT,
@@ -557,7 +572,7 @@ func runInstallRender(args []string) error {
 		}
 	}
 	warnMissingSeatModels(res.Profile.MediaSeats, *modelsDir, target)
-	warnMissingGatedModels(res.Include26B, res.Profile.IncludeQwen38, res.Profile.IncludeQwen354B, res.Profile.IncludeQwen359B, res.Profile.IncludeQwen3827B, *modelsDir, target)
+	warnMissingGatedModels(res.Include26B, res.Profile.IncludeQwen38, res.Profile.IncludeQwen354B, res.Profile.IncludeQwen359B, res.Profile.IncludeQwen3827B, res.Profile.IncludeMimo9B, *modelsDir, target)
 
 	// The provenance stamp (K-02) rides on every rendered config from here on.
 	// It is prepended AFTER the rule audit so the audit sees exactly what a

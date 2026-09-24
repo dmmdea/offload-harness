@@ -55,13 +55,13 @@ func TestParamsBasisMirrorsParams(t *testing.T) {
 	p.Seats = []mediaseat.Seat{{Kind: "vision", Name: "vlm", Model: "m.gguf", Residency: "swap"}}
 	p.VLLMSeat = &vllmseat.Spec{ID: "seat", Unit: "u", Port: 18797, MaxModelLen: 131072}
 	p.VLLMRuntime = vllmseat.Runtime{User: "someone", ProxyHost: "203.0.113.9"}
-	p.IncludeQ38, p.IncludeQ359B, p.DisableCUDAGraphs = true, true, true
+	p.IncludeQ38, p.IncludeQ359B, p.IncludeMimo9B, p.DisableCUDAGraphs = true, true, true, true
 	// The composite tier’s display layer (ADR 0039) rides in the hashed set too:
 	// left nil here, a BasisOf that forgot to carry it would round-trip cleanly
 	// and hash nil forever on the one tier that actually sets it.
 	p.DisplayLayer = &config.LayerSpec{
 		Name: "display", Tier: "blackwell-16", Devices: []string{"GPU-abc"},
-		Seats: []config.LayerSeat{{Role: "agent", Model: "qwen3.8-27b-display", Device: "1", CtxTokens: 65536}},
+		Seats:   []config.LayerSeat{{Role: "agent", Model: "qwen3.8-27b-display", Device: "1", CtxTokens: 65536}},
 		Dormant: true, DisplayDevice: "GPU-abc", DisplayFloorGiB: 4, Guards: []string{"display_floor"},
 	}
 	if rt := BasisOf(p).Params(); !reflect.DeepEqual(rt, p) {
@@ -100,6 +100,7 @@ func TestSpecHashIsSensitiveToEveryInput(t *testing.T) {
 		{"params.include_qwen38", func(b *SpecBasis) { b.Params.IncludeQ38 = true }},
 		{"params.include_qwen35_4b", func(b *SpecBasis) { b.Params.IncludeQ354B = true }},
 		{"params.include_qwen35_9b", func(b *SpecBasis) { b.Params.IncludeQ359B = true }},
+		{"params.include_mimo_9b", func(b *SpecBasis) { b.Params.IncludeMimo9B = true }},
 		{"params.seats", func(b *SpecBasis) {
 			b.Params.Seats = []mediaseat.Seat{{Kind: "vision", Name: "vlm", Model: "m.gguf", Residency: "swap"}}
 		}},
