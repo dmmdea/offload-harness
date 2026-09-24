@@ -85,8 +85,13 @@ models:
   # set membership together). Flags EXPLICIT, not ${common}: every score this seat was
   # chosen on was measured under llama.cpp's DEFAULT reasoning behaviour. NO sampling
   # flags: the agent loop sends `temperature: 0` on every request.
+  #
+  # The Q354B_AGENT_ALIAS token below drops this entry's claim on `agent-seat` when
+  # mimo-9b-agent ALSO renders (2026-09-24, the amd-gcn onboarding): the two share
+  # the alias, and this seat stays as the tier's un-aliased ROLLBACK rather than
+  # being refused outright — the mirror of qwen3.5-9b-agent's own Q359B_AGENT_ALIAS token.
   qwen3.5-4b-agent:
-    aliases: [qwen35-4b, agent-seat]
+    aliases: [qwen35-4b__Q354B_AGENT_ALIAS__]
     env: ["${ld}", "${vk}"]
     cmd: >-
       __LLAMA_BIN__/llama-server --model __MODELS__/Qwen3.5-4B-UD-Q4_K_XL.gguf
@@ -108,21 +113,31 @@ models:
       --jinja --port ${PORT} --host 127.0.0.1
     checkEndpoint: /health
     ttl: 300
-  # SECOND AGENT seat for the 8GB tiers: MiMo-V2.6-Distill-Qwen-9B, gated on
-  # include_mimo_9b — see the win-cuda template for the full rationale and
-  # measurements. Claims the SAME `agent-seat` alias as qwen3.5-9b-agent, which loses
-  # it (the __Q359B_AGENT_ALIAS__ token above) when this seat renders alongside it.
-  # REQUIRES llama.cpp >= b11102 (upstream #29319). Ctx 65536 and the
-  # flash-attn/cache-type values are LITERALS: the exact configuration the
-  # 2026-09-24 fit and quality bakes measured on both 8GB reference boxes.
+  # SECOND AGENT seat: MiMo-V2.6-Distill-Qwen-9B, gated on include_mimo_9b — see the
+  # win-cuda template for the full rationale and measurements. Claims the SAME
+  # `agent-seat` alias as qwen3.5-9b-agent, which loses it (its own Q359B_AGENT_ALIAS
+  # token above) when this seat renders alongside it — and the same is true of
+  # qwen3.5-4b-agent (its own Q354B_AGENT_ALIAS token on that block). REQUIRES
+  # llama.cpp >= b11102 (upstream llama.cpp #29319: an older build routes MiMo's
+  # compact tool-call XML to the Qwen3-Coder parser and every tool call runs to
+  # max_tokens).
+  #
+  # UNLIKE the win-cuda/linux-cuda entries, ctx/flash-attn/KV here are the TIER's own
+  # tokens (CTX / FLASH-ATTN / KV-K / KV-V / CACHE-RAM), the same ones
+  # this template's qwen3.5-4b-agent block already uses — not the literal 65536/q8_0
+  # pin (2026-09-24, the amd-gcn onboarding): those CUDA 8GB tiers' 65536/q8_0 was
+  # measured on their own fixed-VRAM cards, but a Vulkan UMA box has no such fixed
+  # 8GB-class fit to pin to, so the seat serves whatever window/KV the tier declares
+  # (amd-gcn: 32768 / f16 KV / cache-ram 8192, measured on the amd-gcn reference box —
+  # Ryzen 5 5625U + Vega 7 gfx90c, llama.cpp b11153 Vulkan).
   mimo-9b-agent:
     aliases: [mimo-9b, agent-seat]
     env: ["${ld}", "${vk}"]
     cmd: >-
       __LLAMA_BIN__/llama-server --model __MODELS__/MiMo-V2.6-Distill-Qwen-9B-Q4_K_M.gguf
-      --n-gpu-layers 999 --parallel 1 --ctx-size 65536 --flash-attn on
-      --cache-type-k q8_0 --cache-type-v q8_0 --threads __NTHREADS__ --reasoning off --jinja
-      --port ${PORT} --host 127.0.0.1
+      --n-gpu-layers 999 --parallel 1 --ctx-size __CTX__ --flash-attn __FLASH_ATTN__
+      --cache-type-k __KV_K__ --cache-type-v __KV_V__ --cache-ram __CACHE_RAM__ __SLOT_SAVE__ --threads __NTHREADS__
+      --reasoning off --jinja --port ${PORT} --host 127.0.0.1
     checkEndpoint: /health
     ttl: 300
   # AGENT seat for the 16GB class: Qwen3.8-27B, gated on include_qwen38_27b. Same

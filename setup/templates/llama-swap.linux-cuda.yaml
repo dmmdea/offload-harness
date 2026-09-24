@@ -81,8 +81,13 @@ models:
   # NO sampling flags on purpose: the agent loop sends `temperature: 0` on every
   # request (internal/agent/client.go wireReq — the field has no omitempty and is
   # never assigned), so a server-side --temp/--top-p is inert on this lane.
+  #
+  # The Q354B_AGENT_ALIAS token below drops this entry's claim on `agent-seat` when
+  # mimo-9b-agent ALSO renders (2026-09-24): the two share the alias, and this seat
+  # stays as the tier's un-aliased ROLLBACK rather than being refused outright —
+  # the mirror of qwen3.5-9b-agent's own Q359B_AGENT_ALIAS token below.
   qwen3.5-4b-agent:
-    aliases: [qwen35-4b, agent-seat]
+    aliases: [qwen35-4b__Q354B_AGENT_ALIAS__]
     env: ["${ld}"]
     cmd: >-
       __LLAMA_BIN__/llama-server --model __MODELS__/Qwen3.5-4B-UD-Q4_K_XL.gguf

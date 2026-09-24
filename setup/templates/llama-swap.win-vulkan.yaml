@@ -72,13 +72,37 @@ models:
   # render must carry it too. Flags EXPLICIT, not ${common}: the seat was measured under
   # llama.cpp's DEFAULT reasoning behaviour. NO sampling flags: the agent loop sends
   # `temperature: 0` on every request.
+  #
+  # The Q354B_AGENT_ALIAS token below drops this entry's claim on `agent-seat` when
+  # mimo-9b-agent ALSO renders (2026-09-24, the amd-gcn onboarding): the two share
+  # the alias, and this seat stays as the tier's un-aliased ROLLBACK rather than
+  # being refused outright.
   qwen3.5-4b-agent:
-    aliases: [qwen35-4b, agent-seat]
+    aliases: [qwen35-4b__Q354B_AGENT_ALIAS__]
     env: [GGML_VK_VISIBLE_DEVICES=0]
     cmd: >-
       __LLAMA_BIN__/llama-server.exe -m __MODELS__/Qwen3.5-4B-UD-Q4_K_XL.gguf
       -ngl 999 --parallel 1 --ctx-size __CTX__ --flash-attn __FLASH_ATTN__
       --cache-type-k __KV_K__ --cache-type-v __KV_V__ --cache-ram __CACHE_RAM__ __SLOT_SAVE__ --jinja --port ${PORT} --host 127.0.0.1
+    ttl: 300
+  # SECOND AGENT seat: MiMo-V2.6-Distill-Qwen-9B, gated on include_mimo_9b — see the
+  # win-cuda template for the full rationale and measurements. Claims the SAME
+  # `agent-seat` alias as qwen3.5-4b-agent, which loses it (its own Q354B_AGENT_ALIAS
+  # token above) when this seat renders alongside it.
+  # REQUIRES llama.cpp >= b11102 (upstream llama.cpp #29319: an older build routes
+  # MiMo's compact tool-call XML to the Qwen3-Coder parser and every tool call runs
+  # to max_tokens). Ctx/flash-attn/KV are the TIER's own tokens, mirroring the
+  # qwen3.5-4b-agent block above — not the win-cuda/linux-cuda literal 65536/q8_0
+  # pin: those CUDA 8GB tiers measured that fit on their own fixed-VRAM cards, but a
+  # Vulkan UMA box (amd-gcn: 32768 / f16 KV / cache-ram 8192, measured on the amd-gcn
+  # reference box — Ryzen 5 5625U + Vega 7 gfx90c, llama.cpp b11153 Vulkan) has no such fixed fit.
+  mimo-9b-agent:
+    aliases: [mimo-9b, agent-seat]
+    env: [GGML_VK_VISIBLE_DEVICES=0]
+    cmd: >-
+      __LLAMA_BIN__/llama-server.exe -m __MODELS__/MiMo-V2.6-Distill-Qwen-9B-Q4_K_M.gguf
+      -ngl 999 --parallel 1 --ctx-size __CTX__ --flash-attn __FLASH_ATTN__
+      --cache-type-k __KV_K__ --cache-type-v __KV_V__ --cache-ram __CACHE_RAM__ __SLOT_SAVE__ --reasoning off --jinja --port ${PORT} --host 127.0.0.1
     ttl: 300
   embeddinggemma:
     env: [GGML_VK_VISIBLE_DEVICES=0]
@@ -117,8 +141,9 @@ matrix:
     m26: gemma4-26b-a4b
     a26: gemma-4-26b-agent
     q354: qwen3.5-4b-agent
+    mimo9: mimo-9b-agent
   evict_costs:
     emb: 1000
   sets:
     residents: "emb__SEATS_RESIDENT__"
-    interactive: "+residents & (e4b | e2b__M26_ALT____Q354B_ALT____SEATS_SWAPPABLE__)"
+    interactive: "+residents & (e4b | e2b__M26_ALT____Q354B_ALT____MIMO9B_ALT____SEATS_SWAPPABLE__)"

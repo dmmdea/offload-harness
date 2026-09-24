@@ -36,6 +36,7 @@ func TestAgentWindowMatchesWhatTheAgentSeatServes(t *testing.T) {
 		Profiles map[string]struct {
 			CtxSize        int                        `json:"ctx_size"`
 			AgentCtxTokens int                        `json:"agent_ctx_tokens"`
+			Backend        string                     `json:"backend"`
 			IncludeQ354B   bool                       `json:"include_qwen35_4b"`
 			IncludeQ359B   bool                       `json:"include_qwen35_9b"`
 			IncludeQ3827B  bool                       `json:"include_qwen38_27b"`
@@ -46,13 +47,30 @@ func TestAgentWindowMatchesWhatTheAgentSeatServes(t *testing.T) {
 		t.Fatalf("profiles.json is not valid JSON: %v", err)
 	}
 
-	// The agent seats live in the Windows CUDA template; both claim the `agent-seat`
-	// alias, which is how the harness finds the lane.
+	// Most agent seats live in the Windows CUDA template; both claim the `agent-seat`
+	// alias, which is how the harness finds the lane. A "vulkan" tier is the
+	// exception (2026-09-24, the amd-gcn onboarding): it renders from
+	// llama-swap.linux-vulkan.yaml, whose mimo-9b-agent/qwen3.5-*-agent entries carry
+	// the TIER's own __CTX__ macro rather than the CUDA 8GB tiers' literal window —
+	// reading the CUDA template's ctx expression for a vulkan-bound tier would compare
+	// against a window that tier never actually serves.
 	tmplRaw, err := os.ReadFile(filepath.Join("setup", "templates", "llama-swap.win-cuda.yaml"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	seatCtx := map[string]string{
+	vulkanTmplRaw, err := os.ReadFile(filepath.Join("setup", "templates", "llama-swap.linux-vulkan.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	seatCtxByBackend := map[string]map[string]string{
+		"vulkan": {
+			"qwen3.5-4b-agent": ctxExprFor(t, string(vulkanTmplRaw), "qwen3.5-4b-agent"),
+			"qwen3.5-9b-agent": ctxExprFor(t, string(vulkanTmplRaw), "qwen3.5-9b-agent"),
+			"qwen38-27b-agent": ctxExprFor(t, string(vulkanTmplRaw), "qwen38-27b-agent"),
+			"mimo-9b-agent":    ctxExprFor(t, string(vulkanTmplRaw), "mimo-9b-agent"),
+		},
+	}
+	defaultSeatCtx := map[string]string{
 		"qwen3.5-4b-agent": ctxExprFor(t, string(tmplRaw), "qwen3.5-4b-agent"),
 		"qwen3.5-9b-agent": ctxExprFor(t, string(tmplRaw), "qwen3.5-9b-agent"),
 		"qwen38-27b-agent": ctxExprFor(t, string(tmplRaw), "qwen38-27b-agent"),
@@ -61,6 +79,10 @@ func TestAgentWindowMatchesWhatTheAgentSeatServes(t *testing.T) {
 
 	checked := 0
 	for tier, p := range doc.Profiles {
+		seatCtx := defaultSeatCtx
+		if m, ok := seatCtxByBackend[p.Backend]; ok {
+			seatCtx = m
+		}
 		seat := ""
 		// A tier may render SEVERAL agent-capable entries (the 27B entry deliberately does
 		// not claim the `agent-seat` alias, so it coexists with a 4B/9B fallback). What

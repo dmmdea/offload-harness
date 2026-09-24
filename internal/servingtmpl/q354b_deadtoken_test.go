@@ -40,7 +40,7 @@ var tokenTemplates = map[string][]string{
 	"__Q38_AND__":    {"llama-swap.win-cuda-resident.yaml"},
 	"__Q354B_ALT__":  {"llama-swap.linux-cuda.yaml", "llama-swap.win-cuda.yaml"},
 	"__Q359B_ALT__":  {"llama-swap.linux-cuda.yaml", "llama-swap.win-cuda.yaml"},
-	"__MIMO9B_ALT__": {"llama-swap.linux-cuda.yaml", "llama-swap.linux-vulkan.yaml", "llama-swap.win-cuda.yaml"},
+	"__MIMO9B_ALT__": {"llama-swap.linux-cuda.yaml", "llama-swap.linux-vulkan.yaml", "llama-swap.win-cuda.yaml", "llama-swap.win-vulkan.yaml"},
 }
 
 // tokenVar is the matrix VARIABLE each token's expansion must reference when its
@@ -77,10 +77,12 @@ func gatesFor(tmpl string) Params {
 	p.IncludeQ38 = definesModel(tmpl, modelQ38)
 	p.IncludeQ354B = definesModel(tmpl, modelQ354B)
 	// NOT derived like the others: the 4B, 9B and mimo seats all share the
-	// agent-seat alias in some combination (validate() refuses 4B+9B and
-	// 4B+mimo), and every shipping template that defines one defines the
-	// others. The base holds 9B and mimo off; setGate flips one on while
-	// clearing the 4B, keeping each flip single-variable.
+	// agent-seat alias in some combination (validate() still refuses 4B+9B
+	// together; 4B+mimo and 9B+mimo render together instead, with the smaller
+	// entry losing its own claim on the alias), and every shipping template
+	// that defines one defines the others. The base holds 9B and mimo off;
+	// setGate flips one on while clearing the 4B, keeping each flip
+	// single-variable.
 	p.IncludeQ359B = false
 	p.IncludeMimo9B = false
 	return p
@@ -231,7 +233,7 @@ func TestRenderCarriesNoQ354BAndSubstitution(t *testing.T) {
 	}
 	// Pin that the live siblings are still substituted, so this file's
 	// "remove the dead one" lesson is never over-applied to them.
-	for _, live := range []string{`"__M26_ALT__":`, `"__M26_AND__":`, `"__Q38_ALT__":`, `"__Q38_AND__":`, `"__Q354B_ALT__":`, `"__Q359B_ALT__":`, `"__MIMO9B_ALT__":`} {
+	for _, live := range []string{`"__M26_ALT__":`, `"__M26_AND__":`, `"__Q38_ALT__":`, `"__Q38_AND__":`, `"__Q354B_ALT__":`, `"__Q354B_AGENT_ALIAS__":`, `"__Q359B_ALT__":`, `"__MIMO9B_ALT__":`} {
 		if !strings.Contains(src, live) {
 			t.Errorf("substitution %s is gone — it IS consumed by a shipped template, and an unexpanded token bricks llama-swap at startup", live)
 		}
