@@ -317,6 +317,16 @@ if ($a8Functional -notmatch 'qwen3\.5-4b-agent' -and $a8Functional -notmatch '\b
 # on-box bake" was the OLD state: PR #173 flipped include_qwen35_9b after the
 # blackwell-8 reference bake (100% vs E4B 0%); live aorus-ampere8 serves it resident at 32k (verified /fleet/health 2026-08-25). The stale strip expectation kept main red for four merges.
 if ($a8Functional -match 'qwen3\.5-9b-agent' -and $a8Functional -notmatch '__Q359B_') { Ok 'ampere-8 renders the qwen3.5-9b agent seat (include_qwen35_9b, PR #173)' } else { Bad 'ampere-8 qwen3.5-9b seat missing or unsubstituted' }
+# ampere-8 ALSO renders mimo-9b-agent (include_mimo_9b, 2026-09-24 8GB agent-seat bake:
+# a coin-flip quality tie against qwen3.5-9b-agent with a smaller VRAM footprint). Both
+# seats render together; qwen3.5-9b-agent loses its OWN agent-seat alias to mimo.
+if ($a8Functional -match 'mimo-9b-agent' -and $a8Functional -notmatch '__MIMO9B_' -and $a8Functional -notmatch '__Q359B_AGENT_ALIAS__') { Ok 'ampere-8 renders the mimo-9b-agent seat (include_mimo_9b, 2026-09-24 bake)' } else { Bad 'ampere-8 mimo-9b-agent seat missing or unsubstituted' }
+# Whole-block extraction (not "next line after the key"): gpu_env injection inserts an
+# env: line between the key and aliases:, so a fixed line offset is fragile.
+$a8QwenCmd = ([regex]::Match($r.yaml, '(?ms)^\s{2}qwen3\.5-9b-agent:.*?(?=^\s{2}\S|\Z)')).Value
+if ($a8QwenCmd -and $a8QwenCmd -match 'aliases:\s*\[qwen35-9b\]') { Ok 'ampere-8 qwen3.5-9b-agent lost the agent-seat alias to mimo-9b-agent' } else { Bad "ampere-8 qwen3.5-9b-agent aliases wrong (still claims agent-seat?): $a8QwenCmd" }
+$a8MimoCmd = ([regex]::Match($r.yaml, '(?ms)^\s{2}mimo-9b-agent:.*?(?=^\s{2}\S|\Z)')).Value
+if ($a8MimoCmd -and $a8MimoCmd -match 'aliases:.*mimo-9b.*agent-seat') { Ok 'ampere-8 mimo-9b-agent holds the agent-seat alias' } else { Bad "ampere-8 mimo-9b-agent does not hold agent-seat - got: $a8MimoCmd" }
 
 # blackwell-8: the measured 8GB agent seat renders (entry + swappable-set membership).
 # MEASURED 2026-08-22 on the tier's reference box (OptiPlex 7060, RTX 5060): 100%
@@ -342,6 +352,24 @@ foreach ($band in @('low','mid')) {
   # The 4B stays OUT on this tier (shared agent-seat alias; renderer refuses both).
   $bw8Functional = (($r.yaml -split "`r?`n") | Where-Object { $_.Trim() -and $_.Trim() -notmatch '^#' }) -join "`n"
   if ($bw8Functional -notmatch 'qwen3\.5-4b-agent' -and $bw8Functional -notmatch '\bq354\b' -and $bw8Functional -notmatch '__Q354B_') { Ok "blackwell-8/$band qwen3.5-4b seat stays stripped (9B holds the agent-seat alias)" } else { Bad "blackwell-8/$band qwen3.5-4b leaked in beside the 9B" }
+
+  # mimo-9b-agent (include_mimo_9b, 2026-09-24 8GB agent-seat bake): renders TOGETHER
+  # with qwen3.5-9b-agent on this tier, holds the SHARED agent-seat alias, and pins
+  # `--reasoning off` directly (measured byte-identical to the chat-template-kwargs env
+  # twin, unlike qwen3.5-9b-agent which needs the env-twin workaround).
+  Write-Host "== blackwell-8 / ram=$band - mimo-9b-agent seat (include_mimo_9b) =="
+  if ($r.yaml -match '(?m)^\s{2}mimo-9b-agent:')                { Ok "blackwell-8/$band mimo-9b-agent seat present (include_mimo_9b)" } else { Bad "blackwell-8/$band mimo-9b-agent seat missing" }
+  if ($r.yaml -match '(?m)^\s{4}interactive:.*\bmimo9\b')       { Ok "blackwell-8/$band mimo-9b-agent joins the interactive set" } else { Bad "blackwell-8/$band mimo9 set membership" }
+  if ($r.yaml -notmatch '__MIMO9B_')                            { Ok "blackwell-8/${band}: no unsubstituted MIMO9B token" } else { Bad "blackwell-8/$band left __MIMO9B_ALT__" }
+  if ($r.yaml -notmatch '__Q359B_AGENT_ALIAS__')                { Ok "blackwell-8/${band}: no unsubstituted Q359B_AGENT_ALIAS token" } else { Bad "blackwell-8/$band left __Q359B_AGENT_ALIAS__" }
+  $mimoCmd = ([regex]::Match($r.yaml, '(?ms)^\s{2}mimo-9b-agent:.*?(?=^\s{2}\S|\Z)')).Value
+  if ($mimoCmd -and $mimoCmd -match '--reasoning\s+off')        { Ok "blackwell-8/$band mimo seat PINS --reasoning off (measured byte-identical to the kwargs twin)" } else { Bad "blackwell-8/$band mimo seat lost --reasoning off" }
+  if ($mimoCmd -and $mimoCmd -notmatch 'LLAMA_ARG_CHAT_TEMPLATE_KWARGS') { Ok "blackwell-8/$band mimo seat carries no thinking-kwargs env twin (not needed for this family)" } else { Bad "blackwell-8/$band mimo seat carries the unneeded env-twin workaround" }
+  if ($mimoCmd -and $mimoCmd -match '--ctx-size 65536')         { Ok "blackwell-8/$band mimo seat serves explicit ctx 65536 (measured fit)" } else { Bad "blackwell-8/$band mimo seat lost its measured ctx 65536" }
+  if ($mimoCmd -and $mimoCmd -match 'aliases:.*mimo-9b.*agent-seat') { Ok "blackwell-8/$band mimo seat holds mimo-9b + agent-seat aliases" } else { Bad "blackwell-8/$band mimo seat aliases wrong: $mimoCmd" }
+  # qwen3.5-9b-agent stays rendered as the ROLLBACK but loses the SHARED agent-seat alias.
+  $q359CmdWithMimo = ([regex]::Match($r.yaml, '(?ms)^\s{2}qwen3\.5-9b-agent:.*?(?=^\s{2}\S|\Z)')).Value
+  if ($q359CmdWithMimo -and $q359CmdWithMimo -match 'aliases:\s*\[qwen35-9b\]') { Ok "blackwell-8/$band qwen3.5-9b-agent lost the agent-seat alias to mimo-9b-agent" } else { Bad "blackwell-8/$band qwen3.5-9b-agent aliases wrong (still claims agent-seat?): $q359CmdWithMimo" }
 }
 Write-Host "== amd-gcn - 32768 / f16 / flash-attn on (vulkan; measured 2026-09-20) =="
 $r = Invoke-Render -Backend 'vulkan' -ProfileId 'amd-gcn' -RamTier 'low' -BigRam $false
@@ -418,16 +446,17 @@ if ($seat) { $mergedSeed = Merge-ConfigSeed -ConfigText $mergedSeed -Seed ([pscu
 $mergedObj = $mergedSeed | ConvertFrom-Json
 if ($mergedObj.agent_model -eq 'qwen3.8-27b') { Ok 'b2x16 fresh seed-merge binds explicit agent_model=qwen3.8-27b' } else { Bad "b2x16 agent_model (got: '$($mergedObj.agent_model)')" }
 
-# ampere-8 binds agent_model=qwen3.5-9b-agent explicitly in config_seed (PR #173,
-# measured seat, profile research). Mid-RAM flow
-# (base seed + overlay), the widest seed path an 8GB box gets.
+# ampere-8 binds agent_model=mimo-9b-agent explicitly in config_seed (2026-09-24
+# 8GB agent-seat bake: a coin-flip quality tie against qwen3.5-9b-agent with a
+# smaller VRAM footprint; qwen3.5-9b-agent stays rendered as the rollback seat).
+# Mid-RAM flow (base seed + overlay), the widest seed path an 8GB box gets.
 $row8 = $seedProfiles.'ampere-8'
 $merged8 = Merge-ConfigSeed -ConfigText $seedTpl -Seed $row8.config_seed
 if ($row8.PSObject.Properties['config_seed_ram_mid_high']) { $merged8 = Merge-ConfigSeed -ConfigText $merged8 -Seed $row8.config_seed_ram_mid_high }
 $seat8 = Get-DerivedAgentModel -ProfileRow $row8 -Seeds @($row8.config_seed, $row8.config_seed_ram_mid_high)
 if ($seat8) { $merged8 = Merge-ConfigSeed -ConfigText $merged8 -Seed ([pscustomobject]@{ agent_model = $seat8 }) }
 $merged8Obj = $merged8 | ConvertFrom-Json
-if ($merged8Obj.agent_model -eq 'qwen3.5-9b-agent') { Ok 'ampere-8 fresh seed-merge binds explicit agent_model=qwen3.5-9b-agent' } else { Bad "ampere-8 agent_model (got: '$($merged8Obj.agent_model)')" }
+if ($merged8Obj.agent_model -eq 'mimo-9b-agent') { Ok 'ampere-8 fresh seed-merge binds explicit agent_model=mimo-9b-agent' } else { Bad "ampere-8 agent_model (got: '$($merged8Obj.agent_model)')" }
 
 Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue
 

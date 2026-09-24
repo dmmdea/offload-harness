@@ -188,6 +188,53 @@ Five harness defects from the OptiPlex 7060 (blackwell-8) media parity audit, 20
   that first slipped past a vacuous test comparing `protocolText()` with itself (replaced by fixed
   expectations).
 
+## [0.140.9] - 2026-09-24 - a second 8GB-class agent seat, mimo-9b-agent, joins qwen3.5-9b-agent on blackwell-8 and ampere-8
+
+### Added — `mimo-9b-agent`: a coin-flip-tie second 8GB agent seat, encoded exactly like `include_qwen35_9b`
+
+A new tier flag `include_mimo_9b` gates the mimo-9b-agent seat (XiaomiMiMo/MiMo-V2.6-Distill-Qwen-9B,
+bartowski GGUF Q4_K_M) into the serving yaml, mirroring `include_qwen35_9b`'s mechanism end to end
+(`servingtmpl.Params.IncludeMimo9B`, `install_render.go`'s `servingProfile.IncludeMimo9B`, the
+`__MIMO9B_ALT__` matrix-set token, `warnMissingGatedModels`, `install.ps1`'s `$PINNED`/`Get-GatedModelKeys`
+gate). `blackwell-8` and `ampere-8` now set `include_mimo_9b: true` alongside `include_qwen35_9b: true`,
+bind `config_seed.agent_model` to `mimo-9b-agent`, and raise `agent_ctx_tokens` 32768 -> 65536 to match
+the seat's own literal `--ctx-size` (`TestAgentWindowMatchesWhatTheAgentSeatServes`).
+
+- **Exclusivity, decided explicitly and enforced in the renderer.** mimo-9b-agent claims the SAME
+  `agent-seat` alias as qwen3.5-4b-agent and qwen3.5-9b-agent. `include_mimo_9b` with
+  `include_qwen35_4b` is refused by name (both would claim the alias) — but `include_mimo_9b` WITH
+  `include_qwen35_9b` is explicitly ALLOWED: the two 8GB-class seats render TOGETHER, with
+  qwen3.5-9b-agent kept as the un-aliased ROLLBACK (a new `__Q359B_AGENT_ALIAS__` token drops its own
+  claim on `agent-seat` precisely when mimo-9b-agent is included, so the two entries never collide).
+  `include_mimo_9b` alone (no qwen3.5-9b-agent) is also a valid shape.
+- **Wired into `setup/templates/llama-swap.win-cuda.yaml`, `llama-swap.linux-cuda.yaml` and
+  `llama-swap.linux-vulkan.yaml`** — the exact three templates that already carry qwen3.5-9b-agent.
+  The seat pins its measured configuration as LITERALS (`--ctx-size 65536 --flash-attn on
+  --cache-type-k q8_0 --cache-type-v q8_0 --reasoning off`), not the tier's `__CTX__`/`__FLASH_ATTN__`/
+  `__KV_K__`/`__KV_V__` macros — the same convention qwen3.5-9b-agent uses for its own literal ctx.
+  Unlike qwen3.5-9b-agent, MiMo pins `--reasoning off` directly on the command line rather than the
+  `LLAMA_ARG_CHAT_TEMPLATE_KWARGS` env-twin workaround: measured byte-identical on all 12 quality runs,
+  so the CLI flag is the intended pin for this family.
+- **REQUIRES llama.cpp >= b11102.** On b10964 the chat-template auto-detector misroutes MiMo's compact
+  tool-call XML (`<tool_call><function=...>` with no newlines) to the Qwen3-Coder parser, which waits on
+  a literal `\n</parameter>` that never comes, so every tool call runs to the token cap (upstream
+  llama.cpp #29319, fixed in `common/chat.cpp` by excluding that template, present in b11153). MiMo
+  failed every agent run on b10964 for exactly this reason; documented in the template comment, the
+  tier notes and `docs/tiers/{blackwell-8,ampere-8}.md`.
+- **MEASURED 2026-09-24 on both 8GB reference boxes** (RTX 5060 8GB, RTX 3070 Laptop 8GB; llama.cpp
+  b10964 for fit, b11153 for quality/engine smoke): fit at ctx 65536/q8_0/flash-attn-on is smaller than
+  qwen3.5-9b-agent's on both boxes (6,926/7,034 MiB vs 7,044/7,154 on the 5060; 6,683/6,707 vs 6,801/6,827
+  on the 3070 Laptop). Quality (agent-seat bake instrument, gold.py grader, fresh server per rep, n=3):
+  shape B 18/18 x6 both models both boxes; shape C is a genuine coin-flip tie — MiMo 5/5 x3 / qwen 4/5 x3
+  on blackwell-8, MiMo 4/5 x3 / qwen 5/5 x3 on ampere-8 (q2, cross-file arithmetic, is the item that
+  flips). vLLM was ruled out for this 9B on 8GB: text-only W4A16 weights alone (7.51-9.35 GiB) exceed
+  the card before KV. Full figures in `setup/templates/profiles.json`'s tier notes.
+- Tests: new `internal/servingtmpl/mimo9b_invariant_test.go` (measured-invariant pins, entryless-template
+  refusal, the 4B/mimo mutual exclusion, the mimo+9B co-render with the alias handoff, mimo-alone).
+  Extended `q354b_deadtoken_test.go`, `provenance_test.go`, `agent_window_test.go`, `seat_closure_test.go`,
+  `install_gatedmodels_test.go`/`_contract_test.go`, `setup/render.tests.ps1` and
+  `setup/tests/install-config-seed.test.ps1` the same way the 9B pair's own tests are shaped.
+
 ## [0.140.8] - 2026-09-24 - the GPU lease queue is strictly FIFO for a returning holder, a blocked seat/text-load admission gets a fair turn, `--unload-seat` clears every resident model, and `gpu reserve`/`gpu status` name foreign VRAM holders
 
 Four GPU-lease fairness defects measured live during the OptiPlex 7060 remediation (2026-09-23,

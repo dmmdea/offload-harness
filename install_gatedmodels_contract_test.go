@@ -40,6 +40,7 @@ var gatedWeightFilenames = []string{
 	mmprojQ38,
 	weightQ354B,
 	weightQ359B,
+	weightMimo9B,
 }
 
 func repoFile(t *testing.T, rel string) string {
@@ -62,6 +63,7 @@ var gatedModelWeights = map[string][]string{
 	"qwen3.5-4b-agent": {weightQ354B},
 	"qwen3.5-9b-agent": {weightQ359B},
 	"qwen38-27b-agent": {weightQ3827B},
+	"mimo-9b-agent":    {weightMimo9B},
 }
 
 // TestGatedWeightFilenamesMatchTheShippedTemplates pins each filename against the

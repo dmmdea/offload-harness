@@ -126,21 +126,33 @@ Assert ($null -eq $profiles.'ampere-8'.include_qwen35_4b)                  'ampe
 # thinking-off 100% extraction x2 + 5/5 x2 vs the E4B fallback's 0% x2; 6344 MiB
 # @16K / 6696 @32K on the RTX 5060 reference box). Same both-halves rule as ampere-6.
 $sB8 = $profiles.'blackwell-8'.config_seed
-Assert ($sB8.agent_model -eq 'qwen3.5-9b-agent')                           'blackwell-8 seats the qwen3.5-9b agent (measured on-box winner)'
-Assert ([bool]$profiles.'blackwell-8'.include_qwen35_9b)                   'blackwell-8 sets include_qwen35_9b (yaml entry + download gate)'
+# MIMO-9B-AGENT ADOPTED (operator-approved, MEASURED 2026-09-24): mimo-9b-agent joins
+# qwen3.5-9b-agent as this tier's agent_model at ctx 65536 - a coin-flip quality tie
+# with a smaller VRAM footprint (see profiles.json notes for the full bake). Both
+# include flags stay true; qwen3.5-9b-agent keeps rendering as the un-aliased rollback.
+Assert ($sB8.agent_model -eq 'mimo-9b-agent')                              'blackwell-8 seats mimo-9b-agent (2026-09-24 bake, coin-flip tie w/ smaller footprint)'
+Assert ([bool]$profiles.'blackwell-8'.include_mimo_9b)                     'blackwell-8 sets include_mimo_9b (yaml entry + download gate)'
+Assert ([bool]$profiles.'blackwell-8'.include_qwen35_9b)                   'blackwell-8 KEEPS include_qwen35_9b true (qwen3.5-9b-agent stays the rollback seat)'
+Assert ($profiles.'blackwell-8'.agent_ctx_tokens -eq 65536)                'blackwell-8 agent_ctx_tokens raised to 65536 (mimo-9b-agent literal --ctx-size)'
 Assert ($sB8.agent_profile -eq 'research')                                 'blackwell-8 keeps agent_profile=research (the measured 0-to-72 lever)'
-Assert ($null -eq $profiles.'blackwell-8'.include_qwen35_4b)               'blackwell-8 include_qwen35_4b stays absent (9B holds the shared agent-seat alias)'
+Assert ($null -eq $profiles.'blackwell-8'.include_qwen35_4b)               'blackwell-8 include_qwen35_4b stays absent (mimo/9B hold the shared agent-seat alias)'
 # ampere-8: seat ADOPTED (operator-approved 2026-08-25; on-reference leg-2 bake 2026-08-24:
 # 9B think-off 100% x2 + 5/5 x2 at 3 steps vs E4B 0% x2; fit 6111 MiB @32K on the 3070).
 # Twin field-parity with blackwell-8 RESTORED on the agent seat. Same both-halves rule.
 $sA8 = $profiles.'ampere-8'.config_seed
-Assert ($sA8.agent_model -eq 'qwen3.5-9b-agent')                           'ampere-8 seats the qwen3.5-9b agent (on-reference bake winner)'
-Assert ([bool]$profiles.'ampere-8'.include_qwen35_9b)                      'ampere-8 sets include_qwen35_9b (yaml entry + download gate)'
+Assert ($sA8.agent_model -eq 'mimo-9b-agent')                              'ampere-8 seats mimo-9b-agent (2026-09-24 bake, coin-flip tie w/ smaller footprint)'
+Assert ([bool]$profiles.'ampere-8'.include_mimo_9b)                        'ampere-8 sets include_mimo_9b (yaml entry + download gate)'
+Assert ([bool]$profiles.'ampere-8'.include_qwen35_9b)                      'ampere-8 KEEPS include_qwen35_9b true (qwen3.5-9b-agent stays the rollback seat)'
+Assert ($profiles.'ampere-8'.agent_ctx_tokens -eq 65536)                   'ampere-8 agent_ctx_tokens raised to 65536 (mimo-9b-agent literal --ctx-size)'
 Assert ($profiles.'ampere-8'.ctx_size -eq 32768)                           'ampere-8 serves 32K (measured on-reference: E4B 3187 MiB, 9B 6111 MiB @32K)'
 # The 4B and 9B seats are mutually exclusive EVERYWHERE (shared agent-seat alias;
 # the Go renderer refuses both) - pin the whole table so a future tier cannot ship it.
 foreach ($t in @($profiles.PSObject.Properties.Name)) {
   Assert (-not (($profiles.$t.include_qwen35_4b -eq $true) -and ($profiles.$t.include_qwen35_9b -eq $true))) "tier ${t}: include_qwen35_4b and include_qwen35_9b are mutually exclusive"
+  # mimo-9b-agent shares the SAME alias as the 4B, so it is mutually exclusive with it
+  # too - but NOT with include_qwen35_9b, which mimo may render alongside (the renderer
+  # moves the shared alias to mimo and strips it from qwen3.5-9b-agent).
+  Assert (-not (($profiles.$t.include_qwen35_4b -eq $true) -and ($profiles.$t.include_mimo_9b -eq $true))) "tier ${t}: include_qwen35_4b and include_mimo_9b are mutually exclusive"
 }
 $s32 = $profiles.'blackwell-32'.config_seed
 Assert ($s32.videogen_width -eq 1280 -and $s32.videogen_height -eq 704)     'blackwell-32 seeds REDUCED-RES 1280x704 video (doctrine-conformant recipe)'
@@ -285,8 +297,18 @@ Assert ($q359.Count -eq 1)                                                  'inc
 $leanQ359 = @(Get-GatedModelKeys -IncludeQwen38 $false -IncludeQwen354B $false -IncludeQwen359B $true -WithFamily $false)
 Assert ($leanQ359 -contains 'model-qwen35-9b')                              'qwen3.5-9b survives a LEAN install (does NOT ride the family gate)'
 
+# The mimo-9b-agent seat: same gate mechanism, same deliberate non-family asymmetry.
+$mimo = @(Get-GatedModelKeys -IncludeQwen38 $false -IncludeQwen354B $false -IncludeMimo9B $true -WithFamily $true)
+Assert ($mimo -contains 'model-mimo-9b')                                    'include_mimo_9b pulls model-mimo-9b'
+Assert ($mimo.Count -eq 1)                                                  'include_mimo_9b pulls ONLY its own weights'
+$leanMimo = @(Get-GatedModelKeys -IncludeQwen38 $false -IncludeQwen354B $false -IncludeMimo9B $true -WithFamily $false)
+Assert ($leanMimo -contains 'model-mimo-9b')                                'mimo-9b survives a LEAN install (does NOT ride the family gate)'
+# Both 8GB-class seats gated together pull both weights - the shape blackwell-8/ampere-8 ship.
+$both9B = @(Get-GatedModelKeys -IncludeQwen38 $false -IncludeQwen354B $false -IncludeQwen359B $true -IncludeMimo9B $true -WithFamily $true)
+Assert (($both9B -contains 'model-qwen35-9b') -and ($both9B -contains 'model-mimo-9b') -and ($both9B.Count -eq 2)) 'include_qwen35_9b + include_mimo_9b together pull both weights, only those'
+
 # Every key a gate can emit must exist in $PINNED, or the install dies mid-download.
-foreach ($k in @('model-qwen35-4b', 'model-qwen35-9b', 'model-qwen38', 'model-qwen38-mmproj')) {
+foreach ($k in @('model-qwen35-4b', 'model-qwen35-9b', 'model-mimo-9b', 'model-qwen38', 'model-qwen38-mmproj')) {
   Assert ([bool]$PINNED[$k])                                                "PINNED defines $k (gate cannot name a key with no pin)"
 }
 # Closure the other way: a tier that sets the flag must have its pin present.
@@ -296,6 +318,9 @@ foreach ($t in @($profiles.PSObject.Properties.Name)) {
   }
   if ($profiles.$t.include_qwen35_9b -eq $true) {
     Assert ([bool]$PINNED['model-qwen35-9b'])                               "tier $t sets include_qwen35_9b and the pin exists"
+  }
+  if ($profiles.$t.include_mimo_9b -eq $true) {
+    Assert ([bool]$PINNED['model-mimo-9b'])                                 "tier $t sets include_mimo_9b and the pin exists"
   }
 }
 

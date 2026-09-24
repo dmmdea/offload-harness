@@ -156,6 +156,7 @@ type ParamsBasis struct {
 	IncludeQ38    bool             `json:"include_qwen38"`
 	IncludeQ354B  bool             `json:"include_qwen35_4b"`
 	IncludeQ359B  bool             `json:"include_qwen35_9b"`
+	IncludeMimo9B bool             `json:"include_mimo_9b"`
 	IncludeQ3827B bool             `json:"include_qwen38_27b"`
 	Seats         []mediaseat.Seat `json:"seats"`
 	Home          string           `json:"home"`
@@ -179,7 +180,7 @@ func BasisOf(p Params) ParamsBasis {
 		LlamaBin: p.LlamaBin, ModelsDir: p.ModelsDir, Listen: p.Listen,
 		Ctx: p.Ctx, KVType: p.KVType, FlashAttn: p.FlashAttn, MoE26B: p.MoE26B,
 		Threads: p.Threads, CacheRAMMiB: p.CacheRAMMiB, Include26B: p.Include26B, IncludeQ38: p.IncludeQ38,
-		IncludeQ354B: p.IncludeQ354B, IncludeQ359B: p.IncludeQ359B,
+		IncludeQ354B: p.IncludeQ354B, IncludeQ359B: p.IncludeQ359B, IncludeMimo9B: p.IncludeMimo9B,
 		IncludeQ3827B: p.IncludeQ3827B,
 		Seats:         p.Seats, Home: p.Home, GOOS: p.GOOS, DisplayLayer: p.DisplayLayer, GPUEnv: p.GPUEnv,
 		Backend: p.Backend, AltCPULlamaBin: p.AltCPULlamaBin, DisableCUDAGraphs: p.DisableCUDAGraphs,
@@ -196,7 +197,7 @@ func (b ParamsBasis) Params() Params {
 		LlamaBin: b.LlamaBin, ModelsDir: b.ModelsDir, Listen: b.Listen,
 		Ctx: b.Ctx, KVType: b.KVType, FlashAttn: b.FlashAttn, MoE26B: b.MoE26B,
 		Threads: b.Threads, CacheRAMMiB: b.CacheRAMMiB, Include26B: b.Include26B, IncludeQ38: b.IncludeQ38,
-		IncludeQ354B: b.IncludeQ354B, IncludeQ359B: b.IncludeQ359B,
+		IncludeQ354B: b.IncludeQ354B, IncludeQ359B: b.IncludeQ359B, IncludeMimo9B: b.IncludeMimo9B,
 		IncludeQ3827B: b.IncludeQ3827B,
 		Seats:         b.Seats, Home: b.Home, GOOS: b.GOOS, DisplayLayer: b.DisplayLayer, GPUEnv: b.GPUEnv,
 		Backend: b.Backend, AltCPULlamaBin: b.AltCPULlamaBin, DisableCUDAGraphs: b.DisableCUDAGraphs,

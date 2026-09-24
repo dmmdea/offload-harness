@@ -118,13 +118,33 @@ models:
   # NO sampling flags on purpose: the agent loop sends `temperature: 0` on every
   # request (internal/agent/client.go wireReq), so server-side sampling is inert.
   qwen3.5-9b-agent:
-    aliases: [qwen35-9b, agent-seat]
+    aliases: [qwen35-9b__Q359B_AGENT_ALIAS__]
     env: ["${ld}", 'LLAMA_ARG_CHAT_TEMPLATE_KWARGS={"enable_thinking":false}']
     cmd: >-
       __LLAMA_BIN__/llama-server --model __MODELS__/Qwen3.5-9B-UD-Q4_K_XL.gguf
       --n-gpu-layers 999 --parallel 1 --ctx-size 32768 --flash-attn __FLASH_ATTN__
       --cache-type-k __KV_K__ --cache-type-v __KV_V__ --cache-ram __CACHE_RAM__ __SLOT_SAVE__ --threads __NTHREADS__
       --jinja --port ${PORT} --host 127.0.0.1
+    checkEndpoint: /health
+    ttl: 300
+  # SECOND AGENT seat for the 8GB tiers: MiMo-V2.6-Distill-Qwen-9B (bartowski GGUF
+  # Q4_K_M) — see the win-cuda template for the full rationale and measurements.
+  # Gated on include_mimo_9b; claims the SAME `agent-seat` alias as qwen3.5-9b-agent,
+  # which loses that alias (the __Q359B_AGENT_ALIAS__ token above) when this seat
+  # renders alongside it. REQUIRES llama.cpp >= b11102 (upstream #29319 — b10964
+  # misroutes MiMo's compact tool-call XML to the Qwen3-Coder parser and every tool
+  # call runs to the token cap). Ctx 65536 and the flash-attn/cache-type values are
+  # LITERALS: the exact configuration the 2026-09-24 fit and quality bakes measured
+  # on both 8GB reference boxes (6,926/7,034 MiB RTX 5060, 6,683/6,707 MiB RTX 3070
+  # Laptop — both smaller than qwen3.5-9b-agent's footprint at the same window).
+  mimo-9b-agent:
+    aliases: [mimo-9b, agent-seat]
+    env: ["${ld}"]
+    cmd: >-
+      __LLAMA_BIN__/llama-server --model __MODELS__/MiMo-V2.6-Distill-Qwen-9B-Q4_K_M.gguf
+      --n-gpu-layers 999 --parallel 1 --ctx-size 65536 --flash-attn on
+      --cache-type-k q8_0 --cache-type-v q8_0 --threads __NTHREADS__ --reasoning off --jinja
+      --port ${PORT} --host 127.0.0.1
     checkEndpoint: /health
     ttl: 300
   # AGENT seat for the 16GB class: Qwen3.8-27B UD-IQ3_S with the MTP head embedded in
@@ -211,6 +231,7 @@ matrix:
     a26: gemma-4-26b-agent
     q354: qwen3.5-4b-agent
     q359: qwen3.5-9b-agent
+    mimo9: mimo-9b-agent
     q3827: qwen38-27b-agent
   # The memory stack is the most expensive thing on this box to lose and the cheapest to
   # keep: make it maximally expensive to stop, so if the solver ever does have a choice
@@ -220,4 +241,4 @@ matrix:
     rer: 1000
   sets:
     residents: "emb & rer__SEATS_RESIDENT__"
-    interactive: "+residents & (e4b | e2b__M26_ALT____Q354B_ALT____Q359B_ALT____Q3827B_ALT____SEATS_SWAPPABLE__)"
+    interactive: "+residents & (e4b | e2b__M26_ALT____Q354B_ALT____Q359B_ALT____MIMO9B_ALT____Q3827B_ALT____SEATS_SWAPPABLE__)"

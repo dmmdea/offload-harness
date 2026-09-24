@@ -68,6 +68,16 @@ type Params struct {
 	// IncludeQ354B: both entries claim the `agent-seat` alias, so a tier enabling
 	// both would render a config llama-swap rejects — validate() refuses it by name.
 	IncludeQ359B bool
+	// IncludeMimo9B gates the mimo-9b-agent entry exactly as IncludeQ359B gates the
+	// Qwen3.5-9B one: false removes the model block, its matrix var and its set
+	// membership (the __MIMO9B_ALT__ token renders empty). It comes from the tier's
+	// include_mimo_9b field and defaults to false. It claims the SAME `agent-seat`
+	// alias as IncludeQ354B/IncludeQ359B do, so validate() refuses IncludeMimo9B
+	// together with IncludeQ354B — but NOT together with IncludeQ359B: the two 8GB-class
+	// seats may render side by side, with qwen3.5-9b-agent kept as the un-aliased
+	// rollback (its own aliases line carries the __Q359B_AGENT_ALIAS__ token, which
+	// drops the shared alias precisely when IncludeMimo9B is set).
+	IncludeMimo9B bool
 	// IncludeQ3827B gates the Qwen3.8-27B AGENT entry (UD-IQ3_S weights + the MTP
 	// head embedded in the same GGUF, drafted with --spec-type draft-mtp). False
 	// removes the model block, its matrix var and its set membership (the
@@ -237,6 +247,12 @@ func Render(tmpl string, p Params) (string, error) {
 			return "", err
 		}
 	}
+	if !p.IncludeMimo9B {
+		var err error
+		if out, err = dropMimo9B(out); err != nil {
+			return "", err
+		}
+	}
 	if !p.IncludeQ3827B {
 		var err error
 		if out, err = dropQ3827B(out); err != nil {
@@ -368,6 +384,30 @@ func Render(tmpl string, p Params) (string, error) {
 		}
 		q359balt = " | q359"
 	}
+	// mimo-9b-agent's membership mirrors Q359B exactly (only the _ALT_ half exists).
+	// Same refusal-by-name rule.
+	mimo9balt := ""
+	if p.IncludeMimo9B {
+		if !definesModel(out, modelMimo9B) {
+			return "", fmt.Errorf("this tier sets include_mimo_9b but the target serving template defines no "+
+				"`%s` model entry, so there is nothing to include. Rendering anyway would emit a config without "+
+				"the agent seat while the installer still downloads its weights — add the %s entry (and "+
+				"its matrix var + __MIMO9B_ALT__ set membership) to the template, or drop include_mimo_9b from the tier",
+				modelMimo9B, modelMimo9B)
+		}
+		mimo9balt = " | mimo9"
+	}
+	// qwen3.5-9b-agent's OWN `agent-seat` alias is dropped when mimo-9b-agent ALSO
+	// renders: the two would otherwise both claim it, the exact duplicate-alias shape
+	// validate() refuses for the 4B+9B pair. Unlike that pair, mimo+9B render TOGETHER
+	// by design — mimo holds the alias, qwen3.5-9b-agent stays the un-aliased rollback.
+	// Computed unconditionally: a template whose qwen3.5-9b-agent block was already
+	// dropped above (IncludeQ359B false) carries no __Q359B_AGENT_ALIAS__ occurrence
+	// left to substitute, so this is a harmless no-op there.
+	q359bAgentAlias := ", agent-seat"
+	if p.IncludeMimo9B {
+		q359bAgentAlias = ""
+	}
 	// The Qwen3.8-27B agent membership mirrors Q359B exactly. Same refusal-by-name rule.
 	q3827balt := ""
 	if p.IncludeQ3827B {
@@ -381,26 +421,28 @@ func Render(tmpl string, p Params) (string, error) {
 		q3827balt = " | q3827"
 	}
 	for from, to := range map[string]string{
-		"__M26_ALT__":         m26alt,
-		"__M26_AND__":         m26and,
-		"__Q38_ALT__":         q38alt,
-		"__Q38_AND__":         q38and,
-		"__Q354B_ALT__":       q354balt,
-		"__Q359B_ALT__":       q359balt,
-		"__Q3827B_ALT__":      q3827balt,
-		"__SEATS_SWAPPABLE__": seatFrag[roleSwappable],
-		"__SEATS_RESIDENT__":  seatFrag[roleResident],
-		"__LLAMA_BIN__":       strings.TrimRight(p.LlamaBin, "/"),
-		"__MODELS__":          strings.TrimRight(p.ModelsDir, "/"),
-		"__LISTEN__":          p.Listen,
-		"__CTX__":             fmt.Sprint(p.Ctx),
-		"__KV_K__":            p.KVType,
-		"__KV_V__":            p.KVType,
-		"__FLASH_ATTN__":      p.FlashAttn,
-		"__MOE_26B__":         p.MoE26B,
-		"__NTHREADS__":        fmt.Sprint(p.Threads),
-		"__CACHE_RAM__":       fmt.Sprint(p.cacheRAMMiB()),
-		"__SLOT_SAVE__":       p.slotSaveFlag(),
+		"__M26_ALT__":           m26alt,
+		"__M26_AND__":           m26and,
+		"__Q38_ALT__":           q38alt,
+		"__Q38_AND__":           q38and,
+		"__Q354B_ALT__":         q354balt,
+		"__Q359B_ALT__":         q359balt,
+		"__Q359B_AGENT_ALIAS__": q359bAgentAlias,
+		"__MIMO9B_ALT__":        mimo9balt,
+		"__Q3827B_ALT__":        q3827balt,
+		"__SEATS_SWAPPABLE__":   seatFrag[roleSwappable],
+		"__SEATS_RESIDENT__":    seatFrag[roleResident],
+		"__LLAMA_BIN__":         strings.TrimRight(p.LlamaBin, "/"),
+		"__MODELS__":            strings.TrimRight(p.ModelsDir, "/"),
+		"__LISTEN__":            p.Listen,
+		"__CTX__":               fmt.Sprint(p.Ctx),
+		"__KV_K__":              p.KVType,
+		"__KV_V__":              p.KVType,
+		"__FLASH_ATTN__":        p.FlashAttn,
+		"__MOE_26B__":           p.MoE26B,
+		"__NTHREADS__":          fmt.Sprint(p.Threads),
+		"__CACHE_RAM__":         fmt.Sprint(p.cacheRAMMiB()),
+		"__SLOT_SAVE__":         p.slotSaveFlag(),
 	} {
 		out = strings.ReplaceAll(out, from, to)
 	}
@@ -444,6 +486,15 @@ func (p Params) validate() error {
 	if p.IncludeQ354B && p.IncludeQ359B {
 		missing = append(missing, "a single agent seat (include_qwen35_4b and include_qwen35_9b are both set, "+
 			"but the 4B and 9B entries share the `agent-seat` alias — pick one)")
+	}
+	// mimo-9b-agent claims the SAME `agent-seat` alias as the 4B, so the two must never
+	// render together either — exactly the existing 4B/9B rule, extended to the new
+	// seat. Unlike the 4B/9B pair, IncludeMimo9B WITH IncludeQ359B is allowed: the
+	// __Q359B_AGENT_ALIAS__ token drops qwen3.5-9b-agent's own claim on the alias so
+	// only mimo-9b-agent carries it, avoiding the duplicate.
+	if p.IncludeMimo9B && p.IncludeQ354B {
+		missing = append(missing, "a single agent seat (include_mimo_9b and include_qwen35_4b are both set, "+
+			"but the mimo-9b-agent and qwen3.5-4b-agent entries share the `agent-seat` alias — pick one)")
 	}
 	if len(p.Seats) > 0 && p.Home == "" && seatsNeedHome(p.Seats) {
 		missing = append(missing, "install home (a media seat names a path under "+tokenHome+")")
@@ -1089,6 +1140,18 @@ const modelQ359B = "qwen3.5-9b-agent"
 // strip. Its set membership is handled by the __Q359B_*__ tokens.
 func dropQ359B(tmpl string) (string, error) {
 	return dropModel(tmpl, modelQ359B)
+}
+
+// modelMimo9B is the mimo-9b-agent entry, gated by the tier's include_mimo_9b
+// exactly as modelQ359B rides include_qwen35_9b. It claims the SAME `agent-seat`
+// alias as modelQ359B when the two render together; qwen3.5-9b-agent's own claim
+// is stripped via the __Q359B_AGENT_ALIAS__ token rather than a second drop.
+const modelMimo9B = "mimo-9b-agent"
+
+// dropMimo9B removes the mimo-9b-agent entry — the exact mirror of the Q359B
+// strip. Its set membership is handled by the __MIMO9B_ALT__ token.
+func dropMimo9B(tmpl string) (string, error) {
+	return dropModel(tmpl, modelMimo9B)
 }
 
 // modelQ3827B is the Qwen3.8-27B agent entry, gated by the tier's

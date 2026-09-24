@@ -172,6 +172,26 @@ $PINNED = @{
     sha  = '6f5d30666c2d8ae16a306e616d95341dcf3cc46810df84d7e6f5a7d1e4c1b293'
     version = '6f5d3066'
   }
+  # SECOND AGENT seat for the 8GB tiers: MiMo-V2.6-Distill-Qwen-9B (bartowski GGUF
+  # Q4_K_M), measured 2026-09-24 a coin-flip quality tie against qwen3.5-9b-agent
+  # (18/18 shape B x6 both 8GB reference boxes; shape C 5/5 x3 vs 4/5 x3, splitting by
+  # box) with a smaller VRAM footprint at the same 65536 window (6,926/7,034 MiB vs
+  # 7,044/7,154 on the RTX 5060; 6,683/6,707 vs 6,801/6,827 on the RTX 3070 Laptop).
+  # Gated on the resolved profile's include_mimo_9b (Step 5) — mirrors the
+  # include_qwen35_9b mechanism, and shares its `agent-seat` alias exclusivity with
+  # include_qwen35_4b, but NOT with include_qwen35_9b itself: the two 8GB seats may
+  # both be included, with qwen3.5-9b-agent kept as the un-aliased rollback. NO
+  # mmproj: agent planner, not a vision seat. REQUIRES llama.cpp >= b11102 (upstream
+  # #29319 — b10964 misroutes MiMo's compact tool-call XML to the Qwen3-Coder parser
+  # and every tool call runs to the token cap). sha/size verified against the HF
+  # resolve redirect's X-Linked-Size/X-Linked-ETag 2026-09-24.
+  'model-mimo-9b' = @{
+    url  = 'https://huggingface.co/bartowski/MiMo-V2.6-Distill-Qwen-9B-GGUF/resolve/main/MiMo-V2.6-Distill-Qwen-9B-Q4_K_M.gguf'
+    name = 'MiMo-V2.6-Distill-Qwen-9B-Q4_K_M.gguf'
+    size = 5841049120
+    sha  = '4bca6f18c73f72270c7a20c2ea2bea581de8246e318714277120369d34048c81'
+    version = '4bca6f18'
+  }
   'model-embed' = @{
     url  = 'https://huggingface.co/unsloth/embeddinggemma-300m-GGUF/resolve/main/embeddinggemma-300M-Q8_0.gguf'
     name = 'embeddinggemma-300m-Q8_0.gguf'
@@ -648,7 +668,7 @@ function Get-FamilyModelKeys {
 }
 
 function Get-GatedModelKeys {
-  param([bool]$IncludeQwen38, [bool]$IncludeQwen354B, [bool]$IncludeQwen359B, [bool]$IncludeQwen3827B, [bool]$WithFamily)
+  param([bool]$IncludeQwen38, [bool]$IncludeQwen354B, [bool]$IncludeQwen359B, [bool]$IncludeQwen3827B, [bool]$IncludeMimo9B = $false, [bool]$WithFamily)
   $keys = @()
   # The 27B coder/agent seat RIDES the family gate: OFFLOAD_WITH_FAMILY=0 (a lean
   # install) opts out of an 18.8GB download even on an include_qwen38 tier.
@@ -670,6 +690,10 @@ function Get-GatedModelKeys {
   # serve nothing. 12.0 GB, and the tier's vision seat loads the SAME file, so a tier that
   # enables both pays for it once.
   if ($IncludeQwen3827B) { $keys += @('model-qwen38-iq3s') }
+  # The mimo-9b-agent seat does not ride the family gate either, same reasoning as the
+  # 9B Qwen entry it can render beside: 5.6GB, and a lean install must not silently
+  # drop a seat the yaml still names.
+  if ($IncludeMimo9B) { $keys += @('model-mimo-9b') }
   # Returned WITHOUT the ,@() no-unroll wrapper on purpose. That guard is correct where a
   # 1-element array must survive JSON SERIALIZATION (Merge-ConfigSeed), but here the only
   # consumer is `$modelKeys += ...`, where unrolling is exactly what is wanted - and on an
@@ -1291,6 +1315,7 @@ if ($withFamily -and -not $pp.include_26b) {
 $includeQwen38 = $false
 $includeQwen354B = $false
 $includeQwen359B = $false
+$includeMimo9B = $false
 $includeQwen3827B = $false
 $profilesJsonStep5 = Join-Path (Join-Path $scriptDir 'templates') 'profiles.json'
 if ($profileId -and (Test-Path $profilesJsonStep5)) {
@@ -1318,6 +1343,12 @@ if ($profileId -and (Test-Path $profilesJsonStep5)) {
       throw "profile '$profileId': include_qwen35_9b must be a JSON boolean, got '$q359Val' ($($q359Val.GetType().Name)) - fix setup/templates/profiles.json before the download set is chosen"
     }
     $includeQwen359B = ($q359Val -is [bool] -and $q359Val)
+    # Same STRICT bool gate for the second 8GB-class agent seat.
+    $mimoVal = $pdoc5.profiles.$profileId.include_mimo_9b
+    if ($null -ne $mimoVal -and -not ($mimoVal -is [bool])) {
+      throw "profile '$profileId': include_mimo_9b must be a JSON boolean, got '$mimoVal' ($($mimoVal.GetType().Name)) - fix setup/templates/profiles.json before the download set is chosen"
+    }
+    $includeMimo9B = ($mimoVal -is [bool] -and $mimoVal)
 
     $q3827Val = $pdoc5.profiles.$profileId.include_qwen38_27b
     if ($null -ne $q3827Val -and -not ($q3827Val -is [bool])) {
@@ -1328,7 +1359,7 @@ if ($profileId -and (Test-Path $profilesJsonStep5)) {
 }
 # Gate -> download-set mapping lives in Get-GatedModelKeys (above the test seam) so it
 # can be regression-pinned; the rules and their deliberate asymmetry are documented there.
-$modelKeys += Get-GatedModelKeys -IncludeQwen38 $includeQwen38 -IncludeQwen354B $includeQwen354B -IncludeQwen359B $includeQwen359B -IncludeQwen3827B $includeQwen3827B -WithFamily $withFamily
+$modelKeys += Get-GatedModelKeys -IncludeQwen38 $includeQwen38 -IncludeQwen354B $includeQwen354B -IncludeQwen359B $includeQwen359B -IncludeQwen3827B $includeQwen3827B -IncludeMimo9B $includeMimo9B -WithFamily $withFamily
 foreach ($key in $modelKeys) {
   $m = $PINNED[$key]
   $dest = Join-Path $modelDir $m.name
