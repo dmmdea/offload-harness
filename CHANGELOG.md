@@ -188,6 +188,36 @@ Five harness defects from the OptiPlex 7060 (blackwell-8) media parity audit, 20
   that first slipped past a vacuous test comparing `protocolText()` with itself (replaced by fixed
   expectations).
 
+## [0.140.6] - 2026-09-23 - every node reports its own work to PAIR, lease jobs get a card, and a media card reads "running" only once it holds the GPU
+
+### Fixed — PAIR showed only the Qube's delegations while the other nodes ran at 84-100 %
+
+Operator report 2026-09-23 ("work is not being properly shown as routed"): every open card read
+"Running on Qube" while the Aorus ran a seat bench and a ComfyUI diagnostic, the Lenovo a Wan 2.2
+smoke render and binxarn a tuning sweep. None of it was delegation, and none of it reached PAIR.
+
+- **Jobs under `gpu reserve -- <cmd>` get a card** (`gpu_leasecard.go`). The lease queue is where
+  the house runs every bench, render and measurement on every node. The wrapper now owns one card:
+  `queued` while it waits in the queue and drains the seat, `running` once the command starts,
+  closed with the exit (`exit status N`, `(interrupted)`, `(lease lost)`). The model is the
+  harness verb (`generate-video`) or the script (`seatbench.ps1`) or the program; the requester is
+  `--origin`. A one-shot harness verb run directly under the lease gets
+  `OFFLOAD_PAIR_UNDER_LEASE=1` and adds no second card; a session (`mcp`, `fleet-serve`), shell or
+  interpreter under a lease keeps its own reporting (review finding: the flag would otherwise
+  silence a wrapped MCP session for its whole life).
+- **`pair_workloads_enabled` is safe on every box.** Work a fleet node serves for another box
+  (the `fleet` door) is now skipped by `Begin` and by the ledger observer, as `agent` rows always
+  were, so enabling reporting on a fleet node no longer shows a delegation twice, and the node's
+  OWN work (a CLI render started over ssh, a lease job) reaches PAIR. Enabled on the Lenovo and
+  binxarn in the same deploy (backups `*.pre-pair-workloads`).
+- **A media call's card opens `queued` and turns `running` when the lane holds the GPU**
+  (`core.MarkWorking`, fired by `acquireMediaLease` and the compose slot). 0.140.5 opened it
+  `running`, so a call waiting behind another job read "Running" through the wait; a transcription
+  waiting minutes for whisper behind the 3-card seat did exactly that. `transcribe` cannot see its
+  engine start (the wait is a load inside llama-swap), so its card stays queued until it ends.
+- Not covered: work started outside the harness altogether (binxarn's root tuning scripts). Run it
+  under `gpu reserve -- <cmd>` and it gets a card.
+
 ## [0.140.5] - 2026-09-23 - PAIR's Jobs list shows long media calls while they run, and a delegation reads "running" only once its seat works
 
 ### Fixed — PAIR cards that said nothing, or said "Running" over an idle card

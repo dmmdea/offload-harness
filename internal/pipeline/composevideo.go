@@ -337,6 +337,7 @@ func (p *Pipeline) runComposeVideo(ctx context.Context, req core.Request, meta c
 			fmt.Sprintf("compose_video: busy — another composition in this process still holds the compose slot after %s", wait))
 	}
 	defer releaseComposeSlot()
+	core.MarkWorking(ctx) // the slot is ours: the PAIR card turns running
 
 	cacheDir := p.cfg.EffectiveComposeCacheDir()
 	key := sha256hex(fmt.Sprint(creq.ProjectDir, creq.HTML, creq.Template, creq.Variables, creq.Composition,

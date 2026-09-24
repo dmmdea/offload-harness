@@ -336,8 +336,10 @@ type Config struct {
 	// delegates to NVIDIA Personal AI Router's Jobs list, through the loopback
 	// workload ingress of PAIR's workload manager (fork
 	// dmmdea/Personal-AI-Router, worker 0.14.0; docs/systems/pair-workloads.md).
-	// Off by default. Enable on DELEGATOR boxes only: a fleet node that also
-	// reported the delegation it serves would show the same job twice, once
+	// Off by default. Enable on EVERY box with PAIR (0.140.6): work a fleet node
+	// serves for another box (agent rows, the "fleet" door) is skipped, so a job
+	// never shows twice. Before 0.140.6 this said delegator boxes only: a fleet
+	// node that reported the delegation it serves would show the same job twice, once
 	// per origin. Inert when PAIR is not installed (no node-id.json).
 	PairWorkloadsEnabled bool `json:"pair_workloads_enabled,omitempty"`
 	// PairWorkloadsEndpoint is the ingress URL; the default is the port every
