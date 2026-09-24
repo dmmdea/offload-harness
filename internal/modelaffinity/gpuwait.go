@@ -142,6 +142,19 @@ func awaitLease(ctx context.Context, base, model string, deadline time.Time, blo
 	if bound < 0 {
 		bound = 0
 	}
+	// FAIR TURN (register D-1xx-2, 2026-09-23; R2: "seat starvation behind
+	// chained media leases"). Only registered once we are actually about to
+	// block, never on the fast uncontested path above — a blocked admission
+	// takes a place in gpulease's own waiters queue (the SAME one a lease
+	// Acquire registers in) so a fresh media Acquire that reaches this box's
+	// card once the lease frees must queue behind us exactly as it would
+	// behind a real lease waiter, instead of a chained re-acquire winning the
+	// gap before this admission's own poll ever notices the lease is free.
+	// See gpulease.RegisterSeatWaiter's doc for why this cannot deadlock or
+	// starve the lease itself. refresh must run every poll tick or the
+	// record goes heartbeat-stale and stops protecting our place in line.
+	refresh, unregister := gpulease.RegisterSeatWaiter(dir, "load "+model+" on "+base)
+	defer unregister()
 	for {
 		remain := time.Until(deadline)
 		if remain <= 0 {
@@ -155,6 +168,7 @@ func awaitLease(ctx context.Context, base, model string, deadline time.Time, blo
 			return leaseError(base, model, info, time.Since(start), bound, ctx.Err())
 		case <-time.After(remain):
 		}
+		refresh()
 		if info = gpulease.InspectDir(dir); !blocks(info) {
 			return nil
 		}

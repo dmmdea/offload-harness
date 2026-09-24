@@ -292,6 +292,67 @@ func TestJoinIsRefusedWhileAPromotedBatchWaitsForTheCard(t *testing.T) {
 	}
 }
 
+// THE WIRING, as a test (register D-1xx-2, 2026-09-23; R2 "seat starvation
+// behind chained media leases"): a BLOCKED admission must register itself as
+// a gpulease waiter (ClassSeat) for as long as it polls, and must clear that
+// registration once it stops — whether by succeeding once the card frees or
+// by any other exit. Without this, the fairness fix in gpulease's Acquire
+// (a new acquire queues behind REGISTERED waiters) has nothing to queue
+// behind: the whole point of RegisterSeatWaiter is that a blocked admission
+// is exactly such a registered waiter, not merely a silent poller.
+func TestBlockedAdmissionRegistersAndClearsASeatWaiter(t *testing.T) {
+	m := armLease(t)
+	l, err := m.TryAcquire(gpulease.ClassMedia, gpulease.Options{Reason: "chained media lease"})
+	if err != nil {
+		t.Fatalf("acquire media: %v", err)
+	}
+
+	type outcome struct {
+		tk  Ticket
+		err error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		tk, aerr := Admit(context.Background(), "http://gate-seatwaiter", "qwen3.5-9b-vl", 3*time.Second)
+		done <- outcome{tk, aerr}
+	}()
+
+	hasSeatWaiter := func() bool {
+		for _, w := range m.Waiters() {
+			if w.Class == gpulease.ClassSeat {
+				return true
+			}
+		}
+		return false
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for !hasSeatWaiter() {
+		if time.Now().After(deadline) {
+			t.Fatal("a blocked admission never registered a ClassSeat waiter")
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+
+	if err := l.Release(); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+
+	select {
+	case got := <-done:
+		if got.err != nil {
+			t.Fatalf("Admit never succeeded once the lease released: %v", got.err)
+		}
+		got.tk.Release()
+	case <-time.After(3 * time.Second):
+		t.Fatal("Admit never returned")
+	}
+
+	if hasSeatWaiter() {
+		t.Fatal("a ClassSeat waiter survived after Admit returned — it would wrongly block every later Acquire")
+	}
+}
+
 // An unarmed gate (no config.Load in this process) is inert by construction.
 func TestUnarmedGateIsInert(t *testing.T) {
 	leaseMu.Lock()

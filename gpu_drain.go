@@ -438,8 +438,25 @@ func maintainSeat(cfg config.Config, restamp restamper, drain bool, deadline tim
 		// and sat there until its ttl. A reading that fails or is ambiguous keeps
 		// the old behaviour (owed): "could not tell" must not cost a warm seat.
 		wasLoaded := seatWasResident(ctx, endpoint, model)
+		// OTHER RESIDENTS, read before either unload so the record reflects
+		// what was ACTUALLY there (register D-1xx-3, 2026-09-23; R2/R3
+		// measured on the OptiPlex): `--unload-seat` cleared only the
+		// configured agent seat, so a DIFFERENT client's own load — the
+		// vision seat `qwen3.5-9b-vl`, loaded by another session — stayed
+		// resident through an entire media lease on an 8 GB card and only
+		// aged out at its own ttl. gpulease has no per-card model (one lease
+		// fences the whole box — see waiters.go/gpulease.go), so on a
+		// single-card box "the cards the lease fences" is every card, and
+		// every OTHER model llama-swap currently holds is unloaded too, not
+		// only the agent seat.
+		others := otherResidentModels(ctx, endpoint, model)
 		if err := unloadSeat(ctx, maintenanceClient, endpoint, model); err != nil {
 			return err
+		}
+		unloadedOthers := unloadOthers(ctx, endpoint, others)
+		if len(unloadedOthers) > 0 {
+			fmt.Fprintf(os.Stderr, "gpu reserve: also unloaded %d other resident model(s) so the leased cards are actually clear: %s\n",
+				len(unloadedOthers), strings.Join(unloadedOthers, ", "))
 		}
 		if !wasLoaded {
 			fmt.Fprintf(os.Stderr, "gpu reserve: %s was not loaded; nothing to warm back after the window\n", model)
@@ -451,6 +468,51 @@ func maintainSeat(cfg config.Config, restamp restamper, drain bool, deadline tim
 		fmt.Fprintf(os.Stderr, "gpu reserve: %s unloaded\n", model)
 	}
 	return nil
+}
+
+// otherResidentModels lists every model llama-swap's /running reports besides
+// the agent seat (skipping states already leaving/gone: stopped, shutdown),
+// read ONCE before anything is unloaded. Best-effort: an unreadable /running
+// must never block the agent seat's own unload, which is why this returns no
+// error — see the caller.
+func otherResidentModels(ctx context.Context, endpoint, agentSeat string) []string {
+	rows, err := seatload.Occupants(ctx, maintenanceClient, endpoint)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "gpu reserve: could not read /running to find other resident models (%v); only the agent seat will be unloaded\n", err)
+		return nil
+	}
+	var out []string
+	for _, row := range rows {
+		if strings.EqualFold(row.Model, agentSeat) {
+			continue
+		}
+		switch strings.ToLower(row.State) {
+		case "stopped", "shutdown":
+			continue
+		}
+		out = append(out, row.Model)
+	}
+	return out
+}
+
+// unloadOthers unloads every model in others, skipping (and reporting, never
+// failing the lease over) one that will not go. It returns the ones it
+// actually unloaded — the record the reservation prints. These are FOREIGN
+// residents: the PR #464 rule ("warm back only the seat that was loaded, and
+// only if it was loaded") stays exactly as it is for the configured agent
+// seat, and none of these is ever warmed back automatically — that would
+// mean the harness deciding another client's model belongs back on a card it
+// no longer controls.
+func unloadOthers(ctx context.Context, endpoint string, others []string) []string {
+	var done []string
+	for _, m := range others {
+		if err := unloadSeat(ctx, maintenanceClient, endpoint, m); err != nil {
+			fmt.Fprintf(os.Stderr, "gpu reserve: could not unload foreign resident %s: %v\n", m, err)
+			continue
+		}
+		done = append(done, m)
+	}
+	return done
 }
 
 // seatWasResident reports whether the seat is loaded and staying: loaded or
