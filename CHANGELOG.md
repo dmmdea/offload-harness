@@ -6,6 +6,20 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed — ComfyUI-MultiGPU pinned + mirrored ahead of its 2026-09-30 archival
+
+`pollockjj/ComfyUI-MultiGPU` archives 2026-09-30 (issue #223, no successor endorsed) with no
+native ComfyUI-core replacement for donor+compute `virtual_vram_gb` weight-sharding (the Wan
+GGUF lane and the pooled krea2/LTX-2.5 seats depend on it). Pinned the fleet to
+`ed1ffaef7cec1a66f35106c6a4c7a40927c2dc83` (upstream v2.6.4's last code commit `b51c99a5` plus
+an already-deployed local Windows P2P/cudart fix) and created a private fallback mirror,
+`dmmdea/ComfyUI-MultiGPU-mirror`, for when upstream goes read-only. `render/comfy-nodes.mjs`
+and `internal/mediacap/routeneeds.go` now name the pin + mirror in the `MISSING_NODE` hint.
+Docs: `docs/systems/media-generation.md` "ComfyUI-MultiGPU archival"; full research and the
+per-node alignment/A-B record live on the operator's Drive under
+`Ecosystem/Benchmarks and Optimizations/2026-09-22-qwen-image-21-hyperframes/`
+(`research/comfyui-multigpu-archival-2026-09-24.md`, `infra/multigpu-archival-actions-2026-09-24.md`).
+
 ### Fixed — OptiPlex parity: doctor checks what a route loads, the 26B download honours the tier, `generate-video --fast`, the Wan lane defers cleanly, a BOM config loads
 
 Five harness defects from the OptiPlex 7060 (blackwell-8) media parity audit, 2026-09-23.
