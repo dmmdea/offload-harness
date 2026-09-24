@@ -1,6 +1,7 @@
 package mediaops
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
@@ -131,11 +132,58 @@ func TestParseLayerList(t *testing.T) {
 }
 
 func TestGimpArgs(t *testing.T) {
-	args := GimpArgs("(script)")
+	// F-40: GimpArgs takes a script FILE PATH now (never the script text itself,
+	// which can carry caller-supplied non-ASCII copy) and wraps it in (load ...)
+	// so no text ever reaches gimp-console's argv.
+	args := GimpArgs("C:/tmp/giscript-1.scm")
 	s := strings.Join(args, " ")
-	for _, need := range []string{"-i", "--batch-interpreter=plug-in-script-fu-eval", "-b (script)", "-b (gimp-quit 0)"} {
+	for _, need := range []string{"-i", "--batch-interpreter=plug-in-script-fu-eval", `-b (load "C:/tmp/giscript-1.scm")`, "-b (gimp-quit 0)"} {
 		if !strings.Contains(s, need) {
 			t.Fatalf("missing %q in %s", need, s)
 		}
+	}
+	// a backslash path (Windows) normalizes to forward slashes, matching the
+	// path convention already used by BuildGimpScript/BuildInstantiateScript.
+	win := strings.Join(GimpArgs(`C:\tmp\giscript-2.scm`), " ")
+	if !strings.Contains(win, `-b (load "C:/tmp/giscript-2.scm")`) {
+		t.Fatalf("backslash script path must normalize: %s", win)
+	}
+	// the script TEXT itself must never appear in the argv (that's the whole
+	// point of F-40) — only its file path does.
+	if strings.Contains(s, "gimp-file-load") {
+		t.Fatalf("GimpArgs must never embed script text in argv: %s", s)
+	}
+}
+
+func TestWriteScriptFile_RoundTripsUTF8Text(t *testing.T) {
+	// F-40 regression: the accented text a caller sends through instantiate_design's
+	// set_text must survive on disk byte-for-byte — this is the file GimpArgs then
+	// loads instead of putting the text on argv.
+	script, err := BuildInstantiateScript("C:/tpl/promo.xcf", "C:/out/flat.png",
+		map[string]string{"Headline": "¿VOLVERÁ EL ROTATIVO? ñ ü é"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, cleanup, err := WriteScriptFile(script)
+	if err != nil {
+		t.Fatalf("WriteScriptFile: %v", err)
+	}
+	defer cleanup()
+	if !strings.HasSuffix(path, ".scm") {
+		t.Fatalf("script file should have a .scm suffix, got %q", path)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading written script file: %v", err)
+	}
+	if string(got) != script {
+		t.Fatalf("script file content = %q, want %q", got, script)
+	}
+	if !strings.Contains(string(got), "¿VOLVERÁ EL ROTATIVO? ñ ü é") {
+		t.Fatalf("accented text did not survive on disk byte-for-byte: %q", got)
+	}
+	cleanup()
+	if _, err := os.Stat(path); err == nil {
+		t.Fatalf("cleanup must remove the temp script file")
 	}
 }

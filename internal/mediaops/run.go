@@ -92,9 +92,16 @@ func RunEditImage(ctx context.Context, cfg EditConfig, req EditRequest) (EditRes
 		if err != nil {
 			return res, err
 		}
+		// F-40: the script's text goes to disk (UTF-8), never to gimp-console's
+		// argv — see GimpArgs/WriteScriptFile.
+		scriptFile, cleanupScript, err := WriteScriptFile(script)
+		if err != nil {
+			return res, fmt.Errorf("gimp %s: writing script file: %w", gimpOp.Op, err)
+		}
+		defer cleanupScript()
 		// serialize headless GIMPs: concurrent consoles contend on the profile lock
 		gimpMu.Lock()
-		_, stderr, err := runCapture(ctx, cfg.Timeout, nil, nil, cfg.GimpConsole, GimpArgs(script)...)
+		_, stderr, err := runCapture(ctx, cfg.Timeout, nil, nil, cfg.GimpConsole, GimpArgs(scriptFile)...)
 		gimpMu.Unlock()
 		if err != nil {
 			return res, fmt.Errorf("gimp %s failed: %s", gimpOp.Op, tail(stderr, 300))

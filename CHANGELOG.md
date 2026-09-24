@@ -188,6 +188,54 @@ Five harness defects from the OptiPlex 7060 (blackwell-8) media parity audit, 20
   that first slipped past a vacuous test comparing `protocolText()` with itself (replaced by fixed
   expectations).
 
+## [0.140.10] - 2026-09-24 - offload_edit_image loses Spanish accents on both the PIL and GIMP routes; the class behind it also mangles PowerShell 5.1's captured output
+
+`offload_media`'s own `ffmpeg_path` handling was checked against origin/main and found already
+fixed (0.140.7, F-38) — `internal/mediaops.RunMedia`/`ResolveBinary` and `render/audio-qa.mjs`'s
+`resolveFfmpeg`/`resolveFfprobe` already honour a configured path and fall back to PATH only for
+a bare name, with regression tests (`TestResolveBinary_ExplicitPathMissing`,
+`TestRunMedia_BareFFmpegOnPath`) already in place and green. No change needed there.
+
+### Fixed
+
+- **`offload_edit_image`'s "text" op garbles accented copy on the PIL route** (e.g. "VOLVERÁ",
+  "ROTACIÓN", "¿"). Root cause, reproduced live: `render/edit_image.py`'s `json.load(sys.stdin)`
+  decodes the UTF-8 bytes `internal/mediaops.runEditWorker` writes using the HOST'S DEFAULT LOCALE
+  ENCODING (confirmed `cp1252` on a plain Windows box), not UTF-8 — the two-byte UTF-8 sequence for
+  "Á" decodes to an unrelated character plus a lone surrogate for cp1252's undefined 0x81. New
+  `_load_request()` calls `stream.reconfigure(encoding="utf-8")` before decoding, making the
+  request plumbing locale-independent. Separately, even once decoded correctly, `ImageFont.
+  load_default()` — Pillow's own bundled "Aileron" subset, used whenever a caller does not pass
+  `font` — has NO Latin-1 Supplement glyphs at all (measured: Á Ñ Ü É á é ñ ü ¿ all render the
+  identical empty/tofu glyph bbox), so accented text silently disappears regardless of encoding.
+  `_default_text_font()` now tries a short list of common system fonts (Arial/Segoe UI on Windows,
+  DejaVu Sans/Liberation Sans on Linux, Arial/Helvetica on macOS) before falling back to Pillow's
+  glyph-less default. Both fixes are covered by an extended `--selftest` (run by the existing
+  `TestWorkerSelftest`/`TestRunEditImage_Renditions`), proven able to fail by reverting each in
+  turn.
+- **The GIMP route (`instantiate_design`'s `set_text`) put caller-supplied copy directly on
+  gimp-console's own argv** (`GimpArgs` embedded the whole script-fu program, text included, as one
+  `-b` argument), which depends on that specific GIMP build's own Windows argv decoding being
+  correct — an assumption the harness does not control. `GimpArgs` now takes a script FILE path and
+  loads it (`(load "path")`); the new `WriteScriptFile` writes the script to a UTF-8 temp `.scm`
+  file first, so no text ever reaches argv. `TestWriteScriptFile_RoundTripsUTF8Text` and the
+  updated `TestGimpArgs` cover it; live-verified end to end against gimp-console-3.2.6 with
+  "¿VOLVERÁ EL ROTATIVO? ñ ü é".
+- **New package `internal/winexec`** documents and fixes the class the GIMP defect was suspected to
+  share: spawning `powershell.exe` (Windows PowerShell 5.1) and capturing its stdout. Isolating the
+  input and output hops separately showed the corruption is NOT in argv decoding (a non-ASCII
+  `-Command` argument reaches PowerShell's parser intact — confirmed by having a script write what
+  it received straight to a file) but in OUTPUT capture: WinPS 5.1's default `Console.
+  OutputEncoding`, when stdout is redirected to a pipe (which `os/exec.Cmd.Output`/`CombinedOutput`
+  always is), follows the host's legacy code page rather than UTF-8. `winexec.SafeScriptArgs`
+  prepends `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8;` and carries the script via
+  `-EncodedCommand` (UTF-16LE base64, also closing off a separate script-injection/quoting hazard
+  for embedded caller text). `internal/hwdetect/probe.go`'s two `powershell` call sites (GPU name,
+  total RAM) now use it. `TestSafeScriptArgs_SurvivesPowerShell5OutputMangling` is a live
+  regression against a real `powershell.exe` (skips cleanly off Windows, without `powershell.exe`
+  on PATH, or when the current console code page happens not to reproduce the defect); proven able
+  to fail by reverting `SafeScriptArgs` to skip the `Console.OutputEncoding` prefix.
+
 ## [0.140.9] - 2026-09-24 - a second 8GB-class agent seat, mimo-9b-agent, joins qwen3.5-9b-agent on blackwell-8 and ampere-8
 
 ### Added — `mimo-9b-agent`: a coin-flip-tie second 8GB agent seat, encoded exactly like `include_qwen35_9b`
