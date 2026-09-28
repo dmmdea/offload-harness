@@ -65,21 +65,9 @@ func TestFetchGuardsRedirectsAndStrips(t *testing.T) {
 	}
 }
 
-func TestAnchorNeverComesFromTheGoal(t *testing.T) {
-	text := strings.Repeat("The CudaIPCWrapper bundles a handle. CudaIPCWrapper is small. ", 3) + "pickle_dumps path copies four times. pickle_dumps again."
-	goal := "Explain the CudaIPCWrapper and the transfer paths"
-	a := Anchor(text, goal)
-	if a == "" || strings.Contains(strings.ToLower(goal), strings.ToLower(a)) {
-		t.Fatalf("anchor %q is empty or parrot-passable", a)
-	}
-	if a != "pickle_dumps" {
-		t.Fatalf("anchor %q, want the identifier-shaped token absent from the goal", a)
-	}
-}
-
 func TestBuildContractsShape(t *testing.T) {
 	fetched := []Fetched{
-		{URL: "https://docs.lmcache.ai/mp/", FinalURL: "https://docs.lmcache.ai/mp/", Title: "MP", Text: "The lmcache_driven path uses CUDA IPC. lmcache_driven is the default. engine_driven copies. engine_driven is slower."},
+		{URL: "https://docs.lmcache.ai/mp/", FinalURL: "https://docs.lmcache.ai/mp/", Title: "MP", Text: "The driven path uses shared memory transfers between processes.\nThe engine copies every buffer through pinned staging memory, which is slower than the shared handle path."},
 		{URL: "https://example.com/404", Err: "http 404"},
 	}
 	specs, sources := Build(Request{Goal: "List the transfer modes named."}, fetched)
@@ -106,7 +94,7 @@ func TestBuildContractsShape(t *testing.T) {
 	if !strings.Contains(joined, "min_items:key_facts:1") {
 		t.Fatalf("shape check missing: %v", c.Acceptance)
 	}
-	if !strings.HasPrefix(c.Acceptance[0], "regex:(?i)(") || !strings.Contains(c.Acceptance[0], "lmcache_driven") || strings.Contains(c.Acceptance[0], "transfer") {
+	if !strings.HasPrefix(c.Acceptance[0], "regex:(?i)(?P<docanchor>") || !strings.Contains(c.Acceptance[0], "pinned") || strings.Contains(c.Acceptance[0], "modes") {
 		t.Fatalf("anchor acceptance must be a page-only alternation: %v", c.Acceptance)
 	}
 	if strings.Contains(strings.ToLower(c.Goal), "do not try to open") || !strings.Contains(c.Goal, "read that file") {
@@ -123,19 +111,5 @@ func TestDocNameFlat(t *testing.T) {
 		if got := DocName(i, tc.url, tc.url); got != tc.want {
 			t.Errorf("%d: %q want %q", i, got, tc.want)
 		}
-	}
-}
-
-func TestAnchorsSkipHexBlobsAndBuildAlternation(t *testing.T) {
-	text := "image sha256:4449f856653602317e4101a76fce599c7fcd58ccec2e539951fce5f73083179e 4449f856653602317e4101a76fce599c7fcd58ccec2e539951fce5f73083179e. Use uv_pip_install twice: uv_pip_install. The rocm7 wheel; rocm7 again."
-	got := Anchors(text, "install commands", 3)
-	for _, g := range got {
-		if len(g) >= 20 && strings.Trim(g, "0123456789abcdef") == "" {
-			t.Fatalf("hex blob chosen as anchor: %v", got)
-		}
-	}
-	chk := AnchorCheck(text, "install commands")
-	if !strings.HasPrefix(chk, "regex:(?i)(") || !strings.Contains(chk, "uv_pip_install") {
-		t.Fatalf("AnchorCheck %q", chk)
 	}
 }

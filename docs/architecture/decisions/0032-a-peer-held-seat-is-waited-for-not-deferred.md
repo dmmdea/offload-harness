@@ -89,6 +89,15 @@ validating contracts), no daemon, every wait counted on the wire:
    `contains:` or a thin page's `min_items` never quarantines a seat. `Summary` gains
    `quarantined` and `batches`.
 
+**Amended 0.141.1 (register C-65).** Item 4's two-half fingerprint plus the separate goal anchor was
+replaced by ONE any-of `(?P<docanchor>…)` check. Measured on the live ledger, the old miner scored
+identifier-shaped tokens highest and tokenized the whole stripped page, so CSS classes, script names,
+handles and cut-off URL slugs became the anchor, and on forum pages the most frequent words were UI
+strings; every part had to pass, so research pages passed acceptance about a quarter of the time and
+each false failure cost a full seat run. The check now draws only on prose lines and their headings,
+never on identifier-shaped tokens, UI or markup vocabulary, or goal words, never truncates a token, and
+takes the top 24 words. The `docanchor` tag is kept, so quarantine semantics are unchanged.
+
 ## Consequences
 
 - Worst-case added latency per contract = the two budgets (`seat_contention_wait_sec` +

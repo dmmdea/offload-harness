@@ -9,7 +9,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"unicode"
 
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/delegate"
@@ -79,8 +78,9 @@ func FetchAll(ctx context.Context, urls []string, opt Options, workers int) []Fe
 // read it with its file tool — a goal that says "do not open anything" made
 // every seat report the document missing, and one that says "read the document"
 // without naming the file sent a small seat hunting. Acceptance is an
-// alternation of tokens that appear only in the page — never in the goal — so
-// an echoed question cannot pass as verified.
+// alternation of prose content words that appear in the page and never in the
+// goal (see AnchorCheck) — one any-of check, so an echoed question cannot pass
+// as verified and a faithful digest needs to restate only one of them.
 func Build(req Request, fetched []Fetched) (specs []delegate.SubtaskSpec, sources []Source) {
 	schema := req.OutputSchema
 	if len(schema) == 0 {
@@ -117,10 +117,8 @@ func Build(req Request, fetched []Fetched) (specs []delegate.SubtaskSpec, source
 		if anchor != "" {
 			acc = append(acc, anchor)
 		}
-		fp := DocFingerprint(f.Text)
-		src.Fingerprinted = len(fp) > 0
+		src.Fingerprinted = anchor != ""
 		sources[len(sources)-1] = src
-		acc = append(acc, fp...)
 		acc = append(acc, firstArrayCheck(schema)...)
 		acc = append(acc, req.Acceptance...)
 
@@ -190,69 +188,6 @@ func DocName(i int, finalURL, rawURL string) string {
 	return fmt.Sprintf("%02d-%s.txt", i+1, host)
 }
 
-var reToken = regexp.MustCompile(`[A-Za-z][A-Za-z0-9_-]{5,40}`)
-
-// Anchor mines the single most distinctive token from the page that does NOT
-// occur in the goal (see Anchors). Kept for callers that want one token.
-func Anchor(text, goal string) string {
-	if a := Anchors(text, goal, 1); len(a) == 1 {
-		return a[0]
-	}
-	return ""
-}
-
-var reHexBlob = regexp.MustCompile(`^[0-9a-fA-F]{20,}$`)
-
-// Anchors mines up to n distinctive tokens from the page that do NOT occur in
-// the goal: identifier-shaped tokens (underscores, digits, dashes, CamelCase)
-// win, then frequency in a "central to the page, not boilerplate" band
-// (2..50). Hex blobs (digests, image ids) are skipped — a faithful digest never
-// repeats them. Deterministic: ties break on token order.
-func Anchors(text, goal string, n int) []string {
-	goalLower := strings.ToLower(goal)
-	counts := map[string]int{}
-	for _, t := range reToken.FindAllString(text, -1) {
-		counts[t]++
-	}
-	type cand struct {
-		tok   string
-		score float64
-	}
-	var cands []cand
-	keys := make([]string, 0, len(counts))
-	for k := range counts {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys) // deterministic tie-break
-	for _, t := range keys {
-		c := counts[t]
-		if strings.Contains(goalLower, strings.ToLower(t)) || reHexBlob.MatchString(t) {
-			continue // parrot-passable, or an opaque id nobody restates
-		}
-		shaped := 0.0
-		if strings.ContainsAny(t, "_-0123456789") || camel(t) {
-			shaped = 2
-		}
-		freq := 0.0
-		if c >= 2 && c <= 50 {
-			freq = 1
-		}
-		cands = append(cands, cand{t, shaped + freq + float64(min(len(t), 20))/20})
-	}
-	sort.SliceStable(cands, func(i, j int) bool { return cands[i].score > cands[j].score })
-	out := make([]string, 0, n)
-	for _, c := range cands {
-		if len(out) == n {
-			break
-		}
-		out = append(out, c.tok)
-	}
-	return out
-}
-
-// AnchorCheck is the acceptance line the research lane emits: a case-insensitive
-// regex alternation of the top page-only tokens, so a faithful digest passes by
-// restating ANY of them while an echoed goal (which contains none) cannot.
 // boilerplate are the ≥6-letter words that appear on almost every software
 // page and in almost every plausible phantom answer; a fingerprint built from
 // them would match a digest written about a different page entirely (the
@@ -260,8 +195,6 @@ func Anchors(text, goal string, n int) []string {
 // "download", "release" on a page about ffmpeg).
 var boilerplate = map[string]struct{}{}
 
-// fingerprintCutset strips the punctuation that clings to words in fetched text.
-const fingerprintCutset = ".,;:!?()[]{}<>|/*#-_\"'"
 
 func init() {
 	for _, w := range strings.Fields("version versions release releases download downloads install installation installed " +
@@ -274,92 +207,3 @@ func init() {
 	}
 }
 
-// DocFingerprint is the page's OWN fingerprint as acceptance: the 12 most
-// frequent distinctive tokens (≥6 letters, alphabetic, not boilerplate),
-// split alternately into two halves, each an (?i) alternation tagged with the
-// named group `docanchor`. Both checks must pass, so a digest has to touch at
-// least one distinctive token from EACH half — an abstractive summary of the
-// page does that trivially; a digest of some other document (the Lenovo 4B's
-// phantom "latest Go version" answer, 2026-08-31…09-01) does not.
-//
-// It is a WRONG-DOCUMENT tripwire, not a quality gate: lexical overlap is a
-// poor faithfulness metric (Maynez et al. 2020; Cao et al. 2022), which is why
-// the bar is "one token from each half of twelve", not "many tokens". Pages
-// with fewer than 6 distinctive tokens return nil — nothing to fingerprint.
-// The `docanchor` tag is what delegate.strikeOnFingerprint keys on, so
-// contract-caused acceptance failures never quarantine a node.
-func DocFingerprint(text string) []string {
-	counts := map[string]int{}
-	for _, w := range strings.Fields(strings.ToLower(text)) {
-		w = strings.Trim(w, fingerprintCutset)
-		if len(w) < 6 || !isAlpha(w) {
-			continue
-		}
-		if _, b := boilerplate[w]; b {
-			continue
-		}
-		counts[w]++
-	}
-	if len(counts) < 6 {
-		return nil
-	}
-	type kv struct {
-		w string
-		c int
-	}
-	kvs := make([]kv, 0, len(counts))
-	for w, c := range counts {
-		kvs = append(kvs, kv{w, c})
-	}
-	sort.Slice(kvs, func(i, j int) bool {
-		if kvs[i].c != kvs[j].c {
-			return kvs[i].c > kvs[j].c
-		}
-		return kvs[i].w < kvs[j].w
-	})
-	if len(kvs) > 12 {
-		kvs = kvs[:12]
-	}
-	var a, b []string
-	for i, e := range kvs {
-		if i%2 == 0 {
-			a = append(a, regexp.QuoteMeta(e.w))
-		} else {
-			b = append(b, regexp.QuoteMeta(e.w))
-		}
-	}
-	return []string{
-		"regex:(?i)(?P<docanchor>" + strings.Join(a, "|") + ")",
-		"regex:(?i)(?P<docanchor>" + strings.Join(b, "|") + ")",
-	}
-}
-
-func isAlpha(s string) bool {
-	for _, r := range s {
-		if !unicode.IsLetter(r) {
-			return false
-		}
-	}
-	return true
-}
-
-func AnchorCheck(text, goal string) string {
-	toks := Anchors(text, goal, 6)
-	if len(toks) == 0 {
-		return ""
-	}
-	q := make([]string, len(toks))
-	for i, t := range toks {
-		q[i] = regexp.QuoteMeta(t)
-	}
-	return "regex:(?i)(" + strings.Join(q, "|") + ")"
-}
-
-func camel(t string) bool {
-	for i := 1; i < len(t); i++ {
-		if t[i-1] >= 'a' && t[i-1] <= 'z' && t[i] >= 'A' && t[i] <= 'Z' {
-			return true
-		}
-	}
-	return false
-}
