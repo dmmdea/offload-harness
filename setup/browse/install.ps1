@@ -20,6 +20,20 @@ function Fail([string]$reason) {
     exit 1
 }
 
+# Run a native command with its output on stderr, so stdout carries only the final JSON
+# line. ErrorActionPreference is relaxed for the call alone: Windows PowerShell 5.1 turns a
+# redirected native stderr line into an ErrorRecord, which 'Stop' would make fatal even
+# though uv prints ordinary progress there. The exit code is checked by the caller.
+function Invoke-Native([scriptblock]$Command) {
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        & $Command 2>&1 | ForEach-Object { [Console]::Error.WriteLine("$_") }
+    } finally {
+        $ErrorActionPreference = $prev
+    }
+}
+
 try {
     if (-not (Get-Command uv -ErrorAction SilentlyContinue)) { Fail 'uv is not on PATH (https://docs.astral.sh/uv/)' }
 
@@ -30,7 +44,7 @@ try {
         Copy-Item -Force -Path (Join-Path $src $f) -Destination (Join-Path $dir $f)
     }
 
-    & uv sync --frozen --project $dir 1>&2
+    Invoke-Native { uv sync --frozen --project $dir }
     if ($LASTEXITCODE -ne 0) { Fail "uv sync --frozen exited $LASTEXITCODE" }
 
     $venvPython = if ($IsLinux -or $IsMacOS) { Join-Path $dir '.venv/bin/python' } else { Join-Path $dir '.venv\Scripts\python.exe' }
@@ -38,13 +52,13 @@ try {
 
     Push-Location $dir
     try {
-        & $venvPython -m unittest test_runner 1>&2
+        Invoke-Native { & $venvPython -m unittest test_runner }
         if ($LASTEXITCODE -ne 0) { Fail 'unit tests failed in the installed environment' }
     } finally { Pop-Location }
 
     $bh = if ($IsLinux -or $IsMacOS) { Join-Path $dir '.venv/bin/browser-harness' } else { Join-Path $dir '.venv\Scripts\browser-harness.exe' }
     if (Test-Path $bh) {
-        & $bh telemetry disable 1>&2
+        Invoke-Native { & $bh telemetry disable }
         if ($LASTEXITCODE -ne 0) { [Console]::Error.WriteLine("warning: 'browser-harness telemetry disable' exited $LASTEXITCODE (the sidecar also sets the disable env vars)") }
     } else {
         [Console]::Error.WriteLine('warning: browser-harness executable not found; the sidecar still sets the telemetry-disable env vars')
