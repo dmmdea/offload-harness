@@ -218,9 +218,12 @@ is that regression, and it asserts ZERO accepts on a loopback listener.
 
 Two contract rules are baked in because they were measured on the seats (2026-08-28): the
 goal names the context document as *already provided* (a goal that says "read the document"
-sends a small seat hunting for a file and fails acceptance), and acceptance is anchored to
-a token that appears only in the page — never in the goal — plus a shape check on the
-schema's first array field, so an echoed goal cannot pass as verified. The seats never gain
+sends a small seat hunting for a file and fails acceptance), and acceptance is ONE any-of
+regex (tagged `docanchor`) over the page's top prose content words — taken from sentence lines
+and the headings that introduce them, never from identifier-shaped tokens, UI or markup
+vocabulary, and never from the goal (0.141.1, register C-65) — plus a shape check on the
+schema's first array field, so an echoed goal cannot pass as verified while a faithful digest
+passes by restating any one of about two dozen words. The seats never gain
 network access; the agent loop's egress cage is untouched. Failed or refused fetches come
 back as `sources[].skipped` and produce no result — a broken page never reads as a digest.
 

@@ -965,8 +965,8 @@ never a local run. `meta.node` / `meta.placement` on the result say where it ran
 ## Quarantine (0.111.0)
 
 A delegator quarantines a node for **30 minutes** after two results inside that window fail the
-**document fingerprint** (the `(?P<docanchor>…)` regex acceptance `offload_research` attaches to
-every page): the node answered about a different document. Quarantine is held in the delegator's
+**document fingerprint** (the single any-of `(?P<docanchor>…)` regex acceptance `offload_research`
+attaches to every page, built from prose content words only since 0.141.1): the node answered about a different document. Quarantine is held in the delegator's
 process (the MCP server), never persisted; a blocked node is skipped by placement and named in the
 run's `probe_errors` as `quarantined until <time>`. Contract-caused acceptance failures (a strict
 `contains:`, a thin page's `min_items`) never strike. `summary.quarantined` counts the flips.

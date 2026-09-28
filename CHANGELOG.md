@@ -6,6 +6,21 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.141.1] - 2026-09-28 - research acceptance stops being built from page chrome (register C-65)
+
+### Fixed
+
+- `offload_research` acceptance no longer fails faithful digests. The page check used to tokenize the
+  whole stripped page and rank identifier-shaped tokens first, so CSS classes, sidebar ids, script
+  names, handles and URL slugs (one cut mid-word at 40 characters) became the anchor, and the two
+  fingerprint halves on forum pages were UI words; all three checks had to pass. Over a replay of 457
+  completed research runs from the delegation log, 35.0 % passed the recorded checks and 71.1 %
+  pass the new one on the same outputs (the rest are shape-check failures and answers that restate
+  none of the page's words). `internal/research` now builds ONE any-of `docanchor` regex from
+  prose lines and headings only: no token with an underscore, digit, camelCase or two-plus hyphens,
+  no UI or markup vocabulary, no goal word, never a truncated token, the top 24 words. Quarantine
+  semantics are unchanged (it keys on the `docanchor` tag). `research.DocFingerprint` is removed.
+
 ## [0.141.0] - 2026-09-28 - the opt-in browse lane: `offload_browse` and the agent `browse` tool drive the operator's own browser
 
 ### Added — the browse lane (ADR 0060)
