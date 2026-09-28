@@ -69,7 +69,7 @@ type Rule struct {
 // validate rejects a rule that could loosen policy or that can never match.
 func (r Rule) validate() error {
 	switch r.Kind {
-	case ActWrite, ActDelete, ActFetch:
+	case ActWrite, ActDelete, ActFetch, ActBrowse:
 	case ActShell:
 		return fmt.Errorf("rule %q: shell rules are not supported — command lines are not structurally matchable; the OS cage owns shell containment", r.Glob)
 	default:
@@ -107,7 +107,7 @@ func (r Rule) validate() error {
 // the floor was case-bypassable on Windows and the fetch veto was defeatable by
 // casing a redirect Location header.)
 func normalizeSubject(kind ActionKind, p string) string {
-	if kind == ActFetch {
+	if kind == ActFetch || kind == ActBrowse {
 		return strings.ToLower(p) // a.Path is a host
 	}
 	clean := filepath.ToSlash(filepath.Clean(p))

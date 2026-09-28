@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -332,6 +334,13 @@ type Config struct {
 	// still an opt-in rather than a default because a node that opens it is
 	// spending its own disk on whatever a 4B decides to write.
 	AgentAllowWrite bool `json:"agent_allow_write,omitempty"`
+	// AgentAllowBrowse (0.141.0, ADR 0060) is this node's opt-in to the agent
+	// `browse` tool on the AGENT doors (agent_run, agent_delegate, fleet
+	// contracts). false (the default) refuses a contract carrying allow_browse —
+	// at ack on the fleet path, as a `config`-class defer on the local path. Even
+	// opted in, an agent-door run needs a non-empty host allowlist and the browse
+	// lane configured (BrowseConfigured); the deny-list cannot be lifted there.
+	AgentAllowBrowse bool `json:"agent_allow_browse,omitempty"`
 	// PairWorkloadsEnabled (0.126.0) reports every job this box runs or
 	// delegates to NVIDIA Personal AI Router's Jobs list, through the loopback
 	// workload ingress of PAIR's workload manager (fork
@@ -892,6 +901,41 @@ type Config struct {
 	// ComposeQuality is the default encoder preset: draft | standard | high.
 	// Default "high" (libx264 slow, CRF 15) — quality first; a request may ask for less.
 	ComposeQuality string `json:"compose_quality,omitempty"`
+	// --- browse lane (offload_browse / agent `browse`; ADR 0060) ---
+	// An OPT-IN lane that drives the operator's own, already-running Chromium
+	// browser toward a natural-language goal. A pinned Python sidecar
+	// (setup/browse/runner.py: browser-use's jev-ultrafast loop over
+	// browser-harness/CDP) owns the browser; the harness owns every model call.
+	// Every key defaults EMPTY: the lane is NOT CONFIGURED until browse_python,
+	// browse_script and a LOOPBACK browse_decision_url are all bound.
+	//
+	// BrowsePython is the sidecar venv's interpreter (setup/browse/install.ps1
+	// prints it); BrowseScript is the installed runner.py.
+	BrowsePython string `json:"browse_python,omitempty"`
+	BrowseScript string `json:"browse_script,omitempty"`
+	// BrowseDecisionURL is a TypeSafe-shaped decision endpoint (POST
+	// /v1/systemone) that the harness proxies the sidecar's typed choices to. It
+	// MUST be plain http on a loopback host: the harness holds no provider key,
+	// so the only shape it will call is a local service that holds its own
+	// (BrowseDecisionURLAllowed). The bearer, if the endpoint wants one, comes
+	// from the LOCAL_OFFLOAD_BROWSE_BEARER env var at call time — never a config
+	// field, and never passed to the sidecar.
+	BrowseDecisionURL string `json:"browse_decision_url,omitempty"`
+	// BrowseBrowser pins which running browser the sidecar attaches to:
+	// "chrome" | "edge" | "brave" | "chromium", or "" for browser-harness's own
+	// discovery order (Chrome, then Edge, then Brave — the first one with remote
+	// debugging allowed wins). The browser must already run with "Allow remote
+	// debugging for this browser instance" ticked at <browser>://inspect.
+	BrowseBrowser string `json:"browse_browser,omitempty"`
+	// BrowseTimeoutSec bounds one browse run end to end. Default 300.
+	BrowseTimeoutSec int `json:"browse_timeout_sec,omitempty"`
+	// BrowseMaxActions is the default executed-action budget for one run (a
+	// request may ask for fewer or more, never above BrowseMaxActionsCeiling,
+	// which is jev-ultrafast's own loop cap). Default 30.
+	BrowseMaxActions int `json:"browse_max_actions,omitempty"`
+	// BrowseCaptureDir holds network captures a caller asked for (redacted
+	// JSONL). "" = <state_dir>/browse-captures, or the OS temp dir if no state dir.
+	BrowseCaptureDir string `json:"browse_capture_dir,omitempty"`
 	// VideoGenUnetHigh / VideoGenUnetLow / VideoGenTextEncoder bind THIS machine's Wan 2.2
 	// expert weights + text encoder by filename (quality-first weight binding — e.g. a box
 	// with the VRAM/RAM headroom names fp8_scaled/fp16 files instead of the render script's
@@ -1712,6 +1756,8 @@ func Default() Config {
 		VisionGPUWaitSec:            90,    // LO-1: bounded wait for the gen lock before a vision call defers
 		ComposeTimeoutSec:           1800,
 		ComposeQuality:              "high",
+		BrowseTimeoutSec:            300,
+		BrowseMaxActions:            30,
 		MemoryStack:                 []string{"embeddinggemma", "bge-reranker-v2-m3"},
 		EmbedModelName:              "embeddinggemma", // explicit; reorder-proof (not MemoryStack position)
 		Temperature:                 0,
@@ -1885,6 +1931,7 @@ func load(path string) (Config, error) {
 	warnDeadThresholds(c)
 	warnImageGenBindingTraps(c)
 	warnComposeBindings(c)
+	warnBrowseBindings(c)
 	if home, herr := os.UserHomeDir(); herr == nil {
 		c.Home = ExpandTilde(c.Home, home)
 		expandUserPaths(&c, home)
@@ -2340,6 +2387,7 @@ func pathFields(c *Config) []*string {
 		&c.VoiceGenRef, &c.VoiceGenFTModel, &c.VoiceGenFTBaseDir, &c.VoiceGenFTRef,
 		&c.EditPython, &c.GimpConsolePath,
 		&c.ComposeScript, &c.HyperframesDir, &c.HyperframesBrowserPath, &c.ComposeCacheDir,
+		&c.BrowsePython, &c.BrowseScript, &c.BrowseCaptureDir,
 		&c.CachePath, &c.LedgerPath,
 		&c.ThresholdsPath, &c.TierOverridesPath, &c.RouterWeightsPath,
 		&c.ConfHeadPath, &c.RouterLabelsPath, &c.ConfHeadLabelsPath,
@@ -2536,6 +2584,78 @@ func ValidComposeWorkers(v string) bool {
 	}
 	n, err := strconv.Atoi(v)
 	return err == nil && n >= 1 && n <= 24
+}
+
+// BrowseMaxActionsCeiling is the most executed actions one browse run may take:
+// jev-ultrafast's own loop budget (MAX_STEPS = 60).
+const BrowseMaxActionsCeiling = 60
+
+// BrowseBrowsers is the closed set browse_browser accepts ("" = discovery).
+var BrowseBrowsers = []string{"chrome", "edge", "brave", "chromium"}
+
+// BrowseDecisionURLAllowed reports whether u is a decision endpoint the harness
+// will call: plain http on a loopback host (127.0.0.0/8, ::1, localhost). The
+// harness holds no provider key (ADR 0001, Invariant 2), so the one shape it
+// calls is a local service that holds its own — a provider URL here would
+// otherwise turn the lane into a cloud fallback.
+func BrowseDecisionURLAllowed(u string) bool {
+	pu, err := url.Parse(strings.TrimSpace(u))
+	if err != nil || pu.Scheme != "http" || pu.Host == "" || pu.User != nil {
+		return false
+	}
+	host := pu.Hostname()
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// BrowseConfigured reports whether THIS box serves the browse lane: the sidecar
+// interpreter, the runner and a loopback decision endpoint are ALL bound. One
+// predicate for the MCP registration, the pipeline gate and the agent doors.
+func (c Config) BrowseConfigured() bool {
+	return c.BrowsePython != "" && c.BrowseScript != "" && BrowseDecisionURLAllowed(c.BrowseDecisionURL)
+}
+
+// EffectiveBrowseMaxActions is browse_max_actions with 0 meaning the default 30
+// and anything above BrowseMaxActionsCeiling clamped to it.
+func (c Config) EffectiveBrowseMaxActions() int {
+	n := c.BrowseMaxActions
+	if n <= 0 {
+		n = 30
+	}
+	return min(n, BrowseMaxActionsCeiling)
+}
+
+// EffectiveBrowseCaptureDir is where requested network captures land:
+// browse_capture_dir, else <state_dir>/browse-captures, else the OS temp dir.
+func (c Config) EffectiveBrowseCaptureDir() string {
+	if c.BrowseCaptureDir != "" {
+		return c.BrowseCaptureDir
+	}
+	if c.StateDir != "" {
+		return filepath.Join(c.StateDir, "browse-captures")
+	}
+	return filepath.Join(os.TempDir(), "local-offload-browse-captures")
+}
+
+func warnBrowseBindings(c Config) { warnBrowseBindingsTo(c, os.Stderr) }
+
+// warnBrowseBindingsTo flags browse keys that load cleanly and then leave the
+// lane unregistered: a half-bound lane, a decision endpoint that is not plain
+// loopback http, or a browser name the sidecar cannot resolve.
+func warnBrowseBindingsTo(c Config, w io.Writer) {
+	bound := c.BrowsePython != "" || c.BrowseScript != "" || c.BrowseDecisionURL != ""
+	if bound && (c.BrowsePython == "" || c.BrowseScript == "" || c.BrowseDecisionURL == "") {
+		fmt.Fprintln(w, "warning: the browse lane is half-bound — browse_python, browse_script and browse_decision_url must all be set; offload_browse stays unregistered (run setup/browse/install.ps1)")
+	}
+	if c.BrowseDecisionURL != "" && !BrowseDecisionURLAllowed(c.BrowseDecisionURL) {
+		fmt.Fprintf(w, "warning: browse_decision_url %q is not plain http on a loopback host — the harness holds no provider key and never calls a remote decision service; offload_browse stays unregistered\n", c.BrowseDecisionURL)
+	}
+	if c.BrowseBrowser != "" && !slices.Contains(BrowseBrowsers, c.BrowseBrowser) {
+		fmt.Fprintf(w, "warning: browse_browser %q is not one of %v — every browse run defers BROWSER_UNAVAILABLE\n", c.BrowseBrowser, BrowseBrowsers)
+	}
 }
 
 func warnComposeBindings(c Config) { warnComposeBindingsTo(c, os.Stderr) }

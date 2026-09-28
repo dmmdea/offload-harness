@@ -472,6 +472,30 @@ re-runs on the result — residual PII refuses the harvest — and the corpus is
 destination. Methodology harvested from the OmniRoute compression service's
 eval approach (MIT); metrics and signals are this harness's own.
 
+### The `browse` tool (opt-in, 0.141.0, ADR 0060)
+
+`browse` (`url`, `goal`, `max_actions`, `security_risk`) drives the operator's own running,
+logged-in Chromium browser toward a natural-language goal through the browse lane's pinned sidecar
+([browse-lane.md](browse-lane.md)). It is off by default and is granted only when the lane is
+configured (`browse_python`, `browse_script` and a loopback `browse_decision_url`). The policy broker
+has the action kind `browse`, with the start URL's lowercased host as the subject, so a `--rules`
+entry such as `{"kind":"browse","glob":"*.bank.example","decision":"deny"}` works, and every call is
+audited. A page's visible text and element labels go to the loopback decision endpoint, which may
+front a hosted decision model.
+
+| Door | Grant | Deny-list | Host allowlist |
+|---|---|---|---|
+| CLI `local-agent --allow-browse --browse-hosts host1,host2` | unattended (the CLI always builds unattended: ask becomes deny) | can never be lifted | required; the grant is refused without it |
+| `agent_run` / `agent_delegate` with `allow_browse` and `browse_hosts` | unattended | can never be lifted | required, non-empty |
+
+Every agent door is unattended for browse and needs an audit path (the CLI defaults to
+`<HOME>/.local-offload/agent-audit.jsonl`). The only attended browse door is the MCP tool
+`offload_browse`. The contract doors also need the node's `agent_allow_browse: true` and the lane
+configured on the node that runs the browse. A contract carrying `allow_browse` must have `route: local` (intake rejects any
+other), delegation placement never sends it to a remote node, and a fleet node refuses it at ACK
+without the opt-in. An unattended grant without a host list is refused: the tool is not granted, and the run's note
+says why.
+
 ## Delegation surfaces
 
 Since 0.65.0 the same loop can be driven by a **delegation contract** — a self-contained
@@ -720,6 +744,8 @@ replaces the default. `cmd/local-agent/serve_test.go` covers the loopback guard.
 
 ## Related docs
 
+- [browse-lane.md](browse-lane.md)
+- [../architecture/decisions/0060-opt-in-browse-lane-drives-the-operators-browser.md](../architecture/decisions/0060-opt-in-browse-lane-drives-the-operators-browser.md)
 - [../architecture/decisions/0003-policy-broker-and-capability-flags-off-by-default.md](../architecture/decisions/0003-policy-broker-and-capability-flags-off-by-default.md)
 - [../architecture/decisions/0036-the-agent-lane-is-a-harnessed-environment.md](../architecture/decisions/0036-the-agent-lane-is-a-harnessed-environment.md)
 - [../architecture/decisions/0004-worktree-confinement-audit-outside.md](../architecture/decisions/0004-worktree-confinement-audit-outside.md)

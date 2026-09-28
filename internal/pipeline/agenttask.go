@@ -589,6 +589,20 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		}
 		door = d
 	}
+	// The BROWSE door (ADR 0060). Default OFF, like the write door: a node that has
+	// not opted in (agent_allow_browse) or has no configured lane refuses a contract
+	// that asks for it, as a `config`-class defer — this node's config is the fact
+	// that decides, and a delegation door only admits browse on route "local".
+	var browseFn agent.BrowseFunc
+	browseAudit := ""
+	if contract.AllowBrowse {
+		if !p.cfg.AgentAllowBrowse || !p.cfg.BrowseConfigured() {
+			return deferWire(core.DeferClassConfig,
+				"this node does not open the browse door: agent_allow_browse is false or the browse lane is not configured in the config it loaded")
+		}
+		browseFn = NewLoopBrowse(p.cfg, "agent_delegate")
+		browseAudit = agent.DefaultAuditPath()
+	}
 	writeLimit := (*agent.WriteLimit)(nil)
 	allowWrite, writeWorktree := false, ""
 	if door != nil {
@@ -635,6 +649,13 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		AllowOverwrite: allowWrite,
 		Worktree:       writeWorktree,
 		WriteLimit:     writeLimit,
+		// Browse (ADR 0060): granted only with the lane, the audit trail and the
+		// contract's host list — Build refuses anything less and says why.
+		AllowBrowse:   contract.AllowBrowse,
+		BrowseHosts:   contract.BrowseHosts,
+		Browse:        browseFn,
+		BrowseTimeout: LoopBrowseTimeout(p.cfg),
+		AuditPath:     browseAudit,
 	})
 	if berr != nil {
 		if errors.Is(berr, core.ErrAgentEnvRules) {
@@ -643,6 +664,12 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 			return deferWire(core.DeferClassConfig, "building agent: "+berr.Error())
 		}
 		return deferWire(core.DeferClassInfrastructure, "building agent: "+berr.Error())
+	}
+	if contract.AllowBrowse && !built.BrowseGranted {
+		// Build refused the grant (no audit path resolvable, no lane, no hosts): the
+		// contract asked for a browser, so running it without one would hand back a
+		// green result for work that never touched the page.
+		return deferWire(core.DeferClassConfig, "browse was asked for but not granted: "+strings.Join(built.Notes, "; "))
 	}
 
 	// Window budgeting parity with handleAgentRun: the SERVED window (probed and

@@ -45,7 +45,9 @@ type Profile struct {
 // (empty Tools => full set, no tuned prompt, no exemplars). Each specialised
 // profile lists a curated subset by the tools' REAL registered names (see
 // tools.go / writetools.go / greptool.go / shelltools.go / githubtool.go /
-// searchtool.go / fetchtool.go / worktree_memory.go).
+// searchtool.go / fetchtool.go / worktree_memory.go / browsetool.go). `browse` is listed in
+// every narrowed profile: narrow-only means it still survives only where the build granted it
+// (ADR 0060), and a caller who asked for allow_browse must not lose it to a profile.
 var profileRegistry = map[string]Profile{
 	"general": {
 		Name: "general",
@@ -53,7 +55,7 @@ var profileRegistry = map[string]Profile{
 	},
 	"edit": {
 		Name:  "edit",
-		Tools: []string{"list_dir", "read_file", "search_files", "edit_file", "write_file", "update_plan"},
+		Tools: []string{"list_dir", "read_file", "search_files", "edit_file", "write_file", "update_plan", "browse"},
 		System: `You are a local code-editing agent. Work in small, exact steps: locate the code, then change it.
 - Find the file with list_dir and search_files; read the relevant lines with read_file (use offset/limit to read just the region around a match).
 - Change an EXISTING file with edit_file (replace ONE exact, unique snippet) — prefer this over rewriting. Use write_file only to CREATE a new file.
@@ -72,7 +74,7 @@ A worked example follows; it is an illustration of the tool cycle, not the task.
 	},
 	"build": {
 		Name:  "build",
-		Tools: []string{"list_dir", "read_file", "search_files", "edit_file", "write_file", "update_plan", "run_shell", "run"},
+		Tools: []string{"list_dir", "read_file", "search_files", "edit_file", "write_file", "update_plan", "run_shell", "run", "browse"},
 		System: `You are a local build-and-fix agent. Edit code, then verify it by running commands.
 - Inspect with list_dir / search_files / read_file; change files with edit_file (exact snippet) or write_file (new file).
 - Run builds and tests with run_shell (no network; filesystem confined to the worktree). Read the exit code and stderr, then fix and re-run.
@@ -97,7 +99,7 @@ A worked example follows; it is an illustration of the tool cycle, not the task.
 		// small-seat narrowing (0%→72%) is untouched there. Field case: the
 		// loop-NPU wiring (0.85.0) was unreachable under the default profile —
 		// the tools existed in the binary and the profile stripped them.
-		Tools: []string{"web_search", "web_fetch", "summarize_file", "read_file", "list_dir",
+		Tools: []string{"web_search", "web_fetch", "browse", "summarize_file", "read_file", "list_dir",
 			"offload_vqa", "offload_ocr", "offload_transcribe",
 			"offload_face_detect", "offload_face_embed", "offload_object_detect",
 			"offload_person_embed", "offload_depth", "offload_enhance_low_light",
@@ -121,7 +123,7 @@ A worked example follows; it is an illustration of the tool cycle, not the task.
 	},
 	"github": {
 		Name:  "github",
-		Tools: []string{"list_dir", "read_file", "search_files", "edit_file", "write_file", "update_plan", "github_api", "github_create_repo", "github_upload_file"},
+		Tools: []string{"list_dir", "read_file", "search_files", "edit_file", "write_file", "update_plan", "github_api", "github_create_repo", "github_upload_file", "browse"},
 		System: `You are a local agent that prepares files and publishes them to GitHub.
 - Prepare content in the worktree with read_file / edit_file / write_file, tracking steps with update_plan.
 - Create a repository with github_create_repo, then push a worktree file with github_upload_file. Use github_api for any other GitHub REST call.

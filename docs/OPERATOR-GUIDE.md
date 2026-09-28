@@ -540,7 +540,41 @@ the final answer. The endpoint is **unauthenticated** — keep it loopback-only.
 | `--allow-run` | `run` — an allowlisted program run **directly** (no shell) in the OS sandbox | Linux **and** Windows. Allowlist + broker are the control (see "The runner" below). |
 | `--allow-shell` | `run_shell` in the OS sandbox | **Linux only**; no network, FS-confined, syscall-limited. |
 | `--allow-github` | `github_api` / `create_repo` / `upload_file` | token from `$GITHUB_TOKEN`, repo from `$GITHUB_REPO`. Use a least-privilege token. |
+| `--allow-browse` (+ `--browse-hosts host1,host2`) | `browse` — drive the operator's own running browser (ADR 0060) | Needs the browse lane configured (see "Browse lane" below). `--browse-hosts` is REQUIRED: the CLI always builds unattended, so the grant is refused without a host list, the deny-list can never be lifted, and an audit path is needed (default `<HOME>/.local-offload/agent-audit.jsonl`). `agent_run` / `agent_delegate` take `allow_browse` + `browse_hosts` and are unattended the same way; `route` must be `local` and the node needs `agent_allow_browse: true`. Only the MCP tool `offload_browse` is attended. |
 | `--listen-trusted-network` | bind `--serve` beyond loopback | prints a loud warning; only on a trusted LAN. |
+
+### Browse lane (opt-in: drive your own browser)
+
+The lane lets `offload_browse` (MCP) and the agent `browse` tool operate your already-running,
+logged-in Chromium browser toward a goal. It is off by default. Full reference:
+[systems/browse-lane.md](systems/browse-lane.md); decision: ADR 0060.
+
+**What leaves the machine.** The visible page text and element labels go to `browse_decision_url`
+on every step. The harness calls only loopback and holds no key, but your endpoint may front a hosted
+decision model. Do not browse pages whose text must not leave the machine.
+
+```powershell
+# 1. install the pinned sidecar; it prints the browse_python / browse_script values
+pwsh setup/browse/install.ps1 -OffloadHome <OFFLOAD_HOME>
+# 2. config: browse_python, browse_script, browse_decision_url (plain http on loopback only),
+#    optional browse_browser (chrome|edge|brave|chromium), browse_timeout_sec (300),
+#    browse_max_actions (30, ceiling 60), browse_capture_dir
+# 3. only if your decision endpoint wants a bearer, set it in the harness's environment
+$env:LOCAL_OFFLOAD_BROWSE_BEARER = '<bearer>'
+# 4. CLI use (always unattended for browse: --browse-hosts is required)
+local-agent --allow-browse --browse-hosts example.com "open the reports page and read the totals"
+```
+
+Then, in the browser you want driven, open `<browser>://inspect/#remote-debugging` (`chrome://`,
+`edge://`, `brave://`) and tick **Allow remote debugging for this browser instance**. The harness never
+starts or restarts the browser. Restart your MCP client so `offload_browse` appears.
+
+Controls labelled publish, send, post, delete, remove, pay, buy, checkout, subscribe, confirm, sign out
+and similar are removed before the model sees them and rechecked at execution; the run then ends
+`denied`. Only on the MCP door (the one attended door) can `allow_labels` exempt an exact label; the
+CLI, `agent_run` and `agent_delegate` are unattended and never lift it. For `agent_run` and
+`agent_delegate`, set `agent_allow_browse: true` on each node that may run one, and pass `allow_browse`
+with a non-empty `browse_hosts`. `done` is the decision model's claim: check the outcome yourself.
 
 ### Tool profiles (`--profile`)
 

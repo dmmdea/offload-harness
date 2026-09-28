@@ -28,6 +28,9 @@ const (
 	ActDelete ActionKind = "delete"
 	ActFetch  ActionKind = "fetch" // P3: outbound HTTP(S) GET to a host (egress-allowlist gated)
 	ActShell  ActionKind = "shell" // P4.6: run a command inside the OS sandbox (opt-in, audited)
+	// ActBrowse (ADR 0060): drive the operator's own browser; Path holds the start
+	// URL's lowercased host. Opt-in (WithBrowse), audited, rule-tightenable by host.
+	ActBrowse ActionKind = "browse"
 	// ActPark records a self-flagged high-risk call parked on an unattended run
 	// (Loop.WithParkRecorder → ask queue). Queue/audit vocabulary only — the
 	// broker never classifies it and the rule table rejects it implicitly
@@ -54,6 +57,7 @@ type Policy struct {
 	audit      *AuditLog
 	allow      Allowlist // P3 egress allowlist; the zero value permits nothing (default-deny)
 	allowShell bool      // P4.6 shell capability; off by default (default-deny)
+	allowBrowse bool     // ADR 0060 browse capability; off by default (default-deny)
 	askQueue   *AuditLog // P5b: optional reviewable queue of asks deferred on an unattended run
 
 	allowOverwrite bool // open-write: Allow overwrite of an existing file within the worktree
@@ -85,6 +89,14 @@ func NewPolicyWithEgress(unattended bool, audit *AuditLog, allow Allowlist) *Pol
 // Set once at startup before any Decide, so classify stays deterministic.
 func (p *Policy) WithShell(allowed bool) *Policy {
 	p.allowShell = allowed
+	return p
+}
+
+// WithBrowse enables (or disables) the ActBrowse capability (ADR 0060). Off by
+// default; Build turns it on only when the browse tool is actually granted. Set
+// once at startup before any Decide, so classify stays deterministic.
+func (p *Policy) WithBrowse(allowed bool) *Policy {
+	p.allowBrowse = allowed
 	return p
 }
 
@@ -162,6 +174,14 @@ func (p *Policy) classify(a Action) (Decision, string) {
 			return Allow, "shell command in the OS sandbox"
 		}
 		return Deny, "shell capability not enabled"
+	case ActBrowse:
+		// The grant is the pre-authorization (Build refuses it on an unattended run
+		// without a host allowlist, and the sidecar's deny-list refuses publish/send-
+		// class controls); rules may still deny or queue hosts. a.Path is the host.
+		if p.allowBrowse {
+			return Allow, "browse capability enabled for host " + a.Path
+		}
+		return Deny, "browse capability not enabled"
 	}
 	return Deny, "unknown action kind"
 }

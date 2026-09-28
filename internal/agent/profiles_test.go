@@ -73,7 +73,9 @@ func TestLookupProfileEditSubset(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LookupProfile(edit): %v", err)
 	}
-	want := []string{"list_dir", "read_file", "search_files", "edit_file", "write_file", "update_plan"}
+	// browse (ADR 0060) is listed in every narrowed profile so a granted browse tool is not
+	// dropped by the caller's profile; narrow-only keeps it out wherever it was not granted.
+	want := []string{"list_dir", "read_file", "search_files", "edit_file", "write_file", "update_plan", "browse"}
 	got := map[string]bool{}
 	for _, n := range p.Tools {
 		got[n] = true

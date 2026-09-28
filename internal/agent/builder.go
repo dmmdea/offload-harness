@@ -93,6 +93,21 @@ type BuildConfig struct {
 	Worktree       string   // RW worktree for write/shell; default = ReadRoot
 	EgressHosts    []string // web_fetch allowlist (AllowFetch)
 
+	// AllowBrowse grants the `browse` tool (ADR 0060): drive the operator's own
+	// browser through the browse lane. Granted only when Browse is set (the door has
+	// a configured lane), an AuditPath exists (every run leaves a trail) and, on an
+	// UNATTENDED run, BrowseHosts is non-empty. BrowseTimeout bounds one call (the
+	// lane's own timeout plus slack; 0 => 6 minutes).
+	AllowBrowse   bool
+	BrowseHosts   []string
+	Browse        BrowseFunc
+	BrowseTimeout time.Duration
+	// BrowseAgentDoor marks a grant that came from an agent door (agent_run,
+	// agent_delegate, a fleet contract): browse is then judged UNATTENDED — host
+	// list required, deny-list never lifted — whatever Unattended says, because
+	// no human watches that run's browser.
+	BrowseAgentDoor bool
+
 	Memory Memory // optional mem0 layer; nil => no memory
 }
 
@@ -104,8 +119,9 @@ type BuildResult struct {
 	Tools        []Tool
 	Policy       *Policy
 	Worktree     string // resolved RW worktree (empty if no write/shell/run)
-	ShellGranted bool
-	RunGranted   bool
+	ShellGranted  bool
+	RunGranted    bool
+	BrowseGranted bool
 	Notes        []string
 }
 
@@ -343,11 +359,41 @@ func Build(cfg BuildConfig) (*BuildResult, error) {
 		}
 	}
 
+	if cfg.AllowBrowse {
+		hosts := normalizeBrowseHosts(cfg.BrowseHosts)
+		browseUnattended := cfg.Unattended || cfg.BrowseAgentDoor
+		switch {
+		case cfg.Browse == nil:
+			res.Notes = append(res.Notes, "browse requested but this door has no configured browse lane — NOT granted")
+		case cfg.AuditPath == "":
+			res.Notes = append(res.Notes, "browse requested without an audit path — NOT granted (every browse run must leave a trail)")
+		case browseUnattended && len(hosts) == 0:
+			res.Notes = append(res.Notes, "browse requested on an unattended run without a host allowlist — NOT granted (fail-closed)")
+		default:
+			bt := cfg.BrowseTimeout
+			if bt <= 0 {
+				bt = 6 * time.Minute
+			}
+			pol.WithBrowse(true)
+			tools = append(tools, BrowseTools(pol, cfg.Browse, hosts, browseUnattended, bt)...)
+			res.BrowseGranted = true
+			scope := "any http(s) host"
+			if len(hosts) > 0 {
+				scope = strings.Join(hosts, ", ")
+			}
+			res.Notes = append(res.Notes, fmt.Sprintf("browse ON — the operator's own browser, hosts: %s (publish/send-class controls refused; page text goes to the decision endpoint)", scope))
+		}
+	}
+
 	client := NewLLMClient(cfg.PlannerBase, cfg.Model, "", timeout).WithStreamTokenIDs(cfg.StreamTokenIDs) // local planner, keyless
 	// The system prompt advertises only what was actually granted — ShellGranted,
 	// not the raw flag, so a cage-refused shell is never advertised to the model. A
 	// SystemPromptOverride (P6 flywheel replay of a candidate prompt) replaces it.
 	sys := SystemPrompt(cfg.AllowWrite, cfg.AllowOverwrite, cfg.AllowFetch, res.ShellGranted, res.RunGranted, cfg.AllowSearch, cfg.AllowGitHub)
+	if res.BrowseGranted {
+		sys += "\n- browse: drive the operator's own browser toward a goal (start url + goal with every value to type). " +
+			"Publish/send/delete/pay-class controls are refused. A done status is a claim: read final.text before relying on it."
+	}
 	if cfg.SystemPromptOverride != "" {
 		sys = cfg.SystemPromptOverride
 	}

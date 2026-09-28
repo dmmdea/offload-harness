@@ -799,6 +799,13 @@ func buildAgentRun(cfg config.Config, payload json.RawMessage) (core.Request, fu
 			"agent contract: this node does not open the write door (agent_allow_write is false in the config it loaded) and the contract asks to write under %q", contract.WriteRoot)
 	}
 
+	// The browse door (ADR 0060) is refused at ACK the same way: a node that has not
+	// opted in, or has no configured lane, never drives a browser for a contract.
+	if contract.AllowBrowse && !(cfg.AgentAllowBrowse && cfg.BrowseConfigured()) {
+		return core.Request{}, noop, fmt.Errorf(
+			"agent contract: this node does not open the browse door (agent_allow_browse is false or the browse lane is not configured in the config it loaded)")
+	}
+
 	jobsRoot := filepath.Join(cfg.BaseDir(), "pipeline-jobs")
 	if mkErr := os.MkdirAll(jobsRoot, 0o755); mkErr != nil {
 		return core.Request{}, noop, fmt.Errorf("agent contract: creating pipeline-jobs dir: %w", mkErr)

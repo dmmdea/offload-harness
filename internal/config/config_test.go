@@ -359,6 +359,7 @@ func pathFieldJSONNames(t *testing.T) []string {
 		"voicegen_ref", "voicegen_ft_model", "voicegen_ft_base_dir", "voicegen_ft_ref",
 		"edit_python", "gimp_console_path",
 		"compose_script", "hyperframes_dir", "hyperframes_browser_path", "compose_cache_dir",
+		"browse_python", "browse_script", "browse_capture_dir",
 		"cache_path", "ledger_path",
 		"thresholds_path", "tier_overrides_path", "router_weights_path",
 		"confhead_path", "router_labels_path", "confhead_labels_path",

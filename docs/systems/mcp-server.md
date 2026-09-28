@@ -52,6 +52,7 @@ than any number written down:
 | Graph execution | `offload_run_graph` |
 | Agent | `agent_run`, `offload_ask`, `offload_review_diff`, `agent_rig` |
 | Delegation (opt-in: `agent_delegation_enabled`) | `agent_delegate`, `offload_research` |
+| Browser (opt-in lane; registered only when configured; ADR 0060) | `offload_browse` |
 | Remote (opt-in) | `offload_nim` |
 | Status | `offload_status` |
 
@@ -64,9 +65,16 @@ edit tool also takes `images` (multi-reference, qwen-image-2.1 families) and bot
 descriptions say so, so a calling agent never has to guess which outputs are research-only. See
 [media-generation.md](media-generation.md#named-families-launch-profiles-and-license-tags-adr-0058).
 
-`offload_nim` is the **only** tool that reaches a remote service. It is an explicit, caller-invoked
+`offload_nim` is the **only remote MODEL surface**. It is an explicit, caller-invoked
 side channel and is not part of the Cascade — nothing escalates or falls back into it. See
 [ADR 0001](../architecture/decisions/0001-defer-never-cloud-fallback.md).
+
+`offload_browse` (0.141.0, ADR 0060) drives the operator's own browser and is registered only when
+the lane is configured (`browse_python`, `browse_script` and a loopback `browse_decision_url`). The
+harness holds no key and calls only that loopback decision endpoint, which the operator runs and
+which may itself front a hosted decision model, so a run's visible page text and element labels can
+leave the machine through it. Every other tool runs local. See
+[browse-lane.md](browse-lane.md).
 
 **Door order (register A-102, 2026-09-18).** The four cascade tools (`offload_summarize`, `offload_classify`,
 `offload_extract`, `offload_triage`) are the FIRST door for one text + one mechanical question: seconds on the
@@ -387,11 +395,12 @@ errors it will try to work around.
 ## Invariants and assumptions
 
 1. **The manifest and the registered tools must agree.** A drift test enforces it, so adding a tool
-   without updating `.printing-press.json` fails the build. Currently 22 registered, 22 declared;
+   without updating `.printing-press.json` fails the build. Currently 32 declared (measured 2026-09-28), one per `Name:` literal in `mcpserver.go` (some register only behind their config gate — `offload_browse` only on a box that configured the browse lane);
    the manifest's `version` tracks `VERSION` release by release. This test arrived via an outside
    contribution after the manifest had silently drifted to claiming four tools.
 2. A Defer is a successful result. Do not map it to an MCP error.
-3. `offload_nim` is the only remote surface, and it is opt-in.
+3. `offload_nim` is the only remote MODEL surface, and it is opt-in. `offload_browse` is also opt-in and
+   asks only a loopback decision endpoint the operator runs (ADR 0060).
 4. `offload_status` with no argument answers byte-for-byte what it answered before `section`
    existed. A golden captured from the pre-change handler on a fixture that owns every
    machine-dependent input pins it (`TestStatusDefaultIsByteIdenticalToTheGolden`). A deliberate
@@ -463,7 +472,8 @@ GPUs.
 - Adding a tool and forgetting the manifest — the drift test catches it, which is the point.
 - Expecting a Defer to be an error.
 - Debugging "missing tools" without restarting the MCP client first.
-- Assuming every tool is local: `offload_nim` is not.
+- Assuming every tool is local: `offload_nim` is not, and `offload_browse` sends page text to a loopback
+  decision endpoint that may front a hosted model.
 
 ## Source map
 
@@ -487,6 +497,7 @@ GPUs.
 
 ## Related docs
 
+- [browse-lane.md](browse-lane.md)
 - [../architecture/decisions/0001-defer-never-cloud-fallback.md](../architecture/decisions/0001-defer-never-cloud-fallback.md)
 - [../OPERATOR-GUIDE.md](../OPERATOR-GUIDE.md)
 - [../../README.md](../../README.md) — full CLI and MCP tool tables

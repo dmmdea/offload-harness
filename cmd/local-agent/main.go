@@ -147,6 +147,9 @@ func main() {
 	allowShell := fs.Bool("allow-shell", false, "P4.6: enable run_shell inside the OS sandbox (Linux only; no network, FS-confined, syscall-limited). Default off.")
 	allowRun := fs.Bool("allow-run", false, "C7b: enable `run` — an allowlisted program run DIRECTLY (no shell) inside the OS sandbox (Linux AND Windows). The executable allowlist is the primary control. Default off.")
 	allowSearch := fs.Bool("allow-search", false, "enable web_search (DuckDuckGo, keyless; auto-allowlists the search host). Default off.")
+	allowBrowse := fs.Bool("allow-browse", false, "ADR 0060: enable the browse tool — drive THIS machine's own browser through the configured browse lane. Needs --browse-hosts (this CLI runs unattended), a configured lane and an audit path; publish/send-class controls are always refused. Default off.")
+	var browseHosts multiFlag
+	fs.Var(&browseHosts, "browse-hosts", "with --allow-browse: host the browse tool may visit, subdomains included (repeatable, or comma-separated). Required with --allow-browse.")
 	allowGitHub := fs.Bool("allow-github", false, "enable GitHub tools (github_api/create_repo/upload_file). Token from $GITHUB_TOKEN, default repo from $GITHUB_REPO. Default off.")
 	queuePath := fs.String("queue", "", "P5b standalone: drain a JSONL goal queue UNATTENDED (the capability flags become the pre-authorization envelope) instead of a single objective. No resume — a re-run reprocesses the whole queue.")
 	askQueuePath := fs.String("ask-queue", "", "file where asks deferred on the unattended run are parked for review (default when any mutating capability is enabled: ~/.local-offload/agent-asks.jsonl)")
@@ -279,7 +282,7 @@ func main() {
 	// allowGitHub included (review round 2, 2026-08-14): a --allow-github-only
 	// run gets a worktree and github_upload_file — an outward-facing write
 	// surface that must not run without an audit trail.
-	if auditP == "" && (*allowWrite || *allowFetch || *allowShell || *allowRun || *allowGitHub) {
+	if auditP == "" && (*allowWrite || *allowFetch || *allowShell || *allowRun || *allowGitHub || *allowBrowse) {
 		if home, e := os.UserHomeDir(); e == nil {
 			auditP = filepath.Join(home, ".local-offload", "agent-audit.jsonl")
 		}
@@ -292,7 +295,7 @@ func main() {
 	// queue would deny the calls and have nowhere to record them for the
 	// morning review. Traces stay --queue-only.
 	askQ, tracesD := *askQueuePath, *tracesDir
-	if askQ == "" && (*allowWrite || *allowFetch || *allowShell || *allowRun || *allowGitHub) {
+	if askQ == "" && (*allowWrite || *allowFetch || *allowShell || *allowRun || *allowGitHub || *allowBrowse) {
 		if home, e := os.UserHomeDir(); e == nil {
 			askQ = filepath.Join(home, ".local-offload", "agent-asks.jsonl")
 		}
@@ -362,6 +365,10 @@ func main() {
 		Worktree:       *worktree,
 		EgressHosts:    egressHosts,
 		Memory:         mem,
+		AllowBrowse:    *allowBrowse,
+		BrowseHosts:    splitHostList(browseHosts),
+		Browse:         pipeline.NewLoopBrowse(cfg, "cli:local-agent"),
+		BrowseTimeout:  pipeline.LoopBrowseTimeout(cfg),
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
@@ -574,6 +581,10 @@ func main() {
 			EgressHosts:          egressHosts,
 			Memory:               mem,
 			SystemPromptOverride: agent.EditorPrompt,
+			AllowBrowse:          *allowBrowse,
+			BrowseHosts:          splitHostList(browseHosts),
+			Browse:               pipeline.NewLoopBrowse(cfg, "cli:local-agent"),
+			BrowseTimeout:        pipeline.LoopBrowseTimeout(cfg),
 		})
 		if eerr != nil {
 			fmt.Fprintln(os.Stderr, "error: building editor:", eerr)
@@ -737,4 +748,18 @@ func resolveEnvRules(flagPath string, cfg config.Config) (*core.AgentEnvRules, e
 		return nil, fmt.Errorf("--env-rules %s: %w", flagPath, err)
 	}
 	return &r, nil
+}
+
+// splitHostList flattens a repeatable host flag whose values may also be
+// comma-separated ("--browse-hosts a.example,b.example --browse-hosts c.example").
+func splitHostList(vals []string) []string {
+	var out []string
+	for _, v := range vals {
+		for _, h := range strings.Split(v, ",") {
+			if h = strings.TrimSpace(h); h != "" {
+				out = append(out, h)
+			}
+		}
+	}
+	return out
 }

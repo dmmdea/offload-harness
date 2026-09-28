@@ -35,6 +35,8 @@ Detailed documentation lives in `docs/`. This file only routes you there.
 - [`docs/systems/node-swap.md`](docs/systems/node-swap.md) — `node-swap`: the reusable Windows
   fleet-node binary/render-tree swap tool (hash verify, idle wait, backup+rename, restart,
   verify, automatic rollback) and its detached, SSH-drop-proof launcher.
+- [`docs/systems/browse-lane.md`](docs/systems/browse-lane.md) — the opt-in browse lane
+  (`offload_browse` / agent `browse`): sidecar protocol, deny-list, doors, and what leaves the machine (ADR 0060).
 - [`docs/systems/opencode-integration.md`](docs/systems/opencode-integration.md) — the harness inside
   opencode: MCP registration, rules parity, and the `opencode-local-offload` plugin.
 - [`docs/architecture/decisions/`](docs/architecture/decisions/README.md) — Architecture Decision

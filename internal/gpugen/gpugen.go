@@ -304,6 +304,11 @@ func runSampled(cmd *exec.Cmd, w io.Writer, sample func(childPid int) (float64, 
 	return peak, err
 }
 
+// KillTree is killTree for the lanes that spawn their own interactive child (the
+// browse lane keeps a stdio conversation open, so it cannot go through Generate)
+// and still need the same whole-tree kill on timeout/cancel.
+func KillTree(p *os.Process) error { return killTree(p) }
+
 // killTree force-terminates p and ALL descendants. On Windows, killing the bare node
 // process leaves the spawned ComfyUI python alive (no process-group semantics), so we
 // taskkill the whole tree; elsewhere a direct kill is the best portable effort.

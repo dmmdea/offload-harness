@@ -1,0 +1,13 @@
+[project]
+name = "offload-browse-sidecar"
+version = "0.1.0"
+description = "Opt-in browse-lane sidecar for offload-harness (pinned browser-use jev-ultrafast + browser-harness)."
+requires-python = ">=3.12"
+dependencies = [
+    "browser-harness==0.1.13",
+    "jev-ultrafast @ git+https://github.com/browser-use/jev-ultrafast@1231850a0bf1a0c0341fe408ef1668dbbfdfac46",
+]
+
+[tool.uv]
+# The sidecar is a script (runner.py), not an installable package.
+package = false
