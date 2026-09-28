@@ -13,6 +13,15 @@ A fleet node's `202` response accepting a dispatched job. It means "this job is 
 job is finished". Duplicate dispatches of a non-failed job re-ack rather than starting a second run —
 see [flows/fleet-job-lifecycle.md](flows/fleet-job-lifecycle.md).
 
+## Browse lane
+
+The opt-in lane that drives the operator's own running, logged-in Chromium browser toward a
+natural-language goal: the MCP tool `offload_browse` and the agent tool `browse` (ADR 0060). A pinned
+Python sidecar owns the browser; the harness owns every model call and reaches only a loopback
+decision endpoint, which may front a hosted model. Off by default; agent doors are unattended and
+local-only. Not a headless scraper: it uses the operator's real session. See
+[systems/browse-lane.md](systems/browse-lane.md).
+
 ## Cascade
 
 The ordered set of model Tiers an offload task walks, entering at the smallest capable tier and
@@ -44,6 +53,14 @@ Text-cascade defers carry a free-form `reason` plus an `err_class` for infrastru
 Run-graph defers are **typed**, carrying a machine-readable `code`, a `ref` identifying the offending
 item, and a `detail`. See
 [architecture/decisions/0001-defer-never-cloud-fallback.md](architecture/decisions/0001-defer-never-cloud-fallback.md).
+
+## Deny-list
+
+The word-bounded, case-insensitive list of control labels (publish, send, post, delete, pay, buy,
+checkout, subscribe, confirm, sign out, ...) the Browse lane never offers to the model and rechecks at
+execution, so a run ends `denied` rather than clicking one. `allow_labels` lifts it for exact labels on
+the attended MCP door only. Distinct from a policy-broker deny rule, which gates an agent action by
+kind and subject.
 
 ## Effect record
 

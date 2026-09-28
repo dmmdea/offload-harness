@@ -6,6 +6,49 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.141.0] - 2026-09-28 - the opt-in browse lane: `offload_browse` and the agent `browse` tool drive the operator's own browser
+
+### Added — the browse lane (ADR 0060)
+
+An opt-in lane that drives the operator's already-running, logged-in Chromium browser toward a
+natural-language goal. Off by default: no `browse_*` key is seeded, and `offload_browse` is registered
+only when `browse_python`, `browse_script` and a loopback `browse_decision_url` are all set.
+
+- **MCP `offload_browse`** (`url`, `goal`, `max_actions`, `allow_hosts`, `allow_labels`, `capture`,
+  `route=local`). Typed decisions are proxied to the loopback decision endpoint (plain `http` on a
+  loopback host only; anything else leaves the lane unconfigured and warns at load); field values are
+  written by the local seat under a raw GBNF grammar. The harness holds no key: the endpoint's bearer
+  comes only from the `LOCAL_OFFLOAD_BROWSE_BEARER` environment variable and never reaches the sidecar.
+- **Agent `browse` tool** (`url`, `goal`, `max_actions`, `security_risk`). CLI door:
+  `local-agent --allow-browse --browse-hosts host1,host2`. Only the MCP tool is attended. Every agent
+  door is unattended for browse: the CLI (which always builds unattended), `agent_run` and
+  `agent_delegate` (`allow_browse` and `browse_hosts`) each require a non-empty host list and an audit
+  path, and `allow_labels` can never lift the deny-list. For contracts, `route` must be `local` (intake rejects otherwise),
+  delegation placement never sends the contract to a remote node, and a fleet node refuses it at ACK
+  unless its config has `agent_allow_browse: true`. The policy broker gains the action kind `browse`
+  (subject: the start URL's lowercased host), and every agent-door call is audited.
+- **Config keys:** `browse_python`, `browse_script`, `browse_decision_url`, `browse_browser`
+  (`chrome`|`edge`|`brave`|`chromium`|empty), `browse_timeout_sec` (300), `browse_max_actions` (30,
+  ceiling 60), `browse_capture_dir`, and the node opt-in `agent_allow_browse` (default false).
+- **Sidecar `setup/browse/`:** browser-use's `jev-ultrafast` loop over `browser-harness` (both pinned,
+  `uv sync --frozen`), an allowlisted environment with telemetry forced off, a lane-only daemon name
+  stopped after every run, a deny-list applied before the model sees a control and again at execution,
+  redacted network capture, and typed defers (`BAD_INPUT`, `CLI_MISSING`, `BROWSER_UNAVAILABLE`,
+  `DECISION_UNAVAILABLE`, `TEXT_UNAVAILABLE`, `HOST_NOT_ALLOWED`, `DENIED`, `TIMEOUT`,
+  `RUNNER_FAILED`). Installed with `setup/browse/install.ps1`.
+- **What leaves the machine:** the visible page text and element labels go to the decision endpoint,
+  which the operator runs and which may front a hosted decision model. ADR 0060 amends ADR 0001's
+  "never a cloud call" reading for this lane only; `offload_nim` stays the only remote model surface.
+- Docs: ADR 0060, `docs/systems/browse-lane.md`, and the MCP server, coding-agent, operator-guide,
+  README, CONTRIBUTING and glossary entries.
+
+### Changed — the `offload_status` golden changed on purpose
+
+`offload_status`'s `remote` block gains `browse_configured` and `browse_decision_url`, and its `note`
+now names `offload_browse` beside `offload_nim`. The full-payload golden
+(`TestStatusDefaultIsByteIdenticalToTheGolden`) was regenerated deliberately with
+`OFFLOAD_UPDATE_GOLDEN=1`.
+
 ### Removed — the amd-gcn tier's CPU alt route (`alt_backends: ["cpu"]`)
 
 Operator order, 2026-09-24: no model runs on CPU. `amd-gcn` no longer declares the CPU seat

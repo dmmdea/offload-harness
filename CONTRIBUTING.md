@@ -27,9 +27,12 @@ llama.cpp server.
   `docs:`, `test:`, `refactor:`, `chore:` — followed by a short imperative summary.
 - **No cloud calls in the cascade.** The cascade never calls a cloud model and holds no cloud
   credentials by design — on low confidence it returns a structured defer and the caller does the
-  task. Please keep it that way. (`offload_nim` is the single, explicit, caller-invoked remote tool;
-  nothing escalates or falls back into it. See
-  [ADR 0001](docs/architecture/decisions/0001-defer-never-cloud-fallback.md).)
+  task. Please keep it that way. (`offload_nim` is the single, explicit, caller-invoked remote model
+  tool; nothing escalates or falls back into it. The one other exception is the opt-in browse lane:
+  it calls only a loopback decision endpoint the operator runs, holds no key, and that endpoint may
+  front a hosted model, so visible page text can leave the machine. See
+  [ADR 0001](docs/architecture/decisions/0001-defer-never-cloud-fallback.md) and
+  [ADR 0060](docs/architecture/decisions/0060-opt-in-browse-lane-drives-the-operators-browser.md).)
 
 ## Documentation
 

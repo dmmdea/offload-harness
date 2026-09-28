@@ -244,6 +244,14 @@ type AgentContract struct {
 	// The write set is NEVER applied by the harness. It comes back as a
 	// unified diff (AgentWireResult.Diff) for the caller to review and apply.
 	WriteRoot string `json:"write_root,omitempty"`
+	// AllowBrowse (0.141.0, ADR 0060) asks for the agent `browse` tool: drive the
+	// executing node's OWN operator browser through its browse lane. BrowseHosts
+	// is the run's host allowlist and is REQUIRED with it (an agent door is judged
+	// unattended for browse). A node refuses the contract at ack unless it opted
+	// in (agent_allow_browse) and configured the lane; the delegation door admits
+	// it only on route "local".
+	AllowBrowse bool     `json:"allow_browse,omitempty"`
+	BrowseHosts []string `json:"browse_hosts,omitempty"`
 	// ContextClass (ADR 0039, 0.116.0) is the caller's explicit ask for a
 	// long-window seat: "" (the placement table decides from the token
 	// estimate) or ContextClassLong. It is an INPUT to placement, never a seat
@@ -648,6 +656,9 @@ func (c AgentContract) ValidateWithCap(maxBytes int) error {
 	if err := ValidateWriteRoot(c.WriteRoot); err != nil {
 		return fmt.Errorf("agent contract: %w", err)
 	}
+	if err := ValidateBrowseHosts(c.AllowBrowse, c.BrowseHosts); err != nil {
+		return fmt.Errorf("agent contract: %w", err)
+	}
 	if len(c.Context) > AgentContextMaxDocs {
 		return fmt.Errorf("agent contract: %d context docs exceeds the max of %d", len(c.Context), AgentContextMaxDocs)
 	}
@@ -761,6 +772,28 @@ func validDocName(name string) error {
 	}
 	if windowsDeviceNames[strings.ToLower(stem)] {
 		return fmt.Errorf("name %q is a reserved Windows device name (writes to it succeed and read back EMPTY — the doc would vanish silently)", name)
+	}
+	return nil
+}
+
+// ValidateBrowseHosts holds a contract's browse grant to its envelope: with
+// allow_browse, 1-32 bare host names (no scheme, port, path or wildcard); without
+// it, no hosts at all (a host list that grants nothing is a caller mistake).
+func ValidateBrowseHosts(allow bool, hosts []string) error {
+	if !allow {
+		if len(hosts) > 0 {
+			return fmt.Errorf("browse_hosts is set but allow_browse is not")
+		}
+		return nil
+	}
+	if len(hosts) == 0 || len(hosts) > 32 {
+		return fmt.Errorf("allow_browse needs 1-32 browse_hosts (an agent door is judged unattended for browse), got %d", len(hosts))
+	}
+	for _, h := range hosts {
+		h = strings.TrimSpace(h)
+		if h == "" || strings.ContainsAny(h, "/:*?@ \\") {
+			return fmt.Errorf("browse_hosts entry %q must be a bare host name (no scheme, port, path or wildcard)", h)
+		}
 	}
 	return nil
 }

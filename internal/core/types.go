@@ -107,6 +107,14 @@ const (
 	// frames_dir, duration_sec, fps, frames, width, height, has_alpha, has_audio,
 	// codec, render_ms, lint, check, snapshots}.
 	TaskComposeVideo TaskType = "compose_video"
+	// TaskBrowse drives the operator's own, already-running Chromium browser toward a
+	// natural-language goal (ADR 0060). OPT-IN: its own branch in pipeline.Run spawns
+	// the pinned sidecar (setup/browse/runner.py) over a stdio protocol; the harness
+	// proxies the sidecar's typed choices to a LOOPBACK decision endpoint and writes its
+	// field values on the local seat with a grammar. No GPU lease, its own slot. Returns
+	// {status, model_done, final{url,title,text}, actions, steps, decisions, text_calls,
+	// decision_model, decision_cost_usd, capture_path, captured}.
+	TaskBrowse TaskType = "browse"
 	// TaskRunGraph executes an arbitrary ComfyUI API-format graph + satisfies its node
 	// manifest on the LOCAL ComfyUI. 100% generic — the caller owns graph semantics.
 	// Its own branch in pipeline.Run — it shells out to render/comfy-run-graph.mjs via
@@ -147,7 +155,7 @@ const AccelImageCap = 8 << 20
 // Valid reports whether t is a known task type.
 func (t TaskType) Valid() bool {
 	switch t {
-	case TaskSummarize, TaskClassify, TaskExtract, TaskTriage, TaskVQA, TaskOCR, TaskExtractImage, TaskAssessImage, TaskVideoDescribe, TaskVideoWatch, TaskTranscribe, TaskGenerateImage, TaskInpaintImage, TaskEditImageGenerative, TaskUpscaleImage, TaskGenerateSVG, TaskGenerateVideo, TaskAnimateCharacter, TaskGenerateAudio, TaskEditImage, TaskMedia, TaskComposeVideo, TaskRunGraph, TaskPipelineJob, TaskAgentRun, TaskAccel:
+	case TaskSummarize, TaskClassify, TaskExtract, TaskTriage, TaskVQA, TaskOCR, TaskExtractImage, TaskAssessImage, TaskVideoDescribe, TaskVideoWatch, TaskTranscribe, TaskGenerateImage, TaskInpaintImage, TaskEditImageGenerative, TaskUpscaleImage, TaskGenerateSVG, TaskGenerateVideo, TaskAnimateCharacter, TaskGenerateAudio, TaskEditImage, TaskMedia, TaskComposeVideo, TaskBrowse, TaskRunGraph, TaskPipelineJob, TaskAgentRun, TaskAccel:
 		return true
 	}
 	return false

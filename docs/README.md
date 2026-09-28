@@ -42,6 +42,8 @@ where the code lives.
 - [systems/opencode-integration.md](systems/opencode-integration.md) — full harness support inside
   opencode: MCP registration, rules parity, the `opencode-local-offload` plugin (plan-time
   protocol, read-only task reroute, nudges, instrument)
+- [systems/browse-lane.md](systems/browse-lane.md) — the opt-in browse lane: the sidecar and its stdio
+  protocol, the deny-list, attended vs agent doors, the loopback decision endpoint, and what leaves the machine
 - [systems/pair-workloads.md](systems/pair-workloads.md) — harness jobs in NVIDIA Personal AI
   Router's Jobs list: the workload frame contract, the two emit sources (delegate runner, ledger
   observer), the `pair_workloads_*` keys, and the patched PAIR worker the ingress needs

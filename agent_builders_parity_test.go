@@ -84,3 +84,59 @@ func isBuildConfigType(expr ast.Expr) bool {
 	}
 	return false
 }
+
+// TestEveryAgentBuilderThatGrantsBrowseWiresTheLaneAndItsTimeout pins ADR 0060 at
+// the CALL SITES the same way: an agent.BuildConfig literal that sets AllowBrowse
+// must also hand Build the lane (Browse) and its per-call cap (BrowseTimeout).
+// Without the lane, Build refuses the grant with a note — a door that forgot it
+// would silently never browse; without the timeout, the loop's generic 120 s tool
+// cap would kill every real run long before the lane's own typed TIMEOUT.
+func TestEveryAgentBuilderThatGrantsBrowseWiresTheLaneAndItsTimeout(t *testing.T) {
+	var missing []string
+	err := filepath.WalkDir(".", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			switch d.Name() {
+			case ".git", "node_modules", "testdata", "vendor", "docs":
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		fset := token.NewFileSet()
+		f, perr := parser.ParseFile(fset, path, nil, 0)
+		if perr != nil {
+			return perr
+		}
+		ast.Inspect(f, func(n ast.Node) bool {
+			lit, ok := n.(*ast.CompositeLit)
+			if !ok || !isBuildConfigType(lit.Type) {
+				return true
+			}
+			has := map[string]bool{}
+			for _, e := range lit.Elts {
+				if kv, ok := e.(*ast.KeyValueExpr); ok {
+					if id, ok := kv.Key.(*ast.Ident); ok {
+						has[id.Name] = true
+					}
+				}
+			}
+			if has["AllowBrowse"] && (!has["Browse"] || !has["BrowseTimeout"]) {
+				missing = append(missing, fset.Position(lit.Pos()).String())
+			}
+			return true
+		})
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(missing) > 0 {
+		t.Fatalf("agent.BuildConfig literals granting AllowBrowse without Browse and BrowseTimeout (ADR 0060):\n  %s",
+			strings.Join(missing, "\n  "))
+	}
+}
