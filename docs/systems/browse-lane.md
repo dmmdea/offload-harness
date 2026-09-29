@@ -52,14 +52,18 @@ operator's browser, and any remote browser service.
 2. The harness takes the in-process browse slot (capacity one: there is one operator browser), and
    spawns the sidecar with an allowlisted environment, telemetry forced off, and a fresh temp
    directory as cwd.
-3. The sidecar attaches to the running browser through the browser's `DevToolsActivePort` file, opens a
-   background tab, and loops: observe, ask the harness for a decision, execute one action.
+3. The sidecar attaches to the running browser (the `browse_cdp_url` endpoint when set, else the named
+   browser's `DevToolsActivePort` file), opens a background tab, and loops: observe, ask the harness for a
+   decision, execute one action.
 4. Every model call goes through the harness. A typed decision is proxied to `browse_decision_url`
    (the bearer, if any, comes from `LOCAL_OFFLOAD_BROWSE_BEARER` in the harness process and never
    reaches the sidecar). A field value for TYPE_TEXT is generated on the local agent seat under a raw
    GBNF `grammar` (Invariant 1).
-5. The sidecar sends one `result` line and exits. The harness stops the lane's browser-harness daemon
-   (`offload-browse`), removes nothing of the operator's, and returns the result.
+5. Before closing its tab the sidecar waits until the page's XHR/fetch traffic has been quiet for 3.5 s
+   (capped at 15 s): an editor saves on a debounce after the last input (Substack's autosave leaves 2.3 s
+   after a keystroke), and closing the tab at DONE dropped that save while the run reported done. Then it
+   closes the tab, sends one `result` line, stops the lane's browser-harness daemon (`offload-browse`) and
+   exits; the harness returns the result. Nothing of the operator's is removed.
 
 ### The stdio protocol
 

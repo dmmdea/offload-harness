@@ -6,6 +6,17 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.142.1] - 2026-09-29 - the browse lane waits for the page to finish saving before it closes its tab
+
+### Fixed — an edit made by a run's last action was lost when the tab closed
+
+A live Substack run typed a post title, reported `done`, and the title was never stored: the editor
+autosaves on a debounce (measured 2.3 s after a keystroke) and the sidecar closed its tab at DONE, before
+the save left. The sidecar now holds the tab open until the page's XHR/fetch traffic has been quiet for
+3.5 s (capped at 15 s) and keeps feeding any capture while it waits. Measured on the same draft: with the
+settle the typed title was stored (one request watched, 6.1 s); without it the identical step reported
+`done` and the title was not stored.
+
 ## [0.142.0] - 2026-09-28 - `browse_cdp_url` pins the browse lane to a dedicated agent browser
 
 ### Added — `browse_cdp_url`
