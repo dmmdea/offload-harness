@@ -232,6 +232,20 @@ class CdpPinTests(unittest.TestCase):
         self.assertEqual(runner.cdp_env_for("http://127.0.0.1:9333/"), {"BU_CDP_URL": "http://127.0.0.1:9333"})
         self.assertEqual(runner.cdp_env_for("ws://127.0.0.1:9333/devtools/browser/x"),
                          {"BU_CDP_WS": "ws://127.0.0.1:9333/devtools/browser/x"})
+        self.assertEqual(runner.cdp_env_for("WS://127.0.0.1:9333/devtools/browser/x"),
+                         {"BU_CDP_WS": "WS://127.0.0.1:9333/devtools/browser/x"})
+        self.assertEqual(runner.cdp_env_for("HTTP://127.0.0.1:9333"), {"BU_CDP_URL": "HTTP://127.0.0.1:9333"})
+
+    def test_pin_wins_over_named_browser(self):
+        # The named browser has no DevToolsActivePort here; consulting it would be an error.
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {"LOCALAPPDATA": tmp}
+            updates, err = runner.browser_env({"cdp_url": "http://127.0.0.1:9333", "browser": "brave"}, "windows", env)
+            self.assertEqual((updates, err), ({"BU_CDP_URL": "http://127.0.0.1:9333"}, ""))
+            updates, err = runner.browser_env({"browser": "brave"}, "windows", env)
+            self.assertEqual(updates, {})
+            self.assertIn("DevToolsActivePort", err)
+            self.assertEqual(runner.browser_env({}, "windows", env), ({}, ""))
 
 
 class ReviewHardeningTests(unittest.TestCase):

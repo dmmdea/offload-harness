@@ -2632,8 +2632,22 @@ func isLoopbackHost(host string) bool {
 // operator's sessions, so it never attaches to a browser on another machine.
 func BrowseCDPURLAllowed(u string) bool {
 	pu, err := url.Parse(strings.TrimSpace(u))
-	if err != nil || (pu.Scheme != "http" && pu.Scheme != "ws") || pu.Host == "" || pu.User != nil || pu.Port() == "" {
+	if err != nil || (pu.Scheme != "http" && pu.Scheme != "ws") || pu.Host == "" || pu.User != nil ||
+		pu.RawQuery != "" || pu.Fragment != "" {
 		return false
+	}
+	if port, perr := strconv.Atoi(pu.Port()); perr != nil || port < 1 || port > 65535 {
+		return false
+	}
+	switch pu.Scheme {
+	case "http": // the endpoint root: browser-harness appends /json/version itself
+		if pu.Path != "" && pu.Path != "/" {
+			return false
+		}
+	case "ws": // a DevTools socket path, as /json/version or DevToolsActivePort names it
+		if !strings.HasPrefix(pu.Path, "/devtools/") {
+			return false
+		}
 	}
 	return isLoopbackHost(pu.Hostname())
 }

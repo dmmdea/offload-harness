@@ -119,7 +119,7 @@ endpoint keeps its own spend ledger.
 | `browse_script` | The installed `runner.py`. |
 | `browse_decision_url` | Loopback decision endpoint. Must be plain `http` on `127.0.0.1`, `::1` or `localhost`, or the lane stays unconfigured and the load warns. |
 | `browse_browser` | `chrome`, `edge`, `brave`, `chromium`, or empty for the first running browser with remote debugging allowed. |
-| `browse_cdp_url` | Pins the lane to ONE browser endpoint, e.g. `http://127.0.0.1:9333` (resolved through `/json/version`) or a `ws://` URL. Loopback host with an explicit port only; anything else leaves the lane unregistered. Wins over `browse_browser`. Use it for a dedicated agent profile (below). |
+| `browse_cdp_url` | Pins the lane to ONE browser endpoint, e.g. `http://127.0.0.1:9333` (resolved through `/json/version`) or a `ws://` URL. Loopback host, a real port, no credentials, query or fragment; an `http://` value is the endpoint root (no path) and a `ws://` value a `/devtools/` socket. Anything else leaves the lane unregistered. Wins over `browse_browser`. Use it for a dedicated agent profile (below). |
 | `browse_timeout_sec` | One run's wall budget. Default 300. |
 | `browse_max_actions` | Default executed-action budget. Default 30, ceiling 60. |
 | `browse_capture_dir` | Where redacted captures land. Empty means `<state_dir>/browse-captures`, or the OS temp dir. |

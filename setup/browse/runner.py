@@ -172,9 +172,29 @@ def cdp_env_for(cdp_url) -> dict:
     url = str(cdp_url or "").strip()
     if not url:
         return {}
-    if url.startswith("ws://"):
+    if url.lower().startswith("ws://"):  # schemes are case-insensitive; Go accepted WS:// too
         return {"BU_CDP_WS": url}
     return {"BU_CDP_URL": url.rstrip("/")}
+
+
+CDP_ENV_KEYS = ("BU_CDP_URL", "BU_CDP_WS")
+
+
+def browser_env(start, system, env) -> tuple[dict, str]:
+    """Which browser this run attaches to: (env to set, error). Precedence, highest first:
+    the harness's cdp_url pin, then the named browser's DevToolsActivePort, then
+    browser-harness discovery ({}). The caller clears CDP_ENV_KEYS before applying, so an
+    inherited BU_CDP_* can never override the pin."""
+    pinned = cdp_env_for(start.get("cdp_url"))
+    if pinned:
+        return pinned, ""
+    name = str(start.get("browser") or "")
+    if name:
+        ws = resolve_cdp_ws(name, system, env)
+        if not ws:
+            return {}, f"no DevToolsActivePort found for browser {name!r}"
+        return {"BU_CDP_WS": ws}, ""
+    return {}, ""
 
 
 def resolve_cdp_ws(browser, system, env):
@@ -617,18 +637,15 @@ def main() -> int:
         if not host_allowed(run.url, run.allow_hosts):
             _set(result, "error", "HOST_NOT_ALLOWED", f"start url not allowed: {run.url}")
             return _finish(proto, result, run, None)
-        browser_name = str(start.get("browser") or "")
-        pinned = cdp_env_for(start.get("cdp_url"))
-        if pinned:
-            # browse_cdp_url: a dedicated browser instance (its own profile and port) wins
-            # over discovery; browser-harness resolves BU_CDP_URL through /json/version.
-            os.environ.update(pinned)
-        elif browser_name:
-            ws = resolve_cdp_ws(browser_name, current_system(), dict(os.environ))
-            if not ws:
-                _set(result, "error", "BROWSER_UNAVAILABLE", f"no DevToolsActivePort found for browser {browser_name!r}")
-                return _finish(proto, result, run, None)
-            os.environ["BU_CDP_WS"] = ws
+        # browse_cdp_url (a dedicated browser instance) wins over the named browser, which
+        # wins over discovery. Inherited BU_CDP_* are cleared first so nothing overrides that.
+        updates, browser_error = browser_env(start, current_system(), dict(os.environ))
+        if browser_error:
+            _set(result, "error", "BROWSER_UNAVAILABLE", browser_error)
+            return _finish(proto, result, run, None)
+        for key in CDP_ENV_KEYS:
+            os.environ.pop(key, None)
+        os.environ.update(updates)
 
         # Imported only now, after the environment above is set.
         import jev_ultrafast.agent as agent_mod

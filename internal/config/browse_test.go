@@ -85,13 +85,18 @@ func TestBrowseCDPURLMustBeLoopback(t *testing.T) {
 		}
 	}
 	for _, u := range []string{
-		"http://198.51.100.7:9333",          // another machine
-		"ws://browser.example.com:9333/x",   // a remote browser
-		"https://127.0.0.1:9333",            // one shape per scheme: plain http or ws
-		"http://127.0.0.1",                  // no port: a CDP endpoint always names one
-		"http://user@127.0.0.1:9333",        // no credentials in the URL
+		"http://198.51.100.7:9333",        // another machine
+		"ws://browser.example.com:9333/x", // a remote browser
+		"https://127.0.0.1:9333",          // one shape per scheme: plain http or ws
+		"http://127.0.0.1",                // no port: a CDP endpoint always names one
+		"http://user@127.0.0.1:9333",      // no credentials in the URL
 		"file:///tmp/DevToolsActivePort",
 		"127.0.0.1:9333",
+		"http://127.0.0.1:9333/foo?x=1",     // http is the endpoint root; no path, no query
+		"http://127.0.0.1:0",                // not a real port
+		"ws://127.0.0.1:9333",               // a ws endpoint names a /devtools/ socket
+		"ws://198.51.100.7:9333/devtools/x", // ws to another machine
+		"http://[::1%25eth0]:9333",          // zoned IPv6 is not a plain loopback literal
 	} {
 		if BrowseCDPURLAllowed(u) {
 			t.Errorf("%s must be refused", u)
