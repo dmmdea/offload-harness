@@ -586,6 +586,88 @@ def _install_patches(run: Run, model, agent_mod, browser_mod) -> None:
     Browser.observe, Browser.act, Browser.call = observe, act, call
 
 
+# Before the tab closes, the page's own XHR/fetch traffic must go quiet: an editor saves
+# on a debounce after the last input (Substack's autosave leaves 2.3 s after a keystroke,
+# measured 2026-09-29), and closing the tab at DONE dropped that save — a typed title was
+# lost while the run reported done. Quiet = nothing in flight for SETTLE_QUIET_S; the wait
+# is capped so a long-poll can never hold a run open.
+SETTLE_QUIET_S = 3.5
+SETTLE_MAX_S = 15.0
+SETTLE_POLL_S = 0.2
+SETTLE_TYPES = frozenset({"XHR", "Fetch"})
+
+
+class NetworkSettle:
+    """One session's XHR/fetch traffic after the run's last action (pure; clock injected)."""
+
+    def __init__(self, session_id, started, quiet=SETTLE_QUIET_S, cap=SETTLE_MAX_S):
+        self.session_id = session_id
+        self.started = started
+        self.quiet = quiet
+        self.cap = cap
+        self.pending: set = set()
+        self.last_activity = started
+        self.seen = 0
+
+    def feed(self, event, now) -> None:
+        if event.get("session_id") != self.session_id:
+            return
+        method = event.get("method", "")
+        params = event.get("params") or {}
+        rid = params.get("requestId")
+        if method == "Network.requestWillBeSent":
+            if params.get("type") in SETTLE_TYPES:
+                self.pending.add(rid)
+                self.seen += 1
+                self.last_activity = now
+        elif method in ("Network.loadingFinished", "Network.loadingFailed") and rid in self.pending:
+            self.pending.discard(rid)
+            self.last_activity = now
+
+    def done(self, now) -> bool:
+        if now - self.started >= self.cap:
+            return True
+        return not self.pending and now - self.last_activity >= self.quiet
+
+
+def settle_network(run, agent, helpers, clock=time.monotonic, sleep=time.sleep):
+    """Hold the tab open until its XHR/fetch traffic is quiet (see SETTLE_QUIET_S); returns
+    the tracker, or None when there is no live browser session to watch. Events drained
+    here still reach the capture: the daemon's buffer is shared and draining is destructive."""
+    session = getattr(getattr(agent, "browser", None), "session", None)
+    if not session or helpers is None:
+        return None
+    try:
+        if run.net_enabled:
+            # Stale events from before the last action are not the save we wait for.
+            for event in helpers.drain_events():
+                if run.capture is not None:
+                    run.capture.feed(event)
+        else:
+            helpers.cdp("Network.enable", session_id=session)
+            run.net_enabled = True
+    except Exception as exc:  # the browser may be gone; closing is all that is left
+        log(f"settle skipped: {type(exc).__name__}: {exc}")
+        return None
+    tracker = NetworkSettle(session, clock())
+    while True:
+        try:
+            events = helpers.drain_events()
+        except Exception as exc:
+            log(f"settle drain failed: {type(exc).__name__}: {exc}")
+            break
+        now = clock()
+        for event in events:
+            tracker.feed(event, now)
+            if run.capture is not None:
+                run.capture.feed(event)
+        if tracker.done(clock()):
+            break
+        sleep(SETTLE_POLL_S)
+    log(f"settled after {clock() - tracker.started:.1f}s ({tracker.seen} request(s) watched)")
+    return tracker
+
+
 def _drain(run: Run, helpers) -> None:
     # Drained around every act and after every observe, not once per tick: the daemon's
     # shared event buffer holds 500 events and drops the oldest, so a busy page between
@@ -699,6 +781,8 @@ def main() -> int:
     finally:
         if helpers is not None:
             _drain(run, helpers)
+            if agent is not None:
+                settle_network(run, agent, helpers)  # let a debounced save leave before the tab closes
         if agent is not None:
             try:
                 agent.close()

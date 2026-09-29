@@ -4,6 +4,7 @@ import io
 import json
 import os
 import tempfile
+import types
 import unittest
 from pathlib import Path
 
@@ -246,6 +247,83 @@ class CdpPinTests(unittest.TestCase):
             self.assertEqual(updates, {})
             self.assertIn("DevToolsActivePort", err)
             self.assertEqual(runner.browser_env({}, "windows", env), ({}, ""))
+
+
+class SettleTests(unittest.TestCase):
+    """The tab must not close while the page is still saving: Substack's editor autosaves
+    2.3 s after the last keystroke, and a run that closed its tab at DONE lost the title."""
+
+    def ev(self, method, rid, session="s1", type_="XHR"):
+        params = {"requestId": rid}
+        if method == "Network.requestWillBeSent":
+            params["type"] = type_
+        return {"method": method, "params": params, "session_id": session}
+
+    def test_quiet_page_settles_after_the_quiet_window(self):
+        st = runner.NetworkSettle("s1", started=0.0, quiet=3.5, cap=15)
+        self.assertFalse(st.done(3.0))
+        self.assertTrue(st.done(3.5))
+
+    def test_an_autosave_holds_the_tab_open_until_it_finishes_and_goes_quiet(self):
+        st = runner.NetworkSettle("s1", started=0.0, quiet=3.5, cap=15)
+        st.feed(self.ev("Network.requestWillBeSent", "put-1"), now=2.3)   # the debounced autosave
+        self.assertFalse(st.done(4.0), "a request in flight must hold the tab open")
+        st.feed(self.ev("Network.loadingFinished", "put-1"), now=4.5)
+        self.assertFalse(st.done(7.0))
+        self.assertTrue(st.done(8.0))
+        self.assertEqual(st.seen, 1)
+
+    def test_the_cap_ends_a_page_that_never_goes_quiet(self):
+        st = runner.NetworkSettle("s1", started=0.0, quiet=3.5, cap=15)
+        st.feed(self.ev("Network.requestWillBeSent", "long-poll"), now=1.0)
+        self.assertFalse(st.done(14.9))
+        self.assertTrue(st.done(15.0))
+
+    def test_other_tabs_and_non_xhr_traffic_are_ignored(self):
+        st = runner.NetworkSettle("s1", started=0.0, quiet=3.5, cap=15)
+        st.feed(self.ev("Network.requestWillBeSent", "x", session="other"), now=1.0)
+        st.feed(self.ev("Network.requestWillBeSent", "img", type_="Image"), now=1.0)
+        st.feed(self.ev("Network.loadingFinished", "unknown"), now=1.0)
+        self.assertEqual(st.seen, 0)
+        self.assertTrue(st.done(3.5))
+
+    def test_settle_network_drains_feeds_capture_and_returns(self):
+        clock = {"t": 0.0}
+        batches = [[self.ev("Network.requestWillBeSent", "put-1")], [self.ev("Network.loadingFinished", "put-1")]]
+        calls = []
+
+        class Helpers:
+            def drain_events(self):
+                return batches.pop(0) if batches else []
+
+            def cdp(self, method, session_id=None, **params):
+                calls.append(method)
+                return {}
+
+        class Capture:
+            def __init__(self):
+                self.fed = 0
+                self.session_id = None
+
+            def feed(self, event):
+                self.fed += 1
+
+        run = types.SimpleNamespace(net_enabled=False, capture=Capture(), session_id=None)
+        agent = types.SimpleNamespace(browser=types.SimpleNamespace(session="s1"))
+
+        def sleep(seconds):
+            clock["t"] += seconds
+
+        st = runner.settle_network(run, agent, Helpers(), clock=lambda: clock["t"], sleep=sleep)
+        self.assertIn("Network.enable", calls, "a run that never enabled Network must enable it to watch the save")
+        self.assertIsNotNone(st)
+        self.assertEqual(st.seen, 1)
+        self.assertGreaterEqual(run.capture.fed, 1, "settle drains the shared buffer, so capture must still see the events")
+        self.assertLess(clock["t"], 15)
+
+    def test_settle_network_without_a_browser_is_a_no_op(self):
+        run = types.SimpleNamespace(net_enabled=False, capture=None, session_id=None)
+        self.assertIsNone(runner.settle_network(run, None, None))
 
 
 class ReviewHardeningTests(unittest.TestCase):
