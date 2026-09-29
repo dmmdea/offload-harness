@@ -557,7 +557,8 @@ decision model. Do not browse pages whose text must not leave the machine.
 # 1. install the pinned sidecar; it prints the browse_python / browse_script values
 pwsh setup/browse/install.ps1 -OffloadHome <OFFLOAD_HOME>
 # 2. config: browse_python, browse_script, browse_decision_url (plain http on loopback only),
-#    optional browse_browser (chrome|edge|brave|chromium), browse_timeout_sec (300),
+#    browse_cdp_url for a dedicated agent profile (e.g. http://127.0.0.1:9333; recommended),
+#    or browse_browser (chrome|edge|brave|chromium), browse_timeout_sec (300),
 #    browse_max_actions (30, ceiling 60), browse_capture_dir
 # 3. only if your decision endpoint wants a bearer, set it in the harness's environment
 $env:LOCAL_OFFLOAD_BROWSE_BEARER = '<bearer>'

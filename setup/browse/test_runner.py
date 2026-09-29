@@ -225,6 +225,15 @@ class CaptureTests(unittest.TestCase):
         self.assertEqual(cap.write(), 1)
 
 
+class CdpPinTests(unittest.TestCase):
+    def test_cdp_env_for_maps_http_and_ws(self):
+        self.assertEqual(runner.cdp_env_for(""), {})
+        self.assertEqual(runner.cdp_env_for(None), {})
+        self.assertEqual(runner.cdp_env_for("http://127.0.0.1:9333/"), {"BU_CDP_URL": "http://127.0.0.1:9333"})
+        self.assertEqual(runner.cdp_env_for("ws://127.0.0.1:9333/devtools/browser/x"),
+                         {"BU_CDP_WS": "ws://127.0.0.1:9333/devtools/browser/x"})
+
+
 class ReviewHardeningTests(unittest.TestCase):
     """Review findings 2026-09-28: capture boundaries and redaction, click targets, output encoding."""
 

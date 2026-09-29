@@ -162,6 +162,21 @@ def profile_dirs(browser, system, env) -> list[Path]:
     return [Path(base).joinpath(*table[browser])]
 
 
+def cdp_env_for(cdp_url) -> dict:
+    """The browser-harness variable that pins a run to one browser endpoint.
+
+    The harness has already held browse_cdp_url to loopback http/ws with a port; this only
+    maps it: a ws:// endpoint is used as-is (BU_CDP_WS), an http:// one is resolved by
+    browser-harness through /json/version (BU_CDP_URL). Empty means discovery.
+    """
+    url = str(cdp_url or "").strip()
+    if not url:
+        return {}
+    if url.startswith("ws://"):
+        return {"BU_CDP_WS": url}
+    return {"BU_CDP_URL": url.rstrip("/")}
+
+
 def resolve_cdp_ws(browser, system, env):
     """ws://127.0.0.1:<port><path> from the first candidate profile dir that has DevToolsActivePort."""
     for directory in profile_dirs(browser, system, env):
@@ -603,7 +618,12 @@ def main() -> int:
             _set(result, "error", "HOST_NOT_ALLOWED", f"start url not allowed: {run.url}")
             return _finish(proto, result, run, None)
         browser_name = str(start.get("browser") or "")
-        if browser_name:
+        pinned = cdp_env_for(start.get("cdp_url"))
+        if pinned:
+            # browse_cdp_url: a dedicated browser instance (its own profile and port) wins
+            # over discovery; browser-harness resolves BU_CDP_URL through /json/version.
+            os.environ.update(pinned)
+        elif browser_name:
             ws = resolve_cdp_ws(browser_name, current_system(), dict(os.environ))
             if not ws:
                 _set(result, "error", "BROWSER_UNAVAILABLE", f"no DevToolsActivePort found for browser {browser_name!r}")

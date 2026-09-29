@@ -927,6 +927,16 @@ type Config struct {
 	// debugging allowed wins). The browser must already run with "Allow remote
 	// debugging for this browser instance" ticked at <browser>://inspect.
 	BrowseBrowser string `json:"browse_browser,omitempty"`
+	// BrowseCDPURL pins the lane to ONE browser endpoint instead of discovery: a
+	// dedicated agent profile started with its own --remote-debugging-port and
+	// --user-data-dir (e.g. "http://127.0.0.1:9333"). It wins over browse_browser.
+	// Recent Chromium builds ask the operator to approve EVERY new debugging
+	// connection to the main profile ("Allow remote debugging for this browser
+	// instance"); a dedicated instance started with the flag does not, and keeps the
+	// agent out of the operator's everyday profile. http:// (resolved through
+	// /json/version) or ws://, loopback host, explicit port — anything else leaves
+	// the lane unregistered (BrowseCDPURLAllowed).
+	BrowseCDPURL string `json:"browse_cdp_url,omitempty"`
 	// BrowseTimeoutSec bounds one browse run end to end. Default 300.
 	BrowseTimeoutSec int `json:"browse_timeout_sec,omitempty"`
 	// BrowseMaxActions is the default executed-action budget for one run (a
@@ -2603,7 +2613,12 @@ func BrowseDecisionURLAllowed(u string) bool {
 	if err != nil || pu.Scheme != "http" || pu.Host == "" || pu.User != nil {
 		return false
 	}
-	host := pu.Hostname()
+	return isLoopbackHost(pu.Hostname())
+}
+
+// isLoopbackHost: "localhost" or a literal loopback IP (127.0.0.0/8, ::1). A DNS name
+// that merely resolves to loopback is not accepted — it could resolve elsewhere later.
+func isLoopbackHost(host string) bool {
 	if strings.EqualFold(host, "localhost") {
 		return true
 	}
@@ -2611,11 +2626,26 @@ func BrowseDecisionURLAllowed(u string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
+// BrowseCDPURLAllowed reports whether u is a browser endpoint the lane may attach to
+// (browse_cdp_url): plain http (resolved through /json/version) or ws on a LOOPBACK
+// host with an explicit port and no credentials. The lane drives a browser with the
+// operator's sessions, so it never attaches to a browser on another machine.
+func BrowseCDPURLAllowed(u string) bool {
+	pu, err := url.Parse(strings.TrimSpace(u))
+	if err != nil || (pu.Scheme != "http" && pu.Scheme != "ws") || pu.Host == "" || pu.User != nil || pu.Port() == "" {
+		return false
+	}
+	return isLoopbackHost(pu.Hostname())
+}
+
 // BrowseConfigured reports whether THIS box serves the browse lane: the sidecar
-// interpreter, the runner and a loopback decision endpoint are ALL bound. One
+// interpreter, the runner and a loopback decision endpoint are ALL bound, and a
+// browse_cdp_url, when set, is a loopback endpoint (fail closed: a refused one leaves
+// the lane unregistered rather than silently falling back to discovery). One
 // predicate for the MCP registration, the pipeline gate and the agent doors.
 func (c Config) BrowseConfigured() bool {
-	return c.BrowsePython != "" && c.BrowseScript != "" && BrowseDecisionURLAllowed(c.BrowseDecisionURL)
+	return c.BrowsePython != "" && c.BrowseScript != "" && BrowseDecisionURLAllowed(c.BrowseDecisionURL) &&
+		(c.BrowseCDPURL == "" || BrowseCDPURLAllowed(c.BrowseCDPURL))
 }
 
 // EffectiveBrowseMaxActions is browse_max_actions with 0 meaning the default 30
@@ -2655,6 +2685,9 @@ func warnBrowseBindingsTo(c Config, w io.Writer) {
 	}
 	if c.BrowseBrowser != "" && !slices.Contains(BrowseBrowsers, c.BrowseBrowser) {
 		fmt.Fprintf(w, "warning: browse_browser %q is not one of %v — every browse run defers BROWSER_UNAVAILABLE\n", c.BrowseBrowser, BrowseBrowsers)
+	}
+	if c.BrowseCDPURL != "" && !BrowseCDPURLAllowed(c.BrowseCDPURL) {
+		fmt.Fprintf(w, "warning: browse_cdp_url %q is not http:// or ws:// on a loopback host with a port — the lane never attaches to another machine's browser; offload_browse stays unregistered\n", c.BrowseCDPURL)
 	}
 }
 

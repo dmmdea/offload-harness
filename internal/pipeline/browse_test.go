@@ -304,11 +304,15 @@ func TestBrowseHangIsKilledAtTheTimeout(t *testing.T) {
 func TestBrowseStartLineCarriesTheValidatedRequest(t *testing.T) {
 	f := newBrowseFixture(t, nil)
 	f.p.cfg.BrowseBrowser = "brave"
+	f.p.cfg.BrowseCDPURL = "http://127.0.0.1:9333"
 	res := runBrowseReq(f.p, map[string]any{"url": "https://pub.example.com/publish", "goal": "echo-start",
 		"allow_hosts": []any{"Example.COM"}, "capture": []any{"https://pub.example.com/api/v1/"}, "max_actions": 5})
 	var start map[string]any
 	if err := json.Unmarshal([]byte(strings.TrimPrefix(res.Reason, "browse: blocked: ")), &start); err != nil {
 		t.Fatalf("reason %q did not carry the start line: %v", res.Reason, err)
+	}
+	if start["cdp_url"] != "http://127.0.0.1:9333" {
+		t.Errorf("the start line must carry browse_cdp_url so the sidecar attaches to that browser, got %v", start["cdp_url"])
 	}
 	if start["browser"] != "brave" || start["max_actions"] != float64(5) || start["unattended"] != false {
 		t.Errorf("start = %v", start)

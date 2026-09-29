@@ -119,6 +119,7 @@ endpoint keeps its own spend ledger.
 | `browse_script` | The installed `runner.py`. |
 | `browse_decision_url` | Loopback decision endpoint. Must be plain `http` on `127.0.0.1`, `::1` or `localhost`, or the lane stays unconfigured and the load warns. |
 | `browse_browser` | `chrome`, `edge`, `brave`, `chromium`, or empty for the first running browser with remote debugging allowed. |
+| `browse_cdp_url` | Pins the lane to ONE browser endpoint, e.g. `http://127.0.0.1:9333` (resolved through `/json/version`) or a `ws://` URL. Loopback host with an explicit port only; anything else leaves the lane unregistered. Wins over `browse_browser`. Use it for a dedicated agent profile (below). |
 | `browse_timeout_sec` | One run's wall budget. Default 300. |
 | `browse_max_actions` | Default executed-action budget. Default 30, ceiling 60. |
 | `browse_capture_dir` | Where redacted captures land. Empty means `<state_dir>/browse-captures`, or the OS temp dir. |
@@ -154,9 +155,16 @@ telemetry, and prints one JSON line with the `browse_python` and `browse_script`
 1. Set `browse_python`, `browse_script` and `browse_decision_url` (and optionally `browse_browser`) in
    the harness config, and export `LOCAL_OFFLOAD_BROWSE_BEARER` in the harness's environment if the
    decision endpoint wants one.
-2. Start the browser you want driven, open `<browser>://inspect/#remote-debugging`
-   (`chrome://`, `edge://`, `brave://`) and tick **Allow remote debugging for this browser
-   instance**. The harness never launches or restarts the browser.
+2. Choose the browser the lane drives. **Recommended: a dedicated agent profile** started with its own
+   port and profile directory, e.g. `brave.exe --remote-debugging-port=9333 --user-data-dir=<OFFLOAD_HOME>/browse/agent-profile`,
+   and `browse_cdp_url: "http://127.0.0.1:9333"`. Log in once, in that window, to the sites the agent
+   may use. Recent Chromium builds make the operator approve EVERY new debugging connection to the
+   main profile (the per-instance toggle at `<browser>://inspect/#remote-debugging` exposes only a
+   WebSocket and prompts per connection), so an unattended run against the main profile times out in
+   the handshake; a dedicated instance does not prompt, and keeps the agent out of the everyday
+   profile. The alternative is the toggle itself (`browse_browser` names which browser's
+   `DevToolsActivePort` to read), with someone present to approve each run. The harness never launches
+   or restarts the browser; register the dedicated port in your port inventory.
 3. Restart the MCP client so `offload_browse` appears in `tools/list`.
 4. For the agent doors, set `agent_allow_browse: true` on each node that may run one.
 
