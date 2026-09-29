@@ -269,6 +269,7 @@ type browseStart struct {
 	CapturePrefixes []string `json:"capture_prefixes"`
 	CapturePath     string   `json:"capture_path"`
 	Browser         string   `json:"browser"`
+	CDPURL          string   `json:"cdp_url"`
 	Unattended      bool     `json:"unattended"`
 }
 
@@ -577,7 +578,7 @@ func (p *Pipeline) runBrowse(ctx context.Context, req core.Request, meta core.Me
 		Type: "start", URL: breq.URL, Goal: breq.Goal, MaxActions: breq.MaxActions,
 		AllowLabels: nonNil(breq.AllowLabels), AllowHosts: nonNil(breq.AllowHosts),
 		CapturePrefixes: nonNil(breq.Capture), CapturePath: capturePath,
-		Browser: p.cfg.BrowseBrowser, Unattended: breq.Unattended,
+		Browser: p.cfg.BrowseBrowser, CDPURL: p.cfg.BrowseCDPURL, Unattended: breq.Unattended,
 	}
 	if err := sess.send(startLine); err != nil {
 		_ = gpugen.KillTree(cmd.Process)

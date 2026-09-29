@@ -6,6 +6,19 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.142.0] - 2026-09-28 - `browse_cdp_url` pins the browse lane to a dedicated agent browser
+
+### Added — `browse_cdp_url`
+
+The first run against a real main browser profile timed out in the WebSocket handshake: recent Chromium
+builds' per-instance remote-debugging toggle serves no `/json/version` and asks the operator to approve
+every new debugging connection, so an unattended lane can never attach. `browse_cdp_url` (loopback
+`http://` or `ws://` with an explicit port, validated like `browse_decision_url`; anything else leaves the
+lane unregistered with a named warning) pins the sidecar to one endpoint — a dedicated agent profile
+started with `--remote-debugging-port` and its own `--user-data-dir`, which does not prompt and keeps the
+agent out of the operator's everyday profile. It wins over `browse_browser`; the start line carries it
+as `cdp_url` and the sidecar maps it to browser-harness's `BU_CDP_URL` / `BU_CDP_WS`.
+
 ## [0.141.1] - 2026-09-28 - research acceptance stops being built from page chrome (register C-65)
 
 ### Fixed
