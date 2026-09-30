@@ -42,6 +42,13 @@ func (l *withdrawLog) snapshot() []withdrawCall {
 // the fake node untouched, so the fake itself needs no new route.
 func withWithdrawRoute(t *testing.T, inner *httptest.Server, status int) (string, *withdrawLog) {
 	t.Helper()
+	return withWithdrawAnswer(t, inner, status, "")
+}
+
+// withWithdrawAnswer is withWithdrawRoute with a body: the JSON a node that ships the route
+// answers with (`{"state":"withdrawn","withdrawn":true}` for a job it took back).
+func withWithdrawAnswer(t *testing.T, inner *httptest.Server, status int, body string) (string, *withdrawLog) {
+	t.Helper()
 	log := &withdrawLog{}
 	mux := http.NewServeMux()
 	mux.HandleFunc("DELETE /fleet/jobs/{id}", func(w http.ResponseWriter, r *http.Request) {
@@ -49,6 +56,9 @@ func withWithdrawRoute(t *testing.T, inner *httptest.Server, status int) (string
 		log.calls = append(log.calls, withdrawCall{jobID: r.PathValue("id"), auth: r.Header.Get("Authorization")})
 		log.mu.Unlock()
 		w.WriteHeader(status)
+		if body != "" {
+			_, _ = w.Write([]byte(body))
+		}
 	})
 	mux.Handle("/", inner.Config.Handler)
 	srv := httptest.NewServer(mux)
@@ -160,5 +170,82 @@ func TestRunWithDeadlineWithdrawNeverHoldsTheCallPastTheUnwind(t *testing.T) {
 	if sum != (Summary{Deferred: 1}) || strings.Contains(r.Result.Reason, "did not stop") ||
 		r.JobID == "" || !strings.Contains(r.Result.Reason, r.JobID) || r.Node != "node-a" {
 		t.Fatalf("summary %+v result %+v: want the truthful cut (the node and the job named), not an abandoned subtask", sum, r)
+	}
+}
+
+// TestTheCutSaysWhatTheNodeAnsweredToTheWithdraw: the withdraw is a request, and its answer
+// used to reach only a log line while the published reason said "the node was asked" whatever
+// happened — a node with no route, one that refused a started job and one that dropped the
+// connection all read alike, and a ghost job that survived the request left no trace on the
+// row. The reason now carries the answer in words, on the result and in the corpus row.
+func TestTheCutSaysWhatTheNodeAnsweredToTheWithdraw(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		body   string
+		want   string
+	}{
+		{"an older node with no route", http.StatusMethodNotAllowed, "", "HTTP 405: the node has no withdraw route"},
+		{"a node that does not hold the job", http.StatusNotFound, "", "HTTP 404"},
+		{"a job that had already started", http.StatusConflict, "", "HTTP 409: the node said the job had already started"},
+		{"a refused bearer", http.StatusUnauthorized, "", "HTTP 401"},
+		{"a node that errors", http.StatusInternalServerError, "", "HTTP 500"},
+		{"a 200 that does not say it took the job back", http.StatusOK, `{"state":"running"}`, "HTTP 200, but the answer did not say the job was taken back"},
+		{"a job the node took back", http.StatusOK, `{"state":"withdrawn","withdrawn":true}`, "the node confirmed it took the job back"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			compressPolls(t, 5*time.Millisecond, time.Second)
+			_, inner := remoteRunningForeverServer(t)
+			url, _ := withWithdrawAnswer(t, inner, tc.status, tc.body)
+			cfg := testCfg(t)
+			results, sum, _ := runWithin(t, 4*time.Second, cfg, neverLocal(t),
+				[]core.AgentContract{remoteGoal("slow one")}, "remote", []string{url}, deadlineIn(300*time.Millisecond), nil)
+			r := results[0].Result
+			if sum != (Summary{Deferred: 1}) || !strings.HasPrefix(r.Reason, deadlinePrefix+"1 unfinished") || !strings.Contains(r.Reason, "asked to withdraw") {
+				t.Fatalf("summary %+v reason %q, want the ordinary call-deadline defer that says the node was asked", sum, r.Reason)
+			}
+			if !strings.Contains(r.Reason, tc.want) {
+				t.Fatalf("reason = %q, want it to carry the node's answer (%q)", r.Reason, tc.want)
+			}
+			if lines := corpusLines(t, cfg); len(lines) != 1 || lines[0].Result == nil || !strings.Contains(lines[0].Result.Reason, tc.want) {
+				t.Fatalf("the corpus row does not carry the answer either: %+v", lines)
+			}
+		})
+	}
+}
+
+// TestTheCutSaysWhenTheNodeNeverAnsweredTheWithdraw: no answer inside the bound is said as
+// such — a blackholed node is not the same as one with no route.
+func TestTheCutSaysWhenTheNodeNeverAnsweredTheWithdraw(t *testing.T) {
+	compressPolls(t, 5*time.Millisecond, time.Second)
+	_, inner := remoteRunningForeverServer(t)
+	mux := http.NewServeMux()
+	mux.HandleFunc("DELETE /fleet/jobs/{id}", func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-time.After(10 * time.Second):
+		}
+	})
+	mux.Handle("/", inner.Config.Handler)
+	front := httptest.NewServer(mux)
+	t.Cleanup(front.Close)
+	results, _, _ := runWithin(t, 6*time.Second, testCfg(t), neverLocal(t),
+		[]core.AgentContract{remoteGoal("slow one")}, "remote", []string{front.URL}, deadlineIn(300*time.Millisecond), nil)
+	if r := results[0].Result.Reason; !strings.Contains(r, "no answer") || strings.Contains(r, "did not stop") {
+		t.Fatalf("reason = %q, want it to say the node did not answer (and still be the truthful cut, not an abandoned subtask)", r)
+	}
+}
+
+// TestTheWithdrawSendsNoBearerWithoutAToken: a delegator with no fleet_auth_token sends no
+// Authorization header at all — never an empty "Bearer " a node would read as a bad credential.
+func TestTheWithdrawSendsNoBearerWithoutAToken(t *testing.T) {
+	compressPolls(t, 5*time.Millisecond, time.Second)
+	_, inner := remoteRunningForeverServer(t)
+	url, log := withWithdrawRoute(t, inner, http.StatusOK)
+	runWithin(t, 4*time.Second, testCfg(t), neverLocal(t),
+		[]core.AgentContract{remoteGoal("slow one")}, "remote", []string{url}, deadlineIn(300*time.Millisecond), nil)
+	calls := log.snapshot()
+	if len(calls) != 1 || calls[0].auth != "" {
+		t.Fatalf("withdraw requests %+v, want exactly one with no Authorization header", calls)
 	}
 }

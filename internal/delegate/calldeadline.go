@@ -25,6 +25,7 @@ package delegate
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -277,9 +278,9 @@ func (r *runner) cutOutcome(pr PlacedResult, quote bool) PlacedResult {
 		// Cancelling the poll leaves the job on its node, where it could start later
 		// on a seat nobody is waiting for. Ask the node to drop it (a request, not a
 		// claim: see withdrawCut).
-		r.withdrawCut(pr.ranBase, pr.JobID)
-		where = fmt.Sprintf("was still on %s (job %s) when the call's deadline passed; the node was asked to withdraw it if it had not started (a job that had started may still finish there), and this call is no longer waiting for it",
-			nodeOrBase(pr), pr.JobID)
+		answer := r.withdrawCut(pr.ranBase, pr.JobID)
+		where = fmt.Sprintf("was still on %s (job %s) when the call's deadline passed; the node was asked to withdraw it if it had not started — %s — and this call is no longer waiting for it",
+			nodeOrBase(pr), pr.JobID, answer)
 		// The node acked the job and the delegator walked away: it may finish it, so
 		// the intent stays open for the recovery pass (the cancel arms in runRemote
 		// set this too; setting it here makes it hold for every exit).
@@ -412,12 +413,19 @@ const deadlineWithdrawTimeout = 5 * time.Second
 //     orphanable);
 //   - a transport failure is logged and dropped.
 //
+// It returns what the node answered, in words, for the published reason: the answer
+// used to reach only a log line, so a node with no route, one that refused a job that
+// had started and one that dropped the connection all read alike, and a ghost job that
+// survived the request left no trace on the row. The classification mirrors the node
+// route's own contract (200 with state "withdrawn" = taken back; 409 = already started;
+// 404/405 = no such job or no route).
+//
 // Blocking (bounded by deadlineWithdrawTimeout) on purpose: the goroutine that
 // calls it is inside the unwind allowance, and returning before the request is out
 // would let the call return with the ask still unsent.
-func (r *runner) withdrawCut(base, jobID string) {
+func (r *runner) withdrawCut(base, jobID string) string {
 	if base == "" || jobID == "" {
-		return
+		return "no request was sent (the job has no dial base)"
 	}
 	timeout := deadlineWithdrawTimeout
 	if g := r.call.grace * 3 / 4; g > 0 && g < timeout {
@@ -428,7 +436,7 @@ func (r *runner) withdrawCut(base, jobID string) {
 	u := strings.TrimRight(strings.TrimSpace(base), "/") + "/fleet/jobs/" + url.PathEscape(jobID)
 	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, u, nil)
 	if err != nil {
-		return
+		return "the request could not be built: " + deadlineClip(err.Error(), 120)
 	}
 	if r.cfg.FleetAuthToken != "" {
 		req.Header.Set("Authorization", "Bearer "+r.cfg.FleetAuthToken)
@@ -436,11 +444,35 @@ func (r *runner) withdrawCut(base, jobID string) {
 	resp, err := fleetClient.Do(req)
 	if err != nil {
 		log.Printf("delegate: call deadline: the withdraw of job %s at %s failed (best effort): %v", jobID, base, err)
-		return
+		var ue *url.Error
+		if errors.As(err, &ue) && ue.Err != nil {
+			err = ue.Err // the URL repeats the job id the reason already names
+		}
+		return "no answer (" + deadlineClip(err.Error(), 120) + ")"
 	}
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxFleetBody))
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxFleetBody))
 	resp.Body.Close()
-	log.Printf("delegate: call deadline: asked %s to withdraw job %s: status %d (best effort; a node that has not shipped the route answers 404 or 405)", base, jobID, resp.StatusCode)
+	log.Printf("delegate: call deadline: asked %s to withdraw job %s: status %d (best effort)", base, jobID, resp.StatusCode)
+	switch resp.StatusCode {
+	case http.StatusOK:
+		var wire struct {
+			State     string `json:"state"`
+			Withdrawn bool   `json:"withdrawn"`
+		}
+		if json.Unmarshal(body, &wire) == nil && (wire.Withdrawn || wire.State == "withdrawn") {
+			return "the node confirmed it took the job back"
+		}
+		return "HTTP 200, but the answer did not say the job was taken back"
+	case http.StatusConflict:
+		return "HTTP 409: the node said the job had already started"
+	case http.StatusNotFound:
+		return "HTTP 404: the node does not hold the job, or has no withdraw route"
+	case http.StatusMethodNotAllowed:
+		return "HTTP 405: the node has no withdraw route (an older node)"
+	case http.StatusUnauthorized:
+		return "HTTP 401: the node refused this delegator's fleet_auth_token"
+	}
+	return fmt.Sprintf("HTTP %d", resp.StatusCode)
 }
 
 // emitPair sends one PAIR frame unless the run has shut the emitter. Before the
