@@ -224,6 +224,12 @@ type Jobs struct {
 	// it counts as abandoned (SetPollLease); <= 0 = no lease, nothing is ever
 	// reaped or discounted. Guarded by mu like every other mutable field.
 	pollLease time.Duration
+
+	// withdrawnTotal / reapedTotal count the jobs this process took out of the
+	// backlog without running them: a delegator withdrew one (Withdraw, the call that
+	// flipped it, not a repeat) or the reaper took one. Drain is neither and is not
+	// counted. Guarded by mu; read through TakenBack.
+	withdrawnTotal, reapedTotal int
 }
 
 // DefaultPollLease is the poll lease a store built by NewJobs starts with:
@@ -556,6 +562,7 @@ func (j *Jobs) Withdraw(id string) WithdrawResult {
 		return WithdrawResult{Found: true, State: state}
 	}
 	dropped := j.dropLocked(jb, ErrWithdrawn)
+	j.withdrawnTotal++
 	// A long poll parked on the job (none, once a delegator withdraws it — but a
 	// second observer can be) learns the verdict now.
 	j.cond.Broadcast()
@@ -563,6 +570,7 @@ func (j *Jobs) Withdraw(id string) WithdrawResult {
 	if dropped != nil {
 		dropped()
 	}
+	log.Printf("fleet: withdrew job %s at its delegator's request; it never started", id)
 	return WithdrawResult{Found: true, Withdrawn: true}
 }
 
@@ -596,6 +604,16 @@ func (j *Jobs) PollLease() time.Duration {
 	j.mu.RLock()
 	defer j.mu.RUnlock()
 	return j.pollLease
+}
+
+// TakenBack reports how many jobs this process has taken out of the backlog without
+// running them: withdrawn at a delegator's request, and reaped for want of a poller.
+// Counts since the process started, published on /fleet/health so the reaper — the one
+// unattended state change ADR 0064 makes — can be counted by anyone polling the node.
+func (j *Jobs) TakenBack() (withdrawn, reaped int) {
+	j.mu.RLock()
+	defer j.mu.RUnlock()
+	return j.withdrawnTotal, j.reapedTotal
 }
 
 // Touch records that a poller looked at the job just now (the poll route calls it
@@ -667,6 +685,7 @@ func (j *Jobs) reap() int {
 		ids = append(ids, id)
 	}
 	if len(ids) > 0 {
+		j.reapedTotal += len(ids)
 		j.cond.Broadcast() // the queue got shorter; the scheduler re-scans
 	}
 	j.mu.Unlock()

@@ -1109,6 +1109,15 @@ type healthPayload struct {
 	// waiting for. Absent = none (or a node that cannot resolve its registry),
 	// which decodes to 0: the pre-0.127 reading.
 	JobsAdmitting int `json:"jobs_admitting,omitempty"`
+	// JobsWithdrawn / JobsReaped (ADR 0064) count the jobs this node took out of its
+	// backlog without running them since the process started: a delegator withdrew
+	// one, or the poll-lease reaper took one nobody was polling. Additive and
+	// omitempty — a node that has taken nothing back publishes a byte-identical
+	// payload — because the reaper is the one unattended state change the ADR makes,
+	// and a default-on, time-based reaper is exactly the thing whose false positives
+	// an operator has to be able to count. A drain's never-started marks are neither.
+	JobsWithdrawn int `json:"jobs_withdrawn,omitempty"`
+	JobsReaped    int `json:"jobs_reaped,omitempty"`
 	// MaxConcurrentJobs is this node's execution limit (fleet_max_concurrent_jobs);
 	// 0 = unlimited. MaxQueueDepth is its admission ceiling on queue_depth
 	// (fleet_max_queue_depth); 0 = unlimited. A delegator could previously see
@@ -1360,6 +1369,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	// two separate reads could straddle a job's accepted→running transition and
 	// publish a queue_depth that is not jobs_queued + jobs_running.
 	queued, running := s.jobs.Counts()
+	withdrawn, reaped := s.jobs.TakenBack()
 	// Admission holds are read ONCE per health request, before the payload is
 	// assembled: the published `jobs_admitting` and the saturation numerator
 	// that excludes it must be the same number, exactly as queue_depth and its
@@ -1401,6 +1411,8 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		QueueDepth:            queued + running,
 		JobsQueued:            queued,
 		JobsRunning:           running,
+		JobsWithdrawn:         withdrawn,
+		JobsReaped:            reaped,
 		MaxConcurrentJobs:     maxConcurrentJobs,
 		MaxQueueDepth:         s.opts.Cfg.FleetQueueLimit(),
 		HarnessVersion:        s.opts.Version,
