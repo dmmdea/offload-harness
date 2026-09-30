@@ -69,6 +69,11 @@ records say so, and both mean "nothing ran, so re-placing the work cannot double
   unauthenticated jobs feed, a poll that failed the bearer gate and a duplicate dispatch without the
   bearer (`401`, whatever `task_type` it declares) do not.
 
+The node counts both routes since the process started (`jobs_withdrawn`, `jobs_reaped`; see the health
+table), logs one line per withdraw and one per reap pass, and `fleet-serve` prints the lease in force at
+start-up. A drain's `not started: ...` marks are a third route to a job that never ran and are counted in
+neither.
+
 A run that finishes more than a lease after its poller last looked is an abandoned run, and its wall no
 longer feeds `recent_agent_wall_sec` (or the Retry-After built from it). Why all of this exists: every
 delegator give-up used to leave the job on the node to run for nobody, which took 43 % and 59 % of two
@@ -540,6 +545,8 @@ new is sampled (register C-05 stands: probing an unloaded seat through llama-swa
 | Health field | Type | Meaning |
 |---|---|---|
 | `jobs_admitting` | int, omitted when 0 | The subset of `jobs_running` whose worker has **not started generating**: it is still in the run's admission phase — cordon → swap pre-flight → warm → coherence probe — which the node budgets up to 300 s for. Counted from this process's own `gpuactivity` records with `phase: "admission"` (ADR 0041), never from the job store, which knows a worker took the job but not what that worker is waiting for. The registry is opened at most once per 2 s and **retried** — a briefly unresolvable state root does not silence the field for the life of the process — and a registry that cannot be opened or listed is logged once, because `0` is a legitimate value and silence would make the two indistinguishable. |
+| `jobs_withdrawn` | int, omitted when 0 | Jobs a delegator took back out of this node's backlog (`DELETE /fleet/jobs/{id}`) since the process started. The call that flipped a job counts once; a repeat does not. ADR 0064. |
+| `jobs_reaped` | int, omitted when 0 | Accepted agent jobs the poll-lease reaper took because nobody was polling them, since the process started. A drain's never-started marks count in neither. ADR 0064. |
 | `seat_loaded` | bool, omitted when unread | llama-swap's `/running` says the agent seat is loaded. Served from the 30 s residency cache; a read older than two windows or never taken waits (bounded by `residencyWaitBound`, 1.5 s) for a fresh `/running` before answering; an agent contract that completed a call on this seat writes the loaded state straight into the cache (0.128.2, below). |
 | `seat_starting` | bool, omitted when unread | …and is still LOADING (llama-swap holds `/upstream/<seat>/…` for the whole load — 4m08s on the 27B TP2 seat, register D-92), so "loaded" is not yet "ready". |
 | `lease_exclusive` | bool, omitted when false | The held lease FENCES the cards: no model may be loaded onto them for its duration. |

@@ -55,9 +55,10 @@ stack that actually runs the work.
    {"state":"withdrawn"}` when it had not started (it never will; the same answer for a job the node
    itself already took back), `409` with the job's own state when it had (the node does not touch it),
    `404` for an unknown id, `405` for a non-agent job. The delegator
-   asks once, best-effort, at its queue deadline, on cancel and at an owned poll deadline; only a
+   asks once, best-effort, at its queue deadline, on cancel and at a poll deadline (owned or not); only a
    confirmation makes the subtask re-placeable. A node without the route answers `405`/`404` and the
-   delegator behaves as before.
+   delegator behaves as before, but its row says why the withdraw was not confirmed. A poll answered `401`
+   is not withdrawn from: the intent stays open for recovery.
 
 8. **A node cleans up after a delegator that left.** A pushed agent job that stays `accepted` with nobody
    polling it for `fleet_poll_lease_sec` is skipped by the scheduler and reaped (`error: "reaped: ..."`),

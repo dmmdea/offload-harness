@@ -59,12 +59,21 @@ carried no timestamp or process id.
      spent waiting; and the intent closes as `withdrawn`. A `409 running` means the job left the backlog between
      the last poll and the withdraw: the delegator keeps polling it, and does not ask again;
    - on a **cancel** (both exits of the poll loop; one of them used to skip the orphanable mark and closed the
-     intent as "terminal observed" for a job the node might still run) and at an **owned poll deadline**, a
-     confirmed withdrawal closes the intent as `withdrawn`; a job last seen running is not asked;
+     intent as "terminal observed" for a job the node might still run) and at a **poll deadline**, owned or
+     not, a confirmed withdrawal closes the intent as `withdrawn`; a job last seen running is not asked. An
+     unowned deadline is a node that acked the job and never answered a poll in a way that said it held it:
+     the job may still be there, and its intent used to close as "terminal observed" with nothing observed;
+   - a poll answered **401** is not a give-up to withdraw from (the request would carry the token that was just
+     refused), and its intent stays open, like the recovery pass's 401 (decision 6);
    - every other answer (404, 405, 401, 5xx, a dropped connection, a timeout) leaves today's behaviour: a
-     failure naming the deadline, not re-placed, the intent left open for recovery;
+     failure naming the deadline, not re-placed, the intent left open for recovery. The row says why the
+     withdraw was not confirmed (`; withdraw not confirmed: HTTP 405: the node has no withdraw route (an older
+     node)`, `HTTP 401: the node refused this delegator's fleet_auth_token`, `no answer within 5s`, ...), so an
+     older node and an upgraded one that refused stop reading alike. The clause is detail, not a class: the
+     row's `reason_code` stays what the give-up was;
    - a **poll that reads the node's own record** of a job it never ran (`error: "reaped: ..."`, which is what
-     a delegator that was away for longer than the lease finds, or `withdrawn: ...`) is the same fact as a
+     a delegator that was away for longer than the lease finds, `withdrawn: ...`, or `not started: ...`, which
+     a node writes for a job still queued when it shut down) is the same fact as a
      confirmed withdrawal and is treated the same way: filed as a capacity refusal so the subtask is
      re-placed, the queued wait credited back, the intent closed `never started: <what the node said>` (the
      note the recovery pass writes for the same observation) and `reason_code` `queue_withdrawn` on the
@@ -85,7 +94,10 @@ carried no timestamp or process id.
    pushed by a dispatch: a job the pull queue claimed is admitted without a poller (its result travels by ack),
    and media and vision jobs are polled by other clients on cadences this node does not control.
    The claim scan skips a stale job so the ticker's interval is never a window in which a ghost starts. This
-   protects a node from an older delegator that does not withdraw.
+   protects a node from an older delegator that does not withdraw. The node counts what it took back
+   (`jobs_withdrawn`, `jobs_reaped` on `/fleet/health`, since the process started) and `fleet-serve` prints the
+   lease in force at start-up, because a lease under the floor is raised and a negative one turns the rules
+   off: a default-on, time-based reaper is the thing whose false positives an operator has to be able to count.
 
 5. **An abandoned run's wall does not feed the Retry-After basis.** A run that finishes more than a lease
    after its poller last looked is a ghost's wall; `recent_agent_wall_sec` and the Retry-After built from it
@@ -94,20 +106,27 @@ carried no timestamp or process id.
 
 6. **The recovery pass stops closing intents on a 401**, and every intent event says when and by whom. A 401 is
    a fact about the caller's credentials, so the intent stays open (the 48 h expiry still bounds it) and the
-   pass logs it once, however many intents it covered. A terminal error a node writes for a job it never ran
-   (`withdrawn: ...`, `reaped: ...`) has no result to file, so recovery closes that intent as `never started`,
-   writes no envelope and does not count it as a recovery. Every intent event carries the unix second and the
-   pid of the process that wrote it, stamped on the one append path.
+   pass logs it once, however many intents it covered. A live poll's 401 is treated the same way (see
+   decision 3). A terminal error a node writes for a job it never ran (`withdrawn: ...`, `reaped: ...`,
+   `not started: ...`) has no result to file, so recovery closes that intent as `never started`, writes no
+   envelope and does not count it as a recovery. Every intent event carries the unix second and the pid of the
+   process that wrote it, stamped on the one append path. An intent write that fails is logged once per ledger
+   (a lost dispatch event means the job has no intent for recovery to find), and a pass that stops at its clock
+   logs how many open intents it did not examine.
 
 7. **The ledger sees its own failure shapes.** On the delegator's `agent_delegate` row:
-   - `door`: the contract's, else the engine's own name, on every row;
+   - `door`: the contract's, else the engine's own name, on every row (a row with that name is an entry point
+     that skipped the stamp; `fleet-smoke` stamps `cli:fleet-smoke`);
    - `fleet_job_id`: the id the node knows the job by, when the node ACKED the dispatch (a refused dispatch left
      no job on any node, and no marker row, so it carries none); the node's own `agent` row carries the same id
      (both doors a node admits work through stamp it), so the orphan join is one equality;
    - `reason_code`: a closed set (`ok`, `failed_verification`, `queue_full`, `queue_deadline`,
      `queue_withdrawn`, `poll_deadline`, `canceled`, `node_unreachable`, `job_lost`, `dispatch_refused`,
-     `remote_error`, `capacity_wait`, `shed`, `no_eligible_node`, `seat_down`, the `stall_*` phases, the node's
-     defer classes, `other`), set on every row by a total classifier and normalized by `Record`;
+     `remote_error`, `capacity_wait`, `node_busy`, `shed`, `no_eligible_node`, `seat_down`, the `stall_*`
+     phases, the node's defer classes, `other`), set on every row by a total classifier and normalized by
+     `Record`. `capacity_wait` is the delegator's own outcome (a result no node ran); `node_busy` is a node, or
+     this box's own seat, answering a capacity defer after admission (a seat at its run cap, a card under a
+     lease or fence, an engine held busy): two different causes, told apart by structure and not by prose;
    - `reason`: stored whole (bounded at 4096 bytes on a rune boundary). `ShortReason` is the 120-byte display and
      grouping form the report readers use, so a class is not split by every job-specific number;
    - a `phase: "started"` marker row, written when a node acks the job or a local run begins, so a hang or a ghost
