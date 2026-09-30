@@ -62,12 +62,14 @@ func TestRun503WithAnotherNodeHavingRoomNeverSleeps(t *testing.T) {
 	}
 }
 
-// TestRun503RetryAfterAtOrAboveTheQueueDeadlineRePlacesInstead: a Retry-After
-// at or above the delegator's own queue ceiling (maxQueuedWait, 300 s: the
-// node clamps its hint there and says ">=300 s") is a backlog the delegator
-// will not wait out, so nothing sleeps on the way to the other node. The
-// discriminator is the delegator's constant compared with the header's number,
-// never the node's prose.
+// TestRun503RetryAfterAtOrAboveTheQueueDeadlineRePlacesInstead is a GUARD, not a
+// pin: a Retry-After at or above the delegator's own queue ceiling (maxQueuedWait,
+// 300 s: the node clamps its hint there and says ">=300 s") delays nothing on the way
+// to the other node. Since nothing sleeps for any hint any more, it exercises the
+// same path as TestRun503WithAnotherNodeHavingRoomNeverSleeps with a bigger number.
+// What distinguishes a hint at the ceiling - the delegator's constant compared with
+// the header's number, never the node's prose - is the cooldown cap, and that is
+// pinned by TestNoteCooldownCapsAHintAtTheQueueCeiling.
 func TestRun503RetryAfterAtOrAboveTheQueueDeadlineRePlacesInstead(t *testing.T) {
 	for _, hint := range []string{"300", "900"} {
 		t.Run("Retry-After "+hint, func(t *testing.T) {

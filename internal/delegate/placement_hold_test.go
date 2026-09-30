@@ -679,8 +679,6 @@ func TestSpreadDealHoldsBackANodeThatCannotStartInTime(t *testing.T) {
 
 // ---- helpers --------------------------------------------------------------
 
-var _ = fmt.Sprintf
-
 // plainContract is remoteContract with an acceptance any non-empty answer passes:
 // the tests that are not about verification use it, so their nodes can answer in
 // plain words.

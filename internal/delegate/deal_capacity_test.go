@@ -11,8 +11,8 @@ package delegate
 
 import (
 	"context"
-	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -323,8 +323,19 @@ func TestProcessGateReleasesOnTerminalAndGiveUp(t *testing.T) {
 		}
 		url := running.server().URL
 		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
 		go func() {
-			time.Sleep(150 * time.Millisecond)
+			// Cancel once the node holds the job, not after a fixed sleep: a cancel that
+			// lands before the dispatch makes the subtask defer instead of being canceled
+			// mid-run, and the gate assertion below would then prove nothing.
+			for running.dispatches.Load() < 1 {
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(5 * time.Millisecond):
+				}
+			}
+			time.Sleep(30 * time.Millisecond)
 			cancel()
 		}()
 		results, _, err := Run(ctx, testCfg(t), neverLocal(t), []core.AgentContract{plainContract()}, "remote", []string{url})
@@ -352,6 +363,16 @@ func pageContract(page string) core.AgentContract {
 	return c
 }
 
+var pageSeq atomic.Int64
+
+// uniquePage returns page text no other test - and no earlier iteration of the
+// same test under -count=N - has used. pageRetries is process-wide and has no
+// reset switch, so a page keyed on t.Name() was backed off from the second pass on
+// and the test failed for a reason that had nothing to do with the code under test.
+func uniquePage(label string) string {
+	return label + " (" + strconv.FormatInt(time.Now().UnixNano(), 36) + "-" + strconv.FormatInt(pageSeq.Add(1), 10) + ")"
+}
+
 // failingPageNode answers every job with an answer that fails acceptance.
 func failingPageNode(t *testing.T) (*fakeNode, string) {
 	return acceptingNode(t, "node-page", "an unrelated answer", nil)
@@ -364,7 +385,7 @@ func failingPageNode(t *testing.T) (*fakeNode, string) {
 func TestPerPageRetryCapBacksOff(t *testing.T) {
 	compressPolls(t, 5*time.Millisecond, time.Second)
 	node, url := failingPageNode(t)
-	page := "the page nobody can digest — " + t.Name()
+	page := uniquePage("the page nobody can digest")
 	var backedOff int
 	var localCalls atomic.Int64 // the verification retry runs on the local seat and fails there too
 	for issue := 1; issue <= 24; issue++ {
@@ -414,7 +435,7 @@ func TestPerPageRetryCapForgetsAfterASuccessAndAfterTheBackoff(t *testing.T) {
 	}
 
 	// A success forgets the page: fail twice, succeed, and two more failures do not trip the cap.
-	page := "the page that sometimes works — " + t.Name()
+	page := uniquePage("the page that sometimes works")
 	run(pageContract(page))
 	run(pageContract(page))
 	okNow.Store(true)
@@ -431,7 +452,7 @@ func TestPerPageRetryCapForgetsAfterASuccessAndAfterTheBackoff(t *testing.T) {
 
 	// Time forgets it too: three failures back the page off, and once the backoff
 	// has passed it is issued again.
-	stale := "the page that cooled off — " + t.Name()
+	stale := uniquePage("the page that cooled off")
 	for i := 0; i < pageMaxIssues; i++ {
 		run(pageContract(stale))
 	}
@@ -451,7 +472,7 @@ func TestPerPageRetryCapForgetsAfterASuccessAndAfterTheBackoff(t *testing.T) {
 	// A contract that is not a research digest is never capped, however often it fails.
 	before = node.dispatches.Load()
 	other := verifiedContract()
-	other.Context = []core.ContextDoc{{Name: "01-example.txt", Text: "not a research page — " + t.Name()}}
+	other.Context = []core.ContextDoc{{Name: "01-example.txt", Text: uniquePage("not a research page")}}
 	for i := 0; i < 2*pageMaxIssues; i++ {
 		run(other)
 	}
@@ -480,5 +501,4 @@ func TestPageKeyIsTheContentNotTheName(t *testing.T) {
 		// an empty page is still a page
 		t.Fatal("a research contract with an empty page is still keyed")
 	}
-	_ = fmt.Sprint
 }
