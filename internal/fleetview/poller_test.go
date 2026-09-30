@@ -144,11 +144,14 @@ func TestSeenErrPrunedAfterJobClears(t *testing.T) {
 	defer srv.Close()
 
 	p := NewPoller(config.Config{}, []string{srv.URL}, 20*time.Millisecond, 3)
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	// Generous bounds: the loop below exits as soon as the key is pruned, and
+	// under a full `go test ./...` the poller's second tick can land well after
+	// 800 ms (the window this test used to allow, red on 2 of 2 loaded runs).
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	go p.Run(ctx)
 
-	deadline := time.Now().Add(800 * time.Millisecond)
+	deadline := time.Now().Add(8 * time.Second)
 	var present bool
 	var errCount int
 	for time.Now().Before(deadline) {
