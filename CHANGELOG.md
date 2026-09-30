@@ -6,6 +6,68 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.146.1] - 2026-09-30 - the vLLM seat launcher reaps what a crashed seat left behind
+
+### Fixed — a crashed vLLM seat's engine workers and MP server are reaped at crash time, not only when the MP HTTP port is held; an unload is not mistaken for a crash
+
+When a vLLM engine dies nothing runs a stop: the API server exits, but the engine workers it could not stop and the LMCache
+MP server outlive it. 0.143.0 taught `seat_fg.sh` to run `seat_stop.sh` when the MP HTTP port was held; workers left behind
+with the MP port free were still not reaped, so the next engine loaded onto cards that were still held, and nothing cleaned up
+until a request started the next generation (2026-09-29: three workers survived SIGTERM and held 14.5-16 GB on every card
+while the MP server kept its HTTP port: 23 minutes down, 59 failed starts, 75 HTTP 500s).
+
+- `seat_fg.sh`: with no engine of its port alive, the start looks for three kinds of leftover (a listener on the MP HTTP
+  port, an `lmcache server` of its MP port, an orphaned engine process: named `VLLM::*`, found by the start of its command
+  line and never by `pgrep -f`, with no live vLLM API server above it, `vllm serve` or `python -m vllm.entrypoints...`, so a
+  sibling seat's live workers do not count) and runs `seat_stop.sh` once, attached (its output is already the seat log), then
+  waits up to `SEAT_MP_PORT_WAIT_SEC` (10 s) for the port. A holder that is not the stack's own is still refused, and that
+  refusal is the last check in the block.
+- `seat_stop.sh`: reaps by rule, never by the port a process holds (an engine process with no live vLLM API server
+  ancestor; the MP server of THIS stack's MP port and unit). The engine rule reads the process tree: it is a rule, not a
+  proof of ownership, and an engine a script builds in-process would look orphaned, so such jobs belong where no seat lives
+  (the scripts and ADR 0035 now say so instead of claiming proof). An MP server that ignores SIGTERM gets SIGKILL after
+  `SEAT_REAP_WAIT_SEC` (10 s). A reaped worker or MP server that survives SIGKILL (in real life a process stuck in the GPU
+  driver, state D) is named with its process state and the stop exits 1 (`INCOMPLETE`); a zombie is not stuck. A unit that is
+  already gone is no longer a warning, and a cleanup with no process tree no longer waits 3 s.
+- `seat_stop.sh` appends its own output to the seat log unless `seat_fg.sh` runs it attached: the stop task and llama-swap's
+  `cmdStop` have no stdout anyone reads, so a survivor of SIGKILL and an `INCOMPLETE` stop used to vanish. A named env file
+  that does not exist (argument or `SEAT_ENV`) exits 2 and stops nothing; it used to fall back to the default seat's ports
+  and unit and reap whatever held them. The shared-memory sweep also stays off while a `python -m vllm.entrypoints...`
+  engine is alive.
+- `SEAT_REAP_WAIT_SEC` and `SEAT_MP_PORT_WAIT_SEC` are read as decimal seconds. They reached `$(( ))` as octal: `08` and `09`
+  turned every wait into a no-op, and `0` skipped the survivor check, so a stop reported "gone" and exited 0 with a worker still
+  alive. A value that is not a number is now said in the log and means 10.
+- `seat-cmd.ps1` (Windows/WSL stub): its 30 s "seat stopped answering" exit ends every unload as well as every crash (about nine
+  exits in ten in the live stub logs were unloads), so a cleanup on every exit would have started a second stop about 40 s after
+  each unload, woken a distro that had powered itself off, and delayed the exit that completes the unload against an
+  `unloadTimeout` of 60 s. `seat-cmdstop.ps1` now leaves a marker file (`seat-stop-requested-<seat>`) in the seat directory
+  before it starts the stop task; the stub removes any marker when the seat comes up and skips the cleanup when it is there.
+  A crash leaves no marker, so its exit starts the operator-session stop task, waits for it (90 s of the clock at most; a task
+  never seen running gets 30 s to appear: both were counts of polls that a 1.1 s Windows PowerShell 5.1 read stretched to about
+  140 s and 47 s), reads and logs the task's result (a stop that did not finish is named), and exits 0 as before. It does
+  nothing while the seat's own start task is still running (a live launcher owns the seat), never relaunches the seat, and a
+  stop task that will not start or never finishes only logs. No watchdog, no scheduler: both points run inside processes
+  llama-swap already supervises.
+
+Tests: `seat_fg.stale-mp.tests.sh` drives the real code of both scripts against stand-in processes named like the real ones
+(44 checks as root, 43 without: the real transient-unit case needs root and systemd; including two mutants of the
+foreign-listener guard that it must catch); it takes a directory lock and steps aside when another run holds it (a lock file
+created by one user could not be opened by another under `fs.protected_regular=2`), and the Go wrapper starts a second
+overlapping run and requires it to step aside. `launcher_seatcmd_crash_test.go` runs the rendered stubs for real in Windows
+PowerShell 5.1 and PowerShell 7 against a driver with a simulated clock, the scheduled-task cmdlets stubbed, and `Set-Content`
+stood in for with the non-terminating error the real cmdlet raises for a missing directory (a directory in the way, a lock or a
+read-only file raise terminating ones, so they cannot tell `-ErrorAction Stop` from its absence). The behavior of every guard
+the review found pinned only by text is now driven (port boundary of the MP
+pattern, anchored engine name, the unit stop through a stand-in `systemctl`, a three-level engine tree, zombies, survivors of
+SIGKILL, slow-dying processes, the shared-memory sweep, the missing env file, the seat log written once). ADR 0035 gets a dated
+update (the marker, what is reaped and how sure that is, the alternatives rejected, the limits); `docs/systems/cache-server.md`
+items 4d and 4g and the operator guide describe it.
+
+Deploying is a seat-side action: copy `seat_fg.sh` and `seat_stop.sh` into the distro's seat directory and re-render and deploy
+BOTH `seat-cmd.ps1` and `seat-cmdstop.ps1` (the stub reads the marker the stop stub writes; with only the new `seat-cmd.ps1` no
+marker exists and every unload is cleaned up after as before). Diff a deployed stub first: one may have been edited by hand.
+The `seat-stop-requested-<seat>` file next to the stubs is the marker, not litter. Not yet seen on a live crash.
+
 ## [0.146.0] - 2026-09-30 - a delegator takes back a job it has not started, and a node cleans up after one that left (ADR 0064)
 
 ### Fixed — a delegator takes back a job it has not started, and a node cleans up after one that left (ADR 0064; register C-70 ghost-job half, C-68, C-63)

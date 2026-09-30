@@ -4,7 +4,9 @@
 # Runs INSIDE the serving box's Linux (WSL distro or native), in the FOREGROUND of the client llama-swap
 # started: when llama-swap ends that client, the session is reaped and vLLM with it — that is the
 # swap-out. The LMCache MP server (L1 staging + optional cache-server L2) is a transient systemd unit
-# that outlives the engine; seat_stop.sh (llama-swap `cmdStop`) stops both.
+# that outlives the engine; seat_stop.sh (llama-swap `cmdStop`) stops both. When the engine CRASHES nothing runs
+# cmdStop, so the MP server and any engine worker its API server could not stop are still there at the next start:
+# the port-refusal block below runs seat_stop.sh once to reap them (and only them) before it judges the ports.
 #
 # Layouts on Qwen3.8-27B INT4 (first measured 2026-09-02/03 on vLLM 0.28.0, LMCache 0.5.4):
 #   SEAT_TP=2 (two cards, tensor parallel)  — uses a cache server (L2 store) with stock LMCache: 24k-token
@@ -177,6 +179,7 @@ if [ "$L2_DEGRADED" -eq 0 ] && [ -n "${SEAT_L2_MOUNT_SRC:-}" ] && [ -n "${SEAT_L
   fi
 fi
 
+# >>> port refusals and the dead generation's cleanup: seat_fg.stale-mp.tests.sh runs everything between this line and the matching <<< line
 # Refuse to start on a port something else already owns. vLLM would load for ~2 minutes and then die on
 # "Address already in use" while llama-swap's health check passes against the FOREIGN listener — the seat is
 # then "ready" and serving somebody else's engine. Fail here, at once, and name the squatter.
@@ -184,29 +187,58 @@ if ss -ltnp 2>/dev/null | grep -q ":$PORT "; then
   echo "seat_fg: REFUSING to start — :$PORT is already bound: $(ss -ltnp 2>/dev/null | grep ":$PORT " | grep -oE 'users:\(.*\)' | head -1)"
   exit 1
 fi
-if ss -ltnp 2>/dev/null | grep -q ":$MP_HTTP_PORT "; then
-  # A CRASHED generation leaves this stack's MP server behind. When the engine dies (EngineDeadError, a worker that
-  # stopped answering) llama-swap restarts the seat through this script, and nothing ran seat_stop.sh — so the dead
-  # generation's MP server still held its HTTP port and every restart refused right here (2026-09-29: 23 minutes with
-  # the agent seat fully down, 59 failed starts, 75 HTTP 500s). No engine of THIS stack serves :$PORT (checked just
-  # above), so the holder can only be that stale MP server: run the stack's own cleanup once, then look again.
-  # Anything still holding the port after that is foreign and is refused exactly as before. A stopping unit can hold
-  # its socket for a few seconds, so the re-check waits up to 10 s for the port to free instead of judging one look.
-  if ! pgrep -f "vllm serve .*--port $PORT" >/dev/null 2>&1; then
-    echo "seat_fg: :$MP_HTTP_PORT is held and no engine serves :$PORT — a crashed generation's MP server; running seat_stop.sh once"
+# A CRASHED generation leaves its own processes behind. When the engine dies (EngineDeadError, a worker that stopped
+# answering) llama-swap restarts the seat through this script, and nothing ran seat_stop.sh: the dead generation's MP
+# server still held its HTTP port and every restart refused right here (2026-09-29: 23 minutes with the agent seat
+# fully down, 59 failed starts, 75 HTTP 500s), and the engine workers its API server could not stop kept the cards.
+# No engine of THIS stack serves :$PORT (checked just above, and by process here), so what of the stack's own is still
+# around belongs to the dead generation: run the stack's own cleanup once, then look again. Three kinds of leftover start
+# it: a listener on the MP HTTP port, an `lmcache server` of this stack's MP port, and an ORPHANED engine process — named
+# VLLM::* (found by the start of its command line: `pgrep -f VLLM::` also matches any wrapper whose arguments mention the
+# name) with no live vLLM API server (`vllm serve`, or `python -m vllm.entrypoints.…`) among its ancestors. That is
+# seat_stop.sh's rule, and the definition below is a copy of its (a Go test keeps the two identical): a sibling seat's
+# live workers are not leftovers, and a healthy start must not log a crash or run a stop. The rule reads the process
+# tree; it does not prove ownership, and an engine started so that it has no such ancestor (a script that builds the
+# engine in-process) would look orphaned. seat_stop.sh reaps by such rules and by this stack's MP port and unit, never
+# by what holds a port, so anything still holding the MP HTTP port after it is foreign and is refused exactly as before.
+# A stopping unit can hold its socket for a few seconds, so the re-check waits up to SEAT_MP_PORT_WAIT_SEC (default 10;
+# a decimal number of seconds, 0 = judge at once, anything else is said and means 10) for the port to free instead of
+# judging one look. This is the only cleanup the launcher owns: the script becomes `vllm serve` (exec, below), so nothing
+# of it survives a crash to clean up after it — the Windows stub's crash exit runs the same cleanup through the stop
+# task, and there is no watchdog and no proactive relaunch anywhere.
+MP_PORT_WAIT="${SEAT_MP_PORT_WAIT_SEC:-10}"
+case "$MP_PORT_WAIT" in *[!0-9]*) echo "seat_fg: WARN SEAT_MP_PORT_WAIT_SEC='$MP_PORT_WAIT' is not a number of seconds; using 10"; MP_PORT_WAIT=10 ;; esac
+MP_PORT_WAIT=$((10#$MP_PORT_WAIT))
+has_api_ancestor() { local q="$1" n=0; while [ "$q" -gt 1 ] 2>/dev/null && [ $n -lt 32 ]; do
+  if ps -o args= -p "$q" 2>/dev/null | grep -Eq 'vllm serve|vllm\.entrypoints\.'; then return 0; fi
+  q=$(ps -o ppid= -p "$q" 2>/dev/null | tr -d ' '); n=$((n+1)); [ -z "$q" ] && break; done; return 1; }
+if ! pgrep -f "vllm serve .*--port $PORT" >/dev/null 2>&1; then
+  left=""
+  ss -ltnp 2>/dev/null | grep -q ":$MP_HTTP_PORT " && left="$left a listener on the MP HTTP port :$MP_HTTP_PORT;"
+  pgrep -f "lmcache server .*--port $MP_PORT( |\$)" >/dev/null 2>&1 && left="$left an MP server on :$MP_PORT;"
+  orphans=""
+  for ep in $(ps -eo pid,args 2>/dev/null | awk '$2 ~ /^VLLM::/ {print $1}'); do has_api_ancestor "$ep" || orphans="$orphans $ep"; done
+  [ -n "$orphans" ] && left="$left engine processes named VLLM::* with no live engine above them (pids$orphans);"
+  if [ -n "$left" ]; then
+    echo "seat_fg: no engine serves :$PORT and the previous generation may have left something of this stack:${left} — running seat_stop.sh once (it reaps engine processes with no live engine above them and this stack's own MP server, never a port's holder)"
+    # Attached: this script's stdout already is the seat log, so the stop must not append to it a second time. The env file
+    # is passed when there is one; a default path that is not there is no argument, not a wrong one (the stop refuses a NAMED
+    # env file that is missing).
+    stop_args=(); [ -f "$CFG" ] && stop_args=("$CFG")
     stop_rc=0
-    bash "$(dirname "$(readlink -f "$0")")/seat_stop.sh" "$CFG" || stop_rc=$?
+    SEAT_STOP_ATTACHED=1 bash "$(dirname "$(readlink -f "$0")")/seat_stop.sh" "${stop_args[@]}" || stop_rc=$?
     [ "$stop_rc" -eq 0 ] || echo "seat_fg: seat_stop.sh exited $stop_rc (continuing to the re-check)"
-    for _ in $(seq 1 20); do
+    for _ in $(seq 1 $(( MP_PORT_WAIT * 2 ))); do
       ss -ltnp 2>/dev/null | grep -q ":$MP_HTTP_PORT " || break
       sleep 0.5
     done
   fi
-  if ss -ltnp 2>/dev/null | grep -q ":$MP_HTTP_PORT "; then
-    echo "seat_fg: REFUSING to start — the MP HTTP port :$MP_HTTP_PORT is already bound: $(ss -ltnp 2>/dev/null | grep ":$MP_HTTP_PORT " | grep -oE 'users:\(.*\)' | head -1)"
-    exit 1
-  fi
 fi
+if ss -ltnp 2>/dev/null | grep -q ":$MP_HTTP_PORT "; then
+  echo "seat_fg: REFUSING to start — the MP HTTP port :$MP_HTTP_PORT is already bound: $(ss -ltnp 2>/dev/null | grep ":$MP_HTTP_PORT " | grep -oE 'users:\(.*\)' | head -1)"
+  exit 1
+fi
+# <<< port refusals and the dead generation's cleanup
 
 # Chat template precheck. A --chat-template in SEAT_EXTRA_ARGS names a file; vLLM (0.29 validate_chat_template) refuses a
 # path-like value that does not exist, but only after this wrapper has stopped the old MP unit, waited out the VRAM
