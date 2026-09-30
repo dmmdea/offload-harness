@@ -479,26 +479,32 @@ func (m *Monitor) holdLeftLocked(now time.Time) time.Duration {
 // In PhaseColdLoad, Silent counts from the start of the hold's current part
 // and Allowed is that part's bound as it actually applied (clamped to the
 // run ceiling).
-func (m *Monitor) fileStallLocked() {
+// fileStallLocked builds the StallError, applies each amend to it, and only
+// then publishes it (m.cause + cancel): the run's loop reads the error the
+// moment the context is cancelled, so nothing may write to it afterwards —
+// the 0.143.0 unreadable and thrash verdicts did, a data race under -race.
+func (m *Monitor) fileStallLocked(amend ...func(*StallError)) {
 	se := &StallError{Phase: m.phase, Silent: time.Since(m.last), Allowed: m.allow, Tokens: m.tokens + m.callTok}
-	if m.phase == PhaseQueued {
+	switch {
+	case m.phase == PhaseQueued:
 		// The busy hold ended on an engine that stopped working (ADR 0061):
 		// name the engine's silence, the phase the request waited in and the
 		// bound that applied — never the poll interval the hold ran on.
 		se.EngineFlat, se.EngineSilent, se.Waited, se.Engine = true, time.Since(m.engChangedAt), m.busyResume, m.engSum
 		se.Allowed = m.engineFlatBoundLocked()
-		m.cause = se
-		m.cancel(m.cause)
-		return
-	}
-	if m.phase == PhaseColdLoad {
-		bound, from := m.holdBoundLocked()
-		if c := m.dl.Sub(from) - ceilingMargin; c < bound {
-			bound, m.holdClamped = c, true
+	default:
+		if m.phase == PhaseColdLoad {
+			bound, from := m.holdBoundLocked()
+			if c := m.dl.Sub(from) - ceilingMargin; c < bound {
+				bound, m.holdClamped = c, true
+			}
+			se.Silent, se.Allowed, se.PostReady, se.ReadySeen = time.Since(from), bound, m.postReady, m.readySeen
 		}
-		se.Silent, se.Allowed, se.PostReady, se.ReadySeen = time.Since(from), bound, m.postReady, m.readySeen
+		se.Note = m.note()
 	}
-	se.Note = m.note()
+	for _, f := range amend {
+		f(se)
+	}
 	m.cause = se
 	m.cancel(m.cause)
 }

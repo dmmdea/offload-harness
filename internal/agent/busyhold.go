@@ -233,11 +233,10 @@ func (m *Monitor) checkEngineLocked() {
 				m.enterQueuedLocked(now, false)
 			}
 			m.closeQueuedLocked(now, m.engTokChangedAt)
-			m.fileStallLocked()
-			if se, ok := m.cause.(*StallError); ok {
+			m.fileStallLocked(func(se *StallError) {
 				se.EngineThrash, se.EngineSilent = true, now.Sub(m.engTokChangedAt)
 				se.Allowed = m.engineTokenBoundLocked()
-			}
+			})
 			m.mu.Unlock()
 			return
 		}
@@ -257,14 +256,13 @@ func (m *Monitor) fileUnreadableStallLocked(now time.Time) {
 		m.closeQueuedLocked(now, m.engChangedAt)
 		m.leaveQueuedLocked(now)
 	}
-	m.fileStallLocked()
-	if se, ok := m.cause.(*StallError); ok {
+	m.fileStallLocked(func(se *StallError) {
 		se.Unreadable = true
 		se.Note += "; the engine could not be read: " + m.engSum
 		if held > 0 {
 			se.Note += fmt.Sprintf(" (held %.0fs in the busy hold, the last reading that moved %.0fs ago)", held.Seconds(), now.Sub(m.engChangedAt).Seconds())
 		}
-	}
+	})
 }
 
 // enterQueuedLocked puts the run in (or keeps it in) the busy hold and re-arms
