@@ -102,9 +102,9 @@ Both read `0` as "use the built-in default" and a negative value as "unlimited".
 a full node** — that distinction is the entire point of the split.
 
 **A `queue full` 503 carries `Retry-After` (register S-04).** The refusal is a wait the node
-PUBLISHES; nothing in `internal/delegate` reads it yet — that lands with the placement release
-(`feat/placement-eta`) — but the number is there now so that PR has something to consume. It is
-never a dead end: `Retry-After` (seconds) = `ceil(excess x recent_agent_wall_sec / max(1,
+PUBLISHES. The delegator reads it as a per-node cooldown that only its capacity wait consumes: the
+503 itself returns at once and re-places the subtask on a node with room, and nothing ever sleeps on
+the node that refused (ADR 0063). It is never a dead end: `Retry-After` (seconds) = `ceil(excess x recent_agent_wall_sec / max(1,
 max_concurrent_jobs))`, where `excess = capped_backlog - max_concurrent_jobs` — **the CAPPED
 backlog only** (`Jobs.CountsCapped`, the same set `max_concurrent_jobs` actually bounds), never the
 wire's all-task-types `queue_depth`. An uncapped job (a render, an stt, a pipeline route) never
@@ -132,9 +132,10 @@ This is deliberately **not** sized from `seat_rate.min_turn_sec`: that number is
 floor for one seat and has no relationship to how deep this node's backlog is.
 
 `/fleet/health` publishes **`queue_wait_estimate_sec`** (float, omitted when a worker is free or no
-wall sample exists) — the node's own number, so a future delegator can read it before ever being
-refused, not only after (also not yet consumed anywhere; same placement-release caveat as
-`Retry-After` above). It is the SAME `excess x recent_agent_wall_sec / max(1, max_concurrent_jobs)`
+wall sample exists) — the node's own number, so the delegator reads it before ever being refused,
+not only after: it ranks seats (W-11), derives the queue budget of a job sent to the node, and gates
+the deal and the capacity wait on it (ADR 0063, "The queue budget and the backlog gate" below). It is
+the SAME `excess x recent_agent_wall_sec / max(1, max_concurrent_jobs)`
 formula and the SAME capped-backlog-only `excess`, computed off the node's CURRENT capped backlog —
 but it is **RAW, not clamped to `[5, 300]`**: Retry-After is an HTTP retry contract that must stay a
 small, boundable promise, while the health field is a delegator's own placement signal, where a
@@ -370,6 +371,8 @@ bypass; `tasks_agent_test.go` the advertisement gate and contract materializatio
   **re-places** it on another eligible remote and then on the local seat (bounded: the first choice
   plus `maxRemoteReplacements` = 2 more remotes, then local). What it does NOT re-place is a
   `400`/`401`/`403` — those are about the request, not the node — nor anything after a `202` ack.
+  The refusal returns at once (ADR 0063): nothing sleeps on the node that refused, its `Retry-After`
+  only cools that node for the capacity wait, and the fleet is read again before every re-placement.
 - Assuming re-placement makes a saturated fleet free. Every placement spends from the contract's own
   `timeout_sec`, and when nobody takes the job the subtask fails with `placement refused: …`.
 - Expecting a duplicate dispatch to return an error. Only `error` jobs do.
@@ -490,6 +493,58 @@ local seat still reserved → the holder-naming `infrastructure` deferral of 0.1
 · wait off → the pre-0.113.18 `placement refused` failure, byte for byte. Also closed: `replacementNode`'s local last resort
 now honours a text lease (before, a remote's 503 fell straight onto the reserved cards — the 2026-09-05 incident through a
 side door). The wait is bounded by the config key alone; `agent_lease_wait_sec` still applies when it is the longer of the two.
+
+**Holds, never sleeps or refuses (ADR 0063).** Six changes to the wait and what feeds it:
+
+- **A 503 never sleeps.** `runRemote` used to sleep the node's `Retry-After` (up to the 300 s the node clamps it
+  to) on the node that refused, retry it once and charge the sleep to the contract. Now the refusal returns at once
+  and `noteCooldown` files the hint as a per-node cooldown for the run, jittered once when the refusal happens; a
+  refusal with no hint cools the node for `refusalCooldown`, and a hint at or above `maxQueuedWait` (compared as a
+  number with the delegator's own constant, never the node's wording) is capped there, after the jitter (the excess is
+  folded back under the ceiling, so a node is held out for at most 300 s). Only the wait consumes the cooldown, and
+  the wait credits what it idles; a wait that ends with a node still cooling down names it in its defer.
+- **Re-placement re-reads the fleet** for every route (`fetchViewsSince`: a memoised snapshot counts only when it was
+  taken after the refusal, so a snapshot that predates the refusal is never reused; siblings that refuse together
+  each read once). Candidates pass `withRoom`: eligible, room by their own advertisement, a start inside the
+  caller's patience, no cooldown, a process gate with a free slot — all judged against the wall the re-placement
+  will actually carry (what the first attempt left of the budget). With none left the subtask goes to the wait,
+  whatever kind of refusal started the chain: `withRoom` lists every ELIGIBLE node it held out only for being busy,
+  and any such node, like a full local run-cap line, marks the subtask wait-worthy; a node the contract can never
+  run on does not (waiting for it would be a wait for nothing).
+- **The local seat is a candidate only with a free slot ahead** in its run-cap line (`localSlotAhead`: the registered
+  runs on the seat against `fleet_max_concurrent_jobs`, the count the seat's first-come-first-served gate uses). A
+  local-leg capacity defer (class `capacity`, zero steps) is re-placeable (`capacityDeferRefusal`); `route=local`, or
+  no remotes, waits in place, and a remote's defer after a `202` never moves. The wait the local run already spent in
+  line is credited. With nothing else free the defer is published as a defer, not as `placement refused`; the defer
+  alone does not make the subtask wait (only an eligible node that is merely busy does).
+- **The queue budget and the backlog gate.** A job's wait to START is `clamp(1.5 x etaStart + 30 s, 60 s, patience)`
+  (`queueBudgetFor`), where `etaStart` is `queue_wait_estimate_sec` or the arithmetic over the node's jobs and recent
+  wall, patience is the contract's poll budget (`pollBudgetFor`), and a node that publishes no ETA keeps
+  `min(patience, 5 min)`. It is read again when the job is first seen queued. `startsWithinPatience` holds a node out
+  of the deal, of re-placement and of the wait when its ETA exceeds the patience: a placement FEASIBILITY refusal that
+  prints its arithmetic (`backlog (a new job would wait ~444 s to start (1 running + 0 queued - 1 worker(s) + 1 = 1
+  ahead x 443.6 s recent wall / 1 worker(s)), past the 360 s this contract will wait for a start)`, a 300 s wall plus the 60 s grace), in the same class
+  as `feasibleFinal`, never a speed preference. A held-out node is read again every tick. A negative
+  `queue_wait_estimate_sec` is a node bug and is no opinion (`estimateKnown`), never a confident zero. The refresh
+  read is tried again on the next queued poll when it fails (three tries at most), logged, and named in the
+  queue-deadline message if it never succeeded. At that deadline the delegator asks the node to take the job back
+  (ADR 0064, above): a confirmation re-places the subtask, the node cools like any capacity refusal and the time
+  the job sat queued is credited back; anything else leaves the deadline a failure whose text ends with why the
+  withdraw was not confirmed.
+- **The spread deal counts capacity.** No node is dealt more subtasks per run than `max_concurrent_jobs -
+  jobs_running` (no floor; an unpublished ceiling is unlimited); a node at its headroom leaves the rotation, the fit
+  order and the cycle are untouched, and the overflow goes to the wait. The local seat is counted too
+  (`localRunCapRoom`: `fleet_max_concurrent_jobs` minus the runs registered on the planner seat, read once per deal;
+  only while some remote could run the contract). The overflow subtask (`PlacedResult.overflow`) is neither a lease
+  nor a refusal: it takes the seat back only once the seat stops reading busy by the deal's own reading
+  (`localStillBusy`), is a capacity defer when the wait is off, and is not counted as a replacement. The deal names
+  every node it passed over with its arithmetic, and a remote that failed its health probe keeps the run flagged.
+- **A process-wide gate and a page cap** (`processgate.go`). The delegator counts, per node, the dispatches the
+  process holds open across every concurrent Run and does not send one past the node's `max_queue_depth`; the subtask
+  waits for the first node that frees (a turn-away is no refusal). A research page whose last three issues all
+  failed after a seat ran them (a failed verification, an abstention, a budget defer or a node's own job error;
+  never a full node, a lease, a bad token, a cancel or a queue deadline) is backed off for 15 minutes with a
+  `contract`-class defer, and a success forgets it.
 
 **The health probe itself: concurrent, memoised, negative-cached, bounded inside the wait (register D-106,
 2026-09-17).** `fetchViews` — the delegator's read of every configured remote's `/fleet/health`, and the input to
@@ -781,7 +836,7 @@ tokenless) is not a hole: the auth guard `403`s it before `BuildRequest` runs at
 | route | placement |
 |---|---|
 | `auto` (default) | `gate.Place`: an idle local seat always wins; remotes are considered only while the local seat is busy — since PR-5 (W-01) that reading is `probeLocalBusy`'s own in-flight count at or past `FleetConcurrencyLimit()`, or a load in progress, OR'd with the GPU lease, read ONCE per Run — and only the ones passing the hard gate (agent lane on, seat resident, contract fits the advertised ctx, output_schema present, origin hop, and — PR-5's W-05, as corrected in 0.128.1 — the seat can produce one tool step and a minimal answer inside the contract's own effective wall). No eligible remote → queued-local. See "Expected-completion ranking and the joint deal" below for how `auto`/`remote` now place a WHOLE Run's subtasks in one pass. |
-| `spread` (0.80.0, fit-scored 0.99.0) | one `Run` fetches every remote's health ONCE, then deals the subtasks across the local seat AND every remote that passes the hard gate for that subtask. The deal is computed for the WHOLE run in one pass before dispatch, and within each cycle of `len(nodes)` slots every eligible seat takes at most one subtask — so an N-contract fan-out genuinely runs on N seats at the same time, and the fit score can reorder a cycle but never collapse it (see "Fit-scored remote slots" below). The local rotation slot is never contested by shape: with the local seat IDLE, slot 0 is always the local seat (pinned by `TestDealSpreadKeepsSubtaskZeroLocal`, `TestDealSpreadSameShapedFanOutReachesEverySeat` and `TestRunSpreadDealsAcrossLocalAndEveryEligibleRemote`) and a 2-contract spread with an eligible remote is still guaranteed one local + one remote — the pair shape. It IS contested by load (0.113.20, `agent_spread_local_slot`): a local seat already holding a request at deal time loses its slots to the best-fit eligible remote with room — see "The local slot under load" below. Per-subtask eligibility means a contract failing the gate (no `output_schema`, over-size) silently takes the local slot instead; `results[].placement` names where each landed and, for a remote, which shape the fit score read. Measured before spread existed: `auto` put four concurrent contracts on one box, `remote` put four on the other one. No eligible remote → every subtask runs local and the reason says so. |
+| `spread` (0.80.0, fit-scored 0.99.0) | one `Run` fetches every remote's health ONCE, then deals the subtasks across the local seat AND every remote that passes the hard gate for that subtask. The deal is computed for the WHOLE run in one pass before dispatch, and within each cycle of `len(nodes)` slots every eligible seat takes at most one subtask — so an N-contract fan-out genuinely runs on N seats at the same time, and the fit score can reorder a cycle but never collapse it (see "Fit-scored remote slots" below). The local rotation slot is never contested by shape: with the local seat IDLE, slot 0 is always the local seat (pinned by `TestDealSpreadKeepsSubtaskZeroLocal`, `TestDealSpreadSameShapedFanOutReachesEverySeat` and `TestRunSpreadDealsAcrossLocalAndEveryEligibleRemote`) and a 2-contract spread with an eligible remote is still guaranteed one local + one remote — the pair shape. It IS contested by load (0.113.20, `agent_spread_local_slot`): a local seat already holding a request at deal time loses its slots to the best-fit eligible remote with room — see "The local slot under load" below. Per-subtask eligibility means a contract failing the gate (no `output_schema`, over-size) silently takes the local slot instead; `results[].placement` names where each landed and, for a remote, which shape the fit score read. Measured before spread existed: `auto` put four concurrent contracts on one box, `remote` put four on the other one. No eligible remote → every subtask runs local and the reason says so. Since ADR 0063 the deal also counts each remote's headroom (never more subtasks than `max_concurrent_jobs - jobs_running`; the overflow goes to the capacity wait) and holds out a node that cannot start the job inside the caller's patience. |
 | `local` | forced in-process, no network. |
 | `remote` | forced fleet node; with no eligible remote the subtask DEFERS loudly. |
 
@@ -790,6 +845,7 @@ Remotes come from the call's `remotes` argument, else from the config's `delegat
 **Fit-scored remote slots (0.99.0).** `spread` used to deal the remote slots blind: `k := i % len(nodes)` and nothing more. Across heterogeneous seats that sends mechanical triage to the biggest seat and cross-file reasoning to the smallest one with equal probability. `internal/delegate/fit.go` now infers the contract's coarse SHAPE from its own goal text and scores the eligible seats:
 
 - **Shape** (`inferKind`) is one of `mechanical` (extraction, listing, counting, filtering, digesting) or `reasoning` (explanation, causation, cross-file interaction, tracing, comparison). It is decided by an ORDERED deterministic pre-filter — a quantity rule, then an explanation rule, then a mechanical-verb rule — and the order is load-bearing: the quantity rule is what stops a bare `how ` pattern reading "how many files changed" as reasoning. No model call is involved; a placement is reproducible from the recorded contract alone.
+- **A research page digest is `mechanical` by its shape, whatever the goal says (register C-76, ADR 0063).** A contract from a research door (`offload_research`, `cli:research`) with exactly one context page and an output schema is decided from that structure (`digestShaped`, rule `research-digest`), not from the words of the caller's question: "architecture", "why", "how", "compare" and "trace" sent every such digest to the roomiest seat first. Window adequacy still gates every seat, and any other contract is read from its goal as above.
 - **A goal no rule matches is `mechanical`** — the CHEAP seat. This harness exists to move grunt work off the expensive seat, so ambiguity falls toward cheap, never toward capable. A wrong cheap placement costs a retry (which the engine already runs on a different seat); a wrong expensive placement costs the capable seat, which is the resource being protected. The unmatched branch is the seam a better fallback would plug into — a shape carried on the contract, or one decided per fan-out and reused — never a per-subtask model round-trip.
 - **Score** (`scoreFit`) ranks a seat by its ADVERTISED `agent_ctx_tokens`, the only capability number nodes publish: reasoning takes the roomiest **adequate** seat, mechanical takes the **smallest adequate** seat so the roomier one stays free. *Adequate* is not a slogan — it is `adequate()`, `est_tokens + specReserve <= agent_ctx_tokens`, the same arithmetic the hard gate uses (they share the function, so they cannot drift). An unadvertised ceiling is never adequate: unknown is not a capacity, and a seat that published no number must not win the mechanical contest by looking like the smallest on the roster.
 - **Fit chooses WITHIN a cycle, never a free re-pick.** This is the load-bearing constraint: a subtask takes the best-fitting seat *among those not yet dealt in the current cycle*, and a local slot reshuffles the deck. Without it the smallest seat wins every mechanical slot and the roomiest wins every reasoning slot — measured on a `{local, qube 131k, aorus 32k, lenovo 32k}` roster, an unconstrained re-pick put 8 mechanical subtasks on `local 2 / aorus 4 / lenovo 2 / qube 0` and 8 reasoning subtasks on `local 2 / qube 6 / aorus 0 / lenovo 0`, which is precisely the stacking `spread` exists to remove. With the cycle constraint both deal `2/2/2/2` — mechanical dispatching the small seats first, reasoning the roomiest first.
@@ -799,7 +855,7 @@ Remotes come from the call's `remotes` argument, else from the config's `delegat
 - **The local rotation slot is never contested by shape; it is contested by load (0.113.20).** With the local seat idle, subtask 0 lands local whatever its shape — a single-subtask spread is the riskiest case for a shape heuristic, and one regex match must not send a whole run off-box. The same holds for every later local slot, because the fit score ranks by advertised ceiling and the local seat advertises none in a delegator run; scoring it would mean inventing a number for it. Widening the contest to the local slot is a small change once the local seat advertises a ceiling of its own.
 - **The local slot under load (0.113.20, operator decision 2026-09-06).** The deal reads the local seat's in-flight count ONCE when it is computed — the same reader the drain uses (`internal/seatload`: vLLM `num_requests_running` + `waiting`, or a llama-server's processing `/slots`, through llama-swap, alias-aware) — and when the seat already holds a request, every local slot (`i mod len == 0`, subtask 0 included) goes to the best-fit eligible remote WITH ROOM (`hasRoom`; a sheddable run needs an idle slot) instead; the remotes' one-per-seat-per-cycle invariant is unchanged and the reason names the count (`…; local seat busy: 3 in flight`). With no remote that has room the slot stays local and the reason says `local seat busy … no remote with room`. An idle seat keeps every slot it had, so a lone session is dealt exactly as before; a text lease still removes the local seat in both modes. `agent_spread_local_slot: "always"` restores the unconditional local slot. Why: K delegating sessions each dealt 3 of every 8 subtasks to the same local seat while the remotes idled — the K×8 gate's remaining tail after the Lenovo seat replacement (first-local subtask 155–189 s under K=3 vs 91–105 s for its siblings; K=2 wall 1.55× K=1 against a 1.5× bound). A probe that fails deals as idle and logs why: the rule is an optimisation of the deal, never a gate.
 
-**Retry on a different seat (0.80.0).** A subtask whose first attempt came back `failed_verification` (the acceptance DSL caught a wrong answer) or an honest `abstention` is re-run ONCE on a different node when one is available — local → the best eligible remote, remote → local — under a fresh job id. The published result is the BETTER attempt (a success beats any failure; otherwise the first attempt stands) and carries `retried_on` + `retry_note`; the summary carries `retried` / `retry_recovered`. Measured motivation: on the same four digest contracts the 27B seat and the 4B seat each missed a different one, and neither miss was silent thanks to acceptance — the retry is what turns "caught" into "recovered". Transport failures and infrastructure/config/contract defers are NOT retried: a broken box or a bad contract does not get better on another seat. The retry lives **inside the subtask's `timeout_sec`** — it gets whatever budget the first attempt left, and is skipped (the result carries a `retry_note` saying so) when less than the retry floor remains — 10 s by default, raised by the delegator's `agent_retry_min_sec` (0.115.9, register D-46: a cold vLLM load plus one turn at `max_tokens` on the retry seat; 300 on the reference box) — so `timeout_sec` stays the wall ceiling the caller was told it is. Two more skips, each named in `retry_note` (0.115.9): a first attempt that ended on an **empty final** (`stop_reason` `reasoning_starved` / `empty`, 0.115.8) is never retried — the shape is the seat's completion budget, not a wrong answer another seat corrects; and the retry never lands on a seat that is **already running another job** — a remote the delegator can prove would QUEUE the retry (`!provablyStartsNow`: no free worker, or a backlog ahead of it), or the local seat with requests in flight — which would only halve both runs' tok/s. The remote threshold was `jobs_running > 0` until 2026-09-17, i.e. zero rather than the node's own ceiling, so a four-worker box with one job in flight refused every cross-seat retry although three workers were idle; register D-46 shipped the rule and not the threshold. It is the same ceiling-aware predicate the placement gate ranks on, and it stays conservative — an unpublished ceiling still reads as busy. The re-placement floor after a REFUSED dispatch (no seat time spent) stays at 10 s.
+**Retry on a different seat (0.80.0).** A subtask whose first attempt came back `failed_verification` (the acceptance DSL caught a wrong answer) or an honest `abstention` is re-run ONCE on a different node when one is available — local → the best eligible remote, remote → local — under a fresh job id. The published result is the BETTER attempt (a success beats any failure; otherwise the first attempt stands) and carries `retried_on` + `retry_note`; the summary carries `retried` / `retry_recovered`. Measured motivation: on the same four digest contracts the 27B seat and the 4B seat each missed a different one, and neither miss was silent thanks to acceptance — the retry is what turns "caught" into "recovered". Transport failures and infrastructure/config/contract defers are NOT retried: a broken box or a bad contract does not get better on another seat. The retry lives **inside the subtask's `timeout_sec`** — it gets whatever budget the first attempt left, and is skipped (the result carries a `retry_note` saying so) when less than the retry floor remains — 10 s by default, raised by the delegator's `agent_retry_min_sec` (0.115.9, register D-46: a cold vLLM load plus one turn at `max_tokens` on the retry seat; 300 on the reference box) — so `timeout_sec` stays the wall ceiling the caller was told it is. Two more skips, each named in `retry_note` (0.115.9): a first attempt that ended on an **empty final** (`stop_reason` `reasoning_starved` / `empty`, 0.115.8) is never retried — the shape is the seat's completion budget, not a wrong answer another seat corrects; and the retry never lands on a seat that is **already running another job** — a remote the delegator can prove would QUEUE the retry (`!provablyStartsNow`: no free worker, or a backlog ahead of it), or the local seat with requests in flight — which would only halve both runs' tok/s — a skip that is now a WAIT (ADR 0063, register C-76): the retry queues for the seat for up to the placement wait (credited to its budget) and runs the moment the seat has room, and is skipped only when the seat stays busy for the whole wait or the wait is off (`retry_note` then says how long it waited). The remote threshold was `jobs_running > 0` until 2026-09-17, i.e. zero rather than the node's own ceiling, so a four-worker box with one job in flight refused every cross-seat retry although three workers were idle; register D-46 shipped the rule and not the threshold. It is the same ceiling-aware predicate the placement gate ranks on, and it stays conservative — an unpublished ceiling still reads as busy. The re-placement floor after a REFUSED dispatch (no seat time spent) stays at 10 s.
 
 **The retry never lands on a FENCED local seat (0.117.7, register D-94).** Before choosing the local
 seat for a retry the delegator reads the machine-wide lease and asks `delegate.Fenced` — the
@@ -885,14 +941,14 @@ survivors are RANKED and how many of one Run's subtasks one node can take.
   resolved reason (`route=auto → node-a (headroom); node-a: chosen eta 41 s (cold 15 + 26 gen); node-b: slow
   (one step and a 64-token answer need 646 s at 0.3 tok/s, the wall is 300 s); node-c: cap (4/4 running, headroom 0, dealt 0)`) keeps the existing `route=remote`/`route=spread`
   prefixes byte-identical (`fleet_smoke_cmd.go` parses them) and appends one clause per node from the vocabulary
-  `chosen | queue | cap | slow | lease | cold | probe | unfit(ctx) | noschema`, in gate order.
+  `chosen | queue | backlog | cap | slow | lease | cold | probe | unfit(ctx) | noschema` (`backlog`: ADR 0063), in gate order.
 - **Long-poll and a courtesy Retry-After retry (item 7, register D-106).** The delegator's poll now sends
   `GET /fleet/jobs/<id>?wait=12`; a node at 0.127+ blocks the connection until the job finishes or 12 s elapse
   (bounded under the client's own 15 s per-poll timeout), and an older node ignores the parameter and answers
-  at once — the fallback IS the parameter being a no-op, not a second code path. A dispatch 503 that carries its
-  own `Retry-After` is honored as a capacity hint: the delegator waits that long (bounded by the contract's
-  remaining budget) and retries the SAME node once, entirely inside the dispatch call — never surfaced to the
-  re-placement loop as a discrete refusal, so the node is never marked "tried" for it.
+  at once — the fallback IS the parameter being a no-op, not a second code path. The courtesy retry this item
+  added (a dispatch 503's own `Retry-After` honored with a bounded sleep and one retry of the SAME node, inside the
+  dispatch call) was replaced by ADR 0063: a 503 returns at once, the subtask is re-placed on a node with room, and
+  the hint becomes a per-node cooldown that only the capacity wait honours.
 - **`offload_status` reports the same in-flight signal (item 9, W-31).** Each fleet node row and the local seat
   entry publish `in_flight` (a job-registry count — `jobs_running − jobs_admitting` remotely, the seat's own
   gauge locally — never GPU utilization and never a lease alone) and a one-word `verdict`: `busy` (in-flight >
@@ -1013,8 +1069,9 @@ More shapes originate on the **delegator**, not the node:
   the node-side queue in 0.100.0, because until then `accepted` lasted microseconds and this state
   could not persist. Two properties make it safe: **queued time is credited back** to the
   execution deadline (a job that waits and then runs is never penalised for the wait — the
-  contract's `timeout_sec` is a budget for work), and the wait itself is **bounded** by
-  `min(timeout_sec + grace, 5 minutes)`. It is a failure rather than a defer on purpose — a defer
+  contract's `timeout_sec` is a budget for work), and the wait itself is **bounded** by the node's own ETA
+  (`clamp(1.5 x etaStart + 30 s, 60 s, timeout_sec + grace)`, ADR 0063; `min(timeout_sec + grace, 5 minutes)` for
+  a node that publishes no ETA). It is a failure rather than a defer on purpose — a defer
   is a report about the work and carries the node's id and seat, and a job that never started has
   no such report to make.
 - `poll deadline after <d>: node accepted the job but did not reach a terminal state` — class
@@ -1324,6 +1381,12 @@ wait after ONE transient error, which is S-08 again, intermittently.
   schedule queue and its concurrency limit, eviction, drain, the agent job marker
 - [`internal/fleetnode/tasks.go`](../../internal/fleetnode/tasks.go) — `agentTaskConfigured`,
   `buildAgentRun` (contract decode, depth derivation, context materialization)
+- [`internal/delegate/run.go`](../../internal/delegate/run.go) — the delegator: placement, re-placement, the
+  capacity wait, the spread deal, the dispatch and poll loop (ADR 0063)
+- [`internal/delegate/eta.go`](../../internal/delegate/eta.go) — expected-completion ranking, the backlog gate
+  and the ETA-derived queue budget
+- [`internal/delegate/processgate.go`](../../internal/delegate/processgate.go) — the process-wide in-flight
+  gate and the per-page retry cap
 - [`internal/core/agentwire.go`](../../internal/core/agentwire.go) — contract, result, acceptance DSL
 - [`internal/pipeline/agenttask.go`](../../internal/pipeline/agenttask.go) — node-side execution,
   structured re-pack, defer shapes

@@ -16,6 +16,8 @@ package delegate
 import (
 	"math"
 	"regexp"
+
+	"github.com/dmmdea/offload-harness/internal/core"
 )
 
 // Kind is the coarse shape of a contract.
@@ -79,6 +81,31 @@ var shapeRules = []shapeRule{
 	{"mechanical-verb", mechanicalRe, KindMechanical},
 }
 
+// researchDoors are the Door values the research lane stamps on the contracts it
+// builds, one grounded digest contract per fetched page: offload_research (MCP) and
+// cli:research (the CLI verb). Three rules read it: the placement shape below
+// (digestShaped), the per-page retry cap (processgate.go) and the verification retry's
+// research-acceptance skip (skipsRetryAsResearchAcceptanceOnly, run.go).
+var researchDoors = map[string]bool{"offload_research": true, "cli:research": true}
+
+// digestShaped reports whether c is a research PAGE DIGEST by its shape: the
+// research door built it (Door), from exactly one fetched page (one context
+// document), for a schema-shaped answer (an output_schema). That is mechanical work
+// by construction - the answer is IN the page, and the contract asks for a bounded
+// digest of it - whatever the caller's goal says (register C-76).
+//
+// It is decided from structure, never from words. The goal of a research digest is
+// the CALLER's question, verbatim, and the caller asks about "the architecture", "why
+// it fails", "how it works", "compare these" and "trace the flow" of the page: the
+// explanation rule below read those words as reasoning and ranked the roomiest seat
+// first with speed only a tie-break, so a one-page digest went to the slowest seat
+// (a 27B seat measured at 2.7 tok/s, on the deferrals a security audit read). The shape
+// changes only WHICH adequate seat a digest prefers: window adequacy still gates every
+// seat, and a contract from any other door is classified by its goal exactly as before.
+func digestShaped(c core.AgentContract) bool {
+	return researchDoors[c.Door] && len(c.Context) == 1 && len(c.OutputSchema) > 0
+}
+
 // matchShape is the deterministic PRE-FILTER, and it is named that rather than
 // "classifier" because that is all it is: it decides the UNAMBIGUOUS cases and
 // reports honestly (ok=false) when nothing fired.
@@ -105,8 +132,12 @@ func matchShape(goal string) (kind Kind, rule string, ok bool) {
 	return KindMechanical, "", false
 }
 
-// inferKind reports the shape of st from its own goal text.
+// inferKind reports the shape of st: a research page digest is mechanical by its
+// structure (digestShaped); every other contract is read from its own goal text.
 func inferKind(st Subtask) Kind {
+	if digestShaped(st.Contract) {
+		return KindMechanical
+	}
 	k, _, _ := matchShape(st.Contract.Goal)
 	return k
 }
@@ -118,6 +149,9 @@ func inferKind(st Subtask) Kind {
 // fixes — rephrase the goal, versus the vocabulary read it correctly — and a
 // bare shape name cannot tell them apart.
 func shapeOf(st Subtask) (Kind, string) {
+	if digestShaped(st.Contract) {
+		return KindMechanical, "research-digest"
+	}
 	k, rule, ok := matchShape(st.Contract.Goal)
 	if !ok {
 		return k, "default"

@@ -451,6 +451,57 @@ CLICK_TARGETS_JS = (
 )
 
 
+# The lane's tab is opened in the background, and a hidden tab produces no rendering frames:
+# a CSS @keyframes animation or transition that starts there never advances, so a dialog or
+# dropdown menu that fades in keeps its start state (opacity 0). jev's snapshot drops every
+# element whose computed opacity is 0 (checkVisibility with checkOpacity), so the model never
+# sees the control it just opened and the run ends "blocked". Jumping an animation to its end
+# state makes the final style real. Only animations whose target the snapshot cannot see are
+# finished: hidden by opacity or visibility, or empty or outside the viewport (a slide-in panel
+# is fully opaque but starts off screen). An animation on an element that is already visible and
+# on screen is left alone, so a pending exit on it (a toast that fades out after a delay) is
+# not jumped to its hidden end state and does not vanish from the snapshot. Infinite animations
+# (spinners) have an endTime of Infinity and are skipped, which also keeps finish() from ever
+# throwing on them; one that throws anyway (a scroll-driven timeline) is skipped on its own.
+# requestAnimationFrame-driven fades are not touched: one measured opacity 0.0055 at 400 ms in
+# this tab, above 0, so the snapshot keeps it (whether it ever reaches 1 was not measured).
+FINISH_ANIMATIONS_JS = (
+    "(() => { if (typeof document.getAnimations !== 'function') return 0;"
+    " const seen = t => { if (!t || !t.isConnected"
+    " || !t.checkVisibility({checkOpacity: true, checkVisibilityCSS: true})) return false;"
+    " const r = t.getBoundingClientRect();"
+    " return r.width > 0 && r.height > 0 && r.bottom > 0 && r.top < innerHeight"
+    " && r.right > 0 && r.left < innerWidth; };"
+    " let n = 0;"
+    " for (const a of document.getAnimations()) { try {"
+    " const end = a.effect && a.effect.getComputedTiming().endTime;"
+    " if (a.playState !== 'finished' && Number.isFinite(end) && !seen(a.effect.target))"
+    " { a.finish(); n++; } } catch (err) {} }"
+    " return n; })()"
+)
+
+
+def finish_animations(send) -> int:
+    """Jump the finite CSS animations and transitions the snapshot cannot see to their end state.
+
+    `send(method, **params)` is a CDP call in the page's session. Returns how many animations
+    were finished. It can never raise: a page that is navigating, a dead session or an IPC
+    timeout just means nothing was finished, and observe carries on exactly as it did before
+    this hook existed."""
+    try:
+        response = send("Runtime.evaluate", expression=FINISH_ANIMATIONS_JS, returnByValue=True)
+        if not isinstance(response, dict) or response.get("exceptionDetails"):
+            return 0
+        value = (response.get("result") or {}).get("value")
+        count = int(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0
+    except Exception as exc:  # noqa: BLE001 - a helper on the observe path must never end a run
+        log(f"finish animations skipped: {type(exc).__name__}")
+        return 0
+    if count > 0:
+        log(f"finished {count} pending CSS animation(s) before observe")
+    return count
+
+
 def off_list_targets(urls, allow_hosts) -> list[str]:
     """The http(s) targets whose host is outside the allowlist (javascript:, #, mailto: are not navigations)."""
     bad = []
@@ -524,6 +575,25 @@ def _install_patches(run: Run, model, agent_mod, browser_mod) -> None:
     Browser = browser_mod.Browser
     orig_observe, orig_act, orig_call = Browser.observe, Browser.act, Browser.call
 
+    # Finish pending CSS animations (see FINISH_ANIMATIONS_JS) immediately before jev reads the page.
+    # Browser.observe calls the module-level browser_operation once per attempt, after its short
+    # post-action wait and again for every retry after a stale read or a navigation, so patching
+    # that function (resolved at call time) covers content the page mounts in those windows, which
+    # a finish at the top of observe would miss. The finish goes straight to jev's cdp() in the
+    # observed session: it never enters Browser.call (the wrapped call below, whose only extra work
+    # is the first Page.navigate's Network.enable) or Browser.evaluate (which turns an exception
+    # into StalePage), so it touches none of the run's bookkeeping (capture, net_enabled, executed,
+    # drains). Only "observe" is touched; every other operation, act included, passes straight through.
+    orig_operation = browser_mod.browser_operation
+
+    def browser_operation(request):
+        if request.get("operation") == "observe":
+            session = request.get("session")
+            finish_animations(lambda method, **params: browser_mod.cdp(method, session_id=session, **params))
+        return orig_operation(request)
+
+    browser_mod.browser_operation = browser_operation
+
     def observe(self, *args, **kwargs):
         page = orig_observe(self, *args, **kwargs)
         _drain(run, run.helpers)
@@ -542,6 +612,15 @@ def _install_patches(run: Run, model, agent_mod, browser_mod) -> None:
         return page
 
     def act(self, action, page, text=None):
+        # Deliberately NO finish_animations here (browser_operation above finishes for observe
+        # reads only). orig_act starts with fresh(), which compares the page and the target's guard
+        # captured at observe time against the live page, and a finish in between can break that
+        # comparison: jev's guard() is null for an element whose opacity is 0 (so finishing a
+        # pending fade-out flips a live guard to null), and its last field is the target scope's
+        # innerText, which drops visibility:hidden text (so finishing an animation that also toggles
+        # visibility changes it); the page marker also reads the opacity-filtered text and controls.
+        # Any of those raises StalePage ("Observe again"). Every action is followed by an observe,
+        # which already finishes what the page started.
         if run.executed >= run.max_actions:
             raise BudgetExceeded(f"max_actions {run.max_actions} reached")
         kind, label = action.get("kind"), str(action.get("label", ""))

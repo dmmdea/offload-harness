@@ -121,6 +121,34 @@ func autoPollBound(view NodeView, c core.AgentContract, runSeat string) (time.Du
 		fmt.Sprintf("sized from %s's seat_rate %.1f tok/s (%d samples): %d s%s", who, sr.TokS, sr.Samples, wall, budgetNote)
 }
 
+// pollBudgetFor is the delegator's poll budget for contract c placed on view:
+// the contract's wall plus grace, or - for a contract the caller left unsized -
+// the auto bound sized from what the node advertises (autoPollBound) plus the
+// admission allowance and grace. slack is that allowance (0 for an explicit wall)
+// and note says where an auto bound came from ("" for an explicit wall).
+//
+// It is also the CALLER'S PATIENCE: "a job may wait for a start at most as long
+// as it was allowed to run", the rule the fixed queue ceiling used to cap. The
+// backlog gate (startsWithinPatience) and the queue budget (queueBudgetFor) read
+// this same number, so a node the gate lets through is one whose derived queue
+// budget can actually cover its ETA - the two can never disagree about how long
+// the caller will wait.
+func pollBudgetFor(view NodeView, c core.AgentContract, runSeat string) (budget, slack time.Duration, note string) {
+	if bound, n := autoPollBound(view, c, runSeat); bound > 0 {
+		slack = admissionSlack()
+		return bound + slack + pollGrace, slack, n
+	}
+	return time.Duration(executionBudgetSec(c))*pollSecond + pollGrace, 0, ""
+}
+
+// patienceFor is how long the caller will wait for c to START on view: its poll
+// budget. The seat is the advertised agent seat (a composite node's layer seat is
+// decided later and can only widen a bound sized from the cap).
+func patienceFor(c core.AgentContract, view NodeView) time.Duration {
+	budget, _, _ := pollBudgetFor(view, c, "")
+	return budget
+}
+
 // admissionSlack is the window the delegator allows for the node's ADMISSION
 // before its wall starts (review finding 1): the cordon wait, the llama-swap
 // pre-flight, the seat's cold load and the coherence probe, bounded node-side
