@@ -3361,14 +3361,15 @@ func (s *Server) handleAgentDelegate(ctx context.Context, req *mcp.CallToolReque
 	// The loud-exit contract used to live ONLY on the CLI (main.go's
 	// delegateExitErr): every one of these came back to the MCP caller — this
 	// lane's primary consumer — as a plain successful tool call, so a fleet with
-	// a dead llama-swap read like a clean run to the delegating model. Same two
-	// triggers as the exit code, same meaning: a human has to look.
+	// a dead llama-swap read like a clean run to the delegating model. The flag
+	// carries the same meaning — a human has to look — for the cases where the
+	// call itself failed (delegateIsError); a PARTIAL result is not one of them.
 	//
 	// House style stays intact in the important half: the BODY is unchanged, so
 	// the summary and every per-subtask reason/defer_class are still there to
-	// read. The flag is the loudness the JSON alone could not carry. Ordinary
-	// defers (abstention, budget) and failed verification remain successes —
-	// those are RESULT shapes, exactly as on the CLI.
+	// read. Ordinary defers (abstention, budget — a call deadline is one) and
+	// failed verification remain successes — those are RESULT shapes, exactly as
+	// on the CLI.
 	if delegateIsError(sum) {
 		res.IsError = true
 	}
@@ -3388,35 +3389,45 @@ func (s *Server) handleAgentDelegate(ctx context.Context, req *mcp.CallToolReque
 // can sit BESIDE printed results in a way a boolean cannot.
 //
 // The rule that expresses that WITHOUT a silent path is stated on lost WORK, not
-// on the presence of successes. `Succeeded == 0` was the previous spelling and it
-// over-reached: Infrastructure covers both remotesUnreachable (a result that
-// succeeded) and a broken-stack DEFER (a subtask whose contracted output never
-// arrived), and only the first justifies staying quiet — yet the gate silenced
-// the second too the moment ANY sibling succeeded. One of two subtasks eaten by a box with a dead
-// llama-server reached the calling model as a clean tool call, while the CLI
-// exited non-zero on the identical run: two surfaces disagreeing, with the quiet
-// one belonging to the caller that has no exit code to read.
+// on the presence of Infrastructure. Infrastructure covers both remotesUnreachable
+// (a result that succeeded) and a broken-stack DEFER (a subtask whose contracted
+// output never arrived), and only the first justifies staying quiet.
+// LostToStack counts exactly the subtasks that DELIVERED NO USABLE RESULT because
+// the stack failed them, so the rule needs no proxy; `Deferred > 0 &&
+// Infrastructure > 0` is NOT one — a contract-classed defer beside a fleet-down
+// local success satisfies it with nothing lost, re-creating the
+// flag-on-finished-work defect. The count is stated on the CONTRACTED output, not
+// on empty bytes: a finished agent loop whose structured re-pack seat was
+// unreachable publishes its prose with `structured` absent, and is lost — a
+// contract carrying an output_schema is owed a mechanically checked deliverable.
 //
-// LostToStack counts exactly the subtasks that DELIVERED NO USABLE RESULT
-// because the stack failed them, so the rule needs no proxy.
-// `Deferred > 0 && Infrastructure > 0` is NOT one — a contract-classed defer
-// beside a fleet-down local success satisfies it with nothing lost, re-creating
-// the flag-on-finished-work defect.
+// What that lost work does to the FLAG changed twice. R5-2 flagged the call
+// whenever any subtask failed or was lost, so one of two subtasks eaten by a dead
+// llama-server could not read as a clean call. C-75 (register, 2026-09) narrowed
+// it again, because the same argument cuts against the flag: IsError means THE
+// CALL FAILED, and a call that delivered digests for seven of eight subtasks did
+// not fail. The MCP client answers an error-flagged body by keeping only its head
+// and tail, so every partial research reply the workers saw lost the middle — the
+// digests that succeeded. So the flag is kept for the two cases it is true of:
 //
-// The count is stated on the CONTRACTED output, not on empty bytes, and the flag
-// inherits that meaning: a finished agent loop whose structured re-pack seat was
-// unreachable publishes its prose with `structured` absent, and is flagged. That
-// is the right call for an MCP caller — a contract carrying an output_schema is
-// owed a mechanically checked deliverable, and a model handed unchecked prose
-// under a green flag would merge it as if it had been validated.
+//   - nothing succeeded, and something failed or was lost to the stack (the call
+//     delivered nothing, and the fix is on a box or in the contract);
+//   - work was skipped outright (a batched run's later chunks never ran) and
+//     nothing succeeded.
 //
-// So: a subtask that actually failed is an error, and a subtask lost to the
-// stack is an error — a sibling succeeding never un-loses it, exactly as it never
-// un-fails a Failed one. A fleet-down run that still delivered every subtask
-// stays a quiet success.
+// A PARTIAL result is a successful call whose body says what is missing: the
+// summary counts (failed, lost_to_stack, infrastructure, skipped), each
+// subtask's own `failed` / `defer_class` / `reason`, and for research the
+// `partial` and `error` notes. The CLI keeps its wider exit-code rule — an exit
+// code sits BESIDE the printed results — and a call deadline's budget defers are
+// result shapes, never a reason for the flag.
 func delegateIsError(sum delegate.Summary) bool {
+	if sum.Succeeded > 0 {
+		return false
+	}
 	// Skipped: subtasks a batched run never attempted because an earlier chunk
-	// errored — lost work the prose `error` field alone must not hide.
+	// errored — lost work the prose `error` field alone must not hide when there
+	// is no delivered result beside it.
 	return sum.Failed > 0 || sum.LostToStack > 0 || sum.Skipped > 0
 }
 
@@ -3583,6 +3594,30 @@ func result(r core.Result) (*mcp.CallToolResult, error) {
 	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: string(b)}}}, nil
 }
 
+// researchWire is offload_research's published body. FIELD ORDER is the contract,
+// because it is the marshalled order and a client that truncates a long body keeps
+// its head and its tail (C-75):
+//
+//   - the summary leads (roast delta 14: eight quiet defers must read as a loud
+//     outcome);
+//   - `partial` and `error` come next. A partial result is no longer flagged as a
+//     tool error (delegateIsError), so these two notes are what says that pages
+//     are missing, and they must not sit behind anything long;
+//   - the DIGESTS (`results`, with the `result_sources` index that maps them to
+//     pages) come before the sources. They are the deliverable;
+//   - `sources` is last: one metadata row per fetched page, the longest part of
+//     the body and the part a caller can most afford to lose.
+//
+// Every field the body ever carried is still here; only the order moved.
+type researchWire struct {
+	Summary       any               `json:"summary"`
+	Partial       bool              `json:"partial,omitempty"`
+	Error         string            `json:"error,omitempty"`
+	Results       any               `json:"results"`
+	ResultSources []int             `json:"result_sources"`
+	Sources       []research.Source `json:"sources"`
+}
+
 // handleResearch — offload_research. Fetch (guarded, delegator-side) → Build
 // (one grounded contract per usable page) → the SAME delegate.Run path as
 // agent_delegate. The seam s.researchFetch lets tests supply pages without
@@ -3665,14 +3700,10 @@ func (s *Server) handleResearch(ctx context.Context, req *mcp.CallToolRequest) (
 	if rerr != nil {
 		partialErr = rerr.Error()
 	}
-	res, jerr := jsonResult(struct {
-		Summary       any               `json:"summary"`
-		Sources       []research.Source `json:"sources"`
-		Results       any               `json:"results"`
-		ResultSources []int             `json:"result_sources"`
-		Partial       bool              `json:"partial,omitempty"`
-		Error         string            `json:"error,omitempty"`
-	}{wire.Summary, sources, wire.Results, resultSources[:len(results)], rerr != nil, partialErr})
+	res, jerr := jsonResult(researchWire{
+		Summary: wire.Summary, Partial: rerr != nil, Error: partialErr,
+		Results: wire.Results, ResultSources: resultSources[:len(results)], Sources: sources,
+	})
 	if jerr != nil || res == nil {
 		return res, jerr
 	}

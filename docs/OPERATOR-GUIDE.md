@@ -1509,8 +1509,12 @@ subtasks that delivered no usable result because the stack failed them: the cont
 never arrived, as opposed to a local placement that succeeded while the fleet was down. It is not
 a "the result is blank" count — a `structured re-pack unreachable` defer carries the finished
 loop's prose in `output` with `structured` absent, and still counts, because a contract with an
-`output_schema` asked for a checked deliverable. The MCP tool marks the call `isError` on
-`failed > 0 || lost_to_stack > 0`, with the JSON body unchanged; the CLI's exit code is the wider
+`output_schema` asked for a checked deliverable. The MCP tool marks the call `isError` when
+**nothing succeeded** and something failed, was lost to the stack, or was skipped
+(`succeeded == 0 && (failed > 0 || lost_to_stack > 0 || skipped > 0)`), with the JSON body
+unchanged; a **partial** result — at least one subtask delivered — is a successful call whose body
+names what is missing, because the MCP client keeps only the head and tail of an error-flagged body
+and used to cut the surviving digests out of it (C-75). The CLI's exit code is the wider
 `infrastructure > 0` rule below.
 
 `defer_class: "contract"` is the one class that is **your** problem rather than a box's: the

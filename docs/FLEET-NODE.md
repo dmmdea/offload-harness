@@ -597,8 +597,10 @@ excluded: nobody has to touch a box to fix it.
 The subset of those defers that LOST a subtask — it **delivered no usable result: the contracted
 output never arrived** (a broken stack, not the model abstaining) — is published separately as
 `summary.lost_to_stack`, omitted when zero. That is the count the MCP tool sets `isError` on,
-alongside `summary.failed` — a fleet-down run that still delivered every subtask stays a quiet
-success there, while the CLI's exit code still reports it. Read it as "the contracted output was
+alongside `summary.failed`, **when nothing succeeded** (C-75): a call that delivered at
+least one usable result is a successful call whose body says what was lost, so the MCP client does
+not cut the digests out of an error-flagged body. A fleet-down run that still delivered every
+subtask stays a quiet success there, while the CLI's exit code still reports it. Read it as "the contracted output was
 lost", not as "the result is blank": the `structured re-pack unreachable` shape counts here with
 `output` **populated** and `structured` absent, because a contract carrying an `output_schema`
 asked for a mechanically checked deliverable and unchecked prose is not one.

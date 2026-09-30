@@ -227,6 +227,15 @@ passes by restating any one of about two dozen words. The seats never gain
 network access; the agent loop's egress cage is untouched. Failed or refused fetches come
 back as `sources[].skipped` and produce no result — a broken page never reads as a digest.
 
+The body marshals in a fixed order — `summary`, then `partial` / `error` (present only when a
+batch chunk failed), then `results` with its `result_sources` index, and `sources` last — because
+the MCP client keeps only the head and the tail of a long body, and the digests are the
+deliverable (C-75). A **partial** result (some pages digested, some failed) is a successful
+tool call: `isError` is set only when nothing succeeded, so one failed page can no longer cut the
+surviving digests out of the reply. What is missing is named in `summary.failed` /
+`summary.lost_to_stack` and in the failed result's own `reason`. `agent_delegate` follows the same
+rule (`summary`, then `results`).
+
 ### The ask lane's result cache
 
 An IDENTICAL repeat of an `offload_ask` call — same question, same `read_root`, and the same
