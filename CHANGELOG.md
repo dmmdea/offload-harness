@@ -6,6 +6,25 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.143.1] - 2026-09-30 - the NVIDIA key goes only to NVIDIA's hosts
+
+### Security — `offload_nim` could send `NVIDIA_API_KEY` to a caller-supplied host
+
+`nimclient.IsHostedNVIDIA`, which decides who receives the key, was a substring test on the whole base URL
+(`api.nvidia.com` or `integrate.api` anywhere in it), and the `offload_nim` MCP tool takes a caller-supplied
+`base`. One prompt-injected call with a base such as `https://attacker.example/integrate.api/v1` or
+`https://api.nvidia.com.attacker.example/v1` sent the key as a Bearer token to that host. The key is now bound to
+the parsed host: https, no userinfo, the default port, and a host that is `api.nvidia.com` or a DNS subdomain of
+it (`integrate.api.nvidia.com`, `ai.api.nvidia.com`), case-insensitive with a trailing root dot dropped. Every
+caller (the MCP tool, the CLI's `nim` verbs, the status line) resolves the key through this one function. Tests
+cover 15 hostile bases (path, query, fragment, attacker subdomains, userinfo in both directions, plain http,
+a non-default port, case and trailing-dot variants), NVIDIA's own hosts, and the wire itself: through a fake
+dialer, no hostile base puts the key in any header, NVIDIA's host receives it as the Bearer token, and a keyless
+self-hosted NIM sends no Authorization. Restoring the substring test turns them red.
+
+Not in this release: `offload_nim` still accepts an arbitrary base, so a session can still send prompt text to a
+URL of its choosing (no key). An allowlist of bases is a separate change.
+
 ## [0.143.0] - 2026-09-30 - liveness judges the seat, not the request
 
 ### Fixed — busy, preempting or throttled seats no longer kill the runs they serve (ADR 0061)
