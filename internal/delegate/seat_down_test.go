@@ -2,6 +2,7 @@ package delegate
 
 import (
 	"context"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -180,4 +181,118 @@ func TestResultWireCarriesTheSeatRecoveries(t *testing.T) {
 	if v, _ := got["seat_down_wait_sec"].(float64); v != 42.5 {
 		t.Fatalf("seat_down_wait_sec = %v on the result wire", got["seat_down_wait_sec"])
 	}
+}
+
+// The published seat-down wire carries the dead seat's OWN min_turn_sec (its cold
+// load plus a final turn at its measured rate: a flagship that records its ~270 s
+// load publishes ~390 s). The first-pass retry floor read that number of the FAILED
+// seat, so a seat-down defer on a 300 s contract was refused re-placement although
+// the cure is another node whose own floor applies once it is chosen.
+func TestSeatDownDeferIsReplacedWhenTheDeadSeatsMinTurnExceedsTheBudget(t *testing.T) {
+	compressPolls(t, 10*time.Millisecond, 2*time.Second)
+	nodeA, urlA := eligibleNode(t, "node-a", "unused")
+	nodeA.pollByJob = func(jobID string, n int64) (map[string]any, int) {
+		w := seatDownWire("node-a", 6)
+		w.MinTurnSec = 387 // 270 s cold load + a 4,096-token final at 35 tok/s
+		return doneWire(t, w), 200
+	}
+	nodeB, urlB := eligibleNode(t, "node-b", "the answer from B")
+	contract := remoteContract()
+	contract.TimeoutSec = 300
+	contract.Acceptance = []string{"nonempty:answer"}
+	cfg := testCfg(t)
+	cfg.GPULockPath = holdFence(t, gpulease.Options{Reason: "bench", Exclusive: true})
+
+	results, sum, err := Run(context.Background(), cfg, neverLocal(t), []core.AgentContract{contract}, "spread", []string{urlA, urlB})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum.Retried != 1 || results[0].RetriedOn != "node-b" || results[0].Result.Deferred {
+		t.Fatalf("retried=%d retried_on=%q deferred=%v dispatches A=%d B=%d note=%q", sum.Retried, results[0].RetriedOn, results[0].Result.Deferred,
+			nodeA.dispatches.Load(), nodeB.dispatches.Load(), results[0].RetryNote)
+	}
+}
+
+// The retry seat's own floor still applies once it is chosen: the exemption is the
+// FAILED seat's number, not the retry's. node-b publishes that its seat needs 350 s
+// and the contract has 300, so the re-placement is refused for that reason.
+func TestSeatDownDeferStillHonoursTheRetrySeatsOwnFloor(t *testing.T) {
+	compressPolls(t, 10*time.Millisecond, 2*time.Second)
+	nodeA, urlA := eligibleNode(t, "node-a", "unused")
+	nodeA.pollByJob = func(jobID string, n int64) (map[string]any, int) { return doneWire(t, seatDownWire("node-a", 6)), 200 }
+	nodeB, urlB := eligibleNode(t, "node-b", "the answer from B")
+	nodeB.seatRate = map[string]any{"tok_s": 5.0, "cold_load_sec": 350.0, "samples": 6, "min_turn_sec": 555}
+	nodeB.seatBudget = map[string]any{"step_tokens": 1024, "final_tokens": 1024, "thinking": "auto"}
+	contract := remoteContract()
+	contract.TimeoutSec = 300
+	contract.Acceptance = []string{"nonempty:answer"}
+	cfg := testCfg(t)
+	cfg.GPULockPath = holdFence(t, gpulease.Options{Reason: "bench", Exclusive: true})
+
+	results, sum, err := Run(context.Background(), cfg, neverLocal(t), []core.AgentContract{contract}, "spread", []string{urlA, urlB})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum.Retried != 0 || nodeB.dispatches.Load() != 0 || !strings.Contains(results[0].RetryNote, "min_turn_sec published by node-b") {
+		t.Fatalf("retried=%d B dispatches=%d note=%q, want the re-placement refused on the retry seat's own floor", sum.Retried, nodeB.dispatches.Load(), results[0].RetryNote)
+	}
+}
+
+// The other refusal: the alternative node is at its ceiling. During the
+// 2026-09-29 outage the fleet was saturated (44 runs in flight for ~13 slots), so
+// this is the normal state, not an edge: busy is a place in line, never a refusal
+// (INV-4) — the node's own queue is the line.
+func TestSeatDownDeferIsReplacedOnAnAlternativeThatIsAtItsCeiling(t *testing.T) {
+	compressPolls(t, 10*time.Millisecond, 2*time.Second)
+	nodeA, urlA := eligibleNode(t, "node-a", "unused")
+	nodeA.pollByJob = func(jobID string, n int64) (map[string]any, int) { return doneWire(t, seatDownWire("node-a", 6)), 200 }
+	nodeB, urlB := eligibleNode(t, "node-b", "the answer from B")
+	nodeB.maxConcurrentJobs, nodeB.jobsRunning, nodeB.queueDepth = 4, 4, 4
+	contract := remoteContract()
+	contract.Acceptance = []string{"nonempty:answer"}
+	cfg := testCfg(t)
+	cfg.GPULockPath = holdFence(t, gpulease.Options{Reason: "bench", Exclusive: true})
+
+	results, sum, err := Run(context.Background(), cfg, neverLocal(t), []core.AgentContract{contract}, "spread", []string{urlA, urlB})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum.Retried != 1 || results[0].Result.Deferred {
+		t.Fatalf("retried=%d deferred=%v dispatches A=%d B=%d note=%q", sum.Retried, results[0].Result.Deferred, nodeA.dispatches.Load(), nodeB.dispatches.Load(), results[0].RetryNote)
+	}
+}
+
+// A seat-down defer is promised a second placement; when there is nowhere to put
+// it the caller is told it was considered and why it did not happen, never left
+// with a retryable defer and an empty note.
+func TestSeatDownDeferWithNowhereToGoSaysSo(t *testing.T) {
+	t.Run("route local", func(t *testing.T) {
+		local := func(ctx context.Context, c core.AgentContract, _ LocalOptions) (core.AgentWireResult, error) {
+			return seatDownWire("local", 5), nil
+		}
+		contract := remoteContract()
+		results, sum, err := Run(context.Background(), testCfg(t), local, []core.AgentContract{contract}, "local", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if sum.Retried != 0 || !results[0].Result.Deferred || !strings.Contains(results[0].RetryNote, "no other node could take the contract") ||
+			!strings.Contains(results[0].RetryNote, "route local") {
+			t.Fatalf("retried=%d deferred=%v note=%q, want the refusal named", sum.Retried, results[0].Result.Deferred, results[0].RetryNote)
+		}
+	})
+	t.Run("the only remote node was the one that went down", func(t *testing.T) {
+		compressPolls(t, 10*time.Millisecond, 2*time.Second)
+		nodeA, urlA := eligibleNode(t, "node-a", "unused")
+		nodeA.pollByJob = func(jobID string, n int64) (map[string]any, int) { return doneWire(t, seatDownWire("node-a", 6)), 200 }
+		contract := remoteContract()
+		cfg := testCfg(t)
+		cfg.GPULockPath = holdFence(t, gpulease.Options{Reason: "bench", Exclusive: true})
+		results, sum, err := Run(context.Background(), cfg, neverLocal(t), []core.AgentContract{contract}, "spread", []string{urlA})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if sum.Retried != 0 || results[0].RetryNote == "" {
+			t.Fatalf("retried=%d note=%q, want the missing second placement explained", sum.Retried, results[0].RetryNote)
+		}
+	})
 }

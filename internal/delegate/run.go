@@ -1121,6 +1121,15 @@ func (r *runner) runOne(ctx context.Context, i int, contract core.AgentContract)
 		// measurement that has the cards" (D-94).
 		if fenceNote != "" {
 			first.RetryNote = fenceNote
+		} else if SeatDownDefer(first.Result) {
+			// The defer promises a second placement on another node: when there is no
+			// other node the caller must be told it was considered and why it did not
+			// happen, not left with a retryable defer and an empty note.
+			why := "every eligible node was already tried or is not eligible"
+			if r.route == "local" {
+				why = "route local places nothing on another node"
+			}
+			first.RetryNote = fmt.Sprintf("retry skipped: the seat on %s went down and no other node could take the contract (%s)", nodeLabel(first), why)
 		}
 		return first
 	}
@@ -1128,9 +1137,21 @@ func (r *runner) runOne(ctx context.Context, i int, contract core.AgentContract)
 	// job (D-46): the two runs halve each other's tok/s and the retry, on the
 	// leftover budget, is the one that dies (2026-09-10: the ledger-01 retry
 	// joined the 27B mid-generation of ledger-00 and both crawled at 27 tok/s).
-	if busy, why := r.retrySeatBusy(ctx, alt); busy {
-		first.RetryNote = fmt.Sprintf("retry skipped: the retry seat on %s is already running another job (%s); a shared seat would only slow both", alt.view.NodeID, why)
-		return first
+	//
+	// Not for a seat-down defer (ADR 0066). D-46's case is a verification retry: the
+	// first attempt PRODUCED an answer, the retry is an optional second opinion on
+	// the budget that was left, and joining a generating seat costs it the budget
+	// it needs. A seat-down defer produced nothing — declining to re-place it loses
+	// the job — and its retry carries the credited budget of the wait the dead seat
+	// cost. Busy is a place in line, never a refusal (INV-4): the node's own queue is
+	// the line, and it answers 503 when it is full, which placeAndRun re-places.
+	// During the 2026-09-29 outage the fleet was saturated (44 runs in flight for
+	// ~13 slots), so refusing here would have refused nearly every re-placement.
+	if !SeatDownDefer(first.Result) {
+		if busy, why := r.retrySeatBusy(ctx, alt); busy {
+			first.RetryNote = fmt.Sprintf("retry skipped: the retry seat on %s is already running another job (%s); a shared seat would only slow both", alt.view.NodeID, why)
+			return first
+		}
 	}
 	// The floor of the seat the retry will actually run on (D-46 follow-up,
 	// 0.117.2): the 2026-09-10 retry cleared a 201 s floor sized from the 4B's
@@ -1192,9 +1213,17 @@ func (r *runner) retryFloorSec() int {
 // the final budget at its measured rate — and the configured floor otherwise.
 // The larger wins: a box constant sized for the reference seat can sit under
 // what a slower seat just measured for itself.
+//
+// A seat-down defer (ADR 0066) is the exception: its min_turn_sec is the DEAD
+// seat's own (its cold load plus a turn at its measured rate), and the retry goes
+// to another node, whose own floor retryFloorOn applies once it is chosen. Read
+// here it refused the re-placement of the very defer it exists for — a flagship
+// that honestly records a ~270 s cold load publishes a ~390 s min_turn, above
+// any default contract — although the seat that is about to run the retry has
+// nothing to do with it.
 func (r *runner) retryFloorFor(first PlacedResult) (int, string) {
 	floor := r.retryFloorSec()
-	if m := first.Result.MinTurnSec; m > floor {
+	if m := first.Result.MinTurnSec; m > floor && !SeatDownDefer(first.Result) {
 		return m, fmt.Sprintf(", min_turn_sec of the seat on %s", nodeLabel(first))
 	}
 	return floor, retryFloorSource(floor)
