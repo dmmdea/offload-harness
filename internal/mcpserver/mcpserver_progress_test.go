@@ -44,6 +44,23 @@ func (l *progressLog) all() []*mcp.ProgressNotificationParams {
 	return append([]*mcp.ProgressNotificationParams(nil), l.items...)
 }
 
+// quiesce waits for notifications still in flight to the client. The Go SDK client
+// dispatches incoming notifications off the response path, so CallTool can return a
+// moment before the last of them reaches the handler — the server has already
+// written every one (the reporter's stop() waits for its writes), so this waits for
+// delivery, not for anything the server might still send. Quiet means 100 ms
+// without a new one, and it gives up after two seconds.
+func (l *progressLog) quiesce() {
+	last, quiet := -1, 0
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+		if n := len(l.all()); n != last {
+			last, quiet = n, 0
+		} else if quiet++; quiet >= 5 {
+			return
+		}
+	}
+}
+
 // callOverMCP calls a tool of s through a real in-memory MCP client/server pair,
 // with a progress token when token != nil, and returns what the client received.
 func callOverMCP(t *testing.T, s *Server, tool string, args map[string]any, token any) (*mcp.CallToolResult, *progressLog) {
@@ -73,6 +90,7 @@ func callOverMCP(t *testing.T, s *Server, tool string, args map[string]any, toke
 	if err != nil {
 		t.Fatalf("CallTool %s: %v", tool, err)
 	}
+	log.quiesce()
 	return res, log
 }
 
@@ -296,6 +314,7 @@ func TestProgressReporterFlushesWhatWasQueuedWhenTheCallEnds(t *testing.T) {
 	if _, err := cs.CallTool(ctx, params); err != nil {
 		t.Fatalf("CallTool: %v", err)
 	}
+	log.quiesce()
 
 	got := log.all()
 	if len(got) != burst+1 { // the opening notification plus one per finish

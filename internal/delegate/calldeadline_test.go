@@ -576,7 +576,10 @@ func TestAttemptStartsNothingOnceTheCallDeadlineHasPassed(t *testing.T) {
 // TestCutByDeadlineNeverRewritesAFinishedAnswer: only outcomes that are NOT
 // answers are rewritten. A result that finished — even one that failed its
 // acceptance checks, which is a wrong answer and not a missing one — keeps
-// everything it had.
+// everything it had. The second half states what the function decides for an
+// outcome PRODUCED now: finish and settle call it at that moment. It is not a
+// filter for a result that was published earlier (see
+// TestRunWithDeadlineKeepsAnAbstentionWhoseRetryWasCut).
 func TestCutByDeadlineNeverRewritesAFinishedAnswer(t *testing.T) {
 	r := &runner{cfg: testCfg(t), call: pastDeadline(3)}
 	answer := PlacedResult{Node: "n", Seat: "s", Result: localOK()}
@@ -701,5 +704,47 @@ func TestRunWithAnExpiredDeadlineStartsNothing(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestRunWithDeadlineKeepsAnAbstentionWhoseRetryWasCut: the question "was this
+// outcome produced after the deadline?" can only be answered at the moment it is
+// produced (finish, settle). A subtask's FIRST attempt is an honest abstention at
+// once; it is retryable, so the retry is placed on the local seat, blocks, and is
+// cut by the deadline. mergeAttempts publishes the first attempt, annotated with
+// what the retry did — and that published abstention finished long before the
+// deadline. It must stay an abstention (its class, its reason, its node): the cut
+// belongs to the retry, and lives in the RetryNote.
+func TestRunWithDeadlineKeepsAnAbstentionWhoseRetryWasCut(t *testing.T) {
+	compressPolls(t, 5*time.Millisecond, time.Second)
+	node := &fakeNode{t: t, agentEnabled: true, resident: true, ctxTokens: 32768, nodeID: "node-a"}
+	node.pollByJob = func(string, int64) (map[string]any, int) {
+		w := remoteWire("", "")
+		w.NodeID, w.Deferred, w.DeferClass, w.Reason = "node-a", true, core.DeferClassAbstention, "output failed schema: missing answer"
+		return doneWire(t, w), http.StatusOK
+	}
+	var localRuns atomic.Int64
+	local := func(ctx context.Context, _ core.AgentContract, _ LocalOptions) (core.AgentWireResult, error) {
+		localRuns.Add(1)
+		<-ctx.Done() // the retry blocks until the call deadline cancels it
+		return cancelledLoop(), nil
+	}
+
+	results, sum, _ := runWithin(t, 4*time.Second, testCfg(t), local,
+		[]core.AgentContract{remoteGoal("abstain first")}, "remote", []string{node.server().URL}, deadlineIn(400*time.Millisecond), nil)
+
+	pr := results[0]
+	if localRuns.Load() != 1 {
+		t.Fatalf("the local seat ran %d times, want exactly the one retry", localRuns.Load())
+	}
+	if sum != (Summary{Deferred: 1, Retried: 1}) {
+		t.Fatalf("summary = %+v, want the abstention published after one retry", sum)
+	}
+	if pr.deadlineCut || pr.Result.DeferClass != core.DeferClassAbstention || pr.Result.Reason != "output failed schema: missing answer" || pr.Node != "node-a" {
+		t.Fatalf("the published result = cut %v class %q reason %q node %q: the abstention finished before the deadline and must not be rewritten into a call-deadline defer",
+			pr.deadlineCut, pr.Result.DeferClass, pr.Result.Reason, pr.Node)
+	}
+	if !strings.Contains(pr.RetryNote, "call deadline reached") {
+		t.Fatalf("retry_note = %q, want it to carry what happened to the retry (the call deadline cut it)", pr.RetryNote)
 	}
 }

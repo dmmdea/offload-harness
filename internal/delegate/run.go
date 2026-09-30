@@ -752,6 +752,10 @@ func RunWith(ctx context.Context, cfg config.Config, local LocalRunner, subtasks
 	// shows the card "running" until its staleness sweep fails it. Each send is
 	// bounded (2 s), so this cannot hold a run hostage to a down PAIR.
 	defer r.pair.Wait()
+	// Registered after the Wait above, so it runs BEFORE it: from here on a late
+	// frame from an abandoned goroutine is dropped, never added to a WaitGroup that
+	// is being waited on.
+	defer r.shutPair()
 	r.call = dl
 	if opts != nil {
 		r.quarantine = opts.Quarantine
@@ -836,7 +840,11 @@ launch:
 			defer wg.Done()
 			defer func() { <-sem }()
 			progress.started(i)
-			pr := r.cutByDeadline(r.runOne(ctx, i, contract))
+			// runOne's outcome was already cut where it was PRODUCED (finish, settle): the
+			// only moment "after the deadline?" can be answered. Asking again here, with no
+			// timestamp, would rewrite an answer that finished before the deadline — an
+			// abstention whose retry was cut, for one — into a call-deadline defer.
+			pr := r.runOne(ctx, i, contract)
 			if board.put(i, pr) {
 				if !pr.deadlineCut {
 					dl.answer()
@@ -1078,6 +1086,11 @@ type runner struct {
 	// call is this run's whole-call deadline (RunOptions.Deadline), nil = none.
 	// Every method on it is nil-safe, so no site needs a guard.
 	call *callDeadline
+	// pairMu/pairShut fence the PAIR emitter at the end of a run (calldeadline.go:
+	// emitPair, shutPair): a goroutine the call deadline abandoned may report after
+	// RunWith has begun draining the emitter.
+	pairMu   sync.RWMutex
+	pairShut bool
 }
 
 // decide is the composite box's placement decision for a contract that is

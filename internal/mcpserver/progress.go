@@ -126,8 +126,11 @@ func (p *progressReporter) run(ctx context.Context) {
 	for {
 		select {
 		case ev := <-p.events:
+			// Always written, closed or not: an event the engine produced is
+			// delivered (the drain below does the same). Only a heartbeat, which has
+			// nothing new to say once the call has ended, is suppressed by stop().
 			p.lastDone = ev.Done
-			p.send(ctx, p.describe(ev))
+			p.write(ctx, p.describe(ev))
 		case <-tick.C:
 			p.send(ctx, p.heartbeat())
 		case <-p.quit:

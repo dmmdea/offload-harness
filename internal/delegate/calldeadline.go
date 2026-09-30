@@ -37,6 +37,7 @@ import (
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/pairworkloads"
 )
 
 // ErrCallDeadline is the cause a context carries when the whole-call deadline
@@ -212,9 +213,13 @@ func (b *resultBoard) close() ([]PlacedResult, []bool) {
 }
 
 // cutByDeadline turns a subtask outcome that was NOT finished when the deadline
-// passed into the published call-deadline defer. It is applied at every point an
-// outcome is published or recorded — finish, settle and the goroutine wrapper — so
-// the wire result, the ledger row and the corpus row say the same thing.
+// passed into the published call-deadline defer. It is applied at the two moments
+// an outcome is PRODUCED — finish (an attempt's end) and settle (an outcome no
+// attempt produced) — so the wire result, the ledger row and the corpus row say
+// the same thing. It is not a filter to run over a result later: "produced after
+// the deadline" can only be answered when the outcome is produced, and a result
+// that finished earlier (an abstention whose retry was cut, published with the
+// retry's fate in its retry_note) must keep what it was.
 //
 // It rewrites only outcomes that are not answers: a failure or a defer produced
 // once the deadline had passed (a cancelled poll, a cancelled local run, a capacity
@@ -313,6 +318,31 @@ func (r *runner) withdrawCut(base, jobID string) {
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxFleetBody))
 	resp.Body.Close()
 	log.Printf("delegate: call deadline: asked %s to withdraw job %s: status %d (best effort; a node that has not shipped the route answers 404 or 405)", base, jobID, resp.StatusCode)
+}
+
+// emitPair sends one PAIR frame unless the run has shut the emitter. Before the
+// call deadline no goroutine could outlive RunWith, so RunWith's deferred
+// pair.Wait() saw every frame. A seat that ignores its context is abandoned and
+// may report later; Emit does WaitGroup.Add, and an Add racing the final Done of a
+// Wait in progress makes that Done panic ("WaitGroup misuse") — a crash for a
+// frame nobody is waiting for. Emission therefore holds the read lock, and
+// shutPair (below) takes the write lock before Wait, so a late frame is dropped.
+func (r *runner) emitPair(ev pairworkloads.Event) {
+	r.pairMu.RLock()
+	defer r.pairMu.RUnlock()
+	if r.pairShut {
+		return
+	}
+	r.pair.Emit(ev)
+}
+
+// shutPair ends PAIR emission for this run; RunWith defers it so it runs before
+// pair.Wait(). It waits for any Emit in progress (bounded: building and queueing a
+// frame), so after it returns no Add can race the Wait.
+func (r *runner) shutPair() {
+	r.pairMu.Lock()
+	r.pairShut = true
+	r.pairMu.Unlock()
 }
 
 // nodeOrBase names the node a job was placed on: its advertised id, else its dial

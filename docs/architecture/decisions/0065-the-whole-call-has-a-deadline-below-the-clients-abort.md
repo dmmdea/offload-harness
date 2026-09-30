@@ -44,10 +44,12 @@ measurement of the client.
    defer** whose reason opens `call deadline reached; N unfinished` and then says what that subtask was
    doing (running on a named node under a named job, running on the local seat, not yet placed, never
    started, or not stopping). N is the whole call's count, frozen at the first look so every reason
-   states the same number, and it spans every chunk of a batched call. The outcome is applied where a
-   result is published or recorded (`finish`, `settle` and the goroutine wrapper), so the wire result,
-   the ledger row and the corpus row say the same thing. A result that finished, including one that
-   failed its acceptance checks, is an answer and is never rewritten.
+   states the same number, and it spans every chunk of a batched call. The outcome is applied at the two
+   moments an outcome is produced (`finish` and `settle`), so the wire result, the ledger row and the
+   corpus row say the same thing; it is never re-applied to a result published later, because "produced
+   after the deadline" can only be answered when the outcome is produced. A result that finished,
+   including one that failed its acceptance checks, is an answer and is never rewritten: an abstention
+   whose retry was cut stays an abstention and carries the retry's fate in its `retry_note`.
 
 3. **The unwind is bounded, and a subtask that ignores its context cannot hold the call.** Cooperating
    goroutines get an allowance after the deadline (a twentieth of the time left when placement began,
@@ -57,7 +59,11 @@ measurement of the client.
    and the ledger closes after the last such goroutine returns. A remote job cut this way keeps its
    intent open (`orphanable`): the node may still finish it, and the recovery pass may still harvest it.
    A subtask nobody ran (never started, abandoned, or cut before it was placed) names no node and no
-   seat, as `exhausted()` already does for "no node took it", and is marked `Unplaced`.
+   seat, as `exhausted()` already does for "no node took it", and is marked `Unplaced`. Once the run
+   begins draining its PAIR emitter, a frame from an abandoned goroutine is dropped: `Emit` adds to a
+   `sync.WaitGroup`, and an Add racing the last Done of a Wait in progress panics that Done, which
+   would take the process down for a frame nobody is waiting for (before this change no goroutine
+   could outlive the run).
 
 4. **A call deadline is a result shape, never a failure.** Budget-class defers do not set the MCP error
    flag. The flag itself narrows (C-75): `isError` is set only when NOTHING succeeded and something
