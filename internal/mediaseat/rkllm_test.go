@@ -1,6 +1,8 @@
 package mediaseat
 
 import (
+	"math"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -22,16 +24,17 @@ func TestRKLLMSeatPassesAndBindsVisionOnlyWithAnEncoder(t *testing.T) {
 	if err := Validate([]Seat{s}, "tier"); err != nil {
 		t.Fatal(err)
 	}
-	if got := Bindings([]Seat{s}); len(got) != 1 || got["vision_model"] != "npu-seat" {
-		t.Errorf("a VLM rkllm seat binds vision_model = its name, got %v", got)
+	if got := Bindings([]Seat{s}); len(got) != 2 || got["vision_model"] != "npu-seat" {
+		t.Errorf("a VLM rkllm seat binds vision_model = its name (and unconstrained_seats), got %v", got)
 	}
 	textOnly := s
 	textOnly.VisionEncoder = ""
 	if err := Validate([]Seat{textOnly}, "tier"); err != nil {
 		t.Fatal(err)
 	}
-	if got := Bindings([]Seat{textOnly}); len(got) != 0 {
-		t.Errorf("a text-only rkllm seat cannot answer an image question and must bind nothing, got %v", got)
+	got := Bindings([]Seat{textOnly})
+	if _, has := got["vision_model"]; has || len(got) != 1 {
+		t.Errorf("a text-only rkllm seat cannot answer an image question and must bind no route (only unconstrained_seats), got %v", got)
 	}
 }
 
@@ -159,5 +162,216 @@ func TestUnknownKindMessageListsRKLLM(t *testing.T) {
 	s.Kind = "npu"
 	if err := Validate([]Seat{s}, "tier"); err == nil || !strings.Contains(err.Error(), "rkllm") {
 		t.Fatalf("an unknown kind must name the valid set including rkllm, got %v", err)
+	}
+}
+
+// repeat_penalty is the ONE sampling default an rkllm seat may carry: the runtime has no
+// temperature/top_p/top_k seat knobs (those stay refused), but greedy decoding at the
+// runtime's 1.0 loops on a small model's image answers, so the seat starts above it.
+func TestRKLLMRepeatPenaltyIsAcceptedInRangeAndRefusedOutsideIt(t *testing.T) {
+	ptr := func(v float64) *float64 { return &v }
+	for _, v := range []float64{0.01, 1.0, 1.1, 10} {
+		s := rkllmSeat()
+		s.RepeatPenalty = ptr(v)
+		if err := Validate([]Seat{s}, "tier"); err != nil {
+			t.Errorf("repeat_penalty %v should pass: %v", v, err)
+		}
+	}
+	for _, v := range []float64{0, 0.009, 10.01, -1, math.NaN(), math.Inf(1)} {
+		s := rkllmSeat()
+		s.RepeatPenalty = ptr(v)
+		err := Validate([]Seat{s}, "tier")
+		if err == nil || !strings.Contains(err.Error(), "repeat_penalty") {
+			t.Errorf("repeat_penalty %v should be refused by name, got %v", v, err)
+		}
+	}
+	s := rkllmSeat() // unset stays valid: no flag renders and the server's 1.0 stands
+	if err := Validate([]Seat{s}, "tier"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Every other sampling knob stays refused on an rkllm seat: allowing repeat_penalty must not
+// reopen them.
+func TestRKLLMStillRefusesTheOtherSamplingKnobs(t *testing.T) {
+	v, n := 0.5, 20
+	for name, mut := range map[string]func(*Seat){
+		"temp":  func(s *Seat) { s.Temp = &v },
+		"top_p": func(s *Seat) { s.TopP = &v },
+		"top_k": func(s *Seat) { s.TopK = &n },
+	} {
+		s := rkllmSeat()
+		mut(&s)
+		if err := Validate([]Seat{s}, "tier"); err == nil || !strings.Contains(err.Error(), "ignored on an rkllm seat") {
+			t.Errorf("%s on an rkllm seat must stay refused, got %v", name, err)
+		}
+	}
+}
+
+// A repeat_penalty on a llama-server or whisper seat is a knob the renderer would drop.
+func TestRepeatPenaltyIsRefusedOnOtherKinds(t *testing.T) {
+	v := 1.1
+	for i, name := range []string{"vision", "stt"} {
+		seats := good()
+		seats[i].RepeatPenalty = &v
+		err := Validate(seats, "tier")
+		if err == nil || !strings.Contains(err.Error(), "rkllm-only") || !strings.Contains(err.Error(), "repeat_penalty") {
+			t.Errorf("repeat_penalty on a %s seat: want an rkllm-only refusal, got %v", name, err)
+		}
+	}
+}
+
+// Seat.Tasks is the declared task allowlist. Only the vision subset is bound (vision_tasks),
+// in canonical order, and a seat that declares none leaves the key out: today's "all three".
+func TestSeatTasksBindTheVisionSubsetInCanonicalOrder(t *testing.T) {
+	s := rkllmSeat()
+	s.Tasks = []string{"ocr", "vqa"} // declared out of order on purpose
+	if err := Validate([]Seat{s}, "tier"); err != nil {
+		t.Fatal(err)
+	}
+	got := Bindings([]Seat{s})
+	if want := []string{"vqa", "ocr"}; !reflect.DeepEqual(got["vision_tasks"], want) {
+		t.Errorf("vision_tasks = %v, want %v (canonical order vqa, ocr, assess_image)", got["vision_tasks"], want)
+	}
+	if got["vision_model"] != "npu-seat" {
+		t.Errorf("vision_model = %v, want the seat", got["vision_model"])
+	}
+
+	s.Tasks = []string{"assess_image", "extract", "vqa", "classify", "ocr"} // all five: the text subset binds text_tasks
+	if err := Validate([]Seat{s}, "tier"); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"vqa", "ocr", "assess_image"}; !reflect.DeepEqual(Bindings([]Seat{s})["vision_tasks"], want) {
+		t.Errorf("vision_tasks = %v, want the vision subset %v only", Bindings([]Seat{s})["vision_tasks"], want)
+	}
+
+	s.Tasks = nil // no declaration: no key, the node serves all three
+	if _, has := Bindings([]Seat{s})["vision_tasks"]; has {
+		t.Error("a seat that declares no tasks must not write vision_tasks")
+	}
+
+	// A vision (llama-server) seat may declare tasks too: the binding follows the seat that binds vision_model.
+	v := good()[0]
+	v.Tasks = []string{"vqa", "assess_image"}
+	if err := Validate([]Seat{v}, "tier"); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"vqa", "assess_image"}; !reflect.DeepEqual(Bindings([]Seat{v})["vision_tasks"], want) {
+		t.Errorf("a vision seat's vision_tasks = %v, want %v", Bindings([]Seat{v})["vision_tasks"], want)
+	}
+}
+
+// TestRKLLMSeatWritesUnconstrainedSeatsAndTextTasks: every rkllm seat (routes or not) writes
+// unconstrained_seats = its name and aliases, because its runtime cannot constrain decoding;
+// text_tasks is the declared text subset in canonical order, and absent when none is declared
+// (the fleet text lane ships dark). No other kind writes either key.
+func TestRKLLMSeatWritesUnconstrainedSeatsAndTextTasks(t *testing.T) {
+	s := rkllmSeat()
+	got := Bindings([]Seat{s})
+	if want := []string{"npu-seat", "npu-chat", "vision"}; !reflect.DeepEqual(got["unconstrained_seats"], want) {
+		t.Errorf("unconstrained_seats = %v, want %v", got["unconstrained_seats"], want)
+	}
+	if _, has := got["text_tasks"]; has {
+		t.Errorf("a seat declaring no text task must not write text_tasks (the lane is dark), got %v", got["text_tasks"])
+	}
+	s.Tasks = []string{"extract", "ocr", "classify", "vqa"}
+	if err := Validate([]Seat{s}, "tier"); err != nil {
+		t.Fatal(err)
+	}
+	got = Bindings([]Seat{s})
+	if want := []string{"classify", "extract"}; !reflect.DeepEqual(got["text_tasks"], want) {
+		t.Errorf("text_tasks = %v, want %v (canonical order)", got["text_tasks"], want)
+	}
+	// Other kinds write neither key.
+	for _, o := range append(good(), ocrSeat()) {
+		b := Bindings([]Seat{o})
+		if _, has := b["unconstrained_seats"]; has {
+			t.Errorf("a %s seat must not write unconstrained_seats, got %v", o.Kind, b)
+		}
+	}
+	// A text task is refused on a seat whose runtime constrains decoding.
+	v := good()[0]
+	v.Tasks = []string{"vqa", "classify"}
+	if err := Validate([]Seat{v}, "tier"); err == nil || !strings.Contains(err.Error(), "only an rkllm seat is") {
+		t.Errorf("a text task on a vision seat must be refused, got %v", err)
+	}
+	// summarize and triage are not declarable at all.
+	s.Tasks = []string{"vqa", "summarize"}
+	if err := Validate([]Seat{s}, "tier"); err == nil || !strings.Contains(err.Error(), `unknown task "summarize"`) {
+		t.Errorf("summarize must not be declarable, got %v", err)
+	}
+	s.Tasks = []string{"vqa", "triage"}
+	if err := Validate([]Seat{s}, "tier"); err == nil || !strings.Contains(err.Error(), `unknown task "triage"`) {
+		t.Errorf("triage must not be declarable, got %v", err)
+	}
+}
+
+// Two seats declaring text tasks would leave the node's single text_tasks decided by slice order.
+func TestTwoSeatsCannotBothDeclareTextTasks(t *testing.T) {
+	a, b := rkllmSeat(), rkllmSeat()
+	a.VisionEncoder, b.VisionEncoder = "", ""
+	a.Name, b.Name = "npu-a", "npu-b"
+	a.Aliases, b.Aliases = nil, nil
+	a.Tasks, b.Tasks = []string{"classify"}, []string{"extract"}
+	err := Validate([]Seat{a, b}, "tier")
+	if err == nil || !strings.Contains(err.Error(), "at most one") || !strings.Contains(err.Error(), `"text_tasks"`) {
+		t.Fatalf("want a refusal naming text_tasks, got %v", err)
+	}
+	b.Tasks = nil
+	if err := Validate([]Seat{a, b}, "tier"); err != nil {
+		t.Fatalf("one seat declaring text tasks must pass: %v", err)
+	}
+}
+
+func TestBoundKeysIncludeTextDoorKeys(t *testing.T) {
+	for _, want := range []string{"unconstrained_seats", "text_tasks"} {
+		found := false
+		for _, k := range BoundKeys() {
+			found = found || k == want
+		}
+		if !found {
+			t.Errorf("BoundKeys %v must include %s so a config_seed cannot write it", BoundKeys(), want)
+		}
+	}
+}
+
+func TestBoundKeysIncludeVisionTasks(t *testing.T) {
+	found := false
+	for _, k := range BoundKeys() {
+		found = found || k == "vision_tasks"
+	}
+	if !found {
+		t.Fatalf("BoundKeys %v must include vision_tasks so a config_seed cannot write it", BoundKeys())
+	}
+}
+
+func TestSeatTasksValidation(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		seat  func() Seat
+		tasks []string
+		want  string // "" = must pass
+	}{
+		{"vqa+ocr on a VLM rkllm seat", rkllmSeat, []string{"vqa", "ocr"}, ""},
+		{"text tasks beside a vision task", rkllmSeat, []string{"vqa", "classify", "extract"}, ""},
+		{"unknown task", rkllmSeat, []string{"vqa", "caption"}, `unknown task "caption"`},
+		{"duplicate task", rkllmSeat, []string{"vqa", "vqa"}, `"vqa" is listed twice`},
+		{"vision task on a text-only rkllm seat", func() Seat { s := rkllmSeat(); s.VisionEncoder = ""; return s },
+			[]string{"vqa"}, "needs a seat that reads images"},
+		{"text tasks on a text-only rkllm seat", func() Seat { s := rkllmSeat(); s.VisionEncoder = ""; return s },
+			[]string{"classify", "extract"}, ""},
+		{"only text tasks on a seat that binds vision_model", rkllmSeat, []string{"classify"}, "name no vision task"},
+		{"tasks on an stt seat", func() Seat { return good()[1] }, []string{"vqa"}, "ignored on a stt seat"},
+		{"tasks on an ocr seat", ocrSeat, []string{"ocr"}, "ignored on a ocr seat"},
+	} {
+		s := tc.seat()
+		s.Tasks = tc.tasks
+		err := Validate([]Seat{s}, "tier")
+		switch {
+		case tc.want == "" && err != nil:
+			t.Errorf("%s: should pass, got %v", tc.name, err)
+		case tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)):
+			t.Errorf("%s: want a refusal containing %q, got %v", tc.name, tc.want, err)
+		}
 	}
 }

@@ -71,11 +71,27 @@ func VisionLaneAdmissible(cfg config.Config, loopbackListener bool) bool {
 	return cfg.VisionModel != "" && AgentLaneSafelyReachable(cfg, loopbackListener)
 }
 
+// visionTaskServed reports whether this node's vision seat serves task. An empty
+// cfg.VisionTasks is every node's behaviour until its tier declares otherwise: all
+// three. The match is exact on purpose: the same strings travel in health, so the
+// delegator's placement and this refusal can never disagree about a spelling.
+func visionTaskServed(cfg config.Config, task core.TaskType) bool {
+	if len(cfg.VisionTasks) == 0 {
+		return true
+	}
+	for _, t := range cfg.VisionTasks {
+		if t == string(task) {
+			return true
+		}
+	}
+	return false
+}
+
 // tokenGated reports whether a task_type rides the bearer rule: the agent lane
-// (v1 scope) and, since 0.116.0, the vision lane. Every media task stays
-// tokenless so deployed media clients keep working byte-identically.
+// (v1 scope), since 0.116.0 the vision lane, and since 0.154.0 the text lane. Every
+// media task stays tokenless so deployed media clients keep working byte-identically.
 func tokenGated(taskType string) bool {
-	return taskType == string(core.TaskAgentRun) || taskType == VisionTask
+	return taskType == string(core.TaskAgentRun) || taskType == VisionTask || taskType == TextTask
 }
 
 // visionTaskOf maps the payload's task name to the pipeline task, refusing
@@ -96,7 +112,8 @@ func visionTaskOf(name string) (core.TaskType, bool) {
 // runs, mirroring the MCP handlers' param mapping exactly (handleVQA /
 // handleOCR / handleAssessImage): vqa always carries `question`, assess_image
 // carries `brief` only when non-empty, ocr carries nothing. Every refusal is a
-// 400 at ack time — the caller can get each of them wrong — while the
+// 400 at ack time (a task outside this node's vision_tasks included) — the
+// caller can get each of them wrong — while the
 // pipeline's own defers (unreadable image, gpu busy, empty answer) come back
 // inside the job result as the full core.Result.
 func buildVision(cfg config.Config, payload json.RawMessage) (core.Request, func(), error) {
@@ -110,6 +127,14 @@ func buildVision(cfg config.Config, payload json.RawMessage) (core.Request, func
 	task, ok := visionTaskOf(p.Task)
 	if !ok {
 		return core.Request{}, noop, fmt.Errorf("vision: task %q is not one of vqa, ocr, assess_image", p.Task)
+	}
+	// A seat whose runtime cannot do one of the three (the RKLLM runtime cannot constrain
+	// sampling, and assess_image always sends a grammar) declares the ones it serves; a task
+	// outside that set would be taken, run against the seat and deferred after its 400, so it
+	// is refused HERE, where the caller reads it at once and can place the work elsewhere.
+	if !visionTaskServed(cfg, task) {
+		return core.Request{}, noop, fmt.Errorf("vision: task %q is not served by this node's vision seat (vision_tasks: %s)",
+			task, strings.Join(cfg.VisionTasks, ", "))
 	}
 	if !strings.HasPrefix(strings.ToLower(p.Image), "data:image/") {
 		return core.Request{}, noop, fmt.Errorf("vision: image must be a data:image/...;base64 URI (the bytes travel with the job; a path on the caller's disk is unreadable here)")

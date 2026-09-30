@@ -4,6 +4,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/mediaseat"
 	"github.com/dmmdea/offload-harness/internal/servingtmpl"
 	"github.com/dmmdea/offload-harness/internal/tierseed"
+	"github.com/dmmdea/offload-harness/internal/visionremote"
 )
 
 // The rockchip-rk3588 tier is a board that also runs something else: an SoC whose GPU and
@@ -211,5 +213,92 @@ func TestRK3588RknpuHomeSurvivesTheProvenanceReplay(t *testing.T) {
 	}
 	if rep := provenanceOf(stamped); rep.State != servingtmpl.StateMatch {
 		t.Fatalf("a config rendered with a non-default RKNPU home does not verify: %s -- %s (keys %v)", rep.State, rep.Detail, rep.Keys)
+	}
+}
+
+// TestRK3588VisionLaneIsLimitedToWhatTheRuntimeCanDo pins the 0.153.0 vision decisions on the
+// SHIPPED table: the seat is started with a repeat penalty (greedy decoding at the runtime's 1.0
+// looped to the token cap on VQA), declares vqa and ocr only (the runtime cannot constrain
+// sampling and assess_image always sends a grammar), and the seed binds exactly that as
+// vision_tasks. Each of those is one edit away from silently reverting.
+func TestRK3588VisionLaneIsLimitedToWhatTheRuntimeCanDo(t *testing.T) {
+	seat := rk3588Seat(t)
+	if seat.RepeatPenalty == nil || *seat.RepeatPenalty != 1.1 {
+		t.Errorf("the NPU seat's repeat_penalty = %v, want 1.1 (measured: 1.0 loops on VQA to the token cap)", seat.RepeatPenalty)
+	}
+	if got, want := strings.Join(seat.Tasks, ","), "vqa,ocr"; got != want {
+		t.Errorf("the NPU seat declares tasks %q, want %q: the runtime refuses the grammar assess_image always sends", got, want)
+	}
+	res, err := rk3588Render(t, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(res.Config, "--cpu-mask 0x0f --repeat-penalty 1.1 --served-name "+seat.Name+" ") {
+		t.Errorf("the rendered NPU seat is not started with --repeat-penalty 1.1:\n%s", res.Config)
+	}
+	profiles, err := tierseed.Parse(embeddedProfiles)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := effectiveConfig(t, profiles[rk3588Tier], rk3588Tier, "linux")
+	if got, want := strings.Join(cfg.VisionTasks, ","), "vqa,ocr"; got != want {
+		t.Errorf("the seed's vision_tasks = %q, want %q (bound from the seat)", got, want)
+	}
+}
+
+// TestRK3588SeedLimitsFitAOneGenerationNPU: the node default of four concurrent jobs would queue
+// three behind the NPU's single generation, where their wait counts against the delegator's wall;
+// the timeout must stay below the delegator's fleet vision budget or the delegator gives up first.
+func TestRK3588SeedLimitsFitAOneGenerationNPU(t *testing.T) {
+	profiles, err := tierseed.Parse(embeddedProfiles)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := effectiveConfig(t, profiles[rk3588Tier], rk3588Tier, "linux")
+	if got := cfg.FleetConcurrencyLimit(); got != 1 {
+		t.Errorf("fleet concurrency = %d, want 1: the NPU runs one generation at a time", got)
+	}
+	if got := cfg.FleetQueueLimit(); got != 2 {
+		t.Errorf("fleet queue depth = %d, want 2 (the default, twice the concurrency; one running, one waiting): the seed must not set fleet_max_queue_depth", got)
+	}
+	if got, budget := time.Duration(cfg.RequestTimeoutSec)*time.Second, visionremote.Budget; got != 240*time.Second || got >= budget {
+		t.Errorf("request_timeout_sec = %v, want 240s and below the delegator's %v fleet vision budget", got, budget)
+	}
+	if cfg.MaxInputChars != 8000 || cfg.OCRMaxTokens != 512 {
+		t.Errorf("max_input_chars/ocr_max_tokens = %d/%d, want 8000/512", cfg.MaxInputChars, cfg.OCRMaxTokens)
+	}
+	if _, set := profiles[rk3588Tier].ConfigSeed["fleet_max_queue_depth"]; set {
+		t.Error("the tier sets fleet_max_queue_depth: leave it at its default (twice the concurrency)")
+	}
+}
+
+// TestRK3588TextDoorShipsDark pins the 0.154.0 text-door decisions on the SHIPPED table: the seat
+// is written into unconstrained_seats (so the node's own pipeline stops sending a grammar its
+// runtime refuses) while NO text task is declared, so text_tasks is empty and the fleet text lane is
+// not advertised. A later data-only change that adds classify/extract to the seat's tasks is the
+// one edit that opens the lane, and it must be made on purpose, after measured data passes.
+func TestRK3588TextDoorShipsDark(t *testing.T) {
+	seat := rk3588Seat(t)
+	for _, task := range seat.Tasks {
+		if task == "classify" || task == "extract" || task == "summarize" || task == "triage" {
+			t.Errorf("the NPU seat declares text task %q: the text lane ships dark until measured data passes (>=30 cases/lane, >=90%% correct, zero off-schema accepted)", task)
+		}
+	}
+	profiles, err := tierseed.Parse(embeddedProfiles)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := effectiveConfig(t, profiles[rk3588Tier], rk3588Tier, "linux")
+	if !cfg.DeclaresUnconstrainedSeat(seat.Name) {
+		t.Errorf("unconstrained_seats = %v, want it to name the NPU seat %q (bound from the seat)", cfg.UnconstrainedSeats, seat.Name)
+	}
+	// What stops the node's own pipeline sending the seat a grammar is that the cascade rungs it
+	// actually calls are declared, not merely that the seat name is listed somewhere.
+	if !cfg.DeclaresUnconstrainedSeat(cfg.Model) || !cfg.DeclaresUnconstrainedSeat(cfg.TriageModel) {
+		t.Errorf("the cascade rungs model %q and triage_model %q must both be declared unconstrained (unconstrained_seats %v): otherwise the node's pipeline sends the NPU a grammar it refuses",
+			cfg.Model, cfg.TriageModel, cfg.UnconstrainedSeats)
+	}
+	if len(cfg.TextTasks) != 0 {
+		t.Errorf("text_tasks = %v, want none: the fleet text lane is dark", cfg.TextTasks)
 	}
 }

@@ -26,6 +26,7 @@ import (
 type fakeNode struct {
 	node     string
 	tasks    []string
+	vtasks   []string // health vision_tasks; nil = not published (serves all three)
 	leased   bool
 	result   core.Result
 	refuse   int // non-zero: answer the dispatch with this status
@@ -44,6 +45,9 @@ func newFakeNode(t *testing.T, node string, tasks []string, res core.Result) *fa
 		h := map[string]any{"node_id": node, "supported_task_types": tasks, "vision_model": "fake-vlm", "queue_depth": 0}
 		if f.leased {
 			h["lease"] = map[string]any{"held": true, "class": "text", "busy": true}
+		}
+		if f.vtasks != nil {
+			h["vision_tasks"] = f.vtasks
 		}
 		json.NewEncoder(w).Encode(h)
 	})
@@ -361,5 +365,58 @@ func TestUnrecognizedRouteIsAContractDefer(t *testing.T) {
 	res := Run(context.Background(), config.Default(), local, assessReq("x.png"), "cloud")
 	if !res.Deferred || res.DeferClass != core.DeferClassContract || local.count() != 0 {
 		t.Fatalf("result = %+v (local ran %d), want a contract defer and no run", res, local.count())
+	}
+}
+
+func vqaReq(img string) core.Request {
+	return core.Request{Task: core.TaskVQA, Image: img, Params: map[string]any{"question": "what is it?"}}
+}
+
+// TestRemoteSkipsANodeWhoseSeatDoesNotServeTheTask (0.153.0): the NPU-class node advertises
+// vision_tasks [vqa ocr]. An assess_image goes to the node that serves it, a roster holding only
+// the narrow node defers with the miss named (never a dispatch that would 400), and a vqa is still
+// placed on the narrow node.
+func TestRemoteSkipsANodeWhoseSeatDoesNotServeTheTask(t *testing.T) {
+	setBusy(t, false)
+	narrow := newFakeNode(t, "npu-node", []string{"vision"}, remoteOK)
+	narrow.vtasks = []string{"vqa", "ocr"}
+	full := newFakeNode(t, "gpu-node", []string{"vision"}, remoteOK)
+	local := &localRunner{}
+	img := pngFile(t)
+
+	cfg := config.Default()
+	cfg.DelegateRemotes = []string{narrow.srv.URL, full.srv.URL}
+	res := Run(context.Background(), cfg, local, assessReq(img), "remote")
+	if !res.OK || res.Meta.Node != "gpu-node" {
+		t.Fatalf("assess_image result = %+v, want it placed on the node that serves it", res)
+	}
+	if p, _ := narrow.dispatched(); p != nil {
+		t.Fatalf("assess_image was dispatched to a node that does not list it: %v", p)
+	}
+
+	only := config.Default()
+	only.DelegateRemotes = []string{narrow.srv.URL}
+	res = Run(context.Background(), only, local, assessReq(img), "remote")
+	if !res.Deferred || res.DeferClass != core.DeferClassCapacity {
+		t.Fatalf("result = %+v, want a capacity defer", res)
+	}
+	for _, want := range []string{"npu-node", "does not serve assess_image", "vision_tasks [vqa ocr]"} {
+		if !strings.Contains(res.Reason, want) {
+			t.Fatalf("reason %q does not name %q", res.Reason, want)
+		}
+	}
+	if p, _ := narrow.dispatched(); p != nil {
+		t.Fatalf("the narrow node received a dispatch for a task it does not serve: %v", p)
+	}
+
+	res = Run(context.Background(), only, local, vqaReq(img), "remote")
+	if !res.OK || res.Meta.Node != "npu-node" {
+		t.Fatalf("vqa result = %+v, want it placed on the narrow node that lists it", res)
+	}
+	if p, _ := narrow.dispatched(); p["task"] != "vqa" {
+		t.Fatalf("narrow node payload = %v, want the vqa dispatch", p)
+	}
+	if local.count() != 0 {
+		t.Fatal("route remote must never run the local seat")
 	}
 }

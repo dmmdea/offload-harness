@@ -232,6 +232,27 @@ type Config struct {
 	// Empty = this box runs no vLLM seat and the gate is inert, which is the default
 	// and the common case.
 	VLLMSeats []string `json:"vllm_seats,omitempty"`
+	// UnconstrainedSeats names the seats on THIS box whose runtime cannot constrain decoding
+	// at all: it refuses (HTTP 400 constrained_decoding_unsupported) any `grammar`,
+	// `json_schema` or `response_format`, and ignores logprobs. The RKLLM runtime on an
+	// RK3588 NPU is the one today. The cascade's structured lanes (classify, extract)
+	// always send a constraint, so on such a seat they would defer every call; for a
+	// seat listed here the pipeline sends NO constraint and NO logprobs, puts the exact JSON
+	// shape in the prompt instead, and accepts a reply only after strict validation against
+	// the task's schema (required keys, types, the classify label in the allowed set, no
+	// extra keys). The decision-margin gate needs logprobs and is inert on these seats.
+	// Matched case-insensitively against the model id (DeclaresUnconstrainedSeat). Written
+	// by the tier's rkllm media seat (mediaseat.Bindings), like vision_model, never by
+	// config_seed.
+	UnconstrainedSeats []string `json:"unconstrained_seats,omitempty"`
+	// TextTasks is the subset of the text tasks (classify, extract) this node's unconstrained
+	// seat is declared to serve on the FLEET text lane (POST /fleet/text). Empty = the node
+	// advertises no text lane at all: the lane ships dark and a seat opts in only after its
+	// measured data passes. summarize and triage are never in it. The node refuses a task
+	// outside the list at ack time (400 naming the set) and publishes the list in health as
+	// text_tasks. It gates the fleet lane only: a local call never goes through a node's ack.
+	// Written by the tier's media seat (mediaseat.Bindings), never by config_seed.
+	TextTasks []string `json:"text_tasks,omitempty"`
 	// AgentTimeoutSec is the default wall-clock budget for an agent run when the call
 	// passes no timeout. 0 = the built-in default (180s). Tiers binding a big planner
 	// seat seed this higher: a cold big-model load plus low tok/s inside 180s is a
@@ -467,6 +488,17 @@ type Config struct {
 	// VisionModel is the VLM alias used for the vqa task (multimodal). Empty = no
 	// vision route (vqa defers).
 	VisionModel string `json:"vision_model,omitempty"`
+	// VisionTasks is the subset of the three single-image vision tasks (vqa, ocr,
+	// assess_image) this node's vision seat serves on the FLEET vision lane. Empty =
+	// all three, which is every node's behaviour until a tier declares otherwise. A seat
+	// narrows it when its runtime cannot do one of them: the RKLLM runtime cannot
+	// constrain sampling, and assess_image always sends a grammar, so the RK3588 tier's
+	// seat lists vqa and ocr only. The node then refuses a task outside the list at ack
+	// time (400 naming the allowed set), publishes the list in health as vision_tasks, and
+	// a delegator skips the node for a task it does not list. It gates the fleet lane only:
+	// a local call never goes through a fleet node's ack. Written by the tier's media seat
+	// (mediaseat.Bindings), like vision_model, never by config_seed.
+	VisionTasks []string `json:"vision_tasks,omitempty"`
 	// OCRModel is an OPTIONAL dedicated alias for the ocr task. Purpose-built OCR
 	// models (GLM-OCR and friends) beat a general VLM on dense text, but they are
 	// text-recognition ONLY — they cannot answer a vqa question or judge an image,
@@ -3011,6 +3043,23 @@ func (c Config) EnsureDirs() error {
 // declares no vllm_seats — there is no seat to protect.
 func (c Config) CascadeSeatGuardOn() bool {
 	return c.CascadeSeatGuard == nil || *c.CascadeSeatGuard
+}
+
+// DeclaresUnconstrainedSeat reports whether `unconstrained_seats` names id: the box's own
+// answer to "can this seat's runtime constrain decoding?". Matched case-insensitively for the
+// same reason as DeclaresVLLMSeat (llama-swap resolves seat names that way). Empty = every
+// seat takes a grammar, which is the default and the common case.
+func (c Config) DeclaresUnconstrainedSeat(id string) bool {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return false
+	}
+	for _, s := range c.UnconstrainedSeats {
+		if strings.EqualFold(strings.TrimSpace(s), id) {
+			return true
+		}
+	}
+	return false
 }
 
 // DeclaresVLLMSeat reports whether `vllm_seats` names id — the box's own

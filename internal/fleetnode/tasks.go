@@ -33,7 +33,7 @@ import (
 
 // fleetTaskOrder is the advertisement order (stable for health payloads + error
 // messages). Membership is decided per-config by taskConfiguredFor.
-var fleetTaskOrder = []string{"image-gen", "video-gen", "animate", "stt", "audio-gen", "run-graph", ComposeTask, "agent", "accel", VisionTask}
+var fleetTaskOrder = []string{"image-gen", "video-gen", "animate", "stt", "audio-gen", "run-graph", ComposeTask, "agent", "accel", VisionTask, TextTask}
 
 // taskConfiguredFor reports whether THIS box actually serves taskType — the same
 // route gates the pipeline uses (empty script/model = the task defers there, so
@@ -83,6 +83,12 @@ func taskConfiguredFor(cfg config.Config, taskType string, loopbackListener bool
 		// advertised exactly when POST /fleet/vision would admit it — a bound
 		// vision_model and the agent lane's reachability rule.
 		return VisionLaneAdmissible(cfg, loopbackListener)
+	case TextTask:
+		// One classify / extract call on this node's own pipeline (0.154.0): advertised
+		// exactly when POST /fleet/text would admit it — the tier declared at least one
+		// text task (config text_tasks; none ships until measured) and the vision lane's
+		// reachability rule.
+		return TextLaneAdmissible(cfg, loopbackListener)
 	}
 	// Anything else is only "configured" when it is a VALID cfg.Pipelines key
 	// (Task 6): 100% config-driven, so a new pipeline needs no new case here.
@@ -382,6 +388,8 @@ func BuildRequest(ctx context.Context, cfg config.Config, loopbackListener bool,
 		return buildAccel(cfg, payload)
 	case VisionTask:
 		return buildVision(cfg, payload)
+	case TextTask:
+		return buildText(cfg, payload)
 	}
 	// Any other taskType that reaches here (taskConfigured already gated
 	// membership) must be a configured cfg.Pipelines key (Task 6) — 100%

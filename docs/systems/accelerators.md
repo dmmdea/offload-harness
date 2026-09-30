@@ -169,6 +169,44 @@ order; the seeds used to merge key by key, so the last device's list replaced th
 config gated on one device while `installed.json` advertised both. `audit-config` owns the
 accelerator keys and compares a node with the seed of the devices it lists.
 
+#### The RKLLM seat's repeat penalty and task set (0.153.0)
+
+The tier's `rkllm` seat (`accelerators/rknpu/rkllm_server.py` behind `rkllm-serve.sh`, not the sidecar) carries
+two settings declared on the seat in `profiles.json`; each renders into the seat's command or binds into the
+node config from that one declaration.
+
+- **`repeat_penalty`**, rendered as `--repeat-penalty` (0.01 to 10, rkllm seats only; unset renders no flag).
+  It is the seat's default for a request that sends neither `repeat_penalty` nor `repetition_penalty`; a value the
+  request sends wins, so a caller that wants the runtime's 1.0 sends 1.0. The tier ships 1.1, because greedy
+  decoding at 1.0 looped on VQA until the 256-token cap (the vision lane deferred "vision output truncated"),
+  while at 1.1 a blind four-question VQA check scored 3/4 (measured 2026-09-30). It is the only sampling default
+  a seat may declare: `temp`, `top_p` and `top_k` stay refused on an rkllm seat.
+- **`tasks`**, the task names the seat serves (`vqa`, `ocr`, `assess_image`, `classify`, `extract`; `classify`
+  and `extract` are validated now and bound by a later release). The vision subset becomes the node's
+  `vision_tasks` key. The tier declares `["vqa", "ocr"]`: the RKLLM runtime cannot constrain sampling (the
+  server answers a `grammar` or `json_schema` with 400 `constrained_decoding_unsupported`) and `assess_image`
+  always sends a grammar. The node refuses `assess_image` at ack time and a delegator places it elsewhere; see
+  [FLEET-NODE.md](../FLEET-NODE.md#the-vision-task-post-fleetvision). The text subset (`classify`, `extract`)
+  becomes the node's `text_tasks`, which opens the fleet text lane; the tier declares none (the lane ships dark,
+  see [FLEET-NODE.md](../FLEET-NODE.md#the-text-task-post-fleettext)).
+- **`unconstrained_seats`** is written for every `rkllm` seat (its name and aliases), whatever its `tasks`: the
+  runtime cannot constrain decoding, so the node's own pipeline sends it no grammar and validates the reply
+  strictly instead ([ADR 0069](../architecture/decisions/0069-an-unconstrained-seat-runs-classify-and-extract-from-the-prompt-and-the-text-lane-ships-dark.md)).
+
+The tier also seeds limits for an NPU that runs one generation at a time: `fleet_max_concurrent_jobs` 1,
+`request_timeout_sec` 240 (below the delegator's 300 s fleet vision budget), `max_input_chars` 8000 and
+`ocr_max_tokens` 512. `fleet_max_queue_depth` stays at its default, twice the concurrency (2: one running, one
+waiting), inside the server's own window of one running and two waiting. Numbers and reasons:
+[ADR 0062](../architecture/decisions/0062-rk3588-soc-tier-serves-from-the-npu-on-a-unified-memory-budget.md).
+
+**Upgrading an installed node (0.153.0).** The binary does not ship `rkllm_server.py`; it is the `accelerators/rknpu`
+copy under `RKNPU_HOME`, which `install.sh` never refreshes. A 0.153.0 render emits `--repeat-penalty 1.1`, which a
+0.151.1 server refuses (`unrecognized arguments`), so refresh `accelerators/rknpu` in `RKNPU_HOME` (at least
+`rkllm_server.py`) first and only then re-render `llama-swap.yaml`. `install.sh` also leaves an existing `config.json`
+untouched, so add `unconstrained_seats` (the seat's model id, 0.154.0), `vision_tasks` (`["vqa","ocr"]`), `fleet_max_concurrent_jobs` 1, `request_timeout_sec` 240,
+`max_input_chars` 8000 and `ocr_max_tokens` 512 by hand, or delete the file to regenerate it; `local-offload audit-config`
+lists them as SEED-ONLY.
+
 ## Runtime — the sidecar
 
 The sidecar is the Hailo repo's `server/http_server.py`, bound to loopback

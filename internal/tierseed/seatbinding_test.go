@@ -2,6 +2,7 @@ package tierseed
 
 import (
 	"github.com/dmmdea/offload-harness/internal/vllmseat"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -87,5 +88,97 @@ func TestAnInvalidBoundLaneFailsResolution(t *testing.T) {
 	}
 	if _, err := Resolve(p, "ampere-6", Options{Home: "/srv/offload", GOOS: "linux"}); err != nil {
 		t.Fatalf("the FALLBACK path binds the llama.cpp seat and must not validate the vLLM lane: %v", err)
+	}
+}
+
+func rkllmTasksProfile(tasks ...string) Profile {
+	return Profile{
+		Backend: "rk3588",
+		MediaSeats: []mediaseat.Seat{{Kind: mediaseat.KindRKLLM, Name: "npu-vlm", Model: "m.rkllm",
+			VisionEncoder: "enc.rknn", CtxSize: 8192, Residency: mediaseat.Swappable, Tasks: tasks}},
+	}
+}
+
+// TestSeatWritesVisionTasksBesideVisionModel: a seat that declares its vision tasks is the sole
+// writer of the node's vision_tasks, like vision_model; a seat that declares none leaves the key
+// out, which the node reads as "all three" (today's behaviour).
+func TestSeatWritesVisionTasksBesideVisionModel(t *testing.T) {
+	got, err := Resolve(rkllmTasksProfile("ocr", "vqa"), "rk", Options{Home: "/srv/offload", GOOS: "linux"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["vision_model"] != "npu-vlm" {
+		t.Errorf("vision_model = %v", got["vision_model"])
+	}
+	if want := []string{"vqa", "ocr"}; !reflect.DeepEqual(got["vision_tasks"], want) {
+		t.Errorf("vision_tasks = %v, want %v", got["vision_tasks"], want)
+	}
+	got, err = Resolve(rkllmTasksProfile(), "rk", Options{Home: "/srv/offload", GOOS: "linux"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, has := got["vision_tasks"]; has {
+		t.Errorf("a seat with no tasks must not write vision_tasks, got %v", got["vision_tasks"])
+	}
+}
+
+// TestConfigSeedMayNotWriteVisionTasks: two writers of the vision binding is how the seat and
+// its binding drifted apart, so vision_tasks is refused in a config_seed exactly like vision_model.
+func TestConfigSeedMayNotWriteVisionTasks(t *testing.T) {
+	p := rkllmTasksProfile("vqa", "ocr")
+	p.ConfigSeed = map[string]any{"vision_tasks": []any{"vqa"}}
+	_, err := Resolve(p, "rk", Options{Home: "/srv/offload"})
+	if err == nil || !strings.Contains(err.Error(), `"vision_tasks" is written by a media_seat`) {
+		t.Fatalf("a seed writing vision_tasks must be refused by name, got %v", err)
+	}
+	p = Profile{Backend: "cuda", ConfigSeed: map[string]any{"vision_tasks": []any{"vqa"}}}
+	if _, err := Resolve(p, "t", Options{}); err == nil || !strings.Contains(err.Error(), "written by a media_seat") {
+		t.Fatalf("a seatless tier may not seed vision_tasks either, got %v", err)
+	}
+}
+
+// TestSeatWritesUnconstrainedSeatsAndTextTasks: an rkllm seat is the sole writer of the node's
+// unconstrained_seats (its name and aliases, bound or not) and, only when it declares them, of
+// text_tasks (canonical order). A seat that declares no text task leaves text_tasks absent: dark.
+func TestSeatWritesUnconstrainedSeatsAndTextTasks(t *testing.T) {
+	got, err := Resolve(rkllmTasksProfile("vqa", "ocr"), "rk", Options{Home: "/srv/offload", GOOS: "linux"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"npu-vlm"}; !reflect.DeepEqual(got["unconstrained_seats"], want) {
+		t.Errorf("unconstrained_seats = %v, want %v", got["unconstrained_seats"], want)
+	}
+	if _, has := got["text_tasks"]; has {
+		t.Errorf("a seat declaring no text task must not write text_tasks, got %v", got["text_tasks"])
+	}
+	got, err = Resolve(rkllmTasksProfile("extract", "vqa", "ocr", "classify"), "rk", Options{Home: "/srv/offload", GOOS: "linux"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"classify", "extract"}; !reflect.DeepEqual(got["text_tasks"], want) {
+		t.Errorf("text_tasks = %v, want %v", got["text_tasks"], want)
+	}
+	// A tier with no rkllm seat writes neither.
+	got, err = Resolve(Profile{Backend: "cuda"}, "t", Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"unconstrained_seats", "text_tasks"} {
+		if _, has := got[k]; has {
+			t.Errorf("a tier with no rkllm seat must not write %s", k)
+		}
+	}
+}
+
+// TestConfigSeedMayNotWriteTextDoorKeys: both keys are seat-written, so a seed that also writes
+// them is refused by name, exactly like vision_model and vision_tasks.
+func TestConfigSeedMayNotWriteTextDoorKeys(t *testing.T) {
+	for _, key := range []string{"unconstrained_seats", "text_tasks"} {
+		p := rkllmTasksProfile("vqa", "ocr")
+		p.ConfigSeed = map[string]any{key: []any{"x"}}
+		_, err := Resolve(p, "rk", Options{Home: "/srv/offload"})
+		if err == nil || !strings.Contains(err.Error(), `"`+key+`" is written by a media_seat`) {
+			t.Errorf("a seed writing %s must be refused by name, got %v", key, err)
+		}
 	}
 }

@@ -103,6 +103,7 @@ class ServerCase(unittest.TestCase):
     ctx = 4096
     with_vision = False
     ready = True
+    repeat_penalty = rs.DEFAULT_REPEAT_PENALTY  # the seat's --repeat-penalty
 
     def setUp(self):
         quiet = contextlib.redirect_stderr(io.StringIO())  # the server logs one line per chat request
@@ -113,7 +114,7 @@ class ServerCase(unittest.TestCase):
         self.start()
 
     def start(self):
-        self.app = rs.App("test-seat", self.ctx)
+        self.app = rs.App("test-seat", self.ctx, self.repeat_penalty)
         self.app.runtime, self.app.vision = self.rt, self.vision
         if self.ready:
             self.app.ready.set()
@@ -241,6 +242,23 @@ class BuildRequestTest(unittest.TestCase):
         for bad in ({"temperature": -1}, {"temperature": "hot"}, {"top_p": 2}, {"top_k": 1.5}, {"presence_penalty": 9}):
             with self.subTest(bad), self.assertRaises(rs.ApiError):
                 self.build(**bad)
+
+    def test_the_seat_repeat_penalty_applies_when_the_request_sends_neither_key(self):
+        body = {"messages": [{"role": "user", "content": "hi"}]}
+        self.assertEqual(rs.build_request(body, 4096, False, 1.1).sampling.repeat_penalty, 1.1)
+        self.assertEqual(rs.build_request({**body, "repeat_penalty": None}, 4096, False, 1.1).sampling.repeat_penalty,
+                         1.1)  # a null is "not sent", as for every other knob
+        self.assertEqual(rs.build_request(body, 4096, False).sampling.repeat_penalty, 1.0)  # no seat default: off
+
+    def test_a_request_repeat_penalty_beats_the_seat_default(self):
+        body = {"messages": [{"role": "user", "content": "hi"}]}
+        for name, fields, want in (("repeat_penalty", {"repeat_penalty": 1.3}, 1.3),
+                                   ("repetition_penalty", {"repetition_penalty": 1.25}, 1.25),
+                                   ("an explicit 1.0 turns the seat default off", {"repeat_penalty": 1.0}, 1.0)):
+            with self.subTest(name):
+                self.assertEqual(rs.build_request({**body, **fields}, 4096, False, 1.1).sampling.repeat_penalty, want)
+        with self.assertRaises(rs.ApiError):  # the per-request range still holds under a seat default
+            rs.build_request({**body, "repeat_penalty": 11}, 4096, False, 1.1)
 
     def test_fields_the_seat_ignores_never_fail(self):
         r = self.build(grammar="", response_format={"type": "text"}, logprobs=True, top_logprobs=3,
@@ -472,6 +490,16 @@ class ChatTest(ServerCase):
         status, body, _ = self.chat()
         self.assertEqual(status, 500)
         self.assertIn("RUN_ERROR", body["error"]["message"])
+
+
+class SeatRepeatPenaltyTest(ServerCase):
+    repeat_penalty = 1.1
+
+    def test_the_runtime_gets_the_seat_default_unless_the_request_names_one(self):
+        self.assertEqual(self.chat()[0], 200)
+        self.assertEqual(self.chat(repeat_penalty=1.0)[0], 200)
+        self.assertEqual(self.chat(repetition_penalty=1.4)[0], 200)
+        self.assertEqual([round(c["sampling"].repeat_penalty, 4) for c in self.rt.calls], [1.1, 1.0, 1.4])
 
 
 class StreamTest(ServerCase):
@@ -842,6 +870,35 @@ class CliTest(unittest.TestCase):
             code, err = self.run_main("--model", __file__, "--port", str(taken.getsockname()[1]))
         self.assertEqual(code, 2)
         self.assertIn("cannot listen", err)
+
+    def test_the_repeat_penalty_flag_reaches_the_app_and_defaults_to_off(self):
+        made = []
+        real_app = rs.App
+
+        def spy(*a, **kw):
+            made.append(real_app(*a, **kw))
+            return made[-1]
+
+        for argv, want in (([], 1.0), (["--repeat-penalty", "1.1"], 1.1)):
+            with self.subTest(argv), mock.patch.object(rs, "App", spy), socket.socket() as taken:
+                taken.bind(("127.0.0.1", 0))  # a taken port ends main() right after App is built, before any model loads
+                taken.listen(1)
+                self.run_main("--model", __file__, "--port", str(taken.getsockname()[1]), *argv)
+            self.assertEqual(made[-1].repeat_penalty, want)
+
+    def test_an_out_of_range_repeat_penalty_is_refused_at_startup(self):
+        for bad in ("0", "0.001", "10.5", "-1", "nan", "inf", "x"):
+            with self.subTest(bad):
+                code, err = self.run_main("--model", __file__, "--port", "1", "--repeat-penalty", bad)
+                self.assertEqual(code, 2)
+                self.assertIn("--repeat-penalty", err)
+        for ok in ("0.01", "1", "1.1", "10"):  # the request value's range; a taken port ends main() right after the check
+            with self.subTest(ok), socket.socket() as taken:
+                taken.bind(("127.0.0.1", 0))
+                taken.listen(1)
+                code, err = self.run_main("--model", __file__, "--port", str(taken.getsockname()[1]), "--repeat-penalty", ok)
+                self.assertEqual(code, 2)
+                self.assertIn("cannot listen", err)
 
     def test_argument_errors_exit_2(self):
         self.assertEqual(self.run_main("--port", "1")[0], 2)  # no --model

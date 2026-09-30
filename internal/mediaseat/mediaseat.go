@@ -54,6 +54,33 @@ const (
 	KindRKLLM = "rkllm"
 )
 
+// The task names a seat may declare in Seat.Tasks. The first three are the fleet vision
+// lane's single-image tasks; classify and extract are the text tasks the fleet text lane
+// serves. Bindings writes the vision subset as vision_tasks and the text subset as text_tasks.
+// summarize and triage are not declarable: the RKLLM runtime returns no logprobs, so the
+// decision-margin gate cannot run, and blind quality on the reference seat was 0/4 for each.
+const (
+	TaskVQA         = "vqa"
+	TaskOCR         = "ocr"
+	TaskAssessImage = "assess_image"
+	TaskClassify    = "classify"
+	TaskExtract     = "extract"
+)
+
+// visionTaskOrder is the canonical order of the vision lane's tasks: the order vision_tasks is
+// written in, whatever order a tier declared them, so the same declaration always renders the
+// same config.
+var visionTaskOrder = []string{TaskVQA, TaskOCR, TaskAssessImage}
+
+// textTaskOrder is the canonical order of the text lane's tasks: the order text_tasks is written
+// in, whatever order a tier declared them.
+var textTaskOrder = []string{TaskClassify, TaskExtract}
+
+// knownTasks is every name Seat.Tasks accepts.
+var knownTasks = map[string]bool{
+	TaskVQA: true, TaskOCR: true, TaskAssessImage: true, TaskClassify: true, TaskExtract: true,
+}
+
 // What an rkllm seat runs when the tier names no launcher or CPU mask.
 const (
 	// DefaultRKLLMBin is the launcher the rknpu accelerator ships beside its sidecar. It rides
@@ -181,6 +208,25 @@ type Seat struct {
 	// keeps whichever cores are left. At least 3 bits must be set (rkllmMinCPUs). rkllm
 	// only.
 	CPUMask string `json:"cpu_mask,omitempty"`
+	// RepeatPenalty is the repeat penalty an rkllm seat applies to a request that names none
+	// (rendered as --repeat-penalty; rkllm only). A POINTER so the tier can tell "not set" (the
+	// server's 1.0 = off stands, and no flag renders) from a value. It is a seat default, not a
+	// lock: a request that sends its own repeat_penalty wins. Measured on the reference RK3588
+	// board (2026-09-30): greedy decoding at 1.0 loops on VQA until the 256-token
+	// cap (the vision lane defers "vision output truncated"), while 1.1 answered 3 of 4 blind VQA
+	// questions. Range 0.01..10, the range the server accepts per request.
+	RepeatPenalty *float64 `json:"repeat_penalty,omitempty"`
+
+	// Tasks is the task set this seat declares it serves: any of vqa, ocr, assess_image (the
+	// fleet vision lane's tasks) and classify, extract (text tasks, accepted now for the door
+	// that will read them). Empty = unrestricted, which is today's behaviour. The declaration is
+	// honest about what the RUNTIME can do: the RKLLM runtime cannot constrain sampling, so a
+	// grammar-carrying task (assess_image always sends one) would be refused with a 400 after
+	// the node had already taken the job. Bindings writes the vision subset as the node's
+	// vision_tasks, which the node enforces at ack time and publishes in health, and which the
+	// delegator's placement reads to keep such a task off the seat. Valid on vision and rkllm
+	// seats only; a vision task needs a seat that reads images.
+	Tasks []string `json:"tasks,omitempty"`
 
 	// Measured records what measured this seat -- the box, the build, the bake-off and
 	// the numbers -- so a reader never has to take the roster on faith and a future
@@ -235,21 +281,88 @@ func (s Seat) EffectiveCPUMask() string {
 	return s.CPUMask
 }
 
-// Bindings is the config fragment a tier's seats produce. This is the ONLY
-// writer of these keys — a seed that also sets them by hand is refused, because
-// two writers is exactly how the seat and its binding drifted apart before.
-func Bindings(seats []Seat) map[string]any {
-	out := map[string]any{}
-	for _, s := range seats {
-		if k := s.BindingKey(); k != "" {
-			out[k] = s.Name
+// VisionTasks is the vision subset of the seat's declared Tasks, in canonical order (vqa, ocr,
+// assess_image) and de-duplicated. nil when the seat declares no vision task, which the node
+// reads as "serves all three" — today's behaviour.
+func (s Seat) VisionTasks() []string {
+	var out []string
+	for _, t := range visionTaskOrder {
+		for _, d := range s.Tasks {
+			if d == t {
+				out = append(out, t)
+				break
+			}
 		}
 	}
 	return out
 }
 
+// TextTasks is the text subset of the seat's declared Tasks, in canonical order (classify,
+// extract) and de-duplicated. nil when the seat declares no text task, which the node reads as
+// "no text lane": unlike the vision lane the text lane is dark unless declared.
+func (s Seat) TextTasks() []string {
+	var out []string
+	for _, t := range textTaskOrder {
+		for _, d := range s.Tasks {
+			if d == t {
+				out = append(out, t)
+				break
+			}
+		}
+	}
+	return out
+}
+
+// UnconstrainedNames is every model id an rkllm seat answers to (its name and its aliases): the
+// ids the node's unconstrained_seats lists, because a cascade model configured by alias reaches
+// the same runtime, which refuses a grammar whichever name it was asked by. nil for any other kind.
+func (s Seat) UnconstrainedNames() []string {
+	if s.Kind != KindRKLLM {
+		return nil
+	}
+	return append([]string{s.Name}, s.Aliases...)
+}
+
+// Bindings is the config fragment a tier's seats produce. This is the ONLY
+// writer of these keys — a seed that also sets them by hand is refused, because
+// two writers is exactly how the seat and its binding drifted apart before.
+//
+// vision_tasks rides with vision_model: the seat that binds the vision route also says which
+// of the three vision tasks it serves, and only when it declares a vision subset (a seat that
+// declares none leaves the key absent, so the node serves all three).
+//
+// Every rkllm seat, bound to a route or not, also writes unconstrained_seats (its model ids):
+// the runtime cannot constrain decoding, so the node's own pipeline must not send it a grammar.
+// text_tasks is the seat's declared text subset (classify, extract); absent = no fleet text lane.
+func Bindings(seats []Seat) map[string]any {
+	out := map[string]any{}
+	var unconstrained []string
+	for _, s := range seats {
+		unconstrained = append(unconstrained, s.UnconstrainedNames()...)
+		if tasks := s.TextTasks(); len(tasks) > 0 {
+			out["text_tasks"] = tasks
+		}
+		k := s.BindingKey()
+		if k == "" {
+			continue
+		}
+		out[k] = s.Name
+		if k == "vision_model" {
+			if tasks := s.VisionTasks(); len(tasks) > 0 {
+				out["vision_tasks"] = tasks
+			}
+		}
+	}
+	if len(unconstrained) > 0 {
+		out["unconstrained_seats"] = unconstrained
+	}
+	return out
+}
+
 // BoundKeys is every config key seats may write, for the seed validator.
-func BoundKeys() []string { return []string{"ocr_model", "stt_model", "vision_model"} }
+func BoundKeys() []string {
+	return []string{"ocr_model", "stt_model", "text_tasks", "unconstrained_seats", "vision_model", "vision_tasks"}
+}
 
 // Validate rejects a seat set at AUTHORING time — in a test over the committed
 // tier table — rather than on someone's machine, where the symptom is a service
@@ -270,6 +383,11 @@ func Validate(seats []Seat, tier string) error {
 		case KindVision, KindSTT, KindOCR, KindRKLLM:
 			if k := s.BindingKey(); k != "" {
 				writers[k] = append(writers[k], where)
+			}
+			// text_tasks is one node key too: two seats declaring text tasks would leave it decided
+			// by slice order.
+			if len(s.TextTasks()) > 0 {
+				writers["text_tasks"] = append(writers["text_tasks"], where)
 			}
 		case "":
 			problems = append(problems, where+": no kind (want "+KindVision+", "+KindSTT+", "+KindOCR+" or "+KindRKLLM+")")
@@ -377,7 +495,7 @@ func Validate(seats []Seat, tier string) error {
 				s.TopP != nil || s.TopK != nil || s.SplitMode != "" || s.TensorSplit != "" || len(s.GPUEnv) > 0 {
 				problems = append(problems, where+": mmproj/vad_model/lib_dir/image_*_tokens/no_*/chat_template/temp/top_p/top_k/"+
 					"split_mode/tensor_split/gpu_env are llama-server or whisper-server settings and are ignored on an rkllm seat "+
-					"(the RKLLM runtime takes model, vision_encoder, ctx_size and cpu_mask)")
+					"(the RKLLM runtime takes model, vision_encoder, ctx_size, cpu_mask and, as a seat default, repeat_penalty)")
 			}
 			if s.CtxSize <= 0 {
 				problems = append(problems, where+": an rkllm seat needs its own ctx_size — the runtime is started with it")
@@ -385,9 +503,14 @@ func Validate(seats []Seat, tier string) error {
 			if err := checkCPUMask(s.CPUMask); err != nil {
 				problems = append(problems, where+": "+err.Error())
 			}
-		} else if s.VisionEncoder != "" || s.CPUMask != "" {
-			problems = append(problems, where+": vision_encoder/cpu_mask are rkllm-only and are ignored on a "+s.Kind+" seat")
+			if s.RepeatPenalty != nil && !(*s.RepeatPenalty >= minRepeatPenalty && *s.RepeatPenalty <= maxRepeatPenalty) {
+				problems = append(problems, fmt.Sprintf("%s: repeat_penalty %v is outside [%v, %v] — the server refuses to start "+
+					"with a --repeat-penalty outside the range it accepts per request", where, *s.RepeatPenalty, minRepeatPenalty, maxRepeatPenalty))
+			}
+		} else if s.VisionEncoder != "" || s.CPUMask != "" || s.RepeatPenalty != nil {
+			problems = append(problems, where+": vision_encoder/cpu_mask/repeat_penalty are rkllm-only and are ignored on a "+s.Kind+" seat")
 		}
+		problems = append(problems, checkTasks(s, where)...)
 		for field, v := range map[string]string{"model": s.Model, "mmproj": s.MMProj, "vad_model": s.VADModel, "vision_encoder": s.VisionEncoder, "bin": s.Bin, "lib_dir": s.LibDir} {
 			if strings.Contains(strings.ToLower(v), ".exe") {
 				problems = append(problems, fmt.Sprintf("%s: %s carries a literal \".exe\" — use the __EXE__ token so the tier renders on every OS", where, field))
@@ -420,6 +543,60 @@ func Validate(seats []Seat, tier string) error {
 		return fmt.Errorf("tier %q media_seats:\n  - %s", tier, strings.Join(problems, "\n  - "))
 	}
 	return nil
+}
+
+// The range an rkllm seat's repeat_penalty may take: the one rkllm_server.py accepts for a
+// request's repeat_penalty, and so for its --repeat-penalty flag.
+const (
+	minRepeatPenalty = 0.01
+	maxRepeatPenalty = 10.0
+)
+
+// checkTasks validates a seat's declared task set. Tasks is read only by the vision and text
+// bindings, so it is refused where nothing reads it, and a vision task is refused on
+// a seat that cannot read an image: each would otherwise be a declaration that silently does
+// nothing, or one that advertises a task the seat cannot serve.
+func checkTasks(s Seat, where string) []string {
+	if len(s.Tasks) == 0 {
+		return nil
+	}
+	var problems []string
+	seen := map[string]bool{}
+	hasVision, hasText := false, false
+	for _, t := range s.Tasks {
+		switch {
+		case !knownTasks[t]:
+			problems = append(problems, fmt.Sprintf("%s: unknown task %q (want %s, %s, %s, %s or %s)", where, t,
+				TaskVQA, TaskOCR, TaskAssessImage, TaskClassify, TaskExtract))
+		case seen[t]:
+			problems = append(problems, fmt.Sprintf("%s: task %q is listed twice", where, t))
+		}
+		seen[t] = true
+		for _, v := range visionTaskOrder {
+			if t == v {
+				hasVision = true
+			}
+		}
+		for _, v := range textTaskOrder {
+			if t == v {
+				hasText = true
+			}
+		}
+	}
+	switch {
+	case s.Kind == KindSTT || s.Kind == KindOCR:
+		problems = append(problems, where+": tasks are read only for a vision or rkllm seat and are ignored on a "+s.Kind+" seat")
+	case hasText && s.Kind != KindRKLLM:
+		problems = append(problems, where+": a text task (classify/extract) is served by the node's own cascade on an unconstrained seat, "+
+			"which only an rkllm seat is; this "+s.Kind+" seat constrains decoding and needs no declaration")
+	case hasVision && s.BindingKey() != "vision_model":
+		problems = append(problems, where+": a vision task (vqa/ocr/assess_image) needs a seat that reads images — "+
+			"an rkllm seat needs a vision_encoder; this seat binds no vision_model, so the declaration would advertise a task it cannot serve")
+	case s.BindingKey() == "vision_model" && !hasVision:
+		problems = append(problems, where+": this seat binds vision_model but its tasks name no vision task (vqa/ocr/assess_image) — "+
+			"the node would still serve all three, the opposite of the declaration")
+	}
+	return problems
 }
 
 // checkCPUMask validates an rkllm seat's cpu_mask: empty is the default, otherwise a

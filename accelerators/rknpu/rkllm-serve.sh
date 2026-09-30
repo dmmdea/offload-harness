@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Launcher llama-swap runs for each `rkllm` seat (an NPU LLM/VLM seat). The seat's cmd is
-#   rkllm-serve.sh --model <.rkllm> [--vision-encoder <.rknn>] --ctx-size N --cpu-mask 0x0f --served-name NAME \
-#                  --port ${PORT} --host 127.0.0.1
-# and every argument is passed straight through to rkllm_server.py.
+#   rkllm-serve.sh --model <.rkllm> [--vision-encoder <.rknn>] --ctx-size N --cpu-mask 0x0f [--repeat-penalty X] \
+#                  --served-name NAME --port ${PORT} --host 127.0.0.1
+# and every argument is passed straight through to rkllm_server.py, which exits 2 on one it does not know.
 #
 # llama-swap owns the process: this script EXECs python (no setsid, no log redirect, no wrapper left behind), so the
 # SIGTERM llama-swap sends when the seat's ttl runs out reaches the server, which aborts a running generation and

@@ -75,3 +75,53 @@ Ubuntu's mainline 7.0 kernel on the operator's order ("latest kernel, latest dri
   looks valid. `assess_image` and the grammar cascade tasks do not run on this node; free-text chat and vqa do.
 - The seats-only template rule is general. Any future template that leaves every model to its tier's
   seats inherits the audit exception and the empty-render refusal.
+
+## Amendment (0.153.0)
+
+Measured on the reference board on 2026-09-30, the NPU seat as first shipped failed the vision lane two ways, and
+the tier's node limits were the harness defaults, sized for a card that serves several requests at once.
+
+1. **The seat carries a repeat penalty, 1.1.** Greedy decoding at the seat's default `repeat_penalty` of 1.0 loops
+   on VQA and runs to the 256-token cap (the lane defers "vision output truncated"); at 1.1 a blind four-question
+   VQA check scored 3/4. `rkllm_server.py` gains `--repeat-penalty` (default 1.0, range 0.01 to 10, refused at
+   startup outside it) and applies it to a request that sends neither `repeat_penalty` nor `repetition_penalty`;
+   a value the request sends wins. The `rkllm` media seat declares it as `repeat_penalty` and renders the flag only
+   when set. It is the only sampling default an rkllm seat may declare; `temp`, `top_p` and `top_k` stay refused.
+2. **The vision lane is limited to the seat's declared tasks: `vqa` and `ocr`, never `assess_image`.** The runtime
+   cannot constrain sampling and `assess_image` always sends a grammar, so the seat would answer 400 after the
+   node had taken the job. A media seat declares `tasks`; `mediaseat.Bindings` derives the node key `vision_tasks`
+   from its vision subset, in the order `vqa`, `ocr`, `assess_image`, beside `vision_model`, and a `config_seed`
+   may not write it. The node refuses a task outside the list at ack time with a `400` that names the set, and
+   publishes the list in `/fleet/health` as `vision_tasks`. The delegator reads it (absent means all three, so a
+   node that predates the field is unchanged) and `PlaceVision` skips a node that does not list the task.
+   `classify` and `extract` are accepted in `tasks` now for the text door that follows; only the vision subset is
+   bound in this release.
+3. **The tier seeds limits for a one-generation NPU.** `fleet_max_concurrent_jobs` 1, because the NPU runs one
+   generation at a time and the default of 4 would queue three jobs behind it, where their wait counts against
+   the delegator's wall. `request_timeout_sec` 240, below the delegator's 300 s fleet vision budget
+   (`visionremote.Budget`), with the cold load measured at 13 s. `max_input_chars` 8000 (about 2,000 tokens, about
+   90 s of prefill on the A55 cluster at the measured 22.7 tokens per second) and `ocr_max_tokens` 512 (the
+   default 1024 is over two minutes of decode at 7.71 tokens per second). `fleet_max_queue_depth` is not set: its
+   default is twice the concurrency, which is 2 here (one running, one waiting), inside the NPU server's own
+   window of one running and two waiting before it answers 503 `busy`.
+
+**Upgrading an installed node.** The binary does not ship `rkllm_server.py`: it is the `accelerators/rknpu` copy under
+`RKNPU_HOME`, which `install.sh` never refreshes, and `rkllm-serve.sh` execs its arguments into it. A 0.153.0 render
+emits `--repeat-penalty 1.1`, which a 0.151.1 server refuses (`unrecognized arguments`, exit 2), so the seat would
+never start. Refresh `accelerators/rknpu` in `RKNPU_HOME` (at least `rkllm_server.py`) first, then re-render
+`llama-swap.yaml`. An existing `config.json` is not reseeded either: add `vision_tasks` (`["vqa","ocr"]`) and the four
+limits by hand, or delete the file to regenerate it; `local-offload audit-config` lists them as SEED-ONLY.
+
+Under `route: remote`, an `assess_image` for a fleet whose only vision node is this tier now defers at placement
+(defer class `capacity`), naming the node and its `vision_tasks`, instead of a dispatch that would fail; with
+another vision node on the roster it runs there.
+
+## Amendment (0.154.0)
+
+The statement above that the grammar cascade tasks do not run on this node is amended by
+[ADR 0069](0069-an-unconstrained-seat-runs-classify-and-extract-from-the-prompt-and-the-text-lane-ships-dark.md).
+The seat is now declared in the node config key `unconstrained_seats` (written from the `rkllm` media seat), and for
+a declared seat the pipeline sends no grammar: classify and extract run from a prompt that states the JSON shape and
+are accepted only after strict schema validation. `assess_image` still does not run here. The fleet `text` lane that
+would expose classify and extract to a delegator ships dark: this tier declares no text task until measured data
+passes.

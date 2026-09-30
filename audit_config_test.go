@@ -219,3 +219,71 @@ func TestAuditConfigSkipsAnUndeclaredAccelerator(t *testing.T) {
 		t.Fatalf("an undeclared device must be skipped, not fail the audit itself: %v\n%s", err, out)
 	}
 }
+
+// vision_tasks is written by the tier's media seat (like vision_model), so it is a seed-owned key
+// the audit compares: the seed carries a []string, the live config decodes a []any, and the
+// comparison must read them by value, not by Go type.
+func TestClassifyConfigDriftReadsVisionTasksByValue(t *testing.T) {
+	owned := map[string]bool{"vision_tasks": true}
+	seed := map[string]any{"vision_tasks": []string{"vqa", "ocr"}}
+	for _, tc := range []struct {
+		name string
+		live map[string]any
+		want configDriftClass
+	}{
+		{"same list", map[string]any{"vision_tasks": []any{"vqa", "ocr"}}, driftMatch},
+		{"hand-widened to all three", map[string]any{"vision_tasks": []any{"vqa", "ocr", "assess_image"}}, driftDifferent},
+		{"never seeded on the node", map[string]any{}, driftSeedOnly},
+	} {
+		got := classifyConfigDrift(seed, tc.live, owned, isBindingKey)
+		if len(got) != 1 || got[0].Key != "vision_tasks" || got[0].Class != tc.want {
+			t.Errorf("%s: got %+v, want one %s finding for vision_tasks", tc.name, got, tc.want)
+		}
+	}
+	// A node whose tier carries no seed for it keeps a hand-set list as LIVE-ONLY, never a silent pass.
+	got := classifyConfigDrift(map[string]any{}, map[string]any{"vision_tasks": []any{"vqa"}}, owned, isBindingKey)
+	if len(got) != 1 || got[0].Class != driftLiveOnly {
+		t.Errorf("a hand-set vision_tasks the seed does not carry: got %+v, want LIVE-ONLY", got)
+	}
+}
+
+// And the real tier: the rk3588 seed, resolved the way audit-config resolves it, carries the
+// seat-written vision_tasks, so a node that lost it reads SEED-ONLY.
+func TestAuditConfigSeedOwnsTheRK3588VisionTasks(t *testing.T) {
+	doc, err := tierseed.ParseDoc(embeddedProfiles)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !seedOwnedKeys(doc, "/opt/offload")["vision_tasks"] {
+		t.Fatal("vision_tasks is not a seed-owned key: the audit would not compare it")
+	}
+}
+
+// unconstrained_seats is written by the tier's rkllm seat, so it is a seed-owned key the audit
+// compares: a node that lost it reads SEED-ONLY (its pipeline would send the NPU a grammar again),
+// and a hand-widened list reads DIFFERENT. The seed carries a []string, the live config a []any.
+func TestAuditConfigSeedOwnsTheRK3588UnconstrainedSeats(t *testing.T) {
+	doc, err := tierseed.ParseDoc(embeddedProfiles)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !seedOwnedKeys(doc, "/opt/offload")["unconstrained_seats"] {
+		t.Fatal("unconstrained_seats is not a seed-owned key: the audit would not compare it")
+	}
+	owned := map[string]bool{"unconstrained_seats": true}
+	seed := map[string]any{"unconstrained_seats": []string{"npu"}}
+	for _, tc := range []struct {
+		name string
+		live map[string]any
+		want configDriftClass
+	}{
+		{"same list", map[string]any{"unconstrained_seats": []any{"npu"}}, driftMatch},
+		{"hand-widened", map[string]any{"unconstrained_seats": []any{"npu", "other"}}, driftDifferent},
+		{"never seeded on the node", map[string]any{}, driftSeedOnly},
+	} {
+		got := classifyConfigDrift(seed, tc.live, owned, isBindingKey)
+		if len(got) != 1 || got[0].Key != "unconstrained_seats" || got[0].Class != tc.want {
+			t.Errorf("%s: got %+v, want one %s finding", tc.name, got, tc.want)
+		}
+	}
+}

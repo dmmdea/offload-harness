@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/dmmdea/offload-harness/internal/config"
@@ -375,7 +376,8 @@ func renderTier(name string, p Profile, reports []string) string {
 
 // rkllmSeatNote describes the seats a table row cannot: an rkllm seat is not a llama.cpp
 // model, so the columns above say nothing about how it runs. One line per seat carries
-// the two settings the runtime is started with, and its vision encoder when it has one.
+// the two settings the runtime is started with, its vision encoder when it has one, and
+// the repeat-penalty default and the declared task set when the tier names them.
 // "" when the tier declares none, so every other tier's page is unchanged.
 func rkllmSeatNote(seats []mediaseat.Seat) string {
 	var lines []string
@@ -387,6 +389,12 @@ func rkllmSeatNote(seats []mediaseat.Seat) string {
 		if s.VisionEncoder != "" {
 			line += fmt.Sprintf(", vision encoder `%s`", s.VisionEncoder)
 		}
+		if s.RepeatPenalty != nil {
+			line += fmt.Sprintf(", repeat penalty `%s` for a request that sends none", strconv.FormatFloat(*s.RepeatPenalty, 'g', -1, 64))
+		}
+		if len(s.Tasks) > 0 {
+			line += ", serves `" + strings.Join(s.Tasks, "`, `") + "` only"
+		}
 		lines = append(lines, line)
 	}
 	if len(lines) == 0 {
@@ -394,7 +402,14 @@ func rkllmSeatNote(seats []mediaseat.Seat) string {
 	}
 	return "\nAn `rkllm` seat runs on the NPU through the Rockchip RKLLM runtime, not in llama.cpp. It is\n" +
 		"started with its own window and a `cpu_mask` — the CPUs the runtime's host threads may use\n" +
-		"(at least 3, the runtime refuses fewer than the SoC has NPU cores):\n\n" +
+		"(at least 3, the runtime refuses fewer than the SoC has NPU cores). A seat that declares\n" +
+		"`tasks` serves only those: the runtime cannot constrain sampling, so a task that always\n" +
+		"sends a grammar (`assess_image`) is left off. The node refuses the others at ack time and\n" +
+		"publishes the set it serves, so a delegator places them elsewhere. The same runtime cannot\n" +
+		"constrain decoding for the node's own pipeline either, so every `rkllm` seat is written into\n" +
+		"`unconstrained_seats`: classify and extract run there from a prompt that states the JSON shape,\n" +
+		"checked strictly, instead of a grammar. A seat that lists them in `tasks` opens the fleet text\n" +
+		"lane (`text_tasks`); no tier does until measured data passes:\n\n" +
 		strings.Join(lines, "\n") + "\n"
 }
 

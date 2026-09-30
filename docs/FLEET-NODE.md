@@ -409,7 +409,8 @@ is not advertised, so the dispatcher can't send work the box would defer:
 | `audio-gen` | `generate_audio` | voice or music script set | `acestep` (music) / `chatterbox` (voice) |
 | `run-graph` | `run_graph` | `run_graph_script` set | payload-declared `model_family`, else `comfy-graph` |
 | `agent` | `agent` | `fleet_agent_enabled` **and** a resolvable agent seat **and** (loopback listener **or** `fleet_auth_token` set) | none — llama-swap-resident text work, no render footprint |
-| `vision` (own route `POST /fleet/vision`) | `vqa` / `ocr` / `assess_image` | `vision_model` set **and** (loopback listener **or** `fleet_auth_token` set) — see [The vision task](#the-vision-task-post-fleetvision) | none — llama-swap-resident VLM, no render footprint |
+| `vision` (own route `POST /fleet/vision`) | `vqa` / `ocr` / `assess_image` (narrowed by the node's `vision_tasks`) | `vision_model` set **and** (loopback listener **or** `fleet_auth_token` set) — see [The vision task](#the-vision-task-post-fleetvision) | none — llama-swap-resident VLM, no render footprint |
+| `text` (own route `POST /fleet/text`, 0.154.0, dark) | `classify` / `extract` (never summarize or triage), as the node's `text_tasks` names them | `text_tasks` non-empty **and** (loopback listener **or** `fleet_auth_token` set) — see [The text task](#the-text-task-post-fleettext) | none — the node's own cascade seat, no render footprint |
 | *(config-driven)* | `pipeline-job` | a valid `pipelines.<task_type>` entry (see below) | none — sizing rides on the task-scoped `Record("", "", task_type, peak)` entry |
 
 run-graph payloads carry `graph` and `manifest` as **raw nested JSON** (no base64) and are
@@ -1039,6 +1040,9 @@ concurrency-CAPPED (it contends for the shared llama-swap endpoint, exactly like
 data URI — the bytes travel with the job; a path on the caller's disk is refused `400`. An image
 whose decoded size exceeds the node's cap is refused `400` at ack time naming
 `vision_max_image_bytes`; the pipeline's loader re-checks the exact bytes. Unknown fields → `400`.
+A node whose config sets `vision_tasks` (0.153.0) serves only the tasks it lists: any other `task` is
+refused `400` at ack time with the set named — `vision: task "assess_image" is not served by this node's
+vision seat (vision_tasks: vqa, ocr)` — and never reaches the pipeline. Empty or absent = all three.
 
 ### Result
 
@@ -1057,16 +1061,68 @@ reachability) is the ONE predicate behind both the advertisement — `"vision"` 
 the `AgentLaneAdmissible` discipline. Vision jobs are token-gated on poll (`JobView.Gated`) but
 are never listed as agent runs in `/fleet/jobs`.
 
+A node that narrows the lane also publishes the additive, omitempty health field `vision_tasks` (the
+config key of the same name), under the same lane-gated rule as `vision_model`; a node that serves all
+three publishes nothing, byte-identical to a node from before 0.153.0. The key is written by the tier's
+media seat (`mediaseat.Seat.Tasks`), never by `config_seed`: a seat whose runtime cannot do a task
+declares the ones it can. The RK3588 NPU seat declares `vqa` and `ocr` because the RKLLM runtime cannot
+constrain sampling and `assess_image` always sends a grammar
+([ADR 0062](architecture/decisions/0062-rk3588-soc-tier-serves-from-the-npu-on-a-unified-memory-budget.md)).
+
 ### Placement (delegator side)
 
 `route: local` (default) is byte-identical to before the route existed. `auto`: an idle local
 card always runs the work; only while the machine-wide GPU lease is held (`delegate.LocalBusy`)
-is a node considered, ranked by `delegate.PlaceVision` — eligible = advertises the lane and its
+is a node considered, ranked by `delegate.PlaceVision` — eligible = advertises the lane, serves THIS
+task (`NodeView.ServesVisionTask`: no `vision_tasks` in health = all three, so an older node stays
+eligible for every task; a published list serves only what it names) and its
 card is not leased (`lease.class: text` or `lease.busy`), ordered by the agent lane's
 `betterRemote` (not saturated → provably free slot → queue depth → GPU utilization → roster
 order) — and with no eligible node the work still runs local. `remote`: force a node; none
 eligible ⇒ `deferred: true, defer_class: capacity` (or `config` with no `delegate_remotes`),
 never a local run. `meta.node` / `meta.placement` on the result say where it ran.
+
+## The text task (`POST /fleet/text`)
+
+Since 0.154.0 a node can run ONE `classify` or `extract` call on its OWN pipeline for a caller that asked for a remote
+outright (or whose card is leased). The lane is **dark**: a node advertises it only when its tier's media seat declares
+text tasks, and no shipped tier does yet. The runtime behind an RK3588 NPU seat cannot constrain decoding, so the node's
+pipeline runs these two tasks on that seat from a prompt that states the JSON shape and accepts a reply only after strict
+schema validation (config `unconstrained_seats`); summarize and triage are never admitted on the lane.
+Decision and measurements: [ADR 0069](architecture/decisions/0069-an-unconstrained-seat-runs-classify-and-extract-from-the-prompt-and-the-text-lane-ships-dark.md).
+
+```
+POST /fleet/text   Content-Type: application/json   (the agent lane's bearer rule, see below)
+{"job_id": "text-…", "task": "classify", "input": "…", "params": {"labels": ["billing", "support"]}}
+{"job_id": "text-…", "task": "extract",  "input": "…", "params": {"schema": {"type": "object", "properties": {…}}}}
+```
+
+`params` carries only what the task takes (classify: `labels`, at least two; extract: `schema`); anything else, an empty
+`input`, and unknown fields are `400`s naming the field. The body cap is dispatch's 1 MiB; this node's `max_input_chars`
+trims the text before it reaches the model, as for a local call. The poll is `GET /fleet/jobs/{id}` and the job's `data`
+is the node's full `core.Result`, defers included (a schema failure after the retry is a `done` job saying
+`deferred: true` with the validator's reason).
+
+The node's config key `text_tasks` (the text subset of the seat's `tasks`, canonical order `classify`, `extract`, written
+by `mediaseat.Bindings`, never by `config_seed`) is the set it serves: a task outside it is refused `400` at ack time
+(`text: task "extract" is not served by this node's text lane (text_tasks: classify)`), summarize and triage always
+(`text: task "summarize" is never served on the text lane …`). `TextLaneAdmissible` (a non-empty `text_tasks` and the
+agent lane's reachability rule) is the one predicate behind the advertisement — `"text"` in `supported_task_types` and the
+additive, omitempty health field `text_tasks` — and the ack-time admission. Text jobs are token-gated on poll
+(`JobView.Gated`), never listed as agent runs, and capped by `fleet_max_concurrent_jobs`: they contend for the node's
+text endpoint.
+
+The delegator side is `internal/textremote`, the `route` parameter on `offload_classify` / `offload_extract`:
+`local` (default) is byte-identical to before the route existed; `auto` leaves the box only while the machine-wide GPU
+lease is held and otherwise, or with no eligible node, stays local; `remote` forces a node and, with none eligible,
+returns `deferred: true` with `defer_class: capacity` (or `config` with no `delegate_remotes`). Eligibility
+(`delegate.PlaceText`) is stricter than vision's: the node's health must list `text` AND the task in `text_tasks`, so an
+older node and a node whose tier declares nothing are never picked, and its card must not be leased. `meta.node` /
+`meta.placement` on the result say where it ran. Budget 300 s, vision's. The delegator post-checks a node's OK result
+(classify: a label in the request's set and a confidence in 0..1; extract: one object whose keys are all in the requested
+schema) and turns a failure into a deferred result naming the node and the reason. A node declares a text task
+meaningfully only when its cascade for that task (`model`, `triage_model`, per-task rungs) routes to the unconstrained
+seat; measure through that same path.
 
 ## Known limits (v1)
 

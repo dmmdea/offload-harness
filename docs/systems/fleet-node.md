@@ -309,9 +309,27 @@ implications.
    gate on dispatch and on poll, and stores the node's FULL `core.Result` as the done job's data
    (a defer is a `done` job saying `deferred: true`). Its body cap is `VisionBodyCap`
    (`vision_max_image_bytes` × 4/3 + slack), not dispatch's 1 MiB; everything after the body read
-   is the shared `admit` path. Details: [FLEET-NODE.md](../FLEET-NODE.md#the-vision-task-post-fleetvision),
-   [ADR 0040](../architecture/decisions/0040-vision-work-travels-to-a-node-with-an-idle-card.md).
-10. The cascade chat lane (`POST /fleet/chat`, register C-41b) is advertised — `chat_lane` in
+   is the shared `admit` path. A seat whose runtime cannot do one of the three tasks narrows the lane
+   with the config key `vision_tasks` (0.153.0, written by the tier's media seat: the RK3588 NPU seat
+   serves `vqa` and `ocr`, never `assess_image`): the node refuses any other task at ack time with a
+   `400` naming the allowed set, publishes the list in health as `vision_tasks` (additive, omitempty,
+   lane-gated like `vision_model`), and a delegator skips the node for a task it does not list —
+   absent means all three, so a node that predates the field is unchanged. Details:
+   [FLEET-NODE.md](../FLEET-NODE.md#the-vision-task-post-fleetvision),
+   [ADR 0040](../architecture/decisions/0040-vision-work-travels-to-a-node-with-an-idle-card.md),
+   [ADR 0062](../architecture/decisions/0062-rk3588-soc-tier-serves-from-the-npu-on-a-unified-memory-budget.md).
+10. The text lane (`POST /fleet/text`, 0.154.0) runs ONE classify or extract on this node's own pipeline and
+    ships DARK. `text` is in `supported_task_types` and `text_tasks` in health exactly when
+    `TextLaneAdmissible` holds: the tier's media seat declared at least one text task (config `text_tasks`,
+    written by the seat, never by `config_seed`; no shipped tier declares any) and the listener is safely
+    reachable (the vision lane's rule). It rides the same bearer gate on dispatch and poll, takes dispatch's
+    1 MiB body, goes through the shared `admit` path, stores the node's FULL `core.Result` (a defer is a
+    `done` job saying `deferred: true`) and is concurrency-capped. The node refuses a task outside
+    `text_tasks` at ack time with a `400` naming the set, and always refuses summarize and triage. A delegator
+    places it only on a node whose health lists `text` and the task (`delegate.PlaceText`); a node that
+    predates the lane is never picked. Details:
+    [FLEET-NODE.md](../FLEET-NODE.md#the-text-task-post-fleettext), [ADR 0069](../architecture/decisions/0069-an-unconstrained-seat-runs-classify-and-extract-from-the-prompt-and-the-text-lane-ships-dark.md).
+11. The cascade chat lane (`POST /fleet/chat`, register C-41b) is advertised — `chat_lane` in
     health, alongside `served_models` — exactly when `ChatLaneAdmissible` holds (a bound
     `endpoint` and the agent lane's reachability rule), and rides the agent lane's bearer gate.
     It is the ONE surface here that is **not a job**: it forwards a single OpenAI chat completion
@@ -1155,7 +1173,8 @@ above) re-packed it, in which case it is a success and is not counted.
 ### Auth (v1 scope: the agent lane — joined by the vision lane in 0.116.0)
 
 `fleet_auth_token`, when set, bearer-gates exactly two lanes: agent dispatches (and the vision
-lane's `POST /fleet/vision`, which rides the same rule through `tokenGated`), and
+and text lanes' `POST /fleet/vision` and `POST /fleet/text`, which ride the same rule through
+`tokenGated`), and
 `/fleet/jobs/{id}` polls of jobs those dispatches created (the job record carries an agent
 marker — or, for a vision job, the `Gated` marker — written atomically at creation and evicted
 with the record). The comparison hashes both

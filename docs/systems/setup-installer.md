@@ -237,7 +237,7 @@ plus KV) beside an embedder and a reranker, and none of that fits a board whose 
 about 4.7 GiB of inference budget with the host's own workload (`uma_reserve_gib` holds the rest
 back). The template lists only what fits — one llama.cpp Vulkan chat entry, `GGML_VK_VISIBLE_DEVICES=0`,
 every layer offloaded — and places the tier's `rkllm` NPU seats (a model served by the Rockchip RKLLM
-runtime, with its own window and CPU mask) as alternatives to it. No model runs on the CPU there: the
+runtime, with its own window, CPU mask and optional repeat-penalty default) as alternatives to it. No model runs on the CPU there: the
 tier declares no `alt_backends`, so `--llama-bin-cpu` is refused. `--llama-bin` still names a
 llama.cpp build with the Vulkan backend, as for `vulkan`; the installer script needs nothing else.
 

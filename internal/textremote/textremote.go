@@ -1,29 +1,25 @@
-// Package visionremote is the CALLER side of the fleet vision lane (0.116.0):
-// it decides where ONE single-image vision task (vqa / ocr / assess_image)
-// runs — this box's own vision seat, or a fleet node's — and drives the wire
-// when the answer is a node. The node side is fleetnode's POST /fleet/vision.
+// Package textremote is the CALLER side of the fleet text lane (0.154.0): it decides where ONE
+// classify or extract call runs (this box's own cascade, or a fleet node's own pipeline) and
+// drives the wire when the answer is a node. The node side is fleetnode's POST /fleet/text. It is
+// visionremote's shape, for a text payload.
 //
-// The route vocabulary mirrors agent_delegate's, with the same quality-first
-// rule Place applies to contracts:
+// The route vocabulary is visionremote's, and so is the quality-first rule:
 //
-//   - local (the default, and "" ): run in-process, exactly as before the route
-//     existed — every caller that never passes a route is byte-identical.
-//   - auto: an idle local card ALWAYS runs the work; only when the machine-wide
-//     GPU lease is held (delegate.LocalBusy — a render in flight or a text
-//     reservation) is a fleet node considered, and when no node is eligible
-//     the work still runs local. Queued-local beats ineligible-remote.
-//   - remote: force a fleet node; with none eligible the call DEFERS
-//     (defer_class capacity — or config when no remotes are configured at
-//     all), never a silent local run: "remote" is the caller saying its own
-//     card must stay untouched.
+//   - local (the default, and ""): run in-process, exactly as before the route existed; every
+//     caller that never passes a route is byte-identical.
+//   - auto: an idle local card ALWAYS runs the work; only when the machine-wide GPU lease is held
+//     (delegate.LocalBusy) is a fleet node considered, and when no node is eligible the work still
+//     runs local. Queued-local beats ineligible-remote.
+//   - remote: force a fleet node; with none eligible the call DEFERS (defer_class capacity, or
+//     config when no remotes are configured at all), never a silent local run.
 //
-// The image is read HERE, on the box that has it, through the same loader and
-// the same vision_max_image_bytes cap the local path applies
-// (imageio.LoadImageB64), and travels as a data URI inside the job; the node
-// never sees a path that is not its own. The node's answer is the full
-// core.Result it would have returned to a local caller, stamped with the node
-// id and the placement reason (Meta.Node / Meta.Placement).
-package visionremote
+// A node is eligible only when its health lists "text" AND the task in text_tasks. The lane ships
+// dark (no shipped tier declares a text task until measured data passes), so on a fleet where no
+// node advertises it, remote defers and auto stays local. A node that predates the lane is never
+// picked. The node's answer is the full core.Result its own pipeline produced (an unconstrained
+// seat validated strictly, defers included), stamped with the node id and the placement reason
+// (Meta.Node / Meta.Placement). summarize and triage are not routable: the node refuses them.
+package textremote
 
 import (
 	"bytes"
@@ -41,7 +37,6 @@ import (
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/delegate"
-	"github.com/dmmdea/offload-harness/internal/imageio"
 	"github.com/dmmdea/offload-harness/internal/netguard"
 )
 
@@ -52,17 +47,20 @@ const (
 	RouteRemote = "remote"
 )
 
-// Budget bounds one remote call end to end: a cold seat swap on the node
-// (llama.cpp vision seats load in 10-30 s; the node's own vision_gpu_wait_sec
-// is 90 s by default when a render holds its card) plus a slow card's image
-// prefill and decode, with room for a queued dispatch.
+// Budget bounds one remote call end to end: a cold seat load on the node plus a slow runtime's
+// prefill and decode (an NPU node decodes at single-digit tokens per second), with room for a
+// queued dispatch. It is the vision lane's figure, and sits above the node's own
+// request_timeout_sec.
 const Budget = 300 * time.Second
 
 const (
 	healthTimeout   = 5 * time.Second
-	dispatchTimeout = 20 * time.Second // the body is an image, several MB
+	dispatchTimeout = 20 * time.Second
 	pollEvery       = 500 * time.Millisecond
 	maxBody         = 4 << 20
+	// maxPayload is the node's POST /fleet/text body cap (fleetnode.TextBodyCap, dispatch's 1 MiB);
+	// a larger call is refused here, naming the limit, rather than as a 400 after placement.
+	maxPayload = 1 << 20
 	// maxPollFailures bounds consecutive failed polls before the call gives
 	// up on the node: five refusals (a few seconds) or five 20 s timeouts.
 	maxPollFailures = 5
@@ -100,7 +98,7 @@ func NormalizeRoute(route string) (string, bool) {
 	return "", false
 }
 
-// Run is THE entry point the MCP handlers and the CLI verbs share: it applies
+// Run is THE entry point the MCP handlers share: it applies
 // the route rule above to req and returns the result exactly as the pipeline
 // would, plus Meta.Node / Meta.Placement when the route made a decision. A
 // local run under the default route carries neither — byte-identical to
@@ -166,31 +164,28 @@ type placementError struct {
 
 func (e *placementError) Error() string { return e.msg }
 
-// Call runs req on the best eligible fleet node. The image is loaded here
-// (a bad or oversize image is a DEFERRED result, not an error — the same
-// shape the local loader produces); a placement or wire failure is an error
-// the caller maps to a defer class; the node's own result — including its
-// defers — comes back as the core.Result it produced.
+// Call runs req on the best eligible fleet node. A placement or wire failure is an error the caller
+// maps to a defer class; the node's own result, including its defers, comes back as the core.Result
+// it produced.
 func Call(ctx context.Context, cfg config.Config, req core.Request) (core.Result, error) {
 	start := time.Now()
 	if len(cfg.DelegateRemotes) == 0 {
-		return core.Result{}, &placementError{core.DeferClassConfig, "no delegate_remotes configured — nothing to place the vision task on"}
+		return core.Result{}, &placementError{core.DeferClassConfig, "no delegate_remotes configured — nothing to place the text task on"}
 	}
 	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, Budget)
 		defer cancel()
 	}
-	dataURI, err := imageio.LoadImageB64(req.Image, cfg.VisionMaxImageBytes)
+	jobID, body, err := encode(req)
 	if err != nil {
-		return core.Deferf("image load: "+err.Error(), "", core.Meta{}), nil
+		return core.Result{}, err
 	}
 	base, node, err := pickNode(ctx, cfg, string(req.Task))
 	if err != nil {
 		return core.Result{}, err
 	}
-	jobID, err := dispatch(ctx, cfg, base, req, dataURI)
-	if err != nil {
+	if err := dispatch(ctx, cfg, base, body); err != nil {
 		return core.Result{}, err
 	}
 	res, err := wait(ctx, cfg, base, jobID)
@@ -201,13 +196,86 @@ func Call(ctx context.Context, cfg config.Config, req core.Request) (core.Result
 	if res.Meta.LatencyMs == 0 {
 		res.Meta.LatencyMs = time.Since(start).Milliseconds()
 	}
+	if bad := checkNodeResult(req, res); bad != "" {
+		// The node's own pipeline validated this answer, but the delegator does not take a remote
+		// answer on trust: one that fails the cheap shape check below is a defer naming the node
+		// and the reason, never an accepted result.
+		d := core.Deferf(fmt.Sprintf("node %s returned an answer that fails the delegator's check: %s", node, bad),
+			string(res.Data), res.Meta)
+		d.DeferClass = core.DeferClassInfrastructure
+		return d, nil
+	}
 	return res, nil
 }
 
-// pickNode probes delegate_remotes and hands the views to
-// delegate.PlaceVision. Every miss is named in the error so "no node" is never
-// a mystery: an unreachable node, a node without the lane, a node whose seat does
-// not serve this task, a leased card.
+// checkNodeResult is the delegator's cheap post-check of an OK result from a node, and "" when it
+// holds. Classify: a JSON object whose label is one of the request's labels and whose confidence is
+// a number in 0..1. Extract: one JSON object whose keys all lie within the requested schema's
+// properties (a schema naming no properties constrains no key). A deferred or not-OK result is the
+// node's own refusal and passes through.
+func checkNodeResult(req core.Request, res core.Result) string {
+	if !res.OK || res.Deferred {
+		return ""
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(res.Data, &obj); err != nil || obj == nil {
+		return "data is not one JSON object"
+	}
+	switch req.Task {
+	case core.TaskClassify:
+		var label string
+		if raw, ok := obj["label"]; !ok || json.Unmarshal(raw, &label) != nil {
+			return "no string label"
+		}
+		if !stringIn(label, req.Params["labels"]) {
+			return fmt.Sprintf("label %q is not in the requested set", label)
+		}
+		var conf float64
+		if raw, ok := obj["confidence"]; !ok || json.Unmarshal(raw, &conf) != nil {
+			return "no numeric confidence"
+		}
+		if !(conf >= 0 && conf <= 1) {
+			return fmt.Sprintf("confidence %v is outside 0..1", conf)
+		}
+	case core.TaskExtract:
+		schema, _ := req.Params["schema"].(map[string]any)
+		props, _ := schema["properties"].(map[string]any)
+		if len(props) == 0 {
+			return ""
+		}
+		for k := range obj {
+			if _, ok := props[k]; !ok {
+				return fmt.Sprintf("key %q is not in the requested schema", k)
+			}
+		}
+	}
+	return ""
+}
+
+// stringIn reports whether s is one of the labels, which arrive as []string from a local caller
+// and []any from a decoded one.
+func stringIn(s string, labels any) bool {
+	switch l := labels.(type) {
+	case []string:
+		for _, v := range l {
+			if v == s {
+				return true
+			}
+		}
+	case []any:
+		for _, v := range l {
+			if vs, ok := v.(string); ok && vs == s {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// pickNode probes delegate_remotes and hands the views to delegate.PlaceText. Every miss is named
+// in the error so "no node" is never a mystery: an unreachable node, a node without the lane (every
+// node that predates it, and every node whose tier declares no text task), a node whose lane does not
+// serve this task, a leased card.
 func pickNode(ctx context.Context, cfg config.Config, task string) (base, node string, err error) {
 	var (
 		bases  []string
@@ -227,11 +295,11 @@ func pickNode(ctx context.Context, cfg config.Config, task string) (base, node s
 			continue
 		}
 		switch {
-		case !v.ServesVision():
-			misses = append(misses, fmt.Sprintf("%s (%s): no vision lane (tasks %v)", b, v.NodeID, v.Tasks))
+		case !v.ServesText():
+			misses = append(misses, fmt.Sprintf("%s (%s): no text lane (tasks %v)", b, v.NodeID, v.Tasks))
 			continue
-		case !v.ServesVisionTask(task):
-			misses = append(misses, fmt.Sprintf("%s (%s): its vision seat does not serve %s (vision_tasks %v)", b, v.NodeID, task, v.VisionTasks))
+		case !v.ServesTextTask(task):
+			misses = append(misses, fmt.Sprintf("%s (%s): its text lane does not serve %s (text_tasks %v)", b, v.NodeID, task, v.TextTasks))
 			continue
 		case v.LeasedText || v.LeaseBusy:
 			misses = append(misses, fmt.Sprintf("%s (%s): card leased", b, v.NodeID))
@@ -240,10 +308,10 @@ func pickNode(ctx context.Context, cfg config.Config, task string) (base, node s
 		bases = append(bases, b)
 		views = append(views, v)
 	}
-	i, ok := delegate.PlaceVision(views, task)
+	i, ok := delegate.PlaceText(views, task)
 	if !ok {
 		return "", "", &placementError{core.DeferClassCapacity,
-			"no fleet node is eligible for the vision lane — probed " + strings.Join(misses, "; ")}
+			"no fleet node is eligible for the text lane — probed " + strings.Join(misses, "; ")}
 	}
 	node = views[i].NodeID
 	if node == "" {
@@ -252,57 +320,70 @@ func pickNode(ctx context.Context, cfg config.Config, task string) (base, node s
 	return bases[i], node, nil
 }
 
-// payload is the POST /fleet/vision body (fleetnode.VisionPayload's shape).
+// payload is the POST /fleet/text body (fleetnode.TextPayload's shape).
 type payload struct {
-	JobID    string `json:"job_id"`
-	Task     string `json:"task"`
-	Image    string `json:"image"`
-	Question string `json:"question,omitempty"`
-	Brief    string `json:"brief,omitempty"`
+	JobID  string         `json:"job_id"`
+	Task   string         `json:"task"`
+	Input  string         `json:"input"`
+	Params map[string]any `json:"params,omitempty"`
 }
 
-func dispatch(ctx context.Context, cfg config.Config, base string, req core.Request, dataURI string) (string, error) {
+// encode mints the job id and renders the request as the node's payload, mirroring the params the
+// MCP handlers build (classify: labels; extract: schema). A request the lane cannot carry (another
+// task, or a body over the node's cap) is a contract defer, never a wire attempt.
+func encode(req core.Request) (jobID string, body []byte, err error) {
 	var rnd [8]byte
 	if _, err := rand.Read(rnd[:]); err != nil {
-		return "", &placementError{core.DeferClassInfrastructure, "job id: " + err.Error()}
+		return "", nil, &placementError{core.DeferClassInfrastructure, "job id: " + err.Error()}
 	}
-	p := payload{JobID: "vision-" + hex.EncodeToString(rnd[:]), Task: string(req.Task), Image: dataURI}
-	if q, ok := req.Params["question"].(string); ok {
-		p.Question = q
+	p := payload{JobID: "text-" + hex.EncodeToString(rnd[:]), Task: string(req.Task), Input: req.Input}
+	switch req.Task {
+	case core.TaskClassify:
+		p.Params = map[string]any{"labels": req.Params["labels"]}
+	case core.TaskExtract:
+		p.Params = map[string]any{"schema": req.Params["schema"]}
+	default:
+		return "", nil, &placementError{core.DeferClassContract, fmt.Sprintf("the text lane serves classify and extract, not %s", req.Task)}
 	}
-	if b, ok := req.Params["brief"].(string); ok {
-		p.Brief = b
-	}
-	body, err := json.Marshal(p)
+	body, err = json.Marshal(p)
 	if err != nil {
-		return "", &placementError{core.DeferClassInfrastructure, "encoding vision job: " + err.Error()}
+		return "", nil, &placementError{core.DeferClassInfrastructure, "encoding text job: " + err.Error()}
 	}
+	if len(body) > maxPayload {
+		return "", nil, &placementError{core.DeferClassContract, fmt.Sprintf("the text job is %d bytes, over the node's %d-byte body cap", len(body), maxPayload)}
+	}
+	return p.JobID, body, nil
+}
+
+func dispatch(ctx context.Context, cfg config.Config, base string, body []byte) error {
 	dctx, cancel := context.WithTimeout(ctx, dispatchTimeout)
 	defer cancel()
-	hreq, err := http.NewRequestWithContext(dctx, http.MethodPost, base+"/fleet/vision", bytes.NewReader(body))
+	hreq, err := http.NewRequestWithContext(dctx, http.MethodPost, base+"/fleet/text", bytes.NewReader(body))
 	if err != nil {
-		return "", &placementError{core.DeferClassInfrastructure, err.Error()}
+		return &placementError{core.DeferClassInfrastructure, err.Error()}
 	}
 	hreq.Header.Set("Content-Type", "application/json")
 	auth(cfg, hreq)
 	resp, err := HTTPClient.Do(hreq)
 	if err != nil {
-		return "", &placementError{core.DeferClassInfrastructure, fmt.Sprintf("dispatch %s: %v", base, err)}
+		return &placementError{core.DeferClassInfrastructure, fmt.Sprintf("dispatch %s: %v", base, err)}
 	}
 	rb, _ := io.ReadAll(io.LimitReader(resp.Body, maxBody))
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusAccepted {
-		// A refusal is the node's own verdict (queue full, leased, draining,
-		// 401): capacity when it is re-placeable, infrastructure otherwise —
-		// the delegator's replaceableRefusal split, without the re-placement
-		// (one image, one node; the caller retries or runs local).
+		// A refusal is the node's own verdict: capacity when it is re-placeable (queue full,
+		// draining), config when the node says this task or payload is not one it serves (its
+		// health and its ack disagreed), infrastructure otherwise (401, 403, 5xx).
 		class := core.DeferClassInfrastructure
-		if resp.StatusCode == http.StatusServiceUnavailable || resp.StatusCode == http.StatusTooManyRequests {
+		switch resp.StatusCode {
+		case http.StatusServiceUnavailable, http.StatusTooManyRequests:
 			class = core.DeferClassCapacity
+		case http.StatusBadRequest:
+			class = core.DeferClassConfig
 		}
-		return "", &placementError{class, fmt.Sprintf("dispatch %s: status %d: %s", base, resp.StatusCode, truncate(rb))}
+		return &placementError{class, fmt.Sprintf("dispatch %s: status %d: %s", base, resp.StatusCode, truncate(rb))}
 	}
-	return p.JobID, nil
+	return nil
 }
 
 type jobWire struct {
@@ -312,7 +393,7 @@ type jobWire struct {
 }
 
 // wait polls the job until it is done or errored. A done job's data is the
-// node's full core.Result (fleetnode.visionJobData) — defers ride inside it.
+// node's full core.Result (fleetnode.textJobData) — defers ride inside it.
 // An error state is the node's answer too (the build refused it, or the run
 // died): it comes back as a deferred result, never a transport error.
 //

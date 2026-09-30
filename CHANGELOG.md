@@ -6,6 +6,121 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.154.0] - 2026-09-30 - a seat that cannot constrain decoding runs classify and extract from the prompt, and a fleet text lane ships dark
+
+### Added — unconstrained seats, the `text` fleet lane and `route` on `offload_classify` / `offload_extract` (ADR 0069, amends ADR 0062)
+
+The RKLLM runtime on an RK3588 NPU cannot constrain decoding: it answers HTTP 400 `constrained_decoding_unsupported` to any `grammar`, `json_schema` or `response_format`, and ignores logprobs. Every structured cascade lane always sends a constraint, so on that seat every classify, extract, summarize and triage call deferred (`model call failed: ... 400 ...`, err_class `other`) before the model produced a token (measured 2026-09-30). The node also had no fleet door for text work. A blind check on the 2B seat with a prompt and no grammar scored classify 4/4, extract 4/4, summarize 0/4, triage 0/4.
+
+- **`unconstrained_seats` node config key** (`config.Config.UnconstrainedSeats`, `DeclaresUnconstrainedSeat`, case-insensitive): written by `mediaseat.Bindings` from every `rkllm` media seat (its name and its aliases), never by `config_seed` (`tierseed` treats it as a bound key; `audit-config` compares it as a seed-owned key). The rockchip-rk3588 tier now binds it, so the node's own pipeline works on its seat.
+- **No constraint, the shape in the prompt, strict acceptance.** For a declared seat `Pipeline.attempt` (and the terminal reasoning attempt) send no `grammar`, no `json_schema` / `structured_outputs` and no logprobs request. `tasks.BuildFor(req, Caps{Unconstrained: true})` / `Built.ForUnconstrained` append to the system prompt the exact JSON shape (keys in order, each type, an enum's allowed values, "no other key", one compact example) and set `Built.Strict`, the schema the grammar would have forced (`gbnf.JSONSchema`). The reply is parsed leniently (code fences and leading prose stripped) and accepted only if it satisfies that schema, on top of extract's own: a foreign object (`{"foo":1}`, `{"summary":"x"}`), a label outside the set, a missing key, a wrong type and an extra key are all refused. A failure takes the existing correction retry (counted in `meta.retries`), then defers with the validator's words naming what failed. Grounding still applies to extract and classify's self-reported confidence gate is unchanged. **The decision-margin gate needs logprobs and is inert on these seats**: no margin is recorded and nothing escalates on it.
+- **Every other seat is byte-identical.** `tasks.Build` is unchanged and the branch is taken only for a declared seat, pinned by a golden digest of the grammar-seat prompts (taken from the pre-change `Build`), a test that a grammar seat's request body carries exactly `Build`'s system, user and grammar while another seat on the box is unconstrained, and a zero-`Caps` equality test.
+- **The ledger row carries the prompt that was sent.** `meta.prompt_prefix_sha256` is stamped in `Run` from the grammar-bearing build before a rung is chosen; for an unconstrained seat `attempt` restamps it from the prompt with the shape instruction, so a row never reports the fingerprint of a prompt that was not sent (a measurement through this pipeline joins on it).
+- **Review fixes (same release).** (1) The reply of an unconstrained seat is read by `parser.ExtractOne`, not `Extract`: exactly ONE top-level JSON object (a top-level array, a second `{`/`[` after the object, and a repeated key at any depth are refused and take the correction retry, then a defer; leading prose, a fence and trailing prose without a bracket stay accepted; grammar seats keep `Extract` byte for byte). (2) A model declared in both `vllm_seats` and `unconstrained_seats` is pinned to be unconstrained (no `json_schema`, `structured_outputs` or grammar). (3) On an unconstrained seat classify's `confidence` is bounded 0..1 in the strict schema (7, -5 and 1.0001 are refused; the prompt example stays 0.5, below the 0.88 accept threshold); `gbnf.JSONSchema` and every grammar seat are unchanged. (4) `textremote` post-checks a node's OK result (classify: label in the request's set, confidence in 0..1; extract: one object with keys inside the schema's properties) and defers naming the node and the reason on failure. (5) ADR 0069, FLEET-NODE.md and the tier note state that declaring a text task only means something if the node's cascade routes that task to the unconstrained seat, measured through that path. Left as is: the ledger fingerprint of a repacked climbed tier (`promptFingerprintSent`) differs from Run's entry stamp only where Run itself fell back to the whole user turn; not a one-line fix.
+- **Two seats may not both declare text tasks** (`mediaseat.Validate`: `text_tasks` is one node key, like `vision_model`).
+- **summarize and triage** on an unconstrained seat run the same validated path for a local cascade call (they used to defer as an infrastructure error and now validate, then climb on a quality failure) and are never admitted on the fleet lane.
+- **`text_tasks` node config key and the `POST /fleet/text` lane** (`internal/fleetnode/text_task.go`, task type `text`): a media seat's `tasks` may now name `classify` and `extract` (a text task on a non-rkllm seat is refused at validation), `mediaseat.Bindings` writes their canonical-order subset as `text_tasks`, and the node runs ONE classify or extract on its OWN pipeline for a delegator: token-gated on dispatch and poll like the vision lane, dispatch's 1 MiB body, the shared `admit` path, the node's full `core.Result` as the job's data (defers included), concurrency-capped. `TextLaneAdmissible` (a non-empty `text_tasks` and the agent lane's reachability rule) is the one predicate behind the advertisement (`text` in `supported_task_types`, the additive omitempty health field `text_tasks`) and the ack-time admission. A task outside `text_tasks` is a `400` naming the set; summarize and triage are refused whatever `text_tasks` says.
+- **The lane ships DARK.** The rockchip-rk3588 seat declares no text task, so no shipped tier advertises the lane and `text_tasks` is empty everywhere. A later data-only change adds `classify` and `extract` to the seat's `tasks` once at least 30 cases per lane through the node's own pipeline score at least 90 % correct with zero off-schema outputs accepted (`TestRK3588TextDoorShipsDark` pins the dark state). The route default stays local, idle-local-wins and "never a downgrade" stand.
+- **`route` on `offload_classify` and `offload_extract`** (`local` default, `auto`, `remote`; `internal/textremote`, `visionremote`'s shape, Budget 300 s). `local` is byte-identical to before. `auto` leaves the box only while the machine-wide GPU lease is held, else or with no eligible node it runs local. `remote` forces a node and defers (`capacity`, or `config` with no `delegate_remotes`) when none is eligible, naming every miss. `delegate.PlaceText` picks the node: its health must list `text` AND the task in `text_tasks` and its card must not be leased, so a node that predates the lane is never picked (unlike the vision lane, an absent list is "none", not "all"). `meta.node` and `meta.placement` say where it ran. summarize and triage take no `route`.
+- **`tools/list` changes on EVERY box** (deliberate): `offload_classify` and `offload_extract` gain an optional `route` property. The tests that pin it are updated on purpose: `TestTextToolsAdvertiseTheRoute` (route present on the two tools, absent on summarize and triage, never required) and the new `TestTextDefaultRouteRunsLocalUnstamped`. Callers that omit `route` are unchanged.
+- **Docs and generated pages:** ADR 0069 (and a row in the ADR index), an ADR 0062 "Amendment (0.154.0)", `docs/systems/fleet-node.md`, `docs/FLEET-NODE.md` (new "The text task" section and lane-table row), `docs/systems/offload-pipeline.md`, `docs/systems/mcp-server.md`, `docs/systems/accelerators.md`, `docs/OPERATOR-GUIDE.md`; `docs/tiers/rockchip-rk3588.md` and `config.example.json` are regenerated (only that tier page changes).
+- **Upgrading an installed RK3588 node:** `install.sh` leaves an existing `config.json` untouched, so add `"unconstrained_seats": ["<the seat's model id>"]` by hand (or regenerate the file); `local-offload audit-config` lists it as SEED-ONLY until then. Nothing else changes for a node that declares no text task.
+- **Not done here:** `setup/install.ps1`'s `Get-MediaSeatBindings` (the PowerShell mirror of `mediaseat.Bindings`) still does not know the `rkllm` kind and writes neither new key; the RK3588 tier is Linux only. The margin gate's absence on these seats means a valid-but-wrong label is not caught by anything but classify's self-reported confidence: that is what the measured gate for opening the lane is for.
+
+## [0.153.2] - 2026-09-30 - the browse lane waits for the page to settle after an action, so a dialog that mounts late is seen
+
+### Fixed — a confirm dialog opened from a menu item was read before it existed
+
+0.152.1 finished the pending CSS animations before every page read, and a dropdown menu then showed up. A
+confirm dialog opened from a menu item still did not: the run ended `blocked` ("the model or the loop
+reported no progress") three times out of three on a production web app in the operator's browser. jev reads
+the page about 50 ms after an input, and at that moment the dialog is either not mounted yet or mounted at
+opacity 0 with its open-state style change not applied yet, because the page applies it on its own timer. The
+finish had nothing to finish (the animation did not exist yet), so the snapshot was the page as it was before
+the click; 1.5 s later one finish made the dialog's confirm button visible (measured).
+
+- **The observe that follows an action now waits for the page to settle** (`settle_after_input`, new in
+  `setup/browse/runner.py`). Every 100 ms it finishes newly started animations (the 0.152.1 script) and reads
+  a counter of DOM mutations that a `MutationObserver` keeps in the page; a poll is quiet when no animation was
+  finished and the counter did not move. It stops after two quiet polls in a row once 0.3 s have passed, and at
+  1.5 s of page time whatever the page does (plus the calls in flight, see below). Measured with it: the read after the menu click showed
+  exactly the dialog (its text, `Cancel` and the confirm button), and once the goal named the confirm click as
+  a step of its own the run clicked it and the record was deleted, checked independently. Launching the browser
+  with its background-throttling and occlusion-detection switches off did not remove the need (measured: still
+  `blocked` without the settle).
+- **Cost and bounds.** One settle per action, before jev's own wait and read: about 0.3 s on a quiet page on
+  top of jev's wait (plus two CDP calls per poll, more on a slow daemon), and the full 1.5 s on a page that
+  never stops changing (a live ticker, a timer that rewrites the DOM). It does not run before the first observe, after a `wait` action, before an action, or again
+  for the retries of one read. A page that is completely silent for its first 0.3 s counts as settled, so a
+  dialog whose first DOM change comes later is picked up by the following observe, as before. The cap is
+  checked between polls, so it bounds the page time and not the calls in flight: the harness can hold one CDP
+  call for several seconds on a page whose JS thread is frozen (a native `confirm()` or `alert()` open), and a
+  poll makes two; jev's own read fails the same way right after, and the run's own timeout still bounds it.
+- **A capture run drains between the polls.** The daemon's shared event buffer holds 500 events and drops the
+  oldest, and the settle starts right after the input, when the action's own requests fire; `settle_after_input`
+  takes a `between` hook that the wrapper points at the capture drain (a no-op without `capture`), so the
+  undrained window stays what it was before the settle existed. A hook that fails is logged and does not end
+  the settle.
+- **It never ends a run.** The counter is read as an observer id plus a count, so a navigation (a new document
+  has a new observer) reads as a change even when the count matches. An unreadable page (a navigation in
+  progress, a dead session, an IPC timeout) also counts as a change and is polled until the cap; the read that
+  follows reports a real error. The calls go straight to jev's `cdp()` in the observed session, like the
+  finish, so none of the run's bookkeeping is touched. The runner logs `settled N.Ns after an input (...)` to
+  stderr when the page was active.
+- **Finding, documented for goal writers: name the confirm click as its own step.** When a menu item and the
+  confirm button of the dialog it opens carry the same label, the decision model reads the second click as a
+  repeat of the step it just took and chooses BLOCKED; the run ended `blocked` until the goal named the confirm
+  click as a separate required step (measured on one menu and dialog in one app). `docs/systems/browse-lane.md`
+  (Common pitfalls) has the wording. This is guidance, not code.
+- Tests (`setup/browse/test_runner.py`): the settle is driven with a scripted page, a fake clock and a fake
+  sleep (stops after two quiet polls once the minimum has passed, runs at least the minimum on a quiet page, a
+  burst holds it, never past the cap on a page that keeps changing, finishes animations on every poll, an
+  unreadable page or a navigation counts as a change, swallows every exception); the counter script runs
+  under `node` against a fake `MutationObserver`; the wrapper tests pin that it runs once per observe after an
+  action of any kind (click, fill, select, scroll), before jev's wait and read, in the observed session, and
+  never on the first observe (whose fake Browser, like jev's, has no `after_input` until its first act), after
+  a `wait` action or in act. They also pin that the counter is read by value through `Runtime.evaluate`, that
+  the production defaults use the real clock and sleep, and that a capture run drains between the polls and
+  a run without capture drains nothing. Each was shown to fail with its code path removed, broken or dropped
+  (mutants run in a scratch copy: a dropped or altered `returnByValue`, a constant clock, a no-op sleep, a
+  direct `after_input` read, a settle for clicks only, no drain hook, a hook that is never called, called
+  after the reads, or only on the first poll, and a hook whose failure ends the settle).
+- **The settle's finishes are quiet.** On a navigating page every poll's finish fails, and each failure used
+  to log `finish animations skipped`, several lines per settle that crowd the stderr tail a defer reports.
+  `finish_animations(send, quiet=True)` drops that line for the settle; observe's own finish still logs it.
+- **Neutral fixtures.** Site names from earlier releases' examples, comments and test fixtures
+  (`setup/browse`, `internal/pipeline/browse_test.go`, this file's 0.142.1 entry) are replaced with
+  neutral ones; behaviour is unchanged.
+- The fix is in the sidecar (`setup/browse/runner.py`; the Go binary changes only its version string);
+  reinstall with `setup/browse/install.ps1` to take it.
+
+## [0.153.1] - 2026-09-30 - grounding compares numbers by value: a correct amount in either locale is grounded, a substring of another number is not
+
+### Fixed — a correct number was judged ungrounded when the source wrote it with separators, and a wrong one was grounded by a substring
+
+- `internal/grounding` compared a JSON number as TEXT. It rendered 2354.4 and looked for that string among the source's numbers with commas deleted (`2.35440`, `2354.40`, `18550`), so "Total: 2.354,40 EUR", "Total: 2,354.40 USD" and "Importe: 185,50 EUR" all came back UNGROUNDED for the right value. The pipeline treats an ungrounded extract as a retry and then a defer, so a perfect model deferred on every such amount, and `eval.Grade`, which grades extract by grounding alone, scored the same answers wrong. On a bilingual 48-case extract corpus 16 gold answers were judged ungrounded; all 48 are grounded now (measured 2026-09-30, the corpus is kept out of the repository).
+- The opposite failure: the verbatim shortcut accepted a number whose digits occurred inside another number, so `{"amount": 0}` was grounded by "Amount: 4200 USD" and `{"w": 7}` by "7.5".
+- Numbers are now compared as values. Each numeric token of the source is read as every value it can denote: a plain integer; English grouping (`2,354.40`); Spanish grouping (`2.354,40`); one separator followed by exactly three digits (`1,234`) as both 1234 and 1.234; one separator followed by one, two or four-plus digits as a decimal mark; English commas also as Indian lakh/crore grouping (`1,23,456`). A token that is no number in either locale (a date `18.06.2026`, a list `3,4,5`) reads as its digit groups, and a separated token is never read as its digits joined (`2.354,40` does not denote 235440). A trailing `.` or `,` is sentence punctuation. Values are compared exactly, with no tolerance (a tolerance made two different 13-digit ids, epoch timestamps or phone numbers equal). A plain-digit string token of 16 or more digits is an identifier and is compared digit for digit, because a float64 cannot tell 19-digit ids apart; a JSON number of 17 or more digits is a float64 and inherits that limit. A two-part token (`3.1`, `9.30`, `5,10`) is a decimal only, so `{"major":3,"minor":1}` is not grounded by "Release 3.1" (precision over recall, the same rule as 7 against 7.5).
+- A JSON number leaf is grounded iff its value is one of the source's, by magnitude (a sign is not checked, as before). The substring shortcut no longer applies to numbers. A string leaf keeps the shortcut; one that is not a phrase of the source is grounded when every number in it is a value the source writes, every identifier-like word in it (a digit or hyphen) is in the source, and a zero-padded integer (`007`) appears as written, so `"2,354.40"` grounds against "2.354,40". Summaries (`Check` for summarize) and `CheckFields` use the same rule. Booleans, empty strings (absence) and every non-numeric verdict are unchanged, and no signature changed.
+- **Extract eval scores are not comparable across this release.** `eval.Grade` grades extract (and summarize) by grounding alone, so the same answers score differently before and after 0.153.1: correct locale-formatted amounts now pass, and wrong numbers that matched as a substring now fail. Compare extract/summarize eval results only within one side of this change.
+- Tests: `internal/grounding/numbers_test.go` pins each case both ways (locale grouping, decimal comma, ambiguous three-digit groups, integers, 0 against 4200, absent and distractor numbers, string leaves, currency and percent tokens, trailing punctuation, dates and lists), the token parser directly, and a table of the verdicts the string implementation gave on non-locale input, which are unchanged. Not read as one number: space or apostrophe thousands (`1 234,56`, two tokens).
+
+## [0.153.0] - 2026-09-30 - the RK3588 NPU seat serves the vision tasks its runtime can do, and says so
+
+### Changed — the RKLLM seat starts with a repeat penalty, and the vision lane is limited to the tasks the seat declares (ADR 0062 amendment)
+
+Measured on the reference RK3588 board (2026-09-30): greedy decoding with the seat's default `repeat_penalty` 1.0 loops on VQA and runs to the 256-token cap (the vision lane defers "vision output truncated"); with `repeat_penalty` 1.1 a blind four-question VQA check scored 3/4. The seat also refuses constrained decoding (`grammar`, `json_schema`) with HTTP 400, so it can serve `vqa` and `ocr` and never `assess_image`, which always sends a grammar; the fleet vision lane admitted all three and the delegator placed them without looking at the task, so such a node would have taken an `assess_image` and deferred after a 400. The NPU also runs one generation at a time, while a node admits four jobs by default.
+
+- **`--repeat-penalty` on `rkllm_server.py`** (float, default 1.0, refused at startup outside 0.01..10, the range a request's value has). A request that sends neither `repeat_penalty` nor `repetition_penalty` gets the seat's value; a value the request sends always wins. `rkllm-serve.sh` passes it through with every other argument.
+- **`repeat_penalty` on an `rkllm` media seat** (`mediaseat.Seat.RepeatPenalty`, rkllm only, 0.01..10), rendered as `--repeat-penalty <v>` between `--cpu-mask` and `--served-name` only when set, so every seat that names none renders byte for byte as before. It is the one sampling default an rkllm seat may carry: `temp`, `top_p` and `top_k` stay refused. The `rockchip-rk3588` seat sets 1.1.
+- **`tasks` on a media seat** (`mediaseat.Seat.Tasks`, vision and rkllm seats): the task names the seat serves, from `vqa`, `ocr`, `assess_image`, `classify`, `extract`. `classify` and `extract` are validated now for the text door that will read them; only the vision subset is bound in this release. A vision task on a seat that cannot read an image, a declaration naming no vision task on a seat that binds `vision_model`, an unknown or repeated name, and `tasks` on an stt or ocr seat are refused when the tier table is validated. The `rockchip-rk3588` seat declares `["vqa", "ocr"]`.
+- **`vision_tasks` node config key** (`config.Config.VisionTasks`): the vision subset of the seat's `tasks`, in canonical order (`vqa`, `ocr`, `assess_image`), written by `mediaseat.Bindings` beside `vision_model` and refused in a `config_seed` like it (`tierseed` treats it as a bound key; `audit-config` compares it as a seed-owned key). Empty or absent = all three, which is every other tier's behaviour.
+- **The node enforces it, publishes it, and the delegator places by it.** `POST /fleet/vision` refuses a task outside `vision_tasks` at ack time with a `400` naming the allowed set (`vision: task "assess_image" is not served by this node's vision seat (vision_tasks: vqa, ocr)`), and `/fleet/health` gains an additive, omitempty `vision_tasks` beside `vision_model`. `delegate.NodeView` decodes it (absent = all three, so a node that predates the field is exactly as eligible as before) and `NodeView.ServesVisionTask` is the one predicate; `delegate.PlaceVision` now takes the task (`PlaceVision(remotes, task)`) and skips a node that does not list it, and `visionremote` passes the request's task and names the miss when no node serves it.
+- **Serving limits seeded for a one-generation NPU** (`rockchip-rk3588` `config_seed`): `fleet_max_concurrent_jobs` 1 (the node default is 4, which would queue three jobs behind the NPU's single generation), `request_timeout_sec` 240 (below the delegator's 300 s fleet vision budget, `visionremote.Budget`; the cold load measured 13 s), `max_input_chars` 8000, `ocr_max_tokens` 512. `fleet_max_queue_depth` is left at its default, twice the concurrency, which is 2 here (one running, one waiting), inside the NPU server's own window of one running and two waiting.
+- **Docs and generated pages:** ADR 0062 gains an "Amendment (0.153.0)"; `docs/systems/fleet-node.md`, `docs/FLEET-NODE.md` and `docs/systems/accelerators.md` describe the new key, the health field, the placement rule and the seat default; `docs/tiers/rockchip-rk3588.md` and `config.example.json` are regenerated.
+- **Upgrade of an installed RK3588 node: refresh `RKNPU_HOME` first, then re-render, and reseed the config by hand.** The binary does not ship `rkllm_server.py`; it lives in the `accelerators/rknpu` copy under `RKNPU_HOME`, which `install.sh` never refreshes, and `rkllm-serve.sh` execs its arguments straight into it. A 0.153.0 render emits `--repeat-penalty 1.1`, which a 0.151.1 server refuses (`unrecognized arguments`, exit 2), so the seat never starts. Copy or check out the new `accelerators/rknpu` (at least `rkllm_server.py`) into `RKNPU_HOME` before re-rendering `llama-swap.yaml`. `install.sh` also leaves an existing `config.json` untouched, so `vision_tasks` and the four seeded limits do not reach it: add `"vision_tasks": ["vqa","ocr"]`, `"fleet_max_concurrent_jobs": 1`, `"request_timeout_sec": 240`, `"max_input_chars": 8000` and `"ocr_max_tokens": 512` by hand, or delete the file to regenerate it (`local-offload audit-config` lists them as SEED-ONLY). Until then the node keeps accepting `assess_image` and deferring after the 400.
+- **Not done here:** `setup/install.ps1`'s `Get-MediaSeatBindings` (the PowerShell mirror of `mediaseat.Bindings`) still does not know the `rkllm` kind and so does not write `vision_tasks`; the RK3588 tier is Linux only and the mirror already warns on the kind.
+
 ## [0.152.1] - 2026-09-30 - the browse lane un-sticks fade-in dialogs and menus in its background tab
 
 ### Fixed — a dialog or dropdown menu that fades in was invisible to a browse run
@@ -605,7 +720,7 @@ at those caps. Both tiers now seed 2,048 (final 8,192), the geometry the same mo
 
 ### Fixed — an edit made by a run's last action was lost when the tab closed
 
-A live Substack run typed a post title, reported `done`, and the title was never stored: the editor
+A live run on a production web editor typed a post title, reported `done`, and the title was never stored: the editor
 autosaves on a debounce (measured 2.3 s after a keystroke) and the sidecar closed its tab at DONE, before
 the save left. The sidecar now holds the tab open until the page's XHR/fetch traffic has been quiet for
 3.5 s (capped at 15 s) and keeps feeding any capture while it waits. Measured on the same draft: with the

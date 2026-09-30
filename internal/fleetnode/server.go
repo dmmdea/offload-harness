@@ -200,6 +200,10 @@ type Server struct {
 	// vision_model (and SupportedTasksFor lists "vision") exactly when
 	// POST /fleet/vision will admit.
 	visionLane bool
+	// textLane is TextLaneAdmissible over the RESOLVED listener (0.154.0), the same
+	// one-predicate discipline: health publishes text_tasks (and SupportedTasksFor lists
+	// "text") exactly when POST /fleet/text will admit.
+	textLane bool
 	// chatLane is ChatLaneAdmissible over the RESOLVED listener (C-41b) — the
 	// same one-predicate discipline as agentLane and visionLane: health
 	// publishes `chat_lane` exactly when POST /fleet/chat will admit, because
@@ -439,6 +443,7 @@ func New(runner Runner, jobs *Jobs, opts Options) *Server {
 		agentSeat:          opts.Cfg.AgentPlannerModel(""),
 		agentLane:          AgentLaneAdmissible(opts.Cfg, opts.LoopbackListener),
 		visionLane:         VisionLaneAdmissible(opts.Cfg, opts.LoopbackListener),
+		textLane:           TextLaneAdmissible(opts.Cfg, opts.LoopbackListener),
 		chatLane:           ChatLaneAdmissible(opts.Cfg, opts.LoopbackListener),
 		rosterServes:       swapRosterServes,
 		rosterServedModels: swapRosterServedModels,
@@ -887,6 +892,9 @@ func (s *Server) Handler() http.Handler {
 	// image — sized from vision_max_image_bytes rather than dispatch's 1 MiB —
 	// after which it joins the same admission path (admit) as every job.
 	mux.HandleFunc("POST /fleet/vision", s.handleVision)
+	// The text lane (0.154.0): classify / extract on this node's own pipeline. A route of
+	// its own so the payload is typed; dispatch's 1 MiB body cap, then the same admit path.
+	mux.HandleFunc("POST /fleet/text", s.handleText)
 	// The cascade chat lane (C-41b): a SYNCHRONOUS forward, not a job — see
 	// chat_lane.go for why a single short cascade call does not belong in the
 	// job store, and why this node's loopback-only llama-swap needs a door of
@@ -1297,6 +1305,18 @@ type healthPayload struct {
 	// supported_task_types. Additive + omitempty: a node without the lane
 	// emits a byte-identical payload.
 	VisionModel string `json:"vision_model,omitempty"`
+	// VisionTasks is the subset of vqa / ocr / assess_image the vision seat serves
+	// (config vision_tasks), published beside vision_model under the same lane-gated
+	// rule. Additive and omitempty: absent = all three, which is what a node that
+	// predates the field serves, so an older delegator and an older node both keep
+	// today's behaviour. A delegator skips a node for a task it does not list.
+	VisionTasks []string `json:"vision_tasks,omitempty"`
+	// TextTasks is the subset of classify / extract this node's text lane serves
+	// (config text_tasks), published only when the lane is admissible (the same moment
+	// "text" appears in supported_task_types). Additive and omitempty: a node without the
+	// lane, and every node that predates it, emits a byte-identical payload, and a
+	// delegator never places a text task on a node that does not list it.
+	TextTasks []string `json:"text_tasks,omitempty"`
 	// ChatLane says POST /fleet/chat will admit here (C-41b), published under
 	// the same one-predicate rule as vision_model. It is what a delegator's
 	// cascade lane reads to tell a FLEET NODE base from a plain llama-swap
@@ -1492,6 +1512,12 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.visionLane {
 		payload.VisionModel = s.opts.Cfg.VisionModel
+		if len(s.opts.Cfg.VisionTasks) > 0 {
+			payload.VisionTasks = append([]string(nil), s.opts.Cfg.VisionTasks...)
+		}
+	}
+	if s.textLane {
+		payload.TextTasks = append([]string(nil), s.opts.Cfg.TextTasks...)
 	}
 	// Chat lane (C-41b): the delegator's cascade lane reads `chat_lane` to
 	// learn this base is a fleet node it may route through, and served_models
@@ -1941,7 +1967,39 @@ func (s *Server) handleVision(w http.ResponseWriter, r *http.Request) {
 	s.admit(w, r, dispatchEnvelope{JobID: p.JobID, TaskType: VisionTask, Payload: body})
 }
 
-// admit is the shared ack path behind /fleet/dispatch and /fleet/vision: the
+// handleText is the text lane's ack path (0.154.0): handleVision with the text lane's
+// small body (TextBodyCap) and a TextPayload whose job_id rides inside it. The decoded
+// body becomes a "text" envelope and joins admit, so bearer auth, the known-id re-ack,
+// drain, lease, band and queue gates and the job store apply exactly as for every job.
+func (s *Server) handleText(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, TextBodyCap)
+	if ct := r.Header.Get("Content-Type"); ct != "" {
+		if mt, _, err := mime.ParseMediaType(ct); err != nil || mt != "application/json" {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("content-type must be application/json (got %q)", ct))
+			return
+		}
+	}
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			writeError(w, http.StatusBadRequest, "request body too large (limit 1 MiB)")
+			return
+		}
+		writeError(w, http.StatusBadRequest, "reading text body: "+err.Error())
+		return
+	}
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.DisallowUnknownFields()
+	var p TextPayload
+	if err := dec.Decode(&p); err != nil {
+		writeError(w, http.StatusBadRequest, "malformed text body: "+err.Error())
+		return
+	}
+	s.admit(w, r, dispatchEnvelope{JobID: p.JobID, TaskType: TextTask, Payload: body})
+}
+
+// admit is the shared ack path behind /fleet/dispatch, /fleet/vision and /fleet/text: the
 // token-gated lanes' auth, the known-job re-ack/409, the drain/lease/band/
 // queue refusals, BuildRequest, and the job store's Admit. The two handlers
 // differ ONLY in how they read and cap their body; everything a node decides
@@ -2177,6 +2235,10 @@ func (s *Server) admit(w http.ResponseWriter, r *http.Request, env dispatchEnvel
 			// included) — see visionJobData; a defer is a done job here.
 			return visionJobData(res)
 		}
+		if env.TaskType == TextTask {
+			// The same for the text lane — see textJobData.
+			return textJobData(res)
+		}
 		if res.OK {
 			return res.Data, nil
 		}
@@ -2219,7 +2281,7 @@ func (s *Server) admit(w http.ResponseWriter, r *http.Request, env dispatchEnvel
 	}
 	spec := AcceptSpec{
 		Agent:     env.TaskType == string(core.TaskAgentRun),
-		Gated:     env.TaskType == VisionTask,
+		Gated:     env.TaskType == VisionTask || env.TaskType == TextTask,
 		Uncapped:  !s.concurrencyCapped(env.TaskType),
 		OnDropped: cleanup,
 		Task:      env.TaskType,
