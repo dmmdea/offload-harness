@@ -7,7 +7,7 @@ Four layers, all in this file:
   * the wire contract of the real process in RKNPU_ENABLED=0 stub mode (the Coral suite's shape): /health, the
     404 and 400 paths, npu_disabled, the sha256 gate, the loopback refusal and the idle self-exit;
   * server.py imported in-process against a fake RKNNLite that records what the sidecar did to it and returns
-    canned tensors: the input layout, YOLOv8 decoding, residency, the lock, the idle watchdog, /health;
+    canned tensors: the input layout, PP-YOLOE decoding, residency, the lock, the idle watchdog, /health;
   * the manifest itself: every artifact pinned by a real hash, every reference resolvable;
   * the two shell scripts, under bash when the box has one: the launcher against a stub python with stub
     taskset and nice, fetch-models.sh against file:// URLs.
@@ -151,6 +151,12 @@ def load_server(**env):
     return mod
 
 
+_SERVER = load_server(RKNPU_ENABLED="0")  # server.py imported once, for the manifest keys its tools serve
+# The tests follow the keys the tools serve, so flipping server.CLASSIFY_MODEL to the fp16 build keeps them valid.
+CLS, DET = _SERVER.CLASSIFY_MODEL, _SERVER.DETECT_KEY
+SIM_DIR = os.environ.get("RKNPU_SIM_DIR", "")  # a folder of rknn-toolkit2 simulator tensors (.npy); unset skips those tests
+
+
 def make_fake_runtime():
     """A fresh fake RKNNLite class (its state lives on the class: one per test) and the modules that expose it.
 
@@ -205,18 +211,19 @@ def make_fake_runtime():
     return FakeRKNNLite, {"rknnlite": pkg, "rknnlite.api": api}
 
 
-def yolo_outputs(cells, classes: int = 80):
-    """The nine tensors the rknn_model_zoo yolov8 model returns: (box[1,64,g,g], class[1,80,g,g], score-sum
-    [1,1,g,g]) for the 80, 40 and 20 grids. Each cell is a hot grid position: a class score and, per side
-    (left, top, right, bottom), the distance in grid cells that the DFL bins are peaked at."""
+def yolo_outputs(cells, classes: int = 80, bins: int = 17):
+    """The nine tensors the rknn_model_zoo PP-YOLOE model returns: (box[1,4*bins,g,g], class[1,80,g,g], score-sum
+    [1,1,g,g]) for the 80, 40 and 20 grids. bins is the DFL bin count: 17 for PP-YOLOE (68 box channels), 16 for a
+    YOLOv8-shaped head (64). Each cell is a hot grid position: a class score and, per side (left, top, right,
+    bottom), the distance in grid cells that the DFL bins are peaked at."""
     outs = []
     for g in (80, 40, 20):
-        outs += [np.zeros((1, 64, g, g), np.float32), np.zeros((1, classes, g, g), np.float32),
+        outs += [np.zeros((1, 4 * bins, g, g), np.float32), np.zeros((1, classes, g, g), np.float32),
                  np.zeros((1, 1, g, g), np.float32)]
     for c in cells:
         box, cls = outs[3 * c["branch"]], outs[3 * c["branch"] + 1]
         for side, dist in enumerate(c["dist"]):
-            box[0, side * 16 + dist, c["gy"], c["gx"]] = 30.0
+            box[0, side * bins + dist, c["gy"], c["gx"]] = 30.0
         cls[0, c["cls"], c["gy"], c["gx"]] = c["score"]
     return outs
 
@@ -319,7 +326,7 @@ class ProcessContract(unittest.TestCase):
         man = real_manifest()
         want = {s["file"] for s in man["models"].values()} | {s["labels"] for s in man["models"].values() if "labels" in s}
         self.assertEqual(set(h["models_missing"]), want)
-        self.assertGreaterEqual(len(want), 5)  # three models and two label files
+        self.assertGreaterEqual(len(want), 6)  # four models and two label files
 
     def test_unknown_paths_and_tools(self):
         code, r = call(self.port, "GET", "/nope")
@@ -356,18 +363,18 @@ class ProcessContract(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             models, manifest = write_artifacts(d)  # dummy artifacts, pinned by a copy of the manifest
             spec = read_json(manifest)["models"]
-            name = spec["resnet18"]["file"]
+            name = spec[CLS]["file"]
             write(os.path.join(models, name), b"not a model")
-            os.remove(os.path.join(models, spec["yolov8n"]["file"]))
+            os.remove(os.path.join(models, spec[DET]["file"]))
             img = os.path.join(d, "a.png")
             Image.new("RGB", (32, 32), (1, 2, 3)).save(img)
             proc = StartedProcess(models, RKNPU_ENABLED="1", RKNPU_MANIFEST=manifest)
             try:
                 code, r = call(proc.port, "POST", "/v1/classify", {"image_path": img})
                 self.assertEqual((code, r["error"], r["file"]), (200, "model_sha_mismatch", name), r)
-                self.assertEqual((r["expected"], r["got"]), (spec["resnet18"]["sha256"], sha(b"not a model")))
+                self.assertEqual((r["expected"], r["got"]), (spec[CLS]["sha256"], sha(b"not a model")))
                 code, r = call(proc.port, "POST", "/v1/object_detect", {"image_path": img})
-                self.assertEqual((code, r["error"], r["file"]), (200, "model_missing", spec["yolov8n"]["file"]), r)
+                self.assertEqual((code, r["error"], r["file"]), (200, "model_missing", spec[DET]["file"]), r)
                 self.assertEqual(call(proc.port, "GET", "/health")[1]["loaded"], [])
             finally:
                 proc.stop()
@@ -517,7 +524,7 @@ class ClassifyTests(InProcess):
 
     def test_scores_are_a_softmax_and_labels_lose_their_synset_id(self):
         v = self.logits(i812=10.0, i3=8.0)
-        self.outputs("resnet18", lambda _: [v])
+        self.outputs(CLS, lambda _: [v])
         code, r = self.post("classify", image_path=self.image("a.png"), top_k=3)
         self.assertEqual(code, 200, r)
         self.assertEqual(set(r), {"results", "best", "model", "domain"})
@@ -526,24 +533,108 @@ class ClassifyTests(InProcess):
         self.assertAlmostEqual(r["results"][0]["score"], np.exp(10) / (np.exp(10) + np.exp(8) + 998), places=5)
         self.assertGreater(r["results"][0]["score"], r["results"][1]["score"])
         self.assertEqual(r["best"], r["results"][0])
-        self.assertEqual((r["model"], r["domain"]), (self.file["resnet18"], "imagenet"))
+        self.assertEqual((r["model"], r["domain"]), (self.file[CLS], "imagenet"))
         self.assertEqual(len(self.post("classify", image_path=self.image("a.png"))[1]["results"]), 5)  # top_k defaults to 5
 
-    def test_the_input_is_4d_nhwc_uint8_rgb_squashed_on_all_three_cores(self):
-        self.outputs("resnet18", lambda _: [self.logits(i1=1.0)])
-        # Three vertical bands: a squash (the Coral and Rockchip behaviour) keeps all three, a crop would not.
-        path = self.bands("bands.png", [(255, 0, 0), (0, 255, 0), (0, 0, 255)], 224, 224)
+    def stripes(self, name, edges, colors, height, transpose=False):
+        """Vertical stripes: colors[i] runs from the previous edge (0 for the first) to edges[i], the last edge being
+        the width; transposed, the stripes are horizontal."""
+        img = Image.new("RGB", (edges[-1], height))
+        left = 0
+        for right, c in zip(edges, colors):
+            img.paste(Image.new("RGB", (right - left, height), c), (left, 0))
+            left = right
+        if transpose:
+            img = img.transpose(Image.TRANSPOSE)
+        path = os.path.join(self.tmp, name)
+        img.save(path)
+        return path
+
+    def test_the_input_is_4d_nhwc_uint8_rgb_on_all_three_cores(self):
+        self.outputs(CLS, lambda _: [self.logits(i1=1.0)])
+        # 696x232: the short side is already 232, so the centre 224 columns are the middle band, whole. That band is
+        # red, so a BGR input would read (0, 0, 255).
+        path = self.bands("bands.png", [(0, 0, 255), (255, 0, 0), (0, 255, 0)], 232, 232)
         code, _ = self.post("classify", image_path=path)
         self.assertEqual(code, 200)
         rt = self.Fake.instances[0]
         self.assertEqual(rt.core_mask, self.Fake.NPU_CORE_0_1_2)
         x = rt.inputs[0]
         self.assertEqual((x.shape, x.dtype), ((1, 224, 224, 3), np.uint8))
+        self.assertEqual({tuple(int(v) for v in x[0, 100, c]) for c in (0, 111, 223)}, {(255, 0, 0)})
+
+    def test_the_short_side_goes_to_resize_short_bilinear_and_the_centre_is_cropped(self):
+        self.outputs(CLS, lambda _: [self.logits(i1=1.0)])
+        spec = self.mod.MODELS[CLS]
+        self.assertEqual((spec["resize_short"], spec["crop"]), (232, 224))
+        a, b, c = (255, 0, 0), (0, 255, 0), (0, 0, 255)
+        # 928x464 scales by 1/2 to 464x232, whose centre 224 columns are 120..343: A up to column 29, B from 30, C
+        # from 194. Squashed to 224 columns the stripes would end at 72 and 152; cropped without a resize every
+        # column would be B. So the five samples below tell the three apart.
+        for portrait in (False, True):
+            with self.subTest(portrait=portrait):
+                path = self.stripes("stripes.png", [300, 628, 928], [a, b, c], 464, transpose=portrait)
+                self.assertEqual(self.post("classify", image_path=path)[0], 200)
+                x = self.Fake.instances[0].inputs[-1]
+                line = x[0, :, 100] if portrait else x[0, 100]  # portrait: the stripes run down the rows
+                self.assertEqual([tuple(int(v) for v in line[i]) for i in (10, 50, 100, 170, 210)], [a, b, b, b, c])
+
+    def test_the_crop_matches_a_whole_picture_resize_followed_by_a_centre_crop(self):
+        self.outputs(CLS, lambda _: [self.logits(i1=1.0)])
+        rng = np.random.default_rng(11)
+        for w, h in ((300, 200), (200, 300), (333, 500), (232, 232), (224, 224), (100, 60), (1000, 300), (233, 232)):
+            with self.subTest(size=(w, h)):
+                pixels = rng.integers(0, 256, (h, w, 3), dtype=np.uint8)
+                path = os.path.join(self.tmp, "noise.png")
+                Image.fromarray(pixels).save(path)
+                self.assertEqual(self.post("classify", image_path=path)[0], 200)
+                got = self.Fake.instances[0].inputs[-1]
+                # torchvision Resize(232) then CenterCrop(224): the short side becomes 232, the long one int(232 * long / short)
+                nw, nh = (232, int(232 * h / w)) if w <= h else (int(232 * w / h), 232)
+                left, top = int(round((nw - 224) / 2.0)), int(round((nh - 224) / 2.0))
+                want = Image.fromarray(pixels).resize((nw, nh), Image.BILINEAR).crop((left, top, left + 224, top + 224))
+                diff = np.abs(got[0].astype(int) - np.asarray(want).astype(int))
+                # Same geometry; Pillow's fixed-point filter rounds a handful of samples of an upscale (about 5 in
+                # 150528) two levels apart. A window that is off by one pixel would differ by tens of levels on average.
+                self.assertLessEqual(int(diff.max()), 2)
+                self.assertLess(float(diff.mean()), 0.1)
+
+    def test_an_extreme_aspect_ratio_never_builds_a_huge_intermediate(self):
+        self.outputs(CLS, lambda _: [self.logits(i1=1.0)])
+        real = Image.Image.resize
+        made = []
+
+        def spy(img, size, *args, **kwargs):
+            made.append(tuple(size))
+            return real(img, size, *args, **kwargs)
+
+        for size in ((100000, 10), (10, 100000)):
+            with self.subTest(size=size):
+                path = os.path.join(self.tmp, "strip.png")
+                Image.new("RGB", size, (9, 8, 7)).save(path)
+                made.clear()
+                with mock.patch.object(Image.Image, "resize", spy):
+                    code, r = self.post("classify", image_path=path)
+                self.assertEqual(code, 200, r)
+                self.assertTrue(made, "the picture was never resampled")
+                self.assertLessEqual(max(max(s) for s in made), 224, made)  # scaling the strip first would be 2.32 million wide
+                self.assertEqual(self.Fake.instances[0].inputs[-1].shape, (1, 224, 224, 3))
+
+    def test_a_model_whose_spec_has_no_crop_is_squashed_to_the_input(self):
+        self.outputs(CLS, lambda _: [self.logits(i1=1.0)])
+        spec = dict(self.mod.MODELS[CLS])
+        del spec["resize_short"], spec["crop"]
+        self.mod.MODELS[CLS] = spec
+        # Three vertical bands: a squash keeps all three, a crop would not.
+        path = self.bands("bands.png", [(255, 0, 0), (0, 255, 0), (0, 0, 255)], 224, 224)
+        self.assertEqual(self.post("classify", image_path=path)[0], 200)
+        x = self.Fake.instances[0].inputs[0]
+        self.assertEqual((x.shape, x.dtype), ((1, 224, 224, 3), np.uint8))
         self.assertEqual([tuple(int(v) for v in x[0, 100, c]) for c in (10, 112, 213)],
                          [(255, 0, 0), (0, 255, 0), (0, 0, 255)])
 
     def test_a_large_jpeg_is_reduced_to_the_model_input(self):
-        self.outputs("resnet18", lambda _: [self.logits(i1=1.0)])
+        self.outputs(CLS, lambda _: [self.logits(i1=1.0)])
         path = os.path.join(self.tmp, "big.jpg")
         Image.new("RGB", (1600, 1200), (200, 100, 50)).save(path, quality=95)
         code, _ = self.post("classify", image_path=path)
@@ -554,7 +645,7 @@ class ClassifyTests(InProcess):
 
     def test_a_label_list_shorter_than_the_logits_falls_back_to_the_index(self):
         self.rewrite(labels={"imagenet_synset.txt": "n00000000 only one\n"})
-        self.outputs("resnet18", lambda _: [self.logits(i5=9.0)])
+        self.outputs(CLS, lambda _: [self.logits(i5=9.0)])
         _, r = self.post("classify", image_path=self.image("a.png"), top_k=1)
         self.assertEqual(r["best"]["label"], "5")
 
@@ -579,7 +670,7 @@ class ClassifyTests(InProcess):
 
 class DetectTests(InProcess):
     def detect(self, cells, size=(640, 640), **args):
-        self.outputs("yolov8n", lambda _: yolo_outputs(cells))
+        self.outputs(DET, lambda _: yolo_outputs(cells))
         return self.post("object_detect", image_path=self.image("scene.png", size), **args)
 
     def assertBox(self, obj, x, y, w, h, label="bus", cid=5, score=0.9):
@@ -593,7 +684,7 @@ class DetectTests(InProcess):
         code, r = self.detect([hot(10, 20)])
         self.assertEqual(code, 200, r)
         self.assertEqual(set(r), {"objects", "count", "model", "image_width", "image_height"})
-        self.assertEqual((r["count"], r["image_width"], r["image_height"], r["model"]), (1, 640, 640, self.file["yolov8n"]))
+        self.assertEqual((r["count"], r["image_width"], r["image_height"], r["model"]), (1, 640, 640, self.file[DET]))
         self.assertEqual(set(r["objects"][0]), {"label", "class_id", "x", "y", "w", "h", "score"})
         self.assertBox(r["objects"][0], 136, 280, 96, 64)
 
@@ -655,14 +746,54 @@ class DetectTests(InProcess):
         _, r = self.detect(cells)
         self.assertEqual([o["label"] for o in r["objects"]], ["bus"])
 
+    def test_a_64_channel_box_head_still_decodes(self):
+        # YOLOv8's head has 16 DFL bins (64 box channels), PP-YOLOE's 17 (68): the bin count comes from the tensor.
+        for bins in (8, 16, 17, 33):
+            with self.subTest(bins=bins):
+                self.outputs(DET, lambda _, b=bins: yolo_outputs([hot(10, 20)], bins=b))
+                code, r = self.post("object_detect", image_path=self.image("scene.png", (640, 640)))
+                self.assertEqual((code, r["count"]), (200, 1), r)
+                self.assertBox(r["objects"][0], 136, 280, 96, 64)
+
+    def test_the_branch_order_and_the_score_sum_branch_do_not_matter(self):
+        cells = [hot(10, 20), hot(30, 60, cls=6, score=0.8, branch=0),
+                 hot(19, 19, cls=1, score=0.7, branch=2, dist=(1, 1, 3, 3))]
+        want = self.detect(cells)[1]["objects"]
+        self.assertEqual(len(want), 3)
+        variants = {
+            "strides 32, 16, 8 (the simulator's and the zoo's order)": lambda o: [t for i in (6, 3, 0) for t in o[i:i + 3]],
+            "no score-sum branch": lambda o: [t for i in (0, 3, 6) for t in o[i:i + 2]],
+            "a score-sum branch full of 5.0": lambda o: [np.full_like(t, 5.0) if t.shape[1] == 1 else t for t in o],
+        }
+        for name, fn in variants.items():
+            with self.subTest(name):
+                self.outputs(DET, lambda _, f=fn: f(yolo_outputs(cells)))
+                code, r = self.post("object_detect", image_path=self.image("scene.png", (640, 640)))
+                self.assertEqual((code, r["objects"]), (200, want), r)
+
     def test_an_unexpected_output_layout_is_a_structured_error(self):
-        wrong = (lambda _: [np.zeros((1, 64, 80, 80), np.float32)],
-                 lambda _: [np.zeros((1, 32, g, g), np.float32) for g in (80, 80, 80, 40, 40, 40, 20, 20, 20)])
-        for fn in wrong:
-            self.outputs("yolov8n", fn)
-            code, r = self.post("object_detect", image_path=self.image("a.png", (640, 640)))
-            self.assertEqual((code, r["error"]), (200, "internal"), r)
-            self.assertIn("layout", r["detail"])
+        z = lambda *shape: np.zeros(shape, np.float32)  # noqa: E731
+        grids = (80, 80, 80, 40, 40, 40, 20, 20, 20)
+        boxes_differ, classes_differ, grids_differ = yolo_outputs([]), yolo_outputs([]), yolo_outputs([])
+        boxes_differ[3] = z(1, 64, 40, 40)
+        classes_differ[4] = z(1, 79, 40, 40)
+        grids_differ[1] = z(1, 80, 80, 79)
+        wrong = {
+            "one tensor": [z(1, 64, 80, 80)],
+            "a YOLOX-style head of three tensors": [z(1, 85, 80, 80), z(1, 85, 40, 40), z(1, 85, 20, 20)],
+            "box channels that are not a multiple of 4": [z(1, 30, g, g) for g in grids],
+            "no box channels": [z(1, 0, g, g) for g in grids],
+            "3-D tensors": [z(1, 64, g * g) for g in grids],
+            "box channels that differ between branches": boxes_differ,
+            "class channels that differ between branches": classes_differ,
+            "a box and a class grid that disagree": grids_differ,
+        }
+        for name, outs in wrong.items():
+            with self.subTest(name):
+                self.outputs(DET, lambda _, o=outs: o)
+                code, r = self.post("object_detect", image_path=self.image("a.png", (640, 640)))
+                self.assertEqual((code, r["error"]), (200, "internal"), r)
+                self.assertIn("layout", r["detail"])
 
     def test_bad_arguments(self):
         img = self.image("a.png")
@@ -769,26 +900,26 @@ class ImageErrorTests(InProcess):
 class ResidencyTests(InProcess):
     def setUp(self):
         super().setUp()
-        self.outputs("resnet18", lambda _: [np.zeros((1, 1000), np.float32)])
+        self.outputs(CLS, lambda _: [np.zeros((1, 1000), np.float32)])
         self.outputs("clip-vit-b32-image", lambda _: [np.zeros((1, 512), np.float32)])
-        self.outputs("yolov8n", lambda _: yolo_outputs([]))
+        self.outputs(DET, lambda _: yolo_outputs([]))
         self.img = self.image("a.png")
 
     def test_a_model_is_built_once_and_stays_resident(self):
         self.post("classify", image_path=self.img)
         self.post("classify", image_path=self.img)
         self.assertEqual(len(self.Fake.instances), 1)
-        self.assertEqual(self.health()["loaded"], ["resnet18"])
+        self.assertEqual(self.health()["loaded"], [CLS])
 
     def test_switching_models_releases_the_old_context_before_the_new_one_loads(self):
         self.post("classify", image_path=self.img)
         self.post("embed", image_path=self.img)
-        self.assertEqual(self.Fake.events, [("load", self.file["resnet18"]), ("release", self.file["resnet18"]),
+        self.assertEqual(self.Fake.events, [("load", self.file[CLS]), ("release", self.file[CLS]),
                                             ("load", self.file["clip-vit-b32-image"])])
         self.assertEqual(self.health()["loaded"], ["clip-vit-b32-image"])
         self.post("object_detect", image_path=self.img)
         self.assertTrue(self.Fake.instances[1].released)
-        self.assertEqual(self.health()["loaded"], ["yolov8n"])
+        self.assertEqual(self.health()["loaded"], [DET])
 
     def test_the_files_copy_in_python_memory_is_dropped_once_the_context_has_it(self):
         self.post("classify", image_path=self.img)
@@ -801,29 +932,39 @@ class ResidencyTests(InProcess):
         with contextlib.redirect_stderr(err):
             code, r = self.post("embed", image_path=self.img)
         self.assertEqual(code, 200, r)
-        self.assertIn("release of resnet18 failed: driver said no", err.getvalue())
+        self.assertIn(f"release of {CLS} failed: driver said no", err.getvalue())
         self.assertEqual(self.health()["loaded"], ["clip-vit-b32-image"])
 
     def test_a_mismatched_model_is_refused_and_the_resident_one_is_left_alone(self):
         self.post("classify", image_path=self.img)
-        write(os.path.join(self.models, self.file["yolov8n"]), b"tampered")
+        write(os.path.join(self.models, self.file[DET]), b"tampered")
         code, r = self.post("object_detect", image_path=self.img)
-        self.assertEqual((code, r["error"], r["model"], r["file"]), (200, "model_sha_mismatch", "yolov8n", self.file["yolov8n"]))
-        self.assertEqual((r["expected"], r["got"]), (self.mod.MODELS["yolov8n"]["sha256"], sha(b"tampered")))
+        self.assertEqual((code, r["error"], r["model"], r["file"]), (200, "model_sha_mismatch", DET, self.file[DET]))
+        self.assertEqual((r["expected"], r["got"]), (self.mod.MODELS[DET]["sha256"], sha(b"tampered")))
         self.assertEqual(len(self.Fake.instances), 1)
         self.assertFalse(self.Fake.instances[0].released)
-        self.assertEqual(self.health()["loaded"], ["resnet18"])
+        self.assertEqual(self.health()["loaded"], [CLS])
 
     def test_an_absent_model_says_how_to_get_it(self):
-        os.remove(os.path.join(self.models, self.file["yolov8n"]))
-        os.remove(os.path.join(self.models, self.file["resnet18"]))
-        _, r = self.post("object_detect", image_path=self.img)
-        self.assertEqual((r["error"], r["file"]), ("model_missing", self.file["yolov8n"]))
-        self.assertIn("--convert", r["hint"])  # no public download exists for it
-        _, r = self.post("classify", image_path=self.img)
-        self.assertEqual((r["error"], r["file"]), ("model_missing", self.file["resnet18"]))
-        self.assertIn("fetch-models.sh", r["hint"])
-        self.assertNotIn("--convert", r["hint"])
+        os.remove(os.path.join(self.models, self.file[DET]))
+        os.remove(os.path.join(self.models, self.file[CLS]))
+        for tool, key in (("object_detect", DET), ("classify", CLS)):
+            with self.subTest(tool=tool):
+                _, r = self.post(tool, image_path=self.img)
+                self.assertEqual((r["error"], r["file"]), ("model_missing", self.file[key]))
+                self.assertIn("--convert", r["hint"])  # no public .rknn exists for either
+        # a label file is an ordinary download, whichever converted model asked for it (a fresh module: the
+        # labels already read are cached, and this checks the path that reads them)
+        self.rewrite()
+        for name in ("imagenet_synset.txt", "coco_80_labels_list.txt"):
+            os.remove(os.path.join(self.models, name))
+        for tool in ("object_detect", "classify"):
+            with self.subTest(tool=tool, artifact="labels"):
+                _, r = self.post(tool, image_path=self.img)
+                self.assertEqual(r["error"], "model_missing")
+                self.assertTrue(r["file"].endswith(".txt"), r)
+                self.assertIn("fetch-models.sh", r["hint"])
+                self.assertNotIn("--convert", r["hint"])
 
     def test_label_files_are_gated_like_models_and_before_the_npu_is_touched(self):
         write(os.path.join(self.models, "imagenet_synset.txt"), b"tampered\n")
@@ -841,19 +982,19 @@ class ResidencyTests(InProcess):
         self.assertEqual((code, r["error"]), (200, "runtime_missing"))
         self.assertIn("rknn-toolkit-lite2", r["detail"])
         self.assertFalse(self.Fake.instances[0].released)
-        self.assertEqual(self.health()["loaded"], ["resnet18"])
+        self.assertEqual(self.health()["loaded"], [CLS])
 
     def test_the_runtimes_failures_come_back_as_return_codes_and_are_all_checked(self):
         self.Fake.load_ret = -1
         code, r = self.post("classify", image_path=self.img)
-        self.assertEqual((code, r["error"], r["model"]), (200, "model_load_failed", "resnet18"))
+        self.assertEqual((code, r["error"], r["model"]), (200, "model_load_failed", CLS))
         self.Fake.load_ret, self.Fake.init_ret = 0, -1
         _, r = self.post("classify", image_path=self.img)
         self.assertEqual(r["error"], "npu_unavailable")
         self.assertTrue(self.Fake.instances[-1].released)  # the half-built context goes back
         self.assertEqual(self.health()["loaded"], [])
         self.Fake.init_ret = 0
-        self.outputs("resnet18", lambda _: None)
+        self.outputs(CLS, lambda _: None)
         _, r = self.post("classify", image_path=self.img)
         self.assertEqual(r["error"], "inference_failed")
 
@@ -870,7 +1011,7 @@ class ResidencyTests(InProcess):
 class ConcurrencyTests(InProcess):
     def setUp(self):
         super().setUp()
-        self.outputs("resnet18", lambda _: [np.zeros((1, 1000), np.float32)])
+        self.outputs(CLS, lambda _: [np.zeros((1, 1000), np.float32)])
         self.img = self.image("a.png")
 
     def test_one_npu_call_runs_at_a_time(self):
@@ -908,7 +1049,7 @@ class ConcurrencyTests(InProcess):
         t.start()
         try:
             self.assertTrue(inside.wait(30))
-            self.assertEqual(self.health()["loaded"], ["resnet18"])  # the first call is mid-inference
+            self.assertEqual(self.health()["loaded"], [CLS])  # the first call is mid-inference
         finally:
             release.set()
             t.join(30)
@@ -917,7 +1058,7 @@ class ConcurrencyTests(InProcess):
 class IdleClockTests(InProcess):
     def setUp(self):
         super().setUp()
-        self.outputs("resnet18", lambda _: [np.zeros((1, 1000), np.float32)])
+        self.outputs(CLS, lambda _: [np.zeros((1, 1000), np.float32)])
         self.img = self.image("a.png")
 
     def test_health_and_unknown_routes_do_not_count_as_activity_and_tool_calls_do(self):
@@ -951,7 +1092,7 @@ class Watchdog(InProcess):
         self.addCleanup(quiet.stop)
         self.addCleanup(self._end_watchdog)  # runs first: LIFO
         self.rewrite(RKNPU_IDLE_SEC="1")  # ticks every 0.25 s
-        self.outputs("resnet18", lambda _: [np.zeros((1, 1000), np.float32)])
+        self.outputs(CLS, lambda _: [np.zeros((1, 1000), np.float32)])
         self.img = self.image("a.png")
         self.server = self.Stopper()
         self.started = False
@@ -1120,7 +1261,7 @@ class RuntimeLibShimTests(InProcess):
             return 0
 
         self.Fake.init_runtime = init_runtime
-        self.outputs("resnet18", lambda _: [np.zeros((1, 1000), np.float32)])
+        self.outputs(CLS, lambda _: [np.zeros((1, 1000), np.float32)])
 
     def test_init_runtime_loads_the_private_library_and_the_probe_is_put_back(self):
         self.rewrite(RKNPU_RUNTIME_LIB=self.lib)
@@ -1167,7 +1308,12 @@ class ManifestTests(unittest.TestCase):
         out = {f"runtime.{k}": v["sha256"] for k, v in m["runtime"].items() if isinstance(v, dict)}
         for section in ("models", "labels", "testdata"):
             out.update({f"{section}.{k}": v["sha256"] for k, v in m[section].items()})
-        out.update({f"models.{k}.convert.onnx": v["convert"]["onnx"]["sha256"] for k, v in m["models"].items() if "convert" in v})
+        for k, v in m["models"].items():
+            recipe = v.get("convert", {})
+            if "onnx" in recipe:
+                out[f"models.{k}.convert.onnx"] = recipe["onnx"]["sha256"]
+            if "export" in recipe:
+                out[f"models.{k}.convert.export.weights"] = recipe["export"]["weights_sha256"]
         return out
 
     def test_every_artifact_is_pinned_by_a_real_sha256(self):
@@ -1178,10 +1324,13 @@ class ManifestTests(unittest.TestCase):
     def test_downloads_come_from_a_release_tag_never_a_moving_branch(self):
         urls = [v["url"] for k, v in self.man["runtime"].items() if isinstance(v, dict)]
         urls += [v["url"] for section in ("models", "labels", "testdata") for v in self.man[section].values() if "url" in v]
-        urls += [d[k] for d in self.man["datasets"].values() for k in ("list", "base")]
+        urls += [d[k] for d in self.man["datasets"].values() for k in ("list", "base") if k in d]
+        urls += [v["convert"]["export"]["weights_url"] for v in self.man["models"].values() if "export" in v.get("convert", {})]
         for url in urls:
             with self.subTest(url=url):
-                self.assertTrue(url.startswith("https://"))
+                # The one plain-http source is the COCO image host, whose https certificate does not name it (measured
+                # 2026-09-30): its images are unpinned calibration input, and the manifest's comment says so.
+                self.assertTrue(url.startswith("https://") or url.startswith("http://images.cocodataset.org/"))
                 if "raw.githubusercontent.com" in url:
                     self.assertIn(f"/v{self.man['runtime']['rknn_toolkit_lite2']}/", url)
 
@@ -1194,9 +1343,60 @@ class ManifestTests(unittest.TestCase):
                 if "labels" in spec:
                     self.assertIn(spec["labels"], self.man["labels"])
                 if "convert" in spec:
-                    if spec["convert"].get("dataset"):
-                        self.assertIn(spec["convert"]["dataset"], self.man["datasets"])
-                    self.assertIn("url", spec["convert"]["onnx"])
+                    recipe = spec["convert"]
+                    if recipe.get("dataset"):
+                        self.assertIn(recipe["dataset"], self.man["datasets"])
+                    self.assertEqual("onnx" in recipe, "export" not in recipe, "a recipe names one source: onnx or export")
+                    if "onnx" in recipe:
+                        self.assertIn("url", recipe["onnx"])
+                    else:
+                        for field in ("timm", "weights_url", "weights_sha256", "input_name", "input_size", "opset"):
+                            self.assertIn(field, recipe["export"])
+                    for field in ("mean_values", "std_values", "quantize"):
+                        self.assertIn(field, recipe)
+                    self.assertEqual(bool(recipe.get("dataset")), recipe["quantize"], "a dataset only for a quantised build")
+
+    def test_the_timm_exports_pin_their_weights_and_agree_with_their_conversion(self):
+        exports = {k: v["convert"] for k, v in self.man["models"].items() if "export" in v.get("convert", {})}
+        self.assertEqual(sorted(exports), ["resnet50tv2-fp16", "resnet50tv2-i8"])
+        self.assertEqual(exports["resnet50tv2-i8"]["export"], exports["resnet50tv2-fp16"]["export"])  # one shared export
+        for key, recipe in exports.items():
+            with self.subTest(model=key):
+                export = recipe["export"]
+                # a revision, not "main": the weights a rebuild fetches are the ones the hash names
+                self.assertRegex(export["weights_url"], r"^https://huggingface\.co/timm/[^/]+/resolve/[0-9a-f]{40}/model\.safetensors$")
+                self.assertEqual(export["timm"], "resnet50.tv2_in1k")
+                self.assertEqual((export["input_name"], export["input_size"], export["opset"]), ("data", [1, 3, 224, 224], 12))
+                self.assertEqual(recipe["load_onnx"], {"inputs": [export["input_name"]], "input_size_list": [export["input_size"]]})
+                self.assertEqual(recipe["mean_values"], [[123.675, 116.28, 103.53]])  # baked into the .rknn, so the sidecar sends raw uint8
+                self.assertEqual(recipe["std_values"], [[58.395, 57.12, 57.375]])
+        self.assertIs(exports["resnet50tv2-fp16"]["quantize"], False)
+        self.assertIs(exports["resnet50tv2-i8"]["quantize"], True)
+        self.assertIn("ImageNetV2", exports["resnet50tv2-i8"]["calibrated_on"])  # the pinned file was NOT calibrated on the recipe's list
+
+    def test_a_classifier_that_crops_says_how_and_matches_its_input(self):
+        for key, spec in self.man["models"].items():
+            if spec["task"] == "classify":
+                with self.subTest(model=key):
+                    self.assertEqual((spec["resize_short"], spec["crop"], spec["input"]), (232, 224, 224))
+                    self.assertGreaterEqual(spec["resize_short"], spec["crop"])
+                    self.assertEqual(spec["domain"], "imagenet")
+
+    def test_the_datasets_name_a_list_and_a_base_and_every_one_is_used(self):
+        used = {s["convert"]["dataset"] for s in self.man["models"].values() if s.get("convert", {}).get("dataset")}
+        self.assertEqual(set(self.man["datasets"]), used)
+        for name, spec in self.man["datasets"].items():
+            with self.subTest(dataset=name):
+                self.assertEqual("list" in spec, "list_file" not in spec, "exactly one of list (a URL) and list_file")
+                self.assertTrue(spec["base"].endswith("/"))
+                if "list_file" in spec:
+                    self.assertFalse(os.path.isabs(spec["list_file"]) or ".." in spec["list_file"].split("/"))
+                    with open(os.path.join(HERE, spec["list_file"]), encoding="utf-8") as fh:
+                        names = fh.read().split()
+                    self.assertEqual(len(names), len(set(names)), "a duplicated calibration image")
+                    self.assertEqual(len(names), 200)
+                    for n in names:
+                        self.assertRegex(n, r"^\d{12}\.jpg$")  # a COCO val2017 file name, not a path
 
     def test_the_wheel_and_the_runtime_library_agree_with_the_toolkit_version(self):
         version = self.man["runtime"]["rknn_toolkit_lite2"]
@@ -1205,6 +1405,9 @@ class ManifestTests(unittest.TestCase):
 
     def test_the_tools_use_models_the_manifest_has(self):
         mod = load_server(RKNPU_ENABLED="0")
+        self.assertEqual(mod.CLASSIFY_DOMAINS, {"imagenet": mod.CLASSIFY_MODEL})
+        self.assertIn(mod.CLASSIFY_MODEL, ("resnet50tv2-i8", "resnet50tv2-fp16"))
+        self.assertEqual(mod.DETECT_KEY, "ppyoloe_s")
         for key in (*mod.CLASSIFY_DOMAINS.values(), mod.DETECT_KEY, mod.EMBED_KEY):
             with self.subTest(model=key):
                 self.assertIn(key, mod.MODELS)
@@ -1345,16 +1548,57 @@ class LauncherTests(unittest.TestCase):
 
 
 # A stand-in for the RKNN toolkit's rknn.api (x86_64 only): every step succeeds and the export writes the pinned bytes.
-STUB_RKNN = """class RKNN:
+# With STUB_LOG set, each step also appends [step, kwargs] to that file.
+STUB_RKNN = """import json, os
+LOG = os.environ.get("STUB_LOG")
+def _log(step, kw):
+    if LOG:
+        with open(LOG, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps([step, kw]) + "\\n")
+class RKNN:
     def __init__(self, verbose=False): pass
-    def config(self, **kw): pass
-    def load_onnx(self, **kw): return 0
-    def build(self, **kw): return 0
+    def config(self, **kw): _log("config", kw)
+    def load_onnx(self, **kw): _log("load_onnx", kw); return 0
+    def build(self, **kw): _log("build", kw); return 0
     def export_rknn(self, path):
         with open(path, "wb") as fh:
             fh.write(b"a converted model")
         return 0
     def release(self): pass
+"""
+
+# Stand-ins for timm and torch, just enough for the export recipe: they log what the script asked of them to STUB_LOG.
+STUB_TIMM = """import json, os
+def create_model(name, pretrained=False, pretrained_cfg_overlay=None):
+    with open(os.environ["STUB_LOG"], "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(["create_model", dict(name=name, pretrained=pretrained, overlay=pretrained_cfg_overlay)]) + "\\n")
+    class Model:
+        def eval(self): return self
+    return Model()
+"""
+STUB_TORCH = """from . import onnx
+class _NoGrad:
+    def __enter__(self): return self
+    def __exit__(self, *exc): return False
+def no_grad(): return _NoGrad()
+def randn(*size): return ["randn", list(size)]
+"""
+STUB_TORCH_ONNX = """import json, os
+def _record(**kw):
+    with open(os.environ["STUB_LOG"], "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(["export", kw]) + "\\n")
+if os.environ.get("STUB_DYNAMO") == "1":  # torch >= 2.5 has the argument (and from 2.9 defaults it to True)
+    def export(model, args, f, input_names=None, output_names=None, opset_version=None, do_constant_folding=None, dynamo=True):
+        _record(args=args, file=os.path.basename(f), input_names=input_names, output_names=output_names,
+                opset=opset_version, dynamo=dynamo)
+        with open(f, "wb") as fh:
+            fh.write(b"an exported onnx")
+else:  # torch 2.4, the documented venv's: no such argument
+    def export(model, args, f, input_names=None, output_names=None, opset_version=None, do_constant_folding=None):
+        _record(args=args, file=os.path.basename(f), input_names=input_names, output_names=output_names,
+                opset=opset_version, dynamo="absent")
+        with open(f, "wb") as fh:
+            fh.write(b"an exported onnx")
 """
 
 
@@ -1445,24 +1689,40 @@ class FetchModelsTests(unittest.TestCase):
         self.assertIn("rknn", r.stderr)
         self.assertEqual(os.listdir(cache), [])
 
-    def convert(self, entries):
-        """--convert against a stub RKNN toolkit and a calibration list of `entries`; returns (result, cache dir)."""
+    def stub_toolkit(self):
         write(f"{self.root}/stub/rknn/__init__.py", b"")
         write(f"{self.root}/stub/rknn/api.py", STUB_RKNN.encode())
+
+    def stub_log(self):
+        path = f"{self.root}/stub.log"
+        if not os.path.exists(path):
+            return []
+        with open(path, encoding="utf-8") as fh:
+            return [json.loads(line) for line in fh if line.strip()]
+
+    def convert(self, entries, list_file=None, **env):
+        """--convert against a stub RKNN toolkit and a calibration list of `entries`, either downloaded ("list") or,
+        with list_file set to the text of the file, a file beside the manifest ("list_file"); returns (result, cache dir)."""
+        self.stub_toolkit()
         write(f"{self.root}/src/m.onnx", b"an onnx")
-        write(f"{self.root}/src/list.txt", "".join(e + "\n" for e in entries).encode())
+        text = "".join(e + "\n" for e in entries) if list_file is None else list_file
+        write(f"{self.root}/src/list.txt", text.encode())
         for name in ("img1.jpg", "escape.jpg", "sub/img2.jpg"):
             write(f"{self.root}/src/{name}", b"a picture")
         man = read_json(self.manifest)
         man["models"]["big"]["convert"] = {
             "onnx": {"url": pathlib.Path(f"{self.root}/src/m.onnx").as_uri(), "sha256": sha(b"an onnx")},
             "mean_values": [[0]], "std_values": [[1]], "quantize": True, "dataset": "calib"}
-        man["datasets"] = {"calib": {"list": pathlib.Path(f"{self.root}/src/list.txt").as_uri(),
-                                     "base": pathlib.Path(f"{self.root}/src").as_uri() + "/"}}
+        base = pathlib.Path(f"{self.root}/src").as_uri() + "/"
+        if list_file is None:
+            man["datasets"] = {"calib": {"list": pathlib.Path(f"{self.root}/src/list.txt").as_uri(), "base": base}}
+        else:
+            write(f"{self.root}/calib/list.txt", text.encode())
+            man["datasets"] = {"calib": {"list_file": "calib/list.txt", "base": base}}
         write(self.manifest, json.dumps(man))
         cache = f"{self.root}/cache"
         r = self.run_fetch("--convert", RKNPU_CONVERT_PYTHON=sys.executable, RKNPU_CONVERT_CACHE=cache,
-                           PYTHONPATH=f"{self.root}/stub")
+                           PYTHONPATH=f"{self.root}/stub", STUB_LOG=f"{self.root}/stub.log", **env)
         return r, cache
 
     def test_convert_fetches_the_calibration_images_the_list_names_under_the_dataset_directory(self):
@@ -1483,6 +1743,122 @@ class FetchModelsTests(unittest.TestCase):
                 self.assertFalse(os.path.exists(f"{cache}/calib/img1.jpg"), "nothing is fetched once an entry is refused")
                 shutil.rmtree(cache, ignore_errors=True)
 
+    def test_convert_reads_a_calibration_list_that_is_a_file_beside_the_manifest(self):
+        for eol in ("\n", "\r\n"):  # a Windows checkout of the list has CRLF line endings
+            with self.subTest(eol=eol):
+                shutil.rmtree(f"{self.root}/cache", ignore_errors=True)
+                if os.path.exists(f"{self.root}/stub.log"):
+                    os.remove(f"{self.root}/stub.log")
+                r, cache = self.convert([], list_file=eol.join(["img1.jpg", "./sub/img2.jpg", ""]))
+                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                self.assertTrue(os.path.isfile(f"{cache}/calib/img1.jpg"))
+                self.assertTrue(os.path.isfile(f"{cache}/calib/sub/img2.jpg"))
+                with open(f"{cache}/calib/list.txt", "rb") as fh:  # what the toolkit reads: normalised, beside the images
+                    self.assertEqual(fh.read(), b"img1.jpg\nsub/img2.jpg\n")
+                build = [kw for step, kw in self.stub_log() if step == "build"]
+                self.assertEqual([os.path.normpath(kw["dataset"]) for kw in build], [os.path.normpath(f"{cache}/calib/list.txt")])
+
+    def test_convert_refuses_a_list_file_entry_that_is_absolute_or_climbs_out(self):
+        planted = f"{self.root}/planted"
+        for entry in ("../escape.jpg", "./sub/../../escape.jpg", f"{planted}/x.jpg", "/etc/passwd", r"..\escape.jpg"):
+            with self.subTest(entry=entry):
+                r, cache = self.convert([], list_file="img1.jpg\n" + entry + "\n")
+                self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+                self.assertIn("refusing the list entry", r.stdout + r.stderr)
+                self.assertFalse(os.path.exists(f"{cache}/escape.jpg"))
+                self.assertFalse(os.path.exists(planted))
+                self.assertFalse(os.path.exists(f"{cache}/calib/img1.jpg"), "nothing is fetched once an entry is refused")
+                shutil.rmtree(cache, ignore_errors=True)
+
+    def test_convert_refuses_a_list_file_that_leaves_the_manifests_directory_and_a_dataset_with_two_lists(self):
+        self.convert([], list_file="img1.jpg\n")
+        man = read_json(self.manifest)
+        for label, spec, want in (
+                ("climbing out", {"list_file": "../list.txt", "base": "file:///x/"}, "refusing the list entry"),
+                ("absolute", {"list_file": f"{self.root}/calib/list.txt", "base": "file:///x/"}, "refusing the list entry"),
+                ("both", {"list": "file:///x", "list_file": "calib/list.txt", "base": "file:///x/"}, "exactly one of"),
+                ("neither", {"base": "file:///x/"}, "exactly one of")):
+            with self.subTest(label):
+                man["datasets"]["calib"] = spec
+                write(self.manifest, json.dumps(man))
+                shutil.rmtree(f"{self.root}/cache", ignore_errors=True)
+                r = self.run_fetch("--convert", RKNPU_CONVERT_PYTHON=sys.executable, RKNPU_CONVERT_CACHE=f"{self.root}/cache",
+                                   PYTHONPATH=f"{self.root}/stub", STUB_LOG=f"{self.root}/stub.log")
+                self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+                self.assertIn(want, r.stdout + r.stderr)
+
+    def export_setup(self, weights_sha=None, timm=True, dynamo="1"):
+        """Two models that share one timm export recipe and a third that converts a hosted ONNX, beside stubs of the
+        toolkit, timm and torch. Returns the run's result and the cache dir."""
+        self.stub_toolkit()
+        for name, body in (("timm/__init__.py", STUB_TIMM if timm else "raise ImportError('no timm in this stub')\n"),
+                           ("torch/__init__.py", STUB_TORCH), ("torch/onnx/__init__.py", STUB_TORCH_ONNX)):
+            write(f"{self.root}/stub/{name}", body.encode())
+        write(f"{self.root}/src/weights.safetensors", b"some weights")
+        write(f"{self.root}/src/m.onnx", b"an onnx")
+        pinned = sha(b"a converted model")
+        export = {"timm": "toy", "weights_url": pathlib.Path(f"{self.root}/src/weights.safetensors").as_uri(),
+                  "weights_sha256": weights_sha or sha(b"some weights"), "input_name": "data", "input_size": [1, 3, 8, 8], "opset": 12}
+        recipe = {"export": export, "mean_values": [[1, 2, 3]], "std_values": [[4, 5, 6]], "quantize": False,
+                  "load_onnx": {"inputs": ["data"], "input_size_list": [[1, 3, 8, 8]]}}
+        man = read_json(self.manifest)
+        man["models"] = {"big": {"file": "big.rknn", "sha256": pinned, "convert": recipe},
+                         "big2": {"file": "big2.rknn", "sha256": pinned, "convert": recipe},
+                         "plain": {"file": "plain.rknn", "sha256": pinned, "convert": {
+                             "onnx": {"url": pathlib.Path(f"{self.root}/src/m.onnx").as_uri(), "sha256": sha(b"an onnx")},
+                             "mean_values": [[0]], "std_values": [[1]], "quantize": False}}}
+        write(self.manifest, json.dumps(man))
+        cache = f"{self.root}/cache"
+        r = self.run_fetch("--convert", RKNPU_CONVERT_PYTHON=sys.executable, RKNPU_CONVERT_CACHE=cache,
+                           PYTHONPATH=f"{self.root}/stub", STUB_LOG=f"{self.root}/stub.log", STUB_DYNAMO=dynamo)
+        return r, cache
+
+    def test_convert_exports_a_timm_model_from_checked_weights_once_and_converts_the_export(self):
+        for dynamo, want_flag in (("1", False), ("0", "absent")):  # torch with and without the dynamo argument
+            with self.subTest(dynamo=dynamo):
+                shutil.rmtree(f"{self.root}/cache", ignore_errors=True)
+                if os.path.exists(f"{self.root}/stub.log"):
+                    os.remove(f"{self.root}/stub.log")
+                r, cache = self.export_setup(dynamo=dynamo)
+                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                weights = f"{cache}/toy.safetensors"
+                onnx = f"{cache}/toy-{sha(b'some weights')[:12]}-opset12-1x3x8x8.onnx"  # keyed by the weights' hash
+                with open(weights, "rb") as fh:
+                    self.assertEqual(fh.read(), b"some weights")
+                log = self.stub_log()
+                made = [kw for step, kw in log if step == "create_model"]
+                self.assertEqual(len(made), 1, "two models share one export: it runs once")
+                self.assertEqual((made[0]["name"], made[0]["pretrained"]), ("toy", True))
+                self.assertEqual(os.path.normpath(made[0]["overlay"]["file"]), os.path.normpath(weights))  # the local, checked file
+                self.assertEqual(list(made[0]["overlay"]), ["file"])
+                exported = [kw for step, kw in log if step == "export"]
+                self.assertEqual(len(exported), 1)
+                self.assertEqual({k: v for k, v in exported[0].items() if k != "file"},
+                                 {"args": ["randn", [1, 3, 8, 8]], "input_names": ["data"], "output_names": ["logits"],
+                                  "opset": 12, "dynamo": want_flag})
+                self.assertEqual(sorted(f for f in os.listdir(cache) if f.endswith(".part")), [])
+                loaded = [kw for step, kw in log if step == "load_onnx"]
+                self.assertEqual([os.path.normpath(kw["model"]) for kw in loaded], [os.path.normpath(onnx)] * 2 + [os.path.normpath(f"{cache}/m.onnx")])
+                self.assertEqual([kw["input_size_list"] for kw in loaded[:2]], [[[1, 3, 8, 8]]] * 2)
+                self.assertEqual([kw for step, kw in log if step == "config"][0]["mean_values"], [[1, 2, 3]])
+                for name in ("big.rknn", "big2.rknn", "plain.rknn"):
+                    self.assertIn(f"ok       {name} (identical to the pin)", r.stdout)
+
+    def test_convert_refuses_timm_weights_that_do_not_match_their_pin_before_exporting(self):
+        r, cache = self.export_setup(weights_sha="0" * 64)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("sha256 does not match", r.stdout + r.stderr)
+        self.assertFalse(os.path.exists(f"{cache}/toy.safetensors"), "a mismatched download is removed")
+        self.assertEqual([step for step, _ in self.stub_log() if step in ("create_model", "export")], [])
+
+    def test_convert_without_timm_fails_the_exported_models_and_still_converts_the_rest(self):
+        r, cache = self.export_setup(timm=False)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        for name in ("big.rknn", "big2.rknn"):
+            self.assertRegex(r.stdout, rf"FAILED   {re.escape(name)} \(its ONNX is exported with timm and torch, which .* cannot import")
+        self.assertIn("ok       plain.rknn (identical to the pin)", r.stdout)
+        self.assertEqual([step for step, _ in self.stub_log() if step == "export"], [])
+
     def test_an_unknown_argument_is_a_usage_error(self):
         r = self.run_fetch("--bogus")
         self.assertEqual(r.returncode, 2)
@@ -1495,6 +1871,87 @@ class FetchModelsTests(unittest.TestCase):
         r = self.run_fetch(RKNPU_HOME="", script=f"{lonely}/fetch-models.sh")
         self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
         self.assertIn("no RKNPU_HOME", r.stderr)
+
+
+# ---------------------------------------------------------------- the simulator's own tensors
+
+def sim_outputs(stem: str, n: int):
+    """rknn-toolkit2's float32 output tensors ({stem}_out0.npy ...) of the shipped configuration, or None when
+    RKNPU_SIM_DIR is unset or does not hold them. The detector's nine come in the zoo's order: per stride 32, 16, 8
+    a box, a class and a score-sum tensor."""
+    paths = [os.path.join(SIM_DIR, f"{stem}_out{i}.npy") for i in range(n)] if SIM_DIR else []
+    return [np.load(p) for p in paths] if paths and all(os.path.isfile(p) for p in paths) else None
+
+
+class SimulatorTensorTests(InProcess):
+    """The decoder and the classifier's softmax on the tensors the toolkit's simulator produced from the converted
+    models on the zoo's bus.jpg and dog_224x224.jpg (2026-09-30 benchmark folder, sim/): real output, not tensors
+    built to fit the decoder. Set RKNPU_SIM_DIR to that folder; without it these skip."""
+
+    def need(self, stem, n):
+        outs = sim_outputs(stem, n)
+        if outs is None:
+            self.skipTest(f"RKNPU_SIM_DIR does not hold {stem}_out0..{n - 1}.npy")
+        return outs
+
+    # what the simulator's INT8 tensors decode to at the zoo demo's thresholds (0.25 score, 0.45 IoU), in the
+    # letterboxed 640x640 frame: the bench's PP-YOLOE reads person .950/.935/.923, bus .893, person .473, handbag .411
+    BUS = [(0, 0.9505, (109.0, 233.2, 224.7, 536.4)), (0, 0.9350, (477.2, 231.7, 561.4, 520.2)),
+           (0, 0.9234, (211.3, 240.5, 283.4, 512.5)), (5, 0.8925, (89.4, 135.0, 552.4, 439.2)),
+           (0, 0.4731, None), (26, 0.4114, None)]
+
+    def test_ppyoloe_on_bus_jpg_decodes_to_the_expected_objects(self):
+        outs = self.need("ppyoloe_s_i8_rk3588", 9)
+        self.assertEqual([tuple(o.shape) for o in outs[:3]], [(1, 68, 20, 20), (1, 80, 20, 20), (1, 1, 20, 20)])
+        xyxy, ids, scores = self.mod._decode_detections(outs, 640, self.mod.DETECT_SCORE)
+        order = np.argsort(-scores)
+        self.assertEqual([int(ids[i]) for i in order], [c for c, _, _ in self.BUS])
+        for i, (cid, score, box) in zip(order, self.BUS):
+            self.assertAlmostEqual(float(scores[i]), score, delta=0.01)
+            if box is not None:  # the two weaker objects tie many cells on the same quantised score: their box is not pinned
+                for got, want in zip(xyxy[i], box):
+                    self.assertAlmostEqual(float(got), want, delta=4.0)
+        areas = (xyxy[:, 2] - xyxy[:, 0]) * (xyxy[:, 3] - xyxy[:, 1])
+        self.assertEqual(int(ids[int(np.argmax(areas))]), 5)  # the bus is the biggest box
+
+    def test_ppyoloe_through_the_tool_maps_the_boxes_back_onto_the_810x1080_picture(self):
+        outs = self.need("ppyoloe_s_i8_rk3588", 9)
+        self.outputs(DET, lambda _: outs)
+        code, r = self.post("object_detect", image_path=self.image("bus.png", (810, 1080)))
+        self.assertEqual((code, r["count"], r["image_width"], r["image_height"]), (200, 6, 810, 1080), r)
+        objs = r["objects"]
+        self.assertEqual([o["class_id"] for o in objs], [c for c, _, _ in self.BUS])
+        for o, (_, score, _) in zip(objs, self.BUS):
+            self.assertAlmostEqual(o["score"], score, delta=0.01)
+        self.assertEqual([o["label"] for o in objs[:4]], ["person", "person", "person", "bus"])
+        # letterbox scale 640/1080 with 80 columns of padding each side: model x 89.4..552.4 -> picture x 15.9..797.6
+        bus = objs[3]
+        self.assertAlmostEqual(bus["x"], (89.4 - 80) / (640 / 1080), delta=8)
+        self.assertAlmostEqual(bus["x"] + bus["w"], (552.4 - 80) / (640 / 1080), delta=8)
+        self.assertAlmostEqual(bus["y"], 135.0 / (640 / 1080), delta=8)
+        self.assertAlmostEqual(bus["y"] + bus["h"], 439.2 / (640 / 1080), delta=8)
+        self.assertEqual(max(objs, key=lambda o: o["w"] * o["h"]), bus)
+        for o in objs:
+            self.assertTrue(0 <= o["x"] and 0 <= o["y"] and o["x"] + o["w"] <= 810 and o["y"] + o["h"] <= 1080, o)
+
+    def test_resnet50_tv2_on_dog_224x224_is_a_shih_tzu_in_both_builds(self):
+        names = {i: f"class{i}" for i in range(1000)}
+        names[155] = "Shih-Tzu"
+        self.rewrite(labels={"imagenet_synset.txt": "".join(f"n{i:08d} {names[i]}\n" for i in range(1000))})
+        for key, stem, prob in (("resnet50tv2-i8", "resnet50tv2_i8_rk3588", 0.5961), ("resnet50tv2-fp16", "resnet50tv2_fp16_rk3588", 0.5802)):
+            with self.subTest(model=key):
+                logits = self.need(stem, 1)[0]
+                self.assertEqual((logits.shape, int(logits.argmax())), ((1, 1000), 155))
+                self.mod.CLASSIFY_DOMAINS["imagenet"] = key
+                self.outputs(key, lambda _, v=logits: [v])
+                code, r = self.post("classify", image_path=self.image("dog.png", (224, 224)), top_k=3)
+                self.assertEqual(code, 200, r)
+                self.assertEqual((r["best"]["label"], r["model"]), ("Shih-Tzu", self.file[key]))
+                z = logits.reshape(-1).astype(np.float64)
+                want = np.exp(z - z.max()) / np.exp(z - z.max()).sum()
+                self.assertAlmostEqual(r["best"]["score"], float(want[155]), places=5)
+                self.assertAlmostEqual(r["best"]["score"], prob, delta=0.005)  # the bench's figure for this build
+                self.assertEqual([x["label"] for x in r["results"]], [names[i] for i in np.argsort(-want)[:3]])
 
 
 if __name__ == "__main__":

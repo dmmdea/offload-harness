@@ -5,29 +5,47 @@
 #
 #   fetch-models.sh             downloads everything that has a public URL: the runtime (librknnrt.so into
 #                               $RKNPU_HOME/lib, the RKNN-Toolkit-Lite2 wheel into $RKNPU_HOME/wheels) and,
-#                               into the models dir, resnet18, the label files and the test images. The
-#                               models that have no public download (yolov8n, the CLIP image tower) are
-#                               only verified; exit 1 while one is absent.
-#   fetch-models.sh --convert   BUILDS those models (rknn_model_zoo v2.3.2 recipes, target rk3588) into the
-#                               models dir, then reports each one's sha256. Run it on an x86_64 Linux host
-#                               whose $RKNPU_CONVERT_PYTHON (default python3) imports rknn-toolkit2 2.3.2:
+#                               into the models dir, the label files and the test images. No model has a
+#                               public .rknn (PP-YOLOE+ s, the two ResNet-50 builds, the CLIP image tower), so
+#                               the models are only verified; exit 1 while one is absent.
+#   fetch-models.sh --convert   BUILDS those models (rknn-toolkit2 2.3.2, target rk3588) into the models dir,
+#                               then reports each one's sha256. Run it on an x86_64 Linux host whose
+#                               $RKNPU_CONVERT_PYTHON (default python3) imports rknn-toolkit2 2.3.2, and
+#                               timm and torch for the ResNet-50 export:
 #                                   uv venv --python 3.12 conv && P="uv pip install --python conv/bin/python"
-#                                   $P --index-url https://download.pytorch.org/whl/cpu torch==2.4.0
+#                                   $P --index-url https://download.pytorch.org/whl/cpu torch==2.4.0 torchvision==0.19.0
 #                                   $P numpy==1.26.4 'protobuf>=4.21.6,<=4.25.4' psutil ruamel.yaml scipy tqdm \
-#                                      opencv-python-headless fast-histogram onnx==1.16.1 onnxruntime==1.17.1
+#                                      opencv-python-headless fast-histogram onnx==1.16.1 onnxruntime==1.17.1 \
+#                                      timm safetensors
 #                                   $P --no-deps https://raw.githubusercontent.com/airockchip/rknn-toolkit2/v2.3.2/rknn-toolkit2/packages/x86_64/rknn_toolkit2-2.3.2-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
 #                               then RKNPU_MODELS_DIR=$PWD/out RKNPU_CONVERT_PYTHON=conv/bin/python
 #                               ./fetch-models.sh --convert, copy the .rknn files to the board's models dir
 #                               and run this script there (no flag) to verify them.
 #
+# A model's recipe ("convert" in models.json) names its source in one of two ways:
+#   "onnx"    a hosted ONNX (the zoo's own download host): downloaded and checked against its sha256 first.
+#   "export"  a timm model whose ONNX is hosted nowhere: the weights file is downloaded and checked against its
+#             sha256, timm builds the network around that local file (nothing else is fetched), and
+#             torch.onnx.export writes the ONNX with the recipe's input name, size and opset (the TorchScript
+#             exporter: torch >= 2.9 defaults to another one, so dynamo=False is passed wherever torch has the
+#             argument). The exported ONNX has NO sha256 check: an export is not reproducible across torch
+#             versions, so only its weights are pinned. It is cached, and shared by every model that names the
+#             same export.
+# Calibration images ("dataset") come from a list: a URL ("list") or a file of this repository, relative to the
+# manifest ("list_file", one image name per line, so a copy of this directory made for converting needs calib/
+# beside models.json; the board needs neither), plus the base URL the images are fetched from. Every entry is
+# checked before the first image is fetched, and the images are not pinned by hash.
+#
 # A conversion is not bit-reproducible: the .rknn container embeds build metadata, so two runs of the same
-# recipe on the same inputs differ by about a kilobyte (measured 2026-09-29: yolov8n 937 bytes, CLIP 814).
-# models.json therefore pins the exact bytes that were verified on the board. After a conversion of your
+# recipe on the same inputs differ by about a kilobyte (measured yolov8n 937 bytes, CLIP 814 on 2026-09-29;
+# ppyoloe_s 1040, resnet50tv2-i8 923, resnet50tv2-fp16 1002 on 2026-09-30).
+# models.json therefore pins the exact bytes that were built and checked. After a conversion of your
 # own the script prints the new hash; record it in models.json (the model's "sha256") to serve that file.
-# The inputs ARE pinned: every ONNX source is checked against its sha256 before it is converted.
+# Every downloaded ONNX and every timm weights file is checked against its sha256 before it is used.
 #
 # Sources: airockchip/rknn-toolkit2 and airockchip/rknn_model_zoo at v2.3.2 (raw GitHub URLs; the ONNX
-# files come from the model zoo's own download host). Env: RKNPU_HOME (else the directory holding venv/
+# files come from the model zoo's own download host), the timm weights from Hugging Face, and the COCO
+# val2017 images from images.cocodataset.org. Env: RKNPU_HOME (else the directory holding venv/
 # above this script), RKNPU_MODELS_DIR, RKNPU_MANIFEST, RKNPU_CONVERT_PYTHON, RKNPU_CONVERT_CACHE.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -53,7 +71,7 @@ mkdir -p "$DEST"
 
 if [ "$mode" = convert ]; then
   exec "${RKNPU_CONVERT_PYTHON:-python3}" - "$MANIFEST" "$DEST" <<'PY'
-import hashlib, json, os, sys, tempfile, urllib.request
+import hashlib, inspect, json, os, sys, tempfile, urllib.request
 
 manifest, dest = sys.argv[1], sys.argv[2]
 man = json.load(open(manifest, encoding="utf-8"))
@@ -80,8 +98,9 @@ def download(url, path, sha=None):
 
 
 def entry_path(name, rel):
-    """One calibration-list entry, normalised. The list is downloaded, so an entry that is absolute or climbs
-    out with ".." would make the join below write outside the cache: refuse it before anything is joined."""
+    """One calibration-list entry, normalised. The list is downloaded or read from a file, so an entry that is
+    absolute or climbs out with ".." would make the join below write outside the cache: refuse it before anything
+    is joined. The same check refuses a manifest's "list_file" that leaves the manifest's directory."""
     posix = rel.replace("\\", "/")
     if posix.startswith("/") or os.path.isabs(rel) or os.path.splitdrive(rel)[0] or ".." in posix.split("/"):
         sys.exit(f"FAILED   dataset {name}: refusing the list entry {rel!r} (absolute or containing '..')")
@@ -89,17 +108,53 @@ def entry_path(name, rel):
 
 
 def dataset(name):
-    """The quantisation images: a list file plus the images it names, fetched next to each other."""
+    """The quantisation images: a list file plus the images it names, fetched next to each other. The list is a URL
+    ("list", downloaded) or a file of this repository ("list_file", relative to the manifest); either way every entry
+    is checked before the first image is fetched."""
     spec, root = man["datasets"][name], os.path.join(cache, name)
+    if ("list" in spec) == ("list_file" in spec):
+        sys.exit(f"FAILED   dataset {name}: exactly one of \"list\" and \"list_file\" is required")
     os.makedirs(root, exist_ok=True)
     listing = os.path.join(root, "list.txt")
-    download(spec["list"], listing)
-    entries = [entry_path(name, line.strip()) for line in open(listing, encoding="utf-8") if line.strip()]
+    if "list_file" in spec:
+        local = os.path.join(os.path.dirname(os.path.abspath(manifest)), entry_path(name, spec["list_file"]))
+        with open(local, encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
+    else:
+        download(spec["list"], listing)
+        with open(listing, encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
+    entries = [entry_path(name, line.strip()) for line in lines if line.strip()]
+    if "list_file" in spec:  # written next to the images: the toolkit resolves the entries against the list's directory
+        with open(listing, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write("".join(rel.replace(os.sep, "/") + "\n" for rel in entries))
     for rel in entries:
         img = os.path.join(root, rel)
         os.makedirs(os.path.dirname(img), exist_ok=True)
         download(spec["base"] + rel.replace(os.sep, "/"), img)
     return listing
+
+
+def export_onnx(spec):
+    """The ONNX of a timm model (see the header): weights checked, network built around them, exported once."""
+    import timm
+    import torch
+
+    weights = os.path.join(cache, spec["timm"] + ".safetensors")
+    download(spec["weights_url"], weights, spec["weights_sha256"])
+    size = spec["input_size"]
+    out = os.path.join(cache, f"{spec['timm']}-{spec['weights_sha256'][:12]}-opset{spec['opset']}-{'x'.join(map(str, size))}.onnx")
+    if not os.path.isfile(out):
+        model = timm.create_model(spec["timm"], pretrained=True, pretrained_cfg_overlay=dict(file=weights)).eval()
+        kwargs = dict(input_names=[spec["input_name"]], output_names=["logits"], opset_version=spec["opset"],
+                      do_constant_folding=True)
+        if "dynamo" in inspect.signature(torch.onnx.export).parameters:
+            kwargs["dynamo"] = False
+        print(f"exporting {spec['timm']} to {out}")
+        with torch.no_grad():
+            torch.onnx.export(model, torch.randn(*size), out + ".part", **kwargs)
+        os.replace(out + ".part", out)
+    return out
 
 
 from rknn.api import RKNN  # before any download: a host without the toolkit stops here with the ImportError
@@ -109,8 +164,16 @@ for key, spec in man["models"].items():
     recipe = spec.get("convert")
     if recipe is None:
         continue
-    onnx = os.path.join(cache, os.path.basename(recipe["onnx"]["url"]))
-    download(recipe["onnx"]["url"], onnx, recipe["onnx"]["sha256"])
+    if "export" in recipe:
+        try:
+            onnx = export_onnx(recipe["export"])
+        except ImportError as e:
+            print(f"FAILED   {spec['file']} (its ONNX is exported with timm and torch, which {sys.executable} cannot import: {e})")
+            failed = 1
+            continue
+    else:
+        onnx = os.path.join(cache, os.path.basename(recipe["onnx"]["url"]))
+        download(recipe["onnx"]["url"], onnx, recipe["onnx"]["sha256"])
     out = os.path.join(dest, spec["file"])
     rknn = RKNN(verbose=False)
     rknn.config(mean_values=recipe["mean_values"], std_values=recipe["std_values"],
