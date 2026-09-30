@@ -66,6 +66,14 @@ measurement of the client.
    `result_sources`, `sources`: the digests before the long sources, and the notes that say pages are
    missing in the head now that the flag no longer does. Every field is kept.
 
+5. **A cut remote job is withdrawn on request, best effort.** Cancelling the poll leaves the job on its
+   node, where it could start later on a seat nobody is waiting for. At the deadline the delegator asks
+   the node to withdraw each job it is walking away from: `DELETE /fleet/jobs/{id}` with the fleet
+   bearer, five seconds, detached from the cancelled context. It is a request, not a claim: a node that
+   has not shipped the route answers 404 or 405 and keeps the job (today's behaviour), a job that has
+   already started is not the delegator's to cancel, and nothing the call publishes depends on the
+   answer. The reason says the node was asked, never that the job is gone.
+
 ## Consequences
 
 - No `agent_delegate` or `offload_research` call outlives its deadline by more than the unwind

@@ -27,6 +27,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -226,7 +230,11 @@ func (r *runner) cutByDeadline(pr PlacedResult) PlacedResult {
 	var where string
 	switch {
 	case pr.intentRecorded:
-		where = fmt.Sprintf("was still on %s (job %s) when the call's deadline passed; the node may still finish it, and this call is no longer waiting for it",
+		// Cancelling the poll leaves the job on its node, where it could start later
+		// on a seat nobody is waiting for. Ask the node to drop it (a request, not a
+		// claim: see withdrawCut).
+		r.withdrawCut(pr.ranBase, pr.JobID)
+		where = fmt.Sprintf("was still on %s (job %s) when the call's deadline passed; the node was asked to withdraw it if it had not started (a job that had started may still finish there), and this call is no longer waiting for it",
 			nodeOrBase(pr), pr.JobID)
 		// The node acked the job and the delegator walked away: it may finish it, so
 		// the intent stays open for the recovery pass (the cancel arms in runRemote
@@ -252,6 +260,49 @@ func (r *runner) cutByDeadline(pr PlacedResult) PlacedResult {
 	pr.refused, pr.refusalStatus = false, 0
 	pr.deadlineCut = true
 	return pr
+}
+
+// deadlineWithdrawTimeout bounds the one best-effort withdraw sent for a job the
+// call deadline cut. It runs detached from the (already cancelled) call context.
+const deadlineWithdrawTimeout = 5 * time.Second
+
+// withdrawCut asks the node to withdraw a job the call deadline walked away from:
+// DELETE /fleet/jobs/{id} with the fleet bearer. Best effort, and deliberately a
+// REQUEST rather than a claim — nothing the call publishes depends on the answer:
+//
+//   - a node that has not shipped the route answers 404 or 405 (its behaviour
+//     today: the job stays, as it always did);
+//   - a job the node has already started is not the delegator's to cancel, so a
+//     node that only ever withdraws never-started jobs refuses it, and the intent
+//     stays open for the recovery pass either way (cutByDeadline marks it
+//     orphanable);
+//   - a transport failure is logged and dropped.
+//
+// Blocking (bounded by deadlineWithdrawTimeout) on purpose: the goroutine that
+// calls it is inside the unwind allowance, and returning before the request is out
+// would let the call return with the ask still unsent.
+func (r *runner) withdrawCut(base, jobID string) {
+	if base == "" || jobID == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), deadlineWithdrawTimeout)
+	defer cancel()
+	u := strings.TrimRight(strings.TrimSpace(base), "/") + "/fleet/jobs/" + url.PathEscape(jobID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, u, nil)
+	if err != nil {
+		return
+	}
+	if r.cfg.FleetAuthToken != "" {
+		req.Header.Set("Authorization", "Bearer "+r.cfg.FleetAuthToken)
+	}
+	resp, err := fleetClient.Do(req)
+	if err != nil {
+		log.Printf("delegate: call deadline: the withdraw of job %s at %s failed (best effort): %v", jobID, base, err)
+		return
+	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxFleetBody))
+	resp.Body.Close()
+	log.Printf("delegate: call deadline: asked %s to withdraw job %s: status %d (best effort; a node that has not shipped the route answers 404 or 405)", base, jobID, resp.StatusCode)
 }
 
 // nodeOrBase names the node a job was placed on: its advertised id, else its dial

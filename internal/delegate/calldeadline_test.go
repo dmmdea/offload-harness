@@ -280,6 +280,14 @@ func asString(v any) string {
 // whose every other job answers `running` for as long as it is asked.
 func remoteRunningForever(t *testing.T) (*fakeNode, string) {
 	t.Helper()
+	f, srv := remoteRunningForeverServer(t)
+	return f, srv.URL
+}
+
+// remoteRunningForeverServer is remoteRunningForever with the listener itself, for
+// a test that fronts the node with routes of its own.
+func remoteRunningForeverServer(t *testing.T) (*fakeNode, *httptest.Server) {
+	t.Helper()
 	var goals sync.Map
 	f := &fakeNode{t: t, agentEnabled: true, resident: true, ctxTokens: 32768, nodeID: "node-a"}
 	f.onDispatch = func(jobID string, c core.AgentContract) { goals.Store(jobID, c.Goal) }
@@ -291,7 +299,7 @@ func remoteRunningForever(t *testing.T) (*fakeNode, string) {
 		}
 		return map[string]any{"state": "running"}, http.StatusOK
 	}
-	return f, f.server().URL
+	return f, f.server()
 }
 
 func remoteGoal(goal string) core.AgentContract {

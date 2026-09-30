@@ -197,9 +197,10 @@ At the deadline the call **returns what has finished**. Every unfinished subtask
 whose reason opens `call deadline reached; N unfinished` (N is the whole call's count, across every
 chunk of a batched research call) and then says what that subtask was doing: running on a named node
 under a named job, running on the local seat, not yet placed, never started, or not stopping. The
-outstanding work is cancelled — the local seat is told to stop, polling of a remote job ends — nothing
-further starts, and a remote job the node had already started keeps running there and stays open in the
-intent ledger for the recovery pass. The result is a successful tool call: a deadline defer is a result
+outstanding work is cancelled — the local seat is told to stop, polling of a remote job ends and the
+node is asked to withdraw it (`DELETE /fleet/jobs/{id}`, best effort: a node that has not shipped the
+route answers 404 or 405 and keeps the job) — nothing further starts, and a remote job the node had
+already started keeps running there and stays open in the intent ledger for the recovery pass. The result is a successful tool call: a deadline defer is a result
 shape, not a failure. The default is above the longest single subtask (`timeout_sec` cap 900 s + the
 300 s admission allowance + the 60 s poll grace) and below the client's abort by the margin a response
 needs. The CLI verbs take no deadline.
