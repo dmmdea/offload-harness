@@ -1344,6 +1344,20 @@ class LauncherTests(unittest.TestCase):
         self.assertIn("RKNPU_HOME=", r.stderr)
 
 
+# A stand-in for the RKNN toolkit's rknn.api (x86_64 only): every step succeeds and the export writes the pinned bytes.
+STUB_RKNN = """class RKNN:
+    def __init__(self, verbose=False): pass
+    def config(self, **kw): pass
+    def load_onnx(self, **kw): return 0
+    def build(self, **kw): return 0
+    def export_rknn(self, path):
+        with open(path, "wb") as fh:
+            fh.write(b"a converted model")
+        return 0
+    def release(self): pass
+"""
+
+
 class FetchModelsTests(unittest.TestCase):
     """fetch-models.sh against file:// URLs: what it downloads, where it puts it, and what it refuses."""
 
@@ -1430,6 +1444,44 @@ class FetchModelsTests(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("rknn", r.stderr)
         self.assertEqual(os.listdir(cache), [])
+
+    def convert(self, entries):
+        """--convert against a stub RKNN toolkit and a calibration list of `entries`; returns (result, cache dir)."""
+        write(f"{self.root}/stub/rknn/__init__.py", b"")
+        write(f"{self.root}/stub/rknn/api.py", STUB_RKNN.encode())
+        write(f"{self.root}/src/m.onnx", b"an onnx")
+        write(f"{self.root}/src/list.txt", "".join(e + "\n" for e in entries).encode())
+        for name in ("img1.jpg", "escape.jpg", "sub/img2.jpg"):
+            write(f"{self.root}/src/{name}", b"a picture")
+        man = read_json(self.manifest)
+        man["models"]["big"]["convert"] = {
+            "onnx": {"url": pathlib.Path(f"{self.root}/src/m.onnx").as_uri(), "sha256": sha(b"an onnx")},
+            "mean_values": [[0]], "std_values": [[1]], "quantize": True, "dataset": "calib"}
+        man["datasets"] = {"calib": {"list": pathlib.Path(f"{self.root}/src/list.txt").as_uri(),
+                                     "base": pathlib.Path(f"{self.root}/src").as_uri() + "/"}}
+        write(self.manifest, json.dumps(man))
+        cache = f"{self.root}/cache"
+        r = self.run_fetch("--convert", RKNPU_CONVERT_PYTHON=sys.executable, RKNPU_CONVERT_CACHE=cache,
+                           PYTHONPATH=f"{self.root}/stub")
+        return r, cache
+
+    def test_convert_fetches_the_calibration_images_the_list_names_under_the_dataset_directory(self):
+        r, cache = self.convert(["./img1.jpg", "./sub/img2.jpg"])
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertTrue(os.path.isfile(f"{cache}/calib/img1.jpg"))
+        self.assertTrue(os.path.isfile(f"{cache}/calib/sub/img2.jpg"))
+
+    def test_convert_refuses_a_calibration_entry_that_is_absolute_or_climbs_out(self):
+        planted = f"{self.root}/planted"
+        for entry in ("../escape.jpg", "./sub/../../escape.jpg", f"{planted}/x.jpg", "/etc/passwd", r"..\escape.jpg"):
+            with self.subTest(entry=entry):
+                r, cache = self.convert(["./img1.jpg", entry])
+                self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+                self.assertIn("refusing the list entry", r.stdout + r.stderr)
+                self.assertFalse(os.path.exists(f"{cache}/escape.jpg"))  # what "../escape.jpg" would have written
+                self.assertFalse(os.path.exists(planted))
+                self.assertFalse(os.path.exists(f"{cache}/calib/img1.jpg"), "nothing is fetched once an entry is refused")
+                shutil.rmtree(cache, ignore_errors=True)
 
     def test_an_unknown_argument_is_a_usage_error(self):
         r = self.run_fetch("--bogus")

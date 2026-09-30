@@ -79,16 +79,26 @@ def download(url, path, sha=None):
         sys.exit(f"FAILED   {url}: sha256 does not match models.json")
 
 
+def entry_path(name, rel):
+    """One calibration-list entry, normalised. The list is downloaded, so an entry that is absolute or climbs
+    out with ".." would make the join below write outside the cache: refuse it before anything is joined."""
+    posix = rel.replace("\\", "/")
+    if posix.startswith("/") or os.path.isabs(rel) or os.path.splitdrive(rel)[0] or ".." in posix.split("/"):
+        sys.exit(f"FAILED   dataset {name}: refusing the list entry {rel!r} (absolute or containing '..')")
+    return os.path.normpath(posix)
+
+
 def dataset(name):
     """The quantisation images: a list file plus the images it names, fetched next to each other."""
     spec, root = man["datasets"][name], os.path.join(cache, name)
     os.makedirs(root, exist_ok=True)
     listing = os.path.join(root, "list.txt")
     download(spec["list"], listing)
-    for rel in (line.strip() for line in open(listing, encoding="utf-8") if line.strip()):
+    entries = [entry_path(name, line.strip()) for line in open(listing, encoding="utf-8") if line.strip()]
+    for rel in entries:
         img = os.path.join(root, rel)
         os.makedirs(os.path.dirname(img), exist_ok=True)
-        download(spec["base"] + rel.lstrip("./"), img)
+        download(spec["base"] + rel.replace(os.sep, "/"), img)
     return listing
 
 
