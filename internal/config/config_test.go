@@ -819,3 +819,36 @@ func TestAcceleratorFieldsRoundTrip(t *testing.T) {
 		t.Fatalf("round-trip lost a field: %+v", c)
 	}
 }
+
+// The RKNPU sidecar's defaults are as inert as the other devices': loopback :18815 (distinct from
+// the Hailo's 18813 and the Coral's 18814), no baked launcher path (an installer seeds it), a 60 s
+// call bound and a 300 s idle window.
+func TestRknpuDefaultsAreInert(t *testing.T) {
+	c := Default()
+	if c.HasAccelerator("rknpu") {
+		t.Fatal("HasAccelerator(rknpu) true on a default config")
+	}
+	if c.RknpuEndpoint != "http://127.0.0.1:18815" {
+		t.Errorf("RknpuEndpoint = %q, want loopback :18815", c.RknpuEndpoint)
+	}
+	if c.RknpuSidecarCmd != "" {
+		t.Errorf("RknpuSidecarCmd = %q, want \"\" (an installer seeds it; never a baked path)", c.RknpuSidecarCmd)
+	}
+	if c.RknpuTimeoutSec != 60 || c.RknpuIdleSec != 300 {
+		t.Errorf("timeout/idle = %d/%d, want 60/300", c.RknpuTimeoutSec, c.RknpuIdleSec)
+	}
+}
+
+func TestRknpuFieldsRoundTrip(t *testing.T) {
+	body := `{"accelerators":["rknpu"],"rknpu_endpoint":"http://127.0.0.1:19999","rknpu_sidecar_cmd":"/opt/x/rknpu/rknpu-http.sh","rknpu_timeout_sec":7,"rknpu_idle_sec":9}`
+	c, err := Load(writeShapeCfg(t, body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.HasAccelerator("rknpu") || c.HasAccelerator("coral-edgetpu") {
+		t.Fatalf("HasAccelerator: got %v", c.Accelerators)
+	}
+	if c.RknpuEndpoint != "http://127.0.0.1:19999" || c.RknpuSidecarCmd != "/opt/x/rknpu/rknpu-http.sh" || c.RknpuTimeoutSec != 7 || c.RknpuIdleSec != 9 {
+		t.Fatalf("round-trip lost a field: %+v", c)
+	}
+}
