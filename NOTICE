@@ -19,3 +19,9 @@ License, as vendored into OmniRoute
 (https://github.com/diegosouzapw/OmniRoute), also MIT-licensed. internal/gcf
 is an independent Go reimplementation of the format (scalars-only subset);
 no upstream source code was copied.
+
+ComfyUI workflow template fixtures (render/testdata/templates-catalog/):
+The workflow files there are trimmed excerpts of templates from Comfy-Org/workflow_templates
+(https://github.com/Comfy-Org/workflow_templates), Copyright (c) 2023-present Comfy Org,
+licensed under the MIT License. The licence text is kept beside them in
+LICENSE-comfy-workflow-templates.txt. They are test inputs only and are not shipped.

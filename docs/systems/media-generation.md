@@ -907,6 +907,13 @@ recorded as known offenders with their reason rather than silently skipped — a
   template-only `compose-video` fleet task
 - [`setup/hyperframes/`](../../setup/hyperframes/package.json) — the pinned lockfile the installers
   install from
+- [`render/templates-catalog.mjs`](../../render/templates-catalog.mjs) — the read-only workflow
+  templates catalog: active-node walk, model files, API flag, licence class and gate, directory-aware
+  readiness, node snapshots, candidate diff
+- [`render/templates-license-map.json`](../../render/templates-license-map.json) — the harness-owned
+  licence map, keyed by Hugging Face repo id
+- [`render/testdata/templates-catalog/`](../../render/testdata/templates-catalog/README.md) — its
+  fixtures: trimmed upstream templates (MIT) and hand-written edge cases
 
 ## Related docs
 
@@ -1053,3 +1060,113 @@ and `lower-third` webm at 30.4 s. Neither worker setting wins consistently on a 
 - **Offline renders.** Vetted templates reference no URL, and every font family they use is declared
   with `@font-face` from the shared kit. An undeclared family makes the compiler request the Google
   Fonts CSS API, with the page's character set in the query.
+
+## Comfy workflow templates catalog (phase A)
+
+`render/templates-catalog.mjs` is a read-only catalog of the ComfyUI workflow templates a node
+carries: the `comfyui-workflow-templates` package that ComfyUI itself pins, a checkout of the upstream
+repository, or a `pip download` extract of a candidate version. It lists and classifies. It never runs a
+template, downloads a model, installs a package, changes a config or touches the network, and the only
+file it writes is the one named by `--out`. There is no MCP tool, config key, fleet task or route for it
+yet. A template is a UI-format graph and `run-graph` takes API-format graphs only (the tool description
+says so, and `preflight-graph-file.mjs` reads each node's `class_type`), so running one needs a converter
+that this phase does not contain.
+
+**Class: none.** No GPU slot, no lease, no ComfyUI process. It is one dependency-free file (`node:`
+builtins only), so the whole file can be piped to `node --input-type=module - snapshot --comfy-dir <tree>`
+on any node and run there with nothing deployed. A piped file has no licence map beside it, so its other
+verbs count every repo as unknown unless they are given `--license-map FILE`.
+
+**What it derives, per template.** Every count carries its basis: the package it was computed on
+(`installed package`, `package extract` or `repo checkout at <commit>`, with the wheel versions). The
+installed package, a candidate and the upstream HEAD give different numbers, and a figure without its basis
+is not a figure.
+
+| field | rule |
+|---|---|
+| active nodes | subgraph instances are expanded; a node is active only if its mode is not 2 (muted) or 4 (bypassed) and every instance around it is active; a self-instantiating or dangling subgraph is flagged, never hidden |
+| model files | `properties.models` of active nodes (class, URL, hash), plus loader widget files nobody annotated; files that only bypassed nodes reference are reported apart and not required |
+| `kind` | `api` (paid partner nodes) beats `custom_nodes` (a node pack core does not carry) beats `local` (core nodes only) |
+| API flag | three signals, each reported: a node type in the node's own `comfy_api_nodes` ids (read from `node_id="X"`, a `NODE_ID = "X"` class attribute and the first argument of `_cloud_schema`), the `api_` name prefix, the index's `openSource: false`; any one is enough, and the summary counts the templates where they disagree |
+| parameter surface | the `proxyWidgets` of its subgraph instances, the widgets a caller could override |
+| licence | the worst class among the repos its active nodes download from, from the harness's own map |
+| gate | `blocked`, `ack_required` or `open`, below |
+
+**Licence map and gate.** `render/templates-license-map.json` is keyed by Hugging Face repo id. Each entry
+has a class (`permissive`, `conditional`, `non_commercial`, or an explicit `unknown` for a repo whose licence
+nobody has read), the source URL, the date and the basis, and a repo that is not listed is `unknown`. An entry
+whose basis begins `inferred from` was copied from the sibling repo it names, not read: it carries no source URL
+or date, and the summary's evidence range ignores it. A template takes the worst class of its repos (non_commercial >
+conditional > unknown > permissive), so an unlisted repo never hides a known restriction, and a file with no
+Hugging Face source counts as unknown. The boolean `commercial_use` of
+[ADR 0058](../architecture/decisions/0058-non-commercial-model-families-ship-only-as-named-license-tagged-opt-ins.md)
+(status Proposed) cannot say `conditional`, which is why the map has a third class. The map's 50 entries
+were seeded from repo-level licence tags digested on 2026-09-30 and none was re-fetched when it was written;
+a tag is not a per-file licence, and the conditions text comes from digests of licence texts that were not
+read in full. The gate: a paid API template is `blocked` (it spends money,
+[ADR 0001](../architecture/decisions/0001-defer-never-cloud-fallback.md)); a FLUX-family template is
+`blocked` ([ADR 0011](../architecture/decisions/0011-flux-family-license-prohibition.md)), meaning a FLUX
+name, a repo id containing "flux" or under the model maker's organisation, or a map flag, with the shared
+text-encoder repo exempt by its entry. A repo whose id merely contains "flux" does not count when the template
+takes only text encoders from it (a text encoder is another maker's model wherever it is hosted): the gate warns
+instead, while any other class from that repo, a file with no class and the maker's own organisation still bar.
+Non-commercial, conditional and unknown licences are `ack_required` (an explicit acknowledgement that names the
+class); permissive or weightless is `open`. A FLUX-named weights file from another repo is only a warning. `list`
+hides blocked templates unless `--include-hidden`; naming `--kind api` lists the paid API ones without it, and
+the FLUX-family ones stay hidden.
+
+**Readiness is directory-aware.** A file is usable by a template only if ComfyUI would offer it to the
+loader that reads it, and that is a question about directories, not names: a VAE loader lists the `vae`
+class and nothing else. The check reproduces ComfyUI 0.37.0's `folder_paths.py`, `utils/extra_config.py`
+and the lines of `main.py` (`apply_custom_paths`) that register directories: default directories per class,
+three of them dual (`text_encoders` also reads `clip/`, `diffusion_models` also reads `unet/`, `controlnet`
+also reads `t2i_adapter/`); the yaml keys `unet` and `clip` mapped to their classes; `base_path` joined to
+each entry, an absolute entry winning, `is_default` first; the output directory's `checkpoints`, `clip`,
+`vae`, `diffusion_models` and `loras` added last (`--output-directory` moves it, `--base-directory` moves it
+and the models directory); and a class listing that is recursive, follows links, skips `.git` and keeps only
+the extensions its core loaders accept, by path relative to the directory (so `sub/name` is not `name`, and a
+`.gguf` is not offered by a core loader). A requirement is `present` (or `present_class_unknown`: a loader
+file nobody annotated, met by its exact name in any class) or says why not: `missing`, `wrong_class` (and
+where the file is), `in_subfolder`, `case_mismatch`, `extension_not_listed`, `class_unregistered`.
+`--mode basename-only` is the older shortcut (any file with that name, anywhere), kept so its numbers can be
+reproduced and compared. Only `local` templates are evaluated. A snapshot records the node's ComfyUI version
+and the hashes of `folder_paths.py` and `utils/extra_config.py`; `readiness` compares the hashes with the
+0.37.0 files and reports `rules_check` (advisory: the node is scored either way, and the directory-aware text
+table prints a `rules:` line under a node whose files differ).
+
+**Verbs** (`node render/templates-catalog.mjs <verb>`): `summary`, `list`, `catalog` (the full catalog as
+JSON), `snapshot` (one node's package versions and fingerprint, API node ids, resolved model roots, model
+files, and hashes of the two ComfyUI rule files with line endings normalised; it exits 2 on a directory that
+is not a ComfyUI tree), `readiness` (per node and on any node, `--mode directory-aware|basename-only|both`)
+and `diff` (what a candidate package adds, removes and changes, and which templates it would break on each
+node; `--candidate-basis` says what the candidate directory is). Sources are `--templates-dir` or `--comfy-dir`.
+
+**Invariants.**
+
+- No count without its basis (`stamp.label`).
+- Read-only: a test fails if the file imports anything but `node:` builtins, opens the network, spawns a
+  process or writes anywhere but `--out`.
+- A catalog speaks only for a node whose installed json package is the same version; `readiness` refuses
+  otherwise, and `--candidate` answers anyway and labels it.
+- An unlisted repo is `unknown`, never `permissive`.
+
+**Testing.** `node --test render/templates-catalog.test.mjs` runs on trimmed real templates (MIT, see
+`NOTICE`) and hand-written edge fixtures in `render/testdata/templates-catalog/`. With
+`TEMPLATES_CATALOG_DIR` set to an installed package's `templates` directory (and
+`TEMPLATES_CATALOG_COMFY_DIR` to its ComfyUI tree) one more test reproduces the counts measured on the
+0.1.94 package: 566 entries, 326 API, 240 local, 235 of them needing weights, 5 with none. It is skipped
+otherwise.
+
+**Known gaps.** The catalog is data; nothing consumes it yet. Per-repo licence texts are still to be read
+for the 83 repos (of the 133 that the installed package's local templates download from) that the map does not list. Six templates name a FLUX-named
+weights file (mostly a FLUX.2 VAE) without being FLUX; they are reported, not decided. Two templates
+(`image_ideogram4_t2i` and its `_int8` variant) take a FLUX.2 VAE from a FLUX-named repo and are `blocked` by the
+repo signal; whether ADR 0011 reaches a reused FLUX VAE is the operator's call. The
+run-graph satisfier's presence check (`modelCandidates` in `manifest-satisfy.mjs`) looks only where the
+manifest path's own class is registered, so on a node with no `extra_model_paths.yaml` it does not find a
+file under `models/unet` for a `models/diffusion_models/...` path that ComfyUI itself lists; that is a
+follow-up for the models phase, not part of this one. The directory rules are ComfyUI 0.37.0's: a node whose
+rule files differ is scored with them anyway and `rules_check` says so, and `main.py` is not hashed, so a change
+confined to it is not seen. An `extra_model_paths.yaml` entry that is rooted but has no drive letter
+(`/models/x`) under a drive-lettered `base_path` resolves onto that drive under Windows path join and is left as
+written here (measured against ComfyUI's own loader, not on a live file).

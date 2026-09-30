@@ -1,0 +1,13 @@
+{
+ "id": "00000000-0000-4000-8000-00000000f004",
+ "revision": 0,
+ "version": 0.4,
+ "nodes": [
+  {
+   "id": 1,
+   "type": "KSampler",
+   "mode": 0,
+   "properties": {"cnr_id": "comfy-core"}
+  }
+ ]
+}

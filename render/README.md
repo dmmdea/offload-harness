@@ -229,3 +229,33 @@ Templates, and the contract each one keeps, are in
 [`compose-templates/`](compose-templates/README.md). The harness routes are
 `offload_compose_video`, `local-offload compose-video` and the fleet task `compose-video`. See
 [`docs/systems/media-generation.md`](../docs/systems/media-generation.md#composition-hyperframes).
+
+---
+
+# Workflow templates catalog (read-only, `templates-catalog.mjs`)
+
+Lists and classifies the ComfyUI workflow templates a node already carries: the
+`comfyui-workflow-templates` package ComfyUI pins, a checkout of the upstream repository, or a
+`pip download` extract of a candidate version. Dependency-free (`node:` builtins), read-only, no
+network. It never runs a template, downloads a model, installs a package or changes a config; the
+only file it writes is the one named by `--out`. Every count names the package it was computed on.
+
+```bash
+node render/templates-catalog.mjs summary   --comfy-dir <comfyui-tree>          # counts, each with its basis
+node render/templates-catalog.mjs list      --comfy-dir <comfyui-tree> --tag "Text to Image"
+node render/templates-catalog.mjs snapshot  --comfy-dir <comfyui-tree> --label nodeA --out nodeA.json
+node render/templates-catalog.mjs readiness --comfy-dir <comfyui-tree> --snapshot nodeA=nodeA.json --mode both
+node render/templates-catalog.mjs diff      --comfy-dir <comfyui-tree> --snapshot nodeA=nodeA.json \
+    --candidate-dir <extract>/comfyui_workflow_templates_json/templates
+```
+
+`snapshot` reads one node's package versions, API node ids, model directories (default,
+`extra_model_paths.yaml` and the output directory ComfyUI registers) and model files as JSON; run it on each
+node, then compare on one machine. The whole file can be piped to `node --input-type=module - snapshot
+--comfy-dir <tree>` on a node with nothing deployed (a piped file has no licence map beside it, so its other
+verbs need `--license-map FILE`). `readiness` is directory-aware: a file counts only if ComfyUI would offer it
+to the loader that reads it. `list` hides paid API templates and FLUX-family ones unless `--include-hidden`
+(naming `--kind api` lists the paid ones without it). The licence map
+is `render/templates-license-map.json`. Rules, fields and gaps:
+[`docs/systems/media-generation.md`](../docs/systems/media-generation.md#comfy-workflow-templates-catalog-phase-a).
+Tests: `node --test render/templates-catalog.test.mjs`.
