@@ -1,0 +1,198 @@
+{
+ "id": "00000000-0000-4000-8000-00000000f001",
+ "revision": 0,
+ "version": 0.4,
+ "nodes": [
+  {
+   "id": 1,
+   "type": "CheckpointLoaderSimple",
+   "mode": 0,
+   "properties": {
+    "cnr_id": "comfy-core",
+    "models": [
+     {
+      "name": "ckpt-active.safetensors",
+      "url": "https://huggingface.co/example-org/weights-a/resolve/main/ckpt-active.safetensors",
+      "directory": "checkpoints"
+     }
+    ]
+   },
+   "widgets_values": ["ckpt-active.safetensors"]
+  },
+  {
+   "id": 2,
+   "type": "LoraLoaderModelOnly",
+   "mode": 4,
+   "properties": {
+    "cnr_id": "comfy-core",
+    "models": [
+     {
+      "name": "lora-bypassed.safetensors",
+      "url": "https://huggingface.co/example-org/weights-b/resolve/main/lora-bypassed.safetensors",
+      "directory": "loras"
+     }
+    ]
+   },
+   "widgets_values": ["lora-bypassed.safetensors", 1]
+  },
+  {
+   "id": 3,
+   "type": "VAELoader",
+   "mode": 2,
+   "properties": {
+    "cnr_id": "comfy-core",
+    "models": [
+     {
+      "name": "vae-muted.safetensors",
+      "url": "https://huggingface.co/example-org/weights-b/resolve/main/vae-muted.safetensors",
+      "directory": "vae"
+     }
+    ]
+   },
+   "widgets_values": ["vae-muted.safetensors"]
+  },
+  {
+   "id": 4,
+   "type": "a1111111-1111-4111-8111-111111111111",
+   "mode": 0,
+   "properties": {
+    "cnr_id": "comfy-core",
+    "proxyWidgets": [["10", "text"], ["11", "seed"]]
+   }
+  },
+  {
+   "id": 5,
+   "type": "b2222222-2222-4222-8222-222222222222",
+   "mode": 4,
+   "properties": {"cnr_id": "comfy-core"}
+  },
+  {
+   "id": 6,
+   "type": "e5555555-5555-4555-8555-555555555555",
+   "mode": 0
+  },
+  {
+   "id": 7,
+   "type": "PrimitiveNode",
+   "mode": 0,
+   "widgets_values": ["primitive-file.safetensors", "fixed"]
+  },
+  {
+   "id": 8,
+   "type": "MarkdownNote",
+   "mode": 0,
+   "widgets_values": ["Model list: note-file.safetensors"]
+  }
+ ],
+ "definitions": {
+  "subgraphs": [
+   {
+    "id": "a1111111-1111-4111-8111-111111111111",
+    "name": "Outer subgraph",
+    "nodes": [
+     {"id": 10, "type": "CLIPTextEncode", "mode": 0},
+     {
+      "id": 11,
+      "type": "UNETLoader",
+      "mode": 0,
+      "properties": {
+       "cnr_id": "comfy-core",
+       "models": [
+        {
+         "name": "unet-in-subgraph.safetensors",
+         "url": "https://huggingface.co/example-org/weights-a/resolve/main/split_files/diffusion_models/unet-in-subgraph.safetensors",
+         "directory": "diffusion_models"
+        }
+       ]
+      }
+     },
+     {
+      "id": 12,
+      "type": "LoraLoader",
+      "mode": 4,
+      "properties": {
+       "cnr_id": "comfy-core",
+       "models": [
+        {
+         "name": "lora-inner-bypassed.safetensors",
+         "url": "https://huggingface.co/example-org/weights-b/resolve/main/lora-inner-bypassed.safetensors",
+         "directory": "loras"
+        }
+       ]
+      }
+     },
+     {
+      "id": 13,
+      "type": "c3333333-3333-4333-8333-333333333333",
+      "mode": 0,
+      "properties": {"cnr_id": "comfy-core", "proxyWidgets": [["20", "clip_name"]]}
+     }
+    ]
+   },
+   {
+    "id": "c3333333-3333-4333-8333-333333333333",
+    "name": "Nested subgraph",
+    "nodes": [
+     {
+      "id": 20,
+      "type": "CLIPLoader",
+      "mode": 0,
+      "properties": {
+       "cnr_id": "comfy-core",
+       "models": [
+        {
+         "name": "te-nested.safetensors",
+         "url": "https://huggingface.co/example-org/weights-a/resolve/main/split_files/text_encoders/te-nested.safetensors",
+         "directory": "text_encoders"
+        }
+       ]
+      }
+     },
+     {"id": 21, "type": "KSampler", "mode": 2}
+    ]
+   },
+   {
+    "id": "b2222222-2222-4222-8222-222222222222",
+    "name": "Bypassed as a whole",
+    "nodes": [
+     {
+      "id": 30,
+      "type": "UNETLoader",
+      "mode": 0,
+      "properties": {
+       "cnr_id": "comfy-core",
+       "models": [
+        {
+         "name": "unet-under-bypassed-instance.safetensors",
+         "url": "https://huggingface.co/example-org/weights-b/resolve/main/split_files/diffusion_models/unet-under-bypassed-instance.safetensors",
+         "directory": "diffusion_models"
+        }
+       ]
+      }
+     }
+    ]
+   },
+   {
+    "id": "d4444444-4444-4444-8444-444444444444",
+    "name": "Defined but never instantiated",
+    "nodes": [
+     {
+      "id": 40,
+      "type": "UNETLoader",
+      "mode": 0,
+      "properties": {
+       "cnr_id": "comfy-core",
+       "models": [
+        {
+         "name": "unreferenced.safetensors",
+         "url": "https://huggingface.co/example-org/weights-c/resolve/main/unreferenced.safetensors",
+         "directory": "diffusion_models"
+        }
+       ]
+      }
+     }
+    ]
+   }
+  ]
+ }
+}

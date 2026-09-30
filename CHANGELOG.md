@@ -17,6 +17,171 @@ Operator order (2026-09-30): no licence costs, so no AGPL or GPL model ships. Th
 - **A missing label file no longer says to convert.** The `model_missing` hint for a label file is `run fetch-models.sh`; only the model file itself says `--convert`.
 - **Not yet run on the NPU.** The three new files were converted and checked on rknn-toolkit2's simulator; `test_server.py` decodes the simulator's own tensors when `RKNPU_SIM_DIR` names the benchmark's `sim/` folder (PP-YOLOE on `bus.jpg`: person 0.950 / 0.935 / 0.923, bus 0.893, person 0.473, handbag 0.411; ResNet-50 on the zoo's dog photo: Shih-Tzu in both builds). Latency, memory and INT8 accuracy on the board are unmeasured; `docs/systems/accelerators.md` records the host FP32 baselines the board's INT8 figures are to be checked against. A box that already runs the sidecar needs the three new `.rknn` files copied to its models directory (`fetch-models.sh` reports them MISSING until then); the old `resnet18` and `yolov8n` files are no longer served.
 
+## [0.150.0] - 2026-09-30 - a read-only catalog of the ComfyUI workflow templates a node carries (Comfy templates phase A)
+
+### Added — a read-only catalog of the ComfyUI workflow templates a node carries (phase A of the Comfy templates work)
+
+`render/templates-catalog.mjs` lists and classifies the workflow templates of the `comfyui-workflow-templates` package that ComfyUI pins on a node, of a checkout of the upstream repository, or of a `pip download` extract of a candidate version. It is one dependency-free file (`node:` builtins only) that never runs a template, downloads a model, installs a package, changes a config or opens the network; the only file it writes is the one named by `--out`, and a test fails if that stops being true. The whole file can be piped to `node --input-type=module - snapshot --comfy-dir <tree>` on a node with nothing deployed; a piped file has no licence map beside it, so its other verbs count every repo as unknown unless they are given `--license-map FILE`. There is still no MCP tool, config key, fleet task or route for it: a template is a UI-format graph and `run-graph` takes API-format graphs only, so running one waits for a converter. Per template it derives the active nodes (subgraphs are expanded; muted and bypassed nodes, and everything inside a bypassed instance, are inactive), the model files the active nodes need (class, URL and hash from `properties.models`, plus loader widget files nobody annotated; files that only bypassed nodes reference are reported apart), the parameter surface (`proxyWidgets`), whether it is a paid API template (a node type in the node's own `comfy_api_nodes` ids, read from `node_id="X"`, a `NODE_ID = "X"` class attribute and the first argument of `_cloud_schema`; the `api_` name prefix; or the index's `openSource: false`; any one is enough, and the summary counts where they disagree) and a version stamp whose label goes on every count. Against the installed package (comfyui-workflow-templates 0.11.68, json 0.1.94) it reproduces the research figures: 566 entries, 326 API (the node-id scan and the index's `openSource: false` each see all 326 and the `api_` prefix 276; the ids-and-prefix view and the index flag describe the same set, 0 disagreements), 240 local, 235 of them needing weights and 5 needing none, 197 with subgraphs, 1129 model annotations of which 10 carry a hash; against the upstream HEAD e7849852: 660 entries, 367 API, 243 local, 50 needing custom nodes, 262 with subgraphs, 155 with a parameter surface (103 of them local). Trimmed real templates (MIT, attributed in `NOTICE`) and hand-written edge cases are the test fixtures; a golden test reproduces the counts against a real installed package when `TEMPLATES_CATALOG_DIR` names one. The suite is 264 tests (263 run in CI), checked by a mutation pass over about 1,660 one-line edits of the module: of the 56 that survived, ten were real gaps and now have tests, and the rest are equivalent or dead code.
+
+### Added — a harness-owned licence map and a run gate for the templates (`render/templates-license-map.json`)
+
+The map is keyed by Hugging Face repo id; each entry carries a class (`permissive`, `conditional`, `non_commercial`, or an explicit `unknown` for a repo whose licence nobody has read), its source URL, date and basis, and a repo that is not listed is `unknown`. An entry whose basis begins `inferred from` was copied from the sibling repo it names, not read: it carries no source URL or date and the summary's evidence range ignores it. A template takes the worst class among the repos its active nodes download from (non_commercial, then conditional, then unknown, then permissive), so an unlisted repo never hides a known restriction; a file with no Hugging Face source counts as unknown and a template with no weights is `none`. The gate blocks paid API templates (ADR 0001) and FLUX-family ones (ADR 0011: a FLUX name, a repo id containing "flux" or under the model maker's organisation, or a map flag, with the shared text-encoder repo exempt by its entry) and asks for an explicit acknowledgement naming the class for anything else that is not permissive. A repo whose id merely contains "flux" does not bar a template that takes only text encoders from it (a text encoder is another maker's model wherever it is hosted; the gate warns instead), while any other class from that repo, a file with no class and the maker's own organisation still bar; on the installed package that changes exactly one of 566 verdicts, a plain Qwen3 text-generation template that was blocked and now needs the unknown-licence acknowledgement. A FLUX-named weights file from another repo is a warning, not a verdict. `list` hides blocked templates unless `--include-hidden`; naming `--kind api` lists the paid API ones without it, and the FLUX-family ones stay hidden. The 50 seeded entries are the 2026-09-30 research digests of repo-level licence tags, none re-fetched; on the installed package they give 75 permissive, 63 conditional, 29 non-commercial and 68 unknown among the 235 local templates that need weights, and 25 FLUX-family templates among them (23 by name). Per-repo licence texts are still to be read: 83 of the 133 repos the installed package's local templates download from are unlisted.
+
+### Added — directory-aware readiness across `extra_model_paths.yaml`, node snapshots and a candidate diff
+
+A model file is usable by a template only if ComfyUI would offer it to the loader that reads it, so readiness follows ComfyUI 0.37.0's own rules (`folder_paths.py`, `utils/extra_config.py` and the directory registrations of `main.py`) instead of matching file names: default directories per class including the dual ones (`text_encoders` also reads `clip/`, `diffusion_models` also reads `unet/`, `controlnet` also reads `t2i_adapter/`), the yaml keys `unet` and `clip` mapped to their classes, `base_path` joined to each entry with an absolute entry winning and `is_default` first, the output directory's `checkpoints`, `clip`, `vae`, `diffusion_models` and `loras` added last (`--output-directory` moves it, `--base-directory` moves it and the models directory), network-share (UNC) roots kept intact, the yaml shapes ComfyUI's loader accepts (a provider named with a space or in quotes, quoted class keys, `|` and `>` block scalars, an empty entry skipped), and a recursive listing that follows links, skips `.git` and keeps the extensions the class's core loaders accept, matched by exact relative path. Compared with ComfyUI's own loader run on those shapes, the directory lists agree, for every model class and in order, apart from the one gap noted below. A requirement is `present` or says why not: `missing`, `wrong_class` (and where the file is), `in_subfolder`, `case_mismatch`, `extension_not_listed` or `class_unregistered`; `--mode basename-only` keeps the older name-matching method so its numbers reproduce and can be compared. The verbs `snapshot` (one node's package versions and fingerprint, API node ids, resolved roots and files, and hashes of the two ComfyUI rule files with line endings normalised; it exits 2 on a directory that is not a ComfyUI tree, and the file can be piped to `node -` on a node and writes nothing), `readiness` (per node and on any node; it refuses a node whose package differs from the catalog's unless `--candidate`, and reports `rules_check`, whether the node's rule files are the 0.37.0 ones the table was checked against, as an advisory that scores the node either way) and `diff` (what a candidate package adds, removes and changes, and which templates it would break on each node; `--candidate-basis` says what the candidate directory is) work from those. Read-only on the four ComfyUI nodes, which carry an identical package fingerprint and identical rule files: 8, 5, 6 and 1 templates are ready per node and 12 on any node, by both methods with no template flipping between them (measured before the output-directory and yaml-reader fixes; the one node re-run afterwards still reads 8); the drift from json 0.1.94 to 0.1.96 adds 14 templates, removes 2, changes the required files of 10 and would break 5 that are ready today.
+
+Known gaps: the run-graph satisfier's presence check (`modelCandidates` in `render/manifest-satisfy.mjs`) does not look under `models/unet` for a `models/diffusion_models/...` path that ComfyUI itself lists, so on a node with no `extra_model_paths.yaml` it would download two or three diffusion-model files a second time (measured on two of the four nodes; not changed here); 83 of the 133 repos the installed package's local templates download from have no licence entry; two templates that take a FLUX.2 VAE from a FLUX-named repo stay blocked by the repo signal, and whether ADR 0011 reaches a reused FLUX VAE is the operator's call; `main.py` is not hashed, so a change confined to it is not seen by `rules_check`; and a yaml entry that is rooted but has no drive letter under a drive-lettered `base_path` resolves onto that drive under Windows path join and is left as written here.
+
+## [0.149.0] - 2026-09-30 - kit-derived compose templates, captions-bar and the hyperframes-compose skill
+
+### Added — four kit-derived compose templates, `captions-bar`, a caption grouping helper and the `hyperframes-compose` skill
+
+`render/compose-templates/` ships five new vetted templates, all 1920×1080 at 30 fps, all discovered with no route
+change (`local-offload doctor` and `offload_status` list them; the fleet `compose-video` task accepts them by name):
+`stat-card`, `section-title` and `checklist-card` (opaque) and `callout-label` and `captions-bar` (alpha overlays for
+`webm` and `mov`). The first four are adapted from card designs of the hyperframes-student-kit at the pinned commit
+`0d30152` and rewritten in CSS keyframes: no script library, no count-up, Inter from the shared kit only, declared
+variables with explicit limits, emphasis split into `*_pre` / `*_em` / `*_post`, neutral copy and a recoloured palette.
+The kit is a reference, never an install: its MIT `LICENSE` and use permission are kept verbatim (hash-tested, and
+pinned byte for byte by a `.gitattributes` rule) under `render/compose-templates/_third_party/hyperframes-student-kit/`
+with a `PROVENANCE.md`, the root `NOTICE` credits it, and each README says where its template was adapted from.
+`captions-bar` is written for the harness.
+
+`render/captions-groups.mjs` is a pure helper from `offload_transcribe`'s `<base>.segments.json` to `captions-bar`
+chunks. The `words[]` in that file are whisper-server's tokens, not words (a word-initial token keeps its leading
+space; a continuation such as an apostrophe suffix, the digits after a currency sign or punctuation has none), so the
+helper merges tokens into words before it groups anything. Over 489 real transcripts (55,473 tokens, 40,345 words)
+every file regroups into exactly the words of its own segment text and no group has a space before punctuation; a
+first version that trimmed every token and joined them with a space gave "It 's only", "$ 1 a" and "'t worry ." and a
+space before punctuation in a third of all groups. Beyond that: pace presets (3, 5 or 6 words), breaks at sentence
+ends, pauses of 0.15 s or more and a 42-character cap, holds that never overlap two groups, and chunks that fit the
+template (at most 16,000 characters and 600 s), cut at 300 s by default, with `--chunk-sec` (up to the template's
+600 s) and `--chunk-chars` to set another cap.
+
+`skill/hyperframes-compose/SKILL.md` is the house skill ADR 0059 promised: hard bans on `npx hyperframes` and its
+`init`, `skills`, `upgrade` and `add`, which tool to pick, the seven-template catalog (kept in step with the templates
+by a test), the verification loop, the captions flow and the authoring contract. Installing it into an agent's skills
+folder is the operator's step. The tool description, CLI help, README, operator guide, glossary and
+`docs/systems/media-generation.md` name all seven templates, and tests fail when one of those lists, the skill's ban
+list or a number the docs quote drifts from the code.
+
+### Fixed — a `$` in a template variable corrupted the composition (every template)
+
+`applyTemplateVariables` handed the rebuilt `data-composition-variables` attribute to `String.replace` as a
+replacement string, and JavaScript reads `$1`, `$&`, `` $` ``, `$'` and `$$` in one. Ordinary text tripped it: a
+caption "over $100 million" made the attribute invalid JSON, so `check` failed the render with `words_json is not JSON:
+"undefined"` (a message that never mentions the dollar sign), and a `stat-card` figure of `$1.2M` rendered but was
+judged by `lint` and `check` as placeholder text. `$&` spliced the old attribute, closing quote included, into the new
+one, so caller text could become extra attributes on the composition's root tag. The declaration now goes in through a
+replacer function. Tests cover every pattern through the fixture and four shipped templates, show that a hostile value
+adds no attribute to the root, and pin the escaping of `'`, `&`, `<` and `>` (the runner's tag scanning, like
+HyperFrames', ends a tag at the first `>`). Rendered through the runner before and after: the same three-group caption
+list fails `CHECK_FAILED` before and renders after (VP9 `yuva420p`, alpha, all three groups read back exactly,
+`$&` included).
+
+### Measured — what the lane does with worker counts, with a long caption list and with a long clip
+
+- **A frame must be a pure function of time; scaling above 1 is a rule of thumb, the measurement is the gate.** A
+  keyframe that scales an element above its resting size (a halo breathing to 1.06, a ring popping to 1.1) gave frames
+  that depended on the render worker count on two of the ported cards (80 of 180 and 172 of 210 frames differed between
+  1 worker and 4 or `auto`, by a few pixels of gradient, and two runs at 4 workers disagreed); with opacity instead they
+  matched, and with the blur removed and the scale kept they still differed, so blur was not the cause. The ports and
+  `captions-bar` never scale above 1 (a test guards it) and each gives 15 of 15 identical pairs of decoded frames across
+  1, 2, 4, 6 and `auto` (twice) workers. The older `title-card` drifts a large glow out to `scale(1.12)` and also gave 15
+  of 15, so the rule is not a law; the gate is rendering at those worker counts and comparing decoded frames.
+- **One CSS-animated element per caption group does not scale.** The same 8 s clip renders in about 24 s with up to 80
+  groups in the page and 34 s at 150, and a 374-group, 12.9 KB list had written about 290 of its 450 frames after ten
+  minutes when it was stopped. `captions-bar` therefore holds one element and derives the frame from the time of
+  HyperFrames' `hf-seek` event (450 frames of that list in 39.6 s at draft quality). A 15,968-character string variable
+  passed `lint`, `check` and `--strict-variables`. The event is in the pinned 0.8.61 bundle but not in its documentation,
+  so the README names the version it was measured on, a test fails when the pin moves past it, and the operator guide's
+  bump step names `captions-bar`.
+- **A long caption chunk needs one worker and about 300 s, so the helper cuts 300 s chunks by default.** At the lane's
+  default `auto` workers HyperFrames stores every frame and budgets 8.3 MB at 1080p, and refuses a render when that
+  passes 90 % of the free space: a 300 s chunk (9,017 frames) was refused `DISK_HEADROOM` with 33 GB free (it would
+  store about 75 GB; a 600 s chunk about 150 GB). At `workers` 1 the frames stream and the same chunk rendered in
+  1,038 s (115 ms a frame on a busy box), so a 600 s chunk, which was not rendered, takes 27 to 35 minutes and
+  passes the 1,800 s default `compose_timeout_sec`. The helper therefore cuts 300 s chunks by default
+  (`DEFAULTS.variableSec`); the template's own 600 s is only the upper bound `--chunk-sec` is checked against
+  (`TEMPLATE_LIMITS`, refused with the same text as before), so a caller who raises `compose_timeout_sec` can ask for
+  longer chunks. A test reads the template's declared limits and pins the default and the limit in the skill, the
+  captions README and the media doc, so neither number can drift from the code. The captions README, the skill, the
+  media doc and the operator guide's timeout note carry the measured figures.
+
+Not in this change: deploying the templates to the fleet, the `assets` parameter (an image variable type), GSAP
+vendoring or a HyperFrames pin bump, and a test that renders the templates and checks their pixels.
+
+## [0.148.0] - 2026-09-30 - the ampere-16 fast layer and the 35B seat are in the tier table; install render gates for the MoE spill and a storeless tier
+
+### Added — the ampere-16 `fast` layer and the 35B seat are in the tier table (register A-113, ADR 0048 Amendment 2)
+
+The `fast` digest layer and the Qwen3.6-35B-A3B seat behind it existed only in the ampere-16 reference box's
+hand-edited config and in two Go test files, never in `setup/templates/profiles.json`, so a fresh install of the
+tier lost both (the capability-loss class ADR 0048 was written against, one level up). The table had one `vllm_seat`
+per tier and a card cannot hold two heavy seats, so the schema grew by the smallest steps that carry what the box runs.
+
+- `extra_vllm_seats` beside `vllm_seat`: further vLLM seats served on demand on the same card, never the agent lane.
+  Validated as non-lane seats (`Spec.ValidateExtra`: no fallback, every lane field refused), with unique ids, aliases
+  and units and the lane seat's card. `vllm_seat.storeless_reason` (and the same on an extra seat) is the measured
+  reason a seat has no cache server, seeded verbatim into its `kv_cache_server` binding; refused beside a `cache_server`.
+- `ampere-16` now declares `layers` `single` (the 27B GSQ lane seat) and `fast` (the 35B, 32,768 at 8 in flight), the
+  35B as its extra seat, and both seats' B-01 storeless reasons with the local paths dropped. The layer values are the
+  reference node's own (the two placement and delegate tests pin the same ones), so `audit-config` reports MATCH for
+  `layers`, `tiers` and `tier_profile` against a fixture that carries them: a live extract of that node redacts each
+  layer seat's `ctx_tokens`, so the 32,768 is the value those tests pin, not a live reading. A layer seat naming a vLLM
+  seat must equal that seat's `max_model_len` (and `max_num_seqs`, when set) or the table is refused at parse.
+- Seeding is per seat and never advertises what the box cannot serve: an extra seat the box can run (the venv, its
+  own weights and the wrapper scripts the operator installs for it) joins `vllm_seats` with its own binding; a layer
+  whose vLLM seat is absent is dropped; a layer set that lost `single` (the planner default, placement row 5b) is not
+  seeded at all; a box with no vLLM prerequisites seeds exactly what it did before (`tierseed.ResolveLayers`,
+  `Options.ExtraVLLMSeatsActive`).
+- `install render` emits every vLLM seat of a tier as an ALTERNATIVE of the others inside the residents set
+  (`emb & rer & (vagt | vagt2)`): the two seats cannot share the card, and co-resident members would have llama-swap
+  load the second beside the first. The extra seat's entry names its wrappers after its own unit, and a box that runs
+  it without the lane seat (the 27B's weights absent, or two snapshots under them mid-upgrade) renders it with the
+  box's own runtime; `servingtmpl.Render` refuses any vLLM seat whose runtime is incomplete, because such an entry
+  names no seat directory and no address and every gate that reads the text passes it. The composition check now runs
+  for any tier that declares layers, not only one that composes. `ParamsBasis` mirrors `Params.ExtraVLLMSeats`, and a
+  replay pins it.
+- `extra_vllm_seats` keys are strict, like `layers`: a key that is not a seat field is refused by tier and JSON path at
+  parse (`tierseed.ParseDoc`, so the installer's embedded copy too), never silently dropped. A misspelt `storeless_reason`
+  used to seed the generic reason in its place.
+- Not rendered, on purpose: the extra seat's systemd unit, wrapper scripts and polkit rule. Its production launch line
+  carries `--language-model-only`, which the shared linux-systemd run script cannot express, so
+  `docs/systems/composite-tier.md` lists what the operator installs by hand. Those scripts are also the seat's
+  prerequisite (`Spec.DetectExtra`): llama-swap does not check that an entry's `cmd` exists when it loads its config,
+  so a box with the venv and the weights but not the scripts would list the seat, seed its layer and fail only when a
+  contract asked for it. Until they are in the seat directory (`--vllm-seat-dir`, default `<home>/seat`, now a flag of
+  `install seed` and `audit-config` as well as `install render`), the seat and its layer are left out and the note
+  names the missing file.
+- The layer regression floor: `TestEveryTierKeepsItsDeclaredLayerSet` (`layerSetTiers`: each composite tier's layers and
+  the seat roles each serves) fails by name when a tier stops declaring one, and `extraSeatFloor` pins the extra seat.
+  Each was made red against the real regression and the table restored byte for byte: deleting the `fast` layer,
+  deleting the seat while keeping its layer, an extra seat with no tool parser, a layer window that drifts from its
+  seat's, deleting every layer, moving the layer's seat to another role. `docs/tiers/ampere-16.md` is regenerated
+  (layers, the 35B, both storeless reasons); `tierdocs` heads a layers-only tier "Layers", not "Composes".
+
+### Added — H-01's two remaining render gates: the spill ceiling and INV-16
+
+- `install render` refuses `--n-cpu-moe` (any spelling, and `LLAMA_ARG_N_CPU_MOE`) above the tier's measured spill,
+  the new `n_cpu_moe_max` (`servingtmpl.AuditSpill`, in the write gate `renderGate` that now also hosts the H-01 rule
+  audit and the layer check). It is a separate number from `n_cpu_moe`, because one field cannot check itself; 0 means
+  the tier recorded no measured spill, so none is sanctioned. A tier that names `moe_26b: n_cpu_moe` with no N is
+  refused too, since that renders the every-expert `--cpu-moe`. No shipped tier declares a spill.
+- `TestInstallRendersOnAnyTierWithoutACacheServer` (INV-16): every tier renders with no vLLM prerequisites, and a
+  tier whose vLLM seat declares no store renders the seat, its unit and wrappers with no cache-server piece and
+  seeds an explicit storeless binding that `doctor` accepts. A spill of 20 against a measured 14 and a hard-coded
+  `--n-cpu-moe 30` in a rendered command are refused.
+- Both serving-config audits (`Audit` and `AuditSpill`, so `install render`, `audit-yaml` and the template gate) now read
+  each entry the way llama-swap runs it, with its `${name}` macros substituted (nested macros too, bounded, and
+  llama-swap's own `${PORT}` left alone). The templates keep their shared flags in `macros:`, so a `-ngl 0` or an
+  `--n-cpu-moe 30` placed there used to pass every rule. Every shipped template still passes.
+
+### Fixed (tests) — the streamed re-pack tests had a 5x timing margin
+
+`TestRepackSlowStreamingSeatIsNotStalled` streamed a delta every 40 ms against a 200 ms stall allowance, so one scheduling pause of a loaded CI runner filed the stream as a stall (seen once on this PR's merged head; 20/20 locally, green on main). The allowance is now 600 ms (the 2 s stream still outlasts it, so a stream that stops counting as progress still fails: checked with 700 ms gaps), and `TestRepackProgressReachesTheJobRecord` gets the same headroom (600 ms / 900 ms). `TestRepackSilentSeatStillStalls` keeps 200 ms.
+
 ## [0.147.0] - 2026-09-30 - a finished answer is rescued instead of deferred when its re-pack fails; the re-pack is sized, streamed and held by the busy hold; research acceptance
 
 ### Fixed — a finished answer whose structured re-pack failed is re-packed by the delegator, not lost (C-66, PR-4)

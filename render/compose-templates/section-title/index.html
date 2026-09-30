@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>section-title</title>
+    <style>
+      /* Fonts are declared HERE, from the shared kit copied beside this file: Inter 700/900 (latin),
+         byte-identical to the faces HyperFrames' producer embeds. A family the page does not declare
+         with @font-face is resolved by the producer through a Google Fonts request, which is a network
+         call at render time, so every family used below is declared. */
+      @font-face { font-family: "Inter"; src: url("shared/fonts/inter-latin-700-normal.woff2") format("woff2"); font-weight: 700; font-style: normal; }
+      @font-face { font-family: "Inter"; src: url("shared/fonts/inter-latin-900-normal.woff2") format("woff2"); font-weight: 900; font-style: normal; }
+
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { width: 1920px; height: 1080px; overflow: hidden; background: #000; }
+
+      /* Every variable arrives as a --<id> custom property on the root (HyperFrames applies scalar
+         variables there), so the colors and the exit timing read from the root. */
+      #root {
+        position: relative;
+        width: 1920px;
+        height: 1080px;
+        overflow: hidden;
+        background: var(--background, #0a1210);
+        font-family: "Inter", sans-serif;
+        color: var(--text_color, #f1f5f4);
+      }
+
+      /* Everything except the canvas lives in .stage, so the exit fades the whole card to the flat
+         background in one motion. */
+      .stage {
+        position: absolute;
+        inset: 0;
+        animation: out 0.6s cubic-bezier(0.4, 0, 1, 1) calc(var(--duration, 6) * 1s - 0.6s) forwards;
+      }
+
+      /* Silence and weight: a quiet centre glow, a dot texture and a soft ellipse behind the words.
+         Each is a radial gradient from the accent to transparent, so intensity is one opacity value. */
+      .bloom {
+        position: absolute;
+        inset: 0;
+        background: radial-gradient(70% 70% at 50% 50%, var(--accent, #34d399) 0%, transparent 68%);
+        animation: bloom-in 1.6s cubic-bezier(0.16, 1, 0.3, 1) both;
+      }
+      .grid {
+        position: absolute;
+        inset: 0;
+        background-image: radial-gradient(circle at center, rgba(255, 255, 255, 0.07) 1px, transparent 1.6px);
+        background-size: 46px 46px;
+        -webkit-mask-image: radial-gradient(80% 80% at 50% 50%, #000 20%, transparent 74%);
+        mask-image: radial-gradient(80% 80% at 50% 50%, #000 20%, transparent 74%);
+        animation: grid-in 1.2s cubic-bezier(0.33, 1, 0.68, 1) 0.3s both;
+      }
+      .halo {
+        position: absolute;
+        left: 410px;
+        top: 350px;
+        width: 1100px;
+        height: 380px;
+        border-radius: 50%;
+        background: radial-gradient(ellipse at 50% 50%, var(--accent, #34d399) 0%, transparent 70%);
+        animation:
+          halo-in 1.8s cubic-bezier(0.16, 1, 0.3, 1) 0.2s both,
+          halo-breathe calc(max(var(--duration, 6) - 2.5, 1.2) * 1s / 2) ease-in-out 2.5s 2 forwards;
+      }
+
+      .content {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        padding: 90px 120px;
+        text-align: center;
+        animation: breathe calc(max(var(--duration, 6) - 2.5, 1.2) * 1s / 2) ease-in-out 2.5s 2 forwards;
+      }
+
+      .kicker {
+        max-width: 1500px;
+        margin-bottom: 36px;
+        font-size: 26px;
+        font-weight: 700;
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
+        color: var(--accent, #34d399);
+        overflow-wrap: anywhere;
+        animation: rise-small 0.9s cubic-bezier(0.16, 1, 0.3, 1) 0.8s both;
+      }
+
+      .headline {
+        max-width: 1380px;
+        font-size: 104px;
+        font-weight: 900;
+        line-height: 1.04;
+        letter-spacing: -0.02em;
+        overflow-wrap: anywhere;
+        text-wrap: balance;
+        animation: inhale 1.2s cubic-bezier(0.16, 1, 0.3, 1) 1.05s both;
+      }
+      .headline em { font-style: normal; color: var(--accent, #34d399); }
+
+      /* Deep vignette: the edges are pulled hard toward black. Made for dark backgrounds. */
+      .vignette {
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
+        background: radial-gradient(110% 110% at 50% 50%, transparent 30%, rgba(0, 0, 0, 0.6) 100%);
+      }
+
+      /* Nothing here scales above its resting size: the same kind of breathing on a glow gave frames that
+         depended on which render worker drew them, so the headline breathes by rising and settling 6 px
+         instead (see the README). Entrances that scale UP TO 1 are stable. */
+      @keyframes bloom-in { from { opacity: 0; transform: scale(0.82); } to { opacity: 0.22; transform: scale(1); } }
+      @keyframes grid-in { from { opacity: 0; } to { opacity: 0.4; } }
+      @keyframes halo-in { from { opacity: 0; transform: scale(0.6); } to { opacity: 0.3; transform: scale(1); } }
+      @keyframes halo-breathe { 0% { opacity: 0.3; } 50% { opacity: 0.5; } 100% { opacity: 0.3; } }
+      @keyframes breathe { 0% { transform: translateY(0); } 50% { transform: translateY(-6px); } 100% { transform: translateY(0); } }
+      @keyframes rise-small { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: translateY(0); } }
+      @keyframes inhale { from { opacity: 0; transform: scale(0.94); } to { opacity: 1; transform: scale(1); } }
+      @keyframes out { from { opacity: 1; } to { opacity: 0; } }
+    </style>
+  </head>
+  <body>
+    <div
+      id="root"
+      data-composition-id="section-title"
+      data-start="0"
+      data-duration="6"
+      data-width="1920"
+      data-height="1080"
+      data-fps="30"
+      data-no-timeline
+      data-composition-variables='[{"id":"kicker","type":"string","label":"Kicker","description":"A short uppercase lead-in above the headline, such as a chapter number. May be empty.","maxLength":32,"default":"Chapter three"},{"id":"headline_pre","type":"string","label":"Headline before the emphasis","description":"The first part of the headline.","maxLength":32,"default":"Where the plan"},{"id":"headline_em","type":"string","label":"Headline emphasis","description":"The emphasised phrase, in the accent color. May be empty.","maxLength":20,"default":"meets"},{"id":"headline_post","type":"string","label":"Headline after the emphasis","description":"The last part of the headline. May be empty.","maxLength":32,"default":"the road"},{"id":"background","type":"color","label":"Background","default":"#0a1210"},{"id":"accent","type":"color","label":"Accent","description":"The kicker, the emphasised phrase and the glow.","default":"#34d399"},{"id":"text_color","type":"color","label":"Text color","default":"#f1f5f4"},{"id":"duration","type":"number","label":"Duration (seconds)","description":"Total length; the exit fade starts 0.6 s before the end.","min":3,"max":30,"default":6}]'
+    >
+      <div class="stage">
+        <div class="bloom"></div>
+        <div class="grid"></div>
+        <div class="halo"></div>
+
+        <div class="content">
+          <div class="kicker" data-var-text="kicker">Chapter three</div>
+          <div class="headline"><span data-var-text="headline_pre">Where the plan</span> <em data-var-text="headline_em">meets</em> <span data-var-text="headline_post">the road</span></div>
+        </div>
+
+        <div class="vignette"></div>
+      </div>
+    </div>
+    <script>
+      // CSS keyframes only, seeked by HyperFrames' CSS adapter; no clock, no randomness, no timers.
+      window.__timelines = window.__timelines || {};
+    </script>
+  </body>
+</html>

@@ -1388,7 +1388,7 @@ func runComposeVideo(args []string) error {
 	asJSON := fs.Bool("json", false, "print full result JSON")
 	compactFlag := fs.Bool("compact", false, "compact (minified) JSON output")
 	var f composeFlags
-	fs.StringVar(&f.template, "template", "", "a vetted template on this machine (title-card, lower-third, ...)")
+	fs.StringVar(&f.template, "template", "", "a vetted template on this machine (title-card, lower-third, stat-card, section-title, callout-label, checklist-card, captions-bar)")
 	fs.StringVar(&f.variables, "variables", "", "template variables as a JSON object")
 	fs.StringVar(&f.variablesFile, "variables-file", "", "path to a JSON file with the template variables")
 	fs.StringVar(&f.htmlFile, "html", "", "path to a single-file composition (trusted code only)")

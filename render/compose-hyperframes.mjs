@@ -419,7 +419,11 @@ export function applyTemplateVariables(html, variables, manifest = {}) {
     }
     d.default = value;
   }
-  let out = html.replace(VARS_ATTR_RE, `data-composition-variables='${htmlAttrEscape(JSON.stringify(decls))}'`);
+  // A replacer FUNCTION, never a replacement string: String.replace reads $-patterns ($1, $&, $`, $', $$) in a
+  // string, so a caller value such as "over $100 million" would corrupt the declaration and "$&" would splice the
+  // old attribute, closing quote and all, into the new one, turning caller text into attributes of the root tag.
+  const declaration = `data-composition-variables='${htmlAttrEscape(JSON.stringify(decls))}'`;
+  let out = html.replace(VARS_ATTR_RE, () => declaration);
   const durVar = manifest.duration_variable;
   if (durVar && byId.has(durVar)) {
     const dur = byId.get(durVar).default;

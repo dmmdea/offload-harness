@@ -138,6 +138,13 @@ type Spec struct {
 	// registered and then served nothing. ConfigBlock derives the harness half from
 	// this one, so there is a single authority.
 	CacheServer *CacheServer `json:"cache_server,omitempty"`
+	// StorelessReason is the MEASURED reason this seat runs with no cache server. It
+	// rides into the harness's `kv_cache_server` binding verbatim (ConfigBinding), so a
+	// fresh install says WHY a seat is storeless instead of the generic "the tier
+	// declares none" — the measured reason lived only in a reference box's hand-edited
+	// config, and a fresh install lost it. It is accepted only while CacheServer is
+	// nil: a seat is bound to a store or it is storeless, never both.
+	StorelessReason string `json:"storeless_reason,omitempty"`
 
 	// ModelRepo is the HF hub repo directory RELATIVE to the deployment's HF home
 	// (e.g. "hub/models--RedHatAI--Qwen3.5-4B-quantized.w4a16"). Relative because the
@@ -513,10 +520,43 @@ func (r Runtime) Validate() error {
 	return nil
 }
 
-// Validate refuses a spec at AUTHORING time — in a test over the committed tier
-// table — rather than on someone's machine, where the symptom is a unit that will not
-// start or an agent lane that quietly routes nowhere.
-func (s Spec) Validate(tier string) error {
+// Validate refuses the tier's agent-LANE seat (`vllm_seat`) at AUTHORING time — in a
+// test over the committed tier table — rather than on someone's machine, where the
+// symptom is a unit that will not start or an agent lane that quietly routes nowhere.
+func (s Spec) Validate(tier string) error { return s.validate(tier, true) }
+
+// ValidateExtra is Validate for a tier's EXTRA seat (`extra_vllm_seats`): a vLLM seat
+// served on demand beside the lane seat — the ampere-16 fast digest layer's 35B — that
+// never binds `agent_model`. It holds the same engine rules (window, parsers, unit,
+// ttl, cache server) and drops the two that only make sense for the lane: an extra
+// seat has no llama.cpp fallback to name (the layer it backs is simply absent when the
+// seat is), and every lane field is REFUSED rather than ignored, because a setting that
+// reads as a decision and is never read is how a table drifts from its box.
+func (s Spec) ValidateExtra(tier string) error { return s.validate(tier, false) }
+
+// laneFields names the Spec fields that exist only for the agent lane: the fallback a
+// box without the venv serves, and the bound-lane settings the loop runs the seat at.
+// They are what ValidateExtra refuses, by JSON key.
+func (s Spec) laneFields() []string {
+	var out []string
+	add := func(set bool, key string) {
+		if set {
+			out = append(out, key)
+		}
+	}
+	add(s.Fallback != "", "fallback_agent_model")
+	add(s.FallbackCtx != 0, "fallback_agent_ctx_tokens")
+	add(s.FallbackDevice != "", "fallback_agent_device")
+	add(s.AgentCtxTokens != 0, "agent_ctx_tokens")
+	add(s.AgentMaxTokens != 0, "agent_max_tokens")
+	add(s.AgentThinking != "", "agent_thinking")
+	add(s.AgentSampling != nil, "agent_sampling")
+	add(s.AgentTimeoutSec != 0, "agent_timeout_sec")
+	add(s.AgentSeatTokS != 0, "agent_seat_tok_s")
+	return out
+}
+
+func (s Spec) validate(tier string, lane bool) error {
 	var problems []string
 	req := func(cond bool, msg string) {
 		if !cond {
@@ -539,8 +579,14 @@ func (s Spec) Validate(tier string) error {
 	req(s.MaxNumSeqs > 0, "no max_num_seqs — it is also the entry's concurrencyLimit")
 	req(s.ToolCallParser != "", "no tool_call_parser — an agent seat without one fails every contract at once")
 	req(s.ReasoningParser != "", "no reasoning_parser")
-	req(s.Fallback != "", "no fallback_agent_model — a box that has not built the vLLM venv must still get a working agent seat")
-	req(s.Fallback != s.ID, "fallback_agent_model repeats the seat id, so there is no fallback")
+	if lane {
+		req(s.Fallback != "", "no fallback_agent_model — a box that has not built the vLLM venv must still get a working agent seat")
+		req(s.Fallback != s.ID, "fallback_agent_model repeats the seat id, so there is no fallback")
+	} else {
+		for _, f := range s.laneFields() {
+			problems = append(problems, f+" is a lane field: an extra seat never binds agent_model, so it would be written and never read")
+		}
+	}
 	// 0 is the value that means "never unload". It is the one value this field must
 	// never take; omit it to get the house default instead.
 	req(s.TTLSeconds >= 0, "ttl_seconds cannot be negative")
@@ -597,6 +643,9 @@ func (s Spec) Validate(tier string) error {
 		if err := s.CacheServer.Validate(); err != nil {
 			problems = append(problems, err.Error())
 		}
+		if strings.TrimSpace(s.StorelessReason) != "" {
+			problems = append(problems, "storeless_reason is set beside a cache_server — a seat is bound to a store or it is storeless, never both")
+		}
 	}
 	// Bound-lane settings: the same rules the harness config applies, applied at
 	// declaration time so a tier cannot seed a lane the box would refuse or
@@ -619,6 +668,9 @@ func (s Spec) Validate(tier string) error {
 		return nil
 	}
 	sort.Strings(problems)
+	if !lane {
+		return fmt.Errorf("tier %s extra_vllm_seats %s: %s", tier, s.ID, strings.Join(problems, "; "))
+	}
 	return fmt.Errorf("tier %s vllm_seat: %s", tier, strings.Join(problems, "; "))
 }
 
@@ -778,10 +830,14 @@ func (s Spec) ConfigBinding() map[string]any {
 	if b := s.ConfigBlock(); b != nil {
 		return b
 	}
+	reason := "the tier declares no cache_server for this seat: it runs on VRAM plus LMCache's L1 staging only"
+	if r := strings.TrimSpace(s.StorelessReason); r != "" {
+		reason = r // the MEASURED reason, when the tier recorded one
+	}
 	return map[string]any{
 		"seat":      s.ID,
 		"storeless": true,
-		"reason":    "the tier declares no cache_server for this seat: it runs on VRAM plus LMCache's L1 staging only",
+		"reason":    reason,
 	}
 }
 
@@ -1028,7 +1084,56 @@ func (s Spec) unloadTimeout() int {
 // membership instead: the renderer joins this seat to the residents set and gives it
 // a high evict cost. TestEntryMatchesTheReferenceTemplate keeps the two in step on
 // every field that is not residency.
-func (s Spec) Entry(r Runtime) string {
+func (s Spec) Entry(r Runtime) string { return s.entry(r, "vllm-seat") }
+
+// ExtraEntry is Entry for a tier's EXTRA seat (`extra_vllm_seats`). Only the wrapper
+// names differ: `vllm-seat-cmd.sh` has the primary's unit baked into it at render
+// time, so a second entry pointing at the same path would start the WRONG engine — the
+// extra seat's wrappers are named after its own unit (`<unit>-cmd.sh`), which is also
+// how a hand-installed seat on the reference box is laid out. The primary's paths, which
+// every deployed config already carries, do not move.
+func (s Spec) ExtraEntry(r Runtime) string { return s.entry(r, s.Unit) }
+
+// ExtraWrapperPaths are the two scripts an EXTRA seat's llama-swap entry runs, spelled exactly as
+// ExtraEntry writes them. The installer does not write them: the seat's launch line carries flags the
+// shared unit template cannot express (the ampere-16 35B's `--language-model-only`), so its unit, its
+// wrapper scripts and its polkit rule are the operator's step. nil for the WSL launch, whose entry runs
+// one shared PowerShell stub named by the seat id, so there is no per-seat script to install.
+func (s Spec) ExtraWrapperPaths(r Runtime) []string {
+	if s.launch() == LaunchWindowsWSL {
+		return nil
+	}
+	return []string{
+		fmt.Sprintf("%s/%s-cmd.sh", r.SeatDir, s.Unit),
+		fmt.Sprintf("%s/%s-cmdstop.sh", r.SeatDir, s.Unit),
+	}
+}
+
+// DetectExtra is Detect for an EXTRA seat: the venv and the seat's own weights (Detect), and the
+// wrapper scripts its entry runs (ExtraWrapperPaths). Those scripts are not installer output, and
+// llama-swap does not check that an entry's `cmd` exists when it loads its config, so a seat
+// advertised without them sits in the roster and fails only when a contract asks for it. A box
+// therefore advertises the seat (rosters it, binds it, renders its entry, seeds the layer that names
+// it) only once the operator has installed them, and a skip says which file is missing.
+func (s Spec) DetectExtra(r Runtime) (bool, string) {
+	if ok, why := s.Detect(r); !ok {
+		return false, why
+	}
+	if s.launch() != LaunchWindowsWSL && r.SeatDir == "" {
+		return false, "no seat directory to look for the seat's wrapper scripts in"
+	}
+	for _, p := range s.ExtraWrapperPaths(r) {
+		host := r.hostPath(p)
+		if fi, err := os.Stat(host); err != nil || fi.IsDir() {
+			return false, "no wrapper script at " + filepath.ToSlash(host) + ": an extra seat's unit, wrapper scripts " +
+				"and polkit rule are installed by hand (docs/systems/composite-tier.md)"
+		}
+	}
+	return true, ""
+}
+
+// entry renders the block with the wrapper scripts named <base>-cmd.sh / <base>-cmdstop.sh.
+func (s Spec) entry(r Runtime, base string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "  %s:\n", s.ID)
 	if len(s.Aliases) > 0 {
@@ -1043,8 +1148,8 @@ func (s Spec) Entry(r Runtime) string {
 		fmt.Fprintf(&b, "    cmd: %s\n", strconv.Quote(winStub(r.SeatDir, "seat-cmd.ps1", s.ID)))
 		fmt.Fprintf(&b, "    cmdStop: %s\n", strconv.Quote(winStub(r.SeatDir, "seat-cmdstop.ps1", s.ID)))
 	} else {
-		fmt.Fprintf(&b, "    cmd: %s/vllm-seat-cmd.sh\n", r.SeatDir)
-		fmt.Fprintf(&b, "    cmdStop: %s/vllm-seat-cmdstop.sh\n", r.SeatDir)
+		fmt.Fprintf(&b, "    cmd: %s/%s-cmd.sh\n", r.SeatDir, base)
+		fmt.Fprintf(&b, "    cmdStop: %s/%s-cmdstop.sh\n", r.SeatDir, base)
 	}
 	fmt.Fprintf(&b, "    proxy: http://%s:%d\n", r.ProxyHost, s.Port)
 	fmt.Fprintf(&b, "    checkEndpoint: /health\n")

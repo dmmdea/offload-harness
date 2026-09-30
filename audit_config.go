@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"reflect"
 	"sort"
@@ -219,6 +220,7 @@ func runAuditConfig(args []string) error {
 	vllmSeat := fs.String("vllm-seat-active", "auto", "whether this node serves the tier's vLLM agent seat: auto (detect locally, as install does) | true | false")
 	vllmVenv := fs.String("vllm-venv", "", "hand-built vLLM virtualenv for auto detection (default: <home>/vllm-env)")
 	hfHome := fs.String("hf-home", "", "HF cache root for auto detection (default: $HF_HOME, else <home>/hf)")
+	vllmSeatDir := fs.String("vllm-seat-dir", "", "where the vLLM seats' wrapper scripts live, for auto detection of a tier's extra seats (default: <home>/seat)")
 	_ = fs.Parse(args)
 
 	userHome, _ := os.UserHomeDir()
@@ -264,21 +266,24 @@ func runAuditConfig(args []string) error {
 	if !ok {
 		return fmt.Errorf("audit-config: tier %q (from %s) is not in profiles.json", tier, tierSource)
 	}
+	// The flag speaks for the tier's vLLM seats as a set: `true` says the node serves them all
+	// (the lane seat and every extra seat), `false` none, `auto` detects each one locally.
 	vllmActive := false
+	extraActive := map[string]bool{}
 	switch *vllmSeat {
 	case "true":
 		vllmActive = true
+		for _, e := range p.ExtraVLLMSeats {
+			extraActive[e.ID] = true
+		}
 	case "false":
 	case "auto":
-		if p.VLLMSeat != nil {
-			rt := vllmRuntimeFlags{venv: *vllmVenv, hfHome: *hfHome}.resolve(installHome)
-			vllmActive, _ = p.VLLMSeat.Detect(rt)
-		}
+		vllmActive, extraActive = detectVLLMSeats(p, vllmRuntimeFlags{venv: *vllmVenv, hfHome: *hfHome, seatDir: *vllmSeatDir}.resolve(installHome), io.Discard)
 	default:
 		return fmt.Errorf("audit-config: --vllm-seat-active must be auto, true or false, got %q", *vllmSeat)
 	}
 	seed, err := tierseed.Resolve(p, tier, tierseed.Options{
-		Home: installHome, GOOS: *goos, RAMTier: *ramTier, VLLMSeatActive: vllmActive,
+		Home: installHome, GOOS: *goos, RAMTier: *ramTier, VLLMSeatActive: vllmActive, ExtraVLLMSeatsActive: extraActive,
 	})
 	if err != nil {
 		return fmt.Errorf("audit-config: resolve %s: %w", tier, err)
