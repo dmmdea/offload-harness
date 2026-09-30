@@ -13,8 +13,10 @@ package servingtmpl
 
 import (
 	"fmt"
+	"math"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -93,6 +95,67 @@ func Audit(text string) []Violation {
 		}
 		return out[i].Where < out[j].Where
 	})
+	return out
+}
+
+var (
+	// nCPUMoeFlagRe matches llama.cpp's partial expert placement in any spelling of the
+	// flag: `--n-cpu-moe N`, `--n-cpu-moe=N` and the short `-ncmoe N`.
+	nCPUMoeFlagRe = regexp.MustCompile(`(?:^|\s)(?:--n-cpu-moe|-ncmoe)(?:\s+|=)(\d+)(?:\s|$)`)
+	// nCPUMoeEnvRe is the flag's environment twin, which llama-server reads the same way.
+	nCPUMoeEnvRe = regexp.MustCompile(`(?:^|[\s,\[])LLAMA_ARG_N_CPU_MOE=(\d+)`)
+)
+
+// AuditSpill is the H-01 rule Audit cannot carry, because Audit reads one config with no
+// tier in hand: `--n-cpu-moe` above the tier's MEASURED spill (INV-1). The cards do the
+// inference and RAM is overflow only; the single sanctioned host-RAM use is a PARTIAL
+// spill of a model that does not fit its card, and only up to the number of expert layers
+// a measurement showed was needed. A tier that recorded no measurement (maxNCPUMoE 0) has
+// no sanctioned spill at all, so any `--n-cpu-moe N` with N above zero is refused; N 0
+// spills nothing and is compliant.
+//
+// It checks the flag in every spelling and its LLAMA_ARG_N_CPU_MOE environment twin, on
+// every entry, and reports every offender (sorted by entry) so a fix is one pass. The
+// every-expert `--cpu-moe` is a different rule, owned at the table level (a GPU tier may
+// not seed `cpu_moe`), and a document that does not parse is Audit's finding, not this
+// rule's: reporting it twice would only bury it.
+func AuditSpill(text string, maxNCPUMoE int) []Violation {
+	var doc struct {
+		Models map[string]map[string]any `yaml:"models"`
+	}
+	if err := yaml.Unmarshal([]byte(text), &doc); err != nil {
+		return nil
+	}
+	var out []Violation
+	for name, m := range doc.Models {
+		cmd, _ := m["cmd"].(string)
+		env := flatEnv(m["env"])
+		worst, spelling := 0, ""
+		see := func(re *regexp.Regexp, from, label string) {
+			for _, mm := range re.FindAllStringSubmatch(from, -1) {
+				n, err := strconv.Atoi(mm[1])
+				if err != nil {
+					n = math.MaxInt // digits too long for an int are certainly above any measured spill
+				}
+				if n > worst {
+					worst, spelling = n, label
+				}
+			}
+		}
+		see(nCPUMoeFlagRe, cmd, "--n-cpu-moe")
+		see(nCPUMoeEnvRe, env, "LLAMA_ARG_N_CPU_MOE")
+		if worst <= maxNCPUMoE {
+			continue
+		}
+		limit := fmt.Sprintf("the tier's measured spill is %d", maxNCPUMoE)
+		if maxNCPUMoE == 0 {
+			limit = "the tier has no measured spill (n_cpu_moe_max 0), so none is sanctioned"
+		}
+		out = append(out, Violation{Rule: "n-cpu-moe", Where: name, Text: fmt.Sprintf(
+			"%s %d spills %d expert layers to the CPU, but %s (INV-1: RAM is overflow only, and only up to a measured spill)",
+			spelling, worst, worst, limit)})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Where < out[j].Where })
 	return out
 }
 
