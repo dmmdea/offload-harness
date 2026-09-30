@@ -1277,9 +1277,10 @@ type healthPayload struct {
 	// spans every capped task type, and a media-only node with no agent
 	// history simply never has a wall sample to estimate from.
 	//
-	// Not yet consumed by internal/delegate — that lands with the placement
-	// release (feat/placement-eta); this field exists so that PR has
-	// something to read.
+	// Consumed by internal/delegate (ADR 0063): it sizes the queue budget of a job
+	// sent here (queueBudgetFor) and holds this node out of the deal, the
+	// re-placement candidates and the capacity wait while a new job could not start
+	// inside the caller's patience (startsWithinPatience).
 	QueueWaitEstimateSec float64 `json:"queue_wait_estimate_sec,omitempty"`
 	// ServedModels is the CACHED roster name list — canonical ids AND every
 	// alias (agentResidency.served, from swapclient.Roster.Names) —
