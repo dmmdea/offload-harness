@@ -424,7 +424,7 @@ Copy `config.example.json` and edit. Config is resolved in precedence order: `--
 | `model` | `offload-e4b` | Workhorse text tier (summarize / extract). |
 | `triage_model` | `gemma4-e2b` | Fast entry tier (triage / classify); empty = use `model`. |
 | `escalation_model` | `gemma4-26b-a4b` | Larger tier tried before deferring; empty = no escalation. |
-| `vision_model` | `""` | Local vision tier (VQA / OCR / image extract / assess). Opt-in: a tier earns it by declaring a `vision` media seat. Empty = the route defers rather than naming a seat nothing serves. |
+| `vision_model` | `""` | Local vision tier (VQA / OCR / image extract / assess). Opt-in: a tier earns it by declaring a `vision` media seat (or an `rkllm` seat with a vision encoder). Empty = the route defers rather than naming a seat nothing serves. |
 | `ocr_model` | `""` | Optional dedicated OCR tier routing **only** the `ocr` task (purpose-built OCR models beat a general VLM on dense text, but cannot answer VQA — so it is a separate binding, never a `vision_model` replacement). Deliberately unbound by default: empty = OCR rides `vision_model`, exactly as before. |
 | `stt_model` / `stt_model_hq` | `""` / `""` | Speech-to-text upstreams. Both opt-in: a tier earns `stt_model` by declaring an `stt` media seat (`media_seats` in the tier table), which renders the whisper seat AND this binding from one declaration. Empty = the route defers rather than naming a seat nothing serves. |
 | `stt_hq_api` | `""` | Protocol of the HQ upstream: `""`/`whisper` = whisper-server `/inference`; `openai` = llama-server's `/v1/audio/transcriptions` (mtmd STT like Qwen3-ASR — no timestamps: one full-span segment; language auto-detected; whisper knobs don't apply). |
