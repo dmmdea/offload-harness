@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dmmdea/offload-harness/internal/gpuactivity"
 )
@@ -66,4 +67,30 @@ func TestLocalRunCapRoom(t *testing.T) {
 			t.Fatalf("the fail-open was logged %d times, want once per run: %s", n, logs.String())
 		}
 	})
+}
+
+// TestLocalSlotAheadIsMemoisedForTheProbeTTL: a dozen subtasks waiting on the capacity wait read the run-cap
+// line once per tick between them, not a dozen times - and a reading older than the TTL is read again. (Every
+// wait test zeroes the memo to compress its tick, so none of them ever reaches the memoised path.)
+func TestLocalSlotAheadIsMemoisedForTheProbeTTL(t *testing.T) {
+	old := fetchViewsMemoTTL
+	t.Cleanup(func() { fetchViewsMemoTTL = old })
+	fetchViewsMemoTTL = 150 * time.Millisecond
+	r := &runner{cfg: testCfg(t)}
+	r.cfg.FleetMaxConcurrentJobs = 1
+	if free, _ := r.localSlotAhead(); !free {
+		t.Fatal("fixture: an empty line must have a slot")
+	}
+	run := gpuactivity.Start(r.cfg.GPULockPath, r.cfg.StateDir, gpuactivity.Run{Seat: r.cfg.AgentPlannerModel(""), Kind: "contract", Goal: "x", Phase: gpuactivity.PhaseRunning})
+	if run == nil {
+		t.Fatal("fixture: could not register a run")
+	}
+	t.Cleanup(run.End)
+	if free, _ := r.localSlotAhead(); !free {
+		t.Fatal("the line filled inside the memo window and the reading changed: the registry was read again")
+	}
+	time.Sleep(200 * time.Millisecond)
+	if free, _ := r.localSlotAhead(); free {
+		t.Fatal("a reading older than the TTL was served from the memo")
+	}
 }

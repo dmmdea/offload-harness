@@ -2606,9 +2606,11 @@ func replaceableRefusal(status int) bool {
 // THE FLEET IS READ AGAIN, for every route (ADR 0063). route=spread used to reuse
 // the snapshot taken when the run started, so a node the run's own siblings had
 // filled since was still "the node with room". The read goes through the probe
-// memo, which dedupes siblings that refuse together - but only a snapshot taken
-// AFTER this refusal counts (fetchViewsSince): one that predates it is exactly the
-// picture the refusal just proved wrong.
+// memo, but only a snapshot taken AFTER this refusal counts (fetchViewsSince): one
+// that predates it is exactly the picture the refusal just proved wrong. In practice
+// each re-placement reads the fleet itself - a sibling's probe is rarely newer than
+// this caller's own refusal - which is the one extra health read per re-placement
+// ADR 0063 names in its Consequences.
 //
 // A candidate must pass the room check (hasRoomWithin: not saturated, and able
 // to START the job inside the caller's patience), must not be in cooldown after
@@ -4969,9 +4971,10 @@ func (r *runner) fetchViewsDetailed(ctx context.Context) ([]NodeView, []string, 
 
 // fetchViewsSince is fetchViews for a caller that has just learned its picture of
 // the fleet was wrong - a re-placement after a refusal: the memo serves it only
-// when the snapshot was taken AT OR AFTER notBefore. A sibling that probed after
-// the same refusal has already paid for a fresh read and is shared; a snapshot that
-// predates the refusal is the stale picture and is never reused.
+// when the snapshot was taken AT OR AFTER notBefore. A snapshot taken after the
+// refusal is shared; one that predates it is the stale picture and is never reused.
+// Siblings that refuse together are not deduped by this: each one's refusal is newer
+// than the probe another began, so each reads the fleet once.
 func (r *runner) fetchViewsSince(ctx context.Context, notBefore time.Time) ([]NodeView, []string, []string) {
 	views, bases, probeErrs, _ := r.fetchViewsDetailedSince(ctx, notBefore)
 	return views, bases, probeErrs
