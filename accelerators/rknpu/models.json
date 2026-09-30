@@ -1,5 +1,5 @@
 {
-  "_comment": "Rockchip RKNPU (RK3588 NPU) artifact manifest. The sidecar serves only files listed here whose sha256 matches, model files and label files alike: an artifact that drifted is a structured model_sha_mismatch, never a silent load. Sources are airockchip/rknn-toolkit2 and airockchip/rknn_model_zoo at the v2.3.2 tag (raw GitHub URLs; the model zoo's ONNX files come from its own download host); nothing is redistributed by this repository. Licences of what you download: the toolkit, runtime and zoo files are Rockchip's; yolov8n's weights are Ultralytics' (AGPL-3.0); CLIP ViT-B/32 is OpenAI's (MIT). resnet18 is Rockchip's prebuilt rk3588 model and downloads directly. yolov8n and the CLIP image tower have no public .rknn: fetch-models.sh --convert builds them from the pinned ONNX with the recipes recorded under each model's \"convert\" key (rknn_model_zoo examples/yolov8/python/convert.py rk3588 i8, and examples/clip/python/images/convert.py rk3588 fp). A conversion is not bit-reproducible (two runs on identical inputs differ by about a kilobyte of embedded build metadata), so the sha256 of a converted model pins the exact file verified on an Orange Pi 5 (RK3588S) on 2026-09-29; a conversion of your own must have its new hash recorded here before the sidecar will serve it. Every model runs on the NPU only: RKNPU_ENABLED=0 stubs the device, there is no CPU fallback.",
+  "_comment": "Rockchip RKNPU (RK3588 NPU) artifact manifest. The sidecar serves only files listed here whose sha256 matches, model files and label files alike: an artifact that drifted is a structured model_sha_mismatch, never a silent load. Sources are airockchip/rknn-toolkit2 and airockchip/rknn_model_zoo at the v2.3.2 tag (raw GitHub URLs; the model zoo's ONNX files come from its own download host); nothing is redistributed by this repository. Licences of what you download: the toolkit, runtime and zoo files are Rockchip's; yolov8n's weights are Ultralytics' (AGPL-3.0); CLIP ViT-B/32 is OpenAI's (MIT). resnet18 is Rockchip's prebuilt rk3588 model and downloads directly. yolov8n and the CLIP image tower have no public .rknn: fetch-models.sh --convert builds them from the pinned ONNX with the recipes recorded under each model's \"convert\" key (rknn_model_zoo examples/yolov8/python/convert.py rk3588 i8, and examples/clip/python/images/convert.py rk3588 fp). A conversion is not bit-reproducible (two runs on identical inputs differ by about a kilobyte of embedded build metadata, and on the NPU the outputs are bit-identical: measured, a rebuild's maximum absolute difference from the pinned file is 0.0 on every output tensor), so the sha256 of a converted model pins the exact file verified on an Orange Pi 5 (RK3588S) on 2026-09-30 (mainline 7.0 kernel, rknpu 0.9.8 driver, librknnrt 2.3.2); a conversion of your own must have its new hash recorded here before the sidecar will serve it. Every model runs on the NPU only: RKNPU_ENABLED=0 stubs the device, there is no CPU fallback.",
   "runtime": {
     "rknn_toolkit_lite2": "2.3.2",
     "target": "rk3588",
@@ -26,7 +26,7 @@
     },
     "yolov8n": {
       "file": "yolov8n_i8_rk3588.rknn",
-      "sha256": "PENDING",
+      "sha256": "2f97d2eba83c5e7277cbbb9e3f21fd1588f088575350c5452f564b21b2b90f49",
       "task": "object_detect",
       "labels": "coco_80_labels_list.txt",
       "input": 640,
@@ -43,7 +43,7 @@
     },
     "clip-vit-b32-image": {
       "file": "clip_vit_b32_image_fp16_rk3588.rknn",
-      "sha256": "PENDING",
+      "sha256": "7dc93fb58ee21c85a979ecd12267acd8caaeb853b589166bf47f92805af96842",
       "task": "embed",
       "input": 224,
       "space": "clip-vit-base-patch32-image",
