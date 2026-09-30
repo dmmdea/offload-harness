@@ -2255,6 +2255,12 @@ const minRetrySec = 10
 // because the cold load that triggers the probe would otherwise eat most of a
 // default budget before the retry floor is applied. The general infrastructure
 // rule is untouched; see IncoherentSeatDefer.
+//
+// The other is the seat-down defer (ADR 0066, SeatDownDefer): the seat's engine
+// went down under the run and did not come back inside the node's own bounded
+// wait. Same argument — a property of THIS seat, a sound contract, the cure is
+// another node — and the wait the node spent on the dead seat is credited back
+// the same way.
 func retryable(pr PlacedResult) bool {
 	if pr.Err != "" {
 		return false
@@ -2262,10 +2268,30 @@ func retryable(pr PlacedResult) bool {
 	if len(pr.AcceptanceFailures) > 0 {
 		return true
 	}
-	if IncoherentSeatDefer(pr.Result) {
+	if IncoherentSeatDefer(pr.Result) || SeatDownDefer(pr.Result) {
 		return true
 	}
 	return pr.Result.Deferred && pr.Result.DeferClass == core.DeferClassAbstention
+}
+
+// SeatDownDefer reports whether a result is the seat-down defer (ADR 0066,
+// register C-72): an `infrastructure` defer whose reason carries
+// core.SeatDownReason, i.e. the executing node's seat went down under the run —
+// the engine hung with work outstanding, or died and llama-swap no longer serves
+// it — and the node's own bounded wait and one re-issue did not bring it back.
+//
+// It is the SECOND infrastructure defer that is worth a retry, and for the same
+// reason as the first (IncoherentSeatDefer): the fault is a property of THIS
+// seat and the contract itself is sound, so the same contract on another node is
+// the cure. It is safe to re-place because a node-filed defer is an OBSERVED
+// terminal — the node reported it, so nothing is still running the contract
+// (the "never re-place after a 202" rule is about jobs whose outcome nobody
+// observed). It matches on the CONSTANT the producer writes, never on prose. A
+// node older than 0.144 never emits it, and keeps emitting `stalled:` for the
+// same outage until it is upgraded — for such a node this changes nothing.
+func SeatDownDefer(r core.AgentWireResult) bool {
+	return r.Deferred && r.DeferClass == core.DeferClassInfrastructure &&
+		strings.HasPrefix(r.Reason, core.SeatDownReason)
 }
 
 // IncoherentSeatDefer reports whether a result is the admission-time coherence
@@ -2295,11 +2321,27 @@ func IncoherentSeatDefer(r core.AgentWireResult) bool {
 // Zero for every other result: no other shape has a claim on the credit, and a
 // node that reports no admission (a pre-D-118 node, or an unmeasured one) is
 // credited nothing rather than guessed at.
+//
+// A seat-down defer (ADR 0066) is credited its admission AND the wait the node
+// spent on the downed seat (seat_down_wait_sec): time the contract provably did
+// not spend working, on a seat that could not serve it. The credit is bounded by
+// one full contract wall (core.AgentTimeoutSecCap): a node's number never buys
+// the retry more than that.
 func admissionCredit(pr PlacedResult) time.Duration {
-	if !IncoherentSeatDefer(pr.Result) || pr.Result.AdmissionWaitSec <= 0 {
+	secs := 0.0
+	switch {
+	case IncoherentSeatDefer(pr.Result):
+		secs = pr.Result.AdmissionWaitSec
+	case SeatDownDefer(pr.Result):
+		secs = pr.Result.AdmissionWaitSec + pr.Result.SeatDownWaitSec
+		if secs > core.AgentTimeoutSecCap {
+			secs = core.AgentTimeoutSecCap
+		}
+	}
+	if secs <= 0 {
 		return 0
 	}
-	return time.Duration(pr.Result.AdmissionWaitSec * float64(time.Second))
+	return time.Duration(secs * float64(time.Second))
 }
 
 // alternativeNode picks the node a retry runs on: the best eligible remote

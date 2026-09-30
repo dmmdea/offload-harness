@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/agent"
@@ -65,6 +66,12 @@ var (
 	enginePoll = 10 * time.Second
 	// engineProbeTimeout bounds one engine read (see LivenessPolicyFor).
 	engineProbeTimeout = 45 * time.Second
+	// seatRecoveries is how many times one run may wait for a downed seat and
+	// re-issue the failed model call (ADR 0066): the flagship engine died ten
+	// times on 2026-09-29 (median up-time 6.7 minutes), so one run can meet two.
+	// Each wait is bounded by the cold-load ceiling and the run's ceiling. Tests
+	// change it.
+	seatRecoveries = 2
 )
 
 // LivenessPolicyFor is THIS seat's stall policy: the admission budget while
@@ -95,6 +102,9 @@ func LivenessPolicyFor(cfg config.Config, known seatrate.Seat, admission time.Du
 		// /slots and /metrics only between batches (~34 s per prompt batch on
 		// the slowest tier). Inside a hold a timed-out read is no new evidence.
 		EngineProbeTimeout: engineProbeTimeout,
+		// A seat that goes down under the run is waited for and the failed call
+		// re-issued, bounded (ADR 0066).
+		SeatRecoveries: seatRecoveries,
 	}
 }
 
@@ -119,13 +129,39 @@ func engineActivityProbe(endpoint, seat string, load agent.SeatProbe) agent.Engi
 		}
 		act, err := seatload.ReadActivity(ctx, client, base, seat)
 		if err != nil {
-			return agent.EngineReading{}, err
+			// A connection REFUSED at the seat's own address, while llama-swap
+			// still lists the seat, is a dead engine (ADR 0066): nothing listens.
+			// A seat behind another machine's llama-swap that this box cannot
+			// reach is unreadable, never down.
+			return agent.EngineReading{Refused: connRefused(err)}, err
 		}
 		if act.Starting {
 			return agent.EngineReading{Loading: true, State: strings.TrimPrefix(act.Source, "running-state:")}, nil
 		}
-		return agent.EngineReading{Fingerprint: act.Fingerprint, TokenFingerprint: act.TokenFingerprint, Summary: act.Summary()}, nil
+		return agent.EngineReading{
+			Fingerprint: act.Fingerprint, TokenFingerprint: act.TokenFingerprint, Summary: act.Summary(),
+			// llama-swap does not list the seat at all: not loaded, and nothing
+			// loading it (a loading seat was handled above).
+			NotLoaded: !act.Loaded,
+			Running:   act.Running, Waiting: act.Waiting,
+		}, nil
 	}
+}
+
+// connRefused reports whether err is the seat's own address refusing the
+// connection: the process is gone. The remote-unreachable sentinel is not (a
+// loopback-bound seat on another box refuses every read from here, alive or
+// not); the text match covers Windows' "actively refused it", which is not
+// syscall.ECONNREFUSED.
+func connRefused(err error) bool {
+	if err == nil || errors.Is(err, seatload.ErrRemoteSeatUnreachable) {
+		return false
+	}
+	if errors.Is(err, syscall.ECONNREFUSED) {
+		return true
+	}
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "connection refused") || strings.Contains(s, "actively refused")
 }
 
 // coldLoadCeiling bounds one seat load observed mid-run (0.140.0): twice the
@@ -238,6 +274,20 @@ func stallOf(m *agent.Monitor) *agent.StallError {
 	var se *agent.StallError
 	if errors.As(m.Cause(), &se) {
 		return se
+	}
+	return nil
+}
+
+// seatDownOf is the monitor's cause when it is a seat-down verdict (ADR 0066),
+// else nil. A wedge carries the engine-flat stall it replaced, so stallOf reads
+// it too: seat-down is judged first wherever the two are told apart.
+func seatDownOf(m *agent.Monitor) *agent.SeatDownError {
+	if m == nil {
+		return nil
+	}
+	var sd *agent.SeatDownError
+	if errors.As(m.Cause(), &sd) {
+		return sd
 	}
 	return nil
 }

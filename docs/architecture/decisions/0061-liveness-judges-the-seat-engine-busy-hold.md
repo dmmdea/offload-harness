@@ -106,7 +106,7 @@ whether silence is a fault: what the seat's engine is doing for everyone else.
 - `queued` is a new liveness phase in the job record and status readers.
 - Not solved here: a run lost to an engine that DIES mid-run still ends (the busy hold only makes the
   diagnosis right). Waiting for the seat's restart and re-issuing the step (a seat-down outcome) is its
-  own change. Placement and admission (remote 503 re-placement, abandoned accepted jobs, dealing by
+  own change (ADR 0066, 0.144.0). Placement and admission (remote 503 re-placement, abandoned accepted jobs, dealing by
   capacity) are their own change too.
 
 ## Alternatives considered

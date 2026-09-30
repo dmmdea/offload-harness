@@ -853,6 +853,12 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	}
 	wire.Steps = res.Steps
 	wire.StopReason = res.StopReason
+	// A seat that went down under the run and came back (ADR 0066): how many
+	// calls were re-issued, and the wall spent waiting for the seat. On every
+	// branch below — the wait is the number a delegator credits back when it
+	// re-places a run whose seat did not recover.
+	wire.SeatRecoveries = res.SeatRecoveries
+	wire.SeatDownWaitSec = live.SeatDownTotal().Seconds()
 	// Seat usage — set HERE, before every defer branch, for the same reason as
 	// the trace below: a budget- or timeout-ended run is exactly the one that
 	// generated for minutes and used to be ledgered as 0 (0.115.5).
@@ -970,6 +976,21 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		// delegator's contract sizing.
 		if modelaffinity.IsLeaseRefusal(rerr) {
 			return deferWire(core.DeferClassCapacity, "gpu busy: "+rerr.Error())
+		}
+		// A seat that went down under the run and did not come back (ADR 0066):
+		// the engine hung with work outstanding, or died and llama-swap no longer
+		// serves the seat, and the run's recovery wait (one bounded wait and one
+		// re-issue of the failed call) ran out or was spent. The reason opens
+		// core.SeatDownReason — the delegator reads that prefix to give the
+		// contract a second placement on ANOTHER node — and the class stays
+		// infrastructure, like every stack failure. Judged before the stall arm: a
+		// wedge carries the engine-flat stall it replaced.
+		var seatDown *agent.SeatDownError
+		if !errors.As(rerr, &seatDown) {
+			seatDown = seatDownOf(live)
+		}
+		if seatDown != nil {
+			return deferWire(core.DeferClassInfrastructure, seatDown.Error())
 		}
 		// Wall timeout is its own defer shape — the delegator sizes future
 		// contracts off it, so it must be distinguishable from a planner error.
@@ -2267,9 +2288,21 @@ func awaitSeatAdmission(ctx context.Context, endpoint, seat string, budget time.
 // contract's seatwait budget saw at least one busy answer. The prefix is the
 // ledger/audit grep key; the fix it points at is CAPACITY (llama-swap
 // concurrencyLimit / --parallel), never a box.
+//
+// The wording follows the STATUS (ADR 0066). Only a 429 is contention — llama-
+// swap's concurrency limit: peers hold the seat's slots. A 5xx is llama-swap
+// failing to serve the seat (a start that failed, a health check that timed out,
+// an engine that died); telling the operator to "raise concurrencyLimit" for it
+// sent the 2026-09-29 outage's readers to the wrong knob for 23 minutes. It
+// keeps its own prefix, "seat not serving:", so the ledger grep for contention
+// no longer counts a dead seat.
 func contendedReason(seat string, b *seatwait.Budget) (string, bool) {
 	if b == nil || b.LastStatus() == 0 {
 		return "", false
+	}
+	if b.LastStatus() != http.StatusTooManyRequests {
+		return fmt.Sprintf("seat not serving: llama-swap answered HTTP %d for %s on %d attempt(s), waited %.0fs in total (its engine was starting, had crashed or failed its health check — this is not contention: raising concurrencyLimit will not help)",
+			b.LastStatus(), seat, b.Attempts(), b.Spent().Seconds()), true
 	}
 	return fmt.Sprintf("seat contended: %s answered HTTP %d on %d attempt(s), waited %.0fs in total (peers hold its slots — raise concurrencyLimit or retry)",
 		seat, b.LastStatus(), b.Attempts(), b.Spent().Seconds()), true

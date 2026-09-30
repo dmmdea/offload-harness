@@ -122,11 +122,13 @@ func TestRunAgentTaskHoldsARequestWhoseEngineWorksForOthers(t *testing.T) {
 }
 
 // The same silence with an engine that does no work for anyone is a wedged
-// seat: a stall filed as infrastructure, in ~ the allowance plus the flat
-// bound, with the engine's silence in the reason.
+// seat: filed as infrastructure, in ~ the allowance plus the flat bound plus the
+// recovery wait (ADR 0066: since 0.144.0 a wedge is a typed seat-down, held for
+// the cold-load ceiling in case the seat restarts — this one never does), with
+// the engine's silence in the reason.
 func TestRunAgentTaskStallsAWedgedEngine(t *testing.T) {
 	defer compressLiveness(t, 200*time.Millisecond, 100*time.Millisecond, core.AgentCeilingSecCap)()
-	defer compressColdLoad(t, 50*time.Millisecond, 5*time.Second)()
+	defer compressColdLoad(t, 50*time.Millisecond, 700*time.Millisecond)()
 	defer compressBusyHold(t, 300*time.Millisecond, 50*time.Millisecond)()
 	var busy atomic.Bool // stays false: a flat engine
 	fake, base := busySeatFake(6*time.Second, &busy)
@@ -137,7 +139,10 @@ func TestRunAgentTaskStallsAWedgedEngine(t *testing.T) {
 	start := time.Now()
 	wire := decodeWire(t, coldLoadTestPipeline(t, srv.URL).Run(context.Background(), agentTestRequest(t, testContract())))
 	if !wire.Deferred || !strings.Contains(wire.Reason, "the seat's engine did no work") || wire.DeferClass != core.DeferClassInfrastructure {
-		t.Fatalf("want an engine-flat infrastructure stall, got deferred=%v class=%s reason=%q", wire.Deferred, wire.DeferClass, wire.Reason)
+		t.Fatalf("want an engine-flat infrastructure defer, got deferred=%v class=%s reason=%q", wire.Deferred, wire.DeferClass, wire.Reason)
+	}
+	if !strings.HasPrefix(wire.Reason, core.SeatDownReason) {
+		t.Fatalf("a wedged engine is a seat down (the delegator re-places on the prefix): %q", wire.Reason)
 	}
 	if el := time.Since(start); el > 4*time.Second {
 		t.Fatalf("a wedged engine was held for %s", el)

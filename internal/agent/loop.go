@@ -145,6 +145,13 @@ type Result struct {
 	Calls      []CallRecord
 	Transcript []Msg
 
+	// SeatRecoveries (ADR 0066) counts the model calls that failed because the
+	// seat went down under the run and were re-issued after the seat came back:
+	// each one is a wait the run survived with its transcript intact and no step
+	// spent. Set on every return path (Run stamps it); 0 on every run whose seat
+	// stayed up.
+	SeatRecoveries int
+
 	// Fallback is set only by RunTwoTier (two-tier drive): it records whether the
 	// architect/editor plan-then-execute path ran (FallbackNone) or a fallback to a
 	// single-model editor run occurred, and why. Empty on ordinary single-loop runs.
@@ -859,6 +866,9 @@ type budgetState struct {
 	note     string
 	reissue  string
 	narrowed bool
+	// seatRecoveries counts the model calls re-issued after the seat went down
+	// (ADR 0066); Run stamps it on the Result of every return path.
+	seatRecoveries int
 }
 
 // Run executes the loop for objective until the model stops, the step budget is
@@ -870,6 +880,7 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 		res.FinalBudgetFit, res.BudgetNote = bs.fit, bs.note
 	}
 	res.FinalReissue = bs.reissue
+	res.SeatRecoveries = bs.seatRecoveries
 	res.PrefillSamples = l.prefillSamples
 	return res, err
 }
@@ -1061,6 +1072,16 @@ func (l *Loop) run(ctx context.Context, objective string, bs *budgetState) (Resu
 			Transcript: msgs, TokensIn: tokIn, TokensOut: tokOut, CompactionsExhausted: exhausted, TokenCal: l.calReport(),
 			Prefill: l.prefill.Report(), Pager: l.pager.Report(), TokenizerPath: l.tokPath(), Effects: effects, RuleHits: ruleHits, Calls: calls}
 	}
+	// stepRetried: the step in hand was already re-issued once after the seat
+	// went down (ADR 0066). A second seat-down on the same step ends the run,
+	// typed; a step that gets an answer clears it. seatDownResult is the error
+	// Result for a run the seat went down under — a closure over the run-locals
+	// for the same reason as cutResult above.
+	stepRetried := false
+	seatDownResult := func(steps int) Result {
+		return Result{Steps: steps, StopReason: "error", Transcript: msgs, TokensIn: tokIn, TokensOut: tokOut, CompactionsExhausted: exhausted,
+			TokenCal: l.calReport(), Prefill: l.prefill.Report(), Pager: l.pager.Report(), TokenizerPath: l.tokPath(), Effects: effects, RuleHits: ruleHits, Calls: calls}
+	}
 
 	for step := 0; step < l.maxSteps; step++ {
 		if err := ctx.Err(); err != nil {
@@ -1186,6 +1207,7 @@ func (l *Loop) run(ctx context.Context, objective string, bs *budgetState) (Resu
 		// The list-cap re-issue answers at the budget the CUT turn had, never
 		// less: the explicit caps are what makes the answer fit, and shrinking
 		// the room as well would only guarantee a second cut.
+		savedFloor := reissueFloor // a seat-down re-issue of this step must open at the same budget
 		if reissueFloor > stepMax {
 			stepMax = reissueFloor
 		}
@@ -1206,7 +1228,50 @@ func (l *Loop) run(ctx context.Context, objective string, bs *budgetState) (Resu
 			stepCtx = ContextWithProgress(stepCtx, fn)
 		}
 		callStart := time.Now()
-		comp, err := l.client.Chat(stepCtx, msgs, specs, stepMax)
+		// seatDown handles a model call that failed because the SEAT went down
+		// under the run (ADR 0066). The loop keeps the transcript, so the step is
+		// re-issued once after the seat serves again — the wait is the monitor's
+		// (AwaitSeat, under the cold-load hold) — and a re-issue spends no step.
+		// retry=true means "run this step again"; otherwise the Result and error
+		// end the run, typed.
+		seatDown := func(sd *SeatDownError) (retry bool, res Result, rerr error) {
+			if sd.terminal || l.live == nil {
+				return false, seatDownResult(step), sd
+			}
+			if stepRetried {
+				again := *sd
+				again.Reissued = true
+				return false, seatDownResult(step), &again
+			}
+			if werr := l.live.AwaitSeat(ctx, sd); werr != nil {
+				return false, seatDownResult(step), werr
+			}
+			bs.seatRecoveries++
+			stepRetried = true
+			retryNoThink = thisIsReissue
+			reissueFloor = savedFloor
+			return true, Result{}, nil
+		}
+		callCtx, endCall := l.beginCall(stepCtx)
+		comp, err := l.client.Chat(callCtx, msgs, specs, stepMax)
+		if err != nil {
+			// A seat that went down is judged FIRST: the monitor's own cancel of
+			// this call reads as "context canceled" (which the overflow retry below
+			// would answer with a second request to a dead seat), and a cut stream
+			// or a 5xx is confirmed against llama-swap before it is called one.
+			sd := l.seatDownFor(ctx, callCtx, err)
+			endCall()
+			if sd != nil {
+				retry, res, rerr := seatDown(sd)
+				if retry {
+					step-- // the re-issue does not spend a step
+					continue
+				}
+				return res, rerr
+			}
+		} else {
+			endCall()
+		}
 		if err != nil {
 			// A CUT TOOL CALL (register D-114) is the seat running out of
 			// COMPLETION budget in the middle of a tool argument: llama.cpp
@@ -1296,12 +1361,27 @@ func (l *Loop) run(ctx context.Context, objective string, bs *budgetState) (Resu
 				} else if rv == fitUnknown && estimateTokens(msgs) > target {
 					exhausted++ // even the last resort could not fit — counted, never silent
 				}
-				comp, err = l.client.Chat(stepCtx, msgs, specs, stepMax)
+				retryCtx, endRetry := l.beginCall(stepCtx)
+				comp, err = l.client.Chat(retryCtx, msgs, specs, stepMax)
+				var sd2 *SeatDownError
+				if err != nil {
+					sd2 = l.seatDownFor(ctx, retryCtx, err)
+				}
+				endRetry()
+				if sd2 != nil {
+					retry, res, rerr := seatDown(sd2)
+					if retry {
+						step-- // the re-issue does not spend a step
+						continue
+					}
+					return res, rerr
+				}
 			}
 			if err != nil {
 				return Result{Steps: step, StopReason: "error", Transcript: msgs, TokensIn: tokIn, TokensOut: tokOut, CompactionsExhausted: exhausted, TokenCal: l.calReport(), Prefill: l.prefill.Report(), Pager: l.pager.Report(), TokenizerPath: l.tokPath(), Effects: effects, RuleHits: ruleHits, Calls: calls}, err
 			}
 		}
+		stepRetried = false // the step got its answer: a later seat-down earns its own re-issue
 		noteUsage(comp)
 		l.notePrefill(comp)
 		callRec := recordOf(step+1, stepMax, comp)

@@ -161,6 +161,19 @@ const (
 // read as an unknown one on every pre-D-118 node in a mixed-version fleet.
 const IncoherentSeatReason = "seat incoherent at warm: "
 
+// SeatDownReason prefixes the defer a run earns when its seat's engine went
+// down under it and did not come back inside the run's recovery wait (ADR 0066,
+// register C-72): the engine hung with work outstanding, or died and llama-swap
+// no longer serves the seat (gone from /running, restarting, refusing reads).
+// Like IncoherentSeatReason it is a CONSTANT and a reason prefix, not a new
+// defer class — the class stays `infrastructure`, because a class a pre-0.144
+// node does not know would read as unknown in a mixed-version fleet — and the
+// executing node writes the reason with it while the delegator matches on it
+// (delegate.SeatDownDefer) to give the contract a second placement on ANOTHER
+// node. A node-filed defer is an observed terminal, so re-placing it cannot
+// produce a duplicate run.
+const SeatDownReason = "seat down: "
+
 // Scheduling bands (0.113.18) — the delegator stamps one on every dispatch
 // (`priority` in the fleet envelope) and the node's job store orders its
 // backlog by it. Shared here because both sides must agree on the vocabulary
@@ -441,6 +454,17 @@ type AgentWireResult struct {
 	// A broken verdict is also a defer: class `infrastructure`, reason prefixed
 	// IncoherentSeatReason, before the wall ever starts.
 	CoherenceNote string `json:"coherence_note,omitempty"`
+	// SeatRecoveries (0.144.0, ADR 0066) is how many times this run's seat went
+	// down under it and the run waited for the seat and re-issued the failed
+	// step instead of ending — the transcript is the loop's, so nothing done so
+	// far was lost. SeatDownWaitSec is the wall the run spent waiting for a
+	// downed seat (from the moment the seat was called down to its recovery or
+	// to the wait running out); a delegator credits it back to the contract's
+	// budget when it re-places a `seat down:` defer, because time spent on a
+	// dead seat is not time the contract worked. Both omitted when zero; a
+	// pre-0.144 node's result reads as "not measured".
+	SeatRecoveries  int     `json:"seat_recoveries,omitempty"`
+	SeatDownWaitSec float64 `json:"seat_down_wait_sec,omitempty"`
 
 	// --- A1 config pinning (0.81.0, Tier 2 of the Phase 2 re-aim). Stamped by
 	// runAgentTask only when the seat DEMONSTRABLY SERVED this run (the loop

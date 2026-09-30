@@ -67,6 +67,30 @@ type EngineReading struct {
 	// Summary is one clause for reasons and status ("vllm-metrics: 4
 	// running, 0 waiting, 29 preemptions so far").
 	Summary string
+	// NotLoaded (ADR 0066): llama-swap does not list the seat at all — its
+	// engine is gone (crashed, stopped) and nothing is loading it. A reading of
+	// nothing, never "idle": with Loading false and no Fingerprint it is what the
+	// seat's absence looks like from here.
+	NotLoaded bool
+	// Refused (ADR 0066): the engine's own address refused the connection while
+	// llama-swap still listed the seat — nothing is listening, the engine
+	// process is gone. Set only for a LOCAL seat address; a seat behind another
+	// machine's llama-swap that this box cannot reach is unreadable, not down.
+	Refused bool
+	// Running and Waiting are the engine's own request gauges (vLLM running and
+	// waiting; llama-server processing and deferred). Waiting is -1 when the
+	// source cannot see a queue. 0/0 with no Fingerprint = not read.
+	Running, Waiting int
+}
+
+// Load is how many requests share the engine right now: running plus waiting
+// (a queue the source cannot see counts as none). 0 = not read.
+func (r EngineReading) Load() int {
+	n := r.Running
+	if r.Waiting > 0 {
+		n += r.Waiting
+	}
+	return n
 }
 
 // EngineProbe reads the seat's engine. A non-nil error means "cannot tell".
@@ -187,6 +211,26 @@ func (m *Monitor) checkEngineLocked() {
 		}
 		m.engSum = "seat " + rd.State
 		hook, ph, allow = m.enterLoadingLocked(rd.State)
+	case err == nil && rd.NotLoaded && m.phase == PhaseQueued && m.engFP != "":
+		// The seat left llama-swap's /running inside an established hold (ADR
+		// 0066): its engine worked for others a moment ago and nothing lists it
+		// now — it died or was stopped, and nothing is loading it. One sighting
+		// may be a transition; two are a dead engine, and waiting out the flat
+		// bound on reads that can only fail would hold the run for it. The FIRST
+		// look never comes here (m.engFP is empty): absence alone keeps the ADR
+		// 0055 rule.
+		m.engGone++
+		// m.engSum keeps the last reading WITH counters: it is what the reason
+		// says the engine was doing before it vanished.
+		if m.engGone >= 2 {
+			m.closeQueuedLocked(now, m.engChangedAt)
+			m.fileSeatDownLocked(&SeatDownError{Kind: SeatDownDied, Phase: m.busyResume, Silent: now.Sub(m.engChangedAt),
+				Engine: m.engSum, Note: "the seat left llama-swap's /running inside a hold: its engine died or was stopped and nothing is loading it",
+				Tokens: m.tokens + m.callTok})
+			m.mu.Unlock()
+			return
+		}
+		hook, ph, allow = m.enterQueuedLocked(now, false)
 	case err != nil || rd.Fingerprint == "":
 		switch {
 		case err != nil:
@@ -217,6 +261,7 @@ func (m *Monitor) checkEngineLocked() {
 		}
 		m.engSum = rd.Summary
 		m.engUnreadableSince = time.Time{}
+		m.engGone = 0
 		switch {
 		case !first && !moved && now.Sub(m.engChangedAt) >= m.engineFlatBoundLocked():
 			// The engine did no work for anyone since engChangedAt.
@@ -345,6 +390,7 @@ func (m *Monitor) endBusyLocked(now time.Time) {
 	m.busyClosed = false
 	m.engFP, m.engTokFP = "", ""
 	m.engUnreadableSince = time.Time{}
+	m.engGone = 0
 }
 
 // QueuedTotal is how long the run spent in the busy hold so far: time its

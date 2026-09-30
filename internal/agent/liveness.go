@@ -112,6 +112,14 @@ type StallPolicy struct {
 	// producing a token for anyone (a preempt-and-recompute thrash) before the
 	// run stalls; never below the flat bound. 0 = three flat bounds.
 	EngineTokenFlat time.Duration
+	// SeatRecoveries (ADR 0066) is how many times ONE run may wait for a downed
+	// seat and re-issue the model call that failed, instead of ending: the seat's
+	// engine hung with work outstanding, or died and llama-swap no longer serves
+	// the seat. The loop holds the transcript, so a recovery loses nothing. 0 =
+	// none: a seat-down verdict ends the run, typed. The wait itself is bounded
+	// by ColdLoad (and the run's ceiling), so a recovery needs a cold-load
+	// ceiling and an engine probe.
+	SeatRecoveries int
 }
 
 // Allowance is the stall bound for a phase. pendingPromptTokens is the size
@@ -328,6 +336,22 @@ type Monitor struct {
 	engUnreadableSince time.Time
 	busyClosed         bool
 	holdAnchor         time.Time
+	// engGone counts consecutive reads that found the seat missing from
+	// llama-swap's /running inside an established hold (ADR 0066): one sighting
+	// may be a transition, two are a dead engine.
+	engGone int
+	// Seat down (ADR 0066). step is the model call the loop has in flight (the
+	// scope a recoverable verdict cancels); down is the verdict the run is
+	// waiting out and downSince when it began; downTotal the wall already spent
+	// waiting on downed seats; recoveries how many waits ended in a re-issue.
+	// parked: the timers are stopped and the loop owns the wait; a timer callback
+	// that fires anyway returns.
+	step       *stepScope
+	down       *SeatDownError
+	downSince  time.Time
+	downTotal  time.Duration
+	recoveries int
+	parked     bool
 }
 
 // NewMonitor wraps parent with a ceiling deadline and a stall watch. The
@@ -384,7 +408,7 @@ func (m *Monitor) onCeiling() {
 
 func (m *Monitor) onStall() {
 	m.mu.Lock()
-	if m.stopped || m.cause != nil {
+	if m.stopped || m.cause != nil || m.parked {
 		m.mu.Unlock()
 		return
 	}
@@ -530,6 +554,12 @@ func (m *Monitor) fileStallLocked(amend ...func(*StallError)) {
 	for _, f := range amend {
 		f(se)
 	}
+	if sd := m.seatDownFromStallLocked(se); sd != nil {
+		// The engine did no work for the flat bound: a seat down, not a per-run
+		// stall (ADR 0066). It carries the stall it replaced.
+		m.fileSeatDownLocked(sd)
+		return
+	}
 	m.cause = se
 	m.cancel(m.cause)
 }
@@ -625,7 +655,7 @@ func (m *Monitor) stopProbeLocked() {
 // ends on the first byte (Progress), on a phase change, or at its bound.
 func (m *Monitor) onProbeTick() {
 	m.mu.Lock()
-	if m.stopped || m.cause != nil || m.probing || !m.probeArmedLocked() ||
+	if m.stopped || m.cause != nil || m.parked || m.probing || !m.probeArmedLocked() ||
 		(!m.awaitingByteLocked() && m.phase != PhaseColdLoad) {
 		m.mu.Unlock()
 		return
@@ -769,6 +799,7 @@ func (m *Monitor) ToolPhase(cap time.Duration) {
 	m.endBusyLocked(time.Now())
 	m.tokens += m.callTok
 	m.callTok = 0
+	m.parked, m.down = false, nil // the loop moved on: a seat-down verdict for the call before is moot
 	m.phase, m.pending = PhaseTool, 0
 	m.epoch++
 	m.warming, m.postReady = false, false
@@ -792,6 +823,7 @@ func (m *Monitor) Phase(ph Phase, pendingPromptTokens int) {
 	m.endBusyLocked(time.Now())
 	m.tokens += m.callTok
 	m.callTok = 0
+	m.parked, m.down = false, nil // the loop moved on: a seat-down verdict for the call before is moot
 	m.phase, m.pending = ph, pendingPromptTokens
 	m.allow = m.pol.Allowance(ph, pendingPromptTokens)
 	m.last = time.Now()
