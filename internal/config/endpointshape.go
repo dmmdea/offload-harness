@@ -272,6 +272,7 @@ func endpointPort(c Config) string {
 func (c Config) Findings() []string {
 	out := EndpointWarnings(c)
 	out = append(out, gpuWaitFindings(c)...)
+	out = append(out, CallDeadlineFindings(c)...)
 	// A negative Wan split is not a split: the pipeline passes only a positive value, so
 	// the render silently uses the builder's default while the file names another number.
 	if c.VideoGenWanVirtualVramGB < 0 {

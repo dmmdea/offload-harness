@@ -31,11 +31,14 @@ measurement of the client.
    1,500 s; `0` = the default; negative = none) is measured from handler entry, because the client's
    clock starts when it sends the request. It reaches the engine as the absolute
    `delegate.RunOptions.Deadline`, and it also bounds `offload_research`'s page fetch. The CLI verbs
-   have no client to abort and take none. The default sits above the longest single subtask a call can
-   carry (`timeout_sec` cap 900 s, plus the 300 s admission allowance and the 60 s poll grace the
-   delegator holds a job open for: 1,260 s) so a healthy maximum-length subtask is never cut, and below
-   the client's 1,800 s by the margin a response needs (the live check is "call wall <= deadline + 30
-   s").
+   have no client to abort and take none. The default sits above the longest single subtask that starts
+   at once (`timeout_sec` cap 900 s, plus the 300 s admission allowance and the 60 s poll grace the
+   delegator holds a job open for: 1,260 s) and below the client's 1,800 s by the margin a response
+   needs (the live check is "call wall <= deadline + 30 s"). It does not promise that a healthy subtask
+   is never cut: time a job spends queued on a node is credited back to its wall (up to 300 s), and a
+   capacity wait comes before placement, so a worst-case auto-sized subtask can run past the default and
+   be cut. A workload that needs longer sets `agent_call_deadline_sec`, below the client's abort; a value
+   at or above it, or a negative that was meant as a number, is a `doctor` finding and a startup warning.
 
 2. **At the deadline the call returns what has finished and defers the rest.** The deadline is the
    context every placement, probe, poll and local run already honours, so the outstanding work is

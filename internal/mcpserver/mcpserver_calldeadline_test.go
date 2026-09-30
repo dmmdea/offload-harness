@@ -320,8 +320,9 @@ func TestHandleResearchFetchIsBoundedByTheCallDeadline(t *testing.T) {
 
 // TestCallDeadlineDefaultIsBelowTheClientAbort: the default must leave a
 // response room to be built and delivered before the client's own abort, and must
-// still be longer than the longest single subtask a call can carry, so a healthy
-// maximum-length subtask is never cut.
+// still be longer than the longest single subtask that starts at once (a subtask
+// that first waits queued on a node, or for capacity, can run longer and be cut:
+// see config.DefaultCallDeadlineSec).
 func TestCallDeadlineDefaultIsBelowTheClientAbort(t *testing.T) {
 	d := config.Default().CallDeadline()
 	if d <= 0 {

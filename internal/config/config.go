@@ -2038,6 +2038,9 @@ func load(path string) (Config, error) {
 	for _, w := range EndpointWarnings(c) {
 		fmt.Fprintf(os.Stderr, "warning: %s\n", w)
 	}
+	for _, w := range CallDeadlineFindings(c) {
+		fmt.Fprintf(os.Stderr, "warning: %s\n", w)
+	}
 	return c, nil
 }
 
@@ -2492,13 +2495,39 @@ func (c Config) PlacementWait() time.Duration {
 }
 
 // DefaultCallDeadlineSec is the built-in whole-call deadline of the MCP
-// delegation doors: 25 minutes. It sits above the longest single subtask a call
-// can carry (timeout_sec cap 900 s, plus the 300 s admission allowance and the
-// 60 s poll grace the delegator holds a job open for = 1,260 s) so a healthy
-// maximum-length subtask is never cut, and below the MCP client's 1,800 s abort
-// by the margin a response needs to be built and delivered (the live check is
-// "call wall <= deadline + 30 s").
+// delegation doors: 25 minutes. It sits above the longest single subtask that
+// starts at once (timeout_sec cap 900 s, plus the 300 s admission allowance and
+// the 60 s poll grace the delegator holds a job open for = 1,260 s), and below
+// the MCP client's 1,800 s abort by the margin a response needs to be built and
+// delivered (the live check is "call wall <= deadline + 30 s").
+//
+// It does NOT promise that no healthy subtask is ever cut. Time a job spends
+// queued on a node is credited back to its wall (up to 300 s) and a capacity
+// wait comes before placement, so a worst-case auto-sized subtask can run past
+// the default and be cut. That is the deadline doing its job; a workload that
+// needs longer sets agent_call_deadline_sec, below the client's abort.
 const DefaultCallDeadlineSec = 1500
+
+// referenceClientAbortSec is the tool-call abort of the reference MCP client (ADR 0065). The
+// whole-call deadline exists to answer BEFORE it; another client's limit may differ, which is
+// why the deadline is a key, and why a value at or above this only warns.
+const referenceClientAbortSec = 1800
+
+// CallDeadlineFindings returns the non-fatal findings about agent_call_deadline_sec: two shapes
+// that load, run, and then quietly void the protection the key exists for. A value at or above
+// the client's abort cannot beat it — the client drops the call, with the results it holds, at
+// its own limit. Any negative value means "no deadline", so -1500 written for 1500 switches it
+// off without a word. The documented settings (unset, an in-range number, -1) are silent.
+func CallDeadlineFindings(c Config) []string {
+	v := c.AgentCallDeadlineSec
+	switch {
+	case v < -1:
+		return []string{fmt.Sprintf("agent_call_deadline_sec %d switches the whole-call deadline OFF (any negative value does): agent_delegate and offload_research then have no deadline, and a call can outlive the MCP client's abort and lose its finished results. Write -1 if that is what you mean, or %d for a %d-second deadline", v, -v, -v)}
+	case v >= referenceClientAbortSec:
+		return []string{fmt.Sprintf("agent_call_deadline_sec %d is at or above the MCP client's %d s abort, so the deadline cannot beat it: the client drops a call at its limit together with the results it holds. Keep it below %d (the built-in default is %d)", v, referenceClientAbortSec, referenceClientAbortSec, DefaultCallDeadlineSec)}
+	}
+	return nil
+}
 
 // CallDeadline resolves AgentCallDeadlineSec: 0 → DefaultCallDeadlineSec,
 // negative → 0 meaning "no whole-call deadline", positive → that many seconds.
