@@ -39,8 +39,9 @@ measurement of the client.
    the node's own estimate sets, [ADR 0063](0063-placement-holds-instead-of-sleeping-or-refusing.md)
    decision 4: 1.5 x its estimate + 30 s, at least 60 s, at most the contract's poll budget; the lesser
    of that budget and 300 s for a node that publishes none), and a capacity wait comes before
-   placement, so a worst-case auto-sized subtask can run past the default and be cut. A workload that needs longer sets `agent_call_deadline_sec`, below the client's abort; a value
-   at or above it, or a negative that was meant as a number, is a `doctor` finding and a startup warning.
+   placement, so a worst-case auto-sized subtask can run past the default and be cut. A workload that
+   needs longer sets `agent_call_deadline_sec`, below the client's abort; a value at or above it, or a
+   negative that was meant as a number, is a `doctor` finding and a startup warning.
 
 2. **At the deadline the call returns what has finished and defers the rest.** The deadline is the
    context every placement, probe, poll and local run already honours, so the outstanding work is
@@ -171,9 +172,9 @@ measurement of the client.
   evidence about a node, a seat or a page. A capacity-wait tick the call's context cuts keeps the
   previous tick's state, as one cut by the wait's own deadline does: a node that answered earlier in
   the wait (cooling down after its own refusal, held out by the backlog gate) is not narrated as a
-  failed probe. A retry that stood in line for a busy seat and whose wait the deadline ended says `call
-  deadline reached` in its `retry_note`, not that the caller canceled. And the per-page retry cap does
-  not count a cut as a failed issue: the cut is a class-budget defer that still names its seat and
+  failed probe. A retry that stood in line for a busy seat and whose wait the deadline ended says
+  `call deadline reached` in its `retry_note`, not that the caller canceled. And the per-page retry cap
+  does not count a cut as a failed issue: the cut is a class-budget defer that still names its seat and
   node, which the cap would otherwise read as the seat's own budget, so a research page a call keeps
   running out of time on is not backed off for fifteen minutes.
 - Every call-deadline row carries `reason_code` `budget`: the closed set of

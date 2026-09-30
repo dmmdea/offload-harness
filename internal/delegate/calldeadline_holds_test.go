@@ -104,8 +104,9 @@ func TestRetrySeatWaitEndedByTheCallDeadlineNamesTheDeadline(t *testing.T) {
 // deadline is described by what it last said (cooling down after its refusal), never as a
 // node whose probe failed: the deadline ended that probe, not the node. The same shape as
 // the wait's own deadline cutting the probe (ADR 0063), with the wait's TTL far away so
-// only the call's deadline can end it. A 300 ms health answer makes a probe straddle the
-// deadline on every run; if a slow host lands the deadline between two probes instead, the
+// only the call's deadline can end it. With a 300 ms health answer the reads are the deal's,
+// the re-placement's, and then one per tick, so the first tick has answered by ~0.9 s and the
+// fourth straddles 1.7 s. If a slow host lands the deadline between two probes instead, the
 // last answer is preserved trivially and the test still holds.
 func TestCapacityWaitCutByTheCallDeadlineMidProbeKeepsTheLastAnswer(t *testing.T) {
 	compressPolls(t, 5*time.Millisecond, time.Second)
@@ -118,7 +119,7 @@ func TestCapacityWaitCutByTheCallDeadlineMidProbeKeepsTheLastAnswer(t *testing.T
 	cfg := testCfg(t)
 	cfg.AgentPlacementWaitSec = 30 // the wait's own TTL is nowhere near: only the call's deadline ends it
 	results, sum, _ := runWithin(t, 10*time.Second, cfg, neverLocal(t),
-		[]core.AgentContract{plainContract()}, "remote", []string{url}, deadlineIn(1400*time.Millisecond), nil)
+		[]core.AgentContract{plainContract()}, "remote", []string{url}, deadlineIn(1700*time.Millisecond), nil)
 	pr := results[0]
 	if sum.Deferred != 1 || !strings.HasPrefix(pr.Result.Reason, deadlinePrefix+"1 unfinished") || node.dispatches.Load() != 1 {
 		t.Fatalf("summary = %+v reason = %q dispatches = %d, want one call-deadline defer after ONE ask (the cooldown outlasts the call)", sum, pr.Result.Reason, node.dispatches.Load())
