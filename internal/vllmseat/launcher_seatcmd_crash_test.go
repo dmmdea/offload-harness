@@ -23,10 +23,11 @@ const stopMarker = "seat-stop-requested-pp3"
 // The scenario decides the world. The seat answers /v1/models at once and /health twice, then stops answering. The stub's
 // own start task is Running until then and Ready after, unless the scenario says a live launcher still holds it. The stop
 // task is Ready until it is started, then Running for three reads, then Ready — or Running forever, or refusing to start,
-// or never seen Running at all (a Task Scheduler slow to start it). Scenario "after-cmdstop" is a stop that llama-swap
-// asked for: seat-cmdstop.ps1 is another process, so its marker appears in the middle of the stub's polling, at the first
-// /health the seat fails to answer. "cmdstop" and "cmdstop-marker-unwritable" run seat-cmdstop.ps1 itself against a seat
-// that stops answering at once.
+// or never seen Running at all (a Task Scheduler slow to start it). Its last result (what seat_stop.sh exited with, which
+// wscript hands to the task) is 0, or 1 in "stop-task-incomplete", or unreadable in "stop-result-unreadable". Scenario
+// "after-cmdstop" is a stop that llama-swap asked for: seat-cmdstop.ps1 is another process, so its marker appears in the
+// middle of the stub's polling, at the first /health the seat fails to answer. "cmdstop" and "cmdstop-marker-unwritable"
+// run seat-cmdstop.ps1 itself against a seat that stops answering at once.
 const seatCmdDriver = `param([string]$Stub, [string]$Scenario, [string]$Calls, [string]$Marker)
 $ErrorActionPreference = 'Continue'
 $global:Scn = $Scenario
@@ -45,6 +46,14 @@ function Start-ScheduledTask {
     if ($global:Scn -eq 'stop-task-missing') { Write-Error 'The system cannot find the file specified.'; return }
     $global:StopReads = 0
   }
+}
+function Get-ScheduledTaskInfo {
+  [CmdletBinding()] param([string]$TaskName)
+  Note "read-task-result $TaskName"
+  if ($global:Scn -eq 'stop-result-unreadable') { throw 'The task result is not available.' }
+  $r = 0
+  if ($global:Scn -eq 'stop-task-incomplete') { $r = 1 }
+  return [pscustomobject]@{ LastTaskResult = [uint32]$r }
 }
 function Get-ScheduledTask {
   [CmdletBinding()] param([string]$TaskName)
@@ -224,6 +233,38 @@ func seatCmdCrashScenarios(t *testing.T, host string) {
 				t.Errorf("the stub's log lost %q:\n%s", want, log)
 			}
 		}
+		// The stop's result is read once, after the wait and before the exit; a clean stop (result 0) is not a warning.
+		resultAt := -1
+		for i, l := range lines {
+			if l == "read-task-result vllm-seat-stop-pp3" {
+				resultAt = i
+			}
+		}
+		if countLines(calls, "read-task-result vllm-seat-stop-pp3") != 1 || !(resultAt > lastRead && resultAt < exitAt) {
+			t.Errorf("the stub must read the stop task's result exactly once, after the wait and before it exits (read at %d, last poll %d, exit %d):\n%s", resultAt, lastRead, exitAt, calls)
+		}
+		if strings.Contains(log, "did not finish") || strings.Contains(log, "could not read the stop task's result") {
+			t.Errorf("a clean stop (result 0) must not be reported as a problem:\n%s", log)
+		}
+	})
+
+	t.Run("a stop that did not finish is said in the stub's log, and the exit is unchanged", func(t *testing.T) {
+		// seat_stop.sh exits 1 when a process of the seat survived SIGKILL or the port is still bound; wscript hands the
+		// code to the task. The stub used to log "finished" whatever happened, so nothing on the Windows side showed it.
+		calls, log := runSeatCmd(t, host, "stop-task-incomplete")
+		if !strings.Contains(log, "crash cleanup finished") || !strings.Contains(log, "seat_stop.sh reported a stop that did not finish (task result 1)") || !strings.Contains(log, "seat.log") {
+			t.Errorf("an incomplete stop must be said, with the result and where to read why:\n%s", log)
+		}
+		if !strings.HasSuffix(strings.TrimSpace(calls), "exit=0") {
+			t.Errorf("the exit stays exit 0 whatever the stop reported:\n%s", calls)
+		}
+	})
+
+	t.Run("a stop result that cannot be read is said, and the exit is unchanged", func(t *testing.T) {
+		calls, log := runSeatCmd(t, host, "stop-result-unreadable")
+		if !strings.Contains(log, "could not read the stop task's result") || !strings.HasSuffix(strings.TrimSpace(calls), "exit=0") {
+			t.Errorf("a result that cannot be read must be said and must not change the exit:\ncalls:\n%s\nlog:\n%s", calls, log)
+		}
 	})
 
 	t.Run("an unload is not a crash: cmdStop asked for the stop, so no stop task is started and the exit is unchanged", func(t *testing.T) {
@@ -287,6 +328,11 @@ func seatCmdCrashScenarios(t *testing.T, host string) {
 		if !strings.Contains(log, "not seen running in 30 s") || strings.Contains(log, "crash cleanup finished") || !strings.HasSuffix(strings.TrimSpace(calls), "exit=0") {
 			t.Fatalf("a stop task never seen running is not a finished cleanup: it must say so, and the stub must still exit 0:\ncalls:\n%s\nlog:\n%s", calls, log)
 		}
+		// A task that never ran since it was started has only the result of an EARLIER run: reading it would blame this
+		// cleanup for that one (or clear it).
+		if strings.Contains(calls, "read-task-result") {
+			t.Fatalf("the result of a stop task that was never seen running belongs to an earlier run and must not be read:\n%s", calls)
+		}
 	})
 
 	t.Run("a stop task that never finishes is waited for a bounded time", func(t *testing.T) {
@@ -296,6 +342,9 @@ func seatCmdCrashScenarios(t *testing.T, host string) {
 		}
 		if !strings.Contains(log, "still running after 90 s") || !strings.HasSuffix(strings.TrimSpace(calls), "exit=0") {
 			t.Fatalf("a cleanup that outlasts its bound must say so and the stub must still exit 0:\ncalls:\n%s\nlog:\n%s", calls, log)
+		}
+		if strings.Contains(calls, "read-task-result") {
+			t.Fatalf("a stop task still running has no result to read yet:\n%s", calls)
 		}
 	})
 

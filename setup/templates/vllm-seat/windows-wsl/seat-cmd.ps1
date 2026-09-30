@@ -29,7 +29,10 @@ $stopMarker = Join-Path '__SEAT_DIR__' "seat-stop-requested-$Seat"
 # for the stop task (bounded: 45 x 2 s; a task never seen running gets 30 s to appear), so the next start does not overlap
 # it: a stop that ran late could stop the MP server the next start had just begun. It does nothing while the seat's own
 # start task is still running: a live launcher owns the seat then, and nothing in the distro is a leftover. A failure only
-# logs; the exit that follows is the same.
+# logs; the exit that follows is the same. Once the stop task has been seen to finish, its last result is read and logged:
+# seat_stop.sh exits 1 when a process of the seat survived SIGKILL or the engine port is still bound, wscript hands that
+# code to the task, and the task's state alone says "finished" whatever it was. (The result of a task never seen running is
+# an earlier run's, and is not read.)
 function Invoke-CrashCleanup {
   $stopTask = "vllm-seat-stop-$Seat"
   if (Test-Path -LiteralPath $stopMarker) {
@@ -55,6 +58,13 @@ function Invoke-CrashCleanup {
     if ($s -eq 'Running') { $seen = $true; continue }
     if ($seen) {
       "[$(Get-Date -Format s)] crash cleanup finished after about $($i * 2) s (task state=$s)" | Out-File -Append $log
+      $r = $null
+      try { $r = (Get-ScheduledTaskInfo -TaskName $stopTask -ErrorAction Stop).LastTaskResult } catch {
+        "[$(Get-Date -Format s)] could not read the stop task's result: $($_.Exception.Message)" | Out-File -Append $log
+      }
+      if ($null -ne $r -and $r -ne 0) {
+        "[$(Get-Date -Format s)] WARN: seat_stop.sh reported a stop that did not finish (task result $r): a process of the seat survived SIGKILL or the engine port is still bound - see __WSL_SEAT_DIR__/seat.log" | Out-File -Append $log
+      }
       return
     }
     if ($i -ge 15) {
