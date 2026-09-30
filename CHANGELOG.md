@@ -20,8 +20,9 @@ per tier and a card cannot hold two heavy seats, so the schema grew by the small
 - `ampere-16` now declares `layers` `single` (the 27B GSQ lane seat) and `fast` (the 35B, 32,768 at 8 in flight), the
   35B as its extra seat, and both seats' B-01 storeless reasons with the local paths dropped. The layer values are the
   reference node's own (the two placement and delegate tests pin the same ones), so `audit-config` reports MATCH for
-  `layers`, `tiers` and `tier_profile`. A layer seat naming a vLLM seat must equal that seat's `max_model_len` (and
-  `max_num_seqs`, when set) or the table is refused at parse.
+  `layers`, `tiers` and `tier_profile` against a fixture that carries them: a live extract of that node redacts each
+  layer seat's `ctx_tokens`, so the 32,768 is the value those tests pin, not a live reading. A layer seat naming a vLLM
+  seat must equal that seat's `max_model_len` (and `max_num_seqs`, when set) or the table is refused at parse.
 - Seeding is per seat and never advertises what the box cannot serve: an extra seat the box can run (the venv, its
   own weights and the wrapper scripts the operator installs for it) joins `vllm_seats` with its own binding; a layer
   whose vLLM seat is absent is dropped; a layer set that lost `single` (the planner default, placement row 5b) is not

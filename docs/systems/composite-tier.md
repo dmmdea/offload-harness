@@ -53,10 +53,12 @@ Every vLLM seat the tier declares — the 27B lane seat and the 35B — is **sto
 declaration** (register B-01, re-measured 2026-09-18), so `doctor` prints a storeless-OK line per seat
 instead of failing it for a missing cache-server binding (ADR
 [0045](../architecture/decisions/0045-a-cache-server-binding-per-vllm-seat.md)): the MP server's own
-~690 MiB CUDA context beside the resident embedder OOMs the engine at `util 0.90` on a 16 GB card,
-and the 27B GSQ seat's cache path is blocked on top of that by LMCache 0.5.4 × vLLM 0.29 (register
-D-117). The reason each seat carries is its own `storeless_reason` in the tier table, seeded verbatim into
-its binding. (The reference node also lists a third seat, the 4B `qwen3.5-4b-vllm` rollback unit, which
+~690 MiB CUDA context beside the resident embedder OOMs the engine at `util 0.90` on a 16 GB card.
+(The 27B GSQ seat's cache path was also blocked, until 2026-09-18, by LMCache 0.5.4 × vLLM 0.29, register
+D-117, which is the state [ADR 0049](../architecture/decisions/0049-ampere-16-vllm-seat-is-the-3bit-gsq-27b.md)
+records. LMCache 0.5.5 carries the kv-layout fix, so that blocker is cleared and the VRAM cost above is the
+reason that stands.) The reason each seat carries is its own `storeless_reason` in the tier table, seeded
+verbatim into its binding. (The reference node also lists a third seat, the 4B `qwen3.5-4b-vllm` rollback unit, which
 is hand-installed and not part of the tier: its binding is that node's own, and `audit-config` reports the
 two roster keys as DIFFERENT against it until the operator declares or retires it.)
 
@@ -65,8 +67,10 @@ two roster keys as DIFFERENT against it until the operator declares or retires i
 `setup/templates/profiles.json` declares, for `ampere-16`, the two layers above, the 27B as `vllm_seat`
 (the agent lane) and the 35B as `extra_vllm_seats` (a seat served on demand beside the lane seat on the
 same card, never the agent lane: [ADR 0048 Amendment 2](../architecture/decisions/0048-vllm-is-a-first-class-engine-on-every-tier.md)).
-Each layer names its seat explicitly, so the values are the reference node's own and `audit-config`
-reports MATCH for `layers`, `tiers` and `tier_profile`; a layer seat that names a vLLM seat must equal
+Each layer names its seat explicitly, so the values are the reference node's own (the ones
+`internal/placement` and `internal/delegate` pin) and `audit-config` reports MATCH for `layers`, `tiers` and
+`tier_profile` against a fixture that carries them (a live extract of that node redacts each layer seat's
+`ctx_tokens`, so the 32,768 is the pinned value, not a live reading); a layer seat that names a vLLM seat must equal
 that seat's `max_model_len` (and its `max_num_seqs` as `max_inflight`, when set), or the table is refused
 at parse. What a box seeds and renders depends on which seats it can run, decided per seat by the same
 prerequisite check (`vllmseat.Spec.Detect`: the hand-built venv plus that seat's own weights; for the 35B,

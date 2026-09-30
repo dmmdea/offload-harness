@@ -158,7 +158,9 @@ grew, by the smallest steps that carry what the box actually runs.
    sentence and the measurement lived on the node. It is refused beside a `cache_server`: a seat is bound to a store
    or it is storeless, never both.
 3. `layers` on a tier that composes nothing (ampere-16). A layer seat names its vLLM seat explicitly, so the values
-   are the reference node's own and `audit-config` reports MATCH for the layer keys; the copy of the window, the
+   are the reference node's own and `audit-config` reports MATCH for the layer keys against a fixture that carries
+   them (a live extract of that node redacts each layer seat's `ctx_tokens`, so the 32,768 is the value the placement
+   and delegate tests pin, not a live reading); the copy of the window, the
    concurrency and the card pin that naming implies must equal the seat's own declaration, or the table is refused
    at parse (one number, one place).
 4. `n_cpu_moe_max`: the tier's measured spill (H-01, below).

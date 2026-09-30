@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"reflect"
 	"regexp"
 	"sort"
@@ -257,5 +258,35 @@ func TestTheLocalIdentityScanSeesEveryPathForm(t *testing.T) {
 	}
 	if got := ampere16LocalIdentity(ampere16Profile(t)); len(got) != 0 {
 		t.Errorf("the control (the table as shipped) is flagged: %v", got)
+	}
+}
+
+// The 27B's storeless_reason (register B-01, 2026-09-18) says LMCache 0.5.5 clears the vLLM-0.29
+// kv_layout blocker. The tier's own measured note, written two days earlier, called the same cache
+// path BLOCKED by that connector (register D-117); it stays as history and must say it was
+// superseded, or the tier page states both in the present tense and a reader cannot tell which
+// holds. The same goes for the runbook that explains why the seats are storeless.
+func TestAmpere16DoesNotStateTheD117BlockerAsCurrent(t *testing.T) {
+	p := ampere16Profile(t)
+	if !strings.Contains(p.VLLMSeat.StorelessReason, "clears the vLLM-0.29 kv_layout blocker") {
+		t.Fatal("the control is wrong: the 27B's storeless reason no longer says the blocker is cleared, so this guard has nothing to hold against")
+	}
+	if m := p.VLLMSeat.Measured; strings.Contains(m, "D-117") && !strings.Contains(m, "SUPERSEDED") {
+		t.Errorf("the 27B's measured note states the D-117 blocker without saying the B-01 re-measure superseded it")
+	}
+	b, err := os.ReadFile("docs/systems/composite-tier.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := strings.Join(strings.Fields(string(b)), " ") // one line: the runbook wraps its prose
+	for i, off := 0, 0; ; {
+		j := strings.Index(doc[off:], "D-117")
+		if j < 0 {
+			break
+		}
+		i, off = off+j, off+j+len("D-117")
+		if !strings.Contains(doc[i:min(i+400, len(doc))], "cleared") {
+			t.Errorf("composite-tier.md mentions D-117 without saying it is cleared: %q", doc[max(0, i-120):min(i+200, len(doc))])
+		}
 	}
 }
