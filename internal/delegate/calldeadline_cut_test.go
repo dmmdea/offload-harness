@@ -245,3 +245,31 @@ func TestCutByDeadlineTouchesOnlyAnOutcomeThatIsNotAnAnswer(t *testing.T) {
 		t.Fatalf("a cut outcome kept acceptance failures: %v", got.AcceptanceFailures)
 	}
 }
+
+// TestTheCancellationsOwnWordsAreNotQuotedBack: an outcome that says nothing beyond "a
+// context ended" — the deadline's own doing — is not quoted as what "the run itself"
+// reported. Every place that ends because a context ended words it differently: a cancelled
+// poll, a cancelled request ("...: context deadline exceeded"), the agent loop's
+// parent-cancelled defer, its wall-timeout defer that names the caller's deadline, and a
+// reason that already opens with the call-deadline marker.
+func TestTheCancellationsOwnWordsAreNotQuotedBack(t *testing.T) {
+	r := &runner{cfg: testCfg(t), call: pastDeadline(1)}
+	for name, pr := range map[string]PlacedResult{
+		"a cancelled poll":         {Err: "canceled: context deadline exceeded"},
+		"a cancelled request":      {Err: `dispatch http://node-a: Post "http://node-a/fleet/dispatch": context deadline exceeded (status 0)`},
+		"a request cancelled":      {Err: "poll: Get http://node-a/fleet/jobs/x: context canceled"},
+		"the loop's parent cancel": {Result: cancelledLoop()},
+		"the loop's caller wall": {Result: core.AgentWireResult{Deferred: true, DeferClass: core.DeferClassBudget,
+			Reason: "wall timeout after 300s (the caller's deadline, not this node's ceiling)"}},
+		"a reason already cut": {Result: core.AgentWireResult{Deferred: true, DeferClass: core.DeferClassBudget,
+			Reason: "call deadline reached; 1 unfinished — this subtask never started"}},
+	} {
+		if own := ownVerdict(pr); own != "" {
+			t.Errorf("%s: ownVerdict = %q, want nothing: the run reported only the cancellation", name, own)
+		}
+		got := r.cutByDeadline(pr)
+		if strings.Contains(got.Result.Reason, "the run itself") {
+			t.Errorf("%s: the cut quotes the cancellation back as the run's verdict: %q", name, got.Result.Reason)
+		}
+	}
+}

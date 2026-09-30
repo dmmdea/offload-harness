@@ -194,3 +194,57 @@ func TestQueueRouteCutSubmitIsNotSubmittedWhenTheHolderHasNoSuchJob(t *testing.T
 		}
 	}
 }
+
+// widgetContract is a queue-lane contract whose answer must contain "widget".
+func widgetContract(goal string) core.AgentContract {
+	c := queueContract(goal)
+	c.Acceptance = []string{"contains:widget"}
+	return c
+}
+
+// TestQueueRouteEvaluatesAcceptanceOnAFinishedJob: a job the holder finished is checked
+// against its contract's acceptance like any answer — on the ordinary poll AND on the
+// deadline's last look, which reads the holder through the same reader. A finished answer
+// that misses its check is failed verification, never a silent success.
+func TestQueueRouteEvaluatesAcceptanceOnAFinishedJob(t *testing.T) {
+	finish := func(q *fleetqueue.Queue, job *fleetqueue.Job, output string) {
+		w, _ := json.Marshal(core.AgentWireResult{SchemaVersion: core.AgentWireSchemaVersion, NodeID: "claimant", Seat: "seat-x", Output: output, StopReason: "done"})
+		if err := q.Ack(job.ID, "claimant", w, ""); err != nil {
+			t.Errorf("ack: %v", err)
+		}
+	}
+	t.Run("on the ordinary poll", func(t *testing.T) {
+		holder := queueHolder(t)
+		cfg := config.Config{FleetQueueHolder: holder.url, StateDir: t.TempDir()}
+		go func() {
+			time.Sleep(100 * time.Millisecond)
+			for _, job := range claimAll(t, holder.q, 1) {
+				finish(holder.q, job, "no such token here")
+			}
+		}()
+		_, sum, _ := runWithin(t, 10*time.Second, cfg, nil, []core.AgentContract{widgetContract("which shipment?")}, "queue", nil, deadlineIn(time.Hour), nil)
+		if sum.FailedVerification != 1 || sum.Succeeded != 0 {
+			t.Fatalf("summary = %+v, want the finished answer failed verification", sum)
+		}
+	})
+	t.Run("on the deadline's last look", func(t *testing.T) {
+		holder := queueHolder(t)
+		cfg := config.Config{FleetQueueHolder: holder.url, StateDir: t.TempDir()}
+		go func() {
+			time.Sleep(100 * time.Millisecond)
+			for _, job := range claimAll(t, holder.q, 2) {
+				if strings.Contains(goalOf(t, job), "two") {
+					finish(holder.q, job, "no such token here")
+				}
+			}
+		}()
+		results, sum, _ := runWithin(t, 4*time.Second, cfg, nil,
+			[]core.AgentContract{widgetContract("which shipment one?"), widgetContract("which shipment two?")}, "queue", nil, deadlineIn(700*time.Millisecond), nil)
+		if sum != (Summary{Deferred: 1, FailedVerification: 1}) {
+			t.Fatalf("summary = %+v, want the held job deferred and the finished one failed verification", sum)
+		}
+		if len(results[1].AcceptanceFailures) == 0 {
+			t.Fatalf("the finished job carries no acceptance failure: %+v", results[1])
+		}
+	})
+}
