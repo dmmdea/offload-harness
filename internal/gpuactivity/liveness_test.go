@@ -58,3 +58,24 @@ func TestNilHandleProgressIsSafe(t *testing.T) {
 	h.OnProgress(3)
 	h.OnAllowance("tool", time.Second) // no panic: Start returns nil when the registry cannot open
 }
+
+// A phase published before the first byte — a wait in line at the seat cap
+// ("admission") or the busy hold ("queued") — ends at the first byte even when
+// no later phase report arrives (0.143.0): the status line must not read a
+// decoding run as still waiting.
+func TestTheFirstByteHealsTheWaitingPhases(t *testing.T) {
+	for _, phase := range []string{"admission", "queued", "prefill", "cold-load"} {
+		reg := OpenAt(t.TempDir())
+		h, err := reg.Begin(Run{PID: os.Getpid(), Seat: "seat", Kind: "contract", Phase: PhaseAdmission})
+		if err != nil {
+			t.Fatal(err)
+		}
+		h.OnAllowance(phase, 30*time.Second)
+		h.OnProgress(5)
+		runs := reg.List(time.Now())
+		h.End()
+		if len(runs) != 1 || runs[0].LivePhase != "decoding" {
+			t.Fatalf("after the first byte in %q: %+v, want live phase decoding", phase, runs)
+		}
+	}
+}

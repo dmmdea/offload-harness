@@ -368,7 +368,9 @@ func (h *Handle) OnProgress(tokensOut int) {
 			r.TokensOut = tokensOut
 		}
 		r.LastProgressMs = now.UnixMilli()
-		if r.LivePhase == "prefill" || r.LivePhase == "cold-load" || r.LivePhase == "queued" { // the first byte ends a prefill, a cold-load hold and a busy hold alike
+		// The first byte ends a prefill, a cold-load hold, a busy hold and a wait
+		// in line at the seat cap alike (0.143.0 publishes the last two).
+		if r.LivePhase == "prefill" || r.LivePhase == "cold-load" || r.LivePhase == "queued" || r.LivePhase == "admission" {
 			r.LivePhase = "decoding"
 		}
 		if r.Phase == PhaseAdmission || r.Phase == PhaseColdLoad ||
