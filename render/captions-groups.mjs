@@ -251,10 +251,16 @@ export function captionsFromSegments(input, opts = {}) {
 
 // --- command line -----------------------------------------------------------------------------------
 // node render/captions-groups.mjs <segments.json> [--pace punchy|conversational|calm] [--max-words N]
-//   [--gap-sec S] [--max-chars N] [--linger-sec S] [--min-hold-sec S] [--out result.json]
+//   [--gap-sec S] [--max-chars N] [--linger-sec S] [--min-hold-sec S] [--chunk-sec S] [--chunk-chars N]
+//   [--out result.json]
 // Prints the document captionsFromSegments returns (or writes it to --out). Exit 0 on success, 1 on a
-// bad file or bad option, 2 when no file is named.
-const NUMERIC = { "max-words": "maxWords", "gap-sec": "gapSec", "max-chars": "maxChars", "linger-sec": "lingerSec", "min-hold-sec": "minHoldSec" };
+// bad file or bad option, 2 when no file is named. --chunk-sec and --chunk-chars cap one chunk (defaults 600 s
+// and 16,000 characters, which are also the most the template accepts): a long chunk is many frames, and the
+// lane's frame storage and timeout limit how long one can be (the captions-bar README, "Long chunks").
+const NUMERIC = {
+  "max-words": "maxWords", "gap-sec": "gapSec", "max-chars": "maxChars", "linger-sec": "lingerSec", "min-hold-sec": "minHoldSec",
+  "chunk-sec": "variableSec", "chunk-chars": "variableChars",
+};
 
 export function main(argv = process.argv.slice(2), { stdout = process.stdout, stderr = process.stderr } = {}) {
   const opts = {};
@@ -279,12 +285,19 @@ export function main(argv = process.argv.slice(2), { stdout = process.stdout, st
         opts[NUMERIC[key]] = n;
       } else throw new Error(`unknown flag ${a}`);
     }
+    // the template takes at most these, so a bigger request is refused here rather than deferred by the runner
+    if (opts.variableSec !== undefined && !(opts.variableSec > 0 && opts.variableSec <= DEFAULTS.variableSec)) {
+      throw new Error(`--chunk-sec must be more than 0 and at most ${DEFAULTS.variableSec} (the template's duration limit)`);
+    }
+    if (opts.variableChars !== undefined && !(Number.isInteger(opts.variableChars) && opts.variableChars >= 1 && opts.variableChars <= DEFAULTS.variableChars)) {
+      throw new Error(`--chunk-chars must be a whole number from 1 to ${DEFAULTS.variableChars} (the template's words_json limit)`);
+    }
   } catch (e) {
     stderr.write(`captions-groups: ${e.message}\n`);
     return 1;
   }
   if (!file) {
-    stderr.write("captions-groups: usage: node render/captions-groups.mjs <segments.json> [--pace punchy|conversational|calm] [--out result.json]\n");
+    stderr.write("captions-groups: usage: node render/captions-groups.mjs <segments.json> [--pace punchy|conversational|calm] [--chunk-sec S] [--out result.json]\n");
     return 2;
   }
   try {

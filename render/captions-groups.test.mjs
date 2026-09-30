@@ -568,6 +568,48 @@ test("command line: each flag changes exactly the option it names", () => {
   assert.equal(doc(cli([file])).template, "captions-bar");
 });
 
+// A long chunk is many frames and the lane has limits (README, "Long chunks"), so the size of a chunk has to be
+// the caller's to choose on the command line. 300 words at 0.4 s is 120 s of speech, and every group breaks at 3 words.
+function longCliFixture() {
+  const dir = mkdtempSync(join(tmpdir(), "captions-groups-long-"));
+  const words = Array.from({ length: 300 }, (_, i) => ({ word: ` w${i + 1}`, start: i * 0.4, end: (i + 1) * 0.4, probability: 0.9 }));
+  const file = join(dir, "long.segments.json");
+  writeFileSync(file, JSON.stringify([{ id: 0, start: 0, end: 120, text: words.map((x) => x.word).join(""), words }]));
+  return file;
+}
+
+test("command line: --chunk-sec and --chunk-chars cap a chunk, and neither may pass the template's own limits", () => {
+  const file = longCliFixture();
+  const whole = doc(cli([file, "--pace", "punchy"]));
+  assert.equal(whole.chunks.length, 1, "the defaults keep 120 s of speech in one chunk");
+  const groups = whole.groups.length;
+  // by seconds: every chunk fits its cap, none is lost, and each later chunk is rebased to start at 0
+  const bySec = doc(cli([file, "--pace", "punchy", "--chunk-sec", "30"]));
+  assert.ok(bySec.chunks.length >= 4, `${bySec.chunks.length} chunks for 120 s at 30 s each`);
+  for (const [k, c] of bySec.chunks.entries()) {
+    assert.ok(c.duration_sec <= 30 + 1e-9, `chunk ${k}: ${c.duration_sec} s`);
+    for (const t of JSON.parse(c.words_json)) assert.ok(t[1] <= c.duration_sec + 1e-9, `chunk ${k}: a caption ends after its chunk`);
+  }
+  assert.equal(bySec.chunks.reduce((n, c) => n + c.group_count, 0), groups, "no group is lost");
+  // by characters
+  const byChars = doc(cli([file, "--pace", "punchy", "--chunk-chars", "300"]));
+  assert.ok(byChars.chunks.length >= 4, `${byChars.chunks.length} chunks at 300 characters`);
+  for (const [k, c] of byChars.chunks.entries()) assert.ok(c.words_json.length <= 300, `chunk ${k}: ${c.words_json.length} characters`);
+  assert.equal(byChars.chunks.reduce((n, c) => n + c.group_count, 0), groups, "no group is lost");
+  // the template accepts at most 600 s and 16,000 characters, so a bigger request is refused, not passed on
+  const fails = (argv, re) => {
+    const r = cli(argv);
+    assert.equal(r.code, 1, argv.join(" "));
+    assert.match(r.stderr, re, argv.join(" "));
+  };
+  fails([file, "--chunk-sec", "601"], /--chunk-sec must be more than 0 and at most 600/);
+  fails([file, "--chunk-sec", "0"], /--chunk-sec must be more than 0 and at most 600/);
+  fails([file, "--chunk-chars", "16001"], /--chunk-chars must be a whole number from 1 to 16000/);
+  fails([file, "--chunk-chars", "1.5"], /--chunk-chars must be a whole number from 1 to 16000/);
+  fails([file, "--chunk-chars", "0"], /--chunk-chars must be a whole number from 1 to 16000/);
+  assert.equal(cli([file, "--chunk-sec", "600", "--chunk-chars", "16000"]).code, 0, "the limits themselves are accepted");
+});
+
 test("command line: --out writes the document to that file and prints nothing", () => {
   const { dir, file } = cliFixture();
   const target = join(dir, "chunks.json");
