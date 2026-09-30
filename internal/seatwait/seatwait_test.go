@@ -151,3 +151,68 @@ func TestCausedTimeoutNeedsCausation(t *testing.T) {
 		t.Fatal("the in-flight flag must clear when the sleep ends")
 	}
 }
+
+// ADR 0066: the seat gate. Waiting out a busy answer only makes sense while the seat
+// serves; a 5xx from llama-swap on a seat whose engine died or cannot start is the
+// seat's failure, and sleeping the contention budget on it (90 s by default) only
+// delays the run's typed outcome. Every client of the budget shares the gate — the
+// loop's chat calls and the structured re-pack alike.
+func TestSeatGateRefusesTheWaitWhileTheSeatIsNotServing(t *testing.T) {
+	var asked []int
+	down := true
+	b := NewBudget(60).WithSeatGate(func(status int) bool { asked = append(asked, status); return down })
+
+	if d, ok := b.NextFor(500, ""); ok || d != 0 {
+		t.Fatalf("NextFor(500) = %v ok=%v, want the wait refused while the seat is not serving", d, ok)
+	}
+	if b.Spent() != 0 || b.Attempts() != 0 {
+		t.Fatalf("spent %v attempts %d: a refused wait is not spent", b.Spent(), b.Attempts())
+	}
+	if b.LastStatus() != 500 {
+		t.Fatalf("LastStatus = %d, want the 500 the seat answered remembered for the reason", b.LastStatus())
+	}
+	// 429 is contention by definition (llama-swap's concurrency limit): the seat is
+	// never asked about it, and the wait is granted.
+	if d, ok := b.NextFor(429, "1"); !ok || d != time.Second {
+		t.Fatalf("NextFor(429) = %v ok=%v, want the 1 s wait granted without asking the seat", d, ok)
+	}
+	for _, s := range asked {
+		if s == 429 {
+			t.Fatalf("the seat gate was asked about a 429: %v", asked)
+		}
+	}
+	// The seat serves again: the ordinary wait resumes.
+	down = false
+	if d, ok := b.NextFor(503, ""); !ok || d <= 0 {
+		t.Fatalf("NextFor(503) = %v ok=%v, want the ordinary wait once the seat serves", d, ok)
+	}
+	// A status of 0 (Next) is not a busy answer: the gate is not asked.
+	n := len(asked)
+	if _, ok := b.Next(""); !ok || len(asked) != n {
+		t.Fatalf("Next asked the seat gate (%v)", asked[n:])
+	}
+}
+
+// A budget that never waits (a disabled or zero budget) still reports why the
+// failure stands, and the gate cannot make a nil budget wait.
+func TestSeatGateOnABudgetThatNeverWaits(t *testing.T) {
+	b := NewBudget(-1).WithSeatGate(func(int) bool { return true })
+	if _, ok := b.NextFor(500, ""); ok {
+		t.Fatal("a disabled budget waited")
+	}
+	if b.LastStatus() != 500 {
+		t.Fatalf("LastStatus = %d", b.LastStatus())
+	}
+	var nilBudget *Budget
+	if nilBudget.WithSeatGate(func(int) bool { return false }) != nil {
+		t.Fatal("WithSeatGate on a nil budget must stay nil")
+	}
+	if _, ok := nilBudget.NextFor(500, ""); ok {
+		t.Fatal("a nil budget waited")
+	}
+	// No gate installed: NextFor is exactly what it was.
+	plain := NewBudget(10)
+	if d, ok := plain.NextFor(500, ""); !ok || d != time.Second {
+		t.Fatalf("plain NextFor(500) = %v ok=%v", d, ok)
+	}
+}

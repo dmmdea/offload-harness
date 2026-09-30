@@ -625,6 +625,13 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	// and the re-pack draw on it, so a 10-step loop cannot spend ten budgets,
 	// and the wait it consumed is reported on the wire (contention_wait_sec).
 	contention = seatwait.NewBudget(p.cfg.SeatContentionWaitSec)
+	// Every client of this budget — the loop's chat calls and the structured
+	// re-pack — stops sleeping on a llama-swap 5xx while the seat is not serving
+	// (ADR 0066): the failure is the seat's, and the typed outcome is the recovery's.
+	contention.WithSeatGate(func(int) bool {
+		down, _ := live.SeatCheck(cctx)
+		return down
+	})
 	cctx = seatwait.WithBudget(cctx, contention)
 
 	// Depth (roast delta 2): buildAgentRun already derived
