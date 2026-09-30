@@ -190,11 +190,17 @@ if ss -ltnp 2>/dev/null | grep -q ":$MP_HTTP_PORT "; then
   # generation's MP server still held its HTTP port and every restart refused right here (2026-09-29: 23 minutes with
   # the agent seat fully down, 59 failed starts, 75 HTTP 500s). No engine of THIS stack serves :$PORT (checked just
   # above), so the holder can only be that stale MP server: run the stack's own cleanup once, then look again.
-  # Anything still holding the port after that is foreign and is refused exactly as before.
+  # Anything still holding the port after that is foreign and is refused exactly as before. A stopping unit can hold
+  # its socket for a few seconds, so the re-check waits up to 10 s for the port to free instead of judging one look.
   if ! pgrep -f "vllm serve .*--port $PORT" >/dev/null 2>&1; then
     echo "seat_fg: :$MP_HTTP_PORT is held and no engine serves :$PORT — a crashed generation's MP server; running seat_stop.sh once"
-    bash "$(dirname "$(readlink -f "$0")")/seat_stop.sh" "$CFG" || echo "seat_fg: seat_stop.sh reported a problem (continuing to the re-check)"
-    sleep 2
+    stop_rc=0
+    bash "$(dirname "$(readlink -f "$0")")/seat_stop.sh" "$CFG" || stop_rc=$?
+    [ "$stop_rc" -eq 0 ] || echo "seat_fg: seat_stop.sh exited $stop_rc (continuing to the re-check)"
+    for _ in $(seq 1 20); do
+      ss -ltnp 2>/dev/null | grep -q ":$MP_HTTP_PORT " || break
+      sleep 0.5
+    done
   fi
   if ss -ltnp 2>/dev/null | grep -q ":$MP_HTTP_PORT "; then
     echo "seat_fg: REFUSING to start — the MP HTTP port :$MP_HTTP_PORT is already bound: $(ss -ltnp 2>/dev/null | grep ":$MP_HTTP_PORT " | grep -oE 'users:\(.*\)' | head -1)"

@@ -81,6 +81,48 @@ func TestFindRunningByExeProcFindsTheRestartedNode(t *testing.T) {
 	}
 }
 
+// A node run by another user (EACCES on its /proc/<pid>/exe) is matched by
+// its world-readable cmdline; when such an entry names no absolute
+// executable and nothing else matched, the finder errors instead of reporting
+// "no node" — an empty result there rolls a good swap back.
+func TestFindRunningByExeProcSeesAnotherUsersNode(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "local-offload")
+	if err := os.WriteFile(target, []byte("new"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	proc := filepath.Join(dir, "proc")
+	fakeProc(t, proc, 5100, target, target+" fleet-serve --listen 192.0.2.10:18811")
+	fakeProc(t, proc, 5101, target, "local-offload fleet-serve")
+	denied := map[string]bool{filepath.Join(proc, "5100", "exe"): true, filepath.Join(proc, "5101", "exe"): true}
+	orig := procReadlink
+	t.Cleanup(func() { procReadlink = orig })
+	procReadlink = func(p string) (string, error) {
+		if denied[p] {
+			return "", &os.PathError{Op: "readlink", Path: p, Err: os.ErrPermission}
+		}
+		return orig(p)
+	}
+
+	got, err := findRunningByExeProc(proc, target)
+	if err != nil {
+		t.Fatalf("a denied exe with an absolute argv[0] must still match: %v", err)
+	}
+	if len(got) != 1 || got[0].PID != 5100 {
+		t.Fatalf("got %+v, want exactly pid 5100 matched by its cmdline", got)
+	}
+
+	// Only the relative-argv[0] entry left: it cannot be ruled out, so the
+	// finder must not say "no node".
+	if err := os.RemoveAll(filepath.Join(proc, "5100")); err != nil {
+		t.Fatal(err)
+	}
+	got, err = findRunningByExeProc(proc, target)
+	if err == nil || !strings.Contains(err.Error(), "another user") {
+		t.Fatalf("got %+v, %v; want an error naming the unreadable entries", got, err)
+	}
+}
+
 // platformDeps wires the verification finder off Windows (the holder finder
 // stays empty — a Linux swap stops nothing).
 func TestPlatformDepsWireAVerificationFinderOffWindows(t *testing.T) {

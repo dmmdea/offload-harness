@@ -4,6 +4,9 @@ package nodeswap
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -73,8 +76,12 @@ func runPlatformCommand(ctx context.Context, timeout time.Duration, command stri
 // node launched through a symlinked path (a second copy under /usr/local/bin vs
 // /opt/offload/bin) still matches its real file. A replaced image reads
 // "<path> (deleted)": that process runs the OLD binary and is not a match.
-// Unreadable entries (another user's process, a PID that exited mid-scan) are
-// skipped, never an error.
+// An entry whose exe link is unreadable because it belongs to another user
+// (EACCES — a unit run as a different uid than the swap) is matched by its
+// world-readable cmdline instead, and when nothing matched while such entries
+// were skipped the error says so: a verification that cannot see the node
+// must never read as "no node", or a good swap is rolled back. Entries that
+// vanished mid-scan are skipped silently.
 func findRunningByExeProc(procRoot, exePath string) ([]ProcessInfo, error) {
 	want := exePath
 	if abs, err := filepath.Abs(exePath); err == nil {
@@ -88,13 +95,28 @@ func findRunningByExeProc(procRoot, exePath string) ([]ProcessInfo, error) {
 		return nil, err
 	}
 	var out []ProcessInfo
+	unreadable := 0
 	for _, e := range entries {
 		pid, perr := strconv.Atoi(e.Name())
 		if perr != nil || !e.IsDir() {
 			continue
 		}
-		exe, lerr := os.Readlink(filepath.Join(procRoot, e.Name(), "exe"))
-		if lerr != nil || strings.HasSuffix(exe, " (deleted)") {
+		raw, _ := os.ReadFile(filepath.Join(procRoot, e.Name(), "cmdline"))
+		cmdline := strings.TrimSpace(strings.ReplaceAll(string(raw), "\x00", " "))
+		exe, lerr := procReadlink(filepath.Join(procRoot, e.Name(), "exe"))
+		if lerr != nil {
+			if !errors.Is(lerr, fs.ErrPermission) {
+				continue // exited mid-scan, a kernel thread
+			}
+			// Another user's process: its cmdline is world-readable.
+			argv0, _, _ := strings.Cut(strings.TrimRight(string(raw), "\x00"), "\x00")
+			if !filepath.IsAbs(argv0) {
+				unreadable++
+				continue
+			}
+			exe = argv0
+		}
+		if strings.HasSuffix(exe, " (deleted)") {
 			continue
 		}
 		if r, rerr := filepath.EvalSymlinks(exe); rerr == nil {
@@ -103,9 +125,14 @@ func findRunningByExeProc(procRoot, exePath string) ([]ProcessInfo, error) {
 		if exe != want {
 			continue
 		}
-		raw, _ := os.ReadFile(filepath.Join(procRoot, e.Name(), "cmdline"))
-		cmdline := strings.TrimSpace(strings.ReplaceAll(string(raw), "\x00", " "))
 		out = append(out, ProcessInfo{PID: pid, CommandLine: cmdline, ExecutablePath: exe})
+	}
+	if len(out) == 0 && unreadable > 0 {
+		return nil, fmt.Errorf("%d /proc entries belong to another user and name no absolute executable, so the restarted node may be among them: run node-swap as the unit's user (or root)", unreadable)
 	}
 	return out, nil
 }
+
+// procReadlink is os.Readlink, a variable so a test can stand in for a
+// permission-denied /proc/<pid>/exe.
+var procReadlink = os.Readlink

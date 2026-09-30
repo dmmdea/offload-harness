@@ -467,8 +467,8 @@ func TopDeferReasons(path string, since int64, topN int) ([]ReasonCount, error) 
 		return nil, err
 	}
 	counts := map[string]int{}
-	for _, e := range entries {
-		if !e.Deferred || e.CacheHit || e.ParentJobID != "" { // an inner row's defer is its parent's (C-62)
+	for _, e := range JobRows(entries) { // an inner row's defer is its parent's (C-62)
+		if !e.Deferred || e.CacheHit {
 			continue
 		}
 		if since > 0 && e.TS < since {
@@ -504,6 +504,12 @@ func TopDeferReasons(path string, since int64, topN int) ([]ReasonCount, error) 
 // file reports an empty summary (nothing offloaded yet), not an error.
 func SummarizeFile(path string, since int64, prices Prices) (Summary, error) {
 	s := Summary{ByTask: map[string]int{}}
+	// First pass: the parent job ids, so an ORPHAN inner row (its parent row
+	// never landed) counts as its job instead of vanishing (C-62).
+	parents, perr := parentJobIDsInFile(path)
+	if perr != nil {
+		return s, perr
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -526,7 +532,7 @@ func SummarizeFile(path string, since int64, prices Prices) (Summary, error) {
 		if since > 0 && e.TS < since {
 			continue
 		}
-		if e.ParentJobID != "" {
+		if !CountsAsJob(e, parents) {
 			// An inner row (C-62): the parent `agent_delegate` row is the job —
 			// its call, its outcome, its TokensOut. The inner row contributes
 			// only what the parent leaves at 0 by design: the savings column.

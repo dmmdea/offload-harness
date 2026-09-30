@@ -232,7 +232,7 @@ func runLoupe(args []string) error {
 		return err
 	}
 	rows := make([]ledger.Entry, 0, len(all))
-	for _, e := range all {
+	for _, e := range ledger.JobRows(all) { // a local job is one job (C-62)
 		if sinceTS == 0 || e.TS >= sinceTS {
 			rows = append(rows, e)
 		}

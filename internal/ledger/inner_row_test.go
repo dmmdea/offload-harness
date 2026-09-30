@@ -88,3 +88,45 @@ func TestSummarizeCountsALocalJobOnce(t *testing.T) {
 		t.Fatalf("defer reasons = %+v, want the one job's defer counted once", reasons)
 	}
 }
+
+// An ORPHAN inner row — its parent row never landed (a failed write, a
+// process killed between the two writes) — is its job's only record and
+// counts as the job; a paired inner row never does.
+func TestJobRowsKeepsOrphansAndDropsPairedInnerRows(t *testing.T) {
+	rows := []Entry{
+		{Task: "agent", JobID: "agent-local-1", ParentJobID: "agd-1"},
+		{Task: "agent_delegate", JobID: "agd-1"},
+		{Task: "agent", JobID: "agent-local-2", ParentJobID: "agd-missing"},
+		{Task: "summarize"},
+	}
+	got := JobRows(rows)
+	if len(got) != 3 {
+		t.Fatalf("job rows = %d, want the parent, the orphan and the plain row", len(got))
+	}
+	for _, e := range got {
+		if e.JobID == "agent-local-1" {
+			t.Fatal("a paired inner row was counted as a job")
+		}
+	}
+}
+
+func TestSummarizeCountsAnOrphanInnerRowAsItsJob(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "ledger.jsonl")
+	l, err := Open(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = l.Record(Entry{Task: "agent", ParentJobID: "agd-gone", TokensIn: 300, TokensOut: 40, Deferred: true, Reason: "stalled"})
+	l.Close()
+	s, err := SummarizeFile(p, 0, Prices{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Calls != 1 || s.Deferred != 1 || s.ByTask["agent"] != 1 {
+		t.Fatalf("an orphan inner row vanished from the counts: %+v", s)
+	}
+	reasons, err := TopDeferReasons(p, 0, 5)
+	if err != nil || len(reasons) != 1 {
+		t.Fatalf("the orphan's defer reason must be counted: %+v (%v)", reasons, err)
+	}
+}

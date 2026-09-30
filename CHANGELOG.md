@@ -17,44 +17,71 @@ fleet's agent jobs succeeded 15 % of the time — 96 stall kills, 41 finished an
 four decode "stalls" in one second on one seat — while the engines produced throughout.
 
 The liveness monitor now reads the seat's ENGINE before calling silence a stall (`seatload.ReadActivity`, at
-the seat's own address, never `/upstream`): a work fingerprint from vLLM's step, token, preemption and
-finished-request counters plus its KV usage gauge (the only signal that moves through a solo prefill), from
-llama-server's `n_decode_total` and token counters, or from `/slots`. Request gauges never enter it, so a
-wedged engine that still accepts requests cannot look alive.
+the seat's own address, never `/upstream`): a work fingerprint from vLLM's step, token and preemption counters
+plus its KV usage gauge (the only signal that moves through a solo prefill), from llama-server's
+`n_decode_total` and token counters, or from `/slots` (task, processing flag, decoded and prompt-processed
+counts; `next_token` read as the array current builds return). Request gauges and the finished-request counter
+(it counts aborts) never enter it, so a wedged engine that still accepts requests cannot look alive.
 
 - The engine moved since the last look: the run is held in the new phase `queued` and re-reads every 10 s for
-  as long as the engine keeps working, bounded by the run's ceiling.
+  as long as the engine keeps working, bounded by the run's ceiling. The same check runs in the post-ready
+  window after a cold load.
 - The engine did no work for max(120 s, the waiting phase's own allowance): that is the stall, and the reason
   names the engine's silence, the phase and the last reading.
-- The engine cannot be read: the ADR 0055 rule, and the reason says so. A loading seat goes to the cold-load
-  hold.
-- On entering the hold the node publishes the time left to its ceiling as the run's allowance, so the
-  delegator keeps polling a held remote run instead of abandoning it ~70 s in.
-- `queued_ms` reports the wall a run spent held, on the wire, both ledger rows and the call meta.
+- The engine keeps stepping but produces no token for 3× that bound: a preempt-and-recompute thrash stall.
+- The engine cannot be read at the first look: the ADR 0055 rule, and the reason says so. Inside a hold an
+  unreadable read is no new evidence (a llama-server answers only between batches); the hold lasts until the
+  flat bound runs out since the engine last moved, then files an unreadable stall that says it was held. One
+  read may take 45 s. A loading seat goes to the cold-load hold, whose clock starts when the load is seen.
+- On entering the hold and on every read that sees the engine move, the node publishes the flat bound plus
+  one poll as the run's allowance, anchored at that read, so the delegator keeps polling a held remote run
+  while the engine is seen working — and gives a node that stops re-publishing up one allowance plus grace
+  later, never at the ceiling.
+- `queued_ms` reports the wall a run spent held up to the engine's last movement, on the wire, both ledger
+  rows and the call meta. A held run no longer feeds the seat's single-stream rates, which size every later
+  allowance.
 
 ### Fixed — local seat-cap waiters no longer block each other (C-60)
 
 Every run registers in phase `admission` before the local seat gate, and the gate counted every other
 registered run, waiters included: stacked waiters blocked each other with the seat free (92 local runs refused
 on 2026-09-29 after the full admission budget). A run now counts only runs past admission plus waiters that
-registered before it (FIFO), so a freed slot admits exactly the next in line.
+registered before it (FIFO), so a freed slot admits exactly the next in line. The wait in line is bounded by the
+run's own wall (never less than the admission budget, never past the caller's deadline) instead of the shared
+300 s admission budget, which refused 88 of those 92 after exactly 5m0s; the admission deadline moves out by
+the time spent in line, so the pre-flight, the cold load and the probes keep their whole budget. Both doors
+(the pipeline and `agent_run`) apply it. `agent_run` registered its run
+without the admission phase, so each one held a slot while it waited; it now registers in admission like the
+pipeline, and a test fails any `gpuactivity.Start` site that registers a gated run outside it.
 
 ### Fixed — a delegator-local job is one ledger job, not two (C-62)
 
 A route=local job wrote the pipeline's inner `agent` row beside the delegator's `agent_delegate` row and every
 reader counted both (job counts, success rates, `cards_tokens`, `TokensOut` ~2x for local work). The delegator
-now hands its job id to the runner (`parent_job_id`); the inner row carries `cards_tokens` 0, and the summary
-and defer tally count the job once on its parent while keeping the inner row's savings.
+now hands its job id to the runner (`parent_job_id`); the inner row carries `cards_tokens` 0, and every job
+counter — the summary, the defer tally, `report`, `loupe` and the audit sample — counts the job once on its
+parent while keeping the inner row's savings. An inner row whose parent row never landed (a failed write, a
+process killed between the two) is that job's only record and counts as the job.
 
 ### Fixed — `node-swap` restarts and proves Linux nodes; the PS 5.1 launcher detects support
 
 A `--restart-command` ran through `powershell` on every OS ("executable file not found in $PATH" on Linux) and
 the post-restart proof polled a process finder that is empty off Windows, so a Linux swap with a restart
 mechanism could never verify. Restart commands now run through `/bin/sh` off Windows and verification reads
-`/proc/<pid>/exe`. `windows-node-swap-launch.ps1`'s support probe ran under `$ErrorActionPreference = 'Stop'`,
-where Windows PowerShell 5.1 turns the supporting build's own stderr usage line into a terminating error and
-read the build as unsupported — the launcher then ran the OLD installed engine; the probe now runs under a
-function-local `'Continue'`.
+`/proc/<pid>/exe` (another user's node, whose exe link is unreadable, is matched by its cmdline; one that
+cannot be ruled out is an error, never "no node"). `windows-node-swap-launch.ps1`'s support probe ran under
+`$ErrorActionPreference = 'Stop'`, where Windows PowerShell 5.1 turns the supporting build's own stderr usage
+line into a terminating error and read the build as unsupported — the launcher then ran the OLD installed
+engine; the probe now runs under a function-local `'Continue'`, and the launcher's JSON reports
+`runner_exe`, `runner_fell_back` and the probe's evidence so a deploy can fail on a fallback.
+
+### Fixed — a crashed vLLM seat restarts instead of refusing on its own stale MP server
+
+When a vLLM engine died, llama-swap restarted the seat through `seat_fg.sh` without running `seat_stop.sh`, so
+the dead generation's LMCache MP server still held its HTTP port and every restart refused on it (2026-09-29:
+23 minutes with an agent seat down, 59 failed starts, 75 HTTP 500s). With no engine of the stack serving its
+port, `seat_fg.sh` now runs the stack's own `seat_stop.sh` once, prints its exit code, waits up to 10 s for the
+port to free and starts; a holder that survives the cleanup is still refused.
 
 ### Changed — the 8 GB agent seats get a 2,048-token step budget
 

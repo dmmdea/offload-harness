@@ -323,15 +323,21 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	}
 	// The LOCAL run cap (register C-42): the fleet caps the jobs it sends
 	// here; this caps the runs this box starts on its own seat — a
-	// delegation's local leg and a fleet job alike — inside the same
-	// admission budget, own record excluded. A slot that never frees is a
-	// capacity defer, re-placeable, never a refusal.
+	// delegation's local leg and a fleet job alike — own record excluded, in
+	// FIFO order. The wait in line is bounded by the run's own wall, not the
+	// admission budget (register C-60, 0.143.0), and the admission deadline
+	// moves out by the time spent in line, so the pre-flight, the cold load
+	// and the probes below keep their whole budget. A slot that never frees
+	// is a capacity defer, re-placeable, never a refusal.
 	if reg, rerr := gpuactivity.Open(p.cfg.GPULockPath, p.cfg.StateDir); rerr == nil {
-		if serr := modelaffinity.AwaitSeatSlot(ctx, reg.OnSeat, seat, "", act.ID(), p.cfg.FleetConcurrencyLimit(), admissionEnd); serr != nil {
+		capStart := time.Now()
+		capEnd := modelaffinity.SeatCapDeadline(ctx, capStart, wall, admissionEnd)
+		if serr := modelaffinity.AwaitSeatSlot(ctx, reg.OnSeat, seat, "", act.ID(), p.cfg.FleetConcurrencyLimit(), capEnd); serr != nil {
 			admitted = cordonWait(cordonStart)
-			admitNote = "held at the seat cap for the admission budget"
+			admitNote = "held at the seat cap for the run's wall"
 			return deferWire(core.DeferClassCapacity, "seat busy: "+serr.Error())
 		}
+		admissionEnd = admissionEnd.Add(time.Since(capStart))
 	}
 	admitted = cordonWait(cordonStart)
 	// Admission pre-flight (2026-09-02): the wall must not pay for ANOTHER
@@ -879,15 +885,25 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 			bestSample = s
 		}
 	}
-	if p.seatRatesPath != "" && (wire.SeatTokS > 0 || coldLoad > 0 || pf.PrefillTokens > 0 || bestSample.Tokens > 0) {
+	// A CONTENDED run's timings are not the seat's rates (0.143.0): time its
+	// requests spent in the busy hold — queued behind siblings, preempted —
+	// sits inside its first-delta and per-call walls, and folding those into
+	// the store would lower the rates and inflate every later allowance,
+	// ceiling and placement ETA. Only the cold load (measured apart) is kept.
+	contended := busyWatch != nil && busyWatch.QueuedTotal() > 0
+	obsTokS, obsPrefill, obsBest := wire.SeatTokS, pf, bestSample
+	if contended {
+		obsTokS, obsPrefill.PrefillTokens, obsBest.Tokens = 0, 0, 0 // the wire still reports what was measured
+	}
+	if p.seatRatesPath != "" && (obsTokS > 0 || coldLoad > 0 || obsPrefill.PrefillTokens > 0 || obsBest.Tokens > 0) {
 		// Load-observe-save under the store's lock (seatrate.Update): the
 		// pre-loop read above was a snapshot for the estimate; another process
 		// may have written since. The prefill rate (0.131.0) sizes the next
 		// run's stall allowance while the seat prefills.
 		if uerr := seatrate.Update(p.seatRatesPath, func(s *seatrate.Store) {
-			s.Observe(seat, wire.SeatTokS, coldLoad.Seconds(), time.Now())
-			s.ObservePrefill(seat, pf.PrefillTokens, pf.PrefillMS, time.Now())
-			s.ObservePrefill(seat, bestSample.Tokens, bestSample.MS, time.Now())
+			s.Observe(seat, obsTokS, coldLoad.Seconds(), time.Now())
+			s.ObservePrefill(seat, obsPrefill.PrefillTokens, obsPrefill.PrefillMS, time.Now())
+			s.ObservePrefill(seat, obsBest.Tokens, obsBest.MS, time.Now())
 		}); uerr != nil {
 			log.Printf("agent task: seat-rates store not updated: %v", uerr)
 		}

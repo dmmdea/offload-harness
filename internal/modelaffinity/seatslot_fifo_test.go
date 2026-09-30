@@ -71,3 +71,22 @@ func TestAwaitSeatSlotCountsRunningRunsAndEarlierWaitersOnly(t *testing.T) {
 		t.Fatalf("the late waiter must wait behind the running run and the earlier waiter, got %v", err)
 	}
 }
+
+// Register C-60, second half: the wait in line is bounded by the run's own
+// wall, never by less than the admission deadline it used to share, and
+// never past the caller's context deadline.
+func TestSeatCapDeadlineIsTheWallInsideTheCallersDeadline(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	admission := now.Add(300 * time.Second)
+	if got := SeatCapDeadline(context.Background(), now, 900*time.Second, admission); !got.Equal(now.Add(900 * time.Second)) {
+		t.Fatalf("a 900 s wall must bound the wait in line, not the 300 s admission budget: %s", got.Sub(now))
+	}
+	if got := SeatCapDeadline(context.Background(), now, 60*time.Second, admission); !got.Equal(admission) {
+		t.Fatalf("a wall shorter than the admission budget must not shorten the wait the cap had before: %s", got.Sub(now))
+	}
+	ctx, cancel := context.WithDeadline(context.Background(), now.Add(120*time.Second))
+	defer cancel()
+	if got := SeatCapDeadline(ctx, now, 900*time.Second, admission); !got.Equal(now.Add(120 * time.Second)) {
+		t.Fatalf("the caller's deadline must bound the wait: %s", got.Sub(now))
+	}
+}

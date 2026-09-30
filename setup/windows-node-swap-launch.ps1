@@ -162,7 +162,8 @@ function Resolve-RunnerExe {
   if (& $SupportsNodeSwap $Staged) {
     return $Staged
   }
-  & $Log "staged binary $Staged does not support node-swap (very old build) - falling back to the currently-installed $Target as the runner"
+  $why = if ($script:NodeSwapProbe) { "probe: $($script:NodeSwapProbe)" } else { 'very old build' }
+  & $Log "staged binary $Staged does not support node-swap ($why) - falling back to the currently-installed $Target as the runner"
   return $Target
 }
 
@@ -205,15 +206,23 @@ function Resolve-RunnerExe {
 # stderr is data here, never an error, so this function runs under
 # 'Continue' (a function-local assignment: the caller's preference is
 # untouched); a launch failure still throws and is still caught.
+#
+# The answer's evidence lands in $script:NodeSwapProbe ("exit N" or "launch
+# failed: ...") so the fallback log line and the launcher's result JSON can
+# say WHY a staged build was passed over: a fallback reported only as a bool
+# is how the 2026-09-29 run went unnoticed.
 function Test-NodeSwapSupport([string]$path) {
   $ErrorActionPreference = 'Continue'
   try {
     & $path node-swap *> $null
   } catch {
+    $script:NodeSwapProbe = "launch failed: $($_.Exception.Message)"
     return $false
   }
+  $script:NodeSwapProbe = "exit $LASTEXITCODE"
   return ($LASTEXITCODE -eq 0) -or ($LASTEXITCODE -eq 1)
 }
+$script:NodeSwapProbe = ''
 
 if ($SelfTest) {
   $fail = 0
@@ -368,6 +377,7 @@ public static class NodeSwapArgvTest {
 
     if (Test-NodeSwapSupport $exit2) { Write-Host 'FAIL Test-NodeSwapSupport: exit 2 (unrecognized subcommand) is NOT supported: returned true'; $fail++ }
     else { Write-Host 'PASS Test-NodeSwapSupport: exit 2 (unrecognized subcommand) is NOT supported' }
+    Assert-Eq $script:NodeSwapProbe 'exit 2' 'the probe records the exit code it judged'
 
     if (Test-NodeSwapSupport $exitCrash) { Write-Host 'FAIL Test-NodeSwapSupport: a crash exit code is NOT supported: returned true'; $fail++ }
     else { Write-Host 'PASS Test-NodeSwapSupport: a crash exit code is NOT supported' }
@@ -399,6 +409,8 @@ public static class NodeSwapArgvTest {
     try {
       if (Test-NodeSwapSupport $notAnExe) { Write-Host 'FAIL Test-NodeSwapSupport: a non-PE file is NOT supported: returned true'; $fail++ }
       else { Write-Host 'PASS Test-NodeSwapSupport: a non-PE file is NOT supported (and does not throw)' }
+      if ($script:NodeSwapProbe -like 'launch failed:*') { Write-Host 'PASS the probe records a launch failure' }
+      else { Write-Host "FAIL the probe records a launch failure: got [$($script:NodeSwapProbe)]"; $fail++ }
     } catch {
       Write-Host "FAIL Test-NodeSwapSupport: a non-PE file is NOT supported (and does not throw): THREW instead - $($_.Exception.GetType().Name): $($_.Exception.Message)"
       $fail++
@@ -415,6 +427,7 @@ public static class NodeSwapArgvTest {
 if (-not $Staged -or -not $Target -or -not $Sha256) {
   throw "-Staged, -Target and -Sha256 are required (or pass -SelfTest to run the argv-quoting unit checks only)"
 }
+$explicitRunner = [bool]$RunnerExe
 $RunnerExe = Resolve-RunnerExe -RunnerExe $RunnerExe -Staged $Staged -Target $Target -Sha256 $Sha256 -SkipHashCheck:$SkipHashCheck `
   -HashFile { param($p) (Get-FileHash -Algorithm SHA256 -Path $p).Hash } `
   -SupportsNodeSwap ${function:Test-NodeSwapSupport} `
@@ -485,4 +498,11 @@ Write-Host "[node-swap-launch] this session may disconnect now - the swap is det
 Write-Host "  Get-Content '$LogPath' -Tail 20"
 Write-Host "  if (Test-Path '$ResultPath') { Get-Content '$ResultPath' -Raw | ConvertFrom-Json }"
 
-[pscustomobject]@{ pid = $created.ProcessId; log_path = $LogPath; result_path = $ResultPath } | ConvertTo-Json -Compress
+# runner_fell_back is true when the OLD installed engine runs the swap
+# because the staged build failed the probe (runner_probe says how): a
+# deploy script must read it and fail loud, never a Write-Host line nobody sees.
+$runnerFellBack = (-not $explicitRunner) -and ($RunnerExe -eq $Target) -and ($Staged -ne $Target)
+[pscustomobject]@{
+  pid = $created.ProcessId; log_path = $LogPath; result_path = $ResultPath
+  runner_exe = $RunnerExe; runner_fell_back = $runnerFellBack; runner_probe = $script:NodeSwapProbe
+} | ConvertTo-Json -Compress

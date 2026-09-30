@@ -192,14 +192,14 @@ type Deps struct {
 	// use FindProcessesByExe (every Windows run and every fake-Deps test).
 	FindRunningByExe func(exePath string) ([]ProcessInfo, error)
 	StopProcess      func(pid int) error
-	RenameFile         func(oldPath, newPath string) error
-	RemoveAll          func(path string) error
-	Exists             func(path string) bool
-	MkdirAll           func(path string) error
-	RunCommand         func(ctx context.Context, timeout time.Duration, command string) (string, error)
-	ExtractTarGz       func(tarGzPath, destDir string) (filesWritten int, err error)
-	Sleep              func(d time.Duration)
-	Now                func() time.Time
+	RenameFile       func(oldPath, newPath string) error
+	RemoveAll        func(path string) error
+	Exists           func(path string) bool
+	MkdirAll         func(path string) error
+	RunCommand       func(ctx context.Context, timeout time.Duration, command string) (string, error)
+	ExtractTarGz     func(tarGzPath, destDir string) (filesWritten int, err error)
+	Sleep            func(d time.Duration)
+	Now              func() time.Time
 
 	// CopyFile and IsCrossDeviceRenameErr back installNewBinary's fallback
 	// for a same-directory-only rename: RenameFile(Staged, Target) fails
