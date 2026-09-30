@@ -203,6 +203,12 @@ type PlacedResult struct {
 	// set. It is the input to replaceableRefusal — the class decision keys on
 	// the STATUS the node actually sent, never on the text of an error string.
 	//
+	// The one refusal that is not dispatch-time is a job the node itself says it
+	// never ran (ADR 0064): refuseAsWithdrawn and refuseAsNeverRan file it AFTER
+	// the ack, as a 503 the delegator assigns to that outcome and the node never
+	// sent, so the machinery that re-places a refused dispatch takes it as the
+	// capacity refusal it amounts to. Err is set on it too.
+	//
 	// refused is separate from `refusalStatus != 0` because 0 is a real value
 	// (a transport failure), and because a marshaling error inside dispatch is
 	// a delegator bug rather than any node's answer.
