@@ -4,7 +4,9 @@
 # Runs INSIDE the serving box's Linux (WSL distro or native), in the FOREGROUND of the client llama-swap
 # started: when llama-swap ends that client, the session is reaped and vLLM with it — that is the
 # swap-out. The LMCache MP server (L1 staging + optional cache-server L2) is a transient systemd unit
-# that outlives the engine; seat_stop.sh (llama-swap `cmdStop`) stops both.
+# that outlives the engine; seat_stop.sh (llama-swap `cmdStop`) stops both. When the engine CRASHES nothing runs
+# cmdStop, so the MP server and any engine worker its API server could not stop are still there at the next start:
+# the port-refusal block below runs seat_stop.sh once to reap them (and only them) before it judges the ports.
 #
 # Layouts on Qwen3.8-27B INT4 (first measured 2026-09-02/03 on vLLM 0.28.0, LMCache 0.5.4):
 #   SEAT_TP=2 (two cards, tensor parallel)  — uses a cache server (L2 store) with stock LMCache: 24k-token
@@ -177,6 +179,7 @@ if [ "$L2_DEGRADED" -eq 0 ] && [ -n "${SEAT_L2_MOUNT_SRC:-}" ] && [ -n "${SEAT_L
   fi
 fi
 
+# >>> port refusals and the dead generation's cleanup: seat_fg.stale-mp.tests.sh runs everything between this line and the matching <<< line
 # Refuse to start on a port something else already owns. vLLM would load for ~2 minutes and then die on
 # "Address already in use" while llama-swap's health check passes against the FOREIGN listener — the seat is
 # then "ready" and serving somebody else's engine. Fail here, at once, and name the squatter.
@@ -184,29 +187,42 @@ if ss -ltnp 2>/dev/null | grep -q ":$PORT "; then
   echo "seat_fg: REFUSING to start — :$PORT is already bound: $(ss -ltnp 2>/dev/null | grep ":$PORT " | grep -oE 'users:\(.*\)' | head -1)"
   exit 1
 fi
-if ss -ltnp 2>/dev/null | grep -q ":$MP_HTTP_PORT "; then
-  # A CRASHED generation leaves this stack's MP server behind. When the engine dies (EngineDeadError, a worker that
-  # stopped answering) llama-swap restarts the seat through this script, and nothing ran seat_stop.sh — so the dead
-  # generation's MP server still held its HTTP port and every restart refused right here (2026-09-29: 23 minutes with
-  # the agent seat fully down, 59 failed starts, 75 HTTP 500s). No engine of THIS stack serves :$PORT (checked just
-  # above), so the holder can only be that stale MP server: run the stack's own cleanup once, then look again.
-  # Anything still holding the port after that is foreign and is refused exactly as before. A stopping unit can hold
-  # its socket for a few seconds, so the re-check waits up to 10 s for the port to free instead of judging one look.
-  if ! pgrep -f "vllm serve .*--port $PORT" >/dev/null 2>&1; then
-    echo "seat_fg: :$MP_HTTP_PORT is held and no engine serves :$PORT — a crashed generation's MP server; running seat_stop.sh once"
+# A CRASHED generation leaves its own processes behind. When the engine dies (EngineDeadError, a worker that stopped
+# answering) llama-swap restarts the seat through this script, and nothing ran seat_stop.sh: the dead generation's MP
+# server still held its HTTP port and every restart refused right here (2026-09-29: 23 minutes with the agent seat
+# fully down, 59 failed starts, 75 HTTP 500s), and the engine workers its API server could not stop kept the cards. No
+# engine of THIS stack serves :$PORT (checked just above, and by process here), so whatever of the stack's own is still
+# around belongs to the dead generation: run the stack's own cleanup once, then look again. seat_stop.sh reaps only what
+# is provably this seat's own — engine processes with no live `vllm serve` ancestor, and the MP server of THIS stack's
+# MP port, by process and by unit, never by what holds a port — so anything still holding the MP HTTP port after it is
+# foreign and is refused exactly as before. A stopping unit can hold its socket for a few seconds, so the re-check waits
+# up to SEAT_MP_PORT_WAIT_SEC (default 10) for the port to free instead of judging one look. Engine processes are looked
+# for by the START of their command line: `pgrep -f VLLM::` also matches any wrapper whose arguments mention the name.
+# This is the only cleanup the launcher owns: the script becomes `vllm serve` (exec, below), so nothing of it survives a
+# crash to clean up after it — the Windows stub's crash exit runs the same cleanup through the stop task, and there is no
+# watchdog and no proactive relaunch anywhere.
+MP_PORT_WAIT="${SEAT_MP_PORT_WAIT_SEC:-10}"; case "$MP_PORT_WAIT" in ''|*[!0-9]*) MP_PORT_WAIT=10 ;; esac
+if ! pgrep -f "vllm serve .*--port $PORT" >/dev/null 2>&1; then
+  left=""
+  ss -ltnp 2>/dev/null | grep -q ":$MP_HTTP_PORT " && left="$left a listener on the MP HTTP port :$MP_HTTP_PORT;"
+  pgrep -f "lmcache server .*--port $MP_PORT( |\$)" >/dev/null 2>&1 && left="$left an MP server on :$MP_PORT;"
+  ps -eo args= 2>/dev/null | grep -q '^VLLM::' && left="$left engine processes named VLLM::*;"
+  if [ -n "$left" ]; then
+    echo "seat_fg: no engine serves :$PORT and the previous generation left${left} — a crashed generation; running seat_stop.sh once"
     stop_rc=0
     bash "$(dirname "$(readlink -f "$0")")/seat_stop.sh" "$CFG" || stop_rc=$?
     [ "$stop_rc" -eq 0 ] || echo "seat_fg: seat_stop.sh exited $stop_rc (continuing to the re-check)"
-    for _ in $(seq 1 20); do
+    for _ in $(seq 1 $(( MP_PORT_WAIT * 2 ))); do
       ss -ltnp 2>/dev/null | grep -q ":$MP_HTTP_PORT " || break
       sleep 0.5
     done
   fi
-  if ss -ltnp 2>/dev/null | grep -q ":$MP_HTTP_PORT "; then
-    echo "seat_fg: REFUSING to start — the MP HTTP port :$MP_HTTP_PORT is already bound: $(ss -ltnp 2>/dev/null | grep ":$MP_HTTP_PORT " | grep -oE 'users:\(.*\)' | head -1)"
-    exit 1
-  fi
 fi
+if ss -ltnp 2>/dev/null | grep -q ":$MP_HTTP_PORT "; then
+  echo "seat_fg: REFUSING to start — the MP HTTP port :$MP_HTTP_PORT is already bound: $(ss -ltnp 2>/dev/null | grep ":$MP_HTTP_PORT " | grep -oE 'users:\(.*\)' | head -1)"
+  exit 1
+fi
+# <<< port refusals and the dead generation's cleanup
 
 # Chat template precheck. A --chat-template in SEAT_EXTRA_ARGS names a file; vLLM (0.29 validate_chat_template) refuses a
 # path-like value that does not exist, but only after this wrapper has stopped the old MP unit, waited out the VRAM
