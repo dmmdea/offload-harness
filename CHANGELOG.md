@@ -64,6 +64,10 @@ per tier and a card cannot hold two heavy seats, so the schema grew by the small
   tier whose vLLM seat declares no store renders the seat, its unit and wrappers with no cache-server piece and
   seeds an explicit storeless binding that `doctor` accepts. A spill of 20 against a measured 14 and a hard-coded
   `--n-cpu-moe 30` in a rendered command are refused.
+- Both serving-config audits (`Audit` and `AuditSpill`, so `install render`, `audit-yaml` and the template gate) now read
+  each entry the way llama-swap runs it, with its `${name}` macros substituted (nested macros too, bounded, and
+  llama-swap's own `${PORT}` left alone). The templates keep their shared flags in `macros:`, so a `-ngl 0` or an
+  `--n-cpu-moe 30` placed there used to pass every rule. Every shipped template still passes.
 
 ## [0.144.2] - 2026-09-30 - offload_nim's base is allowlisted, audit first
 

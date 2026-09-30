@@ -47,10 +47,12 @@ func Audit(text string) []Violation {
 		Models map[string]map[string]any `yaml:"models"`
 		Groups map[string]map[string]any `yaml:"groups"`
 		Hooks  map[string]any            `yaml:"hooks"`
+		Macros any                       `yaml:"macros"`
 	}
 	if err := yaml.Unmarshal([]byte(text), &doc); err != nil {
 		return []Violation{{Rule: "yaml", Where: "top-level", Text: "not parseable YAML: " + err.Error()}}
 	}
+	macros := macroTable(doc.Macros)
 	var out []Violation
 	add := func(rule, where, text string) { out = append(out, Violation{Rule: rule, Where: where, Text: text}) }
 	// A template whose every model is a tier seat (rk3588's) has an empty models map until it
@@ -69,13 +71,17 @@ func Audit(text string) []Violation {
 				add("ttl", name, fmt.Sprintf("ttl %v, want %d (INV-2: every idle model unloads at five minutes)", ttl, TTLRequired))
 			}
 		}
-		if cmd, _ := m["cmd"].(string); cmd != "" && nglZeroRe.MatchString(cmd) {
+		// What llama-swap runs is the entry with its `${name}` macros substituted, so that is what
+		// the rules read: a flag placed in `macros:` is run by every entry that references it.
+		cmd, _ := m["cmd"].(string)
+		cmd = expandMacros(cmd, macros)
+		if cmd != "" && nglZeroRe.MatchString(cmd) {
 			add("ngl0", name, "cmd runs the model on the CPU (-ngl 0 / --n-gpu-layers 0): INV-1, the cards do the inference")
 		}
-		if cvdEmpty.MatchString(flatEnv(m["env"])) {
+		if cvdEmpty.MatchString(expandMacros(flatEnv(m["env"]), macros)) {
 			add("cvd-empty", name, "env sets CUDA_VISIBLE_DEVICES to nothing — a CPU-only process (INV-1)")
 		}
-		if cmd, _ := m["cmd"].(string); cmd != "" && cvdEmpty.MatchString(cmd) {
+		if cmd != "" && cvdEmpty.MatchString(cmd) {
 			add("cvd-empty", name, "cmd sets CUDA_VISIBLE_DEVICES to nothing — a CPU-only process (INV-1)")
 		}
 	}
@@ -115,21 +121,26 @@ var (
 // spills nothing and is compliant.
 //
 // It checks the flag in every spelling and its LLAMA_ARG_N_CPU_MOE environment twin, on
-// every entry, and reports every offender (sorted by entry) so a fix is one pass. The
+// every entry, reading each entry the way llama-swap runs it (a `${name}` macro is replaced
+// by its text first: the templates keep their shared flags in `macros:`), and reports every
+// offender (sorted by entry) so a fix is one pass. The
 // every-expert `--cpu-moe` is a different rule, owned at the table level (a GPU tier may
 // not seed `cpu_moe`), and a document that does not parse is Audit's finding, not this
 // rule's: reporting it twice would only bury it.
 func AuditSpill(text string, maxNCPUMoE int) []Violation {
 	var doc struct {
 		Models map[string]map[string]any `yaml:"models"`
+		Macros any                       `yaml:"macros"`
 	}
 	if err := yaml.Unmarshal([]byte(text), &doc); err != nil {
 		return nil
 	}
+	macros := macroTable(doc.Macros)
 	var out []Violation
 	for name, m := range doc.Models {
 		cmd, _ := m["cmd"].(string)
-		env := flatEnv(m["env"])
+		cmd = expandMacros(cmd, macros)
+		env := expandMacros(flatEnv(m["env"]), macros)
 		worst, spelling := 0, ""
 		see := func(re *regexp.Regexp, from, label string) {
 			for _, mm := range re.FindAllStringSubmatch(from, -1) {
@@ -157,6 +168,54 @@ func AuditSpill(text string, maxNCPUMoE int) []Violation {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Where < out[j].Where })
 	return out
+}
+
+// macroRefRe matches a llama-swap macro reference, `${name}`. llama-swap's own substitutions
+// (`${PORT}`, `${MODEL_ID}`) match it too and are left alone, because no macro carries their name.
+var macroRefRe = regexp.MustCompile(`\$\{([A-Za-z0-9_-]+)\}`)
+
+// macroDepth bounds the expansion of a macro that references another macro, so a cycle (a config
+// llama-swap would refuse on its own) terminates here instead of looping.
+const macroDepth = 8
+
+// macroTable reads a config's `macros:` block as name -> text. Anything that is not a mapping of
+// scalars is ignored: llama-swap refuses that config itself, and a rule about flags is not the
+// place to say so.
+func macroTable(v any) map[string]string {
+	m, ok := v.(map[string]any)
+	if !ok {
+		return nil
+	}
+	out := make(map[string]string, len(m))
+	for k, val := range m {
+		switch val.(type) {
+		case string, int, int64, float64, bool:
+			out[k] = fmt.Sprint(val)
+		}
+	}
+	return out
+}
+
+// expandMacros substitutes every `${name}` that names a macro with the macro's text, so a rule
+// reads the command line llama-swap will run and not the one that was written. A reference that
+// names no macro stays as it is.
+func expandMacros(s string, macros map[string]string) string {
+	if len(macros) == 0 || !strings.Contains(s, "${") {
+		return s
+	}
+	for i := 0; i < macroDepth; i++ {
+		next := macroRefRe.ReplaceAllStringFunc(s, func(ref string) string {
+			if v, ok := macros[ref[2:len(ref)-1]]; ok {
+				return v
+			}
+			return ref
+		})
+		if next == s {
+			break
+		}
+		s = next
+	}
+	return s
 }
 
 // flatEnv renders a model's env (llama-swap accepts a list of "K=V" strings)

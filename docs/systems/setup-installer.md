@@ -260,6 +260,10 @@ every offender, and nothing is written:
    cards they name. It runs for any tier that declares layers, not only one that composes others: the
    `ampere-16` tier's `fast` layer would otherwise route to a seat the config never defined.
 
+Rules 1 and 2 read each entry the way llama-swap runs it: a `${name}` macro is replaced by its text first
+(nested macros too), because the templates keep their shared flags in `macros:` and a flag placed there is run
+by every entry that references it.
+
 `TestInstallRendersOnAnyTierWithoutACacheServer` is the other half of the same promise (INV-16: the
 harness installs and serves on any single PC, and the cache-server tier is optional): every tier renders
 with no vLLM prerequisites, and a tier whose vLLM seat declares no store renders the seat, its unit and its

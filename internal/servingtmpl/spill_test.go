@@ -86,3 +86,102 @@ func TestAuditSpillLeavesParseFailuresToAudit(t *testing.T) {
 		t.Fatalf("AuditSpill reported on a document Audit already refuses:\n%s", Violations(vs))
 	}
 }
+
+// llama-swap substitutes a `${name}` macro into an entry's cmd and env before it runs them, and the
+// shipped templates keep their shared flags in `macros:` (`common`). A rule that reads only each
+// entry's own text never sees a spill placed there, and every entry that references the macro would
+// run it.
+func TestAuditSpillReadsMacros(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cfg  string
+		max  int
+		want []string // substrings of the single violation; nil = compliant
+	}{
+		{"a flag in a macro the cmd references", `
+macros:
+  common: >-
+    --n-cpu-moe 30 --jinja
+models:
+  m26:
+    ttl: 300
+    cmd: /bin/llama-server --model m.gguf ${common}
+`, 14, []string{"n-cpu-moe", "m26", "30", "14"}},
+		{"a macro that references another macro", `
+macros:
+  spill: --n-cpu-moe 30
+  common: >-
+    --jinja ${spill}
+models:
+  m26:
+    ttl: 300
+    cmd: /bin/llama-server ${common}
+`, 14, []string{"m26", "30"}},
+		{"the environment twin in a macro", `
+macros:
+  moe: LLAMA_ARG_N_CPU_MOE=30
+models:
+  m26:
+    ttl: 300
+    env: ["${moe}"]
+    cmd: /bin/llama-server --model m.gguf
+`, 14, []string{"m26", "30", "LLAMA_ARG_N_CPU_MOE"}},
+		{"a numeric macro value", `
+macros:
+  n: 30
+models:
+  m26:
+    ttl: 300
+    cmd: /bin/llama-server --model m.gguf --n-cpu-moe ${n}
+`, 14, []string{"m26", "30", "14"}},
+		{"a macro no entry references is never run", `
+macros:
+  unused: --n-cpu-moe 30
+models:
+  m26:
+    ttl: 300
+    cmd: /bin/llama-server --model m.gguf
+`, 14, nil},
+		{"a macro within the measured spill", `
+macros:
+  common: --n-cpu-moe 10
+models:
+  m26:
+    ttl: 300
+    cmd: /bin/llama-server ${common}
+`, 14, nil},
+		{"llama-swap's own substitutions are not macros", `
+models:
+  m26:
+    ttl: 300
+    cmd: /bin/llama-server --model m.gguf --port ${PORT}
+`, 0, nil},
+		{"a macro cycle terminates and flags nothing", `
+macros:
+  a: ${b}
+  b: ${a}
+models:
+  m26:
+    ttl: 300
+    cmd: /bin/llama-server ${a}
+`, 14, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			vs := AuditSpill(tc.cfg, tc.max)
+			if tc.want == nil {
+				if len(vs) != 0 {
+					t.Fatalf("compliant config flagged:\n%s", Violations(vs))
+				}
+				return
+			}
+			if len(vs) != 1 {
+				t.Fatalf("want exactly one violation, got %d:\n%s", len(vs), Violations(vs))
+			}
+			for _, w := range tc.want {
+				if !strings.Contains(vs[0].String(), w) {
+					t.Errorf("violation %q does not carry %q", vs[0], w)
+				}
+			}
+		})
+	}
+}
