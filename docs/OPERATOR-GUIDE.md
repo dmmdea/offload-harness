@@ -511,8 +511,8 @@ drive if a render defers `DISK_HEADROOM`).
 **Adding a template.** Follow the contract in
 [`render/compose-templates/README.md`](../render/compose-templates/README.md): offline, deterministic,
 declared variables, a duration variable, and a README with a measured render. Lint and check must
-be clean, the frames must be looked at, and `framemd5` must match at 1, 4 and `auto` workers (a
-frame has to be a pure function of time; see the contract).
+be clean, the frames must be looked at, and `framemd5` must match at 1, 2, 4 and 6 workers and at
+`auto` twice (a frame has to be a pure function of time; see the contract).
 
 **Bumping HyperFrames.** Change the exact version in `setup/hyperframes/package.json` and
 `PINNED_VERSION` in the runner. Regenerate the lock with `npm install --package-lock-only

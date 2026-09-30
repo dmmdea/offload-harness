@@ -1053,7 +1053,9 @@ test("alpha overlays: html, body and #root paint nothing, and no full-frame laye
 // frames, a few pixels off in the gradient); the same cards with the scale-up replaced by an opacity
 // pulse rendered identically at 1, 4 and 4 workers. Scaling UP TO the resting size (an entrance from
 // 0.6 or 0.9 to 1) was identical in every run. The ports therefore never scale past 1. This is a static
-// stand-in for the real gate, which is comparing framemd5 across worker counts (README, "Adding a template").
+// stand-in for the real gate, which is comparing framemd5 across worker counts (README, "Adding a template"),
+// and it reads the ports and captions-bar only: title-card predates the rule, drifts a glow out to 1.12, and
+// measured identical across 1, 2, 4, 6 and auto workers, so the rule is a rule of thumb rather than a law.
 test("kit ports: no keyframe scales an element above its resting size", () => {
   for (const name of KIT_TEMPLATE_NAMES) {
     const html = readFileSync(join(TEMPLATES_DIR, name, "index.html"), "utf8");

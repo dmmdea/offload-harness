@@ -91,8 +91,15 @@ box with software GL. The default three-group sample, `webm`, quality `high`:
   255 and a mean of about 8, and it was 0 again in the gap at 2.8 s and after the last group ended, at 7.9 s;
 - a caption composited over flat grey and over flat white showed the bar, the text and the accent line intact.
 
-The full-size case, from a synthetic 12-minute transcript in the exact shape `offload_transcribe` writes
-(159 segments, 1,529 words) through `render/captions-groups.mjs`: 450 groups of 1 to 5 words (at most 33
+The helper reads what `offload_transcribe` really writes. Its `words[]` entries are whisper-server's tokens, not
+words: a word-initial token keeps its leading space and a continuation (an apostrophe suffix, the digits after a
+currency sign, punctuation) has none, so the helper merges those back into words before it groups anything. Over 489
+real transcript files (55,473 tokens, 40,345 words) every file regroups into exactly the words of its own segment
+text, and not one group has a space before punctuation, at the punchy (15,618 groups), conversational (10,804) and
+calm (9,684) paces.
+
+The full-size case, from a synthetic 12-minute transcript with one entry per word (159 segments, 1,529 words)
+through `render/captions-groups.mjs`: 450 groups of 1 to 5 words (at most 33
 characters, none overlapping) in two chunks. Chunk 0 is 374 groups, 12,908 characters and 599.16 s; chunk 1 is
 76 groups, 2,527 characters and 120.84 s at offset 600.11 s. Chunk 0's variable went through `lint`, `check` and
 `--strict-variables` and the first 15 s rendered in 39.6 s (450 frames, draft quality). Frames at 1.47 s, 7.91 s

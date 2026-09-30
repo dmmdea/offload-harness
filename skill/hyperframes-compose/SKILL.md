@@ -100,8 +100,9 @@ A successful return is not a look at the output. Every time:
    known to be until you have looked.
 5. `offload_video_watch` is a detector for coarse problems, not a substitute for looking, and small vision
    models misread overlay text: read the frames yourself.
-6. **Determinism.** For a template you authored, render it at 1 worker, 4 and `auto` and compare the decoded
-   frames (`ffmpeg -i out.mp4 -f framemd5 -`). They must be identical: a frame is a pure function of time.
+6. **Determinism.** For a template you authored, render it at 1, 2, 4 and 6 workers and at `auto` twice, and
+   compare the decoded frames (`ffmpeg -i out.mp4 -f framemd5 -`; decode a `webm` with `-c:v libvpx-vp9` so the
+   alpha is compared too). They must be identical: a frame is a pure function of time.
 
 ## Captions from a transcript
 
@@ -128,8 +129,9 @@ full text and `render/compose-hyperframes.test.mjs` enforces the part a machine 
   new face needs its `woff2`, its licence text and its sha256 in `_shared/README.md`.
 - **Deterministic.** No `Math.random`, `Date`, `performance.now`, timers or `crypto`. Motion is CSS
   `@keyframes` (or, for a long list of timed items, one element driven from the `hf-seek` event, as
-  `captions-bar` does). **Never scale an element above its resting size in an animation:** it made frames
-  depend on the render worker count. Entrances that scale up to 1, opacity and translation are safe.
+  `captions-bar` does). **Do not scale an element above its resting size in an animation:** on two of the
+  ported cards it made frames depend on the render worker count. Entrances that scale up to 1, opacity and
+  translation are safe. It is a rule of thumb, so measure what you write (the determinism step above).
 - **Declared variables.** Everything a caller may change is in the root's `data-composition-variables`
   with a type, a label, a default and, for strings, an explicit `maxLength`. Text arrives through
   `data-var-text` (text only); emphasis is a `_pre` / `_em` / `_post` split, never markup.

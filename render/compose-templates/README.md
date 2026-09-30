@@ -38,8 +38,10 @@ the kit is installed or run: the four templates are rewrites in CSS, and each RE
    `data-composition-variables` with a type (`string`, `color`, `number`, `boolean`, `enum`) and
    a default. The runner merges the caller's values into those defaults in its copy of the page, so
    `lint` and `check` judge the real text and colors. An undeclared or mistyped value defers
-   `BAD_INPUT`. Text reaches the page through `data-var-text` (text only, never markup); colors reach
-   it as CSS custom properties. A string variable states its `maxLength`: the runner's silent cap when
+   `BAD_INPUT`. A value is data whatever characters it carries: the runner writes the declaration
+   through a replacer function, so `$1`, `$&` and the like in a caption or a figure stay text (a
+   test pins it). Text reaches the page through `data-var-text` (text only, never markup); colors
+   reach it as CSS custom properties. A string variable states its `maxLength`: the runner's silent cap when
    none is declared is 200.
 4. **A duration parameter.** `template.json` names the variable (`duration_variable`). HyperFrames
    reads a composition's total length from source, never from a variable, so the runner rewrites the
@@ -53,10 +55,13 @@ the kit is installed or run: the four templates are rewrites in CSS, and each RE
    few pixels of gradient, and two runs at 4 workers disagreed with each other. The same cards
    animating opacity instead gave 0 differing frames at 1, 4 and 4 workers; the same cards with the
    blur removed and the scale kept still differed, so blur was not the cause. An entrance that scales up
-   *to* 1, from 0.6 to 0.94, was stable in every run. So a template never scales above 1 in an
-   animation (opacity and translation are safe), the test reads the kit ports and `captions-bar` for
-   it, and every template is checked by rendering it at 1, 2, 4 and 6 workers and at `auto` twice, then
-   comparing decoded frames (`ffmpeg -i out.mp4 -f framemd5 -`). For `webm`, decode with
+   *to* 1, from 0.6 to 0.94, was stable in every run. So a new template does not scale above 1 in an
+   animation (opacity and translation are safe), and the test reads the kit ports and `captions-bar`
+   for it. That is a rule of thumb, not a proven law: `title-card` predates it, drifts a large glow out
+   to `scale(1.12)` while it translates, and gave 15 of 15 identical pairs of decoded frames (quality
+   `high`, 150 frames). What every template has to show is the measurement itself: render it at 1, 2, 4
+   and 6 workers and at `auto` twice, then compare decoded frames
+   (`ffmpeg -i out.mp4 -f framemd5 -`). For `webm`, decode with
    `-c:v libvpx-vp9` so the alpha is in the comparison; two `webm` files can differ in container bytes
    and still hold identical frames.
 7. **One template does not use keyframes.** `captions-bar` draws one caption group at a time from a list
@@ -64,7 +69,8 @@ the kit is installed or run: the four templates are rewrites in CSS, and each RE
    with 3 groups in the page, 24 s with 20, 25 s with 40, 24 s with 80 and 34 s with 150, and a
    374-group, 12.9 KB list had written about 290 of its 450 frames after ten minutes, when it was stopped.
    Driven from the `hf-seek` event HyperFrames dispatches with the time on every seek, the same
-   374-group list renders those 450 frames in 42 s, and the frame is still a pure function of the time.
+   374-group list renders those 450 frames in 39.6 s (draft quality, clean CPU), and the frame is still a
+   pure function of the time.
    The larger sizes overlapped other renders on the reference box: read the trend, not the last digit.
 
 ## Adding a template
