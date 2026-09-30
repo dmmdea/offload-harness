@@ -6,69 +6,48 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
-### Added — the ampere-16 `fast` layer and the 35B seat are in the tier table (register A-113, ADR 0048 Amendment 2)
+## [0.146.0] - 2026-09-30 - a delegator takes back a job it has not started, and a node cleans up after one that left (ADR 0064)
 
-The `fast` digest layer and the Qwen3.6-35B-A3B seat behind it existed only in the ampere-16 reference box's
-hand-edited config and in two Go test files, never in `setup/templates/profiles.json`, so a fresh install of the
-tier lost both (the capability-loss class ADR 0048 was written against, one level up). The table had one `vllm_seat`
-per tier and a card cannot hold two heavy seats, so the schema grew by the smallest steps that carry what the box runs.
+### Fixed — a delegator takes back a job it has not started, and a node cleans up after one that left (ADR 0064; register C-70 ghost-job half, C-68, C-63)
 
-- `extra_vllm_seats` beside `vllm_seat`: further vLLM seats served on demand on the same card, never the agent lane.
-  Validated as non-lane seats (`Spec.ValidateExtra`: no fallback, every lane field refused), with unique ids, aliases
-  and units and the lane seat's card. `vllm_seat.storeless_reason` (and the same on an extra seat) is the measured
-  reason a seat has no cache server, seeded verbatim into its `kv_cache_server` binding; refused beside a `cache_server`.
-- `ampere-16` now declares `layers` `single` (the 27B GSQ lane seat) and `fast` (the 35B, 32,768 at 8 in flight), the
-  35B as its extra seat, and both seats' B-01 storeless reasons with the local paths dropped. The layer values are the
-  reference node's own (the two placement and delegate tests pin the same ones), so `audit-config` reports MATCH for
-  `layers`, `tiers` and `tier_profile` against a fixture that carries them: a live extract of that node redacts each
-  layer seat's `ctx_tokens`, so the 32,768 is the value those tests pin, not a live reading. A layer seat naming a vLLM
-  seat must equal that seat's `max_model_len` (and `max_num_seqs`, when set) or the table is refused at parse.
-- Seeding is per seat and never advertises what the box cannot serve: an extra seat the box can run (the venv, its
-  own weights and the wrapper scripts the operator installs for it) joins `vllm_seats` with its own binding; a layer
-  whose vLLM seat is absent is dropped; a layer set that lost `single` (the planner default, placement row 5b) is not
-  seeded at all; a box with no vLLM prerequisites seeds exactly what it did before (`tierseed.ResolveLayers`,
-  `Options.ExtraVLLMSeatsActive`).
-- `install render` emits every vLLM seat of a tier as an ALTERNATIVE of the others inside the residents set
-  (`emb & rer & (vagt | vagt2)`): the two seats cannot share the card, and co-resident members would have llama-swap
-  load the second beside the first. The extra seat's entry names its wrappers after its own unit, and a box that runs
-  it without the lane seat (the 27B's weights absent, or two snapshots under them mid-upgrade) renders it with the
-  box's own runtime; `servingtmpl.Render` refuses any vLLM seat whose runtime is incomplete, because such an entry
-  names no seat directory and no address and every gate that reads the text passes it. The composition check now runs
-  for any tier that declares layers, not only one that composes. `ParamsBasis` mirrors `Params.ExtraVLLMSeats`, and a
-  replay pins it.
-- `extra_vllm_seats` keys are strict, like `layers`: a key that is not a seat field is refused by tier and JSON path at
-  parse (`tierseed.ParseDoc`, so the installer's embedded copy too), never silently dropped. A misspelt `storeless_reason`
-  used to seed the generic reason in its place.
-- Not rendered, on purpose: the extra seat's systemd unit, wrapper scripts and polkit rule. Its production launch line
-  carries `--language-model-only`, which the shared linux-systemd run script cannot express, so
-  `docs/systems/composite-tier.md` lists what the operator installs by hand. Those scripts are also the seat's
-  prerequisite (`Spec.DetectExtra`): llama-swap does not check that an entry's `cmd` exists when it loads its config,
-  so a box with the venv and the weights but not the scripts would list the seat, seed its layer and fail only when a
-  contract asked for it. Until they are in the seat directory (`--vllm-seat-dir`, default `<home>/seat`, now a flag of
-  `install seed` and `audit-config` as well as `install render`), the seat and its layer are left out and the note
-  names the missing file.
-- The layer regression floor: `TestEveryTierKeepsItsDeclaredLayerSet` (`layerSetTiers`: each composite tier's layers and
-  the seat roles each serves) fails by name when a tier stops declaring one, and `extraSeatFloor` pins the extra seat.
-  Each was made red against the real regression and the table restored byte for byte: deleting the `fast` layer,
-  deleting the seat while keeping its layer, an extra seat with no tool parser, a layer window that drifts from its
-  seat's, deleting every layer, moving the layer's seat to another role. `docs/tiers/ampere-16.md` is regenerated
-  (layers, the 35B, both storeless reasons); `tierdocs` heads a layers-only tier "Layers", not "Composes".
+Every give-up on an accepted job (the queue deadline, a canceled caller, a poll deadline) left the job on the fleet node, where it started when a slot freed and ran for nobody. On 2026-09-29, 43 % and 59 % of two nodes' agent runs (50 % and 73 % of their run wall) had no delegator result row, and the finished walls fed each node's own Retry-After, which sent callers away for longer and produced more abandoned jobs. The recovery pass meant to collect such jobs closed 61 of 61 open intents on a 404 or a 401 and recovered none.
 
-### Added — H-01's two remaining render gates: the spill ceiling and INV-16
+- **`DELETE /fleet/jobs/{id}`** (agent bearer, like the poll) withdraws a job that is still `accepted`, under the job store's mutex the scheduler claims under: exactly one of a claim and a withdraw wins, and a running or finished job is never touched (running work stays recoverable). Answers: `200 {"state":"withdrawn"}` (also for a repeat, and for a job the node already took back itself: reaped, or marked never-started at shutdown), `409` with the job's own state, `404`, `401`, `405` for a non-agent job. A withdrawn job is a terminal `error: "withdrawn: ..."` record rather than a deleted one: a poll reaches a terminal state, a duplicate dispatch of the id answers `409` and never runs, and the jobs feed shows what became of it. A node without the route answers `405`/`404`, and every delegator give-up then behaves exactly as before.
+- **The delegator asks once, best-effort** (5 s, on a context the caller's cancel does not touch) at the queue deadline, on cancel, and at a poll deadline, owned or not. At the queue deadline only a confirmation makes the result re-placeable on another node (the queued wait is credited back to the contract's budget) and closes the intent as `withdrawn`; `409 running` means the job left the backlog just before, so it keeps polling. Anything else (404, 405, 401, 5xx, a dropped connection, a timeout) leaves today's failure with the intent open, and the row now says why: `; withdraw not confirmed: HTTP 405: the node has no withdraw route (an older node)`, `HTTP 401: the node refused this delegator's fleet_auth_token`, `no answer within 5s`. An older node and an upgraded one that refused no longer leave identical rows; the clause is detail, and `reason_code` stays what the give-up was. A cancel that landed while the delegator slept used to skip the orphanable mark and close its intent as "terminal observed"; fixed.
+- **A poll that reads the node's own record.** A delegator that was away for longer than the lease finds `error: "reaped: ..."`; another caller's withdraw reads `withdrawn: ...`; a node that shut down with the job still queued marks it `not started: ...`. All three say the job never ran, so the subtask is re-placed on another node (queued wait credited back), the intent closes `never started: <what the node said>` and the abandoned attempt's row reads `queue_withdrawn`. A job that ran and failed stays a remote job error and is never re-placed.
+- **Poll lease** (`fleet_poll_lease_sec`, default 60 s, negative = off, a value under 15 is raised to 15, and `fleet-serve` prints which lease is in force at start-up): a pushed agent job that sits `accepted` with nobody polling it is skipped by the scheduler at once and reaped by a ticker (`error: "reaped: ..."`). Never a running job, never a job the pull queue claimed, never a media or vision job. What counts as a poll is decided by the JOB's own marker, not by the `task_type` a request declares: an authorized poll, an authorized duplicate dispatch and a parked long poll keep a job alive; the unauthenticated jobs feed, a poll or a re-dispatch without the bearer (`401`, whatever type it declares) do not, so a peer that can read ids off the feed can no longer keep a ghost alive or read a failed agent job's error. A run that finishes after its poller left no longer feeds `recent_agent_wall_sec` or the Retry-After built from it. An upgraded node also cleans up after an older delegator. The reaper reads its tick on the constructing goroutine and hands it to its goroutine by value (a package variable read from the goroutine the constructor spawned made `go test -race ./internal/fleetnode/` fail; it is clean now). The node counts what it took back: `jobs_withdrawn` and `jobs_reaped` on `/fleet/health` (since the process started, absent while zero), and logs one line per withdraw.
+- **Recovery and the intent ledger.** The recovery pass leaves an intent open on a 401 (one log line per pass instead of a permanent close) and closes a job the node never ran as `never started` instead of filing it as a recovered result. A poll answered 401 mid-run, and a poll deadline that no answer ever owned, no longer close their intent as "terminal observed" either: the 401 leaves it open, and the unowned deadline gives up like the others (one best-effort withdraw; confirmed closes it, otherwise it stays open). Every intent event carries the unix second and pid of the process that wrote it. An intent write that fails, a dispatch marker that cannot be written, and a recovery pass cut off by its clock now log once instead of vanishing.
+- **The fleet overview** no longer lists a `withdrawn` or `reaped` job as an operator error (dozens a day on a busy node would fill its 200-entry ring).
 
-- `install render` refuses `--n-cpu-moe` (any spelling, and `LLAMA_ARG_N_CPU_MOE`) above the tier's measured spill,
-  the new `n_cpu_moe_max` (`servingtmpl.AuditSpill`, in the write gate `renderGate` that now also hosts the H-01 rule
-  audit and the layer check). It is a separate number from `n_cpu_moe`, because one field cannot check itself; 0 means
-  the tier recorded no measured spill, so none is sanctioned. A tier that names `moe_26b: n_cpu_moe` with no N is
-  refused too, since that renders the every-expert `--cpu-moe`. No shipped tier declares a spill.
-- `TestInstallRendersOnAnyTierWithoutACacheServer` (INV-16): every tier renders with no vLLM prerequisites, and a
-  tier whose vLLM seat declares no store renders the seat, its unit and wrappers with no cache-server piece and
-  seeds an explicit storeless binding that `doctor` accepts. A spill of 20 against a measured 14 and a hard-coded
-  `--n-cpu-moe 30` in a rendered command are refused.
-- Both serving-config audits (`Audit` and `AuditSpill`, so `install render`, `audit-yaml` and the template gate) now read
-  each entry the way llama-swap runs it, with its `${name}` macros substituted (nested macros too, bounded, and
-  llama-swap's own `${PORT}` left alone). The templates keep their shared flags in `macros:`, so a `-ngl 0` or an
-  `--n-cpu-moe 30` placed there used to pass every rule. Every shipped template still passes.
+### Added — the delegation ledger sees its own failure shapes (PR-14)
+
+- Every `agent_delegate` row carries `door` (the contract's, else `delegate`; `fleet-smoke` stamps `cli:fleet-smoke`), `fleet_job_id` (when the node ACKED the dispatch; the node's own `agent` row carries the same id, stamped by both doors a node admits work through, so the orphan join is one equality instead of a guess on latency) and a closed-set `reason_code` (32 members: `ok`, `failed_verification`, `queue_full`, `queue_deadline`, `queue_withdrawn`, `poll_deadline`, `canceled`, `node_unreachable`, `job_lost`, `dispatch_refused`, `remote_error`, `capacity_wait`, `node_busy`, `shed`, `no_eligible_node`, `seat_down`, the `stall_*` phases, the node's defer classes, `started`, `other`) set by a total classifier and normalized by `Record`. `capacity_wait` is the delegator's own outcome (no node had room); `node_busy` is a node, or the local seat, answering a capacity defer after admission (a seat at its run cap, a card under a lease or fence): two different causes, told apart by structure and not by prose. A stall a node filed during the structured re-pack (`structured re-pack unreachable: stalled: ...`) is coded `stall_*` like any other.
+- A `phase:"started"` marker row is written when a node acks a job or a local run begins, so a hang or a ghost is visible while it happens. It is never a job: every counter skips it, and `ledger.ParentJobIDs` skips it too (a marker looks exactly like a parent row, so without the skip an orphan inner row would vanish from every count). The C-62 rule is unchanged.
+
+### Changed
+
+- `ledger.Entry.Reason` is stored whole (bounded at 4096 bytes on a rune boundary) instead of cut to 120 bytes. `ledger.ShortReason` is the 120-byte form the defer report, the loupe report and atlas, and the PAIR error text group by, so a class is not split by every job-specific number. Rows written before this keep their cut reason and carry no code, fleet id or marker.
+- New config key `fleet_poll_lease_sec` (`config.example.json` regenerated); two additive, omitempty health fields, `jobs_withdrawn` and `jobs_reaped`.
+- Compatibility: withdraw and the lease need a node redeploy. Ledger readers outside this repository that count rows must skip `phase:"started"` (one extra `agent_delegate` row per job, `cards_tokens` 0).
+
+## [0.145.0] - 2026-09-30 - the operator names the device that serves a shared accelerator tool
+
+### Added — `accelerator_tool_owners` (ADR 0068)
+
+- A box carrying a Coral that reaches the RK3588 NPU through `fleet_accelerators` gave every shared tool
+  name to the Coral, because local devices are walked first (ADR 0037). `accelerator_tool_owners` maps one tool
+  name to the device that serves it — `{"offload_object_detect": "rknpu"}` — and every other name is decided as
+  before. An entry applies only when its device is listed in `accelerators` or `fleet_accelerators` and has that
+  tool; otherwise it is logged at startup and ignored, so a typo never removes a tool. A fleet device may take a
+  name from a local one.
+- Both surfaces apply the same walk: `mcpserver.accelOwnerPlan` computes every owner without registering
+  anything, and MCP registration and status read it; the agent loop's lanes carry the same claims
+  (`AccelLane.Claims`, from `config.ToolOwnerClaims`). `TestToolOwnersLoopMatchesMCP` builds the loop from the
+  real `NewLoopAccel` and checks every name the plan serves is registered once and routed to the same device,
+  for local orders of three devices, local-plus-fleet shapes, spaced keys and duplicate keys.
+- A device id listed twice no longer registers its tools twice on the MCP surface (the registration walk skips
+  a name it has already added instead of relying on the SDK replacing it).
+- Status: each accelerator entry adds `serves`, the tools that device actually registered, beside `owns`.
 
 ## [0.144.2] - 2026-09-30 - offload_nim's base is allowlisted, audit first
 

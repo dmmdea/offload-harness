@@ -1333,9 +1333,18 @@ type Config struct {
 	// register locally and forward to the first delegate_remotes node whose
 	// /fleet/health lists the id, the image travelling inside the job (cap
 	// 8 MiB). Explicit opt-in keeps tools/list byte-identical for a box that
-	// declares nothing; a local device always wins over a remote one for the
-	// same capability name.
+	// declares nothing; a local device wins over a remote one for the same
+	// capability name unless AcceleratorToolOwners names the remote one.
 	FleetAccelerators []string `json:"fleet_accelerators,omitempty"`
+	// AcceleratorToolOwners names the device that serves a shared accelerator
+	// tool, by tool name: {"offload_object_detect": "rknpu"} (ADR 0068). It
+	// overrides the first-listed rule (ADR 0037) for that name only; every
+	// other name still goes to the first listed owner. An entry applies only
+	// when the device is listed in accelerators or fleet_accelerators and its
+	// table has that tool — otherwise it is ignored (the MCP server logs it at
+	// startup) and the first-listed rule decides, so a typo never removes a
+	// tool. Keys and values are compared with spaces trimmed.
+	AcceleratorToolOwners map[string]string `json:"accelerator_tool_owners,omitempty"`
 	// HailoEndpoint is the loopback HTTP sidecar base (server/http_server.py in
 	// the Hailo repo). Loopback only — the sidecar is not an authenticated service.
 	HailoEndpoint string `json:"hailo_endpoint,omitempty"`
@@ -1437,6 +1446,22 @@ type Config struct {
 	// must. 0 or unset uses FleetBusyLeaseSecDefault (120); negative disables
 	// the rule and restores the text-only behaviour.
 	FleetBusyLeaseSec int `json:"fleet_busy_lease_sec,omitempty"`
+	// FleetPollLeaseSec (ADR 0064) is how long a job a delegator PUSHED to this
+	// node may sit `accepted` with nobody polling it before the node treats its
+	// delegator as gone: the job is never started, it is reaped (terminal, with a
+	// reason a late poller can read), and a run that finishes after its poller
+	// left stops feeding recent_agent_wall_sec and the Retry-After built from it.
+	// Only `accepted` jobs are ever reaped — a running job is never touched, so a
+	// delegator's recovery pass can still collect it — and only agent jobs pushed
+	// by a dispatch (a pulled queue job's result travels by ack; media and vision
+	// pollers are other clients).
+	//
+	// 0 or unset uses FleetPollLeaseSecDefault (60); negative turns the rule off
+	// (nothing is reaped or discounted: the behaviour before ADR 0064). A positive value
+	// under FleetPollLeaseSecFloor is raised to it: the delegator's own gap between
+	// polls (a 12 s long poll plus a few seconds of sleep) must fit inside the
+	// lease, or a job that IS being polled could be reaped. See FleetPollLease.
+	FleetPollLeaseSec int `json:"fleet_poll_lease_sec,omitempty"`
 	// FleetStoreRoot is a persistent KV page store this node OWNS ON DISK and
 	// keeps under a budget between its turns (0.113.16, store steward): the
 	// LMCache fs_native pages the production seat writes over SMB into a
@@ -1727,6 +1752,20 @@ func (c Config) HasAccelerator(id string) bool {
 		}
 	}
 	return false
+}
+
+// ToolOwnerClaims returns the tool names accelerator_tool_owners assigns to
+// device id, sorted. It says nothing about whether the claim can apply — the
+// device's own tool table decides that on each surface (ADR 0068).
+func (c Config) ToolOwnerClaims(id string) []string {
+	var out []string
+	for name, owner := range c.AcceleratorToolOwners {
+		if strings.TrimSpace(owner) == id {
+			out = append(out, strings.TrimSpace(name))
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 func Default() Config {
@@ -2570,6 +2609,31 @@ func (c Config) FleetQueueLimit() int {
 		return 2 * c.FleetConcurrencyLimit()
 	default:
 		return c.FleetMaxQueueDepth
+	}
+}
+
+// FleetPollLeaseSecDefault / FleetPollLeaseSecFloor bound fleet_poll_lease_sec:
+// the default is five times the slowest healthy poll gap, the floor is one gap
+// with room to spare (see Config.FleetPollLeaseSec).
+const (
+	FleetPollLeaseSecDefault = 60
+	FleetPollLeaseSecFloor   = 15
+)
+
+// FleetPollLease resolves FleetPollLeaseSec: 0 → the default (60 s), negative →
+// 0 meaning the abandoned-job rules are off, and a positive value below the
+// floor is raised to it. The store treats <= 0 as "no lease", the convention
+// FleetQueueLimit and FleetConcurrencyLimit already teach.
+func (c Config) FleetPollLease() time.Duration {
+	switch {
+	case c.FleetPollLeaseSec < 0:
+		return 0
+	case c.FleetPollLeaseSec == 0:
+		return FleetPollLeaseSecDefault * time.Second
+	case c.FleetPollLeaseSec < FleetPollLeaseSecFloor:
+		return FleetPollLeaseSecFloor * time.Second
+	default:
+		return time.Duration(c.FleetPollLeaseSec) * time.Second
 	}
 }
 

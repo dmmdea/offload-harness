@@ -123,6 +123,13 @@ this package serves with no auth at all. A missing corpus file (fresh install, a
 never run) is not an error. Every row that is `deferred` or failed acceptance becomes one `Error`
 (severity `warn`, source `delegation`), deduped on `"deleg|<job_id>"`.
 
+**Job errors** (`poller.go`) come from each node's `/fleet/jobs` feed: every row in state `error`
+becomes one `Error` (severity `error`, source `job`), deduped on `"<node>|<job_id>"`, with one
+exception. A job a node took out of its backlog WITHOUT running it (its `error` opens `withdrawn:` or
+`reaped:`, [ADR 0064](../architecture/decisions/0064-a-delegator-takes-back-what-it-has-not-started.md))
+is the cleanup working, dozens a day on a busy node, and listing each would push real failures out of the
+200-entry ring, so it is not an event; the row stays in the node's job list.
+
 **The embedded page** (`internal/fleetview/server.go` + `ui.html`) serves three routes: `GET /{$}`
 (the page itself, embedded via `go:embed`), `GET /api/overview` (the live `Overview` as JSON,
 `Cache-Control: no-store`), and `GET /healthz`. The handler never issues an outbound request of its

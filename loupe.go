@@ -278,7 +278,9 @@ func runLoupe(args []string) error {
 		if e.Deferred {
 			rep.Deferred++
 			if e.Reason != "" {
-				defers[e.Reason]++
+				// Grouped by the short form: the stored reason is whole (ADR 0064),
+				// and a class per job-specific number is not a report.
+				defers[ledger.ShortReason(e.Reason)]++
 			}
 		}
 		if e.Escalations > 0 {

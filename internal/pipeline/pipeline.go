@@ -384,6 +384,10 @@ func (p *Pipeline) Run(ctx context.Context, req core.Request) (res core.Result) 
 	// names the surface that admitted the call. Documentary only — nothing below
 	// reads it, and every sub-branch takes meta by value from here.
 	meta.Door = req.Door
+	// ADR 0064 (register C-63): the job id a fleet node was dispatched this call
+	// under, carried to the ledger row the same way the door is, so a node's row
+	// joins to the delegator's on one equality.
+	meta.FleetJobID = req.FleetJobID
 
 	if !req.Task.Valid() {
 		return core.Deferf("unknown task "+string(req.Task), "", meta)
@@ -4536,6 +4540,8 @@ func entryFrom(task core.TaskType, meta core.Meta, deferred bool, inputChars int
 		// The surface that admitted the call (A-102): "offload_summarize",
 		// "cli:summarize", "fleet". Empty when no door stamped the request.
 		Door: meta.Door,
+		// The fleet job id of a dispatched call (ADR 0064); empty on any other.
+		FleetJobID: meta.FleetJobID,
 		// The media binding's license (ADR 0058); empty on text rows.
 		License: meta.License,
 		// Same read the delegation log does (delegate.record): per-row, so a
