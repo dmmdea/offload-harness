@@ -3,6 +3,8 @@
 import io
 import json
 import os
+import shutil
+import subprocess
 import tempfile
 import types
 import unittest
@@ -328,84 +330,144 @@ class SettleTests(unittest.TestCase):
 
 class BackgroundTabAnimationTests(unittest.TestCase):
     """The lane's tab is hidden, so CSS animations never advance there and a fading-in dialog keeps
-    opacity 0, which jev's snapshot drops. Observe must finish them first; act must not (it would
-    disturb jev's pre-click freshness check). Fakes stand in for jev's Browser: no browser, no jev."""
+    opacity 0, which jev's snapshot drops. Every page read must be preceded by a finish; act must not
+    (it would disturb jev's pre-click freshness check). Fakes stand in for jev's Browser and its
+    module-level browser_operation/cdp: no browser, no jev."""
 
     PAGE = {"url": "https://example.org/", "actions": [{"id": "e1", "kind": "click", "label": "Open menu", "node": 7}]}
 
-    def make(self, finished=2, on_finish=None):
-        """Patch a fresh fake Browser through the real _install_patches; returns (browser, order, run)."""
+    def make(self, finished=2, on_finish=None, stale_reads=0, capture=None):
+        """Patch a fresh fake Browser through the real _install_patches; returns (browser, order, run, sessions)."""
         order = []
+        sessions = []
+        stale = [True] * stale_reads
 
         class FakeStalePage(ValueError):
             pass
 
+        def fake_cdp(method, session_id=None, **params):
+            sessions.append(session_id)
+            if "getAnimations" in params.get("expression", ""):
+                order.append("finish")
+                if on_finish is not None:
+                    return on_finish()
+                return {"result": {"type": "number", "value": finished}}
+            return {"result": {"value": []}}
+
+        def fake_operation(request):  # jev's module-level browser_operation
+            order.append(f"read:{request['operation']}")
+            if request["operation"] == "act":
+                return {"executed": request["action"]["id"]}
+            if stale:
+                stale.pop()
+                raise FakeStalePage("Document is navigating")
+            return {**BackgroundTabAnimationTests.PAGE,
+                    "actions": [dict(a) for a in BackgroundTabAnimationTests.PAGE["actions"]]}
+
         class FakeBrowser:
             session = "s1"
+            after_input = None
 
             def call(self, method, **params):
-                expression = params.get("expression", "")
-                if "getAnimations" in expression:
-                    order.append("finish")
-                    if on_finish is not None:
-                        return on_finish()
-                    return {"result": {"type": "number", "value": finished}}
                 order.append(f"call:{method}")
-                return {"result": {"value": []}}
+                return fake_cdp(method, session_id=self.session, **params)
 
             def evaluate(self, expression):  # like jev: a Runtime.evaluate through self.call
                 order.append("evaluate")
                 return self.call("Runtime.evaluate", expression=expression, returnByValue=True)["result"]["value"]
 
-            def observe(self, screenshot=True):
+            def observe(self, screenshot=True):  # like jev: the post-action wait, then up to 10 reads
                 order.append("observe")
-                return {**BackgroundTabAnimationTests.PAGE, "actions": [dict(a) for a in BackgroundTabAnimationTests.PAGE["actions"]]}
+                if self.after_input:
+                    self.after_input = None
+                    order.append("wait")
+                for attempt in range(10):
+                    try:
+                        # resolved on the module at call time, exactly as jev's Browser.observe does
+                        return browser_mod.browser_operation(
+                            {"operation": "observe", "session": self.session, "screenshot": screenshot})
+                    except FakeStalePage:
+                        if attempt == 9:
+                            raise
+                raise FakeStalePage("Page did not settle")
 
             def act(self, action, page, text=None):
                 order.append("act")
-                return {"executed": action["id"]}
+                result = browser_mod.browser_operation(
+                    {"operation": "act", "session": self.session, "action": action, "text": text})
+                self.after_input = action if action["kind"] != "wait" else None
+                return result
 
-        browser_mod = types.SimpleNamespace(Browser=FakeBrowser, StalePage=FakeStalePage)
+        browser_mod = types.SimpleNamespace(
+            Browser=FakeBrowser, StalePage=FakeStalePage, browser_operation=fake_operation, cdp=fake_cdp)
         model = types.SimpleNamespace()
         agent_mod = types.SimpleNamespace()
         run = runner.Run({"url": "https://example.org/", "unattended": True}, types.SimpleNamespace(send=lambda obj: None))
+        run.capture = capture
         runner._install_patches(run, model, agent_mod, browser_mod)
-        return FakeBrowser(), order, run
+        return FakeBrowser(), order, run, sessions
 
     def test_observe_finishes_animations_before_it_reads_the_page(self):
-        browser, order, _ = self.make()
+        browser, order, _, sessions = self.make()
         page = browser.observe(screenshot=False)
-        self.assertEqual(order, ["finish", "observe"], "the finish must run before the original observe reads the page")
+        self.assertEqual(order, ["observe", "finish", "read:observe"], "the finish must run right before the page is read")
+        self.assertEqual(sessions, ["s1"], "the finish must run in the observed session")
         self.assertEqual([a["id"] for a in page["actions"]], ["e1"])
 
     def test_every_observe_finishes_again(self):
         # An action opens the next dialog, and the observe after it must see that one too.
-        browser, order, _ = self.make()
+        browser, order, _, _ = self.make()
         browser.observe()
         browser.act(self.PAGE["actions"][0], self.PAGE)
         browser.observe()
         self.assertEqual(order.count("finish"), 2)
-        self.assertEqual([o for o in order if o in ("finish", "observe", "act")],
-                         ["finish", "observe", "act", "finish", "observe"])
+        self.assertEqual([o for o in order if o in ("finish", "read:observe", "read:act")],
+                         ["finish", "read:observe", "read:act", "finish", "read:observe"])
+
+    def test_the_finish_runs_after_the_post_action_wait(self):
+        # jev waits 50 ms (200 ms for a combobox) after an input before it reads the page; an
+        # autocomplete option the page mounts in that window still has a pending fade-in.
+        browser, order, _, _ = self.make()
+        browser.act(self.PAGE["actions"][0], self.PAGE)
+        del order[:]
+        browser.observe()
+        self.assertEqual(order, ["observe", "wait", "finish", "read:observe"])
+
+    def test_a_stale_read_is_retried_with_a_fresh_finish(self):
+        # A click that navigates: the retries re-read the new document, whose fade-ins are pending.
+        browser, order, _, _ = self.make(stale_reads=2)
+        page = browser.observe()
+        self.assertEqual(order, ["observe"] + ["finish", "read:observe"] * 3)
+        self.assertEqual(page["url"], "https://example.org/")
 
     def test_act_does_not_finish_animations(self):
         # fresh() inside the original act compares the observed page and the target's guard with
         # the live page; a finish between them can make that comparison fail (guard() is null at
         # opacity 0 and includes the scope's innerText, which honours visibility:hidden).
-        browser, order, _ = self.make()
+        browser, order, _, _ = self.make()
         browser.act({"id": "e1", "kind": "click", "label": "Open menu", "node": 7}, self.PAGE)
         browser.act({"id": "e2", "kind": "fill", "label": "Title", "node": 8}, self.PAGE, text="x")
         browser.act({"id": "wait", "kind": "wait", "label": "Wait for the page to update"}, self.PAGE)
         self.assertEqual(order.count("act"), 3)
+        self.assertEqual(order.count("read:act"), 3, "act still reaches jev's browser_operation")
         self.assertNotIn("finish", order)
 
     def test_the_finish_does_not_touch_the_runs_bookkeeping(self):
-        browser, order, run = self.make()
+        capture = types.SimpleNamespace(session_id=None)
+        browser, order, run, _ = self.make(capture=capture)
         browser.observe()
         self.assertEqual(run.executed, 0)
         self.assertFalse(run.net_enabled)
         self.assertNotIn("call:Network.enable", order)
         self.assertTrue(run.observed_once)
+        # Prove the Network.enable wrapper is live, so the assertions above can fail: the first
+        # Page.navigate enables the Network domain, and nothing else does.
+        browser.call("Page.navigate", url="https://example.org/")
+        self.assertTrue(run.net_enabled)
+        self.assertEqual(capture.session_id, "s1")
+        self.assertEqual(order.count("call:Network.enable"), 1)
+        browser.observe()
+        self.assertEqual(order.count("call:Network.enable"), 1)
 
     def test_a_failing_finish_is_swallowed_and_observe_still_returns_the_page(self):
         def stale():
@@ -423,9 +485,9 @@ class BackgroundTabAnimationTests(unittest.TestCase):
         }
         for name, on_finish in failures.items():
             with self.subTest(name):
-                browser, order, run = self.make(on_finish=on_finish)
+                browser, order, run, _ = self.make(on_finish=on_finish)
                 page = browser.observe()
-                self.assertEqual(order, ["finish", "observe"])
+                self.assertEqual(order, ["observe", "finish", "read:observe"])
                 self.assertEqual(page["url"], "https://example.org/")
                 self.assertTrue(run.observed_once)
 
@@ -447,16 +509,71 @@ class BackgroundTabAnimationTests(unittest.TestCase):
 
         self.assertEqual(runner.finish_animations(boom), 0)
 
-    def test_the_script_skips_infinite_animations_and_checks_the_api_exists(self):
+    def test_the_script_never_resets_an_animation(self):
         js = runner.FINISH_ANIMATIONS_JS
-        self.assertIn("typeof document.getAnimations !== 'function'", js)  # an old engine: nothing to do
-        self.assertIn("getComputedTiming().endTime", js)
-        self.assertIn("Number.isFinite(end)", js)  # a spinner's endTime is Infinity; finish() would throw
-        self.assertIn("a.playState !== 'finished'", js)
         self.assertIn("a.finish()", js)
         self.assertNotIn("cancel()", js)  # an end state, never a reset to the start state
-        self.assertEqual(js.count("try {"), 1, "each finish() is guarded on its own so one throw cannot stop the rest")
         self.assertEqual(js.count("(() =>"), 1)
+
+    # Runs the real script under node against fake animations: the structure of the loop (one try
+    # per animation, which animations are skipped) cannot be pinned by reading the source text.
+    NODE_HARNESS = r"""
+const script = __SCRIPT__;
+globalThis.innerWidth = 1120;
+globalThis.innerHeight = 780;
+const attempted = [], finished = [];
+const target = (visible, [x, y, w, h]) => ({
+  isConnected: true,
+  checkVisibility: () => visible,
+  getBoundingClientRect: () => ({left: x, top: y, right: x + w, bottom: y + h, width: w, height: h}),
+});
+const onScreen = [100, 100, 200, 40];
+const anim = (name, o = {}) => {
+  const {state = 'running', end = 300, tgt = target(false, onScreen), throws = false,
+         noEffect = false, timingThrows = false} = o;
+  const a = {
+    playState: state,
+    effect: noEffect ? null : {
+      target: tgt,
+      getComputedTiming() { if (timingThrows) throw new Error('timeline'); return {endTime: end}; },
+    },
+    finish() { attempted.push(name); if (throws) throw new Error('finish'); a.playState = 'finished'; finished.push(name); },
+  };
+  return a;
+};
+const list = [
+  anim('throws', {throws: true}),                                    // finish() throws; the rest must still run
+  anim('fade-in'),                                                   // hidden by opacity
+  anim('slide-in', {tgt: target(true, [1120, 100, 300, 600])}),      // opaque, but starts beside the viewport
+  anim('collapsed', {tgt: target(true, [100, 100, 200, 0])}),        // opaque, but no height yet
+  anim('paused', {state: 'paused'}),
+  anim('detached', {tgt: null}),
+  anim('toast-exit', {tgt: target(true, onScreen)}),                 // already visible: left alone
+  anim('spinner', {end: Infinity, throws: true}),                    // finish() would throw
+  anim('done', {state: 'finished'}),
+  anim('no-effect', {noEffect: true}),
+  anim('scroll-timeline', {timingThrows: true}),
+];
+globalThis.document = {getAnimations: () => list};
+const n = eval(script);
+globalThis.document = {};
+const missingApi = eval(script);
+console.log(JSON.stringify({n, finished, attempted, missingApi}));
+"""
+
+    @unittest.skipUnless(shutil.which("node"), "node is not on PATH")
+    def test_the_script_finishes_only_what_the_snapshot_cannot_see(self):
+        program = self.NODE_HARNESS.replace("__SCRIPT__", json.dumps(runner.FINISH_ANIMATIONS_JS))
+        done = subprocess.run([shutil.which("node"), "-"], input=program, capture_output=True,
+                              text=True, encoding="utf-8", timeout=60)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        out = json.loads(done.stdout)
+        self.assertEqual(out["finished"], ["fade-in", "slide-in", "collapsed", "paused", "detached"])
+        self.assertEqual(out["n"], 5, "the count is the animations that finished, not the ones that threw")
+        self.assertEqual(out["attempted"], ["throws", "fade-in", "slide-in", "collapsed", "paused", "detached"],
+                         "a throwing finish() is skipped on its own; a visible, infinite, finished, effect-less "
+                         "or throwing-timing animation is never finished")
+        self.assertEqual(out["missingApi"], 0)
 
 
 class ReviewHardeningTests(unittest.TestCase):

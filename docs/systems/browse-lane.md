@@ -54,8 +54,9 @@ operator's browser, and any remote browser service.
    directory as cwd.
 3. The sidecar attaches to the running browser (the `browse_cdp_url` endpoint when set, else the named
    browser's `DevToolsActivePort` file), opens a background tab, and loops: observe, ask the harness for a
-   decision, execute one action. Before every observe it jumps the page's finite CSS animations and
-   transitions to their end state (see [Background tab rendering](#background-tab-rendering)).
+   decision, execute one action. Immediately before every page read it jumps the finite CSS animations and
+   transitions the snapshot cannot see to their end state (see
+   [Background tab rendering](#background-tab-rendering)).
 4. Every model call goes through the harness. A typed decision is proxied to `browse_decision_url`
    (the bearer, if any, comes from `LOCAL_OFFLOAD_BROWSE_BEARER` in the harness process and never
    reaches the sidecar). A field value for TYPE_TEXT is generated on the local agent seat under a raw
@@ -68,9 +69,11 @@ operator's browser, and any remote browser service.
 
 ### Background tab rendering
 
-The lane's tab is opened in the background (with focus emulation on, so the operator's own tab is never
-activated). A hidden tab produces no rendering frames, which has one consequence the lane corrects and
-several it does not:
+The lane's tab is opened in the background (`Target.createTarget` with `background: true`, so the
+operator's own tab is never activated) with focus emulation on, which jev-ultrafast enables to keep
+`requestAnimationFrame` and menus rendering. A hidden tab still produces no rendering frames for CSS
+animations (measured below). The lane corrects the main consequence; the bullets say how, and where the
+correction stops:
 
 - **CSS animations and transitions stay at their start state.** A dialog or dropdown menu that fades in
   with `@keyframes` or a `transition` keeps opacity 0. The page snapshot drops every element whose
@@ -80,25 +83,38 @@ several it does not:
   fade and a `transition` fade both read opacity 0 and not visible until their animations were
   finished, then opacity 1 and visible. A production web app's dropdown menu showed 0 of 7 items visible
   (its animation and transition both running) and 7 of 7 after.
-- **The lane finishes finite animations before each observe.** The sidecar evaluates a short script that
-  calls `finish()` on every animation in `document.getAnimations()` whose end time is finite and that has
-  not finished. Infinite animations (spinners, shimmer) have an infinite end time and are left alone, and
-  an animation whose `finish()` throws is skipped. The call never raises: a navigating page or a dead
-  session means nothing was finished and the observe runs as it always did. The runner logs
-  `finished N pending CSS animation(s) before observe` to stderr when it finished any.
+- **The lane finishes what the snapshot cannot see, immediately before every page read.** The sidecar
+  wraps jev's page read (`browser_operation`, which `Browser.observe` calls once per attempt) and, for an
+  observe read, first evaluates a short script that calls `finish()` on every animation in
+  `document.getAnimations()` whose end time is finite, that has not finished and whose target element the
+  snapshot does not already see: hidden by opacity or `visibility`, with an empty box, or outside the
+  viewport (a slide-in panel is fully opaque but starts off screen). Because it runs on every read
+  attempt, it covers content the page mounts during jev's short wait after an input (an autocomplete
+  option, for one) and the retries after a stale read or a navigation. Infinite animations (spinners,
+  shimmer) have an infinite end time and are left alone, and an animation whose `finish()` throws is
+  skipped. The call never raises: a navigating page or a dead session means nothing was finished and the
+  read runs as it always did. The runner logs `finished N pending CSS animation(s) before observe` to
+  stderr when it finished any.
+- **An element that is already visible is left alone.** An animation whose target is visible and on
+  screen is not finished, so a pending exit on it stays as it was without this fix: a toast that a CSS
+  animation fades out after a delay stays in the snapshot (finishing it would jump it to its hidden end
+  state), and a dialog that is closing keeps showing until the page removes it. This follows from the
+  animation model and jev's snapshot code; it was not measured on a live page.
 - **Not before an action.** A `finish()` between the observe and the pre-click freshness check could make
   that check fail: the snapshot's per-element guard is empty for an element at opacity 0 and ends with the
   innerText of the element's enclosing form, dialog, row or list item (which leaves out text hidden with
   `visibility`), and the page marker reads the opacity-filtered text and controls. Every action is
   followed by an observe, which already finishes what the action started.
-- **`requestAnimationFrame` fades are not targeted.** A fade driven from script keeps running in this
-  tab (measured opacity 0.0055, already visible to the snapshot), and `finish()` changes nothing there.
-- **Forcing frames does not work.** `Page.captureScreenshot`, clipped or not, hung for more than 15 s in
-  the hidden tab on the same fixture, so the lane does not try to wake the tab with screenshots (it
-  never requests one itself).
-- **A menu that mounts late shows up at the next observe.** The finish runs once, before the snapshot. An
-  element the page inserts after a debounce or a network call has no animation yet when it runs, so the
-  following observe finishes it (the `wait` action re-observes).
+- **`requestAnimationFrame` fades are not targeted.** A fade driven from script measured opacity 0.0055
+  at 400 ms on the fixture: above 0, so the snapshot keeps the element, and `finish()` changes nothing
+  there. Whether such a fade ever reaches opacity 1 in this tab was not measured.
+- **Forcing frames with screenshots does not work.** `Page.captureScreenshot`, clipped or not, hung for
+  more than 15 s in the hidden tab on the same fixture, so the lane does not try to wake the tab with
+  screenshots (it never requests one itself). Other ways to produce frames were not tried.
+- **Content mounted after the read shows up at the next observe.** The finish runs immediately before each
+  read, not after it. An element the page inserts once jev has read the page (a debounce or a network
+  response that lands later) has no animation yet when the finish runs, so the following observe finishes
+  it (the `wait` action re-observes).
 
 Out of scope here: `date` and `datetime-local` inputs are not in the snapshot at all (its role table maps
 an input only for text, email, url, tel, search, number, checkbox, radio and button types), so the run
@@ -293,7 +309,8 @@ is not proof.
 - The sidecar's pure helpers (deny regex, host check, header redaction, `DevToolsActivePort` parsing)
   are stdlib `unittest`, run by the installer: `cd setup/browse && python -m unittest -v test_runner`.
   The same file drives the observe and act wrappers through fake `Browser` classes, which is how the
-  finish-before-observe order (and its absence from act) is pinned without a browser.
+  finish-before-every-read order (and its absence from act) is pinned without a browser, and, when `node`
+  is on the PATH, runs the finish script against fake animations to pin which ones it finishes.
 - Verify an install without touching a real page: with the browser running and remote debugging
   ticked, call `offload_browse` with a start URL on a harmless page you own, `allow_hosts` set to its
   host, `max_actions` 3 and a goal that only reads. Check that `status` is `done`, that `final.url`
