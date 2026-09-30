@@ -220,6 +220,7 @@ func runAuditConfig(args []string) error {
 	vllmSeat := fs.String("vllm-seat-active", "auto", "whether this node serves the tier's vLLM agent seat: auto (detect locally, as install does) | true | false")
 	vllmVenv := fs.String("vllm-venv", "", "hand-built vLLM virtualenv for auto detection (default: <home>/vllm-env)")
 	hfHome := fs.String("hf-home", "", "HF cache root for auto detection (default: $HF_HOME, else <home>/hf)")
+	vllmSeatDir := fs.String("vllm-seat-dir", "", "where the vLLM seats' wrapper scripts live, for auto detection of a tier's extra seats (default: <home>/seat)")
 	_ = fs.Parse(args)
 
 	userHome, _ := os.UserHomeDir()
@@ -277,7 +278,7 @@ func runAuditConfig(args []string) error {
 		}
 	case "false":
 	case "auto":
-		vllmActive, extraActive = detectVLLMSeats(p, vllmRuntimeFlags{venv: *vllmVenv, hfHome: *hfHome}.resolve(installHome), io.Discard)
+		vllmActive, extraActive = detectVLLMSeats(p, vllmRuntimeFlags{venv: *vllmVenv, hfHome: *hfHome, seatDir: *vllmSeatDir}.resolve(installHome), io.Discard)
 	default:
 		return fmt.Errorf("audit-config: --vllm-seat-active must be auto, true or false, got %q", *vllmSeat)
 	}

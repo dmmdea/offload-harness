@@ -134,11 +134,12 @@ type servingProfile struct {
 	VLLMSeat *vllmseat.Spec `json:"vllm_seat,omitempty"`
 	// ExtraVLLMSeats are the tier's further vLLM seats (profiles.json `extra_vllm_seats`):
 	// on-demand seats beside VLLMSeat on the same card, rendered as its alternatives and
-	// never the agent lane. Each renders only when the box has the venv and ITS weights
-	// (see extraVLLMSeatsFor), and the layer it backs is left out of the seeded layers
-	// otherwise. What the installer does NOT render for one is its systemd unit and wrapper
-	// scripts: the seat's launch line carries flags the shared unit template cannot express,
-	// so they stay the operator's step (docs/systems/composite-tier.md).
+	// never the agent lane. Each renders only when the box has the venv, ITS weights and the
+	// wrapper scripts its entry runs (see extraVLLMSeatsFor), and the layer it backs is left
+	// out of the seeded layers otherwise. What the installer does NOT render for one is its
+	// systemd unit, wrapper scripts and polkit rule: the seat's launch line carries flags the
+	// shared unit template cannot express, so they stay the operator's step
+	// (docs/systems/composite-tier.md), which is why they are also its prerequisite.
 	ExtraVLLMSeats []vllmseat.Spec `json:"extra_vllm_seats,omitempty"`
 	// moeLiteral is set ONLY by fallbackProfile and bypasses moeFlag: the off-matrix
 	// defaults are literal flag strings (`--cpu-moe -ngl 999`, with 999 — not the 99
@@ -331,42 +332,6 @@ func warnMissingGatedModelsTo(include26B, includeQ38, includeQ354B, includeQ359B
 	fmt.Fprintf(w, "WARNING: %d gated model weight(s) are not on this machine. llama-swap lists a model "+
 		"from the CONFIG, so the alias checks in `doctor` and `acceptance` will PASS and the route will fail only "+
 		"when called. Fetch these before relying on them:\n%s\n", len(missing), strings.Join(missing, "\n"))
-}
-
-// warnMissingExtraSeatWrappers names every extra vLLM seat whose wrapper scripts are not in
-// the seat directory of this machine.
-//
-// The installer renders an extra seat's llama-swap ENTRY but not its systemd unit, wrapper
-// scripts or polkit rule (its launch line carries flags the shared unit template cannot
-// express, so those stay the operator's step). llama-swap starts a model by running the
-// entry's `cmd`, and does not check that the file exists when it loads its config, so a seat
-// whose wrappers were never installed is in the roster and fails only when it is asked for.
-// Install time is where the fix is still cheap, so that is where it is said. A warning, never
-// an error, and skipped when rendering for another machine, where a local miss means nothing.
-func warnMissingExtraSeatWrappers(extras []*vllmseat.Spec, seatDir, target string, w io.Writer) {
-	if len(extras) == 0 || seatDir == "" || target != runtime.GOOS {
-		return
-	}
-	var missing []string
-	for _, e := range extras {
-		if e == nil {
-			continue
-		}
-		for _, f := range []string{e.Unit + "-cmd.sh", e.Unit + "-cmdstop.sh"} {
-			full := filepath.Join(seatDir, f)
-			if _, err := os.Stat(full); err != nil {
-				missing = append(missing, fmt.Sprintf("  %s: %s", e.ID, full))
-			}
-		}
-	}
-	if len(missing) == 0 {
-		return
-	}
-	sort.Strings(missing)
-	fmt.Fprintf(w, "WARNING: %d extra vLLM seat wrapper script(s) are not on this machine. The installer renders an extra "+
-		"seat's llama-swap entry but NOT its systemd unit, wrapper scripts or polkit rule, so llama-swap lists the seat "+
-		"from the config and fails only when it is asked for. Install them by hand (docs/systems/composite-tier.md):\n%s\n",
-		len(missing), strings.Join(missing, "\n"))
 }
 
 // seatsPlaceable reports whether the serving template for this target can host
@@ -639,7 +604,6 @@ func runInstallRender(args []string) error {
 	target := res.Params.GOOS
 	warnMissingSeatModels(res.Profile.MediaSeats, *modelsDir, target)
 	warnMissingGatedModels(res.Include26B, res.Profile.IncludeQwen38, res.Profile.IncludeQwen354B, res.Profile.IncludeQwen359B, res.Profile.IncludeQwen3827B, res.Profile.IncludeMimo9B, *modelsDir, target)
-	warnMissingExtraSeatWrappers(res.Params.ExtraVLLMSeats, res.Params.VLLMRuntime.SeatDir, target, os.Stderr)
 
 	// The provenance stamp (K-02) rides on every rendered config from here on.
 	// It is prepended AFTER the rule audit so the audit sees exactly what a

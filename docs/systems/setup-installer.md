@@ -348,7 +348,8 @@ the installer would never have written, such as a vLLM box against its fallback 
 reports drift that is its own artifact. `--vllm-seat-active auto` runs the installer's own
 detection, which is right for the local box. Pass `true` or `false` for a remote one. The flag speaks
 for the tier's vLLM seats as a set: `true` says the node serves the lane seat and every extra seat,
-`false` none, and `auto` detects each seat on its own (the venv plus that seat's weights).
+`false` none, and `auto` detects each seat on its own (the venv plus that seat's weights, and for an extra
+seat the wrapper scripts in `--vllm-seat-dir`, default `<home>/seat`).
 
 It reports only **seed-owned** keys: every key some tier's resolved seed can write, plus live
 bindings no tier seeds at all. A config also holds keys that are legitimately this machine's
@@ -488,7 +489,10 @@ it (the hand-built venv plus that seat's weights) and seeds accordingly:
 
 - The lane seat (`vllm_seat`) binds `agent_model`; a box without it binds the seat's fallback.
 - Every further seat (`extra_vllm_seats`) that the box can run joins the `vllm_seats` roster with its own
-  `kv_cache_server` binding, and never touches `agent_model`. A seat with no store seeds an explicit
+  `kv_cache_server` binding, and never touches `agent_model`. "Can run" adds the operator's part to the lane
+  seat's check: the seat's wrapper scripts must be in the seat directory (`--vllm-seat-dir`, default
+  `<home>/seat`, the same flag `install render` takes), because the installer does not write them and
+  llama-swap would list a seat whose scripts are missing and fail only when it is asked for. A seat with no store seeds an explicit
   storeless opt-out carrying its `storeless_reason` (the measured reason) or, when the tier recorded none,
   the generic one, so a fresh install never ships a config its own `doctor` rejects.
 - The tier's `layers` are seeded as the box can serve them: a layer whose vLLM seat is absent is dropped, and

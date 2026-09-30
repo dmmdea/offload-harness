@@ -67,11 +67,11 @@ type Options struct {
 	// are driven by the same detection.
 	VLLMSeatActive bool
 	// ExtraVLLMSeatsActive names, by seat id, which of the tier's EXTRA vLLM seats
-	// (Profile.ExtraVLLMSeats) this box can run. The caller decides each one with the same
-	// vllmseat.Spec.Detect it uses for the lane seat: the seats share the venv and each
-	// needs its own weights. An extra seat that is absent here is neither rostered nor
-	// bound, and the layer it backs is left out of the seeded layers — the config never
-	// advertises a seat the box cannot serve.
+	// (Profile.ExtraVLLMSeats) this box can run. The caller decides each one with
+	// vllmseat.Spec.DetectExtra: the seats share the venv, and each needs its own weights
+	// and the wrapper scripts its entry runs (the operator installs those). An extra seat
+	// that is absent here is neither rostered nor bound, and the layer it backs is left out
+	// of the seeded layers — the config never advertises a seat the box cannot serve.
 	ExtraVLLMSeatsActive map[string]bool
 }
 

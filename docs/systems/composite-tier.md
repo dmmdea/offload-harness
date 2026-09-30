@@ -69,7 +69,8 @@ Each layer names its seat explicitly, so the values are the reference node's own
 reports MATCH for `layers`, `tiers` and `tier_profile`; a layer seat that names a vLLM seat must equal
 that seat's `max_model_len` (and its `max_num_seqs` as `max_inflight`, when set), or the table is refused
 at parse. What a box seeds and renders depends on which seats it can run, decided per seat by the same
-prerequisite check (`vllmseat.Spec.Detect`: the hand-built venv plus that seat's own weights):
+prerequisite check (`vllmseat.Spec.Detect`: the hand-built venv plus that seat's own weights; for the 35B,
+`DetectExtra` also wants the two wrapper scripts the operator installs, step 4 below):
 
 | the box runs | `layers` | `vllm_seats` and `kv_cache_server` | llama-swap entries |
 |---|---|---|---|
@@ -78,8 +79,8 @@ prerequisite check (`vllmseat.Spec.Detect`: the hand-built venv plus that seat's
 | the 35B only | none | the 35B | the 35B |
 | neither (a plain llama.cpp box) | none | none | neither |
 
-A box that lacks the 35B's weights therefore never advertises the `fast` layer or its seat, and a box
-that lacks the 27B's seeds no layers at all: `single` is the planner-default layer (row 5b below), and a
+A box that lacks the 35B's weights, or the wrapper scripts its entry runs, therefore never advertises the
+`fast` layer or its seat, and a box that lacks the 27B's seeds no layers at all: `single` is the planner-default layer (row 5b below), and a
 layer set that lost it would make the node ineligible for every contract it ran the day before, so the
 box stays a plain box instead. `install render` refuses a layer that names a seat the rendered config
 does not define, for any tier that declares layers.
@@ -97,7 +98,8 @@ The installer detects prerequisites and never builds them, and it does not rende
 
 1. **The vLLM venv** (vLLM 0.29.0; the 27B checkpoint also needs its shipped embedding patch) and the
    `--vllm-venv` / `--hf-home` flags naming it, passed to `install seed`, `install render` and
-   `audit-config` alike (with `--vllm-user` and `--vllm-proxy-host` for the render).
+   `audit-config` alike (with `--vllm-user` and `--vllm-proxy-host` for the render, and `--vllm-seat-dir`
+   to all three when the seat directory is not `<home>/seat`).
 2. **The weights**: exactly one snapshot each under the HF home, `hub/models--ISTA-DASLab--Qwen3.8-27B-3Bit-GSQ`
    and `hub/models--ISTA-DASLab--Qwen3.6-35B-A3B-2Bit-GSQ`. A seat with no snapshot is skipped, with the
    reason printed, and so is its layer.
@@ -105,7 +107,10 @@ The installer detects prerequisites and never builds them, and it does not rende
    polkit rule and prints the two root steps.
 4. **The 35B seat's unit, wrapper scripts and polkit rule.** Its production launch line carries
    `--language-model-only`, which the shared `linux-systemd` run script cannot express, so `install vllm-seat`
-   does not render it (and `install render` warns when its wrappers are missing). Copy the 27B's rendered
+   does not render it. Until its two wrapper scripts are in the seat directory, `install seed` and
+   `install render` leave the 35B and the `fast` layer out and name the missing file: llama-swap does not
+   check that an entry's `cmd` exists when it loads its config, so a seat advertised without them would be
+   listed, bound and layered and would fail only when a contract asked for it. Copy the 27B's rendered
    files under the 35B's unit name and change exactly what differs: the unit is `vllm-35b-seat` (no
    `[Install]` section: llama-swap owns its lifetime); the wrappers are `vllm-35b-seat-run.sh`,
    `vllm-35b-seat-cmd.sh` and `vllm-35b-seat-cmdstop.sh` in the same seat directory (`cmd` and `cmdStop`
@@ -114,8 +119,8 @@ The installer detects prerequisites and never builds them, and it does not rende
    qwen36-35b-a3b-gsq-vllm a2-pool-35b qwen36-35b-gsq`, `--max-num-seqs 8` and `--tool-call-parser
    qwen3_coder`, and add `--language-model-only`; keep the window and utilisation the table records
    (32,768 at `util 0.90`).
-5. **Then** `install render` writes both llama-swap entries and `install seed` writes the layers, the roster
-   and both bindings. `local-offload doctor` prints a storeless-OK line per seat, `offload_status` lists both
+5. **Then** re-run `install seed` and `install render` with the same flags: `install render` writes both
+   llama-swap entries and `install seed` writes the layers, the roster and both bindings. `local-offload doctor` prints a storeless-OK line per seat, `offload_status` lists both
    layers, and a contract with `layer: "fast"` lands on the 35B.
 
 ## The decision table

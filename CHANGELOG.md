@@ -22,8 +22,8 @@ per tier and a card cannot hold two heavy seats, so the schema grew by the small
   reference node's own (the two placement and delegate tests pin the same ones), so `audit-config` reports MATCH for
   `layers`, `tiers` and `tier_profile`. A layer seat naming a vLLM seat must equal that seat's `max_model_len` (and
   `max_num_seqs`, when set) or the table is refused at parse.
-- Seeding is per seat and never advertises what the box cannot serve: an extra seat the box can run (the venv plus
-  its own weights) joins `vllm_seats` with its own binding; a layer whose vLLM seat is absent is dropped; a layer set
+- Seeding is per seat and never advertises what the box cannot serve: an extra seat the box can run (the venv, its
+  own weights and the wrapper scripts the operator installs for it) joins `vllm_seats` with its own binding; a layer whose vLLM seat is absent is dropped; a layer set
   that lost `single` (the planner default, placement row 5b) is not seeded at all; a box with no vLLM prerequisites
   seeds exactly what it did before (`tierseed.ResolveLayers`, `Options.ExtraVLLMSeatsActive`).
 - `install render` emits every vLLM seat of a tier as an ALTERNATIVE of the others inside the residents set
@@ -35,8 +35,13 @@ per tier and a card cannot hold two heavy seats, so the schema grew by the small
   parse (`tierseed.ParseDoc`, so the installer's embedded copy too), never silently dropped. A misspelt `storeless_reason`
   used to seed the generic reason in its place.
 - Not rendered, on purpose: the extra seat's systemd unit, wrapper scripts and polkit rule. Its production launch line
-  carries `--language-model-only`, which the shared linux-systemd run script cannot express; `install render` warns
-  when the wrappers are missing and `docs/systems/composite-tier.md` lists what the operator installs by hand.
+  carries `--language-model-only`, which the shared linux-systemd run script cannot express, so
+  `docs/systems/composite-tier.md` lists what the operator installs by hand. Those scripts are also the seat's
+  prerequisite (`Spec.DetectExtra`): llama-swap does not check that an entry's `cmd` exists when it loads its config,
+  so a box with the venv and the weights but not the scripts would list the seat, seed its layer and fail only when a
+  contract asked for it. Until they are in the seat directory (`--vllm-seat-dir`, default `<home>/seat`, now a flag of
+  `install seed` and `audit-config` as well as `install render`), the seat and its layer are left out and the note
+  names the missing file.
 - The layer regression floor: `TestEveryTierKeepsItsDeclaredLayerSet` (`layerSetTiers`: each composite tier's layers and
   the seat roles each serves) fails by name when a tier stops declaring one, and `extraSeatFloor` pins the extra seat.
   Each was made red against the real regression and the table restored byte for byte: deleting the `fast` layer,

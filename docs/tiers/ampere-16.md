@@ -74,13 +74,15 @@ tier's `config_seed` values stay for the fallback seat.
 
 These seats are served on demand beside the agent-lane seat above, on the same card (ADR 0048
 Amendment 2). None of them is the agent lane: `agent_model` stays the lane seat, and each is reached by
-name, through the layer that names it. When the box has the venv and a seat's weights, the installer
-renders its llama-swap entry and seeds its `vllm_seats` roster entry, its `kv_cache_server` binding and
-its layer; without them the seat, its binding and its layer are all absent, never half-declared. Every
-vLLM seat of a tier is rendered as an ALTERNATIVE of the others (each is sized to most of the card, so
-two cannot be loaded together). The seat's systemd unit, its wrapper scripts (named after the unit:
-`<unit>-run.sh`, `<unit>-cmd.sh`, `<unit>-cmdstop.sh`) and its polkit rule are the operator's step: its
-launch line carries flags the shared unit template cannot express.
+name, through the layer that names it. When the box has the venv, a seat's weights and the seat's two
+wrapper scripts, the installer renders its llama-swap entry and seeds its `vllm_seats` roster entry, its
+`kv_cache_server` binding and its layer; without any of them the seat, its binding and its layer are all
+absent, never half-declared. Every vLLM seat of a tier is rendered as an ALTERNATIVE of the others (each
+is sized to most of the card, so two cannot be loaded together). The seat's systemd unit, its wrapper
+scripts (named after the unit: `<unit>-run.sh`, `<unit>-cmd.sh`, `<unit>-cmdstop.sh`) and its polkit rule
+are the operator's step: its launch line carries flags the shared unit template cannot express. That is
+why the scripts are also the seat's prerequisite: llama-swap does not check that an entry's command
+exists, so a seat advertised without them would fail only when a contract asked for it.
 
 #### `qwen36-35b-a3b-gsq-vllm`
 
@@ -107,7 +109,7 @@ storeless-OK line for the seat instead of failing it for a missing binding (ADR 
 
 **Measured.**
 
-> The ampere-16 reference box (NVIDIA A2 16 GB, 40 W / 1200 MHz lock), vLLM 0.29.0 with NO checkpoint patch (the native Humming W2A16 path loads this 2-bit GSQ MoE), 2026-09-18, register A-100. Qwen3.6-35B-A3B 2-bit GSQ (ISTA-DASLab; 35B total / 3B active, gated-delta-net hybrid). OPERATING POINT: max_model_len 32,768 at util 0.90, eight sequences in flight - KV pool 77,451 tokens, 11.7 GiB on the card alone; 40.8 tok/s single-stream and 170 tok/s across 8 streams. WHAT IT IS FOR: the tier's fast DIGEST layer, not a second general seat. On the digest-8 gate it finishes in 164.8 s against the 27B's 1,597.8 s (8/8, zero fabrications on the grounded set), but judged blind its coverage is 4.65 against the 27B's 8.53 - faithful and shallow - so the 27B stays the single layer's agent, and this seat is reached only by naming the layer or the model: never a seat swap, never the free choice. IT CANNOT SHARE THE CARD with the 27B (11.85 + 11.2 GB of weights against 15.4 GB usable): the two swap in about 50-70 s, so the renderer emits every vLLM seat of a tier as an alternative of the others. WHAT THE INSTALLER DOES NOT DO FOR IT: its production launch line carries --language-model-only, which the shared linux-systemd run script cannot express, so this seat's systemd unit, its wrapper scripts (vllm-35b-seat-run.sh, vllm-35b-seat-cmd.sh, vllm-35b-seat-cmdstop.sh) and its polkit rule are installed by the operator (docs/systems/composite-tier.md) while the installer renders its llama-swap entry and seeds its layer. Cache server: storeless by measurement (register B-01), see storeless_reason.
+> The ampere-16 reference box (NVIDIA A2 16 GB, 40 W / 1200 MHz lock), vLLM 0.29.0 with NO checkpoint patch (the native Humming W2A16 path loads this 2-bit GSQ MoE), 2026-09-18, register A-100. Qwen3.6-35B-A3B 2-bit GSQ (ISTA-DASLab; 35B total / 3B active, gated-delta-net hybrid). OPERATING POINT: max_model_len 32,768 at util 0.90, eight sequences in flight - KV pool 77,451 tokens, 11.7 GiB on the card alone; 40.8 tok/s single-stream and 170 tok/s across 8 streams. WHAT IT IS FOR: the tier's fast DIGEST layer, not a second general seat. On the digest-8 gate it finishes in 164.8 s against the 27B's 1,597.8 s (8/8, zero fabrications on the grounded set), but judged blind its coverage is 4.65 against the 27B's 8.53 - faithful and shallow - so the 27B stays the single layer's agent, and this seat is reached only by naming the layer or the model: never a seat swap, never the free choice. IT CANNOT SHARE THE CARD with the 27B (11.85 + 11.2 GB of weights against 15.4 GB usable): the two swap in about 50-70 s, so the renderer emits every vLLM seat of a tier as an alternative of the others. WHAT THE INSTALLER DOES NOT DO FOR IT: its production launch line carries --language-model-only, which the shared linux-systemd run script cannot express, so this seat's systemd unit, its wrapper scripts (vllm-35b-seat-run.sh, vllm-35b-seat-cmd.sh, vllm-35b-seat-cmdstop.sh) and its polkit rule are installed by the operator (docs/systems/composite-tier.md), and the installer renders its llama-swap entry and seeds its layer only once those wrapper scripts are on the box. Cache server: storeless by measurement (register B-01), see storeless_reason.
 
 ## Media
 

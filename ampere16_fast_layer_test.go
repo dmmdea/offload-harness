@@ -63,7 +63,7 @@ func resolveAmpere16(t *testing.T, lane bool, fast bool) map[string]any {
 }
 
 // A box that runs both seats seeds the two layers, both seats in the roster, and one
-// storeless binding per seat carrying its MEASURED reason — with no hand edit.
+// storeless binding per seat carrying its MEASURED reason, all from the table.
 func TestAmpere16SeedCarriesTheFastLayerAndBothSeats(t *testing.T) {
 	seed := resolveAmpere16(t, true, true)
 

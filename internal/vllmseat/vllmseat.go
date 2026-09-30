@@ -1094,6 +1094,44 @@ func (s Spec) Entry(r Runtime) string { return s.entry(r, "vllm-seat") }
 // every deployed config already carries, do not move.
 func (s Spec) ExtraEntry(r Runtime) string { return s.entry(r, s.Unit) }
 
+// ExtraWrapperPaths are the two scripts an EXTRA seat's llama-swap entry runs, spelled exactly as
+// ExtraEntry writes them. The installer does not write them: the seat's launch line carries flags the
+// shared unit template cannot express (the ampere-16 35B's `--language-model-only`), so its unit, its
+// wrapper scripts and its polkit rule are the operator's step. nil for the WSL launch, whose entry runs
+// one shared PowerShell stub named by the seat id, so there is no per-seat script to install.
+func (s Spec) ExtraWrapperPaths(r Runtime) []string {
+	if s.launch() == LaunchWindowsWSL {
+		return nil
+	}
+	return []string{
+		fmt.Sprintf("%s/%s-cmd.sh", r.SeatDir, s.Unit),
+		fmt.Sprintf("%s/%s-cmdstop.sh", r.SeatDir, s.Unit),
+	}
+}
+
+// DetectExtra is Detect for an EXTRA seat: the venv and the seat's own weights (Detect), and the
+// wrapper scripts its entry runs (ExtraWrapperPaths). Those scripts are not installer output, and
+// llama-swap does not check that an entry's `cmd` exists when it loads its config, so a seat
+// advertised without them sits in the roster and fails only when a contract asks for it. A box
+// therefore advertises the seat (rosters it, binds it, renders its entry, seeds the layer that names
+// it) only once the operator has installed them, and a skip says which file is missing.
+func (s Spec) DetectExtra(r Runtime) (bool, string) {
+	if ok, why := s.Detect(r); !ok {
+		return false, why
+	}
+	if s.launch() != LaunchWindowsWSL && r.SeatDir == "" {
+		return false, "no seat directory to look for the seat's wrapper scripts in"
+	}
+	for _, p := range s.ExtraWrapperPaths(r) {
+		host := r.hostPath(p)
+		if fi, err := os.Stat(host); err != nil || fi.IsDir() {
+			return false, "no wrapper script at " + filepath.ToSlash(host) + ": an extra seat's unit, wrapper scripts " +
+				"and polkit rule are installed by hand (docs/systems/composite-tier.md)"
+		}
+	}
+	return true, ""
+}
+
 // entry renders the block with the wrapper scripts named <base>-cmd.sh / <base>-cmdstop.sh.
 func (s Spec) entry(r Runtime, base string) string {
 	var b strings.Builder

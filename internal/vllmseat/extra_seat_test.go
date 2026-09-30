@@ -1,6 +1,8 @@
 package vllmseat
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -177,5 +179,97 @@ func TestExtraEntryUsesPerUnitWrappers(t *testing.T) {
 	}
 	if !strings.Contains(norm(got), "checkEndpoint: /health") || !strings.Contains(norm(primary), "checkEndpoint: /health") {
 		t.Error("an entry lost its health check")
+	}
+}
+
+func writeScript(t *testing.T, path string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// An extra seat's wrapper scripts are not installer output: its launch line carries flags the
+// shared unit template cannot express, so its unit, wrappers and polkit rule are the operator's
+// step. llama-swap does not check that an entry's `cmd` exists when it loads its config, so a
+// seat advertised without them is listed and fails only when a contract asks for it. DetectExtra
+// is Detect plus the two files the seat's own entry runs: a box advertises the seat (rosters it,
+// binds it, seeds the layer that names it) only once the operator has put them there.
+func TestDetectExtraNeedsTheWrappersTheInstallerDoesNotWrite(t *testing.T) {
+	root := t.TempDir()
+	slash := filepath.ToSlash(root)
+	r := rt()
+	r.VenvDir, r.HFHome, r.SeatDir = slash+"/vllm-env", slash+"/hf", slash+"/seat"
+	s := extraSeat()
+
+	if ok, _ := s.DetectExtra(r); ok {
+		t.Fatal("a box with nothing installed runs the seat")
+	}
+	// The venv and the weights: everything Detect asks for.
+	writeScript(t, filepath.Join(root, "vllm-env", "bin", "vllm"))
+	if err := os.MkdirAll(filepath.Join(root, "hf", s.ModelRepo, "snapshots", "abc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if ok, why := s.Detect(r); !ok {
+		t.Fatalf("the control box must pass Detect: %s", why)
+	}
+	cmd, stop := slash+"/seat/vllm-35b-seat-cmd.sh", slash+"/seat/vllm-35b-seat-cmdstop.sh"
+
+	ok, why := s.DetectExtra(r)
+	if ok || !strings.Contains(why, cmd) || !strings.Contains(why, "by hand") {
+		t.Fatalf("the venv and the weights without the wrappers must not run the seat, and the reason must name the missing file and say what to do; got %v %q", ok, why)
+	}
+	writeScript(t, filepath.Join(root, "seat", "vllm-35b-seat-cmd.sh"))
+	if ok, why := s.DetectExtra(r); ok || !strings.Contains(why, stop) {
+		t.Fatalf("one of the two wrappers is not enough; got %v %q", ok, why)
+	}
+	// A directory of that name is not a script.
+	if err := os.MkdirAll(filepath.Join(root, "seat", "vllm-35b-seat-cmdstop.sh"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if ok, _ := s.DetectExtra(r); ok {
+		t.Fatal("a directory stood in for a wrapper script")
+	}
+	if err := os.Remove(filepath.Join(root, "seat", "vllm-35b-seat-cmdstop.sh")); err != nil {
+		t.Fatal(err)
+	}
+	writeScript(t, filepath.Join(root, "seat", "vllm-35b-seat-cmdstop.sh"))
+	if ok, why := s.DetectExtra(r); !ok {
+		t.Fatalf("both wrappers on the box: %s", why)
+	}
+	// No seat directory to look in is a refusal that says so, not a stat of the filesystem root.
+	noDir := r
+	noDir.SeatDir = ""
+	if ok, why := s.DetectExtra(noDir); ok || !strings.Contains(why, "seat directory") {
+		t.Fatalf("an empty seat directory must be refused, saying so; got %v %q", ok, why)
+	}
+	// The wrappers alone are not the seat: the prerequisites Detect checks still apply.
+	if err := os.RemoveAll(filepath.Join(root, "hf")); err != nil {
+		t.Fatal(err)
+	}
+	if ok, why := s.DetectExtra(r); ok || !strings.Contains(why, "snapshot") {
+		t.Fatalf("wrappers without the weights must not run the seat and must say the weights are missing; got %v %q", ok, why)
+	}
+}
+
+// ExtraWrapperPaths is what DetectExtra looks for, and ExtraEntry is what llama-swap runs: the two
+// must name the same files, or the box checks one pair of scripts and starts another.
+func TestExtraWrapperPathsAreTheFilesTheEntryRuns(t *testing.T) {
+	r := rt()
+	s := extraSeat()
+	paths := s.ExtraWrapperPaths(r)
+	entry := s.ExtraEntry(r)
+	if len(paths) != 2 || !strings.Contains(entry, "cmd: "+paths[0]+"\n") || !strings.Contains(entry, "cmdStop: "+paths[1]+"\n") {
+		t.Fatalf("ExtraWrapperPaths = %v, but the entry runs:\n%s", paths, entry)
+	}
+	// The WSL launch drives one shared PowerShell stub named by the seat id: no per-seat script
+	// exists for an operator to install, so nothing is required and Detect alone decides.
+	w := s
+	w.Launch = LaunchWindowsWSL
+	if got := w.ExtraWrapperPaths(r); got != nil {
+		t.Errorf("a WSL-launched seat has no per-seat wrapper, got %v", got)
 	}
 }

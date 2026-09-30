@@ -2,10 +2,8 @@ package main
 
 import (
 	"encoding/json"
-	"os"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -393,10 +391,11 @@ func TestRenderGateStillRefusesTheOperatorRules(t *testing.T) {
 	}
 }
 
-// A rendered ampere-16 install serves the fast layer with no hand edit: when the box runs the
-// 35B, its llama-swap entry is in the rendered config, alternated with the 27B (they cannot
-// share the card), the layer names it, and the composition check — now run for any tier that
-// declares layers, not only composite ones — finds every layer seat defined.
+// A rendered ampere-16 install carries the fast layer's seat when the box runs the 35B (the
+// venv, its weights and the wrapper scripts the operator installs): its llama-swap entry is in
+// the rendered config, alternated with the 27B (they cannot share the card), the layer names
+// it, and the composition check — now run for any tier that declares layers, not only
+// composite ones — finds every layer seat defined.
 func TestAmpere16RenderServesTheFastLayerSeat(t *testing.T) {
 	res, err := deriveRender(embeddedProfiles, renderReq("ampere-16", "linux", pinFor(t, embeddedProfiles, "ampere-16", true, true)))
 	if err != nil {
@@ -505,50 +504,6 @@ func TestReplayPinsTheExtraSeatsAStampRecorded(t *testing.T) {
 	}
 	if again.Config != res.Config {
 		t.Fatal("replaying a stamp does not reproduce the config it was taken from")
-	}
-}
-
-// An extra seat's llama-swap entry is rendered, but its unit and wrapper scripts are the
-// operator's step, and llama-swap does not check that an entry's `cmd` exists when it loads
-// its config — so a seat whose wrappers were never installed sits in the roster and fails only
-// when asked for. The render says so at install time, while the fix is cheap.
-func TestRenderWarnsWhenAnExtraSeatsWrappersAreNotInstalled(t *testing.T) {
-	extras := pinFor(t, embeddedProfiles, "ampere-16", true, true).Extras
-	if len(extras) != 1 {
-		t.Fatalf("ampere-16 pins %d extra seats, want the 35B", len(extras))
-	}
-	dir := t.TempDir()
-	var buf strings.Builder
-	warnMissingExtraSeatWrappers(extras, dir, runtime.GOOS, &buf)
-	for _, want := range []string{"vllm-35b-seat-cmd.sh", "vllm-35b-seat-cmdstop.sh", "by hand", "qwen36-35b-a3b-gsq-vllm", "2 extra vLLM seat wrapper"} {
-		if !strings.Contains(buf.String(), want) {
-			t.Errorf("the warning is missing %q:\n%s", want, buf.String())
-		}
-	}
-	// Rendering for another machine: a local miss means nothing.
-	buf.Reset()
-	other := "windows"
-	if runtime.GOOS == "windows" {
-		other = "linux"
-	}
-	warnMissingExtraSeatWrappers(extras, dir, other, &buf)
-	if buf.Len() != 0 {
-		t.Errorf("warned about another machine's directory:\n%s", buf.String())
-	}
-	// Installed: silence.
-	for _, f := range []string{"vllm-35b-seat-cmd.sh", "vllm-35b-seat-cmdstop.sh"} {
-		if err := os.WriteFile(filepath.Join(dir, f), []byte("#!/bin/sh\n"), 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
-	warnMissingExtraSeatWrappers(extras, dir, runtime.GOOS, &buf)
-	if buf.Len() != 0 {
-		t.Errorf("warned although both wrappers are installed:\n%s", buf.String())
-	}
-	// No extra seats (every other tier): nothing, ever.
-	warnMissingExtraSeatWrappers(nil, dir, runtime.GOOS, &buf)
-	if buf.Len() != 0 {
-		t.Errorf("warned for a tier with no extra seats:\n%s", buf.String())
 	}
 }
 

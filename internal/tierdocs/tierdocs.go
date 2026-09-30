@@ -595,13 +595,15 @@ func extraSeatsSection(p Profile) string {
 	b.WriteString("\n### Extra vLLM seats\n\n" +
 		"These seats are served on demand beside the agent-lane seat above, on the same card (ADR 0048\n" +
 		"Amendment 2). None of them is the agent lane: `agent_model` stays the lane seat, and each is reached by\n" +
-		"name, through the layer that names it. When the box has the venv and a seat's weights, the installer\n" +
-		"renders its llama-swap entry and seeds its `vllm_seats` roster entry, its `kv_cache_server` binding and\n" +
-		"its layer; without them the seat, its binding and its layer are all absent, never half-declared. Every\n" +
-		"vLLM seat of a tier is rendered as an ALTERNATIVE of the others (each is sized to most of the card, so\n" +
-		"two cannot be loaded together). The seat's systemd unit, its wrapper scripts (named after the unit:\n" +
-		"`<unit>-run.sh`, `<unit>-cmd.sh`, `<unit>-cmdstop.sh`) and its polkit rule are the operator's step: its\n" +
-		"launch line carries flags the shared unit template cannot express.\n")
+		"name, through the layer that names it. When the box has the venv, a seat's weights and the seat's two\n" +
+		"wrapper scripts, the installer renders its llama-swap entry and seeds its `vllm_seats` roster entry, its\n" +
+		"`kv_cache_server` binding and its layer; without any of them the seat, its binding and its layer are all\n" +
+		"absent, never half-declared. Every vLLM seat of a tier is rendered as an ALTERNATIVE of the others (each\n" +
+		"is sized to most of the card, so two cannot be loaded together). The seat's systemd unit, its wrapper\n" +
+		"scripts (named after the unit: `<unit>-run.sh`, `<unit>-cmd.sh`, `<unit>-cmdstop.sh`) and its polkit rule\n" +
+		"are the operator's step: its launch line carries flags the shared unit template cannot express. That is\n" +
+		"why the scripts are also the seat's prerequisite: llama-swap does not check that an entry's command\n" +
+		"exists, so a seat advertised without them would fail only when a contract asked for it.\n")
 	for _, e := range p.ExtraVLLMSeats {
 		fmt.Fprintf(&b, "\n#### `%s`\n\n| setting | value | what it controls |\n|---|---|---|\n", e.ID)
 		fmt.Fprintf(&b, "| id | `%s` | the llama-swap model id, `--served-model-name`, and what a layer seat names |\n", e.ID)

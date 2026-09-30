@@ -164,7 +164,8 @@ grew, by the smallest steps that carry what the box actually runs.
 4. `n_cpu_moe_max`: the tier's measured spill (H-01, below).
 
 **How a box resolves them.** Whether a box runs a seat is decided per seat, by the check the lane seat already had
-(the hand-built venv plus that seat's own weights). A running extra seat joins the `vllm_seats` roster with its own
+(the hand-built venv plus that seat's own weights; an extra seat also needs the wrapper scripts its entry runs, which
+the operator installs, below). A running extra seat joins the `vllm_seats` roster with its own
 binding; a layer that names a seat the box does not run is dropped; and `single`, the planner-default layer
 (placement row 5b), is what keeps the rest placeable, so a set that lost it is not seeded at all and the box stays a
 plain box. A box with no vLLM prerequisites seeds exactly what it seeded before layers existed.
@@ -181,9 +182,13 @@ declares layers, not only for one that composes, so a layer routed to an undefin
 **What the installer does not do for an extra seat.** It renders the llama-swap entry, the roster entry, the binding
 and the layer, but not the seat's systemd unit, wrapper scripts or polkit rule: the seat's production launch line
 carries `--language-model-only`, which the shared linux-systemd run script cannot express, so rendering it there
-would ship an approximation of a measured configuration. `install render` warns when the wrappers are missing, and
-[composite-tier.md](../../systems/composite-tier.md) lists what the operator installs. Teaching the run script the
-flag is a change to the seat templates and is left to the change that owns them.
+would ship an approximation of a measured configuration. Because they are the operator's step they are also the
+seat's prerequisite (`Spec.DetectExtra`): llama-swap does not check that an entry's `cmd` exists when it loads its
+config, so a seat advertised without them would be rostered, bound and layered and would fail only when a contract
+asked for it. Until the two wrapper scripts are in the seat directory, `install seed` and `install render` leave the
+seat and its layer out and name the missing file; [composite-tier.md](../../systems/composite-tier.md) lists what the
+operator installs. Teaching the run script the flag is a change to the seat templates and is left to the change that
+owns them.
 
 **Gates.** `TestEveryTierKeepsItsDeclaredLayerSet` is the layer counterpart of `TestEveryTierCanSeatAModelUnderVLLM`:
 `layerSetTiers` records each composite tier's layers and the seat roles each serves, and a tier that stops declaring

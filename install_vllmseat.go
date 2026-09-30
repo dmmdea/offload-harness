@@ -97,15 +97,19 @@ func vllmSeatFor(p servingProfile, home string, f vllmRuntimeFlags) (*vllmseat.S
 }
 
 // extraVLLMSeatsFor is vllmSeatFor for a tier's EXTRA seats (`extra_vllm_seats`): each one
-// renders only when THIS box can run it — the hand-built venv plus that seat's own weights,
-// the same detection the lane seat gets, with the same deployment inputs. A seat that cannot
-// run is skipped with the reason printed, and the layer it backs is left out of the seeded
-// layers (tierseed.ResolveLayers), so the box never advertises a seat it cannot serve. The
-// lane seat's presence is irrelevant here: the seats are independent prerequisites.
+// renders only when THIS box can run it — the hand-built venv, that seat's own weights and the
+// wrapper scripts its entry runs (vllmseat.Spec.DetectExtra), with the same deployment inputs
+// the lane seat gets. A seat that cannot run is skipped with the reason printed, and the layer
+// it backs is left out of the seeded layers (tierseed.ResolveLayers), so the box never
+// advertises a seat it cannot serve. The lane seat's presence is irrelevant here: the seats are
+// independent prerequisites.
 //
-// What the installer renders for an extra seat is its llama-swap ENTRY (the render's job);
-// its systemd unit and wrapper scripts are NOT rendered, because the seat's launch line
+// What the installer renders for an extra seat is its llama-swap ENTRY (the render's job); its
+// systemd unit, wrapper scripts and polkit rule are NOT rendered, because the seat's launch line
 // carries flags the shared unit template cannot express (the 35B's `--language-model-only`).
+// They are the operator's step, so they are also the prerequisite: llama-swap does not check that
+// an entry's `cmd` exists when it loads its config, so a seat advertised without them is listed
+// and fails only when a contract asks for it.
 func extraVLLMSeatsFor(p servingProfile, home string, f vllmRuntimeFlags) []*vllmseat.Spec {
 	var out []*vllmseat.Spec
 	if len(p.ExtraVLLMSeats) == 0 {
@@ -125,7 +129,7 @@ func extraVLLMSeatsFor(p servingProfile, home string, f vllmRuntimeFlags) []*vll
 			skip("--vllm-user and --vllm-proxy-host were not supplied")
 			continue
 		}
-		if ok, why := s.Detect(rt); !ok {
+		if ok, why := s.DetectExtra(rt); !ok {
 			skip(why)
 			continue
 		}
@@ -143,8 +147,9 @@ func extraVLLMSeatsFor(p servingProfile, home string, f vllmRuntimeFlags) []*vll
 // whether this box can run the tier's lane seat and each of its extra seats. It mirrors what
 // `install render` decides (vllmSeatFor / extraVLLMSeatsFor) minus the two deployment flags
 // only the render needs, so the binding and the rendered llama-swap entry agree by
-// construction — pass the same venv and HF home to both, or the config will name a model
-// llama-swap never serves. Every skip is said out loud, on note.
+// construction — pass the same venv, HF home and seat directory to both, or the config will name
+// a model llama-swap never serves. An extra seat also needs its wrapper scripts in the seat
+// directory (Spec.DetectExtra). Every skip is said out loud, on note.
 func detectVLLMSeats(p tierseed.Profile, rt vllmseat.Runtime, note io.Writer) (lane bool, extras map[string]bool) {
 	extras = map[string]bool{}
 	if p.VLLMSeat != nil {
@@ -154,7 +159,7 @@ func detectVLLMSeats(p tierseed.Profile, rt vllmseat.Runtime, note io.Writer) (l
 		}
 	}
 	for _, e := range p.ExtraVLLMSeats {
-		ok, why := e.Detect(rt)
+		ok, why := e.DetectExtra(rt)
 		extras[e.ID] = ok
 		if !ok {
 			fmt.Fprintf(note, "NOTE  extra vLLM seat %q unavailable (%s); the layer it backs is not seeded\n", e.ID, why)
