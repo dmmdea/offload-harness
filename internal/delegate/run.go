@@ -2137,6 +2137,8 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 	// base: the tick used to drop these on the floor, so a wait that never
 	// reached a single node reported "0 refusal(s)".
 	probeFails := map[string]*probeFailTally{}
+	// answered is every base whose probe returned a view at least once in this wait.
+	answered := map[string]bool{}
 	var lease gpulease.Info
 	// overflow: a deal kept this subtask off the local seat because it read busy, and
 	// handed it over because every node with room was already dealt to its headroom.
@@ -2239,6 +2241,29 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 			tickCtx, cancelTick := context.WithTimeout(ctx, probeTickBound(deadline))
 			views, bases, _, failed := r.fetchViewsDetailed(tickCtx)
 			cancelTick()
+			if !time.Now().Before(deadline) {
+				// The tick's probe is bounded by the wait's own deadline, so a probe
+				// still in flight when the wait ended may have failed because the WAIT
+				// ended, not because its node is down. For a node that answered
+				// earlier in this wait that is no evidence at all: keep what the
+				// previous tick learned (cooling down, held out) for the defer's
+				// reason. A node that never answered is still named: nobody could ask it.
+				for base, why := range failed {
+					if answered[base] {
+						continue
+					}
+					f := probeFails[base]
+					if f == nil {
+						f = &probeFailTally{}
+						probeFails[base] = f
+					}
+					f.n, f.last = f.n+1, why
+				}
+				break
+			}
+			for _, b := range bases {
+				answered[b] = true
+			}
 			// A base that did not answer is not a node with no room — it is a
 			// node nobody could ask. Kept per base so the defer can say so.
 			for base, why := range failed {

@@ -253,3 +253,35 @@ func TestCapacityDeferNamesANodeThatWasCoolingDown(t *testing.T) {
 		}
 	}
 }
+
+// A node that answered earlier in the wait and whose last probe is cut off by the
+// wait's own deadline is described by what it last said (cooling down after its
+// refusal), never as a node whose probe failed: the deadline ended that probe, not
+// the node. A 300 ms health answer makes the fourth probe of a 1 s wait straddle
+// the deadline on every run, which is the shape a slow host (or -race) hits at
+// random with the faster fixtures.
+func TestCapacityDeferKeepsTheLastAnswerWhenTheWaitEndsMidProbe(t *testing.T) {
+	compressPolls(t, 5*time.Millisecond, time.Second)
+	compressWait(t, 20*time.Millisecond, 0)
+	node, url := refusingNode(t, "node-a", http.StatusServiceUnavailable, func(f *fakeNode) {
+		f.dispatchRetryAfter = "5"
+		f.maxQueueDepth = 4
+		f.healthDelay = 300 * time.Millisecond
+	})
+	cfg := testCfg(t)
+	cfg.AgentPlacementWaitSec = 1
+	results, sum, err := RunWith(t.Context(), cfg, neverLocal(t), []core.AgentContract{plainContract()}, "remote", []string{url}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pr := results[0]
+	if sum.Deferred != 1 || pr.Result.DeferClass != core.DeferClassCapacity || node.dispatches.Load() != 1 {
+		t.Fatalf("summary = %+v class = %q dispatches = %d, want one capacity defer after ONE ask", sum, pr.Result.DeferClass, node.dispatches.Load())
+	}
+	if !strings.Contains(pr.Result.Reason, "cooling down after its own refusal") {
+		t.Errorf("reason = %q: the wait's deadline cut the last probe of a node that had answered, and the reason lost what the node said", pr.Result.Reason)
+	}
+	if strings.Contains(pr.Result.Reason, "probe(s) failed during the wait") {
+		t.Errorf("reason = %q names a probe failure that the wait's own deadline caused", pr.Result.Reason)
+	}
+}
