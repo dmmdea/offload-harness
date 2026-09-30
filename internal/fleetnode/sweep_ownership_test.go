@@ -16,6 +16,7 @@ package fleetnode
 
 import (
 	"context"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -163,6 +164,16 @@ func wantCounts(t *testing.T, swept, kept, wantSwept, wantKept int) {
 	if swept != wantSwept || kept != wantKept {
 		t.Errorf("swept/kept = %d/%d, want %d/%d", swept, kept, wantSwept, wantKept)
 	}
+}
+
+// logLineAbout returns the first line of out that mentions what, or "".
+func logLineAbout(out, what string) string {
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, what) {
+			return line
+		}
+	}
+	return ""
 }
 
 // The incident: a local run in flight in a live process, fleet-serve restarts.
@@ -353,7 +364,9 @@ func TestSweepFailedRemovalIsNeitherSweptNorKept(t *testing.T) {
 
 // The age rule is "older than jobdir.MaxRunLifetime", strictly: a dir exactly
 // that old is still kept, one a second older is not, and a dir stamped in the
-// future (a clock that stepped back) counts as young.
+// future (a clock that stepped back) counts as young. Only the removal by age
+// carries a reason, because it is the one decision that can end a run that is
+// still going.
 func TestJudgeAgeBoundary(t *testing.T) {
 	_, jobs := sweepFixture(t)
 	d := makeJobDir(t, jobs, jobDirSpec{name: "agent-local-707", owner: os.Getpid()})
@@ -363,18 +376,23 @@ func TestJudgeAgeBoundary(t *testing.T) {
 	}
 	born := fi.ModTime()
 	cases := []struct {
-		name string
-		now  time.Time
-		want pipelineJobDirFate
+		name       string
+		now        time.Time
+		want       pipelineJobDirFate
+		wantReason bool
 	}{
-		{"just made", born, pipelineJobDirInUse},
-		{"exactly the maximum", born.Add(jobdir.MaxRunLifetime), pipelineJobDirInUse},
-		{"a second past it", born.Add(jobdir.MaxRunLifetime + time.Second), pipelineJobDirOrphaned},
-		{"stamped in the future", born.Add(-time.Hour), pipelineJobDirInUse},
+		{"just made", born, pipelineJobDirInUse, false},
+		{"exactly the maximum", born.Add(jobdir.MaxRunLifetime), pipelineJobDirInUse, false},
+		{"a second past it", born.Add(jobdir.MaxRunLifetime + time.Second), pipelineJobDirOrphaned, true},
+		{"stamped in the future", born.Add(-time.Hour), pipelineJobDirInUse, false},
 	}
 	for _, c := range cases {
-		if got := judgePipelineJobDir(d, filepath.Base(d), c.now); got != c.want {
+		got, why := judgePipelineJobDir(d, filepath.Base(d), c.now)
+		if got != c.want {
 			t.Errorf("%s: fate = %d, want %d", c.name, got, c.want)
+		}
+		if (why != "") != c.wantReason {
+			t.Errorf("%s: reason = %q, want a reason: %v", c.name, why, c.wantReason)
 		}
 	}
 }
@@ -384,8 +402,116 @@ func TestJudgeAgeBoundary(t *testing.T) {
 func TestJudgeAnEntryThatVanishedIsNeitherOrphanedNorInUse(t *testing.T) {
 	_, jobs := sweepFixture(t)
 	gone := filepath.Join(jobs, "agent-local-808")
-	if got := judgePipelineJobDir(gone, "agent-local-808", time.Now()); got != pipelineJobDirGone {
+	if got, _ := judgePipelineJobDir(gone, "agent-local-808", time.Now()); got != pipelineJobDirGone {
 		t.Fatalf("fate of a vanished agent-local entry = %d, want %d (gone)", got, pipelineJobDirGone)
+	}
+}
+
+// A removal decided by age alone is the one the sweep can make against a run
+// that is still going (its owner alive, or no owner to ask), so it says so:
+// the dir, its age and what is known of its owner. The ordinary removals (a
+// dead owner, fleet-serve's own) and the keeps stay in the counts and out of
+// the log, and the line does not call the dir a crash's leftover, because here
+// it may not be.
+func TestSweepSaysWhyItRemovedADirByAge(t *testing.T) {
+	logs := captureLog(t)
+	cfg, jobs := sweepFixture(t)
+	me := os.Getpid()
+	makeJobDir(t, jobs, jobDirSpec{name: "agent-local-51", owner: me, age: pastMaxRunLifetime})
+	makeJobDir(t, jobs, jobDirSpec{name: "agent-local-52", age: pastMaxRunLifetime})
+	makeJobDir(t, jobs, jobDirSpec{name: "agent-local-53", owner: deadOwnerPID(t)})
+	makeJobDir(t, jobs, jobDirSpec{name: "agent-54"})
+	makeJobDir(t, jobs, jobDirSpec{name: "agent-local-55", owner: me})
+
+	swept, kept := sweep(t, cfg)
+
+	wantCounts(t, swept, kept, 4, 1)
+	out := logs.String()
+	alive := logLineAbout(out, "agent-local-51")
+	if alive == "" {
+		t.Fatalf("a live owner's dir was removed for its age with nothing logged; log = %q", out)
+	}
+	for _, want := range []string{"removing", "still alive", "process " + strconv.Itoa(me), "old"} {
+		if !strings.Contains(alive, want) {
+			t.Errorf("line for the live owner's dir = %q, want it to contain %q", alive, want)
+		}
+	}
+	if unmarked := logLineAbout(out, "agent-local-52"); !strings.Contains(unmarked, "no usable owner marker") {
+		t.Errorf("line for the unmarked dir = %q, want it to say it has no usable owner marker", unmarked)
+	}
+	for _, quiet := range []string{"agent-local-53", "agent-54", "agent-local-55"} {
+		if line := logLineAbout(out, quiet); line != "" {
+			t.Errorf("%s is an ordinary removal or keep and must not be logged, got %q", quiet, line)
+		}
+	}
+}
+
+// An entry whose modification time cannot be read cannot be judged. It is kept
+// (never removed on a guess), reported as an error that names it, and counted
+// as neither swept nor kept: "kept" is the number of dirs a run may still be
+// using, and this one is not known to be. The rest of the sweep goes on.
+func TestSweepReportsAnEntryItCannotInspectAndKeepsIt(t *testing.T) {
+	cfg, jobs := sweepFixture(t)
+	blind := makeJobDir(t, jobs, jobDirSpec{name: "agent-local-61"})
+	seen := makeJobDir(t, jobs, jobDirSpec{name: "agent-local-62"})
+	realLstat := lstatPipelineJob
+	t.Cleanup(func() { lstatPipelineJob = realLstat })
+	lstatPipelineJob = func(p string) (os.FileInfo, error) {
+		if p == blind {
+			return nil, &fs.PathError{Op: "lstat", Path: p, Err: fs.ErrPermission}
+		}
+		return realLstat(p)
+	}
+
+	swept, kept, err := SweepOrphanedPipelineJobs(cfg)
+
+	if !exists(blind) {
+		t.Error("an entry that could not be inspected was removed")
+	}
+	wantDocIntact(t, jobs, "agent-local-61")
+	if !exists(seen) {
+		t.Error("the sweep stopped at the entry it could not inspect")
+	}
+	if err == nil || !strings.Contains(err.Error(), "agent-local-61") {
+		t.Errorf("err = %v, want it to report agent-local-61 as one the sweep could not inspect", err)
+	}
+	wantCounts(t, swept, kept, 0, 1)
+}
+
+// Every removal that failed is reported, not just the first: a dir fleet-serve
+// could not remove refuses its job id until someone removes it by hand, and the
+// operator needs each name to do that.
+func TestSweepReportsEveryRemovalThatFailed(t *testing.T) {
+	cfg, jobs := sweepFixture(t)
+	first := makeJobDir(t, jobs, jobDirSpec{name: "agent-71"})
+	second := makeJobDir(t, jobs, jobDirSpec{name: "accel-72"})
+	healthy := makeJobDir(t, jobs, jobDirSpec{name: "web-73"})
+	defer blockRemoval(t, first)()
+	defer blockRemoval(t, second)()
+
+	swept, kept, err := SweepOrphanedPipelineJobs(cfg)
+
+	if err == nil {
+		t.Fatal("two failed removals must be reported as an error")
+	}
+	for _, name := range []string{"agent-71", "accel-72"} {
+		if !strings.Contains(err.Error(), name) {
+			t.Errorf("err = %q, want it to name %s", err, name)
+		}
+	}
+	if exists(healthy) {
+		t.Error("a removable dir was left because others failed")
+	}
+	wantCounts(t, swept, kept, 1, 0)
+}
+
+// The fate nothing set is the one that keeps the entry: a verdict that was
+// never reached (an early return, a fate added without a case in the sweep)
+// must not be a removal.
+func TestPipelineJobDirFateZeroValueIsNotARemoval(t *testing.T) {
+	var unset pipelineJobDirFate
+	if unset == pipelineJobDirOrphaned {
+		t.Fatal("the zero value of pipelineJobDirFate is the removal fate")
 	}
 }
 

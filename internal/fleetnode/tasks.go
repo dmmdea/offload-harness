@@ -14,7 +14,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -1146,11 +1148,18 @@ func pipelineInjectRefs(jobSpec map[string]json.RawMessage, fetched map[string]s
 // and the reason the unmarked rule exists beside the marked one: a sweep can
 // list a delegator's dir between its creation and its marker.
 //
-// A kept entry is a decision, never an error; a removal that fails is counted
-// as neither removed nor kept. A per-entry removal failure (e.g. a locked file)
-// is collected but does not abort the sweep of the REST of the entries — one
-// bad directory blocking one job_spec.id forever is a much smaller failure than
-// a startup crash over it.
+// A removal decided by age alone is the one the sweep can make against a run
+// that is still going (its owner alive, or no owner to ask), so it logs the dir,
+// its age and what is known of its owner before removing it. The ordinary
+// removals (a dead owner, fleet-serve's own) and the keeps are in the counts
+// only.
+//
+// A kept entry is a decision, never an error. An entry the sweep cannot judge
+// (its modification time cannot be read) is kept and reported as an error, and
+// a removal that fails is reported the same way; both are counted as neither
+// removed nor kept. Every such failure is collected (errors.Join) and none
+// aborts the sweep of the REST of the entries — one bad directory blocking one
+// job_spec.id forever is a much smaller failure than a startup crash over it.
 func SweepOrphanedPipelineJobs(cfg config.Config) (swept, kept int, err error) {
 	dir := filepath.Join(cfg.BaseDir(), "pipeline-jobs")
 	entries, rerr := os.ReadDir(dir)
@@ -1161,58 +1170,89 @@ func SweepOrphanedPipelineJobs(cfg config.Config) (swept, kept int, err error) {
 		return 0, 0, fmt.Errorf("sweep pipeline-jobs: reading %s: %w", dir, rerr)
 	}
 	now := time.Now()
-	var firstErr error
+	var failures []error
 	for _, e := range entries {
 		p := filepath.Join(dir, e.Name())
-		switch judgePipelineJobDir(p, e.Name(), now) {
+		fate, why := judgePipelineJobDir(p, e.Name(), now)
+		switch fate {
 		case pipelineJobDirInUse:
 			kept++
 			continue
 		case pipelineJobDirGone:
 			continue
+		case pipelineJobDirOrphaned:
+			// Removed below.
+		default:
+			// pipelineJobDirUnjudged, or a fate added without a case here. Either
+			// way the entry stays: nothing is removed that has not been judged.
+			if why == "" {
+				why = fmt.Sprintf("no verdict (%d)", fate)
+			}
+			failures = append(failures, fmt.Errorf("sweep pipeline-jobs: keeping %s, which could not be judged: %s", p, why))
+			continue
+		}
+		if why != "" {
+			log.Printf("fleet: sweep pipeline-jobs: removing %s: %s", e.Name(), why)
 		}
 		if rmErr := os.RemoveAll(p); rmErr != nil {
-			if firstErr == nil {
-				firstErr = fmt.Errorf("sweep pipeline-jobs: removing %s: %w", p, rmErr)
-			}
+			failures = append(failures, fmt.Errorf("sweep pipeline-jobs: removing %s: %w", p, rmErr))
 			continue
 		}
 		swept++
 	}
-	return swept, kept, firstErr
+	return swept, kept, errors.Join(failures...)
 }
 
-// pipelineJobDirFate is what the startup sweep decides for one entry.
+// pipelineJobDirFate is what the startup sweep decides for one entry. The zero
+// value keeps the entry: a verdict that nothing set must never remove a dir.
 type pipelineJobDirFate int
 
 const (
-	pipelineJobDirOrphaned pipelineJobDirFate = iota // remove it
+	pipelineJobDirUnjudged pipelineJobDirFate = iota // keep it and report it: it could not be judged (the zero value, on purpose)
 	pipelineJobDirInUse                              // keep it: a delegator's run may still be using it
 	pipelineJobDirGone                               // it vanished while the sweep was looking at it (its run ended): nothing to do, nothing to count
+	pipelineJobDirOrphaned                           // remove it
 )
 
+// lstatPipelineJob reads a job dir's own modification time. A var only so a test
+// can make the read fail, which no portable fixture can.
+var lstatPipelineJob = os.Lstat
+
 // judgePipelineJobDir applies SweepOrphanedPipelineJobs's ownership rules to
-// the entry at path, named name, as of now.
-func judgePipelineJobDir(path, name string, now time.Time) pipelineJobDirFate {
+// the entry at path, named name, as of now. The string is set for a removal by
+// age (why the sweep takes a dir whose run may still be going) and for
+// pipelineJobDirUnjudged (what stopped the judgement).
+func judgePipelineJobDir(path, name string, now time.Time) (pipelineJobDirFate, string) {
 	pid, marked := jobdir.ReadOwner(path)
 	if !marked && !strings.HasPrefix(name, jobdir.LocalRunPrefix) {
-		return pipelineJobDirOrphaned // fleet-serve's own
+		return pipelineJobDirOrphaned, "" // fleet-serve's own
 	}
 	if marked && !gpulease.PIDAlive(pid) {
-		return pipelineJobDirOrphaned // its owner has exited
+		return pipelineJobDirOrphaned, "" // its owner has exited
 	}
 	// A live owner, or no owner to ask (a delegator older than the marker, or
 	// one caught before its marker was down): how long the directory has been
 	// there decides. The time is read again here, not taken from the listing.
-	fi, serr := os.Lstat(path)
-	switch {
-	case serr == nil && now.Sub(fi.ModTime()) > jobdir.MaxRunLifetime:
-		return pipelineJobDirOrphaned
-	case serr != nil && os.IsNotExist(serr):
-		return pipelineJobDirGone
+	fi, serr := lstatPipelineJob(path)
+	if serr != nil {
+		if os.IsNotExist(serr) {
+			return pipelineJobDirGone, ""
+		}
+		// The dir is there and cannot be read. That says nothing about its run,
+		// so it is neither kept as "in flight" nor removed.
+		return pipelineJobDirUnjudged, serr.Error()
 	}
-	// Young, or not readable: keep, because the cost of a wrong removal is a
-	// run that loses its context and the cost of a wrong keep is a directory
-	// the next start reclaims.
-	return pipelineJobDirInUse
+	if age := now.Sub(fi.ModTime()); age > jobdir.MaxRunLifetime {
+		owner := "it has no usable owner marker"
+		if marked {
+			owner = fmt.Sprintf("its owner, process %d, is still alive (a recycled process id, or a run that outlived the bound)", pid)
+		}
+		return pipelineJobDirOrphaned, fmt.Sprintf("%s old, past the %s bound on a run; %s", age.Round(time.Second), jobdir.MaxRunLifetime, owner)
+	}
+	// Young: keep, because the cost of a wrong removal is a run that loses its
+	// context and the cost of a wrong keep is a directory that is reclaimed at
+	// a later start. A dir stamped in the future (a clock that stepped back) is
+	// young too, until the clock has passed the stamp and the bound: it is
+	// reclaimed late by the size of the step, never lost.
+	return pipelineJobDirInUse, ""
 }
