@@ -461,7 +461,9 @@ func TestSettleLoadWaitsForTheReadBoundedByItsMax(t *testing.T) {
 	_, none := NewMonitor(context.Background(), msPolicy(), 5*time.Second)
 	defer none.Stop()
 	begin := time.Now()
-	none.SettleLoad(2 * time.Second)
+	if !none.SettleLoad(2 * time.Second) {
+		t.Fatal("SettleLoad with no read in flight reported an unsettled witness")
+	}
 	if el := time.Since(begin); el > 100*time.Millisecond {
 		t.Fatalf("SettleLoad with no read in flight took %s, want an immediate return", el)
 	}
@@ -480,13 +482,17 @@ func TestSettleLoadWaitsForTheReadBoundedByItsMax(t *testing.T) {
 	m.Phase(PhasePrefill, 10)
 	m.SampleLoad()
 	begin = time.Now()
-	m.SettleLoad(150 * time.Millisecond) // the engine is hung: the bound ends the wait
+	if m.SettleLoad(150 * time.Millisecond) { // the engine is hung: the bound ends the wait
+		t.Fatal("SettleLoad reported a settled witness while the engine read was still pending")
+	}
 	if el := time.Since(begin); el < 120*time.Millisecond || el > 1500*time.Millisecond {
 		t.Fatalf("SettleLoad on a hung engine took %s, want about its 150ms bound", el)
 	}
 	go func() { time.Sleep(60 * time.Millisecond); close(release) }()
 	begin = time.Now()
-	m.SettleLoad(5 * time.Second) // the read lands: the wait ends with it
+	if !m.SettleLoad(5 * time.Second) { // the read lands: the wait ends with it
+		t.Fatal("SettleLoad did not report the witness after the read landed")
+	}
 	if el := time.Since(begin); el > 2*time.Second {
 		t.Fatalf("SettleLoad took %s after the read landed", el)
 	}

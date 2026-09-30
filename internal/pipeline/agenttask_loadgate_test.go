@@ -58,6 +58,15 @@ func gaugesOf(running, waiting int) func() string {
 	}
 }
 
+// slowGauges answers like gaugesOf, after `wait`: an engine that serves /metrics
+// only between batches.
+func slowGauges(wait time.Duration, running, waiting int) func() string {
+	return func() string {
+		time.Sleep(wait)
+		return gaugesOf(running, waiting)()
+	}
+}
+
 // PR-13's fail condition is "a concurrent sample moves the published rate". The run
 // registry only knows the runs of THIS box's state root: a peer it cannot see (a
 // cascade call on the same seat model, another process) is visible to the engine
@@ -66,6 +75,8 @@ func gaugesOf(running, waiting int) func() string {
 // is not solo, and the failure is logged, not silent.
 func TestRunAgentTaskLoadThatOnlyTheEngineSeesKeepsTheRateHonest(t *testing.T) {
 	defer compressLiveness(t, 5*time.Second, 100*time.Millisecond, core.AgentCeilingSecCap)()
+	defer func(w time.Duration) { loadSettleWait = w }(loadSettleWait)
+	loadSettleWait = 300 * time.Millisecond
 	contract := testContract()
 	contract.OutputSchema = nil
 	for _, tc := range []struct {
@@ -78,6 +89,10 @@ func TestRunAgentTaskLoadThatOnlyTheEngineSeesKeepsTheRateHonest(t *testing.T) {
 		{"a peer only the engine sees (the registry says solo)", false, gaugesOf(3, 1), false, false},
 		{"no registry, a peer on the engine", true, gaugesOf(2, 0), false, true},
 		{"no registry and an engine that cannot be read: unknown is not solo", true, nil, false, true},
+		// The registry says solo, but the engine that could contradict it has not
+		// answered when the run ends: the one answer that cannot be trusted then is
+		// "nobody else is here".
+		{"a registry that says solo and an engine that has not answered in time", false, slowGauges(1200*time.Millisecond, 3, 1), false, false},
 		{"control: no registry, the engine shows the run alone", true, gaugesOf(1, 0), true, true},
 		{"control: a registry and an engine that show the run alone", false, gaugesOf(1, 0), true, false},
 	} {

@@ -105,18 +105,28 @@ func (m *Monitor) readEngineLoad(probe EngineProbe, done chan struct{}) {
 // land. The read is asynchronous so a slow engine never holds the stream reader;
 // a caller about to act on PeakLoad (the run is over, the store is about to hear
 // from it) settles first, or a short run could end before its own witness spoke.
-func (m *Monitor) SettleLoad(max time.Duration) {
+//
+// It reports whether the witness has spoken: true when no read was in flight or
+// it landed, false when max ran out with the read still pending. A caller that
+// gets false must treat the run's load as unknown, not as whatever the registry
+// said: the read is pending because the engine answers only between batches, which
+// is when peers are most likely, so "the registry saw nobody" is the one answer
+// that cannot be trusted then. The cost is a sample skipped on a seat whose
+// metrics are chronically slow, never a rate moved by a shared one.
+func (m *Monitor) SettleLoad(max time.Duration) bool {
 	m.mu.Lock()
 	done := m.loadDone
 	m.mu.Unlock()
 	if done == nil {
-		return
+		return true
 	}
 	t := time.NewTimer(max)
 	defer t.Stop()
 	select {
 	case <-done:
+		return true
 	case <-t.C:
+		return false
 	}
 }
 

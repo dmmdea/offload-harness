@@ -367,7 +367,7 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	var coldLoadEnd time.Time  // when the seat became ready for this run: a load ends at one instant for everyone waiting on it
 	var coldLoaded bool        // the warm-up ATTEMPTED a load this run (D-118 reads this, never coldLoad > 0: a sub-tick load measures 0)
 	act.Phase("cold-load")
-	warmed, warmNote, warmAttempted := warmSeat(ctx, p.cfg.Endpoint, seat, admissionBudget(p.cfg.AgentAdmissionWaitSec)-admitted)
+	warmed, warmNote, warmAttempted, warmLoaded := warmSeatOutcome(ctx, p.cfg.Endpoint, seat, admissionBudget(p.cfg.AgentAdmissionWaitSec)-admitted)
 	warmEnd := time.Now()
 	// Admission time whether or not a load was attempted: a warm-up held behind
 	// a GPU lease (2026-09-22) spends the budget waiting and loads nothing. Every
@@ -378,18 +378,25 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		// thing that knows it: a sub-tick load measures 0 and, since W-08, a note
 		// is also returned by exits that warmed nothing. Deriving it from either
 		// silently un-fired the D-118 coherence probe on a fast box.
-		coldLoad = warmed
 		coldLoaded = true
-		coldLoadEnd = warmEnd
-		// The cold load is measured from the FIRST moment this run saw its seat
-		// loading (0.144.0, register C-66), not from the warm-up's own start: when the
-		// pre-flight already waited on the load — the seat was `starting` when the
-		// run arrived, and its admission budget ran out — the warm-up joined it for
-		// its last seconds only, and that tail was recorded as the whole load (12.4 s
-		// against a real 178-271 s).
-		if !loadSeen.IsZero() {
-			if d := warmEnd.Sub(loadSeen); d > coldLoad {
-				coldLoad = d
+		if warmLoaded {
+			// Only a load the warm-up CONFIRMED is a measurement of one. A start that
+			// failed (llama-swap refused it, the request errored, the budget ran out
+			// under a load still in progress) is the cost of a failed start: during the
+			// 2026-09-29 outage every admission ended that way for 18 minutes, and each
+			// was recorded as a 3 s cold load.
+			coldLoad = warmed
+			coldLoadEnd = warmEnd
+			// The cold load is measured from the FIRST moment this run saw its seat
+			// loading (register C-66), not from the warm-up's own start: when the
+			// pre-flight already waited on the load — the seat was `starting` when the
+			// run arrived, and its admission budget ran out — the warm-up joined it for
+			// its last seconds only, and that tail was recorded as the whole load (12.4 s
+			// against a real 178-271 s).
+			if !loadSeen.IsZero() {
+				if d := warmEnd.Sub(loadSeen); d > coldLoad {
+					coldLoad = d
+				}
 			}
 		}
 	} else if !loadSeen.IsZero() && seatReady {
@@ -929,8 +936,18 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	// the store would lower the rates and inflate every later allowance,
 	// ceiling and placement ETA. Only the cold load (measured apart) is kept.
 	contended := busyWatch != nil && busyWatch.QueuedTotal() > 0
+	// So is a run that waited out a seat going down (ADR 0066): the re-issued call
+	// is the request that WAITS OUT llama-swap's load, so its time-to-first-delta
+	// and its wall carry minutes of cold load the seat's own rates do not (a 12k
+	// prompt behind a 200 s load reads as a ~49 tok/s prefill). The wait is booked
+	// as seat_down_wait_sec, not queued_ms, so the busy hold's test above cannot
+	// see it.
+	var downWait time.Duration
+	if busyWatch != nil {
+		downWait = busyWatch.SeatDownTotal()
+	}
 	obsTokS, obsPrefill, obsBest := wire.SeatTokS, pf, bestSample
-	if contended {
+	if !timedTheSeatsOwnRates(contended, res.SeatRecoveries, downWait) {
 		obsTokS, obsPrefill.PrefillTokens, obsBest.Tokens = 0, 0, 0 // the wire still reports what was measured
 	}
 	// A run that saw the seat SHARED (0.144.0, register C-66) timed what a
@@ -942,9 +959,12 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	peakLoad := 0
 	if busyWatch != nil {
 		// The engine read behind the load sample is asynchronous: let a run that
-		// ended right after its first delta hear its own witness before the store does.
-		busyWatch.SettleLoad(loadSettleWait)
-		peakLoad = busyWatch.PeakLoad()
+		// ended right after its first delta hear its own witness before the store
+		// does. A witness that never spoke leaves the load unknown, not solo.
+		settled := busyWatch.SettleLoad(loadSettleWait)
+		if peakLoad = busyWatch.PeakLoad(); !settled {
+			peakLoad = 0
+		}
 	}
 	if p.seatRatesPath != "" && (obsTokS > 0 || coldLoad > 0 || obsPrefill.PrefillTokens > 0 || obsBest.Tokens > 0) {
 		// Load-observe-save under the store's lock (seatrate.Update): the
@@ -2141,23 +2161,31 @@ func joinAdmissionNotes(notes ...string) string {
 // `note != ""` over-reports them. The coherence probe (D-118) keys on exactly
 // "was this seat loaded for this run", and it now gets that fact directly.
 // A seat that is already ready costs one /running probe and returns (0, "", false).
-func warmSeat(ctx context.Context, endpoint, seat string, budget time.Duration) (time.Duration, string, bool) {
+//
+// The fourth answer says the seat is CONFIRMED loaded: the passthrough answered
+// 200, or /running listed the seat ready afterwards. A load that was attempted and
+// failed (the request errored, llama-swap answered a non-200 and never listed the
+// seat, the budget ran out under a load still in progress) is attempted but not
+// loaded, and what it spent is the cost of a failed start, not a measurement of a
+// cold load: recording it taught the store a 3 s "cold load" for every failed
+// start of an 18-minute outage (register C-66).
+func warmSeatOutcome(ctx context.Context, endpoint, seat string, budget time.Duration) (time.Duration, string, bool, bool) {
 	if strings.TrimSpace(endpoint) == "" {
-		return 0, "", false // no endpoint to warm against: the gate is off by construction
+		return 0, "", false, false // no endpoint to warm against: the gate is off by construction
 	}
 	if budget < admissionPoll {
 		if budget <= 0 {
-			return 0, "", false // the admission gate is off (agent_admission_wait_sec −1)
+			return 0, "", false, false // the admission gate is off (agent_admission_wait_sec −1)
 		}
 		// Admission spent the budget before the warm-up got a turn. Proceeding
 		// into the wall is right; doing it SILENTLY is what left admission_note
 		// empty on a seat that may still be cold, so the wire read "nothing was
 		// loading" where the truth was "nobody looked" (register S-24).
-		return 0, fmt.Sprintf("no admission budget left for the warm-up (%.0fs, under one poll interval): a cold seat will load inside the wall", budget.Seconds()), false
+		return 0, fmt.Sprintf("no admission budget left for the warm-up (%.0fs, under one poll interval): a cold seat will load inside the wall", budget.Seconds()), false, false
 	}
 	sc, err := swapclient.New(endpoint, admissionPoll)
 	if err != nil {
-		return 0, "warm-up has no swap client (proceeding): " + err.Error(), false
+		return 0, "warm-up has no swap client (proceeding): " + err.Error(), false, false
 	}
 	// The seat may be listed under its CANONICAL id while the contract names an
 	// alias; seatMatcher resolves that, and only when the bare name missed.
@@ -2186,14 +2214,14 @@ func warmSeat(ctx context.Context, endpoint, seat string, budget time.Duration) 
 			// "Could not read" is not "is ready", and it was reported as
 			// neither. A seat whose residency is unknown proceeds into the wall
 			// possibly cold, and the wire has to say so (register S-24).
-			return 0, "warm-up could not read /running (proceeding; the seat may still be cold): " + rerr.Error(), false
+			return 0, "warm-up could not read /running (proceeding; the seat may still be cold): " + rerr.Error(), false, false
 		}
-		return 0, m.note, false // already resident: nothing to warm; only an alias-probe failure, if any, to report
+		return 0, m.note, false, false // already resident: nothing to warm; only an alias-probe failure, if any, to report
 	}
 	start := time.Now()
 	b := swapclient.BaseURL(endpoint)
 	if b == "" {
-		return 0, joinAdmissionNotes(m.note, "warm-up could not resolve a llama-swap root from the endpoint (proceeding; the seat may still be cold)"), false
+		return 0, joinAdmissionNotes(m.note, "warm-up could not resolve a llama-swap root from the endpoint (proceeding; the seat may still be cold)"), false, false
 	}
 	wctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
@@ -2205,21 +2233,21 @@ func warmSeat(ctx context.Context, endpoint, seat string, budget time.Duration) 
 	wu, ferr := modelaffinity.AwaitUpstream(wctx, endpoint, seat, "/v1/models", start.Add(budget))
 	if ferr != nil {
 		if modelaffinity.IsLeaseRefusal(ferr) {
-			return time.Since(start), joinAdmissionNotes(m.note, "warm-up held behind the GPU lease (nothing loaded onto the held card): "+ferr.Error()), false
+			return time.Since(start), joinAdmissionNotes(m.note, "warm-up held behind the GPU lease (nothing loaded onto the held card): "+ferr.Error()), false, false
 		}
-		return 0, joinAdmissionNotes(m.note, "warm-up could not build its request (proceeding; the seat may still be cold): "+ferr.Error()), false
+		return 0, joinAdmissionNotes(m.note, "warm-up could not build its request (proceeding; the seat may still be cold): "+ferr.Error()), false, false
 	}
 	req, rerr := http.NewRequestWithContext(wctx, http.MethodGet, wu, nil)
 	if rerr != nil {
-		return 0, joinAdmissionNotes(m.note, "warm-up request could not be built (proceeding; the seat may still be cold): "+rerr.Error()), false
+		return 0, joinAdmissionNotes(m.note, "warm-up request could not be built (proceeding; the seat may still be cold): "+rerr.Error()), false, false
 	}
 	resp, derr := warmClient.Do(req)
 	if derr != nil {
 		spent := time.Since(start)
 		if wctx.Err() != nil && ctx.Err() == nil {
-			return spent, joinAdmissionNotes(m.note, fmt.Sprintf("cold load exceeded the admission budget after %.0fs (proceeding into the wall)", spent.Seconds())), true
+			return spent, joinAdmissionNotes(m.note, fmt.Sprintf("cold load exceeded the admission budget after %.0fs (proceeding into the wall)", spent.Seconds())), true, false
 		}
-		return spent, joinAdmissionNotes(m.note, "warm request failed (proceeding): "+derr.Error()), true
+		return spent, joinAdmissionNotes(m.note, "warm request failed (proceeding): "+derr.Error()), true, false
 	}
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
 	resp.Body.Close()
@@ -2232,27 +2260,44 @@ func warmSeat(ctx context.Context, endpoint, seat string, budget time.Duration) 
 	// that had plainly succeeded).
 	if resp.StatusCode == http.StatusOK {
 		if ok, rerr := ready(); rerr == nil && ok {
-			return time.Since(start), joinAdmissionNotes(m.note, fmt.Sprintf("cold load %.0fs outside the wall", time.Since(start).Seconds())), true
+			return time.Since(start), joinAdmissionNotes(m.note, fmt.Sprintf("cold load %.0fs outside the wall", time.Since(start).Seconds())), true, true
 		}
-		return time.Since(start), joinAdmissionNotes(m.note, fmt.Sprintf("cold load %.0fs outside the wall (passthrough answered 200; /running lists the seat under another id)", time.Since(start).Seconds())), true
+		return time.Since(start), joinAdmissionNotes(m.note, fmt.Sprintf("cold load %.0fs outside the wall (passthrough answered 200; /running lists the seat under another id)", time.Since(start).Seconds())), true, true
 	}
 	// A non-200 passthrough answer (404: llama-swap does not know the name)
 	// confirms nothing; two polls one interval apart, then say so and go.
 	for i := 0; i < 2; i++ {
 		if ok, rerr := ready(); rerr == nil && ok {
-			return time.Since(start), joinAdmissionNotes(m.note, fmt.Sprintf("cold load %.0fs outside the wall", time.Since(start).Seconds())), true
+			return time.Since(start), joinAdmissionNotes(m.note, fmt.Sprintf("cold load %.0fs outside the wall", time.Since(start).Seconds())), true, true
 		}
 		// The second poll waits one interval, but only inside what is left of
 		// the budget — the confirmation must not outspend the gate it serves.
 		if i == 0 && time.Since(start)+admissionPoll <= budget {
 			if serr := seatwait.Sleep(ctx, admissionPoll); serr != nil {
-				return time.Since(start), joinAdmissionNotes(m.note, serr.Error()), true
+				return time.Since(start), joinAdmissionNotes(m.note, serr.Error()), true, false
 			}
 		} else if i == 0 {
 			break
 		}
 	}
-	return time.Since(start), joinAdmissionNotes(m.note, fmt.Sprintf("warm request answered HTTP %d after %.0fs but /running never listed %s ready (proceeding)", resp.StatusCode, time.Since(start).Seconds(), seat)), true
+	return time.Since(start), joinAdmissionNotes(m.note, fmt.Sprintf("warm request answered HTTP %d after %.0fs but /running never listed %s ready (proceeding)", resp.StatusCode, time.Since(start).Seconds(), seat)), true, false
+}
+
+// timedTheSeatsOwnRates reports whether what a run measured — its decode rate and
+// its prefill samples — is the seat's own. It is not when the run's requests spent
+// time queued behind siblings in the busy hold (ADR 0061), or when the run waited
+// out a seat going down (ADR 0066): the re-issued call is the request that waits
+// out llama-swap's load, and a call made just before an outage may already have
+// been running on a degrading engine. The cold load is measured apart and kept.
+func timedTheSeatsOwnRates(contended bool, seatRecoveries int, waitedOnDownSeat time.Duration) bool {
+	return !contended && seatRecoveries == 0 && waitedOnDownSeat <= 0
+}
+
+// warmSeat is warmSeatOutcome without its fourth answer: the time spent, the
+// note, and whether a load was ATTEMPTED (the D-118 coherence probe keys on it).
+func warmSeat(ctx context.Context, endpoint, seat string, budget time.Duration) (time.Duration, string, bool) {
+	spent, note, attempted, _ := warmSeatOutcome(ctx, endpoint, seat, budget)
+	return spent, note, attempted
 }
 
 // warmClient carries no timeout of its own: warmSeat bounds the request by

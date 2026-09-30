@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -60,12 +61,23 @@ func (s *seatLife) running(int64) string {
 	return `{"running":[{"model":"` + agentTestSeat + `","state":"ready","cmd":"x","proxy":"` + s.base.Load().(string) + `/seat"}]}`
 }
 
-func (s *seatLife) metrics(int64) string {
+func (s *seatLife) metrics(n int64) string {
 	if s.state() == "new" {
-		return "vllm:num_requests_running 1\nvllm:num_requests_waiting 0\nvllm:iteration_tokens_total_count 3\nvllm:generation_tokens_total 10\nvllm:prompt_tokens_total 100\nvllm:num_preemptions_total 0\nvllm:kv_cache_usage_perc 0.01\n"
+		// A fresh engine that is WORKING: its counters advance on every read. A
+		// constant reading would make any re-issued call slower than the compressed
+		// allowance plus flat bound (200 + 300 ms) a wedge again — a fixture that
+		// flakes under CPU contention, not a seat that is down.
+		return freshEngine(n)
 	}
 	// FROZEN: five requests running, nothing moves, whatever is asked.
 	return "vllm:num_requests_running 5\nvllm:num_requests_waiting 0\nvllm:iteration_tokens_total_count 4000\nvllm:generation_tokens_total 90000\nvllm:prompt_tokens_total 1370000\nvllm:num_preemptions_total 0\nvllm:kv_cache_usage_perc 0.4\n"
+}
+
+// freshEngine is a new engine incarnation's /metrics on its n-th read: one running
+// request, counters that start over and advance with every read.
+func freshEngine(n int64) string {
+	return "vllm:num_requests_running 1\nvllm:num_requests_waiting 0\nvllm:iteration_tokens_total_count " + strconv.FormatInt(3+n, 10) +
+		"\nvllm:generation_tokens_total " + strconv.FormatInt(10+n, 10) + "\nvllm:prompt_tokens_total 100\nvllm:num_preemptions_total 0\nvllm:kv_cache_usage_perc 0.01\n"
 }
 
 // answerOnce answers a loop call with a finished answer.
@@ -195,8 +207,12 @@ func TestRunAgentTaskSurvivesASeatRestart(t *testing.T) {
 	if wire.SeatRecoveries != 1 {
 		t.Fatalf("seat_recoveries = %d, want 1", wire.SeatRecoveries)
 	}
-	if wire.SeatDownWaitSec < 0.8 {
-		t.Fatalf("seat_down_wait_sec = %.2f, want the ~1 s waited for the restart", wire.SeatDownWaitSec)
+	// The restart completes 1.4 s after the hung call (1 s + the 400 ms load) and
+	// the wedge is filed about 0.5 s after it: nominally ~0.9 s waited. The floor
+	// leaves a verdict up to a second late — the lower bound of a quantity that
+	// SHRINKS as the verdict is delayed must not sit near its nominal value.
+	if wire.SeatDownWaitSec < 0.3 {
+		t.Fatalf("seat_down_wait_sec = %.2f, want the wait for the restart (about 0.9 s on this schedule)", wire.SeatDownWaitSec)
 	}
 	if got := fake.loopCalls.Load(); got != 2 {
 		t.Fatalf("loop calls = %d, want the hung call and its re-issue", got)
@@ -265,9 +281,7 @@ func TestRunAgentTaskSurvivesA500FromASeatThatRestarts(t *testing.T) {
 			}
 			return `{"running":[{"model":"` + agentTestSeat + `","state":"ready","cmd":"x","proxy":"` + base.Load().(string) + `/seat"}]}`
 		},
-		seatMetrics: func(int64) string { // a fresh engine
-			return "vllm:num_requests_running 1\nvllm:num_requests_waiting 0\nvllm:iteration_tokens_total_count 3\nvllm:generation_tokens_total 10\nvllm:prompt_tokens_total 100\n"
-		},
+		seatMetrics: freshEngine, // a fresh engine that is working
 		loopStream: func(n int64, body map[string]any, w http.ResponseWriter, r *http.Request) {
 			if n == 1 {
 				restartAt.CompareAndSwap(0, time.Now().Add(400*time.Millisecond).UnixNano())
@@ -428,4 +442,99 @@ func contentionBudgetWith(t *testing.T, status int) *seatwait.Budget {
 		t.Fatal("the budget refused its first wait")
 	}
 	return b
+}
+
+// The re-issued call after a seat restart is the request that WAITS OUT llama-swap's
+// load: its time-to-first-delta and its wall carry the seat's cold load, so what it
+// teaches the store is not the seat's own rate (a 12k-token prompt behind a 200 s
+// load reads as a ~49 tok/s prefill). A run that waited out a seat going down never
+// moves the published prefill or decode rate — PR-13's fail condition — while a run
+// that met no outage still does (the control), so the test can tell the gate from a
+// dead observation path.
+func TestRunAgentTaskARunThatRecoveredFromASeatDownDoesNotTeachTheSeatRates(t *testing.T) {
+	defer compressLiveness(t, 2*time.Second, 100*time.Millisecond, core.AgentCeilingSecCap)()
+	defer compressColdLoad(t, 50*time.Millisecond, 8*time.Second)()
+	defer compressBusyHold(t, 300*time.Millisecond, 50*time.Millisecond)()
+	for _, tc := range []struct {
+		name        string
+		outage      bool
+		wantTeaches bool
+	}{
+		{"a restart: the re-issue waits out the load and teaches nothing", true, false},
+		{"control: no outage, the same slow first delta teaches the rates", false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var restartAt atomic.Int64
+			var base atomic.Value
+			starting := func() bool {
+				r := restartAt.Load()
+				return tc.outage && (r == 0 || time.Now().UnixNano() < r)
+			}
+			fake := &agentFake{
+				rosterIDs: []string{agentTestSeat},
+				running: func(int64) string {
+					if starting() {
+						return `{"running":[{"model":"` + agentTestSeat + `","state":"starting","cmd":"x"}]}`
+					}
+					return `{"running":[{"model":"` + agentTestSeat + `","state":"ready","cmd":"x","proxy":"` + base.Load().(string) + `/seat"}]}`
+				},
+				seatMetrics: freshEngine,
+				loopStream: func(n int64, body map[string]any, w http.ResponseWriter, r *http.Request) {
+					if tc.outage && n == 1 {
+						restartAt.CompareAndSwap(0, time.Now().Add(400*time.Millisecond).UnixNano())
+						w.WriteHeader(http.StatusInternalServerError)
+						_, _ = fmt.Fprint(w, `{"error":{"message":"upstream command exited prematurely","src":"llama-swap"}}`)
+						return
+					}
+					// the (re-)issued request is held while llama-swap loads the seat
+					sseStep(w, 1500*time.Millisecond,
+						`{"choices":[{"index":0,"delta":{"role":"assistant","content":"The answer is 42."},"finish_reason":null}]}`,
+						`{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+						`{"choices":[],"usage":{"prompt_tokens":50000,"completion_tokens":2000}}`, `[DONE]`)
+				},
+			}
+			srv := fake.server(t)
+			defer srv.Close()
+			base.Store(srv.URL)
+			contract := testContract()
+			contract.OutputSchema = nil
+			p := seatDownPipeline(t, srv.URL, 30)
+			wire := decodeWire(t, p.Run(context.Background(), agentTestRequest(t, contract)))
+			if wire.Deferred {
+				t.Fatalf("deferred: %s (%s)", wire.Reason, wire.DeferClass)
+			}
+			if tc.outage && wire.SeatRecoveries != 1 {
+				t.Fatalf("seat_recoveries = %d: the run did not recover, so this test is not exercising the recovery (premise)", wire.SeatRecoveries)
+			}
+			got := storedSeat(t, p.Cfg().StateDir)
+			moved := got.PrefillTokS != 1000000 || got.TokS != 100
+			if moved != tc.wantTeaches {
+				t.Fatalf("prefill_tok_s=%v tok_s=%v: moved=%v, want moved=%v (stored 1000000 / 100)", got.PrefillTokS, got.TokS, moved, tc.wantTeaches)
+			}
+		})
+	}
+}
+
+// The decision itself: a run that queued in the busy hold, recovered from a seat
+// going down, or merely waited on one that never came back timed something other
+// than the seat's own rate.
+func TestTimedTheSeatsOwnRates(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		contended  bool
+		recoveries int
+		waited     time.Duration
+		want       bool
+	}{
+		{"a run that met nothing", false, 0, 0, true},
+		{"queued in the busy hold", true, 0, 0, false},
+		{"recovered from a seat going down", false, 1, 0, false},
+		{"waited on a seat that never came back", false, 0, 30 * time.Second, false},
+		{"recovered, and waited", false, 2, 45 * time.Second, false},
+		{"queued and recovered", true, 1, time.Second, false},
+	} {
+		if got := timedTheSeatsOwnRates(tc.contended, tc.recoveries, tc.waited); got != tc.want {
+			t.Errorf("%s: timedTheSeatsOwnRates = %v, want %v", tc.name, got, tc.want)
+		}
+	}
 }
