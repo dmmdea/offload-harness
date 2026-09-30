@@ -54,8 +54,9 @@ operator's browser, and any remote browser service.
    directory as cwd.
 3. The sidecar attaches to the running browser (the `browse_cdp_url` endpoint when set, else the named
    browser's `DevToolsActivePort` file), opens a background tab, and loops: observe, ask the harness for a
-   decision, execute one action. Immediately before every page read it jumps the finite CSS animations and
-   transitions the snapshot cannot see to their end state (see
+   decision, execute one action. The observe that follows an action first waits for the page to settle
+   (about 0.3 s on a quiet page, 1.5 s at most), and immediately before every page read the sidecar jumps
+   the finite CSS animations and transitions the snapshot cannot see to their end state (see
    [Background tab rendering](#background-tab-rendering)).
 4. Every model call goes through the harness. A typed decision is proxied to `browse_decision_url`
    (the bearer, if any, comes from `LOCAL_OFFLOAD_BROWSE_BEARER` in the harness process and never
@@ -111,10 +112,41 @@ correction stops:
 - **Forcing frames with screenshots does not work.** `Page.captureScreenshot`, clipped or not, hung for
   more than 15 s in the hidden tab on the same fixture, so the lane does not try to wake the tab with
   screenshots (it never requests one itself). Other ways to produce frames were not tried.
+- **A dialog the page mounts on its own timer is waited for after every action.** jev reads the page about
+  50 ms after an input (200 ms for a combobox fill). A confirm dialog opened from a menu item is, at that
+  moment, either not mounted yet or mounted at opacity 0 with its open-state style change not applied yet:
+  the finish above has no animation to finish, the read returns the page as it was, the model sees no
+  progress and the run ends `blocked`. Measured on a production web app in the operator's browser: 50 ms
+  after the click the snapshot was unchanged, 1.5 s later one finish made the dialog's confirm button
+  visible, and the same flow ended `blocked` 3 times out of 3 with only the finish. So the observe that
+  follows an action first runs a settle loop (`settle_after_input`): every 100 ms it finishes newly started
+  animations, with the same script as above, and reads a counter of DOM mutations that a `MutationObserver`
+  keeps in the page. A poll is quiet when no animation was finished and the counter did not move. The loop
+  stops after two quiet polls in a row once 0.3 s have passed, and at 1.5 s whatever the page does (plus the
+  poll in flight). With it, the read after the menu click showed exactly the dialog (its text, `Cancel` and
+  the confirm button), and once the goal named the confirm click as a step of its own the run clicked it and
+  the record was deleted (checked independently). Starting the browser with its background-throttling and
+  occlusion-detection switches off (`--disable-background-timer-throttling`,
+  `--disable-renderer-backgrounding`, `--disable-backgrounding-occluded-windows`,
+  `--disable-features=CalculateNativeWinOcclusion`) did not remove the need for the settle: the flow still
+  ended `blocked` without it.
+- **The settle's cost and bounds.** It runs at the start of every observe that follows an action, not the
+  first observe and not after a `wait` action, and once per action however many times jev retries the read
+  (a typed field pays it too). A quiet page costs about 0.3 s per action, on top of jev's own wait; a page
+  that never stops changing (a live ticker, a timer that rewrites the DOM) costs the full 1.5 s every time.
+  A page that is completely silent for the first 0.3 s counts as settled, so a dialog whose first DOM change
+  comes later than that is not waited for: the following observe finishes whatever is pending then, and the
+  `wait` action re-observes. The counter is read as an observer id plus a count, so a navigation, which gives
+  the new document a new observer, reads as a change even when the count happens to match. It never raises:
+  a page that is navigating, a dead session or an IPC timeout counts as activity, a dead session is polled
+  until the cap and the read that follows reports the real error. The observer is installed by the first
+  read, so mutations between the input and that read are not counted (an animation they started is still
+  finished by the first poll). The runner logs `settled N.Ns after an input (...)` to stderr when the page
+  was active.
 - **Content mounted after the read shows up at the next observe.** The finish runs immediately before each
-  read, not after it. An element the page inserts once jev has read the page (a debounce or a network
-  response that lands later) has no animation yet when the finish runs, so the following observe finishes
-  it (the `wait` action re-observes).
+  read, not after it, and the settle covers only the first 0.3 to 1.5 s after an input. An element the page
+  inserts once jev has read the page (a debounce or a network response that lands later) has no animation
+  yet when the finish runs, so the following observe finishes it (the `wait` action re-observes).
 
 Out of scope here: `date` and `datetime-local` inputs are not in the snapshot at all (its role table maps
 an input only for text, email, url, tel, search, number, checkbox, radio and button types), so the run
@@ -297,6 +329,9 @@ is not proof.
 - A sidecar stderr tail is appended to a defer reason.
 - A `finished N pending CSS animation(s) before observe` line in that tail means the lane un-stuck a fade-in
   in the background tab before reading the page.
+- A `settled N.Ns after an input (P poll(s), M with page activity, K animation(s) finished)` line means the
+  page was still reacting when the lane would have read it, and says how long the lane waited. No line means
+  the page was quiet from the first poll.
 - Browse calls are audited by the policy broker on agent doors, and ledgered like other lanes.
 - `offload_status remote` shows whether the lane is configured and which decision URL it will call.
 - A missing `offload_browse` in `tools/list` means the lane is unconfigured or the client was not
@@ -310,7 +345,11 @@ is not proof.
   are stdlib `unittest`, run by the installer: `cd setup/browse && python -m unittest -v test_runner`.
   The same file drives the observe and act wrappers through fake `Browser` classes, which is how the
   finish-before-every-read order (and its absence from act) is pinned without a browser, and, when `node`
-  is on the PATH, runs the finish script against fake animations to pin which ones it finishes.
+  is on the PATH, runs the finish script against fake animations to pin which ones it finishes. The settle
+  loop is driven with a scripted page, a fake clock and a fake sleep (its stop rule, its minimum, its cap, an
+  unreadable page, a navigation), its counter script runs under `node` against a fake `MutationObserver`,
+  and the wrapper tests pin that it runs once after an action, before jev's read and in the observed session,
+  and never on the first observe, after a `wait` action or in act.
 - Verify an install without touching a real page: with the browser running and remote debugging
   ticked, call `offload_browse` with a start URL on a harmless page you own, `allow_hosts` set to its
   host, `max_actions` 3 and a goal that only reads. Check that `status` is `done`, that `final.url`
@@ -325,6 +364,13 @@ is not proof.
 - Sending an agent-door browse (including `local-agent --allow-browse`) without a host list, with a
   non-local `route`, without an audit path, or to a node without `agent_allow_browse`.
 - Expecting the harness to start the browser or tick the remote-debugging box.
+- Writing a menu-then-confirm flow as one step of the goal. When the menu item and the confirm button of the
+  dialog it opens carry the same label (an "Archive" item, then an "Archive" button in the dialog), the
+  decision model reads the second click as the step it just took and chooses BLOCKED (measured: the run
+  ended `blocked` until the goal named the confirm click as a separate required step). Name both clicks in
+  the goal, for example: "Open the row's menu and click Archive. A confirmation dialog opens: click its
+  Archive button as a second, separate step. The task is done only when the row is gone." The same holds for
+  any flow where one label is clicked twice in a row on purpose.
 
 ## Source map
 

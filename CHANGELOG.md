@@ -6,6 +6,53 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.153.2] - 2026-09-30 - the browse lane waits for the page to settle after an action, so a dialog that mounts late is seen
+
+### Fixed — a confirm dialog opened from a menu item was read before it existed
+
+0.152.1 finished the pending CSS animations before every page read, and a dropdown menu then showed up. A
+confirm dialog opened from a menu item still did not: the run ended `blocked` ("the model or the loop
+reported no progress") three times out of three on a production web app in the operator's browser. jev reads
+the page about 50 ms after an input, and at that moment the dialog is either not mounted yet or mounted at
+opacity 0 with its open-state style change not applied yet, because the page applies it on its own timer. The
+finish had nothing to finish (the animation did not exist yet), so the snapshot was the page as it was before
+the click; 1.5 s later one finish made the dialog's confirm button visible (measured).
+
+- **The observe that follows an action now waits for the page to settle** (`settle_after_input`, new in
+  `setup/browse/runner.py`). Every 100 ms it finishes newly started animations (the 0.152.1 script) and reads
+  a counter of DOM mutations that a `MutationObserver` keeps in the page; a poll is quiet when no animation was
+  finished and the counter did not move. It stops after two quiet polls in a row once 0.3 s have passed, and at
+  1.5 s whatever the page does (plus the poll in flight). Measured with it: the read after the menu click showed
+  exactly the dialog (its text, `Cancel` and the confirm button), and once the goal named the confirm click as
+  a step of its own the run clicked it and the record was deleted, checked independently. Launching the browser
+  with its background-throttling and occlusion-detection switches off did not remove the need (measured: still
+  `blocked` without the settle).
+- **Cost and bounds.** One settle per action, before jev's own wait and read: about 0.3 s on a quiet page on
+  top of jev's wait, and the full 1.5 s on a page that never stops changing (a live ticker, a timer that
+  rewrites the DOM). It does not run before the first observe, after a `wait` action, before an action, or again
+  for the retries of one read. A page that is completely silent for its first 0.3 s counts as settled, so a
+  dialog whose first DOM change comes later is picked up by the following observe, as before.
+- **It never ends a run.** The counter is read as an observer id plus a count, so a navigation (a new document
+  has a new observer) reads as a change even when the count matches. An unreadable page (a navigation in
+  progress, a dead session, an IPC timeout) also counts as a change and is polled until the cap; the read that
+  follows reports a real error. The calls go straight to jev's `cdp()` in the observed session, like the
+  finish, so none of the run's bookkeeping is touched. The runner logs `settled N.Ns after an input (...)` to
+  stderr when the page was active.
+- **Finding, documented for goal writers: name the confirm click as its own step.** When a menu item and the
+  confirm button of the dialog it opens carry the same label, the decision model reads the second click as a
+  repeat of the step it just took and chooses BLOCKED; it did so on every run until the goal named the confirm
+  click as a separate required step. `docs/systems/browse-lane.md` (Common pitfalls) has the wording. This is
+  guidance, not code.
+- Tests (`setup/browse/test_runner.py`): the settle is driven with a scripted page, a fake clock and a fake
+  sleep (stops after two quiet polls once the minimum has passed, runs at least the minimum on a quiet page, a
+  burst holds it, never past the cap on a page that keeps changing, finishes animations on every poll, an
+  unreadable page or a navigation counts as a change, swallows every exception); the counter script runs
+  under `node` against a fake `MutationObserver`; the wrapper tests pin that it runs once per observe after an
+  action, before jev's wait and read, in the observed session, and never on the first observe, after a `wait`
+  action or in act. Each was shown to fail with its code path removed, broken or dropped.
+- The fix is in the sidecar (`setup/browse/runner.py`; the Go binary changes only its version string);
+  reinstall with `setup/browse/install.ps1` to take it.
+
 ## [0.153.1] - 2026-09-30 - grounding compares numbers by value: a correct amount in either locale is grounded, a substring of another number is not
 
 ### Fixed — a correct number was judged ungrounded when the source wrote it with separators, and a wrong one was grounded by a substring

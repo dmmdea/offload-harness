@@ -502,6 +502,95 @@ def finish_animations(send) -> int:
     return count
 
 
+# After an input the page keeps reacting on its own timers, and jev reads it too soon. jev waits
+# about 50 ms after an input (200 ms for a combobox fill) and then reads the page. A confirm dialog
+# opened from a menu item is, at that moment, either not mounted yet or mounted at opacity 0 with
+# its open-state style change not applied yet: finish_animations has nothing to finish (the
+# animation does not exist yet), the snapshot is the page as it was, the model sees no progress and
+# the run ends "blocked". Measured on a production web app in the operator's browser: 50 ms after
+# the click the snapshot was unchanged, and 1.5 s later one finish made the dialog's confirm button
+# visible; the same flow ended blocked 3 times out of 3 with only the finish hook. With the settle
+# below, the read after the click showed the dialog, and once the goal named the confirm click as a
+# step of its own the run clicked it and the record was deleted (checked independently). Starting
+# the browser with its background-throttling and occlusion-detection switches off did not remove
+# the need (measured: still blocked without the settle).
+#
+# settle_after_input waits for the page rather than for a fixed time. Every INPUT_SETTLE_POLL_S it
+# finishes newly started animations (finish_animations) and reads a counter of DOM mutations that a
+# MutationObserver keeps in the page; a poll is quiet when no animation was finished and the counter
+# did not move. It stops after INPUT_SETTLE_QUIET_POLLS quiet polls in a row once INPUT_SETTLE_MIN_S
+# has passed, and in any case at INPUT_SETTLE_CAP_S (plus the poll in flight), so an action costs
+# about 0.3 s on a quiet page and 1.5 s at most; a page that never stops mutating (a live ticker)
+# costs the cap every time. The counter is read as [observer id, count]: a navigation gives the new
+# document a new observer, so its id differs and a count that restarted at the old value still reads
+# as a change. A read that fails (a navigating page, a dead session, an IPC timeout) also counts as
+# a change and never raises: a dead session is polled until the cap, bounded, and jev's read that
+# follows reports the real error. The observer is installed by the first read, so mutations that
+# landed between the input and that read are not counted; an animation they started is still
+# finished by the first poll.
+MUTATION_COUNTER_JS = (
+    "(() => { const s = window.__laneSettle"
+    " || (window.__laneSettle = {id: Math.random(), n: 0, on: false});"
+    " if (!s.on && typeof MutationObserver === 'function' && document.documentElement) {"
+    " new MutationObserver(m => { s.n += m.length; }).observe(document.documentElement,"
+    " {subtree: true, childList: true, attributes: true, characterData: true}); s.on = true; }"
+    " return [s.id, s.n]; })()"
+)
+INPUT_SETTLE_MIN_S = 0.3
+INPUT_SETTLE_QUIET_POLLS = 2
+INPUT_SETTLE_POLL_S = 0.1
+INPUT_SETTLE_CAP_S = 1.5
+
+
+def read_mutations(send):
+    """The page's (observer id, DOM mutation count), or None when it cannot be read. Never raises."""
+    try:
+        response = send("Runtime.evaluate", expression=MUTATION_COUNTER_JS, returnByValue=True)
+        if not isinstance(response, dict) or response.get("exceptionDetails"):
+            return None
+        value = (response.get("result") or {}).get("value")
+    except Exception:  # noqa: BLE001 - a failed read is a change, not an error
+        return None
+    if isinstance(value, list) and len(value) == 2 and all(
+            isinstance(v, (int, float)) and not isinstance(v, bool) for v in value):
+        return tuple(value)
+    return None
+
+
+def settle_after_input(send, clock=time.monotonic, sleep=time.sleep) -> None:
+    """Let the page finish reacting to an input before jev reads it (see MUTATION_COUNTER_JS).
+
+    `send(method, **params)` is a CDP call in the page's session. Polls until the page has been quiet
+    for INPUT_SETTLE_QUIET_POLLS polls in a row and INPUT_SETTLE_MIN_S has passed, never past
+    INPUT_SETTLE_CAP_S. Returns nothing and can never raise: observe carries on exactly as it did
+    before this hook existed."""
+    try:
+        start = clock()
+        last = read_mutations(send)
+        quiet = polls = moved = finished_total = 0
+        while clock() - start < INPUT_SETTLE_CAP_S:
+            sleep(INPUT_SETTLE_POLL_S)
+            finished = finish_animations(send)
+            now = read_mutations(send)
+            polls += 1
+            finished_total += finished
+            if finished > 0 or now is None or now != last:
+                quiet = 0
+                moved += 1
+            else:
+                quiet += 1
+            last = now
+            if quiet >= INPUT_SETTLE_QUIET_POLLS and clock() - start >= INPUT_SETTLE_MIN_S:
+                break
+        elapsed = clock() - start
+    except Exception as exc:  # noqa: BLE001 - a helper on the observe path must never end a run
+        log(f"settle after input skipped: {type(exc).__name__}")
+        return
+    if moved:
+        log(f"settled {elapsed:.1f}s after an input ({polls} poll(s), {moved} with page activity, "
+            f"{finished_total} animation(s) finished)")
+
+
 def off_list_targets(urls, allow_hosts) -> list[str]:
     """The http(s) targets whose host is outside the allowlist (javascript:, #, mailto: are not navigations)."""
     bad = []
@@ -595,6 +684,16 @@ def _install_patches(run: Run, model, agent_mod, browser_mod) -> None:
     browser_mod.browser_operation = browser_operation
 
     def observe(self, *args, **kwargs):
+        if getattr(self, "after_input", None):
+            # An action just ran (jev's act sets after_input and its observe clears it). jev's own wait
+            # after an input is about 50 ms, too short for a dialog the page mounts on its own timer
+            # (see MUTATION_COUNTER_JS), so let the page settle first. After orig_observe's wait the
+            # read below still finishes whatever animations are pending. Runs here, before
+            # orig_observe consumes after_input, and never on the first observe (nothing has run yet)
+            # or after a wait action (jev leaves after_input unset for it). The calls go straight to
+            # jev's cdp() in the observed session, for the reason given at browser_operation above.
+            session = self.session
+            settle_after_input(lambda method, **params: browser_mod.cdp(method, session_id=session, **params))
         page = orig_observe(self, *args, **kwargs)
         _drain(run, run.helpers)
         url = page.get("url", "")
