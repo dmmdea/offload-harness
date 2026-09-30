@@ -467,9 +467,20 @@ renders); GIMP is needed only for `flatten_design`/`instantiate_design` (headles
 local-offload compose-video --template title-card --variables '{"title":"Launch day","subtitle":"Everything that shipped","accent":"#22c55e","duration":6}' --json
 # a transparent lower third for an editor (ProRes 4444) or the web (VP9 alpha), with two check frames
 local-offload compose-video --template lower-third --format webm --variables-file lt.json --snapshots 1,2.5 --out D:/renders/lt.webm
+# a stat card (opaque); the caption's emphasised phrase is its own variable
+local-offload compose-video --template stat-card --variables '{"kicker":"Launch week","stat":"3.4x","label_pre":"faster search across","label_em":"every workspace","label_post":"since the update"}' --json
+# a caption overlay from a transcript: group the words, then render each chunk it prints
+node render/captions-groups.mjs clip.segments.json --pace conversational --out chunks.json
 # your own single-file composition (trusted code only: Chrome runs it without a sandbox)
 local-offload compose-video --html card.html --quality draft --workers 1
 ```
+
+The vetted templates are `title-card`, `lower-third`, `stat-card`, `section-title`, `callout-label`,
+`checklist-card` and `captions-bar` (the last three plus `stat-card` are adapted from a teaching kit under
+its own licences, kept beside them). Each README under `render/compose-templates/` lists the template's
+variables and limits. `captions-bar` reads one `words_json` variable that `render/captions-groups.mjs`
+builds from `offload_transcribe`'s `<base>.segments.json`; render the overlay silent to `webm` or `mov`
+and lay it over the footage with ffmpeg's `overlay` filter or in an editor.
 
 This renders an HTML/CSS composition to video with the pinned HyperFrames CLI. It runs on the CPU:
 software GL and CPU encode, with no GPU lock, so it runs next to every render and text seat. The
@@ -499,7 +510,8 @@ drive if a render defers `DISK_HEADROOM`).
 **Adding a template.** Follow the contract in
 [`render/compose-templates/README.md`](../render/compose-templates/README.md): offline, deterministic,
 declared variables, a duration variable, and a README with a measured render. Lint and check must
-be clean, the frames must be looked at, and `framemd5` must match across two renders.
+be clean, the frames must be looked at, and `framemd5` must match at 1, 4 and `auto` workers (a
+frame has to be a pure function of time; see the contract).
 
 **Bumping HyperFrames.** Change the exact version in `setup/hyperframes/package.json` and
 `PINNED_VERSION` in the runner. Regenerate the lock with `npm install --package-lock-only

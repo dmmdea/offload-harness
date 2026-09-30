@@ -854,6 +854,12 @@ so a broken binding surfaces even when llama-swap is down.
 semantics, and output parsing. Go-side coverage sits in `internal/pipeline/` for the media dispatch
 and defer paths, and `internal/mediacap/` for the derived verdicts.
 
+`render/compose-hyperframes.test.mjs` also pins the shipped compose templates: the offline, deterministic and
+declared-variable contract, the ported templates' provenance, the retained licence texts by hash, the residue gate
+(no creator names, brand palette, placeholder copy or CDN host), the no-scale-above-1 guard, the skill's catalog and
+the lists in this doc. `render/captions-groups.test.mjs` covers the caption helper, and
+`internal/mcpserver/composevideo_test.go` fails when a shipped template is missing from the tool description.
+
 `crossplatform_lint_test.go` (repo root) is the gate on the resolution rules above: a runner that
 probes a Windows venv interpreter without a POSIX one, a drive-letter literal in shared Go with no
 `runtime.GOOS` branch, or a `.exe` in a tier `config_seed` fails CI. The two `amd-rdna3*` seeds are
@@ -901,6 +907,10 @@ recorded as known offenders with their reason rather than silently skipped — a
   typed `COMPOSE-FAIL` classes
 - [`render/compose-templates/`](../../render/compose-templates/README.md) — the vetted templates and
   the shared, locally declared font kit
+- [`render/compose-templates/_third_party/`](../../render/compose-templates/_third_party/hyperframes-student-kit/PROVENANCE.md)
+  — the licence texts of third-party template sources, kept verbatim, with a record of what was taken
+- [`render/captions-groups.mjs`](../../render/captions-groups.mjs) — the pure caption grouping helper
+  (`offload_transcribe` segments to the `captions-bar` `words_json`)
 - [`internal/pipeline/composevideo.go`](../../internal/pipeline/composevideo.go) — `runComposeVideo`:
   the compose slot, the runner env allowlist (`gpugen.Spec.EnvExact`), typed defers
 - [`internal/fleetnode/compose_task.go`](../../internal/fleetnode/compose_task.go) — the
@@ -948,7 +958,7 @@ work that never touches a card. One composition runs at a time per process, on i
 
 | input | meaning | fleet |
 |---|---|---|
-| `template` + `variables` | a vetted template under `render/compose-templates/` (shipped: `title-card`, `lower-third`) plus values for its declared variables | yes, the only form |
+| `template` + `variables` | a vetted template under `render/compose-templates/` (shipped: `title-card`, `lower-third`, `stat-card`, `section-title`, `callout-label`, `checklist-card`, `captions-bar`) plus values for its declared variables | yes, the only form |
 | `html` | an inline single-file composition, staged as the work dir's `index.html` | no |
 | `project_dir` (+ `composition`) | a local composition directory, rendered in place | no |
 
@@ -1007,6 +1017,44 @@ and `lower-third` webm at 30.4 s. Neither worker setting wins consistently on a 
 - the `lower-third` mp4 renders were byte-identical;
 - the two webm files differed in container bytes, but their decoded `yuva420p` frames were
   identical (`framemd5`).
+
+**Kit-derived templates and `captions-bar`** (same box, quality `high`, 2026-09-30). Render time is again
+HyperFrames' own `renderTimeMs`; the whole gated call took 34-50 s.
+
+| composition | frames | 1 worker | `auto` |
+|---|---|---|---|
+| `stat-card` 1080p mp4 | 180 | 21.2 s | 18.5 s |
+| `section-title` 1080p mp4 | 180 | 21.2 s | 17.8 s |
+| `checklist-card` 1080p mp4 | 210 | 33.3 s | 25.8 s |
+| `callout-label` 1080p webm with alpha | 180 | 22.0 s | 22.7 s |
+| `callout-label` 1080p mov (ProRes 4444) | 180 | 23.1 s | 19.9 s |
+| `captions-bar` 1080p webm with alpha | 240 | 23.3 s | 23.7 s |
+
+`checklist-card` is the slowest per frame (23.8 s per 150 frames at one worker) because four blurred rows and
+a title enter together. Each of them, rendered at 1, 2, 4 and 6 workers and at `auto` twice, gave 15 of 15
+identical pairs of decoded frames. That check found a real defect on the first pass: two of the cards animated a
+scale above 1 (a halo breathing out to 1.06, a ring popping to 1.1), and their frames differed between worker
+counts (80 of 180 and 172 of 210 frames, by a few pixels of gradient; two runs at 4 workers disagreed with each
+other too). Blur was not the cause (the same cards with the blur removed still differed) and opacity in place of the
+scale fixed both. A template therefore never scales above 1; the contract is in the
+[templates README](../../render/compose-templates/README.md).
+
+### Captions from a transcript
+
+`render/captions-groups.mjs` is a pure helper that turns `offload_transcribe`'s `<base>.segments.json` (the
+per-word `{word, start, end, probability}` array `internal/sttclient` writes) into the `words_json` variable of the
+`captions-bar` template. It groups words a few at a time (`punchy` 3, `conversational` 5, `calm` 6; a group also ends at
+a sentence end, at a pause of 0.15 s or more, or past 42 characters), holds each group 0.3 s past its last word and
+never past the next group's start, and packs the groups into chunks of at most 16,000 characters and 600 s. The
+first chunk keeps absolute time; each later one is rebased to 0 and carries the `offset_sec` to lay it at.
+
+A 16 KB string variable was measured before the template was designed: a 15,968-character list (476 groups)
+passed `lint`, `check` and `--strict-variables` and arrived intact in the page. The design that followed was
+measured too. One CSS-animated element per group is flat up to 80 groups in the page (24 s for 240 frames) and slows
+from about 150 (34 s), and a 374-group, 12.9 KB list had written about 290 of its 450 frames after ten minutes, when
+it was stopped. The template therefore holds one element and derives the frame from the time of HyperFrames'
+`hf-seek` event, which renders those 450 frames in 40 s. `offload_media` has no overlay operation, so a chunk's `webm`
+or `mov` overlay is laid over the footage with ffmpeg's `overlay` filter or in an editor; the overlay itself is silent.
 
 ### Security
 

@@ -2,6 +2,8 @@ package mcpserver
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -44,4 +46,41 @@ func TestComposeVideoAdvertised(t *testing.T) {
 	if !found {
 		t.Fatal("offload_compose_video not advertised on tools/list")
 	}
+}
+
+// TestComposeVideoNamesEveryShippedTemplate keeps the advertised list in step with what ships. The
+// description says which vetted templates exist ("shipped: ..."), and an agent chooses a template from
+// that sentence, so a template that ships but is not named there is one nobody will pick. The list is
+// read from render/compose-templates, the same directory the runner and the mediacap route enumerate.
+func TestComposeVideoNamesEveryShippedTemplate(t *testing.T) {
+	dir := filepath.Join("..", "..", "render", "compose-templates")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var shipped []string
+	for _, e := range entries {
+		n := e.Name()
+		if !e.IsDir() || strings.HasPrefix(n, "_") || strings.HasPrefix(n, ".") {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(dir, n, "index.html")); err == nil {
+			shipped = append(shipped, n)
+		}
+	}
+	if len(shipped) == 0 {
+		t.Fatalf("no vetted templates found under %s", dir)
+	}
+	for _, tool := range listTools(t, config.Default()) {
+		if tool.Name != "offload_compose_video" {
+			continue
+		}
+		for _, name := range shipped {
+			if !strings.Contains(tool.Description, name) {
+				t.Errorf("offload_compose_video description does not name the shipped template %q (shipped: %s)", name, strings.Join(shipped, ", "))
+			}
+		}
+		return
+	}
+	t.Fatal("offload_compose_video not advertised on tools/list")
 }

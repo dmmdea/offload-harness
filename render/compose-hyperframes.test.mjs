@@ -770,3 +770,17 @@ test("kit ports: no keyframe scales an element above its resting size", () => {
   }
 });
 
+// The shipped list is written by hand in several places; this keeps two of them honest (the tool
+// description is pinned by a Go test, internal/mcpserver/composevideo_test.go).
+test("the shipped template list is complete in the templates README and in the media-generation doc", () => {
+  const names = listTemplates(TEMPLATES_DIR);
+  const readme = readFileSync(join(TEMPLATES_DIR, "README.md"), "utf8");
+  const doc = readFileSync(join(__dirname, "..", "docs", "systems", "media-generation.md"), "utf8");
+  const shipped = /\(shipped:([^)]*)\)/.exec(doc);
+  assert.ok(shipped, "media-generation.md has no '(shipped: ...)' sentence");
+  for (const n of names) {
+    assert.ok(readme.includes("[`" + n + "`](" + n + "/README.md)"), `${n}: not in the templates README table`);
+    assert.ok(shipped[1].includes("`" + n + "`"), `${n}: not in the media-generation shipped list`);
+  }
+  assert.ok(names.length >= 7, `expected the 7 shipped templates, found ${names}`);
+});
