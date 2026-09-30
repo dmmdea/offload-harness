@@ -220,7 +220,7 @@ func TestBuildWeightsOverEligibleRowsAndIsDeterministic(t *testing.T) {
 		t.Fatal("two builds on the same rows differ")
 	}
 	md := Markdown(rep)
-	for _, s := range []string{"seat seat-a", "precedence: seat-infra → timeout", "| loop | 2 / 6 |", "not a rule matter", "agent_seed_context_reads", "proposes nothing"} {
+	for _, s := range []string{"seat seat-a", "precedence: seat-infra → call-deadline → timeout", "| loop | 2 / 6 |", "not a rule matter", "agent_seed_context_reads", "proposes nothing"} {
 		if !strings.Contains(md, s) {
 			t.Errorf("markdown lacks %q", s)
 		}

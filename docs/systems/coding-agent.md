@@ -188,7 +188,9 @@ pass rate first, step count second.
 **The rigger, first slice (`local-offload rig`, MCP `agent_rig`; `internal/rig`, ADR 0036 P3a, 0.113.26).** A
 deterministic classifier over the delegation-log corpus: every failed or deferred row of a seat lands on exactly one
 failure axis, evaluated in a published precedence order and stopping at the first hit — `seat-infra` (a defer class of
-infrastructure/config/contract, or a placement failure with no defer class) → `timeout` → `budget` → `abstention` (an
+infrastructure/config/contract, or a placement failure with no defer class) → `call-deadline` (a reason that opens
+`call deadline reached`: the whole-call deadline of ADR 0065 cut the subtask, so it says nothing about the seat's speed) →
+`timeout` → `budget` → `abstention` (an
 "output failed schema" reason is `schema-miss / invalid`) → `schema-miss` (min_items/nonempty; sub-axes
 `two-step-grounded` = context docs and ≤ 2 steps, `invalid`) → `anchor-miss` (contains/not_contains/regex; same sub-axis) →
 `loop` → `long-observation` → `tool-misuse` (the last three on trace-bearing rows only) → `unclassified`. The report gives
