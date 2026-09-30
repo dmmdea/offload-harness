@@ -64,7 +64,11 @@ first, because a heterogeneous pair outranks any single-card band:
 | AMD, anything else | `amd-gcn` |
 | No usable GPU | `cpu` |
 
-Fourteen profiles. Two boundaries are deliberately below their nominal card size: the `ampere-8` band
+Fifteen bands. Linux adds one PowerShell has no row for: `hwdetect` (the Go classifier `install detect`
+runs) reads the device tree's root `compatible` when no NVIDIA or AMD adapter answered, and a board
+that names the RK3588 SoC (`rockchip,rk3588` on the vendor kernel, `rockchip,rk3588s` on mainline)
+is `rockchip-rk3588` — a board with no PCI adapter would otherwise fall through to `cpu` and be handed
+CPU inference. Two boundaries are deliberately below their nominal card size: the `ampere-8` band
 starts at **7 GB**, and `blackwell-72` starts at **64 GB** so it covers both 72 GB and 96 GB
 workstation cards until larger hardware is actually measured.
 
@@ -225,6 +229,18 @@ download set, and `Get-FamilyModelKeys` adds `model-26b` only when the resolved
 (`include_26b: false`) fetched 14.25 GB the rendered yaml never serves (OptiPlex parity
 audit, 2026-09-23).
 
+#### The `rk3588` backend (Rockchip SoC boards)
+
+The `rockchip-rk3588` tier renders from its own template, `llama-swap.linux-rk3588.yaml`, and not
+from `llama-swap.linux-vulkan.yaml`: the stock vulkan template always renders `offload-e4b` (~5 GB
+plus KV) beside an embedder and a reranker, and none of that fits a board whose GPU and NPU share
+about 4.7 GiB of inference budget with the host's own workload (`uma_reserve_gib` holds the rest
+back). The template lists only what fits — one llama.cpp Vulkan chat entry, `GGML_VK_VISIBLE_DEVICES=0`,
+every layer offloaded — and places the tier's `rkllm` NPU seats (a model served by the Rockchip RKLLM
+runtime, with its own window and CPU mask) as alternatives to it. No model runs on the CPU there: the
+tier declares no `alt_backends`, so `--llama-bin-cpu` is refused. `--llama-bin` still names a
+llama.cpp build with the Vulkan backend, as for `vulkan`; the installer script needs nothing else.
+
 #### The provenance stamp (0.123.0, ADR 0043)
 
 Every config `install render` writes now begins with a six-line comment block:
@@ -339,6 +355,10 @@ absent. The live service on `:11436` was untouched throughout.
 ```
 setup/install.sh --bin ./local-offload --llama-bin /path/to/llamacpp/build/bin [--prefix DIR] [--user NAME]
 ```
+
+`--llama-bin` is required on every tier except one whose backend (`install tier-info`) is `rk3588`: that
+tier's template has no llama.cpp entry (the NPU serves), so a board there has no build to point at.
+`setup/install.tests.sh` pins the rule and the `--rknpu-home` pass-through with a stub binary under `--dry-run`.
 
 It is **deliberately thin**. Every decision that can be wrong lives in the binary, which
 is cross-compiled and unit-tested; the script only fetches, places and registers:

@@ -38,6 +38,9 @@ design's Phase B had already drawn the seams; this record fixes them as policy.
 4. **A local device always wins a shared name.** `config.Accelerators` is walked before
    `config.FleetAccelerators`, on both surfaces, so ADR 0037's first-listed-owner rule extends
    across the fleet without a new rule: local first, then fleet, in config order.
+   *(0.145.0: [ADR 0068](0068-the-operator-may-name-the-owner-of-a-shared-accelerator-tool.md) lets
+   `accelerator_tool_owners` give one shared name to a fleet device; every name without an entry
+   still follows this rule.)*
 5. **Placement is in the result.** Every forwarded result carries
    `placement{node, base, accelerator, job_id, wall_ms, remote:true}`, so a slow call or a
    defer is attributable from the result alone.

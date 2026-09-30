@@ -40,6 +40,9 @@ func TestEveryTemplateIsParseableYAML(t *testing.T) {
 				}
 			}
 			models, ok := doc["models"].(map[string]any)
+			if len(models) == 0 && anchorRe.Match(b) {
+				return // every model is a tier seat; the rendered tier is checked in its own test
+			}
 			if !ok || len(models) == 0 {
 				t.Fatalf("%s has no usable models mapping", name)
 			}

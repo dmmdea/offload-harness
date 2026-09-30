@@ -51,6 +51,7 @@ func TestParamsBasisMirrorsParams(t *testing.T) {
 	// zero value forever.
 	p := params()
 	p.Home, p.GOOS, p.Backend = "/srv/offload", "linux", "cuda"
+	p.RknpuHome = "/srv/npu"
 	p.GPUEnv = []string{"CUDA_VISIBLE_DEVICES=0"}
 	p.Seats = []mediaseat.Seat{{Kind: "vision", Name: "vlm", Model: "m.gguf", Residency: "swap"}}
 	p.VLLMSeat = &vllmseat.Spec{ID: "seat", Unit: "u", Port: 18797, MaxModelLen: 131072}

@@ -47,8 +47,8 @@ const (
 // node-local endpoint, path or port). It is a suffix rule on purpose: every binding the harness has
 // grown so far ends in one of these, and a key that does not is left to the seed-owned comparison.
 // `_endpoint` is deliberately NOT in the list: tts_endpoint and pair_workloads_endpoint are this
-// box's own service URLs (opt-in, empty = the lane is absent), and hailo_/coral_endpoint are owned
-// by the accelerator seeds — flagging any of them as a hand-wired seat was a false positive.
+// box's own service URLs (opt-in, empty = the lane is absent), and hailo_/coral_/rknpu_endpoint are
+// owned by the accelerator seeds — flagging any of them as a hand-wired seat was a false positive.
 func isBindingKey(k string) bool {
 	// The remote NIM lane is account configuration (an opt-in cloud escalation), not a tier seat.
 	if strings.HasPrefix(k, "nim_") {
@@ -153,18 +153,52 @@ func seedOwnedKeys(doc tierseed.Doc, home string) map[string]bool {
 			owned[k] = true
 		}
 	}
-	// Accelerator rows (hailo-8l, coral-edgetpu) seed their own keys; without them an accelerator
-	// box would report its seeded endpoint as drift.
+	// Accelerator rows (hailo-8l, coral-edgetpu, rknpu) seed their own keys, so the audit owns
+	// them too; withLiveAccelerators puts the seed of the devices a node lists into what the node
+	// is compared with. Resolving needs every device's home (accelOptions) — with any one empty
+	// the whole resolution failed and this skipped it, so no accelerator key was ever owned.
 	ids := make([]string, 0, len(doc.Accelerators))
 	for id := range doc.Accelerators {
 		ids = append(ids, id)
 	}
-	if accSeed, err := tierseed.ResolveAccelerators(doc.Accelerators, ids, tierseed.Options{Home: home}); err == nil {
+	if accSeed, err := tierseed.ResolveAccelerators(doc.Accelerators, ids, accelOptions(tierseed.Options{Home: home}, "", "", "")); err == nil {
 		for k := range accSeed {
 			owned[k] = true
 		}
 	}
 	return owned
+}
+
+// withLiveAccelerators returns seed with the seed of every accelerator the live config lists merged
+// over it — what an install writes, since accelerators ride beside the tier and their seeds merge
+// after it (ADR 0024). Compared against the tier's seed alone, every accelerator key a seeded node
+// carries would read LIVE-ONLY. An id this build's profiles.json does not declare has no seed to
+// compare with and is skipped, not an error.
+func withLiveAccelerators(seed, live map[string]any, doc tierseed.Doc, home, goos string) (map[string]any, error) {
+	listed, _ := live["accelerators"].([]any)
+	var ids []string
+	for _, v := range listed {
+		if id, ok := v.(string); ok {
+			if _, declared := doc.Accelerators[id]; declared {
+				ids = append(ids, id)
+			}
+		}
+	}
+	if len(ids) == 0 {
+		return seed, nil
+	}
+	accSeed, err := tierseed.ResolveAccelerators(doc.Accelerators, ids, accelOptions(tierseed.Options{Home: home, GOOS: goos}, "", "", ""))
+	if err != nil {
+		return nil, err
+	}
+	merged := make(map[string]any, len(seed)+len(accSeed))
+	for k, v := range seed {
+		merged[k] = v
+	}
+	for k, v := range accSeed {
+		merged[k] = v
+	}
+	return merged, nil
 }
 
 var errConfigDrift = errors.New("config drift")
@@ -248,6 +282,9 @@ func runAuditConfig(args []string) error {
 	})
 	if err != nil {
 		return fmt.Errorf("audit-config: resolve %s: %w", tier, err)
+	}
+	if seed, err = withLiveAccelerators(seed, live, doc, installHome, *goos); err != nil {
+		return fmt.Errorf("audit-config: resolve the accelerator seeds for %s: %w", path, err)
 	}
 
 	findings := classifyConfigDrift(seed, live, seedOwnedKeys(doc, installHome), isBindingKey)

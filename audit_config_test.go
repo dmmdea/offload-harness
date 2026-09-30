@@ -1,6 +1,15 @@
 package main
 
-import "testing"
+import (
+	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/dmmdea/offload-harness/internal/tierseed"
+)
 
 // TestClassifyConfigDriftNamesTheHandWiredWin pins the four classes on the exact shape that hid
 // the binxarn agent seat: the node carried a hand-set agent_model the seed did not write, while
@@ -86,5 +95,127 @@ func TestClassifyConfigDriftSeesABindingNoTierSeeds(t *testing.T) {
 		if c, ok := got[k]; ok {
 			t.Errorf("%s is node-local and must not be reported, got %q", k, c)
 		}
+	}
+}
+
+// The accelerator rows seed their own keys (ADR 0024), so the audit owns them: it can then say what an
+// accelerator node's endpoint or launcher drifted to. Resolving them needs EVERY device's home — before
+// that the whole resolution failed on the first empty home token and was skipped without a word, so no
+// accelerator key was ever owned.
+func TestSeedOwnedKeysIncludeTheAcceleratorKeys(t *testing.T) {
+	doc, err := tierseed.LoadDoc(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	owned := seedOwnedKeys(doc, t.TempDir())
+	for _, k := range []string{
+		"accelerators", "hailo_endpoint", "hailo_sidecar_cmd", "coral_endpoint", "coral_sidecar_cmd",
+		"rknpu_endpoint", "rknpu_sidecar_cmd", "rknpu_timeout_sec", "rknpu_idle_sec",
+	} {
+		if !owned[k] {
+			t.Errorf("%s is not seed-owned: the accelerator rows did not resolve", k)
+		}
+	}
+}
+
+// auditNode writes a live config made of the tier's own seed plus the given extra keys, runs
+// audit-config against that tier and returns what it printed and whether it reported drift.
+func auditNode(t *testing.T, tier, home string, extra map[string]any, adjust func(live map[string]any)) (string, error) {
+	t.Helper()
+	doc, err := tierseed.LoadDoc(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed, err := tierseed.Resolve(doc.Profiles[tier], tier, tierseed.Options{Home: home, GOOS: "linux"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	live := map[string]any{}
+	for k, v := range seed {
+		live[k] = v
+	}
+	for k, v := range extra {
+		live[k] = v
+	}
+	if adjust != nil {
+		adjust(live)
+	}
+	raw, err := json.Marshal(live)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(cfg, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var runErr error
+	out := captureStdout(t, func() {
+		runErr = runAuditConfig([]string{"--config", cfg, "--tier", tier, "--root", ".", "--home", home,
+			"--goos", "linux", "--vllm-seat-active", "false", "--all"})
+	})
+	return out, runErr
+}
+
+// acceleratorSeedFor is what the installer writes for the listed devices: the same resolver, the same homes.
+func acceleratorSeedFor(t *testing.T, home string, ids ...string) map[string]any {
+	t.Helper()
+	doc, err := tierseed.LoadDoc(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed, err := tierseed.ResolveAccelerators(doc.Accelerators, ids, accelOptions(tierseed.Options{Home: home, GOOS: "linux"}, "", "", ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return seed
+}
+
+// A node the installer seeded — the tier's keys plus the seed of the accelerators it lists — audits clean:
+// the accelerator keys it carries are the seed's own, not hand-set ones the seed does not write.
+func TestAuditConfigLeavesASeededAcceleratorNodeClean(t *testing.T) {
+	t.Setenv("HAILO_HOME", "")
+	t.Setenv("CORAL_HOME", "")
+	t.Setenv("RKNPU_HOME", "")
+	home := t.TempDir()
+	for _, ids := range [][]string{{"rknpu"}, {"hailo-8l", "rknpu"}} {
+		out, err := auditNode(t, "cpu", home, acceleratorSeedFor(t, home, ids...), nil)
+		if err != nil {
+			t.Errorf("devices %v: a seeded accelerator node reports drift: %v\n%s", ids, err, out)
+		}
+	}
+}
+
+// The audit now sees the accelerator keys: a value hand-set on the node differs from the seed, and a
+// device the node does not list adds no row (its seed is not the node's to carry).
+func TestAuditConfigNamesAHandTunedAcceleratorKey(t *testing.T) {
+	t.Setenv("HAILO_HOME", "")
+	t.Setenv("CORAL_HOME", "")
+	t.Setenv("RKNPU_HOME", "")
+	home := t.TempDir()
+	out, err := auditNode(t, "cpu", home, acceleratorSeedFor(t, home, "rknpu"), func(live map[string]any) {
+		live["rknpu_timeout_sec"] = 90
+	})
+	if err == nil {
+		t.Fatalf("a hand-tuned rknpu_timeout_sec must be reported as drift:\n%s", out)
+	}
+	if !strings.Contains(out, "DIFFERENT") || !strings.Contains(out, "rknpu_timeout_sec") {
+		t.Errorf("the drift must name rknpu_timeout_sec as DIFFERENT:\n%s", out)
+	}
+	if strings.Contains(out, "hailo_") || strings.Contains(out, "coral_") {
+		t.Errorf("devices the node does not list must add no rows:\n%s", out)
+	}
+}
+
+// A device this build does not declare in profiles.json (a newer node's, say) has no seed to compare
+// with: it is skipped, not an audit failure.
+func TestAuditConfigSkipsAnUndeclaredAccelerator(t *testing.T) {
+	t.Setenv("RKNPU_HOME", "")
+	home := t.TempDir()
+	extra := acceleratorSeedFor(t, home, "rknpu")
+	out, err := auditNode(t, "cpu", home, extra, func(live map[string]any) {
+		live["accelerators"] = []any{"rknpu", "tpu-from-the-future"}
+	})
+	if err != nil && !errors.Is(err, errConfigDrift) {
+		t.Fatalf("an undeclared device must be skipped, not fail the audit itself: %v\n%s", err, out)
 	}
 }

@@ -122,7 +122,9 @@ func wireOf(t *testing.T, results []PlacedResult, sum Summary) map[string]any {
 	return resp.Results[0]
 }
 
-// ledgerRows reads every JSON row the run's ledger holds.
+// ledgerRows reads every JSON row the run's ledger holds, except the dispatch
+// markers (phase "started", ADR 0064): these tests are about the ONE finished row
+// a job leaves, and the marker beside it is pinned in telemetry_test.go.
 func ledgerRows(t *testing.T, path string) []map[string]any {
 	t.Helper()
 	raw, err := os.ReadFile(path)
@@ -137,6 +139,9 @@ func ledgerRows(t *testing.T, path string) []map[string]any {
 		var m map[string]any
 		if err := json.Unmarshal([]byte(line), &m); err != nil {
 			t.Fatalf("ledger row %q: %v", line, err)
+		}
+		if m["phase"] == "started" {
+			continue
 		}
 		rows = append(rows, m)
 	}

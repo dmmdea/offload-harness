@@ -31,7 +31,10 @@ package fleetnode
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"log"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -91,10 +94,10 @@ type job struct {
 	state      JobState
 	data       json.RawMessage
 	err        string
-	agent      bool      // created via AcceptAgent → poll auth applies (server.go handleJob)
-	gated      bool      // AcceptSpec.Gated → poll auth applies without the agent marker (vision lane)
-	terminalAt time.Time // set when state turns done|error; drives ttl eviction
-	wallSec    int       // the wall the run reported (register D-116); 0 = none reported
+	agent      bool               // created via AcceptAgent → poll auth applies (server.go handleJob)
+	gated      bool               // AcceptSpec.Gated → poll auth applies without the agent marker (vision lane)
+	terminalAt time.Time          // set when state turns done|error; drives ttl eviction
+	wallSec    int                // the wall the run reported (register D-116); 0 = none reported
 	progress   *core.LiveProgress // the run's last liveness report (0.131.0); nil = none yet
 	// task/model/acceptedAt/startedAt/finishedAt are the /fleet/jobs feed's
 	// metadata (see AcceptSpec). Written under mu exactly like every other
@@ -124,6 +127,18 @@ type job struct {
 	// AcceptSpec.Tenant. Read by claimLocked only.
 	band   int
 	tenant string
+	// leased marks a job whose dispatcher POLLS for it (AcceptSpec.PollLeased):
+	// only such a job can be abandoned by a poller that went away, so only such
+	// a job is ever reaped or has its wall discounted (ADR 0064).
+	leased bool
+	// polledAt is when a poller last looked at the job while it was not yet
+	// terminal (Touch, or a long poll parked on it); Admit seeds it with
+	// acceptedAt. It is never written once the job is terminal, so a late look
+	// (a recovery pass an hour on) cannot make a finished ghost look polled.
+	polledAt time.Time
+	// waiters counts the long polls parked on the job right now: a poller that
+	// is blocked in WaitTerminal is polling by definition, whatever the lease.
+	waiters int
 }
 
 // Scheduling bands (0.113.18). A band is an integer priority the CALLER
@@ -204,7 +219,24 @@ type Jobs struct {
 	claimSeq uint64
 	// agingAfter is bandAgingAfter, on the struct so tests can shorten it.
 	agingAfter time.Duration
+
+	// pollLease is how long an `accepted` PollLeased job may go unpolled before
+	// it counts as abandoned (SetPollLease); <= 0 = no lease, nothing is ever
+	// reaped or discounted. Guarded by mu like every other mutable field.
+	pollLease time.Duration
+
+	// withdrawnTotal / reapedTotal count the jobs this process took out of the
+	// backlog without running them: a delegator withdrew one (Withdraw, the call that
+	// flipped it, not a repeat) or the reaper took one. Drain is neither and is not
+	// counted. Guarded by mu; read through TakenBack.
+	withdrawnTotal, reapedTotal int
 }
+
+// DefaultPollLease is the poll lease a store built by NewJobs starts with:
+// five times the slowest healthy poll gap (a long poll parks up to
+// MaxJobWaitSec and the delegator sleeps a few seconds between polls), so a
+// job that is being polled can never be mistaken for a ghost.
+const DefaultPollLease = 60 * time.Second
 
 // OnFinish registers fn to run after every job reaches a terminal state. It is
 // called outside the store's lock and must return quickly; anything slow (the
@@ -219,7 +251,11 @@ func (j *Jobs) OnFinish(fn func()) {
 // sweeping every 5 minutes (the spec's cadence). maxConcurrent bounds how many
 // admitted jobs execute at once (<= 0 = unlimited); the rest wait in accepted.
 func NewJobs(ttl time.Duration, maxConcurrent int) *Jobs {
-	return newJobs(ttl, time.Now, 5*time.Minute, maxConcurrent)
+	j := newJobs(ttl, time.Now, 5*time.Minute, maxConcurrent)
+	// The production store starts with the default lease; the serve verb narrows
+	// or turns it off from config (fleet_poll_lease_sec) through SetPollLease.
+	j.SetPollLease(DefaultPollLease)
+	return j
 }
 
 // newJobs is NewJobs with an injectable clock + janitor tick (unit-testable).
@@ -238,6 +274,12 @@ func newJobs(ttl time.Duration, now func() time.Time, janitorTick time.Duration,
 	}
 	j.cond = sync.NewCond(&j.mu)
 	go j.janitor(janitorTick)
+	// The reaper's tick is read HERE, in the caller's goroutine, and handed to the
+	// loop as a value: reapEvery is a package var a test compresses, and a read
+	// from the spawned goroutine has no happens-before edge to that write (a data
+	// race under -race for any test that builds a store after one that compressed
+	// it). janitorTick above is a parameter for the same reason.
+	go j.reapLoop(reapEvery)
 	go j.schedule()
 	return j
 }
@@ -352,6 +394,14 @@ type AcceptSpec struct {
 	// a band. Empty = one anonymous tenant, which is exactly the pre-0.113.18
 	// behaviour (pure arrival order) for a fleet of older delegators.
 	Tenant string
+	// PollLeased marks a job whose dispatcher polls for its result: a pushed
+	// agent dispatch. The store then treats a job that sits `accepted` with
+	// nobody polling it for the poll lease as abandoned, and skips, reaps and
+	// stops counting it (ADR 0064). It is NOT set for a job the pull queue
+	// claimed (its result travels by ack, nobody polls this node for it), nor
+	// for media and vision jobs, whose pollers are other clients with cadences
+	// this node does not control.
+	PollLeased bool
 }
 
 // IdleSlot reports whether a job admitted RIGHT NOW would start at once: the
@@ -427,10 +477,233 @@ func (j *Jobs) Admit(id string, spec AcceptSpec, run func(context.Context) (json
 		acceptedAt: j.now(),
 		band:       ClampBand(spec.Band),
 		tenant:     spec.Tenant,
+		leased:     spec.PollLeased,
 	}
+	// The lease clock starts at admission: a job nobody ever polls is a ghost
+	// from the moment it is admitted, and must not need a first poll to age.
+	j.m[id].polledAt = j.m[id].acceptedAt
 	j.pending = append(j.pending, id)
 	j.cond.Broadcast() // wake the scheduler: there is work
 	return true
+}
+
+// The wire's two terminal errors for a job that was taken out of the backlog
+// without ever running. Like ErrNeverStarted they are DIFFERENT FACTS from
+// "interrupted": nothing ran, so a delegator that reads one may re-place the
+// work with no risk of a double run. Stable prefixes: a delegator or an
+// operator may key on them.
+const (
+	// ErrWithdrawn: the job's own delegator asked for it back (Withdraw).
+	ErrWithdrawn = "withdrawn: its delegator gave the job up before it started"
+	// ErrReaped: nobody polled the job for the poll lease (reap).
+	ErrReaped = "reaped: nothing polled this accepted job within the poll lease, so it never started"
+)
+
+// WithdrawnState is the `state` a successful DELETE /fleet/jobs/{id} answers
+// with. It is a wire answer only: the job's stored state is the terminal error
+// ErrWithdrawn, which is what a later poll of the id reads.
+const WithdrawnState = "withdrawn"
+
+// neverRanErr reports whether a job's terminal error says it was taken out of the
+// backlog without ever running: withdrawn by its delegator, reaped, or marked
+// never-started at shutdown. They are three routes to one fact, and Withdraw treats
+// the fact, not the route.
+func neverRanErr(err string) bool {
+	return err == ErrWithdrawn || err == ErrReaped || err == ErrNeverStarted
+}
+
+// WithdrawResult is Withdraw's answer.
+type WithdrawResult struct {
+	// Found is false for an id the store does not hold (never admitted, or
+	// already evicted).
+	Found bool
+	// Withdrawn: the job is out of the backlog and never ran — taken back by this
+	// call, by an earlier one (Withdraw is idempotent, so a retry after a lost answer
+	// is unambiguous), or by the node itself (reaped, or never-started at shutdown:
+	// see neverRanErr).
+	Withdrawn bool
+	// State is the job's state when it could NOT be withdrawn: running (a slot
+	// took it), or already done/error. Zero when Withdrawn or not Found.
+	State JobState
+}
+
+// Withdraw takes an `accepted` job back out of the backlog at its delegator's
+// request. It is the one route by which a delegator that gives a job up can make
+// sure the node does not run it later for nobody (ADR 0064).
+//
+// It succeeds ONLY for a job that has never started, and it decides that under
+// the same mutex claimLocked flips accepted→running under, so exactly one of
+// the two wins a race and no job can both run and be reported withdrawn. A
+// RUNNING job is never touched (the operator's Option A, ADR 0028: running work
+// stays recoverable), and neither is a finished one.
+//
+// The job is marked terminal (ErrWithdrawn), not deleted: terminal states are
+// write-once and every poller always reaches one, a duplicate dispatch of the id
+// meets the known-job path (409, never a second run), and the feed keeps the row
+// for the ttl so an operator can see what became of it. Its parked resources are
+// released through OnDropped, outside the lock, exactly as drain does.
+func (j *Jobs) Withdraw(id string) WithdrawResult {
+	j.mu.Lock()
+	jb, ok := j.m[id]
+	switch {
+	case !ok:
+		j.mu.Unlock()
+		return WithdrawResult{}
+	case jb.state == JobError && neverRanErr(jb.err):
+		// Idempotent: the answer a lost reply needs. And not only for a job THIS route
+		// withdrew: a job the reaper took, or a drain marked never-started, is the same
+		// fact (nothing ran, nothing will), and answering "it has already started" for
+		// it would send the delegator back to polling a job that never ran.
+		j.mu.Unlock()
+		return WithdrawResult{Found: true, Withdrawn: true}
+	case jb.state != JobAccepted:
+		state := jb.state
+		j.mu.Unlock()
+		return WithdrawResult{Found: true, State: state}
+	}
+	dropped := j.dropLocked(jb, ErrWithdrawn)
+	j.withdrawnTotal++
+	// A long poll parked on the job (none, once a delegator withdraws it — but a
+	// second observer can be) learns the verdict now.
+	j.cond.Broadcast()
+	j.mu.Unlock()
+	if dropped != nil {
+		dropped()
+	}
+	log.Printf("fleet: withdrew job %s at its delegator's request; it never started", id)
+	return WithdrawResult{Found: true, Withdrawn: true}
+}
+
+// dropLocked takes an `accepted` job out of the running for good: terminal with
+// why as its error, its request payload released, and its OnDropped hook returned
+// for the CALLER to invoke after it unlocks (the hook deletes temp files, and
+// holding the store mutex across the filesystem would stall every poll and every
+// health read — drain's rule). Caller holds mu and has checked the state.
+func (j *Jobs) dropLocked(jb *job, why string) (onDropped func()) {
+	now := j.now()
+	jb.state = JobError
+	jb.err = why
+	jb.terminalAt = now
+	jb.finishedAt = now
+	jb.run = nil
+	onDropped, jb.onDropped = jb.onDropped, nil // exactly once, whoever drops it
+	return onDropped
+}
+
+// SetPollLease sets the poll lease (see DefaultPollLease); <= 0 turns the
+// abandoned-job rules off.
+func (j *Jobs) SetPollLease(d time.Duration) {
+	j.mu.Lock()
+	j.pollLease = d
+	j.mu.Unlock()
+}
+
+// PollLease reports the poll lease in force; 0 = the abandoned-job rules are off.
+// It exists so the serve verb's wiring of fleet_poll_lease_sec can be read back.
+func (j *Jobs) PollLease() time.Duration {
+	j.mu.RLock()
+	defer j.mu.RUnlock()
+	return j.pollLease
+}
+
+// TakenBack reports how many jobs this process has taken out of the backlog without
+// running them: withdrawn at a delegator's request, and reaped for want of a poller.
+// Counts since the process started, published on /fleet/health so the reaper — the one
+// unattended state change ADR 0064 makes — can be counted by anyone polling the node.
+func (j *Jobs) TakenBack() (withdrawn, reaped int) {
+	j.mu.RLock()
+	defer j.mu.RUnlock()
+	return j.withdrawnTotal, j.reapedTotal
+}
+
+// Touch records that a poller looked at the job just now (the poll route calls it
+// after the bearer gate; the feed listing never does, so an observer cannot keep
+// a ghost alive). A terminal job is left alone: see job.polledAt.
+func (j *Jobs) Touch(id string) {
+	j.mu.Lock()
+	if jb, ok := j.m[id]; ok && !Terminal(jb.state) {
+		now := j.now()
+		wasStale := j.staleLocked(jb, now)
+		jb.polledAt = now
+		if wasStale {
+			// The claim scan skipped this job while its poller was quiet, and the
+			// scheduler parked; the poller is back, so the job is claimable again —
+			// but a scan only runs on a wake, so without this the job would sit in
+			// the queue until some unrelated admission or finish happened along.
+			j.cond.Broadcast()
+		}
+	}
+	j.mu.Unlock()
+}
+
+// staleLocked reports whether jb is a ghost: an accepted, PollLeased job that
+// nobody has looked at for the poll lease and that no long poll is parked on.
+// One predicate for the claim scan (never start it), the reaper (clean it up) and
+// the tests. Caller holds mu.
+func (j *Jobs) staleLocked(jb *job, now time.Time) bool {
+	return j.pollLease > 0 && jb.leased && jb.state == JobAccepted && jb.waiters == 0 &&
+		now.Sub(jb.polledAt) > j.pollLease
+}
+
+// reapEvery is how often the reaper looks for abandoned accepted jobs. A var so
+// a test can compress it; production never mutates it, and a test must set it
+// BEFORE building the store (newJobs reads it once, on the constructing
+// goroutine, and hands it to reapLoop).
+var reapEvery = 5 * time.Second
+
+// reapLoop runs reap on every tick of `every` until DrainAndStop closes
+// stopJanitor.
+func (j *Jobs) reapLoop(every time.Duration) {
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		select {
+		case <-j.stopJanitor:
+			return
+		case <-t.C:
+			j.reap()
+		}
+	}
+}
+
+// reap marks every abandoned accepted job terminal (ErrReaped) and releases
+// what they hold; it returns how many it took. Called by reapLoop on its tick
+// and directly by tests with an injected clock.
+func (j *Jobs) reap() int {
+	j.mu.Lock()
+	now := j.now()
+	lease := j.pollLease
+	var ids []string
+	var hooks []func()
+	for id, jb := range j.m {
+		if !j.staleLocked(jb, now) {
+			continue
+		}
+		if hook := j.dropLocked(jb, ErrReaped); hook != nil {
+			hooks = append(hooks, hook)
+		}
+		ids = append(ids, id)
+	}
+	if len(ids) > 0 {
+		j.reapedTotal += len(ids)
+		j.cond.Broadcast() // the queue got shorter; the scheduler re-scans
+	}
+	j.mu.Unlock()
+	for _, hook := range hooks {
+		hook()
+	}
+	if n := len(ids); n > 0 {
+		// ONE line per pass, however many ghosts it collected: a fan-out that
+		// left forty of them must not write forty lines.
+		sort.Strings(ids)
+		more := ""
+		if n > 3 {
+			ids, more = ids[:3], fmt.Sprintf(" and %d more", n-3)
+		}
+		log.Printf("fleet: reaped %d accepted agent job(s) nobody polled for %s (fleet_poll_lease_sec); they never started: %s%s",
+			n, lease, strings.Join(ids, ", "), more)
+	}
+	return len(ids)
 }
 
 // schedule is the ONE goroutine that turns admitted jobs into running ones. It
@@ -527,6 +800,13 @@ func (j *Jobs) claimLocked() (string, func(context.Context) (json.RawMessage, er
 		if !ok || jb.state != JobAccepted || jb.run == nil {
 			j.dropPendingLocked(i) // stale: evicted, or already terminal/claimed
 			i--
+			continue
+		}
+		if j.staleLocked(jb, now) {
+			// A ghost: its delegator stopped polling for it. It is never claimed —
+			// the reaper takes it on its next tick, but the slot this scan is
+			// filling must not go to a job nobody is waiting for in the meantime,
+			// or the reaper's tick length becomes the ghost's window to run.
 			continue
 		}
 		if jb.capped && full {
@@ -641,6 +921,26 @@ func (j *Jobs) WaitTerminal(ctx context.Context, id string, d time.Duration) (*J
 
 	j.mu.Lock()
 	defer j.mu.Unlock()
+	// A poller blocked here IS polling: the job counts as watched for the whole
+	// wait (the reaper never takes a job with a waiter parked on it, whatever the
+	// lease), and the lease starts over from the moment the wait ends — the next
+	// poll follows after the delegator's own sleep, not at this instant. Deferred
+	// so it runs, under the lock, on every return path below.
+	if jb, ok := j.m[id]; ok && !Terminal(jb.state) {
+		now := j.now()
+		wasStale := j.staleLocked(jb, now)
+		jb.waiters++
+		jb.polledAt = now
+		if wasStale {
+			j.cond.Broadcast() // claimable again: see Touch
+		}
+		defer func() {
+			jb.waiters--
+			if !Terminal(jb.state) {
+				jb.polledAt = j.now()
+			}
+		}()
+	}
 	for {
 		view, ok := j.viewLocked(id)
 		if !ok || Terminal(view.State) || wctx.Err() != nil {
@@ -665,6 +965,16 @@ func (j *Jobs) FinishedAgentWalls(n int) []time.Duration {
 	rows := make([]row, 0, len(j.m))
 	for _, jb := range j.m {
 		if !jb.agent || jb.finishedAt.IsZero() || jb.startedAt.IsZero() {
+			continue
+		}
+		if j.pollLease > 0 && jb.leased && jb.finishedAt.Sub(jb.polledAt) > j.pollLease {
+			// Abandoned: the job's poller looked last more than a lease before it
+			// finished, so nobody was waiting for this run and its wall is a ghost's
+			// (4 to 64 minutes of stall on a seat no caller was using). Fed into the
+			// median it inflated the node's own Retry-After, which sent callers away
+			// for longer and produced more ghosts (ADR 0064). Evaluated lazily, on
+			// polledAt as it stood at the end: a look after the job finished never
+			// moves it (Touch skips terminal jobs).
 			continue
 		}
 		if w := jb.finishedAt.Sub(jb.startedAt); w > 0 {
