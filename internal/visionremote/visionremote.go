@@ -185,7 +185,7 @@ func Call(ctx context.Context, cfg config.Config, req core.Request) (core.Result
 	if err != nil {
 		return core.Deferf("image load: "+err.Error(), "", core.Meta{}), nil
 	}
-	base, node, err := pickNode(ctx, cfg)
+	base, node, err := pickNode(ctx, cfg, string(req.Task))
 	if err != nil {
 		return core.Result{}, err
 	}
@@ -206,8 +206,9 @@ func Call(ctx context.Context, cfg config.Config, req core.Request) (core.Result
 
 // pickNode probes delegate_remotes and hands the views to
 // delegate.PlaceVision. Every miss is named in the error so "no node" is never
-// a mystery: an unreachable node, a node without the lane, a leased card.
-func pickNode(ctx context.Context, cfg config.Config) (base, node string, err error) {
+// a mystery: an unreachable node, a node without the lane, a node whose seat does
+// not serve this task, a leased card.
+func pickNode(ctx context.Context, cfg config.Config, task string) (base, node string, err error) {
 	var (
 		bases  []string
 		views  []delegate.NodeView
@@ -229,6 +230,9 @@ func pickNode(ctx context.Context, cfg config.Config) (base, node string, err er
 		case !v.ServesVision():
 			misses = append(misses, fmt.Sprintf("%s (%s): no vision lane (tasks %v)", b, v.NodeID, v.Tasks))
 			continue
+		case !v.ServesVisionTask(task):
+			misses = append(misses, fmt.Sprintf("%s (%s): its vision seat does not serve %s (vision_tasks %v)", b, v.NodeID, task, v.VisionTasks))
+			continue
 		case v.LeasedText || v.LeaseBusy:
 			misses = append(misses, fmt.Sprintf("%s (%s): card leased", b, v.NodeID))
 			continue
@@ -236,7 +240,7 @@ func pickNode(ctx context.Context, cfg config.Config) (base, node string, err er
 		bases = append(bases, b)
 		views = append(views, v)
 	}
-	i, ok := delegate.PlaceVision(views)
+	i, ok := delegate.PlaceVision(views, task)
 	if !ok {
 		return "", "", &placementError{core.DeferClassCapacity,
 			"no fleet node is eligible for the vision lane — probed " + strings.Join(misses, "; ")}

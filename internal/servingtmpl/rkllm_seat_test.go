@@ -196,3 +196,31 @@ func TestRKLLMSeatsTakeTheirOwnVarIds(t *testing.T) {
 		t.Errorf("all three seats are alternatives in the interactive set, got %q", got)
 	}
 }
+
+// TestRKLLMSeatRendersItsRepeatPenaltyDefault: a seat that declares repeat_penalty is started
+// with --repeat-penalty (between the cpu mask and the served name, the launcher passes it
+// straight through to rkllm_server.py); a seat that does not renders byte-for-byte as it
+// always has (TestRKLLMSeatRendersItsLaunchLine pins that shape).
+func TestRKLLMSeatRendersItsRepeatPenaltyDefault(t *testing.T) {
+	for _, tc := range []struct {
+		v    float64
+		flag string
+	}{{1.1, "--repeat-penalty 1.1"}, {1, "--repeat-penalty 1"}, {0.01, "--repeat-penalty 0.01"}, {10, "--repeat-penalty 10"}} {
+		s := rkllmSeat()
+		v := tc.v
+		s.RepeatPenalty = &v
+		out := mustRender(t, linuxCUDA(t), seatParams(s))
+		want := "      --ctx-size 16384 --cpu-mask 0x0f " + tc.flag + " --served-name qwen3.5-0.8b-npu --port ${PORT} --host 127.0.0.1\n"
+		blk := ownBlockOf(out, s.Name)
+		if !strings.Contains(blk, want) {
+			t.Errorf("repeat_penalty %v: seat block missing %q:\n%s", tc.v, want, blk)
+		}
+		m, ok := parseSwapConfig(t, out).Models[s.Name]
+		if !ok || !strings.Contains(m.Cmd, " "+tc.flag+" --served-name ") {
+			t.Errorf("repeat_penalty %v: the folded cmd does not carry the flag: %q", tc.v, m.Cmd)
+		}
+	}
+	if blk := ownBlockOf(mustRender(t, linuxCUDA(t), seatParams(rkllmSeat())), "qwen3.5-0.8b-npu"); strings.Contains(blk, "--repeat-penalty") {
+		t.Errorf("a seat with no repeat_penalty must render no flag:\n%s", blk)
+	}
+}
