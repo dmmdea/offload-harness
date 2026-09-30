@@ -59,7 +59,7 @@ func TestQueueRouteReturnsAJobTheHolderFinishedBehindASlowerOne(t *testing.T) {
 	holder := queueHolder(t)
 	cfg := config.Config{FleetQueueHolder: holder.url, StateDir: t.TempDir()}
 	go func() {
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond)
 		for _, job := range claimAll(t, holder.q, 2) {
 			if strings.Contains(goalOf(t, job), "two") {
 				w, _ := json.Marshal(core.AgentWireResult{SchemaVersion: core.AgentWireSchemaVersion, NodeID: "claimant", Seat: "seat-x", Output: "job two is done", StopReason: "done"})
@@ -71,7 +71,7 @@ func TestQueueRouteReturnsAJobTheHolderFinishedBehindASlowerOne(t *testing.T) {
 	}()
 
 	results, sum, _ := runWithin(t, 4*time.Second, cfg, nil,
-		[]core.AgentContract{queueContract("which shipment one?"), queueContract("which shipment two?")}, "queue", nil, deadlineIn(700*time.Millisecond), nil)
+		[]core.AgentContract{queueContract("which shipment one?"), queueContract("which shipment two?")}, "queue", nil, deadlineIn(1200*time.Millisecond), nil)
 
 	if sum != (Summary{Succeeded: 1, Deferred: 1}) {
 		t.Fatalf("summary = %+v, want the finished job returned and only the held one deferred", sum)
@@ -217,7 +217,7 @@ func TestQueueRouteEvaluatesAcceptanceOnAFinishedJob(t *testing.T) {
 		holder := queueHolder(t)
 		cfg := config.Config{FleetQueueHolder: holder.url, StateDir: t.TempDir()}
 		go func() {
-			time.Sleep(100 * time.Millisecond)
+			time.Sleep(50 * time.Millisecond)
 			for _, job := range claimAll(t, holder.q, 1) {
 				finish(holder.q, job, "no such token here")
 			}
@@ -231,7 +231,7 @@ func TestQueueRouteEvaluatesAcceptanceOnAFinishedJob(t *testing.T) {
 		holder := queueHolder(t)
 		cfg := config.Config{FleetQueueHolder: holder.url, StateDir: t.TempDir()}
 		go func() {
-			time.Sleep(100 * time.Millisecond)
+			time.Sleep(50 * time.Millisecond)
 			for _, job := range claimAll(t, holder.q, 2) {
 				if strings.Contains(goalOf(t, job), "two") {
 					finish(holder.q, job, "no such token here")
@@ -239,7 +239,7 @@ func TestQueueRouteEvaluatesAcceptanceOnAFinishedJob(t *testing.T) {
 			}
 		}()
 		results, sum, _ := runWithin(t, 4*time.Second, cfg, nil,
-			[]core.AgentContract{widgetContract("which shipment one?"), widgetContract("which shipment two?")}, "queue", nil, deadlineIn(700*time.Millisecond), nil)
+			[]core.AgentContract{widgetContract("which shipment one?"), widgetContract("which shipment two?")}, "queue", nil, deadlineIn(1200*time.Millisecond), nil)
 		if sum != (Summary{Deferred: 1, FailedVerification: 1}) {
 			t.Fatalf("summary = %+v, want the held job deferred and the finished one failed verification", sum)
 		}

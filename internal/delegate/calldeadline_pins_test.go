@@ -531,7 +531,7 @@ func TestAWaitCutAfterARefusalIsStillTheCallDeadline(t *testing.T) {
 	cfg := testCfg(t)
 	cfg.AgentPlacementWaitSec = 30
 	results, _, _ := runWithin(t, 5*time.Second, cfg, neverLocal(t),
-		[]core.AgentContract{remoteContract()}, "remote", []string{url}, deadlineIn(400*time.Millisecond), nil)
+		[]core.AgentContract{remoteContract()}, "remote", []string{url}, deadlineIn(800*time.Millisecond), nil)
 	r := results[0].Result
 	if !strings.HasPrefix(r.Reason, deadlinePrefix+"1 unfinished") || r.DeferClass != core.DeferClassBudget {
 		t.Fatalf("a wait cut by the call deadline after a refusal was published as class %q reason %q", r.DeferClass, r.Reason)

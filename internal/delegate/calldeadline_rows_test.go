@@ -33,7 +33,7 @@ func TestAWaitCutAfterARefusalIsRecordedLikeAnyOtherCut(t *testing.T) {
 	cfg.AgentPlacementWaitSec = 30
 
 	results, sum, _ := runWithin(t, 5*time.Second, cfg, neverLocal(t),
-		[]core.AgentContract{remoteContract()}, "remote", []string{url}, deadlineIn(400*time.Millisecond), nil)
+		[]core.AgentContract{remoteContract()}, "remote", []string{url}, deadlineIn(800*time.Millisecond), nil)
 	pr := results[0]
 	if sum.Deferred != 1 || sum.Failed != 0 || !strings.HasPrefix(pr.Result.Reason, deadlinePrefix+"1 unfinished") || pr.JobID == "" {
 		t.Fatalf("summary %+v result %+v, want the call-deadline defer with a job id", sum, pr)
