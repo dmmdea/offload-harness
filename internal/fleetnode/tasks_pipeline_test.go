@@ -388,12 +388,12 @@ func TestSweepOrphanedPipelineJobs_RemovesEntries(t *testing.T) {
 		}
 	}
 
-	swept, err := SweepOrphanedPipelineJobs(cfg)
+	swept, kept, err := SweepOrphanedPipelineJobs(cfg)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if swept != 2 {
-		t.Fatalf("swept = %d, want 2", swept)
+	if swept != 2 || kept != 0 {
+		t.Fatalf("swept/kept = %d/%d, want 2/0 (job dirs with no owner marker are fleet-serve's own)", swept, kept)
 	}
 	entries, rerr := os.ReadDir(jobsDir)
 	if rerr != nil {
@@ -410,12 +410,12 @@ func TestSweepOrphanedPipelineJobs_RemovesEntries(t *testing.T) {
 func TestSweepOrphanedPipelineJobs_MissingDirIsNotAnError(t *testing.T) {
 	cfg := config.Default()
 	cfg.Home = t.TempDir() // pipeline-jobs/ never created under this fresh Home
-	swept, err := SweepOrphanedPipelineJobs(cfg)
+	swept, kept, err := SweepOrphanedPipelineJobs(cfg)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if swept != 0 {
-		t.Fatalf("swept = %d, want 0", swept)
+	if swept != 0 || kept != 0 {
+		t.Fatalf("swept/kept = %d/%d, want 0/0", swept, kept)
 	}
 }
 
@@ -444,7 +444,7 @@ func TestSweepOrphanedPipelineJobs_UnblocksReusedID(t *testing.T) {
 		t.Fatal("expected the pre-sweep re-dispatch to be refused (the orphan is still on disk)")
 	}
 
-	if _, err := SweepOrphanedPipelineJobs(cfg); err != nil {
+	if _, _, err := SweepOrphanedPipelineJobs(cfg); err != nil {
 		t.Fatalf("sweep: unexpected error: %v", err)
 	}
 

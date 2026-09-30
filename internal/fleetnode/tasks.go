@@ -1109,14 +1109,14 @@ func pipelineInjectRefs(jobSpec map[string]json.RawMessage, fetched map[string]s
 // A per-entry removal failure (e.g. a locked file) is collected but does not
 // abort the sweep of the REST of the entries — one bad directory blocking one
 // job_spec.id forever is a much smaller failure than a startup crash over it.
-func SweepOrphanedPipelineJobs(cfg config.Config) (swept int, err error) {
+func SweepOrphanedPipelineJobs(cfg config.Config) (swept, kept int, err error) {
 	dir := filepath.Join(cfg.BaseDir(), "pipeline-jobs")
 	entries, rerr := os.ReadDir(dir)
 	if rerr != nil {
 		if os.IsNotExist(rerr) {
-			return 0, nil
+			return 0, 0, nil
 		}
-		return 0, fmt.Errorf("sweep pipeline-jobs: reading %s: %w", dir, rerr)
+		return 0, 0, fmt.Errorf("sweep pipeline-jobs: reading %s: %w", dir, rerr)
 	}
 	var firstErr error
 	for _, e := range entries {
@@ -1129,5 +1129,5 @@ func SweepOrphanedPipelineJobs(cfg config.Config) (swept int, err error) {
 		}
 		swept++
 	}
-	return swept, firstErr
+	return swept, kept, firstErr
 }

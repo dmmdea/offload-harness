@@ -2504,7 +2504,7 @@ func runFleetServe(args []string) error {
 	// (buildPipelineJob's exclusive job-dir Mkdir guard can't tell "orphaned"
 	// from "still running"). A sweep failure is a warning, not fatal — one
 	// stuck directory blocking one id is far cheaper than refusing to serve.
-	if swept, serr := fleetnode.SweepOrphanedPipelineJobs(cfg); serr != nil {
+	if swept, _, serr := fleetnode.SweepOrphanedPipelineJobs(cfg); serr != nil {
 		fmt.Fprintf(os.Stderr, "[fleet-serve] warning: pipeline-jobs sweep: %v\n", serr)
 	} else if swept > 0 {
 		fmt.Fprintf(os.Stderr, "[fleet-serve] swept %d orphaned pipeline-job dir(s) left by a previous ungraceful stop\n", swept)
