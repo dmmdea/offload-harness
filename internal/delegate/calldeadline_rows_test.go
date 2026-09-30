@@ -17,6 +17,7 @@ import (
 
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/ledger"
+	"github.com/dmmdea/offload-harness/internal/pairworkloads"
 )
 
 // TestAWaitCutAfterARefusalIsRecordedLikeAnyOtherCut: a node refuses the first dispatch
@@ -197,4 +198,31 @@ func TestADroppedLatePairFrameIsSaidOnce(t *testing.T) {
 		t.Fatalf("the log line does not name the job (%s): %s", results[1].JobID, out)
 	}
 	time.Sleep(100 * time.Millisecond)
+}
+
+// TestOnlyTheFirstDroppedPairFrameOfARunIsLogged: several abandoned subtasks report late in
+// one run; the log says it once (naming the first job), not once per frame — a burst of
+// identical lines would bury the results it warns about.
+func TestOnlyTheFirstDroppedPairFrameOfARunIsLogged(t *testing.T) {
+	logs := captureLog(t)
+	pairAppDir(t)
+	c := &pairCapture{}
+	srv := httptest.NewServer(http.HandlerFunc(c.handler))
+	defer srv.Close()
+	cfg := testCfg(t)
+	cfg.PairWorkloadsEnabled = true
+	cfg.PairWorkloadsEndpoint = srv.URL
+	r := &runner{cfg: cfg, pair: pairworkloads.New(pairworkloads.FromConfig(cfg))}
+	r.shutPair()
+	for _, id := range []string{"agd-late-1", "agd-late-2", "agd-late-3"} {
+		pr := PlacedResult{pairModel: "seat-m", pairEngine: "engine-e", pairCreated: 1}
+		r.pairTerminal(id, &pr)
+	}
+	out := logs.String()
+	if n := strings.Count(out, "PAIR frame"); n != 1 || !strings.Contains(out, "agd-late-1") {
+		t.Fatalf("%d log line(s) for three dropped frames, want exactly 1 naming the first job: %s", n, out)
+	}
+	if n := len(c.snapshot()); n != 0 {
+		t.Fatalf("%d frame(s) reached PAIR after the run was shut", n)
+	}
 }

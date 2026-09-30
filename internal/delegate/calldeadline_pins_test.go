@@ -550,3 +550,37 @@ func TestAttemptGuardCutNamesTheDeadlineInThePlacement(t *testing.T) {
 		t.Fatalf("placement narration = %q, want it to open with the call-deadline marker", pr.PlacementReason)
 	}
 }
+
+// TestTheUnfinishedCountIsTakenWhenTheDeadlinePasses: N is the number of subtasks that had no
+// result at the INSTANT the deadline passed, fixed before the unwind so that a subtask which
+// finishes for real inside the unwind allowance does not change what the others say. Here one
+// seat ignores its context (abandoned after the unwind) and another answers 60 ms after the
+// deadline, well inside it: the abandoned subtask's reason is computed after that answer, and
+// must still say 2 — the number that was true when the call ran out of time.
+func TestTheUnfinishedCountIsTakenWhenTheDeadlinePasses(t *testing.T) {
+	cfg := testCfg(t)
+	release := make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	t.Cleanup(unblock)
+	local := func(ctx context.Context, c core.AgentContract, _ LocalOptions) (core.AgentWireResult, error) {
+		switch {
+		case strings.Contains(c.Goal, "deaf"):
+			<-release // ignores its context
+		case strings.Contains(c.Goal, "late"):
+			<-ctx.Done()
+			time.Sleep(60 * time.Millisecond) // inside the unwind allowance
+		}
+		return localOK(), nil
+	}
+	results, sum, _ := runWithin(t, 4*time.Second, cfg, local,
+		[]core.AgentContract{{Goal: "deaf one"}, {Goal: "late one"}}, "local", nil, deadlineIn(300*time.Millisecond), unblock)
+	if sum != (Summary{Succeeded: 1, Deferred: 1}) {
+		t.Fatalf("summary %+v, want the late answer kept and the deaf seat abandoned", sum)
+	}
+	if r := results[0].Result.Reason; !strings.HasPrefix(r, deadlinePrefix+"2 unfinished") || !strings.Contains(r, "did not stop") {
+		t.Fatalf("the abandoned subtask says %q, want the count fixed when the deadline passed (2 unfinished)", r)
+	}
+	unblock()
+	time.Sleep(200 * time.Millisecond) // let the abandoned goroutine finish before the temp dir goes
+}
