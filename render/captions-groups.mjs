@@ -24,7 +24,11 @@
 // absolute time; later chunks are rebased so each clip starts at 0.
 //
 // Word shape. <base>.segments.json is the array internal/sttclient writes: segments carrying
-// words[{word,start,end,probability}] (whisper keeps a leading space on each word). A segment without
+// words[{word,start,end,probability}]. Those entries are whisper-server's TOKENS, not words: a word-initial
+// token keeps a leading space, and a continuation (a sub-word piece, an apostrophe suffix, the digits after a
+// currency sign, punctuation) has none, so a segment's text is its tokens joined with nothing between them.
+// wordsFromSegments merges every token without a leading space into the word before it, inside its segment,
+// and the pace, the word count and the break rules below all count those merged words. A segment without
 // words is spread over its span by character weight.
 import { readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
@@ -55,10 +59,14 @@ function isNum(v) {
   return typeof v === "number" && Number.isFinite(v);
 }
 
-// wordsFromSegments flattens a transcript into [{text,start,end}] in the input order. It accepts the
-// bare segments array or an object holding one. Whisper's non-speech markers ([BLANK_AUDIO], [Music])
-// are dropped unless dropNonSpeech is false. It fails loud on a word it cannot place in time: a caption
-// track that silently loses words is worse than an error.
+// wordsFromSegments flattens a transcript into [{text,start,end}] WORDS in the input order. It accepts the
+// bare segments array or an object holding one. whisper-server's words[] are tokens (see the header), so tokens
+// are merged back into words here: a token that starts with whitespace opens a word; one that does not
+// continues the word before it, appending its text and stretching the word's end. The first token of a segment
+// always opens a word, and a word never continues into the next segment. A token that is only whitespace
+// separates words without being one: what follows it opens a new word. Whisper's non-speech markers
+// ([BLANK_AUDIO], [Music]) are dropped, judged on the merged word, unless dropNonSpeech is false. It fails loud
+// on a token it cannot place in time: a caption track that silently loses words is worse than an error.
 export function wordsFromSegments(input, { dropNonSpeech = true } = {}) {
   const segments = Array.isArray(input) ? input : input && Array.isArray(input.segments) ? input.segments : null;
   if (!segments) throw new TypeError("segments must be an array, or an object with a segments array (the shape of <base>.segments.json)");
@@ -67,13 +75,31 @@ export function wordsFromSegments(input, { dropNonSpeech = true } = {}) {
     if (!seg || typeof seg !== "object") throw new TypeError(`segment ${si}: not an object`);
     const label = `segment ${seg.id !== undefined ? seg.id : si}`;
     if (Array.isArray(seg.words) && seg.words.length > 0) {
+      let cur = null; // the word being built
+      let opens = true; // the next token starts a word: true at the start of a segment and after whitespace
+      const finish = () => {
+        if (cur && !(dropNonSpeech && /^\[[^\]]*\]$/.test(cur.text))) out.push(cur);
+        cur = null;
+      };
       seg.words.forEach((wd, wi) => {
-        if (!wd || !isNum(wd.start) || !isNum(wd.end)) throw new RangeError(`${label}: word ${wi} has no usable start and end`);
+        if (!wd || !isNum(wd.start) || !isNum(wd.end)) throw new RangeError(`${label}: token ${wi} has no usable start and end`);
         const raw = typeof wd.word === "string" ? wd.word : typeof wd.text === "string" ? wd.text : "";
         const text = raw.replace(/\s+/g, " ").trim();
-        if (!text || (dropNonSpeech && /^\[[^\]]*\]$/.test(text))) return;
-        out.push({ text, start: wd.start, end: Math.max(wd.end, wd.start) });
+        if (opens || /^\s/.test(raw)) {
+          finish();
+          opens = false;
+        }
+        if (text) {
+          if (cur) {
+            cur.text += text;
+            cur.end = Math.max(cur.end, wd.end, wd.start);
+          } else {
+            cur = { text, start: wd.start, end: Math.max(wd.end, wd.start) };
+          }
+        }
+        if (/\s$/.test(raw)) opens = true;
       });
+      finish();
       return;
     }
     let text = typeof seg.text === "string" ? seg.text : "";
