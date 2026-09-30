@@ -23,12 +23,18 @@
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 # One run at a time per box: a second run that overlapped this one would reap its stand-ins and fail on nothing of its own
-# making. flock(1) itself holds the lock (-o: nothing this run starts inherits it), so it is released when this run ends.
+# making. flock(1) itself holds the lock (-o: nothing this run starts inherits it), so it is released when this run ends. The
+# lock is a DIRECTORY (world-writable, sticky), not a file: with fs.protected_regular=2 (the Ubuntu default) a lock file that
+# one user created cannot be opened by another in a sticky /tmp, and a root run after an unprivileged one (or the reverse)
+# would fail instead of skipping. Any user can open a directory to lock it.
 if [ -z "${SEAT_FG_TEST_LOCKED:-}" ] && command -v flock >/dev/null; then
-  LOCKFILE="${TMPDIR:-/tmp}/seat_fg.stale-mp.tests.lock"
-  SEAT_FG_TEST_LOCKED=1 flock -n -o -E 99 "$LOCKFILE" bash "$0" "$@"; rc=$?
-  [ "$rc" -eq 99 ] && { echo "SKIP (another run of this test holds $LOCKFILE: runs share scratch ports and a box-wide sweep)"; exit 0; }
-  exit "$rc"
+  LOCKDIR="${TMPDIR:-/tmp}/seat_fg.stale-mp.tests.lock.d"
+  [ -d "$LOCKDIR" ] || mkdir -m 1777 "$LOCKDIR" 2>/dev/null
+  if [ -d "$LOCKDIR" ]; then
+    SEAT_FG_TEST_LOCKED=1 flock -n -o -E 99 "$LOCKDIR" bash "$0" "$@"; rc=$?
+    [ "$rc" -eq 99 ] && { echo "SKIP (another run of this test holds $LOCKDIR: runs share scratch ports and a box-wide sweep)"; exit 0; }
+    exit "$rc"
+  fi
 fi
 command -v ss >/dev/null && command -v pgrep >/dev/null && command -v python3 >/dev/null && command -v setsid >/dev/null || { echo "SKIP (needs ss, pgrep, python3, setsid)"; exit 0; }
 PORT=28797; OTHER_PORT=28798; MP_PORT=28796; OTHER_MP_PORT=28795; MP_HTTP_PORT=28790
@@ -43,6 +49,9 @@ for p in $PORT $OTHER_PORT $MP_PORT $OTHER_MP_PORT $MP_HTTP_PORT; do
 done
 T="$(mktemp -d)"
 trap 'rc=$?; builtin kill -9 $(cat "$T"/*.pid 2>/dev/null) 2>/dev/null; [ -n "${UNIT_STARTED:-}" ] && systemctl stop "lmcache-mp-scratch-$$" >/dev/null 2>&1; rm -rf "$T"; exit $rc' EXIT
+# The stop script appends its own output to the seat log when nothing else carries it there; here that is a scratch file, never the
+# real /root/g7/seat.log of whatever box runs this.
+SEAT_LOG="$T/seat.log"; export SEAT_LOG
 fail=0
 pass() { echo "PASS $1"; }
 failcase() { echo "FAIL $1: $2"; fail=1; }
@@ -145,8 +154,8 @@ else:                             # the engine core spawns a worker
     print(w.pid, file=open(sys.argv[2], "w"))
 time.sleep(600)
 PYEOF
-engine3l() {
-  ( exec -a "vllm serve fake --port $2" python3 "$T/tree.py" api "$T/$1-worker.pid" "$T/$1-core.pid" ) >/dev/null 2>&1 &
+engine3l() {   # name, port, optional argv[0] of the API server (default: the `vllm serve` form)
+  ( exec -a "${3:-vllm serve fake --port $2}" python3 "$T/tree.py" api "$T/$1-worker.pid" "$T/$1-core.pid" ) >/dev/null 2>&1 &
   echo $! > "$T/$1.pid"; disown $!
   local i; for i in $(seq 1 60); do [ -s "$T/$1-worker.pid" ] && [ -s "$T/$1-core.pid" ] && break; sleep 0.1; done
   wait_name "$(cat "$T/$1-worker.pid")" "VLLM::Worker_TP0" || echo "test setup: 3-level worker of $1 never named"
@@ -214,13 +223,16 @@ reset
 # 1c. SEAT_MP_PORT_WAIT_SEC is a decimal number of seconds whatever it looks like: "08" is not an octal error that skips the wait
 #     (the port is refused at once instead of waited for), and a value that is not a number falls back to 10. The holder frees 3 s
 #     after the cleanup, so only a start that really waits (8 s, 10 s) gets to proceed.
+#     A value that is not a number is said so in the log (it was replaced by 10 without a word); a number, "08" included, is not.
 bad=""
 for v in 08 abc; do
   cp "$T/seat_stop.stub.sh" "$T/seat_stop.sh"; foreign $MP_HTTP_PORT stale; out="$(WAITSEC="$v" run)"; cp "$T/seat_stop.real.sh" "$T/seat_stop.sh"
   has "START PROCEEDS" || bad="$bad [SEAT_MP_PORT_WAIT_SEC='$v': $(tr '\n' '|' <<<"$out" | cut -c1-200)]"
+  if [ "$v" = abc ]; then has "WARN SEAT_MP_PORT_WAIT_SEC='abc' is not a number of seconds; using 10" || bad="$bad [abc: the launcher did not say the value was not a number]"
+  else has "WARN SEAT_MP_PORT_WAIT_SEC" && bad="$bad [$v is a number and was warned about]"; fi
   reset
 done
-if [ -z "$bad" ]; then pass "SEAT_MP_PORT_WAIT_SEC is a decimal number of seconds: 08 is waited out, abc means 10"; else failcase "SEAT_MP_PORT_WAIT_SEC" "$bad"; fi
+if [ -z "$bad" ]; then pass "SEAT_MP_PORT_WAIT_SEC is a decimal number of seconds: 08 is waited out, abc means 10 and is said"; else failcase "SEAT_MP_PORT_WAIT_SEC" "$bad"; fi
 
 # 2. a FOREIGN holder the stack's cleanup does not own: refused, and left alone. The wait for the port to free is the
 #    knob's (2 s here), not the default 10 s.
@@ -250,7 +262,7 @@ if has "reaping MP server" && has "reaping orphaned engine process" && has "STAR
 reset
 
 # 6. a LIVE engine on another port has workers of its own: not this seat's leftovers, so no cleanup runs at all (a healthy
-#    box with a sibling seat must not log "a crashed generation" or run a stop at every start), and nothing is reaped
+#    box with a sibling seat must not report a leftover or run a stop at every start), and nothing is reaped
 engine other $OTHER_PORT; out="$(run)"
 if ! has "reaping orphaned engine process" && ! has "running seat_stop.sh once" && has "START PROCEEDS" && alive other && alive other-worker; then
   pass "a live engine's workers on another port are never reaped"; else failcase "live engine's workers" "$out"; fi
@@ -366,6 +378,8 @@ for spec in "08:8" "09:9" "0:0" "abc:10" ":10" "12:12"; do
   orphan knob "VLLM::Worker_TP0"; immortal_on "$(cat "$T/knob.pid")"; fast_sleep_on
   out="$(bash "$T/seat_stop.exit.sh" "$T/seat.knob.env" 2>&1)"; rc=$?; fast_sleep_off; immortal_off
   { [ "$rc" -eq 1 ] && has "still alive $want s after SIGKILL" && has "INCOMPLETE"; } || bad="$bad [worker, SEAT_REAP_WAIT_SEC='$v' want $want s: rc=$rc $(tr '\n' '|' <<<"$out" | cut -c1-220)]"
+  if [ "$v" = abc ]; then has "WARN SEAT_REAP_WAIT_SEC='abc' is not a number of seconds; using 10" || bad="$bad [abc: the stop did not say the value was not a number]"
+  else has "WARN SEAT_REAP_WAIT_SEC" && bad="$bad [SEAT_REAP_WAIT_SEC='$v' is a number or empty and was warned about]"; fi
   reset
 done
 for spec in "08:8" "0:0"; do
@@ -376,7 +390,7 @@ for spec in "08:8" "0:0"; do
   { [ "$rc" -eq 1 ] && has "ignored SIGTERM for $want s; SIGKILL" && has "WARN MP server still alive $want s after SIGKILL" && has "INCOMPLETE"; } || bad="$bad [MP server, SEAT_REAP_WAIT_SEC='$v' want $want s: rc=$rc $(tr '\n' '|' <<<"$out" | cut -c1-220)]"
   reset
 done
-if [ -z "$bad" ]; then pass "SEAT_REAP_WAIT_SEC is a decimal number of seconds: 08, 09 and 0 are honoured, abc and an empty value mean 10"; else failcase "SEAT_REAP_WAIT_SEC" "$bad"; fi
+if [ -z "$bad" ]; then pass "SEAT_REAP_WAIT_SEC is a decimal number of seconds: 08, 09 and 0 are honoured, abc means 10 and is said, an empty value means 10"; else failcase "SEAT_REAP_WAIT_SEC" "$bad"; fi
 
 # 12. the stop path (llama-swap's cmdStop) stops THIS seat's engine and its whole tree, and nothing of another seat's; with a
 #     process tree to wait for it still gives the tree its 3 s grace
@@ -410,8 +424,92 @@ touch "$T/shm/nccl-sib" "$T/shm/vllm_sib" "$T/shm/torch_sib" "$T/shm/lmcache_sib
 engine sib5 $OTHER_PORT; out="$(bash "$T/seat_stop.shm.sh" "$T/seat.env" 2>&1)"
 if [ -e "$T/shm/nccl-sib" ] && [ -e "$T/shm/vllm_sib" ] && [ -e "$T/shm/torch_sib" ] && [ -e "$T/shm/lmcache_sib" ] && [ -e "$T/shm/psm_sib" ] && has "scratch tail done"; then pass "the shared-memory sweep leaves a live sibling's segments alone"; else failcase "shm sweep with a live sibling" "$(ls "$T/shm" | tr '\n' ' '): $out"; fi
 reset
+# the same for a sibling started as `python -m vllm.entrypoints…`: it is as live as a `vllm serve` one
+engine3l ep5 $OTHER_PORT "python3 -m vllm.entrypoints.openai.api_server --port $OTHER_PORT"; out="$(bash "$T/seat_stop.shm.sh" "$T/seat.env" 2>&1)"
+if [ -e "$T/shm/nccl-sib" ] && [ -e "$T/shm/vllm_sib" ] && [ -e "$T/shm/torch_sib" ] && [ -e "$T/shm/lmcache_sib" ] && [ -e "$T/shm/psm_sib" ] && has "scratch tail done"; then pass "the shared-memory sweep leaves the segments of a sibling started as vllm.entrypoints alone"; else failcase "shm sweep with an entrypoints sibling" "$(ls "$T/shm" | tr '\n' ' '): $out"; fi
+reset
 out="$(bash "$T/seat_stop.shm.sh" "$T/seat.env" 2>&1)"
 if [ ! -e "$T/shm/nccl-sib" ] && [ ! -e "$T/shm/vllm_sib" ] && [ ! -e "$T/shm/torch_sib" ] && [ ! -e "$T/shm/lmcache_sib" ] && [ ! -e "$T/shm/psm_sib" ] && [ -e "$T/shm/unrelated" ]; then pass "with no engine alive the sweep removes the stack's segments and only those"; else failcase "shm sweep, no engine" "$(ls "$T/shm" | tr '\n' ' '): $out"; fi
+
+# 15. an env file that was NAMED (as the argument, or by SEAT_ENV) and is not there is refused with exit 2, never replaced by the
+#     default seat's ports and unit: a typo in the stop task's argument must not stop whatever holds the defaults. The orphan
+#     sweep is box-wide, so an orphan the run leaves alone is the proof that nothing was reaped.
+orphan miss "VLLM::Worker_TP0"
+out="$(bash "$T/seat_stop.exit.sh" "$T/no-such.env" 2>&1)"; rc=$?
+out2="$(SEAT_ENV="$T/no-such.env" bash "$T/seat_stop.exit.sh" 2>&1)"; rc2=$?
+if [ "$rc" -eq 2 ] && [ "$rc2" -eq 2 ] && has "env file $T/no-such.env not found" && grep -q "env file $T/no-such.env not found" <<<"$out2" && ! has "reaping" && ! grep -q "reaping" <<<"$out2" && alive miss; then
+  pass "a named env file that is not there is refused and nothing is reaped"; else failcase "missing env file" "rc=$rc rc2=$rc2: $out / $out2"; fi
+reset
+
+# 16. an engine started as `python -m vllm.entrypoints.…` instead of `vllm serve` is as live as any: its EngineCore and workers have
+#     a live API server above them, so they are no leftover at the start and no victim of the stop path (a box that also runs
+#     a benchmark engine that way would otherwise lose it to this seat's next start or unload)
+EP="python3 -m vllm.entrypoints.openai.api_server --port $OTHER_PORT"
+engine3l ep $OTHER_PORT "$EP"; out="$(run)"
+if ! has "reaping orphaned engine process" && ! has "running seat_stop.sh once" && has "START PROCEEDS" && alive ep && alive ep-core && alive ep-worker; then pass "a live sibling started as vllm.entrypoints is never a leftover"; else failcase "entrypoints sibling, start" "$out"; fi
+reset
+engine3l mine4 $PORT; engine3l ep2 $OTHER_PORT "$EP"
+out="$(bash "$T/seat_stop.sh" "$T/seat.env" 2>&1)"
+if gone mine4 && gone mine4-core && gone mine4-worker && alive ep2 && alive ep2-core && alive ep2-worker; then pass "the stop path leaves a sibling started as vllm.entrypoints and its workers alone"; else failcase "entrypoints sibling, stop path" "$out"; fi
+reset
+
+# 17. the stop's own output reaches the seat log when nothing else carries it there. The stop task's stdout goes nowhere (a hidden
+#     wscript, no redirect), so a worker named as stuck, or an INCOMPLETE stop, would be lost with it. Attached to the launcher,
+#     whose own stdout already is the seat log, it must not write the log a second time; the launcher runs it attached (the
+#     scratch launcher has no tee of its own, so any write to the log by the stop is the duplicate the real one would show).
+rm -f "$SEAT_LOG"; orphan lg "VLLM::Worker_TP0"; immortal_on "$(cat "$T/lg.pid")"; fast_sleep_on
+out="$(bash "$T/seat_stop.exit.sh" "$T/seat.env" 2>&1)"; rc=$?; fast_sleep_off; immortal_off
+if [ "$rc" -eq 1 ] && has "INCOMPLETE" && [ "$(grep -c "INCOMPLETE" "$SEAT_LOG" 2>/dev/null)" = 1 ] && grep -q "still alive 3 s after SIGKILL" "$SEAT_LOG"; then pass "the stop's output reaches the seat log when nothing else carries it there"; else failcase "stop output in the seat log" "rc=$rc log=[$(tr '\n' '|' < "$SEAT_LOG" 2>&1)]: $out"; fi
+reset
+rm -f "$SEAT_LOG"; orphan lg2 "VLLM::Worker_TP0"
+out="$(SEAT_STOP_ATTACHED=1 bash "$T/seat_stop.exit.sh" "$T/seat.env" 2>&1)"; rc=$?
+if [ "$rc" -eq 0 ] && has "reaping orphaned engine process" && [ ! -s "$SEAT_LOG" ]; then pass "attached to the launcher, the stop does not write the seat log a second time"; else failcase "attached stop" "rc=$rc log=[$(tr '\n' '|' < "$SEAT_LOG" 2>&1)]: $out"; fi
+reset
+rm -f "$SEAT_LOG"; orphan lg3 "VLLM::Worker_TP0"; out="$(run)"
+if has "running seat_stop.sh once" && has "reaping orphaned engine process" && has "START PROCEEDS" && [ ! -s "$SEAT_LOG" ]; then pass "the launcher runs the stop attached, so the seat log is written once"; else failcase "launcher attaches the stop" "log=[$(tr '\n' '|' < "$SEAT_LOG" 2>&1)]: $out"; fi
+reset
+
+# 18. an MP server is this stack's only when its --port IS this stack's MP port, not when that port merely starts with it: a stack
+#     whose MP port is 2879 must not take the MP server on 28795 for its own — neither the stop (SIGTERM, SIGKILL) nor the launcher
+#     (a cleanup at every start). The stand-in binds only its --port, so nothing else about it looks like a leftover.
+printf 'SEAT_PORT=%s\nSEAT_MP_PORT=2879\nSEAT_MP_HTTP_PORT=%s\nSEAT_MP_UNIT=lmcache-mp-scratch-%s\nSEAT_REAP_WAIT_SEC=3\n' "$PORT" "$MP_HTTP_PORT" "$$" > "$T/seat.prefix.env"
+sed -e "s/MP_PORT=$MP_PORT;/MP_PORT=2879;/" -e "s#CFG=$T/seat.env#CFG=$T/seat.prefix.env#" "$T/seat_fg.sh" > "$T/seat_fg.prefix.sh"
+grep -q "MP_PORT=2879;" "$T/seat_fg.prefix.sh" && grep -q "seat.prefix.env" "$T/seat_fg.prefix.sh" || { echo "FAIL: the prefix-port launcher was not generated"; exit 1; }
+mp_standin prefixmp $OTHER_MP_PORT $MP_HTTP_PORT "" 1
+out="$(bash "$T/seat_stop.exit.sh" "$T/seat.prefix.env" 2>&1)"; rc=$?
+if [ "$rc" -eq 0 ] && ! has "reaping MP server" && alive prefixmp; then pass "the stop leaves an MP server whose port merely starts with this stack's alone"; else failcase "prefix MP port, stop path" "rc=$rc: $out"; fi
+out="$(SEAT_MP_PORT_WAIT_SEC=2 bash "$T/seat_fg.prefix.sh" 2>&1)"
+if ! has "running seat_stop.sh once" && has "START PROCEEDS" && alive prefixmp; then pass "the launcher does not take an MP server whose port merely starts with its own for a leftover"; else failcase "prefix MP port, launcher" "$out"; fi
+reset
+
+# 19. an engine process is one whose argv[0] STARTS with VLLM:: (what vLLM's setproctitle sets): a name that merely contains it is not
+#     one, and neither the launcher nor the stop touches it
+orphan decoy "not-VLLM::Worker_TP0"
+out="$(run)"
+if ! has "engine processes named VLLM::" && ! has "running seat_stop.sh once" && has "START PROCEEDS" && alive decoy; then pass "a process whose name merely contains VLLM:: is no engine process at the start"; else failcase "decoy name, start" "$out"; fi
+out="$(bash "$T/seat_stop.sh" "$T/seat.env" 2>&1)"
+if ! has "reaping orphaned engine process" && alive decoy; then pass "a process whose name merely contains VLLM:: is left alone by the stop"; else failcase "decoy name, stop path" "$out"; fi
+reset
+
+# 20. the unit stop, needing neither root nor systemd: a stand-in systemctl first on the PATH records what the stop asks of it. The
+#     stop goes through THIS stack's unit; a failing stop of a unit that is still active is a warning; one of a unit that is already
+#     gone (a crash cleanup finds none) is not.
+mkdir -p "$T/shim"
+cat > "$T/shim/systemctl" <<'EOF'
+#!/usr/bin/env bash
+echo "$*" >> "$SHIM_LOG"
+case "$1" in
+  stop) [ "${SHIM_STOP_FAILS:-}" = 1 ] && exit 1; exit 0 ;;
+  is-active) [ "${SHIM_ACTIVE:-}" = 1 ] && exit 0; exit 3 ;;
+esac
+exit 0
+EOF
+chmod +x "$T/shim/systemctl"; SHIM_LOG="$T/shim.log"; export SHIM_LOG
+rm -f "$SHIM_LOG"; out="$(PATH="$T/shim:$PATH" bash "$T/seat_stop.exit.sh" "$T/seat.env" 2>&1)"
+if grep -qx "stop lmcache-mp-scratch-$$" "$SHIM_LOG" && grep -qx "reset-failed lmcache-mp-scratch-$$" "$SHIM_LOG" && ! has "WARN systemctl stop"; then pass "the stop asks systemd to stop this stack's unit, and a stopped unit is no warning"; else failcase "unit stop" "shim log: $(tr '\n' '|' < "$SHIM_LOG" 2>&1): $out"; fi
+out="$(SHIM_STOP_FAILS=1 SHIM_ACTIVE=1 PATH="$T/shim:$PATH" bash "$T/seat_stop.exit.sh" "$T/seat.env" 2>&1)"
+out2="$(SHIM_STOP_FAILS=1 PATH="$T/shim:$PATH" bash "$T/seat_stop.exit.sh" "$T/seat.env" 2>&1)"
+if has "WARN systemctl stop lmcache-mp-scratch-$$ failed" && ! grep -q "WARN systemctl stop" <<<"$out2"; then pass "a failed stop of a live unit is a warning, a unit that is already gone is not"; else failcase "unit stop failure" "active: $out / gone: $out2"; fi
 
 # 13. mutation: reaping by PORT instead of by identity (kill whatever holds the MP HTTP port) must be caught by the foreign-holder test
 mkdir -p "$T/mut1"; cp "$T/seat_fg.sh" "$T/mut1/seat_fg.sh"; cp "$T/seat_stop.real.sh" "$T/mut1/seat_stop.sh"
