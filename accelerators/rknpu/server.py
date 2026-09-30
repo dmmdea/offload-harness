@@ -40,7 +40,8 @@ every sysfs/debugfs read below degrades to null where a node is absent):
 Refusals: binds loopback only (a non-loopback RKNPU_BIND is refused at startup); serves only files
 listed in models.json whose sha256 matches — model files and their label files alike (an unlisted or
 mismatched file is a structured error, never a load); exits itself after RKNPU_IDLE_SEC without a tool
-call. /health never counts as a call, so a poller cannot keep a model resident.
+call. /health never counts as a call, so a poller cannot keep a model resident. The process also asks the
+kernel's OOM killer to take it before the host's own stack (oom_score_adj 500), because they share the RAM.
 
 RKNPU_ENABLED=0 runs the whole HTTP contract with the NPU path stubbed (for test_server.py on a box
 without the device); every inference then answers {"error":"npu_disabled"}.
@@ -70,6 +71,8 @@ ENABLED = os.environ.get("RKNPU_ENABLED", "1") != "0"
 RUNTIME_LIB = os.environ.get("RKNPU_RUNTIME_LIB", "")
 SYSFS = os.environ.get("RKNPU_SYSFS", "/sys")  # a test hook: a fake tree stands in for the board's /sys
 DEVICE = "rknpu"
+OOM_SCORE_ADJ = "/proc/self/oom_score_adj"
+OOM_SCORE = "500"  # above the default 0: under memory pressure the kernel kills this process before the host's stack
 # The three paths RKNNRuntime probes for its library, in probe order. The last is the one that exists on
 # a stock install; the shim reports it present and redirects a CDLL of any of the three.
 _VENDOR_LIBS = ("/usr/lib/librknn_runtime.so", "/usr/lib64/librknn_runtime.so", "/usr/lib/librknnrt.so")
@@ -582,7 +585,19 @@ def _idle_watchdog(server: ThreadingHTTPServer):
             return
 
 
+def _prefer_as_oom_victim(path: str = OOM_SCORE_ADJ) -> None:
+    """Make this process the kernel OOM killer's first pick: the host's own stack shares this RAM."""
+    if not os.path.exists(path):  # not Linux
+        return
+    try:
+        with open(path, "w") as fh:
+            fh.write(OOM_SCORE)
+    except OSError as e:  # raising the score needs no privilege, but a locked-down unit may still refuse
+        print(f"rknpu sidecar: could not set oom_score_adj to {OOM_SCORE}: {e}", file=sys.stderr)
+
+
 def main():
+    _prefer_as_oom_victim()
     srv = ThreadingHTTPServer((BIND, PORT), Handler)
     if IDLE_SEC > 0:
         threading.Thread(target=_idle_watchdog, args=(srv,), daemon=True).start()

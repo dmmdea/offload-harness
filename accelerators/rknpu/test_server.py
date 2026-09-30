@@ -460,6 +460,26 @@ class InProcess(unittest.TestCase):
         self.Fake.outputs[self.file[key]] = fn
 
 
+class OomVictimTests(InProcess):
+    def test_the_process_asks_to_be_the_oom_killers_first_pick(self):
+        path = os.path.join(self.tmp, "oom_score_adj")
+        pathlib.Path(path).write_text("0")
+        self.mod._prefer_as_oom_victim(path)
+        self.assertEqual(pathlib.Path(path).read_text(), "500")
+        absent = os.path.join(self.tmp, "absent")
+        self.mod._prefer_as_oom_victim(absent)  # not Linux: nothing to write, nothing created
+        self.assertFalse(os.path.exists(absent))
+        with mock.patch("sys.stderr", io.StringIO()) as err:
+            self.mod._prefer_as_oom_victim(self.tmp)  # unwritable (a directory here): logged, never raised
+        self.assertIn("could not set oom_score_adj", err.getvalue())
+
+    def test_main_sets_the_oom_score_before_it_serves(self):
+        with mock.patch.object(self.mod, "_prefer_as_oom_victim") as prefer,                 mock.patch.object(self.mod, "ThreadingHTTPServer", side_effect=RuntimeError("stop before serving")):
+            with self.assertRaises(RuntimeError):
+                self.mod.main()
+        prefer.assert_called_once_with()
+
+
 class ClassifyTests(InProcess):
     def logits(self, **hot_):
         v = np.zeros((1, 1000), np.float32)

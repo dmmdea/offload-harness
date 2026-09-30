@@ -46,7 +46,10 @@ Runtime behaviours relied on (measured; callbacks run on the thread that called 
     next RUN_NORMAL event.
 
 The NPU is one device: a lock admits one generation (and its image encodes) at a time; every other request waits
-its turn and drops out if its client hangs up while queued. Loopback only (a non-loopback --host exits 2). The
+its turn and drops out if its client hangs up while queued. Only MAX_WAITING requests may wait behind the running
+one: the next answers 503 code "busy" with Retry-After: 5, because every queued request holds its parsed body (and
+decoded images) in RAM the host's own stack shares. For the same reason the process asks the kernel's OOM killer to
+take it first (oom_score_adj 500) and a request body is capped at MAX_BODY. Loopback only (a non-loopback --host exits 2). The
 runtime pins its workers to --cpu-mask, and the server pins its own threads (HTTP, image decode) to the same CPUs, so
 a seat confined to the A55 cluster never spills onto the cores the host keeps for itself. SIGTERM aborts a running
 generation (its request answers 503, never a truncated "stop"), then rkllm_destroy, then exits. `--print-layout`
@@ -80,7 +83,11 @@ MAX_TOP_K = 2**31 - 1  # RKLLMSamplingParam.top_k is an int32: a larger value wo
 DEFAULT_TOP_P = 0.95
 DEFAULT_TEMPERATURE = 0.8
 BASE_DOMAIN_ID = 1  # the vendor multimodal demo's value for RK3588 (0 is for rk3562/rv1126b); text-only ran fine on 0 too
-MAX_BODY = 48 << 20  # request bytes; a 12 MP photo is ~5 MB as a base64 data URI
+MAX_BODY = 16 << 20  # request bytes; a 12 MP photo is ~5 MB as a base64 data URI
+MAX_WAITING = 2  # requests queued behind the running generation; the next one is turned away with a 503
+RETRY_AFTER_SEC = 5
+OOM_SCORE_ADJ = "/proc/self/oom_score_adj"
+OOM_SCORE = "500"  # above the default 0: under memory pressure the kernel kills this process before the host's stack
 MAX_IMAGE_PIXELS = 50_000_000
 THINK_OFF = "<think>\n\n</think>\n\n"  # what Qwen3.5's own template ends the generation prompt with, thinking off
 THINK_ON = "<think>\n"
@@ -739,9 +746,9 @@ class RknnEncoder:
 class ApiError(Exception):
     """A request the server answers with an OpenAI-style error body."""
 
-    def __init__(self, status: int, message: str, code: str | None = None):
+    def __init__(self, status: int, message: str, code: str | None = None, retry_after: int | None = None):
         super().__init__(message)
-        self.status, self.message, self.code = status, message, code
+        self.status, self.message, self.code, self.retry_after = status, message, code, retry_after
 
     def body(self) -> dict:
         kind = "server_error" if self.status >= 500 else "invalid_request_error"
@@ -1082,6 +1089,20 @@ class App:
         self.ready = threading.Event()
         self.closing = False
         self.gen_lock = threading.Lock()  # the NPU is one device: one generation at a time, the rest queue here
+        self.admitted = 0  # requests inside _chat: the running one, those waiting on gen_lock and those still reading
+        self._admit_mu = threading.Lock()
+
+    def admit(self) -> None:
+        """Take a place behind the running generation, or raise the 503 that turns the request away."""
+        with self._admit_mu:
+            if self.admitted > MAX_WAITING:
+                raise ApiError(503, f"the NPU is busy: one generation is running and {MAX_WAITING} requests are waiting",
+                               "busy", RETRY_AFTER_SEC)
+            self.admitted += 1
+
+    def leave(self) -> None:
+        with self._admit_mu:
+            self.admitted -= 1
 
     def shutdown(self, wait_sec: float = 15.0) -> None:
         """Abort a running generation, let it reach its FINISH event, then release the NPU."""
@@ -1107,11 +1128,13 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args) -> None:  # /health is polled every second while loading: no per-request noise
         pass
 
-    def send_json(self, code: int, obj: dict) -> None:
+    def send_json(self, code: int, obj: dict, retry_after: int | None = None) -> None:
         body = json.dumps(obj).encode("utf-8")
         self.responded = True
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
+        if retry_after is not None:
+            self.send_header("Retry-After", str(retry_after))
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -1133,7 +1156,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             self._chat(self.server.app)
         except ApiError as e:
-            self.send_json(e.status, e.body())
+            self.send_json(e.status, e.body(), e.retry_after)
         except Exception as e:  # noqa: BLE001 - the 500 guard: an internal failure never puts a stack trace on the wire
             print(f"rkllm server: request failed: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
             if not self.responded:
@@ -1171,13 +1194,17 @@ class Handler(BaseHTTPRequestHandler):
     def _chat(self, app: App) -> None:
         if not app.ready.is_set() or app.closing:
             raise ApiError(503, "the model is loading" if not app.closing else "the server is shutting down")
-        req = build_request(self._read_json(), app.ctx_size, app.vision is not None)
-        if not self._acquire(app):
-            return
+        app.admit()  # before the body is read: a request turned away costs no memory
         try:
-            self._generate(app, req)
+            req = build_request(self._read_json(), app.ctx_size, app.vision is not None)
+            if not self._acquire(app):
+                return
+            try:
+                self._generate(app, req)
+            finally:
+                app.gen_lock.release()
         finally:
-            app.gen_lock.release()
+            app.leave()
 
     def _generate(self, app: App, req: ChatRequest) -> None:
         started = time.monotonic()
@@ -1262,6 +1289,17 @@ def _pin_to_cpus(mask: int) -> None:
         print(f"rkllm server: could not pin to CPUs {sorted(cpus)}: {e}", file=sys.stderr)
 
 
+def _prefer_as_oom_victim(path: str = OOM_SCORE_ADJ) -> None:
+    """Make this process the kernel OOM killer's first pick: the host's own stack shares this RAM."""
+    if not os.path.exists(path):  # not Linux
+        return
+    try:
+        with open(path, "w") as fh:
+            fh.write(OOM_SCORE)
+    except OSError as e:  # raising the score needs no privilege, but a locked-down unit may still refuse
+        print(f"rkllm server: could not set oom_score_adj to {OOM_SCORE}: {e}", file=sys.stderr)
+
+
 def main(argv: list | None = None) -> int:
     home = os.environ.get("RKNPU_HOME", "")
     lib_dir = os.path.join(home, "lib") if home else ""
@@ -1301,6 +1339,7 @@ def main(argv: list | None = None) -> int:
             return 2
 
     _pin_to_cpus(cpu_mask)
+    _prefer_as_oom_victim()
     app = App(args.served_name or os.path.splitext(os.path.basename(args.model))[0], args.ctx_size)
     try:
         srv = make_server(app, args.host, args.port)

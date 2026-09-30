@@ -18,6 +18,7 @@ import os
 import re
 import socket
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -553,6 +554,40 @@ class LockAndDisconnectTest(ServerCase):
         self.assertEqual(results, {"a": 200, "b": 200})
         self.assertEqual((len(self.rt.calls), self.rt.max_active), (2, 1))
 
+    def test_a_request_past_the_waiting_cap_is_a_503_busy_with_retry_after(self):
+        gate = self.rt.gate = threading.Event()
+        results = {}
+        threads = [self.post_in_thread(results, "a")]
+        self.wait_for(lambda: len(self.rt.calls) == 1, "the first request to reach the runtime")
+        threads += [self.post_in_thread(results, k) for k in ("b", "c")]  # the two that may wait
+        self.wait_for(lambda: self.app.admitted == 3, "two requests to queue behind the running one")
+        status, resp, payload = self.request("POST", "/v1/chat/completions",
+                                             {"messages": [{"role": "user", "content": "hi"}]})
+        self.assertEqual((status, resp.getheader("Retry-After")), (503, "5"))
+        err = json.loads(payload)["error"]
+        self.assertEqual((err["code"], err["type"]), ("busy", "server_error"))
+        gate.set()
+        for t in threads:
+            t.join(10)
+        self.assertEqual(results, {"a": 200, "b": 200, "c": 200})  # the turned-away request never disturbed the queue
+        self.assertEqual((len(self.rt.calls), self.app.admitted), (3, 0))
+        self.assertEqual(self.chat()[0], 200)  # and the place is free again
+
+    def test_a_request_that_fails_early_gives_its_place_back(self):
+        for _ in range(rs.MAX_WAITING + 3):
+            self.assertEqual(self.request("POST", "/v1/chat/completions", raw=b"{oops")[0], 400)
+        self.assertEqual(self.app.admitted, 0)
+        self.assertEqual(self.chat()[0], 200)
+
+    def test_the_request_body_cap_is_16_mib(self):
+        self.assertEqual(rs.MAX_BODY, 16 << 20)
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=15)
+        conn.request("POST", "/v1/chat/completions", body=b"", headers={"Content-Length": str(rs.MAX_BODY + 1)})
+        resp = conn.getresponse()
+        self.assertEqual(resp.status, 413)
+        self.assertIn("16 MiB", json.loads(resp.read())["error"]["message"])
+        conn.close()
+
     def test_a_queued_request_whose_client_hung_up_never_runs(self):
         gate = self.rt.gate = threading.Event()
         results = {}
@@ -769,6 +804,30 @@ class CliTest(unittest.TestCase):
                 code, err = self.run_main("--model", __file__, "--port", "1", "--host", host)
                 self.assertEqual(code, 2)
                 self.assertIn("non-loopback", err)
+
+    def test_the_process_asks_to_be_the_oom_killers_first_pick(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "oom_score_adj")
+            open(path, "w").close()
+            rs._prefer_as_oom_victim(path)
+            with open(path) as fh:
+                self.assertEqual(fh.read(), "500")
+            rs._prefer_as_oom_victim(os.path.join(d, "absent"))  # not Linux: nothing to write, nothing created
+            self.assertFalse(os.path.exists(os.path.join(d, "absent")))
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                rs._prefer_as_oom_victim(d)  # unwritable (a directory here): logged, never raised
+            self.assertIn("could not set oom_score_adj", err.getvalue())
+
+    def test_main_sets_the_oom_score_before_it_serves(self):
+        seen = []
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), mock.patch.object(rs, "_pin_to_cpus"),                 mock.patch.object(rs, "_prefer_as_oom_victim", lambda: seen.append(True)):
+            with socket.socket() as taken:  # a taken port ends main() right after, before any model loads
+                taken.bind(("127.0.0.1", 0))
+                taken.listen(1)
+                rs.main(["--model", __file__, "--port", str(taken.getsockname()[1])])
+        self.assertEqual(seen, [True])
 
     def test_loopback_forms(self):
         for host in ("127.0.0.1", "127.0.0.2", "::1", "localhost"):

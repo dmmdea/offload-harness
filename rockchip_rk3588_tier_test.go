@@ -149,10 +149,11 @@ func TestRK3588SeedBindsTheNPUSeatAndBlanksWhatItDoesNotServe(t *testing.T) {
 	if got := cfg.AgentPlannerModel(""); got != "qwen3.5-2b-npu" {
 		t.Errorf("the agent planner falls back to %q, want the served workhorse qwen3.5-2b-npu", got)
 	}
-	// The seat's own settings: the window the model was converted for (16384) and the strict
-	// CPU reservation (the A55 cluster) until the operator chooses otherwise.
-	if seat.CtxSize != 16384 || seat.EffectiveCPUMask() != "0x0f" || seat.Residency != mediaseat.Swappable {
-		t.Errorf("the NPU seat is %+v, want ctx 16384, cpu_mask 0x0f, swappable", seat)
+	// The seat's own settings: an 8192 window (the 16384 the model was converted for is not
+	// yet measured on this board's RAM budget) and the strict CPU reservation (the A55
+	// cluster) until the operator chooses otherwise.
+	if seat.CtxSize != 8192 || seat.EffectiveCPUMask() != "0x0f" || seat.Residency != mediaseat.Swappable {
+		t.Errorf("the NPU seat is %+v, want ctx 8192, cpu_mask 0x0f, swappable", seat)
 	}
 }
 
