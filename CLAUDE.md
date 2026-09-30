@@ -100,7 +100,7 @@ prompt/exemplars; can only narrow — UNSET resolves to config `agent_profile`, 
    output comes back empty. **Profile-driven, NOT universal:** `--cache-type-k/v` is `q8_0` on 11 of
    17 profiles (`f16` only on blackwell-48/72, amd-rdna3, amd-gcn, cpu and rockchip-rk3588; K and V always symmetric, and
    `q8_0` V requires flash-attn on), and `--flash-attn` is on for every GPU profile (`amd-gcn` joined 2026-09-20, measured;
-   `rockchip-rk3588`'s Mali GPU is still unmeasured, so it is off there), and omitted entirely by the cpu template. The `embeddinggemma` entry bypasses the shared flag
+   `rockchip-rk3588` serves no llama.cpp entry: llama.cpp Vulkan faults its Mali GPU, measured), and omitted entirely by the cpu template. The `embeddinggemma` entry bypasses the shared flag
    macro altogether. **Residency is declared with `matrix:`, never legacy `groups:`** (ADR 0020):
    sets are the valid CONCURRENT COMBINATIONS and the memory stack appears in every set, so no
    request can be satisfied by evicting it — `groups:`+`persistent:true` was measured failing to

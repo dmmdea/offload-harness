@@ -463,10 +463,20 @@ func Render(tmpl string, p Params) (string, error) {
 	} {
 		out = strings.ReplaceAll(out, from, to)
 	}
+	// A set made only of seats (a template with no model of its own, like rk3588's)
+	// renders as `" | seat"`: the seat fragment carries its own leading operator because
+	// it normally follows a template var. llama-swap rejects an expression that opens on
+	// an operator, so drop it.
+	out = leadingSetOperator.ReplaceAllString(out, `$1`)
 	// A leftover token would start a server with a literal "__CTX__" argument, which
 	// fails looking like a model problem. Refuse instead, naming what is unresolved.
 	if left := uniqueTokens(out); len(left) > 0 {
 		return "", fmt.Errorf("unresolved template token(s) after rendering: %s", strings.Join(left, ", "))
+	}
+	// A template may leave every model to the tier's seats (rk3588's does); a render that
+	// still serves nothing would start a node that answers no model, so refuse it.
+	if !renderedModelKeyRe.MatchString(modelsSection(out)) {
+		return "", fmt.Errorf("the rendered config serves no model: this template has none of its own and the tier declared no seat")
 	}
 	return out, nil
 }
@@ -949,6 +959,29 @@ func seatBlock(s mediaseat.Seat, p Params, a seatAnchors) (string, error) {
 	fmt.Fprintf(&b, "\n    ttl: %d", ttl)
 	return b.String(), nil
 }
+
+// renderedModelKeyRe matches one model entry (a two-space-indented key) inside the models section.
+var renderedModelKeyRe = regexp.MustCompile(`(?m)^  [A-Za-z0-9._"-]+:\s*$`)
+
+// modelsSection returns the text between the top-level `models:` line and the next top-level key.
+func modelsSection(out string) string {
+	loc := modelsLineRe.FindStringIndex(out)
+	if loc == nil {
+		return ""
+	}
+	rest := out[loc[1]:]
+	if j := topLevelKeyRe.FindStringIndex(rest); j != nil {
+		rest = rest[:j[0]]
+	}
+	return rest
+}
+
+var (
+	modelsLineRe  = regexp.MustCompile(`(?m)^models:[ \t]*$`)
+	topLevelKeyRe = regexp.MustCompile(`(?m)^[A-Za-z_][A-Za-z0-9_]*:`)
+)
+
+var leadingSetOperator = regexp.MustCompile(`(?m)^(\s+[A-Za-z0-9_-]+:\s*")\s*[|&]\s*`)
 
 var modelKeyRe = regexp.MustCompile(`^ {2}"?([A-Za-z0-9._-]+)"?:\s*$`)
 var envLineRe = regexp.MustCompile(`^ {4}env:\s*\[(.*)\]\s*$`)

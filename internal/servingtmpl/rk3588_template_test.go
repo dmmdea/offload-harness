@@ -22,35 +22,30 @@ func rk3588Params(seats ...mediaseat.Seat) Params {
 	}
 }
 
-// TestRK3588TemplateServesOnlyWhatFitsAndRunsItOnTheGPU: the template's own contract, read
-// from the raw file. This board has no CPU inference (operator rule), so every llama-server
-// entry must offload every layer and pin the Vulkan device, and the model list is the one
-// chat entry — the stock vulkan template's offload-e4b does not fit the board's budget.
-func TestRK3588TemplateServesOnlyWhatFitsAndRunsItOnTheGPU(t *testing.T) {
+// TestRK3588TemplateServesNoModelOfItsOwnAndKeepsTheGPUConventions: the template's own
+// contract, read from the raw file. llama.cpp on this board's GPU faults on its first compute
+// submission (panthor job timeout, vk::DeviceLostError; measured 2026-09-30), so the template
+// serves no llama.cpp entry at all and every model is a tier seat. The Vulkan conventions stay
+// in its macros for the day a GPU entry measures clean.
+func TestRK3588TemplateServesNoModelOfItsOwnAndKeepsTheGPUConventions(t *testing.T) {
 	raw := readTmpl(t, rk3588Template)
 	var doc struct {
-		Macros map[string]string `yaml:"macros"`
-		Models map[string]struct {
-			Cmd string   `yaml:"cmd"`
-			Env []string `yaml:"env"`
-		} `yaml:"models"`
+		Macros map[string]string         `yaml:"macros"`
+		Models map[string]map[string]any `yaml:"models"`
 	}
 	if err := yaml.Unmarshal([]byte(raw), &doc); err != nil {
 		t.Fatal(err)
 	}
-	var ids []string
-	for id, m := range doc.Models {
-		ids = append(ids, id)
-		if !strings.Contains(m.Cmd, "--n-gpu-layers 999") {
-			t.Errorf("%s does not offload every layer, which means CPU inference: %q", id, m.Cmd)
+	if len(doc.Models) != 0 {
+		ids := make([]string, 0, len(doc.Models))
+		for id := range doc.Models {
+			ids = append(ids, id)
 		}
-		if !hasEnvValue(m.Env, "${vk}") || !hasEnvValue(m.Env, "${ld}") {
-			t.Errorf("%s needs the Vulkan device pin and the loader path, env = %v", id, m.Env)
-		}
+		sort.Strings(ids)
+		t.Errorf("the template serves %v of its own; its GPU entries are blocked until they measure clean on this board", ids)
 	}
-	sort.Strings(ids)
-	if got := strings.Join(ids, ","); got != "gemma4-e2b" {
-		t.Errorf("models = %s, want only gemma4-e2b — nothing else fits the board's shared-RAM budget", got)
+	if !anchorRe.MatchString(raw) {
+		t.Fatal("a template with no model of its own must accept seats, or it renders nothing")
 	}
 	if doc.Macros["vk"] != "GGML_VK_VISIBLE_DEVICES=0" {
 		t.Errorf("vk macro = %q, want the single-device Vulkan pin", doc.Macros["vk"])
@@ -80,18 +75,32 @@ func TestRK3588TemplatePlacesSwappableSeatsOnly(t *testing.T) {
 	}
 }
 
-// TestRK3588TemplateSeatsAreAlternativesToTheGPUEntry: the GPU chat entry and an NPU seat draw
-// on the same RAM, so loading one evicts the other; the rendered set says so.
-func TestRK3588TemplateSeatsAreAlternativesToTheGPUEntry(t *testing.T) {
+// TestRK3588TemplateSeatsAreAlternatives: every seat draws on the same RAM, so the rendered
+// set holds them as alternatives, and a set made only of seats does not open on an operator
+// (llama-swap rejects that expression).
+func TestRK3588TemplateSeatsAreAlternatives(t *testing.T) {
 	out := mustRender(t, readTmpl(t, rk3588Template), rk3588Params(rkllmSeat()))
 	cfg := parseSwapConfig(t, out)
-	if got, want := cfg.Matrix.Sets["interactive"], "e2b | rkllm"; got != want {
+	if got, want := cfg.Matrix.Sets["interactive"], "rkllm"; got != want {
 		t.Errorf("interactive set = %q, want %q", got, want)
 	}
-	// With no seats declared the set is the chat entry alone, and still names only vars.
-	bare := mustRender(t, readTmpl(t, rk3588Template), rk3588Params())
-	if got := parseSwapConfig(t, bare).Matrix.Sets["interactive"]; got != "e2b" {
-		t.Errorf("a seat-less render's interactive set = %q, want e2b", got)
+	for id, m := range cfg.Models {
+		if m.TTL == nil || *m.TTL != 300 {
+			t.Errorf("rendered seat %s ttl = %v, want 300", id, m.TTL)
+		}
+	}
+	if len(cfg.Models) != 1 {
+		t.Errorf("rendered models = %d, want the one NPU seat", len(cfg.Models))
+	}
+}
+
+// TestRK3588TemplateRefusesARenderThatServesNothing: with no model of its own, a tier that
+// declares no seat would render a config that serves nothing and still starts; the render
+// refuses instead of shipping an empty node.
+func TestRK3588TemplateRefusesARenderThatServesNothing(t *testing.T) {
+	_, err := Render(readTmpl(t, rk3588Template), rk3588Params())
+	if err == nil || !strings.Contains(err.Error(), "serves no model") {
+		t.Fatalf("a seat-less render must be refused, got %v", err)
 	}
 }
 
@@ -106,7 +115,7 @@ func TestRK3588TemplateRendersLlamaBackedSeatsOnTheGPU(t *testing.T) {
 	if !strings.Contains(blk, "--n-gpu-layers 99 ") || !strings.Contains(blk, `env: ["${ld}"]`) {
 		t.Errorf("a llama-backed seat on the rk3588 backend must offload to the GPU and carry the loader path:\n%s", blk)
 	}
-	if got := parseSwapConfig(t, out).Matrix.Sets["interactive"]; got != "e2b | vis | rkllm" {
-		t.Errorf("interactive set = %q, want e2b | vis | rkllm", got)
+	if got := parseSwapConfig(t, out).Matrix.Sets["interactive"]; got != "vis | rkllm" {
+		t.Errorf("interactive set = %q, want vis | rkllm", got)
 	}
 }

@@ -98,7 +98,7 @@ func TestRK3588TierRendersNoCPUInference(t *testing.T) {
 		}
 	}
 	sort.Strings(ids)
-	if got, want := strings.Join(ids, ","), "gemma4-e2b,"+seat.Name; got != want {
+	if got, want := strings.Join(ids, ","), seat.Name; got != want {
 		t.Errorf("rendered models = %s, want %s: nothing else fits the budget (offload-e4b, the 26B, an embedder and a reranker are not on this board)", got, want)
 	}
 	if got := cfg.Macros["vk"]; got != "GGML_VK_VISIBLE_DEVICES=0" {
@@ -131,8 +131,8 @@ func TestRK3588SeedBindsTheNPUSeatAndBlanksWhatItDoesNotServe(t *testing.T) {
 	if cfg.VisionModel != seat.Name {
 		t.Errorf("vision_model = %q, want the NPU seat %q (it has a vision encoder %q)", cfg.VisionModel, seat.Name, seat.VisionEncoder)
 	}
-	if cfg.Model != "gemma4-e2b" || cfg.TriageModel != "gemma4-e2b" {
-		t.Errorf("model/triage_model = %q/%q, want gemma4-e2b for both: the only chat entry the template serves", cfg.Model, cfg.TriageModel)
+	if cfg.Model != "qwen3.5-2b-npu" || cfg.TriageModel != "qwen3.5-2b-npu" {
+		t.Errorf("model/triage_model = %q/%q, want the NPU seat qwen3.5-2b-npu for both: the only chat model the tier serves", cfg.Model, cfg.TriageModel)
 	}
 	if cfg.EscalationModel != "" || cfg.ReasoningModel != "" {
 		t.Errorf("escalation/reasoning = %q/%q, want both blank: the 26B is not on this board", cfg.EscalationModel, cfg.ReasoningModel)
@@ -146,8 +146,8 @@ func TestRK3588SeedBindsTheNPUSeatAndBlanksWhatItDoesNotServe(t *testing.T) {
 	if cfg.FleetAgentEnabled {
 		t.Error("fleet_agent_enabled is true: no agent seat has been chosen or measured on this tier")
 	}
-	if got := cfg.AgentPlannerModel(""); got != "gemma4-e2b" {
-		t.Errorf("the agent planner falls back to %q, want the served workhorse gemma4-e2b", got)
+	if got := cfg.AgentPlannerModel(""); got != "qwen3.5-2b-npu" {
+		t.Errorf("the agent planner falls back to %q, want the served workhorse qwen3.5-2b-npu", got)
 	}
 	// The seat's own settings: the window the model was converted for (16384) and the strict
 	// CPU reservation (the A55 cluster) until the operator chooses otherwise.

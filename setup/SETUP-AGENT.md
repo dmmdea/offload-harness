@@ -128,7 +128,7 @@ projected per-profile serving choices — `selftest.ps1` measures and refines th
 | `ampere-6` | #10/#11 (3050 6 GB) | `offload-e4b` | 32K | q8_0 (conservative default; f16 measured viable) | dropped |
 | `amd-gcn` | #12 (Vega 7 + 32 GB, Vulkan + CPU alt route) | `gemma4-e2b` (agent `qwen3.5-4b-agent`) | 32K | f16, FA on (measured 2026-09-20) | dropped |
 | `cpu` | no GPU | `offload-e4b` (CPU) | 8K | f16, FA off | `--cpu-moe` if RAM ≥ ~56 GB, else dropped |
-| `rockchip-rk3588` | Rockchip RK3588 SoC board (an Orange Pi 5, 7.7 GiB shared by CPU/GPU/NPU); Linux only, detected from the device tree | `gemma4-e2b` (Mali GPU via llama.cpp Vulkan) + `qwen3.5-0.8b-npu` (NPU via RKLLM); no CPU inference | 8K (the NPU seat 16K) | f16, FA off (GPU seat unmeasured) | dropped |
+| `rockchip-rk3588` | Rockchip RK3588 SoC board (an Orange Pi 5, 7.7 GiB shared by CPU/GPU/NPU); Linux only, detected from the device tree | `qwen3.5-2b-npu` (NPU via RKLLM, chat + vision); no llama.cpp entry (Vulkan faults the Mali, measured); no CPU inference | the NPU seat 16K | n/a (RKLLM) | dropped |
 
 **Big-VRAM Blackwell tiers (#13–15, added 2026-07-16):** cards ≥24 GB render the
 `cuda-resident` template — every model is a standalone entry (no swap group, no ttl), so the

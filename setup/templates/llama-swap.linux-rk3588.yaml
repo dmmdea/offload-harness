@@ -19,9 +19,11 @@
 # there is no CPU seat family and no `alt_backends`. The NPU seats are not llama.cpp at
 # all: their CPU mask (a per-seat setting) only bounds the runtime's host threads.
 #
-# The one chat entry is gemma4-e2b, the fleet's triage model, and it is a PLACEHOLDER until
-# the GPU path is benchmarked on the board: its speed and quality on panvk are unmeasured,
-# and the model list is the first thing that benchmark is allowed to change.
+# NO GPU ENTRY TODAY (measured 2026-09-30): llama.cpp b11270 on Mesa 25.2.8 panvk loads on the
+# Mali-G610 but its first compute submission never finishes (panthor 'job timeout', then
+# vk::DeviceLostError), for every model and batch size tried. Chat and vision are NPU seats
+# until a Mesa/panthor/llama.cpp combination passes here; the conventions below stay so a GPU
+# entry can come back the day it measures clean. Re-measure before adding one.
 #
 # Serving invariants (grammar reliability — do NOT change): --jinja, no MTP, reasoning off.
 # Context size, KV type and flash-attn are PROFILE-DRIVEN, exactly as on linux-vulkan.
@@ -50,14 +52,7 @@ macros:
   vk: "GGML_VK_VISIBLE_DEVICES=0"
 
 models:
-  gemma4-e2b:
-    aliases: [e2b]
-    env: ["${ld}", "${vk}"]
-    cmd: >-
-      __LLAMA_BIN__/llama-server --model __MODELS__/gemma-4-E2B-it-qat-UD-Q4_K_XL.gguf
-      --n-gpu-layers 999 ${common}
-    checkEndpoint: /health
-    ttl: 300
+  # No llama.cpp entry: see the GPU note at the top. The tier's NPU seats render below.
 
 # This template accepts tier-declared media seats. A tier declares a residency ROLE, never a
 # set or group name: those are per-template, while a tier is a hardware class that renders
@@ -70,12 +65,11 @@ models:
 # env at all.
 # offload-seats: swappable env=${ld}
 # RESIDENCY IS DECLARED WITH `matrix:`, NOT `groups:` (llama-swap >= v202; a config uses one
-# or the other, never both). One interactive set of ALTERNATIVES: the GPU chat entry and an
-# NPU seat draw on the same RAM, so they are never co-resident — loading one evicts the
+# or the other, never both). One interactive set of ALTERNATIVES: every seat draws on the same
+# RAM, so no two are ever co-resident — loading one evicts the
 # other, which is what keeps the host's reserve intact. Co-residency is a measurement this
 # tier has not made.
 matrix:
   vars:
-    e2b: gemma4-e2b
   sets:
-    interactive: "e2b__SEATS_SWAPPABLE__"
+    interactive: "__SEATS_SWAPPABLE__"
