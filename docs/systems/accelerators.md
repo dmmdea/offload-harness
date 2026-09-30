@@ -302,6 +302,65 @@ decides which ship, and each result's `model` says what ran. `space` keeps embed
 RKNPU vector is in its own space, neither the Hailo's `tinyclip` nor the Coral's
 `efficientnet-edgetpu-s`, and vectors are comparable only within one space, whatever the dimension.
 
+#### The models the RKNPU sidecar serves
+
+Changed 2026-09-30 on operator order (no licence costs): **no AGPL or GPL model ships.** The
+Ultralytics YOLOv8n (AGPL-3.0) and the Rockchip ResNet18 prebuilt (untraced provenance) are gone.
+The manifest is [`accelerators/rknpu/models.json`](../../accelerators/rknpu/models.json); the
+sidecar serves only a file whose sha256 it pins.
+
+| Tool | Manifest key | Model | Licence | What the sidecar feeds it |
+|---|---|---|---|---|
+| `object_detect` | `ppyoloe_s` | PP-YOLOE+ s, INT8, 640 x 640, the 80 COCO classes | Apache-2.0 (PaddleDetection) | the picture letterboxed onto black, RGB uint8; `/255` is compiled in |
+| `classify` | `resnet50tv2-i8` (`resnet50tv2-fp16` is the same network unquantised) | ResNet-50 with torchvision's `IMAGENET1K_V2` weights, packaged by timm as `resnet50.tv2_in1k`, 224 x 224 | BSD-3-Clause | the short side to 232 (bilinear), a centred 224 crop, RGB uint8; mean and std are compiled in |
+| `embed` | `clip-vit-b32-image` | CLIP ViT-B/32 image tower, FP16 | MIT (OpenAI) | unchanged |
+
+The zoo and toolkit files are Rockchip's (zoo code Apache-2.0). The classifier's key is one constant,
+`CLASSIFY_MODEL` in `server.py`, so serving the FP16 build instead is a one-line change once the board
+has measured both.
+
+- **No model has a public `.rknn`.** `fetch-models.sh --convert` builds each on an x86_64 host from
+  the recipe under its `convert` key: `ppyoloe_s` and CLIP from a sha256-pinned ONNX on the
+  zoo's download host, the two ResNet-50 files from an ONNX **exported** from the timm weights
+  (`export` recipe: weights downloaded and sha256-checked at a pinned Hugging Face revision, opset
+  12; the exported ONNX has no hash, because an export is not reproducible across torch versions).
+  A conversion is not bit-reproducible either (about a kilobyte of embedded build metadata differs
+  between two runs), so each `sha256` pins the exact bytes that were built and checked, and a
+  rebuild has to have its new hash recorded before the sidecar serves it.
+- **The INT8 calibration images are not what a rebuild uses.** `ppyoloe_s` was calibrated on the 200
+  COCO val2017 images of `accelerators/rknpu/calib/coco_val2017_calib_200.txt`; `resnet50tv2-i8`
+  was calibrated on 200 ImageNetV2 images, while its recipe names the COCO list. Both are Flickr
+  photographs under per-image terms, used only to compute quantisation scales and never
+  redistributed. The list is fetched image by image from `images.cocodataset.org` over plain http
+  (its https certificate does not match its name) and the images are not pinned by hash.
+- **Detector decoding.** The head is anchor-free with a Distribution Focal Loss box: the sidecar
+  reads the bin count from the box tensor (17 bins for PP-YOLOE, 16 for a YOLOv8-shaped head),
+  takes the best class probability as the score (no box-confidence factor, exactly as the zoo's
+  Python demo does), applies per-class NMS, and reads the three stride branches in any order. The
+  score-sum branch is ignored: the zoo's Python demo replaces it with ones and its C demo uses it
+  only to skip cells early. The defaults are the zoo demo's own: score threshold 0.25, NMS IoU 0.45.
+- **Not yet run on the NPU.** All three replacement files were converted and checked on
+  rknn-toolkit2's simulator on 2026-09-30 (the simulator's PP-YOLOE output on the zoo's `bus.jpg`
+  is person 0.950 / 0.935 / 0.923, bus 0.893, person 0.473, handbag 0.411; ResNet-50 reads the
+  zoo's dog photo as Shih-Tzu, class 155, in both builds), and the sidecar's decoder is tested
+  on those tensors (`RKNPU_SIM_DIR`, see `test_server.py`). Latency, memory and INT8 accuracy on
+  the board are unmeasured. The PP-YOLOE build log flags an outlier weight (`conv2d_97.w_0` =
+  23.8): compare INT8 with FP32 there first.
+
+The reference the board's INT8 numbers must be checked against is the host FP32 run of the same
+ONNX files (onnxruntime on CPU, 2026-09-30), on evaluation lists that are disjoint from the
+calibration lists (seed 20260930):
+
+| Model | Evaluation list | Host FP32 result | The upstream figure (another dataset and pipeline) |
+|---|---|---|---|
+| PP-YOLOE+ s | 500 COCO val2017 images | mAP@[.5:.95] 0.4360, mAP@.5 0.6043, mAP@.75 0.4707 (zoo post-process at score 0.001 and NMS 0.65, the mAP thresholds, not the demo's) | 43.7 mAP, COCO val, Paddle FP32 |
+| ResNet-50 (tv2) | 1000 ImageNetV2 matched-frequency images, one per class | top-1 69.9 %, top-5 89.3 % (FP16 build: the same ONNX, the same baseline) | 80.858 / 95.434, ImageNet-val |
+
+Read each as a same-list baseline, not a reproduction of the upstream number: ImageNetV2 is about
+ten points harder than ImageNet-val, so 69.9 % against 80.9 % is expected. The simulator's INT8
+tensors sit at cosine 0.963-0.991 to FP32 for PP-YOLOE's nine outputs and 0.988 for ResNet-50 INT8
+(1.000 for the FP16 build).
+
 Deliberately **not** owned: `text_embed` and `zero_shot` (only the image side is served), the tools
 the Hailo covers (`face_*`, `person_embed`, `pose`, `segment`, `depth`, `enhance_low_light`) and the
 Coral's `semantic_segment`. `offload_ocr` and `offload_transcribe` `engine:"npu"` stay Hailo-only.

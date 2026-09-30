@@ -1,5 +1,5 @@
 {
-  "_comment": "Rockchip RKNPU (RK3588 NPU) artifact manifest. The sidecar serves only files listed here whose sha256 matches, model files and label files alike: an artifact that drifted is a structured model_sha_mismatch, never a silent load. Sources are airockchip/rknn-toolkit2 and airockchip/rknn_model_zoo at the v2.3.2 tag (raw GitHub URLs; the model zoo's ONNX files come from its own download host); nothing is redistributed by this repository. Licences of what you download: the toolkit, runtime and zoo files are Rockchip's; yolov8n's weights are Ultralytics' (AGPL-3.0); CLIP ViT-B/32 is OpenAI's (MIT). resnet18 is Rockchip's prebuilt rk3588 model and downloads directly. yolov8n and the CLIP image tower have no public .rknn: fetch-models.sh --convert builds them from the pinned ONNX with the recipes recorded under each model's \"convert\" key (rknn_model_zoo examples/yolov8/python/convert.py rk3588 i8, and examples/clip/python/images/convert.py rk3588 fp). A conversion is not bit-reproducible (two runs on identical inputs differ by about a kilobyte of embedded build metadata, and on the NPU the outputs are bit-identical: measured, a rebuild's maximum absolute difference from the pinned file is 0.0 on every output tensor), so the sha256 of a converted model pins the exact file verified on an Orange Pi 5 (RK3588S) on 2026-09-30 (mainline 7.0 kernel, rknpu 0.9.8 driver, librknnrt 2.3.2); a conversion of your own must have its new hash recorded here before the sidecar will serve it. Every model runs on the NPU only: RKNPU_ENABLED=0 stubs the device, there is no CPU fallback.",
+  "_comment": "Rockchip RKNPU (RK3588 NPU) artifact manifest. The sidecar serves only files listed here whose sha256 matches, model files and label files alike: an artifact that drifted is a structured model_sha_mismatch, never a silent load. Sources are airockchip/rknn-toolkit2 and airockchip/rknn_model_zoo at the v2.3.2 tag (raw GitHub URLs; the model zoo's ONNX files come from its own download host); nothing is redistributed by this repository. Licences of what you download or build (operator order 2026-09-30: no licence costs, so no AGPL or GPL model ships): PP-YOLOE+ s, the detector, is PaddleDetection's weights (Apache-2.0); ResNet-50, the classifier, is torchvision's IMAGENET1K_V2 weights as packaged by timm resnet50.tv2_in1k (BSD-3-Clause); CLIP ViT-B/32 is OpenAI's (MIT); the toolkit, runtime and zoo files are Rockchip's (zoo code Apache-2.0; the toolkit carries a warranty disclaimer and no output restriction). The Ultralytics YOLOv8n (AGPL-3.0) and the Rockchip ResNet18 prebuilt (untraced provenance) that shipped before are gone. No model here has a public .rknn: fetch-models.sh --convert builds each one from the recipe under its \"convert\" key. ppyoloe_s and the CLIP image tower convert a pinned ONNX (the zoo's ppyoloe_s.onnx and clip_images.onnx, sha256-checked: rknn_model_zoo examples/ppyoloe/python/convert.py rk3588 i8, and examples/clip/python/images/convert.py rk3588 fp). The two ResNet-50 files convert an ONNX that is hosted nowhere: the recipe's \"export\" downloads the timm weights (sha256-checked) and exports them with torch.onnx.export at opset 12, and the exported ONNX itself is not pinned. A conversion is not bit-reproducible (two runs on identical inputs differ by about a kilobyte of embedded build metadata: measured 2026-09-29 yolov8n 937 bytes and CLIP 814, and 2026-09-30 ppyoloe_s 1040, resnet50tv2-i8 923 and resnet50tv2-fp16 1002), so the sha256 of a converted model pins the exact file that was built and checked; a conversion of your own must have its new hash recorded here before the sidecar will serve it, and a rebuild with the recipes below will not reproduce these hashes. Board verification differs by model. The pin of clip-vit-b32-image is the file verified on an Orange Pi 5 (RK3588S) on 2026-09-30 (mainline 7.0 kernel, rknpu 0.9.8 driver, librknnrt 2.3.2); when the NPU outputs of a rebuild were compared with the pinned yolov8n and CLIP files, the maximum absolute difference was 0.0 on every output tensor, and that comparison is not yet made for the models below. ppyoloe_s, resnet50tv2-i8 and resnet50tv2-fp16 were converted with rknn-toolkit2 2.3.2 on an x86_64 host on 2026-09-30 and checked only on the toolkit's simulator (nothing has run on the NPU yet): their pins are the files as built there, and the first on-board run is still to do. The calibration images of the INT8 files are photographs under their per-image Flickr terms, used only to compute quantisation scales and never redistributed: ppyoloe_s was calibrated on the 200 COCO val2017 images of the coco_val2017_calib_200 list below; resnet50tv2-i8 was calibrated on 200 ImageNetV2 images instead (see its calibrated_on), so the recipe's COCO list is not what produced the pinned file. That list is a file in this repository (calib/), fetched image by image from images.cocodataset.org over plain http (the host's https certificate does not match its name, measured 2026-09-30) and not pinned by hash. Every model runs on the NPU only: RKNPU_ENABLED=0 stubs the device, there is no CPU fallback.",
   "runtime": {
     "rknn_toolkit_lite2": "2.3.2",
     "target": "rk3588",
@@ -15,30 +15,71 @@
     }
   },
   "models": {
-    "resnet18": {
-      "file": "resnet18_for_rk3588.rknn",
-      "url": "https://raw.githubusercontent.com/airockchip/rknn-toolkit2/v2.3.2/rknn-toolkit-lite2/examples/resnet18/resnet18_for_rk3588.rknn",
-      "sha256": "f56ade1677a2081e4bd8dbc84541b6d5da64654244c4ecb04f59f8d5c13006bf",
-      "task": "classify",
-      "domain": "imagenet",
-      "labels": "imagenet_synset.txt",
-      "input": 224
-    },
-    "yolov8n": {
-      "file": "yolov8n_i8_rk3588.rknn",
-      "sha256": "2f97d2eba83c5e7277cbbb9e3f21fd1588f088575350c5452f564b21b2b90f49",
+    "ppyoloe_s": {
+      "file": "ppyoloe_s_i8_rk3588.rknn",
+      "sha256": "695f549d64a109fbb6c3581ae98946d6ab34830af872ee6f9dc3322de79af225",
       "task": "object_detect",
       "labels": "coco_80_labels_list.txt",
       "input": 640,
       "convert": {
         "onnx": {
-          "url": "https://ftrg.zbox.filez.com/v2/delivery/data/95f00b0fc900458ba134f8b180b3f7a1/examples/yolov8/yolov8n.onnx",
-          "sha256": "0c8716701f471067932b797eeb67c8e5db47c693c2557c881d7679ec12e21bc5"
+          "url": "https://ftrg.zbox.filez.com/v2/delivery/data/95f00b0fc900458ba134f8b180b3f7a1/examples/ppyoloe/ppyoloe_s.onnx",
+          "sha256": "af72d05b33723f6d18f9784f6bba8e593a5554f465f1800d7ad1ba1e33e38b8a"
         },
         "mean_values": [[0, 0, 0]],
         "std_values": [[255, 255, 255]],
         "quantize": true,
-        "dataset": "coco_subset_20"
+        "dataset": "coco_val2017_calib_200"
+      }
+    },
+    "resnet50tv2-i8": {
+      "file": "resnet50tv2_i8_rk3588.rknn",
+      "sha256": "e4ffc840f608edb9ab054d8487e73082859079f4a8a893a1c8424bbaee6613a1",
+      "task": "classify",
+      "domain": "imagenet",
+      "labels": "imagenet_synset.txt",
+      "input": 224,
+      "resize_short": 232,
+      "crop": 224,
+      "convert": {
+        "export": {
+          "timm": "resnet50.tv2_in1k",
+          "weights_url": "https://huggingface.co/timm/resnet50.tv2_in1k/resolve/10eea9779fc8a753af919714889bd7f60fba412d/model.safetensors",
+          "weights_sha256": "30f57ada2f100011a4bd38000df906d6354688a8ca599be580337151c3c5f6a3",
+          "input_name": "data",
+          "input_size": [1, 3, 224, 224],
+          "opset": 12
+        },
+        "mean_values": [[123.675, 116.28, 103.53]],
+        "std_values": [[58.395, 57.12, 57.375]],
+        "load_onnx": {"inputs": ["data"], "input_size_list": [[1, 3, 224, 224]]},
+        "quantize": true,
+        "dataset": "coco_val2017_calib_200",
+        "calibrated_on": "the pinned file was calibrated on 200 ImageNetV2 (matched-frequency) images, not on this COCO list: a rebuild with this recipe calibrates on COCO and will not reproduce the pinned hash (which is true of every conversion here)"
+      }
+    },
+    "resnet50tv2-fp16": {
+      "file": "resnet50tv2_fp16_rk3588.rknn",
+      "sha256": "fe7786778e53fcbce37caca0fb4398b0250388eff65c0895583ef11b079a6872",
+      "task": "classify",
+      "domain": "imagenet",
+      "labels": "imagenet_synset.txt",
+      "input": 224,
+      "resize_short": 232,
+      "crop": 224,
+      "convert": {
+        "export": {
+          "timm": "resnet50.tv2_in1k",
+          "weights_url": "https://huggingface.co/timm/resnet50.tv2_in1k/resolve/10eea9779fc8a753af919714889bd7f60fba412d/model.safetensors",
+          "weights_sha256": "30f57ada2f100011a4bd38000df906d6354688a8ca599be580337151c3c5f6a3",
+          "input_name": "data",
+          "input_size": [1, 3, 224, 224],
+          "opset": 12
+        },
+        "mean_values": [[123.675, 116.28, 103.53]],
+        "std_values": [[58.395, 57.12, 57.375]],
+        "load_onnx": {"inputs": ["data"], "input_size_list": [[1, 3, 224, 224]]},
+        "quantize": false
       }
     },
     "clip-vit-b32-image": {
@@ -60,9 +101,9 @@
     }
   },
   "datasets": {
-    "coco_subset_20": {
-      "list": "https://raw.githubusercontent.com/airockchip/rknn_model_zoo/v2.3.2/datasets/COCO/coco_subset_20.txt",
-      "base": "https://raw.githubusercontent.com/airockchip/rknn_model_zoo/v2.3.2/datasets/COCO/"
+    "coco_val2017_calib_200": {
+      "list_file": "calib/coco_val2017_calib_200.txt",
+      "base": "http://images.cocodataset.org/val2017/"
     }
   },
   "labels": {
@@ -71,22 +112,18 @@
       "sha256": "acf75ef0abe89694b19056e0796401068b459c457baa30335f240c7692857355"
     },
     "coco_80_labels_list.txt": {
-      "url": "https://raw.githubusercontent.com/airockchip/rknn_model_zoo/v2.3.2/examples/yolov8/model/coco_80_labels_list.txt",
+      "url": "https://raw.githubusercontent.com/airockchip/rknn_model_zoo/v2.3.2/examples/ppyoloe/model/coco_80_labels_list.txt",
       "sha256": "bd17f1ee35d5f3c862a4894605855abbb9dda4b0621fdb0ac4c2c8c7bb7e730a"
     }
   },
   "testdata": {
     "bus.jpg": {
-      "url": "https://raw.githubusercontent.com/airockchip/rknn_model_zoo/v2.3.2/examples/yolov8/model/bus.jpg",
+      "url": "https://raw.githubusercontent.com/airockchip/rknn_model_zoo/v2.3.2/examples/ppyoloe/model/bus.jpg",
       "sha256": "fb4914d123d97c440cd127ef0e98d4bdc68cd88e2683657528928b4a34014e16"
     },
     "dog_224x224.jpg": {
       "url": "https://raw.githubusercontent.com/airockchip/rknn_model_zoo/v2.3.2/examples/clip/model/dog_224x224.jpg",
       "sha256": "c350299c6283d5f62fecf1f845b6b3be9aafec8dff528ca09a129990f0a584b0"
-    },
-    "space_shuttle_224.jpg": {
-      "url": "https://raw.githubusercontent.com/airockchip/rknn-toolkit2/v2.3.2/rknn-toolkit-lite2/examples/resnet18/space_shuttle_224.jpg",
-      "sha256": "a827cc9060d15cd34b1b5ac512f4d6d8366416a5874a2075951991cbacef78d4"
     }
   }
 }
