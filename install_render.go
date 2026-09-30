@@ -513,7 +513,14 @@ func deriveRender(profilesRaw []byte, req renderRequest) (renderResult, error) {
 		seat, seatRT, extras = req.PinnedVLLM.Seat, req.PinnedVLLM.Runtime, req.PinnedVLLM.Extras
 	} else {
 		seat, seatRT = vllmSeatFor(p, req.Home, req.VLLM)
-		extras = extraVLLMSeatsFor(p, req.Home, req.VLLM)
+		var extraRT vllmseat.Runtime
+		extras, extraRT = extraVLLMSeatsFor(p, req.Home, req.VLLM)
+		if seat == nil {
+			// The lane seat is skipped (its weights are absent, or two snapshots sit under them
+			// mid-upgrade) but an extra seat may still render, and its entry needs the box's
+			// runtime just the same. Zero when nothing renders, so a plain box keeps its stamp.
+			seatRT = extraRT
+		}
 	}
 	// The layers as a box SEEDS them (tierseed fills the bare agent seat from the vLLM
 	// seat and drops a layer whose vLLM seat this box does not run), so the render and

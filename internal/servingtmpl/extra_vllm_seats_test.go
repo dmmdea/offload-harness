@@ -207,3 +207,45 @@ func modelKeys(doc renderedSeatDoc) []string {
 	}
 	return out
 }
+
+// A seat rendered from an incomplete runtime is a dead entry (`cmd: /vllm-35b-seat-cmd.sh`,
+// `proxy: http://:18797`) that every gate reading the text passes, because none of them reads the
+// address. Render refuses it by seat name instead: a caller that has a seat has resolved a runtime
+// for it, so an incomplete one is that caller's bug.
+func TestAVLLMSeatWithAnIncompleteRuntimeIsRefused(t *testing.T) {
+	without := func(clear func(*vllmseat.Runtime)) vllmseat.Runtime {
+		r := vllmRuntime()
+		clear(&r)
+		return r
+	}
+	for setName, set := range map[string]func(*Params){
+		"an extra seat alone": func(p *Params) { p.ExtraVLLMSeats = []*vllmseat.Spec{extraVLLMSpec()} },
+		"the lane seat":       func(p *Params) { p.VLLMSeat = vllmSpec() },
+		"both seats":          func(p *Params) { p.VLLMSeat = vllmSpec(); p.ExtraVLLMSeats = []*vllmseat.Spec{extraVLLMSpec()} },
+	} {
+		for rtName, tc := range map[string]struct {
+			rt   vllmseat.Runtime
+			want string
+		}{
+			"no runtime at all": {vllmseat.Runtime{}, "no user"},
+			"no address":        {without(func(r *vllmseat.Runtime) { r.ProxyHost = "" }), "no proxy host"},
+			"no seat directory": {without(func(r *vllmseat.Runtime) { r.SeatDir = "" }), "no seat dir"},
+		} {
+			t.Run(setName+"/"+rtName, func(t *testing.T) {
+				p := params()
+				set(&p)
+				p.VLLMRuntime = tc.rt
+				_, err := Render(linuxCUDA(t), p)
+				if err == nil || !strings.Contains(err.Error(), "cannot be rendered") || !strings.Contains(err.Error(), tc.want) {
+					t.Fatalf("a seat with %s must be refused, naming what is missing (%q); got %v", rtName, tc.want, err)
+				}
+			})
+		}
+	}
+	// The control: the same params with a complete runtime render.
+	p := params()
+	p.ExtraVLLMSeats = []*vllmseat.Spec{extraVLLMSpec()}
+	if _, doc := renderSeats(t, p); doc.Models["qwen36-35b-a3b-gsq-vllm"].Proxy == "" {
+		t.Error("the control render carries no proxy address")
+	}
+}

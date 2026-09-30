@@ -171,7 +171,9 @@ type Params struct {
 	// for VLLMSeat: an extra seat whose weights are absent is not rendered.
 	ExtraVLLMSeats []*vllmseat.Spec
 	// VLLMRuntime carries the two per-BOX values the tier cannot know: the account
-	// llama-swap runs as, and the literal address the engine binds.
+	// llama-swap runs as, and the literal address the engine binds. It is required whenever
+	// any vLLM seat is set (the lane seat or an extra one): Render refuses an incomplete one,
+	// because an entry rendered from it names no seat directory and no address.
 	VLLMRuntime vllmseat.Runtime
 }
 
@@ -732,6 +734,13 @@ func insertVLLMSeat(out string, p Params, anchors seatAnchors, taken map[string]
 			"the agent lane — but the target serving template places only: %s. Rendering it as an alternative would "+
 			"let an ordinary chat request unload the agent seat and pay its 125-250 s reload",
 			seats[0].spec.ID, strings.Join(roles, ", "))
+	}
+	// An entry rendered from an incomplete runtime is `cmd: /vllm-35b-seat-cmd.sh` and
+	// `proxy: http://:18797`: a seat that is listed, passes every gate that reads the text, and
+	// fails only when a contract asks for it. A caller that has a seat has resolved a runtime
+	// for it, so an incomplete one is that caller's bug and it is refused here, by name.
+	if err := p.VLLMRuntime.Validate(); err != nil {
+		return "", nil, fmt.Errorf("vllm seat %q cannot be rendered: %w", seats[0].spec.ID, err)
 	}
 	var ids []string
 	for _, ref := range seats {

@@ -23,14 +23,18 @@ per tier and a card cannot hold two heavy seats, so the schema grew by the small
   `layers`, `tiers` and `tier_profile`. A layer seat naming a vLLM seat must equal that seat's `max_model_len` (and
   `max_num_seqs`, when set) or the table is refused at parse.
 - Seeding is per seat and never advertises what the box cannot serve: an extra seat the box can run (the venv, its
-  own weights and the wrapper scripts the operator installs for it) joins `vllm_seats` with its own binding; a layer whose vLLM seat is absent is dropped; a layer set
-  that lost `single` (the planner default, placement row 5b) is not seeded at all; a box with no vLLM prerequisites
-  seeds exactly what it did before (`tierseed.ResolveLayers`, `Options.ExtraVLLMSeatsActive`).
+  own weights and the wrapper scripts the operator installs for it) joins `vllm_seats` with its own binding; a layer
+  whose vLLM seat is absent is dropped; a layer set that lost `single` (the planner default, placement row 5b) is not
+  seeded at all; a box with no vLLM prerequisites seeds exactly what it did before (`tierseed.ResolveLayers`,
+  `Options.ExtraVLLMSeatsActive`).
 - `install render` emits every vLLM seat of a tier as an ALTERNATIVE of the others inside the residents set
   (`emb & rer & (vagt | vagt2)`): the two seats cannot share the card, and co-resident members would have llama-swap
-  load the second beside the first. The extra seat's entry names its wrappers after its own unit. The composition
-  check now runs for any tier that declares layers, not only one that composes. `ParamsBasis` mirrors
-  `Params.ExtraVLLMSeats`, and a replay pins it.
+  load the second beside the first. The extra seat's entry names its wrappers after its own unit, and a box that runs
+  it without the lane seat (the 27B's weights absent, or two snapshots under them mid-upgrade) renders it with the
+  box's own runtime; `servingtmpl.Render` refuses any vLLM seat whose runtime is incomplete, because such an entry
+  names no seat directory and no address and every gate that reads the text passes it. The composition check now runs
+  for any tier that declares layers, not only one that composes. `ParamsBasis` mirrors `Params.ExtraVLLMSeats`, and a
+  replay pins it.
 - `extra_vllm_seats` keys are strict, like `layers`: a key that is not a seat field is refused by tier and JSON path at
   parse (`tierseed.ParseDoc`, so the installer's embedded copy too), never silently dropped. A misspelt `storeless_reason`
   used to seed the generic reason in its place.

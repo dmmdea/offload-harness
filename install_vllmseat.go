@@ -110,10 +110,17 @@ func vllmSeatFor(p servingProfile, home string, f vllmRuntimeFlags) (*vllmseat.S
 // They are the operator's step, so they are also the prerequisite: llama-swap does not check that
 // an entry's `cmd` exists when it loads its config, so a seat advertised without them is listed
 // and fails only when a contract asks for it.
-func extraVLLMSeatsFor(p servingProfile, home string, f vllmRuntimeFlags) []*vllmseat.Spec {
+//
+// It also returns the box's runtime (the account, the address the engine binds, the seat
+// directory), because an entry cannot be rendered without one, and the lane seat is not always the
+// one that carries it: a box that runs the extra seat alone (the lane seat's weights absent, or two
+// snapshots under them mid-upgrade) still needs it. The runtime is the zero value when no extra
+// seat renders, exactly as vllmSeatFor's is when the lane seat does not, so a box with nothing to
+// run keeps the provenance stamp it had.
+func extraVLLMSeatsFor(p servingProfile, home string, f vllmRuntimeFlags) ([]*vllmseat.Spec, vllmseat.Runtime) {
 	var out []*vllmseat.Spec
 	if len(p.ExtraVLLMSeats) == 0 {
-		return nil
+		return nil, vllmseat.Runtime{}
 	}
 	rt := f.resolve(home)
 	for _, e := range p.ExtraVLLMSeats {
@@ -140,7 +147,10 @@ func extraVLLMSeatsFor(p servingProfile, home string, f vllmRuntimeFlags) []*vll
 		}
 		out = append(out, &resolved)
 	}
-	return out
+	if len(out) == 0 {
+		return nil, vllmseat.Runtime{}
+	}
+	return out, rt
 }
 
 // detectVLLMSeats is the ONE prerequisite detection `install seed` and `audit-config` share:
