@@ -14,8 +14,16 @@
 //
 // File shape: <state-root>/delegate-intent.jsonl, append-only events —
 //
-//	{"e":"d","job":"agd-…","base":"http://…","goal":"…","ts":170…}   acked dispatch
-//	{"e":"ok","job":"agd-…","note":"…"}                              terminal observed
+//	{"e":"d","job":"agd-…","base":"http://…","goal":"…","ts":170…,"pid":1234}   acked dispatch
+//	{"e":"ok","job":"agd-…","note":"…","ts":170…,"pid":1234}                     closed
+//
+// Every event carries the unix second it was written and the pid of the process
+// that wrote it (ADR 0064): the `ok` events used to carry neither, so the ledger
+// could not say which process closed a job, or when. The close notes in use:
+// "terminal observed" (this process saw the job end), "withdrawn" (the node
+// confirmed the job was taken back before it started), "recovered to …" (the
+// recovery pass filed the result), "node no longer holds the job …", and
+// "expired unrecovered after …".
 //
 // A job is OPEN when its newest event is "d". Recovered results land as
 // <state-root>/delegate-recovered/<job>.json for the operator (surfaced by a
@@ -31,6 +39,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -63,7 +72,17 @@ type intentEvent struct {
 	Goal string `json:"goal,omitempty"`
 	Note string `json:"note,omitempty"`
 	TS   int64  `json:"ts,omitempty"`
+	// PID is the process that wrote the event (ADR 0064), so "which process ran
+	// the recovery" and "who closed this job" can be read back.
+	PID int `json:"pid,omitempty"`
 }
+
+// The close notes the delegator itself writes. Recovery's own notes stay where
+// they are used.
+const (
+	intentNoteTerminal  = "terminal observed"
+	intentNoteWithdrawn = "withdrawn"
+)
 
 // intentLedger is the per-delegator append-only intent file. A nil ledger is
 // valid and inert: every method no-ops, so a box whose state root cannot be
@@ -89,6 +108,15 @@ func openIntentLedger(cfg config.Config) *intentLedger {
 func (l *intentLedger) append(ev intentEvent) {
 	if l == nil {
 		return
+	}
+	// Stamped HERE, on the one path every event takes, so no writer can forget
+	// them (a timestamp a caller already set, such as a test's back-dated
+	// dispatch, is kept).
+	if ev.TS == 0 {
+		ev.TS = time.Now().Unix()
+	}
+	if ev.PID == 0 {
+		ev.PID = os.Getpid()
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -120,11 +148,20 @@ func (l *intentLedger) dispatched(jobID, base, goal string) {
 }
 
 // done closes a job: a terminal answer was OBSERVED by this process (done,
-// error, positive 404 denial, auth rejection). Not called on cancellation or
-// on an owned-job poll deadline — those are precisely the orphan shapes the
+// error, positive 404 denial, auth rejection at dispatch). Not called on
+// cancellation or on an owned-job poll deadline unless the node confirmed a
+// withdrawal (see withdrawn) — those are precisely the orphan shapes the
 // recovery pass exists for.
 func (l *intentLedger) done(jobID, note string) {
 	l.append(intentEvent{E: "ok", Job: jobID, Note: note})
+}
+
+// withdrawn closes a job the node CONFIRMED it took back before starting it
+// (DELETE /fleet/jobs/{id}, ADR 0064): nothing is left on the node for the
+// recovery pass to collect, so the intent is settled — unlike a give-up the node
+// did not confirm, which stays open.
+func (l *intentLedger) withdrawn(jobID string) {
+	l.done(jobID, intentNoteWithdrawn)
 }
 
 // openIntents folds the ledger into the still-open set, newest base last.
@@ -193,6 +230,9 @@ func RecoverOrphans(ctx context.Context, cfg config.Config) (int, error) {
 		return 0, err
 	}
 	recovered := 0
+	// unauthorized is the intents a node refused THIS process's credentials for,
+	// by base: reported once for the pass, after the loop.
+	unauthorized := map[string]int{}
 	for jobID, ev := range open {
 		if ctx.Err() != nil {
 			break
@@ -210,7 +250,14 @@ func RecoverOrphans(ctx context.Context, cfg config.Config) (int, error) {
 		case status == http.StatusNotFound:
 			ledger.done(jobID, "node no longer holds the job (restarted?) — result lost")
 		case status == http.StatusUnauthorized:
-			ledger.done(jobID, "auth rejected at recovery")
+			// A 401 is the node refusing THIS process's credentials (a config with
+			// no fleet_auth_token, a rotated one) — a fact about the caller, not
+			// about the job. Closing the intent on it destroyed the only record of
+			// work the node may still finish: 36 of 61 intents on 2026-09-29, none
+			// of the 61 ever recovered. It stays OPEN (a process holding the right
+			// token can still collect it; the 48 h expiry bounds it) and the pass
+			// says so once, below.
+			unauthorized[strings.TrimRight(strings.TrimSpace(ev.Base), "/")]++
 		case status == http.StatusOK && (state == "done" || state == "error"):
 			outDir := filepath.Join(root, "delegate-recovered")
 			if mkerr := os.MkdirAll(outDir, 0o755); mkerr != nil {
@@ -231,6 +278,20 @@ func RecoverOrphans(ctx context.Context, cfg config.Config) (int, error) {
 		default:
 			// accepted/running: the node is still working it. Leave open.
 		}
+	}
+	if len(unauthorized) > 0 {
+		total, bases := 0, make([]string, 0, len(unauthorized))
+		for base, n := range unauthorized {
+			total += n
+			bases = append(bases, base)
+		}
+		sort.Strings(bases)
+		more := ""
+		if len(bases) > 3 {
+			bases, more = bases[:3], fmt.Sprintf(" and %d more", len(bases)-3)
+		}
+		log.Printf("delegate: orphan recovery: %d open intent(s) answered 401 from %s%s — this process's fleet_auth_token is missing or wrong for them; they were left OPEN, not closed, so a process with the right token can still recover them (they expire after %s)",
+			total, strings.Join(bases, ", "), more, intentMaxAge)
 	}
 	if lines > intentWarnLines {
 		log.Printf("delegate: intent ledger %s has %d lines — truncate it while no harness process is running if it bothers you (never compacted automatically; see intentWarnLines)", ledger.path, lines)
