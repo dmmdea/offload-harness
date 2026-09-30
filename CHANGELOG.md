@@ -28,6 +28,16 @@ command), UNKNOWN (the node publishes no version) or UNREACHABLE. Informational 
 Parity broke twice on 2026-09-30 within an hour because a merge landed between deploys; the session-start audit
 caught it, and now any session that runs doctor does too. `delegate.NodeView` carries `HarnessVersion` for it.
 
+### Added — the house security standard (ADR 0067) and the bare-client lint
+
+`docs/systems/security.md` is the standard every part of the harness is held to: seven invariants, ten layers
+plus a reliability track, AARM v1.0 R1-R9 as the checklist, promotion from audit to enforce only on counted data,
+and twelve gates that fail when their control is removed. Gate G2 ships with it: `bare_http_client_lint_test.go`
+fails the suite on any new bare HTTP client (ADR 0042 made executable) until the site is reviewed and listed with
+its reason; the first review lists 43 sites, one of them open (`offload_nim`'s caller-named base, next in L5).
+The ADR index row for 0061 now describes the rolling allowance that shipped, not the first draft.
+
+
 ## [0.144.1] - 2026-09-30 - the trusted-network flag permits one address, never every interface
 
 ### Security — a fleet node could serve its unauthenticated endpoints on every interface after a boot race
