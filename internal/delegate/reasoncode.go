@@ -114,7 +114,17 @@ func deferReasonCode(pr PlacedResult) string {
 	}
 	switch w.DeferClass {
 	case core.DeferClassCapacity:
-		return ledger.ReasonCapacityWait
+		// Two different root causes carry this class, and PlacedResult.Unplaced (the
+		// flag a surface reads to tell "the node answered and deferred" from "the node
+		// was never exercised") says which: a result NO node ran is the delegator's own
+		// outcome — its capacity wait ran out, or a placement decision found no room;
+		// one a node (or this box's own seat) answered is that node refusing after
+		// admission — a seat at its run cap, a card under a lease or fence, an engine
+		// held busy by other work.
+		if pr.Unplaced {
+			return ledger.ReasonCapacityWait
+		}
+		return ledger.ReasonNodeBusy
 	case core.DeferClassBudget:
 		return ledger.ReasonBudget
 	case core.DeferClassAbstention:

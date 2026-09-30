@@ -48,8 +48,17 @@ const (
 	// ReasonRemoteError: a node reported the job errored, or its answer could not
 	// be used.
 	ReasonRemoteError = "remote_error"
-	// ReasonCapacityWait: no node had room within the placement wait.
+	// ReasonCapacityWait: no node had room within the placement wait — the
+	// delegator's OWN outcome, a result no node ran (PlacedResult.Unplaced).
 	ReasonCapacityWait = "capacity_wait"
+	// ReasonNodeBusy: a node (or this box's own seat) took the job and answered a
+	// capacity defer AFTER admission: its seat was at its run cap ("seat busy:"), a
+	// GPU lease or fence held its card ("gpu busy:"), or its engine was held busy by
+	// other work. Kept apart from ReasonCapacityWait because they are different root
+	// causes with different fixes — a seat at its cap is the node's admission, a
+	// capacity wait is the fleet having no room — and a reader counting one must not
+	// have to read the prose to exclude the other.
+	ReasonNodeBusy = "node_busy"
 	// ReasonShed: sheddable work found no idle node.
 	ReasonShed = "shed"
 	// ReasonNoEligibleNode: route=remote, or a failing fleet, with nothing eligible.
@@ -90,7 +99,7 @@ var reasonCodes = []string{
 	ReasonOK, ReasonStarted, ReasonFailedVerification,
 	ReasonQueueFull, ReasonQueueDeadline, ReasonQueueWithdrawn, ReasonPollDeadline,
 	ReasonCanceled, ReasonNodeUnreachable, ReasonJobLost, ReasonDispatchRefused,
-	ReasonRemoteError, ReasonCapacityWait, ReasonShed, ReasonNoEligibleNode,
+	ReasonRemoteError, ReasonCapacityWait, ReasonNodeBusy, ReasonShed, ReasonNoEligibleNode,
 	ReasonSeatDown, ReasonStallAdmission, ReasonStallColdLoad, ReasonStallPrefill,
 	ReasonStallDecode, ReasonStallTool, ReasonStallRepack, ReasonStallEngine, ReasonStallOther,
 	ReasonBudget, ReasonAbstention, ReasonContract, ReasonConfig, ReasonWrite,

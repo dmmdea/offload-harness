@@ -207,3 +207,26 @@ func TestStartedRowsAreNotJobs(t *testing.T) {
 		t.Fatalf("TokensSaved = %d, want 200 (the orphan inner row's savings; a marker adds none)", s.TokensSaved)
 	}
 }
+
+// TestNodeBusyIsAStoredMemberOfTheClosedSet: a node that took a job and answered a
+// capacity defer after admission (a seat at its run cap, a card under a lease) is a
+// different root cause from the delegator's own capacity wait, and its code has to
+// survive Record: a code outside the closed set is replaced by `other`, so a member
+// missing from the list would silently turn every such row into a group nobody can
+// join on.
+func TestNodeBusyIsAStoredMemberOfTheClosedSet(t *testing.T) {
+	if !IsReasonCode(ReasonNodeBusy) || ReasonNodeBusy == ReasonCapacityWait {
+		t.Fatalf("node_busy must be its own member of the closed set (got %q, capacity_wait %q)", ReasonNodeBusy, ReasonCapacityWait)
+	}
+	l, p := openLedger(t)
+	if err := l.Record(Entry{Task: "agent_delegate", JobID: "agd-nb", Deferred: true, Reason: "seat busy: seat agent-pool is at its local run cap", ReasonCode: ReasonNodeBusy}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ReadAll(p)
+	if err != nil || len(got) != 1 {
+		t.Fatalf("rows = %d (%v), want 1", len(got), err)
+	}
+	if got[0].ReasonCode != ReasonNodeBusy {
+		t.Fatalf("stored reason_code = %q, want %q: Record replaced a member of the set", got[0].ReasonCode, ReasonNodeBusy)
+	}
+}

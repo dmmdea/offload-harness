@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/ledger"
 )
@@ -157,6 +158,17 @@ func TestReasonCodeIsAlwaysSetOnEveryOutcomeShape(t *testing.T) {
 	refused := func(status int, err string) PlacedResult {
 		return PlacedResult{Err: err, refused: true, refusalStatus: status}
 	}
+	// ownCapacityWait is what the delegator's own capacity wait produces, built by the
+	// real constructor rather than typed by hand, so the classifier is anchored to the
+	// shape production creates: a deferred capacity result marked Unplaced.
+	ownCapacityWait := func() PlacedResult {
+		pr := (&runner{cfg: config.Config{AgentPlacementWaitSec: 120}}).capacityDefer(
+			NodeView{NodeID: "this-box", AgentSeat: "seat"}, PlacedResult{JobID: "agd-1"}, time.Second, 2*time.Minute, []string{"node-a: full"}, nil)
+		if !pr.Unplaced || !pr.Result.Deferred || pr.Result.DeferClass != core.DeferClassCapacity {
+			t.Fatalf("capacityDefer no longer builds a deferred, unplaced capacity result: %+v", pr)
+		}
+		return pr
+	}
 	cases := []struct {
 		name string
 		pr   PlacedResult
@@ -206,7 +218,15 @@ func TestReasonCodeIsAlwaysSetOnEveryOutcomeShape(t *testing.T) {
 		{"seat unreachable", stall("agent loop: Post \"http://127.0.0.1:1/v1/chat/completions\": dial tcp 127.0.0.1:1: connect: connection refused"), ledger.ReasonSeatDown},
 		{"infrastructure, generic", stall("building agent: boom"), ledger.ReasonInfrastructure},
 		{"shed", PlacedResult{shed: true, Result: core.AgentWireResult{Deferred: true, DeferClass: core.DeferClassCapacity, Reason: "shed (priority -1): ..."}}, ledger.ReasonShed},
-		{"capacity wait", deferred(core.DeferClassCapacity, "capacity wait: no node had room within 2m0s"), ledger.ReasonCapacityWait},
+		// The delegator's own placement outcome — a result NO node ran — versus a node
+		// that took the job and answered a capacity defer after admission. Two
+		// diagnosed root causes (the fleet had no room; a seat sat at its run cap) with
+		// different fixes: one code each, so a reader never reads prose to tell them apart.
+		{"capacity wait", ownCapacityWait(), ledger.ReasonCapacityWait},
+		{"placement decision, capacity", PlacedResult{Unplaced: true, Result: core.AgentWireResult{Deferred: true, DeferClass: core.DeferClassCapacity, Reason: "layer fast refused by display-floor: ..."}}, ledger.ReasonCapacityWait},
+		{"node: seat at its run cap", deferred(core.DeferClassCapacity, "seat busy: seat agent-pool is at its local run cap (2 running)"), ledger.ReasonNodeBusy},
+		{"node: gpu lease or fence", deferred(core.DeferClassCapacity, "gpu busy: exclusive text lease held; no new run is admitted on this box until it is released"), ledger.ReasonNodeBusy},
+		{"node: engine held busy", deferred(core.DeferClassCapacity, "wall timeout: the run was held behind the seat's other work"), ledger.ReasonNodeBusy},
 		{"no eligible remote", PlacedResult{Unplaced: true, Result: core.AgentWireResult{Deferred: true, DeferClass: core.DeferClassInfrastructure, Reason: "route=remote: every remote failed the health probe"}}, ledger.ReasonNoEligibleNode},
 		{"budget", deferred(core.DeferClassBudget, "wall timeout after 300s"), ledger.ReasonBudget},
 		{"abstention", deferred(core.DeferClassAbstention, "the seat declined"), ledger.ReasonAbstention},
