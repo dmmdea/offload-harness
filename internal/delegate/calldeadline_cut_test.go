@@ -35,6 +35,24 @@ func measuredWallCancel() core.AgentWireResult {
 	return w
 }
 
+// readFinished reads the ledger rows that describe an OUTCOME: deferred, or carrying an
+// acceptance verdict. A tree that also writes a marker before each dispatch (a row with no
+// reason, no verdict and no deferral) has those left out, so a count of a call's outcomes
+// is the same with or without one.
+func readFinished(path string) ([]ledger.Entry, error) {
+	all, err := ledger.ReadAll(path)
+	if err != nil {
+		return nil, err
+	}
+	var out []ledger.Entry
+	for _, r := range all {
+		if r.Deferred || r.AcceptanceResult != "" {
+			out = append(out, r)
+		}
+	}
+	return out, nil
+}
+
 // corpusLines reads every delegation-log row the run wrote.
 func corpusLines(t *testing.T, cfg config.Config) []delegationLogLine {
 	t.Helper()
@@ -91,7 +109,7 @@ func TestCutKeepsWhatTheRunMeasured(t *testing.T) {
 		t.Fatalf("a run cut mid-run stays placed and named: node %q seat %q unplaced %v", pr.Node, pr.Seat, pr.Unplaced)
 	}
 
-	rows, err := ledger.ReadAll(cfg.LedgerPath)
+	rows, err := readFinished(cfg.LedgerPath)
 	if err != nil || len(rows) != 1 {
 		t.Fatalf("ledger rows = %d (%v), want the cut subtask's one row", len(rows), err)
 	}
@@ -145,7 +163,7 @@ func TestCutSaysWhatTheRunItselfReported(t *testing.T) {
 	if lines := corpusLines(t, cfg); len(lines) != 1 || lines[0].Result == nil || !strings.Contains(lines[0].Result.Reason, "connection refused (engine is DOWN)") {
 		t.Fatalf("the corpus row does not carry the run's verdict: %+v", lines)
 	}
-	rows, _ := ledger.ReadAll(cfg.LedgerPath)
+	rows, _ := readFinished(cfg.LedgerPath)
 	if len(rows) != 1 || !strings.HasPrefix(rows[0].Reason, deadlinePrefix+"1 unfinished") {
 		t.Fatalf("the ledger row does not carry the call-deadline wording: %+v", rows)
 	}

@@ -147,7 +147,7 @@ func TestRunWithDeadlineDoesNotWaitForARunnerThatIgnoresItsContext(t *testing.T)
 		// it finish before the temp dir is removed (a Windows handle would block).
 		deadline := time.Now().Add(3 * time.Second)
 		for time.Now().Before(deadline) {
-			if rows, err := ledger.ReadAll(cfg.LedgerPath); err == nil && len(rows) >= 3 { // the finished row, the call's own abandoned row, the goroutine's late row
+			if rows, err := readFinished(cfg.LedgerPath); err == nil && len(rows) >= 3 { // the finished row, the call's own abandoned row, the goroutine's late row
 				break
 			}
 			time.Sleep(10 * time.Millisecond)
@@ -195,7 +195,7 @@ func TestRunWithDeadlineReportsEachSubtaskFinishedExactlyOnce(t *testing.T) {
 		unblock()
 		deadline := time.Now().Add(3 * time.Second)
 		for time.Now().Before(deadline) {
-			if rows, err := ledger.ReadAll(cfg.LedgerPath); err == nil && len(rows) >= 3 { // the finished row, the call's own abandoned row, the goroutine's late row
+			if rows, err := readFinished(cfg.LedgerPath); err == nil && len(rows) >= 3 { // the finished row, the call's own abandoned row, the goroutine's late row
 				break
 			}
 			time.Sleep(10 * time.Millisecond)
@@ -530,7 +530,7 @@ func TestRunWithDeadlineRecordsACapacityWaitCutBeforeAnyAttempt(t *testing.T) {
 	if !strings.HasPrefix(results[0].Result.Reason, deadlinePrefix+"1 unfinished") {
 		t.Fatalf("reason = %q, want the call-deadline wording", results[0].Result.Reason)
 	}
-	rows, err := ledger.ReadAll(cfg.LedgerPath)
+	rows, err := readFinished(cfg.LedgerPath)
 	if err != nil || len(rows) != 1 {
 		t.Fatalf("ledger rows = %d (%v), want exactly the one row the deadline defer records (no attempt ever wrote one)", len(rows), err)
 	}
@@ -667,7 +667,7 @@ func TestRunBatchedDefersLaterChunksAtTheDeadline(t *testing.T) {
 	}
 	// Every outcome has a row, the never-started page included (the precedent
 	// settle() set: a subtask that produced no attempt is still recorded).
-	rows, err := ledger.ReadAll(cfg.LedgerPath)
+	rows, err := readFinished(cfg.LedgerPath)
 	if err != nil || len(rows) != 9 {
 		t.Fatalf("ledger rows = %d (%v), want one per page (9)", len(rows), err)
 	}
