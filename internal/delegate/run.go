@@ -569,6 +569,11 @@ type RunOptions struct {
 	// finished results, and nothing further is started. The zero value is no
 	// deadline — every caller that is not an MCP door, and every pre-0065 call.
 	Deadline time.Time
+	// OnProgress, when set, is told each time a subtask starts and each time one
+	// ends (progress.go). It is called from the run's own goroutines, concurrently,
+	// so it must be safe for that and must not block: the MCP doors hand each event
+	// to a channel. Nothing in the engine reads it back.
+	OnProgress func(ProgressEvent)
 	// call is the deadline's shared state (calldeadline.go): RunBatched builds it
 	// once so every chunk of a batched call counts its unfinished subtasks against
 	// the whole call. Nil = RunWith builds its own from Deadline.
@@ -623,7 +628,14 @@ func RunBatched(ctx context.Context, cfg config.Config, local LocalRunner, subta
 		if end > len(subtasks) {
 			end = len(subtasks)
 		}
-		res, sum, err := RunWith(ctx, cfg, local, subtasks[start:end], route, remotes, opts)
+		chunkOpts := opts
+		if opts != nil && opts.OnProgress != nil {
+			// Progress counts against the whole call, not against each chunk.
+			o := *opts
+			o.OnProgress = shiftedProgress(opts.OnProgress, len(all), len(subtasks))
+			chunkOpts = &o
+		}
+		res, sum, err := RunWith(ctx, cfg, local, subtasks[start:end], route, remotes, chunkOpts)
 		all = append(all, res...)
 		total = addSummary(total, sum)
 		total.Batches++
@@ -799,6 +811,7 @@ func RunWith(ctx context.Context, cfg config.Config, local LocalRunner, subtasks
 		r.autoDeal = r.dealAutoRemote(subtasks, r.localView(), r.autoViews, r.autoBases, busy, failed)
 	}
 	board := newResultBoard(len(subtasks))
+	progress := newProgressor(opts, len(subtasks))
 	sem := make(chan struct{}, runConcurrency)
 	var wg sync.WaitGroup
 	launched := 0
@@ -822,9 +835,13 @@ launch:
 		go func(i int, contract core.AgentContract) {
 			defer wg.Done()
 			defer func() { <-sem }()
+			progress.started(i)
 			pr := r.cutByDeadline(r.runOne(ctx, i, contract))
-			if board.put(i, pr) && !pr.deadlineCut {
-				dl.answer()
+			if board.put(i, pr) {
+				if !pr.deadlineCut {
+					dl.answer()
+				}
+				progress.finished(i, pr)
 			}
 		}(i, c)
 	}
@@ -840,8 +857,10 @@ launch:
 		case done[i]:
 		case i >= launched:
 			results[i] = r.unlaunched(subtasks[i])
+			progress.finished(i, results[i])
 		default:
 			results[i] = r.abandoned()
+			progress.finished(i, results[i])
 		}
 	}
 

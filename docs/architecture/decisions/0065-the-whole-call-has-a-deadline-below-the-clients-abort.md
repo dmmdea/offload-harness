@@ -74,6 +74,16 @@ measurement of the client.
    already started is not the delegator's to cancel, and nothing the call publishes depends on the
    answer. The reason says the node was asked, never that the job is gone.
 
+6. **Progress is reported only to a client that asks, and nothing depends on it.** A request that
+   carries a progress token (`_meta.progressToken`) gets `notifications/progress` from the two doors: an
+   opening one, one per subtask state change (started; finished and how, counted against the whole call
+   across the chunks of a batched one), and a heartbeat every 30 s while nothing changes that says how
+   many subtasks are done and how long the call has left. `progress` is a running counter, because the
+   spec asks for a strictly increasing value and a heartbeat has no new work to count. The events reach
+   the reporter through a bounded queue that drops rather than blocks, so a slow client cannot slow a
+   subtask, and a request with no token, or with no session, changes nothing. **Whether the reference
+   client resets its timeout on progress is unverified**; the whole-call deadline does not rely on it.
+
 ## Consequences
 
 - No `agent_delegate` or `offload_research` call outlives its deadline by more than the unwind

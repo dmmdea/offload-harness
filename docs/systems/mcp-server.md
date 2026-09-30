@@ -205,6 +205,17 @@ shape, not a failure. The default is above the longest single subtask (`timeout_
 300 s admission allowance + the 60 s poll grace) and below the client's abort by the margin a response
 needs. The CLI verbs take no deadline.
 
+**Progress notifications.** A request that carries a progress token (`_meta.progressToken`) also gets
+`notifications/progress`: an opening one, one per subtask state change ("subtask 2 of 8 started",
+"subtask 2 of 8 finished (succeeded) on <node>; 3 of 8 done" — counted against the whole call, across the
+chunks of a batched research call), and a heartbeat every 30 s while nothing changes ("still working: 3
+of 8 subtasks done after 4m0s; call deadline in 20m0s"). `progress` is a running counter (the spec asks
+for a strictly increasing value; a heartbeat has no new work to count). It is strictly opt-in and
+additive: no token, no notification, and a slow client cannot slow a subtask (events go through a
+bounded queue that drops rather than blocks). Whether the reference client resets its timeout on
+progress is **unverified**, which is why the whole-call deadline above is a hard limit that does not
+depend on it.
+
 Since 0.130.2 (register C-46) `route` is accepted on **`agent_run` and `offload_ask`** too. Both
 doors ran local unconditionally before, so a remote seat could not be named from this box at all.
 `remote` / `auto` / `spread` / `queue` sends the call as ONE contract through the delegator's

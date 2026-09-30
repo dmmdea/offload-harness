@@ -179,6 +179,54 @@ func TestRunWithDeadlineDoesNotWaitForARunnerThatIgnoresItsContext(t *testing.T)
 	}
 }
 
+// TestRunWithDeadlineReportsEachSubtaskFinishedExactlyOnce: progress counts every
+// subtask once. The stuck subtask is reported finished when the call gives up on
+// it; its late answer, released afterwards and dropped by the closed board, must
+// not be reported again — Done never passes Total.
+func TestRunWithDeadlineReportsEachSubtaskFinishedExactlyOnce(t *testing.T) {
+	cfg := testCfg(t)
+	release := make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	t.Cleanup(func() {
+		unblock()
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) {
+			if rows, err := ledger.ReadAll(cfg.LedgerPath); err == nil && len(rows) >= 2 {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		time.Sleep(100 * time.Millisecond)
+	})
+	local := func(ctx context.Context, c core.AgentContract, _ LocalOptions) (core.AgentWireResult, error) {
+		if isSlow(c) {
+			<-release // deaf to ctx
+		}
+		return localOK(), nil
+	}
+	var mu sync.Mutex
+	var finished, maxDone int
+	opts := deadlineIn(300 * time.Millisecond)
+	opts.OnProgress = func(ev ProgressEvent) {
+		mu.Lock()
+		defer mu.Unlock()
+		if ev.Kind == "finished" {
+			finished++
+		}
+		maxDone = max(maxDone, ev.Done)
+	}
+	runWithin(t, 4*time.Second, cfg, local, []core.AgentContract{{Goal: "fast one"}, {Goal: "slow one"}}, "local", nil, opts, unblock)
+
+	unblock() // the stuck subtask now answers, after the call has returned
+	time.Sleep(300 * time.Millisecond)
+	mu.Lock()
+	defer mu.Unlock()
+	if finished != 2 || maxDone != 2 {
+		t.Fatalf("%d finish event(s), max Done %d, want exactly 2 and 2: the late answer of an abandoned subtask was reported too", finished, maxDone)
+	}
+}
+
 // TestRunWithDeadlineStartsNothingPastTheSlots: eight subtasks, four run at a
 // time, all four running ones block. At the deadline the four that never got a
 // slot must not START (a call that is over cannot begin work) and are published
