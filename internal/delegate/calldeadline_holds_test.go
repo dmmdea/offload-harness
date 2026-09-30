@@ -193,6 +193,9 @@ func TestAPlacementRefusedAfterTheCallDeadlineIsTheDeadlinesDefer(t *testing.T) 
 			if row.JobID != pr.JobID || !row.Deferred {
 				t.Fatalf("the closing row = job %q deferred %v, want the job id the caller was given (%q)", row.JobID, row.Deferred, pr.JobID)
 			}
+			if row.ReasonCode != ledger.ReasonBudget {
+				t.Fatalf("the closing row's reason_code = %q, want %q: every call-deadline row carries it (ADR 0065)", row.ReasonCode, ledger.ReasonBudget)
+			}
 		case strings.Contains(row.Reason, "404"):
 			refused++
 			if row.JobID == pr.JobID {
