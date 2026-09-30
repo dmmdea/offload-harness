@@ -159,6 +159,77 @@ func TestAnAbandonedSubtaskIsPublishedWithAJobIDAndARow(t *testing.T) {
 	time.Sleep(100 * time.Millisecond) // let the goroutine finish before the temp dir goes
 }
 
+// TestAnAbandonedAutoRoutedSubtaskIsPublishedUnderTheIDItRanUnder is the route=auto twin of the
+// test above (the default route is auto, and so is route=remote's deal). Those routes mint each
+// subtask's job id once, at deal time, and the attempt replaces the id it minted for itself with
+// the deal's: its seat is handed the deal's id and every row it writes is under it. The abandon
+// reads the id the runner remembered, and the runner remembered the one the attempt minted FIRST.
+// So the caller was given an id no row, seat or node ever carried, the call's own row was under
+// it, and the goroutine's late row (the answer the caller was told is discarded, now a finished
+// one) was under another: nothing to reconcile the two by (ADR 0065 decision 3). Every pin above
+// runs route=local, where the id is never replaced.
+func TestAnAbandonedAutoRoutedSubtaskIsPublishedUnderTheIDItRanUnder(t *testing.T) {
+	cfg := testCfg(t)
+	release := make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	t.Cleanup(unblock)
+	handed := make(chan string, 1) // the id the deaf seat is handed: the id its attempt runs under
+	local := func(ctx context.Context, c core.AgentContract, o LocalOptions) (core.AgentWireResult, error) {
+		if isSlow(c) {
+			handed <- o.ParentJobID
+			<-release // deaf to ctx
+		}
+		return localOK(), nil
+	}
+	results, sum, _ := runWithin(t, 4*time.Second, cfg, local,
+		[]core.AgentContract{{Goal: "fast one"}, {Goal: "slow one"}}, "auto", nil, deadlineIn(300*time.Millisecond), unblock)
+	if sum != (Summary{Succeeded: 1, Deferred: 1}) {
+		t.Fatalf("summary %+v, want one success and one abandoned subtask", sum)
+	}
+	var ranUnder string
+	select {
+	case ranUnder = <-handed:
+	case <-time.After(time.Second):
+		t.Fatal("the slow seat was never started")
+	}
+	ab := results[1]
+	if !strings.Contains(ab.Result.Reason, "did not stop") {
+		t.Fatalf("the abandoned subtask = %q, want the \"did not stop\" defer", ab.Result.Reason)
+	}
+	if ab.JobID != ranUnder || !strings.Contains(ab.Result.Reason, ranUnder) {
+		t.Errorf("the abandoned subtask was published as job %q (reason %q), but its seat ran under %q: the caller is given an id its attempt's rows are not under", ab.JobID, ab.Result.Reason, ranUnder)
+	}
+	rowsUnder := func(id string) (deferred, passed int) {
+		rows, _ := ledger.ReadAll(cfg.LedgerPath)
+		for _, row := range rows {
+			if row.JobID != id {
+				continue
+			}
+			if row.Deferred && strings.HasPrefix(row.Reason, deadlinePrefix+"1 unfinished") {
+				deferred++
+			}
+			if row.AcceptanceResult == "pass" {
+				passed++
+			}
+		}
+		return
+	}
+	if d, p := rowsUnder(ab.JobID); d != 1 || p != 0 {
+		t.Errorf("at return: %d call-deadline row(s) and %d pass row(s) under the published id, want the call's own row and nothing else yet", d, p)
+	}
+	unblock()
+	for end := time.Now().Add(3 * time.Second); time.Now().Before(end); time.Sleep(20 * time.Millisecond) {
+		if _, p := rowsUnder(ranUnder); p >= 1 {
+			break
+		}
+	}
+	if d, p := rowsUnder(ab.JobID); d != 1 || p != 1 {
+		t.Errorf("after the seat answered: %d call-deadline row(s) and %d pass row(s) under the published id %q, want the call's row and the goroutine's own late row (which is under %q)", d, p, ab.JobID, ranUnder)
+	}
+	time.Sleep(100 * time.Millisecond) // let the goroutine finish before the temp dir goes
+}
+
 // TestADroppedLatePairFrameIsSaidOnce: the PAIR emitter is fenced once a run has returned,
 // so an abandoned subtask's terminal frame is dropped — and PAIR's card for it stays open
 // until PAIR's own staleness sweep. That is the design (decision 3), but a drop nobody sees

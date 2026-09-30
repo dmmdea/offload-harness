@@ -3239,6 +3239,12 @@ func (r *runner) attempt(ctx context.Context, i int, contract core.AgentContract
 			// unrelated one here — the seed the ranking recorded and the id
 			// the published result/ledger/corpus row carries must agree.
 			jobID = d.jobID
+			// The id the runner remembers for this subtask (lastJob) is the one the
+			// abandon publishes when this goroutine never returns. It was stored above
+			// with the id minted for this attempt, which the deal's has just replaced:
+			// the attempt's seat, node and rows all carry the deal's, so that is the id
+			// the caller must be given (ADR 0065, decision 3).
+			r.lastJob.Store(i, jobID)
 		}
 		switch {
 		case d.capacityWait:
