@@ -13,6 +13,7 @@ package mcpserver
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -124,7 +125,7 @@ func TestAgentDelegateReportsProgressWhenTheClientAsksForIt(t *testing.T) {
 		}
 	}
 	if started != 2 || finished != 2 {
-		t.Fatalf("%d start and %d finish notification(s), want 2 and 2: %v", started, finished, messages(got))
+		t.Fatalf("%d start and %d finish notification(s), want 2 and 2: %v", started, finished, progressMessages(got))
 	}
 	if lastMsg := got[len(got)-1].Message; !strings.Contains(lastMsg, "2 of 2") {
 		t.Fatalf("the last notification %q should report both subtasks done", lastMsg)
@@ -145,7 +146,7 @@ func TestAgentDelegateSendsNoProgressWithoutAToken(t *testing.T) {
 	_, log := callOverMCP(t, s, "agent_delegate", twoSubtasks, nil)
 	time.Sleep(100 * time.Millisecond)
 	if got := log.all(); len(got) != 0 {
-		t.Fatalf("%d progress notification(s) without a progress token: %v", len(got), messages(got))
+		t.Fatalf("%d progress notification(s) without a progress token: %v", len(got), progressMessages(got))
 	}
 }
 
@@ -164,20 +165,25 @@ func TestProgressHeartbeatKeepsTalkingWhileNothingChanges(t *testing.T) {
 
 	var beats int
 	last := 0.0
+	finished := false
 	for _, p := range log.all() {
 		if p.Progress <= last {
 			t.Fatalf("progress %v does not increase past %v", p.Progress, last)
 		}
 		last = p.Progress
+		if strings.Contains(p.Message, "finished") {
+			finished = true
+		}
 		if strings.Contains(p.Message, "still working") {
 			beats++
-			if !strings.Contains(p.Message, "0 of 1") || !strings.Contains(p.Message, "deadline") {
+			// A heartbeat that lands after the subtask finished says so ("1 of 1").
+			if (!finished && !strings.Contains(p.Message, "0 of 1")) || !strings.Contains(p.Message, "deadline") {
 				t.Fatalf("heartbeat %q should say how far along the call is and when its deadline is", p.Message)
 			}
 		}
 	}
 	if beats < 3 {
-		t.Fatalf("%d heartbeat(s) during a 300ms run at a 40ms cadence, want at least 3: %v", beats, messages(log.all()))
+		t.Fatalf("%d heartbeat(s) during a 300ms run at a 40ms cadence, want at least 3: %v", beats, progressMessages(log.all()))
 	}
 }
 
@@ -205,10 +211,10 @@ func TestProgressCountsTheCallDeadlineDefersAsDone(t *testing.T) {
 		}
 	}
 	if never != 6 {
-		t.Fatalf("%d finish notification(s) for deferred subtasks, want 6 (four cut, two never started): %v", never, messages(got))
+		t.Fatalf("%d finish notification(s) for deferred subtasks, want 6 (four cut, two never started): %v", never, progressMessages(got))
 	}
 	if last := got[len(got)-1].Message; !strings.Contains(last, "6 of 6 done") {
-		t.Fatalf("the last notification %q should report all six done: %v", last, messages(got))
+		t.Fatalf("the last notification %q should report all six done: %v", last, progressMessages(got))
 	}
 }
 
@@ -236,14 +242,71 @@ func TestResearchReportsProgressAcrossChunks(t *testing.T) {
 		}
 	}
 	if !sawNineth {
-		t.Fatalf("no notification reports 9 of 9 pages done: %v", messages(log.all()))
+		t.Fatalf("no notification reports 9 of 9 pages done: %v", progressMessages(log.all()))
 	}
 }
 
-func messages(ps []*mcp.ProgressNotificationParams) []string {
+// progressMessages is the message text of each notification, for failure output.
+func progressMessages(ps []*mcp.ProgressNotificationParams) []string {
 	out := make([]string, len(ps))
 	for i, p := range ps {
 		out[i] = p.Message
 	}
 	return out
+}
+
+// TestProgressReporterFlushesWhatWasQueuedWhenTheCallEnds: the last events of a
+// call — the finishes the engine produces right before it returns, and every one
+// the call deadline itself publishes — are queued a moment before the handler
+// stops the reporter. They must still reach the client, in order, or its final
+// word is a stale "5 of 8 done" for a call that ended with eight. A burst of
+// finishes followed at once by stop() proves it: all of them, and nothing after.
+func TestProgressReporterFlushesWhatWasQueuedWhenTheCallEnds(t *testing.T) {
+	const burst = 20
+	srv := mcp.NewServer(&mcp.Implementation{Name: "burst", Version: "1"}, nil)
+	srv.AddTool(&mcp.Tool{Name: "burst", InputSchema: json.RawMessage(`{"type":"object"}`)},
+		func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			opts := &delegate.RunOptions{}
+			stop := (&Server{}).startProgress(ctx, req, opts, burst, time.Time{})
+			for i := 0; i < burst; i++ {
+				opts.OnProgress(delegate.ProgressEvent{Kind: "finished", Index: i, Done: i + 1, Total: burst, Outcome: "succeeded"})
+			}
+			stop()
+			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "ok"}}}, nil
+		})
+
+	log := &progressLog{}
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	clientT, serverT := mcp.NewInMemoryTransports()
+	ss, err := srv.Connect(ctx, serverT, nil)
+	if err != nil {
+		t.Fatalf("server connect: %v", err)
+	}
+	defer ss.Close()
+	cs, err := mcp.NewClient(&mcp.Implementation{Name: "probe", Version: "1"}, &mcp.ClientOptions{
+		ProgressNotificationHandler: func(_ context.Context, req *mcp.ProgressNotificationClientRequest) { log.add(req.Params) },
+	}).Connect(ctx, clientT, nil)
+	if err != nil {
+		t.Fatalf("client connect: %v", err)
+	}
+	defer cs.Close()
+	params := &mcp.CallToolParams{Name: "burst"}
+	params.SetProgressToken("b-1")
+	if _, err := cs.CallTool(ctx, params); err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+
+	got := log.all()
+	if len(got) != burst+1 { // the opening notification plus one per finish
+		t.Fatalf("got %d notification(s), want %d (the opening one and all %d finishes): %v", len(got), burst+1, burst, progressMessages(got))
+	}
+	if last := got[len(got)-1].Message; !strings.Contains(last, "20 of 20 done") {
+		t.Fatalf("the last notification %q should report all twenty done", last)
+	}
+	for i := 1; i < len(got); i++ {
+		if got[i].Progress <= got[i-1].Progress {
+			t.Fatalf("notification %d progress %v does not increase past %v", i, got[i].Progress, got[i-1].Progress)
+		}
+	}
 }

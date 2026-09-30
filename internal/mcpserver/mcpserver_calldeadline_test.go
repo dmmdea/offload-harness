@@ -154,12 +154,12 @@ func TestHandleAgentDelegateEveryUnfinishedSubtaskIsStillASuccessfulCall(t *test
 }
 
 // TestHandleAgentDelegateDeadlineCanBeSwitchedOff: a negative agent_call_deadline_sec
-// means no whole-call deadline (a client that never aborts). The same 1.2 s subtask
+// means no whole-call deadline (a client that never aborts). The same 2 s subtask
 // is cut by a 1 s deadline and completes without one.
 func TestHandleAgentDelegateDeadlineCanBeSwitchedOff(t *testing.T) {
 	takes12 := func(ctx context.Context, _ core.AgentContract, _ delegate.LocalOptions) (core.AgentWireResult, error) {
 		select {
-		case <-time.After(1200 * time.Millisecond):
+		case <-time.After(2 * time.Second):
 			return core.AgentWireResult{SchemaVersion: core.AgentWireSchemaVersion, NodeID: "this-box", Seat: "fake-seat", Output: "done", StopReason: "done"}, nil
 		case <-ctx.Done():
 			return core.AgentWireResult{SchemaVersion: core.AgentWireSchemaVersion, Deferred: true, DeferClass: core.DeferClassBudget,
@@ -259,13 +259,13 @@ func TestHandleResearchReturnsFinishedDigestsAtTheCallDeadline(t *testing.T) {
 // the whole call past the client's abort.
 func TestHandleResearchCallDeadlineCountsThePageFetch(t *testing.T) {
 	var cancelled atomic.Int64
-	s := deadlineServer(t, 1, func(ctx context.Context, c core.AgentContract, o delegate.LocalOptions) (core.AgentWireResult, error) {
+	s := deadlineServer(t, 2, func(ctx context.Context, c core.AgentContract, o delegate.LocalOptions) (core.AgentWireResult, error) {
 		c.Goal = "slow page"
 		return slowSeat(&cancelled)(ctx, c, o)
 	})
 	s.researchFetch = func(ctx context.Context, urls []string, _ research.Options) []research.Fetched {
 		select { // a slow fetch that honours its context
-		case <-time.After(800 * time.Millisecond):
+		case <-time.After(1400 * time.Millisecond):
 		case <-ctx.Done():
 		}
 		out := make([]research.Fetched, len(urls))
@@ -276,8 +276,10 @@ func TestHandleResearchCallDeadlineCountsThePageFetch(t *testing.T) {
 	}
 	args := `{"goal":"digest the page","urls":["https://docs.example/a"],"route":"local","output_schema":{"properties":{"summary":{"type":"string"}}}}`
 	_, elapsed := callWithin(t, 8*time.Second, s.handleResearch, args)
-	if elapsed > 1600*time.Millisecond {
-		t.Fatalf("the call returned after %s: the deadline was counted from AFTER the 800ms fetch (want ~1s from handler entry)", elapsed)
+	// From handler entry the call ends at ~2s; counted from after the 1.4s fetch it
+	// would end at ~3.4s. 3s splits the two with a margin either side.
+	if elapsed > 3*time.Second {
+		t.Fatalf("the call returned after %s: the deadline was counted from AFTER the 1.4s fetch (want ~2s from handler entry)", elapsed)
 	}
 }
 
@@ -335,5 +337,46 @@ func TestCallDeadlineDefaultIsBelowTheClientAbort(t *testing.T) {
 	longest := time.Duration(core.AgentTimeoutSecCap+core.AgentAdmissionSecDefault+60) * time.Second
 	if d <= longest {
 		t.Fatalf("the default call deadline %s does not exceed the longest single subtask (%s)", d, longest)
+	}
+}
+
+// TestDelegationToolDescriptionsStateTheResultRules keeps the MODEL-FACING text of
+// the two delegation tools honest. A model reads these descriptions to decide what
+// a result means, and they used to promise that a failed subtask "comes back
+// flagged as an error" — the rule C-75 narrowed — and to list the research body in
+// an order that is no longer the marshalled one. They now name the whole-call
+// deadline and the partial-result rule, read here through a real MCP client (the
+// same view Claude gets).
+func TestDelegationToolDescriptionsStateTheResultRules(t *testing.T) {
+	cfg := config.Default()
+	cfg.AgentDelegationEnabled = true
+	desc := map[string]string{}
+	for _, tool := range listTools(t, cfg) {
+		desc[tool.Name] = tool.Description
+	}
+	for name, wants := range map[string][]string{
+		"agent_delegate": {
+			"agent_call_deadline_sec", "call deadline reached; N unfinished",
+			"when NOTHING succeeded the call comes back flagged as an error", "PARTIAL result",
+		},
+		"offload_research": {
+			"the digests come before the sources", "PARTIAL result", "whole-call deadline", "`call deadline reached`",
+		},
+	} {
+		d := desc[name]
+		if d == "" {
+			t.Fatalf("%s is not advertised with agent_delegation_enabled ON", name)
+		}
+		for _, want := range wants {
+			if !strings.Contains(d, want) {
+				t.Errorf("%s description does not say %q", name, want)
+			}
+		}
+	}
+	if stale := "and the call comes back flagged as an error, with this same JSON body intact"; strings.Contains(desc["agent_delegate"], stale) {
+		t.Errorf("agent_delegate still promises %q: a partial result is not flagged since C-75", stale)
+	}
+	if i, j := strings.Index(desc["offload_research"], "results:[...agent_delegate result rows"), strings.Index(desc["offload_research"], "sources:[{index"); i < 0 || j < 0 || i > j {
+		t.Errorf("offload_research lists sources (at %d) before results (at %d): the description must match the marshalled order", j, i)
 	}
 }

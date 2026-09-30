@@ -120,7 +120,9 @@ func (p *progressReporter) run(ctx context.Context) {
 	defer close(p.done)
 	tick := time.NewTicker(progressHeartbeat)
 	defer tick.Stop()
-	p.send(ctx, p.opening())
+	// The opening always goes out, even when the call ends before this goroutine
+	// first runs: the client's first sign of life does not depend on the race.
+	p.write(ctx, p.opening())
 	for {
 		select {
 		case ev := <-p.events:
@@ -129,6 +131,25 @@ func (p *progressReporter) run(ctx context.Context) {
 		case <-tick.C:
 			p.send(ctx, p.heartbeat())
 		case <-p.quit:
+			p.drain(ctx)
+			return
+		}
+	}
+}
+
+// drain sends what the engine queued just before the call ended — the last
+// finishes, and the ones the call deadline itself produces — so the client's final
+// word is the true one. It is bounded by progressStopWait, the same allowance
+// stop() waits for, so no notification is written once the handler has returned.
+func (p *progressReporter) drain(ctx context.Context) {
+	dctx, cancel := context.WithTimeout(ctx, progressStopWait)
+	defer cancel()
+	for {
+		select {
+		case ev := <-p.events:
+			p.lastDone = ev.Done
+			p.write(dctx, p.describe(ev))
+		default:
 			return
 		}
 	}
@@ -140,6 +161,12 @@ func (p *progressReporter) send(ctx context.Context, msg string) {
 	if p.closed.Load() {
 		return
 	}
+	p.write(ctx, msg)
+}
+
+// write is send without the closed guard: the opening and the final drain run
+// whether or not stop() has already marked the reporter closed.
+func (p *progressReporter) write(ctx context.Context, msg string) {
 	p.seq++
 	sctx, cancel := context.WithTimeout(ctx, progressSendTimeout)
 	defer cancel()

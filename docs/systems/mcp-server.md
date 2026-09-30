@@ -183,6 +183,15 @@ node ran each subtask and, for `auto`/`remote`, a one-word verdict for every OTH
 too (`chosen | queue | cap | slow | lease | cold | probe | unfit(ctx) | noschema`) — read it before
 assuming the fleet was even consulted.
 
+Since 0.130.2 (register C-46) `route` is accepted on **`agent_run` and `offload_ask`** too. Both
+doors ran local unconditionally before, so a remote seat could not be named from this box at all.
+`remote` / `auto` / `spread` / `queue` sends the call as ONE contract through the delegator's
+single-contract path, and the response names `node`, `placement`, `seat` and `executed_on`. The two
+doors put different things on the wire: for `agent_run` neither `read_root` nor `model` travels — the
+executing node reads its own root and runs its own seat, so it is for self-contained goals and
+`setup_actions` — while for `offload_ask` the files ride inline, so any node can answer. Omitted, or
+`local`, keeps the old behaviour exactly.
+
 #### The whole-call deadline (ADR 0065)
 
 The MCP client aborts a tool call at its own limit (1,800 s in the reference setup) and drops the
@@ -200,8 +209,8 @@ under a named job, running on the local seat, not yet placed, never started, or 
 outstanding work is cancelled — the local seat is told to stop, polling of a remote job ends and the
 node is asked to withdraw it (`DELETE /fleet/jobs/{id}`, best effort: a node that has not shipped the
 route answers 404 or 405 and keeps the job) — nothing further starts, and a remote job the node had
-already started keeps running there and stays open in the intent ledger for the recovery pass. The result is a successful tool call: a deadline defer is a result
-shape, not a failure. The default is above the longest single subtask (`timeout_sec` cap 900 s + the
+already started keeps running there and stays open in the intent ledger for the recovery pass. The
+result is a successful tool call: a deadline defer is a result shape, not a failure. The default is above the longest single subtask (`timeout_sec` cap 900 s + the
 300 s admission allowance + the 60 s poll grace) and below the client's abort by the margin a response
 needs. The CLI verbs take no deadline.
 
@@ -212,18 +221,11 @@ chunks of a batched research call), and a heartbeat every 30 s while nothing cha
 of 8 subtasks done after 4m0s; call deadline in 20m0s"). `progress` is a running counter (the spec asks
 for a strictly increasing value; a heartbeat has no new work to count). It is strictly opt-in and
 additive: no token, no notification, and a slow client cannot slow a subtask (events go through a
-bounded queue that drops rather than blocks). Whether the reference client resets its timeout on
-progress is **unverified**, which is why the whole-call deadline above is a hard limit that does not
-depend on it.
-
-Since 0.130.2 (register C-46) `route` is accepted on **`agent_run` and `offload_ask`** too. Both
-doors ran local unconditionally before, so a remote seat could not be named from this box at all.
-`remote` / `auto` / `spread` / `queue` sends the call as ONE contract through the delegator's
-single-contract path, and the response names `node`, `placement`, `seat` and `executed_on`. The two
-doors put different things on the wire: for `agent_run` neither `read_root` nor `model` travels — the
-executing node reads its own root and runs its own seat, so it is for self-contained goals and
-`setup_actions` — while for `offload_ask` the files ride inline, so any node can answer. Omitted, or
-`local`, keeps the old behaviour exactly.
+bounded queue that drops rather than blocks). In the MCP TypeScript client SDK the token is sent only
+when the caller passes `onprogress`, and the request timeout restarts on a progress update only when
+the caller also sets `resetTimeoutOnProgress` (`maxTotalTimeout` is the absolute cap). Whether the
+reference client does either is **unverified**, which is why the whole-call deadline above is a hard
+limit that does not depend on it.
 
 ### The research lane (`offload_research`)
 

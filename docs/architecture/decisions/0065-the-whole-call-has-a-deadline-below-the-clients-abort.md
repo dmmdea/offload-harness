@@ -56,6 +56,8 @@ measurement of the client.
    late answer is dropped by a board that no longer accepts writes, its own rows are still recorded,
    and the ledger closes after the last such goroutine returns. A remote job cut this way keeps its
    intent open (`orphanable`): the node may still finish it, and the recovery pass may still harvest it.
+   A subtask nobody ran (never started, abandoned, or cut before it was placed) names no node and no
+   seat, as `exhausted()` already does for "no node took it", and is marked `Unplaced`.
 
 4. **A call deadline is a result shape, never a failure.** Budget-class defers do not set the MCP error
    flag. The flag itself narrows (C-75): `isError` is set only when NOTHING succeeded and something
@@ -72,7 +74,9 @@ measurement of the client.
    bearer, five seconds, detached from the cancelled context. It is a request, not a claim: a node that
    has not shipped the route answers 404 or 405 and keeps the job (today's behaviour), a job that has
    already started is not the delegator's to cancel, and nothing the call publishes depends on the
-   answer. The reason says the node was asked, never that the job is gone.
+   answer. The reason says the node was asked, never that the job is gone. The ask never outlives the
+   unwind: its timeout is the lesser of five seconds and three quarters of the allowance, so a node
+   that does not answer cannot turn the truthful cut result (its node and job) into an abandoned one.
 
 6. **Progress is reported only to a client that asks, and nothing depends on it.** A request that
    carries a progress token (`_meta.progressToken`) gets `notifications/progress` from the two doors: an
@@ -81,14 +85,18 @@ measurement of the client.
    many subtasks are done and how long the call has left. `progress` is a running counter, because the
    spec asks for a strictly increasing value and a heartbeat has no new work to count. The events reach
    the reporter through a bounded queue that drops rather than blocks, so a slow client cannot slow a
-   subtask, and a request with no token, or with no session, changes nothing. **Whether the reference
-   client resets its timeout on progress is unverified**; the whole-call deadline does not rely on it.
+   subtask, and a request with no token, or with no session, changes nothing. In the MCP TypeScript
+   client SDK the token is sent only when the caller passes `onprogress`, and the request timeout
+   restarts on a progress update only when the caller also sets `resetTimeoutOnProgress`
+   (`maxTotalTimeout` is the absolute cap). **Whether the reference client does either is
+   unverified**; the whole-call deadline does not rely on it.
 
 ## Consequences
 
 - No `agent_delegate` or `offload_research` call outlives its deadline by more than the unwind
-  allowance (at most 10 s) plus building the response, so the response reaches the client before its
-  abort and no finished result is lost to it.
+  allowance (at most 10 s), the flush of any PAIR frames still in flight (bounded at 2 s each) and
+  building the response, so the response is meant to reach the client before its abort. That is the
+  design's claim, not a measurement: the live check is "call wall <= deadline + 30 s".
 - A subtask that would have run past the deadline is cut, not finished. The caller re-issues it in a
   smaller call; a remote job that had started keeps running on its node and is not harvested by this
   call. A call-deadline defer is not evidence about a seat's speed: its reason names the deadline.
@@ -120,6 +128,7 @@ measurement of the client.
 - `internal/delegate/calldeadline.go` (the deadline, its stamping, the unwind and the batched and
   queued cases), `internal/delegate/run.go` (`RunOptions.Deadline`, the fan-out block in `RunWith`,
   `RunBatched`)
+- `internal/delegate/progress.go`, `internal/mcpserver/progress.go` (progress notifications)
 - `internal/mcpserver/mcpserver.go` (`callDeadlineAt`, `handleAgentDelegate`, `handleResearch`,
   `delegateIsError`, `researchWire`)
 - `internal/config/config.go` (`AgentCallDeadlineSec`, `CallDeadline`)
