@@ -65,20 +65,23 @@ func (m *Monitor) SampleLoad() {
 }
 
 // observeLoadLocked folds one engine reading's running + waiting into the run's
-// picture of the seat. 0 (a reading with no gauges) is no observation.
+// PEAK: a run that ever saw the seat shared is not solo. 0 (a reading with no
+// gauges) is no observation. It does not touch the load the flat bound is sized
+// with (engLoad): that follows the engine's work, not its arrivals.
 func (m *Monitor) observeLoadLocked(n int) {
 	if n < 1 {
 		return
 	}
-	m.engLoad = n
 	if n > m.loadPeak {
 		m.loadPeak = n
 	}
 }
 
-// loadForBoundLocked is the load the busy hold's flat bound is sized with: the
-// engine's own latest reading when it has one, else the load the phase started
-// under.
+// loadForBoundLocked is the load the busy hold's flat bound is sized with on an
+// engine that cannot see a prefill: the engine's own running + waiting at the last
+// reading whose fingerprint MOVED (or at its first look) when it had gauges, else
+// the load the phase started under. Never the latest reading — see
+// engineFlatBoundLocked.
 func (m *Monitor) loadForBoundLocked() int {
 	if m.engLoad > 0 {
 		return m.engLoad

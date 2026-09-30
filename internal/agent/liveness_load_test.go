@@ -176,13 +176,14 @@ func TestMonitorPeakLoadCountsTheSamplerAndTheEngine(t *testing.T) {
 }
 
 // The busy hold's flat bound is max(the flat floor, the waiting phase's
-// allowance) — and that allowance is the load-scaled one: on a seat shared by
-// four, a prefill's silence is four times as long before the engine's silence is
-// a seat down.
+// allowance) — and on an engine that cannot see a prefill (its counters stay
+// flat while it prefills) that allowance is the load-scaled one: on a seat shared
+// by four, a prefill's silence is four times as long before the engine's silence
+// is a seat down.
 func TestBusyHoldFlatBoundScalesWithTheEnginesLoad(t *testing.T) {
-	// Frozen counters, 3 running + 1 waiting = load 4.
+	// Frozen counters, 3 running + 1 waiting = load 4, on a source blind to prefill.
 	eng := newDownEngine("ready")
-	eng.running, eng.waiting = 3, 1
+	eng.running, eng.waiting, eng.blind = 3, 1, true
 	p := busyPolicy() // prefill 1000 tok/s, slack 10 ms, floor 40 ms; flat 150 ms
 	ctx, m := NewMonitor(context.Background(), p, 10*time.Second)
 	defer m.Stop()
@@ -208,6 +209,61 @@ func TestBusyHoldFlatBoundScalesWithTheEnginesLoad(t *testing.T) {
 	}
 	if !strings.Contains(sd.Error(), "3 running, 1 waiting") {
 		t.Fatalf("reason = %q, want the engine's gauges (the load) in it", sd.Error())
+	}
+}
+
+// An engine whose counters DO move through a prefill (vLLM's KV gauge,
+// llama-server's decode counter) needs no stretched bound: its fingerprint stays
+// flat only when it is hung, whatever is queued behind it. The load-scaled bound
+// is for the engines that cannot see a prefill; giving every engine a bound that
+// grows with the queue held a hung vLLM seat for minutes to hours.
+func TestBusyHoldFlatBoundIgnoresTheLoadOnAnEngineThatSeesItsPrefill(t *testing.T) {
+	eng := newDownEngine("ready") // 5 running, 40 waiting, frozen, and NOT blind
+	eng.running, eng.waiting = 5, 40
+	ctx, m := NewMonitor(context.Background(), busyPolicy(), 10*time.Second)
+	defer m.Stop()
+	m.WithEngineProbe(eng.probe)
+	m.Phase(PhasePrefill, 100) // solo 160 ms; a load-45 stretch would be 100/(1000/45)*1.5+10ms = 3.385 s
+	select {
+	case <-ctx.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("a frozen engine that sees its prefill was never declared down")
+	}
+	var se *StallError
+	if !errors.As(m.Cause(), &se) || se.Allowed != 160*time.Millisecond {
+		t.Fatalf("allowed = %v, want the solo 160ms: 45 queued requests do not stretch the bound of an engine that sees its prefill", se)
+	}
+}
+
+// A hung engine's HTTP front end keeps accepting requests, so its waiting count
+// grows for as long as it is hung — and the engine's gauges are never work (the
+// fingerprint excludes them, internal/seatload/activity.go). The flat bound of a
+// prefill-blind engine is sized with the load the engine had when it LAST DID
+// WORK: a bound that followed the latest reading receded by more than the
+// silence lengthened, and a frozen engine with a growing queue was never
+// declared down.
+func TestBusyHoldFrozenEngineWithAGrowingQueueIsStillDeclaredDown(t *testing.T) {
+	eng := newDownEngine("ready") // 5 running; one more waiting on every read
+	eng.blind, eng.growWait = true, true
+	ctx, m := NewMonitor(context.Background(), busyPolicy(), 30*time.Second)
+	defer m.Stop()
+	m.WithEngineProbe(eng.probe)
+	m.Phase(PhasePrefill, 100) // solo 160 ms; at the first look (5 running + 1 waiting = load 6): 910 ms
+	select {
+	case <-ctx.Done():
+	case <-time.After(6 * time.Second):
+		t.Fatalf("a frozen engine whose waiting count grows was never declared down (%d reads)", eng.readCount())
+	}
+	var sd *SeatDownError
+	if !errors.As(m.Cause(), &sd) || sd.Kind != SeatDownWedged {
+		t.Fatalf("cause = %#v, want a wedged seat-down", m.Cause())
+	}
+	var se *StallError
+	if !errors.As(m.Cause(), &se) || se.Allowed != 910*time.Millisecond {
+		t.Fatalf("allowed = %v, want the 910ms sized with the load at the first look, not the queue's growth since", se)
+	}
+	if peak := m.PeakLoad(); peak <= 6 {
+		t.Fatalf("PeakLoad = %d: the growing queue must still make the run not solo", peak)
 	}
 }
 

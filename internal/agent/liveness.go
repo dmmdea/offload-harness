@@ -372,12 +372,16 @@ type Monitor struct {
 	// Load (ADR 0066, register C-66). loadFn samples how many requests share the
 	// seat (this run's included) when a prefill or re-pack begins; load is what
 	// the current phase's allowance was sized with; engLoad the engine's own
-	// running + waiting at its latest reading; loadPeak the highest of either
-	// this run ever saw. loadPeak > 1 means the run was NOT solo, and what it
-	// timed is not the seat's single-request rate.
+	// running + waiting when it last did work (the load the flat bound of a
+	// prefill-blind engine is sized with; engBlind says whether that engine is
+	// one); loadPeak the highest load either source ever showed this run.
+	// loadPeak > 1 means the run was NOT solo, and what it timed is not the
+	// seat's single-request rate; 0 means nothing ever answered, which is not
+	// the same as solo.
 	loadFn   func() int
 	load     int
 	engLoad  int
+	engBlind bool
 	loadPeak int
 }
 

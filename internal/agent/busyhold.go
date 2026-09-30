@@ -81,6 +81,13 @@ type EngineReading struct {
 	// waiting; llama-server processing and deferred). Waiting is -1 when the
 	// source cannot see a queue. 0/0 with no Fingerprint = not read.
 	Running, Waiting int
+	// PrefillBlind (ADR 0066): the source cannot see a prefill in progress, so an
+	// engine that is prefilling reads flat (llama-server /slots without --metrics;
+	// vLLM without a KV-usage gauge). Only such an engine keeps the waiting
+	// phase's allowance, stretched by the load, inside the flat bound: a source
+	// that moves its fingerprint through a prefill needs no stretch, because a
+	// fingerprint that does not move is then a hung engine whatever else is queued.
+	PrefillBlind bool
 }
 
 // Load is how many requests share the engine right now: running plus waiting
@@ -141,6 +148,15 @@ func (m *Monitor) engineCheckablePhaseLocked() bool {
 // request waits: max(EngineFlat, the waiting phase's own allowance), so a
 // long prefill on a seat whose engine shows nothing mid-prefill keeps the
 // prefill allowance it always had.
+//
+// On an engine that cannot see a prefill (EngineReading.PrefillBlind) that
+// allowance is the load-stretched one (ADR 0066): a prefill shared by `load`
+// requests takes about `load` times as long and the engine's counters say nothing
+// meanwhile. The load is the one the engine had when it last did work (see
+// loadForBoundLocked), never the latest reading: a hung engine's HTTP front end
+// keeps accepting requests, and a bound that grew with every arrival would recede
+// as fast as the silence lengthens. Any other engine gets the solo allowance,
+// exactly ADR 0061's rule.
 func (m *Monitor) engineFlatBoundLocked() time.Duration {
 	resume, pending := m.busyResume, m.busyPending
 	if m.phase != PhaseQueued {
@@ -149,7 +165,11 @@ func (m *Monitor) engineFlatBoundLocked() time.Duration {
 			resume, pending = m.resume, m.resumePending
 		}
 	}
-	return maxDur(m.pol.EngineFlat, m.pol.AllowanceLoad(resume, pending, m.loadForBoundLocked()))
+	load := 1
+	if m.engBlind {
+		load = m.loadForBoundLocked()
+	}
+	return maxDur(m.pol.EngineFlat, m.pol.AllowanceLoad(resume, pending, load))
 }
 
 // engineTokenBoundLocked: how long the engine may keep stepping without
@@ -255,6 +275,9 @@ func (m *Monitor) checkEngineLocked() {
 		moved := !first && rd.Fingerprint != m.engFP
 		if first || moved {
 			m.engFP, m.engChangedAt = rd.Fingerprint, now
+			// The flat bound is sized with the load the engine had when it last did
+			// work: arrivals during a silence do not push the verdict out.
+			m.engLoad, m.engBlind = rd.Load(), rd.PrefillBlind
 		}
 		if first || m.engTokFP == "" || (rd.TokenFingerprint != "" && rd.TokenFingerprint != m.engTokFP) {
 			m.engTokFP, m.engTokChangedAt = rd.TokenFingerprint, now

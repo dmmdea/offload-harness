@@ -146,6 +146,10 @@ func engineActivityProbe(endpoint, seat string, load agent.SeatProbe) agent.Engi
 			// loading it (a loading seat was handled above).
 			NotLoaded: !act.Loaded,
 			Running:   act.Running, Waiting: act.Waiting,
+			// A source whose counters do not move through a prefill (llama-server's
+			// /slots; a vLLM exposition with no KV-usage gauge): the flat bound keeps
+			// the prefill allowance, stretched by the load.
+			PrefillBlind: act.ActSource == "slots" || act.KVGaugeMissing,
 		}, nil
 	}
 }

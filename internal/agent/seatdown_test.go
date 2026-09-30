@@ -29,6 +29,11 @@ type downEngine struct {
 	waiting  int
 	reads    int
 	fpPrefix string
+	// blind marks every readable reading PrefillBlind (a source whose counters do
+	// not move through a prefill); growWait adds one waiting request per read — a
+	// hung engine's HTTP front end still accepting requests.
+	blind    bool
+	growWait bool
 }
 
 func newDownEngine(state string) *downEngine {
@@ -71,12 +76,16 @@ func (e *downEngine) probe(context.Context) (EngineReading, error) {
 	if e.advance {
 		e.steps++
 	}
+	if e.growWait {
+		e.waiting++
+	}
 	return EngineReading{
 		Fingerprint:      e.fpPrefix + strconv.FormatInt(e.steps, 10),
 		TokenFingerprint: "vt|" + strconv.FormatInt(e.steps, 10),
 		Summary:          "vllm-metrics: " + strconv.Itoa(e.running) + " running, " + strconv.Itoa(e.waiting) + " waiting",
 		Running:          e.running,
 		Waiting:          e.waiting,
+		PrefillBlind:     e.blind,
 	}, nil
 }
 
