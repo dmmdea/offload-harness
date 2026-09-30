@@ -105,6 +105,13 @@ the tier's node limits were the harness defaults, sized for a card that serves s
    default is twice the concurrency, which is 2 here (one running, one waiting), inside the NPU server's own
    window of one running and two waiting before it answers 503 `busy`.
 
+**Upgrading an installed node.** The binary does not ship `rkllm_server.py`: it is the `accelerators/rknpu` copy under
+`RKNPU_HOME`, which `install.sh` never refreshes, and `rkllm-serve.sh` execs its arguments into it. A 0.153.0 render
+emits `--repeat-penalty 1.1`, which a 0.151.1 server refuses (`unrecognized arguments`, exit 2), so the seat would
+never start. Refresh `accelerators/rknpu` in `RKNPU_HOME` (at least `rkllm_server.py`) first, then re-render
+`llama-swap.yaml`. An existing `config.json` is not reseeded either: add `vision_tasks` (`["vqa","ocr"]`) and the four
+limits by hand, or delete the file to regenerate it; `local-offload audit-config` lists them as SEED-ONLY.
+
 Under `route: remote`, an `assess_image` for a fleet whose only vision node is this tier now defers at placement
 (defer class `capacity`), naming the node and its `vision_tasks`, instead of a dispatch that would fail; with
 another vision node on the roster it runs there.

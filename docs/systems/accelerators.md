@@ -194,6 +194,14 @@ The tier also seeds limits for an NPU that runs one generation at a time: `fleet
 waiting), inside the server's own window of one running and two waiting. Numbers and reasons:
 [ADR 0062](../architecture/decisions/0062-rk3588-soc-tier-serves-from-the-npu-on-a-unified-memory-budget.md).
 
+**Upgrading an installed node (0.153.0).** The binary does not ship `rkllm_server.py`; it is the `accelerators/rknpu`
+copy under `RKNPU_HOME`, which `install.sh` never refreshes. A 0.153.0 render emits `--repeat-penalty 1.1`, which a
+0.151.1 server refuses (`unrecognized arguments`), so refresh `accelerators/rknpu` in `RKNPU_HOME` (at least
+`rkllm_server.py`) first and only then re-render `llama-swap.yaml`. `install.sh` also leaves an existing `config.json`
+untouched, so add `vision_tasks` (`["vqa","ocr"]`), `fleet_max_concurrent_jobs` 1, `request_timeout_sec` 240,
+`max_input_chars` 8000 and `ocr_max_tokens` 512 by hand, or delete the file to regenerate it; `local-offload audit-config`
+lists them as SEED-ONLY.
+
 ## Runtime — the sidecar
 
 The sidecar is the Hailo repo's `server/http_server.py`, bound to loopback
