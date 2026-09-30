@@ -67,13 +67,14 @@ type Seat struct {
 	// ColdLoadSec is the slowest of the last coldLoadWindow observed loads.
 	ColdLoadSec float64   `json:"cold_load_sec,omitempty"`
 	ColdLoads   []float64 `json:"cold_loads,omitempty"`
-	// ColdLoadAt is when the newest entry of ColdLoads ENDED (0.144.0): a load
-	// ends at one instant for everyone waiting on it, so a second observation
-	// that ends within coldLoadMergeWindow of it is the same load seen by another
-	// run, not another load.
-	ColdLoadAt time.Time `json:"cold_load_at,omitempty"`
-	Samples    int       `json:"samples"`
-	Updated    time.Time `json:"updated"`
+	// ColdLoadEnds is when each entry of ColdLoads ENDED, aligned with it (ADR 0066):
+	// a load ends at one instant for everyone waiting on it, so an observation that
+	// ends within coldLoadMergeWindow of ANY entry is that load seen by another run,
+	// not another load. A zero end is unknown (an entry written without one) and
+	// never merges.
+	ColdLoadEnds []time.Time `json:"cold_load_ends,omitempty"`
+	Samples      int         `json:"samples"`
+	Updated      time.Time   `json:"updated"`
 }
 
 // Store is the per-seat memory. Zero value = empty.
@@ -179,16 +180,13 @@ func (s *Store) Observe(seat string, tokS, coldLoadSec float64, now time.Time) b
 		cur.Samples++
 	}
 	if coldLoadSec > 0 {
-		cur.ColdLoads = append(cur.ColdLoads, math.Round(coldLoadSec*10)/10)
-		if len(cur.ColdLoads) > coldLoadWindow {
-			cur.ColdLoads = cur.ColdLoads[len(cur.ColdLoads)-coldLoadWindow:]
+		loads, ends := coldLoadEntries(cur)
+		loads = append(loads, math.Round(coldLoadSec*10)/10)
+		ends = append(ends, time.Time{}) // this caller cannot say when the load ended
+		if len(loads) > coldLoadWindow {
+			loads, ends = loads[len(loads)-coldLoadWindow:], ends[len(ends)-coldLoadWindow:]
 		}
-		cur.ColdLoadSec = 0
-		for _, c := range cur.ColdLoads {
-			if c > cur.ColdLoadSec {
-				cur.ColdLoadSec = c
-			}
-		}
+		cur.ColdLoads, cur.ColdLoadEnds, cur.ColdLoadSec = loads, ends, slowest(loads)
 	}
 	cur.Updated = now
 	s.Seats[seat] = cur
@@ -201,9 +199,32 @@ func (s *Store) Observe(seat string, tokS, coldLoadSec float64, now time.Time) b
 // seconds (a load is minutes), so the window cannot merge two real loads.
 const coldLoadMergeWindow = 10 * time.Second
 
+// coldLoadEntries returns copies of a seat's cold-load window with its end times
+// aligned: a window whose ends are missing or misaligned (written before the ends
+// were kept, or by a caller that could not say) has none known.
+func coldLoadEntries(cur Seat) ([]float64, []time.Time) {
+	loads := append([]float64(nil), cur.ColdLoads...)
+	ends := make([]time.Time, len(loads))
+	if len(cur.ColdLoadEnds) == len(loads) {
+		copy(ends, cur.ColdLoadEnds)
+	}
+	return loads, ends
+}
+
+// slowest is the longest load of the window (0 for none).
+func slowest(loads []float64) float64 {
+	m := 0.0
+	for _, c := range loads {
+		if c > m {
+			m = c
+		}
+	}
+	return m
+}
+
 // ObserveColdLoad folds one observed seat load into the seat's cold-load window:
 // coldLoadSec is the wall the observer waited, endedAt when the seat became
-// ready for it (0.144.0, register C-66).
+// ready for it (register C-66).
 //
 // Several runs on one box wait on the same load — a fan-out lands its subtasks
 // on a cold seat together, and every one of them measures it — and the store used
@@ -211,9 +232,18 @@ const coldLoadMergeWindow = 10 * time.Second
 // (seat-rates.json, 2026-09-29: [12.4, 234.6, 234.6, 203.5, 203.5]) and a run
 // that joined the load near its end recorded the few seconds it saw as if that
 // were the load (12.4 against a real 178-271 s). An observation that ends within
-// coldLoadMergeWindow of the newest entry is the same load: it keeps the LONGEST
-// measurement — the run that began waiting first, closest to the load's real
-// start — instead of adding an entry. Returns whether anything changed.
+// coldLoadMergeWindow of ANY entry of the window is that load: it keeps the
+// LONGEST measurement — the run that began waiting first, closest to the load's
+// real start — instead of adding an entry. It merges against every entry, not
+// just the newest: runs report when THEY end, not when the load did, so a run that
+// waited on an older load and finishes minutes later must find its own load.
+//
+// A load not in the window is a new entry, placed in end order so a late report
+// keeps the window in the order the loads happened; the window forgets its
+// OLDEST load, and an observation older than everything in a full window belongs
+// to a load that already left it and is dropped, never allowed to push a newer one
+// out. An observation with no end time cannot merge and is appended as the newest.
+// Returns whether anything changed.
 func (s *Store) ObserveColdLoad(seat string, coldLoadSec float64, endedAt time.Time) bool {
 	if s == nil || strings.TrimSpace(seat) == "" || coldLoadSec <= 0 {
 		return false
@@ -223,32 +253,51 @@ func (s *Store) ObserveColdLoad(seat string, coldLoadSec float64, endedAt time.T
 	}
 	cur := s.Seats[seat]
 	sec := math.Round(coldLoadSec*10) / 10
-	gap := endedAt.Sub(cur.ColdLoadAt)
-	if gap < 0 {
-		gap = -gap
+	loads, ends := coldLoadEntries(cur)
+
+	// The entry this observation is another view of: the nearest end inside the window.
+	at := -1
+	if !endedAt.IsZero() {
+		var nearest time.Duration
+		for i, e := range ends {
+			gap := endedAt.Sub(e) // an unknown end (zero) is a gap of centuries: it merges with nothing
+			if gap < 0 {
+				gap = -gap
+			}
+			if gap <= coldLoadMergeWindow && (at < 0 || gap < nearest) {
+				at, nearest = i, gap
+			}
+		}
 	}
-	if n := len(cur.ColdLoads); n > 0 && !cur.ColdLoadAt.IsZero() && gap <= coldLoadMergeWindow {
-		if sec <= cur.ColdLoads[n-1] {
+	if at >= 0 {
+		if sec <= loads[at] {
 			return false // the same load, and an earlier observer already measured more of it
 		}
-		cur.ColdLoads = append([]float64(nil), cur.ColdLoads...) // never write through a shared backing array
-		cur.ColdLoads[n-1] = sec
+		loads[at] = sec
+		if endedAt.After(ends[at]) {
+			ends[at] = endedAt
+		}
 	} else {
-		cur.ColdLoads = append(append([]float64(nil), cur.ColdLoads...), sec)
-		if len(cur.ColdLoads) > coldLoadWindow {
-			cur.ColdLoads = cur.ColdLoads[len(cur.ColdLoads)-coldLoadWindow:]
+		pos := len(loads) // no end time: the newest
+		if !endedAt.IsZero() {
+			pos = 0
+			for pos < len(ends) && !ends[pos].After(endedAt) {
+				pos++ // entries of unknown end sort first, as the oldest
+			}
+		}
+		if len(loads) >= coldLoadWindow && pos == 0 {
+			return false // a load that already left the window
+		}
+		loads = append(loads[:pos], append([]float64{sec}, loads[pos:]...)...)
+		ends = append(ends[:pos], append([]time.Time{endedAt}, ends[pos:]...)...)
+		if len(loads) > coldLoadWindow {
+			loads, ends = loads[len(loads)-coldLoadWindow:], ends[len(ends)-coldLoadWindow:]
 		}
 	}
-	if endedAt.After(cur.ColdLoadAt) {
-		cur.ColdLoadAt = endedAt
+	cur.ColdLoads, cur.ColdLoadEnds, cur.ColdLoadSec = loads, ends, slowest(loads)
+	if endedAt.After(cur.Updated) {
+		cur.Updated = endedAt
 	}
-	cur.ColdLoadSec = 0
-	for _, c := range cur.ColdLoads {
-		if c > cur.ColdLoadSec {
-			cur.ColdLoadSec = c
-		}
-	}
-	cur.Updated = endedAt
 	s.Seats[seat] = cur
 	return true
 }
