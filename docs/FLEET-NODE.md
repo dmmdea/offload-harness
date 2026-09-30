@@ -766,7 +766,8 @@ blackholing nodes cannot spend a budget the subtask no longer owns.
 > are bounded without being charged to it, because neither can be known before it is paid: placement
 > overhead (the fleet probe, plus up to `dispatchAttempts` × `dispatchRequestTimeout` of dial time
 > before a transport verdict) and 0.100.0's queued-time credit, which extends the poll wall past
-> `timeout_sec` by design and is bounded by `maxQueuedWait`. So the wall a subtask can consume is
+> `timeout_sec` by design and is bounded by the queue budget derived from the node's ETA (`queueBudgetFor`,
+> ADR 0063). So the wall a subtask can consume is
 > `timeout_sec` + `pollGrace` + queued credit + placement overhead — all bounded, and the
 > re-placement loop converges because every blocking leg is charged to the next measurement.
 
@@ -777,6 +778,12 @@ moved. One honest residual: when BOTH dispatch attempts fail at transport level 
 have landed and had its ack lost, so the abandoned node could still run the contract once. That costs
 wasted compute on a node nobody is polling (the agent lane is read-only, so there are no effects to
 duplicate) and the alternative is losing the work with certainty.
+
+**A 503 returns at once (ADR 0063).** The delegator no longer sleeps the refusing node's `Retry-After` and retries it: the
+subtask is re-placed on a node with room straight away, the fleet is read again first (a snapshot that predates the
+refusal is never reused, even on `route=spread`), and the hint becomes a per-node cooldown that only the capacity
+wait honours — crediting what it idles. The local seat's own capacity defer (`seat busy`, no step ran) is re-placed
+the same way; anything a node reports after a `202` is not.
 
 **When nobody takes it** the subtask is a **FAILURE**, with its own stable prefix:
 
@@ -847,7 +854,10 @@ messages name the credit (`poll deadline after 5m0s (+42s credited back for time
 node)`) and say nothing extra when there was none.
 
 The wait is **bounded** — a job may wait for a slot at most as long as it was allowed to run, and
-never more than **5 minutes**. Hitting that bound while the job is *still queued* is a **failure**,
+the wait it is given is derived from the node's own ETA: `clamp(1.5 x etaStart + 30 s, 60 s, that limit)`, where
+`etaStart` is the node's `queue_wait_estimate_sec` (or the arithmetic over its jobs and recent wall), read again when
+the job is first seen queued; a node that publishes no ETA keeps **5 minutes** (ADR 0063). Hitting that bound while
+the job is *still queued* is a **failure**,
 not a defer, with its own stable prefix:
 
 ```
