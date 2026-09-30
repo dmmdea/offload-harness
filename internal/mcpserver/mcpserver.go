@@ -48,6 +48,15 @@ import (
 	"github.com/dmmdea/offload-harness/internal/visionremote"
 )
 
+// rescueFunc is the rescue a delegation hands the engine: the injected seam, else
+// this server's pipeline (one re-pack completion on its own agent seat).
+func (s *Server) rescueFunc() delegate.RescueFunc {
+	if s.rescue != nil {
+		return s.rescue
+	}
+	return s.p.RescueRepack
+}
+
 // fleetDispatch is delegate.RunWith's signature, named so the review lane can
 // hold it behind a test seam. Deliberately the WHOLE engine and not a narrower
 // "dispatch one contract to one node": placement, the ctx-fit gate, the
@@ -65,6 +74,11 @@ type Server struct {
 	// researchFetch is offload_research's fetch seam (tests inject pages; nil =
 	// research.FetchAll against the public web).
 	researchFetch func(ctx context.Context, urls []string, opt research.Options) []research.Fetched
+	// rescue is the seam of the delegator's rescue of a finished answer whose
+	// structured re-pack failed (register C-66, PR-4): nil (production) resolves
+	// to the pipeline's own RescueRepack at call time; tests inject a fake so a
+	// delegation is exercisable without a live seat.
+	rescue delegate.RescueFunc
 	// reviewFleet is the FLEET dispatch seam of the review lane's fenced-seat
 	// fallthrough (register D-110): nil (production) resolves to
 	// delegate.RunWith at call time; tests inject a fake so the handler is
@@ -3348,7 +3362,7 @@ func (s *Server) handleAgentDelegate(ctx context.Context, req *mcp.CallToolReque
 	// a node proven to answer about the wrong document must not keep receiving
 	// agent_delegate work (silent-failure review, 2026-09-02).
 	results, sum, rerr := delegate.RunWith(ctx, s.p.Cfg(), localRun, contracts, in.Route, in.Remotes,
-		&delegate.RunOptions{Quarantine: s.quarantine, Priority: in.Priority, Tenant: s.tenant})
+		&delegate.RunOptions{Quarantine: s.quarantine, Priority: in.Priority, Tenant: s.tenant, Rescue: s.rescueFunc()})
 	if rerr != nil {
 		return jsonResult(map[string]any{"deferred": true, "reason": rerr.Error()})
 	}
@@ -3656,7 +3670,7 @@ func (s *Server) handleResearch(ctx context.Context, req *mcp.CallToolRequest) (
 	// RunBatched: 9–12 usable pages used to hit Run's 8-subtask refusal and lose
 	// every page (2026-09-01). Chunks run in order; a chunk error returns WITH
 	// the results already obtained, rendered as partial rather than dropped.
-	results, sum, rerr := delegate.RunBatched(ctx, s.p.Cfg(), localRun, contracts, route, nil, &delegate.RunOptions{Quarantine: s.quarantine})
+	results, sum, rerr := delegate.RunBatched(ctx, s.p.Cfg(), localRun, contracts, route, nil, &delegate.RunOptions{Quarantine: s.quarantine, Rescue: s.rescueFunc()})
 	if rerr != nil && len(results) == 0 {
 		return jsonResult(map[string]any{"deferred": true, "reason": rerr.Error(), "sources": sources})
 	}

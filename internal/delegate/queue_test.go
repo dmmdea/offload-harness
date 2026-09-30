@@ -94,3 +94,55 @@ func TestRunQueueRouteGuards(t *testing.T) {
 		t.Fatalf("schema-less contract must refuse, got %v", err)
 	}
 }
+
+// The queue route rescues a finished answer whose structured re-pack failed, as
+// every other route does (register C-66, PR-4): a claimant node acks the deferred
+// schema_miss wire, and the delegator re-packs the answer it holds.
+func TestRunQueueRouteRescuesAFinishedAnswer(t *testing.T) {
+	q, err := fleetqueue.Open(t.TempDir() + "/q.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer q.Close()
+	mux := http.NewServeMux()
+	fleetqueue.Mount(mux, q, func(*http.Request) bool { return true })
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	go func() {
+		for i := 0; i < 100; i++ {
+			job, ok, _ := q.Claim("sim-node", []string{"agent"})
+			if ok {
+				wire, _ := json.Marshal(core.AgentWireResult{
+					SchemaVersion: core.AgentWireSchemaVersion,
+					NodeID:        "sim-node", Seat: "sim-seat",
+					Output:   "The refrigerated shipment is RF-9082 with 7 pallets.",
+					Deferred: true, DeferClass: core.DeferClassInfrastructure, SchemaMiss: true,
+					StopReason: "done", Reason: "structured re-pack unreachable: stalled: no progress for 120s in repack",
+				})
+				_ = q.Ack(job.ID, "sim-node", wire, "")
+				return
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+	}()
+
+	cfg := config.Config{FleetQueueHolder: srv.URL, StateDir: t.TempDir()}
+	contract := core.AgentContract{
+		Goal:         "which shipment is refrigerated?",
+		OutputSchema: json.RawMessage(`{"properties":{"shipment_id":{"type":"string"}}}`),
+		Acceptance:   []string{"contains:RF-9082"},
+		TimeoutSec:   30,
+	}
+	rs := &rescuer{structured: `{"shipment_id":"RF-9082"}`}
+	results, sum, rerr := RunWith(context.Background(), cfg, nil, []core.AgentContract{contract}, "queue", nil, &RunOptions{Rescue: rs.fn()})
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	if sum.Succeeded != 1 || sum.Deferred != 0 || results[0].Result.Deferred || rs.calls.Load() != 1 {
+		t.Fatalf("summary = %+v deferred=%v rescue calls=%d", sum, results[0].Result.Deferred, rs.calls.Load())
+	}
+	if string(results[0].Result.Structured) != `{"shipment_id":"RF-9082"}` || !strings.Contains(results[0].Result.RepackNote, "rescued on local-seat") {
+		t.Fatalf("result = %+v", results[0].Result)
+	}
+}

@@ -2223,7 +2223,7 @@ func runDelegate(args []string) error {
 	}
 	defer cleanup()
 	results, sum, err := delegate.RunWith(context.Background(), cfg, p.RunAgentContract, contracts, *route, remotes,
-		&delegate.RunOptions{Priority: *priority, Tenant: *tenant})
+		&delegate.RunOptions{Priority: *priority, Tenant: *tenant, Rescue: p.RescueRepack})
 	if err != nil {
 		return err
 	}
@@ -4356,7 +4356,7 @@ func runResearch(args []string) error {
 		return err
 	}
 	defer cleanup()
-	results, sum, err := delegate.RunBatched(context.Background(), cfg, p.RunAgentContract, contracts, *route, nil, nil)
+	results, sum, err := delegate.RunBatched(context.Background(), cfg, p.RunAgentContract, contracts, *route, nil, &delegate.RunOptions{Rescue: p.RescueRepack})
 	if err != nil && len(results) == 0 {
 		return err
 	}

@@ -27,11 +27,15 @@
 package mcpserver
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -188,9 +192,29 @@ func startIntegrationNode(t *testing.T, seatURL string) (base string, nodeCfg co
 	return srv.URL, nodeCfg
 }
 
+// deadSeatURL is the address of a seat that is not there: a listener that was
+// closed. A dial to it is refused at once, so nothing that resolves a delegator's
+// own endpoint through it can ever reach a real seat from a test.
+func deadSeatURL(t *testing.T) string {
+	t.Helper()
+	srv := httptest.NewServer(http.NotFoundHandler())
+	u := srv.URL
+	srv.Close()
+	return u
+}
+
 // integrationDelegator is a real MCP Server with the delegation role on and a
-// local runner that FAILS the test — this run must land on the fleet node.
+// local runner that FAILS the test — this run must land on the fleet node. Its
+// own seat (the one the delegator's rescue of a finished answer would use) is
+// dead: a test that wants a live one passes it to integrationDelegatorWithSeat.
 func integrationDelegator(t *testing.T, token string) *Server {
+	t.Helper()
+	return integrationDelegatorWithSeat(t, token, deadSeatURL(t))
+}
+
+// integrationDelegatorWithSeat is integrationDelegator whose OWN agent seat — the
+// delegator's endpoint and model, distinct from the node's — is at seatURL.
+func integrationDelegatorWithSeat(t *testing.T, token, seatURL string) *Server {
 	t.Helper()
 	home := t.TempDir()
 	cfg := config.Default()
@@ -198,6 +222,8 @@ func integrationDelegator(t *testing.T, token string) *Server {
 	cfg.LedgerPath = filepath.Join(home, "ledger.jsonl")
 	cfg.AgentDelegationEnabled = true
 	cfg.FleetAuthToken = token
+	cfg.Endpoint = seatURL
+	cfg.AgentModel = integrationSeat
 	s := New(pipeline.New(cfg, nil, nil, nil))
 	s.localAgent = func(context.Context, core.AgentContract, delegate.LocalOptions) (core.AgentWireResult, error) {
 		t.Error("local runner ran: route=remote must place this on the fleet node")
@@ -361,10 +387,15 @@ func TestDelegationEndToEndRejectsAMissingToken(t *testing.T) {
 	}
 }
 
-// TestDelegationEndToEndRepackUnreachableIsLostWork (R6) pins the one member of
-// lost_to_stack's counted set whose `output` is NOT empty — the case that made
-// the old "the subtasks that PRODUCED NOTHING … came back EMPTY" wording false
-// about the code shipping under it.
+// TestDelegationEndToEndRepackUnreachableIsLostWorkOnlyWhenTheRescueAlsoFails
+// (R6) pins the one member of lost_to_stack's counted set whose `output` is NOT
+// empty — the case that made the old "the subtasks that PRODUCED NOTHING … came
+// back EMPTY" wording false about the code shipping under it.
+//
+// Since PR-4 (register C-66) the DELEGATOR re-packs a finished answer whose node-
+// side re-pack failed (TestDelegationEndToEndRepackStallIsRescuedOnTheDelegator),
+// so this shape is lost work only when that rescue cannot run either: the
+// delegator's own seat is dead here, and the defer stands as the node sent it.
 //
 // The seat answers the LOOP normally and then refuses the structured re-pack, so
 // the node's agent loop FINISHES: agenttask.go has already set wire.Output, and
@@ -385,7 +416,7 @@ func TestDelegationEndToEndRejectsAMissingToken(t *testing.T) {
 // handler FLAGS the call. Confirmed red by mutation — adding
 // `&& pr.Result.Output == ""` to run.go's `lost` predicate (the literal reading of
 // the old comment) drops lost_to_stack to 0 and clears IsError.
-func TestDelegationEndToEndRepackUnreachableIsLostWork(t *testing.T) {
+func TestDelegationEndToEndRepackUnreachableIsLostWorkOnlyWhenTheRescueAlsoFails(t *testing.T) {
 	var loopCalls atomic.Int64
 	seat := integrationSeatServer(t, &loopCalls, http.StatusInternalServerError)
 	base, _ := startIntegrationNode(t, seat.URL)
@@ -438,4 +469,134 @@ func TestDelegationEndToEndRepackUnreachableIsLostWork(t *testing.T) {
 	if n := loopCalls.Load(); n < 2 {
 		t.Errorf("agent loop turns = %d, want ≥2 — the loop must have genuinely finished before the re-pack failed", n)
 	}
+}
+
+// legacyNodeProxy fronts a node with a proxy that removes the schema_miss flag
+// from its job answers, so the delegator sees exactly what a 0.140.x node sent:
+// the deferred wire with its loop's answer intact and no flag to say so. The
+// second result counts the flags it removed, so a test can tell the legacy shape
+// was really produced (a proxy whose pattern stopped matching would otherwise
+// leave a flagged node behind and the test would quietly stop being about the
+// legacy shape).
+func legacyNodeProxy(t *testing.T, nodeURL string) (string, *atomic.Int64) {
+	t.Helper()
+	target, err := url.Parse(nodeURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stripped atomic.Int64
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	proxy.ModifyResponse = func(resp *http.Response) error {
+		if !strings.HasPrefix(resp.Request.URL.Path, "/fleet/jobs/") {
+			return nil
+		}
+		body, rerr := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if rerr != nil {
+			return rerr
+		}
+		flag := []byte(`"schema_miss":true,`)
+		stripped.Add(int64(bytes.Count(body, flag)))
+		body = bytes.ReplaceAll(body, flag, nil)
+		resp.Body = io.NopCloser(bytes.NewReader(body))
+		resp.ContentLength = int64(len(body))
+		resp.Header.Set("Content-Length", fmt.Sprint(len(body)))
+		return nil
+	}
+	srv := httptest.NewServer(proxy)
+	t.Cleanup(srv.Close)
+	return srv.URL, &stripped
+}
+
+// assertRescuedOnTheDelegator checks the published answer of a delegation whose
+// node-side re-pack failed and whose finished answer the delegator re-packed: a
+// success, the object from the delegator's seat, the rescue in the repack_note,
+// acceptance held, nothing lost to the stack.
+func assertRescuedOnTheDelegator(t *testing.T, res *mcp.CallToolResult, delegatorSeatCalls *atomic.Int64) {
+	t.Helper()
+	if res.IsError {
+		t.Errorf("IsError = true: a finished answer the delegator re-packed is not a failed call")
+	}
+	m := decodeResult(t, res)
+	summary, _ := m["summary"].(map[string]any)
+	// Zero counters that are annotations (lost_to_stack, infrastructure) are omitted.
+	zero := func(v any) bool { return v == nil || v == float64(0) }
+	if summary["succeeded"] != float64(1) || !zero(summary["deferred"]) || !zero(summary["lost_to_stack"]) || !zero(summary["infrastructure"]) {
+		t.Fatalf("summary = %v, want the subtask counted as a success and nothing lost to the stack", m["summary"])
+	}
+	results, _ := m["results"].([]any)
+	if len(results) != 1 {
+		t.Fatalf("results = %v", m["results"])
+	}
+	r0, _ := results[0].(map[string]any)
+	if r0["deferred"] == true || r0["defer_class"] != nil {
+		t.Errorf("result still deferred: %v", r0)
+	}
+	if st, _ := r0["structured"].(map[string]any); st == nil || st["answer"] != "42" {
+		t.Errorf("structured = %v, want the object the delegator's seat produced", r0["structured"])
+	}
+	if r0["output"] != finalAnswer {
+		t.Errorf("output = %v, want the node's finished answer %q", r0["output"], finalAnswer)
+	}
+	if note, _ := r0["repack_note"].(string); !strings.Contains(note, "rescued on "+integrationSeat) || !strings.Contains(note, "structured re-pack unreachable") {
+		t.Errorf("repack_note = %q, want the rescue and the node's own reason", r0["repack_note"])
+	}
+	if af, has := r0["acceptance_failures"]; has {
+		t.Errorf("acceptance_failures = %v, want none: acceptance ran over the rescued object and held", af)
+	}
+	// One completion on the delegator's seat: the grammar re-pack, no loop, no retry.
+	if n := delegatorSeatCalls.Load(); n != 0 {
+		t.Errorf("delegator-seat agent-loop turns = %d, want 0: the rescue is one completion, not a run", n)
+	}
+}
+
+// TestDelegationEndToEndRepackStallIsRescuedOnTheDelegator is PR-4 end to end,
+// with only the two seats faked: a real node runs its agent loop to a finished
+// answer and its structured re-pack fails (its seat answers 500 to the re-pack
+// only); the node flags the defer, and the delegator — a real MCP handler over the
+// real delegate engine — re-packs the finished answer on ITS OWN seat, runs
+// acceptance over the object, and delivers a success instead of lost work. The
+// rewritten TestDelegationEndToEndRepackUnreachableIsLostWorkOnlyWhenTheRescueAlsoFails
+// is the same run with the delegator's seat dead.
+func TestDelegationEndToEndRepackStallIsRescuedOnTheDelegator(t *testing.T) {
+	var nodeLoop, delegatorLoop atomic.Int64
+	nodeSeat := integrationSeatServer(t, &nodeLoop, http.StatusInternalServerError) // the re-pack fails on the node
+	base, _ := startIntegrationNode(t, nodeSeat.URL)
+	advertisedIdentity(t, base)
+	delegatorSeat := integrationSeatServer(t, &delegatorLoop, 0) // the delegator's own seat answers the rescue
+
+	s := integrationDelegatorWithSeat(t, integrationToken, delegatorSeat.URL)
+	res, err := s.handleAgentDelegate(context.Background(), callReq(integrationArgs(base)))
+	if err != nil {
+		t.Fatalf("handleAgentDelegate: %v", err)
+	}
+	assertRescuedOnTheDelegator(t, res, &delegatorLoop)
+	if n := nodeLoop.Load(); n < 2 {
+		t.Errorf("node loop turns = %d, want >=2: the loop must have genuinely finished on the node", n)
+	}
+}
+
+// The same run against a node that predates the flag (0.140.x): the wire is the
+// deferred result with the answer intact and nothing saying so, and the
+// delegator recognizes the shape from stop_reason and the reason prefix.
+func TestDelegationEndToEndLegacyNodeRepackStallIsRescuedOnTheDelegator(t *testing.T) {
+	var nodeLoop, delegatorLoop atomic.Int64
+	nodeSeat := integrationSeatServer(t, &nodeLoop, http.StatusInternalServerError)
+	nodeBase, _ := startIntegrationNode(t, nodeSeat.URL)
+	advertisedIdentity(t, nodeBase)
+	base, stripped := legacyNodeProxy(t, nodeBase)
+	delegatorSeat := integrationSeatServer(t, &delegatorLoop, 0)
+
+	s := integrationDelegatorWithSeat(t, integrationToken, delegatorSeat.URL)
+	res, err := s.handleAgentDelegate(context.Background(), callReq(integrationArgs(base)))
+	if err != nil {
+		t.Fatalf("handleAgentDelegate: %v", err)
+	}
+	// The proxy really removed the flag from a node answer: the rescue below was
+	// earned by the legacy shape, not by a flagged node. (The delegator's published
+	// answer never carries the key, so it cannot show this.)
+	if stripped.Load() == 0 {
+		t.Fatal("the legacy proxy removed no schema_miss flag: this run was against a flagged node, not the legacy shape")
+	}
+	assertRescuedOnTheDelegator(t, res, &delegatorLoop)
 }
