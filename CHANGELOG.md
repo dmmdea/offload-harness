@@ -6,6 +6,73 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.153.2] - 2026-09-30 - the browse lane waits for the page to settle after an action, so a dialog that mounts late is seen
+
+### Fixed — a confirm dialog opened from a menu item was read before it existed
+
+0.152.1 finished the pending CSS animations before every page read, and a dropdown menu then showed up. A
+confirm dialog opened from a menu item still did not: the run ended `blocked` ("the model or the loop
+reported no progress") three times out of three on a production web app in the operator's browser. jev reads
+the page about 50 ms after an input, and at that moment the dialog is either not mounted yet or mounted at
+opacity 0 with its open-state style change not applied yet, because the page applies it on its own timer. The
+finish had nothing to finish (the animation did not exist yet), so the snapshot was the page as it was before
+the click; 1.5 s later one finish made the dialog's confirm button visible (measured).
+
+- **The observe that follows an action now waits for the page to settle** (`settle_after_input`, new in
+  `setup/browse/runner.py`). Every 100 ms it finishes newly started animations (the 0.152.1 script) and reads
+  a counter of DOM mutations that a `MutationObserver` keeps in the page; a poll is quiet when no animation was
+  finished and the counter did not move. It stops after two quiet polls in a row once 0.3 s have passed, and at
+  1.5 s of page time whatever the page does (plus the calls in flight, see below). Measured with it: the read after the menu click showed
+  exactly the dialog (its text, `Cancel` and the confirm button), and once the goal named the confirm click as
+  a step of its own the run clicked it and the record was deleted, checked independently. Launching the browser
+  with its background-throttling and occlusion-detection switches off did not remove the need (measured: still
+  `blocked` without the settle).
+- **Cost and bounds.** One settle per action, before jev's own wait and read: about 0.3 s on a quiet page on
+  top of jev's wait (plus two CDP calls per poll, more on a slow daemon), and the full 1.5 s on a page that
+  never stops changing (a live ticker, a timer that rewrites the DOM). It does not run before the first observe, after a `wait` action, before an action, or again
+  for the retries of one read. A page that is completely silent for its first 0.3 s counts as settled, so a
+  dialog whose first DOM change comes later is picked up by the following observe, as before. The cap is
+  checked between polls, so it bounds the page time and not the calls in flight: the harness can hold one CDP
+  call for several seconds on a page whose JS thread is frozen (a native `confirm()` or `alert()` open), and a
+  poll makes two; jev's own read fails the same way right after, and the run's own timeout still bounds it.
+- **A capture run drains between the polls.** The daemon's shared event buffer holds 500 events and drops the
+  oldest, and the settle starts right after the input, when the action's own requests fire; `settle_after_input`
+  takes a `between` hook that the wrapper points at the capture drain (a no-op without `capture`), so the
+  undrained window stays what it was before the settle existed. A hook that fails is logged and does not end
+  the settle.
+- **It never ends a run.** The counter is read as an observer id plus a count, so a navigation (a new document
+  has a new observer) reads as a change even when the count matches. An unreadable page (a navigation in
+  progress, a dead session, an IPC timeout) also counts as a change and is polled until the cap; the read that
+  follows reports a real error. The calls go straight to jev's `cdp()` in the observed session, like the
+  finish, so none of the run's bookkeeping is touched. The runner logs `settled N.Ns after an input (...)` to
+  stderr when the page was active.
+- **Finding, documented for goal writers: name the confirm click as its own step.** When a menu item and the
+  confirm button of the dialog it opens carry the same label, the decision model reads the second click as a
+  repeat of the step it just took and chooses BLOCKED; the run ended `blocked` until the goal named the confirm
+  click as a separate required step (measured on one menu and dialog in one app). `docs/systems/browse-lane.md`
+  (Common pitfalls) has the wording. This is guidance, not code.
+- Tests (`setup/browse/test_runner.py`): the settle is driven with a scripted page, a fake clock and a fake
+  sleep (stops after two quiet polls once the minimum has passed, runs at least the minimum on a quiet page, a
+  burst holds it, never past the cap on a page that keeps changing, finishes animations on every poll, an
+  unreadable page or a navigation counts as a change, swallows every exception); the counter script runs
+  under `node` against a fake `MutationObserver`; the wrapper tests pin that it runs once per observe after an
+  action of any kind (click, fill, select, scroll), before jev's wait and read, in the observed session, and
+  never on the first observe (whose fake Browser, like jev's, has no `after_input` until its first act), after
+  a `wait` action or in act. They also pin that the counter is read by value through `Runtime.evaluate`, that
+  the production defaults use the real clock and sleep, and that a capture run drains between the polls and
+  a run without capture drains nothing. Each was shown to fail with its code path removed, broken or dropped
+  (mutants run in a scratch copy: a dropped or altered `returnByValue`, a constant clock, a no-op sleep, a
+  direct `after_input` read, a settle for clicks only, no drain hook, a hook that is never called, called
+  after the reads, or only on the first poll, and a hook whose failure ends the settle).
+- **The settle's finishes are quiet.** On a navigating page every poll's finish fails, and each failure used
+  to log `finish animations skipped`, several lines per settle that crowd the stderr tail a defer reports.
+  `finish_animations(send, quiet=True)` drops that line for the settle; observe's own finish still logs it.
+- **Neutral fixtures.** Site names from earlier releases' examples, comments and test fixtures
+  (`setup/browse`, `internal/pipeline/browse_test.go`, this file's 0.142.1 entry) are replaced with
+  neutral ones; behaviour is unchanged.
+- The fix is in the sidecar (`setup/browse/runner.py`; the Go binary changes only its version string);
+  reinstall with `setup/browse/install.ps1` to take it.
+
 ## [0.153.1] - 2026-09-30 - grounding compares numbers by value: a correct amount in either locale is grounded, a substring of another number is not
 
 ### Fixed — a correct number was judged ungrounded when the source wrote it with separators, and a wrong one was grounded by a substring
@@ -632,7 +699,7 @@ at those caps. Both tiers now seed 2,048 (final 8,192), the geometry the same mo
 
 ### Fixed — an edit made by a run's last action was lost when the tab closed
 
-A live Substack run typed a post title, reported `done`, and the title was never stored: the editor
+A live run on a production web editor typed a post title, reported `done`, and the title was never stored: the editor
 autosaves on a debounce (measured 2.3 s after a keystroke) and the sidecar closed its tab at DONE, before
 the save left. The sidecar now holds the tab open until the page's XHR/fetch traffic has been quiet for
 3.5 s (capped at 15 s) and keeps feeding any capture while it waits. Measured on the same draft: with the
