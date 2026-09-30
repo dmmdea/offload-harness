@@ -70,5 +70,8 @@ Ubuntu's mainline 7.0 kernel on the operator's order ("latest kernel, latest dri
   lane. It takes no agent contract.
 - Answer quality of the NPU seat against other tiers' seats is not yet judged. The notes say so, and the
   seat is the largest that fits, not a measured winner.
+- The NPU seat refuses grammar and json_schema requests with a 400 (`constrained_decoding_unsupported`),
+  because the runtime cannot constrain sampling and ignoring the constraint would return an answer that only
+  looks valid. `assess_image` and the grammar cascade tasks do not run on this node; free-text chat and vqa do.
 - The seats-only template rule is general. Any future template that leaves every model to its tier's
   seats inherits the audit exception and the empty-render refusal.

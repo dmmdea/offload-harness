@@ -12,9 +12,11 @@ the seat with SIGTERM when its ttl runs out, so there is no idle watchdog here. 
 Honoured: messages (system first, user, assistant; text parts and image_url data URIs), max_tokens or
 max_completion_tokens, temperature, top_p, top_k, repeat_penalty or repetition_penalty, presence_penalty,
 frequency_penalty, stop, stream_options.include_usage, chat_template_kwargs.enable_thinking (default OFF).
-Accepted and ignored, never a 400: grammar, response_format, logprobs, top_logprobs, cache_prompt, seed, n and every
-other chat_template_kwargs key. Refused with 400: tools, tool roles, http(s) image URLs, images on a seat started
-without --vision-encoder. Answers carry `usage` and llama.cpp-style `timings` built from RKLLMPerfStat.
+Accepted and ignored, never a 400: logprobs, top_logprobs, cache_prompt, seed, n, response_format of type text and every
+other chat_template_kwargs key. Refused with 400: constrained decoding (a non-empty grammar, response_format of type
+json_schema or json_object, structured_outputs; code constrained_decoding_unsupported, because the runtime cannot
+constrain sampling and an answer that silently ignored the constraint would read as a valid one, so the client fails
+over), tools, tool roles, http(s) image URLs, images on a seat started without --vision-encoder. Answers carry `usage` and llama.cpp-style `timings` built from RKLLMPerfStat.
 
 Prompt path (measured on the reference board, runtime 1.3.1, Qwen3.5-0.8B .rkllm):
   * With nothing set, rkllm_run takes ONE user turn (RKLLMInput.role "user"; "tool" wants a JSON string, else rc -1)
@@ -736,13 +738,13 @@ class RknnEncoder:
 class ApiError(Exception):
     """A request the server answers with an OpenAI-style error body."""
 
-    def __init__(self, status: int, message: str):
+    def __init__(self, status: int, message: str, code: str | None = None):
         super().__init__(message)
-        self.status, self.message = status, message
+        self.status, self.message, self.code = status, message, code
 
     def body(self) -> dict:
         kind = "server_error" if self.status >= 500 else "invalid_request_error"
-        return {"error": {"message": self.message, "type": kind, "param": None, "code": None}}
+        return {"error": {"message": self.message, "type": kind, "param": None, "code": self.code}}
 
 
 def _flatten(content, images: list, allow_images: bool) -> str:
@@ -857,8 +859,18 @@ def _integer(body: dict, key: str, default: int) -> int:
     return v
 
 
+def _refuse_constrained_decoding(body: dict) -> None:
+    """The runtime cannot constrain sampling: a request that needs it is refused so the client fails over."""
+    fmt = body.get("response_format")
+    if body.get("grammar") or body.get("structured_outputs") or (
+            isinstance(fmt, dict) and fmt.get("type") in ("json_schema", "json_object")):
+        raise ApiError(400, "constrained decoding (grammar / json_schema) is not supported by the RKLLM runtime",
+                       "constrained_decoding_unsupported")
+
+
 def build_request(body: dict, ctx_size: int, has_vision: bool) -> ChatRequest:
     """Validate an /v1/chat/completions body. Fields the seat cannot honour but may ignore are simply not read."""
+    _refuse_constrained_decoding(body)
     if body.get("tools"):
         raise ApiError(400, "tool calling is not supported by this seat")
     kwargs = body.get("chat_template_kwargs")

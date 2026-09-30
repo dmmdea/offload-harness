@@ -239,11 +239,21 @@ class BuildRequestTest(unittest.TestCase):
                 self.build(**bad)
 
     def test_fields_the_seat_ignores_never_fail(self):
-        r = self.build(grammar="root ::= x", response_format={"type": "json_object"}, logprobs=True, top_logprobs=3,
+        r = self.build(grammar="", response_format={"type": "text"}, logprobs=True, top_logprobs=3,
                        cache_prompt=True, seed=7, n=2, user="u", tool_choice="auto", tools=[],
                        chat_template_kwargs={"preserve_thinking": True}, stream_options={"include_usage": False})
         self.assertFalse(r.thinking)
         self.assertFalse(r.include_usage)
+
+    def test_constrained_decoding_is_refused(self):
+        for name, fields in (("grammar", {"grammar": "root ::= x"}),
+                             ("json_object", {"response_format": {"type": "json_object"}}),
+                             ("json_schema", {"response_format": {"type": "json_schema", "json_schema": {"name": "x"}}}),
+                             ("structured_outputs", {"structured_outputs": {"json": {"type": "object"}}})):
+            with self.subTest(name), self.assertRaises(rs.ApiError) as cm:
+                self.build(**fields)
+            self.assertEqual((cm.exception.status, cm.exception.body()["error"]["code"]),
+                             (400, "constrained_decoding_unsupported"))
 
     def test_enable_thinking_must_be_a_real_true(self):
         self.assertTrue(self.build(chat_template_kwargs={"enable_thinking": True}).thinking)
@@ -419,8 +429,19 @@ class ChatTest(ServerCase):
                          {"role": "assistant", "content": "Answer", "reasoning_content": "plan"})
         self.assertTrue(self.rt.calls[0]["prompt"].endswith("<|im_start|>assistant\n<think>\n"))
 
+    def test_constrained_decoding_is_a_400_with_the_openai_error_and_never_reaches_the_runtime(self):
+        for fields in ({"grammar": "root ::= x"}, {"response_format": {"type": "json_object"}}):
+            for stream in (False, True):
+                with self.subTest(fields=fields, stream=stream):
+                    status, body, _ = self.chat(stream=stream, **fields)
+                    self.assertEqual(status, 400)
+                    self.assertEqual(body, {"error": {
+                        "message": "constrained decoding (grammar / json_schema) is not supported by the RKLLM runtime",
+                        "type": "invalid_request_error", "param": None, "code": "constrained_decoding_unsupported"}})
+        self.assertEqual(self.rt.calls, [])
+
     def test_ignored_fields_still_answer(self):
-        status, body, _ = self.chat(grammar="root ::= x", response_format={"type": "json_object"}, logprobs=True,
+        status, body, _ = self.chat(response_format={"type": "text"}, logprobs=True,
                                     top_logprobs=2, cache_prompt=True, seed=1, chat_template_kwargs={"x": 1})
         self.assertEqual((status, body["choices"][0]["message"]["content"]), (200, "Hello"))
 
