@@ -3500,6 +3500,11 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 				// non-zero CLI exit) is the honest outcome — a broken node, or one
 				// denying the job, must read broken.
 				pr.Err = fmt.Sprintf("poll deadline after %s%s: %s%s", pollBudget, queuedNote(queuedCredit), unownedDetail(sawNodeAnswer, saw404, redispatches, lastPollErr), boundNote(pollNote, slack))
+				// The node ACKED this job, so it may hold it however little it has said
+				// since, and nothing observed it end: the intent must not claim so. Ask the
+				// node to take the job back like every other give-up — a confirmation
+				// closes the intent, anything else leaves it for the recovery pass (ADR 0064).
+				r.giveUp(ctx, base, jobID, lastState, &pr)
 				return pr
 			}
 			// Roast delta 14: mark deferred, reason PREFIXED "poll deadline"
@@ -3668,6 +3673,11 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 			}
 		case status == http.StatusUnauthorized:
 			pr.Err = "poll: 401 unauthorized (fleet_auth_token mismatch)"
+			// A refusal of THIS process's credentials is a fact about the caller, not
+			// about the job (ADR 0064, decision 6): the node may still hold or finish
+			// it, so the intent stays open for a process holding the right token. No
+			// withdraw is sent — it would carry the token that was just refused.
+			pr.orphanable = true
 			return pr
 		case status == http.StatusOK && state == "done":
 			sawNodeAnswer, sawJobOwned = true, true
