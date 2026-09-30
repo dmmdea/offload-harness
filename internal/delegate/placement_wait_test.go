@@ -14,6 +14,7 @@ package delegate
 import (
 	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -123,4 +124,132 @@ func TestNonCapacityRefusalThenABusyNodeWaitsInsteadOfFailing(t *testing.T) {
 			t.Fatalf("err = %q, want it to name node-b and say it had no room - the chain must not claim no remote was eligible", got)
 		}
 	})
+}
+
+// TestWaitNoteDoesNotLeakIntoALaterAttemptsDefer: why a subtask waited when nothing
+// refused it (a gate turn-away, a deal's overflow) belongs to the attempt that was held.
+// The verification retry is another placeAndRun over the same ledger; its defer must not
+// quote the first attempt's hold.
+func TestWaitNoteDoesNotLeakIntoALaterAttemptsDefer(t *testing.T) {
+	compressPolls(t, 5*time.Millisecond, time.Second)
+	compressWait(t, 20*time.Millisecond, 0)
+	_, url := refusingNode(t, "node-a", http.StatusServiceUnavailable, nil)
+	cfg := testCfg(t)
+	cfg.AgentPlacementWaitSec = 1
+	r := &runner{cfg: cfg, route: "remote", remotes: []string{url}, local: neverLocal(t)}
+	pl := newPlacements()
+	pl.waitNote = "process gate: an earlier attempt of this subtask was held in line"
+	pr := r.placeAndRun(t.Context(), 0, plainContract(), nil, time.Now(), 30, pl)
+	if !pr.Result.Deferred || pr.Result.DeferClass != core.DeferClassCapacity {
+		t.Fatalf("result = %+v err = %q, want the capacity defer of a node that never had room (fixture)", pr.Result, pr.Err)
+	}
+	if strings.Contains(pr.Result.Reason, "earlier attempt") {
+		t.Fatalf("reason = %q quotes the hold of an earlier attempt", pr.Result.Reason)
+	}
+}
+
+// TestWaitNeverPlacesTheRetryOnTheSeatThatRanTheFirstAttempt: the first attempt ran on
+// node A and failed verification. The local seat is fenced by a media render, so the retry
+// goes to another remote, node B - and B refuses for capacity. The retry's premise is a
+// DIFFERENT seat, but the capacity wait it is then held in took the best node with room:
+// A, the seat whose answer it exists to correct. A node that REFUSED for capacity stays
+// re-askable (that is what the wait is for); one that TOOK the first attempt does not.
+func TestWaitNeverPlacesTheRetryOnTheSeatThatRanTheFirstAttempt(t *testing.T) {
+	compressPolls(t, 5*time.Millisecond, time.Second)
+	compressWait(t, 20*time.Millisecond, 0)
+	var bReads atomic.Int64
+	a, aURL := acceptingNode(t, "node-a", "an unrelated answer", func(f *fakeNode) { f.maxQueueDepth = 8 })
+	b, bURL := refusingNode(t, "node-b", http.StatusServiceUnavailable, func(f *fakeNode) {
+		f.dispatchRetryAfter = "300" // out for the whole test once it has refused
+		f.maxQueueDepth = 1
+		// Full for the first read only: the run's first placement prefers node A.
+		f.queueDepthFn = func() int {
+			if bReads.Add(1) == 1 {
+				return 1
+			}
+			return 0
+		}
+	})
+	cfg := testCfg(t)
+	cfg.GPULockPath = busyLocal(t) // a media render fences the local seat: a retry cannot go there
+	cfg.AgentPlacementWaitSec = 1
+	results, sum, err := RunWith(t.Context(), cfg, neverLocal(t), []core.AgentContract{verifiedContract()}, "remote", []string{aURL, bURL}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.dispatches.Load() != 1 || b.dispatches.Load() != 1 {
+		t.Fatalf("dispatches a=%d b=%d summary = %+v note = %q, want the retry asked of node B once and never placed on node A, the seat whose answer it corrects", a.dispatches.Load(), b.dispatches.Load(), sum, results[0].RetryNote)
+	}
+	if sum.FailedVerification != 1 || sum.Retried != 1 || sum.RetryRecovered != 0 {
+		t.Fatalf("summary = %+v, want the first attempt's failed verification to stand (the retry found no other seat)", sum)
+	}
+}
+
+// TestReplacementGateTurnAwayDoesNotSpendTheReplacementBound: the re-placement chose node B
+// and another Run of this process took B's last gate slot before the dispatch. Nothing was
+// sent, so the turn-away is no placement: the bound (maxRemoteReplacements) is not spent and
+// the subtask lands on B when the slot frees. The branch was untestable until the seam
+// existed (beforeForced is the one window in which another Run can take the slot).
+func TestReplacementGateTurnAwayDoesNotSpendTheReplacementBound(t *testing.T) {
+	compressPolls(t, 5*time.Millisecond, time.Second)
+	compressWait(t, 20*time.Millisecond, 0)
+	var bReads atomic.Int64
+	a, aURL := refusingNode(t, "node-a", http.StatusServiceUnavailable, func(f *fakeNode) { f.dispatchRetryAfter = "300" })
+	b, bURL := acceptingNode(t, "node-b", "answer from b", func(f *fakeNode) {
+		f.maxQueueDepth = 1
+		f.queueDepthFn = func() int { // full for the first read only: the first placement prefers node A
+			if bReads.Add(1) == 1 {
+				return 1
+			}
+			return 0
+		}
+	})
+	cfg := testCfg(t)
+	cfg.AgentPlacementWaitSec = 10
+	r := &runner{cfg: cfg, route: "remote", remotes: []string{aURL, bURL}, local: neverLocal(t)}
+	var once sync.Once
+	r.beforeForced = func(base string) {
+		if base != bURL {
+			return
+		}
+		once.Do(func() { holdGate(t, bURL, 1, 1, 150*time.Millisecond) }) // a sibling Run takes B's last slot
+	}
+	pl := newPlacements()
+	pr := r.placeAndRun(t.Context(), 0, plainContract(), nil, time.Now(), 30, pl)
+	if pr.Err != "" || pr.Result.Deferred || pr.Node != "node-b" {
+		t.Fatalf("result = err %q deferred %v node %q, want the subtask on node-b once its slot freed", pr.Err, pr.Result.Deferred, pr.Node)
+	}
+	if a.dispatches.Load() != 1 || b.dispatches.Load() != 1 {
+		t.Fatalf("dispatches a=%d b=%d, want 1 each (the turned-away dispatch never reached node B)", a.dispatches.Load(), b.dispatches.Load())
+	}
+	if pl.used != 0 {
+		t.Fatalf("pl.used = %d, want 0: a dispatch the gate turned away spends no re-placement", pl.used)
+	}
+}
+
+// TestCapacityDeferNamesANodeThatWasCoolingDown: a node that refused with a Retry-After
+// longer than the whole wait is never asked again inside it, while its health advertises
+// room on every tick. The defer said only "no node had room", which is not what happened.
+func TestCapacityDeferNamesANodeThatWasCoolingDown(t *testing.T) {
+	compressPolls(t, 5*time.Millisecond, time.Second)
+	compressWait(t, 20*time.Millisecond, 0)
+	node, url := refusingNode(t, "node-a", http.StatusServiceUnavailable, func(f *fakeNode) {
+		f.dispatchRetryAfter = "5"
+		f.maxQueueDepth = 4 // its health advertises room the whole time
+	})
+	cfg := testCfg(t)
+	cfg.AgentPlacementWaitSec = 1
+	results, sum, err := RunWith(t.Context(), cfg, neverLocal(t), []core.AgentContract{plainContract()}, "remote", []string{url}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pr := results[0]
+	if sum.Deferred != 1 || pr.Result.DeferClass != core.DeferClassCapacity || node.dispatches.Load() != 1 {
+		t.Fatalf("summary = %+v class = %q dispatches = %d, want a capacity defer after ONE ask (the cooldown outlasts the wait)", sum, pr.Result.DeferClass, node.dispatches.Load())
+	}
+	for _, want := range []string{"node-a", "cooling down after its own refusal", "left"} {
+		if !strings.Contains(pr.Result.Reason, want) {
+			t.Errorf("reason = %q, want it to say %q: the node was not asked again although its health advertised room", pr.Result.Reason, want)
+		}
+	}
 }

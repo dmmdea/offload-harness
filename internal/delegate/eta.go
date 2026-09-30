@@ -190,7 +190,7 @@ func etaFor(st Subtask, v NodeView) (etaSec float64, ok bool) {
 // as every other unknown field here — it does not make etaFor's ok=false,
 // because cold/gen may still be known).
 func queueWaitFor(v NodeView) float64 {
-	if v.QueueWaitEstimateSec != nil {
+	if estimateKnown(v) {
 		return *v.QueueWaitEstimateSec
 	}
 	if v.RecentAgentWallSec <= 0 {
@@ -498,9 +498,8 @@ const (
 // publishes a recent wall and no estimate means genuinely 0 (a worker is free
 // now), which is a known zero.
 func etaStartFor(v NodeView) (sec float64, known bool) {
-	if v.QueueWaitEstimateSec != nil {
-		// A negative estimate is a node bug, read as "no wait" rather than trusted.
-		return math.Max(*v.QueueWaitEstimateSec, 0), true
+	if estimateKnown(v) {
+		return *v.QueueWaitEstimateSec, true
 	}
 	if v.RecentAgentWallSec <= 0 {
 		return 0, false
@@ -508,10 +507,20 @@ func etaStartFor(v NodeView) (sec float64, known bool) {
 	return queueWaitFor(v), true
 }
 
+// estimateKnown reports whether v published a usable queue_wait_estimate_sec. A negative
+// estimate is a node bug - no queue waits a negative time - and is NO OPINION, exactly
+// like an absent one: read as a confident zero it would pass the backlog gate as "starts
+// now", earn the 60 s floor queue budget instead of the ceiling an unknown node keeps, and
+// make the ranking prefer the node that has the bug. The wait then falls back to the
+// arithmetic over the node's jobs and recent wall, or to no opinion at all.
+func estimateKnown(v NodeView) bool {
+	return v.QueueWaitEstimateSec != nil && *v.QueueWaitEstimateSec >= 0
+}
+
 // startArithmetic renders where etaStartFor's number came from, for the gate's
 // reason: the node's own estimate, or the numbers the delegator derived it from.
 func startArithmetic(v NodeView) string {
-	if v.QueueWaitEstimateSec != nil {
+	if estimateKnown(v) {
 		return fmt.Sprintf("the node's own queue_wait_estimate_sec %.0f s", *v.QueueWaitEstimateSec)
 	}
 	workers := v.MaxConcurrentJobs

@@ -521,26 +521,53 @@ func TestCapacityWaitSurvivesAGateTakenBetweenTheReadAndTheDispatch(t *testing.T
 // TestETAArithmeticSurvivesAbsurdEstimates: a node publishes whatever it publishes.
 // An estimate too large for a Duration must read as "far too long" (held out, and a
 // queue budget capped at the caller's patience), never overflow into a small or
-// negative wait; a negative estimate is a node bug and reads as "no wait".
+// negative wait; a negative estimate is a node bug and is NO OPINION - never a
+// confident zero.
 func TestETAArithmeticSurvivesAbsurdEstimates(t *testing.T) {
 	huge, negative := 1e15, -50.0
 	v := slowNodeShaped()
 	v.QueueWaitEstimateSec = &huge
 	if ok, _ := startsWithinPatience(v, 20*time.Minute); ok {
-		t.Fatal("a 1e15 s ETA fits a 20 minute patience — the arithmetic overflowed")
+		t.Fatal("a 1e15 s ETA fits a 20 minute patience - the arithmetic overflowed")
 	}
 	if got := queueBudgetFor(v, 20*time.Minute); got != 20*time.Minute {
 		t.Fatalf("queue budget for a 1e15 s ETA = %s, want it capped at the 20 minute patience", got)
 	}
+
+	// A negative estimate on a node that also publishes its jobs and recent wall: the
+	// estimate is ignored and the arithmetic over those numbers decides, so the backlog
+	// gate still applies to a node with a real backlog.
 	v.QueueWaitEstimateSec = &negative
-	if sec, known := etaStartFor(v); !known || sec != 0 {
-		t.Fatalf("etaStartFor(-50) = %v/%v, want a known zero", sec, known)
+	if sec, known := etaStartFor(v); !known || sec < 443 || sec > 444 {
+		t.Fatalf("etaStartFor(-50 with a 443.6 s recent wall) = %v/%v, want the derived 443.6 s", sec, known)
 	}
-	if ok, _ := startsWithinPatience(v, time.Second); !ok {
-		t.Fatal("a negative estimate must read as no wait")
+	if ok, _ := startsWithinPatience(v, 300*time.Second); ok {
+		t.Fatal("a negative estimate on a node with a 444 s backlog passed the backlog gate as 'starts now'")
 	}
-	if got := queueBudgetFor(v, 20*time.Minute); got != 60*time.Second {
-		t.Fatalf("queue budget for a negative estimate = %s, want the 60 s floor", got)
+	if got := queueWaitFor(v); got < 443 || got > 444 {
+		t.Fatalf("queueWaitFor = %v, want the derived 443.6 s: the ranking must not reward a node's negative estimate", got)
+	}
+
+	// With nothing else to go on it is no opinion: it does not pass the gate as a
+	// confident zero and it keeps the ceiling an unknown node always had, not the 60 s
+	// floor a node that says "a job starts now" earns.
+	bare := NodeView{QueueWaitEstimateSec: &negative}
+	if sec, known := etaStartFor(bare); known {
+		t.Fatalf("etaStartFor(-50, nothing else) = %v/known, want unknown", sec)
+	}
+	if ok, why := startsWithinPatience(bare, time.Second); !ok || why != "" {
+		t.Fatalf("a node with no usable ETA is no opinion; got ok=%v %q", ok, why)
+	}
+	if got := queueBudgetFor(bare, 20*time.Minute); got != maxQueuedWait {
+		t.Fatalf("queue budget for a negative estimate = %s, want the %s ceiling of a node that publishes no ETA", got, maxQueuedWait)
+	}
+	if got := queueWaitFor(bare); got != 0 {
+		t.Fatalf("queueWaitFor(-50, nothing else) = %v, want 0 (no opinion)", got)
+	}
+	zero := 0.0
+	bare.QueueWaitEstimateSec = &zero
+	if sec, known := etaStartFor(bare); !known || sec != 0 {
+		t.Fatalf("etaStartFor(0) = %v/%v, want a known zero: an honest 'starts now' is not a bug", sec, known)
 	}
 }
 

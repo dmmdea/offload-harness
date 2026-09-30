@@ -152,6 +152,10 @@ type fakeNode struct {
 	recentAgentWallSec  float64
 	queueWaitEstimate   *float64
 	queueWaitEstimateFn func() *float64
+	// healthFailFn, when set, is asked with the 1-based ordinal of every /fleet/health
+	// GET; true answers it with a 500 - a node that stops answering health while it
+	// still accepts and polls jobs.
+	healthFailFn func(n int64) bool
 	// dispatchRetryAfter, when set, rides every refusal this node writes
 	// (dispatchHook / dispatchStatus) as its Retry-After header — a `503 queue
 	// full` carries one on a real node.
@@ -203,7 +207,10 @@ func (f *fakeNode) queueDepthNow() int {
 func (f *fakeNode) server() *httptest.Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /fleet/health", func(w http.ResponseWriter, r *http.Request) {
-		f.healths.Add(1)
+		if n := f.healths.Add(1); f.healthFailFn != nil && f.healthFailFn(n) {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
 		if f.healthDelay > 0 {
 			select {
 			case <-time.After(f.healthDelay):

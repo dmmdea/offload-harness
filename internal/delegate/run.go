@@ -1108,6 +1108,11 @@ func (r *runner) runOne(ctx context.Context, i int, contract core.AgentContract)
 	if !retryable(first) {
 		return first
 	}
+	// A retryable first attempt is one a node TOOK: it ran the job and its answer was the
+	// problem. That seat is recorded here, once, whichever path placed it (the first
+	// dispatch, a re-placement, a capacity wait), so the retry's capacity wait can never
+	// hand the second chance back to the seat whose answer it exists to correct.
+	pl.ran[first.ranBase] = true
 	// An EMPTY final (0.115.8: stop_reason reasoning_starved / empty) is not a
 	// wrong answer another seat can correct — it is the seat's completion
 	// budget or think block, and a second seat handed the wall's leftovers
@@ -1175,14 +1180,20 @@ func (r *runner) runOne(ctx context.Context, i int, contract core.AgentContract)
 	// it. The retry is skipped only when the seat stayed busy for the whole wait (or
 	// the wait is switched off), and the note says how long it waited.
 	if busy, why := r.retrySeatBusy(ctx, alt); busy {
-		waited, stillBusy, stillWhy := r.awaitRetrySeat(ctx, alt, why)
-		pl.credit += waited
-		if stillBusy {
+		w := r.awaitRetrySeat(ctx, alt, why)
+		pl.credit += w.waited
+		if w.canceled {
+			// The caller gave up while the retry stood in line: the seat was not shown to
+			// stay busy, so the note must not claim it did.
+			first.RetryNote = fmt.Sprintf("retry skipped: the caller canceled after the retry waited %s in line for the retry seat on %s, which was running another job (%s)", w.waited.Round(time.Second), alt.view.NodeID, w.why)
+			return first
+		}
+		if w.stillBusy {
 			after := ""
-			if waited > 0 {
-				after = fmt.Sprintf(" after waiting %s in line", waited.Round(time.Second))
+			if w.waited > 0 {
+				after = fmt.Sprintf(" after waiting %s in line", w.waited.Round(time.Second))
 			}
-			first.RetryNote = fmt.Sprintf("retry skipped: the retry seat on %s is already running another job%s (%s); a shared seat would only slow both", alt.view.NodeID, after, stillWhy)
+			first.RetryNote = fmt.Sprintf("retry skipped: the retry seat on %s is already running another job%s (%s); a shared seat would only slow both", alt.view.NodeID, after, w.why)
 			return first
 		}
 	}
@@ -1207,17 +1218,26 @@ func (r *runner) runOne(ctx context.Context, i int, contract core.AgentContract)
 	return mergeAttempts(first, second)
 }
 
+// retryWait is what awaitRetrySeat found: how long the retry waited in line (time the
+// caller credits to the retry's budget, because the wait is queueing and never work),
+// whether the seat was still busy when the wait stopped, whether the CALLER ended it
+// (a cancel says nothing about the seat), and the seat's own last reading.
+type retryWait struct {
+	waited    time.Duration
+	stillBusy bool
+	canceled  bool
+	why       string
+}
+
 // awaitRetrySeat holds a verification retry in line for a seat that is running
 // another job: it re-reads the seat every capacity-wait tick (placementPollInterval,
 // jittered) until it has room, and gives up after the placement wait
 // (agent_placement_wait_sec; a negative value switches the wait off and the retry is
-// skipped at once, as before). It returns how long it waited - time the caller
-// credits to the retry's budget, because the wait is queueing and never work - and
-// whether the seat was still busy when it stopped, with the seat's own last reading.
-func (r *runner) awaitRetrySeat(ctx context.Context, alt placement, why string) (waited time.Duration, stillBusy bool, stillWhy string) {
+// skipped at once, as before).
+func (r *runner) awaitRetrySeat(ctx context.Context, alt placement, why string) retryWait {
 	wait := r.cfg.PlacementWait()
 	if wait <= 0 {
-		return 0, true, why
+		return retryWait{stillBusy: true, why: why}
 	}
 	begin := time.Now()
 	deadline := begin.Add(wait)
@@ -1231,11 +1251,11 @@ func (r *runner) awaitRetrySeat(ctx context.Context, alt placement, why string) 
 		}
 		busy, w := r.retrySeatBusy(ctx, alt)
 		if !busy {
-			return time.Since(begin), false, ""
+			return retryWait{waited: time.Since(begin), why: ""}
 		}
 		why = w
 	}
-	return time.Since(begin), true, why
+	return retryWait{waited: time.Since(begin), stillBusy: true, canceled: ctx.Err() != nil, why: why}
 }
 
 // executionBudgetSec is the delegator's execution budget for a contract: its
@@ -1392,6 +1412,15 @@ func (r *runner) retrySeatBusy(ctx context.Context, alt placement) (bool, string
 	view, source := alt.view, "cached view"
 	if fresh, err := FetchNodeView(ctx, alt.base, r.cfg.FleetAuthToken); err == nil {
 		view, source = fresh, "fresh health"
+	} else if ctx.Err() == nil {
+		// The cached view is the round's own snapshot and can be minutes old: a wait of up
+		// to agent_placement_wait_sec against a node that stopped answering must not look
+		// like a wait against a node that kept saying "busy". Named in the note, and logged
+		// once per node per run.
+		source = "cached view; fresh health could not be read: " + err.Error()
+		if _, warned := r.probeWarned.LoadOrStore("retry-seat:"+alt.base, struct{}{}); !warned {
+			log.Printf("delegate: retry seat %s: fresh health could not be read (%v); judging it from the cached view", alt.base, err)
+		}
 	}
 	if !provablyStartsNow(view) {
 		return true, seatBusyNote(view, source)
@@ -1464,6 +1493,13 @@ type placements struct {
 	// carried on the landing's placement reason and the defer's reason - and never
 	// counted as a refusal or a replacement.
 	waitNote string
+	// ran is every dial base ("" = the local seat) that TOOK a job of this subtask:
+	// it ran the job or answered it, and did not decline it at dispatch. A node that
+	// REFUSED for capacity is in tried but not here, because the capacity wait's whole
+	// job is to ask it again; one that took the first attempt is excluded from the
+	// wait's candidates, because the verification retry's premise is a DIFFERENT seat
+	// from the one whose answer it corrects.
+	ran map[string]bool
 	// attempts counts REAL placements (a dispatch or a local run — anything
 	// that went through attempt()'s finish and so wrote its telemetry row).
 	// A subtask that ends with none of them (reserved seat, nothing freed) is
@@ -1493,7 +1529,7 @@ func (r *runner) settle(contract core.AgentContract, pr PlacedResult, pl *placem
 }
 
 func newPlacements() *placements {
-	return &placements{tried: map[string]bool{}, excluded: map[string]bool{}}
+	return &placements{tried: map[string]bool{}, excluded: map[string]bool{}, ran: map[string]bool{}}
 }
 
 // noteRefusal files a refused attempt in the ledger: a capacity refusal (a 503 or
@@ -1577,13 +1613,19 @@ func (r *runner) noteCooldown(pr PlacedResult) {
 	}
 	d := refusalCooldown
 	if pr.retryAfterSec > 0 {
-		sec := pr.retryAfterSec
-		if ceiling := int(maxQueuedWait / time.Second); sec > ceiling {
-			sec = ceiling
-		}
-		d = time.Duration(sec) * pollSecond
+		d = time.Duration(pr.retryAfterSec) * pollSecond
 	}
-	r.cool.hold(pr.ranBase, time.Now().Add(jittered(d)))
+	// The ceiling holds AFTER the jitter: capped first and jittered up by 20 %, a node's
+	// 300 s hint held it out for 360 s, while the docs, the ADR and this comment all say
+	// 300. Clamping the jittered value would fix that and pile every dispatcher onto the
+	// same instant, so the excess is folded back under the ceiling instead: a hint at or
+	// above it holds the node out for 240-300 s, spread, never past 300.
+	ceiling := time.Duration(int(maxQueuedWait/time.Second)) * pollSecond
+	hold := jittered(min(d, ceiling))
+	if hold > ceiling {
+		hold = 2*ceiling - hold
+	}
+	r.cool.hold(pr.ranBase, time.Now().Add(hold))
 }
 
 // remainingSec is what is LEFT of a subtask's timeout_sec budget. Elapsed
@@ -1665,6 +1707,9 @@ const replacementExhaustedPrefix = "placement refused"
 // Anything that says timeout_sec is an end-to-end wall ceiling is wrong; it is
 // the execution budget.
 func (r *runner) placeAndRun(ctx context.Context, i int, contract core.AgentContract, forced *placement, start time.Time, budget int, pl *placements) PlacedResult {
+	// Why an earlier attempt of this subtask waited when nothing refused it belongs to
+	// THAT attempt: the verification retry is another placeAndRun over the same ledger.
+	pl.waitNote = ""
 	pr := r.attempt(ctx, i, contract, forced)
 	if pr.waitCapacity {
 		// Nothing was dispatched: the only placement was a seat a text lease
@@ -1759,6 +1804,9 @@ func (r *runner) placeAndRun(ctx context.Context, i int, contract core.AgentCont
 		replaced := contract
 		replaced.TimeoutSec = remaining
 		replaced.TimeoutAuto = false // what is left — explicit, never auto (D-03)
+		if r.beforeForced != nil && next.base != "" {
+			r.beforeForced(next.base)
+		}
 		pr = r.attempt(ctx, i, replaced, &next)
 		if pr.waitCapacity {
 			// The local last resort's composite decision must WAIT (the
@@ -1974,7 +2022,7 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 			// Nothing is held and nobody refused: the subtask simply has nowhere to
 			// wait. That is a capacity defer - the fleet is healthy, it was not this
 			// contract's turn - never the holder-naming deferral of a lease nobody holds.
-			return r.settle(contract, r.capacityDefer(localView, seed, 0, 0, refusals, pl.waitNote, nil, nil), pl, waitStart)
+			return r.settle(contract, r.capacityDefer(localView, seed, 0, 0, refusals, waitEvidence{note: pl.waitNote}), pl, waitStart)
 		}
 		if seed.waitCapacity {
 			return r.settle(contract, r.reservedDefer(localView, LocalLease(r.cfg.GPULockPath, r.cfg.StateDir), 0, seed.pendingReason), pl, waitStart)
@@ -2015,6 +2063,11 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 	// its backlog fits; the reason is only kept so a wait that ends without placing
 	// anywhere can print the arithmetic.
 	heldOut := map[string]string{}
+	// cooling is, per base, the LATEST reason an otherwise eligible node was not asked
+	// this wait because its own refusal put it on cooldown: its health may advertise
+	// room on every tick while a Retry-After longer than the wait keeps it out, and a
+	// defer that said only "no node had room" would not be what happened.
+	cooling := map[string]string{}
 	// probeFails is every base whose health probe failed DURING the wait, by
 	// base: the tick used to drop these on the floor, so a wait that never
 	// reached a single node reported "0 refusal(s)".
@@ -2135,15 +2188,17 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 			prior := fleetTokSPrior(views)
 			now := time.Now()
 			clear(heldOut) // only THIS tick's read decides who is held out
+			clear(cooling)
 			sn := stLeft()
 			for j, v := range views {
-				if pl.excluded[bases[j]] || !remoteEligible(sn, v) {
+				if pl.excluded[bases[j]] || pl.ran[bases[j]] || !remoteEligible(sn, v) {
 					continue
 				}
 				// A node that refused for capacity is not asked again before its
 				// cooldown ends, whatever its health says: the snapshot still advertises
 				// the room it just denied.
-				if _, cooling := r.cool.heldUntil(bases[j], now); cooling {
+				if until, isCooling := r.cool.heldUntil(bases[j], now); isCooling {
+					cooling[bases[j]] = fmt.Sprintf("%s: cooling down after its own refusal (%s left)", laneID(v), until.Sub(now).Round(time.Second))
 					continue
 				}
 				if !hasRoom(v, false) || !processGate.available(bases[j], admissionCeiling(v)) {
@@ -2249,7 +2304,7 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 		// decision), with the refusals appended.
 		return r.settle(contract, r.reservedDefer(localView, lease, idle, "no eligible remote had room — "+strings.Join(refusals, "; ")+noteSuffix), pl, waitStart)
 	}
-	return r.settle(contract, r.capacityDefer(localView, seed, idle, wait, refusals, pl.waitNote, probeFails, heldOut), pl, waitStart)
+	return r.settle(contract, r.capacityDefer(localView, seed, idle, wait, refusals, waitEvidence{note: pl.waitNote, probeFails: probeFails, heldOut: heldOut, cooling: cooling}), pl, waitStart)
 }
 
 // runDecided runs a decided-seed subtask on its decided seat once the capacity
@@ -2336,6 +2391,37 @@ func (r *runner) landedAfterWait(pr PlacedResult, idle time.Duration, refusals [
 	return pr
 }
 
+// waitEvidence is what a capacity wait learned besides its refusal chain, for the defer
+// that ends it: why it waited when nothing refused it (note), the probes that failed
+// during it, the nodes the backlog gate held out, and the nodes their own refusal's
+// cooldown kept out. None of it is a refusal.
+type waitEvidence struct {
+	note       string
+	probeFails map[string]*probeFailTally
+	heldOut    map[string]string
+	cooling    map[string]string
+}
+
+// coolingNote renders the nodes the last tick of a capacity wait did not ask because
+// their own refusal put them on cooldown, or "" when none. Like a held-out node they
+// are re-read every tick and asked when the cooldown ends; a Retry-After longer than
+// the wait means that never happens inside it, and the defer says so.
+func coolingNote(cooling map[string]string) string {
+	if len(cooling) == 0 {
+		return ""
+	}
+	bases := make([]string, 0, len(cooling))
+	for base := range cooling {
+		bases = append(bases, base)
+	}
+	sort.Strings(bases)
+	parts := make([]string, 0, len(bases))
+	for _, base := range bases {
+		parts = append(parts, cooling[base])
+	}
+	return "; not asked again inside the wait (re-read every tick, asked when the cooldown ends): " + strings.Join(parts, "; ")
+}
+
 // capacityDefer is the TTL outcome: every node that could run the subtask was
 // full for the whole wait. Deferred, class capacity — the fleet is healthy and
 // the contract is sound; it was not this contract's turn — with every refusal
@@ -2344,17 +2430,17 @@ func (r *runner) landedAfterWait(pr PlacedResult, idle time.Duration, refusals [
 // note is why the subtask waited when nothing refused it (PlacedResult.gated and
 // .overflow: a process-gate turn-away, a deal's overflow): narration, never counted
 // among the refusals.
-func (r *runner) capacityDefer(local NodeView, seed PlacedResult, idle, wait time.Duration, refusals []string, note string, probeFails map[string]*probeFailTally, heldOut map[string]string) PlacedResult {
+func (r *runner) capacityDefer(local NodeView, seed PlacedResult, idle, wait time.Duration, refusals []string, ev waitEvidence) PlacedResult {
 	chain := fmt.Sprintf("%d refusal(s)", len(refusals))
 	if len(refusals) > 0 {
 		chain += ": " + strings.Join(refusals, "; ")
 	}
-	if note != "" {
-		chain += "; waiting because: " + note
+	if ev.note != "" {
+		chain += "; waiting because: " + ev.note
 	}
-	reason := fmt.Sprintf("capacity wait: no node had room within %s (waited %s; agent_placement_wait_sec=%d; %s%s%s) — re-run later, raise agent_placement_wait_sec, or add a node",
+	reason := fmt.Sprintf("capacity wait: no node had room within %s (waited %s; agent_placement_wait_sec=%d; %s%s%s%s) — re-run later, raise agent_placement_wait_sec, or add a node",
 		wait, idle.Round(time.Second), r.cfg.AgentPlacementWaitSec, chain,
-		heldOutNote(heldOut, strings.Join(refusals, "; ")), probeFailureNote(probeFails))
+		heldOutNote(ev.heldOut, strings.Join(refusals, "; ")), coolingNote(ev.cooling), probeFailureNote(ev.probeFails))
 	return PlacedResult{
 		Node: local.NodeID, Seat: local.AgentSeat, JobID: seed.JobID,
 		PlacementReason: reason, waited: true, Unplaced: true, CapacityWaitSec: idle.Seconds(),
@@ -4096,6 +4182,11 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 	// never made — the exact failure the shapes in unownedDetail exist to
 	// prevent.
 	queuedPolls := 0
+	// The queue-budget refresh (below) is attempted on the first queued polls until one read
+	// succeeds, at most maxQueueRefreshTries times: refreshed says one did, refreshErr is
+	// the newest failure while none has - the deadline message names it.
+	refreshTries, refreshed := 0, false
+	var refreshErr error
 	// setDeadline is the ONE place the deadline is computed, so no arm can
 	// rebuild it from a stale base. Once the clock is anchored on the node's
 	// own wall start, the backlog credit is deliberately NOT added again: the
@@ -4356,20 +4447,30 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 			// no credit and behaves exactly as it did before.
 			if state == "accepted" {
 				queuedPolls++
-				if queuedPolls == 1 {
+				if !refreshed && refreshTries < maxQueueRefreshTries {
 					// The job is sitting in the node's backlog, so the ETA the wait was
 					// derived from is what matters now - and it may be a snapshot minutes old
 					// (route=spread deals once, at the start of the run). Read the node again
 					// and EXTEND the wait when its ETA is longer than the snapshot said; a
-					// shorter one changes nothing (the job will simply start sooner). One GET,
-					// only for a job that is actually queued, and it fails open to the
-					// snapshot: an unreadable node keeps the budget it had.
+					// shorter one changes nothing (the job will simply start sooner). One GET
+					// per attempt, only for a job that is actually queued, and it fails open to
+					// the snapshot - but not silently: a failed read is counted and logged with
+					// the poll failures, tried again on the next queued poll (up to
+					// maxQueueRefreshTries), and named in the queue-deadline message if it
+					// never succeeded, because the budget the job is then abandoned at is one
+					// nobody re-checked.
+					refreshTries++
 					rctx, cancelRead := context.WithTimeout(ctx, pollRequestTimeout)
-					if fresh, ferr := FetchNodeView(rctx, base, r.cfg.FleetAuthToken); ferr == nil {
+					fresh, ferr := FetchNodeView(rctx, base, r.cfg.FleetAuthToken)
+					cancelRead()
+					if ferr == nil {
+						refreshed, refreshErr = true, nil
 						queueView = fresh
 						queuedWaitBudget = max(queuedWaitBudget, queueBudgetFor(queueView, pollBudget))
+					} else {
+						refreshErr = ferr
+						pollFails.note(fmt.Errorf("queue-budget refresh: %w", ferr))
 					}
-					cancelRead()
 				}
 				now := time.Now()
 				if !prevQueuedAt.IsZero() {
@@ -4410,7 +4511,7 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 					// one a job that actually ran produces.
 					pr.orphanable = true // still queued on the node — it may run later; recovery's case
 					pr.Err = fmt.Sprintf("queue deadline after %s: the node accepted the job but never started it — it waited in the node's backlog and never reached running (%d poll(s) answered `accepted`)",
-						queuedWaitBudget, queuedPolls)
+						queuedWaitBudget, queuedPolls) + queueRefreshNote(refreshErr, refreshTries)
 					return pr
 				}
 			}
@@ -4442,6 +4543,20 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 		case <-time.After(jitteredWithin(pollEvery, time.Until(deadline))):
 		}
 	}
+}
+
+// maxQueueRefreshTries bounds the reads of a queued job's node for its queue budget.
+const maxQueueRefreshTries = 3
+
+// queueRefreshNote says, on a queue deadline, that the queue budget the job was abandoned
+// at was derived from the placement snapshot because the node's health could not be read
+// again once the job was seen queued (and why). "" when the read succeeded or was never
+// needed. A safeguard that did not run must leave a trace where its absence matters.
+func queueRefreshNote(err error, tries int) string {
+	if err == nil {
+		return ""
+	}
+	return fmt.Sprintf("; the queue budget was derived from the placement snapshot: the node's health could not be read again once the job was seen queued (%d attempt(s), last: %v)", tries, err)
 }
 
 // queuedNote renders the backlog credit for a deadline message, and renders

@@ -202,7 +202,7 @@ func TestNoteCooldownCapsAHintAtTheQueueCeiling(t *testing.T) {
 	if got := cooldown(refusal(503, 30)); !within(got, 30*time.Second) {
 		t.Errorf("cooldown for a 30 s hint = %s, want about 30 s", got)
 	}
-	if got := cooldown(refusal(503, 900)); !within(got, maxQueuedWait) {
+	if got := cooldown(refusal(503, 900)); !within(got, maxQueuedWait) || got > maxQueuedWait {
 		t.Errorf("cooldown for a 900 s hint = %s, want it capped at the %s queue ceiling", got, maxQueuedWait)
 	}
 	if got := cooldown(refusal(503, 0)); !within(got, refusalCooldown) {
@@ -213,6 +213,61 @@ func TestNoteCooldownCapsAHintAtTheQueueCeiling(t *testing.T) {
 	}
 	if got := cooldown(PlacedResult{refused: true, refusalStatus: 503, retryAfterSec: 30}); got != 0 {
 		t.Errorf("a refusal that names no dial base cooled something for %s", got)
+	}
+}
+
+// TestCooldownIsJitteredAndNeverExceedsTheCeiling: the queue ceiling (300 s) is the most a
+// hint may hold a node out, whatever the jitter does to it. The cap used to come first
+// and the jitter (+/-20 %) after it, so a 300 s hint held a node out for up to 360 s while
+// the ADR, the docs and the code comment all said 300. Forty samples of a 900 s hint: each
+// at or under the ceiling, and still spread by the jitter below it (K dispatchers refused
+// by one node must not all ask it again on the same beat).
+func TestCooldownIsJitteredAndNeverExceedsTheCeiling(t *testing.T) {
+	base := "http://192.0.2.71:1"
+	var lo, hi time.Duration = 1 << 62, 0
+	atCeiling := 0
+	for i := 0; i < 40; i++ {
+		r := &runner{}
+		began := time.Now()
+		r.noteCooldown(PlacedResult{refused: true, refusalStatus: 503, retryAfterSec: 900, ranBase: base})
+		until, held := r.cool.heldUntil(base, time.Now())
+		if !held {
+			t.Fatal("not held")
+		}
+		d := until.Sub(began)
+		if d > maxQueuedWait+50*time.Millisecond {
+			t.Fatalf("a 900 s hint held the node out for %s, want at most the %s queue ceiling", d, maxQueuedWait)
+		}
+		if d > maxQueuedWait-100*time.Millisecond {
+			atCeiling++
+		}
+		lo, hi = min(lo, d), max(hi, d)
+	}
+	if hi-lo < 5*time.Second {
+		t.Fatalf("40 cooldowns for a 900 s hint spanned only %s..%s: K dispatchers refused by one node would all ask it again on the same beat", lo, hi)
+	}
+	// Clamping the jittered value at the ceiling would pile about half the dispatchers onto
+	// the same instant; folding the excess back under it spreads them over 240-300 s.
+	if atCeiling > 3 {
+		t.Fatalf("%d of 40 cooldowns for a 900 s hint sit on the ceiling itself, want them spread under it (a clamp releases half of the dispatchers on the same beat)", atCeiling)
+	}
+	// A hint under the ceiling is jittered, not capped: 30 s stays inside 24-36 s.
+	for i := 0; i < 40; i++ {
+		r := &runner{}
+		began := time.Now()
+		r.noteCooldown(PlacedResult{refused: true, refusalStatus: 503, retryAfterSec: 30, ranBase: base})
+		until, _ := r.cool.heldUntil(base, time.Now())
+		if d := until.Sub(began); d < 24*time.Second-50*time.Millisecond || d > 36*time.Second+50*time.Millisecond {
+			t.Fatalf("a 30 s hint held the node out for %s, want 24-36 s (+/-20 %%)", d)
+		}
+	}
+	// A later, shorter hold never shortens the one already in force.
+	var c cooldowns
+	now := time.Now()
+	c.hold(base, now.Add(time.Minute))
+	c.hold(base, now.Add(10*time.Second))
+	if _, held := c.heldUntil(base, now.Add(30*time.Second)); !held {
+		t.Fatal("a later, shorter hold shortened the hold already in force")
 	}
 }
 
