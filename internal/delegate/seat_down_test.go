@@ -3,11 +3,14 @@ package delegate
 import (
 	"context"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/gpuactivity"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
 )
 
@@ -332,4 +335,160 @@ func TestSeatDownDeferWithNowhereToGoSaysSo(t *testing.T) {
 			t.Fatalf("retried=%d note=%q, want the missing second placement explained", sum.Retried, results[0].RetryNote)
 		}
 	})
+}
+
+// scriptFirstJob scripts a fleet for a test about where a SECOND placement goes: whichever of the
+// nodes is handed a job first answers it with first(node), and every other job any of them is handed
+// is answered with `later`. Keyed on the job id (a poll repeats its answer) and on no node name, so
+// the test does not depend on where the deal or the ranking put the first attempt.
+func scriptFirstJob(t *testing.T, first func(node string) core.AgentWireResult, later string, nodes ...*fakeNode) {
+	t.Helper()
+	var mu sync.Mutex
+	firstJob := ""
+	for _, n := range nodes {
+		id := n.nodeID
+		n.pollByJob = func(jobID string, _ int64) (map[string]any, int) {
+			mu.Lock()
+			if firstJob == "" {
+				firstJob = jobID
+			}
+			isFirst := firstJob == jobID
+			mu.Unlock()
+			if isFirst {
+				return doneWire(t, first(id)), 200
+			}
+			w := remoteWire(later, `{"answer":"`+later+`"}`)
+			w.NodeID = id
+			return doneWire(t, w), 200
+		}
+	}
+}
+
+// occupyTheLocalSeat registers one run on the local agent seat: the record the seat's run-cap line
+// counts. With fleet_max_concurrent_jobs = 1 the line then has no free slot ahead of a newcomer.
+func occupyTheLocalSeat(t *testing.T, cfg config.Config) {
+	t.Helper()
+	run := gpuactivity.Start(cfg.GPULockPath, cfg.StateDir, gpuactivity.Run{Seat: cfg.AgentPlannerModel(""), Kind: "contract", Goal: "occupies the seat", Phase: gpuactivity.PhaseRunning})
+	if run == nil {
+		t.Fatal("fixture: could not register a run on the local seat")
+	}
+	t.Cleanup(run.End)
+}
+
+// A seat-down re-placement is exempt from the retry seat's busy check (ADR 0066 decision 3): "the
+// node's own queue is the line, and its 503 is re-placed at once". That is true of a REMOTE
+// alternative and false of the local seat, which answers no 503: a run forced onto it joins the
+// run-cap line and waits there for the run's whole wall before it defers as capacity (the first
+// come first served gate of pipeline/agenttask.go), a line the subtask could not leave. So while
+// that line has no free slot ahead of a newcomer (the question replacementNode asks, ADR 0063
+// decision 2), an untried remote is where the retry goes. A dying seat with several jobs on it is the
+// normal case, and without this every one of them landed on the delegator's own card.
+func TestSeatDownRetryLeavesAFullLocalLineForAnUntriedRemote(t *testing.T) {
+	compressPolls(t, 10*time.Millisecond, 2*time.Second)
+	nodeA, urlA := eligibleNode(t, "node-a", "unused")
+	nodeB, urlB := eligibleNode(t, "node-b", "unused")
+	scriptFirstJob(t, func(node string) core.AgentWireResult { return seatDownWire(node, 6) }, "the answer from the second node", nodeA, nodeB)
+	cfg := testCfg(t)
+	cfg.FleetMaxConcurrentJobs = 1
+	occupyTheLocalSeat(t, cfg)
+	var localCalls atomic.Int64
+	contract := remoteContract()
+	contract.Acceptance = []string{"nonempty:answer"}
+
+	results, sum, err := Run(context.Background(), cfg, passingLocal(&localCalls), []core.AgentContract{contract}, "spread", []string{urlA, urlB})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nodeA.dispatches.Load()+nodeB.dispatches.Load() == 0 {
+		t.Fatalf("fixture: the first attempt ran on the local seat (local calls %d), so there was no seat-down defer to re-place", localCalls.Load())
+	}
+	if localCalls.Load() != 0 {
+		t.Fatalf("the retry joined the local seat's full run-cap line (local calls %d) while an untried remote sat idle: a line the subtask cannot leave, waited out for the retry's whole wall; note=%q", localCalls.Load(), results[0].RetryNote)
+	}
+	if nodeA.dispatches.Load() != 1 || nodeB.dispatches.Load() != 1 {
+		t.Fatalf("dispatches A=%d B=%d, want the seat-down attempt on one node and the retry on the other", nodeA.dispatches.Load(), nodeB.dispatches.Load())
+	}
+	if sum.Retried != 1 || results[0].Result.Deferred {
+		t.Fatalf("retried=%d deferred=%v note=%q reason=%q, want the seat-down defer re-placed and answered", sum.Retried, results[0].Result.Deferred, results[0].RetryNote, results[0].Result.Reason)
+	}
+	if !strings.Contains(results[0].PlacementReason, "run-cap line") {
+		t.Fatalf("placement reason = %q, want it to say the retry skipped the local seat because its run-cap line is full", results[0].PlacementReason)
+	}
+}
+
+// The control the preference must not break: with a free slot on the local seat's line a seat-down
+// retry still goes where it always went (local -> the best remote is the verification retry's rule,
+// remote -> local is this one's), and the untried remote is not touched.
+func TestSeatDownRetryStillTakesTheLocalSeatWhenItsLineHasRoom(t *testing.T) {
+	compressPolls(t, 10*time.Millisecond, 2*time.Second)
+	nodeA, urlA := eligibleNode(t, "node-a", "unused")
+	nodeB, urlB := eligibleNode(t, "node-b", "unused")
+	scriptFirstJob(t, func(node string) core.AgentWireResult { return seatDownWire(node, 6) }, "the answer from the second node", nodeA, nodeB)
+	var localCalls atomic.Int64
+	contract := remoteContract()
+	contract.Acceptance = []string{"nonempty:answer"}
+
+	_, sum, err := Run(context.Background(), testCfg(t), passingLocal(&localCalls), []core.AgentContract{contract}, "remote", []string{urlA, urlB})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := nodeA.dispatches.Load() + nodeB.dispatches.Load(); got != 1 {
+		t.Fatalf("remote dispatches = %d, want only the first attempt: a local seat with a free slot keeps the retry", got)
+	}
+	if localCalls.Load() != 1 || sum.Retried != 1 {
+		t.Fatalf("local calls=%d retried=%d, want the retry on the local seat", localCalls.Load(), sum.Retried)
+	}
+}
+
+// Joining a full line beats losing the job: with no untried remote left the local seat is the only
+// place the seat-down retry can go, so it stays there, and the job is not refused for a busy line
+// (ADR 0066 decision 3, INV-4).
+func TestSeatDownRetryStaysOnAFullLocalLineWhenNoRemoteIsLeft(t *testing.T) {
+	compressPolls(t, 10*time.Millisecond, 2*time.Second)
+	nodeA, urlA := eligibleNode(t, "node-a", "unused")
+	nodeA.pollByJob = func(jobID string, n int64) (map[string]any, int) { return doneWire(t, seatDownWire("node-a", 6)), 200 }
+	cfg := testCfg(t)
+	cfg.FleetMaxConcurrentJobs = 1
+	occupyTheLocalSeat(t, cfg)
+	var localCalls atomic.Int64
+	contract := remoteContract()
+	contract.Acceptance = []string{"nonempty:answer"}
+
+	results, sum, err := Run(context.Background(), cfg, passingLocal(&localCalls), []core.AgentContract{contract}, "remote", []string{urlA})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if localCalls.Load() != 1 || sum.Retried != 1 || results[0].Result.Deferred {
+		t.Fatalf("local calls=%d retried=%d deferred=%v note=%q, want the retry on the only other seat there is", localCalls.Load(), sum.Retried, results[0].Result.Deferred, results[0].RetryNote)
+	}
+}
+
+// The preference is the seat-down defer's, not every retry's: a verification retry has its own busy
+// guard for the seat it lands on (retrySeatBusy and awaitRetrySeat, ADR 0063 decision 10) and keeps
+// the local seat as before. Widening the rule to it is a separate decision, and this is where it
+// would have to be made.
+func TestAVerificationRetryStillTakesTheLocalSeatWhoseLineIsFull(t *testing.T) {
+	compressPolls(t, 10*time.Millisecond, 2*time.Second)
+	nodeA, urlA := eligibleNode(t, "node-a", "unused")
+	nodeB, urlB := eligibleNode(t, "node-b", "unused")
+	scriptFirstJob(t, func(node string) core.AgentWireResult {
+		w := remoteWire("wrong answer", `{"answer":"wrong answer"}`)
+		w.NodeID = node
+		return w
+	}, "qube from the second node", nodeA, nodeB)
+	cfg := testCfg(t)
+	cfg.FleetMaxConcurrentJobs = 1
+	occupyTheLocalSeat(t, cfg)
+	var localCalls atomic.Int64
+
+	_, sum, err := Run(context.Background(), cfg, passingLocal(&localCalls), []core.AgentContract{remoteContract()}, "remote", []string{urlA, urlB})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := nodeA.dispatches.Load() + nodeB.dispatches.Load(); got != 1 {
+		t.Fatalf("remote dispatches = %d, want only the first attempt", got)
+	}
+	if localCalls.Load() != 1 || sum.Retried != 1 {
+		t.Fatalf("local calls=%d retried=%d, want the verification retry on the local seat as before", localCalls.Load(), sum.Retried)
+	}
 }
