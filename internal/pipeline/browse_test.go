@@ -209,7 +209,7 @@ func TestBrowseBadInputDefersBeforeSpawn(t *testing.T) {
 		"file url":            {"url": "file:///etc/passwd", "goal": "x"},
 		"javascript url":      {"url": "javascript:alert(1)", "goal": "x"},
 		"too many actions":    {"url": "https://example.com/", "goal": "x", "max_actions": 61},
-		"host not allowed":    {"url": "https://example.com/", "goal": "x", "allow_hosts": []any{"substack.com"}},
+		"host not allowed":    {"url": "https://example.com/", "goal": "x", "allow_hosts": []any{"example.net"}},
 		"unattended no hosts": {"url": "https://example.com/", "goal": "x", "unattended": true},
 		"unattended allow_labels": {"url": "https://example.com/", "goal": "x", "unattended": true,
 			"allow_hosts": []any{"example.com"}, "allow_labels": []any{"Publish"}},
