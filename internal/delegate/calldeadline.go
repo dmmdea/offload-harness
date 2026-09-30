@@ -37,6 +37,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/pairworkloads"
 )
@@ -511,40 +512,131 @@ func (r *runner) abandoned() PlacedResult {
 	}
 }
 
-// cutQueued applies the deadline to route=queue's outcome. The queue lane polls
-// its subtasks one after another and reports a poll the context cancelled as a
-// failure; when the CALL DEADLINE is what cancelled it, those are unfinished work
-// (the job stays on the holder), not failures, and the summary follows.
-func (c *callDeadline) cutQueued(results []PlacedResult, sum Summary, err error) ([]PlacedResult, Summary, error) {
+// queueLookMax bounds the last look cutQueued takes at the holder. It runs after the
+// deadline, outside the unwind the fan-out has, so its wall lands directly on the call's:
+// the lesser of this and three quarters of the unwind allowance, like the withdraw.
+const queueLookMax = 2 * time.Second
+
+// cutQueued applies the deadline to route=queue's outcome. The queue lane polls its
+// subtasks one after another and reports a poll the context cancelled as a failure —
+// including every job it never got round to asking about, which returns "canceled:"
+// without a request. A claimant may well have finished such a job while an earlier, slower
+// one was being polled, so the deadline takes ONE last look at each of them (lookAtHolder)
+// before it decides anything, and publishes what the holder said:
+//
+//   - a job the holder has finished (or failed) is returned as that answer, exactly as the
+//     poll would have returned it — the finished result is not lost behind a slower one;
+//   - a job the holder still holds is unfinished work: a call-deadline defer whose reason
+//     says what the holder said (queued, or claimed and running), never a state the code
+//     did not observe;
+//   - a job the holder could not be asked about says so ("could not be looked up").
+//
+// The unfinished count spans only the jobs that really are unfinished.
+func (c *callDeadline) cutQueued(cfg config.Config, subtasks []core.AgentContract, results []PlacedResult, sum Summary, err error) ([]PlacedResult, Summary, error) {
 	if !c.reached() || err != nil {
 		return results, sum, err
 	}
-	var cut []int
+	var cand []int
 	for i, pr := range results {
-		// A transport error names the context's CAUSE ("call deadline reached"), a
-		// bare cancellation its Err ("context deadline exceeded"): accept both.
-		if strings.HasPrefix(pr.Err, "canceled:") ||
-			(strings.HasPrefix(pr.Err, "queue submit:") &&
-				(strings.Contains(pr.Err, callDeadlinePrefix) || strings.Contains(pr.Err, context.DeadlineExceeded.Error()))) {
+		if queueCut(pr) {
+			cand = append(cand, i)
+		}
+	}
+	if len(cand) == 0 {
+		return results, sum, err
+	}
+	c.lookAtHolder(cfg, subtasks, results, cand)
+	var cut []int
+	for _, i := range cand {
+		if queueCut(results[i]) || results[i].queueSeen != "" {
 			cut = append(cut, i)
 		}
 	}
-	if len(cut) == 0 {
-		return results, sum, err
+	if len(cut) > 0 {
+		c.frozen.CompareAndSwap(-1, int64(len(cut)))
 	}
-	c.frozen.CompareAndSwap(-1, int64(len(cut)))
 	for _, i := range cut {
 		pr := &results[i]
-		where := fmt.Sprintf("was still queued on the holder (job %s) when the call's deadline passed; the job stays on the holder and this call is no longer waiting for it", pr.JobID)
-		if strings.HasPrefix(pr.Err, "queue submit:") {
+		var where string
+		switch pr.queueSeen {
+		case "accepted":
+			where = fmt.Sprintf("was still queued on the holder (job %s) when the call's deadline passed; the job stays on the holder and this call is no longer waiting for it", pr.JobID)
+		case "running":
+			where = fmt.Sprintf("was claimed by a node and still running (job %s) when the call's deadline passed; the job stays on the holder and this call is no longer waiting for it", pr.JobID)
+		case "absent":
 			where = "had not been submitted to the holder when the call's deadline passed"
 			pr.Unplaced = true
+		default:
+			where = fmt.Sprintf("could not be looked up on the holder when the call's deadline passed (job %s); if it was submitted it stays there, and this call is no longer waiting for it", pr.JobID)
 		}
 		pr.Result = c.wire(where)
 		pr.Err = ""
 		pr.deadlineCut = true
-		sum.Failed--
-		sum.Deferred++
 	}
-	return results, sum, nil
+	return results, queueSummary(results), nil
+}
+
+// queueCut reports whether a queue result is one the call deadline's cancellation ended
+// without an answer: a poll it cancelled, or a submit it interrupted. A transport error
+// names the context's CAUSE ("call deadline reached"), a bare cancellation its Err
+// ("context deadline exceeded"): both count.
+func queueCut(pr PlacedResult) bool {
+	if pr.deadlineCut {
+		return false
+	}
+	return strings.HasPrefix(pr.Err, "canceled:") ||
+		(strings.HasPrefix(pr.Err, "queue submit:") &&
+			(strings.Contains(pr.Err, callDeadlinePrefix) || strings.Contains(pr.Err, context.DeadlineExceeded.Error())))
+}
+
+// lookAtHolder asks the queue holder, once per job and all at once, what became of each
+// job the deadline cancelled the poll of. It runs on a context of its own (the call's is
+// cancelled) bounded by queueLookMax and the unwind allowance, so a holder that has stopped
+// answering costs the call at most that. It moves each answer onto the result: a finished
+// or failed job becomes that outcome; a job still held records what the holder said in
+// queueSeen; a job it could not ask about is "unknown". Each goroutine writes only its own
+// element.
+func (c *callDeadline) lookAtHolder(cfg config.Config, subtasks []core.AgentContract, results []PlacedResult, cand []int) {
+	holder := strings.TrimRight(strings.TrimSpace(cfg.FleetQueueHolder), "/")
+	budget := queueLookMax
+	if g := c.grace * 3 / 4; g > 0 && g < budget {
+		budget = g
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
+	var wg sync.WaitGroup
+	for _, i := range cand {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			pr := &results[i]
+			if pr.JobID == "" {
+				pr.queueSeen = "unknown"
+				return
+			}
+			submitCut := strings.HasPrefix(pr.Err, "queue submit:")
+			p, perr := pollJobOnceAt(ctx, cfg, holder+"/fleet/queue/jobs/"+pr.JobID)
+			switch {
+			case perr != nil:
+				pr.queueSeen = "unknown"
+			case p.Status == http.StatusUnauthorized:
+				pr.Err = "queue poll: 401 unauthorized (fleet_auth_token mismatch)"
+			case p.Status == http.StatusNotFound && submitCut:
+				pr.queueSeen = "absent"
+			case p.Status == http.StatusNotFound:
+				pr.Err = "holder denies the job (submitted then vanished — holder store reset?)"
+			case p.Status == http.StatusOK && (p.State == "done" || p.State == "error"):
+				// The holder's answer supersedes the failure the cancelled poll (or the
+				// interrupted submit) left behind: a finished job is its result, a failed
+				// one is its own failure.
+				pr.Err = ""
+				queueAnswer(subtasks[i], p, pr)
+			case p.Status == http.StatusOK && (p.State == "accepted" || p.State == "running"):
+				pr.queueSeen = p.State
+			default:
+				pr.queueSeen = "unknown"
+			}
+		}(i)
+	}
+	wg.Wait()
 }

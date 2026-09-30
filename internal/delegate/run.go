@@ -129,6 +129,10 @@ type PlacedResult struct {
 	// running, waiting or not yet started when the call ended. Set by
 	// cutByDeadline and the deadline's own constructors; never published.
 	deadlineCut bool
+	// queueSeen is what the queue holder said about this job when the call deadline
+	// took a last look (calldeadline.go lookAtHolder): "accepted", "running", "absent"
+	// (no such job) or "unknown" (no answer inside the look). "" = never looked.
+	queueSeen string
 	// Err is non-empty when the subtask FAILED for transport/config reasons
 	// (dispatch refused, auth rejected, undecodable result). Counted in
 	// Summary.Failed, never in Deferred — eight quiet defers and one broken
@@ -695,7 +699,7 @@ func RunWith(ctx context.Context, cfg config.Config, local LocalRunner, subtasks
 	// owns durability and the claim loops own placement.
 	if route == "queue" {
 		results, sum, err := runQueued(ctx, cfg, subtasks)
-		return dl.cutQueued(results, sum, err)
+		return dl.cutQueued(cfg, subtasks, results, sum, err)
 	}
 	// Fleet membership is configuration: a call that names no remotes uses the
 	// config's delegate_remotes. A call's own list REPLACES it (never merges) so
