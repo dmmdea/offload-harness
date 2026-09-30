@@ -499,7 +499,8 @@ const (
 // now), which is a known zero.
 func etaStartFor(v NodeView) (sec float64, known bool) {
 	if v.QueueWaitEstimateSec != nil {
-		return *v.QueueWaitEstimateSec, true
+		// A negative estimate is a node bug, read as "no wait" rather than trusted.
+		return math.Max(*v.QueueWaitEstimateSec, 0), true
 	}
 	if v.RecentAgentWallSec <= 0 {
 		return 0, false
@@ -532,7 +533,9 @@ func startsWithinPatience(v NodeView, patience time.Duration) (ok bool, why stri
 	if !known {
 		return true, ""
 	}
-	if time.Duration(eta*float64(pollSecond)) <= patience {
+	// Compared as floats: an absurd published ETA must read as "far too long", not
+	// overflow a Duration into a small or negative one.
+	if eta*float64(pollSecond) <= float64(patience) {
 		return true, ""
 	}
 	return false, fmt.Sprintf("a new job would wait ~%.0f s to start (%s), past the %.0f s this contract will wait for a start",
@@ -553,12 +556,13 @@ func queueBudgetFor(v NodeView, patience time.Duration) time.Duration {
 		}
 		return patience
 	}
-	budget := time.Duration((queueBudgetFactor*eta + queueBudgetSlackSec) * float64(pollSecond))
-	if floor := time.Duration(queueBudgetFloorSec) * pollSecond; budget < floor {
+	// In floats for the same reason: clamp first, convert last.
+	budget := (queueBudgetFactor*eta + queueBudgetSlackSec) * float64(pollSecond)
+	if floor := float64(time.Duration(queueBudgetFloorSec) * pollSecond); budget < floor {
 		budget = floor
 	}
-	if budget > patience {
-		budget = patience
+	if budget > float64(patience) {
+		return patience
 	}
-	return budget
+	return time.Duration(budget)
 }

@@ -513,6 +513,32 @@ func TestCapacityWaitSurvivesAGateTakenBetweenTheReadAndTheDispatch(t *testing.T
 	}
 }
 
+// TestETAArithmeticSurvivesAbsurdEstimates: a node publishes whatever it publishes.
+// An estimate too large for a Duration must read as "far too long" (held out, and a
+// queue budget capped at the caller's patience), never overflow into a small or
+// negative wait; a negative estimate is a node bug and reads as "no wait".
+func TestETAArithmeticSurvivesAbsurdEstimates(t *testing.T) {
+	huge, negative := 1e15, -50.0
+	v := slowNodeShaped()
+	v.QueueWaitEstimateSec = &huge
+	if ok, _ := startsWithinPatience(v, 20*time.Minute); ok {
+		t.Fatal("a 1e15 s ETA fits a 20 minute patience — the arithmetic overflowed")
+	}
+	if got := queueBudgetFor(v, 20*time.Minute); got != 20*time.Minute {
+		t.Fatalf("queue budget for a 1e15 s ETA = %s, want it capped at the 20 minute patience", got)
+	}
+	v.QueueWaitEstimateSec = &negative
+	if sec, known := etaStartFor(v); !known || sec != 0 {
+		t.Fatalf("etaStartFor(-50) = %v/%v, want a known zero", sec, known)
+	}
+	if ok, _ := startsWithinPatience(v, time.Second); !ok {
+		t.Fatal("a negative estimate must read as no wait")
+	}
+	if got := queueBudgetFor(v, 20*time.Minute); got != 60*time.Second {
+		t.Fatalf("queue budget for a negative estimate = %s, want the 60 s floor", got)
+	}
+}
+
 // TestHasRoomRefusesANodeWhoseBacklogExceedsThePatience: the slow node's queue
 // depth (1) is under its admission limit (2), so hasRoom said yes — and a job
 // sent there waited 444 s, was abandoned at the 300 s deadline, and ran anyway.
