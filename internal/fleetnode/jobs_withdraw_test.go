@@ -392,14 +392,56 @@ func TestJobsClaimSkipsAGhostBeforeTheReaperRuns(t *testing.T) {
 	if n := j.reap(); n != 1 {
 		t.Fatalf("reap took %d job(s), want the ghost", n)
 	}
-	// A late poll rescues a job that was only skipped, never reaped: the poller
-	// came back inside the window.
-	j.Admit("late", AcceptSpec{Agent: true, PollLeased: true}, func(ctx context.Context) (json.RawMessage, error) {
-		return json.RawMessage(`{}`), nil
-	})
-	clk.Advance(61 * time.Second)
-	j.Touch("late")
-	waitJobState(t, j, "late", JobDone)
+}
+
+// TestJobsALatePollRescuesASkippedJob: a job the claim scan skipped because its
+// poller had been quiet past the lease is fresh again the moment the poller comes
+// back, and the scheduler has to notice — or the job sits in the queue, claimable
+// and unclaimed, until some unrelated admission or finish happens to wake it. The
+// scan only runs on a wake, and skipping a job leaves the scheduler parked.
+func TestJobsALatePollRescuesASkippedJob(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		rescue func(j *Jobs) (done func())
+	}{
+		{"a poll", func(j *Jobs) func() { j.Touch("late"); return func() {} }},
+		{"a long poll", func(j *Jobs) func() {
+			parked := make(chan struct{})
+			go func() {
+				defer close(parked)
+				j.WaitTerminal(context.Background(), "late", 5*time.Second)
+			}()
+			return func() { <-parked }
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clk := newLeaseClock()
+			j := newJobs(time.Hour, clk.Now, time.Hour, 1)
+			defer j.DrainAndStop(time.Second)
+			j.SetPollLease(time.Minute)
+			release := holdSlot(t, j, "holder")
+
+			var ran atomic.Int32
+			j.Admit("late", AcceptSpec{Agent: true, PollLeased: true}, func(ctx context.Context) (json.RawMessage, error) {
+				ran.Add(1)
+				return json.RawMessage(`{}`), nil
+			})
+			clk.Advance(61 * time.Second) // the poller has been quiet past the lease
+			release()                     // the slot frees: the scan skips the job and the scheduler parks
+			waitJobState(t, j, "holder", JobDone)
+			time.Sleep(50 * time.Millisecond)
+			if ran.Load() != 0 {
+				t.Fatal("the stale job ran: the claim scan did not skip it")
+			}
+			// The poller comes back inside the reaper's next tick.
+			finish := tc.rescue(j)
+			waitJobState(t, j, "late", JobDone) // hangs (and fails after 5 s) if nothing wakes the scheduler
+			finish()
+			if ran.Load() != 1 {
+				t.Fatalf("the rescued job ran %d times, want 1", ran.Load())
+			}
+		})
+	}
 }
 
 // TestJobsAParkedLongPollKeepsAJobAlive: a poller blocked in WaitTerminal is

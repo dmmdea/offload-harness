@@ -577,7 +577,16 @@ func (j *Jobs) SetPollLease(d time.Duration) {
 func (j *Jobs) Touch(id string) {
 	j.mu.Lock()
 	if jb, ok := j.m[id]; ok && !Terminal(jb.state) {
-		jb.polledAt = j.now()
+		now := j.now()
+		wasStale := j.staleLocked(jb, now)
+		jb.polledAt = now
+		if wasStale {
+			// The claim scan skipped this job while its poller was quiet, and the
+			// scheduler parked; the poller is back, so the job is claimable again —
+			// but a scan only runs on a wake, so without this the job would sit in
+			// the queue until some unrelated admission or finish happened along.
+			j.cond.Broadcast()
+		}
 	}
 	j.mu.Unlock()
 }
@@ -870,8 +879,13 @@ func (j *Jobs) WaitTerminal(ctx context.Context, id string, d time.Duration) (*J
 	// poll follows after the delegator's own sleep, not at this instant. Deferred
 	// so it runs, under the lock, on every return path below.
 	if jb, ok := j.m[id]; ok && !Terminal(jb.state) {
+		now := j.now()
+		wasStale := j.staleLocked(jb, now)
 		jb.waiters++
-		jb.polledAt = j.now()
+		jb.polledAt = now
+		if wasStale {
+			j.cond.Broadcast() // claimable again: see Touch
+		}
 		defer func() {
 			jb.waiters--
 			if !Terminal(jb.state) {
