@@ -232,7 +232,13 @@ func TestInstallRendersOnAnyTierWithoutACacheServer(t *testing.T) {
 		for _, goos := range []string{"linux", "windows"} {
 			res, err := deriveRender(embeddedProfiles, renderReq(tier, goos, pinFor(t, embeddedProfiles, tier, true, true)))
 			if err != nil {
-				continue // no template for this OS, or a seat launch this OS cannot host
+				if strings.Contains(err.Error(), "no serving template") {
+					continue // this tier has no template for this OS; not this test's business
+				}
+				// Any other failure is a tier whose seat cannot render on this OS. Skipping it would
+				// make a later tier's seat-render break invisible to the walker.
+				t.Errorf("tier %s (%s): the storeless-seat render fails: %v", tier, goos, err)
+				continue
 			}
 			if err := renderGate(res); err != nil {
 				t.Errorf("tier %s (%s): the write gate refuses the storeless-seat render: %v", tier, goos, err)
@@ -463,15 +469,35 @@ func TestAmpere16RenderServesTheFastLayerSeat(t *testing.T) {
 	}
 }
 
+// fastLayerSeat is the ampere-16 fast layer's agent seat in a decoded table, for a test that
+// authors a mistake into it. It is found by name and FAILS the calling test when the table has
+// lost it: an index or an unchecked assertion would panic instead, a panic aborts the whole test
+// binary, and the floor tests that name the regression (TestEveryTierKeepsItsDeclaredLayerSet)
+// would never run, so "REGRESSION: tier ampere-16 declared layer fast" could not print.
+func fastLayerSeat(t *testing.T, doc map[string]any) map[string]any {
+	t.Helper()
+	layers, _ := tierEntry(doc, "ampere-16")["layers"].([]any)
+	for _, l := range layers {
+		lm, _ := l.(map[string]any)
+		if lm["name"] != "fast" {
+			continue
+		}
+		if seats, _ := lm["seats"].([]any); len(seats) > 0 {
+			if seat, ok := seats[0].(map[string]any); ok {
+				return seat
+			}
+		}
+	}
+	t.Fatalf("ampere-16 declares no fast layer with a seat (%d layer(s) declared): TestEveryTierKeepsItsDeclaredLayerSet names the regression", len(layers))
+	return nil
+}
+
 // The composition check exists to refuse a PHANTOM binding: a layer that routes to a seat the
 // rendered config does not define. It used to run only for tiers that declare `composes`; a
 // layers-only tier like ampere-16 had the phantom risk and no check.
 func TestLayerOnlyTierRenderRefusesAPhantomLayerSeat(t *testing.T) {
 	doc := tableDoc(t)
-	e := tierEntry(doc, "ampere-16")
-	layers := e["layers"].([]any)
-	fastSeat := layers[1].(map[string]any)["seats"].([]any)[0].(map[string]any)
-	fastSeat["model"] = "qwen36-35b-a3b-typo" // names no seat anywhere: not a vLLM seat, not in the template
+	fastLayerSeat(t, doc)["model"] = "qwen36-35b-a3b-typo" // names no seat anywhere: not a vLLM seat, not in the template
 	res, err := deriveRender(marshalTable(t, doc), renderReq("ampere-16", "linux", pinFor(t, embeddedProfiles, "ampere-16", true, true)))
 	if err != nil {
 		t.Fatal(err)

@@ -2,8 +2,10 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
 
@@ -190,18 +192,70 @@ func TestAmpere16NewDeclarationsCarryNoLocalIdentity(t *testing.T) {
 	if len(p.ExtraVLLMSeats) != 1 {
 		t.Fatalf("ampere-16 declares %d extra vLLM seats, want the 35B", len(p.ExtraVLLMSeats))
 	}
+	for _, finding := range ampere16LocalIdentity(p) {
+		t.Errorf("%s — say \"the ampere-16 reference box\" and drop paths", finding)
+	}
+}
+
+// localIdentityRe matches the SHAPES of local identity: a path root (`/srv/`, `/home/`, `/mnt/`,
+// `~/`), a drive letter in either slash form (`E:/…` as well as `E:\…`), a record folder, a dotted
+// quad. The patterns are STRUCTURAL on purpose: a test that spelled out the names it forbids would
+// put those names in the public tree.
+var localIdentityRe = regexp.MustCompile(`(?i)/srv/|/home/|/mnt/|~/|\b[a-z]:[\\/]|Benchmarks and Optimizations|\b\d{1,3}(\.\d{1,3}){3}\b`)
+
+// ampere16LocalIdentity reads the declarations this tier added back as JSON and returns one line
+// per field that carries a local-identity shape.
+func ampere16LocalIdentity(p tierseed.Profile) []string {
 	fields := map[string]any{
 		"extra_vllm_seats":           p.ExtraVLLMSeats,
 		"layers":                     p.Layers,
 		"vllm_seat.storeless_reason": p.VLLMSeat.StorelessReason,
 	}
-	// The patterns are STRUCTURAL on purpose (a path root, a drive letter, a record folder, a dotted
-	// quad): a test that spelled out the names it forbids would put those names in the public tree.
-	forbidden := regexp.MustCompile(`(?i)/srv/|/home/|/mnt/|\b[a-z]:\\|Benchmarks and Optimizations|\b\d{1,3}(\.\d{1,3}){3}\b`)
+	var out []string
 	for name, v := range fields {
 		b, _ := json.Marshal(v)
-		if m := forbidden.FindString(string(b)); m != "" {
-			t.Errorf("%s carries local identity %q — say \"the ampere-16 reference box\" and drop paths", name, m)
+		if m := localIdentityRe.FindString(string(b)); m != "" {
+			out = append(out, fmt.Sprintf("%s carries local identity %q", name, m))
 		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// The scan is only worth its name if every form of a local path is seen. It once matched the
+// backslash drive form only, so a forward-slash record path (`E:/…`) appended to a measured note
+// passed it, and only an unrelated rule elsewhere caught the `/Dev/` folder.
+func TestTheLocalIdentityScanSeesEveryPathForm(t *testing.T) {
+	for _, s := range []string{
+		`E:/Benchmarks/2026-09-18-a100/`, `E:\Benchmarks\x`, `d:/x/y`, `~/records/x`, `/srv/x`,
+		`/home/someone`, `/mnt/data`, `Benchmarks and Optimizations/x`, `192.0.2.1`,
+	} {
+		if !localIdentityRe.MatchString(s) {
+			t.Errorf("the scan does not see %q", s)
+		}
+	}
+	for _, s := range []string{
+		"see docs/systems/composite-tier.md", "https://example.invalid/x", "util <= 0.85",
+		"LMCache 0.5.5, chunk 2096, 27 % of the digest set", `"model":"qwen36-35b-a3b-gsq-vllm"`,
+	} {
+		if m := localIdentityRe.FindString(s); m != "" {
+			t.Errorf("the scan flags %q in %q, which carries no local identity", m, s)
+		}
+	}
+	// The scenario the scan exists for: a record path appended to a declaration, in either form.
+	for _, path := range []string{" Records: E:/Benchmarks/2026-09-18-a100/", ` Records: E:\Benchmarks\2026-09-18-a100\`} {
+		p := ampere16Profile(t)
+		p.ExtraVLLMSeats[0].Measured += path
+		if got := ampere16LocalIdentity(p); len(got) != 1 || !strings.Contains(got[0], "extra_vllm_seats") {
+			t.Errorf("a record path appended to the 35B's measured note (%q) was not flagged: %v", path, got)
+		}
+		p = ampere16Profile(t)
+		p.VLLMSeat.StorelessReason += path
+		if got := ampere16LocalIdentity(p); len(got) != 1 || !strings.Contains(got[0], "storeless_reason") {
+			t.Errorf("a record path appended to the 27B's storeless reason (%q) was not flagged: %v", path, got)
+		}
+	}
+	if got := ampere16LocalIdentity(ampere16Profile(t)); len(got) != 0 {
+		t.Errorf("the control (the table as shipped) is flagged: %v", got)
 	}
 }
