@@ -250,9 +250,12 @@ func (s *Server) handleAccelTool(id, tool, requiredArg string) mcp.ToolHandler {
 // order, then the fleet devices in config.FleetAccelerators order, and the
 // first device whose table has a name owns it. An accelerator_tool_owners entry
 // (ADR 0068) takes a name first when its device is one of those and its table
-// has the name; an entry that cannot apply is returned in ignored and the walk
-// decides that name as if the entry were absent. A fleet owner carries
-// FleetOwnerSuffix.
+// has the name. Claims are walked the way agent.accelLaneTools walks the loop's
+// lanes — devices in that same order, each device's config.ToolOwnerClaims, the
+// first device to claim a name it serves keeps it — so the two surfaces agree
+// even when two keys differ only by spaces. Every entry that did not take effect
+// is returned in ignored, and the walk decides its name as if it were absent. A
+// fleet owner carries FleetOwnerSuffix.
 func accelOwnerPlan(cfg config.Config) (owner map[string]string, ignored []string) {
 	type dev struct{ id, owner string }
 	var devs []dev
@@ -269,12 +272,19 @@ func accelOwnerPlan(cfg config.Config) (owner map[string]string, ignored []strin
 		return slices.ContainsFunc(accelMCPTools(id), func(t accelMCPTool) bool { return t.name == name })
 	}
 	owner = map[string]string{}
-	names := make([]string, 0, len(cfg.AcceleratorToolOwners))
-	for name := range cfg.AcceleratorToolOwners {
-		names = append(names, name)
+	for _, d := range devs {
+		for _, name := range cfg.ToolOwnerClaims(d.id) {
+			if _, taken := owner[name]; !taken && serves(d.id, name) {
+				owner[name] = d.owner
+			}
+		}
 	}
-	slices.Sort(names)
-	for _, raw := range names {
+	raws := make([]string, 0, len(cfg.AcceleratorToolOwners))
+	for raw := range cfg.AcceleratorToolOwners {
+		raws = append(raws, raw)
+	}
+	slices.Sort(raws)
+	for _, raw := range raws {
 		name, want := strings.TrimSpace(raw), strings.TrimSpace(cfg.AcceleratorToolOwners[raw])
 		i := slices.IndexFunc(devs, func(d dev) bool { return d.id == want })
 		switch {
@@ -282,8 +292,8 @@ func accelOwnerPlan(cfg config.Config) (owner map[string]string, ignored []strin
 			ignored = append(ignored, name+" -> "+want+": the device is not listed in accelerators or fleet_accelerators")
 		case !serves(want, name):
 			ignored = append(ignored, name+" -> "+want+": the device has no tool of that name")
-		default:
-			owner[name] = devs[i].owner
+		case owner[name] != devs[i].owner:
+			ignored = append(ignored, name+" -> "+want+": another entry for the same tool names "+owner[name]+" (keys are compared with spaces trimmed; the first listed device wins)")
 		}
 	}
 	for _, d := range devs {
@@ -305,14 +315,21 @@ func accelOwnerPlan(cfg config.Config) (owner map[string]string, ignored []strin
 func (s *Server) registerAccelTools(srv *mcp.Server, cfg config.Config) map[string]string {
 	owner, ignored := accelOwnerPlan(cfg)
 	for _, why := range ignored {
-		log.Printf("accelerator_tool_owners: %s; ignored, the first-listed owner serves it (ADR 0068)", why)
+		log.Printf("accelerator_tool_owners: %s; ignored, the first-listed rule decides that name (ADR 0068)", why)
 	}
+	// registered guards a device id listed twice: its second walk must not add the
+	// same tools again.
+	registered := map[string]bool{}
 	for _, id := range cfg.Accelerators {
 		for _, t := range accelMCPTools(id) {
+			if registered[t.name] {
+				continue
+			}
 			if owner[t.name] != id {
 				log.Printf("accelerator %s: %s is served by %s on this box; skipped (shared-name rule, docs/systems/accelerators.md)", id, t.name, owner[t.name])
 				continue
 			}
+			registered[t.name] = true
 			srv.AddTool(&mcp.Tool{Name: t.name, Description: t.desc, InputSchema: json.RawMessage(t.schema)}, s.handleAccelTool(id, t.sidecar, t.arg))
 		}
 	}
@@ -321,11 +338,15 @@ func (s *Server) registerAccelTools(srv *mcp.Server, cfg config.Config) map[stri
 			continue
 		}
 		for _, t := range accelMCPTools(id) {
+			if registered[t.name] {
+				continue
+			}
 			if owner[t.name] != id+FleetOwnerSuffix {
 				log.Printf("fleet accelerator %s: %s is served by %s on this box; skipped (shared-name rule)", id, t.name, owner[t.name])
 				continue
 			}
 			desc := t.desc + " [FLEET: this box has no " + id + " — the call is forwarded to the fleet node that does; image_path is read HERE and its bytes travel with the job (cap 8 MiB); the result carries placement{node,wall_ms}]"
+			registered[t.name] = true
 			srv.AddTool(&mcp.Tool{Name: t.name, Description: desc, InputSchema: json.RawMessage(t.schema)}, s.handleFleetAccelTool(id, t.sidecar, t.arg))
 		}
 	}

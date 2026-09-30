@@ -339,7 +339,8 @@ registers locally — MCP surface and agent loop alike, so the parity test still
    (`coral-edgetpu (fleet): …`); the node's own defers and the sidecar's refusals pass through.
 
 Ownership across the fleet is ADR 0037 extended: `accelerators` is walked before
-`fleet_accelerators` on both surfaces, so a local device always wins a shared name, and a box
+`fleet_accelerators` on both surfaces, so a local device wins a shared name unless an
+`accelerator_tool_owners` entry names the fleet device for it (ADR 0068, below), and a box
 that lists a device in both registers the local lane only. A box that lists nothing in
 `fleet_accelerators` is byte-identical to 0.114.x (pinned by
 `TestFleetAcceleratorRegistersForwardedToolsOnly`).

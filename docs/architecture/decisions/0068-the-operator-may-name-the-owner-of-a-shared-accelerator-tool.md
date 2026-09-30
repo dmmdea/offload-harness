@@ -28,16 +28,23 @@ would have to know the hardware to ask for a capability.
 without an entry is decided exactly as before.
 
 - **An entry applies only when it can.** The named device must be listed in `accelerators` or
-  `fleet_accelerators`, and its tool table must have that name. Otherwise the entry is logged at startup
-  and ignored, and the first-listed rule decides the name, so a typo or a stale entry never removes a tool.
+  `fleet_accelerators`, and its tool table must have that name. Otherwise the entry is ignored and the
+  first-listed rule decides the name, so a typo or a stale entry never removes a tool. The MCP server
+  logs each ignored entry when it starts, and the status block's `serves` lists show what took effect;
+  the standalone `local-agent` binary applies the same rule without logging.
+- **Keys and values are compared with spaces trimmed.** Two keys that trim to the same tool are decided
+  the way a lane walk decides them: the first listed device's claim wins, and the other is reported.
 - **A fleet device may take a name from a local one.** That is the case that motivated the key, and the
   forwarded tool keeps its `[FLEET: …]` description and `placement` result.
-- **Both surfaces read one decision.** `mcpserver.accelOwnerPlan` computes the owner of every name without
-  registering anything; MCP registration and the status block read it. The agent loop's lanes carry their
-  claims (`AccelLane.Claims`, filled by `pipeline.NewLoopAccel` from `config.ToolOwnerClaims`), and
-  `agent.accelLaneTools` applies them the same way. `TestToolOwnersLoopMatchesMCP` checks that a loop tool
-  routes to the device the MCP plan names, in every order of three devices, for entries that apply and for
-  entries that do not.
+- **Both surfaces apply the same rule, and a test holds them together.** `mcpserver.accelOwnerPlan`
+  computes the owner of every name without registering anything; MCP registration and the status block
+  read it. The agent loop's lanes carry their claims (`AccelLane.Claims`, filled by
+  `pipeline.NewLoopAccel` from `config.ToolOwnerClaims`), and `agent.accelLaneTools` applies them with the
+  same walk: devices in order, local before fleet, the first device to claim a name it serves keeps it.
+  `TestToolOwnersLoopMatchesMCP` builds the loop from the real `NewLoopAccel` and checks, for local
+  orders of three devices, local-plus-fleet shapes, spaced keys and duplicate keys, that every name the
+  MCP plan serves is registered once by the loop and routed to the same device, and that the loop serves
+  no accelerator tool the plan does not.
 - **Status shows the result.** Each device's status entry adds `serves`, the tools it actually registered;
   `owns` stays the list of capabilities it could serve.
 

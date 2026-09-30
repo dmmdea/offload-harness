@@ -137,54 +137,101 @@ func TestToolOwnersRouteANameToAFleetDevice(t *testing.T) {
 	}
 }
 
-// The agent loop resolves the same entries to the same device as the MCP surface (ADR 0037's parity,
-// extended by ADR 0068): the lanes carry cfg.ToolOwnerClaims, and the owner a loop tool routes to is the
-// owner accelOwnerPlan names, in every order and for entries that apply and entries that do not.
+// The agent loop resolves every entry to the same device as the MCP surface (ADR 0037's parity, extended
+// by ADR 0068). The loop is built by the real pipeline.NewLoopAccel, so the Claims wiring of local AND
+// fleet lanes is what is tested; only each lane's Call is swapped for a recorder. For every name the MCP
+// plan assigns, the loop must register it exactly once and route it to that device, and the loop must
+// register no accelerator tool the plan does not know.
 func TestToolOwnersLoopMatchesMCP(t *testing.T) {
-	entries := []map[string]string{
+	type shape struct {
+		local, fleet []string
+		entries      map[string]string
+	}
+	var shapes []shape
+	for _, e := range []map[string]string{
+		nil,
 		{"offload_object_detect": "rknpu"},
 		{"offload_object_detect": "coral-edgetpu", "offload_image_embed": "rknpu", "offload_classify_image": "rknpu"},
 		{"offload_object_detect": "nope", "offload_face_detect": "rknpu"},
-	}
-	for _, e := range entries {
+		{" offload_object_detect ": " rknpu "},
+		{"offload_object_detect": "rknpu", " offload_object_detect": "coral-edgetpu"},
+	} {
 		for _, order := range threeDeviceOrders {
-			cfg := config.Default()
-			cfg.Accelerators = order
-			cfg.AcceleratorToolOwners = e
-			plan, _ := accelOwnerPlan(cfg)
-			var seen []string
-			var lanes []agent.AccelLane
-			for _, id := range order {
-				device := id
-				lanes = append(lanes, agent.AccelLane{ID: id, Claims: cfg.ToolOwnerClaims(id), Call: func(ctx context.Context, tool string, args map[string]any) (string, error) {
-					seen = append(seen, device)
-					return `{}`, nil
-				}})
+			shapes = append(shapes, shape{order, nil, e})
+		}
+		// The live shape and its mirror: one device here, one reached over the fleet.
+		shapes = append(shapes,
+			shape{[]string{"coral-edgetpu"}, []string{"rknpu"}, e},
+			shape{[]string{"rknpu"}, []string{"coral-edgetpu", "hailo-8l"}, e},
+			shape{nil, []string{"rknpu", "coral-edgetpu"}, e})
+	}
+	accelNames := map[string]bool{}
+	for _, id := range []string{"hailo-8l", "coral-edgetpu", "rknpu"} {
+		for _, tl := range accelMCPTools(id) {
+			accelNames[tl.name] = true
+		}
+	}
+	for _, sh := range shapes {
+		cfg := config.Default()
+		cfg.Accelerators, cfg.FleetAccelerators, cfg.AcceleratorToolOwners = sh.local, sh.fleet, sh.entries
+		plan, _ := accelOwnerPlan(cfg)
+		var seen []string
+		lanes := pipeline.NewLoopAccel(cfg)
+		for i := range lanes {
+			tag := lanes[i].ID
+			if lanes[i].Remote {
+				tag += FleetOwnerSuffix
 			}
-			tools, err := agent.ReadOnlyToolsWithLanes(t.TempDir(), nil, nil, lanes)
-			if err != nil {
-				t.Fatal(err)
+			lanes[i].Call = func(ctx context.Context, tool string, args map[string]any) (string, error) {
+				seen = append(seen, tag)
+				return `{}`, nil
 			}
-			for _, tl := range tools {
-				want, ok := plan[tl.Name]
-				if !ok {
-					continue
+		}
+		tools, err := agent.ReadOnlyToolsWithLanes(t.TempDir(), nil, nil, lanes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		count := map[string]int{}
+		for _, tl := range tools {
+			count[tl.Name]++
+			if accelNames[tl.Name] {
+				if _, ok := plan[tl.Name]; !ok {
+					t.Errorf("%+v: the loop registered %s, which the MCP plan does not serve", sh, tl.Name)
 				}
-				seen = nil
-				_, _ = tl.Exec(context.Background(), `{"image_path":"/tmp/x.jpg","text":"x"}`)
-				if len(seen) != 1 || seen[0] != want {
-					t.Errorf("entries %v, order %v: the loop's %s routed to %v, the MCP plan says %s", e, order, tl.Name, seen, want)
-				}
+			}
+			want, ok := plan[tl.Name]
+			if !ok {
+				continue
+			}
+			seen = nil
+			_, _ = tl.Exec(context.Background(), `{"image_path":"/tmp/x.jpg","text":"x"}`)
+			if len(seen) != 1 || seen[0] != want {
+				t.Errorf("%+v: the loop's %s routed to %v, the MCP plan says %s", sh, tl.Name, seen, want)
+			}
+		}
+		for name := range plan {
+			if count[name] != 1 {
+				t.Errorf("%+v: the loop registered %s %d times, the MCP plan serves it once", sh, name, count[name])
 			}
 		}
 	}
-	// The loop builder carries the claims from config onto each lane.
+}
+
+// Keys and values are compared with spaces trimmed, on both surfaces; two keys that trim to the same tool
+// are decided like the loop decides them (the first listed device's claim), and the other is reported.
+func TestToolOwnersTrimSpaces(t *testing.T) {
 	cfg := config.Default()
 	cfg.Accelerators = []string{"coral-edgetpu", "rknpu"}
-	cfg.AcceleratorToolOwners = map[string]string{"offload_object_detect": "rknpu", "offload_classify_image": "rknpu"}
-	for _, lane := range pipeline.NewLoopAccel(cfg) {
-		if want := cfg.ToolOwnerClaims(lane.ID); !slices.Equal(lane.Claims, want) {
-			t.Errorf("NewLoopAccel lane %s claims %v, want %v", lane.ID, lane.Claims, want)
-		}
+	cfg.AcceleratorToolOwners = map[string]string{" offload_object_detect ": " rknpu "}
+	if owner, ignored := accelOwnerPlan(cfg); owner["offload_object_detect"] != "rknpu" || len(ignored) != 0 {
+		t.Errorf("a spaced entry: object_detect -> %q (ignored %v), want rknpu", owner["offload_object_detect"], ignored)
+	}
+	cfg.AcceleratorToolOwners = map[string]string{"offload_object_detect": "rknpu", " offload_object_detect": "coral-edgetpu"}
+	owner, ignored := accelOwnerPlan(cfg)
+	if owner["offload_object_detect"] != "coral-edgetpu" {
+		t.Errorf("two keys for one tool: object_detect -> %q, want the first listed claimant coral-edgetpu", owner["offload_object_detect"])
+	}
+	if len(ignored) != 1 || !strings.Contains(ignored[0], "another entry for the same tool") {
+		t.Errorf("two keys for one tool: ignored = %v, want the losing entry reported", ignored)
 	}
 }
