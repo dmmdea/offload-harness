@@ -193,3 +193,23 @@ func hasEnv(env []string, want string) bool {
 	}
 	return false
 }
+
+// TestRK3588RknpuHomeSurvivesTheProvenanceReplay: the NPU seat's launcher follows --rknpu-home,
+// and the stamp records it, so auditing a config rendered with a non-default RKNPU home against
+// this binary reads MATCH instead of re-rendering the default home and calling it STALE.
+func TestRK3588RknpuHomeSurvivesTheProvenanceReplay(t *testing.T) {
+	res, err := rk3588Render(t, func(r *renderRequest) { r.RknpuHome = "/srv/npu-elsewhere" })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(res.Config, "/srv/npu-elsewhere/rkllm-serve.sh --model") {
+		t.Fatalf("the rendered seat does not launch from the RKNPU home:\n%s", res.Config)
+	}
+	stamped, err := servingtmpl.Stamp(res.Config, res.Basis, stampedAtFixed())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep := provenanceOf(stamped); rep.State != servingtmpl.StateMatch {
+		t.Fatalf("a config rendered with a non-default RKNPU home does not verify: %s -- %s (keys %v)", rep.State, rep.Detail, rep.Keys)
+	}
+}

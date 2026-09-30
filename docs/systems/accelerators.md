@@ -157,7 +157,8 @@ The seeded keys (rknpu):
 | `rknpu_timeout_sec` | one NPU call's bound, default 60; a forwarded call is cut off at `accelremote.Budget` (150 s) whatever this says, and a cold start can spend 45 s of it |
 | `rknpu_idle_sec` | the sidecar's self-exit idle window, default 300 — also how long a loaded model holds system RAM |
 
-`RKNPU_HOME` (`install seed --rknpu-home`, default `<OFFLOAD_HOME>/rknpu`) holds the sidecar's own
+`RKNPU_HOME` (`install seed --rknpu-home` and `install render --rknpu-home`, default `<OFFLOAD_HOME>/rknpu`; the
+rkllm seat's default launcher `__RKNPU_HOME__/rkllm-serve.sh` follows it, so the seat and the sidecar never split) holds the sidecar's own
 `venv/`, its `models/` and the sidecar itself (`accelerators/rknpu/`, copied flat or checked out
 beneath it); an empty home is refused at seed time like the other two. `install seed`,
 `install plan` and `audit-config` all resolve accelerator seeds through one helper

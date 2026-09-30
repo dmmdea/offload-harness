@@ -359,6 +359,9 @@ type renderRequest struct {
 	ModelsDir string
 	Listen    string
 	Home      string
+	// RknpuHome (--rknpu-home) is where __RKNPU_HOME__ expands in seat paths: the rkllm
+	// seat's default launcher lives there, like the sidecar's own command.
+	RknpuHome string
 	Threads   int
 	VLLM      vllmRuntimeFlags
 	// AltLlamaBinCPU (--llama-bin-cpu) is the CPU build's dir; non-empty renders the
@@ -500,7 +503,7 @@ func deriveRender(profilesRaw []byte, req renderRequest) (renderResult, error) {
 		CacheRAMMiB:  cacheRAMFor(doc.CacheRAMMiBByRAMTier, ramTier),
 		IncludeQ354B: p.IncludeQwen354B, IncludeQ359B: p.IncludeQwen359B,
 		IncludeQ3827B: p.IncludeQwen3827B, IncludeMimo9B: p.IncludeMimo9B,
-		Seats: p.MediaSeats, Home: req.Home, GOOS: target, GPUEnv: p.GPUEnv, Backend: p.Backend,
+		Seats: p.MediaSeats, Home: req.Home, RknpuHome: req.RknpuHome, GOOS: target, GPUEnv: p.GPUEnv, Backend: p.Backend,
 		AltCPULlamaBin:    req.AltLlamaBinCPU,
 		DisableCUDAGraphs: p.DisableCUDAGraphs,
 		VLLMSeat:          seat, VLLMRuntime: seatRT,
@@ -540,6 +543,7 @@ func runInstallRender(args []string) error {
 	out := fs.String("out", "", "write the rendered config here instead of stdout")
 	root := fs.String("root", ".", "repo root holding setup/templates/profiles.json")
 	home := fs.String("home", "", "install root, for media seat paths (__OFFLOAD_HOME__)")
+	rknpuHome := fs.String("rknpu-home", "", "RKNPU home, for the rkllm seat's launcher (__RKNPU_HOME__; default: $RKNPU_HOME, else <home>/rknpu)")
 	fallback := fs.String("fallback-backend", "", "render off-matrix defaults for this backend when --profile is unknown or empty (cuda|cuda-resident|dual-cuda|vulkan|rk3588|cpu)")
 	ramTier := fs.String("ram-tier", "", "min|low|mid|high — gates the RAM-hungry 26B placements. Empty = do not gate (the caller does not know)")
 	// The vLLM seat's DEPLOYMENT half. A tier is a hardware class, so it cannot know
@@ -559,6 +563,7 @@ func runInstallRender(args []string) error {
 	res, err := deriveRender(raw, renderRequest{
 		TierID: *profileID, Fallback: *fallback, RAMTier: *ramTier, GOOS: *goos,
 		LlamaBin: *llamaBin, ModelsDir: *modelsDir, Listen: *listen, Home: *home, Threads: *threads,
+		RknpuHome:      homeOr(*rknpuHome, "RKNPU_HOME", *home, "rknpu"),
 		AltLlamaBinCPU: *altLlamaBinCPU,
 		VLLM:           vllmRuntimeFlags{user: *vllmUser, proxyHost: *vllmProxy, venv: *vllmVenv, seatDir: *vllmSeatDir, hfHome: *hfHome},
 	})
@@ -759,7 +764,7 @@ func replayRequest(b servingtmpl.SpecBasis) (renderRequest, bool) {
 	req := renderRequest{
 		TierID: b.TierID, Fallback: b.Render.FallbackBackend, RAMTier: b.Render.RAMTier,
 		GOOS: b.Params.GOOS, LlamaBin: b.Params.LlamaBin, ModelsDir: b.Params.ModelsDir,
-		Listen: b.Params.Listen, Home: b.Params.Home, Threads: b.Params.Threads,
+		Listen: b.Params.Listen, Home: b.Params.Home, RknpuHome: b.Params.RknpuHome, Threads: b.Params.Threads,
 		// The vLLM deployment half is a per-BOX fact (the account, the bound
 		// address, where the venv lives), never a seed. Pinned from the stamp so
 		// the replay measures seed drift and not "the auditing box is not the

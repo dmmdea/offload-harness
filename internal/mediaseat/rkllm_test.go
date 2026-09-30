@@ -52,7 +52,7 @@ func TestRKLLMAndVisionCannotBothWriteVisionModel(t *testing.T) {
 
 func TestRKLLMDefaults(t *testing.T) {
 	bare := Seat{Kind: KindRKLLM, Name: "n", Model: "m.rkllm", CtxSize: 4096, Residency: Swappable}
-	if got := bare.EffectiveBin(); got != "__OFFLOAD_HOME__/rknpu/rkllm-serve.sh" {
+	if got := bare.EffectiveBin(); got != "__RKNPU_HOME__/rkllm-serve.sh" {
 		t.Errorf("default bin = %q", got)
 	}
 	if got := bare.EffectiveCPUMask(); got != "0x0f" {
@@ -125,6 +125,7 @@ func TestRKLLMValidateRejects(t *testing.T) {
 		{"lib_dir", func(s *Seat) { s.LibDir = "/x" }, "ignored on an rkllm seat"},
 		{"home token in model", func(s *Seat) { s.Model = "__OFFLOAD_HOME__/m.rkllm" }, "may not carry __OFFLOAD_HOME__"},
 		{"home token in encoder", func(s *Seat) { s.VisionEncoder = "__OFFLOAD_HOME__/e.rknn" }, "may not carry __OFFLOAD_HOME__"},
+		{"rknpu token in model", func(s *Seat) { s.Model = "__RKNPU_HOME__/m.rkllm" }, "may not carry __RKNPU_HOME__"},
 		{"literal .exe in the launcher", func(s *Seat) { s.Bin = "/x/serve.exe" }, "__EXE__"},
 		{"unsafe name", func(s *Seat) { s.Name = "a b" }, "must match"},
 	} {

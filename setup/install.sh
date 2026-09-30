@@ -264,7 +264,7 @@ else
   # install root, and without it the render REFUSES — after step 4 has already
   # written a config.json binding those seats' aliases.
   "$BIN" install render --profile "$TIER" --os linux --home "$PREFIX" \
-    --ram-tier "$RAM_TIER" \
+    --rknpu-home "${RKNPU_HOME:-$PREFIX/rknpu}" --ram-tier "$RAM_TIER" \
     --vllm-user "$SERVICE_USER" --vllm-proxy-host "$TS_IP" \
     --vllm-venv "$VLLM_VENV" --hf-home "$HF_HOME_DIR" \
     --llama-bin "$LLAMA_BIN" ${LLAMA_BIN_CPU:+--llama-bin-cpu "$LLAMA_BIN_CPU"} --models "$MODELS" --listen "$LISTEN" --out "$SWAP_YAML"

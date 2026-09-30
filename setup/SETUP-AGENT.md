@@ -817,8 +817,8 @@ uevent on a mainline kernel with the `rknpu` DKMS module — so it is **Linux on
 merges its seed and writes `installed.json` like the Coral's. A board on the in-tree `rocket` driver
 is not detected: the RKNN runtime does not run on it. Two knobs:
 
-- `RKNPU_HOME` (`install seed --rknpu-home`) — the sidecar home `__RKNPU_HOME__` expands to in the
-  seeded `rknpu_sidecar_cmd`. Default `<OFFLOAD_HOME>/rknpu`. It must hold `venv/` (the sidecar's
+- `RKNPU_HOME` (`install seed --rknpu-home`, and `install render --rknpu-home` for the rkllm seat's
+  launcher) — the sidecar home `__RKNPU_HOME__` expands to in the seeded `rknpu_sidecar_cmd`. Default `<OFFLOAD_HOME>/rknpu`. It must hold `venv/` (the sidecar's
   Python dependencies), `models/` (the `.rknn` models its manifest lists, each verified by sha256)
   and `accelerators/rknpu/` — copied flat or checked out beneath the home; the launcher walks up to
   `venv/`. The harness runs it as `rknpu-http.sh --idle-sec <rknpu_idle_sec>`. An EMPTY home is

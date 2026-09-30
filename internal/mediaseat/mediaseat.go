@@ -56,8 +56,9 @@ const (
 
 // What an rkllm seat runs when the tier names no launcher or CPU mask.
 const (
-	// DefaultRKLLMBin is the launcher the rknpu accelerator ships beside its sidecar.
-	DefaultRKLLMBin = "__OFFLOAD_HOME__/rknpu/rkllm-serve.sh"
+	// DefaultRKLLMBin is the launcher the rknpu accelerator ships beside its sidecar. It rides
+	// __RKNPU_HOME__, the token the sidecar's own command uses, so one RKNPU_HOME moves both.
+	DefaultRKLLMBin = "__RKNPU_HOME__/rkllm-serve.sh"
 	// DefaultRKLLMCPUMask is the RK3588's A55 cluster (cpu0-3): the runtime's host
 	// threads stay off the A76 cores until the operator chooses otherwise, which is
 	// what keeps the box's other workload responsive.
@@ -214,7 +215,7 @@ func (s Seat) BindingKey() string {
 // EffectiveBin is the executable the seat runs: its own bin, or for an rkllm seat
 // that names none the launcher the rknpu accelerator ships. The renderer and the
 // "does this seat need the install home" check both read it, so a default that
-// carries __OFFLOAD_HOME__ can never render without a home to expand it against.
+// carries __RKNPU_HOME__ can never render without a home to expand it against.
 func (s Seat) EffectiveBin() string {
 	if s.Bin == "" && s.Kind == KindRKLLM {
 		return DefaultRKLLMBin
@@ -398,6 +399,9 @@ func Validate(seats []Seat, tier string) error {
 		for field, v := range map[string]string{"model": s.Model, "mmproj": s.MMProj, "vad_model": s.VADModel, "vision_encoder": s.VisionEncoder, "chat_template": s.ChatTemplate} {
 			if strings.Contains(v, "__OFFLOAD_HOME__") {
 				problems = append(problems, fmt.Sprintf("%s: %s is relative to the models dir and may not carry __OFFLOAD_HOME__", where, field))
+			}
+			if strings.Contains(v, "__RKNPU_HOME__") {
+				problems = append(problems, fmt.Sprintf("%s: %s is relative to the models dir and may not carry __RKNPU_HOME__", where, field))
 			}
 		}
 		if s.Temp != nil && (*s.Temp < 0 || *s.Temp > 2) {

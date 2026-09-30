@@ -158,6 +158,29 @@ func TestRKLLMDefaultLauncherNeedsTheInstallHome(t *testing.T) {
 	}
 }
 
+// TestRKLLMDefaultLauncherFollowsTheRknpuHome: the default launcher rides __RKNPU_HOME__, the
+// token the sidecar's command uses, so one RKNPU_HOME moves the seat and the sidecar together.
+// With none given it falls back to <home>/rknpu, the layout every render had before the token.
+func TestRKLLMDefaultLauncherFollowsTheRknpuHome(t *testing.T) {
+	bare := mediaseat.Seat{Kind: mediaseat.KindRKLLM, Name: "npu-chat", Model: "m.rkllm", CtxSize: 4096, Residency: mediaseat.Swappable}
+	p := seatParams(bare)
+	p.RknpuHome = "/opt/npu-elsewhere/"
+	cmd := parseSwapConfig(t, mustRender(t, linuxCUDA(t), p)).Models["npu-chat"].Cmd
+	if !strings.HasPrefix(cmd, "/opt/npu-elsewhere/rkllm-serve.sh --model ") {
+		t.Errorf("a non-default RknpuHome must land in the rendered cmd, got %q", cmd)
+	}
+	p.RknpuHome = ""
+	cmd = parseSwapConfig(t, mustRender(t, linuxCUDA(t), p)).Models["npu-chat"].Cmd
+	if !strings.HasPrefix(cmd, "/srv/offload/rknpu/rkllm-serve.sh --model ") {
+		t.Errorf("with no RknpuHome the launcher falls back to <home>/rknpu, got %q", cmd)
+	}
+	// An explicit RknpuHome is enough on its own: the seat then names nothing under __OFFLOAD_HOME__.
+	p.Home, p.RknpuHome = "", "/opt/npu-elsewhere"
+	if _, err := Render(linuxCUDA(t), p); err != nil {
+		t.Errorf("an rkllm seat with an RknpuHome and no install home renders: %v", err)
+	}
+}
+
 // TestRKLLMSeatsTakeTheirOwnVarIds: a text-only rkllm seat writes no config key, so a tier
 // may declare several, and each needs its own matrix var beside a llama-backed seat's.
 func TestRKLLMSeatsTakeTheirOwnVarIds(t *testing.T) {

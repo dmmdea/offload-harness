@@ -103,6 +103,10 @@ type Params struct {
 	// suffix. Both matter only when Seats is non-empty.
 	Home string
 	GOOS string
+	// RknpuHome is the rknpu accelerator's home, substituted for __RKNPU_HOME__ in seat
+	// paths (an rkllm seat's default launcher lives there). Empty falls back to
+	// <Home>/rknpu, the layout `install seed` uses when no RKNPU_HOME says otherwise.
+	RknpuHome string
 
 	// DisplayLayer is the tier's display layer (ADR 0039) when it declares one:
 	// the dormant rungs pinned to the display card. nil — the common case, and
@@ -520,8 +524,8 @@ func (p Params) validate() error {
 	// kept as the tier's un-aliased ROLLBACK seat. The __Q354B_AGENT_ALIAS__ token
 	// (mirroring __Q359B_AGENT_ALIAS__) drops qwen3.5-4b-agent's own claim on the
 	// alias so only mimo-9b-agent carries it, avoiding the duplicate.
-	if len(p.Seats) > 0 && p.Home == "" && seatsNeedHome(p.Seats) {
-		missing = append(missing, "install home (a media seat names a path under "+tokenHome+")")
+	if len(p.Seats) > 0 && p.Home == "" && seatsNeedHome(p.Seats, p.RknpuHome) {
+		missing = append(missing, "install home (a media seat names a path under "+tokenHome+" or "+tokenRknpuHome+")")
 	}
 	if len(missing) > 0 {
 		return fmt.Errorf("serving template needs: %s", strings.Join(missing, ", "))
@@ -532,8 +536,9 @@ func (p Params) validate() error {
 // Tokens a seat path may carry, shared with internal/tierseed so ONE tier-table
 // row renders on every machine and OS.
 const (
-	tokenHome = "__OFFLOAD_HOME__"
-	tokenExe  = "__EXE__"
+	tokenHome      = "__OFFLOAD_HOME__"
+	tokenRknpuHome = "__RKNPU_HOME__"
+	tokenExe       = "__EXE__"
 )
 
 // seatsNeedHome scans exactly the fields seatExpand resolves. Scanning more would
@@ -541,24 +546,33 @@ const (
 // an rkllm seat that names none runs a default under the install home, and reading the
 // raw field would let it reach the token guard and die there as an unresolved token
 // instead of as the refusal that names the missing home.
-func seatsNeedHome(seats []mediaseat.Seat) bool {
+func seatsNeedHome(seats []mediaseat.Seat, rknpuHome string) bool {
 	for _, s := range seats {
-		if strings.Contains(s.EffectiveBin()+s.LibDir, tokenHome) {
+		paths := s.EffectiveBin() + s.LibDir
+		if strings.Contains(paths, tokenHome) || (rknpuHome == "" && strings.Contains(paths, tokenRknpuHome)) {
 			return true
 		}
 	}
 	return false
 }
 
-// seatExpand resolves the two seat-only tokens against the TARGET machine.
+// seatExpand resolves the seat-only tokens against the TARGET machine.
 func (p Params) seatExpand(s string) string {
 	exe := ""
 	if p.GOOS == "windows" {
 		exe = ".exe"
 	}
 	s = strings.ReplaceAll(s, tokenExe, exe)
+	home := strings.TrimRight(strings.ReplaceAll(p.Home, `\`, "/"), "/")
 	if p.Home != "" {
-		s = strings.ReplaceAll(s, tokenHome, strings.TrimRight(strings.ReplaceAll(p.Home, `\`, "/"), "/"))
+		s = strings.ReplaceAll(s, tokenHome, home)
+	}
+	rknpu := strings.TrimRight(strings.ReplaceAll(p.RknpuHome, `\`, "/"), "/")
+	if p.RknpuHome == "" && p.Home != "" {
+		rknpu = home + "/rknpu"
+	}
+	if rknpu != "" {
+		s = strings.ReplaceAll(s, tokenRknpuHome, rknpu)
 	}
 	return s
 }

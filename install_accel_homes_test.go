@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -114,5 +116,50 @@ func TestInstallSeedResolvesTheRknpuHome(t *testing.T) {
 	}
 	if accs, _ := got["accelerators"].([]any); len(accs) != 1 || accs[0] != "rknpu" {
 		t.Errorf("accelerators = %v, want [rknpu]", got["accelerators"])
+	}
+}
+
+// `install render` resolves the RKNPU home the way `install seed` does, and the rkllm seat's default launcher
+// follows it: the seat and the sidecar's command must never point at two different homes.
+func TestInstallRenderResolvesTheRknpuHome(t *testing.T) {
+	home := t.TempDir()
+	render := func(t *testing.T, args ...string) string {
+		t.Helper()
+		out := filepath.Join(t.TempDir(), "llama-swap.yaml")
+		full := append([]string{"-profile", "rockchip-rk3588", "-os", "linux", "-root", ".", "-home", home,
+			"-models", "/m", "-llama-bin", "/opt/llama", "-out", out}, args...)
+		captureStdout(t, func() {
+			if err := runInstallRender(full); err != nil {
+				t.Fatalf("install render %v: %v", args, err)
+			}
+		})
+		b, err := os.ReadFile(out)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+	launcher := func(t *testing.T, cfg string) string {
+		t.Helper()
+		for _, field := range strings.Fields(cfg) {
+			if strings.HasSuffix(field, "rkllm-serve.sh") {
+				return field
+			}
+		}
+		t.Fatalf("no rkllm-serve.sh launcher in the rendered config:\n%s", cfg)
+		return ""
+	}
+
+	t.Setenv("RKNPU_HOME", "/srv/npu-from-env")
+	if got := launcher(t, render(t, "-rknpu-home", "/opt/x/rknpu")); got != "/opt/x/rknpu/rkllm-serve.sh" {
+		t.Errorf("the flag must win over $RKNPU_HOME: launcher = %q", got)
+	}
+	if got := launcher(t, render(t)); got != "/srv/npu-from-env/rkllm-serve.sh" {
+		t.Errorf("$RKNPU_HOME must apply without the flag: launcher = %q", got)
+	}
+	t.Setenv("RKNPU_HOME", "")
+	got := launcher(t, render(t))
+	if want := strings.ReplaceAll(home, `\`, "/") + "/rknpu/rkllm-serve.sh"; got != want {
+		t.Errorf("the default must be <home>/rknpu: launcher = %q, want %q", got, want)
 	}
 }
