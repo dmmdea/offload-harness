@@ -24,8 +24,9 @@ A fade driven by `requestAnimationFrame` was already visible to the snapshot (op
 not targeted. The finish runs before the observe only, never before an action: jev's pre-click check
 compares the observed page and the target's guard with the live page, and a finish in between could make
 it fail. Forcing frames with `Page.captureScreenshot` is not an option (it hung for more than 15 s in
-the hidden tab). `date` and `datetime-local` inputs are still absent from the snapshot. Sidecar only
-(`setup/browse/runner.py`); reinstall with `setup/browse/install.ps1` to take it.
+the hidden tab). `date` and `datetime-local` inputs are still absent from the snapshot. The fix is in the sidecar
+(`setup/browse/runner.py`; the Go binary changes only its version string); reinstall with
+`setup/browse/install.ps1` to take it.
 
 ## [0.151.1] - 2026-09-30 - the Coral feeds EfficientNet-EdgeTPU-S a correctly quantised input
 
