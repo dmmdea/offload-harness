@@ -143,6 +143,19 @@ type fakeNode struct {
 	queueDepthFn      func() int
 	maxConcurrentJobs int
 	maxQueueDepth     int
+	// recentAgentWallSec / queueWaitEstimate are the node's ETA signals on
+	// health (0.127 / 0.128): the median wall of its last finished agent jobs
+	// and its own estimate of how long a NEW job waits for a worker. nil / 0 =
+	// the node publishes neither (an older node), which every pre-existing fake
+	// keeps doing. queueWaitEstimateFn answers per request, for a node whose
+	// backlog CHANGES during the run.
+	recentAgentWallSec  float64
+	queueWaitEstimate   *float64
+	queueWaitEstimateFn func() *float64
+	// dispatchRetryAfter, when set, rides every refusal this node writes
+	// (dispatchHook / dispatchStatus) as its Retry-After header — a `503 queue
+	// full` carries one on a real node.
+	dispatchRetryAfter string
 
 	// layers, when non-nil, is published as health's `layers` rows (a composite
 	// node, ADR 0039); decodeCap is the cap the node decodes a dispatched
@@ -213,6 +226,16 @@ func (f *fakeNode) server() *httptest.Server {
 		if f.saturation != nil {
 			health["saturation"] = f.saturation
 		}
+		if f.recentAgentWallSec > 0 {
+			health["recent_agent_wall_sec"] = f.recentAgentWallSec
+		}
+		est := f.queueWaitEstimate
+		if f.queueWaitEstimateFn != nil {
+			est = f.queueWaitEstimateFn()
+		}
+		if est != nil {
+			health["queue_wait_estimate_sec"] = *est
+		}
 		if f.seatRate != nil {
 			health["seat_rate"] = f.seatRate
 		}
@@ -248,6 +271,9 @@ func (f *fakeNode) server() *httptest.Server {
 		}
 		if f.dispatchHook != nil {
 			if status := f.dispatchHook(n); status != 0 {
+				if f.dispatchRetryAfter != "" {
+					w.Header().Set("Retry-After", f.dispatchRetryAfter)
+				}
 				w.WriteHeader(status)
 				_ = json.NewEncoder(w).Encode(map[string]string{"status": "error", "error": "scripted refusal"})
 				return
@@ -259,6 +285,9 @@ func (f *fakeNode) server() *httptest.Server {
 			return
 		}
 		if f.dispatchStatus != 0 {
+			if f.dispatchRetryAfter != "" {
+				w.Header().Set("Retry-After", f.dispatchRetryAfter)
+			}
 			w.WriteHeader(f.dispatchStatus)
 			_ = json.NewEncoder(w).Encode(map[string]string{"status": "error", "error": "scripted refusal"})
 			return

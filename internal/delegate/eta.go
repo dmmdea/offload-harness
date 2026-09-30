@@ -13,6 +13,7 @@ import (
 	"math"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/dmmdea/offload-harness/internal/seatrate"
 )
@@ -455,4 +456,109 @@ func scoreFitRanked(kind Kind, window int, eta float64, etaKnown bool) int {
 // already threads the real job id.
 func mintP2CSeed() string {
 	return strings.TrimPrefix(mintJobID(), "agd-")
+}
+
+// The queue budget and the backlog gate (ADR 0063, register C-70).
+//
+// Until ADR 0063 a job dispatched to a node was given a FIXED five minutes
+// (maxQueuedWait) to start, whatever the node said about its own backlog, and
+// the deal and the capacity wait ignored the backlog altogether: a node whose
+// recent jobs took 444 s with one worker was handed work that could not start
+// inside five minutes, the delegator gave up on it at the deadline, and the node
+// ran it anyway - a ghost that held the seat for a caller nobody was waiting for
+// (58 queue deadlines on 2026-09-29; the ghosts ran 38-96 % of the slow nodes'
+// wall in the hour before the diagnosis). Two rules, one arithmetic:
+//
+//   - the QUEUE BUDGET is derived from the node's ETA: 1.5 x the wait a new job
+//     faces + 30 s, clamped to [60 s, the caller's patience], so a job is given
+//     up on only when the node's own estimate was off by half again;
+//   - the BACKLOG GATE (startsWithinPatience) keeps a node whose ETA already
+//     exceeds the caller's patience out of the deal, the capacity wait and the
+//     re-placement candidates. It is a placement FEASIBILITY refusal that names
+//     its arithmetic - the same class as feasibleFinal above (INV-5 rider clause
+//     (i)) - never a pass rule and never a preference for a faster seat: it holds
+//     a node OUT only while its published backlog outlasts the wait the caller
+//     gave the contract, and the capacity wait re-reads the node every tick, so
+//     the node is never refused for good.
+//
+// The wait the caller gave is the contract's own poll budget (its wall plus
+// grace, or the node-sized auto bound): "a job may wait for a start at most as
+// long as it was allowed to run", the rule the fixed ceiling used to cap.
+const (
+	queueBudgetFactor   = 1.5
+	queueBudgetSlackSec = 30
+	queueBudgetFloorSec = 60
+)
+
+// etaStartFor is how long a NEW job dispatched to v waits before it STARTS, in
+// seconds: the node's own queue_wait_estimate_sec when it publishes one, else the
+// arithmetic over its jobs and recent wall (queueWaitFor). known=false when the
+// node publishes neither - no opinion, never a wait of 0 and never a penalty,
+// the house rule every capacity field in this package follows. A node that
+// publishes a recent wall and no estimate means genuinely 0 (a worker is free
+// now), which is a known zero.
+func etaStartFor(v NodeView) (sec float64, known bool) {
+	if v.QueueWaitEstimateSec != nil {
+		return *v.QueueWaitEstimateSec, true
+	}
+	if v.RecentAgentWallSec <= 0 {
+		return 0, false
+	}
+	return queueWaitFor(v), true
+}
+
+// startArithmetic renders where etaStartFor's number came from, for the gate's
+// reason: the node's own estimate, or the numbers the delegator derived it from.
+func startArithmetic(v NodeView) string {
+	if v.QueueWaitEstimateSec != nil {
+		return fmt.Sprintf("the node's own queue_wait_estimate_sec %.0f s", *v.QueueWaitEstimateSec)
+	}
+	workers := v.MaxConcurrentJobs
+	if workers < 1 {
+		workers = 1
+	}
+	return fmt.Sprintf("%d running + %d queued - %d worker(s) + 1 = %d ahead x %.1f s recent wall / %d worker(s)",
+		v.JobsRunning, v.JobsQueued, v.MaxConcurrentJobs, v.JobsRunning+v.JobsQueued-v.MaxConcurrentJobs+1, v.RecentAgentWallSec, workers)
+}
+
+// startsWithinPatience reports whether v can START a new job inside the wait the
+// caller gave the contract, or names the arithmetic that says it cannot. ok=true
+// with no reason when patience is not bounded (<= 0) or v publishes no ETA.
+func startsWithinPatience(v NodeView, patience time.Duration) (ok bool, why string) {
+	if patience <= 0 {
+		return true, ""
+	}
+	eta, known := etaStartFor(v)
+	if !known {
+		return true, ""
+	}
+	if time.Duration(eta*float64(pollSecond)) <= patience {
+		return true, ""
+	}
+	return false, fmt.Sprintf("a new job would wait ~%.0f s to start (%s), past the %.0f s this contract will wait for a start",
+		eta, startArithmetic(v), patience.Seconds()/pollSecond.Seconds())
+}
+
+// queueBudgetFor is how long the delegator waits for a job dispatched to v to
+// START before it gives up on it: clamp(1.5 x etaStart + 30 s, 60 s, patience).
+// A node that publishes no ETA is no opinion and keeps the ceiling that always
+// applied, min(patience, maxQueuedWait) - never a shorter wait than before. The
+// arithmetic is in the node's seconds, converted with pollSecond exactly as a
+// contract's wall is, so a test that compresses the clock compresses both.
+func queueBudgetFor(v NodeView, patience time.Duration) time.Duration {
+	eta, known := etaStartFor(v)
+	if !known {
+		if patience > maxQueuedWait {
+			return maxQueuedWait
+		}
+		return patience
+	}
+	budget := time.Duration((queueBudgetFactor*eta + queueBudgetSlackSec) * float64(pollSecond))
+	if floor := time.Duration(queueBudgetFloorSec) * pollSecond; budget < floor {
+		budget = floor
+	}
+	if budget > patience {
+		budget = patience
+	}
+	return budget
 }
