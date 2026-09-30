@@ -278,11 +278,61 @@ func DetectCoral(read func(path string) (string, error)) []string {
 	return nil
 }
 
+// rknpuUeventPaths are the sysfs files where the Rockchip NPU driver names itself. Which one
+// carries the name depends on the kernel:
+//
+//   - The vendor 6.1 BSP kernel builds the driver in, and its DRM node's device IS the NPU
+//     platform device, so a DRM card's device/uevent holds the line. Which cardN it takes depends
+//     on probe order (the display subsystem is card0 and the NPU card1 on the reference Orange Pi
+//     5, RK3588S), so all four candidates are read.
+//   - A mainline kernel with the out-of-tree rknpu (DKMS) makes the DRM card's device a virtual
+//     /sys/devices/rknpu whose uevent is EMPTY, so the DRM cards say nothing. The line is on the
+//     NPU's three core platform devices instead (RK3588: fdab0000, fdac0000, fdad0000), and any
+//     one of them bound is enough.
+//
+// Linux only; Windows has no sysfs and the read fails.
+var rknpuUeventPaths = []string{
+	"/sys/class/drm/card0/device/uevent",
+	"/sys/class/drm/card1/device/uevent",
+	"/sys/class/drm/card2/device/uevent",
+	"/sys/class/drm/card3/device/uevent",
+	"/sys/bus/platform/devices/fdab0000.npu/uevent",
+	"/sys/bus/platform/devices/fdac0000.npu/uevent",
+	"/sys/bus/platform/devices/fdad0000.npu/uevent",
+}
+
+// rknpuDriverLine is the uevent line that proves the RKNPU driver is bound: the platform
+// driver's name, case-sensitive and whole-line. The mainline in-tree driver binds the same
+// platform devices as DRIVER=rocket and the RKNN runtime does not run on it, so it is
+// deliberately not a match — listing it would register tools whose first call can never succeed.
+const rknpuDriverLine = "DRIVER=RKNPU"
+
+// DetectRknpu reports ["rknpu"] iff one of the candidate uevent files (both kernel layouts, see
+// rknpuUeventPaths) carries the DRIVER=RKNPU line. A successful read alone proves nothing (any
+// DRM card reads, and so does the Mali GPU's), so the driver token is the whole rule; an
+// unreadable candidate is skipped, and no match is "no accelerator", never a failure. read is
+// injected so the rule is testable without a device.
+func DetectRknpu(read func(path string) (string, error)) []string {
+	for _, p := range rknpuUeventPaths {
+		s, err := read(p)
+		if err != nil {
+			continue
+		}
+		for _, line := range strings.Split(s, "\n") {
+			if line == rknpuDriverLine {
+				return []string{"rknpu"}
+			}
+		}
+	}
+	return nil
+}
+
 // DetectAllAccelerators is the union of every device probe, in the order the
-// ids will be listed in config.Accelerators — Hailo first, then Coral. Order is
-// load-bearing: the tool surface's shared-name rule (Coral D5) gives a name to
-// the FIRST listed accelerator that owns it.
+// ids will be listed in config.Accelerators — Hailo first, then Coral, then the
+// RKNPU. Order is load-bearing: the tool surface's shared-name rule (Coral D5)
+// gives a name to the FIRST listed accelerator that owns it.
 func DetectAllAccelerators(run func(args ...string) (string, error), read func(path string) (string, error)) []string {
 	out := DetectAccelerators(run)
-	return append(out, DetectCoral(read)...)
+	out = append(out, DetectCoral(read)...)
+	return append(out, DetectRknpu(read)...)
 }

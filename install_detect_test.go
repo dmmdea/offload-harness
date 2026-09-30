@@ -9,6 +9,80 @@ import (
 	"testing"
 )
 
+// stubSysfs swaps the accelerator sysfs reader for the test. The real one reads THIS machine, so a
+// test that asserts an exact accelerator set would fail on the very board it targets (an RKNPU
+// answers there) unless every test names the sysfs it means.
+func stubSysfs(t *testing.T, read func(path string) (string, error)) {
+	t.Helper()
+	orig := sysfsRead
+	t.Cleanup(func() { sysfsRead = orig })
+	sysfsRead = read
+}
+
+// noSysfsDevice is a box whose sysfs holds no accelerator node: no Coral apex, no RKNPU.
+func noSysfsDevice(path string) (string, error) {
+	return "", errors.New("open " + path + ": no such file or directory")
+}
+
+// rknpuLayouts are the reference board's sysfs on its two kernels. On the vendor 6.1 kernel the NPU,
+// bound by the vendor RKNPU driver, is DRM card1 beside the display subsystem's card0. On the mainline
+// kernel with the rknpu DKMS driver the GPU is card1, the NPU's DRM card2 has an empty uevent, and the
+// driver name is on the NPU's core platform devices.
+var rknpuLayouts = map[string]map[string]string{
+	"vendor kernel": {
+		"/sys/class/drm/card0/device/uevent": "DRIVER=rockchip-drm\nOF_NAME=display-subsystem\n",
+		"/sys/class/drm/card1/device/uevent": "DRIVER=RKNPU\nOF_NAME=npu\nOF_COMPATIBLE_0=rockchip,rk3588-rknpu\n",
+	},
+	"mainline kernel + rknpu DKMS": {
+		"/sys/class/drm/card0/device/uevent":            "DRIVER=rockchip-drm\nOF_NAME=display-subsystem\n",
+		"/sys/class/drm/card1/device/uevent":            "DRIVER=panthor\nOF_NAME=gpu\nOF_COMPATIBLE_0=rockchip,rk3588-mali\n",
+		"/sys/class/drm/card2/device/uevent":            "",
+		"/sys/bus/platform/devices/fdab0000.npu/uevent": "DRIVER=RKNPU\nOF_NAME=npu\nOF_COMPATIBLE_0=rockchip,rk3588-rknn-core\n",
+	},
+}
+
+// sysfsFiles reads from a fixed map of sysfs files and finds no other.
+func sysfsFiles(files map[string]string) func(path string) (string, error) {
+	return func(path string) (string, error) {
+		if body, ok := files[path]; ok {
+			return body, nil
+		}
+		return noSysfsDevice(path)
+	}
+}
+
+// rknpuSysfs is the reference board on its vendor kernel.
+var rknpuSysfs = sysfsFiles(rknpuLayouts["vendor kernel"])
+
+// TestInstallDetectEmitsRknpu proves the RKNPU probe rides the same wiring as the Hailo one: `install
+// detect` hands hwdetect the real sysfs reader, so a board whose NPU driver line is in sysfs — on either
+// kernel layout — comes out with rknpu in its verdict and no other device.
+func TestInstallDetectEmitsRknpu(t *testing.T) {
+	orig := hailortcliRun
+	defer func() { hailortcliRun = orig }()
+	hailortcliRun = func(args ...string) (string, error) { return "", errors.New("exec: hailortcli: not found") }
+
+	for layout, files := range rknpuLayouts {
+		stubSysfs(t, sysfsFiles(files))
+		out := captureStdout(t, func() {
+			if err := runInstallDetect([]string{"-json"}); err != nil {
+				t.Fatalf("%s: install detect -json: %v", layout, err)
+			}
+		})
+		var got struct {
+			Verdict struct {
+				Accelerators []string `json:"accelerators"`
+			} `json:"verdict"`
+		}
+		if err := json.Unmarshal([]byte(out), &got); err != nil {
+			t.Fatalf("%s: emitted JSON did not parse: %v\n%s", layout, err, out)
+		}
+		if len(got.Verdict.Accelerators) != 1 || got.Verdict.Accelerators[0] != "rknpu" {
+			t.Fatalf("%s: verdict.accelerators = %v, want [rknpu]", layout, got.Verdict.Accelerators)
+		}
+	}
+}
+
 // TestInstallDetectEmitsAccelerators proves the detection entry point actually
 // carries hwdetect.DetectAccelerators' answer into the emitted verdict — the
 // wiring, not just the classifier. The runner is faked (this box has no Hailo
@@ -16,6 +90,7 @@ import (
 func TestInstallDetectEmitsAccelerators(t *testing.T) {
 	orig := hailortcliRun
 	defer func() { hailortcliRun = orig }()
+	stubSysfs(t, noSysfsDevice)
 	hailortcliRun = func(args ...string) (string, error) {
 		switch strings.Join(args, " ") {
 		case "scan":
@@ -56,6 +131,7 @@ func TestInstallDetectEmitsAccelerators(t *testing.T) {
 func TestInstallPlanEmitsAccelerators(t *testing.T) {
 	orig := hailortcliRun
 	defer func() { hailortcliRun = orig }()
+	stubSysfs(t, noSysfsDevice)
 	hailortcliRun = func(args ...string) (string, error) {
 		switch strings.Join(args, " ") {
 		case "scan":
@@ -110,6 +186,7 @@ func TestInstallPlanEmitsAccelerators(t *testing.T) {
 func TestInstallDetectOmitsAcceleratorsWithoutDevice(t *testing.T) {
 	orig := hailortcliRun
 	defer func() { hailortcliRun = orig }()
+	stubSysfs(t, noSysfsDevice)
 	hailortcliRun = func(args ...string) (string, error) {
 		return "", errors.New("exec: hailortcli: not found")
 	}

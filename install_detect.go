@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 
 	"github.com/dmmdea/offload-harness/internal/config"
@@ -18,10 +17,10 @@ import (
 // (hwdetect.DetectAccelerators). A package var so tests can stand in a fake
 // device; the real runner's error (tool absent, driver down) is the normal
 // no-NPU case and DetectAccelerators treats it as "no accelerator".
-// sysfsRead is the Coral probe's reader (hwdetect.DetectCoral): a plain read of
-// the apex status node. On Windows the path does not exist and the read fails,
-// which the probe reads as "no accelerator". A package var, like hailortcliRun,
-// so tests can stand in a fake.
+// sysfsRead is the reader of the sysfs probes (hwdetect.DetectCoral's apex status
+// node, hwdetect.DetectRknpu's DRM uevent files): a plain read. On Windows the
+// paths do not exist and the read fails, which the probes read as "no
+// accelerator". A package var, like hailortcliRun, so tests can stand in a fake.
 var sysfsRead = func(path string) (string, error) {
 	b, err := os.ReadFile(path)
 	return string(b), err
@@ -120,17 +119,14 @@ func runInstallPlan(args []string) error {
 		return err
 	}
 	// Accelerator seeds merge OVER the tier seed — same order as install.ps1, so the
-	// plan predicts exactly the config the install would write. HAILO_HOME resolution
-	// mirrors install.ps1 verbatim ($env:HAILO_HOME else <OFFLOAD_HOME>\hailo) and is
-	// never empty: an empty HailoHome would expand __HAILO_HOME__ to "" and produce
-	// the plausible-wrong "/hailo-http.cmd".
+	// plan predicts exactly the config the install would write. Every device's home
+	// resolves as `install seed` does with no flag ($<DEVICE>_HOME, else
+	// <OFFLOAD_HOME>/<device>; install.ps1's $env:HAILO_HOME rule for the Hailo) and
+	// is never empty: an empty home would expand its token to "" and produce the
+	// plausible-wrong "/hailo-http.cmd" (tierseed refuses that render).
 	if len(verdict.Accelerators) > 0 {
-		hailoHome := os.Getenv("HAILO_HOME")
-		if hailoHome == "" {
-			hailoHome = filepath.Join(installHome, "hailo")
-		}
 		accSeed, err := tierseed.ResolveAccelerators(doc.Accelerators, verdict.Accelerators,
-			tierseed.Options{Home: installHome, HailoHome: hailoHome})
+			accelOptions(tierseed.Options{Home: installHome}, "", "", ""))
 		if err != nil {
 			return err
 		}

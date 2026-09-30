@@ -1313,7 +1313,7 @@ type Config struct {
 	// config file or the public repo. A self-hosted NIM needs no key.
 	// --- accelerators (ADR 0024): devices that ride BESIDE the GPU tier ---
 	// Accelerators lists the additive accelerator ids present on this box
-	// (today: "hailo-8l"). `profile` stays the one GPU tier; an empty list is
+	// ("hailo-8l", "coral-edgetpu", "rknpu"). `profile` stays the one GPU tier; an empty list is
 	// byte-identical to a box with no accelerator — tools/list does not change.
 	Accelerators []string `json:"accelerators,omitempty"`
 	// FleetAccelerators lists accelerator ids this box does NOT carry but may
@@ -1347,6 +1347,21 @@ type Config struct {
 	CoralTimeoutSec int `json:"coral_timeout_sec,omitempty"`
 	// CoralIdleSec is passed to the sidecar as its self-exit idle window. Default 300.
 	CoralIdleSec int `json:"coral_idle_sec,omitempty"`
+	// RknpuEndpoint is the Rockchip RK3588 NPU sidecar base (accelerators/rknpu/server.py),
+	// loopback only, port 18815 so a box carrying several devices never collides with the
+	// Hailo's 18813 or the Coral's 18814. Inert while Accelerators lacks "rknpu".
+	RknpuEndpoint string `json:"rknpu_endpoint,omitempty"`
+	// RknpuSidecarCmd launches the RKNPU sidecar on demand (rknpu-http.sh). Empty =
+	// never spawn; the harness defers when /health is unreachable.
+	RknpuSidecarCmd string `json:"rknpu_sidecar_cmd,omitempty"`
+	// RknpuTimeoutSec bounds one RKNPU call. The NPU itself answers in milliseconds, but a
+	// cold call also pays the RKNN runtime init and the model load, so 60 is ample. It must
+	// stay under accelremote.Budget less the 45 s cold-spawn window: a forwarded call is
+	// cut off at the Budget whatever this says. Default 60.
+	RknpuTimeoutSec int `json:"rknpu_timeout_sec,omitempty"`
+	// RknpuIdleSec is passed to the sidecar as its self-exit idle window, which is also how
+	// long its resident models keep their RAM (the NPU shares system memory). Default 300.
+	RknpuIdleSec int `json:"rknpu_idle_sec,omitempty"`
 	// --- fleet-node server (`fleet-serve` / `fleet-measure`; docs/FLEET-NODE.md) ---
 	// FleetListen is the fleet-serve bind address. Loopback by default; the
 	// production binding is the machine's TAILSCALE address behind
@@ -1832,6 +1847,9 @@ func Default() Config {
 		CoralEndpoint:                 "http://127.0.0.1:18814", // loopback sidecar base; inert while Accelerators lacks coral-edgetpu
 		CoralTimeoutSec:               30,
 		CoralIdleSec:                  300,
+		RknpuEndpoint:                 "http://127.0.0.1:18815", // loopback sidecar base; inert while Accelerators lacks rknpu
+		RknpuTimeoutSec:               60,
+		RknpuIdleSec:                  300,
 		FleetListen:                   "127.0.0.1:18811", // fleet-serve bind (18810 = the dispatcher's)
 		FleetNodeID:                   "",                // "" = hostname at serve time
 		FleetMaxQueueDepth:            0,                 // 0 = built-in default (2x fleet_max_concurrent_jobs accepted+running); negative = unlimited

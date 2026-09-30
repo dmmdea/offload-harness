@@ -38,7 +38,7 @@ results, not errors.
 **Twenty-nine tools** are registered on every box, in families. `.printing-press.json` lists all 31
 the code can register, and a drift test holds the two together. The advertised set is per-box:
 `agent_delegate` and `offload_research` are gated on `agent_delegation_enabled`, and a box listing
-an accelerator registers 11 more (see [accelerators.md](accelerators.md)). Read `tools/list` rather
+an accelerator registers its own — 11 for the Hailo-8L, 4 for the Coral, 3 for the RKNPU (see [accelerators.md](accelerators.md)). Read `tools/list` rather
 than any number written down:
 
 | Family | Tools |
