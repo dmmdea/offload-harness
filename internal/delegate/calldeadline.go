@@ -50,8 +50,9 @@ import (
 var ErrCallDeadline = errors.New("call deadline reached")
 
 // callDeadlinePrefix opens every reason the deadline publishes. It is a stable
-// grep key: the ledger, the corpus and the wire all carry it.
-const callDeadlinePrefix = "call deadline reached"
+// grep key: the ledger, the corpus and the wire all carry it, and core owns the words
+// so the readers outside this package (the rigger) match the same constant.
+const callDeadlinePrefix = core.CallDeadlineReasonPrefix
 
 // Grace bounds the unwind allowance after the deadline: the time cooperating
 // goroutines get to write their own telemetry rows and hand back a truthful
