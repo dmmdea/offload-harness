@@ -117,7 +117,9 @@ func TestWarmSeatOutcomeARequestThatFailedIsNotALoad(t *testing.T) {
 // A warm-up whose seat start FAILED loaded nothing, so it is not a cold load: the
 // store hears nothing from it (and, since C-76, the coherence probe is not asked
 // either — nothing was loaded for this run). Five failed starts must not push a
-// real load out of the window of five.
+// real load out of the window of five. This is the arm where the failed start is not
+// even an attempt (a non-200 answer, the seat never listed); the arms where a load WAS
+// attempted and not confirmed are the two tests after it.
 func TestAWarmUpThatFailedIsNotRecordedAsAColdLoad(t *testing.T) {
 	defer compressLiveness(t, 5*time.Second, 100*time.Millisecond, core.AgentCeilingSecCap)()
 	fake := &agentFake{
@@ -136,6 +138,82 @@ func TestAWarmUpThatFailedIsNotRecordedAsAColdLoad(t *testing.T) {
 	}
 	if got := storedSeat(t, dir); len(got.ColdLoads) != 0 || got.ColdLoadSec != 0 {
 		t.Fatalf("cold_loads=%v cold_load_sec=%.1f: a start that failed was recorded as a cold load", got.ColdLoads, got.ColdLoadSec)
+	}
+}
+
+// A load that OUTLASTS the admission budget is attempted and not confirmed: the warm-up
+// waited its whole budget on a seat that was still loading, which is the cost of a wait
+// that failed and not the length of a load. Since a non-200 answer with a never-listed
+// seat stopped being an attempt (C-76), this is one of the two arms of the run's
+// `if warmLoaded` guard that only a run-level test reaches.
+func TestAWarmUpWhoseLoadOutlastedTheBudgetIsNotRecordedAsAColdLoad(t *testing.T) {
+	defer compressLiveness(t, 5*time.Second, 100*time.Millisecond, core.AgentCeilingSecCap)()
+	fake := &agentFake{
+		rosterIDs: []string{agentTestSeat},
+		running:   func(int64) string { return `{"running":[]}` }, // never listed: nothing is resident while the load runs
+		upstreamModels: func(n int64) string {
+			if n == 1 { // the warm-up's request; the probes after it are answered at once
+				time.Sleep(admissionPoll + 3*time.Second) // the load outlasts the 5 s admission budget
+			}
+			return `{"object":"list","data":[{"id":"` + agentTestSeat + `"}]}`
+		},
+		loop: func(int64) string { return doneChat("answered") },
+	}
+	srv := fake.server(t)
+	defer srv.Close()
+	dir := sharedStateDir(t)
+	cfg := config.Config{Endpoint: srv.URL, Model: "workhorse", AgentModel: agentTestSeat, FleetNodeID: "node-t", Temperature: 0.1,
+		StateDir: dir, AgentAdmissionWaitSec: 5}
+	p := New(cfg, llamaclient.New(srv.URL, "", cfg.Model, 30*time.Second), nil, nil)
+	contract := testContract()
+	contract.OutputSchema = nil
+	wire := decodeWire(t, p.Run(context.Background(), agentTestRequest(t, contract)))
+	if !strings.Contains(wire.AdmissionNote, "cold load exceeded the admission budget") {
+		t.Fatalf("admission_note = %q: the warm-up did not wait out its budget on the load (premise)", wire.AdmissionNote)
+	}
+	if got := storedSeat(t, dir); len(got.ColdLoads) != 0 || got.ColdLoadSec != 0 {
+		t.Fatalf("cold_loads=%v cold_load_sec=%.1f: a load that outlasted the admission budget was recorded as a cold load", got.ColdLoads, got.ColdLoadSec)
+	}
+}
+
+// The other arm: the warm-up's own request fails (llama-swap drops the connection under
+// it) after the seat was asked to load. Attempted, not confirmed, and so not a cold load.
+func TestAWarmRequestThatFailedIsNotRecordedAsAColdLoad(t *testing.T) {
+	defer compressLiveness(t, 5*time.Second, 100*time.Millisecond, core.AgentCeilingSecCap)()
+	fake := &agentFake{
+		rosterIDs: []string{agentTestSeat},
+		running:   func(int64) string { return `{"running":[]}` }, // never listed
+		loop:      func(int64) string { return doneChat("answered") },
+	}
+	inner := fake.server(t)
+	defer inner.Close()
+	var passthroughs atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/upstream/") && strings.HasSuffix(r.URL.Path, "/v1/models") {
+			// Every request on the warm-up's route is dropped, not only the first: the HTTP
+			// client replays an idempotent GET once after a dropped connection, and the replay
+			// has to fail too for the warm-up to see its request fail.
+			passthroughs.Add(1)
+			time.Sleep(300 * time.Millisecond) // long enough that a recorded load would not round to nothing
+			if hj, ok := w.(http.Hijacker); ok {
+				if c, _, err := hj.Hijack(); err == nil {
+					_ = c.Close()
+				}
+			}
+			return
+		}
+		inner.Config.Handler.ServeHTTP(w, r)
+	}))
+	defer srv.Close()
+	dir := sharedStateDir(t)
+	contract := testContract()
+	contract.OutputSchema = nil
+	wire := decodeWire(t, pipelineOn(t, srv.URL, dir).Run(context.Background(), agentTestRequest(t, contract)))
+	if passthroughs.Load() == 0 || !strings.Contains(wire.AdmissionNote, "warm request failed") {
+		t.Fatalf("passthrough requests=%d admission_note=%q: the warm-up's request did not fail (premise)", passthroughs.Load(), wire.AdmissionNote)
+	}
+	if got := storedSeat(t, dir); len(got.ColdLoads) != 0 || got.ColdLoadSec != 0 {
+		t.Fatalf("cold_loads=%v cold_load_sec=%.1f: a warm request that failed was recorded as a cold load", got.ColdLoads, got.ColdLoadSec)
 	}
 }
 
