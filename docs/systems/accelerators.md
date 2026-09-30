@@ -186,7 +186,12 @@ node config from that one declaration.
   `vision_tasks` key. The tier declares `["vqa", "ocr"]`: the RKLLM runtime cannot constrain sampling (the
   server answers a `grammar` or `json_schema` with 400 `constrained_decoding_unsupported`) and `assess_image`
   always sends a grammar. The node refuses `assess_image` at ack time and a delegator places it elsewhere; see
-  [FLEET-NODE.md](../FLEET-NODE.md#the-vision-task-post-fleetvision).
+  [FLEET-NODE.md](../FLEET-NODE.md#the-vision-task-post-fleetvision). The text subset (`classify`, `extract`)
+  becomes the node's `text_tasks`, which opens the fleet text lane; the tier declares none (the lane ships dark,
+  see [FLEET-NODE.md](../FLEET-NODE.md#the-text-task-post-fleettext)).
+- **`unconstrained_seats`** is written for every `rkllm` seat (its name and aliases), whatever its `tasks`: the
+  runtime cannot constrain decoding, so the node's own pipeline sends it no grammar and validates the reply
+  strictly instead ([ADR 0069](../architecture/decisions/0069-an-unconstrained-seat-runs-classify-and-extract-from-the-prompt-and-the-text-lane-ships-dark.md)).
 
 The tier also seeds limits for an NPU that runs one generation at a time: `fleet_max_concurrent_jobs` 1,
 `request_timeout_sec` 240 (below the delegator's 300 s fleet vision budget), `max_input_chars` 8000 and
@@ -198,7 +203,7 @@ waiting), inside the server's own window of one running and two waiting. Numbers
 copy under `RKNPU_HOME`, which `install.sh` never refreshes. A 0.153.0 render emits `--repeat-penalty 1.1`, which a
 0.151.1 server refuses (`unrecognized arguments`), so refresh `accelerators/rknpu` in `RKNPU_HOME` (at least
 `rkllm_server.py`) first and only then re-render `llama-swap.yaml`. `install.sh` also leaves an existing `config.json`
-untouched, so add `vision_tasks` (`["vqa","ocr"]`), `fleet_max_concurrent_jobs` 1, `request_timeout_sec` 240,
+untouched, so add `unconstrained_seats` (the seat's model id, 0.154.0), `vision_tasks` (`["vqa","ocr"]`), `fleet_max_concurrent_jobs` 1, `request_timeout_sec` 240,
 `max_input_chars` 8000 and `ocr_max_tokens` 512 by hand, or delete the file to regenerate it; `local-offload audit-config`
 lists them as SEED-ONLY.
 

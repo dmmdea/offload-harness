@@ -55,10 +55,10 @@ const (
 )
 
 // The task names a seat may declare in Seat.Tasks. The first three are the fleet vision
-// lane's single-image tasks; classify and extract are the text tasks, accepted now so a
-// tier can declare them ahead of the door that will read them. Only the vision subset is
-// bound into the node config (Bindings writes vision_tasks); a text task is validated and
-// carried but not yet bound.
+// lane's single-image tasks; classify and extract are the text tasks the fleet text lane
+// serves. Bindings writes the vision subset as vision_tasks and the text subset as text_tasks.
+// summarize and triage are not declarable: the RKLLM runtime returns no logprobs, so the
+// decision-margin gate cannot run, and blind quality on the reference seat was 0/4 for each.
 const (
 	TaskVQA         = "vqa"
 	TaskOCR         = "ocr"
@@ -71,6 +71,10 @@ const (
 // written in, whatever order a tier declared them, so the same declaration always renders the
 // same config.
 var visionTaskOrder = []string{TaskVQA, TaskOCR, TaskAssessImage}
+
+// textTaskOrder is the canonical order of the text lane's tasks: the order text_tasks is written
+// in, whatever order a tier declared them.
+var textTaskOrder = []string{TaskClassify, TaskExtract}
 
 // knownTasks is every name Seat.Tasks accepts.
 var knownTasks = map[string]bool{
@@ -293,6 +297,32 @@ func (s Seat) VisionTasks() []string {
 	return out
 }
 
+// TextTasks is the text subset of the seat's declared Tasks, in canonical order (classify,
+// extract) and de-duplicated. nil when the seat declares no text task, which the node reads as
+// "no text lane": unlike the vision lane the text lane is dark unless declared.
+func (s Seat) TextTasks() []string {
+	var out []string
+	for _, t := range textTaskOrder {
+		for _, d := range s.Tasks {
+			if d == t {
+				out = append(out, t)
+				break
+			}
+		}
+	}
+	return out
+}
+
+// UnconstrainedNames is every model id an rkllm seat answers to (its name and its aliases): the
+// ids the node's unconstrained_seats lists, because a cascade model configured by alias reaches
+// the same runtime, which refuses a grammar whichever name it was asked by. nil for any other kind.
+func (s Seat) UnconstrainedNames() []string {
+	if s.Kind != KindRKLLM {
+		return nil
+	}
+	return append([]string{s.Name}, s.Aliases...)
+}
+
 // Bindings is the config fragment a tier's seats produce. This is the ONLY
 // writer of these keys — a seed that also sets them by hand is refused, because
 // two writers is exactly how the seat and its binding drifted apart before.
@@ -300,9 +330,18 @@ func (s Seat) VisionTasks() []string {
 // vision_tasks rides with vision_model: the seat that binds the vision route also says which
 // of the three vision tasks it serves, and only when it declares a vision subset (a seat that
 // declares none leaves the key absent, so the node serves all three).
+//
+// Every rkllm seat, bound to a route or not, also writes unconstrained_seats (its model ids):
+// the runtime cannot constrain decoding, so the node's own pipeline must not send it a grammar.
+// text_tasks is the seat's declared text subset (classify, extract); absent = no fleet text lane.
 func Bindings(seats []Seat) map[string]any {
 	out := map[string]any{}
+	var unconstrained []string
 	for _, s := range seats {
+		unconstrained = append(unconstrained, s.UnconstrainedNames()...)
+		if tasks := s.TextTasks(); len(tasks) > 0 {
+			out["text_tasks"] = tasks
+		}
 		k := s.BindingKey()
 		if k == "" {
 			continue
@@ -314,11 +353,16 @@ func Bindings(seats []Seat) map[string]any {
 			}
 		}
 	}
+	if len(unconstrained) > 0 {
+		out["unconstrained_seats"] = unconstrained
+	}
 	return out
 }
 
 // BoundKeys is every config key seats may write, for the seed validator.
-func BoundKeys() []string { return []string{"ocr_model", "stt_model", "vision_model", "vision_tasks"} }
+func BoundKeys() []string {
+	return []string{"ocr_model", "stt_model", "text_tasks", "unconstrained_seats", "vision_model", "vision_tasks"}
+}
 
 // Validate rejects a seat set at AUTHORING time — in a test over the committed
 // tier table — rather than on someone's machine, where the symptom is a service
@@ -339,6 +383,11 @@ func Validate(seats []Seat, tier string) error {
 		case KindVision, KindSTT, KindOCR, KindRKLLM:
 			if k := s.BindingKey(); k != "" {
 				writers[k] = append(writers[k], where)
+			}
+			// text_tasks is one node key too: two seats declaring text tasks would leave it decided
+			// by slice order.
+			if len(s.TextTasks()) > 0 {
+				writers["text_tasks"] = append(writers["text_tasks"], where)
 			}
 		case "":
 			problems = append(problems, where+": no kind (want "+KindVision+", "+KindSTT+", "+KindOCR+" or "+KindRKLLM+")")
@@ -503,8 +552,8 @@ const (
 	maxRepeatPenalty = 10.0
 )
 
-// checkTasks validates a seat's declared task set. Tasks is read only by the vision binding (and
-// later the text door), so it is refused where nothing reads it, and a vision task is refused on
+// checkTasks validates a seat's declared task set. Tasks is read only by the vision and text
+// bindings, so it is refused where nothing reads it, and a vision task is refused on
 // a seat that cannot read an image: each would otherwise be a declaration that silently does
 // nothing, or one that advertises a task the seat cannot serve.
 func checkTasks(s Seat, where string) []string {
@@ -513,7 +562,7 @@ func checkTasks(s Seat, where string) []string {
 	}
 	var problems []string
 	seen := map[string]bool{}
-	hasVision := false
+	hasVision, hasText := false, false
 	for _, t := range s.Tasks {
 		switch {
 		case !knownTasks[t]:
@@ -528,10 +577,18 @@ func checkTasks(s Seat, where string) []string {
 				hasVision = true
 			}
 		}
+		for _, v := range textTaskOrder {
+			if t == v {
+				hasText = true
+			}
+		}
 	}
 	switch {
 	case s.Kind == KindSTT || s.Kind == KindOCR:
 		problems = append(problems, where+": tasks are read only for a vision or rkllm seat and are ignored on a "+s.Kind+" seat")
+	case hasText && s.Kind != KindRKLLM:
+		problems = append(problems, where+": a text task (classify/extract) is served by the node's own cascade on an unconstrained seat, "+
+			"which only an rkllm seat is; this "+s.Kind+" seat constrains decoding and needs no declaration")
 	case hasVision && s.BindingKey() != "vision_model":
 		problems = append(problems, where+": a vision task (vqa/ocr/assess_image) needs a seat that reads images — "+
 			"an rkllm seat needs a vision_encoder; this seat binds no vision_model, so the declaration would advertise a task it cannot serve")

@@ -24,16 +24,17 @@ func TestRKLLMSeatPassesAndBindsVisionOnlyWithAnEncoder(t *testing.T) {
 	if err := Validate([]Seat{s}, "tier"); err != nil {
 		t.Fatal(err)
 	}
-	if got := Bindings([]Seat{s}); len(got) != 1 || got["vision_model"] != "npu-seat" {
-		t.Errorf("a VLM rkllm seat binds vision_model = its name, got %v", got)
+	if got := Bindings([]Seat{s}); len(got) != 2 || got["vision_model"] != "npu-seat" {
+		t.Errorf("a VLM rkllm seat binds vision_model = its name (and unconstrained_seats), got %v", got)
 	}
 	textOnly := s
 	textOnly.VisionEncoder = ""
 	if err := Validate([]Seat{textOnly}, "tier"); err != nil {
 		t.Fatal(err)
 	}
-	if got := Bindings([]Seat{textOnly}); len(got) != 0 {
-		t.Errorf("a text-only rkllm seat cannot answer an image question and must bind nothing, got %v", got)
+	got := Bindings([]Seat{textOnly})
+	if _, has := got["vision_model"]; has || len(got) != 1 {
+		t.Errorf("a text-only rkllm seat cannot answer an image question and must bind no route (only unconstrained_seats), got %v", got)
 	}
 }
 
@@ -236,7 +237,7 @@ func TestSeatTasksBindTheVisionSubsetInCanonicalOrder(t *testing.T) {
 		t.Errorf("vision_model = %v, want the seat", got["vision_model"])
 	}
 
-	s.Tasks = []string{"assess_image", "extract", "vqa", "classify", "ocr"} // all five: text tasks are accepted, not bound
+	s.Tasks = []string{"assess_image", "extract", "vqa", "classify", "ocr"} // all five: the text subset binds text_tasks
 	if err := Validate([]Seat{s}, "tier"); err != nil {
 		t.Fatal(err)
 	}
@@ -257,6 +258,80 @@ func TestSeatTasksBindTheVisionSubsetInCanonicalOrder(t *testing.T) {
 	}
 	if want := []string{"vqa", "assess_image"}; !reflect.DeepEqual(Bindings([]Seat{v})["vision_tasks"], want) {
 		t.Errorf("a vision seat's vision_tasks = %v, want %v", Bindings([]Seat{v})["vision_tasks"], want)
+	}
+}
+
+// TestRKLLMSeatWritesUnconstrainedSeatsAndTextTasks: every rkllm seat (routes or not) writes
+// unconstrained_seats = its name and aliases, because its runtime cannot constrain decoding;
+// text_tasks is the declared text subset in canonical order, and absent when none is declared
+// (the fleet text lane ships dark). No other kind writes either key.
+func TestRKLLMSeatWritesUnconstrainedSeatsAndTextTasks(t *testing.T) {
+	s := rkllmSeat()
+	got := Bindings([]Seat{s})
+	if want := []string{"npu-seat", "npu-chat", "vision"}; !reflect.DeepEqual(got["unconstrained_seats"], want) {
+		t.Errorf("unconstrained_seats = %v, want %v", got["unconstrained_seats"], want)
+	}
+	if _, has := got["text_tasks"]; has {
+		t.Errorf("a seat declaring no text task must not write text_tasks (the lane is dark), got %v", got["text_tasks"])
+	}
+	s.Tasks = []string{"extract", "ocr", "classify", "vqa"}
+	if err := Validate([]Seat{s}, "tier"); err != nil {
+		t.Fatal(err)
+	}
+	got = Bindings([]Seat{s})
+	if want := []string{"classify", "extract"}; !reflect.DeepEqual(got["text_tasks"], want) {
+		t.Errorf("text_tasks = %v, want %v (canonical order)", got["text_tasks"], want)
+	}
+	// Other kinds write neither key.
+	for _, o := range append(good(), ocrSeat()) {
+		b := Bindings([]Seat{o})
+		if _, has := b["unconstrained_seats"]; has {
+			t.Errorf("a %s seat must not write unconstrained_seats, got %v", o.Kind, b)
+		}
+	}
+	// A text task is refused on a seat whose runtime constrains decoding.
+	v := good()[0]
+	v.Tasks = []string{"vqa", "classify"}
+	if err := Validate([]Seat{v}, "tier"); err == nil || !strings.Contains(err.Error(), "only an rkllm seat is") {
+		t.Errorf("a text task on a vision seat must be refused, got %v", err)
+	}
+	// summarize and triage are not declarable at all.
+	s.Tasks = []string{"vqa", "summarize"}
+	if err := Validate([]Seat{s}, "tier"); err == nil || !strings.Contains(err.Error(), `unknown task "summarize"`) {
+		t.Errorf("summarize must not be declarable, got %v", err)
+	}
+	s.Tasks = []string{"vqa", "triage"}
+	if err := Validate([]Seat{s}, "tier"); err == nil || !strings.Contains(err.Error(), `unknown task "triage"`) {
+		t.Errorf("triage must not be declarable, got %v", err)
+	}
+}
+
+// Two seats declaring text tasks would leave the node's single text_tasks decided by slice order.
+func TestTwoSeatsCannotBothDeclareTextTasks(t *testing.T) {
+	a, b := rkllmSeat(), rkllmSeat()
+	a.VisionEncoder, b.VisionEncoder = "", ""
+	a.Name, b.Name = "npu-a", "npu-b"
+	a.Aliases, b.Aliases = nil, nil
+	a.Tasks, b.Tasks = []string{"classify"}, []string{"extract"}
+	err := Validate([]Seat{a, b}, "tier")
+	if err == nil || !strings.Contains(err.Error(), "at most one") || !strings.Contains(err.Error(), `"text_tasks"`) {
+		t.Fatalf("want a refusal naming text_tasks, got %v", err)
+	}
+	b.Tasks = nil
+	if err := Validate([]Seat{a, b}, "tier"); err != nil {
+		t.Fatalf("one seat declaring text tasks must pass: %v", err)
+	}
+}
+
+func TestBoundKeysIncludeTextDoorKeys(t *testing.T) {
+	for _, want := range []string{"unconstrained_seats", "text_tasks"} {
+		found := false
+		for _, k := range BoundKeys() {
+			found = found || k == want
+		}
+		if !found {
+			t.Errorf("BoundKeys %v must include %s so a config_seed cannot write it", BoundKeys(), want)
+		}
 	}
 }
 

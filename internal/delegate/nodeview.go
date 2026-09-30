@@ -119,6 +119,11 @@ type NodeView struct {
 	// three: an older node, and a node whose seat serves everything, both read as
 	// today. Read it through ServesVisionTask, never directly.
 	VisionTasks []string
+	// TextTasks is the subset of classify / extract the node's text lane serves
+	// (health `text_tasks`, 0.154.0). nil = the node publishes none, which here means
+	// NONE: the lane is dark unless declared, and an older node never lists "text"
+	// either. Read it through ServesTextTask, never directly.
+	TextTasks []string
 	// Layers is a composite node's advertised device layers (health `layers`,
 	// ADR 0039): the spec of every layer and seat, live occupancy, and the
 	// node's OWN admissibility verdict per layer. The delegator rebuilds them
@@ -168,6 +173,38 @@ type NodeView struct {
 // lists it in supported_task_types when its vision_model is bound and the lane
 // is safely reachable (fleetnode.taskConfiguredFor).
 const VisionTask = "vision"
+
+// TextTask is the fleet task_type of the text lane (0.154.0): a node lists it in
+// supported_task_types only when its tier declares text tasks (config text_tasks) and the
+// lane is safely reachable (fleetnode.taskConfiguredFor).
+const TextTask = "text"
+
+// ServesText reports whether v advertises the text lane.
+func (v NodeView) ServesText() bool {
+	for _, t := range v.Tasks {
+		if t == TextTask {
+			return true
+		}
+	}
+	return false
+}
+
+// ServesTextTask reports whether v serves the text lane AND the given task (classify or
+// extract). Unlike the vision lane an absent list is NOT "all": the lane ships dark, so a
+// node is a target only when it lists both the lane and the task. An older node (which
+// publishes neither) is therefore never picked, and neither is a node that lists the lane
+// with an empty task set.
+func (v NodeView) ServesTextTask(task string) bool {
+	if !v.ServesText() {
+		return false
+	}
+	for _, t := range v.TextTasks {
+		if t == task {
+			return true
+		}
+	}
+	return false
+}
 
 // ServesVision reports whether v advertises the vision lane.
 func (v NodeView) ServesVision() bool {
@@ -301,6 +338,9 @@ type healthWire struct {
 	// Additive (0.153.0): the vision tasks the seat serves. Absent on an older node
 	// and on a node whose seat serves all three, decoding to nil = all three.
 	VisionTasks []string `json:"vision_tasks"`
+	// Additive (0.154.0): the classify / extract tasks the node's text lane serves.
+	// Absent on an older node and on any node whose tier declares none (the lane is dark).
+	TextTasks []string `json:"text_tasks"`
 	// Additive (0.116.0, ADR 0039). nil on a plain or pre-0.116 node; the ONE
 	// row shape fleetnode publishes and offload_status echoes.
 	Layers []placetable.LayerRow `json:"layers"`
@@ -376,6 +416,7 @@ func FetchNodeView(ctx context.Context, base, token string) (NodeView, error) {
 		Tasks:             w.SupportedTaskTypes,
 		VisionModel:       w.VisionModel,
 		VisionTasks:       w.VisionTasks,
+		TextTasks:         w.TextTasks,
 		Layers:            w.Layers,
 		Local:             false,
 

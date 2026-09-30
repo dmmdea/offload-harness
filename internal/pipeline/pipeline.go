@@ -59,7 +59,6 @@ import (
 	"github.com/dmmdea/offload-harness/internal/sttclient"
 	"github.com/dmmdea/offload-harness/internal/svgkit"
 	"github.com/dmmdea/offload-harness/internal/tasks"
-	"github.com/dmmdea/offload-harness/internal/validator"
 	"github.com/dmmdea/offload-harness/internal/verifier"
 	"github.com/dmmdea/offload-harness/internal/videoio"
 )
@@ -4064,13 +4063,22 @@ func (p *Pipeline) attempt(ctx context.Context, req core.Request, built tasks.Bu
 	if attempts < 1 {
 		attempts = 1
 	}
+	// A seat whose runtime cannot constrain decoding (config unconstrained_seats) gets the
+	// prompt-carried shape and no constraint field at all; see unconstrained.go. Decided once,
+	// before the prompt is used, so every retry sends the same thing.
+	unconstrained := p.unconstrainedFor(model, built)
+	if unconstrained {
+		built = built.ForUnconstrained()
+		meta.PromptPrefixSHA256 = promptFingerprintSent(built, req.Input)
+	}
 	user := built.User
 	var lastContent string
 
 	// triage/classify carry a single decision token whose raw logprob margin is a
-	// genuine-uncertainty signal; request top logprobs for those tasks only.
+	// genuine-uncertainty signal; request top logprobs for those tasks only. An unconstrained
+	// seat ignores logprobs, so none are requested and the margin gate stays inert there.
 	topLP := 0
-	if req.Task == core.TaskTriage || req.Task == core.TaskClassify {
+	if !unconstrained && (req.Task == core.TaskTriage || req.Task == core.TaskClassify) {
 		topLP = 10
 	}
 
@@ -4102,7 +4110,7 @@ func (p *Pipeline) attempt(ctx context.Context, req core.Request, built tasks.Bu
 	// on this path already carries, so it cannot serve one render's answer to
 	// the other's caller the way RenderKey exists to prevent.
 	grammar, genOpts := built.Grammar, opts
-	if len(built.Fields) > 0 && p.isVLLMSeat(ctx, model) {
+	if !unconstrained && len(built.Fields) > 0 && p.isVLLMSeat(ctx, model) {
 		grammar = ""
 		// A fresh slice, never append-in-place: opts is the CALLER's variadic
 		// array, and growing it under a spare cap would leak this call's
@@ -4129,7 +4137,7 @@ func (p *Pipeline) attempt(ctx context.Context, req core.Request, built tasks.Bu
 		data, perr := parser.Extract(gen.Content)
 		v := verifier.Check(gen.Content, gen.Truncated, perr)
 		if v.OK {
-			if verr := validator.Validate(data, built.Schema); verr != nil {
+			if verr := validateReply(data, built); verr != nil {
 				v = verifier.Verdict{Retry: true, Reason: "schema: " + verr.Error()}
 				meta.EscSource = core.EscSchema
 			} else if g, ok := grounding.Check(req.Task, req.Input, data); ok {
@@ -4268,8 +4276,15 @@ func (p *Pipeline) attemptReasoning(ctx context.Context, req core.Request, built
 func (p *Pipeline) attemptReasoningOn(ctx context.Context, model string, req core.Request, built tasks.Built, ck string, meta core.Meta, start time.Time, entryChars int, opts ...llamaclient.GenOption) (core.Result, bool) {
 	meta.Model = model
 	meta.Reasoning = true // tag every reasoning-tier outcome so a reclaim is distinguishable from an escalation answer (same model)
+	unconstrained := p.unconstrainedFor(model, built)
+	if unconstrained {
+		built = built.ForUnconstrained()
+		meta.PromptPrefixSHA256 = promptFingerprintSent(built, req.Input)
+	}
 	grammar, genOpts := gbnf.WrapThinking(built.Grammar), opts
-	if len(built.Fields) > 0 && p.isVLLMSeat(ctx, model) {
+	if unconstrained {
+		grammar = "" // nothing to wrap: the seat takes no grammar, and the shape rides in the prompt
+	} else if len(built.Fields) > 0 && p.isVLLMSeat(ctx, model) {
 		grammar = ""
 		genOpts = make([]llamaclient.GenOption, 0, len(opts)+2)
 		genOpts = append(genOpts, opts...)
@@ -4293,7 +4308,7 @@ func (p *Pipeline) attemptReasoningOn(ctx context.Context, model string, req cor
 	data, perr := parser.Extract(content)
 	v := verifier.Check(content, gen.Truncated, perr)
 	if v.OK {
-		if verr := validator.Validate(data, built.Schema); verr != nil {
+		if verr := validateReply(data, built); verr != nil {
 			v = verifier.Verdict{Reason: "schema: " + verr.Error()}
 		} else if g, ok := grounding.Check(req.Task, req.Input, data); ok {
 			meta.Grounded = &g

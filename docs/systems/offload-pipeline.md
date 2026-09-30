@@ -436,7 +436,17 @@ than compiled in.
    the llama-swap roster) — because vLLM accepts and DISCARDS the `grammar` field; never
    `--json-schema` or `response_format` — see
    [ADR 0002](../architecture/decisions/0002-grammar-reliable-serving-flags.md) and its 2026-09-18
-   amendment (register D-129).
+   amendment (register D-129). A seat whose runtime cannot constrain decoding at all (the RKLLM runtime on
+   an RK3588 NPU: HTTP 400 `constrained_decoding_unsupported` to any grammar or schema, logprobs ignored)
+   is declared in `unconstrained_seats`, written by the tier's `rkllm` media seat. For it the pipeline sends
+   NO grammar, NO schema and NO logprobs request, states the exact JSON shape in the system prompt
+   (`tasks.Built.ForUnconstrained`; the prompt of every other seat is byte-identical), parses the reply
+   leniently (fences and leading prose stripped) and accepts it only after strict validation against the
+   schema the grammar would have enforced: every key present, types right, the classify label in the allowed
+   set, no extra key. A failure takes the correction retry, then defers naming what failed; grounding and
+   classify's self-reported confidence gate still apply, and the decision-margin gate is inert there (it
+   needs logprobs). summarize and triage run the same validated path locally and are never admitted on the
+   fleet text lane. See [ADR 0069](../architecture/decisions/0069-an-unconstrained-seat-runs-classify-and-extract-from-the-prompt-and-the-text-lane-ships-dark.md).
 3. The recordless path writes nothing — no ledger, no cache, no shadow capture.
 4. Infrastructure failures do not escalate.
 5. The reasoning Tier never fabricates a pass: garbage from it still defers.
@@ -580,6 +590,8 @@ routing solver and the guard's reading and staleness rules. `internal/grounding/
   as the escalation Tier (they differ only if the config binds them apart, as the ≥16GB matrix
   recommendation does); the flag is what tells them apart.
 - Reading logprobs under an active grammar as if they were unconstrained. They are pre-mask.
+- Expecting a margin escalation from an unconstrained seat. No logprobs come back, so no margin is recorded and
+  only strict validation, grounding and classify's self-reported confidence can send its answer up.
 
 ## Source map
 

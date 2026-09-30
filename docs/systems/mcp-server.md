@@ -89,6 +89,13 @@ and acceptance checks; a contract whose goal is to summarize one file costs a 20
 cascade answer and starves the calibration loop of the rows it fits thresholds from. The tool descriptions say
 so, because the caller reads them and nothing else.
 
+`offload_classify` and `offload_extract` take an optional `route` (0.154.0, the vision tools' shape; this changed
+`tools/list` on every box): `local` (default, byte-identical to before), `auto` (a fleet node runs it only while the
+machine-wide GPU lease is held, and never when none is eligible) or `remote` (force a node; defers when none is
+eligible). The fleet text lane behind it is dark until a node's tier declares text tasks, so on today's fleets `auto`
+stays local and `remote` defers. summarize and triage take no `route`. See
+[FLEET-NODE.md](../FLEET-NODE.md#the-text-task-post-fleettext).
+
 `agent_run` drives the coding agent loop. Its default planner is the **agent seat** (config
 `agent_model`, else the workhorse `model`; a per-call `model` argument overrides both — and on a
 composite box (ADR 0052) the placement table decides when no per-call model is given, its seat
