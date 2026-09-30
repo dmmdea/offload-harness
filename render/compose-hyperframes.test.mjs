@@ -10,10 +10,10 @@ import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
 import vm from "node:vm";
-import { DEFAULTS as CAPTION_DEFAULTS, captionsFromSegments } from "./captions-groups.mjs";
+import { DEFAULTS as CAPTION_DEFAULTS, PACES as CAPTION_PACES, captionsFromSegments } from "./captions-groups.mjs";
 import { fileURLToPath } from "node:url";
 import {
-  ALLOWED_SUBCOMMANDS, FORCED_ENV, PASSTHROUGH_ENV_KEYS, PINNED_VERSION, applyTemplateVariables, assertAllowedInvocation,
+  ALLOWED_BROWSER_SUBCOMMANDS, ALLOWED_SUBCOMMANDS, FORCED_ENV, PASSTHROUGH_ENV_KEYS, PINNED_VERSION, applyTemplateVariables, assertAllowedInvocation,
   buildCheckArgs, buildChildEnv, buildRenderArgs, buildSnapshotArgs, classifyFailure, compositionMeta,
   listTemplates, materializeTemplate, parseJsonDoc, rewriteRootDuration, summarizeProbe, verifyOutput,
 } from "./compose-hyperframes.mjs";
@@ -1131,4 +1131,267 @@ test("the shipped template list is complete in the templates README and in the m
     assert.ok(shipped[1].includes("`" + n + "`"), `${n}: not in the media-generation shipped list`);
   }
   assert.ok(names.length >= 7, `expected the 7 shipped templates, found ${names}`);
+});
+
+// --- drift guards: what the docs, the skill and the pages state must be what the code does ----------------------
+// The limits, numbers and lists below are written by hand in several places. Each test reads the one table or
+// sentence it is about, so a name or a number mentioned elsewhere in the same file cannot satisfy it, and compares
+// it with the source of truth: the page's own declarations, the helper's exports, the runner's allowlist.
+
+const readRepo = (...parts) => readFileSync(join(__dirname, "..", ...parts), "utf8").replace(/\r\n/g, "\n");
+// sectionOf returns the text under a heading, up to the next heading of the same or a higher level.
+function sectionOf(md, title) {
+  const m = new RegExp(`^(#{1,6}) ${title}\\s*$`, "m").exec(md);
+  assert.ok(m, `no "${title}" heading`);
+  const rest = md.slice(m.index + m[0].length);
+  const next = new RegExp(`^#{1,${m[1].length}} `, "m").exec(rest);
+  return rest.slice(0, next ? next.index : rest.length);
+}
+const pageOf = (name) => readFileSync(join(TEMPLATES_DIR, name, "index.html"), "utf8");
+const manifestOf = (name) => JSON.parse(readFileSync(join(TEMPLATES_DIR, name, "template.json"), "utf8"));
+
+// The variable table of a template's README: id, type cell, default cell.
+function readmeRows(name) {
+  const rows = [];
+  for (const line of sectionOf(readRepo("render", "compose-templates", name, "README.md"), "Variables").split("\n")) {
+    const cells = line.split("|").map((c) => c.trim());
+    const id = /^`([a-z0-9_]+)`$/.exec(cells[1] || "");
+    if (cells.length >= 5 && id) rows.push({ id: id[1], type: cells[2], def: cells[3] });
+  }
+  return rows;
+}
+
+test("templates: each README's variable table states exactly the ids, types, limits and defaults its page declares", () => {
+  for (const name of listTemplates(TEMPLATES_DIR)) {
+    const decls = declaredVariables(pageOf(name));
+    const rows = readmeRows(name);
+    assert.deepEqual(rows.map((r) => r.id).sort(), decls.map((d) => d.id).sort(), `${name}: the table lists exactly the declared variables`);
+    for (const d of decls) {
+      const row = rows.find((r) => r.id === d.id);
+      const at = `${name}.${d.id}`;
+      const quoted = "`" + d.default + "`";
+      if (d.type === "string") {
+        assert.equal(row.type, `string (≤ ${d.maxLength})`, `${at}: type cell`);
+        if (row.def.startsWith("`")) assert.equal(row.def, quoted, `${at}: default cell`); // a long default may be described in prose
+      } else if (d.type === "number") {
+        assert.match(row.type, new RegExp(`^number, ${d.min}-${d.max}( s)?$`), `${at}: type cell "${row.type}"`);
+        assert.equal(row.def, quoted, `${at}: default cell`);
+      } else {
+        assert.equal(row.type, d.type, `${at}: type cell`);
+        assert.equal(row.def, quoted, `${at}: default cell`);
+      }
+    }
+  }
+});
+
+test("templates: the templates README table states each template's alpha flag, default length and range as it declares them", () => {
+  const md = readRepo("render", "compose-templates", "README.md");
+  for (const name of listTemplates(TEMPLATES_DIR)) {
+    const line = md.split("\n").find((l) => l.startsWith(`| [\`${name}\`](`));
+    assert.ok(line, `${name}: no row in the templates README table`);
+    const cells = line.split("|").map((c) => c.trim());
+    const manifest = manifestOf(name);
+    const dur = declaredVariables(pageOf(name)).find((d) => d.id === manifest.duration_variable);
+    assert.equal(cells[3].startsWith("yes"), manifest.alpha, `${name}: alpha cell "${cells[3]}"`);
+    assert.ok(cells[4].startsWith(`${dur.default} s`), `${name}: default length cell "${cells[4]}", declared ${dur.default} s`);
+    const range = /\((\d+) to (\d+) s\)/.exec(cells[4]);
+    if (range) assert.deepEqual([Number(range[1]), Number(range[2])], [dur.min, dur.max], `${name}: range cell "${cells[4]}"`);
+  }
+});
+
+test("captions: the paces, breaks, holds and chunk caps quoted in the skill, the README and the media doc are the helper's own", () => {
+  const num = (s) => Number(s.replace(/,/g, ""));
+  const docs = [
+    ["the skill", sectionOf(readRepo("skill", "hyperframes-compose", "SKILL.md"), "Captions from a transcript"), { linger: false, minHold: false }],
+    ["the captions-bar README", sectionOf(readRepo("render", "compose-templates", "captions-bar", "README.md"), "From a transcript"), { linger: true, minHold: true }],
+    ["the media doc", sectionOf(readRepo("docs", "systems", "media-generation.md"), "Captions from a transcript"), { linger: true, minHold: false }],
+  ];
+  for (const [where, text, has] of docs) {
+    const one = (re, what) => {
+      const m = re.exec(text);
+      assert.ok(m, `${where} does not state ${what}`);
+      return m;
+    };
+    assert.equal(num(one(/`punchy`\s+(?:\(up to\s+)?(\d+)/, "the punchy pace")[1]), CAPTION_PACES.punchy.maxWords, `${where}: punchy words`);
+    assert.equal(num(one(/`conversational`\s+\(?(\d+)/, "the conversational pace")[1]), CAPTION_PACES.conversational.maxWords, `${where}: conversational words`);
+    assert.equal(num(one(/`calm`\s+\(?(\d+)/, "the calm pace")[1]), CAPTION_PACES.calm.maxWords, `${where}: calm words`);
+    assert.equal(Number(one(/pause of ([\d.]+) s or more/, "the pause that ends a group")[1]), CAPTION_DEFAULTS.gapSec, `${where}: pause`);
+    assert.equal(num(one(/(?:pass|past) (\d+) characters/, "the line width")[1]), CAPTION_DEFAULTS.maxChars, `${where}: characters per group`);
+    const cap = one(/at most ([\d,]+) characters and (\d+) s/, "the chunk cap");
+    assert.deepEqual([num(cap[1]), num(cap[2])], [CAPTION_DEFAULTS.variableChars, CAPTION_DEFAULTS.variableSec], `${where}: chunk cap`);
+    if (has.linger) assert.equal(Number(one(/(?:held |holds each group )([\d.]+) s past its last word/, "the linger")[1]), CAPTION_DEFAULTS.lingerSec, `${where}: linger`);
+    if (has.minHold) assert.equal(Number(one(/at least ([\d.]+) s\b/, "the minimum hold")[1]), CAPTION_DEFAULTS.minHoldSec, `${where}: minimum hold`);
+  }
+  // the skill's one canvas sentence holds for every template
+  const canvas = /Every template is (\d+) x (\d+) at (\d+) fps and takes a `(\w+)` variable/.exec(readRepo("skill", "hyperframes-compose", "SKILL.md"));
+  assert.ok(canvas, "the skill states the canvas every template shares");
+  for (const name of listTemplates(TEMPLATES_DIR)) {
+    const m = manifestOf(name);
+    assert.deepEqual([m.width, m.height, m.fps, m.duration_variable], [Number(canvas[1]), Number(canvas[2]), Number(canvas[3]), canvas[4]], `${name}: the skill's canvas sentence`);
+  }
+});
+
+// The template list is hand-written in six more places than the tool description (which a Go test pins). Each
+// is read as the sentence it is, both ways: every shipped template is named, and nothing else is.
+test("the shipped template list in the CLI help, the README, the operator guide, the glossary and the doctor line is complete and names nothing else", () => {
+  const shipped = listTemplates(TEMPLATES_DIR).sort();
+  const ticked = (s) => [...s.matchAll(/`([^`]+)`/g)].map((m) => m[1]);
+  const lists = {
+    "the --template help (main.go)": /"a vetted template on this machine \(([^)]*)\)"/.exec(readRepo("main.go")),
+    "the README tool row": /a vetted template \(([^)]*)\)/.exec(readRepo("README.md")),
+    "the operator guide": /The vetted templates are ([^.]*)\./.exec(readRepo("docs", "OPERATOR-GUIDE.md")),
+    "the glossary entry": /`render\/compose-templates\/`: ([^.]*)\./.exec(readRepo("docs", "glossary.md")),
+    "the media doc's shipped list": /\(shipped: ([^)]*)\)/.exec(readRepo("docs", "systems", "media-generation.md")),
+    "the setup doctor line": /templates=([a-z0-9,-]+)/.exec(readRepo("setup", "SETUP-AGENT.md")),
+  };
+  for (const [where, m] of Object.entries(lists)) {
+    assert.ok(m, `${where}: the sentence that lists the templates was not found`);
+    const listed = (where === "the --template help (main.go)" ? m[1].split(",").map((s) => s.trim()) : where === "the setup doctor line" ? m[1].split(",") : ticked(m[1]));
+    assert.deepEqual([...listed].sort(), shipped, `${where} must list exactly the shipped templates`);
+  }
+  assert.deepEqual(lists["the setup doctor line"][1].split(","), shipped, "the doctor prints them sorted");
+});
+
+test("kit ports: each text slot sits where the card reads it, so no two variables are wired to each other's place", () => {
+  // Reading order, top to bottom. Declaration order is what a caller sees and is free to differ; this is the layout.
+  const READING = {
+    "stat-card": ["kicker", "stat", "label_pre", "label_em", "label_post", "source"],
+    "section-title": ["kicker", "headline_pre", "headline_em", "headline_post"],
+    "callout-label": ["term", "detail"],
+    "checklist-card": ["title_pre", "title_em", "title_post", "item1", "item2", "item3", "item4"],
+  };
+  for (const [name, order] of Object.entries(READING)) {
+    assert.deepEqual([...pageOf(name).matchAll(/data-var-text="([^"]+)"/g)].map((m) => m[1]), order, `${name}: text slots in reading order`);
+  }
+});
+
+test("templates: every font weight a page asks for has a matching @font-face, so no face is synthesised or fetched", () => {
+  for (const name of listTemplates(TEMPLATES_DIR)) {
+    const html = pageOf(name);
+    const declared = new Set([...html.matchAll(/@font-face\s*\{([^}]*)\}/g)].map((m) => Number((/font-weight:\s*(\d+)/.exec(m[1]) || [])[1])));
+    assert.ok(declared.size > 0 && ![...declared].some(Number.isNaN), `${name}: every @font-face states a numeric weight`);
+    const css = html.replace(/@font-face\s*\{[^}]*\}/g, "");
+    const used = new Set();
+    for (const m of css.matchAll(/font-weight:\s*([a-z0-9]+)/gi)) {
+      const v = m[1].toLowerCase();
+      used.add(v === "normal" ? 400 : v === "bold" ? 700 : /^\d+$/.test(v) ? Number(v) : v);
+    }
+    for (const u of used) {
+      assert.equal(typeof u, "number", `${name}: font-weight ${u} is relative; use a number so it can be matched to a face`);
+      assert.ok(declared.has(u), `${name}: font-weight ${u} is used but no @font-face declares it (declared: ${[...declared]})`);
+    }
+    assert.ok(!/(^|[;{\s])font:\s*[^;}]*\d/.test(css), `${name}: the font shorthand hides a weight from this check; use font-family and font-weight`);
+  }
+});
+
+test("templates: the exit is as long as the time it is held back by, the --duration fallbacks are the declared default, and the shortest clip outlasts the exit", () => {
+  for (const name of listTemplates(TEMPLATES_DIR)) {
+    const html = pageOf(name);
+    const dur = declaredVariables(html).find((d) => d.id === manifestOf(name).duration_variable);
+    for (const m of html.matchAll(/var\(--duration,\s*([\d.]+)\)/g)) assert.equal(Number(m[1]), dur.default, `${name}: var(--duration, ${m[1]}) against the declared default ${dur.default}`);
+    // animation: out <D>s <easing> calc(var(--duration, N) * 1s - <D>s) forwards
+    const exits = [...html.matchAll(/animation:\s*out\s+([\d.]+)s\s+[^;]*?calc\(var\(--duration,\s*[\d.]+\)\s*\*\s*1s\s*-\s*([\d.]+)s\)/g)];
+    if (/animation:\s*out\b/.test(html)) assert.ok(exits.length > 0, `${name}: the exit animation is not in the form this check reads`);
+    for (const m of exits) {
+      assert.equal(m[1], m[2], `${name}: the exit lasts ${m[1]} s but starts ${m[2]} s before the end`);
+      assert.ok(dur.min > Number(m[1]), `${name}: the shortest clip (${dur.min} s) is not longer than its ${m[1]} s exit`);
+    }
+    // the exit really fades out: its last stop is fully transparent
+    const keyframes = /@keyframes\s+out\s*\{((?:[^{}]|\{[^{}]*\})*)\}/.exec(html);
+    if (keyframes) assert.match(/\bto\s*\{([^}]*)\}/.exec(keyframes[1])[1], /\bopacity:\s*0\s*(;|$)/, `${name}: the exit keyframes must end at opacity 0`);
+    // a breathing loop: max(var(--duration, N) - X, floor) * 1s / 2, then a delay of X s, twice
+    for (const m of html.matchAll(/calc\(max\(var\(--duration,\s*[\d.]+\)\s*-\s*([\d.]+),\s*[\d.]+\)\s*\*\s*1s\s*\/\s*2\)\s*[a-z-]+\s+([\d.]+)s\s+2\b/g)) {
+      assert.equal(m[1], m[2], `${name}: a breathing loop starts at ${m[2]} s but takes ${m[1]} s from the duration`);
+    }
+  }
+});
+
+test("kit ports: every string variable round-trips apostrophes, ampersands, angle brackets and quotes through the declaration", () => {
+  // The two characters the single-quoted attribute depends on escaping are the two speech carries most: ' and &.
+  const sample = `don't R&D & co <b>&amp;</b> "q" it's `;
+  for (const name of KIT_TEMPLATE_NAMES) {
+    const html = pageOf(name);
+    const manifest = manifestOf(name);
+    for (const d of declaredVariables(html).filter((x) => x.type === "string")) {
+      const value = d.id === "words_json" ? JSON.stringify([[0, 2, sample.trim()], [2.5, 4, "R&D's <i>"]]) : sample.repeat(Math.ceil(d.maxLength / sample.length)).slice(0, d.maxLength);
+      const out = applyTemplateVariables(html, { [d.id]: value }, manifest);
+      assert.equal(declaredDefault(out, d.id), value, `${name}.${d.id}`);
+      assert.deepEqual(rootAttributeNames(out), rootAttributeNames(html), `${name}.${d.id}: the root's attributes`);
+    }
+  }
+});
+
+// Angle brackets and quotes are legal inside a single-quoted attribute, so a browser would read a raw one fine. The
+// runner's own tag scanning is a regex ([^>]*), and so is much of HyperFrames' HTML handling: a raw ">" inside the
+// declaration ends the root tag early, and the data-duration the runner appends would land INSIDE the attribute.
+test("applyTemplateVariables: the declaration holds no raw angle bracket or quote, so the root tag cannot end inside it", () => {
+  for (const value of ["a > b", "a < b", "<b>bold</b>", "x' y", "></div><script>", "R&D > 3"]) {
+    const out = applyTemplateVariables(TEMPLATE_HTML, { title: value });
+    const raw = /data-composition-variables='([^']*)'/.exec(out)[1];
+    assert.ok(!/[<>']/.test(raw), `the attribute carries a raw bracket or quote for ${JSON.stringify(value)}: ${raw}`);
+    assert.equal(declaredDefault(out, "title"), value);
+  }
+  // a root with no data-duration of its own gets one appended: after the tag's last attribute, never inside a value
+  const bare = `<!doctype html><html><body><div id="root" data-composition-id="x" data-width="1920" data-height="1080" data-fps="30" data-composition-variables='[{"id":"title","type":"string","label":"T","maxLength":40,"default":"hi"},{"id":"duration","type":"number","label":"D","min":1,"max":10,"default":5}]'></div></body></html>`;
+  const out = applyTemplateVariables(bare, { title: "a > b", duration: 7 }, { duration_variable: "duration" });
+  assert.equal(compositionMeta(out).duration, 7);
+  assert.equal(declaredDefault(out, "title"), "a > b");
+  assert.deepEqual(rootAttributeNames(out), ["id", "data-composition-id", "data-width", "data-height", "data-fps", "data-composition-variables", "data-duration"]);
+});
+
+test("hyperframes-compose skill: the allowed and the banned subcommands are exactly the runner's, each refused before any spawn", () => {
+  const bans = sectionOf(readRepo("skill", "hyperframes-compose", "SKILL.md"), "Hard bans").replace(/\n\s*/g, " ");
+  const ticks = (s) => [...s.matchAll(/`([^`]+)`/g)].map((m) => m[1]);
+  const allowed = /refuses everything except ([^.]*)\./.exec(bans);
+  assert.ok(allowed, "the first ban says what the runner refuses everything except");
+  assert.deepEqual(ticks(allowed[1]), ALLOWED_SUBCOMMANDS.map((s) => (s === "browser" ? `browser ${ALLOWED_BROWSER_SUBCOMMANDS.join("|")}` : s)));
+  // the explicit, complete list of what is banned by name (a change here is deliberate friction)
+  const BANNED = ["init", "skills", "upgrade", "add", "capture", "preview", "tts", "transcribe", "publish", "cloud", "lambda", "cloudrun"];
+  const never = /\*\*Never ((?:`[^`]+`(?:, | or )?)+)\.\*\*/.exec(bans);
+  assert.ok(never, "a bold 'Never ...' sentence lists the banned subcommands");
+  assert.deepEqual(ticks(never[1]), BANNED);
+  for (const sub of BANNED) assert.throws(() => assertAllowedInvocation([sub, "--json"]), (e) => e.cls === "BAD_INPUT" && /not allowlisted/.test(e.detail), sub);
+  assert.ok(bans.includes("`npx hyperframes`") && bans.includes("`npx skills add`"), "the two commands never to run are named");
+});
+
+test("licence hygiene: the retained texts stay LF by rule, and the provenance record pins one commit everywhere", () => {
+  assert.match(readRepo(".gitattributes"), /^render\/compose-templates\/_third_party\/\*\* +text +eol=lf$/m, "the rule that keeps the retained licence texts byte-identical on every checkout");
+  const prov = readFileSync(join(TEMPLATES_DIR, "_third_party", "hyperframes-student-kit", "PROVENANCE.md"), "utf8").replace(/\r\n/g, "\n");
+  const commits = [...prov.matchAll(/\b[0-9a-f]{40}\b/g)].map((m) => m[0]);
+  assert.ok(commits.length >= 2, "the table and the re-check steps both name the commit");
+  assert.deepEqual([...new Set(commits)], ["0d30152a82b9ceb93cfdd9bdbf46f0d5ab3cde86"], "every mention is the same full commit");
+  assert.ok(commits[0].startsWith(KIT_COMMIT), "and it is the short commit every README names");
+  // the four source-card digests can only be checked against upstream (PROVENANCE.md says how); offline they are at least well formed and distinct
+  const digests = [...prov.matchAll(/`([0-9a-f]{64})`/g)].map((m) => m[1]);
+  assert.equal(digests.length, Object.keys(KIT_PORTS).length, "one digest per adapted card");
+  assert.equal(new Set(digests).size, digests.length, "no two cards share a digest");
+});
+
+// The kit's brand colours, as the RGB triples they are, so a different spelling of the same colour is caught:
+// #37bdf8, #f5d82a, #ff3b30 and #ff8a5c, written as hex (3, 4, 6 or 8 digits) or as rgb()/rgba() with commas or spaces.
+const KIT_BRAND_RGB = [[55, 189, 248], [245, 216, 42], [255, 59, 48], [255, 138, 92]];
+function colorTriples(text) {
+  const out = [];
+  for (const m of text.matchAll(/#([0-9a-f]{3,8})\b/gi)) {
+    let h = m[1];
+    if (h.length === 3 || h.length === 4) h = [...h].map((c) => c + c).join("");
+    if (h.length === 6 || h.length === 8) out.push([0, 2, 4].map((i) => parseInt(h.slice(i, i + 2), 16)));
+  }
+  for (const m of text.matchAll(/rgba?\(\s*(\d{1,3})[\s,]+(\d{1,3})[\s,]+(\d{1,3})/gi)) out.push([m[1], m[2], m[3]].map(Number));
+  return out;
+}
+
+test("kit ports: the kit's brand colours are absent however they are spelled", () => {
+  // the parser reads every spelling: upper-case hex, three-digit hex (expanded), eight-digit hex (alpha dropped), rgb() with spaces, rgba() with commas
+  assert.deepEqual(
+    colorTriples("a #37BDF8 b rgb(55 189 248) c rgba(55, 189, 248, .5) d #3bf e #37bdf8cc"),
+    [[55, 189, 248], [51, 187, 255], [55, 189, 248], [55, 189, 248], [55, 189, 248]],
+  );
+  assert.deepEqual(colorTriples("rgb(55 189 248)"), [[55, 189, 248]]);
+  assert.deepEqual(colorTriples("#f5d82a"), [[245, 216, 42]]);
+  for (const name of KIT_TEMPLATE_NAMES) {
+    for (const { file, text } of templateFiles(name)) {
+      for (const t of colorTriples(text)) assert.ok(!KIT_BRAND_RGB.some((b) => b.every((v, i) => v === t[i])), `${name}/${file}: the colour rgb(${t.join(" ")}) is one of the kit's brand colours`);
+    }
+  }
 });
