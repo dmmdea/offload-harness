@@ -6,12 +6,16 @@ import (
 )
 
 // fleetJobIDOf is the id the fleet node knows a job by: the id the delegator
-// dispatched it under, for an attempt that went to a node (ranBase is the dial
-// base, "" for this box). A job that never left this box has none, and the row
-// omits the column. It equals the row's own job_id today; it is a column of its
-// own so the join to a node's ledger does not depend on that staying true.
+// dispatched it under, for an attempt whose dispatch the node ACKED. A job that
+// never left this box has none, and neither has one whose dispatch was refused
+// (or never reached the node): no node holds that id, and a row that named one
+// would read, to a join from the delegator's side, as a job the node lost. The
+// ack is what intentRecorded records, so the id is on a finished row exactly when
+// a started marker was written for it. It equals the row's own job_id today; it is
+// a column of its own so the join to a node's ledger does not depend on that
+// staying true.
 func fleetJobIDOf(pr PlacedResult) string {
-	if pr.ranBase == "" {
+	if pr.ranBase == "" || !pr.intentRecorded {
 		return ""
 	}
 	return pr.JobID

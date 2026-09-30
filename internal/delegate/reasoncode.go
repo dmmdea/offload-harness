@@ -30,7 +30,8 @@ func doorOf(contract core.AgentContract) string {
 // It keys on the STRUCTURE of the result first (the flags and classes the
 // delegator and the node set) and on the stable prefixes of the messages this
 // package itself writes ("queue deadline", "poll deadline", "canceled", ...) and
-// the node's own liveness prefix ("stalled:") second. A node's free prose is never
+// the node's own liveness prefix ("stalled:", bare or behind the re-pack's own
+// prefix, see isStallReason) second. A node's free prose is never
 // the basis for anything but the seat-down hint, which is documented as a hint.
 func reasonCodeFor(pr PlacedResult) string {
 	switch {
@@ -53,6 +54,11 @@ func errReasonCode(pr PlacedResult) string {
 		// The node confirmed it took the job back at the queue deadline (ADR 0064),
 		// whether the result is that deadline itself or the exhausted placement
 		// that followed it.
+		return ledger.ReasonQueueWithdrawn
+	case pr.nodeNeverRan != "":
+		// The node's own terminal record says the job never ran (reaped while this
+		// process was away, or withdrawn): the same fact a confirmed withdrawal is,
+		// read off a poll instead of an answer to a DELETE.
 		return ledger.ReasonQueueWithdrawn
 	case pr.PlacementReason == "refused before placement":
 		return ledger.ReasonContract
@@ -101,7 +107,7 @@ func deferReasonCode(pr PlacedResult) string {
 		return ledger.ReasonShed
 	case strings.HasPrefix(w.Reason, "poll deadline"):
 		return ledger.ReasonPollDeadline
-	case strings.HasPrefix(w.Reason, "stalled:"):
+	case isStallReason(w.Reason):
 		return stallReasonCode(w.Reason)
 	case pr.Unplaced && strings.HasPrefix(w.Reason, "route=remote:"):
 		return ledger.ReasonNoEligibleNode
@@ -126,6 +132,20 @@ func deferReasonCode(pr PlacedResult) string {
 		return ledger.ReasonInfrastructure
 	}
 	return ledger.ReasonOther
+}
+
+// repackUnreachablePrefix opens the reason a node files when the seat went silent
+// DURING the structured re-pack: the stall's own text, behind this stable prefix
+// (internal/pipeline/agenttask.go; the loop's stall is filed bare). It is a stall
+// like any other and the phase word in it ("in repack") names it.
+const repackUnreachablePrefix = "structured re-pack unreachable: "
+
+// isStallReason reports whether a defer reason is a node's liveness verdict
+// ("stalled: ..."), filed bare or behind the re-pack prefix. A re-pack that
+// failed any other way (an unreachable seat, an expired wall) carries the same
+// prefix and is not a stall.
+func isStallReason(reason string) bool {
+	return strings.HasPrefix(strings.TrimPrefix(reason, repackUnreachablePrefix), "stalled:")
 }
 
 // stallReasonCode names the phase a node's liveness verdict went silent in. The

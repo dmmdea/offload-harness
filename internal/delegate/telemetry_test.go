@@ -114,8 +114,7 @@ func TestLocalRowCarriesADoorButNoFleetJobID(t *testing.T) {
 // TestFullReasonReachesTheDelegateRow: the row's reason is the reason the result
 // published — the whole of it, with the code beside it — not its first 120 bytes.
 func TestFullReasonReachesTheDelegateRow(t *testing.T) {
-	compressPolls(t, 10*time.Millisecond, 20*time.Millisecond)
-	compressWallUnit(t, 10*time.Millisecond)
+	compressQueueBudget(t)
 	stuck := stuckNode(t, "node-stuck")
 	url := (&withdrawProbe{}).front(t, stuck.server()).URL // no DELETE route: an old node, so the deadline stays a plain failure
 
@@ -413,4 +412,67 @@ func TestInnerAgentRowCarriesParentJobID(t *testing.T) {
 	if s, serr := ledger.SummarizeFile(cfg.LedgerPath, 0, ledger.DefaultPrices); serr != nil || s.Calls != 1 {
 		t.Fatalf("Summarize = %+v (%v), want 1 call: a local job is counted once", s, serr)
 	}
+}
+
+// TestOnlyAJobANodeAckedCarriesAFleetJobID: fleet_job_id is "the id the fleet node
+// knows the job by". A dispatch the node REFUSED left no job on any node, and a
+// row that named one anyway read, to a join from the delegator's side, as a job
+// the node lost (232 of the 836 attempts on 2026-09-29 were refusals). The id is
+// on a finished row exactly when a started marker was written for it: the ack.
+func TestOnlyAJobANodeAckedCarriesAFleetJobID(t *testing.T) {
+	compressPolls(t, 5*time.Millisecond, time.Second)
+
+	finishedAndMarkers := func(t *testing.T, path string) (finished []ledger.Entry, markers map[string]bool) {
+		t.Helper()
+		markers = map[string]bool{}
+		for _, e := range readRows(t, path) {
+			if e.Phase == ledger.PhaseStarted {
+				markers[e.FleetJobID] = true
+			} else {
+				finished = append(finished, e)
+			}
+		}
+		return finished, markers
+	}
+
+	t.Run("a dispatch the node refused", func(t *testing.T) {
+		_, url := refusingNode(t, "node-full", http.StatusServiceUnavailable, nil)
+		cfg := testCfg(t)
+		if _, _, err := Run(t.Context(), cfg, neverLocal(t), []core.AgentContract{withdrawContract()}, "remote", []string{url}); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		finished, markers := finishedAndMarkers(t, cfg.LedgerPath)
+		if len(finished) != 1 || len(markers) != 0 {
+			t.Fatalf("ledger = %d finished row(s) and %d marker(s), want 1 and 0", len(finished), len(markers))
+		}
+		row := finished[0]
+		if row.ReasonCode != ledger.ReasonQueueFull || row.JobID == "" {
+			t.Fatalf("row = reason_code %q job_id %q, want %q and a job id", row.ReasonCode, row.JobID, ledger.ReasonQueueFull)
+		}
+		if row.FleetJobID != "" {
+			t.Fatalf("fleet_job_id = %q on a dispatch the node refused: no node ever held that id", row.FleetJobID)
+		}
+	})
+
+	t.Run("a job the node acked and then failed", func(t *testing.T) {
+		node := &fakeNode{
+			t: t, agentEnabled: true, resident: true, ctxTokens: 32768, nodeID: "node-broken",
+			pollState: func(int64) (map[string]any, int) {
+				return map[string]any{"state": "error", "error": "the seat exploded"}, http.StatusOK
+			},
+		}
+		url := node.server().URL
+		cfg := testCfg(t)
+		if _, _, err := Run(t.Context(), cfg, neverLocal(t), []core.AgentContract{withdrawContract()}, "remote", []string{url}); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		finished, markers := finishedAndMarkers(t, cfg.LedgerPath)
+		jobID, _ := node.lastJobID.Load().(string)
+		if len(finished) != 1 || finished[0].FleetJobID != jobID || jobID == "" {
+			t.Fatalf("finished = %+v, want one row whose fleet_job_id is the acked job %q", finished, jobID)
+		}
+		if !markers[jobID] {
+			t.Fatalf("no started marker for %s: a finished row and its marker name the same id", jobID)
+		}
+	})
 }

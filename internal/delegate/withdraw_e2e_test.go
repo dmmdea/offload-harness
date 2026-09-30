@@ -61,8 +61,7 @@ func (b *blockedRunner) Run(ctx context.Context, req core.Request) core.Result {
 // withdrawn — terminal, never run — and the delegator with the intent closed and
 // the failure saying the job was taken back.
 func TestWithdrawAgainstTheRealNodeHandler(t *testing.T) {
-	compressPolls(t, 10*time.Millisecond, 20*time.Millisecond)
-	compressWallUnit(t, 10*time.Millisecond)
+	compressQueueBudget(t)
 
 	const seat, token = "e2e-agent-seat", "e2e-fleet-token"
 	seatSrv := e2eSeat(t, seat)

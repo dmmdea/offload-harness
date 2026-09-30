@@ -128,7 +128,13 @@ type PlacedResult struct {
 	// pass, so the intent closes as "withdrawn" instead of staying open.
 	// queuedWait is the time the job provably spent in that node's backlog, which
 	// placements.noteRefusal credits back when the result is re-placed.
-	withdrawn       bool
+	withdrawn bool
+	// nodeNeverRan holds what a node said when its OWN terminal state told the
+	// delegator the job never ran — "reaped: ..." (nobody polled it within the poll
+	// lease: this process was away) or "withdrawn: ..." — read on a poll. Nothing ran,
+	// so the subtask is re-placeable like a confirmed withdrawal, and the intent closes
+	// as "never started: <this>", the note recovery writes for the same observation.
+	nodeNeverRan    string
 	queuedWait      time.Duration
 	PlacementReason string
 	// Err is non-empty when the subtask FAILED for transport/config reasons
@@ -2925,9 +2931,12 @@ func (r *runner) attempt(ctx context.Context, i int, contract core.AgentContract
 		// exits (cancel / owned-deadline / queued give-up) stay open for the
 		// recovery pass — that gap IS the durability feature.
 		if pr.intentRecorded && !pr.orphanable {
-			if pr.withdrawn {
+			switch {
+			case pr.withdrawn:
 				r.intent.withdrawn(jobID) // the node confirmed it took the job back
-			} else {
+			case pr.nodeNeverRan != "":
+				r.intent.neverStarted(jobID, pr.nodeNeverRan) // the node's own record says it never ran
+			default:
 				r.intent.done(jobID, intentNoteTerminal)
 			}
 		}
@@ -3677,6 +3686,15 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 			return pr
 		case status == http.StatusOK && state == "error":
 			pr.Err = "remote job error: " + jobErr
+			if neverRan(jobErr) {
+				// The node took this job out of its backlog without running it: reaped
+				// because nobody polled it within the poll lease (this process was away
+				// for longer — a suspended host, a partition), or withdrawn. Nothing ran,
+				// so offering the subtask to another node cannot arrange a double run: it
+				// is filed as the capacity refusal a confirmed withdrawal is, and the
+				// re-placement machinery takes it from here (ADR 0064).
+				pr.refuseAsNeverRan(jobErr, queuedCredit)
+			}
 			return pr
 		case status == http.StatusOK && (state == "accepted" || state == "running"):
 			// The node answered AND says it owns the job: the only shape that

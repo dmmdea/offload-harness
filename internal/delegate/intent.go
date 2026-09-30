@@ -21,7 +21,9 @@
 // that wrote it (ADR 0064): the `ok` events used to carry neither, so the ledger
 // could not say which process closed a job, or when. The close notes in use:
 // "terminal observed" (this process saw the job end), "withdrawn" (the node
-// confirmed the job was taken back before it started), "recovered to …" (the
+// confirmed the job was taken back before it started), "never started: …" (the
+// node's own terminal record says it never ran the job, reaped or withdrawn,
+// read by a live poll or by the recovery pass), "recovered to …" (the
 // recovery pass filed the result), "node no longer holds the job …", and
 // "expired unrecovered after …".
 //
@@ -82,6 +84,10 @@ type intentEvent struct {
 const (
 	intentNoteTerminal  = "terminal observed"
 	intentNoteWithdrawn = "withdrawn"
+	// intentNoteNeverStarted opens the note for a job the node's own terminal state
+	// says it never ran (reaped, or withdrawn by someone): "never started: <what the
+	// node said>". Recovery and the live poll write it for the same observation.
+	intentNoteNeverStarted = "never started: "
 )
 
 // neverRanPrefixes are the stable prefixes of the terminal errors a fleet node
@@ -179,6 +185,14 @@ func (l *intentLedger) done(jobID, note string) {
 // did not confirm, which stays open.
 func (l *intentLedger) withdrawn(jobID string) {
 	l.done(jobID, intentNoteWithdrawn)
+}
+
+// neverStarted closes a job the node's own terminal state says it never ran —
+// reaped because nobody polled it within the poll lease, or withdrawn by someone
+// (nodeErr is what the node said). Nothing ran, so there is no result for the
+// recovery pass to collect, whichever process observed it.
+func (l *intentLedger) neverStarted(jobID, nodeErr string) {
+	l.done(jobID, intentNoteNeverStarted+nodeErr)
 }
 
 // openIntents folds the ledger into the still-open set, newest base last.
@@ -279,7 +293,7 @@ func RecoverOrphans(ctx context.Context, cfg config.Config) (int, error) {
 			// The node took this job out of its backlog without running it, so there
 			// is no result to file and nothing was recovered: the intent closes
 			// truthfully, and the pass does not report a recovery it did not make.
-			ledger.done(jobID, "never started: "+jobErr)
+			ledger.neverStarted(jobID, jobErr)
 		case status == http.StatusOK && (state == "done" || state == "error"):
 			outDir := filepath.Join(root, "delegate-recovered")
 			if mkerr := os.MkdirAll(outDir, 0o755); mkerr != nil {

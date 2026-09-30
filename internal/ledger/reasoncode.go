@@ -27,8 +27,10 @@ const (
 	// ReasonQueueDeadline: a node accepted the job and never started it before the
 	// queue patience ran out, and did NOT confirm taking it back — it may still run.
 	ReasonQueueDeadline = "queue_deadline"
-	// ReasonQueueWithdrawn: the same, and the node confirmed it took the job back
-	// (ADR 0064): it will never run there.
+	// ReasonQueueWithdrawn: the same, and the node took the job back (ADR 0064): it
+	// will never run there. Either it confirmed a withdrawal the delegator asked for
+	// at the queue deadline, or its own record said so when the delegator next polled
+	// (reaped because nobody polled it within the poll lease, or withdrawn).
 	ReasonQueueWithdrawn = "queue_withdrawn"
 	// ReasonPollDeadline: a node owned the job and it did not finish inside the
 	// poll budget.

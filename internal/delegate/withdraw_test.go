@@ -143,13 +143,62 @@ func withdrawContract() core.AgentContract {
 	return c
 }
 
+// queueBudgetUnit is the real time one second of a contract's budget takes in the
+// queue-deadline tests: a 30 s contract polls for 30 x this.
+const queueBudgetUnit = 40 * time.Millisecond
+
+// compressQueueBudget compresses the clocks for a test whose subject is the QUEUE
+// deadline: a 30 s contract polling a node that keeps its job `accepted`.
+//
+// The queue arm fires when the backlog credit banked between consecutive
+// `accepted` polls reaches the poll budget; the poll-deadline arm fires at anchor +
+// budget + credit. Time the loop cannot credit (the first poll's round trip, and any
+// stall between one observation and the next deadline check) counts against the
+// budget alone, so the two arms are separated by ONE budget of slack. A stall longer
+// than that (a first poll that answers late, a timer delivered late on a loaded
+// box) hands the run to the poll-deadline arm and the test to a failure that has
+// nothing to do with what it pins: it took 1 run in 84, under twelve parallel
+// copies of the test binary, with a 300 ms budget. The unit is sized for a slack of
+// over a second; TestQueueDeadlineSurvivesAStalledFirstPoll pins that margin.
+func compressQueueBudget(t *testing.T) {
+	t.Helper()
+	compressPolls(t, 10*time.Millisecond, 20*time.Millisecond)
+	compressWallUnit(t, queueBudgetUnit)
+}
+
+// TestQueueDeadlineSurvivesAStalledFirstPoll: a node whose first answer takes 400 ms
+// (a scheduling stall, an antivirus scan, a loaded box) must still end as the queue
+// deadline it is, not turn into a poll deadline because the stall was longer than a
+// compressed budget. The stall is beyond a 300 ms budget and inside the shared one.
+func TestQueueDeadlineSurvivesAStalledFirstPoll(t *testing.T) {
+	compressQueueBudget(t)
+	node := &fakeNode{
+		t: t, agentEnabled: true, resident: true, ctxTokens: 32768, nodeID: "node-slow",
+		pollState: func(n int64) (map[string]any, int) {
+			if n == 1 {
+				time.Sleep(400 * time.Millisecond)
+			}
+			return map[string]any{"state": "accepted"}, http.StatusOK
+		},
+	}
+	url := (&withdrawProbe{}).front(t, node.server()).URL // no DELETE route: an old node, so the deadline stays a plain failure
+	contract := withdrawContract()
+	contract.TimeoutSec = 30
+	results, _, err := Run(t.Context(), testCfg(t), neverLocal(t), []core.AgentContract{contract}, "remote", []string{url})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !strings.HasPrefix(results[0].Err, "queue deadline") {
+		t.Fatalf("err = %q (deferred %v: %s), want the queue deadline: a slow first poll is not a poll deadline", results[0].Err, results[0].Result.Deferred, results[0].Result.Reason)
+	}
+}
+
 // TestRunQueueDeadlineWithdrawsAndReplaces is the fix for the ghost jobs: a node
 // accepts a job and never starts it; at the queue deadline the delegator takes it
 // back, the node CONFIRMS, and only then is the subtask offered to another node —
 // with the intent closed as withdrawn, so nothing is left behind to run later.
 func TestRunQueueDeadlineWithdrawsAndReplaces(t *testing.T) {
-	compressPolls(t, 10*time.Millisecond, 20*time.Millisecond)
-	compressWallUnit(t, 10*time.Millisecond) // a 30 s contract polls for 300 ms + the grace
+	compressQueueBudget(t) // a 30 s contract polls for 1.2 s + the grace
 
 	stuck := stuckNode(t, "node-stuck")
 	stuck.token = withdrawToken
@@ -224,8 +273,7 @@ func TestRunQueueDeadlineOnANodeWithoutWithdrawKeepsTodaysBehaviour(t *testing.T
 		{"a dropped connection", func(int64, string) (int, map[string]any) { return -1, nil }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			compressPolls(t, 10*time.Millisecond, 20*time.Millisecond)
-			compressWallUnit(t, 10*time.Millisecond)
+			compressQueueBudget(t)
 			stuck := stuckNode(t, "node-stuck")
 			probe := &withdrawProbe{answer: tc.answer}
 			stuckURL := probe.front(t, stuck.server()).URL
@@ -336,8 +384,7 @@ func TestRunCancelWithdrawsOnEveryCancelExit(t *testing.T) {
 // and the withdraw. The node says so (409) and the delegator keeps polling: the
 // job is running now, not abandoned, and its result is still wanted.
 func TestRunWithdrawAnswerRunningKeepsPolling(t *testing.T) {
-	compressPolls(t, 10*time.Millisecond, 20*time.Millisecond)
-	compressWallUnit(t, 10*time.Millisecond)
+	compressQueueBudget(t)
 
 	var started atomic.Bool
 	var runningPolls atomic.Int64
@@ -414,6 +461,11 @@ func TestRunPollDeadlineWithdrawsAJobThatNeverStarted(t *testing.T) {
 		if !r.Result.Deferred || !strings.HasPrefix(r.Result.Reason, "poll deadline") {
 			t.Fatalf("result = deferred %v reason %q, want the owned-job poll deadline defer", r.Result.Deferred, r.Result.Reason)
 		}
+		// The reason says what became of the job (docs/FLEET-NODE.md promises it): a
+		// reader of the defer alone learns it never started and is not left running.
+		if !strings.HasSuffix(r.Result.Reason, "; the job never started and was withdrawn from the node") {
+			t.Fatalf("reason = %q, want it to end by saying the job never started and was withdrawn from the node", r.Result.Reason)
+		}
 		if probe.deletes.Load() != 1 {
 			t.Fatalf("withdraw attempts = %d, want 1: the job was still accepted at the deadline", probe.deletes.Load())
 		}
@@ -440,6 +492,9 @@ func TestRunPollDeadlineWithdrawsAJobThatNeverStarted(t *testing.T) {
 		if !results[0].Result.Deferred || !strings.HasPrefix(results[0].Result.Reason, "poll deadline") {
 			t.Fatalf("result = %+v, want the poll deadline defer", results[0].Result)
 		}
+		if strings.Contains(results[0].Result.Reason, "withdrawn") {
+			t.Fatalf("reason = %q claims a withdrawal for a job that was running", results[0].Result.Reason)
+		}
 		if probe.deletes.Load() != 0 {
 			t.Fatalf("withdraw attempts = %d for a job last seen RUNNING, want 0: it has started, so the request could only be refused", probe.deletes.Load())
 		}
@@ -454,8 +509,7 @@ func TestRunPollDeadlineWithdrawsAJobThatNeverStarted(t *testing.T) {
 // hold the delegator up beyond the bound (5 s in production), and a withdrawal
 // that timed out is unconfirmed — today's behaviour, the intent left open.
 func TestRunWithdrawIsBoundedAndBestEffort(t *testing.T) {
-	compressPolls(t, 10*time.Millisecond, 20*time.Millisecond)
-	compressWallUnit(t, 10*time.Millisecond)
+	compressQueueBudget(t)
 	old := withdrawTimeout
 	withdrawTimeout = 150 * time.Millisecond
 	t.Cleanup(func() { withdrawTimeout = old })
@@ -472,7 +526,9 @@ func TestRunWithdrawIsBoundedAndBestEffort(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if elapsed := time.Since(began); elapsed > 3*time.Second {
+	// A healthy run is the queue budget (1.2 s) plus the 150 ms bound; one that
+	// waited out the node's 5 s hold would take over 6 s.
+	if elapsed := time.Since(began); elapsed > 4*time.Second {
 		t.Fatalf("the run took %v: a hung node held the give-up past the withdraw bound", elapsed)
 	}
 	if !strings.HasPrefix(results[0].Err, "queue deadline") {
@@ -490,8 +546,7 @@ func TestRunWithdrawIsBoundedAndBestEffort(t *testing.T) {
 // then gives up exactly as it always did, with the intent left open: it must not
 // send a DELETE on every poll until the deadline.
 func TestRunWithdrawAnswerRunningButNodeStaysAcceptedGivesUpOnce(t *testing.T) {
-	compressPolls(t, 10*time.Millisecond, 20*time.Millisecond)
-	compressWallUnit(t, 10*time.Millisecond)
+	compressQueueBudget(t)
 	stuck := stuckNode(t, "node-liar")
 	probe := &withdrawProbe{answer: func(_ int64, id string) (int, map[string]any) {
 		return http.StatusConflict, map[string]any{"job_id": id, "state": "running", "withdrawn": false}

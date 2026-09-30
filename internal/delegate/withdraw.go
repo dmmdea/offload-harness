@@ -117,3 +117,15 @@ func (pr *PlacedResult) refuseAsWithdrawn(queued time.Duration) {
 	pr.refused, pr.refusalStatus = true, http.StatusServiceUnavailable
 	pr.queuedWait = queued
 }
+
+// refuseAsNeverRan is refuseAsWithdrawn for a job whose terminal state the poll READ:
+// the node's own record (nodeErr, "reaped: ..." or "withdrawn: ...") says it took the
+// job out of its backlog without running it, so no seat anywhere holds it and the
+// subtask may be offered to another node. The intent closes as never-started, in the
+// note recovery uses for the same observation, not as a withdrawal this process asked
+// for.
+func (pr *PlacedResult) refuseAsNeverRan(nodeErr string, queued time.Duration) {
+	pr.nodeNeverRan, pr.orphanable = nodeErr, false
+	pr.refused, pr.refusalStatus = true, http.StatusServiceUnavailable
+	pr.queuedWait = queued
+}

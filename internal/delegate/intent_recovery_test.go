@@ -184,3 +184,32 @@ func TestRecoverOrphansClosesAJobTheNodeNeverRan(t *testing.T) {
 		t.Errorf("intents still open: %v", open)
 	}
 }
+
+// TestIntentCloseNotesAreOnTheWireAsDocumented: the ADR, the operator guide and the
+// live acceptance query filter the intent ledger by these literal strings
+// ("withdrawn", "terminal observed", "never started: ..."). Every other test
+// compares against the Go constant, so a reworded constant would pass them all
+// while every query written against the documented text went quiet.
+func TestIntentCloseNotesAreOnTheWireAsDocumented(t *testing.T) {
+	l := &intentLedger{path: filepath.Join(t.TempDir(), "delegate-intent.jsonl")}
+	l.dispatched("agd-observed", "http://192.0.2.1:1", "goal")
+	l.done("agd-observed", intentNoteTerminal)
+	l.dispatched("agd-withdrawn", "http://192.0.2.1:1", "goal")
+	l.withdrawn("agd-withdrawn")
+	l.dispatched("agd-never", "http://192.0.2.1:1", "goal")
+	l.neverStarted("agd-never", "reaped: nothing polled this accepted job")
+
+	raw, err := os.ReadFile(l.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`"e":"ok","job":"agd-observed","note":"terminal observed"`,
+		`"e":"ok","job":"agd-withdrawn","note":"withdrawn"`,
+		`"e":"ok","job":"agd-never","note":"never started: reaped: nothing polled this accepted job"`,
+	} {
+		if !strings.Contains(string(raw), want) {
+			t.Errorf("intent ledger lacks %s\n%s", want, raw)
+		}
+	}
+}
