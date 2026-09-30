@@ -96,7 +96,13 @@ func TestRunAnUnownedPollDeadlineDoesNotCloseTheIntent(t *testing.T) {
 				if !open[jobID] {
 					t.Fatalf("the intent was closed as %q with nothing observed and no withdrawal confirmed: recovery could no longer find the job", closed[jobID])
 				}
+				if !strings.Contains(r.Err, "; withdraw not confirmed: HTTP 405: the node has no withdraw route") {
+					t.Fatalf("err = %q, want it to say why the withdraw was not confirmed", r.Err)
+				}
 				return
+			}
+			if strings.Contains(r.Err, "withdraw not confirmed") {
+				t.Fatalf("err = %q reports an unconfirmed withdraw although the node confirmed it", r.Err)
 			}
 			if closed[jobID] != tc.wantClosed || len(open) != 0 {
 				t.Fatalf("intent closed as %q (open=%v), want %q", closed[jobID], open, tc.wantClosed)

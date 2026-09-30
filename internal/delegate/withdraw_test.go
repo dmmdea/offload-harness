@@ -15,6 +15,7 @@ import (
 
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
+	"github.com/dmmdea/offload-harness/internal/ledger"
 )
 
 // This file pins the delegator half of ADR 0064: where the delegator gives an
@@ -253,24 +254,28 @@ func TestRunQueueDeadlineWithdrawsAndReplaces(t *testing.T) {
 // that is not a confirmation — an old node's 405, a 404, a 401, a 500, a dropped
 // connection — leaves the queue deadline exactly as it was: a failure naming the
 // deadline, NOT re-placed (the node may still run the job), the intent left OPEN
-// for the recovery pass.
+// for the recovery pass. Each says WHY it did not confirm (wantNote): an old node with
+// no route and an upgraded node that refused would otherwise leave byte-identical
+// rows, and a ghost that comes back could not be told from a node that never had
+// the fix.
 func TestRunQueueDeadlineOnANodeWithoutWithdrawKeepsTodaysBehaviour(t *testing.T) {
 	for _, tc := range []struct {
-		name   string
-		answer func(n int64, id string) (int, map[string]any)
+		name     string
+		answer   func(n int64, id string) (int, map[string]any)
+		wantNote string
 	}{
-		{"an old node (405 from its GET-only route)", nil},
+		{"an old node (405 from its GET-only route)", nil, "HTTP 405: the node has no withdraw route"},
 		{"404", func(int64, string) (int, map[string]any) {
 			return http.StatusNotFound, map[string]any{"error": "unknown job"}
-		}},
+		}, "HTTP 404"},
 		{"401", func(int64, string) (int, map[string]any) {
 			return http.StatusUnauthorized, map[string]any{"error": "unauthorized"}
-		}},
+		}, "HTTP 401: the node refused this delegator's fleet_auth_token"},
 		{"500", func(int64, string) (int, map[string]any) {
 			return http.StatusInternalServerError, map[string]any{"error": "boom"}
-		}},
-		{"200 without a withdrawn verdict", func(int64, string) (int, map[string]any) { return http.StatusOK, map[string]any{"state": "accepted"} }},
-		{"a dropped connection", func(int64, string) (int, map[string]any) { return -1, nil }},
+		}, "HTTP 500"},
+		{"200 without a withdrawn verdict", func(int64, string) (int, map[string]any) { return http.StatusOK, map[string]any{"state": "accepted"} }, "HTTP 200, but the answer did not say the job was taken back"},
+		{"a dropped connection", func(int64, string) (int, map[string]any) { return -1, nil }, "no answer"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			compressQueueBudget(t)
@@ -292,6 +297,12 @@ func TestRunQueueDeadlineOnANodeWithoutWithdrawKeepsTodaysBehaviour(t *testing.T
 			}
 			if strings.Contains(r.Err, "withdrawn") {
 				t.Fatalf("err = %q claims a withdrawal nobody confirmed", r.Err)
+			}
+			if want := "; withdraw not confirmed: " + tc.wantNote; !strings.Contains(r.Err, want) {
+				t.Fatalf("err = %q, want it to say why the withdraw was not confirmed (%q)", r.Err, want)
+			}
+			if got := reasonCodeFor(r); got != ledger.ReasonQueueDeadline {
+				t.Fatalf("reason code = %q, want %q: the note is detail, the class stays the queue deadline", got, ledger.ReasonQueueDeadline)
 			}
 			if idle.dispatches.Load() != 0 {
 				t.Fatalf("node-idle was asked %d time(s): an unconfirmed give-up must never be re-placed (a double run)", idle.dispatches.Load())
@@ -339,6 +350,44 @@ func TestRunCancelWithdrawsAQueuedJob(t *testing.T) {
 	closed, open := intentNotes(t, cfg.StateDir)
 	if closed[stuckJob] != intentNoteWithdrawn || len(open) != 0 {
 		t.Fatalf("intent closed as %q (open=%v), want %q and nothing left open", closed[stuckJob], open, intentNoteWithdrawn)
+	}
+}
+
+// TestRunCancelOnANodeWithoutWithdrawSaysSo: a caller that walks away from a queued
+// job on a node that cannot take it back (here an old node with no route) leaves a
+// ghost, and the canceled row says so — with the class still `canceled`. Without the
+// note a cancel that left a ghost and one that withdrew it cleanly differ only in an
+// intent ledger nobody joins, and a node that never got the fix reads the same as an
+// upgraded one that refused.
+func TestRunCancelOnANodeWithoutWithdrawSaysSo(t *testing.T) {
+	compressPolls(t, 2*time.Second, 20*time.Millisecond)
+	stuck := stuckNode(t, "node-stuck")
+	probe := &withdrawProbe{} // an old node: the GET-only route answers 405
+	stuckURL := probe.front(t, stuck.server()).URL
+
+	cfg := testCfg(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	go func() {
+		for stuck.polls.Load() < 1 {
+			time.Sleep(2 * time.Millisecond)
+		}
+		cancel()
+	}()
+	results, _, err := Run(ctx, cfg, neverLocal(t), []core.AgentContract{withdrawContract()}, "remote", []string{stuckURL})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	r := results[0]
+	if !strings.HasPrefix(r.Err, "canceled") || !strings.Contains(r.Err, "; withdraw not confirmed: HTTP 405: the node has no withdraw route") {
+		t.Fatalf("err = %q, want the canceled result naming the unconfirmed withdraw", r.Err)
+	}
+	if got := reasonCodeFor(r); got != ledger.ReasonCanceled {
+		t.Fatalf("reason code = %q, want %q", got, ledger.ReasonCanceled)
+	}
+	stuckJob, _ := stuck.lastJobID.Load().(string)
+	if _, open := intentNotes(t, cfg.StateDir); !open[stuckJob] {
+		t.Fatal("the intent was closed although the node never confirmed the withdrawal")
 	}
 }
 
@@ -475,6 +524,41 @@ func TestRunPollDeadlineWithdrawsAJobThatNeverStarted(t *testing.T) {
 		}
 	})
 
+	t.Run("accepted at the deadline, and the node has no withdraw route", func(t *testing.T) {
+		node := &fakeNode{
+			t: t, agentEnabled: true, resident: true, ctxTokens: 32768, nodeID: "node-flaky",
+			pollState: func(n int64) (map[string]any, int) {
+				if n%2 == 0 {
+					return map[string]any{"error": "proxy hiccup"}, http.StatusServiceUnavailable
+				}
+				return map[string]any{"state": "accepted"}, http.StatusOK
+			},
+		}
+		probe := &withdrawProbe{} // an old node: the GET-only route answers 405
+		url := probe.front(t, node.server()).URL
+		cfg := testCfg(t)
+		contract := withdrawContract()
+		contract.TimeoutSec = 3
+		results, _, err := Run(t.Context(), cfg, neverLocal(t), []core.AgentContract{contract}, "remote", []string{url})
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		r := results[0]
+		if !r.Result.Deferred || !strings.HasPrefix(r.Result.Reason, "poll deadline") {
+			t.Fatalf("result = deferred %v reason %q, want the owned-job poll deadline defer", r.Result.Deferred, r.Result.Reason)
+		}
+		if !strings.Contains(r.Result.Reason, "; withdraw not confirmed: HTTP 405: the node has no withdraw route") {
+			t.Fatalf("reason = %q, want it to say the node has no withdraw route: a ghost this defer leaves behind must not read like a node that never had the fix", r.Result.Reason)
+		}
+		if strings.Contains(r.Result.Reason, "was withdrawn") {
+			t.Fatalf("reason = %q claims a withdrawal nobody confirmed", r.Result.Reason)
+		}
+		jobID, _ := node.lastJobID.Load().(string)
+		if _, open := intentNotes(t, cfg.StateDir); !open[jobID] {
+			t.Fatal("the intent was closed although no withdrawal was confirmed")
+		}
+	})
+
 	t.Run("running at the deadline", func(t *testing.T) {
 		node := &fakeNode{
 			t: t, agentEnabled: true, resident: true, ctxTokens: 32768, nodeID: "node-busy",
@@ -494,6 +578,9 @@ func TestRunPollDeadlineWithdrawsAJobThatNeverStarted(t *testing.T) {
 		}
 		if strings.Contains(results[0].Result.Reason, "withdrawn") {
 			t.Fatalf("reason = %q claims a withdrawal for a job that was running", results[0].Result.Reason)
+		}
+		if strings.Contains(results[0].Result.Reason, "withdraw not confirmed") {
+			t.Fatalf("reason = %q reports a withdraw nobody asked for: a job last seen running is not asked", results[0].Result.Reason)
 		}
 		if probe.deletes.Load() != 0 {
 			t.Fatalf("withdraw attempts = %d for a job last seen RUNNING, want 0: it has started, so the request could only be refused", probe.deletes.Load())
@@ -534,6 +621,9 @@ func TestRunWithdrawIsBoundedAndBestEffort(t *testing.T) {
 	if !strings.HasPrefix(results[0].Err, "queue deadline") {
 		t.Fatalf("err = %q, want today's queue-deadline failure after an unconfirmed withdraw", results[0].Err)
 	}
+	if !strings.Contains(results[0].Err, "; withdraw not confirmed: no answer") {
+		t.Fatalf("err = %q, want it to say the withdraw got no answer inside its bound", results[0].Err)
+	}
 	stuckJob, _ := stuck.lastJobID.Load().(string)
 	if _, open := intentNotes(t, cfg.StateDir); !open[stuckJob] {
 		t.Fatal("the intent was closed although the node never confirmed the withdrawal")
@@ -561,6 +651,12 @@ func TestRunWithdrawAnswerRunningButNodeStaysAcceptedGivesUpOnce(t *testing.T) {
 	}
 	if !strings.HasPrefix(results[0].Err, "queue deadline") {
 		t.Fatalf("err = %q, want today's queue-deadline failure once the node's own answers contradict each other", results[0].Err)
+	}
+	// The row keeps what the node said the one time it was asked, though the run
+	// reached the give-up on a later pass: a node that said "running" and went on
+	// reporting "accepted" is exactly the contradiction a reader needs to see.
+	if !strings.Contains(results[0].Err, "; withdraw not confirmed: HTTP 409: the node said the job had already started") {
+		t.Fatalf("err = %q, want the node's own 409 answer named", results[0].Err)
 	}
 	if got := probe.deletes.Load(); got != 1 {
 		t.Fatalf("withdraw attempts = %d, want exactly 1", got)
