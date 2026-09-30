@@ -630,6 +630,32 @@ func (c *callDeadline) cutQueued(cfg config.Config, subtasks []core.AgentContrac
 	return results, queueSummary(results), nil
 }
 
+// lookAnswer applies a holder answer that ENDS the job — a finished result, or a failed
+// job — to pr, for the deadline's last look. It reads the answer the way queuePoll's terminal
+// arms do (the result, its node and seat, and the contract's acceptance checks) and
+// deliberately does NOT do what a poll may do with a finished answer whose structured re-pack
+// failed (rescue.go): the call's context is over, and starting a seat run after the deadline
+// is exactly what the deadline exists to prevent. A rescue that cannot run leaves the defer,
+// which is what the look publishes.
+func lookAnswer(contract core.AgentContract, p jobPoll, pr *PlacedResult) {
+	switch p.State {
+	case "done":
+		var wire core.AgentWireResult
+		if uerr := json.Unmarshal(p.Data, &wire); uerr != nil {
+			pr.Err = "job done but data is not an AgentWireResult: " + uerr.Error()
+			return
+		}
+		pr.Result = wire
+		pr.Node = wire.NodeID
+		pr.Seat = wire.Seat
+		if !wire.Deferred {
+			pr.AcceptanceFailures = EvalAcceptance(contract, wire)
+		}
+	case "error":
+		pr.Err = "queue job failed: " + p.JobErr
+	}
+}
+
 // queueCut reports whether a queue result is one the call deadline's cancellation ended
 // without an answer: a poll it cancelled, or a submit it interrupted. A transport error
 // names the context's CAUSE ("call deadline reached"), a bare cancellation its Err
@@ -684,7 +710,7 @@ func (c *callDeadline) lookAtHolder(cfg config.Config, subtasks []core.AgentCont
 				// interrupted submit) left behind: a finished job is its result, a failed
 				// one is its own failure.
 				pr.Err = ""
-				queueAnswer(subtasks[i], p, pr)
+				lookAnswer(subtasks[i], p, pr)
 			case p.Status == http.StatusOK && (p.State == "accepted" || p.State == "running"):
 				pr.queueSeen = p.State
 			default:

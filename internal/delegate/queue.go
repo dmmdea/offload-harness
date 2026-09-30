@@ -86,32 +86,6 @@ func queueSummary(results []PlacedResult) Summary {
 	return sum
 }
 
-// queueAnswer applies a holder answer that ENDS the job — a finished result, or a failed
-// job — to pr, and reports whether it did. queuePoll's terminal arms and the call
-// deadline's final look at the holder read it the same way, so a job a claimant finished is
-// one thing wherever it is read.
-func queueAnswer(contract core.AgentContract, p jobPoll, pr *PlacedResult) bool {
-	switch {
-	case p.Status == http.StatusOK && p.State == "done":
-		var wire core.AgentWireResult
-		if uerr := json.Unmarshal(p.Data, &wire); uerr != nil {
-			pr.Err = "job done but data is not an AgentWireResult: " + uerr.Error()
-			return true
-		}
-		pr.Result = wire
-		pr.Node = wire.NodeID
-		pr.Seat = wire.Seat
-		if !wire.Deferred {
-			pr.AcceptanceFailures = EvalAcceptance(contract, wire)
-		}
-		return true
-	case p.Status == http.StatusOK && p.State == "error":
-		pr.Err = "queue job failed: " + p.JobErr
-		return true
-	}
-	return false
-}
-
 func queueSubmit(ctx context.Context, cfg config.Config, holder, jobID, taskType string, payload json.RawMessage, timeoutSec int) error {
 	body, _ := json.Marshal(map[string]any{
 		"job_id": jobID, "task_type": taskType, "payload": payload, "timeout_sec": timeoutSec,
@@ -167,7 +141,7 @@ func queuePoll(ctx context.Context, cfg config.Config, holder string, contract c
 		// pulled by a claimant the delegator never chose, so there is no health
 		// view to size a bound from (register D-116 bounds the PUSH path).
 		p, perr := pollJobOnceAt(ctx, cfg, holder+"/fleet/queue/jobs/"+pr.JobID)
-		state, status := p.State, p.Status
+		state, data, jobErr, status := p.State, p.Data, p.JobErr, p.Status
 		prevQueuedAt := lastQueuedAt
 		lastQueuedAt = time.Time{}
 		switch {
@@ -179,8 +153,21 @@ func queuePoll(ctx context.Context, cfg config.Config, holder string, contract c
 		case status == http.StatusUnauthorized:
 			pr.Err = "queue poll: 401 unauthorized (fleet_auth_token mismatch)"
 			return
-		case status == http.StatusOK && (state == "done" || state == "error"):
-			queueAnswer(contract, p, pr)
+		case status == http.StatusOK && state == "done":
+			var wire core.AgentWireResult
+			if uerr := json.Unmarshal(data, &wire); uerr != nil {
+				pr.Err = "job done but data is not an AgentWireResult: " + uerr.Error()
+				return
+			}
+			pr.Result = wire
+			pr.Node = wire.NodeID
+			pr.Seat = wire.Seat
+			if !wire.Deferred {
+				pr.AcceptanceFailures = EvalAcceptance(contract, wire)
+			}
+			return
+		case status == http.StatusOK && state == "error":
+			pr.Err = "queue job failed: " + jobErr
 			return
 		case status == http.StatusOK && state == "accepted":
 			// Unclaimed: credit the wait like the push path's backlog credit.
