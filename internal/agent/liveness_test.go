@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -42,6 +43,65 @@ func TestAllowanceArithmetic(t *testing.T) {
 	}
 	if got := unknown.toolAllowance(-1); got != time.Hour {
 		t.Fatalf("an uncapped tool gets an hour, got %s", got)
+	}
+}
+
+// The re-pack allowance follows the answer it re-writes and the seat's rate
+// (register C-66, RC-6). It used to be a flat 120 s whatever the size: a 685-token
+// answer on a seat publishing 2.7 tok/s needs ~250 s of generation, and on a seat
+// that answers JSON in one piece the monitor hears nothing until it lands, so
+// 58 of the 83 re-packs on one seat on 2026-09-29 were filed as stalled while the
+// engine was producing.
+func TestAllowanceArithmeticRepackFollowsTheAnswerAndTheSeatRate(t *testing.T) {
+	p := StallPolicy{Floor: 60 * time.Second, Repack: 120 * time.Second, Slack: 30 * time.Second, TokS: 2.7}
+	tokens, rate := 685.0, 2.7
+	want := time.Duration(tokens/rate*1.5*float64(time.Second)) + 30*time.Second // 410.6 s
+	if got := p.Allowance(PhaseRepack, 685); got != want || got < 410*time.Second {
+		t.Fatalf("685 tok at 2.7 tok/s allows %s, want %s (>= 410 s)", got, want)
+	}
+	// The rate unknown, or the size unknown: the flat bound, as before.
+	noRate := StallPolicy{Floor: 60 * time.Second, Repack: 120 * time.Second, Slack: 30 * time.Second}
+	if got := noRate.Allowance(PhaseRepack, 685); got != 120*time.Second {
+		t.Fatalf("TokS 0 must keep the 120 s floor, got %s", got)
+	}
+	if got := p.Allowance(PhaseRepack, 0); got != 120*time.Second {
+		t.Fatalf("an unknown answer size must keep the 120 s floor, got %s", got)
+	}
+	// A fast seat never gets less than the flat bound or the floor.
+	fast := StallPolicy{Floor: 60 * time.Second, Repack: 120 * time.Second, Slack: 30 * time.Second, TokS: 100}
+	if got := fast.Allowance(PhaseRepack, 685); got != 120*time.Second {
+		t.Fatalf("a fast seat keeps the flat bound, got %s", got)
+	}
+	// Only a HIGHER floor than the flat bound wins over an arithmetic that is smaller.
+	strict := StallPolicy{Floor: 300 * time.Second, Repack: 120 * time.Second, Slack: 30 * time.Second, TokS: 100}
+	if got := strict.Allowance(PhaseRepack, 685); got != 300*time.Second {
+		t.Fatalf("the floor still bounds the allowance from below, got %s", got)
+	}
+}
+
+// A stalled re-pack says how its allowance was sized, so a reader can check the
+// arithmetic the way the prefill note lets them check that one.
+func TestMonitorRepackStallNamesItsArithmetic(t *testing.T) {
+	// 800 expected tok / 10,000 tok/s x 1.5 + 10 ms = 130 ms: over the 40 ms flat
+	// bound, so the arithmetic is what sized this allowance.
+	pol := StallPolicy{Floor: 40 * time.Millisecond, Repack: 40 * time.Millisecond, Slack: 10 * time.Millisecond, TokS: 10000}
+	ctx, m := NewMonitor(context.Background(), pol, 5*time.Second)
+	defer m.Stop()
+	m.Phase(PhaseRepack, 800)
+	if _, _, _, allow := m.Snapshot(); allow != 130*time.Millisecond {
+		t.Fatalf("allowance = %s, want 130ms", allow)
+	}
+	select {
+	case <-ctx.Done():
+	case <-time.After(3 * time.Second):
+		t.Fatal("silent re-pack was not stalled")
+	}
+	var se *StallError
+	if !errors.As(context.Cause(ctx), &se) || se.Phase != PhaseRepack {
+		t.Fatalf("cause = %v, want a re-pack stall", context.Cause(ctx))
+	}
+	if !strings.Contains(se.Error(), "800 expected tok / 10000.0 tok/s x 1.5") {
+		t.Fatalf("stall reason %q does not show the re-pack arithmetic", se.Error())
 	}
 }
 

@@ -569,6 +569,12 @@ type RunOptions struct {
 	// nvidia-smi once, not 32 times. Tests inject readers here; a box with no
 	// layers never calls it (the zero Decision is the pre-layer behaviour).
 	LocalDecider func(ctx context.Context, contract core.AgentContract, st Subtask) placetable.Decision
+	// Rescue re-packs a finished answer whose structured re-pack failed on the
+	// executing node (register C-66, PR-4): the delegator holds the answer, so it
+	// structures it itself instead of counting a finished loop as lost work.
+	// nil = no rescue, the behaviour before the rescue existed: the defer is delivered as it is.
+	// The surfaces that own a pipeline wire pipeline.RescueRepack here.
+	Rescue RescueFunc
 }
 
 // DefaultTenant is the tenant id a delegator process identifies itself with
@@ -660,7 +666,11 @@ func RunWith(ctx context.Context, cfg config.Config, local LocalRunner, subtasks
 	// route "queue" bypasses the whole push machinery (ADR 0030): the holder
 	// owns durability and the claim loops own placement.
 	if route == "queue" {
-		return runQueued(ctx, cfg, subtasks)
+		var rescue RescueFunc
+		if opts != nil {
+			rescue = opts.Rescue
+		}
+		return runQueued(ctx, cfg, subtasks, rescue)
 	}
 	// Fleet membership is configuration: a call that names no remotes uses the
 	// config's delegate_remotes. A call's own list REPLACES it (never merges) so
@@ -712,6 +722,7 @@ func RunWith(ctx context.Context, cfg config.Config, local LocalRunner, subtasks
 		r.priority = core.ClampBand(opts.Priority)
 		r.tenant = opts.Tenant
 		r.decider = opts.LocalDecider
+		r.rescue = opts.Rescue
 	}
 	// route=spread probes the fleet ONCE per run: every subtask deals itself
 	// across the same roster, so per-subtask probing would be N identical GETs
@@ -979,6 +990,8 @@ type runner struct {
 	autoProbeErrs []string
 	autoDeal      []spreadSlot
 
+	// rescue is RunOptions.Rescue; nil = no rescue.
+	rescue RescueFunc
 	// quarantine is the caller's Quarantine (RunOptions), nil = inert.
 	quarantine  *Quarantine
 	quarantined atomic.Int64
@@ -1084,6 +1097,13 @@ func (r *runner) runOne(ctx context.Context, i int, contract core.AgentContract)
 	pl := newPlacements()
 	first := r.placeAndRun(ctx, i, contract, nil, start, budget, pl)
 	if !retryable(first) {
+		return first
+	}
+	// A research page that failed ONLY its acceptance is not run a second time
+	// (register C-74). Guarded here, not inside retryable(): that predicate sees
+	// a placed result, never the contract that names the door.
+	if skipsRetryAsResearchAcceptanceOnly(contract, first) {
+		first.RetryNote = fmt.Sprintf("retry skipped: the first attempt on %s failed only its acceptance, and a research digest is graded against its page — a second seat repeats the verdict at the cost of a whole second run", nodeLabel(first))
 		return first
 	}
 	// An EMPTY final (0.115.8: stop_reason reasoning_starved / empty) is not a
@@ -2269,14 +2289,16 @@ const minRetrySec = 10
 // defer, or a broken/misconfigured stack is not something another seat fixes,
 // and a contract-classed defer is the caller's to fix.
 //
-// The ONE infrastructure defer that IS retryable is the admission-time
-// coherence defer (register D-118): the seat itself is broken and it was caught
-// before the contract's wall started, so the budget is still there to fund a
-// retry — which is precisely the case another node fixes. What the node's
-// admission spent getting there is credited back in runOne (admissionCredit),
-// because the cold load that triggers the probe would otherwise eat most of a
-// default budget before the retry floor is applied. The general infrastructure
-// rule is untouched; see IncoherentSeatDefer.
+// The TWO infrastructure defers that ARE retryable are the admission-time
+// ones: the coherence defer (register D-118) and the warm-up defer (register
+// C-76, R-05a). The seat itself is broken (it answers nonsense, or its process
+// did not start) and it was caught before the contract's wall started, so the
+// budget is still there to fund a retry — which is precisely the case another
+// node fixes. What the node's admission spent getting there is credited back in
+// runOne (admissionCredit), because the cold load that leads to either verdict
+// would otherwise eat most of a default budget before the retry floor is
+// applied. The general infrastructure rule is untouched; see IncoherentSeatDefer
+// and SeatWarmFailedDefer.
 func retryable(pr PlacedResult) bool {
 	if pr.Err != "" {
 		return false
@@ -2284,10 +2306,43 @@ func retryable(pr PlacedResult) bool {
 	if len(pr.AcceptanceFailures) > 0 {
 		return true
 	}
-	if IncoherentSeatDefer(pr.Result) {
+	if admissionDefer(pr.Result) {
 		return true
 	}
 	return pr.Result.Deferred && pr.Result.DeferClass == core.DeferClassAbstention
+}
+
+// researchDoors are the Door values the research lane stamps on the contracts
+// it builds: offload_research (MCP) and cli:research (the CLI verb).
+var researchDoors = map[string]bool{"offload_research": true, "cli:research": true}
+
+// skipsRetryAsResearchAcceptanceOnly reports a placed result the verification
+// retry must leave alone: a research page whose only problem is its own checks
+// (a shape, an item count). Those are graded against the fetched page, so a
+// second node given the same page mostly repeats the verdict; before the anchor
+// fix of 0.141.1, 209 of a week's 271 such failures were the checks' own faults,
+// and each retry was a whole second run of five to thirteen minutes.
+//
+// A failed DOCUMENT FINGERPRINT is the exception: the answer is about another
+// document, which is a fact about the node that wrote it (strikeOnFingerprint
+// quarantines a node for it), and another node is the cure. An abstention or the
+// admission-time coherence defer is likewise a fact about the SEAT and keeps its
+// retry.
+func skipsRetryAsResearchAcceptanceOnly(contract core.AgentContract, pr PlacedResult) bool {
+	return researchDoors[contract.Door] && pr.Err == "" && !pr.Result.Deferred &&
+		len(pr.AcceptanceFailures) > 0 && !failsDocumentFingerprint(pr.AcceptanceFailures)
+}
+
+// failsDocumentFingerprint reports whether any failed acceptance is the DOCUMENT
+// FINGERPRINT (research.AnchorCheck tags its regex with the named group
+// `docanchor`).
+func failsDocumentFingerprint(failures []string) bool {
+	for _, f := range failures {
+		if strings.Contains(f, "(?P<docanchor>") {
+			return true
+		}
+	}
+	return false
 }
 
 // IncoherentSeatDefer reports whether a result is the admission-time coherence
@@ -2310,15 +2365,33 @@ func IncoherentSeatDefer(r core.AgentWireResult) bool {
 		strings.HasPrefix(r.Reason, core.IncoherentSeatReason)
 }
 
-// admissionCredit is the node-side admission time a coherence defer already
-// spent — its cordon wait, pre-flight, cold load and the probe itself — which
-// the subtask's execution budget must not be charged for: the contract's wall
-// never started, and the wire carries admission_wait_sec for exactly this.
+// SeatWarmFailedDefer reports whether a result is the admission-time warm-up
+// defer: an `infrastructure` defer whose reason carries core.SeatWarmFailedReason,
+// i.e. the executing node's warm request was refused with a server error and there
+// was positive evidence the seat's process did not start (a busy answer, a seat
+// that reads starting or another model mid-swap never produce it). Like the
+// coherence defer it is a property of THIS seat, was caught before the wall
+// started, and is cured by the same contract on another node.
+func SeatWarmFailedDefer(r core.AgentWireResult) bool {
+	return r.Deferred && r.DeferClass == core.DeferClassInfrastructure &&
+		strings.HasPrefix(r.Reason, core.SeatWarmFailedReason)
+}
+
+// admissionDefer is either of the two defers the node files before its wall
+// starts, on evidence about its own seat, and that another node may cure.
+func admissionDefer(r core.AgentWireResult) bool {
+	return IncoherentSeatDefer(r) || SeatWarmFailedDefer(r)
+}
+
+// admissionCredit is the node-side admission time an admission defer already
+// spent — its cordon wait, pre-flight, cold load and the probe or warm-up itself
+// — which the subtask's execution budget must not be charged for: the contract's
+// wall never started, and the wire carries admission_wait_sec for exactly this.
 // Zero for every other result: no other shape has a claim on the credit, and a
 // node that reports no admission (a pre-D-118 node, or an unmeasured one) is
 // credited nothing rather than guessed at.
 func admissionCredit(pr PlacedResult) time.Duration {
-	if !IncoherentSeatDefer(pr.Result) || pr.Result.AdmissionWaitSec <= 0 {
+	if !admissionDefer(pr.Result) || pr.Result.AdmissionWaitSec <= 0 {
 		return 0
 	}
 	return time.Duration(pr.Result.AdmissionWaitSec * float64(time.Second))
@@ -2419,6 +2492,14 @@ func nodeLabel(pr PlacedResult) string {
 		return "(no node took it)"
 	}
 	return pr.Node
+}
+
+// jobLabel names a subtask's job for a log line ("(unnamed)" before it has one).
+func jobLabel(pr PlacedResult) string {
+	if pr.JobID == "" {
+		return "(unnamed)"
+	}
+	return pr.JobID
 }
 
 // attemptOutcome names an attempt's outcome for the retry annotations.
@@ -2928,7 +3009,12 @@ func (r *runner) attempt(ctx context.Context, i int, contract core.AgentContract
 	jobID := mintJobID()
 
 	finish := func(pr PlacedResult) PlacedResult {
+		// A finished answer whose structured re-pack failed is re-packed here,
+		// before the row is recorded, so the ledger and the corpus say what the
+		// caller receives (rescue.go). The job is named first: the rescue's log line
+		// has to say WHICH job's answer it tried to save.
 		pr.JobID = jobID
+		pr = r.rescueSchemaMiss(ctx, contract, pr, start)
 		pr.wallMs = time.Since(start).Milliseconds()
 		// Intent ledger close-out (Option A, intent.go): an acked job whose
 		// terminal answer THIS process observed is closed; the orphanable
@@ -4175,17 +4261,12 @@ func EvalAcceptance(contract core.AgentContract, wire core.AgentWireResult) []st
 // regex with the named group `docanchor`). Contract-caused failures — a
 // user's over-strict contains:, a thin page's min_items — never strike.
 func (r *runner) strikeOnFingerprint(base string, failures []string) {
-	if r.quarantine == nil {
+	if r.quarantine == nil || !failsDocumentFingerprint(failures) {
 		return
 	}
-	for _, f := range failures {
-		if strings.Contains(f, "(?P<docanchor>") {
-			if r.quarantine.Strike(base) {
-				r.quarantined.Add(1)
-				log.Printf("delegate: node %s quarantined for %s after 2 off-document answers (document fingerprint failed twice)", base, DefaultQuarantineTTL)
-			}
-			return
-		}
+	if r.quarantine.Strike(base) {
+		r.quarantined.Add(1)
+		log.Printf("delegate: node %s quarantined for %s after 2 off-document answers (document fingerprint failed twice)", base, DefaultQuarantineTTL)
 	}
 }
 
