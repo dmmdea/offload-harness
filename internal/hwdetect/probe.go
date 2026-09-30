@@ -17,7 +17,8 @@ import (
 // (it names the card, its dedicated VRAM and the driver); otherwise a per-OS
 // fallback finds an AMD or unknown adapter, because a box that cannot be classified
 // must not be silently called "cpu" — that would hand an AMD laptop the weakest
-// possible profile.
+// possible profile. A board with no PCI adapter at all is last asked whether the
+// device tree names a supported SoC (DetectSoC).
 //
 // Every probe is read-only and bounded: no model is loaded and nothing is written.
 func Detect() Facts {
@@ -42,6 +43,15 @@ func Detect() Facts {
 			// One entry per counted GPU — allArchs demands the invariant hold on
 			// every probe path, not just nvidia-smi's.
 			f.Archs = []string{f.Arch}
+		}
+	}
+	if f.Vendor == "none" {
+		// No PCI adapter claimed the box, but an SoC's GPU and NPU are not on a PCI bus:
+		// the device tree names them (DetectSoC). Asked LAST so a discrete card, which is
+		// what the NVIDIA/AMD bands are written for, always outranks the board it sits in.
+		if soc, ok := DetectSoC(os.ReadFile); ok {
+			soc.OS, soc.RAMGb = f.OS, f.RAMGb
+			return soc
 		}
 	}
 	return f
