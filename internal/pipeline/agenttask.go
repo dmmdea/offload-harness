@@ -1304,6 +1304,10 @@ type AgentContractOptions = delegate.LocalOptions
 // when it happens; nothing else replaces it.
 var writeJobOwner = jobdir.WriteOwner
 
+// removeJobDir removes a finished run's job dir. A var only so a test can make
+// the removal fail; nothing else replaces it.
+var removeJobDir = os.RemoveAll
+
 // RunAgentContract executes one delegation contract IN-PROCESS on this
 // pipeline — the delegator-side LOCAL placement entry (Task 6; it satisfies
 // delegate.LocalRunner). It mirrors fleetnode.buildAgentRun's materialization
@@ -1346,7 +1350,18 @@ func (p *Pipeline) RunAgentContract(ctx context.Context, contract core.AgentCont
 	if err != nil {
 		return core.AgentWireResult{}, fmt.Errorf("agent contract: creating job dir: %w", err)
 	}
-	defer os.RemoveAll(jobDir) // docs live exactly as long as the run
+	defer func() {
+		// Docs live exactly as long as the run. A dir that will not go (a virus
+		// scanner or an indexer holding one of its files, or a fleet-serve sweep
+		// reading the marker at that instant, which on Windows blocks a delete)
+		// stays, and it stays marked: the startup sweep keeps it while this
+		// process lives and it is under jobdir.MaxRunLifetime old. Before the
+		// marker every fleet-serve start removed such a leftover unseen, so the
+		// failure is said here instead.
+		if rerr := removeJobDir(jobDir); rerr != nil {
+			log.Printf("agent contract: could not remove the job dir %s: %v (a fleet-serve start reclaims it once this process has exited or the dir is %s old)", jobDir, rerr, jobdir.MaxRunLifetime)
+		}
+	}()
 	// The owner marker goes down FIRST, before context/ exists and before any
 	// doc is written, so a fleet-serve sweep that lists the root at any later
 	// instant can see whose this dir is. The one window in which it cannot is

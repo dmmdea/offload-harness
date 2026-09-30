@@ -256,6 +256,49 @@ func TestRunAgentContractWritesTheOwnerMarkerBeforeAnythingElse(t *testing.T) {
 	}
 }
 
+// A run that finished must not fail because its job dir would not go away, and
+// the leftover must not be silent. The owner marker is what keeps a startup
+// sweep off a live run's dir, so a dir that stays is kept while this process
+// lives (and until it is a day old); before the marker every fleet-serve start
+// removed such a leftover unseen. The failure is logged with the dir and the
+// cause, and the result is unaffected.
+func TestRunAgentContractLogsAJobDirItCannotRemove(t *testing.T) {
+	orig := removeJobDir
+	t.Cleanup(func() { removeJobDir = orig })
+	var stuck string
+	removeJobDir = func(dir string) error {
+		stuck = dir
+		return errors.New("being used by another process")
+	}
+	logs := captureLog(t)
+	fake := &agentFake{
+		rosterIDs: []string{agentTestSeat},
+		loop:      func(int64) string { return doneChat("The answer is 42.") },
+	}
+	srv := fake.server(t)
+	defer srv.Close()
+
+	p, _ := agentContractPipeline(t, srv.URL)
+	contract := testContract()
+	contract.Depth = 0
+	contract.OutputSchema = nil
+	wire, err := p.RunAgentContract(context.Background(), contract, AgentContractOptions{})
+
+	if err != nil {
+		t.Fatalf("a finished run failed because its dir would not go away: %v", err)
+	}
+	if wire.Deferred {
+		t.Fatalf("deferred: %s", wire.Reason)
+	}
+	if stuck == "" {
+		t.Fatal("the run's job dir was never handed to removeJobDir")
+	}
+	out := logs.String()
+	if !strings.Contains(out, stuck) || !strings.Contains(out, "being used by another process") {
+		t.Errorf("log = %q, want it to name the dir that stayed (%s) and the cause", out, stuck)
+	}
+}
+
 // A marker that cannot be written is a materialization failure like the
 // others: an error, no model call, and nothing left on disk.
 func TestRunAgentContractMarkerWriteFailureIsAnErrorAndLeavesNothing(t *testing.T) {
