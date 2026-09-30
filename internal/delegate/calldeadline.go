@@ -245,6 +245,9 @@ func (r *runner) cutByDeadline(pr PlacedResult) PlacedResult {
 	default:
 		where = "had not been placed on a seat when the call's deadline passed"
 		pr.Unplaced = true
+		// No node ran it, so it names none (exhausted() does the same for "no node
+		// took it"): a capacity defer's own Node and Seat are the DECIDING box.
+		pr.Node, pr.Seat = "", ""
 		// PlacementReason narrates how the placement went. A capacity wait's own
 		// text ("no node had room within 30s") would now read as the OUTCOME, when
 		// the call simply ran out of time: the marker leads, the history follows.
@@ -263,7 +266,10 @@ func (r *runner) cutByDeadline(pr PlacedResult) PlacedResult {
 }
 
 // deadlineWithdrawTimeout bounds the one best-effort withdraw sent for a job the
-// call deadline cut. It runs detached from the (already cancelled) call context.
+// call deadline cut. It runs detached from the (already cancelled) call context,
+// and never longer than three quarters of the unwind allowance: a node that does
+// not answer must not turn the truthful cut result (its node and job) into an
+// abandoned one that says neither.
 const deadlineWithdrawTimeout = 5 * time.Second
 
 // withdrawCut asks the node to withdraw a job the call deadline walked away from:
@@ -285,7 +291,11 @@ func (r *runner) withdrawCut(base, jobID string) {
 	if base == "" || jobID == "" {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), deadlineWithdrawTimeout)
+	timeout := deadlineWithdrawTimeout
+	if g := r.call.grace * 3 / 4; g > 0 && g < timeout {
+		timeout = g
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	u := strings.TrimRight(strings.TrimSpace(base), "/") + "/fleet/jobs/" + url.PathEscape(jobID)
 	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, u, nil)
@@ -321,8 +331,9 @@ func nodeOrBase(pr PlacedResult) string {
 // ended first (or, for a caller cancellation, because the context ended). Its row
 // is recorded here — no attempt ever will — under a freshly minted job id.
 func (r *runner) unlaunched(contract core.AgentContract) PlacedResult {
+	// No node ran it, so it names no node and no seat.
 	pr := PlacedResult{
-		Node: r.localNodeID(), Seat: r.cfg.AgentPlannerModel(""), Unplaced: true, deadlineCut: r.call.reached(),
+		Unplaced: true, deadlineCut: r.call.reached(),
 		PlacementReason: "not started: the call ended first",
 	}
 	if r.call.reached() {
@@ -341,7 +352,7 @@ func (r *runner) unlaunched(contract core.AgentContract) PlacedResult {
 // dropped by the closed board.
 func (r *runner) abandoned() PlacedResult {
 	return PlacedResult{
-		Node: r.localNodeID(), Seat: r.cfg.AgentPlannerModel(""), Unplaced: true, deadlineCut: true,
+		Unplaced: true, deadlineCut: true,
 		PlacementReason: "call deadline reached before this subtask stopped",
 		Result: r.call.wire(fmt.Sprintf("did not stop within %s of the call's deadline passing; whatever it answers later is discarded",
 			r.call.grace.Round(time.Millisecond))),

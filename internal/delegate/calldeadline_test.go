@@ -177,6 +177,9 @@ func TestRunWithDeadlineDoesNotWaitForARunnerThatIgnoresItsContext(t *testing.T)
 	if !strings.Contains(r.Reason, "did not stop") {
 		t.Fatalf("reason = %q, want it to say the subtask did not stop when the deadline ended", r.Reason)
 	}
+	if results[1].Node != "" || results[1].Seat != "" || !results[1].Unplaced {
+		t.Fatalf("the abandoned subtask names node %q seat %q (unplaced %v): the call cannot say where it was running", results[1].Node, results[1].Seat, results[1].Unplaced)
+	}
 }
 
 // TestRunWithDeadlineReportsEachSubtaskFinishedExactlyOnce: progress counts every
@@ -264,6 +267,9 @@ func TestRunWithDeadlineStartsNothingPastTheSlots(t *testing.T) {
 			never++
 			if !pr.Unplaced {
 				t.Errorf("result %d never started but is not marked Unplaced", i)
+			}
+			if pr.Node != "" || pr.Seat != "" {
+				t.Errorf("result %d never started but names node %q seat %q: nobody ran it", i, pr.Node, pr.Seat)
 			}
 		}
 	}
@@ -455,6 +461,9 @@ func TestRunWithDeadlineEndsTheCapacityWaitAsACallDeadlineDefer(t *testing.T) {
 	// text ("no node had room within 30s") would read as the outcome.
 	if pl := results[0].PlacementReason; !strings.HasPrefix(pl, "call deadline reached") || !results[0].Unplaced {
 		t.Fatalf("placement = %q unplaced = %v, want the deadline marker first and the subtask marked unplaced", pl, results[0].Unplaced)
+	}
+	if results[0].Node != "" || results[0].Seat != "" {
+		t.Fatalf("the unplaced subtask names node %q seat %q: no node took it, so it names none", results[0].Node, results[0].Seat)
 	}
 }
 

@@ -130,3 +130,35 @@ func TestRunWithDeadlineWithdrawsNothingWhenNothingIsOutstanding(t *testing.T) {
 		t.Fatalf("%d withdraw request(s) %+v for a call that finished inside its deadline", len(calls), calls)
 	}
 }
+
+// TestRunWithDeadlineWithdrawNeverHoldsTheCallPastTheUnwind: a node that never
+// answers the withdraw (a blackholed box) must cost the call no more than the
+// unwind allowance. The withdraw's own timeout is shorter than that allowance, so
+// the goroutine finishes inside it and the published result stays the TRUTHFUL cut
+// (the node and the job), not an abandoned "did not stop" that names neither.
+func TestRunWithDeadlineWithdrawNeverHoldsTheCallPastTheUnwind(t *testing.T) {
+	compressPolls(t, 5*time.Millisecond, time.Second)
+	_, inner := remoteRunningForeverServer(t)
+	mux := http.NewServeMux()
+	mux.HandleFunc("DELETE /fleet/jobs/{id}", func(w http.ResponseWriter, r *http.Request) {
+		select { // never answers: the delegator's own timeout closes the connection
+		case <-r.Context().Done():
+		case <-time.After(10 * time.Second):
+		}
+	})
+	mux.Handle("/", inner.Config.Handler)
+	front := httptest.NewServer(mux)
+	t.Cleanup(front.Close)
+
+	results, sum, elapsed := runWithin(t, 6*time.Second, testCfg(t), neverLocal(t),
+		[]core.AgentContract{remoteGoal("slow one")}, "remote", []string{front.URL}, deadlineIn(300*time.Millisecond), nil)
+
+	if elapsed > 2*time.Second {
+		t.Fatalf("returned after %s: a node that never answers the withdraw held the call", elapsed)
+	}
+	r := results[0]
+	if sum != (Summary{Deferred: 1}) || strings.Contains(r.Result.Reason, "did not stop") ||
+		r.JobID == "" || !strings.Contains(r.Result.Reason, r.JobID) || r.Node != "node-a" {
+		t.Fatalf("summary %+v result %+v: want the truthful cut (the node and the job named), not an abandoned subtask", sum, r)
+	}
+}
