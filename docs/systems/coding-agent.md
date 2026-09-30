@@ -543,7 +543,7 @@ printed results, so it can say "look at this" without denying the results. **The
 `isError` when nothing succeeded and `summary.failed > 0`, `summary.lost_to_stack > 0` or
 `summary.skipped > 0`**: a call that delivered no usable result is loud whether the stack or a
 transport error ate it. A call that delivered **at least one** usable result is a *partial*
-result and is NOT flagged (C-75):
+result and is NOT flagged (C-75, [ADR 0065](../architecture/decisions/0065-the-whole-call-has-a-deadline-below-the-clients-abort.md)):
 `isError` means *the call failed*, and the MCP client answers an error-flagged body by keeping only
 its head and tail, which cut the surviving digests out of every partial research reply. The lost
 subtask stays loud in the body — `summary.failed` / `summary.lost_to_stack`, its own `failed` /

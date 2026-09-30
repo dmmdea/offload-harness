@@ -3236,12 +3236,30 @@ func (s *Server) publishReview(wire core.AgentWireResult, diff string, maxFindin
 	return jsonResult(withReviewExtra(out, extra))
 }
 
+// callDeadlineAt is the instant a delegation door's call must be over: entered
+// plus the configured whole-call deadline (ADR 0065), or the zero time when the
+// deadline is switched off. The MCP client aborts a call at its own limit and
+// drops the response with it, so the door answers first — with what has finished.
+// entered is taken at handler entry because the client's clock starts when it
+// sends the request, not when the delegator begins placing work.
+func (s *Server) callDeadlineAt(entered time.Time) time.Time {
+	if d := s.p.Cfg().CallDeadline(); d > 0 {
+		return entered.Add(d)
+	}
+	return time.Time{}
+}
+
 // handleAgentDelegate is the MCP front door onto delegate.Run (Task 6). It
 // prepares contracts (delegator-mints version/depth, inlines context_paths
 // under read_root, validates — all BEFORE any placement or network), then
 // hands them to the shared engine. House style throughout: every failure path
 // is a deferred-shape result, never an MCP error (see handleAgentRun).
+//
+// The call has a deadline below the client's abort (ADR 0065, config
+// agent_call_deadline_sec): at it the finished subtasks' results are returned and
+// each unfinished one is a budget defer "call deadline reached; N unfinished".
 func (s *Server) handleAgentDelegate(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	entered := time.Now()
 	var in struct {
 		Subtasks []struct {
 			Goal         string                  `json:"goal"`
@@ -3348,7 +3366,7 @@ func (s *Server) handleAgentDelegate(ctx context.Context, req *mcp.CallToolReque
 	// a node proven to answer about the wrong document must not keep receiving
 	// agent_delegate work (silent-failure review, 2026-09-02).
 	results, sum, rerr := delegate.RunWith(ctx, s.p.Cfg(), localRun, contracts, in.Route, in.Remotes,
-		&delegate.RunOptions{Quarantine: s.quarantine, Priority: in.Priority, Tenant: s.tenant})
+		&delegate.RunOptions{Quarantine: s.quarantine, Priority: in.Priority, Tenant: s.tenant, Deadline: s.callDeadlineAt(entered)})
 	if rerr != nil {
 		return jsonResult(map[string]any{"deferred": true, "reason": rerr.Error()})
 	}
@@ -3623,6 +3641,7 @@ type researchWire struct {
 // agent_delegate. The seam s.researchFetch lets tests supply pages without
 // network; production uses research.FetchAll.
 func (s *Server) handleResearch(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	entered := time.Now()
 	var in struct {
 		Goal            string          `json:"goal"`
 		URLs            []string        `json:"urls"`
@@ -3659,7 +3678,18 @@ func (s *Server) handleResearch(ctx context.Context, req *mcp.CallToolRequest) (
 			return research.FetchAll(ctx, urls, opt, 4)
 		}
 	}
-	fetched := fetch(ctx, in.URLs, opt)
+	// The call deadline started at handler entry (the client's clock did): the page
+	// fetch spends from it, so a slow fetch cannot push the whole call past the
+	// client's abort. A fetch cut by the deadline yields failed sources and then
+	// "no usable source", exactly as any failed fetch does.
+	deadline := s.callDeadlineAt(entered)
+	fetchCtx := ctx
+	if !deadline.IsZero() {
+		var cancelFetch context.CancelFunc
+		fetchCtx, cancelFetch = context.WithDeadline(ctx, deadline)
+		defer cancelFetch()
+	}
+	fetched := fetch(fetchCtx, in.URLs, opt)
 	specs, sources := research.Build(research.Request{
 		Goal: in.Goal, URLs: in.URLs, Questions: in.Questions, OutputSchema: in.OutputSchema,
 		Acceptance: in.Acceptance, TimeoutSec: in.TimeoutSec,
@@ -3691,7 +3721,7 @@ func (s *Server) handleResearch(ctx context.Context, req *mcp.CallToolRequest) (
 	// RunBatched: 9–12 usable pages used to hit Run's 8-subtask refusal and lose
 	// every page (2026-09-01). Chunks run in order; a chunk error returns WITH
 	// the results already obtained, rendered as partial rather than dropped.
-	results, sum, rerr := delegate.RunBatched(ctx, s.p.Cfg(), localRun, contracts, route, nil, &delegate.RunOptions{Quarantine: s.quarantine})
+	results, sum, rerr := delegate.RunBatched(ctx, s.p.Cfg(), localRun, contracts, route, nil, &delegate.RunOptions{Quarantine: s.quarantine, Deadline: deadline})
 	if rerr != nil && len(results) == 0 {
 		return jsonResult(map[string]any{"deferred": true, "reason": rerr.Error(), "sources": sources})
 	}

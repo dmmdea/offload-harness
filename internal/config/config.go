@@ -438,6 +438,19 @@ type Config struct {
 	// (120 s); negative = do not wait (the pre-0.113.18 behaviour). A sheddable
 	// contract (priority -1) never waits: with no idle node it is shed at once.
 	AgentPlacementWaitSec int `json:"agent_placement_wait_sec,omitempty"`
+	// AgentCallDeadlineSec (ADR 0065, register C-67) is the WHOLE-CALL deadline of
+	// the MCP doors agent_delegate and offload_research: how long one call may run
+	// before it returns what has finished and defers the rest ("call deadline
+	// reached; N unfinished", class budget), cancelling the outstanding work. It
+	// exists because the MCP client aborts a tool call at its own limit (1,800 s in
+	// the reference setup) and DROPS the response with it — a call that ran 2,103 s
+	// lost a finished 423 s answer to that abort. It bounds the call as the CLIENT
+	// sees it (the offload_research page fetch included), not any one subtask's
+	// timeout_sec, so keep it BELOW the client's limit with room for the answer to
+	// travel; the built-in default is 1,500 s. 0 = the built-in default; negative =
+	// no whole-call deadline (a client that never aborts). The CLI verbs have no
+	// client to abort and take no deadline.
+	AgentCallDeadlineSec int `json:"agent_call_deadline_sec,omitempty"`
 	// AgentSpreadLocalSlot (0.113.20) decides what route=spread does with the
 	// LOCAL rotation slot when the local agent seat is already busy at deal time:
 	//   ""/"skip-when-busy" (default) — the local slot is dealt to the best
@@ -2475,6 +2488,28 @@ func (c Config) PlacementWait() time.Duration {
 		return 120 * time.Second
 	default:
 		return time.Duration(c.AgentPlacementWaitSec) * time.Second
+	}
+}
+
+// DefaultCallDeadlineSec is the built-in whole-call deadline of the MCP
+// delegation doors: 25 minutes. It sits above the longest single subtask a call
+// can carry (timeout_sec cap 900 s, plus the 300 s admission allowance and the
+// 60 s poll grace the delegator holds a job open for = 1,260 s) so a healthy
+// maximum-length subtask is never cut, and below the MCP client's 1,800 s abort
+// by the margin a response needs to be built and delivered (the live check is
+// "call wall <= deadline + 30 s").
+const DefaultCallDeadlineSec = 1500
+
+// CallDeadline resolves AgentCallDeadlineSec: 0 → DefaultCallDeadlineSec,
+// negative → 0 meaning "no whole-call deadline", positive → that many seconds.
+func (c Config) CallDeadline() time.Duration {
+	switch {
+	case c.AgentCallDeadlineSec < 0:
+		return 0
+	case c.AgentCallDeadlineSec == 0:
+		return DefaultCallDeadlineSec * time.Second
+	default:
+		return time.Duration(c.AgentCallDeadlineSec) * time.Second
 	}
 }
 

@@ -124,6 +124,11 @@ type PlacedResult struct {
 	intentRecorded  bool
 	orphanable      bool
 	PlacementReason string
+	// deadlineCut marks a result the whole-call deadline (RunOptions.Deadline)
+	// published as a budget defer instead of an answer: the subtask was still
+	// running, waiting or not yet started when the call ended. Set by
+	// cutByDeadline and the deadline's own constructors; never published.
+	deadlineCut bool
 	// Err is non-empty when the subtask FAILED for transport/config reasons
 	// (dispatch refused, auth rejected, undecodable result). Counted in
 	// Summary.Failed, never in Deferred — eight quiet defers and one broken
@@ -556,6 +561,18 @@ type RunOptions struct {
 	// nvidia-smi once, not 32 times. Tests inject readers here; a box with no
 	// layers never calls it (the zero Decision is the pre-layer behaviour).
 	LocalDecider func(ctx context.Context, contract core.AgentContract, st Subtask) placetable.Decision
+	// Deadline, when non-zero, is the instant the WHOLE call must be over: the
+	// MCP doors set it below the client's own abort (config.CallDeadline) so a
+	// call returns what has finished instead of being dropped with it (ADR 0065,
+	// register C-67). At Deadline every subtask still running is cancelled and
+	// published as a budget defer "call deadline reached; N unfinished" beside the
+	// finished results, and nothing further is started. The zero value is no
+	// deadline — every caller that is not an MCP door, and every pre-0065 call.
+	Deadline time.Time
+	// call is the deadline's shared state (calldeadline.go): RunBatched builds it
+	// once so every chunk of a batched call counts its unfinished subtasks against
+	// the whole call. Nil = RunWith builds its own from Deadline.
+	call *callDeadline
 }
 
 // DefaultTenant is the tenant id a delegator process identifies itself with
@@ -592,6 +609,15 @@ func Run(ctx context.Context, cfg config.Config, local LocalRunner, subtasks []c
 func RunBatched(ctx context.Context, cfg config.Config, local LocalRunner, subtasks []core.AgentContract, route string, remotes []string, opts *RunOptions) ([]PlacedResult, Summary, error) {
 	var all []PlacedResult
 	var total Summary
+	// The call deadline (ADR 0065) covers the WHOLE batched call, not each chunk:
+	// one shared state, so the unfinished count in every published reason spans
+	// every chunk, and a chunk that would begin after the deadline never does.
+	dl := newCallDeadline(ctx, opts, len(subtasks))
+	if dl != nil {
+		o := *opts
+		o.call = dl
+		opts = &o
+	}
 	for start := 0; start < len(subtasks); start += MaxSubtasks {
 		end := start + MaxSubtasks
 		if end > len(subtasks) {
@@ -644,10 +670,20 @@ func RunWith(ctx context.Context, cfg config.Config, local LocalRunner, subtasks
 	if len(subtasks) > maxSubtasks {
 		return nil, Summary{}, fmt.Errorf("delegate: %d subtasks exceeds the max of %d", len(subtasks), maxSubtasks)
 	}
+	// The whole-call deadline (ADR 0065): from here every placement, probe, poll
+	// and local run answers to a context that ends at RunOptions.Deadline. nil =
+	// no deadline, and everything below behaves exactly as it did before.
+	dl := newCallDeadline(ctx, opts, len(subtasks))
+	if dl != nil {
+		var cancelCall context.CancelFunc
+		ctx, cancelCall = context.WithDeadlineCause(ctx, dl.at, ErrCallDeadline)
+		defer cancelCall()
+	}
 	// route "queue" bypasses the whole push machinery (ADR 0030): the holder
 	// owns durability and the claim loops own placement.
 	if route == "queue" {
-		return runQueued(ctx, cfg, subtasks)
+		results, sum, err := runQueued(ctx, cfg, subtasks)
+		return dl.cutQueued(results, sum, err)
 	}
 	// Fleet membership is configuration: a call that names no remotes uses the
 	// config's delegate_remotes. A call's own list REPLACES it (never merges) so
@@ -668,10 +704,20 @@ func RunWith(ctx context.Context, cfg config.Config, local LocalRunner, subtasks
 	// delivery (same posture as pipeline.record's ignored error).
 	var led *ledger.Ledger
 	ledgerUnopened := false
+	// ledgerDrained is set only when the call deadline passed with subtask
+	// goroutines still running: they write their rows when they end, so the ledger
+	// closes after the last of them instead of under them.
+	var ledgerDrained <-chan struct{}
 	if cfg.LedgerPath != "" {
 		if l, err := ledger.Open(cfg.LedgerPath); err == nil {
 			led = l
-			defer led.Close()
+			defer func() {
+				if ledgerDrained != nil {
+					go func() { <-ledgerDrained; l.Close() }()
+					return
+				}
+				l.Close()
+			}()
 		} else {
 			// Every row this run would have written is LOST, and record() must
 			// count them as such — see runner.ledgerUnopened.
@@ -694,6 +740,7 @@ func RunWith(ctx context.Context, cfg config.Config, local LocalRunner, subtasks
 	// shows the card "running" until its staleness sweep fails it. Each send is
 	// bounded (2 s), so this cannot hold a run hostage to a down PAIR.
 	defer r.pair.Wait()
+	r.call = dl
 	if opts != nil {
 		r.quarantine = opts.Quarantine
 		r.priority = core.ClampBand(opts.Priority)
@@ -751,19 +798,52 @@ func RunWith(ctx context.Context, cfg config.Config, local LocalRunner, subtasks
 		}
 		r.autoDeal = r.dealAutoRemote(subtasks, r.localView(), r.autoViews, r.autoBases, busy, failed)
 	}
-	results := make([]PlacedResult, len(subtasks))
+	board := newResultBoard(len(subtasks))
 	sem := make(chan struct{}, runConcurrency)
 	var wg sync.WaitGroup
+	launched := 0
+launch:
 	for i, c := range subtasks {
+		if dl == nil {
+			sem <- struct{}{} // no deadline: block for a slot exactly as always
+		} else {
+			// A subtask still waiting for a run slot when the call ends never begins.
+			if dl.reached() {
+				break launch
+			}
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				break launch
+			}
+		}
 		wg.Add(1)
-		sem <- struct{}{}
+		launched++
 		go func(i int, contract core.AgentContract) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			results[i] = r.runOne(ctx, i, contract)
+			pr := r.cutByDeadline(r.runOne(ctx, i, contract))
+			if board.put(i, pr) && !pr.deadlineCut {
+				dl.answer()
+			}
 		}(i, c)
 	}
-	wg.Wait()
+	drained, abandoned := dl.await(ctx, &wg)
+	if abandoned && led != nil {
+		// Goroutines are still running and will record their rows when they end:
+		// the ledger stays open for them and closes once the last has returned.
+		ledgerDrained = drained
+	}
+	results, done := board.close()
+	for i := range results {
+		switch {
+		case done[i]:
+		case i >= launched:
+			results[i] = r.unlaunched(subtasks[i])
+		default:
+			results[i] = r.abandoned()
+		}
+	}
 
 	var sum Summary
 	for _, pr := range results {
@@ -976,6 +1056,9 @@ type runner struct {
 	decider  func(ctx context.Context, contract core.AgentContract, st Subtask) placetable.Decision
 	snapOnce sync.Once
 	snapshot *placetable.Snapshot
+	// call is this run's whole-call deadline (RunOptions.Deadline), nil = none.
+	// Every method on it is nil-safe, so no site needs a guard.
+	call *callDeadline
 }
 
 // decide is the composite box's placement decision for a contract that is
@@ -1387,6 +1470,9 @@ type placements struct {
 // subtask made no real attempt at all — otherwise the last attempt's row
 // already stands, exactly as exhausted() leaves it.
 func (r *runner) settle(contract core.AgentContract, pr PlacedResult, pl *placements, since time.Time) PlacedResult {
+	// A capacity wait (or a lease wait) that ended because the CALL did is the call
+	// deadline, not "no node had room" (ADR 0065).
+	pr = r.cutByDeadline(pr)
 	if pl.attempts > 0 {
 		return pr
 	}
@@ -2908,6 +2994,9 @@ func (r *runner) attempt(ctx context.Context, i int, contract core.AgentContract
 	finish := func(pr PlacedResult) PlacedResult {
 		pr.JobID = jobID
 		pr.wallMs = time.Since(start).Milliseconds()
+		// An outcome that was not an answer and arrived once the call deadline had
+		// passed is published — and recorded — as the call deadline (ADR 0065).
+		pr = r.cutByDeadline(pr)
 		// Intent ledger close-out (Option A, intent.go): an acked job whose
 		// terminal answer THIS process observed is closed; the orphanable
 		// exits (cancel / owned-deadline / queued give-up) stay open for the
@@ -2918,6 +3007,13 @@ func (r *runner) attempt(ctx context.Context, i int, contract core.AgentContract
 		r.record(contract, pr)
 		r.pairTerminal(jobID, &pr)
 		return pr
+	}
+
+	// A call whose deadline has passed starts nothing new (ADR 0065): no probe, no
+	// dispatch, no local run. cutByDeadline (in finish) publishes it as the call
+	// deadline.
+	if r.call.reached() {
+		return finish(PlacedResult{Err: "canceled: the call's deadline passed before this placement began"})
 	}
 
 	// Defensive re-validate: the surfaces run PrepareContract, but Run is an

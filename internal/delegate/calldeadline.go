@@ -1,0 +1,336 @@
+// calldeadline.go is the whole-call deadline of the delegation engine (ADR 0065,
+// register C-67).
+//
+// The MCP client aborts a tool call at its own limit (1,800 s in the reference
+// setup) and drops the response with it. RunWith used to return only when EVERY
+// subtask ended, and a producing job is polled to its node ceiling (up to 14,400
+// s), so one slow subtask held a call past the abort and took the finished ones
+// down with it — a call that ran 2,103 s lost a finished 423 s answer.
+//
+// RunOptions.Deadline is the door's answer: an absolute instant, set below the
+// client's abort. At that instant
+//
+//   - every subtask still running is CANCELLED (the deadline is the context every
+//     placement, poll and local run already honours, so the seat is told to stop);
+//   - nothing further is STARTED (a subtask still waiting for a run slot, and the
+//     later chunks of a batched call, never begin);
+//   - the call RETURNS what has finished, and every subtask that had not is
+//     published as a budget defer "call deadline reached; N unfinished" — a result
+//     shape, never a failure, so the finished digests are not lost behind an error.
+//
+// It is not a per-subtask wall: timeout_sec still bounds each subtask's own
+// execution. The deadline bounds the CALL as the client experiences it.
+
+package delegate
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/dmmdea/offload-harness/internal/core"
+)
+
+// ErrCallDeadline is the cause a context carries when the whole-call deadline
+// passed (context.Cause). A caller that cancels for any other reason — the client
+// going away, a test tearing down — is NOT the call deadline: its subtasks report
+// their own "canceled" outcomes exactly as before.
+var ErrCallDeadline = errors.New("call deadline reached")
+
+// callDeadlinePrefix opens every reason the deadline publishes. It is a stable
+// grep key: the ledger, the corpus and the wire all carry it.
+const callDeadlinePrefix = "call deadline reached"
+
+// Grace bounds the unwind allowance after the deadline: the time cooperating
+// goroutines get to write their own telemetry rows and hand back a truthful
+// result before the call returns without them. It scales with the deadline so a
+// compressed test clock stays fast, and is capped so the live check "call wall <=
+// deadline + 30 s" holds with room to spare.
+const (
+	callGraceMin = 250 * time.Millisecond
+	callGraceMax = 10 * time.Second
+)
+
+// callDeadline is ONE call's deadline state. It is shared by every chunk of a
+// batched call, so the unfinished count in each published reason spans the whole
+// call, not the chunk that happened to hold the subtask.
+type callDeadline struct {
+	at    time.Time     // the instant the call must be over
+	grace time.Duration // how long cooperating subtasks get to unwind after it
+
+	total    int          // subtasks the whole call owes an answer for
+	answered atomic.Int64 // subtasks that produced a REAL result (never a deadline defer)
+	frozen   atomic.Int64 // unfinished count at the instant the deadline was first observed; -1 = not yet
+}
+
+// newCallDeadline builds the state for a call whose deadline is opts.Deadline, or
+// returns nil when there is none. A context that already ends earlier keeps that
+// bound: the deadline can only shorten a call, never extend it. owed is how many
+// subtasks the whole call carries.
+func newCallDeadline(ctx context.Context, opts *RunOptions, owed int) *callDeadline {
+	if opts == nil {
+		return nil
+	}
+	if opts.call != nil {
+		return opts.call
+	}
+	if opts.Deadline.IsZero() {
+		return nil
+	}
+	at := opts.Deadline
+	if d, ok := ctx.Deadline(); ok && d.Before(at) {
+		at = d
+	}
+	grace := time.Until(at) / 20
+	grace = min(max(grace, callGraceMin), callGraceMax)
+	c := &callDeadline{at: at, grace: grace, total: owed}
+	c.frozen.Store(-1)
+	return c
+}
+
+// reached reports whether the call deadline has passed. Nil-safe: a call with no
+// deadline never reaches it.
+func (c *callDeadline) reached() bool {
+	return c != nil && !time.Now().Before(c.at)
+}
+
+// unfinished is how many subtasks of the whole call had no result when the
+// deadline was first observed. It is frozen at that first look, so every reason a
+// call publishes states the same number even though the subtasks unwind at
+// slightly different moments.
+func (c *callDeadline) unfinished() int {
+	if v := c.frozen.Load(); v >= 0 {
+		return int(v)
+	}
+	n := max(int64(c.total)-c.answered.Load(), 1)
+	c.frozen.CompareAndSwap(-1, n)
+	return int(c.frozen.Load())
+}
+
+// answer records that one subtask delivered a real result; nil-safe.
+func (c *callDeadline) answer() {
+	if c != nil {
+		c.answered.Add(1)
+	}
+}
+
+// reason builds the published sentence: the stable opening, the whole call's
+// unfinished count, and what this subtask was doing when the deadline passed.
+func (c *callDeadline) reason(where string) string {
+	return fmt.Sprintf("%s; %d unfinished — this subtask %s", callDeadlinePrefix, c.unfinished(), where)
+}
+
+// wire is the AgentWireResult of a subtask the deadline cut off: a budget defer
+// (a ceiling stopped it, and the caller's next move is a smaller call or another
+// one), never an infrastructure or config class — nothing about the stack broke.
+func (c *callDeadline) wire(where string) core.AgentWireResult {
+	return core.AgentWireResult{
+		SchemaVersion: core.AgentWireSchemaVersion,
+		Deferred:      true,
+		DeferClass:    core.DeferClassBudget,
+		Reason:        c.reason(where),
+	}
+}
+
+// await is RunWith's wait for its subtask goroutines. With no deadline it is
+// wg.Wait(), exactly as before. With one it returns when they are all done, or —
+// once the deadline has passed — after the unwind allowance, whichever is first.
+// abandoned says goroutines were still running; drained closes when they finally
+// are, so the caller can keep the ledger open for them.
+//
+// A context that ended for any OTHER reason (the client cancelled) is not the
+// deadline: every subtask reports its own cancelled outcome, so every goroutine is
+// waited for, as it always was.
+func (c *callDeadline) await(ctx context.Context, wg *sync.WaitGroup) (drained <-chan struct{}, abandoned bool) {
+	if c == nil {
+		wg.Wait()
+		return nil, false
+	}
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+		return done, false
+	case <-ctx.Done():
+	}
+	if !c.reached() {
+		<-done
+		return done, false
+	}
+	c.unfinished() // freeze the whole call's count at the instant the deadline passed
+	t := time.NewTimer(c.grace)
+	defer t.Stop()
+	select {
+	case <-done:
+		return done, false
+	case <-t.C:
+		return done, true
+	}
+}
+
+// resultBoard collects the subtask results. The goroutines write through put and
+// RunWith reads once, after closing the board, so a goroutine that is still
+// running when the call returns can never write into a slice the caller owns — its
+// late answer is dropped, not raced.
+type resultBoard struct {
+	mu      sync.Mutex
+	results []PlacedResult
+	done    []bool
+	closed  bool
+}
+
+func newResultBoard(n int) *resultBoard {
+	return &resultBoard{results: make([]PlacedResult, n), done: make([]bool, n)}
+}
+
+// put stores subtask i's result; false means the board was already closed and the
+// result was dropped.
+func (b *resultBoard) put(i int, pr PlacedResult) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.closed {
+		return false
+	}
+	b.results[i], b.done[i] = pr, true
+	return true
+}
+
+// close freezes the board and hands back what it holds.
+func (b *resultBoard) close() ([]PlacedResult, []bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.closed = true
+	return b.results, b.done
+}
+
+// cutByDeadline turns a subtask outcome that was NOT finished when the deadline
+// passed into the published call-deadline defer. It is applied at every point an
+// outcome is published or recorded — finish, settle and the goroutine wrapper — so
+// the wire result, the ledger row and the corpus row say the same thing.
+//
+// It rewrites only outcomes that are not answers: a failure or a defer produced
+// once the deadline had passed (a cancelled poll, a cancelled local run, a capacity
+// wait that ran out of call). A result that finished — including one that failed
+// its acceptance checks — is a real answer and is never rewritten.
+func (r *runner) cutByDeadline(pr PlacedResult) PlacedResult {
+	if !r.call.reached() || pr.deadlineCut || pr.waitCapacity {
+		return pr
+	}
+	if pr.Err == "" && !pr.Result.Deferred {
+		return pr
+	}
+	var where string
+	switch {
+	case pr.intentRecorded:
+		where = fmt.Sprintf("was still on %s (job %s) when the call's deadline passed; the node may still finish it, and this call is no longer waiting for it",
+			nodeOrBase(pr), pr.JobID)
+		// The node acked the job and the delegator walked away: it may finish it, so
+		// the intent stays open for the recovery pass (the cancel arms in runRemote
+		// set this too; setting it here makes it hold for every exit).
+		pr.orphanable = true
+	case pr.ranLocal:
+		where = "was still running on the local seat when the call's deadline passed; it was cancelled"
+	default:
+		where = "had not been placed on a seat when the call's deadline passed"
+		pr.Unplaced = true
+		// PlacementReason narrates how the placement went. A capacity wait's own
+		// text ("no node had room within 30s") would now read as the OUTCOME, when
+		// the call simply ran out of time: the marker leads, the history follows.
+		if pr.PlacementReason != "" {
+			pr.PlacementReason = callDeadlinePrefix + " before a seat took it — " + pr.PlacementReason
+		} else {
+			pr.PlacementReason = callDeadlinePrefix + " before a seat took it"
+		}
+	}
+	pr.Result = r.call.wire(where)
+	pr.Err = ""
+	pr.AcceptanceFailures = nil
+	pr.refused, pr.refusalStatus = false, 0
+	pr.deadlineCut = true
+	return pr
+}
+
+// nodeOrBase names the node a job was placed on: its advertised id, else its dial
+// base — never an empty string mid-sentence.
+func nodeOrBase(pr PlacedResult) string {
+	if pr.Node != "" {
+		return pr.Node
+	}
+	if pr.ranBase != "" {
+		return pr.ranBase
+	}
+	return "its node"
+}
+
+// unlaunched is the result of a subtask that was never started because the call
+// ended first (or, for a caller cancellation, because the context ended). Its row
+// is recorded here — no attempt ever will — under a freshly minted job id.
+func (r *runner) unlaunched(contract core.AgentContract) PlacedResult {
+	pr := PlacedResult{
+		Node: r.localNodeID(), Seat: r.cfg.AgentPlannerModel(""), Unplaced: true, deadlineCut: r.call.reached(),
+		PlacementReason: "not started: the call ended first",
+	}
+	if r.call.reached() {
+		pr.Result = r.call.wire("never started: the call's deadline passed first")
+	} else {
+		pr.Err = "canceled: the call's context ended before this subtask started"
+	}
+	pr.JobID = mintJobID()
+	r.record(contract, pr)
+	return pr
+}
+
+// abandoned is the published result of a subtask whose goroutine had not returned
+// when the unwind allowance ran out — a seat stuck somewhere that never looks at
+// its context. The goroutine keeps its own telemetry and its late answer is
+// dropped by the closed board.
+func (r *runner) abandoned() PlacedResult {
+	return PlacedResult{
+		Node: r.localNodeID(), Seat: r.cfg.AgentPlannerModel(""), Unplaced: true, deadlineCut: true,
+		PlacementReason: "call deadline reached before this subtask stopped",
+		Result: r.call.wire(fmt.Sprintf("did not stop within %s of the call's deadline passing; whatever it answers later is discarded",
+			r.call.grace.Round(time.Millisecond))),
+	}
+}
+
+// cutQueued applies the deadline to route=queue's outcome. The queue lane polls
+// its subtasks one after another and reports a poll the context cancelled as a
+// failure; when the CALL DEADLINE is what cancelled it, those are unfinished work
+// (the job stays on the holder), not failures, and the summary follows.
+func (c *callDeadline) cutQueued(results []PlacedResult, sum Summary, err error) ([]PlacedResult, Summary, error) {
+	if !c.reached() || err != nil {
+		return results, sum, err
+	}
+	var cut []int
+	for i, pr := range results {
+		// A transport error names the context's CAUSE ("call deadline reached"), a
+		// bare cancellation its Err ("context deadline exceeded"): accept both.
+		if strings.HasPrefix(pr.Err, "canceled:") ||
+			(strings.HasPrefix(pr.Err, "queue submit:") &&
+				(strings.Contains(pr.Err, callDeadlinePrefix) || strings.Contains(pr.Err, context.DeadlineExceeded.Error()))) {
+			cut = append(cut, i)
+		}
+	}
+	if len(cut) == 0 {
+		return results, sum, err
+	}
+	c.frozen.CompareAndSwap(-1, int64(len(cut)))
+	for _, i := range cut {
+		pr := &results[i]
+		where := fmt.Sprintf("was still queued on the holder (job %s) when the call's deadline passed; the job stays on the holder and this call is no longer waiting for it", pr.JobID)
+		if strings.HasPrefix(pr.Err, "queue submit:") {
+			where = "had not been submitted to the holder when the call's deadline passed"
+			pr.Unplaced = true
+		}
+		pr.Result = c.wire(where)
+		pr.Err = ""
+		pr.deadlineCut = true
+		sum.Failed--
+		sum.Deferred++
+	}
+	return results, sum, nil
+}

@@ -1033,7 +1033,7 @@ discarded it, so a fleet down for a week read green forever. That same case is w
 `isError` is NOT the exit code's rule — it fires on `summary.failed` plus `summary.lost_to_stack`
 (the defers that LOST a subtask — it delivered no usable result because the contracted output
 never arrived, published separately for exactly this reason), and only when nothing succeeded
-(a partial result is a successful call, C-75), rather than on the whole of
+(a partial result is a successful call, C-75, ADR 0065), rather than on the whole of
 `summary.infrastructure` — see [coding-agent](coding-agent.md#delegation-surfaces). The counted
 set includes the `structured re-pack unreachable` shape, whose `output` is populated: what was
 lost is the schema-checked deliverable, not the bytes.
