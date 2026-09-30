@@ -89,6 +89,12 @@ type LocalOptions struct {
 	// Placed is published verbatim as the result's `placed` block; nil
 	// publishes none (the byte-identical constraint for plain boxes).
 	Placed *core.Placed
+	// ParentJobID is the delegator's job id for this run (register C-62). The
+	// runner's own ledger row becomes an inner row of that job — the
+	// delegator's agent_delegate row is the job's one record — so a
+	// route=local job is counted once, not twice. "" (every caller that is not
+	// the delegator) keeps the runner's row a job of its own.
+	ParentJobID string
 }
 
 // LocalRunner executes one contract in-process on the local node — the same
@@ -3196,7 +3202,7 @@ func (r *runner) runLocal(ctx context.Context, jobID string, contract core.Agent
 		pr.Err = "no local runner wired (delegator surfaces must supply one)"
 		return pr
 	}
-	opts := LocalOptions{Seat: dec.Seat, Placed: pr.Placed}
+	opts := LocalOptions{Seat: dec.Seat, Placed: pr.Placed, ParentJobID: jobID}
 	if dec.Seat != "" {
 		pr.Seat = dec.Seat
 	}
@@ -4761,6 +4767,7 @@ func (r *runner) record(contract core.AgentContract, pr PlacedResult) {
 			StopReason:       pr.Result.StopReason,
 			RepackMs:         pr.Result.RepackMs,
 			RepackAttempts:   pr.Result.RepackAttempts,
+			QueuedMs:         pr.Result.QueuedMs,
 			AcceptanceResult: acceptanceResult(pr),
 		}); err != nil {
 			r.ledgerLost.Add(1)

@@ -186,8 +186,11 @@ func TestLocalRunUsesTheDecidedSeatAndPublishesPlaced(t *testing.T) {
 }
 
 // TestNonCompositeBoxPublishesNoPlacedKey pins the byte-identical constraint
-// on the runner: no layers → zero LocalOptions, no placed block, no `placed`
-// key on the wire, no `layer` on the ledger row.
+// on the runner: no layers → no seat and no placed block in LocalOptions, no
+// `placed` key on the wire, no `layer` on the ledger row. The one option a
+// plain box does carry since 0.143.0 is the delegator's own job id
+// (ParentJobID, register C-62): it shapes only the runner's ledger row, never
+// the wire.
 func TestNonCompositeBoxPublishesNoPlacedKey(t *testing.T) {
 	cfg := testCfg(t)
 	var got LocalOptions
@@ -196,8 +199,11 @@ func TestNonCompositeBoxPublishesNoPlacedKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if sum.Succeeded != 1 || got != (LocalOptions{}) || results[0].Placed != nil {
+	if sum.Succeeded != 1 || got.Seat != "" || got.Placed != nil || results[0].Placed != nil {
 		t.Fatalf("summary=%+v options=%+v placed=%+v, want the pre-0.116 shape", sum, got, results[0].Placed)
+	}
+	if got.ParentJobID == "" || got.ParentJobID != results[0].JobID {
+		t.Fatalf("parent job id %q, want the delegator's job id %q (C-62)", got.ParentJobID, results[0].JobID)
 	}
 	rw := wireOf(t, results, sum)
 	if _, has := rw["placed"]; has {

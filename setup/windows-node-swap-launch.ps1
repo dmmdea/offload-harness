@@ -162,7 +162,8 @@ function Resolve-RunnerExe {
   if (& $SupportsNodeSwap $Staged) {
     return $Staged
   }
-  & $Log "staged binary $Staged does not support node-swap (very old build) - falling back to the currently-installed $Target as the runner"
+  $why = if ($script:NodeSwapProbe) { "probe: $($script:NodeSwapProbe)" } else { 'very old build' }
+  & $Log "staged binary $Staged does not support node-swap ($why) - falling back to the currently-installed $Target as the runner"
   return $Target
 }
 
@@ -194,14 +195,34 @@ function Resolve-RunnerExe {
 # --staged/--target either way (Plan validation is the FIRST thing
 # node-swap's own Run() does, before any file is read), so this is safe to
 # run against any exe.
+#
+# Windows PowerShell 5.1 (the powershell.exe every node's SSH lands in) turns
+# each STDERR line of a redirected native command into an ErrorRecord, and
+# under the script-wide $ErrorActionPreference = 'Stop' the first one —
+# node-swap's own "--staged is required" usage line, the very answer that
+# PROVES support — became a terminating error, the catch below, and "does not
+# support node-swap": the 2026-09-29 blackwell-8 node's parity deploy silently ran the
+# OLD installed engine as its runner. PowerShell 7 does not do this. Native
+# stderr is data here, never an error, so this function runs under
+# 'Continue' (a function-local assignment: the caller's preference is
+# untouched); a launch failure still throws and is still caught.
+#
+# The answer's evidence lands in $script:NodeSwapProbe ("exit N" or "launch
+# failed: ...") so the fallback log line and the launcher's result JSON can
+# say WHY a staged build was passed over: a fallback reported only as a bool
+# is how the 2026-09-29 run went unnoticed.
 function Test-NodeSwapSupport([string]$path) {
+  $ErrorActionPreference = 'Continue'
   try {
     & $path node-swap *> $null
   } catch {
+    $script:NodeSwapProbe = "launch failed: $($_.Exception.Message)"
     return $false
   }
+  $script:NodeSwapProbe = "exit $LASTEXITCODE"
   return ($LASTEXITCODE -eq 0) -or ($LASTEXITCODE -eq 1)
 }
+$script:NodeSwapProbe = ''
 
 if ($SelfTest) {
   $fail = 0
@@ -356,9 +377,24 @@ public static class NodeSwapArgvTest {
 
     if (Test-NodeSwapSupport $exit2) { Write-Host 'FAIL Test-NodeSwapSupport: exit 2 (unrecognized subcommand) is NOT supported: returned true'; $fail++ }
     else { Write-Host 'PASS Test-NodeSwapSupport: exit 2 (unrecognized subcommand) is NOT supported' }
+    Assert-Eq $script:NodeSwapProbe 'exit 2' 'the probe records the exit code it judged'
 
     if (Test-NodeSwapSupport $exitCrash) { Write-Host 'FAIL Test-NodeSwapSupport: a crash exit code is NOT supported: returned true'; $fail++ }
     else { Write-Host 'PASS Test-NodeSwapSupport: a crash exit code is NOT supported' }
+
+    # The REAL answer of a supporting build: its usage error on STDERR, exit 1.
+    # Windows PowerShell 5.1 under $ErrorActionPreference = 'Stop' used to turn
+    # that stderr line into a terminating error and read the build as
+    # unsupported (the 2026-09-29 blackwell-8 node's deploy ran the old engine). Run the
+    # self-test under powershell.exe AND pwsh: both must pass.
+    $stderr1 = Join-Path $fakeBinDir 'stderr1.cmd'
+    Set-Content -Path $stderr1 -Value "@echo off`r`necho error: --staged is required 1>&2`r`nexit /b 1" -Encoding ASCII
+    $savedEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Stop'
+    try {
+      if (Test-NodeSwapSupport $stderr1) { Write-Host 'PASS Test-NodeSwapSupport: a usage error on stderr + exit 1 is supported (under Stop)' }
+      else { Write-Host 'FAIL Test-NodeSwapSupport: a usage error on stderr + exit 1 is supported (under Stop): returned false'; $fail++ }
+    } finally { $ErrorActionPreference = $savedEap }
 
     # A plain text file renamed .exe is not a valid Win32 executable at all -
     # CreateProcess itself fails, so this never even reaches the point of
@@ -373,6 +409,8 @@ public static class NodeSwapArgvTest {
     try {
       if (Test-NodeSwapSupport $notAnExe) { Write-Host 'FAIL Test-NodeSwapSupport: a non-PE file is NOT supported: returned true'; $fail++ }
       else { Write-Host 'PASS Test-NodeSwapSupport: a non-PE file is NOT supported (and does not throw)' }
+      if ($script:NodeSwapProbe -like 'launch failed:*') { Write-Host 'PASS the probe records a launch failure' }
+      else { Write-Host "FAIL the probe records a launch failure: got [$($script:NodeSwapProbe)]"; $fail++ }
     } catch {
       Write-Host "FAIL Test-NodeSwapSupport: a non-PE file is NOT supported (and does not throw): THREW instead - $($_.Exception.GetType().Name): $($_.Exception.Message)"
       $fail++
@@ -389,6 +427,7 @@ public static class NodeSwapArgvTest {
 if (-not $Staged -or -not $Target -or -not $Sha256) {
   throw "-Staged, -Target and -Sha256 are required (or pass -SelfTest to run the argv-quoting unit checks only)"
 }
+$explicitRunner = [bool]$RunnerExe
 $RunnerExe = Resolve-RunnerExe -RunnerExe $RunnerExe -Staged $Staged -Target $Target -Sha256 $Sha256 -SkipHashCheck:$SkipHashCheck `
   -HashFile { param($p) (Get-FileHash -Algorithm SHA256 -Path $p).Hash } `
   -SupportsNodeSwap ${function:Test-NodeSwapSupport} `
@@ -459,4 +498,11 @@ Write-Host "[node-swap-launch] this session may disconnect now - the swap is det
 Write-Host "  Get-Content '$LogPath' -Tail 20"
 Write-Host "  if (Test-Path '$ResultPath') { Get-Content '$ResultPath' -Raw | ConvertFrom-Json }"
 
-[pscustomobject]@{ pid = $created.ProcessId; log_path = $LogPath; result_path = $ResultPath } | ConvertTo-Json -Compress
+# runner_fell_back is true when the OLD installed engine runs the swap
+# because the staged build failed the probe (runner_probe says how): a
+# deploy script must read it and fail loud, never a Write-Host line nobody sees.
+$runnerFellBack = (-not $explicitRunner) -and ($RunnerExe -eq $Target) -and ($Staged -ne $Target)
+[pscustomobject]@{
+  pid = $created.ProcessId; log_path = $LogPath; result_path = $ResultPath
+  runner_exe = $RunnerExe; runner_fell_back = $runnerFellBack; runner_probe = $script:NodeSwapProbe
+} | ConvertTo-Json -Compress

@@ -4526,6 +4526,8 @@ func entryFrom(task core.TaskType, meta core.Meta, deferred bool, inputChars int
 		// The job behind an agent row and the route's placement note (D-101):
 		// empty — omitted — on a plain cascade call.
 		JobID:          meta.JobID,
+		ParentJobID:    meta.ParentJobID,
+		QueuedMs:       meta.QueuedMs,
 		Placement:      meta.Placement,
 		Steps:          meta.Steps,
 		StopReason:     meta.StopReason,

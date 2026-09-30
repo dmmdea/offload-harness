@@ -28,7 +28,9 @@ type TaskStat struct {
 // skipped (they carry no fresh model signal).
 func Summarize(entries []ledger.Entry, marginThreshold float64) map[string]TaskStat {
 	m := map[string]*TaskStat{}
-	for _, e := range entries {
+	// A delegator-local job is ONE job: its inner row is skipped while its
+	// parent row is present (C-62, 0.143.0).
+	for _, e := range ledger.JobRows(entries) {
 		if e.CacheHit {
 			continue
 		}

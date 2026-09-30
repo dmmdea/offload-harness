@@ -141,6 +141,7 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		}
 	}
 	var contention *seatwait.Budget // set once the wall exists; finish reads it
+	var busyWatch *agent.Monitor    // set once the liveness monitor exists; finish reads its busy-hold total
 	var admitted time.Duration      // the admission pre-flight, if any; finish reports it
 	var admitNote string            // why the pre-flight could not settle residency (probe error / budget)
 	var coherenceNote string        // what the post-warm coherence probe found, when it ran (D-118)
@@ -155,6 +156,10 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		if contention != nil {
 			w.ContentionWaitSec = contention.Spent().Seconds()
 		}
+		if busyWatch != nil {
+			w.QueuedMs = busyWatch.QueuedTotal().Milliseconds()
+		}
+		meta.QueuedMs = w.QueuedMs
 		if admitted > 0 {
 			w.AdmissionWaitSec = admitted.Seconds()
 		}
@@ -177,6 +182,9 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		meta.RepackAttempts = w.RepackAttempts
 		if jid, _ := req.Params["job_id"].(string); jid != "" {
 			meta.JobID = jid
+		}
+		if pj, _ := req.Params["parent_job_id"].(string); pj != "" {
+			meta.ParentJobID = pj // an inner row of the delegator's job (C-62)
 		}
 		data, merr := json.Marshal(w)
 		if merr != nil {
@@ -315,15 +323,21 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	}
 	// The LOCAL run cap (register C-42): the fleet caps the jobs it sends
 	// here; this caps the runs this box starts on its own seat — a
-	// delegation's local leg and a fleet job alike — inside the same
-	// admission budget, own record excluded. A slot that never frees is a
-	// capacity defer, re-placeable, never a refusal.
+	// delegation's local leg and a fleet job alike — own record excluded, in
+	// FIFO order. The wait in line is bounded by the run's own wall, not the
+	// admission budget (register C-60, 0.143.0), and the admission deadline
+	// moves out by the time spent in line, so the pre-flight, the cold load
+	// and the probes below keep their whole budget. A slot that never frees
+	// is a capacity defer, re-placeable, never a refusal.
 	if reg, rerr := gpuactivity.Open(p.cfg.GPULockPath, p.cfg.StateDir); rerr == nil {
-		if serr := modelaffinity.AwaitSeatSlot(ctx, reg.OnSeat, seat, "", act.ID(), p.cfg.FleetConcurrencyLimit(), admissionEnd); serr != nil {
+		capStart := time.Now()
+		capEnd := modelaffinity.SeatCapDeadline(ctx, capStart, wall, admissionEnd)
+		if serr := modelaffinity.AwaitSeatSlotReporting(ctx, reg.OnSeat, seat, "", act.ID(), p.cfg.FleetConcurrencyLimit(), capEnd, seatLineHeartbeat(ctx, act)); serr != nil {
 			admitted = cordonWait(cordonStart)
-			admitNote = "held at the seat cap for the admission budget"
+			admitNote = "held at the seat cap for the run's wall"
 			return deferWire(core.DeferClassCapacity, "seat busy: "+serr.Error())
 		}
+		admissionEnd = admissionEnd.Add(time.Since(capStart))
 	}
 	admitted = cordonWait(cordonStart)
 	// Admission pre-flight (2026-09-02): the wall must not pay for ANOTHER
@@ -529,11 +543,33 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	// monitor suspends the stall clock under a bounded cold-load ceiling, and
 	// tells the observer so status readers and the delegator see the phase.
 	obs := newProgressObserver(ctx, act, ceilingSec)
-	if probe := seatLoadProbe(p.cfg.Endpoint, seat); probe != nil {
-		live.WithSeatProbe(probe, func(ph agent.Phase, allow time.Duration) {
+	// The hold re-publishes its rolling allowance on every reading that shows
+	// the engine working (0.143.0); the log line is for phase CHANGES only.
+	var holdMu sync.Mutex
+	var lastHold agent.Phase
+	onHold := func(ph agent.Phase, allow time.Duration) {
+		holdMu.Lock()
+		changed := ph != lastHold
+		lastHold = ph
+		holdMu.Unlock()
+		if changed {
 			log.Printf("agent task: liveness for %s: %s (allowed %.0fs)", seat, ph, allow.Seconds())
-			obs.OnAllowance(string(ph), allow)
-		})
+		}
+		obs.OnAllowance(string(ph), allow)
+	}
+	probe := seatLoadProbe(p.cfg.Endpoint, seat)
+	// The busy hold (0.143.0, ADR 0061): before a silent request is called
+	// stalled, the monitor reads the seat's ENGINE; a request waiting its turn
+	// on an engine that keeps working for others is held, never killed.
+	if eng := engineActivityProbe(p.cfg.Endpoint, seat, probe); eng != nil {
+		live.WithEngineProbe(eng)
+		if probe == nil {
+			live.WithSeatProbe(nil, onHold) // the hold's status events still reach the observer
+		}
+	}
+	busyWatch = live
+	if probe != nil {
+		live.WithSeatProbe(probe, onHold)
 		if coldLoaded {
 			// The warm-up just loaded the seat. Its FIRST completion is still
 			// cold cost (measured 2026-09-23: the 3-card seat read `ready`
@@ -849,15 +885,25 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 			bestSample = s
 		}
 	}
-	if p.seatRatesPath != "" && (wire.SeatTokS > 0 || coldLoad > 0 || pf.PrefillTokens > 0 || bestSample.Tokens > 0) {
+	// A CONTENDED run's timings are not the seat's rates (0.143.0): time its
+	// requests spent in the busy hold — queued behind siblings, preempted —
+	// sits inside its first-delta and per-call walls, and folding those into
+	// the store would lower the rates and inflate every later allowance,
+	// ceiling and placement ETA. Only the cold load (measured apart) is kept.
+	contended := busyWatch != nil && busyWatch.QueuedTotal() > 0
+	obsTokS, obsPrefill, obsBest := wire.SeatTokS, pf, bestSample
+	if contended {
+		obsTokS, obsPrefill.PrefillTokens, obsBest.Tokens = 0, 0, 0 // the wire still reports what was measured
+	}
+	if p.seatRatesPath != "" && (obsTokS > 0 || coldLoad > 0 || obsPrefill.PrefillTokens > 0 || obsBest.Tokens > 0) {
 		// Load-observe-save under the store's lock (seatrate.Update): the
 		// pre-loop read above was a snapshot for the estimate; another process
 		// may have written since. The prefill rate (0.131.0) sizes the next
 		// run's stall allowance while the seat prefills.
 		if uerr := seatrate.Update(p.seatRatesPath, func(s *seatrate.Store) {
-			s.Observe(seat, wire.SeatTokS, coldLoad.Seconds(), time.Now())
-			s.ObservePrefill(seat, pf.PrefillTokens, pf.PrefillMS, time.Now())
-			s.ObservePrefill(seat, bestSample.Tokens, bestSample.MS, time.Now())
+			s.Observe(seat, obsTokS, coldLoad.Seconds(), time.Now())
+			s.ObservePrefill(seat, obsPrefill.PrefillTokens, obsPrefill.PrefillMS, time.Now())
+			s.ObservePrefill(seat, obsBest.Tokens, obsBest.MS, time.Now())
 		}); uerr != nil {
 			log.Printf("agent task: seat-rates store not updated: %v", uerr)
 		}
@@ -948,7 +994,7 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 				r, _ := contendedReason(seat, contention)
 				return deferWire(core.DeferClassInfrastructure, r+"; the wall expired during the wait")
 			}
-			return deferWire(core.DeferClassBudget, ceilingReason(live, timeoutSec))
+			return deferWire(ceilingClass(live), ceilingReason(live, timeoutSec))
 		}
 		if errors.Is(cctx.Err(), context.Canceled) {
 			// The PARENT went away mid-loop — the same shape the re-pack branch
@@ -1137,7 +1183,7 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 				r, _ := contendedReason(seat, contention)
 				return deferWire(core.DeferClassInfrastructure, "structured re-pack unreachable: "+r+"; the wall expired during the wait")
 			}
-			return deferWire(core.DeferClassBudget, ceilingReason(live, timeoutSec))
+			return deferWire(ceilingClass(live), ceilingReason(live, timeoutSec))
 		case stallOf(live) != nil:
 			// The seat stopped producing DURING the re-pack (0.131.0): the
 			// seat's health, not the schema's — same class as the loop arm.
@@ -1249,6 +1295,11 @@ func (p *Pipeline) RunAgentContract(ctx context.Context, contract core.AgentCont
 	}
 	if opts.Placed != nil {
 		params["placed"] = opts.Placed
+	}
+	if opts.ParentJobID != "" {
+		// The delegator's own row is this job's record; ours is an inner row
+		// of it (C-62), never a second job.
+		params["parent_job_id"] = opts.ParentJobID
 	}
 	res := p.Run(ctx, core.Request{
 		Task:   core.TaskAgentRun,
@@ -1828,6 +1879,36 @@ func coerceToSchema(content []byte, schema map[string]any) ([]byte, bool) {
 }
 
 const admissionPoll = 3 * time.Second
+
+// seatLineAllowance / seatLineBeat: a run waiting in line at the seat cap
+// publishes phase "admission" with this allowance at most every beat, and at
+// once whenever the line moves (register C-60, 0.143.0). The wait may now last
+// the run's wall, and a remote delegator keeps polling a job only while its
+// last report is inside the published allowance: without the heartbeat it
+// gave up a job the node still held in line, which then ran for nobody. A
+// node that stops reporting is given up one allowance + grace later. Vars so
+// a test can compress the beat.
+var (
+	seatLineAllowance = 30 * time.Second
+	seatLineBeat      = 5 * time.Second
+)
+
+// seatLineHeartbeat is the tick AwaitSeatSlotReporting calls while this run
+// waits in line: it reports to the run's registry record and to the fleet
+// job's progress (core.ReportProgress), never as progress of the run itself.
+func seatLineHeartbeat(ctx context.Context, act *gpuactivity.Handle) func(ahead int) {
+	var last time.Time
+	lastAhead := -1
+	return func(ahead int) {
+		now := time.Now()
+		if ahead == lastAhead && now.Sub(last) < seatLineBeat {
+			return
+		}
+		last, lastAhead = now, ahead
+		act.OnAllowance("admission", seatLineAllowance)
+		core.ReportProgress(ctx, core.LiveProgress{Phase: "admission", LastProgressMs: now.UnixMilli(), AllowanceMs: seatLineAllowance.Milliseconds()})
+	}
+}
 
 func admissionBudget(sec int) time.Duration {
 	switch {

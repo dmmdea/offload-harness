@@ -2374,7 +2374,7 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 	// deadline (the admission budget) and the wall below starts only after it
 	// — waiting on the wall's context charged the cordon to the run (reviewer
 	// finding, 0.117.0), the exact defect class D-64 removed from the other door.
-	act := gpuactivity.Start(cfg.GPULockPath, cfg.StateDir, gpuactivity.Run{Seat: model, Kind: "agent_run", Origin: agentRunOrigin(), Goal: in.Goal, MaxSteps: maxSteps})
+	act := gpuactivity.Start(cfg.GPULockPath, cfg.StateDir, gpuactivity.Run{Seat: model, Kind: "agent_run", Origin: agentRunOrigin(), Goal: in.Goal, MaxSteps: maxSteps, Phase: gpuactivity.PhaseAdmission})
 	defer act.End()
 	// THE FENCE CHECK (register S-26), BEFORE the cordon below — the same read
 	// the review lane has made since 0.125.0 (D-110) and the delegation door now
@@ -2444,21 +2444,26 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 	// The LOCAL run cap (register C-42): the fleet caps the jobs it sends
 	// here, nothing capped the runs this door starts — sixteen could land on
 	// one seat and spend their walls in the engine's queue. Wait for a slot
-	// among the registered runs on the seat (this run's own record excluded),
-	// inside the same admission budget; a slot that never frees is a capacity
-	// defer, re-placeable, never a refusal.
+	// among the registered runs on the seat (this run's own record excluded,
+	// FIFO), for as long as the run's own wall — the same rule as the
+	// delegation door (register C-60) — and move the admission deadline out by
+	// the time spent in line; a slot that never frees is a capacity defer,
+	// re-placeable, never a refusal.
 	if reg, rerr := gpuactivity.Open(cfg.GPULockPath, cfg.StateDir); rerr == nil {
-		if serr := modelaffinity.AwaitSeatSlot(ctx, reg.OnSeat, model, "", act.ID(), cfg.FleetConcurrencyLimit(), admitDeadline); serr != nil {
+		capStart := time.Now()
+		capEnd := modelaffinity.SeatCapDeadline(ctx, capStart, timeout, admitDeadline)
+		if serr := modelaffinity.AwaitSeatSlot(ctx, reg.OnSeat, model, "", act.ID(), cfg.FleetConcurrencyLimit(), capEnd); serr != nil {
 			dout := map[string]any{
 				"deferred":    true,
 				"defer_class": string(core.DeferClassCapacity),
 				"reason":      "seat busy: " + serr.Error(),
 				"steps":       0,
 			}
-			withAdmission(dout, cordonWait(), "held at the seat cap for the admission budget")
+			withAdmission(dout, cordonWait(), "held at the seat cap for the run's wall")
 			withPlaced(dout, placed)
 			return jsonResult(dout)
 		}
+		admitDeadline = admitDeadline.Add(time.Since(capStart))
 	}
 	cordon := cordonWait()
 	// ONE admission total for this door, exactly as the delegation door keeps

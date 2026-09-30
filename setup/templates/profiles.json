@@ -1110,6 +1110,7 @@
         "upscale_model": "4x-UltraSharp.pth",
         "agent_model": "mimo-9b-agent",
         "agent_profile": "research",
+        "agent_max_tokens": 2048,
         "escalation_model": "qwen3.5-9b-agent",
         "reasoning_model": "qwen3.5-9b-agent"
       },
@@ -1181,6 +1182,7 @@
         "agent_profile": "research",
         "escalation_model": "qwen3.5-9b-agent",
         "reasoning_model": "qwen3.5-9b-agent",
+        "agent_max_tokens": 2048,
         "audiogen_timeout_sec": 1500
       },
       "config_seed_ram_mid_high": {

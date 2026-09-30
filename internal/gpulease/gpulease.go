@@ -48,6 +48,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -734,7 +735,10 @@ type Lease struct {
 	mgr   *Manager
 	epoch uint64
 	class Class
-	done  bool
+	// done is set once by the first Release. Atomic because a holder's
+	// release paths can run concurrently (a deferred Release beside a cleanup
+	// or signal path) — a plain bool was a data race under -race.
+	done atomic.Bool
 }
 
 // Epoch is the fencing token. Threaded to child processes as GPU_LEASE_EPOCH so an
@@ -1214,7 +1218,7 @@ func (m *Manager) writeEpoch(v uint64) error {
 // unloading models, submitting a graph to ComfyUI, promoting an output file.
 // A non-nil error means we no longer hold the card and must abort — not retry.
 func (l *Lease) Check() error {
-	if l.done {
+	if l.done.Load() {
 		return errors.New("gpulease: lease already released")
 	}
 	meta, err := l.mgr.readMeta()
@@ -1315,7 +1319,7 @@ func (m *Manager) Restamp(epoch uint64, fn func(*Meta)) error {
 
 // Restamp is Manager.Restamp for the lease's own holder.
 func (l *Lease) Restamp(fn func(*Meta)) error {
-	if l.done {
+	if l.done.Load() {
 		return errors.New("gpulease: lease already released")
 	}
 	return l.mgr.Restamp(l.epoch, fn)
@@ -1369,10 +1373,9 @@ func (m *Manager) ReleaseByEpoch(epoch uint64) (bool, error) {
 // would let a fenced-out straggler delete the CURRENT holder's lease, which is a
 // worse failure than leaking one: it silently hands the card to a third party.
 func (l *Lease) Release() error {
-	if l.done {
-		return nil
+	if !l.done.CompareAndSwap(false, true) {
+		return nil // released already, or another caller is releasing it now
 	}
-	l.done = true
 	meta, err := l.mgr.readMeta()
 	if err != nil || meta == nil {
 		return nil // already gone

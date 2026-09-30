@@ -33,6 +33,12 @@ func platformDeps(d *Deps) {
 	d.StopProcess = stopProcessWindows
 }
 
+// runPlatformCommand runs a --restart-command (and the scheduled-task verbs)
+// through PowerShell on Windows, hidden.
+func runPlatformCommand(ctx context.Context, timeout time.Duration, command string) (string, error) {
+	return runPowerShell(ctx, timeout, command)
+}
+
 type cimProcRow struct {
 	ProcessId      int    `json:"ProcessId"`
 	CommandLine    string `json:"CommandLine"`

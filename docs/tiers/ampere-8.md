@@ -63,6 +63,7 @@ here so they are never mistaken for a media capability:
 
 | key | value |
 |---|---|
+| `agent_max_tokens` | `2048` |
 | `agent_model` | `mimo-9b-agent` |
 | `agent_profile` | `research` |
 | `escalation_model` | `qwen3.5-9b-agent` |

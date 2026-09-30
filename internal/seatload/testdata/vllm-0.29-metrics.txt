@@ -1,0 +1,31 @@
+# HELP vllm:num_requests_running Number of requests in model execution batches.
+# TYPE vllm:num_requests_running gauge
+vllm:num_requests_running{engine="0",model_name="qwen38-27b-gsq-vllm"} 4.0
+# HELP vllm:num_requests_waiting Number of requests waiting to be processed.
+# TYPE vllm:num_requests_waiting gauge
+vllm:num_requests_waiting{engine="0",model_name="qwen38-27b-gsq-vllm"} 0.0
+# HELP vllm:num_requests_waiting_by_reason Number of waiting requests by reason. Reason labels: 'capacity' = waiting for scheduling capacity; 'deferred' = deferred by transient constraints (LoRA budget, KV transfer, blocked status). Sum of all reasons equals vllm:num_requests_waiting.
+# TYPE vllm:num_requests_waiting_by_reason gauge
+vllm:num_requests_waiting_by_reason{engine="0",model_name="qwen38-27b-gsq-vllm",reason="capacity"} 0.0
+vllm:num_requests_waiting_by_reason{engine="0",model_name="qwen38-27b-gsq-vllm",reason="deferred"} 0.0
+# HELP vllm:kv_cache_usage_perc KV-cache usage. 1 means 100 percent usage.
+# TYPE vllm:kv_cache_usage_perc gauge
+vllm:kv_cache_usage_perc{engine="0",model_name="qwen38-27b-gsq-vllm"} 0.6944444444444444
+# HELP vllm:num_preemptions_total Cumulative number of preemption from the engine.
+# TYPE vllm:num_preemptions_total counter
+vllm:num_preemptions_total{engine="0",model_name="qwen38-27b-gsq-vllm"} 29.0
+# HELP vllm:prompt_tokens_total Number of prefill tokens processed.
+# TYPE vllm:prompt_tokens_total counter
+vllm:prompt_tokens_total{engine="0",model_name="qwen38-27b-gsq-vllm"} 1.504762e+06
+# HELP vllm:generation_tokens_total Number of generation tokens processed.
+# TYPE vllm:generation_tokens_total counter
+vllm:generation_tokens_total{engine="0",model_name="qwen38-27b-gsq-vllm"} 86465.0
+# HELP vllm:request_success_total Count of successfully processed requests.
+# TYPE vllm:request_success_total counter
+vllm:request_success_total{engine="0",finished_reason="stop",model_name="qwen38-27b-gsq-vllm"} 353.0
+vllm:request_success_total{engine="0",finished_reason="length",model_name="qwen38-27b-gsq-vllm"} 0.0
+vllm:request_success_total{engine="0",finished_reason="abort",model_name="qwen38-27b-gsq-vllm"} 0.0
+vllm:request_success_total{engine="0",finished_reason="error",model_name="qwen38-27b-gsq-vllm"} 0.0
+vllm:request_success_total{engine="0",finished_reason="repetition",model_name="qwen38-27b-gsq-vllm"} 0.0
+vllm:iteration_tokens_total_count{engine="0",model_name="qwen38-27b-gsq-vllm"} 23305.0
+vllm:iteration_tokens_total_sum{engine="0",model_name="qwen38-27b-gsq-vllm"} 841723.0

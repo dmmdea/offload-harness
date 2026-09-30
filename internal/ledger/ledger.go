@@ -36,7 +36,7 @@ type Entry struct {
 	CacheHit     bool    `json:"cache_hit"`
 	Deferred     bool    `json:"deferred"`
 	// --- self-learning signals (Phase 0 enrichment) ---
-	Margin          float64            `json:"margin,omitempty"`
+	Margin float64 `json:"margin,omitempty"`
 	// MarginScale / MarginDeclaredMass / MarginAmbiguous describe the margin's
 	// denominator (register D-130). Scale is "matched" (matched class tokens
 	// only) or "full" (every alternative); EMPTY ON OLD ROWS READS AS MATCHED,
@@ -47,16 +47,16 @@ type Entry struct {
 	MarginScale        string             `json:"margin_scale,omitempty"`
 	MarginDeclaredMass float64            `json:"margin_declared_mass,omitempty"`
 	MarginAmbiguous    int                `json:"margin_ambiguous,omitempty"`
-	ModelTier       string             `json:"model_tier,omitempty"`
-	Escalations     int                `json:"escalations,omitempty"`
-	Reasoning       bool               `json:"reasoning,omitempty"` // produced by the terminal reasoning tier (a reclaimed deferral)
-	Retries         int                `json:"retries,omitempty"`
-	Truncated       bool               `json:"truncated,omitempty"`
-	Grounded        *bool              `json:"grounded,omitempty"`
-	EscalatedAgreed *bool              `json:"escalated_agreed,omitempty"`
-	ErrClass        string             `json:"err_class,omitempty"`
-	InputChars      int                `json:"input_chars,omitempty"`
-	Feat            map[string]float64 `json:"feat,omitempty"`
+	ModelTier          string             `json:"model_tier,omitempty"`
+	Escalations        int                `json:"escalations,omitempty"`
+	Reasoning          bool               `json:"reasoning,omitempty"` // produced by the terminal reasoning tier (a reclaimed deferral)
+	Retries            int                `json:"retries,omitempty"`
+	Truncated          bool               `json:"truncated,omitempty"`
+	Grounded           *bool              `json:"grounded,omitempty"`
+	EscalatedAgreed    *bool              `json:"escalated_agreed,omitempty"`
+	ErrClass           string             `json:"err_class,omitempty"`
+	InputChars         int                `json:"input_chars,omitempty"`
+	Feat               map[string]float64 `json:"feat,omitempty"`
 	// Reason is the human-readable defer reason (LO-8), set only on deferred
 	// entries and truncated to maxReasonLen on write. Old ledger lines without
 	// the field parse fine (empty string).
@@ -181,7 +181,21 @@ type Entry struct {
 	// has no job. Placement is the delegator's placement note, capped like
 	// Reason; AcceptanceResult is "pass" | "fail" | "" (nothing evaluated: the
 	// run deferred or the wire failed).
-	JobID      string `json:"job_id,omitempty"`
+	JobID string `json:"job_id,omitempty"`
+	// ParentJobID marks an INNER row (register C-62, 0.143.0): the `agent` row
+	// the pipeline writes for a run the delegator placed on this box's own
+	// seat. That job's authoritative row is the delegator's `agent_delegate`
+	// row carrying this id (it alone knows the acceptance verdict). The inner
+	// row keeps its savings (TokensIn: the parent records 0 there on purpose)
+	// and its seat detail, but Record writes cards_tokens 0 on it and every job
+	// counter skips it — until 0.143.0 each route=local job was counted twice
+	// (1,002 of 1,002 local rows paired, 2026-09-19..27).
+	ParentJobID string `json:"parent_job_id,omitempty"`
+	// QueuedMs (0.143.0, ADR 0061) is the wall an agent job's requests spent
+	// in the liveness monitor's busy hold — waiting on a seat whose engine was
+	// working for others — instead of being killed as a stall. The contention
+	// column beside latency_ms.
+	QueuedMs   int64  `json:"queued_ms,omitempty"`
 	Route      string `json:"route,omitempty"`
 	Placement  string `json:"placement,omitempty"`
 	Steps      int    `json:"steps,omitempty"`
@@ -270,7 +284,11 @@ func (l *Ledger) Record(e Entry) error {
 	// Provenance and the one token figure are stamped HERE, on the one path
 	// every writer takes, so no record site can forget them (D-101).
 	stampOrigin(&e)
-	if e.CardsTokens == 0 {
+	switch {
+	case e.ParentJobID != "":
+		// An inner row (C-62): its card work is on the parent row.
+		e.CardsTokens = 0
+	case e.CardsTokens == 0:
 		e.CardsTokens = cardsTokens(e)
 	}
 	val, err := json.Marshal(e)
@@ -449,7 +467,7 @@ func TopDeferReasons(path string, since int64, topN int) ([]ReasonCount, error) 
 		return nil, err
 	}
 	counts := map[string]int{}
-	for _, e := range entries {
+	for _, e := range JobRows(entries) { // an inner row's defer is its parent's (C-62)
 		if !e.Deferred || e.CacheHit {
 			continue
 		}
@@ -486,6 +504,12 @@ func TopDeferReasons(path string, since int64, topN int) ([]ReasonCount, error) 
 // file reports an empty summary (nothing offloaded yet), not an error.
 func SummarizeFile(path string, since int64, prices Prices) (Summary, error) {
 	s := Summary{ByTask: map[string]int{}}
+	// First pass: the parent job ids, so an ORPHAN inner row (its parent row
+	// never landed) counts as its job instead of vanishing (C-62).
+	parents, perr := parentJobIDsInFile(path)
+	if perr != nil {
+		return s, perr
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -506,6 +530,15 @@ func SummarizeFile(path string, since int64, prices Prices) (Summary, error) {
 			continue // malformed or a not-yet-complete trailing line
 		}
 		if since > 0 && e.TS < since {
+			continue
+		}
+		if !CountsAsJob(e, parents) {
+			// An inner row (C-62): the parent `agent_delegate` row is the job —
+			// its call, its outcome, its TokensOut. The inner row contributes
+			// only what the parent leaves at 0 by design: the savings column.
+			if !e.CacheHit && !e.Deferred {
+				s.TokensSaved += e.TokensIn
+			}
 			continue
 		}
 		s.Calls++
