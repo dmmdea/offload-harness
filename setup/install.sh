@@ -325,6 +325,10 @@ Environment=LOCAL_OFFLOAD_CONFIG=$CONFIG
 Environment=OFFLOAD_HOME=$PREFIX
 ExecStart=/bin/sh -c '$PREFIX/bin/local-offload fleet-serve --listen "\$(tailscale ip -4)":18811 --listen-trusted-network --node-id $NODE_ID'
 Restart=on-failure
+# Since 0.144.1 fleet-serve refuses an empty host (":18811" = every interface), so
+# the boot race FAILS and this restart retries until the tailnet address exists;
+# 15 s keeps the retries clear of systemd's default start limit (5 starts in 10 s).
+RestartSec=15
 
 [Install]
 WantedBy=multi-user.target

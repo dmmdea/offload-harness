@@ -243,7 +243,12 @@ Full reasoning in [ADR 0008](../architecture/decisions/0008-pdh-primary-vram-sam
 
 Binding beyond loopback requires `--listen-trusted-network`. Note that `:18811` with an empty host is
 treated as non-loopback and refused — see
-[ADR 0005](../architecture/decisions/0005-loopback-only-serve.md).
+[ADR 0005](../architecture/decisions/0005-loopback-only-serve.md). Since 0.144.1 the flag permits one
+specific address only: an all-interfaces address (empty host, `0.0.0.0`, `[::]`) and an address that
+does not parse are refused with or without it (`netguard.AllInterfaces`, shared by fleet-serve,
+local-agent and fleet-ui). The Linux unit's `Restart=on-failure` + `RestartSec=15` then covers the
+boot race where `tailscale ip -4` prints nothing yet: the start fails and retries until the tailnet
+address exists, instead of binding every interface.
 
 ## Dependencies
 
