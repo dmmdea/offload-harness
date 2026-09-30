@@ -1277,9 +1277,10 @@ type healthPayload struct {
 	// spans every capped task type, and a media-only node with no agent
 	// history simply never has a wall sample to estimate from.
 	//
-	// Not yet consumed by internal/delegate — that lands with the placement
-	// release (feat/placement-eta); this field exists so that PR has
-	// something to read.
+	// Consumed by internal/delegate (ADR 0063): it sizes the queue budget of a job
+	// sent here (queueBudgetFor) and holds this node out of the deal, the
+	// re-placement candidates and the capacity wait while a new job could not start
+	// inside the caller's patience (startsWithinPatience).
 	QueueWaitEstimateSec float64 `json:"queue_wait_estimate_sec,omitempty"`
 	// ServedModels is the CACHED roster name list — canonical ids AND every
 	// alias (agentResidency.served, from swapclient.Roster.Names) —
@@ -1296,6 +1297,12 @@ type healthPayload struct {
 	// supported_task_types. Additive + omitempty: a node without the lane
 	// emits a byte-identical payload.
 	VisionModel string `json:"vision_model,omitempty"`
+	// VisionTasks is the subset of vqa / ocr / assess_image the vision seat serves
+	// (config vision_tasks), published beside vision_model under the same lane-gated
+	// rule. Additive and omitempty: absent = all three, which is what a node that
+	// predates the field serves, so an older delegator and an older node both keep
+	// today's behaviour. A delegator skips a node for a task it does not list.
+	VisionTasks []string `json:"vision_tasks,omitempty"`
 	// ChatLane says POST /fleet/chat will admit here (C-41b), published under
 	// the same one-predicate rule as vision_model. It is what a delegator's
 	// cascade lane reads to tell a FLEET NODE base from a plain llama-swap
@@ -1491,6 +1498,9 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.visionLane {
 		payload.VisionModel = s.opts.Cfg.VisionModel
+		if len(s.opts.Cfg.VisionTasks) > 0 {
+			payload.VisionTasks = append([]string(nil), s.opts.Cfg.VisionTasks...)
+		}
 	}
 	// Chat lane (C-41b): the delegator's cascade lane reads `chat_lane` to
 	// learn this base is a fleet node it may route through, and served_models

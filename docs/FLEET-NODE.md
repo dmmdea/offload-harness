@@ -409,7 +409,7 @@ is not advertised, so the dispatcher can't send work the box would defer:
 | `audio-gen` | `generate_audio` | voice or music script set | `acestep` (music) / `chatterbox` (voice) |
 | `run-graph` | `run_graph` | `run_graph_script` set | payload-declared `model_family`, else `comfy-graph` |
 | `agent` | `agent` | `fleet_agent_enabled` **and** a resolvable agent seat **and** (loopback listener **or** `fleet_auth_token` set) | none — llama-swap-resident text work, no render footprint |
-| `vision` (own route `POST /fleet/vision`) | `vqa` / `ocr` / `assess_image` | `vision_model` set **and** (loopback listener **or** `fleet_auth_token` set) — see [The vision task](#the-vision-task-post-fleetvision) | none — llama-swap-resident VLM, no render footprint |
+| `vision` (own route `POST /fleet/vision`) | `vqa` / `ocr` / `assess_image` (narrowed by the node's `vision_tasks`) | `vision_model` set **and** (loopback listener **or** `fleet_auth_token` set) — see [The vision task](#the-vision-task-post-fleetvision) | none — llama-swap-resident VLM, no render footprint |
 | *(config-driven)* | `pipeline-job` | a valid `pipelines.<task_type>` entry (see below) | none — sizing rides on the task-scoped `Record("", "", task_type, peak)` entry |
 
 run-graph payloads carry `graph` and `manifest` as **raw nested JSON** (no base64) and are
@@ -779,7 +779,8 @@ blackholing nodes cannot spend a budget the subtask no longer owns.
 > are bounded without being charged to it, because neither can be known before it is paid: placement
 > overhead (the fleet probe, plus up to `dispatchAttempts` × `dispatchRequestTimeout` of dial time
 > before a transport verdict) and 0.100.0's queued-time credit, which extends the poll wall past
-> `timeout_sec` by design and is bounded by `maxQueuedWait`. So the wall a subtask can consume is
+> `timeout_sec` by design and is bounded by the queue budget derived from the node's ETA (`queueBudgetFor`,
+> ADR 0063). So the wall a subtask can consume is
 > `timeout_sec` + `pollGrace` + queued credit + placement overhead — all bounded, and the
 > re-placement loop converges because every blocking leg is charged to the next measurement.
 
@@ -792,6 +793,12 @@ back, and only a node that CONFIRMS it withdrew a job that never started makes t
 have landed and had its ack lost, so the abandoned node could still run the contract once. That costs
 wasted compute on a node nobody is polling (the agent lane is read-only, so there are no effects to
 duplicate) and the alternative is losing the work with certainty.
+
+**A 503 returns at once (ADR 0063).** The delegator no longer sleeps the refusing node's `Retry-After` and retries it: the
+subtask is re-placed on a node with room straight away, the fleet is read again first (a snapshot that predates the
+refusal is never reused, even on `route=spread`), and the hint becomes a per-node cooldown that only the capacity
+wait honours — crediting what it idles. The local seat's own capacity defer (`seat busy`, no step ran) is re-placed
+the same way; anything a node reports after a `202` is not.
 
 **When nobody takes it** the subtask is a **FAILURE**, with its own stable prefix:
 
@@ -862,7 +869,10 @@ messages name the credit (`poll deadline after 5m0s (+42s credited back for time
 node)`) and say nothing extra when there was none.
 
 The wait is **bounded** — a job may wait for a slot at most as long as it was allowed to run, and
-never more than **5 minutes**. Hitting that bound while the job is *still queued* is a **failure**,
+the wait it is given is derived from the node's own ETA: `clamp(1.5 x etaStart + 30 s, 60 s, that limit)`, where
+`etaStart` is the node's `queue_wait_estimate_sec` (or the arithmetic over its jobs and recent wall), read again when
+the job is first seen queued; a node that publishes no ETA keeps **5 minutes** (ADR 0063). Hitting that bound while
+the job is *still queued* is a **failure**,
 not a defer, with its own stable prefix:
 
 ```
@@ -1012,6 +1022,9 @@ concurrency-CAPPED (it contends for the shared llama-swap endpoint, exactly like
 data URI — the bytes travel with the job; a path on the caller's disk is refused `400`. An image
 whose decoded size exceeds the node's cap is refused `400` at ack time naming
 `vision_max_image_bytes`; the pipeline's loader re-checks the exact bytes. Unknown fields → `400`.
+A node whose config sets `vision_tasks` (0.153.0) serves only the tasks it lists: any other `task` is
+refused `400` at ack time with the set named — `vision: task "assess_image" is not served by this node's
+vision seat (vision_tasks: vqa, ocr)` — and never reaches the pipeline. Empty or absent = all three.
 
 ### Result
 
@@ -1030,11 +1043,21 @@ reachability) is the ONE predicate behind both the advertisement — `"vision"` 
 the `AgentLaneAdmissible` discipline. Vision jobs are token-gated on poll (`JobView.Gated`) but
 are never listed as agent runs in `/fleet/jobs`.
 
+A node that narrows the lane also publishes the additive, omitempty health field `vision_tasks` (the
+config key of the same name), under the same lane-gated rule as `vision_model`; a node that serves all
+three publishes nothing, byte-identical to a node from before 0.153.0. The key is written by the tier's
+media seat (`mediaseat.Seat.Tasks`), never by `config_seed`: a seat whose runtime cannot do a task
+declares the ones it can. The RK3588 NPU seat declares `vqa` and `ocr` because the RKLLM runtime cannot
+constrain sampling and `assess_image` always sends a grammar
+([ADR 0062](architecture/decisions/0062-rk3588-soc-tier-serves-from-the-npu-on-a-unified-memory-budget.md)).
+
 ### Placement (delegator side)
 
 `route: local` (default) is byte-identical to before the route existed. `auto`: an idle local
 card always runs the work; only while the machine-wide GPU lease is held (`delegate.LocalBusy`)
-is a node considered, ranked by `delegate.PlaceVision` — eligible = advertises the lane and its
+is a node considered, ranked by `delegate.PlaceVision` — eligible = advertises the lane, serves THIS
+task (`NodeView.ServesVisionTask`: no `vision_tasks` in health = all three, so an older node stays
+eligible for every task; a published list serves only what it names) and its
 card is not leased (`lease.class: text` or `lease.busy`), ordered by the agent lane's
 `betterRemote` (not saturated → provably free slot → queue depth → GPU utilization → roster
 order) — and with no eligible node the work still runs local. `remote`: force a node; none

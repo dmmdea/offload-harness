@@ -12,6 +12,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
@@ -309,6 +310,20 @@ func hasRoom(v NodeView, sheddable bool) bool {
 	return provablyStartsNow(v)
 }
 
+// hasRoomWithin is hasRoom plus the backlog gate: v would take a NEW dispatch
+// right now AND could start it inside `patience` (startsWithinPatience). It is
+// the predicate the capacity wait, the deals and re-placement use - a node that
+// passes hasRoom but whose backlog outlasts the caller's patience is a node the
+// job would sit in for longer than anyone is waiting, and that the delegator
+// would then abandon while the node ran it anyway. patience <= 0 is no bound.
+func hasRoomWithin(v NodeView, sheddable bool, patience time.Duration) bool {
+	if !hasRoom(v, sheddable) {
+		return false
+	}
+	ok, _ := startsWithinPatience(v, patience)
+	return ok
+}
+
 // provablyStartsNow reports whether v's own numbers prove the next job begins
 // executing immediately rather than sitting in the backlog. PROVABLY: an
 // unknown is never counted as a yes.
@@ -514,9 +529,11 @@ func leaseBusyDemoted(v NodeView) bool { return v.LeaseBusy }
 //
 // Eligibility is the vision lane's own gate, not the agent lane's: the node
 // must ADVERTISE the lane (ServesVision — an older node never does, so it is
-// never a target), and its card must not be spoken for (the same LeasedText /
-// LeaseBusy refusals remoteEligible applies: a reserved card is a non-target
-// whatever the lane). AgentEnabled, residency, ctx arithmetic and the
+// never a target), it must serve THIS task (ServesVisionTask — a node that
+// publishes no vision_tasks serves all three, so an older node stays eligible
+// for every task; one that lists a subset is skipped for the rest), and its
+// card must not be spoken for (the same LeasedText / LeaseBusy refusals
+// remoteEligible applies: a reserved card is a non-target whatever the lane). AgentEnabled, residency, ctx arithmetic and the
 // output_schema rule are agent-contract facts and do not apply to an image.
 //
 // Ranking reuses betterRemote — not-saturated, then a provably free slot,
@@ -532,11 +549,11 @@ func leaseBusyDemoted(v NodeView) bool { return v.LeaseBusy }
 // holds a parallel slice of base URLs (a NodeView carries no address) can
 // dispatch to the node it chose without matching on node_id — two
 // misconfigured nodes can share one id, and an id is not an address.
-func PlaceVision(remotes []NodeView) (int, bool) {
+func PlaceVision(remotes []NodeView, task string) (int, bool) {
 	seed := mintP2CSeed()
 	best := -1
 	for i, r := range remotes {
-		if !visionEligible(r) {
+		if !visionEligible(r, task) {
 			continue
 		}
 		if best < 0 || betterRemote(seed, nil, 0, r, remotes[best]) {
@@ -565,10 +582,10 @@ func visionEtaBetter(seed string, candidate, incumbent NodeView) (better, decide
 	return candidate.NodeID < incumbent.NodeID, candidate.NodeID != incumbent.NodeID
 }
 
-// visionEligible is PlaceVision's hard gate: the lane advertised, the card
-// not reserved.
-func visionEligible(r NodeView) bool {
-	return r.ServesVision() && !r.LeasedText && !r.LeaseBusy
+// visionEligible is PlaceVision's hard gate: the lane advertised and the task
+// served, the card not reserved.
+func visionEligible(r NodeView, task string) bool {
+	return r.ServesVisionTask(task) && !r.LeasedText && !r.LeaseBusy
 }
 
 // seatServed: true when the node publishes no roster (unknown) or when the

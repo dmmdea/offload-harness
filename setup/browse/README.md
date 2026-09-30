@@ -35,7 +35,9 @@ cd setup/browse
 python -m unittest -v test_runner
 ```
 
-The tests cover the pure helpers only and need neither the pinned packages, a browser nor a network.
+The tests cover the pure helpers and, through fake `Browser` classes, the observe and act wrappers. They need
+neither the pinned packages, a browser nor a network. The animation-script test runs the script under `node`
+and is skipped when `node` is not on the PATH.
 
 ## Protocol
 
