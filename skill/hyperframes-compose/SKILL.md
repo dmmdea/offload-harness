@@ -121,8 +121,8 @@ and lay it over the footage at `offset_sec`. The first chunk keeps absolute time
 chunk is at most 16,000 characters and 600 s (about ten minutes of speech). The overlay is silent.
 
 **Render every chunk with `workers: 1` and cut long transcripts with `--chunk-sec 300`.** At `auto`, HyperFrames
-stores every frame on disk (8.3 MB at 1080p) and defers `DISK_HEADROOM` on a long clip: a 300 s chunk needs
-about 75 GB free. At one worker a 300 s chunk took 17 minutes, so a 600 s chunk would pass the default 30-minute
+stores every frame on disk (8.3 MB at 1080p) and defers `DISK_HEADROOM` on a long clip: a 300 s chunk would
+store about 75 GB. At one worker a 300 s chunk took 17 minutes, so a 600 s chunk would pass the default 30-minute
 timeout (`TIMEOUT`).
 
 ## Authoring or changing a template

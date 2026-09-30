@@ -56,8 +56,9 @@ one renders. Both were measured on a 300 s chunk (331 groups, 11,256 characters)
 - **Frame storage: render it with `"workers": 1`.** At `auto`, the lane's default, HyperFrames 0.8.61 captures
   with several Chrome workers and stores every frame as an image before it encodes. It budgets 8.3 MB a frame
   at 1080p and refuses the render when that passes 90 % of the free space, and the runner defers
-  `DISK_HEADROOM`. The 300 s chunk (9,017 frames, about 75 GB) was refused with 33 GB free; a 600 s chunk needs
-  about 166 GB free. At one worker the frames stream to the encoder: the cache directory stayed under 6 MB.
+  `DISK_HEADROOM`. The 300 s chunk (9,017 frames) would store about 75 GB and was refused with 33 GB free; a
+  600 s chunk would store about 150 GB. At one worker the frames stream to the encoder: the cache directory stayed
+  under 6 MB.
 - **Time: keep a chunk to about 300 s.** At one worker the 300 s chunk rendered in 1,038 s (115 ms a frame,
   quality `high`, while the box was busy with other work; the 450-frame render below, at draft quality on a
   quiet box, ran at 88 ms). A 600 s chunk was not rendered: by those rates it takes 27 to 35 minutes, at or past the 1,800 s default of
