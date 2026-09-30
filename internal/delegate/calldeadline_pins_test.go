@@ -467,17 +467,33 @@ func TestTheDeadlineContextCarriesTheCause(t *testing.T) {
 	}
 }
 
-// TestWithdrawReachesARemoteConfiguredWithATrailingSlash: the withdraw URL is built from
-// the node's dial base, and a base written with a trailing slash must not become
-// "//fleet/jobs/{id}" (which no node routes).
-func TestWithdrawReachesARemoteConfiguredWithATrailingSlash(t *testing.T) {
+// TestWithdrawRequestTargetIsTheCleanJobRoute: the withdraw URL is built from the node's
+// dial base, and a base written with a trailing slash must not become
+// "//fleet/jobs/{id}". A Go ServeMux quietly cleans that path, so the node here is a bare
+// handler that records the RAW request target — the form a proxy or a stricter node in
+// front of the fleet port would see.
+func TestWithdrawRequestTargetIsTheCleanJobRoute(t *testing.T) {
 	compressPolls(t, 5*time.Millisecond, time.Second)
 	_, inner := remoteRunningForeverServer(t)
-	url, log := withWithdrawRoute(t, inner, http.StatusOK)
-	runWithin(t, 4*time.Second, testCfg(t), neverLocal(t),
-		[]core.AgentContract{remoteGoal("slow one")}, "remote", []string{url + "/"}, deadlineIn(300*time.Millisecond), nil)
-	if n := len(log.snapshot()); n != 1 {
-		t.Fatalf("%d withdraw request(s) reached the node for a remote configured as %q/, want 1", n, url)
+	var mu sync.Mutex
+	var targets []string
+	front := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			mu.Lock()
+			targets = append(targets, r.RequestURI)
+			mu.Unlock()
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		inner.Config.Handler.ServeHTTP(w, r)
+	}))
+	t.Cleanup(front.Close)
+	results, _, _ := runWithin(t, 4*time.Second, testCfg(t), neverLocal(t),
+		[]core.AgentContract{remoteGoal("slow one")}, "remote", []string{front.URL + "/"}, deadlineIn(300*time.Millisecond), nil)
+	mu.Lock()
+	defer mu.Unlock()
+	if want := "/fleet/jobs/" + results[0].JobID; len(targets) != 1 || targets[0] != want {
+		t.Fatalf("withdraw request target(s) %q for a remote configured as %q, want exactly [%q]", targets, front.URL+"/", want)
 	}
 }
 
