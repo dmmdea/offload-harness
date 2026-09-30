@@ -84,6 +84,23 @@ const (
 	intentNoteWithdrawn = "withdrawn"
 )
 
+// neverRanPrefixes are the stable prefixes of the terminal errors a fleet node
+// gives a job it took out of its backlog WITHOUT running it: a delegator withdrew
+// it, or nobody polled it for the poll lease (fleetnode.ErrWithdrawn,
+// fleetnode.ErrReaped; withdraw_e2e_test.go pins the pairing against the node's
+// own constants). Nothing ran, so there is no result for the recovery pass to file.
+var neverRanPrefixes = []string{"withdrawn:", "reaped:"}
+
+// neverRan reports whether a terminal job error says the node never ran the job.
+func neverRan(jobErr string) bool {
+	for _, p := range neverRanPrefixes {
+		if strings.HasPrefix(jobErr, p) {
+			return true
+		}
+	}
+	return false
+}
+
 // intentLedger is the per-delegator append-only intent file. A nil ledger is
 // valid and inert: every method no-ops, so a box whose state root cannot be
 // resolved keeps delegating exactly as before — durability is an addition,
@@ -258,6 +275,11 @@ func RecoverOrphans(ctx context.Context, cfg config.Config) (int, error) {
 			// token can still collect it; the 48 h expiry bounds it) and the pass
 			// says so once, below.
 			unauthorized[strings.TrimRight(strings.TrimSpace(ev.Base), "/")]++
+		case status == http.StatusOK && state == "error" && neverRan(jobErr):
+			// The node took this job out of its backlog without running it, so there
+			// is no result to file and nothing was recovered: the intent closes
+			// truthfully, and the pass does not report a recovery it did not make.
+			ledger.done(jobID, "never started: "+jobErr)
 		case status == http.StatusOK && (state == "done" || state == "error"):
 			outDir := filepath.Join(root, "delegate-recovered")
 			if mkerr := os.MkdirAll(outDir, 0o755); mkerr != nil {

@@ -151,4 +151,10 @@ func TestWithdrawAgainstTheRealNodeHandler(t *testing.T) {
 	if fleetnode.WithdrawnState != withdrawnState {
 		t.Fatalf("fleetnode.WithdrawnState = %q, delegate's withdrawnState = %q: the two ends disagree", fleetnode.WithdrawnState, withdrawnState)
 	}
+	// And the terminal errors recovery reads as "the node never ran this job".
+	for _, e := range []string{fleetnode.ErrWithdrawn, fleetnode.ErrReaped} {
+		if !neverRan(e) {
+			t.Fatalf("the node's terminal error %q is not recognised as a never-ran job: recovery would file it as a result", e)
+		}
+	}
 }

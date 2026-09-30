@@ -119,3 +119,68 @@ func TestIntentEventsCarryTimestampAndPid(t *testing.T) {
 		t.Fatalf("read %d events, want at least 6 (2 dispatches + 2 closes + the old dispatch + its expiry)", events)
 	}
 }
+
+// TestRecoverOrphansClosesAJobTheNodeNeverRan: a node that took a job out of its
+// backlog without running it (a delegator withdrew it, or nobody polled it for the
+// poll lease) answers a poll with a terminal error that says so. There is no result
+// to recover, so the intent closes as "never started" — not as a recovery: no
+// envelope is filed under delegate-recovered/ and it is not counted among the
+// results the pass recovered. A terminal error that IS a real outcome
+// ("interrupted") is still filed, exactly as before.
+func TestRecoverOrphansClosesAJobTheNodeNeverRan(t *testing.T) {
+	cfg, root := intentCfg(t)
+	errs := map[string]string{
+		"agd-reaped":    "reaped: nothing polled this accepted job within the poll lease, so it never started",
+		"agd-withdrawn": "withdrawn: its delegator gave the job up before it started",
+		"agd-interrupt": "interrupted",
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		id := r.URL.Path[strings.LastIndex(r.URL.Path, "/")+1:]
+		if msg, ok := errs[id]; ok {
+			_ = json.NewEncoder(w).Encode(map[string]any{"state": "error", "error": msg})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+	l := openIntentLedger(cfg)
+	for id := range errs {
+		l.dispatched(id, srv.URL, "work")
+	}
+
+	n, err := RecoverOrphans(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("recovered = %d, want 1: only the real outcome (interrupted) is a result to file", n)
+	}
+	for _, id := range []string{"agd-reaped", "agd-withdrawn"} {
+		if _, serr := os.Stat(filepath.Join(root, "delegate-recovered", id+".json")); serr == nil {
+			t.Errorf("an envelope was filed for %s: a job that never ran has no result to recover", id)
+		}
+	}
+	if _, serr := os.Stat(filepath.Join(root, "delegate-recovered", "agd-interrupt.json")); serr != nil {
+		t.Errorf("the interrupted job's outcome was not filed: %v", serr)
+	}
+	// Every intent is settled, and the notes say what happened to each.
+	notes := map[string]string{}
+	raw, _ := os.ReadFile(filepath.Join(root, "delegate-intent.jsonl"))
+	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+		var ev intentEvent
+		if json.Unmarshal([]byte(line), &ev) == nil && ev.E == "ok" {
+			notes[ev.Job] = ev.Note
+		}
+	}
+	for _, id := range []string{"agd-reaped", "agd-withdrawn"} {
+		if !strings.HasPrefix(notes[id], "never started") {
+			t.Errorf("%s closed as %q, want a note starting %q", id, notes[id], "never started")
+		}
+	}
+	if !strings.HasPrefix(notes["agd-interrupt"], "recovered") {
+		t.Errorf("agd-interrupt closed as %q, want a recovery", notes["agd-interrupt"])
+	}
+	if open, _, _ := readOpenIntents(filepath.Join(root, "delegate-intent.jsonl")); len(open) != 0 {
+		t.Errorf("intents still open: %v", open)
+	}
+}

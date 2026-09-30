@@ -355,3 +355,62 @@ func TestStartedRowIsWrittenForALocalRun(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// TestInnerAgentRowCarriesParentJobID (register C-62 kept intact under ADR 0064):
+// the delegator hands the runner its own job id as the parent, the runner's row
+// for that run is written as an INNER row of it, and with the delegator's dispatch
+// marker and finished row beside it the ledger still counts ONE job — the finished
+// row — not three. The runner here writes the inner row the way the pipeline does
+// for a run it executes; the real writer is pinned in internal/pipeline.
+func TestInnerAgentRowCarriesParentJobID(t *testing.T) {
+	pairAppDir(t)
+	cfg := testCfg(t)
+	cfg.Endpoint = "http://127.0.0.1:11434"
+	var handed string
+	local := LocalRunner(func(ctx context.Context, ac core.AgentContract, opts LocalOptions) (core.AgentWireResult, error) {
+		handed = opts.ParentJobID
+		led, err := ledger.Open(cfg.LedgerPath)
+		if err != nil {
+			t.Errorf("runner could not open the ledger: %v", err)
+		} else {
+			defer led.Close()
+			if rerr := led.Record(ledger.Entry{Task: "agent", JobID: "agent-local-1", ParentJobID: opts.ParentJobID, TokensIn: 500, TokensOut: 30}); rerr != nil {
+				t.Errorf("runner's inner row: %v", rerr)
+			}
+		}
+		return core.AgentWireResult{SchemaVersion: core.AgentWireSchemaVersion, Output: "done", Seat: "local-seat"}, nil
+	})
+	results, _, err := RunWith(context.Background(), cfg, local, []core.AgentContract{{Goal: "say done", Door: "cli:delegate"}}, "local", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobID := results[0].JobID
+	if handed == "" || handed != jobID {
+		t.Fatalf("the runner was handed parent job id %q, want the delegator's job id %q", handed, jobID)
+	}
+	rows := readRows(t, cfg.LedgerPath)
+	var marker, inner, finished int
+	for _, e := range rows {
+		switch {
+		case e.Phase == ledger.PhaseStarted:
+			marker++
+		case e.Task == "agent":
+			inner++
+			if e.ParentJobID != jobID || e.CardsTokens != 0 {
+				t.Fatalf("inner row = parent %q cards_tokens %d, want parent %q and 0 (the parent row carries the card work)", e.ParentJobID, e.CardsTokens, jobID)
+			}
+		default:
+			finished++
+		}
+	}
+	if marker != 1 || inner != 1 || finished != 1 {
+		t.Fatalf("ledger holds %d marker(s), %d inner row(s), %d finished row(s), want one of each", marker, inner, finished)
+	}
+	jobs := ledger.JobRows(rows)
+	if len(jobs) != 1 || jobs[0].Task != "agent_delegate" || jobs[0].JobID != jobID {
+		t.Fatalf("JobRows = %+v, want exactly the delegator's finished row for %s", jobs, jobID)
+	}
+	if s, serr := ledger.SummarizeFile(cfg.LedgerPath, 0, ledger.DefaultPrices); serr != nil || s.Calls != 1 {
+		t.Fatalf("Summarize = %+v (%v), want 1 call: a local job is counted once", s, serr)
+	}
+}
