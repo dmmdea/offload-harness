@@ -1475,12 +1475,12 @@ type placements struct {
 	// it back. Bounded by agent_placement_wait_sec.
 	credit time.Duration
 	// capacityRefusal records that the subtask's trouble is CAPACITY (a node
-	// refused it with a 503/429: queue full, leased, draining, shed; or the local
-	// seat deferred it as capacity; or replacementNode found the remaining nodes,
-	// or the local run-cap line, merely busy: no room, a cooldown, a backlog past
-	// the caller's patience, a full process gate) rather than a request or an
-	// address that was wrong. Only then is a capacity wait worth running: a roster
-	// that 404s or is unreachable does not free up.
+	// refused it with a 503/429: queue full, leased, draining, shed; or
+	// replacementNode found an eligible node, or the local run-cap line, merely
+	// busy: no room, a cooldown, a backlog past the caller's patience, a full
+	// process gate) rather than a request or an address that was wrong. Only then
+	// is a capacity wait worth running: a roster that 404s, is unreachable or can
+	// never run the contract does not free up.
 	capacityRefusal bool
 	// excluded is every dial base that refused for a NON-capacity reason
 	// (404/408/409, or unreachable): nothing about such a node frees up, so
@@ -1533,10 +1533,14 @@ func newPlacements() *placements {
 }
 
 // noteRefusal files a refused attempt in the ledger: a capacity refusal (a 503 or
-// 429, or the local seat's own capacity defer) makes the subtask wait-worthy; any
-// other refusal excludes that node from the wait.
+// 429) makes the subtask wait-worthy; any other refusal excludes that node from the
+// wait. The local seat's own capacity defer files nothing here on purpose: it is a
+// refusal to LIST (refusalLine) but not, by itself, a reason to wait - replacementNode
+// marks the subtask wait-worthy when some ELIGIBLE node is merely busy, and a defer
+// beside a remote that can never run the contract would otherwise hold the subtask for
+// the whole placement wait to publish the same defer.
 func (pl *placements) noteRefusal(pr PlacedResult) {
-	if capacityRefusal(pr.refusalStatus) || capacityDeferRefusal(pr) {
+	if capacityRefusal(pr.refusalStatus) {
 		pl.capacityRefusal = true
 		return
 	}
@@ -4718,8 +4722,9 @@ type dispatchResult struct {
 }
 
 // dispatch is dispatchDetailed without the Retry-After hint — the plain
-// 3-value shape every caller but runRemote's 503 courtesy retry (item 7,
-// register D-105/D-106) uses.
+// 3-value shape every caller but runRemote uses. runRemote reads the hint
+// itself (PlacedResult.retryAfterSec) and files it as the node's cooldown;
+// nothing sleeps on it (ADR 0063).
 func (r *runner) dispatch(ctx context.Context, base, jobID string, payload json.RawMessage) (refused bool, status int, err error) {
 	res := r.dispatchDetailed(ctx, base, jobID, payload)
 	return res.refused, res.status, res.err
