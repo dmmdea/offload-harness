@@ -165,6 +165,12 @@ type agentFake struct {
 	// tokenize, when set, serves the seat's /upstream/<seat>/tokenize
 	// passthrough (a warm seat's real tokenizer); nil keeps the historical 404.
 	tokenize http.HandlerFunc
+	// seatMetrics, when set, serves the engine's /metrics at the seat's own
+	// address (/seat/metrics — a /running row must carry that proxy): the busy
+	// hold's engine read (ADR 0061). nil keeps the 404, under which the hold
+	// reads the engine as unreadable and the ADR 0055 rule decides.
+	seatMetrics    func(n int64) string
+	seatMetricsCNT atomic.Int64
 }
 
 // isCoherenceProbeCall recognises the D-118 probe request by its shape. It must
@@ -377,6 +383,10 @@ func (f *agentFake) server(t *testing.T) *httptest.Server {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":` + string(content) + `},"finish_reason":"` + finish + `"}],"usage":{"prompt_tokens":10,"completion_tokens":7}}`))
 		default:
+			if f.seatMetrics != nil && r.URL.Path == "/seat/metrics" {
+				_, _ = w.Write([]byte(f.seatMetrics(f.seatMetricsCNT.Add(1))))
+				return
+			}
 			if f.tokenize != nil && r.URL.Path == "/upstream/"+f.seat()+"/tokenize" {
 				f.tokenize(w, r)
 				return

@@ -4049,7 +4049,7 @@ func runAuditSample(args []string) error {
 		return err
 	}
 	var picked []ledger.Entry
-	for _, e := range entries {
+	for _, e := range ledger.JobRows(entries) { // a local job is one job (C-62)
 		if e.CacheHit {
 			continue
 		}

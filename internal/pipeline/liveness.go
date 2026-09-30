@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -11,6 +13,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/gpuactivity"
+	"github.com/dmmdea/offload-harness/internal/seatload"
 	"github.com/dmmdea/offload-harness/internal/seatrate"
 	"github.com/dmmdea/offload-harness/internal/swapclient"
 )
@@ -50,6 +53,18 @@ var (
 	// only the `starting` part of a load gets the cold-load ceiling. The bound
 	// is max(this, 2 x the waiting phase's own allowance). Tests compress it.
 	postReadyFloor = 120 * time.Second
+	// engineFlatBound is the busy hold's bound (ADR 0061, 0.143.0): how long
+	// the seat's ENGINE may do no work at all, for any request, while a run's
+	// request is silent — never less than the waiting phase's own allowance.
+	// Two floors: longer than the slowest single engine step on the fleet (a
+	// 2,048-token llama.cpp prompt batch on the amd-gcn tier's iGPU at ~60 tok/s is
+	// ~34 s). Tests compress it.
+	engineFlatBound = 2 * livenessFloor
+	// enginePoll is how often the busy hold re-reads the engine; the read is
+	// local (the seat's own /metrics or /slots). Tests compress it.
+	enginePoll = 10 * time.Second
+	// engineProbeTimeout bounds one engine read (see LivenessPolicyFor).
+	engineProbeTimeout = 45 * time.Second
 )
 
 // LivenessPolicyFor is THIS seat's stall policy: the admission budget while
@@ -74,6 +89,42 @@ func LivenessPolicyFor(cfg config.Config, known seatrate.Seat, admission time.Du
 		ColdLoadBasis: basis,
 		ColdLoadPoll:  coldLoadPoll,
 		PostReady:     postReadyFloor,
+		EngineFlat:    engineFlatBound,
+		EnginePoll:    enginePoll,
+		// One engine read may take a whole batch: a llama-server answers
+		// /slots and /metrics only between batches (~34 s per prompt batch on
+		// the slowest tier). Inside a hold a timed-out read is no new evidence.
+		EngineProbeTimeout: engineProbeTimeout,
+	}
+}
+
+// engineActivityProbe is the busy hold's view of the seat's engine (ADR 0061,
+// 0.143.0). It asks llama-swap first, through the cold-load probe's own rules
+// (a load in progress — the seat starting, or absent while a swap runs — is
+// the cold-load hold's), and only then reads the engine's work fingerprint at
+// the seat's own address (seatload.ReadActivity: never /upstream, never an
+// unloaded seat). nil when there is no endpoint or seat to read.
+func engineActivityProbe(endpoint, seat string, load agent.SeatProbe) agent.EngineProbe {
+	if endpoint == "" || seat == "" {
+		return nil
+	}
+	base := swapclient.BaseURL(endpoint)
+	client := &http.Client{Timeout: engineProbeTimeout}
+	return func(ctx context.Context) (agent.EngineReading, error) {
+		if load != nil {
+			loading, state, err := load(ctx)
+			if err == nil && loading {
+				return agent.EngineReading{Loading: true, State: state}, nil
+			}
+		}
+		act, err := seatload.ReadActivity(ctx, client, base, seat)
+		if err != nil {
+			return agent.EngineReading{}, err
+		}
+		if act.Starting {
+			return agent.EngineReading{Loading: true, State: strings.TrimPrefix(act.Source, "running-state:")}, nil
+		}
+		return agent.EngineReading{Fingerprint: act.Fingerprint, TokenFingerprint: act.TokenFingerprint, Summary: act.Summary()}, nil
 	}
 }
 
@@ -203,6 +254,18 @@ func ceilingOf(m *agent.Monitor) *agent.CeilingError {
 	return nil
 }
 
+// ceilingClass is the defer class for a run whose deadline passed: BUDGET —
+// the sizing signal the delegator learns from — unless the monitor's ceiling
+// found the run held behind the seat's other work (ADR 0061). That run was not
+// served; a larger budget would not help and would inflate the delegator's
+// contract sizing, so it is CAPACITY: not this contract's turn, re-placeable.
+func ceilingClass(m *agent.Monitor) string {
+	if ce := ceilingOf(m); ce != nil && ce.Held() {
+		return core.DeferClassCapacity
+	}
+	return core.DeferClassBudget
+}
+
 // ceilingReason is the budget-defer text when the run's deadline passed: the
 // ceiling's own arithmetic when the monitor filed one, else the parent's
 // deadline (the delegator's, never this node's) in the pre-0.131.0 words.
@@ -260,7 +323,9 @@ func (o *progressObserver) OnProgress(tokensOut int) {
 		if tokensOut > p.TokensOut {
 			p.TokensOut = tokensOut
 		}
-		if p.Phase == string(agent.PhasePrefill) || p.Phase == string(agent.PhaseColdLoad) {
+		// The first byte ends a prefill, a cold-load hold and a busy hold alike
+		// (0.143.0: a run left "queued" with the hold's allowance was misread).
+		if p.Phase == string(agent.PhasePrefill) || p.Phase == string(agent.PhaseColdLoad) || p.Phase == string(agent.PhaseQueued) {
 			p.Phase = string(agent.PhaseDecoding)
 		}
 		p.LastProgressMs = now

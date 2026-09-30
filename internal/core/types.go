@@ -293,7 +293,14 @@ type Meta struct {
 	// job id, step count, stop reason and structured re-pack wall, copied from
 	// the wire result at finish so the ledger row carries them. All omitempty:
 	// a cascade call publishes byte-identically to before.
-	JobID      string `json:"job_id,omitempty"`
+	JobID string `json:"job_id,omitempty"`
+	// ParentJobID is the delegator's job id when the delegator placed this run
+	// on the box's own seat (register C-62): the ledger then writes this row
+	// as an INNER row of that job instead of a second job.
+	ParentJobID string `json:"parent_job_id,omitempty"`
+	// QueuedMs is the agent run's busy-hold wall (ADR 0061): time its requests
+	// waited on a seat whose engine was working for others.
+	QueuedMs   int64  `json:"queued_ms,omitempty"`
 	Steps      int    `json:"steps,omitempty"`
 	StopReason string `json:"stop_reason,omitempty"`
 	RepackMs   int64  `json:"repack_ms,omitempty"`

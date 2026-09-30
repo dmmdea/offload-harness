@@ -24,6 +24,13 @@ const (
 	// silence is not a stall. The prefill clock is suspended and a cold-load
 	// ceiling bounds the wait instead (0.140.0).
 	PhaseColdLoad Phase = "cold-load"
+	// PhaseQueued is a request that is silent while its seat's ENGINE keeps
+	// working for other requests (ADR 0061, 0.143.0): it waits its turn in the
+	// engine's own queue, shares a busy or throttled card, or was preempted and
+	// will be recomputed. Silence here is not a stall; the busy hold re-reads
+	// the engine every EnginePoll, and only an engine that does no work at all
+	// for the flat bound is.
+	PhaseQueued Phase = "queued"
 )
 
 // defaultColdLoadPoll is how often a request waiting for its first byte asks
@@ -89,6 +96,22 @@ type StallPolicy struct {
 	// bound is max(PostReady, 2 x the waiting phase's allowance), far shorter
 	// than ColdLoad, so a seat that wedges right after loading is seen fast.
 	PostReady time.Duration
+	// EngineFlat is the busy hold's bound (ADR 0061, 0.143.0): how long the
+	// seat's ENGINE may do no work at all — for any request — while this run's
+	// request is silent, before the run is declared stalled. The bound applied
+	// is max(EngineFlat, the waiting phase's own allowance). 0, or no engine
+	// probe installed, = no busy hold: a silent request is judged alone, the
+	// pre-0.143.0 rule.
+	EngineFlat time.Duration
+	// EnginePoll is how often the busy hold re-reads the engine; 0 =
+	// defaultEnginePoll.
+	EnginePoll time.Duration
+	// EngineProbeTimeout bounds one engine read; 0 = defaultEngineProbeTimeout.
+	EngineProbeTimeout time.Duration
+	// EngineTokenFlat is how long the engine may keep stepping without
+	// producing a token for anyone (a preempt-and-recompute thrash) before the
+	// run stalls; never below the flat bound. 0 = three flat bounds.
+	EngineTokenFlat time.Duration
 }
 
 // Allowance is the stall bound for a phase. pendingPromptTokens is the size
@@ -116,6 +139,8 @@ func (p StallPolicy) Allowance(ph Phase, pendingPromptTokens int) time.Duration 
 		return maxDur(p.Repack, p.Floor)
 	case PhaseColdLoad:
 		return p.ColdLoad
+	case PhaseQueued:
+		return p.enginePoll()
 	}
 	return p.Floor
 }
@@ -155,9 +180,30 @@ type StallError struct {
 	// seat had loaded and then sent nothing); ReadySeen: /running read it
 	// ready (false = it could not be read).
 	PostReady, ReadySeen bool
+	// EngineFlat (ADR 0061): the seat's ENGINE did no work for any request
+	// for EngineSilent while this request waited in Waited — the seat itself
+	// is wedged, not busy. Engine is what the last reading showed.
+	EngineFlat   bool
+	EngineSilent time.Duration
+	Waited       Phase
+	Engine       string
+	// EngineThrash: the engine kept stepping but produced no token for
+	// anyone for EngineSilent (preempt-and-recompute). Unreadable: the stall
+	// was filed because the engine could not be read (the reason's note says
+	// so) — never reported as "did no work".
+	EngineThrash bool
+	Unreadable   bool
 }
 
 func (e *StallError) Error() string {
+	if e.EngineThrash {
+		return fmt.Sprintf("stalled: the seat's engine kept stepping but produced no token for %.0fs while this request waited in %s — a preempt-and-recompute thrash (allowed %.0fs; engine: %s; %d tok so far)",
+			e.EngineSilent.Seconds(), e.Waited, e.Allowed.Seconds(), e.Engine, e.Tokens)
+	}
+	if e.EngineFlat {
+		return fmt.Sprintf("stalled: the seat's engine did no work for %.0fs while this request waited in %s (allowed %.0fs; engine: %s; %d tok so far)",
+			e.EngineSilent.Seconds(), e.Waited, e.Allowed.Seconds(), e.Engine, e.Tokens)
+	}
 	if e.Phase == PhaseColdLoad && e.PostReady {
 		after := "after the seat read ready"
 		if !e.ReadySeen {
@@ -175,14 +221,33 @@ func (e *StallError) Error() string {
 }
 
 // CeilingError: the run was still producing when the safety ceiling passed.
-// Filed as a BUDGET defer — the sizing signal the delegator learns from.
+// Filed as a BUDGET defer — the sizing signal the delegator learns from —
+// unless the run spent its time held behind other requests' work (ADR 0061):
+// then it was not served, a larger budget would not help, and it is capacity
+// (Held reports it; the pipeline files the class).
 type CeilingError struct {
 	Elapsed time.Duration
 	Tokens  int
 	TokS    float64
+	// Queued is the time the run spent in the busy hold; InHold is whether it
+	// was still held when the ceiling passed.
+	Queued time.Duration
+	InHold bool
+}
+
+// Held reports that the ceiling found a run that was waiting for the seat,
+// not working: held when the ceiling passed, or held for at least half of its
+// time (the same half-the-wall rule contention.CausedTimeout applies to peer
+// waits).
+func (e *CeilingError) Held() bool {
+	return e.InHold || (e.Elapsed > 0 && e.Queued*2 >= e.Elapsed)
 }
 
 func (e *CeilingError) Error() string {
+	if e.Held() {
+		return fmt.Sprintf("ceiling %.0fs reached while held behind the seat's other work (%.0fs in the busy hold; %d tok produced)",
+			e.Elapsed.Seconds(), e.Queued.Seconds(), e.Tokens)
+	}
 	return fmt.Sprintf("ceiling %.0fs reached while producing (%d tok at %.1f tok/s)", e.Elapsed.Seconds(), e.Tokens, e.TokS)
 }
 
@@ -238,6 +303,31 @@ type Monitor struct {
 	resumePending int
 	dl            time.Time
 	holdClamped   bool
+	// The busy hold (ADR 0061, 0.143.0). engine reads the seat's engine when a
+	// request's own allowance runs out; engFP is the engine's work fingerprint
+	// at the last look ("" = no look since this request's last progress) and
+	// engChangedAt when it last moved (or was first read). busyResume /
+	// busyPending are the phase the request was waiting in when the hold
+	// began; busySince when it began; engSum the last reading, for reasons.
+	engine       EngineProbe
+	engFP        string
+	engChangedAt time.Time
+	engSum       string
+	busyResume   Phase
+	busyPending  int
+	busySince    time.Time
+	queuedTotal  time.Duration
+	// engTokFP / engTokChangedAt: the token fingerprint and when it last moved
+	// (the thrash bound). engUnreadableSince: the first unreadable read of the
+	// current run of them inside a hold. busyClosed: the hold's contention was
+	// booked up to a stall's last movement (a flat tail is not contention).
+	// holdAnchor: when set, the next cold-load hold's clock starts there (a
+	// load observed from the busy hold), not at the request's last progress.
+	engTokFP           string
+	engTokChangedAt    time.Time
+	engUnreadableSince time.Time
+	busyClosed         bool
+	holdAnchor         time.Time
 }
 
 // NewMonitor wraps parent with a ceiling deadline and a stall watch. The
@@ -282,7 +372,13 @@ func (m *Monitor) onCeiling() {
 	if m.stopped || m.cause != nil {
 		return
 	}
-	m.cause = &CeilingError{Elapsed: time.Since(m.start), Tokens: m.tokens + m.callTok, TokS: m.ewma}
+	now := time.Now()
+	queued := m.queuedTotal
+	inHold := m.phase == PhaseQueued && !m.busyClosed
+	if inHold {
+		queued += now.Sub(m.busySince)
+	}
+	m.cause = &CeilingError{Elapsed: now.Sub(m.start), Tokens: m.tokens + m.callTok, TokS: m.ewma, Queued: queued, InHold: inHold}
 	m.cancel(m.cause)
 }
 
@@ -333,6 +429,11 @@ func (m *Monitor) onStall() {
 			hook, ph, allow = m.enterPostReadyLocked(unreadableState(perr), false, m.last)
 		case m.warming:
 			hook, ph, allow = m.enterPostReadyLocked(warmupState, true, m.last)
+		case m.engineArmedLocked():
+			// Loaded and not loading: before calling the silence a stall, ask
+			// whether the ENGINE is working for anyone (the busy hold).
+			m.checkEngineLocked() // releases the lock
+			return
 		default:
 			m.fileStallLocked()
 			m.mu.Unlock()
@@ -340,6 +441,10 @@ func (m *Monitor) onStall() {
 		}
 		m.mu.Unlock()
 		notify(hook, ph, allow)
+		return
+	}
+	if m.engineArmedLocked() && m.engineCheckablePhaseLocked() {
+		m.checkEngineLocked() // releases the lock
 		return
 	}
 	m.fileStallLocked()
@@ -399,16 +504,32 @@ func (m *Monitor) holdLeftLocked(now time.Time) time.Duration {
 // In PhaseColdLoad, Silent counts from the start of the hold's current part
 // and Allowed is that part's bound as it actually applied (clamped to the
 // run ceiling).
-func (m *Monitor) fileStallLocked() {
+// fileStallLocked builds the StallError, applies each amend to it, and only
+// then publishes it (m.cause + cancel): the run's loop reads the error the
+// moment the context is cancelled, so nothing may write to it afterwards —
+// the 0.143.0 unreadable and thrash verdicts did, a data race under -race.
+func (m *Monitor) fileStallLocked(amend ...func(*StallError)) {
 	se := &StallError{Phase: m.phase, Silent: time.Since(m.last), Allowed: m.allow, Tokens: m.tokens + m.callTok}
-	if m.phase == PhaseColdLoad {
-		bound, from := m.holdBoundLocked()
-		if c := m.dl.Sub(from) - ceilingMargin; c < bound {
-			bound, m.holdClamped = c, true
+	switch {
+	case m.phase == PhaseQueued:
+		// The busy hold ended on an engine that stopped working (ADR 0061):
+		// name the engine's silence, the phase the request waited in and the
+		// bound that applied — never the poll interval the hold ran on.
+		se.EngineFlat, se.EngineSilent, se.Waited, se.Engine = true, time.Since(m.engChangedAt), m.busyResume, m.engSum
+		se.Allowed = m.engineFlatBoundLocked()
+	default:
+		if m.phase == PhaseColdLoad {
+			bound, from := m.holdBoundLocked()
+			if c := m.dl.Sub(from) - ceilingMargin; c < bound {
+				bound, m.holdClamped = c, true
+			}
+			se.Silent, se.Allowed, se.PostReady, se.ReadySeen = time.Since(from), bound, m.postReady, m.readySeen
 		}
-		se.Silent, se.Allowed, se.PostReady, se.ReadySeen = time.Since(from), bound, m.postReady, m.readySeen
+		se.Note = m.note()
 	}
-	se.Note = m.note()
+	for _, f := range amend {
+		f(se)
+	}
 	m.cause = se
 	m.cancel(m.cause)
 }
@@ -433,6 +554,11 @@ func (m *Monitor) enterHoldPhaseLocked() bool {
 	}
 	m.resume, m.resumePending = m.phase, m.pending
 	m.holdStart = m.last
+	if !m.holdAnchor.IsZero() {
+		// The load was observed from the busy hold: the hold was the engine
+		// working for others, and the cold-load ceiling starts now.
+		m.holdStart, m.holdAnchor = m.holdAnchor, time.Time{}
+	}
 	m.phase = PhaseColdLoad
 	m.epoch++
 	return true
@@ -600,6 +726,9 @@ func (m *Monitor) MarkSeatLoaded() {
 
 // note spells the prefill arithmetic so a reader can check the allowance.
 func (m *Monitor) note() string {
+	if m.phase == PhaseQueued {
+		return fmt.Sprintf(": busy hold, waiting in %s; the engine: %s", m.busyResume, m.engSum)
+	}
 	if m.phase == PhaseColdLoad {
 		clamp := ""
 		if m.holdClamped {
@@ -637,6 +766,7 @@ func (m *Monitor) ToolPhase(cap time.Duration) {
 	if m.stopped || m.cause != nil {
 		return
 	}
+	m.endBusyLocked(time.Now())
 	m.tokens += m.callTok
 	m.callTok = 0
 	m.phase, m.pending = PhaseTool, 0
@@ -659,6 +789,7 @@ func (m *Monitor) Phase(ph Phase, pendingPromptTokens int) {
 	if m.stopped || m.cause != nil {
 		return
 	}
+	m.endBusyLocked(time.Now())
 	m.tokens += m.callTok
 	m.callTok = 0
 	m.phase, m.pending = ph, pendingPromptTokens
@@ -694,6 +825,12 @@ func (m *Monitor) Progress(tokensSoFar int) {
 		}
 		m.callTok = tokensSoFar
 		m.warming, m.postReady = false, false
+		m.engFP, m.engTokFP = "", "" // the request moved: the next busy hold takes a fresh look
+		if m.phase == PhaseQueued {
+			// Its turn came: back to the phase it waited in (a prefill's first
+			// delta then ends the prefill just below).
+			m.leaveQueuedLocked(now)
+		}
 		if m.phase == PhasePrefill || m.phase == PhaseColdLoad {
 			// A byte arrived, so the seat is serving: any cold-load hold is over.
 			m.phase, m.allow = PhaseDecoding, m.pol.Allowance(PhaseDecoding, 0)
