@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 
 	"github.com/dmmdea/offload-harness/internal/config"
@@ -117,17 +116,14 @@ func runInstallPlan(args []string) error {
 		return err
 	}
 	// Accelerator seeds merge OVER the tier seed — same order as install.ps1, so the
-	// plan predicts exactly the config the install would write. HAILO_HOME resolution
-	// mirrors install.ps1 verbatim ($env:HAILO_HOME else <OFFLOAD_HOME>\hailo) and is
-	// never empty: an empty HailoHome would expand __HAILO_HOME__ to "" and produce
-	// the plausible-wrong "/hailo-http.cmd".
+	// plan predicts exactly the config the install would write. Every device's home
+	// resolves as `install seed` does with no flag ($<DEVICE>_HOME, else
+	// <OFFLOAD_HOME>/<device>; install.ps1's $env:HAILO_HOME rule for the Hailo) and
+	// is never empty: an empty home would expand its token to "" and produce the
+	// plausible-wrong "/hailo-http.cmd" (tierseed refuses that render).
 	if len(verdict.Accelerators) > 0 {
-		hailoHome := os.Getenv("HAILO_HOME")
-		if hailoHome == "" {
-			hailoHome = filepath.Join(installHome, "hailo")
-		}
 		accSeed, err := tierseed.ResolveAccelerators(doc.Accelerators, verdict.Accelerators,
-			tierseed.Options{Home: installHome, HailoHome: hailoHome})
+			accelOptions(tierseed.Options{Home: installHome}, "", "", ""))
 		if err != nil {
 			return err
 		}

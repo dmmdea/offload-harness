@@ -1,6 +1,7 @@
 package tierseed
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -112,6 +113,53 @@ func TestResolveAcceleratorsExpandsAndValidates(t *testing.T) {
 	}
 }
 
+// The RKNPU has its own home token, like each device: it expands from RknpuHome (trailing slash and
+// backslashes normalised), it is refused when EMPTY (an empty home would render "/rknpu-http.sh", a
+// launcher at the filesystem root that nothing installed), and it expands beside the other two homes
+// in one merge without either leaking into the other.
+func TestResolveAcceleratorsExpandsRknpuHome(t *testing.T) {
+	accs := map[string]Accelerator{
+		"hailo-8l": {Kind: "npu", ConfigSeed: map[string]any{
+			"accelerators": []any{"hailo-8l"}, "hailo_sidecar_cmd": "__HAILO_HOME__/hailo-http.cmd",
+		}},
+		"coral-edgetpu": {Kind: "tpu", ConfigSeed: map[string]any{
+			"coral_sidecar_cmd": "__CORAL_HOME__/coral-http.sh",
+		}},
+		"rknpu": {Kind: "npu", ConfigSeed: map[string]any{
+			"rknpu_endpoint": "http://127.0.0.1:18815", "rknpu_sidecar_cmd": "__RKNPU_HOME__/rknpu-http.sh", "rknpu_timeout_sec": 60,
+		}},
+	}
+	out, err := ResolveAccelerators(accs, []string{"rknpu"}, Options{Home: "/srv/stack", RknpuHome: `/srv/stack/rknpu/`, GOOS: "linux"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out["rknpu_sidecar_cmd"] != "/srv/stack/rknpu/rknpu-http.sh" {
+		t.Fatalf("__RKNPU_HOME__ not expanded: %v", out["rknpu_sidecar_cmd"])
+	}
+	out, err = ResolveAccelerators(accs, []string{"rknpu"}, Options{Home: "/srv/stack", RknpuHome: `D:\x\rknpu`, GOOS: "windows"})
+	if err != nil || out["rknpu_sidecar_cmd"] != "D:/x/rknpu/rknpu-http.sh" {
+		t.Fatalf("a Windows-shaped home must normalise to forward slashes: %v, %v", out["rknpu_sidecar_cmd"], err)
+	}
+
+	_, err = ResolveAccelerators(accs, []string{"rknpu"}, Options{Home: "/srv/stack", HailoHome: "/x/hailo", CoralHome: "/x/coral", GOOS: "linux"})
+	if err == nil || !strings.Contains(err.Error(), "__RKNPU_HOME__") || !strings.Contains(err.Error(), "RknpuHome") {
+		t.Fatalf("an empty RknpuHome must be refused naming the token and the option, got %v", err)
+	}
+
+	all, err := ResolveAccelerators(accs, []string{"hailo-8l", "coral-edgetpu", "rknpu"},
+		Options{Home: "/srv/stack", HailoHome: "/h", CoralHome: "/c", RknpuHome: "/r", GOOS: "linux"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for k, want := range map[string]string{
+		"hailo_sidecar_cmd": "/h/hailo-http.cmd", "coral_sidecar_cmd": "/c/coral-http.sh", "rknpu_sidecar_cmd": "/r/rknpu-http.sh",
+	} {
+		if all[k] != want {
+			t.Errorf("%s = %v, want %s", k, all[k], want)
+		}
+	}
+}
+
 // TestEveryShippedAcceleratorSeedIsValid guards the real accelerators table the same
 // way TestEveryShippedSeedIsValid guards the tiers: a typo'd key in a shipped
 // config_seed would otherwise be dropped on every box that has the device.
@@ -123,19 +171,24 @@ func TestEveryShippedAcceleratorSeedIsValid(t *testing.T) {
 	if len(d.Accelerators) == 0 {
 		t.Fatal("profiles.json declares no accelerators — hailo-8l should be there")
 	}
+	leftover := regexp.MustCompile(`__[A-Z]+_HOME__`)
 	for id := range d.Accelerators {
 		for _, goos := range []string{"windows", "linux"} {
-			out, err := ResolveAccelerators(d.Accelerators, []string{id}, Options{Home: "/tmp/x", HailoHome: "/tmp/hailo", CoralHome: "/tmp/coral", GOOS: goos})
+			out, err := ResolveAccelerators(d.Accelerators, []string{id}, Options{
+				Home: "/tmp/x", HailoHome: "/tmp/hailo", CoralHome: "/tmp/coral", RknpuHome: "/tmp/rknpu", GOOS: goos})
 			if err != nil {
 				t.Errorf("accelerator %s does not resolve for %s: %v", id, goos, err)
 				continue
 			}
 			for k, v := range out {
-				if s, ok := v.(string); ok && strings.Contains(s, "__HAILO_HOME__") {
-					t.Errorf("accelerator %s/%s: %s still carries __HAILO_HOME__ after expansion: %v", id, goos, k, s)
+				if s, ok := v.(string); ok && leftover.MatchString(s) {
+					t.Errorf("accelerator %s/%s: %s still carries a home token after expansion: %v", id, goos, k, s)
 				}
 			}
 		}
+	}
+	if _, ok := d.Accelerators["rknpu"]; !ok {
+		t.Error("profiles.json declares no rknpu accelerator")
 	}
 }
 

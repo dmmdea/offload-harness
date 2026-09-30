@@ -43,9 +43,9 @@
     "notes": "operator-facing caveats."
   },
   "_accelerator_fields": {
-    "kind": "npu | tpu — the device class (hailo-8l is an npu, coral-edgetpu a tpu). An accelerator is ADDITIVE to a box's GPU tier (ADR 0024): `profile` stays one string and `accelerators` lists what rides beside it.",
+    "kind": "npu | tpu — the device class (hailo-8l and rknpu are npus, coral-edgetpu a tpu). An accelerator is ADDITIVE to a box's GPU tier (ADR 0024): `profile` stays one string and `accelerators` lists what rides beside it.",
     "owns": "the offload_* capabilities this accelerator serves EXCLUSIVELY when present; the GPU tier keeps everything else (VQA/description stay on the VLM; OCR stays GPU-primary with engine:npu as the caller's explicit fast path).",
-    "config_seed": "config.json keys merged AFTER the GPU tier's seed (internal/tierseed.ResolveAccelerators). __HAILO_HOME__ expands to the Hailo repo checkout (installer env HAILO_HOME, default <OFFLOAD_HOME>/hailo).",
+    "config_seed": "config.json keys merged AFTER the GPU tier's seed (internal/tierseed.ResolveAccelerators). Each device has its own home token: __HAILO_HOME__ expands to the Hailo repo checkout (installer env HAILO_HOME, default <OFFLOAD_HOME>/hailo), __CORAL_HOME__ to the Coral sidecar home (CORAL_HOME, default <OFFLOAD_HOME>/coral), __RKNPU_HOME__ to the RKNPU sidecar home (RKNPU_HOME, default <OFFLOAD_HOME>/rknpu).",
     "detect": "how detect.ps1 / hwdetect recognise the device — documentation of the rule implemented in code."
   },
   "accelerators": {
@@ -95,6 +95,25 @@
         "coral_idle_sec": 300
       },
       "notes": "Coral Edge TPU (M.2 A+E on the Lenovo M720q, PCI 03:00.0; one id for the whole family — USB/M.2/Dual all run the same _edgetpu.tflite artifacts). Runtime as measured 2026-09-04 (Ecosystem/Lenovo M720q/2026-09-04_coral-tpu/SETUP.md): feranick gasket-dkms 1.0-18.4 + libedgetpu1-std 16.0TF2.19.1 + ai-edge-litert 2.2.0 (cp314); MobileNet v2 iNat p50 3.16 ms / ~300 inf/s, 70-71 C sustained, no throttle; -max measured indistinguishable (the ~3 ms floor is the Gen2 x1 transfer, not compute) and purged. The tier READS that configuration and never rewrites it: the sidecar (accelerators/coral/server.py, harness-spawned on demand over loopback, self-exits idle) reads sysfs temp/status only. Four capabilities in v1, every model from google-coral/test_data (Apache-2.0) and verified by sha256 in accelerators/coral/models.json: classify_image (EfficientNet-EdgeTPU-S ImageNet; MobileNet v2 iNat birds/insects/plants), object_detect (EfficientDet-Lite0/1/2 COCO), semantic_segment (DeepLabV3 MNv2 Pascal, 21 classes — semantic, NOT the Hailo's instance `segment`), image_embed (EfficientNet-EdgeTPU-S extractor, 1280-d, space efficientnet-edgetpu-s — not CLIP, so no text tower and no zero_shot). Shared-name rule (D5): object_detect and image_embed are capability names one owner per box — the FIRST listed accelerator that owns a name registers it. Deploy on the Lenovo (D8): CORAL_HOME=<OFFLOAD_HOME>/coral with its own venv from the staged cp314 wheels; the fleet unit's ProtectHome=yes hides ~/coral-venv, which stays the operator's bench."
+    },
+    "rknpu": {
+      "kind": "npu",
+      "owns": [
+        "classify_image",
+        "object_detect",
+        "image_embed"
+      ],
+      "detect": "one of /sys/class/drm/card0..card3/device/uevent carries the whole line DRIVER=RKNPU (Rockchip's vendor NPU driver bound to a DRM node; Linux only — Windows has no sysfs and never matches). The mainline in-tree driver reports DRIVER=rocket and is deliberately NOT matched: the RKNN runtime does not run on it",
+      "config_seed": {
+        "accelerators": [
+          "rknpu"
+        ],
+        "rknpu_endpoint": "http://127.0.0.1:18815",
+        "rknpu_sidecar_cmd": "__RKNPU_HOME__/rknpu-http.sh",
+        "rknpu_timeout_sec": 60,
+        "rknpu_idle_sec": 300
+      },
+      "notes": "Rockchip RK3588 / RK3588S NPU (6 TOPS, 3 cores). Driver: the vendor rknpu (built into the 6.1 BSP kernel; the out-of-tree DKMS build, 0.9.8, on a mainline kernel) — the in-tree `rocket` driver is a different driver that the RKNN runtime does not use. Measured on an Orange Pi 5 (RK3588S: 4x A55 + 4x A76, 7.7 GiB shared LPDDR4X): librknnrt 2.3.2 loads on driver 0.9.7 and runs resnet18_for_rk3588.rknn at 2.94 ms/inference (340 FPS, core mask 0_1_2). An .rknn is compiled for one target SoC (rk3588). The sidecar (accelerators/rknpu/server.py) speaks the Coral's contract — harness-spawned on demand over loopback, self-exits idle, models verified by sha256 — and serves three capabilities in v1: classify_image (ImageNet), object_detect (COCO), image_embed (a CLIP-class image tower; the result names its `space`, which is not the Hailo's TinyCLIP or the Coral's EfficientNet at any dimension). All three names are shared with the Hailo and/or the Coral, so the shared-name rule (ADR 0037) gives each to the FIRST listed owner. No text tower is served: no text_embed / zero_shot, and OCR / STT engine:npu stay Hailo-only. The NPU shares system memory with the host, so a resident model holds RAM until rknpu_idle_sec passes. The service user must be able to open the NPU's DRM node under /dev/dri (root, or a member of the node's group). Linux only."
     }
   },
   "cache_ram_mib_by_ram_tier": { "min": 1024, "low": 8192, "mid": 16384, "high": 24576 },
