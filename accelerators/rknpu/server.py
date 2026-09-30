@@ -457,12 +457,17 @@ def tool_embed(args: dict) -> dict:
     size = spec["input"]
     with _open_image(image) as img:
         w, h = img.size
-        # CLIP's own preprocessing: shorter side to size (bicubic), then a centred size x size crop.
+        # CLIP's own preprocessing: shorter side to size (bicubic), then a centred size x size crop. The crop
+        # is taken from the SOURCE first (the window of it that the centred crop keeps) and resampled once to
+        # size x size, so a 100000x10 strip never becomes a 2.24-million-wide (1.5 GB) intermediate.
         s = size / min(w, h)
         nw, nh = max(size, round(w * s)), max(size, round(h * s))
-        scaled = _decode(img, image, (nw, nh)).resize((nw, nh), Image.BICUBIC)
-    left, top = (nw - size) // 2, (nh - size) // 2
-    outs = _infer(EMBED_KEY, _nhwc(scaled.crop((left, top, left + size, top + size))))
+        left, top = (nw - size) // 2, (nh - size) // 2
+        rgb = _decode(img, image, (nw, nh))  # a JPEG may decode at reduced scale: the box is in its pixels
+        rw, rh = rgb.size
+        window = (left / nw * rw, top / nh * rh, (left + size) / nw * rw, (top + size) / nh * rh)
+        scaled = rgb.resize((size, size), Image.BICUBIC, box=window)
+    outs = _infer(EMBED_KEY, _nhwc(scaled))
     vec = outs[0].reshape(-1)
     return {"embedding": [float(v) for v in vec], "dim": int(vec.shape[0]), "space": spec["space"], "model": spec["file"]}
 

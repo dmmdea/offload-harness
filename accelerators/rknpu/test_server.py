@@ -265,7 +265,7 @@ def same_path(a: str, b: str) -> bool:
 class StartedProcess:
     def __init__(self, models_dir: str, **env):
         self.port = free_port()
-        e = clean_env(RKNPU_ENABLED="0", RKNPU_PORT=str(self.port), RKNPU_MODELS_DIR=models_dir, RKNPU_IDLE_SEC="0",
+        e = clean_env(RKNPU_ENABLED="0", RKNPU_PORT=str(self.port), RKNPU_MODELS_DIR=models_dir, RKNPU_IDLE_SEC="300",
                       RKNPU_SYSFS=os.path.join(models_dir, "no-sysfs"))
         e.update(env)
         self.p = subprocess.Popen([sys.executable, "-B", SERVER], env=e, stderr=subprocess.PIPE, text=True)
@@ -424,7 +424,7 @@ class InProcess(unittest.TestCase):
         self.spec = real_manifest()["models"]
         self.file = {k: v["file"] for k, v in self.spec.items()}
         e = {"RKNPU_ENABLED": "1", "RKNPU_MANIFEST": self.manifest, "RKNPU_MODELS_DIR": self.models,
-             "RKNPU_SYSFS": self.sysfs, "RKNPU_IDLE_SEC": "0"}
+             "RKNPU_SYSFS": self.sysfs, "RKNPU_IDLE_SEC": "300"}
         e.update(env)
         self.mod = load_server(**e)
         self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), self.mod.Handler)
@@ -694,6 +694,47 @@ class EmbedTests(InProcess):
         self.assertEqual({tuple(int(v) for v in x[0, 100, c]) for c in (0, 111, 223)}, {(0, 255, 0)})
         self.post("embed", image_path=self.image("small.png", (100, 50)))  # smaller than the input: scaled up
         self.assertEqual(self.Fake.instances[0].inputs[1].shape, (1, 224, 224, 3))
+
+
+    def test_the_centred_window_is_cropped_from_the_source_before_the_resize_and_matches_the_old_output(self):
+        self.outputs("clip-vit-b32-image", lambda _: [np.zeros((1, 512), np.float32)])
+        rng = np.random.default_rng(7)
+        for size in ((300, 200), (200, 300), (333, 500), (224, 224), (64, 96)):
+            with self.subTest(size=size):
+                pixels = rng.integers(0, 256, (size[1], size[0], 3), dtype=np.uint8)
+                path = os.path.join(self.tmp, "noise.png")
+                Image.fromarray(pixels).save(path)
+                self.assertEqual(self.post("embed", image_path=path)[0], 200)
+                got = self.Fake.instances[0].inputs[-1]
+                # the previous pipeline: resample the whole picture to the scaled size, then cut the centre out
+                w, h = size
+                s = 224 / min(w, h)
+                nw, nh = max(224, round(w * s)), max(224, round(h * s))
+                left, top = (nw - 224) // 2, (nh - 224) // 2
+                old = Image.fromarray(pixels).resize((nw, nh), Image.BICUBIC).crop((left, top, left + 224, top + 224))
+                self.assertLessEqual(int(np.abs(got[0].astype(int) - np.asarray(old).astype(int)).max()), 1)
+
+    def test_an_extreme_aspect_ratio_never_builds_a_huge_intermediate(self):
+        self.outputs("clip-vit-b32-image", lambda _: [np.zeros((1, 512), np.float32)])
+        real = Image.Image.resize
+        made = []
+
+        def spy(img, size, *args, **kwargs):
+            made.append(tuple(size))
+            return real(img, size, *args, **kwargs)
+
+        for size in ((100000, 10), (10, 100000)):
+            with self.subTest(size=size):
+                path = os.path.join(self.tmp, "strip.png")
+                Image.new("RGB", size, (9, 8, 7)).save(path)
+                made.clear()
+                with mock.patch.object(Image.Image, "resize", spy):
+                    code, r = self.post("embed", image_path=path)
+                self.assertEqual(code, 200, r)
+                self.assertTrue(made, "the picture was never resampled")
+                # the old order scaled the whole strip first: 2.24 million x 224 pixels, about 1.5 GB of RGB
+                self.assertLessEqual(max(max(s) for s in made), 224, made)
+                self.assertEqual(self.Fake.instances[0].inputs[-1].shape, (1, 224, 224, 3))
 
 
 class ImageErrorTests(InProcess):
