@@ -316,8 +316,7 @@ sidecar serves only a file whose sha256 it pins.
 | `embed` | `clip-vit-b32-image` | CLIP ViT-B/32 image tower, FP16 | MIT (OpenAI) | unchanged |
 
 The zoo and toolkit files are Rockchip's (zoo code Apache-2.0). The classifier's key is one constant,
-`CLASSIFY_MODEL` in `server.py`, so serving the FP16 build instead is a one-line change once the board
-has measured both.
+`CLASSIFY_MODEL` in `server.py`; the board measured both builds (below) and the INT8 one is served.
 
 - **No model has a public `.rknn`.** `fetch-models.sh --convert` builds each on an x86_64 host from
   the recipe under its `convert` key: `ppyoloe_s` and CLIP from a sha256-pinned ONNX on the
@@ -339,13 +338,25 @@ has measured both.
   Python demo does), applies per-class NMS, and reads the three stride branches in any order. The
   score-sum branch is ignored: the zoo's Python demo replaces it with ones and its C demo uses it
   only to skip cells early. The defaults are the zoo demo's own: score threshold 0.25, NMS IoU 0.45.
-- **Not yet run on the NPU.** All three replacement files were converted and checked on
-  rknn-toolkit2's simulator on 2026-09-30 (the simulator's PP-YOLOE output on the zoo's `bus.jpg`
-  is person 0.950 / 0.935 / 0.923, bus 0.893, person 0.473, handbag 0.411; ResNet-50 reads the
-  zoo's dog photo as Shih-Tzu, class 155, in both builds), and the sidecar's decoder is tested
-  on those tensors (`RKNPU_SIM_DIR`, see `test_server.py`). Latency, memory and INT8 accuracy on
-  the board are unmeasured. The PP-YOLOE build log flags an outlier weight (`conv2d_97.w_0` =
-  23.8): compare INT8 with FP32 there first.
+- **Measured on the NPU (Orange Pi 5, RK3588S, 2026-09-30).** The pinned files ran on the board
+  (librknnrt 2.3.2, rknpu 0.9.8, one NPU core) over the same evaluation lists as the host FP32
+  baselines below, with a post-processing port that reproduces those baselines on the host to the
+  fourth decimal:
+
+  | Model | NPU result | vs host FP32 | NPU inference (median / p90) |
+  |---|---|---|---|
+  | PP-YOLOE+ s INT8 | mAP@[.5:.95] 0.4255, mAP@.5 0.5926 | −0.0105 mAP | 56.3 / 59.7 ms |
+  | ResNet-50 (tv2) INT8 | top-1 69.7 %, top-5 89.1 % | −0.2 / −0.2 (not significant) | 13.2 / 13.5 ms |
+  | ResNet-50 (tv2) FP16 | top-1 69.9 %, top-5 89.2 % | 0.0 / −0.1 | 29.7 / 30.9 ms |
+
+  The INT8 classifier is served (`CLASSIFY_MODEL`): it matches FP16 accuracy at twice the speed.
+  The PP-YOLOE outlier weight the build log flagged (`conv2d_97.w_0` = 23.8) costs no more than the
+  1-point drop above. The same lists through the Coral Edge TPU (EfficientDet-Lite, 25 boxes per
+  image): Lite0 0.2700, Lite1 0.3128, Lite2 0.3561 mAP@[.5:.95]; the NPU's detector capped to its
+  top 25 boxes per image still scores 0.4099. The simulator's PP-YOLOE output on the zoo's `bus.jpg`
+  (person 0.950 / 0.935 / 0.923, bus 0.893, person 0.473, handbag 0.411) is what the decoder tests
+  replay (`RKNPU_SIM_DIR`, see `test_server.py`). Evidence: the operator's benchmark records (kept
+  outside this repository).
 
 The reference the board's INT8 numbers must be checked against is the host FP32 run of the same
 ONNX files (onnxruntime on CPU, 2026-09-30), on evaluation lists that are disjoint from the

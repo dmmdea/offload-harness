@@ -6,6 +6,8 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.151.0] - 2026-09-30 - the RKNPU sidecar serves permissively licensed models, measured on the NPU
+
 ### Changed — the RKNPU sidecar serves permissively licensed models: PP-YOLOE+ s and ResNet-50 replace YOLOv8n and ResNet18
 
 Operator order (2026-09-30): no licence costs, so no AGPL or GPL model ships. The Ultralytics YOLOv8n (AGPL-3.0) and the Rockchip ResNet18 prebuilt (untraced provenance) are removed from `accelerators/rknpu/models.json`; `object_detect` now runs PP-YOLOE+ s (PaddleDetection, Apache-2.0; 43.7 COCO mAP claimed upstream, host FP32 0.436 on the 500-image evaluation list) and `classify` runs ResNet-50 with torchvision's `IMAGENET1K_V2` weights via timm `resnet50.tv2_in1k` (BSD-3-Clause; 80.9 % ImageNet-val top-1 claimed upstream, host FP32 69.9 % top-1 on 1000 ImageNetV2 images). CLIP is unchanged. The manifest gains `ppyoloe_s`, `resnet50tv2-i8` and `resnet50tv2-fp16` and loses `resnet18` and `yolov8n`; `CLASSIFY_MODEL` in `server.py` names the served classifier build (INT8; the FP16 build is one constant away once the board has measured both).
@@ -16,6 +18,7 @@ Operator order (2026-09-30): no licence costs, so no AGPL or GPL model ships. Th
 - **Classifier preprocessing.** A spec carrying `resize_short` and `crop` gets the torchvision evaluation recipe (short side to 232, bilinear, centred 224 crop, cut from the source and resampled once, so an extreme aspect ratio builds no huge intermediate); a spec without them is squashed to the input size as before.
 - **A missing label file no longer says to convert.** The `model_missing` hint for a label file is `run fetch-models.sh`; only the model file itself says `--convert`.
 - **Not yet run on the NPU.** The three new files were converted and checked on rknn-toolkit2's simulator; `test_server.py` decodes the simulator's own tensors when `RKNPU_SIM_DIR` names the benchmark's `sim/` folder (PP-YOLOE on `bus.jpg`: person 0.950 / 0.935 / 0.923, bus 0.893, person 0.473, handbag 0.411; ResNet-50 on the zoo's dog photo: Shih-Tzu in both builds). Latency, memory and INT8 accuracy on the board are unmeasured; `docs/systems/accelerators.md` records the host FP32 baselines the board's INT8 figures are to be checked against. A box that already runs the sidecar needs the three new `.rknn` files copied to its models directory (`fetch-models.sh` reports them MISSING until then); the old `resnet18` and `yolov8n` files are no longer served.
+- **Measured on the NPU (Orange Pi 5, 2026-09-30), same 500 COCO / 1000 ImageNetV2 images as the host baselines:** ppyoloe_s INT8 mAP@[.5:.95] 0.4255 (host FP32 0.4360; 56 ms per inference on one NPU core); resnet50tv2-i8 top-1 69.7 % (FP32 69.9; 13 ms), resnet50tv2-fp16 69.9 % (30 ms), so the INT8 build is served. The Coral Edge TPU on the same COCO list: EfficientDet-Lite0/1/2 0.270 / 0.313 / 0.356. Evidence: the operator's benchmark records (outside this repository).
 
 ## [0.150.0] - 2026-09-30 - a read-only catalog of the ComfyUI workflow templates a node carries (Comfy templates phase A)
 
