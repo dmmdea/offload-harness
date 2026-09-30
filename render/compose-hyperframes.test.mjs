@@ -770,6 +770,46 @@ test("kit ports: no keyframe scales an element above its resting size", () => {
   }
 });
 
+// --- the hyperframes-compose skill (canonical copy in this repo) ---------------------------------------
+// A skill is documentation an agent acts on, so the parts that can silently rot are tested: the catalog
+// must list every shipped template with its real alpha flag and default length, and the hard bans must
+// be stated. (Installing the skill anywhere else is an operator decision and is not part of this repo.)
+
+test("hyperframes-compose skill: catalog names every shipped template with its alpha flag and default length; the hard bans are stated", () => {
+  const file = join(__dirname, "..", "skill", "hyperframes-compose", "SKILL.md");
+  assert.ok(existsSync(file), "skill/hyperframes-compose/SKILL.md is missing");
+  const md = readFileSync(file, "utf8").replace(/\r\n/g, "\n");
+  const front = /^---\nname: hyperframes-compose\ndescription: ([^\n]+)\n---\n/.exec(md);
+  assert.ok(front, "front matter must be name + description");
+  assert.ok(front[1].includes("offload_compose_video"), "the description names the tool it routes to");
+  assert.ok(front[1].length >= 150, "the description says when to use the skill, not just what it is");
+  const rows = new Map();
+  for (const line of md.split("\n")) {
+    const cells = line.split("|").map((c) => c.trim());
+    const m = /^`([a-z0-9-]+)`$/.exec(cells[1] || "");
+    if (cells.length >= 6 && m) rows.set(m[1], cells);
+  }
+  for (const name of listTemplates(join(__dirname, "compose-templates"))) {
+    const cells = rows.get(name);
+    assert.ok(cells, `the catalog has no row for ${name}`);
+    const manifest = JSON.parse(readFileSync(join(__dirname, "compose-templates", name, "template.json"), "utf8"));
+    const html = readFileSync(join(__dirname, "compose-templates", name, "index.html"), "utf8");
+    const dur = declaredVariables(html).find((d) => d.id === manifest.duration_variable).default;
+    assert.equal(cells[3], manifest.alpha ? "yes" : "no", `${name}: alpha column`);
+    assert.equal(cells[4], `${dur} s`, `${name}: default length column`);
+  }
+  // the hard bans, in one section, naming every subcommand the runner refuses
+  const bans = /## Hard bans\n([\s\S]*?)\n## /.exec(md);
+  assert.ok(bans, "a '## Hard bans' section");
+  for (const banned of ["npx hyperframes", "init", "skills", "upgrade", "add", "npx skills add"]) {
+    assert.ok(bans[1].includes(banned), `the hard bans do not mention ${banned}`);
+  }
+  assert.match(md, /offload_generate_svg/, "says when to use the SVG tool instead");
+  assert.match(md, /offload_media/, "says what offload_media is for");
+  assert.match(md, /snapshots/, "carries the snapshot verification loop");
+  assert.match(md, /captions-groups\.mjs/, "carries the captions workflow");
+});
+
 // The shipped list is written by hand in several places; this keeps two of them honest (the tool
 // description is pinned by a Go test, internal/mcpserver/composevideo_test.go).
 test("the shipped template list is complete in the templates README and in the media-generation doc", () => {
