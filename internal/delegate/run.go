@@ -1427,10 +1427,13 @@ type placements struct {
 	// same rule as time provably spent queued on a node — so remaining() adds
 	// it back. Bounded by agent_placement_wait_sec.
 	credit time.Duration
-	// capacityRefusal records that at least one node refused for CAPACITY
-	// (503/429: queue full, leased, draining, shed) rather than because the
-	// request or the address was wrong. Only then is a capacity wait worth
-	// running: a roster that 404s or is unreachable does not free up.
+	// capacityRefusal records that the subtask's trouble is CAPACITY (a node
+	// refused it with a 503/429: queue full, leased, draining, shed; or the local
+	// seat deferred it as capacity; or replacementNode found the remaining nodes,
+	// or the local run-cap line, merely busy: no room, a cooldown, a backlog past
+	// the caller's patience, a full process gate) rather than a request or an
+	// address that was wrong. Only then is a capacity wait worth running: a roster
+	// that 404s or is unreachable does not free up.
 	capacityRefusal bool
 	// excluded is every dial base that refused for a NON-capacity reason
 	// (404/408/409, or unreachable): nothing about such a node frees up, so
@@ -2433,6 +2436,9 @@ func replaceableRefusal(status int) bool {
 func (r *runner) replacementNode(ctx context.Context, contract core.AgentContract, pl *placements, refused int) (placement, string, bool) {
 	refusedAt := time.Now()
 	boundHit := pl.used >= maxRemoteReplacements
+	// busy names every eligible node the filters below held out only because it is
+	// busy right now (withRoom); nothing was dispatched to any of them.
+	var busy []string
 	if r.route != "local" && !boundHit {
 		st := Subtask{Contract: contract, EstTokens: EstimateTokens(contract)}
 		// Re-probe: the roster this subtask was placed against is now known to
@@ -2440,7 +2446,9 @@ func (r *runner) replacementNode(ctx context.Context, contract core.AgentContrac
 		// only thing that can say which of the others has room.
 		views, bases, _ := r.fetchViewsSince(ctx, refusedAt)
 		freshViews, freshBases := untried(views, bases, pl.tried)
-		candViews, candBases := r.withRoom(st, freshViews, freshBases)
+		var candViews []NodeView
+		var candBases []string
+		candViews, candBases, busy = r.withRoom(st, freshViews, freshBases)
 		if chosen := Place(mintP2CSeed(), st, r.localView(), candViews, true); !chosen.Local {
 			return placement{
 				view:   chosen,
@@ -2453,6 +2461,15 @@ func (r *runner) replacementNode(ctx context.Context, contract core.AgentContrac
 	// explicit remote route must not silently fall local, which is the same
 	// posture the "no eligible remote" defer already holds.
 	head := "no further eligible remote was available"
+	if len(busy) > 0 {
+		// A node the filters held out is BUSY, not broken: INV-4 sends the subtask to
+		// the capacity wait, which re-reads every one of them each tick - whatever
+		// kind of refusal started this chain. Only a 503 or 429 used to say so, and a
+		// 500 followed by a full node failed a subtask that a node about to free could
+		// have taken.
+		pl.capacityRefusal = true
+		head = "no further remote could take it right now (" + strings.Join(busy, "; ") + ")"
+	}
 	if boundHit {
 		head = fmt.Sprintf("the re-placement bound of %d further node(s) was reached", maxRemoteReplacements)
 	}
@@ -2470,6 +2487,10 @@ func (r *runner) replacementNode(ctx context.Context, contract core.AgentContrac
 		return placement{}, head + ", and the local seat is reserved (" + HolderLine(info) + ")", false
 	}
 	if free, note := r.localSlotAhead(); !free {
+		// A full run-cap line is a place in line, not a refusal: the wait watches it and
+		// takes the seat when a slot frees (INV-4), whatever kind of refusal started
+		// this chain.
+		pl.capacityRefusal = true
 		return placement{}, head + ", and the local seat's run-cap line has no free slot (" + note + ")", false
 	}
 	return placement{
@@ -2482,28 +2503,54 @@ func (r *runner) replacementNode(ctx context.Context, contract core.AgentContrac
 // dispatch of st right now: eligible, room by their own advertisement, a start
 // inside the caller's patience, no cooldown from a refusal of their own, and a
 // process gate that is not already full. Views and bases stay index-parallel.
-func (r *runner) withRoom(st Subtask, views []NodeView, bases []string) ([]NodeView, []string) {
-	outV := make([]NodeView, 0, len(views))
-	outB := make([]string, 0, len(bases))
+//
+// busy has one line for every ELIGIBLE node that was held out only because it is
+// busy right now - the arithmetic or the cooldown that says so - and nothing for a
+// node that cannot run the contract at all (remoteEligible): the first kind frees
+// up and is worth waiting for, the second never does.
+func (r *runner) withRoom(st Subtask, views []NodeView, bases []string) (outV []NodeView, outB []string, busy []string) {
+	outV = make([]NodeView, 0, len(views))
+	outB = make([]string, 0, len(bases))
 	now := time.Now()
 	sheddable := r.priority < core.BandNormal
 	for j, v := range views {
 		if !remoteEligible(st, v) {
 			continue
 		}
-		if _, cooling := r.cool.heldUntil(bases[j], now); cooling {
+		if until, cooling := r.cool.heldUntil(bases[j], now); cooling {
+			busy = append(busy, fmt.Sprintf("%s: cooling down after its own refusal (%s left)", laneID(v), until.Sub(now).Round(time.Second)))
 			continue
 		}
-		if !hasRoomWithin(v, sheddable, patienceFor(st.Contract, v)) {
+		if patience := patienceFor(st.Contract, v); !hasRoomWithin(v, sheddable, patience) {
+			busy = append(busy, laneID(v)+": "+whyNoRoom(v, sheddable, patience))
 			continue
 		}
 		if !processGate.available(bases[j], admissionCeiling(v)) {
+			busy = append(busy, fmt.Sprintf("%s: process gate (this process already holds %d open, at its admission ceiling of %d)", laneID(v), processGate.load(bases[j]), admissionCeiling(v)))
 			continue
 		}
 		outV = append(outV, v)
 		outB = append(outB, bases[j])
 	}
-	return outV, outB
+	return outV, outB, busy
+}
+
+// whyNoRoom says why hasRoomWithin refused v: no room by its own advertisement, or
+// room but a backlog past the caller's patience (with the arithmetic).
+func whyNoRoom(v NodeView, sheddable bool, patience time.Duration) string {
+	if !hasRoom(v, sheddable) {
+		switch {
+		case v.SaturationKnown && v.SaturationHigh:
+			return "no room (the node reports itself saturated)"
+		case v.MaxQueueDepth > 0 && v.QueueDepth >= v.MaxQueueDepth:
+			return fmt.Sprintf("no room (queue_depth %d of max_queue_depth %d)", v.QueueDepth, v.MaxQueueDepth)
+		case sheddable:
+			return "no room (no idle execution slot, and sheddable work takes idle capacity only)"
+		}
+		return "no room (not accepting new work)"
+	}
+	_, why := startsWithinPatience(v, patience)
+	return "backlog (" + why + ")"
 }
 
 // localSlotAhead reports whether the local seat's run-cap line has a free slot
