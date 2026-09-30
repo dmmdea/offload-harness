@@ -476,8 +476,9 @@ local-offload compose-video --html card.html --quality draft --workers 1
 ```
 
 The vetted templates are `title-card`, `lower-third`, `stat-card`, `section-title`, `callout-label`,
-`checklist-card` and `captions-bar` (the last three plus `stat-card` are adapted from a teaching kit under
-its own licences, kept beside them). Each README under `render/compose-templates/` lists the template's
+`checklist-card` and `captions-bar`. `stat-card`, `section-title`, `callout-label` and `checklist-card` are
+adapted from a teaching kit under its own licences, kept beside them; `captions-bar` is written for the harness.
+Each README under `render/compose-templates/` lists the template's
 variables and limits. `captions-bar` reads one `words_json` variable that `render/captions-groups.mjs`
 builds from `offload_transcribe`'s `<base>.segments.json`; render the overlay silent to `webm` or `mov`
 and lay it over the footage with ffmpeg's `overlay` filter or in an editor.
