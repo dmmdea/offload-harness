@@ -185,6 +185,9 @@ func ParseDoc(raw []byte) (Doc, error) {
 	if err := validateLayerKeys(raw); err != nil {
 		return Doc{}, err
 	}
+	if err := validateExtraSeatKeys(raw); err != nil {
+		return Doc{}, err
+	}
 	if err := d.Validate(); err != nil {
 		return Doc{}, err
 	}
@@ -210,6 +213,66 @@ func validateLayerKeys(raw []byte) error {
 	for _, id := range ids {
 		if err := config.ValidateLayerKeys(top.Profiles[id]["layers"]); err != nil {
 			return fmt.Errorf("profiles.json: tier %q %w", id, err)
+		}
+	}
+	return nil
+}
+
+// validateExtraSeatKeys is validateLayerKeys' counterpart for `extra_vllm_seats`: it re-reads
+// each entry as raw JSON and refuses a top-level key that is not a vllmseat.Spec field, by
+// tier and JSON path. json.Unmarshal drops a key it cannot match without a word, and for these
+// seats the drop is not harmless: a misspelt `storeless_reason` seeds the generic reason in
+// place of the measured one, and a misspelt `ttl_seconds` or `kv_cache_dtype` reads as unset.
+// (The lane seat's own block carries documentary keys beyond the struct, so this pass covers
+// only the extra seats, which are new and have no such history.) Tiers are visited in id order
+// so a table with two mistakes fails deterministically.
+func validateExtraSeatKeys(raw []byte) error {
+	var top struct {
+		Profiles map[string]map[string]json.RawMessage `json:"profiles"`
+	}
+	if err := json.Unmarshal(raw, &top); err != nil {
+		return fmt.Errorf("profiles.json: %w", err)
+	}
+	known := map[string]bool{}
+	t := reflect.TypeOf(vllmseat.Spec{})
+	for i := 0; i < t.NumField(); i++ {
+		if name := strings.SplitN(t.Field(i).Tag.Get("json"), ",", 2)[0]; name != "" && name != "-" {
+			known[name] = true
+		}
+	}
+	ids := make([]string, 0, len(top.Profiles))
+	for id := range top.Profiles {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		rawSeats, ok := top.Profiles[id]["extra_vllm_seats"]
+		if !ok {
+			continue
+		}
+		var seats []map[string]json.RawMessage
+		if err := json.Unmarshal(rawSeats, &seats); err != nil {
+			return fmt.Errorf("profiles.json: tier %q extra_vllm_seats: %w", id, err)
+		}
+		for i, seat := range seats {
+			var name string
+			_ = json.Unmarshal(seat["id"], &name)
+			keys := make([]string, 0, len(seat))
+			for k := range seat {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			for _, k := range keys {
+				if !known[k] {
+					fields := make([]string, 0, len(known))
+					for f := range known {
+						fields = append(fields, f)
+					}
+					sort.Strings(fields)
+					return fmt.Errorf("profiles.json: tier %q extra_vllm_seats[%d] %q: unknown key %q — not a vLLM seat field (%s); "+
+						"it would be dropped on decode and whatever it declared would read as unset", id, i, name, k, strings.Join(fields, ", "))
+				}
+			}
 		}
 	}
 	return nil

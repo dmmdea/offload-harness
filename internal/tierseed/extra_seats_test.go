@@ -301,3 +301,49 @@ func TestDocValidateRefusesTheExtraSeatShapesThatCannotRender(t *testing.T) {
 		})
 	}
 }
+
+// json.Unmarshal drops a key it cannot match without a word. For an extra seat the drop is not
+// harmless: a misspelt `storeless_reason` seeds the generic reason in place of the measured
+// one, and a misspelt `ttl_seconds` reads as unset. ParseDoc (and so Parse, which the
+// installer's embedded copy goes through) refuses the key by tier and JSON path.
+func TestParseDocRefusesAMisspeltExtraSeatKey(t *testing.T) {
+	raw, err := json.Marshal(map[string]any{"profiles": map[string]Profile{"t": twoSeatProfile()}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ from, to string }{
+		{"storeless_reason", "storeless_reasn"},
+		{"max_num_seqs", "max_num_seq"},
+		{"tool_call_parser", "tool_call_parsr"},
+	} {
+		t.Run(tc.to, func(t *testing.T) {
+			// only the EXTRA seat's copy: the lane seat's keys are not this pass's business, so the
+			// replacement is confined to the extra_vllm_seats block
+			text := string(raw)
+			i := strings.Index(text, `"extra_vllm_seats"`)
+			j := strings.Index(text[i:], `"layers"`)
+			if j < 0 {
+				j = len(text) - i
+			}
+			block := text[i : i+j]
+			if !strings.Contains(block, `"`+tc.from+`"`) {
+				t.Fatalf("the extra seat block carries no key %q — the probe would test nothing", tc.from)
+			}
+			mutated := text[:i] + strings.ReplaceAll(block, `"`+tc.from+`"`, `"`+tc.to+`"`) + text[i+j:]
+			for name, parse := range map[string]func([]byte) error{
+				"ParseDoc": func(b []byte) error { _, err := ParseDoc(b); return err },
+				"Parse":    func(b []byte) error { _, err := Parse(b); return err },
+			} {
+				err := parse([]byte(mutated))
+				if err == nil {
+					t.Fatalf("%s must refuse %s -> %s", name, tc.from, tc.to)
+				}
+				for _, w := range []string{`tier "t"`, `extra_vllm_seats[0] "` + extraSeatID + `"`, `unknown key "` + tc.to + `"`} {
+					if !strings.Contains(err.Error(), w) {
+						t.Fatalf("%s: error must carry %q, got %v", name, w, err)
+					}
+				}
+			}
+		})
+	}
+}

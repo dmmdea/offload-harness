@@ -31,6 +31,9 @@ per tier and a card cannot hold two heavy seats, so the schema grew by the small
   load the second beside the first. The extra seat's entry names its wrappers after its own unit. The composition
   check now runs for any tier that declares layers, not only one that composes. `ParamsBasis` mirrors
   `Params.ExtraVLLMSeats`, and a replay pins it.
+- `extra_vllm_seats` keys are strict, like `layers`: a key that is not a seat field is refused by tier and JSON path at
+  parse (`tierseed.ParseDoc`, so the installer's embedded copy too), never silently dropped. A misspelt `storeless_reason`
+  used to seed the generic reason in its place.
 - Not rendered, on purpose: the extra seat's systemd unit, wrapper scripts and polkit rule. Its production launch line
   carries `--language-model-only`, which the shared linux-systemd run script cannot express; `install render` warns
   when the wrappers are missing and `docs/systems/composite-tier.md` lists what the operator installs by hand.
