@@ -9,7 +9,8 @@ package delegate
 // a second way a tick gets cut; a retry that waits in line for a busy seat says the caller
 // canceled when it was the call's deadline that ended the wait; a refusal chain whose
 // re-placement read the deadline ended was published as "placement refused" (a failure that
-// accuses nodes never asked, in a call that ran out of time).
+// accuses nodes never asked, in a call that ran out of time), and a retry whose node
+// selection it ended left no note at all.
 
 import (
 	"context"
@@ -239,5 +240,39 @@ func TestAnExhaustedChainWithTheWaitOffIsCutByTheCallDeadlineToo(t *testing.T) {
 	}
 	if node.dispatches.Load() != 1 {
 		t.Fatalf("the node was asked %d times, want once", node.dispatches.Load())
+	}
+}
+
+// The first attempt ran on the local seat and failed verification, so a retry on a remote is owed,
+// and the call's deadline ends the retry's node selection (the fleet read that would have found
+// one). The first attempt finished before the deadline: it is an answer, published as it was. What
+// the retry did is carried in retry_note (ADR 0065 decision 2), and it used to be silent: an empty
+// note reads as "there was nowhere else to go".
+func TestARetryWhoseNodeSelectionWasCutByTheCallDeadlineSaysSo(t *testing.T) {
+	compressPolls(t, 5*time.Millisecond, time.Second)
+	compressWait(t, 20*time.Millisecond, 0)
+	var slow atomic.Bool
+	_, url := acceptingNode(t, "node-b", "verified from B", func(f *fakeNode) {
+		f.healthDelayFn = func() time.Duration {
+			if slow.Load() {
+				return 30 * time.Second
+			}
+			return 0
+		}
+	})
+	var localCalls atomic.Int64
+	inner := failingLocal(&localCalls)
+	local := func(ctx context.Context, c core.AgentContract, o LocalOptions) (core.AgentWireResult, error) {
+		slow.Store(true) // the remote's health turns slow once the first attempt is running
+		return inner(ctx, c, o)
+	}
+	results, sum, _ := runWithin(t, 15*time.Second, testCfg(t), local,
+		[]core.AgentContract{verifiedContract()}, "auto", []string{url}, deadlineIn(1500*time.Millisecond), nil)
+	pr := results[0]
+	if sum != (Summary{FailedVerification: 1}) || pr.deadlineCut || pr.retried || localCalls.Load() != 1 {
+		t.Fatalf("summary = %+v cut %v retried %v local runs %d, want the first attempt's failed verification published as it was, with no retry", sum, pr.deadlineCut, pr.retried, localCalls.Load())
+	}
+	if !strings.HasPrefix(pr.RetryNote, "retry skipped: ") || !strings.Contains(pr.RetryNote, "call deadline reached") {
+		t.Fatalf("retry_note = %q, want it to say the call's deadline ended the choice of a retry node", pr.RetryNote)
 	}
 }

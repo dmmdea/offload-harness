@@ -182,10 +182,13 @@ measurement of the client.
   does not count a cut as a failed issue: the cut is a class-budget defer that still names its seat and
   node, which the cap would otherwise read as the seat's own budget, so a research page a call keeps
   running out of time on is not backed off for fifteen minutes.
-- The refusal chain is the same seam under the same rule. A chain the delegator closes once the deadline has
-  passed is the deadline's outcome (decision 2), not `placement refused`; and the sentence a re-placement
-  read leaves when it names no node says the call's deadline had passed in place of `no further eligible
-  remote was available`, a claim about nodes that a read the deadline ended cannot support.
+- The refusal chain and the retry's choice of a node are the same seam under the same rule. A chain the
+  delegator closes once the deadline has passed is the deadline's outcome (decision 2), not `placement
+  refused`; and the sentence a re-placement read leaves when it names no node says the call's deadline had
+  passed in place of `no further eligible remote was available`, a claim about nodes that a read the
+  deadline ended cannot support. A retry whose node selection the deadline ended says so in its
+  `retry_note` (`retry skipped: call deadline reached before a retry node was chosen`), where an empty
+  note would read as there being nowhere else to go.
 - Every call-deadline row carries `reason_code` `budget`: the closed set of
   [ADR 0064](0064-a-delegator-takes-back-what-it-has-not-started.md) has no member of its own for a cut, so a
   reader counting `budget` rows tells a cut from a node-side ceiling by the reason's opening

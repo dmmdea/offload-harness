@@ -1331,9 +1331,15 @@ func (r *runner) runOne(ctx context.Context, i int, contract core.AgentContract)
 	if !ok {
 		// A fence is a REASON, not a silence: the caller has to be able to tell
 		// "there was nowhere else to go" from "the only seat left is behind a
-		// measurement that has the cards" (D-94).
-		if fenceNote != "" {
+		// measurement that has the cards" (D-94). The call's deadline is a third
+		// reason: it ends the fleet read that would have named a node, and an empty
+		// note after it reads as "there was nowhere else to go". The clock decides,
+		// not altCtx, which also ends on the budget the retry is bounded by.
+		switch {
+		case fenceNote != "":
 			first.RetryNote = fenceNote
+		case r.call.reached():
+			first.RetryNote = "retry skipped: " + callDeadlinePrefix + " before a retry node was chosen"
 		}
 		return first
 	}
