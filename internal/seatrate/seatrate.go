@@ -132,15 +132,16 @@ func (s *Store) ObservePrefill(seat string, promptTokens int64, promptMS float64
 }
 
 // ObservePrefillLoad is ObservePrefill for a run that saw the seat shared by
-// `load` requests (its own included; 0 or 1 = solo). A sample timed while
-// requests shared the seat is what a shared seat gives ONE request, never the
-// seat's own rate — folded in, it lowers PrefillTokS, inflates every later
-// stall allowance and ceiling, and swings the published rate with whatever
-// traffic the run happened to meet (one fleet seat's prefill_tok_s: 255-1321 tok/s in one
-// day, 2026-09-29). Only a solo run's sample moves the rate (ADR 0066, register
-// C-66); a shared-seat sample returns false and changes nothing.
+// `load` requests (its own included; 1 = known solo, 0 = never observed). A
+// sample timed while requests shared the seat is what a shared seat gives ONE
+// request, never the seat's own rate — folded in, it lowers PrefillTokS, inflates
+// every later stall allowance and ceiling, and swings the published rate with
+// whatever traffic the run happened to meet (one fleet seat's prefill_tok_s:
+// 255-1321 tok/s in one day, 2026-09-29). Only a KNOWN solo run's sample moves
+// the rate (ADR 0066, register C-66); a shared seat's, and one nobody looked at,
+// return false and change nothing.
 func (s *Store) ObservePrefillLoad(seat string, promptTokens int64, promptMS float64, load int, now time.Time) bool {
-	if load > 1 {
+	if load != 1 {
 		return false
 	}
 	if s == nil || strings.TrimSpace(seat) == "" || promptTokens < minPrefillSampleTokens || promptMS < minPrefillSampleMS {

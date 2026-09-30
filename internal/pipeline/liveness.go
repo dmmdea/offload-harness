@@ -72,6 +72,9 @@ var (
 	// Each wait is bounded by the cold-load ceiling and the run's ceiling. Tests
 	// change it.
 	seatRecoveries = 2
+	// loadSettleWait bounds how long a finished run waits for the engine read that
+	// tells whether it shared the seat (Monitor.SettleLoad). Tests change it.
+	loadSettleWait = 2 * time.Second
 )
 
 // LivenessPolicyFor is THIS seat's stall policy: the admission budget while

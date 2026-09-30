@@ -595,6 +595,10 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		if fn := seatLoadOf(reg, seat, act.ID()); fn != nil {
 			live.WithLoad(fn)
 		}
+	} else {
+		// Not silent: without the registry the load rests on the engine's own gauges
+		// alone, and a run neither could vouch for is never taken for solo.
+		log.Printf("agent task: run registry not readable for %s (%v): the load sample rests on the seat engine's gauges", seat, rerr)
 	}
 	if probe != nil {
 		live.WithSeatProbe(probe, onHold)
@@ -931,10 +935,15 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	}
 	// A run that saw the seat SHARED (0.144.0, register C-66) timed what a
 	// shared seat gives one request, not the seat's own prefill rate: the store
-	// folds a prefill sample in only for a run that was solo (peakLoad <= 1;
-	// 0 = the run never looked, which reads as solo, as before).
+	// folds a prefill sample in only for a run that was KNOWN to be solo (peakLoad
+	// == 1). A run nothing could answer for (0: no run registry and no engine
+	// gauges) is unknown, not solo — the store refuses it like a shared one,
+	// because the published rate is only ever the seat's own.
 	peakLoad := 0
 	if busyWatch != nil {
+		// The engine read behind the load sample is asynchronous: let a run that
+		// ended right after its first delta hear its own witness before the store does.
+		busyWatch.SettleLoad(loadSettleWait)
 		peakLoad = busyWatch.PeakLoad()
 	}
 	if p.seatRatesPath != "" && (obsTokS > 0 || coldLoad > 0 || obsPrefill.PrefillTokens > 0 || obsBest.Tokens > 0) {

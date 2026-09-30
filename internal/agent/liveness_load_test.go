@@ -296,6 +296,233 @@ func TestLoopSamplesTheLoadAtTheFirstDelta(t *testing.T) {
 	}
 }
 
+// A run that nothing has answered about is not solo: PeakLoad 0 is "never looked",
+// which the rates store must not read as the seat to itself. Phase used to raise
+// the peak to 1 for every phase, so a run with no sampler (an unopenable registry)
+// looked solo at the store boundary and its shared-seat sample moved the rate.
+func TestMonitorPeakLoadIsZeroUntilSomethingAnswers(t *testing.T) {
+	_, m := NewMonitor(context.Background(), msPolicy(), 5*time.Second)
+	defer m.Stop()
+	m.Phase(PhasePrefill, 10)
+	m.Phase(PhaseDecoding, 0)
+	m.Phase(PhaseRepack, 0)
+	m.SampleLoad()
+	if got := m.PeakLoad(); got != 0 {
+		t.Fatalf("PeakLoad = %d with no sampler and no engine reading, want 0 (never looked)", got)
+	}
+	// A sampler that answers 1 makes it a known-solo run; only a prefill or a
+	// re-pack asks it.
+	_, s := NewMonitor(context.Background(), msPolicy(), 5*time.Second)
+	defer s.Stop()
+	s.WithLoad(func() int { return 0 }) // "0 or less reads as 1": the sampler answered, the seat is the run's own
+	s.Phase(PhaseDecoding, 0)
+	if got := s.PeakLoad(); got != 0 {
+		t.Fatalf("PeakLoad = %d after a phase that never asks the sampler, want 0", got)
+	}
+	s.Phase(PhasePrefill, 10)
+	if got := s.PeakLoad(); got != 1 {
+		t.Fatalf("PeakLoad = %d after the sampler answered, want 1 (a known solo run)", got)
+	}
+}
+
+// waitPeak polls PeakLoad until it reaches want or a second passes: the engine
+// read behind SampleLoad is asynchronous.
+func waitPeak(t *testing.T, m *Monitor, want int) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if m.PeakLoad() >= want {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("PeakLoad = %d after 1s, want %d", m.PeakLoad(), want)
+}
+
+// The registry knows only this box's runs. A peer it cannot see (a cascade call, a
+// run of another process) still shows in the engine's own running + waiting, which
+// SampleLoad reads at the first delta when the registry saw nobody else.
+func TestSampleLoadSeesAPeerOnlyTheEngineCanSee(t *testing.T) {
+	var reads atomic.Int64
+	probe := func(context.Context) (EngineReading, error) {
+		reads.Add(1)
+		return EngineReading{Fingerprint: "v|1", Summary: "vllm-metrics: 2 running, 1 waiting", Running: 2, Waiting: 1}, nil
+	}
+	_, m := NewMonitor(context.Background(), msPolicy(), 5*time.Second)
+	defer m.Stop()
+	m.WithLoad(func() int { return 1 }) // the registry: nobody else on this box
+	m.WithEngineProbe(probe)
+	m.Phase(PhasePrefill, 10)
+	if m.PeakLoad() != 1 {
+		t.Fatalf("PeakLoad = %d after the registry sample, want 1", m.PeakLoad())
+	}
+	m.SampleLoad()
+	waitPeak(t, m, 3)
+	if got := m.PeakLoad(); got != 3 {
+		t.Fatalf("PeakLoad = %d, want the engine's 2 running + 1 waiting", got)
+	}
+	// The registry already showing a peer makes the engine read redundant.
+	before := reads.Load()
+	_, shared := NewMonitor(context.Background(), msPolicy(), 5*time.Second)
+	defer shared.Stop()
+	shared.WithLoad(func() int { return 4 })
+	shared.WithEngineProbe(probe)
+	shared.Phase(PhasePrefill, 10)
+	shared.SampleLoad()
+	time.Sleep(50 * time.Millisecond)
+	if reads.Load() != before {
+		t.Fatalf("the engine was read %d time(s) for a run the registry already showed sharing the seat", reads.Load()-before)
+	}
+}
+
+// With no registry at all the engine is the only witness: one running request is
+// the run itself, so a known-solo run needs no sampler.
+func TestSampleLoadEngineAloneMakesTheRunKnownSolo(t *testing.T) {
+	probe := func(context.Context) (EngineReading, error) {
+		return EngineReading{Fingerprint: "v|1", Summary: "vllm-metrics: 1 running, 0 waiting", Running: 1}, nil
+	}
+	_, m := NewMonitor(context.Background(), msPolicy(), 5*time.Second)
+	defer m.Stop()
+	m.WithEngineProbe(probe)
+	m.Phase(PhasePrefill, 10)
+	m.SampleLoad()
+	waitPeak(t, m, 1)
+	if got := m.PeakLoad(); got != 1 {
+		t.Fatalf("PeakLoad = %d, want 1 (the engine saw only this run)", got)
+	}
+}
+
+// An engine that cannot be read, or that reports no gauges, is no observation.
+func TestSampleLoadIgnoresAnEngineThatCannotBeRead(t *testing.T) {
+	var reads atomic.Int64
+	for name, probe := range map[string]EngineProbe{
+		"unreadable": func(context.Context) (EngineReading, error) {
+			reads.Add(1)
+			return EngineReading{Running: 4, Waiting: 2}, errors.New("metrics: timeout")
+		},
+		"no gauges": func(context.Context) (EngineReading, error) {
+			reads.Add(1)
+			return EngineReading{Loading: true, State: "starting"}, nil
+		},
+	} {
+		before := reads.Load()
+		_, m := NewMonitor(context.Background(), msPolicy(), 5*time.Second)
+		m.WithEngineProbe(probe)
+		m.Phase(PhasePrefill, 10)
+		m.SampleLoad()
+		deadline := time.Now().Add(time.Second)
+		for reads.Load() == before && time.Now().Before(deadline) {
+			time.Sleep(5 * time.Millisecond)
+		}
+		time.Sleep(20 * time.Millisecond)
+		if got := m.PeakLoad(); got != 0 {
+			t.Errorf("%s: PeakLoad = %d, want 0 (nothing was learned)", name, got)
+		}
+		m.Stop()
+	}
+}
+
+// SampleLoad runs on the stream reader: an engine that answers only between
+// batches must not hold it, and reads must not pile up behind a slow one.
+func TestSampleLoadEngineReadIsAsyncAndSingle(t *testing.T) {
+	release := make(chan struct{})
+	var started atomic.Int64
+	probe := func(ctx context.Context) (EngineReading, error) {
+		started.Add(1)
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+		return EngineReading{Fingerprint: "v|1", Running: 2}, nil
+	}
+	_, m := NewMonitor(context.Background(), msPolicy(), 5*time.Second)
+	defer m.Stop()
+	m.WithEngineProbe(probe)
+	m.Phase(PhasePrefill, 10)
+	begin := time.Now()
+	for i := 0; i < 5; i++ {
+		m.SampleLoad()
+	}
+	if el := time.Since(begin); el > 200*time.Millisecond {
+		t.Fatalf("SampleLoad blocked its caller for %s while the engine read was pending", el)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if n := started.Load(); n != 1 {
+		t.Fatalf("%d engine reads started for 5 samples, want exactly one in flight", n)
+	}
+	close(release)
+	waitPeak(t, m, 2)
+}
+
+// SettleLoad is the run's last look at its own witness: it returns as soon as the
+// read lands, at once when none is in flight, and after its bound when the engine
+// never answers — a finished run is never held for a hung engine.
+func TestSettleLoadWaitsForTheReadBoundedByItsMax(t *testing.T) {
+	_, none := NewMonitor(context.Background(), msPolicy(), 5*time.Second)
+	defer none.Stop()
+	begin := time.Now()
+	none.SettleLoad(2 * time.Second)
+	if el := time.Since(begin); el > 100*time.Millisecond {
+		t.Fatalf("SettleLoad with no read in flight took %s, want an immediate return", el)
+	}
+
+	release := make(chan struct{})
+	probe := func(ctx context.Context) (EngineReading, error) {
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+		return EngineReading{Fingerprint: "v|1", Running: 2}, nil
+	}
+	_, m := NewMonitor(context.Background(), msPolicy(), 5*time.Second)
+	defer m.Stop()
+	m.WithEngineProbe(probe)
+	m.Phase(PhasePrefill, 10)
+	m.SampleLoad()
+	begin = time.Now()
+	m.SettleLoad(150 * time.Millisecond) // the engine is hung: the bound ends the wait
+	if el := time.Since(begin); el < 120*time.Millisecond || el > 1500*time.Millisecond {
+		t.Fatalf("SettleLoad on a hung engine took %s, want about its 150ms bound", el)
+	}
+	go func() { time.Sleep(60 * time.Millisecond); close(release) }()
+	begin = time.Now()
+	m.SettleLoad(5 * time.Second) // the read lands: the wait ends with it
+	if el := time.Since(begin); el > 2*time.Second {
+		t.Fatalf("SettleLoad took %s after the read landed", el)
+	}
+	if got := m.PeakLoad(); got != 2 {
+		t.Fatalf("PeakLoad = %d after the settled read, want the engine's 2", got)
+	}
+}
+
+// The in-flight flag clears when a read ends, or a single failed read would leave
+// the run blind to its peers for good: once the engine has answered, a later
+// first delta reads it again for as long as the run is not known to be shared.
+func TestSampleLoadReadsAgainAfterTheEngineAnswered(t *testing.T) {
+	var reads atomic.Int64
+	probe := func(context.Context) (EngineReading, error) {
+		if reads.Add(1) == 1 {
+			return EngineReading{}, errors.New("metrics: timeout") // the first read learns nothing
+		}
+		return EngineReading{Fingerprint: "v|1", Running: 3}, nil
+	}
+	_, m := NewMonitor(context.Background(), msPolicy(), 5*time.Second)
+	defer m.Stop()
+	m.WithEngineProbe(probe)
+	m.Phase(PhasePrefill, 10)
+	m.SampleLoad()
+	deadline := time.Now().Add(time.Second)
+	for reads.Load() < 1 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	time.Sleep(30 * time.Millisecond)
+	m.SampleLoad() // the next call's first delta
+	waitPeak(t, m, 3)
+	if got := m.PeakLoad(); got != 3 || reads.Load() != 2 {
+		t.Fatalf("PeakLoad = %d after %d read(s), want 3 after the second: a finished read must not block the next", got, reads.Load())
+	}
+}
+
 // touchFirstClient sends a progress touch (0) before its deltas — what a counted
 // busy-wait answer looks like to the monitor.
 type touchFirstClient struct {

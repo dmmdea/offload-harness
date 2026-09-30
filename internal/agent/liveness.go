@@ -383,6 +383,9 @@ type Monitor struct {
 	engLoad  int
 	engBlind bool
 	loadPeak int
+	// loadDone: non-nil while an engine read for the load is in flight (SampleLoad
+	// keeps at most one); closed when it lands.
+	loadDone chan struct{}
 }
 
 // NewMonitor wraps parent with a ceiling deadline and a stall watch. The
@@ -858,7 +861,7 @@ func (m *Monitor) ToolPhase(cap time.Duration) {
 // Phase moves the run to ph; a phase change is itself progress. The finished
 // call's tokens are folded into the run total.
 func (m *Monitor) Phase(ph Phase, pendingPromptTokens int) {
-	load := m.sampleLoad(ph) // a file read at most: never under the lock
+	load, sampled := m.sampleLoad(ph) // a file read at most: never under the lock
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.stopped || m.cause != nil {
@@ -870,7 +873,7 @@ func (m *Monitor) Phase(ph Phase, pendingPromptTokens int) {
 	m.parked, m.down = false, nil // the loop moved on: a seat-down verdict for the call before is moot
 	m.phase, m.pending = ph, pendingPromptTokens
 	m.load = load
-	if load > m.loadPeak {
+	if sampled && load > m.loadPeak {
 		m.loadPeak = load
 	}
 	m.allow = m.pol.AllowanceLoad(ph, pendingPromptTokens, load)

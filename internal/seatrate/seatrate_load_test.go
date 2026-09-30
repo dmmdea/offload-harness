@@ -30,9 +30,22 @@ func TestObservePrefillIgnoresConcurrentSamples(t *testing.T) {
 	if s.ObservePrefillLoad("seat", 20000, 30000, 2, now) {
 		t.Fatal("a load-2 sample must not be recorded")
 	}
-	// Load 0 (never observed) and load 1 are solo: the pre-0.144 behaviour.
-	if !s.ObservePrefillLoad("seat", 10000, 10000, 0, now) { // 1,000 tok/s -> EWMA 0.3*1000 + 0.7*2000 = 1700
-		t.Fatal("an unobserved load reads as solo")
+	// Load 0 is "never observed": nothing vouched that the seat was the run's own,
+	// so it is refused like a shared one — the published rate is only ever a
+	// KNOWN solo run's. (A run's load used to default to 1, which made a run that
+	// could not look at all — no registry, no engine gauges — teach the store.)
+	if s.ObservePrefillLoad("seat", 10000, 10000, 0, now) {
+		t.Fatal("an unobserved load must not be recorded: unknown is not solo")
+	}
+	if s.ObservePrefillLoad("seat", 10000, 10000, -1, now) {
+		t.Fatal("a nonsense load must not be recorded")
+	}
+	if got := s.Get("seat").PrefillTokS; got != 2000 {
+		t.Fatalf("an unobserved sample moved PrefillTokS to %v, want it to stay 2000", got)
+	}
+	// A known solo run (load 1) folds in: 1,000 tok/s -> EWMA 0.3*1000 + 0.7*2000 = 1700.
+	if !s.ObservePrefillLoad("seat", 10000, 10000, 1, now) {
+		t.Fatal("a known solo sample must be recorded")
 	}
 	if got := s.Get("seat").PrefillTokS; got < 1699 || got > 1701 {
 		t.Fatalf("PrefillTokS = %v, want the EWMA 1700", got)
