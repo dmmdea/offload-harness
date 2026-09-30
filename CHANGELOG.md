@@ -21,6 +21,13 @@ are operator-typed and unchanged. Tests: the allowlist rules (20 cases), enforce
 base and writes an enforce row without the path or query, audit runs and counts, a listed base runs cleanly under
 both policies; making the allowlist accept everything turns them red.
 
+### Added — doctor shows fleet version skew (security standard L0)
+
+`local-offload doctor` prints one row per `delegate_remotes` node: OK, SKEW (with both versions and the redeploy
+command), UNKNOWN (the node publishes no version) or UNREACHABLE. Informational only, never an exit-code change.
+Parity broke twice on 2026-09-30 within an hour because a merge landed between deploys; the session-start audit
+caught it, and now any session that runs doctor does too. `delegate.NodeView` carries `HarnessVersion` for it.
+
 ## [0.144.1] - 2026-09-30 - the trusted-network flag permits one address, never every interface
 
 ### Security — a fleet node could serve its unauthenticated endpoints on every interface after a boot race
