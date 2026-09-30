@@ -1028,6 +1028,14 @@ func pipelineJobSpecID(jobSpec map[string]json.RawMessage) (string, error) {
 	if !pipelineJobIDPattern.MatchString(id) {
 		return "", fmt.Errorf("job_spec.id %q must match %s", id, pipelineJobIDPattern.String())
 	}
+	// agent-local-* is where a delegator process keeps its own local runs in
+	// this same pipeline-jobs/ root, and the startup sweep judges those by owner
+	// instead of as this node's own (SweepOrphanedPipelineJobs). An id inside
+	// that namespace would be kept after a crash instead of reclaimed, and
+	// would refuse a re-dispatch of the same id until it aged out.
+	if strings.HasPrefix(id, jobdir.LocalRunPrefix) {
+		return "", fmt.Errorf("job_spec.id %q must not start with %q (reserved for a delegator's local runs)", id, jobdir.LocalRunPrefix)
+	}
 	return id, nil
 }
 

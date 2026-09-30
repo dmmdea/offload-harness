@@ -15,10 +15,12 @@ package fleetnode
 //	anything else                fleet-serve's own: removed, as before
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -405,4 +407,39 @@ func TestSweepMarkerBeatsTheName(t *testing.T) {
 		t.Error("a marked dir with a dead owner survived because of its name")
 	}
 	wantCounts(t, swept, kept, 1, 1)
+}
+
+// agent-local-* is the delegator's namespace in this root: the sweep judges
+// those dirs by owner, so a pipeline job id inside it would be kept after a
+// crash instead of reclaimed, and would refuse a re-dispatch of the same id for
+// a day. The id is refused at ack, before anything is materialized; a name that
+// only resembles the prefix is fine.
+func TestBuildPipelineJobRefusesTheLocalRunNamePrefix(t *testing.T) {
+	srv := pngServer(t)
+	cfg := testPipelineConfig(t)
+	reserved := jobdir.LocalRunPrefix + "1234"
+
+	_, cleanup, err := buildPipelineJob(context.Background(), cfg, "scene-swap", validPipelinePayload(srv, reserved))
+	if cleanup != nil {
+		cleanup()
+	}
+
+	if err == nil {
+		t.Fatalf("job_spec.id %q was accepted; it lies in the delegator's local-run namespace", reserved)
+	}
+	if !strings.Contains(err.Error(), "reserved") {
+		t.Errorf("error = %q, want it to say the prefix is reserved", err)
+	}
+	if exists(filepath.Join(cfg.BaseDir(), "pipeline-jobs", reserved)) {
+		t.Error("a refused id must not materialize a dir")
+	}
+	for _, ok := range []string{"agent-local", "agent-locals-1", "my-agent-local-1"} {
+		_, cleanup, err := buildPipelineJob(context.Background(), cfg, "scene-swap", validPipelinePayload(srv, ok))
+		if cleanup != nil {
+			cleanup()
+		}
+		if err != nil {
+			t.Errorf("job_spec.id %q was refused: %v", ok, err)
+		}
+	}
 }

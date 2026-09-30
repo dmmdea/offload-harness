@@ -466,7 +466,8 @@ accepted — a bad payload or an unreachable ref is a 400, never a mid-render su
 
 - `job_spec` is required and must be a JSON object with a slug-valid `id`
   (`^[A-Za-z0-9_-]{1,64}$` — it becomes the materialization dir name and a filename prefix on
-  every published artifact).
+  every published artifact) that does not start with `agent-local-`, the name prefix a
+  delegator process keeps its own local runs under in the same `pipeline-jobs/` root.
 - `tier` is a required non-empty string (the CLI's own tier resolution is authoritative).
 - `image_refs.product` and `image_refs.logo` are required; `image_refs.background` is
   required **iff** `job_spec.background.mode == "stock"`.
