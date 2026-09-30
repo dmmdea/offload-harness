@@ -903,6 +903,10 @@ type runner struct {
 	// print the same line eight times and bury the results it is warning about.
 	warnCorpus sync.Once
 	warnLedger sync.Once
+	// warnMarker is the same once-per-run rule for the dispatch marker (telemetry.go
+	// recordStarted). A marker is a row the run does not OWE, so its loss stays out of
+	// the ledgerLost tally; the warning is its only trace.
+	warnMarker sync.Once
 	// probeWarned bounds fetchViews' per-remote failure warning to ONCE PER
 	// BASE PER RUN. fetchViews runs inside runOne, so the warning fired once
 	// per remote PER SUBTASK — an 8-subtask fan-out against two dead remotes

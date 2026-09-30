@@ -117,6 +117,8 @@ func neverRan(jobErr string) bool {
 type intentLedger struct {
 	mu   sync.Mutex
 	path string
+	// warned bounds the write-failure warning to ONE per ledger handle (see warn).
+	warned sync.Once
 }
 
 // openIntentLedger resolves the machine state root. Failure returns nil (inert).
@@ -148,14 +150,37 @@ func (l *intentLedger) append(ev intentEvent) {
 	defer l.mu.Unlock()
 	b, err := json.Marshal(ev)
 	if err != nil {
+		l.warn(ev, err)
 		return
 	}
 	f, err := os.OpenFile(l.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
+		l.warn(ev, err)
 		return
 	}
-	_, _ = f.Write(append(b, '\n'))
-	_ = f.Close()
+	if _, werr := f.Write(append(b, '\n')); werr != nil {
+		l.warn(ev, werr)
+	}
+	if cerr := f.Close(); cerr != nil {
+		l.warn(ev, cerr)
+	}
+}
+
+// warn says, once per ledger, that an event could not be written. The ledger is
+// best-effort by design (durability is an addition, never a new way for dispatch to
+// fail), but a write that vanished without a trace is a job the recovery pass can
+// never find, and ADR 0064 leans on an OPEN intent as the safe state for every
+// unconfirmed give-up and every 401: a full disk or a bad path must not look like a
+// working ledger. One line, naming the first event that failed and what it costs.
+func (l *intentLedger) warn(ev intentEvent, err error) {
+	l.warned.Do(func() {
+		cost := "the intent stays open, and the next recovery pass looks at it again"
+		if ev.E == "d" {
+			cost = "this job has no intent, so the recovery pass cannot find it if this process dies"
+		}
+		log.Printf("delegate: intent ledger %s: could not write a %q event for %s (%v); %s (results unaffected; later failures on this ledger are not repeated)",
+			l.path, ev.E, ev.Job, err, cost)
+	})
 }
 
 // dispatched records an ACKED remote dispatch — called only after the node's
@@ -267,10 +292,12 @@ func RecoverOrphans(ctx context.Context, cfg config.Config) (int, error) {
 	// unauthorized is the intents a node refused THIS process's credentials for,
 	// by base: reported once for the pass, after the loop.
 	unauthorized := map[string]int{}
+	examined := 0
 	for jobID, ev := range open {
 		if ctx.Err() != nil {
 			break
 		}
+		examined++
 		age := time.Since(time.Unix(ev.TS, 0))
 		if ev.TS > 0 && age > intentMaxAge {
 			ledger.done(jobID, "expired unrecovered after "+age.Truncate(time.Hour).String())
@@ -317,6 +344,13 @@ func RecoverOrphans(ctx context.Context, cfg config.Config) (int, error) {
 		default:
 			// accepted/running: the node is still working it. Leave open.
 		}
+	}
+	if left := len(open) - examined; left > 0 {
+		// The pass runs on a clock (maybeRecoverOrphans gives it two minutes) and ends
+		// when it runs out or its caller cancels: intents behind a slow or unreachable
+		// node were never looked at, and nothing said so.
+		log.Printf("delegate: orphan recovery stopped early (%v) with %d of %d open intent(s) not examined; they stay open and the next pass continues with them",
+			ctx.Err(), left, len(open))
 	}
 	if len(unauthorized) > 0 {
 		total, bases := 0, make([]string, 0, len(unauthorized))

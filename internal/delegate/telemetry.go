@@ -1,6 +1,8 @@
 package delegate
 
 import (
+	"log"
+
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/ledger"
 )
@@ -31,12 +33,14 @@ func fleetJobIDOf(pr PlacedResult) string {
 //
 // Best effort, like every telemetry write: a marker that cannot be written costs
 // visibility and never fails the work. It is not counted in the ledger-loss tally
-// either, which reports rows the run OWES and a marker is an addition.
+// either, which reports rows the run OWES and a marker is an addition — but it is not
+// silent: the marker is what makes a hang or a ghost visible while it happens, so its
+// loss is exactly the invisible case, and warnMarker says so once per run.
 func (r *runner) recordStarted(contract core.AgentContract, jobID, fleetJobID, node, seat, placement string) {
 	if r.led == nil {
 		return
 	}
-	_ = r.led.Record(ledger.Entry{
+	if err := r.led.Record(ledger.Entry{
 		Task:       "agent_delegate",
 		Phase:      ledger.PhaseStarted,
 		ReasonCode: ledger.ReasonStarted,
@@ -46,5 +50,9 @@ func (r *runner) recordStarted(contract core.AgentContract, jobID, fleetJobID, n
 		Route:      r.route,
 		Placement:  placement,
 		ModelTier:  node + ":" + seat,
-	})
+	}); err != nil {
+		r.warnMarker.Do(func() {
+			log.Printf("delegate: ledger dispatch marker write failed for %s; hangs and ghosts of this run will not show in the ledger while they happen (results unaffected): %v", r.cfg.LedgerPath, err)
+		})
+	}
 }
