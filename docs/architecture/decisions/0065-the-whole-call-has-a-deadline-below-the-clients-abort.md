@@ -35,9 +35,11 @@ measurement of the client.
    at once (`timeout_sec` cap 900 s, plus the 300 s admission allowance and the 60 s poll grace the
    delegator holds a job open for: 1,260 s) and below the client's 1,800 s by the margin a response
    needs (the live check is "call wall <= deadline + 30 s"). It does not promise that a healthy subtask
-   is never cut: time a job spends queued on a node is credited back to its wall (up to 300 s), and a
-   capacity wait comes before placement, so a worst-case auto-sized subtask can run past the default and
-   be cut. A workload that needs longer sets `agent_call_deadline_sec`, below the client's abort; a value
+   is never cut: time a job spends queued on a node is credited back to its wall (up to the queue budget
+   the node's own estimate sets, [ADR 0063](0063-placement-holds-instead-of-sleeping-or-refusing.md)
+   decision 4: 1.5 x its estimate + 30 s, at least 60 s, at most the contract's poll budget; the lesser
+   of that budget and 300 s for a node that publishes none), and a capacity wait comes before
+   placement, so a worst-case auto-sized subtask can run past the default and be cut. A workload that needs longer sets `agent_call_deadline_sec`, below the client's abort; a value
    at or above it, or a negative that was meant as a number, is a `doctor` finding and a startup warning.
 
 2. **At the deadline the call returns what has finished and defers the rest.** The deadline is the
@@ -164,6 +166,16 @@ measurement of the client.
 - The rigger classifies a cut as its own axis, `call-deadline`, ahead of `timeout` (its wall-timeout
   pattern matches the bare word "deadline"), so a call that ran out of time does not steer a seat's
   timeout share.
+- The deadline meets [ADR 0063](0063-placement-holds-instead-of-sleeping-or-refusing.md)'s waits and
+  its page cap in three places, and in each the call running out of time is the caller's clock, never
+  evidence about a node, a seat or a page. A capacity-wait tick the call's context cuts keeps the
+  previous tick's state, as one cut by the wait's own deadline does: a node that answered earlier in
+  the wait (cooling down after its own refusal, held out by the backlog gate) is not narrated as a
+  failed probe. A retry that stood in line for a busy seat and whose wait the deadline ended says `call
+  deadline reached` in its `retry_note`, not that the caller canceled. And the per-page retry cap does
+  not count a cut as a failed issue: the cut is a class-budget defer that still names its seat and
+  node, which the cap would otherwise read as the seat's own budget, so a research page a call keeps
+  running out of time on is not backed off for fifteen minutes.
 - Every call-deadline row carries `reason_code` `budget`: the closed set of
   [ADR 0064](0064-a-delegator-takes-back-what-it-has-not-started.md) has no member of its own for a cut, so a
   reader counting `budget` rows tells a cut from a node-side ceiling by the reason's opening
@@ -198,6 +210,9 @@ measurement of the client.
   `RunBatched`)
 - `internal/delegate/withdraw.go` (`withdrawBound`, the unwind bound the give-up's withdraw takes once the
   deadline has passed; the withdraw itself is ADR 0064's)
+- `internal/delegate/processgate.go` (`pageIssueFailed`, which does not count a cut) and
+  `internal/delegate/run.go` (`awaitCapacity`'s tick and `runOne`'s retry note, where the deadline meets
+  ADR 0063's waits)
 - `internal/delegate/progress.go`, `internal/mcpserver/progress.go` (progress notifications)
 - `internal/mcpserver/mcpserver.go` (`callDeadlineAt`, `handleAgentDelegate`, `handleResearch`,
   `delegateIsError`, `researchWire`)
@@ -209,7 +224,9 @@ measurement of the client.
 
 - [MCP server](../../systems/mcp-server.md), [fleet node](../../systems/fleet-node.md),
   [operator guide](../../OPERATOR-GUIDE.md)
-- ADR [0064](0064-a-delegator-takes-back-what-it-has-not-started.md) (the withdraw a give-up asks for),
+- ADR [0063](0063-placement-holds-instead-of-sleeping-or-refusing.md) (the capacity wait, the queue budget
+  and the page cap the deadline composes with),
+  ADR [0064](0064-a-delegator-takes-back-what-it-has-not-started.md) (the withdraw a give-up asks for),
   ADR [0055](0055-walls-are-ceilings-liveness-is-progress.md) (liveness ceilings),
   ADR [0028](0028-delegation-durability-is-a-push-side-intent-ledger.md) (the intent ledger),
   ADR [0030](0030-pull-queue-ships-dark.md) (route=queue)

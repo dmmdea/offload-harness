@@ -216,9 +216,16 @@ func (c *pageRetryCap) record(key string, failed bool) {
 // stack that is down), a terminal dispatch refusal (a bad token), a poll that never
 // reached an owned job, a lost job and a local runner error are the fleet's or the
 // caller's - none of them ran the page.
+//
+// The whole call's deadline (ADR 0065) counts like a cancel, because it is the caller's
+// clock and not the page's: the cut publishes the run it cancelled as a class-budget
+// defer that still names its seat and node and is not Unplaced, which the budget line
+// above would count. "The seat hit its budget on this page" is not what happened - the
+// call ran out of time, and a healthy page still running when a slower sibling used
+// the time up is cut exactly like a slow one. deadlineCut tells them apart.
 func pageIssueFailed(pr PlacedResult) bool {
 	switch {
-	case pr.Unplaced || pr.shed:
+	case pr.Unplaced || pr.shed || pr.deadlineCut:
 		return false
 	case pr.Err != "":
 		return strings.HasPrefix(pr.Err, "remote job error")

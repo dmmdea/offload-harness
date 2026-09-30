@@ -543,7 +543,8 @@ side door). The wait is bounded by the config key alone; `agent_lease_wait_sec` 
   process holds open across every concurrent Run and does not send one past the node's `max_queue_depth`; the subtask
   waits for the first node that frees (a turn-away is no refusal). A research page whose last three issues all
   failed after a seat ran them (a failed verification, an abstention, a budget defer or a node's own job error;
-  never a full node, a lease, a bad token, a cancel or a queue deadline) is backed off for 15 minutes with a
+  never a full node, a lease, a bad token, a cancel, a queue deadline or the whole call's deadline, ADR 0065)
+  is backed off for 15 minutes with a
   `contract`-class defer, and a success forgets it.
 
 **The health probe itself: concurrent, memoised, negative-cached, bounded inside the wait (register D-106,

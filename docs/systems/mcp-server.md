@@ -228,7 +228,9 @@ or claimed. The result is a successful tool call: a deadline defer is a result s
 The default is above the longest single subtask that starts at once (`timeout_sec` cap 900 s + the
 300 s admission allowance + the 60 s poll grace) and below the client's abort by the margin a response
 needs. It is not a promise that no healthy subtask is cut: time queued on a node (credited back to the
-wall, up to 300 s) and a capacity wait come on top, so a worst-case auto-sized subtask can run past it.
+wall, up to the queue budget the node's own estimate sets, ADR 0063: the lesser of the poll budget and
+300 s for a node that publishes none) and a capacity wait come on top, so a worst-case auto-sized
+subtask can run past it.
 Raise `agent_call_deadline_sec` for such work, but keep it below the client's abort; a value at or above
 it, or a negative that was meant as a number, is reported by `doctor` and once at startup. The CLI verbs
 take no deadline.

@@ -1352,9 +1352,16 @@ func (r *runner) runOne(ctx context.Context, i int, contract core.AgentContract)
 		w := r.awaitRetrySeat(ctx, alt, why)
 		pl.credit += w.waited
 		if w.canceled {
-			// The caller gave up while the retry stood in line: the seat was not shown to
-			// stay busy, so the note must not claim it did.
-			first.RetryNote = fmt.Sprintf("retry skipped: the caller canceled after the retry waited %s in line for the retry seat on %s, which was running another job (%s)", w.waited.Round(time.Second), alt.view.NodeID, w.why)
+			// The wait was ended from outside while the retry stood in line: the seat was
+			// not shown to stay busy, so the note must not claim it did. Who ended it is
+			// part of the truth: the call's own deadline (ADR 0065) is not the caller
+			// cancelling, and the retry's fate is worded with the deadline's stable
+			// opening, as it is for a retry the deadline cut while it ran.
+			ended := "the caller canceled"
+			if r.call.reached() {
+				ended = callDeadlinePrefix
+			}
+			first.RetryNote = fmt.Sprintf("retry skipped: %s after the retry waited %s in line for the retry seat on %s, which was running another job (%s)", ended, w.waited.Round(time.Second), alt.view.NodeID, w.why)
 			return first
 		}
 		if w.stillBusy {
@@ -1389,8 +1396,9 @@ func (r *runner) runOne(ctx context.Context, i int, contract core.AgentContract)
 
 // retryWait is what awaitRetrySeat found: how long the retry waited in line (time the
 // caller credits to the retry's budget, because the wait is queueing and never work),
-// whether the seat was still busy when the wait stopped, whether the CALLER ended it
-// (a cancel says nothing about the seat), and the seat's own last reading.
+// whether the seat was still busy when the wait stopped, whether the context ended it
+// (the caller cancelled, or the call's own deadline passed, ADR 0065: neither says
+// anything about the seat), and the seat's own last reading.
 type retryWait struct {
 	waited    time.Duration
 	stillBusy bool
@@ -2379,13 +2387,15 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 			tickCtx, cancelTick := context.WithTimeout(ctx, probeTickBound(deadline))
 			views, bases, _, failed := r.fetchViewsDetailed(tickCtx)
 			cancelTick()
-			if !time.Now().Before(deadline) {
-				// The tick's probe is bounded by the wait's own deadline, so a probe
-				// still in flight when the wait ended may have failed because the WAIT
-				// ended, not because its node is down. For a node that answered
-				// earlier in this wait that is no evidence at all: keep what the
-				// previous tick learned (cooling down, held out) for the defer's
-				// reason. A node that never answered is still named: nobody could ask it.
+			if ctx.Err() != nil || !time.Now().Before(deadline) {
+				// The tick's probe is bounded by the wait's own deadline, and by the
+				// context the wait runs under (the call's deadline, ADR 0065, or the
+				// caller giving up), so a probe still in flight when either ended may
+				// have failed because the WAIT or the CALL ended, not because its node
+				// is down. For a node that answered earlier in this wait that is no
+				// evidence at all: keep what the previous tick learned (cooling down,
+				// held out) for the defer's reason. A node that never answered is still
+				// named: nobody could ask it.
 				for base, why := range failed {
 					if answered[base] {
 						continue
