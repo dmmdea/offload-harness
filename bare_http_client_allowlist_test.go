@@ -45,7 +45,7 @@ var bareClientAllowlist = map[string]struct {
 	"internal/mcpserver/mcpserver.go:localSeatView":              {1, "configured: the local llama-swap (status view)"},
 	"internal/mediacap/routeneeds.go:LiveNodeChecker":            {1, "configured: fleet nodes from delegate_remotes (media route readiness)"},
 	"internal/modelaffinity/upstream.go:upstreamResident":        {1, "configured: the local llama-swap /running (the upstream fence)"},
-	"internal/nimclient/nimclient.go:New":                        {1, "open: offload_nim dials a caller-named base; the key is bound to NVIDIA's exact hosts since 0.143.1 (S-01), the base itself is not yet allowlisted — register SF S-30 (audit-first allowlist) closes it"},
+	"internal/nimclient/nimclient.go:New":                        {1, "guarded: offload_nim's caller-named base is checked against the S-30 allowlist (NVIDIA hosted API, nim_endpoint, nim_bases; audit by default, enforce by nim_base_policy) and the key only reaches NVIDIA's exact hosts (S-01)"},
 	"internal/nodeswap/deps.go:readHealth":                       {1, "configured: the swapped node's own --health-url"},
 	"internal/pairworkloads/pairworkloads.go:New":                {1, "configured: the local PAIR telemetry endpoint"},
 	"internal/pairworkloads/seatwatch.go:NewSeatWatcher":         {1, "configured: the local llama-swap"},

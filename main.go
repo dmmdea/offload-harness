@@ -3051,6 +3051,15 @@ func doctorRun(cfg config.Config, routes []mediacap.Route, w io.Writer) error {
 		return fmt.Errorf("endpoint down: %w", err)
 	}
 	fmt.Fprintln(w, "health:     OK")
+	// Fleet version skew (security standard L0, register R-06): informational,
+	// never an exit-code change — a node on another release is a parity finding
+	// for the operator, not a broken local box.
+	writeFleetSkewSection(w, cfg, buildinfo.Version, func(base string) (string, error) {
+		hctx, hcancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer hcancel()
+		v, err := delegate.FetchNodeView(hctx, base, cfg.FleetAuthToken)
+		return v.HarnessVersion, err
+	})
 	roster, err := swapclient.FetchRoster(ctx, cfg.Endpoint, 10*time.Second)
 	if err != nil {
 		fmt.Fprintln(w, "roster:     FAIL - cannot list /v1/models:", err)
@@ -3084,6 +3093,32 @@ func doctorRun(cfg config.Config, routes []mediacap.Route, w io.Writer) error {
 		return fmt.Errorf("%d configuration finding(s) — see the config findings section above", findings)
 	}
 	return nil
+}
+
+// writeFleetSkewSection prints one row per fleet remote (delegate_remotes): OK
+// when the node runs this binary's release, SKEW with both versions when it
+// does not, UNKNOWN when the node publishes no version, UNREACHABLE when its
+// health cannot be read. Parity broke twice on 2026-09-30 within an hour (a
+// merge landed between deploys); the session-start audit catches it, and now
+// so does any session that runs doctor. No remotes prints nothing.
+func writeFleetSkewSection(w io.Writer, cfg config.Config, self string, read func(base string) (string, error)) {
+	if len(cfg.DelegateRemotes) == 0 {
+		return
+	}
+	fmt.Fprintf(w, "fleet versions (this binary %s):\n", self)
+	for _, base := range cfg.DelegateRemotes {
+		v, err := read(base)
+		switch {
+		case err != nil:
+			fmt.Fprintf(w, "  UNREACHABLE  %s — %v\n", base, err)
+		case v == "":
+			fmt.Fprintf(w, "  UNKNOWN      %s — the node publishes no harness_version\n", base)
+		case v != self:
+			fmt.Fprintf(w, "  SKEW         %s runs %s (this binary %s): redeploy to parity (plans/fleet-parity-deploy.sh)\n", base, v, self)
+		default:
+			fmt.Fprintf(w, "  OK           %s %s\n", base, v)
+		}
+	}
 }
 
 // writeConfigFindingsSection prints ONE LINE PER non-fatal configuration finding
