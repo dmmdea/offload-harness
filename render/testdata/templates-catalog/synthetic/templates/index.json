@@ -1,0 +1,69 @@
+[
+ {
+  "moduleName": "default",
+  "category": "Foundation",
+  "title": "Synthetic",
+  "type": "image",
+  "templates": [
+   {
+    "name": "synthetic_walk_matrix",
+    "title": "Synthetic: subgraph and bypass matrix",
+    "mediaType": "image",
+    "mediaSubtype": "webp",
+    "description": "Hand-written fixture. Nested subgraphs, bypassed and muted nodes, a bypassed instance, a dangling instance, an unreferenced definition.",
+    "tags": ["Synthetic"],
+    "models": ["Synthetic"],
+    "openSource": true,
+    "size": 1000
+   },
+   {
+    "name": "synthetic_unannotated",
+    "title": "Synthetic: loader widgets without model annotations",
+    "mediaType": "image",
+    "mediaSubtype": "webp",
+    "description": "Hand-written fixture. Model files that only appear as loader widget values.",
+    "tags": ["Synthetic"],
+    "models": ["Synthetic"],
+    "openSource": true
+   },
+   {
+    "name": "synthetic_custom_nodes",
+    "title": "Synthetic: a node from a custom pack",
+    "mediaType": "image",
+    "mediaSubtype": "webp",
+    "description": "Hand-written fixture. One active pack node, one bypassed pack node.",
+    "tags": ["Synthetic"],
+    "models": ["None"],
+    "openSource": true
+   },
+   {
+    "name": "synthetic_open_source_false",
+    "title": "Synthetic: only the index says it is not open source",
+    "mediaType": "image",
+    "mediaSubtype": "webp",
+    "description": "Hand-written fixture. Local core node, openSource false.",
+    "tags": ["Synthetic"],
+    "models": ["None"],
+    "openSource": false
+   },
+   {
+    "name": "api_synthetic_prefix_only",
+    "title": "Synthetic: only the name prefix says it is an API template",
+    "mediaType": "image",
+    "mediaSubtype": "webp",
+    "description": "Hand-written fixture. Local core node, api_ name prefix.",
+    "tags": ["Synthetic"],
+    "models": ["None"]
+   },
+   {
+    "name": "synthetic_missing_file",
+    "title": "Synthetic: listed in the index, no workflow file",
+    "mediaType": "image",
+    "mediaSubtype": "webp",
+    "description": "Hand-written fixture. The index names it; the file does not exist.",
+    "tags": ["Synthetic"],
+    "models": ["None"]
+   }
+  ]
+ }
+]
