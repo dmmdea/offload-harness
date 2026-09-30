@@ -76,6 +76,20 @@ func TestFleetServeParams(t *testing.T) {
 		}
 	})
 
+	// The unit's `--listen "$(tailscale ip -4)":18811` before tailscaled has an
+	// address: the flag arrives as ":18811". Until 0.144.1 the trusted flag
+	// let it bind every interface (a fleet node served the unauthenticated
+	// endpoints on all interfaces after a boot race); it must fail so the
+	// service manager retries once the tailnet address exists.
+	t.Run("an empty host is refused even with the trusted flag", func(t *testing.T) {
+		for _, listen := range []string{":18811", "0.0.0.0:18811", "[::]:18811"} {
+			_, _, err := fleetServeParams(listen, "node-a", true, config.Default(), hostNodeA)
+			if err == nil || !strings.Contains(err.Error(), "EVERY interface") {
+				t.Fatalf("listen %q: err = %v, want the all-interfaces refusal", listen, err)
+			}
+		}
+	})
+
 	t.Run("trusted flag allows the Tailscale bind; explicit flags win", func(t *testing.T) {
 		listen, nodeID, err := fleetServeParams("100.64.0.10:18811", "node-a", true, config.Default(), hostNodeA)
 		if err != nil {

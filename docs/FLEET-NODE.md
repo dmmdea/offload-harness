@@ -300,7 +300,10 @@ rules as `local-agent --serve` apply, enforced by the same shared guard:
 
 - **Loopback is the default** and needs no flag.
 - A non-loopback `--listen` is **refused** unless you pass `--listen-trusted-network`
-  (which prints a loud warning).
+  (which prints a loud warning). The flag permits ONE specific address: an all-interfaces
+  address (`:18811` with an empty host, `0.0.0.0`, `[::]`) is refused even with it (0.144.1), so a
+  unit whose `$(tailscale ip -4)` is still empty at boot fails and its restart retries instead of
+  serving on every interface.
 - Production binding is the machine's **Tailscale address** (e.g. `100.64.0.10:18811` on
   your workstation) — the tailnet is the trust boundary. **NEVER bind `0.0.0.0`**, and never expose
   the port beyond the tailnet.
