@@ -146,9 +146,11 @@ func TestConcurrentAppend(t *testing.T) {
 	}
 }
 
-// TestRecordReasonTruncatedAndRoundTrips (LO-8): a defer entry's reason is
-// persisted, truncated to 120 bytes on a RUNE boundary, and old lines without
-// the field still parse (backward compatible).
+// TestRecordReasonTruncatedAndRoundTrips (LO-8, amended by ADR 0064): a defer
+// entry's reason is persisted WHOLE (it was cut to 120 bytes on write until PR-14;
+// TestFullReasonIsNotCutAt120 pins the bound), its SHORT form is cut to 120 bytes
+// on a RUNE boundary, and old lines without the field still parse (backward
+// compatible).
 func TestRecordReasonTruncatedAndRoundTrips(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "ledger.jsonl")
 	l, err := Open(p)
@@ -175,15 +177,18 @@ func TestRecordReasonTruncatedAndRoundTrips(t *testing.T) {
 	if len(got) != 3 {
 		t.Fatalf("want 3 entries, got %d", len(got))
 	}
-	r0 := got[0].Reason
+	if got[0].Reason != long {
+		t.Fatalf("stored reason = %q, want the whole reason", got[0].Reason)
+	}
+	r0 := ShortReason(got[0].Reason)
 	if len(r0) > 120 {
-		t.Fatalf("reason not truncated: %d bytes", len(r0))
+		t.Fatalf("short reason not truncated: %d bytes", len(r0))
 	}
 	if len(r0) != 119 { // byte 120 is mid-ñ, so the cut backs off to the 119 x's
 		t.Fatalf("rune-boundary back-off expected 119 bytes, got %d (%q)", len(r0), r0[110:])
 	}
 	if !utf8.ValidString(r0) {
-		t.Fatalf("truncated reason is not valid UTF-8: %q", r0)
+		t.Fatalf("short reason is not valid UTF-8: %q", r0)
 	}
 	if got[1].Reason != "model call failed: timeout" {
 		t.Fatalf("short reason must round-trip, got %q", got[1].Reason)

@@ -6,6 +6,137 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.146.0] - 2026-09-30 - a delegator takes back a job it has not started, and a node cleans up after one that left (ADR 0064)
+
+### Fixed — a delegator takes back a job it has not started, and a node cleans up after one that left (ADR 0064; register C-70 ghost-job half, C-68, C-63)
+
+Every give-up on an accepted job (the queue deadline, a canceled caller, a poll deadline) left the job on the fleet node, where it started when a slot freed and ran for nobody. On 2026-09-29, 43 % and 59 % of two nodes' agent runs (50 % and 73 % of their run wall) had no delegator result row, and the finished walls fed each node's own Retry-After, which sent callers away for longer and produced more abandoned jobs. The recovery pass meant to collect such jobs closed 61 of 61 open intents on a 404 or a 401 and recovered none.
+
+- **`DELETE /fleet/jobs/{id}`** (agent bearer, like the poll) withdraws a job that is still `accepted`, under the job store's mutex the scheduler claims under: exactly one of a claim and a withdraw wins, and a running or finished job is never touched (running work stays recoverable). Answers: `200 {"state":"withdrawn"}` (also for a repeat, and for a job the node already took back itself: reaped, or marked never-started at shutdown), `409` with the job's own state, `404`, `401`, `405` for a non-agent job. A withdrawn job is a terminal `error: "withdrawn: ..."` record rather than a deleted one: a poll reaches a terminal state, a duplicate dispatch of the id answers `409` and never runs, and the jobs feed shows what became of it. A node without the route answers `405`/`404`, and every delegator give-up then behaves exactly as before.
+- **The delegator asks once, best-effort** (5 s, on a context the caller's cancel does not touch) at the queue deadline, on cancel, and at a poll deadline, owned or not. At the queue deadline only a confirmation makes the result re-placeable on another node (the queued wait is credited back to the contract's budget) and closes the intent as `withdrawn`; `409 running` means the job left the backlog just before, so it keeps polling. Anything else (404, 405, 401, 5xx, a dropped connection, a timeout) leaves today's failure with the intent open, and the row now says why: `; withdraw not confirmed: HTTP 405: the node has no withdraw route (an older node)`, `HTTP 401: the node refused this delegator's fleet_auth_token`, `no answer within 5s`. An older node and an upgraded one that refused no longer leave identical rows; the clause is detail, and `reason_code` stays what the give-up was. A cancel that landed while the delegator slept used to skip the orphanable mark and close its intent as "terminal observed"; fixed.
+- **A poll that reads the node's own record.** A delegator that was away for longer than the lease finds `error: "reaped: ..."`; another caller's withdraw reads `withdrawn: ...`; a node that shut down with the job still queued marks it `not started: ...`. All three say the job never ran, so the subtask is re-placed on another node (queued wait credited back), the intent closes `never started: <what the node said>` and the abandoned attempt's row reads `queue_withdrawn`. A job that ran and failed stays a remote job error and is never re-placed.
+- **Poll lease** (`fleet_poll_lease_sec`, default 60 s, negative = off, a value under 15 is raised to 15, and `fleet-serve` prints which lease is in force at start-up): a pushed agent job that sits `accepted` with nobody polling it is skipped by the scheduler at once and reaped by a ticker (`error: "reaped: ..."`). Never a running job, never a job the pull queue claimed, never a media or vision job. What counts as a poll is decided by the JOB's own marker, not by the `task_type` a request declares: an authorized poll, an authorized duplicate dispatch and a parked long poll keep a job alive; the unauthenticated jobs feed, a poll or a re-dispatch without the bearer (`401`, whatever type it declares) do not, so a peer that can read ids off the feed can no longer keep a ghost alive or read a failed agent job's error. A run that finishes after its poller left no longer feeds `recent_agent_wall_sec` or the Retry-After built from it. An upgraded node also cleans up after an older delegator. The reaper reads its tick on the constructing goroutine and hands it to its goroutine by value (a package variable read from the goroutine the constructor spawned made `go test -race ./internal/fleetnode/` fail; it is clean now). The node counts what it took back: `jobs_withdrawn` and `jobs_reaped` on `/fleet/health` (since the process started, absent while zero), and logs one line per withdraw.
+- **Recovery and the intent ledger.** The recovery pass leaves an intent open on a 401 (one log line per pass instead of a permanent close) and closes a job the node never ran as `never started` instead of filing it as a recovered result. A poll answered 401 mid-run, and a poll deadline that no answer ever owned, no longer close their intent as "terminal observed" either: the 401 leaves it open, and the unowned deadline gives up like the others (one best-effort withdraw; confirmed closes it, otherwise it stays open). Every intent event carries the unix second and pid of the process that wrote it. An intent write that fails, a dispatch marker that cannot be written, and a recovery pass cut off by its clock now log once instead of vanishing.
+- **The fleet overview** no longer lists a `withdrawn` or `reaped` job as an operator error (dozens a day on a busy node would fill its 200-entry ring).
+
+### Added — the delegation ledger sees its own failure shapes (PR-14)
+
+- Every `agent_delegate` row carries `door` (the contract's, else `delegate`; `fleet-smoke` stamps `cli:fleet-smoke`), `fleet_job_id` (when the node ACKED the dispatch; the node's own `agent` row carries the same id, stamped by both doors a node admits work through, so the orphan join is one equality instead of a guess on latency) and a closed-set `reason_code` (32 members: `ok`, `failed_verification`, `queue_full`, `queue_deadline`, `queue_withdrawn`, `poll_deadline`, `canceled`, `node_unreachable`, `job_lost`, `dispatch_refused`, `remote_error`, `capacity_wait`, `node_busy`, `shed`, `no_eligible_node`, `seat_down`, the `stall_*` phases, the node's defer classes, `started`, `other`) set by a total classifier and normalized by `Record`. `capacity_wait` is the delegator's own outcome (no node had room); `node_busy` is a node, or the local seat, answering a capacity defer after admission (a seat at its run cap, a card under a lease or fence): two different causes, told apart by structure and not by prose. A stall a node filed during the structured re-pack (`structured re-pack unreachable: stalled: ...`) is coded `stall_*` like any other.
+- A `phase:"started"` marker row is written when a node acks a job or a local run begins, so a hang or a ghost is visible while it happens. It is never a job: every counter skips it, and `ledger.ParentJobIDs` skips it too (a marker looks exactly like a parent row, so without the skip an orphan inner row would vanish from every count). The C-62 rule is unchanged.
+
+### Changed
+
+- `ledger.Entry.Reason` is stored whole (bounded at 4096 bytes on a rune boundary) instead of cut to 120 bytes. `ledger.ShortReason` is the 120-byte form the defer report, the loupe report and atlas, and the PAIR error text group by, so a class is not split by every job-specific number. Rows written before this keep their cut reason and carry no code, fleet id or marker.
+- New config key `fleet_poll_lease_sec` (`config.example.json` regenerated); two additive, omitempty health fields, `jobs_withdrawn` and `jobs_reaped`.
+- Compatibility: withdraw and the lease need a node redeploy. Ledger readers outside this repository that count rows must skip `phase:"started"` (one extra `agent_delegate` row per job, `cards_tokens` 0).
+
+## [0.145.0] - 2026-09-30 - the operator names the device that serves a shared accelerator tool
+
+### Added — `accelerator_tool_owners` (ADR 0068)
+
+- A box carrying a Coral that reaches the RK3588 NPU through `fleet_accelerators` gave every shared tool
+  name to the Coral, because local devices are walked first (ADR 0037). `accelerator_tool_owners` maps one tool
+  name to the device that serves it — `{"offload_object_detect": "rknpu"}` — and every other name is decided as
+  before. An entry applies only when its device is listed in `accelerators` or `fleet_accelerators` and has that
+  tool; otherwise it is logged at startup and ignored, so a typo never removes a tool. A fleet device may take a
+  name from a local one.
+- Both surfaces apply the same walk: `mcpserver.accelOwnerPlan` computes every owner without registering
+  anything, and MCP registration and status read it; the agent loop's lanes carry the same claims
+  (`AccelLane.Claims`, from `config.ToolOwnerClaims`). `TestToolOwnersLoopMatchesMCP` builds the loop from the
+  real `NewLoopAccel` and checks every name the plan serves is registered once and routed to the same device,
+  for local orders of three devices, local-plus-fleet shapes, spaced keys and duplicate keys.
+- A device id listed twice no longer registers its tools twice on the MCP surface (the registration walk skips
+  a name it has already added instead of relying on the SDK replacing it).
+- Status: each accelerator entry adds `serves`, the tools that device actually registered, beside `owns`.
+
+## [0.144.2] - 2026-09-30 - offload_nim's base is allowlisted, audit first
+
+### Security — a caller-named offload_nim base is checked against an allowlist (security standard L5)
+
+Since 0.143.1 the NVIDIA key reaches only NVIDIA's hosts, but `offload_nim` still sent the PROMPT to any `base`
+a caller named: one prompt-injected call could post session text to a URL of its choosing. The base must now be
+NVIDIA's hosted API, `nim_endpoint`, or an entry of the new `nim_bases` list (scheme, host and port equal; the
+entry's path a prefix on a segment boundary; userinfo never matches). The new `nim_base_policy` follows the house
+standard's audit-then-enforce rule (ADR 0067): `"audit"` (the default) lets any other base run, marks the result
+with `base_policy` and appends a would-refuse row — scheme, host and port only, never the prompt, path or query —
+to `<state_dir>/nim-base-audit.jsonl`; `"enforce"` defers the call before any request leaves. The CLI `nim` verbs
+are operator-typed and unchanged. Tests: the allowlist rules (20 cases), enforce sends zero requests to an unlisted
+base and writes an enforce row without the path or query, audit runs and counts, a listed base runs cleanly under
+both policies; making the allowlist accept everything turns them red.
+
+### Added — doctor shows fleet version skew (security standard L0)
+
+`local-offload doctor` prints one row per `delegate_remotes` node: OK, SKEW (with both versions and the redeploy
+command), UNKNOWN (the node publishes no version) or UNREACHABLE. Informational only, never an exit-code change.
+Parity broke twice on 2026-09-30 within an hour because a merge landed between deploys; the session-start audit
+caught it, and now any session that runs doctor does too. `delegate.NodeView` carries `HarnessVersion` for it.
+
+### Added — the house security standard (ADR 0067) and the bare-client lint
+
+`docs/systems/security.md` is the standard every part of the harness is held to: seven invariants, ten layers
+plus a reliability track, AARM v1.0 R1-R9 as the checklist, promotion from audit to enforce only on counted data,
+and twelve gates that fail when their control is removed. Gate G2 ships with it: `bare_http_client_lint_test.go`
+fails the suite on any new bare HTTP client (ADR 0042 made executable) until the site is reviewed and listed with
+its reason; the first review lists 43 sites, one of them open (`offload_nim`'s caller-named base, next in L5).
+The ADR index row for 0061 now describes the rolling allowance that shipped, not the first draft.
+
+
+## [0.144.1] - 2026-09-30 - the trusted-network flag permits one address, never every interface
+
+### Security — a fleet node could serve its unauthenticated endpoints on every interface after a boot race
+
+`--listen-trusted-network` returned before any check, so it permitted ANY listen address. A Linux unit's
+`--listen "$(tailscale ip -4)":18811` that ran before tailscaled had an address expanded to `:18811` and
+bound every interface instead of failing — one fleet node served its unauthenticated fleet endpoints that
+way until its next restart, and the unit's `Restart=on-failure`, written for exactly that boot race, never
+fired because nothing failed. The flag now permits one specific address: an all-interfaces address (empty
+host, `0.0.0.0`, `[::]` and their spellings) and an address that does not parse are refused with or
+without it (`netguard.AllInterfaces`, now also the rule fleet-ui uses). fleet-serve, local-agent and
+fleet-ui share it. `setup/install.sh`'s unit gains `RestartSec=15`, so the failed start retries until the
+tailnet address exists without hitting systemd's default start limit (a unit without it gives up after five
+quick failures). Tests: the boot-race shape through fleet-serve's own parameter seam, the validator table
+with and without the flag, local-agent's listen guard — each red against the previous validator.
+
+## [0.144.0] - 2026-09-30 - Rockchip RK3588 boards join the fleet as their own tier, serving from the NPU
+
+### Added — the `rockchip-rk3588` tier (ADR 0062)
+
+An RK3588 board (reference: an Orange Pi 5) used to classify as `cpu`, and `fleet-serve` refused to start
+on it: no PCI GPU, no GPU memory source. `hwdetect` now recognises the SoC from the device tree (vendor
+and mainline spellings), a `linux-meminfo` provider advertises MemTotal less `uma_reserve_gib` as the
+node's capacity, and the tier renders from its own template with no CPU seat. Measured on the reference
+board, mainline 7.0 kernel with the out-of-tree rknpu 0.9.8 driver: Qwen3.5-2B W8A8 on the NPU prefills
+22.7 tok/s and decodes 7.71 tok/s with the runtime on the A55 cluster (126.4 / 7.14 on the A76 cluster),
+peak 2,260 MB.
+
+### Added — the `rkllm` seat kind and `accelerators/rknpu/rkllm_server.py`
+
+An OpenAI-compatible server over Rockchip's RKLLM runtime (text and vision, streaming, stop strings, one
+generation at a time; its ctypes structs are checked byte for byte against the vendor header), launched by
+llama-swap per seat with the seat's `cpu_mask`. It guards the host it shares: grammar / JSON-schema requests are
+refused with a 400 (RKLLM cannot constrain decoding, so the client fails over instead of receiving free text),
+at most two requests wait behind the running one (then 503 `busy`), bodies are capped at 16 MiB, and both NPU
+servers raise their `oom_score_adj` so the kernel's OOM killer takes them before the host's own stack. The seat
+ships an 8192 window until its resident size at 16384 is measured.
+
+### Added — the `rknpu` accelerator
+
+A Coral-style sidecar on the RKNN runtime serves `offload_classify_image`, `offload_object_detect` and
+`offload_image_embed` on the NPU (ResNet18 3.58 ms, YOLOv8n and a CLIP image tower; models pinned by
+sha256). Detection reads `DRIVER=RKNPU` from the DRM card on the vendor kernel and from the NPU platform
+devices on mainline, and never matches the in-tree `rocket` driver.
+
+### Changed — a template may leave every model to the tier's seats
+
+The serving audit accepts an empty `models:` map in a raw template that carries an `# offload-seats:`
+directive, and `Render` refuses a result that still serves no model. A set made only of seats no longer
+renders with a leading operator.
+
+### Not added — a GPU entry on the RK3588 Mali
+
+llama.cpp b11270 on Mesa 25.2.8 panvk loads on the Mali-G610, but its first compute submission hits a
+panthor job timeout and `vk::DeviceLostError` for every model and batch size tried. The tier renders no
+llama.cpp entry until that measures clean.
 ## [0.143.1] - 2026-09-30 - the NVIDIA key goes only to NVIDIA's hosts
 
 ### Security — `offload_nim` could send `NVIDIA_API_KEY` to a caller-supplied host

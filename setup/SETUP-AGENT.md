@@ -128,6 +128,7 @@ projected per-profile serving choices — `selftest.ps1` measures and refines th
 | `ampere-6` | #10/#11 (3050 6 GB) | `offload-e4b` | 32K | q8_0 (conservative default; f16 measured viable) | dropped |
 | `amd-gcn` | #12 (Vega 7 + 32 GB, Vulkan + CPU alt route) | `gemma4-e2b` (agent `qwen3.5-4b-agent`) | 32K | f16, FA on (measured 2026-09-20) | dropped |
 | `cpu` | no GPU | `offload-e4b` (CPU) | 8K | f16, FA off | `--cpu-moe` if RAM ≥ ~56 GB, else dropped |
+| `rockchip-rk3588` | Rockchip RK3588 SoC board (an Orange Pi 5, 7.7 GiB shared by CPU/GPU/NPU); Linux only, detected from the device tree | `qwen3.5-2b-npu` (NPU via RKLLM, chat + vision); no llama.cpp entry (Vulkan faults the Mali, measured); no CPU inference | the NPU seat 16K | n/a (RKLLM) | dropped |
 
 **Big-VRAM Blackwell tiers (#13–15, added 2026-07-16):** cards ≥24 GB render the
 `cuda-resident` template — every model is a standalone entry (no swap group, no ttl), so the
@@ -250,7 +251,9 @@ additionally needs its **chat template file** in the models dir (blackwell-8's p
 `PaddleOCR-VL-1.6.gguf` + `mmproj-PaddleOCR-VL-1.6.gguf` + `PaddleOCR-VL-1.6-chat_template.jinja`,
 all from `PaddlePaddle/PaddleOCR-VL-1.6-GGUF` — the model transcribes DEGRADED without the
 template, and it is crops/region-driven by design: full scattered pages degrade without the
-vendor's layout stage). Field-measured traps (OptiPlex 7060, 2026-08-22):
+vendor's layout stage). An `rkllm` seat (the rockchip-rk3588 tier's NPU seat) needs its `.rkllm`
+model and, when it is a VLM, its vision encoder `.rknn` in the models dir — the renderer WARNs on
+both. Field-measured traps (OptiPlex 7060, 2026-08-22):
 
 - **Qwen3VL-4B**: the HF repo is the HYPHENATED `unsloth/Qwen3-VL-4B-Instruct-GGUF` — the
   unhyphenated `unsloth/Qwen3VL-4B-Instruct-GGUF` name returns 401, which reads like an auth
@@ -804,6 +807,34 @@ four tools then register locally (marked `[FLEET: …]`), `image_path` is read o
 inside the job (cap 8 MiB), and the call runs on the first remote whose `/fleet/health` lists the id;
 the result carries `placement{node, wall_ms}`. Nothing else changes, and a box that lists nothing is
 byte-identical. The node needs 0.115.0 too (it serves the `accel` task).
+
+When that box also carries a device with the same tool names, its local device serves them. To move one
+tool to the fleet device, add `"accelerator_tool_owners": {"offload_object_detect": "rknpu"}` (ADR 0068,
+0.145.0); `offload_status {section:"accelerators"}` then lists the tool under that device's `serves`.
+
+### Accelerators (rknpu)
+
+The Rockchip RK3588 NPU is the third accelerator (ADR 0024 + ADR 0037;
+`docs/systems/accelerators.md`). Detection is a sysfs read of the NPU driver's name — the line
+`DRIVER=RKNPU` in a DRM card's uevent on the vendor kernel, or in an NPU core's platform-device
+uevent on a mainline kernel with the `rknpu` DKMS module — so it is **Linux only**, and `install.sh`
+merges its seed and writes `installed.json` like the Coral's. A board on the in-tree `rocket` driver
+is not detected: the RKNN runtime does not run on it. Two knobs:
+
+- `RKNPU_HOME` (`install seed --rknpu-home`, and `install render --rknpu-home` for the rkllm seat's
+  launcher) — the sidecar home `__RKNPU_HOME__` expands to in the seeded `rknpu_sidecar_cmd`. Default `<OFFLOAD_HOME>/rknpu`. It must hold `venv/` (the sidecar's
+  Python dependencies), `models/` (the `.rknn` models its manifest lists, each verified by sha256)
+  and `accelerators/rknpu/` — copied flat or checked out beneath the home; the launcher walks up to
+  `venv/`. The harness runs it as `rknpu-http.sh --idle-sec <rknpu_idle_sec>`. An EMPTY home is
+  refused at seed time.
+- `OFFLOAD_ACCELERATORS` — the same override as for the other devices; list several ids to exercise
+  the shared-name rule (`hailo-8l,coral-edgetpu,rknpu`: the first listed owner of each name
+  registers it).
+
+The sidecar spawns on demand over loopback :18815 and exits itself after `rknpu_idle_sec`. The user
+the fleet node runs as must be able to open the NPU's DRM node (group `render` on the reference
+board), and the NPU shares system memory with the host, so a loaded model holds its RAM until the
+idle exit.
 
 ### Optional: the coding agent + chat GUI (OFF by default)
 

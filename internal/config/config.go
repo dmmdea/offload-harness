@@ -1319,12 +1319,24 @@ type Config struct {
 	NIMMaxTokens int `json:"nim_max_tokens,omitempty"`
 	// NIMTimeoutSec bounds one nim call (large hosted models can be slow). Default 120.
 	NIMTimeoutSec int `json:"nim_timeout_sec,omitempty"`
+	// NIMBases lists the extra bases an offload_nim call may name besides NVIDIA's
+	// hosted hosts and nim_endpoint: self-hosted NIMs on loopback, the LAN or the
+	// tailnet (security standard L5, ADR 0067). Compared by scheme, host and port,
+	// with each entry's path as a prefix.
+	NIMBases []string `json:"nim_bases,omitempty"`
+	// NIMBasePolicy is what happens when offload_nim is called with a base outside
+	// that allowlist: "audit" (the default — the call runs, the result says it
+	// would be refused, and a would-refuse row is appended to
+	// <state_dir>/nim-base-audit.jsonl) or "enforce" (the call is deferred before
+	// any request leaves). Promotion from audit to enforce follows ADR 0067:
+	// counted would-refuses first.
+	NIMBasePolicy string `json:"nim_base_policy,omitempty"`
 	// NOTE: the NIM API key is deliberately NOT a config field — it is read from the
 	// NVIDIA_API_KEY (or NGC_API_KEY) env var so a secret never lands in a tracked
 	// config file or the public repo. A self-hosted NIM needs no key.
 	// --- accelerators (ADR 0024): devices that ride BESIDE the GPU tier ---
 	// Accelerators lists the additive accelerator ids present on this box
-	// (today: "hailo-8l"). `profile` stays the one GPU tier; an empty list is
+	// ("hailo-8l", "coral-edgetpu", "rknpu"). `profile` stays the one GPU tier; an empty list is
 	// byte-identical to a box with no accelerator — tools/list does not change.
 	Accelerators []string `json:"accelerators,omitempty"`
 	// FleetAccelerators lists accelerator ids this box does NOT carry but may
@@ -1332,9 +1344,18 @@ type Config struct {
 	// register locally and forward to the first delegate_remotes node whose
 	// /fleet/health lists the id, the image travelling inside the job (cap
 	// 8 MiB). Explicit opt-in keeps tools/list byte-identical for a box that
-	// declares nothing; a local device always wins over a remote one for the
-	// same capability name.
+	// declares nothing; a local device wins over a remote one for the same
+	// capability name unless AcceleratorToolOwners names the remote one.
 	FleetAccelerators []string `json:"fleet_accelerators,omitempty"`
+	// AcceleratorToolOwners names the device that serves a shared accelerator
+	// tool, by tool name: {"offload_object_detect": "rknpu"} (ADR 0068). It
+	// overrides the first-listed rule (ADR 0037) for that name only; every
+	// other name still goes to the first listed owner. An entry applies only
+	// when the device is listed in accelerators or fleet_accelerators and its
+	// table has that tool — otherwise it is ignored (the MCP server logs it at
+	// startup) and the first-listed rule decides, so a typo never removes a
+	// tool. Keys and values are compared with spaces trimmed.
+	AcceleratorToolOwners map[string]string `json:"accelerator_tool_owners,omitempty"`
 	// HailoEndpoint is the loopback HTTP sidecar base (server/http_server.py in
 	// the Hailo repo). Loopback only — the sidecar is not an authenticated service.
 	HailoEndpoint string `json:"hailo_endpoint,omitempty"`
@@ -1358,6 +1379,21 @@ type Config struct {
 	CoralTimeoutSec int `json:"coral_timeout_sec,omitempty"`
 	// CoralIdleSec is passed to the sidecar as its self-exit idle window. Default 300.
 	CoralIdleSec int `json:"coral_idle_sec,omitempty"`
+	// RknpuEndpoint is the Rockchip RK3588 NPU sidecar base (accelerators/rknpu/server.py),
+	// loopback only, port 18815 so a box carrying several devices never collides with the
+	// Hailo's 18813 or the Coral's 18814. Inert while Accelerators lacks "rknpu".
+	RknpuEndpoint string `json:"rknpu_endpoint,omitempty"`
+	// RknpuSidecarCmd launches the RKNPU sidecar on demand (rknpu-http.sh). Empty =
+	// never spawn; the harness defers when /health is unreachable.
+	RknpuSidecarCmd string `json:"rknpu_sidecar_cmd,omitempty"`
+	// RknpuTimeoutSec bounds one RKNPU call. The NPU itself answers in milliseconds, but a
+	// cold call also pays the RKNN runtime init and the model load, so 60 is ample. It must
+	// stay under accelremote.Budget less the 45 s cold-spawn window: a forwarded call is
+	// cut off at the Budget whatever this says. Default 60.
+	RknpuTimeoutSec int `json:"rknpu_timeout_sec,omitempty"`
+	// RknpuIdleSec is passed to the sidecar as its self-exit idle window, which is also how
+	// long its resident models keep their RAM (the NPU shares system memory). Default 300.
+	RknpuIdleSec int `json:"rknpu_idle_sec,omitempty"`
 	// --- fleet-node server (`fleet-serve` / `fleet-measure`; docs/FLEET-NODE.md) ---
 	// FleetListen is the fleet-serve bind address. Loopback by default; the
 	// production binding is the machine's TAILSCALE address behind
@@ -1421,6 +1457,22 @@ type Config struct {
 	// must. 0 or unset uses FleetBusyLeaseSecDefault (120); negative disables
 	// the rule and restores the text-only behaviour.
 	FleetBusyLeaseSec int `json:"fleet_busy_lease_sec,omitempty"`
+	// FleetPollLeaseSec (ADR 0064) is how long a job a delegator PUSHED to this
+	// node may sit `accepted` with nobody polling it before the node treats its
+	// delegator as gone: the job is never started, it is reaped (terminal, with a
+	// reason a late poller can read), and a run that finishes after its poller
+	// left stops feeding recent_agent_wall_sec and the Retry-After built from it.
+	// Only `accepted` jobs are ever reaped — a running job is never touched, so a
+	// delegator's recovery pass can still collect it — and only agent jobs pushed
+	// by a dispatch (a pulled queue job's result travels by ack; media and vision
+	// pollers are other clients).
+	//
+	// 0 or unset uses FleetPollLeaseSecDefault (60); negative turns the rule off
+	// (nothing is reaped or discounted: the behaviour before ADR 0064). A positive value
+	// under FleetPollLeaseSecFloor is raised to it: the delegator's own gap between
+	// polls (a 12 s long poll plus a few seconds of sleep) must fit inside the
+	// lease, or a job that IS being polled could be reaped. See FleetPollLease.
+	FleetPollLeaseSec int `json:"fleet_poll_lease_sec,omitempty"`
 	// FleetStoreRoot is a persistent KV page store this node OWNS ON DISK and
 	// keeps under a budget between its turns (0.113.16, store steward): the
 	// LMCache fs_native pages the production seat writes over SMB into a
@@ -1556,6 +1608,17 @@ type Config struct {
 	// one device is already the headline); no effect at all on a
 	// windows-generic node, which has no gpu_devices[] to match against.
 	PrimaryGPUUUID string `json:"primary_gpu_uuid,omitempty"`
+	// UMAReserveGiB is the RAM a unified-memory SoC node (the rockchip-rk3588 tier)
+	// holds back from inference for the box's own workload. Such a box has no VRAM —
+	// its GPU and NPU allocate from the same RAM as everything else — so
+	// /fleet/health advertises MemTotal minus this reserve as capacity and
+	// MemAvailable minus it as free (fleetnode.MeminfoUMAProbe). The tier seeds 3,
+	// for a board that also runs a home-automation stack. 0 (the default) reserves
+	// nothing and advertises all of RAM. Inert on every other tier, which reads a real
+	// VRAM counter. A reserve that leaves no capacity fails the probe, so fleet-serve
+	// refuses to start rather than advertise a node with nothing to give; a negative
+	// one is refused by name.
+	UMAReserveGiB float64 `json:"uma_reserve_gib,omitempty"`
 	// --- config-driven pipeline jobs (Task 4: fleet-node "pipeline job" task family) ---
 	// Pipelines maps a task_type name (e.g. "scene-swap") to the externally-
 	// provided CLI that serves it — see PipelineSpec. Empty/nil = this box
@@ -1702,6 +1765,20 @@ func (c Config) HasAccelerator(id string) bool {
 	return false
 }
 
+// ToolOwnerClaims returns the tool names accelerator_tool_owners assigns to
+// device id, sorted. It says nothing about whether the claim can apply — the
+// device's own tool table decides that on each surface (ADR 0068).
+func (c Config) ToolOwnerClaims(id string) []string {
+	var out []string
+	for name, owner := range c.AcceleratorToolOwners {
+		if strings.TrimSpace(owner) == id {
+			out = append(out, strings.TrimSpace(name))
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
 func Default() Config {
 	base := DefaultBase()
 	return Config{
@@ -1826,12 +1903,16 @@ func Default() Config {
 		NIMModel:                      "nvidia/nemotron-3-ultra-550b-a55b",
 		NIMMaxTokens:                  1024,
 		NIMTimeoutSec:                 120,
+		NIMBasePolicy:                 "audit",
 		HailoEndpoint:                 "http://127.0.0.1:18813", // loopback sidecar base; inert while Accelerators is empty
 		HailoTimeoutSec:               60,
 		HailoIdleSec:                  300,
 		CoralEndpoint:                 "http://127.0.0.1:18814", // loopback sidecar base; inert while Accelerators lacks coral-edgetpu
 		CoralTimeoutSec:               30,
 		CoralIdleSec:                  300,
+		RknpuEndpoint:                 "http://127.0.0.1:18815", // loopback sidecar base; inert while Accelerators lacks rknpu
+		RknpuTimeoutSec:               60,
+		RknpuIdleSec:                  300,
 		FleetListen:                   "127.0.0.1:18811", // fleet-serve bind (18810 = the dispatcher's)
 		FleetNodeID:                   "",                // "" = hostname at serve time
 		FleetMaxQueueDepth:            0,                 // 0 = built-in default (2x fleet_max_concurrent_jobs accepted+running); negative = unlimited
@@ -1842,6 +1923,7 @@ func Default() Config {
 		DelegateRemotes:               nil,               // fleet node base URLs the delegator considers by default (tailnet-only); per-call remotes replace it
 		FleetSampler:                  "auto",            // auto|pdh|pdh-shared|global (FLEET-NODE.md)
 		PrimaryGPUUUID:                "",                // "" = largest-total headline rule; set to pin by UUID (FLEET-NODE.md)
+		UMAReserveGiB:                 0,                 // 0 = a unified-memory SoC advertises all of RAM; the rockchip-rk3588 tier seeds 3
 		Pipelines:                     nil,               // empty = no pipeline-job routes on this box (opt-in per pipeline)
 		SeatEndpoints:                 nil,               // empty = every seat on Endpoint (opt-in per box, like Pipelines)
 		CascadeRemoteLanes:            nil,               // empty = the cascade never fails over off-box (opt-in per box)
@@ -2140,6 +2222,18 @@ func warnBadEnumValues(c Config) {
 	default:
 		fmt.Fprintf(os.Stderr, "warning: unrecognized stt_hq_api %q (valid: \"\", \"whisper\", \"openai\") — treating as \"whisper\"; an llama-server HQ model will 404\n", c.STTHQAPI)
 	}
+	switch strings.ToLower(strings.TrimSpace(c.NIMBasePolicy)) {
+	case "", "audit", "enforce":
+	default:
+		fmt.Fprintf(os.Stderr, "warning: unrecognized nim_base_policy %q (valid: \"audit\", \"enforce\") — treating as \"audit\"\n", c.NIMBasePolicy)
+	}
+}
+
+// NIMBaseEnforced reports whether nim_base_policy is "enforce"; anything else
+// (the default "audit", empty, or an unrecognized value, which Load warns about)
+// is audit mode.
+func (c Config) NIMBaseEnforced() bool {
+	return strings.EqualFold(strings.TrimSpace(c.NIMBasePolicy), "enforce")
 }
 
 // warnDeadThresholds flags confidence-gate thresholds sitting at or below the
@@ -2526,6 +2620,31 @@ func (c Config) FleetQueueLimit() int {
 		return 2 * c.FleetConcurrencyLimit()
 	default:
 		return c.FleetMaxQueueDepth
+	}
+}
+
+// FleetPollLeaseSecDefault / FleetPollLeaseSecFloor bound fleet_poll_lease_sec:
+// the default is five times the slowest healthy poll gap, the floor is one gap
+// with room to spare (see Config.FleetPollLeaseSec).
+const (
+	FleetPollLeaseSecDefault = 60
+	FleetPollLeaseSecFloor   = 15
+)
+
+// FleetPollLease resolves FleetPollLeaseSec: 0 → the default (60 s), negative →
+// 0 meaning the abandoned-job rules are off, and a positive value below the
+// floor is raised to it. The store treats <= 0 as "no lease", the convention
+// FleetQueueLimit and FleetConcurrencyLimit already teach.
+func (c Config) FleetPollLease() time.Duration {
+	switch {
+	case c.FleetPollLeaseSec < 0:
+		return 0
+	case c.FleetPollLeaseSec == 0:
+		return FleetPollLeaseSecDefault * time.Second
+	case c.FleetPollLeaseSec < FleetPollLeaseSecFloor:
+		return FleetPollLeaseSecFloor * time.Second
+	default:
+		return time.Duration(c.FleetPollLeaseSec) * time.Second
 	}
 }
 

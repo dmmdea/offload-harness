@@ -116,6 +116,9 @@ func (s *Server) claimOne(ctx context.Context, client *http.Client, holder, node
 	}
 	run := func(rctx context.Context) (json.RawMessage, error) {
 		defer cleanup()
+		// The same fleet job id the push door stamps (ADR 0064, register C-63): a
+		// pulled job is known to the holder, and to its ledger row, by this id.
+		breq.FleetJobID = job.ID
 		res := s.runner.Run(rctx, breq)
 		if job.TaskType == string(core.TaskAgentRun) && res.OK {
 			// The same seat-proof write the push door makes (server.go's

@@ -22,8 +22,10 @@ package mediaseat
 
 import (
 	"fmt"
+	"math/bits"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -43,6 +45,29 @@ const (
 	// ~2 s answers at 1.8 GB), which need a shipped chat template file and temp 0 —
 	// the two knobs this kind carries that plain vision does not.
 	KindOCR = "ocr"
+	// KindRKLLM is an LLM/VLM seat served by the Rockchip RKLLM runtime on the NPU
+	// (accelerators/rknpu/rkllm_server.py behind a launcher script) rather than by
+	// llama-server. The rockchip-rk3588 tier declares one beside the llama.cpp Vulkan GPU
+	// entry its own template serves: two accelerators, one shared RAM budget. It is a
+	// CHAT seat first; with a vision_encoder it also answers image questions and binds
+	// vision_model. See Seat.VisionEncoder / Seat.CPUMask.
+	KindRKLLM = "rkllm"
+)
+
+// What an rkllm seat runs when the tier names no launcher or CPU mask.
+const (
+	// DefaultRKLLMBin is the launcher the rknpu accelerator ships beside its sidecar. It rides
+	// __RKNPU_HOME__, the token the sidecar's own command uses, so one RKNPU_HOME moves both.
+	DefaultRKLLMBin = "__RKNPU_HOME__/rkllm-serve.sh"
+	// DefaultRKLLMCPUMask is the RK3588's A55 cluster (cpu0-3): the runtime's host
+	// threads stay off the A76 cores until the operator chooses otherwise, which is
+	// what keeps the box's other workload responsive.
+	DefaultRKLLMCPUMask = "0x0f"
+	// rkllmMinCPUs is the fewest CPUs an rkllm seat may enable. The RKLLM runtime
+	// REFUSES to start with fewer enabled CPUs than the SoC has NPU cores (3 on the
+	// RK3588): "The number of enabled CPUs must be greater than or equal to the number
+	// of NPU cores."
+	rkllmMinCPUs = 3
 )
 
 // Residency is a ROLE, not a group name. Group names are a per-TEMPLATE
@@ -144,6 +169,19 @@ type Seat struct {
 	// vision seat pins 1024.
 	ImageMinTokens int `json:"image_min_tokens,omitempty"`
 
+	// VisionEncoder is the separate vision model an rkllm seat pairs with its LLM (a
+	// .rknn under the models dir), rendered as --vision-encoder. With one the seat is a
+	// VLM and binds vision_model; without, it is text-only. rkllm only.
+	VisionEncoder string `json:"vision_encoder,omitempty"`
+	// CPUMask is the hex mask of CPUs the RKLLM runtime may use ("0x0f" = cpu0-3, the
+	// RK3588's A55 cluster; the default). The mask is per seat because it is a
+	// measured trade on a big.LITTLE part: on the reference board (Qwen3.5-0.8B W8A8, a
+	// 1,256-token prompt, mainline kernel) 0x0f prefills at 44.5 tok/s and decodes at
+	// 9.07, 0xf0 (the A76 cluster) at 174.5 / 16.67 — while the box's other workload
+	// keeps whichever cores are left. At least 3 bits must be set (rkllmMinCPUs). rkllm
+	// only.
+	CPUMask string `json:"cpu_mask,omitempty"`
+
 	// Measured records what measured this seat -- the box, the build, the bake-off and
 	// the numbers -- so a reader never has to take the roster on faith and a future
 	// edit can see what it would be overturning. It is data, not configuration: it
@@ -152,17 +190,49 @@ type Seat struct {
 	Measured string `json:"measured,omitempty"`
 }
 
-// configKey is the harness config field a seat of this kind binds.
-func configKey(kind string) string {
-	switch kind {
+// BindingKey is the harness config field this seat writes, "" when it writes none.
+// A vision, stt or ocr seat binds the field of its kind. An rkllm seat is a chat
+// model first — model and triage_model stay the tier's config_seed to name, as for
+// any tier — and binds vision_model only when it carries a vision encoder, because
+// only then can it answer an image question; binding it without one would advertise
+// a route the seat cannot serve.
+func (s Seat) BindingKey() string {
+	switch s.Kind {
 	case KindVision:
 		return "vision_model"
 	case KindSTT:
 		return "stt_model"
 	case KindOCR:
 		return "ocr_model"
+	case KindRKLLM:
+		if s.VisionEncoder != "" {
+			return "vision_model"
+		}
 	}
 	return ""
+}
+
+// EffectiveBin is the executable the seat runs: its own bin, or for an rkllm seat
+// that names none the launcher the rknpu accelerator ships. The renderer and the
+// "does this seat need the install home" check both read it, so a default that
+// carries __RKNPU_HOME__ can never render without a home to expand it against.
+func (s Seat) EffectiveBin() string {
+	if s.Bin == "" && s.Kind == KindRKLLM {
+		return DefaultRKLLMBin
+	}
+	return s.Bin
+}
+
+// EffectiveCPUMask is the mask an rkllm seat is started with: its own, or the A55
+// cluster default. "" for every other kind, which has no CPU mask.
+func (s Seat) EffectiveCPUMask() string {
+	if s.Kind != KindRKLLM {
+		return ""
+	}
+	if s.CPUMask == "" {
+		return DefaultRKLLMCPUMask
+	}
+	return s.CPUMask
 }
 
 // Bindings is the config fragment a tier's seats produce. This is the ONLY
@@ -171,7 +241,7 @@ func configKey(kind string) string {
 func Bindings(seats []Seat) map[string]any {
 	out := map[string]any{}
 	for _, s := range seats {
-		if k := configKey(s.Kind); k != "" {
+		if k := s.BindingKey(); k != "" {
 			out[k] = s.Name
 		}
 	}
@@ -187,7 +257,9 @@ func BoundKeys() []string { return []string{"ocr_model", "stt_model", "vision_mo
 func Validate(seats []Seat, tier string) error {
 	var problems []string
 	seen := map[string]bool{}
-	perKind := map[string]int{}
+	// The seats that write each config key. The cap is per KEY, not per kind: a vision
+	// seat and an rkllm seat with a vision encoder both write vision_model.
+	writers := map[string][]string{}
 
 	for i, s := range seats {
 		where := fmt.Sprintf("seat %d", i)
@@ -195,12 +267,14 @@ func Validate(seats []Seat, tier string) error {
 			where = fmt.Sprintf("seat %q", s.Name)
 		}
 		switch s.Kind {
-		case KindVision, KindSTT, KindOCR:
-			perKind[s.Kind]++
+		case KindVision, KindSTT, KindOCR, KindRKLLM:
+			if k := s.BindingKey(); k != "" {
+				writers[k] = append(writers[k], where)
+			}
 		case "":
-			problems = append(problems, where+": no kind (want "+KindVision+", "+KindSTT+" or "+KindOCR+")")
+			problems = append(problems, where+": no kind (want "+KindVision+", "+KindSTT+", "+KindOCR+" or "+KindRKLLM+")")
 		default:
-			problems = append(problems, fmt.Sprintf("%s: unknown kind %q (want %s, %s or %s)", where, s.Kind, KindVision, KindSTT, KindOCR))
+			problems = append(problems, fmt.Sprintf("%s: unknown kind %q (want %s, %s, %s or %s)", where, s.Kind, KindVision, KindSTT, KindOCR, KindRKLLM))
 		}
 		switch {
 		case s.Name == "":
@@ -294,7 +368,27 @@ func Validate(seats []Seat, tier string) error {
 					"ignored on an stt seat")
 			}
 		}
-		for field, v := range map[string]string{"model": s.Model, "mmproj": s.MMProj, "vad_model": s.VADModel, "bin": s.Bin, "lib_dir": s.LibDir} {
+		if s.Kind == KindRKLLM {
+			// The RKLLM runtime takes a model, an optional vision encoder, a window and a
+			// CPU mask. Every llama-server / whisper-server / device-pin knob is one the
+			// renderer would silently drop, so a tier author who sets one is refused.
+			if s.MMProj != "" || s.VADModel != "" || s.LibDir != "" || s.ImageMaxTokens > 0 || s.ImageMinTokens > 0 ||
+				s.NoContextShift || s.NoMmprojOffload || s.NoFlashAttn || s.ChatTemplate != "" || s.Temp != nil ||
+				s.TopP != nil || s.TopK != nil || s.SplitMode != "" || s.TensorSplit != "" || len(s.GPUEnv) > 0 {
+				problems = append(problems, where+": mmproj/vad_model/lib_dir/image_*_tokens/no_*/chat_template/temp/top_p/top_k/"+
+					"split_mode/tensor_split/gpu_env are llama-server or whisper-server settings and are ignored on an rkllm seat "+
+					"(the RKLLM runtime takes model, vision_encoder, ctx_size and cpu_mask)")
+			}
+			if s.CtxSize <= 0 {
+				problems = append(problems, where+": an rkllm seat needs its own ctx_size — the runtime is started with it")
+			}
+			if err := checkCPUMask(s.CPUMask); err != nil {
+				problems = append(problems, where+": "+err.Error())
+			}
+		} else if s.VisionEncoder != "" || s.CPUMask != "" {
+			problems = append(problems, where+": vision_encoder/cpu_mask are rkllm-only and are ignored on a "+s.Kind+" seat")
+		}
+		for field, v := range map[string]string{"model": s.Model, "mmproj": s.MMProj, "vad_model": s.VADModel, "vision_encoder": s.VisionEncoder, "bin": s.Bin, "lib_dir": s.LibDir} {
 			if strings.Contains(strings.ToLower(v), ".exe") {
 				problems = append(problems, fmt.Sprintf("%s: %s carries a literal \".exe\" — use the __EXE__ token so the tier renders on every OS", where, field))
 			}
@@ -302,9 +396,12 @@ func Validate(seats []Seat, tier string) error {
 		// Only bin/lib_dir are resolved against the install root. The model fields are
 		// relative to the models dir, so a home token there renders nowhere and would
 		// die at the token guard with no hint as to which field caused it.
-		for field, v := range map[string]string{"model": s.Model, "mmproj": s.MMProj, "vad_model": s.VADModel, "chat_template": s.ChatTemplate} {
+		for field, v := range map[string]string{"model": s.Model, "mmproj": s.MMProj, "vad_model": s.VADModel, "vision_encoder": s.VisionEncoder, "chat_template": s.ChatTemplate} {
 			if strings.Contains(v, "__OFFLOAD_HOME__") {
 				problems = append(problems, fmt.Sprintf("%s: %s is relative to the models dir and may not carry __OFFLOAD_HOME__", where, field))
+			}
+			if strings.Contains(v, "__RKNPU_HOME__") {
+				problems = append(problems, fmt.Sprintf("%s: %s is relative to the models dir and may not carry __RKNPU_HOME__", where, field))
 			}
 		}
 		if s.Temp != nil && (*s.Temp < 0 || *s.Temp > 2) {
@@ -312,15 +409,41 @@ func Validate(seats []Seat, tier string) error {
 				"that refuses to start or samples garbage", where, *s.Temp))
 		}
 	}
-	for _, k := range []string{KindVision, KindSTT, KindOCR} {
-		if perKind[k] > 1 {
-			problems = append(problems, fmt.Sprintf("%d %s seats: %q is a single config field, so a tier may declare at most one",
-				perKind[k], k, configKey(k)))
+	for _, k := range BoundKeys() {
+		if len(writers[k]) > 1 {
+			problems = append(problems, fmt.Sprintf("%d seats (%s) write %q: it is a single config field, so a tier may declare at most one",
+				len(writers[k]), strings.Join(writers[k], ", "), k))
 		}
 	}
 	if len(problems) > 0 {
 		sort.Strings(problems)
 		return fmt.Errorf("tier %q media_seats:\n  - %s", tier, strings.Join(problems, "\n  - "))
+	}
+	return nil
+}
+
+// checkCPUMask validates an rkllm seat's cpu_mask: empty is the default, otherwise a
+// 0x-prefixed hex mask that fits RKLLM's uint32 enabled_cpus_mask and enables at
+// least rkllmMinCPUs CPUs. The value is rendered into the seat's command line, so a
+// strict shape is also what keeps anything but hex digits out of it.
+func checkCPUMask(mask string) error {
+	if mask == "" {
+		return nil
+	}
+	digits, ok := strings.CutPrefix(mask, "0x")
+	if !ok {
+		digits, ok = strings.CutPrefix(mask, "0X")
+	}
+	if !ok || digits == "" {
+		return fmt.Errorf("cpu_mask %q is not a hex mask (want e.g. %s)", mask, DefaultRKLLMCPUMask)
+	}
+	n, err := strconv.ParseUint(digits, 16, 32)
+	if err != nil {
+		return fmt.Errorf("cpu_mask %q is not a hex mask that fits RKLLM's 32-bit enabled_cpus_mask", mask)
+	}
+	if bits.OnesCount32(uint32(n)) < rkllmMinCPUs {
+		return fmt.Errorf("cpu_mask %q enables %d CPU(s), fewer than the %d the RKLLM runtime demands (it refuses to start with "+
+			"fewer enabled CPUs than NPU cores)", mask, bits.OnesCount32(uint32(n)), rkllmMinCPUs)
 	}
 	return nil
 }

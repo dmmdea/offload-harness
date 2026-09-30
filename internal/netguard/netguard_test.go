@@ -13,38 +13,73 @@ func TestValidate(t *testing.T) {
 		"[::1]:18800",
 		"localhost:18800",
 	}
-	nonLocal := []string{
-		"0.0.0.0:18800",
+	specific := []string{ // one non-loopback address: the override may permit it
 		"192.168.1.5:18800",
-		":18800", // empty host = bind all interfaces
+		"192.0.2.10:18811",
+		"node-a.example-tailnet.ts.net:18811",
+	}
+	allInterfaces := []string{ // refused with or without the override
+		":18800", // empty host = bind all interfaces (an empty `tailscale ip -4`)
+		"0.0.0.0:18800",
+		"[::]:18800",
+		"[::0]:18800",
+		"[0:0:0:0:0:0:0:0]:18800",
 	}
 
 	for _, addr := range loopback {
-		if err := Validate(addr, false); err != nil {
-			t.Errorf("Validate(%q, false) = %v, want nil (loopback is allowed)", addr, err)
+		for _, trusted := range []bool{false, true} {
+			if err := Validate(addr, trusted); err != nil {
+				t.Errorf("Validate(%q, %v) = %v, want nil (loopback is allowed)", addr, trusted, err)
+			}
 		}
 	}
-	for _, addr := range nonLocal {
+	for _, addr := range specific {
 		if err := Validate(addr, false); err == nil {
 			t.Errorf("Validate(%q, false) = nil, want refusal (non-loopback)", addr)
 		}
-		// The override must let every refused address through (the caller,
-		// not the validator, is responsible for emitting the loud warning).
+		// The override lets ONE specific address through (the caller, not the
+		// validator, is responsible for emitting the loud warning).
 		if err := Validate(addr, true); err != nil {
-			t.Errorf("Validate(%q, true) = %v, want nil (override allows non-loopback)", addr, err)
+			t.Errorf("Validate(%q, true) = %v, want nil (override allows one specific address)", addr, err)
+		}
+	}
+	for _, addr := range allInterfaces {
+		for _, trusted := range []bool{false, true} {
+			if err := Validate(addr, trusted); err == nil {
+				t.Errorf("Validate(%q, %v) = nil, want refusal (binds every interface; the override never permits it)", addr, trusted)
+			}
+		}
+		if !AllInterfaces(addr) {
+			t.Errorf("AllInterfaces(%q) = false, want true", addr)
+		}
+	}
+	for _, addr := range append(append([]string{}, loopback...), specific...) {
+		if AllInterfaces(addr) {
+			t.Errorf("AllInterfaces(%q) = true, want false", addr)
+		}
+	}
+}
+
+// The override never waives the parse check: an address without a port binds
+// nothing predictable and is refused either way.
+func TestValidateTrustedStillRefusesMalformed(t *testing.T) {
+	for _, addr := range []string{"192.0.2.10", "", "node-a"} {
+		if err := Validate(addr, true); err == nil {
+			t.Errorf("Validate(%q, true) = nil, want a parse refusal", addr)
 		}
 	}
 }
 
 // TestValidateMalformed locks the refuse-on-unparseable rule: an address we
-// cannot prove loopback (missing port) is refused rather than allowed.
+// cannot prove loopback (missing port) is refused rather than allowed — with
+// or without the override since 0.144.1 (it used to skip parsing entirely,
+// which is how an empty host slipped through as an all-interfaces bind).
 func TestValidateMalformed(t *testing.T) {
 	for _, addr := range []string{"127.0.0.1", "localhost", ""} {
-		if err := Validate(addr, false); err == nil {
-			t.Errorf("Validate(%q, false) = nil, want parse refusal", addr)
-		}
-		if err := Validate(addr, true); err != nil {
-			t.Errorf("Validate(%q, true) = %v, want nil (override skips parsing)", addr, err)
+		for _, trusted := range []bool{false, true} {
+			if err := Validate(addr, trusted); err == nil {
+				t.Errorf("Validate(%q, %v) = nil, want parse refusal", addr, trusted)
+			}
 		}
 	}
 }
@@ -63,10 +98,10 @@ func TestLoopbackAddr(t *testing.T) {
 		{"127.9.9.9:18811", true}, // any 127/8, not just .0.0.1
 		{"[::1]:18811", true},
 		{"localhost:18811", true},
-		{"100.64.0.10:18811", false}, // tailnet is NOT loopback (token required there)
+		{"192.0.2.10:18811", false}, // tailnet is NOT loopback (token required there)
 		{"0.0.0.0:18811", false},
-		{":18811", false},     // empty host = all interfaces
-		{"127.0.0.1", false},  // missing port: unprovable → treated as exposed
+		{":18811", false},    // empty host = all interfaces
+		{"127.0.0.1", false}, // missing port: unprovable → treated as exposed
 		{"", false},
 	}
 	for _, c := range cases {

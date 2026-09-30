@@ -126,6 +126,7 @@ func validateConfiguredBases(c Config) error {
 		{"nim_endpoint", c.NIMEndpoint},
 		{"hailo_endpoint", c.HailoEndpoint},
 		{"coral_endpoint", c.CoralEndpoint},
+		{"rknpu_endpoint", c.RknpuEndpoint},
 		{"pair_workloads_endpoint", c.PairWorkloadsEndpoint},
 	} {
 		if err := validateBaseURL(kv.key, kv.val); err != nil {

@@ -58,8 +58,10 @@ type Entry struct {
 	InputChars         int                `json:"input_chars,omitempty"`
 	Feat               map[string]float64 `json:"feat,omitempty"`
 	// Reason is the human-readable defer reason (LO-8), set only on deferred
-	// entries and truncated to maxReasonLen on write. Old ledger lines without
-	// the field parse fine (empty string).
+	// entries and stored WHOLE (bounded at maxStoredReasonLen; until ADR 0064 it
+	// was cut to 120 bytes on write). A reader that groups or displays by reason
+	// uses ShortReason. Old ledger lines without the field parse fine (empty
+	// string); rows written before ADR 0064 hold the 120-byte cut.
 	Reason string `json:"reason,omitempty"`
 	// EscSource names WHICH gate sent the call up a tier, from core's closed
 	// EscalationSource set. Unlike Reason it is written on SUCCESSFUL
@@ -210,6 +212,22 @@ type Entry struct {
 	// or three.
 	RepackAttempts   int    `json:"repack_attempts,omitempty"`
 	AcceptanceResult string `json:"acceptance_result,omitempty"`
+	// --- telemetry the harness could not see itself with (ADR 0064, C-68) ----
+	// FleetJobID is the id the job is known by on the fleet node that ran it: the
+	// id the delegator dispatched it under. A delegate row carries it when the job
+	// went to a node; the node's own row for the same run carries the same id, so
+	// joining the two ledgers is one equality instead of a guess on latency. Empty
+	// on a job that never left this box.
+	FleetJobID string `json:"fleet_job_id,omitempty"`
+	// ReasonCode is the closed-set code for why the job ended the way it did (see
+	// reasoncode.go), written on every agent_delegate row: ReasonOK for a job that
+	// completed, so its presence never depends on the job having failed.
+	ReasonCode string `json:"reason_code,omitempty"`
+	// Phase is empty on every ordinary row — a finished record — and PhaseStarted
+	// on the dispatch marker a delegator writes when it hands a job to a seat, so a
+	// job that hangs, or a ghost that outlives its delegator, is visible before it
+	// ends. A marker is never a job: every job counter skips it (jobrows.go).
+	Phase string `json:"phase,omitempty"`
 }
 
 // Label provenance values for Entry.LabelSource. Constants rather than string literals so
@@ -219,22 +237,42 @@ const (
 	LabelSourceShadowCounterfactual = "shadow-counterfactual"
 )
 
-// maxReasonLen bounds a recorded defer reason so a long upstream error can't
-// bloat the one-line ledger records (they must stay O_APPEND-atomic-small).
+// maxReasonLen is the SHORT form of a reason: what a display line, a grouping key
+// and the placement note keep. Until ADR 0064 it was also the stored length of
+// Entry.Reason, which cut every long refusal, deadline and stall message mid-word
+// (a reason that ended "... exceeds the availa" could not be classified from the
+// ledger at all); the stored reason is now kept whole up to maxStoredReasonLen and
+// ShortReason gives readers this form.
 const maxReasonLen = 120
 
-// truncateReason caps s at maxReasonLen bytes, backing off to a rune boundary
-// so a multibyte character is never split.
-func truncateReason(s string) string {
-	if len(s) <= maxReasonLen {
+// maxStoredReasonLen bounds a stored reason so a runaway upstream error still
+// cannot bloat a ledger record (each must stay one small O_APPEND-atomic line). It
+// is a bound and not a policy: the longest reasons the harness writes (an
+// exhausted placement naming every refusing node) run to a couple of kilobytes.
+const maxStoredReasonLen = 4096
+
+// capAt cuts s to at most n bytes, backing off to a rune boundary so a multibyte
+// character is never split.
+func capAt(s string, n int) string {
+	if len(s) <= n {
 		return s
 	}
-	cut := s[:maxReasonLen]
+	cut := s[:n]
 	for len(cut) > 0 && !utf8.ValidString(cut) {
 		cut = cut[:len(cut)-1]
 	}
 	return cut
 }
+
+// truncateReason caps s at maxReasonLen bytes on a rune boundary: the short form.
+func truncateReason(s string) string { return capAt(s, maxReasonLen) }
+
+// ShortReason is the display and grouping form of a stored reason: its first
+// maxReasonLen bytes on a rune boundary. Every reader that aggregates by reason
+// (TopDeferReasons, the loupe atlas, the PAIR error text) groups by this, so the
+// full text the ledger now keeps does not fragment a class into one group per
+// job-specific number. Group on the reason CODE where one exists.
+func ShortReason(s string) string { return truncateReason(s) }
 
 // Ledger appends entries to a JSONL file. The mutex serializes in-process
 // writes; cross-process safety relies on O_APPEND atomicity for small lines.
@@ -279,8 +317,17 @@ func (l *Ledger) Record(e Entry) error {
 	if e.TS == 0 {
 		e.TS = time.Now().Unix()
 	}
-	e.Reason = truncateReason(e.Reason)
+	// The reason is stored WHOLE, bounded only against a runaway upstream error;
+	// the placement note keeps its short form (readers that want the short reason
+	// call ShortReason).
+	e.Reason = capAt(e.Reason, maxStoredReasonLen)
 	e.Placement = truncateReason(e.Placement)
+	// Every agent_delegate row carries a reason code from the closed set, whatever
+	// the writer knew: settled HERE, on the one path every writer takes, so no
+	// record site can leave it off or invent a member.
+	if e.Task == "agent_delegate" {
+		e.ReasonCode = settleReasonCode(e)
+	}
 	// Provenance and the one token figure are stamped HERE, on the one path
 	// every writer takes, so no record site can forget them (D-101).
 	stampOrigin(&e)
@@ -474,7 +521,9 @@ func TopDeferReasons(path string, since int64, topN int) ([]ReasonCount, error) 
 		if since > 0 && e.TS < since {
 			continue
 		}
-		r := e.Reason
+		// Grouped by the SHORT form: the stored reason is whole, and grouping by it
+		// would make one class per job-specific number.
+		r := ShortReason(e.Reason)
 		if r == "" {
 			r = "(unrecorded)"
 		}

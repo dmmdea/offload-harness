@@ -285,6 +285,24 @@ func TestLoadRefusesAnUnusableBaseURL(t *testing.T) {
 	}
 }
 
+// The RKNPU sidecar base is held to the same usable-URL rule as every other configured base: a
+// launcher template that was never substituted must fail the load naming the key, not defer on
+// every call with a dial error.
+func TestLoadRefusesAnUnusableRknpuEndpoint(t *testing.T) {
+	for _, v := range []string{"${RKNPU_HOST}:18815", "rknpu:18815", "http://127.0.0.1:0"} {
+		_, err := Load(writeShapeCfg(t, `{"accelerators":["rknpu"],"rknpu_endpoint":`+quote(v)+`}`))
+		if err == nil {
+			t.Fatalf("Load must refuse rknpu_endpoint %q", v)
+		}
+		if !strings.Contains(err.Error(), "rknpu_endpoint") {
+			t.Errorf("Load error %q must name rknpu_endpoint", err)
+		}
+	}
+	if _, err := Load(writeShapeCfg(t, `{"accelerators":["rknpu"],"rknpu_endpoint":"http://127.0.0.1:18815"}`)); err != nil {
+		t.Fatalf("a usable loopback base must load: %v", err)
+	}
+}
+
 // quote renders a Go string as a JSON string literal for the table above.
 func quote(v string) string {
 	b, err := json.Marshal(v)

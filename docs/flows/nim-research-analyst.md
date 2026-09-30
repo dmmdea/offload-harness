@@ -58,8 +58,12 @@ local-offload nim --list-models
   absent explicit authorization for that material.
 - **Never in the savings ledger.** NIM calls are deliberate experiments/escalations, not
   defer-avoidance; nothing here touches savings accounting.
-- **Key from env only** (`NVIDIA_API_KEY`/`NGC_API_KEY`); `nimclient.KeyForBase` refuses to
-  transmit it to non-NVIDIA bases. A self-hosted NIM via `--base` is keyless.
+- **Key from env only** (`NVIDIA_API_KEY`/`NGC_API_KEY`); `nimclient.KeyForBase` sends it only to
+  https `api.nvidia.com` and its subdomains (0.143.1). A self-hosted NIM via `--base` is keyless.
+- **The base is allowlisted** (0.144.1+ `offload_nim`, register S-30): NVIDIA's hosted API,
+  `nim_endpoint`, or an entry of `nim_bases`. Anything else is counted as a would-refuse under the
+  default `nim_base_policy: "audit"` and refused under `"enforce"`. List a self-hosted NIM in
+  `nim_bases` before pointing the tool at it.
 - **Not for judgment calls.** Seat decisions, plan verdicts, anything the operator will act
   on — the session model owns those. NIM output is input material, always attributed
   ("per the NIM sweep, unverified") until the session verifies it.

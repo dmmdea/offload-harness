@@ -52,6 +52,34 @@ needing to change first.
 completion cannot overwrite a finished job. Terminal entries are evicted after a TTL by a periodic
 janitor, and `queue_depth` counts only non-terminal jobs.
 
+**An `accepted` job can also leave the queue without ever running (ADR 0064).** Two terminal `error`
+records say so, and both mean "nothing ran, so re-placing the work cannot double-run it":
+
+- `withdrawn: ...` — the job's delegator asked for it back. `DELETE /fleet/jobs/{id}` (agent bearer, like
+  the poll) takes back a job that is still `accepted`, under the same mutex the scheduler claims under,
+  so a claim and a withdraw cannot both succeed. A running or finished job is never touched (`409` with
+  its state); a repeat answers `200` again, as does a request for a job the node already took back itself
+  (reaped, or marked never-started at shutdown); a media job is `405`; a node without the route answers
+  `405`/`404`, which a delegator reads as "no withdraw here".
+- `reaped: ...` — nobody polled the job for `fleet_poll_lease_sec` (default 60 s; negative = off; a
+  value under 15 is raised to 15). Only an `accepted` agent job a delegator PUSHED is ever reaped: the
+  scheduler's claim scan skips it at once and a ticker takes it, so a ghost never starts in the gap
+  between ticks. A running job, a job the pull queue claimed, and media and vision jobs are never
+  reaped. Authorized polls, authorized duplicate dispatches and parked long polls keep a job alive; the
+  unauthenticated jobs feed, a poll that failed the bearer gate and a duplicate dispatch without the
+  bearer (`401`, whatever `task_type` it declares) do not.
+
+The node counts both routes since the process started (`jobs_withdrawn`, `jobs_reaped`; see the health
+table), logs one line per withdraw and one per reap pass, and `fleet-serve` prints the lease in force at
+start-up. A drain's `not started: ...` marks are a third route to a job that never ran and are counted in
+neither.
+
+A run that finishes more than a lease after its poller last looked is an abandoned run, and its wall no
+longer feeds `recent_agent_wall_sec` (or the Retry-After built from it). Why all of this exists: every
+delegator give-up used to leave the job on the node to run for nobody, which took 43 % and 59 % of two
+nodes' agent runs on 2026-09-29. See [ADR 0064](../architecture/decisions/0064-a-delegator-takes-back-what-it-has-not-started.md)
+and [Taking a job back](../FLEET-NODE.md#taking-a-job-back-withdraw-and-the-poll-lease).
+
 **`accepted` is a real waiting state (0.100.0).** Accepting a job used to start it, so `accepted`
 lasted microseconds and the node had no queue at all — just an unbounded pile of concurrent
 executions that one config key happened to cap. A dispatch is now *admitted* to a FIFO, and a single
@@ -137,7 +165,9 @@ distinction below trustworthy: a job still `accepted` when shutdown begins prova
 
 **Duplicate dispatch is idempotent, with one deliberate exception.** Re-dispatching a job id that is
 `accepted`, `running`, or `done` re-acks `202` and does **not** start a second run. A job in `error`
-returns `409`.
+returns `409`. For an agent or vision job on a node with a `fleet_auth_token`, all of it is answered only to
+a caller carrying the bearer, whatever `task_type` the duplicate declares (`401` otherwise): the job's own
+record decides.
 
 The asymmetry is intentional and worth understanding before changing it: the dispatcher treats any
 non-`202` as a refusal and may send the job elsewhere. If a `done` job answered non-`202`, the
@@ -177,7 +207,11 @@ different answers:
 provider** ([ADR 0014](../architecture/decisions/0014-gpu-memory-provider-and-uma-sampling.md)):
 `nvidia-smi` where it works, else the windows-generic WDDM source (registry `qwMemorySize` capacity
 + `\GPU Adapter Memory` PDH usage; UMA iGPUs advertise carve-out + the ~RAM/2 shared budget and
-Dedicated+Shared usage) — a global sampler polling every two seconds either way. There is no
+Dedicated+Shared usage) — a global sampler polling every two seconds either way. On Linux the
+generic source is the amdgpu sysfs probe ([ADR 0053](../architecture/decisions/0053-linux-amdgpu-gpu-memory-provider.md)),
+or, for a unified-memory SoC tier with no VRAM counter (`rockchip-rk3588`), `/proc/meminfo`
+less the operator's `uma_reserve_gib` (`fleetnode.MeminfoUMAProbe`: capacity `MemTotal − reserve`,
+free `MemAvailable − reserve` clamped to `[0, capacity]`). There is no
 per-process path here. A sampling failure keeps the last good snapshot rather than publishing
 zeros, bounded by the 30-second staleness gate.
 
@@ -239,7 +273,12 @@ Full reasoning in [ADR 0008](../architecture/decisions/0008-pdh-primary-vram-sam
 
 Binding beyond loopback requires `--listen-trusted-network`. Note that `:18811` with an empty host is
 treated as non-loopback and refused — see
-[ADR 0005](../architecture/decisions/0005-loopback-only-serve.md).
+[ADR 0005](../architecture/decisions/0005-loopback-only-serve.md). Since 0.144.1 the flag permits one
+specific address only: an all-interfaces address (empty host, `0.0.0.0`, `[::]`) and an address that
+does not parse are refused with or without it (`netguard.AllInterfaces`, shared by fleet-serve,
+local-agent and fleet-ui). The Linux unit's `Restart=on-failure` + `RestartSec=15` then covers the
+boot race where `tailscale ip -4` prints nothing yet: the start fails and retries until the tailnet
+address exists, instead of binding every interface.
 
 ## Dependencies
 
@@ -515,6 +554,8 @@ new is sampled (register C-05 stands: probing an unloaded seat through llama-swa
 | Health field | Type | Meaning |
 |---|---|---|
 | `jobs_admitting` | int, omitted when 0 | The subset of `jobs_running` whose worker has **not started generating**: it is still in the run's admission phase — cordon → swap pre-flight → warm → coherence probe — which the node budgets up to 300 s for. Counted from this process's own `gpuactivity` records with `phase: "admission"` (ADR 0041), never from the job store, which knows a worker took the job but not what that worker is waiting for. The registry is opened at most once per 2 s and **retried** — a briefly unresolvable state root does not silence the field for the life of the process — and a registry that cannot be opened or listed is logged once, because `0` is a legitimate value and silence would make the two indistinguishable. |
+| `jobs_withdrawn` | int, omitted when 0 | Jobs a delegator took back out of this node's backlog (`DELETE /fleet/jobs/{id}`) since the process started. The call that flipped a job counts once; a repeat does not. ADR 0064. |
+| `jobs_reaped` | int, omitted when 0 | Accepted agent jobs the poll-lease reaper took because nobody was polling them, since the process started. A drain's never-started marks count in neither. ADR 0064. |
 | `seat_loaded` | bool, omitted when unread | llama-swap's `/running` says the agent seat is loaded. Served from the 30 s residency cache; a read older than two windows or never taken waits (bounded by `residencyWaitBound`, 1.5 s) for a fresh `/running` before answering; an agent contract that completed a call on this seat writes the loaded state straight into the cache (0.128.2, below). |
 | `seat_starting` | bool, omitted when unread | …and is still LOADING (llama-swap holds `/upstream/<seat>/…` for the whole load — 4m08s on the 27B TP2 seat, register D-92), so "loaded" is not yet "ready". |
 | `lease_exclusive` | bool, omitted when false | The held lease FENCES the cards: no model may be loaded onto them for its duration. |
@@ -1291,6 +1332,8 @@ wait after ONE transient error, which is S-08 again, intermittently.
   persistence
 - [`internal/fleetnode/vram.go`](../../internal/fleetnode/vram.go),
   [`vram_windows.go`](../../internal/fleetnode/vram_windows.go) — the two sampling paths
+- [`internal/fleetnode/vram_uma_meminfo.go`](../../internal/fleetnode/vram_uma_meminfo.go) — the
+  linux-meminfo memory provider of a unified-memory SoC tier (`rockchip-rk3588`)
 - [`internal/gpuprobe/`](../../internal/gpuprobe/) — the nvidia-smi command + per-device parser and
   the host free-RAM reader (leaf; fleetnode's `GPUDevice`/`ParseSmiMemoryDevices`/`HeadlineDevice`
   alias it)

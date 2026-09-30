@@ -59,6 +59,71 @@ func IsHostedNVIDIA(base string) bool {
 // subdomains receive the key.
 const nvidiaAPIHost = "api.nvidia.com"
 
+// BaseAllowed reports whether a caller-named base is one offload_nim may
+// target (security standard L5, register S-30): NVIDIA's hosted API
+// (IsHostedNVIDIA), the configured endpoint, or an entry of the operator's
+// extra list. A base matches an entry when scheme, host (case-insensitive,
+// trailing root dot dropped) and port are equal — the default port made
+// explicit — and the entry's path is a prefix of the base's path on a segment
+// boundary. why names the rule that matched, or the reason nothing did.
+func BaseAllowed(base, configured string, extra []string) (ok bool, why string) {
+	if IsHostedNVIDIA(base) {
+		return true, "NVIDIA hosted API"
+	}
+	b, err := parseBase(base)
+	if err != nil {
+		return false, "unparseable base: " + err.Error()
+	}
+	if configured != "" {
+		if c, cerr := parseBase(configured); cerr == nil && baseCovers(c, b) {
+			return true, "nim_endpoint"
+		}
+	}
+	for _, e := range extra {
+		if c, cerr := parseBase(e); cerr == nil && baseCovers(c, b) {
+			return true, "nim_bases entry " + e
+		}
+	}
+	return false, "not NVIDIA's hosted API, nim_endpoint or a nim_bases entry"
+}
+
+type nimBase struct{ scheme, host, port, path string }
+
+func parseBase(raw string) (nimBase, error) {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return nimBase{}, err
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return nimBase{}, fmt.Errorf("scheme %q is not http(s)", u.Scheme)
+	}
+	if u.User != nil {
+		return nimBase{}, fmt.Errorf("a base with userinfo is never allowlisted")
+	}
+	host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
+	if host == "" {
+		return nimBase{}, fmt.Errorf("no host")
+	}
+	port := u.Port()
+	if port == "" {
+		port = map[string]string{"http": "80", "https": "443"}[strings.ToLower(u.Scheme)]
+	}
+	return nimBase{scheme: strings.ToLower(u.Scheme), host: host, port: port, path: strings.TrimRight(u.EscapedPath(), "/")}, nil
+}
+
+// baseCovers: same scheme, host and port, and the entry's path is a prefix of
+// the base's path on a segment boundary ("/v1" covers "/v1" and "/v1/x", never
+// "/v1x").
+func baseCovers(entry, b nimBase) bool {
+	if entry.scheme != b.scheme || entry.host != b.host || entry.port != b.port {
+		return false
+	}
+	if entry.path == "" || entry.path == b.path {
+		return true
+	}
+	return strings.HasPrefix(b.path, entry.path+"/")
+}
+
 // KeyForBase returns the API key to transmit to base: the env key for NVIDIA's
 // hosted API, and "" for ANY other base. This is a security boundary, not just a
 // convenience — the NVIDIA key is only valid on NVIDIA's endpoints, so silently
