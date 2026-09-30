@@ -15,6 +15,22 @@ fails the suite on any new bare HTTP client (ADR 0042 made executable) until the
 its reason; the first review lists 43 sites, one of them open (`offload_nim`'s caller-named base, next in L5).
 The ADR index row for 0061 now describes the rolling allowance that shipped, not the first draft.
 
+## [0.144.1] - 2026-09-30 - the trusted-network flag permits one address, never every interface
+
+### Security — a fleet node could serve its unauthenticated endpoints on every interface after a boot race
+
+`--listen-trusted-network` returned before any check, so it permitted ANY listen address. A Linux unit's
+`--listen "$(tailscale ip -4)":18811` that ran before tailscaled had an address expanded to `:18811` and
+bound every interface instead of failing — one fleet node served its unauthenticated fleet endpoints that
+way until its next restart, and the unit's `Restart=on-failure`, written for exactly that boot race, never
+fired because nothing failed. The flag now permits one specific address: an all-interfaces address (empty
+host, `0.0.0.0`, `[::]` and their spellings) and an address that does not parse are refused with or
+without it (`netguard.AllInterfaces`, now also the rule fleet-ui uses). fleet-serve, local-agent and
+fleet-ui share it. `setup/install.sh`'s unit gains `RestartSec=15`, so the failed start retries until the
+tailnet address exists without hitting systemd's default start limit (a unit without it gives up after five
+quick failures). Tests: the boot-race shape through fleet-serve's own parameter seam, the validator table
+with and without the flag, local-agent's listen guard — each red against the previous validator.
+
 ## [0.144.0] - 2026-09-30 - Rockchip RK3588 boards join the fleet as their own tier, serving from the NPU
 
 ### Added — the `rockchip-rk3588` tier (ADR 0062)

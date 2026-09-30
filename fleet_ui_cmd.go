@@ -46,7 +46,7 @@ func fleetUIRemotes(cfg config.Config, explicit []string) []string {
 // reason). Only past that gate does the loopback-vs-trusted check apply:
 // loopback is always fine, and anything else needs trusted.
 func refuseListen(listen string, trusted bool) error {
-	if strings.HasPrefix(listen, "0.0.0.0") || strings.HasPrefix(listen, "[::]") || strings.HasPrefix(listen, ":") {
+	if netguard.AllInterfaces(listen) {
 		return fmt.Errorf("fleet-ui: refusing to bind all interfaces (%s)", listen)
 	}
 	if !trusted && !netguard.LoopbackAddr(listen) {
