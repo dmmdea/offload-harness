@@ -12,14 +12,15 @@
 # live engine's workers are never touched), and the MP server is matched by THIS stack's MP port and unit, never by
 # whatever holds a port — a foreign listener is left alone, and seat_fg.sh refuses to start on it.
 # SEAT_REAP_WAIT_SEC (default 10) is how long a reaped process gets to exit before it is reported as stuck, and how long
-# an MP server gets to obey SIGTERM before SIGKILL.
+# an MP server gets to obey SIGTERM before SIGKILL. It is read as a decimal number of seconds ("08" is 8, not an octal
+# error that skips every wait), a value that is not a number means 10, and 0 waits for nothing but still looks once.
 set -u
 CFG="${1:-${SEAT_ENV:-/root/g7/seat.env}}"
 [ -f "$CFG" ] && . "$CFG"
 PORT="${SEAT_PORT:-18797}"
 MP_UNIT="${SEAT_MP_UNIT:-lmcache-mp}"
 MP_PORT="${SEAT_MP_PORT:-18796}"
-WAIT="${SEAT_REAP_WAIT_SEC:-10}"; case "$WAIT" in ''|*[!0-9]*) WAIT=10 ;; esac
+WAIT="${SEAT_REAP_WAIT_SEC:-10}"; case "$WAIT" in ''|*[!0-9]*) WAIT=10 ;; esac; WAIT=$((10#$WAIT))
 PAT="vllm serve .*--port $PORT"
 # The API server owns the engine as CHILD processes ("VLLM::EngineCore", "VLLM::Worker_TP0" …). Killing the server
 # alone leaves them alive when it dies mid-request — measured 2026-09-05: an EngineCore + worker outlived the
@@ -43,6 +44,8 @@ has_api_ancestor() { local q="$1" n=0; while [ "$q" -gt 1 ] 2>/dev/null && [ $n 
   q=$(ps -o ppid= -p "$q" 2>/dev/null | tr -d ' '); n=$((n+1)); [ -z "$q" ] && break; done; return 1; }
 # A killed process that is still listed as a zombie has released its memory: only a live entry counts as stuck.
 alive() { kill -0 "$1" 2>/dev/null && [ "$(ps -o stat= -p "$1" 2>/dev/null | cut -c1)" != Z ]; }
+# The processes of a list that are still alive, each with a leading space (nothing when none is).
+alive_of() { local p out=""; for p in "$@"; do alive "$p" && out="$out $p"; done; echo "$out"; }
 REAPED=""; STUCK=""
 for p in $(ps -eo pid,args 2>/dev/null | awk '$2 ~ /^VLLM::/ {print $1}'); do
   if ! has_api_ancestor "$p"; then
@@ -53,10 +56,8 @@ done
 # SIGKILL is the end of what a signal can do: a process stuck in the GPU driver (state D) survives it, keeps its VRAM and
 # fails the next start. Wait for the reaped processes to go and name any that stay, so the cause is in the log.
 if [ -n "$REAPED" ]; then
-  for _ in $(seq 1 $(( WAIT * 2 ))); do
-    STUCK=""; for p in $REAPED; do alive "$p" && STUCK="$STUCK $p"; done
-    [ -z "$STUCK" ] && break; sleep 0.5
-  done
+  for _ in $(seq 1 $(( WAIT * 2 ))); do [ -z "$(alive_of $REAPED)" ] && break; sleep 0.5; done
+  STUCK="$(alive_of $REAPED)"   # judged after the wait, not only inside it, so a wait of 0 still looks
   if [ -n "$STUCK" ]; then
     echo "seat_stop: WARN orphaned engine process(es) still alive ${WAIT} s after SIGKILL:$(for p in $STUCK; do printf ' %s(state %s)' "$p" "$(ps -o stat= -p "$p" 2>/dev/null | tr -d ' ')"; done) — a process in state D is stuck in the GPU driver and keeps its VRAM until it exits"
   else
@@ -80,10 +81,8 @@ for p in $(pgrep -f "$MP_PAT" 2>/dev/null); do
   echo "seat_stop: MP server $p ignored SIGTERM for ${WAIT} s; SIGKILL"; kill -KILL "$p" 2>/dev/null; MP_KILLED="$MP_KILLED $p"
 done
 if [ -n "$MP_KILLED" ]; then
-  for _ in $(seq 1 $(( WAIT * 2 ))); do
-    MP_STUCK=""; for p in $MP_KILLED; do alive "$p" && MP_STUCK="$MP_STUCK $p"; done
-    [ -z "$MP_STUCK" ] && break; sleep 0.5
-  done
+  for _ in $(seq 1 $(( WAIT * 2 ))); do [ -z "$(alive_of $MP_KILLED)" ] && break; sleep 0.5; done
+  MP_STUCK="$(alive_of $MP_KILLED)"
   [ -n "$MP_STUCK" ] && echo "seat_stop: WARN MP server still alive ${WAIT} s after SIGKILL:$(for p in $MP_STUCK; do printf ' %s(state %s)' "$p" "$(ps -o stat= -p "$p" 2>/dev/null | tr -d ' ')"; done)"
 fi
 # --- reaping ends here: seat_fg.stale-mp.tests.sh runs everything above this line against stand-in processes; the rest touches the box ---

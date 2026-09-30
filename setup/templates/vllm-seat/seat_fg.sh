@@ -200,11 +200,12 @@ fi
 # or run a stop. seat_stop.sh reaps only what is provably this seat's own — such orphans, and the MP server of THIS
 # stack's MP port, by process and by unit, never by what holds a port — so anything still holding the MP HTTP port after it
 # is foreign and is refused exactly as before. A stopping unit can hold its socket for a few seconds, so the re-check
-# waits up to SEAT_MP_PORT_WAIT_SEC (default 10) for the port to free instead of judging one look. This is the only
+# waits up to SEAT_MP_PORT_WAIT_SEC (default 10; a decimal number of seconds, 0 = judge at once) for the port to free
+# instead of judging one look. This is the only
 # cleanup the launcher owns: the script becomes `vllm serve` (exec, below), so nothing of it survives a crash to clean up
 # after it — the Windows stub's crash exit runs the same cleanup through the stop task, and there is no watchdog and no
 # proactive relaunch anywhere.
-MP_PORT_WAIT="${SEAT_MP_PORT_WAIT_SEC:-10}"; case "$MP_PORT_WAIT" in ''|*[!0-9]*) MP_PORT_WAIT=10 ;; esac
+MP_PORT_WAIT="${SEAT_MP_PORT_WAIT_SEC:-10}"; case "$MP_PORT_WAIT" in ''|*[!0-9]*) MP_PORT_WAIT=10 ;; esac; MP_PORT_WAIT=$((10#$MP_PORT_WAIT))
 has_api_ancestor() { local q="$1" n=0; while [ "$q" -gt 1 ] 2>/dev/null && [ $n -lt 32 ]; do
   if ps -o args= -p "$q" 2>/dev/null | grep -q "vllm serve"; then return 0; fi
   q=$(ps -o ppid= -p "$q" 2>/dev/null | tr -d ' '); n=$((n+1)); [ -z "$q" ] && break; done; return 1; }
