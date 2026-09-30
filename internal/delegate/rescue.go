@@ -97,11 +97,18 @@ func rescueSchemaMiss(ctx context.Context, rescue RescueFunc, contract core.Agen
 	if budget < rescueFloor {
 		budget = rescueFloor
 	}
+	rescueStart := time.Now()
 	got, err := rescue(ctx, contract, pr.Result.Output, budget)
 	if err == nil {
 		err = validateRescued(contract, got.Structured)
 	}
 	if err != nil {
+		// The defer stands and may be re-placed (a seat lost in the re-pack is): the wall
+		// this rescue spent was delegator time spent on neither node's work, and the
+		// re-placement's budget is credited it back (admissionCredit). It can be minutes,
+		// because the rescue may cold-load the delegator's own seat on the admission
+		// budget and then run a completion to its allowance.
+		pr.rescueSpent = time.Since(rescueStart)
 		log.Printf("delegate: the finished answer of job %s on %s could not be re-packed on the delegator (the defer stands): %v", jobLabel(pr), nodeLabel(pr), err)
 		pr.Result.RepackNote = joinRepackNote(pr.Result.RepackNote, "rescue on the delegator failed: "+errText(err))
 		return pr

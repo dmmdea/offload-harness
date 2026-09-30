@@ -93,20 +93,57 @@ func TestTheSeatDownDeferCreditsBackAdmissionAndTheWait(t *testing.T) {
 	}
 }
 
-// Only the seat-down defer is credited its wait: every other result keeps what it
-// had (nothing, or the coherence defer's admission).
+// A seat lost in the structured re-pack reports no wait of its own (the loop's
+// recovery does not cover the re-pack) and the delegator's rescue ran first, on its
+// own clock: what a FAILED rescue spent is credited back with the node's admission and
+// wait, inside the same one-contract-wall bound. Uncredited, a rescue that cold-loads
+// the delegator's seat and runs a completion to its allowance (minutes) leaves the retry
+// floor to refuse the re-placement the defer is promised.
+func TestTheSeatDownDeferCreditsBackTheWallOfAFailedRescue(t *testing.T) {
+	pr := PlacedResult{Result: seatDownWire("node-a", 0), rescueSpent: 400 * time.Second}
+	pr.Result.AdmissionWaitSec = 30
+	if got := admissionCredit(pr); got != 430*time.Second {
+		t.Fatalf("admissionCredit = %v, want the 30 s of admission plus the 400 s the failed rescue spent", got)
+	}
+	pr.Result.SeatDownWaitSec = 100
+	if got := admissionCredit(pr); got != 530*time.Second {
+		t.Fatalf("admissionCredit = %v, want admission, the wait on the dead seat and the rescue's wall added", got)
+	}
+	// The retry's budget: a 300 s contract whose first attempt took 420 s of the delegator's
+	// clock (20 s of work, a 400 s rescue) has nothing left until the rescue is credited.
+	start := time.Now().Add(-420 * time.Second)
+	pl := newPlacements()
+	if got := pl.remaining(start, 300); got >= 0 {
+		t.Fatalf("uncredited remaining = %d, want nothing left (premise)", got)
+	}
+	pl.credit += admissionCredit(PlacedResult{Result: seatDownWire("node-a", 0), rescueSpent: 400 * time.Second})
+	if got := pl.remaining(start, 300); got < 279 || got > 281 {
+		t.Fatalf("credited remaining = %d, want about 280", got)
+	}
+	// Bounded, with the rest of the credit, by one contract wall.
+	huge := PlacedResult{Result: seatDownWire("node-a", 200), rescueSpent: 1e6 * time.Second}
+	if got := admissionCredit(huge); got != time.Duration(core.AgentTimeoutSecCap)*time.Second {
+		t.Fatalf("admissionCredit = %v: a slow rescue must never buy more than one contract wall (%d s)", got, core.AgentTimeoutSecCap)
+	}
+}
+
+// Only the seat-down defer is credited its wait and its rescue: every other result
+// keeps what it had (nothing, or the coherence defer's admission).
 func TestOnlyTheSeatDownDeferIsCreditedItsWait(t *testing.T) {
 	for _, tc := range []struct {
-		name   string
-		result core.AgentWireResult
+		name        string
+		result      core.AgentWireResult
+		rescueSpent time.Duration
 	}{
-		{"a clean result", core.AgentWireResult{Output: "42", StopReason: "done", SeatDownWaitSec: 200}},
-		{"another infrastructure defer", core.AgentWireResult{Deferred: true, DeferClass: core.DeferClassInfrastructure, Reason: "agent loop: chat 502", SeatDownWaitSec: 200}},
-		{"a coherence defer ignores a wait it did not have", core.AgentWireResult{Deferred: true, DeferClass: core.DeferClassInfrastructure, Reason: core.IncoherentSeatReason + "x", SeatDownWaitSec: 200}},
-		{"a seat-down defer that reports nothing", core.AgentWireResult{Deferred: true, DeferClass: core.DeferClassInfrastructure, Reason: core.SeatDownReason + "x"}},
+		{"a clean result", core.AgentWireResult{Output: "42", StopReason: "done", SeatDownWaitSec: 200}, 0},
+		{"another infrastructure defer", core.AgentWireResult{Deferred: true, DeferClass: core.DeferClassInfrastructure, Reason: "agent loop: chat 502", SeatDownWaitSec: 200}, 0},
+		{"a coherence defer ignores a wait it did not have", core.AgentWireResult{Deferred: true, DeferClass: core.DeferClassInfrastructure, Reason: core.IncoherentSeatReason + "x", SeatDownWaitSec: 200}, 0},
+		{"a seat-down defer that reports nothing", core.AgentWireResult{Deferred: true, DeferClass: core.DeferClassInfrastructure, Reason: core.SeatDownReason + "x"}, 0},
+		{"a failed rescue's wall on a defer that is not the seat-down one", core.AgentWireResult{Deferred: true, DeferClass: core.DeferClassInfrastructure, Reason: "structured re-pack unreachable: stalled: no progress for 120s in repack"}, 400 * time.Second},
+		{"a failed rescue's wall on a coherence defer", core.AgentWireResult{Deferred: true, DeferClass: core.DeferClassInfrastructure, Reason: core.IncoherentSeatReason + "x"}, 400 * time.Second},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := admissionCredit(PlacedResult{Result: tc.result}); got != 0 {
+			if got := admissionCredit(PlacedResult{Result: tc.result, rescueSpent: tc.rescueSpent}); got != 0 {
 				t.Fatalf("admissionCredit = %v, want 0 for %s", got, tc.name)
 			}
 		})

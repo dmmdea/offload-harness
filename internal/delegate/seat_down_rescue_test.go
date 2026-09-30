@@ -3,6 +3,7 @@ package delegate
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -100,5 +101,58 @@ func TestASeatDownDuringTheRepackIsReplacedWhenTheRescueFails(t *testing.T) {
 	}
 	if nodeA.dispatches.Load() != 1 || nodeB.dispatches.Load() != 1 {
 		t.Fatalf("dispatches A=%d B=%d, want one each", nodeA.dispatches.Load(), nodeB.dispatches.Load())
+	}
+}
+
+// The rescue runs on the delegator's own clock BEFORE the re-placement is priced, and a
+// seat lost in the structured re-pack has no recovery wait to credit (the loop's recovery
+// does not cover the re-pack, so seat_down_wait_sec is 0 here). A rescue that fails
+// SLOWLY — it may cold-load the delegator's own seat on the admission budget and then run
+// a completion to its allowance — spent time on neither node's work; charged to the retry
+// budget it made the retry floor refuse the very re-placement a failed rescue is promised
+// (ADR 0066, decision 3). The wall it spent is credited back with the rest of what was not
+// work.
+func TestASeatDownDuringTheRepackIsReplacedAfterASlowRescueFails(t *testing.T) {
+	compressPolls(t, 10*time.Millisecond, 2*time.Second)
+	nodeA, urlA := eligibleNode(t, "node-a", "unused")
+	w := seatDownDuringTheRepack("node-a")
+	w.SeatDownWaitSec = 0 // the re-pack has no recovery wait: the rescue's own wall is the only credit left
+	nodeA.pollByJob = func(string, int64) (map[string]any, int) { return doneWire(t, w), 200 }
+	nodeB, urlB := eligibleNode(t, "node-b", "the answer from B")
+	var retry atomic.Value
+	nodeB.onDispatch = func(_ string, c core.AgentContract) { retry.Store(c) }
+	var calls atomic.Int64
+	slowRescue := func(ctx context.Context, _ core.AgentContract, _ string, _ time.Duration) (Rescued, error) {
+		calls.Add(1)
+		select {
+		case <-time.After(6 * time.Second):
+		case <-ctx.Done():
+		}
+		return Rescued{}, errors.New("the local seat is not serving")
+	}
+	// 15 s of budget against the 10 s retry floor: a 6 s rescue leaves about 8 s when it is
+	// charged (elapsed rounds up, and the first attempt's own poll counts too) and about 14 s
+	// when it is credited, so the floor refuses the re-placement exactly when it is charged.
+	contract := rescueContract()
+	contract.Acceptance = []string{"nonempty:answer"}
+	contract.TimeoutSec = 15
+	cfg := testCfg(t)
+	cfg.GPULockPath = holdFence(t, gpulease.Options{Reason: "bench", Exclusive: true})
+
+	results, sum, err := RunWith(context.Background(), cfg, neverLocal(t), []core.AgentContract{contract}, "spread", []string{urlA, urlB}, &RunOptions{Rescue: slowRescue})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := results[0]
+	if calls.Load() != 1 || sum.Retried != 1 || r.RetriedOn != "node-b" || r.Result.Deferred {
+		t.Fatalf("rescue calls=%d retried=%d retried_on=%q deferred=%v note=%q: want the slow failed rescue followed by a re-placement on node-b",
+			calls.Load(), sum.Retried, r.RetriedOn, r.Result.Deferred, r.RetryNote)
+	}
+	if nodeA.dispatches.Load() != 1 || nodeB.dispatches.Load() != 1 {
+		t.Fatalf("dispatches A=%d B=%d, want one each", nodeA.dispatches.Load(), nodeB.dispatches.Load())
+	}
+	second, _ := retry.Load().(core.AgentContract)
+	if second.TimeoutSec < 12 {
+		t.Fatalf("retry timeout = %d s of 15: the 6 s the rescue spent were not credited back (want about 14; about 8 is what a retry that is charged for it is left)", second.TimeoutSec)
 	}
 }

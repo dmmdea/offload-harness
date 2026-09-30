@@ -137,6 +137,12 @@ type PlacedResult struct {
 	nodeNeverRan    string
 	queuedWait      time.Duration
 	PlacementReason string
+	// rescueSpent is the wall a delegator-side rescue of this result's finished answer
+	// spent and FAILED to turn into a validated object (rescueSchemaMiss); zero when no
+	// rescue ran or it delivered. It is delegator time spent on neither node's work, so a
+	// seat-down defer that is re-placed after it is credited it back (admissionCredit),
+	// like the wait its node spent on the dead seat.
+	rescueSpent time.Duration
 	// Err is non-empty when the subtask FAILED for transport/config reasons
 	// (dispatch refused, auth rejected, undecodable result). Counted in
 	// Summary.Failed, never in Deferred — eight quiet defers and one broken
@@ -2333,7 +2339,8 @@ const minRetrySec = 10
 // went down under the run and did not come back inside the node's own bounded
 // wait. Same argument — a property of THIS seat, a sound contract, the cure is
 // another node — and the wait the node spent on the dead seat is credited back
-// the same way.
+// the same way, with the wall of a delegator-side rescue that failed first (a seat
+// lost in the structured re-pack is rescued before it is re-placed).
 func retryable(pr PlacedResult) bool {
 	if pr.Err != "" {
 		return false
@@ -2447,10 +2454,17 @@ func admissionDefer(r core.AgentWireResult) bool {
 // node that reports no admission (a pre-D-118 node, or an unmeasured one) is
 // credited nothing rather than guessed at.
 //
-// A seat-down defer (ADR 0066) is credited its admission AND the wait the node
-// spent on the downed seat (seat_down_wait_sec): time the contract provably did
-// not spend working, on a seat that could not serve it. The credit is bounded by
-// one full contract wall (core.AgentTimeoutSecCap): a node's number never buys
+// A seat-down defer (ADR 0066) is credited its admission, the wait the node
+// spent on the downed seat (seat_down_wait_sec) AND the wall a failed
+// delegator-side rescue spent (rescueSpent): time the contract provably did not
+// spend working, on a seat that could not serve it or on this box's attempt to
+// save a finished answer. The last term is the one a seat lost in the structured
+// re-pack depends on: the loop's recovery does not cover the re-pack, so that
+// defer reports no wait of its own, and the rescue that runs first on this box's
+// clock may cold-load its own seat and run a completion to its allowance —
+// minutes that, charged to the retry budget, made the retry floor refuse the
+// re-placement the defer is promised. The credit is bounded by one full contract
+// wall (core.AgentTimeoutSecCap): neither a node's number nor a slow rescue buys
 // the retry more than that.
 func admissionCredit(pr PlacedResult) time.Duration {
 	secs := 0.0
@@ -2458,7 +2472,7 @@ func admissionCredit(pr PlacedResult) time.Duration {
 	case admissionDefer(pr.Result):
 		secs = pr.Result.AdmissionWaitSec
 	case SeatDownDefer(pr.Result):
-		secs = pr.Result.AdmissionWaitSec + pr.Result.SeatDownWaitSec
+		secs = pr.Result.AdmissionWaitSec + pr.Result.SeatDownWaitSec + pr.rescueSpent.Seconds()
 		if secs > core.AgentTimeoutSecCap {
 			secs = core.AgentTimeoutSecCap
 		}
