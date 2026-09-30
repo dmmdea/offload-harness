@@ -8,11 +8,13 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
+import { createHash } from "node:crypto";
+import { DEFAULTS as CAPTION_DEFAULTS } from "./captions-groups.mjs";
 import { fileURLToPath } from "node:url";
 import {
   ALLOWED_SUBCOMMANDS, FORCED_ENV, PASSTHROUGH_ENV_KEYS, PINNED_VERSION, applyTemplateVariables, assertAllowedInvocation,
   buildCheckArgs, buildChildEnv, buildRenderArgs, buildSnapshotArgs, classifyFailure, compositionMeta,
-  listTemplates, parseJsonDoc, rewriteRootDuration, summarizeProbe, verifyOutput,
+  listTemplates, materializeTemplate, parseJsonDoc, rewriteRootDuration, summarizeProbe, verifyOutput,
 } from "./compose-hyperframes.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -515,3 +517,256 @@ test("shipped templates: offline, deterministic, declared variables, a duration 
     assert.ok(existsSync(join(dir, n, "README.md")), `${n}: README`);
   }
 });
+
+// --- the hyperframes-student-kit ports ----------------------------------------------------------
+// Four templates adapted from a community teaching kit at ONE pinned commit, kept under the kit's own
+// licences (MIT for its original material, plus its own use permission for the style library and
+// templates). The kit is a reference, never an install: nothing here runs its scripts or its CLI.
+// These tests are the contract of the port: what ships, what must NOT survive the port (creator
+// names, brand palette, placeholder copy, CDN hosts), and proof that the licence texts were kept as
+// received. They run on a bare Node, like the rest of this file.
+
+const TEMPLATES_DIR = join(__dirname, "compose-templates");
+const KIT_COMMIT = "0d30152";
+// template -> the kit card it was adapted from (registry id) and whether it is an alpha overlay.
+const KIT_PORTS = {
+  "stat-card": { card: "kallaway.t1.stat.figure", alpha: false },
+  "section-title": { card: "kallaway.t1.section.breath", alpha: false },
+  "callout-label": { card: "kallaway.t2.label.callout", alpha: true },
+  "checklist-card": { card: "kallaway.t1.overview.checklist", alpha: false },
+};
+const KIT_TEMPLATE_NAMES = [...Object.keys(KIT_PORTS), "captions-bar"];
+
+function templateFiles(name) {
+  const dir = join(TEMPLATES_DIR, name);
+  return readdirSync(dir).map((f) => ({ file: f, text: readFileSync(join(dir, f), "utf8") }));
+}
+function declaredVariables(html) {
+  return JSON.parse(/data-composition-variables='([^']*)'/.exec(html)[1].replace(/&#39;/g, "'"));
+}
+
+test("kit ports: the four templates ship with the canvas, alpha flag and duration variable the plan names", () => {
+  const shipped = listTemplates(TEMPLATES_DIR);
+  for (const [name, want] of Object.entries(KIT_PORTS)) {
+    assert.ok(shipped.includes(name), `${name} is not shipped (shipped: ${shipped})`);
+    const manifest = JSON.parse(readFileSync(join(TEMPLATES_DIR, name, "template.json"), "utf8"));
+    const html = readFileSync(join(TEMPLATES_DIR, name, "index.html"), "utf8");
+    assert.equal(manifest.name, name);
+    assert.deepEqual([manifest.width, manifest.height, manifest.fps], [1920, 1080, 30], `${name}: canvas`);
+    assert.equal(manifest.alpha, want.alpha, `${name}: alpha flag`);
+    assert.equal(manifest.duration_variable, "duration");
+    assert.ok(manifest.description.length > 40, `${name}: description says what it draws`);
+    assert.equal(manifest.formats[0], want.alpha ? "webm" : "mp4", `${name}: the natural format leads`);
+    for (const f of ["webm", "mov", "png-sequence"]) assert.ok(manifest.formats.includes(f) || !want.alpha, `${name}: an alpha overlay offers ${f}`);
+    // the page's root says what the manifest says, and never carries audio (render silent, mux later)
+    const meta = compositionMeta(html);
+    assert.deepEqual([meta.width, meta.height, meta.fps], [manifest.width, manifest.height, manifest.fps], `${name}: root vs manifest`);
+    assert.equal(/data-composition-id="([^"]+)"/.exec(html)[1], name, `${name}: composition id is the template name`);
+    assert.match(html, /\bdata-no-timeline\b/, `${name}: CSS keyframes only, seeked by the CSS adapter`);
+    assert.equal(meta.hasAudio, false, `${name}: audio stays out of templates`);
+    // an alpha template must not paint an opaque page background
+    if (want.alpha) assert.match(html, /html,\s*body\s*\{[^}]*background:\s*transparent/, `${name}: transparent page background`);
+  }
+});
+
+test("kit ports: every declared variable is read by the page, typed for callers, bounded, and documented", () => {
+  for (const name of KIT_TEMPLATE_NAMES) {
+    const html = readFileSync(join(TEMPLATES_DIR, name, "index.html"), "utf8");
+    const readme = readFileSync(join(TEMPLATES_DIR, name, "README.md"), "utf8");
+    const manifest = JSON.parse(readFileSync(join(TEMPLATES_DIR, name, "template.json"), "utf8"));
+    const decls = declaredVariables(html);
+    const ids = decls.map((d) => d.id);
+    assert.equal(new Set(ids).size, ids.length, `${name}: duplicate variable id`);
+    for (const d of decls) {
+      assert.ok(["string", "color", "number", "boolean", "enum"].includes(d.type), `${name}.${d.id}: type ${d.type} is not accepted from callers`);
+      assert.ok(d.label, `${name}.${d.id}: label`);
+      assert.ok(readme.includes("`" + d.id + "`"), `${name}: the README's variable table does not document ${d.id}`);
+      const read = html.includes(`data-var-text="${d.id}"`) || new RegExp(`var\\(--${d.id}\\b`).test(html) || new RegExp(`getVariables\\(\\)[^;]*\\b${d.id}\\b`).test(html) || d.id === manifest.duration_variable; // the runner reads the duration variable
+      assert.ok(read, `${name}.${d.id}: declared, but nothing in the page reads it`);
+      if (d.type === "string") {
+        assert.ok(Number.isInteger(d.maxLength) && d.maxLength > 0, `${name}.${d.id}: a string variable needs an explicit maxLength (the runner's silent cap is 200)`);
+        assert.ok(d.default.length <= d.maxLength, `${name}.${d.id}: default longer than maxLength`);
+        assert.ok(!/['&<>]/.test(d.default), `${name}.${d.id}: default carries a character the attribute would have to escape`);
+      }
+      if (d.type === "number") {
+        assert.ok(Number.isFinite(d.min) && Number.isFinite(d.max) && d.default >= d.min && d.default <= d.max, `${name}.${d.id}: number needs min <= default <= max`);
+      }
+    }
+    for (const m of html.matchAll(/data-var-text="([^"]+)"/g)) assert.ok(ids.includes(m[1]), `${name}: data-var-text="${m[1]}" is not declared`);
+  }
+});
+
+test("kit ports: every variable takes its declared limit and refuses one past it", () => {
+  for (const name of KIT_TEMPLATE_NAMES) {
+    const html = readFileSync(join(TEMPLATES_DIR, name, "index.html"), "utf8");
+    const manifest = JSON.parse(readFileSync(join(TEMPLATES_DIR, name, "template.json"), "utf8"));
+    for (const d of declaredVariables(html)) {
+      if (d.type === "string") {
+        applyTemplateVariables(html, { [d.id]: "W".repeat(d.maxLength) }, manifest);
+        assert.throws(() => applyTemplateVariables(html, { [d.id]: "W".repeat(d.maxLength + 1) }, manifest), /longer than/, `${name}.${d.id}`);
+      } else if (d.type === "number") {
+        applyTemplateVariables(html, { [d.id]: d.min }, manifest);
+        applyTemplateVariables(html, { [d.id]: d.max }, manifest);
+        assert.throws(() => applyTemplateVariables(html, { [d.id]: d.min - 1 }, manifest), />= /, `${name}.${d.id}`);
+        assert.throws(() => applyTemplateVariables(html, { [d.id]: d.max + 1 }, manifest), /<= /, `${name}.${d.id}`);
+      }
+    }
+  }
+});
+
+// The residue gate. Names are matched CASE-SENSITIVELY on purpose: the source card ids in the
+// provenance line are lower-case registry ids (kallaway.t1.stat.figure), which the licence asks us to
+// state, while the capitalised style names, the brand acronym and the placeholder people are exactly
+// what the port must neutralise. The kit author's own name is confined to the retained licence text.
+const KIT_RESIDUE = [
+  [/\bAIS\b|AI Automation|Vox\b|Kallaway|\bInfinite\b|Dana Whitlock|Senior Correspondent|McKinsey|MCKINSEY|Global Payments/, "a creator, brand or placeholder name"],
+  [/jsdelivr|googleapis|gstatic|cdnjs|unpkg/i, "a CDN host"],
+  [/Nate Herk|nateherk/i, "the kit author's name outside the retained licence texts"],
+];
+// The kit's own placeholder copy for the four cards: none of it may ship as a default.
+const KIT_PLACEHOLDER_COPY = [
+  "ADOPTION RATE", "of organizations have", "deployed AI tools", "core workflows this year", "Module 04", "Why Attention",
+  "Why This Matters", "Context collapse", "silent killer", "Complete Pre-Launch", "Thumbnail tested", "front-loaded", "First 30 seconds", "End screen CTA",
+];
+
+test("kit ports: no creator name, brand palette, placeholder copy or CDN host survives in a shipped template", () => {
+  for (const name of KIT_TEMPLATE_NAMES) {
+    for (const { file, text } of templateFiles(name)) {
+      for (const [re, what] of KIT_RESIDUE) assert.ok(!re.test(text), `${name}/${file}: ${what} (${re})`);
+      for (const copy of KIT_PLACEHOLDER_COPY) assert.ok(!text.includes(copy), `${name}/${file}: kit placeholder copy "${copy}"`);
+      // the kit's AIS accent and its brand yellow/red/orange must not be the defaults of the port
+      assert.ok(!/#37bdf8|55,\s*189,\s*248|#f5d82a|#ff3b30|#ff8a5c/i.test(text), `${name}/${file}: a kit brand colour`);
+    }
+  }
+});
+
+test("kit ports: CSS animation is finite, nothing waits on a timer, and every @font-face lands in the shared kit", () => {
+  for (const name of listTemplates(TEMPLATES_DIR)) {
+    const html = readFileSync(join(TEMPLATES_DIR, name, "index.html"), "utf8");
+    assert.ok(!/\binfinite\b/.test(html), `${name}: an infinite animation cannot be captured to a fixed length`);
+    assert.ok(!/setTimeout|setInterval|requestAnimationFrame|await\s|async\s/.test(html), `${name}: timelines must be built synchronously`);
+    assert.ok(!/@import/.test(html), `${name}: @import is a network request`);
+    const declared = new Set();
+    for (const m of html.matchAll(/@font-face\s*\{([^}]*)\}/g)) {
+      declared.add(/font-family:\s*"([^"]+)"/.exec(m[1])[1]);
+      const src = /url\("([^"]+)"\)/.exec(m[1])[1];
+      assert.ok(src.startsWith("shared/fonts/") && existsSync(join(TEMPLATES_DIR, "_shared", src.slice("shared/".length))), `${name}: @font-face src ${src} is not in the shared kit`);
+    }
+    const css = html.replace(/@font-face\s*\{[^}]*\}/g, "");
+    for (const m of css.matchAll(/font-family:\s*([^;}]+)[;}]/g)) {
+      for (const fam of m[1].split(",").map((s) => s.trim())) {
+        const quoted = /^"([^"]+)"$/.exec(fam);
+        if (quoted) assert.ok(declared.has(quoted[1]), `${name}: font family ${fam} is used but not declared with @font-face`);
+        else assert.match(fam, /^(sans-serif|serif|monospace|system-ui|inherit)$/, `${name}: unquoted family ${fam}`);
+      }
+    }
+  }
+});
+
+test("kit ports: each README names its source card at the pinned kit commit and points at the retained licence texts", () => {
+  for (const [name, want] of Object.entries(KIT_PORTS)) {
+    const readme = readFileSync(join(TEMPLATES_DIR, name, "README.md"), "utf8");
+    assert.ok(readme.includes(`adapted from hyperframes-student-kit @${KIT_COMMIT} card ${want.card}`), `${name}: provenance line`);
+    const link = /\]\((\.\.\/_third_party\/hyperframes-student-kit\/[^)]*)\)/.exec(readme);
+    assert.ok(link, `${name}: no link to the retained licence texts`);
+    assert.ok(existsSync(join(TEMPLATES_DIR, name, link[1])), `${name}: README link ${link[1]} does not resolve`);
+    assert.match(readme, /## Changes from the source card/, `${name}: the README lists what was changed`);
+    assert.match(readme, /## Measured/, `${name}: the README carries a measured render`);
+  }
+});
+
+test("kit ports: the kit's MIT licence and use permission are kept verbatim under _third_party, which is never a template", () => {
+  const dir = join(TEMPLATES_DIR, "_third_party", "hyperframes-student-kit");
+  // hashes of the two files as they sit at the pinned kit commit (LF); a CRLF checkout is folded first
+  const sha = (f) => createHash("sha256").update(readFileSync(join(dir, f), "utf8").replace(/\r\n/g, "\n")).digest("hex");
+  assert.equal(sha("LICENSE"), "263623d3ac61f5b09eeceec5af2395bb15e566d0507558f5b6c405f2ba132bd1");
+  assert.equal(sha("PIPELINE-USE-PERMISSION.txt"), "51fc8998336079bd888662ac3ebc708ba05444a98b5ad26af757567f8125259d");
+  assert.ok(!listTemplates(TEMPLATES_DIR).includes("_third_party"));
+  const scratch = mkdtempSync(join(tmpdir(), "compose-tp-"));
+  assert.throws(() => materializeTemplate(TEMPLATES_DIR, "_third_party", {}, scratch), (e) => e.cls === "BAD_INPUT");
+  assert.ok(/kit_commit|0d30152a82b9ceb93cfdd9bdbf46f0d5ab3cde86/.test(readFileSync(join(dir, "PROVENANCE.md"), "utf8")), "PROVENANCE.md pins the full kit commit");
+});
+
+// --- captions-bar: word groups from a transcript, over transparency ------------------------------------
+// Authored for this harness (no kit card exists for it). Its one variable that matters is words_json:
+// [start,end,text] triples that render/captions-groups.mjs builds from offload_transcribe's
+// <base>.segments.json. HyperFrames accepted a 16 KB string variable through lint, check and
+// --strict-variables (measured), which is the cap this template declares.
+
+test("captions-bar: an alpha overlay whose words arrive as one bounded string variable, read through getVariables()", () => {
+  const dir = join(TEMPLATES_DIR, "captions-bar");
+  assert.ok(listTemplates(TEMPLATES_DIR).includes("captions-bar"), "captions-bar is not shipped");
+  const html = readFileSync(join(dir, "index.html"), "utf8");
+  const manifest = JSON.parse(readFileSync(join(dir, "template.json"), "utf8"));
+  assert.equal(manifest.name, "captions-bar");
+  assert.deepEqual([manifest.width, manifest.height, manifest.fps, manifest.alpha, manifest.duration_variable], [1920, 1080, 30, true, "duration"]);
+  assert.equal(manifest.formats[0], "webm");
+  assert.match(html, /html,\s*body\s*\{[^}]*background:\s*transparent/, "transparent page background");
+  assert.match(html, /\bdata-no-timeline\b/);
+  const decls = declaredVariables(html);
+  const words = decls.find((d) => d.id === "words_json");
+  assert.ok(words, "words_json is declared");
+  assert.equal(words.type, "string");
+  assert.equal(words.maxLength, 16000, "the cap that was measured");
+  const duration = decls.find((d) => d.id === "duration");
+  assert.deepEqual([duration.type, duration.min >= 1, duration.max], ["number", true, 600]);
+  // the default is a valid, ordered list of triples that fits inside the default duration
+  const triples = JSON.parse(words.default);
+  assert.ok(Array.isArray(triples) && triples.length >= 3, "a default worth looking at");
+  triples.forEach((t, i) => {
+    assert.ok(Array.isArray(t) && t.length === 3 && typeof t[0] === "number" && typeof t[1] === "number" && typeof t[2] === "string" && t[2], `default group ${i}`);
+    assert.ok(t[0] >= 0 && t[1] > t[0] && t[1] <= duration.default, `default group ${i} times`);
+    if (i) assert.ok(t[0] >= triples[i - 1][1], `default group ${i} overlaps the one before`);
+  });
+  // The runtime strips braces from every string it copies into a CSS custom property, so a JSON string can
+  // only be read through getVariables(); the text goes in with textContent, never as markup.
+  assert.match(html, /window\.__hyperframes\.getVariables\(\)/);
+  assert.ok(!/var\(--words_json/.test(html), "the custom property has lost its braces");
+  assert.ok(!/innerHTML|outerHTML|insertAdjacentHTML|document\.write|eval\(|new Function/.test(html), "text only, never markup or code");
+  assert.match(html, /textContent/);
+  // a malformed variable must fail the composition (check reports the exception) instead of rendering nothing
+  assert.match(html, /throw new Error\(/);
+  // and the finite, clock-free contract every template keeps (the shared test above covers the rest)
+  assert.ok(!/\bDate\b|Math\.random|performance\.now|setTimeout|setInterval|requestAnimationFrame/.test(html));
+});
+
+test("captions-bar: its limits are the helper's limits, and its README names the helper and keeps audio out", () => {
+  const html = readFileSync(join(TEMPLATES_DIR, "captions-bar", "index.html"), "utf8");
+  const decls = declaredVariables(html);
+  assert.equal(decls.find((d) => d.id === "words_json").maxLength, CAPTION_DEFAULTS.variableChars);
+  assert.equal(decls.find((d) => d.id === "duration").max, CAPTION_DEFAULTS.variableSec);
+  const readme = readFileSync(join(TEMPLATES_DIR, "captions-bar", "README.md"), "utf8");
+  assert.ok(readme.includes("render/captions-groups.mjs"), "README names the helper");
+  assert.ok(readme.includes("offload_media"), "README says how the audio is put back");
+  assert.match(readme, /silent/i, "README says the render is silent");
+  assert.match(readme, /## Measured/);
+});
+
+// The determinism guard. Measured on this batch: a keyframe that scales an element ABOVE its resting size
+// (a halo breathing to 1.06, a ring popping to 1.1) made the frames depend on which render worker drew
+// them, so 1 worker, 4 workers and a second run at 4 workers gave three different videos (about 80 of 180
+// frames, a few pixels off in the gradient); the same cards with the scale-up replaced by an opacity
+// pulse rendered identically at 1, 4 and 4 workers. Scaling UP TO the resting size (an entrance from
+// 0.6 or 0.9 to 1) was identical in every run. The ports therefore never scale past 1. This is a static
+// stand-in for the real gate, which is comparing framemd5 across worker counts (README, "Adding a template").
+test("kit ports: no keyframe scales an element above its resting size", () => {
+  for (const name of KIT_TEMPLATE_NAMES) {
+    const html = readFileSync(join(TEMPLATES_DIR, name, "index.html"), "utf8");
+    // a page driven from the seek event has no @keyframes: its transforms are set in script, so read those
+    if (/hf-seek/.test(html)) {
+      assert.ok(!/scale/i.test(html), `${name}: a scripted transform must not scale (frames would depend on the worker count)`);
+      continue;
+    }
+    let blocks = 0;
+    for (const block of html.matchAll(/@keyframes\s+([\w-]+)\s*\{((?:[^{}]|\{[^{}]*\})*)\}/g)) {
+      blocks++;
+      for (const fn of block[2].matchAll(/scale(?:X|Y|Z|3d)?\(([^)]*)\)/g)) {
+        for (const n of fn[1].split(",").map((s) => Number.parseFloat(s))) {
+          assert.ok(Number.isFinite(n) && n <= 1, `${name}: @keyframes ${block[1]} scales to ${fn[0]} (past its resting size: frames would depend on the worker count)`);
+        }
+      }
+    }
+    assert.ok(blocks >= 2, `${name}: the guard found no @keyframes to read`);
+  }
+});
+
