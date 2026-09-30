@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"sort"
 	"strings"
@@ -33,9 +34,30 @@ func APIKeyFromEnv() string {
 
 // IsHostedNVIDIA reports whether base targets NVIDIA's hosted API (which requires
 // a key), as opposed to a self-hosted NIM container (which is keyless).
+//
+// It decides who receives the key, so it matches the parsed HOST exactly: https,
+// no userinfo, the default port, and a host that IS api.nvidia.com or a DNS
+// subdomain of it (integrate.api.nvidia.com, ai.api.nvidia.com), compared
+// case-insensitively with a trailing root dot dropped. Until 0.143.1 it was a
+// substring test on the whole URL, so a caller-supplied base such as
+// https://attacker.example/integrate.api/v1 or
+// https://api.nvidia.com.attacker.example/v1 — one prompt-injected offload_nim
+// call — received NVIDIA_API_KEY as a Bearer token.
 func IsHostedNVIDIA(base string) bool {
-	return strings.Contains(base, "api.nvidia.com") || strings.Contains(base, "integrate.api")
+	u, err := url.Parse(strings.TrimSpace(base))
+	if err != nil || !strings.EqualFold(u.Scheme, "https") || u.User != nil {
+		return false
+	}
+	if p := u.Port(); p != "" && p != "443" {
+		return false
+	}
+	host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
+	return host == nvidiaAPIHost || strings.HasSuffix(host, "."+nvidiaAPIHost)
 }
+
+// nvidiaAPIHost is the DNS zone of NVIDIA's hosted API; only it and its
+// subdomains receive the key.
+const nvidiaAPIHost = "api.nvidia.com"
 
 // KeyForBase returns the API key to transmit to base: the env key for NVIDIA's
 // hosted API, and "" for ANY other base. This is a security boundary, not just a
