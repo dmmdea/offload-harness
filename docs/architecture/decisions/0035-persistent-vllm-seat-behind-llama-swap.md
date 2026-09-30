@@ -58,18 +58,30 @@ on every card.
 by one script, `seat_stop.sh`:
 
 1. **The next start.** `seat_fg.sh`, when no `vllm serve` of its own port is alive and it finds a leftover (a listener on the
-   MP HTTP port, an `lmcache server` of its MP port, an orphaned engine process: named `VLLM::*` with no live `vllm serve`
+   MP HTTP port, an `lmcache server` of its MP port, an orphaned engine process: named `VLLM::*` with no live vLLM API server
    above it, which a sibling seat's live workers are not), runs `seat_stop.sh` once, waits a bounded time for the MP HTTP
    port to free, and only then judges the port. The refusal on a port held by anything else is unchanged, and it is the
    last check in that block.
-2. **The stub's crash exit.** `seat-cmd.ps1` exits 0 when the seat has stopped answering for 30 s. Before it does, it starts
-   the operator-session stop task (the task `cmdStop` uses), waits for it (at most 90 s), and only then exits — unless the
-   seat's own start task is still running, which means a live launcher owns the seat.
+2. **The stub's crash exit.** `seat-cmd.ps1` exits 0 when the seat has stopped answering for 30 s. That exit ends every
+   unload as well as every crash: after a stop llama-swap asked for, the stub sees the same 30 s of silence, and in the live
+   stub logs about nine exits in ten were unloads. A crash is the exit that follows no stop request, so `seat-cmdstop.ps1`
+   (llama-swap's `cmdStop`) leaves a marker file, `seat-stop-requested-<seat>`, in the seat directory before it starts the
+   stop task; the stub removes any marker when the seat comes up (one an earlier generation left says nothing about this
+   one) and skips the cleanup when the marker is there. With no marker it starts the operator-session stop task (the task
+   `cmdStop` uses), waits for it (at most 90 s), reads and logs its last result, and only then exits — unless the seat's own
+   start task is still running, which means a live launcher owns the seat.
 
-**Identity, not port.** `seat_stop.sh` reaps an engine process only when no ancestor of it is a live `vllm serve`, and the MP
-server only by this stack's unit and its MP port (SIGTERM, then SIGKILL after `SEAT_REAP_WAIT_SEC`). It never picks a victim
-by the port it holds, so a foreign listener on the MP HTTP port is refused and left running. A worker that survives SIGKILL
-(a process stuck in the GPU driver stays in state D) is named in the log with its state, and the stop exits non-zero.
+**What is reaped, and how sure that is.** `seat_stop.sh` chooses by rules and never by the port a process holds. An engine
+process (its name starts with `VLLM::`) is reaped when no ancestor of it is a live vLLM API server (`vllm serve`, or
+`python -m vllm.entrypoints...`); the MP server only by this stack's unit and its MP port (SIGTERM, then SIGKILL after
+`SEAT_REAP_WAIT_SEC`). A foreign listener on the MP HTTP port is refused and left running. The engine rule reads the process
+tree, so it is a rule and not a proof of ownership: an engine started so that it has no such ancestor (a script that builds
+the engine in-process) looks orphaned to it, and the sweep has been box-wide since 0.113.11, when `cmdStop` first ran it. Run
+such jobs where no seat lives. A worker that survives SIGKILL (a process stuck in the GPU driver stays in state D) is named
+in the log with its state, and the stop exits 1. The stop appends its own output to the seat log, because the stop task has
+no stdout anyone reads (`seat_fg.sh` runs it attached and skips that); the stub reads the stop task's last result after a
+cleanup and logs one that is not 0. A named env file that does not exist makes the stop exit 2 and touch nothing; it used
+to fall back to the default seat's ports and unit.
 
 **Alternatives rejected.**
 
@@ -83,19 +95,32 @@ by the port it holds, so a foreign listener on the MP HTTP port is refused and l
   the next request, as before.
 - *Reaping whatever holds the MP HTTP port.* It frees the port in the case that hurt and reaps a foreign service in the
   next one.
+- *Proving ownership by marking the engine's environment* (the launcher exports a stack id and the reaper requires it in
+  each process's environment). It would replace a rule with a proof, but it rests on vLLM's worker processes carrying the
+  launcher's environment and keeping it readable, which nothing here has measured; if they do not, the reap silently does
+  nothing, which is the point of the change. The first crash after a deploy would also leave the older generation's workers
+  without the marker. Not done; revisit if a live check shows a process reaped that was not the seat's.
+- *Running the stub's cleanup after every 30 s exit and leaving `seat_stop.sh` to find nothing after an unload.* An unload's
+  own stop has already run, so this only adds a second stop about 40 s later that wakes the distro, delays the exit that
+  completes the unload (`unloadTimeout` is 60 s on the live entries) and can overlap the next generation's start.
 
-**Consequences.** The stub change reaches a box only when the stub is re-rendered and deployed (a hand-edited deployed
-stub is not replaced by a template edit), and `seat_fg.sh` and `seat_stop.sh` only when they are copied into the distro.
-A stop task that ran late could stop the MP server the next start had just begun, so the stub waits for it (bounded at
-90 s; a task never seen running is given 30 s to appear, after which the stub says so and exits, and that overlap is
-then possible) and skips the cleanup while the start task is running (if the start task's client lingers after the API
-server died, the stub cannot tell that from a live launcher and skips it, as it did before this update). The stub delays
-its crash exit by the cleanup's duration, typically 10–20 s and at most 90 s, and the stop task wakes a distro that had
-already powered itself off to run a stop with nothing to do. The stub's other exits are unchanged: a start that fails
+**Consequences.** The stub change reaches a box only when both stubs are re-rendered and deployed (`seat-cmd.ps1` reads
+the marker `seat-cmdstop.ps1` writes, and a hand-edited deployed stub is not replaced by a template edit), and `seat_fg.sh`
+and `seat_stop.sh` only when they are copied into the distro. A new `seat-cmd.ps1` beside an old `seat-cmdstop.ps1` sees no
+marker, and cleans up after every unload as well as every crash: a second stop about 40 s after each unload, a delayed exit
+and a woken distro. A marker that cannot be written costs the same after that one unload, never the stop itself. A stop task
+that ran late could stop the MP server the next start had just begun, so the stub waits for it (bounded at 90 s; a task
+never seen running is given 30 s to appear, after which the stub says so and exits, and that overlap is then possible) and
+skips the cleanup while the start task is running (if the start task's client lingers after the API server died, the stub
+cannot tell that from a live launcher and skips it, as it did before this update). On a crash the stub delays its exit by
+the cleanup's duration, typically 10–20 s and at most 90 s, and the stop task wakes a distro that had already powered itself
+off to run a stop with nothing to do; an unload is not delayed. The stub's other exits are unchanged: a start that fails
 before the seat answers leaves its leftovers to the next start's cleanup. That SIGKILL reaps a worker stuck in the GPU
-driver under WSL2 is not verified; the log names one that survives. The live check is the next natural engine death: the
-seat ready again within 6 minutes, no refusal whose holder is the seat's own MP server, and no `VLLM::Worker` process
-60 s after the API server exits.
+driver under WSL2 is not verified; the log names one that survives (with its state, in the seat log) and the launcher goes
+on to start, because held VRAM only warns there and the engine's own error is the final word, so a load onto held cards
+then fails loudly instead of the start refusing on a cause the operator cannot clear from the script. The live check is the
+next natural engine death: the seat ready again within 6 minutes, no refusal whose holder is the seat's own MP server, and
+no `VLLM::Worker` process 60 s after the API server exits.
 
 ## Context
 

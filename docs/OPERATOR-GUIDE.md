@@ -1257,10 +1257,14 @@ while the store keeps the pages), `seat_stop.sh`, the llama-swap entry, and the 
 policy). **After an engine crash (2026-09-30):** nothing runs a stop for a crash, so the dead generation's engine workers
 and MP server are reaped by the NEXT start (`seat_fg.sh` runs `seat_stop.sh` once when no engine of its port is alive
 and something of the stack is left) and, on a Windows/WSL seat, by the stub's crash exit (`seat-cmd.ps1` starts the
-stop task and waits for it). Only what is provably the seat's own is touched; a foreign listener on the MP HTTP port is
-still refused. To take effect, copy `seat_fg.sh` and `seat_stop.sh` into the distro's seat directory and re-render and
-deploy `seat-cmd.ps1` — diff a deployed stub before replacing it, since one may have been edited by hand. Optional
-knobs in the seat env: `SEAT_REAP_WAIT_SEC`, `SEAT_MP_PORT_WAIT_SEC` (both default 10). Details: `docs/systems/cache-server.md` 4g.
+stop task, waits for it and logs its result; after an unload it does nothing, which `seat-cmdstop.ps1` marks with a
+`seat-stop-requested-<seat>` file in the seat directory: that file is the marker, not litter). What is reaped is chosen by
+rules, never by the port a process holds (engine processes with no live vLLM API server above them, and this stack's MP
+server); a foreign listener on the MP HTTP port is still refused. `seat_stop.sh` writes its output to `seat.log`. To take
+effect, copy `seat_fg.sh` and `seat_stop.sh` into the distro's seat directory and re-render and deploy BOTH
+`seat-cmd.ps1` and `seat-cmdstop.ps1` — diff a deployed stub before replacing it, since one may have been edited by hand.
+Optional knobs in the seat env: `SEAT_REAP_WAIT_SEC`, `SEAT_MP_PORT_WAIT_SEC` (both default 10, a number of seconds;
+anything else is said in the log and means 10). Details: `docs/systems/cache-server.md` 4g.
 **KV pool pinned from free memory (2026-09-07, `seat_fg.sh`):** `--gpu-memory-utilization` budgets a fraction of the
 card whatever the co-residents hold, and the profiler lands the same config at different pool sizes on different starts; set
 `SEAT_KV_HEADROOM_GIB` in the seat's env and the launcher instead computes the pool from what is actually free on the tighter seat
