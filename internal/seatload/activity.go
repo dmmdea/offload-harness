@@ -58,9 +58,22 @@ type Activity struct {
 	// Fingerprint changes whenever the engine takes a step for any request.
 	// "" when the engine was not asked or no counter could be read.
 	Fingerprint string
+	// TokenFingerprint changes only when the engine PRODUCES: generated or
+	// prompt tokens credited (vLLM, llama-server --metrics), or a slot's
+	// decoded / prompt-processed counts (/slots). An engine that keeps stepping
+	// without producing — a preempt-and-recompute thrash moves the step count,
+	// the KV gauge and the preemption counter, never a token — is caught by the
+	// monitor's token bound on this, not by the work fingerprint.
+	TokenFingerprint string
 	// Running and Waiting are the engine's own request gauges (vLLM running
 	// and waiting; llama-server processing and deferred; /slots processing).
+	// Waiting is -1 when the source cannot see a queue (/slots lists no
+	// deferred requests).
 	Running, Waiting int
+	// KVGaugeMissing: a vLLM exposition carried neither KV-usage gauge, so a
+	// solo prefill (no token, no iteration stats) cannot move the fingerprint.
+	// Named in Summary so a reader sees why a prefill looked flat.
+	KVGaugeMissing bool
 	// GenTokens and PromptTokens are the engine's lifetime counters, -1 when
 	// the source has none (/slots). Two readings apart give the throughput
 	// the seat is achieving NOW — throttled, shared or not (LiveRates).
@@ -84,9 +97,17 @@ func (a Activity) Summary() string {
 	case a.Fingerprint == "":
 		return "engine unreadable"
 	}
-	s := fmt.Sprintf("%s: %d running, %d waiting", a.ActSource, a.Running, a.Waiting)
+	var s string
+	if a.Waiting < 0 {
+		s = fmt.Sprintf("%s: %d processing (queue not visible)", a.ActSource, a.Running)
+	} else {
+		s = fmt.Sprintf("%s: %d running, %d waiting", a.ActSource, a.Running, a.Waiting)
+	}
 	if a.Preemptions > 0 {
 		s += fmt.Sprintf(", %.0f preemptions so far", a.Preemptions)
+	}
+	if a.KVGaugeMissing {
+		s += ", no KV-usage gauge (a solo prefill reads flat)"
 	}
 	return s
 }
@@ -117,8 +138,18 @@ func ReadActivity(ctx context.Context, client *http.Client, endpoint, seat strin
 	base := strings.TrimRight(endpoint, "/")
 	rd, done, err := running(ctx, client, endpoint, seat)
 	act := Activity{Reading: rd, GenTokens: -1, PromptTokens: -1, Preemptions: -1}
-	if err != nil || done {
+	if err != nil {
 		return act, err
+	}
+	if done && rd.Ambiguous {
+		// Not listed by the bare name, the roster unreadable and /running not
+		// empty: the seat may be loaded under a name this read could not
+		// resolve. That is "cannot tell", never "not loaded" — a busy
+		// alias-bound seat would otherwise read as absent.
+		return act, fmt.Errorf("seat activity: %s is not listed by name and the roster could not be read (%v); %d other model(s) are running, one may be this seat", seat, rd.RosterErr, rd.RunningOthers)
+	}
+	if done {
+		return act, nil
 	}
 	seatBase, remote, err := seatURL(base, rd.Proxy)
 	if err != nil {
@@ -237,12 +268,21 @@ func parseEngineMetrics(body []byte, act *Activity) error {
 			act.Preemptions = v
 		}
 		kv := m["vllm:kv_cache_usage_perc"]
-		if !m.has("vllm:kv_cache_usage_perc") {
+		switch {
+		case m.has("vllm:kv_cache_usage_perc"):
+		case m.has("vllm:gpu_cache_usage_perc"):
 			kv = m["vllm:gpu_cache_usage_perc"] // pre-V1 name
+		default:
+			act.KVGaugeMissing = true
 		}
-		act.Fingerprint = fmt.Sprintf("v|%.0f|%.0f|%.0f|%.0f|%.0f|%.5f",
+		// request_success_total is NOT part of it: it sums every finished
+		// reason, `abort` included, and an abort is a front-end event (our own
+		// killed requests), not engine work — on a wedged engine each sibling's
+		// kill would restart the others' flat clocks.
+		act.Fingerprint = fmt.Sprintf("v|%.0f|%.0f|%.0f|%.0f|%.5f",
 			m["vllm:iteration_tokens_total_count"], act.GenTokens, act.PromptTokens,
-			m["vllm:num_preemptions_total"], m["vllm:request_success_total"], kv)
+			m["vllm:num_preemptions_total"], kv)
+		act.TokenFingerprint = fmt.Sprintf("vt|%.0f|%.0f", act.GenTokens, act.PromptTokens)
 	case m.has("llamacpp:n_decode_total", "llamacpp:tokens_predicted_total", "llamacpp:prompt_tokens_total"):
 		act.ActSource = "llamacpp-metrics"
 		act.Running = int(m["llamacpp:requests_processing"] + 0.5)
@@ -251,6 +291,7 @@ func parseEngineMetrics(body []byte, act *Activity) error {
 		act.PromptTokens = m["llamacpp:prompt_tokens_total"]
 		act.Fingerprint = fmt.Sprintf("l|%.0f|%.0f|%.0f",
 			m["llamacpp:n_decode_total"], act.GenTokens, act.PromptTokens)
+		act.TokenFingerprint = fmt.Sprintf("lt|%.0f|%.0f", act.GenTokens, act.PromptTokens)
 	default:
 		return fmt.Errorf("the exposition carries no engine work counter (neither vLLM's iteration/token counters nor llama-server's n_decode/token counters)")
 	}
@@ -260,28 +301,77 @@ func parseEngineMetrics(body []byte, act *Activity) error {
 // parseSlotsActivity fills the activity from a llama-server /slots body: the
 // processing count, and a fingerprint of every slot's task id and decoded
 // count. A body that is not an array is an error.
+//
+// llama-server emits `next_token` as a ONE-ELEMENT ARRAY (`[{"n_decoded":…}]`,
+// measured on b11120; the README still shows an object), so it is decoded
+// raw and both shapes are accepted. Builds that report
+// `n_prompt_tokens_processed` (b11120 does) make a slot's PROMPT processing
+// visible too, so a prefill on a /slots-only seat moves the fingerprint.
 func parseSlotsActivity(body []byte, act *Activity) error {
 	var slots []struct {
-		ID         int  `json:"id"`
-		IDTask     int  `json:"id_task"`
-		Processing bool `json:"is_processing"`
-		NextToken  struct {
-			NDecoded int `json:"n_decoded"`
-		} `json:"next_token"`
+		ID              int             `json:"id"`
+		IDTask          int             `json:"id_task"`
+		Processing      bool            `json:"is_processing"`
+		PromptTokens    int             `json:"n_prompt_tokens"`
+		PromptProcessed int             `json:"n_prompt_tokens_processed"`
+		NextToken       json.RawMessage `json:"next_token"`
 	}
 	if err := json.Unmarshal(body, &slots); err != nil {
 		return err
 	}
+	if len(slots) == 0 {
+		// A llama-server always has at least one slot: an empty (or null) list
+		// is not an idle engine, it is a reading of nothing.
+		return fmt.Errorf("the /slots list is empty")
+	}
 	sort.Slice(slots, func(i, j int) bool { return slots[i].ID < slots[j].ID })
-	var b strings.Builder
-	b.WriteString("s")
+	var work, tok strings.Builder
+	work.WriteString("s")
+	tok.WriteString("st")
 	for _, s := range slots {
 		if s.Processing {
 			act.Running++
 		}
-		fmt.Fprintf(&b, "|%d:%d:%t:%d", s.ID, s.IDTask, s.Processing, s.NextToken.NDecoded)
+		decoded, err := nDecoded(s.NextToken)
+		if err != nil {
+			return fmt.Errorf("slot %d next_token: %w", s.ID, err)
+		}
+		fmt.Fprintf(&work, "|%d:%d:%t:%d:%d", s.ID, s.IDTask, s.Processing, decoded, s.PromptProcessed)
+		fmt.Fprintf(&tok, "|%d:%d:%d:%d", s.ID, s.IDTask, decoded, s.PromptProcessed)
 	}
 	act.ActSource = "slots"
-	act.Fingerprint = b.String()
+	act.Waiting = -1 // /slots lists no deferred requests
+	act.Fingerprint = work.String()
+	act.TokenFingerprint = tok.String()
 	return nil
+}
+
+// nDecoded reads a slot's decoded count from `next_token` in either shape
+// llama-server has used: an object, or an array of one object. An absent
+// field (a slot that never had a task) is 0.
+func nDecoded(raw json.RawMessage) (int, error) {
+	type tok struct {
+		NDecoded int `json:"n_decoded"`
+	}
+	t := strings.TrimSpace(string(raw))
+	switch {
+	case t == "" || t == "null":
+		return 0, nil
+	case strings.HasPrefix(t, "["):
+		var arr []tok
+		if err := json.Unmarshal(raw, &arr); err != nil {
+			return 0, err
+		}
+		n := 0
+		for _, a := range arr {
+			n += a.NDecoded
+		}
+		return n, nil
+	default:
+		var one tok
+		if err := json.Unmarshal(raw, &one); err != nil {
+			return 0, err
+		}
+		return one.NDecoded, nil
+	}
 }

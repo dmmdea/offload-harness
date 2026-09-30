@@ -63,6 +63,8 @@ var (
 	// enginePoll is how often the busy hold re-reads the engine; the read is
 	// local (the seat's own /metrics or /slots). Tests compress it.
 	enginePoll = 10 * time.Second
+	// engineProbeTimeout bounds one engine read (see LivenessPolicyFor).
+	engineProbeTimeout = 45 * time.Second
 )
 
 // LivenessPolicyFor is THIS seat's stall policy: the admission budget while
@@ -89,6 +91,10 @@ func LivenessPolicyFor(cfg config.Config, known seatrate.Seat, admission time.Du
 		PostReady:     postReadyFloor,
 		EngineFlat:    engineFlatBound,
 		EnginePoll:    enginePoll,
+		// One engine read may take a whole batch: a llama-server answers
+		// /slots and /metrics only between batches (~34 s per prompt batch on
+		// the slowest tier). Inside a hold a timed-out read is no new evidence.
+		EngineProbeTimeout: engineProbeTimeout,
 	}
 }
 
@@ -103,7 +109,7 @@ func engineActivityProbe(endpoint, seat string, load agent.SeatProbe) agent.Engi
 		return nil
 	}
 	base := swapclient.BaseURL(endpoint)
-	client := &http.Client{Timeout: enginePoll}
+	client := &http.Client{Timeout: engineProbeTimeout}
 	return func(ctx context.Context) (agent.EngineReading, error) {
 		if load != nil {
 			loading, state, err := load(ctx)
@@ -118,7 +124,7 @@ func engineActivityProbe(endpoint, seat string, load agent.SeatProbe) agent.Engi
 		if act.Starting {
 			return agent.EngineReading{Loading: true, State: strings.TrimPrefix(act.Source, "running-state:")}, nil
 		}
-		return agent.EngineReading{Fingerprint: act.Fingerprint, Summary: act.Summary()}, nil
+		return agent.EngineReading{Fingerprint: act.Fingerprint, TokenFingerprint: act.TokenFingerprint, Summary: act.Summary()}, nil
 	}
 }
 
@@ -305,7 +311,9 @@ func (o *progressObserver) OnProgress(tokensOut int) {
 		if tokensOut > p.TokensOut {
 			p.TokensOut = tokensOut
 		}
-		if p.Phase == string(agent.PhasePrefill) || p.Phase == string(agent.PhaseColdLoad) {
+		// The first byte ends a prefill, a cold-load hold and a busy hold alike
+		// (0.143.0: a run left "queued" with the hold's allowance was misread).
+		if p.Phase == string(agent.PhasePrefill) || p.Phase == string(agent.PhaseColdLoad) || p.Phase == string(agent.PhaseQueued) {
 			p.Phase = string(agent.PhaseDecoding)
 		}
 		p.LastProgressMs = now

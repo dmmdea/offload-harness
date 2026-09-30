@@ -2374,7 +2374,7 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 	// deadline (the admission budget) and the wall below starts only after it
 	// — waiting on the wall's context charged the cordon to the run (reviewer
 	// finding, 0.117.0), the exact defect class D-64 removed from the other door.
-	act := gpuactivity.Start(cfg.GPULockPath, cfg.StateDir, gpuactivity.Run{Seat: model, Kind: "agent_run", Origin: agentRunOrigin(), Goal: in.Goal, MaxSteps: maxSteps})
+	act := gpuactivity.Start(cfg.GPULockPath, cfg.StateDir, gpuactivity.Run{Seat: model, Kind: "agent_run", Origin: agentRunOrigin(), Goal: in.Goal, MaxSteps: maxSteps, Phase: gpuactivity.PhaseAdmission})
 	defer act.End()
 	// THE FENCE CHECK (register S-26), BEFORE the cordon below — the same read
 	// the review lane has made since 0.125.0 (D-110) and the delegation door now

@@ -30,8 +30,11 @@ func TestParseEngineMetricsReadsARealVLLMExposition(t *testing.T) {
 	if act.Preemptions != 29 || act.GenTokens != 86465 || act.PromptTokens != 1504762 {
 		t.Fatalf("preemptions/gen/prompt = %v/%v/%v", act.Preemptions, act.GenTokens, act.PromptTokens)
 	}
-	if !strings.HasPrefix(act.Fingerprint, "v|23305|86465|1504762|29|353|0.69444") {
+	if !strings.HasPrefix(act.Fingerprint, "v|23305|86465|1504762|29|0.69444") {
 		t.Fatalf("fingerprint = %q", act.Fingerprint)
+	}
+	if act.TokenFingerprint != "vt|86465|1504762" || act.KVGaugeMissing {
+		t.Fatalf("token fingerprint = %q, kv missing = %v", act.TokenFingerprint, act.KVGaugeMissing)
 	}
 }
 
@@ -64,6 +67,51 @@ func TestFingerprintMovesWithWorkNeverWithArrivals(t *testing.T) {
 	}
 }
 
+// An aborted request (the front end's own event — our killed siblings) must
+// not move the work fingerprint: on a wedged engine it would restart every
+// other run's flat clock. A preempt/recompute thrash moves the work
+// fingerprint but never the TOKEN fingerprint, which is what the monitor's
+// token bound watches.
+func TestAbortsAndThrashDoNotLookLikeProduction(t *testing.T) {
+	base := "vllm:iteration_tokens_total_count %S\nvllm:generation_tokens_total %G\nvllm:prompt_tokens_total 9000\n" +
+		"vllm:num_preemptions_total %P\nvllm:kv_cache_usage_perc %K\nvllm:request_success_total{finished_reason=\"abort\"} %A\n"
+	read := func(steps, gen, pre, kv, abort string) Activity {
+		var a Activity
+		s := strings.NewReplacer("%S", steps, "%G", gen, "%P", pre, "%K", kv, "%A", abort).Replace(base)
+		if err := parseEngineMetrics([]byte(s), &a); err != nil {
+			t.Fatal(err)
+		}
+		return a
+	}
+	idle := read("100", "500", "3", "0.40", "0")
+	if read("100", "500", "3", "0.40", "5").Fingerprint != idle.Fingerprint {
+		t.Fatal("five aborts moved the work fingerprint")
+	}
+	thrash := read("140", "500", "9", "0.55", "0")
+	if thrash.Fingerprint == idle.Fingerprint {
+		t.Fatal("engine steps and preemptions must move the work fingerprint")
+	}
+	if thrash.TokenFingerprint != idle.TokenFingerprint {
+		t.Fatal("a thrash that produced no token moved the token fingerprint")
+	}
+	if read("141", "501", "9", "0.55", "0").TokenFingerprint == idle.TokenFingerprint {
+		t.Fatal("a generated token must move the token fingerprint")
+	}
+}
+
+// A vLLM exposition with no KV-usage gauge is named: a solo prefill (no token,
+// no iteration stats) cannot move the fingerprint there.
+func TestMissingKVGaugeIsNamed(t *testing.T) {
+	var a Activity
+	if err := parseEngineMetrics([]byte("vllm:iteration_tokens_total_count 1\nvllm:generation_tokens_total 2\nvllm:prompt_tokens_total 3\n"), &a); err != nil {
+		t.Fatal(err)
+	}
+	a.Loaded = true
+	if !a.KVGaugeMissing || !strings.Contains(a.Summary(), "no KV-usage gauge") {
+		t.Fatalf("kv missing = %v, summary = %q", a.KVGaugeMissing, a.Summary())
+	}
+}
+
 func TestParseEngineMetricsReadsLlamaServer(t *testing.T) {
 	body := "# HELP llamacpp:prompt_tokens_total x\n# TYPE llamacpp:prompt_tokens_total counter\nllamacpp:prompt_tokens_total 4096\n" +
 		"llamacpp:tokens_predicted_total 812\nllamacpp:n_decode_total 77\nllamacpp:requests_processing 2\nllamacpp:requests_deferred 1\n"
@@ -71,7 +119,7 @@ func TestParseEngineMetricsReadsLlamaServer(t *testing.T) {
 	if err := parseEngineMetrics([]byte(body), &a); err != nil {
 		t.Fatal(err)
 	}
-	if a.ActSource != "llamacpp-metrics" || a.Running != 2 || a.Waiting != 1 || a.Fingerprint != "l|77|812|4096" {
+	if a.ActSource != "llamacpp-metrics" || a.Running != 2 || a.Waiting != 1 || a.Fingerprint != "l|77|812|4096" || a.TokenFingerprint != "lt|812|4096" {
 		t.Fatalf("activity = %+v", a)
 	}
 	var b Activity
@@ -91,18 +139,53 @@ func TestParseEngineMetricsRefusesAnExpositionWithoutWorkCounters(t *testing.T) 
 	}
 }
 
-func TestParseSlotsActivity(t *testing.T) {
-	body := `[{"id":1,"id_task":0,"is_processing":false,"next_token":{"n_decoded":0}},
-	          {"id":0,"id_task":135,"is_processing":true,"next_token":{"n_decoded":12}}]`
-	var a Activity
-	if err := parseSlotsActivity([]byte(body), &a); err != nil {
+// The REAL shape (a b11120 llama-server's /slots, captured 2026-09-30):
+// `next_token` is a one-element ARRAY, and the slot reports its prompt
+// processing. The README's object shape is accepted too.
+func TestParseSlotsActivityReadsARealLlamaServerBody(t *testing.T) {
+	body, err := os.ReadFile("testdata/llamacpp-b11120-slots.json")
+	if err != nil {
 		t.Fatal(err)
 	}
-	if a.ActSource != "slots" || a.Running != 1 || a.Fingerprint != "s|0:135:true:12|1:0:false:0" {
+	var a Activity
+	if err := parseSlotsActivity(body, &a); err != nil {
+		t.Fatalf("a real /slots body must parse: %v", err)
+	}
+	if a.ActSource != "slots" || a.Waiting != -1 || !strings.HasPrefix(a.Fingerprint, "s|0:3:false:0:0|1:2:false:0:0") {
 		t.Fatalf("activity = %+v", a)
 	}
-	if err := parseSlotsActivity([]byte(`{"error":"x"}`), &a); err == nil {
-		t.Fatal("a body that is not an array must be an error")
+	a.Loaded = true
+	if !strings.Contains(a.Summary(), "queue not visible") {
+		t.Fatalf("summary = %q: /slots cannot see a queue and must not claim 0 waiting", a.Summary())
+	}
+}
+
+func TestParseSlotsActivityShapesAndProgress(t *testing.T) {
+	arr := func(decoded, prompt int) string {
+		return `[{"id":0,"id_task":135,"is_processing":true,"n_prompt_tokens":900,"n_prompt_tokens_processed":` + itoa(prompt) +
+			`,"next_token":[{"has_next_token":true,"n_decoded":` + itoa(decoded) + `}]}]`
+	}
+	var a, b, c Activity
+	if err := parseSlotsActivity([]byte(arr(0, 256)), &a); err != nil {
+		t.Fatal(err)
+	}
+	if err := parseSlotsActivity([]byte(arr(0, 512)), &b); err != nil {
+		t.Fatal(err)
+	}
+	if a.Fingerprint == b.Fingerprint || a.TokenFingerprint == b.TokenFingerprint {
+		t.Fatal("a prompt batch processed (256 -> 512) must move both fingerprints: that is the solo-prefill signal")
+	}
+	if a.Running != 1 {
+		t.Fatalf("running = %d, want the processing slot counted", a.Running)
+	}
+	if err := parseSlotsActivity([]byte(`[{"id":0,"id_task":1,"is_processing":true,"next_token":{"n_decoded":12}}]`), &c); err != nil || !strings.Contains(c.Fingerprint, ":12:") {
+		t.Fatalf("the object shape must still parse: %v %q", err, c.Fingerprint)
+	}
+	for _, bad := range []string{`[]`, `null`, `{"error":"x"}`, `[{"id":0,"next_token":"garbage"}]`} {
+		var d Activity
+		if err := parseSlotsActivity([]byte(bad), &d); err == nil {
+			t.Fatalf("%s must be an error, never a fingerprint (got %q)", bad, d.Fingerprint)
+		}
 	}
 }
 
@@ -141,7 +224,7 @@ func TestReadActivityReadsTheSeatNeverTheUpstream(t *testing.T) {
 		mu.Lock()
 		defer mu.Unlock()
 		_, _ = w.Write([]byte("vllm:num_requests_running 2\nvllm:num_requests_waiting 1\nvllm:iteration_tokens_total_count " +
-			itoa(steps) + "\nvllm:generation_tokens_total 10\nvllm:prompt_tokens_total 20\n"))
+			itoa(steps) + "\nvllm:generation_tokens_total 10\nvllm:prompt_tokens_total 20\nvllm:kv_cache_usage_perc 0.1\n"))
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -174,6 +257,21 @@ func TestReadActivityReadsTheSeatNeverTheUpstream(t *testing.T) {
 	if f.upstreamHits.Load() != 0 || f.upstreamHitsWhileUnloaded.Load() != 0 {
 		t.Fatalf("upstream hits = %d, hits while unloaded = %d: the reader must never touch /upstream or an unloaded seat",
 			f.upstreamHits.Load(), f.upstreamHitsWhileUnloaded.Load())
+	}
+}
+
+// An alias-bound seat whose roster cannot be read, with other models running,
+// is "cannot tell" — an error — never "not loaded": a busy seat would
+// otherwise read as absent and its runs would be judged by the old rule with a
+// false reason.
+func TestReadActivityCallsAnAmbiguousSeatUnreadable(t *testing.T) {
+	f := &fakeSwap{id: "qwen-27b", alias: "agent-pool", roster: false}
+	f.loaded.Store(true)
+	srv := httptest.NewServer(f.handler())
+	defer srv.Close()
+	_, err := ReadActivity(context.Background(), srv.Client(), srv.URL, "agent-pool")
+	if err == nil || !strings.Contains(err.Error(), "roster could not be read") {
+		t.Fatalf("an ambiguous seat must be an error naming the roster, got %v", err)
 	}
 }
 

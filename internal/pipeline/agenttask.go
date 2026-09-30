@@ -537,8 +537,18 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	// monitor suspends the stall clock under a bounded cold-load ceiling, and
 	// tells the observer so status readers and the delegator see the phase.
 	obs := newProgressObserver(ctx, act, ceilingSec)
+	// The hold re-publishes its rolling allowance on every reading that shows
+	// the engine working (0.143.0); the log line is for phase CHANGES only.
+	var holdMu sync.Mutex
+	var lastHold agent.Phase
 	onHold := func(ph agent.Phase, allow time.Duration) {
-		log.Printf("agent task: liveness for %s: %s (allowed %.0fs)", seat, ph, allow.Seconds())
+		holdMu.Lock()
+		changed := ph != lastHold
+		lastHold = ph
+		holdMu.Unlock()
+		if changed {
+			log.Printf("agent task: liveness for %s: %s (allowed %.0fs)", seat, ph, allow.Seconds())
+		}
 		obs.OnAllowance(string(ph), allow)
 	}
 	probe := seatLoadProbe(p.cfg.Endpoint, seat)
