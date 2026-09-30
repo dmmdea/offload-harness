@@ -97,13 +97,22 @@ against a real 178-271 s), and several runs waiting on one load each appended it
    wall, because that time was not work. Two gates that guard a
    *verification* retry do not apply to it: the first-pass floor is not raised by the
    dead seat's own `min_turn_sec` (the retry goes elsewhere, and the retry seat's own
-   floor still applies once it is chosen), and the retry is neither held nor refused
-   because the alternative node is busy (a verification retry waits for a busy seat, a
-   bounded and credited wait, ADR 0063 decision 10; this one does not). D-46's case is a
+   floor still applies once it is chosen), and the retry is not checked against the
+   alternative's busy state before it is sent, so it is neither held nor skipped for it
+   (a verification retry waits for a busy seat, a bounded and credited wait, ADR 0063
+   decision 10; this one does not). D-46's case is a
    retry that joins a generating seat on the budget that was left; a seat-down defer
    produced nothing, carries credited budget, and busy is a place in line, never a
-   refusal (INV-4) — the node's own queue is the line, and its 503 is re-placed at once
-   (ADR 0063 decision 1).
+   refusal (INV-4). A remote node's own queue is that line: a full node answers 503,
+   and the placement machinery re-places the dispatch at once (ADR 0063 decision 1), or
+   holds it in the bounded, credited capacity wait when no node has room (decisions 2
+   and 7, a turn-away by the process gate included); it ends as a capacity defer only
+   if nothing frees inside `agent_placement_wait_sec`. The local seat is different: it
+   answers no 503, and a run forced onto it waits in its run-cap line for the run's
+   whole wall, a line the subtask could not leave. So while that line has no free slot
+   ahead of a newcomer (the question a re-placement asks, ADR 0063 decision 2), the
+   retry goes to an untried remote, and to the local seat only when there is none:
+   joining the line beats losing the job.
    A seat-down defer that has nowhere to go (route local, or no untried eligible node)
    says so in `retry_note`. The loop's recovery does not
    cover the structured re-pack (its request is not a step, and the finished answer is
