@@ -258,6 +258,11 @@ func TestRunLocalCapacityDeferOnRouteLocalWaitsInPlace(t *testing.T) {
 	if node.dispatches.Load() != 0 || localCalls.Load() != 1 {
 		t.Fatalf("node saw %d dispatches and local ran %d times, want 0 and 1 — route=local never leaves the box", node.dispatches.Load(), localCalls.Load())
 	}
+	// The defer is published exactly as the seat filed it: it was never offered to
+	// another node, so it carries no re-placement story and is not "unplaced".
+	if strings.Contains(results[0].Result.Reason, "no other node could take it") || results[0].Unplaced || results[0].Replacements != 0 {
+		t.Fatalf("result = %+v unplaced=%v replacements=%d — a route=local defer must not be run through re-placement", results[0].Result, results[0].Unplaced, results[0].Replacements)
+	}
 }
 
 // TestRunLocalCapacityDeferStaysADeferWhenNothingElseHasRoom: with every remote
