@@ -1001,7 +1001,12 @@ while its owner process is alive and the dir is under `jobdir.MaxRunLifetime` (2
 unmarked `agent-local-*` dir (a delegator older than the marker wrote it) is kept until it
 is that old, and any other unmarked dir is `fleet-serve`'s own and goes. A `fleet-serve`
 restart therefore never takes the context out from under a local run in flight on the same
-box (register C-78).
+box (register C-78). A removal for age alone, which can reach a run that outlived the bound,
+is logged dir by dir; a dir the sweep cannot inspect is kept and reported, never counted as
+a run in flight. The marker's process id means something only in the process-id space that
+wrote it, so keep one base dir per machine: sharing one between a Windows host and a WSL
+distribution, a container and its host, or two machines would read a live owner as exited
+(the machine-wide GPU lease and its activity registry presume the same of their records).
 
 ### Result wire shape (`core.AgentWireResult`)
 

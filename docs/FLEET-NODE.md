@@ -554,7 +554,15 @@ verbatim; otherwise the generic exec error (including a timeout-kill) is used.
   `fleet-serve` restart. The sweep keeps a marked directory while its owner process is alive
   and the directory is under 24 hours old (the bound on a recycled process id), keeps an
   unmarked `agent-local-*` directory (written by a delegator older than the marker) until it
-  is 24 hours old, and removes the rest. It logs how many it removed and how many it kept.
+  is 24 hours old, and removes the rest. It logs how many it removed and how many it kept,
+  plus one line for each directory it removes for its age alone while an owner may still be
+  running (so a run that outlived the 24 hours does not look like a crash's leftover). A
+  directory it cannot inspect is kept and reported as a warning, never counted as a run in
+  flight. The owner's process id means something only in the process-id space that wrote it,
+  so keep one `<base_dir>` per machine: a base directory shared between a Windows host and
+  a WSL distribution, a container and its host, or two machines would read a live owner as
+  exited and the sweep would remove the directory of a run still going (the machine-wide GPU
+  lease and its activity registry make the same presumption of their pid-keyed records).
 
 ## The agent task (`task_type: "agent"`)
 

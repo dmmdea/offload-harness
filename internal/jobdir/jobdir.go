@@ -19,6 +19,17 @@
 // context/, and a write door's root is relative to that, so neither can name
 // the marker.
 //
+// A process id means something only inside the process-id space that issued it,
+// so the marker presumes that the delegator and fleet-serve share one: the same
+// machine, the same kernel namespace. That is what a per-machine base directory
+// gives, and it is the presumption the machine-wide GPU lease
+// (internal/gpulease) and the activity registry beside it already make of their
+// own pid-keyed records. A base directory shared between a Windows host and a
+// WSL distribution, a container and its host, or two machines breaks it in the
+// dangerous direction: a live owner probes as exited, and the sweep removes the
+// dir of a run that is still going. Keep one base directory per process-id
+// space.
+//
 // The package imports nothing but the standard library, so the writer
 // (internal/pipeline) and the sweeper (internal/fleetnode) can both import it.
 // The pipeline package imports fleetnode, which rules out the sweeper

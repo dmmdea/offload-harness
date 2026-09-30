@@ -1133,7 +1133,9 @@ func pipelineInjectRefs(jobSpec map[string]json.RawMessage, fetched map[string]s
 //
 //   - a MARKED entry is orphaned iff its owner process is gone
 //     (gpulease.PIDAlive, which reads a process it cannot inspect as alive, the
-//     conservative direction) or the entry is older than jobdir.MaxRunLifetime,
+//     conservative direction; the id is probed in THIS process's process-id
+//     space, which is why one base directory must not be shared across spaces,
+//     see internal/jobdir) or the entry is older than jobdir.MaxRunLifetime,
 //     which bounds a process id recycled by an unrelated process;
 //   - an UNMARKED agent-local-* entry was made by a delegator older than the
 //     marker (a long-lived MCP process keeps its old binary for days after a
