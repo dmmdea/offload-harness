@@ -58,14 +58,16 @@ records say so, and both mean "nothing ran, so re-placing the work cannot double
 - `withdrawn: ...` — the job's delegator asked for it back. `DELETE /fleet/jobs/{id}` (agent bearer, like
   the poll) takes back a job that is still `accepted`, under the same mutex the scheduler claims under,
   so a claim and a withdraw cannot both succeed. A running or finished job is never touched (`409` with
-  its state); a repeat answers `200` again; a media job is `405`; a node without the route answers
+  its state); a repeat answers `200` again, as does a request for a job the node already took back itself
+  (reaped, or marked never-started at shutdown); a media job is `405`; a node without the route answers
   `405`/`404`, which a delegator reads as "no withdraw here".
 - `reaped: ...` — nobody polled the job for `fleet_poll_lease_sec` (default 60 s; negative = off; a
   value under 15 is raised to 15). Only an `accepted` agent job a delegator PUSHED is ever reaped: the
   scheduler's claim scan skips it at once and a ticker takes it, so a ghost never starts in the gap
   between ticks. A running job, a job the pull queue claimed, and media and vision jobs are never
-  reaped. Authorized polls, duplicate dispatches and parked long polls keep a job alive; the
-  unauthenticated jobs feed and a poll that failed the bearer gate do not.
+  reaped. Authorized polls, authorized duplicate dispatches and parked long polls keep a job alive; the
+  unauthenticated jobs feed, a poll that failed the bearer gate and a duplicate dispatch without the
+  bearer (`401`, whatever `task_type` it declares) do not.
 
 A run that finishes more than a lease after its poller last looked is an abandoned run, and its wall no
 longer feeds `recent_agent_wall_sec` (or the Retry-After built from it). Why all of this exists: every
@@ -158,7 +160,9 @@ distinction below trustworthy: a job still `accepted` when shutdown begins prova
 
 **Duplicate dispatch is idempotent, with one deliberate exception.** Re-dispatching a job id that is
 `accepted`, `running`, or `done` re-acks `202` and does **not** start a second run. A job in `error`
-returns `409`.
+returns `409`. For an agent or vision job on a node with a `fleet_auth_token`, all of it is answered only to
+a caller carrying the bearer, whatever `task_type` the duplicate declares (`401` otherwise): the job's own
+record decides.
 
 The asymmetry is intentional and worth understanding before changing it: the dispatcher treats any
 non-`202` as a refusal and may send the job elsewhere. If a `done` job answered non-`202`, the

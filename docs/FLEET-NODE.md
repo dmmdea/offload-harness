@@ -13,7 +13,7 @@ every failure a non-2xx.
 | `GET /fleet/health` | node id, live global VRAM (total/free GiB), supported task types + model families **derived from this box's actual config**, measured per-family VRAM footprints, queue depth. Never blocks on a render. `503` when the VRAM snapshot is unavailable **or older than 30s** (nvidia-smi failing, e.g. a driver reset) — a stale 200 would mislead routing. |
 | `POST /fleet/dispatch` | immediate `202 {"job_id": <exact echo>, "status": "accepted"}`; the render runs async through the pipeline. Duplicate `job_id` → 202 re-ack (accepted/running/**done** — poll `/fleet/jobs/{id}` for the state), never a second render; a job that previously **failed** here answers `409` (an explicit refusal, so the dispatcher may try another node). |
 | `GET /fleet/jobs/{id}` | `{"state": "accepted\|running\|done\|error", ...}` with `data` on done / `error` on error; terminal results retained ~1h; 404 for unknown/evicted ids. |
-| `DELETE /fleet/jobs/{id}` | Takes back an **agent** job that has not started ([ADR 0064](architecture/decisions/0064-a-delegator-takes-back-what-it-has-not-started.md)): `200 {"state":"withdrawn","withdrawn":true}` when it had not (it never will), `409 {"state":"running"\|"done"\|"error","withdrawn":false}` when it had (the node does not touch it), `404` unknown id, `401` without the agent bearer, `405` for a non-agent job. See [Taking a job back](#taking-a-job-back-withdraw-and-the-poll-lease). |
+| `DELETE /fleet/jobs/{id}` | Takes back an **agent** job that has not started ([ADR 0064](architecture/decisions/0064-a-delegator-takes-back-what-it-has-not-started.md)): `200 {"state":"withdrawn","withdrawn":true}` when it had not (it never will; a job the node itself already took back answers the same), `409 {"state":"running"\|"done"\|"error","withdrawn":false}` when it had (the node does not touch it), `404` unknown id, `401` without the agent bearer, `405` for a non-agent job. See [Taking a job back](#taking-a-job-back-withdraw-and-the-poll-lease). |
 
 ## Quickstart
 
@@ -45,7 +45,10 @@ in health, primary first (`["vulkan","cpu"]`), and serves the CPU family as `<se
 a caller picks the route by seat id. Ctrl-C drains: dispatches for a
 job_id this node has never seen get 503; a re-dispatch of a job_id this node already knows
 about (running, done, or previously failed) still re-acks 202 — or 409 if it previously
-failed — even mid-drain, since that's not new work.
+failed — even mid-drain, since that's not new work. On a node with a `fleet_auth_token`, an agent or
+vision job's id is answered only to a request that carries the bearer, whatever `task_type` that request
+declares: without it the answer is `401` (never the 202 or the 409, which would say the job exists, or
+echo what its failure said).
 
 **Backlog and concurrency are two different limits** (0.100.0). Before 0.100.0 they were
 one: accepting a job started it, so `accepted` lasted microseconds and the single cap
@@ -887,7 +890,9 @@ its finished wall then fed the node's own Retry-After. Two mechanisms end that.
 withdraw cannot both succeed; a running or finished job is never touched (Option A, ADR 0028). A
 withdrawn job is a terminal `error: "withdrawn: ..."` record, not a deleted one: a poll of the id
 reaches a terminal state, a duplicate dispatch of it answers `409` and never runs, and the jobs feed
-shows it for the terminal TTL. A repeat of the request answers `200` again.
+shows it for the terminal TTL. A repeat of the request answers `200` again, and so does a request for
+a job the node already took back itself (reaped, or marked never-started at shutdown): nothing ran, which
+is the fact the answer reports.
 
 The delegator calls it once, best-effort (5 s, on a context the caller's cancel does not touch), where
 it gives a job up:
@@ -902,12 +907,21 @@ A job the delegator last saw `running` is not asked at all: it has started, and 
 be refused. A node that predates the route answers `405` (its job route is GET-only) or `404`, which is
 "no withdraw here": every give-up then behaves exactly as it did.
 
+**A poll that reads the node's own record.** A delegator that was away for longer than the lease (a
+suspended host, a long partition) comes back to `error: "reaped: ..."`, and one that polls a job
+another caller withdrew reads `error: "withdrawn: ..."`. Both say the job never ran, so the delegator
+files the result as it files a confirmed withdrawal: a capacity refusal the existing re-placement offers
+to another node, the queued wait credited back, the intent closed `never started: <what the node said>`,
+and `reason_code` `queue_withdrawn` on the abandoned attempt's row. A job that ran and failed stays a
+`remote job error`, is never re-placed, and closes its intent `terminal observed`.
+
 **Poll lease.** A node also cleans up after a delegator that left without asking. A job a delegator
 PUSHED (an agent dispatch) that sits `accepted` with nobody polling it for `fleet_poll_lease_sec` is
 skipped by the scheduler's claim scan at once (so the reaper's tick is never a window in which a ghost
 starts) and reaped by a ticker (terminal, `error: "reaped: ..."`). What counts as a poll: an
-authorized `GET /fleet/jobs/{id}` (a long poll parked on it counts for the whole wait), or a duplicate
-dispatch of the id. What does not: the unauthenticated `GET /fleet/jobs` feed the fleet overview reads,
+authorized `GET /fleet/jobs/{id}` (a long poll parked on it counts for the whole wait), or an authorized
+duplicate dispatch of the id (the job's own bearer rule applies whatever `task_type` the request
+declares, so a re-dispatch without the token answers `401` and counts for nothing). What does not: the unauthenticated `GET /fleet/jobs` feed the fleet overview reads,
 and a poll that failed the bearer gate. Never reaped: a running job; a job the pull queue claimed (its
 result travels by ack, nobody polls this node for it); a media or vision job (their pollers are other
 clients on cadences this node does not control). The log says so in one line per reap pass.
@@ -917,9 +931,11 @@ minutes of stall on a seat no caller was using) no longer feeds `recent_agent_wa
 Retry-After built from it. A look after the job finished does not change that.
 
 The delegator's own ledger records what it did: `reason_code` `queue_withdrawn` for a confirmed
-queue-deadline withdrawal and `queue_deadline` for one the node did not confirm, and the intent ledger's
-close note says `withdrawn`, `terminal observed`, `never started` (the recovery pass found the node had
-withdrawn or reaped the job) or `recovered`; see [The delegation ledger row](#the-delegation-ledger-row).
+queue-deadline withdrawal (or a job whose poll read the node's own `reaped`/`withdrawn` record) and
+`queue_deadline` for one the node did not confirm, and the intent ledger's close note says `withdrawn`,
+`terminal observed`, `never started` (the recovery pass, or a live poll, found the node had withdrawn or
+reaped the job) or `recovered`; see [The delegation ledger row](#the-delegation-ledger-row). The fleet
+overview does not list a `withdrawn` or `reaped` job as an operator error: it is the cleanup working.
 
 ### The delegation ledger row
 
@@ -928,7 +944,7 @@ Every `agent_delegate` row in the delegator's `ledger.jsonl` carries (ADR 0064):
 | Column | Meaning |
 |---|---|
 | `door` | the surface that admitted the contract (the MCP tool or CLI verb); the engine's own name, `delegate`, when the caller stamped none |
-| `job_id` / `fleet_job_id` | the delegator's id for the attempt; `fleet_job_id` is the id the fleet node knows it by (the same value, present only when the attempt went to a node). The node's own `agent` row carries the same `fleet_job_id`, so the two ledgers join on one equality. |
+| `job_id` / `fleet_job_id` | the delegator's id for the attempt; `fleet_job_id` is the id the fleet node knows it by (the same value, present only when the node acked the dispatch: a refused dispatch left no job on any node, and no marker row). The node's own `agent` row carries the same `fleet_job_id`, so the two ledgers join on one equality. |
 | `reason_code` | a closed set saying why the job ended the way it did: `ok`, `failed_verification`, `queue_full`, `queue_deadline`, `queue_withdrawn`, `poll_deadline`, `canceled`, `node_unreachable`, `job_lost`, `dispatch_refused`, `remote_error`, `capacity_wait`, `shed`, `no_eligible_node`, `seat_down`, `stall_admission` / `stall_cold_load` / `stall_prefill` / `stall_decode` / `stall_tool` / `stall_repack` / `stall_engine` / `stall_other`, the node's defer classes (`budget`, `abstention`, `contract`, `config`, `write`, `infrastructure`), `started`, `other`. Present on every row. |
 | `reason` | the whole reason (up to 4096 bytes); rows written before ADR 0064 hold the first 120 bytes. Group by `reason_code`, or by its first 120 bytes. |
 | `phase` | `"started"` on the dispatch marker row, absent on every finished row |

@@ -52,8 +52,9 @@ stack that actually runs the work.
 
 7. **A delegator that gives up can take an unstarted job back (ADR 0064).**
    `DELETE /fleet/jobs/{id}` (agent bearer) withdraws a job that is still `accepted`: `200
-   {"state":"withdrawn"}` when it had not started (it never will), `409` with the job's own state when it
-   had (the node does not touch it), `404` for an unknown id, `405` for a non-agent job. The delegator
+   {"state":"withdrawn"}` when it had not started (it never will; the same answer for a job the node
+   itself already took back), `409` with the job's own state when it had (the node does not touch it),
+   `404` for an unknown id, `405` for a non-agent job. The delegator
    asks once, best-effort, at its queue deadline, on cancel and at an owned poll deadline; only a
    confirmation makes the subtask re-placeable. A node without the route answers `405`/`404` and the
    delegator behaves as before.
@@ -61,7 +62,9 @@ stack that actually runs the work.
 8. **A node cleans up after a delegator that left.** A pushed agent job that stays `accepted` with nobody
    polling it for `fleet_poll_lease_sec` is skipped by the scheduler and reaped (`error: "reaped: ..."`),
    never a running one. Polls come from `GET /fleet/jobs/{id}` (authorized; a parked long poll counts) and
-   duplicate dispatches; the jobs feed does not count.
+   authorized duplicate dispatches; the jobs feed does not count, and a duplicate dispatch without the
+   bearer is a `401` whatever task type it declares. A delegator that comes back to a `reaped` job reads
+   that the job never ran and re-places the subtask on another node.
 
 ## Duplicate dispatch
 
@@ -75,6 +78,11 @@ This is the part with fleet-wide consequences, and the asymmetry is deliberate.
 | `error` | `409` | I tried and failed; another node legitimately should try (a job withdrawn or reaped is an `error` too, and is never run again under its id) |
 
 A duplicate never starts a second run — acceptance is guarded so exactly one render happens per id.
+
+For an agent or vision job on a node with a `fleet_auth_token`, every row above is answered only to a
+caller that carries the bearer: the job's own record decides, not the `task_type` the duplicate declares,
+so a media-typed re-dispatch of an agent job's id is a `401` and neither restarts its poll lease nor reads
+its error.
 
 The reasoning behind `done` → `202`: the dispatcher treats any non-`202` as a refusal and may
 re-dispatch elsewhere. If a completed job answered non-`202`, the dispatcher would buy a duplicate

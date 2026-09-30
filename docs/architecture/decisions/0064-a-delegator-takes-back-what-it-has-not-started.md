@@ -36,7 +36,7 @@ carried no timestamp or process id.
 
    | Answer | Meaning |
    |---|---|
-   | `200 {"state":"withdrawn","withdrawn":true}` | the job had not started; it never will (a repeat says the same) |
+   | `200 {"state":"withdrawn","withdrawn":true}` | the job had not started; it never will (a repeat says the same, and so does a request for a job the node already took back itself: reaped, or marked never-started at shutdown, which are the same fact) |
    | `409 {"state":"running"\|"done"\|"error","withdrawn":false}` | it had started; the node did not touch it |
    | `404` | the node does not hold that id |
    | `401` | the same bearer gate as the poll, checked before any state crosses the wire |
@@ -62,15 +62,26 @@ carried no timestamp or process id.
      intent as "terminal observed" for a job the node might still run) and at an **owned poll deadline**, a
      confirmed withdrawal closes the intent as `withdrawn`; a job last seen running is not asked;
    - every other answer (404, 405, 401, 5xx, a dropped connection, a timeout) leaves today's behaviour: a
-     failure naming the deadline, not re-placed, the intent left open for recovery.
+     failure naming the deadline, not re-placed, the intent left open for recovery;
+   - a **poll that reads the node's own record** of a job it never ran (`error: "reaped: ..."`, which is what
+     a delegator that was away for longer than the lease finds, or `withdrawn: ...`) is the same fact as a
+     confirmed withdrawal and is treated the same way: filed as a capacity refusal so the subtask is
+     re-placed, the queued wait credited back, the intent closed `never started: <what the node said>` (the
+     note the recovery pass writes for the same observation) and `reason_code` `queue_withdrawn` on the
+     abandoned attempt's row. A job that ran and failed stays a `remote job error` and is never re-placed.
 
 4. **A node reaps the ghosts of a delegator that left.** An `accepted` job that a delegator pushed and that
    nobody has polled for `fleet_poll_lease_sec` is skipped by the claim scan at once and reaped by a ticker
    (terminal, `error: "reaped: ..."`). Default 60 s; a negative value turns the rule off; a positive value under
    15 s is raised to 15, because the delegator's own gap between polls (a 12 s long poll plus a few seconds of
-   sleep) must fit inside the lease. What counts as a poll: an authorized poll of the job, a duplicate dispatch
-   of its id, and a long poll parked on it. What does not: the unauthenticated jobs feed the fleet overview
-   reads, and a poll that failed the bearer gate. A running job is never reaped. The rule covers only agent jobs
+   sleep) must fit inside the lease. What counts as a poll: an authorized poll of the job, an authorized
+   duplicate dispatch of its id, and a long poll parked on it. What does not: the unauthenticated jobs feed the
+   fleet overview reads, a poll that failed the bearer gate, and a duplicate dispatch without the bearer. The
+   bearer rule for a known id is the JOB's (its agent or vision marker), not the request's: a dispatch for a
+   known agent or vision job answers `401` without the token whatever `task_type` it declares. The door only
+   checked a request that DECLARED a gated type, so a media-typed re-dispatch of an agent job's id used to be
+   answered (a 202 that restarted the lease, or a 409 echoing the failure text), and any peer that could read
+   ids off the jobs feed could keep a ghost alive. A running job is never reaped. The rule covers only agent jobs
    pushed by a dispatch: a job the pull queue claimed is admitted without a poller (its result travels by ack),
    and media and vision jobs are polled by other clients on cadences this node does not control.
    The claim scan skips a stale job so the ticker's interval is never a window in which a ghost starts. This
@@ -90,8 +101,9 @@ carried no timestamp or process id.
 
 7. **The ledger sees its own failure shapes.** On the delegator's `agent_delegate` row:
    - `door`: the contract's, else the engine's own name, on every row;
-   - `fleet_job_id`: the id the node knows the job by, when it went to a node; the node's own `agent` row carries
-     the same id (both doors a node admits work through stamp it), so the orphan join is one equality;
+   - `fleet_job_id`: the id the node knows the job by, when the node ACKED the dispatch (a refused dispatch left
+     no job on any node, and no marker row, so it carries none); the node's own `agent` row carries the same id
+     (both doors a node admits work through stamp it), so the orphan join is one equality;
    - `reason_code`: a closed set (`ok`, `failed_verification`, `queue_full`, `queue_deadline`,
      `queue_withdrawn`, `poll_deadline`, `canceled`, `node_unreachable`, `job_lost`, `dispatch_refused`,
      `remote_error`, `capacity_wait`, `shed`, `no_eligible_node`, `seat_down`, the `stall_*` phases, the node's
@@ -113,8 +125,11 @@ carried no timestamp or process id.
   started still runs to its end, and a delegator that gave up on it leaves its intent open for the recovery pass.
 - Whether a caller's cancel should also cancel a RUNNING job is an operator decision this change does not make.
 - A delegator that resumes after more than the lease (a suspended host, a long partition) finds its accepted job
-  reaped and reads the terminal `reaped` state as a remote job error. Re-placing on that stable text is possible
-  and is not done here.
+  reaped. It reads the terminal `reaped` state as the node saying the job never ran, and re-places the subtask
+  (decision 3), so the lease costs a slow delegator a re-placement, not the work. The job's wall on the new
+  node starts over; only the time it provably spent queued is credited back.
+- The fleet overview does not list a `withdrawn` or `reaped` job as an operator error (dozens a day on a busy
+  node would fill its 200-entry ring); the row stays in the node's job list.
 - Every job leaves one more ledger row (the marker). Any reader outside this repository that counts rows must
   skip `phase: "started"`; the ones in this repository already do.
 - Rows written before this change keep their 120-byte reason and carry no code, no fleet id and no marker.
