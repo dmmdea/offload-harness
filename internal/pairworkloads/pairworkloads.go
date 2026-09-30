@@ -691,7 +691,9 @@ func (e *Emitter) FromLedger(row ledger.Entry) Event {
 	state, errText := "completed", ""
 	if row.Deferred {
 		state = "failed"
-		errText = row.Reason
+		// The short form: PAIR's error field has always held at most the 120 bytes
+		// the ledger used to cut a reason to, and the ledger now stores it whole.
+		errText = ledger.ShortReason(row.Reason)
 		if errText == "" {
 			errText = "deferred"
 		}
