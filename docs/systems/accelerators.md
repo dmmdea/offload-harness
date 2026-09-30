@@ -400,7 +400,7 @@ To verify an RKNPU (a Rockchip RK3588 board, driver bound):
 - [`internal/mcpserver/mcpserver.go`](../../internal/mcpserver/mcpserver.go) — gated tool
   registration, `handleHailoTool`, the `offload_ocr` engine switch, the status block
 - [`internal/config/config.go`](../../internal/config/config.go) — `Accelerators`,
-  `HasAccelerator`, `hailo_*` keys and defaults
+  `HasAccelerator`, the `hailo_*` / `coral_*` / `rknpu_*` keys and defaults
 - [`internal/hwdetect/classify.go`](../../internal/hwdetect/classify.go) — detection
 - [`internal/mcpserver/acceltools.go`](../../internal/mcpserver/acceltools.go),
   [`internal/agent/acceltools.go`](../../internal/agent/acceltools.go),

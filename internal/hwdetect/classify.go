@@ -288,9 +288,8 @@ var rknpuUeventPaths = []string{
 
 // rknpuDriverLine is the uevent line that proves the RKNPU driver is bound: the platform
 // driver's name, case-sensitive and whole-line. The mainline in-tree driver binds the same
-// platform devices as DRIVER=rocket (device /dev/accel/accel0) and the RKNN runtime does not run
-// on it, so it is deliberately not a match — listing it would register tools whose first call
-// can never succeed.
+// platform devices as DRIVER=rocket and the RKNN runtime does not run on it, so it is
+// deliberately not a match — listing it would register tools whose first call can never succeed.
 const rknpuDriverLine = "DRIVER=RKNPU"
 
 // DetectRknpu reports ["rknpu"] iff one of the candidate uevent files (both kernel layouts, see

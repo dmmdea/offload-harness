@@ -47,8 +47,8 @@ const (
 // node-local endpoint, path or port). It is a suffix rule on purpose: every binding the harness has
 // grown so far ends in one of these, and a key that does not is left to the seed-owned comparison.
 // `_endpoint` is deliberately NOT in the list: tts_endpoint and pair_workloads_endpoint are this
-// box's own service URLs (opt-in, empty = the lane is absent), and hailo_/coral_endpoint are owned
-// by the accelerator seeds — flagging any of them as a hand-wired seat was a false positive.
+// box's own service URLs (opt-in, empty = the lane is absent), and hailo_/coral_/rknpu_endpoint are
+// owned by the accelerator seeds — flagging any of them as a hand-wired seat was a false positive.
 func isBindingKey(k string) bool {
 	// The remote NIM lane is account configuration (an opt-in cloud escalation), not a tier seat.
 	if strings.HasPrefix(k, "nim_") {
