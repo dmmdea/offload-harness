@@ -132,6 +132,13 @@ answers "is this good enough, and if not, is it worth trying a bigger model?"
 - **Grounding.** Extract output whose values do not appear in the source escalates. Grounding is
   *computed and logged* for other tasks but only *actioned* for extract — summarization paraphrases
   legitimately, so acting on it would be noise.
+  The check is verbatim for text and by value for numbers. A string is grounded as a phrase of the
+  source (case and spacing ignored). A number is compared as a value, never as text: a JSON number is
+  grounded iff the source writes that value in either locale, so `2.354,40`, `2,354.40` and `2354.4` are
+  one amount, and a lone separator followed by exactly three digits (`1,234`) counts as both 1234 and
+  1.234. It is never grounded because its digits sit inside another number (`0` against `4200`), and a
+  sign is not checked (magnitudes are compared). A string that is not a phrase of the source is grounded
+  when every number in it is a value the source writes; summaries follow the same number rule.
 - **Confidence gate.** For classify, a self-reported confidence below `classify_min_confidence`
   (default **0.88**) escalates. For decision tasks, a logprob decision margin below the task's
   threshold escalates — a learned per-task conformal value when one exists, otherwise
@@ -565,6 +572,8 @@ routing solver and the guard's reading and staleness rules. `internal/grounding/
 
 - **Treating a defer as a bug.** It is the designed outcome when confidence is low.
 - **Expecting grounding to gate summaries.** It is logged for summaries, actioned only for extract.
+- **Reading "ungrounded" as text mismatch on a number.** Numbers are compared by value across locales, so a
+  number the source writes as `2.354,40` is grounded by 2354.4; an ungrounded number is one the source never writes.
 - Assuming escalation happens on any failure — infrastructure failures deliberately do not escalate.
 - Assuming `Reasoning` implies a different model. Under the shipped default it is the same model
   as the escalation Tier (they differ only if the config binds them apart, as the ≥16GB matrix

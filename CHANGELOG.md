@@ -6,6 +6,16 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.153.1] - 2026-09-30 - grounding compares numbers by value: a correct amount in either locale is grounded, a substring of another number is not
+
+### Fixed — a correct number was judged ungrounded when the source wrote it with separators, and a wrong one was grounded by a substring
+
+- `internal/grounding` compared a JSON number as TEXT. It rendered 2354.4 and looked for that string among the source's numbers with commas deleted (`2.35440`, `2354.40`, `18550`), so "Total: 2.354,40 EUR", "Total: 2,354.40 USD" and "Importe: 185,50 EUR" all came back UNGROUNDED for the right value. The pipeline treats an ungrounded extract as a retry and then a defer, so a perfect model deferred on every such amount, and `eval.Grade`, which grades extract by grounding alone, scored the same answers wrong. On a bilingual 48-case extract corpus 16 gold answers were judged ungrounded; all 48 are grounded now (measured 2026-09-30, the corpus is kept out of the repository).
+- The opposite failure: the verbatim shortcut accepted a number whose digits occurred inside another number, so `{"amount": 0}` was grounded by "Amount: 4200 USD" and `{"w": 7}` by "7.5".
+- Numbers are now compared as values. Each numeric token of the source is read as every value it can denote: a plain integer; English grouping (`2,354.40`); Spanish grouping (`2.354,40`); one separator followed by exactly three digits (`1,234`) as both 1234 and 1.234; one separator followed by one, two or four-plus digits as a decimal mark. A token that is no number in either locale (a date `18.06.2026`, a version, a list `3,4,5`) reads as its digit groups, and a separated token is never read as its digits joined (`2.354,40` does not denote 235440). A trailing `.` or `,` is sentence punctuation. Values are equal within a relative 1e-12 (float noise only: 1000000001 is still not 1000000000).
+- A JSON number leaf is grounded iff its value is one of the source's, by magnitude (a sign is not checked, as before). The substring shortcut no longer applies to numbers. A string leaf keeps the shortcut; one that is not a phrase of the source is grounded when every number in it is a value the source writes, so `"2,354.40"` grounds against "2.354,40". Summaries (`Check` for summarize) and `CheckFields` use the same rule. Booleans, empty strings (absence) and every non-numeric verdict are unchanged, and no signature changed.
+- Tests: `internal/grounding/numbers_test.go` pins each case both ways (locale grouping, decimal comma, ambiguous three-digit groups, integers, 0 against 4200, absent and distractor numbers, string leaves, currency and percent tokens, trailing punctuation, dates and lists), the token parser directly, and a table of the verdicts the string implementation gave on non-locale input, which are unchanged. Not read as one number: space or apostrophe thousands (`1 234,56`, two tokens) and Indian grouping (`1,23,456`, digit groups).
+
 ## [0.151.1] - 2026-09-30 - the Coral feeds EfficientNet-EdgeTPU-S a correctly quantised input
 
 ### Fixed — the Coral fed EfficientNet-EdgeTPU-S raw pixels (classify imagenet and embed)
