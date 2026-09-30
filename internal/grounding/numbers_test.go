@@ -103,8 +103,29 @@ func TestCheckNumbersByValue(t *testing.T) {
 		{"leading zeros are the same value", "Serial 0048127", `{"n":48127}`, true},
 		{"invalid grouping is not joined", "Ref 12,34.5", `{"n":1234.5}`, false},
 
-		// float noise is absorbed; a neighbouring amount is not
-		{"float noise", "Total 0.3", `{"t":0.30000000000000004}`, true},
+		// comparison is exact: float noise is a different float, and a last-digit
+		// error in a long identifier is an error
+		{"float noise is not the same float", "Total 0.3", `{"t":0.30000000000000004}`, false},
+		{"epoch ms last digit", "ts=1759190400123", `{"v":1759190400124}`, false},
+		{"epoch ms exact", "ts=1759190400123", `{"v":1759190400123}`, true},
+		{"phone with country code", "tel 5215512345678", `{"v":5215512345680}`, false},
+		{"13 decimals differ", "x 0.1234567890123", `{"v":0.1234567890124}`, false},
+		{"long string id last digit", "Card 4111111111111111", `{"v":"4111111111111112"}`, false},
+		{"17-digit string id last digit", "Card 12345678901234567", `{"v":"12345678901234568"}`, false},
+		{"19-digit string id last digit", "Order 1234567890123456789", `{"v":"1234567890123456780"}`, false},
+		{"17-digit string id exact", "Card 12345678901234567", `{"v":"12345678901234567"}`, true},
+
+		// Indian lakh/crore grouping reads as one number
+		{"lakh grouping", "Amount ₹1,23,456", `{"v":123456}`, true},
+		{"crore grouping with decimals", "Amount 12,34,567.89", `{"v":1234567.89}`, true},
+		{"lakh grouping wrong value", "Amount ₹1,23,456", `{"v":123457}`, false},
+
+		// two-part tokens are decimals only; their components are not source values
+		// (precision over recall, the same rule as "7 is not in 7.5")
+		{"two-part version is a decimal", "Release 3.1 is out", `{"major":3,"minor":1}`, false},
+		{"hh.mm is a decimal", "At 9.30 sharp", `{"h":9,"m":30}`, false},
+		{"comma pair is a decimal", "qty 5,10", `{"a":5,"b":10}`, false},
+		{"two-part version as a value", "Release 3.1 is out", `{"v":3.1}`, true},
 		{"neighbouring integer", "Total 1000000000", `{"t":1000000001}`, false},
 		{"neighbouring decimal", "Total 2354.40", `{"t":2354.41}`, false},
 
@@ -151,6 +172,11 @@ func TestCheckStringLeavesWithNumbers(t *testing.T) {
 		{"dotted date as written", "Shipped 18.06.2026.", `{"shipped":"18.06.2026"}`, true},
 		{"code with digits as written", "Order 55-20931 shipped", `{"order":"55-20931"}`, true},
 		{"percent string in another spacing", "Growth 12,5% this year", `{"growth":"12,5 %"}`, true},
+		{"wrong code prefix", "Order ABC-0042", `{"v":"ABC-42"}`, false},
+		{"wrong code prefix, same digits", "Order ABC-42", `{"v":"XYZ-42"}`, false},
+		{"code as written", "Order ABC-0042", `{"v":"ABC-0042"}`, true},
+		{"zero-padded code is not its value", "Serial 7", `{"v":"007"}`, false},
+		{"zero-padded code as written", "Serial 007", `{"v":"007"}`, true},
 		{"wrong percent string", "Growth 12,5% this year", `{"growth":"13,5 %"}`, false},
 	}
 	for _, tc := range cases {
@@ -237,7 +263,10 @@ func TestNumberValues(t *testing.T) {
 		{"18.06.2026", []float64{6, 18, 2026}},
 		{"3.1.2", []float64{1, 2, 3}},
 		{"3,4,5", []float64{3, 4, 5}},
-		{"1,23,456", []float64{1, 23, 456}},
+		{"1,23,456", []float64{123456}},
+		{"12,34,567.89", []float64{1234567.89}},
+		{"1,23,45", []float64{1, 23, 45}},
+		{"3.1", []float64{3.1}},
 		{"1.234,567.89", []float64{89, 234, 567, 1}},
 		{"12,34.5", []float64{5, 12, 34}},
 		{"1,2345.6", []float64{1, 2345, 6}},
@@ -302,5 +331,21 @@ func TestCheckLegacyVerdicts(t *testing.T) {
 				t.Fatalf("Check = (grounded=%v, ok=%v); want (grounded=%v, ok=%v)", g, ok, tc.want, tc.ok)
 			}
 		})
+	}
+}
+
+// TestSummarizeLongIDs pins that a summary quoting an identifier must quote it digit for digit.
+func TestSummarizeLongIDs(t *testing.T) {
+	for _, tc := range []struct {
+		data string
+		want bool
+	}{
+		{`{"summary":"Card 4111111111111111 was charged.","bullets":[]}`, true},
+		{`{"summary":"Card 4111111111111112 was charged.","bullets":[]}`, false},
+	} {
+		g, ok := Check(core.TaskSummarize, "Card 4111111111111111 billed", []byte(tc.data))
+		if !ok || g != tc.want {
+			t.Fatalf("Check(%s) = (%v, %v); want grounded=%v", tc.data, g, ok, tc.want)
+		}
 	}
 }

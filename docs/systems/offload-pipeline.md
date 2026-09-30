@@ -137,8 +137,9 @@ answers "is this good enough, and if not, is it worth trying a bigger model?"
   grounded iff the source writes that value in either locale, so `2.354,40`, `2,354.40` and `2354.4` are
   one amount, and a lone separator followed by exactly three digits (`1,234`) counts as both 1234 and
   1.234. It is never grounded because its digits sit inside another number (`0` against `4200`), and a
-  sign is not checked (magnitudes are compared). A string that is not a phrase of the source is grounded
-  when every number in it is a value the source writes; summaries follow the same number rule.
+  sign is not checked (magnitudes are compared). Comparison is exact (no tolerance), and a long digit string
+  (16+) is an identifier compared digit for digit. A two-part token such as `3.1` is a decimal only. A string that is not a phrase of the source is grounded
+  when every number in it is a value the source writes and its identifier-like words (`ABC-42`) are the source's; summaries follow the same number rule.
 - **Confidence gate.** For classify, a self-reported confidence below `classify_min_confidence`
   (default **0.88**) escalates. For decision tasks, a logprob decision margin below the task's
   threshold escalates — a learned per-task conformal value when one exists, otherwise
