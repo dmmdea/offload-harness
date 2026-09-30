@@ -271,7 +271,13 @@ func (l *Loop) seatDownFor(ctx, callCtx context.Context, err error) *SeatDownErr
 	if sd = seatDownCause(callCtx); sd != nil {
 		return sd
 	}
-	if l.live == nil || ctx.Err() != nil || !seatFailure(err) {
+	// A cut tool call (register D-114) is the engine ANSWERING — an HTTP 500 from a
+	// seat that ran out of completion budget mid-argument and refused to parse what
+	// it wrote. It is a budget defect the loop classifies next, not a seat that went
+	// down: nominating it cost a seat read (up to seatCheckTimeout) per occurrence,
+	// and a seat that read as loading at that instant would have turned it into a
+	// seat-down.
+	if l.live == nil || ctx.Err() != nil || !seatFailure(err) || isCutToolCallErr(err) {
 		return nil
 	}
 	return l.live.ConfirmSeatDown(ctx, err)
