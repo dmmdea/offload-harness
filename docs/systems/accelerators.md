@@ -155,7 +155,7 @@ The seeded keys (rknpu):
 | `rknpu_endpoint` | sidecar base, `http://127.0.0.1:18815` — loopback only, after the Hailo's 18813 and the Coral's 18814 |
 | `rknpu_sidecar_cmd` | launcher (`__RKNPU_HOME__/rknpu-http.sh`); the harness runs it as `<cmd> --idle-sec <rknpu_idle_sec>`; empty = never spawn, defer when down |
 | `rknpu_timeout_sec` | one NPU call's bound, default 60; a forwarded call is cut off at `accelremote.Budget` (150 s) whatever this says, and a cold start can spend 45 s of it |
-| `rknpu_idle_sec` | the sidecar's self-exit idle window, default 300 — also how long a loaded model holds system RAM |
+| `rknpu_idle_sec` | the sidecar's self-exit idle window, default 300, clamped by the sidecar to 1..300 (0, negative and larger values mean 300) — also how long a loaded model holds system RAM |
 
 `RKNPU_HOME` (`install seed --rknpu-home` and `install render --rknpu-home`, default `<OFFLOAD_HOME>/rknpu`; the
 rkllm seat's default launcher `__RKNPU_HOME__/rkllm-serve.sh` follows it, so the seat and the sidecar never split) holds the sidecar's own

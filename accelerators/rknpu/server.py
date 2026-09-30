@@ -39,8 +39,9 @@ every sysfs/debugfs read below degrades to null where a node is absent):
 
 Refusals: binds loopback only (a non-loopback RKNPU_BIND is refused at startup); serves only files
 listed in models.json whose sha256 matches — model files and their label files alike (an unlisted or
-mismatched file is a structured error, never a load); exits itself after RKNPU_IDLE_SEC without a tool
-call. /health never counts as a call, so a poller cannot keep a model resident. The process also asks the
+mismatched file is a structured error, never a load); exits itself after RKNPU_IDLE_SEC (the launcher's --idle-sec)
+without a tool call, clamped to 1..300: 0, a negative value and anything above 300 all mean 300, because a model
+that idles longer than five minutes is a violation. /health never counts as a call, so a poller cannot keep a model resident. The process also asks the
 kernel's OOM killer to take it before the host's own stack (oom_score_adj 500), because they share the RAM.
 
 RKNPU_ENABLED=0 runs the whole HTTP contract with the NPU path stubbed (for test_server.py on a box
@@ -63,7 +64,18 @@ from urllib.parse import urlparse
 HERE = os.path.dirname(os.path.abspath(__file__))
 BIND = os.environ.get("RKNPU_BIND", "127.0.0.1")
 PORT = int(os.environ.get("RKNPU_PORT", "18815"))
-IDLE_SEC = int(os.environ.get("RKNPU_IDLE_SEC", "300"))
+MAX_IDLE_SEC = 300
+
+
+def _clamp_idle(sec: int) -> int:
+    """Every model idles out within five minutes: 0 (no idle exit), a negative value and more than 300 mean 300."""
+    if 1 <= sec <= MAX_IDLE_SEC:
+        return sec
+    print(f"rknpu sidecar: idle seconds {sec} is outside 1..{MAX_IDLE_SEC}, using {MAX_IDLE_SEC}", file=sys.stderr)
+    return MAX_IDLE_SEC
+
+
+IDLE_SEC = _clamp_idle(int(os.environ.get("RKNPU_IDLE_SEC", "300")))
 HOME = os.environ.get("RKNPU_HOME", HERE)
 MODELS_DIR = os.environ.get("RKNPU_MODELS_DIR", os.path.join(HOME, "models"))
 MANIFEST = os.environ.get("RKNPU_MANIFEST", os.path.join(HERE, "models.json"))
@@ -599,8 +611,7 @@ def _prefer_as_oom_victim(path: str = OOM_SCORE_ADJ) -> None:
 def main():
     _prefer_as_oom_victim()
     srv = ThreadingHTTPServer((BIND, PORT), Handler)
-    if IDLE_SEC > 0:
-        threading.Thread(target=_idle_watchdog, args=(srv,), daemon=True).start()
+    threading.Thread(target=_idle_watchdog, args=(srv,), daemon=True).start()
     print(f"rknpu sidecar: listening on http://{BIND}:{PORT} enabled={ENABLED} models_dir={MODELS_DIR} idle={IDLE_SEC}s",
           file=sys.stderr)
     try:

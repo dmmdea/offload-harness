@@ -460,6 +460,34 @@ class InProcess(unittest.TestCase):
         self.Fake.outputs[self.file[key]] = fn
 
 
+class IdleClampTests(InProcess):
+    """RKNPU_IDLE_SEC (the launcher's --idle-sec) is clamped to 1..300: no model may idle past five minutes."""
+
+    def idle(self, raw):
+        with mock.patch("sys.stderr", io.StringIO()) as err:
+            self.rewrite(RKNPU_IDLE_SEC=raw)
+        return self.mod.IDLE_SEC, err.getvalue()
+
+    def test_zero_negative_and_over_300_all_become_300_with_a_log_line(self):
+        for raw in ("0", "-1", "-300", "301", "86400"):
+            with self.subTest(raw):
+                got, log = self.idle(raw)
+                self.assertEqual(got, 300)
+                self.assertIn(f"idle seconds {raw} is outside 1..300, using 300", log)
+                self.assertEqual(self.health()["idle_sec"], 300)
+
+    def test_in_range_values_pass_untouched_and_silently(self):
+        for raw in ("1", "45", "300"):
+            with self.subTest(raw):
+                got, log = self.idle(raw)
+                self.assertEqual((got, log), (int(raw), ""))
+
+    def test_the_default_is_300(self):
+        self.assertEqual(self.mod._clamp_idle(300), 300)
+        with mock.patch("sys.stderr", io.StringIO()):
+            self.assertEqual(load_server(RKNPU_MANIFEST=self.manifest).IDLE_SEC, 300)
+
+
 class OomVictimTests(InProcess):
     def test_the_process_asks_to_be_the_oom_killers_first_pick(self):
         path = os.path.join(self.tmp, "oom_score_adj")
