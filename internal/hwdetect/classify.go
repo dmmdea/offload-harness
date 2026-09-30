@@ -21,7 +21,8 @@ import "strings"
 // Facts are what a machine reports about itself. Everything the classifier needs and
 // nothing it does not — so it stays pure and testable against synthetic tuples.
 type Facts struct {
-	// Vendor is nvidia|amd|none. Arch is blackwell|ampere|ada|volta|rdna3|gcn|other|none.
+	// Vendor is nvidia|amd|rockchip|none. Arch is
+	// blackwell|ampere|ada|volta|rdna3|gcn|rk3588|other|none.
 	Vendor string `json:"vendor"`
 	Arch   string `json:"arch"`
 	// VRAMGb is the DEDICATED VRAM of the primary GPU. On an AMD iGPU this is the
@@ -30,6 +31,11 @@ type Facts struct {
 	VRAMGb   float64 `json:"vram_gb"`
 	GPUCount int     `json:"gpu_count"`
 	RAMGb    int     `json:"ram_gb"`
+	// UMA marks a GPU with no memory of its own: an SoC whose GPU and NPU allocate
+	// from the same RAM as the CPU. VRAMGb is 0 there and the usable capacity is a
+	// share of RAMGb — which is what separates it from an AMD iGPU, whose BIOS
+	// carve-out is small but real. Carried for the report; it never decides a tier.
+	UMA bool `json:"uma,omitempty"`
 	// GPUName and DriverVersion are carried for the report; they never decide a tier.
 	GPUName       string `json:"gpu_name,omitempty"`
 	DriverVersion string `json:"driver_version,omitempty"`
@@ -193,6 +199,15 @@ func classifyProfile(f Facts) Verdict {
 			return band("amd-rdna3", "rdna3 with a small dedicated carve-out -> iGPU (real capacity is shared UMA)")
 		}
 		return band("amd-gcn", "amd "+orUnknown(arch)+" -> the weakest Vulkan path")
+	}
+
+	// A Rockchip RK3588 has no NVIDIA/AMD adapter, so before this band it fell through
+	// to "cpu" — and a cpu tier renders llama.cpp CPU inference, which no model on this
+	// fleet may run. Its inference runs on the Mali GPU (llama.cpp on Vulkan) and the NPU
+	// (RKLLM, through the tier's rkllm seats). Ordered after the discrete-GPU bands on
+	// purpose: a card in the M.2 slot is what those bands are written for.
+	if vendor == "rockchip" && arch == "rk3588" {
+		return band("rockchip-rk3588", "rockchip rk3588 SoC (Mali-G610 GPU + 3-core NPU on unified memory) -> GPU and NPU serving, never CPU inference")
 	}
 
 	return band("cpu", "no usable GPU detected")

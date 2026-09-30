@@ -143,6 +143,8 @@ func VendorArchFromProfile(profile string) (vendor, arch string) {
 		return "nvidia", "volta"
 	case profile == "dual-gpu":
 		return "nvidia", "blackwell" // the dual rig's primary; refined when measured
+	case profile == "rockchip-rk3588":
+		return "rockchip", "rk3588"
 	case profile == "cpu":
 		return "none", "none"
 	default:
@@ -152,12 +154,14 @@ func VendorArchFromProfile(profile string) (vendor, arch string) {
 
 // UMAFromProfile reports whether the profile is a unified-memory iGPU class —
 // which changes BOTH capacity composition (carve-out + WDDM shared budget)
-// and usage composition (Dedicated + Shared). Pure; unit-tested. ok is false
+// and usage composition (Dedicated + Shared). An SoC (rockchip-rk3588) is
+// unified through and through: it has no carve-out at all, and its provider
+// (MeminfoUMAProbe) composes from RAM alone. Pure; unit-tested. ok is false
 // when the profile carries no UMA signal (caller falls back to a capacity
 // heuristic).
 func UMAFromProfile(profile string) (uma, ok bool) {
 	switch profile {
-	case "amd-rdna3", "amd-gcn":
+	case "amd-rdna3", "amd-gcn", "rockchip-rk3588":
 		return true, true
 	case "amd-rdna3-dgpu":
 		return false, true
@@ -178,7 +182,7 @@ type ResolvedProvider struct {
 	Probe    MemProbe
 	Vendor   string
 	Arch     string
-	Source   string // "nvidia-smi" | "windows-generic"
+	Source   string // "nvidia-smi" | "windows-generic" | "linux-amdgpu" | "linux-meminfo"
 	TotalGiB float64
 	UsedGiB  float64
 }

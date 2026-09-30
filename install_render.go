@@ -144,13 +144,19 @@ func fallbackProfile(backend string) (servingProfile, error) {
 	case "vulkan":
 		return servingProfile{CtxSize: 8192, KVType: "f16", FlashAttn: "on", Backend: backend,
 			Include26B: true, moeLiteral: "-ngl 999"}, nil
+	case "rk3588":
+		// Its template serves one small GPU chat entry and no 26B (nothing bigger fits the
+		// board's shared-RAM budget), so there is no MoE placement to name and no literal
+		// to bypass moePlacement with. The window, KV and flash-attn are the tier's own
+		// unmeasured floor, not a claim about the GPU.
+		return servingProfile{CtxSize: 8192, KVType: "f16", FlashAttn: "off", Backend: backend}, nil
 	case "cpu":
 		// The cpu template carries no MoE token, so this is inert in the output; it is
 		// non-empty only because a tier that serves the 26B must name a placement.
 		return servingProfile{CtxSize: 8192, KVType: "f16", FlashAttn: "off", Backend: backend,
 			Include26B: true, moeLiteral: "--cpu-moe"}, nil
 	}
-	return servingProfile{}, fmt.Errorf("no fallback defaults for backend %q (have: cuda, cuda-resident, dual-cuda, vulkan, cpu)", backend)
+	return servingProfile{}, fmt.Errorf("no fallback defaults for backend %q (have: cuda, cuda-resident, dual-cuda, vulkan, rk3588, cpu)", backend)
 }
 
 // moePlacement resolves BOTH the 26B flag form and whether the tier serves it at all.
@@ -223,13 +229,22 @@ func templateFor(goos, backend string) (string, error) {
 // A warning rather than an error: rendering the serving config before fetching
 // weights is a legitimate order of operations, and refusing would break it. It is
 // skipped when rendering for another machine, where a local miss means nothing.
+//
+// An rkllm seat's vision encoder is a second weight file of the same kind as an mmproj
+// (a VLM without it loads and answers image questions blind), so it is named here too.
 func warnMissingSeatModels(seats []mediaseat.Seat, modelsDir, target string) {
+	warnMissingSeatModelsTo(seats, modelsDir, target, os.Stderr)
+}
+
+// warnMissingSeatModelsTo carries the body with an injectable sink, like the gated-model
+// warning below, so which files it looks for is testable.
+func warnMissingSeatModelsTo(seats []mediaseat.Seat, modelsDir, target string, w io.Writer) {
 	if len(seats) == 0 || modelsDir == "" || target != runtime.GOOS {
 		return
 	}
 	var missing []string
 	for _, s := range seats {
-		for label, rel := range map[string]string{"model": s.Model, "mmproj": s.MMProj, "vad_model": s.VADModel, "chat_template": s.ChatTemplate} {
+		for label, rel := range map[string]string{"model": s.Model, "mmproj": s.MMProj, "vad_model": s.VADModel, "chat_template": s.ChatTemplate, "vision_encoder": s.VisionEncoder} {
 			if rel == "" {
 				continue
 			}
@@ -243,7 +258,7 @@ func warnMissingSeatModels(seats []mediaseat.Seat, modelsDir, target string) {
 		return
 	}
 	sort.Strings(missing)
-	fmt.Fprintf(os.Stderr, "WARNING: %d declared seat weight(s) are not on this machine. llama-swap lists a seat "+
+	fmt.Fprintf(w, "WARNING: %d declared seat weight(s) are not on this machine. llama-swap lists a seat "+
 		"from the CONFIG, so the alias checks in `doctor` and `acceptance` will PASS and the route will fail only "+
 		"when called. Fetch these before relying on them:\n%s\n", len(missing), strings.Join(missing, "\n"))
 }
@@ -525,7 +540,7 @@ func runInstallRender(args []string) error {
 	out := fs.String("out", "", "write the rendered config here instead of stdout")
 	root := fs.String("root", ".", "repo root holding setup/templates/profiles.json")
 	home := fs.String("home", "", "install root, for media seat paths (__OFFLOAD_HOME__)")
-	fallback := fs.String("fallback-backend", "", "render off-matrix defaults for this backend when --profile is unknown or empty (cuda|cuda-resident|dual-cuda|vulkan|cpu)")
+	fallback := fs.String("fallback-backend", "", "render off-matrix defaults for this backend when --profile is unknown or empty (cuda|cuda-resident|dual-cuda|vulkan|rk3588|cpu)")
 	ramTier := fs.String("ram-tier", "", "min|low|mid|high — gates the RAM-hungry 26B placements. Empty = do not gate (the caller does not know)")
 	// The vLLM seat's DEPLOYMENT half. A tier is a hardware class, so it cannot know
 	// the account llama-swap runs as, the address the engine binds, or where this box

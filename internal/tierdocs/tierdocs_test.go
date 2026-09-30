@@ -1,6 +1,11 @@
 package tierdocs
 
-import "testing"
+import (
+	"strings"
+	"testing"
+
+	"github.com/dmmdea/offload-harness/internal/mediaseat"
+)
 
 // TestMediaSeedKeyCoversMediacapRouteKeys pins mediaSeedKey against the route
 // keys internal/mediacap actually derives CONFIGURED / NOT CONFIGURED from
@@ -38,5 +43,39 @@ func TestMediaSeedKeyCoversMediacapRouteKeys(t *testing.T) {
 		if mediaSeedKey(k) {
 			t.Errorf("mediaSeedKey(%q) = true — harness config classified as media", k)
 		}
+	}
+}
+
+// TestRKLLMSeatDocumentsWhatItBindsAndHowItRuns: the seat table used to assume every seat
+// binds vision_model unless it was stt or ocr, which would document a binding a text-only
+// rkllm seat never writes. An rkllm seat also runs outside llama.cpp, so the page says
+// which CPUs the runtime may use — the one setting that decides how it shares the board.
+func TestRKLLMSeatDocumentsWhatItBindsAndHowItRuns(t *testing.T) {
+	vlm := mediaseat.Seat{Kind: mediaseat.KindRKLLM, Name: "npu-vlm", Model: "m.rkllm", VisionEncoder: "enc.rknn",
+		CtxSize: 16384, CPUMask: "0xf0", Residency: mediaseat.Swappable}
+	chat := mediaseat.Seat{Kind: mediaseat.KindRKLLM, Name: "npu-chat", Model: "c.rkllm", CtxSize: 4096, Residency: mediaseat.Swappable}
+	page := renderTier("t", Profile{CtxSize: 8192, MediaSeats: []mediaseat.Seat{vlm, chat}}, nil)
+	for _, want := range []string{
+		"| `npu-vlm` | rkllm | `vision_model` | `m.rkllm` | swappable |",
+		"| `npu-chat` | rkllm | — | `c.rkllm` | swappable |", // a chat seat writes no binding
+		"- `npu-vlm`: window 16384, `cpu_mask` `0xf0`, vision encoder `enc.rknn`",
+		"- `npu-chat`: window 4096, `cpu_mask` `0x0f`", // the default mask, spelled out
+	} {
+		if !strings.Contains(page, want) {
+			t.Errorf("page missing %q:\n%s", want, page)
+		}
+	}
+}
+
+// TestNoRKLLMSeatNoRKLLMProse: the runtime note appears only on a tier that declares one, so
+// every other tier's page is exactly what it was.
+func TestNoRKLLMSeatNoRKLLMProse(t *testing.T) {
+	vision := mediaseat.Seat{Kind: mediaseat.KindVision, Name: "v", Model: "m.gguf", MMProj: "p.gguf", CtxSize: 4096, Residency: mediaseat.Swappable}
+	page := renderTier("t", Profile{CtxSize: 8192, MediaSeats: []mediaseat.Seat{vision}}, nil)
+	if strings.Contains(page, "rkllm") {
+		t.Errorf("a tier without an rkllm seat mentions rkllm:\n%s", page)
+	}
+	if !strings.Contains(page, "| `v` | vision | `vision_model` | `m.gguf` | swappable |") {
+		t.Errorf("a vision seat's row changed:\n%s", page)
 	}
 }

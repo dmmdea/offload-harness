@@ -260,15 +260,15 @@ func renderTier(name string, p Profile, reports []string) string {
 			"binding can never name a seat that was not rendered:\n\n" +
 			"| seat | kind | binds | model | residency |\n|---|---|---|---|---|\n")
 		for _, s := range p.MediaSeats {
-			bind := "`vision_model`"
-			switch s.Kind {
-			case mediaseat.KindSTT:
-				bind = "`stt_model`"
-			case mediaseat.KindOCR:
-				bind = "`ocr_model`"
+			// The seat itself says which config key it writes; an rkllm seat with no
+			// vision encoder is a chat model and writes none.
+			bind := "—"
+			if k := s.BindingKey(); k != "" {
+				bind = "`" + k + "`"
 			}
 			fmt.Fprintf(&b, "| `%s` | %s | %s | `%s` | %s |\n", s.Name, s.Kind, bind, s.Model, s.Residency)
 		}
+		b.WriteString(rkllmSeatNote(p.MediaSeats))
 		b.WriteString("\nA seat still needs its weights on the box — model downloads stay out-of-band, as with\nevery seed.\n\n")
 	}
 	if len(mediaMidHigh) > 0 {
@@ -367,6 +367,31 @@ func renderTier(name string, p Profile, reports []string) string {
 	}
 	fmt.Fprintf(&b, "\n---\n\n[All tiers](README.md) · [profiles.json](../../setup/templates/profiles.json) · [installer](../systems/setup-installer.md)\n")
 	return b.String()
+}
+
+// rkllmSeatNote describes the seats a table row cannot: an rkllm seat is not a llama.cpp
+// model, so the columns above say nothing about how it runs. One line per seat carries
+// the two settings the runtime is started with, and its vision encoder when it has one.
+// "" when the tier declares none, so every other tier's page is unchanged.
+func rkllmSeatNote(seats []mediaseat.Seat) string {
+	var lines []string
+	for _, s := range seats {
+		if s.Kind != mediaseat.KindRKLLM {
+			continue
+		}
+		line := fmt.Sprintf("- `%s`: window %d, `cpu_mask` `%s`", s.Name, s.CtxSize, s.EffectiveCPUMask())
+		if s.VisionEncoder != "" {
+			line += fmt.Sprintf(", vision encoder `%s`", s.VisionEncoder)
+		}
+		lines = append(lines, line)
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+	return "\nAn `rkllm` seat runs on the NPU through the Rockchip RKLLM runtime, not in llama.cpp. It is\n" +
+		"started with its own window and a `cpu_mask` — the CPUs the runtime's host threads may use\n" +
+		"(at least 3, the runtime refuses fewer than the SoC has NPU cores):\n\n" +
+		strings.Join(lines, "\n") + "\n"
 }
 
 // mediaSeedKey reports whether a config_seed key binds a MEDIA route. The set

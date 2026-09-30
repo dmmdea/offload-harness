@@ -128,6 +128,7 @@ projected per-profile serving choices — `selftest.ps1` measures and refines th
 | `ampere-6` | #10/#11 (3050 6 GB) | `offload-e4b` | 32K | q8_0 (conservative default; f16 measured viable) | dropped |
 | `amd-gcn` | #12 (Vega 7 + 32 GB, Vulkan + CPU alt route) | `gemma4-e2b` (agent `qwen3.5-4b-agent`) | 32K | f16, FA on (measured 2026-09-20) | dropped |
 | `cpu` | no GPU | `offload-e4b` (CPU) | 8K | f16, FA off | `--cpu-moe` if RAM ≥ ~56 GB, else dropped |
+| `rockchip-rk3588` | Rockchip RK3588 SoC board (an Orange Pi 5, 7.7 GiB shared by CPU/GPU/NPU); Linux only, detected from the device tree | `gemma4-e2b` (Mali GPU via llama.cpp Vulkan) + `qwen3.5-0.8b-npu` (NPU via RKLLM); no CPU inference | 8K (the NPU seat 16K) | f16, FA off (GPU seat unmeasured) | dropped |
 
 **Big-VRAM Blackwell tiers (#13–15, added 2026-07-16):** cards ≥24 GB render the
 `cuda-resident` template — every model is a standalone entry (no swap group, no ttl), so the
@@ -250,7 +251,9 @@ additionally needs its **chat template file** in the models dir (blackwell-8's p
 `PaddleOCR-VL-1.6.gguf` + `mmproj-PaddleOCR-VL-1.6.gguf` + `PaddleOCR-VL-1.6-chat_template.jinja`,
 all from `PaddlePaddle/PaddleOCR-VL-1.6-GGUF` — the model transcribes DEGRADED without the
 template, and it is crops/region-driven by design: full scattered pages degrade without the
-vendor's layout stage). Field-measured traps (OptiPlex 7060, 2026-08-22):
+vendor's layout stage). An `rkllm` seat (the rockchip-rk3588 tier's NPU seat) needs its `.rkllm`
+model and, when it is a VLM, its vision encoder `.rknn` in the models dir — the renderer WARNs on
+both. Field-measured traps (OptiPlex 7060, 2026-08-22):
 
 - **Qwen3VL-4B**: the HF repo is the HYPHENATED `unsloth/Qwen3-VL-4B-Instruct-GGUF` — the
   unhyphenated `unsloth/Qwen3VL-4B-Instruct-GGUF` name returns 401, which reads like an auth

@@ -69,6 +69,9 @@ func runInstallDetect(args []string) error {
 	fmt.Println("gpu:     ", dash(facts.GPUName))
 	fmt.Printf("vendor:   %s / %s\n", facts.Vendor, facts.Arch)
 	fmt.Printf("vram:     %.1f GB   gpus: %d\n", facts.VRAMGb, facts.GPUCount)
+	if facts.UMA {
+		fmt.Println("memory:   unified — the GPU and NPU share system RAM (no dedicated VRAM)")
+	}
 	fmt.Printf("ram:      %d GB\n", facts.RAMGb)
 	if facts.DriverVersion != "" {
 		fmt.Println("driver:  ", facts.DriverVersion)
