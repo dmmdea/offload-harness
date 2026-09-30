@@ -481,13 +481,14 @@ FINISH_ANIMATIONS_JS = (
 )
 
 
-def finish_animations(send) -> int:
+def finish_animations(send, quiet=False) -> int:
     """Jump the finite CSS animations and transitions the snapshot cannot see to their end state.
 
     `send(method, **params)` is a CDP call in the page's session. Returns how many animations
     were finished. It can never raise: a page that is navigating, a dead session or an IPC
     timeout just means nothing was finished, and observe carries on exactly as it did before
-    this hook existed."""
+    this hook existed. quiet=True drops the "skipped" line: the settle polls a navigating page
+    several times in a row, and one line per poll would crowd the stderr tail a defer reports."""
     try:
         response = send("Runtime.evaluate", expression=FINISH_ANIMATIONS_JS, returnByValue=True)
         if not isinstance(response, dict) or response.get("exceptionDetails"):
@@ -495,7 +496,8 @@ def finish_animations(send) -> int:
         value = (response.get("result") or {}).get("value")
         count = int(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0
     except Exception as exc:  # noqa: BLE001 - a helper on the observe path must never end a run
-        log(f"finish animations skipped: {type(exc).__name__}")
+        if not quiet:
+            log(f"finish animations skipped: {type(exc).__name__}")
         return 0
     if count > 0:
         log(f"finished {count} pending CSS animation(s) before observe")
@@ -519,9 +521,13 @@ def finish_animations(send) -> int:
 # finishes newly started animations (finish_animations) and reads a counter of DOM mutations that a
 # MutationObserver keeps in the page; a poll is quiet when no animation was finished and the counter
 # did not move. It stops after INPUT_SETTLE_QUIET_POLLS quiet polls in a row once INPUT_SETTLE_MIN_S
-# has passed, and in any case at INPUT_SETTLE_CAP_S (plus the poll in flight), so an action costs
-# about 0.3 s on a quiet page and 1.5 s at most; a page that never stops mutating (a live ticker)
-# costs the cap every time. The counter is read as [observer id, count]: a navigation gives the new
+# has passed, and in any case at INPUT_SETTLE_CAP_S of page time, so an action costs about 0.3 s on a
+# quiet page and 1.5 s at most, each plus the CDP calls in flight (the cap is checked between polls,
+# and the harness can hold one call for several seconds on a page whose JS thread is frozen, for
+# instance while a native dialog is open); a page that never stops mutating (a live ticker) costs the
+# cap every time. Between polls the wrapper drains the capture buffer: the daemon's shared event
+# buffer holds 500 events and drops the oldest, and this wait starts right after the input, when the
+# action's own requests fire. The counter is read as [observer id, count]: a navigation gives the new
 # document a new observer, so its id differs and a count that restarted at the old value still reads
 # as a change. A read that fails (a navigating page, a dead session, an IPC timeout) also counts as
 # a change and never raises: a dead session is polled until the cap, bounded, and jev's read that
@@ -557,20 +563,27 @@ def read_mutations(send):
     return None
 
 
-def settle_after_input(send, clock=time.monotonic, sleep=time.sleep) -> None:
+def settle_after_input(send, clock=time.monotonic, sleep=time.sleep, between=None) -> None:
     """Let the page finish reacting to an input before jev reads it (see MUTATION_COUNTER_JS).
 
     `send(method, **params)` is a CDP call in the page's session. Polls until the page has been quiet
-    for INPUT_SETTLE_QUIET_POLLS polls in a row and INPUT_SETTLE_MIN_S has passed, never past
-    INPUT_SETTLE_CAP_S. Returns nothing and can never raise: observe carries on exactly as it did
-    before this hook existed."""
+    for INPUT_SETTLE_QUIET_POLLS polls in a row and INPUT_SETTLE_MIN_S has passed, and stops at
+    INPUT_SETTLE_CAP_S of page time (checked between polls, so the calls of the poll in flight come on
+    top). `between`, when given, runs once per poll right after the sleep: the capture drain. Returns
+    nothing and can never raise: observe carries on exactly as it did before this hook existed, and a
+    `between` that fails is logged and does not end the settle."""
     try:
         start = clock()
         last = read_mutations(send)
         quiet = polls = moved = finished_total = 0
         while clock() - start < INPUT_SETTLE_CAP_S:
             sleep(INPUT_SETTLE_POLL_S)
-            finished = finish_animations(send)
+            if between is not None:
+                try:
+                    between()
+                except Exception as exc:  # noqa: BLE001 - a drain hiccup must not cost the page its settle
+                    log(f"settle between-poll hook failed: {type(exc).__name__}")
+            finished = finish_animations(send, quiet=True)
             now = read_mutations(send)
             polls += 1
             finished_total += finished
@@ -692,8 +705,10 @@ def _install_patches(run: Run, model, agent_mod, browser_mod) -> None:
             # orig_observe consumes after_input, and never on the first observe (nothing has run yet)
             # or after a wait action (jev leaves after_input unset for it). The calls go straight to
             # jev's cdp() in the observed session, for the reason given at browser_operation above.
+            # A capture run drains between the polls (a no-op without capture), like every other wait.
             session = self.session
-            settle_after_input(lambda method, **params: browser_mod.cdp(method, session_id=session, **params))
+            settle_after_input(lambda method, **params: browser_mod.cdp(method, session_id=session, **params),
+                               between=lambda: _drain(run, run.helpers))
         page = orig_observe(self, *args, **kwargs)
         _drain(run, run.helpers)
         url = page.get("url", "")
@@ -765,8 +780,8 @@ def _install_patches(run: Run, model, agent_mod, browser_mod) -> None:
 
 
 # Before the tab closes, the page's own XHR/fetch traffic must go quiet: an editor saves
-# on a debounce after the last input (Substack's autosave leaves 2.3 s after a keystroke,
-# measured 2026-09-29), and closing the tab at DONE dropped that save — a typed title was
+# on a debounce after the last input (one production editor's autosave left 2.3 s after a
+# keystroke, measured 2026-09-29), and closing the tab at DONE dropped that save — a typed title was
 # lost while the run reported done. Quiet = nothing in flight for SETTLE_QUIET_S; the wait
 # is capped so a long-poll can never hold a run open.
 SETTLE_QUIET_S = 3.5

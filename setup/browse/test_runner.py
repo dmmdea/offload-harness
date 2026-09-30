@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 import types
 import unittest
 from pathlib import Path
@@ -57,11 +58,11 @@ class HostTests(unittest.TestCase):
         self.assertTrue(runner.host_allowed("http://example.org", None))
 
     def test_subdomain_and_exact(self):
-        allow = ["substack.com"]
-        self.assertTrue(runner.host_allowed("https://readypep.substack.com/p/1", allow))
-        self.assertTrue(runner.host_allowed("https://SUBSTACK.com/", allow))
-        self.assertFalse(runner.host_allowed("https://evilsubstack.com/", allow))
-        self.assertFalse(runner.host_allowed("https://substack.com.evil.test/", allow))
+        allow = ["example.net"]
+        self.assertTrue(runner.host_allowed("https://pub.example.net/p/1", allow))
+        self.assertTrue(runner.host_allowed("https://EXAMPLE.net/", allow))
+        self.assertFalse(runner.host_allowed("https://evilexample.net/", allow))
+        self.assertFalse(runner.host_allowed("https://example.net.evil.test/", allow))
         self.assertFalse(runner.host_allowed("https://example.org/", allow))
 
     def test_schemes(self):
@@ -253,7 +254,7 @@ class CdpPinTests(unittest.TestCase):
 
 
 class SettleTests(unittest.TestCase):
-    """The tab must not close while the page is still saving: Substack's editor autosaves
+    """The tab must not close while the page is still saving: a production editor autosaved
     2.3 s after the last keystroke, and a run that closed its tab at DONE lost the title."""
 
     def ev(self, method, rid, session="s1", type_="XHR"):
@@ -338,12 +339,13 @@ class BackgroundTabAnimationTests(unittest.TestCase):
 
     PAGE = {"url": "https://example.org/", "actions": [{"id": "e1", "kind": "click", "label": "Open menu", "node": 7}]}
 
-    def make(self, finished=2, on_finish=None, stale_reads=0, capture=None, settle="record"):
+    def make(self, finished=2, on_finish=None, stale_reads=0, capture=None, settle="record", drain=False):
         """Patch a fresh fake Browser through the real _install_patches; returns (browser, order, run, sessions).
 
         The settle after an input would really sleep, so runner.settle_after_input is replaced for the test:
         settle="record" notes "settle" in `order` and sends one probe call; settle="real" notes "settle" and
-        runs the real function on a fake clock, so its reads and finishes show up in `order`."""
+        runs the real function on a fake clock, so its reads and finishes show up in `order`. drain=True makes
+        it a capture run: every drain of the daemon's event buffer shows up in `order` as "drain"."""
         order = []
         sessions = []
         stale = [True] * stale_reads
@@ -360,23 +362,26 @@ class BackgroundTabAnimationTests(unittest.TestCase):
                 return {"result": {"type": "number", "value": finished}}
             if "__laneSettle" in params.get("expression", ""):
                 order.append("mutations")
+                if method != "Runtime.evaluate" or params.get("returnByValue") is not True:
+                    return {"result": {"type": "object", "objectId": "1"}}  # by reference: Chrome sends no value
                 return {"result": {"value": [1, 0]}}
             return {"result": {"value": []}}
 
         real_settle = runner.settle_after_input
 
-        def record_settle(send):
+        def record_settle(send, between=None):
             order.append("settle")
             send("Runtime.evaluate", expression="probe", returnByValue=True)
 
-        def settle_on_a_fake_clock(send):
+        def settle_on_a_fake_clock(send, between=None):
             order.append("settle")
             now = [0.0]
 
             def sleep(seconds):
                 now[0] += seconds
 
-            real_settle(send, clock=lambda: now[0], sleep=sleep)
+            hook = {} if between is None else {"between": between}
+            real_settle(send, clock=lambda: now[0], sleep=sleep, **hook)
 
         def fake_operation(request):  # jev's module-level browser_operation
             order.append(f"read:{request['operation']}")
@@ -389,8 +394,7 @@ class BackgroundTabAnimationTests(unittest.TestCase):
                     "actions": [dict(a) for a in BackgroundTabAnimationTests.PAGE["actions"]]}
 
         class FakeBrowser:
-            session = "s1"
-            after_input = None
+            session = "s1"  # no after_input here: jev's Browser only sets it in act, never in __init__
 
             def call(self, method, **params):
                 order.append(f"call:{method}")
@@ -402,7 +406,7 @@ class BackgroundTabAnimationTests(unittest.TestCase):
 
             def observe(self, screenshot=True):  # like jev: the post-action wait, then up to 10 reads
                 order.append("observe")
-                if self.after_input:
+                if getattr(self, "after_input", None):  # jev reads it with getattr: the first observe has none
                     self.after_input = None
                     order.append("wait")
                 for attempt in range(10):
@@ -428,6 +432,9 @@ class BackgroundTabAnimationTests(unittest.TestCase):
         agent_mod = types.SimpleNamespace()
         run = runner.Run({"url": "https://example.org/", "unattended": True}, types.SimpleNamespace(send=lambda obj: None))
         run.capture = capture
+        if drain:
+            run.capture = types.SimpleNamespace(session_id=None, feed=lambda event: None)
+            run.helpers = types.SimpleNamespace(drain_events=lambda: order.append("drain") or [])
         runner._install_patches(run, model, agent_mod, browser_mod)
         patcher = mock.patch.object(runner, "settle_after_input",
                                     side_effect=record_settle if settle == "record" else settle_on_a_fake_clock)
@@ -461,6 +468,7 @@ class BackgroundTabAnimationTests(unittest.TestCase):
         del order[:]
         browser.observe()
         self.assertEqual(order, ["settle", "observe", "wait", "finish", "read:observe"])
+
     def test_the_settle_runs_in_the_observed_session_and_the_page_still_comes_back(self):
         browser, order, _, sessions = self.make()
         browser.act(self.PAGE["actions"][0], self.PAGE)
@@ -505,6 +513,37 @@ class BackgroundTabAnimationTests(unittest.TestCase):
         self.assertEqual(page["url"], "https://example.org/")
         self.assertTrue(run.observed_once)
 
+    def test_the_first_observe_of_a_run_does_not_settle(self):
+        # jev's real Browser has no after_input until its first act: the wrapper must read it with getattr.
+        browser, order, _, _ = self.make()
+        self.assertFalse(hasattr(browser, "after_input"))
+        browser.observe()
+        self.assertEqual(order, ["observe", "finish", "read:observe"])
+
+    def test_every_kind_of_input_settles_once(self):
+        # A typed field, a chosen option and a scroll reveal things on the page's own timers as well.
+        for kind in ("click", "fill", "select", "scroll"):
+            with self.subTest(kind):
+                browser, order, _, _ = self.make()
+                browser.act({"id": "e1", "kind": kind, "label": "Field", "node": 7}, self.PAGE, text="x")
+                browser.observe()
+                self.assertEqual(order.count("settle"), 1)
+
+    def test_the_capture_buffer_is_drained_during_the_settle_not_only_around_it(self):
+        # The daemon's event buffer holds 500 events and drops the oldest: the settle waits up to 1.5 s on a
+        # busy page right after the click, so it must drain between its polls, like every other wait does.
+        browser, order, _, _ = self.make(finished=0, settle="real", drain=True)
+        browser.act(self.PAGE["actions"][0], self.PAGE)
+        del order[:]
+        browser.observe()
+        self.assertEqual(order, ["settle", "mutations"] + ["drain", "finish", "mutations"] * 3
+                         + ["observe", "wait", "finish", "read:observe", "drain"])
+
+    def test_without_capture_the_settle_drains_nothing(self):
+        browser, order, _, _ = self.make(finished=0, settle="real")
+        browser.act(self.PAGE["actions"][0], self.PAGE)
+        browser.observe()
+        self.assertNotIn("drain", order)
 
     def test_a_stale_read_is_retried_with_a_fresh_finish(self):
         # A click that navigates: the retries re-read the new document, whose fade-ins are pending.
@@ -679,9 +718,10 @@ class SettleAfterInputTests(unittest.TestCase):
             return script(i)
         return script[min(i, len(script) - 1)] if script else default
 
-    def drive(self, reads=None, finished=None, send=None):
+    def drive(self, reads=None, finished=None, send=None, between=None):
         """Run the real settle against a scripted page. reads[i] is the i-th counter read (index 0 is the
-        install read), finished[i] the i-th finish count. Returns a namespace: polls made, elapsed fake
+        install read), finished[i] the i-th finish count; `between`, when given, is the settle's between-poll
+        hook (noted in `calls`, then run, so it may raise). Returns a namespace: polls made, elapsed fake
         time, the calls in order, the number of finishes and the return value."""
         t = [0.0]
         calls, sleeps = [], [0]
@@ -703,9 +743,16 @@ class SettleAfterInputTests(unittest.TestCase):
             self.assertEqual(expression, runner.MUTATION_COUNTER_JS)
             i, counters["read"] = counters["read"], counters["read"] + 1
             calls.append("read")
+            if method != "Runtime.evaluate" or params.get("returnByValue") is not True:
+                return {"result": {"type": "object", "objectId": "1"}}  # by reference: Chrome sends no value
             return {"result": {"value": self.pick(reads, i, [1, 0])}}
 
-        result = runner.settle_after_input(send or fake_send, clock=lambda: t[0], sleep=sleep)
+        def hook():
+            calls.append("between")
+            between()
+
+        extra = {} if between is None else {"between": hook}
+        result = runner.settle_after_input(send or fake_send, clock=lambda: t[0], sleep=sleep, **extra)
         return types.SimpleNamespace(result=result, polls=sleeps[0], elapsed=t[0], calls=calls,
                                      finishes=counters["finish"])
 
@@ -785,6 +832,39 @@ class SettleAfterInputTests(unittest.TestCase):
                 self.assertGreaterEqual(out.elapsed, self.CAP - 1e-6, "an unreadable page is never quiet")
                 self.assertLessEqual(out.elapsed, self.CAP + self.POLL + 1e-6)
 
+    def test_a_between_hook_runs_once_per_poll_after_the_sleep_and_before_the_finish(self):
+        # The wrapper drains the capture buffer here; a capture run that clicks on a busy page would
+        # otherwise leave the daemon's 500-event buffer undrained for the whole settle.
+        out = self.drive(reads=[[1, 0]], between=lambda: None)
+        self.assertEqual(out.polls, 3)
+        self.assertEqual(out.calls, ["read"] + ["sleep", "between", "finish", "read"] * out.polls)
+
+    def test_a_failing_between_hook_does_not_end_the_settle(self):
+        def boom():
+            raise OSError("daemon gone")
+
+        out = self.drive(reads=[[1, 0]], between=boom)
+        self.assertEqual(out.polls, 3, "the page still gets its settle")
+        self.assertEqual(out.calls.count("between"), 3)
+        failed = [c.args[0] for c in self.log.call_args_list if c.args[0].startswith("settle between-poll hook failed")]
+        self.assertEqual(len(failed), 3, "and each failure is on stderr")
+
+    def test_the_production_defaults_use_the_real_clock_and_sleep(self):
+        # Every other test injects both. A constant clock never ends the loop; a sleep that returns at
+        # once turns the settle into a busy loop of CDP calls: both are caught by the send budget.
+        sends = [0]
+
+        def send(method, **params):
+            sends[0] += 1
+            if sends[0] > 60:  # a settle of at most 1.5 s at 0.1 s per poll sends at most 31
+                raise Runaway("the settle never stopped")
+            return {"result": {"value": 0 if params["expression"] == runner.FINISH_ANIMATIONS_JS else [1, 0]}}
+
+        started = time.monotonic()
+        runner.settle_after_input(send)
+        self.assertGreaterEqual(time.monotonic() - started, self.MIN)
+        self.assertLessEqual(sends[0], 31)
+
     def test_it_never_raises(self):
         def dead(method, **params):
             raise OSError("daemon gone")
@@ -806,6 +886,21 @@ class SettleAfterInputTests(unittest.TestCase):
         skipped = [c.args[0] for c in self.log.call_args_list if c.args[0].startswith("settle after input skipped")]
         self.assertEqual(len(skipped), 2, "a skipped settle says so on stderr")
 
+    def test_a_navigating_page_does_not_flood_stderr_with_finish_skips(self):
+        # Every poll of a settle on a navigating page fails its finish; one "skipped" line per poll would
+        # crowd the stderr tail a defer reports. The settle's finishes are quiet; observe's own is not.
+        def navigating(method, **params):
+            raise RuntimeError("Document is navigating")
+
+        self.log.reset_mock()
+        out = self.drive(send=navigating)
+        self.assertGreater(out.polls, 1)
+        lines = [c.args[0] for c in self.log.call_args_list]
+        self.assertFalse([l for l in lines if l.startswith("finish animations skipped")], lines)
+        self.log.reset_mock()
+        self.assertEqual(runner.finish_animations(navigating), 0)
+        self.assertEqual([c.args[0] for c in self.log.call_args_list], ["finish animations skipped: RuntimeError"])
+
     def test_it_logs_only_when_the_page_was_active(self):
         self.drive(reads=[[1, 0]])
         self.assertEqual(self.settled_lines(), [], "a page that was quiet from the start is not worth a line")
@@ -820,6 +915,18 @@ class SettleAfterInputTests(unittest.TestCase):
         self.assertGreaterEqual(self.QUIET, 2, "one quiet poll is not enough: a page is quiet between bursts")
         self.assertLess(self.CAP, 3.0, "the settle runs after every action, so it must stay cheap")
         self.assertEqual(runner.SETTLE_POLL_S, 0.2, "the network settle's own poll interval is untouched")
+
+    def test_the_counter_is_read_by_value_through_runtime_evaluate(self):
+        # Without returnByValue Chrome answers with an object id and no value: every read would be
+        # unreadable, every poll a change, and every action would pay the whole cap.
+        sent = []
+
+        def send(method, **params):
+            sent.append((method, params))
+            return {"result": {"value": [1, 0]}}
+
+        runner.read_mutations(send)
+        self.assertEqual(sent, [("Runtime.evaluate", {"expression": runner.MUTATION_COUNTER_JS, "returnByValue": True})])
 
     def test_read_mutations_parses_the_observer_id_and_count(self):
         def ok(value):

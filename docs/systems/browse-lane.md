@@ -55,7 +55,7 @@ operator's browser, and any remote browser service.
 3. The sidecar attaches to the running browser (the `browse_cdp_url` endpoint when set, else the named
    browser's `DevToolsActivePort` file), opens a background tab, and loops: observe, ask the harness for a
    decision, execute one action. The observe that follows an action first waits for the page to settle
-   (about 0.3 s on a quiet page, 1.5 s at most), and immediately before every page read the sidecar jumps
+   (about 0.3 s on a quiet page, 1.5 s of page time at most), and immediately before every page read the sidecar jumps
    the finite CSS animations and transitions the snapshot cannot see to their end state (see
    [Background tab rendering](#background-tab-rendering)).
 4. Every model call goes through the harness. A typed decision is proxied to `browse_decision_url`
@@ -63,8 +63,8 @@ operator's browser, and any remote browser service.
    reaches the sidecar). A field value for TYPE_TEXT is generated on the local agent seat under a raw
    GBNF `grammar` (Invariant 1).
 5. Before closing its tab the sidecar waits until the page's XHR/fetch traffic has been quiet for 3.5 s
-   (capped at 15 s): an editor saves on a debounce after the last input (Substack's autosave leaves 2.3 s
-   after a keystroke), and closing the tab at DONE dropped that save while the run reported done. Then it
+   (capped at 15 s): an editor saves on a debounce after the last input (one production editor's autosave left
+   2.3 s after a keystroke), and closing the tab at DONE dropped that save while the run reported done. Then it
    closes the tab, sends one `result` line, stops the lane's browser-harness daemon (`offload-browse`) and
    exits; the harness returns the result. Nothing of the operator's is removed.
 
@@ -122,8 +122,9 @@ correction stops:
   follows an action first runs a settle loop (`settle_after_input`): every 100 ms it finishes newly started
   animations, with the same script as above, and reads a counter of DOM mutations that a `MutationObserver`
   keeps in the page. A poll is quiet when no animation was finished and the counter did not move. The loop
-  stops after two quiet polls in a row once 0.3 s have passed, and at 1.5 s whatever the page does (plus the
-  poll in flight). With it, the read after the menu click showed exactly the dialog (its text, `Cancel` and
+  stops after two quiet polls in a row once 0.3 s have passed, and at 1.5 s of page time whatever the page
+  does (plus the calls in flight, see below). With it, the read after the menu click showed exactly the
+  dialog (its text, `Cancel` and
   the confirm button), and once the goal named the confirm click as a step of its own the run clicked it and
   the record was deleted (checked independently). Starting the browser with its background-throttling and
   occlusion-detection switches off (`--disable-background-timer-throttling`,
@@ -132,17 +133,23 @@ correction stops:
   ended `blocked` without it.
 - **The settle's cost and bounds.** It runs at the start of every observe that follows an action, not the
   first observe and not after a `wait` action, and once per action however many times jev retries the read
-  (a typed field pays it too). A quiet page costs about 0.3 s per action, on top of jev's own wait; a page
-  that never stops changing (a live ticker, a timer that rewrites the DOM) costs the full 1.5 s every time.
+  (a typed field pays it too). A quiet page costs about 0.3 s of waiting per action plus two CDP calls per
+  poll (more on a slow daemon), on top of jev's own wait; a page that never stops changing (a live ticker, a
+  timer that rewrites the DOM) costs the full 1.5 s every time.
   A page that is completely silent for the first 0.3 s counts as settled, so a dialog whose first DOM change
   comes later than that is not waited for: the following observe finishes whatever is pending then, and the
   `wait` action re-observes. The counter is read as an observer id plus a count, so a navigation, which gives
   the new document a new observer, reads as a change even when the count happens to match. It never raises:
   a page that is navigating, a dead session or an IPC timeout counts as activity, a dead session is polled
-  until the cap and the read that follows reports the real error. The observer is installed by the first
-  read, so mutations between the input and that read are not counted (an animation they started is still
-  finished by the first poll). The runner logs `settled N.Ns after an input (...)` to stderr when the page
-  was active.
+  until the cap and the read that follows reports the real error. The cap is checked between polls, so it
+  bounds the page time and not the calls in flight: the harness can hold one CDP call for several seconds on
+  a page whose JS thread is frozen (a native `confirm()` or `alert()` open), and a poll makes two. jev's own
+  read fails the same way right after, and `browse_timeout_sec` still bounds the run. The observer is
+  installed by the first read, so mutations between the input and that read are not counted (an animation
+  they started is still finished by the first poll). In a run with `capture` the settle drains the daemon's
+  event buffer between its polls: the buffer holds 500 events and drops the oldest, and the settle starts
+  right after the input, when the action's own requests fire (without `capture` that drain does nothing).
+  The runner logs `settled N.Ns after an input (...)` to stderr when the page was active.
 - **Content mounted after the read shows up at the next observe.** The finish runs immediately before each
   read, not after it, and the settle covers only the first 0.3 to 1.5 s after an input. An element the page
   inserts once jev has read the page (a debounce or a network response that lands later) has no animation
@@ -369,8 +376,8 @@ is not proof.
   decision model reads the second click as the step it just took and chooses BLOCKED (measured: the run
   ended `blocked` until the goal named the confirm click as a separate required step). Name both clicks in
   the goal, for example: "Open the row's menu and click Archive. A confirmation dialog opens: click its
-  Archive button as a second, separate step. The task is done only when the row is gone." The same holds for
-  any flow where one label is clicked twice in a row on purpose.
+  Archive button as a second, separate step. The task is done only when the row is gone." A similar flow,
+  one label clicked twice in a row on purpose, is likely to behave the same way (not measured).
 
 ## Source map
 
