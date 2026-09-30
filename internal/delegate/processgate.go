@@ -199,24 +199,31 @@ func (c *pageRetryCap) record(key string, failed bool) {
 	}
 }
 
-// pageIssueFailed reports whether a finished issue counts against its page: a
-// seat RAN it and it did not produce a verified digest. Nothing that never ran
-// counts - a capacity defer, a shed, "placement refused", a queue deadline, a
-// caller's cancel are the fleet's busy day, not the page's fault - and neither
-// does a contract-class defer.
+// pageIssueFailed reports whether a finished issue counts against its page: a seat
+// RAN it and did not produce a verified digest. The list is POSITIVE - a result counts
+// only when it is one of the shapes a seat working on this page produces - because
+// the cap's own message ("none of them produced a verified digest") is false for
+// everything else, and a false message that backs a healthy page off for fifteen
+// minutes, unresettable, hides the real cause:
+//
+//   - the seat answered and verification failed (AcceptanceFailures);
+//   - the seat abstained (class abstention: it ran and could not produce an answer);
+//   - the seat hit its step or wall budget on this page (class budget);
+//   - the node ran the job and errored ("remote job error").
+//
+// Nothing else counts. A capacity or contract defer, a shed, `placement refused`, a
+// queue deadline, a caller's cancel, an infrastructure or config defer (a lease, a
+// stack that is down), a terminal dispatch refusal (a bad token), a poll that never
+// reached an owned job, a lost job and a local runner error are the fleet's or the
+// caller's - none of them ran the page.
 func pageIssueFailed(pr PlacedResult) bool {
 	switch {
 	case pr.Unplaced || pr.shed:
 		return false
 	case pr.Err != "":
-		for _, p := range []string{replacementExhaustedPrefix, "queue deadline", "canceled"} {
-			if strings.HasPrefix(pr.Err, p) {
-				return false
-			}
-		}
-		return true
+		return strings.HasPrefix(pr.Err, "remote job error")
 	case pr.Result.Deferred:
-		return pr.Result.DeferClass != core.DeferClassCapacity && pr.Result.DeferClass != core.DeferClassContract
+		return pr.Result.DeferClass == core.DeferClassAbstention || pr.Result.DeferClass == core.DeferClassBudget
 	}
 	return len(pr.AcceptanceFailures) > 0
 }
