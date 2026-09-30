@@ -9,11 +9,45 @@
 #
 # It exits — so llama-swap marks the seat stopped and health-waits on the next request — when the
 # task ends before the seat answers, when the seat never answers inside the load budget, or when the
-# seat stops answering for 30 s.
+# seat stops answering for 30 s. That last exit is a CRASH, and nothing else runs a stop for one: the
+# engine's API server dies, but the workers it could not stop and the LMCache MP server outlive it
+# (2026-09-29: three workers survived, the MP server kept its HTTP port, and every restart refused for
+# 23 minutes). So before it exits it runs the stop task once (seat_stop.sh reaps only what is this
+# seat's own) and waits for it; see Invoke-CrashCleanup.
 param([Parameter(Mandatory)][string]$Seat)
 $ErrorActionPreference = 'Continue'
 $task = "vllm-seat-$Seat"
 $log = Join-Path '__SEAT_DIR__' "seat-cmd-$Seat.log"
+# The crash cleanup. From the process llama-swap already supervises — no scheduler, no watchdog — and never a relaunch:
+# llama-swap starts the seat again on the next request, as it always did, and an idle seat stays unloaded. It WAITS for
+# the stop task (bounded: 45 x 2 s), so the next start can never overlap it: a stop that ran late would kill the
+# engine the next start had begun. It does nothing while the seat's own start task is still running: a live launcher
+# owns the seat then, and nothing in the distro is a leftover. A failure only logs; the exit that follows is the same.
+function Invoke-CrashCleanup {
+  $stopTask = "vllm-seat-stop-$Seat"
+  $st = (Get-ScheduledTask -TaskName $task -ErrorAction SilentlyContinue).State
+  if ($st -eq 'Running') {
+    "[$(Get-Date -Format s)] crash cleanup skipped: the start task is still running, a live launcher owns the seat" | Out-File -Append $log
+    return
+  }
+  try { Start-ScheduledTask -TaskName $stopTask -ErrorAction Stop } catch {
+    "[$(Get-Date -Format s)] crash cleanup: $stopTask failed to start: $($_.Exception.Message)" | Out-File -Append $log
+    return
+  }
+  "[$(Get-Date -Format s)] crash cleanup: $stopTask started (seat_stop.sh reaps the dead generation's workers and MP server)" | Out-File -Append $log
+  # A task that has not started yet reads as not-Running: wait to SEE it run, or for 10 s, before believing it is done.
+  $seen = $false
+  for ($i = 1; $i -le 45; $i++) {
+    Start-Sleep 2
+    $s = (Get-ScheduledTask -TaskName $stopTask -ErrorAction SilentlyContinue).State
+    if ($s -eq 'Running') { $seen = $true; continue }
+    if ($seen -or $i -ge 5) {
+      "[$(Get-Date -Format s)] crash cleanup finished after about $($i * 2) s (task state=$s)" | Out-File -Append $log
+      return
+    }
+  }
+  "[$(Get-Date -Format s)] WARN: the crash cleanup was still running after 90 s - exiting anyway" | Out-File -Append $log
+}
 "[$(Get-Date -Format s)] start requested" | Out-File -Append $log
 try { Start-ScheduledTask -TaskName $task -ErrorAction Stop } catch {
   "[$(Get-Date -Format s)] Start-ScheduledTask $task failed: $($_.Exception.Message)" | Out-File -Append $log
@@ -42,6 +76,7 @@ while ($true) {
   try { $null = Invoke-RestMethod -Uri 'http://__PROXY_HOST__:__PORT__/health' -TimeoutSec 4; $miss = 0 } catch { $miss++ }
   if ($miss -ge 6) {
     "[$(Get-Date -Format s)] seat stopped answering (30 s) - exiting so llama-swap sees it" | Out-File -Append $log
+    Invoke-CrashCleanup
     exit 0
   }
 }
