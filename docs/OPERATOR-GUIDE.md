@@ -517,8 +517,12 @@ frame has to be a pure function of time; see the contract).
 **Bumping HyperFrames.** Change the exact version in `setup/hyperframes/package.json` and
 `PINNED_VERSION` in the runner. Regenerate the lock with `npm install --package-lock-only
 --ignore-scripts` and verify the new integrity against `npm view hyperframes@<v> dist.integrity`.
-Then re-run the installer step and a two-template smoke. Never `npm install -g hyperframes`: a
-global HyperFrames self-upgrades in a detached process.
+Then re-run the installer step and a two-template smoke that includes `captions-bar`: it reads the
+runtime's `hf-seek` event, which the package dispatches but does not document, so render its default
+sample, confirm a known group is on screen at a known time (the frame at 1.5 s shows "Captions follow
+the words"), and record the new version in the Measured section of its README (a test fails until that
+section names the pin). Never `npm install -g hyperframes`: a global HyperFrames self-upgrades in a
+detached process.
 
 ## 4. Drive the coding agent
 

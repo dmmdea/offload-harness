@@ -71,13 +71,16 @@ The page holds one caption element and no CSS animation. HyperFrames dispatches 
 window with the time in seconds at every seek; the page finds the group that is on screen at that time
 (a binary search) and sets the element's text, opacity and offset from it. A frame is a pure function of
 the time, whichever worker draws it. One animated element per group was measured first and does not scale
-(see the contract, item 7, in the [templates README](../README.md)). The template depends on the seek
-event of the pinned HyperFrames, so a version bump re-renders it as part of its checks.
+(see the contract, item 7, in the [templates README](../README.md)). The `hf-seek` event is dispatched by the
+pinned runtime but is not in the package's documentation (only `getVariables()` is), so this template has to be
+measured again on every HyperFrames bump: the Measured section below names the version it was last measured on,
+a test fails as soon as the pin moves past it, and the bump steps in the operator guide say what to confirm (the
+default sample, and a known group on screen at a known time).
 
 ## Measured
 
-Rendered through `render/compose-hyperframes.mjs` on a 36-thread Windows box with software GL, on
-2026-09-30. The default three-group sample, `webm`, quality `high`:
+Rendered on 2026-09-30 through `render/compose-hyperframes.mjs` with HyperFrames 0.8.61, on a 36-thread Windows
+box with software GL. The default three-group sample, `webm`, quality `high`:
 
 - `lint` found 0 errors and 0 warnings, and `check` passed;
 - ffprobe read VP9 `yuva420p`, 1920×1080, 30 fps, 240 frames and 8.000 s, no audio stream;

@@ -9,7 +9,8 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFil
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
-import { DEFAULTS as CAPTION_DEFAULTS } from "./captions-groups.mjs";
+import vm from "node:vm";
+import { DEFAULTS as CAPTION_DEFAULTS, captionsFromSegments } from "./captions-groups.mjs";
 import { fileURLToPath } from "node:url";
 import {
   ALLOWED_SUBCOMMANDS, FORCED_ENV, PASSTHROUGH_ENV_KEYS, PINNED_VERSION, applyTemplateVariables, assertAllowedInvocation,
@@ -482,6 +483,103 @@ test("applyTemplateVariables: typed values only, declared ids only, duration rew
   assert.equal(rewriteRootDuration('<div data-composition-id="x">', 3), '<div data-composition-id="x" data-duration="3">');
 });
 
+// A caller's text is data, whatever characters it carries. String.prototype.replace reads $-patterns in a
+// replacement STRING ($1, $&, $`, $', $$), so the declaration JSON has to go in through a replacer function:
+// through a string, ordinary speech such as "over $100 million" corrupts the attribute, and "$&" splices the
+// old attribute (with its closing quote) into the new one, which lets the caller's text become attributes of
+// the composition's root element.
+const attrJson = (html) => {
+  const raw = /data-composition-variables='([^']*)'/.exec(html);
+  assert.ok(raw, "the root lost its data-composition-variables attribute");
+  return JSON.parse(raw[1].replace(/&#39;/g, "'").replace(/&quot;/g, '"').replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&"));
+};
+const declaredDefault = (html, id) => attrJson(html).find((d) => d.id === id).default;
+// The attribute names an HTML parser would give the composition's root tag (quoted and unquoted values skipped).
+function rootAttributeNames(html) {
+  const tag = /<[a-zA-Z][^>]*\bdata-composition-id=[^>]*>/.exec(html)[0];
+  const names = [];
+  let i = tag.indexOf(" ");
+  while (i < tag.length) {
+    while (i < tag.length && /[\s/>]/.test(tag[i])) i++;
+    const start = i;
+    while (i < tag.length && !/[\s=/>]/.test(tag[i])) i++;
+    if (i > start) names.push(tag.slice(start, i));
+    while (i < tag.length && /\s/.test(tag[i])) i++;
+    if (tag[i] === "=") {
+      i++;
+      while (i < tag.length && /\s/.test(tag[i])) i++;
+      if (tag[i] === "'" || tag[i] === '"') {
+        const q = tag[i];
+        i = tag.indexOf(q, i + 1);
+        i = i < 0 ? tag.length : i + 1;
+      } else {
+        while (i < tag.length && !/[\s>]/.test(tag[i])) i++;
+      }
+    }
+  }
+  return names;
+}
+const DOLLAR_VALUES = [
+  "costs $1", "$10", "$100", "$1,000", "$1.2M", "x $& y", "x $' y", "x $` y", "a $$ b", "$$$", "$", "R&D $& co",
+  "it's $1, don't $&", "$5", "$ 1", "$0", "$2",
+];
+
+test("applyTemplateVariables: a value carrying $ replacement patterns arrives in the declaration byte for byte", () => {
+  for (const value of DOLLAR_VALUES) {
+    const out = applyTemplateVariables(TEMPLATE_HTML, { title: value });
+    assert.equal(declaredDefault(out, "title"), value, `title ${JSON.stringify(value)}`);
+    // and the other declarations are exactly as they were
+    assert.deepEqual(attrJson(out).filter((d) => d.id !== "title"), attrJson(TEMPLATE_HTML).filter((d) => d.id !== "title"));
+  }
+  // the shipped templates, with the values the docs advertise and ordinary speech
+  const load = (name) => [readFileSync(join(__dirname, "compose-templates", name, "index.html"), "utf8"), JSON.parse(readFileSync(join(__dirname, "compose-templates", name, "template.json"), "utf8"))];
+  const [stat, statManifest] = load("stat-card");
+  assert.equal(declaredDefault(applyTemplateVariables(stat, { stat: "$1.2M" }, statManifest), "stat"), "$1.2M");
+  const [card, cardManifest] = load("title-card");
+  assert.equal(declaredDefault(applyTemplateVariables(card, { title: "Only $10 today" }, cardManifest), "title"), "Only $10 today");
+  const [callout, calloutManifest] = load("callout-label");
+  assert.equal(declaredDefault(applyTemplateVariables(callout, { term: "$1.2M" }, calloutManifest), "term"), "$1.2M");
+});
+
+test("applyTemplateVariables: a caption list with dollar amounts and apostrophes reaches captions-bar intact", () => {
+  const html = readFileSync(join(__dirname, "compose-templates", "captions-bar", "index.html"), "utf8");
+  const manifest = JSON.parse(readFileSync(join(__dirname, "compose-templates", "captions-bar", "template.json"), "utf8"));
+  const words = JSON.stringify([[0.5, 2.3, "over $100 million raised"], [3, 5, "don't stop"], [5.2, 7, "it costs $1,000 & $&"]]);
+  const out = applyTemplateVariables(html, { words_json: words, duration: 8 }, manifest);
+  assert.equal(declaredDefault(out, "words_json"), words);
+  assert.deepEqual(JSON.parse(declaredDefault(out, "words_json")).map((t) => t[2]), ["over $100 million raised", "don't stop", "it costs $1,000 & $&"]);
+});
+
+test("applyTemplateVariables: caller text never adds an attribute to the root element or changes the rest of the page", () => {
+  const before = rootAttributeNames(TEMPLATE_HTML);
+  const stripped = (html) => html.replace(/data-composition-variables='[^']*'/, "");
+  const hostile = [
+    "$& onanimationstart=alert(1) x", "$' onclick=alert(1) y", "$` onload=alert(1) z", "$1 onfocus=alert(1)",
+    "x' onmouseover='alert(1)", "\" onerror=\"alert(1)", "&#39; onclick=alert(1) ", "<img src=x onerror=alert(1)>",
+    "$&amp; data-injected=1 $&#39; data-injected=2",
+  ];
+  for (const value of hostile) {
+    const out = applyTemplateVariables(TEMPLATE_HTML, { title: value });
+    assert.deepEqual(rootAttributeNames(out), before, `root attributes changed by ${JSON.stringify(value)}`);
+    assert.equal(declaredDefault(out, "title"), value, `title ${JSON.stringify(value)}`);
+    assert.equal(stripped(out), stripped(TEMPLATE_HTML), `the page outside the declaration changed for ${JSON.stringify(value)}`);
+  }
+});
+
+test("render: a value with $ patterns reaches the composition the runner copies, and the template dir is untouched", () => {
+  const fx = fixture();
+  const vars = join(fx.root, "vars.json");
+  const value = "Only $100, $& more, it's $1";
+  writeFileSync(vars, JSON.stringify({ title: value, duration: 4 }));
+  const r = fx.run(renderArgs(fx, ["--variables-file", vars, "--keep-work"]));
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const job = readdirSync(join(fx.cache, "work"))[0];
+  const html = readFileSync(join(fx.cache, "work", job, "project", "index.html"), "utf8");
+  assert.equal(declaredDefault(html, "title"), value);
+  assert.deepEqual(rootAttributeNames(html), [...rootAttributeNames(TEMPLATE_HTML)]);
+  assert.match(html, /data-duration="4"/);
+});
+
 test("summarizeProbe + verifyOutput: codec, alpha, size, fps, duration, audio", () => {
   const s = summarizeProbe(JSON.parse(probeDoc({ codec: "prores", pix: "yuva444p10le", dur: "6.0", packets: "180" })));
   assert.equal(s.has_alpha, true);
@@ -740,6 +838,213 @@ test("captions-bar: its limits are the helper's limits, and its README names the
   assert.ok(readme.includes("offload_media"), "README says how the audio is put back");
   assert.match(readme, /silent/i, "README says the render is silent");
   assert.match(readme, /## Measured/);
+});
+
+// --- captions-bar's script, executed ------------------------------------------------------------------
+// The template keeps its whole behaviour (the seek listener, the group lookup, the fades, the validation) in one
+// inline script, and a check that only reads that script's source cannot tell a working page from one whose event
+// name or field has drifted. So the script is run: under node:vm with a stub window and document, the way the
+// page's runtime would, then read back after synthetic hf-seek events. Nothing here needs HyperFrames or Chrome.
+
+function loadCaptionsPage(wordsJson) {
+  const html = readFileSync(join(TEMPLATES_DIR, "captions-bar", "index.html"), "utf8");
+  const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)];
+  assert.equal(scripts.length, 1, "captions-bar has exactly one inline script");
+  const listeners = [];
+  const cap = { style: {}, textContent: "" };
+  const win = {
+    __hyperframes: { getVariables: () => ({ words_json: wordsJson }) },
+    addEventListener: (type, fn) => listeners.push({ type, fn }),
+  };
+  vm.runInNewContext(scripts[0][1], { window: win, document: { getElementById: (id) => (id === "cap" ? cap : null) } });
+  // seek(t) is one hf-seek event carrying the time; what the page painted is read back from its one element
+  const seek = (time) => {
+    for (const l of listeners) if (l.type === "hf-seek") l.fn({ detail: { time } });
+    return { text: cap.textContent, opacity: Number(cap.style.opacity), transform: cap.style.transform };
+  };
+  return { listeners, seek, cap };
+}
+
+const CAPTIONS_DEFAULT_WORDS = JSON.stringify([[0.5, 2.7, "Captions follow the words"], [2.9, 5.1, "one short group at a time"], [5.3, 7.5, "then they get out of the way"]]);
+const near = (a, b, msg) => assert.ok(Math.abs(a - b) < 1e-9, `${msg}: ${a} is not ${b}`);
+
+test("captions-bar script: it listens for hf-seek only, and paints the group on screen with its fades and rise", () => {
+  const page = loadCaptionsPage(CAPTIONS_DEFAULT_WORDS);
+  assert.deepEqual(page.listeners.map((l) => l.type), ["hf-seek"], "one listener, on the event HyperFrames dispatches");
+  assert.equal(page.cap.style.opacity, "0", "before any seek nothing shows");
+  assert.equal(page.seek(0.3).opacity, 0, "before the first group");
+  // the first group starts at 0.5 s: it enters over 0.14 s (ease-out cubic) and rises 12 px
+  const start = page.seek(0.5);
+  assert.deepEqual([start.text, start.opacity, start.transform], ["Captions follow the words", 0, "translateY(12.000px)"]);
+  const half = page.seek(0.57); // halfway through the entry: 1 - (1 - 0.5)^3 = 0.875
+  near(half.opacity, 0.875, "opacity halfway through the entry");
+  assert.equal(half.transform, "translateY(1.500px)");
+  const held = page.seek(1.5);
+  assert.deepEqual([held.text, held.opacity, held.transform], ["Captions follow the words", 1, "translateY(0.000px)"]);
+  assert.equal(page.seek(0.64).opacity, 1, "fully in after 0.14 s");
+  // the exit is the last 0.12 s of the group: 2.64 s is halfway, and the group is gone at its end
+  near(page.seek(2.64).opacity, 0.5, "opacity halfway through the exit");
+  assert.equal(page.seek(2.7).opacity, 0, "gone at its end");
+  assert.equal(page.seek(2.8).opacity, 0, "nothing between two groups");
+  // later groups show their own text, and the last one fades out and is gone after its end
+  assert.equal(page.seek(3.5).text, "one short group at a time");
+  assert.equal(page.seek(3.5).opacity, 1);
+  const tail = page.seek(7.44);
+  assert.equal(tail.text, "then they get out of the way");
+  assert.ok(tail.opacity > 0.4 && tail.opacity < 0.6, `the last group is fading out: ${tail.opacity}`);
+  assert.equal(page.seek(7.5).opacity, 0);
+  assert.equal(page.seek(30).opacity, 0, "long after the last group");
+});
+
+test("captions-bar script: a frame is a pure function of the seek time, whatever order the workers ask in", () => {
+  const a = loadCaptionsPage(CAPTIONS_DEFAULT_WORDS);
+  const b = loadCaptionsPage(CAPTIONS_DEFAULT_WORDS);
+  // what a viewer sees: an invisible element has no text or offset that matters
+  const seen = (f) => JSON.stringify(f.opacity === 0 ? { opacity: 0 } : f);
+  const times = [0.2, 0.5, 0.55, 1.5, 2.64, 2.8, 3.0, 3.06, 4, 5.2, 5.3, 5.36, 6, 7.44, 7.6];
+  const expected = new Map(times.map((t) => [t, seen(a.seek(t))]));
+  // b visits the same times shuffled and repeated: every answer must match the first pass
+  for (const t of [7.44, 0.5, 6, 0.2, 2.64, 7.6, 3.06, 1.5, 5.2, 0.55, 4, 2.8, 5.36, 3.0, 5.3, 6, 0.5]) assert.equal(seen(b.seek(t)), expected.get(t), `t=${t}`);
+  assert.ok([...expected.values()].some((v) => JSON.parse(v).opacity > 0), "the times include visible frames");
+});
+
+test("captions-bar script: the group lookup finds the right group among hundreds, and an empty list paints nothing", () => {
+  const groups = Array.from({ length: 300 }, (_, i) => [i * 2 + 0.5, i * 2 + 1.7, `group ${i}`]);
+  const page = loadCaptionsPage(JSON.stringify(groups));
+  for (const i of [0, 1, 2, 149, 150, 151, 298, 299]) {
+    const inside = page.seek(i * 2 + 1.1);
+    assert.deepEqual([inside.text, inside.opacity], [`group ${i}`, 1], `inside group ${i}`);
+    assert.equal(page.seek(i * 2 + 1.85).opacity, 0, `the gap after group ${i}`);
+  }
+  const empty = loadCaptionsPage("[]");
+  for (const t of [0, 1, 100]) assert.equal(empty.seek(t).opacity, 0);
+});
+
+test("captions-bar script: text goes in as text, never markup", () => {
+  const page = loadCaptionsPage(JSON.stringify([[0, 2, "<b>bold</b> & <i>x</i> $& \"quoted\""]]));
+  const shown = page.seek(1);
+  assert.equal(shown.text, "<b>bold</b> & <i>x</i> $& \"quoted\"");
+  assert.ok(!("innerHTML" in page.cap), "the element's markup is never written");
+});
+
+test("captions-bar script: a malformed words_json throws its own message, so check fails the render instead of an empty overlay", () => {
+  const bad = (json, message) => assert.throws(() => loadCaptionsPage(json), (e) => message.test(String(e && e.message)), json);
+  bad("not json", /^captions-bar: words_json is not JSON: /);
+  bad('{"a":1}', /^captions-bar: words_json must be an array of \[start, end, text\] triples$/);
+  bad('"text"', /^captions-bar: words_json must be an array of \[start, end, text\] triples$/);
+  const entry = /^captions-bar: words_json entry 0 is not \[start, end, text\] with 0 <= start < end$/;
+  bad("[[0,1]]", entry);
+  bad('[[0,1,"a","b"]]', entry);
+  bad('[["0",1,"a"]]', entry);
+  bad('[[0,"1","a"]]', entry);
+  bad("[[0,1,5]]", entry);
+  bad('[[-1,1,"a"]]', entry);
+  bad('[[1,1,"a"]]', entry);
+  bad('[[2,1,"a"]]', entry);
+  bad('[null]', entry);
+  bad('[[0,1,"a"],[0.5,2,"b"]]', /^captions-bar: words_json entry 1 starts before entry 0 ends \(one group is on screen at a time\)$/);
+  // valid shapes load: an empty list, groups that touch, and a single group
+  for (const ok of ["[]", '[[0,1,"a"],[1,2,"b"]]', '[[0,0.5,"only"]]']) assert.doesNotThrow(() => loadCaptionsPage(ok), ok);
+});
+
+test("captions-bar script: every chunk the helper emits from a transcript longer than one chunk loads, shows each group, and is accepted by the runner", () => {
+  // 320 segments of 7 words at 0.4 s, each word two tokens (a word-initial token and a "s"-style continuation)
+  const segments = [];
+  let t = 0;
+  for (let i = 0; i < 320; i++) {
+    const words = [];
+    let text = "";
+    for (let k = 0; k < 7; k++) {
+      words.push({ word: ` w${i}x${k}`, start: t, end: t + 0.25, probability: 0.9 }, { word: k === 6 ? "." : "s", start: t + 0.25, end: t + 0.4, probability: 0.9 });
+      text += ` w${i}x${k}${k === 6 ? "." : "s"}`;
+      t += 0.4;
+    }
+    segments.push({ id: i, start: t - 2.8, end: t, text, words });
+    t += 0.35;
+  }
+  const html = readFileSync(join(TEMPLATES_DIR, "captions-bar", "index.html"), "utf8");
+  const manifest = JSON.parse(readFileSync(join(TEMPLATES_DIR, "captions-bar", "template.json"), "utf8"));
+  const { chunks, groups } = captionsFromSegments(segments, { pace: "punchy" });
+  assert.ok(t > 600 && chunks.length >= 2, `${Math.round(t)} s of speech should need more than one chunk (got ${chunks.length})`);
+  let shown = 0;
+  for (const [k, c] of chunks.entries()) {
+    const out = applyTemplateVariables(html, { words_json: c.words_json, duration: c.duration_sec }, manifest);
+    assert.equal(declaredDefault(out, "words_json"), c.words_json, `chunk ${k}: the runner keeps the variable byte for byte`);
+    assert.match(out, new RegExp(`data-duration="${String(c.duration_sec).replace(".", "\\.")}"`), `chunk ${k}: the runner sets the chunk's duration`);
+    const page = loadCaptionsPage(c.words_json);
+    const triples = JSON.parse(c.words_json);
+    for (const [s, e, text] of triples) {
+      assert.ok(e <= c.duration_sec + 1e-9, `chunk ${k}: a caption ends at ${e} s, after the ${c.duration_sec} s the chunk declares`);
+      const mid = page.seek((s + e) / 2);
+      assert.equal(mid.text, text, `chunk ${k}: the page shows the group it should at ${(s + e) / 2} s`);
+      assert.ok(mid.opacity > 0, `chunk ${k}: "${text}" is visible at its middle`);
+      shown++;
+    }
+  }
+  assert.equal(shown, groups.length, "every group of the transcript is shown by some chunk");
+  assert.ok(groups.every((g) => !/\s[.,:;!?]/.test(g.text)), "and none has a space before punctuation");
+});
+
+// The page depends on HyperFrames' seek event, which the pinned package dispatches but does not document (only
+// getVariables() is documented), so a HyperFrames bump must render this template again. The README records the
+// version it was last measured on; this fails on a bump until that section is redone.
+test("captions-bar: its Measured section names the HyperFrames version it was measured on, which is the runner's pin", () => {
+  // Each check reads only the paragraph or section it is about: a mention elsewhere in the file must not satisfy it.
+  const readme = readFileSync(join(TEMPLATES_DIR, "captions-bar", "README.md"), "utf8").replace(/\r\n/g, "\n");
+  const at = readme.indexOf("\n## Measured\n");
+  assert.ok(at >= 0, "captions-bar/README.md has a Measured section");
+  const next = readme.indexOf("\n## ", at + 1);
+  const measured = readme.slice(at, next < 0 ? readme.length : next);
+  assert.ok(measured.includes(`HyperFrames ${PINNED_VERSION}`), `the Measured section of captions-bar/README.md must say it was measured on HyperFrames ${PINNED_VERSION}; after a version bump, render it again (default sample, and a known group at a known time) and update that section`);
+  const guide = readFileSync(join(__dirname, "..", "docs", "OPERATOR-GUIDE.md"), "utf8").replace(/\r\n/g, "\n");
+  const start = guide.indexOf("**Bumping HyperFrames.**");
+  assert.ok(start >= 0, "the operator guide has a 'Bumping HyperFrames' step");
+  const end = guide.indexOf("\n\n", start);
+  const bump = guide.slice(start, end < 0 ? guide.length : end);
+  assert.match(bump, /captions-bar/, "the bump step itself names captions-bar");
+  assert.match(bump, /hf-seek/, "and says why: the template reads the runtime's undocumented seek event");
+});
+
+// --- alpha overlays stay transparent ------------------------------------------------------------------
+// The pixel proof is a render (README "Measured": the alpha plane at fixed times), which a bare-Node run cannot
+// make. What can be read statically is where the page paints: the page, the body and the root must paint nothing,
+// and no full-frame layer may paint a background, because an opaque frame under a template that still encodes as
+// yuva420p keeps has_alpha true (it reads the pixel format) while covering the footage it is laid over.
+
+function cssRules(html) {
+  const css = /<style>([\s\S]*?)<\/style>/.exec(html)[1]
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/@font-face\s*\{[^}]*\}/g, "")
+    .replace(/@keyframes\s+[\w-]+\s*\{(?:[^{}]|\{[^{}]*\})*\}/g, "");
+  return [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)].map((m) => ({
+    selectors: m[1].split(",").map((s) => s.trim()).filter(Boolean),
+    decls: m[2].split(";").map((d) => d.trim()).filter(Boolean).map((d) => [d.slice(0, d.indexOf(":")).trim().toLowerCase(), d.slice(d.indexOf(":") + 1).trim()]),
+  }));
+}
+const isBackgroundProp = (p) => p === "background" || p === "background-color" || p === "background-image";
+const paintsNothing = (v) => /^(transparent|none)$/i.test(v);
+
+test("alpha overlays: html, body and #root paint nothing, and no full-frame layer paints a background", () => {
+  const alpha = listTemplates(TEMPLATES_DIR).filter((n) => JSON.parse(readFileSync(join(TEMPLATES_DIR, n, "template.json"), "utf8")).alpha === true);
+  for (const n of ["lower-third", "callout-label", "captions-bar"]) assert.ok(alpha.includes(n), `${n} is an alpha template`);
+  for (const name of alpha) {
+    const rules = cssRules(readFileSync(join(TEMPLATES_DIR, name, "index.html"), "utf8"));
+    for (const sel of ["html", "body", "#root"]) {
+      const bgs = rules.filter((r) => r.selectors.includes(sel)).flatMap((r) => r.decls.filter(([p]) => isBackgroundProp(p)));
+      assert.ok(bgs.length > 0, `${name}: ${sel} must state background: transparent`);
+      for (const [p, v] of bgs) assert.ok(paintsNothing(v), `${name}: ${sel} paints ${p}: ${v}, so the overlay would cover the footage`);
+    }
+    for (const r of rules) {
+      if (r.selectors.some((s) => ["html", "body", "#root", "*"].includes(s))) continue;
+      const props = Object.fromEntries(r.decls);
+      const zero = (v) => /^0(px)?$/.test(v || "");
+      const fullFrame = (/^(1920px|100%|100vw)$/.test(props.width || "") && /^(1080px|100%|100vh)$/.test(props.height || ""))
+        || zero(props.inset)
+        || ["top", "right", "bottom", "left"].every((k) => zero(props[k]));
+      if (!fullFrame) continue;
+      for (const [p, v] of r.decls) if (isBackgroundProp(p)) assert.ok(paintsNothing(v), `${name}: ${r.selectors.join(", ")} covers the whole frame and paints ${p}: ${v}`);
+    }
+  }
 });
 
 // The determinism guard. Measured on this batch: a keyframe that scales an element ABOVE its resting size
