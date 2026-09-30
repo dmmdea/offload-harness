@@ -203,11 +203,11 @@ func classifyProfile(f Facts) Verdict {
 
 	// A Rockchip RK3588 has no NVIDIA/AMD adapter, so before this band it fell through
 	// to "cpu" — and a cpu tier renders llama.cpp CPU inference, which no model on this
-	// fleet may run. Its accelerator is the NPU, served by RKLLM through the tier's
-	// rkllm seats. Ordered after the discrete-GPU bands on purpose: a card in the M.2
-	// slot is what those bands are written for.
+	// fleet may run. Its inference runs on the Mali GPU (llama.cpp on Vulkan) and the NPU
+	// (RKLLM, through the tier's rkllm seats). Ordered after the discrete-GPU bands on
+	// purpose: a card in the M.2 slot is what those bands are written for.
 	if vendor == "rockchip" && arch == "rk3588" {
-		return band("rockchip-rk3588", "rockchip rk3588 SoC (Mali-G610 GPU + 3-core NPU on unified memory) -> NPU serving, never CPU inference")
+		return band("rockchip-rk3588", "rockchip rk3588 SoC (Mali-G610 GPU + 3-core NPU on unified memory) -> GPU and NPU serving, never CPU inference")
 	}
 
 	return band("cpu", "no usable GPU detected")

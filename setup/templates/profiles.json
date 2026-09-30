@@ -15,10 +15,10 @@
     "include_mimo_9b": "whether the mimo-9b-agent seat (XiaomiMiMo/MiMo-V2.6-Distill-Qwen-9B, bartowski GGUF Q4_K_M) renders into the serving yaml (entry + swappable-set membership) and its GGUF joins the install download set. A SECOND 8GB-class agent seat measured 2026-09-24 a coin-flip quality tie against include_qwen35_9b (18/18 shape B x6 both 8GB reference boxes; shape C 5/5 vs 4/5, splitting by box) with a smaller VRAM footprint at the same 65536 window. It claims the SAME agent-seat alias as include_qwen35_4b and include_qwen35_9b, but pairing it with EITHER is no longer a render refusal (2026-09-24, the amd-gcn onboarding, superseding the 4B refusal shipped with this seat's own introduction): the smaller entry stays rendered as the tier's un-aliased ROLLBACK seat (the renderer moves the shared agent-seat alias to mimo-9b-agent via that entry's own __Q354B_AGENT_ALIAS__/__Q359B_AGENT_ALIAS__ token). REQUIRES llama.cpp >= b11102 (upstream llama.cpp #29319 - an older build misroutes MiMo's compact tool-call XML to the Qwen3-Coder parser and every tool call runs to the token cap). On a Vulkan UMA tier (amd-gcn) the rendered entry serves the TIER's own window/KV/flash-attn (__CTX__/__KV_K__/__KV_V__/__FLASH_ATTN__), not the literal 65536/q8_0 pin the CUDA 8GB tiers measured on their fixed-VRAM cards — see llama-swap.linux-vulkan.yaml.",
     "moe_26b": "gpu (-ngl 99, experts on GPU) | cpu_moe (--cpu-moe, experts in RAM) | drop (omit 26B). When cpu_moe, install.ps1 drops the 26B if ram_tier is low/min (no RAM path).",
     "flash_attn": "on|off -> --flash-attn.",
-    "backend": "the llama-swap.win-<backend> template this profile renders from (cuda|vulkan|cpu|dual-cuda).",
+    "backend": "the llama-swap.<os>-<backend> template this profile renders from (cuda|vulkan|cpu|dual-cuda; rk3588 is the Rockchip RK3588 SoC, Linux only: llama.cpp on Vulkan for the tier's GPU entry plus rkllm NPU seats, from a template that lists only models that fit its shared-RAM budget).",
     "dual_resident": "dual-gpu only: render two models resident (no shared exclusive swap group).",
     "gpu_env": "env vars added to EVERY model in the rendered serving config, appended after whatever the template already declares. Was an `if ($profileId -match '^blackwell-')` branch inside install.ps1, so a Linux install of the same tier silently did not get it. CUDA_VISIBLE_DEVICES pins the device (hybrid-graphics can resolve the default to -1); CUDA_MODULE_LOADING=LAZY is llama.cpp #22696.",
-    "media_seats": "ALIAS-backed media capabilities this tier serves, rendered into BOTH the llama-swap models map and the harness config binding that routes to them (internal/mediaseat). Each seat: kind (vision|stt), name (the llama-swap model id AND the binding value), aliases, model/mmproj/vad_model (relative to the models dir), bin + lib_dir for a seat that is not llama-server (may carry __OFFLOAD_HOME__/__EXE__), ctx_size (vision runs its own smaller window), residency (swappable|resident - a ROLE, since group names are per-template), ttl. A tier declaring NO seat leaves vision_model/stt_model empty and the route honestly defers. FILE-backed media (image/video/music) is NOT here - those are spawn-per-job subprocesses under the GPU lease, seeded via config_seed and derived by internal/mediacap.",
+    "media_seats": "ALIAS-backed media capabilities this tier serves, rendered into BOTH the llama-swap models map and the harness config binding that routes to them (internal/mediaseat). Each seat: kind (vision|stt|ocr|rkllm), name (the llama-swap model id AND the binding value), aliases, model/mmproj/vad_model (relative to the models dir), bin + lib_dir for a seat that is not llama-server (may carry __OFFLOAD_HOME__/__EXE__), ctx_size (vision runs its own smaller window), residency (swappable|resident - a ROLE, since group names are per-template), ttl. An rkllm seat is an NPU LLM/VLM served by the Rockchip RKLLM runtime, not llama-server: it takes model (a .rkllm), an optional vision_encoder (a .rknn under the models dir; with one the seat is a VLM and writes vision_model, without one it is a chat model and writes nothing), ctx_size and cpu_mask (hex, default 0x0f = the A55 cluster; at least 3 bits, the runtime refuses fewer than the SoC has NPU cores), and bin defaults to the launcher the rknpu accelerator ships. A tier declaring NO seat leaves vision_model/stt_model empty and the route honestly defers. FILE-backed media (image/video/music) is NOT here - those are spawn-per-job subprocesses under the GPU lease, seeded via config_seed and derived by internal/mediacap.",
     "composes": "COMPOSITE TIERS (ADR 0039, 0.116.0): the tier ids this tier is a COMPLETE instance of at the same time (blackwell-3x16 composes blackwell-16 and blackwell-2x16). Every id must be a tier in this table, none may be composite itself, and a tier never composes itself. Seeded into config as tiers = composes + this id and tier_profile = this id (internal/tierseed.Resolve); health and offload_status advertise them. Requires layers - composes without layers seeds nothing and is refused at parse.",
     "layers": "COMPOSITE TIERS: the device layers this box places work onto, seeded VERBATIM into config.layers and validated at parse (Doc.Validate) and at resolve (config.ValidateLayers). KEYS ARE STRICT: every layers[] / layers[].seats[] key must be one documented below, spelled exactly - a key the decoder cannot match is refused by tier and JSON path at parse (tierseed.ParseDoc, so the installer's embedded copy too) and at config load (config.ValidateLayerKeys), never dropped to a 0 that turns a fail-closed guard fail-open. A box whose config carries no layers has one implicit layer and is byte-identical on every result, health, status and ledger surface. ONE placement rule (internal/placement.Decide) reads these at runtime on the box, on the delegator for a remote node's advertised layers, and again at admission on the node.",
     "layers[].name": "the layer id placement records and a contract may request (`layer` on the wire): single | pair | triple | display. Unique per box, ^[a-z0-9_-]{1,32}$.",
@@ -1652,6 +1652,42 @@
           "ttl": 300
         }
       ]
+    },
+    "rockchip-rk3588": {
+      "ctx_size": 8192,
+      "kv_type": "f16",
+      "agent_ctx_tokens": 8192,
+      "resident_tier": "gemma4-e2b",
+      "include_26b": false,
+      "moe_26b": "drop",
+      "flash_attn": "off",
+      "backend": "rk3588",
+      "config_seed": {
+        "model": "gemma4-e2b",
+        "triage_model": "gemma4-e2b",
+        "escalation_model": "",
+        "reasoning_model": "",
+        "fleet_agent_enabled": false,
+        "uma_reserve_gib": 3
+      },
+      "media_seats": [
+        {
+          "kind": "rkllm",
+          "name": "qwen3.5-0.8b-npu",
+          "aliases": [
+            "vision",
+            "vlm"
+          ],
+          "model": "qwen3.5-0.8b_w8a8_rk3588.rkllm",
+          "vision_encoder": "qwen3.5-0.8b_vision_rk3588.rknn",
+          "ctx_size": 16384,
+          "cpu_mask": "0x0f",
+          "residency": "swappable",
+          "ttl": 300,
+          "measured": "Orange Pi 5 (RK3588S) reference board, RKLLM runtime librkllmrt 1.3.1, a 1.3.0-converted Qwen3.5-0.8B W8A8 (16384 max context, a VLM with a separate vision .rknn), 3 NPU cores. Mainline 7.0 kernel with the out-of-tree rknpu 0.9.8 driver, one 1,256-token prompt: cpu_mask 0x0f (A55 x4) prefill 44.5 / decode 9.07 tok/s, 0xf0 (A76 x4) 174.5 / 16.67, VmHWM 1,178 MB. Vendor 6.1 kernel with rknpu 0.9.7, the same prompt: 0x0f 40.9 / 12.2, 0xe0 (A76 x3) 166.9 / 11.3, 0xf0 200.1 / 18.7, VmHWM 1,177 MB. The runtime refuses fewer enabled CPUs than NPU cores (3): 'The number of enabled CPUs must be greater than or equal to the number of NPU cores.' Not measured: the vision path's answer quality, and this seat loaded beside the GPU chat entry."
+        }
+      ],
+      "notes": "Rockchip RK3588 SoC board (reference: an Orange Pi 5, RK3588S): 4x Cortex-A55 (cpu0-3) + 4x Cortex-A76 (cpu4-7), 7.7 GiB LPDDR4X shared by CPU, GPU and NPU (no dedicated VRAM), a 3-core 6 TOPS NPU and a Mali-G610 MP4 GPU. The board also runs the operator's home-automation stack, which decides the shape of the tier: NO model runs on the CPU (ADR 0054 amendment: no alt_backends, no CPU seat in the template), uma_reserve_gib 3 holds RAM back for that stack (fleet-serve advertises MemTotal less the reserve as capacity and MemAvailable less it as free, about 4.7 GiB of inference budget), and every model unloads after five idle minutes (ttl 300). Detection reads the device tree's root compatible: `rockchip,rk3588` on the vendor 6.1 kernel (board token rockchip,rk3588s-orangepi-5), `rockchip,rk3588s` on mainline 7.0 (board token xunlong,orangepi-5); both boot entries must classify. Two accelerators serve models. (1) The Mali GPU through llama.cpp on the Vulkan backend, from this tier's OWN template (llama-swap.linux-rk3588.yaml): the stock vulkan template always renders offload-e4b (~5 GB plus KV), which does not fit this budget, so the template lists only models that fit, one chat entry today (gemma4-e2b). The vendor kernel exposes the GPU as mali_kbase with an OpenCL blob only; mainline uses panthor with Mesa 25.2.8 panvk (Vulkan 1.4 on 'Mali-G610'), so this entry needs the mainline kernel. (2) The NPU through the Rockchip RKLLM runtime (rkllm seat qwen3.5-0.8b-npu, a chat model and a VLM, served by accelerators/rknpu/rkllm_server.py). The NPU driver is built into the vendor kernel and is the out-of-tree rknpu 0.9.8 DKMS module on mainline; the in-tree rocket driver is a different stack and does not run the RKNN or RKLLM runtimes. Measured (RKLLM 1.3.1, Qwen3.5-0.8B W8A8, 16384 context, VmHWM 1,178 MB, one 1,256-token prompt, mainline 7.0 + rknpu 0.9.8): cpu_mask 0x0f (A55 x4) prefill 44.5 / decode 9.07 tok/s, 0xf0 (A76 x4) 174.5 / 16.67; on the vendor 6.1 kernel with rknpu 0.9.7: 0x0f 40.9 / 12.2, 0xe0 (A76 x3) 166.9 / 11.3, 0xf0 200.1 / 18.7. RKLLM refuses fewer enabled CPUs than the 3 NPU cores, so a cpu_mask needs at least three bits; the tier default is the A55 cluster 0x0f (strict CPU reservation) until the operator chooses otherwise. vLLM has no Mali or RKNPU target, so this tier declares no vllm_seat. NOT MEASURED: the GPU seat. gemma4-e2b through llama.cpp Vulkan on the Mali-G610 has no speed or quality figure yet, and ctx_size 8192, f16 KV and flash-attn off are conservative defaults, not measurements; an on-box benchmark decides the GPU model list. Also unmeasured: the GPU and NPU seats loaded together (they are alternatives in one matrix set), the VLM's answer quality, and any agent seat (fleet_agent_enabled is false and none has been chosen). PROJECTED until that benchmark."
     }
   }
 }
