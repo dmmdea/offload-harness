@@ -2583,10 +2583,7 @@ func runFleetServe(args []string) error {
 	if snap, ok := sampler.Load(); ok {
 		total = snap.TotalGiB
 	}
-	jobs := fleetnode.NewJobs(time.Hour, cfg.FleetConcurrencyLimit())
-	// The poll lease (ADR 0064): NewJobs starts at the default; fleet_poll_lease_sec
-	// narrows it, or turns the abandoned-job rules off with a negative value.
-	jobs.SetPollLease(cfg.FleetPollLease())
+	jobs := newFleetJobs(cfg)
 	// Reclaimable VRAM is sampled in the background (never from the health handler,
 	// which must not block on llama-swap) — see fleet_reclaim.go for why the idle
 	// baseline, not free or total, is the right denominator for a shared card.

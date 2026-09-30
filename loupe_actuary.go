@@ -131,21 +131,21 @@ func buildReliability(rows []ledger.Entry) ReliabilityReport {
 //
 // # These patterns are narrow for two reasons, both learned by checking the real ledger
 //
-// 1. THE ATLAS GROUPS BY THE SHORT FORM OF A REASON (ledger.ShortReason, 120 bytes). Every
-//    row written before ADR 0064 holds the reason cut to that length on write, and the
-//    atlas still groups newer rows by it, so a class is one failure shape and not one per
-//    job-specific number. The first version matched "exceeds the available context size" —
-//    which never fires, because the string is cut mid-word to "...(10532 tokens) exceeds the
-//    availa". The classifier reported "0 obsolete" against a ledger that contains 12 of them,
-//    and the atlas verdict was computed on a corpus the exclusion had silently failed to
-//    clean. Match on "tokens) exceeds", which is distinctive AND survives the short form.
+//  1. THE ATLAS GROUPS BY THE SHORT FORM OF A REASON (ledger.ShortReason, 120 bytes). Every
+//     row written before ADR 0064 holds the reason cut to that length on write, and the
+//     atlas still groups newer rows by it, so a class is one failure shape and not one per
+//     job-specific number. The first version matched "exceeds the available context size" —
+//     which never fires, because the string is cut mid-word to "...(10532 tokens) exceeds the
+//     availa". The classifier reported "0 obsolete" against a ledger that contains 12 of them,
+//     and the atlas verdict was computed on a corpus the exclusion had silently failed to
+//     clean. Match on "tokens) exceeds", which is distinctive AND survives the short form.
 //
-// 2. "context" IS AMBIGUOUS IN GO. `context deadline exceeded` and `context canceled` are
-//    HTTP timeout/cancellation errors with nothing to do with a context WINDOW. A loose
-//    "context ..." pattern would sweep them in and silently delete a LIVE failure class from
-//    the gate — the opposite of the mistake in (1), and worse, because it hides a real
-//    problem instead of merely failing to hide a dead one. TestTimeoutDefersAreNotObsolete
-//    guards this direction specifically.
+//  2. "context" IS AMBIGUOUS IN GO. `context deadline exceeded` and `context canceled` are
+//     HTTP timeout/cancellation errors with nothing to do with a context WINDOW. A loose
+//     "context ..." pattern would sweep them in and silently delete a LIVE failure class from
+//     the gate — the opposite of the mistake in (1), and worse, because it hides a real
+//     problem instead of merely failing to hide a dead one. TestTimeoutDefersAreNotObsolete
+//     guards this direction specifically.
 //
 // # Why this class is genuinely obsolete, evidenced rather than assumed
 //
