@@ -1035,15 +1035,20 @@ func seatBlock(s mediaseat.Seat, p Params, a seatAnchors) (string, error) {
 		// -ngl/--flash-attn are llama-server flags, while the NPU is neither — the launcher
 		// finds the RKLLM runtime itself. The window and the CPU mask are the two knobs
 		// the runtime is STARTED with, so they ride the command line; the served name is
-		// the seat's own, so /v1/models answers to the id the harness binds.
-		enc := ""
+		// the seat's own, so /v1/models answers to the id the harness binds. The repeat
+		// penalty is the seat's default for a request that sends none, rendered only when
+		// the tier declares one, so a seat that names none renders exactly as it always has.
+		enc, penalty := "", ""
 		if s.VisionEncoder != "" {
 			enc = " --vision-encoder __MODELS__/" + s.VisionEncoder
 		}
+		if s.RepeatPenalty != nil {
+			penalty = " --repeat-penalty " + strconv.FormatFloat(*s.RepeatPenalty, 'g', -1, 64)
+		}
 		fmt.Fprintf(&b, "    cmd: >-\n"+
 			"      %s --model __MODELS__/%s%s\n"+
-			"      --ctx-size %d --cpu-mask %s --served-name %s --port ${PORT} --host 127.0.0.1\n",
-			p.seatExpand(s.EffectiveBin()), s.Model, enc, s.CtxSize, s.EffectiveCPUMask(), s.Name)
+			"      --ctx-size %d --cpu-mask %s%s --served-name %s --port ${PORT} --host 127.0.0.1\n",
+			p.seatExpand(s.EffectiveBin()), s.Model, enc, s.CtxSize, s.EffectiveCPUMask(), penalty, s.Name)
 	default:
 		return "", fmt.Errorf("seat %q: unknown kind %q", s.Name, s.Kind)
 	}

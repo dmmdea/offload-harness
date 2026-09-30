@@ -12,6 +12,10 @@ the seat with SIGTERM when its ttl runs out, so there is no idle watchdog here. 
 Honoured: messages (system first, user, assistant; text parts and image_url data URIs), max_tokens or
 max_completion_tokens, temperature, top_p, top_k, repeat_penalty or repetition_penalty, presence_penalty,
 frequency_penalty, stop, stream_options.include_usage, chat_template_kwargs.enable_thinking (default OFF).
+A request that sends neither repeat_penalty nor repetition_penalty gets the seat's --repeat-penalty (default 1.0, the
+runtime's "off"); a value the request does send always wins. The seat default exists because greedy decoding at 1.0
+loops on a small model's image answers until the token cap (measured 2026-09-30: a 256-token cap hit on VQA, a
+"vision output truncated" defer), where 1.1 ended them.
 Accepted and ignored, never a 400: logprobs, top_logprobs, cache_prompt, seed, n, response_format of type text and every
 other chat_template_kwargs key. Refused with 400: constrained decoding (a non-empty grammar, response_format of type
 json_schema or json_object, structured_outputs; code constrained_decoding_unsupported, because the runtime cannot
@@ -82,6 +86,8 @@ DEFAULT_TOP_K = 40  # the sampling defaults below are llama.cpp's, so an unset k
 MAX_TOP_K = 2**31 - 1  # RKLLMSamplingParam.top_k is an int32: a larger value would wrap to a negative one in ctypes
 DEFAULT_TOP_P = 0.95
 DEFAULT_TEMPERATURE = 0.8
+DEFAULT_REPEAT_PENALTY = 1.0  # 1.0 = no penalty; a seat that loops on greedy decoding starts with --repeat-penalty above it
+MIN_REPEAT_PENALTY, MAX_REPEAT_PENALTY = 0.01, 10.0  # the per-request range, shared by the --repeat-penalty flag
 BASE_DOMAIN_ID = 1  # the vendor multimodal demo's value for RK3588 (0 is for rk3562/rv1126b); text-only ran fine on 0 too
 MAX_BODY = 16 << 20  # request bytes; a 12 MP photo is ~5 MB as a base64 data URI
 MAX_WAITING = 2  # requests queued behind the running generation; the next one is turned away with a 503
@@ -876,8 +882,12 @@ def _refuse_constrained_decoding(body: dict) -> None:
                        "constrained_decoding_unsupported")
 
 
-def build_request(body: dict, ctx_size: int, has_vision: bool) -> ChatRequest:
-    """Validate an /v1/chat/completions body. Fields the seat cannot honour but may ignore are simply not read."""
+def build_request(body: dict, ctx_size: int, has_vision: bool,
+                  repeat_penalty: float = DEFAULT_REPEAT_PENALTY) -> ChatRequest:
+    """Validate an /v1/chat/completions body. Fields the seat cannot honour but may ignore are simply not read.
+
+    `repeat_penalty` is the seat's default for a request that sends neither repeat_penalty nor repetition_penalty.
+    """
     _refuse_constrained_decoding(body)
     if body.get("tools"):
         raise ApiError(400, "tool calling is not supported by this seat")
@@ -902,7 +912,8 @@ def build_request(body: dict, ctx_size: int, has_vision: bool) -> ChatRequest:
     if temperature == 0 or top_p == 0:  # greedy: top_k 1 is deterministic whatever the runtime does with temperature 0
         top_k, top_p, temperature = 1, 1.0, 1.0
     sampling = Sampling(top_k, top_p, temperature,
-                        _number(body, ("repeat_penalty", "repetition_penalty"), 1.0, 0.01, 10),
+                        _number(body, ("repeat_penalty", "repetition_penalty"), repeat_penalty,
+                                MIN_REPEAT_PENALTY, MAX_REPEAT_PENALTY),
                         _number(body, ("frequency_penalty",), 0.0, -2, 2), _number(body, ("presence_penalty",), 0.0, -2, 2))
     stop = body.get("stop")
     stops = [stop] if isinstance(stop, str) else [] if stop is None else stop
@@ -1082,8 +1093,8 @@ class _Stream:
 class App:
     """State shared by the handler threads."""
 
-    def __init__(self, name: str, ctx_size: int):
-        self.name, self.ctx_size = name, ctx_size
+    def __init__(self, name: str, ctx_size: int, repeat_penalty: float = DEFAULT_REPEAT_PENALTY):
+        self.name, self.ctx_size, self.repeat_penalty = name, ctx_size, repeat_penalty
         self.runtime = None  # set by the loader once rkllm_init returns
         self.vision = None
         self.ready = threading.Event()
@@ -1196,7 +1207,7 @@ class Handler(BaseHTTPRequestHandler):
             raise ApiError(503, "the model is loading" if not app.closing else "the server is shutting down")
         app.admit()  # before the body is read: a request turned away costs no memory
         try:
-            req = build_request(self._read_json(), app.ctx_size, app.vision is not None)
+            req = build_request(self._read_json(), app.ctx_size, app.vision is not None, app.repeat_penalty)
             if not self._acquire(app):
                 return
             try:
@@ -1309,6 +1320,9 @@ def main(argv: list | None = None) -> int:
     ap.add_argument("--ctx-size", type=int, default=DEFAULT_CTX, help="context window in tokens (default %(default)s)")
     ap.add_argument("--cpu-mask", default="0x0f", help="hex mask of the CPUs the runtime uses (default %(default)s: A55 cluster)")
     ap.add_argument("--served-name", help="model id reported by /v1/models (default: the model file's name)")
+    ap.add_argument("--repeat-penalty", type=float, default=DEFAULT_REPEAT_PENALTY,
+                    help="repeat penalty for a request that sends none, %g to %g (default %%(default)s: off)"
+                         % (MIN_REPEAT_PENALTY, MAX_REPEAT_PENALTY))
     ap.add_argument("--port", type=int, help="port to listen on")
     ap.add_argument("--host", default="127.0.0.1", help="loopback address to bind (default %(default)s)")
     ap.add_argument("--lib", default=os.path.join(lib_dir, "librkllmrt.so") if lib_dir else "librkllmrt.so",
@@ -1333,6 +1347,8 @@ def main(argv: list | None = None) -> int:
         ap.error("--cpu-mask must be a non-zero hex mask such as 0x0f")
     if args.ctx_size < 64:
         ap.error("--ctx-size must be at least 64")
+    if not MIN_REPEAT_PENALTY <= args.repeat_penalty <= MAX_REPEAT_PENALTY:  # also refuses nan
+        ap.error(f"--repeat-penalty must be a number between {MIN_REPEAT_PENALTY:g} and {MAX_REPEAT_PENALTY:g}")
     for path in (args.model, args.vision_encoder):
         if path and not os.path.isfile(path):
             print(f"rkllm server: no such file: {path}", file=sys.stderr)
@@ -1340,7 +1356,7 @@ def main(argv: list | None = None) -> int:
 
     _pin_to_cpus(cpu_mask)
     _prefer_as_oom_victim()
-    app = App(args.served_name or os.path.splitext(os.path.basename(args.model))[0], args.ctx_size)
+    app = App(args.served_name or os.path.splitext(os.path.basename(args.model))[0], args.ctx_size, args.repeat_penalty)
     try:
         srv = make_server(app, args.host, args.port)
     except OSError as e:
@@ -1360,7 +1376,8 @@ def main(argv: list | None = None) -> int:
             return
         app.ready.set()
         print(f"rkllm server: ready model={app.name} ctx={args.ctx_size} cpu_mask={cpu_mask:#04x} "
-              f"vision={'yes' if app.vision else 'no'} loaded in {time.monotonic() - t0:.1f}s", file=sys.stderr, flush=True)
+              f"repeat_penalty={args.repeat_penalty:g} vision={'yes' if app.vision else 'no'} "
+              f"loaded in {time.monotonic() - t0:.1f}s", file=sys.stderr, flush=True)
 
     def stop(_signum, _frame) -> None:  # serve_forever() runs on this thread: shutdown() must be called from another
         threading.Thread(target=srv.shutdown, daemon=True).start()

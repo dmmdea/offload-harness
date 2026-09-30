@@ -42,6 +42,7 @@
   "agent_call_deadline_sec": 0,
   "agent_spread_local_slot": "",
   "vision_model": "",
+  "vision_tasks": null,
   "ocr_model": "",
   "vision_max_image_bytes": 6000000,
   "ocr_max_tokens": 1024,

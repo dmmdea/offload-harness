@@ -42,6 +42,7 @@ The pipeline, the configured model Tiers served by llama-swap, the grammar compi
    - **Schema validation.** Failure → retry/escalate.
    - **Grounding.** Computed for all tasks, logged always, but *actioned only for extract* —
      summaries legitimately paraphrase.
+     Numbers are compared by value, in either locale (`2.354,40` and `2,354.40` ground 2354.4).
    - **Confidence.** Classify below `classify_min_confidence` (default 0.88) escalates; a decision
      margin below the task's threshold (learned conformal value, else `confidence_margin_threshold`,
      default 0.65) escalates. (Defaults calibrated 2026-08-14 — the prior 0.45/0.35 sat below the

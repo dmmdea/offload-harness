@@ -289,3 +289,78 @@ func TestVisionIsConcurrencyCapped(t *testing.T) {
 		t.Fatal("vision must be capped: it contends for the text endpoint")
 	}
 }
+
+// TestVisionTasksRefuseAnUnservedTaskAtAck (0.153.0): a node whose vision seat declares
+// vision_tasks refuses a task outside the set at ACK time, with a 400 that names the allowed
+// set, and the request never reaches the runner. A listed task is admitted as before.
+func TestVisionTasksRefuseAnUnservedTaskAtAck(t *testing.T) {
+	cfg := visionCfg("")
+	cfg.VisionTasks = []string{"vqa", "ocr"}
+	r := &visionRunner{res: core.Result{OK: true, Data: json.RawMessage(`{"answer":"a cat"}`)}}
+	s, _ := newTestServer(t, cfg, r, authOpts(true))
+
+	rec := do(t, s, http.MethodPost, "/fleet/vision", visionBody("vt-1", "assess_image", tinyPNG(), map[string]string{"brief": "a beach"}), nil)
+	wantErrorShape(t, rec, http.StatusBadRequest, `"assess_image" is not served by this node's vision seat (vision_tasks: vqa, ocr)`)
+	if _, ran := r.last(); ran {
+		t.Fatal("a refused task must never reach the runner")
+	}
+	if rec := do(t, s, http.MethodGet, "/fleet/jobs/vt-1", "", nil); rec.Code != http.StatusNotFound {
+		t.Fatalf("a task refused at ack left a job behind: status %d", rec.Code)
+	}
+
+	if rec := do(t, s, http.MethodPost, "/fleet/vision", visionBody("vt-2", "vqa", tinyPNG(), map[string]string{"question": "what is it?"}), nil); rec.Code != http.StatusAccepted {
+		t.Fatalf("a listed task (vqa) was refused: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := do(t, s, http.MethodPost, "/fleet/vision", visionBody("vt-3", "ocr", tinyPNG(), nil), nil); rec.Code != http.StatusAccepted {
+		t.Fatalf("a listed task (ocr) was refused: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestVisionTasksUnsetServesAllThree: no vision_tasks is today's behaviour, every task admitted.
+func TestVisionTasksUnsetServesAllThree(t *testing.T) {
+	s, _ := newTestServer(t, visionCfg(""), &visionRunner{res: core.Result{OK: true, Data: json.RawMessage(`{}`)}}, authOpts(true))
+	for i, tc := range []struct{ task, extra string }{{"vqa", "question"}, {"ocr", ""}, {"assess_image", "brief"}} {
+		extra := map[string]string{}
+		if tc.extra != "" {
+			extra[tc.extra] = "x"
+		}
+		id := "vt-all-" + string(rune('a'+i))
+		if rec := do(t, s, http.MethodPost, "/fleet/vision", visionBody(id, tc.task, tinyPNG(), extra), nil); rec.Code != http.StatusAccepted {
+			t.Fatalf("%s with no vision_tasks was refused: %d %s", tc.task, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+// TestHealthPublishesVisionTasksOnlyWhenSet: vision_tasks rides beside vision_model under the
+// same lane-gated rule, additive and omitempty, so a node that declares nothing publishes a
+// byte-identical payload (older delegators and older nodes both keep today's behaviour).
+func TestHealthPublishesVisionTasksOnlyWhenSet(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		tasks  []string
+		lane   bool
+		wantIn bool
+	}{
+		{"unset", nil, true, false},
+		{"empty", []string{}, true, false},
+		{"set", []string{"vqa", "ocr"}, true, true},
+		{"set but the lane is not admissible", []string{"vqa", "ocr"}, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := visionCfg("")
+			if !tc.lane {
+				cfg.VisionModel = ""
+			}
+			cfg.VisionTasks = tc.tasks
+			s, _ := newTestServer(t, cfg, &visionRunner{}, authOpts(true))
+			h := decodeMap(t, do(t, s, http.MethodGet, "/fleet/health", "", nil))
+			got, has := h["vision_tasks"]
+			if has != tc.wantIn {
+				t.Fatalf("vision_tasks present = %v, want %v (health %v)", has, tc.wantIn, h)
+			}
+			if tc.wantIn && string(mustJSON(t, got)) != `["vqa","ocr"]` {
+				t.Fatalf("vision_tasks = %s, want [\"vqa\",\"ocr\"]", mustJSON(t, got))
+			}
+		})
+	}
+}

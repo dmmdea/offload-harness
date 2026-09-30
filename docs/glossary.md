@@ -126,6 +126,8 @@ directory because `mkdir` is atomic everywhere. A lock whose owner is dead is re
 Checking that values in a model's output actually appear in its input. Computed and logged for all
 tasks, but *actioned* only for extraction — summaries legitimately paraphrase, so gating them on
 grounding would be noise.
+Text is matched as a phrase; numbers are compared by value across locales (`2.354,40` and `2,354.40`
+are one amount), never as substrings of other numbers.
 
 ## Ledger
 

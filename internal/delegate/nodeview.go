@@ -114,6 +114,11 @@ type NodeView struct {
 	// `vision_model`, 0.116.0) — informational, published beside the result so
 	// a caller can see WHICH model judged its image without opening the node.
 	VisionModel string
+	// VisionTasks is the subset of vqa / ocr / assess_image the node's vision seat
+	// serves (health `vision_tasks`). nil = the node publishes none, which means ALL
+	// three: an older node, and a node whose seat serves everything, both read as
+	// today. Read it through ServesVisionTask, never directly.
+	VisionTasks []string
 	// Layers is a composite node's advertised device layers (health `layers`,
 	// ADR 0039): the spec of every layer and seat, live occupancy, and the
 	// node's OWN admissibility verdict per layer. The delegator rebuilds them
@@ -168,6 +173,26 @@ const VisionTask = "vision"
 func (v NodeView) ServesVision() bool {
 	for _, t := range v.Tasks {
 		if t == VisionTask {
+			return true
+		}
+	}
+	return false
+}
+
+// ServesVisionTask reports whether v serves the vision lane AND the given task
+// (vqa, ocr or assess_image). A node that publishes no vision_tasks serves all
+// three, so an older node is exactly as eligible as before; one that publishes a
+// list serves only what it names — a seat whose runtime cannot do a task (the
+// RKLLM runtime cannot run assess_image's grammar) must not be handed it.
+func (v NodeView) ServesVisionTask(task string) bool {
+	if !v.ServesVision() {
+		return false
+	}
+	if len(v.VisionTasks) == 0 {
+		return true
+	}
+	for _, t := range v.VisionTasks {
+		if t == task {
 			return true
 		}
 	}
@@ -273,6 +298,9 @@ type healthWire struct {
 	// decoded (the vision lane is found in it), and the vision seat name.
 	SupportedTaskTypes []string `json:"supported_task_types"`
 	VisionModel        string   `json:"vision_model"`
+	// Additive (0.153.0): the vision tasks the seat serves. Absent on an older node
+	// and on a node whose seat serves all three, decoding to nil = all three.
+	VisionTasks []string `json:"vision_tasks"`
 	// Additive (0.116.0, ADR 0039). nil on a plain or pre-0.116 node; the ONE
 	// row shape fleetnode publishes and offload_status echoes.
 	Layers []placetable.LayerRow `json:"layers"`
@@ -347,6 +375,7 @@ func FetchNodeView(ctx context.Context, base, token string) (NodeView, error) {
 		LeaseBusy:         w.Lease != nil && w.Lease.Held && w.Lease.Busy,
 		Tasks:             w.SupportedTaskTypes,
 		VisionModel:       w.VisionModel,
+		VisionTasks:       w.VisionTasks,
 		Layers:            w.Layers,
 		Local:             false,
 
