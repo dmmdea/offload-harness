@@ -131,12 +131,14 @@ func buildReliability(rows []ledger.Entry) ReliabilityReport {
 //
 // # These patterns are narrow for two reasons, both learned by checking the real ledger
 //
-// 1. THE LEDGER TRUNCATES REASONS (see maxReasonLen in internal/ledger). The first version
-//    matched "exceeds the available context size" — which never fires, because the stored
-//    string is cut mid-word to "...(10532 tokens) exceeds the availa". The classifier
-//    reported "0 obsolete" against a ledger that contains 12 of them, and the atlas verdict
-//    was computed on a corpus the exclusion had silently failed to clean. Match on
-//    "tokens) exceeds", which is distinctive AND survives truncation.
+// 1. THE ATLAS GROUPS BY THE SHORT FORM OF A REASON (ledger.ShortReason, 120 bytes). Every
+//    row written before ADR 0064 holds the reason cut to that length on write, and the
+//    atlas still groups newer rows by it, so a class is one failure shape and not one per
+//    job-specific number. The first version matched "exceeds the available context size" —
+//    which never fires, because the string is cut mid-word to "...(10532 tokens) exceeds the
+//    availa". The classifier reported "0 obsolete" against a ledger that contains 12 of them,
+//    and the atlas verdict was computed on a corpus the exclusion had silently failed to
+//    clean. Match on "tokens) exceeds", which is distinctive AND survives the short form.
 //
 // 2. "context" IS AMBIGUOUS IN GO. `context deadline exceeded` and `context canceled` are
 //    HTTP timeout/cancellation errors with nothing to do with a context WINDOW. A loose
@@ -201,7 +203,7 @@ func buildAtlas(rows []ledger.Entry, spanDays float64) AtlasReport {
 			continue
 		}
 		rep.TotalDefers++
-		counts[e.Reason]++
+		counts[ledger.ShortReason(e.Reason)]++ // the short form: see the note on obsoleteDeferPatterns
 	}
 	// A rate needs a window. Without one, report the counts and say the gate could not be
 	// evaluated rather than dividing by a guess.
