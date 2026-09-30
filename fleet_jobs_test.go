@@ -37,6 +37,31 @@ func TestNewFleetJobsAppliesTheConfiguredPollLease(t *testing.T) {
 	}
 }
 
+// TestPollLeaseNoteSaysWhichLeaseIsInForce: the lease a node runs under is not always
+// the one written. 0 takes the default, a positive value under the floor is raised to
+// it, a negative one turns the abandoned-job rules off — and a substituted value with
+// no runtime signal is a setting the operator believes in and is not running. The
+// serve verb prints this note once at start-up.
+func TestPollLeaseNoteSaysWhichLeaseIsInForce(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		sec  int
+		want []string // every fragment must appear
+	}{
+		{"unset takes the default", 0, []string{"poll lease 60 s", "default"}},
+		{"an operator's value", 90, []string{"poll lease 90 s", "fleet_poll_lease_sec=90"}},
+		{"a value under the floor says it was raised", 3, []string{"poll lease 15 s", "fleet_poll_lease_sec=3", "raised", "15 s floor"}},
+		{"negative says the rules are off", -1, []string{"poll lease OFF", "fleet_poll_lease_sec=-1"}},
+	} {
+		got := pollLeaseNote(config.Config{FleetPollLeaseSec: tc.sec})
+		for _, frag := range tc.want {
+			if !strings.Contains(got, frag) {
+				t.Errorf("%s: note %q lacks %q", tc.name, got, frag)
+			}
+		}
+	}
+}
+
 // TestServeBuildsItsJobStoreThroughNewFleetJobs pins the call site: the serve verb
 // is never run by a test, so the seam above proves nothing unless the verb goes
 // through it. A store built directly, beside it, would have no lease wiring at all.
@@ -51,5 +76,8 @@ func TestServeBuildsItsJobStoreThroughNewFleetJobs(t *testing.T) {
 	}
 	if strings.Contains(text, "fleetnode.NewJobs(") {
 		t.Error("main.go builds a job store with fleetnode.NewJobs directly: it would bypass the poll-lease wiring in newFleetJobs")
+	}
+	if !strings.Contains(text, "pollLeaseNote(cfg)") {
+		t.Error("main.go's fleet-serve no longer prints the poll-lease note: a lease raised to the floor, or turned off, would carry no runtime signal")
 	}
 }
