@@ -322,12 +322,13 @@ def tool_classify(args: dict) -> dict:
 
     spec = MODELS[key]
     size = spec["input"]
-    img = _open_image(image)
-    outs = _infer(key, _nhwc(_decode(img, image, (size, size)).resize((size, size), Image.BILINEAR)))
+    with _open_image(image) as img:  # closed on every path: a refusal below must not leave the file open
+        labels = _load_labels(key)  # every artifact is verified before the NPU is touched
+        arr = _nhwc(_decode(img, image, (size, size)).resize((size, size), Image.BILINEAR))
+    outs = _infer(key, arr)
     logits = outs[0].reshape(-1).astype(np.float32)  # the fc layer: raw logits
     e = np.exp(logits - logits.max())
     scores = e / e.sum()
-    labels = _load_labels(key)
     order = scores.argsort()[::-1][:top_k]
     results = [{"label": labels[i] if i < len(labels) else str(i), "score": float(scores[i])} for i in order]
     return {"results": results, "best": results[0], "model": spec["file"], "domain": domain}
@@ -405,17 +406,17 @@ def tool_object_detect(args: dict) -> dict:
 
     spec = MODELS[DETECT_KEY]
     size = spec["input"]
-    img = _open_image(image)
-    w, h = img.size
-    # Letterbox as the recipe does: fit inside size x size keeping the aspect, centred on black.
-    r = min(size / w, size / h)
-    nw, nh = max(1, round(w * r)), max(1, round(h * r))
-    left, top = (size - nw) // 2, (size - nh) // 2
-    canvas = Image.new("RGB", (size, size), (0, 0, 0))
-    canvas.paste(_decode(img, image, (nw, nh)).resize((nw, nh), Image.BILINEAR), (left, top))
+    with _open_image(image) as img:
+        labels = _load_labels(DETECT_KEY)  # every artifact is verified before the NPU is touched
+        w, h = img.size
+        # Letterbox as the recipe does: fit inside size x size keeping the aspect, centred on black.
+        r = min(size / w, size / h)
+        nw, nh = max(1, round(w * r)), max(1, round(h * r))
+        left, top = (size - nw) // 2, (size - nh) // 2
+        canvas = Image.new("RGB", (size, size), (0, 0, 0))
+        canvas.paste(_decode(img, image, (nw, nh)).resize((nw, nh), Image.BILINEAR), (left, top))
     outs = _infer(DETECT_KEY, _nhwc(canvas))
     xyxy, ids, scores = _decode_yolov8(outs, size, thr)
-    labels = _load_labels(DETECT_KEY)
     objects = []
     for (x1, y1, x2, y2), cid, s in zip(xyxy, ids, scores):
         x1, x2 = min(max((x1 - left) / r, 0.0), w), min(max((x2 - left) / r, 0.0), w)
@@ -435,14 +436,14 @@ def tool_embed(args: dict) -> dict:
 
     spec = MODELS[EMBED_KEY]
     size = spec["input"]
-    img = _open_image(image)
-    w, h = img.size
-    # CLIP's own preprocessing: shorter side to size (bicubic), then a centred size x size crop.
-    s = size / min(w, h)
-    nw, nh = max(size, round(w * s)), max(size, round(h * s))
-    img = _decode(img, image, (nw, nh)).resize((nw, nh), Image.BICUBIC)
+    with _open_image(image) as img:
+        w, h = img.size
+        # CLIP's own preprocessing: shorter side to size (bicubic), then a centred size x size crop.
+        s = size / min(w, h)
+        nw, nh = max(size, round(w * s)), max(size, round(h * s))
+        scaled = _decode(img, image, (nw, nh)).resize((nw, nh), Image.BICUBIC)
     left, top = (nw - size) // 2, (nh - size) // 2
-    outs = _infer(EMBED_KEY, _nhwc(img.crop((left, top, left + size, top + size))))
+    outs = _infer(EMBED_KEY, _nhwc(scaled.crop((left, top, left + size, top + size))))
     vec = outs[0].reshape(-1)
     return {"embedding": [float(v) for v in vec], "dim": int(vec.shape[0]), "space": spec["space"], "model": spec["file"]}
 
@@ -539,25 +540,28 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(404, {"error": "unknown_tool", "tool": tool, "known": sorted(TOOLS)})
         _touch()
         try:
-            try:
-                n = int(self.headers.get("Content-Length") or 0)
-                if n < 0:
-                    raise ValueError("negative Content-Length")
-                args = json.loads((self.rfile.read(n) if n else b"") or b"{}")
-            except ValueError as e:  # a bad Content-Length or JSON that does not parse
-                return self._send(400, {"error": "bad_request", "detail": str(e)})
-            if not isinstance(args, dict):
-                return self._send(400, {"error": "bad_request", "detail": "body must be a JSON object"})
-            try:
-                with _lock:
+            n = int(self.headers.get("Content-Length") or 0)
+            if n < 0:
+                raise ValueError("negative Content-Length")
+            args = json.loads((self.rfile.read(n) if n else b"") or b"{}")
+        except ValueError as e:  # a bad Content-Length or JSON that does not parse
+            return self._send(400, {"error": "bad_request", "detail": str(e)})
+        if not isinstance(args, dict):
+            return self._send(400, {"error": "bad_request", "detail": "body must be a JSON object"})
+        try:
+            with _lock:
+                try:
                     result = fn(args)
-                return self._send(200, result)
-            except Refusal as e:
-                return self._send(400 if e.body.get("error") == "bad_request" else 200, e.body)
-            except Exception as e:  # noqa: BLE001 - the 500 guard: never a stack trace on the wire
-                return self._send(500, {"error": "internal", "detail": f"{type(e).__name__}: {e}"})
-        finally:
-            _touch()  # idle counts from the end of the call: a slow inference must not read as idle
+                finally:
+                    # Idle counts from the END of the call, and the watchdog only acts while holding this lock, so
+                    # touching before the lock is released leaves no window (the response write below is outside
+                    # it) in which a call longer than --idle-sec looks idle and ends the process mid-response.
+                    _touch()
+            return self._send(200, result)
+        except Refusal as e:
+            return self._send(400 if e.body.get("error") == "bad_request" else 200, e.body)
+        except Exception as e:  # noqa: BLE001 - the 500 guard: never a stack trace on the wire
+            return self._send(500, {"error": "internal", "detail": f"{type(e).__name__}: {e}"})
 
 
 def _idle_watchdog(server: ThreadingHTTPServer):
