@@ -570,7 +570,7 @@ func statusRemote(cfg config.Config) map[string]any {
 	// with a dedicated browse_cdp_url). A key that is set but has nothing to honour it against
 	// says so here instead of reading as a silent false.
 	if cfg.BrowseActivateTabIgnored() {
-		remote["browse_activate_tab_note"] = config.BrowseActivateTabIgnoredNote
+		remote["browse_activate_tab_note"] = cfg.BrowseActivateTabIgnoredNote()
 	}
 	return remote
 }

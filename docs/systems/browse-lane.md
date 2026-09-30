@@ -179,7 +179,11 @@ correction stops. The last bullet is the opt-in setting that removes the cause o
   the sidecar only when `browse_activate_tab` is true AND `browse_cdp_url` names an endpoint the lane
   accepts. With the key true and no such endpoint the setting is ignored and the lane is not failed: the run
   goes on as before, the config load prints a warning, and `offload_status` reports
-  `remote.browse_activate_tab` false with a `remote.browse_activate_tab_note`. A failed activation (a dead
+  `remote.browse_activate_tab` false with a `remote.browse_activate_tab_note`. (A `browse_cdp_url` that is set
+  but refused leaves the lane unregistered; the warning and the note then say refused instead of missing.) An
+  activating run also stops the lane's own browser-harness daemon before jev starts one: jev reuses any live
+  daemon of that name and never compares it with the endpoint the run pins, and one left by a crashed run
+  could still be attached to the everyday browser. A failed activation (a dead
   daemon, a tab that is already gone) is logged as `activate_tab skipped: ...` and the run continues with the
   tab in the background, exactly as without the setting; it is attempted once per run, never retried. It was
   measured in a separate profile started away from the screen; how an on-screen window behaves was not
@@ -271,8 +275,10 @@ endpoint keeps its own spend ledger.
 - Agent tool `browse` (`url`, `goal`, `max_actions`, `security_risk`).
 - CLI `local-agent --allow-browse --browse-hosts host1,host2` (the host list is required).
 - `agent_run` and `agent_delegate` inputs `allow_browse` and `browse_hosts`.
-- `offload_status`'s `remote` block: `browse_configured`, `browse_decision_url` and `browse_activate_tab` (the
-  effective value; a `browse_activate_tab_note` appears when the setting is on but ignored).
+- `offload_status`'s `remote` block: `browse_configured`, `browse_decision_url` and `browse_activate_tab` (what
+  the start line will carry when the lane runs, so the effective value, not the raw key; a
+  `browse_activate_tab_note` appears when the setting is on but ignored, and says whether `browse_cdp_url` is
+  missing or set but refused).
 
 ### Install
 
@@ -327,7 +333,8 @@ placement (a contract with `allow_browse` is local-only).
 8. One browse at a time per process. No GPU lease.
 9. A failure is a typed defer; nothing falls back to another model or lane.
 10. The lane's tab is activated only when the operator opted in (`browse_activate_tab`) AND pinned a dedicated
-    endpoint (`browse_cdp_url`); never in a browser the lane found by discovery.
+    endpoint (`browse_cdp_url`); never in a browser the lane found by discovery. An activating run first stops
+    a leftover lane daemon, so the pinned endpoint is the browser it drives.
 
 ## Error handling
 
@@ -379,10 +386,13 @@ is not proof.
   the page was quiet from the first poll.
 - An `activated the lane's tab (activate_tab)` line in that tail means the lane brought its tab to the front at
   the run's first observe; `activate_tab skipped: ...` means it tried and the call failed (or the browser had
-  no tab id), and the run went on with the tab in the background. No line means the setting is off or ignored.
+  no tab id), and the run went on with the tab in the background. No line means the setting is off or ignored,
+  or that the installed sidecar predates 0.153.3 and does not read it (rerun `setup/browse/install.ps1`).
 - Browse calls are audited by the policy broker on agent doors, and ledgered like other lanes.
 - `offload_status remote` shows whether the lane is configured, which decision URL it will call, and whether
-  tab activation is in effect (`browse_activate_tab`, with a note when the setting is on but ignored).
+  the harness will ask the sidecar to activate its tab (`browse_activate_tab`, with a note when the setting is on
+  but ignored). It reports what the start line will carry, not what the installed sidecar does: an older
+  `runner.py` ignores the field, and status cannot see which one is installed.
 - A missing `offload_browse` in `tools/list` means the lane is unconfigured or the client was not
   restarted.
 
@@ -400,8 +410,11 @@ is not proof.
   and the wrapper tests pin that it runs once after an action, before jev's read and in the observed session,
   and never on the first observe, after a `wait` action or in act. The tab activation is pinned through the same
   fake `Browser`: exactly one `Target.activateTarget` per run, at the first observe and before the settle and
-  jev's read, a browser-level call (no session) carrying the Browser's own target id, nothing unless the start
-  line carries a JSON `true`, and a failure swallowed, logged once and not retried.
+  jev's read, a browser-level call (no session) carrying the Browser's own target id, on the attended and the
+  unattended door alike, nothing unless the start line carries a JSON `true`, and a failure swallowed, logged
+  once and not retried. `main()` runs against fake jev and browser-harness modules to pin that an activating
+  run stops the lane's daemon (only its own name) before the Agent starts, that a run that does not activate
+  never does, and that a failed stop is logged and the run goes on.
 - Verify an install without touching a real page: with the browser running and remote debugging
   ticked, call `offload_browse` with a start URL on a harmless page you own, `allow_hosts` set to its
   host, `max_actions` 3 and a goal that only reads. Check that `status` is `done`, that `final.url`

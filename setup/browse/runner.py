@@ -979,6 +979,15 @@ def main() -> int:
             run.capture.get_body = get_body
         _install_patches(run, model, agent_mod, browser_mod)
 
+        if run.activate_tab:
+            # jev's ensure_daemon reuses any live daemon of this name and never compares it with the endpoint this
+            # run pins. A lane daemon left by an earlier run (a hard crash, a failed stop) may still be attached to
+            # the operator's everyday browser, and the activation would then switch THAT browser's active tab.
+            # Stop it first (the lane's own name only; a no-op when none is running), so the Agent below starts a
+            # daemon on the pinned endpoint. Only for a run that activates: the setting's invariant is that it
+            # never acts in the everyday browser.
+            stop_lane_daemon()
+
         agent = agent_mod.Agent(run.url, run.goal)
         agent_built = True
         if run.capture is not None and not run.net_enabled:

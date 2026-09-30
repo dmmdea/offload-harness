@@ -54,6 +54,25 @@ settle.
   success, both log lines, the no-tab-id guard; the effective predicate without the endpoint, without the
   loopback check, the ignored report, the load warning, the JSON tag, the start line's field, the raw key sent
   or reported, the status key and its note).
+- **An activating run stops the lane's own daemon first** (`setup/browse/runner.py`, `main()`). jev's
+  `ensure_daemon` reuses any live daemon of the lane's name and never compares it with the endpoint the run
+  pins, so a lane daemon left by a crashed run, still attached to the operator's everyday browser, would have
+  had its active tab switched by the activation. When `activate_tab` is true the sidecar now calls
+  `stop_lane_daemon()` (the lane's own daemon name only; a no-op when none runs; a failure is logged and the
+  run goes on) before the `Agent` starts a daemon on the pinned endpoint. A run that does not activate is
+  unchanged. Pinned by tests that drive `main()` against fake jev and browser-harness modules: the stop comes
+  before the `Agent`, only when the start line carries a JSON `true`, and a failed stop does not end the run.
+- **The ignored note names the reason that applies.** A `browse_activate_tab` next to a `browse_cdp_url` that
+  is set but refused (not loopback, no port) used to say it "needs browse_cdp_url", and the load warning ended
+  "the lane runs as before" right beside the warning that `offload_browse` stays unregistered. The note is now
+  `Config.BrowseActivateTabIgnoredNote()`: "set but refused" when an endpoint is set, "needs browse_cdp_url"
+  when none is, and the warning promises "the lane runs as before" only for a registered lane.
+- Tests added with those: the refused endpoint is reported as ignored (`BrowseActivateTabIgnored`), the note and
+  the warning for a refused endpoint and a half-bound lane, the status note for a refused endpoint, and the
+  activation on the attended door as well as the unattended one (the measured failure was on the attended MCP
+  door). Each was shown to fail against a mutant: `Ignored` only when no endpoint is set, the note always
+  saying "needs", the warning always promising the lane runs as before, the daemon stop removed, run for every
+  run, or moved after the `Agent`, and the activation restricted to unattended runs.
 
 ### Docs
 
@@ -66,6 +85,9 @@ settle.
   list). `docs/OPERATOR-GUIDE.md`: how to enable it.
 - The fix is in the sidecar (`setup/browse/runner.py`) and the harness (config, start line, status); the
   setting does nothing until the sidecar is reinstalled with `setup/browse/install.ps1` and the key is set.
+  An older `runner.py` ignores `activate_tab` without a log line, and `offload_status` cannot see which one is
+  installed: `remote.browse_activate_tab` is what the harness will send, so the operator guide and the lane
+  doc say to rerun the installer after upgrading and that no log line can also mean an older sidecar.
 
 ## [0.153.2] - 2026-09-30 - the browse lane waits for the page to settle after an action, so a dialog that mounts late is seen
 

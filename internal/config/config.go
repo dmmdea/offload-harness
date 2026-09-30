@@ -2831,9 +2831,16 @@ func (c Config) BrowseActivateTabIgnored() bool {
 	return c.BrowseActivateTab && !c.EffectiveBrowseActivateTab()
 }
 
-// BrowseActivateTabIgnoredNote is the one sentence status and the load warning share.
-const BrowseActivateTabIgnoredNote = "browse_activate_tab is ignored: it needs browse_cdp_url (a dedicated agent browser), " +
-	"because activating the lane's tab switches the window's active tab and must never happen in the operator's everyday browser"
+// BrowseActivateTabIgnoredNote is the one sentence status and the load warning share. It names the reason
+// that applies: no browse_cdp_url at all, or one the lane refuses (the lane is then unregistered, and the
+// load says so in its own warning).
+func (c Config) BrowseActivateTabIgnoredNote() string {
+	const because = "because activating the lane's tab switches the window's active tab and must never happen in the operator's everyday browser"
+	if c.BrowseCDPURL != "" {
+		return "browse_activate_tab is ignored: browse_cdp_url is set but refused (the lane accepts only http:// or ws:// on a loopback host with a port), " + because
+	}
+	return "browse_activate_tab is ignored: it needs browse_cdp_url (a dedicated agent browser), " + because
+}
 
 // EffectiveBrowseMaxActions is browse_max_actions with 0 meaning the default 30
 // and anything above BrowseMaxActionsCeiling clamped to it.
@@ -2877,7 +2884,13 @@ func warnBrowseBindingsTo(c Config, w io.Writer) {
 		fmt.Fprintf(w, "warning: browse_cdp_url %q is not http:// or ws:// on a loopback host with a port — the lane never attaches to another machine's browser; offload_browse stays unregistered\n", c.BrowseCDPURL)
 	}
 	if c.BrowseActivateTabIgnored() {
-		fmt.Fprintln(w, "warning: "+BrowseActivateTabIgnoredNote+"; the lane runs as before")
+		msg := c.BrowseActivateTabIgnoredNote()
+		if c.BrowseConfigured() {
+			// Only a registered lane (no refused endpoint, no missing binding) goes on running as before; for the
+			// others the warnings above already say offload_browse stays unregistered.
+			msg += "; the lane runs as before"
+		}
+		fmt.Fprintln(w, "warning: "+msg)
 	}
 }
 

@@ -206,6 +206,34 @@ func TestBrowseActivateTabNeedsADedicatedEndpoint(t *testing.T) {
 	if bad.EffectiveBrowseActivateTab() {
 		t.Error("an endpoint the lane refuses must not count as a dedicated endpoint")
 	}
+	if !bad.BrowseActivateTabIgnored() {
+		t.Error("a browse_activate_tab next to a refused endpoint must be reported as ignored, not as honoured or as unset")
+	}
+	if bad.BrowseConfigured() {
+		t.Error("a refused browse_cdp_url leaves the lane unregistered; the ignored report is not what fails it")
+	}
+}
+
+// The ignored sentence names the reason that applies. With no endpoint it says the setting needs one; with an
+// endpoint that IS set but refused, "needs browse_cdp_url" would be wrong (it is set), so it says refused.
+func TestBrowseActivateTabIgnoredNoteNamesTheReason(t *testing.T) {
+	none := browseBound()
+	none.BrowseActivateTab = true
+	if n := none.BrowseActivateTabIgnoredNote(); !strings.Contains(n, "needs browse_cdp_url") || strings.Contains(n, "refused") {
+		t.Errorf("no endpoint set: the note must say the setting needs browse_cdp_url, got %q", n)
+	}
+	bad := browseBound()
+	bad.BrowseActivateTab = true
+	bad.BrowseCDPURL = "http://198.51.100.7:9555" // set, but not loopback
+	n := bad.BrowseActivateTabIgnoredNote()
+	if !strings.Contains(n, "browse_cdp_url is set but refused") || strings.Contains(n, "needs browse_cdp_url") {
+		t.Errorf("a refused endpoint: the note must say it is set but refused, not that it is missing, got %q", n)
+	}
+	for _, c := range []Config{none, bad} {
+		if !strings.Contains(c.BrowseActivateTabIgnoredNote(), "ignored") {
+			t.Errorf("the note must say the setting is ignored, got %q", c.BrowseActivateTabIgnoredNote())
+		}
+	}
 }
 
 func TestBrowseActivateTabLoadsFromJSONAndDefaultsOff(t *testing.T) {
@@ -252,5 +280,33 @@ func TestBrowseActivateTabWarnsOnlyWhenIgnored(t *testing.T) {
 	warnBrowseBindingsTo(c, &buf)
 	if buf.Len() != 0 {
 		t.Errorf("browse_activate_tab false must not warn, got %q", buf.String())
+	}
+}
+
+// The ignored warning only promises "the lane runs as before" when the lane is registered. A refused endpoint
+// (or a half-bound lane) leaves offload_browse unregistered, and the warning beside it says so: a second line
+// that said the lane runs as before would contradict it.
+func TestBrowseActivateTabWarningDoesNotPromiseALaneThatIsNotRegistered(t *testing.T) {
+	warn := func(mutate func(c *Config)) string {
+		var buf bytes.Buffer
+		c := browseBound()
+		c.BrowseActivateTab = true
+		mutate(&c)
+		warnBrowseBindingsTo(c, &buf)
+		return buf.String()
+	}
+	if out := warn(func(c *Config) {}); !strings.Contains(out, "the lane runs as before") {
+		t.Errorf("a registered lane with no endpoint goes on as before, and the warning says so, got %q", out)
+	}
+	refused := warn(func(c *Config) { c.BrowseCDPURL = "http://198.51.100.7:9555" })
+	if !strings.Contains(refused, "browse_cdp_url is set but refused") || !strings.Contains(refused, "offload_browse stays unregistered") {
+		t.Errorf("a refused endpoint must be named as refused next to the unregistered warning, got %q", refused)
+	}
+	if strings.Contains(refused, "runs as before") || strings.Contains(refused, "needs browse_cdp_url") {
+		t.Errorf("a refused endpoint leaves the lane unregistered and is not a missing endpoint, got %q", refused)
+	}
+	halfBound := warn(func(c *Config) { c.BrowseScript = "" })
+	if !strings.Contains(halfBound, "half-bound") || strings.Contains(halfBound, "runs as before") {
+		t.Errorf("a half-bound lane is not running as before, got %q", halfBound)
 	}
 }

@@ -119,4 +119,16 @@ func TestStatusRemoteReportsBrowseActivateTab(t *testing.T) {
 	if _, ok := remote["browse_activate_tab_note"]; ok {
 		t.Error("an effective browse_activate_tab must carry no ignored note")
 	}
+
+	// An endpoint that is set but refused (not loopback) is ignored too, and the note must say refused:
+	// "needs browse_cdp_url" would send the operator looking for a key they already set.
+	cfg.BrowseCDPURL = "http://198.51.100.7:9555"
+	remote = statusRemote(cfg)
+	if remote["browse_activate_tab"] != false {
+		t.Errorf("browse_activate_tab next to a refused endpoint must report false, got %v", remote["browse_activate_tab"])
+	}
+	note, _ = remote["browse_activate_tab_note"].(string)
+	if !strings.Contains(note, "ignored") || !strings.Contains(note, "set but refused") || strings.Contains(note, "needs browse_cdp_url") {
+		t.Errorf("a refused endpoint must be reported as set but refused, got %q", note)
+	}
 }
