@@ -144,7 +144,8 @@ A read that merely succeeds proves nothing — every DRM card reads, the Mali GP
 so does an unreadable candidate. `DetectAllAccelerators` lists the RKNPU **after** the Hailo and the
 Coral (the order is the shared-name rule's), and `install detect` / `install plan` hand it the same
 injected reader as the Coral probe. `OFFLOAD_ACCELERATORS` overrides the probe here as for the other
-devices.
+devices. `setup/detect.ps1` carries no mirror of this probe: the hardware is Linux-only, and
+`install.sh` takes its accelerator list from the Go verdict.
 
 The seeded keys (rknpu):
 
