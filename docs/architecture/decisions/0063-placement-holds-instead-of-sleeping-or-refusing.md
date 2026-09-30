@@ -97,7 +97,9 @@ arithmetic, or an ordering key among seats that already passed the adequacy gate
    open across every concurrent Run, and does not send one that would take a node past its published
    admission ceiling (`max_queue_depth`). The subtask waits in line for the first node that frees. The
    count ends with a terminal answer or with the delegator giving up on the job (a queue deadline, a
-   cancel). A turn-away sends nothing, so it is no refusal and is not counted as a replacement.
+   cancel), and not a moment later: what the delegator then does with a finished answer on its own host
+   (re-packing one the node could not, which can take minutes) is not the node's work and holds no slot
+   on it. A turn-away sends nothing, so it is no refusal and is not counted as a replacement.
 8. **A per-page retry cap.** A research page whose last three issues (the original and two re-issues) all
    failed after a seat ran them is backed off for 15 minutes with a contract-class defer that says so. An
    issue counts as failed only when a seat ran it and produced no verified digest: a failed verification,

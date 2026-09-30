@@ -4126,6 +4126,14 @@ func (r *runner) attempt(ctx context.Context, i int, contract core.AgentContract
 	}
 	defer release()
 	pr := r.runRemote(ctx, base, jobID, dispatched, chosen, runSeat)
+	// The node's part of the job is over: runRemote returns on its terminal answer, on
+	// the delegator giving up on the job, or on a refusal. What finish() does next can be
+	// the delegator's own rescue of the answer (rescue.go), on this box and allowed
+	// minutes; a slot still counted through it would keep an idle node out of every
+	// sibling Run's reach (ADR 0063 decision 7: the count ends with a terminal answer
+	// or with the delegator giving up). The deferred release above stays as the net for
+	// a panic; release is safe to run twice.
+	release()
 	pr.ranBase = base
 	pr.PlacementReason = reason
 	if pr.Node == "" {

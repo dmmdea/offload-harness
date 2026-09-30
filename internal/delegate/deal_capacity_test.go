@@ -351,6 +351,99 @@ func TestProcessGateReleasesOnTerminalAndGiveUp(t *testing.T) {
 	})
 }
 
+// TestProcessGateIsReleasedBeforeTheDelegatorRescuesTheAnswer: the gate counts what a
+// NODE holds for this process, and a node's part of a job ends with its terminal answer.
+// What the delegator does after that - here the re-pack the node could not finish, run
+// on this box by the delegator's own rescue (rescue.go) and allowed minutes - is this
+// box's work, so it must not be counted as an open slot on the node (ADR 0063 decision
+// 7: the count ends with a terminal answer or with the delegator giving up). The
+// previous tests read the gate once Run had returned, which a slot held through that
+// step passes; this one reads it from inside the rescue.
+func TestProcessGateIsReleasedBeforeTheDelegatorRescuesTheAnswer(t *testing.T) {
+	base := rescueNode(t, legacyRepackStall())
+	rs := &rescuer{structured: `{"answer":"42"}`}
+	rescue := rs.fn()
+	var held atomic.Int64
+	held.Store(-1) // -1: the rescue never ran
+	results, _ := runRescued(t, base, rescueContract(), func(ctx context.Context, c core.AgentContract, output string, budget time.Duration) (Rescued, error) {
+		held.Store(int64(processGate.load(base)))
+		return rescue(ctx, c, output, budget)
+	})
+	if rs.calls.Load() != 1 || results[0].Result.Deferred {
+		t.Fatalf("fixture: rescue calls = %d, result = %+v, want one rescue that saved the answer", rs.calls.Load(), results[0].Result)
+	}
+	if got := held.Load(); got != 0 {
+		t.Fatalf("the gate held %d slot(s) on a node whose terminal answer was already in, while the delegator re-packed it", got)
+	}
+	if got := processGate.load(base); got != 0 {
+		t.Fatalf("gate still holds %d slot(s) after the run", got)
+	}
+}
+
+// TestARescuingRunDoesNotHoldASiblingOutOfAnIdleNode: the same defect seen from the next
+// Run in the process. The node admits one job (max_queue_depth 1). Run 1's job is finished
+// on it and Run 1 is re-packing the answer on this box, so the node is idle. A second Run
+// must be dispatched to it at once. With the slot held through the rescue the gate turned
+// the sibling away for its whole placement wait and published a "no node had room" defer
+// for a node that had room all along - the gate that protects a node starving it.
+func TestARescuingRunDoesNotHoldASiblingOutOfAnIdleNode(t *testing.T) {
+	compressPolls(t, 5*time.Millisecond, time.Second)
+	compressWait(t, 20*time.Millisecond, 50*time.Millisecond)
+	var firstJob atomic.Value // the job id Run 1 dispatched
+	node := &fakeNode{
+		t: t, agentEnabled: true, resident: true, ctxTokens: 8192, nodeID: "node-rescuing", maxQueueDepth: 1,
+		onDispatch: func(jobID string, _ core.AgentContract) { firstJob.CompareAndSwap(nil, jobID) },
+		pollByJob: func(jobID string, _ int64) (map[string]any, int) {
+			if jobID == firstJob.Load() { // Run 1's job: a finished answer whose re-pack failed on the node
+				return doneWire(t, legacyRepackStall()), http.StatusOK
+			}
+			return doneWire(t, remoteWire("the sibling's answer", `{"answer":"the sibling's answer"}`)), http.StatusOK
+		},
+	}
+	url := node.server().URL
+
+	inRescue, unpark := make(chan struct{}), make(chan struct{})
+	var entered, unparked sync.Once
+	rescue := func(ctx context.Context, c core.AgentContract, output string, budget time.Duration) (Rescued, error) {
+		entered.Do(func() { close(inRescue) })
+		select { // parked until the sibling has been served, never past the test
+		case <-unpark:
+		case <-ctx.Done():
+		}
+		return Rescued{Structured: []byte(`{"answer":"42"}`), Seat: "local-seat", How: "one re-pack completion"}, nil
+	}
+	cfg1, cfg2, local := testCfg(t), testCfg(t), neverLocal(t)
+	cfg2.AgentPlacementWaitSec = 1 // a turned-away sibling gives up after one second, not the default wait
+	first := make(chan struct{})
+	go func() {
+		defer close(first)
+		_, _, _ = RunWith(t.Context(), cfg1, local, []core.AgentContract{rescueContract()}, "remote", []string{url}, &RunOptions{Rescue: rescue})
+	}()
+	// Whatever ends the test, Run 1 is let go and waited for. t.Context() is already
+	// canceled when a cleanup runs, so even a Run 1 stuck elsewhere unwinds: a fixture
+	// that fails must fail the test, never hang the suite.
+	t.Cleanup(func() {
+		unparked.Do(func() { close(unpark) })
+		<-first
+	})
+	select {
+	case <-inRescue:
+	case <-time.After(10 * time.Second):
+		t.Fatal("fixture: Run 1 never reached its rescue")
+	}
+
+	dispatchedBefore := node.dispatches.Load()
+	results, sum, err := RunWith(t.Context(), cfg2, local, []core.AgentContract{plainContract()}, "remote", []string{url}, nil)
+	if err != nil {
+		t.Fatalf("Run 2: %v", err)
+	}
+	r := results[0]
+	if got := node.dispatches.Load() - dispatchedBefore; got != 1 || sum.Succeeded != 1 {
+		t.Fatalf("the sibling Run made %d dispatch(es) to the idle node while Run 1 re-packed its answer; summary %+v, err %q, reason %.200q; want 1 dispatch and a success",
+			got, sum, r.Err, r.Result.Reason)
+	}
+}
+
 // ---- the per-page retry cap -----------------------------------------------
 
 // pageContract is a research-door digest contract for one page: the door and the
