@@ -50,7 +50,7 @@ func TestSeatDownDeferDoesNotWiden(t *testing.T) {
 		result core.AgentWireResult
 	}{
 		{"the prefix in the wrong class", core.AgentWireResult{Deferred: true, DeferClass: core.DeferClassConfig, Reason: core.SeatDownReason + "x"}},
-		{"a per-run stall (a node older than 0.144)", core.AgentWireResult{Deferred: true, DeferClass: core.DeferClassInfrastructure, Reason: "stalled: the seat's engine did no work for 120s"}},
+		{"a per-run stall (a node without ADR 0066)", core.AgentWireResult{Deferred: true, DeferClass: core.DeferClassInfrastructure, Reason: "stalled: the seat's engine did no work for 120s"}},
 		{"a contended seat", core.AgentWireResult{Deferred: true, DeferClass: core.DeferClassInfrastructure, Reason: "seat contended: 90s of wait budget spent"}},
 		{"a seat that is not serving, from the status-aware wording", core.AgentWireResult{Deferred: true, DeferClass: core.DeferClassInfrastructure, Reason: "seat not serving: llama-swap answered HTTP 500"}},
 		{"the prefix in the middle of a reason", core.AgentWireResult{Deferred: true, DeferClass: core.DeferClassInfrastructure, Reason: "structured re-pack unreachable: " + core.SeatDownReason + "x"}},

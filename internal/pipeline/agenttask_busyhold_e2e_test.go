@@ -123,7 +123,7 @@ func TestRunAgentTaskHoldsARequestWhoseEngineWorksForOthers(t *testing.T) {
 
 // The same silence with an engine that does no work for anyone is a wedged
 // seat: filed as infrastructure, in ~ the allowance plus the flat bound plus the
-// recovery wait (ADR 0066: since 0.144.0 a wedge is a typed seat-down, held for
+// recovery wait (ADR 0066: a wedge is a typed seat-down, held for
 // the cold-load ceiling in case the seat restarts — this one never does), with
 // the engine's silence in the reason.
 func TestRunAgentTaskStallsAWedgedEngine(t *testing.T) {

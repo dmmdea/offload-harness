@@ -1,6 +1,6 @@
 package agent
 
-// The seat-down outcome (ADR 0066, 0.144.0, register C-72).
+// The seat-down outcome (ADR 0066, register C-72).
 //
 // On 2026-09-29 the reference workstation's 3-card flagship engine died ten
 // times. Each death took every run in flight with it as an independent

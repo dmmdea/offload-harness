@@ -104,7 +104,7 @@ func TestNotePrintsTheLoad(t *testing.T) {
 	note = solo.note()
 	solo.mu.Unlock()
 	if note != ": 24000 tok / 400 tok/s x 1.5 + 30s" {
-		t.Fatalf("solo note = %q, want the pre-0.144 arithmetic", note)
+		t.Fatalf("solo note = %q, want the solo arithmetic (unchanged by ADR 0066)", note)
 	}
 }
 

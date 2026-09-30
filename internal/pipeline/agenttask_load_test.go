@@ -143,7 +143,7 @@ func startingSeat(load time.Duration) *agentFake {
 // A run that arrives while the seat is loading waits it out in the admission
 // pre-flight. That wait IS the cold load as far as the run saw it — from the
 // first poll that found the seat starting to the seat reading ready — and it is
-// recorded (0.144.0). Until then the pre-flight's wait was admission time and
+// recorded (ADR 0066). Until then the pre-flight's wait was admission time and
 // nothing else, so a seat whose loads other requests always start fed the
 // store's cold-load figure nothing (agent-pool held 12.4 against real loads of
 // 178-271 s).

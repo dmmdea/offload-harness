@@ -2,7 +2,7 @@ package agent
 
 import "time"
 
-// Load (ADR 0066, register C-66, 0.144.0): how many requests share the seat.
+// Load (ADR 0066, register C-66): how many requests share the seat.
 //
 // The measured prefill rate is the rate of ONE request, and every later stall
 // allowance is sized from it. A seat that batches four requests gives each of

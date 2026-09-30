@@ -99,7 +99,7 @@ func recoveryPolicy(coldLoad time.Duration) StallPolicy {
 	return p
 }
 
-// 0.144.0 (ADR 0066): counters frozen with work outstanding while llama-swap
+// ADR 0066: counters frozen with work outstanding while llama-swap
 // reads the seat ready is the engine WEDGED — the death signature of the
 // 2026-09-29 flagship (a hung pipeline step, then a 120 s RPC timeout). The
 // verdict is a typed seat-down outcome, not a per-run stall: five running
@@ -177,7 +177,7 @@ func TestMonitorSeatGoneInsideAHoldIsSeatDown(t *testing.T) {
 	}
 }
 
-// Recovery (0.144.0): an engine restart under the cold-load hold. AwaitSeat
+// Recovery (ADR 0066): an engine restart under the cold-load hold. AwaitSeat
 // holds the run while llama-swap lists the seat starting and returns when it
 // serves again; the wait is counted.
 func TestAwaitSeatWaitsForARestartThenReturns(t *testing.T) {

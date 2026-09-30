@@ -2316,7 +2316,7 @@ func retryable(pr PlacedResult) bool {
 // terminal — the node reported it, so nothing is still running the contract
 // (the "never re-place after a 202" rule is about jobs whose outcome nobody
 // observed). It matches on the CONSTANT the producer writes, never on prose. A
-// node older than 0.144 never emits it, and keeps emitting `stalled:` for the
+// node without ADR 0066 never emits it, and keeps emitting `stalled:` for the
 // same outage until it is upgraded — for such a node this changes nothing.
 func SeatDownDefer(r core.AgentWireResult) bool {
 	return r.Deferred && r.DeferClass == core.DeferClassInfrastructure &&
