@@ -123,6 +123,13 @@ type ResultWire struct {
 	// caller beside the other wait figures, so a slow answer that was queued
 	// reads as contention, not as a slow seat.
 	QueuedMs int64 `json:"queued_ms,omitempty"`
+	// SeatRecoveries / SeatDownWaitSec (ADR 0066): how many times the run's seat
+	// went down under it and the run waited for the seat and re-issued the failed
+	// step instead of ending, and the wall it spent waiting on a downed seat.
+	// Carried to the caller beside the other wait figures, so a slow answer that
+	// survived a seat restart reads as one, not as a slow seat.
+	SeatRecoveries  int     `json:"seat_recoveries,omitempty"`
+	SeatDownWaitSec float64 `json:"seat_down_wait_sec,omitempty"`
 	// CoherenceNote carries the node's post-warm coherence probe (register
 	// D-118) up to the delegating caller: without it a run that deferred before
 	// its wall started, because the seat was emitting NaN tokens, would reach
@@ -297,6 +304,8 @@ func WireResponse(results []PlacedResult, sum Summary, lints [][]string) Respons
 			AdmissionWaitSec:   pr.Result.AdmissionWaitSec,
 			AdmissionNote:      pr.Result.AdmissionNote,
 			QueuedMs:           pr.Result.QueuedMs,
+			SeatRecoveries:     pr.Result.SeatRecoveries,
+			SeatDownWaitSec:    pr.Result.SeatDownWaitSec,
 			CoherenceNote:      pr.Result.CoherenceNote,
 			RetriedOn:          pr.RetriedOn,
 			RetryNote:          pr.RetryNote,

@@ -155,3 +155,29 @@ func TestRunOneReplacesASeatDownDeferOnAnotherNodeWithCredit(t *testing.T) {
 		t.Fatalf("retry timeout = %d s: the 6 s the node spent waiting on its dead seat were not credited back (want ≈ 34 = the 30 s budget plus the credit, less the first attempt's poll; anything at or under 30 is uncredited)", retry.TimeoutSec)
 	}
 }
+
+// The caller sees what the run survived: seat_recoveries and seat_down_wait_sec
+// reach the published result wire beside queued_ms and the other wait figures.
+func TestResultWireCarriesTheSeatRecoveries(t *testing.T) {
+	compressPolls(t, 5*time.Millisecond, time.Second)
+	w := remoteWire("the answer", `{"answer":"42"}`)
+	w.SeatRecoveries, w.SeatDownWaitSec = 1, 42.5
+	node := &fakeNode{
+		t: t, agentEnabled: true, resident: true, ctxTokens: 8192, nodeID: "fake-node",
+		pollState: func(n int64) (map[string]any, int) { return doneWire(t, w), 200 },
+	}
+	srv := node.server()
+	contract := remoteContract()
+	contract.Acceptance = []string{"nonempty:answer"}
+	results, sum, err := Run(context.Background(), testCfg(t), neverLocal(t), []core.AgentContract{contract}, "remote", []string{srv.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := wireOf(t, results, sum)
+	if v, _ := got["seat_recoveries"].(float64); v != 1 {
+		t.Fatalf("seat_recoveries = %v on the result wire: %v", got["seat_recoveries"], got)
+	}
+	if v, _ := got["seat_down_wait_sec"].(float64); v != 42.5 {
+		t.Fatalf("seat_down_wait_sec = %v on the result wire", got["seat_down_wait_sec"])
+	}
+}

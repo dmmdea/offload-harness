@@ -492,18 +492,20 @@ func TestPhaseUnparksAMonitorWhoseVerdictWasMoot(t *testing.T) {
 
 // seatDownClient answers each call from a script of (completion, error).
 type seatDownClient struct {
-	mu     sync.Mutex
-	script []func() (Completion, error)
-	calls  int
-	seen   [][]Msg
-	max    []int
+	mu      sync.Mutex
+	script  []func() (Completion, error)
+	calls   int
+	seen    [][]Msg
+	max     []int
+	noThink []bool
 }
 
-func (c *seatDownClient) Chat(_ context.Context, msgs []Msg, _ []ToolSpec, maxTokens int) (Completion, error) {
+func (c *seatDownClient) Chat(ctx context.Context, msgs []Msg, _ []ToolSpec, maxTokens int) (Completion, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.seen = append(c.seen, append([]Msg(nil), msgs...))
 	c.max = append(c.max, maxTokens)
+	c.noThink = append(c.noThink, IsThinkingOff(ctx))
 	if c.calls >= len(c.script) {
 		return Completion{}, errors.New("seatDownClient: script exhausted")
 	}
@@ -591,6 +593,56 @@ func TestLoopWithoutARecoveryBudgetReturnsTheTypedErrorAtOnce(t *testing.T) {
 	var sd *SeatDownError
 	if !errors.As(err, &sd) || res.StopReason != "error" || c.calls != 1 || res.SeatRecoveries != 0 {
 		t.Fatalf("err=%v stop=%q calls=%d recoveries=%d, want one call and a typed error", err, res.StopReason, c.calls, res.SeatRecoveries)
+	}
+}
+
+// A step that is itself the empty-final re-issue (thinking off, at the final
+// budget) is re-issued in the SAME mode after a seat recovery: the recovery must
+// not quietly turn it back into an ordinary step.
+func TestLoopSeatDownReissueKeepsTheEmptyFinalReissueMode(t *testing.T) {
+	eng := newDownEngine("gone")
+	empty := func() (Completion, error) {
+		return Completion{Msg: Msg{Role: "assistant"}, FinishReason: "stop"}, nil
+	}
+	c := &seatDownClient{script: []func() (Completion, error){empty, seatDownAt(SeatDownDied), doneCompletion}}
+	ctx, m := NewMonitor(context.Background(), recoveryPolicy(5*time.Second), 30*time.Second)
+	defer m.Stop()
+	m.WithEngineProbe(eng.probe)
+	res, err := NewLoop(c, nil, 3).WithLiveness(m).Run(ctx, "x")
+	if err != nil || res.StopReason != "done" || c.calls != 3 || res.SeatRecoveries != 1 {
+		t.Fatalf("err=%v stop=%q calls=%d recoveries=%d, want empty -> seat down -> done", err, res.StopReason, c.calls, res.SeatRecoveries)
+	}
+	if c.noThink[0] || !c.noThink[1] || !c.noThink[2] {
+		t.Fatalf("thinking off per call = %v, want [false true true]: the recovered call must stay the thinking-off re-issue", c.noThink)
+	}
+	if c.max[1] != c.max[2] || c.max[1] <= c.max[0] {
+		t.Fatalf("budget per call = %v, want the re-issue's final budget kept across the recovery", c.max)
+	}
+}
+
+// The list-cap re-issue of a cut answer opens at the CUT turn's budget (the floor):
+// a seat recovery of that very call must open it there again, not at the smaller
+// fitted final budget the floor exists to override.
+func TestLoopSeatDownReissueKeepsTheListCapBudget(t *testing.T) {
+	eng := newDownEngine("gone")
+	cut := func() (Completion, error) {
+		return Completion{Msg: Msg{Role: "assistant", Content: `{"items":["a","b"`}, FinishReason: "length"}, nil
+	}
+	c := &seatDownClient{script: []func() (Completion, error){cut, seatDownAt(SeatDownDied), doneCompletion}}
+	ctx, m := NewMonitor(context.Background(), recoveryPolicy(5*time.Second), 30*time.Second)
+	defer m.Stop()
+	m.WithEngineProbe(eng.probe)
+	l := NewLoop(c, mkTools("list_dir"), 2).WithMaxTokens(2048).
+		WithCutFinalReissue("cap every list at 8 items", 0).
+		WithFinalBudgetFit(func(configured int, _ time.Duration) (int, string) { return 1024, "fit" }).
+		WithLiveness(m)
+	res, err := l.Run(ctx, "x")
+	if err != nil || res.StopReason != "done" || c.calls != 3 || res.SeatRecoveries != 1 || res.FinalReissue != FinalReissueListCap {
+		t.Fatalf("err=%v stop=%q calls=%d recoveries=%d reissue=%q, want cut -> list-cap re-issue -> seat down -> done",
+			err, res.StopReason, c.calls, res.SeatRecoveries, res.FinalReissue)
+	}
+	if c.max[0] != 2048 || c.max[1] != 2048 || c.max[2] != 2048 {
+		t.Fatalf("budget per call = %v, want the cut turn's 2048 kept on the re-issue AND on its seat recovery (the fitted final budget is 1024)", c.max)
 	}
 }
 
