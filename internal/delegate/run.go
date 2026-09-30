@@ -3723,14 +3723,14 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 	saw404 := false
 	// lastState is the last state the node reported for the job ("" = it never
 	// answered): a give-up asks the node to withdraw a job only while it can still
-	// be unstarted. withdrawTried keeps the queue-deadline arm to one attempt.
+	// be unstarted. ask is the one withdraw this loop's queue-deadline arm may ask
+	// for, and what the node answered when it was not a confirmation: the arm asks
+	// once, and a give-up that follows a `running` answer — a cancel or a deadline
+	// that lands before the next poll has answered, or a node that then says
+	// `accepted` again — reads it instead of asking again, and can still say what
+	// the node was told and what it said.
 	lastState := ""
-	withdrawTried := false
-	// withdrawWhy is what the node answered the one withdraw the queue arm asked for,
-	// when it was not a confirmation: kept so the give-up that follows an answer the
-	// node then contradicted (`running`, and then `accepted` again) can still say what
-	// it was told.
-	withdrawWhy := ""
+	var ask withdrawAsk
 	// pollFails bounds the failure logging (both arms below fired once PER
 	// POLL) and summarizes on the way out, whichever exit is taken.
 	pollFails := newPollFailLog(jobID, base)
@@ -3741,7 +3741,7 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 			// The node may still start it — recovery's case — unless it confirms it
 			// took the job back (ADR 0064). A withdraw that was asked and not confirmed
 			// says why on the row.
-			if note := r.giveUp(ctx, base, jobID, lastState, &pr); note != "" {
+			if note := r.giveUp(ctx, base, jobID, lastState, ask, &pr); note != "" {
 				pr.Err += "; " + note
 			}
 			return pr
@@ -3757,7 +3757,7 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 				// since, and nothing observed it end: the intent must not claim so. Ask the
 				// node to take the job back like every other give-up — a confirmation
 				// closes the intent, anything else leaves it for the recovery pass (ADR 0064).
-				if note := r.giveUp(ctx, base, jobID, lastState, &pr); note != "" {
+				if note := r.giveUp(ctx, base, jobID, lastState, ask, &pr); note != "" {
 					pr.Err += "; " + note
 				}
 				return pr
@@ -3800,7 +3800,7 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 			// still holds the job as `accepted` and confirms it takes it back: a job
 			// that never started must not be run later for nobody (ADR 0064), and the
 			// reason then says what became of it.
-			note := r.giveUp(ctx, base, jobID, lastState, &pr)
+			note := r.giveUp(ctx, base, jobID, lastState, ask, &pr)
 			if pr.withdrawn {
 				reason += "; the job never started and was withdrawn from the node"
 			} else if note != "" {
@@ -4019,9 +4019,9 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 					// for. One try, and one only — a `running` answer is final for
 					// this job.
 					verdict := withdrawUnconfirmed
-					if !withdrawTried {
-						withdrawTried = true
-						verdict, withdrawWhy = r.withdraw(ctx, base, jobID)
+					if !ask.tried {
+						ask.tried = true
+						verdict, ask.why = r.withdraw(ctx, base, jobID)
 					}
 					if verdict != withdrawStarted {
 						pr.Err = fmt.Sprintf("queue deadline after %s: the node accepted the job but never started it — it waited in the node's backlog and never reached running (%d poll(s) answered `accepted`)",
@@ -4037,7 +4037,7 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 							// row says what the node answered instead of taking it back: an old
 							// node with no route and an upgraded node that refused would
 							// otherwise read alike.
-							if note := notConfirmed(withdrawWhy); note != "" {
+							if note := notConfirmed(ask.why); note != "" {
 								pr.Err += "; " + note
 							}
 							pr.orphanable = true
@@ -4046,7 +4046,9 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 					}
 					// `running`: the job left the backlog between the last poll and the
 					// withdraw — a slot took it. It is not abandoned; keep polling and
-					// let liveness govern from here.
+					// let liveness govern from here. The node's answer stays in ask: a
+					// give-up that comes before the next poll reads it, and never asks
+					// again.
 				}
 			}
 			// `running`: the span stays closed by the reset above. Anything
@@ -4076,7 +4078,7 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 			// A give-up like the one at the top of the loop, and it used to skip the
 			// orphanable mark: a cancel that landed while the delegator slept closed
 			// its intent as "terminal observed" for a job the node may still run.
-			if note := r.giveUp(ctx, base, jobID, lastState, &pr); note != "" {
+			if note := r.giveUp(ctx, base, jobID, lastState, ask, &pr); note != "" {
 				pr.Err += "; " + note
 			}
 			return pr

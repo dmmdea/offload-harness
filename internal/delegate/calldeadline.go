@@ -283,7 +283,8 @@ func (r *runner) cutOutcome(pr PlacedResult, quote bool) PlacedResult {
 		// Cancelling the poll leaves the job on its node, where it could start later
 		// on a seat nobody is waiting for. Taking it back is the give-up's business,
 		// not the cut's: runRemote's cancel arms call giveUp (ADR 0064), the ONE
-		// withdraw path. It asks once, never for a job last seen running, and is bounded
+		// withdraw path. It asks once, never for a job last seen running nor for one the
+		// queue deadline already asked about (the node said it had started), and is bounded
 		// by the unwind allowance once the deadline has passed (withdrawBound). Its answer
 		// is already on pr: a confirmation as pr.withdrawn (the job will never run
 		// there), anything else as the clause it appended to the failure, which

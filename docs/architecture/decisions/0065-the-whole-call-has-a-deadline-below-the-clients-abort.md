@@ -112,9 +112,11 @@ measurement of the client.
    other cancel ([ADR 0064](0064-a-delegator-takes-back-what-it-has-not-started.md), decision 3):
    `DELETE /fleet/jobs/{id}` with the fleet bearer, once, detached from the cancelled context, and not for
    a job last seen running (it has started, and the request could only be refused). The deadline adds no
-   request of its own; it reads the answer, so one job is never asked twice. It is a request, not a
-   claim: a node that has not shipped the route answers 404 or 405 and keeps the job (today's
-   behaviour), a job that has already started is not the delegator's to cancel, and what the call
+   request of its own; it reads the answer, so one job is never asked twice. That holds for the queue
+   deadline's own ask too: a job it asked about, and the node answered 409 (it had started), is not asked
+   again by the give-up that follows before the next poll answers, which reads that answer. It is a
+   request, not a claim: a node that has not shipped the route answers 404 or 405 and keeps the job
+   (today's behaviour), a job that has already started is not the delegator's to cancel, and what the call
    publishes depends on the answer only for the words that say what it was. A node that confirms has
    taken the job back for good: the reason says so, and the intent closes as `withdrawn` instead of
    staying open for the recovery pass. Anything else leaves the job where it was, and the reason carries

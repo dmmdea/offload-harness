@@ -161,6 +161,20 @@ func clip(s string, n int) string {
 	return cut
 }
 
+// withdrawAsk is what one poll loop remembers of the withdraw it has already asked for, so
+// that a job is asked about ONCE however the loop ends (ADR 0064 decision 3: the delegator
+// "does not ask again"; ADR 0065 decision 5: "one job is never asked twice"). The queue
+// deadline is the one place the loop asks and then goes on: a node that answers 409 has said
+// the job started, and the loop keeps polling it. Every give-up after that reads the answer
+// here instead of asking again. The zero value is "nobody has asked".
+type withdrawAsk struct {
+	// tried is set when the queue-deadline arm asked. Every answer but withdrawStarted ends
+	// the poll, so a loop still running after the arm asked has been told the job started.
+	tried bool
+	// why is what the node answered, in words (see notConfirmed).
+	why string
+}
+
 // giveUp is the exit the give-ups that RETURN share (a canceled caller, an owned or
 // unowned poll deadline): it asks the node to take an unstarted job back and records
 // the verdict on pr. A confirmed withdrawal settles the intent (the job will never
@@ -171,13 +185,24 @@ func clip(s string, n int) string {
 // answered). A job last seen RUNNING has started, and the request could only be
 // refused, so it is not made.
 //
+// asked is the withdraw the loop's queue-deadline arm has already asked for. The node
+// answered that the job had started, which is newer than lastState (a cancel or a
+// deadline can land before the next poll has answered, and a node that then reports
+// `accepted` again contradicts itself), so the request is not made a second time.
+//
 // It returns the clause the caller appends to its own reason when a withdraw was
-// ASKED and the node did not confirm it (see notConfirmed), and "" when none was
-// asked or the node confirmed.
-func (r *runner) giveUp(ctx context.Context, base, jobID, lastState string, pr *PlacedResult) string {
+// ASKED, by this call or by the queue arm before it, and the node did not confirm it
+// (see notConfirmed), and "" when none was asked or the node confirmed.
+func (r *runner) giveUp(ctx context.Context, base, jobID, lastState string, asked withdrawAsk, pr *PlacedResult) string {
 	if lastState == "running" {
 		pr.orphanable = true
 		return ""
+	}
+	if asked.tried {
+		// The job has started, the node said so when it was asked, and it stays the recovery
+		// pass's. The row says what the node answered, as it does when this call asks for itself.
+		pr.orphanable = true
+		return notConfirmed(asked.why)
 	}
 	outcome, why := r.withdraw(ctx, base, jobID)
 	if outcome == withdrawConfirmed {

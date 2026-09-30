@@ -351,6 +351,48 @@ func TestARunningJobIsNotAskedToWithdrawAtTheCut(t *testing.T) {
 	}
 }
 
+// TestAJobTheQueueDeadlineAskedAboutIsNotAskedAgainAtTheCut: the queue deadline asked the node
+// to take the job back and the node said it had already started (409), so the delegator kept
+// polling it, and the call's deadline passed while the node was still answering. The give-up
+// the deadline then causes has last polled the job `accepted`, but the node's answer is newer,
+// and one job is never asked twice (ADR 0065 decision 5; ADR 0064 decision 3). The node is
+// asked once, the job stays the recovery pass's, and the published reason says what it answered.
+func TestAJobTheQueueDeadlineAskedAboutIsNotAskedAgainAtTheCut(t *testing.T) {
+	widenUnwind(t, 2*time.Second)
+	compressQueueBudget(t) // a 30 s contract queues for about 1.2 s before the queue deadline asks
+	stuck := stuckNode(t, "node-stuck")
+	opts := deadlineIn(3 * time.Second)
+	probe := &withdrawProbe{answer: func(n int64, id string) (int, map[string]any) {
+		if n == 1 {
+			if time.Now().After(opts.Deadline) {
+				t.Errorf("the first withdraw was sent after the call deadline, so it was a give-up's own and not the queue deadline's: this run never reached the state it pins")
+			}
+			time.Sleep(time.Until(opts.Deadline) + 20*time.Millisecond) // the call ends while the node is answering
+		}
+		return http.StatusConflict, map[string]any{"job_id": id, "state": "running", "withdrawn": false}
+	}}
+	url := probe.front(t, stuck.server()).URL
+	cfg := testCfg(t)
+	contract := withdrawContract()
+	contract.TimeoutSec = 30
+
+	results, sum, _ := runWithin(t, 8*time.Second, cfg, neverLocal(t), []core.AgentContract{contract}, "remote", []string{url}, opts, nil)
+
+	if got := probe.deletes.Load(); got != 1 {
+		t.Fatalf("withdraw attempts = %d, want exactly 1: the give-up at the call deadline asked again about a job the node had just said was running", got)
+	}
+	r := results[0]
+	if sum != (Summary{Deferred: 1}) || !r.orphanable || r.withdrawn {
+		t.Fatalf("summary %+v orphanable %v withdrawn %v, want the ordinary cut, the job left for recovery", sum, r.orphanable, r.withdrawn)
+	}
+	if !strings.HasPrefix(r.Result.Reason, deadlinePrefix+"1 unfinished") || !strings.Contains(r.Result.Reason, "it was not taken back from the node") || !strings.Contains(r.Result.Reason, "HTTP 409") {
+		t.Fatalf("reason = %q, want the call-deadline defer saying the job was not taken back and what the node answered", r.Result.Reason)
+	}
+	if _, open := intentNotes(t, cfg.StateDir); !open[r.JobID] {
+		t.Fatal("the intent of a job that is running was closed")
+	}
+}
+
 // TestTheCutKeepsWhatTheNodeSaidAboutTheJob: the node's own word that a job will never run —
 // a confirmed withdrawal, or its record of a job it never ran (reaped, withdrawn) — is what the
 // give-up recorded by clearing orphanable, and the cut must not overwrite it. Any other outcome

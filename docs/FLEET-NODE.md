@@ -917,8 +917,12 @@ has passed, no more than three quarters of its unwind allowance), where it gives
 | a poll answered `401` | not asked: the request would carry the token that was just refused | not asked | the intent stays open for recovery, so a process holding the right token can still collect the job |
 
 A job the delegator last saw `running` is not asked at all: it has started, and the request could only
-be refused. A node that predates the route answers `405` (its job route is GET-only) or `404`, which is
-"no withdraw here": every give-up then behaves exactly as it did.
+be refused. Nor is a job the queue deadline already asked about and the node answered `409`: a give-up
+that comes before the next poll has answered (a cancel, the whole-call deadline, a poll deadline) reads
+that `409` instead of asking again, and its row ends `; withdraw not confirmed: HTTP 409: the node said
+the job had already started`, as it does when the give-up asks for itself. A node that predates the route
+answers `405` (its job route is GET-only) or `404`, which is "no withdraw here": every give-up then
+behaves exactly as it did.
 
 `<why>` says what the node answered instead of taking the job back, so an old node and an upgraded one
 that refused stop reading alike: `HTTP 405: the node has no withdraw route (an older node)`, `HTTP 404: the

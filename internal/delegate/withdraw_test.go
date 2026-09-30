@@ -667,6 +667,95 @@ func TestRunWithdrawAnswerRunningButNodeStaysAcceptedGivesUpOnce(t *testing.T) {
 	}
 }
 
+// TestRunWithdrawAnswerRunningThenACancelDoesNotAskAgain: the queue deadline asked and the
+// node said the job had already started (409), so the delegator keeps polling it. A cancel
+// that lands before the next poll has answered finds the last polled state still `accepted`,
+// but the node's own answer is newer, and a job is asked about once (ADR 0064 decision 3:
+// "does not ask again"; ADR 0065 decision 5: "one job is never asked twice"). The cancel's
+// give-up reads that answer instead of asking again: one request in all, the intent left open
+// (the job is running), and the row says what the node said, as it does when the give-up asks
+// for itself. The cancel is sent from inside the node's answer, so it is the next thing the
+// loop meets, whichever exit of the loop takes it.
+func TestRunWithdrawAnswerRunningThenACancelDoesNotAskAgain(t *testing.T) {
+	compressQueueBudget(t)
+	stuck := stuckNode(t, "node-stuck")
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	probe := &withdrawProbe{answer: func(_ int64, id string) (int, map[string]any) {
+		cancel() // the caller goes away as the node answers
+		return http.StatusConflict, map[string]any{"job_id": id, "state": "running", "withdrawn": false}
+	}}
+	url := probe.front(t, stuck.server()).URL
+	cfg := testCfg(t)
+	contract := withdrawContract()
+	contract.TimeoutSec = 30
+	results, _, err := Run(ctx, cfg, neverLocal(t), []core.AgentContract{contract}, "remote", []string{url})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	r := results[0]
+	if !strings.HasPrefix(r.Err, "canceled") {
+		t.Fatalf("err = %q, want a canceled result", r.Err)
+	}
+	if got := probe.deletes.Load(); got != 1 {
+		t.Fatalf("withdraw attempts = %d, want exactly 1: the cancel's give-up asked again about a job the node had just said was running", got)
+	}
+	if !strings.Contains(r.Err, "; withdraw not confirmed: HTTP 409: the node said the job had already started") {
+		t.Fatalf("err = %q, want the node's own 409 answer named", r.Err)
+	}
+	jobID, _ := stuck.lastJobID.Load().(string)
+	if closed, open := intentNotes(t, cfg.StateDir); !open[jobID] || closed[jobID] != "" {
+		t.Fatalf("intent closed as %q (open=%v), want it left open: the job is running and may still finish", closed[jobID], open)
+	}
+}
+
+// TestGiveUpDoesNotAskAJobTheLoopAlreadyAskedAboutOrSawRunning pins the one place a give-up
+// decides whether to make the request, which every exit of the poll loop goes through (the
+// cancel at the top of the loop and in its sleep, the owned and the unowned poll deadline). A job
+// last seen `running` has started, and so has one the queue deadline already asked about and
+// the node answered 409: neither is asked. The intent stays open for recovery, and a give-up
+// that reads the earlier answer says what the node said, as one that asked for itself does. A
+// job that is neither is asked once, and only a confirmation settles it.
+func TestGiveUpDoesNotAskAJobTheLoopAlreadyAskedAboutOrSawRunning(t *testing.T) {
+	const started = "HTTP 409: the node said the job had already started"
+	alreadyStarted := func(_ int64, id string) (int, map[string]any) {
+		return http.StatusConflict, map[string]any{"job_id": id, "state": "running", "withdrawn": false}
+	}
+	for _, tc := range []struct {
+		name          string
+		lastState     string
+		asked         withdrawAsk
+		answer        func(int64, string) (int, map[string]any)
+		wantRequests  int64
+		wantWithdrawn bool
+		wantNote      string
+	}{
+		{"last seen accepted: asked, and a confirmation settles it", "accepted", withdrawAsk{}, confirmsWithdrawal, 1, true, ""},
+		{"never answered a poll: asked", "", withdrawAsk{}, confirmsWithdrawal, 1, true, ""},
+		{"last seen accepted: asked, and the node says it started", "accepted", withdrawAsk{}, alreadyStarted, 1, false, "withdraw not confirmed: " + started},
+		{"last seen running: not asked", "running", withdrawAsk{}, confirmsWithdrawal, 0, false, ""},
+		{"the queue deadline asked and the node said it started: not asked again", "accepted", withdrawAsk{tried: true, why: started}, confirmsWithdrawal, 0, false, "withdraw not confirmed: " + started},
+		{"the queue deadline asked, then a poll saw it running: not asked", "running", withdrawAsk{tried: true, why: started}, confirmsWithdrawal, 0, false, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			probe := &withdrawProbe{answer: tc.answer}
+			url := probe.front(t, stuckNode(t, "node-stuck").server()).URL
+			r := &runner{cfg: testCfg(t)}
+			var pr PlacedResult
+			note := r.giveUp(t.Context(), url, "agd-x", tc.lastState, tc.asked, &pr)
+			if got := probe.deletes.Load(); got != tc.wantRequests {
+				t.Fatalf("%d withdraw request(s) sent, want %d", got, tc.wantRequests)
+			}
+			if pr.withdrawn != tc.wantWithdrawn || pr.orphanable == tc.wantWithdrawn {
+				t.Fatalf("withdrawn %v orphanable %v, want withdrawn %v and the intent open exactly when nothing was confirmed", pr.withdrawn, pr.orphanable, tc.wantWithdrawn)
+			}
+			if note != tc.wantNote {
+				t.Fatalf("note = %q, want %q", note, tc.wantNote)
+			}
+		})
+	}
+}
+
 // TestRunWithdrawnQueueWaitIsCreditedBackToTheReplacement: a job that waited out
 // most of its contract's budget in a node's backlog and was then taken back has
 // spent that time QUEUED, not working — the same rule as the credit inside one
