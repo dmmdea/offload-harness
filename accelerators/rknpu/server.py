@@ -21,17 +21,21 @@ every sysfs/debugfs read below degrades to null where a node is absent):
     load_rknn / init_runtime return non-zero and inference returns None, so every call is checked.
   * Inputs are ALWAYS 4-D NHWC uint8 (a 3-D array is refused by the runtime); normalisation is compiled
     into the model. Outputs arrive as float32 whatever the model's quantisation.
-  * ONE model resident: an NPU context holds one model's weights, so switching releases the old context
-    before the new one loads; the idle exit releases it too. ONE lock, one in-flight NPU call.
+  * ONE model resident, released before the next one loads and again at the idle exit, so the footprint
+    is one model and the box's own workload keeps its memory (process RSS 113 MB with yolov8n resident,
+    259 MB with CLIP and 471 MB at its peak while CLIP loads; a model switch costs about 0.3 s for resnet18
+    and yolov8n and 1.2-1.8 s for CLIP). ONE lock, one in-flight NPU call. load_rknn also keeps the whole
+    file in Python memory; it is dropped once init_runtime has copied it into the context (CLIP: 179 MB).
   * The wheel does not honour LD_LIBRARY_PATH for its own runtime: RKNNRuntime._get_rknn_api_lib_path
     probes os.path.exists on exactly /usr/lib/librknn_runtime.so, /usr/lib64/librknn_runtime.so and
-    /usr/lib/librknnrt.so (in that order; LIBRKNNRT_PATH is a baked constant, not an environment
-    variable), then calls CDLL on the path it found, and otherwise fails init_runtime with "Can not find
-    dynamic library". RKNPU_RUNTIME_LIB (the launcher sets it to <home>/lib/librknnrt.so) is honoured by
-    _runtime_lib_shim: around init_runtime only, that one path is reported present and the wheel's CDLL
-    is redirected to the private copy, so nothing has to be installed under /usr/lib.
+    /usr/lib/librknnrt.so, then calls CDLL on the path it found, and otherwise fails init_runtime with
+    "Can not find dynamic library" (measured: LD_LIBRARY_PATH set, or the module's LIBRKNNRT_PATH constant
+    changed, makes no difference). RKNPU_RUNTIME_LIB (the launcher sets it to <home>/lib/librknnrt.so) is
+    honoured by _runtime_lib_shim: around init_runtime only, that one path is reported present and the
+    wheel's CDLL is redirected to the private copy, so nothing has to be installed under /usr/lib.
   * The sidecar READS sysfs (the npu-thermal zone, /sys/module/rknpu/version) and debugfs
-    (/sys/kernel/debug/rknpu/load, root only, reported as null when unreadable); it never writes either.
+    (/sys/kernel/debug/rknpu/load: readable by any user on the reference board, usually root-only elsewhere,
+    and reported as null when unreadable); it never writes either.
 
 Refusals: binds loopback only (a non-loopback RKNPU_BIND is refused at startup); serves only files
 listed in models.json whose sha256 matches — model files and their label files alike (an unlisted or
