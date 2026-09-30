@@ -11,6 +11,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/dmmdea/offload-harness/internal/fleetnode"
 )
 
 // TestRecoverOrphansDoesNotCloseAnIntentOn401: a 401 at recovery is a statement
@@ -127,11 +129,17 @@ func TestIntentEventsCarryTimestampAndPid(t *testing.T) {
 // envelope is filed under delegate-recovered/ and it is not counted among the
 // results the pass recovered. A terminal error that IS a real outcome
 // ("interrupted") is still filed, exactly as before.
+//
+// The node has THREE routes to a job that never ran — withdrawn, reaped, and marked
+// never-started when it shut down with the job still queued — and its own Withdraw
+// treats them as one fact, so the delegator that reads them must too: the third was
+// the one recovery still reported as a recovery it had not made.
 func TestRecoverOrphansClosesAJobTheNodeNeverRan(t *testing.T) {
 	cfg, root := intentCfg(t)
 	errs := map[string]string{
 		"agd-reaped":    "reaped: nothing polled this accepted job within the poll lease, so it never started",
 		"agd-withdrawn": "withdrawn: its delegator gave the job up before it started",
+		"agd-drained":   fleetnode.ErrNeverStarted, // the node's own text, not a copy of it
 		"agd-interrupt": "interrupted",
 	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -155,7 +163,7 @@ func TestRecoverOrphansClosesAJobTheNodeNeverRan(t *testing.T) {
 	if n != 1 {
 		t.Fatalf("recovered = %d, want 1: only the real outcome (interrupted) is a result to file", n)
 	}
-	for _, id := range []string{"agd-reaped", "agd-withdrawn"} {
+	for _, id := range []string{"agd-reaped", "agd-withdrawn", "agd-drained"} {
 		if _, serr := os.Stat(filepath.Join(root, "delegate-recovered", id+".json")); serr == nil {
 			t.Errorf("an envelope was filed for %s: a job that never ran has no result to recover", id)
 		}
@@ -172,7 +180,7 @@ func TestRecoverOrphansClosesAJobTheNodeNeverRan(t *testing.T) {
 			notes[ev.Job] = ev.Note
 		}
 	}
-	for _, id := range []string{"agd-reaped", "agd-withdrawn"} {
+	for _, id := range []string{"agd-reaped", "agd-withdrawn", "agd-drained"} {
 		if !strings.HasPrefix(notes[id], "never started") {
 			t.Errorf("%s closed as %q, want a note starting %q", id, notes[id], "never started")
 		}

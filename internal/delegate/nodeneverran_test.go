@@ -44,6 +44,7 @@ func TestRunAJobTheNodeNeverRanIsReplacedNotReportedAsARemoteError(t *testing.T)
 	}{
 		{"reaped", fleetnode.ErrReaped, true},
 		{"withdrawn", fleetnode.ErrWithdrawn, true},
+		{"never started (the node shut down with it queued)", fleetnode.ErrNeverStarted, true},
 		{"a job that ran and failed", "the seat exploded", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

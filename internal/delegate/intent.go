@@ -22,8 +22,9 @@
 // could not say which process closed a job, or when. The close notes in use:
 // "terminal observed" (this process saw the job end), "withdrawn" (the node
 // confirmed the job was taken back before it started), "never started: …" (the
-// node's own terminal record says it never ran the job, reaped or withdrawn,
-// read by a live poll or by the recovery pass), "recovered to …" (the
+// node's own terminal record says it never ran the job — reaped, withdrawn, or
+// marked never-started when the node shut down with it queued — read by a live
+// poll or by the recovery pass), "recovered to …" (the
 // recovery pass filed the result), "node no longer holds the job …", and
 // "expired unrecovered after …".
 //
@@ -92,10 +93,12 @@ const (
 
 // neverRanPrefixes are the stable prefixes of the terminal errors a fleet node
 // gives a job it took out of its backlog WITHOUT running it: a delegator withdrew
-// it, or nobody polled it for the poll lease (fleetnode.ErrWithdrawn,
-// fleetnode.ErrReaped; withdraw_e2e_test.go pins the pairing against the node's
-// own constants). Nothing ran, so there is no result for the recovery pass to file.
-var neverRanPrefixes = []string{"withdrawn:", "reaped:"}
+// it, nobody polled it for the poll lease, or the node shut down while it was still
+// queued (fleetnode.ErrWithdrawn, fleetnode.ErrReaped, fleetnode.ErrNeverStarted;
+// withdraw_e2e_test.go pins the pairing against the node's own constants — the node's
+// Withdraw treats the three as one fact, and so does this). Nothing ran, so there is
+// no result for the recovery pass to file.
+var neverRanPrefixes = []string{"withdrawn:", "reaped:", "not started:"}
 
 // neverRan reports whether a terminal job error says the node never ran the job.
 func neverRan(jobErr string) bool {
