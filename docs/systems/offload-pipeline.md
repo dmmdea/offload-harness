@@ -132,6 +132,14 @@ answers "is this good enough, and if not, is it worth trying a bigger model?"
 - **Grounding.** Extract output whose values do not appear in the source escalates. Grounding is
   *computed and logged* for other tasks but only *actioned* for extract — summarization paraphrases
   legitimately, so acting on it would be noise.
+  The check is verbatim for text and by value for numbers. A string is grounded as a phrase of the
+  source (case and spacing ignored). A number is compared as a value, never as text: a JSON number is
+  grounded iff the source writes that value in either locale, so `2.354,40`, `2,354.40` and `2354.4` are
+  one amount, and a lone separator followed by exactly three digits (`1,234`) counts as both 1234 and
+  1.234. It is never grounded because its digits sit inside another number (`0` against `4200`), and a
+  sign is not checked (magnitudes are compared). Comparison is exact (no tolerance), and a long digit string
+  (16+) is an identifier compared digit for digit. A two-part token such as `3.1` is a decimal only. A string that is not a phrase of the source is grounded
+  when every number in it is a value the source writes and its identifier-like words (`ABC-42`) are the source's; summaries follow the same number rule.
 - **Confidence gate.** For classify, a self-reported confidence below `classify_min_confidence`
   (default **0.88**) escalates. For decision tasks, a logprob decision margin below the task's
   threshold escalates — a learned per-task conformal value when one exists, otherwise
@@ -428,7 +436,17 @@ than compiled in.
    the llama-swap roster) — because vLLM accepts and DISCARDS the `grammar` field; never
    `--json-schema` or `response_format` — see
    [ADR 0002](../architecture/decisions/0002-grammar-reliable-serving-flags.md) and its 2026-09-18
-   amendment (register D-129).
+   amendment (register D-129). A seat whose runtime cannot constrain decoding at all (the RKLLM runtime on
+   an RK3588 NPU: HTTP 400 `constrained_decoding_unsupported` to any grammar or schema, logprobs ignored)
+   is declared in `unconstrained_seats`, written by the tier's `rkllm` media seat. For it the pipeline sends
+   NO grammar, NO schema and NO logprobs request, states the exact JSON shape in the system prompt
+   (`tasks.Built.ForUnconstrained`; the prompt of every other seat is byte-identical), parses the reply
+   leniently (fences and leading prose stripped) and accepts it only after strict validation against the
+   schema the grammar would have enforced: every key present, types right, the classify label in the allowed
+   set, no extra key. A failure takes the correction retry, then defers naming what failed; grounding and
+   classify's self-reported confidence gate still apply, and the decision-margin gate is inert there (it
+   needs logprobs). summarize and triage run the same validated path locally and are never admitted on the
+   fleet text lane. See [ADR 0069](../architecture/decisions/0069-an-unconstrained-seat-runs-classify-and-extract-from-the-prompt-and-the-text-lane-ships-dark.md).
 3. The recordless path writes nothing — no ledger, no cache, no shadow capture.
 4. Infrastructure failures do not escalate.
 5. The reasoning Tier never fabricates a pass: garbage from it still defers.
@@ -565,11 +583,15 @@ routing solver and the guard's reading and staleness rules. `internal/grounding/
 
 - **Treating a defer as a bug.** It is the designed outcome when confidence is low.
 - **Expecting grounding to gate summaries.** It is logged for summaries, actioned only for extract.
+- **Reading "ungrounded" as text mismatch on a number.** Numbers are compared by value across locales, so a
+  number the source writes as `2.354,40` is grounded by 2354.4; an ungrounded number is one the source never writes.
 - Assuming escalation happens on any failure — infrastructure failures deliberately do not escalate.
 - Assuming `Reasoning` implies a different model. Under the shipped default it is the same model
   as the escalation Tier (they differ only if the config binds them apart, as the ≥16GB matrix
   recommendation does); the flag is what tells them apart.
 - Reading logprobs under an active grammar as if they were unconstrained. They are pre-mask.
+- Expecting a margin escalation from an unconstrained seat. No logprobs come back, so no margin is recorded and
+  only strict validation, grounding and classify's self-reported confidence can send its answer up.
 
 ## Source map
 
