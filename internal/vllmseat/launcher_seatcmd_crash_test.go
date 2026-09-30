@@ -27,8 +27,9 @@ const stopMarker = "seat-stop-requested-pp3"
 // or never seen Running at all (a Task Scheduler slow to start it). Its last result (what seat_stop.sh exited with, which
 // wscript hands to the task) is 0, or 1 in "stop-task-incomplete", or unreadable in "stop-result-unreadable". Scenario
 // "after-cmdstop" is a stop that llama-swap asked for: seat-cmdstop.ps1 is another process, so its marker appears in the
-// middle of the stub's polling, at the first /health the seat fails to answer. "cmdstop" and "cmdstop-marker-unwritable"
-// run seat-cmdstop.ps1 itself against a seat that stops answering at once.
+// middle of the stub's polling, at the first /health the seat fails to answer. "cmdstop", "cmdstop-marker-unwritable" (a
+// directory in the way: a terminating failure) and "cmdstop-marker-nonterminating" (what the real cmdlet raises for a missing
+// directory) run seat-cmdstop.ps1 itself against a seat that stops answering at once.
 const seatCmdDriver = `param([string]$Stub, [string]$Scenario, [string]$Calls, [string]$Marker, [double]$ReadCost = 1.2)
 $ErrorActionPreference = 'Continue'
 $global:Scn = $Scenario
@@ -55,6 +56,14 @@ function Start-ScheduledTask {
     $global:StopReads = 0
     Note "stop-started-at $(Secs)"
   }
+}
+# The real Set-Content raises a NON-terminating error only when the directory is missing (a directory in the way, a locked or
+# a read-only file raise terminating ones, measured on Windows PowerShell 5.1 and 7), so a caller that dropped
+# -ErrorAction Stop sails on with no catch. Scenario "cmdstop-marker-nonterminating" is that failure.
+function Set-Content {
+  [CmdletBinding()] param([string]$Path, [string]$LiteralPath, $Value)
+  if ($global:Scn -eq 'cmdstop-marker-nonterminating') { Write-Error 'Could not find a part of the path.'; return }
+  if ($LiteralPath) { Microsoft.PowerShell.Management\Set-Content -LiteralPath $LiteralPath -Value $Value } else { Microsoft.PowerShell.Management\Set-Content -Path $Path -Value $Value }
 }
 function Get-ScheduledTaskInfo {
   [CmdletBinding()] param([string]$TaskName)
@@ -436,6 +445,17 @@ func TestSeatCmdStopMarksAnUnloadForTheStub(t *testing.T) {
 				}
 				if !strings.Contains(r.Log, "stop requested") || !strings.Contains(r.Log, "seat stopped") {
 					t.Errorf("cmdStop's log lost its lines:\n%s", r.Log)
+				}
+			})
+			t.Run("a marker write that fails without raising is still said, and the stop goes on", func(t *testing.T) {
+				// The real Set-Content raises a non-terminating error for a missing directory, so only -ErrorAction Stop makes
+				// the stub's catch fire; the directory-in-the-way case below raises a terminating one and cannot tell.
+				r := runStub(t, host, "seat-cmdstop.ps1", "cmdstop-marker-nonterminating", defaultReadCost, nil)
+				if countLines(r.Calls, "start-task vllm-seat-stop-pp3") != 1 || !strings.HasSuffix(strings.TrimSpace(r.Calls), "exit=0") || !strings.Contains(r.Log, "seat stopped") {
+					t.Fatalf("a marker that cannot be written must not change the stop or its exit:\ncalls:\n%s\nlog:\n%s", r.Calls, r.Log)
+				}
+				if !strings.Contains(r.Log, "could not leave the stop marker") {
+					t.Fatalf("a marker write that fails without raising must still be said (is -ErrorAction Stop gone?):\n%s", r.Log)
 				}
 			})
 			t.Run("a marker that cannot be written does not stop the stop", func(t *testing.T) {
