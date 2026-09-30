@@ -221,14 +221,33 @@ func (e *StallError) Error() string {
 }
 
 // CeilingError: the run was still producing when the safety ceiling passed.
-// Filed as a BUDGET defer — the sizing signal the delegator learns from.
+// Filed as a BUDGET defer — the sizing signal the delegator learns from —
+// unless the run spent its time held behind other requests' work (ADR 0061):
+// then it was not served, a larger budget would not help, and it is capacity
+// (Held reports it; the pipeline files the class).
 type CeilingError struct {
 	Elapsed time.Duration
 	Tokens  int
 	TokS    float64
+	// Queued is the time the run spent in the busy hold; InHold is whether it
+	// was still held when the ceiling passed.
+	Queued time.Duration
+	InHold bool
+}
+
+// Held reports that the ceiling found a run that was waiting for the seat,
+// not working: held when the ceiling passed, or held for at least half of its
+// time (the same half-the-wall rule contention.CausedTimeout applies to peer
+// waits).
+func (e *CeilingError) Held() bool {
+	return e.InHold || (e.Elapsed > 0 && e.Queued*2 >= e.Elapsed)
 }
 
 func (e *CeilingError) Error() string {
+	if e.Held() {
+		return fmt.Sprintf("ceiling %.0fs reached while held behind the seat's other work (%.0fs in the busy hold; %d tok produced)",
+			e.Elapsed.Seconds(), e.Queued.Seconds(), e.Tokens)
+	}
 	return fmt.Sprintf("ceiling %.0fs reached while producing (%d tok at %.1f tok/s)", e.Elapsed.Seconds(), e.Tokens, e.TokS)
 }
 
@@ -353,7 +372,13 @@ func (m *Monitor) onCeiling() {
 	if m.stopped || m.cause != nil {
 		return
 	}
-	m.cause = &CeilingError{Elapsed: time.Since(m.start), Tokens: m.tokens + m.callTok, TokS: m.ewma}
+	now := time.Now()
+	queued := m.queuedTotal
+	inHold := m.phase == PhaseQueued && !m.busyClosed
+	if inHold {
+		queued += now.Sub(m.busySince)
+	}
+	m.cause = &CeilingError{Elapsed: now.Sub(m.start), Tokens: m.tokens + m.callTok, TokS: m.ewma, Queued: queued, InHold: inHold}
 	m.cancel(m.cause)
 }
 

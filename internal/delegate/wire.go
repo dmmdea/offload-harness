@@ -118,6 +118,11 @@ type ResultWire struct {
 	ContentionWaitSec float64 `json:"contention_wait_sec,omitempty"`
 	AdmissionWaitSec  float64 `json:"admission_wait_sec,omitempty"`
 	AdmissionNote     string  `json:"admission_note,omitempty"`
+	// QueuedMs is the wall the run spent in the busy hold (ADR 0061): waiting
+	// on a seat whose engine was working for other requests. Carried to the
+	// caller beside the other wait figures, so a slow answer that was queued
+	// reads as contention, not as a slow seat.
+	QueuedMs int64 `json:"queued_ms,omitempty"`
 	// CoherenceNote carries the node's post-warm coherence probe (register
 	// D-118) up to the delegating caller: without it a run that deferred before
 	// its wall started, because the seat was emitting NaN tokens, would reach
@@ -291,6 +296,7 @@ func WireResponse(results []PlacedResult, sum Summary, lints [][]string) Respons
 			ContentionWaitSec:  pr.Result.ContentionWaitSec,
 			AdmissionWaitSec:   pr.Result.AdmissionWaitSec,
 			AdmissionNote:      pr.Result.AdmissionNote,
+			QueuedMs:           pr.Result.QueuedMs,
 			CoherenceNote:      pr.Result.CoherenceNote,
 			RetriedOn:          pr.RetriedOn,
 			RetryNote:          pr.RetryNote,

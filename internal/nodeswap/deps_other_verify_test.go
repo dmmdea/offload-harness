@@ -131,6 +131,9 @@ func TestPlatformDepsWireAVerificationFinderOffWindows(t *testing.T) {
 	if d.FindRunningByExe == nil {
 		t.Fatal("platformDeps must set FindRunningByExe off Windows: verification after a restart cannot find the node otherwise")
 	}
+	if _, err := os.Stat("/proc/self/exe"); err != nil {
+		t.Skip("no /proc on this OS (darwin/BSD): the fleet's Linux nodes are the target")
+	}
 	self, err := os.Executable()
 	if err != nil {
 		t.Skip("os.Executable unavailable")

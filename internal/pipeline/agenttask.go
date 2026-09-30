@@ -994,7 +994,7 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 				r, _ := contendedReason(seat, contention)
 				return deferWire(core.DeferClassInfrastructure, r+"; the wall expired during the wait")
 			}
-			return deferWire(core.DeferClassBudget, ceilingReason(live, timeoutSec))
+			return deferWire(ceilingClass(live), ceilingReason(live, timeoutSec))
 		}
 		if errors.Is(cctx.Err(), context.Canceled) {
 			// The PARENT went away mid-loop — the same shape the re-pack branch
@@ -1183,7 +1183,7 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 				r, _ := contendedReason(seat, contention)
 				return deferWire(core.DeferClassInfrastructure, "structured re-pack unreachable: "+r+"; the wall expired during the wait")
 			}
-			return deferWire(core.DeferClassBudget, ceilingReason(live, timeoutSec))
+			return deferWire(ceilingClass(live), ceilingReason(live, timeoutSec))
 		case stallOf(live) != nil:
 			// The seat stopped producing DURING the re-pack (0.131.0): the
 			// seat's health, not the schema's — same class as the loop arm.

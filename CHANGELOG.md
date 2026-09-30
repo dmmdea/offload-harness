@@ -37,9 +37,12 @@ counts; `next_token` read as the array current builds return). Request gauges an
   one poll as the run's allowance, anchored at that read, so the delegator keeps polling a held remote run
   while the engine is seen working — and gives a node that stops re-publishing up one allowance plus grace
   later, never at the ceiling.
-- `queued_ms` reports the wall a run spent held up to the engine's last movement, on the wire, both ledger
-  rows and the call meta. A held run no longer feeds the seat's single-stream rates, which size every later
-  allowance.
+- `queued_ms` reports the wall a run spent held up to the engine's last movement, on the wire, the caller's
+  result, both ledger rows and the call meta. A held run no longer feeds the seat's single-stream rates, which
+  size every later allowance.
+- A run whose ceiling passes while it is held behind the seat's other work (held at the ceiling, or held for
+  at least half its time) is a CAPACITY defer that says so, not a budget defer "while producing (0 tok)": a
+  larger budget would not have helped, and a budget class inflates the delegator's contract sizing.
 
 ### Fixed — local seat-cap waiters no longer block each other (C-60)
 
@@ -76,6 +79,12 @@ cannot be ruled out is an error, never "no node"). `windows-node-swap-launch.ps1
 line into a terminating error and read the build as unsupported — the launcher then ran the OLD installed
 engine; the probe now runs under a function-local `'Continue'`, and the launcher's JSON reports
 `runner_exe`, `runner_fell_back` and the probe's evidence so a deploy can fail on a fallback.
+
+### Fixed — `gpulease.Lease.Release` is safe to call concurrently
+
+`Release`, `Check` and `Restamp` read and wrote the lease's released flag unsynchronized; a holder's deferred
+release beside a cleanup path raced on it (`go test -race`, reproduced on the previous release). The flag is
+atomic and exactly one caller releases.
 
 ### Fixed — a crashed vLLM seat restarts instead of refusing on its own stale MP server
 

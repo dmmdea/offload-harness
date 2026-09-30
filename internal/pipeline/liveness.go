@@ -254,6 +254,18 @@ func ceilingOf(m *agent.Monitor) *agent.CeilingError {
 	return nil
 }
 
+// ceilingClass is the defer class for a run whose deadline passed: BUDGET —
+// the sizing signal the delegator learns from — unless the monitor's ceiling
+// found the run held behind the seat's other work (ADR 0061). That run was not
+// served; a larger budget would not help and would inflate the delegator's
+// contract sizing, so it is CAPACITY: not this contract's turn, re-placeable.
+func ceilingClass(m *agent.Monitor) string {
+	if ce := ceilingOf(m); ce != nil && ce.Held() {
+		return core.DeferClassCapacity
+	}
+	return core.DeferClassBudget
+}
+
 // ceilingReason is the budget-defer text when the run's deadline passed: the
 // ceiling's own arithmetic when the monitor filed one, else the parent's
 // deadline (the delegator's, never this node's) in the pre-0.131.0 words.
