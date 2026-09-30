@@ -454,6 +454,11 @@ func (r *runner) emitPair(ev pairworkloads.Event) {
 	r.pairMu.RLock()
 	defer r.pairMu.RUnlock()
 	if r.pairShut {
+		// Dropped by design, but not silently: PAIR's card for this job stays as it was
+		// until PAIR's own staleness sweep, and nobody would otherwise know why.
+		r.pairLate.Do(func() {
+			log.Printf("delegate: a PAIR frame for job %s was dropped: an abandoned subtask reported after the call had returned; its card stays as it was until PAIR's own staleness sweep (results unaffected; further drops in this run are not logged)", ev.JobID)
+		})
 		return
 	}
 	r.pair.Emit(ev)
@@ -499,17 +504,30 @@ func (r *runner) unlaunched(contract core.AgentContract) PlacedResult {
 	return pr
 }
 
-// abandoned is the published result of a subtask whose goroutine had not returned
+// abandoned is the published result of subtask i, whose goroutine had not returned
 // when the unwind allowance ran out — a seat stuck somewhere that never looks at
-// its context. The goroutine keeps its own telemetry and its late answer is
-// dropped by the closed board.
-func (r *runner) abandoned() PlacedResult {
-	return PlacedResult{
+// its context. Its late answer is dropped by the closed board, but the goroutine
+// keeps writing its own rows, and a finished answer there would contradict what the
+// caller was told ("discarded") with nothing to reconcile it by. So the result
+// carries the job id of the attempt that had not returned (lastJob), the call records
+// its own row under that id now, and the goroutine's late row, when it comes, is under
+// the same id. It still names no node or seat: the call cannot say where it was
+// running.
+func (r *runner) abandoned(i int, contract core.AgentContract) PlacedResult {
+	pr := PlacedResult{
 		Unplaced: true, deadlineCut: true,
 		PlacementReason: "call deadline reached before this subtask stopped",
-		Result: r.call.wire(fmt.Sprintf("did not stop within %s of the call's deadline passing; whatever it answers later is discarded",
-			r.call.grace.Round(time.Millisecond))),
 	}
+	if id, ok := r.lastJob.Load(i); ok {
+		pr.JobID, _ = id.(string)
+	}
+	if pr.JobID == "" {
+		pr.JobID = mintJobID()
+	}
+	pr.Result = r.call.wire(fmt.Sprintf("did not stop within %s of the call's deadline passing; whatever it answers later is discarded (job %s: its own late row, if it ends, is under that id)",
+		r.call.grace.Round(time.Millisecond), pr.JobID))
+	r.record(contract, pr)
+	return pr
 }
 
 // queueLookMax bounds the last look cutQueued takes at the holder. It runs after the

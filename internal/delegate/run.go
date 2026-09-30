@@ -871,7 +871,7 @@ launch:
 			results[i] = r.unlaunched(subtasks[i])
 			progress.finished(i, results[i])
 		default:
-			results[i] = r.abandoned()
+			results[i] = r.abandoned(i, subtasks[i])
 			progress.finished(i, results[i])
 		}
 	}
@@ -1095,6 +1095,12 @@ type runner struct {
 	// RunWith has begun draining the emitter.
 	pairMu   sync.RWMutex
 	pairShut bool
+	// pairLate makes the "a late PAIR frame was dropped" line once per run.
+	pairLate sync.Once
+	// lastJob is, per subtask index, the job id of the attempt most recently started
+	// (attempt mints one per attempt). A subtask the call gives up on is published under
+	// it (abandoned), so the caller can reconcile the late row its goroutine writes.
+	lastJob sync.Map
 }
 
 // decide is the composite box's placement decision for a contract that is
@@ -3035,6 +3041,7 @@ func (r *runner) attempt(ctx context.Context, i int, contract core.AgentContract
 	// placement, so even a local run correlates its telemetry line — and a
 	// retry never reuses the id a node may still hold.
 	jobID := mintJobID()
+	r.lastJob.Store(i, jobID)
 
 	finish := func(pr PlacedResult) PlacedResult {
 		pr.JobID = jobID

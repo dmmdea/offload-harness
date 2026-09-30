@@ -147,7 +147,7 @@ func TestRunWithDeadlineDoesNotWaitForARunnerThatIgnoresItsContext(t *testing.T)
 		// it finish before the temp dir is removed (a Windows handle would block).
 		deadline := time.Now().Add(3 * time.Second)
 		for time.Now().Before(deadline) {
-			if rows, err := ledger.ReadAll(cfg.LedgerPath); err == nil && len(rows) >= 2 {
+			if rows, err := ledger.ReadAll(cfg.LedgerPath); err == nil && len(rows) >= 3 { // the finished row, the call's own abandoned row, the goroutine's late row
 				break
 			}
 			time.Sleep(10 * time.Millisecond)
@@ -195,7 +195,7 @@ func TestRunWithDeadlineReportsEachSubtaskFinishedExactlyOnce(t *testing.T) {
 		unblock()
 		deadline := time.Now().Add(3 * time.Second)
 		for time.Now().Before(deadline) {
-			if rows, err := ledger.ReadAll(cfg.LedgerPath); err == nil && len(rows) >= 2 {
+			if rows, err := ledger.ReadAll(cfg.LedgerPath); err == nil && len(rows) >= 3 { // the finished row, the call's own abandoned row, the goroutine's late row
 				break
 			}
 			time.Sleep(10 * time.Millisecond)
