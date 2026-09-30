@@ -116,6 +116,11 @@ type fakeNode struct {
 	// remote sequentially, so a slow health handler is time the delegator
 	// spends between measuring its remaining budget and using it.
 	healthDelay time.Duration
+	// healthDelayFn, when set, answers the delay per health request and wins over
+	// healthDelay: a node whose health turns slow only AFTER something happened (its own
+	// dispatch was refused, another seat started). The fixture reads an atomic, so the
+	// test needs no write to a field the handler goroutines read.
+	healthDelayFn func() time.Duration
 	// killOnDispatch models a node the delegator can never REACH: the dispatch
 	// connection is hijacked and dropped with no HTTP answer at all, so both
 	// dispatch attempts end as transport errors. Distinct from a node that is
@@ -211,9 +216,13 @@ func (f *fakeNode) server() *httptest.Server {
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
-		if f.healthDelay > 0 {
+		delay := f.healthDelay
+		if f.healthDelayFn != nil {
+			delay = f.healthDelayFn()
+		}
+		if delay > 0 {
 			select {
-			case <-time.After(f.healthDelay):
+			case <-time.After(delay):
 			case <-r.Context().Done():
 				return
 			}

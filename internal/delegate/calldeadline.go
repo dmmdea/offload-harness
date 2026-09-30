@@ -233,10 +233,10 @@ func (b *resultBoard) close() ([]PlacedResult, []bool) {
 }
 
 // cutByDeadline turns a subtask outcome that was NOT finished when the deadline
-// passed into the published call-deadline defer. It is applied at the two moments
-// an outcome is PRODUCED — finish (an attempt's end) and settle (an outcome no
-// attempt produced) — so the wire result, the ledger row and the corpus row say
-// the same thing. It is not a filter to run over a result later: "produced after
+// passed into the published call-deadline defer. It is applied where an outcome is
+// PRODUCED — finish (an attempt's end), settle (an outcome no attempt produced) and
+// exhaustedSettled (a refusal chain the delegator closes) — so the wire result, the
+// ledger row and the corpus row say the same thing. It is not a filter to run over a result later: "produced after
 // the deadline" can only be answered when the outcome is produced, and a result
 // that finished earlier (an abstention whose retry was cut, published with the
 // retry's fate in its retry_note) must keep what it was.

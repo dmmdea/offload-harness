@@ -7,7 +7,9 @@ package delegate
 // and the call deadline publishes exactly that class for a run it cut; a capacity-wait tick
 // cut by the wait's own deadline keeps the previous tick's state, and the call's deadline is
 // a second way a tick gets cut; a retry that waits in line for a busy seat says the caller
-// canceled when it was the call's deadline that ended the wait.
+// canceled when it was the call's deadline that ended the wait; a refusal chain whose
+// re-placement read the deadline ended was published as "placement refused" (a failure that
+// accuses nodes never asked, in a call that ran out of time).
 
 import (
 	"context"
@@ -18,6 +20,7 @@ import (
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/ledger"
 )
 
 // TestPageIssueFailedIgnoresACallDeadlineCut: the cut keeps the run's seat and node named and
@@ -129,5 +132,112 @@ func TestCapacityWaitCutByTheCallDeadlineMidProbeKeepsTheLastAnswer(t *testing.T
 	}
 	if strings.Contains(pr.PlacementReason, "probe(s) failed during the wait") {
 		t.Errorf("placement = %q names a probe failure that the call's deadline caused", pr.PlacementReason)
+	}
+}
+
+// A node refuses the dispatch at its own address (404: not a capacity refusal, so the subtask is
+// re-placed rather than waited), a second node is healthy and would take it, and the call's
+// deadline passes while the re-placement is still reading the fleet. The read is cut, the second
+// node is never seen, and the chain used to be published as "placement refused ... no further
+// eligible remote was available": a failure that accuses a node nobody asked, in a call that ran
+// out of time, which also flagged a one-subtask call as an error. The outcome is the deadline's:
+// a budget defer, no node or seat named, the refusal chain quoted behind the deadline marker, and
+// one closing row under a job id of its own (the refused attempt's row belongs to that attempt).
+func TestAPlacementRefusedAfterTheCallDeadlineIsTheDeadlinesDefer(t *testing.T) {
+	compressPolls(t, 5*time.Millisecond, time.Second)
+	compressWait(t, 20*time.Millisecond, 0)
+	a, aURL := refusingNode(t, "node-a", http.StatusNotFound, nil)
+	b, bURL := acceptingNode(t, "node-b", "qube from B", func(f *fakeNode) {
+		// B answers health at once until A has been asked, then takes longer than the call has.
+		f.healthDelayFn = func() time.Duration {
+			if a.dispatches.Load() > 0 {
+				return 30 * time.Second
+			}
+			return 0
+		}
+	})
+	cfg := testCfg(t)
+	results, sum, elapsed := runWithin(t, 15*time.Second, cfg, neverLocal(t),
+		[]core.AgentContract{remoteContract()}, "remote", []string{aURL, bURL}, deadlineIn(2*time.Second), nil)
+	pr := results[0]
+	if sum != (Summary{Deferred: 1}) {
+		t.Fatalf("summary = %+v err %q, want one call-deadline defer: the deadline ended the read that would have found node-b, so no refusal chain is the outcome", sum, pr.Err)
+	}
+	r := pr.Result
+	if !pr.deadlineCut || !pr.Unplaced || r.DeferClass != core.DeferClassBudget || pr.Err != "" {
+		t.Fatalf("result cut %v unplaced %v class %q err %q, want an unplaced budget defer marked as the deadline's", pr.deadlineCut, pr.Unplaced, r.DeferClass, pr.Err)
+	}
+	if !strings.HasPrefix(r.Reason, deadlinePrefix+"1 unfinished") || !strings.Contains(r.Reason, "had not been placed on a seat") || !strings.Contains(r.Reason, "placement refused") {
+		t.Fatalf("reason = %q, want the deadline's opening, that nothing was placed, and the refusal chain quoted", r.Reason)
+	}
+	if pr.Node != "" || pr.Seat != "" {
+		t.Fatalf("the result names node %q seat %q: no node ran it, and the one that refused it is not its node", pr.Node, pr.Seat)
+	}
+	if a.dispatches.Load() != 1 || b.dispatches.Load() != 0 {
+		t.Fatalf("dispatches a=%d b=%d, want node-a asked once and node-b never (the read that would have found it was the one cut)", a.dispatches.Load(), b.dispatches.Load())
+	}
+	if elapsed > 10*time.Second {
+		t.Fatalf("the call returned after %s: it waited out the slow health read instead of ending at its deadline", elapsed)
+	}
+
+	rows, err := ledger.ReadAll(cfg.LedgerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var closing, refused int
+	for _, row := range rows {
+		switch {
+		case strings.HasPrefix(row.Reason, deadlinePrefix):
+			closing++
+			if row.JobID != pr.JobID || !row.Deferred {
+				t.Fatalf("the closing row = job %q deferred %v, want the job id the caller was given (%q)", row.JobID, row.Deferred, pr.JobID)
+			}
+		case strings.Contains(row.Reason, "404"):
+			refused++
+			if row.JobID == pr.JobID {
+				t.Fatalf("the refused attempt's row carries the job id the caller was given (%q): two rows would double-count one id", pr.JobID)
+			}
+		}
+	}
+	if closing != 1 || refused != 1 {
+		t.Fatalf("ledger: %d closing row(s) with the deadline wording and %d refused-attempt row(s) among %d, want exactly 1 and 1", closing, refused, len(rows))
+	}
+	var corpus int
+	for _, line := range corpusLines(t, cfg) {
+		if line.JobID == pr.JobID {
+			corpus++
+			if line.Result == nil || !strings.HasPrefix(line.Result.Reason, deadlinePrefix+"1 unfinished") || !line.Deferred {
+				t.Fatalf("the corpus row for the closing job = %+v, want the call-deadline defer", line)
+			}
+		}
+	}
+	if corpus != 1 {
+		t.Fatalf("%d corpus row(s) carry the job id the caller was given, want exactly 1", corpus)
+	}
+}
+
+// The same seam on the path the capacity wait owns when it is switched off: the only node refuses
+// for capacity (503), the wait is off (testCfg), so the chain is closed at once, and the deadline
+// ends the re-read that produced it. Here the refusal is a capacity one, which is the other way a
+// chain reaches exhausted().
+func TestAnExhaustedChainWithTheWaitOffIsCutByTheCallDeadlineToo(t *testing.T) {
+	compressPolls(t, 5*time.Millisecond, time.Second)
+	compressWait(t, 20*time.Millisecond, 0)
+	node, url := refusingNode(t, "node-a", http.StatusServiceUnavailable, func(f *fakeNode) {
+		f.healthDelayFn = func() time.Duration {
+			if f.dispatches.Load() > 0 {
+				return 30 * time.Second
+			}
+			return 0
+		}
+	})
+	results, sum, _ := runWithin(t, 15*time.Second, testCfg(t), neverLocal(t),
+		[]core.AgentContract{remoteContract()}, "remote", []string{url}, deadlineIn(2*time.Second), nil)
+	pr := results[0]
+	if sum != (Summary{Deferred: 1}) || !pr.deadlineCut || !strings.HasPrefix(pr.Result.Reason, deadlinePrefix+"1 unfinished") {
+		t.Fatalf("summary = %+v cut %v err %q reason %q, want one call-deadline defer", sum, pr.deadlineCut, pr.Err, pr.Result.Reason)
+	}
+	if node.dispatches.Load() != 1 {
+		t.Fatalf("the node was asked %d times, want once", node.dispatches.Load())
 	}
 }

@@ -888,7 +888,7 @@ launch:
 			defer wg.Done()
 			defer func() { <-sem }()
 			progress.started(i)
-			// runOne's outcome was already cut where it was PRODUCED (finish, settle): the
+			// runOne's outcome was already cut where it was PRODUCED (finish, settle, exhaustedSettled): the
 			// only moment "after the deadline?" can be answered. Asking again here, with no
 			// timestamp, would rewrite an answer that finished before the deadline — an
 			// abstention whose retry was cut, for one — into a call-deadline defer.
@@ -1955,9 +1955,12 @@ func (r *runner) placeAndRun(ctx context.Context, i int, contract core.AgentCont
 	refusals := []string{refusalLine(pr)}
 	r.noteRefusal(pl, pr)
 	for {
+		// What the iteration spends after the last attempt returned (selection, mostly) is
+		// the span a closing row for a chain the call deadline ended would measure.
+		iterStart := time.Now()
 		remaining := pl.remaining(start, budget)
 		if remaining < minRetrySec {
-			return exhausted(pr, refusals, budgetSpent(remaining, budget, len(refusals)))
+			return r.exhaustedSettled(contract, pr, refusals, budgetSpent(remaining, budget, len(refusals)), iterStart)
 		}
 		// Selection BLOCKS (fetchViews). Bound it by what is actually left, so
 		// the probe cannot outlive the budget it is probing on behalf of.
@@ -1981,7 +1984,7 @@ func (r *runner) placeAndRun(ctx context.Context, i int, contract core.AgentCont
 			if pl.capacityRefusal || reserved {
 				return r.awaitCapacity(ctx, i, contract, start, budget, pl, pr, refusals, why)
 			}
-			return exhausted(pr, refusals, why)
+			return r.exhaustedSettled(contract, pr, refusals, why, iterStart)
 		}
 		// RE-MEASURE. `remaining` above was true when taken and the probe may
 		// have consumed most of it; committing the stale number to the wire is
@@ -1990,7 +1993,7 @@ func (r *runner) placeAndRun(ctx context.Context, i int, contract core.AgentCont
 		// abandoned here costs neither a slot in the bound nor an exclusion.
 		remaining = pl.remaining(start, budget)
 		if remaining < minRetrySec {
-			return exhausted(pr, refusals, budgetSpent(remaining, budget, len(refusals)))
+			return r.exhaustedSettled(contract, pr, refusals, budgetSpent(remaining, budget, len(refusals)), iterStart)
 		}
 		pl.tried[next.base] = true
 		if next.base != "" {
@@ -2238,7 +2241,7 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 		if seed.waitCapacity {
 			return r.settle(contract, r.reservedDefer(localView, LocalLease(r.cfg.GPULockPath, r.cfg.StateDir), 0, seed.pendingReason), pl, waitStart)
 		}
-		return exhausted(seed, refusals, why)
+		return r.exhaustedSettled(contract, seed, refusals, why, waitStart)
 	}
 	deadline := waitStart.Add(wait)
 	spanStart := waitStart
@@ -2308,7 +2311,7 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 	// never a `placement refused` failure naming a refusal nobody made.
 	budgetGone := func(remaining int) PlacedResult {
 		if len(refusals) > 0 {
-			return exhausted(seed, refusals, budgetSpent(remaining, budget, len(refusals)))
+			return r.exhaustedSettled(contract, seed, refusals, budgetSpent(remaining, budget, len(refusals)), waitStart)
 		}
 		return r.settle(contract, r.waitBudgetDefer(localView, seed, idle, budgetSpent(remaining, budget, pl.attempts), pl.waitNote), pl, waitStart)
 	}
@@ -2558,7 +2561,7 @@ func (r *runner) runDecided(ctx context.Context, i int, contract core.AgentContr
 	remaining := pl.remaining(start, budget)
 	if remaining < minRetrySec {
 		if len(refusals) > 0 {
-			return exhausted(seed, refusals, budgetSpent(remaining, budget, len(refusals)))
+			return r.exhaustedSettled(contract, seed, refusals, budgetSpent(remaining, budget, len(refusals)), waitStart)
 		}
 		local := r.localView()
 		reason := fmt.Sprintf("%s: %s — the decided seat %s was not started", budgetSpent(remaining, budget, pl.attempts), note, dec.Seat)
@@ -2892,6 +2895,11 @@ func (r *runner) replacementNode(ctx context.Context, contract core.AgentContrac
 	// explicit remote route must not silently fall local, which is the same
 	// posture the "no eligible remote" defer already holds.
 	head := "no further eligible remote was available"
+	if r.call.reached() {
+		// The read above may be the very thing the call's deadline ended, and what a cut
+		// read held is not evidence about the nodes it never reached (ADR 0065).
+		head = "the call's deadline had passed, so the fleet read may not have named every eligible remote"
+	}
 	if len(busy) > 0 {
 		// A node the filters held out is BUSY, not broken: INV-4 sends the subtask to
 		// the capacity wait, which re-reads every one of them each tick - whatever
@@ -3178,6 +3186,39 @@ func exhausted(last PlacedResult, refusals []string, why string) PlacedResult {
 	last.Err = fmt.Sprintf("%s: %d node(s) refused this subtask and none of them ran it (%s); %s",
 		replacementExhaustedPrefix, len(refusals), strings.Join(refusals, "; "), why)
 	return last
+}
+
+// exhaustedSettled is exhausted() with the call deadline's answer applied (ADR 0065 decision
+// 2). Every outcome is cut at the moment it is PRODUCED, and a refusal chain is produced here,
+// outside finish and settle. One closed after the call's deadline has passed is not evidence
+// about the nodes: the fleet read that would have found one may be the very thing the deadline
+// ended, so "no further eligible remote was available" would accuse nodes that were never
+// asked, and a failure flags a one-subtask call as an error when it only ran out of time.
+//
+// Until the deadline has passed it is exactly exhausted(): the last refused attempt's row
+// stands as the record. After it the outcome is the call-deadline defer with the chain quoted
+// behind the marker, recorded here under a job id of its own for the reason settle gives one:
+// the id of the last refused attempt belongs to its row, which says "dispatch ... 404" for a
+// job no node held, and a second row under it would double-count one id.
+//
+// Nothing ran it, so it is cut as an outcome that was never placed. What the refused attempt
+// left on the result says where THAT attempt was (the local seat's capacity defer, a job a
+// node acked and then took back, a lease's sentinel), not where this subtask is, and must not
+// steer the cut's wording ("was still running on the local seat") or its node and seat; the
+// attempt's own intent was closed by its finish. since is when the span the closing row
+// measures began.
+func (r *runner) exhaustedSettled(contract core.AgentContract, last PlacedResult, refusals []string, why string, since time.Time) PlacedResult {
+	pr := exhausted(last, refusals, why)
+	if !r.call.reached() {
+		return pr
+	}
+	pr.ranLocal, pr.intentRecorded, pr.orphanable, pr.waitCapacity = false, false, false, false
+	pr.withdrawn, pr.nodeNeverRan = false, ""
+	pr = r.cutOutcome(pr, true)
+	pr.JobID = mintJobID()
+	pr.wallMs = time.Since(since).Milliseconds()
+	r.record(contract, pr)
+	return pr
 }
 
 // minRetrySec is the least timeout_sec budget a retry is worth starting with: a

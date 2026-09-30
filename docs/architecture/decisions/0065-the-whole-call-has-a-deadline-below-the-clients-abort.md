@@ -50,8 +50,9 @@ measurement of the client.
    defer** whose reason opens `call deadline reached; N unfinished` and then says what that subtask was
    doing (running on a named node under a named job, running on the local seat, not yet placed, never
    started, or not stopping). N is the whole call's count, frozen at the first look so every reason
-   states the same number, and it spans every chunk of a batched call. The outcome is applied at the two
-   moments an outcome is produced (`finish` and `settle`), so the wire result, the ledger row and the
+   states the same number, and it spans every chunk of a batched call. The outcome is applied where an
+   outcome is produced (`finish` for an attempt's end, `settle` for an outcome no attempt produced,
+   `exhaustedSettled` for a refusal chain the delegator closes), so the wire result, the ledger row and the
    corpus row say the same thing; it is never re-applied to a result published later, because "produced
    after the deadline" can only be answered when the outcome is produced. A result that finished,
    including one that failed its acceptance checks, is an answer and is never rewritten: an abstention
@@ -73,7 +74,11 @@ measurement of the client.
    quote nothing of the wait's own text; the placement narration keeps that history behind the deadline
    marker. A wait the deadline ends AFTER refused attempts is recorded like any other cut, as one
    closing row under a job id of its own (the id of the last refused dispatch already belongs to that
-   attempt's row, and a second row under it would double-count one id); the caller is given that id.
+   attempt's row, and a second row under it would double-count one id); the caller is given that id. A
+   refusal chain the delegator closes after the deadline has passed (`placement refused`) is cut and
+   recorded the same way, as an outcome nobody placed, with the chain quoted behind the marker: the fleet
+   read that would have named another node may be the very thing the deadline ended, so a failure saying no
+   node was eligible would accuse nodes that were never asked, and would flag a one-subtask call as an error.
 
 3. **The unwind is bounded, and a subtask that ignores its context cannot hold the call.** Cooperating
    goroutines get an allowance after the deadline (a twentieth of the time left when placement began,
@@ -177,6 +182,10 @@ measurement of the client.
   does not count a cut as a failed issue: the cut is a class-budget defer that still names its seat and
   node, which the cap would otherwise read as the seat's own budget, so a research page a call keeps
   running out of time on is not backed off for fifteen minutes.
+- The refusal chain is the same seam under the same rule. A chain the delegator closes once the deadline has
+  passed is the deadline's outcome (decision 2), not `placement refused`; and the sentence a re-placement
+  read leaves when it names no node says the call's deadline had passed in place of `no further eligible
+  remote was available`, a claim about nodes that a read the deadline ended cannot support.
 - Every call-deadline row carries `reason_code` `budget`: the closed set of
   [ADR 0064](0064-a-delegator-takes-back-what-it-has-not-started.md) has no member of its own for a cut, so a
   reader counting `budget` rows tells a cut from a node-side ceiling by the reason's opening
@@ -212,8 +221,8 @@ measurement of the client.
 - `internal/delegate/withdraw.go` (`withdrawBound`, the unwind bound the give-up's withdraw takes once the
   deadline has passed; the withdraw itself is ADR 0064's)
 - `internal/delegate/processgate.go` (`pageIssueFailed`, which does not count a cut) and
-  `internal/delegate/run.go` (`awaitCapacity`'s tick and `runOne`'s retry note, where the deadline meets
-  ADR 0063's waits)
+  `internal/delegate/run.go` (`awaitCapacity`'s tick, `exhaustedSettled`, `replacementNode`'s read and
+  `runOne`'s retry note, where the deadline meets ADR 0063's waits and re-placement)
 - `internal/delegate/progress.go`, `internal/mcpserver/progress.go` (progress notifications)
 - `internal/mcpserver/mcpserver.go` (`callDeadlineAt`, `handleAgentDelegate`, `handleResearch`,
   `delegateIsError`, `researchWire`)

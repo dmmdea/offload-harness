@@ -811,6 +811,9 @@ placement refused: <n> node(s) refused this subtask and none of them ran it
 
 Never a defer — no seat ever saw the contract, so there is no report to author on a node's behalf,
 and the only class that would fit (`budget`) would teach every consumer that a seat needed more time.
+The one exception is a chain the delegator closes after the whole-call deadline has passed: that call ran
+out of time, and the subtask is published as the deadline's budget defer with this text quoted behind
+the `call deadline reached` marker ([ADR 0065](architecture/decisions/0065-the-whole-call-has-a-deadline-below-the-clients-abort.md)).
 The three sentences are deliberately distinct: `placement refused` = nobody took it; `queue deadline`
 = one node accepted it and never started it; `poll deadline` = one node started it and never finished.
 
