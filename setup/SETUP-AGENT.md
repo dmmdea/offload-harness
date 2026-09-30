@@ -675,7 +675,7 @@ Rules for the installing agent:
   `init` and `skills` write agent skills into `~/.claude` and every other agent's skills dir.
 - Do not substitute a lookalike package (`dsh-hyperframes`, `hyfrme`, `framevox`, `framepack`). The
   lockfile names `hyperframes` and `@hyperframes/*` only.
-- Verify with `local-offload doctor` (expect `compose_video CONFIGURED … templates=lower-third,title-card`)
+- Verify with `local-offload doctor` (expect `compose_video CONFIGURED … templates=callout-label,captions-bar,checklist-card,lower-third,section-title,stat-card,title-card`)
   and `local-offload acceptance` (a `hyperframes (compose runner)` row, which runs the pinned CLI's
   `--version` as this identity).
 - On a Linux node, chrome-headless-shell needs the usual Chrome shared libraries (`libnss3`,

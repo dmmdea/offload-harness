@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>captions-bar</title>
+    <style>
+      /* Fonts are declared HERE, from the shared kit copied beside this file: Inter 700 (latin),
+         byte-identical to the face HyperFrames' producer embeds. A family the page does not declare
+         with @font-face is resolved by the producer through a Google Fonts request, which is a network
+         call at render time, so the one family used below is declared. */
+      @font-face { font-family: "Inter"; src: url("shared/fonts/inter-latin-700-normal.woff2") format("woff2"); font-weight: 700; font-style: normal; }
+
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      /* Transparent all the way down: rendered to webm (VP9 yuva420p) or mov (ProRes 4444) every pixel
+         outside the caption carries alpha 0, ready to lay over footage. */
+      html, body { width: 1920px; height: 1080px; overflow: hidden; background: transparent; }
+
+      #root {
+        position: relative;
+        width: 1920px;
+        height: 1080px;
+        overflow: hidden;
+        background: transparent;
+        font-family: "Inter", sans-serif;
+      }
+
+      /* One full-width lane near the bottom edge. The caption is an absolutely positioned child: in a flex
+         container such a child sits where a lone flex item would, so it is centred on its own width and
+         bottom-aligned, and a longer group grows upward. */
+      .lane {
+        position: absolute;
+        left: 0;
+        right: 0;
+        bottom: 96px;
+        height: 220px;
+        display: flex;
+        justify-content: center;
+        align-items: flex-end;
+      }
+
+      /* The one caption element. The script below sets its text, opacity and offset from the seek time, so
+         nothing here is animated by CSS. */
+      .cap {
+        position: absolute;
+        max-width: 1600px;
+        padding: 14px 34px 18px;
+        border-radius: 18px;
+        background: var(--bar, rgba(10, 16, 14, 0.82));
+        color: var(--text_color, #f6f8f7);
+        box-shadow: inset 0 -5px 0 var(--accent, #34d399);
+        font-size: calc(var(--size, 56) * 1px);
+        font-weight: 700;
+        line-height: 1.2;
+        letter-spacing: -0.01em;
+        text-align: center;
+        overflow-wrap: anywhere;
+        text-wrap: balance;
+        opacity: 0;
+      }
+    </style>
+  </head>
+  <body>
+    <div
+      id="root"
+      data-composition-id="captions-bar"
+      data-start="0"
+      data-duration="8"
+      data-width="1920"
+      data-height="1080"
+      data-fps="30"
+      data-no-timeline
+      data-composition-variables='[{"id":"words_json","type":"string","label":"Caption groups","description":"A JSON array of [start, end, text] triples in seconds, one per caption group, in time order and not overlapping. Build it from a transcript with render/captions-groups.mjs. Up to 16000 characters.","maxLength":16000,"default":"[[0.5,2.7,\"Captions follow the words\"],[2.9,5.1,\"one short group at a time\"],[5.3,7.5,\"then they get out of the way\"]]"},{"id":"bar","type":"color","label":"Bar","description":"The bar behind each group; keep it translucent and dark so the text keeps its contrast on any shot.","default":"rgba(10, 16, 14, 0.82)"},{"id":"text_color","type":"color","label":"Text color","default":"#f6f8f7"},{"id":"accent","type":"color","label":"Accent","description":"The line along the bottom edge of the bar.","default":"#34d399"},{"id":"size","type":"number","label":"Text size (pixels)","description":"Font size of the captions on a 1080 px tall frame.","min":32,"max":96,"default":56},{"id":"duration","type":"number","label":"Duration (seconds)","description":"Total length of the overlay; groups that end after it are cut off.","min":1,"max":600,"default":8}]'
+    >
+      <div class="lane"><div class="cap" id="cap"></div></div>
+    </div>
+    <script>
+      // Why a seek listener and not one CSS animation per group: every animated element is visited on every
+      // seek, and a page with hundreds of them stopped being renderable (see the README for the numbers).
+      // HyperFrames dispatches "hf-seek" on window at each seek with the time in seconds; the page derives
+      // the whole frame from that time, so a frame is a pure function of t, whichever worker draws it and in
+      // whatever order. The groups are read through getVariables(), not from a CSS custom property (the
+      // runtime strips braces and semicolons from every string it copies into one), and the text goes in
+      // with textContent, never as markup. A malformed variable throws, so `check` reports it as a runtime
+      // error instead of the render quietly producing an empty overlay. No clock, no randomness, no timers.
+      window.__timelines = window.__timelines || {};
+      (function () {
+        var raw = window.__hyperframes.getVariables().words_json;
+        var groups;
+        try {
+          groups = JSON.parse(raw);
+        } catch (e) {
+          throw new Error("captions-bar: words_json is not JSON: " + e.message);
+        }
+        if (!Array.isArray(groups)) throw new Error("captions-bar: words_json must be an array of [start, end, text] triples");
+        for (var i = 0; i < groups.length; i++) {
+          var g = groups[i];
+          if (!Array.isArray(g) || g.length !== 3 || typeof g[0] !== "number" || typeof g[1] !== "number" || typeof g[2] !== "string" || !(g[0] >= 0) || !(g[1] > g[0])) {
+            throw new Error("captions-bar: words_json entry " + i + " is not [start, end, text] with 0 <= start < end");
+          }
+          if (i > 0 && g[0] < groups[i - 1][1]) {
+            throw new Error("captions-bar: words_json entry " + i + " starts before entry " + (i - 1) + " ends (one group is on screen at a time)");
+          }
+        }
+        var cap = document.getElementById("cap");
+        var shown = -1;
+        function easeOut(x) {
+          var y = 1 - x;
+          return 1 - y * y * y;
+        }
+        function paint(t) {
+          // the last group that has started (binary search); it is shown only until its own end
+          var lo = 0;
+          var hi = groups.length - 1;
+          var k = -1;
+          while (lo <= hi) {
+            var mid = (lo + hi) >> 1;
+            if (groups[mid][0] <= t) {
+              k = mid;
+              lo = mid + 1;
+            } else {
+              hi = mid - 1;
+            }
+          }
+          if (k < 0 || t >= groups[k][1]) {
+            cap.style.opacity = "0";
+            return;
+          }
+          if (k !== shown) {
+            cap.textContent = groups[k][2];
+            shown = k;
+          }
+          var rise = easeOut(Math.min(1, (t - groups[k][0]) / 0.14)); // fades and rises in over 0.14 s
+          var fall = Math.min(1, (groups[k][1] - t) / 0.12); // fades out over the last 0.12 s
+          cap.style.opacity = String(Math.min(rise, fall));
+          cap.style.transform = "translateY(" + ((1 - rise) * 12).toFixed(3) + "px)";
+        }
+        window.addEventListener("hf-seek", function (ev) {
+          paint(ev.detail.time);
+        });
+        paint(0);
+      })();
+    </script>
+  </body>
+</html>

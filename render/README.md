@@ -204,6 +204,7 @@ node render/compose-hyperframes.mjs render --hyperframes-dir <dir> --browser <ch
   --ffmpeg <ffmpeg> --template title-card --out card.mp4
 node render/compose-hyperframes.mjs render ... --template lower-third --format webm \
   --variables-file vars.json --snapshots 1,2.5 --out lt.webm
+node render/captions-groups.mjs clip.segments.json --out chunks.json   # words_json for captions-bar
 node render/compose-hyperframes.mjs browser --hyperframes-dir <dir>   # pinned Chrome (installer step)
 node render/compose-hyperframes.mjs version --hyperframes-dir <dir>   # acceptance check
 ```

@@ -1,0 +1,10 @@
+{
+  "name": "checklist-card",
+  "description": "Full-frame opaque checklist: a title with one emphasised phrase over up to four glass rows that spring in one after another, each with a tick that draws itself; empty items hide their row. Fades out 0.6 s before the end.",
+  "width": 1920,
+  "height": 1080,
+  "fps": 30,
+  "alpha": false,
+  "duration_variable": "duration",
+  "formats": ["mp4", "webm", "mov", "png-sequence", "gif"]
+}

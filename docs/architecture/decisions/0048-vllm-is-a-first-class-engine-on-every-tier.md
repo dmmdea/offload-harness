@@ -133,3 +133,83 @@ It was NOT paid by copying ampere-16's declaration, and the measurement is why t
 - **Coverage now reads 4 of 16 tiers, 12 owing a seat.** The debt list shrank by one; the rule for the next
   eleven is the same: measure on the tier's silicon, never copy a sibling's dtype or window.
 
+## Amendment 2 (2026-09-30): a tier never loses a LAYER or a declared second seat, and the table has a home for both
+
+Register A-113. This is the same defect one level up. On 2026-09-18 the ampere-16 reference box gained a second
+vLLM seat, the Qwen3.6-35B-A3B 2-bit GSQ (register A-100), and a second layer, `fast`, that routes digest-shaped
+contracts to it. Both lived only in that box's hand-edited config and in two Go test files (`internal/placement`,
+`internal/delegate`): `profiles.json` carried neither, so every fresh ampere-16 install lost them and the
+generated tier page could not state them. The gates could not see it for the reason this ADR gives above: they
+validate what is declared, and a layer or a seat that is not declared is not iterated.
+
+The table could not simply be edited, because it had exactly one `vllm_seat` per tier, and the card cannot
+hold two heavy seats at once (13.9 GiB and 11.7 GiB against a 15,356 MiB card, each sized to most of it). So the schema
+grew, by the smallest steps that carry what the box actually runs.
+
+**What the table can now say**
+
+1. `extra_vllm_seats` beside `vllm_seat`: a tier's further vLLM seats, served on demand on the same card and never
+   the agent lane. They are validated as non-lane seats (`Spec.ValidateExtra`): no fallback, and every lane field
+   (`fallback_agent_*`, `agent_*`) is REFUSED rather than ignored, because a setting that reads as a decision and
+   is never read is how a table drifts from its box. Ids, aliases and units must be unique across the tier, and an
+   extra seat must share the lane seat's card.
+2. `vllm_seat.storeless_reason` (and the same on an extra seat): the MEASURED reason a seat runs with no cache
+   server, seeded verbatim into its `kv_cache_server` binding. Until now the derived binding carried one generic
+   sentence and the measurement lived on the node. It is refused beside a `cache_server`: a seat is bound to a store
+   or it is storeless, never both.
+3. `layers` on a tier that composes nothing (ampere-16). A layer seat names its vLLM seat explicitly, so the values
+   are the reference node's own and `audit-config` reports MATCH for the layer keys against a fixture that carries
+   them (a live extract of that node redacts each layer seat's `ctx_tokens`, so the 32,768 is the value the placement
+   and delegate tests pin, not a live reading); the copy of the window, the
+   concurrency and the card pin that naming implies must equal the seat's own declaration, or the table is refused
+   at parse (one number, one place).
+4. `n_cpu_moe_max`: the tier's measured spill (H-01, below).
+
+**How a box resolves them.** Whether a box runs a seat is decided per seat, by the check the lane seat already had
+(the hand-built venv plus that seat's own weights; an extra seat also needs the wrapper scripts its entry runs, which
+the operator installs, below). A running extra seat joins the `vllm_seats` roster with its own
+binding; a layer that names a seat the box does not run is dropped; and `single`, the planner-default layer
+(placement row 5b), is what keeps the rest placeable, so a set that lost it is not seeded at all and the box stays a
+plain box. A box with no vLLM prerequisites seeds exactly what it seeded before layers existed.
+
+**How it renders.** Every vLLM seat of a tier becomes an ALTERNATIVE of the others inside the residents set
+(`emb & rer & (vagt | vagt2)`). Both shapes that look natural are wrong on one card: two co-resident members make
+the matrix call the pair a valid combination and llama-swap loads the second beside the first, and a swappable
+alternative beside a resident lane seat admits `lane + extra` together. As alternatives they stay resident-class (an
+ordinary chat request never evicts the agent lane) while asking for the extra seat by name swaps it in. An extra
+seat's entry names its wrappers after its own unit, because the lane seat's `vllm-seat-cmd.sh` has the lane unit
+baked in and would start the wrong engine. `install render` now runs the composition check for any tier that
+declares layers, not only for one that composes, so a layer routed to an undefined seat is refused.
+
+**What the installer does not do for an extra seat.** It renders the llama-swap entry, the roster entry, the binding
+and the layer, but not the seat's systemd unit, wrapper scripts or polkit rule: the seat's production launch line
+carries `--language-model-only`, which the shared linux-systemd run script cannot express, so rendering it there
+would ship an approximation of a measured configuration. Because they are the operator's step they are also the
+seat's prerequisite (`Spec.DetectExtra`): llama-swap does not check that an entry's `cmd` exists when it loads its
+config, so a seat advertised without them would be rostered, bound and layered and would fail only when a contract
+asked for it. Until the two wrapper scripts are in the seat directory, `install seed` and `install render` leave the
+seat and its layer out and name the missing file; [composite-tier.md](../../systems/composite-tier.md) lists what the
+operator installs. Teaching the run script the flag is a change to the seat templates and is left to the change that
+owns them.
+
+**Gates.** `TestEveryTierKeepsItsDeclaredLayerSet` is the layer counterpart of `TestEveryTierCanSeatAModelUnderVLLM`:
+`layerSetTiers` records each composite tier's layers and the seat roles each serves, and a tier that stops declaring
+one fails by name (exact in both directions, so a new layer must be registered to be protected). The roles are the
+capability and the models are not: swapping the model behind a seat never touches the floor. `extraSeatFloor` pins
+the extra seat, because a layer naming a seat that is no longer declared is just a name nothing recognises as vLLM
+and would be seeded on boxes that cannot serve it. `TestEveryDeclaredVLLMSeatValidates` now validates the extra
+seats too; it, `tierseed.Resolve` and `Artifacts` all used to check `vllm_seat` only.
+
+**H-01, the two Go-test gaps.** `install render` refuses `--n-cpu-moe` above the tier's measured spill
+(`n_cpu_moe_max`, deliberately a separate number from the `n_cpu_moe` a tier ships, because one field cannot check
+itself; no shipped tier declares one, and the "14 on 16 GB" figure has no measurement record in this repository, so it
+is not attached to any tier). A tier that names the partial placement with no N is refused, since that renders the
+every-expert `--cpu-moe`. The INV-16 gate (`TestInstallRendersOnAnyTierWithoutACacheServer`) walks the table: every
+tier renders with no vLLM prerequisites, and a seat that declares no store renders its unit and wrappers with no
+cache-server piece and seeds an explicit storeless binding.
+
+**Verification.** Each new gate was made to fail against the real regression it guards, with the table restored
+byte for byte afterwards: deleting the `fast` layer, deleting the extra seat while keeping its layer, breaking the extra
+seat's tool parser, drifting a layer's window from its seat's, deleting every layer, and moving the fast layer's seat
+to another role each turn a named gate red; a hard-coded `--n-cpu-moe 30` in a rendered command and a spill of 20
+against a measured 14 are refused at the write gate.

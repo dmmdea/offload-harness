@@ -1388,7 +1388,7 @@ func runComposeVideo(args []string) error {
 	asJSON := fs.Bool("json", false, "print full result JSON")
 	compactFlag := fs.Bool("compact", false, "compact (minified) JSON output")
 	var f composeFlags
-	fs.StringVar(&f.template, "template", "", "a vetted template on this machine (title-card, lower-third, ...)")
+	fs.StringVar(&f.template, "template", "", "a vetted template on this machine (title-card, lower-third, stat-card, section-title, callout-label, checklist-card, captions-bar)")
 	fs.StringVar(&f.variables, "variables", "", "template variables as a JSON object")
 	fs.StringVar(&f.variablesFile, "variables-file", "", "path to a JSON file with the template variables")
 	fs.StringVar(&f.htmlFile, "html", "", "path to a single-file composition (trusted code only)")
@@ -2223,7 +2223,7 @@ func runDelegate(args []string) error {
 	}
 	defer cleanup()
 	results, sum, err := delegate.RunWith(context.Background(), cfg, p.RunAgentContract, contracts, *route, remotes,
-		&delegate.RunOptions{Priority: *priority, Tenant: *tenant})
+		&delegate.RunOptions{Priority: *priority, Tenant: *tenant, Rescue: p.RescueRepack})
 	if err != nil {
 		return err
 	}
@@ -4414,7 +4414,7 @@ func runResearch(args []string) error {
 		return err
 	}
 	defer cleanup()
-	results, sum, err := delegate.RunBatched(context.Background(), cfg, p.RunAgentContract, contracts, *route, nil, nil)
+	results, sum, err := delegate.RunBatched(context.Background(), cfg, p.RunAgentContract, contracts, *route, nil, &delegate.RunOptions{Rescue: p.RescueRepack})
 	if err != nil && len(results) == 0 {
 		return err
 	}

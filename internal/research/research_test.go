@@ -90,9 +90,15 @@ func TestBuildContractsShape(t *testing.T) {
 	if err := json.Unmarshal(c.OutputSchema, &sch); err != nil || sch.Properties["key_facts"] == nil {
 		t.Fatalf("default schema not applied: %s", c.OutputSchema)
 	}
-	joined := strings.Join(c.Acceptance, " ")
-	if !strings.Contains(joined, "min_items:key_facts:1") {
-		t.Fatalf("shape check missing: %v", c.Acceptance)
+	// Presence is declared in the schema; items are asked for only by a caller's
+	// own mark (build_test.go), so the default carries no min_items: a digest of a
+	// page with nothing to say is complete with empty lists (its one statement,
+	// the verdict, is build_verdict_test.go's).
+	if joined := strings.Join(c.Acceptance, " "); strings.Contains(joined, "min_items:") {
+		t.Fatalf("the default schema must not carry an automatic items check: %v", c.Acceptance)
+	}
+	if !strings.Contains(string(c.OutputSchema), `"required":["key_facts","numbers","quotes","verdict"]`) {
+		t.Fatalf("default schema must declare every digest field required: %s", c.OutputSchema)
 	}
 	if !strings.HasPrefix(c.Acceptance[0], "regex:(?i)(?P<docanchor>") || !strings.Contains(c.Acceptance[0], "pinned") || strings.Contains(c.Acceptance[0], "modes") {
 		t.Fatalf("anchor acceptance must be a page-only alternation: %v", c.Acceptance)
