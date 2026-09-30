@@ -1333,9 +1333,18 @@ type Config struct {
 	// register locally and forward to the first delegate_remotes node whose
 	// /fleet/health lists the id, the image travelling inside the job (cap
 	// 8 MiB). Explicit opt-in keeps tools/list byte-identical for a box that
-	// declares nothing; a local device always wins over a remote one for the
-	// same capability name.
+	// declares nothing; a local device wins over a remote one for the same
+	// capability name unless AcceleratorToolOwners names the remote one.
 	FleetAccelerators []string `json:"fleet_accelerators,omitempty"`
+	// AcceleratorToolOwners names the device that serves a shared accelerator
+	// tool, by tool name: {"offload_object_detect": "rknpu"} (ADR 0068). It
+	// overrides the first-listed rule (ADR 0037) for that name only; every
+	// other name still goes to the first listed owner. An entry applies only
+	// when the device is listed in accelerators or fleet_accelerators and its
+	// table has that tool — otherwise it is ignored (the MCP server logs it at
+	// startup) and the first-listed rule decides, so a typo never removes a
+	// tool. Keys and values are compared with spaces trimmed.
+	AcceleratorToolOwners map[string]string `json:"accelerator_tool_owners,omitempty"`
 	// HailoEndpoint is the loopback HTTP sidecar base (server/http_server.py in
 	// the Hailo repo). Loopback only — the sidecar is not an authenticated service.
 	HailoEndpoint string `json:"hailo_endpoint,omitempty"`
@@ -1727,6 +1736,20 @@ func (c Config) HasAccelerator(id string) bool {
 		}
 	}
 	return false
+}
+
+// ToolOwnerClaims returns the tool names accelerator_tool_owners assigns to
+// device id, sorted. It says nothing about whether the claim can apply — the
+// device's own tool table decides that on each surface (ADR 0068).
+func (c Config) ToolOwnerClaims(id string) []string {
+	var out []string
+	for name, owner := range c.AcceleratorToolOwners {
+		if strings.TrimSpace(owner) == id {
+			out = append(out, strings.TrimSpace(name))
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 func Default() Config {

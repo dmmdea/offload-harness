@@ -261,3 +261,37 @@ func TestAccelLanesSharedNameRuleOverThreeDevices(t *testing.T) {
 		}
 	}
 }
+
+// A lane's Claims (accelerator_tool_owners, ADR 0068) take a name ahead of the listed order; a claim on a
+// tool the lane lacks, or on a name a built-in already has, changes nothing.
+func TestAccelLaneClaimsTakeANameFirst(t *testing.T) {
+	var seen []string
+	lanes := []AccelLane{
+		{ID: "coral-edgetpu", Call: fakeLane("coral-edgetpu", &seen)},
+		{ID: "rknpu", Call: fakeLane("rknpu", &seen), Claims: []string{"offload_object_detect", "offload_semantic_segment", "read_file"}},
+	}
+	tools, err := ReadOnlyToolsWithLanes(t.TempDir(), nil, nil, lanes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := map[string]int{}
+	byName := map[string]Tool{}
+	for _, tl := range tools {
+		count[tl.Name]++
+		byName[tl.Name] = tl
+	}
+	for name, want := range map[string]string{"offload_object_detect": "rknpu", "offload_semantic_segment": "coral-edgetpu", "offload_classify_image": "coral-edgetpu", "offload_image_embed": "coral-edgetpu"} {
+		if count[name] != 1 {
+			t.Errorf("%s registered %d times, want exactly 1", name, count[name])
+			continue
+		}
+		seen = nil
+		_, _ = byName[name].Exec(context.Background(), `{"image_path":"/tmp/x.jpg"}`)
+		if len(seen) != 1 || !strings.HasPrefix(seen[0], want+"/") {
+			t.Errorf("%s routed to %v, want %s", name, seen, want)
+		}
+	}
+	if count["read_file"] != 1 {
+		t.Errorf("a claim on the built-in read_file changed its registration: %d", count["read_file"])
+	}
+}

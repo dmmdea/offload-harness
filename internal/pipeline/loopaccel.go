@@ -79,7 +79,8 @@ func loopAccelSidecar(id string, lc laneConfig) *accelclient.Sidecar {
 // devices first (config.Accelerators, in order — the shared-name rule's order),
 // then the FLEET devices it reaches through accelremote (config.FleetAccelerators,
 // Coral Phase B). A local device always wins over a remote one for the same
-// name because it is listed first. The fleet task itself (runAccelTask) uses
+// name because it is listed first, unless accelerator_tool_owners names the
+// remote one for that name (each lane carries its Claims, ADR 0068). The fleet task itself (runAccelTask) uses
 // localAccelLanes only, so a forwarded call never forwards again.
 func NewLoopAccel(cfg config.Config) []agent.AccelLane {
 	lanes := localAccelLanes(cfg)
@@ -88,7 +89,7 @@ func NewLoopAccel(cfg config.Config) []agent.AccelLane {
 			continue
 		}
 		device := id
-		lanes = append(lanes, agent.AccelLane{ID: id, Remote: true, Call: func(ctx context.Context, tool string, args map[string]any) (string, error) {
+		lanes = append(lanes, agent.AccelLane{ID: id, Remote: true, Claims: cfg.ToolOwnerClaims(id), Call: func(ctx context.Context, tool string, args map[string]any) (string, error) {
 			out, err := accelremote.Call(ctx, cfg, device, tool, args)
 			if err != nil {
 				b, _ := json.Marshal(map[string]any{"deferred": true, "reason": device + " (fleet): " + err.Error()})
@@ -114,7 +115,7 @@ func localAccelLanes(cfg config.Config) []agent.AccelLane {
 		}
 		sc := loopAccelSidecar(id, lc)
 		device := id
-		lanes = append(lanes, agent.AccelLane{ID: id, Call: func(ctx context.Context, tool string, args map[string]any) (string, error) {
+		lanes = append(lanes, agent.AccelLane{ID: id, Claims: cfg.ToolOwnerClaims(id), Call: func(ctx context.Context, tool string, args map[string]any) (string, error) {
 			deferOut := func(reason string) (string, error) {
 				b, _ := json.Marshal(map[string]any{"deferred": true, "reason": device + ": " + reason})
 				return string(b), nil

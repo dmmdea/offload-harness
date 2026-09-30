@@ -52,6 +52,13 @@ Two consequences the rule carries on purpose:
 - Phase B (routing a shared capability to a remote node's device) inherits the rule per node:
   each node's own list decides its owner; the delegator never has to.
 
+## Amendment (0.145.0)
+
+The rule became a live path when a box carrying a Coral added the RK3588 NPU through `fleet_accelerators`.
+[ADR 0068](0068-the-operator-may-name-the-owner-of-a-shared-accelerator-tool.md) lets the operator name the
+owner of one shared tool (`accelerator_tool_owners`); every name without an entry is still decided by the
+first-listed rule above.
+
 ## Related
 
 - [ADR 0024](0024-accelerators-are-additive-to-the-gpu-tier.md) — accelerators are additive
