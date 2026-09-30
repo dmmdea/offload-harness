@@ -136,6 +136,48 @@ func TestFleetServeParams(t *testing.T) {
 	})
 }
 
+// TestFleetServeSweepReport: the startup sweep's outcome is reported as up to
+// three lines, each on its own account. A sweep that removed some dirs and then
+// failed on one still says what it removed (the failure used to replace the
+// count), and no line calls a swept dir a crash's leftover: a dir can also be
+// swept for its age, and the sweep logs those itself.
+func TestFleetServeSweepReport(t *testing.T) {
+	failure := errors.New("sweep pipeline-jobs: removing x: access denied")
+	cases := []struct {
+		name        string
+		swept, kept int
+		err         error
+		want        []string // one substring per output line, in order
+	}{
+		{"nothing to say", 0, 0, nil, nil},
+		{"removed and kept", 3, 2, nil, []string{"swept 3 ", "kept 2 "}},
+		{"only kept", 0, 4, nil, []string{"kept 4 "}},
+		{"only a failure", 0, 0, failure, []string{"warning: pipeline-jobs sweep: " + failure.Error()}},
+		{"removed some, then failed on one", 22, 1, failure, []string{"warning: pipeline-jobs sweep: " + failure.Error(), "swept 22 ", "kept 1 "}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var out strings.Builder
+			reportPipelineJobsSweep(&out, c.swept, c.kept, c.err)
+			var lines []string
+			if text := strings.TrimSuffix(out.String(), "\n"); text != "" {
+				lines = strings.Split(text, "\n")
+			}
+			if len(lines) != len(c.want) {
+				t.Fatalf("got %d line(s), want %d:\n%s", len(lines), len(c.want), out.String())
+			}
+			for i, line := range lines {
+				if !strings.HasPrefix(line, "[fleet-serve] ") || !strings.Contains(line, c.want[i]) {
+					t.Errorf("line %d = %q, want a [fleet-serve] line containing %q", i, line, c.want[i])
+				}
+				if strings.Contains(line, "ungraceful") {
+					t.Errorf("line %d = %q: a swept dir is not necessarily a crash's leftover", i, line)
+				}
+			}
+		})
+	}
+}
+
 // TestChooseSamplerKind locks the routing decision runFleetServe's sampler
 // switch is built on: it is the ONLY thing that decides whether
 // /fleet/health's gpu_devices[] is present or omitted, so the docs' claim
