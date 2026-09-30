@@ -938,6 +938,8 @@ type runner struct {
 	localSlotAt   time.Time
 	localSlotFree bool
 	localSlotNote string
+	// localSlotWarn logs the local run registry's unreadable fail-open once per run.
+	localSlotWarn sync.Once
 	// localBusyMu/localBusyAt/localBusyRd memoise the local seat's LOAD reading
 	// (probeLocalBusy) for the same reason: the capacity wait of a subtask a deal kept
 	// off a busy seat re-reads it every tick, and twelve waiters must not each ask the
@@ -2720,18 +2722,41 @@ func (r *runner) busyReadingNow(ctx context.Context) busyReading {
 	return rd
 }
 
+// readLocalSlot is localSlotAhead's reading, unmemoised: a slot is free while the seat's
+// line has room (localRunCapRoom).
 func (r *runner) readLocalSlot() (bool, string) {
+	room, note := r.localRunCapRoom()
+	return room > 0, note
+}
+
+// localRunCapRoom is how many MORE runs the local seat's run-cap line takes: the cap
+// (fleet_max_concurrent_jobs, default 4) minus the runs registered on the seat, floored
+// at 0, or unlimitedHeadroom when no cap is configured. Its fail-open is the real
+// gate's: pipeline/agenttask.go skips the wait in line when the registry will not open,
+// so an unreadable registry counts nothing ahead of a newcomer - but the reading says
+// so in its note, and the process logs it once, because a wrong "free" is what silently
+// re-creates the livelock this count exists to prevent.
+//
+// It reads the planner seat, the seat every run on a plain box takes (agenttask.go
+// resolves it first, and only a composite decision moves a run to a layer seat).
+func (r *runner) localRunCapRoom() (room int, note string) {
 	limit := r.cfg.FleetConcurrencyLimit()
+	if limit <= 0 {
+		return unlimitedHeadroom, ""
+	}
 	seat := strings.TrimSpace(r.cfg.AgentPlannerModel(""))
-	if limit <= 0 || seat == "" {
-		return true, ""
+	if seat == "" {
+		return limit, "no agent seat configured, so no run could be counted"
 	}
 	reg, err := gpuactivity.Open(r.cfg.GPULockPath, r.cfg.StateDir)
 	if err != nil {
-		return true, ""
+		r.localSlotWarn.Do(func() {
+			log.Printf("delegate: the local run registry could not be opened (%v); the local seat's run-cap line is read as empty", err)
+		})
+		return limit, fmt.Sprintf("run registry unreadable (%v), read as empty", err)
 	}
 	ahead := len(reg.OnSeat(time.Now(), seat))
-	return ahead < limit, fmt.Sprintf("%d run(s) registered on seat %s, cap %d", ahead, seat, limit)
+	return max(limit-ahead, 0), fmt.Sprintf("%d run(s) registered on seat %s, cap %d", ahead, seat, limit)
 }
 
 // untried filters a fleet snapshot down to the nodes this subtask has not
@@ -3222,29 +3247,51 @@ func (r *runner) placeAutoRemote(seed string, st Subtask, localView NodeView, vi
 // result is read-only by the time the goroutines start (same posture as the
 // spreadViews snapshot), and the same contracts always produce the same deal.
 func (r *runner) dealSpread(contracts []core.AgentContract, localView NodeView) []spreadSlot {
-	// dealt holds the DIAL BASES already given a subtask in the CURRENT cycle.
-	//
-	// The base, not the node id, and that is the fix for a real collapse: every
-	// other exclusion in this file (pl.tried, pl.excluded, the refusal cooldown,
-	// the quarantine) keys on the base, and a node id is neither unique nor
-	// guaranteed to be published. Two remotes that both advertise "" — or the
-	// same id, which C-19 shows does drift here — shared one entry, so the
-	// second remote of a cycle found its key already taken, the cycle was
-	// reshuffled, and the fit score handed the SAME seat both subtasks while
-	// the other one idled. The base is what the dispatcher actually dials, so
-	// it is the only key that can mean "this seat already has one".
-	dealt := make(map[string]bool, len(r.spreadViews))
-	// counts is the WHOLE RUN's tally per dial base (dealt is one cycle's): how many
-	// subtasks this deal has already given each remote, held against the node's
-	// headroom so no node is dealt more than it can start (placeSpreadWith).
-	counts := make(map[string]int, len(r.spreadViews))
+	room, note := r.localRunCapRoom()
+	book := &dealBook{
+		// dealt holds the DIAL BASES already given a subtask in the CURRENT cycle.
+		//
+		// The base, not the node id, and that is the fix for a real collapse: every
+		// other exclusion in this file (pl.tried, pl.excluded, the refusal cooldown,
+		// the quarantine) keys on the base, and a node id is neither unique nor
+		// guaranteed to be published. Two remotes that both advertise "" — or the
+		// same id, which C-19 shows does drift here — shared one entry, so the
+		// second remote of a cycle found its key already taken, the cycle was
+		// reshuffled, and the fit score handed the SAME seat both subtasks while
+		// the other one idled. The base is what the dispatcher actually dials, so
+		// it is the only key that can mean "this seat already has one".
+		dealt: make(map[string]bool, len(r.spreadViews)),
+		// counts is the WHOLE RUN's tally per dial base (dealt is one cycle's): how many
+		// subtasks this deal has already given each node, held against the node's
+		// headroom so no node is dealt more than it can start (placeSpreadWith). The
+		// local seat is the base "".
+		counts:    make(map[string]int, len(r.spreadViews)+1),
+		localRoom: room,
+		localNote: note,
+	}
 	out := make([]spreadSlot, len(contracts))
 	for i, c := range contracts {
 		st := Subtask{Contract: c, EstTokens: EstimateTokens(c)}
-		out[i] = r.placeSpread(i, st, localView, dealt, counts)
+		out[i] = r.placeSpread(i, st, localView, book)
 	}
 	return out
 }
+
+// dealBook is the running tally of ONE spread deal, owned by dealSpread's
+// single-threaded pass.
+type dealBook struct {
+	dealt  map[string]bool // dial bases already given a subtask in the current cycle
+	counts map[string]int  // subtasks dealt per dial base over the whole deal; "" = the local seat
+	// localRoom is how many MORE runs the local seat's run-cap line takes when the
+	// deal starts (localRunCapRoom, read once so every subtask deals against ONE
+	// snapshot), localNote what that reading was. The local seat is counted against it
+	// exactly as a remote is counted against its headroom.
+	localRoom int
+	localNote string
+}
+
+// localRoomLeft is what the local seat's run cap still has for this deal.
+func (b *dealBook) localRoomLeft() int { return b.localRoom - b.counts[""] }
 
 // spreadSlot is one subtask's resolved spread placement plus the deadFleet flag
 // route=auto also raises — see PlacedResult.remotesUnreachable.
@@ -3316,8 +3363,8 @@ type spreadSlot struct {
 // 155–189 s under K=3 vs 91–105 s for its siblings). An idle seat keeps every
 // slot it had; `agent_spread_local_slot: "always"` restores the unconditional
 // slot.
-func (r *runner) placeSpread(i int, st Subtask, localView NodeView, dealt map[string]bool, counts map[string]int) spreadSlot {
-	return r.placeSpreadWith(i, st, localView, dealt, counts, r.skipsBusyLocal())
+func (r *runner) placeSpread(i int, st Subtask, localView NodeView, book *dealBook) spreadSlot {
+	return r.placeSpreadWith(i, st, localView, book, r.skipsBusyLocal())
 }
 
 // busyReading is what the deal knows about the local seat's load at deal time
@@ -3389,15 +3436,13 @@ func (r *runner) skipsBusyLocal() bool {
 // placeSpreadWith is placeSpread with the busy rule as an explicit argument, so
 // the no-remote-with-room fallback can re-deal WITHOUT it and the two paths
 // share one body.
-func (r *runner) placeSpreadWith(i int, st Subtask, localView NodeView, dealt map[string]bool, counts map[string]int, skipBusy bool) spreadSlot {
+func (r *runner) placeSpreadWith(i int, st Subtask, localView NodeView, book *dealBook, skipBusy bool) spreadSlot {
 	// A TEXT reservation takes the local seat out of the rotation — a spread
 	// used to ignore the lease entirely, which is how three foreign contracts
 	// loaded a reserved seat mid-measurement (2026-09-05 08:04–08:09). A media
 	// lease is deliberately NOT consulted here: spread never read it before
 	// 0.113.14 and its render is arbitrated at the affinity gate (ADR 0026), so
 	// a media holder changes nothing about a spread's deal (review 2026-09-06).
-	var nodes []NodeView
-	var bases []string
 	localIn := !Reserved(r.spreadLease)
 	// A BUSY local seat (0.113.20) leaves the rotation exactly like a leased
 	// one, but only while a remote with room exists to take its slots: the
@@ -3405,9 +3450,8 @@ func (r *runner) placeSpreadWith(i int, st Subtask, localView NodeView, dealt ma
 	// with none left the slot falls back to the ordinary deal below, reason
 	// attached — the busy rule is an optimisation, never a way to lose work.
 	skip := skipBusy && localIn
-	if localIn && !skip {
-		nodes, bases = []NodeView{localView}, []string{""}
-	}
+	var remotes []NodeView
+	var remoteBases []string
 	eligible := 0
 	var heldBack, atCap []string
 	for j, v := range r.spreadViews {
@@ -3432,13 +3476,32 @@ func (r *runner) placeSpreadWith(i int, st Subtask, localView NodeView, dealt ma
 		// rotation and never re-ranks the rest, so the fit order, the cycle and
 		// the one-subtask-per-seat-per-cycle invariant are exactly what they
 		// were. The overflow is handed to the capacity wait below.
-		if headroom(v) <= counts[r.spreadBases[j]] {
-			atCap = append(atCap, fmt.Sprintf("%s: cap (%d/%d running, headroom %d, dealt %d)", laneID(v), v.JobsRunning, v.MaxConcurrentJobs, headroom(v), counts[r.spreadBases[j]]))
+		if headroom(v) <= book.counts[r.spreadBases[j]] {
+			atCap = append(atCap, fmt.Sprintf("%s: cap (%d/%d running, headroom %d, dealt %d)", laneID(v), v.JobsRunning, v.MaxConcurrentJobs, headroom(v), book.counts[r.spreadBases[j]]))
 			continue
 		}
-		nodes = append(nodes, v)
-		bases = append(bases, r.spreadBases[j])
+		remotes = append(remotes, v)
+		remoteBases = append(remoteBases, r.spreadBases[j])
 	}
+	// The LOCAL seat is counted the same way (ADR 0063, decision 6): its run-cap line
+	// takes fleet_max_concurrent_jobs runs, minus those already registered on it, and a
+	// deal that has spent that room takes the seat out of the rotation exactly as a
+	// remote at its headroom is taken out - the overflow waits in line for the first
+	// node that frees (the seat too) instead of piling into a line it cannot leave.
+	// Only while some remote COULD run the contract (eligible > 0): with none, the
+	// seat's own line is the only queue there is, as it always was.
+	inRotation := localIn && !skip
+	localSpent := false
+	if inRotation && eligible > 0 && book.localRoomLeft() <= 0 {
+		inRotation, localSpent = false, true
+	}
+	var nodes []NodeView
+	var bases []string
+	if inRotation {
+		nodes, bases = []NodeView{localView}, []string{""}
+	}
+	nodes, bases = append(nodes, remotes...), append(bases, remoteBases...)
+	held := append(append([]string(nil), heldBack...), atCap...)
 	if skip && len(nodes) == 0 {
 		if len(atCap) > 0 {
 			// Remotes with room exist, but this run's own deal has already spent
@@ -3449,7 +3512,7 @@ func (r *runner) placeSpreadWith(i int, st Subtask, localView NodeView, dealt ma
 		}
 		// The reason must not send an operator chasing capacity when no remote
 		// could take this contract at all.
-		sl := r.placeSpreadWith(i, st, localView, dealt, counts, false)
+		sl := r.placeSpreadWith(i, st, localView, book, false)
 		if eligible == 0 {
 			sl.reason += fmt.Sprintf(" (local seat busy: %d in flight; no eligible remote)", r.spreadLocalBusy.inflight)
 		} else {
@@ -3457,45 +3520,68 @@ func (r *runner) placeSpreadWith(i int, st Subtask, localView NodeView, dealt ma
 		}
 		return sl
 	}
+	if localSpent && len(nodes) == 0 {
+		// Every remote that could run it is at its headroom (or holds a backlog the
+		// caller will not wait out) AND this deal has spent the local seat's run cap:
+		// the overflow waits in line rather than stack on either.
+		return spreadSlot{placement: placement{view: localView, reason: fmt.Sprintf("route=spread: every remote with room is already dealt to its headroom or holds a backlog past the caller's patience (%s), and the local seat's run cap is spent (%d of %d free slot(s) dealt; %s)", strings.Join(held, "; "), book.counts[""], book.localRoom, book.localNote)}, capacityWait: true}
+	}
 	if len(nodes) == 0 || (len(nodes) == 1 && nodes[0].Local) {
 		why, class := r.noEligibleRemote(st, r.spreadViews, r.spreadProbeErrs)
-		if held := append(append([]string(nil), heldBack...), atCap...); len(held) > 0 {
+		what := "no eligible remote"
+		if len(held) > 0 {
 			// Not "no eligible remote": every remote that could run it is at its
 			// headroom or holds a backlog the caller will not wait out, and saying
 			// otherwise would send an operator to add a node.
+			what = "no remote with room"
 			why = "every eligible remote is at headroom or holds a backlog past the caller's patience — " + strings.Join(held, "; ")
 			class = core.DeferClassCapacity
+			if len(r.spreadProbeErrs) > 0 {
+				// A remote that failed its health probe is a BROKEN node, not a busy
+				// one (noEligibleRemote's DEFAULT-TO-LOUD rule): name it, and keep the
+				// loud class so the run reads as the broken fleet it is.
+				why += fmt.Sprintf("; and %d other remote(s) failed the health probe: %s", len(r.spreadProbeErrs), strings.Join(r.spreadProbeErrs, "; "))
+				class = core.DeferClassInfrastructure
+			}
 		}
 		dead := class == core.DeferClassInfrastructure
 		if Reserved(r.spreadLease) {
 			// The one placement the lease exists to forbid. Dealt local so the
 			// slot has a view, but flagged: attempt() waits or defers.
-			return spreadSlot{placement: placement{view: localView, reason: "route=spread: local seat reserved (" + HolderLine(r.spreadLease) + "); no eligible remote — " + why}, deadFleet: dead, reserved: true}
+			return spreadSlot{placement: placement{view: localView, reason: "route=spread: local seat reserved (" + HolderLine(r.spreadLease) + "); " + what + " — " + why}, deadFleet: dead, reserved: true}
 		}
-		return spreadSlot{placement: placement{view: localView, reason: "route=spread: no eligible remote — local (" + why + ")"}, deadFleet: dead}
+		book.counts[""]++
+		return spreadSlot{placement: placement{view: localView, reason: "route=spread: " + what + " — local (" + why + ")"}, deadFleet: dead}
 	}
 	slot := i % len(nodes)
 	if nodes[slot].Local {
 		// A local slot opens a new cycle: the deck of remotes is reshuffled, so
 		// the next len(nodes)-1 subtasks deal one to each seat again.
-		clear(dealt)
+		clear(book.dealt)
+		book.counts[""]++
 		return spreadSlot{placement: placement{view: localView, reason: fmt.Sprintf("route=spread → local (slot %d of %d)", slot+1, len(nodes))}}
 	}
-	k := fitPick(st, nodes, bases, slot, dealt)
+	k := fitPick(st, nodes, bases, slot, book.dealt)
 	if k < 0 {
 		// Every eligible remote has already taken a subtask this cycle — which a
 		// ragged eligible set can reach without passing through a local slot.
 		// Reshuffle rather than stack: after the clear a pick always exists,
 		// because len(nodes) > 1 guarantees at least one remote.
-		clear(dealt)
-		k = fitPick(st, nodes, bases, slot, dealt)
+		clear(book.dealt)
+		k = fitPick(st, nodes, bases, slot, book.dealt)
 	}
-	dealt[bases[k]] = true
-	counts[bases[k]]++
+	book.dealt[bases[k]] = true
+	book.counts[bases[k]]++
 	kind, rule := shapeOf(st)
 	reason := fmt.Sprintf("route=spread → %s (slot %d of %d, fit=%s/%s)", nodes[k].NodeID, slot+1, len(nodes), kind, rule)
 	if skip {
 		reason += fmt.Sprintf("; local seat busy: %d in flight", r.spreadLocalBusy.inflight)
+	}
+	if len(held) > 0 {
+		// Nodes this subtask could have been dealt to and was not: named on the slot
+		// they were passed over for, with their arithmetic, so an operator can see why
+		// a node got nothing.
+		reason += "; held back: " + strings.Join(held, "; ")
 	}
 	return spreadSlot{placement: placement{view: nodes[k], base: bases[k], reason: reason}}
 }
