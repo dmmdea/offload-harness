@@ -87,6 +87,12 @@ func TestEngineFor(t *testing.T) {
 		{"classify", "coral-edgetpu@fleet", "coral-edgetpu"},
 		{"object_detect", "hailo-8l", "hailo-8l"},
 		{"face_detect", "node-c:hailo-8l", "hailo-8l"},
+		{"classify", "rknpu", "rknpu"},
+		{"object_detect", "node-d:rknpu", "rknpu"},
+		{"embed", "rknpu@fleet", "rknpu"},
+		// The device outranks the task: a transcribe row whose tier is an NPU is that NPU's call,
+		// not a whisper.cpp job.
+		{"transcribe", "rknpu", "rknpu"},
 	}
 	for _, c := range cases {
 		if got := EngineFor(c.task, c.seat); got != c.want {
