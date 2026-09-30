@@ -76,6 +76,7 @@ from urllib.parse import urlparse
 
 DEFAULT_CTX = 4096
 DEFAULT_TOP_K = 40  # the sampling defaults below are llama.cpp's, so an unset knob behaves like it does on the GPU seats
+MAX_TOP_K = 2**31 - 1  # RKLLMSamplingParam.top_k is an int32: a larger value would wrap to a negative one in ctypes
 DEFAULT_TOP_P = 0.95
 DEFAULT_TEMPERATURE = 0.8
 BASE_DOMAIN_ID = 1  # the vendor multimodal demo's value for RK3588 (0 is for rk3562/rv1126b); text-only ran fine on 0 too
@@ -890,6 +891,7 @@ def build_request(body: dict, ctx_size: int, has_vision: bool) -> ChatRequest:
     top_k = _integer(body, "top_k", DEFAULT_TOP_K)
     if top_k <= 0:  # llama.cpp's 0 means "off", which the runtime has no value for: use the default
         top_k = DEFAULT_TOP_K
+    top_k = min(top_k, MAX_TOP_K)
     if temperature == 0 or top_p == 0:  # greedy: top_k 1 is deterministic whatever the runtime does with temperature 0
         top_k, top_p, temperature = 1, 1.0, 1.0
     sampling = Sampling(top_k, top_p, temperature,

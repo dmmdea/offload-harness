@@ -234,6 +234,9 @@ class BuildRequestTest(unittest.TestCase):
         self.assertEqual(s, rs.Sampling(20, 0.5, 0.3, 1.2, -0.5, 0.5))
         self.assertEqual(self.build(repeat_penalty=1.3).sampling.repeat_penalty, 1.3)
         self.assertEqual(self.build(top_k=0).sampling.top_k, 40)  # 0 = off in llama.cpp; the runtime has no such value
+        self.assertEqual(self.build(top_k=-5).sampling.top_k, 40)
+        self.assertEqual(self.build(top_k=2 ** 32).sampling.top_k, 2 ** 31 - 1)  # the runtime's field is an int32
+        self.assertEqual(self.build(top_k=2 ** 31 - 1).sampling.top_k, 2 ** 31 - 1)
         for bad in ({"temperature": -1}, {"temperature": "hot"}, {"top_p": 2}, {"top_k": 1.5}, {"presence_penalty": 9}):
             with self.subTest(bad), self.assertRaises(rs.ApiError):
                 self.build(**bad)
