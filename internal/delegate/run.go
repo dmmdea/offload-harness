@@ -3231,6 +3231,9 @@ func (r *runner) runLocal(ctx context.Context, jobID string, contract core.Agent
 		pairNode = host
 		pr.PlacementReason += "; engine " + r.cfg.Endpoint + " is " + host + "'s (attributed there)"
 	}
+	// The run is handed to the seat now: mark it in the ledger (PR-14, ADR 0064),
+	// so a runner that wedges is visible while it does.
+	r.recordStarted(contract, jobID, "", pr.Node, pr.Seat, pr.PlacementReason)
 	// Queued until the seat is working on it (seatWorking): the run's own
 	// progress reports flip the card, so a cold load does not read "running".
 	r.pairInflight(&pr, jobID, pairNode, nil, pr.Seat, "queued", true)
@@ -3330,6 +3333,9 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 	// so persist the intent before any polling (Option A, intent.go).
 	r.intent.dispatched(jobID, base, contract.Goal)
 	pr.intentRecorded = true
+	// And say so in the ledger now, not when the job ends: a hang, or a ghost that
+	// outlives this process, is then visible while it matters (PR-14, ADR 0064).
+	r.recordStarted(contract, jobID, jobID, view.NodeID, intendedSeat, "")
 	// The card stays queued past the ack: it turns running when a poll shows
 	// the node's seat working on the job (seatWorking), not at the ack.
 	pairRunning := false
@@ -4818,7 +4824,15 @@ func (r *runner) record(contract core.AgentContract, pr PlacedResult) {
 			// The job behind the row (D-101 / F15): what this result already
 			// knew, so a reader never has to open the corpus for it. The
 			// session that asked is stamped by ledger.Record itself.
-			JobID:            pr.JobID,
+			JobID: pr.JobID,
+			// PR-14 (ADR 0064): the surface that admitted the contract, the id the
+			// fleet node knows the job by (a remote attempt only: a job that stayed
+			// on this box has none) and the closed-set reason code — so a reader
+			// never joins on latency or greps prose. The reason above is stored
+			// whole: the ledger no longer cuts it.
+			Door:             doorOf(contract),
+			FleetJobID:       fleetJobIDOf(pr),
+			ReasonCode:       reasonCodeFor(pr),
 			Route:            r.route,
 			Placement:        pr.PlacementReason,
 			Steps:            pr.Result.Steps,
