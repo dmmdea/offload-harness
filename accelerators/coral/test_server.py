@@ -117,6 +117,47 @@ def main() -> int:
             p.kill()
             p.wait()
 
+    # Input quantisation (_set_input): a uint8 input whose quantisation is not the raw pixel is rescaled with
+    # pycoral's rule q = (px - 128) / (128 * scale) + zp; the models whose quantisation IS the pixel to within
+    # one step pass it through untouched. The (scale, zp) pairs are the manifest models' own, read from their
+    # CPU twins on 2026-09-30. Before this, EfficientNet-EdgeTPU-S got raw pixels: 41.6 % top-1 instead of 63.9 %.
+    import importlib.util
+    try:
+        import numpy as np
+    except ImportError:
+        np = None
+    if np is None:
+        print("SKIP input quantisation (no numpy on this box)")
+    else:
+        spec = importlib.util.spec_from_file_location("coral_server_under_test", SERVER)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        class FakeIt:
+            def __init__(self, dtype, quant):
+                self.d, self.got = {"index": 0, "dtype": dtype, "quantization": quant}, None
+
+            def get_input_details(self):
+                return [self.d]
+
+            def set_tensor(self, index, x):
+                self.got = x
+
+        px = np.array([[[0, 128, 255], [64, 200, 131]]], dtype=np.uint8)  # (1, 2, 3): one row, two pixels
+        it = FakeIt(np.uint8, (0.012566016986966133, 131))  # EfficientNet-EdgeTPU-S (classify imagenet, embed)
+        mod._set_input(it, px)
+        want = np.clip(np.rint((px.astype(np.float32) - 128) / (128 * 0.012566016986966133) + 131), 0, 255).astype(np.uint8)
+        check("efficientnet-s input is rescaled, not passed raw", it.got is not None and np.array_equal(it.got[0], want)
+              and not np.array_equal(it.got[0], px), str(None if it.got is None else it.got.tolist()))
+        check("rescaled input keeps shape and dtype", it.got.shape == (1, 1, 2, 3) and it.got.dtype == np.uint8, str(it.got.shape))
+        check("mid-grey 128 maps to the zero point 131", int(it.got[0, 0, 0, 1]) == 131, str(it.got.tolist()))
+        for name, quant in (("inat mobilenet v2 / deeplab (1/128, 128)", (0.0078125, 128)),
+                            ("efficientdet-lite (1/128, 127)", (0.0078125, 127))):
+            it = FakeIt(np.uint8, quant)
+            mod._set_input(it, px)
+            check(f"{name} input passes through untouched", it.got is not None and np.array_equal(it.got[0], px),
+                  str(None if it.got is None else it.got.tolist()))
+
     # Non-loopback bind is refused at startup (exit 2).
     env = dict(os.environ, CORAL_ENABLED="0", CORAL_BIND="0.0.0.0", CORAL_PORT=str(_free_port()))
     p = subprocess.run([sys.executable, SERVER], env=env, capture_output=True, text=True, timeout=20)
