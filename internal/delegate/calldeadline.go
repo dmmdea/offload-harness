@@ -43,10 +43,13 @@ import (
 	"github.com/dmmdea/offload-harness/internal/pairworkloads"
 )
 
-// ErrCallDeadline is the cause a context carries when the whole-call deadline
-// passed (context.Cause). A caller that cancels for any other reason — the client
-// going away, a test tearing down — is NOT the call deadline: its subtasks report
-// their own "canceled" outcomes exactly as before.
+// ErrCallDeadline is the cause the call's context carries when the whole-call
+// deadline passed (context.Cause), so an error that wraps it names the deadline. It
+// is a label, not the gate: whether an outcome is the deadline's is decided by the
+// clock (callDeadline.reached) at the moment the outcome is produced. A caller that
+// cancels for any other reason before the deadline — the client going away, a test
+// tearing down — is NOT the call deadline: reached() is false, and its subtasks
+// report their own "canceled" outcomes exactly as before.
 var ErrCallDeadline = errors.New("call deadline reached")
 
 // callDeadlinePrefix opens every reason the deadline publishes. It is a stable

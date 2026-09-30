@@ -2255,20 +2255,22 @@ func runDelegate(args []string) error {
 // non-zero class named only the failures, so an operator who fixed the
 // transport error learned about the broken node only on the next run.
 //
-// SURFACE PARITY with mcpserver.delegateIsError (R5-2). The two surfaces must
-// agree on the case that matters — a subtask LOST to the stack (Summary's
-// LostToStack: its contracted output never arrived and a box is why, which
-// includes a finished loop whose structured re-pack seat was unreachable — the
-// prose rides along, but the checked deliverable the contract asked for does
-// not) is loud on both. It used
-// not to be: the MCP flag gated on `Succeeded == 0`, so one of two subtasks
-// eaten by a dead llama-server exited non-zero HERE and returned a clean tool
-// call THERE, and the quiet surface was the one whose caller cannot read an exit
-// code. The one REMAINING difference is deliberate and narrow: a fleet-down
-// LOCAL SUCCESS (Infrastructure with no LostToStack — every subtask delivered,
-// but the fleet failed its probe) exits non-zero here and stays a quiet success
-// there, because an exit code sits beside the printed results while
-// IsError:true tells a model its work failed.
+// THE TWO SURFACES DIVERGE ON PURPOSE (C-75, ADR 0065). The MCP door's error
+// flag (mcpserver.delegateIsError) once matched this rule on the case that
+// matters — a subtask LOST to the stack (Summary's LostToStack: its contracted
+// output never arrived and a box is why, which includes a finished loop whose
+// structured re-pack seat was unreachable) — so one of two subtasks eaten by a
+// dead llama-server could not read as a clean call on either surface (R5-2).
+// C-75 narrowed the flag: IsError says THE CALL FAILED, the MCP client answers an
+// error-flagged body by keeping only its head and tail, and a partial call that
+// delivered seven digests did not fail. It is now set only when nothing succeeded
+// and something failed, was lost or was skipped; a partial result is a successful
+// call whose body says what is missing (summary.lost_to_stack, each result's
+// defer_class and reason). This verb keeps the wider rule: an exit code sits
+// BESIDE the printed results, so it cannot hide a digest, and a script has no
+// other loud signal. A subtask lost to the stack, and a fleet-down LOCAL SUCCESS
+// (Infrastructure with no LostToStack — every subtask delivered, but the fleet
+// failed its probe), exit non-zero here whether or not a sibling succeeded.
 func delegateExitErr(sum delegate.Summary) error {
 	var parts []string
 	if sum.Failed > 0 {

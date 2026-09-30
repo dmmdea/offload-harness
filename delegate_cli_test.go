@@ -94,11 +94,12 @@ func TestDelegateExitContract(t *testing.T) {
 		{"transport failure exits non-zero", delegate.Summary{Failed: 1}, "failed (transport/config)"},
 		{"a broken node exits non-zero", delegate.Summary{Deferred: 2, Infrastructure: 2, LostToStack: 2}, "infrastructure/config"},
 		{"failures win the message", delegate.Summary{Failed: 1, Deferred: 1, Infrastructure: 1, LostToStack: 1}, "failed (transport/config)"},
-		// R5-2, the SURFACE-PARITY row. This exact summary is what the MCP tool's
-		// delegateIsError now flags (its table pins the same shape): a subtask
-		// eaten by a broken box while a sibling finished. The two surfaces had
-		// silently diverged here — the CLI exited non-zero while the MCP call came
-		// back clean — and the divergence must not return from the CLI side either.
+		// R5-2, the wide-exit-rule row: a subtask eaten by a broken box while a
+		// sibling finished exits non-zero HERE. Since C-75 the MCP tool's
+		// delegateIsError deliberately does NOT flag this exact summary (its table
+		// pins it as false: a partial result is a successful call whose body says
+		// what is missing), so the two surfaces diverge on purpose — an exit code
+		// sits beside the printed results, an error flag makes the client cut the body.
 		{"a subtask lost to a broken box beside a sibling success", delegate.Summary{Succeeded: 1, Deferred: 1, Infrastructure: 1, LostToStack: 1}, "infrastructure/config"},
 	}
 	for _, tc := range cases {

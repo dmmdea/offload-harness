@@ -87,9 +87,10 @@ func TestResearchPartialResultIsNotAToolError(t *testing.T) {
 // TestResearchDigestsPrecedeSources: the digests (results) come before the long
 // sources in the marshalled order — a client that keeps only the head and the
 // tail of a long body then keeps the digests, not the page metadata. The body
-// still LEADS with the summary (roast delta 14), and a partial run's `partial`
-// and `error` notes sit beside it: with the error flag no longer marking a
-// partial result, they are the loud signal that pages are missing.
+// still LEADS with the summary (roast delta 14), and the notes of a batched run
+// that returned an error (`partial`, `error`) sit beside it. With the error flag
+// no longer marking a partial result, what says that pages are missing is the
+// summary and each result's own fields; the two notes are the rarer case.
 func TestResearchDigestsPrecedeSources(t *testing.T) {
 	s := researchServer(t, nil)
 	res, err := s.handleResearch(context.Background(), callReq(researchArgs))
@@ -113,9 +114,10 @@ func TestResearchDigestsPrecedeSources(t *testing.T) {
 }
 
 // TestResearchWireFieldOrder pins the WHOLE marshalled order, including the two
-// notes that only a partial run carries: summary, partial, error, results,
-// result_sources, sources. A partial result is no longer error-flagged, so
-// `partial` and `error` must stay in the head of the body.
+// notes that only a batched run that returned an error carries: summary, partial,
+// error, results, result_sources, sources. A partial result is no longer
+// error-flagged, so if a run ever does set them they must stay in the head of
+// the body.
 func TestResearchWireFieldOrder(t *testing.T) {
 	b, err := json.Marshal(researchWire{
 		Summary: map[string]int{"succeeded": 1}, Partial: true, Error: "chunk 2 failed",

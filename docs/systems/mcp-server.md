@@ -207,10 +207,18 @@ whose reason opens `call deadline reached; N unfinished` (N is the whole call's 
 chunk of a batched research call) and then says what that subtask was doing: running on a named node
 under a named job, running on the local seat, not yet placed, never started, or not stopping. The
 outstanding work is cancelled — the local seat is told to stop, polling of a remote job ends and the
-node is asked to withdraw it (`DELETE /fleet/jobs/{id}`, best effort: a node that has not shipped the
-route answers 404 or 405 and keeps the job) — nothing further starts, and a remote job the node had
-already started keeps running there and stays open in the intent ledger for the recovery pass. The
-result is a successful tool call: a deadline defer is a result shape, not a failure. The default is above the longest single subtask that starts at once (`timeout_sec` cap 900 s + the
+node is asked to withdraw it (`DELETE /fleet/jobs/{id}`, best effort; the reason says what the node
+answered: no route, already started, taken back, or no answer) — nothing further starts, and a remote
+job the node had already started keeps running there and stays open in the intent ledger for the
+recovery pass. The cut changes what an outcome is called, never what was measured: a run cancelled
+after nine steps still reports its steps, tokens, stop reason and trace, and what the outcome itself
+reported beyond the cancellation is quoted in the reason (`the run itself reported <class>: ...`). A
+subtask whose seat ignores its context is abandoned after a bounded unwind: its result carries the job
+id of the attempt that had not returned, and its late row, if it ends, is under the same id. On
+`route=queue` the delegator takes one last look at each job whose poll it cancelled and publishes what
+the holder says: a finished job is returned as its answer, one still held is a defer that says queued
+or claimed. The result is a successful tool call: a deadline defer is a result shape, not a failure.
+The default is above the longest single subtask that starts at once (`timeout_sec` cap 900 s + the
 300 s admission allowance + the 60 s poll grace) and below the client's abort by the margin a response
 needs. It is not a promise that no healthy subtask is cut: time queued on a node (credited back to the
 wall, up to 300 s) and a capacity wait come on top, so a worst-case auto-sized subtask can run past it.

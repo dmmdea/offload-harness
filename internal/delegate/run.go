@@ -912,8 +912,9 @@ launch:
 		// (a finished loop whose re-pack seat was unreachable), and the count is
 		// on the CONTRACTED deliverable — see Summary.LostToStack above. Both are
 		// infrastructure; only one is lost work, and a consumer that must decide
-		// "did anything get eaten?" (the MCP error flag) cannot answer it from
-		// the merged count.
+		// "did anything get eaten?" (the loud signal of a partial result, and the
+		// MCP error flag when nothing succeeded) cannot answer it from the merged
+		// count.
 		lost := pr.Result.Deferred && BrokenStackDefer(pr.Result.DeferClass)
 		infra := pr.remotesUnreachable || lost
 		// DO NOT add "every remote refused" to this. It is tempting after

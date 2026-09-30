@@ -3437,11 +3437,10 @@ func (s *Server) handleAgentDelegate(ctx context.Context, req *mcp.CallToolReque
 //     nothing succeeded.
 //
 // A PARTIAL result is a successful call whose body says what is missing: the
-// summary counts (failed, lost_to_stack, infrastructure, skipped), each
-// subtask's own `failed` / `defer_class` / `reason`, and for research the
-// `partial` and `error` notes. The CLI keeps its wider exit-code rule — an exit
-// code sits BESIDE the printed results — and a call deadline's budget defers are
-// result shapes, never a reason for the flag.
+// summary counts (failed, lost_to_stack, infrastructure, skipped) and each
+// subtask's own `failed` / `defer_class` / `reason`. The CLI keeps its wider
+// exit-code rule — an exit code sits BESIDE the printed results — and a call
+// deadline's budget defers are result shapes, never a reason for the flag.
 func delegateIsError(sum delegate.Summary) bool {
 	if sum.Succeeded > 0 {
 		return false
@@ -3620,16 +3619,26 @@ func result(r core.Result) (*mcp.CallToolResult, error) {
 // its head and its tail (C-75):
 //
 //   - the summary leads (roast delta 14: eight quiet defers must read as a loud
-//     outcome);
-//   - `partial` and `error` come next. A partial result is no longer flagged as a
-//     tool error (delegateIsError), so these two notes are what says that pages
-//     are missing, and they must not sit behind anything long;
+//     outcome). A partial result is no longer flagged as a tool error
+//     (delegateIsError), so its counts — failed, lost_to_stack, deferred, skipped —
+//     and each result's own `failed` / `defer_class` / `reason` (mapped to its page
+//     by `result_sources`) are what say that pages are missing;
+//   - `partial` and `error` come next: the notes of a batched run that returned an
+//     error beside the results it had collected. They are rare (see below), but
+//     they are the loudest thing the body can say, so they do not sit behind
+//     anything long;
 //   - the DIGESTS (`results`, with the `result_sources` index that maps them to
 //     pages) come before the sources. They are the deliverable;
 //   - `sources` is last: one metadata row per fetched page, the longest part of
 //     the body and the part a caller can most afford to lose.
 //
 // Every field the body ever carried is still here; only the order moved.
+//
+// `partial` and `error` are narrower than their names suggest: RunBatched returns an
+// error only for what RunWith validates (the route, the subtask count, the tailnet
+// remotes), and every chunk of one call shares all three, so no chunk can fail after
+// another has succeeded. A failed, lost or deferred PAGE never sets them; it is the
+// summary and its own result row that say so.
 type researchWire struct {
 	Summary       any               `json:"summary"`
 	Partial       bool              `json:"partial,omitempty"`

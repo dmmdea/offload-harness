@@ -54,28 +54,54 @@ measurement of the client.
    including one that failed its acceptance checks, is an answer and is never rewritten: an abstention
    whose retry was cut stays an abstention and carries the retry's fate in its `retry_note`.
 
+   The cut decides what an outcome is CALLED, never what was observed. It keeps the run's own wire and
+   overrides only `deferred`, `defer_class` (`budget`) and `reason`, so a local run the deadline
+   cancels after nine steps and thousands of generated tokens still publishes its steps, tokens, stop
+   reason, seat rate and trace, on the result, the ledger row and the corpus row: those are the longest
+   runs, the ones the wall sizing and the rigger most need measured. What the outcome itself reported
+   beyond the cancellation is quoted, bounded, in the reason (`the run itself reported <class>:
+   <reason>` for a defer, `the run itself failed: <error>` for a failure; a cancelled poll's own
+   opening clause is dropped, what a give-up appended after it is kept), so a stack failure that lands
+   inside the unwind is not erased; "it was cancelled" is written only for an outcome that echoed a
+   cancellation. An outcome is "produced after the deadline" by the clock, not by the context's cause:
+   `ErrCallDeadline` is the cause a subtask's context carries, so an error that wraps it names the
+   deadline, but the rewrite cannot key on it (a client cancel before the deadline is not the deadline,
+   and a parent that ends earlier is adopted as the call's own). The wait outcomes built in `settle`
+   quote nothing of the wait's own text; the placement narration keeps that history behind the deadline
+   marker. A wait the deadline ends AFTER refused attempts is recorded like any other cut, as one
+   closing row under a job id of its own (the id of the last refused dispatch already belongs to that
+   attempt's row, and a second row under it would double-count one id); the caller is given that id.
+
 3. **The unwind is bounded, and a subtask that ignores its context cannot hold the call.** Cooperating
    goroutines get an allowance after the deadline (a twentieth of the time left when placement began,
    clamped to 250 ms to 10 s) to write their own rows and hand back a truthful result. A
    goroutine still running after it is abandoned: the call returns a "did not stop" defer for it, its
    late answer is dropped by a board that no longer accepts writes, its own rows are still recorded,
-   and the ledger closes after the last such goroutine returns. A remote job cut this way keeps its
+   and the ledger closes after the last such goroutine returns. The abandoned result carries the job id
+   of the attempt that had not returned (the runner remembers each subtask's latest), the call records
+   its own row under that id at return, and the goroutine's late row, if it ends, is under the same
+   id, so the caller can reconcile the two; the result still names no node or seat. A remote job cut this way keeps its
    intent open (`orphanable`): the node may still finish it, and the recovery pass may still harvest it.
    A subtask nobody ran (never started, abandoned, or cut before it was placed) names no node and no
    seat, as `exhausted()` already does for "no node took it", and is marked `Unplaced`. Once the run
    begins draining its PAIR emitter, a frame from an abandoned goroutine is dropped: `Emit` adds to a
    `sync.WaitGroup`, and an Add racing the last Done of a Wait in progress panics that Done, which
    would take the process down for a frame nobody is waiting for (before this change no goroutine
-   could outlive the run).
+   could outlive the run). The drop is logged once per run, naming the job: PAIR's card for it stays
+   as it was until PAIR's own staleness sweep.
 
 4. **A call deadline is a result shape, never a failure.** Budget-class defers do not set the MCP error
    flag. The flag itself narrows (C-75): `isError` is set only when NOTHING succeeded and something
    failed, was lost to the stack, or was skipped. A partial result is a successful call whose body says
-   what is missing (`summary.failed`, `lost_to_stack`, `skipped`, each subtask's own `failed` /
-   `defer_class` / `reason`, and for research `partial` and `error`); the CLI keeps its wider
-   exit-code rule. `offload_research` marshals `summary`, `partial`, `error`, `results`,
-   `result_sources`, `sources`: the digests before the long sources, and the notes that say pages are
-   missing in the head now that the flag no longer does. Every field is kept.
+   what is missing (`summary.failed`, `lost_to_stack`, `skipped`, and each subtask's own `failed` /
+   `defer_class` / `reason`); the CLI keeps its wider exit-code rule. `offload_research` marshals
+   `summary`, `partial`, `error`, `results`, `result_sources`, `sources`: the summary leads, the digests
+   come before the long sources. What says pages are missing is the summary and each result's own
+   fields, mapped to their pages by `result_sources`. `partial` and `error` are narrower than their
+   names: they mark a batched run that returned an error beside the results it had collected, and
+   `RunBatched` returns an error only for what `RunWith` validates (route, subtask count, tailnet
+   remotes), which every chunk of one call shares, so no ordinary partial result sets them. They stay
+   in the head anyway. Every field is kept.
 
 5. **A cut remote job is withdrawn on request, best effort.** Cancelling the poll leaves the job on its
    node, where it could start later on a seat nobody is waiting for. At the deadline the delegator asks
@@ -83,8 +109,9 @@ measurement of the client.
    bearer, five seconds, detached from the cancelled context. It is a request, not a claim: a node that
    has not shipped the route answers 404 or 405 and keeps the job (today's behaviour), a job that has
    already started is not the delegator's to cancel, and nothing the call publishes depends on the
-   answer. The reason says the node was asked, never that the job is gone. The ask never outlives the
-   unwind: its timeout is the lesser of five seconds and three quarters of the allowance, so a node
+   answer. The reason carries what the node answered, in words (no route, already started, taken
+   back, no answer), classified like the node route's own contract, and never claims more than that.
+   The ask never outlives the unwind: its timeout is the lesser of five seconds and three quarters of the allowance, so a node
    that does not answer cannot turn the truthful cut result (its node and job) into an abandoned one.
 
 6. **Progress is reported only to a client that asks, and nothing depends on it.** A request that
@@ -98,7 +125,11 @@ measurement of the client.
    client SDK the token is sent only when the caller passes `onprogress`, and the request timeout
    restarts on a progress update only when the caller also sets `resetTimeoutOnProgress`
    (`maxTotalTimeout` is the absolute cap). **Whether the reference client does either is
-   unverified**; the whole-call deadline does not rely on it.
+   unverified**; the whole-call deadline does not rely on it. The plan made progress conditional on
+   the client honouring `resetTimeoutOnProgress`, which cannot be checked without that client. It is
+   kept, in its own commit: the condition is enforced at run time by the client's own choice (nothing is
+   sent without a token), it costs one goroutine and a bounded queue per token-carrying call, and a
+   reader who would rather hold it back until the behaviour is measured drops that one commit.
 
 ## Consequences
 
@@ -112,10 +143,22 @@ measurement of the client.
 - `isError` no longer marks a partial result. A caller that read the flag as "something was lost" reads
   `summary` instead; the counts have not changed.
 - `route=queue` is bounded too: a poll the deadline cancelled is reported as a defer (the job stays on
-  the holder), not a failure. The queue lane still polls its jobs one after another, so a job that
-  finished behind an earlier, slower one is not collected once the deadline has passed.
-- Not solved here: the capacity wait still ends on its own TTL rather than on this deadline, and a
-  producing job is still polled to its node ceiling when no deadline is set (the CLI).
+  the holder), not a failure. The queue lane polls its jobs one after another, so at the deadline the
+  delegator takes one last look at each job whose poll it cancelled (once each, all at once, on a
+  context of its own bounded by the lesser of 2 s and three quarters of the unwind allowance) and
+  publishes what the holder says: a finished or failed job is returned as that answer, a job still held
+  is a call-deadline defer that says queued or claimed and running, and a job the holder could not be
+  asked about says so. The unfinished count spans only the jobs that really are unfinished.
+- The rigger classifies a cut as its own axis, `call-deadline`, ahead of `timeout` (its wall-timeout
+  pattern matches the bare word "deadline"), so a call that ran out of time does not steer a seat's
+  timeout share.
+- `agent_call_deadline_sec` at or above the client's abort, or a negative that was meant as a number,
+  loads (it never refuses) but is a `doctor` finding and a startup warning.
+- Not solved here: the capacity wait still ends on its own TTL rather than on this deadline; a
+  producing job is still polled to its node ceiling when no deadline is set (the CLI); and the other
+  doors that call the same engine (`agent_run` and `offload_ask` with a route, the review lane's fleet
+  path) carry no deadline, because the plan names the two delegation doors, so a call through them can
+  still outlive the client's abort.
 
 ## Alternatives considered
 
@@ -140,7 +183,9 @@ measurement of the client.
 - `internal/delegate/progress.go`, `internal/mcpserver/progress.go` (progress notifications)
 - `internal/mcpserver/mcpserver.go` (`callDeadlineAt`, `handleAgentDelegate`, `handleResearch`,
   `delegateIsError`, `researchWire`)
-- `internal/config/config.go` (`AgentCallDeadlineSec`, `CallDeadline`)
+- `internal/config/config.go` (`AgentCallDeadlineSec`, `CallDeadline`, `CallDeadlineFindings`)
+- `internal/core/calldeadline.go` (`CallDeadlineReasonPrefix`), `internal/rig/rig.go` (the
+  `call-deadline` axis)
 
 ## Related docs
 
