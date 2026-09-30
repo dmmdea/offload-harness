@@ -9,6 +9,60 @@ import (
 	"testing"
 )
 
+// stubSysfs swaps the accelerator sysfs reader for the test. The real one reads THIS machine, so a
+// test that asserts an exact accelerator set would fail on the very board it targets (an RKNPU
+// answers there) unless every test names the sysfs it means.
+func stubSysfs(t *testing.T, read func(path string) (string, error)) {
+	t.Helper()
+	orig := sysfsRead
+	t.Cleanup(func() { sysfsRead = orig })
+	sysfsRead = read
+}
+
+// noSysfsDevice is a box whose sysfs holds no accelerator node: no Coral apex, no RKNPU.
+func noSysfsDevice(path string) (string, error) {
+	return "", errors.New("open " + path + ": no such file or directory")
+}
+
+// rknpuSysfs is the reference board's sysfs: the display subsystem on card0 and the NPU, bound by
+// the vendor RKNPU driver, on card1.
+func rknpuSysfs(path string) (string, error) {
+	switch path {
+	case "/sys/class/drm/card0/device/uevent":
+		return "DRIVER=rockchip-drm\nOF_NAME=display-subsystem\n", nil
+	case "/sys/class/drm/card1/device/uevent":
+		return "DRIVER=RKNPU\nOF_NAME=npu\nOF_COMPATIBLE_0=rockchip,rk3588-rknpu\n", nil
+	}
+	return noSysfsDevice(path)
+}
+
+// TestInstallDetectEmitsRknpu proves the RKNPU probe rides the same wiring as the Hailo one: `install
+// detect` hands hwdetect the real sysfs reader, so a board whose card1 uevent names the RKNPU driver
+// comes out with rknpu in its verdict and no other device.
+func TestInstallDetectEmitsRknpu(t *testing.T) {
+	orig := hailortcliRun
+	defer func() { hailortcliRun = orig }()
+	hailortcliRun = func(args ...string) (string, error) { return "", errors.New("exec: hailortcli: not found") }
+	stubSysfs(t, rknpuSysfs)
+
+	out := captureStdout(t, func() {
+		if err := runInstallDetect([]string{"-json"}); err != nil {
+			t.Fatalf("install detect -json: %v", err)
+		}
+	})
+	var got struct {
+		Verdict struct {
+			Accelerators []string `json:"accelerators"`
+		} `json:"verdict"`
+	}
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("emitted JSON did not parse: %v\n%s", err, out)
+	}
+	if len(got.Verdict.Accelerators) != 1 || got.Verdict.Accelerators[0] != "rknpu" {
+		t.Fatalf("verdict.accelerators = %v, want [rknpu]", got.Verdict.Accelerators)
+	}
+}
+
 // TestInstallDetectEmitsAccelerators proves the detection entry point actually
 // carries hwdetect.DetectAccelerators' answer into the emitted verdict — the
 // wiring, not just the classifier. The runner is faked (this box has no Hailo
@@ -16,6 +70,7 @@ import (
 func TestInstallDetectEmitsAccelerators(t *testing.T) {
 	orig := hailortcliRun
 	defer func() { hailortcliRun = orig }()
+	stubSysfs(t, noSysfsDevice)
 	hailortcliRun = func(args ...string) (string, error) {
 		switch strings.Join(args, " ") {
 		case "scan":
@@ -56,6 +111,7 @@ func TestInstallDetectEmitsAccelerators(t *testing.T) {
 func TestInstallPlanEmitsAccelerators(t *testing.T) {
 	orig := hailortcliRun
 	defer func() { hailortcliRun = orig }()
+	stubSysfs(t, noSysfsDevice)
 	hailortcliRun = func(args ...string) (string, error) {
 		switch strings.Join(args, " ") {
 		case "scan":
@@ -110,6 +166,7 @@ func TestInstallPlanEmitsAccelerators(t *testing.T) {
 func TestInstallDetectOmitsAcceleratorsWithoutDevice(t *testing.T) {
 	orig := hailortcliRun
 	defer func() { hailortcliRun = orig }()
+	stubSysfs(t, noSysfsDevice)
 	hailortcliRun = func(args ...string) (string, error) {
 		return "", errors.New("exec: hailortcli: not found")
 	}

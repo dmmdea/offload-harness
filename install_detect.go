@@ -18,10 +18,10 @@ import (
 // (hwdetect.DetectAccelerators). A package var so tests can stand in a fake
 // device; the real runner's error (tool absent, driver down) is the normal
 // no-NPU case and DetectAccelerators treats it as "no accelerator".
-// sysfsRead is the Coral probe's reader (hwdetect.DetectCoral): a plain read of
-// the apex status node. On Windows the path does not exist and the read fails,
-// which the probe reads as "no accelerator". A package var, like hailortcliRun,
-// so tests can stand in a fake.
+// sysfsRead is the reader of the sysfs probes (hwdetect.DetectCoral's apex status
+// node, hwdetect.DetectRknpu's DRM uevent files): a plain read. On Windows the
+// paths do not exist and the read fails, which the probes read as "no
+// accelerator". A package var, like hailortcliRun, so tests can stand in a fake.
 var sysfsRead = func(path string) (string, error) {
 	b, err := os.ReadFile(path)
 	return string(b), err
