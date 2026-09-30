@@ -6,6 +6,15 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed — the Coral fed EfficientNet-EdgeTPU-S raw pixels (classify imagenet and embed)
+
+- `accelerators/coral/server.py::_set_input` passed uint8 pixels straight to every uint8 input. EfficientNet-EdgeTPU-S quantises its
+  input with scale 0.012566 and zero point 131, so it saw a 1.6x contrast-stretched image: 41.6 % top-1 on 1000 ImageNetV2 images, against
+  63.9 % once the input is rescaled with pycoral's rule `q = (px - 128) / (128 * scale) + zp` (the same as its CPU twin; measured
+  2026-09-30). The rescale applies only where the quantisation is not the raw pixel to within one step, so the iNat classifiers,
+  DeepLab and EfficientDet-Lite get exactly the bytes they got before. The `embed` tool used the same broken input: its vectors from
+  before this fix are not comparable with new ones (the harness stores none; a caller that kept some must re-embed).
+
 ## [0.150.0] - 2026-09-30 - a read-only catalog of the ComfyUI workflow templates a node carries (Comfy templates phase A)
 
 ### Added — a read-only catalog of the ComfyUI workflow templates a node carries (phase A of the Comfy templates work)

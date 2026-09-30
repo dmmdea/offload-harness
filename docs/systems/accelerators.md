@@ -243,6 +243,14 @@ The Coral owns four capabilities, each on an artifact from `google-coral/test_da
 | `offload_semantic_segment` **(new capability)** | `semantic_segment` | DeepLabV3 MobileNet v2 Pascal (21 classes) | per-pixel class-id PNG at `mask_path`; `{mask_path,classes:[{class_id,label,pixels}],width,height}` |
 | `offload_image_embed` *(name shared with Hailo)* | `embed` | EfficientNet-EdgeTPU-S embedding extractor | `{embedding,dim:1280,space:"efficientnet-edgetpu-s"}` |
 
+**Input quantisation (0.151.1).** Every Coral model takes quantised uint8 pixels, and the sidecar feeds
+them with pycoral's rule `q = (px - 128) / (128 * scale) + zero_point` (`_set_input`). Where a model's
+input quantisation is the raw pixel to within one step (the iNat MobileNets and DeepLab at scale 1/128,
+zero point 128; EfficientDet-Lite at 1/128, 127) the pixels pass through untouched. EfficientNet-EdgeTPU-S
+(`classify` imagenet and `embed`) quantises with scale 0.012566 and zero point 131: before 0.151.1 it was
+fed raw pixels and scored 41.6 % top-1 on 1000 ImageNetV2 images, 63.9 % with the rescale, the same as its
+CPU twin. `embed` vectors from before 0.151.1 are not comparable with later ones.
+
 Deliberately **not** owned by the Coral: `text_embed` and `zero_shot` (no text tower exists for
 the Edge TPU — the EfficientNet space is not CLIP, and the tool description says so), the
 `face_*`, `pose`, `person_embed`, `depth`, `enhance_low_light` tools, and `segment` (instance
