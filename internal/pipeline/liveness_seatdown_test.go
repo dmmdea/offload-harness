@@ -68,6 +68,23 @@ func TestEngineActivityProbeFlagsARefusedEngine(t *testing.T) {
 	}
 }
 
+// llama-swap's OWN address refusing the connection (the service is down) is not
+// the seat's engine refusing: act.Loaded is what says llama-swap answered and
+// listed the seat. Reading it as a dead engine would send the run into a
+// ten-minute wait for a seat that no read can ever confirm.
+func TestEngineActivityProbeDoesNotBlameTheEngineWhenLlamaSwapIsDown(t *testing.T) {
+	swap := httptest.NewServer(http.NotFoundHandler())
+	url := swap.URL
+	swap.Close() // llama-swap itself is gone
+	rd, err := engineActivityProbe(url, "seat-x", nil)(context.Background())
+	if err == nil {
+		t.Fatalf("a dead llama-swap answered: %+v", rd)
+	}
+	if rd.Refused {
+		t.Fatalf("reading = %+v (err %v): llama-swap's own refusal must not be flagged as the seat's engine refusing", rd, err)
+	}
+}
+
 // connRefused: a refusal, on either platform's wording — and nothing else.
 func TestConnRefused(t *testing.T) {
 	for _, tc := range []struct {

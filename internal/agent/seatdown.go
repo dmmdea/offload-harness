@@ -307,9 +307,12 @@ func (m *Monitor) parkLocked() {
 }
 
 // seatDownFromStallLocked retypes the stall verdicts that are a seat down: the
-// engine-flat stall of the busy hold (a wedge). Every other stall stays a stall.
+// engine-flat stall of the busy hold (a wedge). Every other stall stays a stall
+// — a thrash (the engine keeps stepping but produces no token) is an engine
+// that is alive and overloaded, not down: a re-issue would only feed it another
+// request, so it stays the plain stall ADR 0061 files.
 func (m *Monitor) seatDownFromStallLocked(se *StallError) *SeatDownError {
-	if se.EngineFlat {
+	if se.EngineFlat && !se.EngineThrash {
 		return &SeatDownError{Kind: SeatDownWedged, Phase: se.Waited, Silent: se.EngineSilent, Engine: se.Engine,
 			Tokens: se.Tokens, fp: m.engFP, cause: se}
 	}
@@ -324,6 +327,7 @@ func (m *Monitor) fileSeatDownLocked(sd *SeatDownError) {
 	if m.recoverableLocked() {
 		m.down, m.downSince = sd, time.Now()
 		m.parkLocked()
+		m.epoch++ // a timer answer about the phase that just ended is stale from here
 		m.step.cancel(sd)
 		return
 	}

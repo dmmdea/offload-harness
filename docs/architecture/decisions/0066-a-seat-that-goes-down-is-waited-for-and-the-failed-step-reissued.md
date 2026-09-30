@@ -48,7 +48,11 @@ against a real 178-271 s), and several runs waiting on one load each appended it
      connections while llama-swap still lists it. The failure alone is never the
      evidence: a 5xx from a seat that reads ready and readable is an ordinary error.
      Absence on the FIRST look of a silent request stays the ADR 0055 rule (a removed
-     seat, a renamed alias, a restarted llama-swap: PR #458 finding 1).
+     seat, a renamed alias, a restarted llama-swap: PR #458 finding 1). A refusal of
+     llama-swap's own address (the service is down) is not the engine refusing.
+   - A *thrash* (the engine keeps stepping but produces no token) is neither: the engine
+     is alive and overloaded, a re-issue would only feed it another request, and it stays
+     the plain stall of ADR 0061.
 
 2. **The run waits and the failed step is re-issued, once.** The monitor cancels
    only the model call in flight (its step scope); the run's context stays alive. The
@@ -71,7 +75,12 @@ against a real 178-271 s), and several runs waiting on one load each appended it
    a property of this seat, the contract is sound, the cure is another node. It is
    safe to re-place because a node-filed defer is an observed terminal. The retry's
    budget is credited the node's admission plus its wait on the dead seat (capped at
-   one contract wall), because that time was not work.
+   one contract wall), because that time was not work. The loop's recovery does not
+   cover the structured re-pack (its request is not a step, and the finished answer is
+   already in hand), so a seat lost there — the monitor's wedge verdict, or a transport
+   failure that a fresh read confirms as a dead seat — ends the run typed the same way,
+   with `(during the structured re-pack)` appended; the finished answer stays in
+   `output`.
 
 4. **The wording follows the status.** `seat contended:` is for a 429 only (llama-swap's
    concurrency limit). A 5xx is `seat not serving:`. The chat client asks the run's
@@ -99,8 +108,15 @@ against a real 178-271 s), and several runs waiting on one load each appended it
   by default) before it is filed, in case the seat restarts; every death recorded on
   2026-09-29 restarted the seat within about 120 s of the first silent step.
 - A run whose seat reads shared waits longer before its first engine read (the
-  prefill allowance is sized for the load); the hold, not the allowance, carries
-  correctness.
+  prefill allowance is sized for the load), and the busy hold's flat bound follows the
+  engine's own load the same way, so a wedge on a shared seat is called later. For a
+  13,000-token prefill at 280 tok/s with five requests sharing the seat, the first engine
+  read comes at about 380 s instead of about 100 s and the flat bound is about 380 s
+  instead of 120 s, and the recovery wait follows. Scaling the flat bound is deliberate —
+  a seat whose prefill is invisible to its counters (llama-server on `/slots`) would
+  otherwise be called wedged while a shared prefill is still legitimately running — and
+  a death that breaks the stream is caught at once by the failed call, not by the flat
+  bound. The hold, not the allowance, carries correctness.
 - `prefill_tok_s` no longer follows the traffic a run happened to meet; a box that
   is never idle learns no prefill rate and keeps the assumed one. A joined cold load
   is recorded as the part of it the run saw (a lower bound), never as a second load.

@@ -1232,7 +1232,15 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		// Deferred, and delegate.runLocal/runRemote both run acceptance only
 		// when !wire.Deferred — so no check can ever read it on this path.
 		cutoff, isCutoff := asRepackCutoff(serr)
+		repackDown := repackSeatDown(cctx, live, serr, transport)
 		switch {
+		case repackDown != "":
+			// The seat went down DURING the re-pack (ADR 0066): a wedge the monitor
+			// filed (it carries the engine-flat stall it replaced, which the stall arm
+			// below would file WITHOUT the prefix the delegator re-places on), or a
+			// transport failure llama-swap confirms as a dead seat. The finished
+			// answer stays in output for the caller.
+			return deferWire(core.DeferClassInfrastructure, repackDown)
 		case ceilingOf(live) != nil || errors.Is(cctx.Err(), context.DeadlineExceeded):
 			// The wall expired DURING the re-pack. That is the timeout shape,
 			// not a schema shape — reporting it as "output failed schema" sends

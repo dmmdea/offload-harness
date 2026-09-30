@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -643,6 +644,70 @@ func TestLoopSeatDownReissueKeepsTheListCapBudget(t *testing.T) {
 	}
 	if c.max[0] != 2048 || c.max[1] != 2048 || c.max[2] != 2048 {
 		t.Fatalf("budget per call = %v, want the cut turn's 2048 kept on the re-issue AND on its seat recovery (the fitted final budget is 1024)", c.max)
+	}
+}
+
+// A thrash — the engine keeps stepping (preempting and recomputing) but produces
+// no token for anyone — is an engine that is ALIVE and overloaded, not a seat
+// down: it stays the plain stall ADR 0061 files, never a `seat down:` verdict,
+// even with recoveries armed (a re-issue would only feed it another request).
+func TestBusyHoldThrashStaysAPlainStall(t *testing.T) {
+	eng := &scriptedEngine{}
+	eng.advance.Store(true)
+	eng.noProduce.Store(true)
+	p := recoveryPolicy(5 * time.Second)
+	p.EngineTokenFlat = 300 * time.Millisecond
+	ctx, m := NewMonitor(context.Background(), p, 10*time.Second)
+	defer m.Stop()
+	m.WithEngineProbe(eng.probe)
+	m.Phase(PhaseDecoding, 0)
+	select {
+	case <-ctx.Done():
+	case <-time.After(3 * time.Second):
+		t.Fatal("a thrash that produced nothing was never stalled")
+	}
+	var sd *SeatDownError
+	if errors.As(m.Cause(), &sd) {
+		t.Fatalf("a thrashing engine was filed as a seat down: %v", sd)
+	}
+	var se *StallError
+	if !errors.As(m.Cause(), &se) || !se.EngineThrash || !strings.HasPrefix(se.Error(), "stalled: ") {
+		t.Fatalf("cause = %#v, want the thrash stall", m.Cause())
+	}
+}
+
+// ...and through the loop with a recovery budget, a thrash ends the run: the
+// call is not re-issued onto the engine that is thrashing.
+func TestLoopThrashIsNotReissued(t *testing.T) {
+	eng := &scriptedEngine{}
+	eng.advance.Store(true)
+	eng.noProduce.Store(true)
+	var calls atomic.Int64
+	client := clientFunc(func(ctx context.Context, msgs []Msg, _ []ToolSpec, _ int) (Completion, error) {
+		calls.Add(1)
+		<-ctx.Done() // a request the thrashing engine never answers
+		return Completion{}, ctx.Err()
+	})
+	start := time.Now()
+	p := recoveryPolicy(5 * time.Second)
+	p.EngineTokenFlat = 300 * time.Millisecond
+	ctx, m := NewMonitor(context.Background(), p, 10*time.Second)
+	defer m.Stop()
+	m.WithEngineProbe(eng.probe)
+	res, err := NewLoop(client, nil, 2).WithLiveness(m).Run(ctx, "x")
+	var sd *SeatDownError
+	if err == nil || errors.As(err, &sd) || errors.As(m.Cause(), &sd) {
+		t.Fatalf("err=%v cause=%v, want the run to end on the thrash stall, not a seat down", err, m.Cause())
+	}
+	// (The loop's own context-overflow retry may send the cancelled request once
+	// more — "context canceled" reads like an overflow to it, as it always has —
+	// so the call count is not the pin; the recovery is.)
+	if res.SeatRecoveries != 0 || m.SeatDownTotal() != 0 || m.SeatRecoveries() != 0 {
+		t.Fatalf("recoveries=%d monitor=%d waited=%s (calls %d): a thrash must not be waited for or re-issued",
+			res.SeatRecoveries, m.SeatRecoveries(), m.SeatDownTotal(), calls.Load())
+	}
+	if el := time.Since(start); el > 3*time.Second {
+		t.Fatalf("the run took %s: it waited for a seat that was not down", el)
 	}
 }
 

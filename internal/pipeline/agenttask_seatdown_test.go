@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dmmdea/offload-harness/internal/agent"
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/llamaclient"
@@ -288,6 +290,105 @@ func TestRunAgentTaskSurvivesA500FromASeatThatRestarts(t *testing.T) {
 	}
 	if wire.SeatRecoveries != 1 || wire.ContentionWaitSec != 0 {
 		t.Fatalf("seat_recoveries=%d contention_wait_sec=%.1f, want 1 recovery and no contention budget spent", wire.SeatRecoveries, wire.ContentionWaitSec)
+	}
+}
+
+// A seat lost while the run is in its structured re-pack — after the loop
+// finished its answer — ends the run typed too: the transport failure is
+// confirmed against llama-swap (the seat reads starting) and filed `seat down:`,
+// so the delegator re-places the contract; the finished answer stays in output
+// for the caller. With the seat reading ready and readable the same failure is
+// the ordinary `structured re-pack unreachable:` it always was.
+func TestRunAgentTaskSeatDownDuringTheRepackKeepsThePrefix(t *testing.T) {
+	defer compressLiveness(t, 200*time.Millisecond, 100*time.Millisecond, core.AgentCeilingSecCap)()
+	defer compressColdLoad(t, 50*time.Millisecond, 5*time.Second)()
+	for _, tc := range []struct {
+		name     string
+		seatDown bool
+	}{
+		{"the seat reads starting once the re-pack fails: seat down", true},
+		{"control: the seat reads ready and readable: an ordinary re-pack failure", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var down atomic.Bool
+			var base atomic.Value
+			fake := &agentFake{
+				rosterIDs: []string{agentTestSeat},
+				running: func(int64) string {
+					if down.Load() {
+						return `{"running":[{"model":"` + agentTestSeat + `","state":"starting","cmd":"x"}]}`
+					}
+					return `{"running":[{"model":"` + agentTestSeat + `","state":"ready","cmd":"x","proxy":"` + base.Load().(string) + `/seat"}]}`
+				},
+				seatMetrics: func(int64) string {
+					return "vllm:num_requests_running 1\nvllm:num_requests_waiting 0\nvllm:iteration_tokens_total_count 3\nvllm:generation_tokens_total 10\nvllm:prompt_tokens_total 100\n"
+				},
+				loop: func(int64) string { return doneChat("The answer is 42.") },
+				repackStatusFor: func(int64) int { // the grammar lane dies under the re-pack
+					if tc.seatDown {
+						down.Store(true)
+					}
+					return http.StatusInternalServerError
+				},
+				chatFallbackStatus: http.StatusInternalServerError,
+			}
+			srv := fake.server(t)
+			defer srv.Close()
+			base.Store(srv.URL)
+
+			wire := decodeWire(t, seatDownPipeline(t, srv.URL, 0).Run(context.Background(), agentTestRequest(t, testContract())))
+			if !wire.Deferred || wire.DeferClass != core.DeferClassInfrastructure {
+				t.Fatalf("want an infrastructure defer, got deferred=%v class=%q reason=%q", wire.Deferred, wire.DeferClass, wire.Reason)
+			}
+			if wire.Output != "The answer is 42." {
+				t.Fatalf("output = %q: the finished answer must stay for the caller", wire.Output)
+			}
+			if tc.seatDown {
+				if !strings.HasPrefix(wire.Reason, core.SeatDownReason) || !strings.Contains(wire.Reason, "during the structured re-pack") {
+					t.Fatalf("reason = %q, want %q prefixed and naming the re-pack", wire.Reason, core.SeatDownReason)
+				}
+				return
+			}
+			if !strings.HasPrefix(wire.Reason, "structured re-pack unreachable: ") || strings.Contains(wire.Reason, core.SeatDownReason) {
+				t.Fatalf("reason = %q, want the ordinary re-pack transport failure", wire.Reason)
+			}
+		})
+	}
+}
+
+// repackSeatDown asks the monitor's own verdict FIRST: a wedge filed during the
+// re-pack wraps the engine-flat stall it replaced, so stallOf reads it too — and
+// the stall arm of runAgentTask would file it without the prefix.
+func TestRepackSeatDownPrefersTheMonitorsWedgeVerdict(t *testing.T) {
+	pol := agent.StallPolicy{Floor: 40 * time.Millisecond, PrefillTokS: 1000, TokS: 100, Slack: 10 * time.Millisecond,
+		Repack: 120 * time.Millisecond, EngineFlat: 150 * time.Millisecond, EnginePoll: 20 * time.Millisecond, EngineProbeTimeout: time.Second}
+	frozen := func(context.Context) (agent.EngineReading, error) {
+		return agent.EngineReading{Fingerprint: "v|1", TokenFingerprint: "vt|1", Summary: "vllm-metrics: 4 running, 0 waiting", Running: 4}, nil
+	}
+	ctx, m := agent.NewMonitor(context.Background(), pol, 10*time.Second)
+	defer m.Stop()
+	m.WithEngineProbe(frozen)
+	m.Phase(agent.PhaseRepack, 0)
+	select {
+	case <-ctx.Done():
+	case <-time.After(3 * time.Second):
+		t.Fatal("a frozen engine under the re-pack was never declared down")
+	}
+	if stallOf(m) == nil || seatDownOf(m) == nil {
+		t.Fatalf("stallOf=%v seatDownOf=%v: a wedge must read as both (it wraps the stall it replaced) — the reason that leads with the prefix is the seat-down one", stallOf(m), seatDownOf(m))
+	}
+	got := repackSeatDown(context.Background(), m, errors.New("Post: context canceled"), false)
+	if !strings.HasPrefix(got, core.SeatDownReason) || !strings.Contains(got, "during the structured re-pack") || !strings.Contains(got, "4 running") {
+		t.Fatalf("repackSeatDown = %q, want the seat-down reason with the engine's gauges", got)
+	}
+	// Nothing filed and no transport failure: no verdict.
+	_, quiet := agent.NewMonitor(context.Background(), pol, 10*time.Second)
+	defer quiet.Stop()
+	if got := repackSeatDown(context.Background(), quiet, errors.New("output failed schema"), false); got != "" {
+		t.Fatalf("repackSeatDown = %q for a re-pack that failed on its schema", got)
+	}
+	if got := repackSeatDown(context.Background(), nil, errors.New("x"), true); got != "" {
+		t.Fatalf("repackSeatDown = %q without a monitor", got)
 	}
 }
 

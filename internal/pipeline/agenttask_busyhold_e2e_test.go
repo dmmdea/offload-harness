@@ -273,6 +273,12 @@ func TestRunAgentTaskStallsAThrashingEngine(t *testing.T) {
 	if !wire.Deferred || !strings.Contains(wire.Reason, "produced no token") || wire.DeferClass != core.DeferClassInfrastructure {
 		t.Fatalf("a thrashing engine was held: deferred=%v class=%s reason=%q", wire.Deferred, wire.DeferClass, wire.Reason)
 	}
+	// An engine that is ALIVE and overloaded is not a seat down (ADR 0066): the
+	// plain stall of ADR 0061, never re-issued onto it and never re-placed on the
+	// `seat down:` prefix.
+	if !strings.HasPrefix(wire.Reason, "stalled: ") || strings.Contains(wire.Reason, core.SeatDownReason) {
+		t.Fatalf("a thrash must stay a plain stall, got %q", wire.Reason)
+	}
 }
 
 // A llama-server answers /metrics and /slots only between batches: one read

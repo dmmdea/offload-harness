@@ -131,9 +131,11 @@ func engineActivityProbe(endpoint, seat string, load agent.SeatProbe) agent.Engi
 		if err != nil {
 			// A connection REFUSED at the seat's own address, while llama-swap
 			// still lists the seat, is a dead engine (ADR 0066): nothing listens.
-			// A seat behind another machine's llama-swap that this box cannot
-			// reach is unreadable, never down.
-			return agent.EngineReading{Refused: connRefused(err)}, err
+			// act.Loaded is what says llama-swap answered and listed it: a refusal
+			// of llama-swap's OWN address (the service is down) is not the seat's
+			// engine, and a seat behind another machine's llama-swap that this box
+			// cannot reach is unreadable, never down.
+			return agent.EngineReading{Refused: act.Loaded && connRefused(err)}, err
 		}
 		if act.Starting {
 			return agent.EngineReading{Loading: true, State: strings.TrimPrefix(act.Source, "running-state:")}, nil
@@ -311,6 +313,38 @@ func seatDownOf(m *agent.Monitor) *agent.SeatDownError {
 		return sd
 	}
 	return nil
+}
+
+// repackDuring is appended to a seat-down reason filed for a re-pack that failed.
+const repackDuring = " (during the structured re-pack)"
+
+// repackSeatDown is the `seat down:` reason for a structured re-pack that
+// failed because the run's seat went down (ADR 0066), or "" when it did not.
+// The loop's own recovery does not cover the re-pack (its request is not a
+// step, and the finished answer is already in hand), so a seat lost here ends
+// the run typed and the delegator re-places it. Two ways to know:
+//
+//   - the monitor filed a seat-down verdict while the re-pack was in flight (a
+//     wedge). It wraps the engine-flat stall it replaced, so stallOf reads it too
+//     and the stall arm would file it without the prefix: this is asked first;
+//   - the re-pack failed like a dead seat (transport: a refused connection, a
+//     5xx, a cut body) and a fresh read shows llama-swap listing the seat
+//     starting, stopping or not at all, or its engine refusing connections. A
+//     transport failure on a seat that reads ready and readable is the ordinary
+//     "structured re-pack unreachable" and stays one.
+func repackSeatDown(ctx context.Context, live *agent.Monitor, serr error, transport bool) string {
+	if live == nil {
+		return ""
+	}
+	if sd := seatDownOf(live); sd != nil {
+		return sd.Error() + repackDuring
+	}
+	if transport {
+		if sd := live.ConfirmSeatDown(ctx, serr); sd != nil {
+			return sd.Error() + repackDuring
+		}
+	}
+	return ""
 }
 
 // ceilingOf is the monitor's cause when it is the ceiling, else nil.
