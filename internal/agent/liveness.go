@@ -358,17 +358,26 @@ type Monitor struct {
 	// may be a transition, two are a dead engine.
 	engGone int
 	// Seat down (ADR 0066). step is the model call the loop has in flight (the
-	// scope a recoverable verdict cancels); down is the verdict the run is
-	// waiting out and downSince when it began; downTotal the wall already spent
-	// waiting on downed seats; recoveries how many waits ended in a re-issue.
-	// parked: the timers are stopped and the loop owns the wait; a timer callback
-	// that fires anyway returns.
+	// scope a recoverable verdict cancels); down is the verdict the monitor filed
+	// for that call and downSince when (moot if the loop moves on); ep the outage
+	// the run is waiting out, which outlives the calls that meet it; downTotal the
+	// wall already booked waiting on downed seats; recoveries how many episodes
+	// landed (the re-issued call's first byte arrived). parked: the timers are
+	// stopped and the loop owns the wait; a timer callback that fires anyway
+	// returns.
 	step       *stepScope
 	down       *SeatDownError
 	downSince  time.Time
+	ep         *seatEpisode
 	downTotal  time.Duration
 	recoveries int
 	parked     bool
+	// seatReadErrs counts the reads of the seat (a failed call's confirmation, the
+	// chat client's check, the wait's polls) that could not be answered, and
+	// seatReadErr keeps the last: without them a seat that cannot be read from here
+	// silently gets no recovery and a give-up cannot say why.
+	seatReadErrs int
+	seatReadErr  error
 	// Load (ADR 0066, register C-66). loadFn samples how many requests share the
 	// seat (this run's included) when a prefill or re-pack begins; load is what
 	// the current phase's allowance was sized with; engLoad the engine's own
@@ -909,6 +918,7 @@ func (m *Monitor) Progress(tokensSoFar int) {
 		m.callTok = tokensSoFar
 		m.warming, m.postReady = false, false
 		m.engFP, m.engTokFP = "", "" // the request moved: the next busy hold takes a fresh look
+		m.landEpisodeLocked(now)     // a byte arrived: the seat that was down serves
 		if m.phase == PhaseQueued {
 			// Its turn came: back to the phase it waited in (a prefill's first
 			// delta then ends the prefill just below).
@@ -939,6 +949,7 @@ func (m *Monitor) Progress(tokensSoFar int) {
 func (m *Monitor) Stop() {
 	m.mu.Lock()
 	m.stopped = true
+	m.closeEpisodeLocked(time.Now())
 	m.timer.Stop()
 	m.ceiling.Stop()
 	m.stopProbeLocked()

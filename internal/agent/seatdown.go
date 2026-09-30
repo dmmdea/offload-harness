@@ -27,12 +27,24 @@ package agent
 // owns the transcript: the monitor cancels ONLY the model call in flight (its
 // step scope), the run's context stays alive, the run waits for the seat under
 // the cold-load hold (AwaitSeat, bounded by the cold-load ceiling and the run's
-// ceiling), and the same step is re-issued once. A seat that is gone from
-// /running is not waited for — nobody is starting it, and llama-swap starts a
-// stopped seat on the next request — so the re-issue is the trigger and the
-// cold-load hold covers the load. A recovery spends no step. What does not
-// recover ends the run typed: the reason is prefixed core.SeatDownReason, which
-// the delegator reads to re-place the contract on another node.
+// ceiling), and the same step is re-issued. A recovery spends no step.
+//
+// The wait is one EPISODE (seatEpisode), which begins at the first verdict and
+// outlives the calls that meet it. A seat that is gone from /running has nobody
+// starting it — llama-swap starts a stopped seat on the next request — so the
+// re-issue is the start trigger, and the cold-load hold covers the load. If that
+// start fails (the 2026-09-29 launcher refused to start the flagship for 18
+// minutes, and every request got an instant 500) the episode goes on: the run
+// waits at the poll and triggers again, until the cold-load bound counted from the
+// FIRST verdict, instead of turning each queued request into two quick 500s and a
+// defer. Once the seat has been seen serving, the step is re-issued ONCE: a call
+// that fails again before its answer is a seat that came back and went down again,
+// and ends the run. A recovery is counted when the re-issued call's first byte
+// arrives, never for a re-issue that recovered nothing.
+//
+// What does not recover ends the run typed: the reason is prefixed
+// core.SeatDownReason, which the delegator reads to re-place the contract on
+// another node.
 
 import (
 	"context"
@@ -81,6 +93,10 @@ type SeatDownError struct {
 	// seat went down again. GaveUp: the wait ran out (or no recovery was left).
 	Reissued bool
 	GaveUp   bool
+	// Attempts is how many re-issues the wait sent to a seat nobody listed (each is
+	// a start attempt); LastSeen is what the wait last saw of the seat.
+	Attempts int
+	LastSeen string
 	// terminal marks the verdict the monitor has already made the run's cause: it
 	// ends the run, nothing waits for it.
 	terminal bool
@@ -111,11 +127,17 @@ func (e *SeatDownError) Error() string {
 		b.WriteString("; the failed step was re-issued once after the seat came back and it went down again")
 	}
 	if e.GaveUp {
-		if e.Waited > 0 {
+		switch {
+		case e.Waited > 0 && e.Attempts > 0:
+			fmt.Fprintf(&b, "; the seat did not come back after %d start attempt(s) (waited %.0fs)", e.Attempts, e.Waited.Seconds())
+		case e.Waited > 0:
 			fmt.Fprintf(&b, "; the seat did not come back (waited %.0fs)", e.Waited.Seconds())
-		} else {
+		default:
 			b.WriteString("; not waited for (this run has no seat recovery left)")
 		}
+	}
+	if e.LastSeen != "" && (e.Reissued || (e.GaveUp && e.Waited > 0)) {
+		fmt.Fprintf(&b, "; the seat was last seen: %s", e.LastSeen)
 	}
 	return b.String()
 }
@@ -265,8 +287,9 @@ func seatDownCause(callCtx context.Context) *SeatDownError {
 	return nil
 }
 
-// SeatRecoveries is how many times this run waited for a downed seat and
-// re-issued the failed step.
+// SeatRecoveries is how many times this run's seat went down under it and came
+// back: an episode is counted when the re-issued call's first byte arrives (or the
+// step is answered), never for a re-issue that recovered nothing.
 func (m *Monitor) SeatRecoveries() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -274,21 +297,77 @@ func (m *Monitor) SeatRecoveries() int {
 }
 
 // SeatDownTotal is the wall this run spent waiting for a downed seat: from the
-// moment the seat was called down to its recovery or to the wait running out.
+// first verdict of each episode to the re-issued call's first byte, or to the wait
+// running out. It covers the whole episode, including the time a re-issued call
+// spent held by llama-swap while it started the seat.
 func (m *Monitor) SeatDownTotal() time.Duration {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	t := m.downTotal
-	if m.down != nil && !m.downSince.IsZero() {
-		t += time.Since(m.downSince)
+	if m.ep != nil && !m.ep.landed {
+		t += time.Since(m.ep.since)
 	}
 	return t
 }
 
-// canWaitLocked: a recovery needs an engine to read, a cold-load ceiling to
-// bound the wait by, and a recovery left in the run's budget.
+// seatEpisode is the outage a run is waiting out (ADR 0066). It begins at the first
+// seat-down verdict and lives until the step that met it is answered, so the
+// calls the loop re-issues inside it belong to ONE wait with ONE bound.
+type seatEpisode struct {
+	since time.Time // the first verdict: the wait's bound counts from here, never restarts
+	// served: the wait saw the seat serving again. A re-issued call that fails again
+	// before its answer is then a seat that came back and went down again.
+	served bool
+	// landed: the re-issued call's first byte (or its answer) arrived. The recovery
+	// is counted and the wait booked at that moment.
+	landed bool
+	// sawDown: a non-serving state (starting, unlisted) was seen since the verdict:
+	// a wedge needs a restart or a change before a re-issue is worth sending, and the
+	// re-issued call's first completion is the seat's cold cost.
+	sawDown  bool
+	attempts int    // re-issues sent to a seat nobody listed: each is a start attempt
+	lastSeen string // what the wait last saw of the seat
+}
+
+// landEpisodeLocked counts the recovery and books the wait: the seat is serving.
+func (m *Monitor) landEpisodeLocked(now time.Time) {
+	if m.ep == nil || m.ep.landed {
+		return
+	}
+	m.ep.landed = true
+	m.downTotal += now.Sub(m.ep.since)
+	m.recoveries++
+}
+
+// closeEpisodeLocked ends the episode, booking a wait that never landed.
+func (m *Monitor) closeEpisodeLocked(now time.Time) {
+	if m.ep == nil {
+		return
+	}
+	if !m.ep.landed {
+		m.downTotal += now.Sub(m.ep.since)
+	}
+	m.ep = nil
+}
+
+// SeatAnswered tells the monitor the step got its answer: the seat serves, the
+// episode (if one is open) ends as a recovery, and a later death earns its own.
+func (m *Monitor) SeatAnswered() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.landEpisodeLocked(time.Now())
+	m.ep = nil
+}
+
+// canWaitCoreLocked: a wait needs an engine to read and a cold-load ceiling to
+// bound it, on a run that is still going.
+func (m *Monitor) canWaitCoreLocked() bool {
+	return m.engine != nil && m.pol.ColdLoad > 0 && !m.stopped && m.cause == nil
+}
+
+// canWaitLocked: a NEW episode also needs a recovery left in the run's budget.
 func (m *Monitor) canWaitLocked() bool {
-	return m.engine != nil && m.pol.ColdLoad > 0 && m.pol.SeatRecoveries > m.recoveries && !m.stopped && m.cause == nil
+	return m.canWaitCoreLocked() && m.pol.SeatRecoveries > m.recoveries
 }
 
 // recoverableLocked: a verdict can cancel only the call in flight (and leave
@@ -308,7 +387,7 @@ func (m *Monitor) parkLocked() {
 
 // seatDownFromStallLocked retypes the stall verdicts that are a seat down: the
 // engine-flat stall of the busy hold (a wedge). Every other stall stays a stall
-// — a thrash (the engine keeps stepping but produces no token) is an engine
+// - a thrash (the engine keeps stepping but produces no token) is an engine
 // that is alive and overloaded, not down: a re-issue would only feed it another
 // request, so it stays the plain stall ADR 0061 files.
 func (m *Monitor) seatDownFromStallLocked(se *StallError) *SeatDownError {
@@ -337,11 +416,19 @@ func (m *Monitor) fileSeatDownLocked(sd *SeatDownError) {
 	m.cancel(m.cause)
 }
 
-// giveUpLocked ends the run on a seat that did not come back, typed. Called
-// with m.mu held; it releases it.
-func (m *Monitor) giveUpLocked(sd *SeatDownError, waited time.Duration) error {
+// endLocked ends the run on a seat that did not recover, typed: it closes the
+// episode, applies amend to a terminal copy of the verdict, makes it the run's
+// cause and releases m.mu (which the caller holds).
+func (m *Monitor) endLocked(sd *SeatDownError, amend func(*SeatDownError)) error {
 	t := *sd
-	t.terminal, t.GaveUp, t.Waited = true, true, waited
+	t.terminal = true
+	if ep := m.ep; ep != nil {
+		t.Attempts, t.LastSeen = ep.attempts, ep.lastSeen
+	}
+	if amend != nil {
+		amend(&t)
+	}
+	m.closeEpisodeLocked(time.Now())
 	m.cause = &t
 	m.cancel(m.cause)
 	m.mu.Unlock()
@@ -371,7 +458,24 @@ func (m *Monitor) lookSeat(ctx context.Context) (EngineReading, error) {
 	}
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	return probe(cctx)
+	rd, err := probe(cctx)
+	if err != nil && ctx.Err() == nil {
+		m.mu.Lock()
+		m.seatReadErrs++
+		m.seatReadErr = err
+		m.mu.Unlock()
+	}
+	return rd, err
+}
+
+// SeatReadFailures is how many reads of the seat could not be answered while the
+// run judged a failure or waited for the seat, and the last error. A run whose
+// seat cannot be read from here gets no seat-down handling at all — a dead seat
+// reads as an ordinary error — and the caller should say so.
+func (m *Monitor) SeatReadFailures() (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.seatReadErrs, m.seatReadErr
 }
 
 // seatListedReady asks llama-swap alone (the cold-load probe's /running read)
@@ -421,45 +525,86 @@ func (m *Monitor) ConfirmSeatDown(ctx context.Context, cause error) *SeatDownErr
 	return &SeatDownError{Kind: SeatDownDied, Phase: phase, Engine: engine, Note: why, Tokens: tokens, cause: cause}
 }
 
-// recoveredFrom judges one reading of the seat while the run waits: may the
-// failed step be re-issued now? sawDown latches a non-serving state (starting,
-// gone) seen since the verdict.
+// seatJudgement is what one reading of the seat says to a run that is waiting.
+type seatJudgement int
+
+const (
+	// seatStillDown: not yet - the seat is unreadable, loading, or a wedge that has
+	// not changed.
+	seatStillDown seatJudgement = iota
+	// seatTrigger: llama-swap does not list the seat and nothing is loading it.
+	// Nobody is starting it, and llama-swap starts a stopped seat on the next
+	// request, so the re-issue is what starts it and the cold-load hold covers the
+	// load. It is NOT a recovery: the seat has not been seen serving.
+	seatTrigger
+	// seatServes: the seat is loaded and readable again.
+	seatServes
+)
+
+// judgeSeat judges one reading of the seat while the run waits: may the failed
+// step be re-issued now? sawDown latches a non-serving state (starting, gone) seen
+// since the verdict.
 //
 //   - unreadable, or loading: not yet;
-//   - not listed by llama-swap: yes — nobody is starting it, the re-issue is
-//     what starts it, and the cold-load hold covers the load;
-//   - loaded and readable: yes, except for a WEDGE that has not changed — the
-//     same frozen fingerprint with no restart seen would only feed the frozen
+//   - not listed by llama-swap: a start trigger;
+//   - loaded and readable: it serves, except for a WEDGE that has not changed -
+//     the same frozen fingerprint with no restart seen would only feed the frozen
 //     engine another request.
-func recoveredFrom(sd *SeatDownError, rd EngineReading, err error, sawDown *bool) bool {
+func judgeSeat(sd *SeatDownError, rd EngineReading, err error, sawDown *bool) seatJudgement {
 	switch {
 	case err != nil:
-		return false
+		return seatStillDown
 	case rd.Loading:
 		*sawDown = true
-		return false
+		return seatStillDown
 	case rd.NotLoaded:
 		*sawDown = true
-		return true
+		return seatTrigger
 	case rd.Fingerprint == "":
-		return false
+		return seatStillDown
 	case sd.Kind == SeatDownWedged && !*sawDown && rd.Fingerprint == sd.fp:
-		return false
+		return seatStillDown
 	}
-	return true
+	return seatServes
+}
+
+// describeSeat is one reading in a clause, for what a give-up says the seat last
+// looked like.
+func describeSeat(rd EngineReading, err error) string {
+	switch {
+	case err != nil:
+		return "unreadable (" + err.Error() + ")"
+	case rd.Loading:
+		state := rd.State
+		if state == "" {
+			state = "loading"
+		}
+		return "llama-swap lists the seat " + state
+	case rd.NotLoaded:
+		return "llama-swap does not list the seat"
+	case rd.Fingerprint == "":
+		return "loaded, its engine not readable yet"
+	}
+	return "loaded: " + rd.Summary
 }
 
 // AwaitSeat holds the run while its seat is down, under the cold-load hold: it
-// returns nil when the failed step may be re-issued, and the typed give-up
-// (also the run's cause, its context cancelled) when the seat did not come back
-// inside the cold-load ceiling, when the run's recoveries are spent, or when
-// there is nothing to wait with (no engine probe or no ceiling). The loop
-// calls it with the verdict the monitor cancelled the call with, or with the
-// one ConfirmSeatDown made.
+// returns nil when the failed step may be re-issued, and the typed give-up (also
+// the run's cause, its context cancelled) when the seat did not come back inside
+// the cold-load ceiling counted from the episode's first verdict, when the seat
+// came back and went down again under the re-issued step, when the run's
+// recoveries are spent, or when there is nothing to wait with (no engine probe or
+// no ceiling). The loop calls it with the verdict the monitor cancelled the call
+// with, or with the one ConfirmSeatDown (or the chat client) made.
+//
+// A re-issue onto a seat nobody lists is a start attempt, and one that fails is
+// the same episode: the next call waits one poll, then triggers again, until the
+// bound. Only a seat that was SEEN serving earns exactly one re-issue.
 func (m *Monitor) AwaitSeat(ctx context.Context, sd *SeatDownError) error {
 	m.mu.Lock()
 	if m.stopped || m.cause != nil {
 		err := m.cause
+		m.closeEpisodeLocked(time.Now())
 		m.mu.Unlock()
 		if err == nil {
 			err = context.Cause(ctx)
@@ -469,13 +614,25 @@ func (m *Monitor) AwaitSeat(ctx context.Context, sd *SeatDownError) error {
 		}
 		return err
 	}
-	if !m.canWaitLocked() {
-		return m.giveUpLocked(sd, 0) // releases the lock
-	}
 	now := time.Now()
-	if m.down == nil {
-		m.down, m.downSince = sd, now
+	ep := m.ep
+	paced := ep != nil
+	switch {
+	case ep != nil && (ep.served || ep.landed):
+		// The seat was seen serving again, the step was re-issued, and it went down
+		// again before its answer: not another wait - a seat that comes back and dies
+		// under the same request would be waited for forever.
+		return m.endLocked(sd, func(t *SeatDownError) { t.Reissued = true })
+	case ep == nil && !m.canWaitLocked(), ep != nil && !m.canWaitCoreLocked():
+		return m.endLocked(sd, func(t *SeatDownError) { t.GaveUp = true })
+	case ep == nil:
+		ep = &seatEpisode{since: now}
+		if m.down != nil && !m.downSince.IsZero() {
+			ep.since = m.downSince // a verdict the monitor filed itself dates from then
+		}
+		m.ep = ep
 	}
+	m.down = nil // the verdict is the episode's now
 	m.parkLocked()
 	if m.phase == PhaseQueued {
 		// The busy hold that saw the wedge: book its contention and restore the
@@ -484,7 +641,7 @@ func (m *Monitor) AwaitSeat(ctx context.Context, sd *SeatDownError) error {
 		m.leaveQueuedLocked(now)
 	}
 	m.resume, m.resumePending = m.phase, m.pending
-	m.holdStart, m.holdClamped = now, false
+	m.holdStart, m.holdClamped = ep.since, false // the bound counts from the episode's first verdict
 	m.phase, m.postReady, m.readySeen = PhaseColdLoad, false, false
 	m.holdState = "seat down: " + sd.brief()
 	m.epoch++
@@ -494,44 +651,7 @@ func (m *Monitor) AwaitSeat(ctx context.Context, sd *SeatDownError) error {
 	notify(hook, PhaseColdLoad, left)
 
 	poll := m.pol.coldLoadPoll()
-	sawDown := false
-	for {
-		rd, err := m.lookSeat(ctx)
-		if ctx.Err() != nil {
-			// The run ended while it waited (its ceiling, or the caller): the wait
-			// is booked and the run's own cause is the answer.
-			m.mu.Lock()
-			m.downTotal += time.Since(m.downSince)
-			m.down = nil
-			m.mu.Unlock()
-			return context.Cause(ctx)
-		}
-		ok := recoveredFrom(sd, rd, err, &sawDown)
-		if !ok && err != nil && sawDown {
-			// The seat was seen down since the verdict and llama-swap now lists it
-			// ready, but its engine cannot be read from here (a seat address this
-			// box cannot reach, a metrics route that is off): llama-swap's own word
-			// that the seat serves again is enough to re-issue.
-			ok = m.seatListedReady(ctx)
-		}
-		if ok {
-			m.mu.Lock()
-			m.recoveries++
-			m.downTotal += time.Since(m.downSince)
-			m.down = nil
-			m.warming = sawDown // a restart was seen: the re-issued call's first completion is cold cost
-			m.mu.Unlock()
-			return nil
-		}
-		m.mu.Lock()
-		left = m.holdLeftLocked(time.Now())
-		if left <= 0 {
-			waited := time.Since(m.downSince)
-			m.downTotal += waited
-			m.down = nil
-			return m.giveUpLocked(sd, waited) // releases the lock
-		}
-		m.mu.Unlock()
+	pace := func(left time.Duration) {
 		sleep := poll
 		if left < sleep {
 			sleep = left
@@ -540,5 +660,58 @@ func (m *Monitor) AwaitSeat(ctx context.Context, sd *SeatDownError) error {
 		case <-ctx.Done():
 		case <-time.After(sleep):
 		}
+	}
+	if paced {
+		// A re-issue that failed again is a failing start: one poll between attempts,
+		// never a tight loop against a launcher that is refusing — and never past the
+		// episode's bound, which may already have run out while the re-issued call was
+		// failing (a start trigger is honored only inside it).
+		pace(left)
+		m.mu.Lock()
+		if m.holdLeftLocked(time.Now()) <= 0 {
+			return m.endLocked(sd, func(t *SeatDownError) { t.GaveUp, t.Waited = true, time.Since(ep.since) })
+		}
+		m.mu.Unlock()
+	}
+	for {
+		rd, err := m.lookSeat(ctx)
+		if ctx.Err() != nil {
+			// The run ended while it waited (its ceiling, or the caller): the wait is
+			// booked and the run's own cause is the answer.
+			m.mu.Lock()
+			m.closeEpisodeLocked(time.Now())
+			m.mu.Unlock()
+			return context.Cause(ctx)
+		}
+		m.mu.Lock()
+		j := judgeSeat(sd, rd, err, &ep.sawDown)
+		ep.lastSeen = describeSeat(rd, err)
+		sawDown := ep.sawDown
+		m.mu.Unlock()
+		if j == seatStillDown && err != nil && sawDown && m.seatListedReady(ctx) {
+			// The seat was seen down since the verdict and llama-swap now lists it
+			// ready, but its engine cannot be read from here (a seat address this
+			// box cannot reach, a metrics route that is off): llama-swap's own word
+			// that the seat serves again is enough to re-issue.
+			j = seatServes
+		}
+		if j != seatStillDown {
+			m.mu.Lock()
+			if j == seatServes {
+				ep.served = true
+			} else {
+				ep.attempts++
+			}
+			m.warming = ep.sawDown // a restart was seen: the re-issued call's first completion is cold cost
+			m.mu.Unlock()
+			return nil
+		}
+		m.mu.Lock()
+		left = m.holdLeftLocked(time.Now())
+		if left <= 0 {
+			return m.endLocked(sd, func(t *SeatDownError) { t.GaveUp, t.Waited = true, time.Since(ep.since) })
+		}
+		m.mu.Unlock()
+		pace(left)
 	}
 }

@@ -898,6 +898,7 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	// re-places a run whose seat did not recover.
 	wire.SeatRecoveries = res.SeatRecoveries
 	wire.SeatDownWaitSec = live.SeatDownTotal().Seconds()
+	logSeatDown(seat, res.SeatRecoveries, live)
 	// Seat usage — set HERE, before every defer branch, for the same reason as
 	// the trace below: a budget- or timeout-ended run is exactly the one that
 	// generated for minutes and used to be ledgered as 0 (0.115.5).
@@ -2281,6 +2282,21 @@ func warmSeatOutcome(ctx context.Context, endpoint, seat string, budget time.Dur
 		}
 	}
 	return time.Since(start), joinAdmissionNotes(m.note, fmt.Sprintf("warm request answered HTTP %d after %.0fs but /running never listed %s ready (proceeding)", resp.StatusCode, time.Since(start).Seconds(), seat)), true, false
+}
+
+// logSeatDown says, once per run, what the run's seat did to it: a recovery leaves
+// no other trace than two wire numbers, and a seat that could not be read from here
+// silently got no seat-down handling at all.
+func logSeatDown(seat string, recoveries int, live *agent.Monitor) {
+	if live == nil {
+		return
+	}
+	if recoveries > 0 || live.SeatDownTotal() > 0 {
+		log.Printf("agent task: seat %s went down under the run: %d recovery(ies), %.0fs waited for the seat", seat, recoveries, live.SeatDownTotal().Seconds())
+	}
+	if n, err := live.SeatReadFailures(); n > 0 {
+		log.Printf("agent task: seat %s could not be read %d time(s) while the run judged a failure (last: %v): a dead seat would have read as an ordinary error", seat, n, err)
+	}
 }
 
 // timedTheSeatsOwnRates reports whether what a run measured — its decode rate and

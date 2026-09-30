@@ -145,11 +145,12 @@ type Result struct {
 	Calls      []CallRecord
 	Transcript []Msg
 
-	// SeatRecoveries (ADR 0066) counts the model calls that failed because the
-	// seat went down under the run and were re-issued after the seat came back:
-	// each one is a wait the run survived with its transcript intact and no step
-	// spent. Set on every return path (Run stamps it); 0 on every run whose seat
-	// stayed up.
+	// SeatRecoveries (ADR 0066) counts the times the run's seat went down under it
+	// and came back: each one is a wait the run survived with its transcript intact
+	// and no step spent, counted when the re-issued call's first byte arrived —
+	// never for a re-issue that recovered nothing. Set on every return path (Run
+	// stamps it from the liveness monitor, the run's single witness); 0 on every run
+	// whose seat stayed up.
 	SeatRecoveries int
 
 	// Fallback is set only by RunTwoTier (two-tier drive): it records whether the
@@ -286,26 +287,26 @@ func (l *Loop) calReport() TokenCalReport {
 
 // Loop runs the canonical agent loop over a fixed tool set.
 type Loop struct {
-	client        Client
-	thinking      ThinkingMode // planner think-block policy (thinking.go); "" = ThinkingAuto
-	tools         map[string]Tool
-	specs         []ToolSpec
-	maxSteps      int
-	maxTokens     int
-	maxSameTool   int
-	noForcedFinal bool                          // WithoutForcedFinal: the last step offers tools like any other (D-89)
-	parkHighRisk  bool                          // unattended: park self-flagged high-risk effectful calls (WithParkHighRisk)
-	parkRecord    func(tool, args, risk string) // durable park record (ask queue); nil = ledger only
-	observer      RunObserver                   // WithObserver: per-step progress for the run registry (gpuactivity); nil = none
-	live          *Monitor                      // WithLiveness: the run's stall/ceiling watch (0.131.0); nil = none
-	prefillSamples []PrefillSample              // per-call prefill measurements (0.131.1), published on Result
-	batchJudge    bool                          // end-of-run advisory judge pass (WithBatchJudge; batchjudge.go)
-	ctxTokens     int                           // model context window in tokens; input budget derives from it
-	keepRecent    int                           // most-recent turns kept full during compaction
-	toolTimeout   time.Duration                 // per-tool-call cap; see defaultToolTimeout
-	skeletonPrune bool                          // enable the skeleton rung of the compaction ladder (zero value off; callers default it ON per ADR 0015)
-	gcfCompact    bool                          // enable the lossless GCF rung of the compaction ladder (zero value off; callers default it ON per ADR 0015)
-	toolResultCap int                           // max chars of ONE tool result kept in the transcript (0 => derive from window)
+	client         Client
+	thinking       ThinkingMode // planner think-block policy (thinking.go); "" = ThinkingAuto
+	tools          map[string]Tool
+	specs          []ToolSpec
+	maxSteps       int
+	maxTokens      int
+	maxSameTool    int
+	noForcedFinal  bool                          // WithoutForcedFinal: the last step offers tools like any other (D-89)
+	parkHighRisk   bool                          // unattended: park self-flagged high-risk effectful calls (WithParkHighRisk)
+	parkRecord     func(tool, args, risk string) // durable park record (ask queue); nil = ledger only
+	observer       RunObserver                   // WithObserver: per-step progress for the run registry (gpuactivity); nil = none
+	live           *Monitor                      // WithLiveness: the run's stall/ceiling watch (0.131.0); nil = none
+	prefillSamples []PrefillSample               // per-call prefill measurements (0.131.1), published on Result
+	batchJudge     bool                          // end-of-run advisory judge pass (WithBatchJudge; batchjudge.go)
+	ctxTokens      int                           // model context window in tokens; input budget derives from it
+	keepRecent     int                           // most-recent turns kept full during compaction
+	toolTimeout    time.Duration                 // per-tool-call cap; see defaultToolTimeout
+	skeletonPrune  bool                          // enable the skeleton rung of the compaction ladder (zero value off; callers default it ON per ADR 0015)
+	gcfCompact     bool                          // enable the lossless GCF rung of the compaction ladder (zero value off; callers default it ON per ADR 0015)
+	toolResultCap  int                           // max chars of ONE tool result kept in the transcript (0 => derive from window)
 	// tokenCal corrects the compaction budget using the server's own token
 	// counts — the fix for the estimator defect that let three real
 	// transcripts be rejected while the ladder declined to compact (ADR 0017).
@@ -871,9 +872,6 @@ type budgetState struct {
 	note     string
 	reissue  string
 	narrowed bool
-	// seatRecoveries counts the model calls re-issued after the seat went down
-	// (ADR 0066); Run stamps it on the Result of every return path.
-	seatRecoveries int
 }
 
 // Run executes the loop for objective until the model stops, the step budget is
@@ -885,7 +883,9 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 		res.FinalBudgetFit, res.BudgetNote = bs.fit, bs.note
 	}
 	res.FinalReissue = bs.reissue
-	res.SeatRecoveries = bs.seatRecoveries
+	if l.live != nil {
+		res.SeatRecoveries = l.live.SeatRecoveries()
+	}
 	res.PrefillSamples = l.prefillSamples
 	return res, err
 }
@@ -1077,12 +1077,8 @@ func (l *Loop) run(ctx context.Context, objective string, bs *budgetState) (Resu
 			Transcript: msgs, TokensIn: tokIn, TokensOut: tokOut, CompactionsExhausted: exhausted, TokenCal: l.calReport(),
 			Prefill: l.prefill.Report(), Pager: l.pager.Report(), TokenizerPath: l.tokPath(), Effects: effects, RuleHits: ruleHits, Calls: calls}
 	}
-	// stepRetried: the step in hand was already re-issued once after the seat
-	// went down (ADR 0066). A second seat-down on the same step ends the run,
-	// typed; a step that gets an answer clears it. seatDownResult is the error
-	// Result for a run the seat went down under — a closure over the run-locals
-	// for the same reason as cutResult above.
-	stepRetried := false
+	// seatDownResult is the error Result for a run the seat went down under — a
+	// closure over the run-locals for the same reason as cutResult above.
 	seatDownResult := func(steps int) Result {
 		return Result{Steps: steps, StopReason: "error", Transcript: msgs, TokensIn: tokIn, TokensOut: tokOut, CompactionsExhausted: exhausted,
 			TokenCal: l.calReport(), Prefill: l.prefill.Report(), Pager: l.pager.Report(), TokenizerPath: l.tokPath(), Effects: effects, RuleHits: ruleHits, Calls: calls}
@@ -1235,24 +1231,18 @@ func (l *Loop) run(ctx context.Context, objective string, bs *budgetState) (Resu
 		callStart := time.Now()
 		// seatDown handles a model call that failed because the SEAT went down
 		// under the run (ADR 0066). The loop keeps the transcript, so the step is
-		// re-issued once after the seat serves again — the wait is the monitor's
-		// (AwaitSeat, under the cold-load hold) — and a re-issue spends no step.
-		// retry=true means "run this step again"; otherwise the Result and error
-		// end the run, typed.
+		// re-issued once the seat can take it — the wait, its bound and the rule that
+		// a seat which came back and died under the same step ends the run are the
+		// monitor's (AwaitSeat, an episode under the cold-load hold) — and a re-issue
+		// spends no step. retry=true means "run this step again"; otherwise the
+		// Result and error end the run, typed.
 		seatDown := func(sd *SeatDownError) (retry bool, res Result, rerr error) {
 			if sd.terminal || l.live == nil {
 				return false, seatDownResult(step), sd
 			}
-			if stepRetried {
-				again := *sd
-				again.Reissued = true
-				return false, seatDownResult(step), &again
-			}
 			if werr := l.live.AwaitSeat(ctx, sd); werr != nil {
 				return false, seatDownResult(step), werr
 			}
-			bs.seatRecoveries++
-			stepRetried = true
 			retryNoThink = thisIsReissue
 			reissueFloor = savedFloor
 			return true, Result{}, nil
@@ -1386,7 +1376,9 @@ func (l *Loop) run(ctx context.Context, objective string, bs *budgetState) (Resu
 				return Result{Steps: step, StopReason: "error", Transcript: msgs, TokensIn: tokIn, TokensOut: tokOut, CompactionsExhausted: exhausted, TokenCal: l.calReport(), Prefill: l.prefill.Report(), Pager: l.pager.Report(), TokenizerPath: l.tokPath(), Effects: effects, RuleHits: ruleHits, Calls: calls}, err
 			}
 		}
-		stepRetried = false // the step got its answer: a later seat-down earns its own re-issue
+		if l.live != nil {
+			l.live.SeatAnswered() // the step got its answer: the seat serves, and a later seat-down earns its own wait
+		}
 		noteUsage(comp)
 		l.notePrefill(comp)
 		callRec := recordOf(step+1, stepMax, comp)

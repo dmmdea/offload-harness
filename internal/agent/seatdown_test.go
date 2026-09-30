@@ -198,14 +198,25 @@ func TestAwaitSeatWaitsForARestartThenReturns(t *testing.T) {
 	if el := time.Since(begin); el < 200*time.Millisecond {
 		t.Fatalf("returned after %s: it did not wait for the restart (250 ms)", el)
 	}
-	if m.SeatRecoveries() != 1 {
-		t.Fatalf("SeatRecoveries = %d, want 1", m.SeatRecoveries())
+	// The seat serves again, but the recovery is not COUNTED until the re-issued call
+	// lands: a re-issue that recovered nothing is not a recovery.
+	if m.SeatRecoveries() != 0 {
+		t.Fatalf("SeatRecoveries = %d before the re-issued call landed, want 0", m.SeatRecoveries())
 	}
 	if w := m.SeatDownTotal(); w < 200*time.Millisecond {
 		t.Fatalf("SeatDownTotal = %s, want the ~250 ms waited", w)
 	}
 	if ctx.Err() != nil {
 		t.Fatalf("a recovery must not end the run: %v", context.Cause(ctx))
+	}
+	m.SeatAnswered() // the re-issued step got its answer
+	if m.SeatRecoveries() != 1 {
+		t.Fatalf("SeatRecoveries = %d after the answer, want 1", m.SeatRecoveries())
+	}
+	booked := m.SeatDownTotal()
+	time.Sleep(60 * time.Millisecond)
+	if booked < 200*time.Millisecond || m.SeatDownTotal() != booked {
+		t.Fatalf("SeatDownTotal = %s then %s: the wait must stop growing once the recovery landed", booked, m.SeatDownTotal())
 	}
 }
 
@@ -375,6 +386,7 @@ func TestAwaitSeatIsBoundedByTheRecoveryBudget(t *testing.T) {
 		t.Fatalf("first recovery = %v", err)
 	}
 	m.Phase(PhaseDecoding, 0) // the re-issued step
+	m.SeatAnswered()          // ...got its answer: the recovery landed and spent the budget
 	begin := time.Now()
 	err := m.AwaitSeat(ctx, &SeatDownError{Kind: SeatDownDied, Note: "second"})
 	var sd *SeatDownError
@@ -569,10 +581,17 @@ func TestLoopReissuesTheStepAfterSeatRecovery(t *testing.T) {
 	}
 }
 
-// The re-issue is ONCE per failed step: a seat that goes down again under the
-// re-issued call ends the run, typed, marked as re-issued.
-func TestLoopSeatDownIsBoundedThenTyped(t *testing.T) {
-	eng := newDownEngine("gone")
+// A seat that was SEEN serving again earns exactly one re-issue per failed step: if
+// the re-issued call goes down again before its answer, the seat came back and died
+// under the same request, and the run ends, typed and marked as re-issued — a seat
+// that does that would otherwise be waited for forever. Nothing was recovered, so
+// nothing is counted.
+func TestLoopSeatThatCameBackAndWentDownAgainEndsTyped(t *testing.T) {
+	eng := newDownEngine("starting")
+	go func() {
+		time.Sleep(120 * time.Millisecond)
+		eng.restart()
+	}()
 	c := &seatDownClient{script: []func() (Completion, error){seatDownAt(SeatDownDied), seatDownAt(SeatDownDied), doneCompletion}}
 	ctx, m := NewMonitor(context.Background(), recoveryPolicy(5*time.Second), 30*time.Second)
 	defer m.Stop()
@@ -582,14 +601,90 @@ func TestLoopSeatDownIsBoundedThenTyped(t *testing.T) {
 	if !errors.As(err, &sd) {
 		t.Fatalf("err = %v, want a typed *SeatDownError", err)
 	}
-	if !sd.Reissued || !strings.Contains(sd.Error(), "re-issued once") {
-		t.Fatalf("seat-down = %q (reissued=%v), want it to say the re-issue failed too", sd.Error(), sd.Reissued)
+	if !sd.Reissued || !strings.Contains(sd.Error(), "re-issued once") || sd.GaveUp {
+		t.Fatalf("seat-down = %q (reissued=%v gaveUp=%v), want it to say the re-issue failed too", sd.Error(), sd.Reissued, sd.GaveUp)
 	}
 	if res.StopReason != "error" || c.calls != 2 {
 		t.Fatalf("stop=%q calls=%d, want an error after exactly one re-issue (2 calls)", res.StopReason, c.calls)
 	}
-	if res.SeatRecoveries != 1 {
-		t.Fatalf("SeatRecoveries = %d, want the one recovery that did happen", res.SeatRecoveries)
+	if res.SeatRecoveries != 0 || m.SeatRecoveries() != 0 {
+		t.Fatalf("SeatRecoveries = %d/%d: a re-issue that went down again recovered nothing", res.SeatRecoveries, m.SeatRecoveries())
+	}
+}
+
+// A seat llama-swap does not list has nobody starting it: the re-issue is the start
+// trigger. When that start FAILS (the 2026-09-29 launcher refused for 18 minutes and
+// every request got an instant 500) the wait goes on — one poll, then another
+// attempt — instead of turning the request into two quick 500s and a defer. The run
+// that finally gets its answer recovered once, and nothing before that is counted.
+func TestLoopKeepsTriggeringAStartThatKeepsFailing(t *testing.T) {
+	eng := newDownEngine("gone") // llama-swap never lists the seat: only a request starts it
+	c := &seatDownClient{script: []func() (Completion, error){seatDownAt(SeatDownDied), seatDownAt(SeatDownDied), seatDownAt(SeatDownDied), doneCompletion}}
+	p := recoveryPolicy(5 * time.Second)
+	p.ColdLoadPoll = 40 * time.Millisecond
+	ctx, m := NewMonitor(context.Background(), p, 30*time.Second)
+	defer m.Stop()
+	m.WithEngineProbe(eng.probe)
+	begin := time.Now()
+	res, err := NewLoop(c, nil, 1).WithLiveness(m).Run(ctx, "x")
+	el := time.Since(begin)
+	if err != nil || res.StopReason != "done" || c.calls != 4 {
+		t.Fatalf("err=%v stop=%q calls=%d, want the run to finish on the fourth attempt (three failed starts)", err, res.StopReason, c.calls)
+	}
+	if res.Steps != 1 {
+		t.Fatalf("steps = %d: a start attempt must not spend a step", res.Steps)
+	}
+	if res.SeatRecoveries != 1 || m.SeatRecoveries() != 1 {
+		t.Fatalf("SeatRecoveries result=%d monitor=%d, want ONE recovery for the whole outage (three failed starts are not recoveries)", res.SeatRecoveries, m.SeatRecoveries())
+	}
+	// Two paced attempts between three failures: at least two polls of waiting, all of
+	// it booked as the wait on the dead seat.
+	if el < 70*time.Millisecond {
+		t.Fatalf("the run took %s: failed starts must be paced by the poll, not retried in a tight loop", el)
+	}
+	if w := m.SeatDownTotal(); w < 70*time.Millisecond || w > el {
+		t.Fatalf("SeatDownTotal = %s of a %s run, want the whole episode booked", w, el)
+	}
+}
+
+// A start that never succeeds ends the run at the cold-load bound counted from the
+// FIRST verdict, typed, saying what was tried and what the seat looked like — not
+// after two quick attempts, and not claiming the seat came back.
+func TestLoopStartThatNeverSucceedsGivesUpAtTheBound(t *testing.T) {
+	eng := newDownEngine("gone")
+	var calls atomic.Int64
+	client := clientFunc(func(ctx context.Context, msgs []Msg, _ []ToolSpec, _ int) (Completion, error) {
+		calls.Add(1)
+		return Completion{}, &SeatDownError{Kind: SeatDownDied, Note: "llama-swap answered 500: the start failed"}
+	})
+	p := recoveryPolicy(400 * time.Millisecond)
+	p.ColdLoadPoll = 40 * time.Millisecond
+	ctx, m := NewMonitor(context.Background(), p, 30*time.Second)
+	defer m.Stop()
+	m.WithEngineProbe(eng.probe)
+	begin := time.Now()
+	res, err := NewLoop(client, nil, 1).WithLiveness(m).Run(ctx, "x")
+	el := time.Since(begin)
+	var sd *SeatDownError
+	if !errors.As(err, &sd) || !sd.GaveUp || sd.Reissued {
+		t.Fatalf("err = %v, want a typed give-up at the bound, not a seat that came back", err)
+	}
+	if el < 350*time.Millisecond || el > 3*time.Second {
+		t.Fatalf("gave up after %s, want the 400 ms cold-load bound", el)
+	}
+	if sd.Attempts < 3 || calls.Load() > 25 {
+		t.Fatalf("attempts=%d calls=%d, want several paced start attempts and no tight loop", sd.Attempts, calls.Load())
+	}
+	if sd.Waited < 350*time.Millisecond {
+		t.Fatalf("Waited = %s, want the ~400 ms of the whole episode", sd.Waited)
+	}
+	msg := sd.Error()
+	if !strings.HasPrefix(msg, "seat down: ") || !strings.Contains(msg, "start attempt") || !strings.Contains(msg, "did not come back") ||
+		!strings.Contains(msg, "llama-swap does not list the seat") || strings.Contains(msg, "came back and it went down again") {
+		t.Fatalf("reason = %q, want the attempts and the seat's last state, never a claim that the seat came back", msg)
+	}
+	if res.SeatRecoveries != 0 || m.SeatRecoveries() != 0 {
+		t.Fatalf("SeatRecoveries = %d/%d: a seat that never started recovered nothing", res.SeatRecoveries, m.SeatRecoveries())
 	}
 }
 
