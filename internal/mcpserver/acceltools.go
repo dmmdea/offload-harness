@@ -57,6 +57,16 @@ func accelMCPTools(id string) []accelMCPTool {
 			{"offload_semantic_segment", "semantic_segment", "image_path", "SEMANTIC segmentation on the LOCAL Coral Edge TPU (DeepLabV3 MobileNet v2, 21 Pascal VOC classes): a per-pixel class-id PNG — NOT instances (that is offload_segment on a Hailo box; the two outputs are not interchangeable). Returns {mask_path,classes:[{class_id,label,pixels}],width,height}.", `{"type":"object","properties":{` + img + `,"out_path":{"type":"string","description":"output mask PNG (default: <name>.segmask.png)"}},"required":["image_path"]}`},
 			{"offload_image_embed", "embed", "image_path", "1280-d IMAGE embedding on the LOCAL Coral Edge TPU (EfficientNet-EdgeTPU-S extractor) for image-to-image similarity search and clustering. space=efficientnet-edgetpu-s — NOT a CLIP space: there is no text tower to pair it with (no offload_text_embed / offload_zero_shot on this device). Returns {embedding,dim,space}.", `{"type":"object","properties":{` + img + `},"required":["image_path"]}`},
 		}
+	case "rknpu":
+		// Three capabilities on the Rockchip RK3588's NPU, each on a model the sidecar verifies by
+		// sha256. Every name is one the Coral and/or the Hailo lane also owns — the shared-name rule
+		// decides on a box with several devices. The descriptions do not name the models: which .rknn
+		// files ship is the sidecar's manifest, and each result's `model` says what ran.
+		return []accelMCPTool{
+			{"offload_classify_image", "classify", "image_path", "Classify an image on the LOCAL Rockchip RK3588 NPU (free, on-box; 1000 ImageNet classes). Returns {results:[{label,score}],best,model,domain} top-k (default 5).", `{"type":"object","properties":{` + img + `,"top_k":{"type":"integer","description":"results to return (default 5)"}},"required":["image_path"]}`},
+			{"offload_object_detect", "object_detect", "image_path", "Detect the 80 COCO object classes (person, car, dog, laptop, ...) on the LOCAL Rockchip RK3588 NPU (free, on-box). Returns {objects:[{label,class_id,x,y,w,h,score}],count} in image pixels, sorted by score.", `{"type":"object","properties":{` + img + `,"score_threshold":{"type":"number","description":"minimum score (the sidecar's default when omitted)"}},"required":["image_path"]}`},
+			{"offload_image_embed", "embed", "image_path", "IMAGE embedding on the LOCAL Rockchip RK3588 NPU (a CLIP-class image tower) for image-to-image similarity search and clustering. Returns {embedding,dim,space,model}. space names the embedding space — NOT the Hailo's tinyclip and NOT the Coral's efficientnet-edgetpu-s, so vectors from different devices are never comparable, even at the same dimension. No text tower is served (no offload_text_embed / offload_zero_shot on this device).", `{"type":"object","properties":{` + img + `},"required":["image_path"]}`},
+		}
 	}
 	return nil
 }
@@ -69,6 +79,8 @@ func accelOwns(id string) []string {
 		return []string{"face_detect", "face_embed", "object_detect", "person_embed", "depth", "enhance_low_light", "image_embed", "pose", "segment", "text_embed", "zero_shot"}
 	case "coral-edgetpu":
 		return []string{"classify_image", "object_detect", "semantic_segment", "image_embed"}
+	case "rknpu":
+		return []string{"classify_image", "object_detect", "image_embed"}
 	}
 	return nil
 }
@@ -100,6 +112,13 @@ func accelLaneConfigFor(cfg config.Config, id string) (accelLaneConfig, bool) {
 		}
 		return accelLaneConfig{cfg.CoralEndpoint, cfg.CoralSidecarCmd, t, cfg.CoralIdleSec,
 			"on-demand loopback sidecar (accelerators/coral/server.py); the first call starts it (cold ~0.5-2 s model load on the TPU), it exits itself after coral_idle_sec idle; reads sysfs temp/status, never writes it"}, true
+	case "rknpu":
+		t := time.Duration(cfg.RknpuTimeoutSec) * time.Second
+		if t <= 0 {
+			t = 60 * time.Second
+		}
+		return accelLaneConfig{cfg.RknpuEndpoint, cfg.RknpuSidecarCmd, t, cfg.RknpuIdleSec,
+			"on-demand loopback sidecar (accelerators/rknpu/server.py); the first call starts it (cold: interpreter start, RKNN runtime init and the model load), it exits itself after rknpu_idle_sec idle; the NPU shares system memory with the host, so a loaded model holds its RAM until then"}, true
 	}
 	return accelLaneConfig{}, false
 }

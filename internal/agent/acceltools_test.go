@@ -3,11 +3,16 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 )
 
 var coralToolNames = []string{"offload_classify_image", "offload_object_detect", "offload_semantic_segment", "offload_image_embed"}
+
+// rknpuRoutes maps each RKNPU tool to the sidecar route it drives. The routes are the contract with
+// accelerators/rknpu/server.py (POST /v1/<tool>), so a renamed row would call a route that 404s.
+var rknpuRoutes = map[string]string{"offload_classify_image": "classify", "offload_object_detect": "object_detect", "offload_image_embed": "embed"}
 
 func fakeLane(id string, seen *[]string) NPUFunc {
 	return func(ctx context.Context, tool string, args map[string]any) (string, error) {
@@ -148,5 +153,111 @@ func TestAccelLaneUnknownDeviceRegistersNothing(t *testing.T) {
 	// A nil Call is skipped too.
 	if got := accelLaneTools([]AccelLane{{ID: "coral-edgetpu"}}, nil); len(got) != 0 {
 		t.Errorf("nil lane registered %d tools", len(got))
+	}
+}
+
+// The RKNPU lane is gated like every device: no lane, none of its tools; a lane, exactly its three, and
+// the rest of the tool list untouched. Each tool drives its own sidecar route and hands the arguments
+// through unchanged.
+func TestRknpuLaneRegistersItsToolsOnly(t *testing.T) {
+	without, err := ReadOnlyToolsWithLanes(t.TempDir(), nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for n := range rknpuRoutes {
+		if names(without)[n] {
+			t.Errorf("no lanes leaked tool %s", n)
+		}
+	}
+	var seen []string
+	with, err := ReadOnlyToolsWithLanes(t.TempDir(), nil, nil, []AccelLane{{ID: "rknpu", Call: fakeLane("rknpu", &seen)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(with) != len(without)+len(rknpuRoutes) {
+		t.Errorf("the rknpu lane added %d tools, want %d", len(with)-len(without), len(rknpuRoutes))
+	}
+	args := `{"image_path":"/tmp/x.jpg","top_k":3,"score_threshold":0.4}`
+	found := map[string]bool{}
+	for _, tl := range with {
+		route, ok := rknpuRoutes[tl.Name]
+		if !ok {
+			continue
+		}
+		found[tl.Name] = true
+		seen = nil
+		out, err := tl.Exec(context.Background(), args)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(seen) != 1 || seen[0] != "rknpu/"+route {
+			t.Errorf("%s drove %v, want [rknpu/%s]", tl.Name, seen, route)
+		}
+		var got map[string]any
+		_ = json.Unmarshal([]byte(out), &got)
+		sent, _ := got["args"].(map[string]any)
+		if sent["image_path"] != "/tmp/x.jpg" || sent["top_k"] != float64(3) || sent["score_threshold"] != 0.4 {
+			t.Errorf("%s: arguments did not pass through: %v", tl.Name, got)
+		}
+	}
+	if len(found) != len(rknpuRoutes) {
+		t.Errorf("the rknpu lane registered %v, want %d tools", found, len(rknpuRoutes))
+	}
+}
+
+// The shared-name rule over all three devices, in every order. classify_image is owned by the Coral and
+// the RKNPU only, object_detect and image_embed by all three, so a name goes to the FIRST listed device
+// that owns it — which is not always the first device listed (a Hailo listed first owns no classify).
+func TestAccelLanesSharedNameRuleOverThreeDevices(t *testing.T) {
+	owners := map[string][]string{
+		"offload_classify_image": {"coral-edgetpu", "rknpu"},
+		"offload_object_detect":  {"hailo-8l", "coral-edgetpu", "rknpu"},
+		"offload_image_embed":    {"hailo-8l", "coral-edgetpu", "rknpu"},
+	}
+	orders := [][]string{
+		{"hailo-8l", "coral-edgetpu", "rknpu"}, {"hailo-8l", "rknpu", "coral-edgetpu"},
+		{"coral-edgetpu", "hailo-8l", "rknpu"}, {"coral-edgetpu", "rknpu", "hailo-8l"},
+		{"rknpu", "hailo-8l", "coral-edgetpu"}, {"rknpu", "coral-edgetpu", "hailo-8l"},
+	}
+	for _, order := range orders {
+		var seen []string
+		var lanes []AccelLane
+		for _, id := range order {
+			lanes = append(lanes, AccelLane{ID: id, Call: fakeLane(id, &seen)})
+		}
+		tools, err := ReadOnlyToolsWithLanes(t.TempDir(), nil, nil, lanes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		count := map[string]int{}
+		byName := map[string]Tool{}
+		for _, tl := range tools {
+			count[tl.Name]++
+			byName[tl.Name] = tl
+		}
+		for name, owning := range owners {
+			want := ""
+			for _, id := range order {
+				if slices.Contains(owning, id) {
+					want = id
+					break
+				}
+			}
+			if count[name] != 1 {
+				t.Errorf("order %v: %s registered %d times, want exactly 1", order, name, count[name])
+				continue
+			}
+			seen = nil
+			_, _ = byName[name].Exec(context.Background(), `{"image_path":"/tmp/x.jpg"}`)
+			if len(seen) != 1 || !strings.HasPrefix(seen[0], want+"/") {
+				t.Errorf("order %v: %s routed to %v, want %s", order, name, seen, want)
+			}
+		}
+		// The device-unique tools survive whatever the order.
+		for _, n := range []string{"offload_face_detect", "offload_zero_shot", "offload_semantic_segment"} {
+			if count[n] != 1 {
+				t.Errorf("order %v: %s registered %d times", order, n, count[n])
+			}
+		}
 	}
 }

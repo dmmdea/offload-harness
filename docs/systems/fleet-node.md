@@ -177,7 +177,11 @@ different answers:
 provider** ([ADR 0014](../architecture/decisions/0014-gpu-memory-provider-and-uma-sampling.md)):
 `nvidia-smi` where it works, else the windows-generic WDDM source (registry `qwMemorySize` capacity
 + `\GPU Adapter Memory` PDH usage; UMA iGPUs advertise carve-out + the ~RAM/2 shared budget and
-Dedicated+Shared usage) — a global sampler polling every two seconds either way. There is no
+Dedicated+Shared usage) — a global sampler polling every two seconds either way. On Linux the
+generic source is the amdgpu sysfs probe ([ADR 0053](../architecture/decisions/0053-linux-amdgpu-gpu-memory-provider.md)),
+or, for a unified-memory SoC tier with no VRAM counter (`rockchip-rk3588`), `/proc/meminfo`
+less the operator's `uma_reserve_gib` (`fleetnode.MeminfoUMAProbe`: capacity `MemTotal − reserve`,
+free `MemAvailable − reserve` clamped to `[0, capacity]`). There is no
 per-process path here. A sampling failure keeps the last good snapshot rather than publishing
 zeros, bounded by the 30-second staleness gate.
 
@@ -1288,6 +1292,8 @@ wait after ONE transient error, which is S-08 again, intermittently.
   persistence
 - [`internal/fleetnode/vram.go`](../../internal/fleetnode/vram.go),
   [`vram_windows.go`](../../internal/fleetnode/vram_windows.go) — the two sampling paths
+- [`internal/fleetnode/vram_uma_meminfo.go`](../../internal/fleetnode/vram_uma_meminfo.go) — the
+  linux-meminfo memory provider of a unified-memory SoC tier (`rockchip-rk3588`)
 - [`internal/gpuprobe/`](../../internal/gpuprobe/) — the nvidia-smi command + per-device parser and
   the host free-RAM reader (leaf; fleetnode's `GPUDevice`/`ParseSmiMemoryDevices`/`HeadlineDevice`
   alias it)

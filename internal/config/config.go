@@ -1313,7 +1313,7 @@ type Config struct {
 	// config file or the public repo. A self-hosted NIM needs no key.
 	// --- accelerators (ADR 0024): devices that ride BESIDE the GPU tier ---
 	// Accelerators lists the additive accelerator ids present on this box
-	// (today: "hailo-8l"). `profile` stays the one GPU tier; an empty list is
+	// ("hailo-8l", "coral-edgetpu", "rknpu"). `profile` stays the one GPU tier; an empty list is
 	// byte-identical to a box with no accelerator — tools/list does not change.
 	Accelerators []string `json:"accelerators,omitempty"`
 	// FleetAccelerators lists accelerator ids this box does NOT carry but may
@@ -1347,6 +1347,21 @@ type Config struct {
 	CoralTimeoutSec int `json:"coral_timeout_sec,omitempty"`
 	// CoralIdleSec is passed to the sidecar as its self-exit idle window. Default 300.
 	CoralIdleSec int `json:"coral_idle_sec,omitempty"`
+	// RknpuEndpoint is the Rockchip RK3588 NPU sidecar base (accelerators/rknpu/server.py),
+	// loopback only, port 18815 so a box carrying several devices never collides with the
+	// Hailo's 18813 or the Coral's 18814. Inert while Accelerators lacks "rknpu".
+	RknpuEndpoint string `json:"rknpu_endpoint,omitempty"`
+	// RknpuSidecarCmd launches the RKNPU sidecar on demand (rknpu-http.sh). Empty =
+	// never spawn; the harness defers when /health is unreachable.
+	RknpuSidecarCmd string `json:"rknpu_sidecar_cmd,omitempty"`
+	// RknpuTimeoutSec bounds one RKNPU call. The NPU itself answers in milliseconds, but a
+	// cold call also pays the RKNN runtime init and the model load, so 60 is ample. It must
+	// stay under accelremote.Budget less the 45 s cold-spawn window: a forwarded call is
+	// cut off at the Budget whatever this says. Default 60.
+	RknpuTimeoutSec int `json:"rknpu_timeout_sec,omitempty"`
+	// RknpuIdleSec is passed to the sidecar as its self-exit idle window, which is also how
+	// long its resident models keep their RAM (the NPU shares system memory). Default 300.
+	RknpuIdleSec int `json:"rknpu_idle_sec,omitempty"`
 	// --- fleet-node server (`fleet-serve` / `fleet-measure`; docs/FLEET-NODE.md) ---
 	// FleetListen is the fleet-serve bind address. Loopback by default; the
 	// production binding is the machine's TAILSCALE address behind
@@ -1545,6 +1560,17 @@ type Config struct {
 	// one device is already the headline); no effect at all on a
 	// windows-generic node, which has no gpu_devices[] to match against.
 	PrimaryGPUUUID string `json:"primary_gpu_uuid,omitempty"`
+	// UMAReserveGiB is the RAM a unified-memory SoC node (the rockchip-rk3588 tier)
+	// holds back from inference for the box's own workload. Such a box has no VRAM —
+	// its GPU and NPU allocate from the same RAM as everything else — so
+	// /fleet/health advertises MemTotal minus this reserve as capacity and
+	// MemAvailable minus it as free (fleetnode.MeminfoUMAProbe). The tier seeds 3,
+	// for a board that also runs a home-automation stack. 0 (the default) reserves
+	// nothing and advertises all of RAM. Inert on every other tier, which reads a real
+	// VRAM counter. A reserve that leaves no capacity fails the probe, so fleet-serve
+	// refuses to start rather than advertise a node with nothing to give; a negative
+	// one is refused by name.
+	UMAReserveGiB float64 `json:"uma_reserve_gib,omitempty"`
 	// --- config-driven pipeline jobs (Task 4: fleet-node "pipeline job" task family) ---
 	// Pipelines maps a task_type name (e.g. "scene-swap") to the externally-
 	// provided CLI that serves it — see PipelineSpec. Empty/nil = this box
@@ -1821,6 +1847,9 @@ func Default() Config {
 		CoralEndpoint:                 "http://127.0.0.1:18814", // loopback sidecar base; inert while Accelerators lacks coral-edgetpu
 		CoralTimeoutSec:               30,
 		CoralIdleSec:                  300,
+		RknpuEndpoint:                 "http://127.0.0.1:18815", // loopback sidecar base; inert while Accelerators lacks rknpu
+		RknpuTimeoutSec:               60,
+		RknpuIdleSec:                  300,
 		FleetListen:                   "127.0.0.1:18811", // fleet-serve bind (18810 = the dispatcher's)
 		FleetNodeID:                   "",                // "" = hostname at serve time
 		FleetMaxQueueDepth:            0,                 // 0 = built-in default (2x fleet_max_concurrent_jobs accepted+running); negative = unlimited
@@ -1831,6 +1860,7 @@ func Default() Config {
 		DelegateRemotes:               nil,               // fleet node base URLs the delegator considers by default (tailnet-only); per-call remotes replace it
 		FleetSampler:                  "auto",            // auto|pdh|pdh-shared|global (FLEET-NODE.md)
 		PrimaryGPUUUID:                "",                // "" = largest-total headline rule; set to pin by UUID (FLEET-NODE.md)
+		UMAReserveGiB:                 0,                 // 0 = a unified-memory SoC advertises all of RAM; the rockchip-rk3588 tier seeds 3
 		Pipelines:                     nil,               // empty = no pipeline-job routes on this box (opt-in per pipeline)
 		SeatEndpoints:                 nil,               // empty = every seat on Endpoint (opt-in per box, like Pipelines)
 		CascadeRemoteLanes:            nil,               // empty = the cascade never fails over off-box (opt-in per box)

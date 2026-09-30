@@ -41,6 +41,12 @@ func laneConfigFor(cfg config.Config, id string) (laneConfig, bool) {
 			t = 30 * time.Second
 		}
 		return laneConfig{cfg.CoralEndpoint, cfg.CoralSidecarCmd, t, cfg.CoralIdleSec}, true
+	case "rknpu":
+		t := time.Duration(cfg.RknpuTimeoutSec) * time.Second
+		if t <= 0 {
+			t = 60 * time.Second
+		}
+		return laneConfig{cfg.RknpuEndpoint, cfg.RknpuSidecarCmd, t, cfg.RknpuIdleSec}, true
 	}
 	return laneConfig{}, false
 }

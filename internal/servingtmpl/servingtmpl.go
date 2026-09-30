@@ -103,6 +103,10 @@ type Params struct {
 	// suffix. Both matter only when Seats is non-empty.
 	Home string
 	GOOS string
+	// RknpuHome is the rknpu accelerator's home, substituted for __RKNPU_HOME__ in seat
+	// paths (an rkllm seat's default launcher lives there). Empty falls back to
+	// <Home>/rknpu, the layout `install seed` uses when no RKNPU_HOME says otherwise.
+	RknpuHome string
 
 	// DisplayLayer is the tier's display layer (ADR 0039) when it declares one:
 	// the dormant rungs pinned to the display card. nil — the common case, and
@@ -117,9 +121,11 @@ type Params struct {
 	// This lived in install.ps1 as an `if ($profileId -match '^blackwell-')` branch,
 	// so a Linux install of the same tier silently did not get it.
 	GPUEnv []string
-	// Backend is the tier's serving backend (cuda|vulkan|cpu|…). A vision seat renders
-	// GPU flags (-ngl, --flash-attn) UNLESS this is "cpu", where the template's own
-	// chat models carry neither and a GPU-less build would only ignore them.
+	// Backend is the tier's serving backend (cuda|vulkan|rk3588|cpu|…). A vision seat
+	// renders GPU flags (-ngl, --flash-attn) UNLESS this is "cpu", where the template's
+	// own chat models carry neither and a GPU-less build would only ignore them. rk3588
+	// serves from the NPU (RKLLM seats): its template has no llama.cpp entry, and the GPU
+	// gets none until llama.cpp runs clean on its Mali.
 	Backend string
 	// AltCPULlamaBin, when set, is the directory of a CPU llama-server build and asks
 	// for the CPU seat family (altcpu.go): the tier's chat weights as `<id>-cpu`
@@ -462,17 +468,42 @@ func Render(tmpl string, p Params) (string, error) {
 	} {
 		out = strings.ReplaceAll(out, from, to)
 	}
+	// A set made only of seats (a template with no model of its own, like rk3588's)
+	// renders as `" | seat"`: the seat fragment carries its own leading operator because
+	// it normally follows a template var. llama-swap rejects an expression that opens on
+	// an operator, so drop it.
+	out = leadingSetOperator.ReplaceAllString(out, `$1`)
 	// A leftover token would start a server with a literal "__CTX__" argument, which
 	// fails looking like a model problem. Refuse instead, naming what is unresolved.
 	if left := uniqueTokens(out); len(left) > 0 {
 		return "", fmt.Errorf("unresolved template token(s) after rendering: %s", strings.Join(left, ", "))
 	}
+	// A template may leave every model to the tier's seats (rk3588's does); a render that
+	// still serves nothing would start a node that answers no model, so refuse it.
+	if !renderedModelKeyRe.MatchString(modelsSection(out)) {
+		return "", fmt.Errorf("the rendered config serves no model: this template has none of its own and the tier declared no seat")
+	}
 	return out, nil
+}
+
+// servesWithoutLlama is true for a render that starts no llama-server: the rk3588 backend,
+// whose template has no llama.cpp entry, with every seat on the NPU. Such a board has no
+// llama.cpp build to point at, so the render must not demand one.
+func (p Params) servesWithoutLlama() bool {
+	if p.Backend != "rk3588" {
+		return false
+	}
+	for _, s := range p.Seats {
+		if s.Kind != mediaseat.KindRKLLM {
+			return false
+		}
+	}
+	return true
 }
 
 func (p Params) validate() error {
 	var missing []string
-	if p.LlamaBin == "" {
+	if p.LlamaBin == "" && !p.servesWithoutLlama() {
 		missing = append(missing, "llama bin dir")
 	}
 	if p.ModelsDir == "" {
@@ -509,8 +540,8 @@ func (p Params) validate() error {
 	// kept as the tier's un-aliased ROLLBACK seat. The __Q354B_AGENT_ALIAS__ token
 	// (mirroring __Q359B_AGENT_ALIAS__) drops qwen3.5-4b-agent's own claim on the
 	// alias so only mimo-9b-agent carries it, avoiding the duplicate.
-	if len(p.Seats) > 0 && p.Home == "" && seatsNeedHome(p.Seats) {
-		missing = append(missing, "install home (a media seat names a path under "+tokenHome+")")
+	if len(p.Seats) > 0 && p.Home == "" && seatsNeedHome(p.Seats, p.RknpuHome) {
+		missing = append(missing, "install home (a media seat names a path under "+tokenHome+" or "+tokenRknpuHome+")")
 	}
 	if len(missing) > 0 {
 		return fmt.Errorf("serving template needs: %s", strings.Join(missing, ", "))
@@ -521,30 +552,43 @@ func (p Params) validate() error {
 // Tokens a seat path may carry, shared with internal/tierseed so ONE tier-table
 // row renders on every machine and OS.
 const (
-	tokenHome = "__OFFLOAD_HOME__"
-	tokenExe  = "__EXE__"
+	tokenHome      = "__OFFLOAD_HOME__"
+	tokenRknpuHome = "__RKNPU_HOME__"
+	tokenExe       = "__EXE__"
 )
 
 // seatsNeedHome scans exactly the fields seatExpand resolves. Scanning more would
-// promise a substitution that never happens.
-func seatsNeedHome(seats []mediaseat.Seat) bool {
+// promise a substitution that never happens. The launcher is the seat's EFFECTIVE bin:
+// an rkllm seat that names none runs a default under the install home, and reading the
+// raw field would let it reach the token guard and die there as an unresolved token
+// instead of as the refusal that names the missing home.
+func seatsNeedHome(seats []mediaseat.Seat, rknpuHome string) bool {
 	for _, s := range seats {
-		if strings.Contains(s.Bin+s.LibDir, tokenHome) {
+		paths := s.EffectiveBin() + s.LibDir
+		if strings.Contains(paths, tokenHome) || (rknpuHome == "" && strings.Contains(paths, tokenRknpuHome)) {
 			return true
 		}
 	}
 	return false
 }
 
-// seatExpand resolves the two seat-only tokens against the TARGET machine.
+// seatExpand resolves the seat-only tokens against the TARGET machine.
 func (p Params) seatExpand(s string) string {
 	exe := ""
 	if p.GOOS == "windows" {
 		exe = ".exe"
 	}
 	s = strings.ReplaceAll(s, tokenExe, exe)
+	home := strings.TrimRight(strings.ReplaceAll(p.Home, `\`, "/"), "/")
 	if p.Home != "" {
-		s = strings.ReplaceAll(s, tokenHome, strings.TrimRight(strings.ReplaceAll(p.Home, `\`, "/"), "/"))
+		s = strings.ReplaceAll(s, tokenHome, home)
+	}
+	rknpu := strings.TrimRight(strings.ReplaceAll(p.RknpuHome, `\`, "/"), "/")
+	if p.RknpuHome == "" && p.Home != "" {
+		rknpu = home + "/rknpu"
+	}
+	if rknpu != "" {
+		s = strings.ReplaceAll(s, tokenRknpuHome, rknpu)
 	}
 	return s
 }
@@ -718,10 +762,14 @@ func matrixJoin(role string) string {
 // be alphanumeric and 1-8 characters (verified against the binary: a key of
 // "embeddinggemma" is rejected outright), so the seat's own name — which carries
 // hyphens and is usually longer — can never be the key. The kind is used because a
-// tier may declare at most one seat per kind, which makes the id both stable and
-// unique by construction.
+// tier may declare at most one vision, stt or ocr seat (each writes a single config
+// field), which makes the id both stable and unique by construction. A text-only
+// rkllm seat writes no field, so a tier may declare several: the second and later ones
+// take the numbered ids below.
 func seatVarID(s mediaseat.Seat, taken map[string]bool) (string, error) {
-	base := map[string]string{mediaseat.KindVision: "vis", mediaseat.KindSTT: "stt", mediaseat.KindOCR: "ocr"}[s.Kind]
+	base := map[string]string{
+		mediaseat.KindVision: "vis", mediaseat.KindSTT: "stt", mediaseat.KindOCR: "ocr", mediaseat.KindRKLLM: "rkllm",
+	}[s.Kind]
 	if base == "" {
 		return "", fmt.Errorf("seat %q: no matrix var id for kind %q", s.Name, s.Kind)
 	}
@@ -913,6 +961,20 @@ func seatBlock(s mediaseat.Seat, p Params, a seatAnchors) (string, error) {
 			"      %s --model __MODELS__/%s%s\n"+
 			"      --threads __NTHREADS__ --port ${PORT} --host 127.0.0.1\n",
 			p.seatExpand(s.Bin), s.Model, vad)
+	case mediaseat.KindRKLLM:
+		// No env line and no GPU flags, on purpose: `env` is the llama.cpp loader path and
+		// -ngl/--flash-attn are llama-server flags, while the NPU is neither — the launcher
+		// finds the RKLLM runtime itself. The window and the CPU mask are the two knobs
+		// the runtime is STARTED with, so they ride the command line; the served name is
+		// the seat's own, so /v1/models answers to the id the harness binds.
+		enc := ""
+		if s.VisionEncoder != "" {
+			enc = " --vision-encoder __MODELS__/" + s.VisionEncoder
+		}
+		fmt.Fprintf(&b, "    cmd: >-\n"+
+			"      %s --model __MODELS__/%s%s\n"+
+			"      --ctx-size %d --cpu-mask %s --served-name %s --port ${PORT} --host 127.0.0.1\n",
+			p.seatExpand(s.EffectiveBin()), s.Model, enc, s.CtxSize, s.EffectiveCPUMask(), s.Name)
 	default:
 		return "", fmt.Errorf("seat %q: unknown kind %q", s.Name, s.Kind)
 	}
@@ -927,6 +989,29 @@ func seatBlock(s mediaseat.Seat, p Params, a seatAnchors) (string, error) {
 	fmt.Fprintf(&b, "\n    ttl: %d", ttl)
 	return b.String(), nil
 }
+
+// renderedModelKeyRe matches one model entry (a two-space-indented key) inside the models section.
+var renderedModelKeyRe = regexp.MustCompile(`(?m)^  [A-Za-z0-9._"-]+:\s*$`)
+
+// modelsSection returns the text between the top-level `models:` line and the next top-level key.
+func modelsSection(out string) string {
+	loc := modelsLineRe.FindStringIndex(out)
+	if loc == nil {
+		return ""
+	}
+	rest := out[loc[1]:]
+	if j := topLevelKeyRe.FindStringIndex(rest); j != nil {
+		rest = rest[:j[0]]
+	}
+	return rest
+}
+
+var (
+	modelsLineRe  = regexp.MustCompile(`(?m)^models:[ \t]*$`)
+	topLevelKeyRe = regexp.MustCompile(`(?m)^[A-Za-z_][A-Za-z0-9_]*:`)
+)
+
+var leadingSetOperator = regexp.MustCompile(`(?m)^(\s+[A-Za-z0-9_-]+:\s*")\s*[|&]\s*`)
 
 var modelKeyRe = regexp.MustCompile(`^ {2}"?([A-Za-z0-9._-]+)"?:\s*$`)
 var envLineRe = regexp.MustCompile(`^ {4}env:\s*\[(.*)\]\s*$`)

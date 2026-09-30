@@ -6,6 +6,46 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.144.0] - 2026-09-30 - Rockchip RK3588 boards join the fleet as their own tier, serving from the NPU
+
+### Added — the `rockchip-rk3588` tier (ADR 0062)
+
+An RK3588 board (reference: an Orange Pi 5) used to classify as `cpu`, and `fleet-serve` refused to start
+on it: no PCI GPU, no GPU memory source. `hwdetect` now recognises the SoC from the device tree (vendor
+and mainline spellings), a `linux-meminfo` provider advertises MemTotal less `uma_reserve_gib` as the
+node's capacity, and the tier renders from its own template with no CPU seat. Measured on the reference
+board, mainline 7.0 kernel with the out-of-tree rknpu 0.9.8 driver: Qwen3.5-2B W8A8 on the NPU prefills
+22.7 tok/s and decodes 7.71 tok/s with the runtime on the A55 cluster (126.4 / 7.14 on the A76 cluster),
+peak 2,260 MB.
+
+### Added — the `rkllm` seat kind and `accelerators/rknpu/rkllm_server.py`
+
+An OpenAI-compatible server over Rockchip's RKLLM runtime (text and vision, streaming, stop strings, one
+generation at a time; its ctypes structs are checked byte for byte against the vendor header), launched by
+llama-swap per seat with the seat's `cpu_mask`. It guards the host it shares: grammar / JSON-schema requests are
+refused with a 400 (RKLLM cannot constrain decoding, so the client fails over instead of receiving free text),
+at most two requests wait behind the running one (then 503 `busy`), bodies are capped at 16 MiB, and both NPU
+servers raise their `oom_score_adj` so the kernel's OOM killer takes them before the host's own stack. The seat
+ships an 8192 window until its resident size at 16384 is measured.
+
+### Added — the `rknpu` accelerator
+
+A Coral-style sidecar on the RKNN runtime serves `offload_classify_image`, `offload_object_detect` and
+`offload_image_embed` on the NPU (ResNet18 3.58 ms, YOLOv8n and a CLIP image tower; models pinned by
+sha256). Detection reads `DRIVER=RKNPU` from the DRM card on the vendor kernel and from the NPU platform
+devices on mainline, and never matches the in-tree `rocket` driver.
+
+### Changed — a template may leave every model to the tier's seats
+
+The serving audit accepts an empty `models:` map in a raw template that carries an `# offload-seats:`
+directive, and `Render` refuses a result that still serves no model. A set made only of seats no longer
+renders with a leading operator.
+
+### Not added — a GPU entry on the RK3588 Mali
+
+llama.cpp b11270 on Mesa 25.2.8 panvk loads on the Mali-G610, but its first compute submission hits a
+panthor job timeout and `vk::DeviceLostError` for every model and batch size tried. The tier renders no
+llama.cpp entry until that measures clean.
 ## [0.143.1] - 2026-09-30 - the NVIDIA key goes only to NVIDIA's hosts
 
 ### Security — `offload_nim` could send `NVIDIA_API_KEY` to a caller-supplied host

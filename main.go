@@ -2366,8 +2366,33 @@ const (
 	samplerKindSingle
 )
 
+// genericMemProvider picks the generic GPU memory source for this OS and the
+// installed tier — pulled out of runFleetServe, like chooseSamplerKind, so the
+// selection that ships is the selection that is tested (fleet_verbs_test.go).
+//
+// Windows gets the WDDM provider and Linux the amdgpu sysfs one. A tier that is a
+// unified-memory SoC (rockchip-rk3588) has neither counter, so it reads
+// /proc/meminfo less the operator's reserve; procRoot is "/" in production and
+// only that provider reads through it. A cpu-profile box means detect found NO
+// usable GPU: it must not fleet-serve off iGPU-adjacent counters — only a working
+// nvidia-smi may qualify it, so its generic source is nil.
+func genericMemProvider(goos, profile string, uma bool, umaReserveGiB float64, procRoot string) fleetnode.GenericProvider {
+	generic := fleetnode.GenericProvider{Probe: fleetnode.GenericWindowsProbe(uma), Source: "windows-generic"}
+	if goos == "linux" {
+		generic = fleetnode.GenericProvider{Probe: fleetnode.AmdgpuSysfsProbe("/sys/class/drm", uma), Source: "linux-amdgpu"}
+	}
+	switch profile {
+	case "rockchip-rk3588":
+		generic = fleetnode.GenericProvider{Probe: fleetnode.MeminfoUMAProbe(procRoot, umaReserveGiB), Source: fleetnode.MeminfoSource}
+	case "cpu":
+		generic.Probe = nil
+	}
+	return generic
+}
+
 // chooseSamplerKind picks which sampler runFleetServe starts, given the
-// resolved GPU memory provider's Source ("nvidia-smi" | "windows-generic").
+// resolved GPU memory provider's Source ("nvidia-smi" | "windows-generic" |
+// "linux-amdgpu" | "linux-meminfo").
 // nvidia-smi always gets samplerKindDevice — a single-GPU nvidia-smi box is
 // NOT special-cased to the single-value sampler; it runs the per-device query
 // and /fleet/health reports gpu_devices[] with one entry, same as any other
@@ -2515,20 +2540,12 @@ func runFleetServe(args []string) error {
 			umaSrc = "heuristic"
 		}
 	}
-	// The generic source is per-OS: the WDDM registry+PDH provider on Windows, the
-	// amdgpu sysfs provider on Linux (vram_linux_amdgpu.go — the seam ADR 0014 left
-	// open; without it an AMD APU on Linux with a measured tier could not fleet-serve
-	// at all, binxarn 2026-09-20). Both compose UMA the same way (carve-out + shared
-	// budget); Linux uses the driver's own GTT pool instead of the RAM/2 heuristic.
-	generic := fleetnode.GenericProvider{Probe: fleetnode.GenericWindowsProbe(uma), Source: "windows-generic"}
-	if runtime.GOOS == "linux" {
-		generic = fleetnode.GenericProvider{Probe: fleetnode.AmdgpuSysfsProbe("/sys/class/drm", uma), Source: "linux-amdgpu"}
-	}
-	// A cpu-profile box means detect found NO usable GPU: it must not fleet-serve
-	// off iGPU-adjacent counters — only a working nvidia-smi may qualify it.
-	if info.Profile == "cpu" {
-		generic.Probe = nil
-	}
+	// The generic source is per-OS and per-tier (genericMemProvider): the WDDM
+	// registry+PDH provider on Windows, the amdgpu sysfs provider on Linux
+	// (vram_linux_amdgpu.go — the seam ADR 0014 left open; without it an AMD APU on
+	// Linux with a measured tier could not fleet-serve at all, binxarn 2026-09-20),
+	// and /proc/meminfo less the operator's reserve for an SoC with no VRAM at all.
+	generic := genericMemProvider(runtime.GOOS, info.Profile, uma, cfg.UMAReserveGiB, "/")
 	prov, perr := fleetnode.ResolveProviderNamed(
 		fleetnode.SmiProbe(nvidiaSmiMemory),
 		generic,
@@ -2700,8 +2717,11 @@ func runFleetServe(args []string) error {
 		return fmt.Errorf("fleet-serve: listen %s: %w", listen, err)
 	}
 	umaLabel := ""
-	if prov.Source == "windows-generic" {
+	switch prov.Source {
+	case "windows-generic":
 		umaLabel = fmt.Sprintf(", uma=%v(%s)", uma, umaSrc)
+	case fleetnode.MeminfoSource:
+		umaLabel = fmt.Sprintf(", unified memory, %.1f GiB held back for the host", cfg.UMAReserveGiB)
 	}
 	devicesLabel := ""
 	if snap, ok := sampler.Load(); ok && len(snap.Devices) > 1 {
