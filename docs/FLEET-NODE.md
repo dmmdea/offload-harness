@@ -542,10 +542,18 @@ verbatim; otherwise the generic exec error (including a timeout-kill) is used.
   **ungraceful** stop (crash, `kill -9`, power loss) leaves the directory behind with no
   in-memory record of it at all; since `job_spec.id` collisions are guarded by an exclusive
   directory create (see above), that orphaned directory would otherwise refuse EVERY future
-  dispatch reusing the same `job_spec.id`, forever. `fleet-serve` sweeps
-  `<base_dir>/pipeline-jobs/`'s contents once at startup, **before** it starts listening —
-  every directory present at that instant is orphaned by definition (this process has not
-  accepted a single dispatch yet) — and logs how many it removed.
+  dispatch reusing the same `job_spec.id`, forever. `fleet-serve` therefore sweeps
+  `<base_dir>/pipeline-jobs/` once at startup, **before** it starts listening. Every
+  directory it materialized itself (`agent-<n>`, `accel-<n>`, a pipeline job's id) is
+  orphaned by definition at that instant (this process has not accepted a single dispatch
+  yet) and is removed. The root has a second kind of writer: a delegator process on the same
+  box (the MCP server, the `delegate` and `research` commands) keeps the context of its own
+  in-process local runs in `agent-local-*` directories there, each with an `.owner` file
+  holding the process id (beside `context/`, never inside it), and that process outlives a
+  `fleet-serve` restart. The sweep keeps a marked directory while its owner process is alive
+  and the directory is under 24 hours old (the bound on a recycled process id), keeps an
+  unmarked `agent-local-*` directory (written by a delegator older than the marker) until it
+  is 24 hours old, and removes the rest. It logs how many it removed and how many it kept.
 
 ## The agent task (`task_type: "agent"`)
 

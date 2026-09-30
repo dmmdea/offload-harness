@@ -766,10 +766,12 @@ func materializeRaw(raw json.RawMessage, pattern string) (string, error) {
 //     exists, its depth>0 registration gate keys off this value, not the wire.
 //
 // Materialization follows buildPipelineJob's discipline: a job-scoped dir
-// under BaseDir()/pipeline-jobs/ (so SweepOrphanedPipelineJobs reclaims a
-// crash's leftovers at startup), context docs written under <dir>/context/,
-// and a cleanup closure that removes the WHOLE dir — the docs live exactly as
-// long as the job. Unlike buildPipelineJob the id is NODE-MINTED (the contract
+// under BaseDir()/pipeline-jobs/ (this process's own, so unmarked: the
+// startup SweepOrphanedPipelineJobs reclaims a crash's leftovers, and only
+// the agent-local-* dirs a delegator process writes into the same root are
+// judged by owner instead), context docs written under <dir>/context/, and a
+// cleanup closure that removes the WHOLE dir — the docs live exactly as long
+// as the job. Unlike buildPipelineJob the id is NODE-MINTED (the contract
 // carries none), so os.MkdirTemp is the exclusive create: uniqueness by
 // construction instead of a caller-collision 400.
 func buildAgentRun(cfg config.Config, payload json.RawMessage) (core.Request, func(), error) {
