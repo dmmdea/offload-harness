@@ -62,8 +62,11 @@ arithmetic, or an ordering key among seats that already passed the adequacy gate
    by the local run, joins the refusals a node may answer differently. `route=local` waits in place (the
    seat's own line is the wait), and so does a delegator with no remotes. The time the local run already
    waited in line is credited back. A capacity defer a REMOTE node files after acking a job is an observed
-   terminal answer and is never re-placed: nothing after a 202 ever is. If nothing else has room, the
-   local seat's defer is published as the defer it is, never as a `placement refused` failure. The defer
+   terminal answer and is never re-placed: a job a node ran, or may still run, is never offered to another.
+   The one exception is a job the node itself says it never ran (a confirmed withdrawal, or its own
+   `reaped`, `withdrawn` or `not started` record; [ADR 0064](0064-a-delegator-takes-back-what-it-has-not-started.md),
+   decision 3): it arrives as a refused 503, not as a defer, and is re-placed like one. If nothing else has
+   room, the local seat's defer is published as the defer it is, never as a `placement refused` failure. The defer
    alone is no reason to wait: only an eligible node that is merely busy is worth waiting for, so a defer
    beside a remote that can never run the contract is published at once.
 4. **The queue budget follows the node's ETA.** How long the delegator waits for a job to START is
