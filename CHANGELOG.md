@@ -8,7 +8,7 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [0.144.0] - 2026-09-30 - Rockchip RK3588 boards join the fleet as their own tier, serving from the NPU
 
-### Added — the `rockchip-rk3588` tier (ADR 0061)
+### Added — the `rockchip-rk3588` tier (ADR 0062)
 
 An RK3588 board (reference: an Orange Pi 5) used to classify as `cpu`, and `fleet-serve` refused to start
 on it: no PCI GPU, no GPU memory source. `hwdetect` now recognises the SoC from the device tree (vendor

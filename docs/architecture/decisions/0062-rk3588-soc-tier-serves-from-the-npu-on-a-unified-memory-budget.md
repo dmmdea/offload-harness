@@ -3,7 +3,7 @@ status: Accepted
 date: "2026-09-30"
 ---
 
-# ADR 0061 — An RK3588 SoC board is its own tier: it serves from the NPU on a unified-memory budget, never from the CPU, and a GPU entry waits for a clean measurement
+# ADR 0062 — An RK3588 SoC board is its own tier: it serves from the NPU on a unified-memory budget, never from the CPU, and a GPU entry waits for a clean measurement
 
 ## Context
 
