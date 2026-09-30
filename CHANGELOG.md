@@ -6,6 +6,85 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.149.0] - 2026-09-30 - kit-derived compose templates, captions-bar and the hyperframes-compose skill
+
+### Added — four kit-derived compose templates, `captions-bar`, a caption grouping helper and the `hyperframes-compose` skill
+
+`render/compose-templates/` ships five new vetted templates, all 1920×1080 at 30 fps, all discovered with no route
+change (`local-offload doctor` and `offload_status` list them; the fleet `compose-video` task accepts them by name):
+`stat-card`, `section-title` and `checklist-card` (opaque) and `callout-label` and `captions-bar` (alpha overlays for
+`webm` and `mov`). The first four are adapted from card designs of the hyperframes-student-kit at the pinned commit
+`0d30152` and rewritten in CSS keyframes: no script library, no count-up, Inter from the shared kit only, declared
+variables with explicit limits, emphasis split into `*_pre` / `*_em` / `*_post`, neutral copy and a recoloured palette.
+The kit is a reference, never an install: its MIT `LICENSE` and use permission are kept verbatim (hash-tested, and
+pinned byte for byte by a `.gitattributes` rule) under `render/compose-templates/_third_party/hyperframes-student-kit/`
+with a `PROVENANCE.md`, the root `NOTICE` credits it, and each README says where its template was adapted from.
+`captions-bar` is written for the harness.
+
+`render/captions-groups.mjs` is a pure helper from `offload_transcribe`'s `<base>.segments.json` to `captions-bar`
+chunks. The `words[]` in that file are whisper-server's tokens, not words (a word-initial token keeps its leading
+space; a continuation such as an apostrophe suffix, the digits after a currency sign or punctuation has none), so the
+helper merges tokens into words before it groups anything. Over 489 real transcripts (55,473 tokens, 40,345 words)
+every file regroups into exactly the words of its own segment text and no group has a space before punctuation; a
+first version that trimmed every token and joined them with a space gave "It 's only", "$ 1 a" and "'t worry ." and a
+space before punctuation in a third of all groups. Beyond that: pace presets (3, 5 or 6 words), breaks at sentence
+ends, pauses of 0.15 s or more and a 42-character cap, holds that never overlap two groups, and chunks that fit the
+template (at most 16,000 characters and 600 s), cut at 300 s by default, with `--chunk-sec` (up to the template's
+600 s) and `--chunk-chars` to set another cap.
+
+`skill/hyperframes-compose/SKILL.md` is the house skill ADR 0059 promised: hard bans on `npx hyperframes` and its
+`init`, `skills`, `upgrade` and `add`, which tool to pick, the seven-template catalog (kept in step with the templates
+by a test), the verification loop, the captions flow and the authoring contract. Installing it into an agent's skills
+folder is the operator's step. The tool description, CLI help, README, operator guide, glossary and
+`docs/systems/media-generation.md` name all seven templates, and tests fail when one of those lists, the skill's ban
+list or a number the docs quote drifts from the code.
+
+### Fixed — a `$` in a template variable corrupted the composition (every template)
+
+`applyTemplateVariables` handed the rebuilt `data-composition-variables` attribute to `String.replace` as a
+replacement string, and JavaScript reads `$1`, `$&`, `` $` ``, `$'` and `$$` in one. Ordinary text tripped it: a
+caption "over $100 million" made the attribute invalid JSON, so `check` failed the render with `words_json is not JSON:
+"undefined"` (a message that never mentions the dollar sign), and a `stat-card` figure of `$1.2M` rendered but was
+judged by `lint` and `check` as placeholder text. `$&` spliced the old attribute, closing quote included, into the new
+one, so caller text could become extra attributes on the composition's root tag. The declaration now goes in through a
+replacer function. Tests cover every pattern through the fixture and four shipped templates, show that a hostile value
+adds no attribute to the root, and pin the escaping of `'`, `&`, `<` and `>` (the runner's tag scanning, like
+HyperFrames', ends a tag at the first `>`). Rendered through the runner before and after: the same three-group caption
+list fails `CHECK_FAILED` before and renders after (VP9 `yuva420p`, alpha, all three groups read back exactly,
+`$&` included).
+
+### Measured — what the lane does with worker counts, with a long caption list and with a long clip
+
+- **A frame must be a pure function of time; scaling above 1 is a rule of thumb, the measurement is the gate.** A
+  keyframe that scales an element above its resting size (a halo breathing to 1.06, a ring popping to 1.1) gave frames
+  that depended on the render worker count on two of the ported cards (80 of 180 and 172 of 210 frames differed between
+  1 worker and 4 or `auto`, by a few pixels of gradient, and two runs at 4 workers disagreed); with opacity instead they
+  matched, and with the blur removed and the scale kept they still differed, so blur was not the cause. The ports and
+  `captions-bar` never scale above 1 (a test guards it) and each gives 15 of 15 identical pairs of decoded frames across
+  1, 2, 4, 6 and `auto` (twice) workers. The older `title-card` drifts a large glow out to `scale(1.12)` and also gave 15
+  of 15, so the rule is not a law; the gate is rendering at those worker counts and comparing decoded frames.
+- **One CSS-animated element per caption group does not scale.** The same 8 s clip renders in about 24 s with up to 80
+  groups in the page and 34 s at 150, and a 374-group, 12.9 KB list had written about 290 of its 450 frames after ten
+  minutes when it was stopped. `captions-bar` therefore holds one element and derives the frame from the time of
+  HyperFrames' `hf-seek` event (450 frames of that list in 39.6 s at draft quality). A 15,968-character string variable
+  passed `lint`, `check` and `--strict-variables`. The event is in the pinned 0.8.61 bundle but not in its documentation,
+  so the README names the version it was measured on, a test fails when the pin moves past it, and the operator guide's
+  bump step names `captions-bar`.
+- **A long caption chunk needs one worker and about 300 s, so the helper cuts 300 s chunks by default.** At the lane's
+  default `auto` workers HyperFrames stores every frame and budgets 8.3 MB at 1080p, and refuses a render when that
+  passes 90 % of the free space: a 300 s chunk (9,017 frames) was refused `DISK_HEADROOM` with 33 GB free (it would
+  store about 75 GB; a 600 s chunk about 150 GB). At `workers` 1 the frames stream and the same chunk rendered in
+  1,038 s (115 ms a frame on a busy box), so a 600 s chunk, which was not rendered, takes 27 to 35 minutes and
+  passes the 1,800 s default `compose_timeout_sec`. The helper therefore cuts 300 s chunks by default
+  (`DEFAULTS.variableSec`); the template's own 600 s is only the upper bound `--chunk-sec` is checked against
+  (`TEMPLATE_LIMITS`, refused with the same text as before), so a caller who raises `compose_timeout_sec` can ask for
+  longer chunks. A test reads the template's declared limits and pins the default and the limit in the skill, the
+  captions README and the media doc, so neither number can drift from the code. The captions README, the skill, the
+  media doc and the operator guide's timeout note carry the measured figures.
+
+Not in this change: deploying the templates to the fleet, the `assets` parameter (an image variable type), GSAP
+vendoring or a HyperFrames pin bump, and a test that renders the templates and checks their pixels.
+
 ## [0.148.0] - 2026-09-30 - the ampere-16 fast layer and the 35B seat are in the tier table; install render gates for the MoE spill and a storeless tier
 
 ### Added — the ampere-16 `fast` layer and the 35B seat are in the tier table (register A-113, ADR 0048 Amendment 2)

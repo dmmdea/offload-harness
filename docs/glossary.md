@@ -35,7 +35,9 @@ An HTML/CSS page that HyperFrames renders to video frame by frame: a root elemen
 animation seeked rather than played, so the same inputs give the same frames. The
 `offload_compose_video` lane renders one, CPU-class and with no GPU lock (ADR 0059). A Composition
 is code that runs in an unsandboxed Chrome, so the fleet door renders only the vetted templates under
-`render/compose-templates/`. Not a ComfyUI graph, and not generation: nothing is sampled.
+`render/compose-templates/`: `title-card`, `lower-third`, `stat-card`, `section-title`,
+`callout-label`, `checklist-card` and `captions-bar`. Not a ComfyUI graph, and not generation: nothing
+is sampled.
 
 ## Config seed
 

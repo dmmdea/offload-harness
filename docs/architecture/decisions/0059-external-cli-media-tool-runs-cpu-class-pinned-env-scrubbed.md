@@ -122,6 +122,7 @@ its runner.
 
 - [`render/compose-hyperframes.mjs`](../../../render/compose-hyperframes.mjs) — the runner and every guard above.
 - [`render/compose-templates/`](../../../render/compose-templates/README.md) — the vetted templates and the shared font kit.
+- [`skill/hyperframes-compose/`](../../../skill/hyperframes-compose/SKILL.md) — the curated house skill the "install the upstream skills" alternative promises: the hard bans, which tool to pick, the template catalog and the verification loop (the canonical copy; installing it is the operator's step).
 - [`internal/pipeline/composevideo.go`](../../../internal/pipeline/composevideo.go) — `runComposeVideo`: the compose slot, the runner allowlist and the typed defers.
 - [`internal/gpugen/gpugen.go`](../../../internal/gpugen/gpugen.go) — `Spec.EnvExact`.
 - [`internal/fleetnode/compose_task.go`](../../../internal/fleetnode/compose_task.go) — the template-only fleet task.

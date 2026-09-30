@@ -1,0 +1,10 @@
+{
+  "name": "callout-label",
+  "description": "Transparent callout card anchored at the right of the frame: a term with a lit top edge, an accent rule drawing across, and one or two sentences of detail, with an exit 0.5 s before the end. Render to webm or mov for alpha.",
+  "width": 1920,
+  "height": 1080,
+  "fps": 30,
+  "alpha": true,
+  "duration_variable": "duration",
+  "formats": ["webm", "mov", "png-sequence", "mp4"]
+}
