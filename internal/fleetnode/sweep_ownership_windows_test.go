@@ -10,8 +10,10 @@ import (
 
 // blockRemoval makes os.RemoveAll of jobDir fail: the context doc is held open
 // by a handle that does not share DELETE, the way a process still reading a
-// file keeps it from being removed. (The os package opens files with
-// FILE_SHARE_DELETE, so it cannot stand in for that process.)
+// file keeps it from being removed. The handle is opened with CreateFile and an
+// explicit share mode so the test says what it needs; os.Open would hold the
+// file the same way, because the syscall package opens files with
+// FILE_SHARE_READ|FILE_SHARE_WRITE and never FILE_SHARE_DELETE.
 func blockRemoval(t *testing.T, jobDir string) (release func()) {
 	t.Helper()
 	name, err := syscall.UTF16PtrFromString(filepath.Join(jobDir, "context", "doc.txt"))
