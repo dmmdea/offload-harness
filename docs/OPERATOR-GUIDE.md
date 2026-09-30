@@ -193,7 +193,12 @@ session id the MCP server inherited from its environment, or `LOCAL_OFFLOAD_ORIG
 itself; absent on rows a service or a fleet node wrote), `origin_pid` / `origin_ppid`, `cards_tokens`
 (the one figure for the tokens the cards processed for that row — prompt work plus generation, 0 on a
 cache hit), and on agent / delegate rows `job_id`, `route`, `placement`, `steps`, `stop_reason`,
-`repack_ms`, `acceptance_result`. A per-session share is one filter away:
+`repack_ms`, `acceptance_result`. Since ADR 0064 every delegate row also carries `door`, `fleet_job_id`
+(the id the fleet node knows the job by; the node's own agent row carries the same one), a closed
+`reason_code` (`ok`, `queue_deadline`, `queue_withdrawn`, `stall_prefill`, ... see the
+[delegation ledger row](FLEET-NODE.md#the-delegation-ledger-row)) and the whole `reason`, and a
+`phase: "started"` marker row is written when a job is handed to a seat; a marker is never a job, so a
+reader that counts rows must skip it. A per-session share is one filter away:
 `grep '"origin_session":"<session id>"' ~/.local-offload/ledger.jsonl`. Rows written before 0.124.0
 carry none of these and must be read as unattributed, not as another session's.
 

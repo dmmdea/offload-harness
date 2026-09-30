@@ -52,6 +52,27 @@ needing to change first.
 completion cannot overwrite a finished job. Terminal entries are evicted after a TTL by a periodic
 janitor, and `queue_depth` counts only non-terminal jobs.
 
+**An `accepted` job can also leave the queue without ever running (ADR 0064).** Two terminal `error`
+records say so, and both mean "nothing ran, so re-placing the work cannot double-run it":
+
+- `withdrawn: ...` — the job's delegator asked for it back. `DELETE /fleet/jobs/{id}` (agent bearer, like
+  the poll) takes back a job that is still `accepted`, under the same mutex the scheduler claims under,
+  so a claim and a withdraw cannot both succeed. A running or finished job is never touched (`409` with
+  its state); a repeat answers `200` again; a media job is `405`; a node without the route answers
+  `405`/`404`, which a delegator reads as "no withdraw here".
+- `reaped: ...` — nobody polled the job for `fleet_poll_lease_sec` (default 60 s; negative = off; a
+  value under 15 is raised to 15). Only an `accepted` agent job a delegator PUSHED is ever reaped: the
+  scheduler's claim scan skips it at once and a ticker takes it, so a ghost never starts in the gap
+  between ticks. A running job, a job the pull queue claimed, and media and vision jobs are never
+  reaped. Authorized polls, duplicate dispatches and parked long polls keep a job alive; the
+  unauthenticated jobs feed and a poll that failed the bearer gate do not.
+
+A run that finishes more than a lease after its poller last looked is an abandoned run, and its wall no
+longer feeds `recent_agent_wall_sec` (or the Retry-After built from it). Why all of this exists: every
+delegator give-up used to leave the job on the node to run for nobody, which took 43 % and 59 % of two
+nodes' agent runs on 2026-09-29. See [ADR 0064](../architecture/decisions/0064-a-delegator-takes-back-what-it-has-not-started.md)
+and [Taking a job back](../FLEET-NODE.md#taking-a-job-back-withdraw-and-the-poll-lease).
+
 **`accepted` is a real waiting state (0.100.0).** Accepting a job used to start it, so `accepted`
 lasted microseconds and the node had no queue at all — just an unbounded pile of concurrent
 executions that one config key happened to cap. A dispatch is now *admitted* to a FIFO, and a single
