@@ -16,7 +16,7 @@ import (
 // The scenario decides the world. The seat answers /v1/models at once and /health twice, then stops answering (the
 // crash). The stub's own start task is Running until then and Ready after the crash, unless the scenario says a live
 // launcher still holds it. The stop task is Ready until it is started, then Running for three reads, then Ready — or
-// Running forever, or refusing to start.
+// Running forever, or refusing to start, or never seen Running at all (a Task Scheduler slow to start it).
 const seatCmdDriver = `param([string]$Stub, [string]$Scenario, [string]$Calls)
 $ErrorActionPreference = 'Continue'
 $global:Scn = $Scenario
@@ -38,6 +38,7 @@ function Get-ScheduledTask {
   if ($TaskName -like 'vllm-seat-stop-*') {
     $global:StopReads++
     Note "read-stop-task $($global:StopReads)"
+    if ($global:Scn -eq 'stop-task-never-runs') { return [pscustomobject]@{ State = 'Ready' } }
     if ($global:Scn -eq 'stop-task-hangs' -or $global:StopReads -le 3) { return [pscustomobject]@{ State = 'Running' } }
     return [pscustomobject]@{ State = 'Ready' }
   }
@@ -189,6 +190,16 @@ func seatCmdCrashScenarios(t *testing.T, host string) {
 		}
 		if strings.Contains(calls, "read-stop-task") {
 			t.Fatalf("nothing to wait for when the stop task never started:\n%s", calls)
+		}
+	})
+
+	t.Run("a stop task never seen running is given 30 s to appear, then the stub says so and exits", func(t *testing.T) {
+		calls, log := runSeatCmd(t, host, "stop-task-never-runs")
+		if n := strings.Count(calls, "read-stop-task "); n != 15 {
+			t.Fatalf("a task that never shows Running must be given 15 reads (30 s) to appear, got %d:\n%s", n, calls)
+		}
+		if !strings.Contains(log, "not seen running in 30 s") || strings.Contains(log, "crash cleanup finished") || !strings.HasSuffix(strings.TrimSpace(calls), "exit=0") {
+			t.Fatalf("a stop task never seen running is not a finished cleanup: it must say so, and the stub must still exit 0:\ncalls:\n%s\nlog:\n%s", calls, log)
 		}
 	})
 

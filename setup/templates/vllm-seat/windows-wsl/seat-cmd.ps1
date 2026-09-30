@@ -20,9 +20,10 @@ $task = "vllm-seat-$Seat"
 $log = Join-Path '__SEAT_DIR__' "seat-cmd-$Seat.log"
 # The crash cleanup. From the process llama-swap already supervises — no scheduler, no watchdog — and never a relaunch:
 # llama-swap starts the seat again on the next request, as it always did, and an idle seat stays unloaded. It WAITS for
-# the stop task (bounded: 45 x 2 s), so the next start can never overlap it: a stop that ran late would kill the
-# engine the next start had begun. It does nothing while the seat's own start task is still running: a live launcher
-# owns the seat then, and nothing in the distro is a leftover. A failure only logs; the exit that follows is the same.
+# the stop task (bounded: 45 x 2 s; a task never seen running gets 30 s to appear), so the next start does not overlap
+# it: a stop that ran late could stop the MP server the next start had just begun. It does nothing while the seat's own
+# start task is still running: a live launcher owns the seat then, and nothing in the distro is a leftover. A failure only
+# logs; the exit that follows is the same.
 function Invoke-CrashCleanup {
   $stopTask = "vllm-seat-stop-$Seat"
   $st = (Get-ScheduledTask -TaskName $task -ErrorAction SilentlyContinue).State
@@ -35,14 +36,19 @@ function Invoke-CrashCleanup {
     return
   }
   "[$(Get-Date -Format s)] crash cleanup: $stopTask started (seat_stop.sh reaps the dead generation's workers and MP server)" | Out-File -Append $log
-  # A task that has not started yet reads as not-Running: wait to SEE it run, or for 10 s, before believing it is done.
+  # A task that has not started yet reads as not-Running: wait to SEE it run before believing it is done, and give a
+  # Task Scheduler that is slow to start it 30 s to do so.
   $seen = $false
   for ($i = 1; $i -le 45; $i++) {
     Start-Sleep 2
     $s = (Get-ScheduledTask -TaskName $stopTask -ErrorAction SilentlyContinue).State
     if ($s -eq 'Running') { $seen = $true; continue }
-    if ($seen -or $i -ge 5) {
+    if ($seen) {
       "[$(Get-Date -Format s)] crash cleanup finished after about $($i * 2) s (task state=$s)" | Out-File -Append $log
+      return
+    }
+    if ($i -ge 15) {
+      "[$(Get-Date -Format s)] WARN: the stop task was not seen running in 30 s (state=$s) - exiting anyway; a stop that starts late may overlap the next start" | Out-File -Append $log
       return
     }
   }

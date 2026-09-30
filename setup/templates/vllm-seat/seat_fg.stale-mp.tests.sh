@@ -165,9 +165,10 @@ if has "reaping MP server" && has "reaping orphaned engine process" && has "STAR
   pass "the MP server and the orphaned workers are reaped together"; else failcase "MP server + workers" "sleeps: $(tr '\n' ' ' < "$SLEEP_LOG"): $out"; fi
 reset
 
-# 6. a LIVE engine on another port has workers of its own: never reaped as orphans
+# 6. a LIVE engine on another port has workers of its own: not this seat's leftovers, so no cleanup runs at all (a healthy
+#    box with a sibling seat must not log "a crashed generation" or run a stop at every start), and nothing is reaped
 engine other $OTHER_PORT; out="$(run)"
-if ! has "reaping orphaned engine process" && has "START PROCEEDS" && alive other && alive other-worker; then
+if ! has "reaping orphaned engine process" && ! has "running seat_stop.sh once" && has "START PROCEEDS" && alive other && alive other-worker; then
   pass "a live engine's workers on another port are never reaped"; else failcase "live engine's workers" "$out"; fi
 reset
 

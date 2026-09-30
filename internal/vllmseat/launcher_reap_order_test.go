@@ -3,6 +3,7 @@ package vllmseat
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -56,7 +57,9 @@ func TestLauncherReapsTheDeadGenerationBeforeItTouchesTheMPServerOrTheCards(t *t
 		`if ! pgrep -f "vllm serve .*--port $PORT" >/dev/null 2>&1; then`,
 		`grep -q ":$MP_HTTP_PORT " && left=`,
 		`pgrep -f "lmcache server .*--port $MP_PORT( |\$)"`,
-		`ps -eo args= 2>/dev/null | grep -q '^VLLM::'`,
+		// an engine process counts only as an ORPHAN (no live `vllm serve` above it), found by the start of its command line
+		`ps -eo pid,args 2>/dev/null | awk '$2 ~ /^VLLM::/ {print $1}'`,
+		`has_api_ancestor "$ep" || orphans=`,
 		// what it runs: the stack's own stop script, once
 		`/seat_stop.sh" "$CFG"`,
 	} {
@@ -76,6 +79,22 @@ func TestLauncherReapsTheDeadGenerationBeforeItTouchesTheMPServerOrTheCards(t *t
 	refusal := strings.LastIndex(block, `if ss -ltnp 2>/dev/null | grep -q ":$MP_HTTP_PORT "; then`)
 	if refusal < 0 || !strings.Contains(block[refusal:], "REFUSING to start — the MP HTTP port") {
 		t.Error("the foreign-holder refusal on the MP HTTP port is not the last thing in the cleanup block")
+	}
+}
+
+// TestLauncherAndStopScriptShareOneOrphanRule keeps the launcher's trigger and the reaper's victim list in step: seat_fg.sh
+// decides "the previous generation left engine processes" with a copy of seat_stop.sh's has_api_ancestor (a shared file
+// would be one more artifact to deploy). If the two definitions drift, the launcher either runs a stop that reaps nothing
+// (a healthy sibling seat mistaken for a crash) or skips one that would have reaped (an orphan it cannot see).
+func TestLauncherAndStopScriptShareOneOrphanRule(t *testing.T) {
+	def := regexp.MustCompile(`(?s)has_api_ancestor\(\) \{.*?return 1; \}`)
+	fg := def.FindString(readLauncher(t))
+	stop := def.FindString(readSeatStop(t))
+	if fg == "" || stop == "" {
+		t.Fatalf("has_api_ancestor is missing from seat_fg.sh (%d bytes) or seat_stop.sh (%d bytes)", len(fg), len(stop))
+	}
+	if fg != stop {
+		t.Fatalf("the launcher's has_api_ancestor drifted from seat_stop.sh's:\nseat_fg.sh:\n%s\nseat_stop.sh:\n%s", fg, stop)
 	}
 }
 

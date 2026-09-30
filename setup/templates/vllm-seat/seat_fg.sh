@@ -198,15 +198,22 @@ fi
 # foreign and is refused exactly as before. A stopping unit can hold its socket for a few seconds, so the re-check waits
 # up to SEAT_MP_PORT_WAIT_SEC (default 10) for the port to free instead of judging one look. Engine processes are looked
 # for by the START of their command line: `pgrep -f VLLM::` also matches any wrapper whose arguments mention the name.
-# This is the only cleanup the launcher owns: the script becomes `vllm serve` (exec, below), so nothing of it survives a
-# crash to clean up after it — the Windows stub's crash exit runs the same cleanup through the stop task, and there is no
-# watchdog and no proactive relaunch anywhere.
+# Only an ORPHAN counts — an engine process with no live `vllm serve` above it, the rule seat_stop.sh reaps by (the
+# definition below is a copy of its, and a Go test keeps the two identical): a sibling seat's live workers are not this
+# seat's leftovers, and a healthy start must not log a crash or run a stop. This is the only cleanup the launcher owns:
+# the script becomes `vllm serve` (exec, below), so nothing of it survives a crash to clean up after it — the Windows
+# stub's crash exit runs the same cleanup through the stop task, and there is no watchdog and no proactive relaunch anywhere.
 MP_PORT_WAIT="${SEAT_MP_PORT_WAIT_SEC:-10}"; case "$MP_PORT_WAIT" in ''|*[!0-9]*) MP_PORT_WAIT=10 ;; esac
+has_api_ancestor() { local q="$1" n=0; while [ "$q" -gt 1 ] 2>/dev/null && [ $n -lt 32 ]; do
+  if ps -o args= -p "$q" 2>/dev/null | grep -q "vllm serve"; then return 0; fi
+  q=$(ps -o ppid= -p "$q" 2>/dev/null | tr -d ' '); n=$((n+1)); [ -z "$q" ] && break; done; return 1; }
 if ! pgrep -f "vllm serve .*--port $PORT" >/dev/null 2>&1; then
   left=""
   ss -ltnp 2>/dev/null | grep -q ":$MP_HTTP_PORT " && left="$left a listener on the MP HTTP port :$MP_HTTP_PORT;"
   pgrep -f "lmcache server .*--port $MP_PORT( |\$)" >/dev/null 2>&1 && left="$left an MP server on :$MP_PORT;"
-  ps -eo args= 2>/dev/null | grep -q '^VLLM::' && left="$left engine processes named VLLM::*;"
+  orphans=""
+  for ep in $(ps -eo pid,args 2>/dev/null | awk '$2 ~ /^VLLM::/ {print $1}'); do has_api_ancestor "$ep" || orphans="$orphans $ep"; done
+  [ -n "$orphans" ] && left="$left engine processes named VLLM::* with no live engine above them (pids$orphans);"
   if [ -n "$left" ]; then
     echo "seat_fg: no engine serves :$PORT and the previous generation left${left} — a crashed generation; running seat_stop.sh once"
     stop_rc=0

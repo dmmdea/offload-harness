@@ -146,8 +146,9 @@ native CPU/disk offloading (measured unusable on the Mamba-hybrid 27B under WSL2
    `seat_stop.sh`, both inside processes llama-swap already supervises; there is no watchdog, no scheduler and no
    relaunch (ADR [0035](../architecture/decisions/0035-persistent-vllm-seat-behind-llama-swap.md), update 2026-09-30).
    (1) At the START of the next generation, `seat_fg.sh`, when no `vllm serve` of its port is alive and it finds a
-   leftover (a listener on the MP HTTP port, an `lmcache server` of its MP port, an engine process named `VLLM::*`),
-   runs it once and waits up to `SEAT_MP_PORT_WAIT_SEC` (default 10) for the MP HTTP port to free. (2) On a Windows/WSL
+   leftover (a listener on the MP HTTP port, an `lmcache server` of its MP port, an orphaned engine process: named
+   `VLLM::*` with no live `vllm serve` above it), runs it once and waits up to `SEAT_MP_PORT_WAIT_SEC` (default 10) for
+   the MP HTTP port to free. A sibling seat's live workers are not leftovers and start nothing. (2) On a Windows/WSL
    box the stub's crash exit (`seat-cmd.ps1`: the seat stopped answering for 30 s) starts the stop task and waits for it
    (at most 90 s) before exiting 0, unless the seat's start task is still running, which means a live launcher owns the
    seat. What is reaped is only what is provably the seat's own: an engine process with no live `vllm serve`
