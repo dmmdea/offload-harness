@@ -27,9 +27,11 @@
 # Context size, KV type and flash-attn are PROFILE-DRIVEN, exactly as on linux-vulkan.
 #
 # VULKAN-SPECIFIC AND LOAD-BEARING:
-#   * GGML_VK_VISIBLE_DEVICES=0 pins ONE Vulkan device deterministically. The board has
-#     one GPU, but a software rasteriser can enumerate beside it in varying order; if
-#     `llama-server --list-devices` names the wrong adapter first, change the index.
+#   * GGML_VK_VISIBLE_DEVICES=0 pins ONE Vulkan device deterministically, and here a wrong
+#     index is not a slow config but CPU inference: the reference board enumerates the
+#     Mali-G610 (Mesa panvk, Vulkan 1.4) as device 0 and llvmpipe, a CPU rasteriser, as
+#     device 1 (`vulkaninfo --summary`). If `llama-server --list-devices` ever names
+#     llvmpipe first — after a Mesa change, say — change the index before serving anything.
 #   * The GPU has no memory of its own: RAM is the "VRAM", so -ngl 999 offloads every
 #     layer and the weights are counted against the same budget as everything else.
 #
