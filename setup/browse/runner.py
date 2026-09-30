@@ -451,6 +451,45 @@ CLICK_TARGETS_JS = (
 )
 
 
+# The lane's tab is opened in the background, and a hidden tab produces no rendering frames:
+# a CSS @keyframes animation or transition that starts there never advances, so a dialog or
+# dropdown menu that fades in keeps its start state (opacity 0). jev's snapshot drops every
+# element whose computed opacity is 0 (checkVisibility with checkOpacity), so the model never
+# sees the control it just opened and the run ends "blocked". Jumping each finite animation
+# to its end state makes the final style real. Infinite animations (spinners) have an endTime
+# of Infinity and are skipped, which also keeps finish() from ever throwing on them; one that
+# throws anyway (a scroll-driven timeline) is skipped. requestAnimationFrame-driven fades are
+# not touched: rAF still runs in this tab, so their opacity is already above 0.
+FINISH_ANIMATIONS_JS = (
+    "(() => { if (typeof document.getAnimations !== 'function') return 0; let n = 0;"
+    " for (const a of document.getAnimations()) { try {"
+    " const end = a.effect && a.effect.getComputedTiming().endTime;"
+    " if (a.playState !== 'finished' && Number.isFinite(end)) { a.finish(); n++; } } catch (e) {} }"
+    " return n; })()"
+)
+
+
+def finish_animations(send) -> int:
+    """Jump every finite CSS animation and transition in the page to its end state.
+
+    `send(method, **params)` is a CDP call in the page's session. Returns how many animations
+    were finished. It can never raise: a page that is navigating, a dead session or an IPC
+    timeout just means nothing was finished, and observe carries on exactly as it did before
+    this hook existed."""
+    try:
+        response = send("Runtime.evaluate", expression=FINISH_ANIMATIONS_JS, returnByValue=True)
+        if not isinstance(response, dict) or response.get("exceptionDetails"):
+            return 0
+        value = (response.get("result") or {}).get("value")
+        count = int(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0
+    except Exception as exc:  # noqa: BLE001 - a helper on the observe path must never end a run
+        log(f"finish animations skipped: {type(exc).__name__}")
+        return 0
+    if count > 0:
+        log(f"finished {count} pending CSS animation(s) before observe")
+    return count
+
+
 def off_list_targets(urls, allow_hosts) -> list[str]:
     """The http(s) targets whose host is outside the allowlist (javascript:, #, mailto: are not navigations)."""
     bad = []
@@ -525,6 +564,12 @@ def _install_patches(run: Run, model, agent_mod, browser_mod) -> None:
     orig_observe, orig_act, orig_call = Browser.observe, Browser.act, Browser.call
 
     def observe(self, *args, **kwargs):
+        # Finish pending CSS animations BEFORE the snapshot (see FINISH_ANIMATIONS_JS). This goes
+        # through orig_call, not the wrapped call below and not self.evaluate: the wrapped call's
+        # only extra work is the first Page.navigate's Network.enable, so a Runtime.evaluate
+        # through orig_call provably touches none of the run's bookkeeping (capture, net_enabled,
+        # executed, drains), and self.evaluate turns an exception into StalePage.
+        finish_animations(lambda method, **params: orig_call(self, method, **params))
         page = orig_observe(self, *args, **kwargs)
         _drain(run, run.helpers)
         url = page.get("url", "")
@@ -542,6 +587,14 @@ def _install_patches(run: Run, model, agent_mod, browser_mod) -> None:
         return page
 
     def act(self, action, page, text=None):
+        # Deliberately NO finish_animations here. orig_act starts with fresh(), which compares the
+        # page and the target's guard captured at observe time against the live page, and a finish
+        # in between can break that comparison: jev's guard() is null for an element whose opacity
+        # is 0 (so finishing a pending fade-out flips a live guard to null), and its last field is
+        # the target scope's innerText, which drops visibility:hidden text (so finishing an
+        # animation that also toggles visibility changes it); the page marker also reads the
+        # opacity-filtered text and controls. Any of those raises StalePage ("Observe again").
+        # Every action is followed by an observe, which already finishes what the page started.
         if run.executed >= run.max_actions:
             raise BudgetExceeded(f"max_actions {run.max_actions} reached")
         kind, label = action.get("kind"), str(action.get("label", ""))

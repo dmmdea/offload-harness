@@ -54,7 +54,8 @@ operator's browser, and any remote browser service.
    directory as cwd.
 3. The sidecar attaches to the running browser (the `browse_cdp_url` endpoint when set, else the named
    browser's `DevToolsActivePort` file), opens a background tab, and loops: observe, ask the harness for a
-   decision, execute one action.
+   decision, execute one action. Before every observe it jumps the page's finite CSS animations and
+   transitions to their end state (see [Background tab rendering](#background-tab-rendering)).
 4. Every model call goes through the harness. A typed decision is proxied to `browse_decision_url`
    (the bearer, if any, comes from `LOCAL_OFFLOAD_BROWSE_BEARER` in the harness process and never
    reaches the sidecar). A field value for TYPE_TEXT is generated on the local agent seat under a raw
@@ -64,6 +65,44 @@ operator's browser, and any remote browser service.
    after a keystroke), and closing the tab at DONE dropped that save while the run reported done. Then it
    closes the tab, sends one `result` line, stops the lane's browser-harness daemon (`offload-browse`) and
    exits; the harness returns the result. Nothing of the operator's is removed.
+
+### Background tab rendering
+
+The lane's tab is opened in the background (with focus emulation on, so the operator's own tab is never
+activated). A hidden tab produces no rendering frames, which has one consequence the lane corrects and
+several it does not:
+
+- **CSS animations and transitions stay at their start state.** A dialog or dropdown menu that fades in
+  with `@keyframes` or a `transition` keeps opacity 0. The page snapshot drops every element whose
+  computed opacity is 0 (and everything inside it), so the model never sees the control the last click
+  opened and the run ends `blocked` ("the model or the loop reported no progress"). Measured in a
+  background tab with a dialog opened by a real CDP mouse click and read 400 ms later: a `@keyframes`
+  fade and a `transition` fade both read opacity 0 and not visible until their animations were
+  finished, then opacity 1 and visible. A production web app's dropdown menu showed 0 of 7 items visible
+  (its animation and transition both running) and 7 of 7 after.
+- **The lane finishes finite animations before each observe.** The sidecar evaluates a short script that
+  calls `finish()` on every animation in `document.getAnimations()` whose end time is finite and that has
+  not finished. Infinite animations (spinners, shimmer) have an infinite end time and are left alone, and
+  an animation whose `finish()` throws is skipped. The call never raises: a navigating page or a dead
+  session means nothing was finished and the observe runs as it always did. The runner logs
+  `finished N pending CSS animation(s) before observe` to stderr when it finished any.
+- **Not before an action.** A `finish()` between the observe and the pre-click freshness check could make
+  that check fail: the snapshot's per-element guard is empty for an element at opacity 0 and ends with the
+  innerText of the element's enclosing form, dialog, row or list item (which leaves out text hidden with
+  `visibility`), and the page marker reads the opacity-filtered text and controls. Every action is
+  followed by an observe, which already finishes what the action started.
+- **`requestAnimationFrame` fades are not targeted.** A fade driven from script keeps running in this
+  tab (measured opacity 0.0055, already visible to the snapshot), and `finish()` changes nothing there.
+- **Forcing frames does not work.** `Page.captureScreenshot`, clipped or not, hung for more than 15 s in
+  the hidden tab on the same fixture, so the lane does not try to wake the tab with screenshots (it
+  never requests one itself).
+- **A menu that mounts late shows up at the next observe.** The finish runs once, before the snapshot. An
+  element the page inserts after a debounce or a network call has no animation yet when it runs, so the
+  following observe finishes it (the `wait` action re-observes).
+
+Out of scope here: `date` and `datetime-local` inputs are not in the snapshot at all (its role table maps
+an input only for text, email, url, tel, search, number, checkbox, radio and button types), so the run
+cannot fill them, animation or not.
 
 ### The stdio protocol
 
@@ -240,6 +279,8 @@ is not proof.
 - The result's `step_log[]`, `actions[]`, `removed_labels` and `decision_model` show what ran and what
   the deny-list removed.
 - A sidecar stderr tail is appended to a defer reason.
+- A `finished N pending CSS animation(s) before observe` line in that tail means the lane un-stuck a fade-in
+  in the background tab before reading the page.
 - Browse calls are audited by the policy broker on agent doors, and ledgered like other lanes.
 - `offload_status remote` shows whether the lane is configured and which decision URL it will call.
 - A missing `offload_browse` in `tools/list` means the lane is unconfigured or the client was not
@@ -251,6 +292,8 @@ is not proof.
   servers for the decision endpoint and the local seat.
 - The sidecar's pure helpers (deny regex, host check, header redaction, `DevToolsActivePort` parsing)
   are stdlib `unittest`, run by the installer: `cd setup/browse && python -m unittest -v test_runner`.
+  The same file drives the observe and act wrappers through fake `Browser` classes, which is how the
+  finish-before-observe order (and its absence from act) is pinned without a browser.
 - Verify an install without touching a real page: with the browser running and remote debugging
   ticked, call `offload_browse` with a start URL on a harmless page you own, `allow_hosts` set to its
   host, `max_actions` 3 and a goal that only reads. Check that `status` is `done`, that `final.url`

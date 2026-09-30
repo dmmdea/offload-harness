@@ -6,6 +6,27 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.151.2] - 2026-09-30 - the browse lane un-sticks fade-in dialogs and menus in its background tab
+
+### Fixed — a dialog or dropdown menu that fades in was invisible to a browse run
+
+A run on a site whose dropdown menu fades in could not use the menu: the lane's tab is opened in the
+background, a hidden tab produces no rendering frames, and a CSS `@keyframes` animation or `transition`
+that starts there never advances, so the menu kept its start-state opacity 0. The page snapshot drops
+every element whose computed opacity is 0, so the model never saw the menu it had just opened and the
+run ended `blocked` ("the model or the loop reported no progress"). The sidecar now jumps every finite
+animation in `document.getAnimations()` to its end state before each observe (infinite ones, such as
+spinners, are skipped; the call swallows every error, so a navigating page never becomes a failed run).
+Measured in a background tab with a dialog opened by a real mouse click and read 400 ms later: a
+`@keyframes` fade and a `transition` fade both read opacity 0 and not visible until finished, then
+opacity 1 and visible; a production web app's dropdown menu showed 0 of 7 items visible and 7 of 7 after.
+A fade driven by `requestAnimationFrame` was already visible to the snapshot (opacity above 0) and is
+not targeted. The finish runs before the observe only, never before an action: jev's pre-click check
+compares the observed page and the target's guard with the live page, and a finish in between could make
+it fail. Forcing frames with `Page.captureScreenshot` is not an option (it hung for more than 15 s in
+the hidden tab). `date` and `datetime-local` inputs are still absent from the snapshot. Sidecar only
+(`setup/browse/runner.py`); reinstall with `setup/browse/install.ps1` to take it.
+
 ## [0.151.1] - 2026-09-30 - the Coral feeds EfficientNet-EdgeTPU-S a correctly quantised input
 
 ### Fixed — the Coral fed EfficientNet-EdgeTPU-S raw pixels (classify imagenet and embed)

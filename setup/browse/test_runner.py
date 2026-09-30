@@ -326,6 +326,139 @@ class SettleTests(unittest.TestCase):
         self.assertIsNone(runner.settle_network(run, None, None))
 
 
+class BackgroundTabAnimationTests(unittest.TestCase):
+    """The lane's tab is hidden, so CSS animations never advance there and a fading-in dialog keeps
+    opacity 0, which jev's snapshot drops. Observe must finish them first; act must not (it would
+    disturb jev's pre-click freshness check). Fakes stand in for jev's Browser: no browser, no jev."""
+
+    PAGE = {"url": "https://example.org/", "actions": [{"id": "e1", "kind": "click", "label": "Open menu", "node": 7}]}
+
+    def make(self, finished=2, on_finish=None):
+        """Patch a fresh fake Browser through the real _install_patches; returns (browser, order, run)."""
+        order = []
+
+        class FakeStalePage(ValueError):
+            pass
+
+        class FakeBrowser:
+            session = "s1"
+
+            def call(self, method, **params):
+                expression = params.get("expression", "")
+                if "getAnimations" in expression:
+                    order.append("finish")
+                    if on_finish is not None:
+                        return on_finish()
+                    return {"result": {"type": "number", "value": finished}}
+                order.append(f"call:{method}")
+                return {"result": {"value": []}}
+
+            def evaluate(self, expression):  # like jev: a Runtime.evaluate through self.call
+                order.append("evaluate")
+                return self.call("Runtime.evaluate", expression=expression, returnByValue=True)["result"]["value"]
+
+            def observe(self, screenshot=True):
+                order.append("observe")
+                return {**BackgroundTabAnimationTests.PAGE, "actions": [dict(a) for a in BackgroundTabAnimationTests.PAGE["actions"]]}
+
+            def act(self, action, page, text=None):
+                order.append("act")
+                return {"executed": action["id"]}
+
+        browser_mod = types.SimpleNamespace(Browser=FakeBrowser, StalePage=FakeStalePage)
+        model = types.SimpleNamespace()
+        agent_mod = types.SimpleNamespace()
+        run = runner.Run({"url": "https://example.org/", "unattended": True}, types.SimpleNamespace(send=lambda obj: None))
+        runner._install_patches(run, model, agent_mod, browser_mod)
+        return FakeBrowser(), order, run
+
+    def test_observe_finishes_animations_before_it_reads_the_page(self):
+        browser, order, _ = self.make()
+        page = browser.observe(screenshot=False)
+        self.assertEqual(order, ["finish", "observe"], "the finish must run before the original observe reads the page")
+        self.assertEqual([a["id"] for a in page["actions"]], ["e1"])
+
+    def test_every_observe_finishes_again(self):
+        # An action opens the next dialog, and the observe after it must see that one too.
+        browser, order, _ = self.make()
+        browser.observe()
+        browser.act(self.PAGE["actions"][0], self.PAGE)
+        browser.observe()
+        self.assertEqual(order.count("finish"), 2)
+        self.assertEqual([o for o in order if o in ("finish", "observe", "act")],
+                         ["finish", "observe", "act", "finish", "observe"])
+
+    def test_act_does_not_finish_animations(self):
+        # fresh() inside the original act compares the observed page and the target's guard with
+        # the live page; a finish between them can make that comparison fail (guard() is null at
+        # opacity 0 and includes the scope's innerText, which honours visibility:hidden).
+        browser, order, _ = self.make()
+        browser.act({"id": "e1", "kind": "click", "label": "Open menu", "node": 7}, self.PAGE)
+        browser.act({"id": "e2", "kind": "fill", "label": "Title", "node": 8}, self.PAGE, text="x")
+        browser.act({"id": "wait", "kind": "wait", "label": "Wait for the page to update"}, self.PAGE)
+        self.assertEqual(order.count("act"), 3)
+        self.assertNotIn("finish", order)
+
+    def test_the_finish_does_not_touch_the_runs_bookkeeping(self):
+        browser, order, run = self.make()
+        browser.observe()
+        self.assertEqual(run.executed, 0)
+        self.assertFalse(run.net_enabled)
+        self.assertNotIn("call:Network.enable", order)
+        self.assertTrue(run.observed_once)
+
+    def test_a_failing_finish_is_swallowed_and_observe_still_returns_the_page(self):
+        def stale():
+            raise ValueError("Document changed during evaluation")
+
+        def timed_out():
+            raise RuntimeError("Runtime.evaluate timed out")
+
+        failures = {
+            "an exception": stale,
+            "an IPC timeout": timed_out,
+            "exceptionDetails": lambda: {"exceptionDetails": {"text": "boom"}, "result": {}},
+            "no response": lambda: None,
+            "a non-numeric value": lambda: {"result": {"value": "x"}},
+        }
+        for name, on_finish in failures.items():
+            with self.subTest(name):
+                browser, order, run = self.make(on_finish=on_finish)
+                page = browser.observe()
+                self.assertEqual(order, ["finish", "observe"])
+                self.assertEqual(page["url"], "https://example.org/")
+                self.assertTrue(run.observed_once)
+
+    def test_finish_animations_reports_the_count_and_never_raises(self):
+        seen = []
+
+        def send(method, **params):
+            seen.append((method, params))
+            return {"result": {"type": "number", "value": 3}}
+
+        self.assertEqual(runner.finish_animations(send), 3)
+        self.assertEqual(seen, [("Runtime.evaluate", {"expression": runner.FINISH_ANIMATIONS_JS, "returnByValue": True})])
+        self.assertEqual(runner.finish_animations(lambda m, **p: {"result": {"value": 0}}), 0)
+        self.assertEqual(runner.finish_animations(lambda m, **p: {"result": {"value": True}}), 0)
+        self.assertEqual(runner.finish_animations(lambda m, **p: {"result": {"value": float("nan")}}), 0)
+
+        def boom(method, **params):
+            raise OSError("daemon gone")
+
+        self.assertEqual(runner.finish_animations(boom), 0)
+
+    def test_the_script_skips_infinite_animations_and_checks_the_api_exists(self):
+        js = runner.FINISH_ANIMATIONS_JS
+        self.assertIn("typeof document.getAnimations !== 'function'", js)  # an old engine: nothing to do
+        self.assertIn("getComputedTiming().endTime", js)
+        self.assertIn("Number.isFinite(end)", js)  # a spinner's endTime is Infinity; finish() would throw
+        self.assertIn("a.playState !== 'finished'", js)
+        self.assertIn("a.finish()", js)
+        self.assertNotIn("cancel()", js)  # an end state, never a reset to the start state
+        self.assertEqual(js.count("try {"), 1, "each finish() is guarded on its own so one throw cannot stop the rest")
+        self.assertEqual(js.count("(() =>"), 1)
+
+
 class ReviewHardeningTests(unittest.TestCase):
     """Review findings 2026-09-28: capture boundaries and redaction, click targets, output encoding."""
 
