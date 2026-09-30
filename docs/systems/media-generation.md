@@ -999,7 +999,7 @@ and writes it into its result file.
 | `RENDER_FAILED` | a failed row, or an output that failed the ffprobe gate |
 | `BROWSER_MISSING` / `FFMPEG_MISSING` / `CLI_MISSING` | the pinned Chrome, ffmpeg/ffprobe or the pinned CLI is absent |
 | `SPAWN_EBUSY` | an antivirus lock on ffmpeg ([hyperframes#4058](https://github.com/heygen-com/hyperframes/issues/4058)); retried once, then this class |
-| `DISK_HEADROOM` | the frame-storage gate ([#4060](https://github.com/heygen-com/hyperframes/issues/4060)); move `compose_cache_dir` to a larger drive |
+| `DISK_HEADROOM` | the frame-storage gate ([#4060](https://github.com/heygen-com/hyperframes/issues/4060)): above one worker every frame is stored (8.3 MB at 1080p, refused past 90 % of the free space), so render a long clip with `workers` 1, which streams; else move `compose_cache_dir` to a larger drive |
 | `TIMEOUT` | `compose_timeout_sec` elapsed; the process tree is killed |
 
 **Measured on the reference box** (36 threads, Windows, software GL confirmed on the running
@@ -1033,6 +1033,7 @@ HyperFrames' own `renderTimeMs`; the whole gated call took 34-50 s.
 | `callout-label` 1080p webm with alpha | 180 | 22.0 s | 22.7 s |
 | `callout-label` 1080p mov (ProRes 4444) | 180 | 23.1 s | 19.9 s |
 | `captions-bar` 1080p webm with alpha | 240 | 23.3 s | 23.7 s |
+| `captions-bar` 1080p webm with alpha, 300 s of captions | 9,017 | 1,038 s | refused `DISK_HEADROOM` (33 GB free) |
 
 `checklist-card` is the slowest per frame (23.8 s per 150 frames at one worker) because four blurred rows and
 a title enter together. Each of them, rendered at 1, 2, 4 and 6 workers and at `auto` twice, gave 15 of 15
@@ -1062,7 +1063,11 @@ passed `lint`, `check` and `--strict-variables` and arrived intact in the page. 
 measured too. One CSS-animated element per group is flat up to 80 groups in the page (24 s for 240 frames) and slows
 from about 150 (34 s), and a 374-group, 12.9 KB list had written about 290 of its 450 frames after ten minutes, when
 it was stopped. The template therefore holds one element and derives the frame from the time of HyperFrames'
-`hf-seek` event, which renders those 450 frames in 39.6 s (draft quality, clean CPU). `offload_media` has no overlay operation, so a chunk's `webm`
+`hf-seek` event, which renders those 450 frames in 39.6 s (draft quality, clean CPU). A full chunk is long, though:
+a 300 s chunk (9,017 frames) was refused `DISK_HEADROOM` at `auto` workers with 33 GB free (HyperFrames stores every
+frame above one worker and budgets 8.3 MB each) and rendered at one worker in 1,038 s (115 ms a frame, on a busy box),
+so a 600 s chunk would pass the 1,800 s default of `compose_timeout_sec`. Render chunks at `workers` 1 and cut them
+with `--chunk-sec` (the captions-bar README, "Long chunks"). `offload_media` has no overlay operation, so a chunk's `webm`
 or `mov` overlay is laid over the footage with ffmpeg's `overlay` filter or in an editor; the overlay itself is silent.
 
 ### Security

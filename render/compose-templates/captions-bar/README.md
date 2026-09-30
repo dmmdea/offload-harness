@@ -40,12 +40,33 @@ ends at a sentence end, at a pause of 0.15 s or more (`--gap-sec`), or when it w
 `offset_sec`, `duration_sec`, `group_count` and `words_json`. Render one call per chunk:
 
 ```json
-{"template": "captions-bar", "format": "webm", "variables": {"words_json": "[[0.4,2.4,\"Hello there\"],[2.6,4.9,\"and welcome back\"]]", "duration": 5.5}}
+{"template": "captions-bar", "format": "webm", "workers": 1, "variables": {"words_json": "[[0.4,2.4,\"Hello there\"],[2.6,4.9,\"and welcome back\"]]", "duration": 5.5}}
 ```
 
 The first chunk keeps absolute time; every later chunk is rebased to start at 0, so lay it over the footage
 `offset_sec` seconds in. A chunk holds at most 16,000 characters and 600 s, which is about ten minutes of
-speech.
+speech; `--chunk-sec` and `--chunk-chars` set lower caps. Read "Long chunks" before rendering one of more than a
+couple of minutes.
+
+## Long chunks
+
+A chunk is 30 frames a second: 9,000 frames for 300 s, 18,000 for 600 s. Two limits of the lane decide whether
+one renders. Both were measured on a 300 s chunk (331 groups, 11,256 characters) on the reference box.
+
+- **Frame storage: render it with `"workers": 1`.** At `auto`, the lane's default, HyperFrames 0.8.61 captures
+  with several Chrome workers and stores every frame as an image before it encodes. It budgets 8.3 MB a frame
+  at 1080p and refuses the render when that passes 90 % of the free space, and the runner defers
+  `DISK_HEADROOM`. The 300 s chunk (9,017 frames, about 75 GB) was refused with 33 GB free; a 600 s chunk needs
+  about 166 GB free. At one worker the frames stream to the encoder: the cache directory stayed under 6 MB.
+- **Time: keep a chunk to about 300 s.** At one worker the 300 s chunk rendered in 1,038 s (115 ms a frame,
+  quality `high`, while the box was busy with other work; the 450-frame render below, at draft quality on a
+  quiet box, ran at 88 ms). A 600 s chunk was not rendered: by those rates it takes 27 to 35 minutes, at or past the 1,800 s default of
+  `compose_timeout_sec`, so it would defer `TIMEOUT`. Cut the transcript with `--chunk-sec 300`, or raise
+  `compose_timeout_sec` for the machine.
+
+The 300 s render came out as asked: 9,017 frames, 300.566 s, VP9 `yuva420p`, alpha present, and the frames at
+5.1 s, 147.8 s and 298.9 s (the sixth group, a middle one and the last) showed the groups the list holds for
+those times.
 
 ## Laying it over footage
 

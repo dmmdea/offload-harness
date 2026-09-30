@@ -116,9 +116,14 @@ node render/captions-groups.mjs <base>.segments.json --pace conversational --out
 `--pace` is `punchy` (up to 3 words a group), `conversational` (5) or `calm` (6). A group also ends at a
 sentence end, at a pause of 0.15 s or more, or when it would pass 42 characters. The output is a list of
 chunks, each with `words_json`, `duration_sec` and `offset_sec`. Render one clip per chunk
-(`{"template": "captions-bar", "format": "webm", "variables": {"words_json": "...", "duration": ...}}`) and
-lay it over the footage at `offset_sec`. The first chunk keeps absolute time; later chunks start at 0. A
+(`{"template": "captions-bar", "format": "webm", "workers": 1, "variables": {"words_json": "...", "duration": ...}}`)
+and lay it over the footage at `offset_sec`. The first chunk keeps absolute time; later chunks start at 0. A
 chunk is at most 16,000 characters and 600 s (about ten minutes of speech). The overlay is silent.
+
+**Render every chunk with `workers: 1` and cut long transcripts with `--chunk-sec 300`.** At `auto`, HyperFrames
+stores every frame on disk (8.3 MB at 1080p) and defers `DISK_HEADROOM` on a long clip: a 300 s chunk needs
+about 75 GB free. At one worker a 300 s chunk took 17 minutes, so a 600 s chunk would pass the default 30-minute
+timeout (`TIMEOUT`).
 
 ## Authoring or changing a template
 
@@ -152,7 +157,7 @@ full text and `render/compose-hyperframes.test.mjs` enforces the part a machine 
 | `BAD_INPUT` naming a variable | not declared, wrong type, or over `maxLength` | read the template README's table and fix the value |
 | `LINT_ERRORS` or `CHECK_FAILED` | the composition failed its own gates (runtime error, layout, contrast) | read `check.findings`; for a template you edited, fix the page |
 | `RENDER_FAILED` after a good `check` | the output failed the ffprobe gate | read the detail; wrong size or missing alpha is a template or format bug |
-| `DISK_HEADROOM` | not enough free space for the frames | point `compose_cache_dir` at a larger drive |
-| `TIMEOUT` | `compose_timeout_sec` elapsed | shorten the clip, or split it, then retry |
+| `DISK_HEADROOM` | not enough free space for the frames (above one worker every frame is stored, 8.3 MB at 1080p) | render the clip with `workers: 1`, which streams the frames; else point `compose_cache_dir` at a larger drive |
+| `TIMEOUT` | `compose_timeout_sec` elapsed | shorten the clip, or split it (captions: `--chunk-sec`), then retry |
 | `compose_busy` | another composition holds the slot | wait and call again |
 | a template is missing from `offload_status` | this machine has an older checkout | the templates ship with the harness release; deploy it |

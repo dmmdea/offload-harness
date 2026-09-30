@@ -504,9 +504,11 @@ so the installer prints the three keys instead. To bind by hand:
 `ffmpeg_path` must name an ffmpeg with ffprobe beside it. `local-offload doctor` then reports
 `compose_video CONFIGURED` with the template list, and `local-offload acceptance` runs the pinned
 CLI's `--version` through the runner as this identity. Optional keys: `compose_quality` (`high`
-default), `compose_workers` (`auto` default; on the reference box neither 1 nor `auto` wins consistently),
-`compose_timeout_sec` (1800) and `compose_cache_dir` (work dirs and frame cache; move it to a large
-drive if a render defers `DISK_HEADROOM`).
+default), `compose_workers` (`auto` default; on the reference box neither 1 nor `auto` wins consistently for
+a short card, but a clip longer than about two minutes needs 1: above one worker HyperFrames stores every
+frame, 8.3 MB at 1080p, and defers `DISK_HEADROOM`),
+`compose_timeout_sec` (1800; a 300 s caption chunk takes about 17 minutes at one worker) and `compose_cache_dir`
+(work dirs and frame cache; move it to a large drive if a render defers `DISK_HEADROOM`).
 
 **Adding a template.** Follow the contract in
 [`render/compose-templates/README.md`](../render/compose-templates/README.md): offline, deterministic,
