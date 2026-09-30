@@ -85,7 +85,7 @@ func slowSeat(cancelled *atomic.Int64) func(context.Context, core.AgentContract,
 	return func(ctx context.Context, c core.AgentContract, _ delegate.LocalOptions) (core.AgentWireResult, error) {
 		if strings.Contains(c.Goal, "fast") {
 			return core.AgentWireResult{SchemaVersion: core.AgentWireSchemaVersion, NodeID: "this-box", Seat: "fake-seat",
-				Output: "done on qube", StopReason: "done"}, nil
+				Output: "done on the seat", StopReason: "done"}, nil
 		}
 		<-ctx.Done()
 		cancelled.Add(1)
@@ -122,7 +122,7 @@ func TestHandleAgentDelegateReturnsFinishedResultsAtTheCallDeadline(t *testing.T
 		t.Fatalf("results = %v, want both subtasks in submission order", m["results"])
 	}
 	fast, _ := results[0].(map[string]any)
-	if fast["output"] != "done on qube" || fast["deferred"] == true {
+	if fast["output"] != "done on the seat" || fast["deferred"] == true {
 		t.Fatalf("the finished subtask = %v, want its own result intact", fast)
 	}
 	slow, _ := results[1].(map[string]any)

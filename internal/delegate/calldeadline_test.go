@@ -341,7 +341,7 @@ func remoteRunningForeverServer(t *testing.T) (*fakeNode, *httptest.Server) {
 	f.onDispatch = func(jobID string, c core.AgentContract) { goals.Store(jobID, c.Goal) }
 	f.pollByJob = func(jobID string, n int64) (map[string]any, int) {
 		if g, _ := goals.Load(jobID); strings.Contains(asString(g), "fast") {
-			w := remoteWire("the qube answer", `{"answer":"qube"}`)
+			w := remoteWire("the widget answer", `{"answer":"widget"}`)
 			w.NodeID = "node-a"
 			return doneWire(t, w), http.StatusOK
 		}
@@ -350,9 +350,12 @@ func remoteRunningForeverServer(t *testing.T) (*fakeNode, *httptest.Server) {
 	return f, f.server()
 }
 
+// remoteGoal is a remote contract for goal whose acceptance the fake node's "widget" answer
+// satisfies.
 func remoteGoal(goal string) core.AgentContract {
 	c := remoteContract()
 	c.Goal = goal
+	c.Acceptance = []string{"contains:widget", "nonempty:answer"}
 	return c
 }
 
@@ -568,7 +571,7 @@ func TestAttemptStartsNothingOnceTheCallDeadlineHasPassed(t *testing.T) {
 func TestCutByDeadlineNeverRewritesAFinishedAnswer(t *testing.T) {
 	r := &runner{cfg: testCfg(t), call: pastDeadline(3)}
 	answer := PlacedResult{Node: "n", Seat: "s", Result: localOK()}
-	wrong := PlacedResult{Node: "n", Seat: "s", Result: localOK(), AcceptanceFailures: []string{"contains:qube"}}
+	wrong := PlacedResult{Node: "n", Seat: "s", Result: localOK(), AcceptanceFailures: []string{"contains:widget"}}
 	for name, pr := range map[string]PlacedResult{"a finished answer": answer, "a finished answer that failed acceptance": wrong} {
 		got := r.cutByDeadline(pr)
 		if got.deadlineCut || got.Result.Deferred || got.Result.Output != "done" || len(got.AcceptanceFailures) != len(pr.AcceptanceFailures) {

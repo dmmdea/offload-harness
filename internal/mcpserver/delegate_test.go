@@ -381,7 +381,7 @@ func TestAgentDelegateHandlerAPartialResultIsNotAToolError(t *testing.T) {
 			s := delegateTestServer(t, func(context.Context, core.AgentContract, delegate.LocalOptions) (core.AgentWireResult, error) {
 				if calls.Add(1) == 1 {
 					return core.AgentWireResult{SchemaVersion: 1, NodeID: "this-box", Seat: "fake-seat",
-						Output: "done on qube", StopReason: "done"}, nil
+						Output: "done on the seat", StopReason: "done"}, nil
 				}
 				return tc.second()
 			})
