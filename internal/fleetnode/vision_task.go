@@ -88,10 +88,10 @@ func visionTaskServed(cfg config.Config, task core.TaskType) bool {
 }
 
 // tokenGated reports whether a task_type rides the bearer rule: the agent lane
-// (v1 scope) and, since 0.116.0, the vision lane. Every media task stays
-// tokenless so deployed media clients keep working byte-identically.
+// (v1 scope), since 0.116.0 the vision lane, and since 0.154.0 the text lane. Every
+// media task stays tokenless so deployed media clients keep working byte-identically.
 func tokenGated(taskType string) bool {
-	return taskType == string(core.TaskAgentRun) || taskType == VisionTask
+	return taskType == string(core.TaskAgentRun) || taskType == VisionTask || taskType == TextTask
 }
 
 // visionTaskOf maps the payload's task name to the pipeline task, refusing

@@ -45,6 +45,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/rig"
 	"github.com/dmmdea/offload-harness/internal/seatload"
 	"github.com/dmmdea/offload-harness/internal/swapclient"
+	"github.com/dmmdea/offload-harness/internal/textremote"
 	"github.com/dmmdea/offload-harness/internal/tokclient"
 	"github.com/dmmdea/offload-harness/internal/visionremote"
 )
@@ -228,13 +229,13 @@ func (s *Server) buildServer(version string) *mcp.Server {
 	srv.AddTool(&mcp.Tool{
 		Name:        "offload_classify",
 		Description: "Classify text into one of the given labels on the LOCAL model cascade (free, on-box, no cloud). THE FIRST DOOR for one text + one label set (register A-102): seconds on the entry rung, automatic climb on a low decision margin; never write an agent_delegate contract for a single classification. Returns {label, confidence}; low-confidence results are deferred back to you. Triggers: classify / categorize / label / tag / bucket / route text into one of a known set.",
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"text":{"type":"string","description":"text to classify"},"labels":{"type":"array","items":{"type":"string"},"description":"allowed labels (>=2)"}},"required":["text","labels"]}`),
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"text":{"type":"string","description":"text to classify"},"labels":{"type":"array","items":{"type":"string"},"description":"allowed labels (>=2)"},` + textRouteSchema + `},"required":["text","labels"]}`),
 	}, s.handleClassify)
 
 	srv.AddTool(&mcp.Tool{
 		Name:        "offload_extract",
 		Description: "Extract structured fields from text on the LOCAL model cascade (free, on-box, no cloud), constrained to the provided JSON schema. THE FIRST DOOR for one text + one schema (register A-102): seconds on the entry rung, grounding-checked, automatic climb on failure; agent_delegate is for extraction that needs reading across several documents. Returns the extracted object or defers. Triggers: extract / parse / pull out structured fields from text into a schema (names, dates, amounts, entities).",
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"text":{"type":"string","description":"text to extract fields from"},"schema":{"type":"object","description":"JSON schema with a properties object describing the fields to extract"}},"required":["text","schema"]}`),
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"text":{"type":"string","description":"text to extract fields from"},"schema":{"type":"object","description":"JSON schema with a properties object describing the fields to extract"},` + textRouteSchema + `},"required":["text","schema"]}`),
 	}, s.handleExtract)
 
 	srv.AddTool(&mcp.Tool{
@@ -1286,22 +1287,24 @@ func (s *Server) handleClassify(ctx context.Context, req *mcp.CallToolRequest) (
 	var in struct {
 		Text   string   `json:"text"`
 		Labels []string `json:"labels"`
+		Route  string   `json:"route"`
 	}
 	if bad := parseArgs(req.Params.Arguments, &in); bad != nil {
 		return bad, nil
 	}
-	return result(s.p.Run(ctx, core.Request{Task: core.TaskClassify, Door: "offload_classify", Input: in.Text, Params: map[string]any{"labels": in.Labels}}))
+	return result(s.textRun(ctx, core.Request{Task: core.TaskClassify, Door: "offload_classify", Input: in.Text, Params: map[string]any{"labels": in.Labels}}, in.Route))
 }
 
 func (s *Server) handleExtract(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	var in struct {
 		Text   string         `json:"text"`
 		Schema map[string]any `json:"schema"`
+		Route  string         `json:"route"`
 	}
 	if bad := parseArgs(req.Params.Arguments, &in); bad != nil {
 		return bad, nil
 	}
-	return result(s.p.Run(ctx, core.Request{Task: core.TaskExtract, Door: "offload_extract", Input: in.Text, Params: map[string]any{"schema": in.Schema}}))
+	return result(s.textRun(ctx, core.Request{Task: core.TaskExtract, Door: "offload_extract", Input: in.Text, Params: map[string]any{"schema": in.Schema}}, in.Route))
 }
 
 func (s *Server) handleTriage(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -1334,6 +1337,18 @@ func (s *Server) handleVQA(ctx context.Context, req *mcp.CallToolRequest) (*mcp.
 func (s *Server) visionRun(ctx context.Context, req core.Request, route string) core.Result {
 	return visionremote.Run(ctx, s.p.Cfg(), s.p, req, route)
 }
+
+// textRun is the ONE call behind offload_classify and offload_extract: the default route (and
+// "local") runs the in-process pipeline exactly as before the route existed; auto and remote go
+// through textremote, where the placement rule and the wire live (0.154.0).
+func (s *Server) textRun(ctx context.Context, req core.Request, route string) core.Result {
+	return textremote.Run(ctx, s.p.Cfg(), s.p, req, route)
+}
+
+// textRouteSchema is the `route` property offload_classify and offload_extract share. Adding it
+// changed tools/list on every box (0.154.0): the default is local, so every caller that never
+// passes it is unchanged.
+const textRouteSchema = `"route":{"type":"string","enum":["local","auto","remote"],"description":"where the call runs (0.154.0): local (default; this box's own cascade, unchanged behaviour), auto (an idle local card runs it; when the machine-wide GPU lease is held — a render in flight or a text reservation — a fleet node advertising the text lane for this task runs it instead, and with no eligible node it still runs local), remote (force a fleet node; with none eligible it returns deferred:true with defer_class capacity — or config when no delegate_remotes are configured — and never touches the local GPU). The text lane is dark until a node's tier declares it (text_tasks in its health), so on today's fleets auto stays local and remote defers. The node runs its own pipeline and returns its full result; meta.node / meta.placement say where it ran"}`
 
 // visionRouteSchema is the `route` property every single-image vision tool
 // carries; one string so the three descriptions cannot drift.

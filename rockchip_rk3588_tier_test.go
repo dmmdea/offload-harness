@@ -271,3 +271,34 @@ func TestRK3588SeedLimitsFitAOneGenerationNPU(t *testing.T) {
 		t.Error("the tier sets fleet_max_queue_depth: leave it at its default (twice the concurrency)")
 	}
 }
+
+// TestRK3588TextDoorShipsDark pins the 0.154.0 text-door decisions on the SHIPPED table: the seat
+// is written into unconstrained_seats (so the node's own pipeline stops sending a grammar its
+// runtime refuses) while NO text task is declared, so text_tasks is empty and the fleet text lane is
+// not advertised. A later data-only change that adds classify/extract to the seat's tasks is the
+// one edit that opens the lane, and it must be made on purpose, after measured data passes.
+func TestRK3588TextDoorShipsDark(t *testing.T) {
+	seat := rk3588Seat(t)
+	for _, task := range seat.Tasks {
+		if task == "classify" || task == "extract" || task == "summarize" || task == "triage" {
+			t.Errorf("the NPU seat declares text task %q: the text lane ships dark until measured data passes (>=30 cases/lane, >=90%% correct, zero off-schema accepted)", task)
+		}
+	}
+	profiles, err := tierseed.Parse(embeddedProfiles)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := effectiveConfig(t, profiles[rk3588Tier], rk3588Tier, "linux")
+	if !cfg.DeclaresUnconstrainedSeat(seat.Name) {
+		t.Errorf("unconstrained_seats = %v, want it to name the NPU seat %q (bound from the seat)", cfg.UnconstrainedSeats, seat.Name)
+	}
+	// What stops the node's own pipeline sending the seat a grammar is that the cascade rungs it
+	// actually calls are declared, not merely that the seat name is listed somewhere.
+	if !cfg.DeclaresUnconstrainedSeat(cfg.Model) || !cfg.DeclaresUnconstrainedSeat(cfg.TriageModel) {
+		t.Errorf("the cascade rungs model %q and triage_model %q must both be declared unconstrained (unconstrained_seats %v): otherwise the node's pipeline sends the NPU a grammar it refuses",
+			cfg.Model, cfg.TriageModel, cfg.UnconstrainedSeats)
+	}
+	if len(cfg.TextTasks) != 0 {
+		t.Errorf("text_tasks = %v, want none: the fleet text lane is dark", cfg.TextTasks)
+	}
+}

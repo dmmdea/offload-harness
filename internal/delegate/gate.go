@@ -563,6 +563,32 @@ func PlaceVision(remotes []NodeView, task string) (int, bool) {
 	return best, best >= 0
 }
 
+// PlaceText picks the fleet node that runs ONE text task (classify / extract, 0.154.0) when
+// the caller has decided the work leaves the box (route remote, or route auto on a busy local
+// card). It is PlaceVision with the text lane's own gate: the node must ADVERTISE the lane and
+// list THIS task in text_tasks (ServesTextTask: no list means no lane, never "all", so an older
+// node is never a target), and its card must not be spoken for. Ranking is betterRemote, as for
+// vision; the return is the INDEX into remotes, for the same reason.
+func PlaceText(remotes []NodeView, task string) (int, bool) {
+	seed := mintP2CSeed()
+	best := -1
+	for i, r := range remotes {
+		if !textEligible(r, task) {
+			continue
+		}
+		if best < 0 || betterRemote(seed, nil, 0, r, remotes[best]) {
+			best = i
+		}
+	}
+	return best, best >= 0
+}
+
+// textEligible is PlaceText's hard gate: the lane advertised and the task served, the card not
+// reserved.
+func textEligible(r NodeView, task string) bool {
+	return r.ServesTextTask(task) && !r.LeasedText && !r.LeaseBusy
+}
+
 // visionEtaBetter is PlaceVision's W-11 key: there is no contract to fit a
 // generation term against, so it compares only the node's own queue-wait
 // estimate (queueWaitFor — the same one etaFor folds cold+generation onto for

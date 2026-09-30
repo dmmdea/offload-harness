@@ -136,3 +136,49 @@ func TestConfigSeedMayNotWriteVisionTasks(t *testing.T) {
 		t.Fatalf("a seatless tier may not seed vision_tasks either, got %v", err)
 	}
 }
+
+// TestSeatWritesUnconstrainedSeatsAndTextTasks: an rkllm seat is the sole writer of the node's
+// unconstrained_seats (its name and aliases, bound or not) and, only when it declares them, of
+// text_tasks (canonical order). A seat that declares no text task leaves text_tasks absent: dark.
+func TestSeatWritesUnconstrainedSeatsAndTextTasks(t *testing.T) {
+	got, err := Resolve(rkllmTasksProfile("vqa", "ocr"), "rk", Options{Home: "/srv/offload", GOOS: "linux"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"npu-vlm"}; !reflect.DeepEqual(got["unconstrained_seats"], want) {
+		t.Errorf("unconstrained_seats = %v, want %v", got["unconstrained_seats"], want)
+	}
+	if _, has := got["text_tasks"]; has {
+		t.Errorf("a seat declaring no text task must not write text_tasks, got %v", got["text_tasks"])
+	}
+	got, err = Resolve(rkllmTasksProfile("extract", "vqa", "ocr", "classify"), "rk", Options{Home: "/srv/offload", GOOS: "linux"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"classify", "extract"}; !reflect.DeepEqual(got["text_tasks"], want) {
+		t.Errorf("text_tasks = %v, want %v", got["text_tasks"], want)
+	}
+	// A tier with no rkllm seat writes neither.
+	got, err = Resolve(Profile{Backend: "cuda"}, "t", Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"unconstrained_seats", "text_tasks"} {
+		if _, has := got[k]; has {
+			t.Errorf("a tier with no rkllm seat must not write %s", k)
+		}
+	}
+}
+
+// TestConfigSeedMayNotWriteTextDoorKeys: both keys are seat-written, so a seed that also writes
+// them is refused by name, exactly like vision_model and vision_tasks.
+func TestConfigSeedMayNotWriteTextDoorKeys(t *testing.T) {
+	for _, key := range []string{"unconstrained_seats", "text_tasks"} {
+		p := rkllmTasksProfile("vqa", "ocr")
+		p.ConfigSeed = map[string]any{key: []any{"x"}}
+		_, err := Resolve(p, "rk", Options{Home: "/srv/offload"})
+		if err == nil || !strings.Contains(err.Error(), `"`+key+`" is written by a media_seat`) {
+			t.Errorf("a seed writing %s must be refused by name, got %v", key, err)
+		}
+	}
+}

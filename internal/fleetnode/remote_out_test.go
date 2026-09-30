@@ -24,8 +24,8 @@ var remoteMediaPayloads = map[string]string{
 }
 
 // Tasks that write no caller-addressed file: stt writes its transcript under media_dir
-// from the input's own hash, and the agent/accel/vision lanes produce JSON only.
-var remoteNonWriters = []string{"stt", "agent", "accel", VisionTask}
+// from the input's own hash, and the agent/accel/vision/text lanes produce JSON only.
+var remoteNonWriters = []string{"stt", "agent", "accel", VisionTask, TextTask}
 
 func remoteOutCfg() config.Config {
 	cfg := fullCfg()
