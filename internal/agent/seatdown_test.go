@@ -382,10 +382,14 @@ func TestAwaitSeatIsBoundedByTheRecoveryBudget(t *testing.T) {
 func TestAwaitSeatWithoutAProbeIsTheTerminalVerdict(t *testing.T) {
 	_, m := NewMonitor(context.Background(), recoveryPolicy(time.Second), 30*time.Second)
 	defer m.Stop()
+	begin := time.Now()
 	err := m.AwaitSeat(context.Background(), &SeatDownError{Kind: SeatDownDied, Note: "x"})
 	var sd *SeatDownError
-	if !errors.As(err, &sd) {
-		t.Fatalf("AwaitSeat = %v", err)
+	if !errors.As(err, &sd) || !sd.GaveUp {
+		t.Fatalf("AwaitSeat = %v, want the typed give-up", err)
+	}
+	if el := time.Since(begin); el > 500*time.Millisecond {
+		t.Fatalf("waited %s (the ceiling is 1 s): with no engine to read there is nothing to wait on", el)
 	}
 }
 

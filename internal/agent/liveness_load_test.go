@@ -59,6 +59,12 @@ func TestAllowanceLoadOfOneIsAllowanceForEveryPhase(t *testing.T) {
 			t.Fatalf("AllowanceLoad(%s, 9000, 5) = %s, want the unscaled %s", ph, got, want)
 		}
 	}
+	// ...including a decode rate slow enough that its bound is above the floor
+	// (20 deltas at 0.1 tok/s = 200 s): the floor cannot hide a scaled term.
+	slow := StallPolicy{Floor: 60 * time.Second, TokS: 0.1}
+	if got := slow.AllowanceLoad(PhaseDecoding, 0, 5); got != 200*time.Second || got != slow.Allowance(PhaseDecoding, 0) {
+		t.Fatalf("AllowanceLoad(decoding, 0, 5) on a 0.1 tok/s seat = %s, want the unscaled 200s", got)
+	}
 }
 
 // The monitor sizes a prefill's allowance with the load the sampler reports when
