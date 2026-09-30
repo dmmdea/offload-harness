@@ -33,7 +33,9 @@ Each template is a rewrite of the card's layout and motion, not a copy of its fi
 - Fonts are Inter from `render/compose-templates/_shared/fonts`, declared with `@font-face`; the kit's
   own faces and its Google Fonts import are not used.
 - The palette is recoloured (a different default accent and canvas), the creator, style and brand
-  names are removed, and all placeholder copy is replaced with neutral copy.
+  names are removed from the templates, and all placeholder copy is replaced with neutral copy. The
+  card ids in the table above are the kit's registry ids: they are kept only in this record and in each
+  README's provenance line, so that a port can be traced to its source card.
 - Not carried over: the grain texture, the frosted-glass blur, the count-up script and every
   time-based or random source.
 
@@ -52,6 +54,10 @@ that content is here.
 - The use permission says third-party notices override its grants for their respective assets. The one
   third-party asset the templates touch is the Inter font, which travels with its own licence text in
   `render/compose-templates/_shared/fonts/OFL.txt`.
+- The use permission ends by pointing to the kit's `THIRD_PARTY_NOTICES.md`, the place it names for the
+  licences of third-party software, fonts and assets. That file is not retained here because none of what it
+  covers is redistributed: the templates carry no kit script, no kit font and no kit asset, and the one
+  third-party asset they touch, the Inter font, travels with its own licence text (the point above).
 - No Apache-2.0 notice is kept here because no text from the kit's Apache-2.0 skills was reused.
 
 ## Re-checking the source

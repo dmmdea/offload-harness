@@ -713,9 +713,10 @@ test("kit ports: every variable takes its declared limit and refuses one past it
 });
 
 // The residue gate. Names are matched CASE-SENSITIVELY on purpose: the source card ids in the
-// provenance line are lower-case registry ids (kallaway.t1.stat.figure), which the licence asks us to
-// state, while the capitalised style names, the brand acronym and the placeholder people are exactly
-// what the port must neutralise. The kit author's own name is confined to the retained licence text.
+// provenance line are lower-case registry ids (kallaway.t1.stat.figure), which the provenance line
+// records so a port can be traced to its source card, while the capitalised style names, the brand
+// acronym and the placeholder people are exactly what the port must neutralise. The kit author's own
+// name is confined to the retained licence text.
 const KIT_RESIDUE = [
   [/\bAIS\b|AI Automation|Vox\b|Kallaway|\bInfinite\b|Dana Whitlock|Senior Correspondent|McKinsey|MCKINSEY|Global Payments/, "a creator, brand or placeholder name"],
   [/jsdelivr|googleapis|gstatic|cdnjs|unpkg/i, "a CDN host"],
