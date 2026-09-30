@@ -119,3 +119,25 @@ func TestRK3588TemplateRendersLlamaBackedSeatsOnTheGPU(t *testing.T) {
 		t.Errorf("interactive set = %q, want vis | rkllm", got)
 	}
 }
+
+// TestRK3588NPUOnlyRenderNeedsNoLlamaBuild: the template has no llama.cpp entry, so a board
+// whose seats are all on the NPU has no llama.cpp build to point at. Anything that could start
+// a llama-server still refuses a missing build by name.
+func TestRK3588NPUOnlyRenderNeedsNoLlamaBuild(t *testing.T) {
+	tmpl := readTmpl(t, rk3588Template)
+	p := rk3588Params(rkllmSeat())
+	p.LlamaBin = ""
+	if _, err := Render(tmpl, p); err != nil {
+		t.Fatalf("an NPU-only rk3588 render must not need a llama bin dir: %v", err)
+	}
+	llamaSeat := rk3588Params(visionSeat(), rkllmSeat())
+	llamaSeat.LlamaBin = ""
+	if _, err := Render(tmpl, llamaSeat); err == nil || !strings.Contains(err.Error(), "llama bin dir") {
+		t.Errorf("a llama-backed seat with no llama bin dir must be refused by name, got %v", err)
+	}
+	cuda := seatParams(rkllmSeat())
+	cuda.LlamaBin = ""
+	if _, err := Render(linuxCUDA(t), cuda); err == nil || !strings.Contains(err.Error(), "llama bin dir") {
+		t.Errorf("every other backend still needs a llama bin dir, got %v", err)
+	}
+}

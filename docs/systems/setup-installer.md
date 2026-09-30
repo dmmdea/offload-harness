@@ -356,6 +356,10 @@ absent. The live service on `:11436` was untouched throughout.
 setup/install.sh --bin ./local-offload --llama-bin /path/to/llamacpp/build/bin [--prefix DIR] [--user NAME]
 ```
 
+`--llama-bin` is required on every tier except one whose backend (`install tier-info`) is `rk3588`: that
+tier's template has no llama.cpp entry (the NPU serves), so a board there has no build to point at.
+`setup/install.tests.sh` pins the rule and the `--rknpu-home` pass-through with a stub binary under `--dry-run`.
+
 It is **deliberately thin**. Every decision that can be wrong lives in the binary, which
 is cross-compiled and unit-tested; the script only fetches, places and registers:
 

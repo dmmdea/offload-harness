@@ -127,7 +127,7 @@ func TestInstallRenderResolvesTheRknpuHome(t *testing.T) {
 		t.Helper()
 		out := filepath.Join(t.TempDir(), "llama-swap.yaml")
 		full := append([]string{"-profile", "rockchip-rk3588", "-os", "linux", "-root", ".", "-home", home,
-			"-models", "/m", "-llama-bin", "/opt/llama", "-out", out}, args...)
+			"-models", "/m", "-out", out}, args...)
 		captureStdout(t, func() {
 			if err := runInstallRender(full); err != nil {
 				t.Fatalf("install render %v: %v", args, err)

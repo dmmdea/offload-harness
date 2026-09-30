@@ -124,7 +124,8 @@ type Params struct {
 	// Backend is the tier's serving backend (cuda|vulkan|rk3588|cpu|…). A vision seat
 	// renders GPU flags (-ngl, --flash-attn) UNLESS this is "cpu", where the template's
 	// own chat models carry neither and a GPU-less build would only ignore them. rk3588
-	// is a GPU backend (the Mali through llama.cpp Vulkan), so it renders them like vulkan.
+	// serves from the NPU (RKLLM seats): its template has no llama.cpp entry, and the GPU
+	// gets none until llama.cpp runs clean on its Mali.
 	Backend string
 	// AltCPULlamaBin, when set, is the directory of a CPU llama-server build and asks
 	// for the CPU seat family (altcpu.go): the tier's chat weights as `<id>-cpu`
@@ -485,9 +486,24 @@ func Render(tmpl string, p Params) (string, error) {
 	return out, nil
 }
 
+// servesWithoutLlama is true for a render that starts no llama-server: the rk3588 backend,
+// whose template has no llama.cpp entry, with every seat on the NPU. Such a board has no
+// llama.cpp build to point at, so the render must not demand one.
+func (p Params) servesWithoutLlama() bool {
+	if p.Backend != "rk3588" {
+		return false
+	}
+	for _, s := range p.Seats {
+		if s.Kind != mediaseat.KindRKLLM {
+			return false
+		}
+	}
+	return true
+}
+
 func (p Params) validate() error {
 	var missing []string
-	if p.LlamaBin == "" {
+	if p.LlamaBin == "" && !p.servesWithoutLlama() {
 		missing = append(missing, "llama bin dir")
 	}
 	if p.ModelsDir == "" {
