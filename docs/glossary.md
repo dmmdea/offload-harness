@@ -34,7 +34,8 @@ local-only. Not a headless scraper: it uses the operator's real session. See
 ## Capacity wait
 
 The delegator's queue (`agent_placement_wait_sec`, 120 s by default): a subtask every node that could run it
-refused for capacity, or whose only placement is a reserved or full local seat, waits here, re-reading the
+refused for capacity, or whose only placements are nodes that are merely busy, a reserved local seat or a full
+local run-cap line, waits here, re-reading the
 fleet's health every few seconds, and lands on the first node that has room. The time it idles is credited,
 never charged to the contract's `timeout_sec`; a node inside its `Retry-After` cooldown or held out by the
 backlog gate is skipped. See [ADR 0063](architecture/decisions/0063-placement-holds-instead-of-sleeping-or-refusing.md).

@@ -42,47 +42,67 @@ arithmetic, or an ordering key among seats that already passed the adequacy gate
    consumes it: the wait credits the time it idles, so it is never charged to the contract, and asks the
    node again when the cooldown ends. A refusal that carries no hint cools the node for
    `refusalCooldown`. A hint at or above the delegator's own queue ceiling (`maxQueuedWait`, 300 s) is
-   capped at that ceiling: the comparison is the header's number against the delegator's constant, never
-   the node's wording.
+   capped at that ceiling, and the ceiling holds after the jitter (the excess is folded back under it, so
+   the re-asks stay spread and a node is never held out for more than 300 s): the comparison is the
+   header's number against the delegator's constant, never the node's wording. A wait that ends with a
+   node still cooling down says so in its defer.
 2. **Re-placement reads the fleet again, for every route.** A snapshot taken before the refusal is never
-   reused; siblings that probed after it share theirs (the 2 s probe memo). A candidate must be eligible,
+   reused; one taken after it is (the 2 s probe memo), but siblings that refuse together each read the
+   fleet once, the cost the Consequences name. A candidate must be eligible,
    have room by its own advertisement, be able to start the job inside the caller's patience (5 below),
    not be in cooldown, and not have a full process gate (7 below); all of it is judged against the wall the
    re-placement will actually carry (what the first attempt left of the budget), not the contract's
-   original one. With no candidate the subtask goes to the capacity wait. The local seat is the last resort only when its run-cap line has a free slot ahead
-   of a newcomer (the registry count the seat's own first-come-first-served gate uses); a full seat is a
-   line the subtask could not leave.
+   original one. With no candidate the subtask goes to the capacity wait, whatever kind of refusal started
+   the chain: a node the filters held out only for being busy (no room, a cooldown, a backlog past the
+   patience, a full process gate) and a full local run-cap line are places in line, while a node the
+   contract can never run on is not. The local seat is the last resort only when its run-cap line has a
+   free slot ahead of a newcomer (the registry count the seat's own first-come-first-served gate uses); a
+   full seat is a line the subtask could not leave.
 3. **A local-leg capacity defer is re-placeable.** A defer of class `capacity` with zero steps, produced
    by the local run, joins the refusals a node may answer differently. `route=local` waits in place (the
    seat's own line is the wait), and so does a delegator with no remotes. The time the local run already
    waited in line is credited back. A capacity defer a REMOTE node files after acking a job is an observed
    terminal answer and is never re-placed: nothing after a 202 ever is. If nothing else has room, the
-   local seat's defer is published as the defer it is, never as a `placement refused` failure.
+   local seat's defer is published as the defer it is, never as a `placement refused` failure. The defer
+   alone is no reason to wait: only an eligible node that is merely busy is worth waiting for, so a defer
+   beside a remote that can never run the contract is published at once.
 4. **The queue budget follows the node's ETA.** How long the delegator waits for a job to START is
    `clamp(1.5 x etaStart + 30 s, 60 s, patience)`, where `etaStart` is the node's own
    `queue_wait_estimate_sec` or the arithmetic over its jobs and recent wall, and patience is the
    contract's poll budget. It replaces the fixed five minutes. The delegator reads the node's ETA again
    when a job is first seen sitting in the backlog and extends the wait if the snapshot was too short,
-   because a `spread` run's snapshot can be minutes old. A node that publishes no ETA is no opinion and
-   keeps the wait that always applied, `min(patience, maxQueuedWait)`.
+   because a `spread` run's snapshot can be minutes old; a read that fails is counted and logged, tried
+   again on the next queued poll (three tries at most) and named in the queue-deadline message if it never
+   succeeded. A node that publishes no ETA is no opinion and keeps the wait that always applied,
+   `min(patience, maxQueuedWait)`; so does a node that publishes an impossible (negative) one.
 5. **The backlog gate.** `startsWithinPatience` holds a node out of the deal, the re-placement candidates
    and the capacity wait when its ETA to start a new job exceeds the caller's patience. It is a placement
    feasibility refusal in the same class as `feasibleFinal`: it prints its arithmetic ("a new job would wait
    ~444 s to start (1 running + 0 queued - 1 worker + 1 = 1 ahead x 443.6 s recent wall / 1 worker), past
-   the 301 s this contract will wait for a start"), it never ranks seats by speed, and it is not a pass
+   the 360 s this contract will wait for a start", a 300 s wall plus the 60 s grace), it never ranks seats by speed, and it is not a pass
    rule. A held-out node is read again every tick and is never refused for good.
 6. **The spread deal counts capacity.** No node is dealt more subtasks in one run than its headroom
    (`max_concurrent_jobs - jobs_running`, no floor; an unpublished ceiling is unlimited). A node at its
    headroom leaves the rotation; the fit order, the cycle and the one-subtask-per-seat-per-cycle
-   invariant are untouched. The overflow is handed to the capacity wait.
+   invariant are untouched. The overflow is handed to the capacity wait. The local seat is counted the
+   same way: its room is `fleet_max_concurrent_jobs` minus the runs already registered on it (read once per
+   deal), and a deal that has spent it takes the seat out of the rotation, so the overflow waits for the
+   first node that frees, the seat included, instead of piling into its own line. The count binds only
+   while some remote could run the contract: with none, the seat's own line is the only queue there is. A
+   subtask handed to the wait this way is neither a lease nor a refusal: it takes the local seat back only
+   once the seat stops reading busy by the deal's own reading, with the wait off it is a capacity defer, it
+   is not counted as a replacement, and the deal names every node it passed over with its arithmetic,
+   a remote that failed its health probe included.
 7. **A process-wide in-flight gate.** The delegator counts, per node, the dispatches this process holds
    open across every concurrent Run, and does not send one that would take a node past its published
    admission ceiling (`max_queue_depth`). The subtask waits in line for the first node that frees. The
    count ends with a terminal answer or with the delegator giving up on the job (a queue deadline, a
-   cancel).
+   cancel). A turn-away sends nothing, so it is no refusal and is not counted as a replacement.
 8. **A per-page retry cap.** A research page whose last three issues (the original and two re-issues) all
-   failed after a seat ran them is backed off for 15 minutes with a contract-class defer that says so. A
-   success forgets the page; so does the time. Only research digests are keyed (by the page's content, not
+   failed after a seat ran them is backed off for 15 minutes with a contract-class defer that says so. An
+   issue counts as failed only when a seat ran it and produced no verified digest: a failed verification,
+   an abstention, a budget defer or a node's own job error. A full node, a lease, a bad token, a dead
+   node, a cancel and a queue deadline never count. A success forgets the page; so does the time. Only research digests are keyed (by the page's content, not
    its file name).
 9. **Research digests are routed by contract shape.** A contract from a research door with one context
    page and an output schema is mechanical work by construction; the words of the caller's question
@@ -90,7 +110,9 @@ arithmetic, or an ordering key among seats that already passed the adequacy gate
    adequacy still gates every seat, and every other contract is classified by its goal as before.
 10. **The second chance queues for a busy seat.** A verification retry whose seat is running another job
     waits for it (the placement wait, credited) instead of being skipped, so the two runs still never share
-    the seat. It is skipped only when the seat stays busy for the whole wait or the wait is off.
+    the seat. It is skipped only when the seat stays busy for the whole wait or the wait is off, and a
+    caller's cancel is reported as a cancel. The wait never places the retry on the seat that took the
+    first attempt: the retry's premise is a different seat.
 
 ## Consequences
 
@@ -101,7 +123,8 @@ arithmetic, or an ordering key among seats that already passed the adequacy gate
 - The delegator stops creating the abandoned runs that fed the loop, but it does not clean up the ones
   already on a node: withdrawing a never-started job is a node-side change. Until nodes carry it, the
   queue budget and the gate are the whole defence.
-- One extra health read per queued job, and one per re-placement; no read for a job that starts at once.
+- One extra health read per queued job (up to three when the node does not answer it), and one per
+  re-placement, siblings that refuse together included; no read for a job that starts at once.
 - `maxQueuedWait` stays as the ceiling for a node with no ETA, as the yardstick for a `Retry-After`, and
   for the pull-queue lane, which has no health view to derive a budget from.
 - The process gate and the page cap are process-wide state. Tests that use them key on unique bases and

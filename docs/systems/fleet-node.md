@@ -461,33 +461,48 @@ side door). The wait is bounded by the config key alone; `agent_lease_wait_sec` 
   to) on the node that refused, retry it once and charge the sleep to the contract. Now the refusal returns at once
   and `noteCooldown` files the hint as a per-node cooldown for the run, jittered once when the refusal happens; a
   refusal with no hint cools the node for `refusalCooldown`, and a hint at or above `maxQueuedWait` (compared as a
-  number with the delegator's own constant, never the node's wording) is capped there. Only the wait consumes the
-  cooldown, and the wait credits what it idles.
+  number with the delegator's own constant, never the node's wording) is capped there, after the jitter (the excess is
+  folded back under the ceiling, so a node is held out for at most 300 s). Only the wait consumes the cooldown, and
+  the wait credits what it idles; a wait that ends with a node still cooling down names it in its defer.
 - **Re-placement re-reads the fleet** for every route (`fetchViewsSince`: a memoised snapshot counts only when it was
-  taken after the refusal, so siblings share one read and a snapshot that predates the refusal is never reused).
-  Candidates pass `withRoom`: eligible, room by their own advertisement, a start inside the caller's patience,
-  no cooldown, a process gate with a free slot — all judged against the wall the re-placement will actually carry
-  (what the first attempt left of the budget). With none left the subtask goes to the wait.
+  taken after the refusal, so a snapshot that predates the refusal is never reused; siblings that refuse together
+  each read once). Candidates pass `withRoom`: eligible, room by their own advertisement, a start inside the
+  caller's patience, no cooldown, a process gate with a free slot — all judged against the wall the re-placement
+  will actually carry (what the first attempt left of the budget). With none left the subtask goes to the wait,
+  whatever kind of refusal started the chain: `withRoom` lists every ELIGIBLE node it held out only for being busy,
+  and any such node, like a full local run-cap line, marks the subtask wait-worthy; a node the contract can never
+  run on does not (waiting for it would be a wait for nothing).
 - **The local seat is a candidate only with a free slot ahead** in its run-cap line (`localSlotAhead`: the registered
   runs on the seat against `fleet_max_concurrent_jobs`, the count the seat's first-come-first-served gate uses). A
   local-leg capacity defer (class `capacity`, zero steps) is re-placeable (`capacityDeferRefusal`); `route=local`, or
   no remotes, waits in place, and a remote's defer after a `202` never moves. The wait the local run already spent in
-  line is credited. With nothing else free the defer is published as a defer, not as `placement refused`.
+  line is credited. With nothing else free the defer is published as a defer, not as `placement refused`; the defer
+  alone does not make the subtask wait (only an eligible node that is merely busy does).
 - **The queue budget and the backlog gate.** A job's wait to START is `clamp(1.5 x etaStart + 30 s, 60 s, patience)`
   (`queueBudgetFor`), where `etaStart` is `queue_wait_estimate_sec` or the arithmetic over the node's jobs and recent
   wall, patience is the contract's poll budget (`pollBudgetFor`), and a node that publishes no ETA keeps
   `min(patience, 5 min)`. It is read again when the job is first seen queued. `startsWithinPatience` holds a node out
   of the deal, of re-placement and of the wait when its ETA exceeds the patience: a placement FEASIBILITY refusal that
   prints its arithmetic (`backlog (a new job would wait ~444 s to start (1 running + 0 queued - 1 worker(s) + 1 = 1
-  ahead x 443.6 s recent wall / 1 worker(s)), past the 301 s this contract will wait for a start)`), in the same class
-  as `feasibleFinal`, never a speed preference. A held-out node is read again every tick.
-- **The spread deal counts headroom.** No node is dealt more subtasks per run than `max_concurrent_jobs -
+  ahead x 443.6 s recent wall / 1 worker(s)), past the 360 s this contract will wait for a start)`, a 300 s wall plus the 60 s grace), in the same class
+  as `feasibleFinal`, never a speed preference. A held-out node is read again every tick. A negative
+  `queue_wait_estimate_sec` is a node bug and is no opinion (`estimateKnown`), never a confident zero. The refresh
+  read is tried again on the next queued poll when it fails (three tries at most), logged, and named in the
+  queue-deadline message if it never succeeded.
+- **The spread deal counts capacity.** No node is dealt more subtasks per run than `max_concurrent_jobs -
   jobs_running` (no floor; an unpublished ceiling is unlimited); a node at its headroom leaves the rotation, the fit
-  order and the cycle are untouched, and the overflow goes to the wait.
+  order and the cycle are untouched, and the overflow goes to the wait. The local seat is counted too
+  (`localRunCapRoom`: `fleet_max_concurrent_jobs` minus the runs registered on the planner seat, read once per deal;
+  only while some remote could run the contract). The overflow subtask (`PlacedResult.overflow`) is neither a lease
+  nor a refusal: it takes the seat back only once the seat stops reading busy by the deal's own reading
+  (`localStillBusy`), is a capacity defer when the wait is off, and is not counted as a replacement. The deal names
+  every node it passed over with its arithmetic, and a remote that failed its health probe keeps the run flagged.
 - **A process-wide gate and a page cap** (`processgate.go`). The delegator counts, per node, the dispatches the
   process holds open across every concurrent Run and does not send one past the node's `max_queue_depth`; the subtask
-  waits for the first node that frees. A research page whose last three issues all failed after a seat ran them is
-  backed off for 15 minutes with a `contract`-class defer, and a success forgets it.
+  waits for the first node that frees (a turn-away is no refusal). A research page whose last three issues all
+  failed after a seat ran them (a failed verification, an abstention, a budget defer or a node's own job error;
+  never a full node, a lease, a bad token, a cancel or a queue deadline) is backed off for 15 minutes with a
+  `contract`-class defer, and a success forgets it.
 
 **The health probe itself: concurrent, memoised, negative-cached, bounded inside the wait (register D-106,
 2026-09-17).** `fetchViews` — the delegator's read of every configured remote's `/fleet/health`, and the input to

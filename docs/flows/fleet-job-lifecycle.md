@@ -89,7 +89,8 @@ and what it said — never a manufactured defer, because no seat ever saw the co
 Since ADR 0063 a refusal never sleeps: a `503` returns at once and the subtask is re-placed on a node with room after
 the fleet is read again (its `Retry-After` only cools that node for the capacity wait). A subtask the local seat's
 run cap deferred (`capacity`, no step run) is re-placed the same way, and when no node has room the subtask waits in
-the capacity wait instead of failing.
+the capacity wait instead of failing - whatever kind of refusal started the chain, and a `route=spread` overflow
+(every remote already dealt to its headroom, the local seat's run cap spent) waits there too.
 
 On a COMPOSITE node (ADR 0052) the dispatched contract also carries `layer`: the layer the
 delegator chose from the rows that node advertised in health. The node does NOT take it on
