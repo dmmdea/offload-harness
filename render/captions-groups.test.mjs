@@ -9,7 +9,7 @@ import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import {
-  DEFAULTS, PACES, captionsFromSegments, groupWords, main, splitForVariable, toWordsJson, wordsFromSegments,
+  DEFAULTS, PACES, TEMPLATE_LIMITS, captionsFromSegments, groupWords, main, splitForVariable, toWordsJson, wordsFromSegments,
 } from "./captions-groups.mjs";
 
 const HELPER = join(dirname(fileURLToPath(import.meta.url)), "captions-groups.mjs");
@@ -437,49 +437,91 @@ test("splitForVariable: every chunk fits the character cap and the duration cap,
   }
 });
 
-test("splitForVariable: the shipped defaults are the template's own limits (16000 characters, 600 s)", () => {
+// Two different numbers. What the template ACCEPTS is 16,000 characters and 600 s (its declared limits, which
+// are the most a caller may ask for). What the helper CUTS at by default is 300 s: at the one worker the lane
+// needs, a 600 s chunk (18,000 frames) takes 27 to 35 minutes, at or past the 1,800 s default compose timeout,
+// and a 300 s chunk is the size that was measured to render inside it (captions-bar README, "Long chunks").
+test("splitForVariable: the default chunk is 300 s, not the template's 600 s maximum, and 16000 characters is the template's own limit", () => {
   assert.equal(DEFAULTS.maxChars, 42);
   assert.equal(DEFAULTS.variableChars, 16000);
-  assert.equal(DEFAULTS.variableSec, 600);
+  assert.ok(DEFAULTS.variableSec <= 300, `the default chunk is ${DEFAULTS.variableSec} s`);
+  assert.equal(DEFAULTS.variableSec, 300);
+  // the template's own limits are a separate, larger number and stay what the template declares
+  assert.deepEqual({ ...TEMPLATE_LIMITS }, { variableChars: 16000, variableSec: 600 });
+  assert.ok(Object.isFrozen(TEMPLATE_LIMITS) && Object.isFrozen(DEFAULTS), "neither can be changed by a caller");
   const chunks = splitForVariable(manyGroups(2000, { every: 2, len: 1.5 }));
   assert.ok(chunks.length >= 2);
-  for (const c of chunks) { assert.ok(c.words_json.length <= 16000); assert.ok(c.duration_sec <= 600); }
+  for (const c of chunks) { assert.ok(c.words_json.length <= 16000); assert.ok(c.duration_sec <= 300, `a default chunk of ${c.duration_sec} s`); }
   assert.deepEqual(splitForVariable([]), []);
   assert.throws(() => splitForVariable(manyGroups(3), { maxChars: 5 }), RangeError, "a single group that cannot fit is an error, not a silent drop");
 });
 
-// duration_sec is clamped to the template's 600 s, so a chunk that ran past it would still DECLARE 600 s and
-// the template would silently cut its last captions off. The only honest check is the triples themselves:
-// every one of them must end inside the duration its own chunk declares.
-test("splitForVariable: at the shipped limits no caption ends after its chunk's own duration, and 4,000 s of speech is at least seven chunks", () => {
-  const groups = manyGroups(2000, { every: 2, len: 1.5 }); // 4,000 s: the character cap alone would make 4 chunks
-  const chunks = splitForVariable(groups);
-  assert.ok(chunks.length >= 7, `${chunks.length} chunks for 4,000 s at 600 s each`);
-  let seen = 0;
-  for (const [k, c] of chunks.entries()) {
-    const triples = JSON.parse(c.words_json);
-    assert.ok(c.duration_sec <= 600, `chunk ${k}: ${c.duration_sec} s`);
-    for (const [i, t] of triples.entries()) assert.ok(t[1] <= c.duration_sec + 1e-9, `chunk ${k} group ${i} ends at ${t[1]} s, after its chunk's ${c.duration_sec} s`);
-    assert.ok(triples[triples.length - 1][1] > c.duration_sec - 0.011, `chunk ${k} declares ${c.duration_sec} s but its last caption ends at ${triples[triples.length - 1][1]} s`);
-    seen += triples.length;
-  }
-  assert.equal(seen, groups.length, "no group is lost");
-});
+// duration_sec is clamped to the chunk cap, so a chunk that ran past it would still DECLARE the cap and the
+// template would silently cut its last captions off. The only honest check is the triples themselves: every one
+// of them must end inside the duration its own chunk declares. It is checked at the default cap (no option
+// passed) and at the template's own 600 s maximum (passed explicitly: that is the limit, no longer the default).
+for (const [label, opts, cap, atLeast] of [["the default 300 s", {}, 300, 14], ["the template's 600 s maximum", { maxSec: 600 }, 600, 7]]) {
+  test(`splitForVariable: at ${label} no caption ends after its chunk's own duration, and 4,000 s of speech is at least ${atLeast} chunks`, () => {
+    const groups = manyGroups(2000, { every: 2, len: 1.5 }); // 4,000 s: the character cap alone would make 4 chunks
+    const chunks = splitForVariable(groups, opts);
+    assert.ok(chunks.length >= atLeast, `${chunks.length} chunks for 4,000 s at ${cap} s each`);
+    let seen = 0;
+    for (const [k, c] of chunks.entries()) {
+      const triples = JSON.parse(c.words_json);
+      assert.ok(c.duration_sec <= cap, `chunk ${k}: ${c.duration_sec} s`);
+      for (const [i, t] of triples.entries()) assert.ok(t[1] <= c.duration_sec + 1e-9, `chunk ${k} group ${i} ends at ${t[1]} s, after its chunk's ${c.duration_sec} s`);
+      assert.ok(triples[triples.length - 1][1] > c.duration_sec - 0.011, `chunk ${k} declares ${c.duration_sec} s but its last caption ends at ${triples[triples.length - 1][1]} s`);
+      seen += triples.length;
+    }
+    assert.equal(seen, groups.length, "no group is lost");
+  });
+}
 
-test("splitForVariable: the first chunk keeps absolute time only while its first group ends inside 600 s; otherwise it is rebased, not rejected", () => {
-  const late = [{ text: "late one", start: 700, end: 701.5, words: 2 }, { text: "late two", start: 702, end: 703.5, words: 2 }];
-  const a = splitForVariable(late);
-  assert.equal(a.length, 1);
-  assert.equal(a[0].offset_sec, 700);
-  assert.deepEqual(JSON.parse(a[0].words_json), [[0, 1.5, "late one"], [2, 3.5, "late two"]]);
-  assert.equal(a[0].duration_sec, 3.5);
-  // a first group that ends exactly at the limit still keeps absolute time; one that ends past it is rebased
-  const edge = splitForVariable([{ text: "edge", start: 590, end: 600, words: 1 }]);
-  assert.equal(edge[0].offset_sec, 0);
-  assert.equal(edge[0].duration_sec, 600);
-  const over = splitForVariable([{ text: "over", start: 590, end: 600.5, words: 1 }]);
-  assert.equal(over[0].offset_sec, 590);
-  assert.deepEqual(JSON.parse(over[0].words_json), [[0, 10.5, "over"]]);
+// Whichever cap is in force, the first chunk keeps absolute time only while its first group ends inside that cap.
+for (const [label, opts, limit] of [["the default 300 s", {}, 300], ["600 s, the template's maximum", { maxSec: 600 }, 600]]) {
+  test(`splitForVariable: the first chunk keeps absolute time only while its first group ends inside ${label}; otherwise it is rebased, not rejected`, () => {
+    const late = [{ text: "late one", start: 700, end: 701.5, words: 2 }, { text: "late two", start: 702, end: 703.5, words: 2 }];
+    const a = splitForVariable(late, opts);
+    assert.equal(a.length, 1);
+    assert.equal(a[0].offset_sec, 700);
+    assert.deepEqual(JSON.parse(a[0].words_json), [[0, 1.5, "late one"], [2, 3.5, "late two"]]);
+    assert.equal(a[0].duration_sec, 3.5);
+    // a first group that ends exactly at the limit still keeps absolute time; one that ends past it is rebased
+    const edge = splitForVariable([{ text: "edge", start: limit - 10, end: limit, words: 1 }], opts);
+    assert.equal(edge[0].offset_sec, 0);
+    assert.equal(edge[0].duration_sec, limit);
+    const over = splitForVariable([{ text: "over", start: limit - 10, end: limit + 0.5, words: 1 }], opts);
+    assert.equal(over[0].offset_sec, limit - 10);
+    assert.deepEqual(JSON.parse(over[0].words_json), [[0, 10.5, "over"]]);
+  });
+}
+
+// spokenSegments is seconds of continuous speech, one word every 0.4 s in one segment, no pauses: at the punchy
+// pace every group is 3 words (1.2 s), so a 1,000 s transcript is 834 groups and the cut points are the cap's.
+function spokenSegments(seconds) {
+  const words = Array.from({ length: Math.round(seconds / 0.4) }, (_, i) => ({ word: ` w${i + 1}`, start: i * 0.4, end: (i + 1) * 0.4, probability: 0.9 }));
+  return [{ id: 0, start: 0, end: seconds, text: words.map((x) => x.word).join(""), words }];
+}
+
+test("captionsFromSegments: a long transcript is cut at the default 300 s; variableSec moves the cut, and undefined means the default", () => {
+  const segments = spokenSegments(1000);
+  const dflt = captionsFromSegments(segments, { pace: "punchy" });
+  assert.ok(dflt.chunks.length >= 4, `${dflt.chunks.length} chunks for 1,000 s at the default cap`);
+  for (const [k, c] of dflt.chunks.entries()) {
+    assert.ok(c.duration_sec <= 300, `default chunk ${k} is ${c.duration_sec} s`);
+    for (const t of JSON.parse(c.words_json)) assert.ok(t[1] <= c.duration_sec + 1e-9, `default chunk ${k}: a caption ends after its chunk`);
+  }
+  // an unset option is the default, not an error and not the template's maximum
+  assert.deepEqual(captionsFromSegments(segments, { pace: "punchy", variableSec: undefined }).chunks, dflt.chunks);
+  // a caller may ask for up to the template's 600 s: fewer, longer chunks, and no group lost either way
+  const wide = captionsFromSegments(segments, { pace: "punchy", variableSec: 600 });
+  assert.ok(wide.chunks.length >= 2 && wide.chunks.length < dflt.chunks.length, `${wide.chunks.length} chunks at 600 s against ${dflt.chunks.length} at the default`);
+  assert.ok(wide.chunks.some((c) => c.duration_sec > 300), "asking for 600 s gives a chunk longer than the default");
+  assert.ok(wide.chunks.every((c) => c.duration_sec <= 600));
+  const count = (r) => r.chunks.reduce((n, c) => n + c.group_count, 0);
+  assert.equal(count(dflt), dflt.groups.length);
+  assert.equal(count(wide), wide.groups.length);
+  assert.equal(count(dflt), count(wide), "the cut changes where a chunk ends, never how many groups there are");
 });
 
 // --- the whole pipeline on a realistic transcript -----------------------------------------------------
@@ -569,12 +611,12 @@ test("command line: each flag changes exactly the option it names", () => {
 });
 
 // A long chunk is many frames and the lane has limits (README, "Long chunks"), so the size of a chunk has to be
-// the caller's to choose on the command line. 300 words at 0.4 s is 120 s of speech, and every group breaks at 3 words.
-function longCliFixture() {
+// the caller's to choose on the command line. By default 300 words at 0.4 s is 120 s of speech, and every group
+// breaks at 3 words.
+function longCliFixture(seconds = 120) {
   const dir = mkdtempSync(join(tmpdir(), "captions-groups-long-"));
-  const words = Array.from({ length: 300 }, (_, i) => ({ word: ` w${i + 1}`, start: i * 0.4, end: (i + 1) * 0.4, probability: 0.9 }));
   const file = join(dir, "long.segments.json");
-  writeFileSync(file, JSON.stringify([{ id: 0, start: 0, end: 120, text: words.map((x) => x.word).join(""), words }]));
+  writeFileSync(file, JSON.stringify(spokenSegments(seconds)));
   return file;
 }
 
@@ -608,6 +650,31 @@ test("command line: --chunk-sec and --chunk-chars cap a chunk, and neither may p
   fails([file, "--chunk-chars", "1.5"], /--chunk-chars must be a whole number from 1 to 16000/);
   fails([file, "--chunk-chars", "0"], /--chunk-chars must be a whole number from 1 to 16000/);
   assert.equal(cli([file, "--chunk-sec", "600", "--chunk-chars", "16000"]).code, 0, "the limits themselves are accepted");
+});
+
+// The default cut and the template's limit are two numbers: by default a chunk is at most 300 s, a caller may
+// ask for any length up to the template's own 600 s (a cap between the two is honoured, not clamped to the
+// default), and past 600 s the request is refused with the template's reason.
+test("command line: the default chunk is 300 s, --chunk-sec asks for a longer one up to the template's 600 s, and 601 is refused", () => {
+  const file = longCliFixture(1000); // 1,000 s of speech: 834 punchy groups
+  const by = (...extra) => doc(cli([file, "--pace", "punchy", ...extra]));
+  const grouped = (r) => r.chunks.reduce((n, c) => n + c.group_count, 0);
+  const dflt = by();
+  assert.ok(dflt.chunks.length >= 4, `${dflt.chunks.length} chunks for 1,000 s at the default`);
+  for (const [k, c] of dflt.chunks.entries()) {
+    assert.ok(c.duration_sec <= 300, `default chunk ${k}: ${c.duration_sec} s`);
+    for (const t of JSON.parse(c.words_json)) assert.ok(t[1] <= c.duration_sec + 1e-9, `default chunk ${k}: a caption ends after its chunk`);
+  }
+  const mid = by("--chunk-sec", "450");
+  assert.ok(mid.chunks.some((c) => c.duration_sec > 300 && c.duration_sec <= 450), `at 450 s: ${mid.chunks.map((c) => c.duration_sec)}`);
+  const top = by("--chunk-sec", "600");
+  assert.ok(top.chunks.some((c) => c.duration_sec > 450 && c.duration_sec <= 600), `at 600 s: ${top.chunks.map((c) => c.duration_sec)}`);
+  assert.ok(top.chunks.length < mid.chunks.length && mid.chunks.length < dflt.chunks.length, `${top.chunks.length} < ${mid.chunks.length} < ${dflt.chunks.length} chunks`);
+  for (const r of [dflt, mid, top]) assert.equal(grouped(r), r.groups.length, "no group is lost, whatever the cut");
+  const over = cli([file, "--chunk-sec", "601"]);
+  assert.equal(over.code, 1);
+  assert.equal(over.stdout, "", "a refused request prints no chunks");
+  assert.equal(over.stderr, "captions-groups: --chunk-sec must be more than 0 and at most 600 (the template's duration limit)\n");
 });
 
 test("command line: --out writes the document to that file and prints nothing", () => {

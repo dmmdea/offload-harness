@@ -1055,8 +1055,10 @@ word-initial token keeps its leading space and a continuation such as an apostro
 currency sign or punctuation has none, and the helper merges those back into words first) into the `words_json`
 variable of the `captions-bar` template. It groups words a few at a time (`punchy` 3, `conversational` 5, `calm` 6; a group also ends at
 a sentence end, at a pause of 0.15 s or more, or past 42 characters), holds each group 0.3 s past its last word and
-never past the next group's start, and packs the groups into chunks of at most 16,000 characters and 600 s. The
-first chunk keeps absolute time; each later one is rebased to 0 and carries the `offset_sec` to lay it at.
+never past the next group's start, and packs the groups into chunks that fit the template, which takes at most
+16,000 characters and 600 s. The helper cuts at 300 s by default (the reason is measured below);
+`--chunk-sec` sets another cap up to the template's 600 s. The first chunk keeps absolute time; each later one is
+rebased to 0 and carries the `offset_sec` to lay it at.
 
 A 16 KB string variable was measured before the template was designed: a 15,968-character list (476 groups)
 passed `lint`, `check` and `--strict-variables` and arrived intact in the page. The design that followed was
@@ -1066,9 +1068,10 @@ it was stopped. The template therefore holds one element and derives the frame f
 `hf-seek` event, which renders those 450 frames in 39.6 s (draft quality, clean CPU). A full chunk is long, though:
 a 300 s chunk (9,017 frames) was refused `DISK_HEADROOM` at `auto` workers with 33 GB free (HyperFrames stores every
 frame above one worker and budgets 8.3 MB each) and rendered at one worker in 1,038 s (115 ms a frame, on a busy box),
-so a 600 s chunk would pass the 1,800 s default of `compose_timeout_sec`. Render chunks at `workers` 1 and cut them
-with `--chunk-sec` (the captions-bar README, "Long chunks"). `offload_media` has no overlay operation, so a chunk's `webm`
-or `mov` overlay is laid over the footage with ffmpeg's `overlay` filter or in an editor; the overlay itself is silent.
+so a 600 s chunk would pass the 1,800 s default of `compose_timeout_sec`, which is why the default cut is 300 s and not
+the template's 600 s. Render chunks at `workers` 1 (the captions-bar README, "Long chunks"). `offload_media` has no
+overlay operation, so a chunk's `webm` or `mov` overlay is laid over the footage with ffmpeg's `overlay` filter or in
+an editor; the overlay itself is silent.
 
 ### Security
 

@@ -44,9 +44,9 @@ ends at a sentence end, at a pause of 0.15 s or more (`--gap-sec`), or when it w
 ```
 
 The first chunk keeps absolute time; every later chunk is rebased to start at 0, so lay it over the footage
-`offset_sec` seconds in. A chunk holds at most 16,000 characters and 600 s, which is about ten minutes of
-speech; `--chunk-sec` and `--chunk-chars` set lower caps. Read "Long chunks" before rendering one of more than a
-couple of minutes.
+`offset_sec` seconds in. The template takes a chunk of at most 16,000 characters and 600 s (about ten minutes of
+speech), but the helper cuts at 300 s by default: `--chunk-sec` sets another cap up to the template's 600 s and
+`--chunk-chars` a lower character cap. Read "Long chunks" before asking for a chunk longer than that.
 
 ## Long chunks
 
@@ -62,8 +62,8 @@ one renders. Both were measured on a 300 s chunk (331 groups, 11,256 characters)
 - **Time: keep a chunk to about 300 s.** At one worker the 300 s chunk rendered in 1,038 s (115 ms a frame,
   quality `high`, while the box was busy with other work; the 450-frame render below, at draft quality on a
   quiet box, ran at 88 ms). A 600 s chunk was not rendered: by those rates it takes 27 to 35 minutes, at or past the 1,800 s default of
-  `compose_timeout_sec`, so it would defer `TIMEOUT`. Cut the transcript with `--chunk-sec 300`, or raise
-  `compose_timeout_sec` for the machine.
+  `compose_timeout_sec`, so it would defer `TIMEOUT`. That is why the helper cuts at 300 s by default and not at the
+  template's 600 s. A `--chunk-sec` above 300 needs `compose_timeout_sec` raised for the machine.
 
 The 300 s render came out as asked: 9,017 frames, 300.566 s, VP9 `yuva420p`, alpha present, and the frames at
 5.1 s, 147.8 s and 298.9 s (the sixth group, a middle one and the last) showed the groups the list holds for
@@ -121,7 +121,8 @@ text, and not one group has a space before punctuation, at the punchy (15,618 gr
 calm (9,684) paces.
 
 The full-size case, from a synthetic 12-minute transcript with one entry per word (159 segments, 1,529 words)
-through `render/captions-groups.mjs`: 450 groups of 1 to 5 words (at most 33
+through `render/captions-groups.mjs` at the template's 600 s cap (`--chunk-sec 600`; the helper's default was 600 s
+when this was measured and is 300 s now, see "Long chunks"): 450 groups of 1 to 5 words (at most 33
 characters, none overlapping) in two chunks. Chunk 0 is 374 groups, 12,908 characters and 599.16 s; chunk 1 is
 76 groups, 2,527 characters and 120.84 s at offset 600.11 s. Chunk 0's variable went through `lint`, `check` and
 `--strict-variables` and the first 15 s rendered in 39.6 s (450 frames, draft quality). Frames at 1.47 s, 7.91 s

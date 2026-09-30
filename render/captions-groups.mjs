@@ -23,6 +23,12 @@
 // each its own overlay clip, placed at offset_sec on the source timeline. The first chunk keeps
 // absolute time; later chunks are rebased so each clip starts at 0.
 //
+// Chunk length. The template also stops at 600 s, but a chunk that long does not render inside the lane's
+// default timeout: at the one worker the lane needs, a 600 s chunk (18,000 frames) takes 27 to 35 minutes
+// against the 1,800 s default of compose_timeout_sec, and a 300 s chunk was measured to fit (the captions-bar
+// README, "Long chunks"). So there are two numbers: TEMPLATE_LIMITS is what the template accepts and the most
+// a caller may ask for, and DEFAULTS.variableSec (300 s) is where the helper cuts unless told otherwise.
+//
 // Word shape. <base>.segments.json is the array internal/sttclient writes: segments carrying
 // words[{word,start,end,probability}]. Those entries are whisper-server's TOKENS, not words: a word-initial
 // token keeps a leading space, and a continuation (a sub-word piece, an apostrophe suffix, the digits after a
@@ -39,6 +45,13 @@ export const PACES = Object.freeze({
   calm: Object.freeze({ maxWords: 6 }),
 });
 
+// What the captions-bar template accepts (its declared variables): the most a chunk may hold, and the upper
+// bound --chunk-chars and --chunk-sec are checked against. A test reads the template and fails on a mismatch.
+export const TEMPLATE_LIMITS = Object.freeze({
+  variableChars: 16000, // the words_json maxLength
+  variableSec: 600, // the duration maximum
+});
+
 export const DEFAULTS = Object.freeze({
   pace: "conversational",
   gapSec: 0.15,
@@ -46,8 +59,8 @@ export const DEFAULTS = Object.freeze({
   lingerSec: 0.3,
   minHoldSec: 0.5,
   precision: 2,
-  variableChars: 16000, // the captions-bar template's words_json maxLength
-  variableSec: 600, // the captions-bar template's duration maximum
+  variableChars: TEMPLATE_LIMITS.variableChars, // the whole limit: characters are not what stops a chunk rendering
+  variableSec: 300, // not the template's 600 s: 300 s is the length measured to render inside the default timeout
 });
 
 // A tiny tolerance for comparing times that came out of floating-point subtraction.
@@ -254,9 +267,10 @@ export function captionsFromSegments(input, opts = {}) {
 //   [--gap-sec S] [--max-chars N] [--linger-sec S] [--min-hold-sec S] [--chunk-sec S] [--chunk-chars N]
 //   [--out result.json]
 // Prints the document captionsFromSegments returns (or writes it to --out). Exit 0 on success, 1 on a
-// bad file or bad option, 2 when no file is named. --chunk-sec and --chunk-chars cap one chunk (defaults 600 s
-// and 16,000 characters, which are also the most the template accepts): a long chunk is many frames, and the
-// lane's frame storage and timeout limit how long one can be (the captions-bar README, "Long chunks").
+// bad file or bad option, 2 when no file is named. --chunk-sec and --chunk-chars cap one chunk. The defaults are
+// 300 s and 16,000 characters; the template accepts at most 600 s and 16,000 characters, so a bigger request is
+// refused here rather than deferred by the runner. A long chunk is many frames, and the lane's frame storage and
+// timeout limit how long one can be, which is why the default is 300 s (the captions-bar README, "Long chunks").
 const NUMERIC = {
   "max-words": "maxWords", "gap-sec": "gapSec", "max-chars": "maxChars", "linger-sec": "lingerSec", "min-hold-sec": "minHoldSec",
   "chunk-sec": "variableSec", "chunk-chars": "variableChars",
@@ -285,19 +299,19 @@ export function main(argv = process.argv.slice(2), { stdout = process.stdout, st
         opts[NUMERIC[key]] = n;
       } else throw new Error(`unknown flag ${a}`);
     }
-    // the template takes at most these, so a bigger request is refused here rather than deferred by the runner
-    if (opts.variableSec !== undefined && !(opts.variableSec > 0 && opts.variableSec <= DEFAULTS.variableSec)) {
-      throw new Error(`--chunk-sec must be more than 0 and at most ${DEFAULTS.variableSec} (the template's duration limit)`);
+    // the template takes at most its own limits, so a bigger request is refused here rather than deferred by the runner
+    if (opts.variableSec !== undefined && !(opts.variableSec > 0 && opts.variableSec <= TEMPLATE_LIMITS.variableSec)) {
+      throw new Error(`--chunk-sec must be more than 0 and at most ${TEMPLATE_LIMITS.variableSec} (the template's duration limit)`);
     }
-    if (opts.variableChars !== undefined && !(Number.isInteger(opts.variableChars) && opts.variableChars >= 1 && opts.variableChars <= DEFAULTS.variableChars)) {
-      throw new Error(`--chunk-chars must be a whole number from 1 to ${DEFAULTS.variableChars} (the template's words_json limit)`);
+    if (opts.variableChars !== undefined && !(Number.isInteger(opts.variableChars) && opts.variableChars >= 1 && opts.variableChars <= TEMPLATE_LIMITS.variableChars)) {
+      throw new Error(`--chunk-chars must be a whole number from 1 to ${TEMPLATE_LIMITS.variableChars} (the template's words_json limit)`);
     }
   } catch (e) {
     stderr.write(`captions-groups: ${e.message}\n`);
     return 1;
   }
   if (!file) {
-    stderr.write("captions-groups: usage: node render/captions-groups.mjs <segments.json> [--pace punchy|conversational|calm] [--chunk-sec S] [--out result.json]\n");
+    stderr.write(`captions-groups: usage: node render/captions-groups.mjs <segments.json> [--pace punchy|conversational|calm] [--chunk-sec S (default ${DEFAULTS.variableSec}, at most ${TEMPLATE_LIMITS.variableSec})] [--out result.json]\n`);
     return 2;
   }
   try {

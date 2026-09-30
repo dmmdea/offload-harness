@@ -117,13 +117,14 @@ node render/captions-groups.mjs <base>.segments.json --pace conversational --out
 sentence end, at a pause of 0.15 s or more, or when it would pass 42 characters. The output is a list of
 chunks, each with `words_json`, `duration_sec` and `offset_sec`. Render one clip per chunk
 (`{"template": "captions-bar", "format": "webm", "workers": 1, "variables": {"words_json": "...", "duration": ...}}`)
-and lay it over the footage at `offset_sec`. The first chunk keeps absolute time; later chunks start at 0. A
-chunk is at most 16,000 characters and 600 s (about ten minutes of speech). The overlay is silent.
+and lay it over the footage at `offset_sec`. The first chunk keeps absolute time; later chunks start at 0. The
+template takes a chunk of at most 16,000 characters and 600 s (about ten minutes of speech). The overlay is silent.
 
-**Render every chunk with `workers: 1` and cut long transcripts with `--chunk-sec 300`.** At `auto`, HyperFrames
-stores every frame on disk (8.3 MB at 1080p) and defers `DISK_HEADROOM` on a long clip: a 300 s chunk would
-store about 75 GB. At one worker a 300 s chunk took 17 minutes, so a 600 s chunk would pass the default 30-minute
-timeout (`TIMEOUT`).
+**Render every chunk with `workers: 1`; the helper cuts at 300 s by default, and `--chunk-sec` sets another cap up
+to the template's 600 s.** At `auto`, HyperFrames stores every frame on disk (8.3 MB at 1080p) and defers
+`DISK_HEADROOM` on a long clip: a 300 s chunk would store about 75 GB. At one worker a 300 s chunk took 17 minutes,
+so a 600 s chunk would pass the default 30-minute timeout (`TIMEOUT`). That is why the default is 300 s: a
+`--chunk-sec` above it needs `compose_timeout_sec` raised.
 
 ## Authoring or changing a template
 
@@ -158,6 +159,6 @@ full text and `render/compose-hyperframes.test.mjs` enforces the part a machine 
 | `LINT_ERRORS` or `CHECK_FAILED` | the composition failed its own gates (runtime error, layout, contrast) | read `check.findings`; for a template you edited, fix the page |
 | `RENDER_FAILED` after a good `check` | the output failed the ffprobe gate | read the detail; wrong size or missing alpha is a template or format bug |
 | `DISK_HEADROOM` | not enough free space for the frames (above one worker every frame is stored, 8.3 MB at 1080p) | render the clip with `workers: 1`, which streams the frames; else point `compose_cache_dir` at a larger drive |
-| `TIMEOUT` | `compose_timeout_sec` elapsed | shorten the clip, or split it (captions: `--chunk-sec`), then retry |
+| `TIMEOUT` | `compose_timeout_sec` elapsed | shorten the clip, or split it (captions: a smaller `--chunk-sec` than the 300 s default), then retry |
 | `compose_busy` | another composition holds the slot | wait and call again |
 | a template is missing from `offload_status` | this machine has an older checkout | the templates ship with the harness release; deploy it |

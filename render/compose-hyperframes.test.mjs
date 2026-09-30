@@ -10,7 +10,7 @@ import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
 import vm from "node:vm";
-import { DEFAULTS as CAPTION_DEFAULTS, PACES as CAPTION_PACES, captionsFromSegments } from "./captions-groups.mjs";
+import { DEFAULTS as CAPTION_DEFAULTS, PACES as CAPTION_PACES, TEMPLATE_LIMITS as CAPTION_LIMITS, captionsFromSegments } from "./captions-groups.mjs";
 import { fileURLToPath } from "node:url";
 import {
   ALLOWED_BROWSER_SUBCOMMANDS, ALLOWED_SUBCOMMANDS, FORCED_ENV, PASSTHROUGH_ENV_KEYS, PINNED_VERSION, applyTemplateVariables, assertAllowedInvocation,
@@ -829,11 +829,17 @@ test("captions-bar: an alpha overlay whose words arrive as one bounded string va
   assert.ok(!/\bDate\b|Math\.random|performance\.now|setTimeout|setInterval|requestAnimationFrame/.test(html));
 });
 
-test("captions-bar: its limits are the helper's limits, and its README names the helper and keeps audio out", () => {
+test("captions-bar: its limits are the helper's template limits, the helper's default chunk fits them, and its README names the helper and keeps audio out", () => {
   const html = readFileSync(join(TEMPLATES_DIR, "captions-bar", "index.html"), "utf8");
   const decls = declaredVariables(html);
-  assert.equal(decls.find((d) => d.id === "words_json").maxLength, CAPTION_DEFAULTS.variableChars);
-  assert.equal(decls.find((d) => d.id === "duration").max, CAPTION_DEFAULTS.variableSec);
+  const wordsVar = decls.find((d) => d.id === "words_json");
+  const durationVar = decls.find((d) => d.id === "duration");
+  // what the template accepts is the helper's TEMPLATE_LIMITS (the most a caller may ask for) ...
+  assert.equal(wordsVar.maxLength, CAPTION_LIMITS.variableChars);
+  assert.equal(durationVar.max, CAPTION_LIMITS.variableSec);
+  // ... and the size the helper cuts at by default is a chunk the template accepts
+  assert.ok(CAPTION_DEFAULTS.variableChars <= wordsVar.maxLength, "the default character cap fits words_json");
+  assert.ok(CAPTION_DEFAULTS.variableSec >= durationVar.min && CAPTION_DEFAULTS.variableSec <= durationVar.max, "the default chunk length is a legal duration");
   const readme = readFileSync(join(TEMPLATES_DIR, "captions-bar", "README.md"), "utf8");
   assert.ok(readme.includes("render/captions-groups.mjs"), "README names the helper");
   assert.ok(readme.includes("offload_media"), "README says how the audio is put back");
@@ -965,25 +971,29 @@ test("captions-bar script: every chunk the helper emits from a transcript longer
   }
   const html = readFileSync(join(TEMPLATES_DIR, "captions-bar", "index.html"), "utf8");
   const manifest = JSON.parse(readFileSync(join(TEMPLATES_DIR, "captions-bar", "template.json"), "utf8"));
-  const { chunks, groups } = captionsFromSegments(segments, { pace: "punchy" });
-  assert.ok(t > 600 && chunks.length >= 2, `${Math.round(t)} s of speech should need more than one chunk (got ${chunks.length})`);
-  let shown = 0;
-  for (const [k, c] of chunks.entries()) {
-    const out = applyTemplateVariables(html, { words_json: c.words_json, duration: c.duration_sec }, manifest);
-    assert.equal(declaredDefault(out, "words_json"), c.words_json, `chunk ${k}: the runner keeps the variable byte for byte`);
-    assert.match(out, new RegExp(`data-duration="${String(c.duration_sec).replace(".", "\\.")}"`), `chunk ${k}: the runner sets the chunk's duration`);
-    const page = loadCaptionsPage(c.words_json);
-    const triples = JSON.parse(c.words_json);
-    for (const [s, e, text] of triples) {
-      assert.ok(e <= c.duration_sec + 1e-9, `chunk ${k}: a caption ends at ${e} s, after the ${c.duration_sec} s the chunk declares`);
-      const mid = page.seek((s + e) / 2);
-      assert.equal(mid.text, text, `chunk ${k}: the page shows the group it should at ${(s + e) / 2} s`);
-      assert.ok(mid.opacity > 0, `chunk ${k}: "${text}" is visible at its middle`);
-      shown++;
+  // at the helper's default cut (no option) and at the longest chunk the template accepts (its own maximum)
+  for (const [label, variableSec, limit] of [["the default cut", undefined, CAPTION_DEFAULTS.variableSec], ["the template's maximum", CAPTION_LIMITS.variableSec, CAPTION_LIMITS.variableSec]]) {
+    const { chunks, groups } = captionsFromSegments(segments, { pace: "punchy", variableSec });
+    assert.ok(t > limit && chunks.length >= 2, `${label}: ${Math.round(t)} s of speech should need more than one chunk (got ${chunks.length})`);
+    let shown = 0;
+    for (const [k, c] of chunks.entries()) {
+      assert.ok(c.duration_sec <= limit, `${label}, chunk ${k}: ${c.duration_sec} s is past the cap`);
+      const out = applyTemplateVariables(html, { words_json: c.words_json, duration: c.duration_sec }, manifest);
+      assert.equal(declaredDefault(out, "words_json"), c.words_json, `${label}, chunk ${k}: the runner keeps the variable byte for byte`);
+      assert.match(out, new RegExp(`data-duration="${String(c.duration_sec).replace(".", "\\.")}"`), `${label}, chunk ${k}: the runner sets the chunk's duration`);
+      const page = loadCaptionsPage(c.words_json);
+      const triples = JSON.parse(c.words_json);
+      for (const [s, e, text] of triples) {
+        assert.ok(e <= c.duration_sec + 1e-9, `${label}, chunk ${k}: a caption ends at ${e} s, after the ${c.duration_sec} s the chunk declares`);
+        const mid = page.seek((s + e) / 2);
+        assert.equal(mid.text, text, `${label}, chunk ${k}: the page shows the group it should at ${(s + e) / 2} s`);
+        assert.ok(mid.opacity > 0, `${label}, chunk ${k}: "${text}" is visible at its middle`);
+        shown++;
+      }
     }
+    assert.equal(shown, groups.length, `${label}: every group of the transcript is shown by some chunk`);
+    assert.ok(groups.every((g) => !/\s[.,:;!?]/.test(g.text)), "and none has a space before punctuation");
   }
-  assert.equal(shown, groups.length, "every group of the transcript is shown by some chunk");
-  assert.ok(groups.every((g) => !/\s[.,:;!?]/.test(g.text)), "and none has a space before punctuation");
 });
 
 // The page depends on HyperFrames' seek event, which the pinned package dispatches but does not document (only
@@ -1199,14 +1209,15 @@ test("templates: the templates README table states each template's alpha flag, d
   }
 });
 
-test("captions: the paces, breaks, holds and chunk caps quoted in the skill, the README and the media doc are the helper's own", () => {
+test("captions: the paces, breaks, holds, chunk caps and default cut quoted in the skill, the README and the media doc are the helper's own", () => {
   const num = (s) => Number(s.replace(/,/g, ""));
   const docs = [
     ["the skill", sectionOf(readRepo("skill", "hyperframes-compose", "SKILL.md"), "Captions from a transcript"), { linger: false, minHold: false }],
     ["the captions-bar README", sectionOf(readRepo("render", "compose-templates", "captions-bar", "README.md"), "From a transcript"), { linger: true, minHold: true }],
     ["the media doc", sectionOf(readRepo("docs", "systems", "media-generation.md"), "Captions from a transcript"), { linger: true, minHold: false }],
   ];
-  for (const [where, text, has] of docs) {
+  for (const [where, section, has] of docs) {
+    const text = section.replace(/\s+/g, " "); // the docs are hard-wrapped: a line break counts as one space
     const one = (re, what) => {
       const m = re.exec(text);
       assert.ok(m, `${where} does not state ${what}`);
@@ -1217,8 +1228,12 @@ test("captions: the paces, breaks, holds and chunk caps quoted in the skill, the
     assert.equal(num(one(/`calm`\s+\(?(\d+)/, "the calm pace")[1]), CAPTION_PACES.calm.maxWords, `${where}: calm words`);
     assert.equal(Number(one(/pause of ([\d.]+) s or more/, "the pause that ends a group")[1]), CAPTION_DEFAULTS.gapSec, `${where}: pause`);
     assert.equal(num(one(/(?:pass|past) (\d+) characters/, "the line width")[1]), CAPTION_DEFAULTS.maxChars, `${where}: characters per group`);
+    // what the template accepts: its own limits, which are the helper's TEMPLATE_LIMITS ...
     const cap = one(/at most ([\d,]+) characters and (\d+) s/, "the chunk cap");
-    assert.deepEqual([num(cap[1]), num(cap[2])], [CAPTION_DEFAULTS.variableChars, CAPTION_DEFAULTS.variableSec], `${where}: chunk cap`);
+    assert.deepEqual([num(cap[1]), num(cap[2])], [CAPTION_LIMITS.variableChars, CAPTION_LIMITS.variableSec], `${where}: chunk cap`);
+    // ... and where the helper cuts by default, which is a different and smaller number
+    assert.equal(Number(one(/the helper cuts at (\d+) s by default/i, "where the helper cuts by default")[1]), CAPTION_DEFAULTS.variableSec, `${where}: default chunk`);
+    assert.equal(Number(one(/`--chunk-sec` sets another cap up to the template's (\d+) s/, "how far --chunk-sec may go")[1]), CAPTION_LIMITS.variableSec, `${where}: --chunk-sec limit`);
     if (has.linger) assert.equal(Number(one(/(?:held |holds each group )([\d.]+) s past its last word/, "the linger")[1]), CAPTION_DEFAULTS.lingerSec, `${where}: linger`);
     if (has.minHold) assert.equal(Number(one(/at least ([\d.]+) s\b/, "the minimum hold")[1]), CAPTION_DEFAULTS.minHoldSec, `${where}: minimum hold`);
   }
