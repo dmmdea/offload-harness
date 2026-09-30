@@ -21,6 +21,8 @@ where the code lives.
   test
 - [systems/media-generation.md](systems/media-generation.md) — image, video, audio, SVG, and editing;
   the GPU lifecycle and model bindings
+- [systems/security.md](systems/security.md) — the house security standard: invariants, layers,
+  gates and promotion by counted data (ADR 0067).
 - [systems/fleet-node.md](systems/fleet-node.md) — `fleet-serve` / `fleet-measure`: the node contract,
   job semantics, VRAM sampling
 - [systems/fleet-overview.md](systems/fleet-overview.md) — `fleet-ui` / `top` / `fleet-smoke`: the
