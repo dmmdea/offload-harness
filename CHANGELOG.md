@@ -6,6 +6,62 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.143.0] - 2026-09-30 - liveness judges the seat, not the request
+
+### Fixed — busy, preempting or throttled seats no longer kill the runs they serve (ADR 0061)
+
+A request silent past its phase allowance was declared stalled on its own silence alone, against allowances
+sized from one uncontended request on a cool seat. Waiting its turn in the engine's queue, time-sharing a busy
+card, being preempted by vLLM or running on a clock-capped card all read like a hung engine: on 2026-09-29 the
+fleet's agent jobs succeeded 15 % of the time — 96 stall kills, 41 finished answers discarded in their re-pack,
+four decode "stalls" in one second on one seat — while the engines produced throughout.
+
+The liveness monitor now reads the seat's ENGINE before calling silence a stall (`seatload.ReadActivity`, at
+the seat's own address, never `/upstream`): a work fingerprint from vLLM's step, token, preemption and
+finished-request counters plus its KV usage gauge (the only signal that moves through a solo prefill), from
+llama-server's `n_decode_total` and token counters, or from `/slots`. Request gauges never enter it, so a
+wedged engine that still accepts requests cannot look alive.
+
+- The engine moved since the last look: the run is held in the new phase `queued` and re-reads every 10 s for
+  as long as the engine keeps working, bounded by the run's ceiling.
+- The engine did no work for max(120 s, the waiting phase's own allowance): that is the stall, and the reason
+  names the engine's silence, the phase and the last reading.
+- The engine cannot be read: the ADR 0055 rule, and the reason says so. A loading seat goes to the cold-load
+  hold.
+- On entering the hold the node publishes the time left to its ceiling as the run's allowance, so the
+  delegator keeps polling a held remote run instead of abandoning it ~70 s in.
+- `queued_ms` reports the wall a run spent held, on the wire, both ledger rows and the call meta.
+
+### Fixed — local seat-cap waiters no longer block each other (C-60)
+
+Every run registers in phase `admission` before the local seat gate, and the gate counted every other
+registered run, waiters included: stacked waiters blocked each other with the seat free (92 local runs refused
+on 2026-09-29 after the full admission budget). A run now counts only runs past admission plus waiters that
+registered before it (FIFO), so a freed slot admits exactly the next in line.
+
+### Fixed — a delegator-local job is one ledger job, not two (C-62)
+
+A route=local job wrote the pipeline's inner `agent` row beside the delegator's `agent_delegate` row and every
+reader counted both (job counts, success rates, `cards_tokens`, `TokensOut` ~2x for local work). The delegator
+now hands its job id to the runner (`parent_job_id`); the inner row carries `cards_tokens` 0, and the summary
+and defer tally count the job once on its parent while keeping the inner row's savings.
+
+### Fixed — `node-swap` restarts and proves Linux nodes; the PS 5.1 launcher detects support
+
+A `--restart-command` ran through `powershell` on every OS ("executable file not found in $PATH" on Linux) and
+the post-restart proof polled a process finder that is empty off Windows, so a Linux swap with a restart
+mechanism could never verify. Restart commands now run through `/bin/sh` off Windows and verification reads
+`/proc/<pid>/exe`. `windows-node-swap-launch.ps1`'s support probe ran under `$ErrorActionPreference = 'Stop'`,
+where Windows PowerShell 5.1 turns the supporting build's own stderr usage line into a terminating error and
+read the build as unsupported — the launcher then ran the OLD installed engine; the probe now runs under a
+function-local `'Continue'`.
+
+### Changed — the 8 GB agent seats get a 2,048-token step budget
+
+`ampere-8` and `blackwell-8` seeded no `agent_max_tokens`, so their MiMo agent seats ran the loop default
+(1,024 per step, 4,096 final) and 10 of 200 runs on the ampere-8 reference box ended with the final answer cut
+at those caps. Both tiers now seed 2,048 (final 8,192), the geometry the same model already runs on `amd-gcn`.
+
 ## [0.142.1] - 2026-09-29 - the browse lane waits for the page to finish saving before it closes its tab
 
 ### Fixed — an edit made by a run's last action was lost when the tab closed

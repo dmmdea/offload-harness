@@ -55,11 +55,38 @@ func AwaitSeatSlot(ctx context.Context, runs SeatRuns, seat, canonical, selfID s
 		return nil
 	}
 	start := time.Now()
+	// count is the runs AHEAD of this one (register C-60, 0.143.0): every run
+	// past admission holds a slot, but a run still in admission counts only
+	// when it arrived first (FIFO by registration time, the id breaking a tie).
+	// Until 0.143.0 every other registered run counted, waiters included — and
+	// every waiter registers in admission before it reaches this gate — so
+	// once cap waiters stacked up they blocked EACH OTHER with the seat free:
+	// 92 local runs refused on 2026-09-29 after the full admission budget while
+	// slots stood open. A waiter behind this one never blocks it, and when a
+	// slot frees exactly the next waiter in line sees room — never all of them
+	// at once. Unregistered (self not listed): every waiter counts, the old
+	// conservative reading.
 	count := func() int {
+		list := runs(time.Now(), seat, canonical)
+		var selfStart int64
+		found := false
+		for _, r := range list {
+			if r.ID == selfID {
+				selfStart, found = r.StartedAtMs, true
+				break
+			}
+		}
 		n := 0
-		for _, r := range runs(time.Now(), seat, canonical) {
-			if r.ID != selfID {
-				n++
+		for _, r := range list {
+			if r.ID == selfID {
+				continue
+			}
+			if r.Phase != gpuactivity.PhaseAdmission {
+				n++ // holds a slot
+				continue
+			}
+			if !found || r.StartedAtMs < selfStart || (r.StartedAtMs == selfStart && r.ID < selfID) {
+				n++ // a waiter ahead in line (or one past the gate still in its pre-flight)
 			}
 		}
 		return n

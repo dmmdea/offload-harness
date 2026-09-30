@@ -354,16 +354,16 @@ type AgentWireResult struct {
 	// full re-generations (~690 s) into the 900 s wall on 2026-09-10 and
 	// turned a finished loop into a budget defer with nothing on the wire to
 	// say where the time went.
-	RepackMs        int64   `json:"repack_ms,omitempty"`
-	RepackAttempts  int     `json:"repack_attempts,omitempty"`
-	RepackNote      string  `json:"repack_note,omitempty"`
-	SeatTokS        float64 `json:"seat_tok_s,omitempty"`
+	RepackMs       int64   `json:"repack_ms,omitempty"`
+	RepackAttempts int     `json:"repack_attempts,omitempty"`
+	RepackNote     string  `json:"repack_note,omitempty"`
+	SeatTokS       float64 `json:"seat_tok_s,omitempty"`
 	// ObservedTokS (0.131.1) is the liveness monitor's smoothed decode rate over
 	// the run's streamed deltas — descriptive, present on short runs the
 	// calibrated SeatTokS (>= 1,024-token completions only) skips. The ledger's
 	// tok_per_s prefers SeatTokS, then this; the seat-rates store reads only
 	// SeatTokS, so a short sample never taints calibration.
-	ObservedTokS float64 `json:"observed_tok_s,omitempty"`
+	ObservedTokS    float64 `json:"observed_tok_s,omitempty"`
 	WallEstimateSec int     `json:"wall_estimate_sec,omitempty"`
 	MinTurnSec      int     `json:"min_turn_sec,omitempty"`
 	WallNote        string  `json:"wall_note,omitempty"`
@@ -403,6 +403,13 @@ type AgentWireResult struct {
 	// defers for latency. Omitted when zero; a pre-0.111 node's result reads as
 	// "not measured".
 	ContentionWaitSec float64 `json:"contention_wait_sec,omitempty"`
+	// QueuedMs (0.143.0, ADR 0061) is the wall this contract's requests spent
+	// in the liveness monitor's busy hold: silent while the seat's ENGINE kept
+	// working for other requests (its queue, a shared or throttled card, a
+	// preemption). That is contention the run waited out instead of a stall
+	// kill. Omitted when zero; a pre-0.143 node's result reads as "not
+	// measured".
+	QueuedMs int64 `json:"queued_ms,omitempty"`
 	// AdmissionWaitSec is the pre-flight spent BEFORE the wall started
 	// (RunAgentTask's admission gate): waiting for llama-swap to finish another
 	// model's swap and, since 0.115.11, loading the seat itself when it was not

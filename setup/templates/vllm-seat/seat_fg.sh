@@ -185,8 +185,21 @@ if ss -ltnp 2>/dev/null | grep -q ":$PORT "; then
   exit 1
 fi
 if ss -ltnp 2>/dev/null | grep -q ":$MP_HTTP_PORT "; then
-  echo "seat_fg: REFUSING to start — the MP HTTP port :$MP_HTTP_PORT is already bound: $(ss -ltnp 2>/dev/null | grep ":$MP_HTTP_PORT " | grep -oE 'users:\(.*\)' | head -1)"
-  exit 1
+  # A CRASHED generation leaves this stack's MP server behind. When the engine dies (EngineDeadError, a worker that
+  # stopped answering) llama-swap restarts the seat through this script, and nothing ran seat_stop.sh — so the dead
+  # generation's MP server still held its HTTP port and every restart refused right here (2026-09-29: 23 minutes with
+  # the agent seat fully down, 59 failed starts, 75 HTTP 500s). No engine of THIS stack serves :$PORT (checked just
+  # above), so the holder can only be that stale MP server: run the stack's own cleanup once, then look again.
+  # Anything still holding the port after that is foreign and is refused exactly as before.
+  if ! pgrep -f "vllm serve .*--port $PORT" >/dev/null 2>&1; then
+    echo "seat_fg: :$MP_HTTP_PORT is held and no engine serves :$PORT — a crashed generation's MP server; running seat_stop.sh once"
+    bash "$(dirname "$(readlink -f "$0")")/seat_stop.sh" "$CFG" || echo "seat_fg: seat_stop.sh reported a problem (continuing to the re-check)"
+    sleep 2
+  fi
+  if ss -ltnp 2>/dev/null | grep -q ":$MP_HTTP_PORT "; then
+    echo "seat_fg: REFUSING to start — the MP HTTP port :$MP_HTTP_PORT is already bound: $(ss -ltnp 2>/dev/null | grep ":$MP_HTTP_PORT " | grep -oE 'users:\(.*\)' | head -1)"
+    exit 1
+  fi
 fi
 
 # Chat template precheck. A --chat-template in SEAT_EXTRA_ARGS names a file; vLLM (0.29 validate_chat_template) refuses a

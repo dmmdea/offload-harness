@@ -141,6 +141,7 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		}
 	}
 	var contention *seatwait.Budget // set once the wall exists; finish reads it
+	var busyWatch *agent.Monitor    // set once the liveness monitor exists; finish reads its busy-hold total
 	var admitted time.Duration      // the admission pre-flight, if any; finish reports it
 	var admitNote string            // why the pre-flight could not settle residency (probe error / budget)
 	var coherenceNote string        // what the post-warm coherence probe found, when it ran (D-118)
@@ -155,6 +156,10 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		if contention != nil {
 			w.ContentionWaitSec = contention.Spent().Seconds()
 		}
+		if busyWatch != nil {
+			w.QueuedMs = busyWatch.QueuedTotal().Milliseconds()
+		}
+		meta.QueuedMs = w.QueuedMs
 		if admitted > 0 {
 			w.AdmissionWaitSec = admitted.Seconds()
 		}
@@ -177,6 +182,9 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		meta.RepackAttempts = w.RepackAttempts
 		if jid, _ := req.Params["job_id"].(string); jid != "" {
 			meta.JobID = jid
+		}
+		if pj, _ := req.Params["parent_job_id"].(string); pj != "" {
+			meta.ParentJobID = pj // an inner row of the delegator's job (C-62)
 		}
 		data, merr := json.Marshal(w)
 		if merr != nil {
@@ -529,11 +537,23 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	// monitor suspends the stall clock under a bounded cold-load ceiling, and
 	// tells the observer so status readers and the delegator see the phase.
 	obs := newProgressObserver(ctx, act, ceilingSec)
-	if probe := seatLoadProbe(p.cfg.Endpoint, seat); probe != nil {
-		live.WithSeatProbe(probe, func(ph agent.Phase, allow time.Duration) {
-			log.Printf("agent task: liveness for %s: %s (allowed %.0fs)", seat, ph, allow.Seconds())
-			obs.OnAllowance(string(ph), allow)
-		})
+	onHold := func(ph agent.Phase, allow time.Duration) {
+		log.Printf("agent task: liveness for %s: %s (allowed %.0fs)", seat, ph, allow.Seconds())
+		obs.OnAllowance(string(ph), allow)
+	}
+	probe := seatLoadProbe(p.cfg.Endpoint, seat)
+	// The busy hold (0.143.0, ADR 0061): before a silent request is called
+	// stalled, the monitor reads the seat's ENGINE; a request waiting its turn
+	// on an engine that keeps working for others is held, never killed.
+	if eng := engineActivityProbe(p.cfg.Endpoint, seat, probe); eng != nil {
+		live.WithEngineProbe(eng)
+		if probe == nil {
+			live.WithSeatProbe(nil, onHold) // the hold's status events still reach the observer
+		}
+	}
+	busyWatch = live
+	if probe != nil {
+		live.WithSeatProbe(probe, onHold)
 		if coldLoaded {
 			// The warm-up just loaded the seat. Its FIRST completion is still
 			// cold cost (measured 2026-09-23: the 3-card seat read `ready`
@@ -1249,6 +1269,11 @@ func (p *Pipeline) RunAgentContract(ctx context.Context, contract core.AgentCont
 	}
 	if opts.Placed != nil {
 		params["placed"] = opts.Placed
+	}
+	if opts.ParentJobID != "" {
+		// The delegator's own row is this job's record; ours is an inner row
+		// of it (C-62), never a second job.
+		params["parent_job_id"] = opts.ParentJobID
 	}
 	res := p.Run(ctx, core.Request{
 		Task:   core.TaskAgentRun,

@@ -39,7 +39,7 @@ func DefaultDeps() Deps {
 		RemoveAll:              os.RemoveAll,
 		Exists:                 fileExists,
 		MkdirAll:               func(path string) error { return os.MkdirAll(path, 0o755) },
-		RunCommand:             runPowerShell,
+		RunCommand:             runPlatformCommand,
 		ExtractTarGz:           extractTarGz,
 		Sleep:                  time.Sleep,
 		Now:                    time.Now,

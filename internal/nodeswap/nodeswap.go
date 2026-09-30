@@ -184,7 +184,14 @@ type Deps struct {
 	ReadHealth         func(ctx context.Context, url string) (HealthInfo, error)
 	InspectGPULease    func(lockPath, stateDir string) (GPULeaseInfo, error)
 	FindProcessesByExe func(exePath string) ([]ProcessInfo, error)
-	StopProcess        func(pid int) error
+	// FindRunningByExe is the post-restart VERIFICATION finder: the processes
+	// running exePath right now. It is separate from FindProcessesByExe
+	// because the two answer different questions off Windows — a Linux swap
+	// needs no holders stopped (FindProcessesByExe stays empty there), but its
+	// verification must still find the restarted node (a /proc scan). nil =
+	// use FindProcessesByExe (every Windows run and every fake-Deps test).
+	FindRunningByExe func(exePath string) ([]ProcessInfo, error)
+	StopProcess      func(pid int) error
 	RenameFile         func(oldPath, newPath string) error
 	RemoveAll          func(path string) error
 	Exists             func(path string) bool
@@ -776,9 +783,13 @@ func verifyRunning(ctx context.Context, plan Plan, deps Deps, expectedHash strin
 	}
 	deadline := deps.Now().Add(timeout)
 	match := procMatch(plan)
+	find := deps.FindRunningByExe
+	if find == nil {
+		find = deps.FindProcessesByExe
+	}
 	var lastErr error
 	for {
-		procs, perr := deps.FindProcessesByExe(plan.Target)
+		procs, perr := find(plan.Target)
 		if perr != nil {
 			lastErr = perr
 		}

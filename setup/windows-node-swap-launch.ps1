@@ -194,7 +194,19 @@ function Resolve-RunnerExe {
 # --staged/--target either way (Plan validation is the FIRST thing
 # node-swap's own Run() does, before any file is read), so this is safe to
 # run against any exe.
+#
+# Windows PowerShell 5.1 (the powershell.exe every node's SSH lands in) turns
+# each STDERR line of a redirected native command into an ErrorRecord, and
+# under the script-wide $ErrorActionPreference = 'Stop' the first one —
+# node-swap's own "--staged is required" usage line, the very answer that
+# PROVES support — became a terminating error, the catch below, and "does not
+# support node-swap": the 2026-09-29 blackwell-8 node's parity deploy silently ran the
+# OLD installed engine as its runner. PowerShell 7 does not do this. Native
+# stderr is data here, never an error, so this function runs under
+# 'Continue' (a function-local assignment: the caller's preference is
+# untouched); a launch failure still throws and is still caught.
 function Test-NodeSwapSupport([string]$path) {
+  $ErrorActionPreference = 'Continue'
   try {
     & $path node-swap *> $null
   } catch {
@@ -359,6 +371,20 @@ public static class NodeSwapArgvTest {
 
     if (Test-NodeSwapSupport $exitCrash) { Write-Host 'FAIL Test-NodeSwapSupport: a crash exit code is NOT supported: returned true'; $fail++ }
     else { Write-Host 'PASS Test-NodeSwapSupport: a crash exit code is NOT supported' }
+
+    # The REAL answer of a supporting build: its usage error on STDERR, exit 1.
+    # Windows PowerShell 5.1 under $ErrorActionPreference = 'Stop' used to turn
+    # that stderr line into a terminating error and read the build as
+    # unsupported (the 2026-09-29 blackwell-8 node's deploy ran the old engine). Run the
+    # self-test under powershell.exe AND pwsh: both must pass.
+    $stderr1 = Join-Path $fakeBinDir 'stderr1.cmd'
+    Set-Content -Path $stderr1 -Value "@echo off`r`necho error: --staged is required 1>&2`r`nexit /b 1" -Encoding ASCII
+    $savedEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Stop'
+    try {
+      if (Test-NodeSwapSupport $stderr1) { Write-Host 'PASS Test-NodeSwapSupport: a usage error on stderr + exit 1 is supported (under Stop)' }
+      else { Write-Host 'FAIL Test-NodeSwapSupport: a usage error on stderr + exit 1 is supported (under Stop): returned false'; $fail++ }
+    } finally { $ErrorActionPreference = $savedEap }
 
     # A plain text file renamed .exe is not a valid Win32 executable at all -
     # CreateProcess itself fails, so this never even reaches the point of
