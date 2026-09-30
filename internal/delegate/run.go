@@ -1503,8 +1503,9 @@ type placements struct {
 // already stands, exactly as exhausted() leaves it.
 func (r *runner) settle(contract core.AgentContract, pr PlacedResult, pl *placements, since time.Time) PlacedResult {
 	// A capacity wait (or a lease wait) that ended because the CALL did is the call
-	// deadline, not "no node had room" (ADR 0065).
-	pr = r.cutByDeadline(pr)
+	// deadline, not "no node had room" (ADR 0065). It quotes nothing of the wait's own
+	// text: the placement narration carries that history.
+	pr = r.cutOutcome(pr, false)
 	if pl.attempts > 0 {
 		return pr
 	}

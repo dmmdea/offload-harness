@@ -35,6 +35,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/pairworkloads"
@@ -129,16 +130,28 @@ func (c *callDeadline) reason(where string) string {
 	return fmt.Sprintf("%s; %d unfinished — this subtask %s", callDeadlinePrefix, c.unfinished(), where)
 }
 
-// wire is the AgentWireResult of a subtask the deadline cut off: a budget defer
-// (a ceiling stopped it, and the caller's next move is a smaller call or another
-// one), never an infrastructure or config class — nothing about the stack broke.
+// wire is the AgentWireResult of a subtask nobody ran (or that left nothing to
+// keep): a budget defer (a ceiling stopped it, and the caller's next move is a
+// smaller call or another one). The deadline never publishes an infrastructure or
+// config class of its own — it says WHEN the call ran out, not that a box broke; a
+// run's own verdict rides in the reason (ownVerdict), never in the class.
 func (c *callDeadline) wire(where string) core.AgentWireResult {
-	return core.AgentWireResult{
-		SchemaVersion: core.AgentWireSchemaVersion,
-		Deferred:      true,
-		DeferClass:    core.DeferClassBudget,
-		Reason:        c.reason(where),
-	}
+	return c.stamp(core.AgentWireResult{}, where)
+}
+
+// stamp turns the wire a run produced into the call-deadline defer WITHOUT
+// discarding what the run measured. The deadline decides what the outcome is
+// CALLED (a budget defer whose reason opens "call deadline reached"), never what
+// was observed: a local run the deadline cancels after nine steps and thousands of
+// generated tokens still reports them, on the published result, the ledger row and
+// the corpus row. Those are the longest runs — the ones the deadline exists to cut
+// and the ones the wall sizing and the rigger most need measured.
+func (c *callDeadline) stamp(w core.AgentWireResult, where string) core.AgentWireResult {
+	w.SchemaVersion = core.AgentWireSchemaVersion
+	w.Deferred = true
+	w.DeferClass = core.DeferClassBudget
+	w.Reason = c.reason(where)
+	return w
 }
 
 // await is RunWith's wait for its subtask goroutines. With no deadline it is
@@ -225,13 +238,38 @@ func (b *resultBoard) close() ([]PlacedResult, []bool) {
 // once the deadline had passed (a cancelled poll, a cancelled local run, a capacity
 // wait that ran out of call). A result that finished — including one that failed
 // its acceptance checks — is a real answer and is never rewritten.
+//
+// The cut keeps the run's own wire (steps, tokens, stop reason, seat rate, trace)
+// and says what the outcome itself reported beyond the cancellation the deadline
+// caused (ownVerdict), so a stack failure that lands inside the unwind is not
+// erased: its class and words ride in the reason. Which outcomes are "produced
+// after the deadline" is decided by the clock (reached), not by the context's
+// cause: ErrCallDeadline is the cause a subtask's context carries so an error that
+// wraps it names the deadline, but an outcome's own text is the only evidence of
+// what caused it, and every place that ends because a context ended words that
+// differently. The one hard line — a real answer is never rewritten — needs no
+// cause at all.
 func (r *runner) cutByDeadline(pr PlacedResult) PlacedResult {
+	return r.cutOutcome(pr, true)
+}
+
+// cutOutcome is cutByDeadline with the quoting switchable. settle cuts the outcomes
+// of a WAIT (a capacity wait that ran out of call, a lease wait, a shed): their own
+// text describes the wait ("no node had room within 30s"), which after the deadline
+// would read as the outcome when the call simply ran out of time. The placement
+// narration keeps that history (behind the deadline marker), so they quote nothing.
+func (r *runner) cutOutcome(pr PlacedResult, quote bool) PlacedResult {
 	if !r.call.reached() || pr.deadlineCut || pr.waitCapacity {
 		return pr
 	}
 	if pr.Err == "" && !pr.Result.Deferred {
 		return pr
 	}
+	own := ""
+	if quote {
+		own = ownVerdict(pr)
+	}
+	wire := pr.Result
 	var where string
 	switch {
 	case pr.intentRecorded:
@@ -246,13 +284,21 @@ func (r *runner) cutByDeadline(pr PlacedResult) PlacedResult {
 		// set this too; setting it here makes it hold for every exit).
 		pr.orphanable = true
 	case pr.ranLocal:
-		where = "was still running on the local seat when the call's deadline passed; it was cancelled"
+		where = "was still running on the local seat when the call's deadline passed"
+		if own == "" {
+			// Only an outcome that echoed the cancellation says the run was cancelled;
+			// one that failed or deferred on its own is not authored a cancel the code
+			// never observed.
+			where += "; it was cancelled"
+		}
 	default:
 		where = "had not been placed on a seat when the call's deadline passed"
 		pr.Unplaced = true
 		// No node ran it, so it names none (exhausted() does the same for "no node
-		// took it"): a capacity defer's own Node and Seat are the DECIDING box.
+		// took it"): a capacity defer's own Node and Seat are the DECIDING box, on
+		// the result and on the wire it carries.
 		pr.Node, pr.Seat = "", ""
+		wire.NodeID, wire.Seat, wire.Placed = "", "", nil
 		// PlacementReason narrates how the placement went. A capacity wait's own
 		// text ("no node had room within 30s") would now read as the OUTCOME, when
 		// the call simply ran out of time: the marker leads, the history follows.
@@ -262,12 +308,88 @@ func (r *runner) cutByDeadline(pr PlacedResult) PlacedResult {
 			pr.PlacementReason = callDeadlinePrefix + " before a seat took it"
 		}
 	}
-	pr.Result = r.call.wire(where)
+	if own != "" {
+		where += "; the run itself " + own
+	}
+	pr.Result = r.call.stamp(wire, where)
 	pr.Err = ""
 	pr.AcceptanceFailures = nil
 	pr.refused, pr.refusalStatus = false, 0
 	pr.deadlineCut = true
 	return pr
+}
+
+// verdictMax bounds what a cut quotes of the outcome it replaced: a poll-deadline
+// or refusal-chain reason can run to a paragraph, and the published reason has to
+// stay one readable sentence.
+const verdictMax = 240
+
+// echoesOfTheCancel are the words an outcome carries when the only thing it says is
+// that a context ended — the deadline's own doing, so a cut does not quote them
+// back.
+var echoesOfTheCancel = []string{
+	"context canceled", "context deadline exceeded", callDeadlinePrefix,
+	"agent loop: canceled (the parent context ended",
+	"(the caller's deadline, not this node's ceiling)",
+}
+
+// ownVerdict is what an outcome said for itself before the deadline stamped it:
+// "" when it said nothing beyond the cancellation. The result of a subtask that
+// failed or deferred for its own reasons a moment after the deadline must keep them
+// (an engine that refused the connection is not "a subtask that ran out of time"),
+// so they ride in the published reason and in the ledger and corpus rows that carry
+// it: "reported <class>: <reason>" for a defer, "failed: <error>" for a failure.
+//
+// A cancelled poll's own opening clause ("canceled: context deadline exceeded") is
+// the deadline speaking and is dropped; anything a give-up appended after it (a
+// withdraw that was asked and not confirmed) is kept.
+func ownVerdict(pr PlacedResult) string {
+	switch {
+	case pr.Err != "":
+		text := pr.Err
+		if strings.HasPrefix(text, "canceled:") {
+			text = ""
+			if i := strings.Index(pr.Err, "; "); i >= 0 {
+				text = strings.TrimSpace(pr.Err[i+2:])
+			}
+		}
+		if text == "" || echoesTheCancel(text) {
+			return ""
+		}
+		return "failed: " + deadlineClip(text, verdictMax)
+	case pr.Result.Deferred:
+		text := pr.Result.Reason
+		if text == "" || echoesTheCancel(text) {
+			return ""
+		}
+		class := pr.Result.DeferClass
+		if class == "" {
+			class = "defer"
+		}
+		return "reported " + class + ": " + deadlineClip(text, verdictMax)
+	}
+	return ""
+}
+
+func echoesTheCancel(text string) bool {
+	for _, e := range echoesOfTheCancel {
+		if strings.Contains(text, e) {
+			return true
+		}
+	}
+	return false
+}
+
+// deadlineClip cuts s to at most n bytes on a rune boundary, marking the cut.
+func deadlineClip(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	cut := s[:n]
+	for len(cut) > 0 && !utf8.ValidString(cut) {
+		cut = cut[:len(cut)-1]
+	}
+	return cut + "…"
 }
 
 // deadlineWithdrawTimeout bounds the one best-effort withdraw sent for a job the
