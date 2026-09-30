@@ -125,3 +125,74 @@ func TestQueueRefreshIsTriedAgainAfterAFailure(t *testing.T) {
 		t.Fatalf("summary = %+v err = %q, want the second refresh to extend the wait so the job is waited for", sum, results[0].Err)
 	}
 }
+
+// TestQueueBudgetRisesWhenTheNodePublishesALargerWall: the queue budget is capped by the caller's
+// patience (the poll budget), and an auto contract's poll budget is re-based on the wall the node
+// publishes - lowered when the wall is first seen, RAISED when a later one is larger. A raised
+// patience must lift the queue budget with it, or a job the node's own ETA says needs longer is
+// abandoned at the old cap. Compressed clock (5 ms per "second"): the node advertises a fast seat,
+// so the first patience is (300 + 300 admission) "s" = 3.02 s and the ETA-derived budget (915 "s")
+// is capped there; the node then publishes a 300 "s" wall (patience 1.52 s), then a 900 "s" one
+// (patience 4.52 s, budget 4.52 s), and starts the job at 3.7 s - past the first cap, inside the raised one.
+func TestQueueBudgetRisesWhenTheNodePublishesALargerWall(t *testing.T) {
+	compressPolls(t, 10*time.Millisecond, 20*time.Millisecond)
+	compressWallUnit(t, 5*time.Millisecond)
+	est := 590.0
+	begin := time.Now()
+	node := &fakeNode{
+		t: t, agentEnabled: true, resident: true, ctxTokens: 8192, nodeID: "fake-node",
+		seatRate:          map[string]any{"tok_s": 200.0, "cold_load_sec": 1.0, "samples": 6, "min_turn_sec": 22},
+		seatBudget:        map[string]any{"step_tokens": 1024, "final_tokens": 4096, "thinking": "auto"},
+		queueWaitEstimate: &est,
+		pollState: func(n int64) (map[string]any, int) {
+			switch {
+			case n == 1:
+				return map[string]any{"state": "accepted", "wall_sec": 300}, http.StatusOK
+			case time.Since(begin) < 3700*time.Millisecond:
+				return map[string]any{"state": "accepted", "wall_sec": 900}, http.StatusOK
+			}
+			return doneWire(t, remoteWire("the answer", `{"answer":"the answer"}`)), http.StatusOK
+		},
+	}
+	srv := node.server()
+	c := autoContract()
+	c.Acceptance = []string{"nonempty:answer"} // any answer passes: this test is about how long the job is waited for
+	results, sum, err := Run(t.Context(), testCfg(t), neverLocal(t), []core.AgentContract{c}, "remote", []string{srv.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum.Succeeded != 1 {
+		t.Fatalf("summary = %+v err = %q, want the job waited for: the node published a 900 s wall, which raised the patience and the queue budget with it", sum, results[0].Err)
+	}
+}
+
+// TestQueueBudgetStaysDerivedFromTheETAWhenTheWallRises: the other half. A node that says a job starts
+// now earns the 60 "s" floor (300 ms here), and a wall it later publishes raises the caller's patience -
+// not the budget: the ETA still says the job should have started, and a job still queued a second later
+// is abandoned at the floor, not held until the raised patience.
+func TestQueueBudgetStaysDerivedFromTheETAWhenTheWallRises(t *testing.T) {
+	compressPolls(t, 10*time.Millisecond, 20*time.Millisecond)
+	compressWallUnit(t, 5*time.Millisecond)
+	est := 0.0
+	node := &fakeNode{
+		t: t, agentEnabled: true, resident: true, ctxTokens: 8192, nodeID: "fake-node",
+		seatRate:          map[string]any{"tok_s": 200.0, "cold_load_sec": 1.0, "samples": 6, "min_turn_sec": 22},
+		seatBudget:        map[string]any{"step_tokens": 1024, "final_tokens": 4096, "thinking": "auto"},
+		queueWaitEstimate: &est,
+		pollState: func(n int64) (map[string]any, int) {
+			wall := 300
+			if n > 1 {
+				wall = 900
+			}
+			return map[string]any{"state": "accepted", "wall_sec": wall}, http.StatusOK
+		},
+	}
+	srv := node.server()
+	results, sum, err := Run(t.Context(), testCfg(t), neverLocal(t), []core.AgentContract{autoContract()}, "remote", []string{srv.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum.Failed != 1 || !strings.HasPrefix(results[0].Err, "queue deadline after 300ms") {
+		t.Fatalf("summary = %+v err = %q, want the queue deadline at the 300 ms floor the node's own ETA earned, whatever wall it published", sum, results[0].Err)
+	}
+}
