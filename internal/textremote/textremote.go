@@ -196,7 +196,80 @@ func Call(ctx context.Context, cfg config.Config, req core.Request) (core.Result
 	if res.Meta.LatencyMs == 0 {
 		res.Meta.LatencyMs = time.Since(start).Milliseconds()
 	}
+	if bad := checkNodeResult(req, res); bad != "" {
+		// The node's own pipeline validated this answer, but the delegator does not take a remote
+		// answer on trust: one that fails the cheap shape check below is a defer naming the node
+		// and the reason, never an accepted result.
+		d := core.Deferf(fmt.Sprintf("node %s returned an answer that fails the delegator's check: %s", node, bad),
+			string(res.Data), res.Meta)
+		d.DeferClass = core.DeferClassInfrastructure
+		return d, nil
+	}
 	return res, nil
+}
+
+// checkNodeResult is the delegator's cheap post-check of an OK result from a node, and "" when it
+// holds. Classify: a JSON object whose label is one of the request's labels and whose confidence is
+// a number in 0..1. Extract: one JSON object whose keys all lie within the requested schema's
+// properties (a schema naming no properties constrains no key). A deferred or not-OK result is the
+// node's own refusal and passes through.
+func checkNodeResult(req core.Request, res core.Result) string {
+	if !res.OK || res.Deferred {
+		return ""
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(res.Data, &obj); err != nil || obj == nil {
+		return "data is not one JSON object"
+	}
+	switch req.Task {
+	case core.TaskClassify:
+		var label string
+		if raw, ok := obj["label"]; !ok || json.Unmarshal(raw, &label) != nil {
+			return "no string label"
+		}
+		if !stringIn(label, req.Params["labels"]) {
+			return fmt.Sprintf("label %q is not in the requested set", label)
+		}
+		var conf float64
+		if raw, ok := obj["confidence"]; !ok || json.Unmarshal(raw, &conf) != nil {
+			return "no numeric confidence"
+		}
+		if !(conf >= 0 && conf <= 1) {
+			return fmt.Sprintf("confidence %v is outside 0..1", conf)
+		}
+	case core.TaskExtract:
+		schema, _ := req.Params["schema"].(map[string]any)
+		props, _ := schema["properties"].(map[string]any)
+		if len(props) == 0 {
+			return ""
+		}
+		for k := range obj {
+			if _, ok := props[k]; !ok {
+				return fmt.Sprintf("key %q is not in the requested schema", k)
+			}
+		}
+	}
+	return ""
+}
+
+// stringIn reports whether s is one of the labels, which arrive as []string from a local caller
+// and []any from a decoded one.
+func stringIn(s string, labels any) bool {
+	switch l := labels.(type) {
+	case []string:
+		for _, v := range l {
+			if v == s {
+				return true
+			}
+		}
+	case []any:
+		for _, v := range l {
+			if vs, ok := v.(string); ok && vs == s {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // pickNode probes delegate_remotes and hands the views to delegate.PlaceText. Every miss is named

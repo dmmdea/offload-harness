@@ -414,3 +414,79 @@ func TestUnconstrainedReasoningAttemptSendsNoGrammarAndValidates(t *testing.T) {
 		assertNoConstraintOnTheWire(t, f)
 	}
 }
+
+// An unconstrained seat accepts one object and only one: a top-level array, a second object and a
+// repeated key are each refused (a correction retry, then a defer), and the retry that answers with
+// one clean object is accepted.
+func TestUnconstrainedSeatRefusesAmbiguousReplies(t *testing.T) {
+	const good = `{"label":"billing","confidence":0.95}`
+	for name, bad := range map[string]string{
+		"array":         `[{"label":"support","confidence":0.9},{"label":"billing","confidence":0.1}]`,
+		"two objects":   `{"label":"support","confidence":0.9} {"label":"billing","confidence":0.1}`,
+		"duplicate key": `{"label":"support","label":"billing","confidence":0.95}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := &npuFake{replies: []string{bad, good}}
+			res := npuPipeline(t, f.server(t).URL, 1, true).Run(context.Background(), npuClassify())
+			if !res.OK || res.Meta.Retries != 1 || f.requests() != 2 {
+				t.Fatalf("want the retry's clean object accepted after one refusal, got ok=%v retries=%d requests=%d reason=%q",
+					res.OK, res.Meta.Retries, f.requests(), res.Reason)
+			}
+			if !strings.Contains(string(res.Data), `"billing"`) {
+				t.Errorf("accepted the refused reply's data: %s", res.Data)
+			}
+			g := &npuFake{replies: []string{bad}}
+			res = npuPipeline(t, g.server(t).URL, 1, true).Run(context.Background(), npuClassify())
+			if res.OK || !strings.Contains(res.Reason, "exactly one JSON object") {
+				t.Errorf("a persistent ambiguous reply must defer naming the reason, got ok=%v reason=%q", res.OK, res.Reason)
+			}
+		})
+	}
+	// The valid forms stay accepted: a plain object and a fenced one.
+	for name, ok := range map[string]string{"plain": good, "fenced": "```json\n" + good + "\n```"} {
+		f := &npuFake{replies: []string{ok}}
+		if res := npuPipeline(t, f.server(t).URL, 0, true).Run(context.Background(), npuClassify()); !res.OK {
+			t.Errorf("%s: a single object must be accepted, got %q", name, res.Reason)
+		}
+	}
+}
+
+// A self-reported confidence outside 0..1 is not a probability: 7 would clear the accept threshold.
+func TestUnconstrainedClassifyRefusesOutOfRangeConfidence(t *testing.T) {
+	for _, bad := range []string{`{"label":"billing","confidence":7}`, `{"label":"billing","confidence":-5}`, `{"label":"billing","confidence":1.0001}`} {
+		f := &npuFake{replies: []string{bad}}
+		res := npuPipeline(t, f.server(t).URL, 0, true).Run(context.Background(), npuClassify())
+		if res.OK {
+			t.Errorf("%s was accepted", bad)
+		}
+	}
+	f := &npuFake{replies: []string{`{"label":"billing","confidence":0.93}`}}
+	if res := npuPipeline(t, f.server(t).URL, 0, true).Run(context.Background(), npuClassify()); !res.OK {
+		t.Errorf("0.93 must be accepted, got %q", res.Reason)
+	}
+}
+
+// A model declared in BOTH vllm_seats and unconstrained_seats is unconstrained: no json_schema,
+// no structured_outputs, no grammar reach the seat, and the prompt-carried shape does.
+func TestUnconstrainedWinsOverVLLMSeatDeclaration(t *testing.T) {
+	f := &npuFake{replies: []string{`{"label":"billing","confidence":0.95}`}}
+	p := npuPipeline(t, f.server(t).URL, 0, true)
+	p.cfg.VLLMSeats = []string{npuSeat}
+	if !p.isVLLMSeat(context.Background(), npuSeat) {
+		t.Fatal("precondition: the seat must read as a vLLM seat")
+	}
+	res := p.Run(context.Background(), npuClassify())
+	if !res.OK {
+		t.Fatalf("deferred: %s", res.Reason)
+	}
+	assertNoConstraintOnTheWire(t, f)
+	if f.refused != 0 {
+		t.Errorf("%d constrained bodies reached the seat", f.refused)
+	}
+	f.mu.Lock()
+	msgs, _ := json.Marshal(f.bodies[0]["messages"])
+	f.mu.Unlock()
+	if !strings.Contains(string(msgs), "OUTPUT FORMAT") {
+		t.Errorf("the unconstrained path did not run: %s", msgs)
+	}
+}

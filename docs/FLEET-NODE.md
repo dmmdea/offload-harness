@@ -1101,7 +1101,11 @@ lease is held and otherwise, or with no eligible node, stays local; `remote` for
 returns `deferred: true` with `defer_class: capacity` (or `config` with no `delegate_remotes`). Eligibility
 (`delegate.PlaceText`) is stricter than vision's: the node's health must list `text` AND the task in `text_tasks`, so an
 older node and a node whose tier declares nothing are never picked, and its card must not be leased. `meta.node` /
-`meta.placement` on the result say where it ran. Budget 300 s, vision's.
+`meta.placement` on the result say where it ran. Budget 300 s, vision's. The delegator post-checks a node's OK result
+(classify: a label in the request's set and a confidence in 0..1; extract: one object whose keys are all in the requested
+schema) and turns a failure into a deferred result naming the node and the reason. A node declares a text task
+meaningfully only when its cascade for that task (`model`, `triage_model`, per-task rungs) routes to the unconstrained
+seat; measure through that same path.
 
 ## Known limits (v1)
 

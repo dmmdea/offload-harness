@@ -35,10 +35,17 @@ labels of an enum, "no other key", and one compact example (`tasks.Built.ForUnco
 injected exemplars and the packed input are untouched, and `tasks.Build` itself is unchanged, so every seat that takes a
 grammar keeps a byte-identical prompt, prompt-prefix fingerprint and cache key (a golden digest test pins it).
 
-**2. The reply is parsed leniently and accepted strictly.** `parser.Extract` already strips code fences and leading prose
-to the first JSON object. What it returns is then validated against the schema derived from the task's own fields
-(`gbnf.JSONSchema`: every key required, the declared types, a classify label inside the allowed set,
-`additionalProperties: false`), on top of extract's caller schema. `{"foo":1}`, `{"summary":"x"}`, a label outside the
+**2. The reply is parsed with tolerance for wrapping and accepted only as exactly one object, strictly.** On an
+unconstrained seat only, `parser.ExtractOne` (grammar seats keep `parser.Extract` byte for byte) strips one code fence and
+leading prose, then requires ONE top-level JSON object: a top-level array (even of one object) is refused, so is any `{`
+or `[` after the first object's closing brace (a second value), and so is a repeated key at any depth
+(`encoding/json` would silently keep the last). Trailing prose that holds neither (and whatever follows a closing code
+fence) is still accepted. A refusal is a parse failure, so it takes the correction retry below. What it returns is then
+validated against the schema derived from the task's own fields (`gbnf.JSONSchema`: every key required, the declared
+types, a classify label inside the allowed set, `additionalProperties: false`), on top of extract's caller schema. On
+these seats classify's `confidence` is also bounded to 0..1 in that strict schema (`minimum 0`, `maximum 1`; the grammar's
+number rule is unbounded, and a 7 would clear the accept threshold); the prompt's example value stays 0.5, below the
+default accept threshold (0.88), so echoing the example defers instead of passing as confident. `{"foo":1}`, `{"summary":"x"}`, a label outside the
 set and an object with an extra key are refused. A failure takes the existing correction-retry path (the retry counts in
 `meta.retries`), and then defers with the validator's own words naming what failed. Grounding still applies to extract,
 and classify's self-reported confidence gate is unchanged. The decision-margin gate needs logprobs and is inert on these
@@ -58,7 +65,10 @@ as `text_tasks`, and a node advertises `text` in `supported_task_types` and `tex
 non-empty and the listener is safely reachable. The node refuses a task outside `text_tasks` at ack time with a `400`
 naming the set. **No shipped tier declares a text task.** A later, data-only change adds `classify` and `extract` to the
 seat's `tasks` once at least 30 cases per lane through the node's own pipeline score at least 90 % correct with zero
-off-schema outputs accepted.
+off-schema outputs accepted. Declaring a text task is meaningful only if the node's cascade for that task
+(`model`, `triage_model` and any per-task rung) actually routes to the unconstrained seat, and the measurement must be
+taken through that same path: a node whose cascade answers classify on another seat would advertise a lane its NPU never
+serves.
 
 **5. The delegator door is opt-in and changes nothing by default.** `offload_classify` and `offload_extract` gain `route`
 (`local`, `auto`, `remote`; `internal/textremote`, the vision route's shape). `local`, the default, is byte-identical to
@@ -66,7 +76,10 @@ before. `auto` leaves the box only while the machine-wide GPU lease is held, so 
 a node is never a downgrade by default; with no eligible node it stays local. `remote` forces a node and defers
 (`capacity`, or `config` with no `delegate_remotes`) when none is eligible. A node is eligible only when its health lists
 `text` and the task in `text_tasks` (`delegate.PlaceText`); unlike the vision lane an absent list is "none", so every
-node that predates the lane is never picked. Adding `route` changed `tools/list` on every box.
+node that predates the lane is never picked. Adding `route` changed `tools/list` on every box. The delegator does not take a node's answer on trust: an OK result is
+post-checked (`textremote.checkNodeResult`) and a failure becomes a deferred result naming the node and the reason (defer
+class `infrastructure`), never an accepted answer. Classify: one object, a label inside the request's label set, a numeric
+confidence in 0..1. Extract: one object whose keys all lie within the requested schema's properties.
 
 ## Consequences
 

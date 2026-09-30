@@ -46,7 +46,29 @@ func (b Built) ForUnconstrained() Built {
 	b.Grammar = ""
 	b.System = strings.TrimRight(b.System, " \n") + "\n\n" + ShapeInstruction(b.Fields)
 	b.Strict = gbnf.JSONSchema(b.Fields)
+	boundConfidence(b.Strict, b.Fields)
 	return b
+}
+
+// boundConfidence makes a self-reported confidence a probability in the Strict schema: minimum 0,
+// maximum 1. The grammar's number rule is unbounded, and a grammar seat's classify gate only tests
+// "below the minimum", so a 7 would pass there too; but a grammar seat is left byte-identical, and
+// on an unconstrained seat nothing else stands between a model's "confidence":7 and the gate that
+// accepts on a high confidence. Only the Strict schema changes (gbnf.JSONSchema, which a vLLM seat
+// sends as its constraint, is untouched). The prompt's example value stays 0.5: it is below the
+// default accept threshold (classify_min_confidence 0.88), so a model that merely echoes the example
+// defers instead of being accepted as confident.
+func boundConfidence(schema map[string]any, fields []gbnf.Field) {
+	props, _ := schema["properties"].(map[string]any)
+	for _, f := range fields {
+		if f.Name != "confidence" || f.Type != gbnf.TNumber {
+			continue
+		}
+		if p, ok := props[f.Name].(map[string]any); ok {
+			p["minimum"] = float64(0)
+			p["maximum"] = float64(1)
+		}
+	}
 }
 
 // ShapeInstruction states the exact JSON object a grammar would have forced: the keys in order,

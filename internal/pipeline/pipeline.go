@@ -4134,7 +4134,7 @@ func (p *Pipeline) attempt(ctx context.Context, req core.Request, built tasks.Bu
 		meta.TokPerSec = gen.TokPerSec
 		meta.Truncated = gen.Truncated
 
-		data, perr := parser.Extract(gen.Content)
+		data, perr := extractReply(gen.Content, unconstrained)
 		v := verifier.Check(gen.Content, gen.Truncated, perr)
 		if v.OK {
 			if verr := validateReply(data, built); verr != nil {
@@ -4305,7 +4305,7 @@ func (p *Pipeline) attemptReasoningOn(ctx context.Context, model string, req cor
 	meta.TokPerSec = gen.TokPerSec
 	meta.Truncated = gen.Truncated
 
-	data, perr := parser.Extract(content)
+	data, perr := extractReply(content, unconstrained)
 	v := verifier.Check(content, gen.Truncated, perr)
 	if v.OK {
 		if verr := validateReply(data, built); verr != nil {

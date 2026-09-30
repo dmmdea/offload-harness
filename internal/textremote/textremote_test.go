@@ -170,6 +170,7 @@ func TestRemoteShipsTheTextAndReturnsTheNodesResult(t *testing.T) {
 		t.Fatalf("job_id = %q, want a text- id", id)
 	}
 
+	node.result = core.Result{OK: true, Data: json.RawMessage(`{"name":"Ada Lovelace"}`)}
 	res = Run(context.Background(), cfg, local, extractReq(), "remote")
 	if !res.OK {
 		t.Fatalf("extract: %+v", res)
@@ -374,5 +375,45 @@ func TestUnrecognizedRouteIsAContractDefer(t *testing.T) {
 	res := Run(context.Background(), config.Default(), local, classifyReq(), "cloud")
 	if !res.Deferred || res.DeferClass != core.DeferClassContract || local.count() != 0 {
 		t.Fatalf("result = %+v (local ran %d), want a contract defer and no run", res, local.count())
+	}
+}
+
+// The delegator does not take a node's OK result on trust: an answer outside the request's label
+// set or 0..1 confidence, or an extract with a key outside the schema (or not one object), becomes
+// a defer naming the node and the reason; a conforming answer, and a node's own defer, pass.
+func TestNodeResultPostCheck(t *testing.T) {
+	setBusy(t, false)
+	ok := func(data string) core.Result { return core.Result{OK: true, Data: json.RawMessage(data)} }
+	cases := []struct {
+		name   string
+		req    core.Request
+		res    core.Result
+		reason string // "" = accepted as is
+	}{
+		{"classify ok", classifyReq(), ok(`{"label":"billing","confidence":0.93}`), ""},
+		{"classify label outside the set", classifyReq(), ok(`{"label":"refund","confidence":0.93}`), `label "refund"`},
+		{"classify confidence 7", classifyReq(), ok(`{"label":"billing","confidence":7}`), "outside 0..1"},
+		{"classify confidence -1", classifyReq(), ok(`{"label":"billing","confidence":-1}`), "outside 0..1"},
+		{"classify no confidence", classifyReq(), ok(`{"label":"billing"}`), "no numeric confidence"},
+		{"classify array", classifyReq(), ok(`[{"label":"billing","confidence":0.9}]`), "not one JSON object"},
+		{"extract ok", extractReq(), ok(`{"name":"Ada Lovelace"}`), ""},
+		{"extract key outside the schema", extractReq(), ok(`{"name":"Ada","age":36}`), `key "age"`},
+		{"extract array", extractReq(), ok(`[{"name":"Ada"}]`), "not one JSON object"},
+		{"a node's own defer passes through", classifyReq(), core.Deferf("seat down", "", core.Meta{}), ""},
+	}
+	for _, tc := range cases {
+		node := newFakeNode(t, "rk-node", []string{"text"}, []string{"classify", "extract"}, tc.res)
+		cfg := config.Default()
+		cfg.DelegateRemotes = []string{node.srv.URL}
+		res := Run(context.Background(), cfg, &localRunner{}, tc.req, "remote")
+		if tc.reason == "" {
+			if res.OK != tc.res.OK || res.Reason != tc.res.Reason {
+				t.Errorf("%s: want the node's result unchanged, got %+v", tc.name, res)
+			}
+			continue
+		}
+		if res.OK || !res.Deferred || !strings.Contains(res.Reason, "rk-node") || !strings.Contains(res.Reason, tc.reason) {
+			t.Errorf("%s: want a defer naming the node and %q, got ok=%v deferred=%v reason=%q", tc.name, tc.reason, res.OK, res.Deferred, res.Reason)
+		}
 	}
 }
