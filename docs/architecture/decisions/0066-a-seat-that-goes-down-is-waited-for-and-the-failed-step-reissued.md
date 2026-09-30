@@ -97,10 +97,13 @@ against a real 178-271 s), and several runs waiting on one load each appended it
    wall, because that time was not work. Two gates that guard a
    *verification* retry do not apply to it: the first-pass floor is not raised by the
    dead seat's own `min_turn_sec` (the retry goes elsewhere, and the retry seat's own
-   floor still applies once it is chosen), and the retry is not refused because the
-   alternative node is busy. D-46's case is a retry that joins a generating seat on the
-   budget that was left; a seat-down defer produced nothing, carries credited budget, and
-   busy is a place in line, never a refusal (INV-4) — the node's own queue is the line.
+   floor still applies once it is chosen), and the retry is neither held nor refused
+   because the alternative node is busy (a verification retry waits for a busy seat, a
+   bounded and credited wait, ADR 0063 decision 10; this one does not). D-46's case is a
+   retry that joins a generating seat on the budget that was left; a seat-down defer
+   produced nothing, carries credited budget, and busy is a place in line, never a
+   refusal (INV-4) — the node's own queue is the line, and its 503 is re-placed at once
+   (ADR 0063 decision 1).
    A seat-down defer that has nowhere to go (route local, or no untried eligible node)
    says so in `retry_note`. The loop's recovery does not
    cover the structured re-pack (its request is not a step, and the finished answer is
@@ -198,7 +201,7 @@ against a real 178-271 s), and several runs waiting on one load each appended it
   orphaned workers hold the port (its crash cleanup shipped separately, register C-72;
   deploying it is the operator's), a seat-down recovery in the MCP `agent_run` door
   (it builds no liveness monitor), and placement and admission (re-placement after a 503,
-  dealing by capacity).
+  dealing by capacity: [ADR 0063](0063-placement-holds-instead-of-sleeping-or-refusing.md)).
 
 ## Alternatives considered
 
@@ -234,6 +237,8 @@ against a real 178-271 s), and several runs waiting on one load each appended it
 ## Related
 
 ADR 0061 (the busy hold this builds on), ADR 0055 (walls are ceilings, liveness is
-progress), ADR 0032 (a peer-held seat is waited for), decision D-118 (the coherence
+progress), ADR 0032 (a peer-held seat is waited for), ADR 0063 (placement holds: the
+503 a re-placement may meet returns at once, and a verification retry waits for a busy
+seat, which a seat-down re-placement does not), decision D-118 (the coherence
 defer this follows), register rows C-72 (seat-down outcome), C-66 (liveness walls
 charge queueing to prefill).
