@@ -156,6 +156,7 @@ func runInstallSeed(args []string) error {
 	// values to both commands, or the config will name a model llama-swap never serves.
 	vllmVenv := fs.String("vllm-venv", "", "hand-built vLLM virtualenv (default: <home>/vllm-env)")
 	hfHome := fs.String("hf-home", "", "HF cache root (default: $HF_HOME, else <home>/hf)")
+	vllmSeatDir := fs.String("vllm-seat-dir", "", "where the vLLM seats' unit and wrapper scripts live (default: <home>/seat); a tier's extra seat is seeded only once its wrapper scripts are there")
 	// Accelerators ride BESIDE the tier (ADR 0024): their seed keys merge over the
 	// tier's. install.ps1 always did this; install.sh never did (Coral D4 closed
 	// that gap for the Hailo path too) — both now pass detect's verdict here.
@@ -197,17 +198,9 @@ func runInstallSeed(args []string) error {
 	// Detect once, here, exactly as install render does. A box without the hand-built
 	// venv binds the seat's declared fallback and says why, rather than advertising an
 	// agent model nothing serves.
-	vllmActive := false
-	if p.VLLMSeat != nil {
-		rt := vllmRuntimeFlags{venv: *vllmVenv, hfHome: *hfHome}.resolve(*home)
-		var why string
-		if vllmActive, why = p.VLLMSeat.Detect(rt); !vllmActive {
-			fmt.Fprintf(os.Stderr, "NOTE  vLLM agent seat %q unavailable (%s); binding %s\n",
-				p.VLLMSeat.ID, why, p.VLLMSeat.Fallback)
-		}
-	}
+	vllmActive, extraActive := detectVLLMSeats(p, vllmRuntimeFlags{venv: *vllmVenv, hfHome: *hfHome, seatDir: *vllmSeatDir}.resolve(*home), os.Stderr)
 	seed, err := tierseed.Resolve(p, *profile, tierseed.Options{
-		Home: *home, GOOS: *goos, RAMTier: *ramTier, VLLMSeatActive: vllmActive,
+		Home: *home, GOOS: *goos, RAMTier: *ramTier, VLLMSeatActive: vllmActive, ExtraVLLMSeatsActive: extraActive,
 	})
 	if err != nil {
 		return err

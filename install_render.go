@@ -104,6 +104,14 @@ type servingProfile struct {
 	// NCPUMoE is the N for the partial `n_cpu_moe` placement (top N expert layers in
 	// RAM, the rest on the GPU).
 	NCPUMoE int `json:"n_cpu_moe"`
+	// NCPUMoEMax is the tier's MEASURED spill: the most expert layers a measurement showed
+	// may be placed in host RAM (INV-1: the cards do the inference, RAM is overflow only, and
+	// only up to a measured spill). It is deliberately a SEPARATE number from NCPUMoE: the
+	// placement a tier ships is one decision and the ceiling its measurement supports is
+	// another, and one field cannot check itself: raising NCPUMoE alone would move both.
+	// `install render` refuses a config whose `--n-cpu-moe` exceeds it (servingtmpl.AuditSpill),
+	// and 0 (absent) means the tier recorded no measured spill, so none is sanctioned.
+	NCPUMoEMax int `json:"n_cpu_moe_max"`
 	// MediaSeats are rendered into the models map and the group their residency
 	// role maps to. The same declaration produces the harness config binding via
 	// internal/tierseed, so the seat and the alias routing to it cannot disagree.
@@ -124,6 +132,15 @@ type servingProfile struct {
 	// vllmRuntimeFor — and otherwise the tier falls back to the llama.cpp seat the
 	// spec names, with the reason printed.
 	VLLMSeat *vllmseat.Spec `json:"vllm_seat,omitempty"`
+	// ExtraVLLMSeats are the tier's further vLLM seats (profiles.json `extra_vllm_seats`):
+	// on-demand seats beside VLLMSeat on the same card, rendered as its alternatives and
+	// never the agent lane. Each renders only when the box has the venv, ITS weights and the
+	// wrapper scripts its entry runs (see extraVLLMSeatsFor), and the layer it backs is left
+	// out of the seeded layers otherwise. What the installer does NOT render for one is its
+	// systemd unit, wrapper scripts and polkit rule: the seat's launch line carries flags the
+	// shared unit template cannot express, so they stay the operator's step
+	// (docs/systems/composite-tier.md), which is why they are also its prerequisite.
+	ExtraVLLMSeats []vllmseat.Spec `json:"extra_vllm_seats,omitempty"`
 	// moeLiteral is set ONLY by fallbackProfile and bypasses moeFlag: the off-matrix
 	// defaults are literal flag strings (`--cpu-moe -ngl 999`, with 999 — not the 99
 	// a declared "gpu" placement renders), and they must stay byte-identical to what
@@ -378,6 +395,9 @@ type renderRequest struct {
 type pinnedVLLM struct {
 	Seat    *vllmseat.Spec
 	Runtime vllmseat.Runtime
+	// Extras are the extra vLLM seats the pinned render was given, so a replay pins them
+	// too instead of re-detecting on the auditing machine.
+	Extras []*vllmseat.Spec
 }
 
 // renderResult is one resolved render: the config text plus the provenance basis
@@ -488,14 +508,26 @@ func deriveRender(profilesRaw []byte, req renderRequest) (renderResult, error) {
 	}
 	var seat *vllmseat.Spec
 	var seatRT vllmseat.Runtime
+	var extras []*vllmseat.Spec
 	if req.PinnedVLLM != nil {
-		seat, seatRT = req.PinnedVLLM.Seat, req.PinnedVLLM.Runtime
+		seat, seatRT, extras = req.PinnedVLLM.Seat, req.PinnedVLLM.Runtime, req.PinnedVLLM.Extras
 	} else {
 		seat, seatRT = vllmSeatFor(p, req.Home, req.VLLM)
+		var extraRT vllmseat.Runtime
+		extras, extraRT = extraVLLMSeatsFor(p, req.Home, req.VLLM)
+		if seat == nil {
+			// The lane seat is skipped (its weights are absent, or two snapshots sit under them
+			// mid-upgrade) but an extra seat may still render, and its entry needs the box's
+			// runtime just the same. Zero when nothing renders, so a plain box keeps its stamp.
+			seatRT = extraRT
+		}
 	}
-	// The layers as a box SEEDS them (tierseed fills the bare agent seat from
-	// the vLLM seat), so the render and the check reason about one shape.
-	layers := tierseed.FillPairAgent(p.Layers, p.VLLMSeat, seat != nil)
+	// The layers as a box SEEDS them (tierseed fills the bare agent seat from the vLLM
+	// seat and drops a layer whose vLLM seat this box does not run), so the render and
+	// the check reason about one shape.
+	layers := tierseed.ResolveLayers(p.Layers, tierseed.VLLMSeatSet{
+		Primary: p.VLLMSeat, PrimaryActive: seat != nil, Extras: p.ExtraVLLMSeats, ExtraActive: seatIDs(extras),
+	})
 	params := servingtmpl.Params{
 		LlamaBin: req.LlamaBin, ModelsDir: req.ModelsDir, Listen: req.Listen,
 		Ctx: p.CtxSize, KVType: p.KVType, FlashAttn: p.FlashAttn,
@@ -506,7 +538,7 @@ func deriveRender(profilesRaw []byte, req renderRequest) (renderResult, error) {
 		Seats: p.MediaSeats, Home: req.Home, RknpuHome: req.RknpuHome, GOOS: target, GPUEnv: p.GPUEnv, Backend: p.Backend,
 		AltCPULlamaBin:    req.AltLlamaBinCPU,
 		DisableCUDAGraphs: p.DisableCUDAGraphs,
-		VLLMSeat:          seat, VLLMRuntime: seatRT,
+		VLLMSeat:          seat, ExtraVLLMSeats: extras, VLLMRuntime: seatRT,
 		DisplayLayer: displayLayerOf(layers),
 	}
 	rendered, err := servingtmpl.Render(tmpl, params)
@@ -570,27 +602,13 @@ func runInstallRender(args []string) error {
 	if err != nil {
 		return err
 	}
-	// The serving-config gate (H-01): a rendered config that runs a model on
-	// the CPU, keeps one loaded past five idle minutes, or preloads is REFUSED
-	// here, before it can be written — the templates were fixed by hand twice
-	// (0.115.4, 0.115.7) and nothing stopped the next regression.
-	if vs := servingtmpl.Audit(res.Config); len(vs) != 0 {
-		return fmt.Errorf("tier %s: the rendered config breaks %d operator rule(s) (INV-1/INV-2) — not written:\n%s", res.TierID, len(vs), servingtmpl.Violations(vs))
+	// The write-time gates (H-01 rule audit, the spill ceiling, the composition check):
+	// a config that fails one is REFUSED here, before it can be written.
+	if err := renderGate(res); err != nil {
+		return err
 	}
 
 	target := res.Params.GOOS
-	// D5 (ADR 0039): a composite tier's render must be the CHECKED UNION of the
-	// tiers it composes — every layer seat defined, every seat on the cards its
-	// layer declares, every composed capability present. The tier shipped a media
-	// block copied from the 2-card tier once (0.113.33) and nothing read the
-	// result; this reads it, and refuses before the file is written.
-	if len(res.Profile.Composes) > 0 {
-		if err := servingtmpl.CheckComposite(res.Config, servingtmpl.CompositeDecl{
-			Tier: res.TierID, Composes: res.Profile.Composes, Layers: res.Layers, MediaKinds: seatKinds(res.Profile.MediaSeats),
-		}, res.Composed); err != nil {
-			return fmt.Errorf("tier %s: %w — not written", res.TierID, err)
-		}
-	}
 	warnMissingSeatModels(res.Profile.MediaSeats, *modelsDir, target)
 	warnMissingGatedModels(res.Include26B, res.Profile.IncludeQwen38, res.Profile.IncludeQwen354B, res.Profile.IncludeQwen359B, res.Profile.IncludeQwen3827B, res.Profile.IncludeMimo9B, *modelsDir, target)
 
@@ -617,6 +635,69 @@ func runInstallRender(args []string) error {
 	spec, _, _ := servingtmpl.SpecHash(res.Basis)
 	fmt.Printf("wrote %s (tier %s, %s/%s, spec_sha256 %s)\n", *out, res.TierID, osTag(target), res.Profile.Backend, spec)
 	return nil
+}
+
+// renderGate is the write-time gate of `install render`: every check that REFUSES a render
+// before it can be written, in one place so a test drives the same function the command
+// runs. It returns the first failure.
+//
+//   - The serving-config gate (H-01, INV-1 / INV-2): a rendered config that runs a model on
+//     the CPU, keeps one loaded past five idle minutes, or preloads is refused. The templates
+//     were fixed by hand twice (0.115.4, 0.115.7) and nothing stopped the next regression.
+//   - The spill ceiling (H-01, INV-1): `--n-cpu-moe` above the tier's measured spill
+//     (`n_cpu_moe_max`), and a partial placement that names no N (which renders the
+//     every-expert form), are refused.
+//   - D5 (ADR 0039): a tier that declares layers must render the CHECKED UNION of what it
+//     declares: every layer seat defined, every seat on the cards its layer declares, every
+//     composed capability present. The tier shipped a media block copied from the 2-card tier
+//     once (0.113.33) and nothing read the result; this reads it. It runs for a tier that
+//     declares LAYERS, not only one that declares `composes`: a layers-only tier (ampere-16's
+//     fast layer) has the same phantom-binding risk, a layer routing to a seat the rendered
+//     config does not define.
+func renderGate(res renderResult) error {
+	if vs := servingtmpl.Audit(res.Config); len(vs) != 0 {
+		return fmt.Errorf("tier %s: the rendered config breaks %d operator rule(s) (INV-1/INV-2) — not written:\n%s", res.TierID, len(vs), servingtmpl.Violations(vs))
+	}
+	if vs := spillViolations(res); len(vs) != 0 {
+		return fmt.Errorf("tier %s: the rendered config spills experts to the CPU beyond the tier's measured spill (INV-1) — not written:\n%s", res.TierID, servingtmpl.Violations(vs))
+	}
+	if len(res.Profile.Composes) > 0 || len(res.Layers) > 0 {
+		if err := servingtmpl.CheckComposite(res.Config, servingtmpl.CompositeDecl{
+			Tier: res.TierID, Composes: res.Profile.Composes, Layers: res.Layers, MediaKinds: seatKinds(res.Profile.MediaSeats),
+		}, res.Composed); err != nil {
+			return fmt.Errorf("tier %s: %w — not written", res.TierID, err)
+		}
+	}
+	return nil
+}
+
+// spillViolations is the INV-1 spill rule for one resolved render: the text-level ceiling
+// (any `--n-cpu-moe N` in the rendered config above the tier's `n_cpu_moe_max`) plus the one
+// thing text cannot show: a tier that names the partial placement with no N, which
+// moePlacement renders as the every-expert `--cpu-moe -ngl 999` "rather than emit a broken
+// flag". That is a full spill on a box with a card, and only the cpu backend (no card to
+// overflow from) may render it.
+func spillViolations(res renderResult) []servingtmpl.Violation {
+	vs := servingtmpl.AuditSpill(res.Config, res.Profile.NCPUMoEMax)
+	p := res.Profile
+	if p.MoE26B == "n_cpu_moe" && res.Include26B && p.NCPUMoE <= 0 && p.Backend != "cpu" && p.moeLiteral == "" {
+		vs = append(vs, servingtmpl.Violation{Rule: "n-cpu-moe", Where: "tier " + res.TierID, Text: "moe_26b is n_cpu_moe but " +
+			"n_cpu_moe names no N, which renders the every-expert `--cpu-moe -ngl 999`; INV-1 sanctions only a partial spill up " +
+			"to the tier's measured spill (n_cpu_moe_max)"})
+	}
+	return vs
+}
+
+// seatIDs is the set of seat ids in a list, for the layer resolution's "which seats does
+// this box run" question.
+func seatIDs(seats []*vllmseat.Spec) map[string]bool {
+	out := map[string]bool{}
+	for _, s := range seats {
+		if s != nil {
+			out[s.ID] = true
+		}
+	}
+	return out
 }
 
 // runAuditYAML is the session-start half of the serving-config gate (H-01 /
@@ -770,7 +851,7 @@ func replayRequest(b servingtmpl.SpecBasis) (renderRequest, bool) {
 		// the replay measures seed drift and not "the auditing box is not the
 		// node". A change to the tier's own vllm_seat block is still caught —
 		// it moves profiles_entry_sha256, which the basis diff names.
-		PinnedVLLM: &pinnedVLLM{Seat: b.Params.VLLMSeat, Runtime: b.Params.VLLMRuntime},
+		PinnedVLLM: &pinnedVLLM{Seat: b.Params.VLLMSeat, Runtime: b.Params.VLLMRuntime, Extras: b.Params.ExtraVLLMSeats},
 	}
 	if b.Render.FallbackBackend != "" {
 		// Off-matrix: the stamped tier id is the human label

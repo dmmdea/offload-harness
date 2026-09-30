@@ -174,7 +174,10 @@ type ParamsBasis struct {
 	AltCPULlamaBin    string            `json:"alt_cpu_llama_bin,omitempty"`
 	DisableCUDAGraphs bool              `json:"disable_cuda_graphs"`
 	VLLMSeat          *vllmseat.Spec    `json:"vllm_seat"`
-	VLLMRuntime       vllmseat.Runtime  `json:"vllm_runtime"`
+	// ExtraVLLMSeats is omitted when empty, so every tier that declares none keeps the
+	// spec hash it had before the field existed (RknpuHome and AltCPULlamaBin do the same).
+	ExtraVLLMSeats []*vllmseat.Spec `json:"extra_vllm_seats,omitempty"`
+	VLLMRuntime    vllmseat.Runtime `json:"vllm_runtime"`
 }
 
 // BasisOf projects a Params into its hashed mirror.
@@ -187,7 +190,7 @@ func BasisOf(p Params) ParamsBasis {
 		IncludeQ3827B: p.IncludeQ3827B,
 		Seats:         p.Seats, Home: p.Home, GOOS: p.GOOS, RknpuHome: p.RknpuHome, DisplayLayer: p.DisplayLayer, GPUEnv: p.GPUEnv,
 		Backend: p.Backend, AltCPULlamaBin: p.AltCPULlamaBin, DisableCUDAGraphs: p.DisableCUDAGraphs,
-		VLLMSeat: p.VLLMSeat, VLLMRuntime: p.VLLMRuntime,
+		VLLMSeat: p.VLLMSeat, ExtraVLLMSeats: p.ExtraVLLMSeats, VLLMRuntime: p.VLLMRuntime,
 	}
 }
 
@@ -204,7 +207,7 @@ func (b ParamsBasis) Params() Params {
 		IncludeQ3827B: b.IncludeQ3827B,
 		Seats:         b.Seats, Home: b.Home, GOOS: b.GOOS, RknpuHome: b.RknpuHome, DisplayLayer: b.DisplayLayer, GPUEnv: b.GPUEnv,
 		Backend: b.Backend, AltCPULlamaBin: b.AltCPULlamaBin, DisableCUDAGraphs: b.DisableCUDAGraphs,
-		VLLMSeat: b.VLLMSeat, VLLMRuntime: b.VLLMRuntime,
+		VLLMSeat: b.VLLMSeat, ExtraVLLMSeats: b.ExtraVLLMSeats, VLLMRuntime: b.VLLMRuntime,
 	}
 }
 

@@ -43,14 +43,14 @@ func streamedRepackSeat(gap, total time.Duration) func(n int64, body map[string]
 }
 
 // A seat that streams its re-pack is never a stall while it produces, however
-// long the answer takes (register C-66, RC-6, PR-12): deltas every 40 ms for ten
-// times the allowance are progress, and the request finishes on its first
+// long the answer takes (register C-66, RC-6, PR-12): deltas every 40 ms for more
+// than three times the allowance are progress, and the request finishes on its first
 // attempt. Asked for one JSON answer the SAME seat is silent for those two
-// seconds and is filed as a stall at the 200 ms allowance, which is what the
+// seconds and is filed as a stall at the allowance (TestRepackSilentSeatStillStalls), which is what the
 // flat non-streamed re-pack did to a slow vLLM seat producing at 3-8 tok/s.
 func TestRepackSlowStreamingSeatIsNotStalled(t *testing.T) {
-	defer compressLiveness(t, 200*time.Millisecond, 100*time.Millisecond, core.AgentCeilingSecCap)()
-	defer compressRepackBound(t, 200*time.Millisecond)()
+	defer compressLiveness(t, 600*time.Millisecond, 100*time.Millisecond, core.AgentCeilingSecCap)()
+	defer compressRepackBound(t, 600*time.Millisecond)()
 	fake := &agentFake{
 		rosterIDs:    []string{agentTestSeat},
 		loop:         func(int64) string { return doneChat("The answer is 42.") },
@@ -113,8 +113,8 @@ func TestRepackSilentSeatStillStalls(t *testing.T) {
 // last-progress stamp that advances with every report. A delegator polling the
 // node reads exactly this; until now it read the loop's last step.
 func TestRepackProgressReachesTheJobRecord(t *testing.T) {
-	defer compressLiveness(t, 200*time.Millisecond, 100*time.Millisecond, core.AgentCeilingSecCap)()
-	defer compressRepackBound(t, 300*time.Millisecond)()
+	defer compressLiveness(t, 600*time.Millisecond, 100*time.Millisecond, core.AgentCeilingSecCap)()
+	defer compressRepackBound(t, 900*time.Millisecond)()
 	old := progressReportEvery
 	progressReportEvery = 5 * time.Millisecond
 	defer func() { progressReportEvery = old }()

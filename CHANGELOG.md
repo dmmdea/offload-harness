@@ -6,6 +6,76 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.148.0] - 2026-09-30 - the ampere-16 fast layer and the 35B seat are in the tier table; install render gates for the MoE spill and a storeless tier
+
+### Added — the ampere-16 `fast` layer and the 35B seat are in the tier table (register A-113, ADR 0048 Amendment 2)
+
+The `fast` digest layer and the Qwen3.6-35B-A3B seat behind it existed only in the ampere-16 reference box's
+hand-edited config and in two Go test files, never in `setup/templates/profiles.json`, so a fresh install of the
+tier lost both (the capability-loss class ADR 0048 was written against, one level up). The table had one `vllm_seat`
+per tier and a card cannot hold two heavy seats, so the schema grew by the smallest steps that carry what the box runs.
+
+- `extra_vllm_seats` beside `vllm_seat`: further vLLM seats served on demand on the same card, never the agent lane.
+  Validated as non-lane seats (`Spec.ValidateExtra`: no fallback, every lane field refused), with unique ids, aliases
+  and units and the lane seat's card. `vllm_seat.storeless_reason` (and the same on an extra seat) is the measured
+  reason a seat has no cache server, seeded verbatim into its `kv_cache_server` binding; refused beside a `cache_server`.
+- `ampere-16` now declares `layers` `single` (the 27B GSQ lane seat) and `fast` (the 35B, 32,768 at 8 in flight), the
+  35B as its extra seat, and both seats' B-01 storeless reasons with the local paths dropped. The layer values are the
+  reference node's own (the two placement and delegate tests pin the same ones), so `audit-config` reports MATCH for
+  `layers`, `tiers` and `tier_profile` against a fixture that carries them: a live extract of that node redacts each
+  layer seat's `ctx_tokens`, so the 32,768 is the value those tests pin, not a live reading. A layer seat naming a vLLM
+  seat must equal that seat's `max_model_len` (and `max_num_seqs`, when set) or the table is refused at parse.
+- Seeding is per seat and never advertises what the box cannot serve: an extra seat the box can run (the venv, its
+  own weights and the wrapper scripts the operator installs for it) joins `vllm_seats` with its own binding; a layer
+  whose vLLM seat is absent is dropped; a layer set that lost `single` (the planner default, placement row 5b) is not
+  seeded at all; a box with no vLLM prerequisites seeds exactly what it did before (`tierseed.ResolveLayers`,
+  `Options.ExtraVLLMSeatsActive`).
+- `install render` emits every vLLM seat of a tier as an ALTERNATIVE of the others inside the residents set
+  (`emb & rer & (vagt | vagt2)`): the two seats cannot share the card, and co-resident members would have llama-swap
+  load the second beside the first. The extra seat's entry names its wrappers after its own unit, and a box that runs
+  it without the lane seat (the 27B's weights absent, or two snapshots under them mid-upgrade) renders it with the
+  box's own runtime; `servingtmpl.Render` refuses any vLLM seat whose runtime is incomplete, because such an entry
+  names no seat directory and no address and every gate that reads the text passes it. The composition check now runs
+  for any tier that declares layers, not only one that composes. `ParamsBasis` mirrors `Params.ExtraVLLMSeats`, and a
+  replay pins it.
+- `extra_vllm_seats` keys are strict, like `layers`: a key that is not a seat field is refused by tier and JSON path at
+  parse (`tierseed.ParseDoc`, so the installer's embedded copy too), never silently dropped. A misspelt `storeless_reason`
+  used to seed the generic reason in its place.
+- Not rendered, on purpose: the extra seat's systemd unit, wrapper scripts and polkit rule. Its production launch line
+  carries `--language-model-only`, which the shared linux-systemd run script cannot express, so
+  `docs/systems/composite-tier.md` lists what the operator installs by hand. Those scripts are also the seat's
+  prerequisite (`Spec.DetectExtra`): llama-swap does not check that an entry's `cmd` exists when it loads its config,
+  so a box with the venv and the weights but not the scripts would list the seat, seed its layer and fail only when a
+  contract asked for it. Until they are in the seat directory (`--vllm-seat-dir`, default `<home>/seat`, now a flag of
+  `install seed` and `audit-config` as well as `install render`), the seat and its layer are left out and the note
+  names the missing file.
+- The layer regression floor: `TestEveryTierKeepsItsDeclaredLayerSet` (`layerSetTiers`: each composite tier's layers and
+  the seat roles each serves) fails by name when a tier stops declaring one, and `extraSeatFloor` pins the extra seat.
+  Each was made red against the real regression and the table restored byte for byte: deleting the `fast` layer,
+  deleting the seat while keeping its layer, an extra seat with no tool parser, a layer window that drifts from its
+  seat's, deleting every layer, moving the layer's seat to another role. `docs/tiers/ampere-16.md` is regenerated
+  (layers, the 35B, both storeless reasons); `tierdocs` heads a layers-only tier "Layers", not "Composes".
+
+### Added — H-01's two remaining render gates: the spill ceiling and INV-16
+
+- `install render` refuses `--n-cpu-moe` (any spelling, and `LLAMA_ARG_N_CPU_MOE`) above the tier's measured spill,
+  the new `n_cpu_moe_max` (`servingtmpl.AuditSpill`, in the write gate `renderGate` that now also hosts the H-01 rule
+  audit and the layer check). It is a separate number from `n_cpu_moe`, because one field cannot check itself; 0 means
+  the tier recorded no measured spill, so none is sanctioned. A tier that names `moe_26b: n_cpu_moe` with no N is
+  refused too, since that renders the every-expert `--cpu-moe`. No shipped tier declares a spill.
+- `TestInstallRendersOnAnyTierWithoutACacheServer` (INV-16): every tier renders with no vLLM prerequisites, and a
+  tier whose vLLM seat declares no store renders the seat, its unit and wrappers with no cache-server piece and
+  seeds an explicit storeless binding that `doctor` accepts. A spill of 20 against a measured 14 and a hard-coded
+  `--n-cpu-moe 30` in a rendered command are refused.
+- Both serving-config audits (`Audit` and `AuditSpill`, so `install render`, `audit-yaml` and the template gate) now read
+  each entry the way llama-swap runs it, with its `${name}` macros substituted (nested macros too, bounded, and
+  llama-swap's own `${PORT}` left alone). The templates keep their shared flags in `macros:`, so a `-ngl 0` or an
+  `--n-cpu-moe 30` placed there used to pass every rule. Every shipped template still passes.
+
+### Fixed (tests) — the streamed re-pack tests had a 5x timing margin
+
+`TestRepackSlowStreamingSeatIsNotStalled` streamed a delta every 40 ms against a 200 ms stall allowance, so one scheduling pause of a loaded CI runner filed the stream as a stall (seen once on this PR's merged head; 20/20 locally, green on main). The allowance is now 600 ms (the 2 s stream still outlasts it, so a stream that stops counting as progress still fails: checked with 700 ms gaps), and `TestRepackProgressReachesTheJobRecord` gets the same headroom (600 ms / 900 ms). `TestRepackSilentSeatStillStalls` keeps 200 ms.
+
 ## [0.147.0] - 2026-09-30 - a finished answer is rescued instead of deferred when its re-pack fails; the re-pack is sized, streamed and held by the busy hold; research acceptance
 
 ### Fixed — a finished answer whose structured re-pack failed is re-packed by the delegator, not lost (C-66, PR-4)

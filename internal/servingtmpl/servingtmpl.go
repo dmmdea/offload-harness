@@ -157,8 +157,23 @@ type Params struct {
 	// without them renders the tier's llama.cpp fallback seat instead. Rendering a
 	// unit that points at a venv nobody built is worse than the fallback.
 	VLLMSeat *vllmseat.Spec
+	// ExtraVLLMSeats are the tier's further vLLM seats (profiles.json `extra_vllm_seats`)
+	// this box can run: on-demand seats beside VLLMSeat on the SAME card, never the agent
+	// lane. Empty is the common case and MUST render byte-identically to a build with no
+	// support for them (TestNoExtraVLLMSeatsChangesNothing).
+	//
+	// Every vLLM seat of a tier is rendered as an ALTERNATIVE of the others inside the
+	// residents set (`emb & rer & (vagt | vagt2)`): each is sized with util 0.90 of the
+	// card, so two of them can never be loaded together, and a matrix that called the
+	// pair a valid combination would have llama-swap load the second beside the first.
+	// Each extra seat's entry names wrappers after its own unit (vllmseat.Spec.ExtraEntry).
+	// The caller decides which seats to set with the same prerequisite detection it uses
+	// for VLLMSeat: an extra seat whose weights are absent is not rendered.
+	ExtraVLLMSeats []*vllmseat.Spec
 	// VLLMRuntime carries the two per-BOX values the tier cannot know: the account
-	// llama-swap runs as, and the literal address the engine binds.
+	// llama-swap runs as, and the literal address the engine binds. It is required whenever
+	// any vLLM seat is set (the lane seat or an extra one): Render refuses an incomplete one,
+	// because an entry rendered from it names no seat directory and no address.
 	VLLMRuntime vllmseat.Runtime
 }
 
@@ -605,7 +620,7 @@ func (p Params) seatExpand(s string) string {
 // seat in memory forever or make the memory stack evictable.
 func insertSeats(tmpl string, p Params) (string, map[string]string, error) {
 	frag := map[string]string{roleSwappable: "", roleResident: ""}
-	if len(p.Seats) == 0 && p.VLLMSeat == nil {
+	if len(p.Seats) == 0 && p.VLLMSeat == nil && len(p.vllmExtras()) == 0 {
 		return tmpl, frag, nil
 	}
 	anchors, err := parseAnchors(tmpl)
@@ -656,13 +671,25 @@ func insertSeats(tmpl string, p Params) (string, map[string]string, error) {
 		}
 		frag[s.Residency] += matrixJoin(s.Residency) + id
 	}
-	if p.VLLMSeat != nil {
+	if p.VLLMSeat != nil || len(p.vllmExtras()) > 0 {
 		var err error
 		if out, frag, err = insertVLLMSeat(out, p, anchors, taken, frag); err != nil {
 			return "", nil, err
 		}
 	}
 	return out, frag, nil
+}
+
+// vllmExtras is Params.ExtraVLLMSeats without its nil entries: a caller building the
+// list from a detection loop may leave one, and a nil seat renders nothing.
+func (p Params) vllmExtras() []*vllmseat.Spec {
+	var out []*vllmseat.Spec
+	for _, e := range p.ExtraVLLMSeats {
+		if e != nil {
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 // insertVLLMSeat places the tier's persistent vLLM agent seat as a RESIDENT matrix
@@ -673,8 +700,30 @@ func insertSeats(tmpl string, p Params) (string, map[string]string, error) {
 // reference deployment's llama-swap uses `groups`; `persistent: true` was separately
 // measured FAILING on the Qube, where it silently degraded the memory stack to
 // dense-only, which is why the templates moved to `matrix:`.)
+//
+// A tier that also declares EXTRA vLLM seats (Params.ExtraVLLMSeats) renders them beside
+// the lane seat, and the seats become ALTERNATIVES of one another inside the residents
+// set — `emb & rer & (vagt | vagt2)`. Two heavy seats cannot share a card (each is sized
+// with util 0.90 of it: the reference 16 GB card holds 13.9 GiB or 11.7 GiB, never both),
+// so joining them as co-resident members would make the matrix call the pair a valid
+// combination and llama-swap would load the second beside the first. As alternatives they
+// stay resident-class — an ordinary chat request never evicts the agent lane — while the
+// solver swaps one heavy seat for the other when the other is asked for by name.
 func insertVLLMSeat(out string, p Params, anchors seatAnchors, taken map[string]bool, frag map[string]string) (string, map[string]string, error) {
-	s := *p.VLLMSeat
+	type seatRef struct {
+		spec  vllmseat.Spec
+		extra bool
+	}
+	var seats []seatRef
+	if p.VLLMSeat != nil {
+		seats = append(seats, seatRef{spec: *p.VLLMSeat})
+	}
+	for _, e := range p.vllmExtras() {
+		seats = append(seats, seatRef{spec: *e, extra: true})
+	}
+	if len(seats) == 0 {
+		return out, frag, nil
+	}
 	if !anchors.roles[roleResident] {
 		var roles []string
 		for r := range anchors.roles {
@@ -684,34 +733,54 @@ func insertVLLMSeat(out string, p Params, anchors seatAnchors, taken map[string]
 		return "", nil, fmt.Errorf("this tier declares a vllm_seat (%s), which must be RESIDENT — nothing may evict "+
 			"the agent lane — but the target serving template places only: %s. Rendering it as an alternative would "+
 			"let an ordinary chat request unload the agent seat and pay its 125-250 s reload",
-			s.ID, strings.Join(roles, ", "))
+			seats[0].spec.ID, strings.Join(roles, ", "))
 	}
-	if definesModel(out, s.ID) {
-		return "", nil, fmt.Errorf("vllm seat %q is already defined by the template — a tier may not redeclare a seat "+
-			"the template owns", s.ID)
+	// An entry rendered from an incomplete runtime is `cmd: /vllm-35b-seat-cmd.sh` and
+	// `proxy: http://:18797`: a seat that is listed, passes every gate that reads the text, and
+	// fails only when a contract asks for it. A caller that has a seat has resolved a runtime
+	// for it, so an incomplete one is that caller's bug and it is refused here, by name.
+	if err := p.VLLMRuntime.Validate(); err != nil {
+		return "", nil, fmt.Errorf("vllm seat %q cannot be rendered: %w", seats[0].spec.ID, err)
 	}
-	// llama-swap requires a matrix var key to be alphanumeric and 1-8 characters.
-	id := "vagt"
-	for i := 2; taken[id] && i < 10; i++ {
-		id = fmt.Sprintf("vagt%d", i)
+	var ids []string
+	for _, ref := range seats {
+		s := ref.spec
+		if definesModel(out, s.ID) {
+			return "", nil, fmt.Errorf("vllm seat %q is already defined by the template — a tier may not redeclare a seat "+
+				"the template owns", s.ID)
+		}
+		// llama-swap requires a matrix var key to be alphanumeric and 1-8 characters.
+		id := "vagt"
+		for i := 2; taken[id] && i < 10; i++ {
+			id = fmt.Sprintf("vagt%d", i)
+		}
+		if taken[id] {
+			return "", nil, fmt.Errorf("vllm seat %q: no free matrix var id", s.ID)
+		}
+		taken[id] = true
+		entry := s.Entry(p.VLLMRuntime)
+		if ref.extra {
+			entry = s.ExtraEntry(p.VLLMRuntime)
+		}
+		var err error
+		if out, err = appendModel(out, entry); err != nil {
+			return "", nil, err
+		}
+		if out, err = addMatrixVar(out, id, s.ID); err != nil {
+			return "", nil, err
+		}
+		// The vLLM cold load is 125-250 s; llama-swap's default healthCheckTimeout (120)
+		// kills the attach mid-load and cmdStop then stops the engine. Raising it is
+		// GLOBAL by design — llama.cpp seats still fail fast when genuinely broken, they
+		// just get a longer ceiling.
+		out = raiseHealthCheckTimeout(out, s)
+		ids = append(ids, id)
 	}
-	if taken[id] {
-		return "", nil, fmt.Errorf("vllm seat %q: no free matrix var id", s.ID)
+	if len(ids) == 1 {
+		frag[roleResident] += matrixJoin(roleResident) + ids[0]
+	} else {
+		frag[roleResident] += matrixJoin(roleResident) + "(" + strings.Join(ids, " | ") + ")"
 	}
-	taken[id] = true
-	var err error
-	if out, err = appendModel(out, s.Entry(p.VLLMRuntime)); err != nil {
-		return "", nil, err
-	}
-	if out, err = addMatrixVar(out, id, s.ID); err != nil {
-		return "", nil, err
-	}
-	// The vLLM cold load is 125-250 s; llama-swap's default healthCheckTimeout (120)
-	// kills the attach mid-load and cmdStop then stops the engine. Raising it is
-	// GLOBAL by design — llama.cpp seats still fail fast when genuinely broken, they
-	// just get a longer ceiling.
-	out = raiseHealthCheckTimeout(out, s)
-	frag[roleResident] += matrixJoin(roleResident) + id
 	return out, frag, nil
 }
 
