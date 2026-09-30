@@ -24,8 +24,11 @@ every sysfs/debugfs read below degrades to null where a node is absent):
   * ONE model resident, released before the next one loads and again at the idle exit, so the footprint
     is one model and the box's own workload keeps its memory (process RSS 113 MB with yolov8n resident,
     259 MB with CLIP and 471 MB at its peak while CLIP loads; a model switch costs about 0.3 s for resnet18
-    and yolov8n and 1.2-1.8 s for CLIP). ONE lock, one in-flight NPU call. load_rknn also keeps the whole
-    file in Python memory; it is dropped once init_runtime has copied it into the context (CLIP: 179 MB).
+    and yolov8n and 1.2-1.8 s for CLIP: measured 2026-09-29 with the models the manifest served then. The
+    PP-YOLOE s and ResNet-50 files that replaced resnet18 and yolov8n on 2026-09-30 have not run on the board
+    yet, so their footprint and switch time are unmeasured). ONE lock, one in-flight NPU call. load_rknn also
+    keeps the whole file in Python memory; it is dropped once init_runtime has copied it into the context
+    (CLIP: 179 MB).
   * The wheel does not honour LD_LIBRARY_PATH for its own runtime: RKNNRuntime._get_rknn_api_lib_path
     probes os.path.exists on exactly /usr/lib/librknn_runtime.so, /usr/lib64/librknn_runtime.so and
     /usr/lib/librknnrt.so, then calls CDLL on the path it found, and otherwise fails init_runtime with
@@ -139,8 +142,11 @@ def _sha256(path: str) -> str:
     return h.hexdigest()
 
 
-def _hint(key: str) -> str:
-    if "convert" in MODELS.get(key, {}):
+def _hint(key: str, name: str) -> str:
+    """How to get the missing artifact `name` of model `key`: only the model file itself is converted, its label
+    file is an ordinary download."""
+    spec = MODELS.get(key, {})
+    if "convert" in spec and name == spec.get("file"):
         return "no public download: convert it on an x86_64 host (fetch-models.sh --convert), then copy the file here"
     return "run fetch-models.sh"
 
@@ -149,7 +155,7 @@ def _artifact_path(key: str, name: str, sha256: str) -> str:
     """Resolve a manifest artifact to a verified file; raise Refusal with a structured reason."""
     path = os.path.join(MODELS_DIR, name)
     if not os.path.isfile(path):
-        raise Refusal({"error": "model_missing", "model": key, "file": name, "hint": _hint(key)})
+        raise Refusal({"error": "model_missing", "model": key, "file": name, "hint": _hint(key, name)})
     digest = _sha256(path)
     if digest != sha256:
         raise Refusal({"error": "model_sha_mismatch", "model": key, "file": name, "expected": sha256, "got": digest})
@@ -319,13 +325,35 @@ def _nhwc(img):
 
 # ---------------------------------------------------------------- tools
 
-CLASSIFY_DOMAINS = {"imagenet": "resnet18"}
-DETECT_KEY = "yolov8n"
+CLASSIFY_MODEL = "resnet50tv2-i8"  # "resnet50tv2-fp16" is the same network compiled without quantisation
+CLASSIFY_DOMAINS = {"imagenet": CLASSIFY_MODEL}
+DETECT_KEY = "ppyoloe_s"
 EMBED_KEY = "clip-vit-b32-image"
-NMS_IOU = 0.45          # the rknn_model_zoo yolov8 recipe's NMS_THRESH
-DETECT_SCORE = 0.25     # ... and its OBJ_THRESH, the default score_threshold
+NMS_IOU = 0.45          # the rknn_model_zoo ppyoloe demo's NMS_THRESH (its Python and C demos agree)
+DETECT_SCORE = 0.25     # ... and its OBJ_THRESH / BOX_THRESH, the default score_threshold
 MAX_CANDIDATES = 2000   # boxes past the threshold that reach NMS (a threshold near 0 must not stall an A55 core)
 MAX_DETECTIONS = 100
+
+
+def _classify_input(img, path: str, spec: dict):
+    """The classifier's NHWC uint8 input. A spec with resize_short and crop names the torchvision evaluation recipe
+    its weights were scored with: the shorter side goes to resize_short (bilinear, the other side by the same
+    ratio, truncated), then a centred crop x crop is cut out. A spec without them gets the whole picture squashed
+    to input x input. As in embed, the crop window is taken from the source and resampled once, so a 100000x10
+    strip never becomes a 23-million-pixel intermediate."""
+    from PIL import Image
+
+    size = spec["input"]
+    short, crop = spec.get("resize_short"), spec.get("crop")
+    if not short or not crop:
+        return _nhwc(_decode(img, path, (size, size)).resize((size, size), Image.BILINEAR))
+    w, h = img.size
+    nw, nh = (short, max(short, int(short * h / w))) if w <= h else (max(short, int(short * w / h)), short)
+    left, top = int(round((nw - crop) / 2.0)), int(round((nh - crop) / 2.0))
+    rgb = _decode(img, path, (nw, nh))  # a JPEG may decode at reduced scale: the box below is in its pixels
+    rw, rh = rgb.size
+    window = (left / nw * rw, top / nh * rh, (left + crop) / nw * rw, (top + crop) / nh * rh)
+    return _nhwc(rgb.resize((crop, crop), Image.BILINEAR, box=window))
 
 
 def tool_classify(args: dict) -> dict:
@@ -336,14 +364,12 @@ def tool_classify(args: dict) -> dict:
         raise Refusal({"error": "bad_request", "detail": f"domain must be one of {sorted(CLASSIFY_DOMAINS)}"})
     top_k = _int_arg(args, "top_k", 5, 1, 100)
     _require_npu()
-    from PIL import Image
     import numpy as np
 
     spec = MODELS[key]
-    size = spec["input"]
     with _open_image(image) as img:  # closed on every path: a refusal below must not leave the file open
         labels = _load_labels(key)  # every artifact is verified before the NPU is touched
-        arr = _nhwc(_decode(img, image, (size, size)).resize((size, size), Image.BILINEAR))
+        arr = _classify_input(img, image, spec)
     outs = _infer(key, arr)
     logits = outs[0].reshape(-1).astype(np.float32)  # the fc layer: raw logits
     e = np.exp(logits - logits.max())
@@ -353,13 +379,14 @@ def tool_classify(args: dict) -> dict:
     return {"results": results, "best": results[0], "model": spec["file"], "domain": domain}
 
 
-def _dfl(box):
-    """Distribution Focal Loss decode: (n, 64) logits -> (n, 4) l,t,r,b distances in grid cells."""
+def _dfl(box, bins: int):
+    """Distribution Focal Loss decode: (n, 4 * bins) logits -> (n, 4) l,t,r,b distances in grid cells, each the
+    expectation of a softmax over the bins 0..bins-1 of its side. YOLOv8 has 16 bins (64 channels), PP-YOLOE 17 (68)."""
     import numpy as np
 
-    x = box.reshape(box.shape[0], 4, 16)
+    x = box.reshape(box.shape[0], 4, bins)
     e = np.exp(x - x.max(axis=2, keepdims=True))
-    return ((e / e.sum(axis=2, keepdims=True)) * np.arange(16, dtype=np.float32)).sum(axis=2)
+    return ((e / e.sum(axis=2, keepdims=True)) * np.arange(bins, dtype=np.float32)).sum(axis=2)
 
 
 def _nms(xyxy, scores, iou_thr: float) -> list[int]:
@@ -379,24 +406,32 @@ def _nms(xyxy, scores, iou_thr: float) -> list[int]:
     return keep
 
 
-def _decode_yolov8(outs, size: int, thr: float):
-    """rknn_model_zoo yolov8 post-processing: three (box[1,64,h,w], class[1,80,h,w], score-sum[1,1,h,w])
-    branches -> (xyxy in letterboxed pixels, class ids, scores), per-class NMS applied. The score-sum
-    branch is the C demo's pre-filter and is ignored, as the recipe's Python demo does."""
+def _decode_detections(outs, size: int, thr: float):
+    """rknn_model_zoo anchor-free DFL post-processing (its ppyoloe and yolov8 demos share it): three branches of
+    (box[1,4*bins,h,w], class[1,80,h,w], optionally score-sum[1,1,h,w]), one per stride, in any order (the stride
+    is the input size over the grid height) -> (xyxy in letterboxed pixels, class ids, scores), per-class NMS
+    applied. The class tensors are already sigmoid probabilities and the score IS the best class's, with no
+    box-confidence factor: the zoo's Python demo replaces the score-sum branch by ones and ignores it, and its C
+    demo only uses it to skip a cell early. That branch is the class scores summed and capped at 1 (measured on
+    the simulator's output: within 0.002 of min(sum, 1)), so a cell it skips has no class at or above the threshold
+    (the threshold is at most 1), and ignoring it here changes no result."""
     import numpy as np
 
     shapes = [list(map(int, o.shape)) for o in outs]
     per = len(outs) // 3
-    if len(outs) < 3 or len(outs) % 3:
-        raise Refusal({"error": "internal", "detail": "unexpected detector output layout", "shapes": shapes})
+    layout = Refusal({"error": "internal", "detail": "unexpected detector output layout", "shapes": shapes})
+    if len(outs) % 3 or per not in (2, 3):
+        raise layout
     box_l, cls_l, cell_l = [], [], []
     for b in range(3):
         box, cls = outs[per * b], outs[per * b + 1]
-        if box.ndim != 4 or cls.ndim != 4 or box.shape[1] != 64 or box.shape[2:] != cls.shape[2:]:
-            raise Refusal({"error": "internal", "detail": "unexpected detector output layout", "shapes": shapes})
+        if (box.ndim != 4 or cls.ndim != 4 or box.shape[2:] != cls.shape[2:] or not box.shape[2] * box.shape[3]
+                or box.shape[1] < 4 or box.shape[1] % 4 or box.shape[1] != outs[0].shape[1]
+                or cls.shape[1] < 1 or cls.shape[1] != outs[1].shape[1]):
+            raise layout
         gh, gw = box.shape[2:]
         gy, gx = np.divmod(np.arange(gh * gw), gw)
-        box_l.append(box[0].transpose(1, 2, 0).reshape(-1, 64))
+        box_l.append(box[0].transpose(1, 2, 0).reshape(-1, box.shape[1]))
         cls_l.append(cls[0].transpose(1, 2, 0).reshape(-1, cls.shape[1]))
         cell_l.append(np.stack([gx, gy, np.full(gh * gw, size // gh)], axis=1))
     box, cls, cell = np.concatenate(box_l), np.concatenate(cls_l), np.concatenate(cell_l)
@@ -407,7 +442,7 @@ def _decode_yolov8(outs, size: int, thr: float):
         keep = keep[np.argsort(-scores[keep])[:MAX_CANDIDATES]]
     if not keep.size:
         return np.zeros((0, 4), np.float32), ids[:0], scores[:0]
-    d = _dfl(box[keep].astype(np.float32))
+    d = _dfl(box[keep].astype(np.float32), box.shape[1] // 4)
     gx, gy, stride = cell[keep].T.astype(np.float32)
     xyxy = np.stack([(gx + 0.5 - d[:, 0]) * stride, (gy + 0.5 - d[:, 1]) * stride,
                      (gx + 0.5 + d[:, 2]) * stride, (gy + 0.5 + d[:, 3]) * stride], axis=1)
@@ -428,14 +463,14 @@ def tool_object_detect(args: dict) -> dict:
     with _open_image(image) as img:
         labels = _load_labels(DETECT_KEY)  # every artifact is verified before the NPU is touched
         w, h = img.size
-        # Letterbox as the recipe does: fit inside size x size keeping the aspect, centred on black.
+        # Letterbox as the zoo demo does: fit inside size x size keeping the aspect, centred on black (pad colour 0).
         r = min(size / w, size / h)
         nw, nh = max(1, round(w * r)), max(1, round(h * r))
         left, top = (size - nw) // 2, (size - nh) // 2
         canvas = Image.new("RGB", (size, size), (0, 0, 0))
         canvas.paste(_decode(img, image, (nw, nh)).resize((nw, nh), Image.BILINEAR), (left, top))
     outs = _infer(DETECT_KEY, _nhwc(canvas))
-    xyxy, ids, scores = _decode_yolov8(outs, size, thr)
+    xyxy, ids, scores = _decode_detections(outs, size, thr)
     objects = []
     for (x1, y1, x2, y2), cid, s in zip(xyxy, ids, scores):
         x1, x2 = min(max((x1 - left) / r, 0.0), w), min(max((x2 - left) / r, 0.0), w)
