@@ -2618,10 +2618,13 @@ func (c Config) PlacementWait() time.Duration {
 // delivered (the live check is "call wall <= deadline + 30 s").
 //
 // It does NOT promise that no healthy subtask is ever cut. Time a job spends
-// queued on a node is credited back to its wall (up to 300 s) and a capacity
-// wait comes before placement, so a worst-case auto-sized subtask can run past
-// the default and be cut. That is the deadline doing its job; a workload that
-// needs longer sets agent_call_deadline_sec, below the client's abort.
+// queued on a node is credited back to its wall (up to the queue budget the
+// node's own estimate sets, ADR 0063: 1.5 x its estimate + 30 s, at least 60 s,
+// at most the contract's poll budget; the lesser of that budget and 300 s for a
+// node that publishes none) and a capacity wait comes before placement, so a
+// worst-case auto-sized subtask can run past the default and be cut. That is the
+// deadline doing its job; a workload that needs longer sets
+// agent_call_deadline_sec, below the client's abort.
 const DefaultCallDeadlineSec = 1500
 
 // referenceClientAbortSec is the tool-call abort of the reference MCP client (ADR 0065). The
