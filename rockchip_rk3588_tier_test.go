@@ -4,6 +4,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/mediaseat"
 	"github.com/dmmdea/offload-harness/internal/servingtmpl"
 	"github.com/dmmdea/offload-harness/internal/tierseed"
+	"github.com/dmmdea/offload-harness/internal/visionremote"
 )
 
 // The rockchip-rk3588 tier is a board that also runs something else: an SoC whose GPU and
@@ -211,5 +213,61 @@ func TestRK3588RknpuHomeSurvivesTheProvenanceReplay(t *testing.T) {
 	}
 	if rep := provenanceOf(stamped); rep.State != servingtmpl.StateMatch {
 		t.Fatalf("a config rendered with a non-default RKNPU home does not verify: %s -- %s (keys %v)", rep.State, rep.Detail, rep.Keys)
+	}
+}
+
+// TestRK3588VisionLaneIsLimitedToWhatTheRuntimeCanDo pins the 0.153.0 vision decisions on the
+// SHIPPED table: the seat is started with a repeat penalty (greedy decoding at the runtime's 1.0
+// looped to the token cap on VQA), declares vqa and ocr only (the runtime cannot constrain
+// sampling and assess_image always sends a grammar), and the seed binds exactly that as
+// vision_tasks. Each of those is one edit away from silently reverting.
+func TestRK3588VisionLaneIsLimitedToWhatTheRuntimeCanDo(t *testing.T) {
+	seat := rk3588Seat(t)
+	if seat.RepeatPenalty == nil || *seat.RepeatPenalty != 1.1 {
+		t.Errorf("the NPU seat's repeat_penalty = %v, want 1.1 (measured: 1.0 loops on VQA to the token cap)", seat.RepeatPenalty)
+	}
+	if got, want := strings.Join(seat.Tasks, ","), "vqa,ocr"; got != want {
+		t.Errorf("the NPU seat declares tasks %q, want %q: the runtime refuses the grammar assess_image always sends", got, want)
+	}
+	res, err := rk3588Render(t, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(res.Config, "--cpu-mask 0x0f --repeat-penalty 1.1 --served-name "+seat.Name+" ") {
+		t.Errorf("the rendered NPU seat is not started with --repeat-penalty 1.1:\n%s", res.Config)
+	}
+	profiles, err := tierseed.Parse(embeddedProfiles)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := effectiveConfig(t, profiles[rk3588Tier], rk3588Tier, "linux")
+	if got, want := strings.Join(cfg.VisionTasks, ","), "vqa,ocr"; got != want {
+		t.Errorf("the seed's vision_tasks = %q, want %q (bound from the seat)", got, want)
+	}
+}
+
+// TestRK3588SeedLimitsFitAOneGenerationNPU: the node default of four concurrent jobs would queue
+// three behind the NPU's single generation, where their wait counts against the delegator's wall;
+// the timeout must stay below the delegator's fleet vision budget or the delegator gives up first.
+func TestRK3588SeedLimitsFitAOneGenerationNPU(t *testing.T) {
+	profiles, err := tierseed.Parse(embeddedProfiles)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := effectiveConfig(t, profiles[rk3588Tier], rk3588Tier, "linux")
+	if got := cfg.FleetConcurrencyLimit(); got != 1 {
+		t.Errorf("fleet concurrency = %d, want 1: the NPU runs one generation at a time", got)
+	}
+	if got := cfg.FleetQueueLimit(); got != 2 {
+		t.Errorf("fleet queue depth = %d, want 2 (the default, twice the concurrency; one running, one waiting): the seed must not set fleet_max_queue_depth", got)
+	}
+	if got, budget := time.Duration(cfg.RequestTimeoutSec)*time.Second, visionremote.Budget; got != 240*time.Second || got >= budget {
+		t.Errorf("request_timeout_sec = %v, want 240s and below the delegator's %v fleet vision budget", got, budget)
+	}
+	if cfg.MaxInputChars != 8000 || cfg.OCRMaxTokens != 512 {
+		t.Errorf("max_input_chars/ocr_max_tokens = %d/%d, want 8000/512", cfg.MaxInputChars, cfg.OCRMaxTokens)
+	}
+	if _, set := profiles[rk3588Tier].ConfigSeed["fleet_max_queue_depth"]; set {
+		t.Error("the tier sets fleet_max_queue_depth: leave it at its default (twice the concurrency)")
 	}
 }
