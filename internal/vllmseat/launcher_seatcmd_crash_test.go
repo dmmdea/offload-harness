@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -28,15 +29,22 @@ const stopMarker = "seat-stop-requested-pp3"
 // "after-cmdstop" is a stop that llama-swap asked for: seat-cmdstop.ps1 is another process, so its marker appears in the
 // middle of the stub's polling, at the first /health the seat fails to answer. "cmdstop" and "cmdstop-marker-unwritable"
 // run seat-cmdstop.ps1 itself against a seat that stops answering at once.
-const seatCmdDriver = `param([string]$Stub, [string]$Scenario, [string]$Calls, [string]$Marker)
+const seatCmdDriver = `param([string]$Stub, [string]$Scenario, [string]$Calls, [string]$Marker, [double]$ReadCost = 1.2)
 $ErrorActionPreference = 'Continue'
 $global:Scn = $Scenario
 $global:CallLog = $Calls
 $global:MarkerPath = $Marker
 $global:Probes = 0
 $global:StopReads = 0
+# A simulated clock, because the stub's bounds are seconds: Start-Sleep advances it by its argument and every
+# Get-ScheduledTask read by ReadCost (about 1.1 s each under Windows PowerShell 5.1, measured on the reference workstation).
+$global:ReadCost = $ReadCost
+$global:T0 = [datetime]'2026-01-01T00:00:00'
+$global:Clock = $global:T0
+function Secs { [int][math]::Round(($global:Clock - $global:T0).TotalSeconds) }
+function Get-Date { param([string]$Format) if ($Format) { return $global:Clock.ToString($Format) }; return $global:Clock }
 function Note([string]$m) { Add-Content -Path $global:CallLog -Value $m }
-function Start-Sleep { param($Seconds) Note "sleep $Seconds" }
+function Start-Sleep { param($Seconds) Note "sleep $Seconds"; $global:Clock = $global:Clock.AddSeconds([double]$Seconds) }
 function Start-ScheduledTask {
   [CmdletBinding()] param([string]$TaskName)
   Note "start-task $TaskName"
@@ -45,6 +53,7 @@ function Start-ScheduledTask {
     # -ErrorAction Stop sails on as if the task had started.
     if ($global:Scn -eq 'stop-task-missing') { Write-Error 'The system cannot find the file specified.'; return }
     $global:StopReads = 0
+    Note "stop-started-at $(Secs)"
   }
 }
 function Get-ScheduledTaskInfo {
@@ -57,6 +66,7 @@ function Get-ScheduledTaskInfo {
 }
 function Get-ScheduledTask {
   [CmdletBinding()] param([string]$TaskName)
+  $global:Clock = $global:Clock.AddSeconds($global:ReadCost)
   if ($TaskName -like 'vllm-seat-stop-*') {
     $global:StopReads++
     Note "read-stop-task $($global:StopReads)"
@@ -83,6 +93,7 @@ function Invoke-RestMethod {
   throw 'Unable to connect to the remote server'
 }
 & $Stub -Seat pp3
+Note "clock $(Secs)"
 Note "exit=$LASTEXITCODE"
 `
 
@@ -110,10 +121,37 @@ func (r stubRun) markerExists() bool {
 	return err == nil
 }
 
+// at returns N from the first call-log line "<key> N" (seconds on the driver's clock), or -1 when there is none.
+func (r stubRun) at(key string) int {
+	for _, l := range strings.Split(r.Calls, "\n") {
+		if v, ok := strings.CutPrefix(strings.TrimSpace(l), key+" "); ok {
+			if n, err := strconv.Atoi(v); err == nil {
+				return n
+			}
+		}
+	}
+	return -1
+}
+
+// cleanupSeconds is how long the stub spent between starting the stop task and exiting, on the driver's clock.
+func (r stubRun) cleanupSeconds() int {
+	from, to := r.at("stop-started-at"), r.at("clock")
+	if from < 0 || to < 0 {
+		return -1
+	}
+	return to - from
+}
+
+// defaultReadCost is what the driver's clock charges for one Get-ScheduledTask read, in seconds: about what Windows
+// PowerShell 5.1 measured on the reference workstation, so every scenario runs at a realistic speed, not at the speed a
+// count of reads would suggest.
+const defaultReadCost = "1.2"
+
 // runStub renders the shipped templates with a scratch seat directory, runs one rendered artifact (seat-cmd.ps1 or
-// seat-cmdstop.ps1) in the given PowerShell under the driver for one scenario, and returns what it left behind. pre, when
-// set, runs against the scratch seat directory first (a marker already there, say).
-func runStub(t *testing.T, host, artifact, scenario string, pre func(dir string)) stubRun {
+// seat-cmdstop.ps1) in the given PowerShell under the driver for one scenario, and returns what it left behind. readCost
+// is the driver clock's charge per Get-ScheduledTask read. pre, when set, runs against the scratch seat directory first
+// (a marker already there, say).
+func runStub(t *testing.T, host, artifact, scenario, readCost string, pre func(dir string)) stubRun {
 	t.Helper()
 	dir := t.TempDir()
 	rt := wslRT()
@@ -138,7 +176,7 @@ func runStub(t *testing.T, host, artifact, scenario string, pre func(dir string)
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, host, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-		"-File", driver, "-Stub", stub, "-Scenario", scenario, "-Calls", callLog, "-Marker", filepath.Join(dir, stopMarker)).CombinedOutput()
+		"-File", driver, "-Stub", stub, "-Scenario", scenario, "-Calls", callLog, "-Marker", filepath.Join(dir, stopMarker), "-ReadCost", readCost).CombinedOutput()
 	if err != nil {
 		t.Fatalf("%s: the driver failed (%v):\n%s", scenario, err, out)
 	}
@@ -163,7 +201,12 @@ func runSeatCmd(t *testing.T, host, scenario string) (calls, stubLog string) {
 
 func runSeatCmdWith(t *testing.T, host, scenario string, pre func(dir string)) stubRun {
 	t.Helper()
-	r := runStub(t, host, "seat-cmd.ps1", scenario, pre)
+	return runSeatCmdCost(t, host, scenario, defaultReadCost, pre)
+}
+
+func runSeatCmdCost(t *testing.T, host, scenario, readCost string, pre func(dir string)) stubRun {
+	t.Helper()
+	r := runStub(t, host, "seat-cmd.ps1", scenario, readCost, pre)
 	// In every scenario: the stub starts the seat's own task once, at its start, and never again. A crash is cleaned up,
 	// not relaunched: an idle seat stays unloaded (ttl 300), and llama-swap starts it again on the next request.
 	if n := countLines(r.Calls, "start-task vllm-seat-pp3"); n != 1 {
@@ -322,9 +365,6 @@ func seatCmdCrashScenarios(t *testing.T, host string) {
 
 	t.Run("a stop task never seen running is given 30 s to appear, then the stub says so and exits", func(t *testing.T) {
 		calls, log := runSeatCmd(t, host, "stop-task-never-runs")
-		if n := strings.Count(calls, "read-stop-task "); n != 15 {
-			t.Fatalf("a task that never shows Running must be given 15 reads (30 s) to appear, got %d:\n%s", n, calls)
-		}
 		if !strings.Contains(log, "not seen running in 30 s") || strings.Contains(log, "crash cleanup finished") || !strings.HasSuffix(strings.TrimSpace(calls), "exit=0") {
 			t.Fatalf("a stop task never seen running is not a finished cleanup: it must say so, and the stub must still exit 0:\ncalls:\n%s\nlog:\n%s", calls, log)
 		}
@@ -337,9 +377,6 @@ func seatCmdCrashScenarios(t *testing.T, host string) {
 
 	t.Run("a stop task that never finishes is waited for a bounded time", func(t *testing.T) {
 		calls, log := runSeatCmd(t, host, "stop-task-hangs")
-		if n := strings.Count(calls, "read-stop-task "); n != 45 {
-			t.Fatalf("the wait must be bounded at 45 reads of the stop task, got %d:\n%s", n, calls)
-		}
 		if !strings.Contains(log, "still running after 90 s") || !strings.HasSuffix(strings.TrimSpace(calls), "exit=0") {
 			t.Fatalf("a cleanup that outlasts its bound must say so and the stub must still exit 0:\ncalls:\n%s\nlog:\n%s", calls, log)
 		}
@@ -348,38 +385,23 @@ func seatCmdCrashScenarios(t *testing.T, host string) {
 		}
 	})
 
-	t.Run("the cleanup polls every 2 s, so its 30 s and 90 s bounds are real seconds", func(t *testing.T) {
-		// The driver discards Start-Sleep's argument as a wait but records it, so a read count only means seconds when
-		// every wait between two reads is the 2 s the log strings and ADR 0035 promise.
-		for _, tc := range []struct {
-			scn   string
-			reads int
-		}{{"crash", 4}, {"stop-task-never-runs", 15}, {"stop-task-hangs", 45}} {
-			calls, _ := runSeatCmd(t, host, tc.scn)
-			lines := strings.Split(strings.TrimSpace(calls), "\n")
-			from := -1
-			for i, l := range lines {
-				if l == "start-task vllm-seat-stop-pp3" {
-					from = i
+	t.Run("the cleanup's 30 s and 90 s bounds are seconds of the clock, whatever a read of the stop task costs", func(t *testing.T) {
+		// The bounds were counts of polls (15 and 45 rounds of a 2 s sleep and a read). A read of a scheduled task takes about
+		// 1.1 s under Windows PowerShell 5.1, so 45 rounds spent about 140 s and 15 rounds about 47 s, and the log strings and
+		// ADR 0035 said 90 s and 30 s. The driver's clock charges each read; the bound must hold at a cost of 1.2 s and of 0.
+		for _, cost := range []string{"1.2", "0"} {
+			for _, tc := range []struct {
+				scn      string
+				min, max int // seconds between the stop task's start and the stub's exit
+			}{
+				{"stop-task-never-runs", 30, 35}, // a task never seen running: 30 s to appear, no longer
+				{"stop-task-hangs", 90, 95},      // a task that never finishes: 90 s, no longer
+				{"crash", 4, 29},                 // a task that finishes after three Running reads: soon, well inside both bounds
+			} {
+				r := runSeatCmdCost(t, host, tc.scn, cost, nil)
+				if got := r.cleanupSeconds(); got < tc.min || got > tc.max {
+					t.Errorf("%s at a read cost of %s s: the stub spent %d s on the stop task, want %d to %d:\n%s", tc.scn, cost, got, tc.min, tc.max, r.Calls)
 				}
-			}
-			if from < 0 {
-				t.Fatalf("%s: the stop task was never started:\n%s", tc.scn, calls)
-			}
-			sleeps, reads := 0, 0
-			for _, l := range lines[from:] {
-				if strings.HasPrefix(l, "sleep ") {
-					sleeps++
-					if l != "sleep 2" {
-						t.Errorf("%s: the cleanup polled with %q, want a 2 s interval:\n%s", tc.scn, l, calls)
-					}
-				}
-				if strings.HasPrefix(l, "read-stop-task ") {
-					reads++
-				}
-			}
-			if sleeps != tc.reads || reads != tc.reads {
-				t.Errorf("%s: %d sleeps and %d reads after the stop task started, want %d of each:\n%s", tc.scn, sleeps, reads, tc.reads, calls)
 			}
 		}
 	})
@@ -405,7 +427,7 @@ func TestSeatCmdStopMarksAnUnloadForTheStub(t *testing.T) {
 		host := host
 		t.Run(strings.TrimSuffix(filepath.Base(host), ".exe"), func(t *testing.T) {
 			t.Run("the stop task is started, the unload is marked, and the exit is 0", func(t *testing.T) {
-				r := runStub(t, host, "seat-cmdstop.ps1", "cmdstop", nil)
+				r := runStub(t, host, "seat-cmdstop.ps1", "cmdstop", defaultReadCost, nil)
 				if countLines(r.Calls, "start-task vllm-seat-stop-pp3") != 1 || !strings.HasSuffix(strings.TrimSpace(r.Calls), "exit=0") {
 					t.Fatalf("cmdStop must start the stop task once and exit 0:\n%s", r.Calls)
 				}
@@ -417,7 +439,7 @@ func TestSeatCmdStopMarksAnUnloadForTheStub(t *testing.T) {
 				}
 			})
 			t.Run("a marker that cannot be written does not stop the stop", func(t *testing.T) {
-				r := runStub(t, host, "seat-cmdstop.ps1", "cmdstop-marker-unwritable", func(dir string) {
+				r := runStub(t, host, "seat-cmdstop.ps1", "cmdstop-marker-unwritable", defaultReadCost, func(dir string) {
 					if err := os.Mkdir(filepath.Join(dir, stopMarker), 0o755); err != nil {
 						t.Fatal(err)
 					}

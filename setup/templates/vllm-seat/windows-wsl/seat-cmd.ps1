@@ -26,8 +26,8 @@ $stopMarker = Join-Path '__SEAT_DIR__' "seat-stop-requested-$Seat"
 # llama-swap starts the seat again on the next request, as it always did, and an idle seat stays unloaded. It runs for a
 # CRASH only. After an unload (the marker is there) the stop task has already run through cmdStop, and a second run would
 # wake a distro that had powered itself off, only to find nothing, and delay the exit that completes the unload. It WAITS
-# for the stop task (bounded: 45 x 2 s; a task never seen running gets 30 s to appear), so the next start does not overlap
-# it: a stop that ran late could stop the MP server the next start had just begun. It does nothing while the seat's own
+# for the stop task (bounded: 90 s by the clock; a task never seen running gets 30 s to appear), so the next start does not
+# overlap it: a stop that ran late could stop the MP server the next start had just begun. It does nothing while the seat's own
 # start task is still running: a live launcher owns the seat then, and nothing in the distro is a leftover. A failure only
 # logs; the exit that follows is the same. Once the stop task has been seen to finish, its last result is read and logged:
 # seat_stop.sh exits 1 when a process of the seat survived SIGKILL or the engine port is still bound, wscript hands that
@@ -50,14 +50,25 @@ function Invoke-CrashCleanup {
   }
   "[$(Get-Date -Format s)] crash cleanup: $stopTask started (seat_stop.sh reaps the dead generation's workers and MP server)" | Out-File -Append $log
   # A task that has not started yet reads as not-Running: wait to SEE it run before believing it is done, and give a
-  # Task Scheduler that is slow to start it 30 s to do so.
+  # Task Scheduler that is slow to start it 30 s to do so. Both bounds are seconds of the clock: a read of a scheduled task
+  # takes about a second under Windows PowerShell 5.1 (measured), so counting rounds of a 2 s sleep spent half as long again
+  # as the log strings and the ADR say. The round count only guards against a clock that never moves.
   $seen = $false
-  for ($i = 1; $i -le 45; $i++) {
+  $t0 = Get-Date
+  for ($i = 1; $i -le 200; $i++) {
     Start-Sleep 2
     $s = (Get-ScheduledTask -TaskName $stopTask -ErrorAction SilentlyContinue).State
-    if ($s -eq 'Running') { $seen = $true; continue }
+    $waited = [int]((Get-Date) - $t0).TotalSeconds
+    if ($s -eq 'Running') {
+      $seen = $true
+      if ($waited -ge 90) {
+        "[$(Get-Date -Format s)] WARN: the crash cleanup was still running after 90 s - exiting anyway" | Out-File -Append $log
+        return
+      }
+      continue
+    }
     if ($seen) {
-      "[$(Get-Date -Format s)] crash cleanup finished after about $($i * 2) s (task state=$s)" | Out-File -Append $log
+      "[$(Get-Date -Format s)] crash cleanup finished after about $waited s (task state=$s)" | Out-File -Append $log
       $r = $null
       try { $r = (Get-ScheduledTaskInfo -TaskName $stopTask -ErrorAction Stop).LastTaskResult } catch {
         "[$(Get-Date -Format s)] could not read the stop task's result: $($_.Exception.Message)" | Out-File -Append $log
@@ -67,12 +78,12 @@ function Invoke-CrashCleanup {
       }
       return
     }
-    if ($i -ge 15) {
+    if ($waited -ge 30) {
       "[$(Get-Date -Format s)] WARN: the stop task was not seen running in 30 s (state=$s) - exiting anyway; a stop that starts late may overlap the next start" | Out-File -Append $log
       return
     }
   }
-  "[$(Get-Date -Format s)] WARN: the crash cleanup was still running after 90 s - exiting anyway" | Out-File -Append $log
+  "[$(Get-Date -Format s)] WARN: the crash cleanup wait ended after 200 rounds without a verdict (the clock did not move?) - exiting anyway" | Out-File -Append $log
 }
 "[$(Get-Date -Format s)] start requested" | Out-File -Append $log
 try { Start-ScheduledTask -TaskName $task -ErrorAction Stop } catch {
