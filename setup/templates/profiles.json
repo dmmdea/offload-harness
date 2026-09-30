@@ -14,11 +14,15 @@
     "include_qwen35_9b": "whether the Qwen3.5-9B AGENT seat renders into the serving yaml (entry + swappable-set membership) and its GGUF joins the install download set. Mirrors the include_qwen35_4b mechanism, one weight class up: a 5.6GB agent seat for the 8GB tiers (6344 MiB at 16K / 6696 MiB at 32K, measured on the blackwell-8 reference box 2026-08-22). MUTUALLY EXCLUSIVE with include_qwen35_4b - both entries claim the agent-seat alias, and the renderer refuses a tier that sets both.",
     "include_mimo_9b": "whether the mimo-9b-agent seat (XiaomiMiMo/MiMo-V2.6-Distill-Qwen-9B, bartowski GGUF Q4_K_M) renders into the serving yaml (entry + swappable-set membership) and its GGUF joins the install download set. A SECOND 8GB-class agent seat measured 2026-09-24 a coin-flip quality tie against include_qwen35_9b (18/18 shape B x6 both 8GB reference boxes; shape C 5/5 vs 4/5, splitting by box) with a smaller VRAM footprint at the same 65536 window. It claims the SAME agent-seat alias as include_qwen35_4b and include_qwen35_9b, but pairing it with EITHER is no longer a render refusal (2026-09-24, the amd-gcn onboarding, superseding the 4B refusal shipped with this seat's own introduction): the smaller entry stays rendered as the tier's un-aliased ROLLBACK seat (the renderer moves the shared agent-seat alias to mimo-9b-agent via that entry's own __Q354B_AGENT_ALIAS__/__Q359B_AGENT_ALIAS__ token). REQUIRES llama.cpp >= b11102 (upstream llama.cpp #29319 - an older build misroutes MiMo's compact tool-call XML to the Qwen3-Coder parser and every tool call runs to the token cap). On a Vulkan UMA tier (amd-gcn) the rendered entry serves the TIER's own window/KV/flash-attn (__CTX__/__KV_K__/__KV_V__/__FLASH_ATTN__), not the literal 65536/q8_0 pin the CUDA 8GB tiers measured on their fixed-VRAM cards — see llama-swap.linux-vulkan.yaml.",
     "moe_26b": "gpu (-ngl 99, experts on GPU) | cpu_moe (--cpu-moe, experts in RAM) | drop (omit 26B). When cpu_moe, install.ps1 drops the 26B if ram_tier is low/min (no RAM path).",
+    "n_cpu_moe": "optional, with moe_26b n_cpu_moe: the N of `--n-cpu-moe N`, the top N expert layers of the 26B placed in host RAM (the rest on the GPU). Refused at render when it names no N (that renders the every-expert `--cpu-moe`) or when it exceeds n_cpu_moe_max.",
+    "n_cpu_moe_max": "optional: the tier's MEASURED spill (INV-1, register H-01): the most expert layers a measurement showed may be placed in host RAM. A separate number from n_cpu_moe on purpose - the placement a tier ships and the ceiling its measurement supports are two decisions, and one field cannot check itself. `install render` refuses a config whose `--n-cpu-moe` exceeds it; 0 or absent means the tier recorded no measured spill, so none is sanctioned. No shipped tier declares one.",
     "flash_attn": "on|off -> --flash-attn.",
     "backend": "the llama-swap.<os>-<backend> template this profile renders from (cuda|vulkan|cpu|dual-cuda; rk3588 is the Rockchip RK3588 SoC, Linux only: llama.cpp on Vulkan for the tier's GPU entry plus rkllm NPU seats, from a template that lists only models that fit its shared-RAM budget).",
     "dual_resident": "dual-gpu only: render two models resident (no shared exclusive swap group).",
     "gpu_env": "env vars added to EVERY model in the rendered serving config, appended after whatever the template already declares. Was an `if ($profileId -match '^blackwell-')` branch inside install.ps1, so a Linux install of the same tier silently did not get it. CUDA_VISIBLE_DEVICES pins the device (hybrid-graphics can resolve the default to -1); CUDA_MODULE_LOADING=LAZY is llama.cpp #22696.",
     "media_seats": "ALIAS-backed media capabilities this tier serves, rendered into BOTH the llama-swap models map and the harness config binding that routes to them (internal/mediaseat). Each seat: kind (vision|stt|ocr|rkllm), name (the llama-swap model id AND the binding value), aliases, model/mmproj/vad_model (relative to the models dir), bin + lib_dir for a seat that is not llama-server (may carry __OFFLOAD_HOME__/__EXE__), ctx_size (vision runs its own smaller window), residency (swappable|resident - a ROLE, since group names are per-template), ttl. An rkllm seat is an NPU LLM/VLM served by the Rockchip RKLLM runtime, not llama-server: it takes model (a .rkllm), an optional vision_encoder (a .rknn under the models dir; with one the seat is a VLM and writes vision_model, without one it is a chat model and writes nothing), ctx_size and cpu_mask (hex, default 0x0f = the A55 cluster; at least 3 bits, the runtime refuses fewer than the SoC has NPU cores), and bin defaults to the launcher the rknpu accelerator ships. A tier declaring NO seat leaves vision_model/stt_model empty and the route honestly defers. FILE-backed media (image/video/music) is NOT here - those are spawn-per-job subprocesses under the GPU lease, seeded via config_seed and derived by internal/mediacap.",
+    "vllm_seat": "optional: the tier's persistent vLLM AGENT-LANE seat (ADR 0035, 0048, 0049) - one declaration renders the llama-swap entry, the start/stop wrappers and unit, and the harness config bindings (agent_model, vllm_seats, the kv_cache_server binding). It renders only when the box has the hand-built venv and the weights, else the tier falls back to fallback_agent_model with the reason printed. storeless_reason is the MEASURED reason the seat has no cache server; it is carried verbatim into its kv_cache_server binding and is refused beside a cache_server.",
+    "extra_vllm_seats": "optional, needs vllm_seat: the tier's further vLLM seats (ADR 0048 Amendment 2): on-demand seats served beside the lane seat on the SAME card, never the agent lane (agent_model, the fallback and every bound-lane field are refused on one). Each is validated like the lane seat minus the fallback, must share its card, and must not repeat any id, alias or unit. Each renders only when the box has the venv and ITS weights; an active one joins the box's vllm_seats roster with its own kv_cache_server binding, and the layer that names it (by id or alias) is seeded only while it is - a layer whose vLLM seat is absent is dropped, and a layer set that loses `single` seeds none. The renderer emits every vLLM seat of a tier as an ALTERNATIVE of the others in the residents set (two seats at util 0.90 cannot share a card). A layer seat naming a vLLM seat must equal its max_model_len as ctx_tokens (and its max_num_seqs as max_inflight, when set). The installer renders the seat's llama-swap entry; its systemd unit, its wrapper scripts (named after the unit: <unit>-run.sh, <unit>-cmd.sh, <unit>-cmdstop.sh) and its polkit rule are the operator's.",
     "composes": "COMPOSITE TIERS (ADR 0039, 0.116.0): the tier ids this tier is a COMPLETE instance of at the same time (blackwell-3x16 composes blackwell-16 and blackwell-2x16). Every id must be a tier in this table, none may be composite itself, and a tier never composes itself. Seeded into config as tiers = composes + this id and tier_profile = this id (internal/tierseed.Resolve); health and offload_status advertise them. Requires layers - composes without layers seeds nothing and is refused at parse.",
     "layers": "COMPOSITE TIERS: the device layers this box places work onto, seeded VERBATIM into config.layers and validated at parse (Doc.Validate) and at resolve (config.ValidateLayers). KEYS ARE STRICT: every layers[] / layers[].seats[] key must be one documented below, spelled exactly - a key the decoder cannot match is refused by tier and JSON path at parse (tierseed.ParseDoc, so the installer's embedded copy too) and at config load (config.ValidateLayerKeys), never dropped to a 0 that turns a fail-closed guard fail-open. A box whose config carries no layers has one implicit layer and is byte-identical on every result, health, status and ledger surface. ONE placement rule (internal/placement.Decide) reads these at runtime on the box, on the delegator for a remote node's advertised layers, and again at admission on the node.",
     "layers[].name": "the layer id placement records and a contract may request (`layer` on the wire): single | pair | triple | display. Unique per box, ^[a-z0-9_-]{1,32}$.",
@@ -936,10 +940,69 @@
         "agent_seat_tok_s": 7.17,
         "fallback_agent_model": "qwen3.5-4b-agent",
         "fallback_agent_ctx_tokens": 131072,
+        "storeless_reason": "MEASURED 2026-09-18 (register B-01): LMCache 0.5.5 clears the vLLM-0.29 kv_layout blocker and the fs_native L2 writes on the A2, and an MP tier (L1 8 GB, chunk 1568) served 27 % of the digest set's prompt tokens back across an engine restart - but on this 16 GB card at util 0.90 the tier's own CUDA context (~690 MiB) plus the resident embedder left tens of MiB: the engine OOMed under a 32-way fan-out and under one 24k prefill, and the restart rerun failed 6/8 verifications on the e5m2 restore path without the #4253 overlay (fidelity open; follow-up leg queued). Storeless until the overlay leg at util 0.85 restores the needle exactly and passes the digest rerun; then binding = a util decision (0.85 costs ~5 % of the 1.37x pool).",
         "measured": "NVIDIA A2 16 GB (Lenovo M720q, 40 W / 1200 MHz lock), vLLM 0.29.0 + the checkpoint's embedding patch, 2026-09-16. Qwen3.8-27B 3-bit GSQ (ISTA-DASLab; transformer 3-bit g128, embedding+LM head 4-bit RTN g64) = 11.85 GB, the ONLY published vLLM-loadable 27B that fits a 16 GB card -- every W4A16/AWQ/GPTQ build is 19.45-19.56 GB because it leaves the ~248k-vocab embedding at high precision. BOUND OPERATING POINT (operator decision D5 = A, 2026-09-16): max_model_len 32,768 at util 0.90 -- KV 1.75 GiB = 43,690 tokens (1.33x), 13,852 MiB alone, and the mem0 embedder answers HTTP 200 beside it idle AND under 4-stream load (card peak 14,623 of 15,356 MiB); single-stream 7.17 tok/s, TTFT p50 1.66 s, 4-stream aggregate 20.36 tok/s (0 failed); blind quality at this window 8.42 (accuracy 9.54, zero fabrications; the llama.cpp IQ3_S+MTP arm 9.28). Why not the seat's own shape: alone it serves 49,152 at util 0.92 (KV 2.46 GiB = 65,967 tokens, 1.34x; 65,536 refused; blind 8.35; single-stream 5.75, 4-stream 19.53 tok/s) but holds 14,694 of 15,356 MiB, and the support group's embedder then returns HTTP 500 -- every mem0 write failed while the seat was warm; at util 0.90 vLLM refuses 49,152 (estimated maximum 32,928). The bound-lane fields are the config the digest-8 gate passed 8/8 at (3/8 at the 300 s wire default -- timeouts only, no wrong answers); agent_seat_tok_s 7.17 (the single-stream rate MEASURED at this operating point; 5.75 was the 49,152 @ 0.92 shape's) seeds the D-03 auto wall because no completion reaches the 1,024 tokens a rate sample needs. Cache server: BLOCKED, not chosen (D-117) -- LMCache 0.5.4's MP connector rejects vLLM 0.29's kv_layout. Records: 'Benchmarks and Optimizations/2026-09-16-16gb-tier-pass/' (judge-27b-49k, live-cutover/).",
         "engine_min_version": "0.29.0",
         "engine_patch": "patch_vllm_qwen35_embedding.py (shipped in the checkpoint; vLLM builds a plain VocabParallelEmbedding for Qwen3.5 otherwise)"
       },
+      "extra_vllm_seats": [
+        {
+          "id": "qwen36-35b-a3b-gsq-vllm",
+          "aliases": [
+            "a2-pool-35b",
+            "qwen36-35b-gsq"
+          ],
+          "unit": "vllm-35b-seat",
+          "port": 18797,
+          "device": "0",
+          "model_repo": "hub/models--ISTA-DASLab--Qwen3.6-35B-A3B-2Bit-GSQ",
+          "max_model_len": 32768,
+          "gpu_memory_utilization": 0.9,
+          "max_num_seqs": 8,
+          "max_num_batched_tokens": 4096,
+          "kv_cache_dtype": "fp8_e5m2",
+          "tool_call_parser": "qwen3_coder",
+          "reasoning_parser": "qwen3",
+          "ttl_seconds": 300,
+          "storeless_reason": "MEASURED 2026-09-18 (register B-01): the 0.5.5 MP tier (chunk 2096) registered and served 8/8 on a fresh store (2.9 % external hits, total 227 s vs 117 s no-tier) and its L2 wrote 26 pages, but the restart rerun died at the first requests with CUDA OOM (11.9 MiB free) at util 0.90 with the MP CUDA context resident - the same VRAM cost as the 27B. Storeless with this reason until a util <= 0.85 tier arm passes fill + rerun + needle; the seat's 3.73x pool already covers the digest set with 0 preemptions.",
+          "measured": "The ampere-16 reference box (NVIDIA A2 16 GB, 40 W / 1200 MHz lock), vLLM 0.29.0 with NO checkpoint patch (the native Humming W2A16 path loads this 2-bit GSQ MoE), 2026-09-18, register A-100. Qwen3.6-35B-A3B 2-bit GSQ (ISTA-DASLab; 35B total / 3B active, gated-delta-net hybrid). OPERATING POINT: max_model_len 32,768 at util 0.90, eight sequences in flight - KV pool 77,451 tokens, 11.7 GiB on the card alone; 40.8 tok/s single-stream and 170 tok/s across 8 streams. WHAT IT IS FOR: the tier's fast DIGEST layer, not a second general seat. On the digest-8 gate it finishes in 164.8 s against the 27B's 1,597.8 s (8/8, zero fabrications on the grounded set), but judged blind its coverage is 4.65 against the 27B's 8.53 - faithful and shallow - so the 27B stays the single layer's agent, and this seat is reached only by naming the layer or the model: never a seat swap, never the free choice. IT CANNOT SHARE THE CARD with the 27B (11.85 + 11.2 GB of weights against 15.4 GB usable): the two swap in about 50-70 s, so the renderer emits every vLLM seat of a tier as an alternative of the others. WHAT THE INSTALLER DOES NOT DO FOR IT: its production launch line carries --language-model-only, which the shared linux-systemd run script cannot express, so this seat's systemd unit, its wrapper scripts (vllm-35b-seat-run.sh, vllm-35b-seat-cmd.sh, vllm-35b-seat-cmdstop.sh) and its polkit rule are installed by the operator (docs/systems/composite-tier.md) while the installer renders its llama-swap entry and seeds its layer. Cache server: storeless by measurement (register B-01), see storeless_reason."
+        }
+      ],
+      "layers": [
+        {
+          "name": "single",
+          "tier": "ampere-16",
+          "devices": [
+            "0"
+          ],
+          "seats": [
+            {
+              "role": "agent",
+              "model": "qwen38-27b-gsq-vllm",
+              "device": "0",
+              "ctx_tokens": 32768,
+              "footprint_gib": 13.9
+            }
+          ]
+        },
+        {
+          "name": "fast",
+          "tier": "ampere-16",
+          "devices": [
+            "0"
+          ],
+          "seats": [
+            {
+              "role": "agent",
+              "model": "qwen36-35b-a3b-gsq-vllm",
+              "device": "0",
+              "ctx_tokens": 32768,
+              "max_inflight": 8,
+              "footprint_gib": 11.7
+            }
+          ]
+        }
+      ],
       "ctx_size": 131072,
       "kv_type": "q8_0",
       "agent_ctx_tokens": 131072,

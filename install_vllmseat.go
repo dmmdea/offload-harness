@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/dmmdea/offload-harness/internal/hwdetect"
+	"github.com/dmmdea/offload-harness/internal/tierseed"
 	"github.com/dmmdea/offload-harness/internal/vllmseat"
 )
 
@@ -92,6 +94,73 @@ func vllmSeatFor(p servingProfile, home string, f vllmRuntimeFlags) (*vllmseat.S
 		return skip(err.Error())
 	}
 	return &resolved, rt
+}
+
+// extraVLLMSeatsFor is vllmSeatFor for a tier's EXTRA seats (`extra_vllm_seats`): each one
+// renders only when THIS box can run it — the hand-built venv plus that seat's own weights,
+// the same detection the lane seat gets, with the same deployment inputs. A seat that cannot
+// run is skipped with the reason printed, and the layer it backs is left out of the seeded
+// layers (tierseed.ResolveLayers), so the box never advertises a seat it cannot serve. The
+// lane seat's presence is irrelevant here: the seats are independent prerequisites.
+//
+// What the installer renders for an extra seat is its llama-swap ENTRY (the render's job);
+// its systemd unit and wrapper scripts are NOT rendered, because the seat's launch line
+// carries flags the shared unit template cannot express (the 35B's `--language-model-only`).
+func extraVLLMSeatsFor(p servingProfile, home string, f vllmRuntimeFlags) []*vllmseat.Spec {
+	var out []*vllmseat.Spec
+	if len(p.ExtraVLLMSeats) == 0 {
+		return nil
+	}
+	rt := f.resolve(home)
+	for _, e := range p.ExtraVLLMSeats {
+		s := e
+		skip := func(why string) {
+			fmt.Fprintf(os.Stderr, "NOTE  extra vLLM seat %q not rendered (%s); the layer it backs is not seeded\n", s.ID, why)
+		}
+		if home == "" {
+			skip("no --home, so the seat's paths cannot be resolved")
+			continue
+		}
+		if rt.User == "" || rt.ProxyHost == "" {
+			skip("--vllm-user and --vllm-proxy-host were not supplied")
+			continue
+		}
+		if ok, why := s.Detect(rt); !ok {
+			skip(why)
+			continue
+		}
+		resolved, err := s.Resolve(rt)
+		if err != nil {
+			skip(err.Error())
+			continue
+		}
+		out = append(out, &resolved)
+	}
+	return out
+}
+
+// detectVLLMSeats is the ONE prerequisite detection `install seed` and `audit-config` share:
+// whether this box can run the tier's lane seat and each of its extra seats. It mirrors what
+// `install render` decides (vllmSeatFor / extraVLLMSeatsFor) minus the two deployment flags
+// only the render needs, so the binding and the rendered llama-swap entry agree by
+// construction — pass the same venv and HF home to both, or the config will name a model
+// llama-swap never serves. Every skip is said out loud, on note.
+func detectVLLMSeats(p tierseed.Profile, rt vllmseat.Runtime, note io.Writer) (lane bool, extras map[string]bool) {
+	extras = map[string]bool{}
+	if p.VLLMSeat != nil {
+		var why string
+		if lane, why = p.VLLMSeat.Detect(rt); !lane {
+			fmt.Fprintf(note, "NOTE  vLLM agent seat %q unavailable (%s); binding %s\n", p.VLLMSeat.ID, why, p.VLLMSeat.Fallback)
+		}
+	}
+	for _, e := range p.ExtraVLLMSeats {
+		ok, why := e.Detect(rt)
+		extras[e.ID] = ok
+		if !ok {
+			fmt.Fprintf(note, "NOTE  extra vLLM seat %q unavailable (%s); the layer it backs is not seeded\n", e.ID, why)
+		}
+	}
+	return lane, extras
 }
 
 // runInstallVLLMSeat writes the systemd unit, the two llama-swap wrappers, the run
@@ -223,5 +292,23 @@ func runInstallVLLMSeat(args []string) error {
 			"      reference box's long path produced 268-byte names against NAME_MAX 255, failing every L2 store\n"+
 			"      silently. Mount a short path (the reference deployment uses /hf) before configuring an L2 tier.\n", rt.HFHome)
 	}
+	fmt.Print(extraSeatsNote(p))
 	return nil
+}
+
+// extraSeatsNote says what this command did NOT render for the tier's extra vLLM seats, at the
+// moment the operator is installing seats. The installer renders an extra seat's llama-swap entry
+// (`install render`) and seeds its roster entry, binding and layer (`install seed`), but not its
+// systemd unit, wrapper scripts or polkit rule: its production launch line carries flags the shared
+// unit template cannot express, so those stay the operator's step. "" for a tier with none.
+func extraSeatsNote(p servingProfile) string {
+	var b strings.Builder
+	for _, e := range p.ExtraVLLMSeats {
+		fmt.Fprintf(&b, "NOTE  the tier's extra vLLM seat %s is NOT rendered by this command: its launch line carries flags the shared "+
+			"unit template cannot express.\n"+
+			"      Install its unit (%s.service, no [Install] section), its wrapper scripts (%s-run.sh, %s-cmd.sh, %s-cmdstop.sh) and its "+
+			"polkit rule by hand; docs/systems/composite-tier.md lists exactly what differs from the rendered lane seat.\n",
+			e.ID, e.Unit, e.Unit, e.Unit, e.Unit)
+	}
+	return b.String()
 }

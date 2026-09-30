@@ -197,17 +197,9 @@ func runInstallSeed(args []string) error {
 	// Detect once, here, exactly as install render does. A box without the hand-built
 	// venv binds the seat's declared fallback and says why, rather than advertising an
 	// agent model nothing serves.
-	vllmActive := false
-	if p.VLLMSeat != nil {
-		rt := vllmRuntimeFlags{venv: *vllmVenv, hfHome: *hfHome}.resolve(*home)
-		var why string
-		if vllmActive, why = p.VLLMSeat.Detect(rt); !vllmActive {
-			fmt.Fprintf(os.Stderr, "NOTE  vLLM agent seat %q unavailable (%s); binding %s\n",
-				p.VLLMSeat.ID, why, p.VLLMSeat.Fallback)
-		}
-	}
+	vllmActive, extraActive := detectVLLMSeats(p, vllmRuntimeFlags{venv: *vllmVenv, hfHome: *hfHome}.resolve(*home), os.Stderr)
 	seed, err := tierseed.Resolve(p, *profile, tierseed.Options{
-		Home: *home, GOOS: *goos, RAMTier: *ramTier, VLLMSeatActive: vllmActive,
+		Home: *home, GOOS: *goos, RAMTier: *ramTier, VLLMSeatActive: vllmActive, ExtraVLLMSeatsActive: extraActive,
 	})
 	if err != nil {
 		return err
