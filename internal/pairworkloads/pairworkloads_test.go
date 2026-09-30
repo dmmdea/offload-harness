@@ -87,6 +87,17 @@ func TestEngineFor(t *testing.T) {
 		{"classify", "coral-edgetpu@fleet", "coral-edgetpu"},
 		{"object_detect", "hailo-8l", "hailo-8l"},
 		{"face_detect", "node-c:hailo-8l", "hailo-8l"},
+		{"classify", "rknpu", "rknpu"},
+		{"object_detect", "node-d:rknpu", "rknpu"},
+		{"embed", "rknpu@fleet", "rknpu"},
+		// An rkllm seat is named for its model plus "-npu": the RK3588 NPU serves it, not llama.cpp.
+		{"summarize", "qwen3.5-2b-npu", "rknpu"},
+		{"vqa", "node-d:qwen3.5-2b-npu", "rknpu"},
+		{"summarize", "qwen3.5-2b-npu@fleet", "rknpu"},
+		{"summarize", "npu-chat", "llamacpp"}, // an alias is not the seat's name: only "-npu" reads as the device
+		// The device outranks the task: a transcribe row whose tier is an NPU is that NPU's call,
+		// not a whisper.cpp job.
+		{"transcribe", "rknpu", "rknpu"},
 	}
 	for _, c := range cases {
 		if got := EngineFor(c.task, c.seat); got != c.want {

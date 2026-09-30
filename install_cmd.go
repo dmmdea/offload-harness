@@ -162,6 +162,7 @@ func runInstallSeed(args []string) error {
 	accelerators := fs.String("accelerators", "", "comma-separated accelerator ids from `install detect` (e.g. hailo-8l,coral-edgetpu); their seeds merge over the tier's")
 	hailoHome := fs.String("hailo-home", "", "Hailo repo checkout __HAILO_HOME__ expands to (default: $HAILO_HOME, else <home>/hailo)")
 	coralHome := fs.String("coral-home", "", "Coral sidecar home __CORAL_HOME__ expands to (default: $CORAL_HOME, else <home>/coral)")
+	rknpuHome := fs.String("rknpu-home", "", "RKNPU sidecar home __RKNPU_HOME__ expands to (default: $RKNPU_HOME, else <home>/rknpu)")
 	_ = fs.Parse(args)
 	if *profile == "" {
 		return fmt.Errorf("install seed needs --profile <tier id>")
@@ -216,11 +217,8 @@ func runInstallSeed(args []string) error {
 		if err != nil {
 			return err
 		}
-		accSeed, err := tierseed.ResolveAccelerators(doc.Accelerators, ids, tierseed.Options{
-			Home: *home, GOOS: *goos,
-			HailoHome: homeOr(*hailoHome, "HAILO_HOME", *home, "hailo"),
-			CoralHome: homeOr(*coralHome, "CORAL_HOME", *home, "coral"),
-		})
+		accSeed, err := tierseed.ResolveAccelerators(doc.Accelerators, ids,
+			accelOptions(tierseed.Options{Home: *home, GOOS: *goos}, *hailoHome, *coralHome, *rknpuHome))
 		if err != nil {
 			return err
 		}
@@ -252,6 +250,20 @@ func splitIDs(v string) []string {
 		}
 	}
 	return out
+}
+
+// accelOptions fills every accelerator home of a tierseed.Options: each is its
+// --<device>-home flag ("" when the verb has none), else its environment variable,
+// else <home>/<device> (homeOr). `install seed`, `install plan` and `audit-config`
+// all resolve accelerator seeds, and the resolver refuses a token whose home is
+// empty, so each must supply EVERY device's home — a verb that passed only the
+// Hailo's failed on any box that also lists another device. A new device is one
+// line here.
+func accelOptions(opt tierseed.Options, hailoFlag, coralFlag, rknpuFlag string) tierseed.Options {
+	opt.HailoHome = homeOr(hailoFlag, "HAILO_HOME", opt.Home, "hailo")
+	opt.CoralHome = homeOr(coralFlag, "CORAL_HOME", opt.Home, "coral")
+	opt.RknpuHome = homeOr(rknpuFlag, "RKNPU_HOME", opt.Home, "rknpu")
+	return opt
 }
 
 // homeOr resolves an accelerator home: the flag, else the environment variable,

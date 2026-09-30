@@ -6,6 +6,113 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.145.0] - 2026-09-30 - the operator names the device that serves a shared accelerator tool
+
+### Added — `accelerator_tool_owners` (ADR 0068)
+
+- A box carrying a Coral that reaches the RK3588 NPU through `fleet_accelerators` gave every shared tool
+  name to the Coral, because local devices are walked first (ADR 0037). `accelerator_tool_owners` maps one tool
+  name to the device that serves it — `{"offload_object_detect": "rknpu"}` — and every other name is decided as
+  before. An entry applies only when its device is listed in `accelerators` or `fleet_accelerators` and has that
+  tool; otherwise it is logged at startup and ignored, so a typo never removes a tool. A fleet device may take a
+  name from a local one.
+- Both surfaces apply the same walk: `mcpserver.accelOwnerPlan` computes every owner without registering
+  anything, and MCP registration and status read it; the agent loop's lanes carry the same claims
+  (`AccelLane.Claims`, from `config.ToolOwnerClaims`). `TestToolOwnersLoopMatchesMCP` builds the loop from the
+  real `NewLoopAccel` and checks every name the plan serves is registered once and routed to the same device,
+  for local orders of three devices, local-plus-fleet shapes, spaced keys and duplicate keys.
+- A device id listed twice no longer registers its tools twice on the MCP surface (the registration walk skips
+  a name it has already added instead of relying on the SDK replacing it).
+- Status: each accelerator entry adds `serves`, the tools that device actually registered, beside `owns`.
+
+## [0.144.2] - 2026-09-30 - offload_nim's base is allowlisted, audit first
+
+### Security — a caller-named offload_nim base is checked against an allowlist (security standard L5)
+
+Since 0.143.1 the NVIDIA key reaches only NVIDIA's hosts, but `offload_nim` still sent the PROMPT to any `base`
+a caller named: one prompt-injected call could post session text to a URL of its choosing. The base must now be
+NVIDIA's hosted API, `nim_endpoint`, or an entry of the new `nim_bases` list (scheme, host and port equal; the
+entry's path a prefix on a segment boundary; userinfo never matches). The new `nim_base_policy` follows the house
+standard's audit-then-enforce rule (ADR 0067): `"audit"` (the default) lets any other base run, marks the result
+with `base_policy` and appends a would-refuse row — scheme, host and port only, never the prompt, path or query —
+to `<state_dir>/nim-base-audit.jsonl`; `"enforce"` defers the call before any request leaves. The CLI `nim` verbs
+are operator-typed and unchanged. Tests: the allowlist rules (20 cases), enforce sends zero requests to an unlisted
+base and writes an enforce row without the path or query, audit runs and counts, a listed base runs cleanly under
+both policies; making the allowlist accept everything turns them red.
+
+### Added — doctor shows fleet version skew (security standard L0)
+
+`local-offload doctor` prints one row per `delegate_remotes` node: OK, SKEW (with both versions and the redeploy
+command), UNKNOWN (the node publishes no version) or UNREACHABLE. Informational only, never an exit-code change.
+Parity broke twice on 2026-09-30 within an hour because a merge landed between deploys; the session-start audit
+caught it, and now any session that runs doctor does too. `delegate.NodeView` carries `HarnessVersion` for it.
+
+### Added — the house security standard (ADR 0067) and the bare-client lint
+
+`docs/systems/security.md` is the standard every part of the harness is held to: seven invariants, ten layers
+plus a reliability track, AARM v1.0 R1-R9 as the checklist, promotion from audit to enforce only on counted data,
+and twelve gates that fail when their control is removed. Gate G2 ships with it: `bare_http_client_lint_test.go`
+fails the suite on any new bare HTTP client (ADR 0042 made executable) until the site is reviewed and listed with
+its reason; the first review lists 43 sites, one of them open (`offload_nim`'s caller-named base, next in L5).
+The ADR index row for 0061 now describes the rolling allowance that shipped, not the first draft.
+
+
+## [0.144.1] - 2026-09-30 - the trusted-network flag permits one address, never every interface
+
+### Security — a fleet node could serve its unauthenticated endpoints on every interface after a boot race
+
+`--listen-trusted-network` returned before any check, so it permitted ANY listen address. A Linux unit's
+`--listen "$(tailscale ip -4)":18811` that ran before tailscaled had an address expanded to `:18811` and
+bound every interface instead of failing — one fleet node served its unauthenticated fleet endpoints that
+way until its next restart, and the unit's `Restart=on-failure`, written for exactly that boot race, never
+fired because nothing failed. The flag now permits one specific address: an all-interfaces address (empty
+host, `0.0.0.0`, `[::]` and their spellings) and an address that does not parse are refused with or
+without it (`netguard.AllInterfaces`, now also the rule fleet-ui uses). fleet-serve, local-agent and
+fleet-ui share it. `setup/install.sh`'s unit gains `RestartSec=15`, so the failed start retries until the
+tailnet address exists without hitting systemd's default start limit (a unit without it gives up after five
+quick failures). Tests: the boot-race shape through fleet-serve's own parameter seam, the validator table
+with and without the flag, local-agent's listen guard — each red against the previous validator.
+
+## [0.144.0] - 2026-09-30 - Rockchip RK3588 boards join the fleet as their own tier, serving from the NPU
+
+### Added — the `rockchip-rk3588` tier (ADR 0062)
+
+An RK3588 board (reference: an Orange Pi 5) used to classify as `cpu`, and `fleet-serve` refused to start
+on it: no PCI GPU, no GPU memory source. `hwdetect` now recognises the SoC from the device tree (vendor
+and mainline spellings), a `linux-meminfo` provider advertises MemTotal less `uma_reserve_gib` as the
+node's capacity, and the tier renders from its own template with no CPU seat. Measured on the reference
+board, mainline 7.0 kernel with the out-of-tree rknpu 0.9.8 driver: Qwen3.5-2B W8A8 on the NPU prefills
+22.7 tok/s and decodes 7.71 tok/s with the runtime on the A55 cluster (126.4 / 7.14 on the A76 cluster),
+peak 2,260 MB.
+
+### Added — the `rkllm` seat kind and `accelerators/rknpu/rkllm_server.py`
+
+An OpenAI-compatible server over Rockchip's RKLLM runtime (text and vision, streaming, stop strings, one
+generation at a time; its ctypes structs are checked byte for byte against the vendor header), launched by
+llama-swap per seat with the seat's `cpu_mask`. It guards the host it shares: grammar / JSON-schema requests are
+refused with a 400 (RKLLM cannot constrain decoding, so the client fails over instead of receiving free text),
+at most two requests wait behind the running one (then 503 `busy`), bodies are capped at 16 MiB, and both NPU
+servers raise their `oom_score_adj` so the kernel's OOM killer takes them before the host's own stack. The seat
+ships an 8192 window until its resident size at 16384 is measured.
+
+### Added — the `rknpu` accelerator
+
+A Coral-style sidecar on the RKNN runtime serves `offload_classify_image`, `offload_object_detect` and
+`offload_image_embed` on the NPU (ResNet18 3.58 ms, YOLOv8n and a CLIP image tower; models pinned by
+sha256). Detection reads `DRIVER=RKNPU` from the DRM card on the vendor kernel and from the NPU platform
+devices on mainline, and never matches the in-tree `rocket` driver.
+
+### Changed — a template may leave every model to the tier's seats
+
+The serving audit accepts an empty `models:` map in a raw template that carries an `# offload-seats:`
+directive, and `Render` refuses a result that still serves no model. A set made only of seats no longer
+renders with a leading operator.
+
+### Not added — a GPU entry on the RK3588 Mali
+
+llama.cpp b11270 on Mesa 25.2.8 panvk loads on the Mali-G610, but its first compute submission hits a
+panthor job timeout and `vk::DeviceLostError` for every model and batch size tried. The tier renders no
+llama.cpp entry until that measures clean.
 ## [0.143.1] - 2026-09-30 - the NVIDIA key goes only to NVIDIA's hosts
 
 ### Security — `offload_nim` could send `NVIDIA_API_KEY` to a caller-supplied host

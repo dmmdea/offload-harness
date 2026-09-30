@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/dmmdea/offload-harness/internal/config"
 )
@@ -163,5 +164,22 @@ func TestCallPassesTheNodesDeferThrough(t *testing.T) {
 func TestCallNeedsRemotes(t *testing.T) {
 	if _, err := Call(context.Background(), config.Default(), "coral-edgetpu", "classify", nil); err == nil || !strings.Contains(err.Error(), "delegate_remotes") {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+// A forwarded call is cut off at Budget: the node's cold sidecar spawn, the tool's own timeout and a
+// queued dispatch all have to fit inside it. A device whose per-call default outgrows that would time
+// out at the delegator while its sidecar was still working, so the defaults are held to it here.
+func TestAcceleratorDefaultTimeoutsFitTheBudget(t *testing.T) {
+	const coldSpawn = 45 * time.Second // the Sidecar start window (mcpserver.accelSidecar, pipeline.loopAccelSidecar)
+	def := config.Default()
+	for id, sec := range map[string]int{
+		"hailo-8l":      def.HailoTimeoutSec,
+		"coral-edgetpu": def.CoralTimeoutSec,
+		"rknpu":         def.RknpuTimeoutSec,
+	} {
+		if need := coldSpawn + time.Duration(sec)*time.Second + dispatchTimeout; need >= Budget {
+			t.Errorf("%s: cold spawn + %d s call + dispatch = %s, does not fit accelremote.Budget %s", id, sec, need, Budget)
+		}
 	}
 }

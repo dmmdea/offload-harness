@@ -21,6 +21,8 @@ where the code lives.
   test
 - [systems/media-generation.md](systems/media-generation.md) — image, video, audio, SVG, and editing;
   the GPU lifecycle and model bindings
+- [systems/security.md](systems/security.md) — the house security standard: invariants, layers,
+  gates and promotion by counted data (ADR 0067).
 - [systems/fleet-node.md](systems/fleet-node.md) — `fleet-serve` / `fleet-measure`: the node contract,
   job semantics, VRAM sampling
 - [systems/fleet-overview.md](systems/fleet-overview.md) — `fleet-ui` / `top` / `fleet-smoke`: the
@@ -28,7 +30,7 @@ where the code lives.
 - [systems/node-swap.md](systems/node-swap.md) — `node-swap`: the reusable Windows fleet-node
   binary swap (verify hash, wait idle, backup+rename, restart, verify, auto-rollback), and its
   detached launcher for an SSH-session-proof run
-- [systems/accelerators.md](systems/accelerators.md) — devices beside the GPU tier (hailo-8l NPU):
+- [systems/accelerators.md](systems/accelerators.md) — devices beside the GPU tier (hailo-8l, coral-edgetpu and rknpu):
   detection, seeding, the on-demand sidecar, tool ownership
 - [systems/cache-server.md](systems/cache-server.md) — the optional second-device KV tier for a vLLM seat:
   the `kv_cache_server` block, what it measured, the layout constraint, and the seat templates.

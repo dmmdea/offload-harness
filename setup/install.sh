@@ -67,7 +67,8 @@ Usage: install.sh [options]
                       or the first on PATH)
   --prefix DIR        install root. Default: chosen by `install volumes` — the volume with
                       the most free space, never the OS volume.
-  --llama-bin DIR     directory holding llama-server and its shared objects (required)
+  --llama-bin DIR     directory holding llama-server and its shared objects (required, except on a
+                      tier whose backend is rk3588: the NPU serves there and no llama.cpp runs)
   --llama-bin-cpu DIR directory of a CPU llama-server build: renders the tier's CPU seat family
                       beside its GPU seats (only for a tier that declares alt_backends [cpu])
   --models DIR        directory holding the GGUF files (default: <prefix>/models)
@@ -152,8 +153,14 @@ if [ -z "$PREFIX" ]; then
 else
   say "prefix:    $PREFIX  (given)"
 fi
-[ -n "$LLAMA_BIN" ] || die "--llama-bin is required (the directory holding llama-server and its shared objects)"
-[ -d "$LLAMA_BIN" ] || die "--llama-bin $LLAMA_BIN is not a directory"
+# The tier's serving backend decides whether a llama.cpp build is needed at all: rk3588's template has
+# no llama.cpp entry (the NPU serves), so a board there has no build to point at. Every other tier
+# still needs one. The backend read is best-effort: an unreadable one keeps the requirement.
+BACKEND="$("$BIN" install tier-info --profile "$TIER" --json 2>/dev/null | jq -r '.backend // empty' 2>/dev/null || true)"
+if [ "$BACKEND" != "rk3588" ]; then
+  [ -n "$LLAMA_BIN" ] || die "--llama-bin is required (the directory holding llama-server and its shared objects)"
+fi
+[ -z "$LLAMA_BIN" ] || [ -d "$LLAMA_BIN" ] || die "--llama-bin $LLAMA_BIN is not a directory"
 [ -n "$MODELS" ] || MODELS="$PREFIX/models"
 
 # ---- 3. lay out the tree ----------------------------------------------------
@@ -218,7 +225,8 @@ fi
 # genuinely has none says so on stdout and is not an error.
 if ! SEED="$("$BIN" install seed --profile "$TIER" --home "$PREFIX" --os linux --ram-tier "$RAM_TIER" \
         --vllm-venv "$VLLM_VENV" --hf-home "$HF_HOME_DIR" --accelerators "$ACCELERATORS" \
-        --hailo-home "${HAILO_HOME:-$PREFIX/hailo}" --coral-home "${CORAL_HOME:-$PREFIX/coral}")"; then
+        --hailo-home "${HAILO_HOME:-$PREFIX/hailo}" --coral-home "${CORAL_HOME:-$PREFIX/coral}" \
+        --rknpu-home "${RKNPU_HOME:-$PREFIX/rknpu}")"; then
   die "could not resolve the media seed for tier $TIER"
 fi
 case "$SEED" in *"ships no media"*) SEED='{}'; say "media:     tier $TIER ships none — text only until bound by hand" ;; esac
@@ -263,10 +271,10 @@ else
   # install root, and without it the render REFUSES — after step 4 has already
   # written a config.json binding those seats' aliases.
   "$BIN" install render --profile "$TIER" --os linux --home "$PREFIX" \
-    --ram-tier "$RAM_TIER" \
+    --rknpu-home "${RKNPU_HOME:-$PREFIX/rknpu}" --ram-tier "$RAM_TIER" \
     --vllm-user "$SERVICE_USER" --vllm-proxy-host "$TS_IP" \
     --vllm-venv "$VLLM_VENV" --hf-home "$HF_HOME_DIR" \
-    --llama-bin "$LLAMA_BIN" ${LLAMA_BIN_CPU:+--llama-bin-cpu "$LLAMA_BIN_CPU"} --models "$MODELS" --listen "$LISTEN" --out "$SWAP_YAML"
+    ${LLAMA_BIN:+--llama-bin "$LLAMA_BIN"} ${LLAMA_BIN_CPU:+--llama-bin-cpu "$LLAMA_BIN_CPU"} --models "$MODELS" --listen "$LISTEN" --out "$SWAP_YAML"
 fi
 
 # ---- 5b. the persistent vLLM agent seat (ADR 0035), when this box can run it ----
@@ -317,6 +325,10 @@ Environment=LOCAL_OFFLOAD_CONFIG=$CONFIG
 Environment=OFFLOAD_HOME=$PREFIX
 ExecStart=/bin/sh -c '$PREFIX/bin/local-offload fleet-serve --listen "\$(tailscale ip -4)":18811 --listen-trusted-network --node-id $NODE_ID'
 Restart=on-failure
+# Since 0.144.1 fleet-serve refuses an empty host (":18811" = every interface), so
+# the boot race FAILS and this restart retries until the tailnet address exists;
+# 15 s keeps the retries clear of systemd's default start limit (5 starts in 10 s).
+RestartSec=15
 
 [Install]
 WantedBy=multi-user.target

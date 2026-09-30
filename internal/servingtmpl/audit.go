@@ -51,7 +51,10 @@ func Audit(text string) []Violation {
 	}
 	var out []Violation
 	add := func(rule, where, text string) { out = append(out, Violation{Rule: rule, Where: where, Text: text}) }
-	if len(doc.Models) == 0 {
+	// A template whose every model is a tier seat (rk3588's) has an empty models map until it
+	// is rendered; Render refuses a result that still serves nothing, so the exception cannot
+	// ship an empty config.
+	if len(doc.Models) == 0 && !anchorRe.MatchString(text) {
 		add("models", "top-level", "no models mapping")
 	}
 	for name, m := range doc.Models {

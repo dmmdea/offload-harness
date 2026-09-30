@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 )
 
@@ -17,6 +18,10 @@ type AccelLane struct {
 	// Remote marks a lane that forwards to a fleet node carrying the device
 	// (accelremote, Coral Phase B); the tool descriptions say so.
 	Remote bool
+	// Claims names the tools this lane serves ahead of the listed order
+	// (config accelerator_tool_owners, ADR 0068). A claim on a tool the lane's
+	// table lacks is ignored, so the first-listed rule still decides it.
+	Claims []string
 }
 
 // laneTool is the one adapter shape every accelerator tool takes, on both the
@@ -71,6 +76,25 @@ func coralTools(call NPUFunc) []Tool {
 	}
 }
 
+// rknpuTools is the Rockchip RK3588 NPU's tool table: three capabilities on models the
+// sidecar verifies by sha256, names and schemas equal to the MCP rows. Every name is one the
+// Coral and/or the Hailo lane also owns, so the shared-name rule in accelLaneTools decides who
+// registers it on a box carrying more than one device.
+func rknpuTools(call NPUFunc) []Tool {
+	img := `"image_path":{"type":"string","description":"local image file path (JPEG/PNG)"}`
+	return []Tool{
+		laneTool(call, "offload_classify_image", "classify", "image_path",
+			"Classify an image on the LOCAL Rockchip RK3588 NPU (free, on-box; 1000 ImageNet classes). Returns {results:[{label,score}],best,model,domain} top-k (default 5) or a defer.",
+			`{"type":"object","properties":{`+img+`,"top_k":{"type":"integer","description":"results to return (default 5)"}},"required":["image_path"]}`),
+		laneTool(call, "offload_object_detect", "object_detect", "image_path",
+			"Detect the 80 COCO object classes on the LOCAL Rockchip RK3588 NPU (free, on-box). Returns {objects:[{label,class_id,x,y,w,h,score}],count} in image pixels, sorted by score, or a defer.",
+			`{"type":"object","properties":{`+img+`,"score_threshold":{"type":"number","description":"minimum score (the sidecar's default when omitted)"}},"required":["image_path"]}`),
+		laneTool(call, "offload_image_embed", "embed", "image_path",
+			"IMAGE embedding on the LOCAL Rockchip RK3588 NPU (a CLIP-class image tower) for image-to-image similarity and clustering. Returns {embedding,dim,space,model} or a defer. space names the embedding space — NOT the Hailo's tinyclip and NOT the Coral's efficientnet-edgetpu-s, so vectors from different devices are never comparable, even at the same dimension. No text tower is served.",
+			`{"type":"object","properties":{`+img+`},"required":["image_path"]}`),
+	}
+}
+
 // laneToolsFor maps an accelerator id to its tool table. An unknown id has no
 // table and registers nothing — the loop must never invent tools for a device
 // it has no adapter for.
@@ -80,6 +104,8 @@ func laneToolsFor(id string, call NPUFunc) []Tool {
 		return npuTools(call)
 	case "coral-edgetpu":
 		return coralTools(call)
+	case "rknpu":
+		return rknpuTools(call)
 	}
 	return nil
 }
@@ -90,10 +116,27 @@ func laneToolsFor(id string, call NPUFunc) []Tool {
 // tool whose name is taken is skipped. Lanes come in config.Accelerators order,
 // which is also the order hwdetect.DetectAllAccelerators emits and the order
 // the MCP surface walks — so the two surfaces resolve a shared name identically.
+// A lane's Claims (accelerator_tool_owners, ADR 0068) take their names first,
+// the same override mcpserver.accelOwnerPlan applies.
 func accelLaneTools(lanes []AccelLane, have []Tool) []Tool {
 	taken := map[string]bool{}
 	for _, t := range have {
 		taken[t.Name] = true
+	}
+	// A claim takes the name before the walk, as accelOwnerPlan does on the MCP
+	// surface; the first lane to claim a name keeps it.
+	claimedBy := map[string]string{}
+	for _, lane := range lanes {
+		if lane.Call == nil {
+			continue
+		}
+		tools := laneToolsFor(lane.ID, lane.Call)
+		for _, name := range lane.Claims {
+			has := slices.ContainsFunc(tools, func(t Tool) bool { return t.Name == name })
+			if _, dup := claimedBy[name]; has && !dup && !taken[name] {
+				claimedBy[name] = lane.ID
+			}
+		}
 	}
 	var out []Tool
 	for _, lane := range lanes {
@@ -101,7 +144,7 @@ func accelLaneTools(lanes []AccelLane, have []Tool) []Tool {
 			continue
 		}
 		for _, t := range laneToolsFor(lane.ID, lane.Call) {
-			if taken[t.Name] {
+			if owner, claimed := claimedBy[t.Name]; taken[t.Name] || (claimed && owner != lane.ID) {
 				continue
 			}
 			taken[t.Name] = true

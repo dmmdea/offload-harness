@@ -33,13 +33,17 @@ behaves exactly as before), else the OS's generic source — on Windows the **wi
 WDDM source** (capacity from the display-class registry `qwMemorySize`, usage from the
 `\GPU Adapter Memory` PDH counters), on Linux the **linux-amdgpu sysfs source** (since
 0.130.6: `/sys/class/drm/card*/device/mem_info_vram_*` plus, on a UMA profile, the driver's
-own `mem_info_gtt_*` pool — the real shared budget, not a RAM/2 estimate). Vendor/arch come
+own `mem_info_gtt_*` pool — the real shared budget, not a RAM/2 estimate). A unified-memory
+SoC tier (`rockchip-rk3588`) has no VRAM counter at all, so on Linux it gets the
+**linux-meminfo source** instead: `/proc/meminfo` less the operator's `uma_reserve_gib` —
+capacity is `MemTotal − reserve` and free is `MemAvailable − reserve`, clamped to `[0, capacity]`
+— so the home-automation stack that shares the board keeps its memory. Vendor/arch come
 from the installer's `installed.json` profile, and the UMA memory model from the profile (an
 iGPU advertises carve-out + shared budget as its total, and dedicated+shared as usage). Only
 when **no memory source works** does `fleet-serve` refuse to start: the contract treats
 `vram_total_gb <= 0` as a broken node, and refusing loudly beats advertising an empty GPU.
 The serve log names the resolved source
-(`... via nvidia-smi|windows-generic|linux-amdgpu, vendor=... arch=...`). A **dual-route node**
+(`... via nvidia-smi|windows-generic|linux-amdgpu|linux-meminfo, vendor=... arch=...`). A **dual-route node**
 (ADR 0054: a tier with `alt_backends`, installed with `--llama-bin-cpu`; no tier declares the CPU route since 2026-09-24) advertises `backends`
 in health, primary first (`["vulkan","cpu"]`), and serves the CPU family as `<seat>-cpu` ids —
 a caller picks the route by seat id. Ctrl-C drains: dispatches for a
@@ -284,6 +288,7 @@ source, which has no `gpu_devices[]` to match against. Implementation:
 | `fleet_node_id` | `""` | Node id in `/fleet/health`. Empty = the OS hostname at serve time (`--node-id` overrides). |
 | `fleet_sampler` | `auto` | Per-render VRAM footprint source: `auto` \| `pdh` \| `pdh-shared` \| `global` (see [Sampler modes](#sampler-modes)). |
 | `primary_gpu_uuid` | `""` | Pins the headline `vram_total_gb`/`vram_free_gb` to one card by nvidia-smi UUID, overriding the largest-total rule (see [`primary_gpu_uuid`](#primary_gpu_uuid--pin-the-headline-device-deterministically) above). Empty = unchanged largest-total behavior. |
+| `uma_reserve_gib` | `0` | RAM (GiB) a unified-memory SoC node (the `rockchip-rk3588` tier, whose GPU and NPU share system RAM) holds back from inference for the box's own workload. Health advertises `MemTotal − uma_reserve_gib` as `vram_total_gb` and `MemAvailable − uma_reserve_gib` as `vram_free_gb` (the linux-meminfo source). `0` = advertise all of RAM; the tier seeds `3`. Inert on every other tier, which reads a real VRAM counter. A reserve that leaves no capacity makes `fleet-serve` refuse to start, and a negative one is refused by name. |
 | `fleet_agent_enabled` | `false` | Opts this node into executing fleet **agent** jobs (see [The agent task](#the-agent-task-task_type-agent)). Explicit opt-in: the binding (an agent seat) exists on every tier, the worker ROLE is a per-box decision. Off = the task is not advertised and health is byte-identical to a pre-0.65 node. |
 | `fleet_poll_lease_sec` | `0` (= 60) | How long a pushed agent job may sit `accepted` with nobody polling it before the node treats its delegator as gone: the job is never started and is reaped, and a run that finishes after its poller left stops feeding `recent_agent_wall_sec` and Retry-After. Negative = off; a value under 15 is raised to 15 (the delegator's own gap between polls must fit inside it). A running job is never reaped. See [Taking a job back](#taking-a-job-back-withdraw-and-the-poll-lease). |
 | `fleet_auth_token` | `""` | Bearer token for the **agent lane only** (agent dispatches + polls of agent-created jobs; media stays tokenless in v1). Same value on every node and in the delegator's config. Empty + non-loopback listener = agent dispatches refused 403. |
@@ -300,7 +305,10 @@ rules as `local-agent --serve` apply, enforced by the same shared guard:
 
 - **Loopback is the default** and needs no flag.
 - A non-loopback `--listen` is **refused** unless you pass `--listen-trusted-network`
-  (which prints a loud warning).
+  (which prints a loud warning). The flag permits ONE specific address: an all-interfaces
+  address (`:18811` with an empty host, `0.0.0.0`, `[::]`) is refused even with it (0.144.1), so a
+  unit whose `$(tailscale ip -4)` is still empty at boot fails and its restart retries instead of
+  serving on every interface.
 - Production binding is the machine's **Tailscale address** (e.g. `100.64.0.10:18811` on
   your workstation) — the tailnet is the trust boundary. **NEVER bind `0.0.0.0`**, and never expose
   the port beyond the tailnet.

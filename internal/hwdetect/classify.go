@@ -21,7 +21,8 @@ import "strings"
 // Facts are what a machine reports about itself. Everything the classifier needs and
 // nothing it does not — so it stays pure and testable against synthetic tuples.
 type Facts struct {
-	// Vendor is nvidia|amd|none. Arch is blackwell|ampere|ada|volta|rdna3|gcn|other|none.
+	// Vendor is nvidia|amd|rockchip|none. Arch is
+	// blackwell|ampere|ada|volta|rdna3|gcn|rk3588|other|none.
 	Vendor string `json:"vendor"`
 	Arch   string `json:"arch"`
 	// VRAMGb is the DEDICATED VRAM of the primary GPU. On an AMD iGPU this is the
@@ -30,6 +31,11 @@ type Facts struct {
 	VRAMGb   float64 `json:"vram_gb"`
 	GPUCount int     `json:"gpu_count"`
 	RAMGb    int     `json:"ram_gb"`
+	// UMA marks a GPU with no memory of its own: an SoC whose GPU and NPU allocate
+	// from the same RAM as the CPU. VRAMGb is 0 there and the usable capacity is a
+	// share of RAMGb — which is what separates it from an AMD iGPU, whose BIOS
+	// carve-out is small but real. Carried for the report; it never decides a tier.
+	UMA bool `json:"uma,omitempty"`
 	// GPUName and DriverVersion are carried for the report; they never decide a tier.
 	GPUName       string `json:"gpu_name,omitempty"`
 	DriverVersion string `json:"driver_version,omitempty"`
@@ -195,6 +201,15 @@ func classifyProfile(f Facts) Verdict {
 		return band("amd-gcn", "amd "+orUnknown(arch)+" -> the weakest Vulkan path")
 	}
 
+	// A Rockchip RK3588 has no NVIDIA/AMD adapter, so before this band it fell through
+	// to "cpu" — and a cpu tier renders llama.cpp CPU inference, which no model on this
+	// fleet may run. The NPU serves (RKLLM, through the tier's rkllm seats); the Mali GPU
+	// has no entry until llama.cpp runs clean on it. Ordered after the discrete-GPU bands on
+	// purpose: a card in the M.2 slot is what those bands are written for.
+	if vendor == "rockchip" && arch == "rk3588" {
+		return band("rockchip-rk3588", "rockchip rk3588 SoC (Mali-G610 GPU + 3-core NPU on unified memory) -> NPU serving (RKLLM), never CPU inference")
+	}
+
 	return band("cpu", "no usable GPU detected")
 }
 
@@ -263,11 +278,61 @@ func DetectCoral(read func(path string) (string, error)) []string {
 	return nil
 }
 
+// rknpuUeventPaths are the sysfs files where the Rockchip NPU driver names itself. Which one
+// carries the name depends on the kernel:
+//
+//   - The vendor 6.1 BSP kernel builds the driver in, and its DRM node's device IS the NPU
+//     platform device, so a DRM card's device/uevent holds the line. Which cardN it takes depends
+//     on probe order (the display subsystem is card0 and the NPU card1 on the reference Orange Pi
+//     5, RK3588S), so all four candidates are read.
+//   - A mainline kernel with the out-of-tree rknpu (DKMS) makes the DRM card's device a virtual
+//     /sys/devices/rknpu whose uevent is EMPTY, so the DRM cards say nothing. The line is on the
+//     NPU's three core platform devices instead (RK3588: fdab0000, fdac0000, fdad0000), and any
+//     one of them bound is enough.
+//
+// Linux only; Windows has no sysfs and the read fails.
+var rknpuUeventPaths = []string{
+	"/sys/class/drm/card0/device/uevent",
+	"/sys/class/drm/card1/device/uevent",
+	"/sys/class/drm/card2/device/uevent",
+	"/sys/class/drm/card3/device/uevent",
+	"/sys/bus/platform/devices/fdab0000.npu/uevent",
+	"/sys/bus/platform/devices/fdac0000.npu/uevent",
+	"/sys/bus/platform/devices/fdad0000.npu/uevent",
+}
+
+// rknpuDriverLine is the uevent line that proves the RKNPU driver is bound: the platform
+// driver's name, case-sensitive and whole-line. The mainline in-tree driver binds the same
+// platform devices as DRIVER=rocket and the RKNN runtime does not run on it, so it is
+// deliberately not a match — listing it would register tools whose first call can never succeed.
+const rknpuDriverLine = "DRIVER=RKNPU"
+
+// DetectRknpu reports ["rknpu"] iff one of the candidate uevent files (both kernel layouts, see
+// rknpuUeventPaths) carries the DRIVER=RKNPU line. A successful read alone proves nothing (any
+// DRM card reads, and so does the Mali GPU's), so the driver token is the whole rule; an
+// unreadable candidate is skipped, and no match is "no accelerator", never a failure. read is
+// injected so the rule is testable without a device.
+func DetectRknpu(read func(path string) (string, error)) []string {
+	for _, p := range rknpuUeventPaths {
+		s, err := read(p)
+		if err != nil {
+			continue
+		}
+		for _, line := range strings.Split(s, "\n") {
+			if line == rknpuDriverLine {
+				return []string{"rknpu"}
+			}
+		}
+	}
+	return nil
+}
+
 // DetectAllAccelerators is the union of every device probe, in the order the
-// ids will be listed in config.Accelerators — Hailo first, then Coral. Order is
-// load-bearing: the tool surface's shared-name rule (Coral D5) gives a name to
-// the FIRST listed accelerator that owns it.
+// ids will be listed in config.Accelerators — Hailo first, then Coral, then the
+// RKNPU. Order is load-bearing: the tool surface's shared-name rule (Coral D5)
+// gives a name to the FIRST listed accelerator that owns it.
 func DetectAllAccelerators(run func(args ...string) (string, error), read func(path string) (string, error)) []string {
 	out := DetectAccelerators(run)
-	return append(out, DetectCoral(read)...)
+	out = append(out, DetectCoral(read)...)
+	return append(out, DetectRknpu(read)...)
 }

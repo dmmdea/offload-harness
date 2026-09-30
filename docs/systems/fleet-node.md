@@ -207,7 +207,11 @@ different answers:
 provider** ([ADR 0014](../architecture/decisions/0014-gpu-memory-provider-and-uma-sampling.md)):
 `nvidia-smi` where it works, else the windows-generic WDDM source (registry `qwMemorySize` capacity
 + `\GPU Adapter Memory` PDH usage; UMA iGPUs advertise carve-out + the ~RAM/2 shared budget and
-Dedicated+Shared usage) — a global sampler polling every two seconds either way. There is no
+Dedicated+Shared usage) — a global sampler polling every two seconds either way. On Linux the
+generic source is the amdgpu sysfs probe ([ADR 0053](../architecture/decisions/0053-linux-amdgpu-gpu-memory-provider.md)),
+or, for a unified-memory SoC tier with no VRAM counter (`rockchip-rk3588`), `/proc/meminfo`
+less the operator's `uma_reserve_gib` (`fleetnode.MeminfoUMAProbe`: capacity `MemTotal − reserve`,
+free `MemAvailable − reserve` clamped to `[0, capacity]`). There is no
 per-process path here. A sampling failure keeps the last good snapshot rather than publishing
 zeros, bounded by the 30-second staleness gate.
 
@@ -269,7 +273,12 @@ Full reasoning in [ADR 0008](../architecture/decisions/0008-pdh-primary-vram-sam
 
 Binding beyond loopback requires `--listen-trusted-network`. Note that `:18811` with an empty host is
 treated as non-loopback and refused — see
-[ADR 0005](../architecture/decisions/0005-loopback-only-serve.md).
+[ADR 0005](../architecture/decisions/0005-loopback-only-serve.md). Since 0.144.1 the flag permits one
+specific address only: an all-interfaces address (empty host, `0.0.0.0`, `[::]`) and an address that
+does not parse are refused with or without it (`netguard.AllInterfaces`, shared by fleet-serve,
+local-agent and fleet-ui). The Linux unit's `Restart=on-failure` + `RestartSec=15` then covers the
+boot race where `tailscale ip -4` prints nothing yet: the start fails and retries until the tailnet
+address exists, instead of binding every interface.
 
 ## Dependencies
 
@@ -1320,6 +1329,8 @@ wait after ONE transient error, which is S-08 again, intermittently.
   persistence
 - [`internal/fleetnode/vram.go`](../../internal/fleetnode/vram.go),
   [`vram_windows.go`](../../internal/fleetnode/vram_windows.go) — the two sampling paths
+- [`internal/fleetnode/vram_uma_meminfo.go`](../../internal/fleetnode/vram_uma_meminfo.go) — the
+  linux-meminfo memory provider of a unified-memory SoC tier (`rockchip-rk3588`)
 - [`internal/gpuprobe/`](../../internal/gpuprobe/) — the nvidia-smi command + per-device parser and
   the host free-RAM reader (leaf; fleetnode's `GPUDevice`/`ParseSmiMemoryDevices`/`HeadlineDevice`
   alias it)
