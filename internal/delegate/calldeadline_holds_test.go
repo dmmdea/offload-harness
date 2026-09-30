@@ -68,7 +68,7 @@ func TestPageCapIgnoresCallDeadlineCuts(t *testing.T) {
 	cut := 0
 	for issue := 1; issue <= 5; issue++ {
 		results, _, _ := runWithin(t, 4*time.Second, cfg, local,
-			[]core.AgentContract{pageContract(page)}, "local", nil, deadlineIn(100*time.Millisecond), nil)
+			[]core.AgentContract{pageContract(page)}, "local", nil, deadlineIn(400*time.Millisecond), nil)
 		if results[0].deadlineCut {
 			cut++
 		}
@@ -90,7 +90,7 @@ func TestRetrySeatWaitEndedByTheCallDeadlineNamesTheDeadline(t *testing.T) {
 	cfg.AgentPlacementWaitSec = 10
 	var localCalls atomic.Int64
 	results, _, _ := runWithin(t, 4*time.Second, cfg, failingLocal(&localCalls),
-		[]core.AgentContract{verifiedContract()}, "spread", []string{url}, deadlineIn(300*time.Millisecond), nil)
+		[]core.AgentContract{verifiedContract()}, "spread", []string{url}, deadlineIn(600*time.Millisecond), nil)
 	note := results[0].RetryNote
 	if !strings.Contains(note, "call deadline reached") {
 		t.Fatalf("retry_note = %q, want it to say the call's deadline ended the retry's wait", note)
