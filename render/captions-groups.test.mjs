@@ -4,12 +4,12 @@
 import { test } from "node:test";
 import assert from "node:assert";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import {
-  DEFAULTS, PACES, captionsFromSegments, groupWords, splitForVariable, toWordsJson, wordsFromSegments,
+  DEFAULTS, PACES, captionsFromSegments, groupWords, main, splitForVariable, toWordsJson, wordsFromSegments,
 } from "./captions-groups.mjs";
 
 const HELPER = join(dirname(fileURLToPath(import.meta.url)), "captions-groups.mjs");
@@ -138,6 +138,33 @@ test("wordsFromSegments: a non-speech tag split across tokens is dropped as one 
 
 test("wordsFromSegments: a token with no usable start and end fails loud, naming the segment and the token", () => {
   assert.throws(() => wordsFromSegments([{ id: 4, start: 0, end: 1, words: [tok(" a", 0, 0.5), { word: "b", start: 0.5 }] }]), /segment 4: token 1/);
+});
+
+// whisper-server emits words: [] for a segment it could not align, and a token that is only whitespace now and
+// then. Neither may lose text or crash the pipeline.
+test("wordsFromSegments: a segment whose words[] is empty still yields its text, spread over its span", () => {
+  const words = wordsFromSegments([
+    { id: 0, start: 4, end: 6, text: " spoken anyway", words: [] },
+    { id: 1, start: 6, end: 7, text: " next", words: [tok(" next", 6, 7)] },
+  ]);
+  assert.deepEqual(words.map((x) => x.text), ["spoken", "anyway", "next"]);
+  assert.equal(words[0].start, 4);
+  assert.equal(words[1].end, 6);
+});
+
+test("wordsFromSegments: a token that is only whitespace is never a word, and no empty string reaches the grouper", () => {
+  const segments = [{ id: 0, start: 0, end: 3, words: [tok(" ", 0, 0.1), tok(" a", 0.1, 0.5), tok("  ", 0.5, 0.52), tok(" ", 0.52, 0.54), tok(" b", 0.55, 1.0), tok("\n", 1.0, 1.1)] }];
+  assert.deepEqual(wordsFromSegments(segments), [{ text: "a", start: 0.1, end: 0.5 }, { text: "b", start: 0.55, end: 1.0 }]);
+  assert.deepEqual(captionsFromSegments(segments).groups.map((g) => g.text), ["a b"]);
+  // a segment of nothing but whitespace tokens gives no words at all, and no error
+  assert.deepEqual(wordsFromSegments([{ id: 0, start: 0, end: 1, words: [tok(" ", 0, 0.5), tok("\t", 0.5, 1)] }]), []);
+});
+
+test("wordsFromSegments: overlapping token times stretch a merged word to the latest end, never shrink it", () => {
+  const w1 = wordsFromSegments([{ id: 0, start: 0, end: 2, words: [tok(" abc", 0, 1.5), tok("d", 0.4, 0.6)] }]);
+  assert.deepEqual(w1, [{ text: "abcd", start: 0, end: 1.5 }]);
+  const w2 = wordsFromSegments([{ id: 0, start: 0, end: 2, words: [tok(" abc", 0, 0.5), tok("d", 0.3, 0.2)] }]);
+  assert.deepEqual(w2, [{ text: "abcd", start: 0, end: 0.5 }], "a continuation whose end precedes its start is repaired, not extended backwards");
 });
 
 // A generated transcript in the real token shape, so the invariants hold for shapes nobody thought to write.
@@ -274,6 +301,75 @@ test("groupWords: pure and deterministic — the input is not mutated and the sa
   const b = groupWords(words);
   assert.deepEqual(a, b);
   assert.deepEqual(words, run(9, { gap: 0.05 }));
+});
+
+// --- what real speech does to the break rules ---------------------------------------------------------
+
+test("groupWords: every sentence ender closes a group (. ! ? … ... and one followed by closing quotes or brackets); a stop inside a number or after a comma does not", () => {
+  for (const end of ["done.", "done!", "done?", "done…", "done...", 'done."', "done.'", "done.”", "done.’", "done.)", "done.]", "done?!", "(done.)", "[done.]"]) {
+    const g = groupWords([w("well", 0, 0.3), w(end, 0.3, 0.6), w("next", 0.6, 0.9)]);
+    assert.deepEqual(g.map((x) => x.text), [`well ${end}`, "next"], end);
+  }
+  for (const mid of ["3.5", "v1.2", "well,", "a;", "b:", "end-"]) {
+    assert.deepEqual(groupWords([w(mid, 0, 0.3), w("next", 0.3, 0.6)]).map((x) => x.text), [`${mid} next`], mid);
+  }
+});
+
+test("groupWords: a pause of exactly the gap breaks the group even when float subtraction lands a hair under it", () => {
+  // 1.15 - 1.0 is 0.14999999999999991 in floating point, and the documented boundary is 0.15 s
+  assert.ok(1.15 - 1.0 < 0.15, "the premise: this pair subtracts to just under 0.15");
+  assert.deepEqual(groupWords([w("a", 0, 1.0), w("b", 1.15, 1.5)]).map((x) => x.text), ["a", "b"]);
+  assert.deepEqual(groupWords([w("a", 0, 1.0), w("b", 1.14, 1.5)]).map((x) => x.text), ["a b"], "0.14 s is not a pause");
+});
+
+test("groupWords: a group lasts until its latest word ends, even when a later word's timing sits inside an earlier one", () => {
+  const g = groupWords([w("long", 0, 2.0), w("short", 0.5, 0.9)]);
+  assert.equal(g.length, 1);
+  assert.ok(Math.abs(g[0].end - 2.3) < 1e-9, `the group ends at 2.0 + the 0.3 s linger, not at the last word's 0.9 + 0.3: ${g[0].end}`);
+});
+
+// Every documented option changes what it names, and an option left undefined means the default: a caller
+// that spreads an options object with an unset key must get the defaults, not an error or a silent override.
+test("options: the defaults are the documented ones, undefined means unset, and each option moves only what it names", () => {
+  assert.deepEqual({ lingerSec: DEFAULTS.lingerSec, minHoldSec: DEFAULTS.minHoldSec, gapSec: DEFAULTS.gapSec, maxChars: DEFAULTS.maxChars, precision: DEFAULTS.precision }, { lingerSec: 0.3, minHoldSec: 0.5, gapSec: 0.15, maxChars: 42, precision: 2 });
+  const words = run(12);
+  assert.deepEqual(groupWords(words, { gapSec: undefined, maxWords: undefined, pace: undefined, lingerSec: undefined, minHoldSec: undefined, maxChars: undefined }), groupWords(words));
+  assert.equal(groupWords(words, { gapSec: 0 }).length, 12, "gapSec 0 is legal: every silence, however short, breaks a group");
+  // linger and minimum hold, on two groups far apart so the next start never caps them
+  const apart = [w("a", 0, 0.1), w("b", 5, 6)];
+  const end0 = (o) => groupWords(apart, o)[0].end;
+  assert.ok(Math.abs(end0({}) - 0.5) < 1e-9, "default: 0.1 + 0.3 = 0.4 is under the 0.5 minimum hold");
+  assert.ok(Math.abs(end0({ lingerSec: 2 }) - 2.1) < 1e-9);
+  assert.ok(Math.abs(end0({ lingerSec: 0, minHoldSec: 0 }) - 0.1) < 1e-9);
+  assert.ok(Math.abs(end0({ lingerSec: 0, minHoldSec: 2 }) - 2) < 1e-9);
+  assert.throws(() => groupWords(apart, { lingerSec: -0.1 }), RangeError);
+  assert.throws(() => groupWords(apart, { minHoldSec: -0.1 }), RangeError);
+});
+
+test("captionsFromSegments: variableChars, variableSec, dropNonSpeech and precision each reach the step they name", () => {
+  const base = captionsFromSegments(SEGMENTS);
+  assert.equal(base.chunks.length, 1);
+  // a small character cap forces one group per chunk (each triple is 39 to 40 characters here)
+  const tiny = captionsFromSegments(SEGMENTS, { variableChars: 45 });
+  assert.equal(tiny.chunks.length, base.groups.length);
+  for (const c of tiny.chunks) assert.ok(c.words_json.length <= 45, c.words_json);
+  // a short duration cap splits the same transcript by time, and no caption outlives its chunk
+  const timed = captionsFromSegments(TOKEN_SEGMENTS, { variableSec: 3 });
+  assert.ok(timed.chunks.length > 1, `${timed.chunks.length} chunks`);
+  for (const c of timed.chunks) {
+    assert.ok(c.duration_sec <= 3, `${c.duration_sec} s`);
+    for (const t of JSON.parse(c.words_json)) assert.ok(t[1] <= c.duration_sec + 1e-9);
+  }
+  // non-speech markers are dropped unless asked to stay
+  const tagged = [{ id: 0, start: 0, end: 2, words: [tok(" [", 0, 0.2), tok("MUSIC", 0.2, 0.8), tok("]", 0.8, 1), tok(" go", 1, 1.5)] }];
+  assert.deepEqual(captionsFromSegments(tagged).groups.map((g) => g.text), ["go"]);
+  assert.deepEqual(captionsFromSegments(tagged, { dropNonSpeech: false }).groups.map((g) => g.text), ["[MUSIC] go"]);
+  // precision reaches the variable's numbers (times with four decimals, so each setting shows)
+  const fine = [{ id: 0, start: 0, end: 2, words: [tok(" one", 0.1234, 0.5678), tok(" two", 0.5678, 0.9012)] }];
+  const decimals = (o) => Math.max(...JSON.parse(captionsFromSegments(fine, o).chunks[0].words_json).flatMap((t) => [t[0], t[1]]).map((n) => (String(n).split(".")[1] || "").length));
+  assert.equal(decimals({}), 2);
+  assert.equal(decimals({ precision: 1 }), 1);
+  assert.equal(decimals({ precision: 3 }), 3);
 });
 
 // --- toWordsJson: the variable the template reads ---------------------------------------------------
@@ -430,4 +526,77 @@ test("command line: reads a segments.json and prints the chunks as one JSON docu
   assert.notEqual(fail.status, 0);
   assert.match(fail.stderr, /captions-groups:/);
   assert.notEqual(spawnSync(process.execPath, [HELPER], { encoding: "utf8" }).status, 0, "no file is an error");
+});
+
+// The same command line, called in process through the exported main(), so every flag can be checked for what
+// it changes. Thirteen words at 0.4 s each and no pauses: the groups depend only on the option under test.
+function cli(argv) {
+  const out = [];
+  const err = [];
+  const code = main(argv, { stdout: { write: (s) => out.push(s) }, stderr: { write: (s) => err.push(s) } });
+  return { code, stdout: out.join(""), stderr: err.join("") };
+}
+function cliFixture() {
+  const dir = mkdtempSync(join(tmpdir(), "captions-groups-cli-"));
+  const words = Array.from({ length: 13 }, (_, i) => ({ word: ` w${i + 1}`, start: i * 0.4, end: (i + 1) * 0.4, probability: 0.9 }));
+  const file = join(dir, "clip.segments.json");
+  writeFileSync(file, JSON.stringify([{ id: 0, start: 0, end: 5.2, text: words.map((x) => x.word).join(""), words }]));
+  return { dir, file };
+}
+const doc = (r) => {
+  assert.equal(r.code, 0, r.stderr);
+  return JSON.parse(r.stdout);
+};
+
+test("command line: each flag changes exactly the option it names", () => {
+  const { file } = cliFixture();
+  const sizes = (argv) => doc(cli(argv)).groups.map((g) => g.words);
+  const last = (argv) => doc(cli(argv)).groups.at(-1);
+  assert.deepEqual(sizes([file]), [5, 5, 3], "the default is the conversational pace");
+  assert.deepEqual(sizes([file, "--pace", "punchy"]), [3, 3, 3, 3, 1]);
+  assert.deepEqual(sizes([file, "--pace", "calm"]), [6, 6, 1]);
+  assert.deepEqual(sizes([file, "--max-words", "2"]), [2, 2, 2, 2, 2, 2, 1]);
+  assert.deepEqual(sizes(["--max-words", "4", file]), [4, 4, 4, 1], "a flag may come before the file");
+  assert.deepEqual(sizes([file, "--gap-sec", "0"]), Array(13).fill(1), "every silence breaks a group at 0");
+  assert.deepEqual(sizes([file, "--max-chars", "5"]), [2, 2, 2, 2, 1, 1, 1, 1, 1], "w1 w2 fits five characters, w10 w11 does not");
+  // the last word ends at 5.2 s: the default linger is 0.3 s, the minimum hold 0.5 s
+  const end = (extra) => last([file, "--max-words", "2", ...extra]).end;
+  assert.ok(Math.abs(end([]) - 5.5) < 1e-9, `default linger: ${end([])}`);
+  assert.ok(Math.abs(end(["--linger-sec", "1.5"]) - 6.7) < 1e-9, "--linger-sec moves the end by exactly what it says");
+  assert.ok(Math.abs(end(["--linger-sec", "0"]) - 5.3) < 1e-9, "at 0 the 0.5 s minimum hold (from 4.8 s) is what is left");
+  assert.ok(Math.abs(end(["--linger-sec", "0", "--min-hold-sec", "2"]) - 6.8) < 1e-9, "--min-hold-sec holds a short group to 2 s from its start");
+  assert.equal(doc(cli([file])).template, "captions-bar");
+});
+
+test("command line: --out writes the document to that file and prints nothing", () => {
+  const { dir, file } = cliFixture();
+  const target = join(dir, "chunks.json");
+  const r = cli([file, "--pace", "punchy", "--out", target]);
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(r.stdout, "", "nothing on stdout when --out is given");
+  assert.deepEqual(JSON.parse(readFileSync(target, "utf8")), doc(cli([file, "--pace", "punchy"])));
+});
+
+test("command line: every way to call it wrong exits non-zero with a message that names the problem", () => {
+  const { dir, file } = cliFixture();
+  const bad = join(dir, "bad.json");
+  writeFileSync(bad, "{not json");
+  const fails = (argv, code, re) => {
+    const r = cli(argv);
+    assert.equal(r.code, code, `exit code for: ${argv.join(" ")}`);
+    assert.equal(r.stdout, "", "nothing is printed on failure");
+    assert.match(r.stderr, re, argv.join(" "));
+  };
+  fails([], 2, /^captions-groups: usage: node render\/captions-groups\.mjs <segments\.json>/);
+  fails(["--pace", "punchy"], 2, /usage:/);
+  fails([file, "--nope", "1"], 1, /^captions-groups: unknown flag --nope\n$/);
+  fails([file, "--pace"], 1, /flag --pace needs a value/);
+  fails([file, "--out"], 1, /flag --out needs a value/);
+  fails([file, join(dir, "second.json")], 1, /unexpected argument "/);
+  fails([file, "--max-words", "many"], 1, /flag --max-words needs a number \(got "many"\)/);
+  fails([file, "--pace", "frantic"], 1, /pace "frantic" is not one of punchy, conversational, calm/);
+  fails([file, "--max-words", "0"], 1, /maxWords must be an integer of at least 1/);
+  fails([file, "--gap-sec", "-1"], 1, /gapSec must be a number of at least 0/);
+  fails([join(dir, "missing.json")], 1, /^captions-groups: .*ENOENT/);
+  fails([bad], 1, /^captions-groups: /);
 });
