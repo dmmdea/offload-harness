@@ -86,9 +86,12 @@ by the port it holds, so a foreign listener on the MP HTTP port is refused and l
 **Consequences.** The stub change reaches a box only when the stub is re-rendered and deployed (a hand-edited deployed
 stub is not replaced by a template edit), and `seat_fg.sh` and `seat_stop.sh` only when they are copied into the distro.
 The stop task must never run late: it is waited for so the next start cannot overlap it, and it is skipped while the start
-task is running. That SIGKILL reaps a worker stuck in the GPU driver under WSL2 is not verified; the log names one that
-survives. The live check is the next natural engine death: the seat ready again within 6 minutes, no refusal whose
-holder is the seat's own MP server, and no `VLLM::Worker` process 60 s after the API server exits.
+task is running (if the start task's client lingers after the API server died, the stub cannot tell that from a live
+launcher and skips the cleanup, as it did before this update). The stub's other exits are unchanged: a start that fails
+before the seat answers leaves its leftovers to the next start's cleanup. That SIGKILL
+reaps a worker stuck in the GPU driver under WSL2 is not verified; the log names one that survives. The live check is
+the next natural engine death: the seat ready again within 6 minutes, no refusal whose holder is the seat's own MP
+server, and no `VLLM::Worker` process 60 s after the API server exits.
 
 ## Context
 

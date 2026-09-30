@@ -79,6 +79,28 @@ func TestLauncherReapsTheDeadGenerationBeforeItTouchesTheMPServerOrTheCards(t *t
 	}
 }
 
+// TestSeatEnvDocumentsTheCrashCleanupKnobs keeps the two optional knobs of the crash cleanup honest in both directions:
+// the scripts read them under exactly these names with the documented default, and the seat.env template (the file an
+// operator actually opens) lists them, commented out, so a knob nobody can find is not a knob.
+func TestSeatEnvDocumentsTheCrashCleanupKnobs(t *testing.T) {
+	env, err := os.ReadFile(filepath.Join("..", "..", "setup", "templates", "vllm-seat", "windows-wsl", "seat.env"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := strings.ReplaceAll(string(env), "\r\n", "\n")
+	for _, tc := range []struct{ knob, read, script string }{
+		{"SEAT_REAP_WAIT_SEC", `WAIT="${SEAT_REAP_WAIT_SEC:-10}"`, readSeatStop(t)},
+		{"SEAT_MP_PORT_WAIT_SEC", `MP_PORT_WAIT="${SEAT_MP_PORT_WAIT_SEC:-10}"`, readLauncher(t)},
+	} {
+		if !strings.Contains(tc.script, tc.read) {
+			t.Errorf("the launcher no longer reads %s with a default of 10 (%q missing)", tc.knob, tc.read)
+		}
+		if !strings.Contains(e, "\n#"+tc.knob+"=10\n") {
+			t.Errorf("seat.env does not list %s (commented out, default 10) beside the other optional knobs", tc.knob)
+		}
+	}
+}
+
 // TestSeatStopReapsByIdentityNeverByPort pins the rule behind "a foreign listener is refused, never reaped": the
 // reaping section of seat_stop.sh picks its victims by what they ARE (a VLLM:: process with no live `vllm serve`
 // ancestor; an `lmcache server` of THIS stack's MP port; this stack's unit) and never by which port they hold. It
