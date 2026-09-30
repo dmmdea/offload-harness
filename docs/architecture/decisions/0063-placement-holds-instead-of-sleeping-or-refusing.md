@@ -121,8 +121,17 @@ arithmetic, or an ordering key among seats that already passed the adequacy gate
   deadline is a separate change, and the two ship in that order because an open-ended wait can outlive the
   client's abort.
 - The delegator stops creating the abandoned runs that fed the loop, but it does not clean up the ones
-  already on a node: withdrawing a never-started job is a node-side change. Until nodes carry it, the
-  queue budget and the gate are the whole defence.
+  already on a node by itself: taking a never-started job back is
+  [ADR 0064](0064-a-delegator-takes-back-what-it-has-not-started.md)'s change, and against a node that
+  predates it the queue budget and the gate are the whole defence.
+- The two decisions meet at the queue deadline. The instant is this ADR's (the ETA-derived budget); what the
+  delegator does there is ADR 0064's: it asks the node to take the job back, once. A confirmed withdrawal is
+  filed as a capacity refusal, so it enters this machinery like a 503: the node goes on the run's cooldown
+  for `refusalCooldown` (the withdrawal carries no `Retry-After`), the subtask is re-placed against the wall
+  the first attempt left with the time the job sat queued credited back (once, in `placements.noteRefusal`),
+  and with no candidate it waits in line. It is the one job re-placed after a `202`, because it is the one
+  job the node says it never ran; a capacity defer a remote files after a `202` still never moves. A
+  withdraw the node does not confirm changes nothing, and the row says why after the budget note.
 - One extra health read per queued job (up to three when the node does not answer it), and one per
   re-placement, siblings that refuse together included; no read for a job that starts at once.
 - `maxQueuedWait` stays as the ceiling for a node with no ETA, as the yardstick for a `Retry-After`, and

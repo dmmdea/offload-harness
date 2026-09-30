@@ -527,7 +527,10 @@ side door). The wait is bounded by the config key alone; `agent_lease_wait_sec` 
   as `feasibleFinal`, never a speed preference. A held-out node is read again every tick. A negative
   `queue_wait_estimate_sec` is a node bug and is no opinion (`estimateKnown`), never a confident zero. The refresh
   read is tried again on the next queued poll when it fails (three tries at most), logged, and named in the
-  queue-deadline message if it never succeeded.
+  queue-deadline message if it never succeeded. At that deadline the delegator asks the node to take the job back
+  (ADR 0064, above): a confirmation re-places the subtask, the node cools like any capacity refusal and the time
+  the job sat queued is credited back; anything else leaves the deadline a failure whose text ends with why the
+  withdraw was not confirmed.
 - **The spread deal counts capacity.** No node is dealt more subtasks per run than `max_concurrent_jobs -
   jobs_running` (no floor; an unpublished ceiling is unlimited); a node at its headroom leaves the rotation, the fit
   order and the cycle are untouched, and the overflow goes to the wait. The local seat is counted too

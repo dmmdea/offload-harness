@@ -1509,7 +1509,11 @@ type placements struct {
 	// credit is time this subtask spent WAITING FOR CAPACITY (awaitCapacity):
 	// idle polling, never an attempt. It is not charged to timeout_sec — the
 	// same rule as time provably spent queued on a node — so remaining() adds
-	// it back. Bounded by agent_placement_wait_sec.
+	// it back. The idle polling is bounded by agent_placement_wait_sec. Two spans of
+	// queueing also land here when their attempt is refused (noteRefusal): the time a
+	// job provably sat in the backlog of a node that then took it back (ADR 0064;
+	// bounded by the queue budget) and the admission wait a local capacity defer
+	// already spent in the seat's own line.
 	credit time.Duration
 	// capacityRefusal records that the subtask's trouble is CAPACITY (a node
 	// refused it with a 503/429: queue full, leased, draining, shed; or
@@ -1719,6 +1723,15 @@ const replacementExhaustedPrefix = "placement refused"
 // queue deadline, a poll deadline — leaves a job the node may still hold, and
 // re-placing THOSE would be the delegator arranging a double run. They stay
 // exactly as they were.
+//
+// The one exception is a job the NODE says it never ran (ADR 0064): the queue
+// deadline at which the node confirmed it took the job back (DELETE
+// /fleet/jobs/{id}), and a poll that reads the node's own `reaped` / `withdrawn` /
+// `not started` record. No seat holds such a job and none ever will, so it is filed
+// as the capacity refusal it amounts to (refuseAsWithdrawn, refuseAsNeverRan) and
+// re-placed like any other, with the time it sat queued credited back. A withdraw
+// the node did not confirm changes nothing: the job may still start, so the result
+// stays what it was.
 //
 // The one honest residual: when both dispatch attempts fail at TRANSPORT level
 // (status 0), the first POST may have landed and had its ack lost, so the
@@ -2571,7 +2584,10 @@ func (r *runner) isReplaceable(pr PlacedResult) bool {
 //
 // LOCAL only, on purpose. A capacity defer a REMOTE node files after acking the
 // job is an observed terminal answer of a job that node held; "never re-place
-// after a 202" (placeAndRun) keeps it exactly as it came.
+// after a 202" (placeAndRun) keeps it exactly as it came. The one thing re-placed
+// after a 202 is a job the node itself says it never ran (a confirmed withdrawal, or
+// its own reaped / withdrawn / not-started record: ADR 0064), and that arrives as a
+// refused 503, not as a defer.
 func capacityDeferRefusal(pr PlacedResult) bool {
 	return pr.ranLocal && pr.Err == "" && pr.Result.Deferred &&
 		pr.Result.DeferClass == core.DeferClassCapacity && pr.Result.Steps == 0
