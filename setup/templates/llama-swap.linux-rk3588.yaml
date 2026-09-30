@@ -1,0 +1,79 @@
+# llama-swap.linux-rk3588.yaml — offload-harness on the Rockchip RK3588 (Orange Pi 5 class
+# SoC boards): llama.cpp on the Mali-G610 through the VULKAN backend (Mesa panvk, mainline
+# kernel), plus the NPU seats a tier declares (RKLLM, kind `rkllm`), all on ONE unified-memory
+# budget. Rendered by `local-offload install render`, which substitutes the __CTX__ /
+# __KV_K__ / __KV_V__ / __FLASH_ATTN__ / __CACHE_RAM__ / __LLAMA_BIN__ / __MODELS__ /
+# __NTHREADS__ / __LISTEN__ tokens from the tier and places the seats at the marker below.
+#
+# WHY IT IS NOT llama-swap.linux-vulkan.yaml. That template always renders offload-e4b
+# (~5 GB of weights plus KV) beside its embedder and reranker, and none of it fits this
+# board: the node's inference budget is its RAM less the reserve the host's own workload
+# keeps (uma_reserve_gib, 3 on this tier), about 4.7 GiB of the 7.7 the SoC has. A call to
+# a model that does not fit does not fail cleanly on a unified-memory box — it pushes the
+# host into swap and the OOM killer, on the machine that is also running something else.
+# So this file lists ONLY models that fit, and the tier's config_seed blanks every cascade
+# alias it does not serve (TestEveryBoundAliasIsServed).
+#
+# NO MODEL RUNS ON THE CPU HERE (operator rule, ADR 0054 amendment). Every llama-server
+# entry offloads every layer to the GPU (--n-gpu-layers 999) and pins the Vulkan device;
+# there is no CPU seat family and no `alt_backends`. The NPU seats are not llama.cpp at
+# all: their CPU mask (a per-seat setting) only bounds the runtime's host threads.
+#
+# The one chat entry is gemma4-e2b, the fleet's triage model, and it is a PLACEHOLDER until
+# the GPU path is benchmarked on the board: its speed and quality on panvk are unmeasured,
+# and the model list is the first thing that benchmark is allowed to change.
+#
+# Serving invariants (grammar reliability — do NOT change): --jinja, no MTP, reasoning off.
+# Context size, KV type and flash-attn are PROFILE-DRIVEN, exactly as on linux-vulkan.
+#
+# VULKAN-SPECIFIC AND LOAD-BEARING:
+#   * GGML_VK_VISIBLE_DEVICES=0 pins ONE Vulkan device deterministically. The board has
+#     one GPU, but a software rasteriser can enumerate beside it in varying order; if
+#     `llama-server --list-devices` names the wrong adapter first, change the index.
+#   * The GPU has no memory of its own: RAM is the "VRAM", so -ngl 999 offloads every
+#     layer and the weights are counted against the same budget as everything else.
+#
+# LINUX-SPECIFIC AND LOAD-BEARING: every llama-backed entry carries LD_LIBRARY_PATH
+# pointing at the llama.cpp bin dir (libggml-vulkan.so sits beside the binary); without
+# it the process dies at exec with a loader error that looks nothing like a config problem.
+healthCheckTimeout: 300
+logLevel: info
+listen: __LISTEN__
+
+macros:
+  common: >-
+    --ctx-size __CTX__ --flash-attn __FLASH_ATTN__ --cache-type-k __KV_K__ --cache-type-v __KV_V__ --cache-ram __CACHE_RAM__ __SLOT_SAVE__
+    --threads __NTHREADS__ --jinja --reasoning off --port ${PORT} --host 127.0.0.1
+  ld: "LD_LIBRARY_PATH=__LLAMA_BIN__:${LD_LIBRARY_PATH:-}"
+  vk: "GGML_VK_VISIBLE_DEVICES=0"
+
+models:
+  gemma4-e2b:
+    aliases: [e2b]
+    env: ["${ld}", "${vk}"]
+    cmd: >-
+      __LLAMA_BIN__/llama-server --model __MODELS__/gemma-4-E2B-it-qat-UD-Q4_K_XL.gguf
+      --n-gpu-layers 999 ${common}
+    checkEndpoint: /health
+    ttl: 300
+
+# This template accepts tier-declared media seats. A tier declares a residency ROLE, never a
+# set or group name: those are per-template, while a tier is a hardware class that renders
+# into several templates. The SEATS_SWAPPABLE marker in the set expression below (wrapped in
+# double underscores) says WHERE a seat of that role joins the matrix; this directive says
+# WHICH roles are accepted at all — and this template places SWAPPABLE seats only. It has no
+# resident set (no embedder, no reranker), so a tier that asked for a resident seat is
+# refused by name here rather than having its seat rendered into no set. `env` is the macro
+# a llama-backed seat (a tier's vision seat on the GPU) carries; an `rkllm` seat carries no
+# env at all.
+# offload-seats: swappable env=${ld}
+# RESIDENCY IS DECLARED WITH `matrix:`, NOT `groups:` (llama-swap >= v202; a config uses one
+# or the other, never both). One interactive set of ALTERNATIVES: the GPU chat entry and an
+# NPU seat draw on the same RAM, so they are never co-resident — loading one evicts the
+# other, which is what keeps the host's reserve intact. Co-residency is a measurement this
+# tier has not made.
+matrix:
+  vars:
+    e2b: gemma4-e2b
+  sets:
+    interactive: "e2b__SEATS_SWAPPABLE__"
