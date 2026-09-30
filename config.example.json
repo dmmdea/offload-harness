@@ -254,6 +254,7 @@
   "nim_base_policy": "audit",
   "accelerators": null,
   "fleet_accelerators": null,
+  "accelerator_tool_owners": null,
   "hailo_endpoint": "http://127.0.0.1:18813",
   "hailo_sidecar_cmd": "",
   "hailo_timeout_sec": 60,

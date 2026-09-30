@@ -255,10 +255,28 @@ Hailo-only.
 exactly one owner per box: registration walks `config.Accelerators` **in order** and the first
 listed accelerator that owns a name registers it; a later one is skipped for that name and
 logged once at startup. Both surfaces apply it identically — `mcpserver.registerAccelTools`
-and `agent.accelLaneTools` — and it is tested in both orders. Today no box lists both devices,
-so the rule is a pinned invariant, not a live path. The tool description names the device that
-serves it, and `offload_image_embed` reports `space` so a caller never mixes a 1280-d
+and `agent.accelLaneTools` — and it is tested in both orders. The tool description names the
+device that serves it, and `offload_image_embed` reports `space` so a caller never mixes a 1280-d
 EfficientNet vector with a 512-d TinyCLIP one.
+
+**Naming the owner of one tool ([ADR 0068](../architecture/decisions/0068-the-operator-may-name-the-owner-of-a-shared-accelerator-tool.md), 0.145.0).**
+The rule became a live path when a Coral box added the RKNPU through `fleet_accelerators`: local
+devices are walked first, so the Coral took every shared name. `accelerator_tool_owners` maps a
+tool name to the device that serves it, and only that name moves:
+
+```json
+"accelerators": ["coral-edgetpu"],
+"fleet_accelerators": ["rknpu"],
+"accelerator_tool_owners": {"offload_object_detect": "rknpu"}
+```
+
+Here `offload_object_detect` forwards to the RK3588 node, and `offload_classify_image`,
+`offload_image_embed` and `offload_semantic_segment` stay on the local Coral. An entry applies only
+when its device is listed in `accelerators` or `fleet_accelerators` and has that tool; otherwise it
+is logged at startup and ignored, and the first-listed rule decides. `mcpserver.accelOwnerPlan` is
+the one decision the MCP registration and the status block read; the loop's lanes carry the same
+claims (`AccelLane.Claims`). Each device's status entry lists `serves` (what it registered) beside
+`owns` (what it could).
 
 **Both surfaces, generalised (0.114.0):** the MCP server keeps one per-device table
 (`internal/mcpserver/acceltools.go`) and one on-demand sidecar per device; the agent loop

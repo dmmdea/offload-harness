@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 )
 
@@ -17,6 +18,10 @@ type AccelLane struct {
 	// Remote marks a lane that forwards to a fleet node carrying the device
 	// (accelremote, Coral Phase B); the tool descriptions say so.
 	Remote bool
+	// Claims names the tools this lane serves ahead of the listed order
+	// (config accelerator_tool_owners, ADR 0068). A claim on a tool the lane's
+	// table lacks is ignored, so the first-listed rule still decides it.
+	Claims []string
 }
 
 // laneTool is the one adapter shape every accelerator tool takes, on both the
@@ -111,10 +116,27 @@ func laneToolsFor(id string, call NPUFunc) []Tool {
 // tool whose name is taken is skipped. Lanes come in config.Accelerators order,
 // which is also the order hwdetect.DetectAllAccelerators emits and the order
 // the MCP surface walks — so the two surfaces resolve a shared name identically.
+// A lane's Claims (accelerator_tool_owners, ADR 0068) take their names first,
+// the same override mcpserver.accelOwnerPlan applies.
 func accelLaneTools(lanes []AccelLane, have []Tool) []Tool {
 	taken := map[string]bool{}
 	for _, t := range have {
 		taken[t.Name] = true
+	}
+	// A claim takes the name before the walk, as accelOwnerPlan does on the MCP
+	// surface; the first lane to claim a name keeps it.
+	claimedBy := map[string]string{}
+	for _, lane := range lanes {
+		if lane.Call == nil {
+			continue
+		}
+		tools := laneToolsFor(lane.ID, lane.Call)
+		for _, name := range lane.Claims {
+			has := slices.ContainsFunc(tools, func(t Tool) bool { return t.Name == name })
+			if _, dup := claimedBy[name]; has && !dup && !taken[name] {
+				claimedBy[name] = lane.ID
+			}
+		}
 	}
 	var out []Tool
 	for _, lane := range lanes {
@@ -122,7 +144,7 @@ func accelLaneTools(lanes []AccelLane, have []Tool) []Tool {
 			continue
 		}
 		for _, t := range laneToolsFor(lane.ID, lane.Call) {
-			if taken[t.Name] {
+			if owner, claimed := claimedBy[t.Name]; taken[t.Name] || (claimed && owner != lane.ID) {
 				continue
 			}
 			taken[t.Name] = true

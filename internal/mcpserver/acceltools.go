@@ -244,37 +244,87 @@ func (s *Server) handleAccelTool(id, tool, requiredArg string) mcp.ToolHandler {
 	}
 }
 
-// registerAccelTools walks config.Accelerators IN ORDER and registers each
-// device's table under the shared-name rule (Coral D5): the first listed owner
-// of a name registers it; a later device's same-named tool is skipped and
-// logged once. Today no box lists both devices, so the rule is a tested
-// invariant rather than a live path. Returns the owner map for tests.
+// accelOwnerPlan decides which device serves every accelerator tool name this
+// box can offer, without registering anything (status reads it too). The walk
+// is the shared-name rule (ADR 0037): local devices in config.Accelerators
+// order, then the fleet devices in config.FleetAccelerators order, and the
+// first device whose table has a name owns it. An accelerator_tool_owners entry
+// (ADR 0068) takes a name first when its device is one of those and its table
+// has the name; an entry that cannot apply is returned in ignored and the walk
+// decides that name as if the entry were absent. A fleet owner carries
+// FleetOwnerSuffix.
+func accelOwnerPlan(cfg config.Config) (owner map[string]string, ignored []string) {
+	type dev struct{ id, owner string }
+	var devs []dev
+	for _, id := range cfg.Accelerators {
+		devs = append(devs, dev{id, id})
+	}
+	for _, id := range cfg.FleetAccelerators {
+		if slices.Contains(cfg.Accelerators, id) {
+			continue // the device is here; its local lane owns its names
+		}
+		devs = append(devs, dev{id, id + FleetOwnerSuffix})
+	}
+	serves := func(id, name string) bool {
+		return slices.ContainsFunc(accelMCPTools(id), func(t accelMCPTool) bool { return t.name == name })
+	}
+	owner = map[string]string{}
+	names := make([]string, 0, len(cfg.AcceleratorToolOwners))
+	for name := range cfg.AcceleratorToolOwners {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	for _, raw := range names {
+		name, want := strings.TrimSpace(raw), strings.TrimSpace(cfg.AcceleratorToolOwners[raw])
+		i := slices.IndexFunc(devs, func(d dev) bool { return d.id == want })
+		switch {
+		case i < 0:
+			ignored = append(ignored, name+" -> "+want+": the device is not listed in accelerators or fleet_accelerators")
+		case !serves(want, name):
+			ignored = append(ignored, name+" -> "+want+": the device has no tool of that name")
+		default:
+			owner[name] = devs[i].owner
+		}
+	}
+	for _, d := range devs {
+		for _, t := range accelMCPTools(d.id) {
+			if _, taken := owner[t.name]; !taken {
+				owner[t.name] = d.owner
+			}
+		}
+	}
+	return owner, ignored
+}
+
+// registerAccelTools registers every device's table under accelOwnerPlan: a
+// device registers the names the plan gives it and skips the rest, each skip
+// logged once at startup. Local devices call their loopback sidecar; a device
+// listed only in fleet_accelerators (Coral Phase B, 0.115.0) registers the same
+// table as forwarders through accelremote to the first delegate_remotes node
+// whose health lists it. Returns the owner map for tests.
 func (s *Server) registerAccelTools(srv *mcp.Server, cfg config.Config) map[string]string {
-	owner := map[string]string{}
+	owner, ignored := accelOwnerPlan(cfg)
+	for _, why := range ignored {
+		log.Printf("accelerator_tool_owners: %s; ignored, the first-listed owner serves it (ADR 0068)", why)
+	}
 	for _, id := range cfg.Accelerators {
 		for _, t := range accelMCPTools(id) {
-			if first, dup := owner[t.name]; dup {
-				log.Printf("accelerator %s: %s is already served by %s on this box; skipped (shared-name rule, docs/systems/accelerators.md)", id, t.name, first)
+			if owner[t.name] != id {
+				log.Printf("accelerator %s: %s is served by %s on this box; skipped (shared-name rule, docs/systems/accelerators.md)", id, t.name, owner[t.name])
 				continue
 			}
-			owner[t.name] = id
 			srv.AddTool(&mcp.Tool{Name: t.name, Description: t.desc, InputSchema: json.RawMessage(t.schema)}, s.handleAccelTool(id, t.sidecar, t.arg))
 		}
 	}
-	// Fleet devices (Coral Phase B, 0.115.0): an id this box does NOT carry but
-	// lists in fleet_accelerators registers the same table, forwarding through
-	// accelremote to the first delegate_remotes node whose health lists it. The
-	// walk is AFTER the local devices, so a local device wins a shared name.
 	for _, id := range cfg.FleetAccelerators {
 		if slices.Contains(cfg.Accelerators, id) {
-			continue // the device is here; the local lane above already owns its names
+			continue
 		}
 		for _, t := range accelMCPTools(id) {
-			if first, dup := owner[t.name]; dup {
-				log.Printf("fleet accelerator %s: %s is already served by %s on this box; skipped (shared-name rule)", id, t.name, first)
+			if owner[t.name] != id+FleetOwnerSuffix {
+				log.Printf("fleet accelerator %s: %s is served by %s on this box; skipped (shared-name rule)", id, t.name, owner[t.name])
 				continue
 			}
-			owner[t.name] = id + FleetOwnerSuffix
 			desc := t.desc + " [FLEET: this box has no " + id + " — the call is forwarded to the fleet node that does; image_path is read HERE and its bytes travel with the job (cap 8 MiB); the result carries placement{node,wall_ms}]"
 			srv.AddTool(&mcp.Tool{Name: t.name, Description: desc, InputSchema: json.RawMessage(t.schema)}, s.handleFleetAccelTool(id, t.sidecar, t.arg))
 		}
@@ -321,16 +371,29 @@ func accelStatus(ctx context.Context, cfg config.Config) map[string]any {
 		return nil
 	}
 	out := map[string]any{}
+	// serves is what the device actually registers after the shared-name rule and
+	// accelerator_tool_owners — `owns` is only what it could.
+	plan, _ := accelOwnerPlan(cfg)
+	serves := func(owner string) []string {
+		names := []string{}
+		for name, o := range plan {
+			if o == owner {
+				names = append(names, name)
+			}
+		}
+		slices.Sort(names)
+		return names
+	}
 	for _, id := range cfg.FleetAccelerators {
 		if slices.Contains(cfg.Accelerators, id) {
 			continue
 		}
-		out[id] = map[string]any{"owns": accelOwns(id), "fleet": true,
+		out[id] = map[string]any{"owns": accelOwns(id), "serves": serves(id + FleetOwnerSuffix), "fleet": true,
 			"note": "not on this box: its tools forward to the first delegate_remotes node whose /fleet/health lists it (accelremote, cap 8 MiB per image)"}
 	}
 	for _, id := range cfg.Accelerators {
 		lc, ok := accelLaneConfigFor(cfg, id)
-		entry := map[string]any{"owns": accelOwns(id)}
+		entry := map[string]any{"owns": accelOwns(id), "serves": serves(id)}
 		if !ok {
 			entry["note"] = "listed in accelerators but this build has no adapter for it — nothing is registered"
 			out[id] = entry

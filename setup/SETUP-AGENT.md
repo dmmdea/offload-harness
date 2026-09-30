@@ -808,6 +808,10 @@ inside the job (cap 8 MiB), and the call runs on the first remote whose `/fleet/
 the result carries `placement{node, wall_ms}`. Nothing else changes, and a box that lists nothing is
 byte-identical. The node needs 0.115.0 too (it serves the `accel` task).
 
+When that box also carries a device with the same tool names, its local device serves them. To move one
+tool to the fleet device, add `"accelerator_tool_owners": {"offload_object_detect": "rknpu"}` (ADR 0068,
+0.145.0); `offload_status {section:"accelerators"}` then lists the tool under that device's `serves`.
+
 ### Accelerators (rknpu)
 
 The Rockchip RK3588 NPU is the third accelerator (ADR 0024 + ADR 0037;

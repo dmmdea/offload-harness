@@ -6,6 +6,22 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.145.0] - 2026-09-30 - the operator names the device that serves a shared accelerator tool
+
+### Added — `accelerator_tool_owners` (ADR 0068)
+
+- A box carrying a Coral that reaches the RK3588 NPU through `fleet_accelerators` gave every shared tool
+  name to the Coral, because local devices are walked first (ADR 0037). `accelerator_tool_owners` maps one tool
+  name to the device that serves it — `{"offload_object_detect": "rknpu"}` — and every other name is decided as
+  before. An entry applies only when its device is listed in `accelerators` or `fleet_accelerators` and has that
+  tool; otherwise it is logged at startup and ignored, so a typo never removes a tool. A fleet device may take a
+  name from a local one.
+- One decision for both surfaces: `mcpserver.accelOwnerPlan` computes every owner without registering anything,
+  and MCP registration and status read it; the agent loop's lanes carry the same claims (`AccelLane.Claims`,
+  from `config.ToolOwnerClaims`). `TestToolOwnersLoopMatchesMCP` checks the loop routes each tool to the device
+  the MCP plan names, in all six orders of three devices, for entries that apply and entries that do not.
+- Status: each accelerator entry adds `serves`, the tools that device actually registered, beside `owns`.
+
 ## [0.144.2] - 2026-09-30 - offload_nim's base is allowlisted, audit first
 
 ### Security — a caller-named offload_nim base is checked against an allowlist (security standard L5)
