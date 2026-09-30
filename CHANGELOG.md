@@ -58,7 +58,7 @@ settle.
   `ensure_daemon` reuses any live daemon of the lane's name and never compares it with the endpoint the run
   pins, so a lane daemon left by a crashed run, still attached to the operator's everyday browser, would have
   had its active tab switched by the activation. When `activate_tab` is true the sidecar now calls
-  `stop_lane_daemon()` (the lane's own daemon name only; a no-op when none runs; a failure is logged and the
+  `stop_lane_daemon()` (the lane's own daemon name only; it changes nothing when none runs; a failure is logged and the
   run goes on) before the `Agent` starts a daemon on the pinned endpoint. A run that does not activate is
   unchanged. Pinned by tests that drive `main()` against fake jev and browser-harness modules: the stop comes
   before the `Agent`, only when the start line carries a JSON `true`, and a failed stop does not end the run.

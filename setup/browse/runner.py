@@ -983,7 +983,7 @@ def main() -> int:
             # jev's ensure_daemon reuses any live daemon of this name and never compares it with the endpoint this
             # run pins. A lane daemon left by an earlier run (a hard crash, a failed stop) may still be attached to
             # the operator's everyday browser, and the activation would then switch THAT browser's active tab.
-            # Stop it first (the lane's own name only; a no-op when none is running), so the Agent below starts a
+            # Stop it first (the lane's own name only; it changes nothing when none is running), so the Agent below starts a
             # daemon on the pinned endpoint. Only for a run that activates: the setting's invariant is that it
             # never acts in the everyday browser.
             stop_lane_daemon()
