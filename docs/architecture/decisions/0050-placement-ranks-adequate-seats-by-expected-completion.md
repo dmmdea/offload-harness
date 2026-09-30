@@ -99,7 +99,9 @@ tie-breakers `betterRemote` already had:
    existing `route=auto`/`route=remote` prefix (kept byte-identical — `fleet_smoke_cmd.go` parses it).
 7. **Long-poll and a Retry-After courtesy retry** (item 7, register D-106): the delegator's poll sends
    `?wait=12`; a dispatch 503 carrying its own `Retry-After` is honored with a bounded wait-then-retry to the
-   SAME node, invisible to the re-placement loop.
+   SAME node, invisible to the re-placement loop. *(Amended by [0063](0063-placement-holds-instead-of-sleeping-or-refusing.md):
+   the courtesy retry is gone — a 503 returns at once and its `Retry-After` is a per-node cooldown the capacity wait
+   consumes. The long poll stands.)*
 8. **`offload_status` publishes the same in-flight signal** (item 9, W-31): `in_flight` (a job-registry count,
    never GPU utilization or a lease alone) and a one-word `verdict` on every fleet node row and the local seat
    entry. **Scoped to `offload_status` in this PR** — the operator's original W-31 ask names `gpu status` and

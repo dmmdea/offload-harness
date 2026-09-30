@@ -4,8 +4,8 @@
 // one line can tell "the fleet chose correctly" from "this node was
 // wrongly passed over" without re-deriving the gate by hand.
 //
-// Vocabulary: chosen | queue | cap | slow | lease | cold | probe | hop |
-// unfit(ctx) | noschema | layer. Each word names the FIRST reason (in the
+// Vocabulary: chosen | queue | backlog | cap | slow | lease | cold | probe |
+// hop | unfit(ctx) | noschema | layer. Each word names the FIRST reason (in the
 // EXACT order gate.go's eligibilityVerdict checks it — see that function's
 // own doc; the two are read-only narration over ONE predicate sequence and
 // cannot diverge) a node is not the one running the subtask:
@@ -28,6 +28,13 @@
 //	           ceiling
 //	queue      saturated(): the node's own admission ceiling says the next
 //	           dispatch is refused right now
+//	backlog    ADR 0063: the node cannot START this contract inside the wait the
+//	           caller gave it - printed as "backlog (a new job would wait ~444 s
+//	           to start (<arithmetic>), past the 300 s this contract will wait
+//	           for a start)". A placement FEASIBILITY refusal in the same class
+//	           as slow (feasibleFinal), never a preference for a faster seat: the
+//	           capacity wait re-reads the node every tick and asks it the moment
+//	           its backlog fits
 //	cap        W-06: this DEAL has already committed as many subtasks to the
 //	           node as its headroom (max_concurrent_jobs − jobs_running)
 //	           allows — printed as "cap (running/max running, headroom N,
@@ -73,6 +80,9 @@ func oneWordVerdict(st Subtask, v NodeView, base, chosenBase string, dealtSoFar 
 			return fmt.Sprintf("queue (%d/%d queue_depth)", v.QueueDepth, v.MaxQueueDepth)
 		}
 		return "queue (saturation.high)"
+	}
+	if ok, why := startsWithinPatience(v, patienceFor(st.Contract, v)); !ok {
+		return "backlog (" + why + ")"
 	}
 	if headroom(v) <= dealtSoFar {
 		return fmt.Sprintf("cap (%d/%d running, headroom %d, dealt %d)", v.JobsRunning, v.MaxConcurrentJobs, headroom(v), dealtSoFar)

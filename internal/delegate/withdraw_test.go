@@ -680,7 +680,10 @@ func TestRunWithdrawnQueueWaitIsCreditedBackToTheReplacement(t *testing.T) {
 	stuck := stuckNode(t, "node-stuck")
 	probe := &withdrawProbe{answer: confirmsWithdrawal}
 	stuckURL := probe.front(t, stuck.server()).URL
-	idle, idleURL := acceptingNode(t, "node-idle", "answer from the idle node", nil)
+	var handed atomic.Int64 // the timeout_sec the re-placement was dispatched with
+	idle, idleURL := acceptingNode(t, "node-idle", "answer from the idle node", func(f *fakeNode) {
+		f.onDispatch = func(_ string, c core.AgentContract) { handed.Store(int64(c.TimeoutSec)) }
+	})
 
 	cfg := testCfg(t)
 	contract := withdrawContract()
@@ -695,5 +698,50 @@ func TestRunWithdrawnQueueWaitIsCreditedBackToTheReplacement(t *testing.T) {
 	}
 	if idle.dispatches.Load() != 1 {
 		t.Fatalf("node-idle saw %d dispatches, want 1", idle.dispatches.Load())
+	}
+	// Credited ONCE. Time spent queued is part of the time elapsed, so one credit can
+	// hand the re-placement at most the budget the contract asked for, and does, less
+	// the moments that were not queue time. Above that the wait was credited twice and
+	// the re-placement owns seconds the subtask never had; the floor check above cannot
+	// see that, because a double credit only ever adds time.
+	if got := int(handed.Load()); got < minRetrySec || got > contract.TimeoutSec {
+		t.Fatalf("the re-placement was dispatched with timeout_sec %d, want %d..%d: above the contract's own %d s means the queue wait was credited more than once",
+			got, minRetrySec, contract.TimeoutSec, contract.TimeoutSec)
+	}
+}
+
+// TestQueuedWaitIsCreditedExactlyOnceWhereARefusalIsFiled is the exact half of the
+// credit pin above, which sees a second credit only when it is large enough to lift
+// the re-placement's budget past the contract's own. A refusal is filed in two steps,
+// the subtask's ledger (placements.noteRefusal) and the runner's wrapper around it
+// (runner.noteRefusal). The ledger banks the time the refused job sat in a node's
+// backlog; the wrapper adds only what a LOCAL capacity defer spent in the seat's own
+// line. So one refused attempt credits each span once, to the nanosecond, and no
+// clock is involved.
+func TestQueuedWaitIsCreditedExactlyOnceWhereARefusalIsFiled(t *testing.T) {
+	const queued, admission = 45 * time.Second, 7 * time.Second
+	r := &runner{}
+
+	// A withdrawn job (filed as a 503 that carries the time it sat queued), twice over:
+	// the two spans add, and neither is counted twice.
+	withdrawn := PlacedResult{ranBase: "http://stuck-node.example:18811", refused: true, refusalStatus: http.StatusServiceUnavailable, queuedWait: queued}
+	pl := newPlacements()
+	r.noteRefusal(pl, withdrawn)
+	if pl.credit != queued {
+		t.Fatalf("credit = %v after one withdrawn job that sat queued %v, want exactly %v", pl.credit, queued, queued)
+	}
+	r.noteRefusal(pl, withdrawn)
+	if pl.credit != 2*queued {
+		t.Fatalf("credit = %v after two withdrawn jobs that each sat queued %v, want %v", pl.credit, queued, 2*queued)
+	}
+
+	// A local capacity defer banks the wait its run spent in the seat's own line.
+	local := PlacedResult{ranLocal: true, Result: core.AgentWireResult{
+		Deferred: true, DeferClass: core.DeferClassCapacity, Steps: 0, AdmissionWaitSec: admission.Seconds(),
+	}}
+	pl = newPlacements()
+	r.noteRefusal(pl, local)
+	if pl.credit != admission {
+		t.Fatalf("credit = %v after a local capacity defer that waited %v in the seat's line, want exactly %v", pl.credit, admission, admission)
 	}
 }

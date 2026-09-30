@@ -163,7 +163,7 @@ func TestReasonCodeIsAlwaysSetOnEveryOutcomeShape(t *testing.T) {
 	// shape production creates: a deferred capacity result marked Unplaced.
 	ownCapacityWait := func() PlacedResult {
 		pr := (&runner{cfg: config.Config{AgentPlacementWaitSec: 120}}).capacityDefer(
-			NodeView{NodeID: "this-box", AgentSeat: "seat"}, PlacedResult{JobID: "agd-1"}, time.Second, 2*time.Minute, []string{"node-a: full"}, nil)
+			NodeView{NodeID: "this-box", AgentSeat: "seat"}, PlacedResult{JobID: "agd-1"}, time.Second, 2*time.Minute, []string{"node-a: full"}, waitEvidence{})
 		if !pr.Unplaced || !pr.Result.Deferred || pr.Result.DeferClass != core.DeferClassCapacity {
 			t.Fatalf("capacityDefer no longer builds a deferred, unplaced capacity result: %+v", pr)
 		}
