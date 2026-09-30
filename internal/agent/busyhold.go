@@ -149,7 +149,7 @@ func (m *Monitor) engineFlatBoundLocked() time.Duration {
 			resume, pending = m.resume, m.resumePending
 		}
 	}
-	return maxDur(m.pol.EngineFlat, m.pol.Allowance(resume, pending))
+	return maxDur(m.pol.EngineFlat, m.pol.AllowanceLoad(resume, pending, m.loadForBoundLocked()))
 }
 
 // engineTokenBoundLocked: how long the engine may keep stepping without
@@ -262,6 +262,7 @@ func (m *Monitor) checkEngineLocked() {
 		m.engSum = rd.Summary
 		m.engUnreadableSince = time.Time{}
 		m.engGone = 0
+		m.observeLoadLocked(rd.Load())
 		switch {
 		case !first && !moved && now.Sub(m.engChangedAt) >= m.engineFlatBoundLocked():
 			// The engine did no work for anyone since engChangedAt.

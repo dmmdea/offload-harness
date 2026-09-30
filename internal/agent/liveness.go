@@ -122,9 +122,25 @@ type StallPolicy struct {
 	SeatRecoveries int
 }
 
-// Allowance is the stall bound for a phase. pendingPromptTokens is the size
-// of the prompt the seat is prefilling (0 outside prefill).
+// Allowance is the stall bound for a phase on a seat this run has to itself.
+// pendingPromptTokens is the size of the prompt the seat is prefilling (0
+// outside prefill).
 func (p StallPolicy) Allowance(ph Phase, pendingPromptTokens int) time.Duration {
+	return p.AllowanceLoad(ph, pendingPromptTokens, 1)
+}
+
+// AllowanceLoad is Allowance for a seat that `load` requests share, this one
+// included (ADR 0066, register C-66). The measured prefill rate is a
+// single-request rate, and an engine that batches load requests gives each of
+// them about 1/load of it: prefill = pending / (rate / load) x margin + slack,
+// and the re-pack's flat bound stretches by load the same way. load <= 1 is
+// Allowance, exactly; the floor stays the definition of a silent SEAT. Decoding
+// is left as it is: its allowance is a count of deltas at the seat's own decode
+// rate, and a seat that decodes at 1/load of it is caught by the same floor.
+func (p StallPolicy) AllowanceLoad(ph Phase, pendingPromptTokens, load int) time.Duration {
+	if load < 1 {
+		load = 1
+	}
 	switch ph {
 	case PhaseAdmission:
 		return maxDur(p.Admission, p.Floor)
@@ -133,6 +149,7 @@ func (p StallPolicy) Allowance(ph Phase, pendingPromptTokens int) time.Duration 
 		if rate <= 0 {
 			rate = assumedPrefillTokS
 		}
+		rate /= float64(load)
 		d := time.Duration(float64(pendingPromptTokens)/rate*prefillMargin*float64(time.Second)) + p.Slack
 		return maxDur(d, p.Floor)
 	case PhaseDecoding:
@@ -144,7 +161,7 @@ func (p StallPolicy) Allowance(ph Phase, pendingPromptTokens int) time.Duration 
 	case PhaseTool:
 		return p.toolAllowance(p.ToolTimeout)
 	case PhaseRepack:
-		return maxDur(p.Repack, p.Floor)
+		return maxDur(p.Repack*time.Duration(load), p.Floor)
 	case PhaseColdLoad:
 		return p.ColdLoad
 	case PhaseQueued:
@@ -352,6 +369,16 @@ type Monitor struct {
 	downTotal  time.Duration
 	recoveries int
 	parked     bool
+	// Load (ADR 0066, register C-66). loadFn samples how many requests share the
+	// seat (this run's included) when a prefill or re-pack begins; load is what
+	// the current phase's allowance was sized with; engLoad the engine's own
+	// running + waiting at its latest reading; loadPeak the highest of either
+	// this run ever saw. loadPeak > 1 means the run was NOT solo, and what it
+	// timed is not the seat's single-request rate.
+	loadFn   func() int
+	load     int
+	engLoad  int
+	loadPeak int
 }
 
 // NewMonitor wraps parent with a ceiling deadline and a stall watch. The
@@ -778,12 +805,24 @@ func (m *Monitor) note() string {
 		}
 		return fmt.Sprintf(": cold-load ceiling%s%s; the seat read %q, so no byte could arrive", basis, clamp, m.holdState)
 	}
+	if m.phase == PhaseRepack {
+		if m.load > 1 {
+			// The re-pack's flat bound stretches with the load (AllowanceLoad).
+			return fmt.Sprintf(": re-pack bound %.0fs x load %d", m.pol.Repack.Seconds(), m.load)
+		}
+		return ""
+	}
 	if m.phase != PhasePrefill {
 		return ""
 	}
 	rate, src := m.pol.PrefillTokS, ""
 	if rate <= 0 {
 		rate, src = assumedPrefillTokS, " assumed"
+	}
+	if m.load > 1 {
+		// The seat was shared by `load` requests when this prefill began: the rate
+		// is one request's, so each gets about 1/load of it (AllowanceLoad).
+		return fmt.Sprintf(": %d tok / (%.0f tok/s%s / load %d) x %.1f + %.0fs", m.pending, rate, src, m.load, prefillMargin, m.pol.Slack.Seconds())
 	}
 	return fmt.Sprintf(": %d tok / %.0f tok/s%s x %.1f + %.0fs", m.pending, rate, src, prefillMargin, m.pol.Slack.Seconds())
 }
@@ -815,6 +854,7 @@ func (m *Monitor) ToolPhase(cap time.Duration) {
 // Phase moves the run to ph; a phase change is itself progress. The finished
 // call's tokens are folded into the run total.
 func (m *Monitor) Phase(ph Phase, pendingPromptTokens int) {
+	load := m.sampleLoad(ph) // a file read at most: never under the lock
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.stopped || m.cause != nil {
@@ -825,7 +865,11 @@ func (m *Monitor) Phase(ph Phase, pendingPromptTokens int) {
 	m.callTok = 0
 	m.parked, m.down = false, nil // the loop moved on: a seat-down verdict for the call before is moot
 	m.phase, m.pending = ph, pendingPromptTokens
-	m.allow = m.pol.Allowance(ph, pendingPromptTokens)
+	m.load = load
+	if load > m.loadPeak {
+		m.loadPeak = load
+	}
+	m.allow = m.pol.AllowanceLoad(ph, pendingPromptTokens, load)
 	m.last = time.Now()
 	m.epoch++
 	m.timer.Reset(m.allow)

@@ -675,8 +675,13 @@ func (l *Loop) progressFunc(runTotalBefore int) ProgressFunc {
 	if l.live == nil && l.observer == nil {
 		return nil
 	}
+	sampled := false // one call's first delta: the end of its prefill window
 	return func(n int) {
 		if l.live != nil {
+			if n > 0 && !sampled {
+				sampled = true
+				l.live.SampleLoad()
+			}
 			l.live.Progress(n)
 		}
 		if l.observer != nil {

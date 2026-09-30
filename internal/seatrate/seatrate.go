@@ -67,8 +67,13 @@ type Seat struct {
 	// ColdLoadSec is the slowest of the last coldLoadWindow observed loads.
 	ColdLoadSec float64   `json:"cold_load_sec,omitempty"`
 	ColdLoads   []float64 `json:"cold_loads,omitempty"`
-	Samples     int       `json:"samples"`
-	Updated     time.Time `json:"updated"`
+	// ColdLoadAt is when the newest entry of ColdLoads ENDED (0.144.0): a load
+	// ends at one instant for everyone waiting on it, so a second observation
+	// that ends within coldLoadMergeWindow of it is the same load seen by another
+	// run, not another load.
+	ColdLoadAt time.Time `json:"cold_load_at,omitempty"`
+	Samples    int       `json:"samples"`
+	Updated    time.Time `json:"updated"`
 }
 
 // Store is the per-seat memory. Zero value = empty.
@@ -119,9 +124,25 @@ const (
 )
 
 // ObservePrefill folds one run's prefill measurement (prompt tokens and the
-// milliseconds the engine reported for them) into the seat's PrefillTokS.
-// Returns false when the sample is too small to count.
+// milliseconds the engine reported for them) into the seat's PrefillTokS, for a
+// run that had the seat to itself: ObservePrefillLoad with load 1. Returns false
+// when the sample is too small to count.
 func (s *Store) ObservePrefill(seat string, promptTokens int64, promptMS float64, now time.Time) bool {
+	return s.ObservePrefillLoad(seat, promptTokens, promptMS, 1, now)
+}
+
+// ObservePrefillLoad is ObservePrefill for a run that saw the seat shared by
+// `load` requests (its own included; 0 or 1 = solo). A sample timed while
+// requests shared the seat is what a shared seat gives ONE request, never the
+// seat's own rate — folded in, it lowers PrefillTokS, inflates every later
+// stall allowance and ceiling, and swings the published rate with whatever
+// traffic the run happened to meet (one fleet seat's prefill_tok_s: 255-1321 tok/s in one
+// day, 2026-09-29). Only a solo run's sample moves the rate (ADR 0066, register
+// C-66); a shared-seat sample returns false and changes nothing.
+func (s *Store) ObservePrefillLoad(seat string, promptTokens int64, promptMS float64, load int, now time.Time) bool {
+	if load > 1 {
+		return false
+	}
 	if s == nil || strings.TrimSpace(seat) == "" || promptTokens < minPrefillSampleTokens || promptMS < minPrefillSampleMS {
 		return false
 	}
@@ -169,6 +190,64 @@ func (s *Store) Observe(seat string, tokS, coldLoadSec float64, now time.Time) b
 		}
 	}
 	cur.Updated = now
+	s.Seats[seat] = cur
+	return true
+}
+
+// coldLoadMergeWindow: two cold-load observations of one seat that END within
+// this window are ONE load seen by two runs. A load ends at a single instant for
+// every run waiting on it, and a seat cannot unload and load again in ten
+// seconds (a load is minutes), so the window cannot merge two real loads.
+const coldLoadMergeWindow = 10 * time.Second
+
+// ObserveColdLoad folds one observed seat load into the seat's cold-load window:
+// coldLoadSec is the wall the observer waited, endedAt when the seat became
+// ready for it (0.144.0, register C-66).
+//
+// Several runs on one box wait on the same load — a fan-out lands its subtasks
+// on a cold seat together, and every one of them measures it — and the store used
+// to append each observation: the window of five filled with copies of one load
+// (seat-rates.json, 2026-09-29: [12.4, 234.6, 234.6, 203.5, 203.5]) and a run
+// that joined the load near its end recorded the few seconds it saw as if that
+// were the load (12.4 against a real 178-271 s). An observation that ends within
+// coldLoadMergeWindow of the newest entry is the same load: it keeps the LONGEST
+// measurement — the run that began waiting first, closest to the load's real
+// start — instead of adding an entry. Returns whether anything changed.
+func (s *Store) ObserveColdLoad(seat string, coldLoadSec float64, endedAt time.Time) bool {
+	if s == nil || strings.TrimSpace(seat) == "" || coldLoadSec <= 0 {
+		return false
+	}
+	if s.Seats == nil {
+		s.Seats = map[string]Seat{}
+	}
+	cur := s.Seats[seat]
+	sec := math.Round(coldLoadSec*10) / 10
+	gap := endedAt.Sub(cur.ColdLoadAt)
+	if gap < 0 {
+		gap = -gap
+	}
+	if n := len(cur.ColdLoads); n > 0 && !cur.ColdLoadAt.IsZero() && gap <= coldLoadMergeWindow {
+		if sec <= cur.ColdLoads[n-1] {
+			return false // the same load, and an earlier observer already measured more of it
+		}
+		cur.ColdLoads = append([]float64(nil), cur.ColdLoads...) // never write through a shared backing array
+		cur.ColdLoads[n-1] = sec
+	} else {
+		cur.ColdLoads = append(append([]float64(nil), cur.ColdLoads...), sec)
+		if len(cur.ColdLoads) > coldLoadWindow {
+			cur.ColdLoads = cur.ColdLoads[len(cur.ColdLoads)-coldLoadWindow:]
+		}
+	}
+	if endedAt.After(cur.ColdLoadAt) {
+		cur.ColdLoadAt = endedAt
+	}
+	cur.ColdLoadSec = 0
+	for _, c := range cur.ColdLoads {
+		if c > cur.ColdLoadSec {
+			cur.ColdLoadSec = c
+		}
+	}
+	cur.Updated = endedAt
 	s.Seats[seat] = cur
 	return true
 }

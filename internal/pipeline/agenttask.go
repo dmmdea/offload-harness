@@ -349,7 +349,8 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	// the clock. Known bound: the drain phase before a swap shows nothing
 	// non-ready, so a swap that begins a second later is still charged to the
 	// wall — this removes the swap WINDOW from the wall, not the race.
-	preflight, preNote := awaitSeatAdmission(ctx, p.cfg.Endpoint, seat, time.Until(admissionEnd))
+	preflight, preNote, loadSeen, seatReady := awaitSeatAdmissionLoad(ctx, p.cfg.Endpoint, seat, time.Until(admissionEnd))
+	preflightEnd := time.Now()
 	admitted += preflight
 	admitNote = preNote
 	if admitNote != "" {
@@ -362,10 +363,12 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	// 2026-09-10 under ttl 300), so a 300 s contract could spend most of its
 	// wall before the first token. Warm it here, on the admission budget's
 	// remainder, and start the clock when the seat reads ready.
-	var coldLoad time.Duration // this run's observed cold load, if the warm-up waited for one (seat-rates.json)
+	var coldLoad time.Duration // this run's observed cold load, if it waited for one (seat-rates.json)
+	var coldLoadEnd time.Time  // when the seat became ready for this run: a load ends at one instant for everyone waiting on it
 	var coldLoaded bool        // the warm-up ATTEMPTED a load this run (D-118 reads this, never coldLoad > 0: a sub-tick load measures 0)
 	act.Phase("cold-load")
 	warmed, warmNote, warmAttempted := warmSeat(ctx, p.cfg.Endpoint, seat, admissionBudget(p.cfg.AgentAdmissionWaitSec)-admitted)
+	warmEnd := time.Now()
 	// Admission time whether or not a load was attempted: a warm-up held behind
 	// a GPU lease (2026-09-22) spends the budget waiting and loads nothing. Every
 	// other non-attempt returns zero, so this changes nothing else.
@@ -377,6 +380,23 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		// silently un-fired the D-118 coherence probe on a fast box.
 		coldLoad = warmed
 		coldLoaded = true
+		coldLoadEnd = warmEnd
+		// The cold load is measured from the FIRST moment this run saw its seat
+		// loading (0.144.0, register C-66), not from the warm-up's own start: when the
+		// pre-flight already waited on the load — the seat was `starting` when the
+		// run arrived, and its admission budget ran out — the warm-up joined it for
+		// its last seconds only, and that tail was recorded as the whole load (12.4 s
+		// against a real 178-271 s).
+		if !loadSeen.IsZero() {
+			if d := warmEnd.Sub(loadSeen); d > coldLoad {
+				coldLoad = d
+			}
+		}
+	} else if !loadSeen.IsZero() && seatReady {
+		// Nothing left to warm: the pre-flight waited out a load it saw start —
+		// someone else's request began it. The wait, from the first sighting to the
+		// seat reading ready, is the load as far as this run saw it.
+		coldLoad, coldLoadEnd = preflightEnd.Sub(loadSeen), preflightEnd
 	}
 	if warmNote != "" {
 		log.Printf("agent task: seat warm-up (%s): %s", seat, warmNote)
@@ -568,6 +588,14 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		}
 	}
 	busyWatch = live
+	// The load (ADR 0066, register C-66): how many runs this box has on the seat,
+	// sampled when a prefill or a re-pack begins and again at its first delta, so
+	// the allowance is sized for a shared seat and a run that saw one is not solo.
+	if reg, rerr := gpuactivity.Open(p.cfg.GPULockPath, p.cfg.StateDir); rerr == nil {
+		if fn := seatLoadOf(reg, seat, act.ID()); fn != nil {
+			live.WithLoad(fn)
+		}
+	}
 	if probe != nil {
 		live.WithSeatProbe(probe, onHold)
 		if coldLoaded {
@@ -901,15 +929,26 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	if contended {
 		obsTokS, obsPrefill.PrefillTokens, obsBest.Tokens = 0, 0, 0 // the wire still reports what was measured
 	}
+	// A run that saw the seat SHARED (0.144.0, register C-66) timed what a
+	// shared seat gives one request, not the seat's own prefill rate: the store
+	// folds a prefill sample in only for a run that was solo (peakLoad <= 1;
+	// 0 = the run never looked, which reads as solo, as before).
+	peakLoad := 0
+	if busyWatch != nil {
+		peakLoad = busyWatch.PeakLoad()
+	}
 	if p.seatRatesPath != "" && (obsTokS > 0 || coldLoad > 0 || obsPrefill.PrefillTokens > 0 || obsBest.Tokens > 0) {
 		// Load-observe-save under the store's lock (seatrate.Update): the
 		// pre-loop read above was a snapshot for the estimate; another process
 		// may have written since. The prefill rate (0.131.0) sizes the next
 		// run's stall allowance while the seat prefills.
 		if uerr := seatrate.Update(p.seatRatesPath, func(s *seatrate.Store) {
-			s.Observe(seat, obsTokS, coldLoad.Seconds(), time.Now())
-			s.ObservePrefill(seat, obsPrefill.PrefillTokens, obsPrefill.PrefillMS, time.Now())
-			s.ObservePrefill(seat, obsBest.Tokens, obsBest.MS, time.Now())
+			s.Observe(seat, obsTokS, 0, time.Now())
+			// The cold load goes through the observer that merges one load seen by
+			// several runs into one entry, keyed on when it ENDED.
+			s.ObserveColdLoad(seat, coldLoad.Seconds(), coldLoadEnd)
+			s.ObservePrefillLoad(seat, obsPrefill.PrefillTokens, obsPrefill.PrefillMS, peakLoad, time.Now())
+			s.ObservePrefillLoad(seat, obsBest.Tokens, obsBest.MS, peakLoad, time.Now())
 		}); uerr != nil {
 			log.Printf("agent task: seat-rates store not updated: %v", uerr)
 		}
@@ -2213,12 +2252,25 @@ var warmClient = &http.Client{}
 // proceeds (fail-open, logged): the loop's first chat call surfaces the real
 // transport error with far more detail.
 func awaitSeatAdmission(ctx context.Context, endpoint, seat string, budget time.Duration) (time.Duration, string) {
+	waited, note, _, _ := awaitSeatAdmissionLoad(ctx, endpoint, seat, budget)
+	return waited, note
+}
+
+// awaitSeatAdmissionLoad is awaitSeatAdmission that also says what the poll saw
+// of THIS seat's own load (0.144.0, register C-66): loadSeen is when a poll first
+// found the seat's own row `starting` (zero = never), and ready is whether it
+// returned because the seat's own row read ready. A run that waited out a load
+// here — someone else's request started it — measured part of that load, and the
+// caller records it from loadSeen; before, the wait was admission time and
+// nothing else, so a seat that other requests always loaded first never fed the
+// store's cold-load figure at all.
+func awaitSeatAdmissionLoad(ctx context.Context, endpoint, seat string, budget time.Duration) (waited time.Duration, note string, loadSeen time.Time, ready bool) {
 	if budget <= 0 || strings.TrimSpace(endpoint) == "" {
-		return 0, ""
+		return 0, "", time.Time{}, false
 	}
 	sc, err := swapclient.New(endpoint, admissionPoll)
 	if err != nil {
-		return 0, "no swap client (proceeding): " + err.Error()
+		return 0, "no swap client (proceeding): " + err.Error(), time.Time{}, false
 	}
 	// The seat's own /running row may be listed under the CANONICAL id while the
 	// contract names an alias; seatMatcher resolves that, lazily.
@@ -2230,13 +2282,19 @@ func awaitSeatAdmission(ctx context.Context, endpoint, seat string, budget time.
 	// follow, and a roster that TIMES OUT (3 s, admissionPoll) on every poll
 	// would otherwise let this loop run twice its budget in wall-clock time
 	// while reporting the budget exactly (reviewer finding on the S-08 retry).
-	var waited time.Duration
 	for {
 		rows, rerr := sc.Running(ctx)
 		if rerr != nil {
-			return waited, "running probe failed (proceeding): " + rerr.Error()
+			return waited, "running probe failed (proceeding): " + rerr.Error(), loadSeen, false
 		}
 		mine, busy := false, ""
+		seeStarting := func() {
+			for _, r := range rows {
+				if m.matches(r.ID) && r.State == "starting" && loadSeen.IsZero() {
+					loadSeen = time.Now() // this seat's own load, first sighting
+				}
+			}
+		}
 		for _, r := range rows {
 			if m.matches(r.ID) && r.State == "ready" {
 				mine = true
@@ -2245,6 +2303,7 @@ func awaitSeatAdmission(ctx context.Context, endpoint, seat string, budget time.
 				busy = r.ID + ":" + r.State
 			}
 		}
+		seeStarting()
 		// Resolve the alias only when it would change the verdict — the seat's
 		// own row was not found under its bound name AND something else is
 		// mid-swap, i.e. the next step would be a sleep. This is the fast path
@@ -2265,6 +2324,7 @@ func awaitSeatAdmission(ctx context.Context, endpoint, seat string, budget time.
 						mine = true
 					}
 				}
+				seeStarting() // the seat listed under its canonical id, now that the alias resolves
 			}
 		}
 		// The seat this contract needs is up: another model's swap is not this
@@ -2272,13 +2332,13 @@ func awaitSeatAdmission(ctx context.Context, endpoint, seat string, budget time.
 		// else's load. Every exit below carries the matcher's note, so an alias
 		// probe that failed is reported whatever verdict this poll reaches.
 		if mine || busy == "" {
-			return waited, m.note
+			return waited, m.note, loadSeen, mine
 		}
 		if waited+admissionPoll > budget {
-			return waited, joinAdmissionNotes(m.note, "budget spent while "+busy+" (proceeding into the wall)")
+			return waited, joinAdmissionNotes(m.note, "budget spent while "+busy+" (proceeding into the wall)"), loadSeen, false
 		}
 		if serr := seatwait.Sleep(ctx, admissionPoll); serr != nil {
-			return waited, joinAdmissionNotes(m.note, serr.Error())
+			return waited, joinAdmissionNotes(m.note, serr.Error()), loadSeen, false
 		}
 		waited += admissionPoll
 	}

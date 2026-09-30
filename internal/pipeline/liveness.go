@@ -148,6 +148,27 @@ func engineActivityProbe(endpoint, seat string, load agent.SeatProbe) agent.Engi
 	}
 }
 
+// seatLoadOf is the load sampler behind Monitor.WithLoad (ADR 0066, register
+// C-66): how many runs this box has on the seat, this one included — the runs
+// the registry lists on it that are past admission (a run still admitting is not
+// at the engine yet, the same rule the local run cap counts by). nil when there
+// is no registry to read.
+func seatLoadOf(reg *gpuactivity.Registry, seat, selfID string) func() int {
+	if reg == nil || strings.TrimSpace(seat) == "" {
+		return nil
+	}
+	return func() int {
+		n := 1
+		for _, r := range reg.OnSeat(time.Now(), seat) {
+			if r.ID == selfID || r.Phase == gpuactivity.PhaseAdmission {
+				continue
+			}
+			n++
+		}
+		return n
+	}
+}
+
 // connRefused reports whether err is the seat's own address refusing the
 // connection: the process is gone. The remote-unreachable sentinel is not (a
 // loopback-bound seat on another box refuses every read from here, alive or
