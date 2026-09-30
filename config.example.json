@@ -280,5 +280,6 @@
   "delegate_remotes": null,
   "fleet_sampler": "auto",
   "primary_gpu_uuid": "",
+  "uma_reserve_gib": 0,
   "pipelines": null
 }

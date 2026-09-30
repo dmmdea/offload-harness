@@ -1545,6 +1545,17 @@ type Config struct {
 	// one device is already the headline); no effect at all on a
 	// windows-generic node, which has no gpu_devices[] to match against.
 	PrimaryGPUUUID string `json:"primary_gpu_uuid,omitempty"`
+	// UMAReserveGiB is the RAM a unified-memory SoC node (the rockchip-rk3588 tier)
+	// holds back from inference for the box's own workload. Such a box has no VRAM —
+	// its GPU and NPU allocate from the same RAM as everything else — so
+	// /fleet/health advertises MemTotal minus this reserve as capacity and
+	// MemAvailable minus it as free (fleetnode.MeminfoUMAProbe). The tier seeds 3,
+	// for a board that also runs a home-automation stack. 0 (the default) reserves
+	// nothing and advertises all of RAM. Inert on every other tier, which reads a real
+	// VRAM counter. A reserve that leaves no capacity fails the probe, so fleet-serve
+	// refuses to start rather than advertise a node with nothing to give; a negative
+	// one is refused by name.
+	UMAReserveGiB float64 `json:"uma_reserve_gib,omitempty"`
 	// --- config-driven pipeline jobs (Task 4: fleet-node "pipeline job" task family) ---
 	// Pipelines maps a task_type name (e.g. "scene-swap") to the externally-
 	// provided CLI that serves it — see PipelineSpec. Empty/nil = this box
@@ -1831,6 +1842,7 @@ func Default() Config {
 		DelegateRemotes:               nil,               // fleet node base URLs the delegator considers by default (tailnet-only); per-call remotes replace it
 		FleetSampler:                  "auto",            // auto|pdh|pdh-shared|global (FLEET-NODE.md)
 		PrimaryGPUUUID:                "",                // "" = largest-total headline rule; set to pin by UUID (FLEET-NODE.md)
+		UMAReserveGiB:                 0,                 // 0 = a unified-memory SoC advertises all of RAM; the rockchip-rk3588 tier seeds 3
 		Pipelines:                     nil,               // empty = no pipeline-job routes on this box (opt-in per pipeline)
 		SeatEndpoints:                 nil,               // empty = every seat on Endpoint (opt-in per box, like Pipelines)
 		CascadeRemoteLanes:            nil,               // empty = the cascade never fails over off-box (opt-in per box)
