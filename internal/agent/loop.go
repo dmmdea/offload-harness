@@ -287,26 +287,26 @@ func (l *Loop) calReport() TokenCalReport {
 
 // Loop runs the canonical agent loop over a fixed tool set.
 type Loop struct {
-	client         Client
-	thinking       ThinkingMode // planner think-block policy (thinking.go); "" = ThinkingAuto
-	tools          map[string]Tool
-	specs          []ToolSpec
-	maxSteps       int
-	maxTokens      int
-	maxSameTool    int
-	noForcedFinal  bool                          // WithoutForcedFinal: the last step offers tools like any other (D-89)
-	parkHighRisk   bool                          // unattended: park self-flagged high-risk effectful calls (WithParkHighRisk)
-	parkRecord     func(tool, args, risk string) // durable park record (ask queue); nil = ledger only
-	observer       RunObserver                   // WithObserver: per-step progress for the run registry (gpuactivity); nil = none
-	live           *Monitor                      // WithLiveness: the run's stall/ceiling watch (0.131.0); nil = none
-	prefillSamples []PrefillSample               // per-call prefill measurements (0.131.1), published on Result
-	batchJudge     bool                          // end-of-run advisory judge pass (WithBatchJudge; batchjudge.go)
-	ctxTokens      int                           // model context window in tokens; input budget derives from it
-	keepRecent     int                           // most-recent turns kept full during compaction
-	toolTimeout    time.Duration                 // per-tool-call cap; see defaultToolTimeout
-	skeletonPrune  bool                          // enable the skeleton rung of the compaction ladder (zero value off; callers default it ON per ADR 0015)
-	gcfCompact     bool                          // enable the lossless GCF rung of the compaction ladder (zero value off; callers default it ON per ADR 0015)
-	toolResultCap  int                           // max chars of ONE tool result kept in the transcript (0 => derive from window)
+	client        Client
+	thinking      ThinkingMode // planner think-block policy (thinking.go); "" = ThinkingAuto
+	tools         map[string]Tool
+	specs         []ToolSpec
+	maxSteps      int
+	maxTokens     int
+	maxSameTool   int
+	noForcedFinal bool                          // WithoutForcedFinal: the last step offers tools like any other (D-89)
+	parkHighRisk  bool                          // unattended: park self-flagged high-risk effectful calls (WithParkHighRisk)
+	parkRecord    func(tool, args, risk string) // durable park record (ask queue); nil = ledger only
+	observer      RunObserver                   // WithObserver: per-step progress for the run registry (gpuactivity); nil = none
+	live          *Monitor                      // WithLiveness: the run's stall/ceiling watch (0.131.0); nil = none
+	prefillSamples []PrefillSample              // per-call prefill measurements (0.131.1), published on Result
+	batchJudge    bool                          // end-of-run advisory judge pass (WithBatchJudge; batchjudge.go)
+	ctxTokens     int                           // model context window in tokens; input budget derives from it
+	keepRecent    int                           // most-recent turns kept full during compaction
+	toolTimeout   time.Duration                 // per-tool-call cap; see defaultToolTimeout
+	skeletonPrune bool                          // enable the skeleton rung of the compaction ladder (zero value off; callers default it ON per ADR 0015)
+	gcfCompact    bool                          // enable the lossless GCF rung of the compaction ladder (zero value off; callers default it ON per ADR 0015)
+	toolResultCap int                           // max chars of ONE tool result kept in the transcript (0 => derive from window)
 	// tokenCal corrects the compaction budget using the server's own token
 	// counts — the fix for the estimator defect that let three real
 	// transcripts be rejected while the ladder declined to compact (ADR 0017).
