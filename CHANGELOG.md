@@ -6,6 +6,21 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.144.2] - 2026-09-30 - offload_nim's base is allowlisted, audit first
+
+### Security — a caller-named offload_nim base is checked against an allowlist (security standard L5)
+
+Since 0.143.1 the NVIDIA key reaches only NVIDIA's hosts, but `offload_nim` still sent the PROMPT to any `base`
+a caller named: one prompt-injected call could post session text to a URL of its choosing. The base must now be
+NVIDIA's hosted API, `nim_endpoint`, or an entry of the new `nim_bases` list (scheme, host and port equal; the
+entry's path a prefix on a segment boundary; userinfo never matches). The new `nim_base_policy` follows the house
+standard's audit-then-enforce rule (ADR 0067): `"audit"` (the default) lets any other base run, marks the result
+with `base_policy` and appends a would-refuse row — scheme, host and port only, never the prompt, path or query —
+to `<state_dir>/nim-base-audit.jsonl`; `"enforce"` defers the call before any request leaves. The CLI `nim` verbs
+are operator-typed and unchanged. Tests: the allowlist rules (20 cases), enforce sends zero requests to an unlisted
+base and writes an enforce row without the path or query, audit runs and counts, a listed base runs cleanly under
+both policies; making the allowlist accept everything turns them red.
+
 ## [0.144.1] - 2026-09-30 - the trusted-network flag permits one address, never every interface
 
 ### Security — a fleet node could serve its unauthenticated endpoints on every interface after a boot race

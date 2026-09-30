@@ -12,6 +12,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -2125,6 +2126,29 @@ func (s *Server) handleNIM(ctx context.Context, req *mcp.CallToolRequest) (*mcp.
 	if base == "" {
 		base = cfg.NIMEndpoint
 	}
+	// The base allowlist (security standard L5, register S-30): a caller-named
+	// base outside NVIDIA's hosted API, nim_endpoint and nim_bases is refused
+	// under nim_base_policy "enforce"; under "audit" (the default) the call runs,
+	// the result says it would have been refused, and a would-refuse row is
+	// appended for the promotion decision (ADR 0067).
+	basePolicy := ""
+	if in.Base != "" {
+		if ok, why := nimclient.BaseAllowed(in.Base, cfg.NIMEndpoint, cfg.NIMBases); !ok {
+			mode := "audit"
+			if cfg.NIMBaseEnforced() {
+				mode = "enforce"
+			}
+			auditErr := appendNIMBaseAudit(cfg.StateDir, in.Base, why, mode)
+			if mode == "enforce" {
+				return jsonResult(map[string]any{"deferred": true, "defer_class": string(core.DeferClassConfig),
+					"reason": "offload_nim base refused (nim_base_policy enforce): " + why + "; add it to nim_bases if it is a NIM you run"})
+			}
+			basePolicy = "audit: this base would be refused under nim_base_policy enforce (" + why + ")"
+			if auditErr != nil {
+				basePolicy += "; the would-refuse row was not written: " + auditErr.Error()
+			}
+		}
+	}
 	key := nimclient.KeyForBase(base) // env key only for NVIDIA hosts; never transmitted to a non-NVIDIA base
 	// defer-not-crash: a missing key on the hosted endpoint is a clean defer, not an error.
 	if key == "" && nimclient.IsHostedNVIDIA(base) {
@@ -2138,9 +2162,9 @@ func (s *Server) handleNIM(ctx context.Context, req *mcp.CallToolRequest) (*mcp.
 	if in.ListModels {
 		ids, err := client.ListModels(ctx)
 		if err != nil {
-			return jsonResult(map[string]any{"deferred": true, "reason": err.Error()})
+			return jsonResult(withBasePolicy(map[string]any{"deferred": true, "reason": err.Error()}, basePolicy))
 		}
-		return jsonResult(map[string]any{"models": ids, "count": len(ids), "endpoint": base})
+		return jsonResult(withBasePolicy(map[string]any{"models": ids, "count": len(ids), "endpoint": base}, basePolicy))
 	}
 	model := in.Model
 	if model == "" {
@@ -2152,16 +2176,56 @@ func (s *Server) handleNIM(ctx context.Context, req *mcp.CallToolRequest) (*mcp.
 	}
 	res, err := client.Chat(ctx, model, in.System, in.Prompt, maxTok, in.Temperature)
 	if err != nil {
-		return jsonResult(map[string]any{"deferred": true, "reason": err.Error()})
+		return jsonResult(withBasePolicy(map[string]any{"deferred": true, "reason": err.Error()}, basePolicy))
 	}
-	return jsonResult(map[string]any{
+	return jsonResult(withBasePolicy(map[string]any{
 		"model":             res.Model,
 		"content":           res.Content,
 		"reasoning_content": res.ReasoningContent,
 		"tokens_in":         res.TokensIn,
 		"tokens_out":        res.TokensOut,
 		"truncated":         res.Truncated,
-	})
+	}, basePolicy))
+}
+
+// withBasePolicy adds the audit-mode note (S-30) to an offload_nim result when
+// the base was outside the allowlist.
+func withBasePolicy(out map[string]any, note string) map[string]any {
+	if note != "" {
+		out["base_policy"] = note
+	}
+	return out
+}
+
+// appendNIMBaseAudit appends one would-refuse (or refuse) row to
+// <stateDir>/nim-base-audit.jsonl: the counted data a promotion from audit to
+// enforce needs (ADR 0067). Only the base's scheme, host and port are kept —
+// never the prompt, never a path or query that could carry data.
+func appendNIMBaseAudit(stateDir, base, why, mode string) error {
+	if strings.TrimSpace(stateDir) == "" {
+		return fmt.Errorf("no state_dir")
+	}
+	host := base
+	if u, err := url.Parse(strings.TrimSpace(base)); err == nil && u.Host != "" {
+		host = u.Scheme + "://" + u.Host
+	}
+	row, err := json.Marshal(map[string]any{"ts": time.Now().UTC().Format(time.RFC3339), "mode": mode, "base": host, "why": why})
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(filepath.Join(stateDir, "nim-base-audit.jsonl"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return err
+	}
+	_, werr := f.Write(append(row, '\n'))
+	cerr := f.Close()
+	if werr != nil {
+		return werr
+	}
+	return cerr
 }
 
 // withAdmission stamps an agent_run result with what was spent BEFORE the wall

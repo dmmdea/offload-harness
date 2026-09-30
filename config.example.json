@@ -250,6 +250,8 @@
   "nim_model": "nvidia/nemotron-3-ultra-550b-a55b",
   "nim_max_tokens": 1024,
   "nim_timeout_sec": 120,
+  "nim_bases": null,
+  "nim_base_policy": "audit",
   "accelerators": null,
   "fleet_accelerators": null,
   "hailo_endpoint": "http://127.0.0.1:18813",

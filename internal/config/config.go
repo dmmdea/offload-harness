@@ -1308,6 +1308,18 @@ type Config struct {
 	NIMMaxTokens int `json:"nim_max_tokens,omitempty"`
 	// NIMTimeoutSec bounds one nim call (large hosted models can be slow). Default 120.
 	NIMTimeoutSec int `json:"nim_timeout_sec,omitempty"`
+	// NIMBases lists the extra bases an offload_nim call may name besides NVIDIA's
+	// hosted hosts and nim_endpoint: self-hosted NIMs on loopback, the LAN or the
+	// tailnet (security standard L5, ADR 0067). Compared by scheme, host and port,
+	// with each entry's path as a prefix.
+	NIMBases []string `json:"nim_bases,omitempty"`
+	// NIMBasePolicy is what happens when offload_nim is called with a base outside
+	// that allowlist: "audit" (the default — the call runs, the result says it
+	// would be refused, and a would-refuse row is appended to
+	// <state_dir>/nim-base-audit.jsonl) or "enforce" (the call is deferred before
+	// any request leaves). Promotion from audit to enforce follows ADR 0067:
+	// counted would-refuses first.
+	NIMBasePolicy string `json:"nim_base_policy,omitempty"`
 	// NOTE: the NIM API key is deliberately NOT a config field — it is read from the
 	// NVIDIA_API_KEY (or NGC_API_KEY) env var so a secret never lands in a tracked
 	// config file or the public repo. A self-hosted NIM needs no key.
@@ -1841,6 +1853,7 @@ func Default() Config {
 		NIMModel:                      "nvidia/nemotron-3-ultra-550b-a55b",
 		NIMMaxTokens:                  1024,
 		NIMTimeoutSec:                 120,
+		NIMBasePolicy:                 "audit",
 		HailoEndpoint:                 "http://127.0.0.1:18813", // loopback sidecar base; inert while Accelerators is empty
 		HailoTimeoutSec:               60,
 		HailoIdleSec:                  300,
@@ -2159,6 +2172,18 @@ func warnBadEnumValues(c Config) {
 	default:
 		fmt.Fprintf(os.Stderr, "warning: unrecognized stt_hq_api %q (valid: \"\", \"whisper\", \"openai\") — treating as \"whisper\"; an llama-server HQ model will 404\n", c.STTHQAPI)
 	}
+	switch strings.ToLower(strings.TrimSpace(c.NIMBasePolicy)) {
+	case "", "audit", "enforce":
+	default:
+		fmt.Fprintf(os.Stderr, "warning: unrecognized nim_base_policy %q (valid: \"audit\", \"enforce\") — treating as \"audit\"\n", c.NIMBasePolicy)
+	}
+}
+
+// NIMBaseEnforced reports whether nim_base_policy is "enforce"; anything else
+// (the default "audit", empty, or an unrecognized value, which Load warns about)
+// is audit mode.
+func (c Config) NIMBaseEnforced() bool {
+	return strings.EqualFold(strings.TrimSpace(c.NIMBasePolicy), "enforce")
 }
 
 // warnDeadThresholds flags confidence-gate thresholds sitting at or below the
