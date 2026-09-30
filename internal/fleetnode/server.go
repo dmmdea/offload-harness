@@ -2154,6 +2154,10 @@ func (s *Server) admit(w http.ResponseWriter, r *http.Request, env dispatchEnvel
 		// Register A-102: stamp the DOOR this call came through so its ledger
 		// row is not one of the door-less cascade rows.
 		req.Door = dispatchDoor(req.Door)
+		// ADR 0064 (register C-63): name the job id the delegator dispatched this
+		// under, so this node's ledger row joins to the delegator's row on one
+		// equality instead of on a guess at latency.
+		req.FleetJobID = jobID
 		res := s.runner.Run(ctx, req)
 		if env.TaskType == string(core.TaskAgentRun) && res.OK {
 			// The one fact this result proves about the advertised seat —
