@@ -1505,11 +1505,19 @@ func (r *runner) settle(contract core.AgentContract, pr PlacedResult, pl *placem
 	// A capacity wait (or a lease wait) that ended because the CALL did is the call
 	// deadline, not "no node had room" (ADR 0065). It quotes nothing of the wait's own
 	// text: the placement narration carries that history.
+	cutBefore := pr.deadlineCut
 	pr = r.cutOutcome(pr, false)
-	if pl.attempts > 0 {
+	cutHere := pr.deadlineCut && !cutBefore
+	if pl.attempts > 0 && !cutHere {
 		return pr
 	}
-	if pr.JobID == "" {
+	// A wait the deadline ended after refused attempts (ADR 0065 decision 2) is recorded
+	// here like any other cut: no attempt produced this outcome, so no attempt's row can
+	// say it. The row gets a job id of its own — capacityDefer copies the id of the last
+	// REFUSED dispatch, whose row already says "dispatch ... 503" for a job no node held,
+	// and a second row under it would double-count one id — and the caller is given that
+	// id, so the result, the ledger row and the corpus row are one thing.
+	if pr.JobID == "" || (cutHere && pl.attempts > 0) {
 		pr.JobID = mintJobID()
 	}
 	pr.wallMs = time.Since(since).Milliseconds()
