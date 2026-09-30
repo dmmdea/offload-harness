@@ -332,7 +332,7 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	if reg, rerr := gpuactivity.Open(p.cfg.GPULockPath, p.cfg.StateDir); rerr == nil {
 		capStart := time.Now()
 		capEnd := modelaffinity.SeatCapDeadline(ctx, capStart, wall, admissionEnd)
-		if serr := modelaffinity.AwaitSeatSlot(ctx, reg.OnSeat, seat, "", act.ID(), p.cfg.FleetConcurrencyLimit(), capEnd); serr != nil {
+		if serr := modelaffinity.AwaitSeatSlotReporting(ctx, reg.OnSeat, seat, "", act.ID(), p.cfg.FleetConcurrencyLimit(), capEnd, seatLineHeartbeat(ctx, act)); serr != nil {
 			admitted = cordonWait(cordonStart)
 			admitNote = "held at the seat cap for the run's wall"
 			return deferWire(core.DeferClassCapacity, "seat busy: "+serr.Error())
@@ -1879,6 +1879,36 @@ func coerceToSchema(content []byte, schema map[string]any) ([]byte, bool) {
 }
 
 const admissionPoll = 3 * time.Second
+
+// seatLineAllowance / seatLineBeat: a run waiting in line at the seat cap
+// publishes phase "admission" with this allowance at most every beat, and at
+// once whenever the line moves (register C-60, 0.143.0). The wait may now last
+// the run's wall, and a remote delegator keeps polling a job only while its
+// last report is inside the published allowance: without the heartbeat it
+// gave up a job the node still held in line, which then ran for nobody. A
+// node that stops reporting is given up one allowance + grace later. Vars so
+// a test can compress the beat.
+var (
+	seatLineAllowance = 30 * time.Second
+	seatLineBeat      = 5 * time.Second
+)
+
+// seatLineHeartbeat is the tick AwaitSeatSlotReporting calls while this run
+// waits in line: it reports to the run's registry record and to the fleet
+// job's progress (core.ReportProgress), never as progress of the run itself.
+func seatLineHeartbeat(ctx context.Context, act *gpuactivity.Handle) func(ahead int) {
+	var last time.Time
+	lastAhead := -1
+	return func(ahead int) {
+		now := time.Now()
+		if ahead == lastAhead && now.Sub(last) < seatLineBeat {
+			return
+		}
+		last, lastAhead = now, ahead
+		act.OnAllowance("admission", seatLineAllowance)
+		core.ReportProgress(ctx, core.LiveProgress{Phase: "admission", LastProgressMs: now.UnixMilli(), AllowanceMs: seatLineAllowance.Milliseconds()})
+	}
+}
 
 func admissionBudget(sec int) time.Duration {
 	switch {

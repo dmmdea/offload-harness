@@ -50,7 +50,9 @@ registered before it (FIFO), so a freed slot admits exactly the next in line. Th
 run's own wall (never less than the admission budget, never past the caller's deadline) instead of the shared
 300 s admission budget, which refused 88 of those 92 after exactly 5m0s; the admission deadline moves out by
 the time spent in line, so the pre-flight, the cold load and the probes keep their whole budget. Both doors
-(the pipeline and `agent_run`) apply it. `agent_run` registered its run
+(the pipeline and `agent_run`) apply it. A run waiting in line publishes phase `admission` with a rolling 30 s
+allowance (refreshed at least every 5 s and whenever the line moves), so a remote delegator follows a job the node
+still holds in line instead of abandoning it, and gives up a node that stops reporting one allowance later. `agent_run` registered its run
 without the admission phase, so each one held a slot while it waited; it now registers in admission like the
 pipeline, and a test fails any `gpuactivity.Start` site that registers a gated run outside it.
 

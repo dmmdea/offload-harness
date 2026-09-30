@@ -4,6 +4,7 @@ import (
 	"context"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -113,5 +114,54 @@ func TestTheWarmUpKeepsItsBudgetAfterAWaitInLine(t *testing.T) {
 	}
 	if fake.upstreamCNT.Load() == 0 {
 		t.Fatal("the warm-up never ran: the wait in line spent the admission budget the cold load needs")
+	}
+}
+
+// A run waiting in line publishes it (register C-60): phase "admission" with
+// a rolling allowance, refreshed while it waits, so a remote delegator keeps
+// polling a job the node still holds in line and gives up a node that stops
+// reporting one allowance + grace later — never a job the node will still run.
+func TestAWaitInLineIsPublishedAsAdmissionProgress(t *testing.T) {
+	old := seatLineBeat
+	seatLineBeat = 100 * time.Millisecond
+	t.Cleanup(func() { seatLineBeat = old })
+	p, first, _, _ := seatCapFixture(t, 1)
+	go func() {
+		time.Sleep(1500 * time.Millisecond)
+		first.End()
+	}()
+	var mu sync.Mutex
+	var reports []core.LiveProgress
+	ctx := core.WithProgressReport(context.Background(), func(lp core.LiveProgress) {
+		mu.Lock()
+		reports = append(reports, lp)
+		mu.Unlock()
+	})
+	contract := testContract()
+	contract.TimeoutSec = 30
+	wire := decodeWire(t, p.Run(ctx, agentTestRequest(t, contract)))
+	if wire.Deferred {
+		t.Fatalf("deferred: %s (%s)", wire.Reason, wire.DeferClass)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	var line []core.LiveProgress
+	for _, r := range reports {
+		if r.Phase == "admission" {
+			line = append(line, r)
+		}
+	}
+	// The tick rides the gate's 1 s poll (the beat only throttles it): a 1.5 s
+	// wait gives the report on joining the line and one refresh.
+	if len(line) < 2 {
+		t.Fatalf("%d admission reports during a 1.5 s wait in line, want the join and at least one refresh: %+v", len(line), reports)
+	}
+	for i, r := range line {
+		if r.AllowanceMs != seatLineAllowance.Milliseconds() || r.LastProgressMs <= 0 {
+			t.Fatalf("report %d = %+v, want allowance %d ms and a timestamp", i, r, seatLineAllowance.Milliseconds())
+		}
+		if i > 0 && r.LastProgressMs <= line[i-1].LastProgressMs {
+			t.Fatalf("the heartbeat must move forward: %d then %d", line[i-1].LastProgressMs, r.LastProgressMs)
+		}
 	}
 }

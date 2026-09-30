@@ -70,6 +70,15 @@ func SeatCapDeadline(ctx context.Context, now time.Time, wall time.Duration, adm
 // registered on seat (or canonical), or the deadline passes. cap <= 0 or a
 // nil reader disables the gate.
 func AwaitSeatSlot(ctx context.Context, runs SeatRuns, seat, canonical, selfID string, cap int, deadline time.Time) error {
+	return AwaitSeatSlotReporting(ctx, runs, seat, canonical, selfID, cap, deadline, nil)
+}
+
+// AwaitSeatSlotReporting is AwaitSeatSlot with a heartbeat: tick (when set)
+// is called once when the run joins the line and after every poll while it
+// stays there, with the number of runs still ahead of it. A run that waits in
+// line publishes it so a remote delegator follows the wait on evidence
+// (register C-60) instead of giving up a job the node still holds.
+func AwaitSeatSlotReporting(ctx context.Context, runs SeatRuns, seat, canonical, selfID string, cap int, deadline time.Time, tick func(ahead int)) error {
 	if runs == nil || cap <= 0 || strings.TrimSpace(seat) == "" {
 		return nil
 	}
@@ -115,6 +124,9 @@ func AwaitSeatSlot(ctx context.Context, runs SeatRuns, seat, canonical, selfID s
 		return nil
 	}
 	for {
+		if tick != nil {
+			tick(ahead)
+		}
 		remain := time.Until(deadline)
 		if remain <= 0 {
 			return &SeatSlotError{Seat: seat, Cap: cap, Ahead: ahead, Waited: time.Since(start), cause: context.DeadlineExceeded}
