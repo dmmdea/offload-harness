@@ -356,15 +356,17 @@ func MethodFor(state string) string {
 // identifiers PAIR's upstream engine PRs use (llamacpp, vllm) plus the two
 // non-text engines the harness drives (whispercpp, comfyui) and the
 // accelerators (coral-edgetpu, hailo-8l, rknpu): an NPU call is not a llama.cpp
-// job, and the card's engine badge is how PAIR tells them apart.
+// job, and the card's engine badge is how PAIR tells them apart. An rkllm seat
+// (chat and vision on the RK3588 NPU, named "<model>-npu") is the same device.
 func EngineFor(task, seat string) string {
 	s := strings.ToLower(seat)
+	name, _, _ := strings.Cut(s, "@") // a failed forward is recorded "<seat>@fleet"
 	switch {
 	case strings.Contains(s, "coral"), strings.Contains(s, "edgetpu"):
 		return "coral-edgetpu"
 	case strings.Contains(s, "hailo"):
 		return "hailo-8l"
-	case strings.Contains(s, "rknpu"):
+	case strings.Contains(s, "rknpu"), strings.HasSuffix(name, "-npu"):
 		return "rknpu"
 	case strings.Contains(s, "vllm"):
 		return "vllm"
