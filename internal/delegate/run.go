@@ -3253,10 +3253,12 @@ func admissionCredit(pr PlacedResult) time.Duration {
 // take the contract, and a second remote hop would need a fresh gate pass
 // mid-timeout), but it is a real cost, not a free retry.
 // It consults the SUBTASK's placement ledger, which is what makes "a DIFFERENT
-// node" true rather than merely intended: a seat the first attempt already used
-// — including one it reached by re-placement, and including the local seat — is
+// node" true rather than merely intended: a seat the first attempt already RAN
+// on — including one it reached by re-placement, and including the local seat — is
 // excluded here. Without that, a first attempt that ended up local after two
-// remotes refused could be "retried" on local again.
+// remotes refused could be "retried" on local again. A seat that only DECLINED the
+// subtask (the local seat's capacity defer, ADR 0063 decision 3) took nothing and is
+// not excluded: see the local branch below.
 func (r *runner) alternativeNode(ctx context.Context, first PlacedResult, contract core.AgentContract, pl *placements) (placement, string, bool) {
 	st := Subtask{Contract: contract, EstTokens: EstimateTokens(contract)}
 	localView := r.localView()
@@ -3299,19 +3301,27 @@ func (r *runner) alternativeNode(ctx context.Context, first PlacedResult, contra
 				}
 			}
 		}
-		// No pl.tried[""] check here, and that is a proof rather than an
-		// oversight: a LOCAL placement is always terminal for its chain,
-		// because only runRemote can set `refused` and therefore local can
-		// never be re-placed away from. So pl.tried[""] implies first.ranLocal,
-		// and this branch cannot run with local already used.
+		// No pl.tried[""] check here, on purpose. It used to be stated as a proof:
+		// a LOCAL placement is always terminal for its chain (only runRemote sets
+		// `refused`), so pl.tried[""] implies first.ranLocal and this branch cannot
+		// run with local already used. The proof stopped holding with ADR 0063
+		// decision 3: the local seat's own capacity defer is re-placeable
+		// (isReplaceable, capacityDeferRefusal), so placeAndRun records the seat as
+		// tried, re-places the subtask on a remote, and that remote's failed answer
+		// is the first attempt this branch sees. The local seat is then the
+		// DIFFERENT node the retry asks for: it declined the job and never ran it,
+		// and pl.ran, the exclusion the retry's premise needs, does not hold it.
 		//
-		// A guard was written here first. The mutation battery could not kill
-		// it from any fixture — which is the tell for a branch that reads as
-		// protection while protecting nothing — so it is stated as an invariant
-		// instead. If local ever becomes re-placeable, this is the line to
-		// revisit, and the other direction (a retry's own chain falling back
-		// onto an already-used local seat) is guarded in replacementNode, where
-		// it IS reachable and IS covered.
+		// A retry back onto it is wanted, not a leak. A guard on pl.tried[""] would
+		// refuse a seat-down defer its only other place, and lose the job, and
+		// refuse a verification retry its second opinion. What such a guard is for,
+		// not rejoining a line that is still full, is done at the seat the retry
+		// lands on: the run-cap line check above for a seat-down defer, and
+		// retrySeatBusy and awaitRetrySeat in runOne for a verification retry (by
+		// llama-swap's in-flight count, for the local seat).
+		// TestARetryMayReturnToALocalSeatThatOnlyCapacityDeferredTheSubtask drives
+		// the case. The other direction, a retry's own chain falling back onto a
+		// local seat already used, is guarded in replacementNode.
 		return placement{view: localView, reason: "retry on local after " + nodeLabel(first) + " " + why}, "", true
 	}
 	if r.route == "local" {
