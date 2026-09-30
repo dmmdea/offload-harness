@@ -8,6 +8,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/dmmdea/offload-harness/internal/config"
 )
 
 // This file pins the node half of ADR 0064: a delegator that gives an acked job
@@ -522,5 +524,274 @@ func TestJobsAbandonedRunWallDoesNotFeedRetryAfter(t *testing.T) {
 	j.SetPollLease(0)
 	if walls = j.FinishedAgentWalls(8); len(walls) != 2 {
 		t.Fatalf("with no lease FinishedAgentWalls = %v, want both walls", walls)
+	}
+}
+
+// TestJobsAGhostWhosePollerLeftAfterALongPollIsStillSkippedAndReaped: a long poll's
+// own bookkeeping (waiters) has to come back to zero when its wait ends. Every
+// production poll is a long poll (?wait=12), so a count that never came back would
+// make every polled job look watched for good: staleLocked would be false, the claim
+// scan would start the ghost the moment a slot freed, and the reaper would never
+// take it — the exact failure the lease exists to end, with every other test green.
+func TestJobsAGhostWhosePollerLeftAfterALongPollIsStillSkippedAndReaped(t *testing.T) {
+	clk := newLeaseClock()
+	j := newJobs(time.Hour, clk.Now, time.Hour, 1)
+	defer j.DrainAndStop(time.Second)
+	j.SetPollLease(time.Minute)
+	release := holdSlot(t, j, "holder")
+
+	var ran atomic.Int32
+	if !j.Admit("ghost", AcceptSpec{Agent: true, PollLeased: true}, func(ctx context.Context) (json.RawMessage, error) {
+		ran.Add(1)
+		return json.RawMessage(`{}`), nil
+	}) {
+		t.Fatal("ghost not admitted")
+	}
+	// ONE long poll, parked and then returning at its own wait (the job is still
+	// accepted behind the held slot)...
+	if v, _ := j.WaitTerminal(context.Background(), "ghost", 40*time.Millisecond); v.State != JobAccepted {
+		t.Fatalf("the long poll saw %v, want the job still accepted", v.State)
+	}
+	// ...and its poller then went quiet for two leases.
+	clk.Advance(2 * time.Minute)
+
+	release() // the slot frees and the scheduler scans the queue
+	waitJobState(t, j, "holder", JobDone)
+	time.Sleep(80 * time.Millisecond)
+	if ran.Load() != 0 {
+		t.Fatal("the scheduler started a job whose poller had left: a long poll that ended left the job looking watched")
+	}
+	if n := j.reap(); n != 1 {
+		t.Fatalf("reap took %d job(s), want the ghost whose long poll ended and whose poller then went quiet", n)
+	}
+}
+
+// TestJobsWithTheLeaseOffAGhostIsNeverSkippedOrReaped: fleet_poll_lease_sec < 0 is
+// the kill switch — the behaviour before ADR 0064. With no lease NOTHING may be
+// skipped, reaped or discounted, however long a job sits unpolled; a predicate that
+// read "older than a zero lease" would skip and reap every pushed agent job.
+func TestJobsWithTheLeaseOffAGhostIsNeverSkippedOrReaped(t *testing.T) {
+	for _, lease := range []time.Duration{0, -time.Second} {
+		t.Run(lease.String(), func(t *testing.T) {
+			clk := newLeaseClock()
+			j := newJobs(time.Hour, clk.Now, time.Hour, 1)
+			defer j.DrainAndStop(time.Second)
+			j.SetPollLease(lease)
+			release := holdSlot(t, j, "holder")
+			defer release()
+
+			var ran atomic.Int32
+			j.Admit("late", AcceptSpec{Agent: true, PollLeased: true}, func(ctx context.Context) (json.RawMessage, error) {
+				ran.Add(1)
+				return json.RawMessage(`{}`), nil
+			})
+			clk.Advance(24 * time.Hour)
+			if n := j.reap(); n != 0 {
+				t.Fatalf("reap took %d job(s), want 0 with the rule off", n)
+			}
+			release()
+			waitJobState(t, j, "late", JobDone) // claimed and run, not skipped
+			if ran.Load() != 1 {
+				t.Fatalf("the job ran %d times, want 1", ran.Load())
+			}
+		})
+	}
+}
+
+// TestJobsWithdrawnAndReapedRecordsLiveForTheTTL: a withdrawn or reaped job is a
+// terminal RECORD, not a deletion (ADR 0064, decision 2): a poll of the id reaches
+// it, a duplicate dispatch of the id meets it (409, never a second run) and the
+// jobs feed shows what became of it, for the terminal TTL like every other
+// terminal record. A record that vanished at the next janitor tick would turn all of
+// that back into the 404 the ADR rejects.
+func TestJobsWithdrawnAndReapedRecordsLiveForTheTTL(t *testing.T) {
+	clk := newLeaseClock()
+	j := newJobs(time.Hour, clk.Now, time.Hour, 1)
+	defer j.DrainAndStop(time.Second)
+	j.SetPollLease(time.Minute)
+	release := holdSlot(t, j, "holder")
+	defer release()
+	spec := AcceptSpec{Agent: true, PollLeased: true}
+	run := func(ctx context.Context) (json.RawMessage, error) { return json.RawMessage(`{}`), nil }
+	j.Admit("withdrawn", spec, run)
+	j.Admit("reaped", spec, run)
+
+	if !j.Withdraw("withdrawn").Withdrawn {
+		t.Fatal("withdraw did not take the job")
+	}
+	clk.Advance(2 * time.Minute)
+	if n := j.reap(); n != 1 {
+		t.Fatalf("reap took %d job(s), want the one nobody withdrew", n)
+	}
+
+	clk.Advance(20 * time.Minute) // well inside the 1 h TTL
+	j.sweep()
+	for id, want := range map[string]string{"withdrawn": ErrWithdrawn, "reaped": ErrReaped} {
+		if v, ok := j.Get(id); !ok || v.State != JobError || v.Error != want {
+			t.Fatalf("%s after 20 min = ok=%v %+v, want the terminal record %q still there", id, ok, v, want)
+		}
+	}
+	clk.Advance(2 * time.Hour) // past it
+	j.sweep()
+	for _, id := range []string{"withdrawn", "reaped"} {
+		if _, ok := j.Get(id); ok {
+			t.Fatalf("%s is still held after the TTL: terminal records age out like every other", id)
+		}
+	}
+}
+
+// TestJobsWithdrawnAndReapedFeedRowsCarryTheirFinishTime: the jobs feed's row for a
+// job the node took back says WHEN, and — since nothing ran — has no start and no
+// wall for the overview to average.
+func TestJobsWithdrawnAndReapedFeedRowsCarryTheirFinishTime(t *testing.T) {
+	clk := newLeaseClock()
+	j := newJobs(time.Hour, clk.Now, time.Hour, 1)
+	defer j.DrainAndStop(time.Second)
+	j.SetPollLease(time.Minute)
+	release := holdSlot(t, j, "holder")
+	defer release()
+	spec := AcceptSpec{Agent: true, PollLeased: true}
+	run := func(ctx context.Context) (json.RawMessage, error) { return json.RawMessage(`{}`), nil }
+	j.Admit("withdrawn", spec, run)
+	j.Admit("reaped", spec, run)
+	j.Withdraw("withdrawn")
+	clk.Advance(2 * time.Minute)
+	j.reap()
+
+	seen := 0
+	for _, row := range j.Recent(0) {
+		if row.ID != "withdrawn" && row.ID != "reaped" {
+			continue
+		}
+		seen++
+		if row.FinishedAt.IsZero() {
+			t.Errorf("%s: feed row has no FinishedAt", row.ID)
+		}
+		if !row.StartedAt.IsZero() {
+			t.Errorf("%s: feed row has a StartedAt (%v) for a job that never ran", row.ID, row.StartedAt)
+		}
+	}
+	if seen != 2 {
+		t.Fatalf("the feed held %d of the 2 taken-back jobs", seen)
+	}
+}
+
+// TestJobsWithdrawWakesAParkedLongPoll: an observer parked on the job (a second
+// poller; the delegator that withdraws is not blocked on it) learns the verdict at
+// once, not when its wait runs out.
+func TestJobsWithdrawWakesAParkedLongPoll(t *testing.T) {
+	j := newJobs(time.Hour, time.Now, time.Hour, 1)
+	defer j.DrainAndStop(time.Second)
+	release := holdSlot(t, j, "holder")
+	defer release()
+	j.Admit("queued", AcceptSpec{Agent: true}, func(ctx context.Context) (json.RawMessage, error) { return json.RawMessage(`{}`), nil })
+
+	type answer struct {
+		v    *JobView
+		took time.Duration
+	}
+	got := make(chan answer, 1)
+	go func() {
+		began := time.Now()
+		v, _ := j.WaitTerminal(context.Background(), "queued", 20*time.Second)
+		got <- answer{v, time.Since(began)}
+	}()
+	// Wait until the long poll is parked on the job.
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		j.mu.RLock()
+		parked := j.m["queued"].waiters
+		j.mu.RUnlock()
+		if parked == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the long poll never parked")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if res := j.Withdraw("queued"); !res.Withdrawn {
+		t.Fatalf("Withdraw = %+v", res)
+	}
+	select {
+	case a := <-got:
+		if a.v.State != JobError || a.v.Error != ErrWithdrawn {
+			t.Fatalf("the parked poll read %+v, want the withdrawn terminal", a.v)
+		}
+		if a.took > 5*time.Second {
+			t.Fatalf("the parked poll took %v to learn of the withdraw", a.took)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a long poll parked on a job that was withdrawn was not woken: it would sit out its whole wait")
+	}
+}
+
+// TestJobsWithdrawIsIdempotentForEveryTerminalThatMeansItNeverRan: a job the node
+// reaped, or marked never-started at shutdown, is the fact the withdraw reports —
+// nothing ran — so asking for it back late is confirmed, not refused as "already
+// started". A job that DID run and failed is a different fact and stays refused.
+func TestJobsWithdrawIsIdempotentForEveryTerminalThatMeansItNeverRan(t *testing.T) {
+	clk := newLeaseClock()
+	j := newJobs(time.Hour, clk.Now, time.Hour, 1)
+	j.SetPollLease(time.Minute)
+	release := holdSlot(t, j, "holder")
+	spec := AcceptSpec{Agent: true, PollLeased: true}
+	ok := func(ctx context.Context) (json.RawMessage, error) { return json.RawMessage(`{}`), nil }
+	j.Admit("reaped", spec, ok)
+	clk.Advance(2 * time.Minute)
+	if n := j.reap(); n != 1 {
+		t.Fatalf("reap took %d job(s), want 1", n)
+	}
+	j.Admit("queued-at-shutdown", AcceptSpec{Agent: true}, ok)
+
+	if res := j.Withdraw("reaped"); !res.Found || !res.Withdrawn {
+		t.Fatalf("Withdraw(reaped) = %+v, want found and withdrawn: nothing ran", res)
+	}
+	if v, _ := j.Get("reaped"); v.Error != ErrReaped {
+		t.Fatalf("the withdraw rewrote the record: %+v, want %q kept", v, ErrReaped)
+	}
+
+	// Shutdown: the holder was cut off mid-run (ErrInterrupted: it DID start), the
+	// queued job was never taken (ErrNeverStarted: it did not).
+	j.DrainAndStop(50 * time.Millisecond)
+	release()
+	if v, _ := j.Get("queued-at-shutdown"); v.Error != ErrNeverStarted {
+		t.Fatalf("fixture: queued-at-shutdown = %+v, want the never-started terminal", v)
+	}
+	if res := j.Withdraw("queued-at-shutdown"); !res.Found || !res.Withdrawn {
+		t.Fatalf("Withdraw(never started) = %+v, want found and withdrawn", res)
+	}
+	if v, _ := j.Get("holder"); v.State != JobError || v.Error != ErrInterrupted {
+		t.Fatalf("fixture: holder = %+v, want the interrupted terminal", v)
+	}
+	if res := j.Withdraw("holder"); !res.Found || res.Withdrawn || res.State != JobError {
+		t.Fatalf("Withdraw(a job that ran and was cut off) = %+v, want found, not withdrawn, state error", res)
+	}
+}
+
+// TestPollLeaseDefaultsAgree: the store's default lease and the config key's default
+// are two constants for one number. If they drift, a node built without the config
+// wiring and one built with it disagree about when a delegator has gone.
+func TestPollLeaseDefaultsAgree(t *testing.T) {
+	if want := time.Duration(config.FleetPollLeaseSecDefault) * time.Second; DefaultPollLease != want {
+		t.Fatalf("DefaultPollLease = %v, config.FleetPollLeaseSecDefault = %v", DefaultPollLease, want)
+	}
+	if want := DefaultPollLease; (config.Config{}).FleetPollLease() != want {
+		t.Fatalf("an unset fleet_poll_lease_sec resolves to %v, want the store's default %v", (config.Config{}).FleetPollLease(), want)
+	}
+}
+
+// TestNewJobsStartsWithTheDefaultPollLease: the production constructor arms the lease
+// on its own, so a node whose serve verb never narrows it still cleans up after a
+// delegator that left.
+func TestNewJobsStartsWithTheDefaultPollLease(t *testing.T) {
+	j := NewJobs(time.Hour, 1)
+	defer j.DrainAndStop(time.Second)
+	if got := j.PollLease(); got != DefaultPollLease {
+		t.Fatalf("NewJobs poll lease = %v, want %v", got, DefaultPollLease)
+	}
+	j.SetPollLease(90 * time.Second)
+	if got := j.PollLease(); got != 90*time.Second {
+		t.Fatalf("after SetPollLease(90s) PollLease() = %v", got)
 	}
 }

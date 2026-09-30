@@ -268,7 +268,12 @@ func newJobs(ttl time.Duration, now func() time.Time, janitorTick time.Duration,
 	}
 	j.cond = sync.NewCond(&j.mu)
 	go j.janitor(janitorTick)
-	go j.reapLoop()
+	// The reaper's tick is read HERE, in the caller's goroutine, and handed to the
+	// loop as a value: reapEvery is a package var a test compresses, and a read
+	// from the spawned goroutine has no happens-before edge to that write (a data
+	// race under -race for any test that builds a store after one that compressed
+	// it). janitorTick above is a parameter for the same reason.
+	go j.reapLoop(reapEvery)
 	go j.schedule()
 	return j
 }
@@ -493,13 +498,23 @@ const (
 // ErrWithdrawn, which is what a later poll of the id reads.
 const WithdrawnState = "withdrawn"
 
+// neverRanErr reports whether a job's terminal error says it was taken out of the
+// backlog without ever running: withdrawn by its delegator, reaped, or marked
+// never-started at shutdown. They are three routes to one fact, and Withdraw treats
+// the fact, not the route.
+func neverRanErr(err string) bool {
+	return err == ErrWithdrawn || err == ErrReaped || err == ErrNeverStarted
+}
+
 // WithdrawResult is Withdraw's answer.
 type WithdrawResult struct {
 	// Found is false for an id the store does not hold (never admitted, or
 	// already evicted).
 	Found bool
-	// Withdrawn: the job is withdrawn now — by this call, or by an earlier one
-	// (Withdraw is idempotent, so a retry after a lost answer is unambiguous).
+	// Withdrawn: the job is out of the backlog and never ran — taken back by this
+	// call, by an earlier one (Withdraw is idempotent, so a retry after a lost answer
+	// is unambiguous), or by the node itself (reaped, or never-started at shutdown:
+	// see neverRanErr).
 	Withdrawn bool
 	// State is the job's state when it could NOT be withdrawn: running (a slot
 	// took it), or already done/error. Zero when Withdrawn or not Found.
@@ -528,9 +543,13 @@ func (j *Jobs) Withdraw(id string) WithdrawResult {
 	case !ok:
 		j.mu.Unlock()
 		return WithdrawResult{}
-	case jb.state == JobError && jb.err == ErrWithdrawn:
+	case jb.state == JobError && neverRanErr(jb.err):
+		// Idempotent: the answer a lost reply needs. And not only for a job THIS route
+		// withdrew: a job the reaper took, or a drain marked never-started, is the same
+		// fact (nothing ran, nothing will), and answering "it has already started" for
+		// it would send the delegator back to polling a job that never ran.
 		j.mu.Unlock()
-		return WithdrawResult{Found: true, Withdrawn: true} // idempotent: the answer a lost reply needs
+		return WithdrawResult{Found: true, Withdrawn: true}
 	case jb.state != JobAccepted:
 		state := jb.state
 		j.mu.Unlock()
@@ -571,6 +590,14 @@ func (j *Jobs) SetPollLease(d time.Duration) {
 	j.mu.Unlock()
 }
 
+// PollLease reports the poll lease in force; 0 = the abandoned-job rules are off.
+// It exists so the serve verb's wiring of fleet_poll_lease_sec can be read back.
+func (j *Jobs) PollLease() time.Duration {
+	j.mu.RLock()
+	defer j.mu.RUnlock()
+	return j.pollLease
+}
+
 // Touch records that a poller looked at the job just now (the poll route calls it
 // after the bearer gate; the feed listing never does, so an observer cannot keep
 // a ghost alive). A terminal job is left alone: see job.polledAt.
@@ -602,12 +629,14 @@ func (j *Jobs) staleLocked(jb *job, now time.Time) bool {
 
 // reapEvery is how often the reaper looks for abandoned accepted jobs. A var so
 // a test can compress it; production never mutates it, and a test must set it
-// BEFORE building the store (reapLoop reads it when it starts).
+// BEFORE building the store (newJobs reads it once, on the constructing
+// goroutine, and hands it to reapLoop).
 var reapEvery = 5 * time.Second
 
-// reapLoop runs reap on its tick until DrainAndStop closes stopJanitor.
-func (j *Jobs) reapLoop() {
-	t := time.NewTicker(reapEvery)
+// reapLoop runs reap on every tick of `every` until DrainAndStop closes
+// stopJanitor.
+func (j *Jobs) reapLoop(every time.Duration) {
+	t := time.NewTicker(every)
 	defer t.Stop()
 	for {
 		select {

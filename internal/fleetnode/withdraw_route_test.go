@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/config"
+	"github.com/dmmdea/offload-harness/internal/core"
 )
 
 // This file pins DELETE /fleet/jobs/{id} (ADR 0064): the delegator's way to take
@@ -234,5 +236,245 @@ func TestPulledJobsAreNotPollLeased(t *testing.T) {
 	s, _ := newTestServer(t, agentLaneCfg(t, withdrawToken), &fakeRunner{}, authOpts(true))
 	if spec := s.claimSpec("agent", nil); spec.PollLeased {
 		t.Fatal("claimSpec marked a pulled agent job PollLeased: the reaper would take it while it waits for a slot")
+	}
+}
+
+// TestAKnownAgentJobIsGatedByItsOwnMarkerWhateverTheDispatchDeclares: the dispatch
+// door checks the bearer for a request that DECLARES a token-gated task_type, and a
+// media task_type is tokenless by design. A caller that re-sends a known agent job's
+// id under a media type therefore skipped that check, and the known-job path answered
+// it anyway with a 202 that restarted the job's poll lease. Any peer that can read
+// ids off the unauthenticated jobs feed could then pin a ghost alive for good (ADR
+// 0064, decision 4). The job's OWN record decides, exactly as it does on the poll and
+// on the withdraw.
+func TestAKnownAgentJobIsGatedByItsOwnMarkerWhateverTheDispatchDeclares(t *testing.T) {
+	cfg := agentLaneCfg(t, withdrawToken)
+	cfg.FleetMaxConcurrentJobs = 1
+	cfg.FleetMaxQueueDepth = 16
+	rel := make(chan struct{})
+	var once sync.Once
+	s, jobs, clk := leaseServer(t, cfg, &fakeRunner{fn: blockingAgentRun(rel)})
+	t.Cleanup(func() { once.Do(func() { close(rel) }) }) // after leaseServer: runs before its drain
+
+	for _, id := range []string{"holder", "victim", "control"} {
+		if rec := do(t, s, http.MethodPost, "/fleet/dispatch", agentLaneBody(id), withdrawAuth); rec.Code != http.StatusAccepted {
+			t.Fatalf("dispatch %s = %d (body %s)", id, rec.Code, rec.Body.String())
+		}
+	}
+	waitJobState(t, jobs, "holder", JobRunning)
+
+	// The victim's id, declared as a media task, with no token, five times across
+	// 150 s (two and a half leases). None of them is a poll.
+	const misTyped = `{"job_id":"victim","task_type":"tts","payload":{}}`
+	for i := 0; i < 5; i++ {
+		clk.Advance(30 * time.Second)
+		if rec := do(t, s, http.MethodPost, "/fleet/dispatch", misTyped, nil); rec.Code != http.StatusUnauthorized {
+			t.Errorf("unauthenticated re-dispatch #%d of an agent job = %d, want 401 (body %s)", i+1, rec.Code, rec.Body.String())
+		}
+	}
+	if n := jobs.reap(); n != 2 {
+		t.Errorf("reap took %d job(s), want 2 (victim and control): an unauthenticated re-dispatch kept a ghost alive", n)
+	}
+	for _, id := range []string{"victim", "control"} {
+		if v, _ := jobs.Get(id); v.State != JobError || v.Error != ErrReaped {
+			t.Errorf("%s = %+v, want the reaped terminal", id, v)
+		}
+	}
+}
+
+// TestAFailedAgentJobsErrorIsNotReadableThroughAMisTypedRedispatch: the same hole
+// read state instead of writing it. A known job that FAILED answers a re-dispatch
+// with 409 and its own error text, and an agent error can echo the caller's goal or
+// a tool result, which is why the jobs feed withholds it from a caller without the
+// token. The token holder keeps the 409 (the delegator classes it re-placeable).
+func TestAFailedAgentJobsErrorIsNotReadableThroughAMisTypedRedispatch(t *testing.T) {
+	const secret = "the goal named the rotation key"
+	s, jobs := newTestServer(t, agentLaneCfg(t, withdrawToken), &fakeRunner{fn: func(ctx context.Context, req core.Request) core.Result {
+		return core.Result{OK: false, Reason: secret}
+	}}, authOpts(true))
+	if rec := do(t, s, http.MethodPost, "/fleet/dispatch", agentLaneBody("failed-1"), withdrawAuth); rec.Code != http.StatusAccepted {
+		t.Fatalf("dispatch = %d (body %s)", rec.Code, rec.Body.String())
+	}
+	waitJobState(t, jobs, "failed-1", JobError)
+
+	rec := do(t, s, http.MethodPost, "/fleet/dispatch", `{"job_id":"failed-1","task_type":"tts","payload":{}}`, nil)
+	if rec.Code != http.StatusUnauthorized || strings.Contains(rec.Body.String(), secret) {
+		t.Fatalf("mis-typed unauthenticated re-dispatch of a failed agent job = %d %s, want 401 with no error text", rec.Code, rec.Body.String())
+	}
+	rec = do(t, s, http.MethodPost, "/fleet/dispatch", agentLaneBody("failed-1"), withdrawAuth)
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), secret) {
+		t.Fatalf("authorized re-dispatch of a failed agent job = %d %s, want the 409 with the node's error text", rec.Code, rec.Body.String())
+	}
+}
+
+// TestAnAuthorizedRedispatchRestartsThePollLease: a delegator that re-sends its
+// dispatch (a lost ack) is a delegator that is still there, so the job's lease
+// starts over — and only that job's: the control job nobody re-sent is reaped on
+// the schedule. The dispatch is repeated at 50 s, so without the restart the
+// resent job would be 100 s old, past the 60 s lease, when the reaper looks.
+func TestAnAuthorizedRedispatchRestartsThePollLease(t *testing.T) {
+	cfg := agentLaneCfg(t, withdrawToken)
+	cfg.FleetMaxConcurrentJobs = 1
+	cfg.FleetMaxQueueDepth = 16
+	rel := make(chan struct{})
+	var once sync.Once
+	s, jobs, clk := leaseServer(t, cfg, &fakeRunner{fn: blockingAgentRun(rel)})
+	t.Cleanup(func() { once.Do(func() { close(rel) }) })
+
+	for _, id := range []string{"holder", "resent", "control"} {
+		if rec := do(t, s, http.MethodPost, "/fleet/dispatch", agentLaneBody(id), withdrawAuth); rec.Code != http.StatusAccepted {
+			t.Fatalf("dispatch %s = %d (body %s)", id, rec.Code, rec.Body.String())
+		}
+	}
+	waitJobState(t, jobs, "holder", JobRunning)
+
+	clk.Advance(50 * time.Second)
+	if rec := do(t, s, http.MethodPost, "/fleet/dispatch", agentLaneBody("resent"), withdrawAuth); rec.Code != http.StatusAccepted {
+		t.Fatalf("authorized re-dispatch = %d, want the idempotent 202 re-ack (body %s)", rec.Code, rec.Body.String())
+	}
+	clk.Advance(50 * time.Second)
+	if n := jobs.reap(); n != 1 {
+		t.Fatalf("reap took %d job(s), want only the control job: the re-sent one is 50 s past its restart", n)
+	}
+	if v, _ := jobs.Get("resent"); v.State != JobAccepted {
+		t.Fatalf("resent = %v, want still accepted", v.State)
+	}
+	if v, _ := jobs.Get("control"); v.State != JobError || v.Error != ErrReaped {
+		t.Fatalf("control = %+v, want reaped", v)
+	}
+}
+
+// TestWithdrawOfAVisionJobIsGatedThenRefusedAsNotAnAgentJob: a vision job rides the
+// agent bearer without being an agent job. A caller without the token gets the auth
+// verdict — never the 405, which would say the id exists and what kind of job it is
+// — and a caller WITH the token learns the job is not withdrawable, and which
+// method the route does take.
+func TestWithdrawOfAVisionJobIsGatedThenRefusedAsNotAnAgentJob(t *testing.T) {
+	cfg := visionCfg(withdrawToken)
+	cfg.FleetMaxConcurrentJobs = 1
+	s, jobs := newTestServer(t, cfg, &fakeRunner{}, authOpts(true))
+	release := holdSlot(t, jobs, "holder")
+	defer release()
+	if !jobs.Admit("vision-queued", AcceptSpec{Gated: true, Task: VisionTask}, func(ctx context.Context) (json.RawMessage, error) {
+		return json.RawMessage(`{}`), nil
+	}) {
+		t.Fatal("vision job not admitted")
+	}
+
+	for name, header := range map[string]map[string]string{
+		"no token":    nil,
+		"wrong token": {"Authorization": "Bearer wrong"},
+	} {
+		if rec := do(t, s, http.MethodDelete, "/fleet/jobs/vision-queued", "", header); rec.Code != http.StatusUnauthorized {
+			t.Fatalf("%s: withdraw of a vision job = %d, want 401 (body %s)", name, rec.Code, rec.Body.String())
+		}
+	}
+	rec := do(t, s, http.MethodDelete, "/fleet/jobs/vision-queued", "", withdrawAuth)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("authorized withdraw of a vision job = %d, want 405 (body %s)", rec.Code, rec.Body.String())
+	}
+	if allow := rec.Header().Get("Allow"); allow != http.MethodGet {
+		t.Fatalf("Allow = %q, want %q: a 405 names the method the route takes", allow, http.MethodGet)
+	}
+	if v, _ := jobs.Get("vision-queued"); v.State != JobAccepted {
+		t.Fatalf("a refused withdraw changed the vision job: %v", v.State)
+	}
+}
+
+// TestWithdrawOfAJobTheNodeAlreadyTookBackAnswers200: a job the reaper took (nobody
+// polled it) or a drain marked never-started is the SAME fact the withdraw
+// reports — nothing ran, nothing will — so the delegator that asks for it back late
+// gets its confirmation, not a 409 that says the job "has already started" (which
+// would make it keep polling a job that never ran). The record keeps its own text.
+func TestWithdrawOfAJobTheNodeAlreadyTookBackAnswers200(t *testing.T) {
+	cfg := agentLaneCfg(t, withdrawToken)
+	cfg.FleetMaxConcurrentJobs = 1
+	cfg.FleetMaxQueueDepth = 16
+	rel := make(chan struct{})
+	var once sync.Once
+	s, jobs, clk := leaseServer(t, cfg, &fakeRunner{fn: blockingAgentRun(rel)})
+	t.Cleanup(func() { once.Do(func() { close(rel) }) })
+	for _, id := range []string{"holder", "ghost"} {
+		if rec := do(t, s, http.MethodPost, "/fleet/dispatch", agentLaneBody(id), withdrawAuth); rec.Code != http.StatusAccepted {
+			t.Fatalf("dispatch %s = %d (body %s)", id, rec.Code, rec.Body.String())
+		}
+	}
+	waitJobState(t, jobs, "holder", JobRunning)
+	clk.Advance(2 * time.Minute)
+	if n := jobs.reap(); n != 1 {
+		t.Fatalf("reap took %d job(s), want the ghost", n)
+	}
+
+	rec := do(t, s, http.MethodDelete, "/fleet/jobs/ghost", "", withdrawAuth)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("withdraw of a reaped job = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	if m := decodeMap(t, rec); m["state"] != WithdrawnState || m["withdrawn"] != true {
+		t.Fatalf("withdraw body = %v, want state %q, withdrawn true", m, WithdrawnState)
+	}
+	pm := decodeMap(t, do(t, s, http.MethodGet, "/fleet/jobs/ghost", "", withdrawAuth))
+	if pm["state"] != string(JobError) || pm["error"] != ErrReaped {
+		t.Fatalf("poll after the withdraw = %v, want the record's own reaped text %q", pm, ErrReaped)
+	}
+	// The job that IS running is still refused with its state.
+	if rec = do(t, s, http.MethodDelete, "/fleet/jobs/holder", "", withdrawAuth); rec.Code != http.StatusConflict {
+		t.Fatalf("withdraw of a running job = %d, want 409", rec.Code)
+	}
+}
+
+// TestDispatchLeasesOnlyPushedAgentJobs: the poll lease belongs to a job whose
+// dispatcher polls for it. The door's mapping (env.TaskType == agent) is what keeps
+// a vision job — polled by another client on a cadence this node does not control —
+// and a media job out of the reaper's reach. The store-level tests admit with a
+// hand-built spec and never see that mapping.
+func TestDispatchLeasesOnlyPushedAgentJobs(t *testing.T) {
+	cfg := visionCfg(withdrawToken) // image-gen + run-graph + a bound vision model + the token
+	cfg.Home = t.TempDir()
+	cfg.FleetAgentEnabled = true
+	cfg.AgentModel = "agent-seat"
+	cfg.FleetMaxConcurrentJobs = 1
+	cfg.FleetMaxQueueDepth = 16
+	rel := make(chan struct{})
+	var once sync.Once
+	s, jobs, clk := leaseServer(t, cfg, &fakeRunner{fn: blockingAgentRun(rel)})
+	t.Cleanup(func() { once.Do(func() { close(rel) }) })
+
+	// holder takes the one capped slot; the queued agent job and the vision job wait
+	// behind it; the image job runs on its own uncapped lane.
+	if rec := do(t, s, http.MethodPost, "/fleet/dispatch", agentLaneBody("holder"), withdrawAuth); rec.Code != http.StatusAccepted {
+		t.Fatalf("dispatch holder = %d (body %s)", rec.Code, rec.Body.String())
+	}
+	waitJobState(t, jobs, "holder", JobRunning)
+	if rec := do(t, s, http.MethodPost, "/fleet/dispatch", agentLaneBody("agd-queued"), withdrawAuth); rec.Code != http.StatusAccepted {
+		t.Fatalf("dispatch agd-queued = %d (body %s)", rec.Code, rec.Body.String())
+	}
+	if rec := do(t, s, http.MethodPost, "/fleet/vision", visionBody("vis-queued", "ocr", tinyPNG(), nil), withdrawAuth); rec.Code != http.StatusAccepted {
+		t.Fatalf("dispatch vis-queued = %d (body %s)", rec.Code, rec.Body.String())
+	}
+	if rec := do(t, s, http.MethodPost, "/fleet/dispatch", `{"job_id":"media-1","task_type":"image-gen","payload":{"prompt":"hi"}}`, nil); rec.Code != http.StatusAccepted {
+		t.Fatalf("dispatch media-1 = %d (body %s)", rec.Code, rec.Body.String())
+	}
+	waitJobState(t, jobs, "media-1", JobRunning)
+
+	leased := func(id string) bool {
+		jobs.mu.RLock()
+		defer jobs.mu.RUnlock()
+		return jobs.m[id].leased
+	}
+	for id, want := range map[string]bool{"holder": true, "agd-queued": true, "vis-queued": false, "media-1": false} {
+		if got := leased(id); got != want {
+			t.Errorf("%s leased = %v, want %v", id, got, want)
+		}
+	}
+
+	clk.Advance(2 * time.Hour) // nobody polled anything
+	if n := jobs.reap(); n != 1 {
+		t.Fatalf("reap took %d job(s), want only the queued agent job: the vision job's poller is another client", n)
+	}
+	if v, _ := jobs.Get("vis-queued"); v.State != JobAccepted {
+		t.Fatalf("vis-queued = %v, want still accepted", v.State)
+	}
+	if v, _ := jobs.Get("agd-queued"); v.State != JobError || v.Error != ErrReaped {
+		t.Fatalf("agd-queued = %+v, want reaped", v)
 	}
 }
