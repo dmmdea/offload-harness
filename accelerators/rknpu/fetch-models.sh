@@ -143,7 +143,10 @@ for section in ("labels", "testdata"):
 PY
 }
 
-rows="$(list_artifacts)"  # a manifest that does not parse must stop the script, not read as "nothing to fetch"
+# A manifest that does not parse must stop the script, not read as "nothing to fetch" (pipefail carries the failure
+# through tr). tr drops the CR that a native Windows python (Git Bash) puts before every newline: it would ride into
+# the last field of each row, the URL, and curl refuses "https://...\r".
+rows="$(list_artifacts | tr -d '\r')"
 fail=0
 while IFS=$'\t' read -r kind where name sha url; do
   case "$where" in lib|wheels) dir="$BASE/$where" ;; *) dir="$DEST" ;; esac
