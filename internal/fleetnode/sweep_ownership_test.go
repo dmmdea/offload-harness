@@ -348,3 +348,61 @@ func TestSweepFailedRemovalIsNeitherSweptNorKept(t *testing.T) {
 	// The stuck dir is neither swept nor kept.
 	wantCounts(t, swept, kept, 1, 1)
 }
+
+// The age rule is "older than jobdir.MaxRunLifetime", strictly: a dir exactly
+// that old is still kept, one a second older is not, and a dir stamped in the
+// future (a clock that stepped back) counts as young.
+func TestJudgeAgeBoundary(t *testing.T) {
+	_, jobs := sweepFixture(t)
+	d := makeJobDir(t, jobs, jobDirSpec{name: "agent-local-707", owner: os.Getpid()})
+	fi, err := os.Lstat(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	born := fi.ModTime()
+	cases := []struct {
+		name string
+		now  time.Time
+		want pipelineJobDirFate
+	}{
+		{"just made", born, pipelineJobDirInUse},
+		{"exactly the maximum", born.Add(jobdir.MaxRunLifetime), pipelineJobDirInUse},
+		{"a second past it", born.Add(jobdir.MaxRunLifetime + time.Second), pipelineJobDirOrphaned},
+		{"stamped in the future", born.Add(-time.Hour), pipelineJobDirInUse},
+	}
+	for _, c := range cases {
+		if got := judgePipelineJobDir(d, filepath.Base(d), c.now); got != c.want {
+			t.Errorf("%s: fate = %d, want %d", c.name, got, c.want)
+		}
+	}
+}
+
+// An entry that disappears between the listing and the decision (its run ended
+// and removed its own dir) is nothing to remove and nothing to keep.
+func TestJudgeAnEntryThatVanishedIsNeitherOrphanedNorInUse(t *testing.T) {
+	_, jobs := sweepFixture(t)
+	gone := filepath.Join(jobs, "agent-local-808")
+	if got := judgePipelineJobDir(gone, "agent-local-808", time.Now()); got != pipelineJobDirGone {
+		t.Fatalf("fate of a vanished agent-local entry = %d, want %d (gone)", got, pipelineJobDirGone)
+	}
+}
+
+// The marker decides, not the name: a marked dir is kept for a live, recent
+// owner whatever it is called, and removed for a dead one. (Only the
+// delegator's local runs write markers today; this pins the rule for whatever
+// writes the next.)
+func TestSweepMarkerBeatsTheName(t *testing.T) {
+	cfg, jobs := sweepFixture(t)
+	live := makeJobDir(t, jobs, jobDirSpec{name: "worker-909", owner: os.Getpid()})
+	dead := makeJobDir(t, jobs, jobDirSpec{name: "worker-910", owner: deadOwnerPID(t)})
+
+	swept, kept := sweep(t, cfg)
+
+	if !exists(live) {
+		t.Error("a marked dir with a live owner was removed because of its name")
+	}
+	if exists(dead) {
+		t.Error("a marked dir with a dead owner survived because of its name")
+	}
+	wantCounts(t, swept, kept, 1, 1)
+}

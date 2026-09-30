@@ -8,6 +8,7 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -219,5 +220,72 @@ func TestRunAgentContractSurvivesAStartupSweepMidRun(t *testing.T) {
 	}
 	if entries, _ := os.ReadDir(filepath.Join(h, "pipeline-jobs")); len(entries) != 0 {
 		t.Errorf("pipeline-jobs left %d entries behind after the run", len(entries))
+	}
+}
+
+// The marker is the first thing in the dir: nothing else is in it when it is
+// written, so there is no instant at which a sweep can list a dir that already
+// holds context docs but no marker.
+func TestRunAgentContractWritesTheOwnerMarkerBeforeAnythingElse(t *testing.T) {
+	orig := writeJobOwner
+	t.Cleanup(func() { writeJobOwner = orig })
+	var present []string
+	writeJobOwner = func(dir string) error {
+		entries, _ := os.ReadDir(dir)
+		for _, e := range entries {
+			present = append(present, e.Name())
+		}
+		return orig(dir)
+	}
+	fake := &agentFake{
+		rosterIDs: []string{agentTestSeat},
+		loop:      func(int64) string { return doneChat("The answer is 42.") },
+	}
+	srv := fake.server(t)
+	defer srv.Close()
+
+	p, _ := agentContractPipeline(t, srv.URL)
+	contract := testContract()
+	contract.Depth = 0
+	contract.OutputSchema = nil
+	if _, err := p.RunAgentContract(context.Background(), contract, AgentContractOptions{}); err != nil {
+		t.Fatalf("RunAgentContract: %v", err)
+	}
+	if len(present) != 0 {
+		t.Fatalf("the job dir already held %v when its owner marker was written; the marker must come first", present)
+	}
+}
+
+// A marker that cannot be written is a materialization failure like the
+// others: an error, no model call, and nothing left on disk.
+func TestRunAgentContractMarkerWriteFailureIsAnErrorAndLeavesNothing(t *testing.T) {
+	orig := writeJobOwner
+	t.Cleanup(func() { writeJobOwner = orig })
+	writeJobOwner = func(string) error { return errors.New("disk full") }
+	fake := &agentFake{
+		rosterIDs: []string{agentTestSeat},
+		loop: func(int64) string {
+			t.Error("the seat was called for a run that could not be marked")
+			return doneChat("never")
+		},
+	}
+	srv := fake.server(t)
+	defer srv.Close()
+
+	p, home := agentContractPipeline(t, srv.URL)
+	contract := testContract()
+	contract.Depth = 0
+	_, err := p.RunAgentContract(context.Background(), contract, AgentContractOptions{})
+	if err == nil {
+		t.Fatal("a run whose dir could not be marked must not start")
+	}
+	if !strings.Contains(err.Error(), "owner marker") || !strings.Contains(err.Error(), "disk full") {
+		t.Errorf("error = %q, want it to name the marker and carry the cause", err)
+	}
+	if fake.loopCalls.Load() != 0 {
+		t.Errorf("the seat was called %d time(s) for a run that could not be marked", fake.loopCalls.Load())
+	}
+	if entries, _ := os.ReadDir(filepath.Join(home, "pipeline-jobs")); len(entries) != 0 {
+		t.Errorf("a run that could not be marked left %d entries behind", len(entries))
 	}
 }

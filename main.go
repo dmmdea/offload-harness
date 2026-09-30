@@ -2497,17 +2497,26 @@ func runFleetServe(args []string) error {
 	}
 
 	// Sweep orphaned pipeline-job dirs BEFORE anything else starts: jobs are
-	// in-memory, so any pipeline-jobs/<id> dir still on disk at this instant —
-	// before this process has accepted a single dispatch — belongs to a job an
-	// earlier, ungracefully-stopped instance never finished. Left in place it
-	// would permanently refuse every future dispatch reusing that job_spec.id
-	// (buildPipelineJob's exclusive job-dir Mkdir guard can't tell "orphaned"
-	// from "still running"). A sweep failure is a warning, not fatal — one
-	// stuck directory blocking one id is far cheaper than refusing to serve.
-	if swept, _, serr := fleetnode.SweepOrphanedPipelineJobs(cfg); serr != nil {
+	// in-memory, so a pipeline-jobs/<id> dir of fleet-serve's own that is still
+	// on disk at this instant — before this process has accepted a single
+	// dispatch — belongs to a job an earlier, ungracefully-stopped instance
+	// never finished. Left in place it would permanently refuse every future
+	// dispatch reusing that job_spec.id (buildPipelineJob's exclusive job-dir
+	// Mkdir guard can't tell "orphaned" from "still running"). Not every dir in
+	// that root is fleet-serve's: a delegator process (the MCP server, the
+	// delegate and research commands) keeps its local runs' dirs there too,
+	// marked with its process id, and outlives this restart — the sweep keeps
+	// those while their owner is alive (register C-78), and says how many.
+	// A sweep failure is a warning, not fatal — one stuck directory blocking
+	// one id is far cheaper than refusing to serve.
+	swept, kept, serr := fleetnode.SweepOrphanedPipelineJobs(cfg)
+	if serr != nil {
 		fmt.Fprintf(os.Stderr, "[fleet-serve] warning: pipeline-jobs sweep: %v\n", serr)
 	} else if swept > 0 {
 		fmt.Fprintf(os.Stderr, "[fleet-serve] swept %d orphaned pipeline-job dir(s) left by a previous ungraceful stop\n", swept)
+	}
+	if kept > 0 {
+		fmt.Fprintf(os.Stderr, "[fleet-serve] kept %d pipeline-job dir(s) that belong to local runs still in flight (owned by a live process, or too recent to call orphaned)\n", kept)
 	}
 
 	listen, nodeID, err := fleetServeParams(*listenFlag, *nodeIDFlag, *trusted, cfg, os.Hostname)

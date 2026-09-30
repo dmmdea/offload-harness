@@ -20,9 +20,12 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/gpulease"
+	"github.com/dmmdea/offload-harness/internal/jobdir"
 	"github.com/dmmdea/offload-harness/internal/netguard"
 )
 
@@ -1090,10 +1093,10 @@ func pipelineInjectRefs(jobSpec map[string]json.RawMessage, fetched map[string]s
 	return json.Marshal(out)
 }
 
-// SweepOrphanedPipelineJobs removes every entry directly under
-// cfg.BaseDir()/pipeline-jobs/ (each one a materialized job dir from
-// buildPipelineJob) and reports how many were removed. Missing pipeline-jobs/
-// (nothing configured yet, or a fresh install) is not an error — (0, nil).
+// SweepOrphanedPipelineJobs removes the orphaned entries directly under
+// cfg.BaseDir()/pipeline-jobs/ and reports how many it removed and how many it
+// kept. Missing pipeline-jobs/ (nothing configured yet, or a fresh install) is
+// not an error — (0, 0, nil).
 //
 // Called ONCE at fleet-serve startup, BEFORE listening (main.go's
 // runFleetServe). Jobs are in-memory (internal/fleetnode/jobs.go's Jobs
@@ -1102,13 +1105,42 @@ func pipelineInjectRefs(jobSpec map[string]json.RawMessage, fetched map[string]s
 // Left in place, that orphaned directory would permanently refuse every
 // FUTURE dispatch that reuses its job_spec.id: buildPipelineJob's exclusive
 // os.Mkdir collision guard has no way to distinguish "a real still-running
-// job" from "a directory nobody is ever going to finish or clean up" — so at
-// process start, before any job has been accepted, EVERY directory present is
-// orphaned by definition and safe to remove.
+// job" from "a directory nobody is ever going to finish or clean up".
 //
-// A per-entry removal failure (e.g. a locked file) is collected but does not
-// abort the sweep of the REST of the entries — one bad directory blocking one
-// job_spec.id forever is a much smaller failure than a startup crash over it.
+// What fleet-serve itself materializes here (BuildRequest's agent-<n>,
+// accel-<n> and pipeline job-id dirs) carries no owner marker, and at startup,
+// before this process has accepted a single dispatch, every one of them is
+// orphaned by definition. But fleet-serve is not the only writer in this root:
+// the delegator's in-process local placement (pipeline.RunAgentContract) mints
+// agent-local-* dirs here from processes that are not fleet-serve — the MCP
+// server, the delegate and research commands, the fleet smoke — and that
+// outlive its restarts, so a run's dir can be on disk, and in use, at this very
+// instant. Sweeping those out from under their runs failed every local run in
+// flight on the box at each fleet-serve restart (register C-78). So each
+// entry is judged by who owns it (internal/jobdir):
+//
+//   - a MARKED entry is orphaned iff its owner process is gone
+//     (gpulease.PIDAlive, which reads a process it cannot inspect as alive, the
+//     conservative direction) or the entry is older than jobdir.MaxRunLifetime,
+//     which bounds a process id recycled by an unrelated process;
+//   - an UNMARKED agent-local-* entry was made by a delegator older than the
+//     marker (a long-lived MCP process keeps its old binary for days after a
+//     deploy, so this case is live on the day the marker ships) and has no owner
+//     to ask: orphaned iff older than jobdir.MaxRunLifetime;
+//   - every other UNMARKED entry is fleet-serve's own: orphaned.
+//
+// Age is the entry's modification time, which a run leaves alone after its
+// first moments (everything it writes goes inside context/). A marker that
+// cannot be read (caught half written, garbled) counts as no marker, which for
+// an agent-local-* entry means "young, keep" — the same conservative direction,
+// and the reason the unmarked rule exists beside the marked one: a sweep can
+// list a delegator's dir between its creation and its marker.
+//
+// A kept entry is a decision, never an error; a removal that fails is counted
+// as neither removed nor kept. A per-entry removal failure (e.g. a locked file)
+// is collected but does not abort the sweep of the REST of the entries — one
+// bad directory blocking one job_spec.id forever is a much smaller failure than
+// a startup crash over it.
 func SweepOrphanedPipelineJobs(cfg config.Config) (swept, kept int, err error) {
 	dir := filepath.Join(cfg.BaseDir(), "pipeline-jobs")
 	entries, rerr := os.ReadDir(dir)
@@ -1118,9 +1150,17 @@ func SweepOrphanedPipelineJobs(cfg config.Config) (swept, kept int, err error) {
 		}
 		return 0, 0, fmt.Errorf("sweep pipeline-jobs: reading %s: %w", dir, rerr)
 	}
+	now := time.Now()
 	var firstErr error
 	for _, e := range entries {
 		p := filepath.Join(dir, e.Name())
+		switch judgePipelineJobDir(p, e.Name(), now) {
+		case pipelineJobDirInUse:
+			kept++
+			continue
+		case pipelineJobDirGone:
+			continue
+		}
 		if rmErr := os.RemoveAll(p); rmErr != nil {
 			if firstErr == nil {
 				firstErr = fmt.Errorf("sweep pipeline-jobs: removing %s: %w", p, rmErr)
@@ -1130,4 +1170,39 @@ func SweepOrphanedPipelineJobs(cfg config.Config) (swept, kept int, err error) {
 		swept++
 	}
 	return swept, kept, firstErr
+}
+
+// pipelineJobDirFate is what the startup sweep decides for one entry.
+type pipelineJobDirFate int
+
+const (
+	pipelineJobDirOrphaned pipelineJobDirFate = iota // remove it
+	pipelineJobDirInUse                              // keep it: a delegator's run may still be using it
+	pipelineJobDirGone                               // it vanished while the sweep was looking at it (its run ended): nothing to do, nothing to count
+)
+
+// judgePipelineJobDir applies SweepOrphanedPipelineJobs's ownership rules to
+// the entry at path, named name, as of now.
+func judgePipelineJobDir(path, name string, now time.Time) pipelineJobDirFate {
+	pid, marked := jobdir.ReadOwner(path)
+	if !marked && !strings.HasPrefix(name, jobdir.LocalRunPrefix) {
+		return pipelineJobDirOrphaned // fleet-serve's own
+	}
+	if marked && !gpulease.PIDAlive(pid) {
+		return pipelineJobDirOrphaned // its owner has exited
+	}
+	// A live owner, or no owner to ask (a delegator older than the marker, or
+	// one caught before its marker was down): how long the directory has been
+	// there decides. The time is read again here, not taken from the listing.
+	fi, serr := os.Lstat(path)
+	switch {
+	case serr == nil && now.Sub(fi.ModTime()) > jobdir.MaxRunLifetime:
+		return pipelineJobDirOrphaned
+	case serr != nil && os.IsNotExist(serr):
+		return pipelineJobDirGone
+	}
+	// Young, or not readable: keep, because the cost of a wrong removal is a
+	// run that loses its context and the cost of a wrong keep is a directory
+	// the next start reclaims.
+	return pipelineJobDirInUse
 }
