@@ -253,6 +253,17 @@ type Config struct {
 	// starts (a vLLM cold load is 125–250 s; it used to be charged to the
 	// contract). 0 = 300 s (was 120), negative = disabled.
 	AgentAdmissionWaitSec int `json:"agent_admission_wait_sec,omitempty"`
+	// AgentWarmFailureDefer (register C-76, R-05a) makes the admission warm-up
+	// ENFORCE a start failure: when the warm request is refused with a 5xx and
+	// there is positive evidence the seat's process did not start (llama-swap did
+	// not answer a busy shape, /running lists no row for the seat in any state,
+	// nothing else is mid-swap, /running was readable), the run defers at once as
+	// infrastructure ("seat warm-up failed: …") instead of spending its wall on it,
+	// and the delegator gives that defer one retry on another node. false (the
+	// default) is today's behaviour and the audit mode of the house security
+	// standard: admission proceeds into the wall and admission_note says the run
+	// WOULD have deferred, so would-be defers can be counted before enforcing.
+	AgentWarmFailureDefer bool `json:"agent_warm_failure_defer,omitempty"`
 	// AgentCoherenceProbe (register D-118) is this box's policy for the
 	// post-warm SEAT COHERENCE probe: one ≤ 96-token completion, on the
 	// admission budget and BEFORE the contract's wall starts, that asks the seat

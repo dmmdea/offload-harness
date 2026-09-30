@@ -282,6 +282,14 @@ One device set of a composite box with its own seats, guards and tier identity (
 `pair`, `display`). Placement chooses a layer and a seat per task; a layer marked `dormant` is
 declared but never routed to until the operator enables it.
 
+## Extra vLLM seat
+
+A vLLM seat a tier serves on demand beside its agent-lane seat (`vllm_seat`), declared in the tier's
+`extra_vllm_seats`: the same card, never the agent lane, reached by name through the Layer that names it
+(the `ampere-16` fast layer's 35B). Every vLLM seat of a tier renders as an alternative of the others, and
+the box seeds a seat, its roster entry, its cache-server binding and its layer only while it can run it.
+See [systems/composite-tier.md](systems/composite-tier.md) and ADR 0048 Amendment 2.
+
 ## Placed
 
 The placement block every result carries on a composite box: which tier, layer, role, seat and

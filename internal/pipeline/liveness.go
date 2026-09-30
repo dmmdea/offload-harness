@@ -36,6 +36,12 @@ var (
 	livenessFloor = 60 * time.Second
 	// livenessSlack pads the prefill estimate and a tool's own cap.
 	livenessSlack = 30 * time.Second
+	// livenessRepack is the flat re-pack bound (StallPolicy.Repack): the least a
+	// re-pack may go silent, 120 s in production. The allowance rises above it
+	// with the expected answer and the seat's rate (agent.StallPolicy.Allowance).
+	// A var so a test compresses it, like the floor: a const kept every re-pack
+	// under a test's compressed floor at two real minutes.
+	livenessRepack = agentRepackChatTimeout
 	// ceilingFloorSec / ceilingCapSec bound the ceiling; tests compress them.
 	ceilingFloorSec = core.AgentCeilingSecFloor
 	ceilingCapSec   = core.AgentCeilingSecCap
@@ -82,7 +88,7 @@ func LivenessPolicyFor(cfg config.Config, known seatrate.Seat, admission time.Du
 		PrefillTokS:   known.PrefillTokS,
 		TokS:          tokS,
 		ToolTimeout:   0, // the loop hands each tool's own cap to the monitor (Loop.dispatch)
-		Repack:        agentRepackChatTimeout,
+		Repack:        livenessRepack,
 		Floor:         livenessFloor,
 		Slack:         livenessSlack,
 		ColdLoad:      coldLoad,
@@ -293,7 +299,8 @@ type progressObserver struct {
 	lastReport time.Time
 }
 
-const progressReportEvery = time.Second
+// progressReportEvery is a var so a test can watch the record move at test speed.
+var progressReportEvery = time.Second
 
 func newProgressObserver(ctx context.Context, inner *gpuactivity.Handle, ceilingSec int) *progressObserver {
 	return &progressObserver{ctx: ctx, inner: inner, ceilingSec: ceilingSec}

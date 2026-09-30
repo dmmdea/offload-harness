@@ -85,6 +85,120 @@ list fails `CHECK_FAILED` before and renders after (VP9 `yuva420p`, alpha, all t
 Not in this change: deploying the templates to the fleet, the `assets` parameter (an image variable type), GSAP
 vendoring or a HyperFrames pin bump, and a test that renders the templates and checks their pixels.
 
+## [0.148.0] - 2026-09-30 - the ampere-16 fast layer and the 35B seat are in the tier table; install render gates for the MoE spill and a storeless tier
+
+### Added — the ampere-16 `fast` layer and the 35B seat are in the tier table (register A-113, ADR 0048 Amendment 2)
+
+The `fast` digest layer and the Qwen3.6-35B-A3B seat behind it existed only in the ampere-16 reference box's
+hand-edited config and in two Go test files, never in `setup/templates/profiles.json`, so a fresh install of the
+tier lost both (the capability-loss class ADR 0048 was written against, one level up). The table had one `vllm_seat`
+per tier and a card cannot hold two heavy seats, so the schema grew by the smallest steps that carry what the box runs.
+
+- `extra_vllm_seats` beside `vllm_seat`: further vLLM seats served on demand on the same card, never the agent lane.
+  Validated as non-lane seats (`Spec.ValidateExtra`: no fallback, every lane field refused), with unique ids, aliases
+  and units and the lane seat's card. `vllm_seat.storeless_reason` (and the same on an extra seat) is the measured
+  reason a seat has no cache server, seeded verbatim into its `kv_cache_server` binding; refused beside a `cache_server`.
+- `ampere-16` now declares `layers` `single` (the 27B GSQ lane seat) and `fast` (the 35B, 32,768 at 8 in flight), the
+  35B as its extra seat, and both seats' B-01 storeless reasons with the local paths dropped. The layer values are the
+  reference node's own (the two placement and delegate tests pin the same ones), so `audit-config` reports MATCH for
+  `layers`, `tiers` and `tier_profile` against a fixture that carries them: a live extract of that node redacts each
+  layer seat's `ctx_tokens`, so the 32,768 is the value those tests pin, not a live reading. A layer seat naming a vLLM
+  seat must equal that seat's `max_model_len` (and `max_num_seqs`, when set) or the table is refused at parse.
+- Seeding is per seat and never advertises what the box cannot serve: an extra seat the box can run (the venv, its
+  own weights and the wrapper scripts the operator installs for it) joins `vllm_seats` with its own binding; a layer
+  whose vLLM seat is absent is dropped; a layer set that lost `single` (the planner default, placement row 5b) is not
+  seeded at all; a box with no vLLM prerequisites seeds exactly what it did before (`tierseed.ResolveLayers`,
+  `Options.ExtraVLLMSeatsActive`).
+- `install render` emits every vLLM seat of a tier as an ALTERNATIVE of the others inside the residents set
+  (`emb & rer & (vagt | vagt2)`): the two seats cannot share the card, and co-resident members would have llama-swap
+  load the second beside the first. The extra seat's entry names its wrappers after its own unit, and a box that runs
+  it without the lane seat (the 27B's weights absent, or two snapshots under them mid-upgrade) renders it with the
+  box's own runtime; `servingtmpl.Render` refuses any vLLM seat whose runtime is incomplete, because such an entry
+  names no seat directory and no address and every gate that reads the text passes it. The composition check now runs
+  for any tier that declares layers, not only one that composes. `ParamsBasis` mirrors `Params.ExtraVLLMSeats`, and a
+  replay pins it.
+- `extra_vllm_seats` keys are strict, like `layers`: a key that is not a seat field is refused by tier and JSON path at
+  parse (`tierseed.ParseDoc`, so the installer's embedded copy too), never silently dropped. A misspelt `storeless_reason`
+  used to seed the generic reason in its place.
+- Not rendered, on purpose: the extra seat's systemd unit, wrapper scripts and polkit rule. Its production launch line
+  carries `--language-model-only`, which the shared linux-systemd run script cannot express, so
+  `docs/systems/composite-tier.md` lists what the operator installs by hand. Those scripts are also the seat's
+  prerequisite (`Spec.DetectExtra`): llama-swap does not check that an entry's `cmd` exists when it loads its config,
+  so a box with the venv and the weights but not the scripts would list the seat, seed its layer and fail only when a
+  contract asked for it. Until they are in the seat directory (`--vllm-seat-dir`, default `<home>/seat`, now a flag of
+  `install seed` and `audit-config` as well as `install render`), the seat and its layer are left out and the note
+  names the missing file.
+- The layer regression floor: `TestEveryTierKeepsItsDeclaredLayerSet` (`layerSetTiers`: each composite tier's layers and
+  the seat roles each serves) fails by name when a tier stops declaring one, and `extraSeatFloor` pins the extra seat.
+  Each was made red against the real regression and the table restored byte for byte: deleting the `fast` layer,
+  deleting the seat while keeping its layer, an extra seat with no tool parser, a layer window that drifts from its
+  seat's, deleting every layer, moving the layer's seat to another role. `docs/tiers/ampere-16.md` is regenerated
+  (layers, the 35B, both storeless reasons); `tierdocs` heads a layers-only tier "Layers", not "Composes".
+
+### Added — H-01's two remaining render gates: the spill ceiling and INV-16
+
+- `install render` refuses `--n-cpu-moe` (any spelling, and `LLAMA_ARG_N_CPU_MOE`) above the tier's measured spill,
+  the new `n_cpu_moe_max` (`servingtmpl.AuditSpill`, in the write gate `renderGate` that now also hosts the H-01 rule
+  audit and the layer check). It is a separate number from `n_cpu_moe`, because one field cannot check itself; 0 means
+  the tier recorded no measured spill, so none is sanctioned. A tier that names `moe_26b: n_cpu_moe` with no N is
+  refused too, since that renders the every-expert `--cpu-moe`. No shipped tier declares a spill.
+- `TestInstallRendersOnAnyTierWithoutACacheServer` (INV-16): every tier renders with no vLLM prerequisites, and a
+  tier whose vLLM seat declares no store renders the seat, its unit and wrappers with no cache-server piece and
+  seeds an explicit storeless binding that `doctor` accepts. A spill of 20 against a measured 14 and a hard-coded
+  `--n-cpu-moe 30` in a rendered command are refused.
+- Both serving-config audits (`Audit` and `AuditSpill`, so `install render`, `audit-yaml` and the template gate) now read
+  each entry the way llama-swap runs it, with its `${name}` macros substituted (nested macros too, bounded, and
+  llama-swap's own `${PORT}` left alone). The templates keep their shared flags in `macros:`, so a `-ngl 0` or an
+  `--n-cpu-moe 30` placed there used to pass every rule. Every shipped template still passes.
+
+### Fixed (tests) — the streamed re-pack tests had a 5x timing margin
+
+`TestRepackSlowStreamingSeatIsNotStalled` streamed a delta every 40 ms against a 200 ms stall allowance, so one scheduling pause of a loaded CI runner filed the stream as a stall (seen once on this PR's merged head; 20/20 locally, green on main). The allowance is now 600 ms (the 2 s stream still outlasts it, so a stream that stops counting as progress still fails: checked with 700 ms gaps), and `TestRepackProgressReachesTheJobRecord` gets the same headroom (600 ms / 900 ms). `TestRepackSilentSeatStillStalls` keeps 200 ms.
+
+## [0.147.0] - 2026-09-30 - a finished answer is rescued instead of deferred when its re-pack fails; the re-pack is sized, streamed and held by the busy hold; research acceptance
+
+### Fixed — a finished answer whose structured re-pack failed is re-packed by the delegator, not lost (C-66, PR-4)
+
+A node whose agent loop finished but whose structured re-pack failed (stalled, unreachable, cut, or a shape the schema refused) deferred, and a deferred result is never offered to acceptance, so the finished answer reached the caller as prose inside an error envelope and was counted as lost work. Every one of the 80 re-packs the fleet's nodes killed on 2026-09-29 carried a finished answer, and about 15 job-hours had been discarded that way since 2026-09-20. The delegator holds the answer, so it now re-packs it.
+
+- The node marks such a defer with the new `schema_miss` wire field (omitempty); the defer itself is unchanged, so an older delegator reads what it always did. A node that predates the field is recognized from `stop_reason: done` plus the re-pack failure reason prefix.
+- A cut answer (`output_truncated`), an empty one, a caller cancel (a defer whose reason starts `canceled during the structured re-pack`, whether or not the node flagged it) and every other defer are never rescued.
+- The rescue runs inside `finish`, before the ledger row is written, on the local, remote and queue routes: the lossless reading first (the answer may already be the object), then ONE completion on the delegator's own agent seat, held to the schema the node's answer would have been (every field the acceptance reads required) and bounded by the re-pack allowance sized from the answer and that seat's rate. It is one request, not a run: no run registration and no slot of the run cap, and it waits in line on a busy seat like any other request.
+- A seat that is not resident is warmed first, on the box's admission budget (`agent_admission_wait_sec`, -1 turns it off) and outside the allowance, as a run's own admission does. The delegator's seat is idle-unloaded after five minutes, so the rescue routinely finds it cold, and a cold load (125-250 s on a vLLM seat) is longer than the whole allowance: without the warm-up the completion was cut by its own load. The rescue may therefore wait up to `agent_admission_wait_sec` (300 s by default) behind a GPU-lease fence or another model's swap before its own allowance starts; the delegation context has no deadline of its own until the whole-call deadline (PR-6), so those two bound it.
+- The object is validated again on the delegator (a JSON object that satisfies the schema) and the ordinary acceptance runs over it. A success reads `repack_note: rescued on <seat> ...`; a rescue that cannot produce a validated object leaves the defer exactly as the node sent it, still counted in `lost_to_stack`, with a note that a rescue was tried. The failed rescue's log line names the job.
+- Wired on `agent_delegate`, `offload_research` and the CLI verbs `delegate` and `research` (a source scan fails the suite when any production `RunWith` / `RunBatched` call stops passing one). Deliberately not wired, for three different reasons: `agent_run` carries no `output_schema`; the review lane's fenced-seat fallthrough exists because the local seat is fenced by another session's lease, and a rescue there would queue behind it; `offload_ask` at a named remote route keeps its own handling of a finished answer (its prose still reaches the caller), which the security review records as deliberate, so it is outside this change. The seam is `RunOptions.Rescue`.
+
+### Fixed — the structured re-pack streams, is sized from the answer and the seat's rate, and stops sending attempts on a dead context (C-66, PR-5, PR-12; ADR 0055 item 8, ADR 0061 item 8)
+
+The re-pack was the one completion still sent non-streamed under a flat 120 s allowance, so a slow seat decoding a long object looked silent for its whole decode: 119 of the 838 node-side re-packs since 2026-09-20 were killed at 120 s, `repack_attempts` read 3 on 119 of those 119 stalled rows (attempts sent after the monitor had cancelled), and on 2026-09-29 the kills were 70 % of the busiest remote seat's re-packs.
+
+- The re-pack streams (SSE) on both the grammar arm and the chat lane, falls back to the plain JSON body when a seat or proxy ignores the request, and retries as plain JSON, remembered per seat for 30 minutes, when a server answers a streamed request with 400 or 422. On a vLLM seat the streamed request carries `structured_outputs`.
+- A seat that refuses the stream is no longer a silent mode switch: `repack_note` reads `streaming refused by this seat` (on a success too), because on such a seat the re-pack is one silent request under its allowance again and nothing else would show the fix did not apply to it. A JSON retry that fails in a different way than the refusal logs both halves.
+- Progress reaches the liveness monitor and the job record, and the allowance is published when the phase starts, so a slow seat that is producing is not a stalled seat; a silent one still is.
+- The allowance is `max(120 s, 1.5 x expected answer tokens / decode rate + 30 s)`, where expected is the answer's size and never the completion cap (685 tokens at 2.7 tok/s allows 410 s). A seat with no measured rate keeps the flat 120 s, and a stalled re-pack's reason names the arithmetic, or the flat bound and why it is the flat bound (no measured rate, or an unknown size).
+- Under the monitor the re-pack's requests carry no transport bound: the busy hold (ADR 0061) governs a request whose seat is working for others, and once the monitor has cancelled, no further attempt starts.
+- Not verified live: vLLM 0.29 with `stream: true` together with `structured_outputs` is documented but has not been exercised against a live seat; the plain-JSON retry is the safe default.
+
+### Fixed — `offload_research` no longer fails correct digests (C-74, PR-3)
+
+On 2026-09-29, 72 rows (8.6 %) failed verification and 59 of them were `min_items`, 36 through the direct path (an object that never reached the re-pack): the schema asked for nothing while the acceptance demanded an item from the alphabetically-first array.
+
+- Presence is declared: the default research schema lists all four fields (`key_facts`, `numbers`, `quotes`, `verdict`) as required, a caller's schema gains every field its acceptance checks, and the node holds any contract to it (an object missing a field the acceptance reads goes to the re-pack; on a vLLM seat the fields are required in `structured_outputs` too).
+- Non-emptiness is asked for only where the caller marked it: the first array of the caller's own `required`, or the caller's own acceptance. A faithful digest of a page with nothing to extract is a success. The default digest owes one statement on every page, anchored or not: `nonempty:verdict`, so a page too thin to anchor never carries an empty acceptance and a digest that said nothing (every list empty, no verdict) is not delivered as a success. Empty lists with a verdict that says so still pass.
+- An acceptance-only research failure is no longer retried on another node (the page is the same; the retry note says so), except a failed document fingerprint (`docanchor`): an off-document answer is a fact about the node that wrote it (a node is quarantined after two), and another node is the cure. Abstentions and every other door's acceptance failures are still retried.
+
+### Fixed — a warm-up refused with a server error is a seat that did not start only when nothing says it is busy (C-76, admission half)
+
+Admission proceeded into the wall on any non-200 warm-up answer and reported it as a load.
+
+- A non-200 that loaded nothing is no longer counted as an attempted load (no cold-load sample in the seat-rate store, no coherence probe); a 404 or a timeout still proceeds. `agent_run` is unchanged.
+- A 5xx is evidence the seat's process did not start only when llama-swap's answer is not one of its busy shapes (429, 503 `process is not ready`, a 500 of its own, a health-check timeout, an empty 502), `/running` lists no row for the seat and nothing else is mid-swap, and `/running` could be read. A seat that reads starting or stopping, another model's swap, an unreadable `/running` and every busy shape proceed with the reason in `admission_note`: a busy card is a place in line, never a reason to refuse. The body's `upstream command exited` outranks a busy-looking answer.
+- The defer ships in audit mode (new config `agent_warm_failure_defer`, default `false`, the house standard's audit-then-enforce): the run proceeds as it always did and `admission_note` says `this run would have deferred at once`, so would-be defers can be counted before anyone turns the rule on. With `true` the run defers as infrastructure with the reason prefix `seat warm-up failed: ` within one poll, before any wall exists, and the delegator gives that defer one retry on another node and credits back the admission the node spent (like the coherence defer), so it is not terminal.
+
+### Changed — `repack_attempts` counts requests sent
+
+It used to read 3 whenever the re-pack ran out its attempts, including attempts that never left because the monitor had already cancelled. A stalled re-pack now reports the requests it actually sent (usually one), so anything keyed on `repack_attempts == 3` as exhaustion must change.
+
 ## [0.146.1] - 2026-09-30 - the vLLM seat launcher reaps what a crashed seat left behind
 
 ### Fixed — a crashed vLLM seat's engine workers and MP server are reaped at crash time, not only when the MP HTTP port is held; an unload is not mistaken for a crash

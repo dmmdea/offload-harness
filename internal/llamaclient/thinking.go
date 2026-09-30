@@ -23,6 +23,33 @@ type genOpts struct {
 	// on this box (WithLocalBusy). It changes WHERE the call goes, never the
 	// body, so it is not part of RenderKey.
 	localBusy string
+	// noClientTimeout: the call's context owns the deadline, so the client-level
+	// Timeout is not applied to the request (WithoutClientTimeout). Like
+	// localBusy it changes how the call is SENT, never the body.
+	noClientTimeout bool
+	// progress, when set, streams the completion and hears every delta
+	// (WithProgress, stream.go).
+	progress func(tokensSoFar int)
+}
+
+// ownsDeadline reports whether the call's context bounds it instead of the
+// client's Timeout: a call that asked for its deadline (WithoutClientTimeout)
+// or that streams (WithProgress: the Timeout covers the whole body read and
+// would cut a long answer mid-stream).
+func (o genOpts) ownsDeadline() bool { return o.noClientTimeout || o.progress != nil }
+
+// WithoutClientTimeout hands the call's deadline to its context: the http
+// client's Timeout, which bounds the WHOLE exchange including the body read, is
+// not applied to this request. The caller must then bound the call itself. It is
+// for a call that runs under the agent liveness monitor, whose stall watch
+// cancels a silent request and whose ceiling bounds a producing one: a
+// per-attempt transport bound under it cuts a request the monitor is holding on
+// purpose (a seat whose engine works for other requests, ADR 0061), and the
+// re-pack then re-sends it from the back of the engine's queue. The Timeout
+// still reaches modelaffinity.Admit as the unit of its park bound. The agent
+// loop's own client makes the same exception (ADR 0055).
+func WithoutClientTimeout() GenOption {
+	return func(o *genOpts) { o.noClientTimeout = true }
 }
 
 // WithLocalBusy tells the send that THIS box must not serve the call, for the
