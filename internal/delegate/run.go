@@ -185,6 +185,12 @@ type PlacedResult struct {
 	// the first attempt did not (Summary.RetryRecovered). ranLocal records where
 	// the attempt ran so the retry can pick a DIFFERENT node.
 	retryRecovered bool
+	// retryRanAndFailed: the retry ran on a seat and produced no verified digest (the
+	// per-page cap's own reading of its result, pageIssueFailed) while the published
+	// result is still the FIRST attempt. A first attempt that stands as a seat-down
+	// defer says nothing about the page, because its seat died; the retry seat is the
+	// one that ran it, so the cap reads the retry's verdict from here.
+	retryRanAndFailed bool
 	// retried: a verification retry actually RAN for this subtask. Deliberately
 	// not `RetriedOn != ""`: a retry whose own placement was refused by every
 	// node names no node at all, and keying the tally off the string silently
@@ -3390,6 +3396,11 @@ func attemptOutcome(pr PlacedResult) string {
 // (and is marked recovered); otherwise the FIRST attempt stands — its
 // verified-wrong answer is still the more informative artifact — annotated
 // with what the retry did. Both attempts were recorded by finish() already.
+//
+// The published attempt is not the only one that says what became of the page: the
+// per-page cap counts an issue by what a seat that RAN it produced, and a first attempt
+// that stands as a seat-down defer was never run by a seat that could tell. The retry's
+// own verdict is carried on the published result (retryRanAndFailed) for the cap.
 func mergeAttempts(first, second PlacedResult) PlacedResult {
 	clean := second.Err == "" && !second.Result.Deferred && len(second.AcceptanceFailures) == 0
 	var published PlacedResult
@@ -3401,6 +3412,7 @@ func mergeAttempts(first, second PlacedResult) PlacedResult {
 	} else {
 		first.RetriedOn = second.Node
 		first.RetryNote = "retry on " + nodeLabel(second) + " also " + attemptOutcome(second) + "; this result is the first attempt"
+		first.retryRanAndFailed = pageIssueFailed(second)
 		published = first
 	}
 	published.retried = true

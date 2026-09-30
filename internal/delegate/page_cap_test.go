@@ -76,6 +76,49 @@ func TestPageIssueFailedCountsOnlyWhatASeatRan(t *testing.T) {
 	}
 }
 
+// An issue that was retried counts by what a seat that RAN the page produced in either attempt.
+// The published result is the first attempt unless the retry recovered, and a first attempt that
+// stands as a seat-down defer (a dead seat: an infrastructure defer, never the page's fault) ran
+// nothing to a verdict; the retry seat did, and mergeAttempts carries its verdict for the cap.
+func TestPageIssueFailedReadsTheRetryOfASeatDownFirstAttempt(t *testing.T) {
+	down := func() PlacedResult { return PlacedResult{Node: "node-a", Result: seatDownWire("node-a", 6)} }
+	retry := func(mod func(*PlacedResult)) PlacedResult {
+		pr := PlacedResult{Node: "node-b"}
+		mod(&pr)
+		return pr
+	}
+	deferred := func(class string) func(*PlacedResult) {
+		return func(p *PlacedResult) { p.Result.Deferred, p.Result.DeferClass = true, class }
+	}
+	for _, tc := range []struct {
+		name  string
+		retry PlacedResult
+		want  bool
+	}{
+		{"the retry seat failed verification", retry(func(p *PlacedResult) { p.AcceptanceFailures = []string{"contains:x"} }), true},
+		{"the retry seat abstained", retry(deferred(core.DeferClassAbstention)), true},
+		{"the retry seat hit its budget", retry(deferred(core.DeferClassBudget)), true},
+		{"the retry node errored on the job", retry(func(p *PlacedResult) { p.Err = "remote job error: boom" }), true},
+		{"the retry recovered it", retry(func(*PlacedResult) {}), false},
+		{"the retry seat declined it for capacity", retry(deferred(core.DeferClassCapacity)), false},
+		{"the retry seat went down too", retry(func(p *PlacedResult) { p.Result = seatDownWire("node-b", 6) }), false},
+		{"no node took the retry", retry(func(p *PlacedResult) { p.Err = replacementExhaustedPrefix + ": every node refused" }), false},
+	} {
+		if got := pageIssueFailed(mergeAttempts(down(), tc.retry)); got != tc.want {
+			t.Errorf("%s: pageIssueFailed = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+	// The first attempt's own verdict is unchanged by the retry: a verification failure counts
+	// whatever the retry did, and a retried issue that recovered does not.
+	failed := PlacedResult{Node: "node-a", AcceptanceFailures: []string{"contains:x"}}
+	if !pageIssueFailed(mergeAttempts(failed, PlacedResult{Node: "node-b", Result: seatDownWire("node-b", 6)})) {
+		t.Error("a first attempt that failed verification stopped counting because the retry's seat went down")
+	}
+	if pageIssueFailed(mergeAttempts(failed, PlacedResult{Node: "node-b"})) {
+		t.Error("an issue whose retry recovered it counted against its page")
+	}
+}
+
 // Run level: four issues of one page whose job the node accepts and never starts.
 // Each ends as a queue deadline - the fleet's busy day, not the page - so none of
 // them may back the page off.
