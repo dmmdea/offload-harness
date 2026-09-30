@@ -6,6 +6,17 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.151.1] - 2026-09-30 - the Coral feeds EfficientNet-EdgeTPU-S a correctly quantised input
+
+### Fixed — the Coral fed EfficientNet-EdgeTPU-S raw pixels (classify imagenet and embed)
+
+- `accelerators/coral/server.py::_set_input` passed uint8 pixels straight to every uint8 input. EfficientNet-EdgeTPU-S quantises its
+  input with scale 0.012566 and zero point 131, so it saw a 1.6x contrast-stretched image: 41.6 % top-1 on 1000 ImageNetV2 images, against
+  63.9 % once the input is rescaled with pycoral's rule `q = (px - 128) / (128 * scale) + zp` (the same as its CPU twin; measured
+  2026-09-30). The rescale applies only where the quantisation is not the raw pixel to within one step, so the iNat classifiers,
+  DeepLab and EfficientDet-Lite get exactly the bytes they got before. The `embed` tool used the same broken input: its vectors from
+  before this fix are not comparable with new ones (the harness stores none; a caller that kept some must re-embed).
+
 ## [0.151.0] - 2026-09-30 - the RKNPU sidecar serves permissively licensed models, measured on the NPU
 
 ### Changed — the RKNPU sidecar serves permissively licensed models: PP-YOLOE+ s and ResNet-50 replace YOLOv8n and ResNet18
