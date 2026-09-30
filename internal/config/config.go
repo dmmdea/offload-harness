@@ -467,6 +467,17 @@ type Config struct {
 	// VisionModel is the VLM alias used for the vqa task (multimodal). Empty = no
 	// vision route (vqa defers).
 	VisionModel string `json:"vision_model,omitempty"`
+	// VisionTasks is the subset of the three single-image vision tasks (vqa, ocr,
+	// assess_image) this node's vision seat serves on the FLEET vision lane. Empty =
+	// all three, which is every node's behaviour until a tier declares otherwise. A seat
+	// narrows it when its runtime cannot do one of them: the RKLLM runtime cannot
+	// constrain sampling, and assess_image always sends a grammar, so the RK3588 tier's
+	// seat lists vqa and ocr only. The node then refuses a task outside the list at ack
+	// time (400 naming the allowed set), publishes the list in health as vision_tasks, and
+	// a delegator skips the node for a task it does not list. It gates the fleet lane only:
+	// a local call never goes through a fleet node's ack. Written by the tier's media seat
+	// (mediaseat.Bindings), like vision_model, never by config_seed.
+	VisionTasks []string `json:"vision_tasks,omitempty"`
 	// OCRModel is an OPTIONAL dedicated alias for the ocr task. Purpose-built OCR
 	// models (GLM-OCR and friends) beat a general VLM on dense text, but they are
 	// text-recognition ONLY — they cannot answer a vqa question or judge an image,

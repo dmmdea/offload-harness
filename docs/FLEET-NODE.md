@@ -409,7 +409,7 @@ is not advertised, so the dispatcher can't send work the box would defer:
 | `audio-gen` | `generate_audio` | voice or music script set | `acestep` (music) / `chatterbox` (voice) |
 | `run-graph` | `run_graph` | `run_graph_script` set | payload-declared `model_family`, else `comfy-graph` |
 | `agent` | `agent` | `fleet_agent_enabled` **and** a resolvable agent seat **and** (loopback listener **or** `fleet_auth_token` set) | none — llama-swap-resident text work, no render footprint |
-| `vision` (own route `POST /fleet/vision`) | `vqa` / `ocr` / `assess_image` | `vision_model` set **and** (loopback listener **or** `fleet_auth_token` set) — see [The vision task](#the-vision-task-post-fleetvision) | none — llama-swap-resident VLM, no render footprint |
+| `vision` (own route `POST /fleet/vision`) | `vqa` / `ocr` / `assess_image` (narrowed by the node's `vision_tasks`) | `vision_model` set **and** (loopback listener **or** `fleet_auth_token` set) — see [The vision task](#the-vision-task-post-fleetvision) | none — llama-swap-resident VLM, no render footprint |
 | *(config-driven)* | `pipeline-job` | a valid `pipelines.<task_type>` entry (see below) | none — sizing rides on the task-scoped `Record("", "", task_type, peak)` entry |
 
 run-graph payloads carry `graph` and `manifest` as **raw nested JSON** (no base64) and are
@@ -1012,6 +1012,9 @@ concurrency-CAPPED (it contends for the shared llama-swap endpoint, exactly like
 data URI — the bytes travel with the job; a path on the caller's disk is refused `400`. An image
 whose decoded size exceeds the node's cap is refused `400` at ack time naming
 `vision_max_image_bytes`; the pipeline's loader re-checks the exact bytes. Unknown fields → `400`.
+A node whose config sets `vision_tasks` (0.153.0) serves only the tasks it lists: any other `task` is
+refused `400` at ack time with the set named — `vision: task "assess_image" is not served by this node's
+vision seat (vision_tasks: vqa, ocr)` — and never reaches the pipeline. Empty or absent = all three.
 
 ### Result
 
@@ -1030,11 +1033,21 @@ reachability) is the ONE predicate behind both the advertisement — `"vision"` 
 the `AgentLaneAdmissible` discipline. Vision jobs are token-gated on poll (`JobView.Gated`) but
 are never listed as agent runs in `/fleet/jobs`.
 
+A node that narrows the lane also publishes the additive, omitempty health field `vision_tasks` (the
+config key of the same name), under the same lane-gated rule as `vision_model`; a node that serves all
+three publishes nothing, byte-identical to a node from before 0.153.0. The key is written by the tier's
+media seat (`mediaseat.Seat.Tasks`), never by `config_seed`: a seat whose runtime cannot do a task
+declares the ones it can. The RK3588 NPU seat declares `vqa` and `ocr` because the RKLLM runtime cannot
+constrain sampling and `assess_image` always sends a grammar
+([ADR 0062](architecture/decisions/0062-rk3588-soc-tier-serves-from-the-npu-on-a-unified-memory-budget.md)).
+
 ### Placement (delegator side)
 
 `route: local` (default) is byte-identical to before the route existed. `auto`: an idle local
 card always runs the work; only while the machine-wide GPU lease is held (`delegate.LocalBusy`)
-is a node considered, ranked by `delegate.PlaceVision` — eligible = advertises the lane and its
+is a node considered, ranked by `delegate.PlaceVision` — eligible = advertises the lane, serves THIS
+task (`NodeView.ServesVisionTask`: no `vision_tasks` in health = all three, so an older node stays
+eligible for every task; a published list serves only what it names) and its
 card is not leased (`lease.class: text` or `lease.busy`), ordered by the agent lane's
 `betterRemote` (not saturated → provably free slot → queue depth → GPU utilization → roster
 order) — and with no eligible node the work still runs local. `remote`: force a node; none

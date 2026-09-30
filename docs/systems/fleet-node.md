@@ -308,8 +308,15 @@ implications.
    gate on dispatch and on poll, and stores the node's FULL `core.Result` as the done job's data
    (a defer is a `done` job saying `deferred: true`). Its body cap is `VisionBodyCap`
    (`vision_max_image_bytes` × 4/3 + slack), not dispatch's 1 MiB; everything after the body read
-   is the shared `admit` path. Details: [FLEET-NODE.md](../FLEET-NODE.md#the-vision-task-post-fleetvision),
-   [ADR 0040](../architecture/decisions/0040-vision-work-travels-to-a-node-with-an-idle-card.md).
+   is the shared `admit` path. A seat whose runtime cannot do one of the three tasks narrows the lane
+   with the config key `vision_tasks` (0.153.0, written by the tier's media seat: the RK3588 NPU seat
+   serves `vqa` and `ocr`, never `assess_image`): the node refuses any other task at ack time with a
+   `400` naming the allowed set, publishes the list in health as `vision_tasks` (additive, omitempty,
+   lane-gated like `vision_model`), and a delegator skips the node for a task it does not list —
+   absent means all three, so a node that predates the field is unchanged. Details:
+   [FLEET-NODE.md](../FLEET-NODE.md#the-vision-task-post-fleetvision),
+   [ADR 0040](../architecture/decisions/0040-vision-work-travels-to-a-node-with-an-idle-card.md),
+   [ADR 0062](../architecture/decisions/0062-rk3588-soc-tier-serves-from-the-npu-on-a-unified-memory-budget.md).
 10. The cascade chat lane (`POST /fleet/chat`, register C-41b) is advertised — `chat_lane` in
     health, alongside `served_models` — exactly when `ChatLaneAdmissible` holds (a bound
     `endpoint` and the agent lane's reachability rule), and rides the agent lane's bearer gate.
