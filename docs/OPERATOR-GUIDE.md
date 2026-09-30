@@ -1254,7 +1254,14 @@ The seat itself: `setup/templates/vllm-seat/` has the reference `seat_fg.sh` (st
 server and the engine in the foreground of the llama-swap client, so a swap-out reaps the engine
 while the store keeps the pages), `seat_stop.sh`, the llama-swap entry, and the second device's
 `kv-cache-server.service` (a systemd-guaranteed Valkey container; do not rely on docker's restart
-policy). **KV pool pinned from free memory (2026-09-07, `seat_fg.sh`):** `--gpu-memory-utilization` budgets a fraction of the
+policy). **After an engine crash (2026-09-30):** nothing runs a stop for a crash, so the dead generation's engine workers
+and MP server are reaped by the NEXT start (`seat_fg.sh` runs `seat_stop.sh` once when no engine of its port is alive
+and something of the stack is left) and, on a Windows/WSL seat, by the stub's crash exit (`seat-cmd.ps1` starts the
+stop task and waits for it). Only what is provably the seat's own is touched; a foreign listener on the MP HTTP port is
+still refused. To take effect, copy `seat_fg.sh` and `seat_stop.sh` into the distro's seat directory and re-render and
+deploy `seat-cmd.ps1` — diff a deployed stub before replacing it, since one may have been edited by hand. Optional
+knobs in the seat env: `SEAT_REAP_WAIT_SEC`, `SEAT_MP_PORT_WAIT_SEC` (both default 10). Details: `docs/systems/cache-server.md` 4g.
+**KV pool pinned from free memory (2026-09-07, `seat_fg.sh`):** `--gpu-memory-utilization` budgets a fraction of the
 card whatever the co-residents hold, and the profiler lands the same config at different pool sizes on different starts; set
 `SEAT_KV_HEADROOM_GIB` in the seat's env and the launcher instead computes the pool from what is actually free on the tighter seat
 card at launch — free − `SEAT_NONKV_GIB` (the engine's weights + non-torch + peak activation per worker, read from the profiler's

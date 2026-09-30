@@ -44,6 +44,52 @@ this ADR records the shape the build took and why, per the ownership rule in the
 
 [0047](0047-ampere-16-agent-seat-reaudit.md) re-audited the `ampere-16` agent seat blind and the 4B lost 24 of 24 to Qwen3.8-27B UD-IQ3_S + MTP. `profiles.json` therefore no longer declares a `vllm_seat` for `ampere-16`, and a fresh install of that tier builds no vLLM venv or unit. **The pattern below is unchanged and still correct** — it is the reference for any tier that seats a vLLM engine behind llama-swap, and the reference box's own unit is left installed (unbound) so the lane can be reverted with one config edit.
 
+## Update 2026-09-30 — a crashed generation is cleaned up by the next start and by the stub's crash exit
+
+`cmd` starts a seat and `cmdStop` stops it, and llama-swap runs `cmdStop` only for a stop it asked for. When the engine
+**crashes** the `cmd` process exits, llama-swap marks the seat stopped, and nothing runs a stop. On the Windows/WSL shape
+(`setup/templates/vllm-seat/windows-wsl/`, `seat_fg.sh` and `seat_stop.sh` in the distro) that left the dead generation's
+engine workers (the API server exits, but a worker stuck in a GPU call ignores its SIGTERM) and its LMCache MP server
+behind. On 2026-09-29 one such crash kept a seat down for 23 minutes: 59 failed starts and 75 HTTP 500s, because the MP
+server still held its HTTP port and `seat_fg.sh` refuses to start on a port that is bound, while the workers held 14.5–16 GB
+on every card.
+
+**Decision.** The dead generation's leftovers are reaped at two points, both inside processes the harness already runs, and
+by one script, `seat_stop.sh`:
+
+1. **The next start.** `seat_fg.sh`, when no `vllm serve` of its own port is alive and it finds a leftover (a listener on the
+   MP HTTP port, an `lmcache server` of its MP port, an engine process named `VLLM::*`), runs `seat_stop.sh` once, waits a
+   bounded time for the MP HTTP port to free, and only then judges the port. The refusal on a port held by anything else is
+   unchanged, and it is the last check in that block.
+2. **The stub's crash exit.** `seat-cmd.ps1` exits 0 when the seat has stopped answering for 30 s. Before it does, it starts
+   the operator-session stop task (the task `cmdStop` uses), waits for it (at most 90 s), and only then exits — unless the
+   seat's own start task is still running, which means a live launcher owns the seat.
+
+**Identity, not port.** `seat_stop.sh` reaps an engine process only when no ancestor of it is a live `vllm serve`, and the MP
+server only by this stack's unit and its MP port (SIGTERM, then SIGKILL after `SEAT_REAP_WAIT_SEC`). It never picks a victim
+by the port it holds, so a foreign listener on the MP HTTP port is refused and left running. A worker that survives SIGKILL
+(a process stuck in the GPU driver stays in state D) is named in the log with its state, and the stop exits non-zero.
+
+**Alternatives rejected.**
+
+- *A resident watchdog or a guardian process per generation.* It is one more long-lived process on the operator's machine
+  to poll for a death, and both points above already run at the moment a cleanup is needed.
+- *Dropping `exec` so `seat_fg.sh` outlives the API server and cleans up at once.* The engine is the foreground process of
+  the client llama-swap started so that ending the client reaps the engine (the swap-out); a wrapper that outlives it needs
+  signal forwarding and changes that contract, and the two points above make it unnecessary.
+- *Relaunching the seat at the crash.* A seat that comes back on its own is loaded with nobody asking, which is what the
+  2026-09-08 amendment above ruled out (`ttl: 300`). The cleanup only frees the cards; llama-swap starts the seat again on
+  the next request, as before.
+- *Reaping whatever holds the MP HTTP port.* It frees the port in the case that hurt and reaps a foreign service in the
+  next one.
+
+**Consequences.** The stub change reaches a box only when the stub is re-rendered and deployed (a hand-edited deployed
+stub is not replaced by a template edit), and `seat_fg.sh` and `seat_stop.sh` only when they are copied into the distro.
+The stop task must never run late: it is waited for so the next start cannot overlap it, and it is skipped while the start
+task is running. That SIGKILL reaps a worker stuck in the GPU driver under WSL2 is not verified; the log names one that
+survives. The live check is the next natural engine death: the seat ready again within 6 minutes, no refusal whose
+holder is the seat's own MP server, and no `VLLM::Worker` process 60 s after the API server exits.
+
 ## Context
 
 The `ampere-16` reference box (NVIDIA A2 16 GB at a 40 W / 1200 MHz lock) served its agent lane from a
