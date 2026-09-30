@@ -243,7 +243,7 @@ reset
 # 3. a LIVE engine of this stack: no cleanup runs, the MP port holder is refused
 foreign $MP_HTTP_PORT held; ( exec -a "vllm serve fake --port $PORT" sleep 300 ) >/dev/null 2>&1 & echo $! > "$T/engine3.pid"; disown $!; wait_name "$!" "vllm serve fake --port $PORT"
 out="$(run)"
-if ! has "running seat_stop.sh once" && has "REFUSING to start — the MP HTTP port" && alive engine3 && alive held; then pass "a live engine is never cleaned up"; else failcase "live engine" "$out"; fi
+if ! has "running seat_stop.sh once" && has "REFUSING to start — the MP HTTP port" && ! has "START PROCEEDS" && alive engine3 && alive held; then pass "a live engine is never cleaned up"; else failcase "live engine" "$out"; fi
 reset
 
 # 4. orphaned engine workers, MP port FREE (the MP server died, the workers did not): reaped, the start proceeds. A unit
