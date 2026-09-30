@@ -57,15 +57,18 @@ var ErrCallDeadline = errors.New("call deadline reached")
 // so the readers outside this package (the rigger) match the same constant.
 const callDeadlinePrefix = core.CallDeadlineReasonPrefix
 
-// Grace bounds the unwind allowance after the deadline: the time cooperating
-// goroutines get to write their own telemetry rows and hand back a truthful
-// result before the call returns without them. It scales with the deadline so a
-// compressed test clock stays fast, and is capped so the live check "call wall <=
-// deadline + 30 s" holds with room to spare.
-const (
-	callGraceMin = 250 * time.Millisecond
-	callGraceMax = 10 * time.Second
-)
+// The unwind allowance after the deadline is the time cooperating goroutines get to
+// write their own telemetry rows and hand back a truthful result before the call
+// returns without them. It scales with the deadline (a twentieth of the time left) so a
+// compressed test clock stays fast, floors at callGraceMin, and is capped at
+// callGraceMax so the live check "call wall <= deadline + 30 s" holds with room to spare.
+//
+// callGraceMin is a var so a test that must make a real request inside the allowance can
+// widen it (a goroutine starved past 250 ms on a loaded box would be abandoned instead of
+// cut); production never mutates it.
+var callGraceMin = 250 * time.Millisecond
+
+const callGraceMax = 10 * time.Second
 
 // callDeadline is ONE call's deadline state. It is shared by every chunk of a
 // batched call, so the unfinished count in each published reason spans the whole

@@ -194,6 +194,7 @@ func TestTheCutSaysWhatTheNodeAnsweredToTheWithdraw(t *testing.T) {
 		{"a job the node took back", http.StatusOK, `{"state":"withdrawn","withdrawn":true}`, "the node confirmed it took the job back"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			widenUnwind(t, 2*time.Second)
 			compressPolls(t, 5*time.Millisecond, time.Second)
 			_, inner := remoteRunningForeverServer(t)
 			url, _ := withWithdrawAnswer(t, inner, tc.status, tc.body)
@@ -239,6 +240,7 @@ func TestTheCutSaysWhenTheNodeNeverAnsweredTheWithdraw(t *testing.T) {
 // TestTheWithdrawSendsNoBearerWithoutAToken: a delegator with no fleet_auth_token sends no
 // Authorization header at all — never an empty "Bearer " a node would read as a bad credential.
 func TestTheWithdrawSendsNoBearerWithoutAToken(t *testing.T) {
+	widenUnwind(t, 2*time.Second)
 	compressPolls(t, 5*time.Millisecond, time.Second)
 	_, inner := remoteRunningForeverServer(t)
 	url, log := withWithdrawRoute(t, inner, http.StatusOK)

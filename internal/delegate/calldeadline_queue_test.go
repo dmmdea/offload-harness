@@ -56,6 +56,7 @@ func goalOf(t *testing.T, job *fleetqueue.Job) string {
 // "still queued". The count is the truly unfinished one (1), not the number cut off from
 // being asked (2).
 func TestQueueRouteReturnsAJobTheHolderFinishedBehindASlowerOne(t *testing.T) {
+	widenUnwind(t, 2*time.Second)
 	holder := queueHolder(t)
 	cfg := config.Config{FleetQueueHolder: holder.url, StateDir: t.TempDir()}
 	go func() {
@@ -92,6 +93,7 @@ func TestQueueRouteReturnsAJobTheHolderFinishedBehindASlowerOne(t *testing.T) {
 // TestQueueRouteSaysItSawTheJobStillQueued: nobody claims either job, so the holder's own
 // answer IS "queued": that is what the reason may say, and both count.
 func TestQueueRouteSaysItSawTheJobStillQueued(t *testing.T) {
+	widenUnwind(t, 2*time.Second)
 	holder := queueHolder(t)
 	cfg := config.Config{FleetQueueHolder: holder.url, StateDir: t.TempDir()}
 	results, sum, _ := runWithin(t, 4*time.Second, cfg, nil,
@@ -228,6 +230,7 @@ func TestQueueRouteEvaluatesAcceptanceOnAFinishedJob(t *testing.T) {
 		}
 	})
 	t.Run("on the deadline's last look", func(t *testing.T) {
+		widenUnwind(t, 2*time.Second)
 		holder := queueHolder(t)
 		cfg := config.Config{FleetQueueHolder: holder.url, StateDir: t.TempDir()}
 		go func() {

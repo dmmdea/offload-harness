@@ -473,6 +473,7 @@ func TestTheDeadlineContextCarriesTheCause(t *testing.T) {
 // handler that records the RAW request target — the form a proxy or a stricter node in
 // front of the fleet port would see.
 func TestWithdrawRequestTargetIsTheCleanJobRoute(t *testing.T) {
+	widenUnwind(t, 2*time.Second)
 	compressPolls(t, 5*time.Millisecond, time.Second)
 	_, inner := remoteRunningForeverServer(t)
 	var mu sync.Mutex

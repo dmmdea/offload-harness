@@ -35,6 +35,17 @@ func measuredWallCancel() core.AgentWireResult {
 	return w
 }
 
+// widenUnwind raises the floor of the unwind allowance for one test. It is 250 ms so a
+// compressed clock stays fast, and a test whose subject is what a cut says about a REAL request
+// (the node's answer to the withdraw, the holder's answer to the last look) must not fail because
+// a loaded box starved that request past it: the goroutine would be abandoned instead of cut.
+func widenUnwind(t *testing.T, d time.Duration) {
+	t.Helper()
+	old := callGraceMin
+	callGraceMin = d
+	t.Cleanup(func() { callGraceMin = old })
+}
+
 // readFinished reads the ledger rows that describe an OUTCOME: deferred, or carrying an
 // acceptance verdict. A tree that also writes a marker before each dispatch (a row with no
 // reason, no verdict and no deferral) has those left out, so a count of a call's outcomes
