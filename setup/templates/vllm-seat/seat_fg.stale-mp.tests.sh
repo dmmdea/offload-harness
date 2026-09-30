@@ -12,8 +12,10 @@
 # "reaping ends here" line (the shared-memory cleanup and VRAM readback after it touch the box and are not run). The
 # stand-ins carry the real names: `VLLM::Worker_TP0` as argv[0] (what vLLM's setproctitle sets), a script called
 # `lmcache` invoked as `lmcache server --port … --http-port …`, and `vllm serve … --port N`. Scratch ports 28790-28798
-# and a systemd unit name that does not exist. Linux only (ss, pgrep, ps, python3, setsid). The orphan sweep is box-wide by
-# design, so the test refuses to run (SKIP) on a box where a real VLLM:: process is alive.
+# and a systemd unit name that does not exist — except one case that, run as root under a live systemd, starts the MP
+# server stand-in in a real transient unit of that name (the shape seat_fg.sh gives the real one) and checks it is
+# stopped through the unit. Linux only (ss, pgrep, ps, python3, setsid). The orphan sweep is box-wide by design, so the
+# test refuses to run (SKIP) on a box where a real VLLM:: process is alive.
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 command -v ss >/dev/null && command -v pgrep >/dev/null && command -v python3 >/dev/null && command -v setsid >/dev/null || { echo "SKIP (needs ss, pgrep, python3, setsid)"; exit 0; }
@@ -25,7 +27,7 @@ for p in $PORT $OTHER_PORT $MP_PORT $OTHER_MP_PORT $MP_HTTP_PORT; do
   if ss -ltn 2>/dev/null | grep -q ":$p "; then echo "SKIP (scratch port :$p is already in use)"; exit 0; fi
 done
 T="$(mktemp -d)"
-trap 'rc=$?; builtin kill -9 $(cat "$T"/*.pid 2>/dev/null) 2>/dev/null; rm -rf "$T"; exit $rc' EXIT
+trap 'rc=$?; builtin kill -9 $(cat "$T"/*.pid 2>/dev/null) 2>/dev/null; [ -n "${UNIT_STARTED:-}" ] && systemctl stop "lmcache-mp-scratch-$$" >/dev/null 2>&1; rm -rf "$T"; exit $rc' EXIT
 fail=0
 pass() { echo "PASS $1"; }
 failcase() { echo "FAIL $1: $2"; fail=1; }
@@ -189,6 +191,21 @@ reset
 engine mine $PORT; engine other12 $OTHER_PORT; out="$(bash "$T/seat_stop.sh" "$T/seat.env" 2>&1)"
 if has "scratch seat_stop: reaping done" && gone mine && gone mine-worker && alive other12 && alive other12-worker; then pass "the stop path stops this seat's engine tree and only that"; else failcase "stop path" "$out"; fi
 reset
+
+# 12b. the production shape: the stack's own MP server runs in its transient systemd unit (as seat_fg.sh starts it) and
+#      outlives its engine. Needs root and a running systemd, so it is not run everywhere (a runner without them says so).
+UNIT="lmcache-mp-scratch-$$"
+if [ "$(id -u)" = 0 ] && command -v systemd-run >/dev/null && systemctl list-units --no-legend >/dev/null 2>&1; then
+  UNIT_STARTED=1; systemd-run --unit="$UNIT" --collect -p TimeoutStopSec=5 python3 "$T/venv/bin/lmcache" server --host 127.0.0.1 --port $MP_PORT --http-host 127.0.0.1 --http-port $MP_HTTP_PORT --chunk-size 784 >/dev/null 2>&1
+  wait_bound $MP_HTTP_PORT; wait_bound $MP_PORT; out="$(run)"
+  if systemctl is-active --quiet "$UNIT"; then failcase "MP server in its unit" "the unit is still active: $out"
+  elif has "running seat_stop.sh once" && has "START PROCEEDS" && ! ss -ltn 2>/dev/null | grep -q ":$MP_HTTP_PORT "; then pass "the MP server in its own systemd unit is stopped through the unit"
+  else failcase "MP server in its unit" "$out"; fi
+  systemctl stop "$UNIT" >/dev/null 2>&1; systemctl reset-failed "$UNIT" >/dev/null 2>&1
+  reset
+else
+  echo "note: the systemd-unit case needs root and a running systemd; not run on this box"
+fi
 
 # 13. mutation: reaping by PORT instead of by identity (kill whatever holds the MP HTTP port) must be caught by the foreign-holder test
 mkdir -p "$T/mut1"; cp "$T/seat_fg.sh" "$T/mut1/seat_fg.sh"; cp "$T/seat_stop.real.sh" "$T/mut1/seat_stop.sh"
