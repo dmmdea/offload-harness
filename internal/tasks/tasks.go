@@ -22,8 +22,12 @@ type Built struct {
 	// tasks that set no grammar at all, and every builder that sets one sets
 	// both, pinned by TestBuiltFieldsMatchTheGrammar: the two engines can
 	// never be handed different shapes for one task.
-	Fields    []gbnf.Field
-	Schema    map[string]any // validation schema (extract); nil when grammar suffices
+	Fields []gbnf.Field
+	Schema map[string]any // validation schema (extract); nil when grammar suffices
+	// Strict is set only by ForUnconstrained: the schema derived from Fields (gbnf.JSONSchema)
+	// that an unconstrained seat's reply must satisfy, because no grammar enforced it. Nil for
+	// every seat that took a grammar, which is why a normal build is unchanged.
+	Strict    map[string]any
 	MaxTokens int
 }
 

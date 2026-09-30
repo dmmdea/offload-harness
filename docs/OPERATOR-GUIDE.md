@@ -1058,7 +1058,7 @@ carries any measured override to apply.
 | `ampere-6` | `offload-e4b` | 32768 | q8_0 (conservative default; f16 measured viable) | dropped (architectural — see the tier page) |
 | `amd-gcn` | `gemma4-e2b` (Vulkan; the CPU alt route was withdrawn 2026-09-24 — no model runs on CPU, ADR 0054 amendment; agent seat `qwen3.5-4b-agent`) | 32768 (8192 → 32768 measured 2026-09-20: 24k-token prompt in 278 s, 3.9 GiB GTT) | f16, flash-attn on (measured 2026-09-20 on binxarn: +4 % pp, neutral on Lucienne; the lane is DDR-bandwidth-bound, every RADV/ubatch/KV knob within ±4 %) | dropped |
 | `cpu` | `offload-e4b` (CPU) | 8192 | f16, flash-attn off | `--cpu-moe` when RAM ≥ ~56 GB; else dropped |
-| `rockchip-rk3588` | `qwen3.5-2b-npu` (Qwen3.5-2B W8A8 on the NPU via RKLLM, chat and vision: `vqa` and `ocr`, never `assess_image`); no llama.cpp entry (llama.cpp Vulkan faults the Mali GPU on this kernel/Mesa, measured), no model runs on the CPU, and `uma_reserve_gib` 3 holds RAM back for the host | the NPU seat 16384 | n/a (RKLLM) | dropped |
+| `rockchip-rk3588` | `qwen3.5-2b-npu` (Qwen3.5-2B W8A8 on the NPU via RKLLM, chat and vision: `vqa` and `ocr`, never `assess_image`; its own pipeline runs `classify` and `extract` with no grammar, from a prompt plus strict validation, and the fleet text lane is not advertised until measured); no llama.cpp entry (llama.cpp Vulkan faults the Mali GPU on this kernel/Mesa, measured), no model runs on the CPU, and `uma_reserve_gib` 3 holds RAM back for the host | the NPU seat 16384 | n/a (RKLLM) | dropped |
 
 Notes: q8_0 KV keeps the KV cache ~half the size (V-quant needs flash-attn on, which the CUDA/Vulkan
 templates set); the 26B is placed full-GPU only on ≥12 GB single-card profiles, `--cpu-moe` (experts
