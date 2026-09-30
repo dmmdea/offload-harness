@@ -241,6 +241,30 @@ runtime, with its own window and CPU mask) as alternatives to it. No model runs 
 tier declares no `alt_backends`, so `--llama-bin-cpu` is refused. `--llama-bin` still names a
 llama.cpp build with the Vulkan backend, as for `vulkan`; the installer script needs nothing else.
 
+#### What `install render` refuses to write
+
+Every render passes one gate (`renderGate`) before it can be written. A failure names the tier and
+every offender, and nothing is written:
+
+1. **The serving-config rules (H-01, INV-1 / INV-2).** No `-ngl 0` or empty `CUDA_VISIBLE_DEVICES` (a
+   model on the CPU), `ttl: 300` on every entry, no `persistent` group, no preload hook.
+   `local-offload audit-yaml` runs the same checker over a live file.
+2. **The spill ceiling (H-01, INV-1).** `--n-cpu-moe N` (every spelling, and the `LLAMA_ARG_N_CPU_MOE`
+   twin) above the tier's `n_cpu_moe_max`, its MEASURED spill, is refused. A tier that recorded none
+   sanctions none, so any `N` above zero is refused. A tier that names `moe_26b: n_cpu_moe` with no `N`
+   is refused too, because that renders the every-expert `--cpu-moe` on a box with a card.
+   `n_cpu_moe_max` is a separate number from `n_cpu_moe` on purpose: the placement a tier ships and the
+   ceiling its measurement supports are two decisions, and one field cannot check itself. No shipped tier
+   declares a partial spill today.
+3. **The layer check (ADR 0039, D5).** A tier that declares layers must render the seats they name, on the
+   cards they name. It runs for any tier that declares layers, not only one that composes others: the
+   `ampere-16` tier's `fast` layer would otherwise route to a seat the config never defined.
+
+`TestInstallRendersOnAnyTierWithoutACacheServer` is the other half of the same promise (INV-16: the
+harness installs and serves on any single PC, and the cache-server tier is optional): every tier renders
+with no vLLM prerequisites, and a tier whose vLLM seat declares no store renders the seat, its unit and its
+wrappers with no cache-server piece anywhere and seeds an explicit storeless binding for it.
+
 #### The provenance stamp (0.123.0, ADR 0043)
 
 Every config `install render` writes now begins with a six-line comment block:
@@ -322,7 +346,9 @@ It resolves the tier seed **exactly as `install seed` does**, with the same `--g
 `--ram-tier` and vLLM-seat detection. Skip them and the audit compares the node against a seed
 the installer would never have written, such as a vLLM box against its fallback agent, and
 reports drift that is its own artifact. `--vllm-seat-active auto` runs the installer's own
-detection, which is right for the local box. Pass `true` or `false` for a remote one.
+detection, which is right for the local box. Pass `true` or `false` for a remote one. The flag speaks
+for the tier's vLLM seats as a set: `true` says the node serves the lane seat and every extra seat,
+`false` none, and `auto` detects each seat on its own (the venv plus that seat's weights).
 
 It reports only **seed-owned** keys: every key some tier's resolved seed can write, plus live
 bindings no tier seeds at all. A config also holds keys that are legitimately this machine's
@@ -456,6 +482,20 @@ local-offload install seed --profile ampere-6 --home /srv/offload-stack --os lin
 
 `TestEveryShippedSeedIsValid` resolves every tier in the table for **both** platforms, which
 is the gate that would have caught `sd-cli.exe`.
+
+**vLLM seats, the roster and the layers.** `install seed` decides once, per seat, whether the box can run
+it (the hand-built venv plus that seat's weights) and seeds accordingly:
+
+- The lane seat (`vllm_seat`) binds `agent_model`; a box without it binds the seat's fallback.
+- Every further seat (`extra_vllm_seats`) that the box can run joins the `vllm_seats` roster with its own
+  `kv_cache_server` binding, and never touches `agent_model`. A seat with no store seeds an explicit
+  storeless opt-out carrying its `storeless_reason` (the measured reason) or, when the tier recorded none,
+  the generic one, so a fresh install never ships a config its own `doctor` rejects.
+- The tier's `layers` are seeded as the box can serve them: a layer whose vLLM seat is absent is dropped, and
+  a layer set that lost `single` is not seeded at all (`tierseed.ResolveLayers`).
+
+The composite design and what an `ampere-16` operator still installs by hand are in
+[composite-tier.md](composite-tier.md).
 
 ### Relocating an install: one knob, not a dozen paths
 

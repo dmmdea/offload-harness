@@ -71,7 +71,10 @@ native CPU/disk offloading (measured unusable on the Mamba-hybrid 27B under WSL2
    escape hatch is a declaration and never silence: a binding with `storeless: true` and a `reason`
    passes; an absent binding fails, and so does one merely switched off with no reason. The section
    prints above the health probe, since its verdicts are pure config and a dead serving layer must
-   not hide them. A box with no `vllm_seats` prints nothing and fails nothing.
+   not hide them. A box with no `vllm_seats` prints nothing and fails nothing. A tier that has MEASURED
+   why a seat runs without a store records it as the seat's `storeless_reason` in `profiles.json`
+   (refused beside a `cache_server`), and the seeded binding carries that sentence verbatim; a seat with
+   no recorded reason gets the generic one. A tier's extra vLLM seats each seed a binding of their own.
 3. `offload_status.kv_cache_server` LISTS every binding (an `fs_native` binding with a `status_file` also
    publishes `reachable` from the seat wrapper's verdict file, `SEAT_L2_STATUS_FILE`, which is `seat-l2-<seat id>.status` in a rendered seat env — B-29, 0.129.1): `bindings[]` (seat, store, address,
    key_prefix, l1_staging_gb, chunk size, declared/enabled — or `storeless` with its reason), plus

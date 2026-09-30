@@ -34,7 +34,9 @@ tier declares it again and nothing else changes.
 ## The layers on the `ampere-16` node
 
 A composite box does not need more than one card. The `ampere-16` reference node (one NVIDIA A2,
-16 GB) declares two layers on that single device (register A-100, 0.129.0):
+16 GB) declares two layers on that single device (register A-100, 0.129.0), and since register A-113 the
+tier table declares them too: a fresh install of the tier seeds the layers the reference node's
+hand-edited config carries (see "How the tier table carries it" below).
 
 | layer | tier | devices | seats | chosen when | state |
 |---|---|---|---|---|---|
@@ -47,19 +49,74 @@ the node's agent seat, free choice never lands on it (row 4b: a non-default laye
 only), and it is for digest-shaped contracts. It is not a swap for `single`, and a judgment or
 coverage contract does not belong on it.
 
-Every vLLM seat this node declares — all three of them — is **storeless by measured declaration**
-(register B-01, re-measured 2026-09-18), so `doctor` prints a storeless-OK line per seat instead of
-failing it for a missing cache-server binding (ADR
+Every vLLM seat the tier declares — the 27B lane seat and the 35B — is **storeless by measured
+declaration** (register B-01, re-measured 2026-09-18), so `doctor` prints a storeless-OK line per seat
+instead of failing it for a missing cache-server binding (ADR
 [0045](../architecture/decisions/0045-a-cache-server-binding-per-vllm-seat.md)): the MP server's own
 ~690 MiB CUDA context beside the resident embedder OOMs the engine at `util 0.90` on a 16 GB card,
 and the 27B GSQ seat's cache path is blocked on top of that by LMCache 0.5.4 × vLLM 0.29 (register
-D-117).
+D-117). The reason each seat carries is its own `storeless_reason` in the tier table, seeded verbatim into
+its binding. (The reference node also lists a third seat, the 4B `qwen3.5-4b-vllm` rollback unit, which
+is hand-installed and not part of the tier: its binding is that node's own, and `audit-config` reports the
+two roster keys as DIFFERENT against it until the operator declares or retires it.)
 
-> **Not in the installer's table yet.** `setup/templates/profiles.json` carries neither the `fast`
-> layer nor the 35B `vllm_seat` for `ampere-16`, so the declaration above lives only in that node's
-> own config — a fresh render loses it, and [`docs/tiers/ampere-16.md`](../tiers/ampere-16.md), which
-> is GENERATED from that table, cannot state it. Seeding the layer, and a coverage test that fails
-> when a tier's declared layer set shrinks, is an open register row.
+### How the tier table carries it
+
+`setup/templates/profiles.json` declares, for `ampere-16`, the two layers above, the 27B as `vllm_seat`
+(the agent lane) and the 35B as `extra_vllm_seats` (a seat served on demand beside the lane seat on the
+same card, never the agent lane: [ADR 0048 Amendment 2](../architecture/decisions/0048-vllm-is-a-first-class-engine-on-every-tier.md)).
+Each layer names its seat explicitly, so the values are the reference node's own and `audit-config`
+reports MATCH for `layers`, `tiers` and `tier_profile`; a layer seat that names a vLLM seat must equal
+that seat's `max_model_len` (and its `max_num_seqs` as `max_inflight`, when set), or the table is refused
+at parse. What a box seeds and renders depends on which seats it can run, decided per seat by the same
+prerequisite check (`vllmseat.Spec.Detect`: the hand-built venv plus that seat's own weights):
+
+| the box runs | `layers` | `vllm_seats` and `kv_cache_server` | llama-swap entries |
+|---|---|---|---|
+| the 27B and the 35B | `single`, `fast` | both seats, one storeless binding each | both, as alternatives |
+| the 27B only | `single` | the 27B | the 27B |
+| the 35B only | none | the 35B | the 35B |
+| neither (a plain llama.cpp box) | none | none | neither |
+
+A box that lacks the 35B's weights therefore never advertises the `fast` layer or its seat, and a box
+that lacks the 27B's seeds no layers at all: `single` is the planner-default layer (row 5b below), and a
+layer set that lost it would make the node ineligible for every contract it ran the day before, so the
+box stays a plain box instead. `install render` refuses a layer that names a seat the rendered config
+does not define, for any tier that declares layers.
+
+The two seats cannot both be loaded (11.85 + 11.2 GB of weights against 15.4 GB usable; a warm swap
+between them costs about 50-70 s), so the renderer emits every vLLM seat of a tier as an ALTERNATIVE of the
+others inside the residents set — `emb & rer & (vagt | vagt2)` — never as co-resident members. A
+matrix that called the pair a valid combination would have llama-swap load the second beside the first,
+an out-of-memory at the engine's first allocation. The seats stay resident-class: an ordinary chat request
+never evicts the agent lane, and asking for the 35B by name swaps it in.
+
+### What an operator still installs by hand on a fresh `ampere-16` box
+
+The installer detects prerequisites and never builds them, and it does not render the 35B seat's unit:
+
+1. **The vLLM venv** (vLLM 0.29.0; the 27B checkpoint also needs its shipped embedding patch) and the
+   `--vllm-venv` / `--hf-home` flags naming it, passed to `install seed`, `install render` and
+   `audit-config` alike (with `--vllm-user` and `--vllm-proxy-host` for the render).
+2. **The weights**: exactly one snapshot each under the HF home, `hub/models--ISTA-DASLab--Qwen3.8-27B-3Bit-GSQ`
+   and `hub/models--ISTA-DASLab--Qwen3.6-35B-A3B-2Bit-GSQ`. A seat with no snapshot is skipped, with the
+   reason printed, and so is its layer.
+3. **The 27B seat**: `local-offload install vllm-seat --profile ampere-16 …` renders its unit, wrappers and
+   polkit rule and prints the two root steps.
+4. **The 35B seat's unit, wrapper scripts and polkit rule.** Its production launch line carries
+   `--language-model-only`, which the shared `linux-systemd` run script cannot express, so `install vllm-seat`
+   does not render it (and `install render` warns when its wrappers are missing). Copy the 27B's rendered
+   files under the 35B's unit name and change exactly what differs: the unit is `vllm-35b-seat` (no
+   `[Install]` section: llama-swap owns its lifetime); the wrappers are `vllm-35b-seat-run.sh`,
+   `vllm-35b-seat-cmd.sh` and `vllm-35b-seat-cmdstop.sh` in the same seat directory (`cmd` and `cmdStop`
+   start and stop `vllm-35b-seat.service`); the polkit rule is the 27B's with the unit name changed. In
+   the run script, point `--model` at the 35B snapshot, set `--served-model-name
+   qwen36-35b-a3b-gsq-vllm a2-pool-35b qwen36-35b-gsq`, `--max-num-seqs 8` and `--tool-call-parser
+   qwen3_coder`, and add `--language-model-only`; keep the window and utilisation the table records
+   (32,768 at `util 0.90`).
+5. **Then** `install render` writes both llama-swap entries and `install seed` writes the layers, the roster
+   and both bindings. `local-offload doctor` prints a storeless-OK line per seat, `offload_status` lists both
+   layers, and a contract with `layer: "fast"` lands on the 35B.
 
 ## The decision table
 
@@ -202,9 +259,10 @@ has no reader of its own, and a live reading always wins.
 | `internal/gpuprobe/` | the nvidia-smi parser and runner, host free RAM, index/UUID resolution |
 | `internal/core/placed.go` | `core.Placed`, the block every result publishes |
 | `internal/servingtmpl/composite.go` | the checked union (`CheckComposite`) and the display-twin fences |
-| `internal/tierseed/` | seeding `tier_profile`, `tiers`, `layers` (and filling the bare agent seat) |
+| `internal/tierseed/` | seeding `tier_profile`, `tiers`, `layers` (filling a bare agent seat, dropping a layer whose vLLM seat the box does not run: `ResolveLayers`) and the extra seats' roster and bindings |
+| `layer_coverage_test.go` | the regression floor: a tier that stops declaring a layer, a layer role or an extra vLLM seat fails by name |
 | `internal/fleetnode/server.go` | the health rows and the layer-aware job feed |
 | `internal/delegate/` | the local decision, the pair-long wait, per-layer remote placement |
-| `setup/templates/profiles.json` | `composes` and `layers` for `blackwell-3x16` |
+| `setup/templates/profiles.json` | `composes` and `layers` for `blackwell-3x16`; `layers`, `vllm_seat` and `extra_vllm_seats` for `ampere-16` |
 | `setup/install.ps1` | the Windows parity copy of the composite seed |
 | [ADR 0052](../architecture/decisions/0052-a-box-is-the-union-of-its-tiers-and-placement-is-a-per-task-decision.md) | the decision record |
