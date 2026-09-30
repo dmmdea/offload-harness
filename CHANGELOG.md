@@ -6,6 +6,34 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.152.1] - 2026-09-30 - the browse lane un-sticks fade-in dialogs and menus in its background tab
+
+### Fixed — a dialog or dropdown menu that fades in was invisible to a browse run
+
+A run on a site whose dropdown menu fades in could not use the menu: the lane's tab is opened in the
+background, a hidden tab produces no rendering frames, and a CSS `@keyframes` animation or `transition`
+that starts there never advances, so the menu kept its start-state opacity 0. The page snapshot drops
+every element whose computed opacity is 0, so the model never saw the menu it had just opened and the
+run ended `blocked` ("the model or the loop reported no progress"). The sidecar now jumps the finite
+animations in `document.getAnimations()` that the snapshot cannot see (hidden by opacity or `visibility`,
+empty, or outside the viewport) to their end state, immediately before every page read: each read attempt,
+so also the read after jev's short post-action wait and the retries after a stale read or a navigation.
+Infinite ones, such as spinners, are skipped, and so is an animation on an element that is already visible
+and on screen (a toast that a CSS animation fades out after a delay stays in the snapshot); the call
+swallows every error, so a navigating page never becomes a failed run.
+Measured in a background tab with a dialog opened by a real mouse click and read 400 ms later: a
+`@keyframes` fade and a `transition` fade both read opacity 0 and not visible until finished, then
+opacity 1 and visible; a production web app's dropdown menu showed 0 of 7 items visible and 7 of 7 after.
+A fade driven by `requestAnimationFrame` was already visible to the snapshot (opacity 0.0055 at 400 ms,
+above 0; whether it reaches 1 was not measured) and is not targeted. The finish runs before page reads
+only, never before an action: jev's pre-click check compares the observed page and the target's guard
+with the live page, and a finish in between could make it fail. Content the page mounts after the read
+itself (a debounce or a network response that lands later) is finished at the next observe, and the `wait`
+action triggers one. Forcing frames with `Page.captureScreenshot` is not an option (it hung for more than
+15 s in the hidden tab). `date` and `datetime-local` inputs are still absent from the snapshot. The fix is
+in the sidecar (`setup/browse/runner.py`; the Go binary changes only its version string); reinstall with
+`setup/browse/install.ps1` to take it.
+
 ## [0.152.0] - 2026-09-30 - placement holds instead of sleeping or refusing (ADR 0063)
 
 ### Fixed - placement holds instead of sleeping or refusing (ADR 0063)
