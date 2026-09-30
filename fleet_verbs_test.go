@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -74,6 +76,20 @@ func TestFleetServeParams(t *testing.T) {
 		}
 	})
 
+	// The unit's `--listen "$(tailscale ip -4)":18811` before tailscaled has an
+	// address: the flag arrives as ":18811". Until 0.144.1 the trusted flag
+	// let it bind every interface (a fleet node served the unauthenticated
+	// endpoints on all interfaces after a boot race); it must fail so the
+	// service manager retries once the tailnet address exists.
+	t.Run("an empty host is refused even with the trusted flag", func(t *testing.T) {
+		for _, listen := range []string{":18811", "0.0.0.0:18811", "[::]:18811"} {
+			_, _, err := fleetServeParams(listen, "node-a", true, config.Default(), hostNodeA)
+			if err == nil || !strings.Contains(err.Error(), "EVERY interface") {
+				t.Fatalf("listen %q: err = %v, want the all-interfaces refusal", listen, err)
+			}
+		}
+	})
+
 	t.Run("trusted flag allows the Tailscale bind; explicit flags win", func(t *testing.T) {
 		listen, nodeID, err := fleetServeParams("100.64.0.10:18811", "node-a", true, config.Default(), hostNodeA)
 		if err != nil {
@@ -133,6 +149,8 @@ func TestChooseSamplerKind(t *testing.T) {
 	}{
 		{"nvidia-smi", samplerKindDevice},
 		{"windows-generic", samplerKindSingle},
+		// The SoC provider has no per-device signal either: one RAM pool, no gpu_devices[].
+		{"linux-meminfo", samplerKindSingle},
 		// Defensive: an unrecognized/empty source (should never happen —
 		// ResolveProvider only ever sets these two strings) still degrades to
 		// the single-value sampler rather than risking a nil device probe.
@@ -187,4 +205,59 @@ func TestChooseSamplerKindDrivesGpuDevicesShape(t *testing.T) {
 			t.Fatalf("Devices = %+v, want nil (windows-generic has no per-device signal)", snap.Devices)
 		}
 	})
+}
+
+// TestGenericMemProviderByTier locks the selection runFleetServe ships: which
+// generic GPU memory source each tier gets, and that the operator's reserve
+// (cfg.UMAReserveGiB) reaches the unified-memory SoC provider. Before the SoC arm
+// existed a rockchip-rk3588 box fell through to the amdgpu sysfs source, found no
+// PCI vendor id and no mem_info_vram_total, and fleet-serve refused to start.
+func TestGenericMemProviderByTier(t *testing.T) {
+	// The reference board's own figures: 8,112,688 kB total, 6,502,340 kB available.
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "proc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	meminfo := strings.Join([]string{
+		"MemTotal:        8112688 kB",
+		"MemFree:         3211588 kB",
+		"MemAvailable:    6502340 kB",
+	}, "\n") + "\n"
+	if err := os.WriteFile(filepath.Join(root, "proc", "meminfo"), []byte(meminfo), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		name, goos, profile, source string
+		hasProbe                    bool
+	}{
+		{"AMD APU on Linux", "linux", "amd-gcn", "linux-amdgpu", true},
+		{"Windows iGPU", "windows", "amd-rdna3", "windows-generic", true},
+		{"Linux box with no manifest", "linux", "", "linux-amdgpu", true},
+		{"unified-memory SoC", "linux", "rockchip-rk3588", "linux-meminfo", true},
+		// The cpu guard: detect found no usable GPU, so only a working nvidia-smi may
+		// qualify the node — its generic source stays named (for the gate error) but nil.
+		{"cpu profile on Linux", "linux", "cpu", "linux-amdgpu", false},
+		{"cpu profile on Windows", "windows", "cpu", "windows-generic", false},
+	} {
+		got := genericMemProvider(tc.goos, tc.profile, true, 3, root)
+		if got.Source != tc.source {
+			t.Errorf("%s: source = %q, want %q", tc.name, got.Source, tc.source)
+		}
+		if (got.Probe != nil) != tc.hasProbe {
+			t.Errorf("%s: probe present = %v, want %v", tc.name, got.Probe != nil, tc.hasProbe)
+		}
+	}
+
+	// The reserve is config, not a constant: it must move the advertised capacity.
+	for _, reserve := range []float64{0, 3} {
+		probe := genericMemProvider("linux", "rockchip-rk3588", true, reserve, root).Probe
+		total, _, err := probe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := 8112688.0/(1<<20) - reserve; total < want-1e-9 || total > want+1e-9 {
+			t.Errorf("reserve %v GiB: total = %v GiB, want MemTotal - reserve = %v", reserve, total, want)
+		}
+	}
 }

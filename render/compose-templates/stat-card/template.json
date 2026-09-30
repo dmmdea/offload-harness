@@ -1,0 +1,10 @@
+{
+  "name": "stat-card",
+  "description": "Full-frame opaque stat card: a kicker, a giant gradient figure that focus-pulls in, a caption with one emphasised phrase, a source line, a glow rising from the bottom edge and a fade out 0.6 s before the end.",
+  "width": 1920,
+  "height": 1080,
+  "fps": 30,
+  "alpha": false,
+  "duration_variable": "duration",
+  "formats": ["mp4", "webm", "mov", "png-sequence", "gif"]
+}

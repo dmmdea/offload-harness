@@ -367,7 +367,8 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	var coldLoadEnd time.Time  // when the seat became ready for this run: a load ends at one instant for everyone waiting on it
 	var coldLoaded bool        // the warm-up ATTEMPTED a load this run (D-118 reads this, never coldLoad > 0: a sub-tick load measures 0)
 	act.Phase("cold-load")
-	warmed, warmNote, warmAttempted, warmLoaded := warmSeatOutcome(ctx, p.cfg.Endpoint, seat, admissionBudget(p.cfg.AgentAdmissionWaitSec)-admitted)
+	var warmSt warmStatus
+	warmed, warmNote, warmAttempted, warmLoaded := warmSeatWith(ctx, p.cfg.Endpoint, seat, admissionBudget(p.cfg.AgentAdmissionWaitSec)-admitted, &warmSt)
 	warmEnd := time.Now()
 	// Admission time whether or not a load was attempted: a warm-up held behind
 	// a GPU lease (2026-09-22) spends the budget waiting and loads nothing. Every
@@ -412,6 +413,24 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		} else {
 			admitNote += "; " + warmNote
 		}
+	}
+	if warmSt.Refused >= 500 {
+		// The warm-up was refused with a server error and there is positive
+		// evidence the seat's process died at start (register C-76, R-05;
+		// warmStartFailed): proceeding into the wall spends the whole wall on a seat
+		// that cannot answer (one run filed a 358 s EngineCore death after exactly
+		// this). With agent_warm_failure_defer it is reported at once, as the seat's
+		// health, before any wall exists — nothing was served — and the delegator
+		// gives the contract one retry on another node. A 404 (the seat's name is
+		// unknown here), a timeout and every busy shape keep proceeding.
+		if p.cfg.AgentWarmFailureDefer {
+			return deferWire(core.DeferClassInfrastructure, core.SeatWarmFailedReason+warmNote)
+		}
+		// Audit mode (the default): the run proceeds as it always did and the wire
+		// says what enforcement would have done, so the would-be defers can be counted.
+		audit := fmt.Sprintf("this run would have deferred at once (HTTP %d, the seat's process did not start; agent_warm_failure_defer is off): proceeding into the wall", warmSt.Refused)
+		log.Printf("agent task: seat warm-up (%s): %s", seat, audit)
+		admitNote = joinAdmissionNotes(admitNote, audit)
 	}
 	// Post-warm COHERENCE probe (register D-118). A seat that is HEALTHY by
 	// every other gate can still be numerically broken: on 2026-09-16/17 a
@@ -843,6 +862,14 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	// this function.
 	finalBudget, _ := finalBudgetsFor(p.cfg, contract)
 	hasSchema := len(contract.OutputSchema) > 0
+	// The schema the ANSWER is held to (register C-74): the contract's own, with
+	// every field its acceptance checks read declared required. A direct JSON
+	// answer that leaves such a field out then fails validation and goes to the
+	// re-pack instead of being delivered and failing acceptance at the delegator
+	// after a whole run, and a vLLM seat's structured_outputs may no longer leave
+	// the field out of its own answer. Presence only: a direct object that carries
+	// the field empty is delivered as it is.
+	outSchema := core.RequireAcceptanceFields(contract.OutputSchema, contract.Acceptance)
 	startFit := seatrate.FitFinalBudget(seatrate.FinalFit{
 		ConfiguredFinal: finalBudget,
 		RemainingSec:    float64(timeoutSec),
@@ -1231,7 +1258,7 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	// and re-packing 19 KB of JSON into the same JSON costs another ~6,000
 	// tokens — the 0.115.10 acceptance run's 27B row spent its last 200 s of
 	// wall there. Validate the loop's own text first; only prose re-packs.
-	if direct, ok := directStructured(res.Output, contract.OutputSchema); ok {
+	if direct, ok := directStructured(res.Output, outSchema); ok {
 		wire.Structured = direct
 		return finish(wire)
 	}
@@ -1254,14 +1281,44 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	}
 	repackStart := time.Now()
 	act.Phase("repack")
-	// Liveness (0.131.0): the re-pack is its own phase (allowance = its chat
-	// timeout) and its streamed deltas feed the same watch as the loop's.
-	live.Phase(agent.PhaseRepack, 0)
-	structured, tokensOut, transport, attempts, serr := p.repackStructured(agent.ContextWithProgress(cctx, live.Progress), seat, contract.OutputSchema, res.Output, repackAttemptFloor(wall))
+	// Liveness (0.131.0): the re-pack is its own phase. Its allowance is the flat
+	// re-pack bound raised to what the expected answer needs at this seat's rate
+	// (agent.StallPolicy.Allowance): a flat 120 s stalled 119 of 119 killed
+	// re-packs whatever the answer size, on seats that were producing. The
+	// re-pack STREAMS, so every delta is progress and the allowance bounds
+	// silence; its requests run without a transport bound of their own, so the
+	// busy hold governs them.
+	live.Phase(agent.PhaseRepack, expectedRepackTokens(res.Output))
+	// The job record carries the phase and the allowance the re-pack runs under,
+	// like every loop phase does (Loop.tellAllowance). A remote delegator keeps
+	// polling a job only while its last report is inside the published allowance
+	// plus grace; without this the record still read the loop's last decode
+	// allowance, and a re-pack sized to minutes was abandoned by the delegator
+	// about two minutes in while the node went on running it.
+	_, _, _, repackAllow := live.Snapshot()
+	obs.OnAllowance(string(agent.PhaseRepack), repackAllow)
+	// Every streamed delta of the re-pack feeds the watch AND the job record, the
+	// way the loop's own steps do (Loop.progressFunc): the delegator polling the
+	// node sees the re-pack producing, not a record frozen at the loop's last step.
+	repackProgress := func(n int) {
+		live.Progress(n)
+		obs.OnProgress(res.TokensOut + n)
+	}
+	structured, tokensOut, transport, attempts, serr := p.repackStructured(agent.ContextWithProgress(cctx, repackProgress), seat, outSchema, res.Output, repackAttemptFloor(wall))
 	wire.RepackMs = time.Since(repackStart).Milliseconds()
 	wire.RepackAttempts = attempts
+	// A seat that refuses the stream re-packs as one silent answer, which is the
+	// shape the streaming fix exists for: say the fix did not apply to it.
+	streamNote := p.streamRefusedNote(seat)
 	if serr != nil {
-		wire.RepackNote = serr.Error()
+		wire.RepackNote = joinAdmissionNotes(serr.Error(), streamNote)
+		// The loop FINISHED: its answer is intact in Output and complete (a cut
+		// answer deferred above, before any re-pack), and only its structuring
+		// failed, on whichever arm below. Flagged so the delegator can re-pack the
+		// answer itself instead of counting a finished loop as lost work (register
+		// C-66, PR-4: 80 of 80 killed re-packs carried one). The defer itself is
+		// unchanged, so a delegator that predates the flag reads what it always did.
+		wire.SchemaMiss = true
 		// wire.Output stays populated on every branch below so the CALLER still
 		// receives the loop's answer even when the structured shape never
 		// arrived. It is preserved for the caller, NOT for delegator-side
@@ -1300,7 +1357,7 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 			// infrastructure: an operator told to fix a box that never
 			// misbehaved. Budget is the honest class: a ceiling outside the
 			// model's control stopped the run.
-			return deferWire(core.DeferClassBudget, "canceled during the structured re-pack (the caller's context ended)")
+			return deferWire(core.DeferClassBudget, core.RepackCanceledReason+" (the caller's context ended)")
 		case isCutoff:
 			// The DECISIVE (last-run) re-pack attempt was ended by its OWN
 			// per-attempt bound (repackAttemptDeadline, register D-108) — not
@@ -1333,6 +1390,7 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		}
 	}
 	wire.Structured = structured
+	wire.RepackNote = joinAdmissionNotes(wire.RepackNote, streamNote)
 	wire.TokensOut += tokensOut // the re-pack's own generation, on top of the loop's
 	return finish(wire)
 }
@@ -1466,6 +1524,17 @@ func repackAttemptFloor(wall time.Duration) time.Duration {
 
 // floor is the least remaining wall an attempt may start with (0 = no bound).
 func (p *Pipeline) repackStructured(ctx context.Context, seat string, rawSchema json.RawMessage, output string, floor time.Duration) (structured json.RawMessage, tokensOut int, transport bool, attempts int, err error) {
+	return p.repackStructuredWith(ctx, seat, rawSchema, output, floor, 0)
+}
+
+// repackStructuredWith is repackStructured with a cap on the completions it may
+// spend: maxAttempts of 1 or 2 stops after that many (the delegator's rescue is
+// ONE completion and never the chat lane), 0 keeps the full repackMaxAttempts.
+func (p *Pipeline) repackStructuredWith(ctx context.Context, seat string, rawSchema json.RawMessage, output string, floor time.Duration, maxAttempts int) (structured json.RawMessage, tokensOut int, transport bool, attempts int, err error) {
+	limit := repackMaxAttempts
+	if maxAttempts > 0 && maxAttempts < limit {
+		limit = maxAttempts
+	}
 	var schema map[string]any
 	if uerr := json.Unmarshal(rawSchema, &schema); uerr != nil {
 		return nil, 0, false, 0, fmt.Errorf("output_schema is not a JSON object: %w", uerr)
@@ -1554,14 +1623,54 @@ func (p *Pipeline) repackStructured(ctx context.Context, seat string, rawSchema 
 	var lastAttemptNum int
 	recordFailure := func(raw error, bound time.Duration, attemptNum int) {
 		if lastRaw != nil {
-			earlierNotes = append(earlierNotes, fmt.Sprintf("attempt %d/%d (bound %s): %v", lastAttemptNum, repackMaxAttempts, lastBound, lastRaw))
+			earlierNotes = append(earlierNotes, fmt.Sprintf("attempt %d/%d (%s): %v", lastAttemptNum, limit, boundText(lastBound), lastRaw))
 		}
 		lastRaw, lastBound, lastAttemptNum = raw, bound, attemptNum
 	}
 	budget := repackBudget(output)
-	for attempt := 0; attempt < 2; attempt++ {
+	// Under the liveness monitor (a ProgressFunc on ctx, which is every run of
+	// runAgentTask) the CONTEXT owns the deadline: the stall watch cancels a
+	// silent request, the busy hold (ADR 0061) keeps one whose seat is busy for
+	// others, and the ceiling bounds a producing one. A transport bound of the
+	// attempt's own under that hold cut a held request about a third of the way
+	// through what was left of the wall and re-sent it from the back of the
+	// engine's queue, up to three times. The bound stays for callers with no
+	// monitor (the delegator's rescue, tests), which have nothing else.
+	progress := agent.ProgressFromContext(ctx)
+	underLiveness := progress != nil
+	if underLiveness {
+		// The re-pack streams (ADR 0055 item 1: every seat completion streams) so
+		// the monitor hears every delta and its allowance bounds SILENCE, not the
+		// whole answer; a seat or proxy that answers JSON anyway is decoded as
+		// before, and one that refuses the stream is asked again as JSON
+		// (llamaclient.WithProgress). The deadline stays the context's.
+		structuredOpts = append(structuredOpts, llamaclient.WithoutClientTimeout(), llamaclient.WithProgress(progress))
+	}
+	// stopped ends the re-pack once its context has ended: a request cancelled by
+	// the monitor's stall or ceiling, or by the caller, leaves nothing for a next
+	// attempt to reach. Without it attempts 2 and 3 started on the already-dead
+	// context, failed at once, and were still counted (119 of 119 stalled
+	// re-packs read repack_attempts 3 with repack_ms 120,001: ONE real request).
+	// attempts counts the requests actually sent.
+	stopped := func() error {
+		if ctx.Err() == nil {
+			return nil
+		}
+		return fmt.Errorf("re-pack stopped after %d request(s): %w", attempts, context.Cause(ctx))
+	}
+	// boundFor is the transport bound a failure note names: none under liveness.
+	boundFor := func(d time.Duration) time.Duration {
+		if underLiveness {
+			return 0
+		}
+		return d
+	}
+	for attempt := 0; attempt < 2 && attempts < limit; attempt++ {
 		if !wallLeft("grammar re-pack") {
 			return nil, 0, false, attempts, err
+		}
+		if serr := stopped(); serr != nil {
+			return nil, 0, false, attempts, serr
 		}
 		attempts++
 		// WithoutThinking: the re-pack is a mechanical shape transformation over
@@ -1594,10 +1703,10 @@ func (p *Pipeline) repackStructured(ctx context.Context, seat string, rawSchema 
 		// loop (a 429/503 answer retries on the CONTRACT's contention budget,
 		// not a per-attempt one) and would desynchronize this call's
 		// deadline from the wall the caller classifies a failure against.
-		attemptTimeout := repackAttemptDeadline(ctx, p.cfg, budget, repackMaxAttempts-attempts+1)
+		attemptTimeout := repackAttemptDeadline(ctx, p.cfg, budget, limit-attempts+1)
 		gres, gerr := p.repackClient(p.cfg.CompletionPath, attemptTimeout, gates).Generate(ctx, seat, system, user, grammar, budget, p.cfg.Temperature, 0, append([]llamaclient.GenOption{llamaclient.WithoutThinking()}, structuredOpts...)...)
 		if gerr != nil {
-			recordFailure(gerr, attemptTimeout, attempts)
+			recordFailure(gerr, boundFor(attemptTimeout), attempts)
 			if seatBusyExhausted(gerr) {
 				// The contract's busy-seat budget is spent: the seat answered
 				// 429 past every counted wait. Another attempt cannot reach it
@@ -1615,7 +1724,7 @@ func (p *Pipeline) repackStructured(ctx context.Context, seat string, rawSchema 
 			// answer re-packed at 1,024 tokens on the 27B, an 8,380-char one
 			// on the 4B, both filed as invalid JSON). Name the truncation, and
 			// give the retry the cap.
-			recordFailure(fmt.Errorf("re-pack truncated at %d tokens (the answer is %d chars; the structured budget cannot hold it)", budget, len(output)), attemptTimeout, attempts)
+			recordFailure(fmt.Errorf("re-pack truncated at %d tokens (the answer is %d chars; the structured budget cannot hold it)", budget, len(output)), boundFor(attemptTimeout), attempts)
 			budget = agentRepackMaxTokensCap
 			continue
 		}
@@ -1633,7 +1742,7 @@ func (p *Pipeline) repackStructured(ctx context.Context, seat string, rawSchema 
 			if fixed, ok := coerceToSchema(content, schema); ok {
 				return json.RawMessage(fixed), gres.TokensOut, false, attempts, nil
 			}
-			recordFailure(verr, attemptTimeout, attempts)
+			recordFailure(verr, boundFor(attemptTimeout), attempts)
 			continue
 		}
 		return json.RawMessage(content), gres.TokensOut, false, attempts, nil
@@ -1649,18 +1758,27 @@ func (p *Pipeline) repackStructured(ctx context.Context, seat string, rawSchema 
 	// route is the one surface every seat serves; the schema validator still
 	// gates the result, so this trades the grammar's shape-constraint for
 	// reach while conceding nothing on correctness.
-	if !wallLeft("chat re-pack") {
+	if attempts < limit && !wallLeft("chat re-pack") {
 		return nil, 0, false, attempts, err
 	}
-	if !seatBusyExhausted(lastRaw) {
+	if attempts < limit {
+		if serr := stopped(); serr != nil {
+			return nil, 0, false, attempts, serr
+		}
+	}
+	if attempts < limit && !seatBusyExhausted(lastRaw) {
 		attempts++
-		chatTimeout := repackAttemptDeadline(ctx, p.cfg, budget, repackMaxAttempts-attempts+1)
+		chatTimeout := repackAttemptDeadline(ctx, p.cfg, budget, limit-attempts+1)
 		chatClient := p.repackClient("/v1/chat/completions", chatTimeout, gates)
-		structured, tokensOut, cerr := p.repackViaChat(ctx, chatClient, seat, schema, output)
+		var chatOpts []llamaclient.GenOption
+		if underLiveness {
+			chatOpts = append(chatOpts, llamaclient.WithoutClientTimeout(), llamaclient.WithProgress(progress))
+		}
+		structured, tokensOut, cerr := p.repackViaChat(ctx, chatClient, seat, schema, output, chatOpts...)
 		if cerr == nil {
 			return structured, tokensOut, false, attempts, nil
 		}
-		recordFailure(cerr, chatTimeout, attempts)
+		recordFailure(cerr, boundFor(chatTimeout), attempts)
 	}
 
 	// Every attempt has now run and failed. lastRaw/lastBound/lastAttemptNum
@@ -1673,13 +1791,13 @@ func (p *Pipeline) repackStructured(ctx context.Context, seat string, rawSchema 
 	// (abstention). earlierNotes rides along in every case as diagnostic
 	// context, never as what decides the class.
 	if selfCutoff(lastRaw) {
-		msg := fmt.Sprintf("attempt %d/%d cut by its %s share of the wall", lastAttemptNum, repackMaxAttempts, lastBound)
+		msg := fmt.Sprintf("attempt %d/%d cut by its %s share of the wall", lastAttemptNum, limit, lastBound)
 		if len(earlierNotes) > 0 {
 			msg = strings.Join(earlierNotes, "; ") + "; " + msg
 		}
 		return nil, 0, false, attempts, &repackCutoffErr{msg: msg, raw: lastRaw}
 	}
-	finalErr := fmt.Errorf("attempt %d/%d (bound %s): %w", lastAttemptNum, repackMaxAttempts, lastBound, lastRaw)
+	finalErr := fmt.Errorf("attempt %d/%d (%s): %w", lastAttemptNum, limit, boundText(lastBound), lastRaw)
 	if len(earlierNotes) > 0 {
 		finalErr = fmt.Errorf("%s; %w", strings.Join(earlierNotes, "; "), finalErr)
 	}
@@ -1813,6 +1931,18 @@ func (p *Pipeline) repackClient(path string, timeout time.Duration, gates repack
 	return c
 }
 
+// streamRefusedNote says so when the seat refuses streamed requests (remembered
+// for half an hour, llamaclient.StreamRefusedFor): its re-pack then ran as one
+// non-streamed answer, bounded by its allowance alone. Nothing else on the wire
+// says the streaming fix (PR-12) did not apply to that seat.
+func (p *Pipeline) streamRefusedNote(seat string) string {
+	c := llamaclient.New(p.cfg.Endpoint, "", p.cfg.Model, 0).WithSeatEndpoints(p.cfg.SeatEndpoints)
+	if !c.StreamRefusedFor(seat) {
+		return ""
+	}
+	return "streaming refused by this seat: the re-pack ran as one non-streamed answer, bounded by its allowance alone"
+}
+
 // repackAttemptDeadline bounds ONE re-pack attempt (register D-85/D-108,
 // W-19): the seat's own per-call allowance (repackTimeout, sized to this
 // attempt's budget) narrowed to what the remaining wall actually buys when
@@ -1845,6 +1975,30 @@ func repackAttemptDeadline(ctx context.Context, cfg config.Config, budget, attem
 		}
 	}
 	return d
+}
+
+// boundText spells a re-pack attempt's transport bound for a failure note; 0 is
+// the attempt that ran without one (the context owned its deadline).
+func boundText(d time.Duration) string {
+	if d <= 0 {
+		return "no transport bound; the liveness monitor governs"
+	}
+	return "bound " + d.String()
+}
+
+// expectedRepackTokens is the size the structured re-pack of output is expected
+// to come back at: the re-pack re-writes the answer as JSON, so about a token
+// per three characters of it plus the object's own overhead, never more than the
+// budget the completion may emit. It sizes the liveness allowance (PR-5: the
+// answer at the seat's rate, not a flat 120 s), so it is the EXPECTED size, not
+// the cap: the flat bound of a wedged engine stretches to the phase's allowance
+// (ADR 0061), and an allowance sized to the cap would hold a dead seat for it.
+func expectedRepackTokens(output string) int {
+	n := len(output)/3 + 64
+	if b := repackBudget(output); n > b {
+		n = b
+	}
+	return n
 }
 
 // repackBudget sizes the structured re-pack's completion budget from the text
@@ -1885,7 +2039,7 @@ func repackBudget(output string) int {
 // instead of the chat fallback's own, real one). The caller classifies the
 // returned error; repackViaChat makes no infrastructure/budget/abstention
 // judgment of its own.
-func (p *Pipeline) repackViaChat(ctx context.Context, client *llamaclient.Client, seat string, schema map[string]any, output string) (json.RawMessage, int, error) {
+func (p *Pipeline) repackViaChat(ctx context.Context, client *llamaclient.Client, seat string, schema map[string]any, output string, extra ...llamaclient.GenOption) (json.RawMessage, int, error) {
 	names := make([]string, 0, 8)
 	if props, ok := schema["properties"].(map[string]any); ok {
 		for name, raw := range props {
@@ -1902,7 +2056,7 @@ func (p *Pipeline) repackViaChat(ctx context.Context, client *llamaclient.Client
 	system := "You extract structured data from text. Output ONLY a JSON object — no prose, no code fences. Respect the field types exactly: numbers unquoted, strings quoted."
 	user := fmt.Sprintf("Extract these fields from the text as a JSON object: %s.\n\nTEXT:\n%s", strings.Join(names, ", "), output)
 	budget := repackBudget(output)
-	gres, gerr := client.Generate(ctx, seat, system, user, "", budget, p.cfg.Temperature, 0, llamaclient.WithoutThinking())
+	gres, gerr := client.Generate(ctx, seat, system, user, "", budget, p.cfg.Temperature, 0, append([]llamaclient.GenOption{llamaclient.WithoutThinking()}, extra...)...)
 	if gerr != nil {
 		return nil, 0, gerr
 	}
@@ -2169,15 +2323,80 @@ func joinAdmissionNotes(notes ...string) string {
 // `note != ""` over-reports them. The coherence probe (D-118) keys on exactly
 // "was this seat loaded for this run", and it now gets that fact directly.
 // A seat that is already ready costs one /running probe and returns (0, "", false).
-//
-// The fourth answer says the seat is CONFIRMED loaded: the passthrough answered
-// 200, or /running listed the seat ready afterwards. A load that was attempted and
-// failed (the request errored, llama-swap answered a non-200 and never listed the
-// seat, the budget ran out under a load still in progress) is attempted but not
-// loaded, and what it spent is the cost of a failed start, not a measurement of a
-// cold load: recording it taught the store a 3 s "cold load" for every failed
-// start of an 18-minute outage (register C-66).
+func warmSeat(ctx context.Context, endpoint, seat string, budget time.Duration) (time.Duration, string, bool) {
+	spent, note, attempted, _ := warmSeatWith(ctx, endpoint, seat, budget, nil)
+	return spent, note, attempted
+}
+
+// warmSeatOutcome is warmSeat with a fourth answer: the seat is CONFIRMED loaded,
+// because the passthrough answered 200 or /running listed the seat ready
+// afterwards. A load that was attempted and failed (the request errored, the
+// budget ran out under a load still in progress) is attempted but not loaded, and
+// what it spent is the cost of a failed start, not a measurement of a cold load:
+// recording it taught the store a 3 s "cold load" for every failed start of an
+// 18-minute outage (register C-66). A warm request llama-swap answered with a
+// non-200 while the seat never read ready loaded nothing at all and is not even
+// attempted (register C-76).
 func warmSeatOutcome(ctx context.Context, endpoint, seat string, budget time.Duration) (time.Duration, string, bool, bool) {
+	return warmSeatWith(ctx, endpoint, seat, budget, nil)
+}
+
+// warmStatus is what a warm-up learned beyond warmSeat's three answers. Refused
+// is the HTTP status of a passthrough refusal that is POSITIVE evidence the seat's
+// process did not start (warmStartFailed); 0 = there was none, whatever else the
+// warm-up answered.
+type warmStatus struct{ Refused int }
+
+// residency is what one read of llama-swap's /running says about a seat.
+type residency struct {
+	ready bool   // the seat's own row reads ready
+	state string // the state of the seat's own row when it is not ready ("" = no row)
+	busy  string // "<id>:<state>" of a row for ANOTHER model that is mid-swap ("" = none)
+}
+
+// warmDeathMarker is llama-swap's own wording for a start whose engine exited
+// ("upstream command exited prematurely"): the one body that says a start died.
+const warmDeathMarker = "upstream command exited"
+
+// warmBodyMax bounds the part of a refused warm request's body that is read.
+const warmBodyMax = 4 << 10
+
+// warmStartFailed decides whether a warm request refused with a server error is
+// POSITIVE evidence that the seat's process did not start, so a run may defer at
+// once instead of spending its wall on it. It is not when llama-swap says the seat
+// is busy or on its way (seatwait.Retryable: 429, 503 "process is not ready", a
+// 500 of its own, a health check that timed out, an empty 502 — the answers of a
+// seat PEERS hold), when the seat's own row reads starting or stopping, when
+// another model is mid-swap (this request may have been aborted by a newer one),
+// or when /running could not be read. A busy card is a place in line, never a
+// reason to refuse. whyNot names what stopped it.
+func warmStartFailed(status int, body string, res residency, readErr error) (failed bool, whyNot string) {
+	switch {
+	case status < 500:
+		return false, "the refusal is not a server error"
+	case readErr != nil:
+		return false, "/running could not be read, so the seat's state is unknown: " + readErr.Error()
+	case res.ready:
+		return false, "the seat reads ready"
+	case res.state == "starting" || res.state == "stopping":
+		return false, fmt.Sprintf("the seat's own row reads %s: a load is in flight", res.state)
+	case res.busy != "":
+		return false, res.busy + " is mid-swap: the seat may be queued behind it"
+	case strings.Contains(strings.ToLower(body), warmDeathMarker):
+		return true, ""
+	case seatwait.Retryable(status, body):
+		return false, "llama-swap answered a busy shape: peers hold the seat"
+	}
+	return true, ""
+}
+
+// warmSeatWith is warmSeatOutcome that also reports the refusal it met (st may be
+// nil). A caller that passes st is told when a 5xx refusal is positive evidence the
+// seat failed to START (warmStartFailed) and decides what to do about it
+// (runAgentTask defers when the box asks for it); a refusal that is not such
+// evidence, and a caller that passes nil, keep proceeding into the wall with the
+// note, as before.
+func warmSeatWith(ctx context.Context, endpoint, seat string, budget time.Duration, st *warmStatus) (time.Duration, string, bool, bool) {
 	if strings.TrimSpace(endpoint) == "" {
 		return 0, "", false, false // no endpoint to warm against: the gate is off by construction
 	}
@@ -2198,24 +2417,39 @@ func warmSeatOutcome(ctx context.Context, endpoint, seat string, budget time.Dur
 	// The seat may be listed under its CANONICAL id while the contract names an
 	// alias; seatMatcher resolves that, and only when the bare name missed.
 	m := newSeatMatcher(endpoint, seat)
-	ready := func() (bool, error) {
+	// look reads /running once: is the seat ready, what state is its own row in and
+	// is another model mid-swap. The alias is resolved only when the bare name
+	// missed.
+	look := func() (residency, error) {
 		rows, rerr := sc.Running(ctx)
 		if rerr != nil {
-			return false, rerr
+			return residency{}, rerr
 		}
-		for _, r := range rows {
-			if m.matches(r.ID) && r.State == "ready" {
-				return true, nil
-			}
-		}
-		if m.resolve(ctx) {
+		read := func() residency {
+			var res residency
 			for _, r := range rows {
-				if m.matches(r.ID) && r.State == "ready" {
-					return true, nil
+				switch {
+				case m.matches(r.ID):
+					if r.State == "ready" {
+						res.ready = true
+					} else if res.state == "" {
+						res.state = r.State
+					}
+				case r.State != "ready" && res.busy == "":
+					res.busy = r.ID + ":" + r.State
 				}
 			}
+			return res
 		}
-		return false, nil
+		res := read()
+		if !res.ready && m.resolve(ctx) {
+			res = read()
+		}
+		return res, nil
+	}
+	ready := func() (bool, error) {
+		res, rerr := look()
+		return res.ready, rerr
 	}
 	if ok, rerr := ready(); rerr != nil || ok {
 		if rerr != nil {
@@ -2257,6 +2491,9 @@ func warmSeatOutcome(ctx context.Context, endpoint, seat string, budget time.Dur
 		}
 		return spent, joinAdmissionNotes(m.note, "warm request failed (proceeding): "+derr.Error()), true, false
 	}
+	// The answer's own words tell a busy seat from a dead one (warmStartFailed):
+	// keep the start of the body, and drain the rest for connection reuse.
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, warmBodyMax))
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
 	resp.Body.Close()
 	// The swap answered. A 200 IS the confirmation: llama-swap proxies only
@@ -2273,11 +2510,16 @@ func warmSeatOutcome(ctx context.Context, endpoint, seat string, budget time.Dur
 		return time.Since(start), joinAdmissionNotes(m.note, fmt.Sprintf("cold load %.0fs outside the wall (passthrough answered 200; /running lists the seat under another id)", time.Since(start).Seconds())), true, true
 	}
 	// A non-200 passthrough answer (404: llama-swap does not know the name)
-	// confirms nothing; two polls one interval apart, then say so and go.
+	// confirms nothing; two polls one interval apart, then say so and go. The last
+	// read is kept: it is what a 5xx is judged against.
+	var last residency
+	var lastErr error
 	for i := 0; i < 2; i++ {
-		if ok, rerr := ready(); rerr == nil && ok {
+		res, rerr := look()
+		if rerr == nil && res.ready {
 			return time.Since(start), joinAdmissionNotes(m.note, fmt.Sprintf("cold load %.0fs outside the wall", time.Since(start).Seconds())), true, true
 		}
+		last, lastErr = res, rerr
 		// The second poll waits one interval, but only inside what is left of
 		// the budget — the confirmation must not outspend the gate it serves.
 		if i == 0 && time.Since(start)+admissionPoll <= budget {
@@ -2288,7 +2530,28 @@ func warmSeatOutcome(ctx context.Context, endpoint, seat string, budget time.Dur
 			break
 		}
 	}
-	return time.Since(start), joinAdmissionNotes(m.note, fmt.Sprintf("warm request answered HTTP %d after %.0fs but /running never listed %s ready (proceeding)", resp.StatusCode, time.Since(start).Seconds(), seat)), true, false
+	// Nothing was loaded: an answer that is not 200 and a seat that never reads
+	// ready is not a warm-up that happened, and reporting it as one (attempted)
+	// told the coherence probe and the cold-load bookkeeping that a load had run
+	// for this contract — recording a cold load of a few seconds against the seat.
+	note := fmt.Sprintf("warm request answered HTTP %d after %.0fs but /running never listed %s ready", resp.StatusCode, time.Since(start).Seconds(), seat)
+	if st != nil && resp.StatusCode >= 500 {
+		// A server error and a seat that never came up is a seat whose process did
+		// not start (a vLLM engine that exits at start is llama-swap's 500 "upstream
+		// command exited prematurely") — but only when nothing says otherwise: a busy
+		// answer, a row that reads starting, another model mid-swap and an unreadable
+		// /running are all a place in line (warmStartFailed). The caller decides
+		// what to do with the evidence.
+		if failed, why := warmStartFailed(resp.StatusCode, string(body), last, lastErr); failed {
+			st.Refused = resp.StatusCode
+			note += ": the seat's process did not start"
+		} else {
+			note += " (proceeding: " + why + ")"
+		}
+	} else {
+		note += " (proceeding)"
+	}
+	return time.Since(start), joinAdmissionNotes(m.note, note), false, false
 }
 
 // logSeatDown says, once per run, what the run's seat did to it: a recovery leaves
@@ -2314,13 +2577,6 @@ func logSeatDown(seat string, recoveries int, live *agent.Monitor) {
 // been running on a degrading engine. The cold load is measured apart and kept.
 func timedTheSeatsOwnRates(contended bool, seatRecoveries int, waitedOnDownSeat time.Duration) bool {
 	return !contended && seatRecoveries == 0 && waitedOnDownSeat <= 0
-}
-
-// warmSeat is warmSeatOutcome without its fourth answer: the time spent, the
-// note, and whether a load was ATTEMPTED (the D-118 coherence probe keys on it).
-func warmSeat(ctx context.Context, endpoint, seat string, budget time.Duration) (time.Duration, string, bool) {
-	spent, note, attempted, _ := warmSeatOutcome(ctx, endpoint, seat, budget)
-	return spent, note, attempted
 }
 
 // warmClient carries no timeout of its own: warmSeat bounds the request by

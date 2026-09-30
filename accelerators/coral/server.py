@@ -150,13 +150,27 @@ def _read_image(path: str, size: tuple[int, int]):
     return arr, (w, h)
 
 
+INPUT_MEAN = INPUT_STD = 128.0  # the [-1, 1] normalisation these TF image models were trained with (pycoral's classify rule)
+
+
 def _set_input(it, arr):
+    """Feed RGB uint8 pixels to the model's input tensor. A uint8 input is quantised: the model expects
+    q = (px - mean) / (std * scale) + zero_point. Most of the manifest's models quantise with scale 1/128 and
+    a zero point of 127 or 128, where that is the raw pixel to within one step, so they get the pixels as
+    they are. EfficientNet-EdgeTPU-S (classify imagenet, embed) does not (scale 0.012566, zero point 131):
+    raw pixels reached it as a 1.6x contrast-stretched image and cost ~20 ImageNet top-1 points, so its
+    input is rescaled (measured 2026-09-30 on 1000 ImageNetV2 images: 41.6 % raw, 63.9 % rescaled, the same
+    as its CPU twin)."""
     import numpy as np
 
     d = it.get_input_details()[0]
     x = np.expand_dims(arr, 0)
-    if d["dtype"] != np.uint8:
-        scale, zero = d["quantization"]
+    scale, zero = d["quantization"]
+    if d["dtype"] == np.uint8:
+        if scale and (abs(scale * INPUT_STD - 1.0) > 1e-3 or abs(zero - INPUT_MEAN) > 1):
+            q = (x.astype(np.float32) - INPUT_MEAN) / (INPUT_STD * scale) + zero
+            x = np.clip(np.rint(q), 0, 255).astype(np.uint8)
+    else:
         x = ((x.astype(np.float32) / 255.0) / (scale or 1.0) + zero).astype(d["dtype"])
     it.set_tensor(d["index"], x)
 

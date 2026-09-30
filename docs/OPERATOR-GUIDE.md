@@ -193,7 +193,12 @@ session id the MCP server inherited from its environment, or `LOCAL_OFFLOAD_ORIG
 itself; absent on rows a service or a fleet node wrote), `origin_pid` / `origin_ppid`, `cards_tokens`
 (the one figure for the tokens the cards processed for that row — prompt work plus generation, 0 on a
 cache hit), and on agent / delegate rows `job_id`, `route`, `placement`, `steps`, `stop_reason`,
-`repack_ms`, `acceptance_result`. A per-session share is one filter away:
+`repack_ms`, `acceptance_result`. Since ADR 0064 every delegate row also carries `door`, `fleet_job_id`
+(the id the fleet node knows the job by; the node's own agent row carries the same one), a closed
+`reason_code` (`ok`, `queue_deadline`, `queue_withdrawn`, `stall_prefill`, ... see the
+[delegation ledger row](FLEET-NODE.md#the-delegation-ledger-row)) and the whole `reason`, and a
+`phase: "started"` marker row is written when a job is handed to a seat; a marker is never a job, so a
+reader that counts rows must skip it. A per-session share is one filter away:
 `grep '"origin_session":"<session id>"' ~/.local-offload/ledger.jsonl`. Rows written before 0.124.0
 carry none of these and must be read as unattributed, not as another session's.
 
@@ -462,9 +467,21 @@ renders); GIMP is needed only for `flatten_design`/`instantiate_design` (headles
 local-offload compose-video --template title-card --variables '{"title":"Launch day","subtitle":"Everything that shipped","accent":"#22c55e","duration":6}' --json
 # a transparent lower third for an editor (ProRes 4444) or the web (VP9 alpha), with two check frames
 local-offload compose-video --template lower-third --format webm --variables-file lt.json --snapshots 1,2.5 --out D:/renders/lt.webm
+# a stat card (opaque); the caption's emphasised phrase is its own variable
+local-offload compose-video --template stat-card --variables '{"kicker":"Launch week","stat":"3.4x","label_pre":"faster search across","label_em":"every workspace","label_post":"since the update"}' --json
+# a caption overlay from a transcript: group the words, then render each chunk it prints
+node render/captions-groups.mjs clip.segments.json --pace conversational --out chunks.json
 # your own single-file composition (trusted code only: Chrome runs it without a sandbox)
 local-offload compose-video --html card.html --quality draft --workers 1
 ```
+
+The vetted templates are `title-card`, `lower-third`, `stat-card`, `section-title`, `callout-label`,
+`checklist-card` and `captions-bar`. `stat-card`, `section-title`, `callout-label` and `checklist-card` are
+adapted from a teaching kit under its own licences, kept beside them; `captions-bar` is written for the harness.
+Each README under `render/compose-templates/` lists the template's
+variables and limits. `captions-bar` reads one `words_json` variable that `render/captions-groups.mjs`
+builds from `offload_transcribe`'s `<base>.segments.json`; render the overlay silent to `webm` or `mov`
+and lay it over the footage with ffmpeg's `overlay` filter or in an editor.
 
 This renders an HTML/CSS composition to video with the pinned HyperFrames CLI. It runs on the CPU:
 software GL and CPU encode, with no GPU lock, so it runs next to every render and text seat. The
@@ -487,20 +504,27 @@ so the installer prints the three keys instead. To bind by hand:
 `ffmpeg_path` must name an ffmpeg with ffprobe beside it. `local-offload doctor` then reports
 `compose_video CONFIGURED` with the template list, and `local-offload acceptance` runs the pinned
 CLI's `--version` through the runner as this identity. Optional keys: `compose_quality` (`high`
-default), `compose_workers` (`auto` default; on the reference box neither 1 nor `auto` wins consistently),
-`compose_timeout_sec` (1800) and `compose_cache_dir` (work dirs and frame cache; move it to a large
-drive if a render defers `DISK_HEADROOM`).
+default), `compose_workers` (`auto` default; on the reference box neither 1 nor `auto` wins consistently for
+a short card, but a clip longer than about two minutes needs 1: above one worker HyperFrames stores every
+frame, 8.3 MB at 1080p, and defers `DISK_HEADROOM`),
+`compose_timeout_sec` (1800; a 300 s caption chunk takes about 17 minutes at one worker) and `compose_cache_dir`
+(work dirs and frame cache; move it to a large drive if a render defers `DISK_HEADROOM`).
 
 **Adding a template.** Follow the contract in
 [`render/compose-templates/README.md`](../render/compose-templates/README.md): offline, deterministic,
 declared variables, a duration variable, and a README with a measured render. Lint and check must
-be clean, the frames must be looked at, and `framemd5` must match across two renders.
+be clean, the frames must be looked at, and `framemd5` must match at 1, 2, 4 and 6 workers and at
+`auto` twice (a frame has to be a pure function of time; see the contract).
 
 **Bumping HyperFrames.** Change the exact version in `setup/hyperframes/package.json` and
 `PINNED_VERSION` in the runner. Regenerate the lock with `npm install --package-lock-only
 --ignore-scripts` and verify the new integrity against `npm view hyperframes@<v> dist.integrity`.
-Then re-run the installer step and a two-template smoke. Never `npm install -g hyperframes`: a
-global HyperFrames self-upgrades in a detached process.
+Then re-run the installer step and a two-template smoke that includes `captions-bar`: it reads the
+runtime's `hf-seek` event, which the package dispatches but does not document, so render its default
+sample, confirm a known group is on screen at a known time (the frame at 1.5 s shows "Captions follow
+the words"), and record the new version in the Measured section of its README (a test fails until that
+section names the pin). Never `npm install -g hyperframes`: a global HyperFrames self-upgrades in a
+detached process.
 
 ## 4. Drive the coding agent
 
@@ -759,7 +783,7 @@ does NOT contain:
 | admission + warm-up (`agent_admission_wait_sec`, default 300) | the node, BEFORE its wall starts (D-64) | another model's swap on the endpoint, then the seat's own cold load (`admission_wait_sec`, `admission_note`) | anything after the first token |
 | coherence probe (`agent_coherence_probe`, default `cold`) | the node, after the warm-up and still BEFORE its wall (D-118) | one ≤ 96-token completion asking the freshly loaded seat to call `read_file` and answer DONE (`coherence_note`; its time is added to `admission_wait_sec`) | the loop, the re-pack, anything the contract asked for |
 | node wall (0.131.0: the EXPECTATION, ADR 0055) | `timeout_sec` / the auto wall, reported as `wall_sec` | what the node expects the run to take — what the delegator sizes and anchors from | **it ends nothing any more.** Until 0.130.x it was a context deadline over the loop, and a 27B seat streaming its 949th token at 984 s died at the 900 s cap exactly like a hung engine |
-| **stall allowance** (0.131.0) | the node, per phase, from the seat's measured rates | how long the seat may go without a progress event — a streamed token, a tool call, a phase change; on a seat listed in `vllm_seats`, every frame of generated token ids, including the ones vLLM's tool parser is still holding back (0.140.1: the loop asks for `return_token_ids`) — before the run is filed `stalled: no progress for Xs in <phase> (allowed Ys: …)` as **infrastructure**: admission → the admission budget; prefill → `prompt tokens ÷ prefill_tok_s × 1.5 + 30 s` (100 tok/s assumed until the seat-rates store has measured it — from the time to first delta, any engine); decoding → 20 deltas at the decode rate; a tool → its own cap + 30 s; the re-pack → 120 s × the seat's load (load 1 = 120 s); floor 60 s; while other requests share the seat the prefill rate is divided by the load too (ADR 0066) | the ceiling; a producing seat, however slow; a seat that is LOADING (the cold-load hold below) |
+| **stall allowance** (0.131.0) | the node, per phase, from the seat's measured rates | how long the seat may go without a progress event — a streamed token, a tool call, a phase change; on a seat listed in `vllm_seats`, every frame of generated token ids, including the ones vLLM's tool parser is still holding back (0.140.1: the loop asks for `return_token_ids`) — before the run is filed `stalled: no progress for Xs in <phase> (allowed Ys: …)` as **infrastructure**: admission → the admission budget; prefill → `prompt tokens ÷ prefill_tok_s × 1.5 + 30 s` (100 tok/s assumed until the seat-rates store has measured it — from the time to first delta, any engine); decoding → 20 deltas at the decode rate; a tool → its own cap + 30 s; the re-pack → `max(120 s × the seat's load, 1.5 × expected answer tokens ÷ the seat's decode rate + 30 s)` (register C-66: the re-pack streams, so this bounds silence, and it runs with no transport bound of its own; load 1 = `max(120 s, …)`, and the load stretches the flat 120 s only, never the answer estimate); floor 60 s; while other requests share the seat the prefill rate is divided by the load too (ADR 0066) | the ceiling; a producing seat, however slow; a seat that is LOADING (the cold-load hold below) |
 | **cold-load hold** (0.140.0) | the node, while a request may be waiting for its first byte (admission, prefill, re-pack): `/running` read every 5 s and before any stall is filed | two parts in phase `cold-load`. **Loading** requires positive evidence: the seat's row is `starting`/`stopping`, or it is absent while another row is `starting`/`stopping`. It is bounded by `max(600 s, 2 × the seat's measured cold_load_sec)` from the silence, clamped to the run ceiling, and a defer reads `stalled: seat still loading after Xs in cold-load (…)`. **Post-ready** follows the load, or the admission warm-up: the first completion gets `max(120 s, 2 × the phase's own allowance)`, and a defer reads `stalled: no byte for Xs after the seat read ready, in cold-load (…)`. Both are **infrastructure**; the first byte ends the hold | a seat merely absent from `/running` with nothing loading, or an unreadable `/running` with no load seen (the prefill clock then runs as before) |
 | **seat-down recovery** (ADR 0066) | the node, when the seat's engine goes down under a running call | a seat is DOWN when its engine's counters stayed flat for the flat bound while llama-swap still lists it ready (**wedged**), or when it left `/running` inside an established hold, or a call failed like a dead seat (stream cut, 5xx, refused connection) and a fresh read shows the seat starting, stopping, unlisted or refusing connections (**died**). The node cancels only that call and waits for the seat in phase `cold-load` as ONE episode, bounded by the cold-load ceiling counted from the first verdict (and the run's ceiling), then re-issues the same step; a recovery spends no step. A wedged seat must show a change (counters moving, or a restart) before the re-issue. A seat llama-swap does not list is started by the re-issue itself; if that start fails (the launcher refusing, every request an instant 500) the node waits one poll and triggers again until the bound, and a start that never succeeds is filed at the bound naming the attempts. A seat seen serving again earns exactly one re-issue: a second failure before the answer ends the run. A recovery is counted (`seat_recoveries`) when the re-issued call's first byte arrives, and `seat_down_wait_sec` books the whole episode; a run recovers at most twice. What does not recover is filed `seat down: …` as **infrastructure** (a seat lost during the structured re-pack files the same prefix, with `(during the structured re-pack)` appended), and the delegator re-places that contract on another node with the wait credited back, even when the alternative node is busy | a failed call on a seat that reads ready and readable (an ordinary error), a cut tool call (the engine answered), a thrash (the engine steps but produces no token: still the plain `stalled:` of ADR 0061), and absence from `/running` on the first look of a silent request (the ADR 0055 rule) |
 | **ceiling** (0.131.0) | the node: `max(3 × estimate, 2 × wall, 1800 s)`, cap 4 h (`ceiling_sec`) | the safety net over everything; a run still producing when it passes is filed `ceiling Ns reached while producing (T tok at R tok/s)` as **budget** — the sizing signal | — |
@@ -1043,6 +1067,7 @@ carries any measured override to apply.
 | `ampere-6` | `offload-e4b` | 32768 | q8_0 (conservative default; f16 measured viable) | dropped (architectural — see the tier page) |
 | `amd-gcn` | `gemma4-e2b` (Vulkan; the CPU alt route was withdrawn 2026-09-24 — no model runs on CPU, ADR 0054 amendment; agent seat `qwen3.5-4b-agent`) | 32768 (8192 → 32768 measured 2026-09-20: 24k-token prompt in 278 s, 3.9 GiB GTT) | f16, flash-attn on (measured 2026-09-20 on binxarn: +4 % pp, neutral on Lucienne; the lane is DDR-bandwidth-bound, every RADV/ubatch/KV knob within ±4 %) | dropped |
 | `cpu` | `offload-e4b` (CPU) | 8192 | f16, flash-attn off | `--cpu-moe` when RAM ≥ ~56 GB; else dropped |
+| `rockchip-rk3588` | `qwen3.5-2b-npu` (Qwen3.5-2B W8A8 on the NPU via RKLLM, chat and vision); no llama.cpp entry (llama.cpp Vulkan faults the Mali GPU on this kernel/Mesa, measured), no model runs on the CPU, and `uma_reserve_gib` 3 holds RAM back for the host | the NPU seat 16384 | n/a (RKLLM) | dropped |
 
 Notes: q8_0 KV keeps the KV cache ~half the size (V-quant needs flash-attn on, which the CUDA/Vulkan
 templates set); the 26B is placed full-GPU only on ≥12 GB single-card profiles, `--cpu-moe` (experts
@@ -1073,6 +1098,7 @@ re-pack (ADR 0066); a 429 is contention by definition and is never second-guesse
 |---|---|---|
 | `seat_contention_wait_sec` | `0` → 90 s | one wait budget per agent contract, shared by every chat step and the re-pack; `-1` = never wait (first busy answer defers) |
 | `agent_admission_wait_sec` | `0` → 300 s | pre-flight: wait while any model on the endpoint is mid-swap, then WARM the seat if it is not loaded (0.115.11: one passthrough GET makes llama-swap swap it in; a vLLM cold load is 125–250 s) — all BEFORE the contract's wall starts; `admission_wait_sec` / `admission_note` on the wire report it; `-1` = off |
+| `agent_warm_failure_defer` | `false` | ENFORCEMENT of a warm-up start failure (register C-76, R-05a; audit mode by default). When the warm request is refused with a 5xx and the evidence says the seat's process did not start — the answer is not one of llama-swap's busy shapes, `/running` lists no row for the seat and nothing else is mid-swap, `/running` was readable — `false` proceeds into the wall and `admission_note` says the run **would have deferred at once**; `true` defers at once as `seat warm-up failed: …` (infrastructure) and the delegator retries the contract once on another node. Count the would-be defers in `admission_note` (on every published result and in the delegation log) before turning it on |
 | `agent_coherence_probe` | `""` → `cold` | post-warm SEAT COHERENCE probe (register D-118): after a cold load, ask the seat one ≤ 96-token question BEFORE the wall starts and defer `infrastructure` if it answers with the NaN shape. `cold` = only when this run loaded the seat, `always` = every run warm or cold, `off` = never. `coherence_note` on the wire reports the verdict |
 
 What you will see on the wire and in the ledger: `contention_wait_sec` and `admission_wait_sec`
@@ -1268,7 +1294,18 @@ The seat itself: `setup/templates/vllm-seat/` has the reference `seat_fg.sh` (st
 server and the engine in the foreground of the llama-swap client, so a swap-out reaps the engine
 while the store keeps the pages), `seat_stop.sh`, the llama-swap entry, and the second device's
 `kv-cache-server.service` (a systemd-guaranteed Valkey container; do not rely on docker's restart
-policy). **KV pool pinned from free memory (2026-09-07, `seat_fg.sh`):** `--gpu-memory-utilization` budgets a fraction of the
+policy). **After an engine crash (2026-09-30):** nothing runs a stop for a crash, so the dead generation's engine workers
+and MP server are reaped by the NEXT start (`seat_fg.sh` runs `seat_stop.sh` once when no engine of its port is alive
+and something of the stack is left) and, on a Windows/WSL seat, by the stub's crash exit (`seat-cmd.ps1` starts the
+stop task, waits for it and logs its result; after an unload it does nothing, which `seat-cmdstop.ps1` marks with a
+`seat-stop-requested-<seat>` file in the seat directory: that file is the marker, not litter). What is reaped is chosen by
+rules, never by the port a process holds (engine processes with no live vLLM API server above them, and this stack's MP
+server); a foreign listener on the MP HTTP port is still refused. `seat_stop.sh` writes its output to `seat.log`. To take
+effect, copy `seat_fg.sh` and `seat_stop.sh` into the distro's seat directory and re-render and deploy BOTH
+`seat-cmd.ps1` and `seat-cmdstop.ps1` — diff a deployed stub before replacing it, since one may have been edited by hand.
+Optional knobs in the seat env: `SEAT_REAP_WAIT_SEC`, `SEAT_MP_PORT_WAIT_SEC` (both default 10, a number of seconds;
+anything else is said in the log and means 10). Details: `docs/systems/cache-server.md` 4g.
+**KV pool pinned from free memory (2026-09-07, `seat_fg.sh`):** `--gpu-memory-utilization` budgets a fraction of the
 card whatever the co-residents hold, and the profiler lands the same config at different pool sizes on different starts; set
 `SEAT_KV_HEADROOM_GIB` in the seat's env and the launcher instead computes the pool from what is actually free on the tighter seat
 card at launch — free − `SEAT_NONKV_GIB` (the engine's weights + non-torch + peak activation per worker, read from the profiler's
@@ -1581,12 +1618,13 @@ cross-seat comparisons must refuse rows whose pins differ or are absent; absent 
 | `agent delegation is disabled on this box` | Set `"agent_delegation_enabled": true` in the **delegator's** config. |
 | Everything places local although a remote exists | Usually correct — idle-local always wins. Force `--route remote` to surface the gate's verdict: the defer reason now names the actual cause — no remotes configured, every remote failing its health probe (each error quoted), or a healthy remote failing the gate (`agent_enabled` + `agent_seat_resident` + `output_schema` + the ctx arithmetic above). |
 | `remote "…": hostname … not allowed` | Non-tailnet URL. Loopback, `100.64.0.0/10`, a dotless MagicDNS name, or your own tailnet-zone hostname only. |
-| failed `queue deadline after …: the node accepted the job but never started it` | The node admitted the job but never gave it an execution slot — every poll said `accepted`. It is **saturated**, not broken. Check `jobs_running` / `jobs_queued` / `max_concurrent_jobs` on that node's `/fleet/health`; raise `fleet_max_concurrent_jobs` if the box can genuinely run more at once, or spread the fan-out across more nodes. Queued time is credited back to the budget, so this only fires after a real wait (bounded by `min(timeout_sec + grace, 5 min)`). |
+| failed `queue deadline after …: the node accepted the job but never started it` | The node admitted the job but never gave it an execution slot — every poll said `accepted`. It is **saturated**, not broken. Check `jobs_running` / `jobs_queued` / `max_concurrent_jobs` on that node's `/fleet/health`; raise `fleet_max_concurrent_jobs` if the box can genuinely run more at once, or spread the fan-out across more nodes. Queued time is credited back to the budget, so this only fires after a real wait (bounded by `min(timeout_sec + grace, 5 min)`). A job the node took back when asked is re-placed on another node and never surfaces as this failure; one whose text ends `; withdraw not confirmed: <why>` is a job the delegator asked the node to take back (ADR 0064) and the node did not, so it may still start later for nobody: `HTTP 405` is a node that predates the route (upgrade it), `HTTP 401` is a `fleet_auth_token` mismatch, `no answer` is a node that sat on the request. |
 | `503 queue full (… limit N)` | `fleet_max_queue_depth` reached — default is now `2x fleet_max_concurrent_jobs` (8 with the default 4 workers), not a flat 32, so a busier node hits this sooner than it used to. The node publishes a `Retry-After` header sized from its own `recent_agent_wall_sec` (bounded `[5, 300]`, worded so you can tell a real estimate from the flat 30s default or a clamped-high one), and health separately publishes the same formula's RAW, unbounded value as `queue_wait_estimate_sec`. `internal/delegate` does not yet consume either automatically — that lands with the placement release (`feat/placement-eta`) — so for now, read the header/field yourself before retrying, or raise `fleet_max_queue_depth` if the box should hold a deeper backlog. Never size your own retry from `seat_rate.min_turn_sec`; that is a per-seat retry floor, not a queue-depth signal. |
 | deferred `poll deadline after …: node accepted the job but did not reach a terminal state` | The node acked, STARTED the job, and outran `timeout_sec` + 60 s grace. Check the worker's serve log; the job id in `delegation-log/` reconciles it. A quoted "last poll error" means the node was also answering badly (5xx) — fix that first. A `(+… credited back for time queued …)` clause means part of the wall clock was backlog wait, which was *not* charged to the budget. |
 | failed `poll deadline after …: node never answered` | The node died or became unreachable after acking: nothing came back at all, so nothing is claimed on its behalf. The quoted last error (dial refused, dropped connection) is the lead. |
 | deferred `output failed schema: …` | The schema was too ambitious for the seat. Flatten it — a `properties` map of string / number / integer / boolean / string-array / enum fields is the supported subset. |
-| deferred `structured re-pack unreachable: …` | Not a schema problem: the worker's llama-swap could not be reached for the final grammar completion. Restart/check the worker's endpoint. |
+| deferred `structured re-pack unreachable: …` | Not a schema problem: the worker's llama-swap could not be reached for the final grammar completion. Restart/check the worker's endpoint. Since register C-66 (PR-4) the delegator re-packs the finished answer on its own seat before it reports this (`repack_note: rescued on …`); you only see the defer when that rescue failed too. |
+| deferred `seat warm-up failed: …` | Only with `agent_warm_failure_defer: true`. The seat's process did not start: llama-swap answered the warm-up with a server error that was not one of its busy shapes (429, 503 `process is not ready`, a 500 of its own, a health-check timeout, an empty 502), `/running` listed no row for the seat and nothing else was mid-swap. Read the seat's own log (the engine's exit at start), not the contract. The run was deferred before its wall, and the delegator already gave the contract one retry on another node; you see this defer when there was none to take it or it failed too. With the flag off (the default) `admission_note` says `this run would have deferred at once` and the run proceeds into its wall. |
 
 ### Busy-hour cascade failover (`cascade_remote_lanes`)
 

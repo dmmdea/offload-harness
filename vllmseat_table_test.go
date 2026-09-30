@@ -20,8 +20,9 @@ func TestEveryDeclaredVLLMSeatValidates(t *testing.T) {
 	}
 	var doc struct {
 		Profiles map[string]struct {
-			ConfigSeed map[string]json.RawMessage `json:"config_seed"`
-			VLLMSeat   *vllmseat.Spec             `json:"vllm_seat"`
+			ConfigSeed     map[string]json.RawMessage `json:"config_seed"`
+			VLLMSeat       *vllmseat.Spec             `json:"vllm_seat"`
+			ExtraVLLMSeats []vllmseat.Spec            `json:"extra_vllm_seats"`
 		} `json:"profiles"`
 	}
 	if err := json.Unmarshal(raw, &doc); err != nil {
@@ -30,9 +31,21 @@ func TestEveryDeclaredVLLMSeatValidates(t *testing.T) {
 	if len(doc.Profiles) == 0 {
 		t.Fatal("no profiles parsed — the schema moved and this gate went blind")
 	}
-	declared := 0
+	declared, extras := 0, 0
 	for tier, p := range doc.Profiles {
+		// The extra seats are declared capability too, and they escaped every gate here: this
+		// loop, tierseed.Resolve and Artifacts all validated `vllm_seat` only, so a half-specified
+		// second seat would have shipped. They are validated as NON-lane seats (no fallback).
+		for i := range p.ExtraVLLMSeats {
+			extras++
+			if err := p.ExtraVLLMSeats[i].ValidateExtra(tier); err != nil {
+				t.Errorf("%v", err)
+			}
+		}
 		if p.VLLMSeat == nil {
+			if len(p.ExtraVLLMSeats) > 0 {
+				t.Errorf("tier %s declares extra_vllm_seats but no vllm_seat", tier)
+			}
 			continue
 		}
 		declared++
@@ -59,5 +72,5 @@ func TestEveryDeclaredVLLMSeatValidates(t *testing.T) {
 			"one tier must be able to seat a model under it; see TestEveryTierCanSeatAModelUnderVLLM for the " +
 			"per-tier coverage floor")
 	}
-	t.Logf("validated %d declared vLLM seat(s)", declared)
+	t.Logf("validated %d declared vLLM seat(s) and %d extra seat(s)", declared, extras)
 }

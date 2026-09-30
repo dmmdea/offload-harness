@@ -38,7 +38,7 @@ results, not errors.
 **Twenty-nine tools** are registered on every box, in families. `.printing-press.json` lists all 31
 the code can register, and a drift test holds the two together. The advertised set is per-box:
 `agent_delegate` and `offload_research` are gated on `agent_delegation_enabled`, and a box listing
-an accelerator registers 11 more (see [accelerators.md](accelerators.md)). Read `tools/list` rather
+an accelerator registers its own — 11 for the Hailo-8L, 4 for the Coral, 3 for the RKNPU (see [accelerators.md](accelerators.md)). Read `tools/list` rather
 than any number written down:
 
 | Family | Tools |
@@ -67,7 +67,12 @@ descriptions say so, so a calling agent never has to guess which outputs are res
 
 `offload_nim` is the **only remote MODEL surface**. It is an explicit, caller-invoked
 side channel and is not part of the Cascade — nothing escalates or falls back into it. See
-[ADR 0001](../architecture/decisions/0001-defer-never-cloud-fallback.md).
+[ADR 0001](../architecture/decisions/0001-defer-never-cloud-fallback.md). Its key goes only to
+NVIDIA's hosted hosts (0.143.1), and a caller-named `base` must be NVIDIA's hosted API,
+`nim_endpoint` or a `nim_bases` entry (0.144.2, security standard L5): under `nim_base_policy`
+`audit` (the default) any other base runs, the result carries `base_policy`, and a would-refuse row
+(scheme, host and port only) is appended to `<state_dir>/nim-base-audit.jsonl`; under `enforce` it is
+deferred before any request leaves.
 
 `offload_browse` (0.141.0, ADR 0060) drives the operator's own browser and is registered only when
 the lane is configured (`browse_python`, `browse_script` and a loopback `browse_decision_url`). The
@@ -221,9 +226,30 @@ goal names the context document as *already provided* (a goal that says "read th
 sends a small seat hunting for a file and fails acceptance), and acceptance is ONE any-of
 regex (tagged `docanchor`) over the page's top prose content words — taken from sentence lines
 and the headings that introduce them, never from identifier-shaped tokens, UI or markup
-vocabulary, and never from the goal (0.141.1, register C-65) — plus a shape check on the
-schema's first array field, so an echoed goal cannot pass as verified while a faithful digest
-passes by restating any one of about two dozen words. The seats never gain
+vocabulary, and never from the goal (0.141.1, register C-65), so an echoed goal cannot pass as
+verified while a faithful digest passes by restating any one of about two dozen words.
+
+What a digest owes beyond that is one design (register C-74): **presence is declared,
+non-emptiness is asked for only where the caller marked it, and the default digest owes one
+statement.** The default schema `{key_facts[], numbers[], quotes[], verdict}` declares all four
+fields `required`, and a caller's `output_schema` keeps its own `required` entries and gains every
+field its own `min_items:` / `nonempty:` acceptance reads, so a seat's direct JSON answer that
+leaves one out fails validation and goes to the structured re-pack instead of being delivered and
+failing acceptance after a whole run (36 of the 59 `min_items` failures on 2026-09-29). An item is
+required of the digest only for the FIRST array the caller's own schema lists in `required` (one
+check, never more than before) or through the caller's own `acceptance`; the default schema asks
+for no items and a schema that marks nothing gets none, so a faithful "nothing on this page"
+digest is a success (the old rule demanded an item from the alphabetically first array of any
+schema). What the default digest does owe, on EVERY page anchored or not, is a `nonempty:verdict`:
+a page too thin to anchor would otherwise carry no check at all, and a digest that said nothing
+(every list empty, no verdict) would be delivered as a success. Empty lists with a verdict that
+says so still pass.
+
+A research page that fails only its own checks (a shape, an item count) is not re-run on another
+node: a second seat given the same page mostly repeats the verdict at the cost of a whole second
+run, and the result's `retry_note` says so. A failed document fingerprint (`docanchor`) is a
+different fact: the answer is about another document, which is a property of the node (two of
+them quarantine it), so that failure keeps its one retry on another node. The seats never gain
 network access; the agent loop's egress cage is untouched. Failed or refused fetches come
 back as `sources[].skipped` and produce no result — a broken page never reads as a digest.
 

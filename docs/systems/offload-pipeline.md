@@ -207,7 +207,11 @@ actually ran; `offload_status`'s roster reports the effective `ocr` model, falli
   one token figure a share reader wants, `cards_tokens` (prompt work plus generation, 0 on a cache hit;
   the key is always present, which is how a reader tells a new row from an unattributed old one). Agent
   and delegate rows add the job behind them (`job_id`, `route`, `placement`, `steps`, `stop_reason`,
-  `repack_ms`, `acceptance_result`). Since register A-102 (2026-09-18) every row also carries `door`, the
+  `repack_ms`, `acceptance_result`). Since [ADR 0064](../architecture/decisions/0064-a-delegator-takes-back-what-it-has-not-started.md)
+  the stored `reason` is whole (bounded at 4096 bytes; `ledger.ShortReason` is the 120-byte display and
+  grouping form), every delegate row carries `door`, `fleet_job_id` and a closed-set `reason_code`, a
+  fleet node's own rows carry the `fleet_job_id` it was dispatched under, and a `phase: "started"` marker
+  row is written when a job is handed to a seat (`ledger.JobRows` and every job counter skip it). Since register A-102 (2026-09-18) every row also carries `door`, the
   SURFACE that admitted the call — an MCP tool name (`offload_summarize`), a CLI command
   (`cli:summarize`), or `fleet` for a job a fleet node ran for a delegator: `core.Request.Door` is
   stamped at each door, carried through `core.Meta` and mapped onto the row, so "which door produced

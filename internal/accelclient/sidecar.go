@@ -14,7 +14,7 @@ import (
 // ErrNoSidecarCmd: the sidecar is down and this box has no way to start it
 // (no <device>_sidecar_cmd configured). One sentinel for every device — callers
 // compare identity, and the device is on the wrapping error's prefix.
-var ErrNoSidecarCmd = errors.New("sidecar not running and no launcher configured (hailo_sidecar_cmd / coral_sidecar_cmd)")
+var ErrNoSidecarCmd = errors.New("sidecar not running and no launcher configured (hailo_sidecar_cmd / coral_sidecar_cmd / rknpu_sidecar_cmd)")
 
 // Sidecar starts the HTTP sidecar ON DEMAND (operator decision 2026-08-22: no
 // scheduler, no always-on service — the sidecar self-exits idle, the harness

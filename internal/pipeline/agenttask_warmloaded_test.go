@@ -20,7 +20,8 @@ import (
 // that was attempted and failed is the cost of a failed start, never a measurement
 // of a cold load — during the 2026-09-29 outage llama-swap answered 500 to every
 // start for 18 minutes and each admission ended with a "cold load" of a few
-// seconds in the store.
+// seconds in the store. A non-200 answer that leaves the seat never listed loaded
+// nothing at all, so it is not even an attempted load (register C-76).
 func TestWarmSeatOutcomeSaysWhetherTheLoadWasConfirmed(t *testing.T) {
 	listedReady := `{"running":[{"model":"` + agentTestSeat + `","state":"ready","cmd":"x"}]}`
 	upstreamOK := func(int64) string { return `{"object":"list","data":[{"id":"` + agentTestSeat + `"}]}` }
@@ -60,10 +61,10 @@ func TestWarmSeatOutcomeSaysWhetherTheLoadWasConfirmed(t *testing.T) {
 			budget: 30 * time.Second, wantTried: true, wantLoaded: true,
 		},
 		{
-			name: "a non-200 answer and the seat is never listed: a start that failed",
+			name: "a non-200 answer and the seat is never listed: nothing was loaded, so nothing was attempted",
 			fake: &agentFake{rosterIDs: []string{agentTestSeat},
 				running: func(int64) string { return `{"running":[]}` }},
-			budget: 30 * time.Second, wantTried: true, wantLoaded: false,
+			budget: 30 * time.Second, wantTried: false, wantLoaded: false,
 		},
 		{
 			name: "the load outlasts the admission budget: attempted, not confirmed",
@@ -113,9 +114,10 @@ func TestWarmSeatOutcomeARequestThatFailedIsNotALoad(t *testing.T) {
 	}
 }
 
-// A warm-up whose seat start FAILED is attempted (the coherence probe still keys on
-// that) and is not a cold load: the store hears nothing from it. Five failed
-// starts must not push a real load out of the window of five.
+// A warm-up whose seat start FAILED loaded nothing, so it is not a cold load: the
+// store hears nothing from it (and, since C-76, the coherence probe is not asked
+// either — nothing was loaded for this run). Five failed starts must not push a
+// real load out of the window of five.
 func TestAWarmUpThatFailedIsNotRecordedAsAColdLoad(t *testing.T) {
 	defer compressLiveness(t, 5*time.Second, 100*time.Millisecond, core.AgentCeilingSecCap)()
 	fake := &agentFake{

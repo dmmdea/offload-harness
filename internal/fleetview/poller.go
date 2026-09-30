@@ -255,6 +255,10 @@ func (p *Poller) fold(base string, h map[string]any, herr error, j map[string]an
 		if str(job, "state") != "error" {
 			continue
 		}
+		if nodeTookBack(str(job, "error")) {
+			// The node's own cleanup (ADR 0064), not a failure: see nodeTookBackPrefixes.
+			continue
+		}
 		jobID := str(job, "id")
 		key := nodeLabel + "|" + jobID
 		if p.seenErr[key] {
@@ -266,6 +270,27 @@ func (p *Poller) fold(base string, h map[string]any, herr error, j map[string]an
 			Source: "job", Message: str(job, "task") + ": " + str(job, "error"),
 		})
 	}
+}
+
+// nodeTookBackPrefixes are the openings of the two terminal errors a fleet node
+// writes for a job it took out of its backlog WITHOUT running it (ADR 0064):
+// "withdrawn: ..." (its delegator gave it up and asked for it back) and "reaped: ..."
+// (nobody polled it within the poll lease, so the node cleaned up after a delegator
+// that left). They are the cleanup working as designed, dozens a day on a busy node,
+// so listing each as an operator event would fill the maxErrors ring with non-failures
+// and push the real ones out. The strings are fleetnode.ErrWithdrawn's and
+// fleetnode.ErrReaped's openings; this package does not import fleetnode (that would
+// drag the pipeline into a status view) and tookback_test.go pins the pairing.
+var nodeTookBackPrefixes = []string{"withdrawn:", "reaped:"}
+
+// nodeTookBack reports whether a jobs-feed error is one of those two records.
+func nodeTookBack(jobErr string) bool {
+	for _, p := range nodeTookBackPrefixes {
+		if strings.HasPrefix(jobErr, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // appendErrorLocked appends to p.errors and trims to maxErrors, newest last.

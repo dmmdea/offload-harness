@@ -98,6 +98,16 @@ whether silence is a fault: what the seat's engine is doing for everyone else.
    feed the seat's measured single-stream rates (decode rate, prefill rate), which size every later
    allowance; its cold-load time still does.
 
+8. **The hold governs the re-pack (amendment 2026-09-30, register C-66).** The re-pack phase was always
+   one the hold reads, but its request carried a transport bound of its own: the smaller of the seat's
+   allowance and what was left of the wall divided by the attempts still owed, about a third of the
+   remaining run. It cut a request the monitor was holding on purpose, roughly 50 s into a hold, and the
+   next attempt re-sent it from the back of the engine's queue, up to three times. Under the monitor the
+   re-pack now sends with no transport bound (the context owns the deadline), so the hold decides. The
+   re-pack allowance is sized from the expected answer and the seat's rate (ADR 0055 item 8), and the hold's
+   flat bound is `max(120 s, that allowance)`: a wedged engine is still a stall after the allowance, and
+   the allowance is the expected answer, not the completion cap, so a dead seat is not held for the cap.
+
 ## Consequences
 
 - A busy, preempting or throttled seat no longer kills the runs it is serving; a wedged seat is still

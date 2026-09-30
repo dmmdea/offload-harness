@@ -38,6 +38,10 @@ type smokeRow struct {
 func smokeContract(nodeHint string) delegate.SubtaskSpec {
 	token := "PONG-" + nodeHint
 	return delegate.SubtaskSpec{AgentContract: core.AgentContract{
+		// The surface this traffic came in through: without it the row reads as the
+		// engine's own name, the value a caller that stamped nothing leaves, and
+		// measurement traffic cannot be told from an unstamped entry point.
+		Door:         "cli:fleet-smoke",
 		Goal:         "Read the provided document and reply with the exact token it contains in the `reply` field. Nothing else.",
 		Context:      []core.ContextDoc{{Name: "smoke.txt", Text: "The token is: " + token}},
 		OutputSchema: json.RawMessage(`{"properties":{"reply":{"type":"string"}}}`),

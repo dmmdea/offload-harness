@@ -13,8 +13,10 @@ func TestValidateListenAddr(t *testing.T) {
 		"localhost:18800",
 	}
 	nonLocal := []string{
-		"0.0.0.0:18800",
 		"192.168.1.5:18800",
+	}
+	allInterfaces := []string{
+		"0.0.0.0:18800",
 		":18800", // empty host = bind all interfaces
 	}
 
@@ -27,10 +29,19 @@ func TestValidateListenAddr(t *testing.T) {
 		if err := validateListenAddr(addr, false); err == nil {
 			t.Errorf("validateListenAddr(%q, false) = nil, want refusal (non-loopback)", addr)
 		}
-		// The override must let every refused address through (the caller,
-		// not the validator, is responsible for emitting the loud warning).
+		// The override lets ONE specific address through (the caller, not
+		// the validator, is responsible for emitting the loud warning).
 		if err := validateListenAddr(addr, true); err != nil {
-			t.Errorf("validateListenAddr(%q, true) = %v, want nil (override allows non-loopback)", addr, err)
+			t.Errorf("validateListenAddr(%q, true) = %v, want nil (override allows one specific address)", addr, err)
+		}
+	}
+	// An all-interfaces bind is refused even with the override (0.144.1): the
+	// agent endpoint drives write/GitHub tools and is unauthenticated.
+	for _, addr := range allInterfaces {
+		for _, trusted := range []bool{false, true} {
+			if err := validateListenAddr(addr, trusted); err == nil {
+				t.Errorf("validateListenAddr(%q, %v) = nil, want refusal (binds every interface)", addr, trusted)
+			}
 		}
 	}
 }

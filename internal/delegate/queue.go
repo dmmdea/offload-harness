@@ -26,7 +26,7 @@ const queuePollEvery = 3 * time.Second
 // OutputSchema (the same remote-placement rule as push: schema-less work
 // cannot leave the box) — enforced here so a mixed batch fails loudly before
 // anything is submitted.
-func runQueued(ctx context.Context, cfg config.Config, subtasks []core.AgentContract) ([]PlacedResult, Summary, error) {
+func runQueued(ctx context.Context, cfg config.Config, subtasks []core.AgentContract, rescue RescueFunc) ([]PlacedResult, Summary, error) {
 	holder := strings.TrimRight(strings.TrimSpace(cfg.FleetQueueHolder), "/")
 	if holder == "" {
 		return nil, Summary{}, fmt.Errorf("delegate: route \"queue\" needs fleet_queue_holder configured (ADR 0030)")
@@ -59,7 +59,7 @@ func runQueued(ctx context.Context, cfg config.Config, subtasks []core.AgentCont
 		if results[i].Err != "" {
 			continue
 		}
-		queuePoll(ctx, cfg, holder, subtasks[i], &results[i])
+		queuePoll(ctx, cfg, holder, subtasks[i], &results[i], rescue)
 	}
 
 	var sum Summary
@@ -106,7 +106,7 @@ func queueSubmit(ctx context.Context, cfg config.Config, holder, jobID, taskType
 // push path's shape: execution timeout + grace, with queue-wait NOT charged —
 // the holder reports "accepted" while unclaimed, and that time extends the
 // deadline exactly like the push node's backlog credit (bounded the same way).
-func queuePoll(ctx context.Context, cfg config.Config, holder string, contract core.AgentContract, pr *PlacedResult) {
+func queuePoll(ctx context.Context, cfg config.Config, holder string, contract core.AgentContract, pr *PlacedResult, rescue RescueFunc) {
 	timeoutSec := executionBudgetSec(contract) // the cap for a timeout_auto contract (D-03)
 	budget := time.Duration(timeoutSec)*time.Second + pollGrace
 	start := time.Now()
@@ -155,8 +155,11 @@ func queuePoll(ctx context.Context, cfg config.Config, holder string, contract c
 			pr.Result = wire
 			pr.Node = wire.NodeID
 			pr.Seat = wire.Seat
-			if !wire.Deferred {
-				pr.AcceptanceFailures = EvalAcceptance(contract, wire)
+			// A finished answer whose structured re-pack failed is re-packed here, as on
+			// every other route (rescue.go); a rescue that cannot leaves the defer.
+			*pr = rescueSchemaMiss(ctx, rescue, contract, *pr, start, nil)
+			if !pr.Result.Deferred {
+				pr.AcceptanceFailures = EvalAcceptance(contract, pr.Result)
 			}
 			return
 		case status == http.StatusOK && state == "error":

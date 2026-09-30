@@ -41,6 +41,16 @@ func TestSidecarSpawnErrorNamesDevice(t *testing.T) {
 	}
 }
 
+// The one sentinel is also the only hint an operator gets when a sidecar is down and nothing can start
+// it, and the same text reaches every device's defer — so it must name every device's launcher key.
+func TestErrNoSidecarCmdNamesEveryDeviceKey(t *testing.T) {
+	for _, key := range []string{"hailo_sidecar_cmd", "coral_sidecar_cmd", "rknpu_sidecar_cmd"} {
+		if !strings.Contains(ErrNoSidecarCmd.Error(), key) {
+			t.Errorf("ErrNoSidecarCmd = %q, does not name %s", ErrNoSidecarCmd, key)
+		}
+	}
+}
+
 type boomErr struct{}
 
 func (boomErr) Error() string { return "boom" }

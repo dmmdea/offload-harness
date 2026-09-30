@@ -895,6 +895,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST "+KVSlotSavePath, s.handleKVSlotSave)
 	mux.HandleFunc("POST "+KVSlotRestorePath, s.handleKVSlotRestore)
 	mux.HandleFunc("GET /fleet/jobs/{id}", s.handleJob)
+	// DELETE /fleet/jobs/{id} takes back a job this node has not started (ADR
+	// 0064). A node without this route answers 405 to it (the pattern above is
+	// GET-only), which is the compatibility signal a delegator reads as "no
+	// withdraw here" and falls back to today's behaviour on.
+	mux.HandleFunc("DELETE /fleet/jobs/{id}", s.handleWithdraw)
 	// GET /fleet/jobs (no {id}) is a distinct ServeMux pattern from the one
 	// above — unauthenticated is deliberate: unlike /fleet/jobs/{id}, this
 	// route never carries a payload (Data is never set; see Jobs.Recent), so
@@ -1104,6 +1109,15 @@ type healthPayload struct {
 	// waiting for. Absent = none (or a node that cannot resolve its registry),
 	// which decodes to 0: the pre-0.127 reading.
 	JobsAdmitting int `json:"jobs_admitting,omitempty"`
+	// JobsWithdrawn / JobsReaped (ADR 0064) count the jobs this node took out of its
+	// backlog without running them since the process started: a delegator withdrew
+	// one, or the poll-lease reaper took one nobody was polling. Additive and
+	// omitempty — a node that has taken nothing back publishes a byte-identical
+	// payload — because the reaper is the one unattended state change the ADR makes,
+	// and a default-on, time-based reaper is exactly the thing whose false positives
+	// an operator has to be able to count. A drain's never-started marks are neither.
+	JobsWithdrawn int `json:"jobs_withdrawn,omitempty"`
+	JobsReaped    int `json:"jobs_reaped,omitempty"`
 	// MaxConcurrentJobs is this node's execution limit (fleet_max_concurrent_jobs);
 	// 0 = unlimited. MaxQueueDepth is its admission ceiling on queue_depth
 	// (fleet_max_queue_depth); 0 = unlimited. A delegator could previously see
@@ -1355,6 +1369,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	// two separate reads could straddle a job's accepted→running transition and
 	// publish a queue_depth that is not jobs_queued + jobs_running.
 	queued, running := s.jobs.Counts()
+	withdrawn, reaped := s.jobs.TakenBack()
 	// Admission holds are read ONCE per health request, before the payload is
 	// assembled: the published `jobs_admitting` and the saturation numerator
 	// that excludes it must be the same number, exactly as queue_depth and its
@@ -1396,6 +1411,8 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		QueueDepth:            queued + running,
 		JobsQueued:            queued,
 		JobsRunning:           running,
+		JobsWithdrawn:         withdrawn,
+		JobsReaped:            reaped,
 		MaxConcurrentJobs:     maxConcurrentJobs,
 		MaxQueueDepth:         s.opts.Cfg.FleetQueueLimit(),
 		HarnessVersion:        s.opts.Version,
@@ -2000,11 +2017,7 @@ func (s *Server) admit(w http.ResponseWriter, r *http.Request, env dispatchEnvel
 	// job_spec.id collision (a DIFFERENT job_id) still hits the Mkdir guard
 	// and 400s as intended.
 	if view, ok := s.jobs.Get(env.JobID); ok {
-		if view.State == JobError {
-			writeError(w, http.StatusConflict, "job previously failed on this node: "+view.Error)
-			return
-		}
-		writeAck(w, env.JobID) // accepted/running/done: idempotent re-ack, even mid-drain — no rebuild, no render
+		s.answerKnownJob(w, r, view)
 		return
 	}
 
@@ -2146,6 +2159,10 @@ func (s *Server) admit(w http.ResponseWriter, r *http.Request, env dispatchEnvel
 		// Register A-102: stamp the DOOR this call came through so its ledger
 		// row is not one of the door-less cascade rows.
 		req.Door = dispatchDoor(req.Door)
+		// ADR 0064 (register C-63): name the job id the delegator dispatched this
+		// under, so this node's ledger row joins to the delegator's row on one
+		// equality instead of on a guess at latency.
+		req.FleetJobID = jobID
 		res := s.runner.Run(ctx, req)
 		if env.TaskType == string(core.TaskAgentRun) && res.OK {
 			// The one fact this result proves about the advertised seat —
@@ -2208,6 +2225,11 @@ func (s *Server) admit(w http.ResponseWriter, r *http.Request, env dispatchEnvel
 		Model:     specModel,
 		Band:      band,
 		Tenant:    tenant,
+		// A pushed agent dispatch is polled for by the delegator that sent it, so
+		// the poll lease applies to it (ADR 0064). Media and vision jobs are polled
+		// by other clients on cadences this node does not control, and a job the
+		// pull queue claimed is never polled at all — neither is leased.
+		PollLeased: env.TaskType == string(core.TaskAgentRun),
 	}
 	if !s.jobs.Admit(env.JobID, spec, run) {
 		cleanup() // duplicate/drain refusal: this request's materialized files never run
@@ -2232,14 +2254,48 @@ func (s *Server) admit(w http.ResponseWriter, r *http.Request, env dispatchEnvel
 		// message below says "on this node", and no other node holds that
 		// record — though it re-places under a FRESH id rather than re-sending
 		// this one.
-		if view.State == JobError {
-			writeError(w, http.StatusConflict, "job previously failed on this node: "+view.Error)
-			return
-		}
-		writeAck(w, env.JobID) // accepted/running/done: idempotent re-ack, still just one render
+		s.answerKnownJob(w, r, view) // accepted/running/done: idempotent re-ack, still just one render
 		return
 	}
 	writeAck(w, env.JobID)
+}
+
+// answerKnownJob answers a dispatch of an id this node already holds, whatever
+// its state — the ONE place both admission paths (the up-front lookup, and the
+// duplicate an Admit race turns up) end.
+//
+// The bearer rule is the JOB's, not the request's. The dispatch door checks the
+// token when the request DECLARES a token-gated task_type, and a media task_type
+// is tokenless by design, so a caller that re-sent an agent job's id as a media
+// task skipped that check and was answered: 202 (which restarted the job's poll
+// lease, so anyone able to read ids off the unauthenticated jobs feed could keep a
+// ghost alive), or 409 carrying the agent error text the feed withholds from a
+// caller without the token. pollDenied applies the record's own marker, as the poll
+// and the withdraw do, so the caller gets the auth verdict and nothing else.
+func (s *Server) answerKnownJob(w http.ResponseWriter, r *http.Request, view *JobView) {
+	if s.pollDenied(view, r) {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if view.State == JobError {
+		writeError(w, http.StatusConflict, "job previously failed on this node: "+view.Error)
+		return
+	}
+	// A delegator re-sending its dispatch is a delegator that is still there, and it
+	// has just shown the bearer the job requires: the poll lease restarts.
+	s.jobs.Touch(view.ID)
+	writeAck(w, view.ID) // accepted/running/done: idempotent re-ack, even mid-drain — no rebuild, no render
+}
+
+// pollDenied reports whether a request that names an existing job must be refused
+// with 401 before any of the job's state crosses the wire: the job is an agent (or
+// vision) job, a token is configured, and the request does not carry it. It is the
+// rule handleJob has always applied to a poll, in one place because every route
+// that takes a job id applies it — the poll, the withdraw, a re-dispatch of a known
+// id. No token configured is the loopback-only posture, where the lane is open by
+// design (dispatch enforces that a tokenless listener IS loopback).
+func (s *Server) pollDenied(view *JobView, r *http.Request) bool {
+	return (view.Agent || view.Gated) && s.opts.Cfg.FleetAuthToken != "" && !bearerOK(r, s.opts.Cfg.FleetAuthToken)
 }
 
 // MaxJobWaitSec caps `GET /fleet/jobs/{id}?wait=<seconds>`.
@@ -2313,10 +2369,14 @@ func (s *Server) handleJob(w http.ResponseWriter, r *http.Request) {
 	// enforces that a tokenless listener IS loopback).
 	// view.Gated (0.116.0) is the vision lane's job: the same rule, the same
 	// reason (its data is the caller's image judged in prose).
-	if (view.Agent || view.Gated) && s.opts.Cfg.FleetAuthToken != "" && !bearerOK(r, s.opts.Cfg.FleetAuthToken) {
+	if s.pollDenied(view, r) {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
+	// An authorized poll is the delegator saying it is still there: it restarts
+	// the job's poll lease (ADR 0064). AFTER the gate on purpose — a 401'd caller
+	// must not keep a ghost alive — and never from the jobs feed.
+	s.jobs.Touch(id)
 	if wait := jobWaitOf(r); wait > 0 && !Terminal(view.State) {
 		// This handler is now allowed to outlive the blanket WriteTimeout,
 		// which Go arms at header-read for every handler alike (register S-09).
@@ -2328,6 +2388,67 @@ func (s *Server) handleJob(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJobView(w, http.StatusOK, view)
+}
+
+// withdrawWire is DELETE /fleet/jobs/{id}'s answer. `state` is the same key a
+// poll answers with, so a delegator reads one shape: "withdrawn" on success, the
+// job's own state (running, done, error) when it could not be withdrawn.
+type withdrawWire struct {
+	JobID     string `json:"job_id"`
+	State     string `json:"state"`
+	Withdrawn bool   `json:"withdrawn"`
+	Error     string `json:"error,omitempty"`
+}
+
+// handleWithdraw is the withdraw route (ADR 0064): a delegator that gives up on
+// a job it dispatched asks for it back, and gets one of
+//
+//	200 {"state":"withdrawn","withdrawn":true}   the job had not started; it never will
+//	409 {"state":"running"|"done"|"error",...}  it had: the node did not touch it
+//	404                                          the node does not hold that id
+//	401 / 405                                    not authorized / not an agent job
+//
+// Only a never-started job is ever withdrawn. A RUNNING job is left alone — the
+// operator's Option A (ADR 0028) keeps running work recoverable — and the 409
+// tells the delegator to keep polling it. The check-and-flip is Jobs.Withdraw's,
+// under the store mutex the scheduler claims under, so a claim and a withdraw
+// cannot both succeed.
+//
+// Auth is handleJob's rule, checked before any state crosses the wire: a caller
+// without the token for an agent (or vision) job gets the auth verdict, never the
+// job's state. An id the store does not hold is a plain 404 either way. Only an
+// agent job can be withdrawn; a media job's dispatcher is another client this node
+// does not control, so it answers 405 whatever the caller holds.
+func (s *Server) handleWithdraw(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	view, ok := s.jobs.Get(id)
+	if !ok {
+		writeError(w, http.StatusNotFound, "unknown job")
+		return
+	}
+	if s.pollDenied(view, r) {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if !view.Agent {
+		w.Header().Set("Allow", http.MethodGet)
+		writeError(w, http.StatusMethodNotAllowed, "only an agent job can be withdrawn")
+		return
+	}
+	res := s.jobs.Withdraw(id)
+	switch {
+	case !res.Found:
+		// Evicted between the lookup above and the withdraw: the same answer as any
+		// other unknown id.
+		writeError(w, http.StatusNotFound, "unknown job")
+	case res.Withdrawn:
+		writeJSON(w, http.StatusOK, withdrawWire{JobID: id, State: WithdrawnState, Withdrawn: true})
+	default:
+		writeJSON(w, http.StatusConflict, withdrawWire{
+			JobID: id, State: string(res.State), Withdrawn: false,
+			Error: "the job has already started on this node; only a job that never started can be withdrawn",
+		})
+	}
 }
 
 // jobFeedRow is /fleet/jobs's per-job shape: metadata only, NEVER a payload.

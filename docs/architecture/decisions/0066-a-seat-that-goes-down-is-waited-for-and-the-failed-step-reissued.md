@@ -87,8 +87,9 @@ against a real 178-271 s), and several runs waiting on one load each appended it
 3. **What does not recover ends the run, typed.** The reason opens `seat down: `
    (`core.SeatDownReason`); the class stays `infrastructure` (a new class would read
    as unknown on a node without this decision); the wire carries `seat_recoveries` and
-   `seat_down_wait_sec`. The delegator treats a `seat down:` defer as the second
-   retryable infrastructure defer, after the coherence defer of D-118: the fault is
+   `seat_down_wait_sec`. The delegator treats a `seat down:` defer as a retryable
+   infrastructure defer, the third after the two admission-time ones (the coherence
+   defer of D-118, the warm-up defer of C-76): the fault is
    a property of this seat, the contract is sound, the cure is another node. It is
    safe to re-place because a node-filed defer is an observed terminal. The retry's
    budget is credited the node's admission plus its wait on the dead seat (capped at
@@ -178,7 +179,8 @@ against a real 178-271 s), and several runs waiting on one load each appended it
 - Nodes without this decision keep filing `stalled:` for the same outage until they are
   upgraded; for them the delegator's change is inert.
 - The wire carries `seat_recoveries` and `seat_down_wait_sec`, and the delegation corpus
-  keeps them; the ledger rows do not yet (that is the ledger's own change).
+  keeps them; the ledger rows carry the outcome as `reason_code` `seat_down` (ADR 0064)
+  and not yet the two numbers.
 - Not solved here: why the engine hangs (py-spy and NCCL traces at the next hang;
   register A-123), the launcher that refuses to restart a seat while its own
   orphaned workers hold the port (its crash cleanup shipped separately, register C-72;

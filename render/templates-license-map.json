@@ -1,0 +1,434 @@
+{
+  "schema_version": 1,
+  "purpose": "The harness's own record of which licence governs the model weights that ComfyUI workflow templates download, keyed by Hugging Face repo id. A repo that is not listed is unknown. The catalog reads it to class a template and to decide whether running it needs an acknowledgement; it never grants anything.",
+  "default_class": "unknown",
+  "classes": {
+    "permissive": "The repo declares a licence that allows commercial use without further conditions.",
+    "conditional": "Commercial use depends on conditions: revenue or user thresholds, excluded territories, notices, terms nobody has read, or a base model's licence. Needs an explicit acknowledgement.",
+    "non_commercial": "The repo declares a non-commercial licence. Needs an explicit acknowledgement that names it.",
+    "unknown": "No entry, or the repo declares no licence. Handled like conditional until somebody reads the licence."
+  },
+  "evidence": "Repo-level licence tags from the Hugging Face model API (cardData and tags), as digested on 2026-09-30 during a research pass; none of these entries was re-fetched when the map was written. An entry whose basis begins `inferred from` was copied from the sibling repo it names, not read, and carries no source_url or fetched_on. A tag is not a per-file licence: a repo can host files under another licence, and one repo (a shared encoder host) is tagged for a different model family than some of its files. Conditions text comes from digests of licence texts and was not read in full. Treat every conditional or non_commercial entry as a pointer to the licence, not a summary of it.",
+  "flux_bar": "flux_bar true marks a repo the FLUX-family bar (ADR 0011) applies to; false exempts a repo the name pattern would otherwise catch. Without the field, the catalog's name pattern decides. These entries exist so the gate can refuse those templates; they are not recommendations.",
+  "repos": {
+    "circlestone-labs/Anima": {
+      "class": "non_commercial",
+      "license_id": "other",
+      "license_name": "circlestone-labs-non-commercial-license",
+      "conditions": "circlestone-labs non-commercial licence.",
+      "source_url": "https://huggingface.co/api/models/circlestone-labs/Anima?expand%5B%5D=cardData&expand%5B%5D=tags",
+      "fetched_on": "2026-09-30",
+      "basis": "hf-card-tag"
+    },
+    "Comfy-Org/ace_step_1.5_ComfyUI_files": {
+      "class": "permissive",
+      "license_id": "apache-2.0",
+      "source_url": "https://huggingface.co/api/models/Comfy-Org/ace_step_1.5_ComfyUI_files?expand%5B%5D=cardData&expand%5B%5D=tags",
+      "fetched_on": "2026-09-30",
+      "basis": "hf-card-tag"
+    },
+    "Comfy-Org/ACE-Step_ComfyUI_repackaged": {
+      "class": "permissive",
+      "license_id": "apache-2.0",
+      "source_url": "https://huggingface.co/api/models/Comfy-Org/ACE-Step_ComfyUI_repackaged?expand%5B%5D=cardData&expand%5B%5D=tags",
+      "fetched_on": "2026-09-30",
+      "basis": "hf-card-tag"
+    },
+    "Comfy-Org/Anima-LLLite": {
+      "class": "non_commercial",
+      "license_id": "other",
+      "license_name": "circlestone-labs-non-commercial-license",
+      "conditions": "circlestone-labs non-commercial licence.",
+      "source_url": "https://huggingface.co/api/models/Comfy-Org/Anima-LLLite?expand%5B%5D=cardData&expand%5B%5D=tags",
+      "fetched_on": "2026-09-30",
+      "basis": "hf-card-tag"
+    },
+    "Comfy-Org/BiRefNet": {
+      "class": "permissive",
+      "license_id": "mit",
+      "source_url": "https://huggingface.co/api/models/Comfy-Org/BiRefNet?expand%5B%5D=cardData&expand%5B%5D=tags",
+      "fetched_on": "2026-09-30",
+      "basis": "hf-card-tag"
+    },
+    "Comfy-Org/Boogu-Image": {
+      "class": "permissive",
+      "license_id": "apache-2.0",
+      "source_url": "https://huggingface.co/api/models/Comfy-Org/Boogu-Image?expand%5B%5D=cardData&expand%5B%5D=tags",
+      "fetched_on": "2026-09-30",
+      "basis": "hf-card-tag"
+    },
+    "Comfy-Org/Depth-Anything-3": {
+      "class": "permissive",
+      "license_id": "apache-2.0",
+      "source_url": "https://huggingface.co/api/models/Comfy-Org/Depth-Anything-3?expand%5B%5D=cardData&expand%5B%5D=tags",
+      "fetched_on": "2026-09-30",
+      "basis": "hf-card-tag"
+    },
+    "Comfy-Org/flux1-dev": {
+      "class": "non_commercial",
+      "license_id": "other",
+      "license_name": "flux-1-dev-non-commercial-license",
+      "conditions": "Declared non-commercial. FLUX-family models are barred by ADR 0011.",
+      "source_url": "https://huggingface.co/api/models/Comfy-Org/flux1-dev?expand%5B%5D=cardData&expand%5B%5D=tags",
+      "fetched_on": "2026-09-30",
+      "basis": "hf-card-tag",
+      "flux_bar": true
+    },
+    "Comfy-Org/flux2-dev": {
+      "class": "non_commercial",
+      "license_id": "other",
+      "conditions": "Declared non-commercial. FLUX-family models are barred by ADR 0011.",
+      "source_url": "https://huggingface.co/api/models/Comfy-Org/flux2-dev?expand%5B%5D=cardData&expand%5B%5D=tags",
+      "fetched_on": "2026-09-30",
+      "basis": "hf-card-tag",
+      "flux_bar": true,
+      "note": "An earlier digest recorded the FLUX.1 dev licence name for this repo; the name was not re-checked, so it is left out."
+    },
+    "Comfy-Org/flux2-klein-9B": {
+      "class": "non_commercial",
+      "license_id": "other",
+      "license_name": "flux-non-commercial-license",
+      "conditions": "Declared non-commercial. FLUX-family models are barred by ADR 0011.",
+      "source_url": "https://huggingface.co/api/models/Comfy-Org/flux2-klein-9B?expand%5B%5D=cardData&expand%5B%5D=tags",
+      "fetched_on": "2026-09-30",
+      "basis": "hf-card-tag",
+      "flux_bar": true,
+      "note": "The repo redirects to Comfy-Org/vae-text-encorder-for-flux-klein-9b."
+    },
+    "Comfy-Org/gemma-4": {
+      "class": "permissive",
+      "license_id": "apache-2.0",
+      "source_url": "https://huggingface.co/api/models/Comfy-Org/gemma-4?expand%5B%5D=cardData&expand%5B%5D=tags",
+      "fetched_on": "2026-09-30",
+      "basis": "hf-card-tag"
+    },
+    "Comfy-Org/HiDream-I1_ComfyUI": {
+      "class": "permissive",
+      "license_id": "mit",
+      "source_url": "https://huggingface.co/api/models/Comfy-Org/HiDream-I1_ComfyUI?expand%5B%5D=cardData&expand%5B%5D=tags",
+      "fetched_on": "2026-09-30",
+      "basis": "hf-card-tag"
+    },
+    "Comfy-Org/HiDream-O1-Image": {
+      "class": "permissive",
+      "license_id": "mit",
+      "source_url": "https://huggingface.co/api/models/Comfy-Org/HiDream-O1-Image?expand%5B%5D=cardData&expand%5B%5D=tags",
+      "fetched_on": "2026-09-30",
+      "basis": "hf-card-tag"
+    },
+    "Comfy-Org/hunyuan3D_2.0_repackaged": {
+      "class": "conditional",
+      "license_id": "other",
+      "license_name": "tencent-hunyuan-community",
+      "conditions": "Tencent Hunyuan community licence: a 100M monthly-active-user threshold; excluded territories include the EU, the UK and South Korea; a Powered by Tencent Hunyuan notice; outputs may not be used to improve other models.",
+      "source_url": "https://huggingface.co/api/models/Comfy-Org/hunyuan3D_2.0_repackaged?expand%5B%5D=cardData&expand%5B%5D=tags",
+      "fetched_on": "2026-09-30",
+      "basis": "hf-card-tag",
+      "text_url": "https://raw.githubusercontent.com/Tencent-Hunyuan/HunyuanVideo-1.5/master/LICENSE",
+      "text_basis": "digest of the licence text from one fetch, not read in full"
+    },
+    "Comfy-Org/HunyuanImage_2.1_ComfyUI": {
+      "class": "conditional",
+      "license_id": "other",
+      "license_name": "tencent-hunyuan-community",
+      "conditions": "Tencent Hunyuan community licence: a 100M monthly-active-user threshold; excluded territories include the EU, the UK and South Korea; a Powered by Tencent Hunyuan notice; outputs may not be used to improve other models.",
+      "source_url": "https://huggingface.co/api/models/Comfy-Org/HunyuanImage_2.1_ComfyUI?expand%5B%5D=cardData&expand%5B%5D=tags",
+      "fetched_on": "2026-09-30",
+      "basis": "hf-card-tag",
+      "text_url": "https://raw.githubusercontent.com/Tencent-Hunyuan/HunyuanVideo-1.5/master/LICENSE",
+      "text_basis": "digest of the licence text from one fetch, not read in full"
+    },
+    "Comfy-Org/HunyuanVideo_1.5_repackaged": {
+      "class": "conditional",
+      "license_id": "other",
+      "license_name": "tencent-hunyuan-community",
+      "conditions": "Tencent Hunyuan community licence: a 100M monthly-active-user threshold; excluded territories include the EU, the UK and South Korea; a Powered by Tencent Hunyuan notice; outputs may not be used to improve other models.",
+      "source_url": "https://huggingface.co/api/models/Comfy-Org/HunyuanVideo_1.5_repackaged?expand%5B%5D=cardData&expand%5B%5D=tags",
+      "fetched_on": "2026-09-30",
+      "basis": "hf-card-tag",
+      "text_url": "https://raw.githubusercontent.com/Tencent-Hunyuan/HunyuanVideo-1.5/master/LICENSE",
+      "text_basis": "digest of the licence text from one fetch, not read in full"
+    },
+    "Comfy-Org/Ideogram-4": {
+      "class": "non_commercial",
+      "license_id": "other",
+      "license_name": "ideogram-non-commercial-model-agreement",
+      "conditions": "Ideogram non-commercial model agreement.",
+      "source_url": "https://huggingface.co/api/models/Comfy-Org/Ideogram-4?expand%5B%5D=cardData&expand%5B%5D=tags",
+      "fetched_on": "2026-09-30",
+      "basis": "hf-card-tag"
+    },
+    "Comfy-Org/Krea-2": {
+      "class": "conditional",
+      "license_id": "other",
+      "license_name": "krea-2-community-license",
+      "conditions": "krea-2-community-license: the licence PDF is gated (HTTP 401) and its terms are unread. The model page says creative, commercial, developer and research use.",
+      "source_url": "https://huggingface.co/api/models/Comfy-Org/Krea-2?expand%5B%5D=cardData&expand%5B%5D=tags",
+      "fetched_on": "2026-09-30",
+      "basis": "hf-card-tag",
+      "text_url": "https://huggingface.co/krea/Krea-2-Turbo",
+      "text_basis": "model page only; the licence text itself could not be fetched"
+    },
+    "Comfy-Org/ltx-2": {
+      "class": "conditional",
+      "license_id": "other",
+      "license_name": "ltx-2-community-license-agreement",
+      "conditions": "LTX-2.x community licence: entities with annual revenue of USD 10M or more need a paid Commercial Use Agreement; non-commercial purposes are exempt.",
+      "source_url": "https://huggingface.co/api/models/Comfy-Org/ltx-2?expand%5B%5D=cardData&expand%5B%5D=tags",
+      "fetched_on": "2026-09-30",
+      "basis": "hf-card-tag",
+      "text_url": "https://raw.githubusercontent.com/Lightricks/LTX-2/main/LICENSE-2_x",
+      "text_basis": "quotes of the licence text returned by a seat, not read in full"
+    },
+    "Comfy-Org/ltx-2.3": {
+      "class": "conditional",
+      "license_id": "other",
+      "license_name": "ltx-2-community-license-agreement",
+      "conditions": "LTX-2.x community licence: entities with annual revenue of USD 10M or more need a paid Commercial Use Agreement; non-commercial purposes are exempt.",
+      "basis": "inferred from Lightricks/LTX-2.3 (not fetched)",
+      "text_url": "https://raw.githubusercontent.com/Lightricks/LTX-2/main/LICENSE-2_x",
+      "text_basis": "quotes of the licence text returned by a seat, not read in full"
+    },
+    "Comfy-Org/Lumina_Image_2.0_Repackaged": {
+      "class": "permissive",
+      "license_id": "apache-2.0",
+      "source_url": "https://huggingface.co/api/models/Comfy-Org/Lumina_Image_2.0_Repackaged?expand%5B%5D=cardData&expand%5B%5D=tags",
+      "fetched_on": "2026-09-30",
+      "basis": "hf-card-tag"
+    },
+    "Comfy-Org/Mage-Flow": {
+      "class": "permissive",
+      "license_id": "mit",
+      "source_url": "https://huggingface.co/api/models/Comfy-Org/Mage-Flow?expand%5B%5D=cardData&expand%5B%5D=tags",
+      "fetched_on": "2026-09-30",
+      "basis": "hf-card-tag"
+    },
+    "Comfy-Org/MiniMax-H3": {
+      "class": "conditional",
+      "license_id": "other",
+      "license_name": "minimax-h3-community-license-agreement",
+      "conditions": "MiniMax H3 Community License Agreement: annual revenue above USD 20M needs separate authorisation; a Powered by MiniMax H3 notice; excluded territories include the EU, the UK, the Republic of Korea and the USA.",
+      "source_url": "https://huggingface.co/api/models/Comfy-Org/MiniMax-H3?expand%5B%5D=cardData&expand%5B%5D=tags",
+      "fetched_on": "2026-09-30",
+      "basis": "hf-card-tag",
+      "text_url": "https://huggingface.co/MiniMaxAI/MiniMax-H3/raw/main/LICENSE",
+      "text_basis": "digest of the licence text from one fetch, not read in full"
+    },
+    "Comfy-Org/MoGe": {
+      "class": "permissive",
+      "license_id": "mit",
+      "source_url": "https://huggingface.co/api/models/Comfy-Org/MoGe?expand%5B%5D=cardData&expand%5B%5D=tags",
+      "fetched_on": "2026-09-30",
+      "basis": "hf-card-tag"
+    },
+    "Comfy-Org/Qwen-Image_ComfyUI": {
+      "class": "permissive",
+      "license_id": "apache-2.0",
+      "source_url": "https://huggingface.co/api/models/Comfy-Org/Qwen-Image_ComfyUI?expand%5B%5D=cardData&expand%5B%5D=tags",
+      "fetched_on": "2026-09-30",
+      "basis": "hf-card-tag"
+    },
+    "Comfy-Org/Qwen-Image-2.1": {
+      "class": "non_commercial",
+      "license_id": "other",
+      "license_name": "qwen-research",
+      "conditions": "Qwen Research License: research use, not commercial use.",
+      "source_url": "https://huggingface.co/api/models/Comfy-Org/Qwen-Image-2.1?expand%5B%5D=cardData&expand%5B%5D=tags",
+      "fetched_on": "2026-09-30",
+      "basis": "hf-card-tag"
+    },
+    "Comfy-Org/Qwen-Image-Edit_ComfyUI": {
+      "class": "permissive",
+      "license_id": "apache-2.0",
+      "source_url": "https://huggingface.co/api/models/Comfy-Org/Qwen-Image-Edit_ComfyUI?expand%5B%5D=cardData&expand%5B%5D=tags",
+      "fetched_on": "2026-09-30",
+      "basis": "hf-card-tag"
+    },
+    "Comfy-Org/Qwen-Image-Layered_ComfyUI": {
+      "class": "permissive",
+      "license_id": "apache-2.0",
+      "source_url": "https://huggingface.co/api/models/Comfy-Org/Qwen-Image-Layered_ComfyUI?expand%5B%5D=cardData&expand%5B%5D=tags",
+      "fetched_on": "2026-09-30",
+      "basis": "hf-card-tag"
+    },
+    "Comfy-Org/Qwen3-VL": {
+      "class": "permissive",
+      "license_id": "apache-2.0",
+      "source_url": "https://huggingface.co/api/models/Comfy-Org/Qwen3-VL?expand%5B%5D=cardData&expand%5B%5D=tags",
+      "fetched_on": "2026-09-30",
+      "basis": "hf-card-tag"
+    },
+    "Comfy-Org/Qwen3.5": {
+      "class": "permissive",
+      "license_id": "apache-2.0",
+      "source_url": "https://huggingface.co/api/models/Comfy-Org/Qwen3.5?expand%5B%5D=cardData&expand%5B%5D=tags",
+      "fetched_on": "2026-09-30",
+      "basis": "hf-card-tag"
+    },
+    "Comfy-Org/sam3.1": {
+      "class": "conditional",
+      "license_id": "other",
+      "license_name": "sam-license",
+      "conditions": "SAM licence: bespoke terms, not read.",
+      "source_url": "https://huggingface.co/api/models/Comfy-Org/sam3.1?expand%5B%5D=cardData&expand%5B%5D=tags",
+      "fetched_on": "2026-09-30",
+      "basis": "hf-card-tag"
+    },
+    "Comfy-Org/SDPose": {
+      "class": "permissive",
+      "license_id": "mit",
+      "source_url": "https://huggingface.co/api/models/Comfy-Org/SDPose?expand%5B%5D=cardData&expand%5B%5D=tags",
+      "fetched_on": "2026-09-30",
+      "basis": "hf-card-tag"
+    },
+    "Comfy-Org/SeedVR2": {
+      "class": "permissive",
+      "license_id": "apache-2.0",
+      "source_url": "https://huggingface.co/api/models/Comfy-Org/SeedVR2?expand%5B%5D=cardData&expand%5B%5D=tags",
+      "fetched_on": "2026-09-30",
+      "basis": "hf-card-tag"
+    },
+    "Comfy-Org/stable-audio-3": {
+      "class": "conditional",
+      "license_id": "other",
+      "license_name": "stable-audio-community",
+      "conditions": "Stable Audio community licence: bespoke terms, not read.",
+      "source_url": "https://huggingface.co/api/models/Comfy-Org/stable-audio-3?expand%5B%5D=cardData&expand%5B%5D=tags",
+      "fetched_on": "2026-09-30",
+      "basis": "hf-card-tag"
+    },
+    "Comfy-Org/stable-diffusion-3.5-fp8": {
+      "class": "conditional",
+      "license_id": "other",
+      "license_name": "stabilityai-ai-community",
+      "conditions": "Stability AI community licence: bespoke terms, not read.",
+      "source_url": "https://huggingface.co/api/models/Comfy-Org/stable-diffusion-3.5-fp8?expand%5B%5D=cardData&expand%5B%5D=tags",
+      "fetched_on": "2026-09-30",
+      "basis": "hf-card-tag"
+    },
+    "Comfy-Org/Wan_2.1_ComfyUI_repackaged": {
+      "class": "permissive",
+      "license_id": "apache-2.0",
+      "source_url": "https://huggingface.co/api/models/Comfy-Org/Wan_2.1_ComfyUI_repackaged?expand%5B%5D=cardData&expand%5B%5D=tags",
+      "fetched_on": "2026-09-30",
+      "basis": "hf-card-tag"
+    },
+    "Comfy-Org/Wan_2.2_ComfyUI_Repackaged": {
+      "class": "permissive",
+      "license_id": "apache-2.0",
+      "source_url": "https://huggingface.co/api/models/Comfy-Org/Wan_2.2_ComfyUI_Repackaged?expand%5B%5D=cardData&expand%5B%5D=tags",
+      "fetched_on": "2026-09-30",
+      "basis": "hf-card-tag"
+    },
+    "Comfy-Org/Wan-Animate-2": {
+      "class": "permissive",
+      "license_id": "apache-2.0",
+      "source_url": "https://huggingface.co/api/models/Comfy-Org/Wan-Animate-2?expand%5B%5D=cardData&expand%5B%5D=tags",
+      "fetched_on": "2026-09-30",
+      "basis": "hf-card-tag"
+    },
+    "Comfy-Org/YuE2": {
+      "class": "non_commercial",
+      "license_id": "cc-by-nc-4.0",
+      "conditions": "CC BY-NC 4.0.",
+      "source_url": "https://huggingface.co/api/models/Comfy-Org/YuE2?expand%5B%5D=cardData&expand%5B%5D=tags",
+      "fetched_on": "2026-09-30",
+      "basis": "hf-card-tag"
+    },
+    "Comfy-Org/z_image": {
+      "class": "permissive",
+      "license_id": "apache-2.0",
+      "source_url": "https://huggingface.co/api/models/Comfy-Org/z_image?expand%5B%5D=cardData&expand%5B%5D=tags",
+      "fetched_on": "2026-09-30",
+      "basis": "hf-card-tag"
+    },
+    "Comfy-Org/z_image_turbo": {
+      "class": "permissive",
+      "license_id": "apache-2.0",
+      "source_url": "https://huggingface.co/api/models/Comfy-Org/z_image_turbo?expand%5B%5D=cardData&expand%5B%5D=tags",
+      "fetched_on": "2026-09-30",
+      "basis": "hf-card-tag"
+    },
+    "comfyanonymous/flux_text_encoders": {
+      "class": "permissive",
+      "license_id": "apache-2.0",
+      "source_url": "https://huggingface.co/api/models/comfyanonymous/flux_text_encoders?expand%5B%5D=cardData&expand%5B%5D=tags",
+      "fetched_on": "2026-09-30",
+      "basis": "hf-card-tag",
+      "flux_bar": false,
+      "note": "T5 and CLIP text encoders that only share a repo name with the FLUX family. ADR 0011 bars FLUX models, not these encoders."
+    },
+    "FastVideo/FastVideo-FastH3-Comfy": {
+      "class": "conditional",
+      "license_id": "other",
+      "license_name": "minimax-h3-community-license-agreement",
+      "conditions": "MiniMax H3 Community License Agreement: annual revenue above USD 20M needs separate authorisation; a Powered by MiniMax H3 notice; excluded territories include the EU, the UK, the Republic of Korea and the USA.",
+      "source_url": "https://huggingface.co/api/models/FastVideo/FastVideo-FastH3-Comfy?expand%5B%5D=cardData&expand%5B%5D=tags",
+      "fetched_on": "2026-09-30",
+      "basis": "hf-card-tag",
+      "text_url": "https://huggingface.co/MiniMaxAI/MiniMax-H3/raw/main/LICENSE",
+      "text_basis": "digest of the licence text from one fetch, not read in full"
+    },
+    "Kijai/WanVideo_comfy": {
+      "class": "unknown",
+      "license_id": null,
+      "source_url": "https://huggingface.co/api/models/Kijai/WanVideo_comfy?expand%5B%5D=cardData&expand%5B%5D=tags",
+      "fetched_on": "2026-09-30",
+      "basis": "hf-card-tag",
+      "note": "The repo declares no licence at all."
+    },
+    "Lightricks/LTX-2": {
+      "class": "conditional",
+      "license_id": "other",
+      "license_name": "ltx-2-community-license-agreement",
+      "conditions": "LTX-2.x community licence: entities with annual revenue of USD 10M or more need a paid Commercial Use Agreement; non-commercial purposes are exempt.",
+      "basis": "inferred from Comfy-Org/ltx-2 (not fetched)",
+      "text_url": "https://raw.githubusercontent.com/Lightricks/LTX-2/main/LICENSE-2_x",
+      "text_basis": "quotes of the licence text returned by a seat, not read in full"
+    },
+    "Lightricks/LTX-2.3": {
+      "class": "conditional",
+      "license_id": "other",
+      "license_name": "ltx-2-community-license-agreement",
+      "conditions": "LTX-2.x community licence: entities with annual revenue of USD 10M or more need a paid Commercial Use Agreement; non-commercial purposes are exempt.",
+      "source_url": "https://huggingface.co/api/models/Lightricks/LTX-2.3?expand%5B%5D=cardData&expand%5B%5D=tags",
+      "fetched_on": "2026-09-30",
+      "basis": "hf-card-tag",
+      "text_url": "https://raw.githubusercontent.com/Lightricks/LTX-2/main/LICENSE-2_x",
+      "text_basis": "quotes of the licence text returned by a seat, not read in full"
+    },
+    "Lightricks/LTX-2.5": {
+      "class": "conditional",
+      "license_id": "other",
+      "license_name": "ltx-2.x-community-license-agreement",
+      "conditions": "LTX-2.x community licence: entities with annual revenue of USD 10M or more need a paid Commercial Use Agreement; non-commercial purposes are exempt.",
+      "source_url": "https://huggingface.co/api/models/Lightricks/LTX-2.5?expand%5B%5D=cardData&expand%5B%5D=tags",
+      "fetched_on": "2026-09-30",
+      "basis": "hf-card-tag",
+      "text_url": "https://raw.githubusercontent.com/Lightricks/LTX-2/main/LICENSE-2_x",
+      "text_basis": "quotes of the licence text returned by a seat, not read in full"
+    },
+    "lightx2v/Minimax-h3-Turbo": {
+      "class": "conditional",
+      "license_id": "apache-2.0",
+      "conditions": "Tagged apache-2.0, but it is a LoRA on a MiniMax H3 base: the base model's licence governs use.",
+      "source_url": "https://huggingface.co/api/models/lightx2v/Minimax-h3-Turbo?expand%5B%5D=cardData&expand%5B%5D=tags",
+      "fetched_on": "2026-09-30",
+      "basis": "hf-card-tag"
+    },
+    "lightx2v/Qwen-Image-Lightning": {
+      "class": "permissive",
+      "license_id": "apache-2.0",
+      "source_url": "https://huggingface.co/api/models/lightx2v/Qwen-Image-Lightning?expand%5B%5D=cardData&expand%5B%5D=tags",
+      "fetched_on": "2026-09-30",
+      "basis": "hf-card-tag"
+    },
+    "stabilityai/stable-diffusion-xl-base-1.0": {
+      "class": "permissive",
+      "license_id": "openrail++",
+      "source_url": "https://huggingface.co/api/models/stabilityai/stable-diffusion-xl-base-1.0?expand%5B%5D=cardData&expand%5B%5D=tags",
+      "fetched_on": "2026-09-30",
+      "basis": "hf-card-tag"
+    }
+  }
+}
