@@ -54,50 +54,99 @@ against a real 178-271 s), and several runs waiting on one load each appended it
      is alive and overloaded, a re-issue would only feed it another request, and it stays
      the plain stall of ADR 0061.
 
-2. **The run waits and the failed step is re-issued, once.** The monitor cancels
-   only the model call in flight (its step scope); the run's context stays alive. The
-   loop then waits for the seat under the cold-load hold — phase `cold-load`, bounded
-   by the cold-load ceiling and the run's own ceiling — and re-issues the same step
-   (same transcript, same budget, no step spent). A step is re-issued once; a run
-   recovers at most twice. A wedged seat is not recovered by being listed ready: the
-   counters must move again or a restart must be seen, or the re-issue would only
-   feed the frozen engine. A seat that llama-swap does not list is waited for by
-   nobody — llama-swap starts a stopped seat on the next request — so the re-issue is
-   the trigger and the cold-load hold covers the load. If llama-swap lists the seat
-   ready but its engine cannot be read from here, and the run has seen the seat down
-   since the verdict, llama-swap's word is enough.
+2. **The run waits, in one bounded episode, and the failed step is re-issued.** The
+   monitor cancels only the model call in flight (its step scope); the run's context
+   stays alive. The loop then waits for the seat under the cold-load hold — phase
+   `cold-load` — and re-issues the same step (same transcript, same budget, no step
+   spent). The wait is one *episode*: it begins at the first verdict, outlives the calls
+   that meet it, and is bounded by the cold-load ceiling counted from that first verdict
+   (and by the run's own ceiling); it never restarts per attempt.
+   - A wedged seat is not recovered by being listed ready: the counters must move again or
+     a restart must be seen, or the re-issue would only feed the frozen engine. If
+     llama-swap lists the seat ready but its engine cannot be read from here, and the run
+     has seen the seat down since the verdict, llama-swap's word is enough.
+   - A seat that llama-swap does not list is waited for by nobody — llama-swap starts a
+     stopped seat on the next request — so the re-issue is the start *trigger*, and the
+     cold-load hold covers the load. It is not a recovery. If the start fails (on
+     2026-09-29 the launcher refused to start the flagship for 18 minutes and every request
+     got an instant HTTP 500), the episode goes on: the run waits one poll and triggers
+     again, until the bound, instead of turning each queued request into two quick 500s and
+     a defer. A start that never succeeds ends the run typed at the bound, naming the
+     attempts and what the seat last looked like.
+   - A seat that was *seen serving* again earns exactly one re-issue. If the re-issued call
+     fails again before its answer, the seat came back and died under the same request, and
+     the run ends typed instead of waiting for it forever.
+   - A recovery is counted, and the wait booked, when the re-issued call's first byte
+     arrives — never for a re-issue that recovered nothing. `seat_down_wait_sec` covers the
+     whole episode, including the time llama-swap held the re-issued call while it started
+     the seat. A run recovers at most twice; the budget counts outages that landed.
+   - A refused connection while llama-swap still lists the seat ready is not counted as
+     "seen down" (the fallback to llama-swap's own word would otherwise re-issue onto a
+     dead engine): the run waits, bounded by the same ceiling, for llama-swap to notice.
 
 3. **What does not recover ends the run, typed.** The reason opens `seat down: `
    (`core.SeatDownReason`); the class stays `infrastructure` (a new class would read
-   as unknown on a pre-0.144 node); the wire carries `seat_recoveries` and
+   as unknown on a node without this decision); the wire carries `seat_recoveries` and
    `seat_down_wait_sec`. The delegator treats a `seat down:` defer as the second
    retryable infrastructure defer, after the coherence defer of D-118: the fault is
    a property of this seat, the contract is sound, the cure is another node. It is
    safe to re-place because a node-filed defer is an observed terminal. The retry's
    budget is credited the node's admission plus its wait on the dead seat (capped at
-   one contract wall), because that time was not work. The loop's recovery does not
+   one contract wall), because that time was not work. Two gates that guard a
+   *verification* retry do not apply to it: the first-pass floor is not raised by the
+   dead seat's own `min_turn_sec` (the retry goes elsewhere, and the retry seat's own
+   floor still applies once it is chosen), and the retry is not refused because the
+   alternative node is busy. D-46's case is a retry that joins a generating seat on the
+   budget that was left; a seat-down defer produced nothing, carries credited budget, and
+   busy is a place in line, never a refusal (INV-4) — the node's own queue is the line.
+   A seat-down defer that has nowhere to go (route local, or no untried eligible node)
+   says so in `retry_note`. The loop's recovery does not
    cover the structured re-pack (its request is not a step, and the finished answer is
    already in hand), so a seat lost there — the monitor's wedge verdict, or a transport
    failure that a fresh read confirms as a dead seat — ends the run typed the same way,
    with `(during the structured re-pack)` appended; the finished answer stays in
    `output`.
 
-4. **The wording follows the status.** `seat contended:` is for a 429 only (llama-swap's
-   concurrency limit). A 5xx is `seat not serving:`. The chat client asks the run's
-   seat check before it sleeps the contention budget on a llama-swap 5xx; while the
-   seat is not serving it returns at once, typed, to the recovery wait.
+4. **The wording follows the status, and a seat that is not serving is not waited on as
+   contention.** `seat contended:` is for a 429 only (llama-swap's concurrency limit). A
+   5xx is `seat not serving:`. The run's seat check is a gate on the contract's shared
+   contention budget: before the budget waits out any busy answer except a 429, it asks
+   whether the seat is serving, and while it is not the wait is refused at once. The chat
+   client returns the typed seat-down to the recovery wait; the structured re-pack, which
+   draws on the same budget from another client, stops sleeping the same way and files its
+   `seat down:` defer instead of after up to 90 s.
 
-5. **The allowance knows the load, and only solo runs teach the rate.**
+5. **The allowance knows the load, and only runs known to be solo teach the rate.**
    `StallPolicy.AllowanceLoad(phase, pending, load)` divides the prefill rate by the
    number of requests sharing the seat and stretches the re-pack bound by it (load 1
    is `Allowance`, exactly; the floor is still the definition of a silent seat). The
    load comes from this box's run registry when a prefill or re-pack begins and again
-   at its first delta, and from the busy hold's engine gauges (running + waiting); the
-   stall reason prints it. A run that ever saw the seat shared does not move
-   `prefill_tok_s`. A cold-load observation that ends within ten seconds of the
-   newest one is the same load seen by another run: the store keeps the longest
-   measurement instead of appending; and a run that waited out a load it saw start in
-   its admission pre-flight records the wait from the first sighting to ready.
+   at its first delta, and from the engine's own running + waiting gauges — read by the
+   busy hold, and once at each call's first delta when the registry saw nobody else, the
+   only way to see a peer this box does not know of (a cascade call, another process). The
+   stall reason prints it.
+   - The busy hold's flat bound keeps that stretched allowance only for an engine that
+     cannot see a prefill in progress (llama-server on `/slots`; a vLLM exposition with no
+     KV-usage gauge). Any other engine moves its fingerprint through a prefill, so a flat
+     fingerprint is a hung engine whatever is queued behind it and it keeps ADR 0061's solo
+     bound. The load that sizes the bound is the one the engine had when it last did work,
+     never the latest reading: a hung engine's HTTP front end keeps accepting requests, its
+     waiting count grows for as long as it is hung, and a bound that followed it receded
+     faster than the silence lengthened.
+   - A run moves `prefill_tok_s` only if it was *known* solo. A run nothing could answer for
+     (no run registry, no engine gauges, or an engine read still pending when it ended) has
+     an unknown load, which is not solo: the store refuses it like a shared one, and an
+     unopenable registry is logged.
+   - A run that waited out a seat going down moves neither rate: its re-issued call is the
+     request that waits out llama-swap's load.
+   - Cold loads: only a warm-up that CONFIRMED the load (a 200, or `/running` lists the seat
+     ready) is recorded; a failed start is the cost of a failed start, not a measurement. One
+     load seen by several runs is one entry — an observation ending within ten seconds of
+     ANY entry of the window of five merges into it, keeping the longest measurement, because
+     runs report when they end, not when the load did. A load older than everything in a
+     full window is dropped rather than pushing a newer one out. A run that waited out a load
+     it saw start in its admission pre-flight records the wait from the first sighting to
+     ready, which is a lower bound of that load.
 
 ## Consequences
 
@@ -105,34 +154,53 @@ against a real 178-271 s), and several runs waiting on one load each appended it
   instead of their work; one that does not come back costs them a typed defer the
   delegator re-places, not a stall nobody retries.
 - A wedge that never clears is now held for up to the cold-load ceiling (10 minutes
-  by default) before it is filed, in case the seat restarts; every death recorded on
-  2026-09-29 restarted the seat within about 120 s of the first silent step.
+  by default) before it is filed, in case the seat restarts. The ceiling is a bound,
+  not a promise: most deaths recorded on 2026-09-29 restarted the seat within a couple of
+  minutes of the first silent step, but the 23:01 death did not — the launcher refused to
+  start it for 18 minutes and the seat was up again after 23, longer than the ceiling. A
+  run on that seat waits to the bound and then ends typed, and the delegator re-places it
+  with the wait credited; the launcher's own crash cleanup is what shortens that outage.
 - A run whose seat reads shared waits longer before its first engine read (the
-  prefill allowance is sized for the load), and the busy hold's flat bound follows the
-  engine's own load the same way, so a wedge on a shared seat is called later. For a
-  13,000-token prefill at 280 tok/s with five requests sharing the seat, the first engine
+  prefill allowance is sized for the load). The busy hold's flat bound follows the load
+  only on an engine that cannot see a prefill, so a wedge on such a seat is called later:
+  for a 13,000-token prefill at 280 tok/s with five requests sharing it, the first engine
   read comes at about 380 s instead of about 100 s and the flat bound is about 380 s
-  instead of 120 s, and the recovery wait follows. Scaling the flat bound is deliberate —
-  a seat whose prefill is invisible to its counters (llama-server on `/slots`) would
-  otherwise be called wedged while a shared prefill is still legitimately running — and
-  a death that breaks the stream is caught at once by the failed call, not by the flat
-  bound. The hold, not the allowance, carries correctness.
+  instead of 120 s, and the recovery wait follows. That is deliberate — a seat whose
+  prefill is invisible to its counters would otherwise be called wedged while a shared
+  prefill is still legitimately running — and a death that breaks the stream is caught at
+  once by the failed call, not by the flat bound. An engine that does see its prefill keeps
+  the solo bound whatever is queued. The hold, not the allowance, carries correctness.
 - `prefill_tok_s` no longer follows the traffic a run happened to meet; a box that
-  is never idle learns no prefill rate and keeps the assumed one. A joined cold load
-  is recorded as the part of it the run saw (a lower bound), never as a second load.
-- Nodes on 0.143 or older keep filing `stalled:` for the same outage until they are
+  is never idle, or whose seat cannot be read, learns no prefill rate and keeps the assumed
+  one. A load that outlasts the admission budget is not recorded (the run's own cold-load
+  hold sees it mid-run, and nothing carries that to the store): the cold-load figure stays
+  what complete measurements made it.
+- Nodes without this decision keep filing `stalled:` for the same outage until they are
   upgraded; for them the delegator's change is inert.
+- The wire carries `seat_recoveries` and `seat_down_wait_sec`, and the delegation corpus
+  keeps them; the ledger rows do not yet (that is the ledger's own change).
 - Not solved here: why the engine hangs (py-spy and NCCL traces at the next hang;
   register A-123), the launcher that refuses to restart a seat while its own
-  orphaned workers hold the port (a repo change to the seat launcher scripts, then a
-  deployment the operator approves), and placement and admission (re-placement after
-  a 503, dealing by capacity).
+  orphaned workers hold the port (its crash cleanup shipped separately, register C-72;
+  deploying it is the operator's), a seat-down recovery in the MCP `agent_run` door
+  (it builds no liveness monitor), and placement and admission (re-placement after a 503,
+  dealing by capacity).
 
 ## Alternatives considered
 
 - **Re-issue at once, without waiting.** Rejected for a wedge: the new request
-  would land on the frozen engine. Kept for a seat that is gone, where the request
-  is what starts it.
+  would land on the frozen engine. Kept as the start trigger for a seat that is gone,
+  where the request is what starts it.
+- **Spend the step's single re-issue on the first start attempt.** This was the first
+  design, and the review found what it does when the start keeps failing: two quick 500s and
+  a typed defer while the outage lasts 18 minutes, a reason that says the seat "came back",
+  and a recovery counted for a re-issue that recovered nothing. A failing start is one
+  bounded episode instead.
+- **Wait passively for a seat nobody lists.** Rejected: llama-swap starts a stopped seat on
+  the next request, and a run that is only waiting sends none.
+- **A seat check in the structured re-pack's client.** Rejected for the gate on the shared
+  contention budget: every client draws on the budget, so one refusal covers them all and no
+  client grows its own copy of the rule.
 - **Treat absence from `/running` as down on the first look.** Rejected: ADR 0055's
   review (PR #458) showed absence alone is also a removed seat, a renamed alias or a
   restarted llama-swap. Absence inside an established hold, or after a failed call,

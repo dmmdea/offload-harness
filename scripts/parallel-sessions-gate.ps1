@@ -5,11 +5,14 @@
 # chat on the same seat — the shape of "five sessions at once". It then reads every run's JSON
 # summary and every result's contention_wait_sec / admission_wait_sec and prints one verdict:
 #
-#   PASS          no "seat contended:" defers, no failed_verification, and the wait FIRED on
-#                 at least one result (contention_wait_sec > 0) — the fix did work, not luck
+#   PASS          no "seat contended:" defers, no failed_verification, no defer of any other kind,
+#                 and the wait FIRED on at least one result (contention_wait_sec > 0) — the fix did
+#                 work, not luck
 #   INCONCLUSIVE  no contention was observed at all (no wait fired, no 429): the run proves
 #                 nothing about the fix; rerun with a higher K or while a peer is busy
-#   FAIL          a "seat contended:" defer or a failed_verification surfaced
+#   FAIL          a failed_verification, a "seat not serving:" or "seat down:" defer (ADR 0066: the
+#                 seat itself could not serve, so the run says nothing about contention), or any
+#                 other defer surfaced
 #
 # Compare `-Binary` = the live exe vs the scratch exe on the same K for the before/after the
 # operator asked for. Read-only against production config; runs under the caller's lease.
@@ -49,7 +52,7 @@ $runs = 1..$K | ForEach-Object {
 $runRows = $runs | Wait-Job | Receive-Job | Sort-Object run
 $peer | Wait-Job | Out-Null
 
-$contended = 0; $failedVerification = 0; $waited = 0; $admitted = 0; $succeeded = 0; $total = 0; $wallTimeouts = 0; $otherDefers = 0
+$contended = 0; $failedVerification = 0; $waited = 0; $admitted = 0; $succeeded = 0; $total = 0; $wallTimeouts = 0; $otherDefers = 0; $seatUnhealthy = 0
 foreach ($r in $runRows) {
   $raw = Get-Content $r.log -Raw
   # the CLI prints config notes before the JSON and an error line after it: take the JSON object only
@@ -62,6 +65,7 @@ foreach ($r in $runRows) {
     $total++
     $reason = "$($res.reason)"
     if ($reason -like "seat contended:*") { $contended++ }
+    elseif ($reason -like "seat not serving:*" -or $reason -like "seat down:*") { $seatUnhealthy++ }
     elseif ($reason -like "wall timeout*") { $wallTimeouts++ }
     elseif ($res.deferred) { $otherDefers++ }
     if ([double]$res.contention_wait_sec -gt 0) { $waited++ }
@@ -72,13 +76,15 @@ foreach ($r in $runRows) {
 # verification failures. Contended defers after a full budget, or wall timeouts, are CAPACITY: the seat cannot
 # serve this many concurrent loops — report it as such, never as a pass.
 $verdict = if ($failedVerification -gt 0) { "FAIL (verification failures)" }
+  elseif ($seatUnhealthy -gt 0) { "FAIL ($seatUnhealthy defer(s) 'seat not serving:' / 'seat down:': the seat itself could not serve, so this run proves nothing about contention)" }
   elseif ($contended -gt 0 -or $wallTimeouts -gt 0) { "CAPACITY-LIMITED: $contended contended after the full budget, $wallTimeouts wall timeouts, $succeeded/$total succeeded (raise concurrencyLimit/--parallel or lower K)" }
+  elseif ($otherDefers -gt 0) { "FAIL ($otherDefers other defer(s): not contention, not a wall timeout; read results[].reason)" }
   elseif ($waited -eq 0) { "INCONCLUSIVE (no contention observed: no result waited; rerun with a higher -K or a busier peer)" }
   else { "PASS ($waited results waited and succeeded)" }
 $report = [pscustomobject]@{
   binary = $Binary; k = $K; contract = $Contract; ran_at = (Get-Date -Format s)
   runs = $runRows; results_total = $total; succeeded = $succeeded; seat_contended_defers = $contended
-  failed_verification = $failedVerification; wall_timeouts = $wallTimeouts; other_defers = $otherDefers; results_that_waited = $waited; results_that_waited_for_admission = $admitted
+  failed_verification = $failedVerification; wall_timeouts = $wallTimeouts; seat_unhealthy_defers = $seatUnhealthy; other_defers = $otherDefers; results_that_waited = $waited; results_that_waited_for_admission = $admitted
   median_wall_ms = ($runRows.wall_ms | Sort-Object)[[int]([Math]::Floor(($runRows.Count - 1) / 2))]
   wall_total_s = [int]((Get-Date) - $t0).TotalSeconds
   verdict = $verdict

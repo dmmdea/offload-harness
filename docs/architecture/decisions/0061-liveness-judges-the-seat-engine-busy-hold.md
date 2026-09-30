@@ -65,7 +65,10 @@ whether silence is a fault: what the seat's engine is doing for everyone else.
    max(120 s, the waiting phase's own allowance), the seat itself is wedged: that is the stall, filed as
    infrastructure with the engine's silence, the phase the request waited in and the last reading in the
    reason. The phase's own allowance is the floor so a long prefill on a `/slots`-only seat keeps the
-   prefill allowance it always had.
+   prefill allowance it always had. ADR 0066 files this verdict as a typed `seat down:` outcome the run
+   waits out, and sizes the allowance for the seat's load (the load the engine had when it last did work)
+   only on an engine that cannot see a prefill (`/slots`, or vLLM without a KV-usage gauge); every other
+   engine keeps the bound as written here, whatever is queued behind it.
 
 4. **An engine that steps without producing is thrashing.** If the work fingerprint keeps moving but the
    TOKEN fingerprint does not move for 3× the flat bound, the engine is preempting and recomputing the same
@@ -106,7 +109,7 @@ whether silence is a fault: what the seat's engine is doing for everyone else.
 - `queued` is a new liveness phase in the job record and status readers.
 - Not solved here: a run lost to an engine that DIES mid-run still ends (the busy hold only makes the
   diagnosis right). Waiting for the seat's restart and re-issuing the step (a seat-down outcome) is its
-  own change (ADR 0066, 0.144.0). Placement and admission (remote 503 re-placement, abandoned accepted jobs, dealing by
+  own change (ADR 0066). Placement and admission (remote 503 re-placement, abandoned accepted jobs, dealing by
   capacity) are their own change too.
 
 ## Alternatives considered

@@ -166,13 +166,20 @@ const IncoherentSeatReason = "seat incoherent at warm: "
 // register C-72): the engine hung with work outstanding, or died and llama-swap
 // no longer serves the seat (gone from /running, restarting, refusing reads).
 // Like IncoherentSeatReason it is a CONSTANT and a reason prefix, not a new
-// defer class — the class stays `infrastructure`, because a class a pre-0.144
-// node does not know would read as unknown in a mixed-version fleet — and the
+// defer class — the class stays `infrastructure`, because a class a node
+// without ADR 0066 does not know would read as unknown in a mixed-version fleet — and the
 // executing node writes the reason with it while the delegator matches on it
 // (delegate.SeatDownDefer) to give the contract a second placement on ANOTHER
 // node. A node-filed defer is an observed terminal, so re-placing it cannot
 // produce a duplicate run.
 const SeatDownReason = "seat down: "
+
+// SeatNotServingReason prefixes the defer a run files when llama-swap answered a 5xx
+// for its seat and the answer outlived the contention budget while the seat was not
+// known to be down (ADR 0066): a start that failed, a health check that timed out.
+// It is NOT contention — `seat contended: ` is a 429 only — so operators grep and
+// tools count it separately (scripts/parallel-sessions-gate.ps1 does).
+const SeatNotServingReason = "seat not serving: "
 
 // Scheduling bands (0.113.18) — the delegator stamps one on every dispatch
 // (`priority` in the fleet envelope) and the node's job store orders its
@@ -454,7 +461,7 @@ type AgentWireResult struct {
 	// A broken verdict is also a defer: class `infrastructure`, reason prefixed
 	// IncoherentSeatReason, before the wall ever starts.
 	CoherenceNote string `json:"coherence_note,omitempty"`
-	// SeatRecoveries (0.144.0, ADR 0066) is how many times this run's seat went
+	// SeatRecoveries (ADR 0066) is how many times this run's seat went
 	// down under it and the run waited for the seat and re-issued the failed
 	// step instead of ending — the transcript is the loop's, so nothing done so
 	// far was lost. SeatDownWaitSec is the wall the run spent waiting for a
@@ -462,7 +469,7 @@ type AgentWireResult struct {
 	// to the wait running out); a delegator credits it back to the contract's
 	// budget when it re-places a `seat down:` defer, because time spent on a
 	// dead seat is not time the contract worked. Both omitted when zero; a
-	// pre-0.144 node's result reads as "not measured".
+	// result from a node without ADR 0066 reads as "not measured".
 	SeatRecoveries  int     `json:"seat_recoveries,omitempty"`
 	SeatDownWaitSec float64 `json:"seat_down_wait_sec,omitempty"`
 

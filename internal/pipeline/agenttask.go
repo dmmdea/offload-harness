@@ -958,7 +958,7 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	if !timedTheSeatsOwnRates(contended, res.SeatRecoveries, downWait) {
 		obsTokS, obsPrefill.PrefillTokens, obsBest.Tokens = 0, 0, 0 // the wire still reports what was measured
 	}
-	// A run that saw the seat SHARED (0.144.0, register C-66) timed what a
+	// A run that saw the seat SHARED (ADR 0066, register C-66) timed what a
 	// shared seat gives one request, not the seat's own prefill rate: the store
 	// folds a prefill sample in only for a run that was KNOWN to be solo (peakLoad
 	// == 1). A run nothing could answer for (0: no run registry and no engine
@@ -2342,7 +2342,7 @@ func awaitSeatAdmission(ctx context.Context, endpoint, seat string, budget time.
 }
 
 // awaitSeatAdmissionLoad is awaitSeatAdmission that also says what the poll saw
-// of THIS seat's own load (0.144.0, register C-66): loadSeen is when a poll first
+// of THIS seat's own load (ADR 0066, register C-66): loadSeen is when a poll first
 // found the seat's own row `starting` (zero = never), and ready is whether it
 // returned because the seat's own row read ready. A run that waited out a load
 // here — someone else's request started it — measured part of that load, and the
@@ -2446,7 +2446,7 @@ func contendedReason(seat string, b *seatwait.Budget) (string, bool) {
 		return "", false
 	}
 	if b.LastStatus() != http.StatusTooManyRequests {
-		return fmt.Sprintf("seat not serving: llama-swap answered HTTP %d for %s on %d attempt(s), waited %.0fs in total (its engine was starting, had crashed or failed its health check — this is not contention: raising concurrencyLimit will not help)",
+		return fmt.Sprintf(core.SeatNotServingReason+"llama-swap answered HTTP %d for %s on %d attempt(s), waited %.0fs in total (its engine was starting, had crashed or failed its health check — this is not contention: raising concurrencyLimit will not help)",
 			b.LastStatus(), seat, b.Attempts(), b.Spent().Seconds()), true
 	}
 	return fmt.Sprintf("seat contended: %s answered HTTP %d on %d attempt(s), waited %.0fs in total (peers hold its slots — raise concurrencyLimit or retry)",
