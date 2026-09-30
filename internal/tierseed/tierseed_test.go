@@ -1,6 +1,7 @@
 package tierseed
 
 import (
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
@@ -157,6 +158,38 @@ func TestResolveAcceleratorsExpandsRknpuHome(t *testing.T) {
 		if all[k] != want {
 			t.Errorf("%s = %v, want %s", k, all[k], want)
 		}
+	}
+}
+
+// Each device's seed lists its own id under "accelerators" — the gate config.HasAccelerator reads. A box
+// carrying two devices must seed BOTH, in the order the ids were given (that order is the shared-name
+// rule's, ADR 0037); merging the seeds key by key kept only the last device's list, so the config gated
+// on one device while installed.json advertised both.
+func TestResolveAcceleratorsSeedsEveryDeviceInTheGate(t *testing.T) {
+	accs := map[string]Accelerator{
+		"hailo-8l": {ConfigSeed: map[string]any{"accelerators": []any{"hailo-8l"}, "hailo_timeout_sec": 60}},
+		"rknpu":    {ConfigSeed: map[string]any{"accelerators": []any{"rknpu"}, "rknpu_timeout_sec": 60}},
+	}
+	for _, c := range []struct {
+		ids  []string
+		want []any
+	}{
+		{[]string{"hailo-8l", "rknpu"}, []any{"hailo-8l", "rknpu"}},
+		{[]string{"rknpu", "hailo-8l"}, []any{"rknpu", "hailo-8l"}},
+		{[]string{"rknpu", "rknpu"}, []any{"rknpu"}},
+		{[]string{"rknpu"}, []any{"rknpu"}},
+	} {
+		out, err := ResolveAccelerators(accs, c.ids, Options{Home: "/h"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(out["accelerators"], c.want) {
+			t.Errorf("ids %v: accelerators = %v, want %v", c.ids, out["accelerators"], c.want)
+		}
+	}
+	out, _ := ResolveAccelerators(accs, []string{"hailo-8l", "rknpu"}, Options{Home: "/h"})
+	if out["hailo_timeout_sec"] != 60 || out["rknpu_timeout_sec"] != 60 {
+		t.Errorf("the other keys must still merge: %v", out)
 	}
 }
 

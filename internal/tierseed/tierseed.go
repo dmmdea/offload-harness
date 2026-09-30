@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 
@@ -405,14 +406,29 @@ func ResolveAccelerators(accs map[string]Accelerator, ids []string, opt Options)
 		return nil, nil
 	}
 	merged := map[string]any{}
+	// Every device's seed lists its own id under "accelerators" — the gate. Merged key by
+	// key the last device's list would replace the others', so the gate is the union, in
+	// the order the ids were given (that order is the shared-name rule's, ADR 0037).
+	var gate []any
 	for _, id := range ids {
 		a, ok := accs[id]
 		if !ok {
 			return nil, fmt.Errorf("accelerator %q detected but not declared in profiles.json accelerators", id)
 		}
 		for k, v := range a.ConfigSeed {
+			if list, isList := v.([]any); k == "accelerators" && isList {
+				for _, e := range list {
+					if !slices.ContainsFunc(gate, func(g any) bool { return reflect.DeepEqual(g, e) }) {
+						gate = append(gate, e)
+					}
+				}
+				continue
+			}
 			merged[k] = v
 		}
+	}
+	if gate != nil {
+		merged["accelerators"] = gate
 	}
 	if err := validate(merged, "", "accelerators:"+strings.Join(ids, "+")); err != nil {
 		return nil, err

@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -53,6 +54,15 @@ func TestInstallPlanResolvesEveryAcceleratorHome(t *testing.T) {
 	}
 	if strings.Join(got.Verdict.Accelerators, ",") != "hailo-8l,coral-edgetpu,rknpu" {
 		t.Fatalf("verdict.accelerators = %v, want [hailo-8l coral-edgetpu rknpu]", got.Verdict.Accelerators)
+	}
+	// The gate the seeded config carries lists every detected device, in detection order.
+	var gate []string
+	ids, _ := got.ConfigSeed["accelerators"].([]any)
+	for _, id := range ids {
+		gate = append(gate, fmt.Sprint(id))
+	}
+	if strings.Join(gate, ",") != "hailo-8l,coral-edgetpu,rknpu" {
+		t.Errorf("config_seed accelerators = %v, want every detected device: [hailo-8l coral-edgetpu rknpu]", gate)
 	}
 	for key, suffix := range map[string]string{
 		"hailo_sidecar_cmd": "/hailo/hailo-http.cmd",
