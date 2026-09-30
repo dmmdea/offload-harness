@@ -86,14 +86,18 @@ const maxOwnerBytes = 64
 // Call it right after creating the directory and before anything else goes
 // into it, so a sweep that lists the directory at any later instant can see
 // whose it is. The marker is one short write, so a concurrent reader sees it
-// whole or not yet at all (and ReadOwner treats a partial or empty one as
-// unmarked, which a sweep resolves toward keeping).
+// whole or, between the file's creation and that write, empty. It never relies
+// on that: ReadOwner rejects any marker that does not end in the newline
+// written here, so a write caught in the middle cannot read as another
+// process's id, and a sweep resolves an unreadable marker toward keeping.
 func WriteOwner(dir string) error {
 	return os.WriteFile(filepath.Join(dir, OwnerFile), []byte(strconv.Itoa(os.Getpid())+"\n"), 0o644)
 }
 
 // ReadOwner returns the process id recorded in dir's marker. ok is false for a
-// missing, unreadable or garbled marker and for an id that is not a positive
+// missing, unreadable or garbled marker, for one that stops short of the
+// terminating newline WriteOwner always writes (a prefix of "41728\n" is the
+// digits of a different process, 4172), and for an id that is not a positive
 // 31-bit number. !ok means only that the directory carries no usable owner; it
 // never means the owner is dead, and a caller must not remove a directory on
 // that evidence alone.
@@ -107,10 +111,14 @@ func ReadOwner(dir string) (pid int, ok bool) {
 	if err != nil {
 		return 0, false
 	}
+	text := string(raw)
+	if !strings.HasSuffix(text, "\n") {
+		return 0, false
+	}
 	// ParseUint, not Atoi: digits only (no sign, no underscore), and 31 bits so
 	// the id survives the uint32 conversion a process probe applies on Windows
 	// without wrapping around to a different process.
-	n, err := strconv.ParseUint(strings.TrimSpace(string(raw)), 10, 31)
+	n, err := strconv.ParseUint(strings.TrimSpace(text), 10, 31)
 	if err != nil || n == 0 {
 		return 0, false
 	}

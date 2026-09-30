@@ -31,7 +31,9 @@ func TestWriteOwnerRecordsThisProcess(t *testing.T) {
 // A marker that is not a usable id reads as "no owner" (ok=false), never as an
 // id: the sweep must not act on garbage, and ok=false sends a directory down
 // the conservative unmarked path. Whitespace around a good id is tolerated
-// (a trailing newline, a CRLF from an editor).
+// (padding, a CRLF from an editor), but the terminating newline WriteOwner
+// always writes is required: a file that stops short of it is a write caught
+// in the middle, and its digits are a prefix of the real id.
 func TestReadOwnerTable(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -39,22 +41,22 @@ func TestReadOwnerTable(t *testing.T) {
 		wantPID int
 		wantOK  bool
 	}{
-		{"plain", "4242", 4242, true},
 		{"trailing newline", "4242\n", 4242, true},
+		{"no terminating newline", "4242", 0, false},
 		{"crlf and padding", "  4242 \r\n", 4242, true},
-		{"largest 31-bit id", "2147483647", 2147483647, true},
+		{"largest 31-bit id", "2147483647\n", 2147483647, true},
 		{"empty", "", 0, false},
 		{"whitespace only", " \r\n\t ", 0, false},
-		{"letters", "abc", 0, false},
-		{"digits then junk", "4242abc", 0, false},
-		{"two numbers", "4242 4243", 0, false},
-		{"negative", "-5", 0, false},
-		{"explicit plus", "+7", 0, false},
-		{"zero", "0", 0, false},
-		{"decimal point", "12.5", 0, false},
-		{"past 31 bits", "2147483648", 0, false},
-		{"far past any id", "99999999999999999999", 0, false},
-		{"longer than any id", strings.Repeat("7", maxOwnerBytes+10), 0, false},
+		{"letters", "abc\n", 0, false},
+		{"digits then junk", "4242abc\n", 0, false},
+		{"two numbers", "4242 4243\n", 0, false},
+		{"negative", "-5\n", 0, false},
+		{"explicit plus", "+7\n", 0, false},
+		{"zero", "0\n", 0, false},
+		{"decimal point", "12.5\n", 0, false},
+		{"past 31 bits", "2147483648\n", 0, false},
+		{"far past any id", "99999999999999999999\n", 0, false},
+		{"longer than any id", strings.Repeat("7", maxOwnerBytes+10) + "\n", 0, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -67,6 +69,31 @@ func TestReadOwnerTable(t *testing.T) {
 				t.Fatalf("ReadOwner(%q) = (%d, %v), want (%d, %v)", c.content, pid, ok, c.wantPID, c.wantOK)
 			}
 		})
+	}
+}
+
+// A reader that catches a marker while it is being written must not take the
+// part it sees for an owner: "41728\n" cut after four digits is the id 4172,
+// another process that may well be dead, and the sweep would remove a live
+// run's dir on its word. Every proper prefix reads as "no owner"; only the
+// whole marker names one.
+func TestReadOwnerRejectsEveryProperPrefixOfAMarker(t *testing.T) {
+	const marker = "41728\n"
+	for n := 0; n < len(marker); n++ {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, OwnerFile), []byte(marker[:n]), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if pid, ok := ReadOwner(dir); ok || pid != 0 {
+			t.Errorf("a marker cut after %d byte(s) (%q) = (%d, %v), want (0, false)", n, marker[:n], pid, ok)
+		}
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, OwnerFile), []byte(marker), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if pid, ok := ReadOwner(dir); !ok || pid != 41728 {
+		t.Errorf("the whole marker = (%d, %v), want (41728, true)", pid, ok)
 	}
 }
 
