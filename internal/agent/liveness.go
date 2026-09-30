@@ -58,6 +58,10 @@ const (
 	// a chunked prefill is not linear. StallPolicy.Slack (30 s in production)
 	// is the flat padding on top of it and on top of a tool's own timeout.
 	prefillMargin = 1.5
+	// repackMargin pads the re-pack's generation estimate the same way: the
+	// expected answer at the seat's rate is a mean, and a seat under load or a
+	// long structured answer runs past it.
+	repackMargin = 1.5
 	// uncappedToolAllowance is the stall bound for a tool the loop runs with
 	// capping explicitly disabled (Tool.Timeout < 0): long by design.
 	uncappedToolAllowance = time.Hour
@@ -78,7 +82,7 @@ type StallPolicy struct {
 	PrefillTokS float64       // measured prefill rate; 0 = unknown
 	TokS        float64       // measured decode rate; 0 = unknown
 	ToolTimeout time.Duration // the loop's per-tool cap (ToolPhase overrides per call)
-	Repack      time.Duration // the grammar-free re-pack's bound
+	Repack      time.Duration // the flat re-pack bound: the least a re-pack may be silent (120 s in production); a known answer size and seat rate raise it (Allowance)
 	Floor       time.Duration // no allowance is ever shorter (60 s in production)
 	Slack       time.Duration // flat padding on the prefill estimate and a tool's cap (30 s in production)
 	// ColdLoad is the ceiling on ONE observed seat load while a request waits
@@ -115,7 +119,8 @@ type StallPolicy struct {
 }
 
 // Allowance is the stall bound for a phase. pendingPromptTokens is the size
-// of the prompt the seat is prefilling (0 outside prefill).
+// of the prompt the seat is prefilling (0 outside prefill); for PhaseRepack it
+// is the expected size of the re-packed answer in tokens.
 func (p StallPolicy) Allowance(ph Phase, pendingPromptTokens int) time.Duration {
 	switch ph {
 	case PhaseAdmission:
@@ -136,7 +141,19 @@ func (p StallPolicy) Allowance(ph Phase, pendingPromptTokens int) time.Duration 
 	case PhaseTool:
 		return p.toolAllowance(p.ToolTimeout)
 	case PhaseRepack:
-		return maxDur(p.Repack, p.Floor)
+		// One completion the seat writes out in full. A seat that answers in one
+		// piece (a proxy that ignores `stream`) sends nothing until it is done, so
+		// the allowance has to cover the whole generation: the expected answer at
+		// the seat's rate, padded like the prefill estimate, never under the flat
+		// bound or the floor. The size or the rate unknown leaves the flat bound
+		// (0.131.0: a flat 120 s for every answer size discarded 15 job-hours of
+		// finished loops in 12 days). A seat that streams resets this on every
+		// delta, so there it bounds silence, not the whole answer.
+		d := maxDur(p.Repack, p.Floor)
+		if p.TokS > 0 && pendingPromptTokens > 0 {
+			d = maxDur(d, time.Duration(float64(pendingPromptTokens)/p.TokS*repackMargin*float64(time.Second))+p.Slack)
+		}
+		return d
 	case PhaseColdLoad:
 		return p.ColdLoad
 	case PhaseQueued:
@@ -747,6 +764,18 @@ func (m *Monitor) note() string {
 			basis = " = " + basis
 		}
 		return fmt.Sprintf(": cold-load ceiling%s%s; the seat read %q, so no byte could arrive", basis, clamp, m.holdState)
+	}
+	if m.phase == PhaseRepack {
+		// The arithmetic sizes the allowance only when both the seat's rate and the
+		// expected size are known; otherwise the flat bound did, and the reason
+		// says so instead of leaving a 120 s stall unexplained.
+		switch {
+		case m.pol.TokS <= 0:
+			return ": flat re-pack bound, no measured decode rate for this seat"
+		case m.pending <= 0:
+			return ": flat re-pack bound, expected size unknown"
+		}
+		return fmt.Sprintf(": %d expected tok / %.1f tok/s x %.1f + %.0fs", m.pending, m.pol.TokS, repackMargin, m.pol.Slack.Seconds())
 	}
 	if m.phase != PhasePrefill {
 		return ""

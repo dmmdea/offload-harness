@@ -533,9 +533,22 @@ was down" — nothing lost.
 It counts the missing DELIVERABLE, not missing bytes, and one counted member proves the
 difference: `structured re-pack unreachable` fires after the agent loop has already FINISHED, so
 that result publishes `output` populated, `structured` absent, `defer_class: "infrastructure"`.
-It is still lost work — a contract carrying an `output_schema` asked for a mechanically checked
-deliverable, and prose nothing validated is not one, so the caller is told rather than left to
-merge it.
+That is lost work only when the DELEGATOR's rescue also fails (register C-66, PR-4): the node flags
+such a defer `schema_miss`, and the delegator — which holds the finished answer — re-packs it
+itself before acceptance (the lossless reading first, then ONE completion on its own agent seat, not
+a registered run; a seat that is not resident is warmed first, outside the allowance), validates the
+object, and lets the ordinary delegator-side acceptance decide. A node too old to publish the flag is
+recognized from `stop_reason: done` and the reason prefix, and a defer whose reason says the CALLER's
+context ended is never rescued. The delivered result carries `repack_note: "rescued on <seat> …"` and
+is counted as a success; prose nothing validated is still never one, so a rescue that cannot produce a
+validated object leaves the defer exactly as the node sent it, and it is still counted here. The rescue
+is wired on `agent_delegate`, `offload_research` and the CLI verbs `delegate` and `research`. It is
+deliberately not wired on three doors, for three different reasons: `agent_run` carries no
+`output_schema`, so there is nothing to structure; the review lane's fenced-seat fallthrough exists
+because the local seat is the one another session's lease fences, and a rescue there would queue behind
+that very lease; and `offload_ask` at a named remote route keeps its own handling of a finished answer
+(its prose still reaches the caller), which the security review records as deliberate, so wiring it is
+outside this change. The seam is one field, `RunOptions.Rescue`, if any of them should be wired later.
 
 The two surfaces report that verdict differently, on purpose, and they agree on the case that
 matters. **The CLI exits non-zero on `summary.infrastructure > 0`** — an exit code sits beside the
