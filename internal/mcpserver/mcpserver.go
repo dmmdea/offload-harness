@@ -3444,10 +3444,11 @@ func (s *Server) handleAgentDelegate(ctx context.Context, req *mcp.CallToolReque
 	// a node proven to answer about the wrong document must not keep receiving
 	// agent_delegate work (silent-failure review, 2026-09-02).
 	deadline := s.callDeadlineAt(entered)
-	opts := &delegate.RunOptions{Quarantine: s.quarantine, Priority: in.Priority, Tenant: s.tenant, Deadline: deadline, Rescue: s.rescueFunc()}
 	// Progress notifications, only for a request that supplied a progress token.
-	defer s.startProgress(ctx, req, opts, len(contracts), deadline)()
-	results, sum, rerr := delegate.RunWith(ctx, s.p.Cfg(), localRun, contracts, in.Route, in.Remotes, opts)
+	onProgress, stopProgress := s.startProgress(ctx, req, len(contracts), deadline)
+	defer stopProgress()
+	results, sum, rerr := delegate.RunWith(ctx, s.p.Cfg(), localRun, contracts, in.Route, in.Remotes,
+		&delegate.RunOptions{Quarantine: s.quarantine, Priority: in.Priority, Tenant: s.tenant, Deadline: deadline, OnProgress: onProgress, Rescue: s.rescueFunc()})
 	if rerr != nil {
 		return jsonResult(map[string]any{"deferred": true, "reason": rerr.Error()})
 	}
@@ -3811,10 +3812,11 @@ func (s *Server) handleResearch(ctx context.Context, req *mcp.CallToolRequest) (
 	// RunBatched: 9–12 usable pages used to hit Run's 8-subtask refusal and lose
 	// every page (2026-09-01). Chunks run in order; a chunk error returns WITH
 	// the results already obtained, rendered as partial rather than dropped.
-	opts := &delegate.RunOptions{Quarantine: s.quarantine, Deadline: deadline, Rescue: s.rescueFunc()}
 	// Progress notifications, only for a request that supplied a progress token.
-	defer s.startProgress(ctx, req, opts, len(contracts), deadline)()
-	results, sum, rerr := delegate.RunBatched(ctx, s.p.Cfg(), localRun, contracts, route, nil, opts)
+	onProgress, stopProgress := s.startProgress(ctx, req, len(contracts), deadline)
+	defer stopProgress()
+	results, sum, rerr := delegate.RunBatched(ctx, s.p.Cfg(), localRun, contracts, route, nil,
+		&delegate.RunOptions{Quarantine: s.quarantine, Deadline: deadline, OnProgress: onProgress, Rescue: s.rescueFunc()})
 	if rerr != nil && len(results) == 0 {
 		return jsonResult(map[string]any{"deferred": true, "reason": rerr.Error(), "sources": sources})
 	}

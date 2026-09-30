@@ -65,30 +65,33 @@ type progressReporter struct {
 	lastDone int
 }
 
-// startProgress begins reporting a delegation call's progress and returns the
-// function that ends it (always safe to call, and to defer). It hooks the engine
-// through opts.OnProgress. total is how many subtasks the call owes; deadline is
-// the call's deadline (zero = none).
+// startProgress begins reporting a delegation call's progress. It returns the
+// callback the caller hands the engine as RunOptions.OnProgress, and the function
+// that ends the reporter (always safe to call, and to defer). The callback is
+// returned rather than stored into a shared options value so the call that uses it
+// keeps one RunOptions literal, where the rescue-wiring lint can read the rest of
+// it. total is how many subtasks the call owes; deadline is the call's deadline
+// (zero = none).
 //
-// It does nothing — and returns a no-op — unless the request carried a progress
-// token and has a live session: the spec forbids progress for a request that did
-// not ask for it, and a unit test's bare request has no session at all.
-func (s *Server) startProgress(ctx context.Context, req *mcp.CallToolRequest, opts *delegate.RunOptions, total int, deadline time.Time) (stop func()) {
+// It does nothing — the callback is nil and stop is a no-op — unless the request
+// carried a progress token and has a live session: the spec forbids progress for a
+// request that did not ask for it, and a unit test's bare request has no session
+// at all.
+func (s *Server) startProgress(ctx context.Context, req *mcp.CallToolRequest, total int, deadline time.Time) (onProgress func(delegate.ProgressEvent), stop func()) {
 	noop := func() {}
 	if req == nil || req.Params == nil || req.Session == nil {
-		return noop
+		return nil, noop
 	}
 	token := req.Params.GetProgressToken()
 	if token == nil {
-		return noop
+		return nil, noop
 	}
 	p := &progressReporter{
 		session: req.Session, token: token, total: total, deadline: deadline, begun: time.Now(),
 		events: make(chan delegate.ProgressEvent, progressQueue), quit: make(chan struct{}), done: make(chan struct{}),
 	}
-	opts.OnProgress = p.observe
 	go p.run(ctx)
-	return p.stop
+	return p.observe, p.stop
 }
 
 // observe is the engine's callback. It runs on the engine's goroutines and never

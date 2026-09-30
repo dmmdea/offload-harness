@@ -284,10 +284,9 @@ func TestProgressReporterFlushesWhatWasQueuedWhenTheCallEnds(t *testing.T) {
 	srv := mcp.NewServer(&mcp.Implementation{Name: "burst", Version: "1"}, nil)
 	srv.AddTool(&mcp.Tool{Name: "burst", InputSchema: json.RawMessage(`{"type":"object"}`)},
 		func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-			opts := &delegate.RunOptions{}
-			stop := (&Server{}).startProgress(ctx, req, opts, burst, time.Time{})
+			onProgress, stop := (&Server{}).startProgress(ctx, req, burst, time.Time{})
 			for i := 0; i < burst; i++ {
-				opts.OnProgress(delegate.ProgressEvent{Kind: "finished", Index: i, Done: i + 1, Total: burst, Outcome: "succeeded"})
+				onProgress(delegate.ProgressEvent{Kind: "finished", Index: i, Done: i + 1, Total: burst, Outcome: "succeeded"})
 			}
 			stop()
 			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "ok"}}}, nil
