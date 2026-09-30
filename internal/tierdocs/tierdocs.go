@@ -52,6 +52,10 @@ type Profile struct {
 	// the seed would understate what the tier delivers.
 	MediaSeats []mediaseat.Seat `json:"media_seats"`
 	VLLMSeat   *vllmseat.Spec   `json:"vllm_seat"`
+	// ExtraVLLMSeats are the further vLLM seats served beside VLLMSeat on the same card
+	// (ADR 0048 Amendment 2): a tier page that showed only the lane seat would hide a seat
+	// and the layer it backs.
+	ExtraVLLMSeats []vllmseat.Spec `json:"extra_vllm_seats"`
 	// Composes and Layers are the composite declaration (ADR 0039): the tiers
 	// this one is a COMPLETE instance of, and the device layers it routes work
 	// to. Absent on every ordinary tier, whose page is unchanged.
@@ -260,15 +264,15 @@ func renderTier(name string, p Profile, reports []string) string {
 			"binding can never name a seat that was not rendered:\n\n" +
 			"| seat | kind | binds | model | residency |\n|---|---|---|---|---|\n")
 		for _, s := range p.MediaSeats {
-			bind := "`vision_model`"
-			switch s.Kind {
-			case mediaseat.KindSTT:
-				bind = "`stt_model`"
-			case mediaseat.KindOCR:
-				bind = "`ocr_model`"
+			// The seat itself says which config key it writes; an rkllm seat with no
+			// vision encoder is a chat model and writes none.
+			bind := "—"
+			if k := s.BindingKey(); k != "" {
+				bind = "`" + k + "`"
 			}
 			fmt.Fprintf(&b, "| `%s` | %s | %s | `%s` | %s |\n", s.Name, s.Kind, bind, s.Model, s.Residency)
 		}
+		b.WriteString(rkllmSeatNote(p.MediaSeats))
 		b.WriteString("\nA seat still needs its weights on the box — model downloads stay out-of-band, as with\nevery seed.\n\n")
 	}
 	if len(mediaMidHigh) > 0 {
@@ -367,6 +371,31 @@ func renderTier(name string, p Profile, reports []string) string {
 	}
 	fmt.Fprintf(&b, "\n---\n\n[All tiers](README.md) · [profiles.json](../../setup/templates/profiles.json) · [installer](../systems/setup-installer.md)\n")
 	return b.String()
+}
+
+// rkllmSeatNote describes the seats a table row cannot: an rkllm seat is not a llama.cpp
+// model, so the columns above say nothing about how it runs. One line per seat carries
+// the two settings the runtime is started with, and its vision encoder when it has one.
+// "" when the tier declares none, so every other tier's page is unchanged.
+func rkllmSeatNote(seats []mediaseat.Seat) string {
+	var lines []string
+	for _, s := range seats {
+		if s.Kind != mediaseat.KindRKLLM {
+			continue
+		}
+		line := fmt.Sprintf("- `%s`: window %d, `cpu_mask` `%s`", s.Name, s.CtxSize, s.EffectiveCPUMask())
+		if s.VisionEncoder != "" {
+			line += fmt.Sprintf(", vision encoder `%s`", s.VisionEncoder)
+		}
+		lines = append(lines, line)
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+	return "\nAn `rkllm` seat runs on the NPU through the Rockchip RKLLM runtime, not in llama.cpp. It is\n" +
+		"started with its own window and a `cpu_mask` — the CPUs the runtime's host threads may use\n" +
+		"(at least 3, the runtime refuses fewer than the SoC has NPU cores):\n\n" +
+		strings.Join(lines, "\n") + "\n"
 }
 
 // mediaSeedKey reports whether a config_seed key binds a MEDIA route. The set
@@ -515,6 +544,8 @@ func agentSeatSection(p Profile) string {
 		}
 		b.WriteString("\nThe store is a second device and stays **optional**: a box without one runs the seat on\n" +
 			"VRAM plus the L1 staging buffer.\n")
+	} else if r := strings.TrimSpace(s.StorelessReason); r != "" {
+		b.WriteString("\n### Cache server\n\n" + storelessNote(r))
 	}
 	if s.AgentMaxTokens > 0 || s.AgentThinking != "" || s.AgentSampling != nil || s.AgentTimeoutSec > 0 || s.AgentSeatTokS > 0 {
 		b.WriteString("\n### Bound lane\n\nWhen this seat is the box's agent lane, the loop runs it at the settings it was\n" +
@@ -539,6 +570,65 @@ func agentSeatSection(p Profile) string {
 	if s.Measured != "" {
 		fmt.Fprintf(&b, "\n> %s\n", s.Measured)
 	}
+	b.WriteString(extraSeatsSection(p))
+	return b.String()
+}
+
+// storelessNote states that a seat is deliberately without a cache server, and why. The
+// reason is the tier's own recorded measurement, carried verbatim into the seat's
+// `kv_cache_server` binding, so the page and the config cannot say different things.
+func storelessNote(reason string) string {
+	return "This seat is deliberately **storeless**: it runs on VRAM plus the L1 staging buffer, with no L2 store\n" +
+		"behind it. The tier seeds the binding with the reason below, so `local-offload doctor` prints a\n" +
+		"storeless-OK line for the seat instead of failing it for a missing binding (ADR 0045).\n\n" +
+		"> " + strings.ReplaceAll(reason, "\n", "\n> ") + "\n"
+}
+
+// extraSeatsSection documents the tier's further vLLM seats: on-demand seats beside the
+// lane seat on the same card, each backing a layer of its own. "" for every tier that
+// declares none, so their pages are unchanged.
+func extraSeatsSection(p Profile) string {
+	if len(p.ExtraVLLMSeats) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\n### Extra vLLM seats\n\n" +
+		"These seats are served on demand beside the agent-lane seat above, on the same card (ADR 0048\n" +
+		"Amendment 2). None of them is the agent lane: `agent_model` stays the lane seat, and each is reached by\n" +
+		"name, through the layer that names it. When the box has the venv, a seat's weights and the seat's two\n" +
+		"wrapper scripts, the installer renders its llama-swap entry and seeds its `vllm_seats` roster entry, its\n" +
+		"`kv_cache_server` binding and its layer; without any of them the seat, its binding and its layer are all\n" +
+		"absent, never half-declared. Every vLLM seat of a tier is rendered as an ALTERNATIVE of the others (each\n" +
+		"is sized to most of the card, so two cannot be loaded together). The seat's systemd unit, its wrapper\n" +
+		"scripts (named after the unit: `<unit>-run.sh`, `<unit>-cmd.sh`, `<unit>-cmdstop.sh`) and its polkit rule\n" +
+		"are the operator's step: its launch line carries flags the shared unit template cannot express. That is\n" +
+		"why the scripts are also the seat's prerequisite: llama-swap does not check that an entry's command\n" +
+		"exists, so a seat advertised without them would fail only when a contract asked for it.\n")
+	for _, e := range p.ExtraVLLMSeats {
+		fmt.Fprintf(&b, "\n#### `%s`\n\n| setting | value | what it controls |\n|---|---|---|\n", e.ID)
+		fmt.Fprintf(&b, "| id | `%s` | the llama-swap model id, `--served-model-name`, and what a layer seat names |\n", e.ID)
+		if len(e.Aliases) > 0 {
+			fmt.Fprintf(&b, "| aliases | `%s` | the other names that reach the seat (rewritten to the id) |\n", strings.Join(e.Aliases, "` / `"))
+		}
+		fmt.Fprintf(&b, "| unit | `%s` | the systemd unit the operator installs; llama-swap starts and stops it on demand |\n", e.Unit)
+		fmt.Fprintf(&b, "| cards | `%s` | `CUDA_VISIBLE_DEVICES`; must be the lane seat's cards |\n", dash(e.Device))
+		fmt.Fprintf(&b, "| max_model_len | %d | the served window |\n", e.MaxModelLen)
+		fmt.Fprintf(&b, "| gpu_memory_utilization | %.2f | the engine's share of the card |\n", e.GPUMemoryUtilization)
+		fmt.Fprintf(&b, "| max_num_seqs | %d | the engine's concurrency, and the entry's `concurrencyLimit` |\n", e.MaxNumSeqs)
+		fmt.Fprintf(&b, "| kv_cache_dtype | `%s` | KV precision |\n", dash(e.KVCacheDtype))
+		fmt.Fprintf(&b, "| tool_call_parser / reasoning_parser | `%s` / `%s` | per model family, and not optional for an agent-shaped seat |\n", dash(e.ToolCallParser), dash(e.ReasoningParser))
+		fmt.Fprintf(&b, "| ttl_seconds | %d | idle window before the seat unloads and frees the card |\n", e.TTLSeconds)
+		if c := e.CacheServer; c != nil {
+			fmt.Fprintf(&b, "| cache server | `%s` at `%s` | the store behind this seat |\n", c.StoreName(), c.Address)
+		} else if r := strings.TrimSpace(e.StorelessReason); r != "" {
+			b.WriteString("\n**Cache server:** none.\n\n" + storelessNote(r))
+		}
+		if e.Measured != "" {
+			// Labelled, because a quote directly after the storeless reason's quote would read as
+			// one block: two different records, the cache-server decision and the seat's operating point.
+			fmt.Fprintf(&b, "\n**Measured.**\n\n> %s\n", e.Measured)
+		}
+	}
 	return b.String()
 }
 
@@ -551,7 +641,15 @@ func composesSection(p Profile) string {
 		return ""
 	}
 	var b strings.Builder
-	b.WriteString("\n## Composes\n\n")
+	if len(p.Composes) == 0 {
+		// A layers-only tier (one device, several seats served in turn) composes no other tier,
+		// so the heading that says "Composes" would claim a composition it does not have.
+		b.WriteString("\n## Layers\n\n" +
+			"This tier declares device LAYERS (ADR 0039) on the card(s) it already has: the layer decides which seat\n" +
+			"serves a task, and a layer's seat is seeded only while the box actually runs it.\n\n")
+	} else {
+		b.WriteString("\n## Composes\n\n")
+	}
 	if len(p.Composes) > 0 {
 		b.WriteString("This box is a COMPLETE instance of each of these tiers at once (ADR 0039) — it does not\n" +
 			"merely resemble them, and the fleet reads one capacity row per layer rather than one per box:\n\n")
@@ -572,7 +670,7 @@ func composesSection(p Profile) string {
 		for _, s := range l.Seats {
 			switch {
 			case s.Model != "":
-				seats = append(seats, fmt.Sprintf("%s → `%s` (device %s%s)", s.Role, s.Model, dash(s.Device), window(s.CtxTokens)))
+				seats = append(seats, fmt.Sprintf("%s → `%s` (device %s%s%s)", s.Role, s.Model, dash(s.Device), window(s.CtxTokens), inflight(s.MaxInflight)))
 			case len(s.ModelMap) > 0:
 				var routes []string
 				for _, route := range sortedKeys(s.ModelMap) {
@@ -608,6 +706,15 @@ func composesSection(p Profile) string {
 			l.Name, dash(l.Tier), "`"+strings.Join(l.Devices, "` / `")+"`", strings.Join(seats, "<br>"), guards, state)
 	}
 	return b.String()
+}
+
+// inflight renders a seat's declared concurrency (vLLM max_num_seqs) for the layer table,
+// and nothing for a seat that declares none (a llama.cpp seat is never saturated by count).
+func inflight(n int) string {
+	if n <= 0 {
+		return ""
+	}
+	return fmt.Sprintf(", %d in flight", n)
 }
 
 // window renders a seat's declared context window for the layer table, and

@@ -37,18 +37,19 @@ var (
 	// vllmSeatDebt: tiers that CANNOT yet seat a model under vLLM. Every entry is a
 	// gap to close, not a settled exemption.
 	vllmSeatDebt = map[string]string{
-		"ampere-6":       "6 GB: needs a measured sub-6 GB w4a16 candidate",
-		"ampere-8":       "8 GB: 9B w4a16 arm never run against the llama.cpp seat",
-		"amd-gcn":        "ROCm build path not established for this box class",
-		"amd-rdna3":      "ROCm build path not established for this box class",
-		"amd-rdna3-dgpu": "ROCm build path not established for this box class",
-		"blackwell-8":    "8 GB + accelerator tier: vLLM arm never measured",
-		"blackwell-32":   "no box of this class online to measure on",
-		"blackwell-48":   "no box of this class online to measure on",
-		"blackwell-72":   "no box of this class online to measure on",
-		"cpu":            "no GPU: vLLM CPU inference is forbidden by the RAM-is-overflow-only rule",
-		"dual-gpu":       "generic two-card fallback profile; seat follows whichever tier it resolves to",
-		"volta-16":       "sm70: needs a kv_cache_dtype that Volta backends accept",
+		"ampere-6":        "6 GB: needs a measured sub-6 GB w4a16 candidate",
+		"ampere-8":        "8 GB: 9B w4a16 arm never run against the llama.cpp seat",
+		"amd-gcn":         "ROCm build path not established for this box class",
+		"amd-rdna3":       "ROCm build path not established for this box class",
+		"amd-rdna3-dgpu":  "ROCm build path not established for this box class",
+		"blackwell-8":     "8 GB + accelerator tier: vLLM arm never measured",
+		"blackwell-32":    "no box of this class online to measure on",
+		"blackwell-48":    "no box of this class online to measure on",
+		"blackwell-72":    "no box of this class online to measure on",
+		"cpu":             "no GPU: vLLM CPU inference is forbidden by the RAM-is-overflow-only rule",
+		"dual-gpu":        "generic two-card fallback profile; seat follows whichever tier it resolves to",
+		"rockchip-rk3588": "vLLM has no Mali or RKNPU target: the GPU is served by llama.cpp on Vulkan (Mesa panvk) and the NPU by the Rockchip RKLLM runtime",
+		"volta-16":        "sm70: needs a kv_cache_dtype that Volta backends accept",
 	}
 )
 

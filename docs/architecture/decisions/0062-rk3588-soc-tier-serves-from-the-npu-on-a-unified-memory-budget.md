@@ -1,0 +1,77 @@
+---
+status: Accepted
+date: "2026-09-30"
+---
+
+# ADR 0062 — An RK3588 SoC board is its own tier: it serves from the NPU on a unified-memory budget, never from the CPU, and a GPU entry waits for a clean measurement
+
+## Context
+
+The operator added a Rockchip RK3588 board (reference: an Orange Pi 5, RK3588S) to the fleet. It has no
+NVIDIA or AMD GPU: 4x Cortex-A55 + 4x Cortex-A76, 7.7 GiB of LPDDR4X shared by the CPU, a Mali-G610 GPU
+and a 3-core 6 TOPS NPU. It also runs the operator's home-automation stack, and the operator's orders
+shape everything below: the CPU is reserved for that stack (no CPU inference, ADR 0054's amendment), part
+of the RAM stays reserved for it, and every model unloads after five idle minutes.
+
+Before this change the harness could not use the board at all:
+
+- `hwdetect` only recognised a GPU through a PCI vendor id, so the SoC classified as `cpu` and the
+  installer would have rendered CPU seats.
+- `fleet-serve` refuses to start without a GPU memory source, and the only Linux source was amdgpu sysfs.
+- No engine in the harness drove the NPU.
+
+What was measured on the reference board (2026-09-29/30), after moving it from the vendor 6.1 kernel to
+Ubuntu's mainline 7.0 kernel on the operator's order ("latest kernel, latest drivers"):
+
+- **NPU**: Rockchip's RKLLM 1.3.1 and RKNN 2.3.2 runtimes need Rockchip's own `rknpu` driver, not the
+  mainline in-tree `rocket` driver. On mainline it comes from an out-of-tree DKMS build (0.9.8). Both
+  runtimes run there; LLM decode is weight-bandwidth-bound and RKLLM on RK3588 only offers W8A8, so the
+  largest LLM that fits the budget is Qwen3.5-2B (2.98 GB + a 0.70 GB vision encoder). The runtime needs
+  at least as many enabled CPU threads as NPU cores (3), and which cores it uses changes prefill ~5x.
+- **GPU**: Mesa 25.2.8 panvk exposes the Mali as a conformant Vulkan 1.4 device, but llama.cpp b11270's
+  first compute submission never completes: panthor reports a job timeout and llama.cpp aborts with
+  `vk::DeviceLostError`, for every model and batch size tried, on a freshly reset GPU.
+
+## Decision
+
+1. **A tier, `rockchip-rk3588`, detected from the device tree.** The root `compatible` carries
+   `rockchip,rk3588` (vendor kernel) or `rockchip,rk3588s` (mainline); either classifies the board. It
+   is never `cpu`.
+2. **Unified memory is the GPU memory source.** A `linux-meminfo` provider advertises MemTotal less
+   `uma_reserve_gib` as capacity and MemAvailable less the reserve as free. The reserve is the host
+   workload's RAM; the tier seeds 3 GiB. Placement and the fleet overview read the same fields as any
+   other node.
+3. **The NPU serves the models.** A new seat kind, `rkllm`, renders an llama-swap entry that launches
+   `accelerators/rknpu/rkllm_server.py`, an OpenAI-compatible server over the RKLLM runtime (chat and
+   vision, one generation at a time, ttl 300 like every seat). A new accelerator, `rknpu`, clones the
+   Coral sidecar contract (ADR 0024/0038) for image classification, detection and embedding on the NPU.
+   Its detection accepts both kernels' sysfs layouts and never matches `rocket`.
+4. **No CPU inference, and the CPU reservation is a seat setting.** The tier renders no CPU seat and no
+   `alt_backends`. The RKLLM runtime's host threads are bounded by the seat's `cpu_mask` (at least three
+   bits); the tier default is the A55 cluster, the strict reading of the operator's reservation.
+5. **The tier has its own template, and it may hold no model of its own.** The stock Vulkan template
+   always renders models that do not fit a ~4.7 GiB budget. `llama-swap.linux-rk3588.yaml` lists only what
+   fits, which today is nothing: every model is a tier seat. The serving audit therefore accepts an empty
+   `models:` map in a raw template only when that template carries an `# offload-seats:` directive, and
+   `Render` refuses any result that still serves no model. A set made only of seats no longer renders with
+   a leading operator.
+6. **A GPU entry comes back only on a clean measurement.** The template keeps the Vulkan conventions
+   (device pin, loader path, flag macros) so that a Mesa/panthor/llama.cpp combination that passes on this
+   silicon can be re-added as an ordinary llama.cpp entry. vLLM has no Mali or RKNPU target, so the tier
+   carries a `vllmSeatDebt` row instead of a `vllm_seat`.
+
+## Consequences
+
+- A second RK3588 board (Rock 5B, Orange Pi 5 Plus, ...) installs as this tier from the same detection,
+  but its NPU driver and model files are box work the installer does not do: the vendor runtime libraries,
+  the DKMS driver on a mainline kernel, and the `.rkllm` / `.rknn` files.
+- The node registers with `fleet_agent_enabled: false`. It serves the vision lane (the NPU VLM) and the
+  accelerator lane (the rknpu sidecar) to other boxes, and its chat model is reachable through the chat
+  lane. It takes no agent contract.
+- Answer quality of the NPU seat against other tiers' seats is not yet judged. The notes say so, and the
+  seat is the largest that fits, not a measured winner.
+- The NPU seat refuses grammar and json_schema requests with a 400 (`constrained_decoding_unsupported`),
+  because the runtime cannot constrain sampling and ignoring the constraint would return an answer that only
+  looks valid. `assess_image` and the grammar cascade tasks do not run on this node; free-text chat and vqa do.
+- The seats-only template rule is general. Any future template that leaves every model to its tier's
+  seats inherits the audit exception and the empty-render refusal.

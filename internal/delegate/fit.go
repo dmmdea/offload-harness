@@ -81,8 +81,11 @@ var shapeRules = []shapeRule{
 	{"mechanical-verb", mechanicalRe, KindMechanical},
 }
 
-// researchDoors are the doors that build one grounded digest contract per fetched
-// page (mcpserver's offload_research, main's research verb).
+// researchDoors are the Door values the research lane stamps on the contracts it
+// builds, one grounded digest contract per fetched page: offload_research (MCP) and
+// cli:research (the CLI verb). Three rules read it: the placement shape below
+// (digestShaped), the per-page retry cap (processgate.go) and the verification retry's
+// research-acceptance skip (skipsRetryAsResearchAcceptanceOnly, run.go).
 var researchDoors = map[string]bool{"offload_research": true, "cli:research": true}
 
 // digestShaped reports whether c is a research PAGE DIGEST by its shape: the

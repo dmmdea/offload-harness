@@ -64,7 +64,11 @@ first, because a heterogeneous pair outranks any single-card band:
 | AMD, anything else | `amd-gcn` |
 | No usable GPU | `cpu` |
 
-Fourteen profiles. Two boundaries are deliberately below their nominal card size: the `ampere-8` band
+Fifteen bands. Linux adds one PowerShell has no row for: `hwdetect` (the Go classifier `install detect`
+runs) reads the device tree's root `compatible` when no NVIDIA or AMD adapter answered, and a board
+that names the RK3588 SoC (`rockchip,rk3588` on the vendor kernel, `rockchip,rk3588s` on mainline)
+is `rockchip-rk3588` — a board with no PCI adapter would otherwise fall through to `cpu` and be handed
+CPU inference. Two boundaries are deliberately below their nominal card size: the `ampere-8` band
 starts at **7 GB**, and `blackwell-72` starts at **64 GB** so it covers both 72 GB and 96 GB
 workstation cards until larger hardware is actually measured.
 
@@ -225,6 +229,46 @@ download set, and `Get-FamilyModelKeys` adds `model-26b` only when the resolved
 (`include_26b: false`) fetched 14.25 GB the rendered yaml never serves (OptiPlex parity
 audit, 2026-09-23).
 
+#### The `rk3588` backend (Rockchip SoC boards)
+
+The `rockchip-rk3588` tier renders from its own template, `llama-swap.linux-rk3588.yaml`, and not
+from `llama-swap.linux-vulkan.yaml`: the stock vulkan template always renders `offload-e4b` (~5 GB
+plus KV) beside an embedder and a reranker, and none of that fits a board whose GPU and NPU share
+about 4.7 GiB of inference budget with the host's own workload (`uma_reserve_gib` holds the rest
+back). The template lists only what fits — one llama.cpp Vulkan chat entry, `GGML_VK_VISIBLE_DEVICES=0`,
+every layer offloaded — and places the tier's `rkllm` NPU seats (a model served by the Rockchip RKLLM
+runtime, with its own window and CPU mask) as alternatives to it. No model runs on the CPU there: the
+tier declares no `alt_backends`, so `--llama-bin-cpu` is refused. `--llama-bin` still names a
+llama.cpp build with the Vulkan backend, as for `vulkan`; the installer script needs nothing else.
+
+#### What `install render` refuses to write
+
+Every render passes one gate (`renderGate`) before it can be written. A failure names the tier and
+every offender, and nothing is written:
+
+1. **The serving-config rules (H-01, INV-1 / INV-2).** No `-ngl 0` or empty `CUDA_VISIBLE_DEVICES` (a
+   model on the CPU), `ttl: 300` on every entry, no `persistent` group, no preload hook.
+   `local-offload audit-yaml` runs the same checker over a live file.
+2. **The spill ceiling (H-01, INV-1).** `--n-cpu-moe N` (every spelling, and the `LLAMA_ARG_N_CPU_MOE`
+   twin) above the tier's `n_cpu_moe_max`, its MEASURED spill, is refused. A tier that recorded none
+   sanctions none, so any `N` above zero is refused. A tier that names `moe_26b: n_cpu_moe` with no `N`
+   is refused too, because that renders the every-expert `--cpu-moe` on a box with a card.
+   `n_cpu_moe_max` is a separate number from `n_cpu_moe` on purpose: the placement a tier ships and the
+   ceiling its measurement supports are two decisions, and one field cannot check itself. No shipped tier
+   declares a partial spill today.
+3. **The layer check (ADR 0039, D5).** A tier that declares layers must render the seats they name, on the
+   cards they name. It runs for any tier that declares layers, not only one that composes others: the
+   `ampere-16` tier's `fast` layer would otherwise route to a seat the config never defined.
+
+Rules 1 and 2 read each entry the way llama-swap runs it: a `${name}` macro is replaced by its text first
+(nested macros too), because the templates keep their shared flags in `macros:` and a flag placed there is run
+by every entry that references it.
+
+`TestInstallRendersOnAnyTierWithoutACacheServer` is the other half of the same promise (INV-16: the
+harness installs and serves on any single PC, and the cache-server tier is optional): every tier renders
+with no vLLM prerequisites, and a tier whose vLLM seat declares no store renders the seat, its unit and its
+wrappers with no cache-server piece anywhere and seeds an explicit storeless binding for it.
+
 #### The provenance stamp (0.123.0, ADR 0043)
 
 Every config `install render` writes now begins with a six-line comment block:
@@ -306,7 +350,10 @@ It resolves the tier seed **exactly as `install seed` does**, with the same `--g
 `--ram-tier` and vLLM-seat detection. Skip them and the audit compares the node against a seed
 the installer would never have written, such as a vLLM box against its fallback agent, and
 reports drift that is its own artifact. `--vllm-seat-active auto` runs the installer's own
-detection, which is right for the local box. Pass `true` or `false` for a remote one.
+detection, which is right for the local box. Pass `true` or `false` for a remote one. The flag speaks
+for the tier's vLLM seats as a set: `true` says the node serves the lane seat and every extra seat,
+`false` none, and `auto` detects each seat on its own (the venv plus that seat's weights, and for an extra
+seat the wrapper scripts in `--vllm-seat-dir`, default `<home>/seat`).
 
 It reports only **seed-owned** keys: every key some tier's resolved seed can write, plus live
 bindings no tier seeds at all. A config also holds keys that are legitimately this machine's
@@ -339,6 +386,10 @@ absent. The live service on `:11436` was untouched throughout.
 ```
 setup/install.sh --bin ./local-offload --llama-bin /path/to/llamacpp/build/bin [--prefix DIR] [--user NAME]
 ```
+
+`--llama-bin` is required on every tier except one whose backend (`install tier-info`) is `rk3588`: that
+tier's template has no llama.cpp entry (the NPU serves), so a board there has no build to point at.
+`setup/install.tests.sh` pins the rule and the `--rknpu-home` pass-through with a stub binary under `--dry-run`.
 
 It is **deliberately thin**. Every decision that can be wrong lives in the binary, which
 is cross-compiled and unit-tested; the script only fetches, places and registers:
@@ -436,6 +487,23 @@ local-offload install seed --profile ampere-6 --home /srv/offload-stack --os lin
 
 `TestEveryShippedSeedIsValid` resolves every tier in the table for **both** platforms, which
 is the gate that would have caught `sd-cli.exe`.
+
+**vLLM seats, the roster and the layers.** `install seed` decides once, per seat, whether the box can run
+it (the hand-built venv plus that seat's weights) and seeds accordingly:
+
+- The lane seat (`vllm_seat`) binds `agent_model`; a box without it binds the seat's fallback.
+- Every further seat (`extra_vllm_seats`) that the box can run joins the `vllm_seats` roster with its own
+  `kv_cache_server` binding, and never touches `agent_model`. "Can run" adds the operator's part to the lane
+  seat's check: the seat's wrapper scripts must be in the seat directory (`--vllm-seat-dir`, default
+  `<home>/seat`, the same flag `install render` takes), because the installer does not write them and
+  llama-swap would list a seat whose scripts are missing and fail only when it is asked for. A seat with no store seeds an explicit
+  storeless opt-out carrying its `storeless_reason` (the measured reason) or, when the tier recorded none,
+  the generic one, so a fresh install never ships a config its own `doctor` rejects.
+- The tier's `layers` are seeded as the box can serve them: a layer whose vLLM seat is absent is dropped, and
+  a layer set that lost `single` is not seeded at all (`tierseed.ResolveLayers`).
+
+The composite design and what an `ampere-16` operator still installs by hand are in
+[composite-tier.md](composite-tier.md).
 
 ### Relocating an install: one knob, not a dozen paths
 

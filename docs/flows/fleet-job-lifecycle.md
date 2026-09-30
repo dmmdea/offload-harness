@@ -50,6 +50,23 @@ stack that actually runs the work.
 6. **A successful render also records a footprint observation**, so the node's advertised costs
    improve with use.
 
+7. **A delegator that gives up can take an unstarted job back (ADR 0064).**
+   `DELETE /fleet/jobs/{id}` (agent bearer) withdraws a job that is still `accepted`: `200
+   {"state":"withdrawn"}` when it had not started (it never will; the same answer for a job the node
+   itself already took back), `409` with the job's own state when it had (the node does not touch it),
+   `404` for an unknown id, `405` for a non-agent job. The delegator
+   asks once, best-effort, at its queue deadline, on cancel and at a poll deadline (owned or not); only a
+   confirmation makes the subtask re-placeable. A node without the route answers `405`/`404` and the
+   delegator behaves as before, but its row says why the withdraw was not confirmed. A poll answered `401`
+   is not withdrawn from: the intent stays open for recovery.
+
+8. **A node cleans up after a delegator that left.** A pushed agent job that stays `accepted` with nobody
+   polling it for `fleet_poll_lease_sec` is skipped by the scheduler and reaped (`error: "reaped: ..."`),
+   never a running one. Polls come from `GET /fleet/jobs/{id}` (authorized; a parked long poll counts) and
+   authorized duplicate dispatches; the jobs feed does not count, and a duplicate dispatch without the
+   bearer is a `401` whatever task type it declares. A delegator that comes back to a `reaped` job reads
+   that the job never ran and re-places the subtask on another node.
+
 ## Duplicate dispatch
 
 This is the part with fleet-wide consequences, and the asymmetry is deliberate.
@@ -59,9 +76,14 @@ This is the part with fleet-wide consequences, and the asymmetry is deliberate.
 | `accepted` | `202` re-ack | Already mine; do not schedule a second copy |
 | `running` | `202` re-ack | Same |
 | `done` | `202` re-ack | Same — see below |
-| `error` | `409` | I tried and failed; another node legitimately should try |
+| `error` | `409` | I tried and failed; another node legitimately should try (a job withdrawn or reaped is an `error` too, and is never run again under its id) |
 
 A duplicate never starts a second run — acceptance is guarded so exactly one render happens per id.
+
+For an agent or vision job on a node with a `fleet_auth_token`, every row above is answered only to a
+caller that carries the bearer: the job's own record decides, not the `task_type` the duplicate declares,
+so a media-typed re-dispatch of an agent job's id is a `401` and neither restarts its poll lease nor reads
+its error.
 
 The reasoning behind `done` → `202`: the dispatcher treats any non-`202` as a refusal and may
 re-dispatch elsewhere. If a completed job answered non-`202`, the dispatcher would buy a duplicate
@@ -119,8 +141,9 @@ however many times the job was dispatched.
 Defer from the underlying work is carried through as job data — a deferred render is a completed job
 with a deferred result, not a job error.
 
-Drain marks non-terminal survivors as `error: "interrupted"`, and draining happens *before* the
-listener closes so pollers can still read final state.
+Drain marks non-terminal survivors as `error: "interrupted"` (or `not started: ...` for one still in the
+backlog), and draining happens *before* the listener closes so pollers can still read final state. A
+withdrawn job reads `error: "withdrawn: ..."` and a reaped one `error: "reaped: ..."`; neither ran.
 
 ## External dependencies
 
@@ -153,12 +176,15 @@ always a stalled sampler, not a dead node. When a job is missing, check whether 
 `internal/fleetnode/server_test.go` covers the health golden shape and both 503 paths, the dispatch
 rejection matrix, and both duplicate cases — including an assertion that the runner executed exactly
 once. `jobs_test.go` covers the state machine, concurrent accept, eviction, and drain.
+`jobs_withdraw_test.go` and `withdraw_route_test.go` cover the withdraw (including its race with the
+scheduler's claim), the poll lease and reaper, and the route's bearer gate and answer table.
 
 ## Source map
 
 - [`internal/fleetnode/server.go`](../../internal/fleetnode/server.go) — routes and duplicate
   semantics
-- [`internal/fleetnode/jobs.go`](../../internal/fleetnode/jobs.go) — state machine, drain, eviction
+- [`internal/fleetnode/jobs.go`](../../internal/fleetnode/jobs.go) — state machine, drain, eviction,
+  withdraw, poll lease and reaper
 - [`main.go`](../../main.go) — `fleet-serve` startup, GPU probe, drain
 
 ## Related docs
@@ -166,3 +192,4 @@ once. `jobs_test.go` covers the state machine, concurrent accept, eviction, and 
 - [../systems/fleet-node.md](../systems/fleet-node.md)
 - [../FLEET-NODE.md](../FLEET-NODE.md) — operator guide
 - [../architecture/decisions/0008-pdh-primary-vram-sampling.md](../architecture/decisions/0008-pdh-primary-vram-sampling.md)
+- [../architecture/decisions/0064-a-delegator-takes-back-what-it-has-not-started.md](../architecture/decisions/0064-a-delegator-takes-back-what-it-has-not-started.md)

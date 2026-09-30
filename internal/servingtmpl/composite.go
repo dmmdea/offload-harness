@@ -166,6 +166,12 @@ func CheckComposite(rendered string, decl CompositeDecl, composed []ComposedTier
 		return nil
 	}
 	sort.Strings(problems)
+	if len(decl.Composes) == 0 {
+		// A layers-only tier (no `composes`) has no union to be the checked union of; what it
+		// owes is that every layer it declares is served by the config that was rendered.
+		return fmt.Errorf("tier %s declares layers the rendered config does not serve:\n  - %s",
+			decl.Tier, strings.Join(problems, "\n  - "))
+	}
 	return fmt.Errorf("composite tier %s is not the checked union of %s:\n  - %s",
 		decl.Tier, strings.Join(decl.Composes, ", "), strings.Join(problems, "\n  - "))
 }

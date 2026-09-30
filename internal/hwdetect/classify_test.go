@@ -11,6 +11,10 @@ import (
 // implementations of one classifier exist while the Windows installer still calls
 // the PowerShell one, so they must agree on every case the shipped suite asserts —
 // a machine's tier cannot depend on which code path asked.
+//
+// One band has no row here on purpose: rockchip-rk3588 is recognised from the Linux
+// device tree, which Windows does not have, so detect.ps1 has no counterpart to agree
+// with. It is asserted in soc_test.go instead.
 
 func TestArchFromNameMatchesTheShippedTable(t *testing.T) {
 	for _, tc := range []struct{ name, want string }{
@@ -151,6 +155,12 @@ func TestClassifyNeverGuessesCPUForAKnownVendor(t *testing.T) {
 	if got.Profile != "amd-gcn" {
 		t.Errorf("an unclassified AMD part = %q, want the weakest Vulkan path, never cpu", got.Profile)
 	}
+	// The same rule for a recognised SoC: "cpu" would render CPU inference on a box
+	// whose whole point is that the NPU does it.
+	got = Classify(Facts{Vendor: "rockchip", Arch: "rk3588", GPUCount: 1, RAMGb: 7, UMA: true})
+	if got.Profile != "rockchip-rk3588" {
+		t.Errorf("a recognised RK3588 = %q, want rockchip-rk3588, never cpu", got.Profile)
+	}
 }
 
 // TestDetectDescribesThisMachine is the only test that touches real hardware: the
@@ -164,7 +174,7 @@ func TestDetectDescribesThisMachine(t *testing.T) {
 	if f.RAMGb <= 0 {
 		t.Errorf("RAM = %d GB — the dual-gpu band keys on this", f.RAMGb)
 	}
-	if f.Vendor == "nvidia" || f.Vendor == "amd" {
+	if f.Vendor == "nvidia" || f.Vendor == "amd" || f.Vendor == "rockchip" {
 		if f.GPUName == "" {
 			t.Error("a detected GPU must be named")
 		}

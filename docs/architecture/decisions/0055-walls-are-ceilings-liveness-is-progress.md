@@ -37,7 +37,8 @@ determine if a job is truly still going" — was not met by any of the three sur
    The client decodes the SSE stream into the same `wireResp` a JSON answer produces, so
    nothing after the decode changed; each delta (content, reasoning or tool-call arguments) is a
    progress event delivered through a `ProgressFunc` carried in the call's context. A seat that
-   answers JSON anyway (a proxy that ignores `stream`) is decoded as before.
+   answers JSON anyway (a proxy that ignores `stream`) is decoded as before. The structured
+   re-pack is one of these completions too (item 8).
 
 2. **A run is ended by a STALL or by a CEILING — never by its expectation expiring.** The
    contract's wall (`timeout_sec`, or the node's auto wall) is now the **expectation**: still
@@ -47,7 +48,8 @@ determine if a job is truly still going" — was not met by any of the three sur
      admission → the admission budget; **prefill** → `pending prompt tokens ÷ the seat's
      measured prefill rate × 1.5 + 30 s` (100 tok/s assumed until measured — 400 was the first guess and filed a false stall on the Lenovo GSQ seat, 0.131.1); **decoding** →
      `20 deltas ÷ decode rate`; **tool** → the tool's own cap + 30 s (an uncapped tool: 1 h);
-     **re-pack** → its chat timeout; all floored at 60 s. A stall is filed
+     **re-pack** → `max(120 s, 1.5 × expected answer tokens ÷ decode rate + 30 s)` (item 8); all
+     floored at 60 s. A stall is filed
      `stalled: no progress for Xs in <phase> (allowed Ys: <arithmetic>)` as
      **`DeferClassInfrastructure`** — the seat's health, never the budget signal.
    - **Ceiling** = `max(3 × estimate, 2 × wall, 1800 s)`, capped at 4 h
@@ -117,6 +119,64 @@ determine if a job is truly still going" — was not met by any of the three sur
    allowance from an expected tool-call length was rejected: the engine has a real signal, and an
    estimate would either cut long calls or blind the watch to a hung engine for minutes.
 
+8. **The structured re-pack follows the same rules (amendment 2026-09-30, register C-66, RC-6).**
+   Items 1 and 2 said every completion streams and the allowance follows the seat, but the re-pack was
+   the one call that did neither. It went out non-streamed under a flat 120 s allowance, so the monitor
+   heard nothing between the phase start and the reply and the allowance fired at exactly the phase
+   start plus 120 s, whatever the answer size or the seat's rate. Each attempt also carried a
+   transport bound of its own, and once the monitor cancelled, attempts 2 and 3 still started on the
+   dead context and were counted. From 2026-09-20 to 2026-09-29, 119 re-packs were killed that way,
+   every one carrying a finished answer (about 15 job-hours discarded); a seat producing at 3 to 8
+   tok/s was the day's worst case. Now:
+   - **It streams.** `stream: true` with `stream_options.include_usage`, decoded into the same result a
+     JSON answer gives (`llamaclient.WithProgress`). A server that answers JSON anyway is decoded as
+     before; a stream that dies mid-body is a transport failure (`*BodyError`); a server that refuses the
+     stream with a 400 or 422 is asked again once as one JSON answer, and a retry that answers is
+     remembered for that seat for 30 minutes, and the wire says so: `repack_note` reads `streaming refused
+     by this seat` (on a success too), because on such a seat the re-pack is one silent request under its
+     allowance again and nothing else would show that the streaming fix did not apply. vLLM's own
+     structured-outputs example runs with `--stream`,
+     so a stream together with `structured_outputs` is documented; it was not verified live on the seat
+     builds in use, which is why the JSON answer is the fallback when a server refuses.
+   - **Every delta is progress**, for the monitor and for the job record (phase `repack`, tokens, last
+     progress), so a delegator polling the node sees the re-pack work. The allowance is published when the
+     phase starts: a remote delegator stops polling one allowance plus grace after the node's last report.
+   - **The allowance follows the answer and the seat.** `max(120 s, 1.5 × expected answer tokens ÷ decode
+     rate + 30 s)`, where expected is the answer's size (about a token per three characters plus the
+     object's overhead), never the completion cap: a wedged engine's flat bound stretches to the phase's
+     allowance (ADR 0061), and one sized to the cap would hold a dead seat for it. A seat with no
+     measured rate keeps the flat 120 s. A stalled re-pack's reason names the arithmetic, or the flat bound
+     and why it is the flat bound.
+   - **The context owns the deadline.** Under the monitor the re-pack's requests carry no transport
+     bound (the client's `Timeout` covers the whole body read), so the busy hold governs a request whose
+     seat is working for others, and once the monitor has cancelled no further attempt starts:
+     `repack_attempts` counts the requests actually sent. A caller with no monitor keeps the per-attempt
+     bound.
+   - **A finished answer is not lost with its structuring.** The node flags the defer `schema_miss` when
+     its loop finished and only the re-pack failed. The delegator re-packs the answer itself before
+     acceptance: the lossless reading first (the answer may already be the object), then one completion on
+     its own agent seat. It is one request, not a run, so it takes no slot of the run cap and queues
+     through the client's admission like any other. A seat that is not resident is warmed first, on the
+     box's admission budget and outside the re-pack's allowance, as a run's own admission does: the
+     delegator's seat is idle-unloaded after five minutes, so the rescue routinely finds it cold, and a
+     cold load is longer than the whole allowance. The rescue may therefore wait up to
+     `agent_admission_wait_sec` (300 s by default) behind a GPU-lease fence or another model's swap
+     before its own allowance starts; the delegation context has no deadline of its own until the
+     whole-call deadline (PR-6), so those two bound it. The object is validated against the contract's schema
+     with every field the acceptance reads required, acceptance then decides, and a rescue that cannot
+     produce a validated object leaves the node's defer exactly as sent, still counted as lost work. A node
+     that predates the flag is recognized from `stop_reason: done` and the reason prefix.
+   - **A warm-up refused with a server error is a seat that did not start, only when nothing says it is
+     busy.** Admission proceeded into the wall on any non-200 warm-up answer and reported it as a load.
+     A non-200 that loaded nothing is no longer counted as a load, and a 5xx now defers as infrastructure
+     before any wall exists when there is positive evidence the seat's process died: llama-swap's answer
+     is not one of its busy shapes, `/running` lists no row for the seat and nothing else is mid-swap, and
+     `/running` was readable. A busy card is a place in line, so a 503 `process is not ready`, a 500 of
+     llama-swap's own, a health-check timeout, an empty 502, a seat that reads starting and another
+     model's swap all proceed, as do a 404 and a timeout. The rule ships in audit mode
+     (`agent_warm_failure_defer`, off by default: the run proceeds and `admission_note` says it would have
+     deferred); enforced, the delegator gives the defer one retry on another node, like the coherence defer.
+
 ## Consequences
 
 - A 27B seat at 1 tok/s finishes its contract. A seat that dies mid-stream (an engine error
@@ -128,7 +188,7 @@ determine if a job is truly still going" — was not met by any of the three sur
   liveness touch (the seat answered), never a stall.
 - The client's own `Timeout` no longer applies to a call under liveness: with streaming it
   would cover the whole body read and cut a long answer mid-stream. The context owns the
-  deadline there; the CLI doors and probes keep the client timeout.
+  deadline there (the re-pack included, item 8); the CLI doors and probes keep the client timeout.
 - Contract sizing (`timeout_sec`, `wall_estimate_sec`, `wall_sec`) and the delegator's
   anchoring (D-116) are untouched. `AgentTimeoutSecCap = 900` still caps the *declared*
   value; it no longer ends anything.
@@ -160,6 +220,8 @@ the D-row this ADR is filed under. Supersedes the enforcement half of D-03; D-03
 
 - `internal/agent/client_stream.go`, `internal/agent/client.go` — the SSE decoder and the streamed `Chat`.
 - `internal/agent/progress.go`, `internal/agent/liveness.go` — the progress callback, `StallPolicy`, `Monitor`.
+- `internal/llamaclient/stream.go` — `WithProgress`, the SSE decoder and the JSON fallback (item 8).
+- `internal/pipeline/agentrescue.go`, `internal/delegate/rescue.go` — the delegator's rescue of a finished answer (item 8).
 - `internal/agent/loop.go` — phases and per-delta progress from the loop.
 - `internal/pipeline/liveness.go`, `internal/pipeline/agenttask.go` — the policy, the ceiling, the stall/ceiling arms, the fleet progress report.
 - `internal/gpuactivity/registry.go` — job liveness beside the heartbeat; `Run.Liveness`.

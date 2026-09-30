@@ -13,6 +13,7 @@ every failure a non-2xx.
 | `GET /fleet/health` | node id, live global VRAM (total/free GiB), supported task types + model families **derived from this box's actual config**, measured per-family VRAM footprints, queue depth. Never blocks on a render. `503` when the VRAM snapshot is unavailable **or older than 30s** (nvidia-smi failing, e.g. a driver reset) — a stale 200 would mislead routing. |
 | `POST /fleet/dispatch` | immediate `202 {"job_id": <exact echo>, "status": "accepted"}`; the render runs async through the pipeline. Duplicate `job_id` → 202 re-ack (accepted/running/**done** — poll `/fleet/jobs/{id}` for the state), never a second render; a job that previously **failed** here answers `409` (an explicit refusal, so the dispatcher may try another node). |
 | `GET /fleet/jobs/{id}` | `{"state": "accepted\|running\|done\|error", ...}` with `data` on done / `error` on error; terminal results retained ~1h; 404 for unknown/evicted ids. |
+| `DELETE /fleet/jobs/{id}` | Takes back an **agent** job that has not started ([ADR 0064](architecture/decisions/0064-a-delegator-takes-back-what-it-has-not-started.md)): `200 {"state":"withdrawn","withdrawn":true}` when it had not (it never will; a job the node itself already took back answers the same), `409 {"state":"running"\|"done"\|"error","withdrawn":false}` when it had (the node does not touch it), `404` unknown id, `401` without the agent bearer, `405` for a non-agent job. See [Taking a job back](#taking-a-job-back-withdraw-and-the-poll-lease). |
 
 ## Quickstart
 
@@ -32,19 +33,26 @@ behaves exactly as before), else the OS's generic source — on Windows the **wi
 WDDM source** (capacity from the display-class registry `qwMemorySize`, usage from the
 `\GPU Adapter Memory` PDH counters), on Linux the **linux-amdgpu sysfs source** (since
 0.130.6: `/sys/class/drm/card*/device/mem_info_vram_*` plus, on a UMA profile, the driver's
-own `mem_info_gtt_*` pool — the real shared budget, not a RAM/2 estimate). Vendor/arch come
+own `mem_info_gtt_*` pool — the real shared budget, not a RAM/2 estimate). A unified-memory
+SoC tier (`rockchip-rk3588`) has no VRAM counter at all, so on Linux it gets the
+**linux-meminfo source** instead: `/proc/meminfo` less the operator's `uma_reserve_gib` —
+capacity is `MemTotal − reserve` and free is `MemAvailable − reserve`, clamped to `[0, capacity]`
+— so the home-automation stack that shares the board keeps its memory. Vendor/arch come
 from the installer's `installed.json` profile, and the UMA memory model from the profile (an
 iGPU advertises carve-out + shared budget as its total, and dedicated+shared as usage). Only
 when **no memory source works** does `fleet-serve` refuse to start: the contract treats
 `vram_total_gb <= 0` as a broken node, and refusing loudly beats advertising an empty GPU.
 The serve log names the resolved source
-(`... via nvidia-smi|windows-generic|linux-amdgpu, vendor=... arch=...`). A **dual-route node**
+(`... via nvidia-smi|windows-generic|linux-amdgpu|linux-meminfo, vendor=... arch=...`). A **dual-route node**
 (ADR 0054: a tier with `alt_backends`, installed with `--llama-bin-cpu`; no tier declares the CPU route since 2026-09-24) advertises `backends`
 in health, primary first (`["vulkan","cpu"]`), and serves the CPU family as `<seat>-cpu` ids —
 a caller picks the route by seat id. Ctrl-C drains: dispatches for a
 job_id this node has never seen get 503; a re-dispatch of a job_id this node already knows
 about (running, done, or previously failed) still re-acks 202 — or 409 if it previously
-failed — even mid-drain, since that's not new work.
+failed — even mid-drain, since that's not new work. On a node with a `fleet_auth_token`, an agent or
+vision job's id is answered only to a request that carries the bearer, whatever `task_type` that request
+declares: without it the answer is `401` (never the 202 or the 409, which would say the job exists, or
+echo what its failure said).
 
 **Backlog and concurrency are two different limits** (0.100.0). Before 0.100.0 they were
 one: accepting a job started it, so `accepted` lasted microseconds and the single cap
@@ -280,7 +288,9 @@ source, which has no `gpu_devices[]` to match against. Implementation:
 | `fleet_node_id` | `""` | Node id in `/fleet/health`. Empty = the OS hostname at serve time (`--node-id` overrides). |
 | `fleet_sampler` | `auto` | Per-render VRAM footprint source: `auto` \| `pdh` \| `pdh-shared` \| `global` (see [Sampler modes](#sampler-modes)). |
 | `primary_gpu_uuid` | `""` | Pins the headline `vram_total_gb`/`vram_free_gb` to one card by nvidia-smi UUID, overriding the largest-total rule (see [`primary_gpu_uuid`](#primary_gpu_uuid--pin-the-headline-device-deterministically) above). Empty = unchanged largest-total behavior. |
+| `uma_reserve_gib` | `0` | RAM (GiB) a unified-memory SoC node (the `rockchip-rk3588` tier, whose GPU and NPU share system RAM) holds back from inference for the box's own workload. Health advertises `MemTotal − uma_reserve_gib` as `vram_total_gb` and `MemAvailable − uma_reserve_gib` as `vram_free_gb` (the linux-meminfo source). `0` = advertise all of RAM; the tier seeds `3`. Inert on every other tier, which reads a real VRAM counter. A reserve that leaves no capacity makes `fleet-serve` refuse to start, and a negative one is refused by name. |
 | `fleet_agent_enabled` | `false` | Opts this node into executing fleet **agent** jobs (see [The agent task](#the-agent-task-task_type-agent)). Explicit opt-in: the binding (an agent seat) exists on every tier, the worker ROLE is a per-box decision. Off = the task is not advertised and health is byte-identical to a pre-0.65 node. |
+| `fleet_poll_lease_sec` | `0` (= 60) | How long a pushed agent job may sit `accepted` with nobody polling it before the node treats its delegator as gone: the job is never started and is reaped, and a run that finishes after its poller left stops feeding `recent_agent_wall_sec` and Retry-After. Negative = off; a value under 15 is raised to 15 (the delegator's own gap between polls must fit inside it). A running job is never reaped. See [Taking a job back](#taking-a-job-back-withdraw-and-the-poll-lease). |
 | `fleet_auth_token` | `""` | Bearer token for the **agent lane only** (agent dispatches + polls of agent-created jobs; media stays tokenless in v1). Same value on every node and in the delegator's config. Empty + non-loopback listener = agent dispatches refused 403. |
 | `agent_ctx_tokens` | `0` | The agent seat's served context window, advertised in health for the delegator's placement arithmetic. From config, never probed (a live probe could cold-start a multi-GB model on the health cadence). `0` = not advertised = this node is never chosen for remote agent work. |
 | `kvslot_cap_gib` | `0` (= 8 GiB) | Cap on the node's `kvslots/` directory, the KV-slot files `POST /fleet/kvslot/save` writes (ADR 0056 Layer 2). An LRU sweep after every save deletes the least recently modified files past the cap. The directory is created by the installer; without it the lane answers `501` and the delegator falls through. |
@@ -295,7 +305,10 @@ rules as `local-agent --serve` apply, enforced by the same shared guard:
 
 - **Loopback is the default** and needs no flag.
 - A non-loopback `--listen` is **refused** unless you pass `--listen-trusted-network`
-  (which prints a loud warning).
+  (which prints a loud warning). The flag permits ONE specific address: an all-interfaces
+  address (`:18811` with an empty host, `0.0.0.0`, `[::]`) is refused even with it (0.144.1), so a
+  unit whose `$(tailscale ip -4)` is still empty at boot fails and its restart retries instead of
+  serving on every interface.
 - Production binding is the machine's **Tailscale address** (e.g. `100.64.0.10:18811` on
   your workstation) — the tailnet is the trust boundary. **NEVER bind `0.0.0.0`**, and never expose
   the port beyond the tailnet.
@@ -774,7 +787,9 @@ blackholing nodes cannot spend a budget the subtask no longer owns.
 **Dispatch time only.** A refusal is a NON-ack: the node never took ownership, so no seat can be
 running the contract and re-placing it cannot produce two concurrent runs. Everything after a `202` —
 a poll `404`, a queue deadline, a poll deadline — leaves a job the node may still hold, and is never
-moved. One honest residual: when BOTH dispatch attempts fail at transport level the first POST may
+moved. The one exception (ADR 0064): at the queue deadline the delegator asks the node to take the job
+back, and only a node that CONFIRMS it withdrew a job that never started makes the result re-placeable
+([Taking a job back](#taking-a-job-back-withdraw-and-the-poll-lease)). One honest residual: when BOTH dispatch attempts fail at transport level the first POST may
 have landed and had its ack lost, so the abandoned node could still run the contract once. That costs
 wasted compute on a node nobody is polling (the agent lane is read-only, so there are no effects to
 duplicate) and the alternative is losing the work with certainty.
@@ -881,6 +896,103 @@ What the deadline produces for a job that DID reach `running` depends on whether
   **failure**, `poll deadline after <d>: node never answered (last: …)`, counted in
   `summary.failed`. A node that said nothing never deferred, and reporting a defer stamped with
   its id and seat would be the delegator inventing an answer on its behalf.
+
+### Taking a job back (withdraw and the poll lease)
+
+Until ADR 0064 a delegator that gave up on an acked job left it on the node, where it started when a
+slot freed and ran for nobody (measured at 43 % and 59 % of two nodes' agent runs on 2026-09-29), and
+its finished wall then fed the node's own Retry-After. Two mechanisms end that.
+
+**Withdraw.** `DELETE /fleet/jobs/{id}` (agent bearer, like the poll) takes back a job that is still
+`accepted`. The node decides that under the same mutex its scheduler claims under, so a claim and a
+withdraw cannot both succeed; a running or finished job is never touched (Option A, ADR 0028). A
+withdrawn job is a terminal `error: "withdrawn: ..."` record, not a deleted one: a poll of the id
+reaches a terminal state, a duplicate dispatch of it answers `409` and never runs, and the jobs feed
+shows it for the terminal TTL. A repeat of the request answers `200` again, and so does a request for
+a job the node already took back itself (reaped, or marked never-started at shutdown): nothing ran, which
+is the fact the answer reports.
+
+The delegator calls it once, best-effort (5 s, on a context the caller's cancel does not touch), where
+it gives a job up:
+
+| Where | A confirmed withdrawal | `409 running` | Anything else (404, 405, 401, 5xx, dropped, timeout) |
+|---|---|---|---|
+| queue deadline | the result is re-placed on another node, the queued wait is credited back to the contract's budget, the intent closes `withdrawn`, and the failure text ends `; the job was withdrawn from the node, which will never run it` | the job left the backlog just before: keep polling it, do not ask again | today's `queue deadline` failure, not re-placed, the intent left open for recovery, and the failure text ends `; withdraw not confirmed: <why>` |
+| caller cancel | the intent closes `withdrawn` | the intent stays open for recovery; the failure text `canceled: ...` ends `; withdraw not confirmed: <why>` | as the `409` cell |
+| owned poll deadline | the intent closes `withdrawn`; the defer reason adds `; the job never started and was withdrawn from the node` | the intent stays open; the defer reason ends `; withdraw not confirmed: <why>` | as the `409` cell |
+| unowned poll deadline (the node acked the job and no poll ever said it held it) | the intent closes `withdrawn`; the failure is unchanged | the intent stays open; the failure text ends `; withdraw not confirmed: <why>` | as the `409` cell |
+| a poll answered `401` | not asked: the request would carry the token that was just refused | not asked | the intent stays open for recovery, so a process holding the right token can still collect the job |
+
+A job the delegator last saw `running` is not asked at all: it has started, and the request could only
+be refused. A node that predates the route answers `405` (its job route is GET-only) or `404`, which is
+"no withdraw here": every give-up then behaves exactly as it did.
+
+`<why>` says what the node answered instead of taking the job back, so an old node and an upgraded one
+that refused stop reading alike: `HTTP 405: the node has no withdraw route (an older node)`, `HTTP 404: the
+node does not hold the job, or has no withdraw route`, `HTTP 401: the node refused this delegator's
+fleet_auth_token`, `HTTP 409: the node said the job had already started`, `HTTP 5xx`, `HTTP 200, but the
+answer did not say the job was taken back`, `no answer within 5s` or `no answer (<transport error>)`. It
+is detail, not a class: the row's `reason_code` stays `queue_deadline` or `canceled`.
+
+**A poll that reads the node's own record.** A delegator that was away for longer than the lease (a
+suspended host, a long partition) comes back to `error: "reaped: ..."`, and one that polls a job
+another caller withdrew reads `error: "withdrawn: ..."`, and one that polls a job the node marked
+never-started when it shut down with it still queued reads `error: "not started: ..."`. All three say the
+job never ran (the node's own Withdraw treats them as one fact), so the delegator
+files the result as it files a confirmed withdrawal: a capacity refusal the existing re-placement offers
+to another node, the queued wait credited back, the intent closed `never started: <what the node said>`,
+and `reason_code` `queue_withdrawn` on the abandoned attempt's row. A job that ran and failed stays a
+`remote job error`, is never re-placed, and closes its intent `terminal observed`.
+
+**Poll lease.** A node also cleans up after a delegator that left without asking. A job a delegator
+PUSHED (an agent dispatch) that sits `accepted` with nobody polling it for `fleet_poll_lease_sec` is
+skipped by the scheduler's claim scan at once (so the reaper's tick is never a window in which a ghost
+starts) and reaped by a ticker (terminal, `error: "reaped: ..."`). What counts as a poll: an
+authorized `GET /fleet/jobs/{id}` (a long poll parked on it counts for the whole wait), or an authorized
+duplicate dispatch of the id (the job's own bearer rule applies whatever `task_type` the request
+declares, so a re-dispatch without the token answers `401` and counts for nothing). What does not: the unauthenticated `GET /fleet/jobs` feed the fleet overview reads,
+and a poll that failed the bearer gate. Never reaped: a running job; a job the pull queue claimed (its
+result travels by ack, nobody polls this node for it); a media or vision job (their pollers are other
+clients on cadences this node does not control). The log says so in one line per reap pass, and one per
+withdraw. The node also counts what it took back, since the process started: `jobs_withdrawn` and
+`jobs_reaped` on `/fleet/health` (absent while zero), because a default-on, time-based reaper is the
+thing whose false positives an operator has to be able to count. `fleet-serve` prints the lease in force
+once at start-up (`poll lease 60 s (the default ...)`, `... was raised to it` for a value under 15 s, or
+`poll lease OFF`).
+
+A run that finishes more than a lease after its poller last looked is an abandoned run. Its wall (often
+minutes of stall on a seat no caller was using) no longer feeds `recent_agent_wall_sec` or the
+Retry-After built from it. A look after the job finished does not change that.
+
+The delegator's own ledger records what it did: `reason_code` `queue_withdrawn` for a confirmed
+queue-deadline withdrawal (or a job whose poll read the node's own `reaped`/`withdrawn` record) and
+`queue_deadline` for one the node did not confirm, and the intent ledger's close note says `withdrawn`,
+`terminal observed`, `never started` (the recovery pass, or a live poll, found the node had withdrawn or
+reaped the job) or `recovered`; see [The delegation ledger row](#the-delegation-ledger-row). The fleet
+overview does not list a `withdrawn` or `reaped` job as an operator error: it is the cleanup working.
+
+Telemetry never fails the work, but it does not fail silently either. A write to the intent ledger that
+fails (a full disk, a bad path) is logged once per ledger handle, naming the first event lost and what
+that costs (a lost dispatch event means the job has no intent for recovery to find); a dispatch marker
+that cannot be written is logged once per run; and a recovery pass that stops at its two-minute clock
+logs how many open intents it did not examine.
+
+### The delegation ledger row
+
+Every `agent_delegate` row in the delegator's `ledger.jsonl` carries (ADR 0064):
+
+| Column | Meaning |
+|---|---|
+| `door` | the surface that admitted the contract (the MCP tool or CLI verb); the engine's own name, `delegate`, when the caller stamped none, so a row with that door is an entry point that skipped the stamp (`fleet-smoke` stamps `cli:fleet-smoke`) |
+| `job_id` / `fleet_job_id` | the delegator's id for the attempt; `fleet_job_id` is the id the fleet node knows it by (the same value, present only when the node acked the dispatch: a refused dispatch left no job on any node, and no marker row). The node's own `agent` row carries the same `fleet_job_id`, so the two ledgers join on one equality. |
+| `reason_code` | a closed set saying why the job ended the way it did: `ok`, `failed_verification`, `queue_full`, `queue_deadline`, `queue_withdrawn`, `poll_deadline`, `canceled`, `node_unreachable`, `job_lost`, `dispatch_refused`, `remote_error`, `capacity_wait`, `node_busy`, `shed`, `no_eligible_node`, `seat_down`, `stall_admission` / `stall_cold_load` / `stall_prefill` / `stall_decode` / `stall_tool` / `stall_repack` / `stall_engine` / `stall_other`, the node's defer classes (`budget`, `abstention`, `contract`, `config`, `write`, `infrastructure`), `started`, `other`. Present on every row. `capacity_wait` is the delegator's own outcome (no node had room; nothing ran the job); `node_busy` is a node, or this box's own seat, answering a capacity defer after admission (a seat at its run cap, a card under a lease or fence, an engine held busy by other work). |
+| `reason` | the whole reason (up to 4096 bytes); rows written before ADR 0064 hold the first 120 bytes. Group by `reason_code`, or by its first 120 bytes. |
+| `phase` | `"started"` on the dispatch marker row, absent on every finished row |
+
+A **started marker** is written when a node acks the job (or a local run begins), so a hang or a ghost
+is visible while it happens. A refused dispatch leaves no marker. The marker is never a job (every
+counter in this repository skips it: `ledger.JobRows`, the summary, the reports) and it carries no
+tokens. A reader that counts rows must skip `phase: "started"`.
 
 ## The vision task (`POST /fleet/vision`)
 

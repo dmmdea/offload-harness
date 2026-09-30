@@ -97,18 +97,19 @@ prompt/exemplars; can only narrow — UNSET resolves to config `agent_profile`, 
 1. **Grammar-reliable serving flags.** Universal on every task-serving entry, every backend:
    `--jinja --reasoning off`, **no MTP/draft**. Never `--json-schema` / `response_format` — they
    crash the model; the harness passes a raw GBNF `grammar` field. `--reasoning off` is mandatory or
-   output comes back empty. **Profile-driven, NOT universal:** `--cache-type-k/v` is `q8_0` on 9 of
-   13 profiles (`f16` only on blackwell-48/72, both AMD, and cpu; K and V always symmetric, and
-   `q8_0` V requires flash-attn on), and `--flash-attn` is on for every GPU profile (`amd-gcn` joined 2026-09-20, measured),
-   and omitted entirely by the cpu template. The `embeddinggemma` entry bypasses the shared flag
+   output comes back empty. **Profile-driven, NOT universal:** `--cache-type-k/v` is `q8_0` on 11 of
+   17 profiles (`f16` only on blackwell-48/72, amd-rdna3, amd-gcn, cpu and rockchip-rk3588; K and V always symmetric, and
+   `q8_0` V requires flash-attn on), and `--flash-attn` is on for every GPU profile (`amd-gcn` joined 2026-09-20, measured;
+   `rockchip-rk3588` serves no llama.cpp entry: llama.cpp Vulkan faults its Mali GPU, measured), and omitted entirely by the cpu template. The `embeddinggemma` entry bypasses the shared flag
    macro altogether. **Residency is declared with `matrix:`, never legacy `groups:`** (ADR 0020):
    sets are the valid CONCURRENT COMBINATIONS and the memory stack appears in every set, so no
    request can be satisfied by evicting it — `groups:`+`persistent:true` was measured failing to
    guarantee that. A var key must be alphanumeric and 1-8 chars, and a set may name only var ids.
-   **Media seats** (vision / STT) are NOT baked into the templates: a tier declares them in
+   **Media seats** (vision / STT / OCR, and the `rkllm` NPU seat of the rockchip-rk3588 tier) are NOT baked into the templates: a tier declares them in
    `media_seats` and `internal/servingtmpl` renders each into the models map, a matrix var, and
    the set its residency ROLE marks (`__SEATS_SWAPPABLE__` joins with `|`, `__SEATS_RESIDENT__`
-   with `&`). The same declaration writes `vision_model`/`stt_model`, so a binding can never name
+   with `&`). The same declaration writes `vision_model`/`stt_model`/`ocr_model` (an `rkllm` seat writes
+   `vision_model` only when it has a vision encoder), so a binding can never name
    a seat that was not rendered. Detail: `docs/systems/setup-installer.md`.
 1b. **The display card is never a `single` or `pair` layer device, and the display layer is
    dormant until the operator enables it** (ADR 0052). On the three-card reference box device 1

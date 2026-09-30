@@ -17,21 +17,33 @@ import (
 // killed between the two writes, a delegator whose ledger could not open), is
 // the only record of that job and counts as the job itself.
 
+// PhaseStarted is Entry.Phase on the dispatch marker a delegator writes when it
+// hands a job to a seat (ADR 0064). A marker is a record that a job BEGAN, not a
+// job: it carries the job's id but no outcome, and the finished row with the same
+// id is the job. Every reader above skips it, and ParentJobIDs must too — a
+// marker looks exactly like a parent row (a job id, no parent), so an inner row
+// whose real parent never landed would otherwise be dropped as an inner row of a
+// parent that is only a marker, and the job would vanish from every count.
+const PhaseStarted = "started"
+
 // ParentJobIDs returns the job ids of the rows that can be an inner row's
 // parent: every row that carries a job id and is not itself an inner row.
 func ParentJobIDs(entries []Entry) map[string]bool {
 	ids := map[string]bool{}
 	for _, e := range entries {
-		if e.JobID != "" && e.ParentJobID == "" {
+		if e.JobID != "" && e.ParentJobID == "" && e.Phase != PhaseStarted {
 			ids[e.JobID] = true
 		}
 	}
 	return ids
 }
 
-// CountsAsJob reports whether a row is a job for a counter: every row except
-// an inner row whose parent is present.
+// CountsAsJob reports whether a row is a job for a counter: every row except a
+// dispatch marker and an inner row whose parent is present.
 func CountsAsJob(e Entry, parents map[string]bool) bool {
+	if e.Phase == PhaseStarted {
+		return false
+	}
 	return e.ParentJobID == "" || !parents[e.ParentJobID]
 }
 
@@ -67,11 +79,12 @@ func parentJobIDsInFile(path string) (map[string]bool, error) {
 		var e struct {
 			JobID       string `json:"job_id"`
 			ParentJobID string `json:"parent_job_id"`
+			Phase       string `json:"phase"`
 		}
 		if json.Unmarshal(sc.Bytes(), &e) != nil {
 			continue
 		}
-		if e.JobID != "" && e.ParentJobID == "" {
+		if e.JobID != "" && e.ParentJobID == "" && e.Phase != PhaseStarted {
 			ids[e.JobID] = true
 		}
 	}

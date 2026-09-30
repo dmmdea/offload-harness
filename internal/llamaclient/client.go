@@ -8,8 +8,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"strings"
@@ -139,6 +141,9 @@ type chatReq struct {
 	TopLogprobs        int                 `json:"top_logprobs,omitempty"`
 	CachePrompt        bool                `json:"cache_prompt"`
 	Stream             bool                `json:"stream"`
+	// StreamOptions is nil, and so absent from the body, on every call that does
+	// not stream (WithProgress).
+	StreamOptions *streamOptions `json:"stream_options,omitempty"`
 }
 
 // --- multimodal (vision) request types ---
@@ -252,16 +257,72 @@ func (c *Client) Generate(ctx context.Context, model, system, user, grammar stri
 	}
 	body.Messages = append(body.Messages, chatMsg{Role: "user", Content: user})
 
-	buf, err := json.Marshal(body)
-	if err != nil {
-		return GenResult{}, err
-	}
 	start := time.Now()
 	ep := c.resolveEndpointWith(model, o.localBusy) // ONE decision: base, path, credential and client must never split (lanes.go)
 	if ep.err != nil {
 		return GenResult{}, ep.err
 	}
-	return c.sendWithSeatWait(ctx, ep, model, buf, start)
+	// Streaming (WithProgress) is asked for once the target is known, because a
+	// seat that refused a stream and answered JSON is remembered per base and
+	// model. Logprobs are never streamed: the decoder does not read them.
+	stream := o.progress != nil && topLogprobs == 0 && !streamWasRefused(ep.base, model)
+	if stream {
+		body.Stream, body.StreamOptions = true, &streamOptions{IncludeUsage: true}
+	}
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return GenResult{}, err
+	}
+	so := o
+	if !stream {
+		so.progress = nil
+	}
+	res, err := c.sendWithSeatWait(ctx, ep, model, buf, start, so)
+	if stream && refusedStream(err) {
+		// The server refused the STREAM — or the request, however it is sent. Ask
+		// once more as one JSON answer, on the same target: the safe default when
+		// a seat does not take stream together with the rest of the body (vLLM
+		// structured_outputs is documented to, but not verified live on every
+		// engine build). A retry that answers is remembered so the next call to
+		// this seat does not pay the refused request first; one that fails the
+		// same way is the request's fault, its error is returned, and nothing is
+		// remembered.
+		refusal := err
+		body.Stream, body.StreamOptions = false, nil
+		if rbuf, merr := json.Marshal(body); merr == nil {
+			ro := o
+			ro.progress, ro.noClientTimeout = nil, true // a stream is not asked for again; the context still owns the deadline
+			rres, rerr := c.sendWithSeatWait(ctx, ep, model, rbuf, start, ro)
+			if rerr != nil {
+				// The retry's own error is what the caller gets, and it hides the refusal
+				// that led to it: keep both halves in the log unless the request was
+				// refused the same way twice (then it is the request's fault, not the
+				// stream's).
+				var refusedWith, failedWith *StatusError
+				if !(errors.As(refusal, &refusedWith) && errors.As(rerr, &failedWith) && refusedWith.StatusCode == failedWith.StatusCode) {
+					log.Printf("llamaclient: %s (model %q) refused a streamed request (%v); the JSON retry then failed: %v", ep.base, model, refusal, rerr)
+				}
+				return GenResult{}, rerr
+			}
+			noteStreamRefused(ep.base, model, refusal)
+			if rres.TokensOut > 0 {
+				o.progress(rres.TokensOut)
+			}
+			return rres, nil
+		}
+	}
+	return res, err
+}
+
+// StreamRefusedFor reports whether this client's target for model refused a
+// streamed request lately and answered it as one JSON answer (remembered for
+// streamRefusalTTL): the fact behind a re-pack that ran silent and non-streamed,
+// which nothing else on the wire says.
+func (c *Client) StreamRefusedFor(model string) bool {
+	if model == "" {
+		model = c.model
+	}
+	return streamWasRefused(c.BaseFor(model), model)
 }
 
 // sendWithSeatWait is the ONE request loop every generate path shares: build
@@ -271,8 +332,19 @@ func (c *Client) Generate(ctx context.Context, model, system, user, grammar stri
 // non-200 is returned as a *StatusError; the ticket is held through the body
 // decode on success (llama-swap only stops needing the model resident once the
 // response is fully served). Vision paths use it too (review, 2026-09-02).
-func (c *Client) sendWithSeatWait(ctx context.Context, ep endpointChoice, model string, buf []byte, start time.Time) (GenResult, error) {
+func (c *Client) sendWithSeatWait(ctx context.Context, ep endpointChoice, model string, buf []byte, start time.Time, o genOpts) (GenResult, error) {
 	budget := seatwait.FromContext(ctx)
+	// The client that sends. Under WithoutClientTimeout the CONTEXT owns the
+	// deadline (the liveness monitor's stall watch and ceiling), so the request
+	// rides a copy whose Timeout is zero; the original Timeout stays what
+	// modelaffinity.Admit sizes its park bound from, as the agent loop's client
+	// does (agent/client.go).
+	hc := ep.client
+	if o.ownsDeadline() && hc.Timeout != 0 {
+		cp := *hc
+		cp.Timeout = 0
+		hc = &cp
+	}
 	for {
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, ep.base+ep.path, bytes.NewReader(buf))
 		if err != nil {
@@ -298,7 +370,7 @@ func (c *Client) sendWithSeatWait(ctx context.Context, ep endpointChoice, model 
 		if err != nil {
 			return GenResult{}, err
 		}
-		resp, err := ep.client.Do(req)
+		resp, err := hc.Do(req)
 		if err != nil {
 			tk.Release()
 			return GenResult{}, err
@@ -318,7 +390,19 @@ func (c *Client) sendWithSeatWait(ctx context.Context, ep endpointChoice, model 
 			}
 			return GenResult{}, &StatusError{StatusCode: resp.StatusCode, Body: truncate(string(b), 300)}
 		}
-		res, derr := decodeGenResult(resp, start)
+		var res GenResult
+		var derr error
+		if o.progress != nil && strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream") {
+			res, derr = decodeStreamResult(resp, start, o.progress)
+		} else {
+			// A JSON answer: the request did not stream, or the server answered JSON
+			// to one that did (a proxy that ignores `stream`). The whole answer
+			// arrived at once, which is one progress event.
+			res, derr = decodeGenResult(resp, start)
+			if derr == nil && o.progress != nil && res.TokensOut > 0 {
+				o.progress(res.TokensOut)
+			}
+		}
 		tk.Release()
 		return res, derr
 	}
@@ -368,7 +452,7 @@ func (c *Client) GenerateVision(ctx context.Context, model, system, user string,
 	if ep.err != nil {
 		return GenResult{}, ep.err
 	}
-	return c.sendWithSeatWait(ctx, ep, model, buf, start)
+	return c.sendWithSeatWait(ctx, ep, model, buf, start, o)
 }
 
 // GenerateVisionInterleaved sends a multimodal chat request whose user content
@@ -421,7 +505,7 @@ func (c *Client) GenerateVisionInterleaved(ctx context.Context, model, system st
 	if ep.err != nil {
 		return GenResult{}, ep.err
 	}
-	return c.sendWithSeatWait(ctx, ep, model, buf, start)
+	return c.sendWithSeatWait(ctx, ep, model, buf, start, o)
 }
 
 // StatusError is a non-200 ANSWER from the server — as opposed to a failure to

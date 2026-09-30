@@ -100,18 +100,18 @@ func TestFaithfulSummaryPassesOffTopicFails(t *testing.T) {
 	wire := func(out string) core.AgentWireResult {
 		return core.AgentWireResult{SchemaVersion: core.AgentWireSchemaVersion, Output: out, Structured: json.RawMessage(out)}
 	}
-	faithful := `{"summary":"Clearing the charging controller cache from recovery mode, then draining the battery, restores the speed.","key_facts":["The update resets calibration"]}`
+	faithful := `{"summary":"Clearing the charging controller cache from recovery mode, then draining the battery, restores the speed.","key_facts":["The update resets calibration"],"verdict":"the cache clear restores the speed"}`
 	if fails := delegate.EvalAcceptance(contract, wire(faithful)); len(fails) != 0 {
 		t.Fatalf("a faithful summary must pass: %v (acceptance=%v)", fails, contract.Acceptance)
 	}
-	if fails := delegate.EvalAcceptance(contract, wire(`{"summary":"The firmware resets the calibration so the current is limited.","key_facts":["Slow trickle charge"]}`)); len(fails) != 0 {
+	if fails := delegate.EvalAcceptance(contract, wire(`{"summary":"The firmware resets the calibration so the current is limited.","key_facts":["Slow trickle charge"],"verdict":"the update limits the charge current"}`)); len(fails) != 0 {
 		t.Fatalf("second faithful phrasing must pass: %v (acceptance=%v)", fails, contract.Acceptance)
 	}
-	offTopic := `{"summary":"The latest stable Go release is available from the download page; follow the installation guide.","key_facts":["Go 1.26"]}`
+	offTopic := `{"summary":"The latest stable Go release is available from the download page; follow the installation guide.","key_facts":["Go 1.26"],"verdict":"a new release is out"}`
 	if fails := delegate.EvalAcceptance(contract, wire(offTopic)); len(fails) == 0 {
 		t.Fatalf("an off-topic answer must fail; acceptance=%v", contract.Acceptance)
 	}
-	chromeOnly := `{"summary":"Helpful, follow, question, anonymous; lightbox-image-container.","key_facts":["helpful"]}`
+	chromeOnly := `{"summary":"Helpful, follow, question, anonymous; lightbox-image-container.","key_facts":["helpful"],"verdict":"helpful"}`
 	if fails := delegate.EvalAcceptance(contract, wire(chromeOnly)); len(fails) == 0 {
 		t.Fatalf("restating only chrome must fail; acceptance=%v", contract.Acceptance)
 	}

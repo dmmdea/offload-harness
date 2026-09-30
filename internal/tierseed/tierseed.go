@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 
@@ -56,12 +57,22 @@ type Options struct {
 	// CoralHome is the Coral sidecar home __CORAL_HOME__ expands to (its venv,
 	// models/ and the accelerators/coral/ scripts live under it; Coral D3).
 	CoralHome string
+	// RknpuHome is the RKNPU sidecar home __RKNPU_HOME__ expands to (its venv, models/
+	// and the accelerators/rknpu/ scripts live under it).
+	RknpuHome string
 	// VLLMSeatActive says whether THIS box renders the tier's vLLM agent seat. The
 	// caller decides it with vllmseat.Spec.Detect — the engine is a hand-built venv
 	// the installer does not create, so a box without it binds the fallback seat. The
 	// binding and the rendered llama-swap entry therefore agree by construction: both
 	// are driven by the same detection.
 	VLLMSeatActive bool
+	// ExtraVLLMSeatsActive names, by seat id, which of the tier's EXTRA vLLM seats
+	// (Profile.ExtraVLLMSeats) this box can run. The caller decides each one with
+	// vllmseat.Spec.DetectExtra: the seats share the venv, and each needs its own weights
+	// and the wrapper scripts its entry runs (the operator installs those). An extra seat
+	// that is absent here is neither rostered nor bound, and the layer it backs is left out
+	// of the seeded layers — the config never advertises a seat the box cannot serve.
+	ExtraVLLMSeatsActive map[string]bool
 }
 
 // vaeArgs maps the declared vae_mode to the sd.cpp flag it stands for. Free-text
@@ -94,6 +105,16 @@ type Profile struct {
 	// actually run it (Options.VLLMSeatActive), it is the SOLE writer of agent_model
 	// and agent_ctx_tokens; otherwise its declared fallback is.
 	VLLMSeat *vllmseat.Spec `json:"vllm_seat,omitempty"`
+	// ExtraVLLMSeats are the tier's further vLLM seats: served on demand beside VLLMSeat
+	// on the same card, and never the agent lane — they never bind agent_model, so each
+	// is validated as a non-lane seat (vllmseat.Spec.ValidateExtra) and carries no
+	// fallback. They exist because a card can serve more than one heavy model in turn
+	// (ampere-16: the 27B lane seat and the 35B fast digest seat), and the second seat
+	// and the layer it backs lived only in a reference box's hand-edited config, so a
+	// fresh install lost both — the capability-loss class ADR 0048 was written against.
+	// Each active extra seat joins the box's `vllm_seats` roster with its own storeless
+	// or store binding; the layers name it by id or alias.
+	ExtraVLLMSeats []vllmseat.Spec `json:"extra_vllm_seats,omitempty"`
 	// Composes lists the tiers this tier is a COMPLETE instance of at the same
 	// time (ADR 0039: blackwell-3x16 composes blackwell-16 and blackwell-2x16).
 	// It is seeded as `tiers` = Composes + the tier's own id and `tier_profile`
@@ -164,6 +185,9 @@ func ParseDoc(raw []byte) (Doc, error) {
 	if err := validateLayerKeys(raw); err != nil {
 		return Doc{}, err
 	}
+	if err := validateExtraSeatKeys(raw); err != nil {
+		return Doc{}, err
+	}
 	if err := d.Validate(); err != nil {
 		return Doc{}, err
 	}
@@ -194,6 +218,66 @@ func validateLayerKeys(raw []byte) error {
 	return nil
 }
 
+// validateExtraSeatKeys is validateLayerKeys' counterpart for `extra_vllm_seats`: it re-reads
+// each entry as raw JSON and refuses a top-level key that is not a vllmseat.Spec field, by
+// tier and JSON path. json.Unmarshal drops a key it cannot match without a word, and for these
+// seats the drop is not harmless: a misspelt `storeless_reason` seeds the generic reason in
+// place of the measured one, and a misspelt `ttl_seconds` or `kv_cache_dtype` reads as unset.
+// (The lane seat's own block carries documentary keys beyond the struct, so this pass covers
+// only the extra seats, which are new and have no such history.) Tiers are visited in id order
+// so a table with two mistakes fails deterministically.
+func validateExtraSeatKeys(raw []byte) error {
+	var top struct {
+		Profiles map[string]map[string]json.RawMessage `json:"profiles"`
+	}
+	if err := json.Unmarshal(raw, &top); err != nil {
+		return fmt.Errorf("profiles.json: %w", err)
+	}
+	known := map[string]bool{}
+	t := reflect.TypeOf(vllmseat.Spec{})
+	for i := 0; i < t.NumField(); i++ {
+		if name := strings.SplitN(t.Field(i).Tag.Get("json"), ",", 2)[0]; name != "" && name != "-" {
+			known[name] = true
+		}
+	}
+	ids := make([]string, 0, len(top.Profiles))
+	for id := range top.Profiles {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		rawSeats, ok := top.Profiles[id]["extra_vllm_seats"]
+		if !ok {
+			continue
+		}
+		var seats []map[string]json.RawMessage
+		if err := json.Unmarshal(rawSeats, &seats); err != nil {
+			return fmt.Errorf("profiles.json: tier %q extra_vllm_seats: %w", id, err)
+		}
+		for i, seat := range seats {
+			var name string
+			_ = json.Unmarshal(seat["id"], &name)
+			keys := make([]string, 0, len(seat))
+			for k := range seat {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			for _, k := range keys {
+				if !known[k] {
+					fields := make([]string, 0, len(known))
+					for f := range known {
+						fields = append(fields, f)
+					}
+					sort.Strings(fields)
+					return fmt.Errorf("profiles.json: tier %q extra_vllm_seats[%d] %q: unknown key %q — not a vLLM seat field (%s); "+
+						"it would be dropped on decode and whatever it declared would read as unset", id, i, name, k, strings.Join(fields, ", "))
+				}
+			}
+		}
+	}
+	return nil
+}
+
 // Validate refuses the composite shapes the table cannot seed truthfully, at
 // PARSE time so the embedded copy the installer ships cannot carry them: a
 // `composes` id or a layer tier that is not in the table would seed a `tiers`
@@ -212,6 +296,9 @@ func (d Doc) Validate() error {
 	sort.Strings(ids)
 	for _, id := range ids {
 		p := d.Profiles[id]
+		if err := validateVLLMSeats(id, p); err != nil {
+			return err
+		}
 		if len(p.Composes) == 0 && len(p.Layers) == 0 {
 			continue
 		}
@@ -244,14 +331,246 @@ func (d Doc) Validate() error {
 				return fmt.Errorf("profiles.json: tier %q layers[%d] %q stands for tier %q, which this tier does not compose (%v)", id, i, l.Name, l.Tier, tiers)
 			}
 		}
-		for _, active := range []bool{true, false} {
-			c := config.Config{TierProfile: id, Tiers: tiers, Layers: fillPairAgent(p.Layers, p.VLLMSeat, active)}
+		if err := validateLayerSeatClosure(id, p); err != nil {
+			return err
+		}
+		// Either binding is what an install writes, and with extra seats each of them
+		// may be present or absent on its own: every combination must seed layers that
+		// config's own validator accepts.
+		for _, set := range activityCombos(p) {
+			c := config.Config{TierProfile: id, Tiers: tiers, Layers: ResolveLayers(p.Layers, set)}
 			if err := c.ValidateLayers(); err != nil {
-				return fmt.Errorf("profiles.json: tier %q layers (vllm_seat active=%v): %w", id, active, err)
+				return fmt.Errorf("profiles.json: tier %q layers (%s): %w", id, set.describe(), err)
 			}
 		}
 	}
 	return nil
+}
+
+// validateVLLMSeats refuses the extra-seat shapes the renderer cannot express
+// truthfully. It runs for EVERY tier, at parse, so the copy embedded in the installer
+// cannot carry one — and it validates every declared extra seat, not only an active
+// one: a half-specified seat must die here, never on a box that has fetched its weights.
+func validateVLLMSeats(id string, p Profile) error {
+	if len(p.ExtraVLLMSeats) == 0 {
+		return nil
+	}
+	if p.VLLMSeat == nil {
+		return fmt.Errorf("profiles.json: tier %q declares extra_vllm_seats but no vllm_seat — an extra seat alternates with "+
+			"the tier's lane seat, and it is the lane seat a box without the venv falls back from", id)
+	}
+	names := map[string]string{} // seat id or alias -> the seat that owns it
+	units := map[string]string{} // systemd unit -> the seat that owns it
+	claim := func(s vllmseat.Spec) error {
+		for _, n := range append([]string{s.ID}, s.Aliases...) {
+			if prev, dup := names[n]; dup {
+				return fmt.Errorf("profiles.json: tier %q: seat name %q is declared twice (%s and %s) — llama-swap resolves "+
+					"ids and aliases in one namespace, and a repeat would route one seat's requests to the other", id, n, prev, s.ID)
+			}
+			names[n] = s.ID
+		}
+		if prev, dup := units[s.Unit]; dup {
+			return fmt.Errorf("profiles.json: tier %q: unit %q is used by both %s and %s — two seats cannot be one systemd unit", id, s.Unit, prev, s.ID)
+		}
+		units[s.Unit] = s.ID
+		return nil
+	}
+	if err := claim(*p.VLLMSeat); err != nil {
+		return err
+	}
+	for i := range p.ExtraVLLMSeats {
+		e := p.ExtraVLLMSeats[i]
+		if err := e.ValidateExtra(id); err != nil {
+			return fmt.Errorf("profiles.json: %w", err)
+		}
+		if err := claim(e); err != nil {
+			return err
+		}
+		// The renderer serialises every vLLM seat of a tier as an alternative of the
+		// others (one heavy seat per card set at a time — two seats at util 0.90 cannot
+		// share a card). A seat on other cards could legitimately be co-resident, and
+		// that topology is not rendered: refuse it rather than serialise it silently.
+		if normDevices(e.Device) != normDevices(p.VLLMSeat.Device) {
+			return fmt.Errorf("profiles.json: tier %q extra seat %s pins device %q but the lane seat pins %q — extra seats are "+
+				"rendered as ALTERNATIVES of the lane seat (one heavy seat per card set), and a seat on other cards would need "+
+				"a co-resident topology the renderer does not emit", id, e.ID, dashDevice(e.Device), dashDevice(p.VLLMSeat.Device))
+		}
+	}
+	return nil
+}
+
+// validateLayerSeatClosure ties a layer seat that NAMES a vLLM seat to that seat's own
+// declaration. Naming the seat explicitly (rather than leaving the agent seat bare, as
+// the composite tier's pair layer does) duplicates its window, its concurrency and its
+// card pin into the layer, and two copies of a measured number drift: the layer would
+// then advertise a window the engine does not serve. One number, one place — so the
+// copy must equal the original, and a mismatch is refused at parse.
+func validateLayerSeatClosure(id string, p Profile) error {
+	set := VLLMSeatSet{Primary: p.VLLMSeat, Extras: p.ExtraVLLMSeats}
+	for _, l := range p.Layers {
+		for _, s := range l.Seats {
+			spec, named := set.specNamed(s.Model)
+			if !named {
+				continue
+			}
+			at := fmt.Sprintf("profiles.json: tier %q layers %q seat %s (%s)", id, l.Name, s.Role, spec.ID)
+			if s.CtxTokens != spec.MaxModelLen {
+				return fmt.Errorf("%s declares ctx_tokens %d but the vllm seat serves max_model_len %d", at, s.CtxTokens, spec.MaxModelLen)
+			}
+			if s.MaxInflight != 0 && s.MaxInflight != spec.MaxNumSeqs {
+				return fmt.Errorf("%s declares max_inflight %d but the vllm seat runs max_num_seqs %d", at, s.MaxInflight, spec.MaxNumSeqs)
+			}
+			if normDevices(s.Device) != normDevices(spec.Device) {
+				return fmt.Errorf("%s pins device %q but the vllm seat pins %q", at, dashDevice(s.Device), dashDevice(spec.Device))
+			}
+		}
+	}
+	return nil
+}
+
+// normDevices canonicalises a CUDA_VISIBLE_DEVICES list as a SET ("2,0" == "0,2"); an
+// empty pin is the seat's implicit card 0, matching how the seat itself renders it.
+func normDevices(d string) string {
+	var out []string
+	for _, p := range strings.Split(d, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	if len(out) == 0 {
+		return "0"
+	}
+	sort.Strings(out)
+	return strings.Join(out, ",")
+}
+
+func dashDevice(d string) string {
+	if strings.TrimSpace(d) == "" {
+		return "0 (implicit)"
+	}
+	return d
+}
+
+// layerSingle is the planner-default layer: placement row 5b hands every agent
+// contract of a box that declares no pair to its agent seat.
+const layerSingle = "single"
+
+// VLLMSeatSet is a tier's declared vLLM seats and which of them a box runs — the one
+// input a layer resolution needs, shared by the seed (Resolve) and the render check
+// (install render), so both reason about the same layers.
+type VLLMSeatSet struct {
+	// Primary is the tier's lane seat (Profile.VLLMSeat); PrimaryActive says whether
+	// this box runs it (Options.VLLMSeatActive).
+	Primary       *vllmseat.Spec
+	PrimaryActive bool
+	// Extras are the tier's extra seats and ExtraActive which of them, by id, the box runs.
+	Extras      []vllmseat.Spec
+	ExtraActive map[string]bool
+}
+
+// specNamed finds the declared vLLM seat a layer seat's model names, by id or alias.
+func (s VLLMSeatSet) specNamed(name string) (vllmseat.Spec, bool) {
+	if name == "" {
+		return vllmseat.Spec{}, false
+	}
+	all := s.Extras
+	if s.Primary != nil {
+		all = append([]vllmseat.Spec{*s.Primary}, s.Extras...)
+	}
+	for _, spec := range all {
+		if spec.ID == name || containsID(spec.Aliases, name) {
+			return spec, true
+		}
+	}
+	return vllmseat.Spec{}, false
+}
+
+// running reports whether this box runs the seat with the given id.
+func (s VLLMSeatSet) running(id string) bool {
+	if s.Primary != nil && s.Primary.ID == id {
+		return s.PrimaryActive
+	}
+	return s.ExtraActive[id]
+}
+
+// describe names the combination for an error: which seats are assumed running.
+func (s VLLMSeatSet) describe() string {
+	if len(s.Extras) == 0 {
+		return fmt.Sprintf("vllm_seat active=%v", s.PrimaryActive)
+	}
+	var on []string
+	for _, e := range s.Extras {
+		if s.ExtraActive[e.ID] {
+			on = append(on, e.ID)
+		}
+	}
+	return fmt.Sprintf("vllm_seat active=%v, extra seats running %v", s.PrimaryActive, on)
+}
+
+// activityCombos enumerates every way a box can run this tier's vLLM seats: the lane
+// seat present or absent, and each extra seat present or absent on its own.
+func activityCombos(p Profile) []VLLMSeatSet {
+	n := len(p.ExtraVLLMSeats)
+	var out []VLLMSeatSet
+	for _, primary := range []bool{true, false} {
+		for mask := 0; mask < 1<<n; mask++ {
+			active := map[string]bool{}
+			for i, e := range p.ExtraVLLMSeats {
+				if mask&(1<<i) != 0 {
+					active[e.ID] = true
+				}
+			}
+			out = append(out, VLLMSeatSet{Primary: p.VLLMSeat, PrimaryActive: primary, Extras: p.ExtraVLLMSeats, ExtraActive: active})
+		}
+	}
+	return out
+}
+
+// ResolveLayers turns a tier's DECLARED layers into what a box actually serves. It is
+// exported because the seed is not its only consumer: `install render` checks the
+// rendered serving config against these same layers.
+//
+//   - A bare agent seat ({"role": "agent"}) derives from the lane seat exactly as
+//     FillPairAgent does: the vLLM seat when the box runs it, else its fallback.
+//   - A seat whose model NAMES a declared vLLM seat (by id or alias) is served only
+//     while that seat runs: otherwise it is dropped, and a layer left with no seat is
+//     dropped with it. The seeded config never advertises a layer the box cannot serve.
+//   - `single` is the planner-default layer (placement row 5b: a box that declares no
+//     pair routes every agent contract to it). A layer set that declared `single` and
+//     lost it would make the node ineligible for every contract it ran the day before,
+//     so the whole set resolves to none — the box is then a plain, non-composite box.
+//
+// The input is never mutated: one Profile resolves for many boxes.
+func ResolveLayers(layers []config.LayerSpec, s VLLMSeatSet) []config.LayerSpec {
+	filled := fillPairAgent(layers, s.Primary, s.PrimaryActive)
+	var kept []config.LayerSpec
+	for _, l := range filled {
+		var seats []config.LayerSeat
+		for _, seat := range l.Seats {
+			if spec, named := s.specNamed(seat.Model); named && !s.running(spec.ID) {
+				continue
+			}
+			seats = append(seats, seat)
+		}
+		if len(seats) == 0 {
+			continue
+		}
+		l.Seats = seats
+		kept = append(kept, l)
+	}
+	if declaresLayer(layers, layerSingle) && !declaresLayer(kept, layerSingle) {
+		return nil
+	}
+	return kept
+}
+
+func declaresLayer(layers []config.LayerSpec, name string) bool {
+	for _, l := range layers {
+		if l.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // containsID is the membership test Validate shares between composes and layers.
@@ -315,6 +634,20 @@ func Resolve(p Profile, id string, opt Options) (map[string]any, error) {
 			merged[k] = v
 		}
 	}
+	// The extra seats a box runs join the roster and the bindings AFTER the lane seat's
+	// own (the roster's order is the table's). They never touch agent_model: only the
+	// lane seat is the agent lane. A box that runs an extra seat but not the lane seat
+	// has a roster of just that seat, and `doctor` still finds every roster seat bound.
+	roster, binds, err := extraSeatSeeds(p, id, opt)
+	if err != nil {
+		return nil, err
+	}
+	if len(roster) > 0 {
+		have, _ := merged["vllm_seats"].([]string)
+		merged["vllm_seats"] = append(append([]string{}, have...), roster...)
+		bound, _ := merged["kv_cache_server"].([]map[string]any)
+		merged["kv_cache_server"] = append(append([]map[string]any{}, bound...), binds...)
+	}
 	if _, set := merged["agent_ctx_tokens"]; !set && p.AgentCtxTokens > 0 {
 		merged["agent_ctx_tokens"] = p.AgentCtxTokens
 	}
@@ -369,16 +702,43 @@ func Resolve(p Profile, id string, opt Options) (map[string]any, error) {
 	// that seeds a layer set config refuses dies at authoring time, not on the
 	// first install of the tier.
 	if len(p.Layers) > 0 {
-		layers := fillPairAgent(p.Layers, p.VLLMSeat, opt.VLLMSeatActive)
-		tiers := append(append([]string{}, p.Composes...), id)
-		if err := (config.Config{TierProfile: id, Tiers: tiers, Layers: layers}).ValidateLayers(); err != nil {
-			return nil, fmt.Errorf("tier %q layers: %w", id, err)
+		// A box whose vLLM seats do not run seeds only the layers it can serve — and none
+		// at all when the planner-default layer is not among them (ResolveLayers), in
+		// which case it is a plain box and carries no composite identity either.
+		layers := ResolveLayers(p.Layers, VLLMSeatSet{
+			Primary: p.VLLMSeat, PrimaryActive: opt.VLLMSeatActive,
+			Extras: p.ExtraVLLMSeats, ExtraActive: opt.ExtraVLLMSeatsActive,
+		})
+		if len(layers) > 0 {
+			tiers := append(append([]string{}, p.Composes...), id)
+			if err := (config.Config{TierProfile: id, Tiers: tiers, Layers: layers}).ValidateLayers(); err != nil {
+				return nil, fmt.Errorf("tier %q layers: %w", id, err)
+			}
+			out["tier_profile"] = id
+			out["tiers"] = tiers
+			out["layers"] = layers
 		}
-		out["tier_profile"] = id
-		out["tiers"] = tiers
-		out["layers"] = layers
 	}
 	return out, nil
+}
+
+// extraSeatSeeds is the roster and the cache-server bindings the tier's RUNNING extra
+// seats contribute, in table order. Each running seat is validated as a non-lane seat
+// here too — `install seed` is the path that writes a box's config.json, and a seat the
+// box will run must fail at render, never land on it half-specified.
+func extraSeatSeeds(p Profile, tier string, opt Options) (roster []string, binds []map[string]any, err error) {
+	for i := range p.ExtraVLLMSeats {
+		e := p.ExtraVLLMSeats[i]
+		if !opt.ExtraVLLMSeatsActive[e.ID] {
+			continue
+		}
+		if err := e.ValidateExtra(tier); err != nil {
+			return nil, nil, err
+		}
+		roster = append(roster, e.ID)
+		binds = append(binds, e.ConfigBinding())
+	}
+	return roster, binds, nil
 }
 
 // Accelerator is one profiles.json `accelerators` entry: an additive device
@@ -391,8 +751,8 @@ type Accelerator struct {
 }
 
 // ResolveAccelerators merges the seeds of the listed accelerator ids, validates
-// every key against config.Config, and expands __HAILO_HOME__ / __CORAL_HOME__
-// (plus the usual __OFFLOAD_HOME__/__EXE__). An id with no entry is an authoring error — an
+// every key against config.Config, and expands __HAILO_HOME__ / __CORAL_HOME__ /
+// __RKNPU_HOME__ (plus the usual __OFFLOAD_HOME__/__EXE__). An id with no entry is an authoring error — an
 // installer that detected a device the table does not describe must say so.
 //
 // This function is the single authority on the rule; install.ps1 carries a
@@ -402,14 +762,29 @@ func ResolveAccelerators(accs map[string]Accelerator, ids []string, opt Options)
 		return nil, nil
 	}
 	merged := map[string]any{}
+	// Every device's seed lists its own id under "accelerators" — the gate. Merged key by
+	// key the last device's list would replace the others', so the gate is the union, in
+	// the order the ids were given (that order is the shared-name rule's, ADR 0037).
+	var gate []any
 	for _, id := range ids {
 		a, ok := accs[id]
 		if !ok {
 			return nil, fmt.Errorf("accelerator %q detected but not declared in profiles.json accelerators", id)
 		}
 		for k, v := range a.ConfigSeed {
+			if list, isList := v.([]any); k == "accelerators" && isList {
+				for _, e := range list {
+					if !slices.ContainsFunc(gate, func(g any) bool { return reflect.DeepEqual(g, e) }) {
+						gate = append(gate, e)
+					}
+				}
+				continue
+			}
 			merged[k] = v
 		}
+	}
+	if gate != nil {
+		merged["accelerators"] = gate
 	}
 	if err := validate(merged, "", "accelerators:"+strings.Join(ids, "+")); err != nil {
 		return nil, err
@@ -423,23 +798,27 @@ func ResolveAccelerators(accs map[string]Accelerator, ids []string, opt Options)
 		exe = ".exe"
 	}
 	home := strings.TrimRight(strings.ReplaceAll(opt.Home, `\`, "/"), "/")
-	hailoHome := strings.TrimRight(strings.ReplaceAll(opt.HailoHome, `\`, "/"), "/")
-	coralHome := strings.TrimRight(strings.ReplaceAll(opt.CoralHome, `\`, "/"), "/")
+	homeOf := func(h string) string { return strings.TrimRight(strings.ReplaceAll(h, `\`, "/"), "/") }
+	// One row per device: the token a seed value carries, the option that fills it.
+	homes := []struct{ token, option, dir string }{
+		{"__HAILO_HOME__", "HailoHome", homeOf(opt.HailoHome)},
+		{"__CORAL_HOME__", "CoralHome", homeOf(opt.CoralHome)},
+		{"__RKNPU_HOME__", "RknpuHome", homeOf(opt.RknpuHome)},
+	}
 	out := map[string]any{}
 	for k, v := range merged {
 		ev := expand(v, home, exe)
 		if s, ok := ev.(string); ok {
-			// A home token left EMPTY would render "/coral-http.sh" — a launcher
-			// at the filesystem root that nothing ever installed, and a sidecar
-			// that never spawns with no hint why. Refuse the render instead.
-			if strings.Contains(s, "__HAILO_HOME__") && hailoHome == "" {
-				return nil, fmt.Errorf("accelerator seed key %q uses __HAILO_HOME__ but no HailoHome was given", k)
+			for _, h := range homes {
+				// A home token left EMPTY would render "/coral-http.sh" — a launcher
+				// at the filesystem root that nothing ever installed, and a sidecar
+				// that never spawns with no hint why. Refuse the render instead.
+				if strings.Contains(s, h.token) && h.dir == "" {
+					return nil, fmt.Errorf("accelerator seed key %q uses %s but no %s was given", k, h.token, h.option)
+				}
+				s = strings.ReplaceAll(s, h.token, h.dir)
 			}
-			if strings.Contains(s, "__CORAL_HOME__") && coralHome == "" {
-				return nil, fmt.Errorf("accelerator seed key %q uses __CORAL_HOME__ but no CoralHome was given", k)
-			}
-			s = strings.ReplaceAll(s, "__HAILO_HOME__", hailoHome)
-			ev = strings.ReplaceAll(s, "__CORAL_HOME__", coralHome)
+			ev = s
 		}
 		out[k] = ev
 	}

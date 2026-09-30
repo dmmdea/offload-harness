@@ -53,7 +53,9 @@ An HTML/CSS page that HyperFrames renders to video frame by frame: a root elemen
 animation seeked rather than played, so the same inputs give the same frames. The
 `offload_compose_video` lane renders one, CPU-class and with no GPU lock (ADR 0059). A Composition
 is code that runs in an unsandboxed Chrome, so the fleet door renders only the vetted templates under
-`render/compose-templates/`. Not a ComfyUI graph, and not generation: nothing is sampled.
+`render/compose-templates/`: `title-card`, `lower-third`, `stat-card`, `section-title`,
+`callout-label`, `checklist-card` and `captions-bar`. Not a ComfyUI graph, and not generation: nothing
+is sampled.
 
 ## Config seed
 
@@ -305,6 +307,14 @@ running ComfyUI whose argv contradicts the profile is never reused silently
 One device set of a composite box with its own seats, guards and tier identity (`single`,
 `pair`, `display`). Placement chooses a layer and a seat per task; a layer marked `dormant` is
 declared but never routed to until the operator enables it.
+
+## Extra vLLM seat
+
+A vLLM seat a tier serves on demand beside its agent-lane seat (`vllm_seat`), declared in the tier's
+`extra_vllm_seats`: the same card, never the agent lane, reached by name through the Layer that names it
+(the `ampere-16` fast layer's 35B). Every vLLM seat of a tier renders as an alternative of the others, and
+the box seeds a seat, its roster entry, its cache-server binding and its layer only while it can run it.
+See [systems/composite-tier.md](systems/composite-tier.md) and ADR 0048 Amendment 2.
 
 ## Placed
 

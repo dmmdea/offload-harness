@@ -161,6 +161,32 @@ const (
 // read as an unknown one on every pre-D-118 node in a mixed-version fleet.
 const IncoherentSeatReason = "seat incoherent at warm: "
 
+// SeatWarmFailedReason prefixes the defer a seat earns when its admission
+// warm-up is refused with a server error and there is positive evidence the seat
+// never came up (register C-76, agent_warm_failure_defer): llama-swap could not
+// start the seat's process (an engine that exits at start answers 500 "upstream
+// command exited prematurely"). The class is `infrastructure`, and a constant
+// rather than a sentence typed twice so the delegator keys on it
+// (delegate.SeatWarmFailedDefer: one retry on another node, the case another node
+// serves) without matching prose.
+const SeatWarmFailedReason = "seat warm-up failed: "
+
+// The reason prefixes of a FINISHED loop whose structured re-pack failed
+// (register C-66, PR-4). The executing node writes them (pipeline.runAgentTask:
+// "structured re-pack unreachable: ...", "structured re-pack attempt 3/3 cut by
+// ...", "output failed schema: ...") and a delegator that meets a node which does
+// not yet publish AgentWireResult.SchemaMiss recognizes the shape from them
+// (delegate.SchemaMissRescuable), so constants and not sentences typed twice.
+const (
+	RepackFailedReason = "structured re-pack "
+	SchemaFailedReason = "output failed schema"
+	// RepackCanceledReason prefixes the defer of a re-pack the CALLER's context
+	// ended (the delegator abandoned the poll, the node is shutting down). The
+	// answer is intact but nobody is waiting for the object, so the delegator
+	// never rescues it, whether or not the node flagged it as a schema miss.
+	RepackCanceledReason = "canceled during the structured re-pack"
+)
+
 // Scheduling bands (0.113.18) — the delegator stamps one on every dispatch
 // (`priority` in the fleet envelope) and the node's job store orders its
 // backlog by it. Shared here because both sides must agree on the vocabulary
@@ -327,6 +353,15 @@ type AgentWireResult struct {
 	OutputTruncated bool   `json:"output_truncated,omitempty"`
 	Deferred        bool   `json:"deferred"`
 	Reason          string `json:"reason,omitempty"`
+	// SchemaMiss (register C-66, PR-4) marks a defer whose agent loop FINISHED: the
+	// answer is intact in Output, complete (not cut at the completion budget) and
+	// only its structuring failed — the structured re-pack was stalled, unreachable,
+	// cut or answered a shape the schema refused. It is what lets the delegator
+	// re-pack the answer itself instead of counting a finished loop as lost work
+	// (80 of 80 killed re-packs on 2026-09-29 carried a finished answer). Set with
+	// Deferred and never without Output; a node that predates the field omits it and
+	// the delegator recognizes the same shape from stop_reason and the reason prefix.
+	SchemaMiss bool `json:"schema_miss,omitempty"`
 	// DeferClass is the machine-branchable WHY behind Deferred (one of the
 	// DeferClass* constants). Additive and omitempty: a pre-0.65 node's result
 	// decodes with an empty class, which readers must treat as "unknown", never

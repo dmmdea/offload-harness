@@ -30,6 +30,9 @@ func TestEveryTemplateModelUnloadsAfterFiveIdleMinutes(t *testing.T) {
 		if err := yaml.Unmarshal(b, &doc); err != nil {
 			t.Fatalf("%s: %v", filepath.Base(p), err)
 		}
+		if len(doc.Models) == 0 && anchorRe.Match(b) {
+			continue // every model is a tier seat; the rendered tier is checked in its own test
+		}
 		if len(doc.Models) == 0 {
 			t.Fatalf("%s: no models map", filepath.Base(p))
 		}

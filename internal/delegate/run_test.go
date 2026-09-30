@@ -523,7 +523,8 @@ func TestRunRemoteHappyPathWithAcceptance(t *testing.T) {
 	if want := hashOwnExecutable(t); line.DelegatorBuildSHA256 != want {
 		t.Errorf("delegator_build_sha256 = %q, want the running binary's own sha256 %q", line.DelegatorBuildSHA256, want)
 	}
-	rows, lerr := ledger.ReadAll(cfg.LedgerPath)
+	allRows, lerr := ledger.ReadAll(cfg.LedgerPath)
+	rows := ledger.JobRows(allRows) // one row per job: the dispatch marker is not a job (ADR 0064)
 	if lerr != nil || len(rows) != 1 {
 		t.Fatalf("ledger rows = %d (%v), want 1", len(rows), lerr)
 	}
