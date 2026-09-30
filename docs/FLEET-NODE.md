@@ -918,7 +918,8 @@ Retry-After built from it. A look after the job finished does not change that.
 
 The delegator's own ledger records what it did: `reason_code` `queue_withdrawn` for a confirmed
 queue-deadline withdrawal and `queue_deadline` for one the node did not confirm, and the intent ledger's
-close note says `withdrawn` or `terminal observed`; see [The delegation ledger row](#the-delegation-ledger-row).
+close note says `withdrawn`, `terminal observed`, `never started` (the recovery pass found the node had
+withdrawn or reaped the job) or `recovered`; see [The delegation ledger row](#the-delegation-ledger-row).
 
 ### The delegation ledger row
 

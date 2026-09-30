@@ -83,8 +83,10 @@ carried no timestamp or process id.
 
 6. **The recovery pass stops closing intents on a 401**, and every intent event says when and by whom. A 401 is
    a fact about the caller's credentials, so the intent stays open (the 48 h expiry still bounds it) and the
-   pass logs it once, however many intents it covered. Every intent event carries the unix second and the pid of
-   the process that wrote it, stamped on the one append path.
+   pass logs it once, however many intents it covered. A terminal error a node writes for a job it never ran
+   (`withdrawn: ...`, `reaped: ...`) has no result to file, so recovery closes that intent as `never started`,
+   writes no envelope and does not count it as a recovery. Every intent event carries the unix second and the
+   pid of the process that wrote it, stamped on the one append path.
 
 7. **The ledger sees its own failure shapes.** On the delegator's `agent_delegate` row:
    - `door`: the contract's, else the engine's own name, on every row;
