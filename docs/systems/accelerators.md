@@ -5,8 +5,9 @@
 Devices that ride **beside** the GPU tier: a box's `profile` stays one string, and
 `accelerators: []` lists the additive compute devices found next to it
 ([ADR 0024](../architecture/decisions/0024-accelerators-are-additive-to-the-gpu-tier.md)).
-Today the harness declares exactly one — the Hailo-8L NPU — served through an on-demand loopback HTTP
-sidecar the harness spawns and that exits itself when idle.
+Today the harness declares three — the Hailo-8L NPU, the Coral Edge TPU and the Rockchip RK3588
+NPU (`rknpu`) — each served through an on-demand loopback HTTP sidecar the harness spawns and that
+exits itself when idle.
 
 ## Questions this doc answers
 
@@ -15,6 +16,7 @@ sidecar the harness spawns and that exits itself when idle.
 - Which config keys does an accelerator seed, and who merges them?
 - How does the sidecar start, answer, and stop?
 - Which tools does the NPU own, and which stay on the GPU?
+- How is the Rockchip RK3588 NPU detected on a vendor and on a mainline kernel?
 
 ## Scope
 
@@ -23,8 +25,9 @@ ownership boundary, and status reporting.
 
 ## Non-scope
 
-- The sidecar's own implementation (models, HEFs, pipelines) — that lives in the Hailo repo
-  (Hailo-8L-Analysis-Pipelines), not here.
+- The Hailo sidecar's own implementation (models, HEFs, pipelines) — that lives in the Hailo repo
+  (Hailo-8L-Analysis-Pipelines), not here. The Coral's sidecar is `accelerators/coral/` and the
+  RKNPU's `accelerators/rknpu/`; this doc holds their contract, not their code.
 - GPU tier selection and serving → [setup-installer.md](setup-installer.md)
 - The GPU vision seats (VQA, GPU OCR) → [offload-pipeline.md](offload-pipeline.md)
 
@@ -121,6 +124,48 @@ is **refused** at seed time (0.114.0) instead of rendering a launcher at the fil
 passes detect's verdict to `install seed --accelerators` and writes `installed.json`; and
 `fleet-serve` falls back to `config.accelerators` when the manifest lists none, so a hand-built
 node (the Lenovo has no `installed.json`) still advertises its device in `/fleet/health`.
+
+### Rockchip RK3588 NPU detection and seed (`rknpu`)
+
+`hwdetect.DetectRknpu` reports `["rknpu"]` iff one of a fixed set of sysfs uevent files carries the
+line `DRIVER=RKNPU` — Rockchip's NPU platform driver, matched as a whole line and case-sensitively.
+Which file carries it depends on the kernel, so both layouts are read (Linux only: Windows has no
+sysfs and never matches):
+
+| Kernel | Where the driver names itself | Files read |
+|---|---|---|
+| Vendor 6.1 BSP (driver built in) | the NPU platform device is its DRM node's own device; the `cardN` it takes follows probe order (the display subsystem is `card0`, the NPU `card1` on the reference Orange Pi 5, RK3588S) | `/sys/class/drm/card0` … `card3/device/uevent` |
+| Mainline (7.0 measured) with the out-of-tree `rknpu` module (DKMS, 0.9.8) | the NPU's DRM card (`card2` there) hangs off a virtual `/sys/devices/rknpu` whose uevent is **empty**; the line is on the NPU's three core platform devices (`OF_COMPATIBLE_0=rockchip,rk3588-rknn-core`), and any one bound is enough | `/sys/bus/platform/devices/fdab0000.npu`, `fdac0000.npu`, `fdad0000.npu` `/uevent` |
+| Mainline with the in-tree `rocket` driver | the same core devices report `DRIVER=rocket` | **not a match**: the RKNN runtime does not run on it, so listing it would register tools whose first call can never succeed |
+
+A read that merely succeeds proves nothing — every DRM card reads, the Mali GPU's
+(`DRIVER=panthor`) included — so the driver line is the whole rule. `DRIVER=RKNPU2`,
+`DRIVER=rknpu` and an `OF_COMPATIBLE` string with no driver bound all read as "no accelerator", and
+so does an unreadable candidate. `DetectAllAccelerators` lists the RKNPU **after** the Hailo and the
+Coral (the order is the shared-name rule's), and `install detect` / `install plan` hand it the same
+injected reader as the Coral probe. `OFFLOAD_ACCELERATORS` overrides the probe here as for the other
+devices.
+
+The seeded keys (rknpu):
+
+| Key | Meaning |
+|---|---|
+| `accelerators` | `["rknpu"]` — the gate |
+| `rknpu_endpoint` | sidecar base, `http://127.0.0.1:18815` — loopback only, after the Hailo's 18813 and the Coral's 18814 |
+| `rknpu_sidecar_cmd` | launcher (`__RKNPU_HOME__/rknpu-http.sh`); the harness runs it as `<cmd> --idle-sec <rknpu_idle_sec>`; empty = never spawn, defer when down |
+| `rknpu_timeout_sec` | one NPU call's bound, default 60; a forwarded call is cut off at `accelremote.Budget` (150 s) whatever this says, and a cold start can spend 45 s of it |
+| `rknpu_idle_sec` | the sidecar's self-exit idle window, default 300 — also how long a loaded model holds system RAM |
+
+`RKNPU_HOME` (`install seed --rknpu-home`, default `<OFFLOAD_HOME>/rknpu`) holds the sidecar's own
+`venv/`, its `models/` and the sidecar itself (`accelerators/rknpu/`, copied flat or checked out
+beneath it); an empty home is refused at seed time like the other two. `install seed`,
+`install plan` and `audit-config` all resolve accelerator seeds through one helper
+(`accelOptions`) that fills every device's home from flag, environment and `<home>/<device>` —
+`install plan` used to supply only the Hailo's, so it failed on any box that also listed a Coral.
+A box carrying several devices is seeded `accelerators` = the union of their ids, in detection
+order; the seeds used to merge key by key, so the last device's list replaced the others' and the
+config gated on one device while `installed.json` advertised both. `audit-config` owns the
+accelerator keys and compares a node with the seed of the devices it lists.
 
 ## Runtime — the sidecar
 
@@ -219,6 +264,40 @@ receives every device as an `agent.AccelLane` (`pipeline.NewLoopAccel`, config o
 registers the same tables through `ReadOnlyToolsWithLanes`. The pre-Coral single-lane `NPU`
 injection still works for every existing caller and test.
 
+### RKNPU tools
+
+The RKNPU owns three capabilities, each a sidecar tool under the Coral's contract
+(`POST /v1/<tool>`) on `.rknn` models the sidecar verifies by sha256 (an `.rknn` is compiled for one
+target SoC, here rk3588):
+
+| MCP / loop tool | Sidecar tool | Arguments | Result |
+|---|---|---|---|
+| `offload_classify_image` *(name shared with the Coral)* | `classify` | `image_path`, `top_k?` | `{results:[{label,score}],best,model,domain}`, ImageNet only |
+| `offload_object_detect` *(shared with the Hailo and the Coral)* | `object_detect` | `image_path`, `score_threshold?` | `{objects:[{label,class_id,x,y,w,h,score}],count}` in image pixels |
+| `offload_image_embed` *(shared with the Hailo and the Coral)* | `embed` | `image_path` | `{embedding,dim,space,model}` from a CLIP-class image tower |
+
+The Coral's `domain` (iNat label spaces) and `size` (EfficientDet inputs) arguments are not offered:
+they belong to its models. The descriptions do not name the RKNN models — the sidecar's manifest
+decides which ship, and each result's `model` says what ran. `space` keeps embeddings honest: an
+RKNPU vector is in its own space, neither the Hailo's `tinyclip` nor the Coral's
+`efficientnet-edgetpu-s`, and vectors are comparable only within one space, whatever the dimension.
+
+Deliberately **not** owned: `text_embed` and `zero_shot` (only the image side is served), the tools
+the Hailo covers (`face_*`, `person_embed`, `pose`, `segment`, `depth`, `enhance_low_light`) and the
+Coral's `semantic_segment`. `offload_ocr` and `offload_transcribe` `engine:"npu"` stay Hailo-only.
+
+**The shared-name rule over three devices.** With a third device sharing names, the first listed
+owner is not always the first device listed: `classify_image` is owned by the Coral and the RKNPU
+only, so on `hailo-8l,rknpu,coral-edgetpu` the RKNPU takes it while the Hailo takes `object_detect`
+and `image_embed`. Both surfaces walk `config.Accelerators` in order, and every order of the three
+devices is tested on both.
+
+**Kept in lockstep.** The device id is spelled by hand in the MCP table (`accelMCPTools`,
+`accelOwns`, `accelLaneConfigFor`), in the agent loop's (`laneToolsFor`) and in the pipeline's lane
+table (`laneConfigFor`), with no registry — a missed site registers nothing, and only the status
+block says so. A test holds every device `profiles.json` declares to all three: its owned capabilities are the MCP
+tools, the loop's tools and a pipeline lane.
+
 ## Fleet routing — reaching a device this box lacks (0.115.0, ADR 0038)
 
 A box that carries no accelerator can still use one over the fleet. Opt in with
@@ -264,6 +343,9 @@ four owned tools, and the sidecar's `/health` — `{enabled, device:"/dev/apex_0
 temp_c, loaded:[...], models_missing:[...], runtime:{litert, libedgetpu}}` — read from sysfs
 `status`/`temp` (never written).
 
+For rknpu the block carries the endpoint, whether a launcher is configured, the three owned tools
+and the sidecar's `/health` dict, embedded verbatim.
+
 ## Limits
 
 - **Single in-flight inference** — one sidecar process serialises NPU access by construction.
@@ -272,6 +354,12 @@ temp_c, loaded:[...], models_missing:[...], runtime:{litert, libedgetpu}}` — r
   accelerator calls across several nodes is not a thing yet — one call, one node.
 - Windows cannot see the device as an "NPU" (no MCDM driver) — irrelevant to this route, which
   reaches the device through HailoRT via the sidecar, not through Windows ML.
+- **RKNPU is Linux-only and shares the host's memory.** A loaded model holds system RAM until the
+  sidecar's idle exit (`rknpu_idle_sec`): shorten it on a box whose memory is also a host's, at the
+  cost of a cold start per burst. The user the fleet node runs as needs the NPU's DRM node (on the
+  reference board `/dev/dri/renderD129` is `root:render` and `card2` `root:video`). One in-flight
+  inference per sidecar, as for every device; a forwarded call is cut off at the 150 s Budget,
+  45 s of which a cold start can spend.
 
 ## Verifying on a box
 
@@ -288,6 +376,21 @@ On a box with the device (config seeded, sidecar repo checked out):
    again (cold ~2 s + HEF load).
 5. On a box **without** the device: `tools/list` is unchanged.
 
+To verify an RKNPU (a Rockchip RK3588 board, driver bound):
+
+1. `uname -r`, then the driver: on the vendor kernel one of `/sys/class/drm/card*/device/uevent`
+   holds `DRIVER=RKNPU`; on a mainline kernel `cat /sys/bus/platform/devices/fdab0000.npu/uevent`
+   does, and `/sys/module/rknpu/version` reads the DKMS module's version (0.9.8 measured).
+   `/sys/kernel/debug/rknpu/version` names the driver on both (debugfs: usually root only).
+2. `local-offload install detect -json` → `"accelerators": ["rknpu"]`. On a board whose driver is
+   `rocket` it is empty: that is the rule, not a fault.
+3. `offload_status` → `accelerators.rknpu.endpoint` present; a first-call `health_error` (not
+   running) is expected.
+4. `offload_object_detect` or `offload_classify_image` on a real photo → a result carrying `model`;
+   right after, `curl http://127.0.0.1:18815/health` shows it loaded.
+5. Wait `rknpu_idle_sec` + 10 s → the sidecar process is gone and its RAM back; the next call spawns
+   it again.
+
 ## Source map
 
 - [`internal/accelclient/hailoclient.go`](../../internal/accelclient/accelclient.go) — the
@@ -299,6 +402,12 @@ On a box with the device (config seeded, sidecar repo checked out):
 - [`internal/config/config.go`](../../internal/config/config.go) — `Accelerators`,
   `HasAccelerator`, `hailo_*` keys and defaults
 - [`internal/hwdetect/classify.go`](../../internal/hwdetect/classify.go) — detection
+- [`internal/mcpserver/acceltools.go`](../../internal/mcpserver/acceltools.go),
+  [`internal/agent/acceltools.go`](../../internal/agent/acceltools.go),
+  [`internal/pipeline/loopaccel.go`](../../internal/pipeline/loopaccel.go) — the per-device tables
+  (tools, owned capabilities, lane config) that must stay in lockstep
+- [`internal/pairworkloads/pairworkloads.go`](../../internal/pairworkloads/pairworkloads.go) —
+  `EngineFor`: the device is the PAIR card's engine
 - [`internal/tierseed/tierseed.go`](../../internal/tierseed/tierseed.go) —
   `ResolveAccelerators`
 - [`internal/accelremote/accelremote.go`](../../internal/accelremote/accelremote.go) — the

@@ -28,7 +28,7 @@ where the code lives.
 - [systems/node-swap.md](systems/node-swap.md) — `node-swap`: the reusable Windows fleet-node
   binary swap (verify hash, wait idle, backup+rename, restart, verify, auto-rollback), and its
   detached launcher for an SSH-session-proof run
-- [systems/accelerators.md](systems/accelerators.md) — devices beside the GPU tier (hailo-8l NPU):
+- [systems/accelerators.md](systems/accelerators.md) — devices beside the GPU tier (hailo-8l, coral-edgetpu and rknpu):
   detection, seeding, the on-demand sidecar, tool ownership
 - [systems/cache-server.md](systems/cache-server.md) — the optional second-device KV tier for a vLLM seat:
   the `kv_cache_server` block, what it measured, the layout constraint, and the seat templates.

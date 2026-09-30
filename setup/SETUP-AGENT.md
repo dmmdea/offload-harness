@@ -805,6 +805,30 @@ inside the job (cap 8 MiB), and the call runs on the first remote whose `/fleet/
 the result carries `placement{node, wall_ms}`. Nothing else changes, and a box that lists nothing is
 byte-identical. The node needs 0.115.0 too (it serves the `accel` task).
 
+### Accelerators (rknpu)
+
+The Rockchip RK3588 NPU is the third accelerator (ADR 0024 + ADR 0037;
+`docs/systems/accelerators.md`). Detection is a sysfs read of the NPU driver's name — the line
+`DRIVER=RKNPU` in a DRM card's uevent on the vendor kernel, or in an NPU core's platform-device
+uevent on a mainline kernel with the `rknpu` DKMS module — so it is **Linux only**, and `install.sh`
+merges its seed and writes `installed.json` like the Coral's. A board on the in-tree `rocket` driver
+is not detected: the RKNN runtime does not run on it. Two knobs:
+
+- `RKNPU_HOME` (`install seed --rknpu-home`) — the sidecar home `__RKNPU_HOME__` expands to in the
+  seeded `rknpu_sidecar_cmd`. Default `<OFFLOAD_HOME>/rknpu`. It must hold `venv/` (the sidecar's
+  Python dependencies), `models/` (the `.rknn` models its manifest lists, each verified by sha256)
+  and `accelerators/rknpu/` — copied flat or checked out beneath the home; the launcher walks up to
+  `venv/`. The harness runs it as `rknpu-http.sh --idle-sec <rknpu_idle_sec>`. An EMPTY home is
+  refused at seed time.
+- `OFFLOAD_ACCELERATORS` — the same override as for the other devices; list several ids to exercise
+  the shared-name rule (`hailo-8l,coral-edgetpu,rknpu`: the first listed owner of each name
+  registers it).
+
+The sidecar spawns on demand over loopback :18815 and exits itself after `rknpu_idle_sec`. The user
+the fleet node runs as must be able to open the NPU's DRM node (group `render` on the reference
+board), and the NPU shares system memory with the host, so a loaded model holds its RAM until the
+idle exit.
+
 ### Optional: the coding agent + chat GUI (OFF by default)
 
 The `local-agent --serve` endpoint is **unauthenticated** and drives write/GitHub tools, so it is
