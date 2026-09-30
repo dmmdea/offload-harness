@@ -102,11 +102,19 @@ which is legitimate and visible in health as `jobs_queued`. Only `fleet_max_queu
 Since 0.101.0 this repo's delegator **re-places** a refused subtask rather than failing it — but only
 a refusal that is about the node (`503`, `409`, `429`, `404`, `408`, any 5xx, or a node it could not
 reach). A `400`/`401`/`403` is about the request and stays terminal, because the next node is handed
-identical bytes. Re-placement happens at DISPATCH time only: once a node has acked `202` the job may
-be running there, so nothing after the ack is ever moved. The bound is the first choice plus two more
+identical bytes. Re-placement happens at DISPATCH time, with one exception: once a node has acked `202`
+the job may be running there, so nothing after the ack is moved unless the node itself says it never ran
+it (a confirmed withdrawal, or a `reaped` / `withdrawn` / `not started` record a poll reads: items 7 and 8
+above, ADR 0064). The bound is the first choice plus two more
 remotes, then the local seat; every placement is handed only what is left of the contract's
 `timeout_sec`. When no node takes it the subtask FAILS with `placement refused: …` naming each node
 and what it said — never a manufactured defer, because no seat ever saw the contract.
+
+Since ADR 0063 a refusal never sleeps: a `503` returns at once and the subtask is re-placed on a node with room after
+the fleet is read again (its `Retry-After` only cools that node for the capacity wait). A subtask the local seat's
+run cap deferred (`capacity`, no step run) is re-placed the same way, and when no node has room the subtask waits in
+the capacity wait instead of failing - whatever kind of refusal started the chain, and a `route=spread` overflow
+(every remote already dealt to its headroom, the local seat's run cap spent) waits there too.
 
 On a COMPOSITE node (ADR 0052) the dispatched contract also carries `layer`: the layer the
 delegator chose from the rows that node advertised in health. The node does NOT take it on

@@ -12,6 +12,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
@@ -307,6 +308,20 @@ func hasRoom(v NodeView, sheddable bool) bool {
 		return v.IdleSlot
 	}
 	return provablyStartsNow(v)
+}
+
+// hasRoomWithin is hasRoom plus the backlog gate: v would take a NEW dispatch
+// right now AND could start it inside `patience` (startsWithinPatience). It is
+// the predicate the capacity wait, the deals and re-placement use - a node that
+// passes hasRoom but whose backlog outlasts the caller's patience is a node the
+// job would sit in for longer than anyone is waiting, and that the delegator
+// would then abandon while the node ran it anyway. patience <= 0 is no bound.
+func hasRoomWithin(v NodeView, sheddable bool, patience time.Duration) bool {
+	if !hasRoom(v, sheddable) {
+		return false
+	}
+	ok, _ := startsWithinPatience(v, patience)
+	return ok
 }
 
 // provablyStartsNow reports whether v's own numbers prove the next job begins
