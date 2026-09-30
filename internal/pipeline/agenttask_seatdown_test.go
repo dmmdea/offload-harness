@@ -17,6 +17,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/agent"
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/delegate"
 	"github.com/dmmdea/offload-harness/internal/llamaclient"
 	"github.com/dmmdea/offload-harness/internal/seatrate"
 	"github.com/dmmdea/offload-harness/internal/seatwait"
@@ -360,6 +361,14 @@ func TestRunAgentTaskSeatDownDuringTheRepackKeepsThePrefix(t *testing.T) {
 			if tc.seatDown {
 				if !strings.HasPrefix(wire.Reason, core.SeatDownReason) || !strings.Contains(wire.Reason, "during the structured re-pack") {
 					t.Fatalf("reason = %q, want %q prefixed and naming the re-pack", wire.Reason, core.SeatDownReason)
+				}
+				// Like every failure of the re-pack it is flagged schema_miss (register
+				// C-66): the loop finished and only its structuring failed, so a delegator
+				// may re-pack the answer itself before it re-places the contract. The one
+				// wire is both defers the delegator knows.
+				if !wire.SchemaMiss || !delegate.SeatDownDefer(wire) || !delegate.SchemaMissRescuable(wire) {
+					t.Fatalf("schema_miss=%v seat-down defer=%v rescuable=%v: want a seat-down defer that carries the finished answer and the flag",
+						wire.SchemaMiss, delegate.SeatDownDefer(wire), delegate.SchemaMissRescuable(wire))
 				}
 				return
 			}

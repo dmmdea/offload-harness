@@ -32,7 +32,9 @@ func doorOf(contract core.AgentContract) string {
 // package itself writes ("queue deadline", "poll deadline", "canceled", ...) and
 // the node's own liveness prefix ("stalled:", bare or behind the re-pack's own
 // prefix, see isStallReason) second. A node's free prose is never
-// the basis for anything but the seat-down hint, which is documented as a hint.
+// the basis for anything but the seat-down hint, which is documented as a hint;
+// the two reasons of ADR 0066 ("seat down:", "seat not serving:") are constants
+// core owns, matched as such.
 func reasonCodeFor(pr PlacedResult) string {
 	switch {
 	case pr.Err != "":
@@ -107,6 +109,13 @@ func deferReasonCode(pr PlacedResult) string {
 		return ledger.ReasonShed
 	case strings.HasPrefix(w.Reason, "poll deadline"):
 		return ledger.ReasonPollDeadline
+	case SeatDownDefer(w):
+		// The node's typed outcome (ADR 0066): its seat went down under the run and did
+		// not come back inside the recovery wait. Read before the stall arm: a wedge's
+		// text carries the engine-flat arithmetic of the stall it replaced, and a seat
+		// lost in the structured re-pack carries the re-pack's suffix — neither is a
+		// stall row, and the delegator re-places the contract.
+		return ledger.ReasonSeatDown
 	case isStallReason(w.Reason):
 		return stallReasonCode(w.Reason)
 	case pr.Unplaced && strings.HasPrefix(w.Reason, "route=remote:"):
@@ -136,7 +145,7 @@ func deferReasonCode(pr PlacedResult) string {
 	case core.DeferClassWrite:
 		return ledger.ReasonWrite
 	case core.DeferClassInfrastructure:
-		if seatUnreachable(w.Reason) {
+		if seatUnreachable(w.Reason) || seatNotServing(w.Reason) {
 			return ledger.ReasonSeatDown
 		}
 		return ledger.ReasonInfrastructure
@@ -180,6 +189,18 @@ func stallReasonCode(reason string) string {
 		return ledger.ReasonStallTool
 	}
 	return ledger.ReasonStallOther
+}
+
+// seatNotServing reports the node's "seat not serving:" reason (ADR 0066): llama-swap
+// answered a 5xx for the seat and the answer outlived the busy-seat wait while the
+// seat was not known to be down — a start that failed, a health check that timed
+// out. The node writes it from core.SeatNotServingReason, bare or behind another
+// prefix ("structured re-pack unreachable: ...", "... (seat not serving: ...)"), so
+// it is matched as a constant anywhere in the reason. It is the seat that could not
+// serve, not its peers holding its slots (`seat contended:`, a 429, stays
+// infrastructure), and the live gate groups it with `seat down:` for the same reason.
+func seatNotServing(reason string) bool {
+	return strings.Contains(reason, core.SeatNotServingReason)
 }
 
 // seatUnreachable is the seat-down HINT: an infrastructure defer whose text is a

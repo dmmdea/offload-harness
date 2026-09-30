@@ -107,6 +107,10 @@ against a real 178-271 s), and several runs waiting on one load each appended it
    failure that a fresh read confirms as a dead seat — ends the run typed the same way,
    with `(during the structured re-pack)` appended; the finished answer stays in
    `output`.
+   That defer carries `schema_miss` like every failure of the re-pack (the loop
+   finished and only its structuring did not), so a delegator that can re-pack the
+   answer itself does that first (the rescue of register C-66) and re-places the
+   contract only when the rescue cannot produce a validated object.
 
 4. **The wording follows the status, and a seat that is not serving is not waited on as
    contention.** `seat contended:` is for a 429 only (llama-swap's concurrency limit). A
@@ -179,8 +183,9 @@ against a real 178-271 s), and several runs waiting on one load each appended it
 - Nodes without this decision keep filing `stalled:` for the same outage until they are
   upgraded; for them the delegator's change is inert.
 - The wire carries `seat_recoveries` and `seat_down_wait_sec`, and the delegation corpus
-  keeps them; the ledger rows carry the outcome as `reason_code` `seat_down` (ADR 0064)
-  and not yet the two numbers.
+  keeps them; the ledger rows carry the outcome as `reason_code` `seat_down` (ADR 0064),
+  for a `seat not serving:` defer as well as a `seat down:` one, the grouping the live
+  gate uses (the seat itself could not serve), and not yet the two numbers.
 - Not solved here: why the engine hangs (py-spy and NCCL traces at the next hang;
   register A-123), the launcher that refuses to restart a seat while its own
   orphaned workers hold the port (its crash cleanup shipped separately, register C-72;
