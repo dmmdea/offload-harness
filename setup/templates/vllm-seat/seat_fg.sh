@@ -190,19 +190,20 @@ fi
 # A CRASHED generation leaves its own processes behind. When the engine dies (EngineDeadError, a worker that stopped
 # answering) llama-swap restarts the seat through this script, and nothing ran seat_stop.sh: the dead generation's MP
 # server still held its HTTP port and every restart refused right here (2026-09-29: 23 minutes with the agent seat
-# fully down, 59 failed starts, 75 HTTP 500s), and the engine workers its API server could not stop kept the cards. No
-# engine of THIS stack serves :$PORT (checked just above, and by process here), so whatever of the stack's own is still
-# around belongs to the dead generation: run the stack's own cleanup once, then look again. seat_stop.sh reaps only what
-# is provably this seat's own — engine processes with no live `vllm serve` ancestor, and the MP server of THIS stack's
-# MP port, by process and by unit, never by what holds a port — so anything still holding the MP HTTP port after it is
-# foreign and is refused exactly as before. A stopping unit can hold its socket for a few seconds, so the re-check waits
-# up to SEAT_MP_PORT_WAIT_SEC (default 10) for the port to free instead of judging one look. Engine processes are looked
-# for by the START of their command line: `pgrep -f VLLM::` also matches any wrapper whose arguments mention the name.
-# Only an ORPHAN counts — an engine process with no live `vllm serve` above it, the rule seat_stop.sh reaps by (the
-# definition below is a copy of its, and a Go test keeps the two identical): a sibling seat's live workers are not this
-# seat's leftovers, and a healthy start must not log a crash or run a stop. This is the only cleanup the launcher owns:
-# the script becomes `vllm serve` (exec, below), so nothing of it survives a crash to clean up after it — the Windows
-# stub's crash exit runs the same cleanup through the stop task, and there is no watchdog and no proactive relaunch anywhere.
+# fully down, 59 failed starts, 75 HTTP 500s), and the engine workers its API server could not stop kept the cards.
+# No engine of THIS stack serves :$PORT (checked just above, and by process here), so what of the stack's own is still
+# around belongs to the dead generation: run the stack's own cleanup once, then look again. Three kinds of leftover start
+# it: a listener on the MP HTTP port, an `lmcache server` of this stack's MP port, and an ORPHANED engine process — named
+# VLLM::* (found by the start of its command line: `pgrep -f VLLM::` also matches any wrapper whose arguments mention the
+# name) with no live `vllm serve` above it. That is seat_stop.sh's rule, and the definition below is a copy of its (a Go
+# test keeps the two identical): a sibling seat's live workers are not leftovers, and a healthy start must not log a crash
+# or run a stop. seat_stop.sh reaps only what is provably this seat's own — such orphans, and the MP server of THIS
+# stack's MP port, by process and by unit, never by what holds a port — so anything still holding the MP HTTP port after it
+# is foreign and is refused exactly as before. A stopping unit can hold its socket for a few seconds, so the re-check
+# waits up to SEAT_MP_PORT_WAIT_SEC (default 10) for the port to free instead of judging one look. This is the only
+# cleanup the launcher owns: the script becomes `vllm serve` (exec, below), so nothing of it survives a crash to clean up
+# after it — the Windows stub's crash exit runs the same cleanup through the stop task, and there is no watchdog and no
+# proactive relaunch anywhere.
 MP_PORT_WAIT="${SEAT_MP_PORT_WAIT_SEC:-10}"; case "$MP_PORT_WAIT" in ''|*[!0-9]*) MP_PORT_WAIT=10 ;; esac
 has_api_ancestor() { local q="$1" n=0; while [ "$q" -gt 1 ] 2>/dev/null && [ $n -lt 32 ]; do
   if ps -o args= -p "$q" 2>/dev/null | grep -q "vllm serve"; then return 0; fi
