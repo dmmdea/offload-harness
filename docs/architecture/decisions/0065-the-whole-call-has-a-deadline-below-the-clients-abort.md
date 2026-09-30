@@ -199,7 +199,10 @@ measurement of the client.
   producing job is still polled to its node ceiling when no deadline is set (the CLI); and the other
   doors that call the same engine (`agent_run` and `offload_ask` with a route, the review lane's fleet
   path) carry no deadline, because the plan names the two delegation doors, so a call through them can
-  still outlive the client's abort.
+  still outlive the client's abort. Widening it is a change of its own, not a flag: `contractOnFleet`
+  hands a deferred result back to its caller as "the fleet took nothing", and the review lane answers
+  that by running the local seat, so a deadline defer passed through it would start a local run after
+  the deadline.
 
 ## Alternatives considered
 
