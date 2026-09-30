@@ -563,7 +563,14 @@ func statusRemote(cfg config.Config) map[string]any {
 		"nim_key_present":         nimclient.KeyForBase(cfg.NIMEndpoint) != "",
 		"browse_configured":       cfg.BrowseConfigured(),
 		"browse_decision_url":     cfg.BrowseDecisionURL,
+		"browse_activate_tab":     cfg.EffectiveBrowseActivateTab(),
 		"note":                    "offload_nim is the only remote MODEL tool on this server (opt-in escalation); offload_browse (opt-in, ADR 0060) sends a browse run's typed choices to the loopback decision endpoint above and holds no key",
+	}
+	// browse_activate_tab is the EFFECTIVE value (the sidecar is told to activate its tab only
+	// with a dedicated browse_cdp_url). A key that is set but has nothing to honour it against
+	// says so here instead of reading as a silent false.
+	if cfg.BrowseActivateTabIgnored() {
+		remote["browse_activate_tab_note"] = config.BrowseActivateTabIgnoredNote
 	}
 	return remote
 }

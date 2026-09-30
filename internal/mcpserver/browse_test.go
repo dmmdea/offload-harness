@@ -87,3 +87,36 @@ func TestBrowseDoorDoesNotForwardUnattended(t *testing.T) {
 		t.Errorf("an MCP call must be judged as attended (bad URL, not a missing host list): %s", text)
 	}
 }
+
+// offload_status's remote block reports the EFFECTIVE browse_activate_tab next to its siblings,
+// and says so when the setting is on but ignored (no dedicated browse_cdp_url) instead of
+// showing a silent false.
+func TestStatusRemoteReportsBrowseActivateTab(t *testing.T) {
+	cfg := browseCfg()
+	remote := statusRemote(cfg)
+	if v, ok := remote["browse_activate_tab"]; !ok || v != false {
+		t.Errorf("the default must report browse_activate_tab false, got %v (present %v)", v, ok)
+	}
+	if _, ok := remote["browse_activate_tab_note"]; ok {
+		t.Error("an unset browse_activate_tab must carry no note")
+	}
+
+	cfg.BrowseActivateTab = true
+	remote = statusRemote(cfg)
+	if remote["browse_activate_tab"] != false {
+		t.Errorf("browse_activate_tab without browse_cdp_url is ignored, so the effective value is false, got %v", remote["browse_activate_tab"])
+	}
+	note, _ := remote["browse_activate_tab_note"].(string)
+	if !strings.Contains(note, "ignored") || !strings.Contains(note, "browse_cdp_url") {
+		t.Errorf("an ignored browse_activate_tab must say so and name browse_cdp_url, got %q", note)
+	}
+
+	cfg.BrowseCDPURL = "http://127.0.0.1:9555"
+	remote = statusRemote(cfg)
+	if remote["browse_activate_tab"] != true {
+		t.Errorf("browse_activate_tab with a dedicated endpoint must report true, got %v", remote["browse_activate_tab"])
+	}
+	if _, ok := remote["browse_activate_tab_note"]; ok {
+		t.Error("an effective browse_activate_tab must carry no ignored note")
+	}
+}

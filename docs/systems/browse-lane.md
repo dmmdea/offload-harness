@@ -53,8 +53,9 @@ operator's browser, and any remote browser service.
    spawns the sidecar with an allowlisted environment, telemetry forced off, and a fresh temp
    directory as cwd.
 3. The sidecar attaches to the running browser (the `browse_cdp_url` endpoint when set, else the named
-   browser's `DevToolsActivePort` file), opens a background tab, and loops: observe, ask the harness for a
-   decision, execute one action. The observe that follows an action first waits for the page to settle
+   browser's `DevToolsActivePort` file), opens a background tab (which it brings to the front once, at the
+   first observe, when `browse_activate_tab` is on with a dedicated `browse_cdp_url`), and loops: observe, ask
+   the harness for a decision, execute one action. The observe that follows an action first waits for the page to settle
    (about 0.3 s on a quiet page, 1.5 s of page time at most), and immediately before every page read the sidecar jumps
    the finite CSS animations and transitions the snapshot cannot see to their end state (see
    [Background tab rendering](#background-tab-rendering)).
@@ -70,11 +71,12 @@ operator's browser, and any remote browser service.
 
 ### Background tab rendering
 
-The lane's tab is opened in the background (`Target.createTarget` with `background: true`, so the
-operator's own tab is never activated) with focus emulation on, which jev-ultrafast enables to keep
+The lane's tab is opened in the background (`Target.createTarget` with `background: true`, so by default
+the operator's own tab is never activated) with focus emulation on, which jev-ultrafast enables to keep
 `requestAnimationFrame` and menus rendering. A hidden tab still produces no rendering frames for CSS
 animations (measured below). The lane corrects the main consequence; the bullets say how, and where the
-correction stops:
+correction stops. The last bullet is the opt-in setting that removes the cause on a dedicated agent browser
+(`browse_activate_tab`, recommended there):
 
 - **CSS animations and transitions stay at their start state.** A dialog or dropdown menu that fades in
   with `@keyframes` or a `transition` keeps opacity 0. The page snapshot drops every element whose
@@ -154,6 +156,34 @@ correction stops:
   read, not after it, and the settle covers only the first 0.3 to 1.5 s after an input. An element the page
   inserts once jev has read the page (a debounce or a network response that lands later) has no animation
   yet when the finish runs, so the following observe finishes it (the `wait` action re-observes).
+- **Activating the lane's tab removes the cause (opt-in: `browse_activate_tab`).** The tab jev creates reports
+  `document.visibilityState` `"visible"` but is not the window's active tab, and Chromium produces almost no
+  frames for it, which is why every correction above exists. With `browse_activate_tab: true` and a
+  `browse_cdp_url`, the sidecar calls `Target.activateTarget` for the lane's own tab once per run, at the
+  first observe, before the settle and before jev's read. It is a browser-level call in no session, with the
+  target id of the tab jev created, so no other tab is touched. Measured on a production web app's confirm
+  dialog opened from a menu item, in a dedicated agent browser (a separate profile nobody looks at), with
+  nothing finished by the lane: the dialog mounted at opacity 0 at +0.1 s. Left in the background, its
+  opacity transition started at +0.2 s in one run but, in the lane's own run, not within +0.33 s (the settle
+  saw no DOM mutation and no animation and stopped at 0.3 s, and the read was an empty page, because the
+  modal hides everything else); left alone, the dialog reached opacity 1 only at +2.1 s. After the activation
+  the same flow read opacity 0.957 at +0.2 s and 1 at +0.4 s, and the model's read after the menu click showed
+  the whole dialog in every instrumented run. End to end, deleting a record through the real UI (checked
+  independently): 5 of 5 runs with the activation and a goal that describes the dialog's question and says
+  the task is not done and not blocked while it is open (see Common pitfalls); about half with the older
+  step-list wording, where the failures were the model choosing BLOCKED with the dialog fully visible, not
+  rendering; 0 of 3 on the MCP path with only the settle and no activation. The finish and the settle stay on;
+  those runs had both in place. **Recommended for a dedicated agent browser.**
+- **Why the activation is opt-in and needs a dedicated endpoint.** It switches the window's active tab. In the
+  operator's everyday browser that is the tab someone is looking at, so the harness sends `activate_tab` to
+  the sidecar only when `browse_activate_tab` is true AND `browse_cdp_url` names an endpoint the lane
+  accepts. With the key true and no such endpoint the setting is ignored and the lane is not failed: the run
+  goes on as before, the config load prints a warning, and `offload_status` reports
+  `remote.browse_activate_tab` false with a `remote.browse_activate_tab_note`. A failed activation (a dead
+  daemon, a tab that is already gone) is logged as `activate_tab skipped: ...` and the run continues with the
+  tab in the background, exactly as without the setting; it is attempted once per run, never retried. It was
+  measured in a separate profile started away from the screen; how an on-screen window behaves was not
+  measured.
 
 Out of scope here: `date` and `datetime-local` inputs are not in the snapshot at all (its role table maps
 an input only for text, email, url, tel, search, number, checkbox, radio and button types), so the run
@@ -166,7 +196,7 @@ a diagnostic tail only.
 
 | Direction | Line | Meaning |
 |---|---|---|
-| harness to sidecar | `{"type":"start","url","goal","max_actions","allow_labels":[],"allow_hosts":[],"capture_prefixes":[],"capture_path","browser","unattended"}` | Sent once. `unattended` is true on agent doors. |
+| harness to sidecar | `{"type":"start","url","goal","max_actions","allow_labels":[],"allow_hosts":[],"capture_prefixes":[],"capture_path","browser","cdp_url","activate_tab","unattended"}` | Sent once. `unattended` is true on agent doors. `activate_tab` is true only when `browse_activate_tab` is on and `browse_cdp_url` is set; the sidecar reads anything but a JSON `true`, or an absent field, as false. |
 | sidecar to harness | `{"type":"decide","id","body":{typed request}}` | Ask for a typed decision. |
 | harness to sidecar | `{"type":"decision","id","ok":true,"result":{"answers","model","usage"}}` or `{"type":"decision","id","ok":false,"error"}` | The endpoint's answer. |
 | sidecar to harness | `{"type":"text","id","context":{goal,field,page,recent_actions}}` | Ask for a field value (TYPE_TEXT). |
@@ -218,6 +248,7 @@ endpoint keeps its own spend ledger.
 | `browse_decision_url` | Loopback decision endpoint. Must be plain `http` on `127.0.0.1`, `::1` or `localhost`, or the lane stays unconfigured and the load warns. |
 | `browse_browser` | `chrome`, `edge`, `brave`, `chromium`, or empty for the first running browser with remote debugging allowed. |
 | `browse_cdp_url` | Pins the lane to ONE browser endpoint, e.g. `http://127.0.0.1:9333` (resolved through `/json/version`) or a `ws://` URL. Loopback host, a real port, no credentials, query or fragment; an `http://` value is the endpoint root (no path) and a `ws://` value a `/devtools/` socket. Anything else leaves the lane unregistered. Wins over `browse_browser`. Use it for a dedicated agent profile (below). |
+| `browse_activate_tab` | Default false. Brings the lane's own tab to the front of its window once per run, so the page renders frames like a foreground tab (see [Background tab rendering](#background-tab-rendering)). Recommended for a dedicated agent browser. Honoured only together with `browse_cdp_url`: without it the setting is ignored (status says so, the load warns) and the lane runs as before, because activating the tab switches the window's active tab, which must never happen in the operator's everyday browser. |
 | `browse_timeout_sec` | One run's wall budget. Default 300. |
 | `browse_max_actions` | Default executed-action budget. Default 30, ceiling 60. |
 | `browse_capture_dir` | Where redacted captures land. Empty means `<state_dir>/browse-captures`, or the OS temp dir. |
@@ -225,6 +256,9 @@ endpoint keeps its own spend ledger.
 
 - `BrowseConfigured()` is true only when `browse_python`, `browse_script` and a loopback
   `browse_decision_url` are all set. `offload_browse` is registered only then.
+- `EffectiveBrowseActivateTab()` is what the harness sends as `activate_tab`: `browse_activate_tab` true and a
+  `browse_cdp_url` the lane accepts. A true setting without that endpoint is reported as ignored
+  (`BrowseActivateTabIgnored()`) and never fails the lane.
 - The bearer for the decision endpoint is the environment variable `LOCAL_OFFLOAD_BROWSE_BEARER` in
   the harness process. It is never config.
 - Captures are JSONL files under the capture dir; the result's `capture_path` names one.
@@ -237,7 +271,8 @@ endpoint keeps its own spend ledger.
 - Agent tool `browse` (`url`, `goal`, `max_actions`, `security_risk`).
 - CLI `local-agent --allow-browse --browse-hosts host1,host2` (the host list is required).
 - `agent_run` and `agent_delegate` inputs `allow_browse` and `browse_hosts`.
-- `offload_status`'s `remote` block: `browse_configured` and `browse_decision_url`.
+- `offload_status`'s `remote` block: `browse_configured`, `browse_decision_url` and `browse_activate_tab` (the
+  effective value; a `browse_activate_tab_note` appears when the setting is on but ignored).
 
 ### Install
 
@@ -262,7 +297,8 @@ telemetry, and prints one JSON line with the `browse_python` and `browse_script`
    the handshake; a dedicated instance does not prompt, and keeps the agent out of the everyday
    profile. The alternative is the toggle itself (`browse_browser` names which browser's
    `DevToolsActivePort` to read), with someone present to approve each run. The harness never launches
-   or restarts the browser; register the dedicated port in your port inventory.
+   or restarts the browser; register the dedicated port in your port inventory. On a dedicated profile that nobody
+   looks at, also set `browse_activate_tab: true` (see [Background tab rendering](#background-tab-rendering)).
 3. Restart the MCP client so `offload_browse` appears in `tools/list`.
 4. For the agent doors, set `agent_allow_browse: true` on each node that may run one.
 
@@ -273,7 +309,7 @@ the loopback decision endpoint; the local agent seat (for grammar-constrained fi
 
 ## Downstream effects
 
-`offload_status` (`remote.browse_configured`, `remote.browse_decision_url`), the MCP manifest
+`offload_status` (`remote.browse_configured`, `remote.browse_decision_url`, `remote.browse_activate_tab`), the MCP manifest
 (`.printing-press.json`), the agent tool list, the policy broker's rule vocabulary, and delegation
 placement (a contract with `allow_browse` is local-only).
 
@@ -290,6 +326,8 @@ placement (a contract with `allow_browse` is local-only).
    cannot be lifted there.
 8. One browse at a time per process. No GPU lease.
 9. A failure is a typed defer; nothing falls back to another model or lane.
+10. The lane's tab is activated only when the operator opted in (`browse_activate_tab`) AND pinned a dedicated
+    endpoint (`browse_cdp_url`); never in a browser the lane found by discovery.
 
 ## Error handling
 
@@ -339,8 +377,12 @@ is not proof.
 - A `settled N.Ns after an input (P poll(s), M with page activity, K animation(s) finished)` line means the
   page was still reacting when the lane would have read it, and says how long the lane waited. No line means
   the page was quiet from the first poll.
+- An `activated the lane's tab (activate_tab)` line in that tail means the lane brought its tab to the front at
+  the run's first observe; `activate_tab skipped: ...` means it tried and the call failed (or the browser had
+  no tab id), and the run went on with the tab in the background. No line means the setting is off or ignored.
 - Browse calls are audited by the policy broker on agent doors, and ledgered like other lanes.
-- `offload_status remote` shows whether the lane is configured and which decision URL it will call.
+- `offload_status remote` shows whether the lane is configured, which decision URL it will call, and whether
+  tab activation is in effect (`browse_activate_tab`, with a note when the setting is on but ignored).
 - A missing `offload_browse` in `tools/list` means the lane is unconfigured or the client was not
   restarted.
 
@@ -356,7 +398,10 @@ is not proof.
   loop is driven with a scripted page, a fake clock and a fake sleep (its stop rule, its minimum, its cap, an
   unreadable page, a navigation), its counter script runs under `node` against a fake `MutationObserver`,
   and the wrapper tests pin that it runs once after an action, before jev's read and in the observed session,
-  and never on the first observe, after a `wait` action or in act.
+  and never on the first observe, after a `wait` action or in act. The tab activation is pinned through the same
+  fake `Browser`: exactly one `Target.activateTarget` per run, at the first observe and before the settle and
+  jev's read, a browser-level call (no session) carrying the Browser's own target id, nothing unless the start
+  line carries a JSON `true`, and a failure swallowed, logged once and not retried.
 - Verify an install without touching a real page: with the browser running and remote debugging
   ticked, call `offload_browse` with a start URL on a harmless page you own, `allow_hosts` set to its
   host, `max_actions` 3 and a goal that only reads. Check that `status` is `done`, that `final.url`
@@ -374,10 +419,16 @@ is not proof.
 - Writing a menu-then-confirm flow as one step of the goal. When the menu item and the confirm button of the
   dialog it opens carry the same label (an "Archive" item, then an "Archive" button in the dialog), the
   decision model reads the second click as the step it just took and chooses BLOCKED (measured: the run
-  ended `blocked` until the goal named the confirm click as a separate required step). Name both clicks in
-  the goal, for example: "Open the row's menu and click Archive. A confirmation dialog opens: click its
-  Archive button as a second, separate step. The task is done only when the row is gone." A similar flow,
-  one label clicked twice in a row on purpose, is likely to behave the same way (not measured).
+  ended `blocked` until the goal named the confirm click as a separate required step). The form that
+  measured best describes the dialog's question and says the task is not finished and not blocked while the
+  dialog is open, for example: "Open the row's menu and click Archive. A dialog then asks whether to archive
+  the item, with Cancel and Archive buttons. The task is NOT done and NOT blocked while that dialog is open:
+  click its Archive button. The task is done only when the row is gone." Measured on a production web app's
+  delete flow in a dedicated agent browser with `browse_activate_tab` on, each run checked independently: 5
+  of 5 with that wording, about half with the step-list wording ("click its Archive button as a second,
+  separate step"), and the failures of the step-list wording were the model choosing BLOCKED with the dialog
+  fully visible, not a rendering problem. A similar flow, one label clicked twice in a row on purpose, is
+  likely to behave the same way (not measured).
 
 ## Source map
 

@@ -6,6 +6,67 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.153.3] - 2026-09-30 - an opt-in browse setting activates the lane's own tab, so a dialog renders at once in a dedicated agent browser
+
+### Added — `browse_activate_tab`, for a dedicated agent browser
+
+The lane opens its tab with `Target.createTarget(background: true)`. That tab reports
+`document.visibilityState` `"visible"` but is not the window's active tab, so Chromium produces almost no
+frames for it, and 0.152.1 and 0.153.2 (the animation finish and the settle) work around that. Measured in the
+operator's dedicated agent browser (a separate profile nobody looks at, attached through `browse_cdp_url`) on a
+production web app's confirm dialog opened from a menu item, with nothing finished by the lane: the dialog
+mounted at opacity 0 at +0.1 s; its opacity transition started at +0.2 s in one run but, in the lane's own
+run, not within +0.33 s (the settle saw no DOM mutation and no animation and stopped at 0.3 s, and the read was
+an empty page, because the modal hides everything else); left alone the dialog reached opacity 1 only at
++2.1 s. After `Target.activateTarget` for the lane's tab the same flow read opacity 0.957 at +0.2 s and 1 at
++0.4 s, with nothing finished, and the model's read after the menu click showed the whole dialog in every
+instrumented run. End to end, deleting a record through the real UI (each run checked independently): 5 of 5
+with the activation and a goal that describes the dialog's question and says the task is not done and not
+blocked while it is open; about half with the older step-list wording, where the failures were the model
+choosing BLOCKED with the dialog fully visible, not rendering; 0 of 3 on the MCP path with only the 0.153.2
+settle.
+
+- **New config key `browse_activate_tab`** (bool, default `false`, in `config.example.json`). The harness sends
+  `activate_tab: true` in the sidecar's start line only when the key is true AND `browse_cdp_url` names an
+  endpoint the lane accepts (`Config.EffectiveBrowseActivateTab`); otherwise it sends `false`. Activating a tab
+  switches the window's active tab, and in the operator's everyday browser that is the tab someone is looking
+  at, so the setting is opt-in and only meaningful with a dedicated endpoint.
+- **A true key without `browse_cdp_url` is ignored, never an error.** The lane still runs exactly as before.
+  The config load prints a warning naming both keys, and `offload_status remote` reports
+  `browse_activate_tab` (the effective value, `false` there) with a `browse_activate_tab_note` that says why.
+  `remote.browse_activate_tab` is new in the status block (the default golden gains that one field).
+- **The sidecar** (`setup/browse/runner.py`): `Run` reads `activate_tab` from the start message (only a JSON
+  `true` counts; absent, `false`, `null`, a string or a number is off). In the `Browser.observe` wrapper, at
+  the first observe of the run and only then, before the settle and before jev's own read, it calls
+  `Target.activateTarget` for the Browser's own target id through jev's browser-level `cdp()` (no session, so
+  no other tab is touched) and logs `activated the lane's tab (activate_tab)`. The attempt is flagged before it
+  is made and never retried; a failure, or a Browser without a tab id, logs `activate_tab skipped: ...` and the
+  run continues exactly as before. The finish and the settle stay on; the measured runs had both in place.
+- Tests: Go (`internal/config`: default off, JSON parse, effective only with an accepted `browse_cdp_url`, the
+  ignored report and the warning; `internal/pipeline`: the start line carries `activate_tab` for all four
+  combinations of opt-in and endpoint; `internal/mcpserver`: the status block, its note, the default golden) and
+  Python (`setup/browse/test_runner.py`: exactly one activation at the first observe when on, never when off or
+  absent or not a JSON `true`, a browser-level call with the lane's own target id, before the settle and jev's
+  read, a failure swallowed and logged once and not retried, a missing tab id skipped). Each was shown to fail
+  with its code path removed or broken (mutants run against a scratch copy or restored after each run: the
+  once-per-run guard, the session argument, a constant target id, a narrowed `except`, the activation moved
+  after the settle or after jev's read, a default-on start line, a truthy-value parse, a flag set only on
+  success, both log lines, the no-tab-id guard; the effective predicate without the endpoint, without the
+  loopback check, the ignored report, the load warning, the JSON tag, the start line's field, the raw key sent
+  or reported, the status key and its note).
+
+### Docs
+
+- `docs/systems/browse-lane.md`: the config row, the lifecycle step, the start-line row in the protocol table,
+  invariant 10, the status and observability lines, and, under Background tab rendering, the measured
+  activation timeline, the end-to-end counts and why the setting is opt-in and needs a dedicated endpoint
+  (recommended for a dedicated agent browser). Common pitfalls: the goal-writing guidance for a
+  menu-then-confirm flow now gives the better measured form (describe the dialog's question and state that
+  the task is not done and not blocked while the dialog is open: 5 of 5, against about half for the step
+  list). `docs/OPERATOR-GUIDE.md`: how to enable it.
+- The fix is in the sidecar (`setup/browse/runner.py`) and the harness (config, start line, status); the
+  setting does nothing until the sidecar is reinstalled with `setup/browse/install.ps1` and the key is set.
+
 ## [0.153.2] - 2026-09-30 - the browse lane waits for the page to settle after an action, so a dialog that mounts late is seen
 
 ### Fixed — a confirm dialog opened from a menu item was read before it existed

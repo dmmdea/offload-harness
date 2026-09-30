@@ -2,6 +2,8 @@ package config
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -160,5 +162,95 @@ func TestBrowseWarningsNameTheProblem(t *testing.T) {
 	warnBrowseBindingsTo(Default(), &buf)
 	if buf.Len() != 0 {
 		t.Errorf("the default config must not warn, got %q", buf.String())
+	}
+}
+
+// browse_activate_tab brings the lane's own tab to the front of its window. That switches the
+// window's active tab, so it is honoured only against a dedicated endpoint (browse_cdp_url):
+// the raw key alone must never reach the sidecar, or an operator who set it once would have
+// their everyday browser's active tab switched by a lane run.
+func TestBrowseActivateTabNeedsADedicatedEndpoint(t *testing.T) {
+	if Default().BrowseActivateTab || Default().EffectiveBrowseActivateTab() {
+		t.Fatal("browse_activate_tab must default to false (opt-in)")
+	}
+	on := browseBound()
+	on.BrowseActivateTab = true
+	if on.EffectiveBrowseActivateTab() {
+		t.Error("browse_activate_tab without browse_cdp_url must be ignored: the lane would be driving the everyday browser")
+	}
+	if !on.BrowseActivateTabIgnored() {
+		t.Error("a browse_activate_tab with no browse_cdp_url must be reported as ignored")
+	}
+	if !on.BrowseConfigured() {
+		t.Error("an ignored browse_activate_tab must not fail the lane")
+	}
+	on.BrowseBrowser = "brave" // a named everyday browser is still not a dedicated endpoint
+	if on.EffectiveBrowseActivateTab() {
+		t.Error("browse_browser names the everyday browser; browse_activate_tab must stay ignored")
+	}
+	on.BrowseBrowser = ""
+	for _, u := range []string{"http://127.0.0.1:9555", "ws://127.0.0.1:9555/devtools/browser/abc", "http://[::1]:9555"} {
+		on.BrowseCDPURL = u
+		if !on.EffectiveBrowseActivateTab() || on.BrowseActivateTabIgnored() {
+			t.Errorf("browse_activate_tab with a dedicated endpoint (%q) must be effective", u)
+		}
+	}
+	off := browseBound()
+	off.BrowseCDPURL = "http://127.0.0.1:9555"
+	if off.EffectiveBrowseActivateTab() || off.BrowseActivateTabIgnored() {
+		t.Error("a dedicated endpoint alone must not turn activation on, and is not an ignored setting")
+	}
+	bad := browseBound()
+	bad.BrowseActivateTab = true
+	bad.BrowseCDPURL = "http://198.51.100.7:9555" // refused: not loopback
+	if bad.EffectiveBrowseActivateTab() {
+		t.Error("an endpoint the lane refuses must not count as a dedicated endpoint")
+	}
+}
+
+func TestBrowseActivateTabLoadsFromJSONAndDefaultsOff(t *testing.T) {
+	load := func(js string) Config {
+		t.Helper()
+		p := filepath.Join(t.TempDir(), "cfg.json")
+		if err := os.WriteFile(p, []byte(js), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		c, err := Load(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+	if load(`{}`).BrowseActivateTab {
+		t.Error("a config without the key must load with browse_activate_tab false")
+	}
+	if !load(`{"browse_activate_tab": true}`).BrowseActivateTab {
+		t.Error(`"browse_activate_tab": true must load as true`)
+	}
+	if load(`{"browse_activate_tab": false}`).BrowseActivateTab {
+		t.Error(`"browse_activate_tab": false must load as false`)
+	}
+}
+
+func TestBrowseActivateTabWarnsOnlyWhenIgnored(t *testing.T) {
+	var buf bytes.Buffer
+	c := browseBound()
+	c.BrowseActivateTab = true
+	warnBrowseBindingsTo(c, &buf)
+	if !strings.Contains(buf.String(), "browse_activate_tab") || !strings.Contains(buf.String(), "browse_cdp_url") {
+		t.Errorf("an ignored browse_activate_tab must warn naming both keys, got %q", buf.String())
+	}
+	buf.Reset()
+	c.BrowseCDPURL = "http://127.0.0.1:9555"
+	warnBrowseBindingsTo(c, &buf)
+	if buf.Len() != 0 {
+		t.Errorf("a browse_activate_tab with a dedicated endpoint must not warn, got %q", buf.String())
+	}
+	buf.Reset()
+	c.BrowseActivateTab = false
+	c.BrowseCDPURL = ""
+	warnBrowseBindingsTo(c, &buf)
+	if buf.Len() != 0 {
+		t.Errorf("browse_activate_tab false must not warn, got %q", buf.String())
 	}
 }

@@ -270,7 +270,11 @@ type browseStart struct {
 	CapturePath     string   `json:"capture_path"`
 	Browser         string   `json:"browser"`
 	CDPURL          string   `json:"cdp_url"`
-	Unattended      bool     `json:"unattended"`
+	// ActivateTab asks the sidecar to bring the lane's own tab to the front once per run. It is
+	// Config.EffectiveBrowseActivateTab, never the raw key: true only with a dedicated endpoint
+	// (browse_cdp_url), so the operator's everyday browser never has its active tab switched.
+	ActivateTab bool `json:"activate_tab"`
+	Unattended  bool `json:"unattended"`
 }
 
 // browseMsg is any line from the sidecar; which fields are set depends on Type.
@@ -578,7 +582,8 @@ func (p *Pipeline) runBrowse(ctx context.Context, req core.Request, meta core.Me
 		Type: "start", URL: breq.URL, Goal: breq.Goal, MaxActions: breq.MaxActions,
 		AllowLabels: nonNil(breq.AllowLabels), AllowHosts: nonNil(breq.AllowHosts),
 		CapturePrefixes: nonNil(breq.Capture), CapturePath: capturePath,
-		Browser: p.cfg.BrowseBrowser, CDPURL: p.cfg.BrowseCDPURL, Unattended: breq.Unattended,
+		Browser: p.cfg.BrowseBrowser, CDPURL: p.cfg.BrowseCDPURL, ActivateTab: p.cfg.EffectiveBrowseActivateTab(),
+		Unattended: breq.Unattended,
 	}
 	if err := sess.send(startLine); err != nil {
 		_ = gpugen.KillTree(cmd.Process)

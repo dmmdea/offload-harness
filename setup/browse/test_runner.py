@@ -339,21 +339,33 @@ class BackgroundTabAnimationTests(unittest.TestCase):
 
     PAGE = {"url": "https://example.org/", "actions": [{"id": "e1", "kind": "click", "label": "Open menu", "node": 7}]}
 
-    def make(self, finished=2, on_finish=None, stale_reads=0, capture=None, settle="record", drain=False):
+    def make(self, finished=2, on_finish=None, stale_reads=0, capture=None, settle="record", drain=False,
+             start_extra=None, target="t-lane", activate_error=None):
         """Patch a fresh fake Browser through the real _install_patches; returns (browser, order, run, sessions).
 
         The settle after an input would really sleep, so runner.settle_after_input is replaced for the test:
         settle="record" notes "settle" in `order` and sends one probe call; settle="real" notes "settle" and
         runs the real function on a fake clock, so its reads and finishes show up in `order`. drain=True makes
-        it a capture run: every drain of the daemon's event buffer shows up in `order` as "drain"."""
+        it a capture run: every drain of the daemon's event buffer shows up in `order` as "drain".
+
+        start_extra is merged into the run's start message (activate_tab). The fake Browser's tab id is `target`
+        (None = a Browser without one). Every Target.activateTarget is noted in `order` as "activate" and kept in
+        self.activations (session id and params, in call order); activate_error makes that call raise."""
         order = []
         sessions = []
+        self.activations = []
         stale = [True] * stale_reads
 
         class FakeStalePage(ValueError):
             pass
 
         def fake_cdp(method, session_id=None, **params):
+            if method == "Target.activateTarget":  # a browser-level call: kept apart from the per-session `sessions`
+                order.append("activate")
+                self.activations.append({"session_id": session_id, "params": dict(params)})
+                if activate_error is not None:
+                    raise activate_error
+                return {}
             sessions.append(session_id)
             if "getAnimations" in params.get("expression", ""):
                 order.append("finish")
@@ -395,6 +407,7 @@ class BackgroundTabAnimationTests(unittest.TestCase):
 
         class FakeBrowser:
             session = "s1"  # no after_input here: jev's Browser only sets it in act, never in __init__
+            # jev's Browser.__init__ sets target to the id of the tab it created (and None after close)
 
             def call(self, method, **params):
                 order.append(f"call:{method}")
@@ -430,7 +443,9 @@ class BackgroundTabAnimationTests(unittest.TestCase):
             Browser=FakeBrowser, StalePage=FakeStalePage, browser_operation=fake_operation, cdp=fake_cdp)
         model = types.SimpleNamespace()
         agent_mod = types.SimpleNamespace()
-        run = runner.Run({"url": "https://example.org/", "unattended": True}, types.SimpleNamespace(send=lambda obj: None))
+        FakeBrowser.target = target
+        run = runner.Run({"url": "https://example.org/", "unattended": True, **(start_extra or {})},
+                         types.SimpleNamespace(send=lambda obj: None))
         run.capture = capture
         if drain:
             run.capture = types.SimpleNamespace(session_id=None, feed=lambda event: None)
@@ -519,6 +534,121 @@ class BackgroundTabAnimationTests(unittest.TestCase):
         self.assertFalse(hasattr(browser, "after_input"))
         browser.observe()
         self.assertEqual(order, ["observe", "finish", "read:observe"])
+
+    # ---- activate_tab: bring the lane's own tab to the front once per run (opt-in) --------------------------
+
+    ACTIVATE = {"activate_tab": True}
+
+    def test_activate_tab_activates_the_lanes_tab_once_before_the_first_read(self):
+        browser, order, _, sessions = self.make(start_extra=self.ACTIVATE)
+        page = browser.observe()
+        self.assertEqual(order, ["activate", "observe", "finish", "read:observe"])
+        self.assertEqual(self.activations, [{"session_id": None, "params": {"targetId": "t-lane"}}])
+        self.assertEqual(sessions, ["s1"], "only the finish ran in the observed session; the activation did not")
+        self.assertEqual(page["url"], "https://example.org/")
+
+    def test_activation_is_a_browser_level_call_with_the_lanes_own_target_id(self):
+        # Target.activateTarget is a Target-domain command on the browser: no session, and the target id is the
+        # one jev's Browser created for this run, not a constant and not another tab.
+        browser, _, _, _ = self.make(start_extra=self.ACTIVATE, target="t-7")
+        browser.observe()
+        self.assertEqual(len(self.activations), 1)
+        self.assertIsNone(self.activations[0]["session_id"], "a browser-level call carries no session")
+        self.assertEqual(self.activations[0]["params"], {"targetId": "t-7"})
+
+    def test_activation_happens_exactly_once_however_many_observes_follow(self):
+        browser, order, _, _ = self.make(start_extra=self.ACTIVATE, stale_reads=2)
+        browser.observe()  # three reads (two stale retries) inside one observe
+        browser.act(self.PAGE["actions"][0], self.PAGE)
+        browser.observe()
+        browser.observe()
+        browser.act(self.PAGE["actions"][0], self.PAGE)
+        browser.observe()
+        self.assertEqual(order.count("activate"), 1)
+        self.assertEqual(len(self.activations), 1)
+        self.assertEqual(order.count("settle"), 2, "the settle after each action is unchanged by the activation")
+
+    def test_activate_tab_is_off_unless_the_start_line_says_true(self):
+        for label, extra in (("absent", None), ("false", {"activate_tab": False}), ("null", {"activate_tab": None}),
+                             ("the string true", {"activate_tab": "true"}), ("the string false", {"activate_tab": "false"}),
+                             ("the number one", {"activate_tab": 1})):
+            with self.subTest(label):
+                browser, order, run, _ = self.make(start_extra=extra)
+                browser.observe()
+                browser.act(self.PAGE["actions"][0], self.PAGE)
+                browser.observe()
+                self.assertNotIn("activate", order)
+                self.assertEqual(self.activations, [])
+                self.assertFalse(run.activate_tab)
+
+    def test_the_run_reads_activate_tab_from_the_start_message(self):
+        proto = types.SimpleNamespace(send=lambda obj: None)
+        self.assertTrue(runner.Run({"url": "https://example.org/", "activate_tab": True}, proto).activate_tab)
+        self.assertFalse(runner.Run({"url": "https://example.org/"}, proto).activate_tab, "default False")
+        self.assertFalse(runner.Run({"url": "https://example.org/", "activate_tab": False}, proto).activate_tab)
+
+    def test_activation_runs_before_the_settle_and_before_jevs_read(self):
+        # jev's first observe has no after_input, so the settle cannot run there in production; set it by hand
+        # to pin the order in the wrapper's code: activate, then settle, then jev's own observe.
+        browser, order, _, _ = self.make(start_extra=self.ACTIVATE)
+        browser.after_input = self.PAGE["actions"][0]
+        browser.observe()
+        self.assertEqual(order, ["activate", "settle", "observe", "wait", "finish", "read:observe"])
+
+    def test_a_failing_activation_is_swallowed_logged_once_and_never_retried(self):
+        failures = {
+            "a CDP error": RuntimeError("Target.activateTarget failed: No target with given id"),
+            "a closed pipe": OSError("pipe closed"),
+            "a value error": ValueError("bad reply"),
+        }
+        for name, exc in failures.items():
+            with self.subTest(name):
+                browser, order, run, _ = self.make(start_extra=self.ACTIVATE, activate_error=exc)
+                with mock.patch.object(runner, "log") as log:
+                    page = browser.observe()
+                    browser.act(self.PAGE["actions"][0], self.PAGE)
+                    browser.observe()
+                self.assertEqual(order.count("activate"), 1, "a failed attempt is not retried on the next observe")
+                self.assertEqual(page["url"], "https://example.org/", "the run continues exactly as before")
+                self.assertTrue(run.observed_once)
+                lines = [c.args[0] for c in log.call_args_list if "activate" in c.args[0]]
+                self.assertEqual(len(lines), 1, lines)
+                self.assertIn(type(exc).__name__, lines[0])
+                self.assertIn("skipped", lines[0])
+                self.assertNotIn("activated the lane's tab", lines[0])
+
+    def test_a_successful_activation_logs_exactly_one_line(self):
+        browser, _, _, _ = self.make(start_extra=self.ACTIVATE)
+        with mock.patch.object(runner, "log") as log:
+            browser.observe()
+            browser.observe()
+        lines = [c.args[0] for c in log.call_args_list if "activate" in c.args[0]]
+        self.assertEqual(len(lines), 1, lines)
+        self.assertIn("activated the lane's tab", lines[0])
+
+    def test_a_browser_without_a_tab_id_skips_the_activation_and_still_reads(self):
+        browser, order, run, _ = self.make(start_extra=self.ACTIVATE, target=None)
+        with mock.patch.object(runner, "log") as log:
+            page = browser.observe()
+            browser.observe()
+        self.assertNotIn("activate", order)
+        self.assertEqual(page["url"], "https://example.org/")
+        lines = [c.args[0] for c in log.call_args_list if "activate" in c.args[0]]
+        self.assertEqual(len(lines), 1, "the skip is logged once, not on every observe")
+        self.assertTrue(run.tab_activated, "one attempt per run, even one that had nothing to activate")
+
+    def test_activate_lane_tab_reports_success_and_never_raises(self):
+        calls = []
+        self.assertTrue(runner.activate_lane_tab(lambda method, **params: calls.append((method, params)), "t1"))
+        self.assertEqual(calls, [("Target.activateTarget", {"targetId": "t1"})])
+
+        def boom(method, **params):
+            raise RuntimeError("daemon gone")
+
+        with mock.patch.object(runner, "log"):
+            self.assertFalse(runner.activate_lane_tab(boom, "t1"))
+            self.assertFalse(runner.activate_lane_tab(boom, None))
+            self.assertFalse(runner.activate_lane_tab(boom, ""))
 
     def test_every_kind_of_input_settles_once(self):
         # A typed field, a chosen option and a scroll reveal things on the page's own timers as well.

@@ -583,7 +583,8 @@ pwsh setup/browse/install.ps1 -OffloadHome <OFFLOAD_HOME>
 # 2. config: browse_python, browse_script, browse_decision_url (plain http on loopback only),
 #    browse_cdp_url for a dedicated agent profile (e.g. http://127.0.0.1:9333; recommended),
 #    or browse_browser (chrome|edge|brave|chromium), browse_timeout_sec (300),
-#    browse_max_actions (30, ceiling 60), browse_capture_dir
+#    browse_max_actions (30, ceiling 60), browse_capture_dir,
+#    browse_activate_tab (false; set it true together with browse_cdp_url, see below)
 # 3. only if your decision endpoint wants a bearer, set it in the harness's environment
 $env:LOCAL_OFFLOAD_BROWSE_BEARER = '<bearer>'
 # 4. CLI use (always unattended for browse: --browse-hosts is required)
@@ -593,6 +594,18 @@ local-agent --allow-browse --browse-hosts example.com "open the reports page and
 Then, in the browser you want driven, open `<browser>://inspect/#remote-debugging` (`chrome://`,
 `edge://`, `brave://`) and tick **Allow remote debugging for this browser instance**. The harness never
 starts or restarts the browser. Restart your MCP client so `offload_browse` appears.
+
+**Dedicated agent browser: turn on tab activation.** The lane opens its tab in the background, and Chromium
+draws almost no frames for a background tab, so a dialog that fades in can stay invisible to the model and the
+run ends `blocked`. If the browser behind `browse_cdp_url` is a dedicated profile that nobody looks at, set
+`"browse_activate_tab": true` in the harness config (and restart the MCP client, as for the other browse keys):
+the sidecar then brings the lane's own tab to the front once per run and the page renders normally (measured on a
+production web app's confirm dialog: fully open 0.4 s after the click, against 2.1 s left alone). The setting is
+ignored without `browse_cdp_url`, because activating a tab switches the window's active tab, and in your
+everyday browser that is the tab you are looking at. The config load warns when the setting is ignored, and
+`offload_status` shows `remote.browse_activate_tab` (with a note when it is ignored). For a menu-then-confirm
+flow, write the goal so that it describes the dialog's question and says the task is not done and not blocked
+while the dialog is open (see [systems/browse-lane.md](systems/browse-lane.md), Common pitfalls).
 
 Controls labelled publish, send, post, delete, remove, pay, buy, checkout, subscribe, confirm, sign out
 and similar are removed before the model sees them and rechecked at execution; the run then ends

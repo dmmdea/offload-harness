@@ -169,6 +169,7 @@
   "browse_decision_url": "",
   "browse_browser": "",
   "browse_cdp_url": "",
+  "browse_activate_tab": false,
   "browse_timeout_sec": 300,
   "browse_max_actions": 30,
   "browse_capture_dir": "",

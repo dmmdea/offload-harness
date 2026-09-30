@@ -959,6 +959,17 @@ type Config struct {
 	// /json/version) or ws://, loopback host, explicit port — anything else leaves
 	// the lane unregistered (BrowseCDPURLAllowed).
 	BrowseCDPURL string `json:"browse_cdp_url,omitempty"`
+	// BrowseActivateTab makes the sidecar bring the lane's own tab to the front of its
+	// window once per run (CDP Target.activateTarget), so the page renders frames like a
+	// foreground tab. The lane opens that tab in the background, and Chromium produces
+	// almost no frames for a background tab: a dialog's open transition starts late or
+	// not at all and the model reads an empty page. OPT-IN, default false, and honoured
+	// only together with browse_cdp_url (EffectiveBrowseActivateTab): activating the tab
+	// switches the window's active tab, which must never be the tab the operator is looking
+	// at, so it is for a dedicated agent browser that nobody watches. Against the
+	// operator's everyday browser (discovery or browse_browser) it is ignored, and the
+	// load says so.
+	BrowseActivateTab bool `json:"browse_activate_tab,omitempty"`
 	// BrowseTimeoutSec bounds one browse run end to end. Default 300.
 	BrowseTimeoutSec int `json:"browse_timeout_sec,omitempty"`
 	// BrowseMaxActions is the default executed-action budget for one run (a
@@ -2803,6 +2814,27 @@ func (c Config) BrowseConfigured() bool {
 		(c.BrowseCDPURL == "" || BrowseCDPURLAllowed(c.BrowseCDPURL))
 }
 
+// EffectiveBrowseActivateTab is the value the harness sends the sidecar as activate_tab:
+// browse_activate_tab, and only when browse_cdp_url names an endpoint the lane accepts
+// (an empty value names none). Activating the lane's tab switches the window's active
+// tab, so it is honoured only against a dedicated browser the operator pinned, never
+// against the everyday browser the lane finds by discovery (browse_browser or nothing).
+// One predicate for the start line and offload_status.
+func (c Config) EffectiveBrowseActivateTab() bool {
+	return c.BrowseActivateTab && BrowseCDPURLAllowed(c.BrowseCDPURL)
+}
+
+// BrowseActivateTabIgnored reports a browse_activate_tab that is set but has no effect
+// because there is no dedicated endpoint to honour it against. The lane is not failed
+// for it; status and the load warning say so.
+func (c Config) BrowseActivateTabIgnored() bool {
+	return c.BrowseActivateTab && !c.EffectiveBrowseActivateTab()
+}
+
+// BrowseActivateTabIgnoredNote is the one sentence status and the load warning share.
+const BrowseActivateTabIgnoredNote = "browse_activate_tab is ignored: it needs browse_cdp_url (a dedicated agent browser), " +
+	"because activating the lane's tab switches the window's active tab and must never happen in the operator's everyday browser"
+
 // EffectiveBrowseMaxActions is browse_max_actions with 0 meaning the default 30
 // and anything above BrowseMaxActionsCeiling clamped to it.
 func (c Config) EffectiveBrowseMaxActions() int {
@@ -2843,6 +2875,9 @@ func warnBrowseBindingsTo(c Config, w io.Writer) {
 	}
 	if c.BrowseCDPURL != "" && !BrowseCDPURLAllowed(c.BrowseCDPURL) {
 		fmt.Fprintf(w, "warning: browse_cdp_url %q is not http:// or ws:// on a loopback host with a port — the lane never attaches to another machine's browser; offload_browse stays unregistered\n", c.BrowseCDPURL)
+	}
+	if c.BrowseActivateTabIgnored() {
+		fmt.Fprintln(w, "warning: "+BrowseActivateTabIgnoredNote+"; the lane runs as before")
 	}
 }
 
