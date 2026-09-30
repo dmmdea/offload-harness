@@ -117,9 +117,10 @@ type Params struct {
 	// This lived in install.ps1 as an `if ($profileId -match '^blackwell-')` branch,
 	// so a Linux install of the same tier silently did not get it.
 	GPUEnv []string
-	// Backend is the tier's serving backend (cuda|vulkan|cpu|…). A vision seat renders
-	// GPU flags (-ngl, --flash-attn) UNLESS this is "cpu", where the template's own
-	// chat models carry neither and a GPU-less build would only ignore them.
+	// Backend is the tier's serving backend (cuda|vulkan|rk3588|cpu|…). A vision seat
+	// renders GPU flags (-ngl, --flash-attn) UNLESS this is "cpu", where the template's
+	// own chat models carry neither and a GPU-less build would only ignore them. rk3588
+	// is a GPU backend (the Mali through llama.cpp Vulkan), so it renders them like vulkan.
 	Backend string
 	// AltCPULlamaBin, when set, is the directory of a CPU llama-server build and asks
 	// for the CPU seat family (altcpu.go): the tier's chat weights as `<id>-cpu`
@@ -526,10 +527,13 @@ const (
 )
 
 // seatsNeedHome scans exactly the fields seatExpand resolves. Scanning more would
-// promise a substitution that never happens.
+// promise a substitution that never happens. The launcher is the seat's EFFECTIVE bin:
+// an rkllm seat that names none runs a default under the install home, and reading the
+// raw field would let it reach the token guard and die there as an unresolved token
+// instead of as the refusal that names the missing home.
 func seatsNeedHome(seats []mediaseat.Seat) bool {
 	for _, s := range seats {
-		if strings.Contains(s.Bin+s.LibDir, tokenHome) {
+		if strings.Contains(s.EffectiveBin()+s.LibDir, tokenHome) {
 			return true
 		}
 	}
@@ -718,10 +722,14 @@ func matrixJoin(role string) string {
 // be alphanumeric and 1-8 characters (verified against the binary: a key of
 // "embeddinggemma" is rejected outright), so the seat's own name — which carries
 // hyphens and is usually longer — can never be the key. The kind is used because a
-// tier may declare at most one seat per kind, which makes the id both stable and
-// unique by construction.
+// tier may declare at most one vision, stt or ocr seat (each writes a single config
+// field), which makes the id both stable and unique by construction. A text-only
+// rkllm seat writes no field, so a tier may declare several: the second and later ones
+// take the numbered ids below.
 func seatVarID(s mediaseat.Seat, taken map[string]bool) (string, error) {
-	base := map[string]string{mediaseat.KindVision: "vis", mediaseat.KindSTT: "stt", mediaseat.KindOCR: "ocr"}[s.Kind]
+	base := map[string]string{
+		mediaseat.KindVision: "vis", mediaseat.KindSTT: "stt", mediaseat.KindOCR: "ocr", mediaseat.KindRKLLM: "rkllm",
+	}[s.Kind]
 	if base == "" {
 		return "", fmt.Errorf("seat %q: no matrix var id for kind %q", s.Name, s.Kind)
 	}
@@ -913,6 +921,20 @@ func seatBlock(s mediaseat.Seat, p Params, a seatAnchors) (string, error) {
 			"      %s --model __MODELS__/%s%s\n"+
 			"      --threads __NTHREADS__ --port ${PORT} --host 127.0.0.1\n",
 			p.seatExpand(s.Bin), s.Model, vad)
+	case mediaseat.KindRKLLM:
+		// No env line and no GPU flags, on purpose: `env` is the llama.cpp loader path and
+		// -ngl/--flash-attn are llama-server flags, while the NPU is neither — the launcher
+		// finds the RKLLM runtime itself. The window and the CPU mask are the two knobs
+		// the runtime is STARTED with, so they ride the command line; the served name is
+		// the seat's own, so /v1/models answers to the id the harness binds.
+		enc := ""
+		if s.VisionEncoder != "" {
+			enc = " --vision-encoder __MODELS__/" + s.VisionEncoder
+		}
+		fmt.Fprintf(&b, "    cmd: >-\n"+
+			"      %s --model __MODELS__/%s%s\n"+
+			"      --ctx-size %d --cpu-mask %s --served-name %s --port ${PORT} --host 127.0.0.1\n",
+			p.seatExpand(s.EffectiveBin()), s.Model, enc, s.CtxSize, s.EffectiveCPUMask(), s.Name)
 	default:
 		return "", fmt.Errorf("seat %q: unknown kind %q", s.Name, s.Kind)
 	}
