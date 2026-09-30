@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"log"
+	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -128,4 +130,78 @@ func TestRunAgentTaskLoadThatOnlyTheEngineSeesKeepsTheRateHonest(t *testing.T) {
 			}
 		})
 	}
+}
+
+// slowTimingsLoop is slowFirstDeltaLoop with llama.cpp's own `timings` on the usage
+// frame, so the run carries the server's prefill accounting as well as the
+// time-to-first-delta sample.
+func slowTimingsLoop(wait time.Duration) func(int64, map[string]any, http.ResponseWriter, *http.Request) {
+	return func(n int64, body map[string]any, w http.ResponseWriter, r *http.Request) {
+		fl := w.(http.Flusher)
+		w.Header().Set("Content-Type", "text/event-stream")
+		write := func(s string) { _, _ = w.Write([]byte("data: " + s + "\n\n")); fl.Flush() } // nosemgrep: go.lang.security.audit.xss.no-direct-write-to-responsewriter.no-direct-write-to-responsewriter — a test fake streaming SSE, not HTML
+		select {
+		case <-r.Context().Done():
+			return
+		case <-time.After(wait):
+		}
+		write(`{"choices":[{"index":0,"delta":{"role":"assistant","content":"The answer is 42."},"finish_reason":null}]}`)
+		write(`{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`)
+		write(`{"choices":[],"usage":{"prompt_tokens":20000,"completion_tokens":6},"timings":{"prompt_n":20000,"prompt_ms":10000,"cache_n":0,"predicted_n":6,"predicted_ms":60}}`)
+		write(`[DONE]`)
+	}
+}
+
+// The server's own prefill timings are a SECOND sample the run feeds the store, beside
+// the largest time-to-first-delta sample, and it is gated by the run's peak load too:
+// a shared seat's timings are what a shared seat gives one request. (The test above
+// uses a seat that reports no timings, so it cannot see this line.)
+func TestRunAgentTaskConcurrentRunsWithServerTimingsDoNotFeedThePrefillRate(t *testing.T) {
+	defer compressLiveness(t, 5*time.Second, 100*time.Millisecond, core.AgentCeilingSecCap)()
+	defer compressColdLoad(t, 50*time.Millisecond, 5*time.Second)()
+	slow := func(n int64, body map[string]any, w http.ResponseWriter, r *http.Request) {
+		wait := 1500 * time.Millisecond
+		if n >= 2 {
+			wait = 3 * time.Second
+		}
+		slowTimingsLoop(wait)(n, body, w, r)
+	}
+	contract := testContract()
+	contract.OutputSchema = nil
+
+	t.Run("control: a run alone records the server's timings", func(t *testing.T) {
+		fake := &agentFake{rosterIDs: []string{agentTestSeat}, loopStream: slow}
+		srv := fake.server(t)
+		defer srv.Close()
+		dir := sharedStateDir(t)
+		if w := decodeWire(t, pipelineOn(t, srv.URL, dir).Run(context.Background(), agentTestRequest(t, contract))); w.Deferred {
+			t.Fatalf("deferred: %s", w.Reason)
+		}
+		if got := storedSeat(t, dir).PrefillTokS; got == 1000000 {
+			t.Fatalf("a solo run did not move the rate (%v): the fixture cannot tell the gate from a dead path", got)
+		}
+	})
+	t.Run("two runs on the seat: neither teaches the rate", func(t *testing.T) {
+		fake := &agentFake{rosterIDs: []string{agentTestSeat}, loopStream: slow}
+		srv := fake.server(t)
+		defer srv.Close()
+		dir := sharedStateDir(t)
+		var wg sync.WaitGroup
+		for i := 0; i < 2; i++ {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				if i == 1 {
+					time.Sleep(300 * time.Millisecond) // joins while the first prefills
+				}
+				if w := decodeWire(t, pipelineOn(t, srv.URL, dir).Run(context.Background(), agentTestRequest(t, contract))); w.Deferred {
+					t.Errorf("run %d deferred: %s", i, w.Reason)
+				}
+			}(i)
+		}
+		wg.Wait()
+		if got := storedSeat(t, dir).PrefillTokS; got != 1000000 {
+			t.Fatalf("prefill_tok_s = %v: a run that shared the seat moved the published rate through the server's timings", got)
+		}
+	})
 }
