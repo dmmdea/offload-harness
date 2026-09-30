@@ -317,9 +317,17 @@ func TestRescuedResultIsWhatTheLedgerRecords(t *testing.T) {
 	if err != nil || sum.Succeeded != 1 {
 		t.Fatalf("err=%v summary=%+v", err, sum)
 	}
-	rows, err := ledger.ReadAll(cfg.LedgerPath)
+	all, err := ledger.ReadAll(cfg.LedgerPath)
+	// The dispatch marker (Phase started, ADR 0064) is written before the run and is
+	// not the result: count the finished rows only, as every job-row reader does.
+	var rows []ledger.Entry
+	for _, r := range all {
+		if r.Phase != ledger.PhaseStarted {
+			rows = append(rows, r)
+		}
+	}
 	if err != nil || len(rows) != 1 {
-		t.Fatalf("ledger rows = %+v (%v), want one", rows, err)
+		t.Fatalf("finished ledger rows = %+v (%v), want one", rows, err)
 	}
 	if rows[0].Deferred || rows[0].AcceptanceResult != "pass" || rows[0].Reason != "" {
 		t.Fatalf("ledger row = deferred:%v acceptance:%q reason:%q, want the rescued success", rows[0].Deferred, rows[0].AcceptanceResult, rows[0].Reason)
