@@ -6,6 +6,433 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.151.1] - 2026-09-30 - the Coral feeds EfficientNet-EdgeTPU-S a correctly quantised input
+
+### Fixed — the Coral fed EfficientNet-EdgeTPU-S raw pixels (classify imagenet and embed)
+
+- `accelerators/coral/server.py::_set_input` passed uint8 pixels straight to every uint8 input. EfficientNet-EdgeTPU-S quantises its
+  input with scale 0.012566 and zero point 131, so it saw a 1.6x contrast-stretched image: 41.6 % top-1 on 1000 ImageNetV2 images, against
+  63.9 % once the input is rescaled with pycoral's rule `q = (px - 128) / (128 * scale) + zp` (the same as its CPU twin; measured
+  2026-09-30). The rescale applies only where the quantisation is not the raw pixel to within one step, so the iNat classifiers,
+  DeepLab and EfficientDet-Lite get exactly the bytes they got before. The `embed` tool used the same broken input: its vectors from
+  before this fix are not comparable with new ones (the harness stores none; a caller that kept some must re-embed).
+
+## [0.151.0] - 2026-09-30 - the RKNPU sidecar serves permissively licensed models, measured on the NPU
+
+### Changed — the RKNPU sidecar serves permissively licensed models: PP-YOLOE+ s and ResNet-50 replace YOLOv8n and ResNet18
+
+Operator order (2026-09-30): no licence costs, so no AGPL or GPL model ships. The Ultralytics YOLOv8n (AGPL-3.0) and the Rockchip ResNet18 prebuilt (untraced provenance) are removed from `accelerators/rknpu/models.json`; `object_detect` now runs PP-YOLOE+ s (PaddleDetection, Apache-2.0; 43.7 COCO mAP claimed upstream, host FP32 0.436 on the 500-image evaluation list) and `classify` runs ResNet-50 with torchvision's `IMAGENET1K_V2` weights via timm `resnet50.tv2_in1k` (BSD-3-Clause; 80.9 % ImageNet-val top-1 claimed upstream, host FP32 69.9 % top-1 on 1000 ImageNetV2 images). CLIP is unchanged. The manifest gains `ppyoloe_s`, `resnet50tv2-i8` and `resnet50tv2-fp16` and loses `resnet18` and `yolov8n`; `CLASSIFY_MODEL` in `server.py` names the served classifier build (INT8; the FP16 build is one constant away once the board has measured both).
+
+- **No `.rknn` is downloaded any more.** Every model is built by `fetch-models.sh --convert` from the recipe under its `convert` key (a converted file's `sha256` pins the exact bytes built; a rebuild is not bit-reproducible, and the ResNet INT8 pin was calibrated on 200 ImageNetV2 images while its recipe names COCO, recorded in `calibrated_on`). The two ResNet-50 files use a new `export` recipe: the timm weights are downloaded at a pinned Hugging Face revision and sha256-checked, `torch.onnx.export` writes the ONNX at opset 12 (TorchScript exporter; `dynamo=False` wherever torch has the argument), and the exported ONNX itself has no hash. Verified 2026-09-30 in a scratch venv built from the documented install line (torch 2.4.0 CPU, timm 1.0.30): the export's outputs equal those of the ONNX exported earlier with torch 2.14 (maximum absolute difference 0.0 on three random inputs). The documented convert-venv line now adds `torchvision`, `timm` and `safetensors`.
+- **Calibration list in the repository.** A dataset may name `list_file` (relative to the manifest) instead of `list` (a URL): `accelerators/rknpu/calib/coco_val2017_calib_200.txt` holds the 200 COCO val2017 file names, fetched from `images.cocodataset.org` over plain http (its https certificate does not match its name). Entries of a `list_file` pass the same absolute-path and `..` refusal as a downloaded list. `coco_subset_20` and the unused `space_shuttle_224.jpg` are removed; the COCO label list and `bus.jpg` now come from the zoo's ppyoloe example (byte-identical files, same sha256).
+- **Decoder.** The DFL decode reads the bin count from the box tensor (PP-YOLOE: 68 channels, 17 bins; a 64-channel YOLOv8-shaped head still decodes), the three stride branches may come in any order, and the score-sum branch is ignored, as the zoo's Python demo does. The score is the best class probability with no box-confidence factor. Defaults stay the zoo demo's: score 0.25, NMS IoU 0.45. A head the decoder cannot read (box channels not a multiple of 4, channel counts that differ between branches, a three-tensor YOLOX-style head, or a grid that disagrees between box and class) is the structured `unexpected detector output layout` refusal instead of a 500.
+- **Classifier preprocessing.** A spec carrying `resize_short` and `crop` gets the torchvision evaluation recipe (short side to 232, bilinear, centred 224 crop, cut from the source and resampled once, so an extreme aspect ratio builds no huge intermediate); a spec without them is squashed to the input size as before.
+- **A missing label file no longer says to convert.** The `model_missing` hint for a label file is `run fetch-models.sh`; only the model file itself says `--convert`.
+- **Not yet run on the NPU.** The three new files were converted and checked on rknn-toolkit2's simulator; `test_server.py` decodes the simulator's own tensors when `RKNPU_SIM_DIR` names the benchmark's `sim/` folder (PP-YOLOE on `bus.jpg`: person 0.950 / 0.935 / 0.923, bus 0.893, person 0.473, handbag 0.411; ResNet-50 on the zoo's dog photo: Shih-Tzu in both builds). Latency, memory and INT8 accuracy on the board are unmeasured; `docs/systems/accelerators.md` records the host FP32 baselines the board's INT8 figures are to be checked against. A box that already runs the sidecar needs the three new `.rknn` files copied to its models directory (`fetch-models.sh` reports them MISSING until then); the old `resnet18` and `yolov8n` files are no longer served.
+- **Measured on the NPU (Orange Pi 5, 2026-09-30), same 500 COCO / 1000 ImageNetV2 images as the host baselines:** ppyoloe_s INT8 mAP@[.5:.95] 0.4255 (host FP32 0.4360; 56 ms per inference on one NPU core); resnet50tv2-i8 top-1 69.7 % (FP32 69.9; 13 ms), resnet50tv2-fp16 69.9 % (30 ms), so the INT8 build is served. The Coral Edge TPU on the same COCO list: EfficientDet-Lite0/1/2 0.270 / 0.313 / 0.356. Evidence: the operator's benchmark records (outside this repository).
+
+## [0.150.0] - 2026-09-30 - a read-only catalog of the ComfyUI workflow templates a node carries (Comfy templates phase A)
+
+### Added — a read-only catalog of the ComfyUI workflow templates a node carries (phase A of the Comfy templates work)
+
+`render/templates-catalog.mjs` lists and classifies the workflow templates of the `comfyui-workflow-templates` package that ComfyUI pins on a node, of a checkout of the upstream repository, or of a `pip download` extract of a candidate version. It is one dependency-free file (`node:` builtins only) that never runs a template, downloads a model, installs a package, changes a config or opens the network; the only file it writes is the one named by `--out`, and a test fails if that stops being true. The whole file can be piped to `node --input-type=module - snapshot --comfy-dir <tree>` on a node with nothing deployed; a piped file has no licence map beside it, so its other verbs count every repo as unknown unless they are given `--license-map FILE`. There is still no MCP tool, config key, fleet task or route for it: a template is a UI-format graph and `run-graph` takes API-format graphs only, so running one waits for a converter. Per template it derives the active nodes (subgraphs are expanded; muted and bypassed nodes, and everything inside a bypassed instance, are inactive), the model files the active nodes need (class, URL and hash from `properties.models`, plus loader widget files nobody annotated; files that only bypassed nodes reference are reported apart), the parameter surface (`proxyWidgets`), whether it is a paid API template (a node type in the node's own `comfy_api_nodes` ids, read from `node_id="X"`, a `NODE_ID = "X"` class attribute and the first argument of `_cloud_schema`; the `api_` name prefix; or the index's `openSource: false`; any one is enough, and the summary counts where they disagree) and a version stamp whose label goes on every count. Against the installed package (comfyui-workflow-templates 0.11.68, json 0.1.94) it reproduces the research figures: 566 entries, 326 API (the node-id scan and the index's `openSource: false` each see all 326 and the `api_` prefix 276; the ids-and-prefix view and the index flag describe the same set, 0 disagreements), 240 local, 235 of them needing weights and 5 needing none, 197 with subgraphs, 1129 model annotations of which 10 carry a hash; against the upstream HEAD e7849852: 660 entries, 367 API, 243 local, 50 needing custom nodes, 262 with subgraphs, 155 with a parameter surface (103 of them local). Trimmed real templates (MIT, attributed in `NOTICE`) and hand-written edge cases are the test fixtures; a golden test reproduces the counts against a real installed package when `TEMPLATES_CATALOG_DIR` names one. The suite is 264 tests (263 run in CI), checked by a mutation pass over about 1,660 one-line edits of the module: of the 56 that survived, ten were real gaps and now have tests, and the rest are equivalent or dead code.
+
+### Added — a harness-owned licence map and a run gate for the templates (`render/templates-license-map.json`)
+
+The map is keyed by Hugging Face repo id; each entry carries a class (`permissive`, `conditional`, `non_commercial`, or an explicit `unknown` for a repo whose licence nobody has read), its source URL, date and basis, and a repo that is not listed is `unknown`. An entry whose basis begins `inferred from` was copied from the sibling repo it names, not read: it carries no source URL or date and the summary's evidence range ignores it. A template takes the worst class among the repos its active nodes download from (non_commercial, then conditional, then unknown, then permissive), so an unlisted repo never hides a known restriction; a file with no Hugging Face source counts as unknown and a template with no weights is `none`. The gate blocks paid API templates (ADR 0001) and FLUX-family ones (ADR 0011: a FLUX name, a repo id containing "flux" or under the model maker's organisation, or a map flag, with the shared text-encoder repo exempt by its entry) and asks for an explicit acknowledgement naming the class for anything else that is not permissive. A repo whose id merely contains "flux" does not bar a template that takes only text encoders from it (a text encoder is another maker's model wherever it is hosted; the gate warns instead), while any other class from that repo, a file with no class and the maker's own organisation still bar; on the installed package that changes exactly one of 566 verdicts, a plain Qwen3 text-generation template that was blocked and now needs the unknown-licence acknowledgement. A FLUX-named weights file from another repo is a warning, not a verdict. `list` hides blocked templates unless `--include-hidden`; naming `--kind api` lists the paid API ones without it, and the FLUX-family ones stay hidden. The 50 seeded entries are the 2026-09-30 research digests of repo-level licence tags, none re-fetched; on the installed package they give 75 permissive, 63 conditional, 29 non-commercial and 68 unknown among the 235 local templates that need weights, and 25 FLUX-family templates among them (23 by name). Per-repo licence texts are still to be read: 83 of the 133 repos the installed package's local templates download from are unlisted.
+
+### Added — directory-aware readiness across `extra_model_paths.yaml`, node snapshots and a candidate diff
+
+A model file is usable by a template only if ComfyUI would offer it to the loader that reads it, so readiness follows ComfyUI 0.37.0's own rules (`folder_paths.py`, `utils/extra_config.py` and the directory registrations of `main.py`) instead of matching file names: default directories per class including the dual ones (`text_encoders` also reads `clip/`, `diffusion_models` also reads `unet/`, `controlnet` also reads `t2i_adapter/`), the yaml keys `unet` and `clip` mapped to their classes, `base_path` joined to each entry with an absolute entry winning and `is_default` first, the output directory's `checkpoints`, `clip`, `vae`, `diffusion_models` and `loras` added last (`--output-directory` moves it, `--base-directory` moves it and the models directory), network-share (UNC) roots kept intact, the yaml shapes ComfyUI's loader accepts (a provider named with a space or in quotes, quoted class keys, `|` and `>` block scalars, an empty entry skipped), and a recursive listing that follows links, skips `.git` and keeps the extensions the class's core loaders accept, matched by exact relative path. Compared with ComfyUI's own loader run on those shapes, the directory lists agree, for every model class and in order, apart from the one gap noted below. A requirement is `present` or says why not: `missing`, `wrong_class` (and where the file is), `in_subfolder`, `case_mismatch`, `extension_not_listed` or `class_unregistered`; `--mode basename-only` keeps the older name-matching method so its numbers reproduce and can be compared. The verbs `snapshot` (one node's package versions and fingerprint, API node ids, resolved roots and files, and hashes of the two ComfyUI rule files with line endings normalised; it exits 2 on a directory that is not a ComfyUI tree, and the file can be piped to `node -` on a node and writes nothing), `readiness` (per node and on any node; it refuses a node whose package differs from the catalog's unless `--candidate`, and reports `rules_check`, whether the node's rule files are the 0.37.0 ones the table was checked against, as an advisory that scores the node either way) and `diff` (what a candidate package adds, removes and changes, and which templates it would break on each node; `--candidate-basis` says what the candidate directory is) work from those. Read-only on the four ComfyUI nodes, which carry an identical package fingerprint and identical rule files: 8, 5, 6 and 1 templates are ready per node and 12 on any node, by both methods with no template flipping between them (measured before the output-directory and yaml-reader fixes; the one node re-run afterwards still reads 8); the drift from json 0.1.94 to 0.1.96 adds 14 templates, removes 2, changes the required files of 10 and would break 5 that are ready today.
+
+Known gaps: the run-graph satisfier's presence check (`modelCandidates` in `render/manifest-satisfy.mjs`) does not look under `models/unet` for a `models/diffusion_models/...` path that ComfyUI itself lists, so on a node with no `extra_model_paths.yaml` it would download two or three diffusion-model files a second time (measured on two of the four nodes; not changed here); 83 of the 133 repos the installed package's local templates download from have no licence entry; two templates that take a FLUX.2 VAE from a FLUX-named repo stay blocked by the repo signal, and whether ADR 0011 reaches a reused FLUX VAE is the operator's call; `main.py` is not hashed, so a change confined to it is not seen by `rules_check`; and a yaml entry that is rooted but has no drive letter under a drive-lettered `base_path` resolves onto that drive under Windows path join and is left as written here.
+
+## [0.149.0] - 2026-09-30 - kit-derived compose templates, captions-bar and the hyperframes-compose skill
+
+### Added — four kit-derived compose templates, `captions-bar`, a caption grouping helper and the `hyperframes-compose` skill
+
+`render/compose-templates/` ships five new vetted templates, all 1920×1080 at 30 fps, all discovered with no route
+change (`local-offload doctor` and `offload_status` list them; the fleet `compose-video` task accepts them by name):
+`stat-card`, `section-title` and `checklist-card` (opaque) and `callout-label` and `captions-bar` (alpha overlays for
+`webm` and `mov`). The first four are adapted from card designs of the hyperframes-student-kit at the pinned commit
+`0d30152` and rewritten in CSS keyframes: no script library, no count-up, Inter from the shared kit only, declared
+variables with explicit limits, emphasis split into `*_pre` / `*_em` / `*_post`, neutral copy and a recoloured palette.
+The kit is a reference, never an install: its MIT `LICENSE` and use permission are kept verbatim (hash-tested, and
+pinned byte for byte by a `.gitattributes` rule) under `render/compose-templates/_third_party/hyperframes-student-kit/`
+with a `PROVENANCE.md`, the root `NOTICE` credits it, and each README says where its template was adapted from.
+`captions-bar` is written for the harness.
+
+`render/captions-groups.mjs` is a pure helper from `offload_transcribe`'s `<base>.segments.json` to `captions-bar`
+chunks. The `words[]` in that file are whisper-server's tokens, not words (a word-initial token keeps its leading
+space; a continuation such as an apostrophe suffix, the digits after a currency sign or punctuation has none), so the
+helper merges tokens into words before it groups anything. Over 489 real transcripts (55,473 tokens, 40,345 words)
+every file regroups into exactly the words of its own segment text and no group has a space before punctuation; a
+first version that trimmed every token and joined them with a space gave "It 's only", "$ 1 a" and "'t worry ." and a
+space before punctuation in a third of all groups. Beyond that: pace presets (3, 5 or 6 words), breaks at sentence
+ends, pauses of 0.15 s or more and a 42-character cap, holds that never overlap two groups, and chunks that fit the
+template (at most 16,000 characters and 600 s), cut at 300 s by default, with `--chunk-sec` (up to the template's
+600 s) and `--chunk-chars` to set another cap.
+
+`skill/hyperframes-compose/SKILL.md` is the house skill ADR 0059 promised: hard bans on `npx hyperframes` and its
+`init`, `skills`, `upgrade` and `add`, which tool to pick, the seven-template catalog (kept in step with the templates
+by a test), the verification loop, the captions flow and the authoring contract. Installing it into an agent's skills
+folder is the operator's step. The tool description, CLI help, README, operator guide, glossary and
+`docs/systems/media-generation.md` name all seven templates, and tests fail when one of those lists, the skill's ban
+list or a number the docs quote drifts from the code.
+
+### Fixed — a `$` in a template variable corrupted the composition (every template)
+
+`applyTemplateVariables` handed the rebuilt `data-composition-variables` attribute to `String.replace` as a
+replacement string, and JavaScript reads `$1`, `$&`, `` $` ``, `$'` and `$$` in one. Ordinary text tripped it: a
+caption "over $100 million" made the attribute invalid JSON, so `check` failed the render with `words_json is not JSON:
+"undefined"` (a message that never mentions the dollar sign), and a `stat-card` figure of `$1.2M` rendered but was
+judged by `lint` and `check` as placeholder text. `$&` spliced the old attribute, closing quote included, into the new
+one, so caller text could become extra attributes on the composition's root tag. The declaration now goes in through a
+replacer function. Tests cover every pattern through the fixture and four shipped templates, show that a hostile value
+adds no attribute to the root, and pin the escaping of `'`, `&`, `<` and `>` (the runner's tag scanning, like
+HyperFrames', ends a tag at the first `>`). Rendered through the runner before and after: the same three-group caption
+list fails `CHECK_FAILED` before and renders after (VP9 `yuva420p`, alpha, all three groups read back exactly,
+`$&` included).
+
+### Measured — what the lane does with worker counts, with a long caption list and with a long clip
+
+- **A frame must be a pure function of time; scaling above 1 is a rule of thumb, the measurement is the gate.** A
+  keyframe that scales an element above its resting size (a halo breathing to 1.06, a ring popping to 1.1) gave frames
+  that depended on the render worker count on two of the ported cards (80 of 180 and 172 of 210 frames differed between
+  1 worker and 4 or `auto`, by a few pixels of gradient, and two runs at 4 workers disagreed); with opacity instead they
+  matched, and with the blur removed and the scale kept they still differed, so blur was not the cause. The ports and
+  `captions-bar` never scale above 1 (a test guards it) and each gives 15 of 15 identical pairs of decoded frames across
+  1, 2, 4, 6 and `auto` (twice) workers. The older `title-card` drifts a large glow out to `scale(1.12)` and also gave 15
+  of 15, so the rule is not a law; the gate is rendering at those worker counts and comparing decoded frames.
+- **One CSS-animated element per caption group does not scale.** The same 8 s clip renders in about 24 s with up to 80
+  groups in the page and 34 s at 150, and a 374-group, 12.9 KB list had written about 290 of its 450 frames after ten
+  minutes when it was stopped. `captions-bar` therefore holds one element and derives the frame from the time of
+  HyperFrames' `hf-seek` event (450 frames of that list in 39.6 s at draft quality). A 15,968-character string variable
+  passed `lint`, `check` and `--strict-variables`. The event is in the pinned 0.8.61 bundle but not in its documentation,
+  so the README names the version it was measured on, a test fails when the pin moves past it, and the operator guide's
+  bump step names `captions-bar`.
+- **A long caption chunk needs one worker and about 300 s, so the helper cuts 300 s chunks by default.** At the lane's
+  default `auto` workers HyperFrames stores every frame and budgets 8.3 MB at 1080p, and refuses a render when that
+  passes 90 % of the free space: a 300 s chunk (9,017 frames) was refused `DISK_HEADROOM` with 33 GB free (it would
+  store about 75 GB; a 600 s chunk about 150 GB). At `workers` 1 the frames stream and the same chunk rendered in
+  1,038 s (115 ms a frame on a busy box), so a 600 s chunk, which was not rendered, takes 27 to 35 minutes and
+  passes the 1,800 s default `compose_timeout_sec`. The helper therefore cuts 300 s chunks by default
+  (`DEFAULTS.variableSec`); the template's own 600 s is only the upper bound `--chunk-sec` is checked against
+  (`TEMPLATE_LIMITS`, refused with the same text as before), so a caller who raises `compose_timeout_sec` can ask for
+  longer chunks. A test reads the template's declared limits and pins the default and the limit in the skill, the
+  captions README and the media doc, so neither number can drift from the code. The captions README, the skill, the
+  media doc and the operator guide's timeout note carry the measured figures.
+
+Not in this change: deploying the templates to the fleet, the `assets` parameter (an image variable type), GSAP
+vendoring or a HyperFrames pin bump, and a test that renders the templates and checks their pixels.
+
+## [0.148.0] - 2026-09-30 - the ampere-16 fast layer and the 35B seat are in the tier table; install render gates for the MoE spill and a storeless tier
+
+### Added — the ampere-16 `fast` layer and the 35B seat are in the tier table (register A-113, ADR 0048 Amendment 2)
+
+The `fast` digest layer and the Qwen3.6-35B-A3B seat behind it existed only in the ampere-16 reference box's
+hand-edited config and in two Go test files, never in `setup/templates/profiles.json`, so a fresh install of the
+tier lost both (the capability-loss class ADR 0048 was written against, one level up). The table had one `vllm_seat`
+per tier and a card cannot hold two heavy seats, so the schema grew by the smallest steps that carry what the box runs.
+
+- `extra_vllm_seats` beside `vllm_seat`: further vLLM seats served on demand on the same card, never the agent lane.
+  Validated as non-lane seats (`Spec.ValidateExtra`: no fallback, every lane field refused), with unique ids, aliases
+  and units and the lane seat's card. `vllm_seat.storeless_reason` (and the same on an extra seat) is the measured
+  reason a seat has no cache server, seeded verbatim into its `kv_cache_server` binding; refused beside a `cache_server`.
+- `ampere-16` now declares `layers` `single` (the 27B GSQ lane seat) and `fast` (the 35B, 32,768 at 8 in flight), the
+  35B as its extra seat, and both seats' B-01 storeless reasons with the local paths dropped. The layer values are the
+  reference node's own (the two placement and delegate tests pin the same ones), so `audit-config` reports MATCH for
+  `layers`, `tiers` and `tier_profile` against a fixture that carries them: a live extract of that node redacts each
+  layer seat's `ctx_tokens`, so the 32,768 is the value those tests pin, not a live reading. A layer seat naming a vLLM
+  seat must equal that seat's `max_model_len` (and `max_num_seqs`, when set) or the table is refused at parse.
+- Seeding is per seat and never advertises what the box cannot serve: an extra seat the box can run (the venv, its
+  own weights and the wrapper scripts the operator installs for it) joins `vllm_seats` with its own binding; a layer
+  whose vLLM seat is absent is dropped; a layer set that lost `single` (the planner default, placement row 5b) is not
+  seeded at all; a box with no vLLM prerequisites seeds exactly what it did before (`tierseed.ResolveLayers`,
+  `Options.ExtraVLLMSeatsActive`).
+- `install render` emits every vLLM seat of a tier as an ALTERNATIVE of the others inside the residents set
+  (`emb & rer & (vagt | vagt2)`): the two seats cannot share the card, and co-resident members would have llama-swap
+  load the second beside the first. The extra seat's entry names its wrappers after its own unit, and a box that runs
+  it without the lane seat (the 27B's weights absent, or two snapshots under them mid-upgrade) renders it with the
+  box's own runtime; `servingtmpl.Render` refuses any vLLM seat whose runtime is incomplete, because such an entry
+  names no seat directory and no address and every gate that reads the text passes it. The composition check now runs
+  for any tier that declares layers, not only one that composes. `ParamsBasis` mirrors `Params.ExtraVLLMSeats`, and a
+  replay pins it.
+- `extra_vllm_seats` keys are strict, like `layers`: a key that is not a seat field is refused by tier and JSON path at
+  parse (`tierseed.ParseDoc`, so the installer's embedded copy too), never silently dropped. A misspelt `storeless_reason`
+  used to seed the generic reason in its place.
+- Not rendered, on purpose: the extra seat's systemd unit, wrapper scripts and polkit rule. Its production launch line
+  carries `--language-model-only`, which the shared linux-systemd run script cannot express, so
+  `docs/systems/composite-tier.md` lists what the operator installs by hand. Those scripts are also the seat's
+  prerequisite (`Spec.DetectExtra`): llama-swap does not check that an entry's `cmd` exists when it loads its config,
+  so a box with the venv and the weights but not the scripts would list the seat, seed its layer and fail only when a
+  contract asked for it. Until they are in the seat directory (`--vllm-seat-dir`, default `<home>/seat`, now a flag of
+  `install seed` and `audit-config` as well as `install render`), the seat and its layer are left out and the note
+  names the missing file.
+- The layer regression floor: `TestEveryTierKeepsItsDeclaredLayerSet` (`layerSetTiers`: each composite tier's layers and
+  the seat roles each serves) fails by name when a tier stops declaring one, and `extraSeatFloor` pins the extra seat.
+  Each was made red against the real regression and the table restored byte for byte: deleting the `fast` layer,
+  deleting the seat while keeping its layer, an extra seat with no tool parser, a layer window that drifts from its
+  seat's, deleting every layer, moving the layer's seat to another role. `docs/tiers/ampere-16.md` is regenerated
+  (layers, the 35B, both storeless reasons); `tierdocs` heads a layers-only tier "Layers", not "Composes".
+
+### Added — H-01's two remaining render gates: the spill ceiling and INV-16
+
+- `install render` refuses `--n-cpu-moe` (any spelling, and `LLAMA_ARG_N_CPU_MOE`) above the tier's measured spill,
+  the new `n_cpu_moe_max` (`servingtmpl.AuditSpill`, in the write gate `renderGate` that now also hosts the H-01 rule
+  audit and the layer check). It is a separate number from `n_cpu_moe`, because one field cannot check itself; 0 means
+  the tier recorded no measured spill, so none is sanctioned. A tier that names `moe_26b: n_cpu_moe` with no N is
+  refused too, since that renders the every-expert `--cpu-moe`. No shipped tier declares a spill.
+- `TestInstallRendersOnAnyTierWithoutACacheServer` (INV-16): every tier renders with no vLLM prerequisites, and a
+  tier whose vLLM seat declares no store renders the seat, its unit and wrappers with no cache-server piece and
+  seeds an explicit storeless binding that `doctor` accepts. A spill of 20 against a measured 14 and a hard-coded
+  `--n-cpu-moe 30` in a rendered command are refused.
+- Both serving-config audits (`Audit` and `AuditSpill`, so `install render`, `audit-yaml` and the template gate) now read
+  each entry the way llama-swap runs it, with its `${name}` macros substituted (nested macros too, bounded, and
+  llama-swap's own `${PORT}` left alone). The templates keep their shared flags in `macros:`, so a `-ngl 0` or an
+  `--n-cpu-moe 30` placed there used to pass every rule. Every shipped template still passes.
+
+### Fixed (tests) — the streamed re-pack tests had a 5x timing margin
+
+`TestRepackSlowStreamingSeatIsNotStalled` streamed a delta every 40 ms against a 200 ms stall allowance, so one scheduling pause of a loaded CI runner filed the stream as a stall (seen once on this PR's merged head; 20/20 locally, green on main). The allowance is now 600 ms (the 2 s stream still outlasts it, so a stream that stops counting as progress still fails: checked with 700 ms gaps), and `TestRepackProgressReachesTheJobRecord` gets the same headroom (600 ms / 900 ms). `TestRepackSilentSeatStillStalls` keeps 200 ms.
+
+## [0.147.0] - 2026-09-30 - a finished answer is rescued instead of deferred when its re-pack fails; the re-pack is sized, streamed and held by the busy hold; research acceptance
+
+### Fixed — a finished answer whose structured re-pack failed is re-packed by the delegator, not lost (C-66, PR-4)
+
+A node whose agent loop finished but whose structured re-pack failed (stalled, unreachable, cut, or a shape the schema refused) deferred, and a deferred result is never offered to acceptance, so the finished answer reached the caller as prose inside an error envelope and was counted as lost work. Every one of the 80 re-packs the fleet's nodes killed on 2026-09-29 carried a finished answer, and about 15 job-hours had been discarded that way since 2026-09-20. The delegator holds the answer, so it now re-packs it.
+
+- The node marks such a defer with the new `schema_miss` wire field (omitempty); the defer itself is unchanged, so an older delegator reads what it always did. A node that predates the field is recognized from `stop_reason: done` plus the re-pack failure reason prefix.
+- A cut answer (`output_truncated`), an empty one, a caller cancel (a defer whose reason starts `canceled during the structured re-pack`, whether or not the node flagged it) and every other defer are never rescued.
+- The rescue runs inside `finish`, before the ledger row is written, on the local, remote and queue routes: the lossless reading first (the answer may already be the object), then ONE completion on the delegator's own agent seat, held to the schema the node's answer would have been (every field the acceptance reads required) and bounded by the re-pack allowance sized from the answer and that seat's rate. It is one request, not a run: no run registration and no slot of the run cap, and it waits in line on a busy seat like any other request.
+- A seat that is not resident is warmed first, on the box's admission budget (`agent_admission_wait_sec`, -1 turns it off) and outside the allowance, as a run's own admission does. The delegator's seat is idle-unloaded after five minutes, so the rescue routinely finds it cold, and a cold load (125-250 s on a vLLM seat) is longer than the whole allowance: without the warm-up the completion was cut by its own load. The rescue may therefore wait up to `agent_admission_wait_sec` (300 s by default) behind a GPU-lease fence or another model's swap before its own allowance starts; the delegation context has no deadline of its own until the whole-call deadline (PR-6), so those two bound it.
+- The object is validated again on the delegator (a JSON object that satisfies the schema) and the ordinary acceptance runs over it. A success reads `repack_note: rescued on <seat> ...`; a rescue that cannot produce a validated object leaves the defer exactly as the node sent it, still counted in `lost_to_stack`, with a note that a rescue was tried. The failed rescue's log line names the job.
+- Wired on `agent_delegate`, `offload_research` and the CLI verbs `delegate` and `research` (a source scan fails the suite when any production `RunWith` / `RunBatched` call stops passing one). Deliberately not wired, for three different reasons: `agent_run` carries no `output_schema`; the review lane's fenced-seat fallthrough exists because the local seat is fenced by another session's lease, and a rescue there would queue behind it; `offload_ask` at a named remote route keeps its own handling of a finished answer (its prose still reaches the caller), which the security review records as deliberate, so it is outside this change. The seam is `RunOptions.Rescue`.
+
+### Fixed — the structured re-pack streams, is sized from the answer and the seat's rate, and stops sending attempts on a dead context (C-66, PR-5, PR-12; ADR 0055 item 8, ADR 0061 item 8)
+
+The re-pack was the one completion still sent non-streamed under a flat 120 s allowance, so a slow seat decoding a long object looked silent for its whole decode: 119 of the 838 node-side re-packs since 2026-09-20 were killed at 120 s, `repack_attempts` read 3 on 119 of those 119 stalled rows (attempts sent after the monitor had cancelled), and on 2026-09-29 the kills were 70 % of the busiest remote seat's re-packs.
+
+- The re-pack streams (SSE) on both the grammar arm and the chat lane, falls back to the plain JSON body when a seat or proxy ignores the request, and retries as plain JSON, remembered per seat for 30 minutes, when a server answers a streamed request with 400 or 422. On a vLLM seat the streamed request carries `structured_outputs`.
+- A seat that refuses the stream is no longer a silent mode switch: `repack_note` reads `streaming refused by this seat` (on a success too), because on such a seat the re-pack is one silent request under its allowance again and nothing else would show the fix did not apply to it. A JSON retry that fails in a different way than the refusal logs both halves.
+- Progress reaches the liveness monitor and the job record, and the allowance is published when the phase starts, so a slow seat that is producing is not a stalled seat; a silent one still is.
+- The allowance is `max(120 s, 1.5 x expected answer tokens / decode rate + 30 s)`, where expected is the answer's size and never the completion cap (685 tokens at 2.7 tok/s allows 410 s). A seat with no measured rate keeps the flat 120 s, and a stalled re-pack's reason names the arithmetic, or the flat bound and why it is the flat bound (no measured rate, or an unknown size).
+- Under the monitor the re-pack's requests carry no transport bound: the busy hold (ADR 0061) governs a request whose seat is working for others, and once the monitor has cancelled, no further attempt starts.
+- Not verified live: vLLM 0.29 with `stream: true` together with `structured_outputs` is documented but has not been exercised against a live seat; the plain-JSON retry is the safe default.
+
+### Fixed — `offload_research` no longer fails correct digests (C-74, PR-3)
+
+On 2026-09-29, 72 rows (8.6 %) failed verification and 59 of them were `min_items`, 36 through the direct path (an object that never reached the re-pack): the schema asked for nothing while the acceptance demanded an item from the alphabetically-first array.
+
+- Presence is declared: the default research schema lists all four fields (`key_facts`, `numbers`, `quotes`, `verdict`) as required, a caller's schema gains every field its acceptance checks, and the node holds any contract to it (an object missing a field the acceptance reads goes to the re-pack; on a vLLM seat the fields are required in `structured_outputs` too).
+- Non-emptiness is asked for only where the caller marked it: the first array of the caller's own `required`, or the caller's own acceptance. A faithful digest of a page with nothing to extract is a success. The default digest owes one statement on every page, anchored or not: `nonempty:verdict`, so a page too thin to anchor never carries an empty acceptance and a digest that said nothing (every list empty, no verdict) is not delivered as a success. Empty lists with a verdict that says so still pass.
+- An acceptance-only research failure is no longer retried on another node (the page is the same; the retry note says so), except a failed document fingerprint (`docanchor`): an off-document answer is a fact about the node that wrote it (a node is quarantined after two), and another node is the cure. Abstentions and every other door's acceptance failures are still retried.
+
+### Fixed — a warm-up refused with a server error is a seat that did not start only when nothing says it is busy (C-76, admission half)
+
+Admission proceeded into the wall on any non-200 warm-up answer and reported it as a load.
+
+- A non-200 that loaded nothing is no longer counted as an attempted load (no cold-load sample in the seat-rate store, no coherence probe); a 404 or a timeout still proceeds. `agent_run` is unchanged.
+- A 5xx is evidence the seat's process did not start only when llama-swap's answer is not one of its busy shapes (429, 503 `process is not ready`, a 500 of its own, a health-check timeout, an empty 502), `/running` lists no row for the seat and nothing else is mid-swap, and `/running` could be read. A seat that reads starting or stopping, another model's swap, an unreadable `/running` and every busy shape proceed with the reason in `admission_note`: a busy card is a place in line, never a reason to refuse. The body's `upstream command exited` outranks a busy-looking answer.
+- The defer ships in audit mode (new config `agent_warm_failure_defer`, default `false`, the house standard's audit-then-enforce): the run proceeds as it always did and `admission_note` says `this run would have deferred at once`, so would-be defers can be counted before anyone turns the rule on. With `true` the run defers as infrastructure with the reason prefix `seat warm-up failed: ` within one poll, before any wall exists, and the delegator gives that defer one retry on another node and credits back the admission the node spent (like the coherence defer), so it is not terminal.
+
+### Changed — `repack_attempts` counts requests sent
+
+It used to read 3 whenever the re-pack ran out its attempts, including attempts that never left because the monitor had already cancelled. A stalled re-pack now reports the requests it actually sent (usually one), so anything keyed on `repack_attempts == 3` as exhaustion must change.
+
+## [0.146.1] - 2026-09-30 - the vLLM seat launcher reaps what a crashed seat left behind
+
+### Fixed — a crashed vLLM seat's engine workers and MP server are reaped at crash time, not only when the MP HTTP port is held; an unload is not mistaken for a crash
+
+When a vLLM engine dies nothing runs a stop: the API server exits, but the engine workers it could not stop and the LMCache
+MP server outlive it. 0.143.0 taught `seat_fg.sh` to run `seat_stop.sh` when the MP HTTP port was held; workers left behind
+with the MP port free were still not reaped, so the next engine loaded onto cards that were still held, and nothing cleaned up
+until a request started the next generation (2026-09-29: three workers survived SIGTERM and held 14.5-16 GB on every card
+while the MP server kept its HTTP port: 23 minutes down, 59 failed starts, 75 HTTP 500s).
+
+- `seat_fg.sh`: with no engine of its port alive, the start looks for three kinds of leftover (a listener on the MP HTTP
+  port, an `lmcache server` of its MP port, an orphaned engine process: named `VLLM::*`, found by the start of its command
+  line and never by `pgrep -f`, with no live vLLM API server above it, `vllm serve` or `python -m vllm.entrypoints...`, so a
+  sibling seat's live workers do not count) and runs `seat_stop.sh` once, attached (its output is already the seat log), then
+  waits up to `SEAT_MP_PORT_WAIT_SEC` (10 s) for the port. A holder that is not the stack's own is still refused, and that
+  refusal is the last check in the block.
+- `seat_stop.sh`: reaps by rule, never by the port a process holds (an engine process with no live vLLM API server
+  ancestor; the MP server of THIS stack's MP port and unit). The engine rule reads the process tree: it is a rule, not a
+  proof of ownership, and an engine a script builds in-process would look orphaned, so such jobs belong where no seat lives
+  (the scripts and ADR 0035 now say so instead of claiming proof). An MP server that ignores SIGTERM gets SIGKILL after
+  `SEAT_REAP_WAIT_SEC` (10 s). A reaped worker or MP server that survives SIGKILL (in real life a process stuck in the GPU
+  driver, state D) is named with its process state and the stop exits 1 (`INCOMPLETE`); a zombie is not stuck. A unit that is
+  already gone is no longer a warning, and a cleanup with no process tree no longer waits 3 s.
+- `seat_stop.sh` appends its own output to the seat log unless `seat_fg.sh` runs it attached: the stop task and llama-swap's
+  `cmdStop` have no stdout anyone reads, so a survivor of SIGKILL and an `INCOMPLETE` stop used to vanish. A named env file
+  that does not exist (argument or `SEAT_ENV`) exits 2 and stops nothing; it used to fall back to the default seat's ports
+  and unit and reap whatever held them. The shared-memory sweep also stays off while a `python -m vllm.entrypoints...`
+  engine is alive.
+- `SEAT_REAP_WAIT_SEC` and `SEAT_MP_PORT_WAIT_SEC` are read as decimal seconds. They reached `$(( ))` as octal: `08` and `09`
+  turned every wait into a no-op, and `0` skipped the survivor check, so a stop reported "gone" and exited 0 with a worker still
+  alive. A value that is not a number is now said in the log and means 10.
+- `seat-cmd.ps1` (Windows/WSL stub): its 30 s "seat stopped answering" exit ends every unload as well as every crash (about nine
+  exits in ten in the live stub logs were unloads), so a cleanup on every exit would have started a second stop about 40 s after
+  each unload, woken a distro that had powered itself off, and delayed the exit that completes the unload against an
+  `unloadTimeout` of 60 s. `seat-cmdstop.ps1` now leaves a marker file (`seat-stop-requested-<seat>`) in the seat directory
+  before it starts the stop task; the stub removes any marker when the seat comes up and skips the cleanup when it is there.
+  A crash leaves no marker, so its exit starts the operator-session stop task, waits for it (90 s of the clock at most; a task
+  never seen running gets 30 s to appear: both were counts of polls that a 1.1 s Windows PowerShell 5.1 read stretched to about
+  140 s and 47 s), reads and logs the task's result (a stop that did not finish is named), and exits 0 as before. It does
+  nothing while the seat's own start task is still running (a live launcher owns the seat), never relaunches the seat, and a
+  stop task that will not start or never finishes only logs. No watchdog, no scheduler: both points run inside processes
+  llama-swap already supervises.
+
+Tests: `seat_fg.stale-mp.tests.sh` drives the real code of both scripts against stand-in processes named like the real ones
+(44 checks as root, 43 without: the real transient-unit case needs root and systemd; including two mutants of the
+foreign-listener guard that it must catch); it takes a directory lock and steps aside when another run holds it (a lock file
+created by one user could not be opened by another under `fs.protected_regular=2`), and the Go wrapper starts a second
+overlapping run and requires it to step aside. `launcher_seatcmd_crash_test.go` runs the rendered stubs for real in Windows
+PowerShell 5.1 and PowerShell 7 against a driver with a simulated clock, the scheduled-task cmdlets stubbed, and `Set-Content`
+stood in for with the non-terminating error the real cmdlet raises for a missing directory (a directory in the way, a lock or a
+read-only file raise terminating ones, so they cannot tell `-ErrorAction Stop` from its absence). The behavior of every guard
+the review found pinned only by text is now driven (port boundary of the MP
+pattern, anchored engine name, the unit stop through a stand-in `systemctl`, a three-level engine tree, zombies, survivors of
+SIGKILL, slow-dying processes, the shared-memory sweep, the missing env file, the seat log written once). ADR 0035 gets a dated
+update (the marker, what is reaped and how sure that is, the alternatives rejected, the limits); `docs/systems/cache-server.md`
+items 4d and 4g and the operator guide describe it.
+
+Deploying is a seat-side action: copy `seat_fg.sh` and `seat_stop.sh` into the distro's seat directory and re-render and deploy
+BOTH `seat-cmd.ps1` and `seat-cmdstop.ps1` (the stub reads the marker the stop stub writes; with only the new `seat-cmd.ps1` no
+marker exists and every unload is cleaned up after as before). Diff a deployed stub first: one may have been edited by hand.
+The `seat-stop-requested-<seat>` file next to the stubs is the marker, not litter. Not yet seen on a live crash.
+
+## [0.146.0] - 2026-09-30 - a delegator takes back a job it has not started, and a node cleans up after one that left (ADR 0064)
+
+### Fixed — a delegator takes back a job it has not started, and a node cleans up after one that left (ADR 0064; register C-70 ghost-job half, C-68, C-63)
+
+Every give-up on an accepted job (the queue deadline, a canceled caller, a poll deadline) left the job on the fleet node, where it started when a slot freed and ran for nobody. On 2026-09-29, 43 % and 59 % of two nodes' agent runs (50 % and 73 % of their run wall) had no delegator result row, and the finished walls fed each node's own Retry-After, which sent callers away for longer and produced more abandoned jobs. The recovery pass meant to collect such jobs closed 61 of 61 open intents on a 404 or a 401 and recovered none.
+
+- **`DELETE /fleet/jobs/{id}`** (agent bearer, like the poll) withdraws a job that is still `accepted`, under the job store's mutex the scheduler claims under: exactly one of a claim and a withdraw wins, and a running or finished job is never touched (running work stays recoverable). Answers: `200 {"state":"withdrawn"}` (also for a repeat, and for a job the node already took back itself: reaped, or marked never-started at shutdown), `409` with the job's own state, `404`, `401`, `405` for a non-agent job. A withdrawn job is a terminal `error: "withdrawn: ..."` record rather than a deleted one: a poll reaches a terminal state, a duplicate dispatch of the id answers `409` and never runs, and the jobs feed shows what became of it. A node without the route answers `405`/`404`, and every delegator give-up then behaves exactly as before.
+- **The delegator asks once, best-effort** (5 s, on a context the caller's cancel does not touch) at the queue deadline, on cancel, and at a poll deadline, owned or not. At the queue deadline only a confirmation makes the result re-placeable on another node (the queued wait is credited back to the contract's budget) and closes the intent as `withdrawn`; `409 running` means the job left the backlog just before, so it keeps polling. Anything else (404, 405, 401, 5xx, a dropped connection, a timeout) leaves today's failure with the intent open, and the row now says why: `; withdraw not confirmed: HTTP 405: the node has no withdraw route (an older node)`, `HTTP 401: the node refused this delegator's fleet_auth_token`, `no answer within 5s`. An older node and an upgraded one that refused no longer leave identical rows; the clause is detail, and `reason_code` stays what the give-up was. A cancel that landed while the delegator slept used to skip the orphanable mark and close its intent as "terminal observed"; fixed.
+- **A poll that reads the node's own record.** A delegator that was away for longer than the lease finds `error: "reaped: ..."`; another caller's withdraw reads `withdrawn: ...`; a node that shut down with the job still queued marks it `not started: ...`. All three say the job never ran, so the subtask is re-placed on another node (queued wait credited back), the intent closes `never started: <what the node said>` and the abandoned attempt's row reads `queue_withdrawn`. A job that ran and failed stays a remote job error and is never re-placed.
+- **Poll lease** (`fleet_poll_lease_sec`, default 60 s, negative = off, a value under 15 is raised to 15, and `fleet-serve` prints which lease is in force at start-up): a pushed agent job that sits `accepted` with nobody polling it is skipped by the scheduler at once and reaped by a ticker (`error: "reaped: ..."`). Never a running job, never a job the pull queue claimed, never a media or vision job. What counts as a poll is decided by the JOB's own marker, not by the `task_type` a request declares: an authorized poll, an authorized duplicate dispatch and a parked long poll keep a job alive; the unauthenticated jobs feed, a poll or a re-dispatch without the bearer (`401`, whatever type it declares) do not, so a peer that can read ids off the feed can no longer keep a ghost alive or read a failed agent job's error. A run that finishes after its poller left no longer feeds `recent_agent_wall_sec` or the Retry-After built from it. An upgraded node also cleans up after an older delegator. The reaper reads its tick on the constructing goroutine and hands it to its goroutine by value (a package variable read from the goroutine the constructor spawned made `go test -race ./internal/fleetnode/` fail; it is clean now). The node counts what it took back: `jobs_withdrawn` and `jobs_reaped` on `/fleet/health` (since the process started, absent while zero), and logs one line per withdraw.
+- **Recovery and the intent ledger.** The recovery pass leaves an intent open on a 401 (one log line per pass instead of a permanent close) and closes a job the node never ran as `never started` instead of filing it as a recovered result. A poll answered 401 mid-run, and a poll deadline that no answer ever owned, no longer close their intent as "terminal observed" either: the 401 leaves it open, and the unowned deadline gives up like the others (one best-effort withdraw; confirmed closes it, otherwise it stays open). Every intent event carries the unix second and pid of the process that wrote it. An intent write that fails, a dispatch marker that cannot be written, and a recovery pass cut off by its clock now log once instead of vanishing.
+- **The fleet overview** no longer lists a `withdrawn` or `reaped` job as an operator error (dozens a day on a busy node would fill its 200-entry ring).
+
+### Added — the delegation ledger sees its own failure shapes (PR-14)
+
+- Every `agent_delegate` row carries `door` (the contract's, else `delegate`; `fleet-smoke` stamps `cli:fleet-smoke`), `fleet_job_id` (when the node ACKED the dispatch; the node's own `agent` row carries the same id, stamped by both doors a node admits work through, so the orphan join is one equality instead of a guess on latency) and a closed-set `reason_code` (32 members: `ok`, `failed_verification`, `queue_full`, `queue_deadline`, `queue_withdrawn`, `poll_deadline`, `canceled`, `node_unreachable`, `job_lost`, `dispatch_refused`, `remote_error`, `capacity_wait`, `node_busy`, `shed`, `no_eligible_node`, `seat_down`, the `stall_*` phases, the node's defer classes, `started`, `other`) set by a total classifier and normalized by `Record`. `capacity_wait` is the delegator's own outcome (no node had room); `node_busy` is a node, or the local seat, answering a capacity defer after admission (a seat at its run cap, a card under a lease or fence): two different causes, told apart by structure and not by prose. A stall a node filed during the structured re-pack (`structured re-pack unreachable: stalled: ...`) is coded `stall_*` like any other.
+- A `phase:"started"` marker row is written when a node acks a job or a local run begins, so a hang or a ghost is visible while it happens. It is never a job: every counter skips it, and `ledger.ParentJobIDs` skips it too (a marker looks exactly like a parent row, so without the skip an orphan inner row would vanish from every count). The C-62 rule is unchanged.
+
+### Changed
+
+- `ledger.Entry.Reason` is stored whole (bounded at 4096 bytes on a rune boundary) instead of cut to 120 bytes. `ledger.ShortReason` is the 120-byte form the defer report, the loupe report and atlas, and the PAIR error text group by, so a class is not split by every job-specific number. Rows written before this keep their cut reason and carry no code, fleet id or marker.
+- New config key `fleet_poll_lease_sec` (`config.example.json` regenerated); two additive, omitempty health fields, `jobs_withdrawn` and `jobs_reaped`.
+- Compatibility: withdraw and the lease need a node redeploy. Ledger readers outside this repository that count rows must skip `phase:"started"` (one extra `agent_delegate` row per job, `cards_tokens` 0).
+
+## [0.145.0] - 2026-09-30 - the operator names the device that serves a shared accelerator tool
+
+### Added — `accelerator_tool_owners` (ADR 0068)
+
+- A box carrying a Coral that reaches the RK3588 NPU through `fleet_accelerators` gave every shared tool
+  name to the Coral, because local devices are walked first (ADR 0037). `accelerator_tool_owners` maps one tool
+  name to the device that serves it — `{"offload_object_detect": "rknpu"}` — and every other name is decided as
+  before. An entry applies only when its device is listed in `accelerators` or `fleet_accelerators` and has that
+  tool; otherwise it is logged at startup and ignored, so a typo never removes a tool. A fleet device may take a
+  name from a local one.
+- Both surfaces apply the same walk: `mcpserver.accelOwnerPlan` computes every owner without registering
+  anything, and MCP registration and status read it; the agent loop's lanes carry the same claims
+  (`AccelLane.Claims`, from `config.ToolOwnerClaims`). `TestToolOwnersLoopMatchesMCP` builds the loop from the
+  real `NewLoopAccel` and checks every name the plan serves is registered once and routed to the same device,
+  for local orders of three devices, local-plus-fleet shapes, spaced keys and duplicate keys.
+- A device id listed twice no longer registers its tools twice on the MCP surface (the registration walk skips
+  a name it has already added instead of relying on the SDK replacing it).
+- Status: each accelerator entry adds `serves`, the tools that device actually registered, beside `owns`.
+
+## [0.144.2] - 2026-09-30 - offload_nim's base is allowlisted, audit first
+
+### Security — a caller-named offload_nim base is checked against an allowlist (security standard L5)
+
+Since 0.143.1 the NVIDIA key reaches only NVIDIA's hosts, but `offload_nim` still sent the PROMPT to any `base`
+a caller named: one prompt-injected call could post session text to a URL of its choosing. The base must now be
+NVIDIA's hosted API, `nim_endpoint`, or an entry of the new `nim_bases` list (scheme, host and port equal; the
+entry's path a prefix on a segment boundary; userinfo never matches). The new `nim_base_policy` follows the house
+standard's audit-then-enforce rule (ADR 0067): `"audit"` (the default) lets any other base run, marks the result
+with `base_policy` and appends a would-refuse row — scheme, host and port only, never the prompt, path or query —
+to `<state_dir>/nim-base-audit.jsonl`; `"enforce"` defers the call before any request leaves. The CLI `nim` verbs
+are operator-typed and unchanged. Tests: the allowlist rules (20 cases), enforce sends zero requests to an unlisted
+base and writes an enforce row without the path or query, audit runs and counts, a listed base runs cleanly under
+both policies; making the allowlist accept everything turns them red.
+
+### Added — doctor shows fleet version skew (security standard L0)
+
+`local-offload doctor` prints one row per `delegate_remotes` node: OK, SKEW (with both versions and the redeploy
+command), UNKNOWN (the node publishes no version) or UNREACHABLE. Informational only, never an exit-code change.
+Parity broke twice on 2026-09-30 within an hour because a merge landed between deploys; the session-start audit
+caught it, and now any session that runs doctor does too. `delegate.NodeView` carries `HarnessVersion` for it.
+
+### Added — the house security standard (ADR 0067) and the bare-client lint
+
+`docs/systems/security.md` is the standard every part of the harness is held to: seven invariants, ten layers
+plus a reliability track, AARM v1.0 R1-R9 as the checklist, promotion from audit to enforce only on counted data,
+and twelve gates that fail when their control is removed. Gate G2 ships with it: `bare_http_client_lint_test.go`
+fails the suite on any new bare HTTP client (ADR 0042 made executable) until the site is reviewed and listed with
+its reason; the first review lists 43 sites, one of them open (`offload_nim`'s caller-named base, next in L5).
+The ADR index row for 0061 now describes the rolling allowance that shipped, not the first draft.
+
+
+## [0.144.1] - 2026-09-30 - the trusted-network flag permits one address, never every interface
+
+### Security — a fleet node could serve its unauthenticated endpoints on every interface after a boot race
+
+`--listen-trusted-network` returned before any check, so it permitted ANY listen address. A Linux unit's
+`--listen "$(tailscale ip -4)":18811` that ran before tailscaled had an address expanded to `:18811` and
+bound every interface instead of failing — one fleet node served its unauthenticated fleet endpoints that
+way until its next restart, and the unit's `Restart=on-failure`, written for exactly that boot race, never
+fired because nothing failed. The flag now permits one specific address: an all-interfaces address (empty
+host, `0.0.0.0`, `[::]` and their spellings) and an address that does not parse are refused with or
+without it (`netguard.AllInterfaces`, now also the rule fleet-ui uses). fleet-serve, local-agent and
+fleet-ui share it. `setup/install.sh`'s unit gains `RestartSec=15`, so the failed start retries until the
+tailnet address exists without hitting systemd's default start limit (a unit without it gives up after five
+quick failures). Tests: the boot-race shape through fleet-serve's own parameter seam, the validator table
+with and without the flag, local-agent's listen guard — each red against the previous validator.
+
+## [0.144.0] - 2026-09-30 - Rockchip RK3588 boards join the fleet as their own tier, serving from the NPU
+
+### Added — the `rockchip-rk3588` tier (ADR 0062)
+
+An RK3588 board (reference: an Orange Pi 5) used to classify as `cpu`, and `fleet-serve` refused to start
+on it: no PCI GPU, no GPU memory source. `hwdetect` now recognises the SoC from the device tree (vendor
+and mainline spellings), a `linux-meminfo` provider advertises MemTotal less `uma_reserve_gib` as the
+node's capacity, and the tier renders from its own template with no CPU seat. Measured on the reference
+board, mainline 7.0 kernel with the out-of-tree rknpu 0.9.8 driver: Qwen3.5-2B W8A8 on the NPU prefills
+22.7 tok/s and decodes 7.71 tok/s with the runtime on the A55 cluster (126.4 / 7.14 on the A76 cluster),
+peak 2,260 MB.
+
+### Added — the `rkllm` seat kind and `accelerators/rknpu/rkllm_server.py`
+
+An OpenAI-compatible server over Rockchip's RKLLM runtime (text and vision, streaming, stop strings, one
+generation at a time; its ctypes structs are checked byte for byte against the vendor header), launched by
+llama-swap per seat with the seat's `cpu_mask`. It guards the host it shares: grammar / JSON-schema requests are
+refused with a 400 (RKLLM cannot constrain decoding, so the client fails over instead of receiving free text),
+at most two requests wait behind the running one (then 503 `busy`), bodies are capped at 16 MiB, and both NPU
+servers raise their `oom_score_adj` so the kernel's OOM killer takes them before the host's own stack. The seat
+ships an 8192 window until its resident size at 16384 is measured.
+
+### Added — the `rknpu` accelerator
+
+A Coral-style sidecar on the RKNN runtime serves `offload_classify_image`, `offload_object_detect` and
+`offload_image_embed` on the NPU (ResNet18 3.58 ms, YOLOv8n and a CLIP image tower; models pinned by
+sha256). Detection reads `DRIVER=RKNPU` from the DRM card on the vendor kernel and from the NPU platform
+devices on mainline, and never matches the in-tree `rocket` driver.
+
+### Changed — a template may leave every model to the tier's seats
+
+The serving audit accepts an empty `models:` map in a raw template that carries an `# offload-seats:`
+directive, and `Render` refuses a result that still serves no model. A set made only of seats no longer
+renders with a leading operator.
+
+### Not added — a GPU entry on the RK3588 Mali
+
+llama.cpp b11270 on Mesa 25.2.8 panvk loads on the Mali-G610, but its first compute submission hits a
+panthor job timeout and `vk::DeviceLostError` for every model and batch size tried. The tier renders no
+llama.cpp entry until that measures clean.
 ## [0.143.1] - 2026-09-30 - the NVIDIA key goes only to NVIDIA's hosts
 
 ### Security — `offload_nim` could send `NVIDIA_API_KEY` to a caller-supplied host

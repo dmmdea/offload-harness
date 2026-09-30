@@ -29,7 +29,8 @@ func cutRow(id, reason string) Row {
 func TestACallDeadlineCutIsItsOwnAxisNotASeatTimeout(t *testing.T) {
 	for name, reason := range map[string]string{
 		"running on the local seat": "call deadline reached; 3 unfinished — this subtask was still running on the local seat when the call's deadline passed; it was cancelled",
-		"on a named node":           "call deadline reached; 3 unfinished — this subtask was still on node-a (job agd-1) when the call's deadline passed; the node was asked to withdraw it if it had not started — HTTP 405: the node has no withdraw route (an older node) — and this call is no longer waiting for it",
+		"on a named node":           "call deadline reached; 3 unfinished — this subtask was still on node-a (job agd-1) when the call's deadline passed; it was not taken back from the node, and this call is no longer waiting for it; the run itself failed: withdraw not confirmed: HTTP 405: the node has no withdraw route (an older node)",
+		"taken back by the node":    "call deadline reached; 3 unfinished — this subtask was still on node-a (job agd-1) when the call's deadline passed; the node confirmed it took the job back before it started, so it will not run there, and this call is no longer waiting for it",
 		"not yet placed":            "call deadline reached; 3 unfinished — this subtask had not been placed on a seat when the call's deadline passed",
 		"never started":             "call deadline reached; 3 unfinished — this subtask never started: the call's deadline passed first",
 		"abandoned":                 "call deadline reached; 3 unfinished — this subtask did not stop within 250ms of the call's deadline passing; whatever it answers later is discarded (job agd-2)",

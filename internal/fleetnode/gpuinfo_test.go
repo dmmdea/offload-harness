@@ -18,6 +18,7 @@ func TestVendorArchFromProfile(t *testing.T) {
 		{"ampere-8", "nvidia", "ampere"},
 		{"volta-16", "nvidia", "volta"},
 		{"dual-gpu", "nvidia", "blackwell"},
+		{"rockchip-rk3588", "rockchip", "rk3588"},
 		{"cpu", "none", "none"},
 		{"", "unknown", "unknown"},
 		{"martian-gpu", "unknown", "unknown"},
@@ -38,12 +39,13 @@ func TestUMAFromProfile(t *testing.T) {
 		{"amd-rdna3", true, true},
 		{"amd-gcn", true, true},
 		{"amd-rdna3-dgpu", false, true},
+		{"rockchip-rk3588", true, true}, // an SoC: no carve-out, GPU and NPU share the CPU's RAM
 		{"blackwell-16", false, true},
 		{"ampere-8", false, true},
 		{"volta-16", false, true},
 		{"dual-gpu", false, true},
-		{"", false, false},        // no signal — caller falls back to the capacity heuristic
-		{"cpu", false, false},     // no GPU class at all
+		{"", false, false},    // no signal — caller falls back to the capacity heuristic
+		{"cpu", false, false}, // no GPU class at all
 		{"martian", false, false},
 	}
 	for _, tc := range cases {

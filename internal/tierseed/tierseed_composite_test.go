@@ -246,6 +246,12 @@ func TestParseDocRefusesAMisspeltLayerKey(t *testing.T) {
 	// three-card layer an operator would re-add the day a seat fits: the
 	// parser's refusal must not depend on today's roster.
 	withThreeCard := docPlusThreeCardLayer(t, raw)
+	// Every tier that declares layers is parsed, in id order, and the first refusal is the one
+	// reported. ampere-16 declares layers too (register A-113), and its seats carry the same
+	// `footprint_gib` key the blackwell-3x16 case respells, so its layers are left out of the
+	// document these cases mutate: each case names the tier it is about, not whichever tier
+	// sorts first.
+	raw = docWithoutTierLayers(t, raw, "ampere-16")
 	cases := []struct {
 		doc      []byte
 		from, to string
@@ -292,6 +298,25 @@ func TestParseDocRefusesAMisspeltLayerKey(t *testing.T) {
 	if _, err := ParseDoc(b); err == nil || !strings.Contains(err.Error(), "host_ram_gib is undeclared") {
 		t.Fatalf("a host_ram-guarded seat without host_ram_gib must be refused at parse, got %v", err)
 	}
+}
+
+// docWithoutTierLayers returns the table with one tier's layers (and the extra vLLM seats
+// they name) removed, so a probe that respells a key in every layer block reaches only the
+// tier the case is about.
+func docWithoutTierLayers(t *testing.T, raw []byte, tier string) []byte {
+	t.Helper()
+	var doc map[string]any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	p := doc["profiles"].(map[string]any)[tier].(map[string]any)
+	delete(p, "layers")
+	delete(p, "extra_vllm_seats")
+	b, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
 }
 
 // docPlusThreeCardLayer returns the shipped table with one extra layer on

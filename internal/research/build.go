@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/url"
 	"regexp"
-	"sort"
 	"strings"
 	"sync"
 
@@ -18,11 +17,20 @@ import (
 // output_schema: the fields a research reader actually needs to merge across
 // sources. Every field is a string or string list so the small seats' re-pack
 // path (grammar-guided, scalar-coerced) handles it.
+//
+// All four fields are required, in declaration order (the gbnf builder reads
+// `required` first for field order). Without it a seat's direct JSON answer
+// that left one out validated, skipped the structured re-pack and reached the
+// delegator with the field missing, and vLLM's structured_outputs was free to
+// leave an optional field out of its own answer (register C-74). Required is
+// presence only: an empty list is a complete answer for a page with nothing to
+// say, so no minItems is declared here (see nonEmptyChecks for who asks for items).
 var DefaultSchema = json.RawMessage(`{"type":"object","properties":{` +
 	`"key_facts":{"type":"array","items":{"type":"string"}},` +
 	`"numbers":{"type":"array","items":{"type":"string"}},` +
 	`"quotes":{"type":"array","items":{"type":"string"}},` +
-	`"verdict":{"type":"string"}}}`)
+	`"verdict":{"type":"string"}},` +
+	`"required":["key_facts","numbers","quotes","verdict"]}`)
 
 // Request is one research call: a goal applied to every fetched source.
 type Request struct {
@@ -86,6 +94,27 @@ func Build(req Request, fetched []Fetched) (specs []delegate.SubtaskSpec, source
 	if len(schema) == 0 {
 		schema = DefaultSchema
 	}
+	// One design for what a digest owes (register C-74; the security review's R-02
+	// and the diagnosis's PR-3): PRESENCE is declared for every field an
+	// acceptance check reads, so a seat's direct JSON answer that leaves one out
+	// goes to the structured re-pack instead of being delivered and failing
+	// acceptance after a whole run; NON-EMPTINESS is asked for only where the
+	// caller marked it (nonEmptyChecks), so a faithful "nothing on this page"
+	// digest is a success. The same checks are derived once here because they do
+	// not depend on the page.
+	//
+	// The harness's own digest asks for one statement on every page: a verdict.
+	// A page too thin to anchor carries no anchor check, so without this its
+	// acceptance was empty and a digest that said nothing (every list empty, no
+	// verdict) was delivered as a success. Empty lists stay a complete answer; the
+	// verdict is where a digest of an empty page says so.
+	var derived []string
+	if len(req.OutputSchema) > 0 {
+		derived = nonEmptyChecks(req.OutputSchema)
+	} else {
+		derived = []string{"nonempty:verdict"}
+	}
+	schema = core.RequireAcceptanceFields(schema, append(append([]string{}, derived...), req.Acceptance...))
 	goal := strings.TrimSpace(req.Goal)
 	if len(req.Questions) > 0 {
 		goal += " Also answer, from the document only: " + strings.Join(req.Questions, " ")
@@ -119,7 +148,7 @@ func Build(req Request, fetched []Fetched) (specs []delegate.SubtaskSpec, source
 		}
 		src.Fingerprinted = anchor != ""
 		sources[len(sources)-1] = src
-		acc = append(acc, firstArrayCheck(schema)...)
+		acc = append(acc, derived...)
 		acc = append(acc, req.Acceptance...)
 
 		specs = append(specs, delegate.SubtaskSpec{AgentContract: core.AgentContract{
@@ -135,25 +164,40 @@ func Build(req Request, fetched []Fetched) (specs []delegate.SubtaskSpec, source
 	return specs, sources
 }
 
-// firstArrayCheck adds a shape check on the schema's first array property so a
-// digest that returns nothing at all is failed_verification, not a success.
-func firstArrayCheck(schema json.RawMessage) []string {
+// nonEmptyChecks asks for items only where the CALLER marked them: the first
+// array property their own schema lists in `required`, in the order they wrote
+// it. It replaces firstArrayCheck, which demanded one item from the
+// alphabetically first array of any schema. That array was the caller's choice
+// only by accident: with one caller's custom schema it picked an array that was
+// legitimately empty for the page, and every correct "none of the requested
+// topics" digest was scored failed_verification (register C-74, security review
+// R-02).
+//
+// One check, never one per required array: the rule may not add a failure a
+// schema did not have before, and callers who list every field as required
+// would otherwise be asked for items in all of them. A caller who wants more
+// says so in their own acceptance (min_items: / nonempty:), which Build appends
+// and declares required as well. The harness's default schema is not a caller's
+// mark and asks for no items: a digest of a page with nothing to say is complete
+// with empty lists and a verdict that says so, and Build asks for that verdict
+// (nonempty:verdict) on every page of the default digest instead.
+func nonEmptyChecks(schema json.RawMessage) []string {
 	var s struct {
+		Required   []string                   `json:"required"`
 		Properties map[string]json.RawMessage `json:"properties"`
 	}
 	if json.Unmarshal(schema, &s) != nil || len(s.Properties) == 0 {
 		return nil
 	}
-	keys := make([]string, 0, len(s.Properties))
-	for k := range s.Properties {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	for _, k := range keys {
+	for _, k := range s.Required {
+		raw, declared := s.Properties[k]
+		if !declared {
+			continue
+		}
 		var p struct {
 			Type string `json:"type"`
 		}
-		if json.Unmarshal(s.Properties[k], &p) == nil && p.Type == "array" {
+		if json.Unmarshal(raw, &p) == nil && p.Type == "array" {
 			return []string{"min_items:" + k + ":1"}
 		}
 	}

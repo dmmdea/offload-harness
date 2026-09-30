@@ -121,8 +121,21 @@ type PlacedResult struct {
 	// first says a "d" line exists for JobID; the second marks the exits
 	// (cancel, owned-job poll deadline, queued give-up) where the node may
 	// still finish the job — those stay OPEN for the recovery pass.
-	intentRecorded  bool
-	orphanable      bool
+	intentRecorded bool
+	orphanable     bool
+	// withdrawn: the node CONFIRMED it took the job back before starting it (DELETE
+	// /fleet/jobs/{id}, ADR 0064). Nothing is left on the node for the recovery
+	// pass, so the intent closes as "withdrawn" instead of staying open.
+	// queuedWait is the time the job provably spent in that node's backlog, which
+	// placements.noteRefusal credits back when the result is re-placed.
+	withdrawn bool
+	// nodeNeverRan holds what a node said when its OWN terminal state told the
+	// delegator the job never ran — "reaped: ..." (nobody polled it within the poll
+	// lease: this process was away) or "withdrawn: ..." — read on a poll. Nothing ran,
+	// so the subtask is re-placeable like a confirmed withdrawal, and the intent closes
+	// as "never started: <this>", the note recovery writes for the same observation.
+	nodeNeverRan    string
+	queuedWait      time.Duration
 	PlacementReason string
 	// deadlineCut marks a result the whole-call deadline (RunOptions.Deadline)
 	// published as a budget defer instead of an answer: the subtask was still
@@ -565,6 +578,12 @@ type RunOptions struct {
 	// nvidia-smi once, not 32 times. Tests inject readers here; a box with no
 	// layers never calls it (the zero Decision is the pre-layer behaviour).
 	LocalDecider func(ctx context.Context, contract core.AgentContract, st Subtask) placetable.Decision
+	// Rescue re-packs a finished answer whose structured re-pack failed on the
+	// executing node (register C-66, PR-4): the delegator holds the answer, so it
+	// structures it itself instead of counting a finished loop as lost work.
+	// nil = no rescue, the behaviour before the rescue existed: the defer is delivered as it is.
+	// The surfaces that own a pipeline wire pipeline.RescueRepack here.
+	Rescue RescueFunc
 	// Deadline, when non-zero, is the instant the WHOLE call must be over: the
 	// MCP doors set it below the client's own abort (config.CallDeadline) so a
 	// call returns what has finished instead of being dropped with it (ADR 0065,
@@ -698,7 +717,11 @@ func RunWith(ctx context.Context, cfg config.Config, local LocalRunner, subtasks
 	// route "queue" bypasses the whole push machinery (ADR 0030): the holder
 	// owns durability and the claim loops own placement.
 	if route == "queue" {
-		results, sum, err := runQueued(ctx, cfg, subtasks)
+		var rescue RescueFunc
+		if opts != nil {
+			rescue = opts.Rescue
+		}
+		results, sum, err := runQueued(ctx, cfg, subtasks, rescue)
 		return dl.cutQueued(cfg, subtasks, results, sum, err)
 	}
 	// Fleet membership is configuration: a call that names no remotes uses the
@@ -766,6 +789,7 @@ func RunWith(ctx context.Context, cfg config.Config, local LocalRunner, subtasks
 		r.priority = core.ClampBand(opts.Priority)
 		r.tenant = opts.Tenant
 		r.decider = opts.LocalDecider
+		r.rescue = opts.Rescue
 	}
 	// route=spread probes the fleet ONCE per run: every subtask deals itself
 	// across the same roster, so per-subtask probing would be N identical GETs
@@ -1002,6 +1026,10 @@ type runner struct {
 	// print the same line eight times and bury the results it is warning about.
 	warnCorpus sync.Once
 	warnLedger sync.Once
+	// warnMarker is the same once-per-run rule for the dispatch marker (telemetry.go
+	// recordStarted). A marker is a row the run does not OWE, so its loss stays out of
+	// the ledgerLost tally; the warning is its only trace.
+	warnMarker sync.Once
 	// probeWarned bounds fetchViews' per-remote failure warning to ONCE PER
 	// BASE PER RUN. fetchViews runs inside runOne, so the warning fired once
 	// per remote PER SUBTASK — an 8-subtask fan-out against two dead remotes
@@ -1074,6 +1102,8 @@ type runner struct {
 	autoProbeErrs []string
 	autoDeal      []spreadSlot
 
+	// rescue is RunOptions.Rescue; nil = no rescue.
+	rescue RescueFunc
 	// quarantine is the caller's Quarantine (RunOptions), nil = inert.
 	quarantine  *Quarantine
 	quarantined atomic.Int64
@@ -1193,6 +1223,13 @@ func (r *runner) runOne(ctx context.Context, i int, contract core.AgentContract)
 	pl := newPlacements()
 	first := r.placeAndRun(ctx, i, contract, nil, start, budget, pl)
 	if !retryable(first) {
+		return first
+	}
+	// A research page that failed ONLY its acceptance is not run a second time
+	// (register C-74). Guarded here, not inside retryable(): that predicate sees
+	// a placed result, never the contract that names the door.
+	if skipsRetryAsResearchAcceptanceOnly(contract, first) {
+		first.RetryNote = fmt.Sprintf("retry skipped: the first attempt on %s failed only its acceptance, and a research digest is graded against its page — a second seat repeats the verdict at the cost of a whole second run", nodeLabel(first))
 		return first
 	}
 	// An EMPTY final (0.115.8: stop_reason reasoning_starved / empty) is not a
@@ -1543,6 +1580,11 @@ func newPlacements() *placements {
 // noteRefusal files a refused attempt in the ledger: a capacity refusal makes
 // the subtask wait-worthy; any other refusal excludes that node from the wait.
 func (pl *placements) noteRefusal(pr PlacedResult) {
+	// Time the refused job provably spent QUEUED on a node that then took it back
+	// (a confirmed withdrawal at the queue deadline) is not execution: it is
+	// credited like every other span the subtask spent waiting rather than
+	// working, so the re-placement still owns the budget the contract asked for.
+	pl.credit += pr.queuedWait
 	if capacityRefusal(pr.refusalStatus) {
 		pl.capacityRefusal = true
 		return
@@ -2385,14 +2427,16 @@ const minRetrySec = 10
 // defer, or a broken/misconfigured stack is not something another seat fixes,
 // and a contract-classed defer is the caller's to fix.
 //
-// The ONE infrastructure defer that IS retryable is the admission-time
-// coherence defer (register D-118): the seat itself is broken and it was caught
-// before the contract's wall started, so the budget is still there to fund a
-// retry — which is precisely the case another node fixes. What the node's
-// admission spent getting there is credited back in runOne (admissionCredit),
-// because the cold load that triggers the probe would otherwise eat most of a
-// default budget before the retry floor is applied. The general infrastructure
-// rule is untouched; see IncoherentSeatDefer.
+// The TWO infrastructure defers that ARE retryable are the admission-time
+// ones: the coherence defer (register D-118) and the warm-up defer (register
+// C-76, R-05a). The seat itself is broken (it answers nonsense, or its process
+// did not start) and it was caught before the contract's wall started, so the
+// budget is still there to fund a retry — which is precisely the case another
+// node fixes. What the node's admission spent getting there is credited back in
+// runOne (admissionCredit), because the cold load that leads to either verdict
+// would otherwise eat most of a default budget before the retry floor is
+// applied. The general infrastructure rule is untouched; see IncoherentSeatDefer
+// and SeatWarmFailedDefer.
 func retryable(pr PlacedResult) bool {
 	if pr.Err != "" {
 		return false
@@ -2400,10 +2444,43 @@ func retryable(pr PlacedResult) bool {
 	if len(pr.AcceptanceFailures) > 0 {
 		return true
 	}
-	if IncoherentSeatDefer(pr.Result) {
+	if admissionDefer(pr.Result) {
 		return true
 	}
 	return pr.Result.Deferred && pr.Result.DeferClass == core.DeferClassAbstention
+}
+
+// researchDoors are the Door values the research lane stamps on the contracts
+// it builds: offload_research (MCP) and cli:research (the CLI verb).
+var researchDoors = map[string]bool{"offload_research": true, "cli:research": true}
+
+// skipsRetryAsResearchAcceptanceOnly reports a placed result the verification
+// retry must leave alone: a research page whose only problem is its own checks
+// (a shape, an item count). Those are graded against the fetched page, so a
+// second node given the same page mostly repeats the verdict; before the anchor
+// fix of 0.141.1, 209 of a week's 271 such failures were the checks' own faults,
+// and each retry was a whole second run of five to thirteen minutes.
+//
+// A failed DOCUMENT FINGERPRINT is the exception: the answer is about another
+// document, which is a fact about the node that wrote it (strikeOnFingerprint
+// quarantines a node for it), and another node is the cure. An abstention or the
+// admission-time coherence defer is likewise a fact about the SEAT and keeps its
+// retry.
+func skipsRetryAsResearchAcceptanceOnly(contract core.AgentContract, pr PlacedResult) bool {
+	return researchDoors[contract.Door] && pr.Err == "" && !pr.Result.Deferred &&
+		len(pr.AcceptanceFailures) > 0 && !failsDocumentFingerprint(pr.AcceptanceFailures)
+}
+
+// failsDocumentFingerprint reports whether any failed acceptance is the DOCUMENT
+// FINGERPRINT (research.AnchorCheck tags its regex with the named group
+// `docanchor`).
+func failsDocumentFingerprint(failures []string) bool {
+	for _, f := range failures {
+		if strings.Contains(f, "(?P<docanchor>") {
+			return true
+		}
+	}
+	return false
 }
 
 // IncoherentSeatDefer reports whether a result is the admission-time coherence
@@ -2426,15 +2503,33 @@ func IncoherentSeatDefer(r core.AgentWireResult) bool {
 		strings.HasPrefix(r.Reason, core.IncoherentSeatReason)
 }
 
-// admissionCredit is the node-side admission time a coherence defer already
-// spent — its cordon wait, pre-flight, cold load and the probe itself — which
-// the subtask's execution budget must not be charged for: the contract's wall
-// never started, and the wire carries admission_wait_sec for exactly this.
+// SeatWarmFailedDefer reports whether a result is the admission-time warm-up
+// defer: an `infrastructure` defer whose reason carries core.SeatWarmFailedReason,
+// i.e. the executing node's warm request was refused with a server error and there
+// was positive evidence the seat's process did not start (a busy answer, a seat
+// that reads starting or another model mid-swap never produce it). Like the
+// coherence defer it is a property of THIS seat, was caught before the wall
+// started, and is cured by the same contract on another node.
+func SeatWarmFailedDefer(r core.AgentWireResult) bool {
+	return r.Deferred && r.DeferClass == core.DeferClassInfrastructure &&
+		strings.HasPrefix(r.Reason, core.SeatWarmFailedReason)
+}
+
+// admissionDefer is either of the two defers the node files before its wall
+// starts, on evidence about its own seat, and that another node may cure.
+func admissionDefer(r core.AgentWireResult) bool {
+	return IncoherentSeatDefer(r) || SeatWarmFailedDefer(r)
+}
+
+// admissionCredit is the node-side admission time an admission defer already
+// spent — its cordon wait, pre-flight, cold load and the probe or warm-up itself
+// — which the subtask's execution budget must not be charged for: the contract's
+// wall never started, and the wire carries admission_wait_sec for exactly this.
 // Zero for every other result: no other shape has a claim on the credit, and a
 // node that reports no admission (a pre-D-118 node, or an unmeasured one) is
 // credited nothing rather than guessed at.
 func admissionCredit(pr PlacedResult) time.Duration {
-	if !IncoherentSeatDefer(pr.Result) || pr.Result.AdmissionWaitSec <= 0 {
+	if !admissionDefer(pr.Result) || pr.Result.AdmissionWaitSec <= 0 {
 		return 0
 	}
 	return time.Duration(pr.Result.AdmissionWaitSec * float64(time.Second))
@@ -2535,6 +2630,14 @@ func nodeLabel(pr PlacedResult) string {
 		return "(no node took it)"
 	}
 	return pr.Node
+}
+
+// jobLabel names a subtask's job for a log line ("(unnamed)" before it has one).
+func jobLabel(pr PlacedResult) string {
+	if pr.JobID == "" {
+		return "(unnamed)"
+	}
+	return pr.JobID
 }
 
 // attemptOutcome names an attempt's outcome for the retry annotations.
@@ -3045,7 +3148,12 @@ func (r *runner) attempt(ctx context.Context, i int, contract core.AgentContract
 	r.lastJob.Store(i, jobID)
 
 	finish := func(pr PlacedResult) PlacedResult {
+		// A finished answer whose structured re-pack failed is re-packed here,
+		// before the row is recorded, so the ledger and the corpus say what the
+		// caller receives (rescue.go). The job is named first: the rescue's log line
+		// has to say WHICH job's answer it tried to save.
 		pr.JobID = jobID
+		pr = r.rescueSchemaMiss(ctx, contract, pr, start)
 		pr.wallMs = time.Since(start).Milliseconds()
 		// An outcome that was not an answer and arrived once the call deadline had
 		// passed is published — and recorded — as the call deadline (ADR 0065).
@@ -3055,7 +3163,14 @@ func (r *runner) attempt(ctx context.Context, i int, contract core.AgentContract
 		// exits (cancel / owned-deadline / queued give-up) stay open for the
 		// recovery pass — that gap IS the durability feature.
 		if pr.intentRecorded && !pr.orphanable {
-			r.intent.done(jobID, "terminal observed")
+			switch {
+			case pr.withdrawn:
+				r.intent.withdrawn(jobID) // the node confirmed it took the job back
+			case pr.nodeNeverRan != "":
+				r.intent.neverStarted(jobID, pr.nodeNeverRan) // the node's own record says it never ran
+			default:
+				r.intent.done(jobID, intentNoteTerminal)
+			}
 		}
 		r.record(contract, pr)
 		r.pairTerminal(jobID, &pr)
@@ -3364,6 +3479,9 @@ func (r *runner) runLocal(ctx context.Context, jobID string, contract core.Agent
 		pairNode = host
 		pr.PlacementReason += "; engine " + r.cfg.Endpoint + " is " + host + "'s (attributed there)"
 	}
+	// The run is handed to the seat now: mark it in the ledger (PR-14, ADR 0064),
+	// so a runner that wedges is visible while it does.
+	r.recordStarted(contract, jobID, "", pr.Node, pr.Seat, pr.PlacementReason)
 	// Queued until the seat is working on it (seatWorking): the run's own
 	// progress reports flip the card, so a cold load does not read "running".
 	r.pairInflight(&pr, jobID, pairNode, nil, pr.Seat, "queued", true)
@@ -3463,6 +3581,9 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 	// so persist the intent before any polling (Option A, intent.go).
 	r.intent.dispatched(jobID, base, contract.Goal)
 	pr.intentRecorded = true
+	// And say so in the ledger now, not when the job ends: a hang, or a ghost that
+	// outlives this process, is then visible while it matters (PR-14, ADR 0064).
+	r.recordStarted(contract, jobID, jobID, view.NodeID, intendedSeat, "")
 	// The card stays queued past the ack: it turns running when a poll shows
 	// the node's seat working on the job (seatWorking), not at the ack.
 	pairRunning := false
@@ -3594,6 +3715,16 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 	// nobody made, authored by the delegator, which is the exact fabrication the
 	// failure path exists to prevent.
 	saw404 := false
+	// lastState is the last state the node reported for the job ("" = it never
+	// answered): a give-up asks the node to withdraw a job only while it can still
+	// be unstarted. withdrawTried keeps the queue-deadline arm to one attempt.
+	lastState := ""
+	withdrawTried := false
+	// withdrawWhy is what the node answered the one withdraw the queue arm asked for,
+	// when it was not a confirmation: kept so the give-up that follows an answer the
+	// node then contradicted (`running`, and then `accepted` again) can still say what
+	// it was told.
+	withdrawWhy := ""
 	// pollFails bounds the failure logging (both arms below fired once PER
 	// POLL) and summarizes on the way out, whichever exit is taken.
 	pollFails := newPollFailLog(jobID, base)
@@ -3601,7 +3732,12 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 	for {
 		if err := ctx.Err(); err != nil {
 			pr.Err = "canceled: " + err.Error()
-			pr.orphanable = true // the node may still finish it — recovery's case
+			// The node may still start it — recovery's case — unless it confirms it
+			// took the job back (ADR 0064). A withdraw that was asked and not confirmed
+			// says why on the row.
+			if note := r.giveUp(ctx, base, jobID, lastState, &pr); note != "" {
+				pr.Err += "; " + note
+			}
 			return pr
 		}
 		if now := time.Now(); now.After(deadline) && now.After(progressUntil) {
@@ -3611,6 +3747,13 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 				// non-zero CLI exit) is the honest outcome — a broken node, or one
 				// denying the job, must read broken.
 				pr.Err = fmt.Sprintf("poll deadline after %s%s: %s%s", pollBudget, queuedNote(queuedCredit), unownedDetail(sawNodeAnswer, saw404, redispatches, lastPollErr), boundNote(pollNote, slack))
+				// The node ACKED this job, so it may hold it however little it has said
+				// since, and nothing observed it end: the intent must not claim so. Ask the
+				// node to take the job back like every other give-up — a confirmation
+				// closes the intent, anything else leaves it for the recovery pass (ADR 0064).
+				if note := r.giveUp(ctx, base, jobID, lastState, &pr); note != "" {
+					pr.Err += "; " + note
+				}
 				return pr
 			}
 			// Roast delta 14: mark deferred, reason PREFIXED "poll deadline"
@@ -3647,8 +3790,17 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 				reason += " (last poll error: " + lastPollErr.Error() + ")"
 				class = core.DeferClassInfrastructure
 			}
+			// Acked, owned, no terminal state seen — recovery's case. Unless the node
+			// still holds the job as `accepted` and confirms it takes it back: a job
+			// that never started must not be run later for nobody (ADR 0064), and the
+			// reason then says what became of it.
+			note := r.giveUp(ctx, base, jobID, lastState, &pr)
+			if pr.withdrawn {
+				reason += "; the job never started and was withdrawn from the node"
+			} else if note != "" {
+				reason += "; " + note
+			}
 			pr.Result = core.AgentWireResult{SchemaVersion: core.AgentWireSchemaVersion, Deferred: true, DeferClass: class, Reason: reason}
-			pr.orphanable = true // acked, owned, no terminal state seen — recovery's case
 			return pr
 		}
 		poll, perr := r.pollOnce(ctx, base, jobID)
@@ -3772,6 +3924,11 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 			}
 		case status == http.StatusUnauthorized:
 			pr.Err = "poll: 401 unauthorized (fleet_auth_token mismatch)"
+			// A refusal of THIS process's credentials is a fact about the caller, not
+			// about the job (ADR 0064, decision 6): the node may still hold or finish
+			// it, so the intent stays open for a process holding the right token. No
+			// withdraw is sent — it would carry the token that was just refused.
+			pr.orphanable = true
 			return pr
 		case status == http.StatusOK && state == "done":
 			sawNodeAnswer, sawJobOwned = true, true
@@ -3790,11 +3947,21 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 			return pr
 		case status == http.StatusOK && state == "error":
 			pr.Err = "remote job error: " + jobErr
+			if neverRan(jobErr) {
+				// The node took this job out of its backlog without running it: reaped
+				// because nobody polled it within the poll lease (this process was away
+				// for longer — a suspended host, a partition), or withdrawn. Nothing ran,
+				// so offering the subtask to another node cannot arrange a double run: it
+				// is filed as the capacity refusal a confirmed withdrawal is, and the
+				// re-placement machinery takes it from here (ADR 0064).
+				pr.refuseAsNeverRan(jobErr, queuedCredit)
+			}
 			return pr
 		case status == http.StatusOK && (state == "accepted" || state == "running"):
 			// The node answered AND says it owns the job: the only shape that
 			// earns a defer at the deadline.
 			sawNodeAnswer, sawJobOwned = true, true
+			lastState = state
 			// `accepted` and `running` are no longer the same fact. Since
 			// 0.100.0 `accepted` means ADMITTED BUT NOT STARTED — the job is in
 			// the node's backlog waiting for one of its concurrency slots — and
@@ -3840,10 +4007,40 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 					// it, and N polls answered `accepted`. The "queue deadline"
 					// prefix is stable and distinct from the "poll deadline"
 					// one a job that actually ran produces.
-					pr.orphanable = true // still queued on the node — it may run later; recovery's case
-					pr.Err = fmt.Sprintf("queue deadline after %s: the node accepted the job but never started it — it waited in the node's backlog and never reached running (%d poll(s) answered `accepted`)",
-						queuedWaitBudget, queuedPolls)
-					return pr
+					//
+					// Before giving up, ask the node to take the job back (ADR 0064):
+					// a job left in its backlog runs later on a seat nobody is waiting
+					// for. One try, and one only — a `running` answer is final for
+					// this job.
+					verdict := withdrawUnconfirmed
+					if !withdrawTried {
+						withdrawTried = true
+						verdict, withdrawWhy = r.withdraw(ctx, base, jobID)
+					}
+					if verdict != withdrawStarted {
+						pr.Err = fmt.Sprintf("queue deadline after %s: the node accepted the job but never started it — it waited in the node's backlog and never reached running (%d poll(s) answered `accepted`)",
+							queuedWaitBudget, queuedPolls)
+						if verdict == withdrawConfirmed {
+							// The node took it back: it will never run there, so the
+							// subtask may be offered to another node, and the intent
+							// has nothing left for recovery to collect.
+							pr.Err += "; the job was withdrawn from the node, which will never run it"
+							pr.refuseAsWithdrawn(queuedCredit)
+						} else {
+							// Still queued on the node — it may run later; recovery's case. The
+							// row says what the node answered instead of taking it back: an old
+							// node with no route and an upgraded node that refused would
+							// otherwise read alike.
+							if note := notConfirmed(withdrawWhy); note != "" {
+								pr.Err += "; " + note
+							}
+							pr.orphanable = true
+						}
+						return pr
+					}
+					// `running`: the job left the backlog between the last poll and the
+					// withdraw — a slot took it. It is not abandoned; keep polling and
+					// let liveness govern from here.
 				}
 			}
 			// `running`: the span stays closed by the reset above. Anything
@@ -3870,6 +4067,12 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 		select {
 		case <-ctx.Done():
 			pr.Err = "canceled: " + ctx.Err().Error()
+			// A give-up like the one at the top of the loop, and it used to skip the
+			// orphanable mark: a cancel that landed while the delegator slept closed
+			// its intent as "terminal observed" for a job the node may still run.
+			if note := r.giveUp(ctx, base, jobID, lastState, &pr); note != "" {
+				pr.Err += "; " + note
+			}
 			return pr
 		case <-time.After(jitteredWithin(pollEvery, time.Until(deadline))):
 		}
@@ -4207,17 +4410,12 @@ func EvalAcceptance(contract core.AgentContract, wire core.AgentWireResult) []st
 // regex with the named group `docanchor`). Contract-caused failures — a
 // user's over-strict contains:, a thin page's min_items — never strike.
 func (r *runner) strikeOnFingerprint(base string, failures []string) {
-	if r.quarantine == nil {
+	if r.quarantine == nil || !failsDocumentFingerprint(failures) {
 		return
 	}
-	for _, f := range failures {
-		if strings.Contains(f, "(?P<docanchor>") {
-			if r.quarantine.Strike(base) {
-				r.quarantined.Add(1)
-				log.Printf("delegate: node %s quarantined for %s after 2 off-document answers (document fingerprint failed twice)", base, DefaultQuarantineTTL)
-			}
-			return
-		}
+	if r.quarantine.Strike(base) {
+		r.quarantined.Add(1)
+		log.Printf("delegate: node %s quarantined for %s after 2 off-document answers (document fingerprint failed twice)", base, DefaultQuarantineTTL)
 	}
 }
 
@@ -4909,7 +5107,15 @@ func (r *runner) record(contract core.AgentContract, pr PlacedResult) {
 			// The job behind the row (D-101 / F15): what this result already
 			// knew, so a reader never has to open the corpus for it. The
 			// session that asked is stamped by ledger.Record itself.
-			JobID:            pr.JobID,
+			JobID: pr.JobID,
+			// PR-14 (ADR 0064): the surface that admitted the contract, the id the
+			// fleet node knows the job by (a remote attempt only: a job that stayed
+			// on this box has none) and the closed-set reason code — so a reader
+			// never joins on latency or greps prose. The reason above is stored
+			// whole: the ledger no longer cuts it.
+			Door:             doorOf(contract),
+			FleetJobID:       fleetJobIDOf(pr),
+			ReasonCode:       reasonCodeFor(pr),
 			Route:            r.route,
 			Placement:        pr.PlacementReason,
 			Steps:            pr.Result.Steps,

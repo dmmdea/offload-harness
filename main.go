@@ -1388,7 +1388,7 @@ func runComposeVideo(args []string) error {
 	asJSON := fs.Bool("json", false, "print full result JSON")
 	compactFlag := fs.Bool("compact", false, "compact (minified) JSON output")
 	var f composeFlags
-	fs.StringVar(&f.template, "template", "", "a vetted template on this machine (title-card, lower-third, ...)")
+	fs.StringVar(&f.template, "template", "", "a vetted template on this machine (title-card, lower-third, stat-card, section-title, callout-label, checklist-card, captions-bar)")
 	fs.StringVar(&f.variables, "variables", "", "template variables as a JSON object")
 	fs.StringVar(&f.variablesFile, "variables-file", "", "path to a JSON file with the template variables")
 	fs.StringVar(&f.htmlFile, "html", "", "path to a single-file composition (trusted code only)")
@@ -2223,7 +2223,7 @@ func runDelegate(args []string) error {
 	}
 	defer cleanup()
 	results, sum, err := delegate.RunWith(context.Background(), cfg, p.RunAgentContract, contracts, *route, remotes,
-		&delegate.RunOptions{Priority: *priority, Tenant: *tenant})
+		&delegate.RunOptions{Priority: *priority, Tenant: *tenant, Rescue: p.RescueRepack})
 	if err != nil {
 		return err
 	}
@@ -2368,8 +2368,33 @@ const (
 	samplerKindSingle
 )
 
+// genericMemProvider picks the generic GPU memory source for this OS and the
+// installed tier — pulled out of runFleetServe, like chooseSamplerKind, so the
+// selection that ships is the selection that is tested (fleet_verbs_test.go).
+//
+// Windows gets the WDDM provider and Linux the amdgpu sysfs one. A tier that is a
+// unified-memory SoC (rockchip-rk3588) has neither counter, so it reads
+// /proc/meminfo less the operator's reserve; procRoot is "/" in production and
+// only that provider reads through it. A cpu-profile box means detect found NO
+// usable GPU: it must not fleet-serve off iGPU-adjacent counters — only a working
+// nvidia-smi may qualify it, so its generic source is nil.
+func genericMemProvider(goos, profile string, uma bool, umaReserveGiB float64, procRoot string) fleetnode.GenericProvider {
+	generic := fleetnode.GenericProvider{Probe: fleetnode.GenericWindowsProbe(uma), Source: "windows-generic"}
+	if goos == "linux" {
+		generic = fleetnode.GenericProvider{Probe: fleetnode.AmdgpuSysfsProbe("/sys/class/drm", uma), Source: "linux-amdgpu"}
+	}
+	switch profile {
+	case "rockchip-rk3588":
+		generic = fleetnode.GenericProvider{Probe: fleetnode.MeminfoUMAProbe(procRoot, umaReserveGiB), Source: fleetnode.MeminfoSource}
+	case "cpu":
+		generic.Probe = nil
+	}
+	return generic
+}
+
 // chooseSamplerKind picks which sampler runFleetServe starts, given the
-// resolved GPU memory provider's Source ("nvidia-smi" | "windows-generic").
+// resolved GPU memory provider's Source ("nvidia-smi" | "windows-generic" |
+// "linux-amdgpu" | "linux-meminfo").
 // nvidia-smi always gets samplerKindDevice — a single-GPU nvidia-smi box is
 // NOT special-cased to the single-value sampler; it runs the per-device query
 // and /fleet/health reports gpu_devices[] with one entry, same as any other
@@ -2517,20 +2542,12 @@ func runFleetServe(args []string) error {
 			umaSrc = "heuristic"
 		}
 	}
-	// The generic source is per-OS: the WDDM registry+PDH provider on Windows, the
-	// amdgpu sysfs provider on Linux (vram_linux_amdgpu.go — the seam ADR 0014 left
-	// open; without it an AMD APU on Linux with a measured tier could not fleet-serve
-	// at all, binxarn 2026-09-20). Both compose UMA the same way (carve-out + shared
-	// budget); Linux uses the driver's own GTT pool instead of the RAM/2 heuristic.
-	generic := fleetnode.GenericProvider{Probe: fleetnode.GenericWindowsProbe(uma), Source: "windows-generic"}
-	if runtime.GOOS == "linux" {
-		generic = fleetnode.GenericProvider{Probe: fleetnode.AmdgpuSysfsProbe("/sys/class/drm", uma), Source: "linux-amdgpu"}
-	}
-	// A cpu-profile box means detect found NO usable GPU: it must not fleet-serve
-	// off iGPU-adjacent counters — only a working nvidia-smi may qualify it.
-	if info.Profile == "cpu" {
-		generic.Probe = nil
-	}
+	// The generic source is per-OS and per-tier (genericMemProvider): the WDDM
+	// registry+PDH provider on Windows, the amdgpu sysfs provider on Linux
+	// (vram_linux_amdgpu.go — the seam ADR 0014 left open; without it an AMD APU on
+	// Linux with a measured tier could not fleet-serve at all, binxarn 2026-09-20),
+	// and /proc/meminfo less the operator's reserve for an SoC with no VRAM at all.
+	generic := genericMemProvider(runtime.GOOS, info.Profile, uma, cfg.UMAReserveGiB, "/")
 	prov, perr := fleetnode.ResolveProviderNamed(
 		fleetnode.SmiProbe(nvidiaSmiMemory),
 		generic,
@@ -2585,7 +2602,10 @@ func runFleetServe(args []string) error {
 	if snap, ok := sampler.Load(); ok {
 		total = snap.TotalGiB
 	}
-	jobs := fleetnode.NewJobs(time.Hour, cfg.FleetConcurrencyLimit())
+	jobs := newFleetJobs(cfg)
+	// The lease in force is not always the one written (default, raised to the
+	// floor, off): say which, once, so a substituted value is not silent.
+	fmt.Fprintf(os.Stderr, "[fleet-serve] %s\n", pollLeaseNote(cfg))
 	// Reclaimable VRAM is sampled in the background (never from the health handler,
 	// which must not block on llama-swap) — see fleet_reclaim.go for why the idle
 	// baseline, not free or total, is the right denominator for a shared card.
@@ -2702,8 +2722,11 @@ func runFleetServe(args []string) error {
 		return fmt.Errorf("fleet-serve: listen %s: %w", listen, err)
 	}
 	umaLabel := ""
-	if prov.Source == "windows-generic" {
+	switch prov.Source {
+	case "windows-generic":
 		umaLabel = fmt.Sprintf(", uma=%v(%s)", uma, umaSrc)
+	case fleetnode.MeminfoSource:
+		umaLabel = fmt.Sprintf(", unified memory, %.1f GiB held back for the host", cfg.UMAReserveGiB)
 	}
 	devicesLabel := ""
 	if snap, ok := sampler.Load(); ok && len(snap.Devices) > 1 {
@@ -3033,6 +3056,15 @@ func doctorRun(cfg config.Config, routes []mediacap.Route, w io.Writer) error {
 		return fmt.Errorf("endpoint down: %w", err)
 	}
 	fmt.Fprintln(w, "health:     OK")
+	// Fleet version skew (security standard L0, register R-06): informational,
+	// never an exit-code change — a node on another release is a parity finding
+	// for the operator, not a broken local box.
+	writeFleetSkewSection(w, cfg, buildinfo.Version, func(base string) (string, error) {
+		hctx, hcancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer hcancel()
+		v, err := delegate.FetchNodeView(hctx, base, cfg.FleetAuthToken)
+		return v.HarnessVersion, err
+	})
 	roster, err := swapclient.FetchRoster(ctx, cfg.Endpoint, 10*time.Second)
 	if err != nil {
 		fmt.Fprintln(w, "roster:     FAIL - cannot list /v1/models:", err)
@@ -3066,6 +3098,32 @@ func doctorRun(cfg config.Config, routes []mediacap.Route, w io.Writer) error {
 		return fmt.Errorf("%d configuration finding(s) — see the config findings section above", findings)
 	}
 	return nil
+}
+
+// writeFleetSkewSection prints one row per fleet remote (delegate_remotes): OK
+// when the node runs this binary's release, SKEW with both versions when it
+// does not, UNKNOWN when the node publishes no version, UNREACHABLE when its
+// health cannot be read. Parity broke twice on 2026-09-30 within an hour (a
+// merge landed between deploys); the session-start audit catches it, and now
+// so does any session that runs doctor. No remotes prints nothing.
+func writeFleetSkewSection(w io.Writer, cfg config.Config, self string, read func(base string) (string, error)) {
+	if len(cfg.DelegateRemotes) == 0 {
+		return
+	}
+	fmt.Fprintf(w, "fleet versions (this binary %s):\n", self)
+	for _, base := range cfg.DelegateRemotes {
+		v, err := read(base)
+		switch {
+		case err != nil:
+			fmt.Fprintf(w, "  UNREACHABLE  %s — %v\n", base, err)
+		case v == "":
+			fmt.Fprintf(w, "  UNKNOWN      %s — the node publishes no harness_version\n", base)
+		case v != self:
+			fmt.Fprintf(w, "  SKEW         %s runs %s (this binary %s): redeploy to parity (plans/fleet-parity-deploy.sh)\n", base, v, self)
+		default:
+			fmt.Fprintf(w, "  OK           %s %s\n", base, v)
+		}
+	}
 }
 
 // writeConfigFindingsSection prints ONE LINE PER non-fatal configuration finding
@@ -4358,7 +4416,7 @@ func runResearch(args []string) error {
 		return err
 	}
 	defer cleanup()
-	results, sum, err := delegate.RunBatched(context.Background(), cfg, p.RunAgentContract, contracts, *route, nil, nil)
+	results, sum, err := delegate.RunBatched(context.Background(), cfg, p.RunAgentContract, contracts, *route, nil, &delegate.RunOptions{Rescue: p.RescueRepack})
 	if err != nil && len(results) == 0 {
 		return err
 	}

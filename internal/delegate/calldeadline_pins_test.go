@@ -471,11 +471,12 @@ func TestTheDeadlineContextCarriesTheCause(t *testing.T) {
 // dial base, and a base written with a trailing slash must not become
 // "//fleet/jobs/{id}". A Go ServeMux quietly cleans that path, so the node here is a bare
 // handler that records the RAW request target — the form a proxy or a stricter node in
-// front of the fleet port would see.
+// front of the fleet port would see. The job is queued on the node: a job last seen running
+// is never asked (ADR 0064).
 func TestWithdrawRequestTargetIsTheCleanJobRoute(t *testing.T) {
 	widenUnwind(t, 2*time.Second)
 	compressPolls(t, 5*time.Millisecond, time.Second)
-	_, inner := remoteRunningForeverServer(t)
+	_, inner := remoteQueuedForeverServer(t)
 	var mu sync.Mutex
 	var targets []string
 	front := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

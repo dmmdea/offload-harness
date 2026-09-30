@@ -1,0 +1,55 @@
+{
+ "id": "00000000-0000-4000-8000-00000000f002",
+ "revision": 0,
+ "version": 0.4,
+ "nodes": [
+  {
+   "id": 1,
+   "type": "UNETLoader",
+   "mode": 0,
+   "widgets_values": ["unannotated-unet.safetensors", "default"]
+  },
+  {
+   "id": 2,
+   "type": "DualCLIPLoader",
+   "mode": 0,
+   "widgets_values": ["te-one.safetensors", "te-two.safetensors", "sd3", "default"]
+  },
+  {
+   "id": 3,
+   "type": "LoraLoader",
+   "mode": 0,
+   "widgets_values": ["sub/dir/lora-in-subfolder.safetensors", 1, 1]
+  },
+  {
+   "id": 4,
+   "type": "VAELoader",
+   "mode": 4,
+   "widgets_values": ["vae-bypassed-unannotated.safetensors"]
+  },
+  {
+   "id": 5,
+   "type": "SomeVendorLoader",
+   "mode": 0,
+   "widgets_values": ["vendor-model.gguf"]
+  },
+  {
+   "id": 6,
+   "type": "CheckpointLoaderSimple",
+   "mode": 0,
+   "properties": {
+    "cnr_id": "comfy-core",
+    "models": [
+     {
+      "name": "annotated.safetensors",
+      "url": "https://huggingface.co/example-org/weights-a/resolve/main/annotated.safetensors",
+      "directory": "checkpoints",
+      "hash": "0000000000000000000000000000000000000000000000000000000000000000",
+      "hash_type": "SHA256"
+     }
+    ]
+   },
+   "widgets_values": ["annotated.safetensors"]
+  }
+ ]
+}

@@ -40,3 +40,14 @@ failure mode.
   cross-node take stays unbuilt until the scoreboard shows contention.
 - Re-open trigger for B: sustained multi-session delegation volume with
   measured node imbalance, or a real incident A's recovery cannot cover.
+
+## Amendment (2026-09-30, see ADR 0064)
+
+The decision stands: running work stays recoverable. Three corrections follow from the first live
+measurement of the recovery pass. It closed 61 of 61 intents on 2026-09-29 (36 on an HTTP 401, 25 on a 404)
+and recovered none: a 401 is a fact about the recovering process's credentials, so an intent now stays open
+on it (one log line per pass); every intent event carries the unix second and the pid of the process that
+wrote it; and a delegator that gives up on a job the node has NOT started now asks the node to take it back
+(`DELETE /fleet/jobs/{id}`), closing the intent as `withdrawn` only when the node confirms. A job that has
+started is still never touched, so the orphanable exits for running work leave their intents open exactly as
+before. [ADR 0064](0064-a-delegator-takes-back-what-it-has-not-started.md) records the change.

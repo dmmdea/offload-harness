@@ -48,6 +48,27 @@ func TestFromLedgerAcceleratorRowNamesDeviceAndNode(t *testing.T) {
 			wantNode:   "node-c",
 			wantState:  "completed",
 		},
+		{
+			row:        ledger.Entry{TS: 105, Task: "classify", ModelTier: "node-d:rknpu", LatencyMs: 18},
+			wantModel:  "rknpu",
+			wantEngine: "rknpu",
+			wantNode:   "node-d",
+			wantState:  "completed",
+		},
+		{
+			row:        ledger.Entry{TS: 106, Task: "object_detect", ModelTier: "rknpu", LatencyMs: 12},
+			wantModel:  "rknpu",
+			wantEngine: "rknpu",
+			wantNode:   "",
+			wantState:  "completed",
+		},
+		{
+			row:        ledger.Entry{TS: 107, Task: "embed", ModelTier: "rknpu@fleet", Deferred: true, Reason: "node leased"},
+			wantModel:  "rknpu@fleet",
+			wantEngine: "rknpu",
+			wantNode:   "",
+			wantState:  "failed",
+		},
 		// A text row whose tier happens to hold a colon is not split: only
 		// accelerator rows carry the "<node>:<device>" convention here.
 		{

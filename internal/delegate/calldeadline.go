@@ -28,10 +28,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
-	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -283,15 +281,33 @@ func (r *runner) cutOutcome(pr PlacedResult, quote bool) PlacedResult {
 	switch {
 	case pr.intentRecorded:
 		// Cancelling the poll leaves the job on its node, where it could start later
-		// on a seat nobody is waiting for. Ask the node to drop it (a request, not a
-		// claim: see withdrawCut).
-		answer := r.withdrawCut(pr.ranBase, pr.JobID)
-		where = fmt.Sprintf("was still on %s (job %s) when the call's deadline passed; the node was asked to withdraw it if it had not started — %s — and this call is no longer waiting for it",
-			nodeOrBase(pr), pr.JobID, answer)
-		// The node acked the job and the delegator walked away: it may finish it, so
-		// the intent stays open for the recovery pass (the cancel arms in runRemote
-		// set this too; setting it here makes it hold for every exit).
-		pr.orphanable = true
+		// on a seat nobody is waiting for. Taking it back is the give-up's business,
+		// not the cut's: runRemote's cancel arms call giveUp (ADR 0064), the ONE
+		// withdraw path. It asks once, never for a job last seen running, and is bounded
+		// by the unwind allowance once the deadline has passed (withdrawBound). Its answer
+		// is already on pr: a confirmation as pr.withdrawn (the job will never run
+		// there), anything else as the clause it appended to the failure, which
+		// ownVerdict quotes below. The cut reads that answer and never asks again (a
+		// second request for one job is a duplicate).
+		where = fmt.Sprintf("was still on %s (job %s) when the call's deadline passed", nodeOrBase(pr), pr.JobID)
+		switch {
+		case pr.withdrawn:
+			where += "; the node confirmed it took the job back before it started, so it will not run there"
+		case pr.nodeNeverRan != "":
+			where += "; the node's own record says it never ran the job"
+		default:
+			where += "; it was not taken back from the node"
+		}
+		where += ", and this call is no longer waiting for it"
+		// The node acked the job and this call walked away from it: it may finish it, so
+		// the intent stays open for the recovery pass — unless the node has said the job
+		// will never run (a confirmed withdrawal, or its own record of a job it never
+		// ran). The give-up recorded that by clearing orphanable, and overwriting it
+		// here would leave the intent open for a job the node no longer holds, which
+		// finish() would then not close as withdrawn or never started (ADR 0064).
+		if !pr.withdrawn && pr.nodeNeverRan == "" {
+			pr.orphanable = true
+		}
 	case pr.ranLocal:
 		where = "was still running on the local seat when the call's deadline passed"
 		if own == "" {
@@ -401,87 +417,6 @@ func deadlineClip(s string, n int) string {
 	return cut + "…"
 }
 
-// deadlineWithdrawTimeout bounds the one best-effort withdraw sent for a job the
-// call deadline cut. It runs detached from the (already cancelled) call context,
-// and never longer than three quarters of the unwind allowance: a node that does
-// not answer must not turn the truthful cut result (its node and job) into an
-// abandoned one that says neither.
-const deadlineWithdrawTimeout = 5 * time.Second
-
-// withdrawCut asks the node to withdraw a job the call deadline walked away from:
-// DELETE /fleet/jobs/{id} with the fleet bearer. Best effort, and deliberately a
-// REQUEST rather than a claim — nothing the call publishes depends on the answer:
-//
-//   - a node that has not shipped the route answers 404 or 405 (its behaviour
-//     today: the job stays, as it always did);
-//   - a job the node has already started is not the delegator's to cancel, so a
-//     node that only ever withdraws never-started jobs refuses it, and the intent
-//     stays open for the recovery pass either way (cutByDeadline marks it
-//     orphanable);
-//   - a transport failure is logged and dropped.
-//
-// It returns what the node answered, in words, for the published reason: the answer
-// used to reach only a log line, so a node with no route, one that refused a job that
-// had started and one that dropped the connection all read alike, and a ghost job that
-// survived the request left no trace on the row. The classification mirrors the node
-// route's own contract (200 with state "withdrawn" = taken back; 409 = already started;
-// 404/405 = no such job or no route).
-//
-// Blocking (bounded by deadlineWithdrawTimeout) on purpose: the goroutine that
-// calls it is inside the unwind allowance, and returning before the request is out
-// would let the call return with the ask still unsent.
-func (r *runner) withdrawCut(base, jobID string) string {
-	if base == "" || jobID == "" {
-		return "no request was sent (the job has no dial base)"
-	}
-	timeout := deadlineWithdrawTimeout
-	if g := r.call.grace * 3 / 4; g > 0 && g < timeout {
-		timeout = g
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	u := strings.TrimRight(strings.TrimSpace(base), "/") + "/fleet/jobs/" + url.PathEscape(jobID)
-	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, u, nil)
-	if err != nil {
-		return "the request could not be built: " + deadlineClip(err.Error(), 120)
-	}
-	if r.cfg.FleetAuthToken != "" {
-		req.Header.Set("Authorization", "Bearer "+r.cfg.FleetAuthToken)
-	}
-	resp, err := fleetClient.Do(req)
-	if err != nil {
-		log.Printf("delegate: call deadline: the withdraw of job %s at %s failed (best effort): %v", jobID, base, err)
-		var ue *url.Error
-		if errors.As(err, &ue) && ue.Err != nil {
-			err = ue.Err // the URL repeats the job id the reason already names
-		}
-		return "no answer (" + deadlineClip(err.Error(), 120) + ")"
-	}
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxFleetBody))
-	resp.Body.Close()
-	log.Printf("delegate: call deadline: asked %s to withdraw job %s: status %d (best effort)", base, jobID, resp.StatusCode)
-	switch resp.StatusCode {
-	case http.StatusOK:
-		var wire struct {
-			State     string `json:"state"`
-			Withdrawn bool   `json:"withdrawn"`
-		}
-		if json.Unmarshal(body, &wire) == nil && (wire.Withdrawn || wire.State == "withdrawn") {
-			return "the node confirmed it took the job back"
-		}
-		return "HTTP 200, but the answer did not say the job was taken back"
-	case http.StatusConflict:
-		return "HTTP 409: the node said the job had already started"
-	case http.StatusNotFound:
-		return "HTTP 404: the node does not hold the job, or has no withdraw route"
-	case http.StatusMethodNotAllowed:
-		return "HTTP 405: the node has no withdraw route (an older node)"
-	case http.StatusUnauthorized:
-		return "HTTP 401: the node refused this delegator's fleet_auth_token"
-	}
-	return fmt.Sprintf("HTTP %d", resp.StatusCode)
-}
-
 // emitPair sends one PAIR frame unless the run has shut the emitter. Before the
 // call deadline no goroutine could outlive RunWith, so RunWith's deferred
 // pair.Wait() saw every frame. A seat that ignores its context is abandoned and
@@ -571,7 +506,8 @@ func (r *runner) abandoned(i int, contract core.AgentContract) PlacedResult {
 
 // queueLookMax bounds the last look cutQueued takes at the holder. It runs after the
 // deadline, outside the unwind the fan-out has, so its wall lands directly on the call's:
-// the lesser of this and three quarters of the unwind allowance, like the withdraw.
+// the lesser of this and three quarters of the unwind allowance, as a give-up's withdraw is
+// once the deadline has passed (withdrawBound).
 const queueLookMax = 2 * time.Second
 
 // cutQueued applies the deadline to route=queue's outcome. The queue lane polls its

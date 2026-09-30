@@ -12,6 +12,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -48,6 +49,15 @@ import (
 	"github.com/dmmdea/offload-harness/internal/visionremote"
 )
 
+// rescueFunc is the rescue a delegation hands the engine: the injected seam, else
+// this server's pipeline (one re-pack completion on its own agent seat).
+func (s *Server) rescueFunc() delegate.RescueFunc {
+	if s.rescue != nil {
+		return s.rescue
+	}
+	return s.p.RescueRepack
+}
+
 // fleetDispatch is delegate.RunWith's signature, named so the review lane can
 // hold it behind a test seam. Deliberately the WHOLE engine and not a narrower
 // "dispatch one contract to one node": placement, the ctx-fit gate, the
@@ -65,6 +75,11 @@ type Server struct {
 	// researchFetch is offload_research's fetch seam (tests inject pages; nil =
 	// research.FetchAll against the public web).
 	researchFetch func(ctx context.Context, urls []string, opt research.Options) []research.Fetched
+	// rescue is the seam of the delegator's rescue of a finished answer whose
+	// structured re-pack failed (register C-66, PR-4): nil (production) resolves
+	// to the pipeline's own RescueRepack at call time; tests inject a fake so a
+	// delegation is exercisable without a live seat.
+	rescue delegate.RescueFunc
 	// reviewFleet is the FLEET dispatch seam of the review lane's fenced-seat
 	// fallthrough (register D-110): nil (production) resolves to
 	// delegate.RunWith at call time; tests inject a fake so the handler is
@@ -338,8 +353,8 @@ func (s *Server) buildServer(version string) *mcp.Server {
 
 	srv.AddTool(&mcp.Tool{
 		Name:        "offload_compose_video",
-		Description: "COMPOSE designed motion graphics into VIDEO locally for FREE with HyperFrames — deterministic HTML/CSS -> MP4/WebM/MOV (alpha)/GIF/PNG sequence: title cards, lower thirds, kinetic type, stat cards, overlays to lay over b-roll. CPU-class: software GL + CPU encode, NO GPU lock (runs beside every render and text seat), local only, never cloud (HyperFrames' cloud/lambda/capture paths are not wired). Give ONE input: template + variables (the vetted templates on this box — offload_status media.routes.compose_video lists them; shipped: title-card, lower-third; variables are the template's declared text/colors/duration, typed and escaped), OR html (an inline single-file composition), OR project_dir (a local composition dir). html and project_dir are TRUSTED CODE ONLY: HyperFrames' Chrome runs without a sandbox, so never pass third-party pages. Every render is gated: lint (0 errors), check (runtime/layout/contrast), then ffprobe measures the output (codec, size, fps, duration, alpha) — the returned fields are measured, not requested. format webm (VP9) or mov (ProRes 4444) carries alpha; mp4 is opaque H.264. quality defaults to this machine's compose_quality (high = libx264 slow CRF 15). snapshots = seconds to also save as PNG frames for a visual check. Same inputs render byte-identical frames. Returns {video_path | frames_dir, duration_sec, fps, frames, width, height, has_alpha, has_audio, codec, render_ms, lint:{errors,warnings}, check:{ok,findings}, snapshots[]}. On any failure it returns deferred:true with a typed reason (BAD_INPUT, LINT_ERRORS, CHECK_FAILED, RENDER_FAILED, BROWSER_MISSING, FFMPEG_MISSING, CLI_MISSING, SPAWN_EBUSY, DISK_HEADROOM, TIMEOUT, or no composition route on this machine).",
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"template":{"type":"string","description":"a vetted template name on this machine (e.g. title-card, lower-third); give exactly one of template, html, project_dir"},"variables":{"type":"object","description":"values for the template's declared variables, e.g. {\"title\":\"Q3 results\",\"accent\":\"#22c55e\",\"duration\":6}; an undeclared or mistyped key defers BAD_INPUT"},"html":{"type":"string","description":"an inline single-file HyperFrames composition (TRUSTED code only: Chrome runs it without a sandbox)"},"project_dir":{"type":"string","description":"a local composition directory holding index.html (TRUSTED code only)"},"composition":{"type":"string","description":"a composition file relative to project_dir to render instead of index.html"},"out":{"type":"string","description":"output path (a directory for png-sequence; optional, default under the media dir)"},"format":{"type":"string","enum":["mp4","webm","mov","png-sequence","gif"],"description":"mp4 (default, H.264), webm (VP9 with alpha), mov (ProRes 4444 with alpha), png-sequence (RGBA frames), gif"},"fps":{"type":"integer","description":"frame rate 1-240 (default: the composition's data-fps, else 30)"},"quality":{"type":"string","enum":["draft","standard","high"],"description":"encoder preset (default: this machine's compose_quality, shipped high)"},"resolution":{"type":"string","enum":["landscape","portrait","landscape-4k","portrait-4k","square","square-4k"],"description":"output size preset; the aspect must match the composition (4k = integer supersampling)"},"workers":{"type":"integer","description":"parallel Chrome workers 1-24 (default: this machine's compose_workers, else auto)"},"strict":{"type":"boolean","description":"fail on lint errors / a failed check (default true)"},"snapshots":{"type":"array","items":{"type":"number"},"description":"seconds to also save as PNG frames next to the output (up to 16)"}}}`),
+		Description: "COMPOSE designed motion graphics into VIDEO locally for FREE with HyperFrames — deterministic HTML/CSS -> MP4/WebM/MOV (alpha)/GIF/PNG sequence: title cards, lower thirds, kinetic type, stat cards, overlays to lay over b-roll. CPU-class: software GL + CPU encode, NO GPU lock (runs beside every render and text seat), local only, never cloud (HyperFrames' cloud/lambda/capture paths are not wired). Give ONE input: template + variables (the vetted templates on this box — offload_status media.routes.compose_video lists them; shipped: title-card, lower-third, stat-card, section-title, callout-label, checklist-card, captions-bar; variables are the template's declared text/colors/duration, typed and escaped), OR html (an inline single-file composition), OR project_dir (a local composition dir). html and project_dir are TRUSTED CODE ONLY: HyperFrames' Chrome runs without a sandbox, so never pass third-party pages. Every render is gated: lint (0 errors), check (runtime/layout/contrast), then ffprobe measures the output (codec, size, fps, duration, alpha) — the returned fields are measured, not requested. format webm (VP9) or mov (ProRes 4444) carries alpha; mp4 is opaque H.264. quality defaults to this machine's compose_quality (high = libx264 slow CRF 15). snapshots = seconds to also save as PNG frames for a visual check. Same inputs render byte-identical frames. Returns {video_path | frames_dir, duration_sec, fps, frames, width, height, has_alpha, has_audio, codec, render_ms, lint:{errors,warnings}, check:{ok,findings}, snapshots[]}. On any failure it returns deferred:true with a typed reason (BAD_INPUT, LINT_ERRORS, CHECK_FAILED, RENDER_FAILED, BROWSER_MISSING, FFMPEG_MISSING, CLI_MISSING, SPAWN_EBUSY, DISK_HEADROOM, TIMEOUT, or no composition route on this machine).",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"template":{"type":"string","description":"a vetted template name on this machine (e.g. title-card, stat-card, captions-bar); give exactly one of template, html, project_dir"},"variables":{"type":"object","description":"values for the template's declared variables, e.g. {\"title\":\"Q3 results\",\"accent\":\"#22c55e\",\"duration\":6}; an undeclared or mistyped key defers BAD_INPUT"},"html":{"type":"string","description":"an inline single-file HyperFrames composition (TRUSTED code only: Chrome runs it without a sandbox)"},"project_dir":{"type":"string","description":"a local composition directory holding index.html (TRUSTED code only)"},"composition":{"type":"string","description":"a composition file relative to project_dir to render instead of index.html"},"out":{"type":"string","description":"output path (a directory for png-sequence; optional, default under the media dir)"},"format":{"type":"string","enum":["mp4","webm","mov","png-sequence","gif"],"description":"mp4 (default, H.264), webm (VP9 with alpha), mov (ProRes 4444 with alpha), png-sequence (RGBA frames), gif"},"fps":{"type":"integer","description":"frame rate 1-240 (default: the composition's data-fps, else 30)"},"quality":{"type":"string","enum":["draft","standard","high"],"description":"encoder preset (default: this machine's compose_quality, shipped high)"},"resolution":{"type":"string","enum":["landscape","portrait","landscape-4k","portrait-4k","square","square-4k"],"description":"output size preset; the aspect must match the composition (4k = integer supersampling)"},"workers":{"type":"integer","description":"parallel Chrome workers 1-24 (default: this machine's compose_workers, else auto)"},"strict":{"type":"boolean","description":"fail on lint errors / a failed check (default true)"},"snapshots":{"type":"array","items":{"type":"number"},"description":"seconds to also save as PNG frames next to the output (up to 16)"}}}`),
 	}, s.handleComposeVideo)
 
 	// offload_browse (ADR 0060) is registered only when this box configured the lane:
@@ -2125,6 +2140,29 @@ func (s *Server) handleNIM(ctx context.Context, req *mcp.CallToolRequest) (*mcp.
 	if base == "" {
 		base = cfg.NIMEndpoint
 	}
+	// The base allowlist (security standard L5, register S-30): a caller-named
+	// base outside NVIDIA's hosted API, nim_endpoint and nim_bases is refused
+	// under nim_base_policy "enforce"; under "audit" (the default) the call runs,
+	// the result says it would have been refused, and a would-refuse row is
+	// appended for the promotion decision (ADR 0067).
+	basePolicy := ""
+	if in.Base != "" {
+		if ok, why := nimclient.BaseAllowed(in.Base, cfg.NIMEndpoint, cfg.NIMBases); !ok {
+			mode := "audit"
+			if cfg.NIMBaseEnforced() {
+				mode = "enforce"
+			}
+			auditErr := appendNIMBaseAudit(cfg.StateDir, in.Base, why, mode)
+			if mode == "enforce" {
+				return jsonResult(map[string]any{"deferred": true, "defer_class": string(core.DeferClassConfig),
+					"reason": "offload_nim base refused (nim_base_policy enforce): " + why + "; add it to nim_bases if it is a NIM you run"})
+			}
+			basePolicy = "audit: this base would be refused under nim_base_policy enforce (" + why + ")"
+			if auditErr != nil {
+				basePolicy += "; the would-refuse row was not written: " + auditErr.Error()
+			}
+		}
+	}
 	key := nimclient.KeyForBase(base) // env key only for NVIDIA hosts; never transmitted to a non-NVIDIA base
 	// defer-not-crash: a missing key on the hosted endpoint is a clean defer, not an error.
 	if key == "" && nimclient.IsHostedNVIDIA(base) {
@@ -2138,9 +2176,9 @@ func (s *Server) handleNIM(ctx context.Context, req *mcp.CallToolRequest) (*mcp.
 	if in.ListModels {
 		ids, err := client.ListModels(ctx)
 		if err != nil {
-			return jsonResult(map[string]any{"deferred": true, "reason": err.Error()})
+			return jsonResult(withBasePolicy(map[string]any{"deferred": true, "reason": err.Error()}, basePolicy))
 		}
-		return jsonResult(map[string]any{"models": ids, "count": len(ids), "endpoint": base})
+		return jsonResult(withBasePolicy(map[string]any{"models": ids, "count": len(ids), "endpoint": base}, basePolicy))
 	}
 	model := in.Model
 	if model == "" {
@@ -2152,16 +2190,56 @@ func (s *Server) handleNIM(ctx context.Context, req *mcp.CallToolRequest) (*mcp.
 	}
 	res, err := client.Chat(ctx, model, in.System, in.Prompt, maxTok, in.Temperature)
 	if err != nil {
-		return jsonResult(map[string]any{"deferred": true, "reason": err.Error()})
+		return jsonResult(withBasePolicy(map[string]any{"deferred": true, "reason": err.Error()}, basePolicy))
 	}
-	return jsonResult(map[string]any{
+	return jsonResult(withBasePolicy(map[string]any{
 		"model":             res.Model,
 		"content":           res.Content,
 		"reasoning_content": res.ReasoningContent,
 		"tokens_in":         res.TokensIn,
 		"tokens_out":        res.TokensOut,
 		"truncated":         res.Truncated,
-	})
+	}, basePolicy))
+}
+
+// withBasePolicy adds the audit-mode note (S-30) to an offload_nim result when
+// the base was outside the allowlist.
+func withBasePolicy(out map[string]any, note string) map[string]any {
+	if note != "" {
+		out["base_policy"] = note
+	}
+	return out
+}
+
+// appendNIMBaseAudit appends one would-refuse (or refuse) row to
+// <stateDir>/nim-base-audit.jsonl: the counted data a promotion from audit to
+// enforce needs (ADR 0067). Only the base's scheme, host and port are kept —
+// never the prompt, never a path or query that could carry data.
+func appendNIMBaseAudit(stateDir, base, why, mode string) error {
+	if strings.TrimSpace(stateDir) == "" {
+		return fmt.Errorf("no state_dir")
+	}
+	host := base
+	if u, err := url.Parse(strings.TrimSpace(base)); err == nil && u.Host != "" {
+		host = u.Scheme + "://" + u.Host
+	}
+	row, err := json.Marshal(map[string]any{"ts": time.Now().UTC().Format(time.RFC3339), "mode": mode, "base": host, "why": why})
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(filepath.Join(stateDir, "nim-base-audit.jsonl"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return err
+	}
+	_, werr := f.Write(append(row, '\n'))
+	cerr := f.Close()
+	if werr != nil {
+		return werr
+	}
+	return cerr
 }
 
 // withAdmission stamps an agent_run result with what was spent BEFORE the wall
@@ -3366,7 +3444,7 @@ func (s *Server) handleAgentDelegate(ctx context.Context, req *mcp.CallToolReque
 	// a node proven to answer about the wrong document must not keep receiving
 	// agent_delegate work (silent-failure review, 2026-09-02).
 	deadline := s.callDeadlineAt(entered)
-	opts := &delegate.RunOptions{Quarantine: s.quarantine, Priority: in.Priority, Tenant: s.tenant, Deadline: deadline}
+	opts := &delegate.RunOptions{Quarantine: s.quarantine, Priority: in.Priority, Tenant: s.tenant, Deadline: deadline, Rescue: s.rescueFunc()}
 	// Progress notifications, only for a request that supplied a progress token.
 	defer s.startProgress(ctx, req, opts, len(contracts), deadline)()
 	results, sum, rerr := delegate.RunWith(ctx, s.p.Cfg(), localRun, contracts, in.Route, in.Remotes, opts)
@@ -3733,7 +3811,7 @@ func (s *Server) handleResearch(ctx context.Context, req *mcp.CallToolRequest) (
 	// RunBatched: 9–12 usable pages used to hit Run's 8-subtask refusal and lose
 	// every page (2026-09-01). Chunks run in order; a chunk error returns WITH
 	// the results already obtained, rendered as partial rather than dropped.
-	opts := &delegate.RunOptions{Quarantine: s.quarantine, Deadline: deadline}
+	opts := &delegate.RunOptions{Quarantine: s.quarantine, Deadline: deadline, Rescue: s.rescueFunc()}
 	// Progress notifications, only for a request that supplied a progress token.
 	defer s.startProgress(ctx, req, opts, len(contracts), deadline)()
 	results, sum, rerr := delegate.RunBatched(ctx, s.p.Cfg(), localRun, contracts, route, nil, opts)

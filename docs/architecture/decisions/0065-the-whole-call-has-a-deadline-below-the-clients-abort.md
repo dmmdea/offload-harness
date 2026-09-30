@@ -81,7 +81,10 @@ measurement of the client.
    of the attempt that had not returned (the runner remembers each subtask's latest), the call records
    its own row under that id at return, and the goroutine's late row, if it ends, is under the same
    id, so the caller can reconcile the two; the result still names no node or seat. A remote job cut this way keeps its
-   intent open (`orphanable`): the node may still finish it, and the recovery pass may still harvest it.
+   intent open (`orphanable`): the node may still finish it, and the recovery pass may still harvest it. The one
+   exception is a job the node has said will never run (a confirmed withdrawal, or its own record of a job it never
+   ran): the give-up already cleared `orphanable` for it, the cut leaves that as it found it, and the intent closes as
+   it does for any give-up (decision 5).
    A subtask nobody ran (never started, abandoned, or cut before it was placed) names no node and no
    seat, as `exhausted()` already does for "no node took it", and is marked `Unplaced`. Once the run
    begins draining its PAIR emitter, a frame from an abandoned goroutine is dropped: `Emit` adds to a
@@ -103,16 +106,23 @@ measurement of the client.
    remotes), which every chunk of one call shares, so no ordinary partial result sets them. They stay
    in the head anyway. Every field is kept.
 
-5. **A cut remote job is withdrawn on request, best effort.** Cancelling the poll leaves the job on its
-   node, where it could start later on a seat nobody is waiting for. At the deadline the delegator asks
-   the node to withdraw each job it is walking away from: `DELETE /fleet/jobs/{id}` with the fleet
-   bearer, five seconds, detached from the cancelled context. It is a request, not a claim: a node that
-   has not shipped the route answers 404 or 405 and keeps the job (today's behaviour), a job that has
-   already started is not the delegator's to cancel, and nothing the call publishes depends on the
-   answer. The reason carries what the node answered, in words (no route, already started, taken
-   back, no answer), classified like the node route's own contract, and never claims more than that.
-   The ask never outlives the unwind: its timeout is the lesser of five seconds and three quarters of the allowance, so a node
-   that does not answer cannot turn the truthful cut result (its node and job) into an abandoned one.
+5. **A cut remote job is taken back through the delegator's one withdraw path, best effort.** Cancelling
+   the poll leaves the job on its node, where it could start later on a seat nobody is waiting for. The
+   deadline cancels the context the poll runs under, and the poll's cancel exits give the job up like any
+   other cancel ([ADR 0064](0064-a-delegator-takes-back-what-it-has-not-started.md), decision 3):
+   `DELETE /fleet/jobs/{id}` with the fleet bearer, once, detached from the cancelled context, and not for
+   a job last seen running (it has started, and the request could only be refused). The deadline adds no
+   request of its own; it reads the answer, so one job is never asked twice. It is a request, not a
+   claim: a node that has not shipped the route answers 404 or 405 and keeps the job (today's
+   behaviour), a job that has already started is not the delegator's to cancel, and what the call
+   publishes depends on the answer only for the words that say what it was. A node that confirms has
+   taken the job back for good: the reason says so, and the intent closes as `withdrawn` instead of
+   staying open for the recovery pass. Anything else leaves the job where it was, and the reason carries
+   the give-up's own clause (`withdraw not confirmed: HTTP 405: ...`, `no answer within ...`), quoted
+   from what the outcome itself reported. Once the deadline has passed the ask never outlives the
+   unwind: its bound is the lesser of the flat five seconds and three quarters of the allowance
+   (`withdrawBound`), so a node that does not answer cannot turn the truthful cut result (its node and
+   job) into an abandoned one.
 
 6. **Progress is reported only to a client that asks, and nothing depends on it.** A request that
    carries a progress token (`_meta.progressToken`) gets `notifications/progress` from the two doors: an
@@ -152,6 +162,10 @@ measurement of the client.
 - The rigger classifies a cut as its own axis, `call-deadline`, ahead of `timeout` (its wall-timeout
   pattern matches the bare word "deadline"), so a call that ran out of time does not steer a seat's
   timeout share.
+- Every call-deadline row carries `reason_code` `budget`: the closed set of
+  [ADR 0064](0064-a-delegator-takes-back-what-it-has-not-started.md) has no member of its own for a cut, so a
+  reader counting `budget` rows tells a cut from a node-side ceiling by the reason's opening
+  `call deadline reached`. A code of its own would be an additive change, left for a later decision.
 - `agent_call_deadline_sec` at or above the client's abort, or a negative that was meant as a number,
   loads (it never refuses) but is a `doctor` finding and a startup warning.
 - Not solved here: the capacity wait still ends on its own TTL rather than on this deadline; a
@@ -180,6 +194,8 @@ measurement of the client.
 - `internal/delegate/calldeadline.go` (the deadline, its stamping, the unwind and the batched and
   queued cases), `internal/delegate/run.go` (`RunOptions.Deadline`, the fan-out block in `RunWith`,
   `RunBatched`)
+- `internal/delegate/withdraw.go` (`withdrawBound`, the unwind bound the give-up's withdraw takes once the
+  deadline has passed; the withdraw itself is ADR 0064's)
 - `internal/delegate/progress.go`, `internal/mcpserver/progress.go` (progress notifications)
 - `internal/mcpserver/mcpserver.go` (`callDeadlineAt`, `handleAgentDelegate`, `handleResearch`,
   `delegateIsError`, `researchWire`)
@@ -191,7 +207,8 @@ measurement of the client.
 
 - [MCP server](../../systems/mcp-server.md), [fleet node](../../systems/fleet-node.md),
   [operator guide](../../OPERATOR-GUIDE.md)
-- ADR [0055](0055-walls-are-ceilings-liveness-is-progress.md) (liveness ceilings),
+- ADR [0064](0064-a-delegator-takes-back-what-it-has-not-started.md) (the withdraw a give-up asks for),
+  ADR [0055](0055-walls-are-ceilings-liveness-is-progress.md) (liveness ceilings),
   ADR [0028](0028-delegation-durability-is-a-push-side-intent-ledger.md) (the intent ledger),
   ADR [0030](0030-pull-queue-ships-dark.md) (route=queue)
 - Register rows C-67 (this deadline) and C-75 (partial results and result order)

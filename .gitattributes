@@ -36,3 +36,7 @@ setup/templates/vllm-seat/lmcache-patches/** text eol=lf
 
 # Vendored font files (render/compose-templates/_shared/fonts): binary, never line-converted.
 *.woff2 binary
+
+# Third-party licence texts kept verbatim (render/compose-templates/_third_party): the same bytes on every
+# checkout, so a Windows checkout never rewrites a licence text that must stay as received.
+render/compose-templates/_third_party/** text eol=lf

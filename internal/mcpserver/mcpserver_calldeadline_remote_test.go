@@ -23,8 +23,10 @@ import (
 
 // fleetNodeStub is a scripted fleet node: health advertises the agent lane,
 // dispatch acks and remembers each job's goal, a "fast" job finishes at once,
-// every other job answers `running` for as long as it is polled, and
-// DELETE /fleet/jobs/{id} records who asked to withdraw what.
+// every other job stays `accepted` (queued in the node's backlog, never started) for
+// as long as it is polled, and DELETE /fleet/jobs/{id} records who asked to withdraw
+// what and confirms it, as a node does for a job it has not started. A job last seen
+// `running` is never asked to be withdrawn (ADR 0064), so the slow job must be queued.
 type fleetNodeStub struct {
 	goals sync.Map // job id -> goal
 
@@ -71,13 +73,14 @@ func newFleetNodeStub(t *testing.T) (*fleetNodeStub, string) {
 			_ = json.NewEncoder(w).Encode(map[string]any{"job_id": id, "state": "done", "data": json.RawMessage(wire)})
 			return
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"job_id": id, "state": "running"})
+		_ = json.NewEncoder(w).Encode(map[string]any{"job_id": id, "state": "accepted"})
 	})
 	mux.HandleFunc("DELETE /fleet/jobs/{id}", func(w http.ResponseWriter, r *http.Request) {
 		n.mu.Lock()
 		n.withdrawn = append(n.withdrawn, r.PathValue("id"))
 		n.mu.Unlock()
 		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]any{"job_id": r.PathValue("id"), "state": "withdrawn", "withdrawn": true})
 	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
@@ -85,10 +88,11 @@ func newFleetNodeStub(t *testing.T) (*fleetNodeStub, string) {
 }
 
 // TestCallDeadlineCancelsAndWithdrawsOutstandingJobs: through agent_delegate, two
-// subtasks are placed on a fleet node; one finishes, the other is still running
-// when the call deadline passes. The call returns at the deadline with the
+// subtasks are placed on a fleet node; one finishes, the other is still queued on
+// it when the call deadline passes. The call returns at the deadline with the
 // finished result and a call-deadline defer that names the node and the job, the
-// polling ends, and the node is asked to withdraw exactly the outstanding job.
+// polling ends, and the node is asked once to withdraw exactly the outstanding
+// job (and says so: the reason carries its confirmation).
 func TestCallDeadlineCancelsAndWithdrawsOutstandingJobs(t *testing.T) {
 	node, url := newFleetNodeStub(t)
 	s := deadlineServer(t, 1, func(context.Context, core.AgentContract, delegate.LocalOptions) (core.AgentWireResult, error) {
@@ -135,10 +139,13 @@ func TestCallDeadlineCancelsAndWithdrawsOutstandingJobs(t *testing.T) {
 		t.Fatalf("reason %q should name node-a and the job %q so the caller can reconcile it", reason, jobID)
 	}
 
-	// The node was asked to withdraw exactly the outstanding job — never the
+	// The node was asked to withdraw exactly the outstanding job, once — never the
 	// finished one. (The ask is made inside the unwind, before the call returns.)
 	got := node.withdrawals()
 	if len(got) != 1 || got[0] != jobID {
 		t.Fatalf("the node was asked to withdraw %v, want exactly the outstanding job [%s]", got, jobID)
+	}
+	if !strings.Contains(reason, "the node confirmed it took the job back") {
+		t.Fatalf("reason %q should carry the node's confirmation of the withdraw", reason)
 	}
 }

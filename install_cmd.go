@@ -156,12 +156,14 @@ func runInstallSeed(args []string) error {
 	// values to both commands, or the config will name a model llama-swap never serves.
 	vllmVenv := fs.String("vllm-venv", "", "hand-built vLLM virtualenv (default: <home>/vllm-env)")
 	hfHome := fs.String("hf-home", "", "HF cache root (default: $HF_HOME, else <home>/hf)")
+	vllmSeatDir := fs.String("vllm-seat-dir", "", "where the vLLM seats' unit and wrapper scripts live (default: <home>/seat); a tier's extra seat is seeded only once its wrapper scripts are there")
 	// Accelerators ride BESIDE the tier (ADR 0024): their seed keys merge over the
 	// tier's. install.ps1 always did this; install.sh never did (Coral D4 closed
 	// that gap for the Hailo path too) — both now pass detect's verdict here.
 	accelerators := fs.String("accelerators", "", "comma-separated accelerator ids from `install detect` (e.g. hailo-8l,coral-edgetpu); their seeds merge over the tier's")
 	hailoHome := fs.String("hailo-home", "", "Hailo repo checkout __HAILO_HOME__ expands to (default: $HAILO_HOME, else <home>/hailo)")
 	coralHome := fs.String("coral-home", "", "Coral sidecar home __CORAL_HOME__ expands to (default: $CORAL_HOME, else <home>/coral)")
+	rknpuHome := fs.String("rknpu-home", "", "RKNPU sidecar home __RKNPU_HOME__ expands to (default: $RKNPU_HOME, else <home>/rknpu)")
 	_ = fs.Parse(args)
 	if *profile == "" {
 		return fmt.Errorf("install seed needs --profile <tier id>")
@@ -196,17 +198,9 @@ func runInstallSeed(args []string) error {
 	// Detect once, here, exactly as install render does. A box without the hand-built
 	// venv binds the seat's declared fallback and says why, rather than advertising an
 	// agent model nothing serves.
-	vllmActive := false
-	if p.VLLMSeat != nil {
-		rt := vllmRuntimeFlags{venv: *vllmVenv, hfHome: *hfHome}.resolve(*home)
-		var why string
-		if vllmActive, why = p.VLLMSeat.Detect(rt); !vllmActive {
-			fmt.Fprintf(os.Stderr, "NOTE  vLLM agent seat %q unavailable (%s); binding %s\n",
-				p.VLLMSeat.ID, why, p.VLLMSeat.Fallback)
-		}
-	}
+	vllmActive, extraActive := detectVLLMSeats(p, vllmRuntimeFlags{venv: *vllmVenv, hfHome: *hfHome, seatDir: *vllmSeatDir}.resolve(*home), os.Stderr)
 	seed, err := tierseed.Resolve(p, *profile, tierseed.Options{
-		Home: *home, GOOS: *goos, RAMTier: *ramTier, VLLMSeatActive: vllmActive,
+		Home: *home, GOOS: *goos, RAMTier: *ramTier, VLLMSeatActive: vllmActive, ExtraVLLMSeatsActive: extraActive,
 	})
 	if err != nil {
 		return err
@@ -216,11 +210,8 @@ func runInstallSeed(args []string) error {
 		if err != nil {
 			return err
 		}
-		accSeed, err := tierseed.ResolveAccelerators(doc.Accelerators, ids, tierseed.Options{
-			Home: *home, GOOS: *goos,
-			HailoHome: homeOr(*hailoHome, "HAILO_HOME", *home, "hailo"),
-			CoralHome: homeOr(*coralHome, "CORAL_HOME", *home, "coral"),
-		})
+		accSeed, err := tierseed.ResolveAccelerators(doc.Accelerators, ids,
+			accelOptions(tierseed.Options{Home: *home, GOOS: *goos}, *hailoHome, *coralHome, *rknpuHome))
 		if err != nil {
 			return err
 		}
@@ -252,6 +243,20 @@ func splitIDs(v string) []string {
 		}
 	}
 	return out
+}
+
+// accelOptions fills every accelerator home of a tierseed.Options: each is its
+// --<device>-home flag ("" when the verb has none), else its environment variable,
+// else <home>/<device> (homeOr). `install seed`, `install plan` and `audit-config`
+// all resolve accelerator seeds, and the resolver refuses a token whose home is
+// empty, so each must supply EVERY device's home — a verb that passed only the
+// Hailo's failed on any box that also lists another device. A new device is one
+// line here.
+func accelOptions(opt tierseed.Options, hailoFlag, coralFlag, rknpuFlag string) tierseed.Options {
+	opt.HailoHome = homeOr(hailoFlag, "HAILO_HOME", opt.Home, "hailo")
+	opt.CoralHome = homeOr(coralFlag, "CORAL_HOME", opt.Home, "coral")
+	opt.RknpuHome = homeOr(rknpuFlag, "RKNPU_HOME", opt.Home, "rknpu")
+	return opt
 }
 
 // homeOr resolves an accelerator home: the flag, else the environment variable,

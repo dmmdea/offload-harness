@@ -24,7 +24,11 @@ import (
 // NodeView is one node's placement-relevant state, built from /fleet/health
 // (FetchNodeView) for remotes and from local knowledge for the local node.
 type NodeView struct {
-	NodeID         string
+	NodeID string
+	// HarnessVersion is the node's advertised release (/fleet/health
+	// harness_version); empty on a node too old to publish it. Read by
+	// doctor's fleet-skew rows (security standard L0), never by placement.
+	HarnessVersion string
 	AgentEnabled   bool
 	AgentSeat      string
 	AgentResident  bool
@@ -224,6 +228,7 @@ type SeatBudgetView struct {
 // automatically never placed on.
 type healthWire struct {
 	NodeID         string `json:"node_id"`
+	HarnessVersion string `json:"harness_version"`
 	QueueDepth     int    `json:"queue_depth"`
 	AgentSeat      string `json:"agent_seat"`
 	AgentCtxTokens int    `json:"agent_ctx_tokens"`
@@ -319,6 +324,7 @@ func FetchNodeView(ctx context.Context, base, token string) (NodeView, error) {
 	}
 	v := NodeView{
 		NodeID:         w.NodeID,
+		HarnessVersion: w.HarnessVersion,
 		AgentEnabled:   w.AgentEnabled,
 		AgentSeat:      w.AgentSeat,
 		AgentResident:  w.AgentResident,

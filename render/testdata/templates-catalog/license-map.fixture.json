@@ -1,0 +1,83 @@
+{
+  "schema_version": 1,
+  "purpose": "Test fixture. A small map in the shape of render/templates-license-map.json; the entries are not evidence about any repo.",
+  "default_class": "unknown",
+  "classes": {
+    "permissive": "test",
+    "conditional": "test",
+    "non_commercial": "test",
+    "unknown": "test"
+  },
+  "repos": {
+    "example-org/weights-a": {
+      "class": "permissive",
+      "license_id": "apache-2.0",
+      "source_url": "https://example.com/weights-a",
+      "fetched_on": "2026-01-01",
+      "basis": "hf-card-tag"
+    },
+    "example-org/weights-b": {
+      "class": "conditional",
+      "license_id": "other",
+      "license_name": "example-community-license",
+      "conditions": "Revenue above a threshold needs a paid agreement.",
+      "source_url": "https://example.com/weights-b",
+      "fetched_on": "2026-01-01",
+      "basis": "hf-card-tag"
+    },
+    "example-org/weights-c": {
+      "class": "non_commercial",
+      "license_id": "cc-by-nc-4.0",
+      "conditions": "Non-commercial use only.",
+      "source_url": "https://example.com/weights-c",
+      "fetched_on": "2026-01-01",
+      "basis": "hf-card-tag"
+    },
+    "example-org/weights-inferred": {
+      "class": "conditional",
+      "license_id": "other",
+      "conditions": "Same terms as its sibling repo.",
+      "source_url": "https://example.com/weights-inferred",
+      "fetched_on": "2026-01-01",
+      "basis": "inferred from example-org/weights-b (not fetched)"
+    },
+    "example-org/flagged-family": {
+      "class": "non_commercial",
+      "license_id": "other",
+      "conditions": "Non-commercial use only.",
+      "source_url": "https://example.com/flagged-family",
+      "fetched_on": "2026-01-01",
+      "basis": "hf-card-tag",
+      "flux_bar": true
+    },
+    "Comfy-Org/z_image_turbo": {
+      "class": "permissive",
+      "license_id": "apache-2.0",
+      "source_url": "https://example.com/z_image_turbo",
+      "fetched_on": "2026-01-01",
+      "basis": "hf-card-tag"
+    },
+    "Comfy-Org/ace_step_1.5_ComfyUI_files": {
+      "class": "permissive",
+      "license_id": "apache-2.0",
+      "source_url": "https://example.com/ace_step",
+      "fetched_on": "2026-01-01",
+      "basis": "hf-card-tag"
+    },
+    "Comfy-Org/Wan_2.1_ComfyUI_repackaged": {
+      "class": "permissive",
+      "license_id": "apache-2.0",
+      "source_url": "https://example.com/wan",
+      "fetched_on": "2026-01-01",
+      "basis": "hf-card-tag"
+    },
+    "comfyanonymous/flux_text_encoders": {
+      "class": "permissive",
+      "license_id": "apache-2.0",
+      "source_url": "https://example.com/text_encoders",
+      "fetched_on": "2026-01-01",
+      "basis": "hf-card-tag",
+      "flux_bar": false
+    }
+  }
+}

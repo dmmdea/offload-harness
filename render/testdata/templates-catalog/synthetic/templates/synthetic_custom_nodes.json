@@ -1,0 +1,25 @@
+{
+ "id": "00000000-0000-4000-8000-00000000f003",
+ "revision": 0,
+ "version": 0.4,
+ "nodes": [
+  {
+   "id": 1,
+   "type": "SomePackNode",
+   "mode": 0,
+   "properties": {"cnr_id": "example-pack", "ver": "1.0.0"}
+  },
+  {
+   "id": 2,
+   "type": "KSampler",
+   "mode": 0,
+   "properties": {"cnr_id": "comfy-core"}
+  },
+  {
+   "id": 3,
+   "type": "BypassedPackNode",
+   "mode": 4,
+   "properties": {"cnr_id": "other-pack", "ver": "2.0.0"}
+  }
+ ]
+}

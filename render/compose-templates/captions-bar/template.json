@@ -1,0 +1,10 @@
+{
+  "name": "captions-bar",
+  "description": "Transparent caption track: one short group of words at a time in a bar near the bottom edge, timed from a JSON list of [start, end, text] triples (build it from a transcript with render/captions-groups.mjs). Render silent to webm or mov, then lay it over the footage.",
+  "width": 1920,
+  "height": 1080,
+  "fps": 30,
+  "alpha": true,
+  "duration_variable": "duration",
+  "formats": ["webm", "mov", "png-sequence", "mp4"]
+}

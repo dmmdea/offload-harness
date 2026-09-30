@@ -28,6 +28,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/agent"
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/delegate"
 	"github.com/dmmdea/offload-harness/internal/llamaclient"
 )
 
@@ -48,6 +49,11 @@ type agentFake struct {
 	// streamed seat) and receives the decoded request body; nil = f.loop.
 	loopStream func(n int64, body map[string]any, w http.ResponseWriter, r *http.Request)
 	repack     func(n int64) string // content of the grammar completion (a JSON object string)
+	// repackStream, when set, answers the n-th GRAMMAR completion itself (a seat
+	// whose re-pack may stream) and receives the decoded request body; it runs
+	// before repackDelay/repackStatus, so it owns the whole answer. nil = the JSON
+	// answer f.repack scripts.
+	repackStream func(n int64, body map[string]any, w http.ResponseWriter, r *http.Request)
 	// repackStatus, when non-zero, is returned for every grammar completion
 	// instead of a body: the seat ANSWERED with that status rather than with a
 	// result. 5xx = unreachable-class; 4xx = the seat refusing THIS request.
@@ -109,6 +115,14 @@ type agentFake struct {
 	// not know the seat, unless upstreamModels is set.
 	upstreamCNT    atomic.Int64
 	upstreamModels func(n int64) string
+	// upstreamStatus, when set and non-zero for the n-th warm-up GET, is the
+	// status the passthrough answers with instead of a body — llama-swap's 500
+	// when a seat's engine dies at start.
+	upstreamStatus func(n int64) int
+	// upstreamBody, when set, is the body written after upstreamStatus's status:
+	// llama-swap's own words for a refusal (`process is not ready`, `upstream
+	// command exited prematurely`), which is what tells a busy seat from a dead one.
+	upstreamBody func(n int64) string
 	// rosterStatus, when non-zero, is the status /v1/models answers with.
 	rosterStatus int
 	// props, when non-nil, is served (as JSON) at the seat's
@@ -131,6 +145,13 @@ type agentFake struct {
 	// every pre-fallback test keeps its exact outcome.
 	chatFallback    func(int64) string
 	chatFallbackCNT atomic.Int64
+	// chatBodies, when non-nil, records the decoded body of every grammar-FREE
+	// chat completion: the lane a vLLM-declared seat's structured re-pack lands
+	// on, since that request carries structured_outputs and no `grammar`.
+	chatBodies chan map[string]any
+	// chatStream, when set, answers the n-th grammar-FREE chat completion itself
+	// (a seat whose chat fallback may stream); nil = the chatFallback scripts.
+	chatStream func(n int64, body map[string]any, w http.ResponseWriter, r *http.Request)
 	// chatFallbackDelay stalls every chat-fallback completion — the mirror of
 	// repackDelay for the grammar lane, used to expire the contract's wall
 	// deadline DURING the chat fallback (register D-108: the chat fallback is
@@ -314,6 +335,16 @@ func (f *agentFake) server(t *testing.T) *httptest.Server {
 			if g, _ := body["grammar"].(string); g == "" {
 				// The grammar-free chat fallback lane (repackViaChat).
 				n := f.chatFallbackCNT.Add(1)
+				if f.chatBodies != nil {
+					select {
+					case f.chatBodies <- body:
+					default: // never block the seat on an un-drained recorder
+					}
+				}
+				if f.chatStream != nil {
+					f.chatStream(n, body, w, r)
+					return
+				}
 				if f.chatFallback != nil {
 					if f.chatFallbackDelay > 0 {
 						time.Sleep(f.chatFallbackDelay)
@@ -346,6 +377,10 @@ func (f *agentFake) server(t *testing.T) *httptest.Server {
 				case f.repackBodies <- body:
 				default: // never block the seat on an un-drained recorder
 				}
+			}
+			if f.repackStream != nil {
+				f.repackStream(n, body, w, r)
+				return
 			}
 			if f.repackThinkingSeat && !repackDisablesThinking(body) {
 				// The live defect: grammar + thinking template ⇒ the answer is
@@ -401,6 +436,15 @@ func (f *agentFake) server(t *testing.T) *httptest.Server {
 			}
 			if r.URL.Path == "/upstream/"+f.seat()+"/v1/models" {
 				n := f.upstreamCNT.Add(1)
+				if f.upstreamStatus != nil {
+					if st := f.upstreamStatus(n); st != 0 {
+						w.WriteHeader(st)
+						if f.upstreamBody != nil {
+							_, _ = w.Write([]byte(f.upstreamBody(n)))
+						}
+						return
+					}
+				}
 				if f.upstreamModels != nil {
 					w.Header().Set("Content-Type", "application/json")
 					_, _ = w.Write([]byte(f.upstreamModels(n)))
@@ -907,18 +951,21 @@ func TestRunAgentTaskRepackLastAttemptTransportOutranksEarlierValidation(t *test
 // test passed on code that had lost the behavior entirely — it was pinning
 // genErrIsTransport's context.Canceled exclusion, never this arm.
 func TestRunAgentTaskRepackParentCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	fake := &agentFake{
-		rosterIDs:   []string{agentTestSeat},
-		loop:        func(int64) string { return doneChat("The answer is 42.") },
-		repack:      func(int64) string { return `{"answer":"42"}` },
-		repackDelay: 3 * time.Second,
+		rosterIDs: []string{agentTestSeat},
+		loop:      func(int64) string { return doneChat("The answer is 42.") },
+		// The caller goes away while the re-pack is in flight, whatever the load: the
+		// re-pack request itself is the trigger. A fixed timer (150 ms) landed in the
+		// agent loop on a loaded machine and the run reported the loop's arm instead.
+		repackStream: func(n int64, body map[string]any, w http.ResponseWriter, r *http.Request) {
+			cancel()
+			<-r.Context().Done()
+		},
 	}
 	srv := fake.server(t)
 	defer srv.Close()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	time.AfterFunc(150*time.Millisecond, cancel)
 
 	res := agentTestPipeline(t, srv.URL).Run(ctx, agentTestRequest(t, testContract()))
 	wire := decodeWire(t, res)
@@ -932,6 +979,16 @@ func TestRunAgentTaskRepackParentCancellation(t *testing.T) {
 	}
 	if !strings.Contains(wire.Reason, "structured re-pack") || !strings.Contains(wire.Reason, "cancel") {
 		t.Fatalf("reason = %q, want this arm's own message naming the cancelled re-pack (not the default arm's \"output failed schema\")", wire.Reason)
+	}
+	// The handshake with the delegator (register C-66, PR-4): the node flags EVERY
+	// re-pack failure a schema miss, this one included, and the delegator tells the
+	// caller-went-away arm apart by its reason prefix. A caller that abandoned the
+	// poll is not waiting for a rescued object.
+	if !wire.SchemaMiss || !strings.HasPrefix(wire.Reason, core.RepackCanceledReason) {
+		t.Fatalf("schema_miss = %v, reason = %q, want the flagged defer to carry the stable prefix %q", wire.SchemaMiss, wire.Reason, core.RepackCanceledReason)
+	}
+	if delegate.SchemaMissRescuable(wire) {
+		t.Fatalf("the delegator would rescue a defer whose caller went away: %+v", wire)
 	}
 }
 

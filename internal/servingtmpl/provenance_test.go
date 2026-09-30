@@ -51,9 +51,11 @@ func TestParamsBasisMirrorsParams(t *testing.T) {
 	// zero value forever.
 	p := params()
 	p.Home, p.GOOS, p.Backend = "/srv/offload", "linux", "cuda"
+	p.RknpuHome = "/srv/npu"
 	p.GPUEnv = []string{"CUDA_VISIBLE_DEVICES=0"}
 	p.Seats = []mediaseat.Seat{{Kind: "vision", Name: "vlm", Model: "m.gguf", Residency: "swap"}}
 	p.VLLMSeat = &vllmseat.Spec{ID: "seat", Unit: "u", Port: 18797, MaxModelLen: 131072}
+	p.ExtraVLLMSeats = []*vllmseat.Spec{{ID: "extra-seat", Unit: "u2", Port: 18797, MaxModelLen: 32768}}
 	p.VLLMRuntime = vllmseat.Runtime{User: "someone", ProxyHost: "203.0.113.9"}
 	p.IncludeQ38, p.IncludeQ359B, p.IncludeMimo9B, p.DisableCUDAGraphs = true, true, true, true
 	// The composite tier’s display layer (ADR 0039) rides in the hashed set too:
@@ -110,6 +112,9 @@ func TestSpecHashIsSensitiveToEveryInput(t *testing.T) {
 		{"params.backend", func(b *SpecBasis) { b.Params.Backend = "vulkan" }},
 		{"params.disable_cuda_graphs", func(b *SpecBasis) { b.Params.DisableCUDAGraphs = true }},
 		{"params.vllm_seat", func(b *SpecBasis) { b.Params.VLLMSeat = &vllmseat.Spec{ID: "seat", MaxModelLen: 131072} }},
+		{"params.extra_vllm_seats", func(b *SpecBasis) {
+			b.Params.ExtraVLLMSeats = []*vllmseat.Spec{{ID: "extra-seat", MaxModelLen: 32768}}
+		}},
 		{"params.vllm_runtime", func(b *SpecBasis) { b.Params.VLLMRuntime = vllmseat.Runtime{User: "someone"} }},
 	} {
 		t.Run(tc.field, func(t *testing.T) {

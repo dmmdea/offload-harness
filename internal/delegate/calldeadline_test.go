@@ -342,6 +342,22 @@ func remoteRunningForever(t *testing.T) (*fakeNode, string) {
 // a test that fronts the node with routes of its own.
 func remoteRunningForeverServer(t *testing.T) (*fakeNode, *httptest.Server) {
 	t.Helper()
+	return remoteStuckServer(t, "running")
+}
+
+// remoteQueuedForeverServer is the same node with its slow jobs still in the backlog:
+// every job but a "fast" one answers `accepted` (admitted, not started) for as long as it
+// is polled. It is the state in which the delegator asks a node to take a job back (ADR
+// 0064): a job last seen `running` has started, and the request could only be refused.
+func remoteQueuedForeverServer(t *testing.T) (*fakeNode, *httptest.Server) {
+	t.Helper()
+	return remoteStuckServer(t, "accepted")
+}
+
+// remoteStuckServer builds the node both helpers above return: a "fast" job finishes at
+// once and every other job answers slowState for as long as it is polled.
+func remoteStuckServer(t *testing.T, slowState string) (*fakeNode, *httptest.Server) {
+	t.Helper()
 	var goals sync.Map
 	f := &fakeNode{t: t, agentEnabled: true, resident: true, ctxTokens: 32768, nodeID: "node-a"}
 	f.onDispatch = func(jobID string, c core.AgentContract) { goals.Store(jobID, c.Goal) }
@@ -351,7 +367,7 @@ func remoteRunningForeverServer(t *testing.T) (*fakeNode, *httptest.Server) {
 			w.NodeID = "node-a"
 			return doneWire(t, w), http.StatusOK
 		}
-		return map[string]any{"state": "running"}, http.StatusOK
+		return map[string]any{"state": slowState}, http.StatusOK
 	}
 	return f, f.server()
 }

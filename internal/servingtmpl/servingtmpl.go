@@ -103,6 +103,10 @@ type Params struct {
 	// suffix. Both matter only when Seats is non-empty.
 	Home string
 	GOOS string
+	// RknpuHome is the rknpu accelerator's home, substituted for __RKNPU_HOME__ in seat
+	// paths (an rkllm seat's default launcher lives there). Empty falls back to
+	// <Home>/rknpu, the layout `install seed` uses when no RKNPU_HOME says otherwise.
+	RknpuHome string
 
 	// DisplayLayer is the tier's display layer (ADR 0039) when it declares one:
 	// the dormant rungs pinned to the display card. nil — the common case, and
@@ -117,9 +121,11 @@ type Params struct {
 	// This lived in install.ps1 as an `if ($profileId -match '^blackwell-')` branch,
 	// so a Linux install of the same tier silently did not get it.
 	GPUEnv []string
-	// Backend is the tier's serving backend (cuda|vulkan|cpu|…). A vision seat renders
-	// GPU flags (-ngl, --flash-attn) UNLESS this is "cpu", where the template's own
-	// chat models carry neither and a GPU-less build would only ignore them.
+	// Backend is the tier's serving backend (cuda|vulkan|rk3588|cpu|…). A vision seat
+	// renders GPU flags (-ngl, --flash-attn) UNLESS this is "cpu", where the template's
+	// own chat models carry neither and a GPU-less build would only ignore them. rk3588
+	// serves from the NPU (RKLLM seats): its template has no llama.cpp entry, and the GPU
+	// gets none until llama.cpp runs clean on its Mali.
 	Backend string
 	// AltCPULlamaBin, when set, is the directory of a CPU llama-server build and asks
 	// for the CPU seat family (altcpu.go): the tier's chat weights as `<id>-cpu`
@@ -151,8 +157,23 @@ type Params struct {
 	// without them renders the tier's llama.cpp fallback seat instead. Rendering a
 	// unit that points at a venv nobody built is worse than the fallback.
 	VLLMSeat *vllmseat.Spec
+	// ExtraVLLMSeats are the tier's further vLLM seats (profiles.json `extra_vllm_seats`)
+	// this box can run: on-demand seats beside VLLMSeat on the SAME card, never the agent
+	// lane. Empty is the common case and MUST render byte-identically to a build with no
+	// support for them (TestNoExtraVLLMSeatsChangesNothing).
+	//
+	// Every vLLM seat of a tier is rendered as an ALTERNATIVE of the others inside the
+	// residents set (`emb & rer & (vagt | vagt2)`): each is sized with util 0.90 of the
+	// card, so two of them can never be loaded together, and a matrix that called the
+	// pair a valid combination would have llama-swap load the second beside the first.
+	// Each extra seat's entry names wrappers after its own unit (vllmseat.Spec.ExtraEntry).
+	// The caller decides which seats to set with the same prerequisite detection it uses
+	// for VLLMSeat: an extra seat whose weights are absent is not rendered.
+	ExtraVLLMSeats []*vllmseat.Spec
 	// VLLMRuntime carries the two per-BOX values the tier cannot know: the account
-	// llama-swap runs as, and the literal address the engine binds.
+	// llama-swap runs as, and the literal address the engine binds. It is required whenever
+	// any vLLM seat is set (the lane seat or an extra one): Render refuses an incomplete one,
+	// because an entry rendered from it names no seat directory and no address.
 	VLLMRuntime vllmseat.Runtime
 }
 
@@ -462,17 +483,42 @@ func Render(tmpl string, p Params) (string, error) {
 	} {
 		out = strings.ReplaceAll(out, from, to)
 	}
+	// A set made only of seats (a template with no model of its own, like rk3588's)
+	// renders as `" | seat"`: the seat fragment carries its own leading operator because
+	// it normally follows a template var. llama-swap rejects an expression that opens on
+	// an operator, so drop it.
+	out = leadingSetOperator.ReplaceAllString(out, `$1`)
 	// A leftover token would start a server with a literal "__CTX__" argument, which
 	// fails looking like a model problem. Refuse instead, naming what is unresolved.
 	if left := uniqueTokens(out); len(left) > 0 {
 		return "", fmt.Errorf("unresolved template token(s) after rendering: %s", strings.Join(left, ", "))
 	}
+	// A template may leave every model to the tier's seats (rk3588's does); a render that
+	// still serves nothing would start a node that answers no model, so refuse it.
+	if !renderedModelKeyRe.MatchString(modelsSection(out)) {
+		return "", fmt.Errorf("the rendered config serves no model: this template has none of its own and the tier declared no seat")
+	}
 	return out, nil
+}
+
+// servesWithoutLlama is true for a render that starts no llama-server: the rk3588 backend,
+// whose template has no llama.cpp entry, with every seat on the NPU. Such a board has no
+// llama.cpp build to point at, so the render must not demand one.
+func (p Params) servesWithoutLlama() bool {
+	if p.Backend != "rk3588" {
+		return false
+	}
+	for _, s := range p.Seats {
+		if s.Kind != mediaseat.KindRKLLM {
+			return false
+		}
+	}
+	return true
 }
 
 func (p Params) validate() error {
 	var missing []string
-	if p.LlamaBin == "" {
+	if p.LlamaBin == "" && !p.servesWithoutLlama() {
 		missing = append(missing, "llama bin dir")
 	}
 	if p.ModelsDir == "" {
@@ -509,8 +555,8 @@ func (p Params) validate() error {
 	// kept as the tier's un-aliased ROLLBACK seat. The __Q354B_AGENT_ALIAS__ token
 	// (mirroring __Q359B_AGENT_ALIAS__) drops qwen3.5-4b-agent's own claim on the
 	// alias so only mimo-9b-agent carries it, avoiding the duplicate.
-	if len(p.Seats) > 0 && p.Home == "" && seatsNeedHome(p.Seats) {
-		missing = append(missing, "install home (a media seat names a path under "+tokenHome+")")
+	if len(p.Seats) > 0 && p.Home == "" && seatsNeedHome(p.Seats, p.RknpuHome) {
+		missing = append(missing, "install home (a media seat names a path under "+tokenHome+" or "+tokenRknpuHome+")")
 	}
 	if len(missing) > 0 {
 		return fmt.Errorf("serving template needs: %s", strings.Join(missing, ", "))
@@ -521,30 +567,43 @@ func (p Params) validate() error {
 // Tokens a seat path may carry, shared with internal/tierseed so ONE tier-table
 // row renders on every machine and OS.
 const (
-	tokenHome = "__OFFLOAD_HOME__"
-	tokenExe  = "__EXE__"
+	tokenHome      = "__OFFLOAD_HOME__"
+	tokenRknpuHome = "__RKNPU_HOME__"
+	tokenExe       = "__EXE__"
 )
 
 // seatsNeedHome scans exactly the fields seatExpand resolves. Scanning more would
-// promise a substitution that never happens.
-func seatsNeedHome(seats []mediaseat.Seat) bool {
+// promise a substitution that never happens. The launcher is the seat's EFFECTIVE bin:
+// an rkllm seat that names none runs a default under the install home, and reading the
+// raw field would let it reach the token guard and die there as an unresolved token
+// instead of as the refusal that names the missing home.
+func seatsNeedHome(seats []mediaseat.Seat, rknpuHome string) bool {
 	for _, s := range seats {
-		if strings.Contains(s.Bin+s.LibDir, tokenHome) {
+		paths := s.EffectiveBin() + s.LibDir
+		if strings.Contains(paths, tokenHome) || (rknpuHome == "" && strings.Contains(paths, tokenRknpuHome)) {
 			return true
 		}
 	}
 	return false
 }
 
-// seatExpand resolves the two seat-only tokens against the TARGET machine.
+// seatExpand resolves the seat-only tokens against the TARGET machine.
 func (p Params) seatExpand(s string) string {
 	exe := ""
 	if p.GOOS == "windows" {
 		exe = ".exe"
 	}
 	s = strings.ReplaceAll(s, tokenExe, exe)
+	home := strings.TrimRight(strings.ReplaceAll(p.Home, `\`, "/"), "/")
 	if p.Home != "" {
-		s = strings.ReplaceAll(s, tokenHome, strings.TrimRight(strings.ReplaceAll(p.Home, `\`, "/"), "/"))
+		s = strings.ReplaceAll(s, tokenHome, home)
+	}
+	rknpu := strings.TrimRight(strings.ReplaceAll(p.RknpuHome, `\`, "/"), "/")
+	if p.RknpuHome == "" && p.Home != "" {
+		rknpu = home + "/rknpu"
+	}
+	if rknpu != "" {
+		s = strings.ReplaceAll(s, tokenRknpuHome, rknpu)
 	}
 	return s
 }
@@ -561,7 +620,7 @@ func (p Params) seatExpand(s string) string {
 // seat in memory forever or make the memory stack evictable.
 func insertSeats(tmpl string, p Params) (string, map[string]string, error) {
 	frag := map[string]string{roleSwappable: "", roleResident: ""}
-	if len(p.Seats) == 0 && p.VLLMSeat == nil {
+	if len(p.Seats) == 0 && p.VLLMSeat == nil && len(p.vllmExtras()) == 0 {
 		return tmpl, frag, nil
 	}
 	anchors, err := parseAnchors(tmpl)
@@ -612,13 +671,25 @@ func insertSeats(tmpl string, p Params) (string, map[string]string, error) {
 		}
 		frag[s.Residency] += matrixJoin(s.Residency) + id
 	}
-	if p.VLLMSeat != nil {
+	if p.VLLMSeat != nil || len(p.vllmExtras()) > 0 {
 		var err error
 		if out, frag, err = insertVLLMSeat(out, p, anchors, taken, frag); err != nil {
 			return "", nil, err
 		}
 	}
 	return out, frag, nil
+}
+
+// vllmExtras is Params.ExtraVLLMSeats without its nil entries: a caller building the
+// list from a detection loop may leave one, and a nil seat renders nothing.
+func (p Params) vllmExtras() []*vllmseat.Spec {
+	var out []*vllmseat.Spec
+	for _, e := range p.ExtraVLLMSeats {
+		if e != nil {
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 // insertVLLMSeat places the tier's persistent vLLM agent seat as a RESIDENT matrix
@@ -629,8 +700,30 @@ func insertSeats(tmpl string, p Params) (string, map[string]string, error) {
 // reference deployment's llama-swap uses `groups`; `persistent: true` was separately
 // measured FAILING on the Qube, where it silently degraded the memory stack to
 // dense-only, which is why the templates moved to `matrix:`.)
+//
+// A tier that also declares EXTRA vLLM seats (Params.ExtraVLLMSeats) renders them beside
+// the lane seat, and the seats become ALTERNATIVES of one another inside the residents
+// set — `emb & rer & (vagt | vagt2)`. Two heavy seats cannot share a card (each is sized
+// with util 0.90 of it: the reference 16 GB card holds 13.9 GiB or 11.7 GiB, never both),
+// so joining them as co-resident members would make the matrix call the pair a valid
+// combination and llama-swap would load the second beside the first. As alternatives they
+// stay resident-class — an ordinary chat request never evicts the agent lane — while the
+// solver swaps one heavy seat for the other when the other is asked for by name.
 func insertVLLMSeat(out string, p Params, anchors seatAnchors, taken map[string]bool, frag map[string]string) (string, map[string]string, error) {
-	s := *p.VLLMSeat
+	type seatRef struct {
+		spec  vllmseat.Spec
+		extra bool
+	}
+	var seats []seatRef
+	if p.VLLMSeat != nil {
+		seats = append(seats, seatRef{spec: *p.VLLMSeat})
+	}
+	for _, e := range p.vllmExtras() {
+		seats = append(seats, seatRef{spec: *e, extra: true})
+	}
+	if len(seats) == 0 {
+		return out, frag, nil
+	}
 	if !anchors.roles[roleResident] {
 		var roles []string
 		for r := range anchors.roles {
@@ -640,34 +733,54 @@ func insertVLLMSeat(out string, p Params, anchors seatAnchors, taken map[string]
 		return "", nil, fmt.Errorf("this tier declares a vllm_seat (%s), which must be RESIDENT — nothing may evict "+
 			"the agent lane — but the target serving template places only: %s. Rendering it as an alternative would "+
 			"let an ordinary chat request unload the agent seat and pay its 125-250 s reload",
-			s.ID, strings.Join(roles, ", "))
+			seats[0].spec.ID, strings.Join(roles, ", "))
 	}
-	if definesModel(out, s.ID) {
-		return "", nil, fmt.Errorf("vllm seat %q is already defined by the template — a tier may not redeclare a seat "+
-			"the template owns", s.ID)
+	// An entry rendered from an incomplete runtime is `cmd: /vllm-35b-seat-cmd.sh` and
+	// `proxy: http://:18797`: a seat that is listed, passes every gate that reads the text, and
+	// fails only when a contract asks for it. A caller that has a seat has resolved a runtime
+	// for it, so an incomplete one is that caller's bug and it is refused here, by name.
+	if err := p.VLLMRuntime.Validate(); err != nil {
+		return "", nil, fmt.Errorf("vllm seat %q cannot be rendered: %w", seats[0].spec.ID, err)
 	}
-	// llama-swap requires a matrix var key to be alphanumeric and 1-8 characters.
-	id := "vagt"
-	for i := 2; taken[id] && i < 10; i++ {
-		id = fmt.Sprintf("vagt%d", i)
+	var ids []string
+	for _, ref := range seats {
+		s := ref.spec
+		if definesModel(out, s.ID) {
+			return "", nil, fmt.Errorf("vllm seat %q is already defined by the template — a tier may not redeclare a seat "+
+				"the template owns", s.ID)
+		}
+		// llama-swap requires a matrix var key to be alphanumeric and 1-8 characters.
+		id := "vagt"
+		for i := 2; taken[id] && i < 10; i++ {
+			id = fmt.Sprintf("vagt%d", i)
+		}
+		if taken[id] {
+			return "", nil, fmt.Errorf("vllm seat %q: no free matrix var id", s.ID)
+		}
+		taken[id] = true
+		entry := s.Entry(p.VLLMRuntime)
+		if ref.extra {
+			entry = s.ExtraEntry(p.VLLMRuntime)
+		}
+		var err error
+		if out, err = appendModel(out, entry); err != nil {
+			return "", nil, err
+		}
+		if out, err = addMatrixVar(out, id, s.ID); err != nil {
+			return "", nil, err
+		}
+		// The vLLM cold load is 125-250 s; llama-swap's default healthCheckTimeout (120)
+		// kills the attach mid-load and cmdStop then stops the engine. Raising it is
+		// GLOBAL by design — llama.cpp seats still fail fast when genuinely broken, they
+		// just get a longer ceiling.
+		out = raiseHealthCheckTimeout(out, s)
+		ids = append(ids, id)
 	}
-	if taken[id] {
-		return "", nil, fmt.Errorf("vllm seat %q: no free matrix var id", s.ID)
+	if len(ids) == 1 {
+		frag[roleResident] += matrixJoin(roleResident) + ids[0]
+	} else {
+		frag[roleResident] += matrixJoin(roleResident) + "(" + strings.Join(ids, " | ") + ")"
 	}
-	taken[id] = true
-	var err error
-	if out, err = appendModel(out, s.Entry(p.VLLMRuntime)); err != nil {
-		return "", nil, err
-	}
-	if out, err = addMatrixVar(out, id, s.ID); err != nil {
-		return "", nil, err
-	}
-	// The vLLM cold load is 125-250 s; llama-swap's default healthCheckTimeout (120)
-	// kills the attach mid-load and cmdStop then stops the engine. Raising it is
-	// GLOBAL by design — llama.cpp seats still fail fast when genuinely broken, they
-	// just get a longer ceiling.
-	out = raiseHealthCheckTimeout(out, s)
-	frag[roleResident] += matrixJoin(roleResident) + id
 	return out, frag, nil
 }
 
@@ -718,10 +831,14 @@ func matrixJoin(role string) string {
 // be alphanumeric and 1-8 characters (verified against the binary: a key of
 // "embeddinggemma" is rejected outright), so the seat's own name — which carries
 // hyphens and is usually longer — can never be the key. The kind is used because a
-// tier may declare at most one seat per kind, which makes the id both stable and
-// unique by construction.
+// tier may declare at most one vision, stt or ocr seat (each writes a single config
+// field), which makes the id both stable and unique by construction. A text-only
+// rkllm seat writes no field, so a tier may declare several: the second and later ones
+// take the numbered ids below.
 func seatVarID(s mediaseat.Seat, taken map[string]bool) (string, error) {
-	base := map[string]string{mediaseat.KindVision: "vis", mediaseat.KindSTT: "stt", mediaseat.KindOCR: "ocr"}[s.Kind]
+	base := map[string]string{
+		mediaseat.KindVision: "vis", mediaseat.KindSTT: "stt", mediaseat.KindOCR: "ocr", mediaseat.KindRKLLM: "rkllm",
+	}[s.Kind]
 	if base == "" {
 		return "", fmt.Errorf("seat %q: no matrix var id for kind %q", s.Name, s.Kind)
 	}
@@ -913,6 +1030,20 @@ func seatBlock(s mediaseat.Seat, p Params, a seatAnchors) (string, error) {
 			"      %s --model __MODELS__/%s%s\n"+
 			"      --threads __NTHREADS__ --port ${PORT} --host 127.0.0.1\n",
 			p.seatExpand(s.Bin), s.Model, vad)
+	case mediaseat.KindRKLLM:
+		// No env line and no GPU flags, on purpose: `env` is the llama.cpp loader path and
+		// -ngl/--flash-attn are llama-server flags, while the NPU is neither — the launcher
+		// finds the RKLLM runtime itself. The window and the CPU mask are the two knobs
+		// the runtime is STARTED with, so they ride the command line; the served name is
+		// the seat's own, so /v1/models answers to the id the harness binds.
+		enc := ""
+		if s.VisionEncoder != "" {
+			enc = " --vision-encoder __MODELS__/" + s.VisionEncoder
+		}
+		fmt.Fprintf(&b, "    cmd: >-\n"+
+			"      %s --model __MODELS__/%s%s\n"+
+			"      --ctx-size %d --cpu-mask %s --served-name %s --port ${PORT} --host 127.0.0.1\n",
+			p.seatExpand(s.EffectiveBin()), s.Model, enc, s.CtxSize, s.EffectiveCPUMask(), s.Name)
 	default:
 		return "", fmt.Errorf("seat %q: unknown kind %q", s.Name, s.Kind)
 	}
@@ -927,6 +1058,29 @@ func seatBlock(s mediaseat.Seat, p Params, a seatAnchors) (string, error) {
 	fmt.Fprintf(&b, "\n    ttl: %d", ttl)
 	return b.String(), nil
 }
+
+// renderedModelKeyRe matches one model entry (a two-space-indented key) inside the models section.
+var renderedModelKeyRe = regexp.MustCompile(`(?m)^  [A-Za-z0-9._"-]+:\s*$`)
+
+// modelsSection returns the text between the top-level `models:` line and the next top-level key.
+func modelsSection(out string) string {
+	loc := modelsLineRe.FindStringIndex(out)
+	if loc == nil {
+		return ""
+	}
+	rest := out[loc[1]:]
+	if j := topLevelKeyRe.FindStringIndex(rest); j != nil {
+		rest = rest[:j[0]]
+	}
+	return rest
+}
+
+var (
+	modelsLineRe  = regexp.MustCompile(`(?m)^models:[ \t]*$`)
+	topLevelKeyRe = regexp.MustCompile(`(?m)^[A-Za-z_][A-Za-z0-9_]*:`)
+)
+
+var leadingSetOperator = regexp.MustCompile(`(?m)^(\s+[A-Za-z0-9_-]+:\s*")\s*[|&]\s*`)
 
 var modelKeyRe = regexp.MustCompile(`^ {2}"?([A-Za-z0-9._-]+)"?:\s*$`)
 var envLineRe = regexp.MustCompile(`^ {4}env:\s*\[(.*)\]\s*$`)

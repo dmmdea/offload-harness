@@ -41,7 +41,8 @@ func TestQueuedMsReachesTheDelegatorLedgerRow(t *testing.T) {
 	if results[0].Result.QueuedMs != 91234 {
 		t.Fatalf("PlacedResult.Result.QueuedMs = %d: the node's wire key did not decode", results[0].Result.QueuedMs)
 	}
-	rows, err := ledger.ReadAll(path)
+	all, err := ledger.ReadAll(path)
+	rows := ledger.JobRows(all) // one row per job: the dispatch marker is not a job (ADR 0064)
 	if err != nil || len(rows) != 1 || rows[0].QueuedMs != 91234 {
 		t.Fatalf("ledger rows = %+v (%v)", rows, err)
 	}

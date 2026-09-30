@@ -176,6 +176,15 @@ type Request struct {
 	// surface produced a cascade call. Documentary only — it NEVER routes,
 	// gates or selects a tier, and a forwarded request keeps its origin door.
 	Door string `json:"door,omitempty"`
+	// FleetJobID is the id the delegator dispatched this job under, stamped by a
+	// fleet node on the request it builds for a dispatched or pulled job (ADR 0064,
+	// register C-63). It rides to the ledger row as Meta.FleetJobID so the node's
+	// row and the delegator's row for the same run join on one equality instead of
+	// on a guess at latency. Documentary only, like Door: it NEVER routes, gates or
+	// keys a cache — a field of its own rather than a Params entry precisely
+	// because Params feeds the result-cache key, and a job-unique id there would
+	// make every dispatched request miss.
+	FleetJobID string `json:"fleet_job_id,omitempty"`
 }
 
 // Meta is per-call telemetry returned to the caller and recorded in the ledger.
@@ -417,6 +426,11 @@ type Meta struct {
 	// Pipeline.Run and mapped onto ledger.Entry.Door; omitempty, so a caller
 	// that stamps no door publishes byte-identically to before.
 	Door string `json:"door,omitempty"`
+	// FleetJobID is the Request.FleetJobID carried through to telemetry (ADR 0064):
+	// the id a fleet node's ledger row is joined to the delegator's row on. Copied
+	// in Pipeline.Run and mapped onto ledger.Entry.FleetJobID; omitempty, so a call
+	// no fleet node dispatched publishes byte-identically to before.
+	FleetJobID string `json:"fleet_job_id,omitempty"`
 	// License is the license of the media binding that produced this result (ADR
 	// 0058: a named family always declares one; a default binding may). Mapped onto
 	// ledger.Entry.License so the ledger can answer "which renders came out of a

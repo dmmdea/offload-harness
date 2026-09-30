@@ -71,7 +71,10 @@ native CPU/disk offloading (measured unusable on the Mamba-hybrid 27B under WSL2
    escape hatch is a declaration and never silence: a binding with `storeless: true` and a `reason`
    passes; an absent binding fails, and so does one merely switched off with no reason. The section
    prints above the health probe, since its verdicts are pure config and a dead serving layer must
-   not hide them. A box with no `vllm_seats` prints nothing and fails nothing.
+   not hide them. A box with no `vllm_seats` prints nothing and fails nothing. A tier that has MEASURED
+   why a seat runs without a store records it as the seat's `storeless_reason` in `profiles.json`
+   (refused beside a `cache_server`), and the seeded binding carries that sentence verbatim; a seat with
+   no recorded reason gets the generic one. A tier's extra vLLM seats each seed a binding of their own.
 3. `offload_status.kv_cache_server` LISTS every binding (an `fs_native` binding with a `status_file` also
    publishes `reachable` from the seat wrapper's verdict file, `SEAT_L2_STATUS_FILE`, which is `seat-l2-<seat id>.status` in a rendered seat env — B-29, 0.129.1): `bindings[]` (seat, store, address,
    key_prefix, l1_staging_gb, chunk size, declared/enabled — or `storeless` with its reason), plus
@@ -117,6 +120,10 @@ native CPU/disk offloading (measured unusable on the Mamba-hybrid 27B under WSL2
    (`VLLM::EngineCore`, `VllmWorker-N`) that outlive it, plus any parentless engine process; it then reads the
    seat devices back and warns, naming the holders, when they still hold VRAM. A stop that arrives mid-request
    left an EngineCore alive for 8 minutes on 2026-09-05 with the port free — llama-swap saw a clean unload.
+   Since 2026-09-30 it also waits for what it reaped to exit and names any process that survives SIGKILL with its
+   state (state D = stuck in the GPU driver, which keeps its VRAM), sends SIGKILL to an MP server that ignores
+   SIGTERM, and exits non-zero while a process of the seat is left; its output goes to the seat log even when the stop
+   task ran it (that task has no stdout anyone reads). See 4g for when it runs without a stop request.
 4c. Before the engine starts, the wrapper waits (`SEAT_VRAM_WAIT_SEC`, default 60) for every seat device to
    fall below its floor and names the holders if they do not — a start a few seconds after a swap-out found
    the cards still holding the previous engine and vLLM refused the KV pool (two cold loads in a row,
@@ -136,6 +143,34 @@ native CPU/disk offloading (measured unusable on the Mamba-hybrid 27B under WSL2
    pairing being 18797 engine / 18796 MP ZMQ / 18790 MP HTTP — refuses a squatted HTTP port the way it refuses
    a squatted engine port, and the seat spec carries `mp_http_port` (0 = engine port − 7) rendered into
    `seat.env` as `SEAT_MP_HTTP_PORT`.
+4g. **A crashed generation is cleaned up, not only a stopped one.** When the engine dies nothing runs
+   `cmdStop`: the API server exits, but the engine workers it could not stop and the seat's MP server outlive it
+   (2026-09-29: three workers survived SIGTERM and held 14.5–16 GB on every card, and the MP server kept its HTTP
+   port, so every restart refused for 23 minutes: 59 failed starts, 75 HTTP 500s). Two places run the stack's own
+   `seat_stop.sh`, both inside processes llama-swap already supervises; there is no watchdog, no scheduler and no
+   relaunch (ADR [0035](../architecture/decisions/0035-persistent-vllm-seat-behind-llama-swap.md), update 2026-09-30).
+   (1) At the START of the next generation, `seat_fg.sh`, when no `vllm serve` of its port is alive and it finds a
+   leftover (a listener on the MP HTTP port, an `lmcache server` of its MP port, an orphaned engine process: named
+   `VLLM::*` with no live vLLM API server above it), runs it once and waits up to `SEAT_MP_PORT_WAIT_SEC` (default 10) for
+   the MP HTTP port to free. A sibling seat's live workers are not leftovers and start nothing. (2) On a Windows/WSL
+   box the stub's crash exit (`seat-cmd.ps1`: the seat stopped answering for 30 s) starts the stop task and waits for it
+   (at most 90 s) before exiting 0, and logs the task's result (a stop that did not finish is named), unless the seat's
+   start task is still running, which means a live launcher owns the seat, or unless llama-swap asked for the stop: the
+   same 30 s exit ends every unload too (about nine exits in ten), and `seat-cmdstop.ps1` leaves a marker file
+   (`seat-stop-requested-<seat>` in the seat directory) that the stub reads to tell the two apart, so an unload gets no
+   second stop. What is reaped is chosen by rules and never by the port a process holds: an engine process with no live
+   vLLM API server (`vllm serve`, or `python -m vllm.entrypoints...`) among its ancestors, and the MP server of THIS stack's
+   MP port (its unit, then its process; SIGKILL after `SEAT_REAP_WAIT_SEC`, default 10). The engine rule reads the process
+   tree and is not a proof of ownership: an engine that a script builds in-process would look orphaned, so run such jobs
+   where no seat lives. A listener on the MP HTTP port that is anything else is foreign, the start is refused and the
+   listener is left running; a named env file that does not exist makes the stop exit 2 and touch nothing. Proven against
+   stand-in processes named like the real ones (`setup/templates/vllm-seat/seat_fg.stale-mp.tests.sh`, which also runs two
+   mutants of that guard and must catch both); not yet seen on a live crash. The live check: the seat ready again within 6
+   minutes of the death, no `REFUSING to start` line whose holder is the seat's own MP server, no `VLLM::Worker` process
+   60 s after the API server exits. The launcher scripts take effect when copied into the distro's seat directory, and the
+   stubs, BOTH `seat-cmd.ps1` and `seat-cmdstop.ps1`, when re-rendered and deployed (a hand-edited deployed stub is not
+   replaced by editing the template; with only the new `seat-cmd.ps1` no marker is written and every unload is cleaned up
+   after as well).
 
 ## Important flows
 

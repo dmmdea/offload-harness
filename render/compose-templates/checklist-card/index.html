@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>checklist-card</title>
+    <style>
+      /* Fonts are declared HERE, from the shared kit copied beside this file: Inter 700 (latin),
+         byte-identical to the face HyperFrames' producer embeds. A family the page does not declare
+         with @font-face is resolved by the producer through a Google Fonts request, which is a network
+         call at render time, so every family used below is declared. */
+      @font-face { font-family: "Inter"; src: url("shared/fonts/inter-latin-700-normal.woff2") format("woff2"); font-weight: 700; font-style: normal; }
+
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { width: 1920px; height: 1080px; overflow: hidden; background: #000; }
+
+      /* Every variable arrives as a --<id> custom property on the root (HyperFrames applies scalar
+         variables there), so the colors and the exit timing read from the root. */
+      #root {
+        position: relative;
+        width: 1920px;
+        height: 1080px;
+        overflow: hidden;
+        background: var(--background, #0a1210);
+        font-family: "Inter", sans-serif;
+        color: var(--text_color, #f1f5f4);
+      }
+
+      /* Everything except the canvas lives in .stage, so the exit fades the whole card to the flat
+         background in one motion. */
+      .stage {
+        position: absolute;
+        inset: 0;
+        animation: out 0.6s cubic-bezier(0.4, 0, 1, 1) calc(var(--duration, 7) * 1s - 0.6s) forwards;
+      }
+
+      /* Glow rising from the bottom edge and a soft dot texture. Radial gradients from the accent to
+         transparent, so the intensity is one opacity value. */
+      .bloom {
+        position: absolute;
+        inset: 0;
+        background: radial-gradient(120% 85% at 50% 118%, var(--accent, #34d399) 0%, transparent 62%);
+        transform-origin: 50% 120%;
+        animation:
+          bloom-in 1.4s cubic-bezier(0.16, 1, 0.3, 1) both,
+          bloom-breathe calc(max(var(--duration, 7) - 3, 1.2) * 1s / 2) ease-in-out 3s 2 forwards;
+      }
+      .grid {
+        position: absolute;
+        inset: 0;
+        background-image: radial-gradient(circle at center, rgba(255, 255, 255, 0.07) 1px, transparent 1.6px);
+        background-size: 46px 46px;
+        -webkit-mask-image: radial-gradient(130% 110% at 50% 60%, #000 30%, transparent 78%);
+        mask-image: radial-gradient(130% 110% at 50% 60%, #000 30%, transparent 78%);
+        animation: grid-in 1.1s cubic-bezier(0.33, 1, 0.68, 1) 0.2s both;
+      }
+
+      .layout {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        padding: 80px 80px 70px;
+      }
+
+      .title {
+        margin-bottom: 48px;
+        font-size: 54px;
+        font-weight: 700;
+        line-height: 1.1;
+        letter-spacing: -0.01em;
+        overflow-wrap: anywhere;
+        text-wrap: balance;
+        animation: focus 0.85s cubic-bezier(0.16, 1, 0.3, 1) 0.5s both;
+      }
+      .title em { font-style: normal; color: var(--accent, #34d399); }
+
+      .rows { display: flex; flex-direction: column; gap: 24px; }
+
+      /* One row per item; an item left empty hides its whole row. Each row starts a beat after the
+         one above it: --t is that start time, and the ring and the tick key off it. */
+      .row {
+        display: flex;
+        align-items: center;
+        gap: 36px;
+        padding: 34px 52px;
+        border-radius: 28px;
+        border: 1.5px solid rgba(255, 255, 255, 0.14);
+        background: rgba(255, 255, 255, 0.05);
+        box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.22);
+        animation: row-in 0.7s cubic-bezier(0.34, 1.3, 0.64, 1) var(--t) both;
+      }
+      .row:nth-child(1) { --t: 0.9s; }
+      .row:nth-child(2) { --t: 1.08s; }
+      .row:nth-child(3) { --t: 1.26s; }
+      .row:nth-child(4) { --t: 1.44s; }
+      .row:has(.row-text:empty) { display: none; }
+
+      .check {
+        position: relative;
+        flex-shrink: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 72px;
+        height: 72px;
+      }
+      .disc, .ring { position: absolute; inset: 0; border-radius: 50%; }
+      .disc { background: var(--accent, #34d399); opacity: 0.1; }
+      .ring {
+        border: 2px solid var(--accent, #34d399);
+        opacity: 0.55;
+        animation: ring-pop 0.5s ease-out calc(var(--t) + 0.2s) both;
+      }
+      .check svg { position: relative; width: 36px; height: 36px; overflow: visible; }
+      .check path {
+        fill: none;
+        stroke: var(--accent, #34d399);
+        stroke-width: 3.2;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+        stroke-dasharray: 48;
+        animation: tick 0.38s cubic-bezier(0.22, 1, 0.36, 1) calc(var(--t) + 0.28s) both;
+      }
+
+      .row-text {
+        font-size: 36px;
+        font-weight: 700;
+        line-height: 1.2;
+        letter-spacing: -0.01em;
+        overflow-wrap: anywhere;
+        text-wrap: balance;
+      }
+
+      /* Edges pulled toward black. */
+      .vignette {
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
+        background: radial-gradient(125% 125% at 50% 45%, transparent 52%, rgba(0, 0, 0, 0.5) 100%);
+      }
+
+      /* Nothing here scales above its resting size: a ring popping out to 1.1 gave frames that depended on
+         which render worker drew them, so the pop is an opacity pulse (see the README). Entrances that
+         scale UP TO 1 are stable. */
+      @keyframes bloom-in { from { opacity: 0; transform: scale(0.88); } to { opacity: 0.42; transform: scale(1); } }
+      @keyframes bloom-breathe { 0% { opacity: 0.42; } 50% { opacity: 0.3; } 100% { opacity: 0.42; } }
+      @keyframes grid-in { from { opacity: 0; } to { opacity: 0.45; } }
+      @keyframes focus { from { opacity: 0; transform: translateY(28px); filter: blur(12px); } to { opacity: 1; transform: translateY(0); filter: blur(0); } }
+      @keyframes row-in { from { opacity: 0; transform: translate(-16px, 38px); filter: blur(8px); } to { opacity: 1; transform: translate(0, 0); filter: blur(0); } }
+      @keyframes ring-pop { 0% { opacity: 0.55; } 40% { opacity: 1; } 100% { opacity: 0.55; } }
+      @keyframes tick { from { stroke-dashoffset: 48; } to { stroke-dashoffset: 0; } }
+      @keyframes out { from { opacity: 1; } to { opacity: 0; } }
+    </style>
+  </head>
+  <body>
+    <div
+      id="root"
+      data-composition-id="checklist-card"
+      data-start="0"
+      data-duration="7"
+      data-width="1920"
+      data-height="1080"
+      data-fps="30"
+      data-no-timeline
+      data-composition-variables='[{"id":"title_pre","type":"string","label":"Title before the emphasis","description":"The first part of the title.","maxLength":24,"default":"Before you"},{"id":"title_em","type":"string","label":"Title emphasis","description":"The emphasised phrase, in the accent color. May be empty.","maxLength":16,"default":"ship"},{"id":"title_post","type":"string","label":"Title after the emphasis","description":"The last part of the title. May be empty.","maxLength":24,"default":"a release"},{"id":"item1","type":"string","label":"Item 1","description":"The first checklist line. Leave empty to hide the row.","maxLength":56,"default":"Run the full test suite on a clean checkout"},{"id":"item2","type":"string","label":"Item 2","description":"The second line. Leave empty to hide the row.","maxLength":56,"default":"Read the changelog aloud once"},{"id":"item3","type":"string","label":"Item 3","description":"The third line. Leave empty to hide the row.","maxLength":56,"default":"Tag the commit and record its hash"},{"id":"item4","type":"string","label":"Item 4","description":"The fourth line. Leave empty to hide the row.","maxLength":56,"default":"Tell the team what to watch after deploy"},{"id":"background","type":"color","label":"Background","default":"#0a1210"},{"id":"accent","type":"color","label":"Accent","description":"The title emphasis, the tick marks and the glow.","default":"#34d399"},{"id":"text_color","type":"color","label":"Text color","default":"#f1f5f4"},{"id":"duration","type":"number","label":"Duration (seconds)","description":"Total length; the exit fade starts 0.6 s before the end.","min":4,"max":30,"default":7}]'
+    >
+      <div class="stage">
+        <div class="bloom"></div>
+        <div class="grid"></div>
+
+        <div class="layout">
+          <div class="title"><span data-var-text="title_pre">Before you</span> <em data-var-text="title_em">ship</em> <span data-var-text="title_post">a release</span></div>
+          <div class="rows">
+            <div class="row">
+              <div class="check"><span class="disc"></span><span class="ring"></span><svg viewBox="0 0 36 36"><path d="M6 18 L15 27 L30 10" /></svg></div>
+              <div class="row-text" data-var-text="item1">Run the full test suite on a clean checkout</div>
+            </div>
+            <div class="row">
+              <div class="check"><span class="disc"></span><span class="ring"></span><svg viewBox="0 0 36 36"><path d="M6 18 L15 27 L30 10" /></svg></div>
+              <div class="row-text" data-var-text="item2">Read the changelog aloud once</div>
+            </div>
+            <div class="row">
+              <div class="check"><span class="disc"></span><span class="ring"></span><svg viewBox="0 0 36 36"><path d="M6 18 L15 27 L30 10" /></svg></div>
+              <div class="row-text" data-var-text="item3">Tag the commit and record its hash</div>
+            </div>
+            <div class="row">
+              <div class="check"><span class="disc"></span><span class="ring"></span><svg viewBox="0 0 36 36"><path d="M6 18 L15 27 L30 10" /></svg></div>
+              <div class="row-text" data-var-text="item4">Tell the team what to watch after deploy</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="vignette"></div>
+      </div>
+    </div>
+    <script>
+      // CSS keyframes only, seeked by HyperFrames' CSS adapter; no clock, no randomness, no timers.
+      window.__timelines = window.__timelines || {};
+    </script>
+  </body>
+</html>
