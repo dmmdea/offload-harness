@@ -92,8 +92,9 @@ against a real 178-271 s), and several runs waiting on one load each appended it
    defer of D-118, the warm-up defer of C-76): the fault is
    a property of this seat, the contract is sound, the cure is another node. It is
    safe to re-place because a node-filed defer is an observed terminal. The retry's
-   budget is credited the node's admission plus its wait on the dead seat (capped at
-   one contract wall), because that time was not work. Two gates that guard a
+   budget is credited the node's admission plus its wait on the dead seat, and the wall
+   of a delegator-side rescue that failed first (below), capped together at one contract
+   wall, because that time was not work. Two gates that guard a
    *verification* retry do not apply to it: the first-pass floor is not raised by the
    dead seat's own `min_turn_sec` (the retry goes elsewhere, and the retry seat's own
    floor still applies once it is chosen), and the retry is not refused because the
@@ -110,7 +111,13 @@ against a real 178-271 s), and several runs waiting on one load each appended it
    That defer carries `schema_miss` like every failure of the re-pack (the loop
    finished and only its structuring did not), so a delegator that can re-pack the
    answer itself does that first (the rescue of register C-66) and re-places the
-   contract only when the rescue cannot produce a validated object.
+   contract only when the rescue cannot produce a validated object. A seat lost there
+   has no recovery wait of its own to report, and the rescue runs on the delegator's
+   clock before the re-placement is priced (it may cold-load the delegator's own seat
+   on the admission budget and then run a completion to its allowance), so the wall a
+   failed rescue spent is credited back with the rest: charged to the retry budget, a
+   slow rescue would have the retry floor refuse the very re-placement this decision
+   promises.
 
 4. **The wording follows the status, and a seat that is not serving is not waited on as
    contention.** `seat contended:` is for a 429 only (llama-swap's concurrency limit). A
