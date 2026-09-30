@@ -48,6 +48,7 @@ func TestSeatLauncherRecoversFromACrashedGenerationsMPServer(t *testing.T) {
 		"PASS an MP server that ignores SIGTERM is killed after the grace",
 		"PASS an MP server that obeys SIGTERM late is waited out, not killed",
 		"PASS a reaped worker that survives SIGKILL is named",
+		"PASS a stop that leaves a process of the seat alive fails, a clean one exits 0",
 		"PASS the stop path stops this seat's engine tree and only that",
 		"PASS mutation: reaping by port instead of by identity is caught",
 		"PASS mutation: dropping the final MP HTTP port refusal is caught",

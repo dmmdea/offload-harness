@@ -104,6 +104,7 @@ if command -v nvidia-smi >/dev/null 2>&1; then
   done
   [ -n "$held" ] && echo "seat_stop: WARN seat devices still hold VRAM after the stop:$held — holders: $(nvidia-smi --query-compute-apps=gpu_uuid,pid,process_name,used_memory --format=csv,noheader 2>/dev/null | tr '\n' ';')"
 fi
+# --- exit status: seat_fg.stale-mp.tests.sh runs from here to the end as well ---
 # A process that survived SIGKILL (or an MP server that did) is an incomplete stop: say so and fail, like a bound port.
 if [ -n "$STUCK" ] || [ -n "$MP_STUCK" ]; then echo "seat_stop: INCOMPLETE — processes of this seat survived SIGKILL:${STUCK}${MP_STUCK}"; exit 1; fi
 echo "seat stopped"

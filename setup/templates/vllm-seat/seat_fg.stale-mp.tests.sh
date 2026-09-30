@@ -118,6 +118,15 @@ alive() { ! gone "$1"; }
 reset() { builtin kill -9 $(cat "$T"/*.pid 2>/dev/null) 2>/dev/null; rm -f "$T"/*.pid; local p; for p in $MP_HTTP_PORT $MP_PORT $OTHER_MP_PORT; do wait_free "$p"; done; sleep 0.2; }
 run() { SEAT_MP_PORT_WAIT_SEC="${WAITSEC:-2}" bash "$T/seat_fg.sh" 2>&1; }
 has() { grep -q -- "$1" <<<"$out"; }
+# Records every `sleep` the shells started under it make (an exported function child bash processes inherit), so a test can
+# say "no 3 s grace was waited". A probe proves the recorder reaches a child shell; without it a silent recorder would pass.
+SLEEP_LOG="$T/sleeps"; export SLEEP_LOG
+record_sleeps() {
+  rm -f "$SLEEP_LOG"
+  sleep() { printf '%s\n' "$*" >> "$SLEEP_LOG"; command sleep "$@"; }; export -f sleep
+  bash -c 'sleep 0.01'; grep -qx 0.01 "$SLEEP_LOG" || failcase "sleep recorder" "it did not reach a child shell, so a \"no 3 s grace\" assertion would pass vacuously"
+}
+stop_recording() { unset -f sleep; }
 
 # 1. a crashed generation's MP server (the stack's own, by name and MP port) holds the MP HTTP port, no engine: reaped
 mp_standin stale $MP_PORT $MP_HTTP_PORT; out="$(run)"
@@ -129,9 +138,10 @@ cp "$T/seat_stop.stub.sh" "$T/seat_stop.sh"; foreign $MP_HTTP_PORT stale; out="$
 if has "seat_stop.sh exited 3" && has "START PROCEEDS"; then pass "a slow release is waited out and the cleanup's exit code is printed"; else failcase "slow release" "$out"; fi
 reset
 
-# 2. a FOREIGN holder the stack's cleanup does not own: refused, and left alone
-foreign $MP_HTTP_PORT foreign; out="$(run)"
-if has "REFUSING to start — the MP HTTP port" && ! has "START PROCEEDS" && alive foreign; then pass "a foreign holder is still refused"; else failcase "foreign holder" "$out"; fi
+# 2. a FOREIGN holder the stack's cleanup does not own: refused, and left alone. The wait for the port to free is the
+#    knob's (2 s here), not the default 10 s.
+foreign $MP_HTTP_PORT foreign; t0=$SECONDS; out="$(run)"; dt=$(( SECONDS - t0 ))
+if has "REFUSING to start — the MP HTTP port" && ! has "START PROCEEDS" && alive foreign && [ "$dt" -lt 8 ]; then pass "a foreign holder is still refused"; else failcase "foreign holder" "took ${dt} s: $out"; fi
 reset
 
 # 3. a LIVE engine of this stack: no cleanup runs, the MP port holder is refused
@@ -140,16 +150,19 @@ out="$(run)"
 if ! has "running seat_stop.sh once" && has "REFUSING to start — the MP HTTP port" && alive engine3 && alive held; then pass "a live engine is never cleaned up"; else failcase "live engine" "$out"; fi
 reset
 
-# 4. orphaned engine workers, MP port FREE (the MP server died, the workers did not): reaped, the start proceeds
+# 4. orphaned engine workers, MP port FREE (the MP server died, the workers did not): reaped, the start proceeds. A unit
+#    that is already gone is no warning.
 orphan o1 "VLLM::EngineCore"; orphan o2 "VLLM::Worker_TP0"; orphan o3 "VLLM::Worker_TP1"; out="$(run)"
-if has "engine processes named VLLM::" && [ "$(grep -c 'reaping orphaned engine process' <<<"$out")" -eq 3 ] && has "START PROCEEDS" && gone o1 && gone o2 && gone o3; then
+if has "engine processes named VLLM::" && [ "$(grep -c 'reaping orphaned engine process' <<<"$out")" -eq 3 ] && has "START PROCEEDS" && gone o1 && gone o2 && gone o3 && ! has "WARN systemctl stop"; then
   pass "orphaned engine workers are reaped with the MP port free and the start proceeds"; else failcase "orphaned workers" "$out"; fi
 reset
 
-# 5. the MP server AND the orphaned workers of the dead generation: both reaped in the one cleanup
-mp_standin stale5 $MP_PORT $MP_HTTP_PORT; orphan o1 "VLLM::Worker_PP0"; orphan o2 "VLLM::Worker_PP1"; out="$(run)"
-if has "reaping MP server" && has "reaping orphaned engine process" && has "START PROCEEDS" && gone stale5 && gone o1 && gone o2; then
-  pass "the MP server and the orphaned workers are reaped together"; else failcase "MP server + workers" "$out"; fi
+# 5. the MP server AND the orphaned workers of the dead generation: both reaped in the one cleanup, and with no process tree
+#    to wait for the cleanup does not sit out the 3 s grace the stop path gives a tree (every `sleep` the run makes is recorded)
+mp_standin stale5 $MP_PORT $MP_HTTP_PORT; orphan o1 "VLLM::Worker_PP0"; orphan o2 "VLLM::Worker_PP1"
+record_sleeps; out="$(run)"; stop_recording
+if has "reaping MP server" && has "reaping orphaned engine process" && has "START PROCEEDS" && gone stale5 && gone o1 && gone o2 && ! grep -qx 3 "$SLEEP_LOG"; then
+  pass "the MP server and the orphaned workers are reaped together"; else failcase "MP server + workers" "sleeps: $(tr '\n' ' ' < "$SLEEP_LOG"): $out"; fi
 reset
 
 # 6. a LIVE engine on another port has workers of its own: never reaped as orphans
@@ -187,9 +200,22 @@ out="$(run)"; unset -f kill; unset IMMORTAL
 if has "WARN orphaned engine process(es) still alive 3 s after SIGKILL: $(cat "$T/im.pid")(state S" && has "START PROCEEDS" && alive im; then pass "a reaped worker that survives SIGKILL is named"; else failcase "worker surviving SIGKILL" "$out"; fi
 reset
 
-# 12. the stop path (llama-swap's cmdStop) stops THIS seat's engine and its whole tree, and nothing of another seat's
-engine mine $PORT; engine other12 $OTHER_PORT; out="$(bash "$T/seat_stop.sh" "$T/seat.env" 2>&1)"
-if has "scratch seat_stop: reaping done" && gone mine && gone mine-worker && alive other12 && alive other12-worker; then pass "the stop path stops this seat's engine tree and only that"; else failcase "stop path" "$out"; fi
+# 11b. the exit status: a stop that leaves a process of the seat alive fails (INCOMPLETE, exit 1), a clean one says so and
+#      exits 0. The prefix of the real script, then its exit-status tail (no shared-memory cleanup, no VRAM readback).
+sed '/^# --- reaping ends here/,$d' "$HERE/seat_stop.sh" > "$T/seat_stop.exit.sh"; sed -n '/^# --- exit status/,$p' "$HERE/seat_stop.sh" >> "$T/seat_stop.exit.sh"
+grep -q 'seat stopped' "$T/seat_stop.exit.sh" && grep -q 'has_api_ancestor' "$T/seat_stop.exit.sh" || { echo "FAIL: seat_stop.sh has no marked exit-status tail"; exit 1; }
+orphan im2 "VLLM::Worker_TP0"; IMMORTAL="$(cat "$T/im2.pid")"; export IMMORTAL
+kill() { if [ "${1:-}" = "-KILL" ] && [ "${2:-}" = "$IMMORTAL" ]; then return 0; fi; builtin kill "$@"; }; export -f kill
+out="$(bash "$T/seat_stop.exit.sh" "$T/seat.env" 2>&1)"; rc=$?; unset -f kill; unset IMMORTAL
+reset
+out2="$(bash "$T/seat_stop.exit.sh" "$T/seat.env" 2>&1)"; rc2=$?
+if [ "$rc" -eq 1 ] && has "INCOMPLETE" && [ "$rc2" -eq 0 ] && grep -qx "seat stopped" <<<"$out2"; then pass "a stop that leaves a process of the seat alive fails, a clean one exits 0"; else failcase "exit status" "rc=$rc: $out / rc=$rc2: $out2"; fi
+
+# 12. the stop path (llama-swap's cmdStop) stops THIS seat's engine and its whole tree, and nothing of another seat's; with a
+#     process tree to wait for it still gives the tree its 3 s grace
+engine mine $PORT; engine other12 $OTHER_PORT
+record_sleeps; out="$(bash "$T/seat_stop.sh" "$T/seat.env" 2>&1)"; stop_recording
+if has "scratch seat_stop: reaping done" && gone mine && gone mine-worker && alive other12 && alive other12-worker && grep -qx 3 "$SLEEP_LOG"; then pass "the stop path stops this seat's engine tree and only that"; else failcase "stop path" "sleeps: $(tr '\n' ' ' < "$SLEEP_LOG"): $out"; fi
 reset
 
 # 12b. the production shape: the stack's own MP server runs in its transient systemd unit (as seat_fg.sh starts it) and
