@@ -27,6 +27,7 @@ one declaration, so the seat and the lane routing to it cannot disagree.
 | tensor_parallel | 0 | `--tensor-parallel-size`; tensor x pipeline must equal how many cards are listed |
 | max_model_len | 49152 | the served window |
 | gpu_memory_utilization | 0.92 | the engine's share of the card — chosen WITH the seat's co-residents in mind, not alone |
+| max_num_seqs | 32 | the engine's concurrency, and the entry's `concurrencyLimit` |
 | kv_cache_dtype | `fp8` | KV precision — backend-dependent, not free everywhere |
 | ttl_seconds | 300 | idle window before the seat unloads and frees its cards |
 | launch | `—` | which artifact set starts it |

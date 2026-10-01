@@ -542,6 +542,7 @@ func agentSeatSection(p Profile) string {
 	}
 	fmt.Fprintf(&b, "| max_model_len | %d | the served window |\n", s.MaxModelLen)
 	fmt.Fprintf(&b, "| gpu_memory_utilization | %.2f | the engine's share of the card — chosen WITH the seat's co-residents in mind, not alone |\n", s.GPUMemoryUtilization)
+	fmt.Fprintf(&b, "| max_num_seqs | %d | the engine's concurrency, and the entry's `concurrencyLimit` |\n", s.MaxNumSeqs)
 	fmt.Fprintf(&b, "| kv_cache_dtype | `%s` | KV precision — backend-dependent, not free everywhere |\n", dash(s.KVCacheDtype))
 	fmt.Fprintf(&b, "| ttl_seconds | %d | idle window before the seat unloads and frees its cards |\n", s.TTLSeconds)
 	fmt.Fprintf(&b, "| launch | `%s` | which artifact set starts it |\n", dash(s.Launch))
