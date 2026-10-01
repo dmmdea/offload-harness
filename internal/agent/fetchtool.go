@@ -10,11 +10,11 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strings"
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/netguard"
+	"github.com/dmmdea/offload-harness/internal/untrusted"
 )
 
 const (
@@ -161,50 +161,10 @@ func fetchTool(pol *Policy, client *http.Client) Tool {
 // force the fail-closed path.
 var randRead = rand.Read
 
-// injectionMarkers are chat-template / role tokens an injected page could use to
-// impersonate the operator. Stripping them is belt-and-suspenders; the PRIMARY
-// defense is structural (the body is delivered as a JSON string value below, so
-// quotes/newlines/angle-brackets are escaped and cannot terminate the fence).
-var injectionMarkers = []string{
-	"<|im_start|>", "<|im_end|>", "<|system|>", "<|user|>", "<|assistant|>",
-	"</system>", "<system>", "[INST]", "[/INST]", "### Instruction", "### System",
-	"UNTRUSTED_WEB_CONTENT",
-}
-
-// injectionRE matches the markers CASE-INSENSITIVELY (a page may use lowercase
-// forms like "[inst]" / "### system" that a case-sensitive compare would miss),
-// each marker QuoteMeta-escaped. Belt-and-suspenders only — the primary fence
-// defense is the structural JSON-string escape in fenceUntrusted.
-var injectionRE = func() *regexp.Regexp {
-	parts := make([]string, len(injectionMarkers))
-	for i, m := range injectionMarkers {
-		parts[i] = regexp.QuoteMeta(m)
-	}
-	return regexp.MustCompile("(?i)(" + strings.Join(parts, "|") + ")")
-}()
-
-// sanitizeUntrusted drops zero-width / format / line-separator runes (used to
-// hide payloads or break naive concatenation) and neutralizes the injection
-// markers above. Code points are tested numerically so the source stays ASCII.
-func sanitizeUntrusted(s string) string {
-	var b strings.Builder
-	b.Grow(len(s))
-	for _, r := range s {
-		switch r {
-		case 0x200B, // zero-width space
-			0x200C, // zero-width non-joiner
-			0x200D, // zero-width joiner
-			0x2060, // word joiner
-			0xFEFF, // zero-width no-break space / BOM
-			0x00AD, // soft hyphen
-			0x2028, // line separator
-			0x2029: // paragraph separator
-			continue
-		}
-		b.WriteRune(r)
-	}
-	return injectionRE.ReplaceAllString(b.String(), "[neutralized]")
-}
+// sanitizeUntrusted is untrusted.Sanitize: the markers and the hidden-rune rules live
+// once, shared with offload_research's digests (register SF-45). The PRIMARY defense
+// here stays structural: the body is delivered as a JSON string value below.
+func sanitizeUntrusted(s string) string { return untrusted.Sanitize(s) }
 
 // fenceUntrusted wraps fetched bytes as explicitly UNTRUSTED data: an unguessable
 // per-fetch nonce on the open/close delimiters (so a page cannot forge the
