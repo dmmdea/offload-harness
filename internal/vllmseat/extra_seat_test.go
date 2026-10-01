@@ -11,8 +11,9 @@ import (
 
 // extraSeat is a tier's SECOND vLLM seat: an on-demand digest seat that shares the
 // card with the tier's agent-lane seat but never binds `agent_model`. The numbers are
-// the ampere-16 reference box's measured 35B-A3B seat (register A-100): 32,768 at
-// util 0.90, eight in flight, the Qwen3.6 tool parser.
+// the ampere-16 reference box's measured 35B-A3B seat (register A-100; util 0.90 retuned
+// to 0.85 on 2026-09-30 so the memory embedder and reranker keep their room on the card):
+// 32,768 at util 0.85, eight in flight, the Qwen3.6 tool parser.
 func extraSeat() Spec {
 	return Spec{
 		ID:                   "qwen36-35b-a3b-gsq-vllm",
@@ -22,7 +23,7 @@ func extraSeat() Spec {
 		Device:               "0",
 		ModelRepo:            "hub/models--ISTA-DASLab--Qwen3.6-35B-A3B-2Bit-GSQ",
 		MaxModelLen:          32768,
-		GPUMemoryUtilization: 0.9,
+		GPUMemoryUtilization: 0.85,
 		MaxNumSeqs:           8,
 		MaxBatchedTokens:     4096,
 		KVCacheDtype:         "fp8_e5m2",
