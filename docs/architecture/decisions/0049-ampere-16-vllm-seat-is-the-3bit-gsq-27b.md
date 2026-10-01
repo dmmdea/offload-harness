@@ -23,6 +23,13 @@ date: "2026-09-16"
 > the bound lane at **32,768 @ util 0.90**, the window the card shares with the embedder. Measured before binding:
 > KV 1.75 GiB = 43,690 tokens (1.33x), embedder HTTP 200 beside it idle and under 4-stream load, single-stream
 > 7.17 tok/s, 4-stream 20.36 tok/s. The seat declaration now carries its bound-lane settings — see *Amendment 3*.
+>
+> **Amendment 4, 2026-09-30 — the memory embedder has absolute priority; the operating point moves to util 0.87 with
+> 8 sequences.** The declared 32,768 @ util 0.90 with `max_num_seqs` 32 ran the engine at 14,788 MiB under four
+> concurrent 8k-token requests, so the embedder could not load and every memory write failed for 35 minutes. The seat
+> now declares util 0.87 and `max_num_seqs` 8 (engine peak 13,984 MiB, card peak 14,833 MiB with the embedder and the
+> reranker resident), and the 35B fast-layer seat util 0.85 — see *Amendment 4*. Where this header or Amendment 3
+> says 0.90, Amendment 4 governs.
 
 ## Context — the quant nobody had found
 
@@ -174,6 +181,45 @@ default it was measured failing at.
 `measured` as history); walls are 129–516 s against the 4B's 42–108 s; the cache server stays blocked on the
 LMCache × vLLM 0.29 connector (D-117), so the seat runs on VRAM only and the binding says so.
 
+## Amendment 4 — the seat makes room for the memory stack's support models (operator order, 2026-09-30)
+
+**What happened.** Amendment 3 measured the embedder beside the seat at util 0.90 and it answered (card peak
+14,623 MiB). On 2026-09-30 the same declaration, util 0.90 with `max_num_seqs` 32, was run with the embedder
+(embeddinggemma 300M Q8, 452 MiB) and the reranker (bge-reranker-v2-m3 Q4_K_M, 372 MiB) resident on the 15,356 MiB card
+and four concurrent 8k-token requests: the engine ran at **14,788 MiB**, about 1 GB above its util share, because CUDA
+graph capture and workspaces are sized for 32 sequences. The embedder could not load, and every memory write failed for
+35 minutes. The operator's order: the memory embedder is absolute priority, and a better way than excluding one or the
+other has to be found.
+
+**What was measured** (the same load, both support models resident, on the reference ampere-16 box):
+
+| point | result |
+|---|---|
+| util 0.90, 32 sequences (Amendment 3) | engine 14,788 MiB; the embedder cannot load |
+| util 0.82 | refused: KV 0.64 GiB < 1.29 GiB needed for one 32,768-token request (vLLM's estimate: maximum length 9,408) |
+| util 0.87, 32 sequences | refused: 28 Mamba cache blocks < 32 sequences |
+| **util 0.87, 8 sequences** | runs: KV pool about 34k tokens, engine peak **13,984 MiB** under four concurrent 8,007-token requests, card peak **14,833 MiB** (about 520 MiB of headroom), embedder answering in 25 ms |
+
+The 35B fast-layer seat is served instead of the lane seat, never beside it, so it has its own point: util 0.85 gives KV
+0.91 GiB = 67,025 tokens (2.05x the window), an engine peak of 13,630 MiB and about 900 MiB of headroom beside both support
+models (at util 0.90 its pool was 122,135 tokens). One concurrent fleet request swapped the seats once during that run:
+the KV figure is exact, the peak is the maximum seen.
+
+**Decision.** `profiles.json` declares the lane seat at util 0.87 with `max_num_seqs` 8 and the 35B at util 0.85 (its
+`max_num_seqs` 8 and both 32,768 windows are unchanged). Util alone could not do it: below 0.87 vLLM refuses the
+32,768 window (util 0.82), and at 0.87 it refuses 32 sequences (Mamba cache blocks), so the sequence count comes down
+with it, and the engine's graph capture and workspaces scale with that count, which is where the extra 1 GB came from.
+The single layer's seat still declares no `max_inflight`, so the layer table and the seeded layers are unchanged.
+`TestAmpere16VLLMSeatDeclaresItsMeasuredBoundLane` pins the lane seat's exact values, and
+`TestAmpere16VLLMSeatsStayAtOrUnderTheirMeasuredCoResidencyPoint` fails when either seat's util or sequence count rises
+above its measured point. Raising either is a re-measurement beside both support models, not an edit.
+
+**Costs recorded.** The lane seat serves at most 8 sequences at once (it declared 32) and llama-swap's
+`concurrencyLimit` for it follows, 32 to 8; the harness's own local run cap defaults to 4, so its runs never reach it,
+and a direct client past 8 gets llama-swap's 429. Its KV pool holds about one full 32,768-token window (it held
+1.33x), so a second full-window request waits for KV. The 35B's pool falls from 3.73x to 2.05x of its window; the
+2026-09-18 note that the digest set runs with 0 preemptions on the larger pool is not re-measured on the smaller one.
+
 ## Consequences
 
 - `profiles.json` → `profiles["ampere-16"].vllm_seat` becomes `qwen38-27b-gsq-vllm`, `max_model_len` 49,152,
@@ -188,6 +234,8 @@ LMCache × vLLM 0.29 connector (D-117), so the seat runs on VRAM only and the bi
 - **Superseded by Amendment 3:** the bound lane on the reference box is the GSQ at 32,768 @ 0.90, and
   `profiles.json` now declares that operating point plus the bound-lane settings; the 49,152 @ 0.92 shape is kept
   in `measured` as what the seat serves when it has the card to itself.
+- **Amended by Amendment 4:** the operating point is now 32,768 @ util 0.87 with `max_num_seqs` 8 (and the 35B seat at
+  util 0.85); the 0.90 / 32 point is kept in `measured` as history.
 - **Not propagated** to blackwell-16 / volta-16. Neither has been measured on its own silicon and both still owe
   a vLLM seat ([ADR 0048](0048-vllm-is-a-first-class-engine-on-every-tier.md) counts the debt).
 
