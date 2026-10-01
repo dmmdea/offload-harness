@@ -117,7 +117,18 @@ arithmetic, or an ordering key among seats that already passed the adequacy gate
     waits for it (the placement wait, credited) instead of being skipped, so the two runs still never share
     the seat. It is skipped only when the seat stays busy for the whole wait or the wait is off, and a
     caller's cancel is reported as a cancel. The wait never places the retry on the seat that took the
-    first attempt: the retry's premise is a different seat.
+    first attempt: the retry's premise is a different seat. A retry never runs on a local seat a text lease
+    reserves (register C-81), as a first placement on `route=auto` or `route=spread` does not: with the seat
+    reserved it goes to an untried remote or, with none, is skipped at once with a note that names the
+    holder, and the first attempt's result stands. That is not the wait above, and it is not what a first
+    placement gets: a first placement that finds only a reserved seat is held in the capacity wait
+    (`agent_placement_wait_sec`, or `agent_lease_wait_sec` when that is longer) until the lease clears or a
+    node frees. A retry is skipped instead, as it is for a fenced seat (D-94), for three reasons. Its wait
+    is for a busy seat it was already placed on, so a retry that found no node has nothing to wait with. A
+    reservation, unlike a busy seat, lasts until the holder releases it or its lease expires, not until a
+    run ends. And the first attempt's result with the holder named is what a caller needs to wait, route
+    elsewhere or ask. A retry that queued for a reserved seat would be a new mechanism, and C-81 does not
+    add one.
 
 ## Consequences
 
