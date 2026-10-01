@@ -1836,6 +1836,10 @@ func (p *Pipeline) repackStructuredWith(ctx context.Context, seat string, rawSch
 		attemptTimeout := repackAttemptDeadline(ctx, p.cfg, sent, limit-attempts+1)
 		attemptStart := time.Now()
 		gres, gerr := p.repackClient(p.cfg.CompletionPath, attemptTimeout, gates).Generate(ctx, seat, system, user, grammar, sent, p.cfg.Temperature, 0, append([]llamaclient.GenOption{llamaclient.WithoutThinking()}, structuredOpts...)...)
+		// What the attempt generated counts whether or not it answered: a stream that
+		// died mid-body (a stall or the ceiling cutting a producing seat, a dropped
+		// connection) cost the seat its tokens and wrote something worth a clip.
+		gres = partialOf(gres, gerr)
 		tokensOut += gres.TokensOut
 		if gerr != nil {
 			note(attempts, lane, sent, clampedFrom, gres, time.Since(attemptStart), repackWhy(gerr))
@@ -2253,7 +2257,7 @@ func (p *Pipeline) repackViaChat(ctx context.Context, client *llamaclient.Client
 	user := fmt.Sprintf("Extract these fields from the text as a JSON object: %s.\n\nTEXT:\n%s", repackFieldList(names, props), output)
 	gres, gerr := client.Generate(ctx, seat, system, user, "", budget, p.cfg.Temperature, 0, append([]llamaclient.GenOption{llamaclient.WithoutThinking()}, extra...)...)
 	if gerr != nil {
-		return nil, gres, gerr
+		return nil, partialOf(gres, gerr), gerr
 	}
 	if gres.Truncated {
 		return nil, gres, truncatedRepackErr("chat re-pack", budget, len(output), judgeCut(output, gres), clampNote, "")

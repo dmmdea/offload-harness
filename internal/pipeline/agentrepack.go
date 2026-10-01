@@ -288,6 +288,23 @@ func clipEnds(s string) (head, tail string) {
 	return s[:h], s[t:]
 }
 
+// partialOf is what an attempt generated, for its record and the run's token count,
+// whether or not it produced a usable answer: the completion when one came back,
+// else what a STREAM that died mid-body had delivered (a dropped connection, an
+// engine error frame, the stall watch or the ceiling cutting a producing seat; the
+// deltas heard are a lower bound of the tokens). A request that never got a body
+// (refused, unreachable, a busy answer past the budget) generated nothing.
+func partialOf(g llamaclient.GenResult, err error) llamaclient.GenResult {
+	if err == nil || g.TokensOut > 0 || g.Content != "" {
+		return g
+	}
+	var be *llamaclient.BodyError
+	if errors.As(err, &be) {
+		return be.Partial
+	}
+	return g
+}
+
 // repackWhy is an error as one clipped line for an attempt's record: the
 // validator's message spans lines, and the record is a note, not a log.
 func repackWhy(err error) string {
