@@ -53,9 +53,14 @@ sits on the utility card while the render ran on another card, so the unload fre
 prints `kept the memory stack resident (mem0 never yields to a lease)`.
 
 - `otherResidentModels` returns the configured `memory_stack` as kept rather than as foreign residents; the agent seat
-  and every other resident are still cleared.
-- Tests: `TestUnloadSeatNeverUnloadsTheMemoryStack` and `TestUnloadSeatKeepsTheConfiguredMemoryStack` failed on the old
-  code; a mutant that drops the check turns both red. `TestUnloadSeatAlsoUnloadsOtherResidentModels` named
+  and every other resident are still cleared. An empty `memory_stack` means the default pair, as it already did on the
+  render side.
+- When the per-model unload route fails, the legacy `GET /unload` fallback is refused while the stack is resident, or
+  while `/running` cannot be read. That route unloads everything whatever its `?model=` says. The reserve then fails and
+  names the stack; before, the fallback tore the stack down. This matches `render/gpu-lock.mjs` and the llamaswap tool's
+  `unload-all`.
+- Tests: five new (memory stack kept, configured stack kept, empty stack means the default, no total fallback with
+  the stack resident or residency unreadable). Each failed on the old code, and four mutants each turn one red. `TestUnloadSeatAlsoUnloadsOtherResidentModels` named
   `embeddinggemma` as a foreign resident and now uses `whisper-stt`.
 - The `memory_stack` comments in `internal/config` and `render/gpu-lock.mjs` no longer call the stack CPU-only:
   it runs on a GPU, the box's utility card. Docs: `docs/systems/gpu-lease.md`.

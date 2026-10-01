@@ -385,7 +385,10 @@ the lease (the card stays reserved, work keeps routing elsewhere) and exits non-
 as the fallback): the agent seat, and every other model `/running` lists, except the config's `memory_stack` (the mem0
 embedder and reranker). The stack stays resident and the run prints `kept the memory stack resident`. The operator's
 rule is that mem0 never yields; it sits on the utility card, so unloading it freed nothing a render could use (register
-C-87, 2026-10-01). `render/gpu-lock.mjs` keeps the same set. The wrapper form warms the seat back (`GET /upstream/<model>/health`) BEFORE releasing, so the first
+C-87, 2026-10-01). `render/gpu-lock.mjs` keeps the same set. An empty `memory_stack` means the default pair. If the
+per-model route fails, the legacy `GET /unload` is used only when no stack member is resident. It unloads everything,
+whatever `?model=` says, so when the stack is resident or `/running` cannot be read, the reserve fails and names the
+stack. The wrapper form warms the seat back (`GET /upstream/<model>/health`) BEFORE releasing, so the first
 contract placed here again finds a loaded seat; the detach form's counterpart is `gpu release --warm-seat`.
 
 **The warm-back belongs to the LAST holder (0.129.2, register D-124).** On 2026-09-18 02:57 a wrapper whose command

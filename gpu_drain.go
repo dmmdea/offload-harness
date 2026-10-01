@@ -287,16 +287,26 @@ func seatStuckAfter(cfg config.Config, seat string) time.Duration {
 }
 
 // unloadSeat frees the seat through llama-swap: the current API first, the
-// legacy GET as a fallback for an older llama-swap.
-func unloadSeat(ctx context.Context, client *http.Client, endpoint, model string) error {
+// legacy GET as a fallback for an older llama-swap. That GET is TOTAL (llama-swap
+// ignores ?model=; see tools/llamaswap's unload-all), so it is refused while any
+// model in protect (the resident mem0 stack) would go down with the seat; the
+// caller then fails loud instead (register C-87).
+func unloadSeat(ctx context.Context, client *http.Client, endpoint, model string, protect []string) error {
 	base := strings.TrimRight(endpoint, "/")
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, base+"/api/models/unload/"+url.PathEscape(model), nil)
 	resp, err := client.Do(req)
+	why := ""
 	if err == nil {
 		resp.Body.Close()
 		if resp.StatusCode < 300 {
 			return nil
 		}
+		why = fmt.Sprintf("status %d", resp.StatusCode)
+	} else {
+		why = err.Error()
+	}
+	if len(protect) > 0 {
+		return fmt.Errorf("unload %s: the per-model route failed (%s), and the only other route, GET /unload, unloads everything: refused while the memory stack (%s) may be resident", model, why, strings.Join(protect, ", "))
 	}
 	req, _ = http.NewRequestWithContext(ctx, http.MethodGet, base+"/unload?model="+url.QueryEscape(model), nil)
 	resp, err = client.Do(req)
@@ -469,14 +479,27 @@ func maintainSeatCtx(ctx context.Context, cfg config.Config, restamp restamper, 
 		// single-card box "the cards the lease fences" is every card, and
 		// every OTHER model llama-swap currently holds is unloaded too, not
 		// only the agent seat.
-		others, kept := otherResidentModels(ctx, endpoint, model, cfg.MemoryStack)
+		stack := cfg.MemoryStack
+		if len(stack) == 0 {
+			// Same reading as the render side: the pipeline exports MEMORY_STACK only
+			// when the list is non-empty, so render/gpu-lock.mjs then keeps its default.
+			stack = config.Default().MemoryStack
+		}
+		others, kept, readable := otherResidentModels(ctx, endpoint, model, stack)
 		if len(kept) > 0 {
 			fmt.Fprintf(os.Stderr, "gpu reserve: kept the memory stack resident (mem0 never yields to a lease): %s\n", strings.Join(kept, ", "))
 		}
-		if err := unloadSeat(ctx, maintenanceClient, endpoint, model); err != nil {
+		// The legacy GET /unload is total, so it may run only when no stack member
+		// is resident; an unreadable /running cannot show that, so it protects the
+		// whole configured stack.
+		protect := kept
+		if !readable {
+			protect = stack
+		}
+		if err := unloadSeat(ctx, maintenanceClient, endpoint, model, protect); err != nil {
 			return err
 		}
-		unloadedOthers := unloadOthers(ctx, endpoint, others)
+		unloadedOthers := unloadOthers(ctx, endpoint, others, protect)
 		if len(unloadedOthers) > 0 {
 			fmt.Fprintf(os.Stderr, "gpu reserve: also unloaded %d other resident model(s) so the leased cards are actually clear: %s\n",
 				len(unloadedOthers), strings.Join(unloadedOthers, ", "))
@@ -502,11 +525,11 @@ func maintainSeatCtx(ctx context.Context, cfg config.Config, restamp restamper, 
 // yields, and render/gpu-lock.mjs always kept the stack). Best-effort: an
 // unreadable /running must never block the agent seat's own unload, which is
 // why this returns no error — see the caller.
-func otherResidentModels(ctx context.Context, endpoint, agentSeat string, memoryStack []string) (others, kept []string) {
+func otherResidentModels(ctx context.Context, endpoint, agentSeat string, memoryStack []string) (others, kept []string, readable bool) {
 	rows, err := seatload.Occupants(ctx, maintenanceClient, endpoint)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "gpu reserve: could not read /running to find other resident models (%v); only the agent seat will be unloaded\n", err)
-		return nil, nil
+		return nil, nil, false
 	}
 	keep := map[string]bool{}
 	for _, m := range memoryStack {
@@ -528,7 +551,7 @@ func otherResidentModels(ctx context.Context, endpoint, agentSeat string, memory
 		}
 		others = append(others, row.Model)
 	}
-	return others, kept
+	return others, kept, true
 }
 
 // unloadOthers unloads every model in others, skipping (and reporting, never
@@ -539,10 +562,10 @@ func otherResidentModels(ctx context.Context, endpoint, agentSeat string, memory
 // seat, and none of these is ever warmed back automatically — that would
 // mean the harness deciding another client's model belongs back on a card it
 // no longer controls.
-func unloadOthers(ctx context.Context, endpoint string, others []string) []string {
+func unloadOthers(ctx context.Context, endpoint string, others, protect []string) []string {
 	var done []string
 	for _, m := range others {
-		if err := unloadSeat(ctx, maintenanceClient, endpoint, m); err != nil {
+		if err := unloadSeat(ctx, maintenanceClient, endpoint, m, protect); err != nil {
 			fmt.Fprintf(os.Stderr, "gpu reserve: could not unload foreign resident %s: %v\n", m, err)
 			continue
 		}
