@@ -6,7 +6,7 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
-## [0.158.1] - 2026-10-01 - A ComfyUI that answers HTTP but cannot render ends the wait and the batch
+## [0.158.1] - 2026-10-01 - A ComfyUI that answers HTTP but cannot render ends the wait and the batch; `gpu reserve` keeps the mem0 stack
 
 ### Fixed — a ComfyUI that answers HTTP but can no longer render ends the wait and the batch (register C-83)
 
@@ -43,6 +43,22 @@ delegations overflowed to another node.
   each of the four jobs. Unchanged main took 631 s on the same run, exited 0, and recorded
   `comfy-render exited 1` as every error.
 - Docs: `docs/systems/media-generation.md` (the poll loop and the warm batch).
+
+### Fixed — `gpu reserve --unload-seat` keeps the mem0 stack resident (register C-87)
+
+`--unload-seat` cleared the agent seat and every other model llama-swap held, including the config's `memory_stack`
+(the mem0 embedder and reranker). On 2026-10-01 a media lease unloaded the reference box's mem0 embedder. That embedder
+sits on the utility card while the render ran on another card, so the unload freed nothing the render could use.
+`render/gpu-lock.mjs` has always kept that set; the Go side now matches it. The stack stays resident, and the run
+prints `kept the memory stack resident (mem0 never yields to a lease)`.
+
+- `otherResidentModels` returns the configured `memory_stack` as kept rather than as foreign residents; the agent seat
+  and every other resident are still cleared.
+- Tests: `TestUnloadSeatNeverUnloadsTheMemoryStack` and `TestUnloadSeatKeepsTheConfiguredMemoryStack` failed on the old
+  code; a mutant that drops the check turns both red. `TestUnloadSeatAlsoUnloadsOtherResidentModels` named
+  `embeddinggemma` as a foreign resident and now uses `whisper-stt`.
+- The `memory_stack` comments in `internal/config` and `render/gpu-lock.mjs` no longer call the stack CPU-only:
+  it runs on a GPU, the box's utility card. Docs: `docs/systems/gpu-lease.md`.
 
 ## [0.158.0] - 2026-10-01 - Qwen-Image-2.1 licence warnings removed from results, status and docs
 

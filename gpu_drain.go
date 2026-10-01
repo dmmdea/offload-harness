@@ -469,7 +469,10 @@ func maintainSeatCtx(ctx context.Context, cfg config.Config, restamp restamper, 
 		// single-card box "the cards the lease fences" is every card, and
 		// every OTHER model llama-swap currently holds is unloaded too, not
 		// only the agent seat.
-		others := otherResidentModels(ctx, endpoint, model)
+		others, kept := otherResidentModels(ctx, endpoint, model, cfg.MemoryStack)
+		if len(kept) > 0 {
+			fmt.Fprintf(os.Stderr, "gpu reserve: kept the memory stack resident (mem0 never yields to a lease): %s\n", strings.Join(kept, ", "))
+		}
 		if err := unloadSeat(ctx, maintenanceClient, endpoint, model); err != nil {
 			return err
 		}
@@ -492,16 +495,25 @@ func maintainSeatCtx(ctx context.Context, cfg config.Config, restamp restamper, 
 
 // otherResidentModels lists every model llama-swap's /running reports besides
 // the agent seat (skipping states already leaving/gone: stopped, shutdown),
-// read ONCE before anything is unloaded. Best-effort: an unreadable /running
-// must never block the agent seat's own unload, which is why this returns no
-// error — see the caller.
-func otherResidentModels(ctx context.Context, endpoint, agentSeat string) []string {
+// read ONCE before anything is unloaded. The config's memory stack is never in
+// the list: it is returned as kept instead (register C-87, 2026-10-01: a media
+// lease unloaded the reference box's mem0 embedder from the utility card for nothing the
+// render on another card could use; the operator's rule is that mem0 never
+// yields, and render/gpu-lock.mjs always kept the stack). Best-effort: an
+// unreadable /running must never block the agent seat's own unload, which is
+// why this returns no error — see the caller.
+func otherResidentModels(ctx context.Context, endpoint, agentSeat string, memoryStack []string) (others, kept []string) {
 	rows, err := seatload.Occupants(ctx, maintenanceClient, endpoint)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "gpu reserve: could not read /running to find other resident models (%v); only the agent seat will be unloaded\n", err)
-		return nil
+		return nil, nil
 	}
-	var out []string
+	keep := map[string]bool{}
+	for _, m := range memoryStack {
+		if m = strings.ToLower(strings.TrimSpace(m)); m != "" {
+			keep[m] = true
+		}
+	}
 	for _, row := range rows {
 		if strings.EqualFold(row.Model, agentSeat) {
 			continue
@@ -510,9 +522,13 @@ func otherResidentModels(ctx context.Context, endpoint, agentSeat string) []stri
 		case "stopped", "shutdown":
 			continue
 		}
-		out = append(out, row.Model)
+		if keep[strings.ToLower(row.Model)] {
+			kept = append(kept, row.Model)
+			continue
+		}
+		others = append(others, row.Model)
 	}
-	return out
+	return others, kept
 }
 
 // unloadOthers unloads every model in others, skipping (and reporting, never

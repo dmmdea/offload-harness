@@ -382,7 +382,10 @@ one frees). Any other non-200 from `/metrics` is still "could not read", never i
 `--drain-timeout` the wrapper form releases the lease and exits non-zero; the detach form keeps
 the lease (the card stays reserved, work keeps routing elsewhere) and exits non-zero so the caller does not start.
 `--unload-seat` (requires `--drain`) then frees the cards through `POST /api/models/unload/<model>` (legacy `GET /unload`
-as the fallback). The wrapper form warms the seat back (`GET /upstream/<model>/health`) BEFORE releasing, so the first
+as the fallback): the agent seat, and every other model `/running` lists, except the config's `memory_stack` (the mem0
+embedder and reranker). The stack stays resident and the run prints `kept the memory stack resident`. The operator's
+rule is that mem0 never yields; it sits on the utility card, so unloading it freed nothing a render could use (register
+C-87, 2026-10-01). `render/gpu-lock.mjs` keeps the same set. The wrapper form warms the seat back (`GET /upstream/<model>/health`) BEFORE releasing, so the first
 contract placed here again finds a loaded seat; the detach form's counterpart is `gpu release --warm-seat`.
 
 **The warm-back belongs to the LAST holder (0.129.2, register D-124).** On 2026-09-18 02:57 a wrapper whose command

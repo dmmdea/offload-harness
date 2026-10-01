@@ -349,9 +349,10 @@ func (f *multiSeatSwap) handler() http.Handler {
 // TestUnloadSeatAlsoUnloadsOtherResidentModels is the headline case: three
 // models resident (the configured agent seat plus two loaded by OTHER
 // clients), `--unload-seat` must clear all three, and only the agent seat is
-// ever recorded as owed a warm-back.
+// ever recorded as owed a warm-back. (The mem0 stack is not a foreign
+// resident: TestUnloadSeatNeverUnloadsTheMemoryStack.)
 func TestUnloadSeatAlsoUnloadsOtherResidentModels(t *testing.T) {
-	f := newMultiSeatSwap("agent-pool", "qwen3.5-9b-vl", "embeddinggemma")
+	f := newMultiSeatSwap("agent-pool", "qwen3.5-9b-vl", "whisper-stt")
 	srv := httptest.NewServer(f.handler())
 	defer srv.Close()
 
@@ -387,7 +388,7 @@ func TestUnloadSeatAlsoUnloadsOtherResidentModels(t *testing.T) {
 	if len(stillLoaded) != 0 {
 		t.Fatalf("model(s) still resident after --unload-seat: %v", stillLoaded)
 	}
-	want := []string{"agent-pool", "qwen3.5-9b-vl", "embeddinggemma"}
+	want := []string{"agent-pool", "qwen3.5-9b-vl", "whisper-stt"}
 	for _, m := range want {
 		found := false
 		for _, c := range calls {
@@ -398,6 +399,73 @@ func TestUnloadSeatAlsoUnloadsOtherResidentModels(t *testing.T) {
 		if !found {
 			t.Fatalf("model %q was never asked to unload; unload calls = %v", m, calls)
 		}
+	}
+}
+
+// unloadSeatRun runs one `--unload-seat` maintenance pass against f with the
+// given extra config JSON fields and returns the unload calls and the models
+// still resident afterwards.
+func unloadSeatRun(t *testing.T, f *multiSeatSwap, extraCfg string) (calls []string, still map[string]bool) {
+	t.Helper()
+	srv := httptest.NewServer(f.handler())
+	defer srv.Close()
+	old := maintenanceClient
+	maintenanceClient = srv.Client()
+	t.Cleanup(func() { maintenanceClient = old })
+	root := t.TempDir()
+	cfgPath := filepath.Join(root, "config.json")
+	cfg := `{"state_dir": ` + strconv.Quote(root) + `, "endpoint": ` + strconv.Quote(srv.URL) + `, "agent_model": "agent-pool"` + extraCfg + `}`
+	if err := os.WriteFile(cfgPath, []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := maintainSeat(loadCfgPath(cfgPath), nil, false, time.Time{}, true, false, nil); err != nil {
+		t.Fatalf("maintainSeat: %v", err)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	still = map[string]bool{}
+	for m, ok := range f.loaded {
+		if ok {
+			still[m] = true
+		}
+	}
+	return append([]string(nil), f.unloadCalls...), still
+}
+
+// TestUnloadSeatNeverUnloadsTheMemoryStack: the mem0 embedder and reranker are
+// the operator's absolute priority, and on the reference box they sit on the
+// utility card, not the render card. On 2026-10-01 a media lease's
+// `--unload-seat` unloaded the reference box's mem0 embedder for nothing the render
+// could use (register C-87). render/gpu-lock.mjs has always kept the stack;
+// this side now does too.
+func TestUnloadSeatNeverUnloadsTheMemoryStack(t *testing.T) {
+	f := newMultiSeatSwap("agent-pool", "qwen3.5-9b-vl", "embeddinggemma", "bge-reranker-v2-m3")
+	calls, still := unloadSeatRun(t, f, "")
+	for _, m := range []string{"embeddinggemma", "bge-reranker-v2-m3"} {
+		if !still[m] {
+			t.Errorf("memory-stack model %q was unloaded by --unload-seat; unload calls = %v", m, calls)
+		}
+		for _, c := range calls {
+			if c == m {
+				t.Errorf("memory-stack model %q was asked to unload; unload calls = %v", m, calls)
+			}
+		}
+	}
+	if still["agent-pool"] || still["qwen3.5-9b-vl"] {
+		t.Errorf("the seat and the foreign resident must still be cleared; still resident: %v", still)
+	}
+}
+
+// TestUnloadSeatKeepsTheConfiguredMemoryStack: the kept set is the config's
+// memory_stack, not a literal; a model outside it is a foreign resident.
+func TestUnloadSeatKeepsTheConfiguredMemoryStack(t *testing.T) {
+	f := newMultiSeatSwap("agent-pool", "my-embedder", "embeddinggemma")
+	calls, still := unloadSeatRun(t, f, `, "memory_stack": ["my-embedder"]`)
+	if !still["my-embedder"] {
+		t.Errorf("configured memory-stack model was unloaded; unload calls = %v", calls)
+	}
+	if still["embeddinggemma"] {
+		t.Errorf("embeddinggemma is not in this config's memory_stack, so it is a foreign resident and must be cleared; still: %v", still)
 	}
 }
 
