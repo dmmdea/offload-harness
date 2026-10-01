@@ -44,12 +44,15 @@ Three scripts run in order, each ending with a machine-readable JSON line:
 those receipts.
 
 **Classification** happens in `Get-Profile`, and the evaluation order matters — multi-GPU is checked
-first, because a heterogeneous pair outranks any single-card band:
+first, because a heterogeneous pair outranks any single-card band. The three multi-GPU rules are the only
+paths that set `big_ram` (RAM ≥ 120 GB), and `hwdetect` carries the same table in Go
+(`TestHomogeneousBlackwellPairGetsItsOwnTier`):
 
 | Condition | Profile |
 |---|---|
-| 2 NVIDIA GPUs, both Blackwell, primary 12–23 GB | `blackwell-2x16` (checked before the generic multi-GPU rule) |
-| ≥2 NVIDIA GPUs, anything else | `dual-gpu` — a 3× Blackwell rig included (`Get-Profile`'s own self-test asserts `'3x blackwell -> dual-gpu'`). The only path that sets `big_ram`, when RAM ≥ 120 GB. |
+| 2 NVIDIA GPUs, both Blackwell (an arch captured per card), largest card 12–23 GB | `blackwell-2x16` (checked before the generic multi-GPU rule) |
+| 3 NVIDIA GPUs, all Blackwell (an arch captured per card), largest card 12–23 GB | `blackwell-3x16` (checked before the generic multi-GPU rule; before this rule a 3× Blackwell rig classified as `dual-gpu`, a tier the installer refuses because CUDA 13 cannot compile sm_70) |
+| ≥2 NVIDIA GPUs, anything else | `dual-gpu` — a mixed-arch rig, four or more cards, a pair or triple outside the 12–23 GB band, or one whose archs were not all captured (`Get-Profile`'s self-test asserts the mixed-arch, four-card, uncaptured-arch and out-of-band pair cases). |
 | NVIDIA Blackwell ≥64 GB | `blackwell-72` |
 | NVIDIA Blackwell ≥40 GB | `blackwell-48` |
 | NVIDIA Blackwell ≥24 GB | `blackwell-32` |
