@@ -97,13 +97,13 @@ measurement of the client.
    finished answer, [ADR 0066](0066-a-seat-that-goes-down-is-waited-for-and-the-failed-step-reissued.md)) is cut as `had been answered by <node> (job <id>)`,
    never as `still on` the node, and its intent closes as the terminal observation it is. "Still on the node, not
    taken back" is false of a job that ended, and an intent left open for it would have the recovery pass collect an
-   outcome the call has already published. So is a node's own terminal failure that the poll read in the moment between
-   the clock passing the deadline and the context ending (a context's timer trails the clock): the job ended in error,
-   its result could not be decoded, or the node denied holding it after the bounded re-dispatches. It is cut as `had
-   ended on <node> (job <id>)` with the node's text quoted behind it, and its intent closes as terminal too. The poll
-   loop says which failures those are (`nodeTerminal`), because a failure alone does not: a cancelled poll and a poll
-   deadline are the give-up's and keep their words and their open intent, and so does a refused re-dispatch, whose POST
-   may have landed.
+   outcome the call has already published. A node's own terminal failure is the same case: the poll can read it in the
+   moment between the clock passing the deadline and the context ending (a context's timer trails the clock), when the
+   job ended in error, its result could not be decoded, or the node denied holding it after the bounded re-dispatches.
+   It is cut as `had ended on <node> (job <id>)` with the node's text quoted behind it, and its intent closes as
+   terminal too. The poll loop says which failures those are (`nodeTerminal`), because a failure alone does not: a
+   cancelled poll and a poll deadline are the give-up's and keep their words and their open intent, and so does a
+   refused re-dispatch, whose POST may have landed.
    A subtask nobody ran (never started, abandoned, or cut before it was placed) names no node and no
    seat, as `exhausted()` already does for "no node took it", and is marked `Unplaced`. Once the run
    begins draining its PAIR emitter, a frame from an abandoned goroutine is dropped: `Emit` adds to a
