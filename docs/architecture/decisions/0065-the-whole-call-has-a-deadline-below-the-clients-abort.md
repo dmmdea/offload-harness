@@ -218,8 +218,11 @@ measurement of the client.
   structured re-pack, which the delegator tries to re-pack itself first (the rescue runs on the call's context, so the
   deadline ends it, and the defer is then produced after the deadline); a rescue is never started on a live context
   once the deadline has passed. (3) When the deadline ends a retry's choice of node, the note says so before it says
-  that no other node could take the contract: the order of the two notes in `runOne` is deliberate. (4) The cut of a
-  job the node had already answered says so (decision 3).
+  that no other node could take the contract: the order of the notes in `runOne` is deliberate. A fenced local seat
+  (D-94) does not outrank it either: the note leads with the deadline and names the fence behind it, which is read from
+  the lease record and stays true, without `no other node is eligible`, a claim about a fleet the deadline kept the
+  delegator from reading. With no deadline the fence note is what it always was. (4) The cut of a job the node had
+  already answered, or ended in failure, says so (decision 3).
 - Every call-deadline row carries `reason_code` `budget`: the closed set of
   [ADR 0064](0064-a-delegator-takes-back-what-it-has-not-started.md) has no member of its own for a cut, so a
   reader counting `budget` rows tells a cut from a node-side ceiling by the reason's opening

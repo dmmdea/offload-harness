@@ -890,7 +890,10 @@ seat under an exclusive lease, waited the whole `gpu-lease timeout after 5m0s (b
 affinity cordon and then deferred as capacity, while an idle remote sat unused for those five
 minutes. A plain (non-exclusive, non-draining) text reservation is NOT a fence here: it already
 removes the local seat from FIRST placement (`Reserved`, below), and the affinity gate admits the
-load, so refusing a retry on it would refuse work the box can do.
+load, so refusing a retry on it would refuse work the box can do. The note says `and no other node is
+eligible` only for a read of the fleet that finished: when the whole call's deadline (ADR 0065) ended that read,
+the note leads with `call deadline reached before a retry node was chosen` and names the fence behind it, and the
+claim about the other nodes is left out.
 
 FIRST placement already consults the lease and always did: `route=auto` defers to the capacity wait
 when `Reserved(LocalLease(...))` holds (`TestRunAutoReservedLocalDefersNamingTheHolder`) and

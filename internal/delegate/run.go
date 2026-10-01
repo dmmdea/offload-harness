@@ -1347,25 +1347,31 @@ func (r *runner) runOne(ctx context.Context, i int, contract core.AgentContract)
 	// budget the subtask no longer owns (fetchViews is sequential at
 	// fetchNodeViewTimeout per remote and Run derives no deadline of its own).
 	altCtx, cancel := context.WithTimeout(ctx, time.Duration(remaining)*time.Second)
-	alt, fenceNote, ok := r.alternativeNode(altCtx, first, contract, pl)
+	alt, fence, ok := r.alternativeNode(altCtx, first, contract, pl)
 	cancel()
 	if !ok {
 		// A fence is a REASON, not a silence: the caller has to be able to tell
 		// "there was nowhere else to go" from "the only seat left is behind a
-		// measurement that has the cards" (D-94). The call's deadline is a third
+		// measurement that has the cards" (D-94). The call's deadline is a second
 		// reason: it ends the fleet read that would have named a node, and an empty
 		// note after it reads as "there was nowhere else to go". The clock decides,
 		// not altCtx, which also ends on the budget the retry is bounded by.
 		//
-		// A seat-down defer's own note (ADR 0066: the second placement it was promised found
-		// no node) comes last, and the order is the point. "No other node could take the
-		// contract" is a claim about nodes, which a read the deadline ended cannot support
-		// (ADR 0065), so once the clock has run out the note names the deadline instead.
+		// The order is the point. "No other node is eligible" and "no other node could take
+		// the contract" are claims about nodes, which a read the deadline ended cannot support
+		// (ADR 0065), so once the clock has run out the note leads with the deadline, and when
+		// the local seat is fenced it keeps that fact behind it: it is read from the lease
+		// record and stays true, but the claim about the fleet goes. Next comes the fence on
+		// its own, and a seat-down defer's own note (ADR 0066: the second placement it was
+		// promised found no node) comes last.
 		switch {
-		case fenceNote != "":
-			first.RetryNote = fenceNote
 		case r.call.reached():
 			first.RetryNote = "retry skipped: " + callDeadlinePrefix + " before a retry node was chosen"
+			if fence != "" {
+				first.RetryNote += "; " + fence + ", and " + retryFenceWhy
+			}
+		case fence != "":
+			first.RetryNote = "retry skipped: " + fence + " and no other node is eligible; " + retryFenceWhy
 		case SeatDownDefer(first.Result):
 			// The defer promises a second placement on another node: when there is no
 			// other node the caller must be told it was considered and why it did not
@@ -3481,10 +3487,18 @@ func admissionCredit(pr PlacedResult) time.Duration {
 	return time.Duration(secs * float64(time.Second))
 }
 
+// retryFenceWhy is why a retry is not placed on a fenced local seat: dialling it would hold the
+// retry at the model-affinity cordon for agent_lease_wait_sec, and it would end as a capacity
+// defer anyway (D-94). It is a fact about the seat, read from the lease record, so it stays true
+// when the call's deadline ended the read of the fleet.
+const retryFenceWhy = "a retry placed there would wait out agent_lease_wait_sec at the affinity cordon and defer as capacity anyway"
+
 // alternativeNode picks the node a retry runs on: the best eligible remote
 // when the first attempt ran locally (probing the fleet now if this run has
 // not yet), the local seat when it ran remotely. ok=false when no different
-// node can take the contract.
+// node can take the contract; the string is then the clause naming the fence
+// ("the local seat is fenced (...)") when the local seat is fenced and was
+// left out for it, "" otherwise. runOne words the note around it.
 //
 // Note the asymmetry and its cost: recovering a wrong REMOTE answer puts the
 // work back on the local box the harness exists to keep free — so a placement
@@ -3518,10 +3532,7 @@ func (r *runner) alternativeNode(ctx context.Context, first PlacedResult, contra
 					reason: "retry on " + chosen.NodeID + " after " + nodeLabel(first) + " " + why +
 						" — the local seat is fenced: " + fence}, "", true
 			}
-			return placement{}, fmt.Sprintf(
-				"retry skipped: the local seat is fenced (%s — %s) and no other node is eligible; "+
-					"a retry placed there would wait out agent_lease_wait_sec at the affinity cordon and defer as capacity anyway",
-				fence, HolderLine(lease)), false
+			return placement{}, fmt.Sprintf("the local seat is fenced (%s — %s)", fence, HolderLine(lease)), false
 		}
 		// A seat-down defer is not held for a busy retry seat (runOne, ADR 0066 decision
 		// 3): the node's own queue is the line, and its 503 is re-placed at once. That is
