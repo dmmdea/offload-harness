@@ -1,4 +1,4 @@
-// Copyright 2026 Daniel Martinez and contributors. Licensed under Apache-2.0. See LICENSE.
+// Copyright 2026 dmmdea and contributors. Licensed under Apache-2.0. See LICENSE.
 // Hand-authored (wave D final glue): bulk capture export to JSONL.
 // Attaches to the GENERATED `captures` command as a subcommand; that file is
 // not modified.

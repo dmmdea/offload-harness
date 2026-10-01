@@ -1,4 +1,4 @@
-// Copyright 2026 Daniel Martinez and contributors. Licensed under Apache-2.0. See LICENSE.
+// Copyright 2026 dmmdea and contributors. Licensed under Apache-2.0. See LICENSE.
 // Hand-authored shared plumbing for the bench family: dispersion statistics,
 // the comparability key, KV-depth prefill, and the community-canonical row.
 // Not a command: no pp:data-source marker.

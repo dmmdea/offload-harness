@@ -1,4 +1,4 @@
-// Copyright 2026 Daniel Martinez and contributors. Licensed under Apache-2.0. See LICENSE.
+// Copyright 2026 dmmdea and contributors. Licensed under Apache-2.0. See LICENSE.
 // Wave D: the hand-built command audit, made permanent.
 //
 // Four waves added commands by hand. The conventions they must all honor are

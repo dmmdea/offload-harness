@@ -8,7 +8,7 @@
 
 **Tech Stack:** Go 1.26 (`github.com/dmmdea/offload-harness`, `modelcontextprotocol/go-sdk`), PowerShell 5.1/7 (installer, dot-source test seam), Python 3.11 stdlib `http.server` (sidecar), openpyxl (tier matrix).
 
-**Spec:** Decisions locked by Daniel 2026-08-22, recorded in `~/.claude/plans/optiplex7060-editor-rig-plan.md` row C3 and mem0 `76c64d48`. Recon (file:line map of the tier system) in the same row.
+**Spec:** Decisions locked by the operator 2026-08-22, recorded in `~/.claude/plans/optiplex7060-editor-rig-plan.md` row C3 and mem0 `76c64d48`. Recon (file:line map of the tier system) in the same row.
 
 ## Global Constraints
 

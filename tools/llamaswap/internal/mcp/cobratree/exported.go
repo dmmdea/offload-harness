@@ -1,4 +1,4 @@
-// Copyright 2026 Daniel Martinez and contributors. Licensed under Apache-2.0. See LICENSE.
+// Copyright 2026 dmmdea and contributors. Licensed under Apache-2.0. See LICENSE.
 // Hand-authored: a stable public name for the generated tool-name derivation.
 //
 // The MCP output-schema layer needs to map a CLI command path onto the tool

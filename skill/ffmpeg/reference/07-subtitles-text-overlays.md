@@ -64,7 +64,7 @@ Options that matter: `fontfile` (mandatory on this build), `text` | `textfile`, 
 
 Lower third that works (Git Bash shown; PowerShell/cmd identical string in double quotes):
 ```
--vf "drawtext=fontfile='C\:/Windows/Fonts/arialbd.ttf':text='the operator Martinez':fontsize=56:fontcolor=white:box=1:boxcolor=black@0.6:boxborderw=16:x=80:y=h-200:enable='between(t,1,3)'"
+-vf "drawtext=fontfile='C\:/Windows/Fonts/arialbd.ttf':text='Sample Name':fontsize=56:fontcolor=white:box=1:boxcolor=black@0.6:boxborderw=16:x=80:y=h-200:enable='between(t,1,3)'"
 ```
 (In bash the `\:` needs to reach ffmpeg as one backslash: inside double quotes write `C\\:` or,
 simpler, put the whole `-vf` argument in **single** quotes.)

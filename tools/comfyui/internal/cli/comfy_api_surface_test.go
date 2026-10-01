@@ -1,4 +1,4 @@
-// Copyright 2026 Daniel Martinez and contributors. Licensed under Apache-2.0. See LICENSE.
+// Copyright 2026 dmmdea and contributors. Licensed under Apache-2.0. See LICENSE.
 //
 // Tests for the commands added in the perfection wave: features (capability
 // drift), deps (node-pack resolution), and node-set identity capture.

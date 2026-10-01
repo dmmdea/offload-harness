@@ -1,4 +1,4 @@
-// Copyright 2026 Daniel Martinez and contributors. Licensed under Apache-2.0. See LICENSE.
+// Copyright 2026 dmmdea and contributors. Licensed under Apache-2.0. See LICENSE.
 // Novel command (wave A spine), implemented against the mirrored domain tables.
 // pp:data-source local
 // Supported strategies: auto, local, live, or computed. `local` is deliberate:

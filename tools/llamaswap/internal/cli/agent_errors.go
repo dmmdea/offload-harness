@@ -1,4 +1,4 @@
-// Copyright 2026 Daniel Martinez and contributors. Licensed under Apache-2.0. See LICENSE.
+// Copyright 2026 dmmdea and contributors. Licensed under Apache-2.0. See LICENSE.
 // Hand-authored (wave LS-1): the machine-readable error contract.
 // Not a command: no pp:data-source marker.
 //

@@ -6,7 +6,7 @@ date: "2026-08-27"
 # 0027 — FreeToken is the big-MoE opt-in engine on the blackwell-2x16 tier
 
 - Status: **Accepted** (operator-approved 2026-08-27)
-- Deciders: operator (Daniel), on measured evidence from the 2026-08-27 nightshift
+- Deciders: operator, on measured evidence from the 2026-08-27 nightshift
 - Related: ADR 0018 (media lease), ADR 0025 (model residency), `docs/ROADMAP.md`
   nightshift + round-2 sections, mem0 `b7799371` / `18ac82da` / `af2fa8b9`
 

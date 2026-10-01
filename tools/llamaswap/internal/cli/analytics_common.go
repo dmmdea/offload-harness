@@ -1,4 +1,4 @@
-// Copyright 2026 Daniel Martinez and contributors. Licensed under Apache-2.0. See LICENSE.
+// Copyright 2026 dmmdea and contributors. Licensed under Apache-2.0. See LICENSE.
 // Novel analytics support (wave D): shared primitives for the residency and
 // saturation verbs. Both read the local mirror ONLY and print — they never edit
 // groups, ttl, or placement.
