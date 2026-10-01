@@ -1366,7 +1366,10 @@ reserved two-card seat mid-measurement, 2026-09-05). Now, on route=auto and rout
 **text** lease takes the local seat out of placement: an eligible remote takes the work; with none,
 the placement waits up to `agent_lease_wait_sec` (config; default 0 = defer at once), re-reading the
 lease once a second, then defers with class `infrastructure` and a reason naming the holder (class,
-pid, reason, origin, expiry) so the caller can wait, route elsewhere, or ask. `route=local` is the
+pid, reason, origin, expiry) so the caller can wait, route elsewhere, or ask. A retry respects the
+reservation the same way (register C-81): a verification retry, or the re-issue of a seat-down defer,
+whose first attempt ran on a fleet node goes to an untried node and, with none, is skipped with a
+`retry_note` that names the holder; it never runs on the reserved seat. `route=local` is the
 caller's explicit choice and is never gated. A **media** lease is not a placement gate: it keeps
 steering toward remotes as before and is arbitrated at the model-affinity gate (ADR 0026), so
 single-box render behaviour is unchanged. The local seat's window is probed live before each run —

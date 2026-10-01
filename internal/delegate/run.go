@@ -1355,7 +1355,9 @@ func (r *runner) runOne(ctx context.Context, i int, contract core.AgentContract)
 		// measurement that has the cards" (D-94). The call's deadline is a second
 		// reason: it ends the fleet read that would have named a node, and an empty
 		// note after it reads as "there was nowhere else to go". The clock decides,
-		// not altCtx, which also ends on the budget the retry is bounded by.
+		// not altCtx, which also ends on the budget the retry is bounded by. A text reservation
+		// of the local seat (C-81) is told the same way: `fence` carries either clause, and
+		// retryHeldWhy words what follows it.
 		//
 		// The order is the point. "No other node is eligible" and "no other node could take
 		// the contract" are claims about nodes, which a read the deadline ended cannot support
@@ -1368,10 +1370,10 @@ func (r *runner) runOne(ctx context.Context, i int, contract core.AgentContract)
 		case r.call.reached():
 			first.RetryNote = "retry skipped: " + callDeadlinePrefix + " before a retry node was chosen"
 			if fence != "" {
-				first.RetryNote += "; " + fence + ", and " + retryFenceWhy
+				first.RetryNote += "; " + fence + ", and " + retryHeldWhy(fence)
 			}
 		case fence != "":
-			first.RetryNote = "retry skipped: " + fence + " and no other node is eligible; " + retryFenceWhy
+			first.RetryNote = "retry skipped: " + fence + " and no other node is eligible; " + retryHeldWhy(fence)
 		case SeatDownDefer(first.Result):
 			// The defer promises a second placement on another node: when there is no
 			// other node the caller must be told it was considered and why it did not
@@ -3493,12 +3495,39 @@ func admissionCredit(pr PlacedResult) time.Duration {
 // when the call's deadline ended the read of the fleet.
 const retryFenceWhy = "a retry placed there would wait out agent_lease_wait_sec at the affinity cordon and defer as capacity anyway"
 
+// localReservedPrefix opens the clause alternativeNode returns for a local seat it left out of a
+// retry because a text lease RESERVES it (register C-81), as "the local seat is fenced (...)" does
+// for a fence. retryHeldWhy tells the two apart by it.
+const localReservedPrefix = "the local seat is reserved ("
+
+// reservedClause names a reservation for a retry: the words replacementNode ends a refused
+// re-placement with, so a reservation reads one way wherever it is reported.
+func reservedClause(info gpulease.Info) string {
+	return localReservedPrefix + HolderLine(info) + ")"
+}
+
+// retryReservedWhy is why a retry is not placed on a reserved local seat. It is not the fence's
+// reason: the affinity gate admits the load of a plain reservation, so a dial would not wait at the
+// cordon, it would run, on the cards the holder reserved for its own work.
+const retryReservedWhy = "a retry placed there would run on the cards the holder reserved (a reservation keeps every placement off them)"
+
+// retryHeldWhy closes the note of a retry that was not placed because a lease holds the local seat:
+// the reservation's reason for the clause reservedClause writes, and the fence's for any other.
+func retryHeldWhy(clause string) string {
+	if strings.HasPrefix(clause, localReservedPrefix) {
+		return retryReservedWhy
+	}
+	return retryFenceWhy
+}
+
 // alternativeNode picks the node a retry runs on: the best eligible remote
 // when the first attempt ran locally (probing the fleet now if this run has
-// not yet), the local seat when it ran remotely. ok=false when no different
-// node can take the contract; the string is then the clause naming the fence
-// ("the local seat is fenced (...)") when the local seat is fenced and was
-// left out for it, "" otherwise. runOne words the note around it.
+// not yet), the local seat when it ran remotely, unless a lease keeps the retry off the
+// seat, a fence (D-94) or a text reservation (C-81), when the best untried remote takes
+// it instead. ok=false when no different node can take the contract; the string is then
+// the clause naming the lease ("the local seat is fenced (...)" or "the local seat is
+// reserved (...)") when the local seat was left out for it, "" otherwise. runOne words
+// the note around it (retryHeldWhy).
 //
 // Note the asymmetry and its cost: recovering a wrong REMOTE answer puts the
 // work back on the local box the harness exists to keep free — so a placement
@@ -3533,6 +3562,26 @@ func (r *runner) alternativeNode(ctx context.Context, first PlacedResult, contra
 						" — the local seat is fenced: " + fence}, "", true
 			}
 			return placement{}, fmt.Sprintf("the local seat is fenced (%s — %s)", fence, HolderLine(lease)), false
+		}
+		// C-81: a plain text reservation does not FENCE (the affinity gate admits the load, which is
+		// why Fenced above leaves it alone), but it RESERVES the cards. A first placement never takes
+		// the local seat under one (route=auto waits for the holder, route=spread deals without the
+		// seat) and neither does replacementNode's last resort, and the forced local placement below
+		// is never read against the lease again, since attempt() runs a forced placement as given. So
+		// without this check the retry of an attempt that ran on a fleet node, a verification retry
+		// or a seat-down re-issue alike, was dialled onto cards a measurement had reserved. The
+		// reading is replacementNode's: Reserved, which exempts the holder's own child. An untried
+		// remote is the retry's place; with none the retry is not placed, as for a fence, and the note
+		// names the holder (replacementNode's refusal for a reserved seat is the same sentence, and
+		// its caller then waits in the capacity wait, which a retry does not have).
+		if Reserved(lease) {
+			held := reservedClause(lease)
+			if chosen, base, found := r.remoteAlternative(ctx, st, pl); found {
+				return placement{view: chosen, base: base,
+					reason: "retry on " + chosen.NodeID + " after " + nodeLabel(first) + " " + why +
+						" — " + held}, "", true
+			}
+			return placement{}, held, false
 		}
 		// A seat-down defer is not held for a busy retry seat (runOne, ADR 0066 decision
 		// 3): the node's own queue is the line, and its 503 is re-placed at once. That is

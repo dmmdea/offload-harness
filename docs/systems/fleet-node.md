@@ -888,10 +888,20 @@ eligible the subtask defers AT ONCE with a `retry_note` naming the fence and the
 from the lease record, never discovered by dialling: on 2026-09-14 a retry was placed on the local
 seat under an exclusive lease, waited the whole `gpu-lease timeout after 5m0s (bound 5m0s)` at the
 affinity cordon and then deferred as capacity, while an idle remote sat unused for those five
-minutes. A plain (non-exclusive, non-draining) text reservation is NOT a fence here: it already
-removes the local seat from FIRST placement (`Reserved`, below), and the affinity gate admits the
-load, so refusing a retry on it would refuse work the box can do. The note says `and no other node is
-eligible` only for a read of the fleet that finished: when the whole call's deadline (ADR 0065) ended that read,
+minutes. A plain (non-exclusive, non-draining) text reservation is NOT a fence: the affinity gate
+admits the load, so nothing refuses the dial. It is a RESERVATION, though, and a retry respects it as a
+first placement does (register C-81). `Reserved` already keeps the local seat out of FIRST placement
+(below) and out of `replacementNode`'s last resort, and `alternativeNode` asks it as well, right after the
+fence; before C-81 it read only the fence, so a verification retry or a seat-down re-issue (ADR 0066)
+whose first attempt had run on a fleet node was dialled onto cards a measurement had reserved. With the
+seat reserved the retry goes to the best untried remote exactly as it does for a fence (the placement
+reason says `the local seat is reserved (…)` and names the holder). With none it is skipped at once, from
+the lease record, and the `retry_note` names the holder and says why: `the local seat is reserved (gpu
+lease class=text …) and no other node is eligible; a retry placed there would run on the cards the holder
+reserved (a reservation keeps every placement off them)`. That is `replacementNode`'s answer for a reserved
+seat, whose caller then waits in the capacity wait; a retry has no such wait. The holder's own child
+(`GPU_LEASE_EPOCH` equal to the held epoch) is exempt, as it is for a first placement. The note says `and
+no other node is eligible` only for a read of the fleet that finished: when the whole call's deadline (ADR 0065) ended that read,
 the note leads with `call deadline reached before a retry node was chosen` and names the fence behind it, and the
 claim about the other nodes is left out.
 

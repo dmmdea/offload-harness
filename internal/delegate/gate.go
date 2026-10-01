@@ -707,6 +707,10 @@ func Reserved(info gpulease.Info) bool {
 // placed on the local seat under an exclusive lease, waited the whole
 // `gpu-lease timeout after 5m0s` at the cordon and deferred as capacity, while an
 // idle remote sat unused. The verdict was on disk before the dial.
+//
+// A retry asks Reserved after Fenced as well (register C-81), for the one hold Fenced leaves alone:
+// a plain reservation does not refuse a run at the gate, but a first placement never takes the seat
+// under one, and neither may a retry.
 func Fenced(info gpulease.Info) (bool, string) {
 	if !modelaffinity.BlocksNewRun(info) {
 		return false, ""
