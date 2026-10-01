@@ -161,6 +161,11 @@ func TestRunWithDeadlineWithdrawsNothingWhenNothingIsOutstanding(t *testing.T) {
 // stays the TRUTHFUL cut (the node and the job), not an abandoned "did not stop" that names neither.
 func TestRunWithDeadlineWithdrawNeverHoldsTheCallPastTheUnwind(t *testing.T) {
 	compressPolls(t, 5*time.Millisecond, time.Second)
+	// The withdraw's bound is three quarters of the unwind allowance, so at the 250 ms floor the
+	// goroutine had ~60 ms to hand back the truthful cut; a loaded CI runner overran it and the
+	// subtask read as abandoned (register C-85). One second leaves ~250 ms and still returns well
+	// inside the 2 s bound below.
+	widenUnwind(t, time.Second)
 	_, inner := remoteQueuedForeverServer(t)
 	mux := http.NewServeMux()
 	mux.HandleFunc("DELETE /fleet/jobs/{id}", func(w http.ResponseWriter, r *http.Request) {
