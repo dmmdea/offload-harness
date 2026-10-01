@@ -456,7 +456,7 @@ would strip it of the entire Vulkan serving path.
 
 Verified on the fleet: <node-b> → `blackwell-2x16` (RTX 5060 Ti 16 GB **+** RTX 5070 Ti 16 GB,
 ~32 GB total), the <node-a> laptop → `ampere-8` (RTX 3070 Laptop, 8 GB), and the Linux node →
-`ampere-6` (RTX 3050, 6 GB), each matching the tier that box ran AT THAT TIME. Both have since moved: the Lenovo is `ampere-16` (A2 16 GB) since 2026-09-04, and <node-b> has run three Blackwell cards since 2026-08-31 — a shape no tier id covers, which `Get-Profile` files as `dual-gpu`. [stale-marker added 2026-09-07] Historical text: each matching the tier it actually runs.
+`ampere-6` (RTX 3050, 6 GB), each matching the tier that box ran AT THAT TIME. Both have since moved: the Linux node is `ampere-16` (A2 16 GB) since 2026-09-04, and <node-b> has run three Blackwell cards since 2026-08-31, which `Get-Profile` files as `blackwell-3x16` (shipped 0.113.32; before it, the same rig filed as `dual-gpu`, a tier the installer refuses because CUDA 13 cannot compile sm_70). Historical text: each matching the tier it actually runs.
 
 > <node-b> read `blackwell-16` (single RTX 5060 Ti, 15.9 GB) until **2026-08-02**, when the
 > 5070 Ti was installed. Detection already handles this — `hwdetect.Classify` returns
