@@ -115,3 +115,13 @@ limits by hand, or delete the file to regenerate it; `local-offload audit-config
 Under `route: remote`, an `assess_image` for a fleet whose only vision node is this tier now defers at placement
 (defer class `capacity`), naming the node and its `vision_tasks`, instead of a dispatch that would fail; with
 another vision node on the roster it runs there.
+
+## Amendment (0.154.0)
+
+The statement above that the grammar cascade tasks do not run on this node is amended by
+[ADR 0069](0069-an-unconstrained-seat-runs-classify-and-extract-from-the-prompt-and-the-text-lane-ships-dark.md).
+The seat is now declared in the node config key `unconstrained_seats` (written from the `rkllm` media seat), and for
+a declared seat the pipeline sends no grammar: classify and extract run from a prompt that states the JSON shape and
+are accepted only after strict schema validation. `assess_image` still does not run here. The fleet `text` lane that
+would expose classify and extract to a delegator ships dark: this tier declares no text task until measured data
+passes.

@@ -583,7 +583,8 @@ pwsh setup/browse/install.ps1 -OffloadHome <OFFLOAD_HOME>
 # 2. config: browse_python, browse_script, browse_decision_url (plain http on loopback only),
 #    browse_cdp_url for a dedicated agent profile (e.g. http://127.0.0.1:9333; recommended),
 #    or browse_browser (chrome|edge|brave|chromium), browse_timeout_sec (300),
-#    browse_max_actions (30, ceiling 60), browse_capture_dir
+#    browse_max_actions (30, ceiling 60), browse_capture_dir,
+#    browse_activate_tab (false; set it true together with browse_cdp_url, see below)
 # 3. only if your decision endpoint wants a bearer, set it in the harness's environment
 $env:LOCAL_OFFLOAD_BROWSE_BEARER = '<bearer>'
 # 4. CLI use (always unattended for browse: --browse-hosts is required)
@@ -593,6 +594,22 @@ local-agent --allow-browse --browse-hosts example.com "open the reports page and
 Then, in the browser you want driven, open `<browser>://inspect/#remote-debugging` (`chrome://`,
 `edge://`, `brave://`) and tick **Allow remote debugging for this browser instance**. The harness never
 starts or restarts the browser. Restart your MCP client so `offload_browse` appears.
+
+**Dedicated agent browser: turn on tab activation.** The lane opens its tab in the background, and Chromium
+draws almost no frames for a background tab, so a dialog that fades in can stay invisible to the model and the
+run ends `blocked`. If the browser behind `browse_cdp_url` is a dedicated profile that nobody looks at, set
+`"browse_activate_tab": true` in the harness config (and restart the MCP client, as for the other browse keys):
+the sidecar then brings the lane's own tab to the front once per run and the page renders normally (measured on a
+production web app's confirm dialog: fully open 0.4 s after the click, against 2.1 s left alone). The setting is
+ignored without `browse_cdp_url`, because activating a tab switches the window's active tab, and in your
+everyday browser that is the tab you are looking at. The config load warns when the setting is ignored, and
+`offload_status` shows `remote.browse_activate_tab` (with a note when it is ignored). That field is what the
+harness will send; it cannot see the installed sidecar, and only a sidecar from 0.154.2 or later acts on it, so
+after an upgrade rerun `setup/browse/install.ps1` first (an older `runner.py` ignores the setting without a log
+line). A run that activates also stops the lane's own leftover browser-harness daemon before it starts, so a
+daemon left by a crashed run cannot keep the run attached to the wrong browser. For a menu-then-confirm
+flow, write the goal so that it describes the dialog's question and says the task is not done and not blocked
+while the dialog is open (see [systems/browse-lane.md](systems/browse-lane.md), Common pitfalls).
 
 Controls labelled publish, send, post, delete, remove, pay, buy, checkout, subscribe, confirm, sign out
 and similar are removed before the model sees them and rechecked at execution; the run then ends
@@ -1058,7 +1075,7 @@ carries any measured override to apply.
 | `ampere-6` | `offload-e4b` | 32768 | q8_0 (conservative default; f16 measured viable) | dropped (architectural — see the tier page) |
 | `amd-gcn` | `gemma4-e2b` (Vulkan; the CPU alt route was withdrawn 2026-09-24 — no model runs on CPU, ADR 0054 amendment; agent seat `qwen3.5-4b-agent`) | 32768 (8192 → 32768 measured 2026-09-20: 24k-token prompt in 278 s, 3.9 GiB GTT) | f16, flash-attn on (measured 2026-09-20 on binxarn: +4 % pp, neutral on Lucienne; the lane is DDR-bandwidth-bound, every RADV/ubatch/KV knob within ±4 %) | dropped |
 | `cpu` | `offload-e4b` (CPU) | 8192 | f16, flash-attn off | `--cpu-moe` when RAM ≥ ~56 GB; else dropped |
-| `rockchip-rk3588` | `qwen3.5-2b-npu` (Qwen3.5-2B W8A8 on the NPU via RKLLM, chat and vision: `vqa` and `ocr`, never `assess_image`); no llama.cpp entry (llama.cpp Vulkan faults the Mali GPU on this kernel/Mesa, measured), no model runs on the CPU, and `uma_reserve_gib` 3 holds RAM back for the host | the NPU seat 16384 | n/a (RKLLM) | dropped |
+| `rockchip-rk3588` | `qwen3.5-2b-npu` (Qwen3.5-2B W8A8 on the NPU via RKLLM, chat and vision: `vqa` and `ocr`, never `assess_image`; its own pipeline runs `classify` and `extract` with no grammar, from a prompt plus strict validation, and the fleet text lane is not advertised until measured); no llama.cpp entry (llama.cpp Vulkan faults the Mali GPU on this kernel/Mesa, measured), no model runs on the CPU, and `uma_reserve_gib` 3 holds RAM back for the host | the NPU seat 16384 | n/a (RKLLM) | dropped |
 
 Notes: q8_0 KV keeps the KV cache ~half the size (V-quant needs flash-attn on, which the CUDA/Vulkan
 templates set); the 26B is placed full-GPU only on ≥12 GB single-card profiles, `--cpu-moe` (experts

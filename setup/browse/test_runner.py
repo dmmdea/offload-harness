@@ -1,14 +1,18 @@
 """Unit tests for the pure helpers in runner.py. No network, no browser, no jev dependencies."""
 
+import contextlib
 import io
 import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
+import time
 import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import runner
 
@@ -56,11 +60,11 @@ class HostTests(unittest.TestCase):
         self.assertTrue(runner.host_allowed("http://example.org", None))
 
     def test_subdomain_and_exact(self):
-        allow = ["substack.com"]
-        self.assertTrue(runner.host_allowed("https://readypep.substack.com/p/1", allow))
-        self.assertTrue(runner.host_allowed("https://SUBSTACK.com/", allow))
-        self.assertFalse(runner.host_allowed("https://evilsubstack.com/", allow))
-        self.assertFalse(runner.host_allowed("https://substack.com.evil.test/", allow))
+        allow = ["example.net"]
+        self.assertTrue(runner.host_allowed("https://pub.example.net/p/1", allow))
+        self.assertTrue(runner.host_allowed("https://EXAMPLE.net/", allow))
+        self.assertFalse(runner.host_allowed("https://evilexample.net/", allow))
+        self.assertFalse(runner.host_allowed("https://example.net.evil.test/", allow))
         self.assertFalse(runner.host_allowed("https://example.org/", allow))
 
     def test_schemes(self):
@@ -252,7 +256,7 @@ class CdpPinTests(unittest.TestCase):
 
 
 class SettleTests(unittest.TestCase):
-    """The tab must not close while the page is still saving: Substack's editor autosaves
+    """The tab must not close while the page is still saving: a production editor autosaved
     2.3 s after the last keystroke, and a run that closed its tab at DONE lost the title."""
 
     def ev(self, method, rid, session="s1", type_="XHR"):
@@ -331,28 +335,67 @@ class SettleTests(unittest.TestCase):
 class BackgroundTabAnimationTests(unittest.TestCase):
     """The lane's tab is hidden, so CSS animations never advance there and a fading-in dialog keeps
     opacity 0, which jev's snapshot drops. Every page read must be preceded by a finish; act must not
-    (it would disturb jev's pre-click freshness check). Fakes stand in for jev's Browser and its
+    (it would disturb jev's pre-click freshness check), and the observe that follows an action first lets
+    the page settle (SettleAfterInputTests pins the settle itself). Fakes stand in for jev's Browser and its
     module-level browser_operation/cdp: no browser, no jev."""
 
     PAGE = {"url": "https://example.org/", "actions": [{"id": "e1", "kind": "click", "label": "Open menu", "node": 7}]}
 
-    def make(self, finished=2, on_finish=None, stale_reads=0, capture=None):
-        """Patch a fresh fake Browser through the real _install_patches; returns (browser, order, run, sessions)."""
+    def make(self, finished=2, on_finish=None, stale_reads=0, capture=None, settle="record", drain=False,
+             start_extra=None, target="t-lane", activate_error=None):
+        """Patch a fresh fake Browser through the real _install_patches; returns (browser, order, run, sessions).
+
+        The settle after an input would really sleep, so runner.settle_after_input is replaced for the test:
+        settle="record" notes "settle" in `order` and sends one probe call; settle="real" notes "settle" and
+        runs the real function on a fake clock, so its reads and finishes show up in `order`. drain=True makes
+        it a capture run: every drain of the daemon's event buffer shows up in `order` as "drain".
+
+        start_extra is merged into the run's start message (activate_tab). The fake Browser's tab id is `target`
+        (None = a Browser without one). Every Target.activateTarget is noted in `order` as "activate" and kept in
+        self.activations (session id and params, in call order); activate_error makes that call raise."""
         order = []
         sessions = []
+        self.activations = []
         stale = [True] * stale_reads
 
         class FakeStalePage(ValueError):
             pass
 
         def fake_cdp(method, session_id=None, **params):
+            if method == "Target.activateTarget":  # a browser-level call: kept apart from the per-session `sessions`
+                order.append("activate")
+                self.activations.append({"session_id": session_id, "params": dict(params)})
+                if activate_error is not None:
+                    raise activate_error
+                return {}
             sessions.append(session_id)
             if "getAnimations" in params.get("expression", ""):
                 order.append("finish")
                 if on_finish is not None:
                     return on_finish()
                 return {"result": {"type": "number", "value": finished}}
+            if "__laneSettle" in params.get("expression", ""):
+                order.append("mutations")
+                if method != "Runtime.evaluate" or params.get("returnByValue") is not True:
+                    return {"result": {"type": "object", "objectId": "1"}}  # by reference: Chrome sends no value
+                return {"result": {"value": [1, 0]}}
             return {"result": {"value": []}}
+
+        real_settle = runner.settle_after_input
+
+        def record_settle(send, between=None):
+            order.append("settle")
+            send("Runtime.evaluate", expression="probe", returnByValue=True)
+
+        def settle_on_a_fake_clock(send, between=None):
+            order.append("settle")
+            now = [0.0]
+
+            def sleep(seconds):
+                now[0] += seconds
+
+            hook = {} if between is None else {"between": between}
+            real_settle(send, clock=lambda: now[0], sleep=sleep, **hook)
 
         def fake_operation(request):  # jev's module-level browser_operation
             order.append(f"read:{request['operation']}")
@@ -365,8 +408,8 @@ class BackgroundTabAnimationTests(unittest.TestCase):
                     "actions": [dict(a) for a in BackgroundTabAnimationTests.PAGE["actions"]]}
 
         class FakeBrowser:
-            session = "s1"
-            after_input = None
+            session = "s1"  # no after_input here: jev's Browser only sets it in act, never in __init__
+            # jev's Browser.__init__ sets target to the id of the tab it created (and None after close)
 
             def call(self, method, **params):
                 order.append(f"call:{method}")
@@ -378,7 +421,7 @@ class BackgroundTabAnimationTests(unittest.TestCase):
 
             def observe(self, screenshot=True):  # like jev: the post-action wait, then up to 10 reads
                 order.append("observe")
-                if self.after_input:
+                if getattr(self, "after_input", None):  # jev reads it with getattr: the first observe has none
                     self.after_input = None
                     order.append("wait")
                 for attempt in range(10):
@@ -402,9 +445,18 @@ class BackgroundTabAnimationTests(unittest.TestCase):
             Browser=FakeBrowser, StalePage=FakeStalePage, browser_operation=fake_operation, cdp=fake_cdp)
         model = types.SimpleNamespace()
         agent_mod = types.SimpleNamespace()
-        run = runner.Run({"url": "https://example.org/", "unattended": True}, types.SimpleNamespace(send=lambda obj: None))
+        FakeBrowser.target = target
+        run = runner.Run({"url": "https://example.org/", "unattended": True, **(start_extra or {})},
+                         types.SimpleNamespace(send=lambda obj: None))
         run.capture = capture
+        if drain:
+            run.capture = types.SimpleNamespace(session_id=None, feed=lambda event: None)
+            run.helpers = types.SimpleNamespace(drain_events=lambda: order.append("drain") or [])
         runner._install_patches(run, model, agent_mod, browser_mod)
+        patcher = mock.patch.object(runner, "settle_after_input",
+                                    side_effect=record_settle if settle == "record" else settle_on_a_fake_clock)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         return FakeBrowser(), order, run, sessions
 
     def test_observe_finishes_animations_before_it_reads_the_page(self):
@@ -426,12 +478,209 @@ class BackgroundTabAnimationTests(unittest.TestCase):
 
     def test_the_finish_runs_after_the_post_action_wait(self):
         # jev waits 50 ms (200 ms for a combobox) after an input before it reads the page; an
-        # autocomplete option the page mounts in that window still has a pending fade-in.
+        # autocomplete option the page mounts in that window still has a pending fade-in. The settle
+        # comes first, before jev's wait: the page gets its time, then jev's own wait and the read.
         browser, order, _, _ = self.make()
         browser.act(self.PAGE["actions"][0], self.PAGE)
         del order[:]
         browser.observe()
-        self.assertEqual(order, ["observe", "wait", "finish", "read:observe"])
+        self.assertEqual(order, ["settle", "observe", "wait", "finish", "read:observe"])
+
+    def test_the_settle_runs_in_the_observed_session_and_the_page_still_comes_back(self):
+        browser, order, _, sessions = self.make()
+        browser.act(self.PAGE["actions"][0], self.PAGE)
+        del order[:], sessions[:]
+        page = browser.observe()
+        self.assertEqual(sessions, ["s1", "s1"], "the settle (probe) and the finish both run in the observed session")
+        self.assertEqual(page["url"], "https://example.org/")
+        self.assertEqual([a["id"] for a in page["actions"]], ["e1"])
+
+    def test_the_settle_runs_once_per_observe_after_an_action(self):
+        browser, order, _, _ = self.make()
+        browser.observe()
+        self.assertEqual(order.count("settle"), 0, "nothing has run before the first observe")
+        browser.act(self.PAGE["actions"][0], self.PAGE)
+        browser.observe()
+        browser.observe()
+        self.assertEqual(order.count("settle"), 1, "after_input is consumed by the observe that follows the action")
+        browser.act(self.PAGE["actions"][0], self.PAGE)
+        browser.observe()
+        self.assertEqual(order.count("settle"), 2)
+
+    def test_a_wait_action_and_a_stale_retry_do_not_settle(self):
+        # jev leaves after_input unset after a wait, and the retries of one observe are not new inputs.
+        browser, order, _, _ = self.make()
+        browser.act({"id": "wait", "kind": "wait", "label": "Wait for the page to update"}, self.PAGE)
+        browser.observe()
+        self.assertNotIn("settle", order)
+        browser2, order2, _, _ = self.make(stale_reads=2)
+        browser2.act(self.PAGE["actions"][0], self.PAGE)
+        browser2.observe()
+        self.assertEqual(order2.count("settle"), 1)
+        self.assertEqual(order2.count("finish"), 3, "every retry still finishes")
+
+    def test_the_real_settle_polls_in_the_observed_session_before_jevs_wait(self):
+        browser, order, run, sessions = self.make(finished=0, settle="real")
+        browser.act(self.PAGE["actions"][0], self.PAGE)
+        del order[:], sessions[:]
+        page = browser.observe()
+        self.assertEqual(order, ["settle", "mutations"] + ["finish", "mutations"] * 3
+                         + ["observe", "wait", "finish", "read:observe"])
+        self.assertEqual(set(sessions), {"s1"})
+        self.assertEqual(page["url"], "https://example.org/")
+        self.assertTrue(run.observed_once)
+
+    def test_the_first_observe_of_a_run_does_not_settle(self):
+        # jev's real Browser has no after_input until its first act: the wrapper must read it with getattr.
+        browser, order, _, _ = self.make()
+        self.assertFalse(hasattr(browser, "after_input"))
+        browser.observe()
+        self.assertEqual(order, ["observe", "finish", "read:observe"])
+
+    # ---- activate_tab: bring the lane's own tab to the front once per run (opt-in) --------------------------
+
+    ACTIVATE = {"activate_tab": True}
+
+    def test_activate_tab_activates_the_lanes_tab_once_before_the_first_read(self):
+        # Attended and unattended alike: the measured failure (0 of 3) was on the attended MCP door, so the
+        # activation must not depend on the door the run came in by.
+        for label, door in (("unattended", {}), ("attended", {"unattended": False})):
+            with self.subTest(label):
+                browser, order, run, sessions = self.make(start_extra={**self.ACTIVATE, **door})
+                self.assertEqual(run.unattended, not door)
+                page = browser.observe()
+                self.assertEqual(order, ["activate", "observe", "finish", "read:observe"])
+                self.assertEqual(self.activations, [{"session_id": None, "params": {"targetId": "t-lane"}}])
+                self.assertEqual(sessions, ["s1"], "only the finish ran in the observed session; the activation did not")
+                self.assertEqual(page["url"], "https://example.org/")
+
+    def test_activation_is_a_browser_level_call_with_the_lanes_own_target_id(self):
+        # Target.activateTarget is a Target-domain command on the browser: no session, and the target id is the
+        # one jev's Browser created for this run, not a constant and not another tab.
+        browser, _, _, _ = self.make(start_extra=self.ACTIVATE, target="t-7")
+        browser.observe()
+        self.assertEqual(len(self.activations), 1)
+        self.assertIsNone(self.activations[0]["session_id"], "a browser-level call carries no session")
+        self.assertEqual(self.activations[0]["params"], {"targetId": "t-7"})
+
+    def test_activation_happens_exactly_once_however_many_observes_follow(self):
+        browser, order, _, _ = self.make(start_extra=self.ACTIVATE, stale_reads=2)
+        browser.observe()  # three reads (two stale retries) inside one observe
+        browser.act(self.PAGE["actions"][0], self.PAGE)
+        browser.observe()
+        browser.observe()
+        browser.act(self.PAGE["actions"][0], self.PAGE)
+        browser.observe()
+        self.assertEqual(order.count("activate"), 1)
+        self.assertEqual(len(self.activations), 1)
+        self.assertEqual(order.count("settle"), 2, "the settle after each action is unchanged by the activation")
+
+    def test_activate_tab_is_off_unless_the_start_line_says_true(self):
+        for label, extra in (("absent", None), ("false", {"activate_tab": False}), ("null", {"activate_tab": None}),
+                             ("the string true", {"activate_tab": "true"}), ("the string false", {"activate_tab": "false"}),
+                             ("the number one", {"activate_tab": 1})):
+            with self.subTest(label):
+                browser, order, run, _ = self.make(start_extra=extra)
+                browser.observe()
+                browser.act(self.PAGE["actions"][0], self.PAGE)
+                browser.observe()
+                self.assertNotIn("activate", order)
+                self.assertEqual(self.activations, [])
+                self.assertFalse(run.activate_tab)
+
+    def test_the_run_reads_activate_tab_from_the_start_message(self):
+        proto = types.SimpleNamespace(send=lambda obj: None)
+        self.assertTrue(runner.Run({"url": "https://example.org/", "activate_tab": True}, proto).activate_tab)
+        self.assertFalse(runner.Run({"url": "https://example.org/"}, proto).activate_tab, "default False")
+        self.assertFalse(runner.Run({"url": "https://example.org/", "activate_tab": False}, proto).activate_tab)
+
+    def test_activation_runs_before_the_settle_and_before_jevs_read(self):
+        # jev's first observe has no after_input, so the settle cannot run there in production; set it by hand
+        # to pin the order in the wrapper's code: activate, then settle, then jev's own observe.
+        browser, order, _, _ = self.make(start_extra=self.ACTIVATE)
+        browser.after_input = self.PAGE["actions"][0]
+        browser.observe()
+        self.assertEqual(order, ["activate", "settle", "observe", "wait", "finish", "read:observe"])
+
+    def test_a_failing_activation_is_swallowed_logged_once_and_never_retried(self):
+        failures = {
+            "a CDP error": RuntimeError("Target.activateTarget failed: No target with given id"),
+            "a closed pipe": OSError("pipe closed"),
+            "a value error": ValueError("bad reply"),
+        }
+        for name, exc in failures.items():
+            with self.subTest(name):
+                browser, order, run, _ = self.make(start_extra=self.ACTIVATE, activate_error=exc)
+                with mock.patch.object(runner, "log") as log:
+                    page = browser.observe()
+                    browser.act(self.PAGE["actions"][0], self.PAGE)
+                    browser.observe()
+                self.assertEqual(order.count("activate"), 1, "a failed attempt is not retried on the next observe")
+                self.assertEqual(page["url"], "https://example.org/", "the run continues exactly as before")
+                self.assertTrue(run.observed_once)
+                lines = [c.args[0] for c in log.call_args_list if "activate" in c.args[0]]
+                self.assertEqual(len(lines), 1, lines)
+                self.assertIn(type(exc).__name__, lines[0])
+                self.assertIn("skipped", lines[0])
+                self.assertNotIn("activated the lane's tab", lines[0])
+
+    def test_a_successful_activation_logs_exactly_one_line(self):
+        browser, _, _, _ = self.make(start_extra=self.ACTIVATE)
+        with mock.patch.object(runner, "log") as log:
+            browser.observe()
+            browser.observe()
+        lines = [c.args[0] for c in log.call_args_list if "activate" in c.args[0]]
+        self.assertEqual(len(lines), 1, lines)
+        self.assertIn("activated the lane's tab", lines[0])
+
+    def test_a_browser_without_a_tab_id_skips_the_activation_and_still_reads(self):
+        browser, order, run, _ = self.make(start_extra=self.ACTIVATE, target=None)
+        with mock.patch.object(runner, "log") as log:
+            page = browser.observe()
+            browser.observe()
+        self.assertNotIn("activate", order)
+        self.assertEqual(page["url"], "https://example.org/")
+        lines = [c.args[0] for c in log.call_args_list if "activate" in c.args[0]]
+        self.assertEqual(len(lines), 1, "the skip is logged once, not on every observe")
+        self.assertTrue(run.tab_activated, "one attempt per run, even one that had nothing to activate")
+
+    def test_activate_lane_tab_reports_success_and_never_raises(self):
+        calls = []
+        self.assertTrue(runner.activate_lane_tab(lambda method, **params: calls.append((method, params)), "t1"))
+        self.assertEqual(calls, [("Target.activateTarget", {"targetId": "t1"})])
+
+        def boom(method, **params):
+            raise RuntimeError("daemon gone")
+
+        with mock.patch.object(runner, "log"):
+            self.assertFalse(runner.activate_lane_tab(boom, "t1"))
+            self.assertFalse(runner.activate_lane_tab(boom, None))
+            self.assertFalse(runner.activate_lane_tab(boom, ""))
+
+    def test_every_kind_of_input_settles_once(self):
+        # A typed field, a chosen option and a scroll reveal things on the page's own timers as well.
+        for kind in ("click", "fill", "select", "scroll"):
+            with self.subTest(kind):
+                browser, order, _, _ = self.make()
+                browser.act({"id": "e1", "kind": kind, "label": "Field", "node": 7}, self.PAGE, text="x")
+                browser.observe()
+                self.assertEqual(order.count("settle"), 1)
+
+    def test_the_capture_buffer_is_drained_during_the_settle_not_only_around_it(self):
+        # The daemon's event buffer holds 500 events and drops the oldest: the settle waits up to 1.5 s on a
+        # busy page right after the click, so it must drain between its polls, like every other wait does.
+        browser, order, _, _ = self.make(finished=0, settle="real", drain=True)
+        browser.act(self.PAGE["actions"][0], self.PAGE)
+        del order[:]
+        browser.observe()
+        self.assertEqual(order, ["settle", "mutations"] + ["drain", "finish", "mutations"] * 3
+                         + ["observe", "wait", "finish", "read:observe", "drain"])
+
+    def test_without_capture_the_settle_drains_nothing(self):
+        browser, order, _, _ = self.make(finished=0, settle="real")
+        browser.act(self.PAGE["actions"][0], self.PAGE)
+        browser.observe()
+        self.assertNotIn("drain", order)
 
     def test_a_stale_read_is_retried_with_a_fresh_finish(self):
         # A click that navigates: the retries re-read the new document, whose fade-ins are pending.
@@ -451,6 +700,7 @@ class BackgroundTabAnimationTests(unittest.TestCase):
         self.assertEqual(order.count("act"), 3)
         self.assertEqual(order.count("read:act"), 3, "act still reaches jev's browser_operation")
         self.assertNotIn("finish", order)
+        self.assertNotIn("settle", order, "the settle belongs to the observe that follows an action")
 
     def test_the_finish_does_not_touch_the_runs_bookkeeping(self):
         capture = types.SimpleNamespace(session_id=None)
@@ -576,6 +826,303 @@ console.log(JSON.stringify({n, finished, attempted, missingApi}));
         self.assertEqual(out["missingApi"], 0)
 
 
+class Runaway(BaseException):
+    """Not an Exception, so the settle's own catch-all cannot swallow it: a loop with no stop must fail a test."""
+
+
+class SettleAfterInputTests(unittest.TestCase):
+    """settle_after_input waits for the page to go quiet after an input: a dialog opened from a menu item
+    mounts on the page's own timer, well after jev's ~50 ms wait. Pure Python: a scripted page, a fake
+    clock that only sleep advances, and a runaway guard so a broken stop rule fails instead of hanging."""
+
+    MIN, QUIET, POLL, CAP = (runner.INPUT_SETTLE_MIN_S, runner.INPUT_SETTLE_QUIET_POLLS,
+                             runner.INPUT_SETTLE_POLL_S, runner.INPUT_SETTLE_CAP_S)
+
+    def setUp(self):
+        patcher = mock.patch.object(runner, "log")  # the settle and the finish log to stderr
+        self.log = patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def settled_lines(self):
+        return [c.args[0] for c in self.log.call_args_list if c.args[0].startswith("settled ")]
+
+    @staticmethod
+    def pick(script, i, default):
+        """script is a list (the last value repeats), a function of the index, or None (the default)."""
+        if script is None:
+            return default
+        if callable(script):
+            return script(i)
+        return script[min(i, len(script) - 1)] if script else default
+
+    def drive(self, reads=None, finished=None, send=None, between=None):
+        """Run the real settle against a scripted page. reads[i] is the i-th counter read (index 0 is the
+        install read), finished[i] the i-th finish count; `between`, when given, is the settle's between-poll
+        hook (noted in `calls`, then run, so it may raise). Returns a namespace: polls made, elapsed fake
+        time, the calls in order, the number of finishes and the return value."""
+        t = [0.0]
+        calls, sleeps = [], [0]
+        counters = {"read": 0, "finish": 0}
+
+        def sleep(seconds):
+            calls.append("sleep")
+            sleeps[0] += 1
+            if sleeps[0] > 100:  # the cap is 15 polls: a hundred means nothing stopped the loop
+                raise Runaway("the settle never stopped")
+            t[0] += seconds
+
+        def fake_send(method, **params):
+            expression = params.get("expression")
+            if expression == runner.FINISH_ANIMATIONS_JS:
+                i, counters["finish"] = counters["finish"], counters["finish"] + 1
+                calls.append("finish")
+                return {"result": {"value": self.pick(finished, i, 0)}}
+            self.assertEqual(expression, runner.MUTATION_COUNTER_JS)
+            i, counters["read"] = counters["read"], counters["read"] + 1
+            calls.append("read")
+            if method != "Runtime.evaluate" or params.get("returnByValue") is not True:
+                return {"result": {"type": "object", "objectId": "1"}}  # by reference: Chrome sends no value
+            return {"result": {"value": self.pick(reads, i, [1, 0])}}
+
+        def hook():
+            calls.append("between")
+            between()
+
+        extra = {} if between is None else {"between": hook}
+        result = runner.settle_after_input(send or fake_send, clock=lambda: t[0], sleep=sleep, **extra)
+        return types.SimpleNamespace(result=result, polls=sleeps[0], elapsed=t[0], calls=calls,
+                                     finishes=counters["finish"])
+
+    def test_a_quiet_page_stops_after_the_minimum_not_before(self):
+        # Two quiet polls are reached at 0.2 s, but the minimum is 0.3 s: the settle must still be running.
+        out = self.drive(reads=[[1, 0]])
+        self.assertIsNone(out.result)
+        self.assertEqual(out.polls, 3)
+        self.assertAlmostEqual(out.elapsed, self.MIN, places=6)
+        self.assertGreaterEqual(out.elapsed, self.MIN - 1e-9)
+
+    def test_it_stops_after_consecutive_quiet_polls_once_the_page_stopped_changing(self):
+        # Mutations land in polls 1 and 3. The quiet poll between them must not end the settle, and neither
+        # must the one after poll 3: two quiet polls in a row do, at poll 5.
+        out = self.drive(reads=[[1, 0], [1, 4], [1, 4], [1, 9], [1, 9], [1, 9]])
+        self.assertEqual(out.polls, 5)
+        self.assertAlmostEqual(out.elapsed, 5 * self.POLL, places=6)
+
+    def test_a_burst_after_a_quiet_start_holds_the_settle_until_it_is_quiet(self):
+        # The dialog mounts in poll 3 (0.3 s): the page was quiet for two polls, yet the settle goes on.
+        out = self.drive(reads=[[1, 0], [1, 0], [1, 0], [1, 12]])
+        self.assertEqual(out.polls, 5)
+
+    def test_an_animation_finished_in_a_poll_is_activity(self):
+        # No DOM mutation at all, but one animation finished in poll 2: that poll is not quiet.
+        out = self.drive(reads=[[1, 0]], finished=[0, 1, 0])
+        self.assertEqual(out.polls, 4)
+
+    def test_every_poll_finishes_animations_and_reads_the_counter_after_sleeping(self):
+        out = self.drive(reads=[[1, 0]])
+        self.assertEqual(out.calls, ["read"] + ["sleep", "finish", "read"] * out.polls)
+        self.assertEqual(out.finishes, out.polls)
+
+    def test_a_navigation_is_a_change_even_when_the_count_matches(self):
+        # A new document has no observer: its id differs and its count restarts (here at the same value).
+        out = self.drive(reads=[[1, 0], [1, 0], [2, 0]])
+        self.assertEqual(out.polls, 4, "the id change in poll 2 restarts the quiet window")
+        out = self.drive(reads=[[1, 40], [1, 40], [2, 3]])  # and a count that went down
+        self.assertEqual(out.polls, 4)
+
+    def test_it_never_runs_past_the_cap_on_a_page_that_keeps_changing(self):
+        pages = {
+            "a DOM that keeps mutating": {"reads": lambda i: [1, i]},
+            "an animation starting every poll": {"finished": lambda i: 1},
+        }
+        for name, page in pages.items():
+            with self.subTest(name):
+                out = self.drive(**page)
+                self.assertLessEqual(out.polls, round(self.CAP / self.POLL) + 1)
+                self.assertGreaterEqual(out.elapsed, self.CAP - 1e-6)
+                self.assertLessEqual(out.elapsed, self.CAP + self.POLL + 1e-6, "the cap, plus at most the poll in flight")
+
+    def test_an_unreadable_page_counts_as_a_change_and_is_bounded(self):
+        def raises(exc):
+            def fail():
+                raise exc
+            return fail
+
+        failures = {
+            "an exception": raises(RuntimeError("Cannot find context with specified id")),
+            "an IPC timeout": raises(TimeoutError("Runtime.evaluate timed out")),
+            "exceptionDetails": lambda: {"exceptionDetails": {"text": "boom"}, "result": {}},
+            "no response": lambda: None,
+            "a bare number": lambda: {"result": {"value": 7}},
+            "a bool pair": lambda: {"result": {"value": [True, False]}},
+            "a short list": lambda: {"result": {"value": [1]}},
+        }
+        for name, fail in failures.items():
+            with self.subTest(name):
+                def send(method, fail=fail, **params):
+                    if params.get("expression") == runner.FINISH_ANIMATIONS_JS:
+                        return {"result": {"value": 0}}
+                    return fail()
+
+                out = self.drive(send=send)
+                self.assertIsNone(out.result)
+                self.assertGreaterEqual(out.elapsed, self.CAP - 1e-6, "an unreadable page is never quiet")
+                self.assertLessEqual(out.elapsed, self.CAP + self.POLL + 1e-6)
+
+    def test_a_between_hook_runs_once_per_poll_after_the_sleep_and_before_the_finish(self):
+        # The wrapper drains the capture buffer here; a capture run that clicks on a busy page would
+        # otherwise leave the daemon's 500-event buffer undrained for the whole settle.
+        out = self.drive(reads=[[1, 0]], between=lambda: None)
+        self.assertEqual(out.polls, 3)
+        self.assertEqual(out.calls, ["read"] + ["sleep", "between", "finish", "read"] * out.polls)
+
+    def test_a_failing_between_hook_does_not_end_the_settle(self):
+        def boom():
+            raise OSError("daemon gone")
+
+        out = self.drive(reads=[[1, 0]], between=boom)
+        self.assertEqual(out.polls, 3, "the page still gets its settle")
+        self.assertEqual(out.calls.count("between"), 3)
+        failed = [c.args[0] for c in self.log.call_args_list if c.args[0].startswith("settle between-poll hook failed")]
+        self.assertEqual(len(failed), 3, "and each failure is on stderr")
+
+    def test_the_production_defaults_use_the_real_clock_and_sleep(self):
+        # Every other test injects both. A constant clock never ends the loop; a sleep that returns at
+        # once turns the settle into a busy loop of CDP calls: both are caught by the send budget.
+        sends = [0]
+
+        def send(method, **params):
+            sends[0] += 1
+            if sends[0] > 60:  # a settle of at most 1.5 s at 0.1 s per poll sends at most 31
+                raise Runaway("the settle never stopped")
+            return {"result": {"value": 0 if params["expression"] == runner.FINISH_ANIMATIONS_JS else [1, 0]}}
+
+        started = time.monotonic()
+        runner.settle_after_input(send)
+        self.assertGreaterEqual(time.monotonic() - started, self.MIN)
+        self.assertLessEqual(sends[0], 31)
+
+    def test_it_never_raises(self):
+        def dead(method, **params):
+            raise OSError("daemon gone")
+
+        self.assertIsNone(self.drive(send=dead).result)
+
+        def sleep_boom(seconds):
+            raise RuntimeError("sleep failed")
+
+        def clock_boom():
+            raise RuntimeError("clock failed")
+
+        def quiet(method, **params):
+            return {"result": {"value": 0 if params["expression"] == runner.FINISH_ANIMATIONS_JS else [1, 0]}}
+
+        self.log.reset_mock()
+        self.assertIsNone(runner.settle_after_input(quiet, clock=lambda: 0.0, sleep=sleep_boom))
+        self.assertIsNone(runner.settle_after_input(quiet, clock=clock_boom, sleep=lambda s: None))
+        skipped = [c.args[0] for c in self.log.call_args_list if c.args[0].startswith("settle after input skipped")]
+        self.assertEqual(len(skipped), 2, "a skipped settle says so on stderr")
+
+    def test_a_navigating_page_does_not_flood_stderr_with_finish_skips(self):
+        # Every poll of a settle on a navigating page fails its finish; one "skipped" line per poll would
+        # crowd the stderr tail a defer reports. The settle's finishes are quiet; observe's own is not.
+        def navigating(method, **params):
+            raise RuntimeError("Document is navigating")
+
+        self.log.reset_mock()
+        out = self.drive(send=navigating)
+        self.assertGreater(out.polls, 1)
+        lines = [c.args[0] for c in self.log.call_args_list]
+        self.assertFalse([l for l in lines if l.startswith("finish animations skipped")], lines)
+        self.log.reset_mock()
+        self.assertEqual(runner.finish_animations(navigating), 0)
+        self.assertEqual([c.args[0] for c in self.log.call_args_list], ["finish animations skipped: RuntimeError"])
+
+    def test_it_logs_only_when_the_page_was_active(self):
+        self.drive(reads=[[1, 0]])
+        self.assertEqual(self.settled_lines(), [], "a page that was quiet from the start is not worth a line")
+        self.drive(reads=[[1, 0], [1, 5]], finished=[0, 2, 0])
+        lines = self.settled_lines()
+        self.assertEqual(len(lines), 1)
+        self.assertIn("2 animation(s) finished", lines[0])
+
+    def test_the_constants_are_ordered_and_leave_the_network_settle_alone(self):
+        self.assertLess(self.POLL, self.MIN)
+        self.assertLess(self.MIN, self.CAP)
+        self.assertGreaterEqual(self.QUIET, 2, "one quiet poll is not enough: a page is quiet between bursts")
+        self.assertLess(self.CAP, 3.0, "the settle runs after every action, so it must stay cheap")
+        self.assertEqual(runner.SETTLE_POLL_S, 0.2, "the network settle's own poll interval is untouched")
+
+    def test_the_counter_is_read_by_value_through_runtime_evaluate(self):
+        # Without returnByValue Chrome answers with an object id and no value: every read would be
+        # unreadable, every poll a change, and every action would pay the whole cap.
+        sent = []
+
+        def send(method, **params):
+            sent.append((method, params))
+            return {"result": {"value": [1, 0]}}
+
+        runner.read_mutations(send)
+        self.assertEqual(sent, [("Runtime.evaluate", {"expression": runner.MUTATION_COUNTER_JS, "returnByValue": True})])
+
+    def test_read_mutations_parses_the_observer_id_and_count(self):
+        def ok(value):
+            return lambda method, **params: {"result": {"type": "object", "value": value}}
+
+        self.assertEqual(runner.read_mutations(ok([0.42, 7])), (0.42, 7))
+        self.assertEqual(runner.read_mutations(ok([3, 0])), (3, 0))
+        for bad in (None, 5, "1:2", [1], [1, 2, 3], ["a", 1], [True, 1], [None, 1], {"id": 1}):
+            self.assertIsNone(runner.read_mutations(ok(bad)), repr(bad))
+
+    NODE_HARNESS = r"""
+const script = __SCRIPT__;
+globalThis.window = globalThis;
+const observers = [];
+globalThis.MutationObserver = class {
+  constructor(cb) { this.cb = cb; observers.push(this); }
+  observe(target, options) { this.target = target; this.options = options; }
+};
+globalThis.document = {documentElement: {name: 'html'}};
+const first = eval(script);
+const second = eval(script);
+const installedAfterTwoReads = observers.length;
+observers[0].cb([{}, {}, {}]);          // three mutation records arrive
+const third = eval(script);
+delete globalThis.__laneSettle;         // a navigation: the new document has no state
+const fourth = eval(script);
+delete globalThis.__laneSettle;         // a document that has no root element yet
+globalThis.document = {documentElement: null};
+const early = eval(script);
+globalThis.document = {documentElement: {name: 'html'}};
+const later = eval(script);
+delete globalThis.__laneSettle;         // a page without MutationObserver
+delete globalThis.MutationObserver;
+const missing = eval(script);
+console.log(JSON.stringify({first, second, third, fourth, early, later, missing, installedAfterTwoReads,
+  observers: observers.length, options: observers[0].options, target: observers[0].target}));
+"""
+
+    @unittest.skipUnless(shutil.which("node"), "node is not on PATH")
+    def test_the_counter_script_counts_mutations_and_survives_navigations(self):
+        program = self.NODE_HARNESS.replace("__SCRIPT__", json.dumps(runner.MUTATION_COUNTER_JS))
+        done = subprocess.run([shutil.which("node"), "-"], input=program, capture_output=True,
+                              text=True, encoding="utf-8", timeout=60)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        out = json.loads(done.stdout)
+        self.assertEqual(out["first"][1], 0)
+        self.assertEqual(out["second"], out["first"], "the same document reads the same id and count")
+        self.assertEqual(out["installedAfterTwoReads"], 1, "one observer per document, however often it is read")
+        self.assertEqual(out["third"], [out["first"][0], 3], "the count is the mutation records seen")
+        self.assertNotEqual(out["fourth"][0], out["first"][0], "a new document gets a new id")
+        self.assertEqual(out["fourth"][1], 0)
+        self.assertEqual(out["early"][1], 0, "no root element yet: nothing observed, nothing thrown")
+        self.assertEqual(out["later"][0], out["early"][0], "the same document installs when its root exists")
+        self.assertEqual(out["observers"], 3)
+        self.assertEqual(out["missing"][1], 0, "no MutationObserver: a constant count, nothing thrown")
+        self.assertEqual(out["options"], {"subtree": True, "childList": True, "attributes": True, "characterData": True})
+        self.assertEqual(out["target"], {"name": "html"})
+
+
 class ReviewHardeningTests(unittest.TestCase):
     """Review findings 2026-09-28: capture boundaries and redaction, click targets, output encoding."""
 
@@ -629,6 +1176,94 @@ class ReviewHardeningTests(unittest.TestCase):
         line = out.getvalue()
         line.encode("utf-8")  # must not raise: the surrogate is escaped
         self.assertIn("\\ud83d", line)
+
+
+class ActivationStopsAStaleLaneDaemonTests(unittest.TestCase):
+    """main() with fake jev and browser-harness modules: no browser, no daemon. jev's ensure_daemon reuses any
+    live daemon of the lane's name and never compares it with the endpoint the run pins, so a lane daemon left by
+    an earlier run (a hard crash, a failed stop) could still be attached to the operator's everyday browser. A run
+    that activates its tab therefore stops the lane's daemon before jev starts one; a run that does not activate
+    leaves the daemon lifecycle exactly as it was."""
+
+    START = {"type": "start", "url": "https://example.org/", "goal": "g", "max_actions": 3,
+             "allow_hosts": ["example.org"], "cdp_url": "http://127.0.0.1:9555", "unattended": True}
+
+    def run_main(self, start_extra=None, stop_error=None):
+        """Drive runner.main() once; returns (order, stopped_names, result_line, log_lines)."""
+        order, stopped = [], []
+
+        def restart_daemon(name=None):
+            order.append("stop")
+            stopped.append(name)
+            if stop_error is not None:
+                raise stop_error
+
+        class FakeAgent:
+            def __init__(self, url, goal):
+                order.append("agent")
+                self.state = {"status": "done", "page": {"url": url, "title": "", "text": ""}, "history": []}
+                self.browser = types.SimpleNamespace(session=None)
+
+            def run(self):
+                return iter(())
+
+            def close(self):
+                order.append("close")
+
+        modules = {}
+
+        def module(name, **attrs):
+            mod = types.ModuleType(name)
+            mod.__dict__.update(attrs)
+            modules[name] = mod
+            return mod
+
+        jev = module("jev_ultrafast")
+        jev.agent = module("jev_ultrafast.agent", Agent=FakeAgent)
+        jev.browser = module("jev_ultrafast.browser")
+        jev.model = module("jev_ultrafast.model")
+        bh = module("browser_harness")
+        bh.helpers = module("browser_harness.helpers")
+        bh.admin = module("browser_harness.admin", restart_daemon=restart_daemon)
+
+        start = {**self.START, **(start_extra or {})}
+        out = io.StringIO()
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.dict(sys.modules, modules))
+            stack.enter_context(mock.patch.dict(os.environ))
+            stack.enter_context(mock.patch.object(sys, "stdin", io.StringIO(json.dumps(start) + "\n")))
+            stack.enter_context(mock.patch.object(sys, "stdout", out))
+            stack.enter_context(mock.patch.object(sys, "stderr", io.StringIO()))
+            stack.enter_context(mock.patch.object(runner, "_install_patches"))
+            stack.enter_context(mock.patch.object(runner, "settle_network"))
+            log = stack.enter_context(mock.patch.object(runner, "log"))
+            os.environ.pop("BU_NAME", None)
+            rc = runner.main()
+        self.assertEqual(rc, 0)
+        result = json.loads(out.getvalue().strip().splitlines()[-1])
+        self.assertEqual(result["status"], "done", result)
+        return order, stopped, result, [c.args[0] for c in log.call_args_list]
+
+    def test_an_activating_run_stops_the_lane_daemon_before_jev_starts_one(self):
+        order, stopped, _, _ = self.run_main(start_extra={"activate_tab": True})
+        self.assertEqual(order, ["stop", "agent", "close"], "the stop must come before the Agent starts its daemon")
+        self.assertEqual(stopped, [runner.LANE_DAEMON_NAME], "only the lane's own daemon name, never another tool's")
+
+    def test_a_run_that_does_not_activate_leaves_the_daemon_lifecycle_alone(self):
+        for label, extra in (("absent", None), ("false", {"activate_tab": False}), ("null", {"activate_tab": None}),
+                             ("the string true", {"activate_tab": "true"})):
+            with self.subTest(label):
+                order, stopped, _, _ = self.run_main(start_extra=extra)
+                self.assertEqual(order, ["agent", "close"])
+                self.assertEqual(stopped, [])
+
+    def test_a_failed_stop_is_logged_and_the_run_goes_on(self):
+        order, _, result, lines = self.run_main(start_extra={"activate_tab": True}, stop_error=RuntimeError("wedged"))
+        self.assertEqual(order, ["stop", "agent", "close"], "a stop that raises must not keep the run from starting")
+        self.assertEqual(result["status"], "done")
+        failures = [line for line in lines if "daemon stop failed" in line]
+        self.assertEqual(len(failures), 1, lines)
+        self.assertIn("RuntimeError", failures[0])
 
 
 if __name__ == "__main__":

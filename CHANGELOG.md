@@ -6,6 +6,203 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.154.2] - 2026-09-30 - an opt-in browse setting activates the lane's own tab, so a dialog renders at once in a dedicated agent browser
+
+### Added — `browse_activate_tab`, for a dedicated agent browser
+
+The lane opens its tab with `Target.createTarget(background: true)`. That tab reports
+`document.visibilityState` `"visible"` but is not the window's active tab, so Chromium produces almost no
+frames for it, and 0.152.1 and 0.153.2 (the animation finish and the settle) work around that. Measured in the
+operator's dedicated agent browser (a separate profile nobody looks at, attached through `browse_cdp_url`) on a
+production web app's confirm dialog opened from a menu item, with nothing finished by the lane: the dialog
+mounted at opacity 0 at +0.1 s; its opacity transition started at +0.2 s in one run but, in the lane's own
+run, not within +0.33 s (the settle saw no DOM mutation and no animation and stopped at 0.3 s, and the read was
+an empty page, because the modal hides everything else); left alone the dialog reached opacity 1 only at
++2.1 s. After `Target.activateTarget` for the lane's tab the same flow read opacity 0.957 at +0.2 s and 1 at
++0.4 s, with nothing finished, and the model's read after the menu click showed the whole dialog in every
+instrumented run. End to end, deleting a record through the real UI (each run checked independently): 5 of 5
+with the activation and a goal that describes the dialog's question and says the task is not done and not
+blocked while it is open; about half with the older step-list wording, where the failures were the model
+choosing BLOCKED with the dialog fully visible, not rendering; 0 of 3 on the MCP path with only the 0.153.2
+settle.
+
+- **New config key `browse_activate_tab`** (bool, default `false`, in `config.example.json`). The harness sends
+  `activate_tab: true` in the sidecar's start line only when the key is true AND `browse_cdp_url` names an
+  endpoint the lane accepts (`Config.EffectiveBrowseActivateTab`); otherwise it sends `false`. Activating a tab
+  switches the window's active tab, and in the operator's everyday browser that is the tab someone is looking
+  at, so the setting is opt-in and only meaningful with a dedicated endpoint.
+- **A true key without `browse_cdp_url` is ignored, never an error.** The lane still runs exactly as before.
+  The config load prints a warning naming both keys, and `offload_status remote` reports
+  `browse_activate_tab` (the effective value, `false` there) with a `browse_activate_tab_note` that says why.
+  `remote.browse_activate_tab` is new in the status block (the default golden gains that one field).
+- **The sidecar** (`setup/browse/runner.py`): `Run` reads `activate_tab` from the start message (only a JSON
+  `true` counts; absent, `false`, `null`, a string or a number is off). In the `Browser.observe` wrapper, at
+  the first observe of the run and only then, before the settle and before jev's own read, it calls
+  `Target.activateTarget` for the Browser's own target id through jev's browser-level `cdp()` (no session, so
+  no other tab is touched) and logs `activated the lane's tab (activate_tab)`. The attempt is flagged before it
+  is made and never retried; a failure, or a Browser without a tab id, logs `activate_tab skipped: ...` and the
+  run continues exactly as before. The finish and the settle stay on; the measured runs had both in place.
+- Tests: Go (`internal/config`: default off, JSON parse, effective only with an accepted `browse_cdp_url`, the
+  ignored report and the warning; `internal/pipeline`: the start line carries `activate_tab` for all four
+  combinations of opt-in and endpoint; `internal/mcpserver`: the status block, its note, the default golden) and
+  Python (`setup/browse/test_runner.py`: exactly one activation at the first observe when on, never when off or
+  absent or not a JSON `true`, a browser-level call with the lane's own target id, before the settle and jev's
+  read, a failure swallowed and logged once and not retried, a missing tab id skipped). Each was shown to fail
+  with its code path removed or broken (mutants run against a scratch copy or restored after each run: the
+  once-per-run guard, the session argument, a constant target id, a narrowed `except`, the activation moved
+  after the settle or after jev's read, a default-on start line, a truthy-value parse, a flag set only on
+  success, both log lines, the no-tab-id guard; the effective predicate without the endpoint, without the
+  loopback check, the ignored report, the load warning, the JSON tag, the start line's field, the raw key sent
+  or reported, the status key and its note).
+- **An activating run stops the lane's own daemon first** (`setup/browse/runner.py`, `main()`). jev's
+  `ensure_daemon` reuses any live daemon of the lane's name and never compares it with the endpoint the run
+  pins, so a lane daemon left by a crashed run, still attached to the operator's everyday browser, would have
+  had its active tab switched by the activation. When `activate_tab` is true the sidecar now calls
+  `stop_lane_daemon()` (the lane's own daemon name only; it changes nothing when none runs; a failure is logged and the
+  run goes on) before the `Agent` starts a daemon on the pinned endpoint. A run that does not activate is
+  unchanged. Pinned by tests that drive `main()` against fake jev and browser-harness modules: the stop comes
+  before the `Agent`, only when the start line carries a JSON `true`, and a failed stop does not end the run.
+- **The ignored note names the reason that applies.** A `browse_activate_tab` next to a `browse_cdp_url` that
+  is set but refused (not loopback, no port) used to say it "needs browse_cdp_url", and the load warning ended
+  "the lane runs as before" right beside the warning that `offload_browse` stays unregistered. The note is now
+  `Config.BrowseActivateTabIgnoredNote()`: "set but refused" when an endpoint is set, "needs browse_cdp_url"
+  when none is, and the warning promises "the lane runs as before" only for a registered lane.
+- Tests added with those: the refused endpoint is reported as ignored (`BrowseActivateTabIgnored`), the note and
+  the warning for a refused endpoint and a half-bound lane, the status note for a refused endpoint, and the
+  activation on the attended door as well as the unattended one (the measured failure was on the attended MCP
+  door). Each was shown to fail against a mutant: `Ignored` only when no endpoint is set, the note always
+  saying "needs", the warning always promising the lane runs as before, the daemon stop removed, run for every
+  run, or moved after the `Agent`, and the activation restricted to unattended runs.
+
+### Docs
+
+- `docs/systems/browse-lane.md`: the config row, the lifecycle step, the start-line row in the protocol table,
+  invariant 10, the status and observability lines, and, under Background tab rendering, the measured
+  activation timeline, the end-to-end counts and why the setting is opt-in and needs a dedicated endpoint
+  (recommended for a dedicated agent browser). Common pitfalls: the goal-writing guidance for a
+  menu-then-confirm flow now gives the better measured form (describe the dialog's question and state that
+  the task is not done and not blocked while the dialog is open: 5 of 5, against about half for the step
+  list). `docs/OPERATOR-GUIDE.md`: how to enable it.
+- The fix is in the sidecar (`setup/browse/runner.py`) and the harness (config, start line, status); the
+  setting does nothing until the sidecar is reinstalled with `setup/browse/install.ps1` and the key is set.
+  An older `runner.py` ignores `activate_tab` without a log line, and `offload_status` cannot see which one is
+  installed: `remote.browse_activate_tab` is what the harness will send, so the operator guide and the lane
+  doc say to rerun the installer after upgrading and that no log line can also mean an older sidecar.
+
+## [0.154.1] - 2026-09-30 - a fleet-serve restart no longer deletes the context of local runs in flight
+
+### Fixed — a fleet-serve restart deleted the context of every local delegation in flight on its box
+
+fleet-serve sweeps `pipeline-jobs/` once at every start, before it listens, and it removed every entry there on the
+premise that it was the only writer in that root. It is not: the delegator's in-process local placement
+(`RunAgentContract`, behind the MCP server's `agent_delegate`, `offload_research`, `offload_ask` and
+`offload_review_diff` doors, the `delegate` and `research` commands and the fleet smoke) materializes each run's
+`agent-local-*` directory, with the context documents the seat reads, in the same root, from processes that outlive
+fleet-serve restarts. So every restart (each deploy, each crash-restart) deleted the documents of every local run in
+flight on that box, and the seat answered "workspace root unavailable" or that it could not read the file, which failed
+acceptance. Measured on 2026-09-30: 23 local runs spanned one fleet-serve restart, the node logged 23 swept directories,
+and 6 of those runs lost their documents mid-run.
+
+A local run now writes an owner marker (`.owner`, its process id and a newline) into its job directory, beside
+`context/` and outside the seat's read root, before it writes any document. The startup sweep decides per entry: a
+marked directory is removed only when its owner has exited or the directory has outlived any run (24 hours, against a
+longest local run of about 4.3 hours by the code's own caps); an unmarked `agent-local-*` directory, which a delegator
+binary older than this fix still writes, is kept until that same age; fleet-serve's own directories are removed as
+before. An entry it cannot inspect is kept and reported, never counted as a live run; a directory removed for its age
+while its owner lives is logged by name; every removal failure is reported, not only the first; and the start-up log
+states what was swept, what was kept and what failed as separate lines. A local run whose job directory cannot be removed
+at its end logs it. A pipeline `job_spec.id` may no longer start with `agent-local-` (refused at the ack), so no
+fleet-serve directory can fall under the owner rule. The marker assumes, as the machine-wide GPU lease and the activity
+registry already do, that the delegator and fleet-serve share one process-id space per base directory.
+
+## [0.154.0] - 2026-09-30 - a seat that cannot constrain decoding runs classify and extract from the prompt, and a fleet text lane ships dark
+
+### Added — unconstrained seats, the `text` fleet lane and `route` on `offload_classify` / `offload_extract` (ADR 0069, amends ADR 0062)
+
+The RKLLM runtime on an RK3588 NPU cannot constrain decoding: it answers HTTP 400 `constrained_decoding_unsupported` to any `grammar`, `json_schema` or `response_format`, and ignores logprobs. Every structured cascade lane always sends a constraint, so on that seat every classify, extract, summarize and triage call deferred (`model call failed: ... 400 ...`, err_class `other`) before the model produced a token (measured 2026-09-30). The node also had no fleet door for text work. A blind check on the 2B seat with a prompt and no grammar scored classify 4/4, extract 4/4, summarize 0/4, triage 0/4.
+
+- **`unconstrained_seats` node config key** (`config.Config.UnconstrainedSeats`, `DeclaresUnconstrainedSeat`, case-insensitive): written by `mediaseat.Bindings` from every `rkllm` media seat (its name and its aliases), never by `config_seed` (`tierseed` treats it as a bound key; `audit-config` compares it as a seed-owned key). The rockchip-rk3588 tier now binds it, so the node's own pipeline works on its seat.
+- **No constraint, the shape in the prompt, strict acceptance.** For a declared seat `Pipeline.attempt` (and the terminal reasoning attempt) send no `grammar`, no `json_schema` / `structured_outputs` and no logprobs request. `tasks.BuildFor(req, Caps{Unconstrained: true})` / `Built.ForUnconstrained` append to the system prompt the exact JSON shape (keys in order, each type, an enum's allowed values, "no other key", one compact example) and set `Built.Strict`, the schema the grammar would have forced (`gbnf.JSONSchema`). The reply is parsed leniently (code fences and leading prose stripped) and accepted only if it satisfies that schema, on top of extract's own: a foreign object (`{"foo":1}`, `{"summary":"x"}`), a label outside the set, a missing key, a wrong type and an extra key are all refused. A failure takes the existing correction retry (counted in `meta.retries`), then defers with the validator's words naming what failed. Grounding still applies to extract and classify's self-reported confidence gate is unchanged. **The decision-margin gate needs logprobs and is inert on these seats**: no margin is recorded and nothing escalates on it.
+- **Every other seat is byte-identical.** `tasks.Build` is unchanged and the branch is taken only for a declared seat, pinned by a golden digest of the grammar-seat prompts (taken from the pre-change `Build`), a test that a grammar seat's request body carries exactly `Build`'s system, user and grammar while another seat on the box is unconstrained, and a zero-`Caps` equality test.
+- **The ledger row carries the prompt that was sent.** `meta.prompt_prefix_sha256` is stamped in `Run` from the grammar-bearing build before a rung is chosen; for an unconstrained seat `attempt` restamps it from the prompt with the shape instruction, so a row never reports the fingerprint of a prompt that was not sent (a measurement through this pipeline joins on it).
+- **Review fixes (same release).** (1) The reply of an unconstrained seat is read by `parser.ExtractOne`, not `Extract`: exactly ONE top-level JSON object (a top-level array, a second `{`/`[` after the object, and a repeated key at any depth are refused and take the correction retry, then a defer; leading prose, a fence and trailing prose without a bracket stay accepted; grammar seats keep `Extract` byte for byte). (2) A model declared in both `vllm_seats` and `unconstrained_seats` is pinned to be unconstrained (no `json_schema`, `structured_outputs` or grammar). (3) On an unconstrained seat classify's `confidence` is bounded 0..1 in the strict schema (7, -5 and 1.0001 are refused; the prompt example stays 0.5, below the 0.88 accept threshold); `gbnf.JSONSchema` and every grammar seat are unchanged. (4) `textremote` post-checks a node's OK result (classify: label in the request's set, confidence in 0..1; extract: one object with keys inside the schema's properties) and defers naming the node and the reason on failure. (5) ADR 0069, FLEET-NODE.md and the tier note state that declaring a text task only means something if the node's cascade routes that task to the unconstrained seat, measured through that path. Left as is: the ledger fingerprint of a repacked climbed tier (`promptFingerprintSent`) differs from Run's entry stamp only where Run itself fell back to the whole user turn; not a one-line fix.
+- **Two seats may not both declare text tasks** (`mediaseat.Validate`: `text_tasks` is one node key, like `vision_model`).
+- **summarize and triage** on an unconstrained seat run the same validated path for a local cascade call (they used to defer as an infrastructure error and now validate, then climb on a quality failure) and are never admitted on the fleet lane.
+- **`text_tasks` node config key and the `POST /fleet/text` lane** (`internal/fleetnode/text_task.go`, task type `text`): a media seat's `tasks` may now name `classify` and `extract` (a text task on a non-rkllm seat is refused at validation), `mediaseat.Bindings` writes their canonical-order subset as `text_tasks`, and the node runs ONE classify or extract on its OWN pipeline for a delegator: token-gated on dispatch and poll like the vision lane, dispatch's 1 MiB body, the shared `admit` path, the node's full `core.Result` as the job's data (defers included), concurrency-capped. `TextLaneAdmissible` (a non-empty `text_tasks` and the agent lane's reachability rule) is the one predicate behind the advertisement (`text` in `supported_task_types`, the additive omitempty health field `text_tasks`) and the ack-time admission. A task outside `text_tasks` is a `400` naming the set; summarize and triage are refused whatever `text_tasks` says.
+- **The lane ships DARK.** The rockchip-rk3588 seat declares no text task, so no shipped tier advertises the lane and `text_tasks` is empty everywhere. A later data-only change adds `classify` and `extract` to the seat's `tasks` once at least 30 cases per lane through the node's own pipeline score at least 90 % correct with zero off-schema outputs accepted (`TestRK3588TextDoorShipsDark` pins the dark state). The route default stays local, idle-local-wins and "never a downgrade" stand.
+- **`route` on `offload_classify` and `offload_extract`** (`local` default, `auto`, `remote`; `internal/textremote`, `visionremote`'s shape, Budget 300 s). `local` is byte-identical to before. `auto` leaves the box only while the machine-wide GPU lease is held, else or with no eligible node it runs local. `remote` forces a node and defers (`capacity`, or `config` with no `delegate_remotes`) when none is eligible, naming every miss. `delegate.PlaceText` picks the node: its health must list `text` AND the task in `text_tasks` and its card must not be leased, so a node that predates the lane is never picked (unlike the vision lane, an absent list is "none", not "all"). `meta.node` and `meta.placement` say where it ran. summarize and triage take no `route`.
+- **`tools/list` changes on EVERY box** (deliberate): `offload_classify` and `offload_extract` gain an optional `route` property. The tests that pin it are updated on purpose: `TestTextToolsAdvertiseTheRoute` (route present on the two tools, absent on summarize and triage, never required) and the new `TestTextDefaultRouteRunsLocalUnstamped`. Callers that omit `route` are unchanged.
+- **Docs and generated pages:** ADR 0069 (and a row in the ADR index), an ADR 0062 "Amendment (0.154.0)", `docs/systems/fleet-node.md`, `docs/FLEET-NODE.md` (new "The text task" section and lane-table row), `docs/systems/offload-pipeline.md`, `docs/systems/mcp-server.md`, `docs/systems/accelerators.md`, `docs/OPERATOR-GUIDE.md`; `docs/tiers/rockchip-rk3588.md` and `config.example.json` are regenerated (only that tier page changes).
+- **Upgrading an installed RK3588 node:** `install.sh` leaves an existing `config.json` untouched, so add `"unconstrained_seats": ["<the seat's model id>"]` by hand (or regenerate the file); `local-offload audit-config` lists it as SEED-ONLY until then. Nothing else changes for a node that declares no text task.
+- **Not done here:** `setup/install.ps1`'s `Get-MediaSeatBindings` (the PowerShell mirror of `mediaseat.Bindings`) still does not know the `rkllm` kind and writes neither new key; the RK3588 tier is Linux only. The margin gate's absence on these seats means a valid-but-wrong label is not caught by anything but classify's self-reported confidence: that is what the measured gate for opening the lane is for.
+
+## [0.153.2] - 2026-09-30 - the browse lane waits for the page to settle after an action, so a dialog that mounts late is seen
+
+### Fixed — a confirm dialog opened from a menu item was read before it existed
+
+0.152.1 finished the pending CSS animations before every page read, and a dropdown menu then showed up. A
+confirm dialog opened from a menu item still did not: the run ended `blocked` ("the model or the loop
+reported no progress") three times out of three on a production web app in the operator's browser. jev reads
+the page about 50 ms after an input, and at that moment the dialog is either not mounted yet or mounted at
+opacity 0 with its open-state style change not applied yet, because the page applies it on its own timer. The
+finish had nothing to finish (the animation did not exist yet), so the snapshot was the page as it was before
+the click; 1.5 s later one finish made the dialog's confirm button visible (measured).
+
+- **The observe that follows an action now waits for the page to settle** (`settle_after_input`, new in
+  `setup/browse/runner.py`). Every 100 ms it finishes newly started animations (the 0.152.1 script) and reads
+  a counter of DOM mutations that a `MutationObserver` keeps in the page; a poll is quiet when no animation was
+  finished and the counter did not move. It stops after two quiet polls in a row once 0.3 s have passed, and at
+  1.5 s of page time whatever the page does (plus the calls in flight, see below). Measured with it: the read after the menu click showed
+  exactly the dialog (its text, `Cancel` and the confirm button), and once the goal named the confirm click as
+  a step of its own the run clicked it and the record was deleted, checked independently. Launching the browser
+  with its background-throttling and occlusion-detection switches off did not remove the need (measured: still
+  `blocked` without the settle).
+- **Cost and bounds.** One settle per action, before jev's own wait and read: about 0.3 s on a quiet page on
+  top of jev's wait (plus two CDP calls per poll, more on a slow daemon), and the full 1.5 s on a page that
+  never stops changing (a live ticker, a timer that rewrites the DOM). It does not run before the first observe, after a `wait` action, before an action, or again
+  for the retries of one read. A page that is completely silent for its first 0.3 s counts as settled, so a
+  dialog whose first DOM change comes later is picked up by the following observe, as before. The cap is
+  checked between polls, so it bounds the page time and not the calls in flight: the harness can hold one CDP
+  call for several seconds on a page whose JS thread is frozen (a native `confirm()` or `alert()` open), and a
+  poll makes two; jev's own read fails the same way right after, and the run's own timeout still bounds it.
+- **A capture run drains between the polls.** The daemon's shared event buffer holds 500 events and drops the
+  oldest, and the settle starts right after the input, when the action's own requests fire; `settle_after_input`
+  takes a `between` hook that the wrapper points at the capture drain (a no-op without `capture`), so the
+  undrained window stays what it was before the settle existed. A hook that fails is logged and does not end
+  the settle.
+- **It never ends a run.** The counter is read as an observer id plus a count, so a navigation (a new document
+  has a new observer) reads as a change even when the count matches. An unreadable page (a navigation in
+  progress, a dead session, an IPC timeout) also counts as a change and is polled until the cap; the read that
+  follows reports a real error. The calls go straight to jev's `cdp()` in the observed session, like the
+  finish, so none of the run's bookkeeping is touched. The runner logs `settled N.Ns after an input (...)` to
+  stderr when the page was active.
+- **Finding, documented for goal writers: name the confirm click as its own step.** When a menu item and the
+  confirm button of the dialog it opens carry the same label, the decision model reads the second click as a
+  repeat of the step it just took and chooses BLOCKED; the run ended `blocked` until the goal named the confirm
+  click as a separate required step (measured on one menu and dialog in one app). `docs/systems/browse-lane.md`
+  (Common pitfalls) has the wording. This is guidance, not code.
+- Tests (`setup/browse/test_runner.py`): the settle is driven with a scripted page, a fake clock and a fake
+  sleep (stops after two quiet polls once the minimum has passed, runs at least the minimum on a quiet page, a
+  burst holds it, never past the cap on a page that keeps changing, finishes animations on every poll, an
+  unreadable page or a navigation counts as a change, swallows every exception); the counter script runs
+  under `node` against a fake `MutationObserver`; the wrapper tests pin that it runs once per observe after an
+  action of any kind (click, fill, select, scroll), before jev's wait and read, in the observed session, and
+  never on the first observe (whose fake Browser, like jev's, has no `after_input` until its first act), after
+  a `wait` action or in act. They also pin that the counter is read by value through `Runtime.evaluate`, that
+  the production defaults use the real clock and sleep, and that a capture run drains between the polls and
+  a run without capture drains nothing. Each was shown to fail with its code path removed, broken or dropped
+  (mutants run in a scratch copy: a dropped or altered `returnByValue`, a constant clock, a no-op sleep, a
+  direct `after_input` read, a settle for clicks only, no drain hook, a hook that is never called, called
+  after the reads, or only on the first poll, and a hook whose failure ends the settle).
+- **The settle's finishes are quiet.** On a navigating page every poll's finish fails, and each failure used
+  to log `finish animations skipped`, several lines per settle that crowd the stderr tail a defer reports.
+  `finish_animations(send, quiet=True)` drops that line for the settle; observe's own finish still logs it.
+- **Neutral fixtures.** Site names from earlier releases' examples, comments and test fixtures
+  (`setup/browse`, `internal/pipeline/browse_test.go`, this file's 0.142.1 entry) are replaced with
+  neutral ones; behaviour is unchanged.
+- The fix is in the sidecar (`setup/browse/runner.py`; the Go binary changes only its version string);
+  reinstall with `setup/browse/install.ps1` to take it.
+
 ## [0.153.1] - 2026-09-30 - grounding compares numbers by value: a correct amount in either locale is grounded, a substring of another number is not
 
 ### Fixed — a correct number was judged ungrounded when the source wrote it with separators, and a wrong one was grounded by a substring
@@ -632,7 +829,7 @@ at those caps. Both tiers now seed 2,048 (final 8,192), the geometry the same mo
 
 ### Fixed — an edit made by a run's last action was lost when the tab closed
 
-A live Substack run typed a post title, reported `done`, and the title was never stored: the editor
+A live run on a production web editor typed a post title, reported `done`, and the title was never stored: the editor
 autosaves on a debounce (measured 2.3 s after a keystroke) and the sidecar closed its tab at DONE, before
 the save left. The sidecar now holds the tab open until the page's XHR/fetch traffic has been quiet for
 3.5 s (capped at 15 s) and keeps feeding any capture while it waits. Measured on the same draft: with the

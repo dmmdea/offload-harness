@@ -481,13 +481,14 @@ FINISH_ANIMATIONS_JS = (
 )
 
 
-def finish_animations(send) -> int:
+def finish_animations(send, quiet=False) -> int:
     """Jump the finite CSS animations and transitions the snapshot cannot see to their end state.
 
     `send(method, **params)` is a CDP call in the page's session. Returns how many animations
     were finished. It can never raise: a page that is navigating, a dead session or an IPC
     timeout just means nothing was finished, and observe carries on exactly as it did before
-    this hook existed."""
+    this hook existed. quiet=True drops the "skipped" line: the settle polls a navigating page
+    several times in a row, and one line per poll would crowd the stderr tail a defer reports."""
     try:
         response = send("Runtime.evaluate", expression=FINISH_ANIMATIONS_JS, returnByValue=True)
         if not isinstance(response, dict) or response.get("exceptionDetails"):
@@ -495,11 +496,112 @@ def finish_animations(send) -> int:
         value = (response.get("result") or {}).get("value")
         count = int(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0
     except Exception as exc:  # noqa: BLE001 - a helper on the observe path must never end a run
-        log(f"finish animations skipped: {type(exc).__name__}")
+        if not quiet:
+            log(f"finish animations skipped: {type(exc).__name__}")
         return 0
     if count > 0:
         log(f"finished {count} pending CSS animation(s) before observe")
     return count
+
+
+# After an input the page keeps reacting on its own timers, and jev reads it too soon. jev waits
+# about 50 ms after an input (200 ms for a combobox fill) and then reads the page. A confirm dialog
+# opened from a menu item is, at that moment, either not mounted yet or mounted at opacity 0 with
+# its open-state style change not applied yet: finish_animations has nothing to finish (the
+# animation does not exist yet), the snapshot is the page as it was, the model sees no progress and
+# the run ends "blocked". Measured on a production web app in the operator's browser: 50 ms after
+# the click the snapshot was unchanged, and 1.5 s later one finish made the dialog's confirm button
+# visible; the same flow ended blocked 3 times out of 3 with only the finish hook. With the settle
+# below, the read after the click showed the dialog, and once the goal named the confirm click as a
+# step of its own the run clicked it and the record was deleted (checked independently). Starting
+# the browser with its background-throttling and occlusion-detection switches off did not remove
+# the need (measured: still blocked without the settle).
+#
+# settle_after_input waits for the page rather than for a fixed time. Every INPUT_SETTLE_POLL_S it
+# finishes newly started animations (finish_animations) and reads a counter of DOM mutations that a
+# MutationObserver keeps in the page; a poll is quiet when no animation was finished and the counter
+# did not move. It stops after INPUT_SETTLE_QUIET_POLLS quiet polls in a row once INPUT_SETTLE_MIN_S
+# has passed, and in any case at INPUT_SETTLE_CAP_S of page time, so an action costs about 0.3 s on a
+# quiet page and 1.5 s at most, each plus the CDP calls in flight (the cap is checked between polls,
+# and the harness can hold one call for several seconds on a page whose JS thread is frozen, for
+# instance while a native dialog is open); a page that never stops mutating (a live ticker) costs the
+# cap every time. Between polls the wrapper drains the capture buffer: the daemon's shared event
+# buffer holds 500 events and drops the oldest, and this wait starts right after the input, when the
+# action's own requests fire. The counter is read as [observer id, count]: a navigation gives the new
+# document a new observer, so its id differs and a count that restarted at the old value still reads
+# as a change. A read that fails (a navigating page, a dead session, an IPC timeout) also counts as
+# a change and never raises: a dead session is polled until the cap, bounded, and jev's read that
+# follows reports the real error. The observer is installed by the first read, so mutations that
+# landed between the input and that read are not counted; an animation they started is still
+# finished by the first poll.
+MUTATION_COUNTER_JS = (
+    "(() => { const s = window.__laneSettle"
+    " || (window.__laneSettle = {id: Math.random(), n: 0, on: false});"
+    " if (!s.on && typeof MutationObserver === 'function' && document.documentElement) {"
+    " new MutationObserver(m => { s.n += m.length; }).observe(document.documentElement,"
+    " {subtree: true, childList: true, attributes: true, characterData: true}); s.on = true; }"
+    " return [s.id, s.n]; })()"
+)
+INPUT_SETTLE_MIN_S = 0.3
+INPUT_SETTLE_QUIET_POLLS = 2
+INPUT_SETTLE_POLL_S = 0.1
+INPUT_SETTLE_CAP_S = 1.5
+
+
+def read_mutations(send):
+    """The page's (observer id, DOM mutation count), or None when it cannot be read. Never raises."""
+    try:
+        response = send("Runtime.evaluate", expression=MUTATION_COUNTER_JS, returnByValue=True)
+        if not isinstance(response, dict) or response.get("exceptionDetails"):
+            return None
+        value = (response.get("result") or {}).get("value")
+    except Exception:  # noqa: BLE001 - a failed read is a change, not an error
+        return None
+    if isinstance(value, list) and len(value) == 2 and all(
+            isinstance(v, (int, float)) and not isinstance(v, bool) for v in value):
+        return tuple(value)
+    return None
+
+
+def settle_after_input(send, clock=time.monotonic, sleep=time.sleep, between=None) -> None:
+    """Let the page finish reacting to an input before jev reads it (see MUTATION_COUNTER_JS).
+
+    `send(method, **params)` is a CDP call in the page's session. Polls until the page has been quiet
+    for INPUT_SETTLE_QUIET_POLLS polls in a row and INPUT_SETTLE_MIN_S has passed, and stops at
+    INPUT_SETTLE_CAP_S of page time (checked between polls, so the calls of the poll in flight come on
+    top). `between`, when given, runs once per poll right after the sleep: the capture drain. Returns
+    nothing and can never raise: observe carries on exactly as it did before this hook existed, and a
+    `between` that fails is logged and does not end the settle."""
+    try:
+        start = clock()
+        last = read_mutations(send)
+        quiet = polls = moved = finished_total = 0
+        while clock() - start < INPUT_SETTLE_CAP_S:
+            sleep(INPUT_SETTLE_POLL_S)
+            if between is not None:
+                try:
+                    between()
+                except Exception as exc:  # noqa: BLE001 - a drain hiccup must not cost the page its settle
+                    log(f"settle between-poll hook failed: {type(exc).__name__}")
+            finished = finish_animations(send, quiet=True)
+            now = read_mutations(send)
+            polls += 1
+            finished_total += finished
+            if finished > 0 or now is None or now != last:
+                quiet = 0
+                moved += 1
+            else:
+                quiet += 1
+            last = now
+            if quiet >= INPUT_SETTLE_QUIET_POLLS and clock() - start >= INPUT_SETTLE_MIN_S:
+                break
+        elapsed = clock() - start
+    except Exception as exc:  # noqa: BLE001 - a helper on the observe path must never end a run
+        log(f"settle after input skipped: {type(exc).__name__}")
+        return
+    if moved:
+        log(f"settled {elapsed:.1f}s after an input ({polls} poll(s), {moved} with page activity, "
+            f"{finished_total} animation(s) finished)")
 
 
 def off_list_targets(urls, allow_hosts) -> list[str]:
@@ -512,6 +614,34 @@ def off_list_targets(urls, allow_hosts) -> list[str]:
     return bad
 
 
+def activate_lane_tab(cdp, target) -> bool:
+    """Bring the lane's own tab to the front of its window (CDP Target.activateTarget). Never raises.
+
+    jev opens the lane's tab with Target.createTarget(background=True): it reports visibilityState
+    "visible" but is not the window's active tab, and Chromium then produces almost no frames for it.
+    A dialog's open transition starts late or not at all (measured on a production web app: opacity 0
+    at +0.1 s, no transition within +0.33 s, fully open only at +2.1 s when left alone; 0.957 at +0.2 s
+    and 1 at +0.4 s once the tab was activated), so the model reads an empty page. Activating the tab
+    makes it render like a foreground tab.
+
+    Activation switches the window's active tab, so the harness sends activate_tab only with a dedicated
+    browser endpoint (browse_cdp_url) and never against the operator's everyday browser. `cdp` is jev's
+    browser-level call (no session: Target.activateTarget is a Target-domain command on the browser) and
+    `target` is the lane's own target id, Browser.target. A failure is logged and the run continues exactly
+    as before: the tab just stays in the background.
+    """
+    if not target:
+        log("activate_tab skipped: the lane has no tab id")
+        return False
+    try:
+        cdp("Target.activateTarget", targetId=target)
+    except Exception as exc:  # noqa: BLE001 - an optimisation must never fail the run
+        log(f"activate_tab skipped: {type(exc).__name__}: {str(exc)[:200]}")
+        return False
+    log("activated the lane's tab (activate_tab)")
+    return True
+
+
 class Run:
     def __init__(self, start, proto):
         self.proto = proto
@@ -521,6 +651,10 @@ class Run:
         self.allow_labels = list(start.get("allow_labels") or [])
         self.allow_hosts = list(start.get("allow_hosts") or [])
         self.unattended = bool(start.get("unattended", True))
+        # Opt-in, sent true by the harness only with a dedicated browser endpoint. Only a JSON true counts
+        # (a string such as "false" is truthy in Python), so the default and every malformed value is off.
+        self.activate_tab = start.get("activate_tab") is True
+        self.tab_activated = False  # set before the attempt: one attempt per run, success or not
         self.executed = 0
         self.removed: list[str] = []
         self.observed_once = False
@@ -595,6 +729,25 @@ def _install_patches(run: Run, model, agent_mod, browser_mod) -> None:
     browser_mod.browser_operation = browser_operation
 
     def observe(self, *args, **kwargs):
+        if run.activate_tab and not run.tab_activated:
+            # Once per run, at the first observe, before the settle and before jev's own read (activate_lane_tab
+            # says why). The flag is set first so a failed attempt is never retried on every observe. A
+            # browser-level call in no session, with the lane's own target id (Browser.target): it cannot
+            # touch any other tab of the browser.
+            run.tab_activated = True
+            activate_lane_tab(browser_mod.cdp, getattr(self, "target", None))
+        if getattr(self, "after_input", None):
+            # An action just ran (jev's act sets after_input and its observe clears it). jev's own wait
+            # after an input is about 50 ms, too short for a dialog the page mounts on its own timer
+            # (see MUTATION_COUNTER_JS), so let the page settle first. After orig_observe's wait the
+            # read below still finishes whatever animations are pending. Runs here, before
+            # orig_observe consumes after_input, and never on the first observe (nothing has run yet)
+            # or after a wait action (jev leaves after_input unset for it). The calls go straight to
+            # jev's cdp() in the observed session, for the reason given at browser_operation above.
+            # A capture run drains between the polls (a no-op without capture), like every other wait.
+            session = self.session
+            settle_after_input(lambda method, **params: browser_mod.cdp(method, session_id=session, **params),
+                               between=lambda: _drain(run, run.helpers))
         page = orig_observe(self, *args, **kwargs)
         _drain(run, run.helpers)
         url = page.get("url", "")
@@ -666,8 +819,8 @@ def _install_patches(run: Run, model, agent_mod, browser_mod) -> None:
 
 
 # Before the tab closes, the page's own XHR/fetch traffic must go quiet: an editor saves
-# on a debounce after the last input (Substack's autosave leaves 2.3 s after a keystroke,
-# measured 2026-09-29), and closing the tab at DONE dropped that save — a typed title was
+# on a debounce after the last input (one production editor's autosave left 2.3 s after a
+# keystroke, measured 2026-09-29), and closing the tab at DONE dropped that save — a typed title was
 # lost while the run reported done. Quiet = nothing in flight for SETTLE_QUIET_S; the wait
 # is capped so a long-poll can never hold a run open.
 SETTLE_QUIET_S = 3.5
@@ -825,6 +978,15 @@ def main() -> int:
 
             run.capture.get_body = get_body
         _install_patches(run, model, agent_mod, browser_mod)
+
+        if run.activate_tab:
+            # jev's ensure_daemon reuses any live daemon of this name and never compares it with the endpoint this
+            # run pins. A lane daemon left by an earlier run (a hard crash, a failed stop) may still be attached to
+            # the operator's everyday browser, and the activation would then switch THAT browser's active tab.
+            # Stop it first (the lane's own name only; it changes nothing when none is running), so the Agent below starts a
+            # daemon on the pinned endpoint. Only for a run that activates: the setting's invariant is that it
+            # never acts in the everyday browser.
+            stop_lane_daemon()
 
         agent = agent_mod.Agent(run.url, run.goal)
         agent_built = True

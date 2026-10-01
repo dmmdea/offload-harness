@@ -232,6 +232,27 @@ type Config struct {
 	// Empty = this box runs no vLLM seat and the gate is inert, which is the default
 	// and the common case.
 	VLLMSeats []string `json:"vllm_seats,omitempty"`
+	// UnconstrainedSeats names the seats on THIS box whose runtime cannot constrain decoding
+	// at all: it refuses (HTTP 400 constrained_decoding_unsupported) any `grammar`,
+	// `json_schema` or `response_format`, and ignores logprobs. The RKLLM runtime on an
+	// RK3588 NPU is the one today. The cascade's structured lanes (classify, extract)
+	// always send a constraint, so on such a seat they would defer every call; for a
+	// seat listed here the pipeline sends NO constraint and NO logprobs, puts the exact JSON
+	// shape in the prompt instead, and accepts a reply only after strict validation against
+	// the task's schema (required keys, types, the classify label in the allowed set, no
+	// extra keys). The decision-margin gate needs logprobs and is inert on these seats.
+	// Matched case-insensitively against the model id (DeclaresUnconstrainedSeat). Written
+	// by the tier's rkllm media seat (mediaseat.Bindings), like vision_model, never by
+	// config_seed.
+	UnconstrainedSeats []string `json:"unconstrained_seats,omitempty"`
+	// TextTasks is the subset of the text tasks (classify, extract) this node's unconstrained
+	// seat is declared to serve on the FLEET text lane (POST /fleet/text). Empty = the node
+	// advertises no text lane at all: the lane ships dark and a seat opts in only after its
+	// measured data passes. summarize and triage are never in it. The node refuses a task
+	// outside the list at ack time (400 naming the set) and publishes the list in health as
+	// text_tasks. It gates the fleet lane only: a local call never goes through a node's ack.
+	// Written by the tier's media seat (mediaseat.Bindings), never by config_seed.
+	TextTasks []string `json:"text_tasks,omitempty"`
 	// AgentTimeoutSec is the default wall-clock budget for an agent run when the call
 	// passes no timeout. 0 = the built-in default (180s). Tiers binding a big planner
 	// seat seed this higher: a cold big-model load plus low tok/s inside 180s is a
@@ -972,6 +993,17 @@ type Config struct {
 	// /json/version) or ws://, loopback host, explicit port — anything else leaves
 	// the lane unregistered (BrowseCDPURLAllowed).
 	BrowseCDPURL string `json:"browse_cdp_url,omitempty"`
+	// BrowseActivateTab makes the sidecar bring the lane's own tab to the front of its
+	// window once per run (CDP Target.activateTarget), so the page renders frames like a
+	// foreground tab. The lane opens that tab in the background, and Chromium produces
+	// almost no frames for a background tab: a dialog's open transition starts late or
+	// not at all and the model reads an empty page. OPT-IN, default false, and honoured
+	// only together with browse_cdp_url (EffectiveBrowseActivateTab): activating the tab
+	// switches the window's active tab, which must never be the tab the operator is looking
+	// at, so it is for a dedicated agent browser that nobody watches. Against the
+	// operator's everyday browser (discovery or browse_browser) it is ignored, and the
+	// load says so.
+	BrowseActivateTab bool `json:"browse_activate_tab,omitempty"`
 	// BrowseTimeoutSec bounds one browse run end to end. Default 300.
 	BrowseTimeoutSec int `json:"browse_timeout_sec,omitempty"`
 	// BrowseMaxActions is the default executed-action budget for one run (a
@@ -2870,6 +2902,34 @@ func (c Config) BrowseConfigured() bool {
 		(c.BrowseCDPURL == "" || BrowseCDPURLAllowed(c.BrowseCDPURL))
 }
 
+// EffectiveBrowseActivateTab is the value the harness sends the sidecar as activate_tab:
+// browse_activate_tab, and only when browse_cdp_url names an endpoint the lane accepts
+// (an empty value names none). Activating the lane's tab switches the window's active
+// tab, so it is honoured only against a dedicated browser the operator pinned, never
+// against the everyday browser the lane finds by discovery (browse_browser or nothing).
+// One predicate for the start line and offload_status.
+func (c Config) EffectiveBrowseActivateTab() bool {
+	return c.BrowseActivateTab && BrowseCDPURLAllowed(c.BrowseCDPURL)
+}
+
+// BrowseActivateTabIgnored reports a browse_activate_tab that is set but has no effect
+// because there is no dedicated endpoint to honour it against. The lane is not failed
+// for it; status and the load warning say so.
+func (c Config) BrowseActivateTabIgnored() bool {
+	return c.BrowseActivateTab && !c.EffectiveBrowseActivateTab()
+}
+
+// BrowseActivateTabIgnoredNote is the one sentence status and the load warning share. It names the reason
+// that applies: no browse_cdp_url at all, or one the lane refuses (the lane is then unregistered, and the
+// load says so in its own warning).
+func (c Config) BrowseActivateTabIgnoredNote() string {
+	const because = "because activating the lane's tab switches the window's active tab and must never happen in the operator's everyday browser"
+	if c.BrowseCDPURL != "" {
+		return "browse_activate_tab is ignored: browse_cdp_url is set but refused (the lane accepts only http:// or ws:// on a loopback host with a port), " + because
+	}
+	return "browse_activate_tab is ignored: it needs browse_cdp_url (a dedicated agent browser), " + because
+}
+
 // EffectiveBrowseMaxActions is browse_max_actions with 0 meaning the default 30
 // and anything above BrowseMaxActionsCeiling clamped to it.
 func (c Config) EffectiveBrowseMaxActions() int {
@@ -2910,6 +2970,15 @@ func warnBrowseBindingsTo(c Config, w io.Writer) {
 	}
 	if c.BrowseCDPURL != "" && !BrowseCDPURLAllowed(c.BrowseCDPURL) {
 		fmt.Fprintf(w, "warning: browse_cdp_url %q is not http:// or ws:// on a loopback host with a port — the lane never attaches to another machine's browser; offload_browse stays unregistered\n", c.BrowseCDPURL)
+	}
+	if c.BrowseActivateTabIgnored() {
+		msg := c.BrowseActivateTabIgnoredNote()
+		if c.BrowseConfigured() {
+			// Only a registered lane (no refused endpoint, no missing binding) goes on running as before; for the
+			// others the warnings above already say offload_browse stays unregistered.
+			msg += "; the lane runs as before"
+		}
+		fmt.Fprintln(w, "warning: "+msg)
 	}
 }
 
@@ -3089,6 +3158,23 @@ func (c Config) EnsureDirs() error {
 // declares no vllm_seats — there is no seat to protect.
 func (c Config) CascadeSeatGuardOn() bool {
 	return c.CascadeSeatGuard == nil || *c.CascadeSeatGuard
+}
+
+// DeclaresUnconstrainedSeat reports whether `unconstrained_seats` names id: the box's own
+// answer to "can this seat's runtime constrain decoding?". Matched case-insensitively for the
+// same reason as DeclaresVLLMSeat (llama-swap resolves seat names that way). Empty = every
+// seat takes a grammar, which is the default and the common case.
+func (c Config) DeclaresUnconstrainedSeat(id string) bool {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return false
+	}
+	for _, s := range c.UnconstrainedSeats {
+		if strings.EqualFold(strings.TrimSpace(s), id) {
+			return true
+		}
+	}
+	return false
 }
 
 // DeclaresVLLMSeat reports whether `vllm_seats` names id — the box's own

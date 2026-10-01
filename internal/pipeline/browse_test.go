@@ -209,7 +209,7 @@ func TestBrowseBadInputDefersBeforeSpawn(t *testing.T) {
 		"file url":            {"url": "file:///etc/passwd", "goal": "x"},
 		"javascript url":      {"url": "javascript:alert(1)", "goal": "x"},
 		"too many actions":    {"url": "https://example.com/", "goal": "x", "max_actions": 61},
-		"host not allowed":    {"url": "https://example.com/", "goal": "x", "allow_hosts": []any{"substack.com"}},
+		"host not allowed":    {"url": "https://example.com/", "goal": "x", "allow_hosts": []any{"example.net"}},
 		"unattended no hosts": {"url": "https://example.com/", "goal": "x", "unattended": true},
 		"unattended allow_labels": {"url": "https://example.com/", "goal": "x", "unattended": true,
 			"allow_hosts": []any{"example.com"}, "allow_labels": []any{"Publish"}},
@@ -317,6 +317,9 @@ func TestBrowseStartLineCarriesTheValidatedRequest(t *testing.T) {
 	if start["browser"] != "brave" || start["max_actions"] != float64(5) || start["unattended"] != false {
 		t.Errorf("start = %v", start)
 	}
+	if start["activate_tab"] != false {
+		t.Errorf("the start line must always carry activate_tab, false unless the setting is on, got %v", start["activate_tab"])
+	}
 	if hosts, _ := start["allow_hosts"].([]any); len(hosts) != 1 || hosts[0] != "example.com" {
 		t.Errorf("hosts must be normalized to lowercase, got %v", start["allow_hosts"])
 	}
@@ -337,5 +340,40 @@ func TestBrowseRunnerEnvIsAnAllowlistWithTelemetryOff(t *testing.T) {
 		if !strings.Contains(joined, want) {
 			t.Errorf("sidecar env must carry %s, got %v", want, env)
 		}
+	}
+}
+
+// activate_tab switches the active tab of the browser the lane drives, so the harness sends it
+// true only when the operator opted in AND pinned a dedicated endpoint. The raw key never reaches
+// the sidecar on its own.
+func TestBrowseStartLineActivateTabNeedsAnOptInAndADedicatedEndpoint(t *testing.T) {
+	startFor := func(t *testing.T, activate bool, cdpURL string) map[string]any {
+		t.Helper()
+		f := newBrowseFixture(t, nil)
+		f.p.cfg.BrowseActivateTab = activate
+		f.p.cfg.BrowseCDPURL = cdpURL
+		res := runBrowseReq(f.p, map[string]any{"url": "https://pub.example.com/publish", "goal": "echo-start"})
+		var start map[string]any
+		if err := json.Unmarshal([]byte(strings.TrimPrefix(res.Reason, "browse: blocked: ")), &start); err != nil {
+			t.Fatalf("reason %q did not carry the start line: %v", res.Reason, err)
+		}
+		return start
+	}
+	for name, tc := range map[string]struct {
+		activate bool
+		cdpURL   string
+		want     bool
+	}{
+		"opted in with a dedicated endpoint":     {true, "http://127.0.0.1:9555", true},
+		"opted in without an endpoint (ignored)": {true, "", false},
+		"a dedicated endpoint, not opted in":     {false, "http://127.0.0.1:9555", false},
+		"the default":                            {false, "", false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := startFor(t, tc.activate, tc.cdpURL)
+			if got["activate_tab"] != tc.want {
+				t.Errorf("activate_tab = %v, want %v (start %v)", got["activate_tab"], tc.want, got)
+			}
+		})
 	}
 }

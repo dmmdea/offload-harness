@@ -410,6 +410,7 @@ is not advertised, so the dispatcher can't send work the box would defer:
 | `run-graph` | `run_graph` | `run_graph_script` set | payload-declared `model_family`, else `comfy-graph` |
 | `agent` | `agent` | `fleet_agent_enabled` **and** a resolvable agent seat **and** (loopback listener **or** `fleet_auth_token` set) | none — llama-swap-resident text work, no render footprint |
 | `vision` (own route `POST /fleet/vision`) | `vqa` / `ocr` / `assess_image` (narrowed by the node's `vision_tasks`) | `vision_model` set **and** (loopback listener **or** `fleet_auth_token` set) — see [The vision task](#the-vision-task-post-fleetvision) | none — llama-swap-resident VLM, no render footprint |
+| `text` (own route `POST /fleet/text`, 0.154.0, dark) | `classify` / `extract` (never summarize or triage), as the node's `text_tasks` names them | `text_tasks` non-empty **and** (loopback listener **or** `fleet_auth_token` set) — see [The text task](#the-text-task-post-fleettext) | none — the node's own cascade seat, no render footprint |
 | *(config-driven)* | `pipeline-job` | a valid `pipelines.<task_type>` entry (see below) | none — sizing rides on the task-scoped `Record("", "", task_type, peak)` entry |
 
 run-graph payloads carry `graph` and `manifest` as **raw nested JSON** (no base64) and are
@@ -466,7 +467,8 @@ accepted — a bad payload or an unreachable ref is a 400, never a mid-render su
 
 - `job_spec` is required and must be a JSON object with a slug-valid `id`
   (`^[A-Za-z0-9_-]{1,64}$` — it becomes the materialization dir name and a filename prefix on
-  every published artifact).
+  every published artifact) that does not start with `agent-local-`, the name prefix a
+  delegator process keeps its own local runs under in the same `pipeline-jobs/` root.
 - `tier` is a required non-empty string (the CLI's own tier resolution is authoritative).
 - `image_refs.product` and `image_refs.logo` are required; `image_refs.background` is
   required **iff** `job_spec.background.mode == "stock"`.
@@ -542,10 +544,26 @@ verbatim; otherwise the generic exec error (including a timeout-kill) is used.
   **ungraceful** stop (crash, `kill -9`, power loss) leaves the directory behind with no
   in-memory record of it at all; since `job_spec.id` collisions are guarded by an exclusive
   directory create (see above), that orphaned directory would otherwise refuse EVERY future
-  dispatch reusing the same `job_spec.id`, forever. `fleet-serve` sweeps
-  `<base_dir>/pipeline-jobs/`'s contents once at startup, **before** it starts listening —
-  every directory present at that instant is orphaned by definition (this process has not
-  accepted a single dispatch yet) — and logs how many it removed.
+  dispatch reusing the same `job_spec.id`, forever. `fleet-serve` therefore sweeps
+  `<base_dir>/pipeline-jobs/` once at startup, **before** it starts listening. Every
+  directory it materialized itself (`agent-<n>`, `accel-<n>`, a pipeline job's id) is
+  orphaned by definition at that instant (this process has not accepted a single dispatch
+  yet) and is removed. The root has a second kind of writer: a delegator process on the same
+  box (the MCP server, the `delegate` and `research` commands) keeps the context of its own
+  in-process local runs in `agent-local-*` directories there, each with an `.owner` file
+  holding the process id (beside `context/`, never inside it), and that process outlives a
+  `fleet-serve` restart. The sweep keeps a marked directory while its owner process is alive
+  and the directory is under 24 hours old (the bound on a recycled process id), keeps an
+  unmarked `agent-local-*` directory (written by a delegator older than the marker) until it
+  is 24 hours old, and removes the rest. It logs how many it removed and how many it kept,
+  plus one line for each directory it removes for its age alone while an owner may still be
+  running (so a run that outlived the 24 hours does not look like a crash's leftover). A
+  directory it cannot inspect is kept and reported as a warning, never counted as a run in
+  flight. The owner's process id means something only in the process-id space that wrote it,
+  so keep one `<base_dir>` per machine: a base directory shared between a Windows host and
+  a WSL distribution, a container and its host, or two machines would read a live owner as
+  exited and the sweep would remove the directory of a run still going (the machine-wide GPU
+  lease and its activity registry make the same presumption of their pid-keyed records).
 
 ## The agent task (`task_type: "agent"`)
 
@@ -1073,6 +1091,48 @@ card is not leased (`lease.class: text` or `lease.busy`), ordered by the agent l
 order) — and with no eligible node the work still runs local. `remote`: force a node; none
 eligible ⇒ `deferred: true, defer_class: capacity` (or `config` with no `delegate_remotes`),
 never a local run. `meta.node` / `meta.placement` on the result say where it ran.
+
+## The text task (`POST /fleet/text`)
+
+Since 0.154.0 a node can run ONE `classify` or `extract` call on its OWN pipeline for a caller that asked for a remote
+outright (or whose card is leased). The lane is **dark**: a node advertises it only when its tier's media seat declares
+text tasks, and no shipped tier does yet. The runtime behind an RK3588 NPU seat cannot constrain decoding, so the node's
+pipeline runs these two tasks on that seat from a prompt that states the JSON shape and accepts a reply only after strict
+schema validation (config `unconstrained_seats`); summarize and triage are never admitted on the lane.
+Decision and measurements: [ADR 0069](architecture/decisions/0069-an-unconstrained-seat-runs-classify-and-extract-from-the-prompt-and-the-text-lane-ships-dark.md).
+
+```
+POST /fleet/text   Content-Type: application/json   (the agent lane's bearer rule, see below)
+{"job_id": "text-…", "task": "classify", "input": "…", "params": {"labels": ["billing", "support"]}}
+{"job_id": "text-…", "task": "extract",  "input": "…", "params": {"schema": {"type": "object", "properties": {…}}}}
+```
+
+`params` carries only what the task takes (classify: `labels`, at least two; extract: `schema`); anything else, an empty
+`input`, and unknown fields are `400`s naming the field. The body cap is dispatch's 1 MiB; this node's `max_input_chars`
+trims the text before it reaches the model, as for a local call. The poll is `GET /fleet/jobs/{id}` and the job's `data`
+is the node's full `core.Result`, defers included (a schema failure after the retry is a `done` job saying
+`deferred: true` with the validator's reason).
+
+The node's config key `text_tasks` (the text subset of the seat's `tasks`, canonical order `classify`, `extract`, written
+by `mediaseat.Bindings`, never by `config_seed`) is the set it serves: a task outside it is refused `400` at ack time
+(`text: task "extract" is not served by this node's text lane (text_tasks: classify)`), summarize and triage always
+(`text: task "summarize" is never served on the text lane …`). `TextLaneAdmissible` (a non-empty `text_tasks` and the
+agent lane's reachability rule) is the one predicate behind the advertisement — `"text"` in `supported_task_types` and the
+additive, omitempty health field `text_tasks` — and the ack-time admission. Text jobs are token-gated on poll
+(`JobView.Gated`), never listed as agent runs, and capped by `fleet_max_concurrent_jobs`: they contend for the node's
+text endpoint.
+
+The delegator side is `internal/textremote`, the `route` parameter on `offload_classify` / `offload_extract`:
+`local` (default) is byte-identical to before the route existed; `auto` leaves the box only while the machine-wide GPU
+lease is held and otherwise, or with no eligible node, stays local; `remote` forces a node and, with none eligible,
+returns `deferred: true` with `defer_class: capacity` (or `config` with no `delegate_remotes`). Eligibility
+(`delegate.PlaceText`) is stricter than vision's: the node's health must list `text` AND the task in `text_tasks`, so an
+older node and a node whose tier declares nothing are never picked, and its card must not be leased. `meta.node` /
+`meta.placement` on the result say where it ran. Budget 300 s, vision's. The delegator post-checks a node's OK result
+(classify: a label in the request's set and a confidence in 0..1; extract: one object whose keys are all in the requested
+schema) and turns a failure into a deferred result naming the node and the reason. A node declares a text task
+meaningfully only when its cascade for that task (`model`, `triage_model`, per-task rungs) routes to the unconstrained
+seat; measure through that same path.
 
 ## Known limits (v1)
 

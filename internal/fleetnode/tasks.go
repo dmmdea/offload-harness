@@ -14,21 +14,26 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/gpulease"
+	"github.com/dmmdea/offload-harness/internal/jobdir"
 	"github.com/dmmdea/offload-harness/internal/netguard"
 )
 
 // fleetTaskOrder is the advertisement order (stable for health payloads + error
 // messages). Membership is decided per-config by taskConfiguredFor.
-var fleetTaskOrder = []string{"image-gen", "video-gen", "animate", "stt", "audio-gen", "run-graph", ComposeTask, "agent", "accel", VisionTask}
+var fleetTaskOrder = []string{"image-gen", "video-gen", "animate", "stt", "audio-gen", "run-graph", ComposeTask, "agent", "accel", VisionTask, TextTask}
 
 // taskConfiguredFor reports whether THIS box actually serves taskType — the same
 // route gates the pipeline uses (empty script/model = the task defers there, so
@@ -78,6 +83,12 @@ func taskConfiguredFor(cfg config.Config, taskType string, loopbackListener bool
 		// advertised exactly when POST /fleet/vision would admit it — a bound
 		// vision_model and the agent lane's reachability rule.
 		return VisionLaneAdmissible(cfg, loopbackListener)
+	case TextTask:
+		// One classify / extract call on this node's own pipeline (0.154.0): advertised
+		// exactly when POST /fleet/text would admit it — the tier declared at least one
+		// text task (config text_tasks; none ships until measured) and the vision lane's
+		// reachability rule.
+		return TextLaneAdmissible(cfg, loopbackListener)
 	}
 	// Anything else is only "configured" when it is a VALID cfg.Pipelines key
 	// (Task 6): 100% config-driven, so a new pipeline needs no new case here.
@@ -377,6 +388,8 @@ func BuildRequest(ctx context.Context, cfg config.Config, loopbackListener bool,
 		return buildAccel(cfg, payload)
 	case VisionTask:
 		return buildVision(cfg, payload)
+	case TextTask:
+		return buildText(cfg, payload)
 	}
 	// Any other taskType that reaches here (taskConfigured already gated
 	// membership) must be a configured cfg.Pipelines key (Task 6) — 100%
@@ -763,10 +776,12 @@ func materializeRaw(raw json.RawMessage, pattern string) (string, error) {
 //     exists, its depth>0 registration gate keys off this value, not the wire.
 //
 // Materialization follows buildPipelineJob's discipline: a job-scoped dir
-// under BaseDir()/pipeline-jobs/ (so SweepOrphanedPipelineJobs reclaims a
-// crash's leftovers at startup), context docs written under <dir>/context/,
-// and a cleanup closure that removes the WHOLE dir — the docs live exactly as
-// long as the job. Unlike buildPipelineJob the id is NODE-MINTED (the contract
+// under BaseDir()/pipeline-jobs/ (this process's own, so unmarked: the
+// startup SweepOrphanedPipelineJobs reclaims a crash's leftovers, and only
+// the agent-local-* dirs a delegator process writes into the same root are
+// judged by owner instead), context docs written under <dir>/context/, and a
+// cleanup closure that removes the WHOLE dir — the docs live exactly as long
+// as the job. Unlike buildPipelineJob the id is NODE-MINTED (the contract
 // carries none), so os.MkdirTemp is the exclusive create: uniqueness by
 // construction instead of a caller-collision 400.
 func buildAgentRun(cfg config.Config, payload json.RawMessage) (core.Request, func(), error) {
@@ -1023,6 +1038,14 @@ func pipelineJobSpecID(jobSpec map[string]json.RawMessage) (string, error) {
 	if !pipelineJobIDPattern.MatchString(id) {
 		return "", fmt.Errorf("job_spec.id %q must match %s", id, pipelineJobIDPattern.String())
 	}
+	// agent-local-* is where a delegator process keeps its own local runs in
+	// this same pipeline-jobs/ root, and the startup sweep judges those by owner
+	// instead of as this node's own (SweepOrphanedPipelineJobs). An id inside
+	// that namespace would be kept after a crash instead of reclaimed, and
+	// would refuse a re-dispatch of the same id until it aged out.
+	if strings.HasPrefix(id, jobdir.LocalRunPrefix) {
+		return "", fmt.Errorf("job_spec.id %q must not start with %q (reserved for a delegator's local runs)", id, jobdir.LocalRunPrefix)
+	}
 	return id, nil
 }
 
@@ -1090,10 +1113,10 @@ func pipelineInjectRefs(jobSpec map[string]json.RawMessage, fetched map[string]s
 	return json.Marshal(out)
 }
 
-// SweepOrphanedPipelineJobs removes every entry directly under
-// cfg.BaseDir()/pipeline-jobs/ (each one a materialized job dir from
-// buildPipelineJob) and reports how many were removed. Missing pipeline-jobs/
-// (nothing configured yet, or a fresh install) is not an error — (0, nil).
+// SweepOrphanedPipelineJobs removes the orphaned entries directly under
+// cfg.BaseDir()/pipeline-jobs/ and reports how many it removed and how many it
+// kept. Missing pipeline-jobs/ (nothing configured yet, or a fresh install) is
+// not an error — (0, 0, nil).
 //
 // Called ONCE at fleet-serve startup, BEFORE listening (main.go's
 // runFleetServe). Jobs are in-memory (internal/fleetnode/jobs.go's Jobs
@@ -1102,32 +1125,144 @@ func pipelineInjectRefs(jobSpec map[string]json.RawMessage, fetched map[string]s
 // Left in place, that orphaned directory would permanently refuse every
 // FUTURE dispatch that reuses its job_spec.id: buildPipelineJob's exclusive
 // os.Mkdir collision guard has no way to distinguish "a real still-running
-// job" from "a directory nobody is ever going to finish or clean up" — so at
-// process start, before any job has been accepted, EVERY directory present is
-// orphaned by definition and safe to remove.
+// job" from "a directory nobody is ever going to finish or clean up".
 //
-// A per-entry removal failure (e.g. a locked file) is collected but does not
-// abort the sweep of the REST of the entries — one bad directory blocking one
+// What fleet-serve itself materializes here (BuildRequest's agent-<n>,
+// accel-<n> and pipeline job-id dirs) carries no owner marker, and at startup,
+// before this process has accepted a single dispatch, every one of them is
+// orphaned by definition. But fleet-serve is not the only writer in this root:
+// the delegator's in-process local placement (pipeline.RunAgentContract) mints
+// agent-local-* dirs here from processes that are not fleet-serve — the MCP
+// server, the delegate and research commands, the fleet smoke — and that
+// outlive its restarts, so a run's dir can be on disk, and in use, at this very
+// instant. Sweeping those out from under their runs failed every local run in
+// flight on the box at each fleet-serve restart (register C-78). So each
+// entry is judged by who owns it (internal/jobdir):
+//
+//   - a MARKED entry is orphaned iff its owner process is gone
+//     (gpulease.PIDAlive, which reads a process it cannot inspect as alive, the
+//     conservative direction; the id is probed in THIS process's process-id
+//     space, which is why one base directory must not be shared across spaces,
+//     see internal/jobdir) or the entry is older than jobdir.MaxRunLifetime,
+//     which bounds a process id recycled by an unrelated process;
+//   - an UNMARKED agent-local-* entry was made by a delegator older than the
+//     marker (a long-lived MCP process keeps its old binary for days after a
+//     deploy, so this case is live on the day the marker ships) and has no owner
+//     to ask: orphaned iff older than jobdir.MaxRunLifetime;
+//   - every other UNMARKED entry is fleet-serve's own: orphaned.
+//
+// Age is the entry's modification time, which a run leaves alone after its
+// first moments (everything it writes goes inside context/). A marker that
+// cannot be read (caught half written, garbled) counts as no marker, which for
+// an agent-local-* entry means "young, keep" — the same conservative direction,
+// and the reason the unmarked rule exists beside the marked one: a sweep can
+// list a delegator's dir between its creation and its marker.
+//
+// A removal decided by age alone is the one the sweep can make against a run
+// that is still going (its owner alive, or no owner to ask), so it logs the dir,
+// its age and what is known of its owner before removing it. The ordinary
+// removals (a dead owner, fleet-serve's own) and the keeps are in the counts
+// only.
+//
+// A kept entry is a decision, never an error. An entry the sweep cannot judge
+// (its modification time cannot be read) is kept and reported as an error, and
+// a removal that fails is reported the same way; both are counted as neither
+// removed nor kept. Every such failure is collected (errors.Join) and none
+// aborts the sweep of the REST of the entries — one bad directory blocking one
 // job_spec.id forever is a much smaller failure than a startup crash over it.
-func SweepOrphanedPipelineJobs(cfg config.Config) (swept int, err error) {
+func SweepOrphanedPipelineJobs(cfg config.Config) (swept, kept int, err error) {
 	dir := filepath.Join(cfg.BaseDir(), "pipeline-jobs")
 	entries, rerr := os.ReadDir(dir)
 	if rerr != nil {
 		if os.IsNotExist(rerr) {
-			return 0, nil
+			return 0, 0, nil
 		}
-		return 0, fmt.Errorf("sweep pipeline-jobs: reading %s: %w", dir, rerr)
+		return 0, 0, fmt.Errorf("sweep pipeline-jobs: reading %s: %w", dir, rerr)
 	}
-	var firstErr error
+	now := time.Now()
+	var failures []error
 	for _, e := range entries {
 		p := filepath.Join(dir, e.Name())
-		if rmErr := os.RemoveAll(p); rmErr != nil {
-			if firstErr == nil {
-				firstErr = fmt.Errorf("sweep pipeline-jobs: removing %s: %w", p, rmErr)
+		fate, why := judgePipelineJobDir(p, e.Name(), now)
+		switch fate {
+		case pipelineJobDirInUse:
+			kept++
+			continue
+		case pipelineJobDirGone:
+			continue
+		case pipelineJobDirOrphaned:
+			// Removed below.
+		default:
+			// pipelineJobDirUnjudged, or a fate added without a case here. Either
+			// way the entry stays: nothing is removed that has not been judged.
+			if why == "" {
+				why = fmt.Sprintf("no verdict (%d)", fate)
 			}
+			failures = append(failures, fmt.Errorf("sweep pipeline-jobs: keeping %s, which could not be judged: %s", p, why))
+			continue
+		}
+		if why != "" {
+			log.Printf("fleet: sweep pipeline-jobs: removing %s: %s", e.Name(), why)
+		}
+		if rmErr := os.RemoveAll(p); rmErr != nil {
+			failures = append(failures, fmt.Errorf("sweep pipeline-jobs: removing %s: %w", p, rmErr))
 			continue
 		}
 		swept++
 	}
-	return swept, firstErr
+	return swept, kept, errors.Join(failures...)
+}
+
+// pipelineJobDirFate is what the startup sweep decides for one entry. The zero
+// value keeps the entry: a verdict that nothing set must never remove a dir.
+type pipelineJobDirFate int
+
+const (
+	pipelineJobDirUnjudged pipelineJobDirFate = iota // keep it and report it: it could not be judged (the zero value, on purpose)
+	pipelineJobDirInUse                              // keep it: a delegator's run may still be using it
+	pipelineJobDirGone                               // it vanished while the sweep was looking at it (its run ended): nothing to do, nothing to count
+	pipelineJobDirOrphaned                           // remove it
+)
+
+// lstatPipelineJob reads a job dir's own modification time. A var only so a test
+// can make the read fail, which no portable fixture can.
+var lstatPipelineJob = os.Lstat
+
+// judgePipelineJobDir applies SweepOrphanedPipelineJobs's ownership rules to
+// the entry at path, named name, as of now. The string is set for a removal by
+// age (why the sweep takes a dir whose run may still be going) and for
+// pipelineJobDirUnjudged (what stopped the judgement).
+func judgePipelineJobDir(path, name string, now time.Time) (pipelineJobDirFate, string) {
+	pid, marked := jobdir.ReadOwner(path)
+	if !marked && !strings.HasPrefix(name, jobdir.LocalRunPrefix) {
+		return pipelineJobDirOrphaned, "" // fleet-serve's own
+	}
+	if marked && !gpulease.PIDAlive(pid) {
+		return pipelineJobDirOrphaned, "" // its owner has exited
+	}
+	// A live owner, or no owner to ask (a delegator older than the marker, or
+	// one caught before its marker was down): how long the directory has been
+	// there decides. The time is read again here, not taken from the listing.
+	fi, serr := lstatPipelineJob(path)
+	if serr != nil {
+		if os.IsNotExist(serr) {
+			return pipelineJobDirGone, ""
+		}
+		// The dir is there and cannot be read. That says nothing about its run,
+		// so it is neither kept as "in flight" nor removed.
+		return pipelineJobDirUnjudged, serr.Error()
+	}
+	if age := now.Sub(fi.ModTime()); age > jobdir.MaxRunLifetime {
+		owner := "it has no usable owner marker"
+		if marked {
+			owner = fmt.Sprintf("its owner, process %d, is still alive (a recycled process id, or a run that outlived the bound)", pid)
+		}
+		return pipelineJobDirOrphaned, fmt.Sprintf("%s old, past the %s bound on a run; %s", age.Round(time.Second), jobdir.MaxRunLifetime, owner)
+	}
+	// Young: keep, because the cost of a wrong removal is a run that loses its
+	// context and the cost of a wrong keep is a directory that is reclaimed at
+	// a later start. A dir stamped in the future (a clock that stepped back) is
+	// young too, until the clock has passed the stamp and the bound: it is
+	// reclaimed late by the size of the step, never lost.
+	return pipelineJobDirInUse, ""
 }

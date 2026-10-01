@@ -405,7 +405,11 @@ func rkllmSeatNote(seats []mediaseat.Seat) string {
 		"(at least 3, the runtime refuses fewer than the SoC has NPU cores). A seat that declares\n" +
 		"`tasks` serves only those: the runtime cannot constrain sampling, so a task that always\n" +
 		"sends a grammar (`assess_image`) is left off. The node refuses the others at ack time and\n" +
-		"publishes the set it serves, so a delegator places them elsewhere:\n\n" +
+		"publishes the set it serves, so a delegator places them elsewhere. The same runtime cannot\n" +
+		"constrain decoding for the node's own pipeline either, so every `rkllm` seat is written into\n" +
+		"`unconstrained_seats`: classify and extract run there from a prompt that states the JSON shape,\n" +
+		"checked strictly, instead of a grammar. A seat that lists them in `tasks` opens the fleet text\n" +
+		"lane (`text_tasks`); no tier does until measured data passes:\n\n" +
 		strings.Join(lines, "\n") + "\n"
 }
 
