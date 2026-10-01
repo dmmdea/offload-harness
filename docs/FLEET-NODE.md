@@ -590,7 +590,7 @@ one contract. Unknown payload fields are **ignored** (staggered node deploys mus
 | `acceptance` | `[string]` | delegator-evaluated checks: `contains:<s>` \| `not_contains:<s>` \| `regex:<re>` \| `min_items:<field>:<n>` \| `nonempty:<field>`; malformed or unfalsifiable checks are a 400 |
 | `profile` | string | agent task profile; default = the executing node's configured `agent_profile`, else `general` (small tiers seed `research` in `config_seed`); unknown names defer naming the valid set |
 | `max_steps` | int | default 12, clamped to 12 |
-| `timeout_sec` | int | default 300, clamped to 900; enforced node-side as a hard wall deadline |
+| `timeout_sec` | int | default 300, clamped to 900; the wall the run is expected to fit in, not a deadline since 0.131.0 (ADR 0055: a run ends on a stall or the liveness ceiling) |
 | `depth` | int | advisory — the node executes anything off the wire at `max(1, depth)`, so a wire "origin" claim is never trusted |
 
 ### Job result — what `data` holds on `done`

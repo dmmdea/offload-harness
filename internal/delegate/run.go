@@ -547,8 +547,10 @@ func jitteredWithin(d, left time.Duration) time.Duration {
 
 // pollEvery/pollGrace are vars (not consts) so tests compress the cadence;
 // production never mutates them. Grace rides ON TOP of the contract's
-// TimeoutSec: the node enforces TimeoutSec as its own wall, so the delegator
-// allows that plus transport slack before declaring the poll dead.
+// TimeoutSec: the node reports TimeoutSec as its wall (the run's expectation,
+// ADR 0055: what ends a run is a stall or the node's ceiling), so the delegator
+// allows that plus transport slack before declaring the poll dead, and holds the
+// poll open past it while the node reports progress.
 var (
 	pollEvery = 3 * time.Second
 	pollGrace = 60 * time.Second

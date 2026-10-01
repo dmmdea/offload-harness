@@ -49,8 +49,11 @@ const (
 	AgentMaxStepsDefault = 12
 	AgentMaxStepsCap     = 12
 
-	// AgentTimeoutSecDefault/Cap: wall-clock ceiling for the remote loop,
-	// enforced as a context deadline node-side. 300s default, 900s hard cap.
+	// AgentTimeoutSecDefault/Cap: the wall a remote contract is EXPECTED to fit
+	// in, 300s default, 900s hard cap. It is not a deadline: since 0.131.0 the node
+	// ends a run on a stall or on the liveness ceiling (AgentCeilingSecCap, below),
+	// and holds only the structured re-pack to the wall, by a token budget and a
+	// deadline check before each attempt, never by cutting a request in flight.
 	AgentTimeoutSecDefault = 300
 	AgentTimeoutSecCap     = 900
 

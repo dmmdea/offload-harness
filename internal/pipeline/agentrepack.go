@@ -1,6 +1,8 @@
 package pipeline
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"math"
 	"strings"
@@ -10,6 +12,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/agent"
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/llamaclient"
+	"github.com/dmmdea/offload-harness/internal/seatrate"
 )
 
 // Helpers of the node-side structured re-pack (repackStructuredWith): what its
@@ -84,8 +87,114 @@ func pluralType(name string) string {
 // repackOpts is what one structured re-pack call is handed beside its context.
 // The zero value is the call every caller made before: no bound, no record.
 type repackOpts struct {
+	// WallEnd is when the contract's wall ends: the instant the wall began plus
+	// timeout_sec. The zero time means the call carries no wall (the delegator's
+	// rescue, which has a deadline of its own).
+	WallEnd time.Time
+	// Grace is how far past the wall a re-pack may be asked to finish. The run's
+	// liveness policy gives its Slack (30 s in production), the padding the
+	// re-pack's own stall allowance already adds to its generation estimate.
+	Grace time.Duration
+	// TokS is the seat's decode rate in tokens per second, and RateBasis says where
+	// it came from. 0 means unknown, and then the call does no time arithmetic at
+	// all: it fails open, like every other sizing decision that needs a rate.
+	TokS      float64
+	RateBasis string
 	// Trace, when set, receives one record per attempt, for the wire.
 	Trace *repackTrace
+}
+
+// repackRate is the decode rate the node sizes a re-pack against: the seat-rates
+// store's calibrated rate, else this run's own observed rate (the liveness
+// monitor's smoothed rate over its streamed deltas: 0 on a seat that answers JSON
+// in one piece), else the box's agent_seat_tok_s. The basis names which.
+func repackRate(known seatrate.Seat, observed, configured float64) (float64, string) {
+	switch {
+	case known.TokS > 0:
+		return known.TokS, "the seat-rates store"
+	case observed > 0:
+		return observed, "this run's observed rate"
+	case configured > 0:
+		return configured, "agent_seat_tok_s"
+	}
+	return 0, ""
+}
+
+// repackFit is what the time left lets one attempt ask for.
+type repackFit struct {
+	// Tokens is the max_tokens to send: the budget, or what the time buys.
+	Tokens int
+	// Clamped is true when Tokens is under the budget asked for.
+	Clamped bool
+	// Skip is true when the time left cannot buy even the answer.
+	Skip bool
+	// Note is the clamp's or the skip's arithmetic ("" when the budget fitted).
+	Note string
+}
+
+// fit sizes one attempt against the time left: before the earlier of the run's
+// own deadline (its liveness ceiling) and the wall's end plus the grace, at the
+// seat's rate. An attempt whose budget fits is sent as it is; one that does not is
+// clamped to the tokens the time buys, as long as that still holds the answer
+// (least, the answer's own size in tokens); one that cannot is skipped, and the
+// note says why. It is a token budget and a deadline check, never a transport
+// timeout (ADR 0061): a request in flight is not cut, and the busy hold stays.
+func (o repackOpts) fit(now, ctxDeadline time.Time, budget, least int) repackFit {
+	if o.TokS <= 0 {
+		return repackFit{Tokens: budget}
+	}
+	var deadline time.Time
+	what := ""
+	if !ctxDeadline.IsZero() {
+		deadline, what = ctxDeadline, "the ceiling"
+	}
+	if !o.WallEnd.IsZero() {
+		if end := o.WallEnd.Add(o.Grace); deadline.IsZero() || end.Before(deadline) {
+			deadline, what = end, fmt.Sprintf("the wall + %.0f s grace", o.Grace.Seconds())
+		}
+	}
+	if deadline.IsZero() {
+		return repackFit{Tokens: budget}
+	}
+	left := max(deadline.Sub(now), 0)
+	// Compared as a float first: a context with a distant deadline would overflow
+	// an int on a 32-bit build, and nothing is clamped when the budget fits.
+	buysF := left.Seconds() * o.TokS
+	if buysF >= float64(budget) {
+		return repackFit{Tokens: budget}
+	}
+	buys := int(buysF)
+	if buys >= least {
+		return repackFit{Tokens: buys, Clamped: true, Note: fmt.Sprintf(
+			"max_tokens %d clamped to %d: %.0f s left to %s at %.1f tok/s", budget, buys, left.Seconds(), what, o.TokS)}
+	}
+	basis := ""
+	if o.RateBasis != "" {
+		basis = " (rate: " + o.RateBasis + ")"
+	}
+	return repackFit{Skip: true, Note: fmt.Sprintf(
+		"re-pack skipped: %.0f s left to %s at %.1f tok/s buys %d tokens < the answer's %d%s", left.Seconds(), what, o.TokS, buys, least, basis)}
+}
+
+// repackSkipErr marks a re-pack that was not sent, or not sent again, because the
+// time left could not buy the answer: the wall's doing, not the seat's, so the
+// defer is a budget one and the finished answer stays flagged for the delegator
+// to re-pack (register C-80).
+type repackSkipErr struct{ msg string }
+
+func (e *repackSkipErr) Error() string { return e.msg }
+
+// asRepackSkip reports whether err is a *repackSkipErr, and returns it.
+func asRepackSkip(err error) (*repackSkipErr, bool) {
+	var s *repackSkipErr
+	ok := errors.As(err, &s)
+	return s, ok
+}
+
+// deadlineOf is ctx's deadline, the zero time when it has none.
+func deadlineOf(ctx context.Context) time.Time {
+	dl, _ := ctx.Deadline()
+	return dl
 }
 
 // repackTrace collects what each attempt of one re-pack call did.
@@ -100,17 +209,26 @@ const repackClipBytes = 80
 
 // add records one attempt: what was asked (lane, max_tokens), what came back
 // (tokens, finish reason, a clip of the content), how long it took and why it
-// failed ("" when it produced the object). A nil trace records nothing.
-func (tr *repackTrace) add(attemptNum int, lane string, maxTokens int, g llamaclient.GenResult, took time.Duration, why string) {
+// failed ("" when it produced the object). clampedFrom is the budget the time left
+// narrowed it from (0 when it was not). A nil trace records nothing.
+func (tr *repackTrace) add(attemptNum int, lane string, maxTokens, clampedFrom int, g llamaclient.GenResult, took time.Duration, why string) {
 	if tr == nil {
 		return
 	}
 	a := core.AgentRepackAttempt{
-		Attempt: attemptNum, Lane: lane, MaxTokens: maxTokens,
+		Attempt: attemptNum, Lane: lane, MaxTokens: maxTokens, ClampedFrom: clampedFrom,
 		TokensOut: g.TokensOut, FinishReason: g.FinishReason, Ms: took.Milliseconds(), Why: why,
 	}
 	a.Head, a.Tail = clipEnds(g.Content)
 	tr.Attempts = append(tr.Attempts, a)
+}
+
+// skip records an attempt that was never sent, and why.
+func (tr *repackTrace) skip(attemptNum int, lane, why string) {
+	if tr == nil {
+		return
+	}
+	tr.Attempts = append(tr.Attempts, core.AgentRepackAttempt{Attempt: attemptNum, Lane: lane, Skipped: true, Why: why})
 }
 
 // clipEnds returns the first and the last repackClipBytes bytes of s, each cut on

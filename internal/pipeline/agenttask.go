@@ -248,10 +248,13 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		return deferWire(core.DeferClassConfig, "no agent seat resolvable (agent_model and model both empty)")
 	}
 
-	// The contract's TimeoutSec is the WALL ceiling, enforced as a context
-	// deadline over everything below (probe, build, loop, re-pack) — closing
-	// ground-truth gap #12 for this lane. DecodeAgentContract guarantees a
-	// positive value on the wire path; the default covers in-process callers.
+	// The contract's TimeoutSec is the WALL: the run's EXPECTATION, not its
+	// deadline (ADR 0055). What ends a run is a stall or the liveness CEILING
+	// (CeilingFor: max(3 x estimate, 2 x wall, 1800 s)). The structured re-pack
+	// alone is held to the wall, plus the liveness slack, by a token budget and a
+	// deadline check before each attempt (repackOpts.fit), never by cutting a
+	// request in flight. DecodeAgentContract guarantees a positive value on the
+	// wire path; the default covers in-process callers.
 	timeoutSec := contract.TimeoutSec
 	if timeoutSec <= 0 {
 		timeoutSec = core.AgentTimeoutSecDefault
@@ -570,6 +573,10 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	// ever ran. (Safe to move: `wall_sec` ships for the first time in this
 	// same release, so no deployed node ever published the earlier meaning.)
 	core.ReportWall(ctx, timeoutSec)
+	// The wall's end: the instant it began plus timeout_sec. The re-pack is held
+	// to it (plus the liveness slack) by a token budget and a deadline check before
+	// each attempt; nothing else on this path is (register C-80).
+	wallEnd := time.Now().Add(wall)
 	// Liveness walls (0.131.0, ADR 0055): the wall above is the EXPECTATION.
 	// The run is ended by a STALL (no progress inside the seat's dynamic
 	// allowance) or by the safety CEILING — never by the expectation expiring
@@ -1307,7 +1314,11 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		obs.OnProgress(res.TokensOut + n)
 	}
 	var trace repackTrace
-	structured, tokensOut, transport, attempts, serr := p.repackStructuredWith(agent.ContextWithProgress(cctx, repackProgress), seat, outSchema, res.Output, repackAttemptFloor(wall), 0, repackOpts{Trace: &trace})
+	// The decode rate the re-pack is sized against: the store's, else this run's
+	// own (the loop has just measured it), else the box's agent_seat_tok_s.
+	repackTokS, repackBasis := repackRate(rates.Get(seat), wire.ObservedTokS, p.cfg.AgentSeatTokS)
+	structured, tokensOut, transport, attempts, serr := p.repackStructuredWith(agent.ContextWithProgress(cctx, repackProgress), seat, outSchema, res.Output, repackAttemptFloor(wall), 0,
+		repackOpts{WallEnd: wallEnd, Grace: livePolicy.Slack, TokS: repackTokS, RateBasis: repackBasis, Trace: &trace})
 	wire.RepackMs = time.Since(repackStart).Milliseconds()
 	wire.RepackAttempts = attempts
 	// Every attempt on the wire, and every attempt's generation in tokens_out: a
@@ -1334,6 +1345,7 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		// Deferred, and delegate.runLocal/runRemote both run acceptance only
 		// when !wire.Deferred — so no check can ever read it on this path.
 		cutoff, isCutoff := asRepackCutoff(serr)
+		skip, isSkip := asRepackSkip(serr)
 		repackDown := repackSeatDown(cctx, live, serr, transport)
 		switch {
 		case repackDown != "":
@@ -1366,6 +1378,14 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 			// misbehaved. Budget is the honest class: a ceiling outside the
 			// model's control stopped the run.
 			return deferWire(core.DeferClassBudget, core.RepackCanceledReason+" (the caller's context ended)")
+		case isSkip:
+			// The wall's remaining time could not buy the answer, so the re-pack was
+			// never sent (repackOpts.fit, register C-80): the seat did nothing wrong
+			// and was not asked. Budget, like the other arms where the clock decided,
+			// and the finished answer rides in output, flagged above, for the
+			// delegator to re-pack. The prefix is the one an older delegator
+			// recognizes a re-pack failure by.
+			return deferWire(core.DeferClassBudget, "structured "+skip.Error())
 		case isCutoff:
 			// The DECISIVE (last-run) re-pack attempt was ended by its OWN
 			// per-attempt bound (repackAttemptDeadline, register D-108) — not
@@ -1578,7 +1598,10 @@ func (p *Pipeline) repackStructured(ctx context.Context, seat string, rawSchema 
 // repackStructuredWith is repackStructured with a cap on the completions it may
 // spend: maxAttempts of 1 or 2 stops after that many (the delegator's rescue is
 // ONE completion and never the chat lane), 0 keeps the full repackMaxAttempts.
-// opts is what else this call is handed beside its context (repackOpts).
+// opts is what else this call is handed beside its context (repackOpts): with a
+// wall and a decode rate, each attempt is sized against the time left before the
+// wall's end plus the grace, clamped to what that buys or skipped when it cannot
+// buy the answer; with a trace, each attempt is recorded for the wire.
 //
 // tokensOut is the generation of EVERY attempt, the failed ones included: it was
 // seat time spent whether or not the answer was usable (register C-80).
@@ -1614,8 +1637,8 @@ func (p *Pipeline) repackStructuredWith(ctx context.Context, seat string, rawSch
 	}
 	// note records one attempt on the call's trace: what was asked, what came
 	// back and, once known, why it failed. A call with no trace records nothing.
-	note := func(attemptNum int, lane string, maxTokens int, g llamaclient.GenResult, took time.Duration, why string) {
-		opts.Trace.add(attemptNum, lane, maxTokens, g, took, why)
+	note := func(attemptNum int, lane string, maxTokens, clampedFrom int, g llamaclient.GenResult, took time.Duration, why string) {
+		opts.Trace.add(attemptNum, lane, maxTokens, clampedFrom, g, took, why)
 	}
 	names := make([]string, 0, len(fields))
 	for _, f := range fields {
@@ -1690,6 +1713,11 @@ func (p *Pipeline) repackStructuredWith(ctx context.Context, seat string, rawSch
 		lastRaw, lastBound, lastAttemptNum = raw, bound, attemptNum
 	}
 	budget := repackBudget(output)
+	// least is the smallest an attempt may be sized to: the answer's own size in
+	// tokens. skipped is set when the time left could not buy even that, and no
+	// further attempt is sent (repackOpts.fit).
+	least := expectedRepackTokens(output)
+	var skipped *repackSkipErr
 	// Under the liveness monitor (a ProgressFunc on ctx, which is every run of
 	// runAgentTask) the CONTEXT owns the deadline: the stall watch cancels a
 	// silent request, the busy hold (ADR 0061) keeps one whose seat is busy for
@@ -1734,6 +1762,21 @@ func (p *Pipeline) repackStructuredWith(ctx context.Context, seat string, rawSch
 		if serr := stopped(); serr != nil {
 			return nil, tokensOut, false, attempts, serr
 		}
+		// The time left decides what this attempt may ask for, at the seat's rate: a
+		// token budget and a deadline check, never a transport timeout (ADR 0061;
+		// the busy hold and the stall watch are untouched). An attempt that cannot
+		// buy the answer is not sent, and neither is any later one: time only runs
+		// out (register C-80).
+		fit := opts.fit(time.Now(), deadlineOf(ctx), budget, least)
+		if fit.Skip {
+			skipped = &repackSkipErr{msg: fit.Note}
+			opts.Trace.skip(attempts+1, lane, fit.Note)
+			break
+		}
+		sent, clampedFrom := fit.Tokens, 0
+		if fit.Clamped {
+			clampedFrom = budget
+		}
 		attempts++
 		// WithoutThinking: the re-pack is a mechanical shape transformation over
 		// text the loop has ALREADY finished reasoning about, so it should never
@@ -1765,12 +1808,12 @@ func (p *Pipeline) repackStructuredWith(ctx context.Context, seat string, rawSch
 		// loop (a 429/503 answer retries on the CONTRACT's contention budget,
 		// not a per-attempt one) and would desynchronize this call's
 		// deadline from the wall the caller classifies a failure against.
-		attemptTimeout := repackAttemptDeadline(ctx, p.cfg, budget, limit-attempts+1)
+		attemptTimeout := repackAttemptDeadline(ctx, p.cfg, sent, limit-attempts+1)
 		attemptStart := time.Now()
-		gres, gerr := p.repackClient(p.cfg.CompletionPath, attemptTimeout, gates).Generate(ctx, seat, system, user, grammar, budget, p.cfg.Temperature, 0, append([]llamaclient.GenOption{llamaclient.WithoutThinking()}, structuredOpts...)...)
+		gres, gerr := p.repackClient(p.cfg.CompletionPath, attemptTimeout, gates).Generate(ctx, seat, system, user, grammar, sent, p.cfg.Temperature, 0, append([]llamaclient.GenOption{llamaclient.WithoutThinking()}, structuredOpts...)...)
 		tokensOut += gres.TokensOut
 		if gerr != nil {
-			note(attempts, lane, budget, gres, time.Since(attemptStart), repackWhy(gerr))
+			note(attempts, lane, sent, clampedFrom, gres, time.Since(attemptStart), repackWhy(gerr))
 			recordFailure(gerr, boundFor(attemptTimeout), attempts)
 			if seatBusyExhausted(gerr) {
 				// The contract's busy-seat budget is spent: the seat answered
@@ -1795,10 +1838,16 @@ func (p *Pipeline) repackStructuredWith(ctx context.Context, seat string, rawSch
 			// more tokens cannot help, the chat lane is a different request and
 			// is the next attempt.
 			cut := judgeCut(output, gres)
-			terr := fmt.Errorf("re-pack truncated at %d tokens (the answer is %d chars; %s)", budget, len(output), cut.observed(budget))
-			note(attempts, lane, budget, gres, time.Since(attemptStart), terr.Error())
+			seen := cut.observed(sent)
+			if fit.Clamped {
+				// The time left, not the answer, set this budget, and a larger one
+				// would be clamped again: nothing to escalate to.
+				seen = "the time left set this budget: " + fit.Note
+			}
+			terr := fmt.Errorf("re-pack truncated at %d tokens (the answer is %d chars; %s)", sent, len(output), seen)
+			note(attempts, lane, sent, clampedFrom, gres, time.Since(attemptStart), terr.Error())
 			recordFailure(terr, boundFor(attemptTimeout), attempts)
-			if !cut.escalates(budget) {
+			if fit.Clamped || !cut.escalates(sent) {
 				break
 			}
 			budget = agentRepackMaxTokensCap
@@ -1816,14 +1865,14 @@ func (p *Pipeline) repackStructuredWith(ctx context.Context, seat string, rawSch
 		content := []byte(outerObject(gres.Content))
 		if verr := validator.Validate(content, schema); verr != nil {
 			if fixed, ok := coerceToSchema(content, schema); ok {
-				note(attempts, lane, budget, gres, time.Since(attemptStart), "")
+				note(attempts, lane, sent, clampedFrom, gres, time.Since(attemptStart), "")
 				return json.RawMessage(fixed), tokensOut, false, attempts, nil
 			}
-			note(attempts, lane, budget, gres, time.Since(attemptStart), repackWhy(verr))
+			note(attempts, lane, sent, clampedFrom, gres, time.Since(attemptStart), repackWhy(verr))
 			recordFailure(verr, boundFor(attemptTimeout), attempts)
 			continue
 		}
-		note(attempts, lane, budget, gres, time.Since(attemptStart), "")
+		note(attempts, lane, sent, clampedFrom, gres, time.Since(attemptStart), "")
 		return json.RawMessage(content), tokensOut, false, attempts, nil
 	}
 	// FINAL fallback: one grammar-FREE attempt over /v1/chat/completions.
@@ -1837,31 +1886,42 @@ func (p *Pipeline) repackStructuredWith(ctx context.Context, seat string, rawSch
 	// route is the one surface every seat serves; the schema validator still
 	// gates the result, so this trades the grammar's shape-constraint for
 	// reach while conceding nothing on correctness.
-	if attempts < limit && !wallLeft("chat re-pack") {
+	if skipped == nil && attempts < limit && !wallLeft("chat re-pack") {
 		return nil, tokensOut, false, attempts, err
 	}
-	if attempts < limit {
+	if skipped == nil && attempts < limit {
 		if serr := stopped(); serr != nil {
 			return nil, tokensOut, false, attempts, serr
 		}
 	}
-	if attempts < limit && !seatBusyExhausted(lastRaw) {
+	chatBudget := repackBudget(output)
+	var cfit repackFit
+	if skipped == nil && attempts < limit && !seatBusyExhausted(lastRaw) {
+		if cfit = opts.fit(time.Now(), deadlineOf(ctx), chatBudget, least); cfit.Skip {
+			skipped = &repackSkipErr{msg: cfit.Note}
+			opts.Trace.skip(attempts+1, "chat", cfit.Note)
+		}
+	}
+	if skipped == nil && attempts < limit && !seatBusyExhausted(lastRaw) {
 		attempts++
-		chatTimeout := repackAttemptDeadline(ctx, p.cfg, budget, limit-attempts+1)
+		chatSent, chatClamped := cfit.Tokens, 0
+		if cfit.Clamped {
+			chatClamped = chatBudget
+		}
+		chatTimeout := repackAttemptDeadline(ctx, p.cfg, chatSent, limit-attempts+1)
 		chatClient := p.repackClient("/v1/chat/completions", chatTimeout, gates)
 		var chatOpts []llamaclient.GenOption
 		if underLiveness {
 			chatOpts = append(chatOpts, llamaclient.WithoutClientTimeout(), llamaclient.WithProgress(progress))
 		}
-		chatBudget := repackBudget(output)
 		chatStart := time.Now()
-		structured, cres, cerr := p.repackViaChat(ctx, chatClient, seat, schema, output, chatBudget, chatOpts...)
+		structured, cres, cerr := p.repackViaChat(ctx, chatClient, seat, schema, output, chatSent, chatOpts...)
 		tokensOut += cres.TokensOut
 		if cerr == nil {
-			note(attempts, "chat", chatBudget, cres, time.Since(chatStart), "")
+			note(attempts, "chat", chatSent, chatClamped, cres, time.Since(chatStart), "")
 			return structured, tokensOut, false, attempts, nil
 		}
-		note(attempts, "chat", chatBudget, cres, time.Since(chatStart), repackWhy(cerr))
+		note(attempts, "chat", chatSent, chatClamped, cres, time.Since(chatStart), repackWhy(cerr))
 		recordFailure(cerr, boundFor(chatTimeout), attempts)
 	}
 
@@ -1874,16 +1934,29 @@ func (p *Pipeline) repackStructuredWith(ctx context.Context, seat string, rawSch
 	// non-429 4xx refusal — means the seat answered and could not be used
 	// (abstention). earlierNotes rides along in every case as diagnostic
 	// context, never as what decides the class.
+	//
+	// A re-pack skipped because the time left could not buy the answer is not an
+	// attempt: with none before it, it IS the verdict (a budget defer); after a
+	// failed attempt it is a note, and that attempt's own verdict stands.
+	if skipped != nil && lastRaw == nil {
+		return nil, tokensOut, false, attempts, skipped
+	}
 	if selfCutoff(lastRaw) {
 		msg := fmt.Sprintf("attempt %d/%d cut by its %s share of the wall", lastAttemptNum, limit, lastBound)
 		if len(earlierNotes) > 0 {
 			msg = strings.Join(earlierNotes, "; ") + "; " + msg
+		}
+		if skipped != nil {
+			msg += "; " + skipped.msg
 		}
 		return nil, tokensOut, false, attempts, &repackCutoffErr{msg: msg, raw: lastRaw}
 	}
 	finalErr := fmt.Errorf("attempt %d/%d (%s): %w", lastAttemptNum, limit, boundText(lastBound), lastRaw)
 	if len(earlierNotes) > 0 {
 		finalErr = fmt.Errorf("%s; %w", strings.Join(earlierNotes, "; "), finalErr)
+	}
+	if skipped != nil {
+		finalErr = fmt.Errorf("%w; %s", finalErr, skipped.msg)
 	}
 	return nil, tokensOut, genErrIsTransport(lastRaw), attempts, finalErr
 }
