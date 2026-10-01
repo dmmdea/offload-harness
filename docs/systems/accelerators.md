@@ -125,6 +125,8 @@ is **refused** at seed time (0.114.0) instead of rendering a launcher at the fil
 passes detect's verdict to `install seed --accelerators` and writes `installed.json`; and
 `fleet-serve` falls back to `config.accelerators` when the manifest lists none, so a hand-built
 node (the Lenovo has no `installed.json`) still advertises its device in `/fleet/health`.
+The Hailo-8L is the one exception: it is local-only and no source publishes it (see Fleet routing
+below).
 
 ### Rockchip RK3588 NPU detection and seed (`rknpu`)
 
