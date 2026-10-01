@@ -88,6 +88,15 @@ func drainSeat(ctx context.Context, client *http.Client, endpoint, model string,
 // reminderEvery bounds how often an UNCHANGED drain state is re-printed.
 const reminderEvery = 5 * time.Minute
 
+// drainSpan prints a duration for a drain message: whole seconds, or milliseconds
+// below one second, where seconds would read "0s" for a real span (register C-84).
+func drainSpan(d time.Duration) time.Duration {
+	if d < time.Second {
+		return d.Round(time.Millisecond)
+	}
+	return d.Round(time.Second)
+}
+
 // drainUntil polls until the seat is idle on two consecutive reads — no request
 // running or waiting on the engine, no load in progress, and no registered run
 // on the seat — or the deadline passes. It returns nil when drained; an error
@@ -166,7 +175,7 @@ func drainUntil(ctx context.Context, p drainProbe, deadline time.Time) error {
 			if key != stuckKey {
 				stuckKey, stuckSince = key, now
 			} else if now.Sub(stuckSince) >= p.stuckAfter {
-				msg := fmt.Sprintf("drain of %s gave up after %s without progress (last: %s): the seat's state has not changed for %s, longer than the seat's own turn arithmetic allows", p.model, now.Sub(start).Round(time.Second), last, now.Sub(stuckSince).Round(time.Second))
+				msg := fmt.Sprintf("drain of %s gave up after %s without progress (last: %s): the seat's state has not changed for %s, longer than the seat's own turn arithmetic allows", p.model, drainSpan(now.Sub(start)), last, drainSpan(now.Sub(stuckSince)))
 				if p.hint != "" {
 					msg += "; " + p.hint
 				}

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -37,25 +38,24 @@ func TestDrainGivesUpOnAnUnchangedBusyStateBeforeTheDeadline(t *testing.T) {
 	if took > 2*time.Second {
 		t.Fatalf("the stuck bound must fire near stuckAfter, not at the deadline: took %s", took)
 	}
-	// Progress resets the bound: toggling the in-flight count keeps the drain
-	// alive past several stuckAfter windows, until the overall deadline.
+	// Progress resets the bound: an in-flight count that changes keeps the drain
+	// alive past several stuckAfter windows, until the overall deadline. The fake
+	// seat changes it on EVERY probe (each poll reads /running first), so what the
+	// drain sees never repeats however a loaded host delays the poll. A timer
+	// goroutine toggling it every 30 ms against the 80 ms bound was delayed past
+	// 80 ms on a busy box and read as stuck (register C-84).
 	f.inflight.Store(2)
-	stop := make(chan struct{})
-	go func() {
-		n := int64(2)
-		for {
-			select {
-			case <-stop:
-				return
-			case <-time.After(30 * time.Millisecond):
-			}
-			n = 3 - n // 2 <-> 1, never zero
-			f.inflight.Store(n)
+	progressing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/running" {
+			f.inflight.Store(3 - f.inflight.Load()) // 2 <-> 1, never zero
 		}
-	}()
+		f.handler("seat").ServeHTTP(w, r)
+	}))
+	defer progressing.Close()
+	pp := p
+	pp.client, pp.endpoint = progressing.Client(), progressing.URL
 	start = time.Now()
-	err = drainUntil(context.Background(), p, time.Now().Add(400*time.Millisecond))
-	close(stop)
+	err = drainUntil(context.Background(), pp, time.Now().Add(400*time.Millisecond))
 	took = time.Since(start)
 	if err == nil || strings.Contains(err.Error(), "without progress") || !strings.Contains(err.Error(), "did not finish within") {
 		t.Fatalf("a changing busy state must run to the overall deadline, got %v after %s", err, took)

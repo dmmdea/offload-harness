@@ -77,9 +77,12 @@ places.
   third-party pages, so the text a caller reads is third-party content even though a seat wrote it,
   and an instruction planted on a page can survive into a digest. The agent's own `web_fetch` and
   browse tools fence page content as untrusted data (`fenceUntrusted`, `sanitizeUntrusted` in
-  `internal/agent`); the research door does not yet label or bound its digests. Gate G13 (open): a
-  digest result carries the untrusted label and a length bound, and a test fails when a page's
-  planted instruction reaches the result without them.
+  `internal/agent`). The research door now does the same for its digests: the body's `untrusted`
+  field, right after `summary`, says the results and sources are page content to weigh as data,
+  and every string in them goes through `internal/untrusted` (hidden runes dropped, role markers
+  neutralized, each string capped at 16,000 characters, twice the longest digest measured). Gate
+  G13: a test plants markers in a digest, its structured fields and a page title, and fails when
+  one reaches the body or the notice is missing.
 
 ## AARM v1.0 coverage
 
@@ -125,7 +128,7 @@ R1–R6 are MUST, R7–R9 SHOULD.
 | G10 | rules golden tests and read-floor fixtures with would-deny counters | open (L2) |
 | G11 | the replay gate for the reliability track | open (R) |
 | G12 | skill manifest drift | open (L8) |
-| G13 | research digests labelled untrusted and length-bounded | open (L5) |
+| G13 | research digests labelled untrusted and length-bounded | shipped (`research_untrusted_test.go`) |
 
 ## What was evaluated and not adopted
 
@@ -153,7 +156,7 @@ R1–R6 are MUST, R7–R9 SHOULD.
 | listen, tailnet and public-web guards | `internal/netguard/netguard.go`, `tailnet.go`, `publicnet.go` |
 | credential binding for the NVIDIA key | `internal/nimclient/nimclient.go` (`IsHostedNVIDIA`, `KeyForBase`) |
 | bare-client gate (G2) | `bare_http_client_lint_test.go`, `bare_http_client_allowlist_test.go` |
-| untrusted-content fences | `internal/agent/fetchtool.go` (`fenceUntrusted`), `internal/agent/browsetool.go`; none yet in `internal/research` (G13) |
+| untrusted-content fences | `internal/agent/fetchtool.go` (`fenceUntrusted`), `internal/agent/browsetool.go`; the shared rules in `internal/untrusted`, applied to research bodies in `internal/mcpserver` (G13) |
 | fleet node listeners and the fleet bearer | `internal/fleetnode/server.go`, `main.go` (`fleetServeParams`) |
 | posture report | `main.go` (`doctor`) |
 

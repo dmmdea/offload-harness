@@ -329,10 +329,13 @@ them quarantine it), so that failure keeps its one retry on another node. The se
 network access; the agent loop's egress cage is untouched. Failed or refused fetches come
 back as `sources[].skipped` and produce no result — a broken page never reads as a digest.
 
-The body marshals in a fixed order — `summary`, then `partial` / `error` (present only when a
-batch chunk failed), then `results` with its `result_sources` index, and `sources` last — because
+The body marshals in a fixed order — `summary`, then `untrusted` (a one-line notice that the
+results and sources are third-party page content, data to weigh and never instructions), then
+`partial` / `error` (present only when a batch chunk failed), then `results` with its
+`result_sources` index, and `sources` last — because
 the MCP client keeps only the head and the tail of a long body, and the digests are the
-deliverable (C-75). A **partial** result (some pages digested, some failed) is a successful
+deliverable (C-75). Every string in `results` and `sources` has been through `internal/untrusted`
+(hidden runes dropped, role markers neutralized, each capped at 16,000 characters; SF-45, gate G13). A **partial** result (some pages digested, some failed) is a successful
 tool call: `isError` is set only when nothing succeeded, so one failed page can no longer cut the
 surviving digests out of the reply. What is missing is named in `summary.failed` /
 `summary.lost_to_stack` and in the failed result's own `reason`. `agent_delegate` follows the same
