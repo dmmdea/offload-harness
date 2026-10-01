@@ -1328,15 +1328,43 @@ func TestRunRouteLocalNeverTouchesTheNetwork(t *testing.T) {
 	}
 }
 
-// captureLog redirects the standard logger into a buffer for one test.
-func captureLog(t *testing.T) *bytes.Buffer {
+// captureLog redirects the standard logger into a buffer for one test. The
+// buffer takes a lock on every access: the logger serializes its own writes, but
+// a test reads what was logged while a run's goroutines may still be logging (a
+// subtask the call deadline abandoned keeps unwinding after RunWith returns), and
+// a bare bytes.Buffer read beside that write is a data race.
+func captureLog(t *testing.T) *lockedBuffer {
 	t.Helper()
-	var buf bytes.Buffer
+	buf := &lockedBuffer{}
 	oldOut, oldFlags := log.Writer(), log.Flags()
-	log.SetOutput(&buf)
+	log.SetOutput(buf)
 	log.SetFlags(0)
 	t.Cleanup(func() { log.SetOutput(oldOut); log.SetFlags(oldFlags) })
-	return &buf
+	return buf
+}
+
+// lockedBuffer is captureLog's sink: a bytes.Buffer behind a mutex.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+func (b *lockedBuffer) Len() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Len()
 }
 
 // TestRunTelemetryFailureIsLoudOnceAndNeverFailsTheRun (H-4): the delegation-log
