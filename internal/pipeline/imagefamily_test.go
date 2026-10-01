@@ -351,7 +351,7 @@ func TestEditFamilyWiresReferencesAndRefusesMisuse(t *testing.T) {
 	}
 	var payload map[string]any
 	_ = json.Unmarshal(res.Data, &payload)
-	if payload["license_note"] != nil || payload["images"] != float64(3) || payload["width"] != float64(40) || payload["height"] != float64(24) {
+	if payload["license"] != "Qwen Research License" || payload["commercial_use"] != false || payload["license_note"] != nil || payload["images"] != float64(3) || payload["width"] != float64(40) || payload["height"] != float64(24) {
 		t.Errorf("payload = %v", payload)
 	}
 
