@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -55,6 +56,47 @@ func refuseListen(listen string, trusted bool) error {
 	return nil
 }
 
+// refuseHailoPort is the sidecar-port half of fleet-ui's bind safety (register E-08), kept apart
+// from refuseListen because it needs the loaded config. fleet-ui's documented default listen is
+// 127.0.0.1:18813 and the Hailo sidecar's documented endpoint is the same port, so on a box that
+// lists hailo-8l the page would squat the sidecar's port (or the sidecar's on-demand spawn would
+// find it taken). Such a box refuses to bind that port and names the way out.
+//
+// Neither documented port moves: a box without the Hailo binds the default exactly as before, and
+// the check is per device — a Coral or RKNPU box is untouched. Only the PORT is compared, whatever
+// the host half, because the refusal is cheap to satisfy (pass another --listen) and a sidecar on
+// the same port number is the collision the operator cares about.
+func refuseHailoPort(cfg config.Config, listen string) error {
+	if !cfg.HasAccelerator("hailo-8l") {
+		return nil
+	}
+	_, listenPort, err := net.SplitHostPort(listen)
+	if err != nil {
+		return nil // a malformed address is refuseListen's and net.Listen's to name; this check is only about the port
+	}
+	endpoint := strings.TrimSpace(cfg.HailoEndpoint)
+	if endpoint == "" {
+		endpoint = config.Default().HailoEndpoint // the documented sidecar port, as the lane itself would read it
+	}
+	u, err := url.Parse(endpoint)
+	if err != nil || u.Hostname() == "" {
+		return nil // an unusable base never loads (validateConfiguredBases), so there is no sidecar port to collide with
+	}
+	sidecarPort := u.Port()
+	if sidecarPort == "" { // a portless base dials its scheme's own port
+		sidecarPort = "80"
+		if u.Scheme == "https" {
+			sidecarPort = "443"
+		}
+	}
+	want, werr := net.LookupPort("tcp", sidecarPort)
+	got, gerr := net.LookupPort("tcp", listenPort)
+	if werr != nil || gerr != nil || want != got {
+		return nil
+	}
+	return fmt.Errorf("fleet-ui: refusing to bind %s — this box lists hailo-8l and its sidecar answers on port %d (hailo_endpoint %s); pass --listen with another port", listen, want, endpoint)
+}
+
 func runFleetUI(args []string) error {
 	fs := flag.NewFlagSet("fleet-ui", flag.ExitOnError)
 	fs.String("config", "", "config file path")
@@ -69,6 +111,9 @@ func runFleetUI(args []string) error {
 	}
 	cfg, _ := loadCfgWithSource(fs)
 	if err := refuseListen(*listen, *trusted); err != nil {
+		return err
+	}
+	if err := refuseHailoPort(cfg, *listen); err != nil {
 		return err
 	}
 	if *interval < time.Second {
