@@ -1267,8 +1267,9 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	// and re-packing 19 KB of JSON into the same JSON costs another ~6,000
 	// tokens — the 0.115.10 acceptance run's 27B row spent its last 200 s of
 	// wall there. Validate the loop's own text first; only prose re-packs.
-	if direct, ok := directStructured(res.Output, outSchema); ok {
+	if direct, coerced, ok := directStructuredNoted(res.Output, outSchema); ok {
 		wire.Structured = direct
+		wire.RepackNote = coerced // no attempt to carry it: the answer was the object, re-typed
 		return finish(wire)
 	}
 	// D-91 (0.115.23): a final answer cut at the completion budget is a
@@ -1434,7 +1435,7 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		}
 	}
 	wire.Structured = structured
-	wire.RepackNote = joinAdmissionNotes(wire.RepackNote, streamNote)
+	wire.RepackNote = joinAdmissionNotes(wire.RepackNote, trace.Coerced, streamNote)
 	return finish(wire)
 }
 
@@ -1916,8 +1917,11 @@ func (p *Pipeline) repackStructuredWith(ctx context.Context, seat string, rawSch
 		// falls back to the grammar path — and because a trim costs nothing.
 		content := []byte(outerObject(gres.Content))
 		if verr := validator.Validate(content, schema); verr != nil {
-			if fixed, ok := coerceToSchema(content, schema); ok {
-				note(attempts, lane, sent, clampedFrom, gres, time.Since(attemptStart), "")
+			if fixed, changed, ok := coerceToSchemaNoted(content, schema); ok {
+				// Delivered, but not as the seat wrote it: the record says what was re-typed.
+				why := coercedNote(changed)
+				note(attempts, lane, sent, clampedFrom, gres, time.Since(attemptStart), why)
+				opts.Trace.setCoerced(why)
 				return json.RawMessage(fixed), tokensOut, false, attempts, nil
 			}
 			note(attempts, lane, sent, clampedFrom, gres, time.Since(attemptStart), repackWhy(verr))
@@ -1967,10 +1971,11 @@ func (p *Pipeline) repackStructuredWith(ctx context.Context, seat string, rawSch
 			chatOpts = append(chatOpts, llamaclient.WithoutClientTimeout(), llamaclient.WithProgress(progress))
 		}
 		chatStart := time.Now()
-		structured, cres, cerr := p.repackViaChat(ctx, chatClient, seat, schema, output, chatSent, chatClampNote, chatOpts...)
+		structured, cres, chatCoerced, cerr := p.repackViaChat(ctx, chatClient, seat, schema, output, chatSent, chatClampNote, chatOpts...)
 		tokensOut += cres.TokensOut
 		if cerr == nil {
-			note(attempts, "chat", chatSent, chatClamped, cres, time.Since(chatStart), "")
+			note(attempts, "chat", chatSent, chatClamped, cres, time.Since(chatStart), chatCoerced)
+			opts.Trace.setCoerced(chatCoerced)
 			return structured, tokensOut, false, attempts, nil
 		}
 		note(attempts, "chat", chatSent, chatClamped, cres, time.Since(chatStart), repackWhy(cerr))
@@ -2034,36 +2039,44 @@ const directWrapperMax = 200
 // coercion the re-pack lanes apply. ok=false means "re-pack it"; nothing
 // about the text is judged beyond shape.
 func directStructured(output string, rawSchema json.RawMessage) (json.RawMessage, bool) {
+	direct, _, ok := directStructuredNoted(output, rawSchema)
+	return direct, ok
+}
+
+// directStructuredNoted is directStructured that also says which fields the
+// coercion re-typed ("" when the object validated as written), so the delivered
+// object is never silently different from what the seat wrote.
+func directStructuredNoted(output string, rawSchema json.RawMessage) (json.RawMessage, string, bool) {
 	var schema map[string]any
 	if json.Unmarshal(rawSchema, &schema) != nil {
-		return nil, false
+		return nil, "", false
 	}
 	// Only a schema that names fields can be matched by shape: against a
 	// property-less schema the validator checks "is this JSON" and nothing
 	// more, and a stray {} in prose would pass (review finding, 0.115.12).
 	if props, ok := schema["properties"].(map[string]any); !ok || len(props) == 0 {
-		return nil, false
+		return nil, "", false
 	}
 	trimmed := strings.TrimSpace(output)
 	i, j := strings.Index(trimmed, "{"), strings.LastIndex(trimmed, "}")
 	if i < 0 || j <= i {
-		return nil, false
+		return nil, "", false
 	}
 	// The object must BE the answer, not an aside inside it: either most of
 	// the text, or wrapped in no more than a short preamble/fence/tail — so a
 	// code sample or an "{example}" inside a long prose answer still goes
 	// through the re-pack.
 	if span, outside := j+1-i, len(trimmed)-(j+1-i); span*2 < len(trimmed) && outside > directWrapperMax {
-		return nil, false
+		return nil, "", false
 	}
 	content := []byte(strings.TrimSpace(trimmed[i : j+1]))
 	if validator.Validate(content, schema) == nil {
-		return json.RawMessage(content), true
+		return json.RawMessage(content), "", true
 	}
-	if fixed, ok := coerceToSchema(content, schema); ok {
-		return json.RawMessage(fixed), true
+	if fixed, changed, ok := coerceToSchemaNoted(content, schema); ok {
+		return json.RawMessage(fixed), coercedNote(changed), true
 	}
-	return nil, false
+	return nil, "", false
 }
 
 // repackTimeout bounds ONE re-pack HTTP call by the budget it may generate:
@@ -2249,7 +2262,7 @@ func repackBudget(output string) int {
 // returned error; repackViaChat makes no infrastructure/budget/abstention
 // judgment of its own. The GenResult is whatever completion came back, usable or
 // not (zero when none did), so the caller can count and record a failed attempt.
-func (p *Pipeline) repackViaChat(ctx context.Context, client *llamaclient.Client, seat string, schema map[string]any, output string, budget int, clampNote string, extra ...llamaclient.GenOption) (json.RawMessage, llamaclient.GenResult, error) {
+func (p *Pipeline) repackViaChat(ctx context.Context, client *llamaclient.Client, seat string, schema map[string]any, output string, budget int, clampNote string, extra ...llamaclient.GenOption) (json.RawMessage, llamaclient.GenResult, string, error) {
 	props, _ := schema["properties"].(map[string]any)
 	names := make([]string, 0, len(props))
 	for name := range props {
@@ -2264,20 +2277,20 @@ func (p *Pipeline) repackViaChat(ctx context.Context, client *llamaclient.Client
 	user := fmt.Sprintf("Extract these fields from the text as a JSON object: %s.\n\nTEXT:\n%s", repackFieldList(names, props), output)
 	gres, gerr := client.Generate(ctx, seat, system, user, "", budget, p.cfg.Temperature, 0, append([]llamaclient.GenOption{llamaclient.WithoutThinking()}, extra...)...)
 	if gerr != nil {
-		return nil, partialOf(gres, gerr), gerr
+		return nil, partialOf(gres, gerr), "", gerr
 	}
 	if gres.Truncated {
-		return nil, gres, truncatedRepackErr("chat re-pack", budget, len(output), judgeCut(output, gres), clampNote, "")
+		return nil, gres, "", truncatedRepackErr("chat re-pack", budget, len(output), judgeCut(output, gres), clampNote, "")
 	}
 	content := outerObject(gres.Content)
 	if verr := validator.Validate([]byte(content), schema); verr != nil {
-		fixed, ok := coerceToSchema([]byte(content), schema)
+		fixed, changed, ok := coerceToSchemaNoted([]byte(content), schema)
 		if !ok {
-			return nil, gres, verr
+			return nil, gres, "", verr
 		}
-		return json.RawMessage(fixed), gres, nil
+		return json.RawMessage(fixed), gres, coercedNote(changed), nil
 	}
-	return json.RawMessage(content), gres, nil
+	return json.RawMessage(content), gres, "", nil
 }
 
 // coerceToSchema repairs the failure shapes a grammar would have prevented and no
@@ -2298,20 +2311,28 @@ func (p *Pipeline) repackViaChat(ctx context.Context, client *llamaclient.Client
 // becomes the string "12.50", never "12.5", and a number nothing touched comes
 // back with every digit (a float64 round trip rewrote 12345678901234567890).
 func coerceToSchema(content []byte, schema map[string]any) ([]byte, bool) {
+	fixed, _, ok := coerceToSchemaNoted(content, schema)
+	return fixed, ok
+}
+
+// coerceToSchemaNoted is coerceToSchema that also names what it re-typed, one entry
+// per field in name order ("id", or "numbers (3 items)" for a list), so the object a
+// run delivers is never silently different from the one the seat wrote.
+func coerceToSchemaNoted(content []byte, schema map[string]any) ([]byte, []string, bool) {
 	dec := json.NewDecoder(bytes.NewReader(content))
 	dec.UseNumber()
 	var obj map[string]any
 	if dec.Decode(&obj) != nil {
-		return nil, false
+		return nil, nil, false
 	}
 	if _, err := dec.Token(); err != io.EOF {
-		return nil, false // trailing data: json.Unmarshal refused it, and so does this
+		return nil, nil, false // trailing data: json.Unmarshal refused it, and so does this
 	}
 	props, ok := schema["properties"].(map[string]any)
 	if !ok {
-		return nil, false
+		return nil, nil, false
 	}
-	changed := false
+	var changed []string
 	for name, raw := range props {
 		spec, ok := raw.(map[string]any)
 		if !ok {
@@ -2326,29 +2347,46 @@ func coerceToSchema(content []byte, schema map[string]any) ([]byte, bool) {
 			items, _ := spec["items"].(map[string]any)
 			itemWant, _ := items["type"].(string)
 			if arr, ok := got.([]any); ok {
+				n := 0
 				for i, el := range arr {
 					if v, ok := coerceScalar(el, itemWant); ok {
-						arr[i], changed = v, true
+						arr[i] = v
+						n++
 					}
+				}
+				if n > 0 {
+					unit := "items"
+					if n == 1 {
+						unit = "item"
+					}
+					changed = append(changed, fmt.Sprintf("%s (%d %s)", name, n, unit))
 				}
 			}
 			continue
 		}
 		if v, ok := coerceScalar(got, want); ok {
-			obj[name], changed = v, true
+			obj[name] = v
+			changed = append(changed, name)
 		}
 	}
-	if !changed {
-		return nil, false
+	if len(changed) == 0 {
+		return nil, nil, false
 	}
+	sort.Strings(changed)
 	fixed, merr := json.Marshal(obj)
 	if merr != nil {
-		return nil, false
+		return nil, nil, false
 	}
 	if validator.Validate(fixed, schema) != nil {
-		return nil, false
+		return nil, nil, false
 	}
-	return fixed, true
+	return fixed, changed, true
+}
+
+// coercedNote is what an attempt's record and the run's repack_note say when the
+// object was re-typed to fit the schema.
+func coercedNote(changed []string) string {
+	return "coerced to the schema's types: " + strings.Join(changed, ", ")
 }
 
 // coerceScalar re-types ONE decoded value to the scalar type the schema names. ok

@@ -267,6 +267,18 @@ func deadlineOf(ctx context.Context) time.Time {
 // repackTrace collects what each attempt of one re-pack call did.
 type repackTrace struct {
 	Attempts []core.AgentRepackAttempt
+	// Coerced says which fields the node re-typed to make the returned object fit the
+	// schema ("" when it was returned as the seat wrote it): the delivered object is
+	// then not byte for byte what the seat wrote, and nothing else says so.
+	Coerced string
+}
+
+// setCoerced records that the object the call returned was re-typed. A nil trace
+// records nothing.
+func (tr *repackTrace) setCoerced(note string) {
+	if tr != nil {
+		tr.Coerced = note
+	}
 }
 
 // repackClipBytes is how much of what an attempt wrote rides on the wire at each

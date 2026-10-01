@@ -45,8 +45,12 @@ func (p *Pipeline) RescueRepack(ctx context.Context, contract core.AgentContract
 		return delegate.Rescued{}, errors.New("the contract carries no output_schema")
 	}
 	schema := core.RequireAcceptanceFields(contract.OutputSchema, contract.Acceptance)
-	if direct, ok := directStructured(output, schema); ok {
-		return delegate.Rescued{Structured: direct, How: "the finished answer was already the object"}, nil
+	if direct, coerced, ok := directStructuredNoted(output, schema); ok {
+		how := "the finished answer was already the object"
+		if coerced != "" {
+			how += " (" + coerced + ")"
+		}
+		return delegate.Rescued{Structured: direct, How: how}, nil
 	}
 	// A seat that is not resident loads on the first request that reaches it, and a
 	// cold load is minutes on a vLLM seat (125–250 s), far more than the re-pack's
