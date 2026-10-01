@@ -551,8 +551,9 @@ func TestALayerNoNodeDeclaresDefersByNameEvenUnderALocalLease(t *testing.T) {
 // dispatch with a 409, a refusal no wait outlasts, and this box declares no layers. Nothing is left to wait for:
 // a text lease reserves a seat that could never have run the layer, so it changes nothing, and the subtask ends as
 // the placement-refused failure it is, naming the 409 and the layer, without having waited. It used to spend the
-// whole wait - the lease's seat was the one thing the wait could still place on, and it keeps that seat out - and
-// end as a capacity defer saying no node had room.
+// whole wait: the lease made the seat look like something to wait for, yet the wait keeps that seat out and the
+// 409 node is excluded from it, so nothing could ever be placed, and it ended as a capacity defer saying no node
+// had room.
 func TestANamedLayerItsOnlyNodeRefusedForGoodFailsAtOnceUnderAnyLease(t *testing.T) {
 	const wait = 5 // seconds: the TTL the buggy path spends in full, and far past what the fixed path needs
 	for _, route := range []string{"auto", "spread"} {
