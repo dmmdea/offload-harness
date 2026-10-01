@@ -6,6 +6,39 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.156.1] - 2026-09-30 - the ampere-16 seats leave the memory embedder room; run ids are unique on a coarse clock
+
+### Fixed — the ampere-16 vLLM seats leave the memory embedder room on the 16 GB card (ADR 0049 Amendment 4)
+
+Operator order 2026-09-30: the memory embedder has absolute priority, so the seats make room for it instead of excluding it.
+On the reference ampere-16 box (NVIDIA A2, 15,356 MiB) with the embedder (452 MiB) and the reranker (372 MiB) resident, the
+lane seat declared at util 0.90 with `max_num_seqs` 32 ran the engine at 14,788 MiB under four concurrent 8k-token requests
+(graph capture and workspaces sized for 32 sequences), so the embedder could not load and every memory write failed for 35
+minutes.
+
+- `setup/templates/profiles.json`, `ampere-16` only: the lane seat `qwen38-27b-gsq-vllm` declares `gpu_memory_utilization`
+  0.87 (was 0.90) and `max_num_seqs` 8 (was 32), window 32,768 unchanged: engine peak 13,984 MiB, card peak 14,833 MiB with
+  both support models resident, embedder answering in 25 ms, KV pool about 34k tokens. util 0.82 is refused (KV 0.64 GiB <
+  1.29 GiB for one 32,768-token request) and util 0.87 with 32 sequences is refused (28 Mamba cache blocks), so the sequence
+  count comes down with the util. The 35B fast-layer seat `qwen36-35b-a3b-gsq-vllm` declares util 0.85 (was 0.90): KV
+  0.91 GiB = 67,025 tokens (2.05x the window), engine peak 13,630 MiB. `blackwell-16` seeds the same lane seat id for its own
+  card and is untouched. An installed box keeps its rendered unit until `install vllm-seat` is re-run; llama-swap's
+  `concurrencyLimit` for the lane seat follows `max_num_seqs` (32 to 8; the default local run cap is 4).
+- `ampere16_coresidency_test.go`: a ceiling guard fails when either seat's util or `max_num_seqs` rises above its measured
+  point (or a seat of the tier is not registered); the measured notes must carry the 2026-09-30 re-measure; the bound-lane
+  pin is 0.87 / 8.
+- The tier pages state the lane seat's `max_num_seqs` beside its util; `docs/tiers/ampere-16.md` and the three other vLLM
+  tier pages are regenerated. ADR 0049 gains Amendment 4.
+
+### Fixed — the run registry no longer loses a run begun in the same clock tick as another (register C-82)
+
+`gpuactivity.Begin` named a run `<pid>-<unix nanos>`. On a coarse clock (Windows reads the clock in 0.5-1 ms steps) two runs
+begun in one tick of one process got the same id, the second record overwrote the first, and the registry undercounted the
+runs on a seat, which feeds the local run cap (`modelaffinity.AwaitSeatSlot`) and the seat-load figure. The id is now
+`<pid>-<unix nanos>-<seq>` with a process-wide atomic sequence, zero-padded to six digits so same-tick ids sort in begin
+order (the seat's line breaks a same-millisecond tie by comparing ids as strings). `internal/delegate`'s
+`TestSpreadDealCountsWhatIsAlreadyRegisteredOnTheLocalSeat` failed 38 of 150 runs alone on Windows before, 0 of 180 after.
+
 ## [0.156.0] - 2026-09-30 - the whole call has a deadline below the client's abort (ADR 0065)
 
 ### Changed — `agent_delegate` and `offload_research` answer before the client's abort instead of losing finished work behind one slow subtask (ADR 0065)

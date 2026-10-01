@@ -96,6 +96,13 @@ matrix that called the pair a valid combination would have llama-swap load the s
 an out-of-memory at the engine's first allocation. The seats stay resident-class: an ordinary chat request
 never evicts the agent lane, and asking for the 35B by name swaps it in.
 
+Beside whichever seat is loaded the card keeps the memory stack's support models, the embedder (452 MiB) and the
+reranker (372 MiB), and the memory embedder has absolute priority (operator order, 2026-09-30): the seats make room for
+it. So each seat's `gpu_memory_utilization` and `max_num_seqs` are capped at the point measured to leave both room on
+the 15,356 MiB card — the 27B at util 0.87 with 8 sequences, the 35B at util 0.85 ([ADR 0049](../architecture/decisions/0049-ampere-16-vllm-seat-is-the-3bit-gsq-27b.md)
+Amendment 4) — and `ampere16_coresidency_test.go` fails when either rises above it. The earlier declaration (util 0.90, 32
+sequences) ran the engine at 14,788 MiB and kept the embedder from loading for 35 minutes.
+
 ### What an operator still installs by hand on a fresh `ampere-16` box
 
 The installer detects prerequisites and never builds them, and it does not render the 35B seat's unit:
@@ -122,7 +129,7 @@ The installer detects prerequisites and never builds them, and it does not rende
    the run script, point `--model` at the 35B snapshot, set `--served-model-name
    qwen36-35b-a3b-gsq-vllm a2-pool-35b qwen36-35b-gsq`, `--max-num-seqs 8` and `--tool-call-parser
    qwen3_coder`, and add `--language-model-only`; keep the window and utilisation the table records
-   (32,768 at `util 0.90`).
+   (32,768 at `util 0.85`, the point measured to leave the embedder and the reranker room).
 5. **Then** re-run `install seed` and `install render` with the same flags: `install render` writes both
    llama-swap entries and `install seed` writes the layers, the roster and both bindings. `local-offload doctor` prints a storeless-OK line per seat, `offload_status` lists both
    layers, and a contract with `layer: "fast"` lands on the 35B.

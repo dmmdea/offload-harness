@@ -484,7 +484,10 @@ drain clears the stamp.
 
 **Runs.** Every agent loop launcher registers its run in `<state root>/gpu/activity/` BEFORE admission
 (seat, kind, origin, goal excerpt, phase, step, tokens; updated per step and every 15 s; removed at the end;
-stale = dead/recycled pid or heartbeat > 120 s, swept by readers). The drain is done when the engine's gauge
+stale = dead/recycled pid or heartbeat > 120 s, swept by readers). A run is one record,
+`run-<pid>-<unix nanos>-<seq>.json`: the process-wide sequence keeps two runs begun in the same clock tick apart
+(a coarse clock, Windows' 0.5-1 ms steps, once gave them the same id, and the second record overwrote the first, so
+the seat's run count read low; register C-82). The drain is done when the engine's gauge
 AND the registry are empty on two consecutive reads; a seat listed `starting`/`stopping` counts as busy and
 its upstream is never probed. Registering before the warm-up is also what puts the load path behind the
 fence: the pre-0.117.0 warm-up loaded the seat straight past an exclusive hold.

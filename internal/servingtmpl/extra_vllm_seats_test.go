@@ -21,7 +21,7 @@ func extraVLLMSpec() *vllmseat.Spec {
 		Device:               "0",
 		ModelRepo:            "hub/models--ISTA-DASLab--Qwen3.6-35B-A3B-2Bit-GSQ",
 		MaxModelLen:          32768,
-		GPUMemoryUtilization: 0.9,
+		GPUMemoryUtilization: 0.85,
 		MaxNumSeqs:           8,
 		MaxBatchedTokens:     4096,
 		KVCacheDtype:         "fp8_e5m2",
@@ -74,7 +74,7 @@ func varOf(t *testing.T, doc renderedSeatDoc, model string) string {
 }
 
 // Two vLLM seats on one 16 GB card cannot both be loaded: 13.9 + 11.7 GiB against a
-// 15.3 GiB card, and each is sized with util 0.90 of it. If both joined the residents
+// 15.3 GiB card, and each is sized with util 0.85-0.87 of it. If both joined the residents
 // set as co-resident members (`& a & b`) the matrix would call the pair a valid
 // combination and llama-swap would load the second beside the first — an OOM at the
 // engine's first allocation. The seats must be ALTERNATIVES of each other inside the

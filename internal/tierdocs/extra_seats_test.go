@@ -48,6 +48,9 @@ func TestExtraSeatsLayersAndStorelessReasonsAreRendered(t *testing.T) {
 		"| aliases | `fast-pool` / `fast` |",
 		"| unit | `vllm-fast-seat` |",
 		"| max_num_seqs | 8 |",
+		// the lane seat's own table states its concurrency as well: max_num_seqs sizes the engine's graph
+		// capture and workspaces, so it is a co-residency lever beside gpu_memory_utilization (2026-09-30)
+		"| max_num_seqs | 32 |",
 		"| tool_call_parser / reasoning_parser | `qwen3_coder` / `qwen3` |",
 		"**Cache server:** none.",
 		"> fast measured reason",
