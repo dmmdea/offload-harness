@@ -3163,13 +3163,13 @@ func (s *Server) reviewOnFleet(ctx context.Context, contract core.AgentContract,
 // always ran local, so a remote seat could not be named from this box's door at
 // all). The extras say where it ran.
 //
-// Like every other delegator door it hands the engine the rescue of a finished
-// answer whose structured re-pack failed (register C-66, PR-4), so a node's budget
-// defer for a loop that ended past its wall is re-packed here instead of counted as
-// lost work (register C-80). The one exception is a call under a fence: the review
-// lane's fleet path exists because the LOCAL seat is held by someone else's lease,
-// and the rescue is a completion on that seat. A deferred result is handed back
-// beside its reason (ok=false), so a caller can keep the answer it carries.
+// It hands the engine NO rescue of a finished answer whose structured re-pack failed
+// (register C-66, PR-4), on purpose: docs/systems/coding-agent.md records the three
+// doors that do not wire it and why (agent_run has no schema to structure, the review
+// lane's fenced fallthrough must not queue behind the lease that fences it, and
+// offload_ask keeps its own handling of a finished answer, so that its prose still
+// reaches the caller). A deferred result is therefore handed back beside its reason
+// (ok=false), so that caller can keep the answer it carries (withFinishedAnswer).
 func (s *Server) contractOnFleet(ctx context.Context, contract core.AgentContract, route, fence string) (core.AgentWireResult, map[string]any, string, bool) {
 	dispatch := s.reviewFleet // test seam
 	if dispatch == nil {
@@ -3181,11 +3181,8 @@ func (s *Server) contractOnFleet(ctx context.Context, contract core.AgentContrac
 	}
 	// remotes nil: RunWith reads the configured delegate_remotes, which is the
 	// fleet this box is a delegator for. A review names no node of its own.
-	opts := &delegate.RunOptions{Quarantine: s.quarantine, Tenant: s.tenant}
-	if fence == "" {
-		opts.Rescue = s.rescueFunc()
-	}
-	results, _, err := dispatch(ctx, s.p.Cfg(), local, []core.AgentContract{contract}, route, nil, opts)
+	results, _, err := dispatch(ctx, s.p.Cfg(), local, []core.AgentContract{contract}, route, nil,
+		&delegate.RunOptions{Quarantine: s.quarantine, Tenant: s.tenant})
 	switch {
 	case err != nil:
 		return core.AgentWireResult{}, nil, "the fleet could not be asked: " + err.Error(), false

@@ -109,44 +109,6 @@ func TestReviewDeferredSchemaMissDoesNotPublishTheUnfilteredProse(t *testing.T) 
 	}
 }
 
-// contractOnFleet hands the delegator engine the rescue of a finished answer whose
-// re-pack failed (register C-66), as the other delegator doors do, except under a
-// fence: the review lane's fleet path exists because the LOCAL seat is held by someone
-// else's lease, and the rescue is a completion on that seat.
-func TestRoutedDoorsWireTheDelegatorRescueExceptUnderAFence(t *testing.T) {
-	var gotOpts *delegate.RunOptions
-	capture := func(_ context.Context, _ config.Config, _ delegate.LocalRunner, _ []core.AgentContract, _ string, _ []string, opts *delegate.RunOptions) ([]delegate.PlacedResult, delegate.Summary, error) {
-		gotOpts = opts
-		return []delegate.PlacedResult{{Node: "node-b", Seat: "seat-b", Result: core.AgentWireResult{SchemaVersion: core.AgentWireSchemaVersion, Output: "x", StopReason: "done"}}}, delegate.Summary{Succeeded: 1}, nil
-	}
-
-	dir, p := askFixture(t)
-	s := routeServer(t, func(context.Context, core.AgentContract, delegate.LocalOptions) (core.AgentWireResult, error) {
-		return core.AgentWireResult{}, nil
-	})
-	s.reviewFleet = capture
-	mustAsk(t, s, `{"question":"what is the queue cap","paths":[`+jsonString(p)+`],"read_root":`+jsonString(dir)+`,"route":"remote"}`)
-	if gotOpts == nil || gotOpts.Rescue == nil {
-		t.Fatalf("a routed offload_ask must hand the engine the rescue of a finished answer: opts = %+v", gotOpts)
-	}
-
-	gotOpts = nil
-	fs, _ := fenceServer(t, func(context.Context, core.AgentContract, delegate.LocalOptions) (core.AgentWireResult, error) {
-		t.Fatal("the local seat is fenced")
-		return core.AgentWireResult{}, nil
-	})
-	fs.reviewFleet = capture
-	if _, err := fs.handleReviewDiff(context.Background(), callReq(reviewArgs(t, map[string]any{"diff": reviewDiff, "task": "iterate over every element exactly once"}))); err != nil {
-		t.Fatalf("handleReviewDiff: %v", err)
-	}
-	if gotOpts == nil {
-		t.Fatal("the fenced review was not offered to the fleet")
-	}
-	if gotOpts.Rescue != nil {
-		t.Fatal("a fenced review must not get a rescue: it would run a completion on the seat the fence protects")
-	}
-}
-
 func mustAsk(t *testing.T, s *Server, args string) any {
 	t.Helper()
 	res, err := s.handleAsk(context.Background(), callReq(args))
