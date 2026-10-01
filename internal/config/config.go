@@ -431,7 +431,8 @@ type Config struct {
 	// lease now makes the local seat a non-target: an eligible remote takes the
 	// work; with none, the placement waits up to this many seconds (re-reading the
 	// lease once a second) and then defers, class infrastructure, naming the holder
-	// and its expiry. 0 (the default) = defer at once. route=local is the caller's
+	// and its expiry. The wait is the larger of this and agent_placement_wait_sec
+	// (default 120 s), so 0 (the default) leaves it to the placement wait. route=local is the caller's
 	// explicit choice and is not gated; a media lease is arbitrated by the
 	// model-affinity gate as before (ADR 0026) and is not a placement gate either.
 	AgentLeaseWaitSec int `json:"agent_lease_wait_sec,omitempty"`
@@ -1401,7 +1402,9 @@ type Config struct {
 	// /fleet/health lists the id, the image travelling inside the job (cap
 	// 8 MiB). Explicit opt-in keeps tools/list byte-identical for a box that
 	// declares nothing; a local device wins over a remote one for the same
-	// capability name unless AcceleratorToolOwners names the remote one.
+	// capability name unless AcceleratorToolOwners names the remote one. A local-only
+	// device (hailo-8l, register E-08) is never served over the fleet: listing it here
+	// is a doctor finding and a startup warning, and its forwarded calls could only defer.
 	FleetAccelerators []string `json:"fleet_accelerators,omitempty"`
 	// AcceleratorToolOwners names the device that serves a shared accelerator
 	// tool, by tool name: {"offload_object_detect": "rknpu"} (ADR 0068). It
@@ -2175,6 +2178,9 @@ func load(path string) (Config, error) {
 		fmt.Fprintf(os.Stderr, "warning: %s\n", w)
 	}
 	for _, w := range CallDeadlineFindings(c) {
+		fmt.Fprintf(os.Stderr, "warning: %s\n", w)
+	}
+	for _, w := range LocalOnlyAcceleratorFindings(c) {
 		fmt.Fprintf(os.Stderr, "warning: %s\n", w)
 	}
 	return c, nil

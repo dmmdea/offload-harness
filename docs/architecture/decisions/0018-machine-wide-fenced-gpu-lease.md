@@ -191,3 +191,10 @@ Two further facts shaped the design:
   longer issues a fencing token per probe, which had it taking a machine-wide lock and doing
   four file operations a second for claims that could not succeed. `gpu reserve --detach` is the
   one continuous poller, exists only on explicit operator command, and exits by itself.
+- **A reclaim removes only a claim that is still stale (register C-59, 2026-10-01).** The reclaim decision comes from
+  one read, and removing the claim by path let a slower reclaimer delete the claim a faster one had just created — a
+  lease granted and gone before its holder did anything with it. The removal now runs under the epoch lock (the lock
+  `Restamp` already takes) and reads the record again first (`removeStaleClaim`); a claim that moved on — a rival's
+  new claim, one a rival is still writing, the old holder back from the dead — is left alone. Found by reading and
+  reproduced deterministically; whether it caused any live loss is unproven. Pinned by
+  `TestASlowReclaimerNeverDeletesTheClaimTheFirstReclaimerMade` and `TestAClaimBeingWrittenIsNotRemovedAsDebris`.

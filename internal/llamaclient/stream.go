@@ -97,6 +97,15 @@ func decodeStreamResult(resp *http.Response, start time.Time, progress func(int)
 	var promptTokens, completionTokens int
 	var tokPerSec float64
 	tokens, done := 0, false
+	// partial is what the stream had delivered, for a BodyError: the usage frame's
+	// exact count when it had come, else the deltas heard.
+	partial := func() GenResult {
+		n := completionTokens
+		if n == 0 {
+			n = tokens
+		}
+		return GenResult{Content: content.String(), TokensIn: promptTokens, TokensOut: n}
+	}
 	for sc.Scan() {
 		line := sc.Text()
 		if !strings.HasPrefix(line, "data:") {
@@ -109,10 +118,10 @@ func decodeStreamResult(resp *http.Response, start time.Time, progress func(int)
 		}
 		var c streamChunk
 		if err := json.Unmarshal([]byte(payload), &c); err != nil {
-			return GenResult{}, &BodyError{Err: fmt.Errorf("stream frame: %w", err)}
+			return GenResult{}, &BodyError{Err: fmt.Errorf("stream frame: %w", err), Partial: partial()}
 		}
 		if c.Error != nil {
-			return GenResult{}, &BodyError{Err: fmt.Errorf("engine error in stream: %s", c.Error.Message)}
+			return GenResult{}, &BodyError{Err: fmt.Errorf("engine error in stream: %s", c.Error.Message), Partial: partial()}
 		}
 		if c.Usage != nil {
 			promptTokens, completionTokens = c.Usage.PromptTokens, c.Usage.CompletionTokens
@@ -142,17 +151,18 @@ func decodeStreamResult(resp *http.Response, start time.Time, progress func(int)
 		}
 	}
 	if err := sc.Err(); err != nil {
-		return GenResult{}, &BodyError{Err: fmt.Errorf("stream read: %w", err)}
+		return GenResult{}, &BodyError{Err: fmt.Errorf("stream read: %w", err), Partial: partial()}
 	}
 	if !done && finish == "" {
-		return GenResult{}, &BodyError{Err: errors.New("stream ended without a finish_reason or [DONE]")}
+		return GenResult{}, &BodyError{Err: errors.New("stream ended without a finish_reason or [DONE]"), Partial: partial()}
 	}
 	out := GenResult{
-		Content:   content.String(),
-		TokensIn:  promptTokens,
-		TokensOut: completionTokens,
-		Truncated: finish == "length",
-		TokPerSec: tokPerSec,
+		Content:      content.String(),
+		TokensIn:     promptTokens,
+		TokensOut:    completionTokens,
+		Truncated:    finish == "length",
+		FinishReason: finish,
+		TokPerSec:    tokPerSec,
 	}
 	if out.TokensOut == 0 {
 		// the engine sent no usage frame: the delta count is the honest estimate

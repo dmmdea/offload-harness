@@ -1,6 +1,6 @@
 # Morning Summary — 2026-06-16 (overnight autonomous build)
 
-> Running log of the overnight local-offload media build. Honest status: what shipped + was **live-verified**, what's flagged, what needs Daniel.
+> Running log of the overnight local-offload media build. Honest status: what shipped + was **live-verified**, what's flagged, what needs the operator.
 
 ## ✅ Phase A.2 — STT / `offload_transcribe` — BUILT + LIVE-VERIFIED (merge pending review)
 
@@ -23,7 +23,7 @@
   - es_MX voice / **Colombian** vocabulary (parceros, camioneta, huecos, gasolina — all correct): **turbo 6.5%** accent-folded (one real miss: clipped final word "arranquemos"→garbled); **large-v3 `--hq` 0.0%** accent-folded (fixed it). With accents, every remaining error is a dropped diacritic (qué→que) — cosmetic, not content. **This is a real demonstration of the turbo→`--hq` escalation value.**
 - **Hardware-harmony measured:** cold reload (after force-unload) ≈ **6.0 s**, warm ≈ **0.6 s**. Zero-always-warm costs ~5.4 s/cold-call; set `stt_unload_after:false` to keep warm for a batch.
 
-**Process honesty (corrections Daniel caught mid-build):**
+**Process honesty (corrections the operator caught mid-build):**
 - I started the whisper build before research returned — corrected: research gates finalization, not the clock.
 - I skipped writing `pipeline_transcribe_test.go` in the first pass and leaned on a green `go test` "ok" that only ran the *existing* suite. Fixed: tests written + verified to actually run (`-v`), defer-paths covered. (Happy path was always covered by the live smoke.)
 - I reported "WER ≈ 0 / it corrected me" by eyeball; then my first WER script was encoding-broken (cp1252 mojibake). Fixed: UTF-8 decode + self-test; numbers above are trustworthy.
@@ -35,16 +35,16 @@ Built ik_llama.cpp in its own dir + benchmarked vs the live mainline engine on s
 
 - **ik is faster on PP** (26B-A4B: +27% f16, **+140% with q8_0 KV**) and the feared #1765 token-gen regression **did NOT reproduce** on our current build (likely fixed by ik's recent CUDA-FA work). The raw benchmark alone would have said "adopt."
 - **But ik FAILS the sacred GBNF grammar gate** on the 26B CPU-MoE path — HTTP 500 `invalid UTF-8` on trivial enum grammars (classify/triage) + repetition loops, where **mainline produces valid JSON**. Grammar is non-negotiable → **REJECT**. (ik's grammar is clean on the fully-GPU E4B, so the bug is its CPU-resident-expert path = the #1693 class.)
-- **Free win surfaced (no ik):** mainline `--n-cpu-moe 24` lifts the live 26B escalation TG ~**+11%** (15.4→17.2 t/s), grammar-safe. **Proposed for Daniel** — it's a live-config edit, so verify VRAM fit + grammar gate first; your call.
+- **Free win surfaced (no ik):** mainline `--n-cpu-moe 24` lifts the live 26B escalation TG ~**+11%** (15.4→17.2 t/s), grammar-safe. **Proposed for the operator** — it's a live-config edit, so verify VRAM fit + grammar gate first; your call.
 - Verify-then-assert paid off twice: the benchmark said adopt, the gate said no; and #1765 said reject-for-TG, wrong on our build.
 
-## ⚠️ Flagged for Daniel
+## ⚠️ Flagged for the operator
 - **ES tests are CLEAN synthetic TTS, not real noisy field audio.** Capability is proven; noisy chest-cam ES robustness + VAD-threshold tuning need ONE short real Colombian clip (I did NOT touch the Danmar footage per guardrail). Point me at one and I'll benchmark turbo-vs-`--hq` on it.
 - **No es_CO (Colombian) TTS voice exists in Piper** — used es_MX (Mexican, the closest LatAm). For **Phase 2 (TTS generation)** the channel's generated voice should be sourced Colombian/LatAm (cultural fit); for STT this phase, whisper is accent-robust so it's not blocking.
 - whisper drops some written accents (qué→que). Cosmetic; a Spanish accent-restoration post-pass (or just accepting it) is a future nicety.
 - Installed in WSL for testing (no spend): Piper TTS in `~/piper-venv` + es_ES/es_MX voices in `~/piper-voices` (for generating test audio). Not part of the harness.
 
-## ✅ /printing-press evaluation (Daniel-requested) — DONE
+## ✅ /printing-press evaluation (operator-requested) — DONE
 Write-up: `docs/PRINTING-PRESS-EVAL-2026-06-16.md`. **Verdict: printing-press can't *build* this harness** (it generates API-client CLIs from a spec; the harness is a bespoke local-inference orchestrator with no API spec — generating would discard its value). **But its quality rubric surfaced one genuinely good, on-philosophy improvement:** add **`--select`/`--compact` field-filtering to the verbose outputs** (`transcribe` segments, `video-describe`, `extract`) — it's literally the fastcontext citation-pattern the harness already espouses, letting the agent pull only needed fields. Plus two minor polish items (MCP `readOnlyHint`, richer `--help` examples). All are small future PRs, not a regeneration. Did NOT run printing-press (wrong tool / no API target).
 
 ## ⏳ Next (not done tonight — teed up)
@@ -52,9 +52,9 @@ Write-up: `docs/PRINTING-PRESS-EVAL-2026-06-16.md`. **Verdict: printing-press ca
 - **Phase 2 generation scaffolding** (ComfyUI Wan 2.2/Hunyuan video gen — already on disk in `C:\ComfyUI` — + the GPU single-slot file-lock scheduler) is the clear next major item. Deliberately NOT half-built at this hour (quality-first); design is in `CHAPTER-video`. Ready for a fresh research→plan→build cycle.
 - Optional small PR from the eval above: `--select`/`--compact` on verbose outputs.
 
-## ❗ Needs Daniel's decision / spend (NOT done autonomously)
+## ❗ Needs the operator's decision / spend (NOT done autonomously)
 - **Phase S proposal — mainline `--n-cpu-moe 24` for the live 26B escalation tier** (~+11% TG, free, grammar-safe). It's a live-`~/llama-swap/config.yaml` edit, so I did NOT apply it — your call. Verify VRAM fit + grammar gate first. (ik itself = rejected, no action.)
-- DaVinci Resolve Studio $295 — Phase 3, with Daniel.
-- Docker leftovers (open-webui keep/kill) — Daniel's call.
+- DaVinci Resolve Studio $295 — Phase 3, with the operator.
+- Docker leftovers (open-webui keep/kill) — the operator's call.
 - A real Colombian field clip for representative ES field-audio benchmarking.
 - `~/ik_llama.cpp` build (~few GB) kept for the watch-list re-test — remove if you need the disk.

@@ -398,7 +398,7 @@ donor+compute `virtual_vram_gb` weight-sharding (needed by the Wan GGUF lane and
 krea2/LTX-2.5 seats), so the harness stays on MultiGPU for those and pins rather than migrates
 blind. **Pinned commit: `ed1ffaef7cec1a66f35106c6a4c7a40927c2dc83`** — upstream v2.6.4's last
 code commit (`b51c99a525e9607e43545ee2a8b7694c74a4775a`) plus one already-deployed local fix
-(`fix(p2p): platform-aware cudart load + fail-closed P2P on Windows/WDDM`, Daniel, 2026-09-01 —
+(`fix(p2p): platform-aware cudart load + fail-closed P2P on Windows/WDDM`, operator, 2026-09-01 —
 the first-stage fix for upstream issue #220's `libcudart.so`-on-Windows crash; the second-stage
 `illegal memory access` in the int8 dispatch path itself, hit only when `compute_device` is a
 *non-default* CUDA device, remains open and unfixable upstream — this is why the pooled LTX-2.5

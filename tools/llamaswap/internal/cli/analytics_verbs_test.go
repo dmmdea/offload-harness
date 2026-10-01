@@ -1,4 +1,4 @@
-// Copyright 2026 Daniel Martinez and contributors. Licensed under Apache-2.0. See LICENSE.
+// Copyright 2026 dmmdea and contributors. Licensed under Apache-2.0. See LICENSE.
 // Acceptance tests for the wave D analytics verbs (residency, saturation), driven
 // against a seeded mirror. No live server, no fakeswap needed: these verbs read
 // the local SQLite mirror and the config YAML only.

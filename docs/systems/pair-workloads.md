@@ -128,6 +128,18 @@ The emitter (`internal/pairworkloads.Emitter`) is fire-and-forget: a goroutine p
 a 2 s timeout, one warning per process on the first failure, nothing ever changes a harness
 result. PAIR being absent (no `node-id.json`) or down is normal.
 
+**Frames of one job are not ordered on the wire.** Each frame is posted on its own goroutine, so
+a run that ends within milliseconds of its queued frame (a defer, a local run's error, a node's
+refusal of the dispatch) can land its terminal frame first. A subtask refused before placement
+sent no queued frame (source 1 above), so it has no order to lose. That is by design: the
+open-card register's markers are written on the caller's goroutine, in frame order, and PAIR's
+broker store and workload manager merge a job's frames by lifecycle rank (queued < running <
+terminal) and drop a non-terminal frame for a card they already hold terminal, so the card
+converges whatever the arrival order. A test of delegation frames therefore asserts the frames
+present and the card they describe, never the position the scheduler happened to give them
+(`TestFailedLocalPlacementReportsErrored` forces the terminal frame first, with an ingress that
+holds the queued one, and asserts that it landed so; register C-77).
+
 ## Configuration
 
 | Key | Default | Meaning |

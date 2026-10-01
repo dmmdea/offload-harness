@@ -1,6 +1,6 @@
 # Evaluation — can `/printing-press` improve the local-offload harness? (2026-06-16)
 
-> Daniel asked whether `/printing-press` could improve the harness + the new Phase A.2 components. I read the full skill and assessed fit against the actual codebase. Verdict below; the actionable part is the audit at the bottom.
+> The operator asked whether `/printing-press` could improve the harness + the new Phase A.2 components. I read the full skill and assessed fit against the actual codebase. Verdict below; the actionable part is the audit at the bottom.
 
 ## What printing-press actually is
 A generator that turns **an HTTP API (spec / HAR / URL)** into a ship-ready Go **API-client CLI**: research the API → absorb every competitor feature → emit a CLI with a **SQLite data layer + FTS search**, `sync`, agent-native output (`--json`/`--select`/`--compact`), an **MCP server** mirroring the Cobra tree, typed exit codes, and a scorecard/dogfood/verify shipcheck. Its whole premise is "there is a remote API; wrap it beautifully."

@@ -327,7 +327,7 @@ with an audit trail written **outside** the worktree (`~/.local-offload/agent-au
 can't tamper with its own log. Writes never escape the `--worktree` (default `--root`) and never
 touch `.git`.
 
-**Circuit breaker.** `--max-same-tool` (default 3) caps calls to any one tool per run — the breaker
+**Circuit breaker.** `--max-same-tool` (default 8) caps calls to any one tool per run — the breaker
 for a model that loops instead of progressing (e.g. repeated reworded `web_search`). `--max-steps`
 (default 12) is a hard step budget owned in code, not the prompt.
 

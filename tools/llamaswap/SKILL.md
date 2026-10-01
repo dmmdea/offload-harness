@@ -1,7 +1,7 @@
 ---
 name: pp-llamaswap
 description: "The llama-swap operations console — durable history, drain-aware control, and measurement commands with three specific guarantees: keep-set unloads are refused statically by id AND alias (never from server ttl), `--drain` fails closed when slot state is unreadable, and fit/ctx refuse to answer inside their uncertainty band instead of guessing. Trigger phrases: `what models are loaded`, `free up VRAM`, `unload a model safely`, `check llama-swap`, `is the memory stack ok`, `will this model fit`, `llama-swap history`, `use llamaswap`, `run llamaswap-pp-cli`."
-author: "Daniel Martinez"
+author: "dmmdea"
 license: "Apache-2.0"
 argument-hint: "<command> [args] | install cli|mcp"
 allowed-tools: "Read Bash"

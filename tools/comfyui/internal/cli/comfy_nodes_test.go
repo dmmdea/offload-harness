@@ -1,4 +1,4 @@
-// Copyright 2026 Daniel Martinez and contributors. Licensed under Apache-2.0. See LICENSE.
+// Copyright 2026 dmmdea and contributors. Licensed under Apache-2.0. See LICENSE.
 //
 // Tests for the node-schema and model-visibility surfaces. Everything under
 // test is pure: a decoded /object_info fixture in, a verdict or a rendered

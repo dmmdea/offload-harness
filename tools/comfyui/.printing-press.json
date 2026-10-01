@@ -7,11 +7,11 @@
   "cli_name": "comfyui-pp-cli",
   "creator": {
     "handle": "dmmdea",
-    "name": "Daniel Martinez"
+    "name": "dmmdea"
   },
   "owner": "dmmdea",
   "printer": "dmmdea",
-  "printer_name": "Daniel Martinez",
+  "printer_name": "dmmdea",
   "spec_path": "spec.yaml",
   "spec_format": "internal",
   "spec_checksum": "sha256:842720280c62bcfd2ca65883e32cb5c14adb395e3b00cc34e645cbb03bc294c7",

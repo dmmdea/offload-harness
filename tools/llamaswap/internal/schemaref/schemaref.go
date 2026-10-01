@@ -1,4 +1,4 @@
-// Copyright 2026 Daniel Martinez and contributors. Licensed under Apache-2.0. See LICENSE.
+// Copyright 2026 dmmdea and contributors. Licensed under Apache-2.0. See LICENSE.
 
 // Package schemaref reflects a Go result struct into a JSON Schema
 // (draft 2020-12) describing the JSON that struct marshals to.

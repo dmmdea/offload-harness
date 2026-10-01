@@ -1,4 +1,4 @@
-// Copyright 2026 Daniel Martinez and contributors. Licensed under Apache-2.0. See LICENSE.
+// Copyright 2026 dmmdea and contributors. Licensed under Apache-2.0. See LICENSE.
 // Novel command (wave D): reconstruct each seat's residency/eviction timeline
 // from mirrored request gaps and answer "what would a different idle-TTL cost or
 // save". This is the verb the operator's own open question needs — the uniform

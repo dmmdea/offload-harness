@@ -1,6 +1,6 @@
 # Phase S — ik_llama.cpp benchmark spike (RESOLVED — see RESOLUTION at end)
 
-> Non-mutating spike, 2026-06-16. Built ik_llama.cpp in its own dir, benchmarked vs the live mainline engine on a scratch port, **touched nothing in the live `~/llama-swap/config.yaml`**. This is a proposal for Daniel — no binary was swapped.
+> Non-mutating spike, 2026-06-16. Built ik_llama.cpp in its own dir, benchmarked vs the live mainline engine on a scratch port, **touched nothing in the live `~/llama-swap/config.yaml`**. This is a proposal for the operator — no binary was swapped.
 
 ## TL;DR — VERDICT: **REJECT ik_llama.cpp for the local-offload cascade.** One free mainline tuning win found.
 
@@ -50,7 +50,7 @@ Same harness GBNF tasks, same model, f16 KV:
 
 ## Decision
 1. **REJECT ik for the local-offload cascade.** The cascade runs one shared binary; the 26B escalation tier's grammar is broken on ik. A mixed setup (ik for E2B/E4B/12B + mainline for 26B) is technically possible but buys only ~10% on E4B (sub-threshold) while adding a second rolling-`main` engine to maintain and a live grammar landmine. Not worth it.
-2. **PROPOSE: adopt mainline `--n-cpu-moe 24` for the live 26B-A4B escalation entry** (`~/llama-swap/config.yaml`, the `gemma4-26b-a4b` cmd: replace `--cpu-moe` with `--n-cpu-moe 24`). Measured ~+11% TG (15.4→17.2), grammar-safe (it's mainline). **Verify first:** (a) it still fits 8GB VRAM with the cascade's headroom, (b) the grammar gate passes at `--n-cpu-moe 24`. This is a free, low-risk win — Daniel's call (it's a live-config edit).
+2. **PROPOSE: adopt mainline `--n-cpu-moe 24` for the live 26B-A4B escalation entry** (`~/llama-swap/config.yaml`, the `gemma4-26b-a4b` cmd: replace `--cpu-moe` with `--n-cpu-moe 24`). Measured ~+11% TG (15.4→17.2), grammar-safe (it's mainline). **Verify first:** (a) it still fits 8GB VRAM with the cascade's headroom, (b) the grammar gate passes at `--n-cpu-moe 24`. This is a free, low-risk win — the operator's call (it's a live-config edit).
 3. **Watch-list:** re-evaluate ik if/when the Gemma-4 CPU-MoE grammar/UTF-8 bug is fixed upstream — ik's PP is genuinely strong (583 t/s at q8_0 KV is 2.4× mainline). Worth filing/finding the upstream issue (`invalid UTF-8 byte 0xA0` on grammar-constrained Gemma-4 MoE with `--cpu-moe`).
 
 ## Why the spike was worth it (even ending in REJECT)

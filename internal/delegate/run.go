@@ -547,8 +547,10 @@ func jitteredWithin(d, left time.Duration) time.Duration {
 
 // pollEvery/pollGrace are vars (not consts) so tests compress the cadence;
 // production never mutates them. Grace rides ON TOP of the contract's
-// TimeoutSec: the node enforces TimeoutSec as its own wall, so the delegator
-// allows that plus transport slack before declaring the poll dead.
+// TimeoutSec: the node reports TimeoutSec as its wall (the run's expectation,
+// ADR 0055: what ends a run is a stall or the node's ceiling), so the delegator
+// allows that plus transport slack before declaring the poll dead, and holds the
+// poll open past it while the node reports progress.
 var (
 	pollEvery = 3 * time.Second
 	pollGrace = 60 * time.Second
@@ -877,11 +879,22 @@ func RunWith(ctx context.Context, cfg config.Config, local LocalRunner, subtasks
 			// "idle" without re-deriving it from the placement_reason.
 			log.Printf("delegate: auto local slot: busy=%v inflight=%d loading=%v (%s)", busy, localBusy.inflight, localBusy.loading, localBusy.note)
 		}
+		// The fleet is read when the local seat is busy and, for an idle one, only when some
+		// contract names a layer this box does not declare (register A-108): that contract is dealt
+		// to the node that declares it, and nothing else about an idle box needs the roster.
+		localView := r.localView()
+		readFleet := busy
+		for _, c := range subtasks {
+			if !r.localServesLayer(localView, c) {
+				readFleet = true
+				break
+			}
+		}
 		var failed map[string]string
-		if busy {
+		if readFleet {
 			r.autoViews, r.autoBases, r.autoProbeErrs, failed = r.fetchViewsDetailed(ctx)
 		}
-		r.autoDeal = r.dealAutoRemote(subtasks, r.localView(), r.autoViews, r.autoBases, busy, failed)
+		r.autoDeal = r.dealAutoRemote(subtasks, localView, r.autoViews, r.autoBases, busy, failed)
 	}
 	board := newResultBoard(len(subtasks))
 	progress := newProgressor(opts, len(subtasks))
@@ -1347,7 +1360,7 @@ func (r *runner) runOne(ctx context.Context, i int, contract core.AgentContract)
 	// budget the subtask no longer owns (fetchViews is sequential at
 	// fetchNodeViewTimeout per remote and Run derives no deadline of its own).
 	altCtx, cancel := context.WithTimeout(ctx, time.Duration(remaining)*time.Second)
-	alt, fence, ok := r.alternativeNode(altCtx, first, contract, pl)
+	alt, held, ok := r.alternativeNode(altCtx, first, contract, pl)
 	cancel()
 	if !ok {
 		// A fence is a REASON, not a silence: the caller has to be able to tell
@@ -1355,7 +1368,10 @@ func (r *runner) runOne(ctx context.Context, i int, contract core.AgentContract)
 		// measurement that has the cards" (D-94). The call's deadline is a second
 		// reason: it ends the fleet read that would have named a node, and an empty
 		// note after it reads as "there was nowhere else to go". The clock decides,
-		// not altCtx, which also ends on the budget the retry is bounded by.
+		// not altCtx, which also ends on the budget the retry is bounded by. A text reservation
+		// of the local seat (C-81) is told the same way: `held` carries either clause, and
+		// retryHeldWhy words what follows it. Like a fence it is skipped and not queued for: a
+		// retry that found no node has no placement to wait with (ADR 0063, decision 10).
 		//
 		// The order is the point. "No other node is eligible" and "no other node could take
 		// the contract" are claims about nodes, which a read the deadline ended cannot support
@@ -1367,11 +1383,11 @@ func (r *runner) runOne(ctx context.Context, i int, contract core.AgentContract)
 		switch {
 		case r.call.reached():
 			first.RetryNote = "retry skipped: " + callDeadlinePrefix + " before a retry node was chosen"
-			if fence != "" {
-				first.RetryNote += "; " + fence + ", and " + retryFenceWhy
+			if held != "" {
+				first.RetryNote += "; " + held + ", and " + retryHeldWhy(held)
 			}
-		case fence != "":
-			first.RetryNote = "retry skipped: " + fence + " and no other node is eligible; " + retryFenceWhy
+		case held != "":
+			first.RetryNote = "retry skipped: " + held + " and no other node is eligible; " + retryHeldWhy(held)
 		case SeatDownDefer(first.Result):
 			// The defer promises a second placement on another node: when there is no
 			// other node the caller must be told it was considered and why it did not
@@ -2056,7 +2072,13 @@ func (r *runner) placeAndRun(ctx context.Context, i int, contract core.AgentCont
 			// were: a 409 elsewhere does not make the lease less releasable):
 			// wait for something to free rather than fail on a snapshot of one
 			// minute. A roster that only 404s or is unreachable is exhausted.
-			reserved := r.route != "remote" && !pl.tried[""] && Reserved(LocalLease(r.cfg.GPULockPath, r.cfg.StateDir))
+			//
+			// So is a roster whose only seat left is a lease's when this box declares no layer the
+			// contract names (register A-108): the lease frees a seat that could never run it, and the
+			// wait keeps that seat out (localCan), so it could place nothing and would spend its whole
+			// TTL to end as a capacity defer saying no node had room. `why` already says it.
+			reserved := r.route != "remote" && !pl.tried[""] && r.localServesLayer(r.localView(), contract) &&
+				Reserved(LocalLease(r.cfg.GPULockPath, r.cfg.StateDir))
 			if pl.capacityRefusal || reserved {
 				return r.awaitCapacity(ctx, i, contract, start, budget, pl, pr, refusals, why)
 			}
@@ -2365,6 +2387,10 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 	// answered is every base whose probe returned a view at least once in this wait.
 	answered := map[string]bool{}
 	var lease gpulease.Info
+	// localCan: this box can run the contract at all. One that names a layer the box does not declare
+	// (register A-108) never takes the local seat in this wait, whatever the seat's load or lease: the
+	// wait is for a node that declares the layer.
+	localCan := r.localServesLayer(localView, contract)
 	// overflow: a deal kept this subtask off the local seat because it read busy, and
 	// handed it over because every node with room was already dealt to its headroom.
 	// The seat stays off limits until it stops reading busy (localStillBusy) - the
@@ -2406,6 +2432,12 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 			free, _ := r.localSlotAhead()
 			if r.route == "local" || len(r.remotes) == 0 {
 				free = true
+			}
+			// With no node to wait for (route=local, or no remotes) the seat's own decision still
+			// answers a layer it does not declare, by deferring it naming the layer; otherwise the
+			// seat is no candidate for it.
+			if !localCan && r.route != "local" && len(r.remotes) > 0 {
+				free = false
 			}
 			// A subtask a deal kept off the seat for reading busy stays off it while
 			// the seat still reads busy by the deal's own reading: the registry above
@@ -2615,7 +2647,7 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 			idle.Round(time.Second), r.cfg.AgentPlacementWaitSec, decided.Evicts, decided.Seat, decided.Evicts)
 		return r.runDecided(ctx, i, contract, start, budget, pl, seed, refusals, idle, *decided, true, note, waitStart)
 	}
-	if r.route != "remote" && Reserved(lease) {
+	if r.route != "remote" && localCan && Reserved(lease) {
 		// Nothing freed and the local seat is still reserved: the established
 		// deferral, naming the holder (class infrastructure — a human's timing
 		// decision), with the refusals appended.
@@ -3018,6 +3050,12 @@ func (r *runner) replacementNode(ctx context.Context, contract core.AgentContrac
 	}
 	if pl.tried[""] {
 		return placement{}, head + ", and the local seat had already been tried", false
+	}
+	// A contract that names a layer this box does not declare (register A-108) has no local seat to
+	// fall back on: it could only defer there by name. Returning here sends a refusal that was a place
+	// in line (pl.capacityRefusal) to the capacity wait, for the node that declares the layer.
+	if !r.localServesLayer(r.localView(), contract) {
+		return placement{}, head + fmt.Sprintf(", and this box declares no layer %s, so the local seat cannot take it", contract.Layer), false
 	}
 	// A text lease reserves the local seat for re-placement exactly as it does
 	// for first placement (0.113.18; before this a remote's 503 fell straight
@@ -3493,12 +3531,49 @@ func admissionCredit(pr PlacedResult) time.Duration {
 // when the call's deadline ended the read of the fleet.
 const retryFenceWhy = "a retry placed there would wait out agent_lease_wait_sec at the affinity cordon and defer as capacity anyway"
 
+// localReservedPrefix opens the clause alternativeNode returns for a local seat it left out of a
+// retry because a text lease RESERVES it (register C-81), as "the local seat is fenced (...)" does
+// for a fence. retryHeldWhy tells the two apart by this opening: the one coupling between the clause
+// and the closing reason of the note, and a string match on purpose, because alternativeNode returns
+// the clause as text and a typed return would reach past its helpers. The opening is edited here,
+// where reservedClause and retryHeldWhy both read it, and TestRetryHeldWhyTellsAReservationFromAFence
+// fails with this coupling named when a clause that reservedClause writes stops being told as one.
+const localReservedPrefix = "the local seat is reserved ("
+
+// reservedClause names a reservation for a retry in the sentence replacementNode ends a refused
+// re-placement with ("..., and the local seat is reserved (...)"), which replacementNode spells out
+// itself; TestAReservedSeatReadsTheSameInARefusedReplacementAndASkippedRetry keeps the two copies
+// identical. The first placement's own reasons ("local seat reserved (...); no eligible remote - ...")
+// word a reservation differently and are not this clause.
+func reservedClause(info gpulease.Info) string {
+	return localReservedPrefix + HolderLine(info) + ")"
+}
+
+// retryReservedWhy is why a retry is not placed on a reserved local seat. It is not the fence's
+// reason: the affinity gate admits the load of a plain reservation, so a dial would not wait at the
+// cordon, it would run, on the cards the holder reserved. It says that and nothing wider: the note
+// reaches callers, and "a reservation keeps every placement off them" is false for route=local (the
+// caller's explicit choice, never gated) and for the holder's own child (the inherited lease exempts
+// it), so the words stay about this retry.
+const retryReservedWhy = "a retry placed there would run on the cards the holder reserved"
+
+// retryHeldWhy closes the note of a retry that was not placed because a lease holds the local seat:
+// the reservation's reason for the clause reservedClause writes, and the fence's for any other.
+func retryHeldWhy(clause string) string {
+	if strings.HasPrefix(clause, localReservedPrefix) {
+		return retryReservedWhy
+	}
+	return retryFenceWhy
+}
+
 // alternativeNode picks the node a retry runs on: the best eligible remote
 // when the first attempt ran locally (probing the fleet now if this run has
-// not yet), the local seat when it ran remotely. ok=false when no different
-// node can take the contract; the string is then the clause naming the fence
-// ("the local seat is fenced (...)") when the local seat is fenced and was
-// left out for it, "" otherwise. runOne words the note around it.
+// not yet), the local seat when it ran remotely, unless a lease keeps the retry off the
+// seat, a fence (D-94) or a text reservation (C-81), when the best untried remote takes
+// it instead. ok=false when no different node can take the contract; the string is then
+// the clause naming the lease ("the local seat is fenced (...)" or "the local seat is
+// reserved (...)") when the local seat was left out for it, "" otherwise. runOne words
+// the note around it (retryHeldWhy).
 //
 // Note the asymmetry and its cost: recovering a wrong REMOTE answer puts the
 // work back on the local box the harness exists to keep free — so a placement
@@ -3518,6 +3593,17 @@ func (r *runner) alternativeNode(ctx context.Context, first PlacedResult, contra
 	localView := r.localView()
 	why := attemptOutcome(first)
 	if !first.ranLocal {
+		// A contract that names a layer this box does not declare (register A-108) has no local retry:
+		// the seat would only defer it by name. A different node that declares the layer is the retry,
+		// and with none there is no retry.
+		if !r.localServesLayer(localView, contract) {
+			if chosen, base, found := r.remoteAlternative(ctx, st, pl); found {
+				return placement{view: chosen, base: base,
+					reason: "retry on " + chosen.NodeID + " after " + nodeLabel(first) + " " + why +
+						" — the local seat declares no layer " + contract.Layer}, "", true
+			}
+			return placement{}, "", false
+		}
 		// D-94: the local seat is only a retry target if its lease would ADMIT
 		// the run. Read fresh — the deal's snapshot can be minutes old by the
 		// time a first attempt has failed somewhere else — and read the VERDICT
@@ -3533,6 +3619,26 @@ func (r *runner) alternativeNode(ctx context.Context, first PlacedResult, contra
 						" — the local seat is fenced: " + fence}, "", true
 			}
 			return placement{}, fmt.Sprintf("the local seat is fenced (%s — %s)", fence, HolderLine(lease)), false
+		}
+		// C-81: a plain text reservation does not FENCE (the affinity gate admits the load, which is
+		// why Fenced above leaves it alone), but it RESERVES the cards. A first placement on route auto
+		// or spread never takes the local seat under one (auto waits for the holder, spread deals
+		// without the seat) and neither does replacementNode's last resort, and the forced local
+		// placement below is never read against the lease again, since attempt() runs a forced
+		// placement as given. So without this check the retry of an attempt that ran on a fleet node,
+		// a verification retry or a seat-down re-issue alike, was dialled onto cards a measurement had
+		// reserved. The reading is replacementNode's: Reserved, which exempts the holder's own child.
+		// An untried remote is the retry's place; with none the retry is not placed, as for a fence,
+		// and the note names the holder (replacementNode's refusal for a reserved seat is the same
+		// sentence, and its caller then waits in the capacity wait, which a retry does not have).
+		if Reserved(lease) {
+			held := reservedClause(lease)
+			if chosen, base, found := r.remoteAlternative(ctx, st, pl); found {
+				return placement{view: chosen, base: base,
+					reason: "retry on " + chosen.NodeID + " after " + nodeLabel(first) + " " + why +
+						" — " + held}, "", true
+			}
+			return placement{}, held, false
 		}
 		// A seat-down defer is not held for a busy retry seat (runOne, ADR 0066 decision
 		// 3): the node's own queue is the line, and its 503 is re-placed at once. That is
@@ -3768,10 +3874,15 @@ func (r *runner) dealAutoRemote(contracts []core.AgentContract, localView NodeVi
 }
 
 // placeAutoRemote deals ONE subtask within dealAutoRemote's joint pass: an
-// idle local seat wins unconditionally (Place's own rule, unchanged); busy,
-// the best REMOTE that passes remoteEligible AND still has headroom over what
+// idle local seat wins the work it can run (Place's own rule); busy, the
+// best REMOTE that passes remoteEligible AND still has headroom over what
 // this deal has already committed to it. A node at 0 headroom gets NOTHING —
 // no floor, no "at least one" — and the next-best candidate is tried.
+//
+// A contract that names a layer this box does not declare is not work the
+// idle seat can run (register A-108): it is dealt exactly as a busy seat's
+// subtask is, to the best remote that declares the layer, and the idle-local
+// shortcut is for the rest.
 //
 //   - Some node had headroom: dealt, resolved, headroom decremented for the
 //     next subtask in this same deal.
@@ -3783,7 +3894,7 @@ func (r *runner) dealAutoRemote(contracts []core.AgentContract, localView NodeVi
 //     sentinel — attempt() re-derives the exact pre-W-06 sentence
 //     (r.noEligibleRemote) over this same snapshot; unrelated to headroom.
 func (r *runner) placeAutoRemote(seed string, st Subtask, localView NodeView, views []NodeView, bases []string, localBusy bool, dealt map[string]int, failed map[string]string) spreadSlot {
-	if !localBusy {
+	if !localBusy && r.localServesLayer(localView, st.Contract) {
 		return spreadSlot{placement: placement{view: localView, reason: "local idle"}}
 	}
 	var best NodeView
@@ -3981,6 +4092,12 @@ type spreadSlot struct {
 // 155–189 s under K=3 vs 91–105 s for its siblings). An idle seat keeps every
 // slot it had; `agent_spread_local_slot: "always"` restores the unconditional
 // slot.
+//
+// And it is contested by the CONTRACT's layer (register A-108): a subtask that
+// names a layer this box does not declare is never dealt the local slot - the
+// seat could only defer it by name - so it deals among the remotes that declare
+// the layer, and the guarantee above (subtask 0 stays local) is for the
+// contracts the box can run.
 func (r *runner) placeSpread(i int, st Subtask, localView NodeView, book *dealBook) spreadSlot {
 	return r.placeSpreadWith(i, st, localView, book, r.skipsBusyLocal())
 }
@@ -4061,7 +4178,13 @@ func (r *runner) placeSpreadWith(i int, st Subtask, localView NodeView, book *de
 	// lease is deliberately NOT consulted here: spread never read it before
 	// 0.113.14 and its render is arbitrated at the affinity gate (ADR 0026), so
 	// a media holder changes nothing about a spread's deal (review 2026-09-06).
-	localIn := !Reserved(r.spreadLease)
+	//
+	// A contract that names a layer this box does not declare leaves the rotation the same
+	// way (register A-108): the seat would only defer it by name while a node that declares
+	// the layer idles. It deals among the remotes alone, and what they cannot take yet waits
+	// in line for them below.
+	localServes := r.localServesLayer(localView, st.Contract)
+	localIn := !Reserved(r.spreadLease) && localServes
 	// A BUSY local seat (0.113.20) leaves the rotation exactly like a leased
 	// one, but only while a remote with room exists to take its slots: the
 	// remotes are filtered by hasRoom (a sheddable run needs an idle slot), and
@@ -4144,6 +4267,13 @@ func (r *runner) placeSpreadWith(i int, st Subtask, localView NodeView, book *de
 		// the overflow waits in line rather than stack on either.
 		return spreadSlot{placement: placement{view: localView, reason: fmt.Sprintf("route=spread: every remote with room is already dealt to its headroom or holds a backlog past the caller's patience (%s), and the local seat's run cap is spent (%d of %d free slot(s) dealt; %s)", strings.Join(held, "; "), book.counts[""], book.localRoom, book.localNote)}, capacityWait: true}
 	}
+	if !localServes && len(nodes) == 0 && len(held) > 0 {
+		// Every remote that could take this contract is dealt to its headroom or holds a backlog
+		// the caller will not wait out, and the local seat declares no such layer: the overflow
+		// waits in line for the first of them to free (INV-4), as it does when the seat's own run
+		// cap is spent - never for the seat, which cannot take it.
+		return spreadSlot{placement: placement{view: localView, reason: fmt.Sprintf("route=spread: every remote that can take layer %s is already dealt to its headroom or holds a backlog past the caller's patience (%s); this box declares no such layer", st.Contract.Layer, strings.Join(held, "; "))}, capacityWait: true}
+	}
 	if len(nodes) == 0 || (len(nodes) == 1 && nodes[0].Local) {
 		why, class := r.noEligibleRemote(st, r.spreadViews, r.spreadProbeErrs)
 		what := "no eligible remote"
@@ -4163,6 +4293,13 @@ func (r *runner) placeSpreadWith(i int, st Subtask, localView NodeView, book *de
 			}
 		}
 		dead := class == core.DeferClassInfrastructure
+		if !localServes {
+			// No node on the fleet can take it and this box declares no layer by that name: nothing
+			// runs here. The slot is dealt local only so it has a view - the seat's own decision
+			// defers the contract naming the layer (runner.decide), with the fleet's verdict beside
+			// it. It takes no run-cap slot and waits on no lease.
+			return spreadSlot{placement: placement{view: localView, reason: fmt.Sprintf("route=spread: %s, and this box declares no layer %s so the seat cannot take it (%s)", what, st.Contract.Layer, why)}, deadFleet: dead}
+		}
 		if Reserved(r.spreadLease) {
 			// The one placement the lease exists to forbid. Dealt local so the
 			// slot has a view, but flagged: attempt() waits or defers.
@@ -4230,6 +4367,26 @@ func fitPick(st Subtask, nodes []NodeView, bases []string, slot int, dealt map[s
 // is how a node id drifts between a placement and its telemetry.
 func (r *runner) localView() NodeView {
 	return NodeView{NodeID: r.localNodeID(), AgentSeat: r.cfg.AgentPlannerModel(""), Local: true}
+}
+
+// localServesLayer reports whether the local seat may be handed c. A contract that names no layer is
+// the local seat's like any other. One that names a layer is the local seat's only if this box DECLARES
+// that layer (register A-108): a box that does not has nothing to run it on, and the seat can only defer
+// it by name (runner.decide) while a node that declares the layer sits idle. Place applies the same rule
+// for its own callers; the two deals do not call Place, so each of them, and every other place that
+// chooses the local seat, asks here.
+//
+// A delegator states its layers in its own config, never in a health document, so localView carries no
+// rows and declaresLayer alone would read every composite box as layerless. cfg is the production answer
+// and the first test DecideOnLayer applies (an undeclared layer defers by name), so a box that fails it
+// can only ever have deferred the contract. A view that does carry rows (Place's own convention, and what
+// a white-box deal is handed) is honoured as well.
+func (r *runner) localServesLayer(local NodeView, c core.AgentContract) bool {
+	if c.Layer == "" || declaresLayer(local, c.Layer) {
+		return true
+	}
+	_, declared := r.cfg.Layer(c.Layer)
+	return declared
 }
 
 // attempt places (per route, or as forced by a retry) and executes one
@@ -4386,11 +4543,18 @@ func (r *runner) attempt(ctx context.Context, i int, contract core.AgentContract
 			// ineligible-remote, exactly as before W-06.
 			leaseInfo := LocalLease(r.cfg.GPULockPath, r.cfg.StateDir)
 			why, class := r.noEligibleRemote(st, r.autoViews, r.autoProbeErrs)
-			if Reserved(leaseInfo) {
+			// A contract that names a layer this box does not declare (register A-108) waits on no lease
+			// and is not "queued-local": the seat cannot take it. It lands here only so the seat's own
+			// decision defers it naming the layer, and the fleet's verdict rides beside that.
+			localServes := r.localServesLayer(localView, contract)
+			if localServes && Reserved(leaseInfo) {
 				return PlacedResult{waitCapacity: true, pendingReason: "local seat reserved (" + HolderLine(leaseInfo) + "); no eligible remote — " + why}
 			}
 			chosen = localView
 			reason = "local busy; no eligible remote — " + why + " (queued-local beats ineligible-remote)"
+			if !localServes {
+				reason = fmt.Sprintf("no eligible remote, and this box declares no layer %s so the seat cannot take it (%s)", contract.Layer, why)
+			}
 			deadFleet = class == core.DeferClassInfrastructure
 		default:
 			chosen, base, reason = d.view, d.base, d.reason
@@ -5876,6 +6040,14 @@ func (r *runner) noEligibleRemote(st Subtask, views []NodeView, probeErrs []stri
 		// lane is offered and sized, so the contract is the whole story.
 		if contractWhy != "" {
 			return contractWhy, core.DeferClassContract
+		}
+		// A contract that NAMES a layer (register A-100) that no answering remote declares: the name
+		// is the story. A remote that publishes no layer rows declares none, and layerVerdicts above
+		// speaks only for the ones that publish rows, so without this the line below would report a
+		// disagreement between the gate and the placement - a bug in this package - where the cause
+		// is the layer the caller chose.
+		if layer := st.Contract.Layer; layer != "" && !anyDeclaresLayer(views, layer) {
+			return fmt.Sprintf("layer %s requested and no answering remote declares it (%d answered with an agent lane; a node that publishes no layers declares none)", layer, lanes), core.DeferClassContract
 		}
 		// Defensive: every remote answered, at least one advertises a lane this
 		// contract fits, and Place still found nothing. That is a bug in this

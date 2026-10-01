@@ -1,4 +1,4 @@
-// Copyright 2026 Daniel Martinez and contributors. Licensed under Apache-2.0. See LICENSE.
+// Copyright 2026 dmmdea and contributors. Licensed under Apache-2.0. See LICENSE.
 // Hand-authored (wave A spine). Registered through the novel-command hook so a
 // reprint of root.go keeps the wiring. See REGISTRATIONS-A.md.
 // pp:data-source live

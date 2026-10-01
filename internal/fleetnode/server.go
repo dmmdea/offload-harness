@@ -131,8 +131,11 @@ type Options struct {
 	// field, so every node without a manifest backend is byte-identical.
 	Backends []string
 	// Accelerators is the additive-device list from the installer's manifest
-	// (installed.json `accelerators`, ADR 0024) — advertised verbatim in health
-	// so a delegator can route NPU-owned work to this node. Empty = omitted.
+	// (installed.json `accelerators`, ADR 0024) — advertised in health so a
+	// delegator can route NPU-owned work to this node, minus the devices that
+	// stay on the box that carries them (config.FleetVisibleAccelerators,
+	// register E-08: the standalone Hailo-8L is never advertised, whatever this
+	// list says). Empty = omitted.
 	Accelerators []string
 	// LoopbackListener reports whether the serve listener is bound to a
 	// loopback address. The verb computes it from the RESOLVED listen address
@@ -180,6 +183,11 @@ type Server struct {
 	queue    *fleetqueue.Queue
 	tasks    []string
 	families []string
+	// accelerators is Options.Accelerators minus the local-only devices
+	// (config.FleetVisibleAccelerators, register E-08), computed once like tasks:
+	// the list health publishes. The standalone Hailo-8L is never in it, whoever
+	// built Options and whatever the manifest says. nil on a node with none.
+	accelerators []string
 	// imageFamilies is the named-family advertisement (ADR 0058), computed once
 	// like families; nil on a node without named families (key omitted).
 	imageFamilies []ImageFamily
@@ -438,6 +446,7 @@ func New(runner Runner, jobs *Jobs, opts Options) *Server {
 		jobs:               jobs,
 		opts:               opts,
 		tasks:              SupportedTasksFor(opts.Cfg, opts.LoopbackListener),
+		accelerators:       config.FleetVisibleAccelerators(opts.Accelerators),
 		families:           Families(opts.Cfg),
 		imageFamilies:      ImageFamilies(opts.Cfg),
 		agentSeat:          opts.Cfg.AgentPlannerModel(""),
@@ -1045,8 +1054,9 @@ type healthPayload struct {
 	// KVSlot is true when this node renders a slot directory and answers the
 	// /fleet/kvslot/save|restore lane (ADR 0056 Layer 2).
 	KVSlot bool `json:"kvslot,omitempty"`
-	// Accelerators is the installer-manifest additive-device list (ADR 0024).
-	// Additive + omitempty: a node with none emits a byte-identical payload.
+	// Accelerators is the installer-manifest additive-device list (ADR 0024),
+	// without the local-only devices (register E-08). Additive + omitempty: a
+	// node with none emits a byte-identical payload.
 	Accelerators []string `json:"accelerators,omitempty"`
 	VramTotalGb  float64  `json:"vram_total_gb"`
 	VramFreeGb   float64  `json:"vram_free_gb"`
@@ -1421,7 +1431,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		GpuArch:               s.opts.GpuArch,
 		Backends:              s.opts.Backends,
 		KVSlot:                s.kvSlotEnabled(),
-		Accelerators:          s.opts.Accelerators,
+		Accelerators:          s.accelerators,
 		VramTotalGb:           snap.TotalGiB,
 		VramFreeGb:            snap.FreeGiB,
 		GpuDevices:            snap.Devices,
@@ -1849,9 +1859,10 @@ func (s *Server) concurrencyCapped(taskType string) bool {
 	// verbatim the failure the rule above says the exemption exists to prevent.
 	case "image-gen", "video-gen", "animate", "audio-gen", "run-graph", "stt":
 		return false
-	// accel (0.115.0) drives a loopback accelerator sidecar — Hailo or Coral —
-	// and never the llama-swap text endpoint; a 3 ms TPU call parked behind a
-	// five-minute digest contract would be the cap protecting nothing.
+	// accel (0.115.0) drives a loopback accelerator sidecar — Coral or RKNPU;
+	// the Hailo-8L is local-only and never served here (register E-08) — and never
+	// the llama-swap text endpoint; a 3 ms TPU call parked behind a five-minute
+	// digest contract would be the cap protecting nothing.
 	case "accel":
 		return false
 	// compose-video (ADR 0059) never touches the text endpoint either: HyperFrames

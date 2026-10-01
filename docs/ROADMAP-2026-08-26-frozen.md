@@ -513,13 +513,13 @@ Still true and still blocking: **Aorus unreachable** (ping 100% loss, `fleet/hea
 Completes the *understanding* angle (the lowest-risk, highest-reuse tier). Build whisper.cpp `whisper-server` (CUDA + `WHISPER_BUILD_SERVER`), download `ggml-large-v3-turbo.bin`, and **register it as a llama-swap `ttl:300` upstream** in the **LOAD-BEARING** `~/llama-swap/config.yaml` (do it ONLY via the backup → validate → restart → verify-memory-stack → **rollback-on-any-failure** ritual). Go `offload_transcribe` verb returns **`{gist, segments[]}`** (timestamped spans = the fastcontext citation-pattern, so Claude pulls only the spans it needs) + an SRT writer + MCP tool + CLI subcommand. Design: CHAPTER-audio brief, ANGLE 1 (whisper-large-v3-turbo; WhisperX/Parakeet as later quality/fast tiers).
 
 ### 2. Phase S — `ik_llama.cpp` infra spike  (standalone, non-mutating)  ✅ DONE (2026-06-16) — VERDICT: REJECT ik
-**Benchmarked, did NOT adopt** (write-up: `docs/PHASE-S-ik_llama-benchmark-2026-06-16.md`). ik builds clean + is **faster on PP** (26B +27% f16 / **+140% q8_0 KV**; refutes #1765's TG regression on our build), BUT **fails the sacred GBNF gate on the 26B CPU-MoE path** (HTTP 500 invalid-UTF-8 on enum grammars + repetition loops; mainline produces valid JSON). Grammar is non-negotiable → reject. E4B (fully-GPU) grammar is clean but the speed win is only ~10% (sub-threshold). **Free actionable win surfaced:** mainline `--n-cpu-moe 24` lifts the live 26B TG ~+11% (15.4→17.2), grammar-safe — proposed for Daniel (live-config edit, verify VRAM+grammar first). Watch-list: re-eval ik when the Gemma-4 CPU-MoE grammar bug is fixed upstream.
-Build `ik_llama.cpp` (ikawrakow fork), run it **on a scratch port — NOT the live config**, and benchmark the 26B-A4B `--cpu-moe` path + IQ_K quants vs mainline llama.cpp on this i7-11800H. Also test KV-cache quant on the Gemma cascade + tuned per-layer `-ot` offload. **Propose** a binary swap; do **not** auto-adopt (swapping the binary affects every model — that decision waits for Daniel). Adopt only what *provably* helps. Source: ADDENDUM.
+**Benchmarked, did NOT adopt** (write-up: `docs/PHASE-S-ik_llama-benchmark-2026-06-16.md`). ik builds clean + is **faster on PP** (26B +27% f16 / **+140% q8_0 KV**; refutes #1765's TG regression on our build), BUT **fails the sacred GBNF gate on the 26B CPU-MoE path** (HTTP 500 invalid-UTF-8 on enum grammars + repetition loops; mainline produces valid JSON). Grammar is non-negotiable → reject. E4B (fully-GPU) grammar is clean but the speed win is only ~10% (sub-threshold). **Free actionable win surfaced:** mainline `--n-cpu-moe 24` lifts the live 26B TG ~+11% (15.4→17.2), grammar-safe — proposed for the operator (live-config edit, verify VRAM+grammar first). Watch-list: re-eval ik when the Gemma-4 CPU-MoE grammar bug is fixed upstream.
+Build `ik_llama.cpp` (ikawrakow fork), run it **on a scratch port — NOT the live config**, and benchmark the 26B-A4B `--cpu-moe` path + IQ_K quants vs mainline llama.cpp on this i7-11800H. Also test KV-cache quant on the Gemma cascade + tuned per-layer `-ot` offload. **Propose** a binary swap; do **not** auto-adopt (swapping the binary affects every model — that decision waits for the operator). Adopt only what *provably* helps. Source: ADDENDUM.
 
 ### 3. Phase 2 — Generation
 Video gen (Wan 2.2 14B / Hunyuan 1.5 — already on disk — via `comfy-render`-style runners) then audio gen (ACE-Step 1.5 music + Chatterbox V3 voice). **Standalone** (driven through ComfyUI `:8188`; does NOT touch llama-swap). Add the **GPU single-slot file-lock scheduler** here. Design: CHAPTER-video (gen) + CHAPTER-audio (gen).
 
-#### Image-gen tooling — generation gaps + the right tool for each (Daniel, 2026-06-26)
+#### Image-gen tooling — generation gaps + the right tool for each (operator, 2026-06-26)
 **SDXL (current) is genuinely good at exactly one thing:** atmospheric / organic / molecular amber-on-ink heroes. Everything else it fakes badly. The gaps, and the right tool for each:
 
 | Gap (SDXL is weak) | Best tool | Notes |
@@ -530,7 +530,7 @@ Video gen (Wan 2.2 14B / Hunyuan 1.5 — already on disk — via `comfy-render`-
 | Soft / low-res renders | **Real-ESRGAN / SUPIR** upscale (ComfyUI node) | Optional crispness pass. |
 | Fixing/compositing a render (artifact removal, inpaint) | **FLUX Fill / SDXL inpaint** | Polish, not generation. |
 
-**Prioritized (Daniel's recommendation):**
+**Prioritized (the operator's recommendation):**
 1. ✅ **DONE — SVG component kit** (gauge, comparison-bar, chromatogram, icon set) shipped as `offload_generate_svg` + `generate-svg` (parametric `internal/svgkit`, brand-agnostic, pure-Go/free). Covers topic-legibility needs crisply, free, no new model. **Highest ROI.** See Done above.
 2. **Add FLUX.1 [dev] (quantized) to ComfyUI** — for a coherent recognizable subject (pen, glassware, organ) or in-image text. **Verify the exact quantized setup works on the 8 GB 3070 before installing** (per "don't author configs unverified").
 
@@ -540,12 +540,12 @@ Video gen (Wan 2.2 14B / Hunyuan 1.5 — already on disk — via `comfy-render`-
 **Net:** keep SDXL for atmosphere, lean on the designed SVG kit for legibility (now delivered — see Done), add FLUX when we want real objects/text. **FLUX stays a NO-GO on the 8 GB 3070; the SVG kit covers legibility.** *(SVG kit: done. FLUX: revisit only on bigger-VRAM GPU.)*
 
 ### 4. Phase 3 — Editing  (needs the Resolve spend → last of the build)
-Claude-driven cut-lists (WhisperX-JSON → OTIO/EDL + `auto-editor`) + cleanup (DeepFilterNet3 → MossFormer2; ffmpeg two-pass loudnorm → -14 LUFS) + **DaVinci Resolve Studio** (the $295 one-time spend, **approved but only purchased at this phase, with Daniel**). Design: CHAPTER-audio (edit) + CHAPTER-video (DaVinci).
+Claude-driven cut-lists (WhisperX-JSON → OTIO/EDL + `auto-editor`) + cleanup (DeepFilterNet3 → MossFormer2; ffmpeg two-pass loudnorm → -14 LUFS) + **DaVinci Resolve Studio** (the $295 one-time spend, **approved but only purchased at this phase, with the operator**). Design: CHAPTER-audio (edit) + CHAPTER-video (DaVinci).
 
 ### 5. Danmar Auto Reviews capstone  (last, deepest)
 The private optimized track: no-avatar (chest-cam + b-roll), 6-month backlog, short+long form, two machines (3070 + editor's 5060). Deep channel analysis via the **Youtube-Analyst** skill. Built once the generalist capabilities exist.
 
-### Parallel / needs Daniel (not on the critical path)
+### Parallel / needs the operator (not on the critical path)
 - **Docker leftovers** — RESOLVED on the reference box (verified 2026-08-27): Docker Desktop is not installed, no docker processes, no docker WSL distros — nothing to keep or kill there. Remaining: one check on the Aorus at its next parity pass.
 - **Resolve purchase** — at Phase 3, still unpurchased.
 - **DiffusionGemma** — WATCH only; re-eval when PR #24423 merges with `llama-server` AND grammar-under-diffusion lands in llama.cpp. *Merge status not re-checked in the 2026-08-26 refresh.*

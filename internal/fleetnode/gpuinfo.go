@@ -71,7 +71,8 @@ type InstalledInfo struct {
 	Profile string `json:"profile"`
 	Backend string `json:"backend"`
 	// Accelerators are the additive devices the installer detected (ADR 0024);
-	// advertised so a delegator can route NPU-owned work here.
+	// advertised (minus local-only devices, config.FleetVisibleAccelerators) so a
+	// delegator can route NPU-owned work here.
 	Accelerators []string `json:"accelerators,omitempty"`
 	// AltBackends are the extra serving backends THIS install rendered beside the
 	// primary one (today: ["cpu"] when install.sh was given --llama-bin-cpu). The

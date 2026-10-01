@@ -1,4 +1,4 @@
-// Copyright 2026 Daniel Martinez and contributors. Licensed under Apache-2.0. See LICENSE.
+// Copyright 2026 dmmdea and contributors. Licensed under Apache-2.0. See LICENSE.
 // Novel command family: per-seat history and experiments.
 // pp:data-source auto
 // Supported strategies: auto, local, live, or computed. `seat log` is local

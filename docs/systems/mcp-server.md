@@ -71,7 +71,9 @@ side channel and is not part of the Cascade — nothing escalates or falls back 
 NVIDIA's hosted hosts (0.143.1), and a caller-named `base` must be NVIDIA's hosted API,
 `nim_endpoint` or a `nim_bases` entry (0.144.2, security standard L5): under `nim_base_policy`
 `audit` (the default) any other base runs, the result carries `base_policy`, and a would-refuse row
-(scheme, host and port only) is appended to `<state_dir>/nim-base-audit.jsonl`; under `enforce` it is
+(scheme, host and port only) is appended to `nim-base-audit.jsonl` in the machine-wide state root the GPU
+lease uses (`state_dir`, else `LOCAL_OFFLOAD_STATE_DIR`, else `%ProgramData%\local-offload` or
+`/var/lib/local-offload`); under `enforce` it is
 deferred before any request leaves.
 
 `offload_browse` (0.141.0, ADR 0060) drives the operator's own browser and is registered only when
@@ -106,7 +108,8 @@ display card refuses by the guard's name, before any seat is touched. Both agent
 subtasks also take `layer`, a composite node's declared layer id whose agent seat the subtask
 runs on (register A-100: the Lenovo's `fast` layer is its 35B digest seat — a node that does
 not declare the layer is ineligible for that subtask, an idle local box that does not declare it
-does not keep it, and with no node declaring it the subtask defers naming the layer), and every result and
+does not keep it (route=auto reads the fleet for it, route=spread never deals it the local slot: register A-108), and with no
+node declaring it the subtask defers naming the layer), and every result and
 defer on a composite box carries `placed` {tier, layer, role, seat, devices, reason, guard,
 evicts} — absent on a plain box), its default
 timeout honors config `agent_timeout_sec` (else the built-in 180s), and its result reports the
@@ -179,6 +182,13 @@ cites nothing, and grading the bytes gives `verified: false` when the re-pack re
 `acceptance_failures` and then the evidence, never a reason to discard the answer: the residual
 case is a question whose subject is a SHORT (<8-character) or question-named identifier, which
 leaves nothing anchorable at all.
+
+A deferred `offload_ask` keeps the finished answer (register C-80). When the node says the loop FINISHED and only
+its structuring failed (`schema_miss`: the re-pack was skipped because the wall had no time left, was cut by the clock, or
+stalled), the deferred payload carries the loop's prose as `output` with `schema_miss: true`, beside the defer's own
+`reason` and `defer_class`, for a local run and a routed one alike. It is never graded and never an `answer` field.
+`offload_review_diff` publishes no such field: what that lane returns went through its grounding filters, and the raw
+prose has not, so a review defer stays bare.
 
 `agent_delegate`'s `route` argument picks the placement rule (see
 [fleet-node.md](fleet-node.md#placement-routes-and-the-retry-delegator-side) for the mechanics):

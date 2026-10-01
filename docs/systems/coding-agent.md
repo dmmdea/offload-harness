@@ -35,7 +35,7 @@ architect model plans, an editor model executes.
 ## How the system works
 
 The loop alternates model calls and tool calls until the task completes or the step budget runs out.
-Two independent limits keep a weak model from burning the budget on nothing:
+Three limits keep a weak model from burning the budget on nothing:
 
 - **A step budget** — the loop stops with `StopReason: "budget"`.
 - **Tool-call caps** — `dispatchOrThrottle` sits between the model's request and execution. It
@@ -46,6 +46,36 @@ Two independent limits keep a weak model from burning the budget on nothing:
   breaches the name cap is *also removed from the tool list sent on every later request* —
   structural enforcement, added after a 9B model re-issued an already-refused identical call
   seventeen times in a row.
+- **The `read_file` character budget** (register D-103, `readbudget.go`) — the one tool the loop
+  meters in characters instead of by call. `read_file` pages (`offset`/`limit`) and its own hint
+  tells the seat to ("use offset=N to continue"), so a seat doing as told spent one call per page:
+  on 2026-10-01 a seat was refused its ninth read of a 12,005-character document having taken in
+  about 8 KB of it, and with the loop's per-result cap evidently at 1,090 characters (six of the
+  eight results were exactly that long) eight reads could never have held that document. For
+  `read_file` the same-tool cap now counts *files*: the first read of each path counts, so a
+  six-file reconnaissance costs six and the ninth distinct file is still refused, while a new page
+  of a file the run has already read costs characters, not a call. An exact repeat, a read that
+  failed (a path that does not exist is not "being read"), a call whose path cannot be read and a
+  page that gave nothing new count against the cap, and no other tool is affected. A page gives
+  nothing new when the tool failed or refused the call as not performed, or when it began past the
+  end of the file (`(end of file — N lines)`): it costs the budget next to nothing, so the budget
+  cannot bound it and the cap counts it once it has run (the call that crosses the line completes),
+  and a seat paging past the end of a file or re-sending a page that fails spends the cap as it
+  always did. The same lines asked for under another spelling of the call are still new pages, and
+  only the budget and the step budget bound them. Every `read_file` result is charged to a per-run
+  budget at the length the transcript keeps — after the loop-boundary trim, the figure the effect
+  ledger records as `obs_chars`; once the budget is spent the next read is refused and `read_file`
+  is withdrawn like any capped tool (the call that crosses the line completes, so the overshoot is
+  at most one result). The setup replay is not charged. The default is the larger of the step budget
+  and the same-tool cap, times the cap on one result: it can never refuse a seat that issues one
+  read per step (the step budget bounds that case, as it always did) and it bounds what is left,
+  many reads in one step (measured on the delegation log, 2026-09-07 to 2026-10-01: 214 of 3,374
+  runs issued parallel reads, up to 12 in a step; finished runs read 6.4 KB at the median and 95 KB
+  at p99). `Loop.WithReadBudgetChars` sets it and `Loop.WithoutReadBudget` restores the pure call
+  count. The exact-repeat refusal, the withdrawal of a tool refused twice for one call (D-49) and
+  the forced final step (D-89) are unchanged: with the step budget they are what bound a seat
+  hunting through tools. A `max_calls_per_tool` env rule on `read_file` is a separate, explicit cap
+  and still counts every call.
 
 The ordering here is load-bearing and documented in the code: the name cap must be checked before the
 exact-repeat check, or a model stuck on an identical call matches the repeat branch forever and never
@@ -549,7 +579,7 @@ deliberately not wired on three doors, for three different reasons: `agent_run` 
 `output_schema`, so there is nothing to structure; the review lane's fenced-seat fallthrough exists
 because the local seat is the one another session's lease fences, and a rescue there would queue behind
 that very lease; and `offload_ask` at a named remote route keeps its own handling of a finished answer
-(its prose still reaches the caller), which the security review records as deliberate, so wiring it is
+(its prose still reaches the caller: a deferred `offload_ask` carries it as `output`, flagged `schema_miss`), which the security review records as deliberate, so wiring it is
 outside this change. The seam is one field, `RunOptions.Rescue`, if any of them should be wired later.
 
 The two surfaces report that verdict differently, on purpose, and they agree on the case that

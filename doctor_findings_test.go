@@ -63,3 +63,44 @@ func TestDoctorSilentOnACleanConfig(t *testing.T) {
 		t.Fatalf("no findings section expected on a clean config:\n%s", got)
 	}
 }
+
+// TestDoctorFlagsALocalOnlyAcceleratorInFleetAccelerators (register E-08, operator decision J-13):
+// the standalone Hailo-8L never leaves the box that carries it, so a box whose fleet_accelerators
+// asks the fleet for it can never be answered. That loads — nothing refuses — and doctor names the
+// key and the device as a FAIL row with a non-zero exit, like every other finding that cannot do
+// what the file says.
+func TestDoctorFlagsALocalOnlyAcceleratorInFleetAccelerators(t *testing.T) {
+	srv := fakeSwap(t, defaultAliasIDs())
+	cfg := config.Default()
+	cfg.Endpoint = srv.URL
+	cfg.FleetAccelerators = []string{"hailo-8l"}
+	var out strings.Builder
+	err := doctorRun(cfg, nil, &out)
+	got := out.String()
+	if err == nil {
+		t.Fatalf("doctor must exit non-zero on a local-only device in fleet_accelerators:\n%s", got)
+	}
+	for _, want := range []string{"config findings", "FAIL", "fleet_accelerators", "hailo-8l", "local-only"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("doctor output must name %q:\n%s", want, got)
+		}
+	}
+}
+
+// The finding is per device: the Coral and the RKNPU are served over the fleet (that is what
+// fleet_accelerators is for), so listing them is the supported shape and doctor stays silent.
+func TestDoctorAcceptsAFleetServedAcceleratorInFleetAccelerators(t *testing.T) {
+	for _, id := range []string{"coral-edgetpu", "rknpu"} {
+		srv := fakeSwap(t, defaultAliasIDs())
+		cfg := config.Default()
+		cfg.Endpoint = srv.URL
+		cfg.FleetAccelerators = []string{id}
+		var out strings.Builder
+		if err := doctorRun(cfg, nil, &out); err != nil {
+			t.Fatalf("%s in fleet_accelerators must pass doctor: %v\n%s", id, err, out.String())
+		}
+		if got := out.String(); strings.Contains(got, "config findings") {
+			t.Fatalf("%s in fleet_accelerators is the supported shape, no finding expected:\n%s", id, got)
+		}
+	}
+}

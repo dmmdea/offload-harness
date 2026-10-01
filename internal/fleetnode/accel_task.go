@@ -16,7 +16,8 @@ import (
 )
 
 // AccelPayload is the wire shape of a fleet "accel" job (Coral design Phase B):
-// one accelerator tool call for a box that lacks the device. The image, when
+// one accelerator tool call for a box that lacks the device (never the Hailo-8L,
+// which is local-only — register E-08, see buildAccel). The image, when
 // the tool takes one, travels INSIDE the job as base64 — the caller's
 // image_path is on the caller's disk, which this node cannot read — and lands
 // in a job-scoped directory that lives exactly as long as the job.
@@ -43,8 +44,16 @@ func buildAccel(cfg config.Config, payload json.RawMessage) (core.Request, func(
 	if err := dec.Decode(&p); err != nil {
 		return core.Request{}, noop, fmt.Errorf("accel: payload: %w", err)
 	}
-	if p.Accelerator == "" || !slices.Contains(cfg.Accelerators, p.Accelerator) {
-		return core.Request{}, noop, fmt.Errorf("accel: accelerator %q is not listed on this node (accelerators: %v)", p.Accelerator, cfg.Accelerators)
+	// A local-only device (register E-08: the standalone Hailo-8L) is refused by what it IS, before
+	// this node's own list is consulted: the refusal is the same whether or not the box carries the
+	// device, so it never says what the box has. The list the refusal below prints is the one the
+	// fleet may use, for the same reason.
+	if config.LocalOnlyAccelerator(p.Accelerator) {
+		return core.Request{}, noop, fmt.Errorf("accel: accelerator %q is local-only: it stays on the box that carries it and is never served over the fleet (ADR 0038, register E-08)", p.Accelerator)
+	}
+	servable := config.FleetVisibleAccelerators(cfg.Accelerators)
+	if p.Accelerator == "" || !slices.Contains(servable, p.Accelerator) {
+		return core.Request{}, noop, fmt.Errorf("accel: accelerator %q is not listed on this node (accelerators: %v)", p.Accelerator, servable)
 	}
 	if strings.TrimSpace(p.Tool) == "" {
 		return core.Request{}, noop, fmt.Errorf("accel: tool is required")

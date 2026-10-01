@@ -1,4 +1,4 @@
-// Copyright 2026 Daniel Martinez and contributors. Licensed under Apache-2.0. See LICENSE.
+// Copyright 2026 dmmdea and contributors. Licensed under Apache-2.0. See LICENSE.
 // Wave D tests. Every fixture below is a verbatim excerpt of real llama-swap
 // output from the reference deployment, not an invented shape.
 

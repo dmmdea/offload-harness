@@ -1,4 +1,4 @@
-// Copyright 2026 Daniel Martinez and contributors. Licensed under Apache-2.0. See LICENSE.
+// Copyright 2026 dmmdea and contributors. Licensed under Apache-2.0. See LICENSE.
 
 // Package measure wraps the machine-level measurements the CLI's benchmark,
 // VRAM, and fit commands need: per-GPU memory read from nvidia-smi, and the
