@@ -6,6 +6,99 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.155.0] - 2026-09-30 - a seat that goes down is waited for and the failed step re-issued (ADR 0066)
+
+### Fixed - a dead or wedged engine no longer takes its runs with it (ADR 0066, register C-72)
+
+On 2026-09-29 the three-card flagship engine on the reference workstation died ten times in one evening (its engine core waits 120 s
+for a hung pipeline step, then the API server exits). Every death took every run in flight with it as an independent
+`stalled:` although the agent loop holds its whole transcript and needed only the seat back; the delegator then treated
+each such defer as terminal; and while the seat could not start, every request got llama-swap's `500 src=llama-swap`,
+which the client waited out on the 90 s contention budget and the run reported as `seat contended ... (peers hold its
+slots - raise concurrencyLimit)`.
+
+- A seat is DOWN on positive evidence. **Wedged**: the busy hold's engine-flat verdict (counters flat for the flat bound
+  while llama-swap lists the seat ready), retyped as `SeatDownError` - it wraps the stall it replaces, so a reader that
+  only knows the stall still sees the arithmetic. **Died**: the seat left `/running` inside an established hold (two
+  reads running), or a model call failed like a dead seat (a cut stream, a 5xx, a refused connection) and a fresh read
+  shows llama-swap listing the seat starting, stopping or not at all, or the engine's own local address refusing
+  connections. A failure alone is never the evidence, a refusal of llama-swap's own address is not the engine's, a
+  thrash (the engine steps but produces no token) stays ADR 0061's plain stall, and a cut tool call (the engine
+  answered) is a budget defect, never a seat check.
+- The monitor cancels only the model call in flight and the run's context stays alive. The run then waits as ONE
+  bounded episode in phase `cold-load`, counted from the first verdict, and the loop re-issues the SAME step (same
+  transcript, budget and thinking mode) without spending a step. A wedge must show a change (the counters moving, or a
+  restart) first. A seat llama-swap does not list is started by the re-issue itself; when that start fails (on
+  2026-09-29 the launcher refused to start the flagship for 18 minutes and every request got an instant 500) the run
+  waits one poll and triggers again until the bound, instead of turning each request into two quick 500s and a defer,
+  and a start that never succeeds ends the run typed at the bound naming the attempts and what the seat last looked
+  like. A seat that was seen serving again earns exactly one re-issue: a second failure before the step's answer ends
+  the run. A recovery is counted when the re-issued call's first byte arrives, never for a re-issue that recovered
+  nothing; a run recovers at most twice.
+- What does not recover ends `seat down: ...` (infrastructure), also when the seat is lost during the structured re-pack
+  (`(during the structured re-pack)`, the finished answer kept in `output`). New wire fields `seat_recoveries` and
+  `seat_down_wait_sec` (the whole episode, including the time llama-swap held the re-issued call while it started the
+  seat), carried to the delegator's published result too.
+- The delegator re-places a `seat down:` defer on another node - the second retryable infrastructure defer, after the
+  coherence defer - crediting the retry's budget with the node's admission plus its wait on the dead seat (capped at one
+  contract wall). The dead seat's own `min_turn_sec` does not gate its re-placement (the retry seat's own floor still
+  does), and an alternative node at its ceiling does not refuse it (the node's queue is the line); with nowhere to go,
+  `retry_note` says so. The retry is not checked for a busy alternative, but it can still wait in ADR 0063's bounded,
+  credited capacity wait and end as a capacity defer after `agent_placement_wait_sec`. While the local seat's run-cap
+  line has no free slot, the retry goes to an untried remote instead of joining that line; it stays local only when no
+  remote is left, because joining the line beats losing the job. A verification retry is unchanged.
+- The per-page retry cap (ADR 0063) counts a page issue whose seat-down retry also failed on its retry seat, so a page
+  that keeps killing seats backs off like any other failing page.
+- `seat contended:` is a 429 only; a 5xx that outlives the budget is `seat not serving:`. The run's seat check is a gate
+  on the contract's shared contention budget: while the seat is not serving no client sleeps on a 5xx, the loop's chat
+  calls and the structured re-pack alike.
+- The node says once per run what its seat did to it (a recovery, or that the seat could not be read from here, so a
+  dead seat would have read as an ordinary error).
+
+### Fixed - the stall allowance is sized for the load, and the rates store hears only the seat's own numbers (register C-66)
+
+- `StallPolicy.AllowanceLoad(phase, pending, load)`: prefill = pending / (rate / load) x 1.5 + slack, the re-pack bound x
+  load (load 1 is `Allowance`, exactly; the 60 s floor still defines a silent seat). The load is sampled from this box's
+  run registry when a prefill or re-pack begins and at its first delta, and from the engine's own running + waiting
+  gauges (read by the busy hold, and once at each first delta when the registry saw nobody else - the only way to see a
+  peer this box does not know of); the stall reason prints it (`24000 tok / (400 tok/s / load 4) x 1.5 + 30s`).
+- The busy hold's wedge bound follows the load only on an engine that cannot see a prefill (llama-server on `/slots`, a
+  vLLM exposition with no KV-usage gauge); any other engine keeps ADR 0061's solo bound. The load that sizes it is the
+  one the engine had when it last did work: a frozen engine whose queue keeps growing used to push its own verdict out
+  forever and was never declared down.
+- `prefill_tok_s` is folded in only from a run KNOWN to have had the seat to itself. A run nothing could answer for (no
+  run registry, no engine gauges, an engine read still pending when it ended) is unknown, not solo, and an unopenable
+  registry is logged. A run that waited out a seat going down teaches neither rate (its re-issued call waits out
+  llama-swap's load).
+- Cold loads: only a load the warm-up CONFIRMED is recorded (a failed start was recorded as a few-second "cold load" for
+  every admission of the 18-minute outage). One load seen by several runs is one entry: an observation ending within
+  ten seconds of ANY entry of the window of five merges into it and keeps the longest measurement, because runs report
+  when they end, not when the load did; a load older than everything in a full window is dropped instead of pushing a
+  newer one out (`seat-rates.json` gains `cold_load_ends`; a file without it still loads). A run that waited out a load
+  it saw start in its pre-flight records the wait from the first sighting to ready (a lower bound of that load).
+
+### Changed
+
+- A wedged engine is now held for up to the cold-load ceiling (10 minutes by default) before it is filed, in case the
+  seat restarts; the ceiling is a bound, not a promise (the 18-minute outage outlasted it, and the run then ends typed
+  and is re-placed with the wait credited). On a shared seat whose engine cannot see a prefill a wedge is called later
+  (for a 13,000-token prefill at 280 tok/s with five requests sharing the seat, about 380 s and 380 s instead of about
+  100 s and 120 s); a death that breaks the stream is caught at once by the failed call.
+- Operator-visible wording: a wedged engine now files `seat down: the seat's engine did no work ...` (was `stalled:`);
+  `seat contended:` is a 429 only, a 5xx that outlives the budget is `seat not serving:`. Greps and dashboards keyed on
+  the old text should count the new prefixes. `scripts/parallel-sessions-gate.ps1` now counts `seat not serving:` and
+  `seat down:` and refuses PASS over them and over any other defer.
+- Nodes without this change keep filing `stalled:` for the same outage, so the delegator half is inert until they are
+  upgraded.
+
+### Not in this release
+
+The root cause of the engine hang; the seat launcher's crash cleanup (0.146.1; its deployment on a two-seat WSL box is
+pending, register C-72); a seat-down recovery in the MCP `agent_run` door (it builds no liveness monitor);
+`seat_recoveries` / `seat_down_wait_sec` on ledger rows (the wire and the delegator's result carry them); a load that
+outlasts the admission budget is not recorded in the cold-load figure; a retry (verification or seat-down) still does
+not check a plain, non-cordoning text reservation of the local cards (register C-81).
+
 ## [0.154.1] - 2026-09-30 - a fleet-serve restart no longer deletes the context of local runs in flight
 
 ### Fixed — a fleet-serve restart deleted the context of every local delegation in flight on its box
