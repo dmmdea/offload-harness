@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -170,35 +171,76 @@ func TestRunAgentTaskRepackAsksForABudgetSizedToTheAnswer(t *testing.T) {
 }
 
 // TestRunAgentTaskRepackTruncationIsNamedAndRetriedAtTheCap: a grammar
-// completion cut at max_tokens is never validated as JSON; the retry runs at
-// the cap, and when both are cut the defer names the truncation.
+// completion cut at max_tokens is never validated as JSON, and the defer names
+// the truncation. Since register C-80 the retry runs at the cap ONLY when the cut
+// attempt shows the budget was the problem (a short answer whose output was a
+// loop, or that already fits the budget, goes to the chat lane instead): this
+// test pins both halves. The escalation half is the old test's own shape, now on
+// text dense enough to earn it; its second half, a short answer that fits, is the
+// request the old rule resent blindly.
 func TestRunAgentTaskRepackTruncationIsNamedAndRetriedAtTheCap(t *testing.T) {
-	fake := &agentFake{
-		rosterIDs:       []string{agentTestSeat},
-		loop:            func(int64) string { return doneChat("The answer is 42, and a great deal more.") },
-		repack:          func(int64) string { return `{"answer":"4` }, // a JSON prefix
-		repackTruncated: func(int64) bool { return true },
-		repackBodies:    make(chan map[string]any, 4),
-	}
-	srv := fake.server(t)
-	defer srv.Close()
+	t.Run("the budget was the problem: retried at the cap", func(t *testing.T) {
+		answer := answerOfChars(1500) // the 1,024-token floor
+		fake := &agentFake{
+			rosterIDs: []string{agentTestSeat},
+			loop:      func(int64) string { return doneChat(answer) },
+			// ~1.4 bytes per token on the seat: the 1,500-char answer needs ~1,160
+			// tokens at that density, so 1,024 was too few.
+			repackStream: func(n int64, _ map[string]any, w http.ResponseWriter, _ *http.Request) {
+				writeCompletion(w, `{"answer":"`+digitNoise(1400), "length", agentRepackMaxTokens)
+			},
+			repackBodies: make(chan map[string]any, 4),
+		}
+		srv := fake.server(t)
+		defer srv.Close()
 
-	res := agentTestPipeline(t, srv.URL).Run(context.Background(), agentTestRequest(t, testContract()))
-	wire := decodeWire(t, res)
-	if !wire.Deferred || wire.DeferClass != core.DeferClassAbstention {
-		t.Fatalf("deferred/class = %v/%q, want an abstention", wire.Deferred, wire.DeferClass)
-	}
-	if !strings.Contains(wire.Reason, "re-pack truncated at") || strings.Contains(wire.Reason, "unexpected end of JSON") {
-		t.Fatalf("reason = %q, want the truncation named rather than an invalid-json verdict", wire.Reason)
-	}
-	if fake.grammarCNT.Load() != 2 {
-		t.Fatalf("grammar attempts = %d, want 2", fake.grammarCNT.Load())
-	}
-	first, second := <-fake.repackBodies, <-fake.repackBodies
-	if mt1, _ := first["max_tokens"].(float64); int(mt1) != agentRepackMaxTokens {
-		t.Fatalf("first attempt max_tokens = %v, want the floor %d for a short answer", first["max_tokens"], agentRepackMaxTokens)
-	}
-	if mt2, _ := second["max_tokens"].(float64); int(mt2) != agentRepackMaxTokensCap {
-		t.Fatalf("retry max_tokens = %v, want the cap %d after a truncation", second["max_tokens"], agentRepackMaxTokensCap)
-	}
+		res := agentTestPipeline(t, srv.URL).Run(context.Background(), agentTestRequest(t, testContract()))
+		wire := decodeWire(t, res)
+		if !wire.Deferred || wire.DeferClass != core.DeferClassAbstention {
+			t.Fatalf("deferred/class = %v/%q, want an abstention", wire.Deferred, wire.DeferClass)
+		}
+		if !strings.Contains(wire.Reason, "re-pack truncated at") || strings.Contains(wire.Reason, "unexpected end of JSON") {
+			t.Fatalf("reason = %q, want the truncation named rather than an invalid-json verdict", wire.Reason)
+		}
+		if fake.grammarCNT.Load() != 2 {
+			t.Fatalf("grammar attempts = %d, want 2", fake.grammarCNT.Load())
+		}
+		first, second := <-fake.repackBodies, <-fake.repackBodies
+		if mt1, _ := first["max_tokens"].(float64); int(mt1) != agentRepackMaxTokens {
+			t.Fatalf("first attempt max_tokens = %v, want the floor %d for a short answer", first["max_tokens"], agentRepackMaxTokens)
+		}
+		if mt2, _ := second["max_tokens"].(float64); int(mt2) != agentRepackMaxTokensCap {
+			t.Fatalf("retry max_tokens = %v, want the cap %d after a truncation that the budget explains", second["max_tokens"], agentRepackMaxTokensCap)
+		}
+	})
+
+	t.Run("a short answer that fits: straight to the chat lane", func(t *testing.T) {
+		fake := &agentFake{
+			rosterIDs:       []string{agentTestSeat},
+			loop:            func(int64) string { return doneChat("The answer is 42, and a great deal more.") },
+			repack:          func(int64) string { return `{"answer":"4` }, // a JSON prefix
+			repackTruncated: func(int64) bool { return true },
+			repackBodies:    make(chan map[string]any, 4),
+		}
+		srv := fake.server(t)
+		defer srv.Close()
+
+		res := agentTestPipeline(t, srv.URL).Run(context.Background(), agentTestRequest(t, testContract()))
+		wire := decodeWire(t, res)
+		if !wire.Deferred || wire.DeferClass != core.DeferClassAbstention {
+			t.Fatalf("deferred/class = %v/%q, want an abstention", wire.Deferred, wire.DeferClass)
+		}
+		if !strings.Contains(wire.Reason, "re-pack truncated at") || strings.Contains(wire.Reason, "unexpected end of JSON") {
+			t.Fatalf("reason = %q, want the truncation named rather than an invalid-json verdict", wire.Reason)
+		}
+		if fake.grammarCNT.Load() != 1 {
+			t.Fatalf("grammar attempts = %d, want 1: a 40-character answer cannot need more than the 1,024 it was given", fake.grammarCNT.Load())
+		}
+		if mt1, _ := (<-fake.repackBodies)["max_tokens"].(float64); int(mt1) != agentRepackMaxTokens {
+			t.Fatalf("first attempt max_tokens = %v, want the floor %d for a short answer", mt1, agentRepackMaxTokens)
+		}
+		if strings.Contains(wire.Reason, "cannot hold it") || !strings.Contains(wire.Reason, "inside the 1024-token budget") {
+			t.Fatalf("reason = %q, want what was observed (the answer fits the budget), not what cannot be known", wire.Reason)
+		}
+	})
 }

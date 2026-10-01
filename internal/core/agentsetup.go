@@ -12,7 +12,8 @@ import (
 // model first sees already holds the observations it would otherwise spend its
 // first steps collecting. envharness's Setup component replays a fixed action
 // list on reset, not charged to the episode budget; here the replay is charged
-// to the wall (it runs inside the contract's deadline) and never to max_steps.
+// to the wall (the run's expectation of its own length, ADR 0055: it runs inside
+// the run, under the same stall watch and ceiling) and never to max_steps.
 //
 // Why this exists: the delegation-log corpus (2026-09-01…07, 1,172 rows) holds
 // 117 failed or deferred 4B-seat rows, every one grounded on context docs, and

@@ -110,6 +110,10 @@ type GenResult struct {
 	TokPerSec float64
 	Truncated bool           // hit max_tokens before finishing (finish_reason == "length")
 	Logprobs  []TokenLogprob // per-output-token, only when top_logprobs was requested
+	// FinishReason is the engine's own finish_reason ("stop", "length",
+	// "tool_calls", ...), "" when it reported none. Truncated is its one-bit
+	// reading; the structured re-pack keeps the reason itself per attempt.
+	FinishReason string
 }
 
 type chatMsg struct {
@@ -536,7 +540,18 @@ func (e *StatusError) Error() string {
 // and no net.Error is anywhere in the chain — which is exactly why an unwrapped
 // decoder error read as "the model got the shape wrong" to every classifier
 // downstream. Consumers branch on this type to call it what it is: the wire.
-type BodyError struct{ Err error }
+type BodyError struct {
+	Err error
+	// Partial is what a STREAM that died mid-body had delivered before it did: the
+	// content so far and the tokens generated (the usage frame's count when one had
+	// arrived, else the deltas heard, a lower bound). Zero for a JSON body, which
+	// arrives whole or not at all. The call's GenResult stays empty on an error; this
+	// is for a caller that wants to account for the attempt anyway (the structured
+	// re-pack counts a failed attempt's tokens and keeps a clip of what it wrote,
+	// register C-80), carried on the error so no caller that ignores a result beside
+	// an error can mistake it for an answer.
+	Partial GenResult
+}
 
 func (e *BodyError) Error() string { return "llama-server response body unusable: " + e.Err.Error() }
 
@@ -566,10 +581,11 @@ func decodeGenResult(resp *http.Response, start time.Time) (GenResult, error) {
 	}
 	elapsed := time.Since(start)
 	out := GenResult{
-		Content:   cr.Choices[0].Message.Content,
-		TokensIn:  cr.Usage.PromptTokens,
-		TokensOut: cr.Usage.CompletionTokens,
-		Truncated: cr.Choices[0].FinishReason == "length",
+		Content:      cr.Choices[0].Message.Content,
+		TokensIn:     cr.Usage.PromptTokens,
+		TokensOut:    cr.Usage.CompletionTokens,
+		Truncated:    cr.Choices[0].FinishReason == "length",
+		FinishReason: cr.Choices[0].FinishReason,
 	}
 	if cr.Timings != nil && cr.Timings.PredictedPerSecond > 0 {
 		out.TokPerSec = cr.Timings.PredictedPerSecond
