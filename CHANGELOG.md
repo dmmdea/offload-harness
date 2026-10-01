@@ -6,7 +6,7 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
-## [0.158.1] - 2026-10-01 - A ComfyUI that answers HTTP but cannot render ends the wait and the batch; `gpu reserve` keeps the mem0 stack
+## [0.158.1] - 2026-10-01 - A ComfyUI that answers HTTP but cannot render ends the wait and the batch; `gpu reserve` keeps the mem0 stack; an unreadable busy seat keeps the overflow off it
 
 ### Fixed — a ComfyUI that answers HTTP but can no longer render ends the wait and the batch (register C-83)
 
@@ -64,6 +64,21 @@ prints `kept the memory stack resident (mem0 never yields to a lease)`.
   `embeddinggemma` as a foreign resident and now uses `whisper-stt`.
 - The `memory_stack` comments in `internal/config` and `render/gpu-lock.mjs` no longer call the stack CPU-only:
   it runs on a GPU, the box's utility card. Docs: `docs/systems/gpu-lease.md`.
+
+### Fixed — a seat whose load cannot be read no longer takes the overflow it was kept off (register C-88)
+
+When a deal finds the local seat busy, it keeps the overflow subtask off it and hands that subtask to the capacity
+wait. The wait re-reads the seat on every tick and may run the subtask locally once the seat reads idle. A failed or
+ambiguous read was folded into idle (the deal's documented fail-open), so on a box too loaded to answer the metrics
+probe in time, the first failed read put the overflow on the seat the deal had just found busy. CI caught it as a
+flaky `TestAutoOverflowIsNotStackedOnTheBusyLocalSeat` (run 36937589311).
+
+- `busyReading` gains `unknown`, set when the probe fails or the read is ambiguous. The deal still treats it as idle.
+- `localStillBusy`, which only the wait uses, keeps the deal's busy answer while the reading is unknown, on both
+  `spread` and `auto`. A seat that never reads again leaves the subtask to the remotes or to the wait's own end.
+- Tests: `TestOverflowStaysOffABusySeatWhoseLoadBecomesUnreadable` fails the seat's metrics after the deal's own
+  reads. It went red 3 of 3 runs on both routes before the fix. Three mutants each turn it red. The `internal/delegate`
+  package passes.
 
 ## [0.158.0] - 2026-10-01 - Qwen-Image-2.1 licence warnings removed from results, status and docs
 

@@ -3166,14 +3166,19 @@ func (r *runner) localSlotAhead() (free bool, note string) {
 // (PlacedResult.overflow) may take the seat only once the deal would have. route=spread
 // reads busy on any request in flight (agent_spread_local_slot: always never reads
 // busy); route=auto on a held lease, an in-flight count at the fleet's own cap, or a
-// load in progress (W-01). It fails open to idle exactly as the probe does.
+// load in progress (W-01). An UNREADABLE seat keeps the deal's busy answer: the deal
+// fails open because it has no evidence, but here it read the seat busy, and a probe
+// that fails afterwards (a box too loaded to answer in time) is no evidence of idle.
+// Failing open here ran the overflow on the busy seat (register C-88, CI run
+// 36937589311); a seat that never reads again leaves the subtask to the remotes or
+// to the wait's own end.
 func (r *runner) localStillBusy(ctx context.Context, lease gpulease.Info) (busy bool, note string) {
 	rd := r.busyReadingNow(ctx)
 	if r.route == "spread" {
-		return rd.busy && r.cfg.SpreadLocalSlot() != config.SpreadLocalAlways, rd.note
+		return (rd.busy || rd.unknown) && r.cfg.SpreadLocalSlot() != config.SpreadLocalAlways, rd.note
 	}
 	limit := r.cfg.FleetConcurrencyLimit()
-	return lease.Held || (limit > 0 && rd.inflight >= limit) || rd.loading, rd.note
+	return lease.Held || (limit > 0 && rd.inflight >= limit) || rd.loading || rd.unknown, rd.note
 }
 
 // busyReadingNow is probeLocalBusy memoised for fetchViewsMemoTTL, so a dozen
@@ -4113,6 +4118,10 @@ type busyReading struct {
 	// rule reads it as its own signal — a seat mid-load is not idle, whatever
 	// inflight (0, by construction) says.
 	loading bool
+	// unknown is true when the seat's load could not be read (the probe failed,
+	// or the read was ambiguous): busy is false only because the deal fails open.
+	// The capacity wait must not read that as "now idle" (register C-88).
+	unknown bool
 }
 
 // localBusyProbeTimeout bounds the one-shot read of the local seat's load: two
@@ -4140,7 +4149,7 @@ func (r *runner) probeLocalBusy(ctx context.Context) busyReading {
 	rd, err := seatload.Inflight(pctx, localBusyClient, endpoint, seat)
 	if err != nil {
 		log.Printf("delegate: local seat busy probe of %s/%s failed; dealing the local slot as idle: %v", endpoint, seat, err)
-		return busyReading{note: "busy probe failed: " + err.Error()}
+		return busyReading{note: "busy probe failed: " + err.Error(), unknown: true}
 	}
 	if !rd.Loaded {
 		if rd.Ambiguous {
@@ -4148,7 +4157,7 @@ func (r *runner) probeLocalBusy(ctx context.Context) busyReading {
 			// holds other entries. Idle is the SAFE reading for a deal (the
 			// worst case is the pre-0.113.20 stacking), but it must be visible.
 			log.Printf("delegate: local seat busy probe of %s/%s is ambiguous (roster unreadable: %v; /running lists %d other model(s)); dealing the local slot as idle", endpoint, seat, rd.RosterErr, rd.RunningOthers)
-			return busyReading{note: "ambiguous: roster unreadable"}
+			return busyReading{note: "ambiguous: roster unreadable", unknown: true}
 		}
 		return busyReading{note: "local seat not loaded"}
 	}

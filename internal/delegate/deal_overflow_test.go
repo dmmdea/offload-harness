@@ -31,12 +31,24 @@ import (
 // busySwapLive is busySwap with an in-flight count the test can change while the
 // run is going: the local seat reads busy now and idle a moment later.
 func busySwapLive(t *testing.T, seat string, inflight func() int) string {
+	return busySwapFlaky(t, seat, inflight, 0)
+}
+
+// busySwapFlaky is busySwapLive whose /metrics answers HTTP 500 from its
+// failAfter+1-th read on (0 = never): the deal's read succeeds, every later read
+// of the seat's load fails - a llama-swap too slow or too loaded to answer.
+func busySwapFlaky(t *testing.T, seat string, inflight func() int, failAfter int64) string {
 	t.Helper()
+	var reads atomic.Int64
 	mux := http.NewServeMux()
 	mux.HandleFunc("/running", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"running":[{"model":"` + seat + `","state":"ready","proxy":"http://` + r.Host + `/direct/` + seat + `"}]}`))
 	})
 	mux.HandleFunc("/direct/"+seat+"/metrics", func(w http.ResponseWriter, r *http.Request) {
+		if n := reads.Add(1); failAfter > 0 && n > failAfter {
+			http.Error(w, "too slow to answer", http.StatusInternalServerError)
+			return
+		}
 		_, _ = w.Write([]byte("vllm:num_requests_running{engine=\"0\"} " + strconv.Itoa(inflight()) + "\nvllm:num_requests_waiting{engine=\"0\"} 0\n"))
 	})
 	srv := httptest.NewServer(mux)
@@ -77,11 +89,18 @@ func overflowNodes(t *testing.T, jobPolls int64) (urls []string) {
 // `inflight` requests in flight: the third is the deal's overflow.
 func overflowRun(t *testing.T, route string, inflight func() int, jobPolls int64, waitSec int) (results []PlacedResult, sum Summary, localCalls int64) {
 	t.Helper()
+	return overflowRunFlaky(t, route, inflight, jobPolls, waitSec, 0)
+}
+
+// overflowRunFlaky is overflowRun with the local seat's load unreadable after
+// failAfter reads (busySwapFlaky).
+func overflowRunFlaky(t *testing.T, route string, inflight func() int, jobPolls int64, waitSec int, failAfter int64) (results []PlacedResult, sum Summary, localCalls int64) {
+	t.Helper()
 	compressPolls(t, 5*time.Millisecond, time.Second)
 	compressWait(t, 20*time.Millisecond, 0)
 	urls := overflowNodes(t, jobPolls)
 	cfg := testCfg(t)
-	cfg.Endpoint = busySwapLive(t, "local-seat", inflight)
+	cfg.Endpoint = busySwapFlaky(t, "local-seat", inflight, failAfter)
 	cfg.AgentPlacementWaitSec = waitSec
 	var calls atomic.Int64
 	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
@@ -142,6 +161,31 @@ func TestAutoOverflowIsNotStackedOnTheBusyLocalSeat(t *testing.T) {
 			}
 		}
 		t.Fatalf("summary = %+v, local ran %d (placement: %q); want the overflow to wait for a remote while the seat reads at its in-flight cap", sum, localCalls, why)
+	}
+}
+
+// TestOverflowStaysOffABusySeatWhoseLoadBecomesUnreadable (register C-88): the
+// deal read the seat busy, then every later read of its load failed (a loaded box;
+// CI run 36937589311). The wait read the failure as idle and ran the overflow on the
+// busy seat. A failed read in the wait now keeps the deal's busy answer; both
+// routes. failAfter 3 lets the deal's own reads through.
+func TestOverflowStaysOffABusySeatWhoseLoadBecomesUnreadable(t *testing.T) {
+	for _, tc := range []struct {
+		route    string
+		inflight func() int
+	}{{"spread", always(2)}, {"auto", always(4)}} {
+		t.Run(tc.route, func(t *testing.T) {
+			results, sum, localCalls := overflowRunFlaky(t, tc.route, tc.inflight, 60, 10, 3)
+			if localCalls != 0 || sum.Succeeded != 3 {
+				var why string
+				for _, pr := range results {
+					if pr.ranLocal {
+						why = pr.PlacementReason
+					}
+				}
+				t.Fatalf("summary = %+v, local ran %d (placement: %q); an unreadable seat the deal read busy must not take the overflow", sum, localCalls, why)
+			}
+		})
 	}
 }
 
