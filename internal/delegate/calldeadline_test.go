@@ -733,6 +733,10 @@ func TestRunWithAnExpiredDeadlineStartsNothing(t *testing.T) {
 // belongs to the retry, and lives in the RetryNote.
 func TestRunWithDeadlineKeepsAnAbstentionWhoseRetryWasCut(t *testing.T) {
 	compressPolls(t, 5*time.Millisecond, time.Second)
+	// The remote attempt must come back AND the local retry start before the deadline, and the
+	// cut retry must unwind inside the allowance: a 400 ms deadline and the 250 ms floor were
+	// both too tight for a loaded CI runner (register C-85: Retried 0 at 0.77 s).
+	widenUnwind(t, time.Second)
 	node := &fakeNode{t: t, agentEnabled: true, resident: true, ctxTokens: 32768, nodeID: "node-a"}
 	node.pollByJob = func(string, int64) (map[string]any, int) {
 		w := remoteWire("", "")
@@ -746,8 +750,8 @@ func TestRunWithDeadlineKeepsAnAbstentionWhoseRetryWasCut(t *testing.T) {
 		return cancelledLoop(), nil
 	}
 
-	results, sum, _ := runWithin(t, 4*time.Second, testCfg(t), local,
-		[]core.AgentContract{remoteGoal("abstain first")}, "remote", []string{node.server().URL}, deadlineIn(400*time.Millisecond), nil)
+	results, sum, _ := runWithin(t, 8*time.Second, testCfg(t), local,
+		[]core.AgentContract{remoteGoal("abstain first")}, "remote", []string{node.server().URL}, deadlineIn(2*time.Second), nil)
 
 	pr := results[0]
 	if localRuns.Load() != 1 {
