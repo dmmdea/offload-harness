@@ -1,11 +1,11 @@
 package delegate
 
-// Register C-81: a retry respects a plain text reservation of the local cards the way a first
-// placement does.
+// Register C-81: a retry never runs on a plain text reservation of the local cards, as a first
+// placement on route auto or spread does not.
 //
 // A text lease taken with `gpu reserve --class text`, with no exclusive stamp and no drain, is a
-// RESERVATION and not a fence. It keeps every first placement off the local seat (route=auto waits
-// for the holder, route=spread deals without the seat) and off replacementNode's last resort, but
+// RESERVATION and not a fence. It keeps a first placement on route auto or spread off the local seat
+// (auto waits for the holder, spread deals without the seat) and off replacementNode's last resort, but
 // the affinity gate still admits a load onto the cards, so nothing refuses the run once it is
 // dialled. alternativeNode asked the lease only whether it FENCES a new run (D-94), which a plain
 // reservation does not, so the retry of a subtask whose first attempt had run on a fleet node was
@@ -150,7 +150,7 @@ func TestARetryIsSkippedNotRunLocallyWhenOnlyAReservedLocalSeatIsLeft(t *testing
 			}
 			lease := LocalLease(cfg.GPULockPath, cfg.StateDir)
 			want := "retry skipped: the local seat is reserved (" + HolderLine(lease) +
-				") and no other node is eligible; a retry placed there would run on the cards the holder reserved (a reservation keeps every placement off them)"
+				") and no other node is eligible; a retry placed there would run on the cards the holder reserved"
 			if pr.RetryNote != want {
 				t.Fatalf("retry_note = %q, want %q", pr.RetryNote, want)
 			}
@@ -174,15 +174,23 @@ func TestARetryIsSkippedNotRunLocallyWhenOnlyAReservedLocalSeatIsLeft(t *testing
 // lease's class and not against Reserved.
 func TestARetryStillRunsOnAReservedLocalSeatForTheHoldersOwnChild(t *testing.T) {
 	compressPolls(t, 10*time.Millisecond, 2*time.Second)
-	_, urlA := eligibleNode(t, "node-a", "wrong answer") // fails acceptance -> retryable
+	nodeA, urlA := eligibleNode(t, "node-a", "wrong answer") // fails acceptance -> retryable
 	cfg := testCfg(t)
 	info := reserveTheLocalSeat(t, &cfg)
 	t.Setenv("GPU_LEASE_EPOCH", strconv.FormatUint(info.Epoch, 10))
 	var localCalls atomic.Int64
 
-	results, sum, err := Run(context.Background(), cfg, reservedRetryLocal(&localCalls), []core.AgentContract{verifiedContract()}, "remote", []string{urlA})
+	// route=auto, not remote: the held lease reads the local seat as busy, so the deal sends the first
+	// attempt to the fleet node, and the inherited lease exempts the seat for the retry. Route remote
+	// would also land the retry here, but only because alternativeNode has no route=remote guard in its
+	// "first ran on a fleet node" branch (replacementNode refuses to fall local on route=remote), so a
+	// control on it would turn red the day that is fixed, for a reason that has nothing to do with C-81.
+	results, sum, err := Run(context.Background(), cfg, reservedRetryLocal(&localCalls), []core.AgentContract{verifiedContract()}, "auto", []string{urlA})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if nodeA.dispatches.Load() != 1 {
+		t.Fatalf("the first attempt must have run on the fleet node: node-a dispatches=%d, local calls=%d, summary=%+v", nodeA.dispatches.Load(), localCalls.Load(), sum)
 	}
 	if localCalls.Load() != 1 || sum.Retried != 1 || sum.RetryRecovered != 1 {
 		t.Fatalf("local calls=%d summary=%+v note=%q, want the holder's own child to retry on the seat it reserved", localCalls.Load(), sum, results[0].RetryNote)
@@ -234,11 +242,60 @@ func TestAReservedLocalSeatDoesNotOutrankTheCallDeadlineInTheRetryNote(t *testin
 	}
 	lease := LocalLease(cfg.GPULockPath, cfg.StateDir)
 	want := "retry skipped: " + callDeadlinePrefix + " before a retry node was chosen; the local seat is reserved (" + HolderLine(lease) +
-		"), and a retry placed there would run on the cards the holder reserved (a reservation keeps every placement off them)"
+		"), and a retry placed there would run on the cards the holder reserved"
 	if pr.RetryNote != want {
 		t.Fatalf("retry_note = %q, want %q", pr.RetryNote, want)
 	}
 	if strings.Contains(pr.RetryNote, "no other node is eligible") {
 		t.Fatalf("retry_note = %q accuses nodes the deadline kept the delegator from asking", pr.RetryNote)
+	}
+}
+
+// TestRetryHeldWhyTellsAReservationFromAFence pins the one coupling in the retry note. alternativeNode
+// returns the lease clause as text, and retryHeldWhy picks the closing reason of the note by the
+// clause's opening (localReservedPrefix): a reservation is told with its own reason and a fence with
+// the fence's. If reservedClause were edited to open some other way, the note would fall back to the
+// fence's explanation, a wait at the affinity cordon, which is false for a reservation (the affinity
+// gate admits the load). The two exact-note tests would catch that as a mismatch of a long string;
+// this one names the coupling.
+func TestRetryHeldWhyTellsAReservationFromAFence(t *testing.T) {
+	holder := gpulease.Info{Held: true, Class: gpulease.ClassText, Epoch: 7, PID: 4242, Reason: "weights A/B"}
+
+	clause := reservedClause(holder)
+	if !strings.HasPrefix(clause, localReservedPrefix) {
+		t.Fatalf("reservedClause = %q does not open with localReservedPrefix %q: retryHeldWhy tells a reservation from a fence by that opening, so the retry_note would end on the fence's reason (a wait at the affinity cordon), which a plain reservation never meets", clause, localReservedPrefix)
+	}
+	if got := retryHeldWhy(clause); got != retryReservedWhy {
+		t.Errorf("retryHeldWhy(%q) = %q, want the reservation's reason %q", clause, got, retryReservedWhy)
+	}
+
+	fenceInfo := gpulease.Info{Held: true, Class: gpulease.ClassText, Epoch: 7, PID: 4242, Draining: true}
+	fenced, fence := Fenced(fenceInfo)
+	if !fenced {
+		t.Fatalf("fixture: a draining text lease must fence, got fenced=%v (%s)", fenced, fence)
+	}
+	// The fence's clause as alternativeNode words it: it must never be mistaken for a reservation.
+	fenceClause := "the local seat is fenced (" + fence + " — " + HolderLine(fenceInfo) + ")"
+	if got := retryHeldWhy(fenceClause); got != retryFenceWhy {
+		t.Errorf("retryHeldWhy(%q) = %q, want the fence's reason %q", fenceClause, got, retryFenceWhy)
+	}
+}
+
+// TestAReservedSeatReadsTheSameInARefusedReplacementAndASkippedRetry: replacementNode ends a refused
+// re-placement with the sentence a skipped retry names for the same seat (reservedClause), and each
+// of them writes it itself, so nothing but this test keeps the two copies from drifting apart. The
+// first placement's own reasons ("local seat reserved (...); no eligible remote - ...") are a
+// different shape and are not held to it.
+func TestAReservedSeatReadsTheSameInARefusedReplacementAndASkippedRetry(t *testing.T) {
+	cfg := testCfg(t)
+	info := reserveTheLocalSeat(t, &cfg)
+	r := &runner{cfg: cfg, route: "auto"}
+
+	_, why, ok := r.replacementNode(t.Context(), plainContract(), newPlacements(), 1)
+	if ok {
+		t.Fatalf("replacementNode placed the subtask on a reserved local seat: %q", why)
+	}
+	if want := ", and " + reservedClause(info); !strings.HasSuffix(why, want) {
+		t.Fatalf("replacementNode ended its refusal with %q, want it to end with %q: the clause a skipped retry names for the same seat", why, want)
 	}
 }

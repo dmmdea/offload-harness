@@ -1347,7 +1347,7 @@ func (r *runner) runOne(ctx context.Context, i int, contract core.AgentContract)
 	// budget the subtask no longer owns (fetchViews is sequential at
 	// fetchNodeViewTimeout per remote and Run derives no deadline of its own).
 	altCtx, cancel := context.WithTimeout(ctx, time.Duration(remaining)*time.Second)
-	alt, fence, ok := r.alternativeNode(altCtx, first, contract, pl)
+	alt, held, ok := r.alternativeNode(altCtx, first, contract, pl)
 	cancel()
 	if !ok {
 		// A fence is a REASON, not a silence: the caller has to be able to tell
@@ -1356,8 +1356,9 @@ func (r *runner) runOne(ctx context.Context, i int, contract core.AgentContract)
 		// reason: it ends the fleet read that would have named a node, and an empty
 		// note after it reads as "there was nowhere else to go". The clock decides,
 		// not altCtx, which also ends on the budget the retry is bounded by. A text reservation
-		// of the local seat (C-81) is told the same way: `fence` carries either clause, and
-		// retryHeldWhy words what follows it.
+		// of the local seat (C-81) is told the same way: `held` carries either clause, and
+		// retryHeldWhy words what follows it. Like a fence it is skipped and not queued for: a
+		// retry that found no node has no placement to wait with (ADR 0063, decision 10).
 		//
 		// The order is the point. "No other node is eligible" and "no other node could take
 		// the contract" are claims about nodes, which a read the deadline ended cannot support
@@ -1369,11 +1370,11 @@ func (r *runner) runOne(ctx context.Context, i int, contract core.AgentContract)
 		switch {
 		case r.call.reached():
 			first.RetryNote = "retry skipped: " + callDeadlinePrefix + " before a retry node was chosen"
-			if fence != "" {
-				first.RetryNote += "; " + fence + ", and " + retryHeldWhy(fence)
+			if held != "" {
+				first.RetryNote += "; " + held + ", and " + retryHeldWhy(held)
 			}
-		case fence != "":
-			first.RetryNote = "retry skipped: " + fence + " and no other node is eligible; " + retryHeldWhy(fence)
+		case held != "":
+			first.RetryNote = "retry skipped: " + held + " and no other node is eligible; " + retryHeldWhy(held)
 		case SeatDownDefer(first.Result):
 			// The defer promises a second placement on another node: when there is no
 			// other node the caller must be told it was considered and why it did not
@@ -3497,19 +3498,29 @@ const retryFenceWhy = "a retry placed there would wait out agent_lease_wait_sec 
 
 // localReservedPrefix opens the clause alternativeNode returns for a local seat it left out of a
 // retry because a text lease RESERVES it (register C-81), as "the local seat is fenced (...)" does
-// for a fence. retryHeldWhy tells the two apart by it.
+// for a fence. retryHeldWhy tells the two apart by this opening: the one coupling between the clause
+// and the closing reason of the note, and a string match on purpose, because alternativeNode returns
+// the clause as text and a typed return would reach past its helpers. The opening is edited here,
+// where reservedClause and retryHeldWhy both read it, and TestRetryHeldWhyTellsAReservationFromAFence
+// fails with this coupling named when a clause that reservedClause writes stops being told as one.
 const localReservedPrefix = "the local seat is reserved ("
 
-// reservedClause names a reservation for a retry: the words replacementNode ends a refused
-// re-placement with, so a reservation reads one way wherever it is reported.
+// reservedClause names a reservation for a retry in the sentence replacementNode ends a refused
+// re-placement with ("..., and the local seat is reserved (...)"), which replacementNode spells out
+// itself; TestAReservedSeatReadsTheSameInARefusedReplacementAndASkippedRetry keeps the two copies
+// identical. The first placement's own reasons ("local seat reserved (...); no eligible remote - ...")
+// word a reservation differently and are not this clause.
 func reservedClause(info gpulease.Info) string {
 	return localReservedPrefix + HolderLine(info) + ")"
 }
 
 // retryReservedWhy is why a retry is not placed on a reserved local seat. It is not the fence's
 // reason: the affinity gate admits the load of a plain reservation, so a dial would not wait at the
-// cordon, it would run, on the cards the holder reserved for its own work.
-const retryReservedWhy = "a retry placed there would run on the cards the holder reserved (a reservation keeps every placement off them)"
+// cordon, it would run, on the cards the holder reserved. It says that and nothing wider: the note
+// reaches callers, and "a reservation keeps every placement off them" is false for route=local (the
+// caller's explicit choice, never gated) and for the holder's own child (the inherited lease exempts
+// it), so the words stay about this retry.
+const retryReservedWhy = "a retry placed there would run on the cards the holder reserved"
 
 // retryHeldWhy closes the note of a retry that was not placed because a lease holds the local seat:
 // the reservation's reason for the clause reservedClause writes, and the fence's for any other.
@@ -3564,16 +3575,16 @@ func (r *runner) alternativeNode(ctx context.Context, first PlacedResult, contra
 			return placement{}, fmt.Sprintf("the local seat is fenced (%s — %s)", fence, HolderLine(lease)), false
 		}
 		// C-81: a plain text reservation does not FENCE (the affinity gate admits the load, which is
-		// why Fenced above leaves it alone), but it RESERVES the cards. A first placement never takes
-		// the local seat under one (route=auto waits for the holder, route=spread deals without the
-		// seat) and neither does replacementNode's last resort, and the forced local placement below
-		// is never read against the lease again, since attempt() runs a forced placement as given. So
-		// without this check the retry of an attempt that ran on a fleet node, a verification retry
-		// or a seat-down re-issue alike, was dialled onto cards a measurement had reserved. The
-		// reading is replacementNode's: Reserved, which exempts the holder's own child. An untried
-		// remote is the retry's place; with none the retry is not placed, as for a fence, and the note
-		// names the holder (replacementNode's refusal for a reserved seat is the same sentence, and
-		// its caller then waits in the capacity wait, which a retry does not have).
+		// why Fenced above leaves it alone), but it RESERVES the cards. A first placement on route auto
+		// or spread never takes the local seat under one (auto waits for the holder, spread deals
+		// without the seat) and neither does replacementNode's last resort, and the forced local
+		// placement below is never read against the lease again, since attempt() runs a forced
+		// placement as given. So without this check the retry of an attempt that ran on a fleet node,
+		// a verification retry or a seat-down re-issue alike, was dialled onto cards a measurement had
+		// reserved. The reading is replacementNode's: Reserved, which exempts the holder's own child.
+		// An untried remote is the retry's place; with none the retry is not placed, as for a fence,
+		// and the note names the holder (replacementNode's refusal for a reserved seat is the same
+		// sentence, and its caller then waits in the capacity wait, which a retry does not have).
 		if Reserved(lease) {
 			held := reservedClause(lease)
 			if chosen, base, found := r.remoteAlternative(ctx, st, pl); found {
