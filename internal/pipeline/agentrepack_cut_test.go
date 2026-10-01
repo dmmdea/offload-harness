@@ -7,7 +7,12 @@ import (
 	"github.com/dmmdea/offload-harness/internal/llamaclient"
 )
 
-// What the tail of a cut completion is: whitespace, a loop, or content.
+// What the tail of a cut completion is: whitespace, a loop, or content. A loop runs
+// to the END of the output (it is what spent the budget), so a repeat counts as
+// evidence only when it reaches the end and covers half the 256-byte window the tail
+// is read through (whitespace, which no JSON value needs in quantity, needs 32
+// bytes): the same byte 30 times, a markdown rule, base64 padding or a list of a
+// few identical items is ordinary content on a 1,000-token output (register C-80).
 func TestDegenerateTail(t *testing.T) {
 	line := `"a long repeated list item that is well over sixteen bytes long",` + "\n"
 	cases := []struct {
@@ -19,9 +24,22 @@ func TestDegenerateTail(t *testing.T) {
 		{"only whitespace", "  \n\t  \n", "whitespace"},
 		{"a JSON prefix and then spaces", `{"a":[` + strings.Repeat(" ", 400), "whitespace"},
 		{"spaces after real text, inside the window", `{"a":["x"]` + strings.Repeat(" ", 100), "repeating"},
-		{"one byte repeated", proseNoise(300) + strings.Repeat("!", 30), "repeated"},
+		{"one byte repeated", proseNoise(300) + strings.Repeat("!", 160), "repeated"},
 		{"a short block repeated, on one line", proseNoise(300) + strings.Repeat(`"", `, 40), "repeating"},
+		{"a block of 24 bytes repeated, cut inside the last copy", proseNoise(300) + strings.Repeat(`"alpha item", "beta", `, 9) + `"alpha it`, "repeating"},
+		{"thirty copies of a five-byte block reach the half window", proseNoise(300) + strings.Repeat(`"0", `, 30), "repeating"},
 		{"a block of lines repeated", proseNoise(200) + "\n" + strings.Repeat(line, 6), "line block"},
+		// Ordinary content that a short repeat used to read as a loop: every one of these
+		// is a legitimate tail of a cut completion.
+		{"a markdown rule at the end", proseNoise(300) + strings.Repeat("-", 40), ""},
+		{"a markdown rule in the middle", proseNoise(200) + strings.Repeat("-", 40) + proseNoise(100), ""},
+		{"base64 padding", proseNoise(300) + strings.Repeat("=", 26), ""},
+		{"a leader of dots", proseNoise(300) + strings.Repeat(".", 30), ""},
+		{"zeros in an identifier", proseNoise(300) + "id-" + strings.Repeat("0", 25) + "7", ""},
+		{"a list of twenty identical items", proseNoise(300) + strings.Repeat(`"0", `, 20), ""},
+		{"a list of a few identical pairs", proseNoise(300) + strings.Repeat(`"yes","no",`, 8), ""},
+		{"a short column of identical zero pairs", proseNoise(300) + strings.Repeat("00 ", 20), ""},
+		{"six identical lines", proseNoise(200) + "\n" + strings.Repeat(`  "N/A",`+"\n", 6), ""},
 		{"ordinary prose", proseNoise(500), ""},
 		{"dense digits", digitNoise(500), ""},
 		{"a short JSON prefix", `{"answer":"4`, ""},
@@ -77,5 +95,31 @@ func TestJudgeCutAndEscalation(t *testing.T) {
 	short := judgeCut(answer, llamaclient.GenResult{Content: digitNoise(40), TokensOut: 40})
 	if short.BytesPerToken != 0 || short.Needed != (len(answer)+2)/3+64 {
 		t.Errorf("short sample: %+v, want no measured density and the code's own estimate", short)
+	}
+}
+
+// periodicSuffix is how far back from the end a block repeats: the evidence the
+// loop test counts.
+func TestPeriodicSuffix(t *testing.T) {
+	cases := []struct {
+		s      string
+		period int
+		want   int
+	}{
+		{"hello", 1, 1},     // nothing repeats at the end: the block itself
+		{"aaaa", 1, 4},      // all of it
+		{"xaaaa", 1, 4},     // up to the first byte that differs
+		{"abab", 2, 4},      // a whole number of copies
+		{"xabcabcab", 3, 8}, // the last copy is cut mid-block
+		{"abcd", 2, 2},      // two different pairs are no repeat
+		{"abcabcabc", 3, 9}, // the whole string is the repeat
+		{"abcabcabc", 1, 1}, // a different period sees none of it
+		{"ab", 3, 2},        // shorter than one block
+		{"", 1, 0},          // nothing at all
+	}
+	for _, tc := range cases {
+		if got := periodicSuffix(tc.s, tc.period); got != tc.want {
+			t.Errorf("periodicSuffix(%q, %d) = %d, want %d", tc.s, tc.period, got, tc.want)
+		}
 	}
 }

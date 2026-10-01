@@ -95,7 +95,7 @@ func TestRunAgentTaskRepackDoesNotEscalateWhenMoreTokensCannotHelp(t *testing.T)
 	}{
 		{"a whitespace tail", `{"key_facts":["a"],"numbers":[` + strings.Repeat(" \n  ", 200), budget, answer, "degenerate"},
 		{"a repeating tail", `{"key_facts":["a"],"numbers":[` + proseNoise(500) + strings.Repeat(`"", `, 60), budget, answer, "degenerate"},
-		{"a single repeated byte", `{"key_facts":["a"],"numbers":[` + proseNoise(500) + strings.Repeat("!", 120), budget, answer, "degenerate"},
+		{"a single repeated byte", `{"key_facts":["a"],"numbers":[` + proseNoise(500) + strings.Repeat("!", 160), budget, answer, "degenerate"},
 		{"prose that already fits the budget", `{"key_facts":["` + proseNoise(budget*4), budget, answer, "inside"},
 		{"a budget that is already the cap", `{"key_facts":["` + digitNoise(8192), agentRepackMaxTokensCap, answerOfChars(30000), "cap"},
 	}

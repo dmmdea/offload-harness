@@ -363,20 +363,30 @@ func (c repackCut) observed(budget int) string {
 const (
 	// degenerateTailBytes is how much of the end of a cut completion is read for a loop.
 	degenerateTailBytes = 256
-	// degenerateMaxPeriod and degenerateMinBytes shape the repeat test: a block of
-	// up to 16 bytes, repeated at least four times and over at least 32 bytes.
-	degenerateMaxPeriod = 16
+	// degenerateMaxPeriod bounds the block a repeat test looks for, in bytes, and
+	// degenerateMinReps is how many times it must repeat.
+	degenerateMaxPeriod = 64
 	degenerateMinReps   = 4
-	degenerateMinBytes  = 32
+	// degenerateMinCover is how much of the end of the output a repeat of visible text
+	// must cover: half the window. A loop runs to the END (it is what spent the budget),
+	// and a run of one byte or a short block that is not that long is ordinary content on
+	// a 1,000-token output: a markdown rule, base64 padding, a leader of dots, a list of a
+	// few identical items. degenerateMinBlank is the same for a repeat made of whitespace
+	// alone, which no JSON value needs in quantity.
+	degenerateMinCover = 128
+	degenerateMinBlank = 32
 )
 
 // degenerateTail says what the end of a cut completion is when it is no content,
 // and "" when it reads as content. Whitespace, one byte repeated, a short block
 // repeated and a block of lines repeated are the shapes a constrained decoder
-// falls into when the grammar masks what the model wanted: agent.DegenerateRun
-// skips whitespace on purpose and agent.DetectRepetitionLoop wants four lines,
-// and neither sees `"", "", ""` or spaces on ONE line, which is the shape a
-// single-line JSON object runs to its cap in.
+// falls into when the grammar masks what the model wanted. The evidence must
+// reach the end of the output and cover enough of it: agent.DegenerateRun's
+// twenty-byte floor was built for a sampler that emits one token to the cap, and a
+// 40-byte rule or 26 bytes of padding anywhere in the window read as a runaway on
+// output that was only long. agent.DetectRepetitionLoop wants four lines and sees
+// neither `"", "", ""` nor spaces on ONE line, which is the shape a single-line JSON
+// object runs to its cap in, so the byte-level repeat test covers that.
 func degenerateTail(content string) string {
 	if strings.TrimSpace(content) == "" {
 		return "nothing but whitespace"
@@ -392,28 +402,39 @@ func degenerateTail(content string) string {
 	if strings.TrimSpace(tail) == "" {
 		return fmt.Sprintf("only whitespace in its last %d bytes", len(tail))
 	}
-	if b, n := agent.DegenerateRun(tail); n > 0 {
-		return fmt.Sprintf("%q repeated %d times", string(b), n)
-	}
-	for period := 1; period <= degenerateMaxPeriod; period++ {
-		window := max(period*degenerateMinReps, degenerateMinBytes)
-		if len(tail) < window {
+	for period := 1; period <= degenerateMaxPeriod && period <= len(tail); period++ {
+		block := tail[len(tail)-period:]
+		need := degenerateMinCover
+		if strings.TrimSpace(block) == "" {
+			need = degenerateMinBlank
+		}
+		need = max(need, period*degenerateMinReps)
+		covered := periodicSuffix(tail, period)
+		if covered < need {
 			continue
 		}
-		w := tail[len(tail)-window:]
-		periodic := true
-		for i := period; i < len(w); i++ {
-			if w[i] != w[i-period] {
-				periodic = false
-				break
-			}
+		if period == 1 && strings.TrimSpace(block) != "" {
+			return fmt.Sprintf("%q repeated %d times", block, covered)
 		}
-		if periodic {
-			return fmt.Sprintf("repeating %q", w[len(w)-period:])
-		}
+		return fmt.Sprintf("repeating %q", block)
 	}
-	if rep, ok := agent.DetectRepetitionLoop(content); ok {
+	if rep, ok := agent.DetectRepetitionLoop(content); ok && len(content)-rep.CutAt >= degenerateMinCover {
 		return fmt.Sprintf("repeating a %d-line block %d times", rep.Period, rep.Count)
 	}
 	return ""
+}
+
+// periodicSuffix is the length of the longest suffix of s that repeats with the
+// given period: the last `period` bytes, and every byte before them back to the
+// first that differs from the byte one period after it. It is `period` when the end
+// of s repeats nothing, and all of s when s is shorter than that.
+func periodicSuffix(s string, period int) int {
+	if period >= len(s) {
+		return len(s)
+	}
+	i := len(s) - 1
+	for i-period >= 0 && s[i] == s[i-period] {
+		i--
+	}
+	return len(s) - 1 - i + period
 }
