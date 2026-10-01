@@ -202,7 +202,7 @@ determine if a job is truly still going" — was not met by any of the three sur
 
      The consequences are deliberate. A loop that ends after the wall plus its grace never gets a
      node-side re-pack, whatever the seat's speed or the answer's size (a 2 KB answer on a 30 tok/s
-     seat is a 33 s re-pack): the time left buys no tokens, so the re-pack is skipped, and the
+     seat is a re-pack of about 25 s): the time left buys no tokens, so the re-pack is skipped, and the
      structured result depends on the delegator's rescue (item 8), which makes one grammar
      completion on the delegator's own agent seat. That rescue is wired on `agent_delegate`,
      `offload_research` and the `delegate` and `research` verbs and, as

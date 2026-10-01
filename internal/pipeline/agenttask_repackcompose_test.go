@@ -18,9 +18,10 @@ import (
 // chat lane needed.
 //
 // The timing below keeps every figure well inside its band, so no outcome rests on
-// one clock tick: a 2 s wall and 100 ms of grace leave about 2.05 s at the first
-// request, the seat does 1,000 tok/s, and the answer's own size (the skip floor)
-// is 564 tokens, about 0.56 s of it.
+// one clock tick. Where the outcome has a window on both sides (the first test), the
+// window is about 0.9 s wide and the figure sits in its middle; where it has one side
+// (the chat lane skipped for want of time), more elapsed time only makes the skip
+// surer.
 
 // escalationFake is a seat whose grammar completions are always cut at max_tokens
 // with dense, non-repeating text (the budget WAS the problem by the density test),
@@ -48,19 +49,24 @@ func composeContract() core.AgentContract {
 	return c
 }
 
-// The first request fits whole (1,024 tokens, the floor) and is cut on dense text
-// that needs about 1,160, then holds the seat for 1.25 s. What is left (about 0.8 s)
-// buys about 800 tokens: fewer than the first request carried and fewer than the
-// answer needs. The old gate sent the escalation anyway, clamped to those 800, and
+// A 3 s wall and 100 ms of grace leave about 3.05 s at the first request, the seat
+// does 500 tok/s, and the answer's own size (the skip floor) is 564 tokens, about
+// 1.1 s of it. The first request fits whole (1,024 tokens, the floor, 2 s of it) and
+// is cut on dense text that needs about 1,160, then holds the seat for 1.5 s. What is
+// left (about 1.5 s) buys about 760 tokens: fewer than the first request carried and
+// fewer than the answer needs, and more than the chat lane's floor, so the chat lane
+// goes out clamped. The old gate sent the escalation anyway, clamped to those 760, and
 // it was cut again.
 func TestRunAgentTaskRepackDoesNotEscalateToFewerTokensThanTheCutRequestCarried(t *testing.T) {
 	defer compressLiveness(t, 200*time.Millisecond, 100*time.Millisecond, core.AgentCeilingSecCap)()
 	answer := answerOfChars(1500)
-	fake := escalationFake(answer, 1250*time.Millisecond)
+	fake := escalationFake(answer, 1500*time.Millisecond)
 	srv := fake.server(t)
 	defer srv.Close()
 
-	wire := decodeWire(t, rateTestPipeline(t, srv.URL, 1000).Run(context.Background(), agentTestRequest(t, composeContract())))
+	contract := composeContract()
+	contract.TimeoutSec = 3
+	wire := decodeWire(t, rateTestPipeline(t, srv.URL, 500).Run(context.Background(), agentTestRequest(t, contract)))
 	if got := fake.grammarCNT.Load(); got != 1 {
 		t.Fatalf("grammar requests = %d, want 1: the time left buys fewer tokens than the cut request carried, so a resend cannot finish", got)
 	}
@@ -82,7 +88,7 @@ func TestRunAgentTaskRepackDoesNotEscalateToFewerTokensThanTheCutRequestCarried(
 	// The chat lane was sized to what the time bought, under its own budget and over
 	// the answer's size.
 	if mt := d[1].MaxTokens; mt >= agentRepackMaxTokens || mt < expectedRepackTokens(answer) || d[1].ClampedFrom != agentRepackMaxTokens {
-		t.Errorf("chat attempt = %+v, want it clamped from %d to what ~0.8 s buys (%d <= n < %d)", d[1], agentRepackMaxTokens, expectedRepackTokens(answer), agentRepackMaxTokens)
+		t.Errorf("chat attempt = %+v, want it clamped from %d to what ~1.5 s buys (%d <= n < %d)", d[1], agentRepackMaxTokens, expectedRepackTokens(answer), agentRepackMaxTokens)
 	}
 }
 
