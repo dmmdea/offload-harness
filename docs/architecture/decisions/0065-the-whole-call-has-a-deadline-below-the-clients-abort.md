@@ -92,7 +92,12 @@ measurement of the client.
    intent open (`orphanable`): the node may still finish it, and the recovery pass may still harvest it. The one
    exception is a job the node has said will never run (a confirmed withdrawal, or its own record of a job it never
    ran): the give-up already cleared `orphanable` for it, the cut leaves that as it found it, and the intent closes as
-   it does for any give-up (decision 5).
+   it does for any give-up (decision 5). A job whose terminal answer the call had already read is the other: a node's
+   own defer that was still being worked on when the deadline passed (the usual case is the delegator's rescue of a
+   finished answer, [ADR 0066](0066-a-seat-that-goes-down-is-waited-for-and-the-failed-step-reissued.md)) is cut as `had been answered by <node> (job <id>)`,
+   never as `still on` the node, and its intent closes as the terminal observation it is. "Still on the node, not
+   taken back" is false of a job that ended, and an intent left open for it would have the recovery pass collect an
+   outcome the call has already published.
    A subtask nobody ran (never started, abandoned, or cut before it was placed) names no node and no
    seat, as `exhausted()` already does for "no node took it", and is marked `Unplaced`. Once the run
    begins draining its PAIR emitter, a frame from an abandoned goroutine is dropped: `Emit` adds to a
@@ -189,6 +194,22 @@ measurement of the client.
   deadline ended cannot support. A retry whose node selection the deadline ended says so in its
   `retry_note` (`retry skipped: call deadline reached before a retry node was chosen`), where an empty
   note would read as there being nowhere else to go.
+- A seat-down re-placement ([ADR 0066](0066-a-seat-that-goes-down-is-waited-for-and-the-failed-step-reissued.md)) is an attempt like any other, and the deadline
+  meets it in four places. (1) The credit it carries (the node's admission, its wait on the dead seat and the wall of
+  a failed rescue, at most one contract wall together) lengthens the retry's budget on the contract's clock and never
+  on the call's: a re-placement that is running, or waiting for capacity, when the deadline passes is cut with the
+  cut's reason and a row of its own (`budget`; a wait gets a closing row under a job id of its own), whatever its
+  credited budget still holds. The first attempt, a seat-down defer produced in time, is not rewritten (decision 2):
+  the cut rides in its `retry_note`, as an abstention's does, and a retry the deadline cut counts for nothing against
+  the per-page cap (`retryRanAndFailed` reads the retry's own verdict, and a cut is the call's clock, not the page's).
+  (2) A seat-down defer produced after the deadline is the deadline's outcome: a budget defer that quotes what the
+  run reported, keeps what it measured (`seat_recoveries`, `seat_down_wait_sec`), is not re-placed and is not counted
+  as lost to the stack. That covers a local run answering from the unwind and the finished answer of a seat lost in the
+  structured re-pack, which the delegator tries to re-pack itself first (the rescue runs on the call's context, so the
+  deadline ends it, and the defer is then produced after the deadline); a rescue is never started on a live context
+  once the deadline has passed. (3) When the deadline ends a retry's choice of node, the note says so before it says
+  that no other node could take the contract: the order of the two notes in `runOne` is deliberate. (4) The cut of a
+  job the node had already answered says so (decision 3).
 - Every call-deadline row carries `reason_code` `budget`: the closed set of
   [ADR 0064](0064-a-delegator-takes-back-what-it-has-not-started.md) has no member of its own for a cut, so a
   reader counting `budget` rows tells a cut from a node-side ceiling by the reason's opening
@@ -243,6 +264,8 @@ measurement of the client.
 - ADR [0063](0063-placement-holds-instead-of-sleeping-or-refusing.md) (the capacity wait, the queue budget
   and the page cap the deadline composes with),
   ADR [0064](0064-a-delegator-takes-back-what-it-has-not-started.md) (the withdraw a give-up asks for),
+  ADR [0066](0066-a-seat-that-goes-down-is-waited-for-and-the-failed-step-reissued.md) (the seat-down re-placement and the rescue before
+  it, an attempt like any other for this deadline: see the Consequence on the seat-down re-placement),
   ADR [0055](0055-walls-are-ceilings-liveness-is-progress.md) (liveness ceilings),
   ADR [0028](0028-delegation-durability-is-a-push-side-intent-ledger.md) (the intent ledger),
   ADR [0030](0030-pull-queue-ships-dark.md) (route=queue)

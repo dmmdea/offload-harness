@@ -821,7 +821,7 @@ for, or that waited out a seat going down, teaches it nothing). The busy hold's 
 an engine that cannot see a prefill (`/slots`, or vLLM without a KV-usage gauge). A `seat down:` reason means the
 seat's engine hung or died under the run and did not come back inside the recovery wait (see the table); a
 `seat not serving:` reason means llama-swap answered a 5xx for the seat (a start that failed, a health check that
-timed out) — not contention, so `concurrencyLimit` is not the knob; `seat contended:` is a 429 only. While the seat is
+timed out) — not contention, so `concurrencyLimit` is not the knob; `seat contended:` is a 429 only. Inside an `agent_delegate` or `offload_research` call the delegator re-places a `seat down:` defer on another node, and that re-placement answers to the call's deadline (`agent_call_deadline_sec`, [ADR 0065](architecture/decisions/0065-the-whole-call-has-a-deadline-below-the-clients-abort.md)) like any other attempt: the credit for the dead seat's wait lengthens the retry's own budget, never the call's, so a re-placement still running at the deadline is cut (its own `budget` row, and the cut is in the first attempt's `retry_note`), and a `seat down:` defer that arrives after the deadline is the call's `call deadline reached` defer and is not re-placed. While the seat is
 being loaded under a waiting request the line reads `… allowed in cold-load` (0.140.0), and a `stalled: seat still
 loading after …` reason means the load itself outlasted the cold-load ceiling: look at the seat's load, not at its
 prefill. `stalled: no byte … after the seat read ready` means the seat loaded and then answered nothing inside the

@@ -238,6 +238,14 @@ needs. It is not a promise that no healthy subtask is cut: time queued on a node
 wall, up to the queue budget the node's own estimate sets, ADR 0063: the lesser of the poll budget and
 300 s for a node that publishes none) and a capacity wait come on top, so a worst-case auto-sized
 subtask can run past it.
+A seat that goes down under a run ([ADR 0066](../architecture/decisions/0066-a-seat-that-goes-down-is-waited-for-and-the-failed-step-reissued.md)) meets the deadline like any other attempt.
+The delegator re-places the node's `seat down:` defer on another node and credits the dead seat's wait back to that retry's
+budget, but the credit is on the contract's clock, never the call's: a re-placement still running, or waiting for
+capacity, at the deadline is cut with a `budget` row of its own, and the published result is the first attempt (the
+seat-down defer, produced in time) with the cut in its `retry_note`, as for an abstention. A `seat down:` defer produced
+after the deadline (a local run answering from the unwind, or a finished answer the delegator's own rescue was still
+re-packing) is the deadline's budget defer: it quotes what the node reported, keeps `seat_recoveries` and
+`seat_down_wait_sec`, and is not re-placed.
 Raise `agent_call_deadline_sec` for such work, but keep it below the client's abort; a value at or above
 it, or a negative that was meant as a number, is reported by `doctor` and once at startup. The CLI verbs
 take no deadline.
