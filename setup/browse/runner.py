@@ -614,6 +614,34 @@ def off_list_targets(urls, allow_hosts) -> list[str]:
     return bad
 
 
+def activate_lane_tab(cdp, target) -> bool:
+    """Bring the lane's own tab to the front of its window (CDP Target.activateTarget). Never raises.
+
+    jev opens the lane's tab with Target.createTarget(background=True): it reports visibilityState
+    "visible" but is not the window's active tab, and Chromium then produces almost no frames for it.
+    A dialog's open transition starts late or not at all (measured on a production web app: opacity 0
+    at +0.1 s, no transition within +0.33 s, fully open only at +2.1 s when left alone; 0.957 at +0.2 s
+    and 1 at +0.4 s once the tab was activated), so the model reads an empty page. Activating the tab
+    makes it render like a foreground tab.
+
+    Activation switches the window's active tab, so the harness sends activate_tab only with a dedicated
+    browser endpoint (browse_cdp_url) and never against the operator's everyday browser. `cdp` is jev's
+    browser-level call (no session: Target.activateTarget is a Target-domain command on the browser) and
+    `target` is the lane's own target id, Browser.target. A failure is logged and the run continues exactly
+    as before: the tab just stays in the background.
+    """
+    if not target:
+        log("activate_tab skipped: the lane has no tab id")
+        return False
+    try:
+        cdp("Target.activateTarget", targetId=target)
+    except Exception as exc:  # noqa: BLE001 - an optimisation must never fail the run
+        log(f"activate_tab skipped: {type(exc).__name__}: {str(exc)[:200]}")
+        return False
+    log("activated the lane's tab (activate_tab)")
+    return True
+
+
 class Run:
     def __init__(self, start, proto):
         self.proto = proto
@@ -623,6 +651,10 @@ class Run:
         self.allow_labels = list(start.get("allow_labels") or [])
         self.allow_hosts = list(start.get("allow_hosts") or [])
         self.unattended = bool(start.get("unattended", True))
+        # Opt-in, sent true by the harness only with a dedicated browser endpoint. Only a JSON true counts
+        # (a string such as "false" is truthy in Python), so the default and every malformed value is off.
+        self.activate_tab = start.get("activate_tab") is True
+        self.tab_activated = False  # set before the attempt: one attempt per run, success or not
         self.executed = 0
         self.removed: list[str] = []
         self.observed_once = False
@@ -697,6 +729,13 @@ def _install_patches(run: Run, model, agent_mod, browser_mod) -> None:
     browser_mod.browser_operation = browser_operation
 
     def observe(self, *args, **kwargs):
+        if run.activate_tab and not run.tab_activated:
+            # Once per run, at the first observe, before the settle and before jev's own read (activate_lane_tab
+            # says why). The flag is set first so a failed attempt is never retried on every observe. A
+            # browser-level call in no session, with the lane's own target id (Browser.target): it cannot
+            # touch any other tab of the browser.
+            run.tab_activated = True
+            activate_lane_tab(browser_mod.cdp, getattr(self, "target", None))
         if getattr(self, "after_input", None):
             # An action just ran (jev's act sets after_input and its observe clears it). jev's own wait
             # after an input is about 50 ms, too short for a dialog the page mounts on its own timer
@@ -939,6 +978,15 @@ def main() -> int:
 
             run.capture.get_body = get_body
         _install_patches(run, model, agent_mod, browser_mod)
+
+        if run.activate_tab:
+            # jev's ensure_daemon reuses any live daemon of this name and never compares it with the endpoint this
+            # run pins. A lane daemon left by an earlier run (a hard crash, a failed stop) may still be attached to
+            # the operator's everyday browser, and the activation would then switch THAT browser's active tab.
+            # Stop it first (the lane's own name only; it changes nothing when none is running), so the Agent below starts a
+            # daemon on the pinned endpoint. Only for a run that activates: the setting's invariant is that it
+            # never acts in the everyday browser.
+            stop_lane_daemon()
 
         agent = agent_mod.Agent(run.url, run.goal)
         agent_built = True
