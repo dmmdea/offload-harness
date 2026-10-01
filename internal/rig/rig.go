@@ -128,8 +128,10 @@ var (
 //     1b. call-deadline: the reason opens with core.CallDeadlineReasonPrefix — the
 //     whole-call deadline (ADR 0065) cut the subtask, so it says nothing about the
 //     seat's speed. Ahead of timeout because the wall-timeout pattern matches the bare
-//     word "deadline"; behind seat-infra because a cut that quotes the run's own
-//     infrastructure verdict keeps that class and that verdict is the seat's.
+//     word "deadline"; behind seat-infra, which reads the row's CLASS: a cut is always
+//     class budget (the run's own verdict rides in the reason, never in the class), so a
+//     cut reaches this axis whatever the run reported, and only a row that carries an
+//     infrastructure, config or contract class of its own stays the seat's.
 //  2. timeout: the reason/error says wall timeout / deadline, or
 //     defer_class == "budget" with stop_reason "error" and no step-budget text.
 //     2b. reasoning-starved: stop_reason "reasoning_starved" or "empty", or the
