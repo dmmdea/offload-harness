@@ -441,6 +441,29 @@ exclusive card, and three measurement rows read the seat's 10 GiB as their own f
   plain `gpu release` prints a note when a warm is owed.
 - **The warm is heartbeat for its length** (`drainRenewEvery`, 15 s), so a 27B load of several minutes cannot go stale
   under the 120 s heartbeat TTL; losing the lease mid-warm cancels the request and is reported.
+- **A queued `--unload-seat` acquire finds the card empty because of the ORDER, not because it waits (register D-124
+  clause b, validated 2026-10-01).** The live failure of 2026-09-19 — after `gpu reserve --unload-seat` the seat was
+  still loaded, the previous holder's deferred warm-back having landed between the new holder's unload and its first
+  load — is the unordered warm this section fixed. The orderings that stand today, each pinned from the acquirer's
+  side (`gpu_acquire_warm_test.go`: what the acquirer's command finds when it starts, and whose lease was held when
+  the warm landed):
+  1. *Wrapper form.* The warm runs before `Release()`, under the holder's lease, heartbeat for its length. A queued
+     acquirer is either seen as a waiter (the warm is skipped; it belongs to the last holder) or waits for the
+     release that follows the warm, so its drain and unload run after the warm settled. A warm whose health request
+     is answered 5xx while the load carries on is watched to completion under the same lease.
+  2. *Owed, not in flight* (a holder lost its lease before it could warm): the marker stays; the next
+     `--unload-seat` holder drains a cold seat, runs its command on the cleared card, and pays the warm at its own
+     release, never ahead of its command.
+  3. *`gpu release --warm-seat --epoch N` with the detached holder alive:* the warm runs under that holder's lease and
+     the release follows it.
+  4. *`gpu release --warm-seat` on a FREE card* (the detached holder's `--for` window ended first): nothing holds the
+     card, so the warm runs unleased and an acquirer is not ordered behind it. This is the operator-explicit path and
+     is left as it is; the acquirer's drain still waits out a load that llama-swap lists as `starting`
+     (`TestDrainWaitsThroughAStartingSeatWithoutTouchingTheUpstream`), so what is unordered there is only the
+     moment before llama-swap lists the load.
+
+  There is deliberately NO acquire-side wait: the releasing lease already outlives its warm, and a second wait on top
+  of it would only double the queue.
 
 **A failed drain is not a cordon, and a stuck run is not a wait (register C-50).** A drain that misses its deadline
 clears the `draining` stamp before returning — the detach form keeps the lease held and non-exclusive, so new runs are
