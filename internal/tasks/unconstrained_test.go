@@ -52,13 +52,16 @@ func TestBuildForZeroCapsIsBuildByteForByte(t *testing.T) {
 // Grammar. The digests were taken from Build as it stood before the unconstrained path existed
 // (base ee4e23c9), so an edit that leaks the shape instruction into Build, and through it into
 // every normal seat's prompt-prefix fingerprint and cache key, fails here even if BuildFor and
-// Build drift together.
+// Build drift together. They were re-taken once, for register C-80, when gbnf's whitespace rule
+// became llama.cpp's bounded one: with the old rule swapped back into the grammar the original
+// digests reproduce exactly, so that rule is the only byte that moved (and every grammar seat's
+// prompt-prefix fingerprint moved with it, once).
 func TestGrammarSeatPromptGolden(t *testing.T) {
 	want := map[string]string{
-		"classify":  "4a9b2fd2eb1fa6f1151eaa666f9e5b27e5364596baa7a3dc6f32fa449c78fd96",
-		"extract":   "c6db82b9248f2dde47ff25a512527adc97104c9b0919fb36494372c6da6c13e0",
-		"summarize": "8be46b03cbd7d15f0a7b81f50166ecc43cdeb8796a65c3875983f97baef0df97",
-		"triage":    "a302175e415dfe6fadcf8c10fbc64188dc22a7f52206ca6ec86ad62fe32db9b5",
+		"classify":  "cbadb0f198dc0a3dc15e2669f5f4b937f98b5006477354640ef0b93afdeb0711",
+		"extract":   "6ded91a297e35c88008816e3b086c0d85f7904997be75e3c669e3c4ef93f251c",
+		"summarize": "54c2607ba00db595afd8d6c3c185cfd112644ae6afa6108018a02f5fe75e8d0e",
+		"triage":    "5015af69d913a31e709aacd08fbbd7dfd051598cf5dbefcf02fef52576aa3f03",
 	}
 	for name, req := range textReqs() {
 		b, err := Build(req)

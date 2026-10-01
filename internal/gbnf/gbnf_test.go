@@ -143,3 +143,45 @@ func TestJSONSchemaShape(t *testing.T) {
 		t.Errorf("bullets items = %v, want {\"type\":\"string\"}", arr["items"])
 	}
 }
+
+// TestGrammarWhitespaceIsBounded pins llama.cpp's own json.gbnf rule for the
+// whitespace between JSON tokens: empty, one space, or one newline plus at most
+// twenty spaces/tabs. The rule used to be `[ \t\n]*`, which is legal forever: a
+// constrained model whose preferred next token the grammar masks can sample
+// whitespace until max_tokens and still be "valid" (register C-80: a structured
+// re-pack ran to its cap twice on one request). Every user of the grammar (the
+// extract lane, the classifiers, the agent re-pack) shares this rule.
+func TestGrammarWhitespaceIsBounded(t *testing.T) {
+	fields := []Field{
+		{Name: "summary", Type: TString},
+		{Name: "bullets", Type: TStringArray},
+		{Name: "label", Type: TEnum, Enum: []string{"a", "b"}},
+		{Name: "n", Type: TNumber},
+	}
+	grammars := map[string]string{
+		"object":        Object(fields),
+		"think-wrapped": WrapThinking(Object(fields)),
+	}
+	const want = `ws ::= | " " | "\n" [ \t]{0,20}`
+	for name, g := range grammars {
+		var wsRules []string
+		for _, line := range strings.Split(strings.ReplaceAll(g, "\r", ""), "\n") {
+			if strings.HasPrefix(line, "ws ::=") {
+				wsRules = append(wsRules, line)
+			}
+		}
+		if len(wsRules) != 1 {
+			t.Fatalf("%s: want exactly one ws rule, got %q\n%s", name, wsRules, g)
+		}
+		if wsRules[0] != want {
+			t.Errorf("%s: ws rule = %q, want %q", name, wsRules[0], want)
+		}
+		if strings.ContainsAny(wsRules[0], "*+") {
+			t.Errorf("%s: the ws rule repeats without a bound: %q", name, wsRules[0])
+		}
+		// No other rule may bring an unbounded whitespace class back in.
+		if strings.Contains(g, `[ \t\n]*`) || strings.Contains(g, `[ \t]*`) || strings.Contains(g, `[ \t\n]+`) {
+			t.Errorf("%s: an unbounded whitespace class survives in the grammar:\n%s", name, g)
+		}
+	}
+}
