@@ -1,4 +1,4 @@
-// Copyright 2026 Daniel Martinez and contributors. Licensed under Apache-2.0. See LICENSE.
+// Copyright 2026 dmmdea and contributors. Licensed under Apache-2.0. See LICENSE.
 // Hand-authored shared plumbing for the final-glue command family
 // (load, kill, events, logs triage, captures export, upstream open,
 // configure, service status). Not a command: no pp:data-source marker.

@@ -1,4 +1,4 @@
-// Copyright 2026 Daniel Martinez and contributors. Licensed under Apache-2.0. See LICENSE.
+// Copyright 2026 dmmdea and contributors. Licensed under Apache-2.0. See LICENSE.
 // Hand-authored (wave LS-1): MCP outputSchema + structuredContent.
 //
 // Until now every tool this server exposed advertised its result as TEXT. An

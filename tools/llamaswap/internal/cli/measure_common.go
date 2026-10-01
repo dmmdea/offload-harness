@@ -1,4 +1,4 @@
-// Copyright 2026 Daniel Martinez and contributors. Licensed under Apache-2.0. See LICENSE.
+// Copyright 2026 dmmdea and contributors. Licensed under Apache-2.0. See LICENSE.
 // Hand-authored shared plumbing for the measurement command family
 // (gguf, vram, fit, ctx, bench, scratch, gate, build check, verify).
 // Not a command: no pp:data-source marker.

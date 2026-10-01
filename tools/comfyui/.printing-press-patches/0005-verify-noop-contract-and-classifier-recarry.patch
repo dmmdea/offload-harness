@@ -1,4 +1,4 @@
-From: Claude (nightshift 2026-08-24) on behalf of Daniel Martinez
+From: Claude (nightshift 2026-08-24) on behalf of dmmdea
 Subject: [PATCH 0005] verify-mode noop contract, 0003 classifier re-carry, upload-mask dry-run order
 
 Press 4.31.x changed writeNoop to return a typed *cliError sentinel (unwrap with

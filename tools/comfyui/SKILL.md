@@ -1,7 +1,7 @@
 ---
 name: pp-comfyui
 description: "Drive a local ComfyUI render server from the shell, with a durable record of every run the server itself forgets. Trigger phrases: `submit a comfyui graph`, `why can't comfyui see my model`, `how long did that render take`, `what made this output file`, `check what this loader accepts`, `use comfyui`, `run comfyui`."
-author: "Daniel Martinez"
+author: "dmmdea"
 license: "Apache-2.0"
 argument-hint: "<command> [args] | install cli|mcp"
 allowed-tools: "Read Bash"

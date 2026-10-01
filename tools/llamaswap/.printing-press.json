@@ -7,11 +7,11 @@
   "cli_name": "llamaswap-pp-cli",
   "creator": {
     "handle": "dmmdea",
-    "name": "Daniel Martinez"
+    "name": "dmmdea"
   },
   "owner": "dmmdea",
   "printer": "dmmdea",
-  "printer_name": "Daniel Martinez",
+  "printer_name": "dmmdea",
   "spec_path": "spec.yaml",
   "spec_format": "internal",
   "spec_checksum": "sha256:22adcd85eb84d84b53c73cbbaaa136185c7e5ca35668a154f58a246362cd74b5",

@@ -1,4 +1,4 @@
-// Copyright 2026 Daniel Martinez and contributors. Licensed under Apache-2.0. See LICENSE.
+// Copyright 2026 dmmdea and contributors. Licensed under Apache-2.0. See LICENSE.
 // Hand-authored novel command family: the config surface.
 // pp:data-source local
 // Supported strategies: auto, local, live, or computed. `config` reads the

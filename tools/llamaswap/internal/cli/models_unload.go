@@ -1,4 +1,4 @@
-// Copyright 2026 Daniel Martinez and contributors. Licensed under Apache-2.0. See LICENSE.
+// Copyright 2026 dmmdea and contributors. Licensed under Apache-2.0. See LICENSE.
 // Hand-authored (wave A spine): the generated endpoint mirror for
 // POST /api/models/unload/{model} shipped an unguarded fire-and-forget call.
 // This replaces it with alias resolution, keep-set refusal, and a drain check

@@ -1,4 +1,4 @@
-// Copyright 2026 Daniel Martinez and contributors. Licensed under Apache-2.0. See LICENSE.
+// Copyright 2026 dmmdea and contributors. Licensed under Apache-2.0. See LICENSE.
 // Hand-authored (wave A spine): the generated mirror for POST /api/models/unload
 // called the non-selective bulk route directly, which on this box takes the mem0
 // memory stack down. This version unloads per model and excludes the keep-set.

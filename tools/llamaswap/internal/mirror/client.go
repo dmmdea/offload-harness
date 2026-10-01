@@ -1,4 +1,4 @@
-// Copyright 2026 Daniel Martinez and contributors. Licensed under Apache-2.0. See LICENSE.
+// Copyright 2026 dmmdea and contributors. Licensed under Apache-2.0. See LICENSE.
 
 // Package mirror holds the epoch-aware llama-swap activity/event mirror and the
 // typed client the spine commands share.
