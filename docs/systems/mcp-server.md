@@ -106,7 +106,8 @@ display card refuses by the guard's name, before any seat is touched. Both agent
 subtasks also take `layer`, a composite node's declared layer id whose agent seat the subtask
 runs on (register A-100: the Lenovo's `fast` layer is its 35B digest seat — a node that does
 not declare the layer is ineligible for that subtask, an idle local box that does not declare it
-does not keep it, and with no node declaring it the subtask defers naming the layer), and every result and
+does not keep it (route=auto reads the fleet for it, route=spread never deals it the local slot: register A-108), and with no
+node declaring it the subtask defers naming the layer), and every result and
 defer on a composite box carries `placed` {tier, layer, role, seat, devices, reason, guard,
 evicts} — absent on a plain box), its default
 timeout honors config `agent_timeout_sec` (else the built-in 180s), and its result reports the
