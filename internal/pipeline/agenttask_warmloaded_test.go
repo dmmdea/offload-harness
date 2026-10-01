@@ -220,6 +220,17 @@ func TestAWarmRequestThatFailedIsNotRecordedAsAColdLoad(t *testing.T) {
 // The pre-flight's budget ran out while the seat still read `starting`: the run saw
 // the START of a load and never its end, so what it measured is a lower bound and
 // not a load. Nothing may be recorded as one.
+//
+// The budget is 4 s, not the 3 s of one poll interval, on purpose. The pre-flight
+// sleeps a poll only when the whole interval fits in what is LEFT of its budget, and
+// what is left is the budget minus the microseconds the cordon and the run registry
+// took before the pre-flight started. A budget of exactly one poll is therefore a
+// coin flip on the clock: a coarse Windows clock reads those microseconds as zero
+// and the pre-flight sleeps its poll, a nanosecond Linux clock charges them, leaves
+// the pre-flight a few microseconds under 3 s, and it returns at once with nothing
+// waited (the test failed on Linux CI while passing on Windows). 4 s fits one poll and
+// never a second, so the pre-flight waits exactly 3 s on both.
+// agenttask_windowprobe_test.go met the same coin flip.
 func TestAPreflightThatRanOutOfBudgetOnAStartingSeatRecordsNoColdLoad(t *testing.T) {
 	defer compressLiveness(t, 5*time.Second, 100*time.Millisecond, core.AgentCeilingSecCap)()
 	fake := &agentFake{
@@ -233,13 +244,13 @@ func TestAPreflightThatRanOutOfBudgetOnAStartingSeatRecordsNoColdLoad(t *testing
 	defer srv.Close()
 	dir := sharedStateDir(t)
 	cfg := config.Config{Endpoint: srv.URL, Model: "workhorse", AgentModel: agentTestSeat, FleetNodeID: "node-t", Temperature: 0.1,
-		StateDir: dir, AgentAdmissionWaitSec: 3}
+		StateDir: dir, AgentAdmissionWaitSec: 4}
 	p := New(cfg, llamaclient.New(srv.URL, "", cfg.Model, 30*time.Second), nil, nil)
 	contract := testContract()
 	contract.OutputSchema = nil
 	wire := decodeWire(t, p.Run(context.Background(), agentTestRequest(t, contract)))
-	if wire.AdmissionWaitSec < 2.9 {
-		t.Fatalf("admission_wait_sec = %.1f: the pre-flight did not spend its 3 s budget on the starting seat (premise)", wire.AdmissionWaitSec)
+	if wire.AdmissionWaitSec < 2.9 || !strings.Contains(wire.AdmissionNote, "budget spent while "+agentTestSeat+":starting") {
+		t.Fatalf("admission_wait_sec = %.1f, admission_note = %q: the pre-flight did not wait a poll interval and run out of its budget on the starting seat (premise)", wire.AdmissionWaitSec, wire.AdmissionNote)
 	}
 	if got := storedSeat(t, dir); len(got.ColdLoads) != 0 || got.ColdLoadSec != 0 {
 		t.Fatalf("cold_loads=%v cold_load_sec=%.1f: a load that had not finished when the budget ran out was recorded as if it had", got.ColdLoads, got.ColdLoadSec)
