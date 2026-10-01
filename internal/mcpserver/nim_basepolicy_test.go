@@ -132,3 +132,62 @@ func TestOffloadNIMListedBaseRunsCleanly(t *testing.T) {
 		}
 	}
 }
+
+// nimServerDefaultRoot leaves state_dir unset, as the live hosts' configs do, so
+// the audit row has to find the machine-wide state root the GPU lease uses.
+func nimServerDefaultRoot(t *testing.T, envRoot string) *Server {
+	t.Helper()
+	t.Setenv("LOCAL_OFFLOAD_STATE_DIR", envRoot)
+	cfg := config.Default()
+	cfg.Home = t.TempDir()
+	cfg.StateDir = ""
+	cfg.NIMEndpoint = "https://integrate.api.nvidia.com/v1"
+	return New(pipeline.New(cfg, nil, nil, nil))
+}
+
+// SF-05: with state_dir unset every would-refuse row was dropped with "no
+// state_dir" (live proof 2026-10-01), so the promotion to enforce had nothing
+// to count. The row lands in the resolved state root instead.
+func TestOffloadNIMAuditRowLandsInTheDefaultStateRoot(t *testing.T) {
+	var hits atomic.Int64
+	nim := fakeNIM(t, &hits)
+	root := t.TempDir()
+	s := nimServerDefaultRoot(t, root)
+	res, err := s.handleNIM(context.Background(), callReq(fmt.Sprintf(`{"prompt":"hello","base":%q}`, nim.URL+"/v1")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := decodeResult(t, res)
+	note, _ := m["base_policy"].(string)
+	if m["content"] != "ok" || !strings.HasPrefix(note, "audit:") {
+		t.Fatalf("audit mode must run the call and say it would be refused: %v", m)
+	}
+	if strings.Contains(note, "not written") {
+		t.Fatalf("the would-refuse row was dropped: %s", note)
+	}
+	rows := auditRows(t, root)
+	if len(rows) != 1 || !strings.Contains(rows[0], `"mode":"audit"`) {
+		t.Fatalf("audit rows in the default state root = %v, want one audit row", rows)
+	}
+}
+
+// A state root the resolver refuses (a cloud-sync folder) still lets the
+// audit-mode call run, and the note names why the row was not written.
+func TestOffloadNIMAuditSaysWhyTheRowWasNotWritten(t *testing.T) {
+	var hits atomic.Int64
+	nim := fakeNIM(t, &hits)
+	synced := filepath.Join(t.TempDir(), "Dropbox", "state")
+	s := nimServerDefaultRoot(t, synced)
+	res, err := s.handleNIM(context.Background(), callReq(fmt.Sprintf(`{"prompt":"hello","base":%q}`, nim.URL+"/v1")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := decodeResult(t, res)
+	note, _ := m["base_policy"].(string)
+	if m["content"] != "ok" || !strings.Contains(note, "not written") || !strings.Contains(note, "cloud-sync") {
+		t.Fatalf("a refused state root must leave the call running and say why no row was written: %v", m)
+	}
+	if rows := auditRows(t, synced); len(rows) != 0 {
+		t.Fatalf("no row may be written under a refused state root: %v", rows)
+	}
+}
