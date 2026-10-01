@@ -46,7 +46,7 @@ pinned, env-scrubbed and machine-gated. See
 - Which of the three edit-shaped routes fits a given change?
 - When is batching worth it?
 - Why is FLUX not an option?
-- How does a non-commercial model (Qwen-Image-2.1) ship, and how is every result it makes tagged?
+- How is a named opt-in family (Qwen-Image-2.1) selected, and what does its result carry?
 - Which card does a ComfyUI route render on, and how is that pinned per binding?
 
 ## Scope
@@ -550,9 +550,8 @@ root is a `MISSING` row instead of a green doctor and a failed render.
 
 A 7B single-stream DiT with a Qwen3-VL-8B encoder and a new 4-channel (RGBA) VAE — not a variant of
 Qwen-Image 2512, whose graph cannot drive it. Needs **ComfyUI ≥ v0.37.0** (the nodes arrived in PR
-#16400; master ≥ `95539f56` adds the KV-cache placement fix #16429). Weights: **Qwen Research License**
-(non-commercial) — bind it only as a named family with `"license": "Qwen Research License",
-"commercial_use": false`. The download set is in `setup/SETUP-AGENT.md`.
+#16400; master ≥ `95539f56` adds the KV-cache placement fix #16429). Bind it as a named family
+(overlay example: `docs/OPERATOR-GUIDE.md`). The download set is in `setup/SETUP-AGENT.md`.
 
 - **T2I graph:** `UNETLoader` + `CLIPLoader(type "qwen_image")` + `VAELoader` → `TextEncodeQwenImage21`
   → sampler → `VAEDecode` (4-channel) → `SplitImageWithAlpha` (opaque RGB, the default) → `SaveImage`.
@@ -749,10 +748,9 @@ protects the environment from it. `compose_video`'s `html` and `project_dir` inp
 kind of trusted-caller interface: the page runs in a Chrome without a sandbox. The fleet door
 therefore accepts vetted templates only. See [Security](#security) below.
 
-**Licenses.** A non-commercial family's output is tagged (`license`, `commercial_use: false`,
-`license_note`) and its ledger row carries the license, but the tag is informational: nothing stops
-a caller from republishing the file. Do not route brand or client work to a family whose
-`commercial_use` is false, and read an absent license as UNKNOWN
+**Licenses.** A family that declares a license tags its output (`license`, `commercial_use`,
+`license_note`) and its ledger row; the tag is informational and enforces nothing. An absent license
+reads as UNKNOWN
 ([ADR 0058](../architecture/decisions/0058-non-commercial-model-families-ship-only-as-named-license-tagged-opt-ins.md)).
 
 ## Capability is derived, never declared

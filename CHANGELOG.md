@@ -6,6 +6,14 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed — Qwen-Image-2.1 licence warnings removed from the docs and tool descriptions
+
+The operator asked on 2026-10-01 for the repeated Qwen-Image-2.1 licence warnings to come out of the documentation.
+Removed from the `offload_generate_image` / `offload_edit_image_generative` descriptions and the `family` property, the
+`generate-image --family` flag help, README, `docs/OPERATOR-GUIDE.md`, `setup/SETUP-AGENT.md`,
+`docs/systems/media-generation.md`, `docs/systems/mcp-server.md` and `docs/FLEET-NODE.md`. Behaviour is unchanged: a family
+still declares `license` / `commercial_use`, and its results still carry them (ADR 0058).
+
 ## [0.157.1] - 2026-10-01 - research results are labelled and sanitized; an ended run no longer lingers on Windows
 
 ### Fixed — `offload_research` labels and sanitizes what it returns (register SF-45, security standard gate G13)

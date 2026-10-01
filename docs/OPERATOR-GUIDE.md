@@ -325,8 +325,8 @@ preset `lightning8`), unbound elsewhere. See
 ### Add a named image or edit family (license-tagged opt-in, ADR 0058) ✅
 
 A family is a second (third, …) binding beside the box's default one, selected per request
-with `family`. It is how a non-commercial model such as **Qwen-Image-2.1** (Qwen Research
-License) is offered at all: never as the default, always tagged. Put the weights in the
+with `family`. It is how a model such as **Qwen-Image-2.1** is offered beside the default
+without replacing it. Put the weights in the
 ComfyUI class directories first (download set: `setup/SETUP-AGENT.md`), back up the config,
 then add the overlay:
 
@@ -378,8 +378,7 @@ local-offload generate-image "a glass perfume bottle" --family qwen-image-2.1 --
 ```
 
 The result carries `family`, `license`, `commercial_use: false` and `license_note`, and the
-ledger row the license. **Never use a `commercial_use: false` family for brand or client
-work.** A bare `generate-image` (no `--family`) still renders the default binding unchanged.
+ledger row the license. A bare `generate-image` (no `--family`) still renders the default binding unchanged.
 To tag the default binding too, set `imagegen_license` + `imagegen_commercial_use` (both or
 neither; edit: `gen_edit_license` + `gen_edit_commercial_use`).
 
