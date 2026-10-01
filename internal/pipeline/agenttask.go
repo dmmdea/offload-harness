@@ -1306,9 +1306,15 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		live.Progress(n)
 		obs.OnProgress(res.TokensOut + n)
 	}
-	structured, tokensOut, transport, attempts, serr := p.repackStructured(agent.ContextWithProgress(cctx, repackProgress), seat, outSchema, res.Output, repackAttemptFloor(wall))
+	var trace repackTrace
+	structured, tokensOut, transport, attempts, serr := p.repackStructuredWith(agent.ContextWithProgress(cctx, repackProgress), seat, outSchema, res.Output, repackAttemptFloor(wall), 0, repackOpts{Trace: &trace})
 	wire.RepackMs = time.Since(repackStart).Milliseconds()
 	wire.RepackAttempts = attempts
+	// Every attempt on the wire, and every attempt's generation in tokens_out: a
+	// failed attempt was seat time spent too (register C-80). Set before the
+	// branches below so every defer carries them.
+	wire.RepackAttemptsDetail = trace.Attempts
+	wire.TokensOut += tokensOut
 	// A seat that refuses the stream re-packs as one silent answer, which is the
 	// shape the streaming fix exists for: say the fix did not apply to it.
 	streamNote := p.streamRefusedNote(seat)
@@ -1393,7 +1399,6 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	}
 	wire.Structured = structured
 	wire.RepackNote = joinAdmissionNotes(wire.RepackNote, streamNote)
-	wire.TokensOut += tokensOut // the re-pack's own generation, on top of the loop's
 	return finish(wire)
 }
 
@@ -1567,13 +1572,17 @@ func repackAttemptFloor(wall time.Duration) time.Duration {
 
 // floor is the least remaining wall an attempt may start with (0 = no bound).
 func (p *Pipeline) repackStructured(ctx context.Context, seat string, rawSchema json.RawMessage, output string, floor time.Duration) (structured json.RawMessage, tokensOut int, transport bool, attempts int, err error) {
-	return p.repackStructuredWith(ctx, seat, rawSchema, output, floor, 0)
+	return p.repackStructuredWith(ctx, seat, rawSchema, output, floor, 0, repackOpts{})
 }
 
 // repackStructuredWith is repackStructured with a cap on the completions it may
 // spend: maxAttempts of 1 or 2 stops after that many (the delegator's rescue is
 // ONE completion and never the chat lane), 0 keeps the full repackMaxAttempts.
-func (p *Pipeline) repackStructuredWith(ctx context.Context, seat string, rawSchema json.RawMessage, output string, floor time.Duration, maxAttempts int) (structured json.RawMessage, tokensOut int, transport bool, attempts int, err error) {
+// opts is what else this call is handed beside its context (repackOpts).
+//
+// tokensOut is the generation of EVERY attempt, the failed ones included: it was
+// seat time spent whether or not the answer was usable (register C-80).
+func (p *Pipeline) repackStructuredWith(ctx context.Context, seat string, rawSchema json.RawMessage, output string, floor time.Duration, maxAttempts int, opts repackOpts) (structured json.RawMessage, tokensOut int, transport bool, attempts int, err error) {
 	limit := repackMaxAttempts
 	if maxAttempts > 0 && maxAttempts < limit {
 		limit = maxAttempts
@@ -1603,6 +1612,11 @@ func (p *Pipeline) repackStructuredWith(ctx context.Context, seat string, rawSch
 		}
 		return true
 	}
+	// note records one attempt on the call's trace: what was asked, what came
+	// back and, once known, why it failed. A call with no trace records nothing.
+	note := func(attemptNum int, lane string, maxTokens int, g llamaclient.GenResult, took time.Duration, why string) {
+		opts.Trace.add(attemptNum, lane, maxTokens, g, took, why)
+	}
 	names := make([]string, 0, len(fields))
 	for _, f := range fields {
 		names = append(names, f.Name)
@@ -1618,8 +1632,10 @@ func (p *Pipeline) repackStructuredWith(ctx context.Context, seat string, rawSch
 	// keep the raw GBNF byte-identically. WithoutThinking already rides every
 	// attempt, which is also what a whole-output constraint requires.
 	var structuredOpts []llamaclient.GenOption
+	lane := "grammar" // how the first lane is constrained, as the attempt record names it
 	if p.isVLLMSeat(ctx, seat) {
 		grammar = ""
+		lane = "json_schema"
 		// The CONTRACT's schema, not the GBNF projection: internal/gbnf has no
 		// object or array-of-object type, so gbnf.JSONSchema(fields) turned a
 		// nested schema into strings and vLLM then CONSTRAINED the answer into
@@ -1713,10 +1729,10 @@ func (p *Pipeline) repackStructuredWith(ctx context.Context, seat string, rawSch
 	}
 	for attempt := 0; attempt < 2 && attempts < limit; attempt++ {
 		if !wallLeft("grammar re-pack") {
-			return nil, 0, false, attempts, err
+			return nil, tokensOut, false, attempts, err
 		}
 		if serr := stopped(); serr != nil {
-			return nil, 0, false, attempts, serr
+			return nil, tokensOut, false, attempts, serr
 		}
 		attempts++
 		// WithoutThinking: the re-pack is a mechanical shape transformation over
@@ -1750,8 +1766,11 @@ func (p *Pipeline) repackStructuredWith(ctx context.Context, seat string, rawSch
 		// not a per-attempt one) and would desynchronize this call's
 		// deadline from the wall the caller classifies a failure against.
 		attemptTimeout := repackAttemptDeadline(ctx, p.cfg, budget, limit-attempts+1)
+		attemptStart := time.Now()
 		gres, gerr := p.repackClient(p.cfg.CompletionPath, attemptTimeout, gates).Generate(ctx, seat, system, user, grammar, budget, p.cfg.Temperature, 0, append([]llamaclient.GenOption{llamaclient.WithoutThinking()}, structuredOpts...)...)
+		tokensOut += gres.TokensOut
 		if gerr != nil {
+			note(attempts, lane, budget, gres, time.Since(attemptStart), repackWhy(gerr))
 			recordFailure(gerr, boundFor(attemptTimeout), attempts)
 			if seatBusyExhausted(gerr) {
 				// The contract's busy-seat budget is spent: the seat answered
@@ -1770,7 +1789,9 @@ func (p *Pipeline) repackStructuredWith(ctx context.Context, seat string, rawSch
 			// answer re-packed at 1,024 tokens on the 27B, an 8,380-char one
 			// on the 4B, both filed as invalid JSON). Name the truncation, and
 			// give the retry the cap.
-			recordFailure(fmt.Errorf("re-pack truncated at %d tokens (the answer is %d chars; the structured budget cannot hold it)", budget, len(output)), boundFor(attemptTimeout), attempts)
+			terr := fmt.Errorf("re-pack truncated at %d tokens (the answer is %d chars; the structured budget cannot hold it)", budget, len(output))
+			note(attempts, lane, budget, gres, time.Since(attemptStart), terr.Error())
+			recordFailure(terr, boundFor(attemptTimeout), attempts)
 			budget = agentRepackMaxTokensCap
 			continue
 		}
@@ -1786,12 +1807,15 @@ func (p *Pipeline) repackStructuredWith(ctx context.Context, seat string, rawSch
 		content := []byte(outerObject(gres.Content))
 		if verr := validator.Validate(content, schema); verr != nil {
 			if fixed, ok := coerceToSchema(content, schema); ok {
-				return json.RawMessage(fixed), gres.TokensOut, false, attempts, nil
+				note(attempts, lane, budget, gres, time.Since(attemptStart), "")
+				return json.RawMessage(fixed), tokensOut, false, attempts, nil
 			}
+			note(attempts, lane, budget, gres, time.Since(attemptStart), repackWhy(verr))
 			recordFailure(verr, boundFor(attemptTimeout), attempts)
 			continue
 		}
-		return json.RawMessage(content), gres.TokensOut, false, attempts, nil
+		note(attempts, lane, budget, gres, time.Since(attemptStart), "")
+		return json.RawMessage(content), tokensOut, false, attempts, nil
 	}
 	// FINAL fallback: one grammar-FREE attempt over /v1/chat/completions.
 	// Found live wiring the Lenovo FreeToken agent seat (2026-08-27): the two
@@ -1805,11 +1829,11 @@ func (p *Pipeline) repackStructuredWith(ctx context.Context, seat string, rawSch
 	// gates the result, so this trades the grammar's shape-constraint for
 	// reach while conceding nothing on correctness.
 	if attempts < limit && !wallLeft("chat re-pack") {
-		return nil, 0, false, attempts, err
+		return nil, tokensOut, false, attempts, err
 	}
 	if attempts < limit {
 		if serr := stopped(); serr != nil {
-			return nil, 0, false, attempts, serr
+			return nil, tokensOut, false, attempts, serr
 		}
 	}
 	if attempts < limit && !seatBusyExhausted(lastRaw) {
@@ -1820,10 +1844,15 @@ func (p *Pipeline) repackStructuredWith(ctx context.Context, seat string, rawSch
 		if underLiveness {
 			chatOpts = append(chatOpts, llamaclient.WithoutClientTimeout(), llamaclient.WithProgress(progress))
 		}
-		structured, tokensOut, cerr := p.repackViaChat(ctx, chatClient, seat, schema, output, chatOpts...)
+		chatBudget := repackBudget(output)
+		chatStart := time.Now()
+		structured, cres, cerr := p.repackViaChat(ctx, chatClient, seat, schema, output, chatBudget, chatOpts...)
+		tokensOut += cres.TokensOut
 		if cerr == nil {
+			note(attempts, "chat", chatBudget, cres, time.Since(chatStart), "")
 			return structured, tokensOut, false, attempts, nil
 		}
+		note(attempts, "chat", chatBudget, cres, time.Since(chatStart), repackWhy(cerr))
 		recordFailure(cerr, boundFor(chatTimeout), attempts)
 	}
 
@@ -1841,13 +1870,13 @@ func (p *Pipeline) repackStructuredWith(ctx context.Context, seat string, rawSch
 		if len(earlierNotes) > 0 {
 			msg = strings.Join(earlierNotes, "; ") + "; " + msg
 		}
-		return nil, 0, false, attempts, &repackCutoffErr{msg: msg, raw: lastRaw}
+		return nil, tokensOut, false, attempts, &repackCutoffErr{msg: msg, raw: lastRaw}
 	}
 	finalErr := fmt.Errorf("attempt %d/%d (%s): %w", lastAttemptNum, limit, boundText(lastBound), lastRaw)
 	if len(earlierNotes) > 0 {
 		finalErr = fmt.Errorf("%s; %w", strings.Join(earlierNotes, "; "), finalErr)
 	}
-	return nil, 0, genErrIsTransport(lastRaw), attempts, finalErr
+	return nil, tokensOut, genErrIsTransport(lastRaw), attempts, finalErr
 }
 
 // outerObject trims text to its outermost {...} span (fences and prose around
@@ -2084,8 +2113,9 @@ func repackBudget(output string) int {
 // validation, repackStructured fell through to that STALE validation error
 // instead of the chat fallback's own, real one). The caller classifies the
 // returned error; repackViaChat makes no infrastructure/budget/abstention
-// judgment of its own.
-func (p *Pipeline) repackViaChat(ctx context.Context, client *llamaclient.Client, seat string, schema map[string]any, output string, extra ...llamaclient.GenOption) (json.RawMessage, int, error) {
+// judgment of its own. The GenResult is whatever completion came back, usable or
+// not (zero when none did), so the caller can count and record a failed attempt.
+func (p *Pipeline) repackViaChat(ctx context.Context, client *llamaclient.Client, seat string, schema map[string]any, output string, budget int, extra ...llamaclient.GenOption) (json.RawMessage, llamaclient.GenResult, error) {
 	props, _ := schema["properties"].(map[string]any)
 	names := make([]string, 0, len(props))
 	for name := range props {
@@ -2098,23 +2128,22 @@ func (p *Pipeline) repackViaChat(ctx context.Context, client *llamaclient.Client
 	// list of strings (register C-80).
 	system := "You extract structured data from text. Output ONLY a JSON object — no prose, no code fences. " + repackTypeRule
 	user := fmt.Sprintf("Extract these fields from the text as a JSON object: %s.\n\nTEXT:\n%s", repackFieldList(names, props), output)
-	budget := repackBudget(output)
 	gres, gerr := client.Generate(ctx, seat, system, user, "", budget, p.cfg.Temperature, 0, append([]llamaclient.GenOption{llamaclient.WithoutThinking()}, extra...)...)
 	if gerr != nil {
-		return nil, 0, gerr
+		return nil, gres, gerr
 	}
 	if gres.Truncated {
-		return nil, 0, fmt.Errorf("chat re-pack truncated at %d tokens (the answer is %d chars; the structured budget cannot hold it)", budget, len(output))
+		return nil, gres, fmt.Errorf("chat re-pack truncated at %d tokens (the answer is %d chars; the structured budget cannot hold it)", budget, len(output))
 	}
 	content := outerObject(gres.Content)
 	if verr := validator.Validate([]byte(content), schema); verr != nil {
 		fixed, ok := coerceToSchema([]byte(content), schema)
 		if !ok {
-			return nil, 0, verr
+			return nil, gres, verr
 		}
-		return json.RawMessage(fixed), gres.TokensOut, nil
+		return json.RawMessage(fixed), gres, nil
 	}
-	return json.RawMessage(content), gres.TokensOut, nil
+	return json.RawMessage(content), gres, nil
 }
 
 // coerceToSchema repairs the failure shapes a grammar would have prevented and no

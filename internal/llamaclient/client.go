@@ -110,6 +110,10 @@ type GenResult struct {
 	TokPerSec float64
 	Truncated bool           // hit max_tokens before finishing (finish_reason == "length")
 	Logprobs  []TokenLogprob // per-output-token, only when top_logprobs was requested
+	// FinishReason is the engine's own finish_reason ("stop", "length",
+	// "tool_calls", ...), "" when it reported none. Truncated is its one-bit
+	// reading; the structured re-pack keeps the reason itself per attempt.
+	FinishReason string
 }
 
 type chatMsg struct {
@@ -566,10 +570,11 @@ func decodeGenResult(resp *http.Response, start time.Time) (GenResult, error) {
 	}
 	elapsed := time.Since(start)
 	out := GenResult{
-		Content:   cr.Choices[0].Message.Content,
-		TokensIn:  cr.Usage.PromptTokens,
-		TokensOut: cr.Usage.CompletionTokens,
-		Truncated: cr.Choices[0].FinishReason == "length",
+		Content:      cr.Choices[0].Message.Content,
+		TokensIn:     cr.Usage.PromptTokens,
+		TokensOut:    cr.Usage.CompletionTokens,
+		Truncated:    cr.Choices[0].FinishReason == "length",
+		FinishReason: cr.Choices[0].FinishReason,
 	}
 	if cr.Timings != nil && cr.Timings.PredictedPerSecond > 0 {
 		out.TokPerSec = cr.Timings.PredictedPerSecond

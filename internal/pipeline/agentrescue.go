@@ -74,7 +74,7 @@ func (p *Pipeline) RescueRepack(ctx context.Context, contract core.AgentContract
 	// the standard busy-seat budget, inside its own allowance, like every other
 	// seat call of a contract.
 	rctx = seatwait.WithBudget(rctx, seatwait.NewBudget(p.cfg.SeatContentionWaitSec))
-	structured, tokens, _, _, err := p.repackStructuredWith(rctx, seat, schema, output, 0, 1)
+	structured, tokens, _, _, err := p.repackStructuredWith(rctx, seat, schema, output, 0, 1, repackOpts{})
 	if err != nil {
 		return delegate.Rescued{}, fmt.Errorf("one re-pack completion on %s: %w", seat, err)
 	}

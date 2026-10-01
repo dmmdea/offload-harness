@@ -148,11 +148,12 @@ func decodeStreamResult(resp *http.Response, start time.Time, progress func(int)
 		return GenResult{}, &BodyError{Err: errors.New("stream ended without a finish_reason or [DONE]")}
 	}
 	out := GenResult{
-		Content:   content.String(),
-		TokensIn:  promptTokens,
-		TokensOut: completionTokens,
-		Truncated: finish == "length",
-		TokPerSec: tokPerSec,
+		Content:      content.String(),
+		TokensIn:     promptTokens,
+		TokensOut:    completionTokens,
+		Truncated:    finish == "length",
+		FinishReason: finish,
+		TokPerSec:    tokPerSec,
 	}
 	if out.TokensOut == 0 {
 		// the engine sent no usage frame: the delta count is the honest estimate

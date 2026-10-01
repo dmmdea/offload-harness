@@ -409,10 +409,19 @@ type AgentWireResult struct {
 	// full re-generations (~690 s) into the 900 s wall on 2026-09-10 and
 	// turned a finished loop into a budget defer with nothing on the wire to
 	// say where the time went.
-	RepackMs       int64   `json:"repack_ms,omitempty"`
-	RepackAttempts int     `json:"repack_attempts,omitempty"`
-	RepackNote     string  `json:"repack_note,omitempty"`
-	SeatTokS       float64 `json:"seat_tok_s,omitempty"`
+	RepackMs       int64  `json:"repack_ms,omitempty"`
+	RepackAttempts int    `json:"repack_attempts,omitempty"`
+	RepackNote     string `json:"repack_note,omitempty"`
+	// RepackAttemptsDetail (register C-80) is what each re-pack attempt did, in
+	// order: its lane, the max_tokens it asked for, the tokens the seat spent, why
+	// it ended, a short head and tail of what it wrote, and the attempts that were
+	// SKIPPED with the arithmetic that skipped them. repack_attempts counts only the
+	// requests actually sent, and a failed attempt left no other trace: one re-pack
+	// ran 1,670 s over three attempts and nothing on the wire could say what any of
+	// them produced. Additive and omitempty: a node that predates the field omits
+	// it, and a delegator that predates it ignores it.
+	RepackAttemptsDetail []AgentRepackAttempt `json:"repack_attempts_detail,omitempty"`
+	SeatTokS             float64              `json:"seat_tok_s,omitempty"`
 	// ObservedTokS (0.131.1) is the liveness monitor's smoothed decode rate over
 	// the run's streamed deltas — descriptive, present on short runs the
 	// calibrated SeatTokS (>= 1,024-token completions only) skips. The ledger's
@@ -613,6 +622,42 @@ type AgentCallRecord struct {
 	// prove which sampling ran is not a measurement. Omitempty: a node that
 	// predates the field reports none, never "the default".
 	Sampling string `json:"sampling,omitempty"`
+}
+
+// AgentRepackAttempt is one attempt of the node's structured re-pack as the
+// corpus keeps it (register C-80): counts and a short clip of what the seat
+// wrote, never the transcript.
+type AgentRepackAttempt struct {
+	// Attempt is the attempt's number, 1-based, in the order tried. A skipped
+	// attempt carries the number it would have had.
+	Attempt int `json:"attempt"`
+	// Lane is how the request was constrained: "grammar" (a GBNF grammar on the
+	// completion route), "json_schema" (a vLLM seat's structured_outputs) or
+	// "chat" (the grammar-free chat route).
+	Lane string `json:"lane"`
+	// MaxTokens is the completion budget the request carried (0 when the attempt
+	// was skipped). ClampedFrom is the budget it would have carried had the time
+	// left in the wall not narrowed it (0 when it was not narrowed).
+	MaxTokens   int `json:"max_tokens,omitempty"`
+	ClampedFrom int `json:"clamped_from,omitempty"`
+	// TokensOut is the completion tokens the seat generated for the attempt,
+	// whether or not its answer was usable.
+	TokensOut int `json:"tokens_out,omitempty"`
+	// FinishReason is the engine's own ("stop", "length"); empty when no
+	// completion came back.
+	FinishReason string `json:"finish_reason,omitempty"`
+	// Ms is the attempt's wall.
+	Ms int64 `json:"ms,omitempty"`
+	// Head and Tail are the first and last bytes of what the seat wrote, whitespace
+	// kept: a run to the cap shows its shape here, a whitespace tail or a loop
+	// included. Short answers carry the head only.
+	Head string `json:"head,omitempty"`
+	Tail string `json:"tail,omitempty"`
+	// Skipped is true for an attempt that was never sent, and Why says why. On an
+	// attempt that WAS sent, Why says how it failed (empty on the one that produced
+	// the object).
+	Skipped bool   `json:"skipped,omitempty"`
+	Why     string `json:"why,omitempty"`
 }
 
 // ValidateContextClass accepts the closed vocabulary of the placement hint

@@ -3,6 +3,11 @@ package pipeline
 import (
 	"fmt"
 	"strings"
+	"time"
+	"unicode/utf8"
+
+	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/llamaclient"
 )
 
 // Helpers of the node-side structured re-pack (repackStructuredWith): what its
@@ -72,4 +77,68 @@ func pluralType(name string) string {
 		return name + "s"
 	}
 	return name
+}
+
+// repackOpts is what one structured re-pack call is handed beside its context.
+// The zero value is the call every caller made before: no bound, no record.
+type repackOpts struct {
+	// Trace, when set, receives one record per attempt, for the wire.
+	Trace *repackTrace
+}
+
+// repackTrace collects what each attempt of one re-pack call did.
+type repackTrace struct {
+	Attempts []core.AgentRepackAttempt
+}
+
+// repackClipBytes is how much of what an attempt wrote rides on the wire at each
+// end: enough to see a whitespace tail, a loop or the shape of a prefix, never
+// the answer.
+const repackClipBytes = 80
+
+// add records one attempt: what was asked (lane, max_tokens), what came back
+// (tokens, finish reason, a clip of the content), how long it took and why it
+// failed ("" when it produced the object). A nil trace records nothing.
+func (tr *repackTrace) add(attemptNum int, lane string, maxTokens int, g llamaclient.GenResult, took time.Duration, why string) {
+	if tr == nil {
+		return
+	}
+	a := core.AgentRepackAttempt{
+		Attempt: attemptNum, Lane: lane, MaxTokens: maxTokens,
+		TokensOut: g.TokensOut, FinishReason: g.FinishReason, Ms: took.Milliseconds(), Why: why,
+	}
+	a.Head, a.Tail = clipEnds(g.Content)
+	tr.Attempts = append(tr.Attempts, a)
+}
+
+// clipEnds returns the first and the last repackClipBytes bytes of s, each cut on
+// a character boundary. Content that fits in both clips is returned whole as the
+// head, with no tail, so a short answer is not shown twice.
+func clipEnds(s string) (head, tail string) {
+	if len(s) <= 2*repackClipBytes {
+		return s, ""
+	}
+	h := repackClipBytes
+	for h > 0 && !utf8.RuneStart(s[h]) {
+		h--
+	}
+	t := len(s) - repackClipBytes
+	for t < len(s) && !utf8.RuneStart(s[t]) {
+		t++
+	}
+	return s[:h], s[t:]
+}
+
+// repackWhy is an error as one clipped line for an attempt's record: the
+// validator's message spans lines, and the record is a note, not a log.
+func repackWhy(err error) string {
+	s := strings.Join(strings.Fields(err.Error()), " ")
+	if len(s) <= 240 {
+		return s
+	}
+	cut := 240
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "…"
 }
