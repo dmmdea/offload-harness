@@ -382,10 +382,24 @@ export async function pollOutputs({
     }
     prevTickAt = now();
     let hist;
+    let failed = null;
     try {
       hist = await jfetch(fetchImpl, `${api}/history/${promptId}`, { signal: AbortSignal.timeout(30_000) });
     } catch (e) {
-      if (e && e.httpStatus) { lastAnswerAt = now(); continue; } // an error status is an answer
+      failed = e;
+    }
+    // The machine can also sleep DURING the request: it aborts itself at 30 s, so a
+    // request that took past the fence's 120 s spanned a suspend. Without this, the
+    // failed fetch on wake counted the whole nap as dead time and stopped the batch.
+    const took = now() - prevTickAt;
+    if (took > 120_000) {
+      lastAnswerAt = now();
+      deadline += took;
+      if (nextProbeAt !== null) nextProbeAt += took;
+      prevTickAt = now();
+    }
+    if (failed) {
+      if (failed.httpStatus) { lastAnswerAt = now(); continue; } // an error status is an answer
       const deadFor = Math.floor((now() - lastAnswerAt) / 1000);
       if (deadFor >= deadSec) {
         throw serverUnusableError(`ComfyUI stopped answering mid-render (unreachable ${deadFor}s, COMFY_DEAD_SEC=${deadSec}); aborting early to release the GPU slot`);

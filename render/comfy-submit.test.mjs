@@ -585,6 +585,26 @@ test("pollOutputs: the dead-server watchdog's abort is marked serverUnusable —
   assert.equal(err.serverUnusable, true);
 });
 
+test("pollOutputs: a suspend DURING an in-flight /history poll is neither dead time nor budget — no server-unusable abort on wake", async () => {
+  // Review finding on C-83: the fence only ran at the top of the next tick, so a lid that
+  // closed while a request was in flight woke into a failed fetch whose dead time covered
+  // the whole nap; with the server-unusable flag that would stop a whole batch.
+  const c = clock();
+  let hist = 0;
+  const fetchImpl = async (url) => {
+    if (isStats(url)) return entry({ system: {} });
+    hist++;
+    if (hist === 3) { c.jump(1_000_000); throw new Error("fetch failed: socket reset after resume"); }
+    if (hist < 6) return entry({});
+    return entry({ p1: { outputs: { 9: { images: [{ filename: "woke.png" }] } }, status: {} } });
+  };
+  const h = await pollOutputs({
+    api: "http://x", promptId: "p1", waitSec: 60, isDone: (e) => !!e.outputs,
+    fetchImpl, sleep: c.sleep, now: c.now, env: { COMFY_DEAD_SEC: "240" },
+  });
+  assert.equal(h.outputs[9].images[0].filename, "woke.png");
+});
+
 test("pollOutputs: a suspend (timer jump past 120 s) does not consume the wall-clock budget", async () => {
   const c = clock();
   let hist = 0;
