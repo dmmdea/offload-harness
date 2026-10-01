@@ -356,7 +356,8 @@ Bound per machine through flat config keys, so the same code serves different ha
 Hardware profiles seed these. The single-card 16 GB tiers (`blackwell-16`, `ampere-16`, `volta-16`)
 and the 8 GB tiers' RAM layer bind **HiDream-O1** via `imagegen_family` — the official graph for that
 DiT, never the generic SDXL graph; the pooled and 32 GB-class Blackwell tiers (`blackwell-2x16`,
-`-3x16`, `-32`, `-48`, `-72`) bind **Krea 2 Turbo** (below). No tier seeds a non-commercial family.
+`-3x16`, `-32`, `-48`, `-72`) bind **Krea 2 Turbo** (below). No tier makes a named family its default; `blackwell-8`'s RAM
+layer seeds `qwen-image-2.1` as an opt-in family.
 The Wan 2.2 video tiers bind **Wan 2.2 Q8_0** experts with an fp16 text encoder. **RealVisXL** is the SDXL-class inpainting default. The 8 GB
 tiers stay SDXL-class for image generation until O1 on 8 GB is verified on real hardware.
 
@@ -748,8 +749,9 @@ protects the environment from it. `compose_video`'s `html` and `project_dir` inp
 kind of trusted-caller interface: the page runs in a Chrome without a sandbox. The fleet door
 therefore accepts vetted templates only. See [Security](#security) below.
 
-**Licenses.** A family that declares a license tags its output (`license`, `commercial_use`,
-`license_note`) and its ledger row; the tag is informational and enforces nothing. An absent license
+**Licenses.** A family that declares a license tags its output (`license`, `commercial_use`, plus
+`license_note` when `commercial_use` is false) and its ledger row; the tag is informational and
+enforces nothing. An absent license
 reads as UNKNOWN
 ([ADR 0058](../architecture/decisions/0058-non-commercial-model-families-ship-only-as-named-license-tagged-opt-ins.md)).
 
