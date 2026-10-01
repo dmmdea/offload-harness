@@ -1367,7 +1367,8 @@ read the lease only to *prefer* a remote (route=auto) — and on route=spread no
 contract with no eligible remote still ran on the reserved seat (three foreign contracts loaded a
 reserved two-card seat mid-measurement, 2026-09-05). Now, on route=auto and route=spread, a held
 **text** lease takes the local seat out of placement: an eligible remote takes the work; with none,
-the placement waits up to `agent_lease_wait_sec` (config; default 0 = defer at once), re-reading the
+the placement waits up to the larger of `agent_placement_wait_sec` (default 120 s) and `agent_lease_wait_sec`
+(default 0), re-reading the
 lease once a second, then defers with class `infrastructure` and a reason naming the holder (class,
 pid, reason, origin, expiry) so the caller can wait, route elsewhere, or ask. A retry never runs on the
 reserved seat either (register C-81), but it is not held in line for the holder as a first placement is:
