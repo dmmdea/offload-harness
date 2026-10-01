@@ -44,9 +44,12 @@ func TestRunAgentTaskHeldRunDoesNotFeedTheSeatRates(t *testing.T) {
 		name     string
 		floor    time.Duration
 		wantHeld bool
+		// the engine's own gauges: a peer on the seat makes the run not solo (ADR
+		// 0066), so the control's engine reports the run alone.
+		running, waiting string
 	}{
-		{"held run: the sample is not the seat's rate", 200 * time.Millisecond, true},
-		{"control: an unheld run records its sample", 3 * time.Second, false},
+		{"held run: the sample is not the seat's rate", 200 * time.Millisecond, true, "4", "1"},
+		{"control: an unheld run records its sample", 3 * time.Second, false, "1", "0"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			defer compressLiveness(t, tc.floor, 100*time.Millisecond, core.AgentCeilingSecCap)()
@@ -58,7 +61,7 @@ func TestRunAgentTaskHeldRunDoesNotFeedTheSeatRates(t *testing.T) {
 				},
 				// An engine working for other requests: every read sees new steps.
 				seatMetrics: func(n int64) string {
-					return "vllm:num_requests_running 4\nvllm:num_requests_waiting 1\nvllm:iteration_tokens_total_count " +
+					return "vllm:num_requests_running " + tc.running + "\nvllm:num_requests_waiting " + tc.waiting + "\nvllm:iteration_tokens_total_count " +
 						strconv.FormatInt(100*n, 10) + "\nvllm:generation_tokens_total " + strconv.FormatInt(40*n, 10) +
 						"\nvllm:prompt_tokens_total 9000\nvllm:num_preemptions_total 0\nvllm:kv_cache_usage_perc 0.5\n"
 				},

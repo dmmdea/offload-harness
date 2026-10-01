@@ -335,6 +335,59 @@ func TestReplacementDoesNotLandOnAFullLocalSeat(t *testing.T) {
 	}
 }
 
+// TestARetryMayReturnToALocalSeatThatOnlyCapacityDeferredTheSubtask pins what the local seat's
+// re-placeable capacity defer (ADR 0063 decision 3) did to an invariant alternativeNode used to
+// state as a proof: a local placement is no longer terminal for its chain, so the ledger can
+// record the local seat as tried while the attempt that failed ran on a remote.
+//
+//	placement 1   the local seat holds the contract in its line and defers it (capacity, zero steps)
+//	placement 2   the contract is re-placed on node-a, which answers wrongly or loses its seat
+//	the retry     the local seat is the different node, and it never ran the job: it goes back there
+//
+// That is deliberate. The exclusion the retry needs is the seats that TOOK a job of the subtask
+// (pl.ran), and a seat that only declined one has produced no answer to repeat. What keeps the retry
+// from rejoining a line that is still full is the guard each kind of retry has for the seat it lands
+// on: retrySeatBusy and awaitRetrySeat for a verification retry (ADR 0063 decision 10) and the
+// run-cap line check of alternativeNode for a seat-down defer (ADR 0066 decision 3).
+func TestARetryMayReturnToALocalSeatThatOnlyCapacityDeferredTheSubtask(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// firstRemote is node-a's answer to the re-placed job.
+		firstRemote func(t *testing.T) map[string]any
+	}{
+		{"node-a fails verification", func(t *testing.T) map[string]any {
+			w := remoteWire("wrong answer", `{"answer":"wrong answer"}`)
+			w.NodeID = "node-a"
+			return doneWire(t, w)
+		}},
+		{"node-a loses its seat", func(t *testing.T) map[string]any { return doneWire(t, seatDownWire("node-a", 6)) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			compressPolls(t, 5*time.Millisecond, time.Second)
+			nodeA, urlA := eligibleNode(t, "node-a", "unused")
+			nodeA.pollByJob = func(jobID string, n int64) (map[string]any, int) { return tc.firstRemote(t), http.StatusOK }
+			var localCalls atomic.Int64
+			local := func(ctx context.Context, c core.AgentContract, o LocalOptions) (core.AgentWireResult, error) {
+				if localCalls.Load() == 0 {
+					return capacityDeferLocal(&localCalls)(ctx, c, o)
+				}
+				return passingLocal(&localCalls)(ctx, c, o)
+			}
+
+			results, sum, err := Run(t.Context(), testCfg(t), local, []core.AgentContract{remoteContract()}, "auto", []string{urlA})
+			if err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if localCalls.Load() != 2 || nodeA.dispatches.Load() != 1 {
+				t.Fatalf("local runner called %d times and node-a dispatched %d times, want 2 and 1: the local seat's capacity defer, then the retry it is the different node for; note=%q", localCalls.Load(), nodeA.dispatches.Load(), results[0].RetryNote)
+			}
+			if sum.Retried != 1 || sum.Succeeded != 1 {
+				t.Fatalf("summary = %+v note=%q, want the retry on the local seat to have recovered the subtask", sum, results[0].RetryNote)
+			}
+		})
+	}
+}
+
 // ---- the queue budget and the backlog gate --------------------------------
 
 // TestQueueBudgetIsDerivedFromTheNodesETA: a node that says a new job waits 480 s

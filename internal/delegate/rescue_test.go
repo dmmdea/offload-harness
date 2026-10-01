@@ -202,6 +202,42 @@ func TestRunSchemaMissNeverReadsGreenWithoutCheckedStructured(t *testing.T) {
 	}
 }
 
+// A rescue that FAILS records the wall it spent on the result (rescueSpent), whichever
+// way it failed — an error, nothing at all, an object the schema refuses — because a
+// re-placed seat-down defer is credited it back (admissionCredit). One that delivers, and
+// a result nobody tries to rescue, record nothing.
+func TestAFailedRescueRecordsTheWallItSpent(t *testing.T) {
+	const took = 50 * time.Millisecond
+	after := func(structured string, err error) RescueFunc {
+		return func(context.Context, core.AgentContract, string, time.Duration) (Rescued, error) {
+			time.Sleep(took)
+			return Rescued{Structured: json.RawMessage(structured)}, err
+		}
+	}
+	for _, tc := range []struct {
+		name      string
+		rescue    RescueFunc
+		wantSpent bool
+	}{
+		{"the rescue errors", after("", errors.New("the local seat is not serving")), true},
+		{"the rescue returns nothing", after("", nil), true},
+		{"the rescue returns an object the schema refuses", after(`{"answer":7}`, nil), true},
+		{"the rescue delivers", after(`{"answer":"42"}`, nil), false},
+		{"no rescue is wired", nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pr := PlacedResult{Result: seatDownDuringTheRepack("node-a")}
+			got := rescueSchemaMiss(context.Background(), tc.rescue, rescueContract(), pr, time.Now(), nil)
+			if tc.wantSpent && got.rescueSpent < took {
+				t.Fatalf("rescueSpent = %v, want at least the %v the failed rescue took", got.rescueSpent, took)
+			}
+			if !tc.wantSpent && got.rescueSpent != 0 {
+				t.Fatalf("rescueSpent = %v, want none: %s", got.rescueSpent, tc.name)
+			}
+		})
+	}
+}
+
 // The rescue is for a finished answer whose structuring failed and nothing else.
 func TestRescueRunsOnlyForASchemaMiss(t *testing.T) {
 	ok := remoteWire("the answer", `{"answer":"42"}`)

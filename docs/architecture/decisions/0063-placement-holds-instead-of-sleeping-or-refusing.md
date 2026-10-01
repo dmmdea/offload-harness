@@ -107,7 +107,7 @@ arithmetic, or an ordering key among seats that already passed the adequacy gate
    failed after a seat ran them is backed off for 15 minutes with a contract-class defer that says so. An
    issue counts as failed only when a seat ran it and produced no verified digest: a failed verification,
    an abstention, a budget defer or a node's own job error. A full node, a lease, a bad token, a dead
-   node, a cancel and a queue deadline never count. A success forgets the page; so does the time. Only research digests are keyed (by the page's content, not
+   node, a cancel and a queue deadline never count. An issue that was retried counts by either attempt: a first attempt that stands as a dead seat's defer ([ADR 0066](0066-a-seat-that-goes-down-is-waited-for-and-the-failed-step-reissued.md)) says nothing about the page, so the retry seat's own failed run counts. A success forgets the page; so does the time. Only research digests are keyed (by the page's content, not
    its file name).
 9. **Research digests are routed by contract shape.** A contract from a research door with one context
    page and an output schema is mechanical work by construction; the words of the caller's question

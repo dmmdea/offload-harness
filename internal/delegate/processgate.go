@@ -216,7 +216,17 @@ func (c *pageRetryCap) record(key string, failed bool) {
 // stack that is down), a terminal dispatch refusal (a bad token), a poll that never
 // reached an owned job, a lost job and a local runner error are the fleet's or the
 // caller's - none of them ran the page.
+//
+// An issue that was retried counts by what a seat that RAN the page produced in either
+// attempt. The published result is the first attempt unless the retry recovered, and a
+// first attempt that stands as a seat-down defer (a dead seat, an infrastructure defer)
+// ran nothing to a verdict: the retry seat did, and mergeAttempts carries its verdict in
+// retryRanAndFailed. A retry that recovers forgets the page, and one no seat ran (a full
+// node, a local seat that declined it) adds nothing.
 func pageIssueFailed(pr PlacedResult) bool {
+	if pr.retryRanAndFailed {
+		return true
+	}
 	switch {
 	case pr.Unplaced || pr.shed:
 		return false

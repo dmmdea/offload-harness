@@ -138,6 +138,12 @@ type PlacedResult struct {
 	nodeNeverRan    string
 	queuedWait      time.Duration
 	PlacementReason string
+	// rescueSpent is the wall a delegator-side rescue of this result's finished answer
+	// spent and FAILED to turn into a validated object (rescueSchemaMiss); zero when no
+	// rescue ran or it delivered. It is delegator time spent on neither node's work, so a
+	// seat-down defer that is re-placed after it is credited it back (admissionCredit),
+	// like the wait its node spent on the dead seat.
+	rescueSpent time.Duration
 	// Err is non-empty when the subtask FAILED for transport/config reasons
 	// (dispatch refused, auth rejected, undecodable result). Counted in
 	// Summary.Failed, never in Deferred — eight quiet defers and one broken
@@ -179,6 +185,12 @@ type PlacedResult struct {
 	// the first attempt did not (Summary.RetryRecovered). ranLocal records where
 	// the attempt ran so the retry can pick a DIFFERENT node.
 	retryRecovered bool
+	// retryRanAndFailed: the retry ran on a seat and produced no verified digest (the
+	// per-page cap's own reading of its result, pageIssueFailed) while the published
+	// result is still the FIRST attempt. A first attempt that stands as a seat-down
+	// defer says nothing about the page, because its seat died; the retry seat is the
+	// one that ran it, so the cap reads the retry's verdict from here.
+	retryRanAndFailed bool
 	// retried: a verification retry actually RAN for this subtask. Deliberately
 	// not `RetriedOn != ""`: a retry whose own placement was refused by every
 	// node names no node at all, and keying the tally off the string silently
@@ -1208,6 +1220,15 @@ func (r *runner) runOne(ctx context.Context, i int, contract core.AgentContract)
 		// measurement that has the cards" (D-94).
 		if fenceNote != "" {
 			first.RetryNote = fenceNote
+		} else if SeatDownDefer(first.Result) {
+			// The defer promises a second placement on another node: when there is no
+			// other node the caller must be told it was considered and why it did not
+			// happen, not left with a retryable defer and an empty note.
+			why := "every eligible node was already tried or is not eligible"
+			if r.route == "local" {
+				why = "route local places nothing on another node"
+			}
+			first.RetryNote = fmt.Sprintf("retry skipped: the seat on %s went down and no other node could take the contract (%s)", nodeLabel(first), why)
 		}
 		return first
 	}
@@ -1222,22 +1243,43 @@ func (r *runner) runOne(ctx context.Context, i int, contract core.AgentContract)
 	// like it - and runs on it the moment it does, so the two runs still never share
 	// it. The retry is skipped only when the seat stayed busy for the whole wait (or
 	// the wait is switched off), and the note says how long it waited.
-	if busy, why := r.retrySeatBusy(ctx, alt); busy {
-		w := r.awaitRetrySeat(ctx, alt, why)
-		pl.credit += w.waited
-		if w.canceled {
-			// The caller gave up while the retry stood in line: the seat was not shown to
-			// stay busy, so the note must not claim it did.
-			first.RetryNote = fmt.Sprintf("retry skipped: the caller canceled after the retry waited %s in line for the retry seat on %s, which was running another job (%s)", w.waited.Round(time.Second), alt.view.NodeID, w.why)
-			return first
-		}
-		if w.stillBusy {
-			after := ""
-			if w.waited > 0 {
-				after = fmt.Sprintf(" after waiting %s in line", w.waited.Round(time.Second))
+	//
+	// Not for a seat-down defer (ADR 0066): this check neither waits nor skips. D-46's
+	// case is a verification retry: the first attempt PRODUCED an answer, the retry is an
+	// optional second opinion on the budget that was left, and joining a generating seat
+	// costs it the budget it needs. A seat-down defer produced nothing — declining to
+	// re-place it, or waiting out the placement wait and then declining, loses the job
+	// — and its retry carries the credited budget of the wait the dead seat cost. Busy
+	// is a place in line, never a refusal (INV-4): the node's own queue is the line, and
+	// it answers 503 when it is full, which placeAndRun re-places at once (ADR 0063),
+	// into the bounded capacity wait when nothing has room. During the 2026-09-29 outage
+	// the fleet was saturated (44 runs in flight for ~13 slots), so a check here would
+	// have held or refused nearly every re-placement.
+	//
+	// That line is a REMOTE alternative's. The local seat answers no 503: a run forced
+	// onto it joins the run-cap line and waits there for the run's whole wall, a line the
+	// subtask cannot leave. alternativeNode therefore sends a seat-down retry to an
+	// untried remote while that line has no free slot ahead of a newcomer, so the
+	// exemption below never hands the retry to a full local line when there is another
+	// place to go.
+	if !SeatDownDefer(first.Result) {
+		if busy, why := r.retrySeatBusy(ctx, alt); busy {
+			w := r.awaitRetrySeat(ctx, alt, why)
+			pl.credit += w.waited
+			if w.canceled {
+				// The caller gave up while the retry stood in line: the seat was not shown to
+				// stay busy, so the note must not claim it did.
+				first.RetryNote = fmt.Sprintf("retry skipped: the caller canceled after the retry waited %s in line for the retry seat on %s, which was running another job (%s)", w.waited.Round(time.Second), alt.view.NodeID, w.why)
+				return first
 			}
-			first.RetryNote = fmt.Sprintf("retry skipped: the retry seat on %s is already running another job%s (%s); a shared seat would only slow both", alt.view.NodeID, after, w.why)
-			return first
+			if w.stillBusy {
+				after := ""
+				if w.waited > 0 {
+					after = fmt.Sprintf(" after waiting %s in line", w.waited.Round(time.Second))
+				}
+				first.RetryNote = fmt.Sprintf("retry skipped: the retry seat on %s is already running another job%s (%s); a shared seat would only slow both", alt.view.NodeID, after, w.why)
+				return first
+			}
 		}
 	}
 	// The floor of the seat the retry will actually run on (D-46 follow-up,
@@ -1340,9 +1382,17 @@ func (r *runner) retryFloorSec() int {
 // the final budget at its measured rate — and the configured floor otherwise.
 // The larger wins: a box constant sized for the reference seat can sit under
 // what a slower seat just measured for itself.
+//
+// A seat-down defer (ADR 0066) is the exception: its min_turn_sec is the DEAD
+// seat's own (its cold load plus a turn at its measured rate), and the retry goes
+// to another node, whose own floor retryFloorOn applies once it is chosen. Read
+// here it refused the re-placement of the very defer it exists for — a flagship
+// that honestly records a ~270 s cold load publishes a ~390 s min_turn, above
+// any default contract — although the seat that is about to run the retry has
+// nothing to do with it.
 func (r *runner) retryFloorFor(first PlacedResult) (int, string) {
 	floor := r.retryFloorSec()
-	if m := first.Result.MinTurnSec; m > floor {
+	if m := first.Result.MinTurnSec; m > floor && !SeatDownDefer(first.Result) {
 		return m, fmt.Sprintf(", min_turn_sec of the seat on %s", nodeLabel(first))
 	}
 	return floor, retryFloorSource(floor)
@@ -3042,16 +3092,23 @@ const minRetrySec = 10
 // defer, or a broken/misconfigured stack is not something another seat fixes,
 // and a contract-classed defer is the caller's to fix.
 //
-// The TWO infrastructure defers that ARE retryable are the admission-time
-// ones: the coherence defer (register D-118) and the warm-up defer (register
-// C-76, R-05a). The seat itself is broken (it answers nonsense, or its process
-// did not start) and it was caught before the contract's wall started, so the
-// budget is still there to fund a retry — which is precisely the case another
+// The TWO infrastructure defers that ARE retryable at admission are the
+// admission-time ones: the coherence defer (register D-118) and the warm-up defer
+// (register C-76, R-05a). The seat itself is broken (it answers nonsense, or its
+// process did not start) and it was caught before the contract's wall started, so
+// the budget is still there to fund a retry — which is precisely the case another
 // node fixes. What the node's admission spent getting there is credited back in
 // runOne (admissionCredit), because the cold load that leads to either verdict
 // would otherwise eat most of a default budget before the retry floor is
 // applied. The general infrastructure rule is untouched; see IncoherentSeatDefer
 // and SeatWarmFailedDefer.
+//
+// The third is the seat-down defer (ADR 0066, SeatDownDefer): the seat's engine
+// went down under the run and did not come back inside the node's own bounded
+// wait. Same argument — a property of THIS seat, a sound contract, the cure is
+// another node — and the wait the node spent on the dead seat is credited back
+// the same way, with the wall of a delegator-side rescue that failed first (a seat
+// lost in the structured re-pack is rescued before it is re-placed).
 func retryable(pr PlacedResult) bool {
 	if pr.Err != "" {
 		return false
@@ -3059,10 +3116,31 @@ func retryable(pr PlacedResult) bool {
 	if len(pr.AcceptanceFailures) > 0 {
 		return true
 	}
-	if admissionDefer(pr.Result) {
+	if admissionDefer(pr.Result) || SeatDownDefer(pr.Result) {
 		return true
 	}
 	return pr.Result.Deferred && pr.Result.DeferClass == core.DeferClassAbstention
+}
+
+// SeatDownDefer reports whether a result is the seat-down defer (ADR 0066,
+// register C-72): an `infrastructure` defer whose reason carries
+// core.SeatDownReason, i.e. the executing node's seat went down under the run —
+// the engine hung with work outstanding, or died and llama-swap no longer serves
+// it — and the node's own bounded wait and one re-issue did not bring it back.
+//
+// It is the THIRD infrastructure defer that is worth a retry, after the two
+// admission-time ones (IncoherentSeatDefer, SeatWarmFailedDefer), and for the same
+// reason: the fault is a property of THIS seat and the contract itself is sound,
+// so the same contract on another node is the cure. It is safe to re-place
+// because a node-filed defer is an OBSERVED terminal — the node reported it, so
+// nothing is still running the contract (the "never re-place after a 202" rule is
+// about jobs whose outcome nobody observed). It matches on the CONSTANT the
+// producer writes, never on prose. A node without ADR 0066 never emits it, and
+// keeps emitting `stalled:` for the same outage until it is upgraded — for such a
+// node this changes nothing.
+func SeatDownDefer(r core.AgentWireResult) bool {
+	return r.Deferred && r.DeferClass == core.DeferClassInfrastructure &&
+		strings.HasPrefix(r.Reason, core.SeatDownReason)
 }
 
 // skipsRetryAsResearchAcceptanceOnly reports a placed result the verification
@@ -3074,9 +3152,9 @@ func retryable(pr PlacedResult) bool {
 //
 // A failed DOCUMENT FINGERPRINT is the exception: the answer is about another
 // document, which is a fact about the node that wrote it (strikeOnFingerprint
-// quarantines a node for it), and another node is the cure. An abstention or the
-// admission-time coherence defer is likewise a fact about the SEAT and keeps its
-// retry.
+// quarantines a node for it), and another node is the cure. An abstention, an
+// admission-time defer (coherence, warm-up) and the seat-down defer are likewise
+// facts about the SEAT and keep their retry.
 func skipsRetryAsResearchAcceptanceOnly(contract core.AgentContract, pr PlacedResult) bool {
 	return researchDoors[contract.Door] && pr.Err == "" && !pr.Result.Deferred &&
 		len(pr.AcceptanceFailures) > 0 && !failsDocumentFingerprint(pr.AcceptanceFailures)
@@ -3139,11 +3217,34 @@ func admissionDefer(r core.AgentWireResult) bool {
 // Zero for every other result: no other shape has a claim on the credit, and a
 // node that reports no admission (a pre-D-118 node, or an unmeasured one) is
 // credited nothing rather than guessed at.
+//
+// A seat-down defer (ADR 0066) is credited its admission, the wait the node
+// spent on the downed seat (seat_down_wait_sec) AND the wall a failed
+// delegator-side rescue spent (rescueSpent): time the contract provably did not
+// spend working, on a seat that could not serve it or on this box's attempt to
+// save a finished answer. The last term is the one a seat lost in the structured
+// re-pack depends on: the loop's recovery does not cover the re-pack, so that
+// defer reports no wait of its own, and the rescue that runs first on this box's
+// clock may cold-load its own seat and run a completion to its allowance —
+// minutes that, charged to the retry budget, made the retry floor refuse the
+// re-placement the defer is promised. The credit is bounded by one full contract
+// wall (core.AgentTimeoutSecCap): neither a node's number nor a slow rescue buys
+// the retry more than that.
 func admissionCredit(pr PlacedResult) time.Duration {
-	if !admissionDefer(pr.Result) || pr.Result.AdmissionWaitSec <= 0 {
+	secs := 0.0
+	switch {
+	case admissionDefer(pr.Result):
+		secs = pr.Result.AdmissionWaitSec
+	case SeatDownDefer(pr.Result):
+		secs = pr.Result.AdmissionWaitSec + pr.Result.SeatDownWaitSec + pr.rescueSpent.Seconds()
+		if secs > core.AgentTimeoutSecCap {
+			secs = core.AgentTimeoutSecCap
+		}
+	}
+	if secs <= 0 {
 		return 0
 	}
-	return time.Duration(pr.Result.AdmissionWaitSec * float64(time.Second))
+	return time.Duration(secs * float64(time.Second))
 }
 
 // alternativeNode picks the node a retry runs on: the best eligible remote
@@ -3158,10 +3259,12 @@ func admissionCredit(pr PlacedResult) time.Duration {
 // take the contract, and a second remote hop would need a fresh gate pass
 // mid-timeout), but it is a real cost, not a free retry.
 // It consults the SUBTASK's placement ledger, which is what makes "a DIFFERENT
-// node" true rather than merely intended: a seat the first attempt already used
-// — including one it reached by re-placement, and including the local seat — is
+// node" true rather than merely intended: a seat the first attempt already RAN
+// on — including one it reached by re-placement, and including the local seat — is
 // excluded here. Without that, a first attempt that ended up local after two
-// remotes refused could be "retried" on local again.
+// remotes refused could be "retried" on local again. A seat that only DECLINED the
+// subtask (the local seat's capacity defer, ADR 0063 decision 3) took nothing and is
+// not excluded: see the local branch below.
 func (r *runner) alternativeNode(ctx context.Context, first PlacedResult, contract core.AgentContract, pl *placements) (placement, string, bool) {
 	st := Subtask{Contract: contract, EstTokens: EstimateTokens(contract)}
 	localView := r.localView()
@@ -3186,19 +3289,45 @@ func (r *runner) alternativeNode(ctx context.Context, first PlacedResult, contra
 					"a retry placed there would wait out agent_lease_wait_sec at the affinity cordon and defer as capacity anyway",
 				fence, HolderLine(lease)), false
 		}
-		// No pl.tried[""] check here, and that is a proof rather than an
-		// oversight: a LOCAL placement is always terminal for its chain,
-		// because only runRemote can set `refused` and therefore local can
-		// never be re-placed away from. So pl.tried[""] implies first.ranLocal,
-		// and this branch cannot run with local already used.
+		// A seat-down defer is not held for a busy retry seat (runOne, ADR 0066 decision
+		// 3): the node's own queue is the line, and its 503 is re-placed at once. That is
+		// true of a REMOTE alternative and false of the local seat, which answers no 503:
+		// a run forced onto it joins the run-cap line and waits there for the run's whole
+		// wall before it defers as capacity, a line the subtask could not leave (the
+		// state replacementNode declines to re-place into, ADR 0063 decision 2). So while
+		// that line has no free slot ahead of a newcomer, an untried remote is the better
+		// place for the retry. With none, the local seat is the only place there is, and
+		// joining its line beats losing the job.
+		if SeatDownDefer(first.Result) {
+			if free, note := r.localSlotAhead(); !free {
+				if chosen, base, found := r.remoteAlternative(ctx, st, pl); found {
+					return placement{view: chosen, base: base,
+						reason: "retry on " + chosen.NodeID + " after " + nodeLabel(first) + " " + why +
+							" — the local seat's run-cap line has no free slot (" + note + ")"}, "", true
+				}
+			}
+		}
+		// No pl.tried[""] check here, on purpose. It used to be stated as a proof:
+		// a LOCAL placement is always terminal for its chain (only runRemote sets
+		// `refused`), so pl.tried[""] implies first.ranLocal and this branch cannot
+		// run with local already used. The proof stopped holding with ADR 0063
+		// decision 3: the local seat's own capacity defer is re-placeable
+		// (isReplaceable, capacityDeferRefusal), so placeAndRun records the seat as
+		// tried, re-places the subtask on a remote, and that remote's failed answer
+		// is the first attempt this branch sees. The local seat is then the
+		// DIFFERENT node the retry asks for: it declined the job and never ran it,
+		// and pl.ran, the exclusion the retry's premise needs, does not hold it.
 		//
-		// A guard was written here first. The mutation battery could not kill
-		// it from any fixture — which is the tell for a branch that reads as
-		// protection while protecting nothing — so it is stated as an invariant
-		// instead. If local ever becomes re-placeable, this is the line to
-		// revisit, and the other direction (a retry's own chain falling back
-		// onto an already-used local seat) is guarded in replacementNode, where
-		// it IS reachable and IS covered.
+		// A retry back onto it is wanted, not a leak. A guard on pl.tried[""] would
+		// refuse a seat-down defer its only other place, and lose the job, and
+		// refuse a verification retry its second opinion. What such a guard is for,
+		// not rejoining a line that is still full, is done at the seat the retry
+		// lands on: the run-cap line check above for a seat-down defer, and
+		// retrySeatBusy and awaitRetrySeat in runOne for a verification retry (by
+		// llama-swap's in-flight count, for the local seat).
+		// TestARetryMayReturnToALocalSeatThatOnlyCapacityDeferredTheSubtask drives
+		// the case. The other direction, a retry's own chain falling back onto a
+		// local seat already used, is guarded in replacementNode.
 		return placement{view: localView, reason: "retry on local after " + nodeLabel(first) + " " + why}, "", true
 	}
 	if r.route == "local" {
@@ -3267,6 +3396,11 @@ func attemptOutcome(pr PlacedResult) string {
 // (and is marked recovered); otherwise the FIRST attempt stands — its
 // verified-wrong answer is still the more informative artifact — annotated
 // with what the retry did. Both attempts were recorded by finish() already.
+//
+// The published attempt is not the only one that says what became of the page: the
+// per-page cap counts an issue by what a seat that RAN it produced, and a first attempt
+// that stands as a seat-down defer was never run by a seat that could tell. The retry's
+// own verdict is carried on the published result (retryRanAndFailed) for the cap.
 func mergeAttempts(first, second PlacedResult) PlacedResult {
 	clean := second.Err == "" && !second.Result.Deferred && len(second.AcceptanceFailures) == 0
 	var published PlacedResult
@@ -3278,6 +3412,7 @@ func mergeAttempts(first, second PlacedResult) PlacedResult {
 	} else {
 		first.RetriedOn = second.Node
 		first.RetryNote = "retry on " + nodeLabel(second) + " also " + attemptOutcome(second) + "; this result is the first attempt"
+		first.retryRanAndFailed = pageIssueFailed(second)
 		published = first
 	}
 	published.retried = true

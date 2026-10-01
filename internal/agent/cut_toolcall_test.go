@@ -3,9 +3,11 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Register D-114: a `write_file` call whose JSON argument is CUT at the step
@@ -117,6 +119,35 @@ func TestCutToolCallTwiceStopsWithBothBudgetsNamed(t *testing.T) {
 	}
 	if res.Output != "" {
 		t.Errorf("output = %q, want empty: nothing was answered", res.Output)
+	}
+}
+
+// (ii-c) The cut tool call is the engine ANSWERING (an HTTP 500 from a seat that ran
+// out of completion budget mid-argument), so it is a budget defect and never a seat
+// that might be down: with a liveness monitor and an engine probe installed — the
+// production shape, where every 5xx is otherwise nominated for a seat read — the
+// seat is not read for it, and a seat that reads as gone at that instant cannot turn
+// it into a seat-down (ADR 0066).
+func TestCutToolCallIsNotNominatedForTheSeatCheck(t *testing.T) {
+	eng := newDownEngine("gone") // a seat check would call this down
+	execs := 0
+	client := &scriptedErrClient{errs: map[int]error{0: cutErr(), 1: cutErr()}}
+	ctx, m := NewMonitor(context.Background(), recoveryPolicy(5*time.Second), 30*time.Second)
+	defer m.Stop()
+	m.WithEngineProbe(eng.probe)
+	res, err := NewLoop(client, writeTool(&execs), 5).WithMaxTokens(1024).WithLiveness(m).Run(ctx, "write release-notes.md")
+	var sd *SeatDownError
+	if errors.As(err, &sd) || err != nil {
+		t.Fatalf("Run: a twice-cut tool call is a budget stop, not a seat-down or an error: %v", err)
+	}
+	if res.StopReason != StopToolCallCut || len(client.maxSeen) != 2 {
+		t.Fatalf("stop=%q calls=%d, want the budget stop after exactly one re-issue", res.StopReason, len(client.maxSeen))
+	}
+	if n := eng.readCount(); n != 0 {
+		t.Fatalf("the seat was read %d time(s) for a cut tool call: the engine answered, it is not down", n)
+	}
+	if res.SeatRecoveries != 0 || m.SeatDownTotal() != 0 {
+		t.Fatalf("recoveries=%d waited=%s, want none", res.SeatRecoveries, m.SeatDownTotal())
 	}
 }
 
