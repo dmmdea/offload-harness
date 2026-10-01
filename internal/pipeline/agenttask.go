@@ -19,6 +19,7 @@
 package pipeline
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -1627,11 +1628,14 @@ func (p *Pipeline) repackStructuredWith(ctx context.Context, seat string, rawSch
 		// checks against the same schema, so the two finally agree.
 		structuredOpts = append(structuredOpts, llamaclient.WithJSONSchema(schema))
 	}
-	// The re-pack IS an extract over the loop's final text — same system/user
-	// shape as tasks.buildExtract, so the seat sees a prompt pattern it
-	// already handles.
-	system := "You extract structured data from text. Output ONLY a JSON object with exactly the requested fields. Use empty values when a field is absent."
-	user := fmt.Sprintf("Extract these fields from the text: %s.\n\nTEXT:\n%s", strings.Join(names, ", "), output)
+	// The re-pack IS an extract over the loop's final text — the system/user
+	// shape of tasks.buildExtract, so the seat sees a prompt pattern it already
+	// handles, with each field's TYPE spelled out (register C-80: a prompt that
+	// lists names alone lets a seat read "numbers" and answer numbers for a list
+	// of strings).
+	props, _ := schema["properties"].(map[string]any)
+	system := "You extract structured data from text. Output ONLY a JSON object with exactly the requested fields. Use empty values when a field is absent. " + repackTypeRule
+	user := fmt.Sprintf("Extract these fields from the text: %s.\n\nTEXT:\n%s", repackFieldList(names, props), output)
 
 	// ONE set of lane-probe closures for the WHOLE call (register D-85/D-108,
 	// W-19): before this, repackClient built a fresh FleetLaneGates cache and
@@ -2082,21 +2086,18 @@ func repackBudget(output string) int {
 // returned error; repackViaChat makes no infrastructure/budget/abstention
 // judgment of its own.
 func (p *Pipeline) repackViaChat(ctx context.Context, client *llamaclient.Client, seat string, schema map[string]any, output string, extra ...llamaclient.GenOption) (json.RawMessage, int, error) {
-	names := make([]string, 0, 8)
-	if props, ok := schema["properties"].(map[string]any); ok {
-		for name, raw := range props {
-			typ := "string"
-			if m, ok := raw.(map[string]any); ok {
-				if t, ok := m["type"].(string); ok {
-					typ = t
-				}
-			}
-			names = append(names, fmt.Sprintf("%q (%s)", name, typ))
-		}
+	props, _ := schema["properties"].(map[string]any)
+	names := make([]string, 0, len(props))
+	for name := range props {
+		names = append(names, name)
 	}
 	sort.Strings(names)
-	system := "You extract structured data from text. Output ONLY a JSON object — no prose, no code fences. Respect the field types exactly: numbers unquoted, strings quoted."
-	user := fmt.Sprintf("Extract these fields from the text as a JSON object: %s.\n\nTEXT:\n%s", strings.Join(names, ", "), output)
+	// Each field's type, and a list's item type, ride in the prompt. The old
+	// instruction here ended "numbers unquoted, strings quoted", which a seat read
+	// together with a field called `numbers` and answered bare JSON numbers for a
+	// list of strings (register C-80).
+	system := "You extract structured data from text. Output ONLY a JSON object — no prose, no code fences. " + repackTypeRule
+	user := fmt.Sprintf("Extract these fields from the text as a JSON object: %s.\n\nTEXT:\n%s", repackFieldList(names, props), output)
 	budget := repackBudget(output)
 	gres, gerr := client.Generate(ctx, seat, system, user, "", budget, p.cfg.Temperature, 0, append([]llamaclient.GenOption{llamaclient.WithoutThinking()}, extra...)...)
 	if gerr != nil {
@@ -2116,19 +2117,32 @@ func (p *Pipeline) repackViaChat(ctx context.Context, client *llamaclient.Client
 	return json.RawMessage(content), gres.TokensOut, nil
 }
 
-// coerceToSchema repairs the ONE failure shape a grammar would have prevented
-// and no prompt reliably does: scalar TYPE mismatches from a grammar-less
-// seat — "7" where the schema wants a number, "true" where it wants a bool.
-// Found live on the FreeToken gpt-oss seat (2026-08-27/28): the model answers
-// correctly and quotes every scalar, so each typed contract abstained after a
-// CORRECT answer. Coercion is deterministic and lossless — a string is
-// converted only when the schema demands the type AND the value parses as it —
-// and the result must re-validate in full before it counts. Anything beyond
-// scalar re-typing (missing fields, wrong structure) still fails honestly.
+// coerceToSchema repairs the failure shapes a grammar would have prevented and no
+// prompt reliably does: scalar TYPE mismatches from a grammar-less seat — "7"
+// where the schema wants a number, "true" where it wants a bool, and, the other
+// way, a bare 7 where it wants the string "7" (register C-80: a research digest's
+// `numbers` list holds strings, and the chat lane answered JSON numbers for it).
+// It reads a property and every item of an array property. Found live on the
+// FreeToken gpt-oss seat (2026-08-27/28): the model answers correctly and quotes
+// every scalar, so each typed contract abstained after a CORRECT answer.
+// Coercion is deterministic and lossless — a value is converted only when the
+// schema demands the type AND its text says the same thing in that type — and the
+// result must re-validate in full before it counts. Anything beyond scalar
+// re-typing (missing fields, wrong structure, null, nested values) still fails
+// honestly.
+//
+// Numbers are decoded with UseNumber, so they stay the text the seat wrote: 12.50
+// becomes the string "12.50", never "12.5", and a number nothing touched comes
+// back with every digit (a float64 round trip rewrote 12345678901234567890).
 func coerceToSchema(content []byte, schema map[string]any) ([]byte, bool) {
+	dec := json.NewDecoder(bytes.NewReader(content))
+	dec.UseNumber()
 	var obj map[string]any
-	if json.Unmarshal(content, &obj) != nil {
+	if dec.Decode(&obj) != nil {
 		return nil, false
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return nil, false // trailing data: json.Unmarshal refused it, and so does this
 	}
 	props, ok := schema["properties"].(map[string]any)
 	if !ok {
@@ -2140,30 +2154,25 @@ func coerceToSchema(content []byte, schema map[string]any) ([]byte, bool) {
 		if !ok {
 			continue
 		}
-		want, _ := spec["type"].(string)
 		got, present := obj[name]
-		str, isStr := got.(string)
-		if !present || !isStr {
+		if !present {
 			continue
 		}
-		switch want {
-		case "number", "integer":
-			var n json.Number
-			if err := json.Unmarshal([]byte(strings.TrimSpace(str)), &n); err == nil {
-				if f, ferr := n.Float64(); ferr == nil {
-					obj[name] = f
-					changed = true
+		want, _ := spec["type"].(string)
+		if want == "array" {
+			items, _ := spec["items"].(map[string]any)
+			itemWant, _ := items["type"].(string)
+			if arr, ok := got.([]any); ok {
+				for i, el := range arr {
+					if v, ok := coerceScalar(el, itemWant); ok {
+						arr[i], changed = v, true
+					}
 				}
 			}
-		case "boolean":
-			switch strings.ToLower(strings.TrimSpace(str)) {
-			case "true":
-				obj[name] = true
-				changed = true
-			case "false":
-				obj[name] = false
-				changed = true
-			}
+			continue
+		}
+		if v, ok := coerceScalar(got, want); ok {
+			obj[name], changed = v, true
 		}
 	}
 	if !changed {
@@ -2177,6 +2186,44 @@ func coerceToSchema(content []byte, schema map[string]any) ([]byte, bool) {
 		return nil, false
 	}
 	return fixed, true
+}
+
+// coerceScalar re-types ONE decoded value to the scalar type the schema names. ok
+// is false when the value is not one of the shapes that converts without losing
+// anything: a string holding a JSON number (for number/integer) or a bool (for
+// boolean), or a number (a json.Number, the text as written) for a string.
+func coerceScalar(v any, want string) (any, bool) {
+	switch want {
+	case "number", "integer":
+		s, isStr := v.(string)
+		if !isStr {
+			return nil, false
+		}
+		var n json.Number
+		if err := json.Unmarshal([]byte(strings.TrimSpace(s)), &n); err != nil {
+			return nil, false
+		}
+		if _, ferr := n.Float64(); ferr != nil {
+			return nil, false // 1e999: a number no float holds is not a number the validator can judge
+		}
+		return n, true
+	case "boolean":
+		s, isStr := v.(string)
+		if !isStr {
+			return nil, false
+		}
+		switch strings.ToLower(strings.TrimSpace(s)) {
+		case "true":
+			return true, true
+		case "false":
+			return false, true
+		}
+	case "string":
+		if n, isNum := v.(json.Number); isNum {
+			return n.String(), true
+		}
+	}
+	return nil, false
 }
 
 const admissionPoll = 3 * time.Second
