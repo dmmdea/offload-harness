@@ -435,7 +435,10 @@ test("pollOutputs: dead-server watchdog aborts after COMFY_DEAD_SEC of consecuti
 test("pollOutputs: an HTTP error status IS an answer — it resets the watchdog instead of feeding it", async () => {
   const c = clock();
   let polls = 0;
-  const fetchImpl = async () => {
+  const fetchImpl = async (url) => {
+    // A healthy server's /system_stats (C-83's probe): only /history errors here, which is
+    // what this test is about. A /system_stats that errored too would be a poisoned server.
+    if (String(url).endsWith("/system_stats")) return entry({ system: {} });
     polls++;
     // Polls 1-20: HTTP 500s — 40 virtual seconds, far past COMFY_DEAD_SEC=10, but every
     // one is an ANSWER (server alive), so each must re-base the watchdog clock.
@@ -475,6 +478,170 @@ test("pollOutputs: suspend/resume fence — a timer jump past 120s never counts 
     fetchImpl, sleep, now: c.now, env: { COMFY_DEAD_SEC: "30" },
   });
   assert.equal(h.outputs[9].images[0].filename, "resumed.png");
+});
+
+// C-83, 2026-10-01 12:00:10: a sticky CUDA OOM killed ComfyUI's prompt worker on card 2.
+// HTTP kept answering: /history/<id> said 200 {} for 48 minutes (read as a slow render)
+// while /system_stats said HTTP 500 (torch.cuda.mem_get_info on the dead context), and
+// the media lease held all three cards with nothing running.
+const http500 = () => ({ ok: false, status: 500, text: async () => "500 Internal Server Error", json: async () => ({}) });
+const isStats = (url) => String(url).endsWith("/system_stats");
+
+test("pollOutputs: the wait budget is wall-clock — slow /history answers cannot stretch it (C-83)", async () => {
+  // COMFY_WAIT_SEC=1500 ran 2,894 s: the loop counted polls, not seconds.
+  const c = clock();
+  const start = c.now();
+  const fetchImpl = async () => { c.jump(2000); return entry({}); }; // every answer takes 2 s
+  await assert.rejects(
+    pollOutputs({
+      api: "http://x", promptId: "p1", waitSec: 60, isDone: () => false,
+      noOutputMsg: "no image produced in time",
+      fetchImpl, sleep: c.sleep, now: c.now, env: {},
+    }),
+    /no image produced in time/,
+  );
+  const spent = (c.now() - start) / 1000;
+  assert.ok(spent <= 66, `a 60 s budget spent ${spent} s`);
+});
+
+test("pollOutputs: a prompt that never finishes while /system_stats answers HTTP 500 is a poisoned server — abort in about a minute, marked serverUnusable (C-83)", async () => {
+  const c = clock();
+  const start = c.now();
+  let probes = 0;
+  const fetchImpl = async (url) => {
+    if (isStats(url)) { probes++; return http500(); }
+    return entry({});
+  };
+  const err = await pollOutputs({
+    api: "http://x", promptId: "p1", waitSec: 1500, isDone: () => false,
+    fetchImpl, sleep: c.sleep, now: c.now, env: {},
+  }).then(() => null, (e) => e);
+  assert.ok(err, "a poisoned server must not be waited on for the whole budget");
+  assert.equal(err.serverUnusable, true);
+  assert.match(err.message, /\/system_stats answered HTTP 500/);
+  assert.match(err.message, /restart/);
+  assert.ok(probes >= 2, `one failed probe is not a verdict (probes: ${probes})`);
+  const spent = (c.now() - start) / 1000;
+  assert.ok(spent <= 90, `must abort within about a minute, spent ${spent} s`);
+});
+
+test("pollOutputs: a poisoned server whose /history ALSO answers HTTP errors is caught by the probe too (C-83 review)", async () => {
+  // The incident server said 200 {} on /history; a variant answers 5xx there. Every error
+  // status counts as an answer (the watchdog stays quiet), so only the probe can catch it.
+  const c = clock();
+  const start = c.now();
+  const fetchImpl = async () => http500();
+  const err = await pollOutputs({
+    api: "http://x", promptId: "p1", waitSec: 1500, isDone: () => false,
+    fetchImpl, sleep: c.sleep, now: c.now, env: {},
+  }).then(() => null, (e) => e);
+  assert.ok(err, "must not wait out the whole budget");
+  assert.equal(err.serverUnusable, true);
+  assert.match(err.message, /\/system_stats answered HTTP 500/);
+  const spent = (c.now() - start) / 1000;
+  assert.ok(spent <= 90, `must abort within about a minute, spent ${spent} s`);
+});
+
+test("pollOutputs: a healthy /system_stats keeps a slow-but-honest render alive across many probes", async () => {
+  const c = clock();
+  let hist = 0;
+  const fetchImpl = async (url) => {
+    if (isStats(url)) return entry({ system: {}, devices: [] });
+    hist++;
+    if (hist < 300) return entry({}); // ten minutes of "not finished yet"
+    return entry({ p1: { outputs: { 9: { images: [{ filename: "slow.png" }] } }, status: {} } });
+  };
+  const h = await pollOutputs({
+    api: "http://x", promptId: "p1", waitSec: 1800, isDone: (e) => !!e.outputs,
+    fetchImpl, sleep: c.sleep, now: c.now, env: {},
+  });
+  assert.equal(h.outputs[9].images[0].filename, "slow.png");
+});
+
+test("pollOutputs: a /system_stats failure followed by a healthy probe resets the count — only consecutive failures are a verdict", async () => {
+  const c = clock();
+  let probes = 0, hist = 0;
+  const fetchImpl = async (url) => {
+    if (isStats(url)) { probes++; return probes % 2 === 1 ? http500() : entry({ system: {} }); }
+    hist++;
+    if (hist < 200) return entry({});
+    return entry({ p1: { outputs: { 9: { images: [{ filename: "flaky.png" }] } }, status: {} } });
+  };
+  const h = await pollOutputs({
+    api: "http://x", promptId: "p1", waitSec: 1800, isDone: (e) => !!e.outputs,
+    fetchImpl, sleep: c.sleep, now: c.now, env: {},
+  });
+  assert.equal(h.outputs[9].images[0].filename, "flaky.png");
+  assert.ok(probes >= 4, `the probe must have run and failed more than once (probes: ${probes})`);
+});
+
+test("pollOutputs: a /system_stats probe that gets no answer at all is not a poisoned-server verdict", async () => {
+  // A network failure on the probe is the dead-server watchdog's question (it watches
+  // /history); only an ANSWERED error status says the context is broken.
+  const c = clock();
+  let hist = 0;
+  const fetchImpl = async (url) => {
+    if (isStats(url)) throw new Error("fetch failed: socket hang up");
+    hist++;
+    if (hist < 100) return entry({});
+    return entry({ p1: { outputs: { 9: { images: [{ filename: "late.png" }] } }, status: {} } });
+  };
+  const h = await pollOutputs({
+    api: "http://x", promptId: "p1", waitSec: 1800, isDone: (e) => !!e.outputs,
+    fetchImpl, sleep: c.sleep, now: c.now, env: {},
+  });
+  assert.equal(h.outputs[9].images[0].filename, "late.png");
+});
+
+test("pollOutputs: the dead-server watchdog's abort is marked serverUnusable — no later job can run on a vanished server (C-83)", async () => {
+  const c = clock();
+  const fetchImpl = async () => { throw new Error("fetch failed: ECONNREFUSED"); };
+  const err = await pollOutputs({
+    api: "http://x", promptId: "p1", waitSec: 3600, isDone: () => false,
+    fetchImpl, sleep: c.sleep, now: c.now, env: { COMFY_DEAD_SEC: "10" },
+  }).then(() => null, (e) => e);
+  assert.ok(err);
+  assert.match(err.message, /stopped answering mid-render/);
+  assert.equal(err.serverUnusable, true);
+});
+
+test("pollOutputs: a suspend DURING an in-flight /history poll is neither dead time nor budget — no server-unusable abort on wake", async () => {
+  // Review finding on C-83: the fence only ran at the top of the next tick, so a lid that
+  // closed while a request was in flight woke into a failed fetch whose dead time covered
+  // the whole nap; with the server-unusable flag that would stop a whole batch.
+  const c = clock();
+  let hist = 0;
+  const fetchImpl = async (url) => {
+    if (isStats(url)) return entry({ system: {} });
+    hist++;
+    if (hist === 3) { c.jump(1_000_000); throw new Error("fetch failed: socket reset after resume"); }
+    if (hist < 6) return entry({});
+    return entry({ p1: { outputs: { 9: { images: [{ filename: "woke.png" }] } }, status: {} } });
+  };
+  const h = await pollOutputs({
+    api: "http://x", promptId: "p1", waitSec: 60, isDone: (e) => !!e.outputs,
+    fetchImpl, sleep: c.sleep, now: c.now, env: { COMFY_DEAD_SEC: "240" },
+  });
+  assert.equal(h.outputs[9].images[0].filename, "woke.png");
+});
+
+test("pollOutputs: a suspend (timer jump past 120 s) does not consume the wall-clock budget", async () => {
+  const c = clock();
+  let hist = 0;
+  let nap = false;
+  const sleep = async (ms) => { c.jump(nap ? 600_000 : ms); nap = false; };
+  const fetchImpl = async (url) => {
+    if (isStats(url)) return entry({ system: {} });
+    hist++;
+    if (hist === 1) nap = true; // the lid closes for ten minutes after the first poll
+    if (hist < 10) return entry({});
+    return entry({ p1: { outputs: { 9: { images: [{ filename: "after-nap.png" }] } }, status: {} } });
+  };
+  const h = await pollOutputs({
+    api: "http://x", promptId: "p1", waitSec: 60, isDone: (e) => !!e.outputs,
+    fetchImpl, sleep, now: c.now, env: {},
+  });
+  assert.equal(h.outputs[9].images[0].filename, "after-nap.png");
 });
 
 // ---------------------------------------------------------------------------------------
@@ -604,7 +771,8 @@ test("finalizeRun: PATH-guess ENOENT stays silent (submit already printed the on
 test("pollOutputs: an error status whose BODY read fails still counts as an answer, not dead time", async () => {
   const c = clock();
   let polls = 0;
-  const fetchImpl = async () => {
+  const fetchImpl = async (url) => {
+    if (String(url).endsWith("/system_stats")) return entry({ system: {} }); // healthy: see the C-83 probe
     polls++;
     if (polls <= 20) {
       // Server answers 502 but the error-page body read dies mid-stream.

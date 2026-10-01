@@ -574,8 +574,10 @@ func batchArgs(jobsPath, resultsPath string, m Model) []string {
 // through ONE warm ComfyUI session and writes one result line per job to resultsPath.
 // The results file is the gpugen success gate: the script exits 0 with a complete
 // results file even when individual renders failed (the caller reads per-job status),
-// while a crash/timeout/GPU-busy exits non-zero and errors here. timeout bounds the
-// WHOLE batch.
+// while a crash/timeout/GPU-busy exits non-zero and errors here. So does a ComfyUI that
+// became unusable mid-batch (register C-83): the results file still holds a row per
+// job, the later ones "not run: ...", and the caller reads them on error too.
+// timeout bounds the WHOLE batch.
 func GenerateBatch(ctx context.Context, node, script, comfyDir, jobsPath, resultsPath string, m Model, timeout time.Duration, extraEnv ...string) error {
 	env := []string{"COMFY_DIR=" + comfyDir}
 	if timeout > 0 {

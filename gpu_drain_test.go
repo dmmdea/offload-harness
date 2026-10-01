@@ -185,7 +185,7 @@ func TestUnloadAndWarmGoThroughLlamaSwap(t *testing.T) {
 	f.loaded.Store(true)
 	srv := httptest.NewServer(f.handler("seat"))
 	defer srv.Close()
-	if err := unloadSeat(context.Background(), srv.Client(), srv.URL, "seat"); err != nil {
+	if err := unloadSeat(context.Background(), srv.Client(), srv.URL, "seat", nil); err != nil {
 		t.Fatal(err)
 	}
 	if f.loaded.Load() || f.unloads.Load() != 1 {
@@ -300,6 +300,11 @@ type multiSeatSwap struct {
 	unloadCalls  []string // every model /api/models/unload/<model> was hit for, in order
 	runningReads int
 	runningFail  bool // when true, GET /running answers a body Occupants cannot parse
+	// perModelMissing makes POST /api/models/unload/<model> answer 404 (an older
+	// llama-swap), so the caller falls back to GET /unload, which (as on the real
+	// v208/v242 builds) ignores ?model= and unloads EVERYTHING. bulkCalls counts it.
+	perModelMissing bool
+	bulkCalls       int
 }
 
 func newMultiSeatSwap(models ...string) *multiSeatSwap {
@@ -331,9 +336,22 @@ func (f *multiSeatSwap) handler() http.Handler {
 	mux.HandleFunc("/api/models/unload/", func(w http.ResponseWriter, r *http.Request) {
 		model := strings.TrimPrefix(r.URL.Path, "/api/models/unload/")
 		f.mu.Lock()
+		defer f.mu.Unlock()
+		if f.perModelMissing {
+			http.NotFound(w, r)
+			return
+		}
 		f.loaded[model] = false
 		f.unloadCalls = append(f.unloadCalls, model)
-		f.mu.Unlock()
+		w.WriteHeader(200)
+	})
+	mux.HandleFunc("/unload", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		f.bulkCalls++
+		for m := range f.loaded {
+			f.loaded[m] = false // total, whatever ?model= says
+		}
 		w.WriteHeader(200)
 	})
 	// Nothing besides the agent seat's own warm-back may ever be asked to
@@ -349,9 +367,10 @@ func (f *multiSeatSwap) handler() http.Handler {
 // TestUnloadSeatAlsoUnloadsOtherResidentModels is the headline case: three
 // models resident (the configured agent seat plus two loaded by OTHER
 // clients), `--unload-seat` must clear all three, and only the agent seat is
-// ever recorded as owed a warm-back.
+// ever recorded as owed a warm-back. (The mem0 stack is not a foreign
+// resident: TestUnloadSeatNeverUnloadsTheMemoryStack.)
 func TestUnloadSeatAlsoUnloadsOtherResidentModels(t *testing.T) {
-	f := newMultiSeatSwap("agent-pool", "qwen3.5-9b-vl", "embeddinggemma")
+	f := newMultiSeatSwap("agent-pool", "qwen3.5-9b-vl", "whisper-stt")
 	srv := httptest.NewServer(f.handler())
 	defer srv.Close()
 
@@ -387,7 +406,7 @@ func TestUnloadSeatAlsoUnloadsOtherResidentModels(t *testing.T) {
 	if len(stillLoaded) != 0 {
 		t.Fatalf("model(s) still resident after --unload-seat: %v", stillLoaded)
 	}
-	want := []string{"agent-pool", "qwen3.5-9b-vl", "embeddinggemma"}
+	want := []string{"agent-pool", "qwen3.5-9b-vl", "whisper-stt"}
 	for _, m := range want {
 		found := false
 		for _, c := range calls {
@@ -398,6 +417,140 @@ func TestUnloadSeatAlsoUnloadsOtherResidentModels(t *testing.T) {
 		if !found {
 			t.Fatalf("model %q was never asked to unload; unload calls = %v", m, calls)
 		}
+	}
+}
+
+// unloadSeatRun runs one `--unload-seat` maintenance pass against f with the
+// given extra config JSON fields and returns the unload calls and the models
+// still resident afterwards.
+func unloadSeatRun(t *testing.T, f *multiSeatSwap, extraCfg string) (calls []string, still map[string]bool) {
+	t.Helper()
+	calls, still, err := unloadSeatRunErr(t, f, extraCfg)
+	if err != nil {
+		t.Fatalf("maintainSeat: %v", err)
+	}
+	return calls, still
+}
+
+func unloadSeatRunErr(t *testing.T, f *multiSeatSwap, extraCfg string) (calls []string, still map[string]bool, err error) {
+	t.Helper()
+	srv := httptest.NewServer(f.handler())
+	defer srv.Close()
+	old := maintenanceClient
+	maintenanceClient = srv.Client()
+	t.Cleanup(func() { maintenanceClient = old })
+	root := t.TempDir()
+	cfgPath := filepath.Join(root, "config.json")
+	cfg := `{"state_dir": ` + strconv.Quote(root) + `, "endpoint": ` + strconv.Quote(srv.URL) + `, "agent_model": "agent-pool"` + extraCfg + `}`
+	if err := os.WriteFile(cfgPath, []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err = maintainSeat(loadCfgPath(cfgPath), nil, false, time.Time{}, true, false, nil)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	still = map[string]bool{}
+	for m, ok := range f.loaded {
+		if ok {
+			still[m] = true
+		}
+	}
+	return append([]string(nil), f.unloadCalls...), still, err
+}
+
+// TestUnloadSeatNeverFallsBackToTheTotalUnloadWhileTheStackIsResident: when the
+// per-model route fails, the legacy GET /unload is total (it ignores ?model=), so
+// using it would take the mem0 stack down with the seat. render/gpu-lock.mjs and
+// the llamaswap unload-all tool both refuse it while the stack is resident; this
+// side refuses too, and says why (C-87 review).
+func TestUnloadSeatNeverFallsBackToTheTotalUnloadWhileTheStackIsResident(t *testing.T) {
+	f := newMultiSeatSwap("agent-pool", "embeddinggemma")
+	f.perModelMissing = true
+	_, still, err := unloadSeatRunErr(t, f, "")
+	if f.bulkCalls != 0 {
+		t.Fatalf("GET /unload (total) was called %d time(s) with the memory stack resident", f.bulkCalls)
+	}
+	if !still["embeddinggemma"] {
+		t.Fatalf("the memory stack was torn down: still resident %v", still)
+	}
+	if err == nil || !strings.Contains(err.Error(), "memory stack") {
+		t.Fatalf("the seat could not be unloaded selectively, so the reserve must fail and say why; err = %v", err)
+	}
+}
+
+// TestUnloadSeatRefusesTheTotalUnloadWhenResidencyIsUnreadable: an unreadable
+// /running cannot show the stack is absent, so the total route stays refused.
+func TestUnloadSeatRefusesTheTotalUnloadWhenResidencyIsUnreadable(t *testing.T) {
+	f := newMultiSeatSwap("agent-pool", "embeddinggemma")
+	f.perModelMissing = true
+	f.runningFail = true
+	_, still, err := unloadSeatRunErr(t, f, "")
+	if f.bulkCalls != 0 || !still["embeddinggemma"] {
+		t.Fatalf("bulk calls %d, still resident %v: the total unload ran blind", f.bulkCalls, still)
+	}
+	if err == nil {
+		t.Fatal("the seat was not unloaded; the reserve must fail, not go on with the seat resident")
+	}
+}
+
+// TestUnloadSeatFallsBackToTheTotalUnloadWhenNoStackIsResident: with nothing to
+// protect, an older llama-swap still gets its only unload route.
+func TestUnloadSeatFallsBackToTheTotalUnloadWhenNoStackIsResident(t *testing.T) {
+	f := newMultiSeatSwap("agent-pool", "qwen3.5-9b-vl")
+	f.perModelMissing = true
+	_, still, err := unloadSeatRunErr(t, f, "")
+	if err != nil {
+		t.Fatalf("maintainSeat: %v", err)
+	}
+	if f.bulkCalls == 0 || len(still) != 0 {
+		t.Fatalf("bulk calls %d, still resident %v: want the legacy route used and the cards clear", f.bulkCalls, still)
+	}
+}
+
+// TestUnloadSeatEmptyMemoryStackMeansTheDefault: `"memory_stack": []` is the same
+// as an omitted key on the render side (the pipeline exports MEMORY_STACK only
+// when non-empty, so gpu-lock.mjs uses its default pair); the Go side agrees.
+func TestUnloadSeatEmptyMemoryStackMeansTheDefault(t *testing.T) {
+	f := newMultiSeatSwap("agent-pool", "embeddinggemma")
+	calls, still := unloadSeatRun(t, f, `, "memory_stack": []`)
+	if !still["embeddinggemma"] {
+		t.Fatalf("an empty memory_stack unloaded the default stack; unload calls = %v", calls)
+	}
+}
+
+// TestUnloadSeatNeverUnloadsTheMemoryStack: the mem0 embedder and reranker are
+// the operator's absolute priority, and on the reference box they sit on the
+// utility card, not the render card. On 2026-10-01 a media lease's
+// `--unload-seat` unloaded the reference box's mem0 embedder for nothing the render
+// could use (register C-87). render/gpu-lock.mjs has always kept the stack;
+// this side now does too.
+func TestUnloadSeatNeverUnloadsTheMemoryStack(t *testing.T) {
+	f := newMultiSeatSwap("agent-pool", "qwen3.5-9b-vl", "embeddinggemma", "bge-reranker-v2-m3")
+	calls, still := unloadSeatRun(t, f, "")
+	for _, m := range []string{"embeddinggemma", "bge-reranker-v2-m3"} {
+		if !still[m] {
+			t.Errorf("memory-stack model %q was unloaded by --unload-seat; unload calls = %v", m, calls)
+		}
+		for _, c := range calls {
+			if c == m {
+				t.Errorf("memory-stack model %q was asked to unload; unload calls = %v", m, calls)
+			}
+		}
+	}
+	if still["agent-pool"] || still["qwen3.5-9b-vl"] {
+		t.Errorf("the seat and the foreign resident must still be cleared; still resident: %v", still)
+	}
+}
+
+// TestUnloadSeatKeepsTheConfiguredMemoryStack: the kept set is the config's
+// memory_stack, not a literal; a model outside it is a foreign resident.
+func TestUnloadSeatKeepsTheConfiguredMemoryStack(t *testing.T) {
+	f := newMultiSeatSwap("agent-pool", "my-embedder", "embeddinggemma")
+	calls, still := unloadSeatRun(t, f, `, "memory_stack": ["my-embedder"]`)
+	if !still["my-embedder"] {
+		t.Errorf("configured memory-stack model was unloaded; unload calls = %v", calls)
+	}
+	if still["embeddinggemma"] {
+		t.Errorf("embeddinggemma is not in this config's memory_stack, so it is a foreign resident and must be cleared; still: %v", still)
 	}
 }
 

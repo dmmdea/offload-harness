@@ -54,7 +54,8 @@ import { buildHiDreamO1 } from "./wf-hidream-o1.mjs";
 import { buildKrea2 } from "./wf-krea2.mjs";
 import { buildQwenImage, QWEN_IMAGE_PRESETS } from "./wf-qwen-image.mjs";
 import { buildQwenImage21, snapDim, QWEN_IMAGE_21_DEFAULT_SIZE, QWEN_IMAGE_21_SCHEDULES } from "./wf-qwen-image-21.mjs";
-import { resolveCli, submitGraph, pollOutputs, fetchView, finalizeRun } from "./comfy-submit.mjs";
+import { resolveCli, submitGraph, pollOutputs, fetchView, finalizeRun, serverUnusableError } from "./comfy-submit.mjs";
+import { RENDER_EXIT_SERVER_UNUSABLE } from "./batch-jobs.mjs";
 
 /** A caller mistake: main() prints the message and exits 2 (never 1, never a render). */
 export class UsageError extends Error {}
@@ -316,14 +317,39 @@ export function buildRenderGraph({ pos, flags, env = process.env, random = Math.
   return { graph, seed, width, height };
 }
 
-async function waitServer(API) {
-  for (let i = 0; i < 90; i++) {
+// waitServer: wait for the ComfyUI a --no-lifecycle parent already booted to answer
+// GET /system_stats. Both failures are serverUnusable: in this mode nobody relaunches the
+// server, so no later job of the batch can run either. A server that ANSWERS with an error
+// status is up but broken (C-83, 2026-10-01: a sticky CUDA error made /system_stats answer
+// HTTP 500, and each job waited the whole ~3 min before "not reachable"); a booting server
+// does not answer at all, so maxErrorAnswers error answers are a verdict, not a slow start.
+// Deps are injectable for tests only.
+export async function waitServer(API, {
+  fetchImpl = fetch,
+  sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
+  probes = 90,
+  maxErrorAnswers = 3,
+} = {}) {
+  let errorAnswers = 0;
+  for (let i = 0; i < probes; i++) {
     // Per-probe abort: a wedged-but-listening server hangs sockets; without a signal the
     // fetch would stall this loop far past its intended ~3min cap.
-    try { const r = await fetch(API + "/system_stats", { signal: AbortSignal.timeout(8000) }); if (r.ok) return true; } catch {}
-    await new Promise(r => setTimeout(r, 2000));
+    let r = null;
+    try { r = await fetchImpl(API + "/system_stats", { signal: AbortSignal.timeout(8000) }); } catch {}
+    if (r && r.ok) return true;
+    if (r && ++errorAnswers >= maxErrorAnswers) {
+      throw serverUnusableError(`ComfyUI on ${API} answers, but GET /system_stats returned HTTP ${r.status} ${errorAnswers} times: its CUDA context is broken, so it can run no more work and must be restarted (see the ComfyUI log)`);
+    }
+    await sleep(2000);
   }
-  throw new Error("ComfyUI not reachable on " + API + " after ~3min");
+  throw serverUnusableError("ComfyUI not reachable on " + API + " after ~3min");
+}
+
+// renderExitCode: the exit code for a failed render. RENDER_EXIT_SERVER_UNUSABLE tells a
+// --batch parent (comfy-generate.mjs) that its ComfyUI can run no later job, so it stops
+// instead of failing every remaining job against the same server.
+export function renderExitCode(err) {
+  return err && err.serverUnusable ? RENDER_EXIT_SERVER_UNUSABLE : 1;
 }
 
 // firstImage: the first node output under `images` — this runner produces images, so a
@@ -413,5 +439,5 @@ async function main() {
 // endsWith, not a URL comparison: the harness may reach render/ through a junction, and
 // Node reports the main module by its real path.
 if (process.argv[1] && /comfy-render\.mjs$/.test(process.argv[1])) {
-  main().catch(e => { console.error("RENDER FAILED:", e.message); process.exit(1); });
+  main().catch(e => { console.error("RENDER FAILED:", e.message); process.exit(renderExitCode(e)); });
 }

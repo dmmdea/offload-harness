@@ -6,6 +6,80 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.158.1] - 2026-10-01 - A ComfyUI that answers HTTP but cannot render ends the wait and the batch; `gpu reserve` keeps the mem0 stack; an unreadable busy seat keeps the overflow off it
+
+### Fixed — a ComfyUI that answers HTTP but can no longer render ends the wait and the batch (register C-83)
+
+On 2026-10-01 at 12:00:10 a sticky CUDA error on a 16 GB render card killed ComfyUI's prompt worker while its HTTP
+server kept answering (register A-128 tracks the fault itself). `/history/<id>` returned `200 {}`, which the poll loop
+read as a slow render, and `GET /system_stats` returned HTTP 500. The batch waited 2,894 s on that job against a
+1,500 s `COMFY_WAIT_SEC`, then failed the next three jobs at about 3 min each. For those 57 minutes the media lease
+held all three cards with nothing running on any of them: a whisper load and the text seat queued behind it, and
+delegations overflowed to another node.
+
+- `pollOutputs`, used by every ComfyUI runner, measures `waitSec` in wall-clock time. It used to count polls, so
+  slow answers stretched the budget. A suspend still moves the deadline by the time slept, now also when the
+  machine sleeps during a request. Before, a request in flight across a suspend counted the whole nap as dead time
+  and ended the job on a healthy server.
+- While the prompt is missing from `/history`, or `/history` answers with an error status, a `GET /system_stats`
+  probe runs every 15 s, starting after 15 s. Two HTTP-error answers in a row end the wait with a *server unusable*
+  error that names the probe, the status and the restart. A probe that gets no answer counts for nothing. The
+  dead-server watchdog's abort is a server-unusable error too.
+- `comfy-render.mjs` exits 3 on a server-unusable error (1 for any other failure, 2 for a caller mistake). When a
+  `--no-lifecycle` child waits for its parent's server, three error answers now end the wait instead of ~3 min of
+  polling, and the "not reachable" ending is server-unusable as well.
+- `comfy-generate.mjs --batch` stops when a job exits 3. The failed job and every later job get a result row (the
+  later ones `not run: ComfyUI became unusable at job N/M (...)`), the batch exits non-zero, and its teardown frees
+  the card and the lease. An ordinary failure is still recorded and the batch goes on with exit 0, which is what
+  the Go side reads job by job. A failed job's `error` now carries the child's own `RENDER FAILED:` reason instead
+  of only `comfy-render exited N`.
+- `comfy-inpaint.mjs --batch` stops at once on a server-unusable error. Before, it stopped only after three
+  consecutive failures, each a full wait. Its `_row: "aborted"` line gains `reason`.
+- When `withGpuSlot` adds ComfyUI's console tail to an error, it keeps the server-unusable flag, so a standalone
+  render exits 3 too.
+- Tests: 18 new; each of the 16 mutants of the new logic turns one red. Two existing poll tests whose mocks answered
+  5xx on every URL now answer `/system_stats` as a healthy server, since they test the `/history` watchdog. An end-to-end run of the real
+  `comfy-generate.mjs --batch` against a fake ComfyUI that goes poisoned on job 2 stopped in 37 s with a row for
+  each of the four jobs. Unchanged main took 631 s on the same run, exited 0, and recorded
+  `comfy-render exited 1` as every error.
+- Docs: `docs/systems/media-generation.md` (the poll loop and the warm batch).
+
+### Fixed — `gpu reserve --unload-seat` keeps the mem0 stack resident (register C-87)
+
+`--unload-seat` cleared the agent seat and every other model llama-swap held, including the config's `memory_stack`
+(the mem0 embedder and reranker). On 2026-10-01 a media lease unloaded the reference box's mem0 embedder. That embedder
+sits on the utility card while the render ran on another card, so the unload freed nothing the render could use.
+`render/gpu-lock.mjs` has always kept that set; the Go side now matches it. The stack stays resident, and the run
+prints `kept the memory stack resident (mem0 never yields to a lease)`.
+
+- `otherResidentModels` returns the configured `memory_stack` as kept rather than as foreign residents; the agent seat
+  and every other resident are still cleared. An empty `memory_stack` means the default pair, as it already did on the
+  render side.
+- When the per-model unload route fails, the legacy `GET /unload` fallback is refused while the stack is resident, or
+  while `/running` cannot be read. That route unloads everything whatever its `?model=` says. The reserve then fails and
+  names the stack; before, the fallback tore the stack down. This matches `render/gpu-lock.mjs` and the llamaswap tool's
+  `unload-all`.
+- Tests: five new (memory stack kept, configured stack kept, empty stack means the default, no total fallback with
+  the stack resident or residency unreadable). Each failed on the old code, and four mutants each turn one red. `TestUnloadSeatAlsoUnloadsOtherResidentModels` named
+  `embeddinggemma` as a foreign resident and now uses `whisper-stt`.
+- The `memory_stack` comments in `internal/config` and `render/gpu-lock.mjs` no longer call the stack CPU-only:
+  it runs on a GPU, the box's utility card. Docs: `docs/systems/gpu-lease.md`.
+
+### Fixed — a seat whose load cannot be read no longer takes the overflow it was kept off (register C-88)
+
+When a deal finds the local seat busy, it keeps the overflow subtask off it and hands that subtask to the capacity
+wait. The wait re-reads the seat on every tick and may run the subtask locally once the seat reads idle. A failed or
+ambiguous read was folded into idle (the deal's documented fail-open), so on a box too loaded to answer the metrics
+probe in time, the first failed read put the overflow on the seat the deal had just found busy. CI caught it as a
+flaky `TestAutoOverflowIsNotStackedOnTheBusyLocalSeat` (run 36937589311).
+
+- `busyReading` gains `unknown`, set when the probe fails or the read is ambiguous. The deal still treats it as idle.
+- `localStillBusy`, which only the wait uses, keeps the deal's busy answer while the reading is unknown, on both
+  `spread` and `auto`. A seat that never reads again leaves the subtask to the remotes or to the wait's own end.
+- Tests: `TestOverflowStaysOffABusySeatWhoseLoadBecomesUnreadable` fails the seat's metrics after the deal's own
+  reads. It went red 3 of 3 runs on both routes before the fix. Three mutants each turn it red. The `internal/delegate`
+  package passes.
+
 ## [0.158.0] - 2026-10-01 - Qwen-Image-2.1 licence warnings removed from results, status and docs
 
 ### Changed — no licence warning text anywhere (operator order 2026-10-01)

@@ -22,7 +22,7 @@ import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import { readFileSync, writeFileSync, appendFileSync, mkdirSync } from "node:fs";
 import { withGpuSlot } from "./gpu-lock.mjs";
-import { parseJobs, jobArgs, resultLine, JOB_PARAM_FLAGS, SHARED_BINDING_FLAGS } from "./batch-jobs.mjs";
+import { parseJobs, jobArgs, runBatchJobs, renderExitError, JOB_PARAM_FLAGS, SHARED_BINDING_FLAGS } from "./batch-jobs.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const argv = process.argv.slice(2);
@@ -45,11 +45,17 @@ const API = flags.api || process.env.COMFY_API || "http://127.0.0.1:8188";
 // path (comfy-render.mjs can also self-manage when run standalone — gap 4 — but here
 // it must not, or its own teardown would free/unload ComfyUI's model after EVERY job
 // in a --batch session, defeating the whole point of the warm session).
+// The child's stderr is relayed as it arrives and its tail kept: its "RENDER FAILED:" line
+// becomes the job's error, and exit RENDER_EXIT_SERVER_UNUSABLE marks the error
+// serverUnusable, which stops a --batch (C-83). "close", not "exit": the tail must be
+// complete before the reason is read from it.
 function runRenderArgs(tail) {
   const args = [join(__dirname, "comfy-render.mjs"), ...tail, "--no-lifecycle"];
   return new Promise((resolve, reject) => {
-    const c = spawn("node", args, { stdio: "inherit" });
-    c.on("exit", (code) => (code === 0 ? resolve() : reject(new Error("comfy-render exited " + code))));
+    const c = spawn("node", args, { stdio: ["inherit", "inherit", "pipe"] });
+    let errTail = "";
+    c.stderr.on("data", (d) => { process.stderr.write(d); errTail = (errTail + d).slice(-8192); });
+    c.on("close", (code) => (code === 0 ? resolve() : reject(renderExitError(code, errTail))));
     c.on("error", reject);
   });
 }
@@ -75,19 +81,12 @@ if (flags.batch) {
   writeFileSync(resultsPath, "");
   withGpuSlot(
     { noLock: flags["no-lock"], keepComfy: flags["keep-comfy"], comfyManaged: true, reserveVram: flags["reserve-vram"], warm: true },
-    async () => {
-      for (let i = 0; i < jobs.length; i++) {
-        const t0 = Date.now();
-        try {
-          await runRenderArgs(jobArgs(jobs[i], sharedFlags));
-          appendFileSync(resultsPath, resultLine(i, jobs[i], true, Date.now() - t0) + "\n");
-        } catch (e) {
-          // A single failed render must not sink the batch: record and continue.
-          appendFileSync(resultsPath, resultLine(i, jobs[i], false, Date.now() - t0, e.message) + "\n");
-        }
-        console.error(`batch ${i + 1}/${jobs.length} done (${Math.round((Date.now() - t0) / 1000)}s)`);
-      }
-    },
+    () => runBatchJobs({
+      jobs,
+      runJob: (job) => runRenderArgs(jobArgs(job, sharedFlags)),
+      record: (line) => appendFileSync(resultsPath, line + "\n"),
+      log: (line) => console.error(line),
+    }),
   ).catch((e) => { console.error("IMAGE BATCH FAILED:", e.message); process.exit(1); });
 } else {
   if (!out || !prompt) {

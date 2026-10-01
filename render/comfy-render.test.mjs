@@ -9,7 +9,8 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { buildRenderGraph, parseRenderArgs, parseBoolFlag, UsageError, KNOWN_FAMILIES, BOOL_FLAGS } from "./comfy-render.mjs";
+import { buildRenderGraph, parseRenderArgs, parseBoolFlag, UsageError, KNOWN_FAMILIES, BOOL_FLAGS, waitServer } from "./comfy-render.mjs";
+import * as renderMod from "./comfy-render.mjs";
 import { rgbaPrompt } from "./wf-qwen-image-21.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -179,4 +180,40 @@ test("--no-lifecycle: skips withGpuSlot entirely — unset lease does not block 
     { encoding: "utf8", timeout: 3000, env });
   assert.ok(r.signal || (r.error && r.error.code === "ETIMEDOUT"), `expected the process to still be running (polling) when killed, got status=${r.status} signal=${r.signal} error=${r.error}`);
   assert.doesNotMatch(r.stderr || "", /GPU lease missing/, "must not require a lease under --no-lifecycle");
+});
+
+// C-83: a --no-lifecycle child whose server is listening but broken (a poisoned CUDA
+// context answers GET /system_stats with HTTP 500) waited the full ~3 min per job before
+// "not reachable", three times in a row on 2026-10-01.
+test("waitServer: a listening server whose /system_stats answers HTTP 500 is unusable — fail in seconds, not ~3 min (C-83)", async () => {
+  let calls = 0;
+  const fetchImpl = async () => { calls++; return { ok: false, status: 500 }; };
+  const err = await waitServer("http://x", { fetchImpl, sleep: async () => {} }).then(() => null, (e) => e);
+  assert.ok(err, "a broken server must be refused");
+  assert.equal(err.serverUnusable, true);
+  assert.match(err.message, /HTTP 500/);
+  assert.ok(calls <= 3, `must stop after 3 consecutive error answers, made ${calls} probes`);
+});
+
+test("waitServer: a server that never answers is unusable once its budget ends", async () => {
+  const fetchImpl = async () => { throw new Error("connect ECONNREFUSED"); };
+  const err = await waitServer("http://x", { fetchImpl, sleep: async () => {}, probes: 5 }).then(() => null, (e) => e);
+  assert.ok(err);
+  assert.equal(err.serverUnusable, true);
+  assert.match(err.message, /not reachable/);
+});
+
+test("waitServer: error answers that end in a healthy one are a server still booting, not a verdict", async () => {
+  let calls = 0;
+  const fetchImpl = async () => { calls++; return calls <= 2 ? { ok: false, status: 503 } : { ok: true }; };
+  assert.equal(await waitServer("http://x", { fetchImpl, sleep: async () => {} }), true);
+  assert.equal(calls, 3);
+});
+
+test("renderExitCode: a serverUnusable failure exits 3 so a batch parent stops; anything else exits 1 (C-83)", () => {
+  assert.equal(typeof renderMod.renderExitCode, "function", "comfy-render.mjs must export renderExitCode");
+  const e = new Error("poisoned"); e.serverUnusable = true;
+  assert.equal(renderMod.renderExitCode(e), 3);
+  assert.equal(renderMod.renderExitCode(new Error("ordinary")), 1);
+  assert.equal(renderMod.renderExitCode(undefined), 1);
 });

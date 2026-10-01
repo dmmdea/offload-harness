@@ -80,9 +80,10 @@ export function releaseLeaseUnloadMarker(lease) {
   try { unlinkSync(join(lease.dir, `unloaded.${lease.epoch}`)); } catch {}
 }
 
-// MEMORY_STACK: the always-loaded, CPU-only mem0 models (they hold ZERO GPU VRAM).
-// freeLlamaSwap must NEVER unload these — the unload-ALL route did, needlessly tearing
-// down the load-bearing memory stack on every gen job for no VRAM benefit.
+// MEMORY_STACK: the load-bearing mem0 models (small; on the reference box pinned to the
+// utility card, not the render card). freeLlamaSwap must NEVER unload these — the
+// unload-ALL route did, tearing down the memory stack on every gen job for no VRAM the
+// render could use. `gpu reserve --unload-seat` keeps them too (register C-87).
 //
 // SOURCED FROM CONFIG/ENV, not a buried const: the Go harness threads the config's
 // MemoryStack as MEMORY_STACK, so a renamed/added 3rd CPU member is honored instead
@@ -382,6 +383,8 @@ export async function withGpuSlot(opts, fn) {
             { cause: err },
           );
           enriched.stack = err.stack;
+          // The rewrap must not drop the flag comfy-render.mjs turns into exit 3 (C-83).
+          if (err && err.serverUnusable) enriched.serverUnusable = true;
           throw enriched;
         }
       }

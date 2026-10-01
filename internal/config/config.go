@@ -1170,9 +1170,12 @@ type Config struct {
 	// harness never calls a cloud model, it hands the work back to the calling session,
 	// which is the expensive path this wait exists to avoid. Default 90.
 	VisionGPUWaitSec int `json:"vision_gpu_wait_sec,omitempty"`
-	// MemoryStack lists the CPU-only, zero-VRAM llama-swap models the GPU-free helper
-	// must NEVER unload (the load-bearing mem0 stack). Sourced here (not a buried const)
-	// so a renamed/added 3rd CPU member is honored. Threaded to the runner via the
+	// MemoryStack lists the llama-swap models of the load-bearing mem0 stack, which
+	// nothing that clears cards for a GPU job may unload: not the render runner's
+	// helper and not `gpu reserve --unload-seat` (register C-87). They are small and,
+	// on the reference box, pinned to the utility card, not the render card (they ran
+	// on the CPU only from 2026-09-07 to 09-10). Sourced here (not a buried const) so a
+	// renamed/added 3rd member is honored. Threaded to the runner via the
 	// MEMORY_STACK env. Default {embeddinggemma, bge-reranker-v2-m3}. This is an
 	// UNORDERED keep-alive set — do NOT infer roles from position (use EmbedModel).
 	MemoryStack []string `json:"memory_stack,omitempty"`
