@@ -640,9 +640,12 @@ overrides matter:
 **An EXISTING `~\.local-offload\config.json` is never touched by the installer** (it prints
 SKIP). On an already-installed box, hand-seed these exact keys into the existing config —
 `accelerators`, `hailo_endpoint`, `hailo_sidecar_cmd`, `hailo_timeout_sec`, `hailo_idle_sec` —
-and append `"accelerators": ["hailo-8l"]` to `installed.json` so `/fleet/health` advertises
-the device. Values: see the `accelerators.hailo-8l.config_seed` block in
-`setup/templates/profiles.json` (back both files up first).
+and add nothing to `installed.json`: the config keys are what enable the device for this box's
+own tools and agent loop, while `installed.json`'s `accelerators` list is read only to build
+`/fleet/health`, where the Hailo-8L never appears (it is local-only, ADR 0038 amendment, register
+E-08: no node advertises it or accepts a fleet job for it, whatever either file lists). Values:
+see the `accelerators.hailo-8l.config_seed` block in `setup/templates/profiles.json` (back the
+config up first).
 
 ### Composition lane (HyperFrames; `offload_compose_video`, ADR 0059)
 

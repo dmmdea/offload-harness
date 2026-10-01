@@ -304,14 +304,16 @@ func TestHealthOmitsGpuDevicesWhenAbsent(t *testing.T) {
 // (Options.Accelerators — the fleet-serve verb reads it from installed.json's
 // `accelerators`, ADR 0024) must reach the health payload so a delegator can
 // route NPU-owned work here; a node with none must OMIT the key entirely (the
-// pre-accelerator payload stays byte-identical, same rule as gpu_devices).
+// pre-accelerator payload stays byte-identical, same rule as gpu_devices). The device is the
+// Coral: the Hailo-8L is local-only and never reaches this payload (register E-08, see
+// accel_localonly_test.go).
 func TestHealthAdvertisesAccelerators(t *testing.T) {
 	opts := &Options{
 		NodeID:       "node-acc",
 		Snapshot:     goodSnapshot,
 		GpuVendor:    "nvidia",
 		GpuArch:      "ampere",
-		Accelerators: []string{"hailo-8l"},
+		Accelerators: []string{"coral-edgetpu"},
 	}
 	s, _ := newTestServer(t, imageCfg(), &fakeRunner{}, opts)
 	rec := do(t, s, http.MethodGet, "/fleet/health", "", nil)
@@ -320,8 +322,8 @@ func TestHealthAdvertisesAccelerators(t *testing.T) {
 	}
 	m := decodeMap(t, rec)
 	accs, ok := m["accelerators"].([]any)
-	if !ok || len(accs) != 1 || accs[0] != "hailo-8l" {
-		t.Fatalf("accelerators = %v, want [hailo-8l]", m["accelerators"])
+	if !ok || len(accs) != 1 || accs[0] != "coral-edgetpu" {
+		t.Fatalf("accelerators = %v, want [coral-edgetpu]", m["accelerators"])
 	}
 	plain, _ := newTestServer(t, imageCfg(), &fakeRunner{}, nil)
 	mp := decodeMap(t, do(t, plain, http.MethodGet, "/fleet/health", "", nil))

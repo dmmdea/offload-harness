@@ -138,7 +138,8 @@ const (
 	// AgentWireResult; a defer is a SUCCESS shape (job done, contract unmet),
 	// mirroring the cascade's defer semantics.
 	TaskAgentRun TaskType = "agent"
-	// TaskAccel runs ONE accelerator tool (a Hailo/Coral lane) on this node on
+	// TaskAccel runs ONE accelerator tool (a Coral or RKNPU lane; the Hailo-8L is
+	// local-only and never runs as a fleet task, register E-08) on this node on
 	// behalf of a box that lacks the device (Coral design Phase B, 0.115.0).
 	// Payload {accelerator, tool, args, image_b64?, image_name?}: the image
 	// travels as bytes (cap AccelImageCap), lands in a job-scoped dir and

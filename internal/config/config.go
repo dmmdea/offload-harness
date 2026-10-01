@@ -1401,7 +1401,9 @@ type Config struct {
 	// /fleet/health lists the id, the image travelling inside the job (cap
 	// 8 MiB). Explicit opt-in keeps tools/list byte-identical for a box that
 	// declares nothing; a local device wins over a remote one for the same
-	// capability name unless AcceleratorToolOwners names the remote one.
+	// capability name unless AcceleratorToolOwners names the remote one. A local-only
+	// device (hailo-8l, register E-08) is never served over the fleet: listing it here
+	// is a doctor finding and a startup warning, and its forwarded calls could only defer.
 	FleetAccelerators []string `json:"fleet_accelerators,omitempty"`
 	// AcceleratorToolOwners names the device that serves a shared accelerator
 	// tool, by tool name: {"offload_object_detect": "rknpu"} (ADR 0068). It
@@ -2175,6 +2177,9 @@ func load(path string) (Config, error) {
 		fmt.Fprintf(os.Stderr, "warning: %s\n", w)
 	}
 	for _, w := range CallDeadlineFindings(c) {
+		fmt.Fprintf(os.Stderr, "warning: %s\n", w)
+	}
+	for _, w := range LocalOnlyAcceleratorFindings(c) {
 		fmt.Fprintf(os.Stderr, "warning: %s\n", w)
 	}
 	return c, nil
