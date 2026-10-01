@@ -6,6 +6,192 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.157.0] - 2026-10-01 - the structured re-pack is bounded by the wall; a named layer is honoured on every deal; the Hailo-8L stays on its box; read_file is metered in characters
+
+### Fixed — the structured re-pack is bounded by the wall, resends a cut request only when it can help, and says what it did (register C-80, ADR 0055 item 9)
+
+On 2026-09-30 a 9B agent seat at about 5.6 tok/s ended its loop 219 s into a 600 s wall and then spent 1,670 s re-packing a 2,782-byte answer: the grammar request, sized at 1,439 tokens, ended `length`; the same request, resent unconditionally at the 8,192-token cap, ended `length` again; the chat lane answered JSON numbers where the schema wanted strings. Nothing compared what an attempt asked for with the time left, and the wire kept a count of attempts and nothing about what any of them wrote.
+
+- **The wall bounds each attempt, by arithmetic.** Before every attempt the node takes the time left before `min(the run's ceiling, the wall's end + the liveness slack)` and the seat's decode rate (the seat-rates store, else this run's streamed rate, else the rate its own completions measured, else `agent_seat_tok_s`). An attempt whose `max_tokens` fits is sent as sized; one that does not is sent with the tokens the time buys, down to the answer's own size (`len/3 + 64`); under that it is skipped, and so is every later attempt. A skip with no attempt before it is a `budget` defer (`structured re-pack skipped: ...`) carrying the finished answer, flagged `schema_miss`. It is a token budget and a deadline check, never a transport timeout: a request in flight is not cut. With no known rate there is no arithmetic, and a failed re-pack says `re-pack time bound off` in `repack_note`. A loop that ends after the wall plus its grace therefore gets no node-side re-pack, and its structured result depends on the delegator's rescue.
+- **A cut grammar request is resent at the cap only when the budget was the problem and the time left buys it.** The retry used to go on every truncation, and a greedy seat answers the same request byte for byte. It now needs a budget under the cap, a tail that is not a runaway (whitespace, or a block of up to 64 bytes repeated back from the end of the output across at least half of its last 256 bytes, or a block of lines repeated), an answer that needs more tokens than the budget held at the density the seat wrote, a budget the wall did not set, and enough time left to carry what the answer needs. Otherwise the loop goes to the chat lane. A re-pack attempt the clock narrowed and the seat cut, with no runaway tail, is a `budget` defer and no longer an `abstention` (which the delegator retries on another node).
+- **The prompts and the grammar stop permitting the suspected runaway.** Both prompts name each field's type and a list's item type; the grammar lane names what its grammar enforces (every array is a list of strings, an object a string), the chat and vLLM lanes the schema's own. The grammar's whitespace rule is llama.cpp's own bounded `ws ::= | " " | "\n" [ \t]{0,20}`, which moves every grammar's text and so each seat's prompt-prefix cache key once (the four grammar-seat golden digests were re-taken; with the old rule swapped back they reproduce exactly). The scalar coercion turns a bare JSON number into the string a string field or list item asks for, keeping its text, reads array items both ways, and says which fields it re-typed (`coerced to the schema's types: ...`).
+- **Every attempt is on the wire.** `repack_attempts_detail` (additive, omitted when empty) carries one record per attempt: lane, `max_tokens` and `clamped_from`, tokens generated, finish reason, wall, the first and last 80 bytes of what the seat wrote, and why it failed or was skipped. `llamaclient.GenResult` gains `FinishReason`. `tokens_out` counts failed attempts too, including a stream that died mid-body (`llamaclient.BodyError` now carries what it had delivered). The row an `agent_delegate` caller reads carries the first four records.
+- **A finished answer is not dropped by a bare defer.** A deferred `offload_ask` (local or routed) carries the loop's prose as `output`, flagged `schema_miss`; `offload_review_diff` stays bare (its grounding filters never saw the raw prose). The rescue stays unwired on those doors, as `docs/systems/coding-agent.md` records.
+- Unverified when this was written: that whitespace was what the incident's seat wrote (the request was not replayed; the attempt records will show it), and that a live llama.cpp compiles the bounded `{0,20}` repetition. The bound reaches llama.cpp grammar lanes only: a vLLM seat's `structured_outputs` carries no whitespace control.
+- Docs: ADR 0055 item 9, `docs/systems/fleet-node.md`, `docs/systems/mcp-server.md`, `docs/OPERATOR-GUIDE.md`, and a corrected `timeout_sec` row in `docs/FLEET-NODE.md` (the wall is not a deadline).
+
+### Fixed — the standalone Hailo-8L is never published, advertised or accepted over the fleet (ADR 0038 Amendment, register E-08)
+
+The box that carries the Hailo-8L is standalone by operator decision (register J-13): it is never delegated to, never a fleet node and
+sends nothing to another node. That held only by omission, because nothing in the harness kept `fleet-serve` from advertising the device
+or running an `accel` job for it. One filter, `config.FleetVisibleAccelerators` (keyed on `config.LocalOnlyAccelerator`, which names
+`hailo-8l`, compared trimmed and case-folded, and nothing else), now sits at the three fleet-visible points. The decision is per device:
+the Coral Edge TPU and the RKNPU are published, advertised and accepted exactly as before. Every local path (the MCP tools, the agent
+loop, the pipeline lanes, `config.HasAccelerator`) is untouched, because the device never leaves its box and is not switched off.
+
+- `/fleet/health` `accelerators`: `fleetAccelerators` (main.go) filters the list it hands the server, and `fleetnode.New` filters again into
+  the list health publishes, so an `Options` built by hand cannot publish the device either. The source choice is unchanged: the installer
+  manifest still wins when it lists anything, else the config's `accelerators`, and the filter then applies to what the winner listed. A manifest
+  that names only the Hailo-8L therefore publishes nothing, even beside a config that lists another device.
+- The `accel` lane: `taskConfiguredFor("accel")` keys on `config.FleetVisibleAccelerators`, so `supported_task_types` and the pull door's claim
+  name `accel` only for a node that carries a device the fleet may use. A node whose only device is the Hailo-8L runs no `accel` lane.
+- `accel` job acceptance: `buildAccel` refuses a local-only id by what it is, before it consults the node's own list, with the same text whether
+  or not the box carries the device, and its refusal lists only the devices the fleet may use. The push door answers 400 and the pull door nacks,
+  because both reach `buildAccel` through `BuildRequest`.
+- `fleet_accelerators` naming `hailo-8l` is a `doctor` FAIL row and a startup warning. It loads and nothing refuses, because no node can answer it
+  and every forwarded call would defer.
+- `fleet-ui` (`refuseHailoPort`): its documented default listen, `127.0.0.1:18813`, is also the Hailo sidecar's documented endpoint, so on a box that
+  lists `hailo-8l` the page would squat the sidecar's port. Such a box refuses a listen port equal to `hailo_endpoint`'s (the documented default when the
+  key is unset, the scheme's own port when the base has none; the port only, whatever the host half) and names the way out, `--listen` with another port.
+  The check runs after `refuseListen` and before anything binds or polls. Neither documented port moves: a box with no accelerator, or with only the
+  Coral or the RKNPU, binds the default exactly as before.
+- Not in this change: refusing `fleet-serve` on a standalone box, and knowing which other boxes name the device in `delegate_remotes`. The harness
+  cannot read another box's config, so that stays an operating rule.
+
+Tests: 18 new top-level tests (`internal/config/localonly_test.go` 5, `internal/fleetnode/accel_localonly_test.go` 7, `internal/tierseed` 1, and 5 in
+the root package across `fleet_accelerators_test.go`, `fleet_ui_cmd_test.go` and `doctor_findings_test.go`). Red first against the 3ce9fbf5 behaviour, with
+the new symbols stubbed to no-ops so the tests compile: 16 of the 18 failed, and the other two are controls that pass before and after
+(`TestDoctorAcceptsAFleetServedAcceleratorInFleetAccelerators`, `TestFleetVisibleAcceleratorsDoesNotMutateItsInput`). 11 of 11 guards reverted on their
+own turned a test red, and 9 more mutations of parts the first set left alone were each caught in review. Two older fixtures
+(`TestHealthAdvertisesAccelerators` and the first case of `TestFleetAcceleratorsManifestThenConfig`) used the Hailo-8L as their advertised device; they now
+use the Coral and the RKNPU with the same assertions, and the Hailo-8L cases are new tests. `TestEveryDeclaredAcceleratorHasAFleetVisibilityDecision`
+(`internal/tierseed`) fails when `profiles.json` declares an accelerator with no fleet-visibility decision.
+
+Docs: ADR 0038 gains an Amendment (2026-10-01) and its index row notes the exception; `docs/systems/accelerators.md` (Fleet routing, the manifest-advertised,
+`accel` and config-fallback sentences, a source-map entry), `docs/systems/fleet-overview.md` (the port refusal) and the operator guide's `doctor` findings row
+follow. The install runbook (`setup/SETUP-AGENT.md`) told an operator hand-seeding an existing box to append `hailo-8l` to `installed.json` "so `/fleet/health`
+advertises the device"; that list's only reader is the health list, which now drops the device, so the runbook says the config keys enable it and
+`installed.json` needs no edit.
+
+### Fixed — a contract that names a layer is never handed to the local seat of a box that does not declare it (register A-108)
+
+A subtask whose contract names a `layer` (register A-100) that the delegator's own box does not declare ended as `layer fast requested; this box declares no layers` while a node that declares the layer sat idle. The rule lived in `gate.Place` alone, and neither joint deal calls `Place`: `route=spread` dealt the local rotation slot without looking at the contract's layer (a 2026-09-19 ledger shows six such defers, all on slot 1 of 2), and `route=auto`'s idle-local shortcut kept the subtask unconditionally. One predicate, `runner.localServesLayer` (the delegator's own `layers` config, and a view that carries rows), is now asked at every place the delegator chooses its own seat:
+
+- `route=spread`: the local slot leaves the rotation for that subtask, exactly as a text lease takes it out, and the subtask is dealt among the remotes that declare the layer. When every one of them is dealt to its headroom or holds a backlog past the caller's patience, the overflow waits in line for them (the capacity wait), never as a defer from the seat, and it spends no slot of the seat's run cap. With no node declaring the layer it defers naming it.
+- `route=auto`: the idle-local shortcut is for the work the box can run, and an idle box reads the roster only when some contract names a layer it does not declare. For `route=auto` and `route=remote` alike, when the remotes answer and none declares the layer, the verdict says `layer fast requested and no answering remote declares it`, where it used to claim `placement and gate disagree — please report` (the line meant for a bug in this package).
+- The capacity wait never offers the seat to such a contract, and it closes as the capacity defer it is, not as a defer naming a lease holder on a seat that could never run it. A re-placement has no local last resort for it, and a verification retry goes to another node that declares the layer, or there is no retry.
+- A refusal that frees nothing (anything but a 503 or 429: a 409, a 404, a dial failure) from the only node that declares the layer no longer waits on a text lease held on the local seat. It used to spend the whole `agent_placement_wait_sec` and end as a capacity defer saying no node had room; it now fails at once as `placement refused`, naming the refusal and the layer, which is what it already did without a lease. A box that declares the layer keeps the lease wait.
+
+A contract that names no layer, and a box that declares the layer, are dealt exactly as before. `internal/delegate/deal_layer_test.go` pins every place above and the controls (the lease case was found in review, and its test failed first); the `agent_delegate` schema text, the `delegate --route` help and `docs/systems/{fleet-node,composite-tier,mcp-server}.md` state the exception.
+
+### Fixed — `read_file` is metered in characters, so paging one file is no longer a call count (register D-103)
+
+Live 2026-10-01 00:16: a seat whose window probe had fallen back to 8,192 tokens (the loop's cap on ONE tool result was
+therefore 1,090 characters) read a 12,005-character context document in pages, as `read_file`'s own hint tells it to
+("use offset=N to continue"). Eight reads of at most 1,090 characters each (six of them exactly 1,090) held 8,720 of the
+document's 12,005 characters, and the ninth was refused "now DISABLED" by the same-tool cap, which counts calls (default 8).
+Under a count cap of eight no seat could have read that document to its end.
+
+- `read_file` is charged to a per-run character budget at the length the transcript keeps (after the loop-boundary trim:
+  the figure the effect ledger records as `obs_chars`). Once the charge reaches the budget the next `read_file` call is
+  refused and the tool is withdrawn through the same `disabledTools` path the same-tool cap uses; the call that crosses the
+  line completes. The default is the larger of the step budget and the same-tool cap, times the per-result cap (13,080
+  characters at the incident's 12 steps and 1,090 cap): it cannot refuse a seat that reads once per step, and it bounds the
+  rest, many reads in ONE step. Measured on the delegation log (2026-09-07 to 2026-10-01): finished runs read 6.4 KB at the
+  median and 95 KB at p99 through `read_file`; 214 of 3,374 runs issued parallel reads, up to 12 in a step.
+- The same-tool cap counts `read_file` by FILE: the first read of each path counts (a six-file reconnaissance still costs six
+  and the ninth distinct file is still refused), and a new page of a file the run has already read costs characters, not a
+  call. An exact repeat, a read that failed, a call whose path cannot be read and every other tool count as before. So does a
+  page that gave nothing new (the tool failed or refused the call as not performed, or the page began past the end of the
+  file), once it has run: it costs the budget next to nothing, so without that a seat paging past a file's end or re-sending
+  a failing page was bounded only by the step budget (found in review: 30 or 31 executions against the cap's 8; now 9, the
+  call that crosses the line completes). The same lines asked for under another spelling of the call stay new pages, bounded
+  by the budget and the steps.
+- Unchanged: the exact-repeat refusal, the withdrawal of a tool refused twice for one call (D-49), the setup replay (D-48; a
+  replay is not charged to the budget), the forced final step (D-89), `max_calls_per_tool` env rules (they still count every
+  call) and every tool but `read_file`. API: `Loop.WithReadBudgetChars` sets the budget (a non-positive value restores the
+  derived default) and `Loop.WithoutReadBudget` restores the pure call count; neither has a flag.
+- Docs: `docs/systems/coding-agent.md` (the budget; "Three limits"), `docs/OPERATOR-GUIDE.md` (the `--max-same-tool` bullet,
+  which now states its default of 8, and the loop-budgets row), `CLAUDE.md`.
+- Tests: `internal/agent/loop_readbudget_test.go` (red against the call-counting cap; the page-that-gave-nothing-new tests
+  were red against the first D-103 commits; mutation-checked with `go test -overlay`).
+
+### Fixed — a retry respects a plain text reservation of the local seat (register C-81)
+
+`alternativeNode` read the lease only through `Fenced` (exclusive, draining, media) and, for a seat-down defer,
+`localSlotAhead`, never `Reserved`. A plain `text` lease does not fence (the affinity gate admits the load), yet it keeps every
+first placement off the local seat, so a verification retry or a seat-down re-issue whose first attempt ran on a fleet node could
+fall through to a forced local placement and run on cards a measurement had reserved. The retry now asks `Reserved` right after
+`Fenced`: with the local seat reserved it goes to the best untried remote, and with none it is skipped with a `retry_note` that
+names the holder ("a retry placed there would run on the cards the holder reserved"), the same outcome D-94 chose for a fence. The
+holder's own child stays exempt, and the fence's wording and behaviour are unchanged. `internal/delegate/retry_reserved_test.go`
+failed on the old code (the retry ran on the reserved seat with an untried node idle); ADR 0063 decision 10, the operator guide and
+`docs/systems/fleet-node.md` say why a reservation is skipped and not queued.
+
+### Fixed — a draining `gpu reserve` that loses its lease queues again instead of dying at the restamp (register C-59)
+
+- The wrapper form kept draining a card it no longer owned and exited with `stamping the lease after the drain: restamp: the lease
+  is gone`, its command never started. The drain's heartbeat now ends the drain as soon as the lease is confirmed gone (the
+  restamp still comes before the unload), the reserve says `the lease was lost during the drain`, releases what is left and takes
+  its place in the line again with what remains of `--wait` (never under the 2-minute drain floor; `--wait 0` stays one try),
+  then drains and clears the seat afresh under the new lease. After five re-queues the next loss gives up loudly. A seat fault with
+  the lease still held is returned as before.
+- The drain's and the warm-back's heartbeats ended on one failed write, including a write that failed with the lease record still
+  ours, which left a multi-hour drain without a heartbeat until the next acquirer could reclaim it (and abandoned a warm that was
+  not lost). Now only a lease that is actually gone ends them; a failed write is reported once and retried.
+- A stale-claim reclaim could delete a live claim: `TryAcquire` judged a claim stale from one read and removed it by path, so two
+  acquirers reclaiming the same dead holder's record could interleave and the slower one deleted the claim the faster one had just
+  created. The removal now runs under the epoch lock, reads the record again and removes it only if it is still stale. Found by
+  reading and reproduced deterministically; whether it caused a live loss is unproven.
+- The `--detach` drain error says whether the lease is still held, instead of always pointing at `gpu release` (which would
+  release another holder's lease).
+- Register D-124 clause (b), an `--unload-seat` acquire while a warm-back is owed or in flight, was already green on main (the
+  warm-back runs under the releasing holder's own lease and is skipped when a lease is queued); four tests now pin it from the
+  acquirer's side, and `docs/systems/gpu-lease.md` writes down the orderings. No acquire-side wait was added.
+
+### Tests — one job's PAIR frames are not asserted in arrival order (register C-77)
+
+`TestFailedLocalPlacementReportsErrored` read the terminal frame by position, but the emitter posts each frame on its own
+goroutine, so once a process is warm the terminal frame can reach the ingress first (it failed 69 of 500 runs in one process at
+`GOMAXPROCS=1`, 0 of 300 fresh processes). Production tolerates the reorder by design: the open-card markers follow the frames in
+order, and PAIR merges a job's frames by lifecycle rank. The test now checks the frames present and the card they describe, and a
+held case asserts the terminal frame landed first. `docs/systems/pair-workloads.md` says which runs can deliver the terminal frame
+first and that a subtask refused before placement emits none.
+
+### Fixed — the `offload_nim` base audit writes its row on a host with no `state_dir` (security standard L5, S-30)
+
+Under `nim_base_policy` `audit` (the default) a caller-named base outside the allowlist runs, the result carries
+`base_policy`, and a would-refuse row is appended to `nim-base-audit.jsonl` for the audit-to-enforce decision (ADR 0067).
+The handler passed `cfg.StateDir` straight to the writer, which refuses an empty directory, so on every host whose config
+leaves `state_dir` unset no row was ever written and the note said "the would-refuse row was not written: no state_dir".
+The row now goes to the machine-wide state root the GPU lease uses (`gpulease.ResolveStateRoot`: `state_dir`, else
+`LOCAL_OFFLOAD_STATE_DIR`, else `%ProgramData%\local-offload` or `/var/lib/local-offload`). A root the resolver refuses (a
+cloud-sync folder) still lets the audit-mode call run, and the note names the reason. Two handler tests fail on the old code
+with the message seen live; the three existing base-policy tests still pass. `docs/systems/mcp-server.md` names the root.
+
+### Fixed — the pair tier seeds its measured L1 staging (register B-02)
+
+`blackwell-2x16`'s pair seat seeded `cache_server.l1_staging_gb` 2, the default for a seat with no measured value. The pair
+has one: a 2 GB cut starved its staging under production load (the stores came up short by 34 blocks and nothing reached
+L2), so it runs 8. A fresh install of the tier now seeds 8; the three-card flagship already seeds 16, and
+`TestDualBlackwellSeedsThePairSeatWithTheCacheServer` pins both (it failed on the old profile with "l1_staging_gb = 2, want
+8"). The 2 GB launcher and spec default stays for unmeasured seats; the comments that called 2 GB measured for every seat
+now say which seats measured what (`seat_fg.sh`, `internal/vllmseat`, `internal/config/kvcacheserver.go`,
+`docs/systems/cache-server.md`). `docs/tiers/blackwell-2x16.md` is regenerated.
+
+### Docs — the installer table classifies a 3-card Blackwell rig as `blackwell-3x16`
+
+`docs/systems/setup-installer.md` still said a 3x Blackwell rig files as `dual-gpu`, quoting a self-test assert that now
+reads `3x blackwell -> blackwell-3x16`. The classification table gains the `blackwell-3x16` row, the `dual-gpu` row names
+what still lands there, and the `big_ram` note says all three multi-GPU rules set it.
+
+### Docs — the security standard's admission checklist and the research-digest surface
+
+`docs/systems/security.md` gains the L8 admission checklist for third-party tools, model weights, plugins, MCP servers and
+desktop apps: ten read-only checks by the reviewer and one for the operator alone (a malware-scanner lookup by hash, and the
+install approval). Nothing in it downloads anything new or approves anything (I2). MCP servers and desktop apps join the
+provenance inventory's scope. A new "Named surfaces" section names the research-digest channel (digests are third-party
+content written by a seat, and the research door does not yet label or bound them as the agent's fetch and browse tools do)
+with gate G13, open.
+
+### Changed — the copyright holder is the handle, not a person (register H-55)
+
+The two tool modules' generated Apache headers (462 files), their LICENSE and NOTICE lines, the skill author fields, the generator's own config (which would have re-stamped the headers) and two patch files name the holder as `dmmdea`, as the root NOTICE already did; prose in a few older docs and the embedded ADR text of two digest contracts says "the operator". No code changes.
+
+### Docs — two defaults described as the code runs them
+
+`internal/agent` has defaulted the per-run same-tool cap to 8 since 0.80.0; the operator guide, the README and two `builder.go` comments still said 3. A placement under a held text lease waits for the larger of `agent_placement_wait_sec` (default 120 s) and `agent_lease_wait_sec`; the config comment and the operator guide still said the latter's default 0 meant "defer at once".
+
 ## [0.156.1] - 2026-09-30 - the ampere-16 seats leave the memory embedder room; run ids are unique on a coarse clock
 
 ### Fixed — the ampere-16 vLLM seats leave the memory embedder room on the 16 GB card (ADR 0049 Amendment 4)
