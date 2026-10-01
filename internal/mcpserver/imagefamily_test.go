@@ -42,8 +42,9 @@ func familyCfg(t *testing.T) config.Config {
 }
 
 // The two image tools advertise the family surface with the schema the pipeline
-// consumes, say that non-commercial families come back license-tagged, and the edit
-// tool no longer claims a ~1MP snap its 2511 graph stopped doing.
+// consumes, name the license fields a result can carry without warning prose (the
+// operator removed the licence warnings from the descriptions, 2026-10-01), and the
+// edit tool no longer claims a ~1MP snap its 2511 graph stopped doing.
 func TestImageFamilySurfaceIsAdvertised(t *testing.T) {
 	tools := map[string]string{}
 	descs := map[string]string{}
@@ -63,12 +64,17 @@ func TestImageFamilySurfaceIsAdvertised(t *testing.T) {
 		}
 	}
 	for name, wants := range map[string][]string{
-		"offload_generate_image":        {"media.image_families", "license-tagged", "license_note", "MEASURED", "transparent"},
-		"offload_edit_image_generative": {"media.edit_families", "license-tagged", "<image1>", "10 images in all", "MEASURED"},
+		"offload_generate_image":        {"media.image_families", "license/commercial_use", "MEASURED", "transparent"},
+		"offload_edit_image_generative": {"media.edit_families", "license/commercial_use", "<image1>", "10 images in all", "MEASURED"},
 	} {
 		for _, w := range wants {
 			if !strings.Contains(descs[name], w) {
 				t.Errorf("%s description lacks %q", name, w)
+			}
+		}
+		for _, w := range []string{"non-commercial", "research/evaluation", "brand or client", "license_note"} {
+			if strings.Contains(strings.ToLower(descs[name]+tools[name]), w) {
+				t.Errorf("%s description carries licence warning prose %q (removed by operator order 2026-10-01)", name, w)
 			}
 		}
 	}
@@ -87,7 +93,7 @@ func TestImageFamilyParamsReachThePipeline(t *testing.T) {
 	res, _ := s.handleGenerateImage(ctx, callReq(`{"prompt":"p","family":"nope"}`))
 	m := decodeResult(t, res)
 	if m["deferred"] != true || !strings.Contains(m["reason"].(string), `unknown image family "nope"`) ||
-		!strings.Contains(m["reason"].(string), "qwen-image-2.1 [non-commercial: Qwen Research License]") {
+		!strings.Contains(m["reason"].(string), "qwen-image-2.1") || strings.Contains(m["reason"].(string), "non-commercial") {
 		t.Errorf("family must reach the pipeline's resolver: %v", m)
 	}
 	res, _ = s.handleGenerateImage(ctx, callReq(`{"prompt":"p","transparent":true}`))

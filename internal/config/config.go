@@ -689,7 +689,7 @@ type Config struct {
 	ImageGenSchedule string `json:"imagegen_schedule,omitempty"`
 	// ImageGenLicense / ImageGenCommercialUse declare the license of THIS box's default
 	// image binding (ADR 0058). When set, every generate_image result from the default
-	// binding carries them (and a license_note when commercial_use is false). Both or
+	// binding carries them. Both or
 	// neither: a license with no commercial_use verdict is refused at load. Named
 	// families declare their own inside imagegen_families.
 	ImageGenLicense       string `json:"imagegen_license,omitempty"`
@@ -2411,7 +2411,7 @@ func warnImageBindingTo(c Config, w io.Writer, where string) {
 			where, c.ImageGenSchedule, c.ImageGenFamily)
 	}
 	if where == "" && c.ImageGenFamily == FamilyQwenImage21 {
-		fmt.Fprintln(w, "warning: imagegen_family is qwen-image-2.1 on the DEFAULT image binding — its weights are non-commercial (Qwen Research License) and ADR 0058 ships them only as a named imagegen_families opt-in; every un-named request on this box now renders research-only output")
+		fmt.Fprintln(w, "warning: imagegen_family is qwen-image-2.1 on the DEFAULT image binding — ADR 0058 ships it only as a named imagegen_families opt-in; every un-named request on this box now renders it")
 	}
 	poolAux := c.ImageGenPoolCompute != "" || c.ImageGenPoolDonor != ""
 	if c.ImageGenPoolVvramGB < 0 {
@@ -2453,7 +2453,7 @@ func warnEditBindingTo(c Config, w io.Writer, where string) {
 			fmt.Fprintf(w, "warning: %sgen_edit_megapixels is set on the qwen-image-2.1 edit binding — that graph sizes by gen_edit_resolution; the runner refuses the flag and EVERY edit will defer\n", where)
 		}
 		if where == "" {
-			fmt.Fprintln(w, "warning: gen_edit_family is qwen-image-2.1 on the DEFAULT edit binding — its weights are non-commercial (Qwen Research License) and ADR 0058 ships them only as a named gen_edit_families opt-in")
+			fmt.Fprintln(w, "warning: gen_edit_family is qwen-image-2.1 on the DEFAULT edit binding — ADR 0058 ships it only as a named gen_edit_families opt-in")
 		}
 	}
 }
@@ -2793,7 +2793,7 @@ func (c Config) ImageRouteConfigured() bool {
 // ImageGenAdvertisable reports whether this box serves generate_image AT ALL: its
 // default binding (ImageRouteConfigured) OR at least one named family
 // (imagegen_families — ADR 0058). A family-only node deliberately has NO default
-// binding (a non-commercial family, e.g. Qwen-Image-2.1, must never be the default —
+// binding (an opt-in family, e.g. Qwen-Image-2.1, must never be the default —
 // D1), so gating fleet advertisement/admission on ImageRouteConfigured alone made the
 // fleet HTTP door invisible to every request naming a family, even though
 // `local-offload doctor` showed the family fully CONFIGURED and it rendered correctly

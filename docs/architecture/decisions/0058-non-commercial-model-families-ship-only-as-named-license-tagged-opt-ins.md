@@ -55,8 +55,8 @@ it produces carries its license.
 3. **Every result is tagged.**
    - Every result carries `family`, and `license` / `commercial_use` whenever the binding declares
      them.
-   - A `commercial_use: false` result also carries `license_note`: "research/evaluation use only
-     under <license>; not for commercial work".
+   - (A `license_note` sentence on `commercial_use: false` results was removed by the 2026-10-01
+     amendment below.)
    - The ledger row carries `license`.
    - `offload_status` (`media.image_families` / `media.edit_families`) and `/fleet/health`
      (`image_families`) list each family with its license flags.
@@ -89,6 +89,17 @@ commercial" is answered by construction:
   The opt-in is per node, and seeds never carry it.
 - The license tag is informational. It cannot stop a caller from republishing an image. The ADR
   records that limit rather than implying enforcement.
+
+## Amendment 2026-10-01 (0.158.0, no warning text)
+
+By operator order the licence warnings are gone from results, status and docs: results no longer
+carry `license_note`, the `unknown family` list no longer appends `[non-commercial: …]`, `doctor`'s
+family route reads `license <name>` instead of leading with `NON-COMMERCIAL (…)`, and the tool
+descriptions and docs no longer warn. The binding still declares `license` and `commercial_use`, and
+results, the ledger, `offload_status` and `/fleet/health` still publish them, so the information is
+there for a caller that looks; the harness just stops repeating it. Rule 4 (never a default, never a
+seed default) is unchanged, and so is the config-load warning when the default binding names
+`qwen-image-2.1` — without its licence clause.
 
 ## Alternatives considered
 

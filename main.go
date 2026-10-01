@@ -816,7 +816,7 @@ func runGenerateImage(args []string) error {
 	seed := fs.Int("seed", 0, "RNG seed (default random)")
 	refine := fs.Bool("refine", true, "set --refine=false (the =form is required) to render the prompt verbatim, skipping this machine's opt-in prompt refiner; on --batch it applies to every job without its own \"refine\" value (no-op unless imagegen_refiner_model is configured)")
 	compactFlag := fs.Bool("compact", false, "compact (minified) JSON output")
-	family := fs.String("family", "", "named image family to render with (ADR 0058; offload_status media.image_families / doctor list them); default = this machine's default binding. A non-commercial family's result carries license, commercial_use:false and license_note")
+	family := fs.String("family", "", "named image family to render with (ADR 0058; offload_status media.image_families / doctor list them); default = this machine's default binding")
 	transparent := fs.Bool("transparent", false, "keep an alpha channel (RGBA PNG; qwen-image-2.1 families only — any other binding defers)")
 	batchFile := fs.String("batch", "", "render a JSONL batch of jobs through ONE warm ComfyUI session (one line per job: {\"prompt\":...,\"out\"?,\"negative\"?,\"width\"?,\"height\"?,\"steps\"?,\"seed\"?,\"refine\"?})")
 	positional, flagArgs := splitArgs(args, map[string]bool{
@@ -886,9 +886,6 @@ func runGenerateImage(args []string) error {
 			}
 			if fam.CommercialUse != nil {
 				payload["commercial_use"] = *fam.CommercialUse
-			}
-			if note := fam.LicenseNote(); note != "" {
-				payload["license_note"] = note
 			}
 		}
 		// Surface the refiner fallback count in the batch summary whenever a

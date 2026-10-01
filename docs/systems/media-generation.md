@@ -46,7 +46,7 @@ pinned, env-scrubbed and machine-gated. See
 - Which of the three edit-shaped routes fits a given change?
 - When is batching worth it?
 - Why is FLUX not an option?
-- How does a non-commercial model (Qwen-Image-2.1) ship, and how is every result it makes tagged?
+- How is a named opt-in family (Qwen-Image-2.1) selected, and what does its result carry?
 - Which card does a ComfyUI route render on, and how is that pinned per binding?
 
 ## Scope
@@ -356,7 +356,8 @@ Bound per machine through flat config keys, so the same code serves different ha
 Hardware profiles seed these. The single-card 16 GB tiers (`blackwell-16`, `ampere-16`, `volta-16`)
 and the 8 GB tiers' RAM layer bind **HiDream-O1** via `imagegen_family` — the official graph for that
 DiT, never the generic SDXL graph; the pooled and 32 GB-class Blackwell tiers (`blackwell-2x16`,
-`-3x16`, `-32`, `-48`, `-72`) bind **Krea 2 Turbo** (below). No tier seeds a non-commercial family.
+`-3x16`, `-32`, `-48`, `-72`) bind **Krea 2 Turbo** (below). No tier makes a named family its default; `blackwell-8`'s RAM
+layer seeds `qwen-image-2.1` as an opt-in family.
 The Wan 2.2 video tiers bind **Wan 2.2 Q8_0** experts with an fp16 text encoder. **RealVisXL** is the SDXL-class inpainting default. The 8 GB
 tiers stay SDXL-class for image generation until O1 on 8 GB is verified on real hardware.
 
@@ -502,9 +503,8 @@ outside `[a-z0-9._-]`, or a name that collides with the default binding's own fa
 also checked by the same binding-trap warnings as the default, with its name in front.
 
 **Every result is tagged.** Results carry `family` (the default binding's own name for an unnamed
-request), and `license` + `commercial_use` whenever the binding declares them; a `commercial_use:
-false` result also carries `license_note` ("research/evaluation use only under <license>; not for
-commercial work"). The ledger row carries `license` (`ledger.Entry.License`; absent = UNKNOWN, never
+request), and `license` + `commercial_use` whenever the binding declares them (no warning sentence
+rides along: `license_note` was removed by operator order on 2026-10-01). The ledger row carries `license` (`ledger.Entry.License`; absent = UNKNOWN, never
 "safe"). `offload_status` lists `media.image_families` / `media.edit_families` — name, graph family,
 engine, checkpoint, license, commercial_use (null = undeclared) and the route verdict — and
 `/fleet/health` publishes `image_families` with the same license flags — including on a node with NO
@@ -516,8 +516,8 @@ label for a route this node does not serve. A dispatch naming no `family` on suc
 the plain "no image-gen route configured" defer (same as any unconfigured node), never a silent
 render of one family as if it were the default. A warm batch
 (`generate-image --batch`) always renders the default binding, so every batch item — and the batch
-payload's top level — carries that binding's `family` and, when declared, its `license`,
-`commercial_use` and `license_note`. `width`/`height` in a
+payload's top level — carries that binding's `family` and, when declared, its `license`
+and `commercial_use`. `width`/`height` in a
 `generate_image` or `edit_image_generative` result are **measured** from the written file
 (`imagegen.OutputSize`), not echoed from the request.
 
@@ -540,7 +540,7 @@ unknown value exits 2 before any GPU work — it used to render the generic SDXL
 **`doctor` sees the whole family.** `media.routes` gains `generate_image:<name>` and
 `edit_image_generative:<name>`: CONFIGURED only when the family's script resolves AND every model file
 its graph opens sits in the class directory the loader reads (resolved under the family's own
-`comfy_dir`); the verdict leads with `NON-COMMERCIAL (<license>)` for a research family. The `comfyui
+`comfy_dir`); the verdict names the family's license (`license <name>`). The `comfyui
 model bindings` section also resolves the files a binding's graph loads WITHOUT a key naming them — a
 preset's Lightning LoRA (`qwen-image` `lightning4`, 2511 `lightning8`/`lightning4`) and a builder's
 default text encoder and VAE — so an edit route bound to preset `lightning8` with its LoRA on no models
@@ -550,9 +550,8 @@ root is a `MISSING` row instead of a green doctor and a failed render.
 
 A 7B single-stream DiT with a Qwen3-VL-8B encoder and a new 4-channel (RGBA) VAE — not a variant of
 Qwen-Image 2512, whose graph cannot drive it. Needs **ComfyUI ≥ v0.37.0** (the nodes arrived in PR
-#16400; master ≥ `95539f56` adds the KV-cache placement fix #16429). Weights: **Qwen Research License**
-(non-commercial) — bind it only as a named family with `"license": "Qwen Research License",
-"commercial_use": false`. The download set is in `setup/SETUP-AGENT.md`.
+#16400; master ≥ `95539f56` adds the KV-cache placement fix #16429). Bind it as a named family
+(overlay example: `docs/OPERATOR-GUIDE.md`). The download set is in `setup/SETUP-AGENT.md`.
 
 - **T2I graph:** `UNETLoader` + `CLIPLoader(type "qwen_image")` + `VAELoader` → `TextEncodeQwenImage21`
   → sampler → `VAEDecode` (4-channel) → `SplitImageWithAlpha` (opaque RGB, the default) → `SaveImage`.
@@ -749,10 +748,10 @@ protects the environment from it. `compose_video`'s `html` and `project_dir` inp
 kind of trusted-caller interface: the page runs in a Chrome without a sandbox. The fleet door
 therefore accepts vetted templates only. See [Security](#security) below.
 
-**Licenses.** A non-commercial family's output is tagged (`license`, `commercial_use: false`,
-`license_note`) and its ledger row carries the license, but the tag is informational: nothing stops
-a caller from republishing the file. Do not route brand or client work to a family whose
-`commercial_use` is false, and read an absent license as UNKNOWN
+**Licenses.** A family that declares a license tags its output (`license`, `commercial_use`) and
+its ledger row; the tag is informational and
+enforces nothing. An absent license
+reads as UNKNOWN
 ([ADR 0058](../architecture/decisions/0058-non-commercial-model-families-ship-only-as-named-license-tagged-opt-ins.md)).
 
 ## Capability is derived, never declared

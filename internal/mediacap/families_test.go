@@ -68,8 +68,8 @@ func TestFamilyRouteChecksItsModelFiles(t *testing.T) {
 	if img.State != Configured {
 		t.Fatalf("complete family = %q (%s), want CONFIGURED", img.State, img.Detail)
 	}
-	if !strings.Contains(img.Detail, "NON-COMMERCIAL (Qwen Research License)") {
-		t.Errorf("a non-commercial family's route must say so first: %q", img.Detail)
+	if !strings.Contains(img.Detail, "license Qwen Research License") || strings.Contains(img.Detail, "NON-COMMERCIAL") {
+		t.Errorf("the route names the license with no warning prefix (operator order 2026-10-01): %q", img.Detail)
 	}
 	if !strings.Contains(img.Detail, "qwen_image_2.1_bf16.safetensors") {
 		t.Errorf("the verdict must name the files it checked: %q", img.Detail)

@@ -6,6 +6,28 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.158.0] - 2026-10-01 - Qwen-Image-2.1 licence warnings removed from results, status and docs
+
+### Changed — no licence warning text anywhere (operator order 2026-10-01)
+
+The operator asked for the repeated Qwen-Image-2.1 licence warnings to go: they had become noise in every session.
+
+- Results no longer carry `license_note`: single renders, edits, `generate-image --batch` items and the batch top level.
+  `license` and `commercial_use` stay on results, the ledger, `offload_status` and `/fleet/health`, because the binding
+  still declares them (the loader requires both) (ADR 0058, amended).
+- The `unknown image family` list no longer appends `[non-commercial: <license>]`. `doctor`'s family route reads
+  `license <name>` instead of leading with `NON-COMMERCIAL (<license>)`.
+- The config-load warning for `qwen-image-2.1` on a DEFAULT binding stays (ADR 0058 rule 4) without its licence clause. The
+  `commercial_use is required` error no longer explains itself in licence terms.
+- The `blackwell-8` seed declares `"license": "Qwen Research License"` (was `"… (non-commercial)"`). `docs/tiers` regenerated.
+- The warning prose is gone from the `offload_generate_image` / `offload_edit_image_generative` descriptions, the
+  `family` property, the `generate-image --family` flag help, README, `docs/OPERATOR-GUIDE.md`, `setup/SETUP-AGENT.md`,
+  `docs/systems/media-generation.md`, `docs/systems/mcp-server.md` and `docs/FLEET-NODE.md`. SETUP-AGENT and
+  media-generation now say correctly that `blackwell-8` seeds the family in its RAM layer (Copilot review).
+- Tests: the family tests now assert the note, the label and the prefix are ABSENT, with `license` / `commercial_use` still
+  present. `TestImageFamilySurfaceIsAdvertised` fails if `non-commercial`, `research/evaluation`, `brand or client` or
+  `license_note` comes back into either tool description.
+
 ## [0.157.1] - 2026-10-01 - research results are labelled and sanitized; an ended run no longer lingers on Windows
 
 ### Fixed — `offload_research` labels and sanitizes what it returns (register SF-45, security standard gate G13)

@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -32,7 +31,7 @@ func TestGenerateImageCLIFamilyFlagsReachThePipeline(t *testing.T) {
 			t.Errorf("runGenerateImage: %v", err)
 		}
 	})
-	if !strings.Contains(out, `unknown image family \"nope\"`) || !strings.Contains(out, "qwen-image-2.1 [non-commercial: Qwen Research License]") {
+	if !strings.Contains(out, `unknown image family \"nope\"`) || !strings.Contains(out, "qwen-image-2.1") || strings.Contains(out, "non-commercial") {
 		t.Errorf("--family must reach the pipeline's resolver, got:\n%s", out)
 	}
 	out = captureStdout(t, func() {
@@ -105,17 +104,21 @@ writeFileSync(a[a.indexOf("--results") + 1], jobs.map((l, i) => { const j = JSON
 	var top map[string]any
 	_ = json.Unmarshal(res.Data, &top)
 	if top["family"] != "krea2" || top["license"] != "Research-Only Test License" || top["commercial_use"] != false ||
-		!strings.Contains(fmt.Sprint(top["license_note"]), "research/evaluation use only") {
-		t.Errorf("batch payload lacks the default binding's license: %s", res.Data)
+		hasJSONKey(top, "license_note") {
+		t.Errorf("batch payload must carry the default binding's license and no license_note (operator order 2026-10-01): %s", res.Data)
 	}
 	if len(data.Items) != 2 {
 		t.Fatalf("items = %v", data.Items)
 	}
 	for i, it := range data.Items {
-		if it["license"] != "Research-Only Test License" || it["commercial_use"] != false || it["license_note"] == nil {
-			t.Errorf("item %d lacks the license tag: %v", i, it)
+		if it["license"] != "Research-Only Test License" || it["commercial_use"] != false || hasJSONKey(it, "license_note") {
+			t.Errorf("item %d: want license + commercial_use and no license_note: %v", i, it)
 		}
 	}
 }
 
 func strconvQuote(s string) string { b, _ := json.Marshal(s); return string(b) }
+
+// hasJSONKey reports whether a decoded JSON object carries k at all: a removed field
+// must be absent, not null (operator order 2026-10-01 removed license_note).
+func hasJSONKey(m map[string]any, k string) bool { _, ok := m[k]; return ok }

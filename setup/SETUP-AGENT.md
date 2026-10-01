@@ -194,11 +194,10 @@ non-commercial — ADR 0011).
 > block-swap** — composite peak **15,757 MiB** (HiDream for comparison: 15,688 MiB). A manifest that
 > pins a K-quant will download 15GB and then fail at load time, so pin the `_1` quant explicitly.
 
-**Qwen-Image-2.1 — an OPT-IN, NON-COMMERCIAL family (ADR 0058), never seeded.** The weights are
-under the **Qwen Research License** (§2.a: "FOR NON-COMMERCIAL PURPOSES ONLY"), so no tier seeds
-them and the installer never downloads them. A node that should offer it binds it as a named
-`imagegen_families` / `gen_edit_families` overlay with `"license": "Qwen Research License",
-"commercial_use": false` (how-to: `docs/OPERATOR-GUIDE.md` §3 "Add a named image or edit family";
+**Qwen-Image-2.1 — an opt-in family (ADR 0058), never a default.** The installer never downloads
+its weights. `blackwell-8` seeds it as a named image family in its RAM-conditional layer
+(`config_seed_ram_mid_high`); any other node that should offer it binds it as a named
+`imagegen_families` / `gen_edit_families` overlay (how-to: `docs/OPERATOR-GUIDE.md` §3 "Add a named image or edit family";
 graph, schedules and launch profile: `docs/systems/media-generation.md`). Requirements: **ComfyUI ≥
 v0.37.0** (the 2.1 nodes; master ≥ `95539f56` recommended for the KV-cache placement fix), torch
 cu130 for the int8 files. Files, from `Comfy-Org/Qwen-Image-2.1` at revision

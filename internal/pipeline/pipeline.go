@@ -1501,8 +1501,7 @@ func (p *Pipeline) runGenerateImage(ctx context.Context, req core.Request, meta 
 // are MEASURED from the written file: the request value (or a 1024 guess) was wrong for
 // every family with a native size (qwen-image 1328, HiDream/qwen-image-2.1 2048) and
 // for every size a builder snaps (2.1 floors to /32). The request is the fallback only
-// when the header cannot be read. The family and its license ride every result; a
-// non-commercial family also carries license_note.
+// when the header cannot be read. The family and its license ride every result.
 func imageResultPayload(outPath string, params map[string]any, seed int, fam config.FamilyInfo) map[string]any {
 	w, h := imagegen.OutputSize(outPath)
 	if w <= 0 || h <= 0 {
@@ -1523,17 +1522,14 @@ func imageResultPayload(outPath string, params map[string]any, seed int, fam con
 }
 
 // addLicenseData stamps a result with the binding's license (ADR 0058): license and
-// commercial_use when the binding declares them, and license_note — the sentence a
-// reader cannot miss — when commercial_use is false.
+// commercial_use when the binding declares them. No warning sentence rides along
+// (operator order 2026-10-01).
 func addLicenseData(payload map[string]any, fam config.FamilyInfo) {
 	if fam.License != "" {
 		payload["license"] = fam.License
 	}
 	if fam.CommercialUse != nil {
 		payload["commercial_use"] = *fam.CommercialUse
-	}
-	if note := fam.LicenseNote(); note != "" {
-		payload["license_note"] = note
 	}
 }
 
@@ -2081,13 +2077,12 @@ type ImageBatchItem struct {
 	// The binding that rendered the item and its license (ADR 0058), the same keys
 	// the single path's imageResultPayload carries. A batch always renders the
 	// DEFAULT binding (there is no family seam on this path), so every item carries
-	// that binding's family and — when imagegen_license declares one — its license,
-	// commercial_use and, for a non-commercial binding, license_note. Absent license
-	// = the binding declares none (UNKNOWN, never "commercial-safe").
+	// that binding's family and — when imagegen_license declares one — its license
+	// and commercial_use. Absent license = the binding declares none (UNKNOWN, never
+	// "commercial-safe").
 	Family        string `json:"family"`
 	License       string `json:"license,omitempty"`
 	CommercialUse *bool  `json:"commercial_use,omitempty"`
-	LicenseNote   string `json:"license_note,omitempty"`
 }
 
 // tagLicense stamps a batch item with the rendering binding's family and license —
@@ -2099,7 +2094,6 @@ func (it *ImageBatchItem) tagLicense(fam config.FamilyInfo) {
 		v := *fam.CommercialUse
 		it.CommercialUse = &v
 	}
-	it.LicenseNote = fam.LicenseNote()
 }
 
 // normalizeImageBatch fills the per-job invariants the single-render path enforces

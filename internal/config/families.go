@@ -16,15 +16,14 @@ import (
 // A node has ONE default image binding (imagegen_*) and ONE default edit binding
 // (gen_edit_*). imagegen_families / gen_edit_families add NAMED bindings beside them:
 // a request selects one with its `family` param, and a request without one keeps
-// rendering exactly what it rendered before. That is how a non-commercial model
-// (Qwen-Image-2.1, Qwen Research License) ships at all: never a default, never a seed
-// default, always an explicit per-request opt-in whose every result carries its
-// license.
+// rendering exactly what it rendered before. That is how an opt-in model such as
+// Qwen-Image-2.1 ships: never a default, never a seed default, always an explicit
+// per-request opt-in whose every result carries its license.
 //
 // An overlay is a JSON object of this Config's own keys plus two meta keys:
 //
 //	"license":        string, required, non-empty — the model's license name
-//	"commercial_use": bool,   required — false tags every result research-only
+//	"commercial_use": bool,   required — published on every result and status row
 //
 // Resolution builds the family's EFFECTIVE config: this node's config, with every
 // MODEL-BINDING key of that route cleared (so a family never inherits the default's
@@ -63,14 +62,6 @@ type FamilyInfo struct {
 
 // NonCommercial reports a binding that declared commercial_use false.
 func (f FamilyInfo) NonCommercial() bool { return f.CommercialUse != nil && !*f.CommercialUse }
-
-// LicenseNote is the sentence every non-commercial result carries ("" otherwise).
-func (f FamilyInfo) LicenseNote() string {
-	if !f.NonCommercial() {
-		return ""
-	}
-	return fmt.Sprintf("research/evaluation use only under %s; not for commercial work", f.License)
-}
 
 // VideoFamilyBinding is one video family's per-machine weight/behavior override,
 // an entry of Config.VideoGenFamilies. Every field mirrors a top-level videogen_*
@@ -282,7 +273,7 @@ func applyOverlay(base Config, name string, ov FamilyOverlay, kind overlayKind) 
 	}
 	var commercial bool
 	if raw, ok := ov["commercial_use"]; !ok {
-		return base, "", false, fmt.Errorf("%s: \"commercial_use\" is required (true or false — false tags every result research/evaluation-only)", where)
+		return base, "", false, fmt.Errorf("%s: \"commercial_use\" is required (true or false)", where)
 	} else if err := json.Unmarshal(raw, &commercial); err != nil {
 		return base, "", false, fmt.Errorf("%s: \"commercial_use\" must be true or false", where)
 	}
@@ -578,9 +569,6 @@ func familyList(fs []FamilyInfo) string {
 		}
 		if f.Default {
 			label += " (default)"
-		}
-		if f.NonCommercial() {
-			label += " [non-commercial: " + f.License + "]"
 		}
 		parts = append(parts, label)
 	}

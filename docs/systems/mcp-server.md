@@ -61,8 +61,7 @@ take a `family` param that selects one of the box's opt-in bindings beside its d
 edit tool also takes `images` (multi-reference, qwen-image-2.1 families) and both take
 `transparent`. `offload_status` lists what a `family` can name under `media.image_families` /
 `media.edit_families` (license, `commercial_use`, route verdict). A result from a family whose
-`commercial_use` is false carries `license`, `commercial_use:false` and `license_note`; the tool
-descriptions say so, so a calling agent never has to guess which outputs are research-only. See
+`commercial_use` is false carries `license` and `commercial_use:false`. See
 [media-generation.md](media-generation.md#named-families-launch-profiles-and-license-tags-adr-0058).
 
 `offload_nim` is the **only remote MODEL surface**. It is an explicit, caller-invoked

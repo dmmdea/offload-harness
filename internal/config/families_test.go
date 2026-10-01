@@ -72,9 +72,6 @@ func TestImageFamilyOverlayResolvesAsACompleteBinding(t *testing.T) {
 	if fi.Default || fi.Name != "qwen-image-2.1" || fi.Family != "qwen-image-2.1" || fi.License != "Qwen Research License" || !fi.NonCommercial() {
 		t.Fatalf("family info: %+v", fi)
 	}
-	if !strings.Contains(fi.LicenseNote(), "research/evaluation use only under Qwen Research License") {
-		t.Errorf("license note: %q", fi.LicenseNote())
-	}
 	// Overlay keys applied.
 	if q.ImageGenCkpt != "qwen_image_2.1_bf16.safetensors" || q.ImageGenCLIP != "qwen3vl_8b_bf16.safetensors" ||
 		q.ImageGenSteps != 40 || q.ImageGenSchedule != "official" || q.ImageGenTimeoutSec != 2400 || q.ComfyDynamicVRAM != "on" {
@@ -197,7 +194,7 @@ func TestUnknownFamilyNameListsWhatTheNodeServes(t *testing.T) {
 	}
 	_, _, err = c.ResolveImageFamily("flux-dev")
 	if err == nil || !strings.Contains(err.Error(), `unknown image family "flux-dev"`) ||
-		!strings.Contains(err.Error(), "krea2 (default), qwen-image-2.1 [non-commercial: Qwen Research License]") {
+		!strings.Contains(err.Error(), "krea2 (default), qwen-image-2.1") || strings.Contains(err.Error(), "non-commercial") {
 		t.Fatalf("got %v", err)
 	}
 	if _, _, err := c.ResolveEditFamily("nope"); err == nil || !strings.Contains(err.Error(), "qwen-image-2.1-edit") {
@@ -285,7 +282,7 @@ func TestDefaultBindingLicenseIsBothOrNeither(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, fi, _ := c.ResolveImageFamily("")
-	if fi.License != "Apache-2.0" || fi.CommercialUse == nil || !*fi.CommercialUse || fi.NonCommercial() || fi.LicenseNote() != "" {
+	if fi.License != "Apache-2.0" || fi.CommercialUse == nil || !*fi.CommercialUse || fi.NonCommercial() {
 		t.Errorf("default binding license: %+v", fi)
 	}
 }
