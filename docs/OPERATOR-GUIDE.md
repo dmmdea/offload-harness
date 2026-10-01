@@ -604,7 +604,7 @@ production web app's confirm dialog: fully open 0.4 s after the click, against 2
 ignored without `browse_cdp_url`, because activating a tab switches the window's active tab, and in your
 everyday browser that is the tab you are looking at. The config load warns when the setting is ignored, and
 `offload_status` shows `remote.browse_activate_tab` (with a note when it is ignored). That field is what the
-harness will send; it cannot see the installed sidecar, and only a sidecar from 0.154.1 or later acts on it, so
+harness will send; it cannot see the installed sidecar, and only a sidecar from 0.154.2 or later acts on it, so
 after an upgrade rerun `setup/browse/install.ps1` first (an older `runner.py` ignores the setting without a log
 line). A run that activates also stops the lane's own leftover browser-harness daemon before it starts, so a
 daemon left by a crashed run cannot keep the run attached to the wrong browser. For a menu-then-confirm

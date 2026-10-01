@@ -1010,7 +1010,21 @@ decode error is an ack-time 400 with the decoder's reason.
 | `depth` | int | **Advisory on the wire**: the node derives `max(1, depth)` for anything that arrives over the fleet wire, so a wire claim of "origin" is never trusted. The delegator's placement gate separately requires the requester's depth to be 0 (hop limit 1). |
 
 Context docs are materialized to a job-scoped dir under `pipeline-jobs/` (the same
-sweep-at-startup discipline as pipeline jobs) and removed when the job ends.
+sweep-at-startup discipline as pipeline jobs) and removed when the job ends. A delegator's
+own in-process local runs (`pipeline.RunAgentContract`, inside the MCP server and the
+`delegate` and `research` commands) keep their context in the same root, in `agent-local-*`
+dirs that carry an owner marker (`.owner`, the writing process's id, beside `context/`
+and never inside it). The startup sweep removes only what is orphaned: a marked dir is kept
+while its owner process is alive and the dir is under `jobdir.MaxRunLifetime` (24 h), an
+unmarked `agent-local-*` dir (a delegator older than the marker wrote it) is kept until it
+is that old, and any other unmarked dir is `fleet-serve`'s own and goes. A `fleet-serve`
+restart therefore never takes the context out from under a local run in flight on the same
+box (register C-78). A removal for age alone, which can reach a run that outlived the bound,
+is logged dir by dir; a dir the sweep cannot inspect is kept and reported, never counted as
+a run in flight. The marker's process id means something only in the process-id space that
+wrote it, so keep one base dir per machine: sharing one between a Windows host and a WSL
+distribution, a container and its host, or two machines would read a live owner as exited
+(the machine-wide GPU lease and its activity registry presume the same of their records).
 
 ### Result wire shape (`core.AgentWireResult`)
 
@@ -1398,7 +1412,12 @@ wait after ONE transient error, which is S-08 again, intermittently.
 - [`internal/fleetnode/jobs.go`](../../internal/fleetnode/jobs.go) — state machine, the admit-then-
   schedule queue and its concurrency limit, eviction, drain, the agent job marker
 - [`internal/fleetnode/tasks.go`](../../internal/fleetnode/tasks.go) — `agentTaskConfigured`,
-  `buildAgentRun` (contract decode, depth derivation, context materialization)
+  `buildAgentRun` (contract decode, depth derivation, context materialization),
+  `SweepOrphanedPipelineJobs` (the startup sweep and its ownership rules)
+- [`internal/jobdir/`](../../internal/jobdir/) — the owner marker of a delegator-side job dir under
+  `pipeline-jobs/` (`.owner`, the writer's process id), the `agent-local-` name prefix and
+  `MaxRunLifetime`; `pipeline.RunAgentContract` writes it and the sweep reads it (leaf, standard
+  library only)
 - [`internal/delegate/run.go`](../../internal/delegate/run.go) — the delegator: placement, re-placement, the
   capacity wait, the spread deal, the dispatch and poll loop (ADR 0063)
 - [`internal/delegate/eta.go`](../../internal/delegate/eta.go) — expected-completion ranking, the backlog gate

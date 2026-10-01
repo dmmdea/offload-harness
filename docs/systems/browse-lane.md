@@ -387,7 +387,7 @@ is not proof.
 - An `activated the lane's tab (activate_tab)` line in that tail means the lane brought its tab to the front at
   the run's first observe; `activate_tab skipped: ...` means it tried and the call failed (or the browser had
   no tab id), and the run went on with the tab in the background. No line means the setting is off or ignored,
-  or that the installed sidecar predates 0.154.1 and does not read it (rerun `setup/browse/install.ps1`).
+  or that the installed sidecar predates 0.154.2 and does not read it (rerun `setup/browse/install.ps1`).
 - Browse calls are audited by the policy broker on agent doors, and ledgered like other lanes.
 - `offload_status remote` shows whether the lane is configured, which decision URL it will call, and whether
   the harness will ask the sidecar to activate its tab (`browse_activate_tab`, with a note when the setting is on

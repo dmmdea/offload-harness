@@ -6,7 +6,7 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
-## [0.154.1] - 2026-09-30 - an opt-in browse setting activates the lane's own tab, so a dialog renders at once in a dedicated agent browser
+## [0.154.2] - 2026-09-30 - an opt-in browse setting activates the lane's own tab, so a dialog renders at once in a dedicated agent browser
 
 ### Added — `browse_activate_tab`, for a dedicated agent browser
 
@@ -88,6 +88,32 @@ settle.
   An older `runner.py` ignores `activate_tab` without a log line, and `offload_status` cannot see which one is
   installed: `remote.browse_activate_tab` is what the harness will send, so the operator guide and the lane
   doc say to rerun the installer after upgrading and that no log line can also mean an older sidecar.
+
+## [0.154.1] - 2026-09-30 - a fleet-serve restart no longer deletes the context of local runs in flight
+
+### Fixed — a fleet-serve restart deleted the context of every local delegation in flight on its box
+
+fleet-serve sweeps `pipeline-jobs/` once at every start, before it listens, and it removed every entry there on the
+premise that it was the only writer in that root. It is not: the delegator's in-process local placement
+(`RunAgentContract`, behind the MCP server's `agent_delegate`, `offload_research`, `offload_ask` and
+`offload_review_diff` doors, the `delegate` and `research` commands and the fleet smoke) materializes each run's
+`agent-local-*` directory, with the context documents the seat reads, in the same root, from processes that outlive
+fleet-serve restarts. So every restart (each deploy, each crash-restart) deleted the documents of every local run in
+flight on that box, and the seat answered "workspace root unavailable" or that it could not read the file, which failed
+acceptance. Measured on 2026-09-30: 23 local runs spanned one fleet-serve restart, the node logged 23 swept directories,
+and 6 of those runs lost their documents mid-run.
+
+A local run now writes an owner marker (`.owner`, its process id and a newline) into its job directory, beside
+`context/` and outside the seat's read root, before it writes any document. The startup sweep decides per entry: a
+marked directory is removed only when its owner has exited or the directory has outlived any run (24 hours, against a
+longest local run of about 4.3 hours by the code's own caps); an unmarked `agent-local-*` directory, which a delegator
+binary older than this fix still writes, is kept until that same age; fleet-serve's own directories are removed as
+before. An entry it cannot inspect is kept and reported, never counted as a live run; a directory removed for its age
+while its owner lives is logged by name; every removal failure is reported, not only the first; and the start-up log
+states what was swept, what was kept and what failed as separate lines. A local run whose job directory cannot be removed
+at its end logs it. A pipeline `job_spec.id` may no longer start with `agent-local-` (refused at the ack), so no
+fleet-serve directory can fall under the owner rule. The marker assumes, as the machine-wide GPU lease and the activity
+registry already do, that the delegator and fleet-serve share one process-id space per base directory.
 
 ## [0.154.0] - 2026-09-30 - a seat that cannot constrain decoding runs classify and extract from the prompt, and a fleet text lane ships dark
 
