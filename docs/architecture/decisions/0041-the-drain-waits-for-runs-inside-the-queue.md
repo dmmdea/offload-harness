@@ -117,6 +117,18 @@ draining hold of either class, and the media class fences once `maintainSeat` cl
 `TestDrainingIsRecordedForEitherClassAndTheCommandIsClipped`. The probes themselves pass the fence since the
 same change (ADR 0026, extended 2026-09-22).
 
+**Extended 2026-10-01 (register C-59):** the drain survives losing its lease. A wrapper reserve whose lease
+record was released, or taken by another acquirer, while it drained used to keep waiting for a seat it no longer
+had the card for, die at the restamp (`stamping the lease after the drain: restamp: the lease is gone`) and never
+start its command. The drain's heartbeat now ends the drain as soon as the lease is confirmed gone
+(`maintainSeatCtx`; the restamp still precedes the unload, so a drain that lost its lease never reaches the unload),
+and the reserve queues again inside the budget decision 1 defines — what remains of `--wait`, never under the
+drain floor, `--wait 0` one try — then drains and clears the seat under the new lease. After five re-queues the
+next loss gives up loudly; a seat fault with the lease still held is returned as before. The drain's deadline semantics are
+otherwise unchanged. Pinned by `TestADrainingReserveThatLosesItsLeaseQueuesAgainInsteadOfDyingAtTheRestamp`,
+`TestADrainingReserveQueuesBehindTheAcquirerThatTookItsCard` and
+`TestADrainingReserveThatLosesItsLeaseFailsLoudlyWhenAskedNotToQueue`.
+
 ## Evidence
 
 llama-swap log 2026-09-14 (two drain windows of 61 polls at 7 ms each, the 3m26.9s

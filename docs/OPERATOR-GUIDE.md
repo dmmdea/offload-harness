@@ -1412,6 +1412,13 @@ a `cascade_remote_lanes` lane or wait their own budget. `offload_status` publish
 reserve it and the machine queues it**:
 `local-offload gpu reserve --wait 8h --drain --unload-seat --for <window> --reason "<why>" -- <cmd>`.
 
+**A reserve that loses its lease while draining queues again (register C-59).** If the lease record is released, or
+another acquirer takes the card, while `--drain` is waiting, the wrapper form says `the lease was lost during the
+drain`, takes its place in the line again with what remains of `--wait`, and drains and clears the seat afresh under
+the new lease before it runs the command — it no longer exits at the restamp (`stamping the lease after the drain`).
+`--wait 0` stays one try. The `--detach` form cannot re-queue; its error says whether the lease is still held. See
+docs/systems/gpu-lease.md.
+
 
 **Enable — worker node** (the box that will *execute* contracts), in its
 `~/.local-offload/config.json`:

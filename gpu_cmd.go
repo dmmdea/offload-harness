@@ -240,10 +240,12 @@ func runGPUReserve(args []string) error {
 		// The lease is held by the hidden child FIRST (so no new work is placed
 		// here), then the seat is drained and unloaded. A failed drain leaves the
 		// lease held on purpose — the card stays reserved, work keeps routing
-		// elsewhere — and the exit code tells the caller not to start.
+		// elsewhere — and the exit code tells the caller not to start. When the
+		// lease itself is what was lost (the child releases at --for whether or
+		// not the drain is done), nothing is held and the error says so.
 		if *drain || *unload {
 			if err := maintainSeat(loadCfg(fs), func(fn func(*gpulease.Meta)) error { return m.Restamp(epoch, fn) }, *drain, drainDeadline(*drainTimeout, queuedAt, *wait), *unload, exclusiveAfter, markWarmOwed(m)); err != nil {
-				return fmt.Errorf("%w (the lease is still held; `gpu release` frees it)", err)
+				return detachedMaintainError(m, epoch, err)
 			}
 		}
 		return nil
@@ -276,17 +278,49 @@ func runGPUReserve(args []string) error {
 	}
 	defer finish()
 	if *drain || *unload {
-		// The drain now runs for the queue budget (hours) and the renewal loop
-		// below starts only once the wrapped command does; the reclaim rule needs
-		// a stale heartbeat AND an expired --for window, so a drain longer than
-		// --for with no renewal handed the card to the next acquirer mid-wait
-		// (reviewer finding, 0.117.0). Heartbeat for the drain's whole length.
-		stopRenew := renewWhile(lease, drainRenewEvery)
-		merr := maintainSeat(cfg, lease.Restamp, *drain, drainDeadline(*drainTimeout, queuedAt, *wait), *unload, exclusiveAfter, markWarmOwed(m))
-		stopRenew()
-		if merr != nil {
-			card.finish(merr)
-			return merr // deferred finish releases the lease (and warms back if it got that far)
+		for requeues := 0; ; requeues++ {
+			// The drain now runs for the queue budget (hours) and the renewal loop
+			// below starts only once the wrapped command does; the reclaim rule needs
+			// a stale heartbeat AND an expired --for window, so a drain longer than
+			// --for with no renewal handed the card to the next acquirer mid-wait
+			// (reviewer finding, 0.117.0). Heartbeat for the drain's whole length.
+			//
+			// A lease that is GONE ends the drain at the next heartbeat (register
+			// C-59): waiting out a drain on a card that is no longer ours only moved
+			// the failure to the restamp, hours later, and the command never started.
+			mctx, cancelMaintain := context.WithCancel(context.Background())
+			stopRenew := renewWhile(lease, drainRenewEvery, func(error) { cancelMaintain() })
+			merr := maintainSeatCtx(mctx, cfg, lease.Restamp, *drain, drainDeadline(*drainTimeout, queuedAt, *wait), *unload, exclusiveAfter, markWarmOwed(m))
+			stopRenew()
+			cancelMaintain()
+			if merr == nil {
+				break
+			}
+			lost := lease.Check()
+			if lost == nil {
+				card.finish(merr)
+				return merr // a seat fault with the lease still ours: the deferred finish releases it (and warms back if it got that far)
+			}
+			// The lease is not ours any more: its record is gone (an operator
+			// release, a reclaim) or another holder took the card. The restamp comes
+			// before the unload, so a reserve that lost its lease during the drain
+			// never reached the unload. Say so, take its place in the line again
+			// inside the queue budget it already had, and start the drain over under
+			// the new lease; never exit at the restamp with the command not started.
+			if requeues >= maxLeaseRequeues {
+				err := fmt.Errorf("the lease was lost %d times while draining, giving up: %w", requeues+1, merr)
+				card.finish(err)
+				return err
+			}
+			fmt.Fprintf(os.Stderr, "gpu reserve: the lease was lost during the drain (%v); queueing for the card again, the drain starts over under the new lease\n", lost)
+			_ = lease.Release() // gone or another holder's: Release only ever drops its own epoch
+			next, aerr := acquireQueued(m, gpulease.Class(*class), opts, requeueWait(queuedAt, *wait))
+			if aerr != nil {
+				err := fmt.Errorf("the lease was lost during the drain and the card could not be taken again: %w", aerr)
+				card.finish(err)
+				return err
+			}
+			lease = next
 		}
 	}
 	sigc := make(chan os.Signal, 1)
@@ -678,26 +712,89 @@ func printActivity(v gpuactivity.View) {
 // so a test can watch the heartbeat move within its own window.
 var drainRenewEvery = 15 * time.Second
 
-// renewWhile heartbeats the lease on a ticker until stop is called. Losing the
-// lease mid-drain is reported once and ends the loop; the drain's own Restamp
-// or the wrapped command's Renew then fails loudly on the fenced epoch.
-func renewWhile(l *gpulease.Lease, every time.Duration) (stop func()) {
+// renewWhile heartbeats the lease on a ticker until stop is called. The loop
+// ends for good only when the lease is actually GONE (Check fails): that is
+// reported once and handed to onLost, so the holder can stop working on a card
+// that is not its own (the wrapper cancels its drain).
+//
+// A heartbeat write that fails with the record still ours is reported once and
+// retried on the next tick. Ending the loop on it left a multi-hour drain
+// without a heartbeat until the stale heartbeat and the expired --for window
+// let the next acquirer reclaim the lease (register C-59).
+//
+// stop returns once the loop has exited, so no heartbeat lands after the
+// caller has moved on to releasing the lease.
+func renewWhile(l *gpulease.Lease, every time.Duration, onLost ...func(error)) (stop func()) {
 	done := make(chan struct{})
+	exited := make(chan struct{})
 	var once sync.Once
 	go func() {
+		defer close(exited)
 		t := time.NewTicker(every)
 		defer t.Stop()
+		warned := false
 		for {
 			select {
 			case <-done:
 				return
 			case <-t.C:
-				if err := l.Renew(); err != nil {
-					fmt.Fprintf(os.Stderr, "gpu reserve: LEASE LOST while draining (%v)\n", err)
+				err := l.Renew()
+				if err == nil {
+					warned = false
+					continue
+				}
+				if cerr := l.Check(); cerr != nil {
+					fmt.Fprintf(os.Stderr, "gpu reserve: LEASE LOST while draining (%v)\n", cerr)
+					for _, fn := range onLost {
+						if fn != nil {
+							fn(cerr)
+						}
+					}
 					return
+				}
+				if !warned {
+					warned = true
+					fmt.Fprintf(os.Stderr, "gpu reserve: could not write the lease heartbeat (%v); the lease is still ours, retrying every %s\n", err, every)
 				}
 			}
 		}
 	}()
-	return func() { once.Do(func() { close(done) }) }
+	return func() {
+		once.Do(func() { close(done) })
+		<-exited
+	}
+}
+
+// maxLeaseRequeues bounds how often one wrapper reserve takes its place in the
+// line again after losing its lease mid-drain: the queue budget bounds the
+// wait, this bounds the ping-pong with a holder that keeps taking the card.
+const maxLeaseRequeues = 5
+
+// requeueWait is the queue budget a reserve that lost its lease mid-drain
+// still has: what remains of --wait, measured from when the reservation began
+// queueing (the same clock drainDeadline uses), never under drainFloor when a
+// wait was asked for. --wait 0 stays fail-fast: one try, then the error.
+func requeueWait(queuedAt time.Time, wait time.Duration) time.Duration {
+	if wait <= 0 {
+		return 0
+	}
+	left := time.Until(queuedAt.Add(wait))
+	if left < drainFloor {
+		left = drainFloor
+	}
+	return left
+}
+
+// detachedMaintainError says what became of the detached holder's lease after
+// its drain or unload failed. On a seat fault the lease is still held (the card
+// stays reserved, work keeps routing elsewhere) and `gpu release` frees it. When
+// the record is gone or is another holder's — the hidden holder releases at
+// --for whether or not the drain is done, or the lease was taken away —
+// nothing of this reservation is held, and telling the caller to `gpu release`
+// would release someone else's lease.
+func detachedMaintainError(m *gpulease.Manager, epoch uint64, err error) error {
+	if info := m.Inspect(); info.Held && info.Epoch == epoch {
+		return fmt.Errorf("%w (the lease is still held; `gpu release` frees it)", err)
+	}
+	return fmt.Errorf("%w (the lease is no longer this reservation's: it was released, or another holder took the card; reserve again to queue for it)", err)
 }

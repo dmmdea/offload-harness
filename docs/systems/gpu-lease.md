@@ -464,6 +464,20 @@ exclusive card, and three measurement rows read the seat's 10 GiB as their own f
 
   There is deliberately NO acquire-side wait: the releasing lease already outlives its warm, and a second wait on top
   of it would only double the queue.
+- **A drainer that loses its lease queues again instead of dying at the restamp (register C-59).** The wrapper form
+  used to keep draining a card it no longer owned, die at the restamp with `stamping the lease after the drain:
+  restamp: the lease is gone` (or `fenced out`), and never start its command. Now the drain's heartbeat ends the
+  drain the moment the lease is confirmed gone (`maintainSeatCtx` takes a context; the restamp comes before the
+  unload, so a drain that lost its lease never reaches the unload), the reserve says `the lease was lost during the
+  drain`, releases what is left, and takes its place in the line again with what remains of `--wait` (never under
+  the 2-minute drain floor; `--wait 0` stays one try, and a card another holder has then fails with that holder
+  named). It drains and clears the seat afresh under the new lease and only then runs its command; after five
+  re-queues the next loss gives up loudly. A seat fault with the lease still ours (a drain that misses its deadline) is not a
+  loss and is returned as before. The heartbeat itself ends only for a lease that is actually gone: one failed
+  heartbeat write with the record still ours is reported once and retried, where it used to end the loop and leave a
+  multi-hour drain without a heartbeat. The detach form cannot re-queue (its hidden holder releases at `--for`
+  whether or not the drain is done), so its error now says whether the lease is still held instead of always
+  pointing at `gpu release`.
 
 **A failed drain is not a cordon, and a stuck run is not a wait (register C-50).** A drain that misses its deadline
 clears the `draining` stamp before returning — the detach form keeps the lease held and non-exclusive, so new runs are

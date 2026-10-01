@@ -382,18 +382,28 @@ var maintenanceClient = &http.Client{Timeout: 15 * time.Minute}
 // wrapper form; Manager.Restamp by epoch for the detached child's lease).
 type restamper func(fn func(*gpulease.Meta)) error
 
-// maintainSeat runs the --drain / --unload-seat steps against the config's
+// maintainSeat is maintainSeatCtx for a caller that nothing cancels.
+func maintainSeat(cfg config.Config, restamp restamper, drain bool, deadline time.Time, unload, exclusive bool, owed func(seat string)) error {
+	return maintainSeatCtx(context.Background(), cfg, restamp, drain, deadline, unload, exclusive, owed)
+}
+
+// maintainSeatCtx runs the --drain / --unload-seat steps against the config's
 // seat: drain until deadline, then turn the DRAINING stamp into EXCLUSIVE when
 // the window asked for it (or just clear it), then unload. Errors are returned
 // as-is; the caller decides what to do with the lease. owed, when non-nil, is
 // told the seat's name after a successful unload: the warm-owed marker the
 // LAST releasing holder pays (register D-124).
-func maintainSeat(cfg config.Config, restamp restamper, drain bool, deadline time.Time, unload, exclusive bool, owed func(seat string)) error {
+//
+// ctx ends the drain and the unload early. The wrapper form cancels it the
+// moment its lease is lost (register C-59): a drain that goes on waiting for a
+// card another holder has is the failure arriving hours late. The restamp
+// comes BEFORE the unload, so a lease that is already gone never gets as far
+// as clearing the seat under whoever holds the card now.
+func maintainSeatCtx(ctx context.Context, cfg config.Config, restamp restamper, drain bool, deadline time.Time, unload, exclusive bool, owed func(seat string)) error {
 	endpoint, model, err := seatTarget(cfg)
 	if err != nil {
 		return err
 	}
-	ctx := context.Background()
 	if drain {
 		p := drainProbe{client: maintenanceClient, endpoint: endpoint, model: model, every: 2 * time.Second, out: os.Stderr, hint: seatTurnHint(cfg, model), stuckAfter: seatStuckAfter(cfg, model)}
 		if reg, rerr := gpuactivity.Open(cfg.GPULockPath, cfg.StateDir); rerr == nil {
@@ -407,8 +417,9 @@ func maintainSeat(cfg config.Config, restamp restamper, drain bool, deadline tim
 			// — no new run admitted — for the rest of the window, which turned
 			// one failed drain into a box refused for 8 h (register C-50,
 			// S-31). The lease stays held and non-exclusive; the caller says
-			// what to do with it.
-			if restamp != nil {
+			// what to do with it. A drain the caller cancelled (the lease is
+			// gone) has no stamp left to clear: the attempt could only fail.
+			if restamp != nil && ctx.Err() == nil {
 				if serr := restamp(func(m *gpulease.Meta) { m.Draining = false }); serr != nil {
 					fmt.Fprintf(os.Stderr, "gpu reserve: could not clear the draining stamp after the failed drain: %v\n", serr)
 				}
