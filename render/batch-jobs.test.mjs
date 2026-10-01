@@ -1,7 +1,8 @@
 // node --test render/batch-jobs.test.mjs
 import { test } from "node:test";
 import assert from "node:assert";
-import { parseJobs, jobArgs, resultLine, JOB_PARAM_FLAGS, SHARED_BINDING_FLAGS } from "./batch-jobs.mjs";
+import { parseJobs, jobArgs, resultLine, runBatchJobs, JOB_PARAM_FLAGS, SHARED_BINDING_FLAGS } from "./batch-jobs.mjs";
+import * as batchMod from "./batch-jobs.mjs";
 import { buildRenderGraph, parseRenderArgs } from "./comfy-render.mjs";
 
 test("parseJobs: valid JSONL, skips blank lines", () => {
@@ -89,4 +90,56 @@ test("resultLine: ok and error shapes", () => {
   const bad = JSON.parse(resultLine(1, { out: "b.png" }, false, 55, "comfy-render exited 1"));
   assert.equal(bad.ok, false);
   assert.equal(bad.error, "comfy-render exited 1");
+});
+
+// C-83 (2026-10-01): a poisoned ComfyUI failed jobs 3-6 of a qwen-image batch one by one
+// (48 min + 3 x 3 min) while the media lease held every card and nothing ran.
+test("runBatchJobs: a serverUnusable failure stops the batch — the failed job and every later job get a row, later jobs never run (C-83)", async () => {
+  const jobs = [0, 1, 2, 3, 4].map((i) => ({ prompt: "p" + i, out: `o${i}.png`, seed: 10 + i }));
+  const ran = [], rows = [], logs = [];
+  const runJob = async (job, i) => {
+    ran.push(i);
+    if (i === 2) {
+      const e = new Error("comfy-render exited 3: ComfyUI's CUDA context is broken");
+      e.serverUnusable = true;
+      throw e;
+    }
+  };
+  const err = await runBatchJobs({ jobs, runJob, record: (l) => rows.push(JSON.parse(l)), log: (l) => logs.push(l), now: () => 0 })
+    .then(() => null, (e) => e);
+  assert.deepEqual(ran, [0, 1, 2], "no job may run on an unusable server");
+  assert.ok(err, "the batch must fail loud");
+  assert.equal(err.serverUnusable, true);
+  assert.match(err.message, /job 3\/5/);
+  assert.match(err.message, /2 jobs not run/);
+  assert.deepEqual(rows.map((r) => [r.i, r.ok]), [[0, true], [1, true], [2, false], [3, false], [4, false]]);
+  assert.match(rows[2].error, /CUDA context is broken/);
+  assert.match(rows[3].error, /^not run: ComfyUI became unusable at job 3\/5/);
+  assert.equal(rows[4].out, "o4.png");
+  assert.equal(rows[4].seed, 14);
+  assert.ok(logs.some((l) => /FAILED/.test(l)), "the failure is logged as a failure, not as done");
+});
+
+test("runBatchJobs: an ordinary failure is recorded and the batch goes on (Go reads per-job status from an exit-0 batch)", async () => {
+  const jobs = [0, 1, 2].map((i) => ({ prompt: "p" + i, out: `o${i}.png` }));
+  const ran = [], rows = [];
+  await runBatchJobs({
+    jobs,
+    runJob: async (j, i) => { ran.push(i); if (i === 1) throw new Error("comfy-render exited 1: ComfyUI exec error"); },
+    record: (l) => rows.push(JSON.parse(l)),
+    now: () => 0,
+  });
+  assert.deepEqual(ran, [0, 1, 2]);
+  assert.deepEqual(rows.map((r) => r.ok), [true, false, true]);
+});
+
+test("renderExitError: exit 3 is serverUnusable and carries the child's RENDER FAILED reason (C-83)", () => {
+  assert.equal(typeof batchMod.renderExitError, "function", "batch-jobs.mjs must export renderExitError");
+  const e = batchMod.renderExitError(3, "queued x seed 1\nRENDER FAILED: ComfyUI's CUDA context is broken: GET /system_stats answered HTTP 500\n");
+  assert.equal(e.serverUnusable, true);
+  assert.equal(e.message, "comfy-render exited 3: ComfyUI's CUDA context is broken: GET /system_stats answered HTTP 500");
+  const o = batchMod.renderExitError(1, "");
+  assert.ok(!o.serverUnusable);
+  assert.equal(o.message, "comfy-render exited 1");
+  assert.equal(batchMod.RENDER_EXIT_SERVER_UNUSABLE, 3, "the exit code is a cross-process contract");
 });

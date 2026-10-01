@@ -1,7 +1,8 @@
 // batch-jobs.mjs — pure helpers for comfy-generate.mjs --batch mode: parse the jobs
 // JSONL, build a per-job comfy-render argv (job fields beat shared defaults; the
-// machine's model-binding flags are shared-only), and format per-job result lines.
-// Pure functions, no I/O — the script owns files and process lifecycle. No deps.
+// machine's model-binding flags are shared-only), format per-job result lines and run
+// the batch loop over injected callbacks.
+// No I/O — the script owns files and process lifecycle. No deps.
 
 // Per-job overridable request params vs shared-only machine binding flags. A job may
 // NOT override the binding (ckpt/vae/...): which checkpoint a machine renders with is
@@ -60,4 +61,51 @@ export function resultLine(i, job, ok, ms, error) {
   r.ms = ms;
   if (!ok && error) r.error = String(error);
   return JSON.stringify(r);
+}
+
+// RENDER_EXIT_SERVER_UNUSABLE: comfy-render.mjs's exit code when its ComfyUI can run no
+// later job: the server vanished, or it answers HTTP with a broken CUDA context (C-83).
+// A cross-process contract between comfy-render.mjs and its --batch parent.
+export const RENDER_EXIT_SERVER_UNUSABLE = 3;
+
+// renderExitError: the rejection for a comfy-render child that exited non-zero.
+// stderrTail is the end of the child's stderr; its last "RENDER FAILED:" line names the
+// reason, so a result row says why a job failed instead of only an exit code.
+export function renderExitError(code, stderrTail = "") {
+  const marker = "RENDER FAILED:";
+  const lines = String(stderrTail).split(/\r?\n/).filter((l) => l.startsWith(marker));
+  const why = lines.length ? lines[lines.length - 1].slice(marker.length).trim() : "";
+  const e = new Error(`comfy-render exited ${code}` + (why ? ": " + why : ""));
+  if (code === RENDER_EXIT_SERVER_UNUSABLE) e.serverUnusable = true;
+  return e;
+}
+
+// runBatchJobs: the --batch loop. runJob renders one job and throws on failure; record
+// receives each result line; log receives the progress lines. The caller owns the
+// files and the GPU slot, so this stays free of I/O.
+// A failed job is recorded and the batch goes on (the Go side reads per-job status from
+// an exit-0 batch), unless the failure is serverUnusable: then every later job would fail
+// against the same server, so each gets a "not run" row and the batch throws. That is
+// what lets the caller's teardown free the card and its lease (C-83, 2026-10-01: a
+// poisoned ComfyUI failed jobs 3-6 over 57 min while the media lease held every card).
+export async function runBatchJobs({ jobs, runJob, record, log = () => {}, now = Date.now }) {
+  for (let i = 0; i < jobs.length; i++) {
+    const t0 = now();
+    try {
+      await runJob(jobs[i], i);
+    } catch (e) {
+      record(resultLine(i, jobs[i], false, now() - t0, e.message));
+      log(`batch ${i + 1}/${jobs.length} FAILED: ${e.message} (${Math.round((now() - t0) / 1000)}s)`);
+      if (e && e.serverUnusable) {
+        const why = `ComfyUI became unusable at job ${i + 1}/${jobs.length} (${e.message})`;
+        for (let k = i + 1; k < jobs.length; k++) record(resultLine(k, jobs[k], false, 0, "not run: " + why));
+        const abort = new Error(`${why}; ${jobs.length - i - 1} jobs not run, recorded as such`);
+        abort.serverUnusable = true;
+        throw abort;
+      }
+      continue;
+    }
+    record(resultLine(i, jobs[i], true, now() - t0));
+    log(`batch ${i + 1}/${jobs.length} done (${Math.round((now() - t0) / 1000)}s)`);
+  }
 }

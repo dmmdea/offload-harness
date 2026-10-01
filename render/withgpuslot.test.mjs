@@ -64,6 +64,20 @@ test("throw path: comfyChild present + a captured log => the error is enriched w
   );
 });
 
+test("throw path: the console-tail enrichment keeps serverUnusable, so a standalone render still exits 3 (C-83)", async () => {
+  const h = harness();
+  const dead = new Error("ComfyUI's CUDA context is broken");
+  dead.serverUnusable = true;
+  await assert.rejects(
+    withGpuSlot({ ...h.opts, ...h.deps, tailLog: () => "Sticky error detected" }, async () => { throw dead; }),
+    (err) => {
+      assert.match(err.message, /Sticky error detected/, "the tail is still attached");
+      assert.equal(err.serverUnusable, true, "the enriched error must keep the flag");
+      return true;
+    },
+  );
+});
+
 test("throw path: no captured log (nothing to add) => the error is unchanged, not padded with an empty section", async () => {
   const h = harness();
   await assert.rejects(

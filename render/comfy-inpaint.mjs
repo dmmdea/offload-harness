@@ -33,7 +33,7 @@ import { withGpuSlot } from "./gpu-lock.mjs";
 import { COMFY_DIR } from "./comfy-lifecycle.mjs";
 import { buildSDXLInpaint } from "./wf-sdxl-inpaint.mjs";
 import { buildQwenInpaint, QWEN_INPAINT_PRESETS } from "./wf-qwen-inpaint.mjs";
-import { parseInpaintJobs, qwenRecipe } from "./inpaint-jobs.mjs";
+import { parseInpaintJobs, qwenRecipe, batchAbort } from "./inpaint-jobs.mjs";
 import { resultLine } from "./batch-jobs.mjs";
 import { firstOutputFile } from "./comfy-output.mjs";
 import { resolveCli, submitGraph, pollOutputs, fetchView, finalizeRun } from "./comfy-submit.mjs";
@@ -213,29 +213,31 @@ if (flags.batch) {
       let okCount = 0, failCount = 0, consecFail = 0, firstErr = null;
       for (let i = 0; i < jobs.length; i++) {
         const t0 = Date.now();
-        let ok = false, errMsg = null;
+        let ok = false, errMsg = null, err = null;
         try {
           await renderJob(jobs[i], true);
           ok = true; okCount++; consecFail = 0;
         } catch (e) {
           // A single failed render must not sink the batch: record and continue —
-          // but LOUDLY, and a run of consecutive failures means the server or the
-          // model binding is dead for every remaining job: abort instead of
-          // grinding the rest of the night against a corpse.
-          errMsg = e.message; failCount++; consecFail++;
+          // but LOUDLY. A server that became unusable, or a run of consecutive
+          // failures, means the server or the model binding is dead for every
+          // remaining job: abort instead of grinding the rest of the night against a
+          // corpse (batchAbort).
+          err = e; errMsg = e.message; failCount++; consecFail++;
           if (!firstErr) firstErr = e.message;
         }
         appendFileSync(resultsPath, resultLine(i, jobs[i], ok, Date.now() - t0, errMsg) + "\n");
         console.error(`batch ${i + 1}/${jobs.length} ${ok ? "done" : "FAILED: " + errMsg} (${Math.round((Date.now() - t0) / 1000)}s)`);
-        if (consecFail >= MAX_CONSEC_FAIL) {
+        const abort = batchAbort({ err, consecFail, maxConsecFail: MAX_CONSEC_FAIL });
+        if (abort) {
           // A partial file that ADMITS it is partial is safe (the eval runner's
           // own abort discipline): without this row, "aborted at job 4" and
           // "the batch was 4 jobs" are indistinguishable in the artifact.
           appendFileSync(resultsPath, JSON.stringify({
-            _row: "aborted", attempted: i + 1, not_attempted: jobs.length - i - 1,
+            _row: "aborted", reason: abort.reason, attempted: i + 1, not_attempted: jobs.length - i - 1,
             consecutive_failures: consecFail, error: errMsg,
           }) + "\n");
-          throw new Error(`${consecFail} consecutive failures (last: ${errMsg}) — aborting the batch; ${jobs.length - i - 1} jobs not attempted`);
+          throw new Error(`${abort.message} — aborting the batch; ${jobs.length - i - 1} jobs not attempted`);
         }
       }
       console.error(`batch complete: ${okCount} ok / ${failCount} failed of ${jobs.length}`);

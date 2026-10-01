@@ -64,3 +64,14 @@ export function qwenRecipe(job, flags, presets) {
     lora: job.lora ?? flags.lora ?? preset.lora,
   };
 }
+
+/** Why the inpaint --batch must stop after a failed job, or null to go on. An unusable
+ * server (it vanished, or answers HTTP with a broken CUDA context: register C-83) fails
+ * every later job, so it stops the batch at once; otherwise a run of consecutive failures
+ * means the binding or the server is dead for the rest of the batch. */
+export function batchAbort({ err, consecFail, maxConsecFail }) {
+  if (!err) return null;
+  if (err.serverUnusable) return { reason: "server_unusable", message: `ComfyUI became unusable (${err.message})` };
+  if (consecFail >= maxConsecFail) return { reason: "consecutive_failures", message: `${consecFail} consecutive failures (last: ${err.message})` };
+  return null;
+}

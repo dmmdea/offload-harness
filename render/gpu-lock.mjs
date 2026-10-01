@@ -382,6 +382,8 @@ export async function withGpuSlot(opts, fn) {
             { cause: err },
           );
           enriched.stack = err.stack;
+          // The rewrap must not drop the flag comfy-render.mjs turns into exit 3 (C-83).
+          if (err && err.serverUnusable) enriched.serverUnusable = true;
           throw enriched;
         }
       }

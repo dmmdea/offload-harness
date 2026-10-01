@@ -307,6 +307,33 @@ async function rawSubmit({ api, graph, clientId, fetchImpl = fetch }) {
 // Polling (KEEP-raw by design — see header)
 // ---------------------------------------------------------------------------------------
 
+// serverUnusableError: a failure that says the ComfyUI server can run no later job: it
+// vanished, or it answers HTTP with a broken CUDA context. comfy-render.mjs exits
+// RENDER_EXIT_SERVER_UNUSABLE on it and the --batch loops stop instead of failing every
+// later job against the same server (register C-83).
+export function serverUnusableError(message) {
+  const e = new Error(message);
+  e.serverUnusable = true;
+  return e;
+}
+
+// How often a prompt that /history does not list yet triggers a GET /system_stats, and
+// how many answered errors in a row condemn the server.
+const STATS_PROBE_EVERY_MS = 15_000;
+const STATS_PROBE_FAILS = 2;
+
+// probeStats: {state:"ok"}, {state:"error", status} (the server ANSWERED with an error
+// status) or {state:"none"} (no answer; silence is the dead-server watchdog's question,
+// not this probe's).
+async function probeStats(fetchImpl, api) {
+  try {
+    const r = await fetchImpl(`${api}/system_stats`, { signal: AbortSignal.timeout(10_000) });
+    return r.ok ? { state: "ok" } : { state: "error", status: r.status };
+  } catch {
+    return { state: "none" };
+  }
+}
+
 // pollOutputs: poll /history/<id> every 2s until isDone(entry) or the budget runs out.
 // This is comfy-render.mjs's hardened loop (2026-07-30 dead-server watchdog + 2026-08
 // suspend/resume fence + per-poll 30s abort), now shared by every runner:
@@ -314,10 +341,18 @@ async function rawSubmit({ api, graph, clientId, fetchImpl = fetch }) {
 //     accrue dead time; COMFY_DEAD_SEC (default 240s, min 10) of consecutive dead time
 //     aborts EARLY so the exclusive GPU slot is released in seconds, not budget-minutes;
 //   - a timer jump >120s means the MACHINE slept (lids close mid-render on this fleet by
-//     design) — that time never counts as dead;
-//   - a slow-but-honest render keeps answering /history with no outputs yet, which
-//     resets the counter: the long waitSec budget still governs that case, and the Go
-//     side's process-tree kill remains the hard stop.
+//     design) — that time never counts as dead, and it moves the deadline by the jump;
+//   - waitSec is wall-clock time (C-83: counting polls let slow /history answers stretch a
+//     1,500 s budget to 2,894 s on 2026-10-01); the Go side's process-tree kill remains
+//     the hard stop;
+//   - a sticky CUDA error can kill ComfyUI's prompt worker while HTTP keeps answering:
+//     /history/<id> then says 200 {} for the rest of the budget (C-83, 2026-10-01: 48 min
+//     with the media lease holding every card). While the prompt is not listed, GET
+//     /system_stats runs every STATS_PROBE_EVERY_MS: it calls into CUDA, so a broken
+//     context answers it with an HTTP error, and STATS_PROBE_FAILS of those in a row end
+//     the wait with a serverUnusableError. Every runner only submits after /system_stats
+//     answered OK (waitServer, comfyUp), so an error answer here is a change on this
+//     server, not an endpoint that never worked. A healthy probe resets the count.
 // onExecError (optional) runs best-effort before an exec-error throw — the CLI-path
 // hook that finalizes the run row with the server's verbatim failure.
 export async function pollOutputs({
@@ -331,11 +366,20 @@ export async function pollOutputs({
 }) {
   const deadRaw = Number(env.COMFY_DEAD_SEC);
   const deadSec = Number.isFinite(deadRaw) ? Math.max(10, deadRaw) : 240;
-  let lastAnswerAt = now();
-  let prevTickAt = now();
-  for (let i = 0; i < Math.max(1, Math.ceil(waitSec / 2)); i++) {
+  const startedAt = now();
+  let deadline = startedAt + Math.max(1, Number(waitSec) || 0) * 1000;
+  let lastAnswerAt = startedAt;
+  let prevTickAt = startedAt;
+  let nextProbeAt = null; // armed when /history first answers without this prompt
+  let failedProbes = 0;
+  for (let first = true; first || now() < deadline; first = false) {
     await sleep(2000);
-    if (now() - prevTickAt > 120_000) lastAnswerAt = now(); // suspend/resume fence
+    const gap = now() - prevTickAt;
+    if (gap > 120_000) { // suspend/resume fence: the machine slept, the budget did not run
+      lastAnswerAt = now();
+      deadline += gap;
+      if (nextProbeAt !== null) nextProbeAt += gap;
+    }
     prevTickAt = now();
     let hist;
     try {
@@ -344,13 +388,24 @@ export async function pollOutputs({
       if (e && e.httpStatus) { lastAnswerAt = now(); continue; } // an error status is an answer
       const deadFor = Math.floor((now() - lastAnswerAt) / 1000);
       if (deadFor >= deadSec) {
-        throw new Error(`ComfyUI stopped answering mid-render (unreachable ${deadFor}s, COMFY_DEAD_SEC=${deadSec}); aborting early to release the GPU slot`);
+        throw serverUnusableError(`ComfyUI stopped answering mid-render (unreachable ${deadFor}s, COMFY_DEAD_SEC=${deadSec}); aborting early to release the GPU slot`);
       }
       continue;
     }
     lastAnswerAt = now();
     const h = hist[promptId];
-    if (!h) continue;
+    if (!h) {
+      if (nextProbeAt === null) { nextProbeAt = now() + STATS_PROBE_EVERY_MS; continue; }
+      if (now() < nextProbeAt) continue;
+      nextProbeAt = now() + STATS_PROBE_EVERY_MS;
+      const p = await probeStats(fetchImpl, api);
+      if (p.state === "ok") failedProbes = 0;
+      else if (p.state === "error" && ++failedProbes >= STATS_PROBE_FAILS) {
+        const waited = Math.round((now() - startedAt) / 1000);
+        throw serverUnusableError(`ComfyUI's CUDA context is broken: GET /system_stats answered HTTP ${p.status} on ${failedProbes} probes in a row while prompt ${promptId} had not finished after ${waited}s; the server can run no more work and must be restarted (a sticky CUDA error, e.g. a driver fault on its card; see the ComfyUI log)`);
+      }
+      continue;
+    }
     if (h.status && h.status.status_str === "error") {
       if (onExecError) { try { await onExecError(); } catch { /* best-effort only */ } }
       throw new Error("ComfyUI exec error: " + JSON.stringify(h.status).slice(0, 500));

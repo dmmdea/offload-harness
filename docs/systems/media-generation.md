@@ -113,6 +113,25 @@ release the GPU slot when the server stops answering) and the suspend/resume fen
 CLI's `wait` does not provide; `/view` bytes are fetched raw for exact file fidelity. All six
 runners now share that hardened loop.
 
+**A server that answers but cannot work ends the wait (register C-83, 0.158.1).** On 2026-10-01 a
+sticky CUDA error on a 16 GB render card killed ComfyUI's prompt worker while its HTTP server kept
+answering: `/history/<id>` returned `200 {}` for 48 minutes, which the loop read as a slow render,
+and the media lease held all three cards with nothing running on any of them. The loop now does two
+things about that:
+- **The wait budget is wall-clock time.** `COMFY_WAIT_SEC` used to count polls, so slow `/history`
+  answers stretched 1,500 s to 2,894 s. A suspend still moves the deadline by the time slept.
+- **A health probe runs while the prompt is unlisted.** Once the prompt has been missing from
+  `/history` for 15 s, `GET /system_stats` runs every 15 s. It calls into CUDA, so a broken context
+  answers it with an HTTP error, and two such answers in a row end the wait. Every runner submits
+  only after `/system_stats` answered OK, so an error there is a change, not an endpoint that never
+  worked. A probe that gets no answer at all counts for nothing, because silence is the dead-server
+  watchdog's question.
+
+Both that probe and the dead-server watchdog raise a *server unusable* error. `comfy-render.mjs`
+exits **3** on it (1 for any other failure, 2 for a caller mistake). A `--no-lifecycle` child also
+exits 3 when its parent's server answers `/system_stats` with an error three times while it waits
+for it, and when the server never answers at all.
+
 **Picking the produced file from `/history` never trusts node-id order alone (found 2026-09-23).**
 `comfy-output.mjs`'s `firstOutputFile()` scans the `/history` outputs object for the first node
 carrying a file descriptor; JS enumerates integer-like object keys in ASCENDING NUMERIC order
@@ -132,7 +151,16 @@ node id from its own manifest rather than guessing) was not affected.
 **Warm batch.** `generate-image --batch` takes a jobs file and runs N renders in one session. The
 only behavioral change is omitting ComfyUI's `--cache-none`, so the checkpoint loads once; teardown
 still happens exactly once, at the batch boundary. A failed render is recorded and the batch
-continues, one JSONL result line per job. **The default single-render path is unchanged.**
+continues, one JSONL result line per job, and the script exits 0 (the Go side reads per-job
+status). The exception is a server that became unusable, where the child exits 3. Then the failed
+job and every later job get a row, the later ones with an `error` that starts `not run: ComfyUI
+became unusable at job N/M`. The batch exits non-zero and its teardown frees the card and the
+lease, instead of failing every remaining job against the same server (C-83: 3 min each, after a
+48-minute wait on the first). A failed job's `error` carries the child's own `RENDER FAILED:` reason
+rather than only `comfy-render exited N`. The inpaint batch (`comfy-inpaint.mjs --batch`) stops the
+same way on an unusable server, and still stops after `COMFY_BATCH_MAX_CONSEC_FAIL` (3) consecutive
+failures; its `_row: "aborted"` line now carries `reason`. **The default single-render path is
+unchanged.**
 
 **Prompt refiner (opt-in).** When `imagegen_refiner_model` names a llama-swap text model,
 `generate_image` first expands the raw prompt with concrete photographic detail (lighting,
