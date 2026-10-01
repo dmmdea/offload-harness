@@ -116,6 +116,16 @@ func declaresLayer(v NodeView, name string) bool {
 	return false
 }
 
+// anyDeclaresLayer reports whether some node in views advertises the named layer.
+func anyDeclaresLayer(views []NodeView, name string) bool {
+	for _, v := range views {
+		if declaresLayer(v, name) {
+			return true
+		}
+	}
+	return false
+}
+
 // betterRemote reports whether candidate should displace the incumbent. Only a
 // STRICTLY better candidate displaces, so equal seats are kept in roster order
 // and the caller's list stays the stable preference order it has always been.

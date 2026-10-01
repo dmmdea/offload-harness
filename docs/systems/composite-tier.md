@@ -165,6 +165,12 @@ The installer detects prerequisites and never builds them, and it does not rende
    that does not declare it is ineligible for that contract, an idle local box that does not
    declare it does not keep it, the free choice never overwrites the caller's layer on the
    dispatched copy, and with no node declaring it the contract defers naming the layer.
+   The delegator keeps that rule at every place it picks its own seat (register A-108):
+   `route=spread` never deals such a contract the local slot of a box that does not declare
+   the layer (it deals among the remotes that do, and the overflow waits in line for them),
+   `route=auto` never takes the idle-local shortcut for it (the roster is read for it although
+   nothing is busy), and neither the capacity wait, a re-placement's local last resort nor a
+   verification retry hands it to that seat.
 5. **An agent contract that fits the pair's agent window** → the pair's agent seat, always.
    A saturated pair (in flight ≥ max_num_seqs) is RECORDED in the reason and nothing is
    re-placed: no other layer can hold that contract beside a loaded pair.
