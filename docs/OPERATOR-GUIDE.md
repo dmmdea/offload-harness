@@ -1031,7 +1031,7 @@ low so a stuck model gets its tool disabled quickly.
 4. **If you see `agent error: chat 400 … context`, your prompt was too big or too broad.** Nothing is
    broken — narrow the ask and send again.
 5. These are guardrails, not conventions: the loop hard-caps at `--max-steps` (12) and disables any
-   tool called more than `--max-same-tool` (3) times per run, so a bad prompt costs one failed run,
+   tool called more than `--max-same-tool` (8) times per run, so a bad prompt costs one failed run,
    never the installation.
 
 ### Per-hardware-profile serving expectations

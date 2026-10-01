@@ -25,7 +25,7 @@ type BuildConfig struct {
 	Timeout     time.Duration // per planner-call timeout; default 180s
 	MaxSteps    int           // hard step budget; default 12
 	MaxTokens   int           // planner max tokens per call; default 1024
-	MaxSameTool int           // per-run cap on calls to any one tool name; 0 => Loop's default (3); <0 => disabled
+	MaxSameTool int           // per-run cap on calls to any one tool name; 0 => Loop's default (8); <0 => disabled
 
 	ReadRoot string      // directory the agent may read (P0 scope); required
 	Offload  OffloadFunc // in-process offload (record=false); nil => no offload tools
@@ -407,7 +407,7 @@ func Build(cfg BuildConfig) (*BuildResult, error) {
 		})
 	}
 	if cfg.MaxSameTool != 0 {
-		loop = loop.WithMaxSameTool(cfg.MaxSameTool) // 0 (unset) leaves NewLoop's built-in default (3); negative disables
+		loop = loop.WithMaxSameTool(cfg.MaxSameTool) // 0 (unset) leaves NewLoop's built-in default (8); negative disables
 	}
 	if cfg.Memory != nil {
 		loop = loop.WithMemory(cfg.Memory)
