@@ -217,18 +217,26 @@ func (c *pageRetryCap) record(key string, failed bool) {
 // reached an owned job, a lost job and a local runner error are the fleet's or the
 // caller's - none of them ran the page.
 //
+// The whole call's deadline (ADR 0065) counts like a cancel, because it is the caller's
+// clock and not the page's: the cut publishes the run it cancelled as a class-budget
+// defer that still names its seat and node and is not Unplaced, which the budget line
+// above would count. "The seat hit its budget on this page" is not what happened - the
+// call ran out of time, and a healthy page still running when a slower sibling used
+// the time up is cut exactly like a slow one. deadlineCut tells them apart.
+//
 // An issue that was retried counts by what a seat that RAN the page produced in either
 // attempt. The published result is the first attempt unless the retry recovered, and a
 // first attempt that stands as a seat-down defer (a dead seat, an infrastructure defer)
 // ran nothing to a verdict: the retry seat did, and mergeAttempts carries its verdict in
 // retryRanAndFailed. A retry that recovers forgets the page, and one no seat ran (a full
-// node, a local seat that declined it) adds nothing.
+// node, a local seat that declined it, or one the call's deadline cut: deadlineCut again,
+// read on the retry's own result) adds nothing.
 func pageIssueFailed(pr PlacedResult) bool {
 	if pr.retryRanAndFailed {
 		return true
 	}
 	switch {
-	case pr.Unplaced || pr.shed:
+	case pr.Unplaced || pr.shed || pr.deadlineCut:
 		return false
 	case pr.Err != "":
 		return strings.HasPrefix(pr.Err, "remote job error")

@@ -23,6 +23,22 @@ import (
 // it; production never mutates it.
 var withdrawTimeout = 5 * time.Second
 
+// withdrawBound is how long ONE withdraw may take: withdrawTimeout, and, when the ask is
+// made because the call's deadline has passed, no more than three quarters of the unwind
+// allowance (ADR 0065). The asking goroutine is inside that allowance, and a node that
+// never answers must not turn the truthful cut result (its node and job) into an
+// abandoned "did not stop" that names neither. A call without a deadline, or whose
+// context ended for any other reason, keeps withdrawTimeout.
+func (r *runner) withdrawBound() time.Duration {
+	bound := withdrawTimeout
+	if r.call.reached() {
+		if g := r.call.grace * 3 / 4; g > 0 && g < bound {
+			bound = g
+		}
+	}
+	return bound
+}
+
 // withdrawnState is the `state` a node answers a successful withdraw with
 // (fleetnode.WithdrawnState; the two packages do not import each other, and the
 // end-to-end test in withdraw_e2e_test.go runs the real node handler against this
@@ -57,11 +73,12 @@ const (
 // It is best-effort by construction. The request runs on a context that OUTLIVES
 // the caller's (context.WithoutCancel), because the commonest reason to withdraw
 // is that the caller has just been canceled and a request bound to that context
-// would die before it left; it is bounded on its own by withdrawTimeout, so a node
+// would die before it left; it is bounded on its own by withdrawBound, so a node
 // that sits on it cannot hold the give-up. It never returns an error: an answer
 // that is not a clear yes or a clear "already started" is withdrawUnconfirmed.
 func (r *runner) withdraw(ctx context.Context, base, jobID string) (withdrawOutcome, string) {
-	wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), withdrawTimeout)
+	bound := r.withdrawBound()
+	wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), bound)
 	defer cancel()
 	u := strings.TrimRight(strings.TrimSpace(base), "/") + "/fleet/jobs/" + jobID
 	req, err := http.NewRequestWithContext(wctx, http.MethodDelete, u, nil)
@@ -74,7 +91,7 @@ func (r *runner) withdraw(ctx context.Context, base, jobID string) (withdrawOutc
 	resp, err := fleetClient.Do(req)
 	if err != nil {
 		log.Printf("delegate: withdraw of %s at %s not confirmed (%v); the give-up stays open for recovery", jobID, base, err)
-		return withdrawUnconfirmed, transportWhy(err)
+		return withdrawUnconfirmed, transportWhy(err, bound)
 	}
 	defer resp.Body.Close()
 	body, rerr := io.ReadAll(io.LimitReader(resp.Body, maxFleetBody))
@@ -119,11 +136,11 @@ func notConfirmed(why string) string {
 }
 
 // transportWhy words a withdraw that got no HTTP answer at all: a timeout inside its
-// own bound, or a transport failure with the request's URL (which repeats the job id
-// the row already carries) stripped off.
-func transportWhy(err error) string {
+// own bound (the one the request was given, withdrawBound), or a transport failure with
+// the request's URL (which repeats the job id the row already carries) stripped off.
+func transportWhy(err error, bound time.Duration) string {
 	if errors.Is(err, context.DeadlineExceeded) {
-		return fmt.Sprintf("no answer within %s", withdrawTimeout)
+		return fmt.Sprintf("no answer within %s", bound)
 	}
 	var ue *url.Error
 	if errors.As(err, &ue) && ue.Err != nil {
@@ -144,6 +161,20 @@ func clip(s string, n int) string {
 	return cut
 }
 
+// withdrawAsk is what one poll loop remembers of the withdraw it has already asked for, so
+// that a job is asked about ONCE however the loop ends (ADR 0064 decision 3: the delegator
+// "does not ask again"; ADR 0065 decision 5: "one job is never asked twice"). The queue
+// deadline is the one place the loop asks and then goes on: a node that answers 409 has said
+// the job started, and the loop keeps polling it. Every give-up after that reads the answer
+// here instead of asking again. The zero value is "nobody has asked".
+type withdrawAsk struct {
+	// tried is set when the queue-deadline arm asked. Every answer but withdrawStarted ends
+	// the poll, so a loop still running after the arm asked has been told the job started.
+	tried bool
+	// why is what the node answered, in words (see notConfirmed).
+	why string
+}
+
 // giveUp is the exit the give-ups that RETURN share (a canceled caller, an owned or
 // unowned poll deadline): it asks the node to take an unstarted job back and records
 // the verdict on pr. A confirmed withdrawal settles the intent (the job will never
@@ -154,13 +185,24 @@ func clip(s string, n int) string {
 // answered). A job last seen RUNNING has started, and the request could only be
 // refused, so it is not made.
 //
+// asked is the withdraw the loop's queue-deadline arm has already asked for. The node
+// answered that the job had started, which is newer than lastState (a cancel or a
+// deadline can land before the next poll has answered, and a node that then reports
+// `accepted` again contradicts itself), so the request is not made a second time.
+//
 // It returns the clause the caller appends to its own reason when a withdraw was
-// ASKED and the node did not confirm it (see notConfirmed), and "" when none was
-// asked or the node confirmed.
-func (r *runner) giveUp(ctx context.Context, base, jobID, lastState string, pr *PlacedResult) string {
+// ASKED, by this call or by the queue arm before it, and the node did not confirm it
+// (see notConfirmed), and "" when none was asked or the node confirmed.
+func (r *runner) giveUp(ctx context.Context, base, jobID, lastState string, asked withdrawAsk, pr *PlacedResult) string {
 	if lastState == "running" {
 		pr.orphanable = true
 		return ""
+	}
+	if asked.tried {
+		// The job has started, the node said so when it was asked, and it stays the recovery
+		// pass's. The row says what the node answered, as it does when this call asks for itself.
+		pr.orphanable = true
+		return notConfirmed(asked.why)
 	}
 	outcome, why := r.withdraw(ctx, base, jobID)
 	if outcome == withdrawConfirmed {

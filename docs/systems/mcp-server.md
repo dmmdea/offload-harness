@@ -204,6 +204,65 @@ executing node reads its own root and runs its own seat, so it is for self-conta
 `setup_actions` — while for `offload_ask` the files ride inline, so any node can answer. Omitted, or
 `local`, keeps the old behaviour exactly.
 
+#### The whole-call deadline (ADR 0065)
+
+The MCP client aborts a tool call at its own limit (1,800 s in the reference setup) and drops the
+response with it, and a producing job is polled to its node's ceiling (up to 14,400 s), so one slow
+subtask used to hold a call past the abort and take the finished results down with it (a call ran
+2,103 s and lost a finished 423 s answer). `agent_delegate` and `offload_research` therefore have a
+**whole-call deadline**, `agent_call_deadline_sec` (default **1,500 s**; `0` = the default; negative =
+none), measured from the moment the handler is entered — the client's clock starts when it sends the
+request, so `offload_research`'s page fetch spends from it too.
+
+At the deadline the call **returns what has finished**. Every unfinished subtask is a budget-class defer
+whose reason opens `call deadline reached; N unfinished` (N is the whole call's count, across every
+chunk of a batched research call) and then says what that subtask was doing: running on a named node
+under a named job, running on the local seat, not yet placed, never started, or not stopping. The
+outstanding work is cancelled — the local seat is told to stop, and polling of a remote job ends with
+the give-up every cancel takes ([ADR 0064](../architecture/decisions/0064-a-delegator-takes-back-what-it-has-not-started.md)):
+the node is asked once to take the job back (`DELETE /fleet/jobs/{id}`, best effort, never for a job
+last seen running; the reason says what the node answered: taken back, or `withdraw not confirmed: ...`
+with no route, already started or no answer) — nothing further starts, and a remote job the node did
+not take back keeps running there and stays open in the intent ledger for the recovery pass (one it
+took back closes as `withdrawn`). The cut changes what an outcome is called, never what was measured: a run cancelled
+after nine steps still reports its steps, tokens, stop reason and trace, and what the outcome itself
+reported beyond the cancellation is quoted in the reason (`the run itself reported <class>: ...`). A
+subtask whose seat ignores its context is abandoned after a bounded unwind: its result carries the job
+id of the attempt that had not returned, and its late row, if it ends, is under the same id. On
+`route=queue` the delegator takes one last look at each job whose poll it cancelled and publishes what
+the holder says: a finished job is returned as its answer, one still held is a defer that says queued
+or claimed. The result is a successful tool call: a deadline defer is a result shape, not a failure.
+The default is above the longest single subtask that starts at once (`timeout_sec` cap 900 s + the
+300 s admission allowance + the 60 s poll grace) and below the client's abort by the margin a response
+needs. It is not a promise that no healthy subtask is cut: time queued on a node (credited back to the
+wall, up to the queue budget the node's own estimate sets, ADR 0063: the lesser of the poll budget and
+300 s for a node that publishes none) and a capacity wait come on top, so a worst-case auto-sized
+subtask can run past it.
+A seat that goes down under a run ([ADR 0066](../architecture/decisions/0066-a-seat-that-goes-down-is-waited-for-and-the-failed-step-reissued.md)) meets the deadline like any other attempt.
+The delegator re-places the node's `seat down:` defer on another node and credits the dead seat's wait back to that retry's
+budget, but the credit is on the contract's clock, never the call's: a re-placement still running, or waiting for
+capacity, at the deadline is cut with a `budget` row of its own, and the published result is the first attempt (the
+seat-down defer, produced in time) with the cut in its `retry_note`, as for an abstention. A `seat down:` defer produced
+after the deadline (a local run answering from the unwind, or a finished answer the delegator's own rescue was still
+re-packing) is the deadline's budget defer: it quotes what the node reported, keeps `seat_recoveries` and
+`seat_down_wait_sec`, and is not re-placed.
+Raise `agent_call_deadline_sec` for such work, but keep it below the client's abort; a value at or above
+it, or a negative that was meant as a number, is reported by `doctor` and once at startup. The CLI verbs
+take no deadline.
+
+**Progress notifications.** A request that carries a progress token (`_meta.progressToken`) also gets
+`notifications/progress`: an opening one, one per subtask state change ("subtask 2 of 8 started",
+"subtask 2 of 8 finished (succeeded) on <node>; 3 of 8 done" — counted against the whole call, across the
+chunks of a batched research call), and a heartbeat every 30 s while nothing changes ("still working: 3
+of 8 subtasks done after 4m0s; call deadline in 20m0s"). `progress` is a running counter (the spec asks
+for a strictly increasing value; a heartbeat has no new work to count). It is strictly opt-in and
+additive: no token, no notification, and a slow client cannot slow a subtask (events go through a
+bounded queue that drops rather than blocks). In the MCP TypeScript client SDK the token is sent only
+when the caller passes `onprogress`, and the request timeout restarts on a progress update only when
+the caller also sets `resetTimeoutOnProgress` (`maxTotalTimeout` is the absolute cap). Whether the
+reference client does either is **unverified**, which is why the whole-call deadline above is a hard
+limit that does not depend on it.
+
 ### The research lane (`offload_research`)
 
 `offload_research` is the one-call answer to "this leg needs the web, so it goes to a cloud
@@ -259,6 +318,15 @@ different fact: the answer is about another document, which is a property of the
 them quarantine it), so that failure keeps its one retry on another node. The seats never gain
 network access; the agent loop's egress cage is untouched. Failed or refused fetches come
 back as `sources[].skipped` and produce no result — a broken page never reads as a digest.
+
+The body marshals in a fixed order — `summary`, then `partial` / `error` (present only when a
+batch chunk failed), then `results` with its `result_sources` index, and `sources` last — because
+the MCP client keeps only the head and the tail of a long body, and the digests are the
+deliverable (C-75). A **partial** result (some pages digested, some failed) is a successful
+tool call: `isError` is set only when nothing succeeded, so one failed page can no longer cut the
+surviving digests out of the reply. What is missing is named in `summary.failed` /
+`summary.lost_to_stack` and in the failed result's own `reason`. `agent_delegate` follows the same
+rule (`summary`, then `results`).
 
 ### The ask lane's result cache
 

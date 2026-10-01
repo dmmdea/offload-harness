@@ -36,10 +36,11 @@ type SummaryWire struct {
 	// lost, because a contract carrying an output_schema asked for a checkable
 	// deliverable and unchecked prose is not one.
 	//
-	// It is published rather than kept internal because it is what makes the MCP
-	// surface's error flag legible: `infrastructure: 1` beside `succeeded: 1` no
-	// longer says on its own whether a subtask was eaten, and the caller reading
-	// "this call failed" is owed the count that decided it.
+	// It is published rather than kept internal because a partial result is no
+	// longer error-flagged (C-75): `infrastructure: 1` beside `succeeded: 1` does
+	// not say on its own whether a subtask was eaten, and this count is the
+	// caller's loud signal for it. The MCP error flag now marks only a call that
+	// delivered nothing.
 	LostToStack int `json:"lost_to_stack,omitempty"`
 	// CorpusRows*/LedgerRows* publish telemetry loss to the CALLER. omitempty:
 	// a healthy run's response stays byte-identical to before these fields

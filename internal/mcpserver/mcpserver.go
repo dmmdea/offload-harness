@@ -387,7 +387,7 @@ func (s *Server) buildServer(version string) *mcp.Server {
 	// unknown seat is a clean defer naming the seats seen.
 	srv.AddTool(&mcp.Tool{
 		Name:        "agent_rig",
-		Description: "The seat rigger, first slice (ADR 0036 P3a): classify THIS box's delegation-log failures for one seat onto exactly ONE failure axis each, in a published precedence order (seat-infra [incl. placement failures with no defer class] → timeout → budget → abstention [an 'output failed schema' reason is schema-miss/invalid] → schema-miss[two-step-grounded|invalid] → anchor-miss[two-step-grounded] → loop → long-observation → tool-misuse → unclassified), and return the triage report: per axis the hits, the ELIGIBLE rows (trace-only axes count only rows that carry a trace), the weight, up to five evidence job ids with the deciding fact, and the pre-authored remedy where the harness's closed vocabulary has a lever (agent_seed_context_reads, max_observation_tokens, max_calls_per_tool, rewrite_error) or the honest 'not a rule matter' where it has none (seat errors, wall timeouts). It PROPOSES NOTHING on its own and applies nothing — adoption is a measured A/B on the seat (P3b). Reads the corpus files only; never calls a seat or the cloud. Use it after a batch of delegations to see what actually failed and why before tuning anything.",
+		Description: "The seat rigger, first slice (ADR 0036 P3a): classify THIS box's delegation-log failures for one seat onto exactly ONE failure axis each, in a published precedence order (seat-infra [incl. placement failures with no defer class] → call-deadline [a subtask the whole-call deadline cut: not evidence about the seat] → timeout → budget → abstention [an 'output failed schema' reason is schema-miss/invalid] → schema-miss[two-step-grounded|invalid] → anchor-miss[two-step-grounded] → loop → long-observation → tool-misuse → unclassified), and return the triage report: per axis the hits, the ELIGIBLE rows (trace-only axes count only rows that carry a trace), the weight, up to five evidence job ids with the deciding fact, and the pre-authored remedy where the harness's closed vocabulary has a lever (agent_seed_context_reads, max_observation_tokens, max_calls_per_tool, rewrite_error) or the honest 'not a rule matter' where it has none (seat errors, wall timeouts). It PROPOSES NOTHING on its own and applies nothing — adoption is a measured A/B on the seat (P3b). Reads the corpus files only; never calls a seat or the cloud. Use it after a batch of delegations to see what actually failed and why before tuning anything.",
 		InputSchema: json.RawMessage(`{"type":"object","properties":{"seat":{"type":"string","description":"the seat alias exactly as corpus rows name it (e.g. qwen3.5-4b-vllm, agent-pool)"},"since":{"type":"string","description":"window back from now: <N>d or <N>h (default 7d), or an RFC3339 instant"},"node":{"type":"string","description":"only rows that ran on this node id (optional)"},"markdown":{"type":"boolean","description":"also return the markdown triage table (default false; the JSON report is always returned)"}},"required":["seat"]}`),
 	}, s.handleAgentRig)
 
@@ -434,7 +434,7 @@ func (s *Server) buildServer(version string) *mcp.Server {
 	if s.p != nil && s.p.Cfg().AgentDelegationEnabled {
 		srv.AddTool(&mcp.Tool{
 			Name:        "agent_delegate",
-			Description: "Fan out 1-8 self-contained subtasks to the FREE local delegation engine. NOT the door for single-shot mechanical text: one document + one summarize/classify/extract/triage question goes to the offload_* cascade tool first (seconds; a contract costs a 20-200 s seat run) — this door is for multi-document read-and-reason with context docs, a schema and acceptance checks (register A-102). Each subtask is a contract {goal, context docs, output_schema, acceptance} run by an autonomous read-only agent loop on THIS box or on a fleet node over the operator's tailnet (never cloud). Placement is quality-first: an idle local box always runs the work; a remote node is used only when the local GPU is busy AND the node passes the capability gate (route=auto; force with local|remote). context_paths inlines files DELEGATOR-side (confined to read_root) so your context never pays for them. SIZE CONTRACTS FROM THE LIVE CEILING, never from a remembered or written figure: offload_status {section:\"brief\"} reports each seat's agent_ctx_tokens. Written guidance drifted to a quarter of the real window and work that fits trivially was declined as 'too big for the seat' for weeks, so a figure you did not just read from offload_status is not a number. acceptance is a machine-checkable DSL evaluated by the delegator before a result counts as done: contains:<s>, not_contains:<s>, regex:<re>, min_items:<field>:<n>, nonempty:<field> — a schema-valid result failing a check comes back as failed_verification, NOT a success. Returns {summary:{succeeded,deferred,failed_verification,failed,infrastructure,corpus_rows_lost,ledger_rows_lost}, results:[{node,seat,placement,job_id,output,structured,deferred,reason,defer_class,failed,acceptance_failures,wall_ms,acceptance_lint}]} — read summary FIRST. results[].acceptance_lint (warn-only, the run still happened) flags acceptance that verifies less than it looks: PARROT-PASSABLE (every content check also matches the goal text, so an echoed question passes as verified and the retry never fires), UNGROUNDED (a contains:/regex: matching nothing in the contract's own context docs — fails right answers), or SHAPE-ONLY (nonempty:/min_items: alone — passes garbage). When present, fix the acceptance (anchor >=1 contains:/regex: to content that appears only in the docs) before reusing the contract. summary.infrastructure counts the results whose story is a broken STACK rather than the work: defers whose defer_class is infrastructure|config, plus a local placement taken while every configured remote failed its health probe. Non-zero means a node is broken or misconfigured, so do NOT read those subtasks as work the local stack honestly could not do — and the call comes back flagged as an error, with this same JSON body intact. defer_class \"contract\" is YOUR contract, not a box: no output_schema for a remote placement, past the origin hop, or bigger than any node's advertised context — rewrite the contract and retry. abstention|budget defers and failed_verification are ordinary result shapes. WRITE DOOR (0.122.0): add write_root to a subtask to hand a seat a small IMPLEMENTATION leg — it gets write_file/edit_file inside that directory of the NODE'S OWN copy of your inlined docs, and the result carries diff + diff_files, a unified patch YOU review and apply (the harness never applies it; that is what makes handing a 4B an edit safe). Needs agent_allow_write on the executing node, else the subtask is refused and re-placed, or defers with defer_class write. Caps: 8 files, 64 KiB written, 192 KiB of diff, and no delete/shell/run/network — past a cap nothing is published at all. Verify it with diff_touches:<path-prefix> and diff_max_files:<n>, which read the write set rather than the prose; neither says the change is CORRECT, so read the diff. On any refusal before placement it returns deferred:true with a reason and you do the work yourself.",
+			Description: "Fan out 1-8 self-contained subtasks to the FREE local delegation engine. NOT the door for single-shot mechanical text: one document + one summarize/classify/extract/triage question goes to the offload_* cascade tool first (seconds; a contract costs a 20-200 s seat run) — this door is for multi-document read-and-reason with context docs, a schema and acceptance checks (register A-102). Each subtask is a contract {goal, context docs, output_schema, acceptance} run by an autonomous read-only agent loop on THIS box or on a fleet node over the operator's tailnet (never cloud). Placement is quality-first: an idle local box always runs the work; a remote node is used only when the local GPU is busy AND the node passes the capability gate (route=auto; force with local|remote). context_paths inlines files DELEGATOR-side (confined to read_root) so your context never pays for them. SIZE CONTRACTS FROM THE LIVE CEILING, never from a remembered or written figure: offload_status {section:\"brief\"} reports each seat's agent_ctx_tokens. Written guidance drifted to a quarter of the real window and work that fits trivially was declined as 'too big for the seat' for weeks, so a figure you did not just read from offload_status is not a number. acceptance is a machine-checkable DSL evaluated by the delegator before a result counts as done: contains:<s>, not_contains:<s>, regex:<re>, min_items:<field>:<n>, nonempty:<field> — a schema-valid result failing a check comes back as failed_verification, NOT a success. Returns {summary:{succeeded,deferred,failed_verification,failed,infrastructure,corpus_rows_lost,ledger_rows_lost}, results:[{node,seat,placement,job_id,output,structured,deferred,reason,defer_class,failed,acceptance_failures,wall_ms,acceptance_lint}]} — read summary FIRST. results[].acceptance_lint (warn-only, the run still happened) flags acceptance that verifies less than it looks: PARROT-PASSABLE (every content check also matches the goal text, so an echoed question passes as verified and the retry never fires), UNGROUNDED (a contains:/regex: matching nothing in the contract's own context docs — fails right answers), or SHAPE-ONLY (nonempty:/min_items: alone — passes garbage). When present, fix the acceptance (anchor >=1 contains:/regex: to content that appears only in the docs) before reusing the contract. summary.infrastructure counts the results whose story is a broken STACK rather than the work: defers whose defer_class is infrastructure|config, plus a local placement taken while every configured remote failed its health probe. Non-zero means a node is broken or misconfigured, so do NOT read those subtasks as work the local stack honestly could not do — and when NOTHING succeeded the call comes back flagged as an error, with this same JSON body intact (a PARTIAL result, where some subtasks delivered, is a successful call: read summary.failed / lost_to_stack and each result's failed / defer_class / reason for what is missing). defer_class \"contract\" is YOUR contract, not a box: no output_schema for a remote placement, past the origin hop, or bigger than any node's advertised context — rewrite the contract and retry. abstention|budget defers and failed_verification are ordinary result shapes. The whole call has a deadline below the MCP client's abort (agent_call_deadline_sec, default 1,500 s, counted from arrival): at it the finished subtasks' results come back and every unfinished one is a budget defer whose reason opens `call deadline reached; N unfinished` — a result shape, not a failure; re-issue those subtasks in a smaller call. WRITE DOOR (0.122.0): add write_root to a subtask to hand a seat a small IMPLEMENTATION leg — it gets write_file/edit_file inside that directory of the NODE'S OWN copy of your inlined docs, and the result carries diff + diff_files, a unified patch YOU review and apply (the harness never applies it; that is what makes handing a 4B an edit safe). Needs agent_allow_write on the executing node, else the subtask is refused and re-placed, or defers with defer_class write. Caps: 8 files, 64 KiB written, 192 KiB of diff, and no delete/shell/run/network — past a cap nothing is published at all. Verify it with diff_touches:<path-prefix> and diff_max_files:<n>, which read the write set rather than the prose; neither says the change is CORRECT, so read the diff. On any refusal before placement it returns deferred:true with a reason and you do the work yourself.",
 			InputSchema: json.RawMessage(`{"type":"object","properties":{"subtasks":{"type":"array","minItems":1,"maxItems":8,"description":"the delegation contracts to place and run","items":{"type":"object","properties":{"goal":{"type":"string","description":"the self-contained task for the sub-agent (it sees ONLY this + the context docs)"},"context":{"type":"array","items":{"type":"object","properties":{"name":{"type":"string"},"text":{"type":"string"}},"required":["name","text"]},"description":"inline context documents (name is a flat filename; total across docs <= the box's cap: 256 KiB, which a composite box raises to its largest layer window x 3 bytes)"},"context_paths":{"type":"array","items":{"type":"string"},"description":"files to inline as context docs, read by the DELEGATOR under read_root confinement (<=128 KiB each)"},"output_schema":{"type":"object","description":"JSON Schema with a properties map; the sub-agent's final answer is re-packed into it. REQUIRED for any remote placement"},"acceptance":{"type":"array","items":{"type":"string"},"description":"machine-checkable checks evaluated delegator-side: contains:<s> | not_contains:<s> | regex:<re> | min_items:<field>:<n> | nonempty:<field> | diff_touches:<path-prefix> | diff_max_files:<n> (the last two read the write set of a write_root subtask and FAIL on an empty one)"},"profile":{"type":"string","description":"agent task profile. Default = the EXECUTING box's configured agent_profile, else general — a per-SEAT property: small tiers seed research (narrowing measured 0%->72% there), big planners run un-narrowed (research measured 94% and 5x slower vs general 100% on the 27B). Omit unless the task genuinely needs a specific toolset"},"max_steps":{"type":"integer","description":"loop step budget (default 12, cap 12)"},"write_root":{"type":"string","description":"opens the WRITE door (0.122.0): a directory RELATIVE to the run's read root that the seat may create and change files under, inside the executing node's own throwaway copy of the inlined context docs — relative because the node never sees your filesystem. The result carries diff + diff_files, a unified patch (git apply -p1) that YOU review and apply; the harness never applies it. Requires agent_allow_write on the executing node. Grants create+overwrite only: no delete, no shell, no run, no network. Caps 8 files / 64 KiB written / 192 KiB of diff — past any of them NOTHING is published and the subtask defers with defer_class write. Omit for read-only work, which is everything else"},"setup_actions":{"type":"array","maxItems":8,"items":{"type":"object","properties":{"tool":{"type":"string"},"args":{"type":"object"}},"required":["tool"]},"description":"tool calls the EXECUTING seat replays before its first turn (ADR 0036 P2), e.g. read_file of a context doc by its name — the model's first turn then already holds the document instead of spending two steps finding it (the corpus's dominant 4B failure shape). Not charged to max_steps. A node with agent_seed_context_reads on prepends one read_file per context doc itself; a node one release behind ignores this field and reports no setup_ran"},"thinking":{"type":"string","enum":["auto","on","off"],"description":"planner think-block policy on the EXECUTING seat (0.115.8): auto (default = the executing box's agent_thinking) thinks every step and re-issues an empty final ONCE with thinking off at 4x the step budget, then defers as reasoning_starved/empty; off renders every planner call in non-thinking mode (grounded extraction on a thinking seat); on never sends the kwarg. results[].calls carries per-completion finish_reason / completion_tokens / reasoning_tokens; results[].stop_note the starvation arithmetic"},"context_class":{"type":"string","enum":["","long"],"description":"long = ask for the box's biggest long-context layer (the three-card seat where a box declares one, otherwise the pair's 262k seat) under its display-floor, host-RAM and presence guards and a prefill feasibility check; omit for the default placement"},"layer":{"type":"string","description":"run this subtask on the NAMED layer's agent seat (a layer id a composite node declares, e.g. fast = the Lenovo's 35B digest seat): the placement table decides FOR that layer — a node that does not declare it is ineligible for this subtask, an idle local box that does not declare it does not keep it, and when no node declares it the subtask defers naming the layer (never a silent run on the planner seat). Use for digest / extract / summarize-shaped contracts where the measured fast seat is adequate (blind coverage 4.65 vs the default's 8.53 — judgment and coverage contracts stay on the default). Omit for the default placement"},"allow_browse":{"type":"boolean","description":"grant the browse tool (ADR 0060) on the executing seat: it may drive that machine's own browser through its browse lane. Admitted only with route local, this node's agent_allow_browse, a configured lane and browse_hosts; judged unattended (publish/send-class controls always refused), audited"},"browse_hosts":{"type":"array","items":{"type":"string"},"description":"with allow_browse: 1-32 bare host names (subdomains included) the browse tool may visit; required"},"timeout_sec":{"type":"integer","description":"EXECUTION budget per subtask (default 300, cap 900), shared by every placement it makes: a cross-seat retry and any re-placement after a node refuses the job run only inside what is LEFT of it, and are skipped with a note under the retry floor (10 s, or the delegator's agent_retry_min_sec); a retry is also skipped after an empty final and never lands on a seat already running another job. Not an end-to-end wall: placement overhead (fleet health probe, dispatch dial) and time the job provably spent queued on a node are bounded but not charged to it, so observed wall can exceed this"}},"required":["goal"]}},"route":{"type":"string","enum":["auto","spread","local","remote","queue"],"description":"placement: auto (default; idle-local wins, busy-local considers remotes), spread (deal the subtasks across the local seat AND every eligible fleet node, concurrently — use for any fan-out of 2+ contracts. The deal is deterministic: subtask 0 ALWAYS lands on the local seat, so a 2-contract spread with an eligible remote is guaranteed one local + one remote — the local+server pair. The REMOTE slots are FIT-SCORED from the goal text, no model call: reasoning-shaped goals (explain/why/trace/compare/across these files) take the roomiest eligible seat, mechanical ones (extract/list/count/summarize/how many) take the smallest eligible seat so the roomier one stays free, a goal matching neither reads as mechanical, and equal seats rotate — phrase the goal with the verb you mean. Eligibility is PER SUBTASK — a contract with no output_schema, or too big for every node, silently deals local; read results[].placement to confirm the pair landed), local (force in-process), remote (force a fleet node; defers if none eligible), queue (ADR 0030, DARK unless fleet_queue_holder is configured: submit every subtask to the consolidated pull queue and let claiming nodes take them — durability lives on the holder; requires output_schema on every subtask). A subtask whose answer fails acceptance (or abstains) is retried once on a different node and the better attempt is published (retried_on / retry_note)"},"read_root":{"type":"string","description":"absolute directory context_paths may be read from (default: the server working dir)"},"remotes":{"type":"array","items":{"type":"string"},"description":"fleet node base URLs, tailnet-only (e.g. http://node-c:18811)"},"priority":{"type":"integer","enum":[-1,0,1],"description":"scheduling band for every subtask (default 0 = production). -1 = SHEDDABLE: measurement/gate traffic that takes idle fleet capacity only — a node without an idle execution slot refuses it and the subtask is re-placed; with no idle node anywhere it is shed at once (deferred, defer_class capacity) instead of waiting or queuing before/behind production work. 1 = urgent (claimed first on every node). Band-0 subtasks that find every node full WAIT for capacity (agent_placement_wait_sec, default 120 s, not charged to timeout_sec) and land on the first node that frees; summary.waited / results[].capacity_wait_sec report it"}},"required":["subtasks"]}`),
 		}, s.handleAgentDelegate)
 
@@ -443,7 +443,7 @@ func (s *Server) buildServer(version string) *mcp.Server {
 		// so tools/list stays byte-identical when the delegator role is off.
 		srv.AddTool(&mcp.Tool{
 			Name:        "offload_research",
-			Description: "RESEARCH on the FREE local seats: hand over URLs + a goal; the harness fetches each page DELEGATOR-side (public http/https only — loopback, private, tailnet hosts are refused), strips it to text, and fans one digest contract per page across the fleet (route spread by default). The seats never touch the network; your context never pays for the pages. This is the lane for any leg that would otherwise be a cloud research subagent — WebSearch to find URLs, then call this. Each contract is written the way the seats pass (the document is named as already provided) and acceptance is anchored to a token that appears only in the page, so an echoed goal cannot pass as verified. Returns {summary, sources:[{index,url,final_url,title,status,bytes,text_bytes,truncated,error,doc_name,anchor,skipped}], results:[...agent_delegate result rows, one per usable source, in source order], result_sources:[source index per result]}. Read summary FIRST; a source with `skipped` produced no result (fetch failed, non-public host, unsupported content type). Default output_schema {key_facts[],numbers[],quotes[],verdict} — pass your own to shape the digest; pass questions to add per-page asks. Caps: 12 URLs per call, 2 MiB fetched / 96 KiB text per page, 30 s per fetch.",
+			Description: "RESEARCH on the FREE local seats: hand over URLs + a goal; the harness fetches each page DELEGATOR-side (public http/https only — loopback, private, tailnet hosts are refused), strips it to text, and fans one digest contract per page across the fleet (route spread by default). The seats never touch the network; your context never pays for the pages. This is the lane for any leg that would otherwise be a cloud research subagent — WebSearch to find URLs, then call this. Each contract is written the way the seats pass (the document is named as already provided) and acceptance is anchored to a token that appears only in the page, so an echoed goal cannot pass as verified. Returns {summary, partial?, error?, results:[...agent_delegate result rows, one per usable source, in source order], result_sources:[source index per result], sources:[{index,url,final_url,title,status,bytes,text_bytes,truncated,error,doc_name,anchor,skipped}]} — the digests come before the sources on purpose. Read summary FIRST; a PARTIAL result (some pages digested, some failed) is a successful call — the error flag is set only when nothing succeeded — so read summary.failed and each result's reason for what is missing; the same whole-call deadline as agent_delegate applies (the page fetch included): at it the finished digests come back and the unfinished pages are `call deadline reached` budget defers; a source with `skipped` produced no result (fetch failed, non-public host, unsupported content type). Default output_schema {key_facts[],numbers[],quotes[],verdict} — pass your own to shape the digest; pass questions to add per-page asks. Caps: 12 URLs per call, 2 MiB fetched / 96 KiB text per page, 30 s per fetch.",
 			InputSchema: json.RawMessage(`{"type":"object","properties":{"goal":{"type":"string","description":"what to extract from EVERY page, self-contained (the seat sees only this + the page text)"},"urls":{"type":"array","minItems":1,"maxItems":12,"items":{"type":"string"},"description":"public http(s) URLs to fetch delegator-side"},"questions":{"type":"array","items":{"type":"string"},"description":"optional extra asks appended to the goal for every page"},"output_schema":{"type":"object","description":"JSON Schema with a properties map for the per-page digest (default: key_facts/numbers/quotes/verdict)"},"acceptance":{"type":"array","items":{"type":"string"},"description":"optional extra delegator-side checks (contains:/not_contains:/regex:/min_items:/nonempty:) appended to the grounded default"},"route":{"type":"string","enum":["auto","spread","local","remote"],"description":"placement (default spread: pages are dealt across the local seat and every eligible fleet node)"},"timeout_sec":{"type":"integer","description":"per-page contract budget (default 300, cap 900)"},"fetch_timeout_sec":{"type":"integer","description":"per-page fetch timeout (default 30)"}},"required":["goal","urls"]}`),
 		}, s.handleResearch)
 	}
@@ -3336,12 +3336,30 @@ func (s *Server) publishReview(wire core.AgentWireResult, diff string, maxFindin
 	return jsonResult(withReviewExtra(out, extra))
 }
 
+// callDeadlineAt is the instant a delegation door's call must be over: entered
+// plus the configured whole-call deadline (ADR 0065), or the zero time when the
+// deadline is switched off. The MCP client aborts a call at its own limit and
+// drops the response with it, so the door answers first — with what has finished.
+// entered is taken at handler entry because the client's clock starts when it
+// sends the request, not when the delegator begins placing work.
+func (s *Server) callDeadlineAt(entered time.Time) time.Time {
+	if d := s.p.Cfg().CallDeadline(); d > 0 {
+		return entered.Add(d)
+	}
+	return time.Time{}
+}
+
 // handleAgentDelegate is the MCP front door onto delegate.Run (Task 6). It
 // prepares contracts (delegator-mints version/depth, inlines context_paths
 // under read_root, validates — all BEFORE any placement or network), then
 // hands them to the shared engine. House style throughout: every failure path
 // is a deferred-shape result, never an MCP error (see handleAgentRun).
+//
+// The call has a deadline below the client's abort (ADR 0065, config
+// agent_call_deadline_sec): at it the finished subtasks' results are returned and
+// each unfinished one is a budget defer "call deadline reached; N unfinished".
 func (s *Server) handleAgentDelegate(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	entered := time.Now()
 	var in struct {
 		Subtasks []struct {
 			Goal         string                  `json:"goal"`
@@ -3447,8 +3465,12 @@ func (s *Server) handleAgentDelegate(ctx context.Context, req *mcp.CallToolReque
 	// The server-lifetime quarantine rides every delegation, not only research:
 	// a node proven to answer about the wrong document must not keep receiving
 	// agent_delegate work (silent-failure review, 2026-09-02).
+	deadline := s.callDeadlineAt(entered)
+	// Progress notifications, only for a request that supplied a progress token.
+	onProgress, stopProgress := s.startProgress(ctx, req, len(contracts), deadline)
+	defer stopProgress()
 	results, sum, rerr := delegate.RunWith(ctx, s.p.Cfg(), localRun, contracts, in.Route, in.Remotes,
-		&delegate.RunOptions{Quarantine: s.quarantine, Priority: in.Priority, Tenant: s.tenant, Rescue: s.rescueFunc()})
+		&delegate.RunOptions{Quarantine: s.quarantine, Priority: in.Priority, Tenant: s.tenant, Deadline: deadline, OnProgress: onProgress, Rescue: s.rescueFunc()})
 	if rerr != nil {
 		return jsonResult(map[string]any{"deferred": true, "reason": rerr.Error()})
 	}
@@ -3461,14 +3483,15 @@ func (s *Server) handleAgentDelegate(ctx context.Context, req *mcp.CallToolReque
 	// The loud-exit contract used to live ONLY on the CLI (main.go's
 	// delegateExitErr): every one of these came back to the MCP caller — this
 	// lane's primary consumer — as a plain successful tool call, so a fleet with
-	// a dead llama-swap read like a clean run to the delegating model. Same two
-	// triggers as the exit code, same meaning: a human has to look.
+	// a dead llama-swap read like a clean run to the delegating model. The flag
+	// carries the same meaning — a human has to look — for the cases where the
+	// call itself failed (delegateIsError); a PARTIAL result is not one of them.
 	//
 	// House style stays intact in the important half: the BODY is unchanged, so
 	// the summary and every per-subtask reason/defer_class are still there to
-	// read. The flag is the loudness the JSON alone could not carry. Ordinary
-	// defers (abstention, budget) and failed verification remain successes —
-	// those are RESULT shapes, exactly as on the CLI.
+	// read. Ordinary defers (abstention, budget — a call deadline is one) and
+	// failed verification remain successes — those are RESULT shapes, exactly as
+	// on the CLI.
 	if delegateIsError(sum) {
 		res.IsError = true
 	}
@@ -3488,35 +3511,44 @@ func (s *Server) handleAgentDelegate(ctx context.Context, req *mcp.CallToolReque
 // can sit BESIDE printed results in a way a boolean cannot.
 //
 // The rule that expresses that WITHOUT a silent path is stated on lost WORK, not
-// on the presence of successes. `Succeeded == 0` was the previous spelling and it
-// over-reached: Infrastructure covers both remotesUnreachable (a result that
-// succeeded) and a broken-stack DEFER (a subtask whose contracted output never
-// arrived), and only the first justifies staying quiet — yet the gate silenced
-// the second too the moment ANY sibling succeeded. One of two subtasks eaten by a box with a dead
-// llama-server reached the calling model as a clean tool call, while the CLI
-// exited non-zero on the identical run: two surfaces disagreeing, with the quiet
-// one belonging to the caller that has no exit code to read.
+// on the presence of Infrastructure. Infrastructure covers both remotesUnreachable
+// (a result that succeeded) and a broken-stack DEFER (a subtask whose contracted
+// output never arrived), and only the first justifies staying quiet.
+// LostToStack counts exactly the subtasks that DELIVERED NO USABLE RESULT because
+// the stack failed them, so the rule needs no proxy; `Deferred > 0 &&
+// Infrastructure > 0` is NOT one — a contract-classed defer beside a fleet-down
+// local success satisfies it with nothing lost, re-creating the
+// flag-on-finished-work defect. The count is stated on the CONTRACTED output, not
+// on empty bytes: a finished agent loop whose structured re-pack seat was
+// unreachable publishes its prose with `structured` absent, and is lost — a
+// contract carrying an output_schema is owed a mechanically checked deliverable.
 //
-// LostToStack counts exactly the subtasks that DELIVERED NO USABLE RESULT
-// because the stack failed them, so the rule needs no proxy.
-// `Deferred > 0 && Infrastructure > 0` is NOT one — a contract-classed defer
-// beside a fleet-down local success satisfies it with nothing lost, re-creating
-// the flag-on-finished-work defect.
+// What that lost work does to the FLAG changed twice. R5-2 flagged the call
+// whenever any subtask failed or was lost, so one of two subtasks eaten by a dead
+// llama-server could not read as a clean call. C-75 (register, 2026-09) narrowed
+// it again, because the same argument cuts against the flag: IsError means THE
+// CALL FAILED, and a call that delivered digests for seven of eight subtasks did
+// not fail. The MCP client answers an error-flagged body by keeping only its head
+// and tail, so every partial research reply the workers saw lost the middle — the
+// digests that succeeded. So the flag is kept for the two cases it is true of:
 //
-// The count is stated on the CONTRACTED output, not on empty bytes, and the flag
-// inherits that meaning: a finished agent loop whose structured re-pack seat was
-// unreachable publishes its prose with `structured` absent, and is flagged. That
-// is the right call for an MCP caller — a contract carrying an output_schema is
-// owed a mechanically checked deliverable, and a model handed unchecked prose
-// under a green flag would merge it as if it had been validated.
+//   - nothing succeeded, and something failed or was lost to the stack (the call
+//     delivered nothing, and the fix is on a box or in the contract);
+//   - work was skipped outright (a batched run's later chunks never ran) and
+//     nothing succeeded.
 //
-// So: a subtask that actually failed is an error, and a subtask lost to the
-// stack is an error — a sibling succeeding never un-loses it, exactly as it never
-// un-fails a Failed one. A fleet-down run that still delivered every subtask
-// stays a quiet success.
+// A PARTIAL result is a successful call whose body says what is missing: the
+// summary counts (failed, lost_to_stack, infrastructure, skipped) and each
+// subtask's own `failed` / `defer_class` / `reason`. The CLI keeps its wider
+// exit-code rule — an exit code sits BESIDE the printed results — and a call
+// deadline's budget defers are result shapes, never a reason for the flag.
 func delegateIsError(sum delegate.Summary) bool {
+	if sum.Succeeded > 0 {
+		return false
+	}
 	// Skipped: subtasks a batched run never attempted because an earlier chunk
-	// errored — lost work the prose `error` field alone must not hide.
+	// errored — lost work the prose `error` field alone must not hide when there
+	// is no delivered result beside it.
 	return sum.Failed > 0 || sum.LostToStack > 0 || sum.Skipped > 0
 }
 
@@ -3683,11 +3715,46 @@ func result(r core.Result) (*mcp.CallToolResult, error) {
 	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: string(b)}}}, nil
 }
 
+// researchWire is offload_research's published body. FIELD ORDER is the contract,
+// because it is the marshalled order and a client that truncates a long body keeps
+// its head and its tail (C-75):
+//
+//   - the summary leads (roast delta 14: eight quiet defers must read as a loud
+//     outcome). A partial result is no longer flagged as a tool error
+//     (delegateIsError), so its counts — failed, lost_to_stack, deferred, skipped —
+//     and each result's own `failed` / `defer_class` / `reason` (mapped to its page
+//     by `result_sources`) are what say that pages are missing;
+//   - `partial` and `error` come next: the notes of a batched run that returned an
+//     error beside the results it had collected. They are rare (see below), but
+//     they are the loudest thing the body can say, so they do not sit behind
+//     anything long;
+//   - the DIGESTS (`results`, with the `result_sources` index that maps them to
+//     pages) come before the sources. They are the deliverable;
+//   - `sources` is last: one metadata row per fetched page, the longest part of
+//     the body and the part a caller can most afford to lose.
+//
+// Every field the body ever carried is still here; only the order moved.
+//
+// `partial` and `error` are narrower than their names suggest: RunBatched returns an
+// error only for what RunWith validates (the route, the subtask count, the tailnet
+// remotes), and every chunk of one call shares all three, so no chunk can fail after
+// another has succeeded. A failed, lost or deferred PAGE never sets them; it is the
+// summary and its own result row that say so.
+type researchWire struct {
+	Summary       any               `json:"summary"`
+	Partial       bool              `json:"partial,omitempty"`
+	Error         string            `json:"error,omitempty"`
+	Results       any               `json:"results"`
+	ResultSources []int             `json:"result_sources"`
+	Sources       []research.Source `json:"sources"`
+}
+
 // handleResearch — offload_research. Fetch (guarded, delegator-side) → Build
 // (one grounded contract per usable page) → the SAME delegate.Run path as
 // agent_delegate. The seam s.researchFetch lets tests supply pages without
 // network; production uses research.FetchAll.
 func (s *Server) handleResearch(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	entered := time.Now()
 	var in struct {
 		Goal            string          `json:"goal"`
 		URLs            []string        `json:"urls"`
@@ -3724,7 +3791,18 @@ func (s *Server) handleResearch(ctx context.Context, req *mcp.CallToolRequest) (
 			return research.FetchAll(ctx, urls, opt, 4)
 		}
 	}
-	fetched := fetch(ctx, in.URLs, opt)
+	// The call deadline started at handler entry (the client's clock did): the page
+	// fetch spends from it, so a slow fetch cannot push the whole call past the
+	// client's abort. A fetch cut by the deadline yields failed sources and then
+	// "no usable source", exactly as any failed fetch does.
+	deadline := s.callDeadlineAt(entered)
+	fetchCtx := ctx
+	if !deadline.IsZero() {
+		var cancelFetch context.CancelFunc
+		fetchCtx, cancelFetch = context.WithDeadline(ctx, deadline)
+		defer cancelFetch()
+	}
+	fetched := fetch(fetchCtx, in.URLs, opt)
 	specs, sources := research.Build(research.Request{
 		Goal: in.Goal, URLs: in.URLs, Questions: in.Questions, OutputSchema: in.OutputSchema,
 		Acceptance: in.Acceptance, TimeoutSec: in.TimeoutSec,
@@ -3756,7 +3834,11 @@ func (s *Server) handleResearch(ctx context.Context, req *mcp.CallToolRequest) (
 	// RunBatched: 9–12 usable pages used to hit Run's 8-subtask refusal and lose
 	// every page (2026-09-01). Chunks run in order; a chunk error returns WITH
 	// the results already obtained, rendered as partial rather than dropped.
-	results, sum, rerr := delegate.RunBatched(ctx, s.p.Cfg(), localRun, contracts, route, nil, &delegate.RunOptions{Quarantine: s.quarantine, Rescue: s.rescueFunc()})
+	// Progress notifications, only for a request that supplied a progress token.
+	onProgress, stopProgress := s.startProgress(ctx, req, len(contracts), deadline)
+	defer stopProgress()
+	results, sum, rerr := delegate.RunBatched(ctx, s.p.Cfg(), localRun, contracts, route, nil,
+		&delegate.RunOptions{Quarantine: s.quarantine, Deadline: deadline, OnProgress: onProgress, Rescue: s.rescueFunc()})
 	if rerr != nil && len(results) == 0 {
 		return jsonResult(map[string]any{"deferred": true, "reason": rerr.Error(), "sources": sources})
 	}
@@ -3765,14 +3847,10 @@ func (s *Server) handleResearch(ctx context.Context, req *mcp.CallToolRequest) (
 	if rerr != nil {
 		partialErr = rerr.Error()
 	}
-	res, jerr := jsonResult(struct {
-		Summary       any               `json:"summary"`
-		Sources       []research.Source `json:"sources"`
-		Results       any               `json:"results"`
-		ResultSources []int             `json:"result_sources"`
-		Partial       bool              `json:"partial,omitempty"`
-		Error         string            `json:"error,omitempty"`
-	}{wire.Summary, sources, wire.Results, resultSources[:len(results)], rerr != nil, partialErr})
+	res, jerr := jsonResult(researchWire{
+		Summary: wire.Summary, Partial: rerr != nil, Error: partialErr,
+		Results: wire.Results, ResultSources: resultSources[:len(results)], Sources: sources,
+	})
 	if jerr != nil || res == nil {
 		return res, jerr
 	}

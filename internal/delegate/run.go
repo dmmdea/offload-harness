@@ -135,9 +135,27 @@ type PlacedResult struct {
 	// lease: this process was away) or "withdrawn: ..." — read on a poll. Nothing ran,
 	// so the subtask is re-placeable like a confirmed withdrawal, and the intent closes
 	// as "never started: <this>", the note recovery writes for the same observation.
-	nodeNeverRan    string
+	nodeNeverRan string
+	// nodeTerminal marks a failure the poll loop READ off the node as its last word on the job:
+	// it ended in error, its result could not be decoded, or the node denied holding it after
+	// the bounded re-dispatches. The job is over, or gone, so when the call deadline cuts such
+	// an outcome (cutOutcome) it says the job had ended and not that it is still on the node,
+	// and the intent closes as the terminal observation it is. It is the producer that says
+	// so, not the error text, because other failures of an acked job leave its fate unknown: a
+	// cancelled poll and a poll deadline are the give-up's (orphanable), and a refused
+	// re-dispatch may have landed.
+	nodeTerminal    bool
 	queuedWait      time.Duration
 	PlacementReason string
+	// deadlineCut marks a result the whole-call deadline (RunOptions.Deadline)
+	// published as a budget defer instead of an answer: the subtask was still
+	// running, waiting or not yet started when the call ended. Set by
+	// cutByDeadline and the deadline's own constructors; never published.
+	deadlineCut bool
+	// queueSeen is what the queue holder said about this job when the call deadline
+	// took a last look (calldeadline.go lookAtHolder): "accepted", "running", "absent"
+	// (no such job) or "unknown" (no answer inside the look). "" = never looked.
+	queueSeen string
 	// rescueSpent is the wall a delegator-side rescue of this result's finished answer
 	// spent and FAILED to turn into a validated object (rescueSchemaMiss); zero when no
 	// rescue ran or it delivered. It is delegator time spent on neither node's work, so a
@@ -607,6 +625,23 @@ type RunOptions struct {
 	// nil = no rescue, the behaviour before the rescue existed: the defer is delivered as it is.
 	// The surfaces that own a pipeline wire pipeline.RescueRepack here.
 	Rescue RescueFunc
+	// Deadline, when non-zero, is the instant the WHOLE call must be over: the
+	// MCP doors set it below the client's own abort (config.CallDeadline) so a
+	// call returns what has finished instead of being dropped with it (ADR 0065,
+	// register C-67). At Deadline every subtask still running is cancelled and
+	// published as a budget defer "call deadline reached; N unfinished" beside the
+	// finished results, and nothing further is started. The zero value is no
+	// deadline — every caller that is not an MCP door, and every pre-0065 call.
+	Deadline time.Time
+	// OnProgress, when set, is told each time a subtask starts and each time one
+	// ends (progress.go). It is called from the run's own goroutines, concurrently,
+	// so it must be safe for that and must not block: the MCP doors hand each event
+	// to a channel. Nothing in the engine reads it back.
+	OnProgress func(ProgressEvent)
+	// call is the deadline's shared state (calldeadline.go): RunBatched builds it
+	// once so every chunk of a batched call counts its unfinished subtasks against
+	// the whole call. Nil = RunWith builds its own from Deadline.
+	call *callDeadline
 }
 
 // DefaultTenant is the tenant id a delegator process identifies itself with
@@ -643,12 +678,28 @@ func Run(ctx context.Context, cfg config.Config, local LocalRunner, subtasks []c
 func RunBatched(ctx context.Context, cfg config.Config, local LocalRunner, subtasks []core.AgentContract, route string, remotes []string, opts *RunOptions) ([]PlacedResult, Summary, error) {
 	var all []PlacedResult
 	var total Summary
+	// The call deadline (ADR 0065) covers the WHOLE batched call, not each chunk:
+	// one shared state, so the unfinished count in every published reason spans
+	// every chunk, and a chunk that would begin after the deadline never does.
+	dl := newCallDeadline(ctx, opts, len(subtasks))
+	if dl != nil {
+		o := *opts
+		o.call = dl
+		opts = &o
+	}
 	for start := 0; start < len(subtasks); start += MaxSubtasks {
 		end := start + MaxSubtasks
 		if end > len(subtasks) {
 			end = len(subtasks)
 		}
-		res, sum, err := RunWith(ctx, cfg, local, subtasks[start:end], route, remotes, opts)
+		chunkOpts := opts
+		if opts != nil && opts.OnProgress != nil {
+			// Progress counts against the whole call, not against each chunk.
+			o := *opts
+			o.OnProgress = shiftedProgress(opts.OnProgress, len(all), len(subtasks))
+			chunkOpts = &o
+		}
+		res, sum, err := RunWith(ctx, cfg, local, subtasks[start:end], route, remotes, chunkOpts)
 		all = append(all, res...)
 		total = addSummary(total, sum)
 		total.Batches++
@@ -695,6 +746,15 @@ func RunWith(ctx context.Context, cfg config.Config, local LocalRunner, subtasks
 	if len(subtasks) > maxSubtasks {
 		return nil, Summary{}, fmt.Errorf("delegate: %d subtasks exceeds the max of %d", len(subtasks), maxSubtasks)
 	}
+	// The whole-call deadline (ADR 0065): from here every placement, probe, poll
+	// and local run answers to a context that ends at RunOptions.Deadline. nil =
+	// no deadline, and everything below behaves exactly as it did before.
+	dl := newCallDeadline(ctx, opts, len(subtasks))
+	if dl != nil {
+		var cancelCall context.CancelFunc
+		ctx, cancelCall = context.WithDeadlineCause(ctx, dl.at, ErrCallDeadline)
+		defer cancelCall()
+	}
 	// route "queue" bypasses the whole push machinery (ADR 0030): the holder
 	// owns durability and the claim loops own placement.
 	if route == "queue" {
@@ -702,7 +762,8 @@ func RunWith(ctx context.Context, cfg config.Config, local LocalRunner, subtasks
 		if opts != nil {
 			rescue = opts.Rescue
 		}
-		return runQueued(ctx, cfg, subtasks, rescue)
+		results, sum, err := runQueued(ctx, cfg, subtasks, rescue)
+		return dl.cutQueued(cfg, subtasks, results, sum, err)
 	}
 	// Fleet membership is configuration: a call that names no remotes uses the
 	// config's delegate_remotes. A call's own list REPLACES it (never merges) so
@@ -723,10 +784,20 @@ func RunWith(ctx context.Context, cfg config.Config, local LocalRunner, subtasks
 	// delivery (same posture as pipeline.record's ignored error).
 	var led *ledger.Ledger
 	ledgerUnopened := false
+	// ledgerDrained is set only when the call deadline passed with subtask
+	// goroutines still running: they write their rows when they end, so the ledger
+	// closes after the last of them instead of under them.
+	var ledgerDrained <-chan struct{}
 	if cfg.LedgerPath != "" {
 		if l, err := ledger.Open(cfg.LedgerPath); err == nil {
 			led = l
-			defer led.Close()
+			defer func() {
+				if ledgerDrained != nil {
+					go func() { <-ledgerDrained; l.Close() }()
+					return
+				}
+				l.Close()
+			}()
 		} else {
 			// Every row this run would have written is LOST, and record() must
 			// count them as such — see runner.ledgerUnopened.
@@ -749,6 +820,11 @@ func RunWith(ctx context.Context, cfg config.Config, local LocalRunner, subtasks
 	// shows the card "running" until its staleness sweep fails it. Each send is
 	// bounded (2 s), so this cannot hold a run hostage to a down PAIR.
 	defer r.pair.Wait()
+	// Registered after the Wait above, so it runs BEFORE it: from here on a late
+	// frame from an abandoned goroutine is dropped, never added to a WaitGroup that
+	// is being waited on.
+	defer r.shutPair()
+	r.call = dl
 	if opts != nil {
 		r.quarantine = opts.Quarantine
 		r.priority = core.ClampBand(opts.Priority)
@@ -807,19 +883,63 @@ func RunWith(ctx context.Context, cfg config.Config, local LocalRunner, subtasks
 		}
 		r.autoDeal = r.dealAutoRemote(subtasks, r.localView(), r.autoViews, r.autoBases, busy, failed)
 	}
-	results := make([]PlacedResult, len(subtasks))
+	board := newResultBoard(len(subtasks))
+	progress := newProgressor(opts, len(subtasks))
 	sem := make(chan struct{}, runConcurrency)
 	var wg sync.WaitGroup
+	launched := 0
+launch:
 	for i, c := range subtasks {
+		if dl == nil {
+			sem <- struct{}{} // no deadline: block for a slot exactly as always
+		} else {
+			// A subtask still waiting for a run slot when the call ends never begins.
+			if dl.reached() {
+				break launch
+			}
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				break launch
+			}
+		}
 		wg.Add(1)
-		sem <- struct{}{}
+		launched++
 		go func(i int, contract core.AgentContract) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			results[i] = r.runCapped(ctx, i, contract)
+			progress.started(i)
+			// runOne's outcome was already cut where it was PRODUCED (finish, settle, exhaustedSettled): the
+			// only moment "after the deadline?" can be answered. Asking again here, with no
+			// timestamp, would rewrite an answer that finished before the deadline — an
+			// abstention whose retry was cut, for one — into a call-deadline defer.
+			pr := r.runCapped(ctx, i, contract)
+			if board.put(i, pr) {
+				if !pr.deadlineCut {
+					dl.answer()
+				}
+				progress.finished(i, pr)
+			}
 		}(i, c)
 	}
-	wg.Wait()
+	drained, abandoned := dl.await(ctx, &wg)
+	if abandoned && led != nil {
+		// Goroutines are still running and will record their rows when they end:
+		// the ledger stays open for them and closes once the last has returned.
+		ledgerDrained = drained
+	}
+	results, done := board.close()
+	for i := range results {
+		switch {
+		case done[i]:
+		case i >= launched:
+			results[i] = r.unlaunched(subtasks[i])
+			progress.finished(i, results[i])
+		default:
+			results[i] = r.abandoned(i, subtasks[i])
+			progress.finished(i, results[i])
+		}
+	}
 
 	var sum Summary
 	for _, pr := range results {
@@ -857,8 +977,9 @@ func RunWith(ctx context.Context, cfg config.Config, local LocalRunner, subtasks
 		// (a finished loop whose re-pack seat was unreachable), and the count is
 		// on the CONTRACTED deliverable — see Summary.LostToStack above. Both are
 		// infrastructure; only one is lost work, and a consumer that must decide
-		// "did anything get eaten?" (the MCP error flag) cannot answer it from
-		// the merged count.
+		// "did anything get eaten?" (the loud signal of a partial result, and the
+		// MCP error flag when nothing succeeded) cannot answer it from the merged
+		// count.
 		lost := pr.Result.Deferred && BrokenStackDefer(pr.Result.DeferClass)
 		infra := pr.remotesUnreachable || lost
 		// DO NOT add "every remote refused" to this. It is tempting after
@@ -1063,6 +1184,20 @@ type runner struct {
 	decider  func(ctx context.Context, contract core.AgentContract, st Subtask) placetable.Decision
 	snapOnce sync.Once
 	snapshot *placetable.Snapshot
+	// call is this run's whole-call deadline (RunOptions.Deadline), nil = none.
+	// Every method on it is nil-safe, so no site needs a guard.
+	call *callDeadline
+	// pairMu/pairShut fence the PAIR emitter at the end of a run (calldeadline.go:
+	// emitPair, shutPair): a goroutine the call deadline abandoned may report after
+	// RunWith has begun draining the emitter.
+	pairMu   sync.RWMutex
+	pairShut bool
+	// pairLate makes the "a late PAIR frame was dropped" line once per run.
+	pairLate sync.Once
+	// lastJob is, per subtask index, the job id of the attempt most recently started
+	// (attempt mints one per attempt). A subtask the call gives up on is published under
+	// it (abandoned), so the caller can reconcile the late row its goroutine writes.
+	lastJob sync.Map
 }
 
 // decide is the composite box's placement decision for a contract that is
@@ -1212,15 +1347,32 @@ func (r *runner) runOne(ctx context.Context, i int, contract core.AgentContract)
 	// budget the subtask no longer owns (fetchViews is sequential at
 	// fetchNodeViewTimeout per remote and Run derives no deadline of its own).
 	altCtx, cancel := context.WithTimeout(ctx, time.Duration(remaining)*time.Second)
-	alt, fenceNote, ok := r.alternativeNode(altCtx, first, contract, pl)
+	alt, fence, ok := r.alternativeNode(altCtx, first, contract, pl)
 	cancel()
 	if !ok {
 		// A fence is a REASON, not a silence: the caller has to be able to tell
 		// "there was nowhere else to go" from "the only seat left is behind a
-		// measurement that has the cards" (D-94).
-		if fenceNote != "" {
-			first.RetryNote = fenceNote
-		} else if SeatDownDefer(first.Result) {
+		// measurement that has the cards" (D-94). The call's deadline is a second
+		// reason: it ends the fleet read that would have named a node, and an empty
+		// note after it reads as "there was nowhere else to go". The clock decides,
+		// not altCtx, which also ends on the budget the retry is bounded by.
+		//
+		// The order is the point. "No other node is eligible" and "no other node could take
+		// the contract" are claims about nodes, which a read the deadline ended cannot support
+		// (ADR 0065), so once the clock has run out the note leads with the deadline, and when
+		// the local seat is fenced it keeps that fact behind it: it is read from the lease
+		// record and stays true, but the claim about the fleet goes. Next comes the fence on
+		// its own, and a seat-down defer's own note (ADR 0066: the second placement it was
+		// promised found no node) comes last.
+		switch {
+		case r.call.reached():
+			first.RetryNote = "retry skipped: " + callDeadlinePrefix + " before a retry node was chosen"
+			if fence != "" {
+				first.RetryNote += "; " + fence + ", and " + retryFenceWhy
+			}
+		case fence != "":
+			first.RetryNote = "retry skipped: " + fence + " and no other node is eligible; " + retryFenceWhy
+		case SeatDownDefer(first.Result):
 			// The defer promises a second placement on another node: when there is no
 			// other node the caller must be told it was considered and why it did not
 			// happen, not left with a retryable defer and an empty note.
@@ -1267,9 +1419,16 @@ func (r *runner) runOne(ctx context.Context, i int, contract core.AgentContract)
 			w := r.awaitRetrySeat(ctx, alt, why)
 			pl.credit += w.waited
 			if w.canceled {
-				// The caller gave up while the retry stood in line: the seat was not shown to
-				// stay busy, so the note must not claim it did.
-				first.RetryNote = fmt.Sprintf("retry skipped: the caller canceled after the retry waited %s in line for the retry seat on %s, which was running another job (%s)", w.waited.Round(time.Second), alt.view.NodeID, w.why)
+				// The wait was ended from outside while the retry stood in line: the seat was
+				// not shown to stay busy, so the note must not claim it did. Who ended it is
+				// part of the truth: the call's own deadline (ADR 0065) is not the caller
+				// cancelling, and the retry's fate is worded with the deadline's stable
+				// opening, as it is for a retry the deadline cut while it ran.
+				ended := "the caller canceled"
+				if r.call.reached() {
+					ended = callDeadlinePrefix
+				}
+				first.RetryNote = fmt.Sprintf("retry skipped: %s after the retry waited %s in line for the retry seat on %s, which was running another job (%s)", ended, w.waited.Round(time.Second), alt.view.NodeID, w.why)
 				return first
 			}
 			if w.stillBusy {
@@ -1305,8 +1464,9 @@ func (r *runner) runOne(ctx context.Context, i int, contract core.AgentContract)
 
 // retryWait is what awaitRetrySeat found: how long the retry waited in line (time the
 // caller credits to the retry's budget, because the wait is queueing and never work),
-// whether the seat was still busy when the wait stopped, whether the CALLER ended it
-// (a cancel says nothing about the seat), and the seat's own last reading.
+// whether the seat was still busy when the wait stopped, whether the context ended it
+// (the caller cancelled, or the call's own deadline passed, ADR 0065: neither says
+// anything about the seat), and the seat's own last reading.
 type retryWait struct {
 	waited    time.Duration
 	stillBusy bool
@@ -1614,10 +1774,22 @@ type placements struct {
 // subtask made no real attempt at all — otherwise the last attempt's row
 // already stands, exactly as exhausted() leaves it.
 func (r *runner) settle(contract core.AgentContract, pr PlacedResult, pl *placements, since time.Time) PlacedResult {
-	if pl.attempts > 0 {
+	// A capacity wait (or a lease wait) that ended because the CALL did is the call
+	// deadline, not "no node had room" (ADR 0065). It quotes nothing of the wait's own
+	// text: the placement narration carries that history.
+	cutBefore := pr.deadlineCut
+	pr = r.cutOutcome(pr, false)
+	cutHere := pr.deadlineCut && !cutBefore
+	if pl.attempts > 0 && !cutHere {
 		return pr
 	}
-	if pr.JobID == "" {
+	// A wait the deadline ended after refused attempts (ADR 0065 decision 2) is recorded
+	// here like any other cut: no attempt produced this outcome, so no attempt's row can
+	// say it. The row gets a job id of its own — capacityDefer copies the id of the last
+	// REFUSED dispatch, whose row already says "dispatch ... 503" for a job no node held,
+	// and a second row under it would double-count one id — and the caller is given that
+	// id, so the result, the ledger row and the corpus row are one thing.
+	if pr.JobID == "" || (cutHere && pl.attempts > 0) {
 		pr.JobID = mintJobID()
 	}
 	pr.wallMs = time.Since(since).Milliseconds()
@@ -1859,9 +2031,12 @@ func (r *runner) placeAndRun(ctx context.Context, i int, contract core.AgentCont
 	refusals := []string{refusalLine(pr)}
 	r.noteRefusal(pl, pr)
 	for {
+		// What the iteration spends after the last attempt returned (selection, mostly) is
+		// the span a closing row for a chain the call deadline ended would measure.
+		iterStart := time.Now()
 		remaining := pl.remaining(start, budget)
 		if remaining < minRetrySec {
-			return exhausted(pr, refusals, budgetSpent(remaining, budget, len(refusals)))
+			return r.exhaustedSettled(contract, pr, refusals, budgetSpent(remaining, budget, len(refusals)), iterStart)
 		}
 		// Selection BLOCKS (fetchViews). Bound it by what is actually left, so
 		// the probe cannot outlive the budget it is probing on behalf of.
@@ -1885,7 +2060,7 @@ func (r *runner) placeAndRun(ctx context.Context, i int, contract core.AgentCont
 			if pl.capacityRefusal || reserved {
 				return r.awaitCapacity(ctx, i, contract, start, budget, pl, pr, refusals, why)
 			}
-			return exhausted(pr, refusals, why)
+			return r.exhaustedSettled(contract, pr, refusals, why, iterStart)
 		}
 		// RE-MEASURE. `remaining` above was true when taken and the probe may
 		// have consumed most of it; committing the stale number to the wire is
@@ -1894,7 +2069,7 @@ func (r *runner) placeAndRun(ctx context.Context, i int, contract core.AgentCont
 		// abandoned here costs neither a slot in the bound nor an exclusion.
 		remaining = pl.remaining(start, budget)
 		if remaining < minRetrySec {
-			return exhausted(pr, refusals, budgetSpent(remaining, budget, len(refusals)))
+			return r.exhaustedSettled(contract, pr, refusals, budgetSpent(remaining, budget, len(refusals)), iterStart)
 		}
 		pl.tried[next.base] = true
 		if next.base != "" {
@@ -1943,10 +2118,10 @@ func (r *runner) placeAndRun(ctx context.Context, i int, contract core.AgentCont
 		pl.attempts++
 		pr.Replacements = len(refusals)
 		if !r.isReplaceable(pr) {
-			// Some node TOOK it. Whether its answer was any good is the four
-			// outcome buckets' business, not this loop's.
-			pr.ReplacementNote = replacementNote(refusals, true)
-			return pr
+			// Some node TOOK it (or the call's deadline ended the chain before one was asked:
+			// annotateLanding). Whether its answer was any good is the four outcome buckets'
+			// business, not this loop's.
+			return annotateLanding(pr, refusals)
 		}
 		refusals = append(refusals, refusalLine(pr))
 		r.noteRefusal(pl, pr)
@@ -2142,7 +2317,7 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 		if seed.waitCapacity {
 			return r.settle(contract, r.reservedDefer(localView, LocalLease(r.cfg.GPULockPath, r.cfg.StateDir), 0, seed.pendingReason), pl, waitStart)
 		}
-		return exhausted(seed, refusals, why)
+		return r.exhaustedSettled(contract, seed, refusals, why, waitStart)
 	}
 	deadline := waitStart.Add(wait)
 	spanStart := waitStart
@@ -2212,7 +2387,7 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 	// never a `placement refused` failure naming a refusal nobody made.
 	budgetGone := func(remaining int) PlacedResult {
 		if len(refusals) > 0 {
-			return exhausted(seed, refusals, budgetSpent(remaining, budget, len(refusals)))
+			return r.exhaustedSettled(contract, seed, refusals, budgetSpent(remaining, budget, len(refusals)), waitStart)
 		}
 		return r.settle(contract, r.waitBudgetDefer(localView, seed, idle, budgetSpent(remaining, budget, pl.attempts), pl.waitNote), pl, waitStart)
 	}
@@ -2291,13 +2466,15 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 			tickCtx, cancelTick := context.WithTimeout(ctx, probeTickBound(deadline))
 			views, bases, _, failed := r.fetchViewsDetailed(tickCtx)
 			cancelTick()
-			if !time.Now().Before(deadline) {
-				// The tick's probe is bounded by the wait's own deadline, so a probe
-				// still in flight when the wait ended may have failed because the WAIT
-				// ended, not because its node is down. For a node that answered
-				// earlier in this wait that is no evidence at all: keep what the
-				// previous tick learned (cooling down, held out) for the defer's
-				// reason. A node that never answered is still named: nobody could ask it.
+			if ctx.Err() != nil || !time.Now().Before(deadline) {
+				// The tick's probe is bounded by the wait's own deadline, and by the
+				// context the wait runs under (the call's deadline, ADR 0065, or the
+				// caller giving up), so a probe still in flight when either ended may
+				// have failed because the WAIT or the CALL ended, not because its node
+				// is down. For a node that answered earlier in this wait that is no
+				// evidence at all: keep what the previous tick learned (cooling down,
+				// held out) for the defer's reason. A node that never answered is still
+				// named: nobody could ask it.
 				for base, why := range failed {
 					if answered[base] {
 						continue
@@ -2460,7 +2637,7 @@ func (r *runner) runDecided(ctx context.Context, i int, contract core.AgentContr
 	remaining := pl.remaining(start, budget)
 	if remaining < minRetrySec {
 		if len(refusals) > 0 {
-			return exhausted(seed, refusals, budgetSpent(remaining, budget, len(refusals)))
+			return r.exhaustedSettled(contract, seed, refusals, budgetSpent(remaining, budget, len(refusals)), waitStart)
 		}
 		local := r.localView()
 		reason := fmt.Sprintf("%s: %s — the decided seat %s was not started", budgetSpent(remaining, budget, pl.attempts), note, dec.Seat)
@@ -2520,10 +2697,35 @@ func (r *runner) decidedDefer(local NodeView, dec placetable.Decision, reason st
 	}
 }
 
-// landedAfterWait annotates a result some node TOOK after a capacity wait.
+// landedAfterWait annotates a result some node TOOK after a capacity wait (or that the call's
+// deadline cut before one was asked: annotateLanding).
 func (r *runner) landedAfterWait(pr PlacedResult, idle time.Duration, refusals []string) PlacedResult {
 	pr.waited = true
 	pr.CapacityWaitSec = idle.Seconds()
+	return annotateLanding(pr, refusals)
+}
+
+// annotateLanding files the refusal history on the attempt that ENDED a chain of refusals without
+// being refused itself. Usually a node took it, and the subtask was re-placed once per refusal.
+// The exception is an attempt the call's deadline cut before any node was asked (an Unplaced cut,
+// ADR 0065: attempt starts nothing once the deadline has passed): nothing took it, so "re-placed
+// after N refusals" would claim a placement that never happened, and Summary.Replaced would count
+// it. It is filed the way exhausted() files a chain nobody took: one re-placement fewer than
+// refusals (the placement the deadline ended is not one), the note worded for a subtask nobody
+// ran, and no note when nothing was re-placed (a single refusal with nowhere to go).
+//
+// Only the deadline's cut is read this way. A subtask the local seat's own decision deferred was
+// placed there (the seat was asked), and one the deadline cut while a node was running it was
+// taken: both keep the wording and the count they had.
+func annotateLanding(pr PlacedResult, refusals []string) PlacedResult {
+	if pr.deadlineCut && pr.Unplaced {
+		pr.Replacements = max(len(refusals)-1, 0)
+		pr.ReplacementNote = ""
+		if pr.Replacements > 0 {
+			pr.ReplacementNote = replacementNote(refusals, false)
+		}
+		return pr
+	}
 	pr.Replacements = len(refusals)
 	if len(refusals) > 0 {
 		pr.ReplacementNote = replacementNote(refusals, true)
@@ -2794,6 +2996,11 @@ func (r *runner) replacementNode(ctx context.Context, contract core.AgentContrac
 	// explicit remote route must not silently fall local, which is the same
 	// posture the "no eligible remote" defer already holds.
 	head := "no further eligible remote was available"
+	if r.call.reached() {
+		// The read above may be the very thing the call's deadline ended, and what a cut
+		// read held is not evidence about the nodes it never reached (ADR 0065).
+		head = "the call's deadline had passed, so the fleet read may not have named every eligible remote"
+	}
 	if len(busy) > 0 {
 		// A node the filters held out is BUSY, not broken: INV-4 sends the subtask to
 		// the capacity wait, which re-reads every one of them each tick - whatever
@@ -3082,6 +3289,39 @@ func exhausted(last PlacedResult, refusals []string, why string) PlacedResult {
 	return last
 }
 
+// exhaustedSettled is exhausted() with the call deadline's answer applied (ADR 0065 decision
+// 2). Every outcome is cut at the moment it is PRODUCED, and a refusal chain is produced here,
+// outside finish and settle. One closed after the call's deadline has passed is not evidence
+// about the nodes: the fleet read that would have found one may be the very thing the deadline
+// ended, so "no further eligible remote was available" would accuse nodes that were never
+// asked, and a failure flags a one-subtask call as an error when it only ran out of time.
+//
+// Until the deadline has passed it is exactly exhausted(): the last refused attempt's row
+// stands as the record. After it the outcome is the call-deadline defer with the chain quoted
+// behind the marker, recorded here under a job id of its own for the reason settle gives one:
+// the id of the last refused attempt belongs to its row, which says "dispatch ... 404" for a
+// job no node held, and a second row under it would double-count one id.
+//
+// Nothing ran it, so it is cut as an outcome that was never placed. What the refused attempt
+// left on the result says where THAT attempt was (the local seat's capacity defer, a job a
+// node acked and then took back, a lease's sentinel), not where this subtask is, and must not
+// steer the cut's wording ("was still running on the local seat") or its node and seat; the
+// attempt's own intent was closed by its finish. since is when the span the closing row
+// measures began.
+func (r *runner) exhaustedSettled(contract core.AgentContract, last PlacedResult, refusals []string, why string, since time.Time) PlacedResult {
+	pr := exhausted(last, refusals, why)
+	if !r.call.reached() {
+		return pr
+	}
+	pr.ranLocal, pr.intentRecorded, pr.orphanable, pr.waitCapacity = false, false, false, false
+	pr.withdrawn, pr.nodeNeverRan, pr.nodeTerminal = false, "", false
+	pr = r.cutOutcome(pr, true)
+	pr.JobID = mintJobID()
+	pr.wallMs = time.Since(since).Milliseconds()
+	r.record(contract, pr)
+	return pr
+}
+
 // minRetrySec is the least timeout_sec budget a retry is worth starting with: a
 // cold seat needs seconds to load and a contract that cannot finish in this
 // would only add a budget defer on top of the verified failure.
@@ -3247,10 +3487,18 @@ func admissionCredit(pr PlacedResult) time.Duration {
 	return time.Duration(secs * float64(time.Second))
 }
 
+// retryFenceWhy is why a retry is not placed on a fenced local seat: dialling it would hold the
+// retry at the model-affinity cordon for agent_lease_wait_sec, and it would end as a capacity
+// defer anyway (D-94). It is a fact about the seat, read from the lease record, so it stays true
+// when the call's deadline ended the read of the fleet.
+const retryFenceWhy = "a retry placed there would wait out agent_lease_wait_sec at the affinity cordon and defer as capacity anyway"
+
 // alternativeNode picks the node a retry runs on: the best eligible remote
 // when the first attempt ran locally (probing the fleet now if this run has
 // not yet), the local seat when it ran remotely. ok=false when no different
-// node can take the contract.
+// node can take the contract; the string is then the clause naming the fence
+// ("the local seat is fenced (...)") when the local seat is fenced and was
+// left out for it, "" otherwise. runOne words the note around it.
 //
 // Note the asymmetry and its cost: recovering a wrong REMOTE answer puts the
 // work back on the local box the harness exists to keep free — so a placement
@@ -3284,10 +3532,7 @@ func (r *runner) alternativeNode(ctx context.Context, first PlacedResult, contra
 					reason: "retry on " + chosen.NodeID + " after " + nodeLabel(first) + " " + why +
 						" — the local seat is fenced: " + fence}, "", true
 			}
-			return placement{}, fmt.Sprintf(
-				"retry skipped: the local seat is fenced (%s — %s) and no other node is eligible; "+
-					"a retry placed there would wait out agent_lease_wait_sec at the affinity cordon and defer as capacity anyway",
-				fence, HolderLine(lease)), false
+			return placement{}, fmt.Sprintf("the local seat is fenced (%s — %s)", fence, HolderLine(lease)), false
 		}
 		// A seat-down defer is not held for a busy retry seat (runOne, ADR 0066 decision
 		// 3): the node's own queue is the line, and its 503 is re-placed at once. That is
@@ -3996,6 +4241,7 @@ func (r *runner) attempt(ctx context.Context, i int, contract core.AgentContract
 	// placement, so even a local run correlates its telemetry line — and a
 	// retry never reuses the id a node may still hold.
 	jobID := mintJobID()
+	r.lastJob.Store(i, jobID)
 
 	finish := func(pr PlacedResult) PlacedResult {
 		// A finished answer whose structured re-pack failed is re-packed here,
@@ -4005,6 +4251,9 @@ func (r *runner) attempt(ctx context.Context, i int, contract core.AgentContract
 		pr.JobID = jobID
 		pr = r.rescueSchemaMiss(ctx, contract, pr, start)
 		pr.wallMs = time.Since(start).Milliseconds()
+		// An outcome that was not an answer and arrived once the call deadline had
+		// passed is published — and recorded — as the call deadline (ADR 0065).
+		pr = r.cutByDeadline(pr)
 		// Intent ledger close-out (Option A, intent.go): an acked job whose
 		// terminal answer THIS process observed is closed; the orphanable
 		// exits (cancel / owned-deadline / queued give-up) stay open for the
@@ -4022,6 +4271,13 @@ func (r *runner) attempt(ctx context.Context, i int, contract core.AgentContract
 		r.record(contract, pr)
 		r.pairTerminal(jobID, &pr)
 		return pr
+	}
+
+	// A call whose deadline has passed starts nothing new (ADR 0065): no probe, no
+	// dispatch, no local run. cutByDeadline (in finish) publishes it as the call
+	// deadline.
+	if r.call.reached() {
+		return finish(PlacedResult{Err: "canceled: the call's deadline passed before this placement began"})
 	}
 
 	// Defensive re-validate: the surfaces run PrepareContract, but Run is an
@@ -4085,6 +4341,12 @@ func (r *runner) attempt(ctx context.Context, i int, contract core.AgentContract
 			// unrelated one here — the seed the ranking recorded and the id
 			// the published result/ledger/corpus row carries must agree.
 			jobID = d.jobID
+			// The id the runner remembers for this subtask (lastJob) is the one the
+			// abandon publishes when this goroutine never returns. It was stored above
+			// with the id minted for this attempt, which the deal's has just replaced:
+			// the attempt's seat, node and rows all carry the deal's, so that is the id
+			// the caller must be given (ADR 0065, decision 3).
+			r.lastJob.Store(i, jobID)
 		}
 		switch {
 		case d.capacityWait:
@@ -4555,14 +4817,14 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 	saw404 := false
 	// lastState is the last state the node reported for the job ("" = it never
 	// answered): a give-up asks the node to withdraw a job only while it can still
-	// be unstarted. withdrawTried keeps the queue-deadline arm to one attempt.
+	// be unstarted. ask is the one withdraw this loop's queue-deadline arm may ask
+	// for, and what the node answered when it was not a confirmation: the arm asks
+	// once, and a give-up that follows a `running` answer — a cancel or a deadline
+	// that lands before the next poll has answered, or a node that then says
+	// `accepted` again — reads it instead of asking again, and can still say what
+	// the node was told and what it said.
 	lastState := ""
-	withdrawTried := false
-	// withdrawWhy is what the node answered the one withdraw the queue arm asked for,
-	// when it was not a confirmation: kept so the give-up that follows an answer the
-	// node then contradicted (`running`, and then `accepted` again) can still say what
-	// it was told.
-	withdrawWhy := ""
+	var ask withdrawAsk
 	// pollFails bounds the failure logging (both arms below fired once PER
 	// POLL) and summarizes on the way out, whichever exit is taken.
 	pollFails := newPollFailLog(jobID, base)
@@ -4573,7 +4835,7 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 			// The node may still start it — recovery's case — unless it confirms it
 			// took the job back (ADR 0064). A withdraw that was asked and not confirmed
 			// says why on the row.
-			if note := r.giveUp(ctx, base, jobID, lastState, &pr); note != "" {
+			if note := r.giveUp(ctx, base, jobID, lastState, ask, &pr); note != "" {
 				pr.Err += "; " + note
 			}
 			return pr
@@ -4589,7 +4851,7 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 				// since, and nothing observed it end: the intent must not claim so. Ask the
 				// node to take the job back like every other give-up — a confirmation
 				// closes the intent, anything else leaves it for the recovery pass (ADR 0064).
-				if note := r.giveUp(ctx, base, jobID, lastState, &pr); note != "" {
+				if note := r.giveUp(ctx, base, jobID, lastState, ask, &pr); note != "" {
 					pr.Err += "; " + note
 				}
 				return pr
@@ -4632,7 +4894,7 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 			// still holds the job as `accepted` and confirms it takes it back: a job
 			// that never started must not be run later for nobody (ADR 0064), and the
 			// reason then says what became of it.
-			note := r.giveUp(ctx, base, jobID, lastState, &pr)
+			note := r.giveUp(ctx, base, jobID, lastState, ask, &pr)
 			if pr.withdrawn {
 				reason += "; the job never started and was withdrawn from the node"
 			} else if note != "" {
@@ -4745,6 +5007,7 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 			pollFails.note(fmt.Errorf("poll: 404 — the node denies ever holding job %s", jobID))
 			if redispatches >= maxRedispatches {
 				pr.Err = fmt.Sprintf("node lost job %s %d times (poll 404 after re-dispatch)", jobID, redispatches+1)
+				pr.nodeTerminal = true
 				return pr
 			}
 			redispatches++
@@ -4771,6 +5034,7 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 			var wire core.AgentWireResult
 			if uerr := json.Unmarshal(data, &wire); uerr != nil {
 				pr.Err = "job done but data is not an AgentWireResult: " + uerr.Error()
+				pr.nodeTerminal = true
 				return pr
 			}
 			pr.Result = wire
@@ -4783,6 +5047,7 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 			return pr
 		case status == http.StatusOK && state == "error":
 			pr.Err = "remote job error: " + jobErr
+			pr.nodeTerminal = true
 			if neverRan(jobErr) {
 				// The node took this job out of its backlog without running it: reaped
 				// because nobody polled it within the poll lease (this process was away
@@ -4874,9 +5139,9 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 					// for. One try, and one only — a `running` answer is final for
 					// this job.
 					verdict := withdrawUnconfirmed
-					if !withdrawTried {
-						withdrawTried = true
-						verdict, withdrawWhy = r.withdraw(ctx, base, jobID)
+					if !ask.tried {
+						ask.tried = true
+						verdict, ask.why = r.withdraw(ctx, base, jobID)
 					}
 					if verdict != withdrawStarted {
 						// The deadline is the ETA-derived budget above (ADR 0063), and its refresh note
@@ -4896,7 +5161,7 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 							// row says what the node answered instead of taking it back: an old
 							// node with no route and an upgraded node that refused would
 							// otherwise read alike.
-							if note := notConfirmed(withdrawWhy); note != "" {
+							if note := notConfirmed(ask.why); note != "" {
 								pr.Err += "; " + note
 							}
 							pr.orphanable = true
@@ -4905,7 +5170,9 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 					}
 					// `running`: the job left the backlog between the last poll and the
 					// withdraw — a slot took it. It is not abandoned; keep polling and
-					// let liveness govern from here.
+					// let liveness govern from here. The node's answer stays in ask: a
+					// give-up that comes before the next poll reads it, and never asks
+					// again.
 				}
 			}
 			// `running`: the span stays closed by the reset above. Anything
@@ -4935,7 +5202,7 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 			// A give-up like the one at the top of the loop, and it used to skip the
 			// orphanable mark: a cancel that landed while the delegator slept closed
 			// its intent as "terminal observed" for a job the node may still run.
-			if note := r.giveUp(ctx, base, jobID, lastState, &pr); note != "" {
+			if note := r.giveUp(ctx, base, jobID, lastState, ask, &pr); note != "" {
 				pr.Err += "; " + note
 			}
 			return pr

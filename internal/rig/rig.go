@@ -39,6 +39,7 @@ type Axis string
 
 const (
 	AxisSeatInfra        Axis = "seat-infra"        // defer_class infrastructure: the seat/engine, not the loop
+	AxisCallDeadline     Axis = "call-deadline"     // the whole call ran out of time before this subtask finished (ADR 0065): not evidence about the seat
 	AxisTimeout          Axis = "timeout"           // the contract's wall ran out
 	AxisBudget           Axis = "budget"            // the step budget ran out
 	AxisReasoningStarved Axis = "reasoning-starved" // stop_reason reasoning_starved / empty: the completion budget went to the think block, or the seat closed with nothing (0.115.8)
@@ -52,7 +53,7 @@ const (
 )
 
 // Precedence is the evaluation order, published so the report can print it.
-var Precedence = []Axis{AxisSeatInfra, AxisTimeout, AxisReasoningStarved, AxisBudget, AxisAbstention, AxisSchemaMiss, AxisAnchorMiss, AxisLoop, AxisLongObservation, AxisToolMisuse, AxisUnclassified}
+var Precedence = []Axis{AxisSeatInfra, AxisCallDeadline, AxisTimeout, AxisReasoningStarved, AxisBudget, AxisAbstention, AxisSchemaMiss, AxisAnchorMiss, AxisLoop, AxisLongObservation, AxisToolMisuse, AxisUnclassified}
 
 // SubTwoStepGrounded is the sub-axis (of schema-miss and anchor-miss) the P2
 // corpus read found: the contract carried context docs and the run stopped
@@ -124,6 +125,13 @@ var (
 //     the box or the contract, never the loop); ALSO no defer_class at all
 //     and the delegator's own error is a placement failure (a node's 503
 //     shed, a refused dispatch, a dial failure) — no node produced a result.
+//     1b. call-deadline: the reason opens with core.CallDeadlineReasonPrefix — the
+//     whole-call deadline (ADR 0065) cut the subtask, so it says nothing about the
+//     seat's speed. Ahead of timeout because the wall-timeout pattern matches the bare
+//     word "deadline"; behind seat-infra, which reads the row's CLASS: a cut is always
+//     class budget (the run's own verdict rides in the reason, never in the class), so a
+//     cut reaches this axis whatever the run reported, and only a row that carries an
+//     infrastructure, config or contract class of its own stays the seat's.
 //  2. timeout: the reason/error says wall timeout / deadline, or
 //     defer_class == "budget" with stop_reason "error" and no step-budget text.
 //     2b. reasoning-starved: stop_reason "reasoning_starved" or "empty", or the
@@ -169,6 +177,10 @@ func Classify(r Row) Verdict {
 			v.Axis, v.Evidence = AxisSeatInfra, "dispatch: "+clip(r.Error, 120)
 			return v
 		}
+	}
+	if strings.HasPrefix(reason, core.CallDeadlineReasonPrefix) {
+		v.Axis, v.Evidence = AxisCallDeadline, clip(reason, 120)
+		return v
 	}
 	if wallTimeoutRe.MatchString(reason) || (r.DeferClass == core.DeferClassCapacity && wallTimeoutRe.MatchString(reason)) {
 		v.Axis, v.Evidence = AxisTimeout, clip(reason, 120)
@@ -284,6 +296,7 @@ type Remedy struct {
 // never a proposal the author did not already hand-map.
 var Remedies = map[Axis]Remedy{
 	AxisSeatInfra:       {Applies: "none", Rationale: "the seat or the box answered wrong (HTTP errors, engine crashes, contention): fix the serving stack; no rule shapes this"},
+	AxisCallDeadline:    {Applies: "none", Rationale: "the whole call ran out of time before this subtask finished (agent_call_deadline_sec, ADR 0065): not evidence about the seat, and no rule shapes it — split the call into smaller ones or raise the deadline"},
 	AxisTimeout:         {Applies: "contract", Key: "timeout_sec", Value: "raise toward the cap only when the row's steps show progress; otherwise the run was stuck, not slow", Rationale: "the wall ran out — a contract-side budget, not a rule"},
 	AxisBudget:          {Applies: "contract", Key: "max_steps", Value: "the cap is 12; a run at the cap with no loop axis is a task too large for one contract — split it", Rationale: "the step budget ran out"},
 	AxisAbstention:      {Applies: "contract", Key: "goal", Value: "name the context file and tell the seat to read it first; anchor acceptance on page-only tokens", Rationale: "the seat declined — usually a goal that reads as unanswerable"},

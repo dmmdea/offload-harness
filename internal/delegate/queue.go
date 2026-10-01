@@ -62,6 +62,13 @@ func runQueued(ctx context.Context, cfg config.Config, subtasks []core.AgentCont
 		queuePoll(ctx, cfg, holder, subtasks[i], &results[i], rescue)
 	}
 
+	return results, queueSummary(results), nil
+}
+
+// queueSummary counts the queue lane's outcomes into the four buckets. runQueued builds
+// it once the polls end; the call deadline (calldeadline.go) builds it again after its
+// final look at the holder has moved some outcomes.
+func queueSummary(results []PlacedResult) Summary {
 	var sum Summary
 	for i := range results {
 		pr := results[i]
@@ -76,7 +83,7 @@ func runQueued(ctx context.Context, cfg config.Config, subtasks []core.AgentCont
 			sum.Succeeded++
 		}
 	}
-	return results, sum, nil
+	return sum
 }
 
 func queueSubmit(ctx context.Context, cfg config.Config, holder, jobID, taskType string, payload json.RawMessage, timeoutSec int) error {

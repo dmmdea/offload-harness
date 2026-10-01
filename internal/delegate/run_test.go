@@ -116,6 +116,11 @@ type fakeNode struct {
 	// remote sequentially, so a slow health handler is time the delegator
 	// spends between measuring its remaining budget and using it.
 	healthDelay time.Duration
+	// healthDelayFn, when set, answers the delay per health request and wins over
+	// healthDelay: a node whose health turns slow only AFTER something happened (its own
+	// dispatch was refused, another seat started). The fixture reads an atomic, so the
+	// test needs no write to a field the handler goroutines read.
+	healthDelayFn func() time.Duration
 	// killOnDispatch models a node the delegator can never REACH: the dispatch
 	// connection is hijacked and dropped with no HTTP answer at all, so both
 	// dispatch attempts end as transport errors. Distinct from a node that is
@@ -211,9 +216,13 @@ func (f *fakeNode) server() *httptest.Server {
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
-		if f.healthDelay > 0 {
+		delay := f.healthDelay
+		if f.healthDelayFn != nil {
+			delay = f.healthDelayFn()
+		}
+		if delay > 0 {
 			select {
-			case <-time.After(f.healthDelay):
+			case <-time.After(delay):
 			case <-r.Context().Done():
 				return
 			}
@@ -1319,15 +1328,43 @@ func TestRunRouteLocalNeverTouchesTheNetwork(t *testing.T) {
 	}
 }
 
-// captureLog redirects the standard logger into a buffer for one test.
-func captureLog(t *testing.T) *bytes.Buffer {
+// captureLog redirects the standard logger into a buffer for one test. The
+// buffer takes a lock on every access: the logger serializes its own writes, but
+// a test reads what was logged while a run's goroutines may still be logging (a
+// subtask the call deadline abandoned keeps unwinding after RunWith returns), and
+// a bare bytes.Buffer read beside that write is a data race.
+func captureLog(t *testing.T) *lockedBuffer {
 	t.Helper()
-	var buf bytes.Buffer
+	buf := &lockedBuffer{}
 	oldOut, oldFlags := log.Writer(), log.Flags()
-	log.SetOutput(&buf)
+	log.SetOutput(buf)
 	log.SetFlags(0)
 	t.Cleanup(func() { log.SetOutput(oldOut); log.SetFlags(oldFlags) })
-	return &buf
+	return buf
+}
+
+// lockedBuffer is captureLog's sink: a bytes.Buffer behind a mutex.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+func (b *lockedBuffer) Len() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Len()
 }
 
 // TestRunTelemetryFailureIsLoudOnceAndNeverFailsTheRun (H-4): the delegation-log

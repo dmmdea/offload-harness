@@ -251,3 +251,13 @@ progress), ADR 0032 (a peer-held seat is waited for), ADR 0063 (placement holds:
 seat, which a seat-down re-placement does not), decision D-118 (the coherence
 defer this follows), register rows C-72 (seat-down outcome), C-66 (liveness walls
 charge queueing to prefill).
+
+ADR 0065 (the whole-call deadline). A seat-down re-placement, the credit it carries and
+the delegator's rescue that precedes it are on the call's clock, not only the
+contract's: the credit lengthens the retry's own budget and never the call's, so a
+re-placement still running, or waiting for capacity, at the deadline is cut like any
+other attempt, with the cut's reason and a row of its own. The seat-down defer the
+first attempt produced in time stands as the published result and carries the cut in
+its `retry_note` (a retry the deadline cut counts for nothing against the per-page
+cap); one produced after the deadline is the deadline's budget defer, is not
+re-placed, and a rescue still re-packing its finished answer is ended by the deadline.

@@ -73,7 +73,7 @@ func (r *runner) pairInflight(pr *PlacedResult, jobID, node string, aliases []st
 		pr.pairStarted = now
 		started = now
 	}
-	r.pair.Emit(pairworkloads.Event{
+	r.emitPair(pairworkloads.Event{
 		JobID:       jobID,
 		Model:       pr.pairModel,
 		Engine:      pr.pairEngine,
@@ -124,7 +124,7 @@ func (r *runner) pairTerminal(jobID string, pr *PlacedResult) {
 			node, aliases = aliases[0], aliases[1:]
 		}
 	}
-	r.pair.Emit(pairworkloads.Event{
+	r.emitPair(pairworkloads.Event{
 		JobID:       jobID,
 		Model:       pr.pairModel,
 		Engine:      pr.pairEngine,

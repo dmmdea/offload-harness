@@ -188,7 +188,9 @@ pass rate first, step count second.
 **The rigger, first slice (`local-offload rig`, MCP `agent_rig`; `internal/rig`, ADR 0036 P3a, 0.113.26).** A
 deterministic classifier over the delegation-log corpus: every failed or deferred row of a seat lands on exactly one
 failure axis, evaluated in a published precedence order and stopping at the first hit — `seat-infra` (a defer class of
-infrastructure/config/contract, or a placement failure with no defer class) → `timeout` → `budget` → `abstention` (an
+infrastructure/config/contract, or a placement failure with no defer class) → `call-deadline` (a reason that opens
+`call deadline reached`: the whole-call deadline of ADR 0065 cut the subtask, so it says nothing about the seat's speed) →
+`timeout` → `budget` → `abstention` (an
 "output failed schema" reason is `schema-miss / invalid`) → `schema-miss` (min_items/nonempty; sub-axes
 `two-step-grounded` = context docs and ≤ 2 steps, `invalid`) → `anchor-miss` (contains/not_contains/regex; same sub-axis) →
 `loop` → `long-observation` → `tool-misuse` (the last three on trace-bearing rows only) → `unclassified`. The report gives
@@ -553,13 +555,18 @@ outside this change. The seam is one field, `RunOptions.Rescue`, if any of them 
 The two surfaces report that verdict differently, on purpose, and they agree on the case that
 matters. **The CLI exits non-zero on `summary.infrastructure > 0`** — an exit code sits beside the
 printed results, so it can say "look at this" without denying the results. **The MCP tool sets
-`isError` on `summary.failed > 0` or `summary.lost_to_stack > 0`**: a subtask whose contracted
-output never arrived is loud whether the stack or a transport error ate it, and a sibling
-succeeding does not un-lose it. The one deliberate difference is the fleet-down run that still delivered every
-subtask (`infrastructure > 0`, `lost_to_stack == 0`): non-zero on the CLI, a quiet success on
-MCP, because `isError` means *the call failed* and flagging a run whose subtasks all completed,
-validated and passed acceptance is how a model comes to discard or redo correct work. The body is
-identical either way, so the summary and every per-subtask reason are always there to read.
+`isError` when nothing succeeded and `summary.failed > 0`, `summary.lost_to_stack > 0` or
+`summary.skipped > 0`**: a call that delivered no usable result is loud whether the stack or a
+transport error ate it. A call that delivered **at least one** usable result is a *partial*
+result and is NOT flagged (C-75, [ADR 0065](../architecture/decisions/0065-the-whole-call-has-a-deadline-below-the-clients-abort.md)):
+`isError` means *the call failed*, and the MCP client answers an error-flagged body by keeping only
+its head and tail, which cut the surviving digests out of every partial research reply. The lost
+subtask stays loud in the body — `summary.failed` / `summary.lost_to_stack`, its own `failed` /
+`defer_class` / `reason` — instead of in the flag. The same reasoning is why the fleet-down run
+that still delivered every subtask (`infrastructure > 0`, `lost_to_stack == 0`) is non-zero on the
+CLI and a quiet success on MCP: flagging a run whose subtasks all completed, validated and passed
+acceptance is how a model comes to discard or redo correct work. The body is identical either way,
+so the summary and every per-subtask reason are always there to read.
 
 The summary also carries `corpus_rows_lost` / `ledger_rows_lost` and, whenever one is non-zero,
 its `corpus_rows_attempted` / `ledger_rows_attempted` denominator (all `omitempty`): telemetry

@@ -628,8 +628,10 @@ excluded: nobody has to touch a box to fix it.
 The subset of those defers that LOST a subtask — it **delivered no usable result: the contracted
 output never arrived** (a broken stack, not the model abstaining) — is published separately as
 `summary.lost_to_stack`, omitted when zero. That is the count the MCP tool sets `isError` on,
-alongside `summary.failed` — a fleet-down run that still delivered every subtask stays a quiet
-success there, while the CLI's exit code still reports it. Read it as "the contracted output was
+alongside `summary.failed`, **when nothing succeeded** (C-75, ADR 0065): a call that delivered at
+least one usable result is a successful call whose body says what was lost, so the MCP client does
+not cut the digests out of an error-flagged body. A fleet-down run that still delivered every
+subtask stays a quiet success there, while the CLI's exit code still reports it. Read it as "the contracted output was
 lost", not as "the result is blank": the `structured re-pack unreachable` shape counts here with
 `output` **populated** and `structured` absent, because a contract carrying an `output_schema`
 asked for a mechanically checked deliverable and unchecked prose is not one.
@@ -827,6 +829,9 @@ placement refused: <n> node(s) refused this subtask and none of them ran it
 
 Never a defer — no seat ever saw the contract, so there is no report to author on a node's behalf,
 and the only class that would fit (`budget`) would teach every consumer that a seat needed more time.
+The one exception is a chain the delegator closes after the whole-call deadline has passed: that call ran
+out of time, and the subtask is published as the deadline's budget defer with this text quoted behind
+the `call deadline reached` marker ([ADR 0065](architecture/decisions/0065-the-whole-call-has-a-deadline-below-the-clients-abort.md)).
 The three sentences are deliberately distinct: `placement refused` = nobody took it; `queue deadline`
 = one node accepted it and never started it; `poll deadline` = one node started it and never finished.
 
@@ -930,20 +935,25 @@ shows it for the terminal TTL. A repeat of the request answers `200` again, and 
 a job the node already took back itself (reaped, or marked never-started at shutdown): nothing ran, which
 is the fact the answer reports.
 
-The delegator calls it once, best-effort (5 s, on a context the caller's cancel does not touch), where
-it gives a job up:
+The delegator calls it once, best-effort (5 s, on a context the caller's cancel does not touch; once the
+whole-call deadline of [ADR 0065](architecture/decisions/0065-the-whole-call-has-a-deadline-below-the-clients-abort.md)
+has passed, no more than three quarters of its unwind allowance), where it gives a job up:
 
 | Where | A confirmed withdrawal | `409 running` | Anything else (404, 405, 401, 5xx, dropped, timeout) |
 |---|---|---|---|
 | queue deadline | the result is re-placed on another node, the queued wait is credited back to the contract's budget, the intent closes `withdrawn`, and the failure text ends `; the job was withdrawn from the node, which will never run it` | the job left the backlog just before: keep polling it, do not ask again | today's `queue deadline` failure, not re-placed, the intent left open for recovery, and the failure text ends `; withdraw not confirmed: <why>` |
-| caller cancel | the intent closes `withdrawn` | the intent stays open for recovery; the failure text `canceled: ...` ends `; withdraw not confirmed: <why>` | as the `409` cell |
+| caller cancel, or the whole-call deadline (ADR 0065) | the intent closes `withdrawn` | the intent stays open for recovery; the failure text `canceled: ...` ends `; withdraw not confirmed: <why>` | as the `409` cell |
 | owned poll deadline | the intent closes `withdrawn`; the defer reason adds `; the job never started and was withdrawn from the node` | the intent stays open; the defer reason ends `; withdraw not confirmed: <why>` | as the `409` cell |
 | unowned poll deadline (the node acked the job and no poll ever said it held it) | the intent closes `withdrawn`; the failure is unchanged | the intent stays open; the failure text ends `; withdraw not confirmed: <why>` | as the `409` cell |
 | a poll answered `401` | not asked: the request would carry the token that was just refused | not asked | the intent stays open for recovery, so a process holding the right token can still collect the job |
 
 A job the delegator last saw `running` is not asked at all: it has started, and the request could only
-be refused. A node that predates the route answers `405` (its job route is GET-only) or `404`, which is
-"no withdraw here": every give-up then behaves exactly as it did.
+be refused. Nor is a job the queue deadline already asked about and the node answered `409`: a give-up
+that comes before the next poll has answered (a cancel, the whole-call deadline, a poll deadline) reads
+that `409` instead of asking again, and its row ends `; withdraw not confirmed: HTTP 409: the node said
+the job had already started`, as it does when the give-up asks for itself. A node that predates the route
+answers `405` (its job route is GET-only) or `404`, which is "no withdraw here": every give-up then
+behaves exactly as it did.
 
 `<why>` says what the node answered instead of taking the job back, so an old node and an upgraded one
 that refused stop reading alike: `HTTP 405: the node has no withdraw route (an older node)`, `HTTP 404: the
