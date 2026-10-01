@@ -451,7 +451,8 @@ exclusive card, and three measurement rows read the seat's 10 GiB as their own f
   that lost the card (an operator `gpu release`, a reclaim) never warms; the marker stays for the next last holder, and a
   plain `gpu release` prints a note when a warm is owed.
 - **The warm is heartbeat for its length** (`drainRenewEvery`, 15 s), so a 27B load of several minutes cannot go stale
-  under the 120 s heartbeat TTL; losing the lease mid-warm cancels the request and is reported.
+  under the 120 s heartbeat TTL; losing the lease mid-warm cancels the request and is reported, while a heartbeat
+  write that fails with the lease still ours is reported once and retried on the next tick (register C-59).
 - **A queued `--unload-seat` acquire finds the card empty because of the ORDER, not because it waits (register D-124
   clause b, validated 2026-10-01).** The live failure of 2026-09-19 — after `gpu reserve --unload-seat` the seat was
   still loaded, the previous holder's deferred warm-back having landed between the new holder's unload and its first

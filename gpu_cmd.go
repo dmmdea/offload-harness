@@ -308,7 +308,7 @@ func runGPUReserve(args []string) error {
 			// inside the queue budget it already had, and start the drain over under
 			// the new lease; never exit at the restamp with the command not started.
 			if requeues >= maxLeaseRequeues {
-				err := fmt.Errorf("the lease was lost %d times while draining, giving up: %w", requeues+1, merr)
+				err := fmt.Errorf("the lease was lost %d times while draining, giving up (last: %v): %w", requeues+1, lost, merr)
 				card.finish(err)
 				return err
 			}

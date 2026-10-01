@@ -592,7 +592,31 @@ func warmBackGuarded(cfg config.Config, g warmGuard, out io.Writer) {
 	defer cancel()
 	stopRenew := func() {}
 	if g.renew != nil {
-		stopRenew = renewUntilLost(g.renew, drainRenewEvery, func(lerr error) {
+		renew := g.renew
+		if g.held != nil {
+			// A heartbeat that fails is a LOSS only when the card is no longer
+			// ours. A write that fails with the lease still held is reported once
+			// and retried on the next tick: abandoning the warm on it left the
+			// seat cold with the warm still owed (register C-59, the drain's
+			// heartbeat had the same defect).
+			warned := false
+			renew = func() error {
+				err := g.renew()
+				if err == nil {
+					warned = false
+					return nil
+				}
+				if g.held() != nil {
+					return err
+				}
+				if !warned {
+					warned = true
+					fmt.Fprintf(out, "gpu: could not write the lease heartbeat while warming %s back (%v); the lease is still ours, retrying\n", model, err)
+				}
+				return nil
+			}
+		}
+		stopRenew = renewUntilLost(renew, drainRenewEvery, func(lerr error) {
 			fmt.Fprintf(out, "gpu: LEASE LOST while warming %s back (%v); abandoning the warm\n", model, lerr)
 			cancel()
 		})
