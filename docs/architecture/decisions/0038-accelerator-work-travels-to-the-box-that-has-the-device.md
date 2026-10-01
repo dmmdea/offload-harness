@@ -77,6 +77,33 @@ design's Phase B had already drawn the seams; this record fixes them as policy.
 - Not in this record: multi-node fan-out of accelerator calls, a savings ledger for accelerator
   work (still the recorded follow-up from ADR 0024), and video/stream inputs.
 
+## Amendment 2026-10-01 (register E-08, the Hailo-8L is the one device that never travels)
+
+Decisions 1 and 2 send accelerator work to the box that carries the device. One device is the
+explicit exception: **the Hailo-8L stays local-only.** The standalone accelerator box that carries
+it is, by operator decision (register J-13), never delegated to, never a fleet node and never a
+sender; this amendment enforces the device-level half of that in the harness. ADR 0024's
+`accelerators` list is still how the box registers the device's tools and agent-loop lanes for its
+own callers. What changes is everything a fleet node would do with the id:
+
+1. **Not published.** `/fleet/health` omits `hailo-8l` from `accelerators`, whichever source supplied
+   the list (the installer manifest or the config fallback).
+2. **No lane.** A node whose only device is the Hailo-8L does not advertise `accel` in
+   `supported_task_types`, and the pull door does not claim it.
+3. **No job.** An `accel` job naming `hailo-8l` is refused at admission — a 400 on the push door, a nack
+   on the pull door — whether or not the node lists the device. The refusal prints only the devices the
+   fleet may use, never the node's full list.
+4. **No forward.** `fleet_accelerators: ["hailo-8l"]` is a `doctor` finding and a startup warning, because
+   no node can answer it. `fleet-ui` refuses a listen port equal to `hailo_endpoint`'s on a box that lists
+   the device (its documented default, 18813, is also the sidecar's); neither port moves.
+
+The rule is per device: one list (`config.LocalOnlyAccelerator`) behind one filter
+(`config.FleetVisibleAccelerators`). The Coral Edge TPU and the RK3588 NPU are still published, advertised
+and accepted exactly as decisions 1 and 2 describe, and a device `profiles.json` declares without a
+decision fails a test in `internal/tierseed`. Not in this amendment: refusing `fleet-serve` on a standalone
+box, or knowing which other boxes name it in `delegate_remotes` — the harness cannot read another box's
+config, so that half stays an operating rule.
+
 ## Related
 
 - [ADR 0024](0024-accelerators-are-additive-to-the-gpu-tier.md) — accelerators are additive

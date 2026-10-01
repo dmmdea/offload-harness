@@ -81,7 +81,8 @@ The accelerator seed merges **AFTER** the tier seed (and after every tier overla
 accelerator key can never be overwritten by the GPU tier's own seed — and an accelerator on a
 profile-less render still seeds, because accelerators are additive to the tier, not part of it.
 The installer also writes `accelerators` into `installed.json`, which `fleet-serve` advertises
-verbatim in `/fleet/health` so a delegator can route NPU-owned work to the box.
+in `/fleet/health` — except the Hailo-8L, which stays local-only (see Fleet routing below) — so a
+delegator can route NPU-owned work to the box.
 
 The seeded keys (hailo-8l):
 
@@ -461,9 +462,16 @@ that lists a device in both registers the local lane only. A box that lists noth
 `fleet_accelerators` is byte-identical to 0.114.x (pinned by
 `TestFleetAcceleratorRegistersForwardedToolsOnly`).
 
+**The Hailo-8L never travels** (register E-08, [ADR 0038](../architecture/decisions/0038-accelerator-work-travels-to-the-box-that-has-the-device.md)
+amendment): the standalone box that carries it keeps it local. `/fleet/health` omits it from
+`accelerators`, `accel` is advertised only for a device the fleet may use, an `accel` job naming it is
+refused, listing it in `fleet_accelerators` is a `doctor` finding, and `fleet-ui` refuses a `--listen` port
+equal to `hailo_endpoint`'s on a box that lists it. The Coral and the RKNPU are unaffected; the one list is
+`config.LocalOnlyAccelerator`.
+
 `offload_status.accelerators` lists a fleet device with `fleet: true` and no health probe (the
 probe is per call, at the node). The node's `supported_task_types` gains `accel` exactly when it
-lists a device; `NodeView.Accelerators` decodes the same field for the delegator.
+lists a device the fleet may use; `NodeView.Accelerators` decodes the same field for the delegator.
 
 Measured 2026-09-08 from the Qube (no device) against the Lenovo (`coral-edgetpu`): see the
 gate lines in the CHANGELOG entry for 0.115.0.
@@ -538,6 +546,8 @@ To verify an RKNPU (a Rockchip RK3588 board, driver bound):
   registration, `handleHailoTool`, the `offload_ocr` engine switch, the status block
 - [`internal/config/config.go`](../../internal/config/config.go) — `Accelerators`,
   `HasAccelerator`, the `hailo_*` / `coral_*` / `rknpu_*` keys and defaults
+- [`internal/config/localonly.go`](../../internal/config/localonly.go) — the local-only device
+  list and the one filter behind the three fleet-visible points (register E-08)
 - [`internal/hwdetect/classify.go`](../../internal/hwdetect/classify.go) — detection
 - [`internal/mcpserver/acceltools.go`](../../internal/mcpserver/acceltools.go),
   [`internal/agent/acceltools.go`](../../internal/agent/acceltools.go),
