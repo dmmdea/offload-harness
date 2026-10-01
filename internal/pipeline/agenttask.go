@@ -1728,8 +1728,11 @@ func (p *Pipeline) repackStructuredWith(ctx context.Context, seat string, rawSch
 	budget := repackBudget(output)
 	// least is the smallest an attempt may be sized to: the answer's own size in
 	// tokens. skipped is set when the time left could not buy even that, and no
-	// further attempt is sent (repackOpts.fit).
+	// further attempt is sent (repackOpts.fit). floorTokens is the smallest the NEXT
+	// grammar attempt may be sized to: least, raised to what the answer needs once a
+	// cut attempt has shown it needs more (the resend below).
 	least := expectedRepackTokens(output)
+	floorTokens := least
 	var skipped *repackSkipErr
 	// Under the liveness monitor (a ProgressFunc on ctx, which is every run of
 	// runAgentTask) the CONTEXT owns the deadline: the stall watch cancels a
@@ -1780,7 +1783,7 @@ func (p *Pipeline) repackStructuredWith(ctx context.Context, seat string, rawSch
 		// the busy hold and the stall watch are untouched). An attempt that cannot
 		// buy the answer is not sent, and neither is any later one: time only runs
 		// out (register C-80).
-		fit := opts.fit(time.Now(), deadlineOf(ctx), budget, least)
+		fit := opts.fit(time.Now(), deadlineOf(ctx), budget, floorTokens)
 		if fit.Skip {
 			skipped = &repackSkipErr{msg: fit.Note}
 			opts.Trace.skip(attempts+1, lane, fit.Note)
@@ -1853,17 +1856,32 @@ func (p *Pipeline) repackStructuredWith(ctx context.Context, seat string, rawSch
 			cut := judgeCut(output, gres)
 			seen := cut.observed(sent)
 			if fit.Clamped {
-				// The time left, not the answer, set this budget, and a larger one
-				// would be clamped again: nothing to escalate to.
-				seen = "the time left set this budget: " + fit.Note
+				// The time left set this budget whatever the answer needed, and the
+				// note keeps both: what the clock did and what the cut showed.
+				seen = "the time left set this budget: " + fit.Note + "; " + seen
+			}
+			// A resend at the cap is worth a request only when the time still left buys
+			// what the answer needs (cut.Needed), which is more than the request that
+			// was just judged too small carried. Time only runs out: after a clamped
+			// attempt it never does, and after an unclamped one it may not. A resend
+			// that carries fewer tokens than the cut request cannot finish; it spends
+			// the time the chat lane needed (register C-80). The floor rides into the
+			// next fit, so the request that goes out is the one judged feasible here.
+			resend := !fit.Clamped && cut.escalates(sent)
+			resendFloor := max(least, cut.Needed)
+			if resend {
+				if next := opts.fit(time.Now(), deadlineOf(ctx), agentRepackMaxTokensCap, resendFloor); next.Skip {
+					resend = false
+					seen += "; " + next.Note
+				}
 			}
 			terr := fmt.Errorf("re-pack truncated at %d tokens (the answer is %d chars; %s)", sent, len(output), seen)
 			note(attempts, lane, sent, clampedFrom, gres, time.Since(attemptStart), terr.Error())
 			recordFailure(terr, boundFor(attemptTimeout), attempts)
-			if fit.Clamped || !cut.escalates(sent) {
+			if !resend {
 				break
 			}
-			budget = agentRepackMaxTokensCap
+			budget, floorTokens = agentRepackMaxTokensCap, resendFloor
 			continue
 		}
 		// Trim to the outermost {...} before validating. This is the BELT, not
