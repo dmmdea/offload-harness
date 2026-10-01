@@ -549,3 +549,121 @@ func TestReadBudgetDefaultIsTheLargerOfTheStepsAndTheCapTimesTheResultCap(t *tes
 		t.Errorf("an overflowing budget = %d, want it clamped to %d", got, math.MaxInt)
 	}
 }
+
+// TestLoopAPageThatGivesNothingNewCountsAgainstTheCap (D-103 review, finding 1):
+// the paging exemption is for a page that is PROGRESS. A seat that has read a
+// file once and then keeps sending pages that fail, that the tool refuses as not
+// performed (wrong-typed arguments), or that begin past the end of the file is
+// the near-duplicate thrash the same-tool cap exists to catch (D-48 saw a seat
+// page past a document's end three times). Such a page costs a few dozen
+// characters, so the read budget never reaches it; before the exemption looked
+// at the result the only bound left was the step budget, and a seat got every
+// step instead of eight calls.
+//
+// A page that gave nothing new counts against the cap once it has run, so the
+// cap's overshoot is the budget's: the call that crosses the line completes. One
+// read and defaultMaxSameTool such pages run (the cap is then spent), and the next
+// call is refused and the tool withdrawn.
+func TestLoopAPageThatGivesNothingNewCountsAgainstTheCap(t *testing.T) {
+	const pages = 11 // after the first read; steps leave room for all of them
+	const wantExecs = 1 + defaultMaxSameTool
+	cases := []struct {
+		name     string
+		tools    func(t *testing.T, execs *int) []Tool
+		pageArgs func(k int) string
+	}{
+		{
+			// The file is read once, then every later call to the tool fails.
+			name: "the tool fails",
+			tools: func(t *testing.T, execs *int) []Tool {
+				return []Tool{{ToolSpec: ToolSpec{Name: "read_file"}, Exec: func(_ context.Context, _ string) (string, error) {
+					*execs++
+					if *execs == 1 {
+						return "1: the whole file", nil
+					}
+					return "", fmt.Errorf("read failed")
+				}}}
+			},
+			pageArgs: func(k int) string { return fmt.Sprintf(`{"path":"ctx.txt","offset":%d}`, 1+k) },
+		},
+		{
+			// A seat that re-sends a wrong-typed field: the REAL tool refuses the call as
+			// not performed (decodeToolArgs), the loop records it as EffectNone and
+			// charges the budget nothing at all.
+			name: "the tool refuses the call as not performed",
+			tools: func(t *testing.T, execs *int) []Tool {
+				root := t.TempDir()
+				writeIncidentDoc(t, root, "ctx.txt", 126)
+				return countedReadFile(t, root, execs)
+			},
+			pageArgs: func(k int) string { return fmt.Sprintf(`{"path":"ctx.txt","offset":%d,"limit":3.5}`, 1+k) },
+		},
+		{
+			// The REAL tool answers "(end of file - N lines)" to a page that starts after
+			// the last line: about 27 characters.
+			name: "the page begins past the end of the file",
+			tools: func(t *testing.T, execs *int) []Tool {
+				root := t.TempDir()
+				writeIncidentDoc(t, root, "ctx.txt", 5)
+				return countedReadFile(t, root, execs)
+			},
+			pageArgs: func(k int) string { return fmt.Sprintf(`{"path":"ctx.txt","offset":%d,"limit":10}`, 100+k) },
+		},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			execs := 0
+			tools := tt.tools(t, &execs)
+			read := func(id, args string) Completion {
+				return Completion{Msg: Msg{Role: "assistant", ToolCalls: []ToolCall{tc(id, "read_file", args)}}, FinishReason: "tool_calls"}
+			}
+			script := []Completion{read("c1", `{"path":"ctx.txt"}`)}
+			for k := 1; k <= pages; k++ {
+				script = append(script, read(fmt.Sprintf("c%d", k+1), tt.pageArgs(k)))
+			}
+			script = append(script, finalAnswer("done"))
+			res, err := NewLoop(&fakeClient{script: script}, tools, pages+3).Run(context.Background(), "read it")
+			if err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if execs != wantExecs {
+				t.Errorf("read_file ran %d times, want %d: one read, then %d pages that gave nothing new, then the cap", execs, wantExecs, defaultMaxSameTool)
+			}
+			// c1 is the read and c2..c9 are the pages that ran; c10 is the first call the cap refuses.
+			if got := toolResultFor(res.Transcript, fmt.Sprintf("c%d", wantExecs)); strings.Contains(got, "DISABLED") {
+				t.Errorf("the last page that was due to run was refused: %q", got)
+			}
+			if got := toolResultFor(res.Transcript, fmt.Sprintf("c%d", wantExecs+1)); !strings.Contains(got, "NOT executed") || !strings.Contains(got, "DISABLED") {
+				t.Errorf("the call after the cap got %q, want the same-name refusal", got)
+			}
+		})
+	}
+}
+
+// TestPageGaveNothing is the whole rule for a page that is not progress: it did
+// not complete, or it began past the end of the file. A page of lines is progress
+// whatever else it carries (a continuation hint included), and the marker counts
+// only at the start of the result: real lines always begin with their number.
+func TestPageGaveNothing(t *testing.T) {
+	cases := []struct {
+		name  string
+		out   string
+		isErr bool
+		eff   EffectStatus
+		want  bool
+	}{
+		{"lines came back", "5: some text\n6: more text", false, EffectCommitted, false},
+		{"lines and a continuation hint", "5: some text\n(showing lines 5-5 of 9; use offset=6 to continue)", false, EffectCommitted, false},
+		{"the tool failed", "error: read failed", true, EffectFailed, true},
+		{"the tool refused the call as not performed", "NOT performed: read_file arguments do not match the tool's schema", false, EffectNone, true},
+		{"the call was abandoned at its time budget", "error: tool read_file exceeded its budget and was cancelled", true, EffectUnknown, true},
+		{"an error flag on a committed call is still an error", "5: some text", true, EffectCommitted, true},
+		{"the page began past the end of the file", "(end of file - 6 lines)", false, EffectCommitted, true},
+		{"the marker inside a page is file text", "5: see (end of file) below", false, EffectCommitted, false},
+	}
+	for _, tt := range cases {
+		if got := pageGaveNothing(tt.out, tt.isErr, tt.eff); got != tt.want {
+			t.Errorf("%s: pageGaveNothing(%q, %v, %v) = %v, want %v", tt.name, tt.out, tt.isErr, tt.eff, got, tt.want)
+		}
+	}
+}

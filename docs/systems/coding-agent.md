@@ -55,12 +55,18 @@ Two independent limits keep a weak model from burning the budget on nothing:
   `read_file` the same-tool cap now counts *files*: the first read of each path counts, so a
   six-file reconnaissance costs six and the ninth distinct file is still refused, while a new page
   of a file the run has already read costs characters, not a call. An exact repeat, a read that
-  failed (a path that does not exist is not "being read") and a call whose path cannot be read count
-  as before, and no other tool is affected. Every `read_file` result is charged to a per-run budget
-  at the length the transcript keeps — after the loop-boundary trim, the figure the effect ledger
-  records as `obs_chars`; once the budget is spent the next read is refused and `read_file` is
-  withdrawn like any capped tool (the call that crosses the line completes, so the overshoot is at
-  most one result). The setup replay is not charged. The default is the larger of the step budget
+  failed (a path that does not exist is not "being read"), a call whose path cannot be read and a
+  page that gave nothing new count against the cap, and no other tool is affected. A page gives
+  nothing new when the tool failed or refused the call as not performed, or when it began past the
+  end of the file (`(end of file — N lines)`): it costs the budget next to nothing, so the budget
+  cannot bound it and the cap counts it once it has run (the call that crosses the line completes),
+  and a seat paging past the end of a file or re-sending a page that fails spends the cap as it
+  always did. The same lines asked for under another spelling of the call are still new pages, and
+  only the budget and the step budget bound them. Every `read_file` result is charged to a per-run
+  budget at the length the transcript keeps — after the loop-boundary trim, the figure the effect
+  ledger records as `obs_chars`; once the budget is spent the next read is refused and `read_file`
+  is withdrawn like any capped tool (the call that crosses the line completes, so the overshoot is
+  at most one result). The setup replay is not charged. The default is the larger of the step budget
   and the same-tool cap, times the cap on one result: it can never refuse a seat that issues one
   read per step (the step budget bounds that case, as it always did) and it bounds what is left,
   many reads in one step (measured on the delegation log, 2026-09-07 to 2026-10-01: 214 of 3,374

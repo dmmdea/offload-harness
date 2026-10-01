@@ -425,8 +425,10 @@ const defaultKeepRecent = 4
 // metered in characters (the read budget, readbudget.go: its default is the
 // larger of the step budget and this cap, times the cap on one result) and the
 // cap counts it by FILE: a new page of a file the run has already read costs
-// characters, not a call. The first read of each path, an exact repeat, a read
-// that failed and every other tool count as ever.
+// characters, not a call, unless it gave nothing new (it failed, was refused as
+// not performed, or began past the end of the file), which is counted once it has
+// run. The first read of each path, an exact repeat, a read that failed and every
+// other tool count as ever.
 const defaultMaxSameTool = 8
 
 // FinalAnswerTurn opens the forced final step (0.115.19, register D-89): the
@@ -1740,7 +1742,8 @@ func (l *Loop) run(ctx context.Context, objective string, bs *budgetState) (Resu
 // applies, but never disables the tool outright).
 //
 // reads is the read_file ledger (D-103, readbudget.go): a NEW page of a file the
-// run has already read is not counted against the name cap, and once the run's
+// run has already read is not counted against the name cap before it runs, and is
+// counted after it when it gave nothing new (pageGaveNothing); once the run's
 // read_file results have filled the character budget the next call is refused and
 // the tool withdrawn, by the same disabledTools mechanism. nil = no budget:
 // read_file counts like any tool.
@@ -1782,10 +1785,12 @@ func (l *Loop) dispatchOrThrottle(ctx context.Context, call ToolCall, msgs []Msg
 	exactCalls[key]++
 	reads.sawCall(call.Name)
 	// A NEW page of a file this run has already read is paging, which the read
-	// budget meters in characters (D-103); it is not a call against the name cap.
-	// Every other call counts: the first read of a path, an exact repeat, a read
-	// that failed, a call whose path cannot be read.
-	if !reads.isNewPage(call, exactCalls[key]) {
+	// budget meters in characters (D-103); it is not charged to the name cap
+	// before it runs. Every other call is: the first read of a path, an exact
+	// repeat, a read that failed, a call whose path cannot be read. A page that
+	// then gives the model nothing new is charged once it has run (below).
+	page := reads.isNewPage(call, exactCalls[key])
+	if !page {
 		sameNameCalls[call.Name]++
 	}
 
@@ -1828,7 +1833,16 @@ func (l *Loop) dispatchOrThrottle(ctx context.Context, call ToolCall, msgs []Msg
 	if _, seen := firstCallID[key]; !seen {
 		firstCallID[key] = call.ID
 	}
-	return l.dispatch(ctx, call)
+	out, isErr, eff := l.dispatch(ctx, call)
+	if page && pageGaveNothing(out, isErr, eff) {
+		// A page that failed, was refused as not performed, or began past the end
+		// of the file is not progress, and it costs the read budget next to
+		// nothing, so the cap counts it: a seat paging past the end of a file
+		// spends the cap as it always did. Charged after the run, so the call that
+		// crosses the line completes, as it does under the budget.
+		sameNameCalls[call.Name]++
+	}
+	return out, isErr, eff
 }
 
 // resultDestroyed reports whether the tool result for callID no longer exists

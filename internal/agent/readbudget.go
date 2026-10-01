@@ -33,23 +33,34 @@ import (
 //     the line completes, so the overshoot is at most one result.
 //
 //   - A call counts against the same-name cap unless it is a NEW page of a file
-//     the run has already read. The first read of each path counts, so for
-//     read_file the cap is a cap on FILES opened: a six-file reconnaissance costs
-//     six, exactly as before, and the ninth distinct file is still refused. A
-//     page of a file already read costs characters, not a call. Calls that
-//     cannot be told from a repeat or a miss keep counting as before: an exact
-//     repeat of an earlier call (the exact-repeat refusal is untouched), a read
-//     that failed (a path that does not exist is not "being read"), and a call
-//     whose path cannot be read from its arguments.
+//     the run has already read, and the page gave the model something. The first
+//     read of each path counts, so for read_file the cap is a cap on FILES
+//     opened: a six-file reconnaissance costs six, exactly as before, and the
+//     ninth distinct file is still refused. A page of a file already read costs
+//     characters, not a call. Calls that cannot be told from a repeat or a miss
+//     keep counting as before: an exact repeat of an earlier call (the
+//     exact-repeat refusal is untouched), a read that failed (a path that does
+//     not exist is not "being read"), and a call whose path cannot be read from
+//     its arguments. So does a page that gave nothing new (pageGaveNothing): the
+//     tool failed or refused the call as not performed, or the page began past
+//     the end of the file. Such a page costs the budget next to nothing, so the
+//     budget cannot bound it and the cap is charged once the page has run: a seat
+//     paging past the end of a file, or re-sending a page that fails, spends the
+//     cap as it always did, and the call that crosses the line completes.
 //
 //   - Setup replays are not charged (setup.go: the model's own budget under the
 //     breakers stays whole), and neither is a call that did not run.
 //
 // Why paging of one file may skip the count cap: the cap exists to catch a model
 // that keeps re-issuing a near-duplicate call instead of progressing. A different
-// file is progress, and so is the next page of the same one; what is not progress
-// is asking again for what it has, which the exact-repeat refusal catches byte for
-// byte and the budget bounds in volume. The thrash the breakers bound (a seat
+// file is progress, and so is the next page of the same one when it returns
+// lines. What is not progress is asking again for what it has, which the
+// exact-repeat refusal catches byte for byte and the budget bounds in volume, and
+// asking for what is not there (a page that fails, is refused, or starts past the
+// end), which costs the budget next to nothing and so is counted by the cap. One
+// case stays loose on purpose: the same lines asked for under another spelling of
+// the call (offset 5 limit 10, then offset 5 limit 11) run as new pages, and only
+// the budget and the steps bound them. The thrash the breakers bound (a seat
 // hunting through read_file / search_files / list_dir until the steps run out)
 // stays bounded by the step budget, the forced final step (D-89), the exact-repeat
 // refusal (with the replay feeding it, D-48) and the withdrawal of a tool refused
@@ -165,6 +176,20 @@ func (r *readLedger) isNewPage(call ToolCall, exactCount int) bool {
 	}
 	p, ok := readFilePath(call.Args)
 	return ok && r.opened[p]
+}
+
+// pastEndMarker begins what read_file answers to a page that starts after the
+// last line ("(end of file - N lines)", tools.go); setup.go keys on the same
+// prefix to tell a read that reached the end from one that did not.
+const pastEndMarker = "(end of file"
+
+// pageGaveNothing reports whether a page that ran added nothing to what the model
+// already holds: it did not complete (the tool failed, refused the call as not
+// performed, or was abandoned), or it began past the end of the file. out is the
+// tool's own result, before the loop-boundary trim. The error flag is read as well
+// as the effect, so the rule does not lean on every error being non-committed.
+func pageGaveNothing(out string, isErr bool, eff EffectStatus) bool {
+	return isErr || eff != EffectCommitted || strings.HasPrefix(out, pastEndMarker)
 }
 
 // spent is the refusal for a read_file call made after the budget ran out, or
