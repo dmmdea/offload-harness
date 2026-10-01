@@ -111,7 +111,31 @@ func TestRepackRatePrefersTheStoreThenTheObservedThenTheConfigured(t *testing.T)
 		{"nothing known", seatrate.Seat{}, 0, 0, 0, ""},
 	}
 	for _, tc := range cases {
-		if got, basis := repackRate(tc.known, tc.observed, tc.configured); got != tc.want || basis != tc.basis {
+		if got, basis := repackRate(tc.known, tc.observed, 0, tc.configured); got != tc.want || basis != tc.basis {
+			t.Errorf("%s: repackRate = %v, %q, want %v, %q", tc.name, got, basis, tc.want, tc.basis)
+		}
+	}
+}
+
+// A run that answered as one JSON body has no observed rate (the monitor hears
+// deltas), but its loop's completions measured the seat: the effective rate over the
+// completions of 1,024 tokens or more. It sizes the re-pack before the configured
+// rate does, and after the run's own streamed one; with none of them the bound is off.
+func TestRepackRateReadsTheRunsOwnMeasuredRateBeforeTheConfiguredOne(t *testing.T) {
+	cases := []struct {
+		name                           string
+		known                          seatrate.Seat
+		observed, measured, configured float64
+		want                           float64
+		basis                          string
+	}{
+		{"the measured rate when nothing streamed and the store is empty", seatrate.Seat{}, 0, 7, 30, 7, "this run's measured rate"},
+		{"the streamed rate outranks the measured one", seatrate.Seat{}, 9, 7, 30, 9, "this run's observed rate"},
+		{"the store outranks both", seatrate.Seat{TokS: 5.6}, 9, 7, 30, 5.6, "the seat-rates store"},
+		{"the configured rate when the run measured nothing", seatrate.Seat{}, 0, 0, 30, 30, "agent_seat_tok_s"},
+	}
+	for _, tc := range cases {
+		if got, basis := repackRate(tc.known, tc.observed, tc.measured, tc.configured); got != tc.want || basis != tc.basis {
 			t.Errorf("%s: repackRate = %v, %q, want %v, %q", tc.name, got, basis, tc.want, tc.basis)
 		}
 	}

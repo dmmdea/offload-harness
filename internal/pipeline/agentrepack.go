@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"math"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -107,17 +109,43 @@ type repackOpts struct {
 // repackRate is the decode rate the node sizes a re-pack against: the seat-rates
 // store's calibrated rate, else this run's own observed rate (the liveness
 // monitor's smoothed rate over its streamed deltas: 0 on a seat that answers JSON
-// in one piece), else the box's agent_seat_tok_s. The basis names which.
-func repackRate(known seatrate.Seat, observed, configured float64) (float64, string) {
+// in one piece), else the rate this run's own completions measured (the effective
+// rate over the loop's completions of 1,024 tokens or more, which includes the
+// prefill and so errs toward the slower side), else the box's agent_seat_tok_s. The
+// basis names which. 0 means no rate is known, and the wall bound then does no
+// arithmetic (repackBoundOff says so).
+func repackRate(known seatrate.Seat, observed, measured, configured float64) (float64, string) {
 	switch {
 	case known.TokS > 0:
 		return known.TokS, "the seat-rates store"
 	case observed > 0:
 		return observed, "this run's observed rate"
+	case measured > 0:
+		return measured, "this run's measured rate"
 	case configured > 0:
 		return configured, "agent_seat_tok_s"
 	}
 	return 0, ""
+}
+
+// repackBoundOffNote is what a failed re-pack says when no decode rate was known
+// for its seat: the wall bound fails open without one (repackOpts.fit), which is
+// right, and a failed re-pack is exactly the one it would have bounded, so failing
+// open must not be silent (register C-80).
+const repackBoundOffNote = "re-pack time bound off: no decode rate is known for this seat (no seat-rates sample, none streamed or measured this run, no agent_seat_tok_s), so the wall could not bound it"
+
+// repackBoundOffLogged remembers the seats that were logged as running a re-pack
+// with its time bound off, so the log says it once per seat and process, not once
+// per run.
+var repackBoundOffLogged sync.Map
+
+// repackBoundOff returns the note a failed re-pack carries when its time bound was
+// off, and logs the first time a seat is seen so.
+func repackBoundOff(seat string) string {
+	if _, seen := repackBoundOffLogged.LoadOrStore(seat, true); !seen {
+		log.Printf("agent task: %s (seat %s); the re-pack is bounded by the run's ceiling alone", repackBoundOffNote, seat)
+	}
+	return repackBoundOffNote
 }
 
 // repackFit is what the time left lets one attempt ask for.

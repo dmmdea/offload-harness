@@ -1316,7 +1316,7 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	var trace repackTrace
 	// The decode rate the re-pack is sized against: the store's, else this run's
 	// own (the loop has just measured it), else the box's agent_seat_tok_s.
-	repackTokS, repackBasis := repackRate(rates.Get(seat), wire.ObservedTokS, p.cfg.AgentSeatTokS)
+	repackTokS, repackBasis := repackRate(rates.Get(seat), wire.ObservedTokS, wire.SeatTokS, p.cfg.AgentSeatTokS)
 	structured, tokensOut, transport, attempts, serr := p.repackStructuredWith(agent.ContextWithProgress(cctx, repackProgress), seat, outSchema, res.Output, repackAttemptFloor(wall), 0,
 		repackOpts{WallEnd: wallEnd, Grace: livePolicy.Slack, TokS: repackTokS, RateBasis: repackBasis, Trace: &trace})
 	wire.RepackMs = time.Since(repackStart).Milliseconds()
@@ -1330,7 +1330,14 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	// shape the streaming fix exists for: say the fix did not apply to it.
 	streamNote := p.streamRefusedNote(seat)
 	if serr != nil {
-		wire.RepackNote = joinAdmissionNotes(serr.Error(), streamNote)
+		// With no rate known the wall bound did no arithmetic, and a failed re-pack
+		// is the one it would have bounded: say so beside the failure. A clean
+		// success carries no such note.
+		boundNote := ""
+		if repackTokS <= 0 {
+			boundNote = repackBoundOff(seat)
+		}
+		wire.RepackNote = joinAdmissionNotes(serr.Error(), streamNote, boundNote)
 		// The loop FINISHED: its answer is intact in Output and complete (a cut
 		// answer deferred above, before any re-pack), and only its structuring
 		// failed, on whichever arm below. Flagged so the delegator can re-pack the
