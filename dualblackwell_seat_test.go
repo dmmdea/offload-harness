@@ -35,8 +35,9 @@ func TestDualBlackwellSeedsThePairSeatWithTheCacheServer(t *testing.T) {
 		KVCacheDtype         string   `json:"kv_cache_dtype"`
 		TTLSeconds           int      `json:"ttl_seconds"`
 		CacheServer          *struct {
-			Store   string `json:"store"`
-			Address string `json:"address"`
+			Store       string `json:"store"`
+			Address     string `json:"address"`
+			L1StagingGB int    `json:"l1_staging_gb"`
 		} `json:"cache_server"`
 		Measured string `json:"measured"`
 	}
@@ -87,6 +88,18 @@ func TestDualBlackwellSeedsThePairSeatWithTheCacheServer(t *testing.T) {
 		if c.got != c.want {
 			t.Errorf("vllm_seat.%s = %q, want %q", c.name, c.got, c.want)
 		}
+	}
+	// L1 staging is measured per seat, not a tier default (register B-02). On 2026-09-21 a
+	// 2 GB cut starved the pair's staging (the stores came up short by 34 blocks and nothing
+	// reached L2), so the pair runs 8; the three-card flagship needs 16 (8 at the 0.80
+	// watermark could not stage an L2 hit back). A seat with no measured value keeps the
+	// 2 GB launcher default (internal/vllmseat/launcher_l1_default_test.go).
+	if s.CacheServer != nil && s.CacheServer.L1StagingGB != 8 {
+		t.Errorf("blackwell-2x16 cache_server.l1_staging_gb = %d, want 8: the pair's measured staging (2 GB starved it)",
+			s.CacheServer.L1StagingGB)
+	}
+	if r.CacheServer == nil || r.CacheServer.L1StagingGB != 16 {
+		t.Errorf("blackwell-3x16 cache_server must seed l1_staging_gb 16, the flagship's measured staging (got %+v)", r.CacheServer)
 	}
 	if s.MaxModelLen != 163840 || s.TTLSeconds != r.TTLSeconds {
 		t.Errorf("vllm_seat operating point (max_model_len %d, ttl %d) differs from the pair's measured (163840, %d)",

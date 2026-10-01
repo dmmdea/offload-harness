@@ -334,9 +334,10 @@ func (c CacheServer) StoreName() string {
 	return "fs_native"
 }
 
-// EffectiveL1StagingGB is the pinned host buffer, defaulted to the measured
-// 2 GB (register B-02, 2026-09-18: L1 size has no capacity effect on what
-// the store restores; RSS ≈ L1 + 1.1 GiB).
+// EffectiveL1StagingGB is the pinned host buffer, defaulted to 2 GB for a seat
+// with no measured value (register B-02; RSS ≈ L1 + 1.1 GiB). A measured seat
+// sets its own: the pair 8 (2 starved its staging on 2026-09-21), the
+// three-card flagship 16.
 func (c CacheServer) EffectiveL1StagingGB() int {
 	if c.L1StagingGB > 0 {
 		return c.L1StagingGB
