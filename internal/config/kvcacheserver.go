@@ -114,11 +114,11 @@ func (k KVCacheServer) StoreName() string {
 	return strings.ToLower(strings.TrimSpace(k.Store))
 }
 
-// EffectiveL1StagingGB applies the 2 GB default (register B-02, measured
-// 2026-09-18: 2 / 4 / 8 GB restore the same context from the store — every
-// graded contract passes at every size, 0 preemptions — at 3.1 / 5.1 / 9.1 GiB
-// of MP-server RSS; the smallest at parity is the default. 8 was the
-// unmeasured 0.113 seed).
+// EffectiveL1StagingGB applies the 2 GB default for a seat with no measured
+// value (register B-02: on 2026-09-18 the pair's 2 / 4 / 8 GB arms restored the
+// same context at 3.1 / 5.1 / 9.1 GiB of MP-server RSS over 24 contracts). It is
+// not enough for every seat: on 2026-09-21 2 GB starved the pair's staging under
+// production load, so the pair seeds 8 and the three-card flagship 16.
 func (k KVCacheServer) EffectiveL1StagingGB() int {
 	if k.L1StagingGB <= 0 {
 		return 2
