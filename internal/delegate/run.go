@@ -2067,7 +2067,13 @@ func (r *runner) placeAndRun(ctx context.Context, i int, contract core.AgentCont
 			// were: a 409 elsewhere does not make the lease less releasable):
 			// wait for something to free rather than fail on a snapshot of one
 			// minute. A roster that only 404s or is unreachable is exhausted.
-			reserved := r.route != "remote" && !pl.tried[""] && Reserved(LocalLease(r.cfg.GPULockPath, r.cfg.StateDir))
+			//
+			// So is a roster whose only seat left is a lease's when this box declares no layer the
+			// contract names (register A-108): the lease frees a seat that could never run it, and the
+			// wait keeps that seat out (localCan), so it could place nothing and would spend its whole
+			// TTL to end as a capacity defer saying no node had room. `why` already says it.
+			reserved := r.route != "remote" && !pl.tried[""] && r.localServesLayer(r.localView(), contract) &&
+				Reserved(LocalLease(r.cfg.GPULockPath, r.cfg.StateDir))
 			if pl.capacityRefusal || reserved {
 				return r.awaitCapacity(ctx, i, contract, start, budget, pl, pr, refusals, why)
 			}

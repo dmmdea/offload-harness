@@ -8,8 +8,9 @@
 // Place alone, and neither deal calls Place.
 //
 // The end-to-end tests drive Run / RunWith, the production entry. A white-box runOne would bypass the
-// joint deal (autoDeal stays nil) and exercise the per-subtask Place path instead, which is the one
-// path that was already right.
+// joint deal (autoDeal stays nil) and take the per-subtask Place path instead, which production reaches
+// only for route=local (RunWith builds a deal for every other route): a test on it would pin a path
+// these deals never take.
 
 package delegate
 
@@ -543,6 +544,92 @@ func TestALayerNoNodeDeclaresDefersByNameEvenUnderALocalLease(t *testing.T) {
 					sum, plain.dispatches.Load(), r.DeferClass, r.Reason)
 			}
 		})
+	}
+}
+
+// TestANamedLayerItsOnlyNodeRefusedForGoodFailsAtOnceUnderAnyLease: the one node that declares `fast` answers its
+// dispatch with a 409, a refusal no wait outlasts, and this box declares no layers. Nothing is left to wait for:
+// a text lease reserves a seat that could never have run the layer, so it changes nothing, and the subtask ends as
+// the placement-refused failure it is, naming the 409 and the layer, without having waited. It used to spend the
+// whole wait - the lease's seat was the one thing the wait could still place on, and it keeps that seat out - and
+// end as a capacity defer saying no node had room.
+func TestANamedLayerItsOnlyNodeRefusedForGoodFailsAtOnceUnderAnyLease(t *testing.T) {
+	const wait = 5 // seconds: the TTL the buggy path spends in full, and far past what the fixed path needs
+	for _, route := range []string{"auto", "spread"} {
+		for _, leased := range []bool{false, true} {
+			name := route + "/no lease"
+			if leased {
+				name = route + "/text lease held"
+			}
+			t.Run(name, func(t *testing.T) {
+				compressPolls(t, 5*time.Millisecond, time.Second)
+				compressWait(t, 20*time.Millisecond, 0)
+				node, url := refusingNode(t, "fast-node", http.StatusConflict, func(f *fakeNode) { f.layers = oneCardRows(t) })
+				cfg := testCfg(t)
+				cfg.AgentPlacementWaitSec = wait
+				if leased {
+					dir, _ := holdLease(t, gpulease.ClassText, "held for the layer test")
+					cfg.GPULockPath = dir
+				}
+
+				start := time.Now()
+				results, sum, err := RunWith(t.Context(), cfg, neverLocal(t), layerContracts(1, "fast"), route, []string{url}, nil)
+				if err != nil {
+					t.Fatalf("Run: %v", err)
+				}
+				elapsed := time.Since(start)
+				pr := results[0]
+				if sum.Failed != 1 || sum.Deferred != 0 || sum.Waited != 0 || pr.Result.Deferred {
+					t.Fatalf("summary = %+v result = class %q reason %q err %q, want one placement-refused failure that never waited",
+						sum, pr.Result.DeferClass, pr.Result.Reason, pr.Err)
+				}
+				for _, want := range []string{"placement refused", "fast-node", "409", "declares no layer fast"} {
+					if !strings.Contains(pr.Err, want) {
+						t.Errorf("error = %q, want it to contain %q", pr.Err, want)
+					}
+				}
+				if pr.CapacityWaitSec != 0 || node.dispatches.Load() != 1 {
+					t.Errorf("capacity_wait_sec = %.2f dispatches = %d, want no wait and the 409 node asked once", pr.CapacityWaitSec, node.dispatches.Load())
+				}
+				if elapsed > wait*time.Second/2 {
+					t.Errorf("Run took %s, want it to return without spending the %d s wait", elapsed, wait)
+				}
+			})
+		}
+	}
+}
+
+// TestALeaseWaitStaysForABoxThatDeclaresTheLayer is the control for the test above, and what keeps the fix from
+// reading "a contract that names a layer never waits for a lease": the same 409 under the same text lease, but the
+// delegator's box DECLARES `fast`, so the seat the lease reserves could run the contract the moment it clears. The
+// subtask waits for it and ends as the holder-naming deferral, as TestRunNonCapacityRefusalThenReservedLocalStillWaits
+// pins for a contract that names no layer.
+func TestALeaseWaitStaysForABoxThatDeclaresTheLayer(t *testing.T) {
+	compressPolls(t, 5*time.Millisecond, time.Second)
+	compressWait(t, 20*time.Millisecond, 0)
+	cfg := oneCardConfig(t)
+	node, url := refusingNode(t, "fast-node", http.StatusConflict, func(f *fakeNode) { f.layers = oneCardRows(t) })
+	dir, _ := holdLease(t, gpulease.ClassText, "held for the layer test")
+	cfg.GPULockPath = dir
+	cfg.AgentPlacementWaitSec = 1
+
+	start := time.Now()
+	results, sum, err := RunWith(t.Context(), cfg, neverLocal(t), layerContracts(1, "fast"), "auto", []string{url},
+		&RunOptions{LocalDecider: layerDecider(cfg)})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if waited := time.Since(start); waited < time.Second {
+		t.Fatalf("Run returned after %s - it did not wait for the lease that holds the box's own seat", waited)
+	}
+	if sum.Deferred != 1 || sum.Infrastructure != 1 || sum.Failed != 0 {
+		t.Fatalf("summary = %+v, want the holder-naming deferral, not a placement-refused failure", sum)
+	}
+	if r := results[0].Result.Reason; !strings.Contains(r, `reason="held for the layer test"`) || !strings.Contains(r, "fast-node") {
+		t.Fatalf("reason = %q, want the holder AND the 409 named", r)
+	}
+	if got := node.dispatches.Load(); got != 1 {
+		t.Fatalf("the 409 node was asked %d times, want 1 (409 is not a capacity refusal; it is not re-asked)", got)
 	}
 }
 
