@@ -6,6 +6,13 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Docs — the last stale sentence filing a three-card Blackwell rig as `dual-gpu` (register I-07)
+
+`docs/systems/setup-installer.md`'s fleet history still said the three-card reference box was "a shape no tier id
+covers, which `Get-Profile` files as `dual-gpu`". That contradicts its own classification table and `setup/detect.ps1`,
+which file it as `blackwell-3x16` (shipped 0.113.32). Every doc that mentions `dual-gpu` was re-checked against the
+detector, and this was the last stale sentence.
+
 ## [0.158.1] - 2026-10-01 - A ComfyUI that answers HTTP but cannot render ends the wait and the batch; `gpu reserve` keeps the mem0 stack; an unreadable busy seat keeps the overflow off it
 
 ### Fixed — a ComfyUI that answers HTTP but can no longer render ends the wait and the batch (register C-83)
