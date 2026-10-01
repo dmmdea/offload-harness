@@ -259,7 +259,10 @@ than the per-node routes it reads.
 **Tailnet-only bind, enforced twice.** `fleet-ui` refuses to bind `0.0.0.0`/`[::]`/a bare `:port`
 outright, and refuses any non-loopback address unless `--listen-trusted-network` is passed — the same
 posture as `fleet-serve`. The default is `127.0.0.1:18813`; the flag exists for an operator who wants
-to check the fleet from another tailnet box, never for a public bind.
+to check the fleet from another tailnet box, never for a public bind. Apart from that bind safety, a
+box that lists `hailo-8l` also refuses a `--listen` port equal to its `hailo_endpoint`'s (18813 by
+default, so the default listen is refused there; pass another port), because that port is the Hailo
+sidecar's and the page would squat it (ADR 0038 amendment, register E-08).
 
 ## Observability and debugging
 
