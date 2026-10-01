@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/agent"
@@ -71,6 +72,15 @@ var (
 	enginePoll = 10 * time.Second
 	// engineProbeTimeout bounds one engine read (see LivenessPolicyFor).
 	engineProbeTimeout = 45 * time.Second
+	// seatRecoveries is how many times one run may wait for a downed seat and
+	// re-issue the failed model call (ADR 0066): the flagship engine died ten
+	// times on 2026-09-29 (median up-time 6.7 minutes), so one run can meet two.
+	// Each wait is bounded by the cold-load ceiling and the run's ceiling. Tests
+	// change it.
+	seatRecoveries = 2
+	// loadSettleWait bounds how long a finished run waits for the engine read that
+	// tells whether it shared the seat (Monitor.SettleLoad). Tests change it.
+	loadSettleWait = 2 * time.Second
 )
 
 // LivenessPolicyFor is THIS seat's stall policy: the admission budget while
@@ -101,6 +111,9 @@ func LivenessPolicyFor(cfg config.Config, known seatrate.Seat, admission time.Du
 		// /slots and /metrics only between batches (~34 s per prompt batch on
 		// the slowest tier). Inside a hold a timed-out read is no new evidence.
 		EngineProbeTimeout: engineProbeTimeout,
+		// A seat that goes down under the run is waited for and the failed call
+		// re-issued, bounded (ADR 0066).
+		SeatRecoveries: seatRecoveries,
 	}
 }
 
@@ -125,13 +138,66 @@ func engineActivityProbe(endpoint, seat string, load agent.SeatProbe) agent.Engi
 		}
 		act, err := seatload.ReadActivity(ctx, client, base, seat)
 		if err != nil {
-			return agent.EngineReading{}, err
+			// A connection REFUSED at the seat's own address, while llama-swap
+			// still lists the seat, is a dead engine (ADR 0066): nothing listens.
+			// act.Loaded is what says llama-swap answered and listed it: a refusal
+			// of llama-swap's OWN address (the service is down) is not the seat's
+			// engine, and a seat behind another machine's llama-swap that this box
+			// cannot reach is unreadable, never down.
+			return agent.EngineReading{Refused: act.Loaded && connRefused(err)}, err
 		}
 		if act.Starting {
 			return agent.EngineReading{Loading: true, State: strings.TrimPrefix(act.Source, "running-state:")}, nil
 		}
-		return agent.EngineReading{Fingerprint: act.Fingerprint, TokenFingerprint: act.TokenFingerprint, Summary: act.Summary()}, nil
+		return agent.EngineReading{
+			Fingerprint: act.Fingerprint, TokenFingerprint: act.TokenFingerprint, Summary: act.Summary(),
+			// llama-swap does not list the seat at all: not loaded, and nothing
+			// loading it (a loading seat was handled above).
+			NotLoaded: !act.Loaded,
+			Running:   act.Running, Waiting: act.Waiting,
+			// A source whose counters do not move through a prefill (llama-server's
+			// /slots; a vLLM exposition with no KV-usage gauge): the flat bound keeps
+			// the prefill allowance, stretched by the load.
+			PrefillBlind: act.ActSource == "slots" || act.KVGaugeMissing,
+		}, nil
 	}
+}
+
+// seatLoadOf is the load sampler behind Monitor.WithLoad (ADR 0066, register
+// C-66): how many runs this box has on the seat, this one included — the runs
+// the registry lists on it that are past admission (a run still admitting is not
+// at the engine yet, the same rule the local run cap counts by). nil when there
+// is no registry to read.
+func seatLoadOf(reg *gpuactivity.Registry, seat, selfID string) func() int {
+	if reg == nil || strings.TrimSpace(seat) == "" {
+		return nil
+	}
+	return func() int {
+		n := 1
+		for _, r := range reg.OnSeat(time.Now(), seat) {
+			if r.ID == selfID || r.Phase == gpuactivity.PhaseAdmission {
+				continue
+			}
+			n++
+		}
+		return n
+	}
+}
+
+// connRefused reports whether err is the seat's own address refusing the
+// connection: the process is gone. The remote-unreachable sentinel is not (a
+// loopback-bound seat on another box refuses every read from here, alive or
+// not); the text match covers Windows' "actively refused it", which is not
+// syscall.ECONNREFUSED.
+func connRefused(err error) bool {
+	if err == nil || errors.Is(err, seatload.ErrRemoteSeatUnreachable) {
+		return false
+	}
+	if errors.Is(err, syscall.ECONNREFUSED) {
+		return true
+	}
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "connection refused") || strings.Contains(s, "actively refused")
 }
 
 // coldLoadCeiling bounds one seat load observed mid-run (0.140.0): twice the
@@ -246,6 +312,52 @@ func stallOf(m *agent.Monitor) *agent.StallError {
 		return se
 	}
 	return nil
+}
+
+// seatDownOf is the monitor's cause when it is a seat-down verdict (ADR 0066),
+// else nil. A wedge carries the engine-flat stall it replaced, so stallOf reads
+// it too: seat-down is judged first wherever the two are told apart.
+func seatDownOf(m *agent.Monitor) *agent.SeatDownError {
+	if m == nil {
+		return nil
+	}
+	var sd *agent.SeatDownError
+	if errors.As(m.Cause(), &sd) {
+		return sd
+	}
+	return nil
+}
+
+// repackDuring is appended to a seat-down reason filed for a re-pack that failed.
+const repackDuring = " (during the structured re-pack)"
+
+// repackSeatDown is the `seat down:` reason for a structured re-pack that
+// failed because the run's seat went down (ADR 0066), or "" when it did not.
+// The loop's own recovery does not cover the re-pack (its request is not a
+// step, and the finished answer is already in hand), so a seat lost here ends
+// the run typed and the delegator re-places it. Two ways to know:
+//
+//   - the monitor filed a seat-down verdict while the re-pack was in flight (a
+//     wedge). It wraps the engine-flat stall it replaced, so stallOf reads it too
+//     and the stall arm would file it without the prefix: this is asked first;
+//   - the re-pack failed like a dead seat (transport: a refused connection, a
+//     5xx, a cut body) and a fresh read shows llama-swap listing the seat
+//     starting, stopping or not at all, or its engine refusing connections. A
+//     transport failure on a seat that reads ready and readable is the ordinary
+//     "structured re-pack unreachable" and stays one.
+func repackSeatDown(ctx context.Context, live *agent.Monitor, serr error, transport bool) string {
+	if live == nil {
+		return ""
+	}
+	if sd := seatDownOf(live); sd != nil {
+		return sd.Error() + repackDuring
+	}
+	if transport {
+		if sd := live.ConfirmSeatDown(ctx, serr); sd != nil {
+			return sd.Error() + repackDuring
+		}
+	}
+	return ""
 }
 
 // ceilingOf is the monitor's cause when it is the ceiling, else nil.

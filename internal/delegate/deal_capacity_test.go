@@ -11,6 +11,7 @@ package delegate
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"strconv"
 	"strings"
@@ -499,6 +500,85 @@ func TestPerPageRetryCapBacksOff(t *testing.T) {
 	}
 	if backedOff != 24-pageMaxIssues {
 		t.Fatalf("%d issues were backed off, want %d", backedOff, 24-pageMaxIssues)
+	}
+}
+
+// TestPerPageRetryCapCountsASeatDownIssueWhoseRetrySeatRanItAndFailed: an issue counts against its
+// page when a seat RAN it and produced no verified digest (ADR 0063 decision 8), and a seat-down
+// issue has two attempts. The first is the dead seat's: it says nothing about the page. The retry
+// is another node's, it ran the page and failed verification, and because the published result is
+// the FIRST attempt (mergeAttempts) the cap read only a seat-down defer and counted nothing: a page
+// that no seat could digest, on a fleet that kept losing a seat, was re-issued without end, at two
+// seat runs an issue.
+func TestPerPageRetryCapCountsASeatDownIssueWhoseRetrySeatRanItAndFailed(t *testing.T) {
+	compressPolls(t, 5*time.Millisecond, time.Second)
+	nodeA, urlA := eligibleNode(t, "node-a", "unused")
+	nodeA.pollByJob = func(jobID string, n int64) (map[string]any, int) {
+		return doneWire(t, seatDownWire("node-a", 1)), http.StatusOK
+	}
+	page := uniquePage("the page the retry seat cannot digest either")
+	var localCalls atomic.Int64 // the retry runs on the local seat and fails verification there
+	const issues = 6
+	var backedOff int
+	for issue := 1; issue <= issues; issue++ {
+		results, _, err := Run(t.Context(), testCfg(t), failingLocal(&localCalls), []core.AgentContract{pageContract(page)}, "remote", []string{urlA})
+		if err != nil {
+			t.Fatalf("issue %d: %v", issue, err)
+		}
+		if strings.Contains(results[0].Result.Reason, "page retry cap") {
+			backedOff++
+		}
+	}
+	if got := nodeA.dispatches.Load(); got != int64(pageMaxIssues) {
+		t.Fatalf("the node whose seat went down saw %d dispatches for %d issues of one page that fails on the retry seat too, want %d (the original and two re-issues)", got, issues, pageMaxIssues)
+	}
+	if got := localCalls.Load(); got != int64(pageMaxIssues) {
+		t.Fatalf("the retry seat ran the page %d times, want %d", got, pageMaxIssues)
+	}
+	if backedOff != issues-pageMaxIssues {
+		t.Fatalf("%d issues were backed off, want %d", backedOff, issues-pageMaxIssues)
+	}
+}
+
+// The other half: a seat-down issue whose retry did NOT fail the page is not counted, so the flag
+// that carries the retry's verdict must be set from the retry's own result, never unconditionally. A
+// retry that recovers forgets the page; a retry the local seat declined for capacity never ran it.
+func TestPerPageRetryCapDoesNotCountASeatDownIssueWhoseRetryDidNotFailThePage(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		retry func(calls *atomic.Int64) LocalRunner
+	}{
+		{"the retry recovers it", func(calls *atomic.Int64) LocalRunner {
+			return func(ctx context.Context, c core.AgentContract, _ LocalOptions) (core.AgentWireResult, error) {
+				calls.Add(1)
+				return core.AgentWireResult{SchemaVersion: core.AgentWireSchemaVersion, NodeID: "local", Seat: "local-seat",
+					Output: "verified digest", Structured: json.RawMessage(`{"answer":"verified digest"}`), StopReason: "done"}, nil
+			}
+		}},
+		{"the retry seat never ran it", capacityDeferLocal},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			compressPolls(t, 5*time.Millisecond, time.Second)
+			nodeA, urlA := eligibleNode(t, "node-a", "unused")
+			nodeA.pollByJob = func(jobID string, n int64) (map[string]any, int) {
+				return doneWire(t, seatDownWire("node-a", 1)), http.StatusOK
+			}
+			page := uniquePage("the page whose retry did not fail it")
+			var localCalls atomic.Int64
+			const issues = 6
+			for issue := 1; issue <= issues; issue++ {
+				results, _, err := Run(t.Context(), testCfg(t), tc.retry(&localCalls), []core.AgentContract{pageContract(page)}, "remote", []string{urlA})
+				if err != nil {
+					t.Fatalf("issue %d: %v", issue, err)
+				}
+				if strings.Contains(results[0].Result.Reason, "page retry cap") {
+					t.Fatalf("issue %d was backed off although no seat ran the page and failed it", issue)
+				}
+			}
+			if got := nodeA.dispatches.Load(); got != issues {
+				t.Fatalf("the node saw %d dispatches for %d issues, want every one", got, issues)
+			}
+		})
 	}
 }
 

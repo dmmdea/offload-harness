@@ -379,6 +379,21 @@ func (c *LLMClient) Chat(ctx context.Context, msgs []Msg, tools []ToolSpec, maxT
 		r.Body.Close()
 		tk.Release()
 		if seatwait.Retryable(r.StatusCode, string(b)) {
+			// A 5xx from llama-swap while the seat is NOT serving is the seat's
+			// failure, not contention (ADR 0066): a start that fails answers 500
+			// src=llama-swap to every request, and sleeping the 90 s contention
+			// budget on it — then reporting "seat contended, raise concurrencyLimit"
+			// — was the 2026-09-29 outage's wrong answer. The run's seat check asks
+			// llama-swap; a down seat returns at once, typed, to the loop's recovery
+			// wait. A 429 IS contention by definition and is never asked.
+			if r.StatusCode != http.StatusTooManyRequests {
+				if chk := SeatCheckFromContext(ctx); chk != nil {
+					if down, why := chk(ctx); down {
+						return Completion{}, &SeatDownError{Kind: SeatDownDied, Note: why,
+							cause: &StatusError{Code: r.StatusCode, Body: strings.TrimSpace(string(b))}}
+					}
+				}
+			}
 			if d, ok := budget.NextFor(r.StatusCode, retryAfter); ok {
 				// The seat ANSWERED (busy): liveness, not a token. A touch keeps
 				// the stall watch from reading a counted wait as a dead seat.

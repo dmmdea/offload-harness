@@ -116,12 +116,38 @@ type StallPolicy struct {
 	// producing a token for anyone (a preempt-and-recompute thrash) before the
 	// run stalls; never below the flat bound. 0 = three flat bounds.
 	EngineTokenFlat time.Duration
+	// SeatRecoveries (ADR 0066) is how many times ONE run may wait for a downed
+	// seat and re-issue the model call that failed, instead of ending: the seat's
+	// engine hung with work outstanding, or died and llama-swap no longer serves
+	// the seat. The loop holds the transcript, so a recovery loses nothing. 0 =
+	// none: a seat-down verdict ends the run, typed. The wait itself is bounded
+	// by ColdLoad (and the run's ceiling), so a recovery needs a cold-load
+	// ceiling and an engine probe.
+	SeatRecoveries int
 }
 
-// Allowance is the stall bound for a phase. pendingPromptTokens is the size
-// of the prompt the seat is prefilling (0 outside prefill); for PhaseRepack it
-// is the expected size of the re-packed answer in tokens.
+// Allowance is the stall bound for a phase on a seat this run has to itself.
+// pendingPromptTokens is the size of the prompt the seat is prefilling (0
+// outside prefill); for PhaseRepack it is the expected size of the re-packed
+// answer in tokens.
 func (p StallPolicy) Allowance(ph Phase, pendingPromptTokens int) time.Duration {
+	return p.AllowanceLoad(ph, pendingPromptTokens, 1)
+}
+
+// AllowanceLoad is Allowance for a seat that `load` requests share, this one
+// included (ADR 0066, register C-66). The measured prefill rate is a
+// single-request rate, and an engine that batches load requests gives each of
+// them about 1/load of it: prefill = pending / (rate / load) x margin + slack,
+// and the re-pack's flat bound stretches by load the same way (the generation
+// estimate that can raise it above the flat bound, sized from the expected answer
+// at the seat's decode rate, is left as it is, like decoding). load <= 1 is
+// Allowance, exactly; the floor stays the definition of a silent SEAT. Decoding
+// is left as it is: its allowance is a count of deltas at the seat's own decode
+// rate, and a seat that decodes at 1/load of it is caught by the same floor.
+func (p StallPolicy) AllowanceLoad(ph Phase, pendingPromptTokens, load int) time.Duration {
+	if load < 1 {
+		load = 1
+	}
 	switch ph {
 	case PhaseAdmission:
 		return maxDur(p.Admission, p.Floor)
@@ -130,6 +156,7 @@ func (p StallPolicy) Allowance(ph Phase, pendingPromptTokens int) time.Duration 
 		if rate <= 0 {
 			rate = assumedPrefillTokS
 		}
+		rate /= float64(load)
 		d := time.Duration(float64(pendingPromptTokens)/rate*prefillMargin*float64(time.Second)) + p.Slack
 		return maxDur(d, p.Floor)
 	case PhaseDecoding:
@@ -149,7 +176,15 @@ func (p StallPolicy) Allowance(ph Phase, pendingPromptTokens int) time.Duration 
 		// (0.131.0: a flat 120 s for every answer size discarded 15 job-hours of
 		// finished loops in 12 days). A seat that streams resets this on every
 		// delta, so there it bounds silence, not the whole answer.
-		d := maxDur(p.Repack, p.Floor)
+		//
+		// The flat bound stretches by the load (ADR 0066), like the prefill's rate:
+		// a seat shared by `load` requests is not silent for a flat 120 s. The
+		// generation estimate does not: like the decoding allowance it is counted at
+		// the seat's own decode rate. The busy hold, not the allowance, carries
+		// correctness on a shared seat (an engine working for others holds the run),
+		// and scaling the estimate would hold a dead seat for `load` times what one
+		// request needs to write the expected answer.
+		d := maxDur(p.Repack*time.Duration(load), p.Floor)
 		if p.TokS > 0 && pendingPromptTokens > 0 {
 			d = maxDur(d, time.Duration(float64(pendingPromptTokens)/p.TokS*repackMargin*float64(time.Second))+p.Slack)
 		}
@@ -345,6 +380,48 @@ type Monitor struct {
 	engUnreadableSince time.Time
 	busyClosed         bool
 	holdAnchor         time.Time
+	// engGone counts consecutive reads that found the seat missing from
+	// llama-swap's /running inside an established hold (ADR 0066): one sighting
+	// may be a transition, two are a dead engine.
+	engGone int
+	// Seat down (ADR 0066). step is the model call the loop has in flight (the
+	// scope a recoverable verdict cancels); down is the verdict the monitor filed
+	// for that call and downSince when (moot if the loop moves on); ep the outage
+	// the run is waiting out, which outlives the calls that meet it; downTotal the
+	// wall already booked waiting on downed seats; recoveries how many episodes
+	// landed (the re-issued call's first byte arrived). parked: the timers are
+	// stopped and the loop owns the wait; a timer callback that fires anyway
+	// returns.
+	step       *stepScope
+	down       *SeatDownError
+	downSince  time.Time
+	ep         *seatEpisode
+	downTotal  time.Duration
+	recoveries int
+	parked     bool
+	// seatReadErrs counts the reads of the seat (a failed call's confirmation, the
+	// chat client's check, the wait's polls) that could not be answered, and
+	// seatReadErr keeps the last: without them a seat that cannot be read from here
+	// silently gets no recovery and a give-up cannot say why.
+	seatReadErrs int
+	seatReadErr  error
+	// Load (ADR 0066, register C-66). loadFn samples how many requests share the
+	// seat (this run's included) when a prefill or re-pack begins; load is what
+	// the current phase's allowance was sized with; engLoad the engine's own
+	// running + waiting when it last did work (the load the flat bound of a
+	// prefill-blind engine is sized with; engBlind says whether that engine is
+	// one); loadPeak the highest load either source ever showed this run.
+	// loadPeak > 1 means the run was NOT solo, and what it timed is not the
+	// seat's single-request rate; 0 means nothing ever answered, which is not
+	// the same as solo.
+	loadFn   func() int
+	load     int
+	engLoad  int
+	engBlind bool
+	loadPeak int
+	// loadDone: non-nil while an engine read for the load is in flight (SampleLoad
+	// keeps at most one); closed when it lands.
+	loadDone chan struct{}
 }
 
 // NewMonitor wraps parent with a ceiling deadline and a stall watch. The
@@ -401,7 +478,7 @@ func (m *Monitor) onCeiling() {
 
 func (m *Monitor) onStall() {
 	m.mu.Lock()
-	if m.stopped || m.cause != nil {
+	if m.stopped || m.cause != nil || m.parked {
 		m.mu.Unlock()
 		return
 	}
@@ -547,6 +624,12 @@ func (m *Monitor) fileStallLocked(amend ...func(*StallError)) {
 	for _, f := range amend {
 		f(se)
 	}
+	if sd := m.seatDownFromStallLocked(se); sd != nil {
+		// The engine did no work for the flat bound: a seat down, not a per-run
+		// stall (ADR 0066). It carries the stall it replaced.
+		m.fileSeatDownLocked(sd)
+		return
+	}
 	m.cause = se
 	m.cancel(m.cause)
 }
@@ -642,7 +725,7 @@ func (m *Monitor) stopProbeLocked() {
 // ends on the first byte (Progress), on a phase change, or at its bound.
 func (m *Monitor) onProbeTick() {
 	m.mu.Lock()
-	if m.stopped || m.cause != nil || m.probing || !m.probeArmedLocked() ||
+	if m.stopped || m.cause != nil || m.parked || m.probing || !m.probeArmedLocked() ||
 		(!m.awaitingByteLocked() && m.phase != PhaseColdLoad) {
 		m.mu.Unlock()
 		return
@@ -768,14 +851,24 @@ func (m *Monitor) note() string {
 	if m.phase == PhaseRepack {
 		// The arithmetic sizes the allowance only when both the seat's rate and the
 		// expected size are known; otherwise the flat bound did, and the reason
-		// says so instead of leaving a 120 s stall unexplained.
-		switch {
-		case m.pol.TokS <= 0:
-			return ": flat re-pack bound, no measured decode rate for this seat"
-		case m.pending <= 0:
+		// says so instead of leaving a 120 s stall unexplained. The flat bound
+		// stretches with the load (AllowanceLoad), so a run that shared the seat
+		// prints that too.
+		if m.pol.TokS <= 0 || m.pending <= 0 {
+			if m.load > 1 {
+				return fmt.Sprintf(": re-pack bound %.0fs x load %d", m.pol.Repack.Seconds(), m.load)
+			}
+			if m.pol.TokS <= 0 {
+				return ": flat re-pack bound, no measured decode rate for this seat"
+			}
 			return ": flat re-pack bound, expected size unknown"
 		}
-		return fmt.Sprintf(": %d expected tok / %.1f tok/s x %.1f + %.0fs", m.pending, m.pol.TokS, repackMargin, m.pol.Slack.Seconds())
+		note := fmt.Sprintf(": %d expected tok / %.1f tok/s x %.1f + %.0fs", m.pending, m.pol.TokS, repackMargin, m.pol.Slack.Seconds())
+		if m.load > 1 {
+			// The estimate is held against the flat bound, which the load stretched.
+			note += fmt.Sprintf("; flat re-pack bound %.0fs x load %d", m.pol.Repack.Seconds(), m.load)
+		}
+		return note
 	}
 	if m.phase != PhasePrefill {
 		return ""
@@ -783,6 +876,11 @@ func (m *Monitor) note() string {
 	rate, src := m.pol.PrefillTokS, ""
 	if rate <= 0 {
 		rate, src = assumedPrefillTokS, " assumed"
+	}
+	if m.load > 1 {
+		// The seat was shared by `load` requests when this prefill began: the rate
+		// is one request's, so each gets about 1/load of it (AllowanceLoad).
+		return fmt.Sprintf(": %d tok / (%.0f tok/s%s / load %d) x %.1f + %.0fs", m.pending, rate, src, m.load, prefillMargin, m.pol.Slack.Seconds())
 	}
 	return fmt.Sprintf(": %d tok / %.0f tok/s%s x %.1f + %.0fs", m.pending, rate, src, prefillMargin, m.pol.Slack.Seconds())
 }
@@ -798,6 +896,7 @@ func (m *Monitor) ToolPhase(cap time.Duration) {
 	m.endBusyLocked(time.Now())
 	m.tokens += m.callTok
 	m.callTok = 0
+	m.parked, m.down = false, nil // the loop moved on: a seat-down verdict for the call before is moot
 	m.phase, m.pending = PhaseTool, 0
 	m.epoch++
 	m.warming, m.postReady = false, false
@@ -813,6 +912,7 @@ func (m *Monitor) ToolPhase(cap time.Duration) {
 // Phase moves the run to ph; a phase change is itself progress. The finished
 // call's tokens are folded into the run total.
 func (m *Monitor) Phase(ph Phase, pendingPromptTokens int) {
+	load, sampled := m.sampleLoad(ph) // a file read at most: never under the lock
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.stopped || m.cause != nil {
@@ -821,8 +921,13 @@ func (m *Monitor) Phase(ph Phase, pendingPromptTokens int) {
 	m.endBusyLocked(time.Now())
 	m.tokens += m.callTok
 	m.callTok = 0
+	m.parked, m.down = false, nil // the loop moved on: a seat-down verdict for the call before is moot
 	m.phase, m.pending = ph, pendingPromptTokens
-	m.allow = m.pol.Allowance(ph, pendingPromptTokens)
+	m.load = load
+	if sampled && load > m.loadPeak {
+		m.loadPeak = load
+	}
+	m.allow = m.pol.AllowanceLoad(ph, pendingPromptTokens, load)
 	m.last = time.Now()
 	m.epoch++
 	m.timer.Reset(m.allow)
@@ -855,6 +960,7 @@ func (m *Monitor) Progress(tokensSoFar int) {
 		m.callTok = tokensSoFar
 		m.warming, m.postReady = false, false
 		m.engFP, m.engTokFP = "", "" // the request moved: the next busy hold takes a fresh look
+		m.landEpisodeLocked(now)     // a byte arrived: the seat that was down serves
 		if m.phase == PhaseQueued {
 			// Its turn came: back to the phase it waited in (a prefill's first
 			// delta then ends the prefill just below).
@@ -885,6 +991,7 @@ func (m *Monitor) Progress(tokensSoFar int) {
 func (m *Monitor) Stop() {
 	m.mu.Lock()
 	m.stopped = true
+	m.closeEpisodeLocked(time.Now())
 	m.timer.Stop()
 	m.ceiling.Stop()
 	m.stopProbeLocked()

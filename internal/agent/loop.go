@@ -145,6 +145,14 @@ type Result struct {
 	Calls      []CallRecord
 	Transcript []Msg
 
+	// SeatRecoveries (ADR 0066) counts the times the run's seat went down under it
+	// and came back: each one is a wait the run survived with its transcript intact
+	// and no step spent, counted when the re-issued call's first byte arrived —
+	// never for a re-issue that recovered nothing. Set on every return path (Run
+	// stamps it from the liveness monitor, the run's single witness); 0 on every run
+	// whose seat stayed up.
+	SeatRecoveries int
+
 	// Fallback is set only by RunTwoTier (two-tier drive): it records whether the
 	// architect/editor plan-then-execute path ran (FallbackNone) or a fallback to a
 	// single-model editor run occurred, and why. Empty on ordinary single-loop runs.
@@ -668,8 +676,13 @@ func (l *Loop) progressFunc(runTotalBefore int) ProgressFunc {
 	if l.live == nil && l.observer == nil {
 		return nil
 	}
+	sampled := false // one call's first delta: the end of its prefill window
 	return func(n int) {
 		if l.live != nil {
+			if n > 0 && !sampled {
+				sampled = true
+				l.live.SampleLoad()
+			}
 			l.live.Progress(n)
 		}
 		if l.observer != nil {
@@ -870,6 +883,9 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 		res.FinalBudgetFit, res.BudgetNote = bs.fit, bs.note
 	}
 	res.FinalReissue = bs.reissue
+	if l.live != nil {
+		res.SeatRecoveries = l.live.SeatRecoveries()
+	}
 	res.PrefillSamples = l.prefillSamples
 	return res, err
 }
@@ -1061,6 +1077,12 @@ func (l *Loop) run(ctx context.Context, objective string, bs *budgetState) (Resu
 			Transcript: msgs, TokensIn: tokIn, TokensOut: tokOut, CompactionsExhausted: exhausted, TokenCal: l.calReport(),
 			Prefill: l.prefill.Report(), Pager: l.pager.Report(), TokenizerPath: l.tokPath(), Effects: effects, RuleHits: ruleHits, Calls: calls}
 	}
+	// seatDownResult is the error Result for a run the seat went down under — a
+	// closure over the run-locals for the same reason as cutResult above.
+	seatDownResult := func(steps int) Result {
+		return Result{Steps: steps, StopReason: "error", Transcript: msgs, TokensIn: tokIn, TokensOut: tokOut, CompactionsExhausted: exhausted,
+			TokenCal: l.calReport(), Prefill: l.prefill.Report(), Pager: l.pager.Report(), TokenizerPath: l.tokPath(), Effects: effects, RuleHits: ruleHits, Calls: calls}
+	}
 
 	for step := 0; step < l.maxSteps; step++ {
 		if err := ctx.Err(); err != nil {
@@ -1186,6 +1208,7 @@ func (l *Loop) run(ctx context.Context, objective string, bs *budgetState) (Resu
 		// The list-cap re-issue answers at the budget the CUT turn had, never
 		// less: the explicit caps are what makes the answer fit, and shrinking
 		// the room as well would only guarantee a second cut.
+		savedFloor := reissueFloor // a seat-down re-issue of this step must open at the same budget
 		if reissueFloor > stepMax {
 			stepMax = reissueFloor
 		}
@@ -1206,7 +1229,44 @@ func (l *Loop) run(ctx context.Context, objective string, bs *budgetState) (Resu
 			stepCtx = ContextWithProgress(stepCtx, fn)
 		}
 		callStart := time.Now()
-		comp, err := l.client.Chat(stepCtx, msgs, specs, stepMax)
+		// seatDown handles a model call that failed because the SEAT went down
+		// under the run (ADR 0066). The loop keeps the transcript, so the step is
+		// re-issued once the seat can take it — the wait, its bound and the rule that
+		// a seat which came back and died under the same step ends the run are the
+		// monitor's (AwaitSeat, an episode under the cold-load hold) — and a re-issue
+		// spends no step. retry=true means "run this step again"; otherwise the
+		// Result and error end the run, typed.
+		seatDown := func(sd *SeatDownError) (retry bool, res Result, rerr error) {
+			if sd.terminal || l.live == nil {
+				return false, seatDownResult(step), sd
+			}
+			if werr := l.live.AwaitSeat(ctx, sd); werr != nil {
+				return false, seatDownResult(step), werr
+			}
+			retryNoThink = thisIsReissue
+			reissueFloor = savedFloor
+			return true, Result{}, nil
+		}
+		callCtx, endCall := l.beginCall(stepCtx)
+		comp, err := l.client.Chat(callCtx, msgs, specs, stepMax)
+		if err != nil {
+			// A seat that went down is judged FIRST: the monitor's own cancel of
+			// this call reads as "context canceled" (which the overflow retry below
+			// would answer with a second request to a dead seat), and a cut stream
+			// or a 5xx is confirmed against llama-swap before it is called one.
+			sd := l.seatDownFor(ctx, callCtx, err)
+			endCall()
+			if sd != nil {
+				retry, res, rerr := seatDown(sd)
+				if retry {
+					step-- // the re-issue does not spend a step
+					continue
+				}
+				return res, rerr
+			}
+		} else {
+			endCall()
+		}
 		if err != nil {
 			// A CUT TOOL CALL (register D-114) is the seat running out of
 			// COMPLETION budget in the middle of a tool argument: llama.cpp
@@ -1296,11 +1356,28 @@ func (l *Loop) run(ctx context.Context, objective string, bs *budgetState) (Resu
 				} else if rv == fitUnknown && estimateTokens(msgs) > target {
 					exhausted++ // even the last resort could not fit — counted, never silent
 				}
-				comp, err = l.client.Chat(stepCtx, msgs, specs, stepMax)
+				retryCtx, endRetry := l.beginCall(stepCtx)
+				comp, err = l.client.Chat(retryCtx, msgs, specs, stepMax)
+				var sd2 *SeatDownError
+				if err != nil {
+					sd2 = l.seatDownFor(ctx, retryCtx, err)
+				}
+				endRetry()
+				if sd2 != nil {
+					retry, res, rerr := seatDown(sd2)
+					if retry {
+						step-- // the re-issue does not spend a step
+						continue
+					}
+					return res, rerr
+				}
 			}
 			if err != nil {
 				return Result{Steps: step, StopReason: "error", Transcript: msgs, TokensIn: tokIn, TokensOut: tokOut, CompactionsExhausted: exhausted, TokenCal: l.calReport(), Prefill: l.prefill.Report(), Pager: l.pager.Report(), TokenizerPath: l.tokPath(), Effects: effects, RuleHits: ruleHits, Calls: calls}, err
 			}
+		}
+		if l.live != nil {
+			l.live.SeatAnswered() // the step got its answer: the seat serves, and a later seat-down earns its own wait
 		}
 		noteUsage(comp)
 		l.notePrefill(comp)

@@ -64,7 +64,10 @@ const (
 	// ReasonNoEligibleNode: route=remote, or a failing fleet, with nothing eligible.
 	ReasonNoEligibleNode = "no_eligible_node"
 
-	// ReasonSeatDown: the seat the job needed was unreachable.
+	// ReasonSeatDown: the seat the job needed could not serve it: it was unreachable,
+	// went down under the run and did not come back inside the node's recovery wait
+	// (`seat down:`, ADR 0066), or answered llama-swap's 5xx past the node's busy-seat
+	// wait (`seat not serving:`, the same ADR) — the seat itself, not its peers.
 	ReasonSeatDown = "seat_down"
 	// The stall codes name the phase a run went silent in (ADR 0055, 0061): the
 	// node's own liveness verdict, filed as infrastructure.

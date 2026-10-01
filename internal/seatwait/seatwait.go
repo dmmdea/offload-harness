@@ -46,6 +46,28 @@ type Budget struct {
 	attempts   int
 	lastStatus int
 	sleeping   bool // a reserved sleep is in progress (Sleep on this budget)
+	gate       SeatGate
+}
+
+// SeatGate answers, before the budget waits out a busy answer other than 429,
+// whether the seat is NOT SERVING right now (ADR 0066). It reads the seat, so it may
+// take a moment and must be safe to call from any client of the contract.
+type SeatGate func(status int) (down bool)
+
+// WithSeatGate installs the gate: while it says the seat is not serving, NextFor
+// refuses the wait. A 5xx from llama-swap on a seat whose engine died or cannot start
+// is the seat's failure, not peers holding its slots — sleeping the contention budget
+// on it (90 s by default) only delays the run's typed outcome. A 429 is contention by
+// definition and is never asked. It is the seam every client of the budget shares,
+// the structured re-pack's included, so none of them needs its own check. Returns b.
+func (b *Budget) WithSeatGate(g SeatGate) *Budget {
+	if b == nil {
+		return nil
+	}
+	b.mu.Lock()
+	b.gate = g
+	b.mu.Unlock()
+	return b
 }
 
 // NewBudget builds a Budget from the config value in seconds: 0 = the
@@ -75,10 +97,18 @@ func (b *Budget) NextFor(status int, retryAfter string) (time.Duration, bool) {
 		return 0, false
 	}
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	if status != 0 {
 		b.lastStatus = status
 	}
+	gate := b.gate
+	b.mu.Unlock()
+	// The seat is asked outside the lock (it reads the seat), and BEFORE the budget's
+	// own bookkeeping: a budget that never waits still has to say why the failure stands.
+	if gate != nil && status != 0 && status != 429 && gate(status) {
+		return 0, false
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	if b.max <= 0 {
 		return 0, false
 	}

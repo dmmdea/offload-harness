@@ -223,7 +223,18 @@ func (c *pageRetryCap) record(key string, failed bool) {
 // above would count. "The seat hit its budget on this page" is not what happened - the
 // call ran out of time, and a healthy page still running when a slower sibling used
 // the time up is cut exactly like a slow one. deadlineCut tells them apart.
+//
+// An issue that was retried counts by what a seat that RAN the page produced in either
+// attempt. The published result is the first attempt unless the retry recovered, and a
+// first attempt that stands as a seat-down defer (a dead seat, an infrastructure defer)
+// ran nothing to a verdict: the retry seat did, and mergeAttempts carries its verdict in
+// retryRanAndFailed. A retry that recovers forgets the page, and one no seat ran (a full
+// node, a local seat that declined it, or one the call's deadline cut: deadlineCut again,
+// read on the retry's own result) adds nothing.
 func pageIssueFailed(pr PlacedResult) bool {
+	if pr.retryRanAndFailed {
+		return true
+	}
 	switch {
 	case pr.Unplaced || pr.shed || pr.deadlineCut:
 		return false
