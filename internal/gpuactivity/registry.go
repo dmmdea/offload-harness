@@ -418,6 +418,11 @@ func (h *Handle) OnAllowance(phase string, allowance time.Duration) {
 }
 
 // End removes the record and stops the heartbeat. Idempotent.
+//
+// The delete is retried like write()'s rename: on Windows it fails with a sharing
+// violation while a reader (a drain, a status call) has the record open, and an
+// ignored failure left the run registered with its heartbeat stopped until
+// HeartbeatTTL aged it out, so a drain waited on a run that had ended (register C-84).
 func (h *Handle) End() {
 	if h == nil {
 		return
@@ -426,9 +431,22 @@ func (h *Handle) End() {
 		close(h.stop)
 		h.mu.Lock()
 		defer h.mu.Unlock()
-		_ = os.Remove(h.path)
-		_ = os.Remove(h.path + ".tmp")
+		removeRetrying(h.path)
+		removeRetrying(h.path + ".tmp")
 	})
+}
+
+// removeRetrying deletes path, retrying a delete that fails while another handle
+// holds the file for at most the window write() gives a rename; a path that is
+// already gone counts as removed.
+func removeRetrying(path string) {
+	const attempts, pause = 20, 5 * time.Millisecond
+	for i := 0; i < attempts; i++ {
+		if err := os.Remove(path); err == nil || os.IsNotExist(err) {
+			return
+		}
+		time.Sleep(pause)
+	}
 }
 
 // write persists the record atomically (tmp + rename), so a reader never sees a
