@@ -50,14 +50,14 @@ Two independent limits keep a weak model from burning the budget on nothing:
   meters in characters instead of by call. `read_file` pages (`offset`/`limit`) and its own hint
   tells the seat to ("use offset=N to continue"), so a seat doing as told spent one call per page:
   on 2026-10-01 a seat was refused its ninth read of a 12,005-character document having taken in
-  about 8 KB of it, and with every result cut at the loop's per-result cap (six of the eight were
-  exactly 1,090 characters) eight reads could never have held that document. For `read_file` the
-  same-tool cap now counts *files*: the first read of each path counts, so a six-file
-  reconnaissance costs six and the ninth distinct file is still refused, while a new page of a file
-  the run has already read costs characters, not a call. An exact repeat, a read that failed (a
-  path that does not exist is not "being read") and a call whose path cannot be read count as
-  before, and no other tool is affected. Every `read_file` result is charged to a per-run budget at
-  the length the transcript keeps — after the loop-boundary trim, the figure the effect ledger
+  about 8 KB of it, and with the loop's per-result cap evidently at 1,090 characters (six of the
+  eight results were exactly that long) eight reads could never have held that document. For
+  `read_file` the same-tool cap now counts *files*: the first read of each path counts, so a
+  six-file reconnaissance costs six and the ninth distinct file is still refused, while a new page
+  of a file the run has already read costs characters, not a call. An exact repeat, a read that
+  failed (a path that does not exist is not "being read") and a call whose path cannot be read count
+  as before, and no other tool is affected. Every `read_file` result is charged to a per-run budget
+  at the length the transcript keeps — after the loop-boundary trim, the figure the effect ledger
   records as `obs_chars`; once the budget is spent the next read is refused and `read_file` is
   withdrawn like any capped tool (the call that crosses the line completes, so the overshoot is at
   most one result). The setup replay is not charged. The default is the larger of the step budget
