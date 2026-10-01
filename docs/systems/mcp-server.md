@@ -71,7 +71,9 @@ side channel and is not part of the Cascade — nothing escalates or falls back 
 NVIDIA's hosted hosts (0.143.1), and a caller-named `base` must be NVIDIA's hosted API,
 `nim_endpoint` or a `nim_bases` entry (0.144.2, security standard L5): under `nim_base_policy`
 `audit` (the default) any other base runs, the result carries `base_policy`, and a would-refuse row
-(scheme, host and port only) is appended to `<state_dir>/nim-base-audit.jsonl`; under `enforce` it is
+(scheme, host and port only) is appended to `nim-base-audit.jsonl` in the machine-wide state root the GPU
+lease uses (`state_dir`, else `LOCAL_OFFLOAD_STATE_DIR`, else `%ProgramData%\local-offload` or
+`/var/lib/local-offload`); under `enforce` it is
 deferred before any request leaves.
 
 `offload_browse` (0.141.0, ADR 0060) drives the operator's own browser and is registered only when

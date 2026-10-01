@@ -2174,7 +2174,16 @@ func (s *Server) handleNIM(ctx context.Context, req *mcp.CallToolRequest) (*mcp.
 			if cfg.NIMBaseEnforced() {
 				mode = "enforce"
 			}
-			auditErr := appendNIMBaseAudit(cfg.StateDir, in.Base, why, mode)
+			// The row goes to the machine-wide state root the GPU lease uses:
+			// state_dir, else LOCAL_OFFLOAD_STATE_DIR, else the platform default.
+			// Reading cfg.StateDir alone dropped every row on hosts that leave
+			// state_dir unset (SF-05).
+			var auditErr error
+			if root, rerr := gpulease.ResolveStateRoot(cfg.StateDir); rerr != nil {
+				auditErr = rerr
+			} else {
+				auditErr = appendNIMBaseAudit(root, in.Base, why, mode)
+			}
 			if mode == "enforce" {
 				return jsonResult(map[string]any{"deferred": true, "defer_class": string(core.DeferClassConfig),
 					"reason": "offload_nim base refused (nim_base_policy enforce): " + why + "; add it to nim_bases if it is a NIM you run"})
