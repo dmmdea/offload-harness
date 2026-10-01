@@ -46,7 +46,7 @@ honestly serves text only.
 | `imagegen_cfg` | `1` |
 | `imagegen_ckpt` | `hidream_o1_image_dev_mxfp8.safetensors` |
 | `imagegen_engine` | `` |
-| `imagegen_families` | `map[qwen-image:map[commercial_use:true imagegen_ckpt:qwen-image-2512-Q5_1.gguf imagegen_engine: imagegen_family:qwen-image imagegen_preset:lightning4 imagegen_timeout_sec:2400 license:Apache-2.0] qwen-image-2.1:map[comfy_dynamic_vram:on commercial_use:false imagegen_cfg:1 imagegen_ckpt:qwen_image_2.1_bf16.safetensors imagegen_clip:qwen3vl_8b_bf16.safetensors imagegen_engine: imagegen_family:qwen-image-2.1 imagegen_reserve_vram:1 imagegen_sampler:euler imagegen_schedule:official imagegen_scheduler:simple imagegen_steps:40 imagegen_timeout_sec:2400 imagegen_vae:qwen_image_2.1_vae_bf16.safetensors license:Qwen Research License (non-commercial)]]` |
+| `imagegen_families` | `map[qwen-image:map[commercial_use:true imagegen_ckpt:qwen-image-2512-Q5_1.gguf imagegen_engine: imagegen_family:qwen-image imagegen_preset:lightning4 imagegen_timeout_sec:2400 license:Apache-2.0] qwen-image-2.1:map[comfy_dynamic_vram:on commercial_use:false imagegen_cfg:1 imagegen_ckpt:qwen_image_2.1_bf16.safetensors imagegen_clip:qwen3vl_8b_bf16.safetensors imagegen_engine: imagegen_family:qwen-image-2.1 imagegen_reserve_vram:1 imagegen_sampler:euler imagegen_schedule:official imagegen_scheduler:simple imagegen_steps:40 imagegen_timeout_sec:2400 imagegen_vae:qwen_image_2.1_vae_bf16.safetensors license:Qwen Research License]]` |
 | `imagegen_family` | `hidream-o1-dev` |
 | `imagegen_script` | `render/comfy-generate.mjs` |
 | `imagegen_steps` | `28` |

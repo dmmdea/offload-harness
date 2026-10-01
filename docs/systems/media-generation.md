@@ -503,9 +503,8 @@ outside `[a-z0-9._-]`, or a name that collides with the default binding's own fa
 also checked by the same binding-trap warnings as the default, with its name in front.
 
 **Every result is tagged.** Results carry `family` (the default binding's own name for an unnamed
-request), and `license` + `commercial_use` whenever the binding declares them; a `commercial_use:
-false` result also carries `license_note` ("research/evaluation use only under <license>; not for
-commercial work"). The ledger row carries `license` (`ledger.Entry.License`; absent = UNKNOWN, never
+request), and `license` + `commercial_use` whenever the binding declares them (no warning sentence
+rides along: `license_note` was removed by operator order on 2026-10-01). The ledger row carries `license` (`ledger.Entry.License`; absent = UNKNOWN, never
 "safe"). `offload_status` lists `media.image_families` / `media.edit_families` — name, graph family,
 engine, checkpoint, license, commercial_use (null = undeclared) and the route verdict — and
 `/fleet/health` publishes `image_families` with the same license flags — including on a node with NO
@@ -517,8 +516,8 @@ label for a route this node does not serve. A dispatch naming no `family` on suc
 the plain "no image-gen route configured" defer (same as any unconfigured node), never a silent
 render of one family as if it were the default. A warm batch
 (`generate-image --batch`) always renders the default binding, so every batch item — and the batch
-payload's top level — carries that binding's `family` and, when declared, its `license`,
-`commercial_use` and `license_note`. `width`/`height` in a
+payload's top level — carries that binding's `family` and, when declared, its `license`
+and `commercial_use`. `width`/`height` in a
 `generate_image` or `edit_image_generative` result are **measured** from the written file
 (`imagegen.OutputSize`), not echoed from the request.
 
@@ -541,7 +540,7 @@ unknown value exits 2 before any GPU work — it used to render the generic SDXL
 **`doctor` sees the whole family.** `media.routes` gains `generate_image:<name>` and
 `edit_image_generative:<name>`: CONFIGURED only when the family's script resolves AND every model file
 its graph opens sits in the class directory the loader reads (resolved under the family's own
-`comfy_dir`); the verdict leads with `NON-COMMERCIAL (<license>)` for a research family. The `comfyui
+`comfy_dir`); the verdict names the family's license (`license <name>`). The `comfyui
 model bindings` section also resolves the files a binding's graph loads WITHOUT a key naming them — a
 preset's Lightning LoRA (`qwen-image` `lightning4`, 2511 `lightning8`/`lightning4`) and a builder's
 default text encoder and VAE — so an edit route bound to preset `lightning8` with its LoRA on no models
@@ -749,8 +748,8 @@ protects the environment from it. `compose_video`'s `html` and `project_dir` inp
 kind of trusted-caller interface: the page runs in a Chrome without a sandbox. The fleet door
 therefore accepts vetted templates only. See [Security](#security) below.
 
-**Licenses.** A family that declares a license tags its output (`license`, `commercial_use`, plus
-`license_note` when `commercial_use` is false) and its ledger row; the tag is informational and
+**Licenses.** A family that declares a license tags its output (`license`, `commercial_use`) and
+its ledger row; the tag is informational and
 enforces nothing. An absent license
 reads as UNKNOWN
 ([ADR 0058](../architecture/decisions/0058-non-commercial-model-families-ship-only-as-named-license-tagged-opt-ins.md)).

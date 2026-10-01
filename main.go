@@ -887,9 +887,6 @@ func runGenerateImage(args []string) error {
 			if fam.CommercialUse != nil {
 				payload["commercial_use"] = *fam.CommercialUse
 			}
-			if note := fam.LicenseNote(); note != "" {
-				payload["license_note"] = note
-			}
 		}
 		// Surface the refiner fallback count in the batch summary whenever a
 		// refiner is configured (0 = all jobs refined or opted out) — absent

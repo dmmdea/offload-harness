@@ -293,10 +293,7 @@ func withModelFiles(r Route, fcfg config.Config, prefix string, required, keys [
 }
 
 func licenseDetail(fi config.FamilyInfo) string {
-	switch {
-	case fi.NonCommercial():
-		return fmt.Sprintf("NON-COMMERCIAL (%s); ", fi.License)
-	case fi.License != "":
+	if fi.License != "" {
 		return fmt.Sprintf("license %s; ", fi.License)
 	}
 	return ""

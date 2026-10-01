@@ -1290,7 +1290,7 @@
         "inpaint_vae": "builtin",
         "imagegen_families": {
           "qwen-image-2.1": {
-            "license": "Qwen Research License (non-commercial)",
+            "license": "Qwen Research License",
             "commercial_use": false,
             "imagegen_engine": "",
             "imagegen_family": "qwen-image-2.1",

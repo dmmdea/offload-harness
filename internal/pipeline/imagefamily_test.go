@@ -155,7 +155,7 @@ func TestGenerateImageFamilyRendersTheOverlayAndTagsTheLicense(t *testing.T) {
 		t.Errorf("width/height = %v x %v, want the MEASURED 64 x 32 (the request said 2048)", payload["width"], payload["height"])
 	}
 	if payload["family"] != "qwen-image-2.1" || payload["license"] != "Qwen Research License" || payload["commercial_use"] != false ||
-		!strings.Contains(payload["license_note"].(string), "research/evaluation use only under Qwen Research License") ||
+		payload["license_note"] != nil ||
 		payload["transparent"] != true {
 		t.Errorf("payload = %v", payload)
 	}
@@ -220,7 +220,7 @@ func TestGenerateImageRefusesUnknownFamilyAndUnsupportedTransparency(t *testing.
 	res := p.Run(context.Background(), core.Request{Task: core.TaskGenerateImage, Input: "x",
 		Params: map[string]any{"family": "flux-dev"}})
 	if !res.Deferred || !strings.Contains(res.Reason, `unknown image family "flux-dev"`) ||
-		!strings.Contains(res.Reason, "krea2 (default), qwen-image-2.1 [non-commercial: Qwen Research License]") {
+		!strings.Contains(res.Reason, "krea2 (default), qwen-image-2.1") || strings.Contains(res.Reason, "non-commercial") {
 		t.Fatalf("unknown family: %+v", res)
 	}
 	res = p.Run(context.Background(), core.Request{Task: core.TaskGenerateImage, Input: "x",
@@ -351,7 +351,7 @@ func TestEditFamilyWiresReferencesAndRefusesMisuse(t *testing.T) {
 	}
 	var payload map[string]any
 	_ = json.Unmarshal(res.Data, &payload)
-	if payload["license_note"] == nil || payload["images"] != float64(3) || payload["width"] != float64(40) || payload["height"] != float64(24) {
+	if payload["license_note"] != nil || payload["images"] != float64(3) || payload["width"] != float64(40) || payload["height"] != float64(24) {
 		t.Errorf("payload = %v", payload)
 	}
 
@@ -454,15 +454,17 @@ func TestImageBatchItemsCarryTheDefaultBindingsLicense(t *testing.T) {
 		t.Fatalf("batch failed: %v", err)
 	}
 	for i, it := range items {
-		if it.Family != "krea2" || it.License != "Research-Only Test License" || it.CommercialUse == nil || *it.CommercialUse ||
-			!strings.Contains(it.LicenseNote, "research/evaluation use only under Research-Only Test License") {
-			t.Errorf("item %d = %+v, want the default binding's family, license, commercial_use:false and license_note", i, it)
+		if it.Family != "krea2" || it.License != "Research-Only Test License" || it.CommercialUse == nil || *it.CommercialUse {
+			t.Errorf("item %d = %+v, want the default binding's family, license and commercial_use:false", i, it)
 		}
 		b, _ := json.Marshal(it)
-		for _, k := range []string{`"family":"krea2"`, `"license":"Research-Only Test License"`, `"commercial_use":false`, `"license_note":`} {
+		for _, k := range []string{`"family":"krea2"`, `"license":"Research-Only Test License"`, `"commercial_use":false`} {
 			if !strings.Contains(string(b), k) {
 				t.Errorf("item %d JSON lacks %s: %s", i, k, b)
 			}
+		}
+		if strings.Contains(string(b), "license_note") {
+			t.Errorf("item %d JSON carries license_note (removed by operator order 2026-10-01): %s", i, b)
 		}
 	}
 
