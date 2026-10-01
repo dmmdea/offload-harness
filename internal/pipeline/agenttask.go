@@ -1672,7 +1672,20 @@ func (p *Pipeline) repackStructuredWith(ctx context.Context, seat string, rawSch
 	// handles, with each field's TYPE spelled out (register C-80: a prompt that
 	// lists names alone lets a seat read "numbers" and answer numbers for a list
 	// of strings).
+	//
+	// On the grammar lane the types are the GRAMMAR's reading of the schema, not the
+	// schema's own: gbnf compiles every array to a list of strings and a type it has
+	// none for (an object) to a string, and a prompt that says "array of numbers"
+	// beside a grammar that forces a quote after the `[` hands the seat a contradiction
+	// it can only settle by writing the numbers inside a string that never closes.
+	// The coercion below turns what the grammar admits into what the schema wants (a
+	// quoted number into a number, an item at a time), so the prompt says what the
+	// grammar allows. The vLLM lane constrains by the contract's own schema, and the
+	// chat lane has no grammar, so both read the schema's types.
 	props, _ := schema["properties"].(map[string]any)
+	if lane == "grammar" {
+		props, _ = gbnf.JSONSchema(fields)["properties"].(map[string]any)
+	}
 	system := "You extract structured data from text. Output ONLY a JSON object with exactly the requested fields. Use empty values when a field is absent. " + repackTypeRule
 	user := fmt.Sprintf("Extract these fields from the text: %s.\n\nTEXT:\n%s", repackFieldList(names, props), output)
 
