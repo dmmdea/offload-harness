@@ -435,7 +435,10 @@ test("pollOutputs: dead-server watchdog aborts after COMFY_DEAD_SEC of consecuti
 test("pollOutputs: an HTTP error status IS an answer — it resets the watchdog instead of feeding it", async () => {
   const c = clock();
   let polls = 0;
-  const fetchImpl = async () => {
+  const fetchImpl = async (url) => {
+    // A healthy server's /system_stats (C-83's probe): only /history errors here, which is
+    // what this test is about. A /system_stats that errored too would be a poisoned server.
+    if (String(url).endsWith("/system_stats")) return entry({ system: {} });
     polls++;
     // Polls 1-20: HTTP 500s — 40 virtual seconds, far past COMFY_DEAD_SEC=10, but every
     // one is an ANSWER (server alive), so each must re-base the watchdog clock.
@@ -518,6 +521,23 @@ test("pollOutputs: a prompt that never finishes while /system_stats answers HTTP
   assert.match(err.message, /\/system_stats answered HTTP 500/);
   assert.match(err.message, /restart/);
   assert.ok(probes >= 2, `one failed probe is not a verdict (probes: ${probes})`);
+  const spent = (c.now() - start) / 1000;
+  assert.ok(spent <= 90, `must abort within about a minute, spent ${spent} s`);
+});
+
+test("pollOutputs: a poisoned server whose /history ALSO answers HTTP errors is caught by the probe too (C-83 review)", async () => {
+  // The incident server said 200 {} on /history; a variant answers 5xx there. Every error
+  // status counts as an answer (the watchdog stays quiet), so only the probe can catch it.
+  const c = clock();
+  const start = c.now();
+  const fetchImpl = async () => http500();
+  const err = await pollOutputs({
+    api: "http://x", promptId: "p1", waitSec: 1500, isDone: () => false,
+    fetchImpl, sleep: c.sleep, now: c.now, env: {},
+  }).then(() => null, (e) => e);
+  assert.ok(err, "must not wait out the whole budget");
+  assert.equal(err.serverUnusable, true);
+  assert.match(err.message, /\/system_stats answered HTTP 500/);
   const spent = (c.now() - start) / 1000;
   assert.ok(spent <= 90, `must abort within about a minute, spent ${spent} s`);
 });
@@ -751,7 +771,8 @@ test("finalizeRun: PATH-guess ENOENT stays silent (submit already printed the on
 test("pollOutputs: an error status whose BODY read fails still counts as an answer, not dead time", async () => {
   const c = clock();
   let polls = 0;
-  const fetchImpl = async () => {
+  const fetchImpl = async (url) => {
+    if (String(url).endsWith("/system_stats")) return entry({ system: {} }); // healthy: see the C-83 probe
     polls++;
     if (polls <= 20) {
       // Server answers 502 but the error-page body read dies mid-stream.

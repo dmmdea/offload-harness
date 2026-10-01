@@ -121,7 +121,8 @@ things about that:
 - **The wait budget is wall-clock time.** `COMFY_WAIT_SEC` used to count polls, so slow `/history`
   answers stretched 1,500 s to 2,894 s. A suspend still moves the deadline by the time slept.
 - **A health probe runs while the prompt is unlisted.** Once the prompt has been missing from
-  `/history` for 15 s, `GET /system_stats` runs every 15 s. It calls into CUDA, so a broken context
+  `/history` for 15 s (or `/history` has answered with an error status instead),
+  `GET /system_stats` runs every 15 s. It calls into CUDA, so a broken context
   answers it with an HTTP error, and two such answers in a row end the wait. Every runner submits
   only after `/system_stats` answered OK, so an error there is a change, not an endpoint that never
   worked. A probe that gets no answer at all counts for nothing, because silence is the dead-server

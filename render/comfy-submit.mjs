@@ -398,16 +398,17 @@ export async function pollOutputs({
       if (nextProbeAt !== null) nextProbeAt += took;
       prevTickAt = now();
     }
-    if (failed) {
-      if (failed.httpStatus) { lastAnswerAt = now(); continue; } // an error status is an answer
+    if (failed && !failed.httpStatus) {
       const deadFor = Math.floor((now() - lastAnswerAt) / 1000);
       if (deadFor >= deadSec) {
         throw serverUnusableError(`ComfyUI stopped answering mid-render (unreachable ${deadFor}s, COMFY_DEAD_SEC=${deadSec}); aborting early to release the GPU slot`);
       }
       continue;
     }
-    lastAnswerAt = now();
-    const h = hist[promptId];
+    lastAnswerAt = now(); // an answer, even an HTTP error status: the server is up
+    // An error status on /history says nothing about this prompt, like an unlisted one:
+    // both go through the probe (a poisoned server may answer /history with a 5xx too).
+    const h = failed ? null : hist[promptId];
     if (!h) {
       if (nextProbeAt === null) { nextProbeAt = now() + STATS_PROBE_EVERY_MS; continue; }
       if (now() < nextProbeAt) continue;
