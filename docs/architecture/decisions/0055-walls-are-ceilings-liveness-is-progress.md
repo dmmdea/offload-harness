@@ -177,6 +177,47 @@ determine if a job is truly still going" — was not met by any of the three sur
      (`agent_warm_failure_defer`, off by default: the run proceeds and `admission_note` says it would have
      deferred); enforced, the delegator gives the defer one retry on another node, like the coherence defer.
 
+9. **The re-pack is bounded by the wall, and a cut request is not resent blindly (amendment
+   2026-10-01, register C-80).** Item 2 made the wall an expectation and the ceiling the only
+   deadline, and item 8 left the re-pack under the ceiling alone: nothing compared what an attempt
+   asked for with the time left. A 9B agent seat at about 5.6 tok/s ended its loop 219 s into a 600 s
+   wall and then spent 1,670 s re-packing a 2,782-byte answer: the grammar request, sized at 1,439
+   tokens, ended `length`; the same request, escalated unconditionally to the 8,192-token cap, ended
+   `length` again; and the chat lane answered JSON numbers where the schema wanted strings. Now:
+   - **The wall bounds each attempt, by arithmetic.** Before every attempt the node takes the time
+     left before `min(the run's ceiling, the wall's end + the liveness slack)` and the seat's decode
+     rate (the seat-rates store, else this run's observed rate, else `agent_seat_tok_s`). The slack
+     is the 30 s that the re-pack's own stall allowance already adds to its generation estimate, so
+     the bound and the allowance share one unit. An attempt whose `max_tokens` fits is sent as
+     sized; one that does not is sent with the tokens the time buys, down to the answer's own size
+     (`len/3 + 64` tokens); under that it is skipped, and so is every later attempt, because time
+     only runs out. With no known rate there is no arithmetic. A skip with no attempt before it is a
+     `budget` defer carrying the finished answer, flagged `schema_miss`, which the delegator
+     re-packs (item 8); after a failed attempt it is a note on that attempt's own verdict. It is a
+     token budget and a deadline check, not a transport timeout: a request in flight is not cut, and
+     ADR 0061's busy hold and its "no transport bound" stand. The delegator-side rescue passes no
+     wall and keeps its own context deadline.
+   - **A cut grammar request is resent at the cap only when the budget was the problem.** The retry
+     used to go on every truncation, and a greedy seat answers the same request byte for byte. It
+     now goes only when the budget is under the cap, the tail of what the seat wrote is not
+     degenerate (only whitespace, or one byte or a short block repeated), and the answer needs more
+     tokens than the budget held at the bytes per token the seat actually wrote. The size test
+     measures that density because the code's own estimate (a token per three bytes plus 64) is
+     under `repackBudget` (the same estimate plus 512, between 1,024 and 8,192) for every answer
+     length below the cap, and at the cap an escalation is a request identical to the first.
+     Otherwise the loop goes to the chat lane, which is a different request, and the note says what
+     was seen.
+   - **The prompts and the grammar stop inviting the runaway.** Both prompts give each field's type
+     and a list's item type (the chat prompt used to end "numbers unquoted", which a seat read
+     together with a field called `numbers`); the grammar's whitespace rule is llama.cpp's own
+     bounded one instead of an unbounded repetition; and the scalar coercion turns a bare JSON
+     number into the string a string field or list item asks for, keeping its text, and reads array
+     items. The string and array rules of the grammar are still unbounded.
+   - **Every attempt is on the wire.** `repack_attempts_detail` carries one record per attempt
+     (lane, `max_tokens`, tokens generated, finish reason, the first and last 80 bytes of what it
+     wrote, why it failed or was skipped), and `tokens_out` counts the tokens of failed attempts
+     too.
+
 ## Consequences
 
 - A 27B seat at 1 tok/s finishes its contract. A seat that dies mid-stream (an engine error
@@ -222,6 +263,7 @@ the D-row this ADR is filed under. Supersedes the enforcement half of D-03; D-03
 - `internal/agent/progress.go`, `internal/agent/liveness.go` — the progress callback, `StallPolicy`, `Monitor`.
 - `internal/llamaclient/stream.go` — `WithProgress`, the SSE decoder and the JSON fallback (item 8).
 - `internal/pipeline/agentrescue.go`, `internal/delegate/rescue.go` — the delegator's rescue of a finished answer (item 8).
+- `internal/pipeline/agentrepack.go` — the re-pack's time fit, escalation gate, type text for its prompts and attempt records (item 9).
 - `internal/agent/loop.go` — phases and per-delta progress from the loop.
 - `internal/pipeline/liveness.go`, `internal/pipeline/agenttask.go` — the policy, the ceiling, the stall/ceiling arms, the fleet progress report.
 - `internal/gpuactivity/registry.go` — job liveness beside the heartbeat; `Run.Liveness`.
