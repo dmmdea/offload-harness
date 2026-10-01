@@ -197,7 +197,11 @@ measurement of the client.
   delegator closes once the deadline has passed is the deadline's outcome (decision 2), not `placement
   refused`; and the sentence a re-placement read leaves when it names no node says the call's deadline had
   passed in place of `no further eligible remote was available`, a claim about nodes that a read the
-  deadline ended cannot support. A retry whose node selection the deadline ended says so in its
+  deadline ended cannot support. A re-placement the deadline cuts before it begins (`attempt` starts nothing once it
+  has passed) is no placement either: it is filed as a chain nobody took, with one re-placement fewer than refusals
+  and the refusals worded `N refusal(s) and no node took it` (no note at all when nothing was re-placed), never
+  `re-placed after N refusal(s)`, which would claim a placement that never happened and be counted in
+  `summary.replaced`. A retry whose node selection the deadline ended says so in its
   `retry_note` (`retry skipped: call deadline reached before a retry node was chosen`), where an empty
   note would read as there being nowhere else to go.
 - A seat-down re-placement ([ADR 0066](0066-a-seat-that-goes-down-is-waited-for-and-the-failed-step-reissued.md)) is an attempt like any other, and the deadline

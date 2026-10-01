@@ -2112,10 +2112,10 @@ func (r *runner) placeAndRun(ctx context.Context, i int, contract core.AgentCont
 		pl.attempts++
 		pr.Replacements = len(refusals)
 		if !r.isReplaceable(pr) {
-			// Some node TOOK it. Whether its answer was any good is the four
-			// outcome buckets' business, not this loop's.
-			pr.ReplacementNote = replacementNote(refusals, true)
-			return pr
+			// Some node TOOK it (or the call's deadline ended the chain before one was asked:
+			// annotateLanding). Whether its answer was any good is the four outcome buckets'
+			// business, not this loop's.
+			return annotateLanding(pr, refusals)
 		}
 		refusals = append(refusals, refusalLine(pr))
 		r.noteRefusal(pl, pr)
@@ -2691,10 +2691,35 @@ func (r *runner) decidedDefer(local NodeView, dec placetable.Decision, reason st
 	}
 }
 
-// landedAfterWait annotates a result some node TOOK after a capacity wait.
+// landedAfterWait annotates a result some node TOOK after a capacity wait (or that the call's
+// deadline cut before one was asked: annotateLanding).
 func (r *runner) landedAfterWait(pr PlacedResult, idle time.Duration, refusals []string) PlacedResult {
 	pr.waited = true
 	pr.CapacityWaitSec = idle.Seconds()
+	return annotateLanding(pr, refusals)
+}
+
+// annotateLanding files the refusal history on the attempt that ENDED a chain of refusals without
+// being refused itself. Usually a node took it, and the subtask was re-placed once per refusal.
+// The exception is an attempt the call's deadline cut before any node was asked (an Unplaced cut,
+// ADR 0065: attempt starts nothing once the deadline has passed): nothing took it, so "re-placed
+// after N refusals" would claim a placement that never happened, and Summary.Replaced would count
+// it. It is filed the way exhausted() files a chain nobody took: one re-placement fewer than
+// refusals (the placement the deadline ended is not one), the note worded for a subtask nobody
+// ran, and no note when nothing was re-placed (a single refusal with nowhere to go).
+//
+// Only the deadline's cut is read this way. A subtask the local seat's own decision deferred was
+// placed there (the seat was asked), and one the deadline cut while a node was running it was
+// taken: both keep the wording and the count they had.
+func annotateLanding(pr PlacedResult, refusals []string) PlacedResult {
+	if pr.deadlineCut && pr.Unplaced {
+		pr.Replacements = max(len(refusals)-1, 0)
+		pr.ReplacementNote = ""
+		if pr.Replacements > 0 {
+			pr.ReplacementNote = replacementNote(refusals, false)
+		}
+		return pr
+	}
 	pr.Replacements = len(refusals)
 	if len(refusals) > 0 {
 		pr.ReplacementNote = replacementNote(refusals, true)
