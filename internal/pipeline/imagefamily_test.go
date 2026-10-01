@@ -155,7 +155,7 @@ func TestGenerateImageFamilyRendersTheOverlayAndTagsTheLicense(t *testing.T) {
 		t.Errorf("width/height = %v x %v, want the MEASURED 64 x 32 (the request said 2048)", payload["width"], payload["height"])
 	}
 	if payload["family"] != "qwen-image-2.1" || payload["license"] != "Qwen Research License" || payload["commercial_use"] != false ||
-		payload["license_note"] != nil ||
+		hasJSONKey(payload, "license_note") ||
 		payload["transparent"] != true {
 		t.Errorf("payload = %v", payload)
 	}
@@ -351,7 +351,7 @@ func TestEditFamilyWiresReferencesAndRefusesMisuse(t *testing.T) {
 	}
 	var payload map[string]any
 	_ = json.Unmarshal(res.Data, &payload)
-	if payload["license"] != "Qwen Research License" || payload["commercial_use"] != false || payload["license_note"] != nil || payload["images"] != float64(3) || payload["width"] != float64(40) || payload["height"] != float64(24) {
+	if payload["license"] != "Qwen Research License" || payload["commercial_use"] != false || hasJSONKey(payload, "license_note") || payload["images"] != float64(3) || payload["width"] != float64(40) || payload["height"] != float64(24) {
 		t.Errorf("payload = %v", payload)
 	}
 
@@ -479,3 +479,7 @@ func TestImageBatchItemsCarryTheDefaultBindingsLicense(t *testing.T) {
 		t.Errorf("an undeclared license must not be tagged: %s", b)
 	}
 }
+
+// hasJSONKey reports whether a decoded JSON object carries k at all: a removed field
+// must be absent, not null (operator order 2026-10-01 removed license_note).
+func hasJSONKey(m map[string]any, k string) bool { _, ok := m[k]; return ok }

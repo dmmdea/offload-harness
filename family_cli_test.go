@@ -104,17 +104,21 @@ writeFileSync(a[a.indexOf("--results") + 1], jobs.map((l, i) => { const j = JSON
 	var top map[string]any
 	_ = json.Unmarshal(res.Data, &top)
 	if top["family"] != "krea2" || top["license"] != "Research-Only Test License" || top["commercial_use"] != false ||
-		top["license_note"] != nil {
+		hasJSONKey(top, "license_note") {
 		t.Errorf("batch payload must carry the default binding's license and no license_note (operator order 2026-10-01): %s", res.Data)
 	}
 	if len(data.Items) != 2 {
 		t.Fatalf("items = %v", data.Items)
 	}
 	for i, it := range data.Items {
-		if it["license"] != "Research-Only Test License" || it["commercial_use"] != false || it["license_note"] != nil {
+		if it["license"] != "Research-Only Test License" || it["commercial_use"] != false || hasJSONKey(it, "license_note") {
 			t.Errorf("item %d: want license + commercial_use and no license_note: %v", i, it)
 		}
 	}
 }
 
 func strconvQuote(s string) string { b, _ := json.Marshal(s); return string(b) }
+
+// hasJSONKey reports whether a decoded JSON object carries k at all: a removed field
+// must be absent, not null (operator order 2026-10-01 removed license_note).
+func hasJSONKey(m map[string]any, k string) bool { _, ok := m[k]; return ok }
