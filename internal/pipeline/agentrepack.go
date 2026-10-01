@@ -2,10 +2,12 @@ package pipeline
 
 import (
 	"fmt"
+	"math"
 	"strings"
 	"time"
 	"unicode/utf8"
 
+	"github.com/dmmdea/offload-harness/internal/agent"
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/llamaclient"
 )
@@ -141,4 +143,120 @@ func repackWhy(err error) string {
 		cut--
 	}
 	return s[:cut] + "…"
+}
+
+// repackCut is what a grammar completion cut at max_tokens shows about WHY it was
+// cut. The retry used to go to the completion cap on every truncation, a second
+// request that a greedy seat answers byte for byte like the first (register C-80:
+// a seat that ran away at 1,439 tokens ran away again at 8,192, 24 minutes at 5.6
+// tok/s). More tokens help only when the budget was the problem.
+type repackCut struct {
+	// Degenerate says what the tail of the output is when it is no content: only
+	// whitespace, or a short block repeated. "" when it is not.
+	Degenerate string
+	// Needed is the tokens the answer's object needs, from the answer's bytes at the
+	// density the seat actually wrote: never under the code's own estimate (a token
+	// per three bytes, expectedRepackTokens), and above it when the seat's tokenizer
+	// is denser on this text (digits, symbols, other scripts).
+	Needed int
+	// BytesPerToken is the density the truncated completion showed, 0 when it was
+	// too short to measure.
+	BytesPerToken float64
+}
+
+// judgeCut reads a truncated completion against the answer it re-packs. The
+// measured density is trusted only on a real sample: a short cut says nothing
+// about the tokenizer.
+func judgeCut(output string, g llamaclient.GenResult) repackCut {
+	c := repackCut{Degenerate: degenerateTail(g.Content)}
+	perToken := 3.0
+	if g.TokensOut >= 64 && len(g.Content) > 0 {
+		c.BytesPerToken = float64(len(g.Content)) / float64(g.TokensOut)
+		if c.BytesPerToken < perToken {
+			perToken = math.Max(c.BytesPerToken, 1)
+		}
+	}
+	c.Needed = int(math.Ceil(float64(len(output))/perToken)) + 64
+	return c
+}
+
+// escalates reports whether a second request at the completion cap can do what the
+// first could not: the cap must be above the budget that was cut, the output must
+// not be a loop or whitespace (more tokens only lengthen it), and the answer must
+// need more tokens than the budget held.
+func (c repackCut) escalates(budget int) bool {
+	return c.Degenerate == "" && budget < agentRepackMaxTokensCap && c.Needed > budget
+}
+
+// observed spells what the truncated attempt showed, for its note: the
+// degenerate tail, a budget that was too small, one that already is the cap, or
+// an answer that fits the budget and an output that ran on past it.
+func (c repackCut) observed(budget int) string {
+	switch {
+	case c.Degenerate != "":
+		return fmt.Sprintf("the output was degenerate (%s): a larger budget would not help", c.Degenerate)
+	case c.Needed > budget && budget >= agentRepackMaxTokensCap:
+		return fmt.Sprintf("the answer needs about %d tokens at the density the seat wrote and the budget is already the %d-token cap", c.Needed, agentRepackMaxTokensCap)
+	case c.Needed > budget:
+		return fmt.Sprintf("the answer needs about %d tokens at the %.1f bytes per token the seat wrote: the %d-token budget was too small", c.Needed, c.BytesPerToken, budget)
+	}
+	return fmt.Sprintf("the answer needs about %d tokens, inside the %d-token budget: the output ran on past it", c.Needed, budget)
+}
+
+const (
+	// degenerateTailBytes is how much of the end of a cut completion is read for a loop.
+	degenerateTailBytes = 256
+	// degenerateMaxPeriod and degenerateMinBytes shape the repeat test: a block of
+	// up to 16 bytes, repeated at least four times and over at least 32 bytes.
+	degenerateMaxPeriod = 16
+	degenerateMinReps   = 4
+	degenerateMinBytes  = 32
+)
+
+// degenerateTail says what the end of a cut completion is when it is no content,
+// and "" when it reads as content. Whitespace, one byte repeated, a short block
+// repeated and a block of lines repeated are the shapes a constrained decoder
+// falls into when the grammar masks what the model wanted: agent.DegenerateRun
+// skips whitespace on purpose and agent.DetectRepetitionLoop wants four lines,
+// and neither sees `"", "", ""` or spaces on ONE line, which is the shape a
+// single-line JSON object runs to its cap in.
+func degenerateTail(content string) string {
+	if strings.TrimSpace(content) == "" {
+		return "nothing but whitespace"
+	}
+	tail := content
+	if len(tail) > degenerateTailBytes {
+		cut := len(tail) - degenerateTailBytes
+		for cut < len(tail) && !utf8.RuneStart(tail[cut]) {
+			cut++
+		}
+		tail = tail[cut:]
+	}
+	if strings.TrimSpace(tail) == "" {
+		return fmt.Sprintf("only whitespace in its last %d bytes", len(tail))
+	}
+	if b, n := agent.DegenerateRun(tail); n > 0 {
+		return fmt.Sprintf("%q repeated %d times", string(b), n)
+	}
+	for period := 1; period <= degenerateMaxPeriod; period++ {
+		window := max(period*degenerateMinReps, degenerateMinBytes)
+		if len(tail) < window {
+			continue
+		}
+		w := tail[len(tail)-window:]
+		periodic := true
+		for i := period; i < len(w); i++ {
+			if w[i] != w[i-period] {
+				periodic = false
+				break
+			}
+		}
+		if periodic {
+			return fmt.Sprintf("repeating %q", w[len(w)-period:])
+		}
+	}
+	if rep, ok := agent.DetectRepetitionLoop(content); ok {
+		return fmt.Sprintf("repeating a %d-line block %d times", rep.Period, rep.Count)
+	}
+	return ""
 }

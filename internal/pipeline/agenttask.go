@@ -1787,11 +1787,20 @@ func (p *Pipeline) repackStructuredWith(ctx context.Context, seat string, rawSch
 			// input" or a cut multibyte character — the operator then rewrites
 			// a schema that was never the problem (2026-09-10: a 22,865-char
 			// answer re-packed at 1,024 tokens on the 27B, an 8,380-char one
-			// on the 4B, both filed as invalid JSON). Name the truncation, and
-			// give the retry the cap.
-			terr := fmt.Errorf("re-pack truncated at %d tokens (the answer is %d chars; the structured budget cannot hold it)", budget, len(output))
+			// on the 4B, both filed as invalid JSON). Name the truncation, and what
+			// it showed (judgeCut): the retry goes to the completion cap only when
+			// the budget was the problem. It used to go on every truncation, and a
+			// greedy seat answers the same request byte for byte: the same
+			// runaway at 1,439 tokens and again at 8,192 (register C-80). When
+			// more tokens cannot help, the chat lane is a different request and
+			// is the next attempt.
+			cut := judgeCut(output, gres)
+			terr := fmt.Errorf("re-pack truncated at %d tokens (the answer is %d chars; %s)", budget, len(output), cut.observed(budget))
 			note(attempts, lane, budget, gres, time.Since(attemptStart), terr.Error())
 			recordFailure(terr, boundFor(attemptTimeout), attempts)
+			if !cut.escalates(budget) {
+				break
+			}
 			budget = agentRepackMaxTokensCap
 			continue
 		}
