@@ -28,13 +28,18 @@ type Field struct {
 // commonRules are the shared terminals. Written as a raw string so the GBNF
 // escapes (\" etc.) are preserved verbatim.
 //
-// ws is llama.cpp's own json.gbnf rule, not `[ \t\n]*`: empty, one space, or one
-// newline and at most twenty spaces or tabs. An unbounded whitespace rule is a
-// legal continuation forever, so a constrained model whose preferred next token
-// the grammar masks can sample whitespace until max_tokens and the output is
-// still "valid" (register C-80: a structured re-pack ran to its token cap twice
-// on one request). The bound uses GBNF's {m,n} repetition, which llama.cpp
-// accepts since the 2024 releases. Every user of Object shares this rule.
+// ws is the rule llama.cpp's own json.gbnf uses, not `[ \t\n]*`: empty, one space,
+// or one newline and at most twenty spaces or tabs. An unbounded whitespace rule
+// is a legal continuation forever, so a constrained model whose preferred next
+// token the grammar masks can sample whitespace until max_tokens and the output is
+// still "valid". That is the suspected shape of a structured re-pack that ran to
+// its token cap twice on one request (register C-80); the request was not
+// replayed, so it is unconfirmed, and the per-attempt head and tail the re-pack
+// records will show whether whitespace was what the seat wrote. The bound uses
+// GBNF's {m,n} repetition, the operator json.gbnf uses for this same rule; this
+// grammar was not compiled against a live seat by the change that introduced it,
+// so the first grammar request on one is the confirmation. Every user of Object
+// shares this rule.
 const commonRules = "\n" + `ws ::= | " " | "\n" [ \t]{0,20}
 string ::= "\"" ( [^"\\] | "\\" ["\\/bfnrt] | "\\u" [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F] )* "\""
 number ::= "-"? ("0" | [1-9] [0-9]*) ("." [0-9]+)? ([eE] [-+]? [0-9]+)?

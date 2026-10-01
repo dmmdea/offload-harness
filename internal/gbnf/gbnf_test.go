@@ -148,8 +148,10 @@ func TestJSONSchemaShape(t *testing.T) {
 // whitespace between JSON tokens: empty, one space, or one newline plus at most
 // twenty spaces/tabs. The rule used to be `[ \t\n]*`, which is legal forever: a
 // constrained model whose preferred next token the grammar masks can sample
-// whitespace until max_tokens and still be "valid" (register C-80: a structured
-// re-pack ran to its cap twice on one request). Every user of the grammar (the
+// whitespace until max_tokens and still be "valid" (the suspected shape of
+// register C-80's re-pack that ran to its cap twice on one request; unconfirmed,
+// the request was not replayed). The test pins the TEXT of the rule: that a live
+// llama.cpp compiles it was not checked here. Every user of the grammar (the
 // extract lane, the classifiers, the agent re-pack) shares this rule.
 func TestGrammarWhitespaceIsBounded(t *testing.T) {
 	fields := []Field{
