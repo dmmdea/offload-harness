@@ -75,9 +75,12 @@ func taskConfiguredFor(cfg config.Config, taskType string, loopbackListener bool
 		return AgentLaneAdmissible(cfg, loopbackListener)
 	case "accel":
 		// One accelerator tool for a box without the device (Phase B): served
-		// exactly when this node lists a device — the same gate that registers
-		// the tools locally, so health never advertises a lane that is not there.
-		return len(cfg.Accelerators) > 0
+		// exactly when this node lists a device the fleet may use — the same gate
+		// that registers the tools locally, less the devices that stay on the box
+		// that carries them (register E-08: a node whose only device is the
+		// standalone Hailo-8L runs no accel lane at all), so health never
+		// advertises a lane that is not there or that admission would refuse.
+		return len(config.FleetVisibleAccelerators(cfg.Accelerators)) > 0
 	case VisionTask:
 		// One single-image vision task on this node's vision seat (0.116.0):
 		// advertised exactly when POST /fleet/vision would admit it — a bound

@@ -5,6 +5,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/dmmdea/offload-harness/internal/config"
 )
 
 func seedOf(kv map[string]any, backend string) Profile {
@@ -222,6 +224,35 @@ func TestEveryShippedAcceleratorSeedIsValid(t *testing.T) {
 	}
 	if _, ok := d.Accelerators["rknpu"]; !ok {
 		t.Error("profiles.json declares no rknpu accelerator")
+	}
+}
+
+// TestEveryDeclaredAcceleratorHasAFleetVisibilityDecision (register E-08): which accelerators may
+// leave their box is decided per device, and the decision lives in config.LocalOnlyAccelerator,
+// keyed on the id profiles.json declares. A rename of the id would leave the guard keyed on a
+// string no device carries; a new device declared without a decision would be published by
+// default. Either fails here, by name. The Hailo-8L stays on the box that carries it; the Coral
+// and the RKNPU are published, accepted and advertised over the fleet.
+func TestEveryDeclaredAcceleratorHasAFleetVisibilityDecision(t *testing.T) {
+	d, err := LoadDoc("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	localOnly := map[string]bool{"hailo-8l": true, "coral-edgetpu": false, "rknpu": false}
+	for id := range d.Accelerators {
+		want, decided := localOnly[id]
+		if !decided {
+			t.Errorf("profiles.json declares accelerator %q with no fleet-visibility decision: add it to this table and to config.LocalOnlyAccelerator (docs/systems/accelerators.md, ADR 0038 amendment)", id)
+			continue
+		}
+		if got := config.LocalOnlyAccelerator(id); got != want {
+			t.Errorf("config.LocalOnlyAccelerator(%q) = %v, want %v", id, got, want)
+		}
+	}
+	for id := range localOnly {
+		if _, declared := d.Accelerators[id]; !declared {
+			t.Errorf("this table decides accelerator %q but profiles.json no longer declares it: the guard would be keyed on an id no device carries", id)
+		}
 	}
 }
 

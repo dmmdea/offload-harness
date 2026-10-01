@@ -2720,11 +2720,12 @@ func runFleetServe(args []string) error {
 		// dual-route node (Vulkan iGPU + CPU family) advertises both so a caller can
 		// pick the route by seat id. nil (no manifest backend) omits the field.
 		Backends: info.Backends(),
-		// ADR 0024: the manifest's additive-device list, advertised verbatim so
+		// ADR 0024: the manifest's additive-device list, advertised so
 		// a delegator can route NPU-owned work here. A hand-built node has no
 		// installed.json (the Lenovo, verified) and would never list its device;
 		// the config's own list is the fallback then (Coral D6). The manifest
 		// wins when it lists anything, so the installer path is unchanged.
+		// A local-only device (register E-08) is dropped either way.
 		Accelerators: fleetAccelerators(info.Accelerators, cfg.Accelerators),
 		// The agent lane's tokenless-listener refusal keys on where the bind
 		// actually landed (the resolved listen address), not on the
@@ -4466,11 +4467,14 @@ func runResearch(args []string) error {
 }
 
 // fleetAccelerators picks the accelerator list health advertises: the installer
-// manifest's when it lists any, else the harness config's (Coral D6). Pure, so the
-// test can pin both sources.
+// manifest's when it lists any, else the harness config's (Coral D6), minus the
+// devices that stay on the box that carries them (register E-08: the standalone
+// Hailo-8L is never advertised). The source is chosen first and the filter then
+// applies to what it listed, so a manifest naming only a local-only device still
+// wins and advertises nothing. Pure, so the test can pin both sources.
 func fleetAccelerators(manifest, cfg []string) []string {
 	if len(manifest) > 0 {
-		return manifest
+		return config.FleetVisibleAccelerators(manifest)
 	}
-	return cfg
+	return config.FleetVisibleAccelerators(cfg)
 }
