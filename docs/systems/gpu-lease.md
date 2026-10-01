@@ -251,6 +251,17 @@ names — is in-process only and does not close the cross-process gap named abov
   expired)*. A bare heartbeat timeout would expire a descheduled benchmark under exactly the load
   it exists to protect.
 - **Release is epoch-guarded** — a fenced-out straggler cannot delete the current holder's lease.
+- **A reclaim removes only what is still stale (register C-59).** The reclaim rule decides from one read, and
+  the claim used to be removed by path: two acquirers that both read the same dead holder's record could
+  interleave so that the slower one deleted the claim the faster one had just created — a lease granted and gone
+  before its holder did anything with it (its next `Check` or restamp reports "fenced out", or "the lease is
+  gone" in the instant before the rival's own claim lands). The removal (`removeStaleClaim`) now runs under the
+  epoch lock, reads the record again, and removes it only if it is still stale: a new holder's claim, a claim a
+  rival is still writing, or the old holder back from the dead is left alone, and a claim the caller parsed a
+  moment ago that now fails to read is left for the next look instead of being treated as debris. This is one
+  mechanism by which a draining reserve can lose its epoch to a concurrent acquire — found by reading and
+  reproduced deterministically; whether it caused any live loss is unproven. What remains is a window of
+  microseconds, open only to a holder (or an operator) releasing at that exact instant.
 
 ## The drain
 
@@ -440,7 +451,45 @@ exclusive card, and three measurement rows read the seat's 10 GiB as their own f
   that lost the card (an operator `gpu release`, a reclaim) never warms; the marker stays for the next last holder, and a
   plain `gpu release` prints a note when a warm is owed.
 - **The warm is heartbeat for its length** (`drainRenewEvery`, 15 s), so a 27B load of several minutes cannot go stale
-  under the 120 s heartbeat TTL; losing the lease mid-warm cancels the request and is reported.
+  under the 120 s heartbeat TTL; losing the lease mid-warm cancels the request and is reported, while a heartbeat
+  write that fails with the lease still ours is reported once and retried on the next tick (register C-59).
+- **A queued `--unload-seat` acquire finds the card empty because of the ORDER, not because it waits (register D-124
+  clause b, validated 2026-10-01).** The live failure of 2026-09-19 — after `gpu reserve --unload-seat` the seat was
+  still loaded, the previous holder's deferred warm-back having landed between the new holder's unload and its first
+  load — is the unordered warm this section fixed. The orderings that stand today, each pinned from the acquirer's
+  side (`gpu_acquire_warm_test.go`: what the acquirer's command finds when it starts, and whose lease was held when
+  the warm landed):
+  1. *Wrapper form.* The warm runs before `Release()`, under the holder's lease, heartbeat for its length. A queued
+     acquirer is either seen as a waiter (the warm is skipped; it belongs to the last holder) or waits for the
+     release that follows the warm, so its drain and unload run after the warm settled. A warm whose health request
+     is answered 5xx while the load carries on is watched to completion under the same lease.
+  2. *Owed, not in flight* (a holder lost its lease before it could warm): the marker stays; the next
+     `--unload-seat` holder drains a cold seat, runs its command on the cleared card, and pays the warm at its own
+     release, never ahead of its command.
+  3. *`gpu release --warm-seat --epoch N` with the detached holder alive:* the warm runs under that holder's lease and
+     the release follows it.
+  4. *`gpu release --warm-seat` on a FREE card* (the detached holder's `--for` window ended first): nothing holds the
+     card, so the warm runs unleased and an acquirer is not ordered behind it. This is the operator-explicit path and
+     is left as it is; the acquirer's drain still waits out a load that llama-swap lists as `starting`
+     (`TestDrainWaitsThroughAStartingSeatWithoutTouchingTheUpstream`), so what is unordered there is only the
+     moment before llama-swap lists the load.
+
+  There is deliberately NO acquire-side wait: the releasing lease already outlives its warm, and a second wait on top
+  of it would only double the queue.
+- **A drainer that loses its lease queues again instead of dying at the restamp (register C-59).** The wrapper form
+  used to keep draining a card it no longer owned, die at the restamp with `stamping the lease after the drain:
+  restamp: the lease is gone` (or `fenced out`), and never start its command. Now the drain's heartbeat ends the
+  drain the moment the lease is confirmed gone (`maintainSeatCtx` takes a context; the restamp comes before the
+  unload, so a drain that lost its lease never reaches the unload), the reserve says `the lease was lost during the
+  drain`, releases what is left, and takes its place in the line again with what remains of `--wait` (never under
+  the 2-minute drain floor; `--wait 0` stays one try, and a card another holder has then fails with that holder
+  named). It drains and clears the seat afresh under the new lease and only then runs its command; after five
+  re-queues the next loss gives up loudly. A seat fault with the lease still ours (a drain that misses its deadline) is not a
+  loss and is returned as before. The heartbeat itself ends only for a lease that is actually gone: one failed
+  heartbeat write with the record still ours is reported once and retried, where it used to end the loop and leave a
+  multi-hour drain without a heartbeat. The detach form cannot re-queue (its hidden holder releases at `--for`
+  whether or not the drain is done), so its error now says whether the lease is still held instead of always
+  pointing at `gpu release`.
 
 **A failed drain is not a cordon, and a stuck run is not a wait (register C-50).** A drain that misses its deadline
 clears the `draining` stamp before returning — the detach form keeps the lease held and non-exclusive, so new runs are
