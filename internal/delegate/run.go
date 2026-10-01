@@ -135,7 +135,16 @@ type PlacedResult struct {
 	// lease: this process was away) or "withdrawn: ..." — read on a poll. Nothing ran,
 	// so the subtask is re-placeable like a confirmed withdrawal, and the intent closes
 	// as "never started: <this>", the note recovery writes for the same observation.
-	nodeNeverRan    string
+	nodeNeverRan string
+	// nodeTerminal marks a failure the poll loop READ off the node as its last word on the job:
+	// it ended in error, its result could not be decoded, or the node denied holding it after
+	// the bounded re-dispatches. The job is over, or gone, so when the call deadline cuts such
+	// an outcome (cutOutcome) it says the job had ended and not that it is still on the node,
+	// and the intent closes as the terminal observation it is. It is the producer that says
+	// so, not the error text, because other failures of an acked job leave its fate unknown: a
+	// cancelled poll and a poll deadline are the give-up's (orphanable), and a refused
+	// re-dispatch may have landed.
+	nodeTerminal    bool
 	queuedWait      time.Duration
 	PlacementReason string
 	// deadlineCut marks a result the whole-call deadline (RunOptions.Deadline)
@@ -3274,7 +3283,7 @@ func (r *runner) exhaustedSettled(contract core.AgentContract, last PlacedResult
 		return pr
 	}
 	pr.ranLocal, pr.intentRecorded, pr.orphanable, pr.waitCapacity = false, false, false, false
-	pr.withdrawn, pr.nodeNeverRan = false, ""
+	pr.withdrawn, pr.nodeNeverRan, pr.nodeTerminal = false, "", false
 	pr = r.cutOutcome(pr, true)
 	pr.JobID = mintJobID()
 	pr.wallMs = time.Since(since).Milliseconds()
@@ -4962,6 +4971,7 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 			pollFails.note(fmt.Errorf("poll: 404 — the node denies ever holding job %s", jobID))
 			if redispatches >= maxRedispatches {
 				pr.Err = fmt.Sprintf("node lost job %s %d times (poll 404 after re-dispatch)", jobID, redispatches+1)
+				pr.nodeTerminal = true
 				return pr
 			}
 			redispatches++
@@ -4988,6 +4998,7 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 			var wire core.AgentWireResult
 			if uerr := json.Unmarshal(data, &wire); uerr != nil {
 				pr.Err = "job done but data is not an AgentWireResult: " + uerr.Error()
+				pr.nodeTerminal = true
 				return pr
 			}
 			pr.Result = wire
@@ -5000,6 +5011,7 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 			return pr
 		case status == http.StatusOK && state == "error":
 			pr.Err = "remote job error: " + jobErr
+			pr.nodeTerminal = true
 			if neverRan(jobErr) {
 				// The node took this job out of its backlog without running it: reaped
 				// because nobody polled it within the poll lease (this process was away

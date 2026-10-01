@@ -292,6 +292,19 @@ func (r *runner) cutOutcome(pr PlacedResult, quote bool) PlacedResult {
 		if pr.rescueSpent > 0 {
 			where += " (the delegator was re-packing the finished answer itself)"
 		}
+	case pr.intentRecorded && pr.nodeTerminal && pr.Err != "" && !pr.orphanable && !pr.withdrawn && pr.nodeNeverRan == "":
+		// The node's own last word on the job, a failure the poll loop read: it ended in error, its
+		// result could not be decoded, or the node denied holding it after the bounded re-dispatches.
+		// The context a poll runs under ends a moment after the clock passes the deadline, so a poll
+		// answered in that moment is read and its outcome is produced after the deadline: the
+		// deadline's, like any outcome produced then. What it describes is a job that is OVER, though.
+		// "Still on the node, not taken back" is false of it, and an intent left open for it makes the
+		// recovery pass file the node's error as a recovered orphan, an outcome this call has already
+		// published: finish closes the intent as the terminal observation it is. The producer says so
+		// (nodeTerminal) because a failure alone does not: a cancelled poll and a poll deadline are
+		// the give-up's, which marks the job orphanable first, and a refused re-dispatch may have
+		// landed. The node's text rides behind the sentence (ownVerdict).
+		where = fmt.Sprintf("had ended on %s (job %s) when the call's deadline passed", nodeOrBase(pr), pr.JobID)
 	case pr.intentRecorded:
 		// Cancelling the poll leaves the job on its node, where it could start later
 		// on a seat nobody is waiting for. Taking it back is the give-up's business,
