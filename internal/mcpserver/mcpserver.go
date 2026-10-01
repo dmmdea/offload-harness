@@ -2873,9 +2873,10 @@ func (s *Server) handleAsk(ctx context.Context, req *mcp.CallToolRequest) (*mcp.
 	if run == nil {
 		run = s.p.RunAgentContract
 	}
-	// No context deadline is imposed here: the contract's TimeoutSec is the wall
-	// ceiling and runAgentTask enforces it as its own deadline, so wrapping it
-	// again would give the run two budgets that could disagree.
+	// No context deadline is imposed here: the contract's TimeoutSec is the wall,
+	// the run's expectation (ADR 0055), and runAgentTask's liveness monitor owns the
+	// deadline (a stall, or the safety ceiling), so wrapping it again would give the
+	// run two budgets that could disagree.
 	var wire core.AgentWireResult
 	var fleetExtra map[string]any
 	if route := strings.TrimSpace(in.Route); route != "" && route != "local" {
@@ -2883,7 +2884,7 @@ func (s *Server) handleAsk(ctx context.Context, req *mcp.CallToolRequest) (*mcp.
 		// can run wherever the delegator places it.
 		w, extra, note, ok := s.contractOnFleet(ctx, contract, route, "")
 		if !ok {
-			return jsonResult(map[string]any{"deferred": true, "reason": note, "route": route})
+			return jsonResult(withFinishedAnswer(map[string]any{"deferred": true, "reason": note, "route": route}, w))
 		}
 		wire, fleetExtra = w, extra
 	} else {
@@ -2894,13 +2895,13 @@ func (s *Server) handleAsk(ctx context.Context, req *mcp.CallToolRequest) (*mcp.
 		wire = w
 	}
 	if wire.Deferred {
-		return jsonResult(map[string]any{
+		return jsonResult(withFinishedAnswer(map[string]any{
 			"deferred":    true,
 			"reason":      wire.Reason,
 			"defer_class": wire.DeferClass,
 			"seat":        wire.Seat,
 			"steps":       wire.Steps,
-		})
+		}, wire))
 	}
 	// The contracted deliverable is the structured pair. When the re-pack seat
 	// could not be reached the loop's prose still arrived, so it is published as
@@ -3121,9 +3122,10 @@ func (s *Server) handleReviewDiff(ctx context.Context, req *mcp.CallToolRequest)
 	if run == nil {
 		run = s.p.RunAgentContract
 	}
-	// No context deadline is imposed here: the contract's TimeoutSec is the wall
-	// ceiling and runAgentTask enforces it as its own deadline, so wrapping it
-	// again would give the run two budgets that could disagree.
+	// No context deadline is imposed here: the contract's TimeoutSec is the wall,
+	// the run's expectation (ADR 0055), and runAgentTask's liveness monitor owns the
+	// deadline (a stall, or the safety ceiling), so wrapping it again would give the
+	// run two budgets that could disagree.
 	wire, rerr := run(ctx, contract, delegate.LocalOptions{})
 	if rerr != nil {
 		return jsonResult(withReviewExtra(map[string]any{"deferred": true, "reason": rerr.Error()}, fleetNote))
@@ -3160,6 +3162,14 @@ func (s *Server) reviewOnFleet(ctx context.Context, contract core.AgentContract,
 // behind `route` on agent_run and offload_ask (register C-46, S-27: those doors
 // always ran local, so a remote seat could not be named from this box's door at
 // all). The extras say where it ran.
+//
+// Like every other delegator door it hands the engine the rescue of a finished
+// answer whose structured re-pack failed (register C-66, PR-4), so a node's budget
+// defer for a loop that ended past its wall is re-packed here instead of counted as
+// lost work (register C-80). The one exception is a call under a fence: the review
+// lane's fleet path exists because the LOCAL seat is held by someone else's lease,
+// and the rescue is a completion on that seat. A deferred result is handed back
+// beside its reason (ok=false), so a caller can keep the answer it carries.
 func (s *Server) contractOnFleet(ctx context.Context, contract core.AgentContract, route, fence string) (core.AgentWireResult, map[string]any, string, bool) {
 	dispatch := s.reviewFleet // test seam
 	if dispatch == nil {
@@ -3171,8 +3181,11 @@ func (s *Server) contractOnFleet(ctx context.Context, contract core.AgentContrac
 	}
 	// remotes nil: RunWith reads the configured delegate_remotes, which is the
 	// fleet this box is a delegator for. A review names no node of its own.
-	results, _, err := dispatch(ctx, s.p.Cfg(), local, []core.AgentContract{contract}, route, nil,
-		&delegate.RunOptions{Quarantine: s.quarantine, Tenant: s.tenant})
+	opts := &delegate.RunOptions{Quarantine: s.quarantine, Tenant: s.tenant}
+	if fence == "" {
+		opts.Rescue = s.rescueFunc()
+	}
+	results, _, err := dispatch(ctx, s.p.Cfg(), local, []core.AgentContract{contract}, route, nil, opts)
 	switch {
 	case err != nil:
 		return core.AgentWireResult{}, nil, "the fleet could not be asked: " + err.Error(), false
@@ -3188,7 +3201,7 @@ func (s *Server) contractOnFleet(ctx context.Context, contract core.AgentContrac
 		// there fits the diff, or nothing is up. Verbatim, because the reason
 		// distinguishes "no remotes configured" from "they answered and the diff
 		// does not fit their window", and those need different fixes.
-		return core.AgentWireResult{}, nil, pr.Result.Reason, false
+		return pr.Result, nil, pr.Result.Reason, false
 	}
 	extra := map[string]any{
 		"executed_on": "fleet",
@@ -3203,6 +3216,20 @@ func (s *Server) contractOnFleet(ctx context.Context, contract core.AgentContrac
 		extra["seat"] = pr.Seat
 	}
 	return pr.Result, extra, "", true
+}
+
+// withFinishedAnswer adds a deferred result's finished answer to the payload a door
+// publishes for it, flagged schema_miss, when the node said the loop FINISHED and only
+// its structuring failed (register C-66, C-80). The answer is the loop's own prose: it
+// is never graded and never presented as an answer, only kept beside the defer so the
+// caller is not handed a bare "deferred" for work that was done. offload_review_diff does
+// not use it: what that lane publishes went through its grounding filters, and the raw
+// prose has not.
+func withFinishedAnswer(out map[string]any, w core.AgentWireResult) map[string]any {
+	if w.SchemaMiss && strings.TrimSpace(w.Output) != "" {
+		out["output"], out["schema_miss"] = w.Output, true
+	}
+	return out
 }
 
 // withReviewExtra folds the fleet block (node, placement, seat, fence — or the
