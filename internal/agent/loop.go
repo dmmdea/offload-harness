@@ -370,6 +370,12 @@ type Loop struct {
 	// because --serve reads budgets from concurrent handlers.
 	specReserve     atomic.Int32
 	specReserveOnce sync.Once
+	// readBudget / noReadBudget are the read_file character budget (register
+	// D-103, readbudget.go): readBudget > 0 is an explicit budget in characters,
+	// 0 derives it per run (readBudgetChars), and noReadBudget turns it off — every
+	// read_file call then counts against the same-name cap, as it did before.
+	readBudget   int
+	noReadBudget bool
 }
 
 // defaultCtxTokens is the model context window the loop budgets against. It
@@ -410,6 +416,17 @@ const defaultKeepRecent = 4
 // to bound the near-duplicate drift, and 8 distinct calls inside a 12-step run
 // is still a bound. Small-seat tiers that measured better under a tighter cap
 // set it explicitly (builder.Config.MaxSameTool / --max-same-tool).
+//
+// The cap counts CALLS, and for read_file that is the wrong unit (register
+// D-103): the tool pages, and its own hint tells the seat to ("use offset=N to
+// continue"), so a seat doing as it was told spends one call per page. Live
+// 2026-10-01 00:16: eight reads of at most 1,090 characters each of ONE
+// 12,005-character document, the ninth refused DISABLED. read_file is therefore
+// metered in characters (the read budget, readbudget.go: its default is the
+// larger of the step budget and this cap, times the cap on one result) and the
+// cap counts it by FILE: a new page of a file the run has already read costs
+// characters, not a call. The first read of each path, an exact repeat, a read
+// that failed and every other tool count as ever.
 const defaultMaxSameTool = 8
 
 // FinalAnswerTurn opens the forced final step (0.115.19, register D-89): the
@@ -1019,6 +1036,9 @@ func (l *Loop) run(ctx context.Context, objective string, bs *budgetState) (Resu
 	// reExecuted bounds the destroyed-result recovery to ONE re-execution per
 	// exact (name,args) pair — see dispatchOrThrottle.
 	reExecuted := map[string]bool{}
+	// reads is the read_file character ledger (D-103, readbudget.go): per-Run
+	// state like the maps above, nil when the budget is off.
+	reads := l.newReadLedger()
 	// exhausted counts steps whose ladder could not fit the budget (fit=false
 	// telemetry on the Result — never a silent over-budget request).
 	exhausted := 0
@@ -1619,7 +1639,7 @@ func (l *Loop) run(ctx context.Context, objective string, bs *budgetState) (Resu
 					disabledTools[call.Name] = true
 				}
 			} else {
-				content, isErr, eff = l.dispatchOrThrottle(ctx, call, msgs, exactCalls, sameNameCalls, disabledTools, firstCallID, pinned, reExecuted)
+				content, isErr, eff = l.dispatchOrThrottle(ctx, call, msgs, exactCalls, sameNameCalls, disabledTools, firstCallID, pinned, reExecuted, reads)
 				if eff != EffectNone {
 					ruleState.Executed(call.Name)
 				}
@@ -1675,6 +1695,9 @@ func (l *Loop) run(ctx context.Context, objective string, bs *budgetState) (Resu
 			// serialized into the MCP response, so an untrimmed note would smuggle
 			// the very bytes this cap exists to bound past the loop boundary.
 			content, _ = contextbudget.Trim(content, l.toolResultCapChars())
+			// The read budget is charged HERE, at the length the transcript keeps
+			// and the effect ledger records as obs_chars (D-103).
+			reads.note(call, content, eff, isErr)
 			// Effect ledger (effects.go): one record per REQUESTED call, in call
 			// order, whatever became of it. Note carries the why only for
 			// non-committed statuses — for those, the (bounded) result text IS
@@ -1716,6 +1739,12 @@ func (l *Loop) run(ctx context.Context, objective string, bs *budgetState) (Resu
 // message. maxSameTool<=0 disables the name-cap (exact-repeat refusal still
 // applies, but never disables the tool outright).
 //
+// reads is the read_file ledger (D-103, readbudget.go): a NEW page of a file the
+// run has already read is not counted against the name cap, and once the run's
+// read_file results have filled the character budget the next call is refused and
+// the tool withdrawn, by the same disabledTools mechanism. nil = no budget:
+// read_file counts like any tool.
+//
 // firstCallID/pinned are the H8-ramp state: the first execution of each exact
 // (name,args) pair records its call id; a later exact-repeat refusal proves
 // the model WANTED that result back, so the original id is pinned and the
@@ -1725,7 +1754,7 @@ func (l *Loop) run(ctx context.Context, objective string, bs *budgetState) (Resu
 // the model at destroyed bytes with no recovery path — so the call is
 // re-executed ONCE per pair (reExecuted bounds it) and the FRESH result is
 // pinned instead; msgs is the live transcript that check reads.
-func (l *Loop) dispatchOrThrottle(ctx context.Context, call ToolCall, msgs []Msg, exactCalls, sameNameCalls map[string]int, disabledTools map[string]bool, firstCallID map[string]string, pinned map[string]bool, reExecuted map[string]bool) (string, bool, EffectStatus) {
+func (l *Loop) dispatchOrThrottle(ctx context.Context, call ToolCall, msgs []Msg, exactCalls, sameNameCalls map[string]int, disabledTools map[string]bool, firstCallID map[string]string, pinned map[string]bool, reExecuted map[string]bool, reads *readLedger) (string, bool, EffectStatus) {
 	if disabledTools[call.Name] {
 		return fmt.Sprintf("NOT executed: %s has been disabled for the rest of this task (too many repeated calls). It is no longer offered — use a different tool or your existing results to continue.", call.Name), true, EffectNone
 	}
@@ -1751,7 +1780,14 @@ func (l *Loop) dispatchOrThrottle(ctx context.Context, call ToolCall, msgs []Msg
 	}
 	key := call.Name + "\x00" + call.Args
 	exactCalls[key]++
-	sameNameCalls[call.Name]++
+	reads.sawCall(call.Name)
+	// A NEW page of a file this run has already read is paging, which the read
+	// budget meters in characters (D-103); it is not a call against the name cap.
+	// Every other call counts: the first read of a path, an exact repeat, a read
+	// that failed, a call whose path cannot be read.
+	if !reads.isNewPage(call, exactCalls[key]) {
+		sameNameCalls[call.Name]++
+	}
 
 	// The name-cap MUST be checked before the exact-repeat check: a model stuck
 	// retrying the IDENTICAL call (the observed real-world failure) increments
@@ -1760,7 +1796,18 @@ func (l *Loop) dispatchOrThrottle(ctx context.Context, call ToolCall, msgs []Msg
 	// tool — would never be reached.
 	if l.maxSameTool > 0 && sameNameCalls[call.Name] > l.maxSameTool {
 		disabledTools[call.Name] = true
-		return fmt.Sprintf("NOT executed: %s has now been called %d times in this task — that is enough, and it is now DISABLED for the rest of this task. Proceed with the remaining steps using what you already have; %s is no longer available.", call.Name, sameNameCalls[call.Name], call.Name), true, EffectNone
+		n := sameNameCalls[call.Name]
+		if calls := reads.callCount(call.Name); calls > 0 {
+			n = calls // paged read_file calls are not in the capped count; say how many calls there really were
+		}
+		return fmt.Sprintf("NOT executed: %s has now been called %d times in this task — that is enough, and it is now DISABLED for the rest of this task. Proceed with the remaining steps using what you already have; %s is no longer available.", call.Name, n, call.Name), true, EffectNone
+	}
+	// The read budget is checked where the name cap is, before the exact-repeat
+	// check, for the same reason: a model repeating a call after the budget ran
+	// out must reach the withdrawal, not be refused as a repeat for ever.
+	if why := reads.spent(call.Name); why != "" {
+		disabledTools[call.Name] = true
+		return why, true, EffectNone
 	}
 	if exactCalls[key] > 1 {
 		id := firstCallID[key]

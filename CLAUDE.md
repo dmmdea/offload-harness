@@ -126,8 +126,8 @@ prompt/exemplars; can only narrow — UNSET resolves to config `agent_profile`, 
    risk-rule table (`rules.go`, loaded via `--rules`; rules deny or ask, never allow, with a
    built-in secret-material floor), and downgrades an Allow to Deny if the
    audit write fails; the **loop** (`loop.go`) owns the *budgets* — the step limit and the tool caps
-   (`--max-same-tool`, the exact-repeat breaker), enforced in `dispatchOrThrottle`, which is the only
-   path to `dispatch` and therefore runs before any `Exec`. Capability flags
+   (`--max-same-tool`, the exact-repeat breaker, the `read_file` character budget), enforced in
+   `dispatchOrThrottle`, which is the only path to `dispatch` and therefore runs before any `Exec`. Capability flags
    (`--allow-write/-overwrite/-delete/-fetch/-search/-run/-shell/-github`) are all **OFF by default**.
    The `run` tool (`--allow-run`) execs an **allowlisted program directly, no shell** (`go`, `gofmt`,
    `python`, `python3`, `pytest`, `npm`, `node`, `cargo`, `git`; bare name only, resolved on the
