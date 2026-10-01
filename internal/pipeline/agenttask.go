@@ -1346,6 +1346,7 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		// when !wire.Deferred — so no check can ever read it on this path.
 		cutoff, isCutoff := asRepackCutoff(serr)
 		skip, isSkip := asRepackSkip(serr)
+		isClamped := asRepackClamped(serr)
 		repackDown := repackSeatDown(cctx, live, serr, transport)
 		switch {
 		case repackDown != "":
@@ -1386,6 +1387,14 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 			// delegator to re-pack. The prefix is the one an older delegator
 			// recognizes a re-pack failure by.
 			return deferWire(core.DeferClassBudget, "structured "+skip.Error())
+		case isClamped:
+			// The last attempt was cut at a budget the time left had set, and its tail
+			// was no runaway (repackClampedErr): the clock decided, so this is a budget
+			// defer and not an abstention, which the delegator would retry on another
+			// node for a failure the seat did not commit. Same prefix as the skip's,
+			// the finished answer rides in output flagged above for the delegator to
+			// re-pack, and the note says what the clock did and what the cut showed.
+			return deferWire(core.DeferClassBudget, core.RepackFailedReason+serr.Error())
 		case isCutoff:
 			// The DECISIVE (last-run) re-pack attempt was ended by its OWN
 			// per-attempt bound (repackAttemptDeadline, register D-108) — not
@@ -1854,12 +1863,6 @@ func (p *Pipeline) repackStructuredWith(ctx context.Context, seat string, rawSch
 			// more tokens cannot help, the chat lane is a different request and
 			// is the next attempt.
 			cut := judgeCut(output, gres)
-			seen := cut.observed(sent)
-			if fit.Clamped {
-				// The time left set this budget whatever the answer needed, and the
-				// note keeps both: what the clock did and what the cut showed.
-				seen = "the time left set this budget: " + fit.Note + "; " + seen
-			}
 			// A resend at the cap is worth a request only when the time still left buys
 			// what the answer needs (cut.Needed), which is more than the request that
 			// was just judged too small carried. Time only runs out: after a clamped
@@ -1869,13 +1872,20 @@ func (p *Pipeline) repackStructuredWith(ctx context.Context, seat string, rawSch
 			// next fit, so the request that goes out is the one judged feasible here.
 			resend := !fit.Clamped && cut.escalates(sent)
 			resendFloor := max(least, cut.Needed)
+			resendSkip := ""
 			if resend {
 				if next := opts.fit(time.Now(), deadlineOf(ctx), agentRepackMaxTokensCap, resendFloor); next.Skip {
-					resend = false
-					seen += "; " + next.Note
+					resend, resendSkip = false, next.Note
 				}
 			}
-			terr := fmt.Errorf("re-pack truncated at %d tokens (the answer is %d chars; %s)", sent, len(output), seen)
+			// What the cut showed and, when the time left set the budget, what the clock
+			// did: both ride in the note. A cut the clock caused (and no runaway) is the
+			// clock's verdict, not the seat's (repackClampedErr).
+			clampNote := ""
+			if fit.Clamped {
+				clampNote = fit.Note
+			}
+			terr := truncatedRepackErr("re-pack", sent, len(output), cut, clampNote, resendSkip)
 			note(attempts, lane, sent, clampedFrom, gres, time.Since(attemptStart), terr.Error())
 			recordFailure(terr, boundFor(attemptTimeout), attempts)
 			if !resend {
@@ -1935,9 +1945,9 @@ func (p *Pipeline) repackStructuredWith(ctx context.Context, seat string, rawSch
 	}
 	if skipped == nil && attempts < limit && !seatBusyExhausted(lastRaw) {
 		attempts++
-		chatSent, chatClamped := cfit.Tokens, 0
+		chatSent, chatClamped, chatClampNote := cfit.Tokens, 0, ""
 		if cfit.Clamped {
-			chatClamped = chatBudget
+			chatClamped, chatClampNote = chatBudget, cfit.Note
 		}
 		chatTimeout := repackAttemptDeadline(ctx, p.cfg, chatSent, limit-attempts+1)
 		chatClient := p.repackClient("/v1/chat/completions", chatTimeout, gates)
@@ -1946,7 +1956,7 @@ func (p *Pipeline) repackStructuredWith(ctx context.Context, seat string, rawSch
 			chatOpts = append(chatOpts, llamaclient.WithoutClientTimeout(), llamaclient.WithProgress(progress))
 		}
 		chatStart := time.Now()
-		structured, cres, cerr := p.repackViaChat(ctx, chatClient, seat, schema, output, chatSent, chatOpts...)
+		structured, cres, cerr := p.repackViaChat(ctx, chatClient, seat, schema, output, chatSent, chatClampNote, chatOpts...)
 		tokensOut += cres.TokensOut
 		if cerr == nil {
 			note(attempts, "chat", chatSent, chatClamped, cres, time.Since(chatStart), "")
@@ -2228,7 +2238,7 @@ func repackBudget(output string) int {
 // returned error; repackViaChat makes no infrastructure/budget/abstention
 // judgment of its own. The GenResult is whatever completion came back, usable or
 // not (zero when none did), so the caller can count and record a failed attempt.
-func (p *Pipeline) repackViaChat(ctx context.Context, client *llamaclient.Client, seat string, schema map[string]any, output string, budget int, extra ...llamaclient.GenOption) (json.RawMessage, llamaclient.GenResult, error) {
+func (p *Pipeline) repackViaChat(ctx context.Context, client *llamaclient.Client, seat string, schema map[string]any, output string, budget int, clampNote string, extra ...llamaclient.GenOption) (json.RawMessage, llamaclient.GenResult, error) {
 	props, _ := schema["properties"].(map[string]any)
 	names := make([]string, 0, len(props))
 	for name := range props {
@@ -2246,7 +2256,7 @@ func (p *Pipeline) repackViaChat(ctx context.Context, client *llamaclient.Client
 		return nil, gres, gerr
 	}
 	if gres.Truncated {
-		return nil, gres, fmt.Errorf("chat re-pack truncated at %d tokens (the answer is %d chars; %s)", budget, len(output), judgeCut(output, gres).observed(budget))
+		return nil, gres, truncatedRepackErr("chat re-pack", budget, len(output), judgeCut(output, gres), clampNote, "")
 	}
 	content := outerObject(gres.Content)
 	if verr := validator.Validate([]byte(content), schema); verr != nil {

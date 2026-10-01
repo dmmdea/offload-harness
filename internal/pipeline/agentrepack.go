@@ -191,6 +191,45 @@ func asRepackSkip(err error) (*repackSkipErr, bool) {
 	return s, ok
 }
 
+// repackClampedErr marks a re-pack attempt that the time left had narrowed and
+// that was cut at the narrowed budget with a tail that was not a runaway: the clock
+// decided how much the seat was given, not the seat and not the schema, so the
+// defer is a budget one. Filed as an abstention it would be retried on another node,
+// a failure charged to a seat that was never given room to finish, and a contract
+// the clock could not fit would be spent twice. The finished answer stays flagged
+// for the delegator to re-pack (register C-80).
+type repackClampedErr struct{ msg string }
+
+func (e *repackClampedErr) Error() string { return e.msg }
+
+// asRepackClamped reports whether err is, or wraps, a *repackClampedErr.
+func asRepackClamped(err error) bool {
+	var c *repackClampedErr
+	return errors.As(err, &c)
+}
+
+// truncatedRepackErr is the error of a re-pack attempt cut at max_tokens: what was
+// asked (budget), what the cut showed (cut.observed), and, when the time left set
+// the budget, the clamp's own arithmetic beside it (clampNote, "" when the budget
+// fitted), then extra, any further finding the caller made about what came next.
+// Both lanes build it, so a clamped cut reads and is filed the same on either. It
+// is a *repackClampedErr only when the clock set the budget and the tail was not a
+// runaway: a loop or whitespace to the cap is the seat's, whatever the clock did.
+func truncatedRepackErr(what string, budget, answerChars int, cut repackCut, clampNote, extra string) error {
+	seen := cut.observed(budget)
+	if clampNote != "" {
+		seen = "the time left set this budget: " + clampNote + "; " + seen
+	}
+	if extra != "" {
+		seen += "; " + extra
+	}
+	msg := fmt.Sprintf("%s truncated at %d tokens (the answer is %d chars; %s)", what, budget, answerChars, seen)
+	if clampNote != "" && cut.Degenerate == "" {
+		return &repackClampedErr{msg: msg}
+	}
+	return errors.New(msg)
+}
+
 // deadlineOf is ctx's deadline, the zero time when it has none.
 func deadlineOf(ctx context.Context) time.Time {
 	dl, _ := ctx.Deadline()
