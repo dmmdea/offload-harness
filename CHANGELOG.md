@@ -6,6 +6,44 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.158.1] - 2026-10-01 - A ComfyUI that answers HTTP but cannot render ends the wait and the batch
+
+### Fixed — a ComfyUI that answers HTTP but can no longer render ends the wait and the batch (register C-83)
+
+On 2026-10-01 at 12:00:10 a sticky CUDA error on a 16 GB render card killed ComfyUI's prompt worker while its HTTP
+server kept answering (register A-128 tracks the fault itself). `/history/<id>` returned `200 {}`, which the poll loop
+read as a slow render, and `GET /system_stats` returned HTTP 500. The batch waited 2,894 s on that job against a
+1,500 s `COMFY_WAIT_SEC`, then failed the next three jobs at about 3 min each. For those 57 minutes the media lease
+held all three cards with nothing running on any of them: a whisper load and the text seat queued behind it, and
+delegations overflowed to another node.
+
+- `pollOutputs`, used by every ComfyUI runner, measures `waitSec` in wall-clock time. It used to count polls, so
+  slow answers stretched the budget. A suspend still moves the deadline by the time slept, now also when the
+  machine sleeps during a request. Before, a request in flight across a suspend counted the whole nap as dead time
+  and ended the job on a healthy server.
+- While the prompt is missing from `/history`, or `/history` answers with an error status, a `GET /system_stats`
+  probe runs every 15 s, starting after 15 s. Two HTTP-error answers in a row end the wait with a *server unusable*
+  error that names the probe, the status and the restart. A probe that gets no answer counts for nothing. The
+  dead-server watchdog's abort is a server-unusable error too.
+- `comfy-render.mjs` exits 3 on a server-unusable error (1 for any other failure, 2 for a caller mistake). When a
+  `--no-lifecycle` child waits for its parent's server, three error answers now end the wait instead of ~3 min of
+  polling, and the "not reachable" ending is server-unusable as well.
+- `comfy-generate.mjs --batch` stops when a job exits 3. The failed job and every later job get a result row (the
+  later ones `not run: ComfyUI became unusable at job N/M (...)`), the batch exits non-zero, and its teardown frees
+  the card and the lease. An ordinary failure is still recorded and the batch goes on with exit 0, which is what
+  the Go side reads job by job. A failed job's `error` now carries the child's own `RENDER FAILED:` reason instead
+  of only `comfy-render exited N`.
+- `comfy-inpaint.mjs --batch` stops at once on a server-unusable error. Before, it stopped only after three
+  consecutive failures, each a full wait. Its `_row: "aborted"` line gains `reason`.
+- When `withGpuSlot` adds ComfyUI's console tail to an error, it keeps the server-unusable flag, so a standalone
+  render exits 3 too.
+- Tests: 18 new; each of the 16 mutants of the new logic turns one red. Two existing poll tests whose mocks answered
+  5xx on every URL now answer `/system_stats` as a healthy server, since they test the `/history` watchdog. An end-to-end run of the real
+  `comfy-generate.mjs --batch` against a fake ComfyUI that goes poisoned on job 2 stopped in 37 s with a row for
+  each of the four jobs. Unchanged main took 631 s on the same run, exited 0, and recorded
+  `comfy-render exited 1` as every error.
+- Docs: `docs/systems/media-generation.md` (the poll loop and the warm batch).
+
 ## [0.158.0] - 2026-10-01 - Qwen-Image-2.1 licence warnings removed from results, status and docs
 
 ### Changed — no licence warning text anywhere (operator order 2026-10-01)
