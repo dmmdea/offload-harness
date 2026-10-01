@@ -820,13 +820,57 @@ func (m *Manager) TryAcquire(class Class, opts Options) (*Lease, error) {
 		}
 		// Remove only the CLAIM, never the container: another acquirer may be working
 		// inside this directory right now.
-		if err := removeClaim(m.metaPath()); err != nil {
+		if err := m.removeStaleClaim(meta); err != nil {
 			// A reclaim we cannot perform is not a free lease. Report it as held rather
 			// than looping — spinning here once pegged a core forever.
 			return nil, fmt.Errorf("gpulease: cannot reclaim the stale lease at %s: %w", m.metaPath(), err)
 		}
 	}
 	return nil, &ErrHeld{Info: m.holderInfo(nil)}
+}
+
+// removeStaleClaim removes the claim ONLY IF it is still stale when looked at
+// again. judged is the record the caller judged stale — nil when the caller
+// judged an unreadable claim debris.
+//
+// The decision to reclaim comes from one read and the removal is by path. In
+// between, a faster acquirer can reclaim the SAME stale record and create its own
+// claim — and a removal that does not look again deletes THAT one: a lease
+// granted and gone before its holder did anything with it. (Register C-59: one
+// way a draining reserve can lose its epoch to a concurrent acquire. Found by
+// reading and reproduced by
+// TestASlowReclaimerNeverDeletesTheClaimTheFirstReclaimerMade; whether it caused
+// a live loss is unproven.)
+//
+// So the removal runs under the epoch lock — the lock Restamp holds, and the one
+// a rival's own reclaim must take — reads the record again, and removes it only
+// if it is STILL stale. A claim that moved on (a rival reclaimed it and took the
+// card, a rival is still writing its record, the holder came back to life) is
+// left alone and the caller's loop judges it afresh.
+//
+// What stays is a window of a few microseconds between this read and the
+// removal, open only to a holder that releases (or an operator who releases) at
+// that very instant: creating the next claim needs the old one gone, so no
+// rival can slip a claim in underneath.
+func (m *Manager) removeStaleClaim(judged *Meta) error {
+	return m.withEpochLock(func() error {
+		cur, err := m.readMeta()
+		switch {
+		case err != nil:
+			// Gone, or unreadable, under the lock. A claim the caller PARSED a
+			// moment ago is then a record that is gone or failed to read, not
+			// debris: leave it for the next look. One the caller already judged
+			// unreadable is debris only while it is OLD: a claim this new is a
+			// rival's, caught between its create and its write — the same grace
+			// the caller applied before it judged.
+			if judged != nil || m.claimIsFresh() {
+				return nil
+			}
+		case !m.reclaimable(cur, m.now()):
+			return nil // no longer stale: a new holder's claim, or the old holder came back
+		}
+		return removeClaim(m.metaPath())
+	})
 }
 
 // holderInfo describes the current holder for an ErrHeld, falling back to the record we

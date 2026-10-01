@@ -251,6 +251,17 @@ names — is in-process only and does not close the cross-process gap named abov
   expired)*. A bare heartbeat timeout would expire a descheduled benchmark under exactly the load
   it exists to protect.
 - **Release is epoch-guarded** — a fenced-out straggler cannot delete the current holder's lease.
+- **A reclaim removes only what is still stale (register C-59).** The reclaim rule decides from one read, and
+  the claim used to be removed by path: two acquirers that both read the same dead holder's record could
+  interleave so that the slower one deleted the claim the faster one had just created — a lease granted and gone
+  before its holder did anything with it (its next `Check` or restamp reports "fenced out", or "the lease is
+  gone" in the instant before the rival's own claim lands). The removal (`removeStaleClaim`) now runs under the
+  epoch lock, reads the record again, and removes it only if it is still stale: a new holder's claim, a claim a
+  rival is still writing, or the old holder back from the dead is left alone, and a claim the caller parsed a
+  moment ago that now fails to read is left for the next look instead of being treated as debris. This is one
+  mechanism by which a draining reserve can lose its epoch to a concurrent acquire — found by reading and
+  reproduced deterministically; whether it caused any live loss is unproven. What remains is a window of
+  microseconds, open only to a holder (or an operator) releasing at that exact instant.
 
 ## The drain
 
