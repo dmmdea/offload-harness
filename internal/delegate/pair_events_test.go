@@ -19,14 +19,34 @@ import (
 type pairCapture struct {
 	mu     sync.Mutex
 	frames []map[string]any
+
+	// holdQueued, when non-nil, keeps the ingress from recording a queued frame
+	// until a terminal one has landed: the arrival order the emitter's per-frame
+	// goroutines produce whenever they race, forced. The wait is bounded (a
+	// second, inside the emitter's 2 s send budget) so a terminal frame that
+	// never lands cannot hang the server's Close, which makes the order certain
+	// only while the terminal frame lands in time: a case that depends on the
+	// order asserts it. Set it before the server starts; the handler closes it.
+	holdQueued  chan struct{}
+	releaseOnce sync.Once
 }
 
 func (c *pairCapture) handler(w http.ResponseWriter, r *http.Request) {
 	var f map[string]any
 	_ = json.NewDecoder(r.Body).Decode(&f)
+	method, _ := f["method"].(string)
+	if c.holdQueued != nil && method == "workload:submitted" {
+		select {
+		case <-c.holdQueued:
+		case <-time.After(time.Second):
+		}
+	}
 	c.mu.Lock()
 	c.frames = append(c.frames, f)
 	c.mu.Unlock()
+	if c.holdQueued != nil && (method == "workload:completed" || method == "workload:errored") {
+		c.releaseOnce.Do(func() { close(c.holdQueued) })
+	}
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -153,32 +173,66 @@ func TestPAIRDisabledEmitsNothing(t *testing.T) {
 }
 
 // TestFailedLocalPlacementReportsErrored: a deferred local run ends the card
-// as failed with the defer reason.
+// as failed with the defer reason, whichever of its two frames reaches the
+// ingress first. The emitter posts each frame on its own goroutine and a defer
+// ends the run within milliseconds of its queued frame, so the two posts race;
+// PAIR's store merges a job's frames by lifecycle rank (queued < running <
+// terminal), not by arrival, so the test asserts the card the frames describe
+// and never takes the scheduler's order for granted (register C-77: asserting
+// frames[1] failed intermittently once the process was warm, and never on a
+// fresh process's first run, where the cold start leaves the queued post time
+// to land first). The first case leaves the order to the scheduler and asserts
+// none. The second holds the queued frame back at the ingress so the terminal
+// one lands first, and asserts that it did: a hold that expired before the
+// terminal frame arrived, or an emitter that began ordering a job's frames,
+// would turn that case into the first one without failing anything, so it
+// fails instead.
 func TestFailedLocalPlacementReportsErrored(t *testing.T) {
-	pairAppDir(t)
-	c := &pairCapture{}
-	srv := httptest.NewServer(http.HandlerFunc(c.handler))
-	defer srv.Close()
-	cfg := testCfg(t)
-	cfg.PairWorkloadsEnabled = true
-	cfg.PairWorkloadsEndpoint = srv.URL
-	local := LocalRunner(func(ctx context.Context, ac core.AgentContract, _ LocalOptions) (core.AgentWireResult, error) {
-		return core.AgentWireResult{SchemaVersion: core.AgentWireSchemaVersion, Deferred: true, Reason: "seat busy"}, nil
-	})
-	if _, _, err := RunWith(context.Background(), cfg, local, []core.AgentContract{{Goal: "say done"}}, "local", nil, nil); err != nil {
-		t.Fatal(err)
-	}
-	deadline := 50
-	for len(c.snapshot()) < 2 && deadline > 0 {
-		deadline--
-		waitABit()
-	}
-	frames := c.snapshot()
-	if len(frames) != 2 || frames[1]["method"] != "workload:errored" {
-		t.Fatalf("frames = %v", frames)
-	}
-	if info := pairInfo(frames[1]); info["error"] != "seat busy" || info["state"] != "failed" {
-		t.Fatalf("terminal frame wrong: %v", info)
+	for _, tc := range []struct {
+		name string
+		hold bool // hold the queued frame at the ingress until the terminal one has landed
+	}{
+		{"arrival order left to the scheduler", false},
+		{"queued frame lands after the terminal one", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pairAppDir(t)
+			c := &pairCapture{}
+			if tc.hold {
+				c.holdQueued = make(chan struct{})
+			}
+			srv := httptest.NewServer(http.HandlerFunc(c.handler))
+			defer srv.Close()
+			cfg := testCfg(t)
+			cfg.PairWorkloadsEnabled = true
+			cfg.PairWorkloadsEndpoint = srv.URL
+			local := LocalRunner(func(ctx context.Context, ac core.AgentContract, _ LocalOptions) (core.AgentWireResult, error) {
+				return core.AgentWireResult{SchemaVersion: core.AgentWireSchemaVersion, Deferred: true, Reason: "seat busy"}, nil
+			})
+			if _, _, err := RunWith(context.Background(), cfg, local, []core.AgentContract{{Goal: "say done"}}, "local", nil, nil); err != nil {
+				t.Fatal(err)
+			}
+			deadline := 50
+			for len(c.snapshot()) < 2 && deadline > 0 {
+				deadline--
+				waitABit()
+			}
+			frames := c.snapshot()
+			byMethod := framesByMethod(frames)
+			if len(frames) != 2 || byMethod["workload:submitted"] == nil || byMethod["workload:errored"] == nil {
+				t.Fatalf("frames = %v, want queued + errored", frames)
+			}
+			if tc.hold && frames[0]["method"] != "workload:errored" {
+				t.Fatalf("the ingress held the queued frame, yet it was recorded first: the hold expired before the terminal frame landed, or the emitter now orders a job's frames, so this case did not run a terminal-first arrival: %v", frames)
+			}
+			queued, errored := pairInfo(byMethod["workload:submitted"]), pairInfo(byMethod["workload:errored"])
+			if errored["error"] != "seat busy" || errored["state"] != "failed" {
+				t.Fatalf("terminal frame wrong: %v", errored)
+			}
+			if queued["id"] != errored["id"] {
+				t.Fatalf("the two frames name two jobs: queued %v, errored %v", queued["id"], errored["id"])
+			}
+		})
 	}
 }
 
