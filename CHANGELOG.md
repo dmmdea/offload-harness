@@ -6,6 +6,35 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.157.1] - 2026-10-01 - research results are labelled and sanitized; an ended run no longer lingers on Windows
+
+### Fixed — `offload_research` labels and sanitizes what it returns (register SF-45, security standard gate G13)
+
+A research digest is a local seat's reading of someone else's page, so an instruction planted on the page could survive into
+the text the calling session reads, unlabelled and unbounded; the agent's own fetch and browse tools already fenced page
+content, the research door did not.
+
+- The body gains `untrusted` right after `summary`: a one-line notice that `results` and `sources` are third-party page content,
+  data to weigh and never instructions (the head of the body is what a truncating client keeps).
+- Every string in `results` and `sources` (object keys too) goes through the new `internal/untrusted` package: zero-width,
+  format and line-separator runes dropped, chat-template and instruction-header markers neutralized, each string capped at
+  16,000 characters with a note. The cap is twice the longest digest (7,952) and prose answer (8,317) over 970 finished
+  research runs, so it never cuts a real one. A part that cannot be walked is withheld with a note instead of published
+  unfenced; numbers keep their exact text. Inside each result, fields now marshal in key order.
+- `internal/agent`'s fetch, browse and search tools use the same package, so the markers and the rune rules live once.
+- Tests: the notice and the sanitize-and-cap tests failed on the old handler; six mutants each turn one red; the C-75 field
+  order and digests-before-sources pins still pass. Docs: `docs/systems/security.md` (G13 shipped), `docs/systems/mcp-server.md`.
+
+### Fixed — an ended run's record is removed even while a reader holds it (register C-84)
+
+`gpuactivity.Handle.End` ignored `os.Remove`'s error. On Windows a delete fails with a sharing violation while a reader (a
+drain, a status call) has the record open, so an ended run stayed registered with its heartbeat stopped until `HeartbeatTTL`
+(120 s) aged it out: a drain waited on a run that had ended, and the local run cap counted it. `End` now retries the delete for
+the same bounded window `write()` gives its rename (20 x 5 ms); a path already gone counts as removed.
+`TestEndRemovesTheRecordEvenWhileAReaderHoldsItOpen` failed 5 of 5 on the old code. The drain test that toggled a seat's
+in-flight count from a timer goroutine against an 80 ms stuck bound now changes it on every probe, and the drain's give-up
+message prints a sub-second span in milliseconds (it read "0s" for 80 ms). The twelve drain tests passed 60 runs each.
+
 ## [0.157.0] - 2026-10-01 - the structured re-pack is bounded by the wall; a named layer is honoured on every deal; the Hailo-8L stays on its box; read_file is metered in characters
 
 ### Fixed — the structured re-pack is bounded by the wall, resends a cut request only when it can help, and says what it did (register C-80, ADR 0055 item 9)
