@@ -206,6 +206,15 @@ type ResultWire struct {
 	RepackMs       int64  `json:"repack_ms,omitempty"`
 	RepackAttempts int    `json:"repack_attempts,omitempty"`
 	RepackNote     string `json:"repack_note,omitempty"`
+	// RepackAttemptsDetail (register C-80) is the node's record of each re-pack
+	// attempt (lane, max_tokens, tokens generated, finish reason, a clip of what the
+	// seat wrote, why it failed or was skipped), passed through bounded to the first
+	// wireRepackAttemptsMax: the earliest attempt shows what went wrong, and a node
+	// sends at most three and a skip. Before it, only the node's own job result and
+	// the delegation log held it, so the caller who asked what a failed re-pack did
+	// could not read it. omitempty: a node that predates the field publishes a row
+	// byte-identical to before.
+	RepackAttemptsDetail []core.AgentRepackAttempt `json:"repack_attempts_detail,omitempty"`
 	// Final-budget fit and the list-cap re-issue (0.122.1, register D-95),
 	// passed through from the node. Without them a caller sizing its next
 	// contract cannot tell an answer that fitted from one the wall narrowed,
@@ -242,6 +251,27 @@ func lintFor(lints [][]string, i int) []string {
 // completions cover a 12-step run's tail — its tool steps, the final answer,
 // a structured re-pack — without republishing every planner turn.
 const wireCallsMax = 8
+
+// wireRepackAttemptsMax bounds ResultWire.RepackAttemptsDetail (register C-80): a
+// node records one entry per request sent (at most three: two grammar attempts and
+// the chat lane) and one for the attempt it skipped, so the bound never cuts what a
+// current node sends and only keeps a row from a future one from growing without
+// limit.
+const wireRepackAttemptsMax = 4
+
+// firstRepackAttempts returns the leading n records of attempts (all of them when
+// there are fewer), nil when there are none so omitempty holds.
+func firstRepackAttempts(attempts []core.AgentRepackAttempt, n int) []core.AgentRepackAttempt {
+	if len(attempts) == 0 {
+		return nil
+	}
+	if len(attempts) > n {
+		attempts = attempts[:n]
+	}
+	out := make([]core.AgentRepackAttempt, len(attempts))
+	copy(out, attempts)
+	return out
+}
 
 // lastCalls returns the trailing n records of calls (all of them when there
 // are fewer), nil when there are none so omitempty holds.
@@ -339,6 +369,9 @@ func WireResponse(results []PlacedResult, sum Summary, lints [][]string) Respons
 			DiffFiles:          pr.Result.DiffFiles,
 			WriteNote:          pr.Result.WriteNote,
 		}
+		// Set beside, not inside, the literal above: a key longer than every other would
+		// re-align the whole block.
+		rw.RepackAttemptsDetail = firstRepackAttempts(pr.Result.RepackAttemptsDetail, wireRepackAttemptsMax)
 		if pr.Err != "" {
 			rw.Failed = true
 			rw.Reason = pr.Err
