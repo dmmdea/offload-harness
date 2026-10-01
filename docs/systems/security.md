@@ -41,9 +41,45 @@ Each layer lists what exists today, what the standard adds, its default and the 
 | **L5 Network egress and the model path** | no network in the cage; the `web_fetch` allowlist; three netguard guards (listen, tailnet, public web); ADR 0001 (never cloud) | exact-host credential binding (shipped 0.143.1); an audit-first allowlist for `offload_nim`'s base; the bare-client lint (this change); egress rules | binding and lint on; allowlist audit-first | hostile-base credential test plus mutation (G1, shipped); the AST lint fails on a new bare client (G2, shipped); a would-refuse counter for the nim base |
 | **L6 Secrets** | keys from the environment only; a write floor; env allowlists; secret scan on Edit/Write | a read floor; a managed hard tier for the guards; no live credential in tracked settings; guard-override hygiene | anything adopted ships with vendor telemetry off | tracked-file secret-shape scan; a posture row for managed settings |
 | **L7 Audit and evidence** | broker audit on the CLI doors only | coverage on every agent door (flag `off / warn / enforce`); a per-run hash chain and a `verify` verb; an off-node head witness only with approval | coverage `off` until measured, then `warn` | audit allow-rows equal the effect-trace count on a delegated write-door run (G3); editing, deleting or reordering a row fails verify naming run and seq (G4); 8 concurrent writers keep every chain valid without a global lock (G5) |
-| **L8 Supply chain and provenance** | pinned Go deps; installer SHA-256; `npm ci --ignore-scripts` for the compose lane; a pre-commit secret scan | a provenance manifest and drift report for skills and plugins; a local vulnerability scan; any adopted binary pinned by tag and sha256, never `curl \| sh` | read-only report | the drift check goes RED on a modified skill (G12) |
+| **L8 Supply chain and provenance** | pinned Go deps; installer SHA-256; `npm ci --ignore-scripts` for the compose lane; a pre-commit secret scan | a provenance manifest and drift report for skills, plugins, MCP servers and desktop apps; the admission checklist below for any new third-party software; a local vulnerability scan; any adopted binary pinned by tag and sha256, never `curl \| sh` | read-only report; admission is operator-approved, one artifact at a time | the drift check goes RED on a modified skill (G12) |
 | **L9 Human approval and kill** | unattended Ask = deny and queue; no cancel route | structured refusal bodies; an authenticated cancel route and pause flag (approval item); approve-and-replay only on measured need | — | an unauthenticated cancel gets 401 or 403; an expired one-shot grant is refused |
 | **R Reliability** | the busy hold (ADR 0061), the seat-cap FIFO, the parity deploy | the placement and re-pack work of the 15-change reliability plan | — | the replay gate (G11): a promotion to enforce needs the harness itself to be reliable |
+
+## Admitting third-party software (L8)
+
+No third-party tool, model weight, plugin, MCP server or desktop app is installed, bound or run until
+it has passed these checks and the operator has approved it. The checks are read-only research. They
+download nothing new (a hash is taken only of a file already fetched for that purpose, never extracted
+or run), and nothing in them approves anything (I2).
+
+| # | Check | Who |
+|---|---|---|
+| 1 | Maintainer identity: account and organisation age | reviewer |
+| 2 | Repository age, last push, contributor count (complete or windowed) | reviewer |
+| 3 | Two issue searches per repository, one for malware terms and one for telemetry and credential terms, read against their total counts | reviewer |
+| 4 | Advisories: the repository's advisories page, the GitHub Advisory Database (malware and reviewed types), deps.dev advisory keys | reviewer |
+| 5 | Signing in three layers: Authenticode or notarisation, update-channel signatures, build attestations or package provenance | reviewer |
+| 6 | At least two hash channels for any binary, with the forge's own per-asset digest as the independent one | reviewer |
+| 7 | The licence text as written, not a card tag: a class enters a licence map only from a text read in full | reviewer fetches; the operator (or counsel) reads terms that carry conditions |
+| 8 | Package publisher continuity between the first and the latest versions, and lifecycle hooks in the manifest | reviewer |
+| 9 | Namesake and lookalike search | reviewer |
+| 10 | A pattern scan of install hooks and code for anything that runs on install | reviewer |
+| 11 | A malware-scanner lookup by hash (VirusTotal), and the install approval itself | **operator only** |
+
+The result is a verdict per artifact (no finding, concern, or reject) with the evidence for each check.
+A concern goes to the operator; the reviewer never resolves it. For an MCP server the artifact is the
+server's command, package and version; for a desktop app it is the installer and the binaries it
+places.
+
+## Named surfaces
+
+- **The research-digest channel.** `offload_research` digests are written by local seats from
+  third-party pages, so the text a caller reads is third-party content even though a seat wrote it,
+  and an instruction planted on a page can survive into a digest. The agent's own `web_fetch` and
+  browse tools fence page content as untrusted data (`fenceUntrusted`, `sanitizeUntrusted` in
+  `internal/agent`); the research door does not yet label or bound its digests. Gate G13 (open): a
+  digest result carries the untrusted label and a length bound, and a test fails when a page's
+  planted instruction reaches the result without them.
 
 ## AARM v1.0 coverage
 
@@ -89,6 +125,7 @@ R1–R6 are MUST, R7–R9 SHOULD.
 | G10 | rules golden tests and read-floor fixtures with would-deny counters | open (L2) |
 | G11 | the replay gate for the reliability track | open (R) |
 | G12 | skill manifest drift | open (L8) |
+| G13 | research digests labelled untrusted and length-bounded | open (L5) |
 
 ## What was evaluated and not adopted
 
@@ -116,6 +153,7 @@ R1–R6 are MUST, R7–R9 SHOULD.
 | listen, tailnet and public-web guards | `internal/netguard/netguard.go`, `tailnet.go`, `publicnet.go` |
 | credential binding for the NVIDIA key | `internal/nimclient/nimclient.go` (`IsHostedNVIDIA`, `KeyForBase`) |
 | bare-client gate (G2) | `bare_http_client_lint_test.go`, `bare_http_client_allowlist_test.go` |
+| untrusted-content fences | `internal/agent/fetchtool.go` (`fenceUntrusted`), `internal/agent/browsetool.go`; none yet in `internal/research` (G13) |
 | fleet node listeners and the fleet bearer | `internal/fleetnode/server.go`, `main.go` (`fleetServeParams`) |
 | posture report | `main.go` (`doctor`) |
 
