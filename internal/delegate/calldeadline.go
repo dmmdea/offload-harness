@@ -279,6 +279,19 @@ func (r *runner) cutOutcome(pr PlacedResult, quote bool) PlacedResult {
 	wire := pr.Result
 	var where string
 	switch {
+	case pr.intentRecorded && pr.Err == "" && pr.Result.Deferred && !pr.orphanable && !pr.withdrawn && pr.nodeNeverRan == "":
+		// The node's own terminal answer, a defer it filed and this call read, and the call was
+		// still working on it when the deadline passed: the delegator's rescue of a finished
+		// answer (a seat lost in the structured re-pack, ADR 0066) is the usual case, and a poll
+		// that answered a moment late the other. The job is OVER on the node, so neither "still
+		// on the node" nor "not taken back" is true of it, and nothing is left for the recovery
+		// pass: finish closes the intent as the terminal observation it is. A give-up that leaves
+		// a job on its node marks it orphanable first (giveUp), so a node's defer that carries
+		// no mark is a job that ended.
+		where = fmt.Sprintf("had been answered by %s (job %s) when the call's deadline passed, and this call was not done with that answer", nodeOrBase(pr), pr.JobID)
+		if pr.rescueSpent > 0 {
+			where += " (the delegator was re-packing the finished answer itself)"
+		}
 	case pr.intentRecorded:
 		// Cancelling the poll leaves the job on its node, where it could start later
 		// on a seat nobody is waiting for. Taking it back is the give-up's business,

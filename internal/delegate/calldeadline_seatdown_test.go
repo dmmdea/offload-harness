@@ -17,7 +17,10 @@ package delegate
 //     not re-placed; the same holds for the finished answer a delegator-side rescue was still
 //     trying to save when the deadline passed;
 //   - a retry whose choice of node the deadline ended says so in its note, before it says that
-//     no other node could take the contract.
+//     no other node could take the contract;
+//   - a node's finished answer the call was still working on when the deadline passed (the
+//     rescue above) is cut as an answered job, not as one still on the node, and its intent is
+//     closed, not left for the recovery pass.
 
 import (
 	"context"
@@ -345,6 +348,63 @@ func TestTheRescueOfASeatLostInTheRepackIsEndedByTheCallDeadlineAndTheDeferIsNot
 	}
 	if sum.Deferred != 1 || sum.Retried != 0 || sum.LostToStack != 0 {
 		t.Fatalf("summary = %+v, want one deferred subtask, not retried and not lost to the stack", sum)
+	}
+	// The node's job had ended (it reported the seat-down); what was still running was the delegator's
+	// own re-pack of the finished answer. The cut says that, and it leaves nothing for the recovery
+	// pass: "still on the node, not taken back" is false of a job the node answered, and an intent
+	// left open for it makes the recovery pass collect an outcome the call has already published.
+	for _, bad := range []string{"was still on", "not taken back", "no longer waiting for it"} {
+		if strings.Contains(pr.Result.Reason, bad) {
+			t.Fatalf("reason = %q claims the node still holds a job it had already answered (%q)", pr.Result.Reason, bad)
+		}
+	}
+	for _, want := range []string{"had been answered by " + pr.Node, "(job " + pr.JobID + ")", "re-packing the finished answer itself"} {
+		if !strings.Contains(pr.Result.Reason, want) {
+			t.Fatalf("reason = %q, want it to say what was still running: %q", pr.Result.Reason, want)
+		}
+	}
+	closed, open := intentNotes(t, cfg.StateDir)
+	if pr.orphanable || closed[pr.JobID] != intentNoteTerminal || len(open) != 0 {
+		t.Fatalf("orphanable %v, intent closed as %q (open=%v), want the node's terminal answer closed as %q with nothing left open for recovery", pr.orphanable, closed[pr.JobID], open, intentNoteTerminal)
+	}
+}
+
+// TestTheCutOfAJobTheNodeAlreadyAnsweredDoesNotSayItIsStillThere: the unit under the run-level test
+// above, with the contrast it must not move. A cancelled poll, and a delegator-authored defer for a job
+// a give-up left on its node, are jobs the node may still hold: they keep the words and the open
+// intent. The node's own terminal defer, read before the deadline, is not one.
+func TestTheCutOfAJobTheNodeAlreadyAnsweredDoesNotSayItIsStillThere(t *testing.T) {
+	r := &runner{cfg: testCfg(t), call: pastDeadline(1)}
+	answered := r.cutByDeadline(PlacedResult{
+		Node: "node-a", Seat: "remote-seat", ranBase: "http://192.0.2.50:1", JobID: "agd-done", intentRecorded: true,
+		Result: seatDownWire("node-a", 6), rescueSpent: 3 * time.Second,
+	})
+	if !answered.deadlineCut || answered.orphanable || answered.Err != "" {
+		t.Fatalf("answered job: cut %v orphanable %v err %q, want a cut that is not orphanable", answered.deadlineCut, answered.orphanable, answered.Err)
+	}
+	for _, want := range []string{"had been answered by node-a (job agd-done)", "re-packing the finished answer itself", "the run itself reported infrastructure: " + core.SeatDownReason} {
+		if !strings.Contains(answered.Result.Reason, want) {
+			t.Errorf("answered job: reason = %q, want %q", answered.Result.Reason, want)
+		}
+	}
+	if strings.Contains(answered.Result.Reason, "was still on") || strings.Contains(answered.Result.Reason, "not taken back") {
+		t.Errorf("answered job: reason = %q says the job is still on the node", answered.Result.Reason)
+	}
+	// No rescue behind it (the node's answer was read a moment late): still answered, nothing to re-pack.
+	late := r.cutByDeadline(PlacedResult{Node: "node-a", ranBase: "http://192.0.2.50:1", JobID: "agd-late", intentRecorded: true, Result: seatDownWire("node-a", 6)})
+	if late.orphanable || strings.Contains(late.Result.Reason, "re-packing") || !strings.Contains(late.Result.Reason, "had been answered by node-a (job agd-late)") {
+		t.Errorf("late answer: orphanable %v reason %q, want the answered wording without a re-pack", late.orphanable, late.Result.Reason)
+	}
+	// What the cut must not move: a job the node may still hold.
+	polled := r.cutByDeadline(PlacedResult{Node: "node-a", ranBase: "http://192.0.2.50:1", JobID: "agd-open", intentRecorded: true,
+		Err: "canceled: context deadline exceeded; withdraw not confirmed: HTTP 405: the node has no withdraw route", orphanable: true})
+	if !polled.orphanable || !strings.Contains(polled.Result.Reason, "was still on node-a (job agd-open)") || !strings.Contains(polled.Result.Reason, "it was not taken back from the node") {
+		t.Errorf("cancelled poll: orphanable %v reason %q, want it still on the node and left to the recovery pass", polled.orphanable, polled.Result.Reason)
+	}
+	gaveUp := r.cutByDeadline(PlacedResult{Node: "node-a", ranBase: "http://192.0.2.50:1", JobID: "agd-poll", intentRecorded: true, orphanable: true,
+		Result: core.AgentWireResult{Deferred: true, DeferClass: core.DeferClassBudget, Reason: "poll deadline after 5m0s: the node accepted the job but did not reach a terminal state"}})
+	if !gaveUp.orphanable || !strings.Contains(gaveUp.Result.Reason, "was still on node-a (job agd-poll)") {
+		t.Errorf("poll-deadline defer: orphanable %v reason %q, want it still on the node (the give-up left it open)", gaveUp.orphanable, gaveUp.Result.Reason)
 	}
 }
 
