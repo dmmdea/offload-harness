@@ -180,6 +180,13 @@ cites nothing, and grading the bytes gives `verified: false` when the re-pack re
 case is a question whose subject is a SHORT (<8-character) or question-named identifier, which
 leaves nothing anchorable at all.
 
+A deferred `offload_ask` keeps the finished answer (register C-80). When the node says the loop FINISHED and only
+its structuring failed (`schema_miss`: the re-pack was skipped because the wall had no time left, was cut by the clock, or
+stalled), the deferred payload carries the loop's prose as `output` with `schema_miss: true`, beside the defer's own
+`reason` and `defer_class`, for a local run and a routed one alike. It is never graded and never an `answer` field.
+`offload_review_diff` publishes no such field: what that lane returns went through its grounding filters, and the raw
+prose has not, so a review defer stays bare.
+
 `agent_delegate`'s `route` argument picks the placement rule (see
 [fleet-node.md](fleet-node.md#placement-routes-and-the-retry-delegator-side) for the mechanics):
 `auto` (default) runs local while the local seat is idle and considers the fleet only while it is
