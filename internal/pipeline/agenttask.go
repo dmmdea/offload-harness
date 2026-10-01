@@ -2215,7 +2215,7 @@ func (p *Pipeline) repackViaChat(ctx context.Context, client *llamaclient.Client
 		return nil, gres, gerr
 	}
 	if gres.Truncated {
-		return nil, gres, fmt.Errorf("chat re-pack truncated at %d tokens (the answer is %d chars; the structured budget cannot hold it)", budget, len(output))
+		return nil, gres, fmt.Errorf("chat re-pack truncated at %d tokens (the answer is %d chars; %s)", budget, len(output), judgeCut(output, gres).observed(budget))
 	}
 	content := outerObject(gres.Content)
 	if verr := validator.Validate([]byte(content), schema); verr != nil {

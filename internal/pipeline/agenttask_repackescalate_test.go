@@ -177,3 +177,35 @@ func TestRunAgentTaskRepackTruncationIsNamedAndEscalatesWhenTheBudgetWasTheProbl
 	}
 	t.Logf("attempt 1 note: %s", d[0].Why)
 }
+
+// The chat lane's own truncation says what it observed too: it used to end with
+// the same "the structured budget cannot hold it", a claim no one had measured.
+func TestRunAgentTaskChatLaneTruncationNoteSaysWhatWasObserved(t *testing.T) {
+	answer := answerOfChars(2800)
+	budget := repackBudget(answer)
+	fake := &agentFake{
+		rosterIDs: []string{agentTestSeat},
+		loop:      func(int64) string { return doneChat(answer) },
+		repack:    func(int64) string { return `{"wrong":"shape"}` }, // both grammar attempts answer the wrong shape
+		chatStream: func(n int64, _ map[string]any, w http.ResponseWriter, _ *http.Request) {
+			writeCompletion(w, `{"answer":"`+strings.Repeat(" ", 400), "length", budget)
+		},
+	}
+	srv := fake.server(t)
+	defer srv.Close()
+
+	wire := decodeWire(t, agentTestPipeline(t, srv.URL).Run(context.Background(), agentTestRequest(t, testContract())))
+	if !wire.Deferred || wire.DeferClass != core.DeferClassAbstention {
+		t.Fatalf("deferred/class = %v/%q, want an abstention (the chat lane was cut)", wire.Deferred, wire.DeferClass)
+	}
+	d := wire.RepackAttemptsDetail
+	if len(d) != 3 || d[2].Lane != "chat" || d[2].FinishReason != "length" {
+		t.Fatalf("detail = %+v, want two grammar attempts then a chat attempt cut at its budget", d)
+	}
+	if strings.Contains(d[2].Why, "cannot hold it") || !strings.Contains(d[2].Why, "degenerate") {
+		t.Fatalf("chat attempt note = %q, want what was observed (a degenerate tail), not what cannot be known", d[2].Why)
+	}
+	if !strings.Contains(wire.Reason, "chat re-pack truncated at") || strings.Contains(wire.Reason, "cannot hold it") {
+		t.Fatalf("reason = %q, want the chat truncation named with what was seen", wire.Reason)
+	}
+}
