@@ -51,6 +51,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/gpulease"
@@ -100,6 +101,9 @@ const (
 
 // Run is one registered agent run on a seat: the harness's unit of work.
 type Run struct {
+	// ID is unique per run within a process whatever the clock does (see runID) and is the record's
+	// file name. Readers compare it for equality ("is this my own record") and, in one place, as a
+	// string to break a same-millisecond tie in the seat's line; nothing parses it.
 	ID          string `json:"id"`
 	PID         int    `json:"pid"`
 	StartTimeMs int64  `json:"start_time_ms,omitempty"` // the process's start time (pid-recycling guard, as the lease)
@@ -241,9 +245,29 @@ type Handle struct {
 	once sync.Once
 }
 
+// runSeq numbers the runs this process has begun. It is process-wide, not per Registry: several
+// Registry values (one per launcher, one per status read) address the same directory from the same
+// process, and their records must not collide either.
+var runSeq atomic.Int64
+
+// runID names a run "<pid>-<unix nanos>-<seq>", which is also its record's file name
+// ("run-<id>.json"). The pid and the clock keep one process's ids apart from another's and from a
+// recycled pid's; the sequence keeps two runs of THIS process apart without trusting the clock
+// (register C-82): Windows reads the clock in 0.5-1 ms steps, so two runs begun in one tick read the
+// same nanoseconds, got the same id, and the second record overwrote the first. The registry then
+// undercounted the runs on a seat, which is the count the local run cap and the seat-load figure read.
+//
+// The sequence is zero-padded to a fixed width so that the ids of one process begun in the same tick
+// sort, as strings, in the order they began: the seat's line (modelaffinity.AwaitSeatSlot) breaks a
+// same-millisecond tie with a string comparison of ids, and an unpadded "10" would sort before "9".
+func runID(pid int, now time.Time, seq int64) string {
+	return fmt.Sprintf("%d-%d-%06d", pid, now.UnixNano(), seq)
+}
+
 // Begin registers a run and starts its heartbeat. The record carries this
 // process's pid and start time; Seat, Kind, Origin, Goal, MaxSteps and Phase
-// come from the caller.
+// come from the caller. Every run gets its own id and its own record, however
+// many begin in the same clock tick.
 func (r *Registry) Begin(run Run) (*Handle, error) {
 	if strings.TrimSpace(run.Seat) == "" {
 		return nil, errors.New("gpuactivity: a run must name its seat")
@@ -262,7 +286,7 @@ func (r *Registry) Begin(run Run) (*Handle, error) {
 	if run.Phase == "" {
 		run.Phase = "running"
 	}
-	run.ID = fmt.Sprintf("%d-%d", run.PID, now.UnixNano())
+	run.ID = runID(run.PID, now, runSeq.Add(1))
 	h := &Handle{reg: r, path: filepath.Join(r.dir, filePrefix+run.ID+fileSuffix), run: run, stop: make(chan struct{})}
 	if err := h.write(); err != nil {
 		return nil, err
