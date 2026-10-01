@@ -675,10 +675,11 @@ to a single-model run of the original objective (logged as `fallback=…`). `--a
 ### Circuit breakers & budget
 
 - `--max-steps` (default 12) — hard step budget, owned in code.
-- `--max-same-tool` (default 3) — cap on calls to any one tool per run; the breaker for a model that
+- `--max-same-tool` (default 8) — cap on calls to any one tool per run; the breaker for a model that
   loops (e.g. repeated reworded `web_search`). Negative disables; 0 → built-in default. `read_file`
   is the exception: it is metered in characters (the read budget, register D-103) and the cap counts
-  the files it opens, not the pages of one — see `docs/systems/coding-agent.md`.
+  the files it opens and any page that gave nothing new (a failed page, or one past the end of the
+  file), not the pages of one that return lines — see `docs/systems/coding-agent.md`.
 - `--max-tokens` (default 4096) — planner tokens per completion. Must be large enough for the biggest
   tool-call argument (e.g. a whole file's content) or the model's JSON gets cut off mid-string and
   the call fails. 4096 is the tested value; do not lower it for write-heavy runs.

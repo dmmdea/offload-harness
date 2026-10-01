@@ -35,7 +35,7 @@ architect model plans, an editor model executes.
 ## How the system works
 
 The loop alternates model calls and tool calls until the task completes or the step budget runs out.
-Two independent limits keep a weak model from burning the budget on nothing:
+Three limits keep a weak model from burning the budget on nothing:
 
 - **A step budget** — the loop stops with `StopReason: "budget"`.
 - **Tool-call caps** — `dispatchOrThrottle` sits between the model's request and execution. It
