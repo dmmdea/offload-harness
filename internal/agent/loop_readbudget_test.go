@@ -667,3 +667,278 @@ func TestPageGaveNothing(t *testing.T) {
 		}
 	}
 }
+
+// readFileCall is one assistant turn asking for read_file with exactly these
+// arguments.
+func readFileCall(id, args string) Completion {
+	return Completion{Msg: Msg{Role: "assistant", ToolCalls: []ToolCall{tc(id, "read_file", args)}}, FinishReason: "tool_calls"}
+}
+
+// TestLoopReadBudgetIsSpentWhenTheCharactersReachIt: "reaches the budget" is the
+// line, not "passes it". Cap 1,000 and budget 2,000, with results far over the
+// cap: two reads charge exactly 2,000 and the third is refused; a budget that
+// was spent only once the characters passed it would let the third run.
+func TestLoopReadBudgetIsSpentWhenTheCharactersReachIt(t *testing.T) {
+	execs := 0
+	client := &fakeClient{script: []Completion{
+		pageCall("c1", "big.txt", 1, 10), pageCall("c2", "big.txt", 11, 10), pageCall("c3", "big.txt", 21, 10),
+		finalAnswer("done"),
+	}}
+	res, err := NewLoop(client, bigReadFile(&execs), 8).WithToolResultCap(1000).WithReadBudgetChars(2000).Run(context.Background(), "read it")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if execs != 2 || readChars(res) != 2000 {
+		t.Errorf("read_file ran %d times for %d characters, want 2 times for exactly the budget, 2000", execs, readChars(res))
+	}
+	if got := toolResultFor(res.Transcript, "c3"); !strings.Contains(got, "read budget (2000)") || !strings.Contains(got, "returned 2000 characters") {
+		t.Errorf("the third read got %q, want the read-budget refusal naming 2000 of 2000", got)
+	}
+}
+
+// TestLoopCallsThatDidNotRunAreNotChargedToTheReadBudget: the budget counts what
+// the model received from a read that ran. A call refused before it ran (an exact
+// repeat, answered by the breaker with a couple of hundred characters) or
+// declined by the tool as not performed is not a read, and charging its text
+// would spend the model's budget on the loop's own refusals. Cap 1,000 and budget
+// 2,100: two reads of 1,000 are 2,000, so the next page is due; had the refusal
+// been charged the budget would read 2,230 or more and that page would be refused.
+func TestLoopCallsThatDidNotRunAreNotChargedToTheReadBudget(t *testing.T) {
+	cases := []struct {
+		name      string
+		script    []Completion
+		wantExecs int // tool invocations: the reads that ran, and a declined call counts as one
+	}{
+		{
+			name: "an exact repeat refused by the breaker",
+			script: []Completion{
+				pageCall("c1", "big.txt", 1, 10), pageCall("c2", "big.txt", 11, 10),
+				pageCall("c3", "big.txt", 11, 10), // the exact repeat of c2: not run
+				pageCall("c4", "big.txt", 21, 10),
+				finalAnswer("done"),
+			},
+			wantExecs: 3, // c1, c2, c4
+		},
+		{
+			name: "a call the tool declines as not performed",
+			script: []Completion{
+				pageCall("c1", "big.txt", 1, 10), pageCall("c2", "big.txt", 11, 10),
+				readFileCall("c3", `{"path":"big.txt","offset":21,"limit":10,"declined":true}`),
+				pageCall("c4", "big.txt", 31, 10),
+				finalAnswer("done"),
+			},
+			wantExecs: 4, // c1, c2, c3 (declined), c4
+		},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			execs := 0
+			tools := []Tool{{ToolSpec: ToolSpec{Name: "read_file"}, Exec: func(_ context.Context, args string) (string, error) {
+				execs++
+				if strings.Contains(args, `"declined"`) {
+					return "", NotPerformed("NOT performed: " + strings.Repeat("x", 600))
+				}
+				return strings.Repeat("A", 100000), nil
+			}}}
+			res, err := NewLoop(&fakeClient{script: tt.script}, tools, 8).WithToolResultCap(1000).WithReadBudgetChars(2100).Run(context.Background(), "read it")
+			if err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if execs != tt.wantExecs {
+				t.Errorf("read_file was invoked %d times, want %d: the page after the call that did not run was refused, so that call was charged to the budget", execs, tt.wantExecs)
+			}
+			if got := toolResultFor(res.Transcript, "c4"); strings.Contains(got, "NOT executed") {
+				t.Errorf("the last page got %q, want it to run: the budget stood at 2000 of 2100", got)
+			}
+			if readChars(res) != 3000 {
+				t.Errorf("the model received %d characters from read_file, want 3000 (three reads of 1000, none from the call that did not run)", readChars(res))
+			}
+		})
+	}
+}
+
+// TestLoopTheRefusalCountsReadFileCallsOnly: the same-name refusal quotes how many
+// times read_file was called, which paged calls leave out of the capped count. The
+// figure is the read_file calls the run made and not the calls of every tool:
+// eight distinct files with three list_dir calls between them, then a ninth file
+// refused at read_file's ninth call.
+func TestLoopTheRefusalCountsReadFileCallsOnly(t *testing.T) {
+	tools := []Tool{
+		{ToolSpec: ToolSpec{Name: "read_file"}, Exec: func(_ context.Context, _ string) (string, error) { return "contents", nil }},
+		{ToolSpec: ToolSpec{Name: "list_dir"}, Exec: func(_ context.Context, _ string) (string, error) { return "entries", nil }},
+	}
+	call := func(id, name, args string) Completion {
+		return Completion{Msg: Msg{Role: "assistant", ToolCalls: []ToolCall{tc(id, name, args)}}, FinishReason: "tool_calls"}
+	}
+	var script []Completion
+	dirs := 0
+	for i := 1; i <= 9; i++ {
+		script = append(script, call(fmt.Sprintf("f%d", i), "read_file", fmt.Sprintf(`{"path":"f%d.md"}`, i)))
+		if i == 2 || i == 5 || i == 7 {
+			dirs++
+			script = append(script, call(fmt.Sprintf("d%d", dirs), "list_dir", fmt.Sprintf(`{"path":"d%d"}`, dirs)))
+		}
+	}
+	script = append(script, finalAnswer("done"))
+	res, err := NewLoop(&fakeClient{script: script}, tools, 16).Run(context.Background(), "map the repo")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	refused := toolResultFor(res.Transcript, "f9")
+	if !strings.Contains(refused, "DISABLED") || !strings.Contains(refused, "called 9 times") {
+		t.Errorf("the ninth file got %q, want the same-name refusal naming 9 read_file calls (not the 12 calls of both tools)", refused)
+	}
+}
+
+// TestLoopAnotherToolsRefusalQuotesItsOwnCount: the paged-call figure belongs to
+// read_file alone. Four read_file calls (a file and three pages of it) leave
+// read_file's call count at four; list_dir's ninth call is refused and says nine.
+func TestLoopAnotherToolsRefusalQuotesItsOwnCount(t *testing.T) {
+	tools := []Tool{
+		{ToolSpec: ToolSpec{Name: "read_file"}, Exec: func(_ context.Context, _ string) (string, error) { return "contents", nil }},
+		{ToolSpec: ToolSpec{Name: "list_dir"}, Exec: func(_ context.Context, _ string) (string, error) { return "entries", nil }},
+	}
+	call := func(id, name, args string) Completion {
+		return Completion{Msg: Msg{Role: "assistant", ToolCalls: []ToolCall{tc(id, name, args)}}, FinishReason: "tool_calls"}
+	}
+	script := []Completion{call("f1", "read_file", `{"path":"a.md"}`)}
+	for k := 2; k <= 4; k++ {
+		script = append(script, call(fmt.Sprintf("p%d", k), "read_file", fmt.Sprintf(`{"path":"a.md","offset":%d}`, k)))
+	}
+	for k := 1; k <= 9; k++ {
+		script = append(script, call(fmt.Sprintf("d%d", k), "list_dir", fmt.Sprintf(`{"path":"d%d"}`, k)))
+	}
+	script = append(script, finalAnswer("done"))
+	res, err := NewLoop(&fakeClient{script: script}, tools, 16).Run(context.Background(), "map the repo")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	refused := toolResultFor(res.Transcript, "d9")
+	if !strings.Contains(refused, "list_dir has now been called 9 times") || !strings.Contains(refused, "DISABLED") {
+		t.Errorf("the ninth list_dir got %q, want the same-name refusal naming list_dir's own 9 calls", refused)
+	}
+}
+
+// TestLoopAPathReadThroughReadFileDoesNotExemptAnotherTool: the paging exemption is
+// for read_file's own pages. A tool that takes the same path (here peek_file) is
+// counted by call even after read_file has opened the file.
+func TestLoopAPathReadThroughReadFileDoesNotExemptAnotherTool(t *testing.T) {
+	peeks := 0
+	tools := []Tool{
+		{ToolSpec: ToolSpec{Name: "read_file"}, Exec: func(_ context.Context, _ string) (string, error) { return "contents", nil }},
+		{ToolSpec: ToolSpec{Name: "peek_file"}, Exec: func(_ context.Context, _ string) (string, error) {
+			peeks++
+			return "contents", nil
+		}},
+	}
+	script := []Completion{readFileCall("r1", `{"path":"a.md"}`)}
+	for k := 1; k <= 10; k++ {
+		script = append(script, Completion{Msg: Msg{Role: "assistant", ToolCalls: []ToolCall{tc(fmt.Sprintf("k%d", k), "peek_file", fmt.Sprintf(`{"path":"a.md","offset":%d}`, k))}}, FinishReason: "tool_calls"})
+	}
+	script = append(script, finalAnswer("done"))
+	res, err := NewLoop(&fakeClient{script: script}, tools, 14).Run(context.Background(), "read it")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if peeks != defaultMaxSameTool || !strings.Contains(toolResultFor(res.Transcript, "k9"), "DISABLED") {
+		t.Errorf("peek_file ran %d times, want %d and the ninth refused: read_file opening a.md must not exempt it", peeks, defaultMaxSameTool)
+	}
+}
+
+// TestLoopTheReadBudgetIsReadFilesAlone: other tools' results are not charged to
+// the read budget, and a spent budget refuses read_file only. Budget 2,000 and
+// cap 1,000: three list_dir results (3,000 characters, were they charged) leave
+// the budget untouched, two reads spend it, the third read is refused, and
+// list_dir still runs after that.
+func TestLoopTheReadBudgetIsReadFilesAlone(t *testing.T) {
+	reads, dirs := 0, 0
+	tools := []Tool{
+		{ToolSpec: ToolSpec{Name: "read_file"}, Exec: func(_ context.Context, _ string) (string, error) {
+			reads++
+			return strings.Repeat("A", 100000), nil
+		}},
+		{ToolSpec: ToolSpec{Name: "list_dir"}, Exec: func(_ context.Context, _ string) (string, error) {
+			dirs++
+			return strings.Repeat("B", 100000), nil
+		}},
+	}
+	call := func(id, name, args string) Completion {
+		return Completion{Msg: Msg{Role: "assistant", ToolCalls: []ToolCall{tc(id, name, args)}}, FinishReason: "tool_calls"}
+	}
+	script := []Completion{
+		call("d1", "list_dir", `{"path":"d1"}`), call("d2", "list_dir", `{"path":"d2"}`), call("d3", "list_dir", `{"path":"d3"}`),
+		pageCall("r1", "big.txt", 1, 10), pageCall("r2", "big.txt", 11, 10), pageCall("r3", "big.txt", 21, 10),
+		call("d4", "list_dir", `{"path":"d4"}`),
+		finalAnswer("done"),
+	}
+	res, err := NewLoop(&fakeClient{script: script}, tools, 12).WithToolResultCap(1000).WithReadBudgetChars(2000).Run(context.Background(), "read it")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if reads != 2 || dirs != 4 {
+		t.Errorf("read_file ran %d times (want 2) and list_dir %d times (want 4): only read_file results are charged, and only read_file is refused when the budget is spent", reads, dirs)
+	}
+	if got := toolResultFor(res.Transcript, "r3"); !strings.Contains(got, "read budget (2000)") {
+		t.Errorf("the third read got %q, want the read-budget refusal", got)
+	}
+	if got := toolResultFor(res.Transcript, "d4"); strings.Contains(got, "NOT executed") {
+		t.Errorf("list_dir after the budget was spent got %q, want it to run", got)
+	}
+}
+
+// TestReadLedgerChargesAndMarksOnlyWhatRan pins note() by itself: only a read_file
+// result that reached the transcript is charged, and only one that succeeded marks
+// its path as read. An error flag on a committed call is an error all the same.
+func TestReadLedgerChargesAndMarksOnlyWhatRan(t *testing.T) {
+	cases := []struct {
+		name       string
+		tool       string
+		eff        EffectStatus
+		isErr      bool
+		wantChars  int
+		wantOpened bool
+	}{
+		{"a read that succeeded", "read_file", EffectCommitted, false, 5, true},
+		{"a read that failed", "read_file", EffectFailed, true, 5, false},
+		{"a read that was abandoned", "read_file", EffectUnknown, true, 5, false},
+		{"an error flag on a committed read", "read_file", EffectCommitted, true, 5, false},
+		{"a call that did not run", "read_file", EffectNone, false, 0, false},
+		{"another tool", "peek_file", EffectCommitted, false, 0, false},
+	}
+	for _, tt := range cases {
+		r := &readLedger{budget: 100, opened: map[string]bool{}}
+		r.note(ToolCall{Name: tt.tool, Args: `{"path":"a.md"}`}, "12345", tt.eff, tt.isErr)
+		if r.chars != tt.wantChars || r.opened["a.md"] != tt.wantOpened {
+			t.Errorf("%s: charged %d (want %d), opened=%v (want %v)", tt.name, r.chars, tt.wantChars, r.opened["a.md"], tt.wantOpened)
+		}
+	}
+	var none *readLedger // no budget: every method is a no-op
+	none.note(ToolCall{Name: "read_file", Args: `{"path":"a.md"}`}, "12345", EffectCommitted, false)
+}
+
+// TestReadFilePath: two spellings of one path agree, and arguments that name no
+// path give none, so a call that cannot be read is never taken for a page of
+// anything.
+func TestReadFilePath(t *testing.T) {
+	cases := []struct {
+		name string
+		args string
+		want string
+		ok   bool
+	}{
+		{"plain", `{"path":"a/b.md"}`, "a/b.md", true},
+		{"dot and slash spellings", `{"path":"./a//b.md"}`, "a/b.md", true},
+		{"the platform's own separator", `{"path":` + jsonStr(filepath.FromSlash("a/b.md")) + `}`, "a/b.md", true},
+		{"offset and limit are not part of the file", `{"path":"a/b.md","offset":9,"limit":3}`, "a/b.md", true},
+		{"a blank path", `{"path":"   "}`, "", false},
+		{"no path", `{"offset":3}`, "", false},
+		{"a path of the wrong type", `{"path":123}`, "", false},
+		{"not JSON", `not json`, "", false},
+	}
+	for _, tt := range cases {
+		got, ok := readFilePath(tt.args)
+		if got != tt.want || ok != tt.ok {
+			t.Errorf("%s: readFilePath(%s) = %q, %v; want %q, %v", tt.name, tt.args, got, ok, tt.want, tt.ok)
+		}
+	}
+}
