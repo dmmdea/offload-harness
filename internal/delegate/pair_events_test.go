@@ -21,9 +21,12 @@ type pairCapture struct {
 	frames []map[string]any
 
 	// holdQueued, when non-nil, keeps the ingress from recording a queued frame
-	// until a terminal one has landed (or a second has passed): the arrival
-	// order the emitter's per-frame goroutines produce whenever they race, made
-	// certain. Set it before the server starts; the handler closes it.
+	// until a terminal one has landed: the arrival order the emitter's per-frame
+	// goroutines produce whenever they race, forced. The wait is bounded (a
+	// second, inside the emitter's 2 s send budget) so a terminal frame that
+	// never lands cannot hang the server's Close, which makes the order certain
+	// only while the terminal frame lands in time: a case that depends on the
+	// order asserts it. Set it before the server starts; the handler closes it.
 	holdQueued  chan struct{}
 	releaseOnce sync.Once
 }
@@ -175,22 +178,29 @@ func TestPAIRDisabledEmitsNothing(t *testing.T) {
 // ends the run within milliseconds of its queued frame, so the two posts race;
 // PAIR's store merges a job's frames by lifecycle rank (queued < running <
 // terminal), not by arrival, so the test asserts the card the frames describe
-// and never their position (register C-77: asserting frames[1] failed
-// intermittently once the process was warm, and never on a fresh process's
-// first run, where the cold start leaves the queued post time to land first).
-// The second case holds the queued frame back at the ingress so the terminal
-// one lands first every time.
+// and never takes the scheduler's order for granted (register C-77: asserting
+// frames[1] failed intermittently once the process was warm, and never on a
+// fresh process's first run, where the cold start leaves the queued post time
+// to land first). The first case leaves the order to the scheduler and asserts
+// none. The second holds the queued frame back at the ingress so the terminal
+// one lands first, and asserts that it did: a hold that expired before the
+// terminal frame arrived, or an emitter that began ordering a job's frames,
+// would turn that case into the first one without failing anything, so it
+// fails instead.
 func TestFailedLocalPlacementReportsErrored(t *testing.T) {
 	for _, tc := range []struct {
 		name string
-		c    *pairCapture
+		hold bool // hold the queued frame at the ingress until the terminal one has landed
 	}{
-		{"arrival order left to the scheduler", &pairCapture{}},
-		{"queued frame lands after the terminal one", &pairCapture{holdQueued: make(chan struct{})}},
+		{"arrival order left to the scheduler", false},
+		{"queued frame lands after the terminal one", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pairAppDir(t)
-			c := tc.c
+			c := &pairCapture{}
+			if tc.hold {
+				c.holdQueued = make(chan struct{})
+			}
 			srv := httptest.NewServer(http.HandlerFunc(c.handler))
 			defer srv.Close()
 			cfg := testCfg(t)
@@ -211,6 +221,9 @@ func TestFailedLocalPlacementReportsErrored(t *testing.T) {
 			byMethod := framesByMethod(frames)
 			if len(frames) != 2 || byMethod["workload:submitted"] == nil || byMethod["workload:errored"] == nil {
 				t.Fatalf("frames = %v, want queued + errored", frames)
+			}
+			if tc.hold && frames[0]["method"] != "workload:errored" {
+				t.Fatalf("the ingress held the queued frame, yet it was recorded first: the hold expired before the terminal frame landed, or the emitter now orders a job's frames, so this case did not run a terminal-first arrival: %v", frames)
 			}
 			queued, errored := pairInfo(byMethod["workload:submitted"]), pairInfo(byMethod["workload:errored"])
 			if errored["error"] != "seat busy" || errored["state"] != "failed" {
