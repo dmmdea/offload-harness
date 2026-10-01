@@ -467,7 +467,8 @@ accepted — a bad payload or an unreachable ref is a 400, never a mid-render su
 
 - `job_spec` is required and must be a JSON object with a slug-valid `id`
   (`^[A-Za-z0-9_-]{1,64}$` — it becomes the materialization dir name and a filename prefix on
-  every published artifact).
+  every published artifact) that does not start with `agent-local-`, the name prefix a
+  delegator process keeps its own local runs under in the same `pipeline-jobs/` root.
 - `tier` is a required non-empty string (the CLI's own tier resolution is authoritative).
 - `image_refs.product` and `image_refs.logo` are required; `image_refs.background` is
   required **iff** `job_spec.background.mode == "stock"`.
@@ -543,10 +544,26 @@ verbatim; otherwise the generic exec error (including a timeout-kill) is used.
   **ungraceful** stop (crash, `kill -9`, power loss) leaves the directory behind with no
   in-memory record of it at all; since `job_spec.id` collisions are guarded by an exclusive
   directory create (see above), that orphaned directory would otherwise refuse EVERY future
-  dispatch reusing the same `job_spec.id`, forever. `fleet-serve` sweeps
-  `<base_dir>/pipeline-jobs/`'s contents once at startup, **before** it starts listening —
-  every directory present at that instant is orphaned by definition (this process has not
-  accepted a single dispatch yet) — and logs how many it removed.
+  dispatch reusing the same `job_spec.id`, forever. `fleet-serve` therefore sweeps
+  `<base_dir>/pipeline-jobs/` once at startup, **before** it starts listening. Every
+  directory it materialized itself (`agent-<n>`, `accel-<n>`, a pipeline job's id) is
+  orphaned by definition at that instant (this process has not accepted a single dispatch
+  yet) and is removed. The root has a second kind of writer: a delegator process on the same
+  box (the MCP server, the `delegate` and `research` commands) keeps the context of its own
+  in-process local runs in `agent-local-*` directories there, each with an `.owner` file
+  holding the process id (beside `context/`, never inside it), and that process outlives a
+  `fleet-serve` restart. The sweep keeps a marked directory while its owner process is alive
+  and the directory is under 24 hours old (the bound on a recycled process id), keeps an
+  unmarked `agent-local-*` directory (written by a delegator older than the marker) until it
+  is 24 hours old, and removes the rest. It logs how many it removed and how many it kept,
+  plus one line for each directory it removes for its age alone while an owner may still be
+  running (so a run that outlived the 24 hours does not look like a crash's leftover). A
+  directory it cannot inspect is kept and reported as a warning, never counted as a run in
+  flight. The owner's process id means something only in the process-id space that wrote it,
+  so keep one `<base_dir>` per machine: a base directory shared between a Windows host and
+  a WSL distribution, a container and its host, or two machines would read a live owner as
+  exited and the sweep would remove the directory of a run still going (the machine-wide GPU
+  lease and its activity registry make the same presumption of their pid-keyed records).
 
 ## The agent task (`task_type: "agent"`)
 

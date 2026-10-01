@@ -43,6 +43,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/gbnf"
 	"github.com/dmmdea/offload-harness/internal/gpuactivity"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
+	"github.com/dmmdea/offload-harness/internal/jobdir"
 	"github.com/dmmdea/offload-harness/internal/llamaclient"
 	"github.com/dmmdea/offload-harness/internal/modelaffinity"
 	"github.com/dmmdea/offload-harness/internal/placement"
@@ -1403,18 +1404,38 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 // The zero value runs the planner seat and publishes nothing.
 type AgentContractOptions = delegate.LocalOptions
 
+// writeJobOwner marks a local run's job dir with this process as its owner
+// (jobdir.WriteOwner). A var only so a test can make the write fail or watch
+// when it happens; nothing else replaces it.
+var writeJobOwner = jobdir.WriteOwner
+
+// removeJobDir removes a finished run's job dir. A var only so a test can make
+// the removal fail; nothing else replaces it.
+var removeJobDir = os.RemoveAll
+
 // RunAgentContract executes one delegation contract IN-PROCESS on this
 // pipeline — the delegator-side LOCAL placement entry (Task 6; it satisfies
 // delegate.LocalRunner). It mirrors fleetnode.buildAgentRun's materialization
-// discipline — a job-scoped dir under BaseDir()/pipeline-jobs/ (so
-// SweepOrphanedPipelineJobs reclaims a crash's leftovers), context docs under
-// <dir>/context/, removed when the run ends — then goes through Pipeline.Run
-// (NOT runAgentTask directly) so a local placement takes byte-for-byte the
-// same route a fleet node's Runner.Run takes. Differences from the wire path,
-// both deliberate: Depth stays caller-set (a delegator-side local run IS the
-// origin; buildAgentRun derives ≥1 only for wire arrivals), and OutputSchema
-// is NOT required (roast delta 3 gates REMOTE placement on it; a local run's
-// text-verb acceptance can stand alone). The context cap is the BOX's
+// discipline — a job-scoped dir under BaseDir()/pipeline-jobs/, context docs
+// under <dir>/context/, removed when the run ends — with one difference in
+// who owns the dir. buildAgentRun's dirs are fleet-serve's own, and its
+// startup sweep removes every unmarked one, because nothing of its own can be
+// in flight before it has accepted a dispatch. This process is a delegator (an
+// MCP server, the delegate or research command, the fleet smoke), it is not
+// fleet-serve, and it outlives fleet-serve restarts, so its dir is named
+// agent-local-* and carries an owner marker (jobdir.WriteOwner, this process's
+// id, beside context/ and never inside it). The sweep keeps the dir while that
+// process is alive and the dir is younger than jobdir.MaxRunLifetime, and
+// reclaims what a crash left behind once the process is gone or that long has
+// passed (register C-78; before the marker every fleet-serve restart deleted
+// the context of each local run in flight on its box). The contract then goes
+// through Pipeline.Run (NOT runAgentTask directly) so a local placement takes
+// byte-for-byte the same route a fleet node's Runner.Run takes. Differences
+// from the wire path, both deliberate: Depth stays caller-set (a
+// delegator-side local run IS the origin; buildAgentRun derives ≥1 only for
+// wire arrivals), and OutputSchema is NOT required (roast delta 3 gates
+// REMOTE placement on it; a local run's text-verb acceptance can stand
+// alone). The context cap is the BOX's
 // (config.AgentContextCapBytes: 256 KiB on a plain box, scaled to the largest
 // layer window on a composite one), the same cap the agent doors validate
 // against — otherwise a contract sized for the long seats would pass the door
@@ -1430,11 +1451,32 @@ func (p *Pipeline) RunAgentContract(ctx context.Context, contract core.AgentCont
 	}
 	// MkdirTemp is the exclusive create (buildAgentRun's rule): the id is
 	// minted here, so uniqueness comes by construction, not caller discipline.
-	jobDir, err := os.MkdirTemp(jobsRoot, "agent-local-*")
+	jobDir, err := os.MkdirTemp(jobsRoot, jobdir.LocalRunPrefix+"*")
 	if err != nil {
 		return core.AgentWireResult{}, fmt.Errorf("agent contract: creating job dir: %w", err)
 	}
-	defer os.RemoveAll(jobDir) // docs live exactly as long as the run
+	defer func() {
+		// Docs live exactly as long as the run. A dir that will not go (a virus
+		// scanner or an indexer holding one of its files, or a fleet-serve sweep
+		// reading the marker at that instant, which on Windows blocks a delete)
+		// stays, and it stays marked: the startup sweep keeps it while this
+		// process lives and it is under jobdir.MaxRunLifetime old. Before the
+		// marker every fleet-serve start removed such a leftover unseen, so the
+		// failure is said here instead.
+		if rerr := removeJobDir(jobDir); rerr != nil {
+			log.Printf("agent contract: could not remove the job dir %s: %v (a fleet-serve start reclaims it once this process has exited or the dir is %s old)", jobDir, rerr, jobdir.MaxRunLifetime)
+		}
+	}()
+	// The owner marker goes down FIRST, before context/ exists and before any
+	// doc is written, so a fleet-serve sweep that lists the root at any later
+	// instant can see whose this dir is. The one window in which it cannot is
+	// between the MkdirTemp above and this write; a sweep that lists the dir
+	// then finds an unmarked agent-local-* dir, which it keeps while young
+	// (SweepOrphanedPipelineJobs). A failed write is a materialization failure
+	// like the ones below, and the deferred RemoveAll takes the dir with it.
+	if err := writeJobOwner(jobDir); err != nil {
+		return core.AgentWireResult{}, fmt.Errorf("agent contract: writing the job dir's owner marker: %w", err)
+	}
 	contextDir := filepath.Join(jobDir, "context")
 	if err := os.MkdirAll(contextDir, 0o755); err != nil {
 		return core.AgentWireResult{}, fmt.Errorf("agent contract: creating context dir: %w", err)

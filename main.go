@@ -2476,6 +2476,23 @@ func fleetServeParams(listenFlag, nodeIDFlag string, trusted bool, cfg config.Co
 	return listen, nodeID, nil
 }
 
+// reportPipelineJobsSweep writes the startup sweep's outcome to w: up to three
+// lines, each reported whether or not the others are, so a sweep that removed
+// 22 dirs and could not remove one says both. The removed line does not call
+// those dirs a crash's leftovers: a dir is also removed for its age, and the
+// sweep logs each of those itself, above this summary.
+func reportPipelineJobsSweep(w io.Writer, swept, kept int, serr error) {
+	if serr != nil {
+		fmt.Fprintf(w, "[fleet-serve] warning: pipeline-jobs sweep: %v\n", serr)
+	}
+	if swept > 0 {
+		fmt.Fprintf(w, "[fleet-serve] swept %d orphaned pipeline-job dir(s): an earlier instance's leftovers, runs whose delegator exited, or dirs past the age bound (those are logged one by one above)\n", swept)
+	}
+	if kept > 0 {
+		fmt.Fprintf(w, "[fleet-serve] kept %d pipeline-job dir(s) that may belong to local runs still in flight (owned by a live process, or too recent to call orphaned)\n", kept)
+	}
+}
+
 // runFleetServe joins this box to the fleet-dispatcher fleet (CONTRACT.md v2:
 // /fleet/health, /fleet/dispatch, /fleet/jobs/{id}) on the same pipeline the
 // MCP server drives. Refuses to start without a working GPU MEMORY SOURCE —
@@ -2497,18 +2514,21 @@ func runFleetServe(args []string) error {
 	}
 
 	// Sweep orphaned pipeline-job dirs BEFORE anything else starts: jobs are
-	// in-memory, so any pipeline-jobs/<id> dir still on disk at this instant —
-	// before this process has accepted a single dispatch — belongs to a job an
-	// earlier, ungracefully-stopped instance never finished. Left in place it
-	// would permanently refuse every future dispatch reusing that job_spec.id
-	// (buildPipelineJob's exclusive job-dir Mkdir guard can't tell "orphaned"
-	// from "still running"). A sweep failure is a warning, not fatal — one
-	// stuck directory blocking one id is far cheaper than refusing to serve.
-	if swept, serr := fleetnode.SweepOrphanedPipelineJobs(cfg); serr != nil {
-		fmt.Fprintf(os.Stderr, "[fleet-serve] warning: pipeline-jobs sweep: %v\n", serr)
-	} else if swept > 0 {
-		fmt.Fprintf(os.Stderr, "[fleet-serve] swept %d orphaned pipeline-job dir(s) left by a previous ungraceful stop\n", swept)
-	}
+	// in-memory, so a pipeline-jobs/<id> dir of fleet-serve's own that is still
+	// on disk at this instant — before this process has accepted a single
+	// dispatch — belongs to a job an earlier, ungracefully-stopped instance
+	// never finished. Left in place it would permanently refuse every future
+	// dispatch reusing that job_spec.id (buildPipelineJob's exclusive job-dir
+	// Mkdir guard can't tell "orphaned" from "still running"). Not every dir in
+	// that root is fleet-serve's: a delegator process (the MCP server, the
+	// delegate and research commands) keeps its local runs' dirs there too,
+	// marked with its process id, and outlives this restart — the sweep keeps
+	// those while their owner is alive (register C-78), says how many, and says
+	// why whenever it removes one for its age alone.
+	// A sweep failure is a warning, not fatal — one stuck directory blocking
+	// one id is far cheaper than refusing to serve.
+	swept, kept, serr := fleetnode.SweepOrphanedPipelineJobs(cfg)
+	reportPipelineJobsSweep(os.Stderr, swept, kept, serr)
 
 	listen, nodeID, err := fleetServeParams(*listenFlag, *nodeIDFlag, *trusted, cfg, os.Hostname)
 	if err != nil {
