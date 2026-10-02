@@ -86,7 +86,8 @@ that the patch is **not** upstream: vLLM `main` still constructs a stock three-a
 `VocabParallelEmbedding` for Qwen3.5, so this is a carried patch, not a version wait.
 
 > **Amendment 6 (2026-10-02):** the reference box runs vLLM 0.30.0 and the seat's `engine_min_version` now reads `0.30.0`, the
-> engine the pinned operating point was measured on. The block above is the 2026-09-16 declaration.
+> engine the pinned operating point was measured on. It records what was measured, not a finding that 0.29.0 fails: the floor
+> semantics below still mean 'the oldest engine known to serve this seat'. The block above is the 2026-09-16 declaration.
 
 ## What was measured
 
@@ -309,7 +310,7 @@ is 1.39x the window, where the same load read 1.53x at the 0.87 point.
 three failures are in the seat's own log). Amendment 5 left its KV pool sized by utilization (util 0.84), and vLLM measures such a
 pool during startup profiling, device-wide: anything else that moves the card's memory in that window changes the pool. Two
 things did. A cold compile cache profiles a larger activation (0.77 GiB against 0.41 GiB on a warm cache), and a memory-stack
-model loading beside the engine in that window shrinks the pool likewise; either took it below one 32,768-token request
+model loading beside the engine in that window shrinks the pool likewise; together they can take it below one 32,768-token request (the reproduced trigger was the embedder loading into the window)
 and the start failed. The second was reproduced on an empty card by firing the embedder about 50 s into the start. A seat that is meant to share its card with the memory stack's embedder and reranker cannot have a pool
 that depends on what else is loading during its start.
 
