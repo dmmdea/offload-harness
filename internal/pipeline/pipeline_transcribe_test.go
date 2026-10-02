@@ -34,14 +34,15 @@ func TestTranscribeBadAudioDefers(t *testing.T) {
 	}
 }
 
-// TestTranscribeNoSpeechCrashDefersCleanly guards the fix (F-35 regression follow-up,
-// 2026-09-23): whisper-server's crash signature (empty-body 5xx) on audio with no
-// speech content must surface as the SAME calm "empty transcript" defer the clean
-// no-speech case already uses — never the alarming "transcribe call failed: ...
-// upstream crashed" wording, and never OK:true with fabricated content. Mutation
-// check: reverting the errors.Is branch in runTranscribe (pipeline.go) makes this
-// fail because Reason reverts to the "transcribe call failed" text.
-func TestTranscribeNoSpeechCrashDefersCleanly(t *testing.T) {
+// TestTranscribeVanishedUpstreamIsAFailureNotNoSpeech (register C-91; this test pinned
+// the opposite from F-35, 2026-09-23, until 2026-10-01). An empty-body 5xx is the bare
+// answer of an upstream that vanished mid-request, and a model unloaded from under a
+// call looks exactly like whisper-server's exit on audio with no speech content. The F-35
+// mapping turned both into the calm "empty transcript (no speech detected)" defer, so a
+// recording with speech in it was reported to its caller as silent. Now the defer says the
+// call failed — a caller can retry it — and no-speech is reserved for an upstream that
+// answered (the next test).
+func TestTranscribeVanishedUpstreamIsAFailureNotNoSpeech(t *testing.T) {
 	ffmpeg := lookFFmpeg()
 	if ffmpeg == "" {
 		t.Skip("ffmpeg not on PATH; this test needs a real convert to reach the STT call")
@@ -49,7 +50,7 @@ func TestTranscribeNoSpeechCrashDefersCleanly(t *testing.T) {
 	wav := makeSilentWav(t, ffmpeg)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusBadGateway) // 502, empty body — the whisper-server crash signature
+		w.WriteHeader(http.StatusBadGateway) // 502, empty body: the upstream vanished
 	}))
 	defer srv.Close()
 
@@ -61,16 +62,46 @@ func TestTranscribeNoSpeechCrashDefersCleanly(t *testing.T) {
 
 	res := p.Run(context.Background(), core.Request{Task: core.TaskTranscribe, Audio: wav})
 	if res.OK {
-		t.Fatalf("want deferred (no speech found), got OK=true with data=%s", res.Data)
+		t.Fatalf("want a deferred failure, got OK=true with data=%s", res.Data)
 	}
 	if !res.Deferred {
-		t.Fatal("want Deferred=true on the crash-signature response")
+		t.Fatal("want Deferred=true on an upstream that vanished")
+	}
+	if !strings.HasPrefix(res.Reason, "transcribe call failed:") || !strings.Contains(res.Reason, "vanished") {
+		t.Errorf("reason = %q, want the call-failed defer that says the upstream vanished", res.Reason)
+	}
+	if strings.Contains(res.Reason, "(no speech detected)") {
+		t.Errorf("reason claims the audio had no speech although nothing answered: %q", res.Reason)
+	}
+}
+
+// TestTranscribeEmptyAnswerDefersAsNoSpeech: the other half. An upstream that answered 200
+// with an empty transcript has heard nothing, and that is the one thing reported as no
+// speech: the same calm defer the F-35 fix introduced, with nothing for a caller to retry.
+func TestTranscribeEmptyAnswerDefersAsNoSpeech(t *testing.T) {
+	ffmpeg := lookFFmpeg()
+	if ffmpeg == "" {
+		t.Skip("ffmpeg not on PATH; this test needs a real convert to reach the STT call")
+	}
+	wav := makeSilentWav(t, ffmpeg)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"language":"en","duration":1,"text":"","segments":[]}`))
+	}))
+	defer srv.Close()
+
+	cfg := gateCfg(t)
+	cfg.MediaDir = t.TempDir()
+	cfg.FFmpegPath = ffmpeg
+	cfg.Endpoint = srv.URL
+	p := gatePipeline(t, cfg, gateCache(t))
+
+	res := p.Run(context.Background(), core.Request{Task: core.TaskTranscribe, Audio: wav})
+	if res.OK || !res.Deferred {
+		t.Fatalf("want a deferred no-speech result, got OK=%v Deferred=%v data=%s", res.OK, res.Deferred, res.Data)
 	}
 	if res.Reason != "empty transcript (no speech detected)" {
-		t.Errorf("reason = %q, want the calm no-speech defer, not the alarming crash wording", res.Reason)
-	}
-	if strings.Contains(res.Reason, "call failed") || strings.Contains(res.Reason, "crashed") {
-		t.Errorf("reason leaked the raw crash wording to the caller: %q", res.Reason)
+		t.Errorf("reason = %q, want the calm no-speech defer", res.Reason)
 	}
 }
 

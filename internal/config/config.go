@@ -570,8 +570,10 @@ type Config struct {
 	// STTMaxInlineSegments caps how many timestamped segments are inlined in the
 	// result (the rest live in the on-disk .segments.json pointer). Default 120.
 	STTMaxInlineSegments int `json:"stt_max_inline_segments,omitempty"`
-	// STTUnloadAfter force-unloads the whisper upstream after each transcription
-	// (zero-always-warm). Default true; set false for a known batch loop.
+	// STTUnloadAfter force-unloads the whisper upstream once the last transcription of
+	// a burst is done (zero-always-warm): concurrent calls share one load and the last
+	// one out frees it, because an unload after EACH would land on the next call's
+	// inference (register C-91). Default true; set false for a known batch loop.
 	STTUnloadAfter bool `json:"stt_unload_after,omitempty"`
 	// STTRequestTimeoutSec bounds one transcription HTTP call (long audio at
 	// 5-8x realtime). Default 1800 (30 min). Separate from RequestTimeoutSec.

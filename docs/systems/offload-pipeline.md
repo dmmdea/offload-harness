@@ -200,6 +200,20 @@ empty = OCR rides `vision_model`, byte-identical to before. The alias is resolve
 through, so the call, the cache key, the circuit breaker, and the ledger all name the model that
 actually ran; `offload_status`'s roster reports the effective `ocr` model, falling back to vision.
 
+**Transcription** (`offload_transcribe`) is its own branch: the audio is converted to a 16 kHz mono wav
+and posted to the whisper upstream through llama-swap's per-model passthrough (`internal/sttclient`),
+never to the text cascade. The upstream is single-slot, so one process-wide mutex serializes the
+inference POSTs, and every call counts itself in line from its first statement until it returns. The
+zero-always-warm unload (`stt_unload_after`, default on) runs after every call but only the last one out
+does anything: `UnloadIfIdle` sends it holding that mutex, and only when no call is waiting or running
+and the model was used since the last unload. A burst of concurrent transcriptions therefore shares one
+load and pays one cold start (register C-91; the unload used to follow every call and landed on the next
+call's inference, which llama-swap answers `matrix: model unloaded`). The verdict "no speech"
+(`ErrUpstreamNoSpeech`, the defer reason `empty transcript (no speech detected)`) is reserved for an
+upstream that answered 200 with an empty transcript. An upstream that vanished mid-request — an empty-body
+5xx, or an answer cut off mid-read, which an unload, a swap, a restart and whisper.cpp's exit on audio with
+no speech content all produce — is a failed call a caller can retry, never a claim that the audio is silent.
+
 ## Important flows
 
 - [../flows/cascade-escalation-and-defer.md](../flows/cascade-escalation-and-defer.md) — the walk in
@@ -617,6 +631,8 @@ routing solver and the guard's reading and staleness rules. `internal/grounding/
   methods and where the gate is taken
 - [`internal/llamaclient/lanes.go`](../../internal/llamaclient/lanes.go) — `resolveEndpoint`, whose
   base decision the gate consumes and never re-decides
+- [`internal/sttclient/sttclient.go`](../../internal/sttclient/sttclient.go) — the whisper client: the
+  single-slot mutex, the in-line count, `UnloadIfIdle`, and where the no-speech verdict is produced
 
 ## Related docs
 

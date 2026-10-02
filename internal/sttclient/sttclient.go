@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/modelaffinity"
@@ -36,13 +37,36 @@ import (
 // of how many Client values exist), so it holds even across concurrent callers.
 var inferMu sync.Mutex
 
-// ErrUpstreamNoSpeech marks the whisper-server crash-signature (empty-body 5xx) that
-// Transcribe wraps its error in. Root-caused 2026-09-23: whisper-server reliably exits
-// when the audio has no speech content (music, tone, near-silence alike — not a
-// loudness/cold-load effect; see the call site for the reproduction). Callers should
-// treat this as "no speech found", not as an infrastructure failure — never retry it
-// (the same audio crashes the server again) and never surface "call failed" wording.
-var ErrUpstreamNoSpeech = errors.New("stt upstream: no speech content (whisper-server exits on non-speech audio)")
+// sttCalls counts the transcriptions in this process that are waiting for the whisper
+// upstream or running on it (register C-91). Transcribe and TranscribeOAI count themselves
+// in on their first line — before the fenced URL wait and the queue on inferMu — and out
+// when they return, so a call is "in line" for the whole of its wait. UnloadIfIdle reads
+// it. Process-wide for the reason inferMu is: the one upstream is one shared resource
+// however many Client values exist.
+var sttCalls atomic.Int64
+
+// warmed records, per llama-swap base and model, that a request has gone out to the
+// upstream since the last unload this process sent (register C-91). UnloadIfIdle unloads
+// only a model in it, which is what makes "one unload per burst" true when several
+// finishing calls reach it at once, and keeps a call that never reached the upstream (the
+// card was fenced, the wav would not read) from unloading anything. Guarded by inferMu.
+var warmed = map[string]bool{}
+
+// Pending reports how many transcriptions in this process are waiting for the whisper
+// upstream or running on it (register C-91): the count UnloadIfIdle reads. It exists so a
+// test can wait until a second call is in line instead of sleeping and hoping.
+func Pending() int { return int(sttCalls.Load()) }
+
+// ErrUpstreamNoSpeech is the verdict "the upstream ANSWERED, successfully, with an empty
+// transcript": Transcribe and TranscribeOAI return it, wrapped, in place of an empty
+// Result. It is never inferred from a failure to get an answer (register C-91). Until
+// 2026-10-01 it also marked the empty-body 5xx that whisper-server's exit on audio with no
+// speech content leaves behind (root-caused 2026-09-23, F-35; see Transcribe) — but the
+// same bare status, or a read cut off mid-answer, follows a model that is unloaded,
+// swapped or restarted under a call, and audio WITH speech was reported to its caller as
+// silent. A status cannot tell the two apart; only an answer can. Callers treat this as
+// "no speech found", not as an infrastructure failure, and have nothing to retry.
+var ErrUpstreamNoSpeech = errors.New("stt upstream: the upstream answered with an empty transcript (no speech found)")
 
 // Word is one timestamped word with whisper's per-word confidence. whisper-server
 // emits words[] in verbose_json BY DEFAULT (no extra request field needed — adding
@@ -152,6 +176,10 @@ func New(base string, timeout time.Duration) *Client {
 // parsed verbose_json. The multipart body is built in memory (wavs are 16 kHz
 // mono — ~2 MB/min — comfortable in 64 GB RAM).
 func (c *Client) Transcribe(ctx context.Context, model, wavPath string, p Params) (Result, error) {
+	// In line from the first statement (register C-91): the call counts as waiting for the
+	// whole of its fence wait and its queue on inferMu, which is what UnloadIfIdle reads.
+	sttCalls.Add(1)
+	defer sttCalls.Add(-1)
 	wav, err := os.ReadFile(wavPath)
 	if err != nil {
 		return Result{}, fmt.Errorf("sttclient: read wav %q: %w", wavPath, err)
@@ -175,39 +203,44 @@ func (c *Client) Transcribe(ctx context.Context, model, wavPath string, p Params
 	// waits for the connection to fully drain, not just for Do() to return.
 	inferMu.Lock()
 	defer inferMu.Unlock()
+	warmed[c.warmKey(model)] = true
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return Result{}, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 400))
-		// An empty-body 5xx is the crash signature: whisper-server (whisper.cpp
-		// build-v194) exits mid-request and llama-swap's proxy sees the connection
-		// reset ("upstream process exited unexpectedly" in llama-swap.log).
-		// Root-caused 2026-09-23 (F-35 regression follow-up): this is NOT a
-		// cold-load fluke and NOT specific to near-silence. Direct /inference calls
-		// reproduced it 100% of the time (repeated attempts, no cold-restart window)
-		// on (a) a near-silent ACE-Step-generated tail, (b) the same clip with the
-		// per-request vad field both on and off (the server always loads with
-		// --vad baked into its launch command, so the per-request field cannot
-		// disable it), and (c) a plain loud 440 Hz sine tone with no ACE-Step
-		// involvement at all. The common factor across all three is NO SPEECH
-		// CONTENT, not loudness — whisper.cpp's decode/beam-search path hits a
-		// fatal state (~28-30s in) when there is nothing speech-like to
-		// transcribe. This is an upstream whisper.cpp bug outside this repo; the
-		// harness-side mitigation is to treat this signature as a clean "no
-		// speech found" outcome (see runTranscribe) rather than retry it
-		// (retrying just re-triggers the same crash on the same audio) or
-		// surface it as an infrastructure failure.
-		if resp.StatusCode >= 500 && len(bytes.TrimSpace(b)) == 0 {
-			return Result{}, fmt.Errorf("whisper-server %d (empty body): upstream crashed — no speech content in the audio (confirmed reproducible on music/tone, not silence-specific, not a cold-load fluke): %w", resp.StatusCode, ErrUpstreamNoSpeech)
+		b, rerr := io.ReadAll(io.LimitReader(resp.Body, 400))
+		// NO ANSWER IS NOT NO SPEECH (register C-91). An empty-body 5xx is llama-swap's
+		// bare answer when its connection to whisper-server drops mid-request ("upstream
+		// process exited unexpectedly" in llama-swap.log), and a read that was cut off
+		// reads empty too — the error of that read used to be thrown away. Both follow a
+		// crash: whisper.cpp (build-v194) reliably exits on audio with no speech content
+		// (root-caused 2026-09-23, F-35: direct /inference calls reproduced it 100% of
+		// the time on a near-silent ACE-Step tail, on the same clip with the per-request
+		// vad field on and off, and on a plain 440 Hz tone — no speech, not loudness, not
+		// a cold load; an upstream bug outside this repo). They follow an unload, a swap
+		// or a restart under the call just as well, and then the audio HAD speech: the
+		// old reading reported a call whose model was taken away mid-flight as a
+		// recording with nothing in it. The status cannot say which it was, so the error
+		// says what is known and leaves the verdict to an upstream that answered
+		// (ErrUpstreamNoSpeech, below). A crash on no-speech audio therefore reaches the
+		// caller as a failed call; a retry of an unloaded one succeeds.
+		switch {
+		case rerr != nil:
+			return Result{}, fmt.Errorf("whisper-server %d: the answer was cut off mid-read (%v): the upstream was stopped or restarted under the call", resp.StatusCode, rerr)
+		case resp.StatusCode >= 500 && len(bytes.TrimSpace(b)) == 0:
+			return Result{}, fmt.Errorf("whisper-server %d (empty body): the upstream vanished mid-request — it was unloaded, restarted or crashed (whisper.cpp also exits on audio with no speech content, so this is not a no-speech verdict)", resp.StatusCode)
 		}
 		return Result{}, fmt.Errorf("whisper-server %d: %s", resp.StatusCode, string(b))
 	}
 	var out Result
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return Result{}, fmt.Errorf("sttclient: decode verbose_json: %w", err)
+	}
+	// The one producer of the no-speech verdict: the upstream answered 200 and heard nothing.
+	if strings.TrimSpace(out.Text) == "" && len(out.Segments) == 0 {
+		return Result{}, fmt.Errorf("whisper-server answered with an empty transcript: %w", ErrUpstreamNoSpeech)
 	}
 	return out, nil
 }
@@ -271,9 +304,13 @@ func buildMultipart(wav []byte, filename string, p Params) (*bytes.Buffer, strin
 // llama-swap config marks resident is REFUSED instead of taken down.
 //
 // Drain is deliberately off: the pre-existing behavior was an unconditional
-// unload, and the caller already holds the single-slot inference mutex when it
-// fires. Passing UnloadOpts{Drain: true} is the one-line change if a future
-// caller unloads a seat it does not own.
+// unload. Unload itself holds NOTHING — the single-slot inference mutex is released
+// when Transcribe returns, so a caller that fires it right after a call lands it on
+// whatever the next call has in flight (register C-91; this comment used to say the
+// caller holds the mutex, which no caller did). The zero-always-warm caller uses
+// UnloadIfIdle, which unloads holding that mutex and only when nothing is in line,
+// so there is nothing in flight to drain. Passing UnloadOpts{Drain: true} is the
+// one-line change if a future caller unloads a seat it does not own.
 func (c *Client) Unload(ctx context.Context, model string) error {
 	ls, err := swapclient.New(c.base, c.http.Timeout)
 	if err != nil {
@@ -281,6 +318,57 @@ func (c *Client) Unload(ctx context.Context, model string) error {
 	}
 	_, err = ls.Unload(ctx, model, &llamaswap.UnloadOpts{})
 	return err
+}
+
+// warmKey names one (llama-swap base, model) pair in warmed.
+func (c *Client) warmKey(model string) string { return c.base + "\x00" + model }
+
+// UnloadIfIdle is Unload for the zero-always-warm caller (register C-91): it frees the
+// upstream only when this is the last transcription of a burst, and only once per burst.
+//
+// The caller used to unload after EVERY call, holding nothing: inferMu is released when
+// Transcribe returns, so a call that finished while others were in line sent its unload
+// while the next one's inference was on the upstream, and llama-swap answered that call
+// "matrix: model unloaded" with a 500 (or cut its read off). The calls queued behind it paid
+// a cold start each, whatever the order. Here the unload goes out holding inferMu, which
+// keeps the next inference off the upstream until it is done, and only when nothing is
+// in line:
+//
+//   - another call is waiting or running (sttCalls): that call is the last one out and
+//     unloads then, so a burst of N pays one cold start, not N;
+//   - the model was not used since the last unload (warmed): a call of the same burst
+//     already freed it, or this call never reached the upstream (the card was fenced, the
+//     wav would not read).
+//
+// It never BLOCKS on inferMu, because a finished call must not hold its own answer back
+// for the length of the next call's inference: a 30-minute transcription would delay a
+// ten-second one's result by 30 minutes. That is safe because a failed TryLock always means
+// somebody else has the unload covered: the holder is a call that came in after the check
+// above (it is the last one out), or another UnloadIfIdle that has already seen an empty
+// line and will unload the model if it was used. The decision is taken on sttCalls BEFORE
+// the lock, so a call that only looked and went away never holds the slot against another.
+//
+// The last call out unloads even when it failed: the pipeline calls this after every
+// call, so a burst whose final call was refused by the fence still frees the model its
+// earlier calls warmed. A failed unload leaves the model marked warm for the next one; the
+// ttl is the backstop, as it is for a mixed burst whose second model was left to it.
+func (c *Client) UnloadIfIdle(ctx context.Context, model string) error {
+	if sttCalls.Load() > 0 {
+		return nil
+	}
+	if !inferMu.TryLock() {
+		return nil
+	}
+	defer inferMu.Unlock()
+	key := c.warmKey(model)
+	if sttCalls.Load() > 0 || !warmed[key] {
+		return nil
+	}
+	if err := c.Unload(ctx, model); err != nil {
+		return err
+	}
+	delete(warmed, key)
+	return nil
 }
 
 // SRT renders segments as SubRip text (1-indexed, HH:MM:SS,mmm timestamps).
@@ -366,6 +454,9 @@ func wavDurationSec(wav []byte) float64 {
 // this path). Serialized by the same process-global mutex as Transcribe — the mtmd
 // upstream is served single-slot too.
 func (c *Client) TranscribeOAI(ctx context.Context, model, wavPath string) (Result, error) {
+	// In line from the first statement, exactly as Transcribe is (register C-91).
+	sttCalls.Add(1)
+	defer sttCalls.Add(-1)
 	wav, err := os.ReadFile(wavPath)
 	if err != nil {
 		return Result{}, fmt.Errorf("read wav: %w", err)
@@ -399,6 +490,7 @@ func (c *Client) TranscribeOAI(ctx context.Context, model, wavPath string) (Resu
 
 	inferMu.Lock()
 	defer inferMu.Unlock()
+	warmed[c.warmKey(model)] = true
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return Result{}, err
@@ -416,10 +508,10 @@ func (c *Client) TranscribeOAI(ctx context.Context, model, wavPath string) (Resu
 		return Result{}, fmt.Errorf("transcriptions response parse: %w (body %.200s)", err, raw)
 	}
 	lang, text := ParseASRText(parsed.Text)
-	dur := wavDurationSec(wav)
-	r := Result{Language: lang, Duration: dur, Text: text}
-	if text != "" {
-		r.Segments = []Segment{{ID: 0, Start: 0, End: dur, Text: text}}
+	// As on the whisper path, the verdict needs an answer: this one came back 200 and empty.
+	if text == "" {
+		return Result{}, fmt.Errorf("transcriptions endpoint answered with an empty transcript: %w", ErrUpstreamNoSpeech)
 	}
-	return r, nil
+	dur := wavDurationSec(wav)
+	return Result{Language: lang, Duration: dur, Text: text, Segments: []Segment{{ID: 0, Start: 0, End: dur, Text: text}}}, nil
 }

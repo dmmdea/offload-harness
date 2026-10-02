@@ -1243,22 +1243,27 @@ func (p *Pipeline) runTranscribe(ctx context.Context, req core.Request, meta cor
 		}
 		tr, terr = p.stt.Transcribe(ctx, model, wav, prm)
 	}
-	// zero-always-warm: free the upstream's VRAM now (best-effort, short timeout).
+	// zero-always-warm: free the upstream's VRAM once the last call of a burst is done
+	// (best-effort, short timeout). UnloadIfIdle, not Unload (register C-91): with several
+	// transcriptions in line an unload after EACH one landed on the next call's inference,
+	// which llama-swap answers "matrix: model unloaded". It sends nothing while another call
+	// is waiting or running, so the last call out is the one that unloads — on either
+	// protocol, and whether that last call succeeded or failed.
 	if p.cfg.STTUnloadAfter {
 		uctx, ucancel := context.WithTimeout(context.Background(), 10*time.Second)
-		_ = p.stt.Unload(uctx, model)
+		_ = p.stt.UnloadIfIdle(uctx, model)
 		ucancel()
 	}
 	if terr != nil {
-		// ErrUpstreamNoSpeech (root-caused 2026-09-23): whisper-server's crash
-		// signature on audio with no speech content — music, tone, near-silence
-		// alike, confirmed NOT a cold-load or loudness effect (sttclient doc
-		// comment has the reproduction). This is semantically the same outcome as
-		// the clean "empty transcript" case just below (no speech found), so it
-		// gets the identical calm defer reason instead of the generic "transcribe
-		// call failed" wording, which reads as an infrastructure failure it is
-		// not. Retrying is deliberately not attempted: the same audio reliably
-		// crashes the server again.
+		// ErrUpstreamNoSpeech: the upstream ANSWERED, successfully, with an empty
+		// transcript (register C-91). It used to be read off an empty-body 5xx — the
+		// whisper-server crash on audio with no speech content (F-35, 2026-09-23) — which
+		// a model unloaded from under the call produces just as well, so audio with
+		// speech was reported as silent; sttclient now returns the verdict only for an
+		// answer. The call went through and found nothing to transcribe, so it is a
+		// calm defer rather than the "transcribe call failed" wording, which reads as an
+		// infrastructure failure it is not, and there is nothing to retry. An upstream
+		// that vanished mid-request falls through to the failure below.
 		if errors.Is(terr, sttclient.ErrUpstreamNoSpeech) {
 			meta.LatencyMs = time.Since(start).Milliseconds()
 			p.recordDefer(req.Task, meta, len(req.Audio), "empty transcript (no speech detected)")

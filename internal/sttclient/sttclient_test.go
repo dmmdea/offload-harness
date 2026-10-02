@@ -55,11 +55,17 @@ func TestTranscribeSerializesConcurrentCalls(t *testing.T) {
 	}
 }
 
-// TestTranscribeEmptyBody502IsDescriptive guards that a crash-signature 5xx (empty
-// body) surfaces an accurate, diagnostic error rather than a bare status code.
-func TestTranscribeEmptyBody502IsDescriptive(t *testing.T) {
+// TestTranscribeEmptyBody502IsNotANoSpeechVerdict (register C-91; this test pinned the
+// opposite until 2026-10-01). An empty-body 5xx is llama-swap's bare answer when its
+// connection to the upstream drops mid-request, and an unload, a swap, a restart and a
+// crash all look like that. It used to wrap ErrUpstreamNoSpeech (F-35, 2026-09-23:
+// whisper.cpp does exit on audio with no speech content), so a call whose model was
+// unloaded from under it — audio WITH speech — was reported to its caller as silent. The
+// status cannot tell the two apart, so the error says what is known, that the upstream
+// vanished, and leaves "no speech" to an upstream that answered (see nospeech_test.go).
+func TestTranscribeEmptyBody502IsNotANoSpeechVerdict(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusBadGateway) // 502, empty body — the whisper crash signature
+		w.WriteHeader(http.StatusBadGateway) // 502, empty body
 	}))
 	defer srv.Close()
 	tmp := t.TempDir()
@@ -71,15 +77,11 @@ func TestTranscribeEmptyBody502IsDescriptive(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error on empty-body 502")
 	}
-	if !strings.Contains(err.Error(), "crashed") || !strings.Contains(err.Error(), "empty body") {
-		t.Errorf("empty-body 502 error should be descriptive (crash / no-speech hint); got: %v", err)
+	if !strings.Contains(err.Error(), "empty body") || !strings.Contains(err.Error(), "vanished") {
+		t.Errorf("empty-body 502 error should say the upstream vanished mid-request; got: %v", err)
 	}
-	// F-35 regression follow-up (2026-09-23): the error must be MACHINE-detectable
-	// as "no speech", not just human-readable, so the pipeline can map it to the
-	// same calm defer the clean empty-transcript case uses instead of surfacing it
-	// as an infrastructure failure.
-	if !errors.Is(err, ErrUpstreamNoSpeech) {
-		t.Errorf("empty-body 502 must wrap ErrUpstreamNoSpeech so callers can errors.Is() it; got: %v", err)
+	if errors.Is(err, ErrUpstreamNoSpeech) {
+		t.Errorf("an empty-body 502 must not be reported as no speech — an unloaded model looks the same; got: %v", err)
 	}
 }
 
