@@ -1,4 +1,4 @@
-# One box, three tiers: the Qube as a composite of blackwell-16 / 2x16 / 3x16 — design
+# One box, three tiers: `<node-b>` as a composite of blackwell-16 / 2x16 / 3x16 — design
 
 Date: 2026-09-09 · Status: APPROVED 2026-09-09 (operator: "implement autonomously"; the three defaults below stand) · Path: architectural
 (touches tier identity, placement, the delegate gate, health, status, the serving renderer,
@@ -6,13 +6,13 @@ docs, tier matrix)
 
 ## Why
 
-Operator directive, 2026-09-08: *"qube now must be part of 3 tiers at the same time,
+Operator directive, 2026-09-08: *"`<node-b>` now must be part of 3 tiers at the same time,
 blackwell 16, blackwell 2x16 and blackwell 3x16, dynamically switching and routing models to
 the optimal path depending on task needs."*
 
 What is already true: the 3-card llama-swap config **serves all three shapes** — single-card
 seats (the cascade rungs e2b/e4b/12b/26b on device 0; OCR vl-8b, STT, embed/rerank on
-device 2), pair seats (`agent-pool` 27B vLLM with the Lenovo cache server, vl-32b, the 27B/31B
+device 2), pair seats (`agent-pool` 27B vLLM with the `<node-c>` cache server, vl-32b, the 27B/31B
 llama.cpp agents on 0+2) and the 3-card opt-ins (`qwen3.8-flash-next` 131k/262k,
 `qwen3.8-27b-vllm-3card`). 21 models are served today.
 
@@ -118,7 +118,7 @@ the composite tier only.
 ### D6 — The fleet sees three capacity rows, not one
 
 `NodeView` gains `Layers []LayerView{Name, Devices, Seat, CtxTokens, Inflight, Admissible}`
-decoded from health; the delegate gate scores a composite node **per layer**: a pair-busy Qube
+decoded from health; the delegate gate scores a composite node **per layer**: a pair-busy `<node-b>`
 is still eligible for a mechanical contract on its single layer, and a 200k contract that fits
 only the triple layer is placed there (subject to D4) instead of being refused as too big for
 every node. Nodes without `layers` decode to one implicit layer (today's `AgentCtxTokens`).
@@ -126,21 +126,21 @@ every node. Nodes without `layers` decode to one implicit layer (today's `AgentC
 ### D7 — Status and UI
 
 `offload_status.local` gains `tiers` and `layers` (devices, seat, window, in-flight, admissible
-+ reason); the fleet overview page draws the Qube as three stacked layer cards. `placement.layer`
++ reason); the fleet overview page draws `<node-b>` as three stacked layer cards. `placement.layer`
 appears in `agent_delegate` / `agent_run` results and in the ledger, so the utilization
 scoreboard can say how much work each layer took.
 
 ### D8 — Versioning, docs, matrix
 
 0.116.0. New `docs/systems/composite-tier.md`; ADR 0039 *"A box is the union of its tiers, and
-placement is a per-task decision"*; `docs/tiers` regenerated; tier matrix: the Qube's row
+placement is a per-task decision"*; `docs/tiers` regenerated; tier matrix: `<node-b>`'s row
 carries `composes` and the evidence sheet gets the three live gates below.
 
 ## Out of scope
 
 - Pinning any tier seat to the 5070 Ti (operator rule, unchanged).
 - Pipeline-parallel vLLM on three cards as the delegation lane (measured failure, 2026-09-07).
-- Composites on single-card boxes (Lenovo, Aorus): one layer, nothing changes.
+- Composites on single-card boxes (`<node-c>`, `<node-a>`): one layer, nothing changes.
 - Cross-box "layers" (that is the fleet, which exists).
 
 ## Testing
@@ -151,7 +151,7 @@ carries `composes` and the evidence sheet gets the three live gates below.
   named defer; `composes` render pin (a composed seat missing or on the wrong device fails);
   `NodeView.Layers` decode + per-layer gate scoring; a box with no layers is byte-identical
   (tools/list, health, placement) — pinned.
-- **Live gates on the Qube (the only check that counts):**
+- **Live gates on `<node-b>` (the only check that counts):**
   1. a mechanical `summarize` while `agent-pool` holds 32 in-flight ⇒ `placement.layer=single`,
      no queue wait;
   2. two concurrent digest contracts, one with acceptance checks and one without, with the pair
@@ -160,8 +160,8 @@ carries `composes` and the evidence sheet gets the three live gates below.
   3. a 200k-token contract with the operator away and ≥ 4 GiB free on device 1 ⇒
      `layer=triple` on `qwen3.8-flash-next-262k`, needle answered; the same contract with the
      operator at the desk ⇒ a defer naming the presence guard;
-  4. `/fleet/health` from the Lenovo shows `tiers` (3) and `layers` (3) for the Qube; the
-     delegator's `offload_status.fleet` shows the Qube as three capacity rows.
+  4. `/fleet/health` from `<node-c>` shows `tiers` (3) and `layers` (3) for `<node-b>`; the
+     delegator's `offload_status.fleet` shows `<node-b>` as three capacity rows.
 
 ## Operator decisions carried as defaults (say the word to override)
 

@@ -17,7 +17,7 @@
 - Health never blocks: no sampling, no llama-swap call, no `nvidia-smi` inside `handleHealth`.
 - No JS frameworks, no CDN, no external requests from the page.
 - Version bump to `0.113.0` in `VERSION`, `internal/buildinfo/buildinfo.go`, `.printing-press.json` — together, in Task 10.
-- Docs in the same PR: `docs/systems/fleet-overview.md`, `docs/systems/fleet-node.md` (health fields), `docs/README.md` index, `AGENTS.md` pointer, ADR 0034, CHANGELOG, `P:\Port Directory\qube-ports.md` row for 18813.
+- Docs in the same PR: `docs/systems/fleet-overview.md`, `docs/systems/fleet-node.md` (health fields), `docs/README.md` index, `AGENTS.md` pointer, ADR 0034, CHANGELOG, the operator's port ledger row for 18813.
 - Placement law unchanged: `Place` returns local when `!localBusy`; the three existing `betterRemote` keys keep their order; new logic only appends.
 - Tests: table-driven, in the package's existing `_test.go` style; every new guard is broken once at its call site during Task verification (clean-ship Consequential rule 3 applies to Task 7, the placement change).
 - Repo root for all paths below: `<harness repo>` (work in the worktree `<trees>\fleet-overview`, branch `feat/fleet-overview` — create it from `main` at execution time; the plan branch is `docs/fleet-overview-plan`).
@@ -512,7 +512,7 @@ Expected: PASS.
 Run (from the worktree, a scratch port so the live node is untouched):
 `go run . fleet-serve --listen 127.0.0.1:18899 --node-id scratch` in the background, then
 `curl -s http://127.0.0.1:18899/fleet/health | python -c "import sys,json; d=json.load(sys.stdin); print({k:d.get(k) for k in ('gpu_util_pct','gpu_util_known','host_cpu_pct','host_ram_used_gb','host_ram_total_gb')})"`
-Expected: after ~10 s all five keys present and plausible (RAM total ≈ 128 on Qube). Kill the scratch server.
+Expected: after ~10 s all five keys present and plausible (RAM total ≈ 128 on `<node-b>`). Kill the scratch server.
 
 - [ ] **Step 6: Commit**
 
@@ -1266,7 +1266,7 @@ Run: `go test ./internal/fleetview ./ && go build -o offload-harness.exe .`
 Expected: PASS, build ok.
 
 Run: `./offload-harness.exe fleet-ui` (defaults: 127.0.0.1:18813, remotes from config), then in another shell `curl -s http://127.0.0.1:18813/api/overview | python -c "import sys,json; o=json.load(sys.stdin); print([(n['node_id'],n['reachable'],len(n['history']),len(n['jobs'])) for n in o['nodes']], len(o['errors']))"`
-Expected: one tuple per configured node, `reachable=True` for lenovo-ampere6 and aorus-ampere8, history growing on a second call. Open `http://127.0.0.1:18813/` in a browser and confirm cards render with moving sparklines and no console errors (the constitution's "inspect your own output" rule — the page is the deliverable). Stop the server with Ctrl-C.
+Expected: one tuple per configured node, `reachable=True` for node-c-ampere6 and node-a-ampere8, history growing on a second call. Open `http://127.0.0.1:18813/` in a browser and confirm cards render with moving sparklines and no console errors (the constitution's "inspect your own output" rule — the page is the deliverable). Stop the server with Ctrl-C.
 
 - [ ] **Step 7: Commit**
 
@@ -1441,7 +1441,7 @@ import (
 )
 
 func TestSmokeContractIsGroundedAndCheap(t *testing.T) {
-	spec := smokeContract("lenovo-ampere6")
+	spec := smokeContract("node-c-ampere6")
 	c, err := delegate.PrepareContract(spec, "")
 	if err != nil {
 		t.Fatal(err)
@@ -1449,13 +1449,13 @@ func TestSmokeContractIsGroundedAndCheap(t *testing.T) {
 	if c.MaxSteps != 1 || c.TimeoutSec != 60 {
 		t.Fatalf("smoke must be one step / 60 s, got %d/%d", c.MaxSteps, c.TimeoutSec)
 	}
-	if !strings.Contains(strings.Join(c.Acceptance, " "), "contains:PONG-lenovo-ampere6") {
+	if !strings.Contains(strings.Join(c.Acceptance, " "), "contains:PONG-node-c-ampere6") {
 		t.Fatalf("acceptance must anchor on a token that only the doc carries: %v", c.Acceptance)
 	}
-	if len(c.Context) != 1 || !strings.Contains(c.Context[0].Text, "PONG-lenovo-ampere6") {
+	if len(c.Context) != 1 || !strings.Contains(c.Context[0].Text, "PONG-node-c-ampere6") {
 		t.Fatal("the token must be IN the context doc, not only in the goal (parrot-passable otherwise)")
 	}
-	if strings.Contains(c.Goal, "PONG-lenovo-ampere6") {
+	if strings.Contains(c.Goal, "PONG-node-c-ampere6") {
 		t.Fatal("goal must not carry the token — an echo of the goal would pass")
 	}
 }
@@ -1624,7 +1624,7 @@ Replace `loadConfigAndPipeline()` with whatever `runDelegate` (main.go:1904-1945
 - [ ] **Step 4: Run tests, then run it for real**
 
 Run: `go test . -run Smoke && go build -o offload-harness.exe . && ./offload-harness.exe fleet-smoke`
-Expected: a two-row table, both `PASS`, wall under ~30 s each (Lenovo 4B and Aorus 9B seats are resident per `offload_status`). If a row is `DEFER` with a budget reason, that is a real finding, not a test bug — report it.
+Expected: a two-row table, both `PASS`, wall under ~30 s each (`<node-c>` 4B and `<node-a>` 9B seats are resident per `offload_status`). If a row is `DEFER` with a budget reason, that is a real finding, not a test bug — report it.
 
 - [ ] **Step 5: Commit**
 
@@ -1659,12 +1659,12 @@ import (
 
 func TestRenderTopShowsNodesJobsErrors(t *testing.T) {
 	o := Overview{At: 1, DelegationEnabled: true, Nodes: []Node{
-		{Base: "http://node-a:18811", NodeID: "lenovo-ampere6", Reachable: true, AgentSeat: "qwen3.5-4b-agent", AgentResident: true, GpuUtil: 7, GpuUtilKnown: true, VramFree: 4.1, VramTotal: 6, HostCPU: 3, RamUsed: 10, RamTotal: 64, JobsRunning: 0, JobsQueued: 0,
+		{Base: "http://node-a:18811", NodeID: "node-c-ampere6", Reachable: true, AgentSeat: "qwen3.5-4b-agent", AgentResident: true, GpuUtil: 7, GpuUtilKnown: true, VramFree: 4.1, VramTotal: 6, HostCPU: 3, RamUsed: 10, RamTotal: 64, JobsRunning: 0, JobsQueued: 0,
 			Jobs: []map[string]any{{"id": "agd-1", "task": "agent-run", "state": "done", "wall_ms": float64(900)}}},
 		{Base: "http://node-b:18811", Reachable: false, ProbeError: "dial refused"},
 	}, Errors: []Error{{At: 1, Severity: "error", Node: "node-b", Source: "probe", Message: "dial refused"}}}
 	out := RenderTop(o, 120)
-	for _, want := range []string{"lenovo-ampere6", "7%", "4.1/6.0", "qwen3.5-4b-agent", "agd-1", "dial refused", "1/2 reachable"} {
+	for _, want := range []string{"node-c-ampere6", "7%", "4.1/6.0", "qwen3.5-4b-agent", "agd-1", "dial refused", "1/2 reachable"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("missing %q in:\n%s", want, out)
 		}
@@ -1733,12 +1733,12 @@ func (m topModel) View() string {
   local-offload top [--ui http://127.0.0.1:18813] [--interval 5s]   terminal view of the fleet overview (for headless boxes; reads a running fleet-ui)
 ```
 
-- [ ] **Step 4: Run tests and try it on the Lenovo**
+- [ ] **Step 4: Run tests and try it on `<node-c>`**
 
 Run: `go test ./internal/fleetview && go build .`
 Expected: PASS.
 
-With `fleet-ui --listen <delegator-tailnet-ip>:18813 --listen-trusted-network` running on Qube, on the Lenovo run `local-offload top --ui http://<delegator>:18813` (after the binary is dropped there per `docs/systems/fleet-node.md`'s Linux path) and confirm the three sections refresh; `q` exits and restores the terminal.
+With `fleet-ui --listen <delegator-tailnet-ip>:18813 --listen-trusted-network` running on `<node-b>`, on `<node-c>` run `local-offload top --ui http://<delegator>:18813` (after the binary is dropped there per `docs/systems/fleet-node.md`'s Linux path) and confirm the three sections refresh; `q` exits and restores the terminal.
 
 - [ ] **Step 5: Commit**
 
@@ -1753,7 +1753,7 @@ git commit -m "top: terminal view of the fleet overview (Bubble Tea client of fl
 
 **Files:**
 - Create: `docs/systems/fleet-overview.md` (from `docs/templates/system.md`), `docs/architecture/decisions/0034-fleet-overview-is-a-read-only-page-on-the-delegator.md` (from `docs/templates/adr.md`)
-- Modify: `docs/systems/fleet-node.md` (health table: `gpu_util_pct`, `gpu_util_known`, `host_cpu_pct`, `host_ram_used_gb`, `host_ram_total_gb`, `served_models`; new route `GET /fleet/jobs`), `docs/README.md` (index row), `AGENTS.md` (pointer beside the fleet-node line), `CHANGELOG.md` (`## [0.113.0] — <date> — fleet overview: the PAIR-inspired operator surface` with Added/Changed), `VERSION`, `internal/buildinfo/buildinfo.go`, `.printing-press.json` → `0.113.0`, `P:\Port Directory\qube-ports.md` (row `18813 | local-offload fleet-ui | 127.0.0.1 (tailnet with --listen-trusted-network) | ...`)
+- Modify: `docs/systems/fleet-node.md` (health table: `gpu_util_pct`, `gpu_util_known`, `host_cpu_pct`, `host_ram_used_gb`, `host_ram_total_gb`, `served_models`; new route `GET /fleet/jobs`), `docs/README.md` (index row), `AGENTS.md` (pointer beside the fleet-node line), `CHANGELOG.md` (`## [0.113.0] — <date> — fleet overview: the PAIR-inspired operator surface` with Added/Changed), `VERSION`, `internal/buildinfo/buildinfo.go`, `.printing-press.json` → `0.113.0`, the operator's port ledger (row `18813 | local-offload fleet-ui | 127.0.0.1 (tailnet with --listen-trusted-network) | ...`)
 
 - [ ] **Step 1: Write the system doc**
 
@@ -1777,7 +1777,7 @@ ADR 0034 status `Accepted`, date today. Context: the PAIR gap analysis (2026-09-
 - **Placement**: a node whose published `served_models` omits its agent seat is ineligible (unknown roster still eligible); GPU utilization is the FOURTH ranking key, a tie-breaker after queue depth, only when both nodes publish it (ADR 0034).
 ```
 
-Bump: `VERSION` → `0.113.0`; `internal/buildinfo/buildinfo.go` `const Version = "0.113.0"`; `.printing-press.json` `"version": "0.113.0"`. Append the 18813 row to `P:\Port Directory\qube-ports.md` in the Listeners table.
+Bump: `VERSION` → `0.113.0`; `internal/buildinfo/buildinfo.go` `const Version = "0.113.0"`; `.printing-press.json` `"version": "0.113.0"`. Append the 18813 row to the operator's port ledger in the Listeners table.
 
 - [ ] **Step 4: Gate**
 
@@ -1797,8 +1797,8 @@ git commit -m "docs+0.113.0: fleet overview system doc, ADR 0034, health fields,
 
 - [ ] **Step 1:** `pr-review-toolkit:code-reviewer` once on the whole diff (`model: "sonnet"`); fix findings once.
 - [ ] **Step 2:** `offload_review_diff` on the diff via a free seat that has not seen this session; triage findings (a `defer` does not block).
-- [ ] **Step 3:** Open the PR with `gh --repo dmmdea/local-offload-public pr create` (account `dmmdea`, switched and verified in the same command per the account-separation skill). Body: Intent (PAIR-inspired operator surface, spec link) · what changed (the 10 commits) · how tested (`go test ./...`, the live `fleet-ui` render, `fleet-smoke` table, Lenovo `top`) · risk **medium** (placement gate change; mitigated by the unknown-is-eligible rule and the three pinned tests).
-- [ ] **Step 4:** Merge only on the operator's explicit authorization in the conversation. Then deploy: build on Qube, drop the binary to the Aorus (parity rule — same day) and the Lenovo (per `lenovo-offload-harness-drop-target` memory: binary drop, not a git pull), restart the two `fleet-serve` nodes, confirm `curl <node>/fleet/health` shows `gpu_util_known`, `host_ram_total_gb`, `served_models` on both, then start `fleet-ui` on Qube and screenshot the page with all three cards live.
+- [ ] **Step 3:** Open the PR with `gh --repo dmmdea/local-offload-public pr create` (account `dmmdea`, switched and verified in the same command per the account-separation skill). Body: Intent (PAIR-inspired operator surface, spec link) · what changed (the 10 commits) · how tested (`go test ./...`, the live `fleet-ui` render, `fleet-smoke` table, `<node-c>` `top`) · risk **medium** (placement gate change; mitigated by the unknown-is-eligible rule and the three pinned tests).
+- [ ] **Step 4:** Merge only on the operator's explicit authorization in the conversation. Then deploy: build on `<node-b>`, drop the binary to `<node-a>` (parity rule — same day) and `<node-c>` (per the offload-harness drop-target memory: binary drop, not a git pull), restart the two `fleet-serve` nodes, confirm `curl <node>/fleet/health` shows `gpu_util_known`, `host_ram_total_gb`, `served_models` on both, then start `fleet-ui` on `<node-b>` and screenshot the page with all three cards live.
 
 ---
 

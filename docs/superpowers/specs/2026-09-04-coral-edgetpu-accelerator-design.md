@@ -6,8 +6,8 @@ fleet health, docs, tier matrix)
 
 ## Why
 
-The Lenovo M720q now carries a Coral Edge TPU (M.2 A+E, PCI `03:00.0`) that is driven,
-tuned and measured (record: `Ecosystem/Lenovo M720q/2026-09-04_coral-tpu/SETUP.md`):
+`<node-c>` now carries a Coral Edge TPU (M.2 A+E, PCI `03:00.0`) that is driven,
+tuned and measured (record: `Ecosystem/<node-c>/2026-09-04_coral-tpu/SETUP.md`):
 MobileNet v2 iNat at **p50 3.16 ms / ~300 inf/s**, 70–71 °C sustained on `libedgetpu1-std`,
 no throttle. Nothing in the harness knows it exists. The harness already has exactly one
 pattern for "a device beside the GPU": the Hailo-8L accelerator lane (ADR 0024,
@@ -16,11 +16,11 @@ pattern for "a device beside the GPU": the Hailo-8L accelerator lane (ADR 0024,
 1. the device's live configuration (feranick gasket-dkms 1.0-18.4, libedgetpu1-std
    16.0TF2.19.1, ai-edge-litert 2.2.0, `temp_poll_interval=1000`, trip points untouched) is
    **preserved verbatim** — the tier reads it, never rewrites it;
-2. agent contracts that land on the Lenovo, and Claude sessions on the Lenovo, get free
+2. agent contracts that land on `<node-c>`, and Claude sessions on `<node-c>`, get free
    on-box tools for the work the TPU does natively (classification, detection, semantic
    segmentation, image embeddings);
 3. the fleet advertises the device so a delegator can route fitting work to it
-   (phase B below makes that routing real from the Qube).
+   (phase B below makes that routing real from `<node-b>`).
 
 ## What already exists and is reused unchanged
 
@@ -40,7 +40,7 @@ pattern for "a device beside the GPU": the Hailo-8L accelerator lane (ADR 0024,
 Accelerator id `coral-edgetpu` (one id for the whole Edge TPU family: USB/M.2/Dual all
 run the same `_edgetpu.tflite` artifacts, unlike Hailo-8 vs 8L). Sidecar base
 `http://127.0.0.1:18814` — loopback only, distinct from Hailo's 18813 so a box with both
-devices never collides. 18814 is free on the Lenovo (live `ss` 2026-09-04) and inside its
+devices never collides. 18814 is free on `<node-c>` (live `ss` 2026-09-04) and inside its
 safe-pick range 18792–18999; the port file gains the row in the same change.
 
 ### D2 — One generic sidecar lane, not a second copy of `hailoclient`
@@ -116,11 +116,11 @@ device that serves it, and `offload_image_embed` reports `space` so a caller nev
 1280-d EfficientNet vector with a 512-d TinyCLIP one.
 
 The `engine:"npu"` switches on `offload_ocr` / `offload_transcribe` stay Hailo-only (the
-Coral has no OCR or ASR path); they keep deferring with "no hailo-8l" on the Lenovo.
+Coral has no OCR or ASR path); they keep deferring with "no hailo-8l" on `<node-c>`.
 
 ### D6 — Health advertises the device from config when there is no manifest
 
-`fleet-serve` today reads `accelerators` only from `installed.json`. The Lenovo has **no**
+`fleet-serve` today reads `accelerators` only from `installed.json`. `<node-c>` has **no**
 `installed.json` (hand-built node; verified) so its health would never list the device.
 Rule: `Options.Accelerators` = manifest list when the manifest exists and lists any,
 else `cfg.Accelerators`. The Windows/manifest path is unchanged; a test pins both sources.
@@ -151,7 +151,7 @@ temp_c(sysfs), loaded:[...], models_missing:[...], runtime:{litert, libedgetpu}}
 The sidecar **never writes sysfs** — the thermal knobs stay the operator's (`SETUP.md`
 §6.4); it only reads `temp` and `status`.
 
-### D8 — Deployment on the Lenovo respects the unit's sandbox
+### D8 — Deployment on `<node-c>` respects the unit's sandbox
 
 `offload-fleet-node.service` runs as the fleet service user with `ProtectHome=yes` (verified). The
 sidecar it spawns cannot see `~/coral-venv`. So `CORAL_HOME =
@@ -162,8 +162,8 @@ stays untouched as the operator's bench. The unit needs no change: no `PrivateDe
 root. Nothing else on the box changes — no udev, modprobe, sysfs, kernel or NVIDIA state
 is touched (the SETUP.md rollback stays valid).
 
-The binary follows the established path: cross-compiled on the Qube, scp'd over the drop
-at `src/offload-harness/local-offload` (memory: the Lenovo's src clone is stale and must
+The binary follows the established path: cross-compiled on `<node-b>`, scp'd over the drop
+at `src/offload-harness/local-offload` (memory: `<node-c>`'s src clone is stale and must
 not be built there). Config: `accelerators`, `coral_*` keys added to
 `etc/config.json` (backup first, as every prior edit there). Deploy sequence and its
 verification are the last task of the implementation plan.
@@ -179,15 +179,15 @@ verification are the last task of the implementation plan.
   shared-name rule, deploy notes); ADR 0024 gets the D7 amendment paragraph; a new short
   ADR records D5's shared-name rule (it constrains every future accelerator).
   `AGENTS.md`, `README.md`, `setup/SETUP-AGENT.md`, `docs/README.md` index lines.
-- Ecosystem records outside the repo, same change: `P:\Port Directory\lenovo-ports.md`
-  (18814 row), the Lenovo wiki entity (Coral section: "served through the harness"),
+- Ecosystem records outside the repo, same change: the operator's port ledger
+  (18814 row), the `<node-c>` wiki entity (Coral section: "served through the harness"),
   `SETUP.md` gets a pointer paragraph, not a rewrite.
 
 ## Phase B — proactive routing from a box that lacks the device
 
-Phase A makes the Coral usable **on** the Lenovo (Claude sessions there; every
+Phase A makes the Coral usable **on** `<node-c>` (Claude sessions there; every
 `agent_delegate`/`agent_run` contract that lands there advertises the four tools).
-"Proactively route fitting work to it" from the Qube needs one more hop, designed here so
+"Proactively route fitting work to it" from `<node-b>` needs one more hop, designed here so
 Phase A leaves the right seams, planned and shipped as its own PR after A is verified:
 
 1. **Fleet task type `accel`** on the node: payload `{accelerator, tool, args}` where an
@@ -197,7 +197,7 @@ Phase A leaves the right seams, planned and shipped as its own PR after A is ver
    endpoint) — added to the explicit uncapped list in `concurrencyCapped`.
 2. **`NodeView.Accelerators`** decoded from health (tolerant, absent = none).
 3. **Delegator-side registration opt-in**: config `fleet_accelerators: ["coral-edgetpu"]`
-   on the Qube registers that accelerator's tools locally, each forwarding to the first
+   on `<node-b>` registers that accelerator's tools locally, each forwarding to the first
    reachable fleet node whose health lists the id (health probe per call, 2 s; quarantine
    reuse). Explicit opt-in keeps the `tools/list` pin: a box that declares nothing changes
    nothing. Local device always wins over a remote one for the same name.
@@ -218,14 +218,14 @@ follow-up from the Hailo tier), multi-TPU pipelining, USB Coral hot-plug.
   config (D6).
 - **Sidecar contract (Python, `CORAL_ENABLED=0`):** routing, 404/400/500 shapes, idle
   exit, non-loopback refusal, manifest mismatch refusal.
-- **Live gate on the Lenovo (the only check that counts):** `offload_classify_image` on
+- **Live gate on `<node-c>` (the only check that counts):** `offload_classify_image` on
   `parrot.jpg`, `domain=birds` → top-1 "Ara macao (Scarlet Macaw)" ≥ 0.7 (the measured
   0.758); `curl 127.0.0.1:18814/health` right after shows the model loaded and a TPU
   `temp_c`; `offload_object_detect` on a real photo returns COCO boxes; wait
   `coral_idle_sec`+10 s → process gone → next call re-spawns; `/fleet/health` from the
-  Qube lists `"accelerators":["coral-edgetpu"]`; an `agent_delegate` contract with
-  `route:remote` that calls `offload_classify_image` succeeds on `lenovo-ampere6`;
-  `tools/list` on the Qube unchanged; sustained 90 s classify loop through the sidecar
+  `<node-b>` lists `"accelerators":["coral-edgetpu"]`; an `agent_delegate` contract with
+  `route:remote` that calls `offload_classify_image` succeeds on `node-c-ampere6`;
+  `tools/list` on `<node-b>` unchanged; sustained 90 s classify loop through the sidecar
   stays ≤ 72 °C with no throttle line in `dmesg` (SETUP.md §6.3 baseline).
 
 ## Open questions for the operator
