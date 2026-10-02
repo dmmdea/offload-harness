@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-// The uevent bodies are the reference board's own (an Orange Pi 5, RK3588S). The vendor 6.1 BSP kernel
+// The uevent bodies are the reference board's own (<node-d>, RK3588S). The vendor 6.1 BSP kernel
 // binds the NPU as a DRM node — the display subsystem is card0 and the NPU card1 — so the driver name
 // is on the DRM card's device. The mainline 7.0 kernel with the rknpu 0.9.8 DKMS module names it on the
 // NPU's three core platform devices instead: the GPU (panthor) takes card1, and the NPU's DRM card2

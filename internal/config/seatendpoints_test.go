@@ -32,15 +32,15 @@ func TestSeatEndpointsLoadValidation(t *testing.T) {
 		{
 			name: "tailnet endpoints load and round-trip",
 			json: `{"tailnet_suffix":"tailnnnnnn.ts.net","seat_endpoints":{` +
-				`"lenovo-e4b":"http://node-c:11436",` +
-				`"qube-27b":"http://workstation.tailnnnnnn.ts.net:11436",` +
+				`"node-c-e4b":"http://node-c:11436",` +
+				`"node-b-27b":"http://workstation.tailnnnnnn.ts.net:11436",` +
 				`"local-loop":"http://127.0.0.1:11436",` +
 				`"cgnat-literal":"http://100.64.0.1:18811"}}`,
 		},
 		{
 			name:    "public FQDN fails naming the key",
-			json:    `{"tailnet_suffix":"tailnnnnnn.ts.net","seat_endpoints":{"lenovo-e4b":"http://example.com"}}`,
-			wantErr: `seat_endpoints["lenovo-e4b"]`,
+			json:    `{"tailnet_suffix":"tailnnnnnn.ts.net","seat_endpoints":{"node-c-e4b":"http://example.com"}}`,
+			wantErr: `seat_endpoints["node-c-e4b"]`,
 		},
 		{
 			name:    "public IP literal fails naming the key",
@@ -69,8 +69,8 @@ func TestSeatEndpointsLoadValidation(t *testing.T) {
 				if err != nil {
 					t.Fatalf("expected a clean load, got error: %v", err)
 				}
-				if got := c.SeatEndpoints["lenovo-e4b"]; got != "http://node-c:11436" {
-					t.Fatalf(`SeatEndpoints["lenovo-e4b"] = %q, did not round-trip`, got)
+				if got := c.SeatEndpoints["node-c-e4b"]; got != "http://node-c:11436" {
+					t.Fatalf(`SeatEndpoints["node-c-e4b"] = %q, did not round-trip`, got)
 				}
 				if len(c.SeatEndpoints) != 4 {
 					t.Fatalf("SeatEndpoints = %v, want all 4 entries", c.SeatEndpoints)

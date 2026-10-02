@@ -6,8 +6,8 @@
 // written to send a cascade tier at a fleet node that serves the identical
 // GGUF while the local 27B seat holds this box's cards. It probed the lane
 // base's llama-swap directly — and BOTH fleet nodes bind llama-swap to
-// 127.0.0.1:11436 and nothing else (the Aorus since the 2026-08-24 native
-// cutover, the Lenovo by design), so from another box that base is
+// 127.0.0.1:11436 and nothing else (<node-a> since the 2026-08-24 native
+// cutover, <node-c> by design), so from another box that base is
 // unreachable, every residency probe fails, and the lane silently never fires.
 // Binding llama-swap to the tailnet would be a NEW unauthenticated listener,
 // which is exactly what the vision lane refused to do in 0.116.0 (ADR 0040):

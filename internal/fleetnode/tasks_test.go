@@ -24,7 +24,7 @@ func fullCfg() config.Config {
 	}
 }
 
-// familyOnlyImageCfg: the binxarn shape (binxarn wave session 5d227d30 §2a) — NO
+// familyOnlyImageCfg: the <node-f> shape (<node-f> wave session 5d227d30 §2a) — NO
 // default image binding at all (ImageGenScript/ImageGenEngine both unset, deliberate
 // per ADR 0058/D1: a non-commercial family must never become the default), ONLY a
 // named, fully-configured sdcpp family. Before the fix, cfg.ImageRouteConfigured()
@@ -178,7 +178,7 @@ func TestBuildRequestImageGen(t *testing.T) {
 		// The regression this defect is about: before the fix, taskConfiguredFor
 		// gated solely on cfg.ImageRouteConfigured() (the DEFAULT binding), so this
 		// dispatch 400'd with "unsupported task_type" even though the named family
-		// was fully configured (binxarn wave session 5d227d30 §2a, reproduced live
+		// was fully configured (<node-f> wave session 5d227d30 §2a, reproduced live
 		// against the deployed fleet door).
 		req, cleanup := mustBuild(t, familyOnlyImageCfg(), "image-gen", `{"prompt":"a fox sticker","family":"qwen-image-2.1"}`)
 		defer cleanup()

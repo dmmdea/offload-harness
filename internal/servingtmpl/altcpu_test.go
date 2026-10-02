@@ -25,7 +25,7 @@ func readTmpl(t *testing.T, name string) string {
 	return string(b)
 }
 
-// TestAltCPUSeatsRenderBesideTheVulkanSeats: the dual-route shape binxarn was
+// TestAltCPUSeatsRenderBesideTheVulkanSeats: the dual-route shape <node-f> was
 // hand-spliced into on 2026-09-20, produced by the renderer — same ids, the CPU
 // build's binary and loader path, the cpu template's flags, matrix membership.
 func TestAltCPUSeatsRenderBesideTheVulkanSeats(t *testing.T) {

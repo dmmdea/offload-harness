@@ -698,7 +698,7 @@ func (p Params) vllmExtras() []*vllmseat.Spec {
 // every set by construction — which is the same guarantee `persistent` was reaching
 // for, in the residency system every template in this repo actually uses. (The
 // reference deployment's llama-swap uses `groups`; `persistent: true` was separately
-// measured FAILING on the Qube, where it silently degraded the memory stack to
+// measured FAILING on <node-b>, where it silently degraded the memory stack to
 // dense-only, which is why the templates moved to `matrix:`.)
 //
 // A tier that also declares EXTRA vLLM seats (Params.ExtraVLLMSeats) renders them beside
@@ -1445,7 +1445,7 @@ func (p Params) cacheRAMMiB() int {
 // slotSaveFlag renders NOTHING, on purpose, and the token stays wired so that
 // turning it back on is this one function (ADR 0056 Layer 2).
 //
-// MEASURED 2026-09-21 on binxarn (llama.cpp b9934), the two reasons:
+// MEASURED 2026-09-21 on <node-f> (llama.cpp b9934), the two reasons:
 //
 //  1. llama-server REFUSES TO START when the path does not exist —
 //     `error while handling argument "--slot-save-path": not a directory: …`.

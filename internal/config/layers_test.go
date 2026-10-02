@@ -206,7 +206,7 @@ func TestDisplayFootprintIsRequiredOnlyWhereConfigCanResolveThePin(t *testing.T)
 		t.Fatalf("a seat off the display card owes no footprint: %v", err)
 	}
 	c = CompositeFixture()
-	c.Layers[2].DisplayDevice = "GPU-2a44210f-6739-2d89-0e21-44cd5143faf7"
+	c.Layers[2].DisplayDevice = "GPU-8888bbbb-9999-cccc-dddd-eeeeffff0000"
 	c.Layers[2].Seats[0].DisplayFootprintGiB = 0
 	if err := c.ValidateLayers(); err != nil {
 		t.Fatalf("a UUID pin is resolved at admission, not at load: %v", err)

@@ -44,7 +44,7 @@ func TestHashFile_MissingFile(t *testing.T) {
 func TestReadHealth(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"node_id": "qube", "harness_version": "0.140.8", "jobs_running": 0, "jobs_queued": 2,
+			"node_id": "node-b", "harness_version": "0.140.8", "jobs_running": 0, "jobs_queued": 2,
 		})
 	}))
 	defer srv.Close()
@@ -52,7 +52,7 @@ func TestReadHealth(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !h.OK || h.NodeID != "qube" || h.Version != "0.140.8" || h.QueuedJobs != 2 {
+	if !h.OK || h.NodeID != "node-b" || h.Version != "0.140.8" || h.QueuedJobs != 2 {
 		t.Errorf("readHealth = %+v, unexpected", h)
 	}
 }

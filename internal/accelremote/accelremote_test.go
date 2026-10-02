@@ -62,8 +62,8 @@ func newFakeNode(t *testing.T, node string, accels []string, result string) *fak
 }
 
 func TestCallShipsTheImageToTheNodeThatHasTheDevice(t *testing.T) {
-	without := newFakeNode(t, "aorus", nil, `{}`)
-	with := newFakeNode(t, "lenovo", []string{"coral-edgetpu"}, `{"best":{"label":"Ara macao","score":0.75},"model":"m.tflite"}`)
+	without := newFakeNode(t, "node-a", nil, `{}`)
+	with := newFakeNode(t, "node-c", []string{"coral-edgetpu"}, `{"best":{"label":"Ara macao","score":0.75},"model":"m.tflite"}`)
 	img := filepath.Join(t.TempDir(), "parrot.jpg")
 	if err := os.WriteFile(img, []byte("not really a jpeg"), 0o644); err != nil {
 		t.Fatal(err)
@@ -78,7 +78,7 @@ func TestCallShipsTheImageToTheNodeThatHasTheDevice(t *testing.T) {
 	}
 	// Placement: the node WITH the device, never the first one.
 	pl, _ := out["placement"].(Placement)
-	if pl.Node != "lenovo" || !pl.Remote || pl.Accelerator != "coral-edgetpu" || !strings.HasPrefix(pl.JobID, "accel-") {
+	if pl.Node != "node-c" || !pl.Remote || pl.Accelerator != "coral-edgetpu" || !strings.HasPrefix(pl.JobID, "accel-") {
 		t.Fatalf("placement = %+v", pl)
 	}
 	if without.dispatch != nil {
@@ -129,7 +129,7 @@ func TestCallRefusesWhenNoNodeAdvertisesTheDevice(t *testing.T) {
 }
 
 func TestCallRefusesAMissingOrOversizedImageBeforeDispatch(t *testing.T) {
-	with := newFakeNode(t, "lenovo", []string{"coral-edgetpu"}, `{}`)
+	with := newFakeNode(t, "node-c", []string{"coral-edgetpu"}, `{}`)
 	cfg := config.Default()
 	cfg.DelegateRemotes = []string{with.srv.URL}
 	if _, err := Call(context.Background(), cfg, "coral-edgetpu", "classify", map[string]any{"image_path": filepath.Join(t.TempDir(), "nope.jpg")}); err == nil || !strings.Contains(err.Error(), "must exist on THIS box") {
@@ -148,7 +148,7 @@ func TestCallRefusesAMissingOrOversizedImageBeforeDispatch(t *testing.T) {
 }
 
 func TestCallPassesTheNodesDeferThrough(t *testing.T) {
-	with := newFakeNode(t, "lenovo", []string{"coral-edgetpu"}, ``)
+	with := newFakeNode(t, "node-c", []string{"coral-edgetpu"}, ``)
 	with.errText = "coral-edgetpu: sidecar did not become healthy within 45s"
 	cfg := config.Default()
 	cfg.DelegateRemotes = []string{with.srv.URL}

@@ -3,7 +3,7 @@
 // APU that detect classified into a MEASURED tier (amd-gcn) and that llama-swap
 // already served could not fleet-serve at all: "no working GPU memory source:
 // nvidia-smi (…); windows-generic (windows-generic GPU memory source requires
-// WDDM)" — binxarn, Ryzen 5 5625U / Vega 7, 2026-09-20.
+// WDDM)" — <node-f>, Ryzen 5 5625U / Vega 7, 2026-09-20.
 //
 // The amdgpu kernel driver publishes exactly the two numbers the provider needs,
 // per card, under /sys/class/drm/card*/device:

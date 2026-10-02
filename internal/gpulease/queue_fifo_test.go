@@ -1,6 +1,6 @@
 package gpulease
 
-// Queue fairness: register D-13x (2026-09-22), observed live on the Lenovo.
+// Queue fairness: register D-13x (2026-09-22), observed live on <node-c>.
 //
 // `gpu status` showed a text waiter (pid 56364) sitting in line for 1h43m while two
 // media reservations that queued LATER (pids 59816, 28452) each acquired the card ahead
@@ -93,7 +93,7 @@ func TestQueuedWaitersAreServedInArrivalOrder(t *testing.T) {
 }
 
 // THE RETURNING-HOLDER DEFECT (register D-1xx, 2026-09-23), measured live on
-// the OptiPlex: waiter pid 7864 registered at 15:30:28 behind holder pid
+// <node-e>: waiter pid 7864 registered at 15:30:28 behind holder pid
 // 13832's epoch 111 (a media lease). The holder released epoch 111 and
 // immediately re-acquired — a fresh Acquire call from the SAME process, as a
 // wrapper script chaining two `gpu reserve -- cmd` invocations back to back —

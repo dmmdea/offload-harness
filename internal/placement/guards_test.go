@@ -102,8 +102,8 @@ func TestASeatOffTheDisplayCardPassesTheFloorWithoutAFootprint(t *testing.T) {
 		t.Fatalf("off-display seat with 4.5 free ≥ 4 must pass, got guard=%q %q", guard, reason)
 	}
 	// But a UUID display pin that cannot be resolved refuses — the seat may be on it.
-	l.DisplayDevice = "GPU-2a44210f"
-	f.free["GPU-2a44210f"] = 4.5
+	l.DisplayDevice = "GPU-8888bbbb"
+	f.free["GPU-8888bbbb"] = 4.5
 	f.index = nil // no resolver
 	if ok, reason, guard := LayerAdmissible(l, s, f.live(), nil); ok || guard != "display_floor" || !strings.Contains(reason, "resolve") {
 		t.Fatalf("unresolvable UUID pin fails closed, got ok=%v guard=%q %q", ok, guard, reason)

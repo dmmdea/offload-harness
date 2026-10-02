@@ -12,7 +12,7 @@ package gpuprobe
 // inferred it from the process list instead — "nvidia-smi could not size this
 // process, so it is the desktop" — and that was wrong twice over. `[N/A]`
 // memory is a WDDM property, not a graphics-process property: nvidia-smi cannot
-// size ANY process on Windows, and it types every one of the Qube's 24 desktop
+// size ANY process on Windows, and it types every one of <node-b>'s 24 desktop
 // rows `C+G`, compute AND graphics. A native-Windows CUDA seat (ComfyUI is
 // exactly that, and the 3-card law pins it to card 0 or 2) produces the same
 // `[N/A]`, so the heuristic would have flagged the card the harness was working
@@ -21,9 +21,9 @@ package gpuprobe
 //
 // Measured 2026-09-21 with `--query-gpu=display_active`:
 //
-//	Qube, 3 cards, operator gaming ....... Disabled / ENABLED / Disabled  (card 1, exactly)
-//	Lenovo, headless Linux, A2 ........... Disabled                        (nothing flagged)
-//	Aorus, laptop, screen on the iGPU .... Disabled                        (the RTX is scored)
+//	<node-b>, 3 cards, operator gaming ... Disabled / ENABLED / Disabled  (card 1, exactly)
+//	<node-c>, headless Linux, A2 ......... Disabled                        (nothing flagged)
+//	<node-a>, laptop, screen on the iGPU . Disabled                        (the RTX is scored)
 
 // DisplayCardUUIDs returns, by UUID, the cards driving a display — the ones the
 // 3-card law forbids seats from using, so utilization on them is never the

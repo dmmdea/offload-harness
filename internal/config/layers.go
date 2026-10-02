@@ -105,7 +105,7 @@ type LayerSpec struct {
 	// (the display layer ships dormant until its measurement is read; council R7).
 	Dormant bool `json:"dormant,omitempty"`
 	// DisplayDevice is the device (CUDA index or GPU-UUID prefix) the display
-	// guards read live. The Qube pins it by UUID because the board reorders
+	// guards read live. <node-b> pins it by UUID because the board reorders
 	// indices on power loss.
 	DisplayDevice string `json:"display_device,omitempty"`
 	// DisplayFloorGiB is the VRAM the desktop keeps on DisplayDevice: the

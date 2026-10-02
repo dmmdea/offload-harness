@@ -10,16 +10,16 @@ import (
 )
 
 const (
-	wuCard0 = "GPU-3ee161b5-c188-495b-eaeb-291e6e6e1d97"
-	wuCard1 = "GPU-2a44210f-6739-2d89-0e21-44cd5143faf7" // the display card
-	wuCard2 = "GPU-0c3843d3-5721-d9f7-47fe-89fdb8373e24"
+	wuCard0 = "GPU-1111aaaa-2222-3333-4444-555566667777"
+	wuCard1 = "GPU-8888bbbb-9999-cccc-dddd-eeeeffff0000" // the display card
+	wuCard2 = "GPU-3333cccc-0000-0000-0000-000000000000"
 )
 
-// qubeDevices is the Qube while its operator plays a game: 33% on the display
+// nodeBDevices is <node-b> while its operator plays a game: 33% on the display
 // card, 0% on both cards the harness can use. display_active comes straight
 // from the device query every reader already runs, so a device sample carries
 // the answer with it.
-func qubeDevices() []GPUDevice {
+func nodeBDevices() []GPUDevice {
 	return []GPUDevice{
 		{Index: 0, UUID: wuCard0, Name: "RTX 5060 Ti", TotalGiB: 15.9, FreeGiB: 15.4, UtilPct: 0, UtilKnown: true},
 		{Index: 1, UUID: wuCard1, Name: "RTX 5070 Ti", TotalGiB: 15.9, FreeGiB: 2.2, UtilPct: 33, UtilKnown: true, DisplayActive: true},
@@ -33,7 +33,7 @@ func qubeDevices() []GPUDevice {
 // immediately when a card stops driving a screen.
 func TestSamplerDerivesTheDisplaySetFromTheSameSample(t *testing.T) {
 	calls := 0
-	devices := qubeDevices()
+	devices := nodeBDevices()
 	probe := func() ([]GPUDevice, error) {
 		calls++
 		return devices, nil
@@ -51,7 +51,7 @@ func TestSamplerDerivesTheDisplaySetFromTheSameSample(t *testing.T) {
 
 	// The operator logs out and the card drives nothing: the very next tick
 	// scores it again, with no stale set to expire first.
-	devices = qubeDevices()
+	devices = nodeBDevices()
 	devices[1].DisplayActive = false
 	s.sampleDevices(probe)
 	snap, _ = s.Load()
@@ -65,11 +65,11 @@ func TestSamplerDerivesTheDisplaySetFromTheSameSample(t *testing.T) {
 // and the PAIR rule want exactly that), and work_util_pct is the busiest card
 // the harness can run a seat on.
 func TestHealthWorkUtilSkipsTheDisplayCardAndGpuUtilKeepsItsContract(t *testing.T) {
-	display := gpuprobe.DisplayCardUUIDs(qubeDevices())
+	display := gpuprobe.DisplayCardUUIDs(nodeBDevices())
 	opts := &Options{
-		NodeID: "qube",
+		NodeID: "node-b",
 		Snapshot: func() (Snapshot, bool) {
-			return Snapshot{TotalGiB: 47.7, FreeGiB: 33.5, Devices: qubeDevices(), DisplayUUIDs: display, At: time.Now()}, true
+			return Snapshot{TotalGiB: 47.7, FreeGiB: 33.5, Devices: nodeBDevices(), DisplayUUIDs: display, At: time.Now()}, true
 		},
 	}
 	s, _ := newTestServer(t, imageCfg(), &fakeRunner{}, opts)
@@ -104,7 +104,7 @@ func TestHealthWorkUtilOnASingleGPUBoxCountsItsOnlyCard(t *testing.T) {
 	if len(display) != 0 {
 		t.Fatalf("display set = %v on a single-GPU box, want empty — excluding its only card leaves nothing to score", display)
 	}
-	opts := &Options{NodeID: "aorus", Snapshot: func() (Snapshot, bool) {
+	opts := &Options{NodeID: "node-a", Snapshot: func() (Snapshot, bool) {
 		return Snapshot{TotalGiB: 8, FreeGiB: 2, Devices: only, DisplayUUIDs: display, At: time.Now()}, true
 	}}
 	s, _ := newTestServer(t, imageCfg(), &fakeRunner{}, opts)

@@ -20,7 +20,7 @@ func bomCfg(t *testing.T, body string) string {
 	return p
 }
 
-// TestLoadAcceptsAUTF8BOM is the OptiPlex regression (2026-09-23): a config saved from
+// TestLoadAcceptsAUTF8BOM is the <node-e> regression (2026-09-23): a config saved from
 // PowerShell 5.1 starts with a BOM, encoding/json refused it, and a run-graph ran on
 // built-in defaults. The file must load as written, from Load and from LoadWithSource.
 func TestLoadAcceptsAUTF8BOM(t *testing.T) {
@@ -45,7 +45,7 @@ func TestLoadAcceptsAUTF8BOM(t *testing.T) {
 // the value is the plain defaults (a TYPE error used to leave a half-read file, with no
 // expansion or validation, that was neither), and both disclosures say NOTHING from the
 // file is in effect — never the validation wording "the file's other settings ARE in
-// effect", which is what an operator was told on the OptiPlex while it ran on defaults.
+// effect", which is what an operator was told on <node-e> while it ran on defaults.
 func TestUnparseableConfigIsDefaultsAndSaysSo(t *testing.T) {
 	for name, body := range map[string]string{
 		"syntax error": `{"model":"x",}`,

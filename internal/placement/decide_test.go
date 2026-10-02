@@ -382,14 +382,14 @@ func TestTripleIsRefusedByNameForEachGuard(t *testing.T) {
 		{"floor with footprint arithmetic: 14.4 − 10.5 = 3.9 < 4", func() fakeLive { f := admitting(); f.free["1"] = 14.4; return f }, layers, "display_floor", "3.9"},
 		{"undeclared footprint on the UUID-pinned display device", func() fakeLive {
 			f := admitting()
-			f.free["GPU-2a44210f"] = 15
-			f.index["GPU-2a44210f"] = "1"
+			f.free["GPU-8888bbbb"] = 15
+			f.index["GPU-8888bbbb"] = "1"
 			return f
 		}, func() []config.LayerSpec {
 			ls := layers()
 			for i := range ls {
 				if ls[i].Name == "triple" {
-					ls[i].DisplayDevice = "GPU-2a44210f"
+					ls[i].DisplayDevice = "GPU-8888bbbb"
 					ls[i].Seats[0].DisplayFootprintGiB = 0
 				}
 			}
@@ -429,12 +429,12 @@ func TestTripleIsRefusedByNameForEachGuard(t *testing.T) {
 	// The UUID-pinned display device with a DECLARED footprint admits — the
 	// arithmetic runs on the resolved card.
 	f := admitting()
-	f.free["GPU-2a44210f"] = 15
-	f.index["GPU-2a44210f"] = "1"
+	f.free["GPU-8888bbbb"] = 15
+	f.index["GPU-8888bbbb"] = "1"
 	ls := layers()
 	for i := range ls {
 		if ls[i].Name == "triple" {
-			ls[i].DisplayDevice = "GPU-2a44210f"
+			ls[i].DisplayDevice = "GPU-8888bbbb"
 		}
 	}
 	if d := Decide(req, ls, f.live()); d.Defer {

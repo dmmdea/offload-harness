@@ -53,7 +53,7 @@ type cimProcRow struct {
 // same reasoning). Matching by ExecutablePath (not Name) is deliberate: the
 // caller passes the exact --target path, and this box can run more than one
 // exe with the same base name (local-offload.exe vs
-// local-offload-fleet.exe, per the 2026-09-23/24 Qube deploy records) — a
+// local-offload-fleet.exe, per the 2026-09-23/24 <node-b> deploy records) — a
 // name-only filter would return the wrong process's holders.
 func findProcessesByExeWindows(exePath string) ([]ProcessInfo, error) {
 	abs, err := filepath.Abs(exePath)

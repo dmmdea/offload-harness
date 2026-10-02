@@ -203,7 +203,7 @@ func HeadlineDevice(devices []Device) Device {
 
 // FreeGiB finds one device by the key a config pins it with and returns its
 // free memory. key is either a bare nvidia-smi index ("1") or a UUID prefix
-// ("GPU-2a44210f" or the full UUID), compared case-insensitively — the Qube's
+// ("GPU-8888bbbb" or the full UUID), compared case-insensitively — <node-b>'s
 // live config pins the display card by UUID because the board reorders
 // indices on power loss, while a plain box pins by index, and one lookup must
 // serve both. The bool is the ONLY honest answer for "not found": a guard

@@ -283,8 +283,8 @@ func DetectCoral(read func(path string) (string, error)) []string {
 //
 //   - The vendor 6.1 BSP kernel builds the driver in, and its DRM node's device IS the NPU
 //     platform device, so a DRM card's device/uevent holds the line. Which cardN it takes depends
-//     on probe order (the display subsystem is card0 and the NPU card1 on the reference Orange Pi
-//     5, RK3588S), so all four candidates are read.
+//     on probe order (the display subsystem is card0 and the NPU card1 on the reference <node-d>
+//     board, RK3588S), so all four candidates are read.
 //   - A mainline kernel with the out-of-tree rknpu (DKMS) makes the DRM card's device a virtual
 //     /sys/devices/rknpu whose uevent is EMPTY, so the DRM cards say nothing. The line is on the
 //     NPU's three core platform devices instead (RK3588: fdab0000, fdac0000, fdad0000), and any
