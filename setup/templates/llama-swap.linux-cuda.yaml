@@ -186,9 +186,10 @@ models:
     aliases: [reranker-v2-m3]
     env: ["${ld}"]
     # GPU weights (2026-09-10 operator rule: no CPU inference; RAM is overflow only).
+    # A-122b (measured 2026-10-01): each pair the memory stack scores (<= ~2,000 tokens) is ONE non-causal sequence that must fit one ubatch; 8192/4096/4096 failed to start beside the loaded ampere-16 agent seat 7 times (639 MiB free; 1,369 MiB at 4096/2048/2048).
     cmd: >-
       __LLAMA_BIN__/llama-server --model __MODELS__/bge-reranker-v2-m3-Q4_K_M.gguf
-      --reranking --pooling rank --ctx-size 8192 --batch-size 4096 --ubatch-size 4096
+      --reranking --pooling rank --ctx-size 4096 --batch-size 2048 --ubatch-size 2048
       --n-gpu-layers 99 --port ${PORT} --host 127.0.0.1
     checkEndpoint: /health
     ttl: 300

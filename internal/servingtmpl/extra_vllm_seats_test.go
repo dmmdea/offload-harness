@@ -74,7 +74,9 @@ func varOf(t *testing.T, doc renderedSeatDoc, model string) string {
 }
 
 // Two vLLM seats on one 16 GB card cannot both be loaded: 13.9 + 11.7 GiB against a
-// 15.3 GiB card, and each is sized with util 0.85-0.87 of it. If both joined the residents
+// 15.3 GiB card, and each is sized with util 0.84-0.85 of it (the lane seat at 0.84 with 4 sequences and a 2,048
+// batch, the 35B at 0.85, so the memory stack's embedder AND reranker stay resident beside whichever is
+// loaded: ADR 0049 Amendment 5, register A-122b). If both joined the residents
 // set as co-resident members (`& a & b`) the matrix would call the pair a valid
 // combination and llama-swap would load the second beside the first — an OOM at the
 // engine's first allocation. The seats must be ALTERNATIVES of each other inside the
