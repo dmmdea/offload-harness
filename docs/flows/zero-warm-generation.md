@@ -30,7 +30,7 @@ script.
 
 2. **Free the llama-swap tiers**, giving the render the whole card. This enumerates loaded models and
    unloads them **individually, skipping a keep-set** — the always-loaded embedding and reranker
-   models are CPU-only, hold zero GPU VRAM, and an earlier unload-everything implementation destroyed
+   models are small and, on the reference box, pinned to the utility card, not the render card, and an earlier unload-everything implementation destroyed
    that memory stack on every job for no benefit.
 
 3. **Cold-start ComfyUI** with `--disable-smart-memory`, `--cache-none`, and a VRAM reservation.
@@ -50,7 +50,7 @@ difference is that `--cache-none` is omitted, so the checkpoint loads once inste
 Teardown is not special-cased — it is the same single teardown, now at the batch boundary. Zero-warm
 moves from per-render to per-batch rather than being abandoned.
 
-A failed render inside a batch is recorded and the loop continues; one JSONL result line is written
+A failed render inside a batch is recorded and the loop continues (unless ComfyUI itself became unusable: the batch then stops at that job, the later jobs get `not run:` rows and the batch exits non-zero, register C-83, 0.158.1); one JSONL result line is written
 per job. **The default single-render path is byte-identical to its pre-batch behavior.**
 
 ## Data and state changes
@@ -61,7 +61,7 @@ Successful renders record a VRAM footprint observation used by fleet advertiseme
 ## Success behavior
 
 The job's outputs exist, the GPU is free, ComfyUI is stopped (if the harness started it), the lock is
-released, and the CPU memory stack is still resident.
+released, and the memory stack is still resident.
 
 ## Failure behavior
 
@@ -75,7 +75,7 @@ A local ComfyUI installation, the llama-swap serving endpoint, and the bound mod
 ## Invariants and assumptions
 
 1. **Nothing GPU-resident persists between jobs** (batch: between batches).
-2. **The CPU memory stack is never unloaded.**
+2. **The memory stack is never unloaded** — not by the free step and not by `gpu reserve --unload-seat` (register C-87); it is an exception to item 1.
 3. One GPU-heavy job at a time, per machine.
 4. ComfyUI is only killed if the harness started it.
 5. Teardown is idempotent and runs on signals.

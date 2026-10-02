@@ -6,6 +6,20 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Docs — the docs describe 0.158.1 as it runs
+
+A documentation sweep after 0.158.1 checked each surface against the shipped behaviour and corrected what had gone stale.
+- The memory stack is no longer described as CPU-only with zero GPU VRAM. On the reference box it runs on the utility
+  card, not the render card. Neither the render runner's free step nor `gpu reserve --unload-seat` unloads it (register
+  C-87): `docs/systems/media-generation.md`, `docs/flows/zero-warm-generation.md`, ADR 0009 (dated note),
+  `docs/systems/gpu-lease.md`, and the comments in `render/gpu-lock.mjs` and `internal/gpugen`.
+- A warm batch stops when ComfyUI becomes unusable, and the later jobs get `not run:` rows (register C-83):
+  `README.md`, `docs/OPERATOR-GUIDE.md`, `render/README.md` (`COMFY_WAIT_SEC` is wall-clock time), the zero-warm flow.
+- `docs/systems/fleet-node.md`: in the capacity wait, a local seat whose load cannot be read keeps the deal's busy
+  answer (register C-88).
+- `docs/OPERATOR-GUIDE.md` and `docs/systems/media-generation.md`: a family binding with no `imagegen_timeout_sec`
+  inherits the top-level one, so a slow family must set its own.
+
 ### Docs — the last stale sentence filing a three-card Blackwell rig as `dual-gpu` (register I-07)
 
 `docs/systems/setup-installer.md`'s fleet history still said the three-card reference box was "a shape no tier id

@@ -36,7 +36,7 @@ One GPU, two very different consumers: llama-swap wants its tiers resident; Comf
 whole card. Before this, only the Node render runners took a lock, so text work had no way to
 say "I am using the GPU." A media job dispatched from elsewhere unloaded every GPU-resident
 model mid-benchmark. The server log holds **3,356 unload calls, 330 of them the text
-workhorse, and 0 for the CPU memory stack** — that last zero identifies `freeLlamaSwap` as the
+workhorse, and 0 for the memory stack** — that last zero identifies `freeLlamaSwap` as the
 caller, since excluding the memory stack is its own invariant.
 
 ## Using it
@@ -385,7 +385,7 @@ the lease (the card stays reserved, work keeps routing elsewhere) and exits non-
 as the fallback): the agent seat, and every other model `/running` lists, except the config's `memory_stack` (the mem0
 embedder and reranker). The stack stays resident and the run prints `kept the memory stack resident`. The operator's
 rule is that mem0 never yields; it sits on the utility card, so unloading it freed nothing a render could use (register
-C-87, 2026-10-01). `render/gpu-lock.mjs` keeps the same set. An empty `memory_stack` means the default pair. If the
+C-87, 2026-10-01). `render/gpu-lock.mjs` keeps the same set. An empty `memory_stack` means the default pair (`embeddinggemma`, `bge-reranker-v2-m3`); a non-empty list replaces it, so a node whose embedder or reranker has another model name must list every member: an unlisted one is unloaded by `--unload-seat` like any other resident model, and by the render free step like any other tier. If the
 per-model route fails, the legacy `GET /unload` is used only when no stack member is resident. It unloads everything,
 whatever `?model=` says, so when the stack is resident or `/running` cannot be read, the reserve fails and names the
 stack. The wrapper form warms the seat back (`GET /upstream/<model>/health`) BEFORE releasing, so the first

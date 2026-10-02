@@ -10,7 +10,7 @@
 //   - defer freeComfyVRAM — belt-and-suspenders: however the child ended (clean exit,
 //     error, or a timeout-kill that skipped its finally), force-drop any ComfyUI VRAM
 //     so a render never leaves the GPU pinned (zero-always-warm; protects the
-//     load-bearing CPU memory stack).
+//     load-bearing memory stack).
 //
 // This was extracted from internal/imagegen.Generate so video + audio get the SAME
 // process-tree-kill (they previously had no Go wrapper → no kill on timeout). Pure
