@@ -83,6 +83,29 @@ func TestImageFamilySurfaceIsAdvertised(t *testing.T) {
 	}
 }
 
+// The video tool names the license fields a generate_video result can carry, as the
+// two image tools do, and keeps the licence warning prose out (operator order
+// 2026-10-01). Only the video tool's own sentence is checked; the character-animation
+// tool returns no licence pair.
+func TestVideoToolAdvertisesLicenceFields(t *testing.T) {
+	descs := map[string]string{}
+	for _, tool := range listTools(t, config.Default()) {
+		descs[tool.Name] = tool.Description
+	}
+	d := descs["offload_generate_video"]
+	if !strings.Contains(d, "Returns {video_path, seed} plus license/commercial_use when the family declares them") {
+		t.Errorf("offload_generate_video description does not name the licence pair a result can carry: %s", d)
+	}
+	for _, w := range []string{"non-commercial", "research/evaluation", "brand or client", "license_note"} {
+		if strings.Contains(strings.ToLower(d), w) {
+			t.Errorf("offload_generate_video description carries licence warning prose %q", w)
+		}
+	}
+	if strings.Contains(descs["offload_animate_character"], "license") {
+		t.Error("offload_animate_character returns no licence pair; its description must not claim one")
+	}
+}
+
 // family / transparent / images reach the pipeline: each is observable as the
 // pipeline's own refusal, which runs before any lease or render.
 func TestImageFamilyParamsReachThePipeline(t *testing.T) {

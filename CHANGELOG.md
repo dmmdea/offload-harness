@@ -6,6 +6,31 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added — video families carry the licence pair (CT-47)
+
+- `videogen_families[name]` takes `license` (string) and `commercial_use` (bool), the same pair the image and edit
+  families declare. Both or neither: the config load refuses a lone one, naming the family. Nothing requires the
+  pair and nothing gates on it; video family selection stays open through `model`. Licence fields only, no warning
+  text (operator order 2026-10-01).
+- The pair is read from the family's own entry whichever way its weights resolve, so this box's default family is
+  tagged too (its weights still come from the flat `videogen_*` keys). A family with no entry carries none.
+- Surfaces, following the image families: a `generate_video` result carries `license` and `commercial_use` when
+  the rendering family declares them (an override request gets the overridden family's pair, not the seat's), the
+  ledger row carries `license`, `offload_status` `media.video_family_bindings` rows carry `license` and
+  `commercial_use` (null when undeclared, which a reader treats as UNKNOWN), and `local-offload doctor` prints a
+  `license:` line under a family that declares one. A family that declares none changes nothing in a result or in
+  the doctor output; the status rows gain the two null keys.
+- No value ships as a default. The repo's only sourced statements of the HunyuanVideo 1.5 and MiniMax-H3 terms are
+  the names and conditions in `render/templates-license-map.json`, read from hosting-card tags and digests and not
+  from the licence texts in full, and its `conditional` class is not a boolean. Operators declare the pair
+  themselves once the texts are read.
+- Tests: config (both-or-neither, default-family tagging), pipeline (result, ledger meta, undeclared adds no keys),
+  mediacap and mcpserver status rows, doctor; each mutation-checked. The status golden gains the two null keys.
+- The `offload_generate_video` tool description, its README row and the `TaskGenerateVideo` comment now say the result
+  carries `license`/`commercial_use` when the family declares them, as the image and edit descriptions do.
+- Docs: `docs/systems/media-generation.md`, `docs/systems/mcp-server.md`, ADR 0058 amendment 2026-10-02.
+- Files: `internal/config/families.go`, `internal/pipeline/pipeline.go`, `internal/mediacap/routeneeds.go`, `main.go`.
+
 ## [0.159.0] - 2026-10-02 - The ampere-16 vLLM seats move to vLLM 0.30.0 with a pinned KV pool; the compose lane pins HyperFrames 0.8.108
 
 ### Fixed — the ampere-16 lane seat starts with a fixed KV pool, so a cold compile cache or a memory-stack model loading mid-start can no longer fail its start; both seats move to vLLM 0.30.0 (registers A-119, A-129)
