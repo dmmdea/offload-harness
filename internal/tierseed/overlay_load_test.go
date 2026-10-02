@@ -47,6 +47,9 @@ var leftoverToken = regexp.MustCompile(`__[A-Z0-9]+(?:_[A-Z0-9]+)*__`)
 // half-bound recipe or a placeholder that never expanded (expand() substitutes tokens in strings and
 // string arrays, never inside an object) could ship and die only on the first box that installed it.
 func TestEveryShippedOverlayLoadsAndValidates(t *testing.T) {
+	// A pooled tier warns when the launch environment lacks --disable-dynamic-vram; model a launch that
+	// carries it, so the gate judges the seed and not the host it runs on (a CI runner sets nothing).
+	t.Setenv("COMFY_EXTRA_ARGS", "--disable-dynamic-vram")
 	profiles, err := Load("../..")
 	if err != nil {
 		t.Fatal(err)

@@ -227,7 +227,7 @@ an 8GB 3070 + 64GB RAM box, 2026-07-16). **J4: this binding is now AUTOMATIC on 
 `ram_tier` is mid/high (same RAM gate as the 26B cpu-moe path). The two tiers DIVERGE by operator
 decision: **`ampere-8` = the O1 bf16 IMAGE seat, image only** (no video/music — decision
 2026-07-23, standing for that tier pending its own bake). **`blackwell-8` (2026-08-23 REVERSAL,
-editor-box role; every seat measured on the OptiPlex reference box)** additionally seeds the wan22
+editor-box role; every seat run on the OptiPlex reference box; the fp8mixed edit timing is owed at acceptance)** additionally seeds the wan22
 VIDEO lane (`videogen_unet_high/low` = the fp8_scaled pair
 `wan2.2_i2v_{high,low}_noise_14B_fp8_scaled.safetensors` on `videogen_wan_loader` `native`: register
 A-120, 2,029 s against 2,939 s for the Q8_0 pair at 832x480x81 on the reference box, measured 2026-09-24.
