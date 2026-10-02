@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 )
 
 // Source records where a Config actually came from — the loaded-vs-resolved distinction.
@@ -97,6 +98,50 @@ func WarnOnDefaults(src Source, w io.Writer) bool {
 		return true
 	}
 	return false
+}
+
+// WarnOnShadowedAgentModel prints one line when cfg's agent_model is shadowed by
+// the layers it also declares (AgentModelShadowNote), naming the file that
+// supplied both so a config copy is the first suspect rather than the node's own
+// configuration. Returns whether it warned. Register C-95.
+func WarnOnShadowedAgentModel(src Source, cfg Config, w io.Writer) bool {
+	note := cfg.AgentModelShadowNote()
+	if note == "" {
+		return false
+	}
+	from := "built-in defaults"
+	if src.Path != "" {
+		from = src.Path
+	}
+	fmt.Fprintf(w, "note: config %s: %s\n", from, note)
+	return true
+}
+
+var (
+	shadowNoteMu   sync.Mutex
+	shadowNoteSeen = map[[2]string]bool{}
+)
+
+// WarnOnShadowedAgentModelOnce is WarnOnShadowedAgentModel for the shared
+// config-loading path: every entry point that loads a config (the MCP server,
+// agent_delegate and agent_run through it, acceptance, report, delegate, the
+// local-agent binary) calls it, and a process says each distinct (file, note)
+// once however many times it loads the config. Callers pass stderr only: the
+// MCP server's stdout is the JSON-RPC stream. Register C-95.
+func WarnOnShadowedAgentModelOnce(src Source, cfg Config, w io.Writer) bool {
+	note := cfg.AgentModelShadowNote()
+	if note == "" {
+		return false
+	}
+	key := [2]string{src.Path, note}
+	shadowNoteMu.Lock()
+	seen := shadowNoteSeen[key]
+	shadowNoteSeen[key] = true
+	shadowNoteMu.Unlock()
+	if seen {
+		return false
+	}
+	return WarnOnShadowedAgentModel(src, cfg, w)
 }
 
 // SourceLine renders a one-line, truthful config-source disclosure (doctor's first line).

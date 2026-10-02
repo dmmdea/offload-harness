@@ -6,6 +6,25 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Every config-loading verb says which source supplied the agent seat (register C-95).** A
+  config copy run with `LOCAL_OFFLOAD_CONFIG` honoured its `endpoint` but sent every subtask to
+  the seat of the node's own layers and deferred `agent seat "..." is not in the endpoint's
+  served roster`. Confirmed cause: a copied config that kept the node's `layers`. The explicit
+  file was in fact the only one read; on a composite box the placement table picks the seat from
+  the layers and `agent_model` applies only when a decision names none (ADR 0039, unchanged), so
+  the copy's `agent_model` was shadowed by a layer's agent seat, which the repointed
+  endpoint did not serve. The harness now prints a stderr note naming the config file when its
+  `agent_model` is not a seat of any of its layers, and a roster-miss defer on a placed (or
+  delegator-set) seat ends with its source (layer and role, versus this config's `agent_model`).
+  The note is emitted from the shared config-loading path, once per process and on stderr only
+  (the MCP stdout stays JSON-RPC), so `agent_delegate` and `agent_run` through `local-offload
+  mcp`, `delegate`, `acceptance` and `report` all say it, and `local-agent` calls the same
+  helper. New: `Config.AgentModelShadowNote`, `Config.LayerSeatModels`,
+  `config.WarnOnShadowedAgentModel`, `config.WarnOnShadowedAgentModelOnce`. README and
+  `docs/systems/fleet-node.md` updated.
+
 ## [0.159.0] - 2026-10-02 - The ampere-16 vLLM seats move to vLLM 0.30.0 with a pinned KV pool; the compose lane pins HyperFrames 0.8.108
 
 ### Fixed — the ampere-16 lane seat starts with a fixed KV pool, so a cold compile cache or a memory-stack model loading mid-start can no longer fail its start; both seats move to vLLM 0.30.0 (registers A-119, A-129)

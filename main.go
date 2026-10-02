@@ -338,6 +338,11 @@ func loadCfg(fs *flag.FlagSet) config.Config {
 func loadCfgWithSource(fs *flag.FlagSet) (config.Config, config.Source) {
 	cfg, src := config.LoadWithSource(fs.Lookup("config").Value.String())
 	config.WarnOnDefaults(src, os.Stderr)
+	// C-95: every verb that builds a delegator loads its config here (the MCP
+	// server behind agent_delegate/agent_run, delegate, acceptance, report), so
+	// the note that a config's own layers shadow its agent_model lives on this
+	// shared path, once per process, on stderr (MCP stdout is JSON-RPC).
+	config.WarnOnShadowedAgentModelOnce(src, cfg, os.Stderr)
 	return cfg, src
 }
 
@@ -2186,7 +2191,9 @@ func runDelegate(args []string) error {
 	if *tenant == "" {
 		*tenant = delegate.DefaultTenant()
 	}
-	cfg := loadCfg(fs)
+	// loadCfgWithSource says when this config's own layers shadow its agent_model
+	// (C-95), before any run defers on a seat the operator never wrote.
+	cfg, _ := loadCfgWithSource(fs)
 	// Same switch that gates the MCP tool's registration (roast delta 13): a
 	// box is a DELEGATOR only by explicit opt-in.
 	if !cfg.AgentDelegationEnabled {
