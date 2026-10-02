@@ -216,7 +216,7 @@ func Generate(ctx context.Context, spec Spec) (string, error) {
 		// killTree's Windows path (taskkill /T /F) terminates via TerminateProcess,
 		// which reports exit code 1, so cmd.Wait() returned a plain "exit status 1"
 		// with none of those words in it. A cold ACE-Step music retry killed at
-		// audiogen_timeout_sec surfaced that way (OptiPlex remediation, 2026-09-23):
+		// audiogen_timeout_sec surfaced that way (<node-e> remediation, 2026-09-23):
 		// a real timeout, reported as a generic failure indistinguishable from any
 		// other crash. Folding "deadline exceeded" into the error text here makes
 		// EVERY gpugen caller's ClassifyErr(gerr) == "timeout" reliable, on every OS

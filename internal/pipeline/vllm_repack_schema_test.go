@@ -12,7 +12,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/llamaclient"
 )
 
-// Register D-129, found by the A-100 proof contract (2026-09-18 23:42, Lenovo
+// Register D-129, found by the A-100 proof contract (2026-09-18 23:42, <node-c>
 // 35B seat, three re-pack attempts all "got string, want object"): the re-pack
 // handed vLLM `gbnf.JSONSchema(fields)` — the GBNF-typed projection of the
 // contract's schema — and internal/gbnf has no object or array-of-object type,

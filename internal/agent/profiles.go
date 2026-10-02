@@ -34,7 +34,7 @@ type Profile struct {
 	// Every exemplar thread must be CLOSED by a final assistant answer and its user
 	// turns marked "(worked example, not the task)": an open thread whose topic is a
 	// real-world question (the research profile's "latest stable Go version", until
-	// 0.113.1) is continued by small seats instead of the objective — the Lenovo
+	// 0.113.1) is continued by small seats instead of the objective — the <node-c>
 	// 4B's phantom "Go version" digests of 2026-08-31…09-03 that quarantined both
 	// fleet nodes. Enforced by TestProfileExemplarsCloseWithAFinalAnswer /
 	// TestProfileExemplarUserTurnsAreMarked / TestProfileExemplarsUseNoRealWorldTopic.

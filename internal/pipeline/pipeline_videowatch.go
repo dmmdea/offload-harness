@@ -20,7 +20,7 @@ import (
 // video_describe samples max_frames at fps from the head of a file, so on the
 // default 12 frames @ 2 fps it "sees" the first six seconds of a thirty-second
 // short and answers "I cannot tell" about the rest (measured 2026-08-24 on the
-// OptiPlex rig). video_watch removes that ceiling without changing what the
+// <node-e> rig). video_watch removes that ceiling without changing what the
 // vision seat is good at: it plans fixed-length time windows over the whole
 // duration, samples each window at its own fps/frame budget, sends every window
 // through the SAME per-call machinery as video_describe (cache, GPU-lock gate,

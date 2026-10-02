@@ -331,7 +331,7 @@ func Inflight(ctx context.Context, client *http.Client, endpoint, seat string) (
 	case http.StatusNotImplemented, http.StatusNotFound:
 		// llama-server answers 501 (older builds 404) when it runs WITHOUT
 		// --metrics — every llama.cpp seat on this fleet does (2026-09-06: the
-		// Lenovo's drain timed out on a warm seat, "seat metrics: status 501").
+		// <node-c>'s drain timed out on a warm seat, "seat metrics: status 501").
 		// Its /slots endpoint is on by default and reports per-slot
 		// is_processing, which is the in-flight count for a slot-based server.
 		// Only these two statuses fall back: a 500 or a timeout is "could not

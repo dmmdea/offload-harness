@@ -149,7 +149,7 @@ func TestResolveContextTokens(t *testing.T) {
 	}
 }
 
-// vLLM behind llama-swap (the Qube agent-pool seat): the per-model /props
+// vLLM behind llama-swap (the <node-b> agent-pool seat): the per-model /props
 // passthrough answers 404 — vLLM has no /props — and the served window is
 // only reported as max_model_len on the backend's own /v1/models. Before
 // 0.113.14 this seat budgeted FallbackContextTokens (8,192) against a
@@ -250,7 +250,7 @@ func TestResolveContextTokensConfiguredFallback(t *testing.T) {
 // TestProbeServedWindowWaitsOutAColdStart (2026-09-16): llama-swap holds a
 // request for a model that is not loaded until its health check passes, so a
 // cold seat answers the per-model probe only after the load. Measured on the
-// Qube agent-pool seat: `ready` at 222 s, while the old 60 s per-request timeout
+// <node-b> agent-pool seat: `ready` at 222 s, while the old 60 s per-request timeout
 // gave up at 60 s and 120 s and the run budgeted 8,192 against 114,688. Here the
 // load is 600 ms and the bare-root timeout 100 ms: a probe still bounded by the
 // per-request timeout gives up twice before the seat is up.

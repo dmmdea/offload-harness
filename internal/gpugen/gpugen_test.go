@@ -83,7 +83,7 @@ func TestGenerateEmptyOutputErrors(t *testing.T) {
 // /T /F terminates via TerminateProcess, which reports exit code 1 — cmd.Wait()
 // then returns a plain "exit status 1" containing none of ClassifyErr's substrings
 // ("timeout"/"deadline"/"killed"/"signal:"). A cold ACE-Step music retry killed at
-// audiogen_timeout_sec hit exactly this (OptiPlex remediation, 2026-09-23): a real
+// audiogen_timeout_sec hit exactly this (<node-e> remediation, 2026-09-23): a real
 // timeout reported as an indistinguishable generic failure. Generate now checks its
 // OWN derived context's DeadlineExceeded directly (authoritative regardless of the
 // child's exit code), so this is now a HARD assertion, not a note.

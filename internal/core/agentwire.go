@@ -453,7 +453,7 @@ type AgentWireResult struct {
 	// arithmetic ("final 8192 → 3592 to fit 900 s at 15.0 tok/s (split with the
 	// output_schema re-pack)"). Both absent when the seat has no measured rate
 	// or the configured budget fitted as it was: an un-narrowed run must not
-	// publish a narrowing note. Measured 2026-09-14 on the Lenovo 4B seat: a
+	// publish a narrowing note. Measured 2026-09-14 on the <node-c> 4B seat: a
 	// schema contract's 8,192-token final plus its re-pack owed ≈ 1,420 s
 	// against a 900 s wall, and hit the wall instead of answering.
 	FinalBudgetFit int    `json:"final_budget_fit,omitempty"`

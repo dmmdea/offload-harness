@@ -232,7 +232,7 @@ func TestGenerateImageRefusesUnknownFamilyAndUnsupportedTransparency(t *testing.
 }
 
 // TestSdcppQwenImage21FamilyOnlyNodeRendersTransparent is D5's end-to-end regression:
-// a family-only node (binxarn's shape — NO default image binding, only a named sdcpp
+// a family-only node (<node-f>'s shape — NO default image binding, only a named sdcpp
 // family; the same shape defect 2's fleet-gate fix admits) must actually carry
 // transparent:true through to the sdcpp runner instead of the old unconditional
 // engine-based refusal (families.go's SupportsTransparentImage used to read

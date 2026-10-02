@@ -6,7 +6,7 @@ import (
 )
 
 // TestFinalBudgetFitsTheWall is the D-95 regression, measured 2026-09-14 on the
-// Lenovo 4B seat (qwen3.5-4b-vllm, ~15 tok/s): a list-heavy grounded extraction
+// <node-c> 4B seat (qwen3.5-4b-vllm, ~15 tok/s): a list-heavy grounded extraction
 // with an output_schema ran its final answer at the configured 8,192-token
 // budget, and the harness's own wall_note predicted 1,166–1,310 s for
 // final + re-pack against a 900 s wall. METHODOLOGY.md and SELF-CONTROL.md hit

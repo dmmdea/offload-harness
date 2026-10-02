@@ -3234,8 +3234,8 @@ func (p *Pipeline) genEnv() []string {
 	// audio-qa.mjs's resolveFfmpeg() treats a set FFMPEG_PATH as an exact file via
 	// existsSync(), which cannot see PATH resolution, so it read "ffmpeg" as
 	// missing and silently skipped the entire QA gate on every fleet node that
-	// never set an explicit ffmpeg_path (reproduced identically on the Lenovo and
-	// the Aorus, 2026-09-23/24). mediaops.ResolveBinary resolves it here in Go —
+	// never set an explicit ffmpeg_path (reproduced identically on <node-c> and
+	// <node-a>, 2026-09-23/24). mediaops.ResolveBinary resolves it here in Go —
 	// the same PATH-aware lookup doctor's media route already uses — so the child
 	// always receives either a real absolute path (existsSync succeeds directly)
 	// or nothing at all. Omitted (not "ffmpeg") when it cannot be resolved on this

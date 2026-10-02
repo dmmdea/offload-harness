@@ -13,7 +13,7 @@ import (
 // the right default for tool-calling and grounded extraction — and is also the
 // setting every Qwen3-class model card warns against for NON-THINKING
 // generation, because greedy decoding is exactly what makes a small seat fall
-// into a degenerate repetition loop (the Lenovo 4B's METHODOLOGY.md digest,
+// into a degenerate repetition loop (the <node-c> 4B's METHODOLOGY.md digest,
 // 2026-09-14). This type is how an operator gives a MEASURED seat a different
 // policy without changing the default for anyone else.
 //

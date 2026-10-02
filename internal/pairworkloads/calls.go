@@ -10,14 +10,14 @@ import (
 //
 // A tool call reaches PAIR through its ledger row, which is written when the
 // call ENDS: a ten-minute render showed nothing in the Jobs list until it was
-// over (2026-09-23, an animate_character run on the OptiPlex held its card at
+// over (2026-09-23, an animate_character run on <node-e> held its card at
 // 100 % for minutes with no card at all). Begin opens a card when the call
 // starts; the call's ledger row, or End when no row came, closes the SAME card.
 //
 // The card opens "queued" and turns "running" only when the lane marks the
 // work started (core.MarkWorking — a media lane does it once it holds the
 // GPU). 0.140.5 opened it "running": a transcription waiting minutes for
-// whisper to load behind a 3-card seat read "Running on Qube" throughout
+// whisper to load behind a 3-card seat read "Running on <node-b>" throughout
 // (2026-09-23). A lane that cannot tell when its engine starts (transcribe:
 // the wait is inside llama-swap) never marks, so its card stays queued until
 // it ends, which is the honest reading.

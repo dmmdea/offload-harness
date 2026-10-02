@@ -68,7 +68,7 @@ type Config struct {
 	AppDir string
 	// VLLMSeats is the box's declared `vllm_seats` and SwapEndpoint the
 	// llama-swap its seats sit behind. Together they label a LOCAL seat bound
-	// by alias: the Qube's agent seat is `agent-pool`, an alias of
+	// by alias: <node-b>'s agent seat is `agent-pool`, an alias of
 	// `qwen3.8-27b-vllm-3card`, so the name alone reads as llama.cpp and PAIR
 	// showed a vLLM job as "llamacpp".
 	VLLMSeats    []string

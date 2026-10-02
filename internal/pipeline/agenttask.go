@@ -364,7 +364,7 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	// Cold-load warm-up (0.115.11, register D-64): the pre-flight above settles
 	// ANOTHER model's swap, but a seat that is simply not loaded used to load on
 	// the loop's first call — INSIDE the wall. A vLLM seat's cold load is
-	// 125–250 s on the fleet (seven Lenovo cold starts in two hours on
+	// 125–250 s on the fleet (seven <node-c> cold starts in two hours on
 	// 2026-09-10 under ttl 300), so a 300 s contract could spend most of its
 	// wall before the first token. Warm it here, on the admission budget's
 	// remainder, and start the clock when the seat reads ready.
@@ -1275,7 +1275,7 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	// D-91 (0.115.23): a final answer cut at the completion budget is a
 	// PARTIAL — a JSON prefix or a truncated narrative — and every re-pack of
 	// it is a full re-generation that cannot produce the whole object. The
-	// 2026-09-10 Lenovo run spent ~690 s (two grammar attempts + the chat
+	// 2026-09-10 <node-c> run spent ~690 s (two grammar attempts + the chat
 	// lane over a 12,100-char cut answer) to the 900 s wall and deferred
 	// "wall timeout" on a loop that had finished in four minutes. Name the
 	// shape at once instead; the partial rides in output for the caller.
@@ -1932,7 +1932,7 @@ func (p *Pipeline) repackStructuredWith(ctx context.Context, seat string, rawSch
 		return json.RawMessage(content), tokensOut, false, attempts, nil
 	}
 	// FINAL fallback: one grammar-FREE attempt over /v1/chat/completions.
-	// Found live wiring the Lenovo FreeToken agent seat (2026-08-27): the two
+	// Found live wiring the <node-c> FreeToken agent seat (2026-08-27): the two
 	// attempts above ride cfg.CompletionPath — llama-server's NATIVE completion
 	// route, which an OpenAI-only engine does not serve. llama-swap proxies the
 	// call anyway, the engine 404s with an HTML body, and the re-pack read

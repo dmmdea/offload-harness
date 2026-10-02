@@ -63,7 +63,7 @@ func TestModelBindingsResolveAgainstTheClassDirectories(t *testing.T) {
 	}
 }
 
-// The Qube keeps its weights on another volume through extra_model_paths.yaml:
+// <node-b> keeps its weights on another volume through extra_model_paths.yaml:
 // base_path plus a class map whose values may be a newline-separated list of
 // subdirectories (ComfyUI's own syntax for aliases such as diffusion_models |
 // unet). A file under such a root must resolve exactly as ComfyUI resolves it,
@@ -74,7 +74,7 @@ func TestModelBindingsHonourExtraModelPaths(t *testing.T) {
 	touchModel(t, filepath.Join(vol, "unet", "krea2_turbo_bf16.safetensors"))
 	touchModel(t, filepath.Join(vol, "vae", "qwen_image_vae.safetensors"))
 	touchModel(t, filepath.Join(vol, "clip", "gemma-proj.safetensors")) // text encoder in the legacy alias dir
-	yamlText := "qube_optane:\n    base_path: " + filepath.ToSlash(vol) + "/\n    checkpoints: checkpoints\n    diffusion_models: |\n        diffusion_models\n        unet\n    unet: |\n        diffusion_models\n        unet\n    clip: clip\n    text_encoders: text_encoders\n    vae: vae\n"
+	yamlText := "node_b_optane:\n    base_path: " + filepath.ToSlash(vol) + "/\n    checkpoints: checkpoints\n    diffusion_models: |\n        diffusion_models\n        unet\n    unet: |\n        diffusion_models\n        unet\n    clip: clip\n    text_encoders: text_encoders\n    vae: vae\n"
 	if err := os.WriteFile(filepath.Join(comfy, "extra_model_paths.yaml"), []byte(yamlText), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -102,7 +102,7 @@ func TestModelBindingsHonourExtraModelPaths(t *testing.T) {
 		t.Errorf("upscale_model: %+v", b)
 	}
 	roots := ModelRoots(comfy)
-	if len(roots) != 1 || roots[0].Label != "qube_optane" || len(roots[0].Classes["diffusion_models"]) != 2 {
+	if len(roots) != 1 || roots[0].Label != "node_b_optane" || len(roots[0].Classes["diffusion_models"]) != 2 {
 		t.Fatalf("roots = %+v", roots)
 	}
 }
@@ -132,7 +132,7 @@ func TestModelBindingsAreNilWithoutAModelsRoot(t *testing.T) {
 }
 
 // ---- F-38: a partial/mid-copy download is INCOMPLETE, not FOUND -----------------
-// Reproduced live on the Qube, 2026-09-23: doctor's resolveBinding did a bare
+// Reproduced live on <node-b>, 2026-09-23: doctor's resolveBinding did a bare
 // os.Stat and reported `animate_character: OK CONFIGURED` while a 16.65 GB unet
 // was still ~70% written. When the configured name is one the harness's own
 // installer pins a known-good size for (knownModelSizes, mirroring setup/

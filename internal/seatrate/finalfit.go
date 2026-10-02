@@ -70,7 +70,7 @@ type FinalFitResult struct {
 //
 // where `turns` is 2 when an output_schema is set (the final answer and its
 // structured re-pack are both decoded on this seat, inside this wall) and 1
-// otherwise. Measured 2026-09-14 on the Lenovo 4B seat at ~15 tok/s: a 900 s
+// otherwise. Measured 2026-09-14 on the <node-c> 4B seat at ~15 tok/s: a 900 s
 // contract with a schema and the configured 8,192-token final owed ≈ 1,420 s,
 // so METHODOLOGY.md and SELF-CONTROL.md hit the wall instead of answering.
 //

@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// loopBlock is the exact degenerate tail the Lenovo 4B produced on the
+// loopBlock is the exact degenerate tail the <node-c> 4B produced on the
 // METHODOLOGY.md digest (2026-09-14): a four-line block under `numbers:`,
 // repeated until the completion budget ran out.
 const loopBlock = "- 100 words cap for summary (enforced).\n" +
