@@ -210,6 +210,7 @@ func TestABurstOfTranscriptionsPaysOneUnloadAfterTheLastCall(t *testing.T) {
 		{"both entry points at once", func(i int) bool { return i%2 == 1 }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			resetClientState(t)
 			fake := newBurstSwap(t, 20*time.Millisecond)
 			fake.firstGate = func() { waitPending(t, n) }
 			c := New(fake.srv.URL, 10*time.Second)
@@ -261,6 +262,7 @@ func TestABurstOfTranscriptionsPaysOneUnloadAfterTheLastCall(t *testing.T) {
 // request to whisper, so it has nothing to unload — and under a fence the box is a
 // render's, so an unload of a model this process never loaded is noise on a busy card.
 func TestACallThatNeverReachedTheUpstreamUnloadsNothing(t *testing.T) {
+	resetClientState(t)
 	isolateKeepSet(t)
 	root := t.TempDir()
 	m, err := gpulease.OpenAt("", root)
@@ -298,6 +300,7 @@ func TestACallThatNeverReachedTheUpstreamUnloadsNothing(t *testing.T) {
 // so every way out of it — an unreadable wav, a refused request, an upstream error — must
 // count it out again, or one failure would hold every later unload back for good.
 func TestEveryExitFromATranscribeLeavesTheLine(t *testing.T) {
+	resetClientState(t)
 	failing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "model loading", http.StatusServiceUnavailable)
 	}))
@@ -331,6 +334,7 @@ func TestEveryExitFromATranscribeLeavesTheLine(t *testing.T) {
 // not an act each finishing call repeats. Three UnloadIfIdle calls after one transcription
 // send one unload; a transcription after it warms the model again and earns the next.
 func TestAnUnloadIsSentOncePerWarmUp(t *testing.T) {
+	resetClientState(t)
 	isolateKeepSet(t)
 	fake := newBurstSwap(t, time.Millisecond)
 	c := New(fake.srv.URL, 10*time.Second)
@@ -363,6 +367,7 @@ func TestAnUnloadIsSentOncePerWarmUp(t *testing.T) {
 // call that arrives while it is going out waits for it instead of putting an inference on
 // the upstream the unload is about to take down.
 func TestAnUnloadHoldsTheSlotAgainstTheNextCall(t *testing.T) {
+	resetClientState(t)
 	isolateKeepSet(t)
 	fake := newBurstSwap(t, time.Millisecond)
 	fake.unloadHold = make(chan struct{})
@@ -407,6 +412,7 @@ func TestAnUnloadHoldsTheSlotAgainstTheNextCall(t *testing.T) {
 // UnloadIfIdle that waited for the slot would sit through the whole inference (a
 // 30-minute transcription would delay a ten-second one's answer by 30 minutes).
 func TestAFinishedCallIsNotHeldBackByTheNextCallsInference(t *testing.T) {
+	resetClientState(t)
 	isolateKeepSet(t)
 	fake := newBurstSwap(t, time.Millisecond)
 	fake.block = make(chan struct{})
@@ -472,6 +478,7 @@ func (s *burstSwap) unloadCount() int {
 // it frees the model the earlier call used: the pipeline calls UnloadIfIdle after every
 // call, whatever its outcome, and that is what makes "the last call out" a promise.
 func TestTheLastCallOutUnloadsEvenWhenTheFenceRefusedIt(t *testing.T) {
+	resetClientState(t)
 	isolateKeepSet(t)
 	root := t.TempDir()
 	m, err := gpulease.OpenAt("", root)

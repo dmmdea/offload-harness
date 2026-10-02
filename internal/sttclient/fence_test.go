@@ -94,6 +94,7 @@ func bothDoors(t *testing.T, c *Client, wav string) (whisper, oai time.Duration)
 }
 
 func TestTranscribeUnderAFenceNeverReachesUpstream(t *testing.T) {
+	resetClientState(t)
 	heldCard(t)
 	srv, upstream := fencedWhisper(t)
 	wav := fenceTestWav(t)
@@ -117,6 +118,7 @@ func TestTranscribeUnderAFenceNeverReachesUpstream(t *testing.T) {
 // The client's own timeout still caps the wait: a fence wait longer than the HTTP
 // timeout cannot outlast the request it is part of.
 func TestAFenceWaitLongerThanTheClientTimeoutIsCappedByIt(t *testing.T) {
+	resetClientState(t)
 	heldCard(t)
 	srv, upstream := fencedWhisper(t)
 
@@ -136,6 +138,7 @@ func TestAFenceWaitLongerThanTheClientTimeoutIsCappedByIt(t *testing.T) {
 // inspection, never "unset" — an unset client would silently go back to waiting out the
 // HTTP timeout on a box configured not to wait.
 func TestAFenceWaitOfZeroIsASingleInspection(t *testing.T) {
+	resetClientState(t)
 	heldCard(t)
 	srv, upstream := fencedWhisper(t)
 

@@ -46,6 +46,7 @@ func TestAnAnswerThatNeverArrivedIsNotReportedAsNoSpeech(t *testing.T) {
 		{"a bare 500 with no body", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusInternalServerError) }, "vanished"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			resetClientState(t)
 			srv := httptest.NewServer(tc.handler)
 			defer srv.Close()
 			c := New(srv.URL, 10*time.Second)
@@ -79,6 +80,7 @@ func TestAnUpstreamThatAnsweredWithAnEmptyTranscriptIsNoSpeech(t *testing.T) {
 		{"openai, a language span with nothing after it", `{"text":"language None<asr_text>"}`, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			resetClientState(t)
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(tc.body)) }))
 			defer srv.Close()
 			c := New(srv.URL, 10*time.Second)

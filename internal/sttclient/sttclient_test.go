@@ -21,6 +21,7 @@ import (
 // inference requests crash whisper-server, so the client must serialize them. The fake
 // server records the peak number of in-flight requests; with the mutex it must be 1.
 func TestTranscribeSerializesConcurrentCalls(t *testing.T) {
+	resetClientState(t)
 	var inflight, maxSeen int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		n := atomic.AddInt32(&inflight, 1)
@@ -64,6 +65,7 @@ func TestTranscribeSerializesConcurrentCalls(t *testing.T) {
 // status cannot tell the two apart, so the error says what is known, that the upstream
 // vanished, and leaves "no speech" to an upstream that answered (see nospeech_test.go).
 func TestTranscribeEmptyBody502IsNotANoSpeechVerdict(t *testing.T) {
+	resetClientState(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadGateway) // 502, empty body
 	}))
@@ -122,6 +124,7 @@ func TestBuildMultipartAutoLanguage(t *testing.T) {
 }
 
 func TestTranscribeParsesVerboseJSON(t *testing.T) {
+	resetClientState(t)
 	tmp := t.TempDir()
 	wav := filepath.Join(tmp, "a.wav")
 	if err := os.WriteFile(wav, []byte("RIFFfake-wav-bytes"), 0o644); err != nil {
@@ -171,6 +174,7 @@ func TestTranscribeParsesVerboseJSON(t *testing.T) {
 }
 
 func TestTranscribeHTTPErrorIsError(t *testing.T) {
+	resetClientState(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "model loading", http.StatusServiceUnavailable)
 	}))
@@ -273,6 +277,7 @@ func TestParseASRText(t *testing.T) {
 }
 
 func TestTranscribeOAIPostsMultipartAndParses(t *testing.T) {
+	resetClientState(t)
 	var gotPath, gotCT string
 	var sawFile bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -316,6 +321,7 @@ func TestTranscribeOAIPostsMultipartAndParses(t *testing.T) {
 }
 
 func TestTranscribeOAIErrorsAreErrors(t *testing.T) {
+	resetClientState(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":{"message":"File Not Found"}}`, 404)
 	}))
