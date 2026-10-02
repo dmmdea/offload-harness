@@ -208,7 +208,9 @@ zero-always-warm unload (`stt_unload_after`, default on) runs after every call b
 does anything: `UnloadIfIdle` sends it holding that mutex, and only when no call is waiting or running
 and the model was used since the last unload. A burst of concurrent transcriptions therefore shares one
 load and pays one cold start (register C-91; the unload used to follow every call and landed on the next
-call's inference, which llama-swap answers `matrix: model unloaded`). The verdict "no speech"
+call's inference, which llama-swap answers `matrix: model unloaded`). A card a render holds is waited for
+`gpu_wait_ms` like every other GPU door (the HTTP timeout, `stt_request_timeout_sec`, only caps that wait), and the
+refusal is a `capacity` defer, `gpu busy: …` (register C-89). The verdict "no speech"
 (`ErrUpstreamNoSpeech`, the defer reason `empty transcript (no speech detected)`) is reserved for an
 upstream that answered 200 with an empty transcript. An upstream that vanished mid-request — an empty-body
 5xx, or an answer cut off mid-read, which an unload, a swap, a restart and whisper.cpp's exit on audio with

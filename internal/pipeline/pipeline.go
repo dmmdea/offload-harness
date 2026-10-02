@@ -50,6 +50,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/llamaclient"
 	"github.com/dmmdea/offload-harness/internal/mediahash"
 	"github.com/dmmdea/offload-harness/internal/mediaops"
+	"github.com/dmmdea/offload-harness/internal/modelaffinity"
 	"github.com/dmmdea/offload-harness/internal/parser"
 	"github.com/dmmdea/offload-harness/internal/placement"
 	"github.com/dmmdea/offload-harness/internal/router"
@@ -264,7 +265,10 @@ func (p *Pipeline) EmbedMemoStats() (embedmemo.Stats, string) {
 
 func New(cfg config.Config, c *llamaclient.Client, ca *cache.Cache, l *ledger.Ledger) *Pipeline {
 	p := &Pipeline{cfg: cfg, client: c, cache: ca, led: l, lastHeal: map[string]time.Time{}, learnHashes: map[string]string{}}
-	p.stt = sttclient.New(cfg.Endpoint, time.Duration(cfg.STTRequestTimeoutSec)*time.Second)
+	// A held card is waited for gpu_wait_ms, like every other GPU door, and the HTTP timeout
+	// only caps that: the lease wait used to BE stt_request_timeout_sec (1,800 s), which is
+	// where the MCP client aborts an idle call (register C-89).
+	p.stt = sttclient.New(cfg.Endpoint, time.Duration(cfg.STTRequestTimeoutSec)*time.Second).WithFenceWait(p.gpuWait())
 	// LO-1: resolve the shared GPU lock path ONCE, the same way the Node render
 	// runners do, so the vision gate watches the exact lock the gen jobs hold.
 	p.gpuLockPath = gpulock.Path(cfg.GPULockPath, cfg.StateDir)
@@ -1255,6 +1259,21 @@ func (p *Pipeline) runTranscribe(ctx context.Context, req core.Request, meta cor
 		ucancel()
 	}
 	if terr != nil {
+		// A held card is congestion, not a failure (register C-89): the request waited its
+		// gpu_wait_ms behind a render or an exclusive hold and the fence refused it. Filed
+		// as capacity — the class a delegator re-places and a caller can retry — with the
+		// holder named, exactly as the vision tier and the agent doors file it. Through
+		// classifyErr it read "timeout" (the lease error carries the word) with no defer
+		// class, which nothing can act on.
+		if modelaffinity.IsLeaseRefusal(terr) {
+			meta.LatencyMs = time.Since(start).Milliseconds()
+			meta.ErrClass = "gpu_busy"
+			reason := "gpu busy: " + terr.Error()
+			p.recordDefer(req.Task, meta, len(req.Audio), reason)
+			res := core.Deferf(reason, "", meta)
+			res.DeferClass = core.DeferClassCapacity
+			return res
+		}
 		// ErrUpstreamNoSpeech: the upstream ANSWERED, successfully, with an empty
 		// transcript (register C-91). It used to be read off an empty-body 5xx — the
 		// whisper-server crash on audio with no speech content (F-35, 2026-09-23) — which

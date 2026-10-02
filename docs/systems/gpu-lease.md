@@ -597,7 +597,7 @@ literal that spells the route anywhere else), and it:
 | CLI window probes (`local-agent`, compaction eval) | ctx and the 10-minute cold-start budget | falls back to the configured window, as an unanswered probe always has |
 | seat-pin probe | none (one inspection) | no pin — the honest answer for telemetry |
 | tokenizer (`/tokenize`) | none | fails open for that step and is **not** counted toward the sticky downgrade (`LastFailFenced`); the completion that follows is the request that waits |
-| whisper transcription | the client's timeout | a `timeout`-class defer naming the holder |
+| whisper transcription | `gpu_wait_ms` (90 s by default; zero is one inspection), capped by the client's own timeout (`stt_request_timeout_sec`, 1,800 s) — register C-89, 2026-10-01 | a `capacity` defer (`gpu busy: …`, error class `gpu_busy`) naming the holder |
 | KV-slot lane | none | `409 seat-cold` |
 | fleet chat lane (`POST /fleet/chat` → `/v1/chat/completions`) | the caller's own budget (the request context) and `ChatProxyTimeout` | `503` whose body is the lease refusal ("gpu-lease timeout …"): the caller files it as congestion (`timeout`), never as a broken stack |
 | embedder (`/v1/embeddings`: the kNN pre-filter, `shadow-label`) | the embedder's own timeout | an error the kNN pre-filter fails open on, as on a slow embedder |

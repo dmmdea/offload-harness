@@ -121,7 +121,8 @@ its deadline: the window probe and the warm-up wait inside the admission budget 
 `capacity` (the probe's bare-root fallback is skipped under a fence); the seat pin, the per-step
 tokenizer and the cascade's per-tier re-pack probes do not wait, and the re-pack caches no fenced
 answer (no pin; the tokenizer fails open without a sticky strike, and the completion after it
-is the request that waits); transcription waits its client timeout. The one unfenced builder,
+is the request that waits); transcription waits its client timeout (changed 2026-10-01, see
+"Extended 2026-10-01" below: it waits `gpu_wait_ms`). The one unfenced builder,
 `HolderUpstreamURL`, is the lease holder's own warm-back in `gpu_drain.go`, restricted by the same test. A
 generation that ran out its wait mid-run is filed `capacity` on both run doors, before the stall and ceiling
 branches.
@@ -153,6 +154,32 @@ evicted by its own ttl between the `/running` read and the request. Code: `inter
 tests: `internal/modelaffinity/upstream_test.go`, `internal/agent/upstream_fence_test.go`,
 `internal/tokclient/fence_test.go`, `internal/sttclient/fence_test.go`,
 `internal/pipeline/agenttask_upstream_fence_test.go`, `upstream_fence_lint_test.go`.
+
+## Extended 2026-10-01: transcription waits `gpu_wait_ms`, not its client timeout (register C-89)
+
+**What happened.** The 2026-09-22 extension let a transcription wait for a fenced card "its client timeout". For
+`offload_transcribe` that timeout is `stt_request_timeout_sec`: 1,800 s, because long audio decodes at 5-8x
+realtime. A held card therefore held the call for up to 1,800 s, which is also where the MCP client aborts an idle
+call, so the two raced, while every other GPU door gives up after `gpu_wait_ms` (90 s by default). When the wait
+did run out, the refusal reached the caller as `transcribe call failed: gpu-lease timeout …`, error class
+`timeout` and no defer class, which a delegator cannot re-place.
+
+**Decision.** The whisper client has its own lease-wait budget, `sttclient.Client.WithFenceWait`, that
+`pipeline.New` sets from `gpu_wait_ms`; the client's own timeout only caps it (`min` of the two), because a wait
+cannot outlast the request it is part of. Zero is a value, one inspection, as `gpu_wait_ms: 0` is for every other
+door; a client built without the option keeps waiting its timeout. A lease refusal is filed as the vision tier and
+the agent doors file theirs: error class `gpu_busy`, reason `gpu busy: <the holder>`, defer class `capacity`, the
+class a delegator re-places and a caller can retry. The timeout keeps bounding the HTTP call itself. A long
+transcription also tells the client it is alive: when the request carries a progress token the server sends an
+opening notification and a heartbeat every 30 s ([ADR 0065](0065-the-whole-call-has-a-deadline-below-the-clients-abort.md)).
+Whether the reference client restarts its timeout on progress is still unverified, so the bounded wait is the fix and
+the heartbeat is a courtesy.
+
+**Residual.** None new. The one-read check-then-act window above is unchanged, and a request already running on the
+upstream is not interrupted by a lease taken after it started. Code: `internal/sttclient/sttclient.go`
+(`WithFenceWait`, `fencedURL`), `internal/pipeline/pipeline.go` (`New`, `runTranscribe`),
+`internal/mcpserver/progress.go` (`startHeartbeat`); tests: `internal/sttclient/fence_test.go`,
+`internal/pipeline/transcribe_fence_test.go`, `internal/mcpserver/transcribe_progress_test.go`.
 
 ## Alternatives considered
 

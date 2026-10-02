@@ -1446,6 +1446,11 @@ func (s *Server) handleTranscribe(ctx context.Context, req *mcp.CallToolRequest)
 	if in.HQ {
 		params["hq"] = true
 	}
+	// A transcription of long audio is silent for minutes, like a delegation. With a progress
+	// token the client hears an opening notification and a heartbeat while the call runs;
+	// without one nothing is sent (register C-89).
+	stopHeartbeat := s.startHeartbeat(ctx, req, "offload_transcribe")
+	defer stopHeartbeat()
 	res := s.p.Run(ctx, core.Request{Task: core.TaskTranscribe, Door: "offload_transcribe", Audio: in.Audio, Params: params})
 	if len(in.Select) > 0 {
 		res.Data = core.ProjectFields(res.Data, in.Select)

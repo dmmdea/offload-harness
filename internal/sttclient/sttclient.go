@@ -144,6 +144,11 @@ func (Params) ResponseFormat() string { return "verbose_json" }
 type Client struct {
 	base string
 	http *http.Client
+	// fenceWait is the budget for waiting out a fenced card when fenceWaitSet (register
+	// C-89); see WithFenceWait. A client that never set one waits its HTTP timeout, as it
+	// did before the budget existed.
+	fenceWait    time.Duration
+	fenceWaitSet bool
 }
 
 // fenceBudget is how long a transcription waits for a fenced card when the
@@ -153,13 +158,17 @@ const fenceBudget = 120 * time.Second
 // fencedURL builds the whisper upstream's URL behind the GPU-lease fence
 // (2026-09-22). The passthrough STARTS the whisper model when it is not loaded,
 // so under a render or an exclusive hold the request waits for the card — the
-// same bound a text admission uses: the client's own timeout, then ctx — and on
-// exhaustion returns the fence's *modelaffinity.LeaseError, which the pipeline
-// defers as congestion ("timeout"). A resident whisper model is served at once.
+// fence-wait budget (WithFenceWait; the pipeline hands it gpu_wait_ms, the bound
+// every GPU door shares), never longer than the client's own timeout, then ctx —
+// and on exhaustion returns the fence's *modelaffinity.LeaseError, which the
+// pipeline defers as capacity ("gpu busy"). A resident whisper model is served at once.
 func (c *Client) fencedURL(ctx context.Context, model, path string) (string, error) {
 	budget := c.http.Timeout
 	if budget <= 0 {
 		budget = fenceBudget
+	}
+	if c.fenceWaitSet && c.fenceWait < budget {
+		budget = c.fenceWait
 	}
 	return modelaffinity.AwaitUpstream(ctx, c.base, model, path, time.Now().Add(budget))
 }
@@ -170,6 +179,25 @@ func New(base string, timeout time.Duration) *Client {
 		base: strings.TrimRight(base, "/"),
 		http: &http.Client{Timeout: timeout},
 	}
+}
+
+// WithFenceWait sets how long a transcription waits for a card a render holds (register
+// C-89) and returns the client, so it chains at construction:
+// New(...).WithFenceWait(p.gpuWait()).
+//
+// The wait used to BE the client's timeout, which for a transcription is
+// stt_request_timeout_sec (1,800 s: long audio decodes at 5-8x realtime) — the same limit
+// at which the MCP client aborts an idle call, so a held card made the two race, while
+// every other GPU door gave up after gpu_wait_ms (90 s by default). The fence wait is its
+// own budget now, and the client's timeout only CAPS it (min of the two), because a wait
+// cannot outlast the request it is part of.
+//
+// Zero is a value, not "unset": gpu_wait_ms 0 means a single try for every GPU door, and
+// a zero here is one inspection of the lease. Only a client that never called this waits
+// its HTTP timeout, as before.
+func (c *Client) WithFenceWait(d time.Duration) *Client {
+	c.fenceWait, c.fenceWaitSet = d, true
+	return c
 }
 
 // Transcribe uploads wavPath to the whisper upstream `model` and returns the
