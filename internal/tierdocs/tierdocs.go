@@ -14,6 +14,7 @@ package tierdocs
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -537,11 +538,9 @@ func agentSeatSection(p Profile) string {
 		fmt.Fprintf(&b, "| pipeline_parallel | %d | `--pipeline-parallel-size`: the model is split across the cards in listed order |\n", s.PipelineParallel)
 		fmt.Fprintf(&b, "| layer_partition | `%s` | layers per pipeline stage (`VLLM_PP_LAYER_PARTITION`), in card order |\n", dash(s.LayerPartition))
 	}
-	if s.KVCacheMemoryBytes > 0 {
-		fmt.Fprintf(&b, "| kv_cache_memory_bytes | %d | fixed KV budget per card (`--kv-cache-memory-bytes`) instead of a profiled share: how a seat on a display card leaves the desktop its room |\n", s.KVCacheMemoryBytes)
-	}
+	b.WriteString(kvPoolRow(s.KVCacheMemoryBytes))
 	fmt.Fprintf(&b, "| max_model_len | %d | the served window |\n", s.MaxModelLen)
-	fmt.Fprintf(&b, "| gpu_memory_utilization | %.2f | the engine's share of the card — chosen WITH the seat's co-residents in mind, not alone |\n", s.GPUMemoryUtilization)
+	fmt.Fprintf(&b, "| gpu_memory_utilization | %s | the engine's share of the card — chosen WITH the seat's co-residents in mind, not alone |\n", utilization(s.GPUMemoryUtilization))
 	fmt.Fprintf(&b, "| max_num_seqs | %d | the engine's concurrency, and the entry's `concurrencyLimit` |\n", s.MaxNumSeqs)
 	b.WriteString(batchedTokensRow(s.MaxBatchedTokens, "the engine's per-step token budget (`--max-num-batched-tokens`); with the sequence count it sizes the workspace the profiled share must cover, so it is a co-residency lever beside utilization"))
 	fmt.Fprintf(&b, "| kv_cache_dtype | `%s` | KV precision — backend-dependent, not free everywhere |\n", dash(s.KVCacheDtype))
@@ -630,7 +629,8 @@ func extraSeatsSection(p Profile) string {
 		fmt.Fprintf(&b, "| unit | `%s` | the systemd unit the operator installs; llama-swap starts and stops it on demand |\n", e.Unit)
 		fmt.Fprintf(&b, "| cards | `%s` | `CUDA_VISIBLE_DEVICES`; must be the lane seat's cards |\n", dash(e.Device))
 		fmt.Fprintf(&b, "| max_model_len | %d | the served window |\n", e.MaxModelLen)
-		fmt.Fprintf(&b, "| gpu_memory_utilization | %.2f | the engine's share of the card |\n", e.GPUMemoryUtilization)
+		b.WriteString(kvPoolRow(e.KVCacheMemoryBytes))
+		fmt.Fprintf(&b, "| gpu_memory_utilization | %s | the engine's share of the card |\n", utilization(e.GPUMemoryUtilization))
 		fmt.Fprintf(&b, "| max_num_seqs | %d | the engine's concurrency, and the entry's `concurrencyLimit` |\n", e.MaxNumSeqs)
 		b.WriteString(batchedTokensRow(e.MaxBatchedTokens, "the engine's per-step token budget (`--max-num-batched-tokens`)"))
 		fmt.Fprintf(&b, "| kv_cache_dtype | `%s` | KV precision |\n", dash(e.KVCacheDtype))
@@ -724,6 +724,27 @@ func composesSection(p Profile) string {
 			l.Name, dash(l.Tier), "`"+strings.Join(l.Devices, "` / `")+"`", strings.Join(seats, "<br>"), guards, state)
 	}
 	return b.String()
+}
+
+// utilization renders a seat's gpu_memory_utilization as declared. Two decimals where two suffice (every page
+// that printed 0.90 or 0.85 keeps doing so, byte for byte); a value that needs a third digit prints it, because
+// %.2f turns the 35B seat's measured 0.855 into 0.85, the point it was moved off (ADR 0049 Amendment 6).
+func utilization(u float64) string {
+	if math.Abs(u*100-math.Round(u*100)) < 1e-9 {
+		return fmt.Sprintf("%.2f", u)
+	}
+	return strconv.FormatFloat(u, 'f', -1, 64)
+}
+
+// kvPoolRow renders a seat's fixed KV pool (`--kv-cache-memory-bytes`) as a table row, and nothing for a seat
+// that sizes its pool by utilization: a "0" there would read as a measured zero. The row says what the pin does
+// to the utilization beside it, because that is the knob a reader reaches for first (ADR 0049 Amendment 6,
+// register A-129).
+func kvPoolRow(n int64) string {
+	if n <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("| kv_cache_memory_bytes | %d | a FIXED KV pool per card (`--kv-cache-memory-bytes`) instead of a profiled share, so vLLM ignores `gpu_memory_utilization` while it is set: a utilization-sized pool is measured during startup profiling, and a cold compile cache or another model loading in that window can shrink it below one request and fail the start (register A-129); on a display card it is also how the desktop keeps its room |\n", n)
 }
 
 // batchedTokensRow renders a seat's declared batch budget (vLLM max_num_batched_tokens) as a table row, and nothing

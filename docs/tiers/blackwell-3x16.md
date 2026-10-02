@@ -47,7 +47,7 @@ one declaration, so the seat and the lane routing to it cannot disagree.
 | tensor_parallel | 0 | `--tensor-parallel-size`; tensor x pipeline must equal how many cards are listed |
 | pipeline_parallel | 3 | `--pipeline-parallel-size`: the model is split across the cards in listed order |
 | layer_partition | `28,13,23` | layers per pipeline stage (`VLLM_PP_LAYER_PARTITION`), in card order |
-| kv_cache_memory_bytes | 4026531840 | fixed KV budget per card (`--kv-cache-memory-bytes`) instead of a profiled share: how a seat on a display card leaves the desktop its room |
+| kv_cache_memory_bytes | 4026531840 | a FIXED KV pool per card (`--kv-cache-memory-bytes`) instead of a profiled share, so vLLM ignores `gpu_memory_utilization` while it is set: a utilization-sized pool is measured during startup profiling, and a cold compile cache or another model loading in that window can shrink it below one request and fail the start (register A-129); on a display card it is also how the desktop keeps its room |
 | max_model_len | 262144 | the served window |
 | gpu_memory_utilization | 0.84 | the engine's share of the card — chosen WITH the seat's co-residents in mind, not alone |
 | max_num_seqs | 32 | the engine's concurrency, and the entry's `concurrencyLimit` |
