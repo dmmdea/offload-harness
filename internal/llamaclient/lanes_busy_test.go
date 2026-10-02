@@ -16,7 +16,7 @@ import (
 //
 // The lease gate (delegate.LocalBusy) sees only the harness's own machine-wide
 // GPU lease. The measured C-41 symptom has no lease at all: another session
-// holds the Qube's `qwen3.8-27b-vllm` seat through llama-swap, the
+// holds <node-b>'s `qwen3.8-27b-vllm` seat through llama-swap, the
 // `interactive` set is mutually exclusive, so every cascade tier needs a swap
 // — and llama-swap swaps only after the loaded model's in-flight requests
 // finish (300–900 s contracts). The cascade call sits in that queue until its

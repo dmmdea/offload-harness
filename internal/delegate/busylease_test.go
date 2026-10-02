@@ -69,7 +69,7 @@ func TestBetterRemoteDemotesALeaseBusyNode(t *testing.T) {
 	quiet.QueueDepth = 0 // otherwise the best possible node on every other key
 
 	worseButFree := eligibleRemote()
-	worseButFree.NodeID = "aorus"
+	worseButFree.NodeID = "node-a"
 	worseButFree.QueueDepth = 5
 
 	st := schemaSubtask()
@@ -82,7 +82,7 @@ func TestBetterRemoteDemotesALeaseBusyNode(t *testing.T) {
 
 	// Two lease-busy nodes: the existing keys still decide between them.
 	quiet2 := eligibleRemote()
-	quiet2.NodeID, quiet2.LeasedText, quiet2.LeaseBusy = "lenovo2", true, true
+	quiet2.NodeID, quiet2.LeasedText, quiet2.LeaseBusy = "node-c2", true, true
 	quiet2.QueueDepth = 3
 	if !betterRemote("seed", &st, 0, quiet, quiet2) {
 		t.Fatal("between two lease-busy nodes, the lower queue depth must still win")

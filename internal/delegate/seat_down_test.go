@@ -475,7 +475,7 @@ func TestAVerificationRetryStillTakesTheLocalSeatWhoseLineIsFull(t *testing.T) {
 		w := remoteWire("wrong answer", `{"answer":"wrong answer"}`)
 		w.NodeID = node
 		return w
-	}, "qube from the second node", nodeA, nodeB)
+	}, "zorblax from the second node", nodeA, nodeB)
 	cfg := testCfg(t)
 	cfg.FleetMaxConcurrentJobs = 1
 	occupyTheLocalSeat(t, cfg)

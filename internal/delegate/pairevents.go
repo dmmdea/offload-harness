@@ -14,7 +14,7 @@ import (
 // pairNodeName is the name a remote placement is reported under BEFORE the
 // node has answered: the host of its dispatch URL (the tailnet name the fleet
 // config lists, which is the hostname PAIR's members.json carries), lowercased
-// and without the port. The fleet node id (`aorus-ampere8`-style) is not a
+// and without the port. The fleet node id (`node-a-ampere8`-style) is not a
 // PAIR member name and resolved to nothing, which is why 0.126.0's queued and
 // running frames showed the delegator as the running node until the terminal
 // frame, built from the node's reported name, corrected it. fallback is used

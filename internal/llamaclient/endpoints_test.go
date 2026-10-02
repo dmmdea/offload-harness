@@ -33,7 +33,7 @@ func countingServer(t *testing.T, hits *atomic.Int64) *httptest.Server {
 // default seat itself can be remoted.
 func TestBaseFor(t *testing.T) {
 	plain := New("http://127.0.0.1:11436", "", "offload-e4b", time.Second)
-	if got := plain.BaseFor("lenovo-e4b"); got != "http://127.0.0.1:11436" {
+	if got := plain.BaseFor("node-c-e4b"); got != "http://127.0.0.1:11436" {
 		t.Errorf("no overrides: BaseFor = %q, want the default base", got)
 	}
 	if got := plain.BaseFor(""); got != "http://127.0.0.1:11436" {
@@ -42,14 +42,14 @@ func TestBaseFor(t *testing.T) {
 
 	c := New("http://127.0.0.1:11436", "", "offload-e4b", time.Second).
 		WithSeatEndpoints(map[string]string{
-			"lenovo-e4b":  "http://node-c:11436/", // trailing slash must be trimmed like New's base
-			"offload-e4b": remotedSeat,    // the DEFAULT model seat, remoted
+			"node-c-e4b":  "http://node-c:11436/", // trailing slash must be trimmed like New's base
+			"offload-e4b": remotedSeat,            // the DEFAULT model seat, remoted
 		})
 	cases := []struct {
 		model string
 		want  string
 	}{
-		{"lenovo-e4b", "http://node-c:11436"},
+		{"node-c-e4b", "http://node-c:11436"},
 		{"offload-e4b", remotedSeat},
 		{"", remotedSeat}, // "" = default model, which is overridden here
 		{"gemma4-e2b", "http://127.0.0.1:11436"},
@@ -73,7 +73,7 @@ func TestSeatEndpointOverrideRoutesRequests(t *testing.T) {
 	defer ovrSrv.Close()
 
 	c := New(defSrv.URL, "", "offload-e4b", 5*time.Second).
-		WithSeatEndpoints(map[string]string{"lenovo-e4b": ovrSrv.URL})
+		WithSeatEndpoints(map[string]string{"node-c-e4b": ovrSrv.URL})
 
 	if _, err := c.Generate(context.Background(), "", "sys", "hi", "", 16, 0, 0); err != nil {
 		t.Fatalf("default-model Generate: %v", err)
@@ -82,7 +82,7 @@ func TestSeatEndpointOverrideRoutesRequests(t *testing.T) {
 		t.Fatalf("default-model call: hits = (default %d, override %d), want (1, 0)", defaultHits.Load(), overrideHits.Load())
 	}
 
-	if _, err := c.Generate(context.Background(), "lenovo-e4b", "sys", "hi", "", 16, 0, 0); err != nil {
+	if _, err := c.Generate(context.Background(), "node-c-e4b", "sys", "hi", "", 16, 0, 0); err != nil {
 		t.Fatalf("overridden-model Generate: %v", err)
 	}
 	if defaultHits.Load() != 1 || overrideHits.Load() != 1 {

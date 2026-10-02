@@ -70,7 +70,7 @@ func TestRunQueuedTimeDoesNotConsumeExecutionBudget(t *testing.T) {
 	// So this test can only pass if queued time was credited back.
 	node := scriptedNode(t, 800*time.Millisecond, 500*time.Millisecond,
 		func() (map[string]any, int) {
-			return doneWire(t, remoteWire("the answer is qube", `{"answer":"qube"}`)), http.StatusOK
+			return doneWire(t, remoteWire("the answer is zorblax", `{"answer":"zorblax"}`)), http.StatusOK
 		}, &sawAccepted, &sawRunning)
 	srv := node.server()
 
@@ -91,7 +91,7 @@ func TestRunQueuedTimeDoesNotConsumeExecutionBudget(t *testing.T) {
 	if sum.Succeeded != 1 {
 		t.Fatalf("summary = %+v, want one success", sum)
 	}
-	if r.Result.Output != "the answer is qube" {
+	if r.Result.Output != "the answer is zorblax" {
 		t.Fatalf("output = %q", r.Result.Output)
 	}
 	// Proof the test actually exercised a backlog: without queued polls it

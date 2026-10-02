@@ -169,13 +169,13 @@ func TestRemoteRunCarriesTheDecidedLayerAndPublishesPlaced(t *testing.T) {
 	cfg := compositeTestCfg(t)
 	var seenLayer atomic.Value
 	nodePlaced := &core.Placed{Tier: "blackwell-2x16", Layer: "pair", Role: "long", Seat: "qwen3.8-27b-262k", Reason: "node re-decided"}
-	node, url := acceptingNode(t, "qube-remote", "qube found the needle", func(f *fakeNode) {
+	node, url := acceptingNode(t, "node-b-remote", "zorblax found the needle", func(f *fakeNode) {
 		f.layers = fixtureRows(t, idlePair())
 		f.decodeCap = cfg.AgentContextCapBytes()
 		f.onDispatch = func(_ string, c core.AgentContract) { seenLayer.Store(c.Layer) }
 		f.pollByJob = func(jobID string, n int64) (map[string]any, int) {
-			w := remoteWire("qube found the needle", `{"answer":"qube"}`)
-			w.NodeID = "qube-remote"
+			w := remoteWire("zorblax found the needle", `{"answer":"zorblax"}`)
+			w.NodeID = "node-b-remote"
 			w.Seat = "qwen3.8-27b-262k"
 			w.Placed = nodePlaced
 			return doneWire(t, w), http.StatusOK
@@ -201,7 +201,7 @@ func TestRemoteRunCarriesTheDecidedLayerAndPublishesPlaced(t *testing.T) {
 	}
 
 	// The pair-only node: route=remote defers with the table's reason.
-	only, onlyURL := acceptingNode(t, "qube-small", "never", func(f *fakeNode) { f.layers = pairOnlyRows(t) })
+	only, onlyURL := acceptingNode(t, "node-b-small", "never", func(f *fakeNode) { f.layers = pairOnlyRows(t) })
 	results, sum, err = RunWith(context.Background(), cfg, neverLocal(t),
 		[]core.AgentContract{contractOfTokens(200_000)}, "remote", []string{onlyURL}, nil)
 	if err != nil {
@@ -210,7 +210,7 @@ func TestRemoteRunCarriesTheDecidedLayerAndPublishesPlaced(t *testing.T) {
 	if sum.Deferred != 1 || only.dispatches.Load() != 0 {
 		t.Fatalf("summary=%+v dispatches=%d, want an undispatched defer", sum, only.dispatches.Load())
 	}
-	if r := results[0].Result.Reason; !strings.Contains(r, "qube-small") || !strings.Contains(r, "largest 163840") {
+	if r := results[0].Result.Reason; !strings.Contains(r, "node-b-small") || !strings.Contains(r, "largest 163840") {
 		t.Fatalf("reason = %q, want the node and its largest window named", r)
 	}
 	if results[0].Result.DeferClass != core.DeferClassContract {

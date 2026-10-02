@@ -86,7 +86,7 @@ func (c *Client) WithRemoteLanes(lanes map[string]string, busy func() bool, busy
 // and the call keeps the client's own generation path with no credential.
 //
 // It exists because the two fleet nodes' llama-swap binds 127.0.0.1:11436 and
-// nothing else (read from the port directory, 2026-09-15): a lane base of the
+// nothing else (read from the operator's port ledger, 2026-09-15): a lane base of the
 // form http://<node>:11436 cannot be reached from this box at all, and binding
 // llama-swap to the tailnet would be a new unauthenticated listener. The vision
 // lane (0.116.0, ADR 0040) already solved this shape — the node's own

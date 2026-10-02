@@ -21,8 +21,8 @@ func TestWireResponseCarriesTheLastEightCalls(t *testing.T) {
 		calls = append(calls, core.AgentCallRecord{Step: i, MaxTokens: 1024, FinishReason: "stop", CompletionTokens: 10 * i, Sampling: "temperature=0"})
 	}
 	results := []PlacedResult{
-		{Node: "lenovo", Seat: "qwen3.5-4b-vllm", Result: core.AgentWireResult{Output: "x", Calls: calls}},
-		{Node: "Qube", Seat: "agent-pool", Result: core.AgentWireResult{Output: "y"}},
+		{Node: "node-c", Seat: "qwen3.5-4b-vllm", Result: core.AgentWireResult{Output: "x", Calls: calls}},
+		{Node: "node-b", Seat: "agent-pool", Result: core.AgentWireResult{Output: "y"}},
 	}
 	raw, err := json.Marshal(WireResponse(results, Summary{Succeeded: 2}, nil))
 	if err != nil {

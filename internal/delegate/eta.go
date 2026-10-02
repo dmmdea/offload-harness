@@ -49,7 +49,7 @@ const minimalFinalTokens = 64
 // seat's published min_turn_sec (its max-final worst case), which the rider
 // forbids gating on, and since 0.128.1 it is no longer a fit of the
 // configured final against seatrate.FinalBudgetFloor either: 0.128.0 shipped
-// that rule and it refused a cold Aorus a 60 s contract the seat completes
+// that rule and it refused a cold <node-a> a 60 s contract the seat completes
 // in ~25 s ("fitted final 0 < floor 1024").
 //
 // A composite node's published seat_rate describes its single advertised

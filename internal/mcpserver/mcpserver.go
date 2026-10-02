@@ -2414,7 +2414,7 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 	// config.AgentPlannerModel). The IN-LOOP offload tools follow the planner
 	// too (0.115.18, register D-88): they used to stay on the workhorse "for
 	// its economics", but the workhorse shares the planner's llama-swap and
-	// loading it EVICTS the planner mid-run — measured 2026-09-10 on the Qube:
+	// loading it EVICTS the planner mid-run — measured 2026-09-10 on <node-b>:
 	// three offload_triage calls cost four 3-minute reloads of the 27B seat
 	// and the whole 900 s wall. pipeline.InLoopOffloadModel keeps the
 	// workhorse only when it IS the planner (a single-model box).

@@ -1,15 +1,15 @@
 package modelaffinity
 
 // A remote engine endpoint (register C-58, operator 2026-09-18: "nvidia pair
-// showing the qube doing lenovo work").
+// showing <node-b> doing <node-c> work").
 //
 // A config's `endpoint` is normally this box's llama-swap on loopback. A bench
-// or trial config may point it at ANOTHER box's engine (the Lenovo's vLLM arm
+// or trial config may point it at ANOTHER box's engine (<node-c>'s vLLM arm
 // on :18797, reached over the tailnet) and run the delegator here. Two things
 // then went wrong: every run was attributed to this box (the ledger row, the
 // PAIR card), and this box's machine-wide GPU lease cordoned runs that never
 // touched a local card — 8 of 16 contracts deferred "gpu busy" in 0.7 s while
-// the Qube's cards sat under a lease and the work was on the Lenovo.
+// <node-b>'s cards sat under a lease and the work was on <node-c>.
 //
 // EndpointHost is the one reading both fixes rest on: the endpoint's host when
 // it is not this box, "" when it is. Attribution follows it (internal/delegate

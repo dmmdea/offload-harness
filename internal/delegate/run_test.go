@@ -433,7 +433,7 @@ func remoteContract() core.AgentContract {
 		SchemaVersion: core.AgentWireSchemaVersion,
 		Goal:          "answer the question",
 		OutputSchema:  json.RawMessage(`{"properties":{"answer":{"type":"string"}}}`),
-		Acceptance:    []string{"contains:qube", "nonempty:answer"},
+		Acceptance:    []string{"contains:zorblax", "nonempty:answer"},
 		MaxSteps:      4,
 		TimeoutSec:    30,
 	}
@@ -455,7 +455,7 @@ func TestRunRemoteHappyPathWithAcceptance(t *testing.T) {
 			if n == 1 {
 				return map[string]any{"state": "running"}, http.StatusOK
 			}
-			return doneWire(t, remoteWire("the qube answer", `{"answer":"42"}`)), http.StatusOK
+			return doneWire(t, remoteWire("the zorblax answer", `{"answer":"42"}`)), http.StatusOK
 		},
 	}
 	srv := node.server()
@@ -479,7 +479,7 @@ func TestRunRemoteHappyPathWithAcceptance(t *testing.T) {
 	if len(r.AcceptanceFailures) != 0 {
 		t.Errorf("acceptance failures = %v, want none", r.AcceptanceFailures)
 	}
-	if r.Result.Output != "the qube answer" {
+	if r.Result.Output != "the zorblax answer" {
 		t.Errorf("output = %q", r.Result.Output)
 	}
 	if !strings.HasPrefix(r.JobID, "agd-") {
@@ -586,8 +586,8 @@ func TestRunAcceptanceFailureFlipsToFailedVerification(t *testing.T) {
 		t.Fatalf("summary = %+v, want exactly one failed-verification (retried once, not recovered)", sum)
 	}
 	r := results[0]
-	if len(r.AcceptanceFailures) != 1 || !strings.Contains(r.AcceptanceFailures[0], "contains:qube") {
-		t.Fatalf("acceptance failures = %v, want the contains:qube failure named", r.AcceptanceFailures)
+	if len(r.AcceptanceFailures) != 1 || !strings.Contains(r.AcceptanceFailures[0], "contains:zorblax") {
+		t.Fatalf("acceptance failures = %v, want the contains:zorblax failure named", r.AcceptanceFailures)
 	}
 }
 
@@ -866,7 +866,7 @@ func TestRunAutoLocalFallbackReportsADeadFleet(t *testing.T) {
 	cfg.GPULockPath = leaseDir
 	local := func(ctx context.Context, c core.AgentContract, _ LocalOptions) (core.AgentWireResult, error) {
 		return core.AgentWireResult{SchemaVersion: 1, NodeID: "this-box", Seat: "local-seat",
-			Output: "local qube answer", Structured: json.RawMessage(`{"answer":"local"}`), StopReason: "done"}, nil
+			Output: "local zorblax answer", Structured: json.RawMessage(`{"answer":"local"}`), StopReason: "done"}, nil
 	}
 	results, sum, err := Run(t.Context(), cfg, local, []core.AgentContract{remoteContract()}, "auto", []string{base})
 	if err != nil {
@@ -1040,7 +1040,7 @@ func TestRunInfrastructureDeferCountsSeparately(t *testing.T) {
 // must NOT trip the broken-node signal.
 func TestRunAbstentionDeferIsNotInfrastructure(t *testing.T) {
 	compressPolls(t, 5*time.Millisecond, time.Second)
-	deferred := remoteWire("the qube answer", "")
+	deferred := remoteWire("the zorblax answer", "")
 	deferred.Deferred = true
 	deferred.DeferClass = core.DeferClassAbstention
 	deferred.Reason = "output failed schema: missing required field answer"
@@ -1099,7 +1099,7 @@ func TestRunRedispatchOnLostJob(t *testing.T) {
 		if n == 1 {
 			return map[string]any{"status": "error", "error": "unknown job"}, http.StatusNotFound
 		}
-		return doneWire(t, remoteWire("the qube answer", `{"answer":"42"}`)), http.StatusOK
+		return doneWire(t, remoteWire("the zorblax answer", `{"answer":"42"}`)), http.StatusOK
 	}
 	srv := node.server()
 
@@ -1257,7 +1257,7 @@ func TestRunAutoBusyFallsLocalWhenNoEligibleRemote(t *testing.T) {
 	localCalls := 0
 	local := func(ctx context.Context, c core.AgentContract, _ LocalOptions) (core.AgentWireResult, error) {
 		localCalls++
-		return core.AgentWireResult{SchemaVersion: 1, NodeID: "this-box", Seat: "local-seat", Output: "local qube answer", Structured: json.RawMessage(`{"answer":"local"}`), StopReason: "done"}, nil
+		return core.AgentWireResult{SchemaVersion: 1, NodeID: "this-box", Seat: "local-seat", Output: "local zorblax answer", Structured: json.RawMessage(`{"answer":"local"}`), StopReason: "done"}, nil
 	}
 	results, sum, err := Run(t.Context(), cfg, local, []core.AgentContract{remoteContract()}, "auto", []string{srv.URL})
 	if err != nil {
@@ -1314,7 +1314,7 @@ func TestRunRouteLocalNeverTouchesTheNetwork(t *testing.T) {
 	defer srv.Close()
 
 	local := func(ctx context.Context, c core.AgentContract, _ LocalOptions) (core.AgentWireResult, error) {
-		return core.AgentWireResult{SchemaVersion: 1, NodeID: "this-box", Seat: "local-seat", Output: "the qube answer", Structured: json.RawMessage(`{"answer":"42"}`), StopReason: "done"}, nil
+		return core.AgentWireResult{SchemaVersion: 1, NodeID: "this-box", Seat: "local-seat", Output: "the zorblax answer", Structured: json.RawMessage(`{"answer":"42"}`), StopReason: "done"}, nil
 	}
 	_, sum, err := Run(t.Context(), testCfg(t), local, []core.AgentContract{remoteContract()}, "local", []string{srv.URL})
 	if err != nil {
@@ -1388,7 +1388,7 @@ func TestRunTelemetryFailureIsLoudOnceAndNeverFailsTheRun(t *testing.T) {
 	}
 
 	local := func(ctx context.Context, c core.AgentContract, _ LocalOptions) (core.AgentWireResult, error) {
-		return core.AgentWireResult{SchemaVersion: 1, NodeID: "this-box", Seat: "local-seat", Output: "the qube answer", Structured: json.RawMessage(`{"answer":"42"}`), StopReason: "done"}, nil
+		return core.AgentWireResult{SchemaVersion: 1, NodeID: "this-box", Seat: "local-seat", Output: "the zorblax answer", Structured: json.RawMessage(`{"answer":"42"}`), StopReason: "done"}, nil
 	}
 	results, sum, err := Run(t.Context(), cfg, local, []core.AgentContract{remoteContract(), remoteContract()}, "local", nil)
 	if err != nil {
@@ -1693,10 +1693,10 @@ func TestRunContractSideClassRequiresAHealthyFleet(t *testing.T) {
 		cfg.GPULockPath = heldLease(t)
 		contract := remoteContract()
 		contract.OutputSchema = nil
-		contract.Acceptance = []string{"contains:qube"} // text-verb only: nothing structured was asked for
+		contract.Acceptance = []string{"contains:zorblax"} // text-verb only: nothing structured was asked for
 		local := func(ctx context.Context, c core.AgentContract, _ LocalOptions) (core.AgentWireResult, error) {
 			return core.AgentWireResult{SchemaVersion: 1, NodeID: "this-box", Seat: "local-seat",
-				Output: "local qube answer", StopReason: "done"}, nil
+				Output: "local zorblax answer", StopReason: "done"}, nil
 		}
 		results, sum, err := Run(t.Context(), cfg, local, []core.AgentContract{contract}, "auto", []string{deadRemoteBase(t)})
 		if err != nil {
@@ -1928,7 +1928,7 @@ func TestRunTotalLedgerLossIsPublished(t *testing.T) {
 	}
 	local := func(ctx context.Context, c core.AgentContract, _ LocalOptions) (core.AgentWireResult, error) {
 		return core.AgentWireResult{SchemaVersion: 1, NodeID: "this-box", Seat: "local-seat",
-			Output: "the qube answer", Structured: json.RawMessage(`{"answer":"42"}`), StopReason: "done"}, nil
+			Output: "the zorblax answer", Structured: json.RawMessage(`{"answer":"42"}`), StopReason: "done"}, nil
 	}
 	results, sum, err := Run(t.Context(), cfg, local, []core.AgentContract{remoteContract(), remoteContract()}, "local", nil)
 	if err != nil {
@@ -2000,11 +2000,11 @@ func TestPollFailLogCountsEveryShapePastTheCap(t *testing.T) {
 // the CLI and MCP caller saw a forced answer and a voluntary one as the same
 // bytes. The accounting must ride results[] exactly as the node reported it.
 func TestWireResponseCarriesLoopAccounting(t *testing.T) {
-	forced := PlacedResult{Node: "Qube", Seat: "agent-pool", JobID: "agd-forced", PlacementReason: "route=local forced",
-		Result: core.AgentWireResult{SchemaVersion: 1, NodeID: "Qube", Seat: "agent-pool", Output: "the answer",
+	forced := PlacedResult{Node: "node-b", Seat: "agent-pool", JobID: "agd-forced", PlacementReason: "route=local forced",
+		Result: core.AgentWireResult{SchemaVersion: 1, NodeID: "node-b", Seat: "agent-pool", Output: "the answer",
 			Steps: 12, StopReason: "done", StopNote: "forced final answer: the 12-step budget was reached (D-89)", OutputTruncated: true}}
-	voluntary := PlacedResult{Node: "Qube", Seat: "agent-pool", JobID: "agd-vol", PlacementReason: "route=local forced",
-		Result: core.AgentWireResult{SchemaVersion: 1, NodeID: "Qube", Seat: "agent-pool", Output: "the answer", Steps: 3, StopReason: "done"}}
+	voluntary := PlacedResult{Node: "node-b", Seat: "agent-pool", JobID: "agd-vol", PlacementReason: "route=local forced",
+		Result: core.AgentWireResult{SchemaVersion: 1, NodeID: "node-b", Seat: "agent-pool", Output: "the answer", Steps: 3, StopReason: "done"}}
 	blob, err := json.Marshal(WireResponse([]PlacedResult{forced, voluntary}, Summary{Succeeded: 2}, nil))
 	if err != nil {
 		t.Fatal(err)
