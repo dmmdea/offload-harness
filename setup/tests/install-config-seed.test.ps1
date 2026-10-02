@@ -146,7 +146,7 @@ Assert ([bool]$profiles.'ampere-8'.include_qwen35_9b)                      'ampe
 Assert ($profiles.'ampere-8'.agent_ctx_tokens -eq 65536)                   'ampere-8 agent_ctx_tokens raised to 65536 (mimo-9b-agent literal --ctx-size)'
 Assert ($profiles.'ampere-8'.ctx_size -eq 32768)                           'ampere-8 serves 32K (measured on-reference: E4B 3187 MiB, 9B 6111 MiB @32K)'
 # amd-gcn: mimo-9b-agent ADOPTED as this tier's bound agent seat (operator-approved,
-# MEASURED 2026-09-24 on binxarn): equal quality to qwen3.5-4b-agent within the test's
+# MEASURED 2026-09-24 on <node-f>): equal quality to qwen3.5-4b-agent within the test's
 # resolution at roughly HALF the wall (333 s vs 614 s). qwen3.5-4b-agent stays
 # include_qwen35_4b true and renders as the un-aliased ROLLBACK seat - the SAME
 # both-halves-move-together rule as blackwell-8/ampere-8, one weight class down.
@@ -353,7 +353,7 @@ foreach ($t in @($profiles.PSObject.Properties.Name)) {
   }
 }
 
-# --- The 26B download follows the resolved include_26b (OptiPlex parity audit, 2026-09-23) --
+# --- The 26B download follows the resolved include_26b (<node-e> parity audit, 2026-09-23) --
 # Step 5 added 'model-26b' on the family gate alone, so blackwell-8 (include_26b false,
 # moe_26b drop) downloaded 14.25 GB the rendered yaml never serves.
 Write-Host ""
@@ -412,7 +412,7 @@ Assert ($m2 -match '"accelerators":\s*\[') 'config accelerators serializes as a 
 $mjson = [ordered]@{ big_ram = $false; accelerators = @(@('hailo-8l')) } | ConvertTo-Json -Depth 6
 Assert ($mjson -match '"accelerators":\s*\[') 'manifest accelerators serializes as a JSON array (1 element, no unroll)'
 
-# --- Media-seat bindings: the missing tierseed.Resolve layer (field: OptiPlex 7060) ---
+# --- Media-seat bindings: the missing tierseed.Resolve layer (field: <node-e>) ---
 Write-Host ""
 Write-Host "== Get-MediaSeatBindings: seats bind vision_model/stt_model on the fresh path =="
 Assert ([bool](Get-Command Get-MediaSeatBindings -ErrorAction SilentlyContinue)) 'dot-source seam defines Get-MediaSeatBindings'

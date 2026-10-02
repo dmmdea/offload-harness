@@ -1661,7 +1661,7 @@ var generateVideoValueFlags = map[string]bool{
 // option the offload_generate_video MCP tool takes (prompt, still, out, model,
 // negative, frames, width, height, steps, seed, reserve_vram, fast, hero, upscale):
 // --fast was the missing one, which left the distilled Wan recipe reachable only
-// through MCP (OptiPlex parity audit, 2026-09-23).
+// through MCP (<node-e> parity audit, 2026-09-23).
 func parseGenerateVideo(args []string, errorHandling flag.ErrorHandling) (generateVideoCLI, error) {
 	fs := flag.NewFlagSet("generate-video", errorHandling)
 	fs.String("config", "", "config file path")
@@ -2562,7 +2562,7 @@ func runFleetServe(args []string) error {
 	// The generic source is per-OS and per-tier (genericMemProvider): the WDDM
 	// registry+PDH provider on Windows, the amdgpu sysfs provider on Linux
 	// (vram_linux_amdgpu.go — the seam ADR 0014 left open; without it an AMD APU on
-	// Linux with a measured tier could not fleet-serve at all, binxarn 2026-09-20),
+	// Linux with a measured tier could not fleet-serve at all, <node-f> 2026-09-20),
 	// and /proc/meminfo less the operator's reserve for an SoC with no VRAM at all.
 	generic := genericMemProvider(runtime.GOOS, info.Profile, uma, cfg.UMAReserveGiB, "/")
 	prov, perr := fleetnode.ResolveProviderNamed(
@@ -2719,7 +2719,7 @@ func runFleetServe(args []string) error {
 		Backends: info.Backends(),
 		// ADR 0024: the manifest's additive-device list, advertised so
 		// a delegator can route NPU-owned work here. A hand-built node has no
-		// installed.json (the Lenovo, verified) and would never list its device;
+		// installed.json (<node-c>, verified) and would never list its device;
 		// the config's own list is the fallback then (Coral D6). The manifest
 		// wins when it lists anything, so the installer path is unchanged.
 		// A local-only device (register E-08) is dropped either way.
@@ -3033,7 +3033,7 @@ func doctorRun(cfg config.Config, routes []mediacap.Route, w io.Writer) error {
 	// them — a doctor that is red for llama-swap and silent about a broken media
 	// binding is the same blind spot in a different disguise.
 	mediaMissing := writeMediaSection(w, routes)
-	// sdcpp's Vulkan device pin (register: OptiPlex remediation 2026-09-23): a box
+	// sdcpp's Vulkan device pin (register: <node-e> remediation 2026-09-23): a box
 	// with an enabled integrated GPU enumerates it as Vulkan0, ahead of the
 	// discrete card, and the render script used to pin device 0 whenever the
 	// environment left it unset — every sdcpp render then ran on the iGPU at
@@ -4277,7 +4277,7 @@ func runEval(args []string) error {
 		p, cleanup, err := openPipeline(c)
 		if err != nil {
 			// Said, never swallowed: a pipeline that cannot open produced a
-			// silent `{}` report on the Aorus (2026-09-18, register A-102 (d)) that
+			// silent `{}` report on <node-a> (2026-09-18, register A-102 (d)) that
 			// read as "zero cases" for an hour.
 			fmt.Fprintf(os.Stderr, "eval: open pipeline: %v\n", err)
 			return nil

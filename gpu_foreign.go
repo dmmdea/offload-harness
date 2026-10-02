@@ -1,7 +1,7 @@
 package main
 
 // Foreign GPU memory holders (register D-1xx-4, 2026-09-23; R4/noise-repro on
-// the OptiPlex): idle DaVinci Resolve held 1,450 MiB of an 8 GB card and
+// <node-e>): idle DaVinci Resolve held 1,450 MiB of an 8 GB card and
 // nothing reported it. `gpuactivity.SampleProcesses` (nvidia-smi
 // --query-compute-apps) already lists processes on the cards, but on Windows
 // (WDDM) nvidia-smi's own per-process memory is `[N/A]` — see GPUProcess's
@@ -16,9 +16,9 @@ package main
 // already imports gpuactivity (internal/fleetnode/server.go), so the reverse
 // import would cycle. Package main already imports both.
 //
-// Follow-up (2026-09-24, operator-reported): the warning fired on the Qube
+// Follow-up (2026-09-24, operator-reported): the warning fired on <node-b>
 // for an ordinary desktop session — Code.exe, chrome.exe, SnippingTool.exe,
-// explorer.exe and friends, all sitting on the Qube's DISPLAY card (nvidia-smi
+// explorer.exe and friends, all sitting on <node-b>'s DISPLAY card (nvidia-smi
 // index 1, the 3-card law's own "never a work card"). The PDH source this
 // file reads has no per-card identity (AllProcessDedicatedMiB sums/duplicates
 // per pid, not per adapter), so two more signals are cross-referenced,
@@ -38,7 +38,7 @@ package main
 // a nil DisplayCardUUIDs already encodes), which is also the single-card-box
 // case where the lease has no other card to fence: there the display card
 // IS the work card, so nothing is filtered and a Resolve-class hog still
-// warns (foreignMinMiB_test.go's OptiPlex-shaped case). A PID absent from the
+// warns (foreignMinMiB_test.go's single-card-shaped case). A PID absent from the
 // compute-apps list (unknown attribution) is never filtered — absence of
 // evidence is not evidence of "it's only on the display card".
 //
@@ -96,7 +96,7 @@ type ForeignGPUHolder struct {
 // box and would turn every `gpu reserve` into a wall of warnings. Raised
 // from the original 64 MiB to 512 (2026-09-24, operator-reported): 64 MiB
 // let ordinary desktop apps (PAIR.exe 366, chrome.exe 365, SnippingTool.exe
-// 361, msedgewebview2.exe 238 MiB — all measured on the Qube's display card)
+// 361, msedgewebview2.exe 238 MiB — all measured on <node-b>'s display card)
 // through; DaVinci Resolve's measured 1,450 MiB idle-hog clears 512 by
 // nearly 3x, so the headline case this file exists for is unaffected.
 const foreignDefaultMinMiB = 512
@@ -123,7 +123,7 @@ func effectiveForeignMinMiB(cfg config.Config) int {
 //
 // The Windows shell/desktop rows (csrss, explorer, and the shell-experience
 // hosts below) were added 2026-09-24 alongside dwm: the per-process floor
-// already clears them on the Qube's own measured numbers (explorer.exe 154,
+// already clears them on <node-b>'s own measured numbers (explorer.exe 154,
 // csrss.exe 119 MiB), but naming them explicitly means a busier desktop
 // session that pushes one of them over the floor still doesn't warn — the
 // operator's own OS chrome is never the "GPU hog" this file exists to catch.

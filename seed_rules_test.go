@@ -54,7 +54,7 @@ func sortedTiers(doc seedRulesDoc) []string {
 // GPU may seed it. The `cpu` tier is exempt only because it has no card to overflow FROM.
 //
 // It exists because the rule was written, recorded, and then not applied to the seeds: four tiers
-// kept "cpu_moe", and the Aorus served the 26B that way live until 2026-09-21.
+// kept "cpu_moe", and <node-a> served the 26B that way live until 2026-09-21.
 func TestNoGPUTierParksTheMoEExpertsInRAM(t *testing.T) {
 	doc := loadSeedRulesDoc(t)
 	for _, name := range sortedTiers(doc) {
@@ -98,8 +98,8 @@ func TestEveryAgentSeatIsChosenNotDerived(t *testing.T) {
 	}
 }
 
-// TestAmdGcnSeedsTheSeatItWasMeasuredOn pins amd-gcn to what ran on its reference box (Binxarn,
-// Ryzen 5 5625U / Vega 7, Vulkan), per plans/receipts/2026-09-20-binxarn-firmware-and-tune.md:
+// TestAmdGcnSeedsTheSeatItWasMeasuredOn pins amd-gcn to what ran on its reference box (<node-f>,
+// Ryzen 5 5625U / Vega 7, Vulkan), per the amd-gcn firmware-and-tune receipt:
 //
 //   - the E4B is the hot model (resident == workhorse offload-e4b): Vulkan pp512 129.08 / tg128
 //     11.93. The E2B "weakest path" the tier carried was a projection that was never replaced.
@@ -121,7 +121,7 @@ func TestAmdGcnSeedsTheSeatItWasMeasuredOn(t *testing.T) {
 		t.Fatal("tier amd-gcn not found — this gate went blind")
 	}
 	if p.ResidentTier != "offload-e4b" {
-		t.Errorf("amd-gcn resident_tier = %q, want \"offload-e4b\" (the E4B measured on binxarn)", p.ResidentTier)
+		t.Errorf("amd-gcn resident_tier = %q, want \"offload-e4b\" (the E4B measured on <node-f>)", p.ResidentTier)
 	}
 	want := map[string]any{
 		"agent_model":         "mimo-9b-agent",
@@ -133,7 +133,7 @@ func TestAmdGcnSeedsTheSeatItWasMeasuredOn(t *testing.T) {
 	for key, w := range want {
 		raw, ok := p.ConfigSeed[key]
 		if !ok {
-			t.Errorf("amd-gcn config_seed lacks %q (want %v) — it is live on binxarn and a fresh install loses it", key, w)
+			t.Errorf("amd-gcn config_seed lacks %q (want %v) — it is live on <node-f> and a fresh install loses it", key, w)
 			continue
 		}
 		var got any

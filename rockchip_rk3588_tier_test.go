@@ -164,8 +164,8 @@ func TestRK3588SeedBindsTheNPUSeatAndBlanksWhatItDoesNotServe(t *testing.T) {
 // The two spellings are the vendor 6.1 kernel's and mainline's, on the same physical board.
 func TestDetectedRK3588RendersItsOwnTier(t *testing.T) {
 	for name, compat := range map[string]string{
-		"vendor 6.1 kernel": "rockchip,rk3588s-orangepi-5\x00rockchip,rk3588\x00",
-		"mainline 7.0":      "xunlong,orangepi-5\x00rockchip,rk3588s\x00",
+		"vendor 6.1 kernel": "rockchip,rk3588s-exampleboard-5\x00rockchip,rk3588\x00",
+		"mainline 7.0":      "vendor,exampleboard-5\x00rockchip,rk3588s\x00",
 	} {
 		facts, ok := hwdetect.DetectSoC(func(string) ([]byte, error) { return []byte(compat), nil })
 		if !ok {

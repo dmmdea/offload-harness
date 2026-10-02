@@ -123,7 +123,7 @@ func TestDrainWaitsForInflightToReachZeroTwice(t *testing.T) {
 	}
 }
 
-// TestDrainFallsBackToSlotsWhenTheSeatHasNoMetrics is the 2026-09-06 Lenovo
+// TestDrainFallsBackToSlotsWhenTheSeatHasNoMetrics is the 2026-09-06 <node-c>
 // case: a warm llama.cpp seat without --metrics answers /metrics 501, and the
 // drain timed out on it. It now reads /slots: busy while a slot is processing,
 // drained once two consecutive reads see none.
@@ -291,7 +291,7 @@ func TestDrainErrorsAtTheDeadlineWhileStarting(t *testing.T) {
 // once (drainSwap above only ever models one) — the fixture the defect-3 fix
 // needs: `gpu reserve --unload-seat` must unload every OTHER resident model
 // on the box, not only the configured agent seat (register D-1xx-3,
-// 2026-09-23; R2/R3 measured on the OptiPlex: another client's vision seat
+// 2026-09-23; R2/R3 measured on <node-e>: another client's vision seat
 // `qwen3.5-9b-vl` stayed resident through an entire media lease on an 8 GB
 // card and only aged out at its own ttl).
 type multiSeatSwap struct {

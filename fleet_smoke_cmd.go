@@ -29,7 +29,7 @@ type smokeRow struct {
 // smokeContract is the harness's "Test traffic" button. "Cheap" is the 60 s
 // wall bound (TimeoutSec), not a hand-picked step cap: MaxSteps is left at 0
 // so PrepareContract fills in the harness default (core.AgentMaxStepsDefault)
-// — a hard-coded small budget strangled legitimate smokes (the Lenovo seat
+// — a hard-coded small budget strangled legitimate smokes (the <node-c> seat
 // needed exactly 3 steps to answer; a smaller cap starves any seat that plans
 // or tool-calls before replying) and the real cost control is the timeout,
 // not an artificially tight step count. The acceptance is anchored on a
@@ -77,7 +77,7 @@ func renderSmokeTable(rows []smokeRow) string {
 // The case that earned it is Unplaced. A forced remote route that finds nothing
 // eligible comes back Deferred with the LOCAL node and seat stamped on it (the
 // deciding box, not a box that ran anything), so the row used to read
-// "Qube / agent-pool / DEFER" — naming the operator's own machine as the node
+// "<node-b> / agent-pool / DEFER" — naming the operator's own machine as the node
 // under test and hiding WHICH configured base was unreachable (issue #250, filed
 // as "the dispatcher's own local row always DEFERs"; there is in fact no
 // separate local row — it is the remote's row coming back local). The verdict

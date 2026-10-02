@@ -3,7 +3,7 @@
 # Registers the swap through WMI (Win32_Process.Create), which survives the calling SSH
 # session ending - Start-Process does NOT (windows-ssh-remote-ops-patterns house memory:
 # "Windows OpenSSH kills the whole remote process tree on disconnect"). This is the direct
-# fix for the 2026-09-24 Aorus outage: that deploy's restart-and-verify phase ran INSIDE the
+# fix for the 2026-09-24 <node-a> outage: that deploy's restart-and-verify phase ran INSIDE the
 # ssh session and died with it mid-swap, with the binary already replaced but no restart, no
 # verify, and no rollback ever reached. This launcher starts the swap, prints the log/result
 # paths, and returns immediately - the swap process itself keeps running (and can still roll
@@ -14,7 +14,7 @@
 # this script is meant to run unmodified via `powershell -File` however it is staged.
 #
 # Usage (local, or piped over ssh - the launch call itself returns almost instantly, so it
-# is not vulnerable to the disconnect trap that hit the Aorus swap):
+# is not vulnerable to the disconnect trap that hit the <node-a> swap):
 #
 #   .\windows-node-swap-launch.ps1 -Staged D:\offload-stack\bin\local-offload-NEW.exe `
 #     -Target D:\offload-stack\bin\local-offload.exe -Sha256 <hex> `
