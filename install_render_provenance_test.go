@@ -33,7 +33,7 @@ func stampedAtFixed() time.Time { return time.Date(2026, 9, 14, 12, 0, 0, 0, tim
 //
 // The case is the real one. Register A-39 raised ampere-16's served window from
 // 32768 to 131072 (commit 5e249dd, 0.113.32, 2026-09-07, "install defaults
-// follow the measurement upward"). The Lenovo's rendered llama-swap config was
+// follow the measurement upward"). <node-c>'s rendered llama-swap config was
 // never re-rendered, so it kept serving 32768 — and `local-offload audit-yaml`
 // reported OK the entire time, because a config a tier revision behind breaks no
 // operator rule. testdata/profiles-pre-a39-ampere-16.json is that tier's entry
@@ -97,7 +97,7 @@ func TestPreA39AmpereConfigIsReportedStaleNamingCtxSize(t *testing.T) {
 func TestFreshRenderVerifiesAgainstItsOwnBinary(t *testing.T) {
 	for _, tc := range []struct{ tier, goos string }{
 		{"ampere-16", "linux"},
-		{"blackwell-2x16", "windows"}, // the Qube pair: a Windows template, a vLLM seat, two cards
+		{"blackwell-2x16", "windows"}, // the <node-b> pair: a Windows template, a vLLM seat, two cards
 	} {
 		t.Run(tc.tier, func(t *testing.T) {
 			req := ampere16Replay(tc.tier)

@@ -128,7 +128,7 @@ projected per-profile serving choices — `selftest.ps1` measures and refines th
 | `ampere-6` | #10/#11 (3050 6 GB) | `offload-e4b` | 32K | q8_0 (conservative default; f16 measured viable) | dropped |
 | `amd-gcn` | #12 (Vega 7 + 32 GB, Vulkan + CPU alt route) | `gemma4-e2b` (agent `qwen3.5-4b-agent`) | 32K | f16, FA on (measured 2026-09-20) | dropped |
 | `cpu` | no GPU | `offload-e4b` (CPU) | 8K | f16, FA off | `--cpu-moe` if RAM ≥ ~56 GB, else dropped |
-| `rockchip-rk3588` | Rockchip RK3588 SoC board (an Orange Pi 5, 7.7 GiB shared by CPU/GPU/NPU); Linux only, detected from the device tree | `qwen3.5-2b-npu` (NPU via RKLLM, chat + vision); no llama.cpp entry (Vulkan faults the Mali, measured); no CPU inference | the NPU seat 16K | n/a (RKLLM) | dropped |
+| `rockchip-rk3588` | Rockchip RK3588 SoC board (the reference board, 7.7 GiB shared by CPU/GPU/NPU); Linux only, detected from the device tree | `qwen3.5-2b-npu` (NPU via RKLLM, chat + vision); no llama.cpp entry (Vulkan faults the Mali, measured); no CPU inference | the NPU seat 16K | n/a (RKLLM) | dropped |
 
 **Big-VRAM Blackwell tiers (#13–15, added 2026-07-16):** cards ≥24 GB render the
 `cuda-resident` template — every model is a standalone entry (no swap group, no ttl), so the
@@ -178,7 +178,7 @@ The **≥16GB image-EDIT primitive is Qwen-Image-Edit-2511** (Apache-2.0, commer
 *recommended-model designation*, not a `config_seed` binding", because edit workflows run through
 `run-graph` with their own node manifest — true for those workflows, but it left the harness's own
 `edit_image_generative` route NOT CONFIGURED on every fresh ≥16GB install while the SMALLER blackwell-8
-tier had it, and the Qube served it only by hand-wiring. Binding it is additive: run-graph workflows
+tier had it, and <node-b> served it only by hand-wiring. Binding it is additive: run-graph workflows
 still declare their own models. **Make sure these three models are in ComfyUI** (the installer does
 not fetch ComfyUI models). `blackwell-8` seeds its own edit/inpaint in its RAM-conditional layer —
 see the 8GB section below. HiDream-O1 (t2i) and Wan (video) stay the config_seed
@@ -227,7 +227,7 @@ an 8GB 3070 + 64GB RAM box, 2026-07-16). **J4: this binding is now AUTOMATIC on 
 `ram_tier` is mid/high (same RAM gate as the 26B cpu-moe path). The two tiers DIVERGE by operator
 decision: **`ampere-8` = the O1 bf16 IMAGE seat, image only** (no video/music — decision
 2026-07-23, standing for that tier pending its own bake). **`blackwell-8` (2026-08-23 REVERSAL,
-editor-box role; every seat run on the OptiPlex reference box; the fp8mixed edit timing is owed at acceptance)** additionally seeds the wan22
+editor-box role; every seat run on the blackwell-8 reference box; the fp8mixed edit timing is owed at acceptance)** additionally seeds the wan22
 VIDEO lane (`videogen_unet_high/low` = the fp8_scaled pair
 `wan2.2_i2v_{high,low}_noise_14B_fp8_scaled.safetensors` on `videogen_wan_loader` `native`: register
 A-120, 2,029 s against 2,939 s for the Q8_0 pair at 832x480x81 on the reference box, measured 2026-09-24.
@@ -267,7 +267,7 @@ all from `PaddlePaddle/PaddleOCR-VL-1.6-GGUF` — the model transcribes DEGRADED
 template, and it is crops/region-driven by design: full scattered pages degrade without the
 vendor's layout stage). An `rkllm` seat (the rockchip-rk3588 tier's NPU seat) needs its `.rkllm`
 model and, when it is a VLM, its vision encoder `.rknn` in the models dir — the renderer WARNs on
-both. Field-measured traps (OptiPlex 7060, 2026-08-22):
+both. Field-measured traps (<node-e>, 2026-08-22):
 
 - **Qwen3VL-4B**: the HF repo is the HYPHENATED `unsloth/Qwen3-VL-4B-Instruct-GGUF` — the
   unhyphenated `unsloth/Qwen3VL-4B-Instruct-GGUF` name returns 401, which reads like an auth
@@ -807,7 +807,7 @@ on Linux). Two knobs:
 
 - `CORAL_HOME` (`install seed --coral-home`) — the sidecar home `__CORAL_HOME__` expands to in the
   seeded `coral_sidecar_cmd`. Default `<OFFLOAD_HOME>/coral`. It must hold `venv/` (ai-edge-litert +
-  numpy + pillow; on the Lenovo built offline from `~/coral-stage/wheels314`), `models/` (run
+  numpy + pillow; on <node-c> built offline from `~/coral-stage/wheels314`), `models/` (run
   `accelerators/coral/fetch-models.sh`, which verifies every sha256), and `accelerators/coral/` —
   copied flat or checked out beneath the home; the launcher walks up to `venv/`. The harness runs
   it as `coral-http.sh --idle-sec <coral_idle_sec>`. An EMPTY home is refused at seed time.

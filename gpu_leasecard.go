@@ -17,9 +17,9 @@ import (
 //
 // The lease queue is where the house runs every bench, render and measurement
 // (CLAUDE.md: any GPU job on any node goes through `gpu reserve`), and none of
-// it reached PAIR: on 2026-09-23 the Aorus ran a seat bench and a ComfyUI
-// diagnostic and the Lenovo a Wan 2.2 smoke render, each at 84-100 % on its
-// card, and the Jobs list showed only the Qube's delegations. The card is
+// it reached PAIR: on 2026-09-23 <node-a> ran a seat bench and a ComfyUI
+// diagnostic and <node-c> a Wan 2.2 smoke render, each at 84-100 % on its
+// card, and the Jobs list showed only <node-b>'s delegations. The card is
 // queued while the job waits in the lease queue and drains the seat, running
 // once the command starts, and closed with the command's exit. A one-shot
 // harness verb run directly under the lease gets pairworkloads.UnderLeaseEnv,

@@ -62,7 +62,7 @@ func seedStr(m map[string]any, k string) string {
 // either is empty, and there is no default script). Until 0.132.5 eight 16 GB+ tiers seeded an image
 // model with no imagegen_script, thirteen seeded upscale_model with no upscale_script anywhere, and
 // blackwell-8 seeded an edit UNET and an inpaint checkpoint with no scripts — so on every fresh
-// install those routes deferred, while the Qube served them only because they were hand-wired.
+// install those routes deferred, while <node-b> served them only because they were hand-wired.
 func TestEveryComfyMediaModelHasItsScript(t *testing.T) {
 	doc := loadMediaSeedDoc(t)
 	names := make([]string, 0, len(doc.Profiles))
@@ -102,9 +102,9 @@ func TestEveryComfyMediaModelHasItsScript(t *testing.T) {
 // TestMediaScriptsResolveNextToTheBinary: gpugen.ResolveScriptIn joins a RELATIVE script to the
 // binary's own directory, and both installers put render/ there (install.sh: "$PREFIX/bin/render";
 // Windows: <home>\bin\render). ampere-8 and blackwell-8 seeded "__OFFLOAD_HOME__/render/…", a
-// directory that does not exist on an installed box (measured on the Aorus 2026-09-21:
+// directory that does not exist on an installed box (measured on <node-a> 2026-09-21:
 // D:\offload-stack\render absent, D:\offload-stack\bin\render present), so the seeded image route
-// pointed at nothing and the Aorus worked only because it was hand-set.
+// pointed at nothing and <node-a> worked only because it was hand-set.
 func TestMediaScriptsResolveNextToTheBinary(t *testing.T) {
 	doc := loadMediaSeedDoc(t)
 	for name, p := range doc.Profiles {
@@ -123,7 +123,7 @@ func TestMediaScriptsResolveNextToTheBinary(t *testing.T) {
 }
 
 // TestSixteenGBComfyTiersSeedTheMeasuredEditInpaintAnimateRoutes pins the three routes that were
-// measured, kept, and served on the Qube — and seeded by no tier:
+// measured, kept, and served on <node-b> — and seeded by no tier:
 //   - edit: Qwen-Image-Edit-2511 Q5_1 + the lightning8 preset, "frontier confirmed ≥16GB edit
 //     primitive" (2026-08-14-seat-frontier-leg0-1-2-notes.md:323).
 //   - inpaint: RealVisXL_V5.0_fp16 held its seat (2026-08-19-nightshift8-notes.md:201).

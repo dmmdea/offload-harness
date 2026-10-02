@@ -8,7 +8,7 @@ import (
 )
 
 // TestAmpere16VisionSeatIsTheMeasuredWinner pins the ampere-16 vision seat to
-// the 2026-09-12 bake-off result on the tier's reference box (Lenovo M720q,
+// the 2026-09-12 bake-off result on the tier's reference box (<node-c>,
 // NVIDIA A2 16 GB): Qwen3.8-27B UD-IQ3_S + mmproj-F16 was the only candidate
 // that read every serial number, email and low-contrast string (OCR 9/9, VQA
 // 5/5) in the harness's own assess_image / ocr / vqa over a labelled set; the

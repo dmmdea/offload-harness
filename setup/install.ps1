@@ -656,7 +656,7 @@ function Select-CudaBuild {
 # Resolve-ProfileParams returns AFTER its RAM gate - moe_26b drop, or cpu_moe with no
 # RAM path). Step 5 used to add 'model-26b' on the family gate alone, so a tier that
 # drops the 26B (blackwell-8: include_26b false) still downloaded 14.25 GB that the
-# rendered yaml never serves (OptiPlex parity audit, 2026-09-23). Download set and
+# rendered yaml never serves (<node-e> parity audit, 2026-09-23). Download set and
 # served roster now come from the same flag, like the other gated seats.
 function Get-FamilyModelKeys {
   param([bool]$WithFamily, [bool]$Include26B)
@@ -881,7 +881,7 @@ function Add-OrSet-Property {
 # the accelerator seed) but never this one — so a fresh Windows install rendered
 # the yaml seats while writing a config with NO vision_model/stt_model, and
 # vqa/ocr/transcribe deferred "no route" while llama-swap named the seats
-# (field case: OptiPlex 7060 blackwell-8, 2026-08-22).
+# (field case: <node-e> blackwell-8, 2026-08-22).
 function Get-MediaSeatBindings {
   param($ProfileRow)
   if (-not $ProfileRow -or -not $ProfileRow.PSObject.Properties['media_seats']) { return $null }

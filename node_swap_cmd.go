@@ -1,9 +1,9 @@
 package main
 
 // `local-offload node-swap` — the one reusable engine every future Windows
-// fleet-node binary swap calls, replacing the per-deploy aorus-swap-<sha>.ps1
+// fleet-node binary swap calls, replacing the per-deploy node-swap-<sha>.ps1
 // / deploy-node-exe.ps1 / fleet-node-restart.ps1 stitching (docs/systems/
-// node-swap.md has the full story, including the 2026-09-24 Aorus outage
+// node-swap.md has the full story, including the 2026-09-24 <node-a> outage
 // this tool exists to prevent).
 //
 //	local-offload node-swap --staged path --target path --sha256 HEX
@@ -56,11 +56,11 @@ func parseNodeSwapFlags(args []string) (nodeswap.Plan, nodeSwapOutput, error) {
 	skipHash := fs.Bool("skip-hash-check", false, "TESTING ONLY: skip verifying the staged binary's hash")
 	backupSuffix := fs.String("backup-suffix", "", "backup filename suffix: <target>.bak-<suffix> (default: a timestamp)")
 
-	healthURL := fs.String("health-url", "", "this node's GET /fleet/health URL — waits for queue=0 before swapping and verifies health after restart; omit for a standalone node with no fleet-serve endpoint (e.g. the OptiPlex)")
+	healthURL := fs.String("health-url", "", "this node's GET /fleet/health URL — waits for queue=0 before swapping and verifies health after restart; omit for a standalone node with no fleet-serve endpoint")
 	waitIdleTimeout := fs.Duration("wait-idle-timeout", 10*time.Minute, "max time to wait for the node to go idle before swapping")
 
 	restartTask := fs.String("restart-task", "", "Windows scheduled task to Stop/Start around the swap (e.g. offload-fleet-node); mutually exclusive with --restart-command")
-	restartCommand := fs.String("restart-command", "", "a command that stops+relaunches the node itself (e.g. the Qube's WMI-based fleet-node-restart.ps1); mutually exclusive with --restart-task. Neither flag = standalone binary-only swap, nothing restarted")
+	restartCommand := fs.String("restart-command", "", "a command that stops+relaunches the node itself (e.g. a launcher script that restarts the node out of session via WMI/CIM); mutually exclusive with --restart-task. Neither flag = standalone binary-only swap, nothing restarted")
 	restartTimeout := fs.Duration("restart-timeout", 60*time.Second, "max time to let --restart-command/-task run")
 	verifyTimeout := fs.Duration("verify-timeout", 90*time.Second, "max time to wait for a verified new process (PID + image sha256 + health) after restart")
 
@@ -106,7 +106,7 @@ func parseNodeSwapFlags(args []string) (nodeswap.Plan, nodeSwapOutput, error) {
 
 // loopbackOrWildcardHost reports a host that cannot be dialed FROM ANOTHER
 // MACHINE (loopback, or an unspecified/wildcard bind like 0.0.0.0/[::]) — the
-// exact host class that made the Lenovo's own ad-hoc deploy script silently
+// exact host class that made <node-c>'s own ad-hoc deploy script silently
 // fail every health poll (it hardcoded 127.0.0.1 while fleet-serve bound only
 // the tailnet address; d5207011 deploy record). A resolvable, specific host
 // (a tailnet IP, a hostname) is never in this set — resolveNodeSwapDefaults
@@ -136,7 +136,7 @@ func loopbackOrWildcardHost(hostport string) bool {
 //     address already clears loopbackOrWildcardHost, so a node whose config
 //     still carries the built-in loopback default (i.e. never told this tool
 //     its real bind address) gets no health URL, not a wrong one that reads
-//     as a false "not idle" forever (the Lenovo incident, d5207011 deploy
+//     as a false "not idle" forever (the <node-c> incident, d5207011 deploy
 //     record: ~46 minutes lost to exactly that silent-failure shape).
 //   - GPULockPath / GPUStateDir: always carried from cfg.GPULockPath /
 //     cfg.StateDir (harmless when HealthURL ends up set — nodeswap only

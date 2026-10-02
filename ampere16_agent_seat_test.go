@@ -16,7 +16,7 @@ import (
 // seat nothing can call.
 //
 // It pins the ampere-16 agent seat to the
-// 2026-09-16 blind re-audit on the tier's reference box (Lenovo M720q, NVIDIA A2
+// 2026-09-16 blind re-audit on the tier's reference box (<node-c>, NVIDIA A2
 // 16 GB at its accepted 40 W / 1200 MHz profile): Qwen3.8-27B UD-IQ3_S with the MTP
 // head embedded in the same GGUF beat the incumbent Qwen3.5-4B seat 24 of 24 blind
 // judgements, the Gemma 4 12B 24/24 and gpt-oss-20b 24/24, overall 9.32 against the

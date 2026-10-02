@@ -4,7 +4,7 @@
 #
 # Gap (bigger-models-2026-09-24.md / deploy-d5207011.md): every Linux deploy before
 # this script was an ad-hoc, per-node bash sequence hand-written for that one box —
-# the Lenovo's own script hardcoded a `curl http://127.0.0.1:<port>/fleet/health`
+# <node-c>'s own script hardcoded a `curl http://127.0.0.1:<port>/fleet/health`
 # health check while fleet-serve there actually binds only its tailnet address
 # (`--listen 192.0.2.10:18811 --listen-trusted-network`, a placeholder example —
 # a real tailnet address here, not loopback, is the point), so every poll silently
@@ -42,7 +42,7 @@
 # --restart-command is the Linux equivalent of the Windows launcher's -RestartTask
 # (Linux has no scheduled-task concept here): the systemd unit restart every deploy
 # record already uses by hand (`sudo systemctl restart offload-fleet-node.service`).
-# Omitting both --restart-command and --health-url is the OptiPlex/standalone
+# Omitting both --restart-command and --health-url is <node-e>/standalone
 # pattern (binary-only swap, GPU-lease-checked, nothing restarted — see gap 6b,
 # internal/nodeswap's standalone GPU-lease wait).
 #
@@ -82,7 +82,7 @@ usage() {
 # self-check would mean running arbitrary staged bytes first) — never the
 # currently-installed target. This inverts the tool's original default
 # (target): a fix to the swap engine itself (e.g. a node-swap bug fixed in the
-# very build being staged — exactly what happened on the Lenovo/binxarn
+# very build being staged — exactly what happened on <node-c>/<node-f>
 # 2026-09-24 rollout: their installed build still had the OLD, broken
 # deps_other.go stub, so running node-swap FROM it re-triggered the very bug
 # the staged build had already fixed) can never take effect while the launcher

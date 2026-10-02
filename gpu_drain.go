@@ -463,14 +463,14 @@ func maintainSeatCtx(ctx context.Context, cfg config.Config, restamp restamper, 
 	if unload {
 		// Read the seat BEFORE unloading: only a seat that was resident is owed a
 		// warm-back. Marking it owed unconditionally made a lease over a cold
-		// seat LOAD it at release — on 2026-09-23 the Qube's 3-card 27B came up
+		// seat LOAD it at release — on 2026-09-23 <node-b>'s 3-card 27B came up
 		// on all three cards after a video render, with nothing asking for it,
 		// and sat there until its ttl. A reading that fails or is ambiguous keeps
 		// the old behaviour (owed): "could not tell" must not cost a warm seat.
 		wasLoaded := seatWasResident(ctx, endpoint, model)
 		// OTHER RESIDENTS, read before either unload so the record reflects
 		// what was ACTUALLY there (register D-1xx-3, 2026-09-23; R2/R3
-		// measured on the OptiPlex): `--unload-seat` cleared only the
+		// measured on <node-e>): `--unload-seat` cleared only the
 		// configured agent seat, so a DIFFERENT client's own load — the
 		// vision seat `qwen3.5-9b-vl`, loaded by another session — stayed
 		// resident through an entire media lease on an 8 GB card and only

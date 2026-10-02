@@ -12,7 +12,7 @@ import (
 // TestVulkanAndCPUTiersRenderOnLinux: until 2026-09-20 the vulkan and cpu backends had
 // ONLY Windows templates, so a Linux AMD box carrying a MEASURED tier (amd-gcn, measured
 // 2026-07-17) could not be installed at all — install.sh died at "no serving template
-// for linux/vulkan" on binxarn (Ryzen 5 5625U). A tier is a hardware class; the OS it
+// for linux/vulkan" on <node-f> (Ryzen 5 5625U). A tier is a hardware class; the OS it
 // boots must not decide whether it exists. Every tier on these two backends must render
 // on BOTH operating systems, seats included, or this goes red before an installer does.
 func TestVulkanAndCPUTiersRenderOnLinux(t *testing.T) {
