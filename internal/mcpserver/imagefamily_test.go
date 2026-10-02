@@ -162,3 +162,40 @@ func TestStatusListsImageAndEditFamilies(t *testing.T) {
 		t.Errorf("media.routes lacks the family route: %v", routes)
 	}
 }
+
+// CT-47: offload_status media.video_family_bindings carries each family's license and
+// commercial_use beside its files — null when the family declares none (UNKNOWN).
+func TestStatusVideoFamilyBindingsCarryTheLicenseFields(t *testing.T) {
+	no := false
+	cfg := familyCfg(t)
+	cfg.VideoGenFamilies = map[string]config.VideoFamilyBinding{
+		"hunyuan": {License: "Example Community License", CommercialUse: &no},
+	}
+	s := New(pipeline.New(cfg, nil, nil, nil))
+	res, err := s.handleStatus(context.Background(), callReq(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	media, _ := decodeResult(t, res)["media"].(map[string]any)
+	rows, _ := media["video_family_bindings"].([]any)
+	if len(rows) == 0 {
+		t.Fatalf("media.video_family_bindings = %v", media["video_family_bindings"])
+	}
+	seen := map[string]map[string]any{}
+	for _, r := range rows {
+		m := r.(map[string]any)
+		seen[m["family"].(string)] = m
+		if _, ok := m["license"]; !ok {
+			t.Errorf("row %v lacks the license key", m)
+		}
+		if _, ok := m["commercial_use"]; !ok {
+			t.Errorf("row %v lacks the commercial_use key", m)
+		}
+	}
+	if hy := seen["hunyuan"]; hy["license"] != "Example Community License" || hy["commercial_use"] != false {
+		t.Errorf("hunyuan row = %v", hy)
+	}
+	if w := seen["wan22"]; w["license"] != nil || w["commercial_use"] != nil {
+		t.Errorf("wan22 declares none, row = %v must read null", w)
+	}
+}
