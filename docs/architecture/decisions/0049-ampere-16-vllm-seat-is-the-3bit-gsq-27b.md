@@ -310,15 +310,14 @@ three failures are in the seat's own log). Amendment 5 left its KV pool sized by
 pool during startup profiling, device-wide: anything else that moves the card's memory in that window changes the pool. Two
 things did. A cold compile cache profiles a larger activation (0.77 GiB against 0.41 GiB on a warm cache), and a memory-stack
 model loading beside the engine in that window shrinks the pool likewise; either took it below one 32,768-token request
-(Amendment 4 puts that at 1.29 GiB) and the start failed. The second was reproduced on an empty card by firing the embedder about
-50 s into the start. A seat that is meant to share its card with the memory stack's embedder and reranker cannot have a pool
+and the start failed. The second was reproduced on an empty card by firing the embedder about 50 s into the start. A seat that is meant to share its card with the memory stack's embedder and reranker cannot have a pool
 that depends on what else is loading during its start.
 
 **What was measured** (the reference ampere-16 box, by the acceptance arms of the vLLM 0.30.0 move; this change re-ran none of them):
 
 | point | result |
 |---|---|
-| lane seat, vLLM 0.29.0, util 0.84, pool sized by profiling, cold compile cache | profiled activation 0.77 GiB (0.41 warm); the start can fail below one request (three production failures; reproduced on an empty card with the embedder fired at about 50 s) |
+| lane seat, util 0.84, pool sized by profiling, cold compile cache | profiled activation 0.77 GiB (0.41 warm); the start can fail below one request (three production failures; reproduced on an empty card with the embedder fired at about 50 s) |
 | **lane seat, vLLM 0.30.0, `--kv-cache-memory-bytes 1524713390`** (1.42 GiB, the pool 0.29.0 sized on a warm start, 45,472 tokens), four concurrent ~20k-token requests beside the embedder and the reranker | card peak **13,951** of 15,356 MiB, **1,405 MiB** free; digest-8 **8/8** at the 900 s wall; greedy output identical to 0.29.0 on 20 prompts |
 | 35B seat, vLLM 0.30.0, util 0.85 | 0.30.0 carries about 0.07 GiB more non-torch memory than 0.29.0, and the pool lost 3 KV blocks |
 | **35B seat, vLLM 0.30.0, util 0.855** (8 sequences, 4,096 batched tokens) | KV pool **96,416 tokens**; **1,027-1,037 MiB** free under load beside the embedder and the reranker; digest-8 **8/8** |
