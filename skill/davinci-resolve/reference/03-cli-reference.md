@@ -9,7 +9,7 @@
 
 Source of truth: `<dev>\video-pipeline\engine\resolve_bridge\resolve_cli.py`
 (workstation). Rig copy is a build artifact — never hand-edit; `resolve.cmd --version` prints the SHA.
-Deploy: `pwsh engine/resolve_bridge/deploy.ps1` (remote Dell default) or
+Deploy: `pwsh engine/resolve_bridge/deploy.ps1` (remote editing-rig default) or
 `deploy.ps1 -Local -Dest 'D:/Editing/ResolveTools' -PythonPin '<python.exe>'` (workstation).
 Unit tests: `py -3 -m pytest engine/resolve_bridge/tests -q`. `check_readonly.py` (AST gate)
 fails the deploy if a non-write command path calls a mutating API.

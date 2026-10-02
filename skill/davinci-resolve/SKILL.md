@@ -12,8 +12,8 @@ the live Resolve deployment is per-machine and the layers below are NOT intercha
 
 | Capability | State |
 |---|---|
-| Reads: status, projects (+attributes), timelines, clips (video+audio, named timeline), selection, media pool (recursive), render presets, export-spec | **VERIFIED live** (2026-08-23, Dell rig, Studio 21.0.4.5) |
-| Writes: `import`, `page`, `create-project`, `load-project`, `delete-project`, `create-timeline`, `render`, `smoke` | **VERIFIED WORKING 2026-08-31** on the Dell rig — `smoke --yes --timeout 180` returns SMOKE PASS end-to-end (creates a disposable project, builds a timeline, inserts a generator, RENDERS and verifies the file, deletes the project, restores the editor's project). |
+| Reads: status, projects (+attributes), timelines, clips (video+audio, named timeline), selection, media pool (recursive), render presets, export-spec | **VERIFIED live** (2026-08-23, editing rig, Studio 21.0.4.5) |
+| Writes: `import`, `page`, `create-project`, `load-project`, `delete-project`, `create-timeline`, `render`, `smoke` | **VERIFIED WORKING 2026-08-31** on the editing rig — `smoke --yes --timeout 180` returns SMOKE PASS end-to-end (creates a disposable project, builds a timeline, inserts a generator, RENDERS and verifies the file, deletes the project, restores the editor's project). |
 | Spec→timeline build (append-from-spec), Fusion templates | The deployed CLI (`build f759aaa29`, 2026-08-25) DOES expose `build --spec PATH [--fps] [--lut NAME=PATH]` taking an edit-spec 1.0.0 — newer than this table's old "NOT BUILT". Untested, and it rides the same write path that is measured broken above, so treat as unusable until writes work. Still: do NOT hand-roll raw fusionscript writes against a live project |
 | **21.1 catalog + sidecar (2026-09-09, workstation)** | **146 commands VERIFIED live on Studio 21.1.0.14** through `resolve_cli.py serve --port 18800`: bins/clips/markers/flags/proxies, tracks, items (incl. 21.1 `add-transition`, `set-item --speed/--fade-in`, `set-item-properties`), multicam create/smart-switch/flatten, colour versions/CDL/LUT/DRX/groups/gallery, Fusion tool scripting (Lock/Undo wrapped), render queue/presets/quick-export/`verify-render`, system presets, `transcription` readback, `validate-dctl`. Branch `feat/resolve-http-sidecar` (PR #5). Reference: `reference/09-resolve-21-1.md` + `10-sidecar-and-cli.md`. **`archive-project` is refused: `ArchiveProject` crashes Resolve 21.1 from a script.** |
 | **Printed CLI `davinci-resolve-pp-cli` (2026-09-09)** | **Promoted to the local printing-press library** `%USERPROFILE%\printing-press\library\davinci-resolve` (build with `go build ./cmd/davinci-resolve-pp-cli`; NOT published to the public library — never publish without asking). 147 endpoint commands generated 1:1 from the sidecar catalog + 7 hand-authored history commands (`runs list/show`, `marker search`, `render history`, `color audit`, `fusion titles search`, `timeline log`, `doctor history`). Live dogfood 511/511 against `_ref_scratch`, shipcheck 7/7, scorecard 93/100. Needs the sidecar on `127.0.0.1:18800` (`resolve.cmd serve --port 18800`). Details + fixture recipe: `reference/10-sidecar-and-cli.md` §4–5. |
@@ -21,7 +21,7 @@ the live Resolve deployment is per-machine and the layers below are NOT intercha
 
 ## Access layers by host
 
-### Dell editing rig the editing rig — the editing rig (PRIMARY)
+### The editing rig (PRIMARY)
 > **2026-09-10: upgraded in place to Studio 21.1.0.14 and bridge `c099f222a` deployed** (silent
 > install over SSH while Resolve was closed; `deploy.ps1` verify PASS). NOT yet re-verified on
 > 21.1 here: interpreter compatibility (`_probe.py` first — the pin is per-machine), the licence
@@ -107,7 +107,7 @@ the live Resolve deployment is per-machine and the layers below are NOT intercha
   (`python312\`) — 3.11/3.14 crash 0xC0000005 on this Resolve build; never repoint.
 - **Footage root:** `D:\Editing\` (Projects/Footage/Exports/Assets).
 
-### laptop 15P the laptop — laptop (DORMANT: no Studio seat since 2026-08-28)
+### The laptop (DORMANT: no Studio seat since 2026-08-28)
 - Resolve updated to **21.0.4.5** but its license seat moved to the workstation — Resolve cannot
   launch there, so the whole scripting layer is inert until a seat returns. When it does:
   run `_probe.py` FIRST (its MCP venv is python 3.14.6; compatibility is per-machine).
@@ -128,7 +128,7 @@ the live Resolve deployment is per-machine and the layers below are NOT intercha
 - **CLI:** `D:\Editing\ResolveTools\resolve.cmd` — deployed from the same repo via
   `deploy.ps1 -Local -Dest 'D:/Editing/ResolveTools' -PythonPin 'C:\Program Files\Python314\python.exe'`.
   Interpreter is PIN-based: on the workstation fusionscript works under machine **3.14.7** and
-  CRASHES under the 3.12.10 embeddable — the exact inverse of the Dell, same Resolve build.
+  CRASHES under the 3.12.10 embeddable — the exact inverse of the editing rig, same Resolve build.
   Compatibility is PER-MACHINE: measure with `_probe.py`, never copy another box's pin.
 - **Preconditions:** Resolve must be running in the local session (launch
   `C:\Program Files\Blackmagic Design\DaVinci Resolve\Resolve.exe`); external scripting

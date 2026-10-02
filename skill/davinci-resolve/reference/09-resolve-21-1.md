@@ -39,7 +39,7 @@ Interpreter matrix on 21.1.0.14 (workstation), `_probe.py` against a running Stu
 
 Conclusion: on 21.1 every 64-bit CPython ≥3.11 tested binds `fusionscript.dll`; the
 0xC0000005-per-machine class of failure (02 §preconditions, 08 #3) is **not reproduced on 21.1**.
-Keep `_probe.py` in the deploy gate anyway (it is cheap, and the Dell has not been re-measured on
+Keep `_probe.py` in the deploy gate anyway (it is cheap, and the editing rig has not been re-measured on
 21.1). Preferred pin for new deploys: the bundled `ResolvePython.exe` (no env vars, upgraded with
 Resolve) or the system 3.14.
 
