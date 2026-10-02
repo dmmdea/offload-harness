@@ -14,7 +14,10 @@ designed, text-exact motion graphics. That covers title cards, lower thirds, kin
 overlays to lay over LTX b-roll, and each render can be regression-tested with `framemd5`. It is
 also the first third-party CLI the harness runs as a media route, and its defaults assume an
 interactive developer machine rather than a harness node. Every behaviour below was read in the
-pinned 0.8.61 source:
+0.8.61 source. The pin moved to 0.8.108 on 2026-10-02, and the gates the runner depends on were
+checked again on that package: the telemetry, update and skills gates, the `--json` skip of the
+update block, the flags of the allowlisted commands, the chrome-headless-shell pin and the set of
+hosts the package names:
 
 - **Telemetry.** PostHog is on by default (`telemetry/client.ts`). The opt-outs are
   `HYPERFRAMES_NO_TELEMETRY` and `DO_NOT_TRACK`.

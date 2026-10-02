@@ -53,8 +53,9 @@ speech), but the helper cuts at 300 s by default: `--chunk-sec` sets another cap
 A chunk is 30 frames a second: 9,000 frames for 300 s, 18,000 for 600 s. Two limits of the lane decide whether
 one renders. Both were measured on a 300 s chunk (331 groups, 11,256 characters) on the reference box.
 
-- **Frame storage: render it with `"workers": 1`.** At `auto`, the lane's default, HyperFrames 0.8.61 captures
-  with several Chrome workers and stores every frame as an image before it encodes. It budgets 8.3 MB a frame
+- **Frame storage: render it with `"workers": 1`.** At `auto`, the lane's default, HyperFrames captures
+  with several Chrome workers and stores every frame as an image before it encodes (measured on 0.8.61; the
+  check and its message are the same in 0.8.108). It budgets 8.3 MB a frame
   at 1080p and refuses the render when that passes 90 % of the free space, and the runner defers
   `DISK_HEADROOM`. The 300 s chunk (9,017 frames) would store about 75 GB and was refused with 33 GB free; a
   600 s chunk would store about 150 GB. At one worker the frames stream to the encoder: the cache directory stayed
@@ -101,16 +102,20 @@ default sample, and a known group on screen at a known time).
 
 ## Measured
 
-Rendered on 2026-09-30 through `render/compose-hyperframes.mjs` with HyperFrames 0.8.61, on a 36-thread Windows
-box with software GL. The default three-group sample, `webm`, quality `high`:
+Rendered on 2026-10-02 through `render/compose-hyperframes.mjs` with HyperFrames 0.8.108, on a 36-thread Windows
+box with software GL. The same sample was first measured on 0.8.61 on 2026-09-30, and every figure below was taken
+again after the pin moved. The default three-group sample, `webm`, quality `high`:
 
 - `lint` found 0 errors and 0 warnings, and `check` passed;
 - ffprobe read VP9 `yuva420p`, 1920×1080, 30 fps, 240 frames and 8.000 s, no audio stream;
-- HyperFrames' render time was 23.3 s at 1 worker and 23.7 s at `auto` (14.6 s and 14.8 s per 150 frames);
+- HyperFrames' render time was 24.0 s at 1 worker and 27.2 s and 26.7 s at `auto` (15.0 s, and 17.0 s and 16.7 s,
+  per 150 frames);
 - rendered at 1, 2, 4 and 6 workers and at `auto` twice, all 15 pairs of decoded frames (libvpx decoder, so the
-  alpha is in the comparison) were identical;
-- the alpha plane was 0 everywhere at 0.3 s (before the first group), inside each group it had a maximum of
-  255 and a mean of about 8, and it was 0 again in the gap at 2.8 s and after the last group ended, at 7.9 s;
+  alpha is in the comparison) were identical, and they are identical to the frames the 0.8.61 render of the same
+  sample decodes to (0 of 240 differ);
+- the frame at 1.5 s showed "Captions follow the words"; the alpha plane was 0 everywhere at 0.3 s (before the first
+  group), inside each group (1.5 s, 4.0 s and 6.0 s) it had a maximum of 255 and a mean between 7.7 and 8.5, and it
+  was 0 again in the gap at 2.8 s and after the last group ended, at 7.9 s;
 - a caption composited over flat grey and over flat white showed the bar, the text and the accent line intact.
 
 The helper reads what `offload_transcribe` really writes. Its `words[]` entries are whisper-server's tokens, not
