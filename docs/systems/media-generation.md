@@ -66,7 +66,7 @@ CPU-class composition lane (HyperFrames).
 ## Key concepts
 
 **GPU Lock** — a single-slot, cross-process lock; only one GPU-heavy job runs at a time per machine.
-**Zero-Warm** — no GPU residency persists between jobs. **Warm Batch** — an opt-in session where the
+**Zero-Warm** — no GPU residency persists between jobs, except the memory stack (the mem0 embedder and reranker stay resident, register C-87). **Warm Batch** — an opt-in session where the
 checkpoint loads once for N renders. **Op** — one image-editing operation inside `edit-image`.
 **Named family** — an opt-in image or edit binding beside the node's default one, selected per
 request by `family` and carrying its own license (ADR 0058). **Launch profile** — the ComfyUI launch

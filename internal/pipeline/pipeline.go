@@ -3167,7 +3167,7 @@ func appendVoiceRecipe(args []string, cfg config.Config) []string {
 }
 
 // genEnv builds the extra env for a GPU-gen child: COMFY_DIR + MEMORY_STACK
-// (invariant 1: the CPU-only models freeLlamaSwap must never unload, sourced from
+// (invariant 1: the models freeLlamaSwap must never unload, sourced from
 // config rather than a buried const).
 //
 // It does NOT carry the lease. Callers append the env returned by acquireMediaLease,

@@ -384,7 +384,7 @@ the lease (the card stays reserved, work keeps routing elsewhere) and exits non-
 `--unload-seat` (requires `--drain`) then frees the cards through `POST /api/models/unload/<model>` (legacy `GET /unload`
 as the fallback): the agent seat, and every other model `/running` lists, except the config's `memory_stack` (the mem0
 embedder and reranker). The stack stays resident and the run prints `kept the memory stack resident`. The operator's
-rule is that mem0 never yields; it sits on the utility card, so unloading it freed nothing a render could use (register
+rule is that mem0 never yields. On the three-card reference box it sits on the utility card, so unloading it freed nothing a render could use; on a single-card tier it shares the render card (register
 C-87, 2026-10-01). `render/gpu-lock.mjs` keeps the same set. An empty `memory_stack` means the default set: `embeddinggemma`,
 `bge-reranker-v2-m3` and `embeddinggemma-ams`, the id the memory authority node serves its embedder under (register A-122b:
 the first two did not name it, so a lease cleared it; a name the box does not serve is inert, and `internal/config` and
