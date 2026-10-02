@@ -16,7 +16,7 @@ optional second-device KV tier and gave it one config block:
 "kv_cache_server": {
   "enabled": true, "store": "fs_native",
   "address": "/mnt/kvcache/lmcache-seat-tp2-fp8",
-  "chunk_size": 1568, "key_prefix": "qube-seat-tp2-fp8",
+  "chunk_size": 1568, "key_prefix": "seat-tp2-fp8",
   "seat": "qwen3.8-27b-vllm"
 }
 ```
@@ -30,7 +30,7 @@ config, the same `offload_status`, and the same silence.
 The operator directive of 2026-09-10 removed the ambiguity in the other direction: *the second
 device's store backs EVERY vLLM seat whenever that device is online* — the pair, the 3-card layout,
 and the second box's own seat — and a config that binds `kv_cache_server` to a single seat name is a
-DEFECT, not a configuration. The defect was recorded against the deployed Qube config, which carries
+DEFECT, not a configuration. The defect was recorded against the deployed `<node-b>` config, which carries
 exactly the block above.
 
 Two constraints shape what replaces it:
@@ -40,7 +40,7 @@ Two constraints shape what replaces it:
   `/v1/models` cannot supply one — it reports model ids, not engines, and a sniffed roster would
   fail every llama.cpp seat that must never have a store.
 - **One namespace per stack generation** (register B-45, standing practice since the 2026-09-02/03/04
-  `qube-s3c` → `qube-seat` → `qube-seat-v7` → `qube-seat-tp2-v1` sequence). Pages written by another
+  `s3c` → `seat` → `seat-v7` → `seat-tp2-v1` sequence). Pages written by another
   engine layout are not stale, they are unreadable: LMCache fails the read with `value size exceeds
   buffer capacity` and the tier serves nothing while reporting success. Two seats sharing a
   `key_prefix` across layouts is that failure, pre-installed.
@@ -88,6 +88,6 @@ a config its own `doctor` rejects.
 - `key_prefix` is still not rendered into `seat.env` — for `fs_native` the store DIRECTORY is the
   live namespace, and `key_prefix` is what the config block and `offload_status` publish. The two
   must be moved together; the generation fields exist so the refusal can say when they were not.
-- The live Qube and Lenovo configs still carry the old single object. They load unchanged; migrating
+- The live `<node-b>` and `<node-c>` configs still carry the old single object. They load unchanged; migrating
   them to per-seat bindings is a deployment step, taken in a GPU window with the H-24 soak any
   pair-seat env change requires.

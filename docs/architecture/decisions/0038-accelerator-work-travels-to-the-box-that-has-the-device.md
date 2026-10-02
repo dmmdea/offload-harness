@@ -11,9 +11,9 @@ Release: 0.115.0
 
 ADR 0024 made a device beside the GPU an *additive* capability of the box that carries it, and
 ADR 0037 settled which device owns a shared tool name on one box. What neither covered is the
-box that has **no** device: on 2026-09-08 the Coral Edge TPU was fully served on the Lenovo,
-and from the Qube — where the operator actually works — the only way to reach it was an
-`agent_delegate` contract routed by hand to that node, naming an image path *on the Lenovo's
+box that has **no** device: on 2026-09-08 the Coral Edge TPU was fully served on `<node-c>`,
+and from `<node-b>` — where the operator actually works — the only way to reach it was an
+`agent_delegate` contract routed by hand to that node, naming an image path *on `<node-c>`'s
 disk*. The operator's verdict on both: "ship it" (routing) and "fix it" (the path). The Coral
 design's Phase B had already drawn the seams; this record fixes them as policy.
 
@@ -67,9 +67,9 @@ design's Phase B had already drawn the seams; this record fixes them as policy.
 
 ## Consequences
 
-- From the Qube, `offload_classify_image(image_path=<a file on the Qube>)` answers from the
-  Lenovo's Coral with a placement block; the same tool inside an `agent_run` on the Qube does
-  the same. `agent_delegate` contracts to the Lenovo keep working unchanged.
+- From `<node-b>`, `offload_classify_image(image_path=<a file on the calling node>)` answers from
+  `<node-c>`'s Coral with a placement block; the same tool inside an `agent_run` on `<node-b>` does
+  the same. `agent_delegate` contracts to `<node-c>` keep working unchanged.
 - A box that lists nothing in `fleet_accelerators` is byte-identical to 0.114.x (pinned by
   test). A box that lists a device it also carries registers the local lane only.
 - The fleet's device inventory is readable in one place: `NodeView.Accelerators`, decoded from

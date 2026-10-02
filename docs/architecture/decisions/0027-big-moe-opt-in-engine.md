@@ -28,7 +28,7 @@ instrument (proven able to score 0 on a dead endpoint).
 card scored **18/18** on the differential suite (tool-call fidelity, 22k-token
 multi-hop joins, Spanish) in 678 s total — faster than Flash-Next on two cards
 (1828 s), on a model class this box previously could not usably serve at all. On
-Lenovo's 6 GB card, `gpt-oss-20b` beat the resident 4B seat on both correctness
+`<node-c>`'s 6 GB card, `gpt-oss-20b` beat the resident 4B seat on both correctness
 (36/36 vs 32/36) and wall (712 s vs 1368 s).
 
 ## Decision
@@ -43,14 +43,14 @@ with `gpt-oss-120b` as its seated model.
   `/v1/messages` also served). The harness or any client reaches it as a plain
   endpoint — config, not code.
 - **Install locations (both nodes, isolated from production):**
-  - Qube: WSL distro `freetoken` (separate from the production WSL distro that hosts the memory stack), venv at
-    `/opt/freetoken`, engine from git main.
-  - Lenovo: the node's ZFS app pool under `offload-stack/freetoken` (pool storage;
+  - `<node-b>`: a dedicated WSL distro (separate from the production WSL distro that hosts the memory stack), venv at
+    `<engine-dir>`, engine from git main.
+  - `<node-c>`: the node's ZFS app pool under `<pool-path>/engine` (pool storage;
     `UV_CACHE_DIR` and `HF_HOME` MUST live on the pool — a home-dir quota killed
     the first `[accel]` install).
-- **Canonical launch (Qube):**
+- **Canonical launch (`<node-b>`):**
   ```
-  wsl -d freetoken -u root -- bash /opt/freetoken/serve-bigmoe.sh
+  wsl -d <distro> -u root -- bash <engine-dir>/serve-bigmoe.sh
   # which runs:
   #   CUDA_VISIBLE_DEVICES=<card> ft serve --model openai/gpt-oss-120b \
   #     --port 1919 --num-tokens 32768
@@ -68,7 +68,7 @@ with `gpt-oss-120b` as its seated model.
    the proven path here.
 4. **Mutual exclusion with pooled seats.** While the engine holds a card, pooled
    llama-swap seats (and on a 6 GB node, ANY seat) cannot co-reside — measured as
-   502s on Lenovo. Callers take a text-class GPU lease for the session
+   502s on `<node-c>`. Callers take a text-class GPU lease for the session
    (`local-offload gpu reserve --class text …`).
 5. **GGUF reuse is off the table today:** arch gate (`known: ['gemma4']`) and a
    dtype assert on gemma UD quants (both 0.1.2 and main@9ef3651). HF safetensors /
@@ -82,7 +82,7 @@ with `gpt-oss-120b` as its seated model.
 - The >VRAM MoE class (gpt-oss-120b now; GLM/M2.5-class NVFP4 checkpoints when
   disk allows) becomes usable on this tier at quality parity with the incumbent
   on everything measured.
-- Ports: Qube `:1919` (WSL), Lenovo `:1920` — rows recorded in the port files.
+- Ports: `<node-b>` `:1919` (WSL), `<node-c>` `:1920` — rows recorded in the port files.
 - The engine tracks git main under the monthly whole-system update process
   (ROADMAP standing section), released-tag-first once upstream starts tagging
   meaningfully.

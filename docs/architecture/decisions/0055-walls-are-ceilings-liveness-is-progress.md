@@ -17,9 +17,9 @@ that day was a **producing** job:
 
 | time | seat | steps | tokens out | seat tokens in | latency | reason |
 |---|---|---|---|---|---|---|
-| 11:48 | lenovo `qwen38-27b-gsq-vllm` | 11 | 949 | 213,442 | 984 s | wall timeout after 900s |
-| 12:07 | lenovo `qwen38-27b-gsq-vllm` | 11 | 544 | 169,515 | 900 s | wall timeout after 900s |
-| 16:09 | Qube `agent-pool` | 11 | 6,236 | 549,594 | 769 s | wall timeout after 600s |
+| 11:48 | `<node-c>` `qwen38-27b-gsq-vllm` | 11 | 949 | 213,442 | 984 s | wall timeout after 900s |
+| 12:07 | `<node-c>` `qwen38-27b-gsq-vllm` | 11 | 544 | 169,515 | 900 s | wall timeout after 900s |
+| 16:09 | `<node-b>` `agent-pool` | 11 | 6,236 | 549,594 | 769 s | wall timeout after 600s |
 
 The 16:09 row's `tok_per_s` read **0** on the `agent_delegate` row — the one field that should
 have proved the job alive was unfilled on the row the operator reads.
@@ -46,7 +46,7 @@ determine if a job is truly still going" — was not met by any of the three sur
    `agent.Monitor` owns the run's liveness:
    - **Stall** = no progress event inside the phase's allowance. The allowance is dynamic:
      admission → the admission budget; **prefill** → `pending prompt tokens ÷ the seat's
-     measured prefill rate × 1.5 + 30 s` (100 tok/s assumed until measured — 400 was the first guess and filed a false stall on the Lenovo GSQ seat, 0.131.1); **decoding** →
+     measured prefill rate × 1.5 + 30 s` (100 tok/s assumed until measured — 400 was the first guess and filed a false stall on the `<node-c>` GSQ seat, 0.131.1); **decoding** →
      `20 deltas ÷ decode rate`; **tool** → the tool's own cap + 30 s (an uncapped tool: 1 h);
      **re-pack** → `max(120 s, 1.5 × expected answer tokens ÷ decode rate + 30 s)` (item 8); all
      floored at 60 s. A stall is filed

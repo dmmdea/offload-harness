@@ -66,7 +66,7 @@ makes vLLM a first-class engine on every tier; a first-class engine is sent the 
 
 - **vLLM seats** — the seats `vllm_seats` declares, matched case-insensitively and **alias-resolved
   through the live llama-swap roster** — receive `structured_outputs: {"json": <schema>}` and **no
-  `grammar`**. The alias step is the common case, not padding: the Qube's agent seat is bound as
+  `grammar`**. The alias step is the common case, not padding: `<node-b>`'s agent seat is bound as
   `agent-pool-3card`, an alias of the declared `qwen3.8-27b-vllm-3card`, so an exact-match-only gate
   would have left the three-card box on the discarded field.
 - **llama.cpp seats** keep the raw GBNF, byte-identically. The two fields are alternatives, never

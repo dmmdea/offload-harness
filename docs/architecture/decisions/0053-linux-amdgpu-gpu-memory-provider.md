@@ -11,7 +11,7 @@ date: "2026-09-20"
 resolved provider — `nvidia-smi`, else the Windows-generic WDDM source — and recorded that
 "off-Windows non-NVIDIA boxes still cannot fleet-serve (no generic provider there); a Linux
 provider is a future seam". That seam became the blocker the day the first Linux AMD node
-arrived: binxarn (Ryzen 5 5625U / Vega 7, Ubuntu 26.04, 2026-09-20) detected into the MEASURED
+arrived: `<node-f>` (Ryzen 5 5625U / Vega 7, Ubuntu 26.04, 2026-09-20) detected into the MEASURED
 `amd-gcn` tier, rendered and served its llama-swap config, and then `fleet-serve` refused with
 `no working GPU memory source: nvidia-smi (…); windows-generic (… requires WDDM)`.
 

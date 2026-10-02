@@ -10,7 +10,7 @@ date: "2026-09-12"
 The harness could place TEXT work on fleet nodes (`agent_delegate`, ADR 0023) but had no path
 to place VISION work there: `offload_vqa`, `offload_assess_image` and `offload_ocr` always ran
 against the local endpoint. On 2026-09-11 a 275-image render held all three of the workstation's
-cards for a day while a fleet node (`lenovo-ampere16`, an NVIDIA A2 with a vision seat) sat at
+cards for a day while a fleet node (`node-c-ampere16`, an NVIDIA A2 with a vision seat) sat at
 0 % utilization — and the image QA the render needed could only queue behind the render on the
 box that was rendering.
 

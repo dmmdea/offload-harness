@@ -18,7 +18,7 @@ date: "2026-09-20"
 
 ## Context
 
-The operator's direction for the first Linux AMD node (binxarn, Ryzen 5 5625U / Vega 7,
+The operator's direction for the first Linux AMD node (`<node-f>`, Ryzen 5 5625U / Vega 7,
 2026-09-20): "wire and test both so the harness can offer both routes — that new AMD tier is a
 first-class citizen of the fleet." Both routes were measured on the box (Vulkan E2B pp512 256 /
 tg128 22.8 t/s; CPU 109 / 21.5; native CPU build +10 % pp) and the CPU family was hand-spliced
@@ -49,7 +49,7 @@ end (an UNSTAMPED serving config nobody can regenerate).
    omitted when the manifest has no backend). A caller picks the route by seat id — no new
    contract field, no per-request backend switch.
 4. **The hand splice is retired by re-rendering:** the rendered CPU entries are byte-identical
-   to the spliced ones (checked on binxarn; only the OR-order of the interactive set differs).
+   to the spliced ones (checked on `<node-f>`; only the OR-order of the interactive set differs).
 
 ## Consequences
 

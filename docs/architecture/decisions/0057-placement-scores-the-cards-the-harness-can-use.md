@@ -13,7 +13,7 @@ desktop or whatever the operator is running.
 
 1. **The lease verdict** (`gpuactivity.Assess`). `held-working` outranks `held-idle`, so the
    desktop pinned the verdict at "the holder's own job" and `held-idle` could never fire.
-   Measured on the Qube 2026-09-20 while the operator played a game: the verdict read
+   Measured on `<node-b>` 2026-09-20 while the operator played a game: the verdict read
    `held-working — 33% on card 1 (RTX 5070 Ti)` while the lease holder had spent **4 seconds of
    CPU in 141 minutes** and both cards it fenced sat at 0%. Three jobs queued behind it. Fixed in
    0.132.1.
@@ -45,7 +45,7 @@ The first cut of this record inferred it from the process list instead — on Wi
 `--query-compute-apps` reports processes with `[N/A]` memory, and those were taken to be the
 desktop. That was wrong twice over, and the correction is the reason this section was rewritten:
 `[N/A]` is a WDDM property, not a graphics-process property (nvidia-smi cannot size ANY process
-there, and it types all 24 of the Qube's desktop rows `C+G` — compute AND graphics), and a
+there, and it types all 24 of `<node-b>`'s desktop rows `C+G` — compute AND graphics), and a
 native-Windows CUDA seat produces exactly the same shape. ComfyUI is one, and the 3-card law pins
 it to card 0 or 2 — so the heuristic would have flagged the card the harness was WORKING on,
 dropped it from `work_util_pct`, and made a saturated node advertise itself as idle. It would have
@@ -55,9 +55,9 @@ Measured 2026-09-21 across all three node shapes:
 
 | node | cards | `display_active` |
 |---|---|---|
-| Qube, operator gaming | 3 | `Disabled` / **`Enabled`** / `Disabled` (card 1, exactly) |
-| Lenovo, headless Linux | A2 | `Disabled` — nothing flagged |
-| Aorus, laptop, screen on the iGPU | RTX 3070 | `Disabled` — the RTX is scored |
+| `<node-b>`, operator gaming | 3 | `Disabled` / **`Enabled`** / `Disabled` (card 1, exactly) |
+| `<node-c>`, headless Linux | A2 | `Disabled` — nothing flagged |
+| `<node-a>`, laptop, screen on the iGPU | RTX 3070 | `Disabled` — the RTX is scored |
 
 Only an exact `Enabled` counts as a yes. A driver that does not report the field answers
 `[Not Supported]` and older ones `[N/A]`; both mean "we do not know", which must never read as
@@ -111,7 +111,7 @@ on roster order:
 
 ## Consequences
 
-- A Windows fleet node stops losing placements to its operator's desktop, and the Qube's lease
+- A Windows fleet node stops losing placements to its operator's desktop, and `<node-b>`'s lease
   verdict stops calling a game the holder's work — through the same function.
 - `gpu_util_pct` is unchanged, so the fleet overview and every existing reader see what they saw.
 - A pre-0.132.2 delegator ignores `work_util_pct` and behaves as before; a 0.132.3 delegator ranks an
