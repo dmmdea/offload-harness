@@ -49,6 +49,8 @@ effect is omitting `--cache-none` so the checkpoint loads once for N renders. Te
 exactly once, at the batch boundary — zero-warm moves from per-render to per-batch rather than being
 abandoned. The default single-render path is unchanged.
 
+**Extended 2026-10-01 (register C-87):** the memory stack is not CPU-only on every box. On the reference box it is served on the utility card, not the render card, so "CPU-only, zero GPU VRAM" in the freeing paragraph above, and "CPU-resident" in the "Unload every model" alternative below, no longer describe it there. The decision stands on the operator's rule that mem0 never yields to a lease, and it now holds on every path that clears cards for a GPU job: `gpu reserve --unload-seat` keeps the configured `memory_stack` resident, as the render side always did, and refuses its legacy total `GET /unload` fallback while a stack member is resident or `/running` cannot be read. See [GPU lease](../../systems/gpu-lease.md).
+
 ## Consequences
 
 - The machine returns to a known state after every job. Text inference works immediately afterward

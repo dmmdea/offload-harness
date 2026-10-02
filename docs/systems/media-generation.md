@@ -89,7 +89,7 @@ job for a bounded window (`gpu_wait_ms`, 90 s) and then defers with the holder's
 Two details of the free step are easy to get wrong:
 
 - **It frees per model, not everything.** The always-loaded embedding and reranker models are
-  CPU-only and hold zero GPU VRAM. An earlier unload-all implementation tore that memory stack down
+  small (a few hundred MiB each) and, on the reference box, pinned to the utility card, not the render card. An earlier unload-all implementation tore that memory stack down
   on every generation job for no VRAM benefit; the keep-set now protects it.
 - **ComfyUI is only killed if the harness started it.** An already-running instance is left alone.
 
@@ -351,7 +351,7 @@ the output envelope shape.
 ## Invariants and assumptions
 
 1. **Zero-warm by default.** Nothing GPU-resident survives a job.
-2. **The CPU memory stack is never unloaded** by the free step.
+2. **The memory stack is never unloaded** by the free step or by `gpu reserve --unload-seat` (register C-87, 2026-10-01). It is an exception to item 1: mem0 never yields to a lease, and the stack is small and, on the reference box, off the render card.
 3. Only one GPU-heavy job at a time, per machine.
    **Corollary — never post a graph straight to ComfyUI (`:8188`).** Every render enters
    through this system so it takes the machine-wide lease; a direct POST is unprotected
@@ -524,7 +524,7 @@ opt-in whose result carries its license.
 `license` (string) and `commercial_use` (bool). Resolution (`config.ResolveImageFamily` /
 `ResolveEditFamily`) starts from the node's config, **clears every model-binding key** of that route
 (checkpoint, family, VAE, text encoder, LoRA, preset, sampler knobs, pool keys, sdcpp model files),
-keeps the route keys (script, engine, timeout, reserve) and the launch keys, then applies the
+keeps the route keys (script, engine, timeout, reserve; the timeout is the node's own `imagegen_timeout_sec` or `gen_edit_timeout_sec`, so a family that needs longer sets its own) and the launch keys, then applies the
 overlay. So a family never inherits the default's LoRA or pool by accident. The config load refuses:
 an overlay key outside those prefixes or not a config key (typo), a forbidden key (`*_families`,
 `*_license`, the prompt refiner), a missing/empty `license`, a missing `commercial_use`, a family name
@@ -766,7 +766,7 @@ seeds a single-card ComfyUI route without a non-display pin.
 ## Error handling
 
 Failures return typed Defers rather than crashing: a busy GPU lock defers with a distinct reason, a
-render error defers with detail. The batch path records per-job failures and continues.
+render error defers with detail. The batch path records per-job failures and continues, except when ComfyUI became unusable: the batch then stops at that job and exits non-zero (register C-83, 0.158.1; see the Warm batch paragraph above).
 
 ## Security and privacy notes
 
@@ -896,7 +896,7 @@ recorded as known offenders with their reason rather than silently skipped — a
 
 ## Common pitfalls
 
-- Assuming the free step unloads everything — it deliberately preserves the CPU memory stack.
+- Assuming the free step unloads everything — it deliberately preserves the memory stack.
 - Treating `grade` or `finish` as verbs. They are ops inside `edit-image`.
 - Using `perspective` — the op is `perspective_composite`.
 - Assuming the pipeline reorders ops for you — it does not; `finish` should be placed last by the

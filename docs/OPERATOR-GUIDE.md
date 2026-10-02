@@ -230,7 +230,7 @@ render through **one warm ComfyUI session** — the checkpoint loads once instea
 image; the zero-always-warm teardown (free VRAM, kill the spawned ComfyUI, release the GPU
 lock) runs at the **batch boundary**, however the batch ends. Measured on the 16GB box:
 first job ~32s (absorbs the checkpoint load), warm jobs ~22s. A failed job is recorded in
-its result item and does not abort the rest. Single (unbatched) renders keep the zero-warm
+its result item and does not abort the rest, unless ComfyUI itself became unusable (it stopped answering, or a CUDA fault left it answering but unable to run a prompt): the batch then stops at that job, the jobs after it fail with an error that starts `not run: ComfyUI became unusable at job N/M`, and the command exits non-zero (register C-83, 0.158.1). Single (unbatched) renders keep the zero-warm
 default — nothing changes unless you pass `--batch`.
 
 ### Never post a graph to `:8188` directly ⛔
@@ -365,7 +365,7 @@ string) and `commercial_use` (bool) are required; image overlays take only `imag
 a real config key; a family does NOT inherit the default's checkpoint, LoRA, preset, sampler
 knobs or pool — it inherits the script, engine, timeout and launch keys unless it sets them.
 The values above for timeout, device and dynamic VRAM are the planned starting point for a
-three-card box, not measurements — replace them with the node's own measured values.
+three-card box, not measurements — replace them with the node's own measured values. A family that sets no `imagegen_timeout_sec` inherits the top-level one, which is sized for the default binding, so a slow family needs its own, set above its measured cold render. On a 16 GB render card a Qwen-Image 2512 `full`-preset still took 480-555 s warm at 1.5 MP, and a 600 s limit killed its cold renders at 1.6 MP at 601 s (1,500 s, for example, clears that).
 
 Verify: `local-offload doctor` shows a `generate_image:qwen-image-2.1` route (CONFIGURED only
 when every model file is where the loader looks, with `license Qwen Research License` in its

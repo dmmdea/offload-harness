@@ -86,7 +86,7 @@ export function releaseLeaseUnloadMarker(lease) {
 // render could use. `gpu reserve --unload-seat` keeps them too (register C-87).
 //
 // SOURCED FROM CONFIG/ENV, not a buried const: the Go harness threads the config's
-// MemoryStack as MEMORY_STACK, so a renamed/added 3rd CPU member is honored instead
+// MemoryStack as MEMORY_STACK, so a renamed/added 3rd member is honored instead
 // of silently unloaded. The literal below is the fallback for a direct CLI run.
 const DEFAULT_MEMORY_STACK = ["embeddinggemma", "bge-reranker-v2-m3"];
 export function memoryStack(env = process.env.MEMORY_STACK) {
@@ -195,7 +195,7 @@ export async function quiesceLlamaSwap(ids, {
 }
 
 // freeLlamaSwap: free the GPU-resident llama-swap models so their VRAM goes to a gen
-// job, while leaving the CPU memory stack warm. DRAINS FIRST (see quiesceLlamaSwap).
+// job, while leaving the memory stack warm. DRAINS FIRST (see quiesceLlamaSwap).
 //
 // Called ONCE PER LEASE, not per job — withGpuSlot enforces that via claimLeaseUnload.
 // Errors are reported through `log` rather than swallowed: silently unloading nothing
@@ -254,7 +254,7 @@ export async function freeLlamaSwap(api = process.env.LLAMA_SWAP_API || "http://
   // GET /unload — v208's ONLY unload route, and still present-and-total on v242,
   // which is why the gate below applies on every version — and that
   // fallback is gated on the memory stack not being resident: tearing down the
-  // always-on CPU tier to free VRAM it does not hold would trade a render for
+  // always-on tier to free VRAM the render may not be able to use would trade a render for
   // the memory stack (invariant 1).
   const failures = [];
   await Promise.all(loaded.map(async (id) => {

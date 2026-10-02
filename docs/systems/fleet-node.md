@@ -555,7 +555,7 @@ side door). The wait is bounded by the config key alone; `agent_lease_wait_sec` 
   (`localRunCapRoom`: `fleet_max_concurrent_jobs` minus the runs registered on the planner seat, read once per deal;
   only while some remote could run the contract). The overflow subtask (`PlacedResult.overflow`) is neither a lease
   nor a refusal: it takes the seat back only once the seat stops reading busy by the deal's own reading
-  (`localStillBusy`), is a capacity defer when the wait is off, and is not counted as a replacement. The deal names
+  (`localStillBusy`; a seat whose busy probe failed or was ambiguous still reads busy there, on `spread` and `auto` alike, although the deal itself treats it as idle, register C-88, 2026-10-01), is a capacity defer when the wait is off, and is not counted as a replacement. The deal names
   every node it passed over with its arithmetic, and a remote that failed its health probe keeps the run flagged.
 - **A process-wide gate and a page cap** (`processgate.go`). The delegator counts, per node, the dispatches the
   process holds open across every concurrent Run and does not send one past the node's `max_queue_depth`; the subtask
