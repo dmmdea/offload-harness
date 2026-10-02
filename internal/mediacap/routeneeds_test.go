@@ -53,7 +53,7 @@ func videoBox(t *testing.T) (cfg config.Config, exeDir, comfyDir string) {
 	return cfg, exeDir, comfyDir
 }
 
-// TestVideoRouteNeedsTheWanNodePacks is the OptiPlex regression: ComfyUI-GGUF and
+// TestVideoRouteNeedsTheWanNodePacks is the <node-e> regression: ComfyUI-GGUF and
 // ComfyUI-MultiGPU installed, VideoHelperSuite absent, every model present. The route
 // was CONFIGURED; the lane failed on its first POST. It must name the class and pack.
 func TestVideoRouteNeedsTheWanNodePacks(t *testing.T) {
@@ -210,7 +210,7 @@ func TestKrea2NeedsMultiGPUOnlyWhenPooled(t *testing.T) {
 	}
 }
 
-// TestAnimateAndMusicNeedTheirModelFiles: the OptiPlex animate row read CONFIGURED with
+// TestAnimateAndMusicNeedTheirModelFiles: the <node-e> animate row read CONFIGURED with
 // no WAN-Animate-2 weights on the box; music was script-only too.
 func TestAnimateAndMusicNeedTheirModelFiles(t *testing.T) {
 	exeDir, comfy := t.TempDir(), t.TempDir()
@@ -262,7 +262,7 @@ func voiceBox(t *testing.T) (cfg config.Config, exeDir, repo string) {
 	return cfg, exeDir, repo
 }
 
-// TestVoiceRouteNeedsVenvPackagesAndWeights is the OptiPlex voice row: the script was
+// TestVoiceRouteNeedsVenvPackagesAndWeights is the <node-e> voice row: the script was
 // on disk, so voice read CONFIGURED, while the runner had no venv (it fell back to a
 // system python without torch or chatterbox) and no weights were cached.
 func TestVoiceRouteNeedsVenvPackagesAndWeights(t *testing.T) {

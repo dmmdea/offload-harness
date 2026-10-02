@@ -1,6 +1,6 @@
 ﻿# start-fleet-node.win.ps1 - TEMPLATE for running `local-offload fleet-serve` as a Windows
 # scheduled task. Replace __OFFLOAD_HOME__ (install root, e.g. D:/offload-stack) and
-# __NODE_ID__ (e.g. aorus-ampere8). See docs/FLEET-NODE.md "Running as a Windows scheduled
+# __NODE_ID__ (e.g. node-a-ampere8). See docs/FLEET-NODE.md "Running as a Windows scheduled
 # task" for the registration recipe (S4U principal + boot trigger + hidden VBS shim) and the
 # measured gotchas this file encodes. Save AS UTF-8 WITH BOM; keep paths FORWARD-slashed
 # (PS 5.1 reads a BOM-less file as ANSI, and backslash escapes get eaten by generators).

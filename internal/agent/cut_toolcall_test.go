@@ -12,7 +12,7 @@ import (
 
 // Register D-114: a `write_file` call whose JSON argument is CUT at the step
 // completion budget is a BUDGET defect, never a broken box. Measured on the
-// Aorus 9B llama.cpp seat (step_tokens 1024, a ~3 KB single-call write):
+// <node-a> 9B llama.cpp seat (step_tokens 1024, a ~3 KB single-call write):
 // llama.cpp answers HTTP 500 "Failed to parse tool call arguments as JSON …
 // invalid string: missing closing quote" at column 2847, the loop returned
 // stop_reason "error", and the node filed defer_class "infrastructure" — the

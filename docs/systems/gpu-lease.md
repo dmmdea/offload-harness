@@ -362,7 +362,7 @@ local-offload gpu reserve --class text --for 30m --reason "arm B" --detach --dra
 local-offload gpu release --warm-seat
 ```
 
-**Alias-bound seats (0.113.20).** llama-swap's `/running` lists CANONICAL ids, while `agent_model` is normally an alias (`agent-pool` → `qwen3.8-27b-vllm`). The drain's reader matched `/running` by the configured name, so on an alias-bound seat it read "not loaded" and returned at once — a silent no-op from 0.113.16 to 0.113.19 on the reference workstation (the Lenovo, whose seat is bound by its id, drained correctly, which is why the live proofs passed). The reader now lives in `internal/seatload` and resolves the name through the roster before consulting `/running`; an unreadable roster falls back to the bare name.
+**Alias-bound seats (0.113.20).** llama-swap's `/running` lists CANONICAL ids, while `agent_model` is normally an alias (`agent-pool` → `qwen3.8-27b-vllm`). The drain's reader matched `/running` by the configured name, so on an alias-bound seat it read "not loaded" and returned at once — a silent no-op from 0.113.16 to 0.113.19 on the reference workstation (<node-c>, whose seat is bound by its id, drained correctly, which is why the live proofs passed). The reader now lives in `internal/seatload` and resolves the name through the roster before consulting `/running`; an unreadable roster falls back to the bare name.
 
 Taking a text lease already makes the node a non-target (health `lease`, dispatch 503, the delegator's gate), but work placed
 before the lease can still be in flight. `--drain` waits, after the lease is taken, until the agent seat reports nothing
@@ -391,9 +391,11 @@ the first two did not name it, so a lease cleared it; a name the box does not se
 `render/gpu-lock.mjs` carry the same list, kept equal by a test). A non-empty list replaces the default rather than adding
 to it, and the installer's seeded `config.json` names the first two, so a node whose embedder or reranker has another
 model name must list every member: an unlisted one is unloaded by `--unload-seat` like any other resident model, and by
-the render free step like any other tier. Fleet reclaim (`fleet_reclaim.go`) does not read `memory_stack`: it keeps
-llama-swap's ttl -1/0 seats and the configured keep-set, so a ttl-300 member of the stack is still reclaimable there
-(register C-94). If the
+the render free step like any other tier. Fleet reclaim (`fleet_reclaim.go`) keeps the same set: a loaded `memory_stack`
+member (the default set when the list is empty, read by the same `effectiveMemoryStack` as `--unload-seat`) is baseline, never
+reclaimable capacity, whatever its ttl is, so the house rule's 300 s idle ttl no longer makes the embedder reclaimable there. It
+is checked by name before the keep-set (llama-swap's ttl -1/0 seats) and also when no keep-set could be read (register C-94,
+2026-10-02; before that fix this was a known gap). If the
 per-model route fails, the legacy `GET /unload` is used only when no stack member is resident. It unloads everything,
 whatever `?model=` says, so when the stack is resident or `/running` cannot be read, the reserve fails and names the
 stack. The wrapper form warms the seat back (`GET /upstream/<model>/health`) BEFORE releasing, so the first
@@ -518,7 +520,7 @@ invocation changes, so a systemd relaunch is a seat llama-swap does not track an
 reloaded by llama-swap on the next request, which the lease gate orders like any other load.
 
 Why: a gate that unloaded the production seat by hand collided with a delegation that made llama-swap reload it mid-profile
-(`No available memory for the cache blocks`, 2026-09-06 15:23), and the Lenovo's measurement windows stopped its fleet node
+(`No available memory for the cache blocks`, 2026-09-06 15:23), and <node-c>'s measurement windows stopped its fleet node
 outright, cutting in-flight remote work. With the lease advertised and enforced, the window is a lease, not an outage.
 
 ## The drain waits for runs, inside the queue budget (0.117.0, ADR 0041)

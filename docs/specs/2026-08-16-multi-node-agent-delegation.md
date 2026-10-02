@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** The delegation cascade can hand agent-loop subtasks optimally to Qube alone, Qube+Lenovo, or Lenovo alone — over the tailnet, authenticated, quality-first — so a weak-but-real second local agent (lenovo-ampere6, RTX 3050 6GB) does meaningful work without ever costing delivered quality.
+**Goal:** The delegation cascade can hand agent-loop subtasks optimally to <node-b> alone, <node-b>+<node-c>, or <node-c> alone — over the tailnet, authenticated, quality-first — so a weak-but-real second local agent (node-c-ampere6, RTX 3050 6GB) does meaningful work without ever costing delivered quality.
 
 **Architecture:** Three additive layers on the existing fleet+agent seams. (A) *Remote seats*: any model seat can resolve to a remote OpenAI-compatible base over the tailnet. (B) *AGENT fleet jobs*: a new `agent` task type carries a self-contained, versioned **delegation contract** (goal + inline context + output JSON Schema + acceptance checks + ceilings); the remote node executes it with its own local `agent.Build` loop and returns a versioned result or the harness's structured defer. (R/T) *Routing + surfaces*: a hard capability gate decides node placement from extended `/fleet/health`; delegation is reachable from the MCP surface and (bounded, hop-limit-1) from inside the agent loop itself. The full 27b decomposing-orchestrator (research option C) is explicitly deferred — the caller decomposes; the harness routes, executes, verifies, merges.
 
@@ -20,15 +20,15 @@
 - **No new deps.** Go stdlib + existing internals only.
 - **Version 0.65.0** on completion (minor: new capability, additive). Bump ritual: VERSION + main.go const + .printing-press.json + CHANGELOG in one commit; `go test -count=1 .` after, unpiped.
 - **Do NOT build (research-killed, do not resurrect):** llama.cpp RPC/exo tensor distribution · A2A protocol adoption (steal its state *semantics* only) · MCP-tasks node-to-node wire · durable-execution/queue clusters · learned routers · cross-machine speculative decoding · weak-node-as-judge · voting ensembles · worker re-delegation.
-- **Tier matrix:** arc 1 adds NO model seats — no matrix edit. (The Lenovo agent-seat MODEL is arc 2's decision; this build binds whatever `agent_model` the tier config names, today `offload-e4b`.)
+- **Tier matrix:** arc 1 adds NO model seats — no matrix edit. (<node-c> agent-seat MODEL is arc 2's decision; this build binds whatever `agent_model` the tier config names, today `offload-e4b`.)
 
 ---
 
 ## ROAST RESHAPE 2026-08-16 (five-persona council; BINDING deltas — these override the §S text below wherever they conflict)
 
 1. **Task 0 runs FIRST — the kill-shot measurement.** Paired run of a representative
-   contract-shaped task: Lenovo-served e4b (existing binaries, ssh tunnel) vs Qube
-   qwen3.8-27b. If the Lenovo output is not merge-worthy, the arc collapses to Phase A +
+   contract-shaped task: <node-c>-served e4b (existing binaries, ssh tunnel) vs <node-b>
+   qwen3.8-27b. If <node-c> output is not merge-worthy, the arc collapses to Phase A +
    auth + health extension, and Phases B/R/T gate on arc-2's seat decision. Measured
    verdict recorded in the nightshift-6 ledger before Task 1 begins.
 2. **Depth is DERIVED on the receiving node** — any contract arriving over the fleet wire
@@ -68,7 +68,7 @@
    — the standing small-model agent-task corpus (no sub-27B agent data exists anywhere;
    this accumulates it from real work).
 10. **Auth scope v1 = the agent lane only** (dispatch of `task_type:"agent"` + polling its
-    jobs). Media endpoints stay tokenless in v1 — the Aorus's deployed 0.62.1 media client
+    jobs). Media endpoints stay tokenless in v1 — <node-a>'s deployed 0.62.1 media client
     must not 401. Full-fleet token enforcement is a recorded follow-up for a
     whole-fleet-deploy window.
 11. **TailnetURL tightened:** allowed = loopback, 100.64.0.0/10 literals, and hostnames
@@ -85,9 +85,9 @@
     deferred (reason `poll deadline`) and STOPS polling. `agent_delegate`'s result
     summarizes `succeeded/deferred/failed` counts at the TOP — eight quiet defers must
     read as a loud outcome, not eight green jobs.
-15. **ADR 0023 additionally records:** N-node door (Aorus joins by config — say it
+15. **ADR 0023 additionally records:** N-node door (<node-a> joins by config — say it
     explicitly), bearer-token weaknesses (shared identity, no rotation) as accepted for a
-    2-node personal fleet, and the llama-swap remote-lane bind change (Lenovo llama-swap
+    2-node personal fleet, and the llama-swap remote-lane bind change (<node-c> llama-swap
     re-binds to the tailscale address for Phase A; llama-swap itself is tokenless —
     accepted on the tailnet, noted).
 
@@ -98,12 +98,12 @@
 New config key `seat_endpoints` (map model→base URL, default empty):
 
 ```json
-"seat_endpoints": { "lenovo-e4b": "http://node-c:11436" }
+"seat_endpoints": { "node-c-e4b": "http://node-c:11436" }
 ```
 
 `llamaclient` gains per-model base resolution: `Client.BaseFor(model)` consults the map (exact model id or llama-swap alias), else the default base. Every completion/embedding call site resolves through it. A remote base MUST pass the tailnet guard (loopback or 100.64.0.0/10 after literal-IP parse; MagicDNS hostnames allowed and resolved lazily by the HTTP layer — the guard checks the URL host is not a public FQDN/IP literal; a non-IP hostname is allowed only when it has no dots or ends in `.ts.net`).
 
-This alone delivers: Qube's cascade or agent planner can use a Lenovo-served model as a lane ("b alone" for cascade calls), with zero job machinery. It also lets the delegator health-check a remote seat cheaply (roster fetch against the remote base — `swapclient.FetchRoster` already takes a base).
+This alone delivers: <node-b>'s cascade or agent planner can use a <node-c>-served model as a lane ("b alone" for cascade calls), with zero job machinery. It also lets the delegator health-check a remote seat cheaply (roster fetch against the remote base — `swapclient.FetchRoster` already takes a base).
 
 ### S2. Phase B — the `agent` fleet task
 
@@ -184,7 +184,7 @@ Hard gate for a REMOTE placement (every condition must hold): remote `AgentEnabl
 
 ### S5. Verification, docs, deploy
 
-E2E acceptance on the REAL fleet (Qube delegator → Lenovo node): a schema-outputting research subtask over inline context docs; assert structured output validates, placement log correct, defer path fires when the contract exceeds ctx, auth rejection fires without token, byte-identical media fleet behavior with keys absent. Docs updated same PR: `docs/systems/fleet-node.md`, `docs/systems/coding-agent.md`, `docs/FLEET-NODE.md` (contract + result wire tables), `docs/OPERATOR-GUIDE.md` (enable recipe), new ADR `0023-agent-lane-tailnet-auth-and-locality.md`. CHANGELOG + 0.65.0 bump. Deploy: Qube bin + Lenovo binary/render-tree (established pattern) + Lenovo `fleet_agent_enabled: true` + token on both + service restart + live e2e re-run.
+E2E acceptance on the REAL fleet (<node-b> delegator → <node-c> node): a schema-outputting research subtask over inline context docs; assert structured output validates, placement log correct, defer path fires when the contract exceeds ctx, auth rejection fires without token, byte-identical media fleet behavior with keys absent. Docs updated same PR: `docs/systems/fleet-node.md`, `docs/systems/coding-agent.md`, `docs/FLEET-NODE.md` (contract + result wire tables), `docs/OPERATOR-GUIDE.md` (enable recipe), new ADR `0023-agent-lane-tailnet-auth-and-locality.md`. CHANGELOG + 0.65.0 bump. Deploy: <node-b> bin + <node-c> binary/render-tree (established pattern) + <node-c> `fleet_agent_enabled: true` + token on both + service restart + live e2e re-run.
 
 ---
 
@@ -285,9 +285,9 @@ E2E acceptance on the REAL fleet (Qube delegator → Lenovo node): a schema-outp
 ### Task 8: live E2E on the real fleet + deploy (execution gated on operator's standing merge-when-green grant)
 
 - [ ] clean-ship gates: semgrep changed paths; fresh-context review (`code-reviewer` + `silent-failure-hunter` — new fallback paths exist — + `pr-test-analyzer`, consequential: network + auth surface); fix rounds until a round returns nothing new.
-- [ ] PR → CI green → merge → build+deploy Qube bin; deploy Lenovo binary (+ render tree pattern), set `fleet_agent_enabled: true` + `fleet_auth_token` (generated, same value both nodes, stored in each config), restart `offload-fleet-node.service`.
-- [ ] Live acceptance: `local-offload delegate --contract <research contract w/ schema>` from Qube → placement=lenovo when Qube lease held / local when idle (force both ways); structured output schema-validates; auth negative test (curl without token → 401); `local-offload acceptance` READY both nodes; media fleet regression (one render job) unchanged.
-- [ ] Measured numbers recorded in nightshift-6 notes: delegation round-trip overhead, Lenovo agent subtask wall-clock + quality spot-check vs the same contract run locally (paired), break-even verdict.
+- [ ] PR → CI green → merge → build+deploy <node-b> bin; deploy <node-c> binary (+ render tree pattern), set `fleet_agent_enabled: true` + `fleet_auth_token` (generated, same value both nodes, stored in each config), restart `offload-fleet-node.service`.
+- [ ] Live acceptance: `local-offload delegate --contract <research contract w/ schema>` from <node-b> → placement=node-c when <node-b> lease held / local when idle (force both ways); structured output schema-validates; auth negative test (curl without token → 401); `local-offload acceptance` READY both nodes; media fleet regression (one render job) unchanged.
+- [ ] Measured numbers recorded in nightshift-6 notes: delegation round-trip overhead, <node-c> agent subtask wall-clock + quality spot-check vs the same contract run locally (paired), break-even verdict.
 
 ## Self-review (run at execution start)
 

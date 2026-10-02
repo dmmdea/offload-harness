@@ -2712,6 +2712,11 @@ func (p *Pipeline) runGenerateVideo(ctx context.Context, req core.Request, meta 
 	// scope a leak away — an ltx25-bound box's text encoder could reach an
 	// overridden Wan render with no opt-out at all (bigger-models-2026-09-24.md).
 	fb := p.cfg.ResolveVideoFamilyBinding(renderFamily)
+	// The family's license rides on the result and the ledger row exactly as an image
+	// family's does (ADR 0058; CT-47). It is the RENDERING family's, so an override
+	// request is tagged with the overridden family's license, not the seat's. Set here,
+	// before any defer, so a deferred render's row names it too.
+	meta.License = fb.License
 
 	seed := paramIntOr(req.Params, "seed", 0)
 	if seed <= 0 {
@@ -2896,7 +2901,9 @@ func (p *Pipeline) runGenerateVideo(ctx context.Context, req core.Request, meta 
 		return p.deferGen(req, meta, start, len(req.Input), "video generation failed: "+gerr.Error())
 	}
 	meta.LatencyMs = time.Since(start).Milliseconds()
-	data, _ := json.Marshal(map[string]any{"video_path": outPath, "seed": seed})
+	payload := map[string]any{"video_path": outPath, "seed": seed}
+	addLicenseData(payload, config.FamilyInfo{License: fb.License, CommercialUse: fb.CommercialUse})
+	data, _ := json.Marshal(payload)
 	p.record(req.Task, meta, len(prompt))
 	return core.Result{OK: true, Data: data, Meta: meta}
 }
@@ -3234,8 +3241,8 @@ func (p *Pipeline) genEnv() []string {
 	// audio-qa.mjs's resolveFfmpeg() treats a set FFMPEG_PATH as an exact file via
 	// existsSync(), which cannot see PATH resolution, so it read "ffmpeg" as
 	// missing and silently skipped the entire QA gate on every fleet node that
-	// never set an explicit ffmpeg_path (reproduced identically on the Lenovo and
-	// the Aorus, 2026-09-23/24). mediaops.ResolveBinary resolves it here in Go —
+	// never set an explicit ffmpeg_path (reproduced identically on <node-c> and
+	// <node-a>, 2026-09-23/24). mediaops.ResolveBinary resolves it here in Go —
 	// the same PATH-aware lookup doctor's media route already uses — so the child
 	// always receives either a real absolute path (existsSync succeeds directly)
 	// or nothing at all. Omitted (not "ffmpeg") when it cannot be resolved on this

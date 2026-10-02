@@ -86,7 +86,7 @@ native CPU/disk offloading (measured unusable on the Mamba-hybrid 27B under WSL2
    wrapper runs what ITS OWN `seat.env` says — `local-offload install vllm-seat --config
    <config.json>` renders a seat from the binding that names it, so the two stop being kept in
    agreement by hand.
-4. `fs_native` over a network share is the measured transport of choice (Lenovo tmpfs over SMB 3.1.1: a
+4. `fs_native` over a network share is the measured transport of choice (<node-c> tmpfs over SMB 3.1.1: a
    23.7k-token prefix back in 2.6–2.9 s at fp16 and 0.80 s at fp8 KV, vs 3.8 / 0.92 s through Valkey;
    `--l2-prefetch-policy` / `--l2-store-policy` variants gained nothing; the legacy `fs` adapter was slower).
    The seat wrapper mounts the share before the MP server starts when `SEAT_L2_MOUNT_SRC` / `SEAT_L2_MOUNT_DIR`
@@ -249,13 +249,13 @@ keeps serving, the tier just stops paying, which is why the counters must be rea
 | layout | tier | 24k-token context restored | vs recompute | tokens from tier |
 |---|---|---|---|---|
 | 2 cards (tp2) | same-box RAM L1 32 GB | 0.50 s | 49.7× | 23,520 / 23,520 |
-| 2 cards (tp2), 65k | Lenovo Valkey over 10 GbE, L1 8 GB, one namespace per generation | **3.86 s** | **6.4×** | 23,520 / 23,520 |
+| 2 cards (tp2), 65k | <node-c> Valkey over 10 GbE, L1 8 GB, one namespace per generation | **3.86 s** | **6.4×** | 23,520 / 23,520 |
 | 2 cards (tp2) | same route, store shared across earlier layouts (afternoon run) | 20.6 s | 1.2× | 23,520 / 23,520 |
 | 2 cards (tp2) | Valkey with 8 io-threads + 16 workers | 32.8 s | 0.75× | 4,704 (timeouts) |
 | 3 cards (pp3 26/26/12), 131k | same-box RAM L1 32 GB | 0.53 s | 26× | 23,520 / 23,520 |
-| 3 cards (pp3 26/26/12) | Lenovo Valkey | 13.85 s (recomputed) | 1.0× | 0 (size mismatch, see invariants) |
+| 3 cards (pp3 26/26/12) | <node-c> Valkey | 13.85 s (recomputed) | 1.0× | 0 (size mismatch, see invariants) |
 
-Raw link: ~980 MB/s Qube→Lenovo, ~700 MB/s Lenovo→Qube (iperf3); the Valkey path used ~300 MB/s.
+Raw link: ~980 MB/s <node-b>→<node-c>, ~700 MB/s <node-c>→<node-b> (iperf3); the Valkey path used ~300 MB/s.
 
 ## Source map
 

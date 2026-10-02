@@ -35,8 +35,14 @@ import (
 // Without this distinction the feature would report "unknown" forever on precisely
 // the nodes that are configured correctly, because a node with an always-resident
 // seat never reaches "nothing of ours loaded".
+//
+// The memory stack is protected the same way, by NAME and not by ttl (register
+// C-94). The house rule gives every model a 300 s idle ttl, so a mem0 stack member
+// is not a ttl -1/0 seat and the keep-set never names it, yet it is exactly what
+// `gpu reserve --unload-seat` and render/gpu-lock.mjs keep resident: the memory
+// authority never yields. Reclaim keeps the same set (memoryStackMember).
 func oursLoaded(cfg config.Config) (loaded bool, ok bool) {
-	swapLoaded, swapOK := llamaSwapHasSwappable(cfg.Endpoint)
+	swapLoaded, swapOK := llamaSwapHasSwappable(cfg.Endpoint, memoryStackMember(cfg))
 	leaseHeld := gpuLeaseHeld(cfg)
 	switch {
 	case leaseHeld:
@@ -65,7 +71,7 @@ func oursLoaded(cfg config.Config) (loaded bool, ok bool) {
 // llama-swap YAML (ttl:-1 / ttl:0 seats, plus their aliases) and never the API.
 // Matching is by the canonical id, which is exactly what /running reports and what
 // the YAML keys each seat by.
-func llamaSwapHasSwappable(endpoint string) (bool, bool) {
+func llamaSwapHasSwappable(endpoint string, inStack func(string) bool) (bool, bool) {
 	c, err := swapclient.New(endpoint, 3*time.Second)
 	if err != nil {
 		return false, false
@@ -80,7 +86,22 @@ func llamaSwapHasSwappable(endpoint string) (bool, bool) {
 	return anyReclaimable(running, func(id string) bool {
 		_, protected := c.IsProtected(id)
 		return protected
-	}, len(keepSet.Members) > 0), true
+	}, len(keepSet.Members) > 0, inStack), true
+}
+
+// memoryStackMember answers "is this llama-swap model id in the memory stack this
+// config keeps resident?", using the one reading `gpu reserve --unload-seat` uses
+// (effectiveMemoryStack: the configured list, or the default when it is empty).
+// Matching is by canonical id, ignoring case and padding, as otherResidentModels
+// does, because that is what /running reports.
+func memoryStackMember(cfg config.Config) func(string) bool {
+	keep := map[string]bool{}
+	for _, m := range effectiveMemoryStack(cfg) {
+		if m = strings.ToLower(strings.TrimSpace(m)); m != "" {
+			keep[m] = true
+		}
+	}
+	return func(id string) bool { return keep[strings.ToLower(strings.TrimSpace(id))] }
 }
 
 // anyReclaimable classifies a /running snapshot. Split out from the transport so
@@ -93,11 +114,17 @@ func llamaSwapHasSwappable(endpoint string) (bool, bool) {
 // answer would fold a resident embedder into the idle BASELINE and make the node
 // under-advertise reclaimable VRAM forever — the exact failure this file exists to
 // avoid, arrived at from the other side.
-func anyReclaimable(running []llamaswap.RunningModel, protected func(string) bool, keepSetKnown bool) bool {
+//
+// inStack (nil-safe) is checked first and in BOTH modes: a memory-stack member is
+// baseline whatever its ttl says and whether or not a keep-set could be read.
+func anyReclaimable(running []llamaswap.RunningModel, protected func(string) bool, keepSetKnown bool, inStack func(string) bool) bool {
 	for _, m := range running {
 		// "stopped"/"stopping" seats hold no VRAM; anything else does.
 		if s := strings.ToLower(m.State); s == "stopped" || s == "stopping" {
 			continue
+		}
+		if inStack != nil && inStack(m.ID) {
+			continue // the memory stack never yields: part of the baseline, not capacity
 		}
 		if keepSetKnown {
 			if protected(m.ID) {

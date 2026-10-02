@@ -160,6 +160,16 @@ type Seat struct {
 	GPUEnv    []string `json:"gpu_env,omitempty"`
 	Residency string   `json:"residency"`
 	TTL       int      `json:"ttl,omitempty"`
+	// Extra marks a REGISTERED EXTRA: a seat the tier renders into llama-swap and serves by
+	// its name and aliases, but that is NOT the route's binding. BindingKey() answers ""
+	// for it, so Bindings writes no config key for it and the one-writer check does not
+	// count it: a tier can serve a second vision-class model (a small screenshot reader, a
+	// general VLM beside the OCR specialist) while the first vision seat keeps
+	// vision_model. Nothing routes to an extra by default; a caller reaches it by naming
+	// the seat or one of its aliases. Allowed on vision, ocr and stt seats (an rkllm seat
+	// writes unconstrained_seats and text_tasks that this flag would not suppress), and
+	// it takes no Tasks (they are read only through the vision binding the extra lacks).
+	Extra bool `json:"extra,omitempty"`
 	// ChatTemplate names a template file in the models dir, rendered as
 	// --chat-template-file (vision/ocr only). PaddleOCR-VL ships its own
 	// chat_template.jinja and produces degraded transcription without it —
@@ -241,8 +251,12 @@ type Seat struct {
 // model first — model and triage_model stay the tier's config_seed to name, as for
 // any tier — and binds vision_model only when it carries a vision encoder, because
 // only then can it answer an image question; binding it without one would advertise
-// a route the seat cannot serve.
+// a route the seat cannot serve. A registered extra (Seat.Extra) binds nothing whatever its
+// kind: it is rendered and reachable by name, never the route's default.
 func (s Seat) BindingKey() string {
+	if s.Extra {
+		return ""
+	}
 	switch s.Kind {
 	case KindVision:
 		return "vision_model"
@@ -378,6 +392,10 @@ func Validate(seats []Seat, tier string) error {
 		where := fmt.Sprintf("seat %d", i)
 		if s.Name != "" {
 			where = fmt.Sprintf("seat %q", s.Name)
+		}
+		if s.Extra && s.Kind == KindRKLLM {
+			problems = append(problems, where+": extra is not available on an rkllm seat — it still writes "+
+				"unconstrained_seats and text_tasks, so the seat would not be the bind-free extra it claims to be")
 		}
 		switch s.Kind {
 		case KindVision, KindSTT, KindOCR, KindRKLLM:
@@ -589,6 +607,9 @@ func checkTasks(s Seat, where string) []string {
 	case hasText && s.Kind != KindRKLLM:
 		problems = append(problems, where+": a text task (classify/extract) is served by the node's own cascade on an unconstrained seat, "+
 			"which only an rkllm seat is; this "+s.Kind+" seat constrains decoding and needs no declaration")
+	case hasVision && s.Extra:
+		problems = append(problems, where+": an extra seat binds no route, so a declared vision task (vqa/ocr/assess_image) "+
+			"would be read by nothing — tasks ride the vision_model binding an extra does not write")
 	case hasVision && s.BindingKey() != "vision_model":
 		problems = append(problems, where+": a vision task (vqa/ocr/assess_image) needs a seat that reads images — "+
 			"an rkllm seat needs a vision_encoder; this seat binds no vision_model, so the declaration would advertise a task it cannot serve")

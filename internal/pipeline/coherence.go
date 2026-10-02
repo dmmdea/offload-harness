@@ -199,7 +199,7 @@ func JudgeCoherence(comp agent.Completion, spent time.Duration) CoherenceVerdict
 			core.IncoherentSeatReason, coherenceProbeMaxTokens, len(content), comp.FinishReason)}
 	}
 	// A tool-call marker in plain TEXT with no parsed tool calls is the seat's
-	// server failing to parse its own model's tool syntax — the 2026-09-04 Qube
+	// server failing to parse its own model's tool syntax — the 2026-09-04 <node-b>
 	// hermes-parser-on-a-Qwen3-template defect, which the loop already names
 	// (agent.ErrUnparsedToolCall) after it has spent the wall.
 	if marker := agent.UnparsedToolCallMarker(content); marker != "" {

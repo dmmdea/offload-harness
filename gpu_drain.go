@@ -463,14 +463,14 @@ func maintainSeatCtx(ctx context.Context, cfg config.Config, restamp restamper, 
 	if unload {
 		// Read the seat BEFORE unloading: only a seat that was resident is owed a
 		// warm-back. Marking it owed unconditionally made a lease over a cold
-		// seat LOAD it at release — on 2026-09-23 the Qube's 3-card 27B came up
+		// seat LOAD it at release — on 2026-09-23 <node-b>'s 3-card 27B came up
 		// on all three cards after a video render, with nothing asking for it,
 		// and sat there until its ttl. A reading that fails or is ambiguous keeps
 		// the old behaviour (owed): "could not tell" must not cost a warm seat.
 		wasLoaded := seatWasResident(ctx, endpoint, model)
 		// OTHER RESIDENTS, read before either unload so the record reflects
 		// what was ACTUALLY there (register D-1xx-3, 2026-09-23; R2/R3
-		// measured on the OptiPlex): `--unload-seat` cleared only the
+		// measured on <node-e>): `--unload-seat` cleared only the
 		// configured agent seat, so a DIFFERENT client's own load — the
 		// vision seat `qwen3.5-9b-vl`, loaded by another session — stayed
 		// resident through an entire media lease on an 8 GB card and only
@@ -479,12 +479,7 @@ func maintainSeatCtx(ctx context.Context, cfg config.Config, restamp restamper, 
 		// single-card box "the cards the lease fences" is every card, and
 		// every OTHER model llama-swap currently holds is unloaded too, not
 		// only the agent seat.
-		stack := cfg.MemoryStack
-		if len(stack) == 0 {
-			// Same reading as the render side: the pipeline exports MEMORY_STACK only
-			// when the list is non-empty, so render/gpu-lock.mjs then keeps its default.
-			stack = config.Default().MemoryStack
-		}
+		stack := effectiveMemoryStack(cfg)
 		others, kept, readable := otherResidentModels(ctx, endpoint, model, stack)
 		if len(kept) > 0 {
 			fmt.Fprintf(os.Stderr, "gpu reserve: kept the memory stack resident (mem0 never yields to a lease): %s\n", strings.Join(kept, ", "))
@@ -514,6 +509,18 @@ func maintainSeatCtx(ctx context.Context, cfg config.Config, restamp restamper, 
 		fmt.Fprintf(os.Stderr, "gpu reserve: %s unloaded\n", model)
 	}
 	return nil
+}
+
+// effectiveMemoryStack is the set every path that clears or reclaims the cards keeps
+// resident: the configured memory_stack, or the default when it is empty. It is one
+// reading shared by `gpu reserve --unload-seat` and fleet reclaim (register C-94),
+// and it matches the render side: the pipeline exports MEMORY_STACK only when the
+// list is non-empty, so render/gpu-lock.mjs then keeps its own default.
+func effectiveMemoryStack(cfg config.Config) []string {
+	if len(cfg.MemoryStack) == 0 {
+		return config.Default().MemoryStack
+	}
+	return cfg.MemoryStack
 }
 
 // otherResidentModels lists every model llama-swap's /running reports besides

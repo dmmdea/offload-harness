@@ -106,7 +106,7 @@ if ($macro -match '--cache-ram 16384')                         { Ok 'ampere-8/mi
 if ($macro -notmatch '--slot-save-path')                      { Ok 'ampere-8/mid renders NO slot-save-path (ADR 0056: llama-server REFUSES TO START when the path is missing, and the par8 seat has 8 slots)' } else { Bad "ampere-8/mid must not render slot-save-path (got: $macro)" }
 # RAM is overflow only (operator rule 2026-09-10; wiring-debt W4, 0.132.4): an 8 GB card cannot hold the
 # 26B without parking its experts in RAM, and --cpu-moe parks ALL of them. This block used to assert the
-# opposite - that ampere-8/mid renders the 26B WITH --cpu-moe - which is how the Aorus served it live.
+# opposite - that ampere-8/mid renders the 26B WITH --cpu-moe - which is how <node-a> served it live.
 if ($r.yaml -notmatch '(?m)^\s{2}gemma4-26b-a4b:' -and $r.yaml -notmatch '(?m)^\s{2}gemma-4-26b-agent:') { Ok 'ampere-8/mid renders NO 26B (RAM is overflow only)' } else { Bad 'ampere-8/mid still renders a 26B entry' }
 $cpuMoeLines = @($r.yaml -split "`r?`n" | Where-Object { $_ -match '--cpu-moe' -and $_ -notmatch '^\s*#' })
 if ($cpuMoeLines.Count -eq 0)                                  { Ok 'ampere-8/mid renders no --cpu-moe anywhere' } else { Bad "ampere-8/mid still renders --cpu-moe ($($cpuMoeLines.Count) line(s))" }
@@ -315,7 +315,7 @@ $a8Functional = (($r.yaml -split "`r?`n") | Where-Object { $_.Trim() -and $_.Tri
 if ($a8Functional -notmatch 'qwen3\.5-4b-agent' -and $a8Functional -notmatch '\bq354\b' -and $a8Functional -notmatch '__Q354B_') { Ok 'ampere-8 qwen3.5-4b seat STRIPPED (include_qwen35_4b absent)' } else { Bad 'ampere-8 qwen3.5-4b leaked in' }
 # ampere-8 RENDERS the 9B agent seat: "stays E4B-by-fallback until its own
 # on-box bake" was the OLD state: PR #173 flipped include_qwen35_9b after the
-# blackwell-8 reference bake (100% vs E4B 0%); live aorus-ampere8 serves it resident at 32k (verified /fleet/health 2026-08-25). The stale strip expectation kept main red for four merges.
+# blackwell-8 reference bake (100% vs E4B 0%); live node-a-ampere8 serves it resident at 32k (verified /fleet/health 2026-08-25). The stale strip expectation kept main red for four merges.
 if ($a8Functional -match 'qwen3\.5-9b-agent' -and $a8Functional -notmatch '__Q359B_') { Ok 'ampere-8 renders the qwen3.5-9b agent seat (include_qwen35_9b, PR #173)' } else { Bad 'ampere-8 qwen3.5-9b seat missing or unsubstituted' }
 # ampere-8 ALSO renders mimo-9b-agent (include_mimo_9b, 2026-09-24 8GB agent-seat bake:
 # a coin-flip quality tie against qwen3.5-9b-agent with a smaller VRAM footprint). Both
@@ -329,7 +329,7 @@ $a8MimoCmd = ([regex]::Match($r.yaml, '(?ms)^\s{2}mimo-9b-agent:.*?(?=^\s{2}\S|\
 if ($a8MimoCmd -and $a8MimoCmd -match 'aliases:.*mimo-9b.*agent-seat') { Ok 'ampere-8 mimo-9b-agent holds the agent-seat alias' } else { Bad "ampere-8 mimo-9b-agent does not hold agent-seat - got: $a8MimoCmd" }
 
 # blackwell-8: the measured 8GB agent seat renders (entry + swappable-set membership).
-# MEASURED 2026-08-22 on the tier's reference box (OptiPlex 7060, RTX 5060): 100%
+# MEASURED 2026-08-22 on the tier's reference box (<node-e>, RTX 5060): 100%
 # extraction x2 + 5/5 x2 where the E4B fallback scored 0% x2; 6344 MiB @16K / 6696 @32K.
 # RAM-band insensitive on purpose (same doctrine as the ampere-6 4B seat: the seat
 # lives entirely in VRAM, so no RAM gate may remove it).

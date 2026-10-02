@@ -32,7 +32,7 @@ func sizedFailingLocal(calls *atomic.Int64) LocalRunner {
 // and the note names the seat's number as the floor.
 func TestRunRetryFloorUsesTheFirstAttemptsMinTurn(t *testing.T) {
 	compressPolls(t, 10*time.Millisecond, 2*time.Second)
-	node, url := eligibleNode(t, "node-a", "qube from A")
+	node, url := eligibleNode(t, "node-a", "zorblax from A")
 	cfg := testCfg(t)
 	cfg.AgentRetryMinSec = 0
 	var localCalls atomic.Int64

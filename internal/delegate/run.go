@@ -4770,7 +4770,7 @@ func (r *runner) runLocal(ctx context.Context, jobID string, contract core.Agent
 	// A local placement starts the moment it is handed to the runner: no
 	// queue, no ack. "" as the node = this box's PAIR identity — unless the
 	// endpoint is another box's engine, whose name the card then carries
-	// (register C-58: PAIR showed the Qube doing the Lenovo's work).
+	// (register C-58: PAIR showed <node-b> doing <node-c>'s work).
 	pairNode := ""
 	if host := modelaffinity.EndpointHost(r.cfg.Endpoint, r.cfg.FleetNodeID); host != "" {
 		pairNode = host
@@ -6175,7 +6175,7 @@ func nodeSideVerdict(lanes int, unadvertised []string, views []NodeView, probeEr
 //
 // unadvertised is a list rather than a count because it is the operator's
 // worklist: "some node did not publish agent_ctx_tokens" is unactionable across
-// a fleet, "qube-2 did not" is one ssh away.
+// a fleet, "node-b2 did not" is one ssh away.
 func laneStats(st Subtask, views []NodeView) (lanes, advertisedTooSmall, roomiest int, unadvertised []string) {
 	for _, v := range views {
 		if !v.AgentEnabled || !v.AgentResident {
@@ -6284,9 +6284,9 @@ func contractIneligible(st Subtask, lanes, advertisedTooSmall, roomiest, unadver
 // results.
 func (r *runner) localNodeID() string {
 	// A "local" run against another box's engine (a bench config whose
-	// endpoint is the Lenovo's arm) is that box's work: name the node after
+	// endpoint is <node-c>'s arm) is that box's work: name the node after
 	// the endpoint host, as a remote placement is named after its base
-	// (register C-58: PAIR showed the Qube doing the Lenovo's work).
+	// (register C-58: PAIR showed <node-b> doing <node-c>'s work).
 	if host := modelaffinity.EndpointHost(r.cfg.Endpoint, r.cfg.FleetNodeID); host != "" {
 		return host
 	}

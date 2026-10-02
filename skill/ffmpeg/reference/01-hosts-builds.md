@@ -61,9 +61,9 @@ the digest.
 
 | Item | Value |
 |---|---|
-| Reach | `ssh lenovo` (user **<lenovo-ssh-user>**, key auth; `<user>@edge-node` is refused). Tailscale MagicDNS the edge node **[measured]** |
+| Reach | `ssh <ssh-alias>` (user **<ssh-user>**, key auth; `<user>@edge-node` is refused). Tailscale MagicDNS the edge node **[measured]** |
 | OS / CPU / RAM | Ubuntu, kernel 7.0.0-30, i9-9900 8C/16T, 62 GB **[measured]** |
-| GPU | **NVIDIA A2 16 GB since 2026-09-04** (tier `ampere-16`; fleet node renamed `lenovo-ampere6` → `lenovo-ampere16` the same day) — **not yet dumped**. The encoder/filter rows and every edge node throughput number below were measured 2026-09-01 on the box's previous **RTX 3050 6 GB, driver 610.43.02**; re-run `ffdump.py` before relying on them **[3050 rows measured 2026-09-01]** |
+| GPU | **NVIDIA A2 16 GB since 2026-09-04** (tier `ampere-16`; fleet node renamed `node-c-ampere6` → `node-c-ampere16` the same day) — **not yet dumped**. The encoder/filter rows and every edge node throughput number below were measured 2026-09-01 on the box's previous **RTX 3050 6 GB, driver 610.43.02**; re-run `ffdump.py` before relying on them **[3050 rows measured 2026-09-01]** |
 | ffmpeg | **8.0.1-3ubuntu2** (`/usr/bin/ffmpeg`, gcc 15), python3 present **[measured]** |
 | `-hwaccels` | vdpau cuda vaapi qsv drm opencl vulkan **[measured]** |
 | Encoders | h264_nvenc, hevc_nvenc, av1_nvenc (listed, **but "No capable devices found" on the RTX 3050** — Ampere has no AV1 NVENC), libx264, libx265 (4.1), libsvtav1 (2.3.0), libaom-av1, librav1e, libvpx-vp9, *_qsv (listed; iGPU untested), prores_ks, dnxhd, libwebp(_anim), aac, libopus, libmp3lame, flac. No AMF/MF (Windows-only), no libvvenc **[measured]** |
@@ -82,10 +82,10 @@ Measured throughput, edge node, 2026-09-01 (same clips; the fleet agent seat was
 | hevc_nvenc p4 cq26 | 295 | | |
 | av1_nvenc | **refused** | | |
 
-## laptop 15P the laptop — NOT MEASURED (offline on Tailscale during the whole session, last seen 5–6 h earlier)
+## The laptop — NOT MEASURED (offline on Tailscale during the whole session, last seen 5–6 h earlier)
 Known from the Resolve reference: Windows, RTX 3070 8 GB (Ampere → h264/hevc NVENC, **no AV1 NVENC** [inferred from the RTX 3050 result]), 64 GB, `ssh laptop` (user <user>, PowerShell 5.1 remote shell, no `&&`). ffmpeg version and build **unknown** — run `ffdump.py` (below) when it is up.
 
-## Dell editing rig 7060 the editing rig — THE editing rig, MEASURED 2026-09-10
+## The editing rig, MEASURED 2026-09-10
 
 | Item | Value [measured 2026-09-10] |
 |---|---|
@@ -99,7 +99,7 @@ Known from the Resolve reference: Windows, RTX 3070 8 GB (Ampere → h264/hevc N
 | Console owner | local account **<editor>**, session 1 — was Active with no idle time at probe time. Reads and file writes are safe; a throughput benchmark is not (see Gaps) |
 | Harness clone | `<dev>\<user>a\local-offload-public` → `https://github.com/<dev>/offload-harness.git`; `git pull` brings `skill/ffmpeg/` (sanitized copy) |
 | Docs deployed | `%USERPROFILE%\.claude\skills\{ffmpeg,davinci-resolve}\` — unredacted copies, created 2026-09-10 (the rig had no `skills` dir before; `claude.exe` and a `CLAUDE.md` were already there) |
-| Also present | `<dev>\<user>a\powertune`, Hailo-8L pipelines under `D:\Dev`; editing tree `D:\Editing\{Assets,Exports,Footage,Projects,ResolveCache,ResolveDB,ResolveTools,_pp_*}` |
+| Also present | `<dev>\<user>a\powertune`, Hailo-8L pipelines under `<dev>`; editing tree `D:\Editing\{Assets,Exports,Footage,Projects,ResolveCache,ResolveDB,ResolveTools,_pp_*}` |
 
 From the Resolve reference [doc-of-ours]: i7-9700T 8C/8T, 64 GB, C: Optane 109 GB / D: T-Force 954 GB / E: Exos 3.7 TB / F: cache. Editing outputs stay on `D:\Editing\Exports`; never copy MyTools output to Google Drive.
 

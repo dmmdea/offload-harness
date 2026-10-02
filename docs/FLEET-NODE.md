@@ -185,7 +185,7 @@ config at process start — a route bound in the config after the process starte
 | `gpu_util_pct` | the busiest card on the WHOLE box (PAIR's multi-GPU rule — the shared card is the one that matters) | the fleet overview, any dashboard |
 | `work_util_pct` | the busiest card **the harness can actually run a seat on** | the delegator's placement tie-break |
 
-They differ exactly when someone is using the machine. On 2026-09-20 the Qube read
+They differ exactly when someone is using the machine. On 2026-09-20 <node-b> read
 `gpu_util_pct: 33` from a game on its display card while every card the harness could use sat at
 0%, and because placement broke ties on that number the node lost work it should have won. A
 display card is identified by the card's OWN property, not by config and not by inference:
@@ -313,7 +313,7 @@ rules as `local-agent --serve` apply, enforced by the same shared guard:
   your workstation) — the tailnet is the trust boundary. **NEVER bind `0.0.0.0`**, and never expose
   the port beyond the tailnet.
 - Port **18811** per the house port discipline; update the machine's port file in
-  `P:\Port Directory\` when you stand a node up.
+  the operator's port ledger when you stand a node up.
 
 ## Footprints — measured, not guessed
 

@@ -4,17 +4,17 @@
 
 `local-offload node-swap` (`node_swap_cmd.go`, engine in `internal/nodeswap/`) is the one
 reusable Windows fleet-node binary-swap tool every future deploy calls, replacing the family of
-hand-adapted, per-release scripts (`aorus-swap-<sha>.ps1`, `deploy-node-exe.ps1`,
+hand-adapted, per-release scripts (`node-swap-<sha>.ps1`, `deploy-node-exe.ps1`,
 `fleet-node-restart.ps1` stitched together on the fly) that every deploy record before it used.
 
-It exists because of a real outage. The 2026-09-24 Aorus 0.140.8 deploy ran its
+It exists because of a real outage. The 2026-09-24 <node-a> 0.140.8 deploy ran its
 restart-and-verify phase inside an interactive SSH session. Windows OpenSSH kills the whole
 remote process tree when the client disconnects (the `windows-ssh-remote-ops-patterns` house
 memory). The session dropped mid-script: the binary had already been swapped, but the script
 never reached `schtasks /run` / health-verify / its own rollback path. The node sat down from
 02:56 to ~05:30 with nobody watching, and was only recovered by a separate, short-lived
 `schtasks /run` call made by hand. A second hazard the same day: an idle
-`offload-harness.exe mcp` process on the OptiPlex held an OS-level file handle on the live exe
+`offload-harness.exe mcp` process on <node-e> held an OS-level file handle on the live exe
 and silently blocked `Move-Item`/`Rename-Item`, even though nothing was actively using it.
 
 `node-swap` fixes both: it is meant to be launched **detached** (see
@@ -49,17 +49,17 @@ restart, verify, automatic rollback on any failure) and, as an option, its rende
   with no lock at all, so that class of problem does not exist there. Linux deploys
   use [`setup/linux-node-swap-launch.sh`](#interfaces-and-entry-points), the
   detached-launch sibling of the PowerShell one, which drives the SAME engine —
-  never a separate, hand-rolled polling implementation (the deploy-d5207011 Lenovo
+  never a separate, hand-rolled polling implementation (the deploy-d5207011 <node-c>
   incident this fixes: an ad-hoc bash script's own health-poll hardcoded
   `127.0.0.1` while fleet-serve there bound only its tailnet address, and an
   unguarded fallback read every failed poll as "still busy" for ~46 minutes).
 - **Deciding WHEN to deploy, or building the go binary/render tarball.** Those stay operator
   and deploy-record concerns; this tool is the mechanical last mile.
-- **The OptiPlex's own campaign scheduling** (which release to deploy, when). What
+- **<node-e>'s own campaign scheduling** (which release to deploy, when). What
   `node-swap` DOES now own for a standalone node (no `--health-url`, no
   `--restart-task`/`--restart-command`): it waits for this node's own GPU lease to
   clear before touching the binary — the check a standalone-node deploy previously
-  left to the operator's own `gpu status` (deploy-d5207011 OptiPlex section). See
+  left to the operator's own `gpu status` (deploy-d5207011 <node-e> section). See
   "GPU-lease wait (standalone nodes)" below.
 
 ## Key concepts
@@ -69,7 +69,7 @@ restart, verify, automatic rollback on any failure) and, as an option, its rende
   (`Steps[]`, `OK`, `Error`, `RolledBack`, `RollbackOK`, the old/new sha256, the final PID and
   image hash). The `--result` file IS an `Outcome`.
 - **Standalone node** — no `--health-url` and neither `--restart-task` nor `--restart-command`:
-  the OptiPlex pattern (binary-only swap, no fleet-serve to wait on or restart). The health
+  <node-e> pattern (binary-only swap, no fleet-serve to wait on or restart). The health
   half of post-restart verification is skipped (the swap is still proven by hash), but the
   wait step is NOT skipped: it waits for this node's own GPU lease to clear instead (see
   "GPU-lease wait" below) — a standalone node has no queue depth to read, but it can still
@@ -85,7 +85,7 @@ restart, verify, automatic rollback on any failure) and, as an option, its rende
   address already clears loopback/wildcard (`resolveNodeSwapDefaults`,
   `loopbackOrWildcardHost` in `node_swap_cmd.go`). A config that still carries the
   built-in loopback default gets no health URL, never a wrong one that reads as a false
-  "not idle" forever — the exact failure class of the Lenovo deploy-d5207011 incident. An
+  "not idle" forever — the exact failure class of the <node-c> deploy-d5207011 incident. An
   explicit `--health-url` always wins outright.
 - **Idle MCP holder** — a Windows-only class of rename blocker: a `local-offload.exe mcp`
   process from another session holds an OS-level handle on the exe with no active job. Only a
@@ -113,12 +113,12 @@ rollback branch is unit-tested with fakes, no real Windows box required):
    different volumes/filesystems (Windows: a different drive letter; Linux/macOS: EXDEV), the
    plain rename cannot cross that boundary — falls back to copying `Staged` into a temp file
    next to `Target` (same directory, so the final move is same-device), re-hashing the copy
-   before trusting it, and cleaning up the temp file on any failure (2026-09-24 Aorus rollout:
+   before trusting it, and cleaning up the temp file on any failure (2026-09-24 <node-a> rollout:
    staged at `C:\tmp\` against a `D:\` target rolled back cleanly but never actually swapped).
 6. **Optional render-tree swap** — backup the render dir, extract the tarball, verify at least
    one file landed; any failure here rolls the whole run back (binary included).
-7. **Restart** — `Start-ScheduledTask`, or run `--restart-command` (e.g. the Qube's
-   WMI-launching `fleet-node-restart.ps1`), or nothing at all for a standalone node.
+7. **Restart** — `Start-ScheduledTask`, or run `--restart-command` (e.g. a launcher script that
+   restarts the node out of session via WMI/CIM), or nothing at all for a standalone node.
 8. **Verify** — poll for a process matching `--process-match` whose OWN running image hashes
    to what was just installed, and (when configured) a healthy `/fleet/health`, within
    `--verify-timeout`.
@@ -168,7 +168,7 @@ when step 4 itself failed — nothing was ever moved, so the original binary is 
   post-launch liveness check and log/result-path printout. Its `--restart-command` is the
   Linux equivalent of the Windows launcher's `-RestartTask` (a systemd unit restart, e.g.
   `systemctl restart offload-fleet-node.service`, matching every deploy record's own
-  pattern); omitting it (and `--health-url`) is the standalone/OptiPlex-on-Linux shape.
+  pattern); omitting it (and `--health-url`) is the standalone/<node-e>-on-Linux shape.
 - **Both launchers' `--runner-exe`/`-RunnerExe` default to the STAGED binary** (the engine
   actually being deployed), never the currently-installed one — verified against
   `--sha256`/`-Sha256` by the launcher itself before it ever runs, since node-swap's own hash
@@ -177,7 +177,7 @@ when step 4 itself failed — nothing was ever moved, so the original binary is 
   support the `node-swap` subcommand at all (a very old staged build). This matters because a
   fix TO the swap engine (like the cross-device fallback above) cannot take effect while a
   launcher keeps running the OLD installed code to perform the swap — the exact 2026-09-24
-  failure mode on the Lenovo/binxarn: their installed build still carried the pre-fix
+  failure mode on <node-c>/<node-f>: their installed build still carried the pre-fix
   `deps_other.go` stub, so running node-swap FROM it re-triggered the very bug the staged build
   had already fixed. `resolve_runner_exe`/`Resolve-RunnerExe` in each launcher are the
   unit-tested seam (`setup/linux-node-swap-launch.tests.sh`,

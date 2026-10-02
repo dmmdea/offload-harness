@@ -402,7 +402,7 @@ test("version and browser ops run through the same allowlist and env", () => {
   assert.equal(r.last.browser_path, fx.browserPath);
   const calls = fx.calls();
   assert.deepEqual(calls.map((c) => c.argv.slice(0, 2).join(" ")), ["--version --json", "browser ensure", "browser path"]);
-  // --dns-result-order=ipv4first (D-defect: binxarn wave session 5d227d30 §5a — a
+  // --dns-result-order=ipv4first (D-defect: <node-f> wave session 5d227d30 §5a — a
   // dead IPv6 route to storage.googleapis.com hung `browser ensure` with no
   // failover) reaches the node PROCESS that runs "browser ensure" and nothing
   // else: not --version, not "browser path", not lint/check/render/snapshot.

@@ -105,7 +105,7 @@ type LayerSpec struct {
 	// (the display layer ships dormant until its measurement is read; council R7).
 	Dormant bool `json:"dormant,omitempty"`
 	// DisplayDevice is the device (CUDA index or GPU-UUID prefix) the display
-	// guards read live. The Qube pins it by UUID because the board reorders
+	// guards read live. <node-b> pins it by UUID because the board reorders
 	// indices on power loss.
 	DisplayDevice string `json:"display_device,omitempty"`
 	// DisplayFloorGiB is the VRAM the desktop keeps on DisplayDevice: the
@@ -151,6 +151,57 @@ const agentContextCapCeilingBytes = 2 << 20
 // row, status view and ledger entry is byte-identical to the pre-layer build.
 func (c Config) Composite() bool {
 	return len(c.Layers) > 0
+}
+
+// LayerSeatModels lists every model name the declared layers serve, in layer
+// order, router twins (model_map) included.
+func (c Config) LayerSeatModels() []string {
+	var out []string
+	for _, l := range c.Layers {
+		for _, s := range l.Seats {
+			if s.Model != "" {
+				out = append(out, s.Model)
+			}
+			for _, twin := range s.ModelMap {
+				out = append(out, twin)
+			}
+		}
+	}
+	return out
+}
+
+// AgentModelShadowNote says when agent_model is NOT the seat a run will use,
+// and "" when it is (or may be). On a box that declares layers the placement
+// table picks the agent seat from them; agent_model only applies when a
+// decision names no seat (register C-95). So a config that sets agent_model to
+// a model none of its layers serves — typically a copy repointed at a scratch
+// engine that kept the original `layers` — still sends every placed run to a
+// layer seat, and the roster defer names a seat the operator never wrote there.
+// The note is the one place that precedence is spoken in the operator's terms.
+func (c Config) AgentModelShadowNote() string {
+	if !c.Composite() || strings.TrimSpace(c.AgentModel) == "" {
+		return ""
+	}
+	served := c.LayerSeatModels()
+	for _, m := range served {
+		if m == c.AgentModel {
+			return ""
+		}
+	}
+	var agents []string
+	for _, l := range c.Layers {
+		for _, s := range l.Seats {
+			if s.Role == "agent" && s.Model != "" {
+				agents = append(agents, s.Model)
+			}
+		}
+	}
+	seats := "its layer seats (" + strings.Join(served, ", ") + ")"
+	if len(agents) > 0 {
+		seats = "a layer's agent seat (" + strings.Join(agents, ", ") + ") or another layer seat"
+	}
+	return fmt.Sprintf("agent_model %q is not a seat of any layer this config declares, and a config with layers lets placement choose the seat: runs go to %s, and agent_model applies only when a decision names no seat. To run %q, serve it from a layer seat or remove \"layers\".",
+		c.AgentModel, seats, c.AgentModel)
 }
 
 // Layer returns the declared layer by name. A miss is a miss, not a default:

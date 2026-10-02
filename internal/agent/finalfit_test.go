@@ -9,7 +9,7 @@ import (
 
 const cutJSON = `{"mechanisms":[{"name":"gradient checkpointing","detail":"recompute activations in the backward pass"},{"name":"paged attention","detail":"`
 
-// cutProse is the shape a cut final ACTUALLY has on the Lenovo 4B seat: the
+// cutProse is the shape a cut final ACTUALLY has on the <node-c> 4B seat: the
 // seat answers a schema contract in its own `key:` / `- item` prose, which the
 // ordinary re-pack reads fine, and the cut lands mid-item.
 const cutProse = "summary (<=100 words):\nExo-Bench measures per-task prefill and generation TPS across a cluster.\nmechanisms:\n- Prefill TPS = prompt_tokens / prefill_wall_seconds (server-side).\n- Generation TPS = (completion_tokens - 1) / (last_token_time - first"
@@ -192,7 +192,7 @@ func TestNoListCapReissueWhenTheWallCannotHoldOneMoreTurn(t *testing.T) {
 }
 
 // TestCutProseFinalOnASchemaContractIsReissuedWithListCaps (D-95b): 0.122.1
-// gated the re-issue on the partial being JSON-shaped, and on the Lenovo 4B
+// gated the re-issue on the partial being JSON-shaped, and on the <node-c> 4B
 // that excluded exactly the runs it was built for — the seat's normal final
 // shape on a schema contract is prose (`summary:` / `- item`), and the
 // METHODOLOGY.md digest of 2026-09-14 deferred at 381 s with a prose partial

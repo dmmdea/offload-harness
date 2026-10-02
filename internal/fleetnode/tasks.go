@@ -53,9 +53,9 @@ func taskConfiguredFor(cfg config.Config, taskType string, loopbackListener bool
 	case "image-gen":
 		// The default binding (ComfyUI script OR the sdcpp engine, J2) OR at least one
 		// named family (ADR 0058) — a family-only node (no default binding by design,
-		// e.g. binxarn's Qwen-Image-2.1) must still be admitted and advertised, or the
+		// e.g. <node-f>'s Qwen-Image-2.1) must still be admitted and advertised, or the
 		// fleet HTTP door can neither reach nor advertise a family doctor shows fully
-		// CONFIGURED (binxarn wave session 5d227d30 §2a).
+		// CONFIGURED (<node-f> wave session 5d227d30 §2a).
 		return cfg.ImageGenAdvertisable()
 	case "video-gen":
 		return cfg.VideoGenScript != ""
@@ -310,7 +310,7 @@ type ImageFamily struct {
 // health's pre-0.134 shape (no image_families key at all): the old gate here also
 // required ImageRouteConfigured() (the DEFAULT binding), which made this nil for a
 // family-only node even though its families were fully configured and reachable
-// through the CLI door (binxarn wave session 5d227d30 §2a) — the two binding sets
+// through the CLI door (<node-f> wave session 5d227d30 §2a) — the two binding sets
 // (default vs. named) are independent, so only the family count gates this.
 // Config-derived like the task list; the per-family file verdicts live in
 // offload_status/doctor on the node itself.

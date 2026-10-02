@@ -18,7 +18,7 @@ import (
 // agent_run door never ran the cold-load warm-up the pipeline door has had since
 // 0.115.11 (D-64), so on a cold seat its window probe raced a model still
 // loading. The same agent_run measured ctx_window 8,192 cold and 114,688 warm,
-// minutes apart, on the Qube agent-pool seat. The seat here is absent; the first
+// minutes apart, on the <node-b> agent-pool seat. The seat here is absent; the first
 // passthrough GET is the load. The run must load it OUTSIDE the wall, say so
 // under the wire's own field names, and budget against the served window.
 func TestAgentRunWarmsAColdSeatBeforeProbingItsWindow(t *testing.T) {

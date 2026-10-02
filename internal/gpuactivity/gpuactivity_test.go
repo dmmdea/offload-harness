@@ -118,7 +118,7 @@ func TestParseGPUsAndProcesses(t *testing.T) {
 	if gpus[1].UtilKnown {
 		t.Fatalf("[N/A] utilization must read as unknown, not idle: %+v", gpus[1])
 	}
-	procs := ParseProcesses("58596, [N/A], GPU-0c3843d3-5721-d9f7-47fe-89fdb8373e24, C:\\Program Files\\Python314\\python.exe\n" +
+	procs := ParseProcesses("58596, [N/A], GPU-3333cccc-0000-0000-0000-000000000000, C:\\Program Files\\Python314\\python.exe\n" +
 		"4242, 1536, GPU-1111aaaa-2222-3333-4444-555566667777, /usr/bin/vllm, with comma\n")
 	if len(procs) != 2 || procs[0].UsedKnown || procs[0].PID != 58596 || !strings.HasSuffix(procs[0].Name, "python.exe") {
 		t.Fatalf("procs: %+v", procs)
@@ -249,7 +249,7 @@ func TestALaterPhaseSurvivesAStep(t *testing.T) {
 }
 
 // TestHeldWorkingNeedsACardTheHarnessCanRunOn pins the 2026-09-20 defect: on the
-// Qube, while the operator played a game, `gpu status` read
+// workstation, while the operator played a game, `gpu status` read
 // `held-working — 33% on card 1 (RTX 5070 Ti)` although the lease holder had
 // spent 4 SECONDS of CPU in 141 minutes and the two cards it fenced were at 0%.
 // Card 1 is the display card and the 33% was the game. held-working outranks
@@ -257,11 +257,11 @@ func TestALaterPhaseSurvivesAStep(t *testing.T) {
 // a box anyone was using, and three jobs queued behind a holder doing nothing.
 func TestHeldWorkingNeedsACardTheHarnessCanRunOn(t *testing.T) {
 	const (
-		card0 = "GPU-3ee161b5-c188-495b-eaeb-291e6e6e1d97" // 5060 Ti, harness
-		card1 = "GPU-2a44210f-6739-2d89-0e21-44cd5143faf7" // 5070 Ti, the display card
-		card2 = "GPU-0c3843d3-5721-d9f7-47fe-89fdb8373e24" // 5060 Ti, harness
+		card0 = "GPU-1111aaaa-2222-3333-4444-555566667777" // 5060 Ti, harness
+		card1 = "GPU-8888bbbb-9999-cccc-dddd-eeeeffff0000" // 5070 Ti, the display card
+		card2 = "GPU-3333cccc-0000-0000-0000-000000000000" // 5060 Ti, harness
 	)
-	// The Qube's real sample: nvidia-smi types every one of these desktop rows
+	// The workstation's real sample: nvidia-smi types every one of these desktop rows
 	// `C+G` and can size none of them, so the process list proves nothing
 	// either way. What marks card 1 is the card's own display_active property.
 	desktop := []GPUProcess{
@@ -269,7 +269,7 @@ func TestHeldWorkingNeedsACardTheHarnessCanRunOn(t *testing.T) {
 		{PID: 65980, Name: `V:\Battle.net\World of Warcraft\_classic_beta_\WowB.exe`, GPUUUID: card1},
 		{PID: 11988, Name: `C:\Program Files\Google\Chrome\Application\chrome.exe`, GPUUUID: card1},
 	}
-	qube := func(u0, u1, u2 int) []GPU {
+	nodeB := func(u0, u1, u2 int) []GPU {
 		return []GPU{
 			{Index: 0, UUID: card0, Name: "NVIDIA GeForce RTX 5060 Ti", UtilPct: u0, UtilKnown: true, MemTotalMiB: 16311},
 			{Index: 1, UUID: card1, Name: "NVIDIA GeForce RTX 5070 Ti", UtilPct: u1, UtilKnown: true, MemTotalMiB: 16303, DisplayActive: true},
@@ -289,14 +289,14 @@ func TestHeldWorkingNeedsACardTheHarnessCanRunOn(t *testing.T) {
 	}{
 		{
 			name:    "the game on the display card is NOT the holder working",
-			view:    View{At: now, Held: true, Holder: holder, Seat: idleSeat, GPUs: qube(0, 33, 0), Processes: desktop},
+			view:    View{At: now, Held: true, Holder: holder, Seat: idleSeat, GPUs: nodeB(0, 33, 0), Processes: desktop},
 			verdict: VerdictHeldIdle,
 			want:    []string{"NOTHING is running", "display card", "not the holder's work", "33% on card 1", "held 8456s"},
 			absent:  []string{"this is the holder's own job"},
 		},
 		{
 			name:    "a busy card the harness CAN use is the holder working",
-			view:    View{At: now, Held: true, Holder: holder, Seat: idleSeat, GPUs: qube(90, 33, 0), Processes: desktop},
+			view:    View{At: now, Held: true, Holder: holder, Seat: idleSeat, GPUs: nodeB(90, 33, 0), Processes: desktop},
 			verdict: VerdictHeldWorking,
 			want:    []string{"90% on card 0", "the holder's own job"},
 			absent:  []string{"card 1"},
@@ -314,7 +314,7 @@ func TestHeldWorkingNeedsACardTheHarnessCanRunOn(t *testing.T) {
 		{
 			// Headless Linux: every card answers Disabled, so nothing is excluded
 			// and a busy card is the holder's work wherever it sits. Measured on
-			// the Lenovo's A2 on 2026-09-21.
+			// <node-c>'s A2 on 2026-09-21.
 			name: "a card driving no display is the holder working wherever it sits",
 			view: View{At: now, Held: true, Holder: holder, Seat: idleSeat,
 				GPUs: []GPU{
@@ -328,7 +328,7 @@ func TestHeldWorkingNeedsACardTheHarnessCanRunOn(t *testing.T) {
 		{
 			// Unleased, the game IS the answer to "is anything using this box".
 			name:    "with no lease the display card still reads busy-outside",
-			view:    View{At: now, Seat: idleSeat, GPUs: qube(0, 33, 0), Processes: desktop},
+			view:    View{At: now, Seat: idleSeat, GPUs: nodeB(0, 33, 0), Processes: desktop},
 			verdict: VerdictBusyOutside,
 			want:    []string{"33% on card 1", "work the harness does not own"},
 		},

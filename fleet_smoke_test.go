@@ -9,7 +9,7 @@ import (
 )
 
 func TestSmokeContractIsGroundedAndCheap(t *testing.T) {
-	spec := smokeContract("lenovo-ampere6")
+	spec := smokeContract("node-c-ampere6")
 	c, err := delegate.PrepareContract(spec, "")
 	if err != nil {
 		t.Fatal(err)
@@ -22,13 +22,13 @@ func TestSmokeContractIsGroundedAndCheap(t *testing.T) {
 	if c.TimeoutSec != 60 {
 		t.Fatalf("smoke must be 60 s wall-bound, got %d", c.TimeoutSec)
 	}
-	if !strings.Contains(strings.Join(c.Acceptance, " "), "contains:PONG-lenovo-ampere6") {
+	if !strings.Contains(strings.Join(c.Acceptance, " "), "contains:PONG-node-c-ampere6") {
 		t.Fatalf("acceptance must anchor on a token that only the doc carries: %v", c.Acceptance)
 	}
-	if len(c.Context) != 1 || !strings.Contains(c.Context[0].Text, "PONG-lenovo-ampere6") {
+	if len(c.Context) != 1 || !strings.Contains(c.Context[0].Text, "PONG-node-c-ampere6") {
 		t.Fatal("the token must be IN the context doc, not only in the goal (parrot-passable otherwise)")
 	}
-	if strings.Contains(c.Goal, "PONG-lenovo-ampere6") {
+	if strings.Contains(c.Goal, "PONG-node-c-ampere6") {
 		t.Fatal("goal must not carry the token — an echo of the goal would pass")
 	}
 }

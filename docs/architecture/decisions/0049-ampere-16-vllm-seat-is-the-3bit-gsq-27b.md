@@ -91,7 +91,7 @@ that the patch is **not** upstream: vLLM `main` still constructs a stock three-a
 
 ## What was measured
 
-Reference box: Lenovo M720q, NVIDIA A2 16 GB at the accepted 40 W / 1200 MHz profile. Both arms at the **same
+Reference box: the ampere-16 reference box (NVIDIA A2 16 GB at the accepted 40 W / 1200 MHz profile). Both arms at the **same
 vendor sampling** — `temperature 0.7 / top_p 0.80 / top_k 20 / presence_penalty 1.5`, the Qwen3.8 model card's
 non-thinking values — so budgets match and the comparison is not confounded by sampling (INV-6).
 
@@ -141,7 +141,7 @@ seat that ANSWERS a default contract is unchanged and no quality regression ship
 
 ## Live cutover on the reference box (2026-09-16, same night)
 
-Everything below is measured on the Lenovo M720q with the production venv (`vllm-env-s6`, upgraded vLLM 0.28.0 →
+Everything below is measured on `<node-c>` with the production venv (`vllm-env-s6`, upgraded vLLM 0.28.0 →
 **0.29.0** by exact version with `uv`; torch 2.13.0 unchanged, LMCache 0.5.4 with its CUDA extensions intact,
 `pip check` clean) and the checkpoint's embedding patch applied in that venv. The tier's OTHER Qwen3.5 seat, the 4B,
 loads on 0.29 unpatched and patched and passed `contracts/digest-8.json` **8/8** (walls 42–108 s) — the patch is safe
@@ -153,7 +153,7 @@ for the whole tier. Record: `Benchmarks and Optimizations/2026-09-16-16gb-tier-p
 | digest-8 as the bound lane, measured config (4,096 / thinking off / vendor sampling), 300 s wire default | **3/8** — five `wall timeout after 300s`, zero wrong answers |
 | same, `timeout_sec: 900` | **8/8**, walls 129–516 s |
 | decode-rate sample for the auto wall (D-03) | **none recorded** — no single completion reached 1,024 tokens; the seat needs `agent_seat_tok_s` seeded (single-stream measured 5.75 tok/s → the estimate clamps to the 900 s cap, which is what 8/8 needed) |
-| embedder beside the seat at util 0.92 | `embeddinggemma /v1/embeddings → HTTP 500`; every mem0 write from every session returned 500 from the Lenovo authority while the seat was warm — the support group (`swap: false`) can neither evict it nor fit beside it |
+| embedder beside the seat at util 0.92 | `embeddinggemma /v1/embeddings → HTTP 500`; every mem0 write from every session returned 500 from the `<node-c>` authority while the seat was warm — the support group (`swap: false`) can neither evict it nor fit beside it |
 | the obvious fix, util 0.90 | vLLM refuses: `1.82 GiB KV cache is needed … available 1.32 GiB`; **estimated maximum model length 32,928** |
 
 **What this settles.** The seat is real, wired, callable by name and measured; it earns its keep on fan-out and on
@@ -170,7 +170,7 @@ blocked by co-residency, not by the seat.
 1. bind the GSQ at **32,768 @ util 0.90** — the window the card can share with the embedder; already blind-measured
    at that window (**8.42**, 22/24 against the llama.cpp 27B, accuracy 9.54 vs 9.47, coverage 7.69), mem0 stays up,
    concurrency at 0.90 not yet measured; or
-2. move mem0's embedder off the Lenovo (then the GSQ binds at 49,152 @ 0.92 as declared) — an architecture change
+2. move mem0's embedder off `<node-c>` (then the GSQ binds at 49,152 @ 0.92 as declared) — an architecture change
    this ADR does not make; or
 3. keep the 4B bound (today's state) and call the GSQ by name for fan-out.
 
@@ -293,9 +293,11 @@ runner's helper would have unloaded it. The default now lists it, appended so `E
 unchanged, in `internal/config` and in `render/gpu-lock.mjs`, and a test keeps the two lists equal
 ([gpu-lease.md](../../systems/gpu-lease.md)). The installer's seeded `config.json` keeps its explicit pair: a configured list
 replaces the default, and `llamaswap-pp-cli bind check` reports a `memory_stack` entry the box does not serve as dangling.
-The default covers `gpu reserve --unload-seat` and the render runner's helper only: fleet reclaim (`fleet_reclaim.go`) does
-not read `memory_stack` (it protects llama-swap's ttl -1/0 seats and the configured keep-set), so a ttl-300 embedder is still
-reclaimable there (register C-94).
+The default first covered `gpu reserve --unload-seat` and the render runner's helper only: fleet reclaim (`fleet_reclaim.go`)
+did not read `memory_stack` (it protected llama-swap's ttl -1/0 seats and the configured keep-set), so a ttl-300 embedder was
+still reclaimable there. That gap is closed (register C-94): reclaim now keeps every `memory_stack` member, and the default set
+when the list is empty, by name and whatever the ttl, through the same `effectiveMemoryStack` that `--unload-seat` reads, with a
+test that a ttl-300 member is never reclaimed and a non-member still is.
 
 **Costs recorded.** The lane seat serves at most 4 sequences at once (it declared 8, and 32 before) and llama-swap's
 `concurrencyLimit` for it follows, 8 to 4; the harness's own local run cap defaults to 4, so its runs now reach the limit
@@ -387,7 +389,7 @@ carries them as recorded, and the repository's gates prove only that the table d
 ## Re-eval triggers
 
 A vLLM release that upstreams the Qwen3.5 quantized-embedding path (the patch is carried, not merged); a W4A16
-27B that fits 16 GB by quantizing its embedding; mem0's embedder leaving the Lenovo (removes the co-residency
+27B that fits 16 GB by quantizing its embedding; mem0's embedder leaving `<node-c>` (removes the co-residency
 block on binding the GSQ at its declared window); a vLLM-loadable 27B quant that closes the 0.94 coverage gap
 (the matched-window result is in — a new quant, not a bigger window, is what would re-open this); and any change
 to the reference card's free VRAM, since the 49,152 window was fitted against what the box actually had free. Amendment 6

@@ -18,7 +18,7 @@ independent defects, all in `internal/delegate`:
 - **Nothing ranked by expected completion** (S-02): `fit.go`'s mechanical branch returned `-window` — the
   SMALLEST adequate seat wins, with no rate term at all — and `betterRemote`'s four keys (saturated,
   provably-free, queue depth, GPU utilization) carried none either. The fleet already published `seat_rate`;
-  placement read it nowhere. Measured on 642 same-goal contracts: the fastest seat (Aorus, 27.0 s median) was
+  placement read it nowhere. Measured on 642 same-goal contracts: the fastest seat (`<node-a>`, 27.0 s median) was
   also the MOST accepting (90.3 %) — ranking among quality-adequate seats by speed cost no quality on this
   fleet.
 - **`remoteEligible` gated on context fit only, never on whether one turn fits the wall** (S-03/S-05): a seat
@@ -63,7 +63,7 @@ tie-breakers `betterRemote` already had:
    the wall (D-64). A seat that cannot is excluded, naming the arithmetic ("one step and a 64-token answer
    need 42 s at 5.4 tok/s, the wall is 20 s"); an unknown rate is no opinion. As first shipped (0.128.0) this
    item fitted the configured final against `seatrate.FinalBudgetFloor` over the wall MINUS a tri-state
-   cold-load charge; the deploy smoke refused a cold Aorus a 60 s contract it completes in ~25 s, so 0.128.1
+   cold-load charge; the deploy smoke refused a cold `<node-a>` a 60 s contract it completes in ~25 s, so 0.128.1
    moved the fitted final and the cold load where the rider puts them — into the eta (item 3).
 3. **Expected-completion ranking among quality-adequate seats** (W-11): `etaFor` estimates cold + the node's own
    queue wait (`queueWaitFor`, from `jobs_running`/`jobs_queued`/`max_concurrent_jobs`/`recent_agent_wall_sec`,

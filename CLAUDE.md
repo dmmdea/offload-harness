@@ -110,7 +110,9 @@ prompt/exemplars; can only narrow — UNSET resolves to config `agent_profile`, 
    the set its residency ROLE marks (`__SEATS_SWAPPABLE__` joins with `|`, `__SEATS_RESIDENT__`
    with `&`). The same declaration writes `vision_model`/`stt_model`/`ocr_model` (an `rkllm` seat writes
    `vision_model` only when it has a vision encoder), so a binding can never name
-   a seat that was not rendered. Detail: `docs/systems/setup-installer.md`.
+   a seat that was not rendered. A seat flagged `extra: true` renders and answers to its aliases but
+   writes no key and is not counted by the one-writer check (`BindingKey()` is empty; install.ps1
+   `Get-MediaSeatBindings` mirrors the skip). Detail: `docs/systems/setup-installer.md`.
 1b. **The display card is never a `single` or `pair` layer device, and the display layer is
    dormant until the operator enables it** (ADR 0052). On the three-card reference box device 1
    is the RTX 5070 Ti driving the desktop: no default seat is pinned to it (tests assert the
@@ -154,7 +156,7 @@ prompt/exemplars; can only narrow — UNSET resolves to config `agent_profile`, 
 | `internal/mcpserver/` | MCP tool surface (incl. `agent_run`). |
 | `setup/` | Cross-vendor installer: `detect.ps1`, `install.ps1`, `selftest.ps1`, `templates/`, `SETUP-AGENT.md`. |
 | `skill/local-offload-setup/` | Thin setup-skill wrapper pointing at `setup/SETUP-AGENT.md`. |
-| `skill/gimp/` | GIMP 3.2 autonomous-driving reference (canonical source; installed copy lives in `~/.claude/skills/gimp`). Lean `SKILL.md` router + `reference/` (ten rules, hosts, connection modes, CLI/batch, Python API, editing playbook, export formats, scripting, failure modes, live PDB/GEGL dump measured on the Qube 2026-09-01). Backs the `flatten_design` / `instantiate_design` GIMP ops. |
+| `skill/gimp/` | GIMP 3.2 autonomous-driving reference (canonical source; installed copy lives in `~/.claude/skills/gimp`). Lean `SKILL.md` router + `reference/` (ten rules, hosts, connection modes, CLI/batch, Python API, editing playbook, export formats, scripting, failure modes, live PDB/GEGL dump measured on <node-b> 2026-09-01). Backs the `flatten_design` / `instantiate_design` GIMP ops. |
 | `config.example.json` | Full config with defaults (kept in lockstep via `go generate ./...`). |
 
 ## When lost

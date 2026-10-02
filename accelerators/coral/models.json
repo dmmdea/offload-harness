@@ -1,5 +1,5 @@
 {
-  "_comment": "Coral Edge TPU artifact manifest (Coral design D7). Every file from google-coral/test_data (Apache-2.0), fetched by fetch-models.sh from https://raw.githubusercontent.com/google-coral/test_data/master/<file> and verified by sha256 (computed 2026-09-08 on the Qube from the downloaded bytes). The sidecar refuses to serve an unlisted file or one whose hash does not match: an artifact that drifted is a structured model_sha_mismatch, never a silent load.",
+  "_comment": "Coral Edge TPU artifact manifest (Coral design D7). Every file from google-coral/test_data (Apache-2.0), fetched by fetch-models.sh from https://raw.githubusercontent.com/google-coral/test_data/master/<file> and verified by sha256 (computed 2026-09-08 on <node-b> from the downloaded bytes). The sidecar refuses to serve an unlisted file or one whose hash does not match: an artifact that drifted is a structured model_sha_mismatch, never a silent load.",
   "models": {
     "efficientnet-s": {
       "file": "efficientnet-edgetpu-S_quant_edgetpu.tflite",

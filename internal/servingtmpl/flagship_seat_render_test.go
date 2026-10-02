@@ -60,9 +60,9 @@ func TestFlagshipSeatRendersIntoItsOwnTemplate(t *testing.T) {
 	p.VLLMRuntime = vllmseat.Runtime{
 		User: "BOX\\operator", ProxyHost: "127.0.0.1",
 		StackDir: "C:/llama-swap", SeatDir: "C:/llama-swap/seat",
-		VenvDir: "/root/g7/vllm-env", HFHome: "/hf",
-		LMCacheOverlay: "/root/g7/lmcache-overlay",
-		Distro:         "freetoken", WSLSeatDir: "/root/g7",
+		VenvDir: "/opt/seat/vllm-env", HFHome: "/hf",
+		LMCacheOverlay: "/opt/seat/lmcache-overlay",
+		Distro:         "distro", WSLSeatDir: "/opt/seat",
 	}
 
 	out, err := Render(string(raw), p)

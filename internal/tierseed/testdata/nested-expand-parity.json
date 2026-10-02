@@ -1,0 +1,64 @@
+{
+  "_comment": "Shared fixture for the nested-placeholder parity gate. internal/tierseed (Go expand) and setup/install.ps1 (Expand-SeedValue, via Merge-ConfigSeed) must turn `seed` into exactly `expected` for a Windows install rooted at `home`. Both test suites load THIS file, so the two implementations cannot drift apart without one of them failing.",
+  "home": "D:\\oh",
+  "seed": {
+    "top": "__OFFLOAD_HOME__/top__EXE__",
+    "imagegen_families": {
+      "fam-a": {
+        "license": "Apache-2.0",
+        "commercial_use": true,
+        "sdcpp_bin": "__OFFLOAD_HOME__/sdcpp/sd-cli__EXE__",
+        "sdcpp_model": "__OFFLOAD_HOME__/models/m.gguf",
+        "sdcpp_extra_args": ["--a", "__OFFLOAD_HOME__/x", "6.5"],
+        "one_element": ["__OFFLOAD_HOME__/only"],
+        "empty_array": [],
+        "empty_object": {},
+        "objects": [{ "p": "__OFFLOAD_HOME__/o1", "n": 3 }, { "q": ["__EXE__"], "t": true }],
+        "one_object": [{ "p": "__OFFLOAD_HOME__/solo" }],
+        "matrix": [["__OFFLOAD_HOME__/a", "b"], ["__EXE__"], [], [["__OFFLOAD_HOME__/deep"]]],
+        "one_nested": [["__OFFLOAD_HOME__/z"]],
+        "mixed": ["__EXE__", 7, null, false, { "k": "__OFFLOAD_HOME__/m" }, ["x"]],
+        "imagegen_steps": 8,
+        "imagegen_cfg": 1,
+        "ratio": 1.5,
+        "off": false,
+        "nothing": null,
+        "deeper": {
+          "path": "__OFFLOAD_HOME__/d",
+          "flags": ["__EXE__", "plain"],
+          "again": { "p": "__OFFLOAD_HOME__/dd", "n": 40 }
+        }
+      }
+    }
+  },
+  "expected": {
+    "top": "D:/oh/top.exe",
+    "imagegen_families": {
+      "fam-a": {
+        "license": "Apache-2.0",
+        "commercial_use": true,
+        "sdcpp_bin": "D:/oh/sdcpp/sd-cli.exe",
+        "sdcpp_model": "D:/oh/models/m.gguf",
+        "sdcpp_extra_args": ["--a", "D:/oh/x", "6.5"],
+        "one_element": ["D:/oh/only"],
+        "empty_array": [],
+        "empty_object": {},
+        "objects": [{ "p": "D:/oh/o1", "n": 3 }, { "q": [".exe"], "t": true }],
+        "one_object": [{ "p": "D:/oh/solo" }],
+        "matrix": [["D:/oh/a", "b"], [".exe"], [], [["D:/oh/deep"]]],
+        "one_nested": [["D:/oh/z"]],
+        "mixed": [".exe", 7, null, false, { "k": "D:/oh/m" }, ["x"]],
+        "imagegen_steps": 8,
+        "imagegen_cfg": 1,
+        "ratio": 1.5,
+        "off": false,
+        "nothing": null,
+        "deeper": {
+          "path": "D:/oh/d",
+          "flags": [".exe", "plain"],
+          "again": { "p": "D:/oh/dd", "n": 40 }
+        }
+      }
+    }
+  }
+}

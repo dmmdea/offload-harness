@@ -36,7 +36,7 @@ const (
 	// on window overflow, the triple's long seat on an explicit context_class
 	// long.
 	ClassAgent Class = "agent"
-	// ClassOCR is the ocr vision role (single layer, device 2 on the Qube).
+	// ClassOCR is the ocr vision role (single layer, device 2 on <node-b>).
 	ClassOCR Class = "ocr"
 	// ClassVision is the vision role (the pair's vl-32b); documentary — no
 	// media row is placed here.
@@ -132,7 +132,7 @@ type Live struct {
 	// prefix; !ok = not visible = refuse.
 	DeviceFree func(device string) (float64, bool)
 	// DeviceIndex resolves a GPU-UUID prefix to the CUDA index nvidia-smi
-	// reports for it, so a UUID-pinned display device (the Qube pins it by
+	// reports for it, so a UUID-pinned display device (<node-b> pins it by
 	// UUID because the board reorders indices on power loss) can be matched
 	// against a seat's index pin. !ok = cannot resolve = the guard refuses.
 	DeviceIndex func(device string) (string, bool)
@@ -337,7 +337,7 @@ func (t table) admissible(l config.LayerSpec, s config.LayerSeat) (ok bool, reas
 
 // agentHome names the layer whose agent seat takes the free choice: the triple
 // when it declares an agent seat and is neither opt-in nor dormant, otherwise
-// the pair. The Qube's flagship is the three-card seat (operator 2026-09-19:
+// the pair. <node-b>'s flagship is the three-card seat (operator 2026-09-19:
 // "the 3 card tier as the agent seat now and the 2 card tier to be the opt in
 // one"), so a triple that carries the agent seat is the default and the pair is
 // entered by name; a box whose triple is opt-in (or absent) keeps the pair.
@@ -436,7 +436,7 @@ func (t table) agent() Decision {
 	// this a restriction to any other name only narrowed them to nothing and
 	// the request deferred "no layer serves an agent contract" — the reason a
 	// box declares a second layer whose agent seat is not the planner default
-	// (the ampere-16 Lenovo's 35B digest seat beside its 27B GSQ on the one
+	// (the ampere-16 <node-c>'s 35B digest seat beside its 27B GSQ on the one
 	// card) was unreachable by contract at all. The pair keeps row 5, with its
 	// saturation note; every other named layer resolves here, under its own
 	// guards where it declares any — except `single` on a box that ALSO
@@ -472,7 +472,7 @@ func (t table) agent() Decision {
 			return d
 		}
 	} else if l, s, ok := t.seat(LayerSingle, RoleAgent); ok && !hasHome {
-		// Row 5b: a box that declares no pair (one card — the ampere-16 Lenovo)
+		// Row 5b: a box that declares no pair (one card — the ampere-16 <node-c>)
 		// places the free choice on the single layer's agent seat, the planner
 		// default under a layer name. Without this row the node's first layer
 		// declaration made it INELIGIBLE for every contract it ran the day

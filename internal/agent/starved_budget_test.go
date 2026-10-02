@@ -13,7 +13,7 @@ import (
 // "length", content "" and the unclosed block under `reasoning`. Until 0.115.8
 // the loop raised the budget 4x and re-ran, nudged with a user turn, and then
 // accepted a SECOND empty as "done" — 1x + 4x + 4x the budget for zero visible
-// output, published as a result (2026-09-10, 20,526 tokens on the Qube 27B).
+// output, published as a result (2026-09-10, 20,526 tokens on the <node-b> 27B).
 //
 // Now the step is re-issued ONCE, with thinking off at the final budget and
 // no nudge turn; a second empty ends the run on a NAMED stop.

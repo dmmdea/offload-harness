@@ -114,7 +114,7 @@ func TestAgentDelegateHandlerLocalHappyPath(t *testing.T) {
 			SchemaVersion: core.AgentWireSchemaVersion,
 			NodeID:        "this-box",
 			Seat:          "fake-seat",
-			Output:        "done on qube",
+			Output:        "done on zorblax",
 			Structured:    json.RawMessage(`{"answer":"42"}`),
 			Steps:         1,
 			StopReason:    "done",
@@ -122,7 +122,7 @@ func TestAgentDelegateHandlerLocalHappyPath(t *testing.T) {
 	})
 
 	res, err := s.handleAgentDelegate(context.Background(), callReq(
-		`{"subtasks":[{"goal":"answer it","output_schema":{"properties":{"answer":{"type":"string"}}},"acceptance":["contains:qube","nonempty:answer"],"max_steps":99}],"route":"local"}`))
+		`{"subtasks":[{"goal":"answer it","output_schema":{"properties":{"answer":{"type":"string"}}},"acceptance":["contains:zorblax","nonempty:answer"],"max_steps":99}],"route":"local"}`))
 	if err != nil {
 		t.Fatalf("handleAgentDelegate: %v", err)
 	}
@@ -143,7 +143,7 @@ func TestAgentDelegateHandlerLocalHappyPath(t *testing.T) {
 		t.Fatalf("results = %v", m["results"])
 	}
 	r0, _ := results[0].(map[string]any)
-	if r0["node"] != "this-box" || r0["seat"] != "fake-seat" || r0["output"] != "done on qube" {
+	if r0["node"] != "this-box" || r0["seat"] != "fake-seat" || r0["output"] != "done on zorblax" {
 		t.Errorf("result = %v", r0)
 	}
 	if r0["deferred"] == true || r0["failed"] == true {
@@ -168,7 +168,7 @@ func TestAgentDelegateHandlerAcceptanceFailure(t *testing.T) {
 			Output: "wrong content", Structured: json.RawMessage(`{"answer":"x"}`), StopReason: "done"}, nil
 	})
 	res, err := s.handleAgentDelegate(context.Background(), callReq(
-		`{"subtasks":[{"goal":"answer it","acceptance":["contains:qube"]}],"route":"local"}`))
+		`{"subtasks":[{"goal":"answer it","acceptance":["contains:zorblax"]}],"route":"local"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -465,11 +465,11 @@ func TestAgentDelegateHandlerNothingSucceededStaysAnError(t *testing.T) {
 func TestAgentDelegateHandlerAcceptanceLint(t *testing.T) {
 	s := delegateTestServer(t, func(ctx context.Context, c core.AgentContract, _ delegate.LocalOptions) (core.AgentWireResult, error) {
 		return core.AgentWireResult{SchemaVersion: core.AgentWireSchemaVersion, NodeID: "this-box",
-			Seat: "fake-seat", Output: "mentions qube and 412", StopReason: "done"}, nil
+			Seat: "fake-seat", Output: "mentions zorblax and 412", StopReason: "done"}, nil
 	})
 	res, err := s.handleAgentDelegate(context.Background(), callReq(
 		`{"subtasks":[`+
-			`{"goal":"does the doc mention qube?","context":[{"name":"d.md","text":"qube is the workstation"}],"acceptance":["contains:qube"]},`+
+			`{"goal":"does the doc mention zorblax?","context":[{"name":"d.md","text":"zorblax is the workstation"}],"acceptance":["contains:zorblax"]},`+
 			`{"goal":"how many pallets?","context":[{"name":"d.md","text":"Rotterdam holds 412 pallets"}],"acceptance":["contains:412"]}`+
 			`],"route":"local"}`))
 	if err != nil {
@@ -483,7 +483,7 @@ func TestAgentDelegateHandlerAcceptanceLint(t *testing.T) {
 	r0, _ := results[0].(map[string]any)
 	lint0, _ := r0["acceptance_lint"].([]any)
 	if len(lint0) != 1 || !strings.Contains(lint0[0].(string), "PARROT-PASSABLE") {
-		t.Errorf("subtask 0 (echoable contains:qube) lint = %v, want one PARROT-PASSABLE warning", r0["acceptance_lint"])
+		t.Errorf("subtask 0 (echoable contains:zorblax) lint = %v, want one PARROT-PASSABLE warning", r0["acceptance_lint"])
 	}
 	r1, _ := results[1].(map[string]any)
 	if _, present := r1["acceptance_lint"]; present {

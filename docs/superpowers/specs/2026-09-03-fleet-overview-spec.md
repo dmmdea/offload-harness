@@ -42,8 +42,8 @@ coarser signal than the delegator already uses).
   background samplers/cached probes, never inside the handler.
 - **No JS frameworks, no CDN:** one embedded HTML file, vanilla JS, inline SVG sparklines. It must
   render with no network access.
-- **Port:** the UI binds `127.0.0.1:18813` by default (Qube safe band; 18810–18812 are taken by
-  dispatcher/fleet-serve/retalk). The Qube port file gets the row in the same change.
+- **Port:** the UI binds `127.0.0.1:18813` by default (`<node-b>` safe band; 18810–18812 are taken by
+  dispatcher/fleet-serve/retalk). The `<node-b>` port file gets the row in the same change.
 - **Versioning ritual:** VERSION, `internal/buildinfo/buildinfo.go`, `.printing-press.json` move
   together to `0.113.0`; CHANGELOG under Keep-a-Changelog; docs updated in the same PR (house rule).
 - **Placement rule holds:** an idle local node still wins unconditionally; the served-model gate

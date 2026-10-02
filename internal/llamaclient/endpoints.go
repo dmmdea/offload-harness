@@ -1,7 +1,7 @@
 // endpoints.go — per-model seat endpoint overrides (Phase A of multi-node
 // delegation, spec §S1): any model seat can resolve to a REMOTE
 // OpenAI-compatible base over the tailnet, with zero job machinery — the
-// cascade or the agent planner uses a Lenovo-served model as a lane simply by
+// cascade or the agent planner uses a <node-c>-served model as a lane simply by
 // naming it. Overridden requests ride netguard.SafeTransport, so the
 // never-cloud boundary (ADR 0001) holds at DIAL time on every request:
 // config-load validation alone cannot survive a DNS answer that drifts to a

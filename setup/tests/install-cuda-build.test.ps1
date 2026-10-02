@@ -1,6 +1,6 @@
 # setup/tests/install-cuda-build.test.ps1 - H4 unit tests for install.ps1's CUDA build
-# selection (Select-CudaBuild) and the Blackwell runtime-env yaml injection
-# (Add-GpuEnvToYaml). Uses the OFFLOAD_INSTALL_DOT_SOURCE=1 seam: install.ps1 defines
+# selection (Select-CudaBuild). The Blackwell runtime-env yaml injection moved to the Go
+# renderer (servingtmpl injectGPUEnv, tested in inject_gpu_env_test.go). Uses the OFFLOAD_INSTALL_DOT_SOURCE=1 seam: install.ps1 defines
 # its pure helpers and returns before ANY main-flow work (no dirs, no transcript,
 # no detection, no downloads).
 #
@@ -28,7 +28,6 @@ try {
   else { Remove-Item Env:OFFLOAD_INSTALL_DOT_SOURCE -ErrorAction SilentlyContinue }
 }
 Assert ([bool](Get-Command Select-CudaBuild -ErrorAction SilentlyContinue)) 'dot-source seam defines Select-CudaBuild'
-Assert ([bool](Get-Command Add-GpuEnvToYaml -ErrorAction SilentlyContinue)) 'dot-source seam defines Add-GpuEnvToYaml'
 
 Write-Host "== Select-CudaBuild: Blackwell on a CUDA-13 driver -> pinned 13.3 build (serves) =="
 $r = Select-CudaBuild -ProfileId 'blackwell-16' -CudaDriver '13.3' -CudaToolkit $null
@@ -82,47 +81,6 @@ foreach ($p in @('ampere-8', 'ampere-16', 'ampere-6', 'volta-16', $null)) {
 # Even on a CUDA-13 driver a non-Blackwell card stays on the verified 12.4 build.
 $r = Select-CudaBuild -ProfileId 'ampere-8' -CudaDriver '13.3' -CudaToolkit $null
 Assert ((-not $r.refuse) -and $r.component -eq 'llama-cuda') 'ampere-8 on a 13.x driver stays on llama-cuda'
-
-Write-Host "== Add-GpuEnvToYaml: inserts env on models without one, extends the 26B's list =="
-$yaml = @'
-healthCheckTimeout: 300
-
-macros:
-  common: >-
-    --ctx-size 32768 --port ${PORT}
-
-models:
-  offload-e4b:
-    aliases: [gemma4-e4b]
-    cmd: >-
-      C:/x/llama/llama-server.exe -m C:/x/models/e4b.gguf
-      -ngl 99 ${common}
-    ttl: 300
-  gemma4-26b-a4b:
-    env: [GGML_CUDA_DISABLE_GRAPHS=1]
-    cmd: >-
-      C:/x/llama/llama-server.exe -m C:/x/models/26b.gguf
-      -ngl 99 ${common}
-    ttl: 300
-
-groups:
-  offload-family:
-    swap: true
-    members: [offload-e4b, gemma4-26b-a4b]
-'@
-$vars = @('CUDA_VISIBLE_DEVICES=0', 'CUDA_MODULE_LOADING=LAZY')
-$outText = Add-GpuEnvToYaml -Text $yaml -EnvVars $vars
-$outLines = $outText -split "`r?`n"
-$e4bIdx = [array]::IndexOf($outLines, ($outLines | Where-Object { $_ -match '^\s{2}offload-e4b:' } | Select-Object -First 1))
-Assert ($outLines[$e4bIdx + 1] -match '^\s{4}env: \[CUDA_VISIBLE_DEVICES=0, CUDA_MODULE_LOADING=LAZY\]$') 'e4b gains an env line right after its key'
-Assert ($outText -match '(?m)^\s{4}env: \[GGML_CUDA_DISABLE_GRAPHS=1, CUDA_VISIBLE_DEVICES=0, CUDA_MODULE_LOADING=LAZY\]$') '26B env list extended, GGML flag kept first'
-Assert (@($outLines | Where-Object { $_ -match 'CUDA_VISIBLE_DEVICES=0' }).Count -eq 2) 'exactly one injection per model block'
-Assert ($outText -notmatch '(?m)^groups:[\s\S]*CUDA_VISIBLE_DEVICES') 'groups: section untouched'
-Assert ($outText -match [regex]::Escape('macros:')) 'macros section untouched'
-
-Write-Host "== Add-GpuEnvToYaml: idempotent (second pass adds nothing) =="
-$twice = Add-GpuEnvToYaml -Text $outText -EnvVars $vars
-Assert ($twice -eq $outText) 'second application is a no-op'
 
 Write-Host ""
 if ($failures -eq 0) { Write-Host 'ALL PASS' -ForegroundColor Green; exit 0 }

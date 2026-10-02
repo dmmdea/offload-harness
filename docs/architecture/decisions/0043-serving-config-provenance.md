@@ -85,7 +85,7 @@ sweep is then one poll instead of three ssh sessions.
 - **The kill criterion is a positive control, not an assertion of correctness.** An audit
   that cannot be MADE to say STALE proves nothing by saying MATCH.
   `TestPreA39AmpereConfigIsReportedStaleNamingCtxSize` reconstructs the pre-A-39 `ampere-16`
-  entry from git history (`testdata/profiles-pre-a39-ampere-16.json`, verbatim from 549f360,
+  entry from git history (`testdata/profiles-pre-a39-ampere-16.json`, verbatim from 549f360 (machine names scrubbed),
   the commit before the raise), renders and stamps it, asserts the RULE audit still passes —
   that is why a rule gate could not catch this — and asserts the provenance audit reports
   `STALE(params.ctx_size, …)`.
@@ -106,7 +106,7 @@ sweep is then one poll instead of three ssh sessions.
   unchanged and only the stamp is behind — never MATCH, because claiming "re-installing
   reproduces this file" when it might not is the certified-stale-as-current failure again.
 - **UNSTAMPED does not exit 1.** Every config on the fleet today predates stamping (verified
-  read-only on all three reference nodes at 0.123.0: Qube, Lenovo and Aorus all report
+  read-only on all three reference nodes at 0.123.0: `<node-b>`, `<node-c>` and `<node-a>` all report
   UNSTAMPED). Failing on it would make the session-start audit red on every box from the
   moment this ships. It prints as a finding; STALE and HAND-EDITED fail.
 - **One derivation, two callers.** `deriveRender` is called by the renderer and by the replay.

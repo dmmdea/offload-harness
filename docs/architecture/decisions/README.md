@@ -36,9 +36,9 @@ code, treat everything else as background.
 | [0024](0024-accelerators-are-additive-to-the-gpu-tier.md) | Accepted | Accelerators are additive to the GPU tier |
 | [0025](0025-model-residency-is-arbitrated-in-process-by-base.md) | Accepted | Model residency is arbitrated in process, keyed on the resolved base |
 | [0026](0026-text-load-admissions-wait-for-the-media-lease.md) | Accepted | Text admissions that would load a model wait for the media lease |
-| [0027](0027-freetoken-is-the-big-moe-opt-in-engine.md) | Accepted | FreeToken is the big-MoE opt-in engine on the blackwell-2x16 tier |
+| [0027](0027-big-moe-opt-in-engine.md) | Accepted | FreeToken is the big-MoE opt-in engine on the blackwell-2x16 tier |
 | [0028](0028-delegation-durability-is-a-push-side-intent-ledger.md) | Accepted | Delegation durability is a push-side intent ledger, not a pull queue |
-| [0029](0029-lenovo-agent-lane-stays-on-the-4b-seat.md) | Accepted (its 4B verdict is void per [0047](0047-ampere-16-agent-seat-reaudit.md)) | The Lenovo agent lane stays on the 4B seat; FreeToken is parked there after a disqualifying live finding |
+| [0029](0029-ampere-6-agent-lane-stays-on-the-4b-seat.md) | Accepted (its 4B verdict is void per [0047](0047-ampere-16-agent-seat-reaudit.md)) | The ampere-6 agent lane stays on the 4B seat; FreeToken is parked there after a disqualifying live finding |
 | [0030](0030-pull-queue-ships-dark.md) | Accepted | The consolidated pull queue (Option B) ships complete and DARK |
 | [0031](0031-harness-first-is-enforced.md) | Accepted | Harness-first is enforced, and web research is a harness lane |
 | [0032](0032-a-peer-held-seat-is-waited-for-not-deferred.md) | Accepted | A peer-held seat is waited for, not deferred |

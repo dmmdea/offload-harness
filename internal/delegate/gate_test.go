@@ -34,7 +34,7 @@ func schemaSubtask() Subtask {
 // schemaSubtask: enabled, resident, 8192-token ceiling, shallow queue.
 func eligibleRemote() NodeView {
 	return NodeView{
-		NodeID:         "lenovo",
+		NodeID:         "node-c",
 		AgentEnabled:   true,
 		AgentSeat:      "offload-e4b",
 		AgentResident:  true,
@@ -44,7 +44,7 @@ func eligibleRemote() NodeView {
 }
 
 func localNode() NodeView {
-	return NodeView{NodeID: "qube", Local: true}
+	return NodeView{NodeID: "node-b", Local: true}
 }
 
 // TestPlace drives every gate condition flip through the §S3 hard gate as
@@ -72,13 +72,13 @@ func TestPlace(t *testing.T) {
 			name:      "idle local always wins even with an eligible remote",
 			remotes:   func() []NodeView { return []NodeView{eligibleRemote()} },
 			localBusy: false,
-			wantNode:  "qube",
+			wantNode:  "node-b",
 		},
 		{
 			name:      "busy local with an eligible remote goes remote",
 			remotes:   func() []NodeView { return []NodeView{eligibleRemote()} },
 			localBusy: true,
-			wantNode:  "lenovo",
+			wantNode:  "node-c",
 		},
 		{
 			name: "agent lane disabled on the remote stays local",
@@ -87,7 +87,7 @@ func TestPlace(t *testing.T) {
 			},
 			remotes:   func() []NodeView { return []NodeView{eligibleRemote()} },
 			localBusy: true,
-			wantNode:  "qube",
+			wantNode:  "node-b",
 		},
 		{
 			name: "seat not roster-resident on the remote stays local",
@@ -96,7 +96,7 @@ func TestPlace(t *testing.T) {
 			},
 			remotes:   func() []NodeView { return []NodeView{eligibleRemote()} },
 			localBusy: true,
-			wantNode:  "qube",
+			wantNode:  "node-b",
 		},
 		{
 			name: "contract without an output schema stays local",
@@ -105,7 +105,7 @@ func TestPlace(t *testing.T) {
 			},
 			remotes:   func() []NodeView { return []NodeView{eligibleRemote()} },
 			localBusy: true,
-			wantNode:  "qube",
+			wantNode:  "node-b",
 		},
 		{
 			name: "empty-but-non-nil schema counts as absent (presence means bytes)",
@@ -114,7 +114,7 @@ func TestPlace(t *testing.T) {
 			},
 			remotes:   func() []NodeView { return []NodeView{eligibleRemote()} },
 			localBusy: true,
-			wantNode:  "qube",
+			wantNode:  "node-b",
 		},
 		{
 			name: "depth>=1 requester never places remote (hop limit)",
@@ -123,7 +123,7 @@ func TestPlace(t *testing.T) {
 			},
 			remotes:   func() []NodeView { return []NodeView{eligibleRemote()} },
 			localBusy: true,
-			wantNode:  "qube",
+			wantNode:  "node-b",
 		},
 		{
 			name: "ctx arithmetic boundary: EstTokens+specReserve == ceiling passes",
@@ -132,7 +132,7 @@ func TestPlace(t *testing.T) {
 			},
 			remotes:   func() []NodeView { return []NodeView{eligibleRemote()} },
 			localBusy: true,
-			wantNode:  "lenovo",
+			wantNode:  "node-c",
 		},
 		{
 			name: "ctx arithmetic boundary: one token over the ceiling fails",
@@ -141,7 +141,7 @@ func TestPlace(t *testing.T) {
 			},
 			remotes:   func() []NodeView { return []NodeView{eligibleRemote()} },
 			localBusy: true,
-			wantNode:  "qube",
+			wantNode:  "node-b",
 		},
 		{
 			name: "unadvertised ctx ceiling (0) never fits",
@@ -150,13 +150,13 @@ func TestPlace(t *testing.T) {
 			},
 			remotes:   func() []NodeView { return []NodeView{eligibleRemote()} },
 			localBusy: true,
-			wantNode:  "qube",
+			wantNode:  "node-b",
 		},
 		{
 			name:      "busy local with no remotes at all stays local",
 			remotes:   func() []NodeView { return nil },
 			localBusy: true,
-			wantNode:  "qube",
+			wantNode:  "node-b",
 		},
 		{
 			name: "two eligible remotes: lowest queue depth wins",
@@ -204,7 +204,7 @@ func TestPlace(t *testing.T) {
 				return []NodeView{a, b}
 			},
 			localBusy: true,
-			wantNode:  "qube",
+			wantNode:  "node-b",
 		},
 	}
 	for _, tc := range cases {
@@ -351,7 +351,7 @@ func TestBetterRemote_UnknownUtilizationNeverLoses(t *testing.T) {
 // TestBetterRemote_TieBreakSkipsTheOperatorsDesktop pins the placement half of
 // the 2026-09-20 defect. GpuUtilPct is the busiest card on the WHOLE box, so a
 // node whose operator is gaming advertised that load and lost the tie to a node
-// it should have beaten — on the Qube a game read 33% on the display card while
+// it should have beaten — on <node-b> a game read 33% on the display card while
 // every card the harness could use sat at 0%. WorkUtilPct skips a card reporting
 // display_active, and placementUtil picks the figure per node.
 func TestBetterRemote_TieBreakSkipsTheOperatorsDesktop(t *testing.T) {

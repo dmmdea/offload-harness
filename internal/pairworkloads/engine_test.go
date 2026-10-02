@@ -13,7 +13,7 @@ import (
 )
 
 // TestLocalEngineResolvesVLLMAlias pins the card label for an alias-bound
-// vLLM seat: the Qube's agent seat is `agent-pool`, an alias of the declared
+// vLLM seat: <node-b>'s agent seat is `agent-pool`, an alias of the declared
 // `qwen3.8-27b-vllm-3card`, and PAIR showed its jobs as "llamacpp" because
 // the label was read off the name alone.
 func TestLocalEngineResolvesVLLMAlias(t *testing.T) {

@@ -61,7 +61,9 @@ take a `family` param that selects one of the box's opt-in bindings beside its d
 edit tool also takes `images` (multi-reference, qwen-image-2.1 families) and both take
 `transparent`. `offload_status` lists what a `family` can name under `media.image_families` /
 `media.edit_families` (license, `commercial_use`, route verdict). A result from a family whose
-`commercial_use` is false carries `license` and `commercial_use:false`. See
+`commercial_use` is false carries `license` and `commercial_use:false`. `media.video_family_bindings`
+rows carry the same two fields for a video family that declares them (`videogen_families`, null
+otherwise). See
 [media-generation.md](media-generation.md#named-families-launch-profiles-and-license-tags-adr-0058).
 
 `offload_nim` is the **only remote MODEL surface**. It is an explicit, caller-invoked
@@ -105,7 +107,7 @@ only if that layer's guards admit it right now: a dormant layer refuses outright
 display card refuses by the guard's name, before any seat is touched. Both agent doors take
 `context_class: "long"`, an input to placement rather than a seat name; the delegation door's
 subtasks also take `layer`, a composite node's declared layer id whose agent seat the subtask
-runs on (register A-100: the Lenovo's `fast` layer is its 35B digest seat — a node that does
+runs on (register A-100: <node-c>'s `fast` layer is its 35B digest seat — a node that does
 not declare the layer is ineligible for that subtask, an idle local box that does not declare it
 does not keep it (route=auto reads the fleet for it, route=spread never deals it the local slot: register A-108), and with no
 node declaring it the subtask defers naming the layer), and every result and

@@ -13,7 +13,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/gpulease"
 )
 
-// The lease hand-off race (register D-124, 2026-09-18 02:57 on the Lenovo):
+// The lease hand-off race (register D-124, 2026-09-18 02:57 on <node-c>):
 // a holder's release-side warm-back ran unordered against the NEXT lease's
 // --unload-seat and loaded the agent seat onto a card that lease held
 // exclusively; three trial rows measured the previous holder's seat. These
@@ -131,7 +131,7 @@ func TestReserveLeavesTheWarmBackToTheLastHolderWhenALeaseIsQueued(t *testing.T)
 }
 
 // A lease over a COLD seat must not load it at release: nothing was unloaded
-// for the window, so no warm-back is owed (2026-09-23, the Qube: a video render
+// for the window, so no warm-back is owed (2026-09-23, <node-b>: a video render
 // under --unload-seat brought the 3-card 27B up on all three cards afterwards,
 // with nothing asking for it, until its ttl).
 func TestReserveDoesNotWarmASeatThatWasNotLoaded(t *testing.T) {

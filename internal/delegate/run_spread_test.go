@@ -15,7 +15,7 @@ import (
 )
 
 // eligibleNode is a fake fleet node that passes the hard gate and answers every
-// job with the given output (so acceptance "contains:qube" passes or fails by
+// job with the given output (so acceptance "contains:zorblax" passes or fails by
 // what the caller puts in output).
 func eligibleNode(t *testing.T, id, output string) (*fakeNode, string) {
 	t.Helper()
@@ -32,7 +32,7 @@ func passingLocal(calls *atomic.Int64) LocalRunner {
 	return func(ctx context.Context, c core.AgentContract, _ LocalOptions) (core.AgentWireResult, error) {
 		calls.Add(1)
 		return core.AgentWireResult{SchemaVersion: core.AgentWireSchemaVersion, NodeID: "local", Seat: "local-seat",
-			Output: "qube answered locally", Structured: json.RawMessage(`{"answer":"qube"}`), StopReason: "done"}, nil
+			Output: "zorblax answered locally", Structured: json.RawMessage(`{"answer":"zorblax"}`), StopReason: "done"}, nil
 	}
 }
 
@@ -68,8 +68,8 @@ func contracts(n int) []core.AgentContract {
 // one box and remote put all four on the other.
 func TestRunSpreadDealsAcrossLocalAndEveryEligibleRemote(t *testing.T) {
 	compressPolls(t, 10*time.Millisecond, 2*time.Second)
-	nodeA, urlA := eligibleNode(t, "node-a", "qube from A")
-	nodeB, urlB := eligibleNode(t, "node-b", "qube from B")
+	nodeA, urlA := eligibleNode(t, "node-a", "zorblax from A")
+	nodeB, urlB := eligibleNode(t, "node-b", "zorblax from B")
 	var localCalls atomic.Int64
 	results, sum, err := Run(context.Background(), testCfg(t), passingLocal(&localCalls), contracts(4), "spread", []string{urlA, urlB})
 	if err != nil {
@@ -120,7 +120,7 @@ func TestRunSpreadWithNoEligibleRemoteRunsLocalAndSaysWhy(t *testing.T) {
 // remote's, marked as a recovered retry; both attempts were recorded.
 func TestRunRetriesFailedVerificationOnADifferentNode(t *testing.T) {
 	compressPolls(t, 10*time.Millisecond, 2*time.Second)
-	node, url := eligibleNode(t, "node-a", "qube from A")
+	node, url := eligibleNode(t, "node-a", "zorblax from A")
 	var localCalls atomic.Int64
 	results, sum, err := Run(context.Background(), testCfg(t), failingLocal(&localCalls), contracts(1), "local-then-retry-is-not-a-route", []string{url})
 	if err == nil {
@@ -190,7 +190,7 @@ func TestRunRetryBothFailKeepsFirstAttemptAnnotated(t *testing.T) {
 // per-subtask EXECUTION budget the caller was told it is.
 func TestRunRetryStaysInsideTimeoutBudget(t *testing.T) {
 	compressPolls(t, 10*time.Millisecond, 2*time.Second)
-	node, url := eligibleNode(t, "node-a", "qube from A")
+	node, url := eligibleNode(t, "node-a", "zorblax from A")
 	slowWrongLocal := func(ctx context.Context, c core.AgentContract, _ LocalOptions) (core.AgentWireResult, error) {
 		time.Sleep(1200 * time.Millisecond)
 		return core.AgentWireResult{SchemaVersion: core.AgentWireSchemaVersion, NodeID: "local", Seat: "local-seat",
@@ -261,8 +261,8 @@ func TestRunTransportFailureIsNotRetried(t *testing.T) {
 // cfg.DelegateRemotes; a call's own list replaces it.
 func TestRunRemotesDefaultFromConfig(t *testing.T) {
 	compressPolls(t, 10*time.Millisecond, 2*time.Second)
-	cfgNode, cfgURL := eligibleNode(t, "cfg-node", "qube from config node")
-	callNode, callURL := eligibleNode(t, "call-node", "qube from call node")
+	cfgNode, cfgURL := eligibleNode(t, "cfg-node", "zorblax from config node")
+	callNode, callURL := eligibleNode(t, "call-node", "zorblax from call node")
 	cfg := testCfg(t)
 	cfg.DelegateRemotes = []string{cfgURL}
 	var localCalls atomic.Int64
@@ -323,8 +323,8 @@ func busySwap(t *testing.T, seat string, inflight int) string {
 // each remote, every reason naming the count — where the idle deal ran two local.
 func TestRunSpreadBusyLocalSeatDealsEveryContractRemote(t *testing.T) {
 	compressPolls(t, 10*time.Millisecond, 2*time.Second)
-	nodeA, urlA := eligibleNode(t, "node-a", "qube from A")
-	nodeB, urlB := eligibleNode(t, "node-b", "qube from B")
+	nodeA, urlA := eligibleNode(t, "node-a", "zorblax from A")
+	nodeB, urlB := eligibleNode(t, "node-b", "zorblax from B")
 	cfg := testCfg(t)
 	cfg.Endpoint = busySwap(t, "local-seat", 2)
 	var localCalls atomic.Int64
@@ -352,8 +352,8 @@ func TestRunSpreadBusyLocalSeatDealsEveryContractRemote(t *testing.T) {
 // same fake llama-swap with ZERO in flight deals local, A, B, local as before.
 func TestRunSpreadIdleLocalSeatKeepsTheOldDeal(t *testing.T) {
 	compressPolls(t, 10*time.Millisecond, 2*time.Second)
-	nodeA, urlA := eligibleNode(t, "node-a", "qube from A")
-	nodeB, urlB := eligibleNode(t, "node-b", "qube from B")
+	nodeA, urlA := eligibleNode(t, "node-a", "zorblax from A")
+	nodeB, urlB := eligibleNode(t, "node-b", "zorblax from B")
 	cfg := testCfg(t)
 	cfg.Endpoint = busySwap(t, "local-seat", 0)
 	var localCalls atomic.Int64

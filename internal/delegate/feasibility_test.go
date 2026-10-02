@@ -16,10 +16,10 @@ import (
 	"github.com/dmmdea/offload-harness/internal/seatrate"
 )
 
-// lenovoShapedSlow is the Lenovo GSQ 27B shape from the diagnosis: 5.4 tok/s,
+// nodeCShapedSlow is the <node-c> GSQ 27B shape from the diagnosis: 5.4 tok/s,
 // 69 s cold, not currently loaded — a seat that holds one step and a minimal
 // answer in a 300 s wall (a ranking matter) but not in a 20 s one (refused).
-func lenovoShapedSlow() NodeView {
+func nodeCShapedSlow() NodeView {
 	v := eligibleRemote()
 	loaded := false
 	v.SeatRate = &SeatRateView{TokS: 5.4, ColdLoadSec: 69, Samples: 4, MinTurnSec: 1594}
@@ -49,7 +49,7 @@ func oneStepSchemaContract(timeoutSec int, auto bool) Subtask {
 }
 
 func TestFeasibleFinalExcludesAWallTooShortForOneStepAndAMinimalAnswer(t *testing.T) {
-	v := lenovoShapedSlow()
+	v := nodeCShapedSlow()
 	// 5.4 tok/s: one tool step (128 tok + 6 s prefill) and a 64-token final need
 	// ~42 s. A 20 s wall cannot hold ANY answer — that, and only that, is the
 	// INV-5 rider's refusal. (The cold load is NOT charged: admission pays it
@@ -71,7 +71,7 @@ func TestFeasibleFinalExcludesAWallTooShortForOneStepAndAMinimalAnswer(t *testin
 }
 
 // The 0.128.0 regression, pinned: fleet-smoke's contract (an explicit 60 s wall,
-// the default 12 steps, a schema, thinking auto) reached a COLD Aorus and was
+// the default 12 steps, a schema, thinking auto) reached a COLD <node-a> and was
 // refused "fitted final 0 < floor 1024" although the seat completes it in ~25 s;
 // the cold load was subtracted from a wall that never pays it, and a floor sized
 // for a full answer was applied to a one-token reply. Feasibility asks only
@@ -94,7 +94,7 @@ func TestFeasibleFinalAdmitsAShortExplicitWallOnAColdSeat(t *testing.T) {
 	}
 	// And the slow seat on a 300 s wall is a RANKING matter (eta), not a refusal:
 	// it answered this class of contract in the smoke at 26 s after admission.
-	slow := lenovoShapedSlow()
+	slow := nodeCShapedSlow()
 	if ok, reason := feasibleFinal(oneStepSchemaContract(300, false), slow); !ok {
 		t.Fatalf("a 5.4 tok/s seat holds one step and a minimal answer in 300 s; reason=%q", reason)
 	}
@@ -104,7 +104,7 @@ func TestFeasibleFinalAdmitsAShortExplicitWallOnAColdSeat(t *testing.T) {
 // slow seat reads as "cold, then the whole wall", never as the configured
 // budgets' arithmetic (0.128.0 printed "eta 4682 s" for a 60 s wall).
 func TestEtaForNeverExceedsColdPlusWall(t *testing.T) {
-	v := lenovoShapedSlow()
+	v := nodeCShapedSlow()
 	st := oneStepSchemaContract(60, false)
 	eta, ok := etaFor(st, v)
 	if !ok {
@@ -119,7 +119,7 @@ func TestEtaForNeverExceedsColdPlusWall(t *testing.T) {
 }
 
 func TestFeasibleFinalEligibleUnderTimeoutAuto(t *testing.T) {
-	v := lenovoShapedSlow()
+	v := nodeCShapedSlow()
 	// The SAME node under a timeout_auto contract: the wall is sized by the
 	// node's own slow rate (clamped to the wire cap, up to 900 s), and the
 	// feasibility floor reads THAT wall — one step and a minimal answer fit

@@ -47,7 +47,7 @@ type SeatProbe func(ctx context.Context) (loading bool, state string, err error)
 const (
 	// assumedPrefillTokS is a SLOW seat's prefill rate when none is measured
 	// yet. 400 was the first guess and it filed a false stall on the very seat
-	// this exists for (2026-09-20, Lenovo 27B GSQ on an A2: ~12k uncached tokens
+	// this exists for (2026-09-20, <node-c> 27B GSQ on an A2: ~12k uncached tokens
 	// took >94 s = ~130 tok/s). 100 errs generous; a measured rate (time to
 	// first delta, any engine) replaces it after one run.
 	assumedPrefillTokS = 100.0

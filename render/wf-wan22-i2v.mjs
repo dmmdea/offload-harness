@@ -42,7 +42,7 @@ export function buildWan22I2V({
   // 2026-09-24.md), a .safetensors expert loads through the plain, un-wrapped
   // UNETLoader (no virtual_vram; ComfyUI's own dynamic-VRAM streaming does the
   // offload instead, measured ~27.6% faster wall-clock than the GGUF/DisTorch2
-  // path on the Qube, "Interim Phase 2 round 2" item 1). "native" FORCES the plain
+  // path on <node-b>, "Interim Phase 2 round 2" item 1). "native" FORCES the plain
   // loader on both experts (refused on a .gguf file — it cannot stream). "gguf-
   // distorch" FORCES the DisTorch2/MultiGPU wrapper on both experts regardless of
   // extension — the historical, always-worked behavior, still available for a

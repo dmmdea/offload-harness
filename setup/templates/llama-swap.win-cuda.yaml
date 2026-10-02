@@ -100,7 +100,7 @@ models:
   # Flags are EXPLICIT, not ${common}: ${common} pins `--reasoning off`, the 4B
   # seat's measured collapse trap for this THINKING family. Thinking is pinned OFF
   # via the env twin LLAMA_ARG_CHAT_TEMPLATE_KWARGS, NOT left to the default.
-  # MEASURED 2026-08-25 on llama.cpp b10615 (Aorus + OptiPlex, live): the old claim
+  # MEASURED 2026-08-25 on llama.cpp b10615 (<node-a> + <node-e>, live): the old claim
   # that llama.cpp defaults this template to thinking OFF is FALSE on this build.
   # The seat served with reasoning_content populated and, at a small max_tokens,
   # returned EMPTY content (174 to 2 completion tokens after the fix). The CLI form

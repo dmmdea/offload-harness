@@ -57,6 +57,13 @@ that routes to it.**
    workstream exists to end.
 5. `stt_model` defaults to `""`, matching `vision_model`. A tier earns the binding by declaring
    the seat; a node with a hand-provisioned upstream sets it explicitly.
+6. A seat may be a **registered extra** (`extra: true`, A-131): a second vision, ocr or stt model the
+   tier serves by name and alias beside the bound one. `Seat.BindingKey()` answers `""` for it, so it
+   writes no config key and the one-writer check does not count it, and `Get-MediaSeatBindings` in
+   `setup/install.ps1` skips it the same way. It still renders (model entry, matrix var, residency
+   set) and is validated like any seat. It is refused on an `rkllm` seat (that kind still writes
+   `unconstrained_seats`/`text_tasks`) and takes no `tasks` (they ride the `vision_model` binding an
+   extra does not write). Nothing routes to an extra by default; a caller reaches it by naming it.
 
 ## Consequences
 
@@ -103,7 +110,7 @@ correctly, so the schema gained two per-seat fields and one backend rule — all
   `--flash-attn`, matching the cpu template's own chat models rather than emitting flags a
   GPU-less build would only ignore.
 
-Two of these four tiers are **PROJECTED** — `dual-gpu` and `cpu`, with no matching box in the fleet. As of **2026-09-07** the other two are **MEASURED**: `blackwell-8` on the OptiPlex 7060 (RTX 5060 8 GB) and `amd-gcn` on a collaborator's GCN/Vega laptop (2026-07-17). The guarantee is the
+Two of these four tiers are **PROJECTED** — `dual-gpu` and `cpu`, with no matching box in the fleet. As of **2026-09-07** the other two are **MEASURED**: `blackwell-8` on `<node-e>` (RTX 5060 8 GB) and `amd-gcn` on a collaborator's GCN/Vega laptop (2026-07-17). The guarantee is the
 same as every other projected tier param: the rendered config was verified to LOAD in real
 llama-swap (v242), and the seats reproduce a proven reference where one exists (blackwell-8
 is ampere-8's twin; cpu/amd-gcn reuse ampere-6's E4B+mmproj vision). Runtime quality on the

@@ -89,7 +89,7 @@ func TestPickDiscreteVulkanDevice(t *testing.T) {
 	}
 }
 
-// TestDetectSdcppDevice_AutoPicksDiscrete is the OptiPlex-shaped case: two
+// TestDetectSdcppDevice_AutoPicksDiscrete is the iGPU-plus-RTX-shaped case: two
 // devices, Vulkan0 = iGPU listed first, Vulkan1 = the RTX. No env override —
 // auto-detection must land on the discrete adapter, never device 0.
 func TestDetectSdcppDevice_AutoPicksDiscrete(t *testing.T) {

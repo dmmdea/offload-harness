@@ -132,7 +132,7 @@ func TestEditFamilyOverlayResolves(t *testing.T) {
 	}
 }
 
-// A binxarn-shaped node: no default image binding at all (family-only, sdcpp
+// A <node-f>-shaped node: no default image binding at all (family-only, sdcpp
 // engine) — the family-only tier the fleet gate defect (D1) covers, distinct from
 // TestImageFamilyOverlayResolvesAsACompleteBinding's pooled-krea2-plus-family node.
 const sdcppFamilyOnlyCfg = `{
@@ -159,7 +159,7 @@ const sdcppFamilyOnlyCfg = `{
 // TestSdcppQwenImage21SupportsTransparent: D5's root cause — SupportsTransparentImage
 // used to unconditionally exclude the sdcpp engine (`ImageGenEngine != "sdcpp"`),
 // refusing transparent:true on every sdcpp binding regardless of family, even though
-// sd.cpp's qwen-image-2.1 build carries the identical RGBA VAE (binxarn wave session
+// sd.cpp's qwen-image-2.1 build carries the identical RGBA VAE (<node-f> wave session
 // 5d227d30 §3b/§3c: P1/P8 both came out RGBA from sd.cpp with zero ComfyUI involved).
 // A sibling sdcpp family with no RGBA VAE (z-image) must still be refused, so the fix
 // is "follow the family", not "always allow sdcpp".
@@ -506,5 +506,66 @@ func TestResolveVideoFamilyBindingFallsBackToFlatKeysUnlessExplicitlyOverridden(
 	c.VideoGenFamilies["ltx25"] = VideoFamilyBinding{TextEncoder: "should-never-apply.safetensors"}
 	if def := c.ResolveVideoFamilyBinding("ltx25"); def.TextEncoder != c.VideoGenTextEncoder {
 		t.Errorf("an override named for this box's OWN default family must be ignored, got TextEncoder = %q", def.TextEncoder)
+	}
+}
+
+// Video families carry the same license pair the image and edit families do (CT-47,
+// operator order 2026-10-01: the fields only, no warning text). A binding declares both
+// or neither, exactly as imagegen_license / imagegen_commercial_use do.
+func TestVideoFamilyLicenseIsBothOrNeither(t *testing.T) {
+	for _, body := range []string{
+		`{"model":"x","videogen_families":{"hunyuan":{"license":"Example Community License"}}}`,
+		`{"model":"x","videogen_families":{"h3":{"commercial_use":false}}}`,
+		`{"model":"x","videogen_families":{"h3":{"license":"  ","commercial_use":false}}}`,
+	} {
+		if _, err := Load(writeCfg(t, body)); err == nil || !strings.Contains(err.Error(), "declare both") ||
+			!strings.Contains(err.Error(), "videogen_families") {
+			t.Errorf("%s: want a both-or-neither refusal naming videogen_families, got %v", body, err)
+		}
+	}
+	c, err := Load(writeCfg(t, `{"model":"x","videogen_families":{
+		"hunyuan":{"license":"Example Community License","commercial_use":false,"text_encoder":"enc.safetensors"},
+		"ltx25":{"text_encoder":"other.safetensors"}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	hy := c.ResolveVideoFamilyBinding("hunyuan")
+	if hy.License != "Example Community License" || hy.CommercialUse == nil || *hy.CommercialUse || hy.TextEncoder != "enc.safetensors" {
+		t.Errorf("hunyuan binding = %+v, want its license, commercial_use false and its own weights", hy)
+	}
+	// A family that declares none reads empty / nil (UNKNOWN), never an invented value.
+	if lx := c.ResolveVideoFamilyBinding("ltx25"); lx.License != "" || lx.CommercialUse != nil {
+		t.Errorf("an undeclared family must carry no license: %+v", lx)
+	}
+	if h3 := c.ResolveVideoFamilyBinding("h3"); h3.License != "" || h3.CommercialUse != nil {
+		t.Errorf("a family with no entry must carry no license: %+v", h3)
+	}
+}
+
+// A license belongs to the MODEL FAMILY, not to a weight binding: this box's own
+// default family resolves its weights from the flat videogen_* keys (an entry under
+// its own name is ignored for weights, see the test above), but the entry's license
+// pair still tags it, so the default family is never the one family left untagged.
+func TestVideoFamilyLicenseAppliesToTheBoxsOwnDefaultFamily(t *testing.T) {
+	no := false
+	c := Config{
+		VideoGenFamily:      "ltx25",
+		VideoGenTextEncoder: "flat-encoder.safetensors",
+		VideoGenFamilies: map[string]VideoFamilyBinding{
+			"ltx25": {TextEncoder: "ignored.safetensors", License: "Example Community License", CommercialUse: &no},
+		},
+	}
+	for _, fam := range []string{"", "ltx25"} {
+		fb := c.ResolveVideoFamilyBinding(fam)
+		if fb.TextEncoder != "flat-encoder.safetensors" {
+			t.Errorf("family %q: TextEncoder = %q, want the flat key (weights unchanged)", fam, fb.TextEncoder)
+		}
+		if fb.License != "Example Community License" || fb.CommercialUse == nil || *fb.CommercialUse {
+			t.Errorf("family %q: license = %q / %v, want the entry's pair", fam, fb.License, fb.CommercialUse)
+		}
+	}
+	// A family the box did not seat, with no entry of its own, stays untagged.
+	if fb := c.ResolveVideoFamilyBinding("wan22"); fb.License != "" || fb.CommercialUse != nil {
+		t.Errorf("wan22 has no entry: %+v", fb)
 	}
 }

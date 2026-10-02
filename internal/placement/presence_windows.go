@@ -30,7 +30,7 @@ const (
 // wtsInfoExLevel1 mirrors WTSINFOEX_LEVEL1_W. The explicit pad before the
 // LARGE_INTEGER block keeps the layout identical to the C struct on every
 // Windows arch (MSVC aligns LARGE_INTEGER to 8; Go/386 would align int64 to 4).
-// Verified live 2026-09-10 on the Qube: 232 bytes returned, level 1, the
+// Verified live 2026-09-10 on <node-b>: 232 bytes returned, level 1, the
 // user name and the logon/current times decode in place.
 type wtsInfoExLevel1 struct {
 	SessionID               uint32
@@ -73,7 +73,7 @@ type lastInputInfo struct {
 // task; (3) the idle time, from WTS's LastInputTime when the OS fills it
 // (RDP sessions) and otherwise from GetLastInputInfo, which is per-session
 // and is trusted ONLY when the caller's own session is the console session
-// (measured 2026-09-10 on the Qube: WTS reports LastInputTime 0 for the local
+// (measured 2026-09-10 on <node-b>: WTS reports LastInputTime 0 for the local
 // console, so a probe built on it alone fails closed forever on the box the
 // guard exists for; and from session 0 GetLastInputInfo would describe a
 // session that never receives input, reading as "away" forever — fail OPEN);

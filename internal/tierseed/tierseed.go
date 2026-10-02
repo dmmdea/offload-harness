@@ -94,7 +94,7 @@ type Profile struct {
 	// AgentCtxTokens is the tier's agent context window. Resolve seeds it as
 	// agent_ctx_tokens unless config_seed or a vLLM seat binding already set it. It used
 	// to reach a config only through install.ps1, which wrote the tier field directly;
-	// install.sh never did, so every fresh LINUX node (binxarn, the Lenovo) got the code
+	// install.sh never did, so every fresh LINUX node (<node-f>, <node-c>) got the code
 	// default instead of the window its tier was measured at. Seeding it here gives both
 	// installers the same value from one place.
 	AgentCtxTokens int `json:"agent_ctx_tokens"`
@@ -978,6 +978,16 @@ func expand(v any, home, exe string) any {
 		out := make([]any, 0, len(t))
 		for _, e := range t {
 			out = append(out, expand(e, home, exe))
+		}
+		return out
+	case map[string]any:
+		// A named family (imagegen_families / gen_edit_families) is an object of strings, string arrays and
+		// scalars; its path tokens must expand like a top-level seed value, or the family ships a literal
+		// "__OFFLOAD_HOME__/..." the runner passes verbatim. A NEW object, never the profile's own: the
+		// seed table is shared by every Resolve call. setup/install.ps1 Expand-SeedValue mirrors this.
+		out := make(map[string]any, len(t))
+		for k, e := range t {
+			out[k] = expand(e, home, exe)
 		}
 		return out
 	default:

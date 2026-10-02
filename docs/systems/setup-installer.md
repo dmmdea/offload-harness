@@ -229,7 +229,7 @@ group names a model that does not exist. The **download** follows the same flag:
 resolves the profile (`Resolve-ProfileParams`, the RAM gate included) before it builds the
 download set, and `Get-FamilyModelKeys` adds `model-26b` only when the resolved
 `include_26b` is true. It used to add it on the family gate alone, so `blackwell-8`
-(`include_26b: false`) fetched 14.25 GB the rendered yaml never serves (OptiPlex parity
+(`include_26b: false`) fetched 14.25 GB the rendered yaml never serves (<node-e> parity
 audit, 2026-09-23).
 
 #### The `rk3588` backend (Rockchip SoC boards)
@@ -336,23 +336,41 @@ gate that is red on every box from day one is a gate nobody reads.
 drift actually lived. Measured winners were wired **by hand into a node's config** and never
 written back to `profiles.json`:
 
-- binxarn's `qwen3.5-4b-agent` seat and its four lane keys;
-- the Lenovo's layers, its 35B digest seat and its cascade rungs;
-- the Qube's image-edit, inpaint and animate routes.
+- <node-f>'s `qwen3.5-4b-agent` seat and its four lane keys;
+- <node-c>'s layers, its 35B digest seat and its cascade rungs;
+- <node-b>'s image-edit, inpaint and animate routes.
 
 The node kept working, the seed kept the loser, and every fresh install lost the win. Every
 regeneration of the tier matrix, which reads the seed, erased it from the record too. The
 2026-09-21 wiring-debt audit found this pattern on every node it read.
 
 ```
-local-offload audit-config                                   # this node, its own tier
+local-offload audit-config                                   # this node, its own tier and detected RAM tier
 local-offload audit-config --config node.json --tier ampere-16 --home /srv/x     --goos linux --ram-tier mid --vllm-seat-active true      # a node read over SSH
 ```
 
 It resolves the tier seed **exactly as `install seed` does**, with the same `--goos`,
 `--ram-tier` and vLLM-seat detection. Skip them and the audit compares the node against a seed
 the installer would never have written, such as a vLLM box against its fallback agent, and
-reports drift that is its own artifact. `--vllm-seat-active auto` runs the installer's own
+reports drift that is its own artifact.
+
+`--ram-tier` defaults to **auto**: the RAM tier this machine detects (`detect` stamps the same
+value), so a 64 GB box is compared against the base seed **plus** the `config_seed_ram_mid_high`
+overlay its installer applied. It used to default to the base seed alone, and on a blackwell-8 box
+with 64 GB of RAM 23 of the 38 rows it called drifted were overlay-carried false positives. Pass
+`--ram-tier none` to compare the base seed alone, `min` or `low` to speak for a smaller box
+(neither has an overlay), or `mid` or `high` to name one explicitly, which is what a node read
+over SSH needs: the auditing machine's RAM is not the node's. An unknown value is refused.
+Detection reads **this** machine only, so when `--config`, `--home` or a `--goos` other than this
+platform's point away from it and `--ram-tier` is not named, the audit prints a warning on stderr
+that the overlay compared is this machine's RAM tier and asks for `--ram-tier` for another node's
+config. A RAM probe that reads 0 GB is refused with the same pointer: 0 GB would classify as `min`,
+and the audit would pick the base seed without saying so.
+Both outputs say which seed was compared. The text header reads
+`ram-tier=mid (detected, 64 GB; base seed + config_seed_ram_mid_high overlay)` or
+`ram-tier=none (--ram-tier; base seed only, no RAM overlay)`, and `--json` carries `ram_tier`,
+`ram_tier_source` (`detected` or `--ram-tier`) and `ram_overlay` (`config_seed_ram_mid_high` or
+`none`). `--vllm-seat-active auto` runs the installer's own
 detection, which is right for the local box. Pass `true` or `false` for a remote one. The flag speaks
 for the tier's vLLM seats as a set: `true` says the node serves the lane seat and every extra seat,
 `false` none, and `auto` detects each seat on its own (the venv plus that seat's weights, and for an extra
@@ -373,7 +391,7 @@ drift it exists to show.
 
 `UNSEEDED` exists because a seed-owned comparison alone was blind to the worst case. A media
 route that no tier carries is invisible to a check that reads only what seeds can write. That
-is exactly how the Qube's image-edit and animate wins stayed node-only. Empty-string values
+is exactly how <node-b>'s image-edit and animate wins stayed node-only. Empty-string values
 are unbound routes and are not reported. `nim_*` keys are the cloud escalation account, not a
 seat, and are not reported either.
 
@@ -553,6 +571,12 @@ live-captured log lines, cosine). Go-side config round-tripping is covered by
   whisper-server seat (with its own loader path, since it is a separate binary) into the models map,
   and writes `stt_model` at the same time. A tier that declares no seat leaves `stt_model` empty and
   the route defers — it does not name an upstream nothing serves.
+- Expecting a second vision seat to bind. A tier may declare at most one seat per bound key, but a seat
+  flagged `extra: true` (a registered extra, e.g. blackwell-8's `lfm2.5-vl` and `gemma4-e4b-vision`) writes no
+  key and is not counted: it renders into llama-swap with its aliases and answers to them, and nothing
+  routes to it by default. A rendered extra runs the template's flag shape (`--reasoning off`, `-ngl 99`, the
+  tier's KV type), which can differ from a hand-wired entry of the same model, so the seat's `measured` note
+  says "rendered form not yet re-measured" until an EN/ES OCR and spatial VQA pass has been run on it.
 - Adding a profile without its self-test assertion.
 - Expecting the `ampere-8` band to start at 8 GB. It starts at 7.
 - Treating the profile string as fleet routing input. It is not.

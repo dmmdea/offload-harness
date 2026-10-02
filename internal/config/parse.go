@@ -12,7 +12,7 @@ var utf8BOM = []byte{0xEF, 0xBB, 0xBF}
 
 // StripBOM drops one leading UTF-8 byte-order mark. Every reader of an operator-written
 // JSON file calls it before decoding: a config saved from PowerShell 5.1 is otherwise
-// "not valid JSON" while it looks perfect in every editor (OptiPlex, 2026-09-23: a
+// "not valid JSON" while it looks perfect in every editor (<node-e>, 2026-09-23: a
 // run-graph ran on built-in defaults because of exactly this).
 func StripBOM(b []byte) []byte { return bytes.TrimPrefix(b, utf8BOM) }
 

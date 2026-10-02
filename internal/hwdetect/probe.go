@@ -33,7 +33,7 @@ func Detect() Facts {
 		if f.Vendor == "none" && vendorHint != "" {
 			// The PCI vendor id is authoritative; the marketing/codename string only
 			// refines the arch. Without this, "Barcelo" (lspci for a Vega 7) turned an
-			// AMD APU into profile "cpu" — binxarn, 2026-09-20.
+			// AMD APU into profile "cpu" — <node-f>, 2026-09-20.
 			f.Vendor = vendorHint
 		}
 		f.Arch = ArchFromName(name)

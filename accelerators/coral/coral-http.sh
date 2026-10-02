@@ -6,7 +6,7 @@
 # CORAL_HOME layout (D8): $CORAL_HOME/venv (ai-edge-litert + numpy + pillow, built from the box's
 # staged wheels), $CORAL_HOME/models (the manifest's artifacts), and this directory either copied
 # FLAT into $CORAL_HOME (the profiles.json seed: __CORAL_HOME__/coral-http.sh) or as a checkout of
-# accelerators/coral/ beneath it ($CORAL_HOME/accelerators/coral/coral-http.sh, the Lenovo). Both
+# accelerators/coral/ beneath it ($CORAL_HOME/accelerators/coral/coral-http.sh, <node-c>). Both
 # shapes resolve: the home is wherever venv/ is found walking up from here. Pins the venv's python
 # explicitly: a transient unit or a sandboxed service has no PATH worth trusting.
 #

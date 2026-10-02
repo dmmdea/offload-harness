@@ -7,7 +7,7 @@
 // caller's real need, not a general imaging library.
 //
 // Used by sdcpp-generate.mjs (D5): stable-diffusion.cpp's qwen-image-2.1 VAE always
-// emits RGBA (native, not request-flag-driven — binxarn wave session 5d227d30 §3c), so
+// emits RGBA (native, not request-flag-driven — <node-f> wave session 5d227d30 §3c), so
 // the runner flattens an ordinary render to opaque RGB itself; ComfyUI's equivalent
 // step is wf-qwen-image-21.mjs's SplitImageWithAlpha node, which the same file's
 // comment documents as a channel DROP, never a composite onto a background — this

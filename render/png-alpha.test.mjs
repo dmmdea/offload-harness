@@ -61,7 +61,7 @@ test("flattenToOpaqueRGB: fully-transparent and fully-opaque pixels both flatten
   const flattened = flattenToOpaqueRGB(encodePng(img));
   const out = decodePng(flattened);
   // Pixel index 1 had alpha 128 (partial, the harness's own "not byte-opaque" finding
-  // — binxarn wave §3c: 5.53% of an ORDINARY prompt's pixels sat at alpha 243-255) and
+  // — <node-f> wave §3c: 5.53% of an ORDINARY prompt's pixels sat at alpha 243-255) and
   // pixel index 2 had alpha 0 (fully transparent, P8's sticker case) — both must
   // still carry their RGB bytes in the flattened output.
   assert.equal(out.pixels[1 * 3 + 1], 255); // pixel 1 green channel

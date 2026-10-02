@@ -11,9 +11,9 @@ import (
 // them: NUL-separated and NUL-terminated, board token first, SoC token last.
 const (
 	// the vendor 6.1 BSP kernel's device tree
-	compatVendorKernel = "rockchip,rk3588s-orangepi-5\x00rockchip,rk3588\x00"
+	compatVendorKernel = "rockchip,rk3588s-exampleboard-5\x00rockchip,rk3588\x00"
 	// a mainline 7.0 device tree
-	compatMainline = "xunlong,orangepi-5\x00rockchip,rk3588s\x00"
+	compatMainline = "vendor,exampleboard-5\x00rockchip,rk3588s\x00"
 )
 
 // fakeDeviceTree stands in for /proc/device-tree/compatible. It fails the test if
@@ -78,7 +78,7 @@ func TestDetectSoCIsInertEverywhereElse(t *testing.T) {
 		"a different vendor": {body: "vendor,board\x00vendor,rk3588\x00"},
 		// EXACT tokens: the board token alone, or an SoC token with a suffix, is not
 		// the SoC — a prefix match would admit both.
-		"board token alone":         {body: "rockchip,rk3588s-orangepi-5\x00"},
+		"board token alone":         {body: "rockchip,rk3588s-exampleboard-5\x00"},
 		"suffixed SoC token":        {body: "rockchip,rk3588-evb1-v10\x00"},
 		"unseparated tokens":        {body: "rockchip,rk3588rockchip,rk3588s"},
 		"a variant nobody measured": {body: "rockchip,rk3588j\x00"},

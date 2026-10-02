@@ -656,7 +656,7 @@ function Select-CudaBuild {
 # Resolve-ProfileParams returns AFTER its RAM gate - moe_26b drop, or cpu_moe with no
 # RAM path). Step 5 used to add 'model-26b' on the family gate alone, so a tier that
 # drops the 26B (blackwell-8: include_26b false) still downloaded 14.25 GB that the
-# rendered yaml never serves (OptiPlex parity audit, 2026-09-23). Download set and
+# rendered yaml never serves (<node-e> parity audit, 2026-09-23). Download set and
 # served roster now come from the same flag, like the other gated seats.
 function Get-FamilyModelKeys {
   param([bool]$WithFamily, [bool]$Include26B)
@@ -728,14 +728,21 @@ function Merge-ConfigSeed {
       return $s.Replace('__EXE__', '.exe')
     }
     if ($Value -is [System.Array]) {
-      $out = @($Value | ForEach-Object {
-          if ($_ -is [string]) {
-            $e = $_
-            if ($HomeFwd) { $e = $e.Replace('__OFFLOAD_HOME__', $HomeFwd) }
-            $e.Replace('__EXE__', '.exe')
-          } else { $_ }
-        })
-      return ,([object[]]$out)
+      # Every element recurses (parity with tierseed.expand's []any case), so an object or an array inside
+      # an array expands too. A plain foreach, not a pipeline: a pipeline would unroll an element that is
+      # itself an array, and the call's own `,(...)` wrapper is undone by the assignment, so each element
+      # arrives as exactly what it was (a nested array stays a nested array, an empty one stays empty).
+      $out = [System.Collections.Generic.List[object]]::new()
+      foreach ($el in $Value) { $out.Add((Expand-SeedValue -Value $el -HomeFwd $HomeFwd)) }
+      return ,([object[]]$out.ToArray())
+    }
+    if ($Value -is [System.Management.Automation.PSCustomObject]) {
+      # A named family block (imagegen_families / gen_edit_families) is an OBJECT of strings, arrays and
+      # scalars: recurse so a path token inside it expands exactly like a top-level seed value. Parity copy
+      # of tierseed.expand's map case; both suites load internal/tierseed/testdata/nested-expand-parity.json.
+      $o = [ordered]@{}
+      foreach ($pp in $Value.PSObject.Properties) { $o[$pp.Name] = Expand-SeedValue -Value $pp.Value -HomeFwd $HomeFwd }
+      return [pscustomobject]$o
     }
     return $Value
   }
@@ -853,13 +860,16 @@ function Get-CompositeSeed {
       }
     }
   }
-  # ,([object[]]...) on both arrays: PowerShell unrolls a 1-element array on
-  # return, and a `tiers` that serialized as a bare string would make Go reject
-  # the whole config (the same trap Merge-ConfigSeed documents).
+  # [object[]] on both arrays, and NO leading comma: a hashtable value is never unrolled (the
+  # returned pscustomobject is not either), so the cast alone keeps a 1-element array an array.
+  # A comma here wraps the array in a SECOND array, which Expand-SeedValue (it now recurses into
+  # every array element, as tierseed.expand does) faithfully preserves: `tiers` then serialized
+  # as [["a","b"]] and Go rejected the whole config. The old string-only array branch flattened
+  # that extra level by accident.
   return [pscustomobject][ordered]@{
     tier_profile = $ProfileId
-    tiers        = ,([object[]]@(@($ProfileRow.composes) + $ProfileId))
-    layers       = ,([object[]]@($layers))
+    tiers        = [object[]]@(@($ProfileRow.composes) + $ProfileId)
+    layers       = [object[]]@($layers)
   }
 }
 
@@ -881,7 +891,7 @@ function Add-OrSet-Property {
 # the accelerator seed) but never this one — so a fresh Windows install rendered
 # the yaml seats while writing a config with NO vision_model/stt_model, and
 # vqa/ocr/transcribe deferred "no route" while llama-swap named the seats
-# (field case: OptiPlex 7060 blackwell-8, 2026-08-22).
+# (field case: <node-e> blackwell-8, 2026-08-22).
 function Get-MediaSeatBindings {
   param($ProfileRow)
   if (-not $ProfileRow -or -not $ProfileRow.PSObject.Properties['media_seats']) { return $null }
@@ -890,6 +900,10 @@ function Get-MediaSeatBindings {
   $out = [ordered]@{}
   foreach ($s in @($ProfileRow.media_seats)) {
     if ($null -eq $s) { continue }
+    # Mirror of mediaseat.Seat.BindingKey: a registered extra (extra = true) is rendered into
+    # llama-swap but binds NO config key, so it must not win the last-seat-takes-the-key loop
+    # below (A-131). Only an explicit true skips; absent or false binds as before.
+    if ($s.PSObject.Properties['extra'] -and $s.extra -eq $true) { continue }
     $k = $keyByKind[[string]$s.kind]
     if ($k) { $out[$k] = [string]$s.name }
     elseif ($s.kind) {

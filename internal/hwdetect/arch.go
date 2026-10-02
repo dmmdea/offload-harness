@@ -44,7 +44,7 @@ var archRules = []struct {
 	{regexp.MustCompile(`(?i)RDNA\s*3`), "rdna3"},
 	// AMD GCN / Vega (older iGPU + discrete). "Vega 7" is a Ryzen APU iGPU. On Linux lspci
 	// names the SILICON, not the marketing part: a Ryzen 5 5625U's Vega 7 shows up as plain
-	// "Barcelo" (measured 2026-09-20 on binxarn). The Vega-era APU family is
+	// "Barcelo" (measured 2026-09-20 on <node-f>). The Vega-era APU family is
 	// Raven/Picasso/Renoir/Lucienne/Cezanne/Barcelo — all gfx90x GCN5.
 	{regexp.MustCompile(`(?i)\bVega\b`), "gcn"},
 	{regexp.MustCompile(`(?i)\b(Barcelo|Cezanne|Lucienne|Renoir|Picasso|Raven)\b`), "gcn"},

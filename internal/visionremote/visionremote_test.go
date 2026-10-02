@@ -142,7 +142,7 @@ var remoteOK = core.Result{OK: true, Data: json.RawMessage(`{"has_people":false,
 // fake node would record any dispatch; it records none.
 func TestDefaultRouteIsLocalAndNeverTouchesTheWire(t *testing.T) {
 	setBusy(t, true) // even a busy card: local is local
-	node := newFakeNode(t, "lenovo", []string{"vision"}, remoteOK)
+	node := newFakeNode(t, "node-c", []string{"vision"}, remoteOK)
 	cfg := config.Default()
 	cfg.DelegateRemotes = []string{node.srv.URL}
 	local := &localRunner{res: core.Result{OK: true, Data: json.RawMessage(`{"answer":"local"}`)}}
@@ -165,7 +165,7 @@ func TestDefaultRouteIsLocalAndNeverTouchesTheWire(t *testing.T) {
 // node's core.Result stamped with node + placement — the local runner never runs.
 func TestRemoteShipsTheImageAndReturnsTheNodesResult(t *testing.T) {
 	setBusy(t, false)
-	node := newFakeNode(t, "lenovo-ampere16", []string{"vision", "agent"}, remoteOK)
+	node := newFakeNode(t, "node-c-ampere16", []string{"vision", "agent"}, remoteOK)
 	cfg := config.Default()
 	cfg.DelegateRemotes = []string{node.srv.URL + "/"}
 	cfg.FleetAuthToken = "tok"
@@ -175,7 +175,7 @@ func TestRemoteShipsTheImageAndReturnsTheNodesResult(t *testing.T) {
 	if !res.OK || string(res.Data) != string(remoteOK.Data) {
 		t.Fatalf("result = %+v, want the node's", res)
 	}
-	if res.Meta.Node != "lenovo-ampere16" || res.Meta.Placement != "remote: forced" || res.Meta.Model != "fake-vlm" {
+	if res.Meta.Node != "node-c-ampere16" || res.Meta.Placement != "remote: forced" || res.Meta.Model != "fake-vlm" {
 		t.Fatalf("meta = %+v, want node + placement stamped over the node's meta", res.Meta)
 	}
 	if local.count() != 0 {
@@ -202,8 +202,8 @@ func TestRemoteShipsTheImageAndReturnsTheNodesResult(t *testing.T) {
 // naming what was probed — and never fall back to local.
 func TestRemoteDefersWithAClassWhenNoNodeIsEligible(t *testing.T) {
 	setBusy(t, false)
-	noLane := newFakeNode(t, "aorus", []string{"agent", "image-gen"}, remoteOK)
-	leased := newFakeNode(t, "lenovo", []string{"vision"}, remoteOK)
+	noLane := newFakeNode(t, "node-a", []string{"agent", "image-gen"}, remoteOK)
+	leased := newFakeNode(t, "node-c", []string{"vision"}, remoteOK)
 	leased.leased = true
 	local := &localRunner{}
 	img := pngFile(t)
@@ -214,7 +214,7 @@ func TestRemoteDefersWithAClassWhenNoNodeIsEligible(t *testing.T) {
 	if !res.Deferred || res.DeferClass != core.DeferClassCapacity {
 		t.Fatalf("result = %+v, want a capacity defer", res)
 	}
-	for _, want := range []string{"aorus", "no vision lane", "lenovo", "card leased"} {
+	for _, want := range []string{"node-a", "no vision lane", "node-c", "card leased"} {
 		if !strings.Contains(res.Reason, want) {
 			t.Fatalf("reason %q does not name %q", res.Reason, want)
 		}
@@ -235,7 +235,7 @@ func TestRemoteDefersWithAClassWhenNoNodeIsEligible(t *testing.T) {
 func TestRemoteRefusalMapsToAClass(t *testing.T) {
 	setBusy(t, false)
 	for status, class := range map[int]string{503: core.DeferClassCapacity, 401: core.DeferClassInfrastructure} {
-		node := newFakeNode(t, "lenovo", []string{"vision"}, remoteOK)
+		node := newFakeNode(t, "node-c", []string{"vision"}, remoteOK)
 		node.refuse = status
 		cfg := config.Default()
 		cfg.DelegateRemotes = []string{node.srv.URL}
@@ -250,7 +250,7 @@ func TestRemoteRefusalMapsToAClass(t *testing.T) {
 // eligible node on the roster.
 func TestAutoRunsLocalOnAnIdleCard(t *testing.T) {
 	setBusy(t, false)
-	node := newFakeNode(t, "lenovo", []string{"vision"}, remoteOK)
+	node := newFakeNode(t, "node-c", []string{"vision"}, remoteOK)
 	cfg := config.Default()
 	cfg.DelegateRemotes = []string{node.srv.URL}
 	local := &localRunner{res: core.Result{OK: true, Data: json.RawMessage(`{"answer":"local"}`)}}
@@ -268,13 +268,13 @@ func TestAutoRunsLocalOnAnIdleCard(t *testing.T) {
 // placement says why.
 func TestAutoGoesRemoteOnABusyCardAndFallsBackLocal(t *testing.T) {
 	setBusy(t, true)
-	node := newFakeNode(t, "lenovo", []string{"vision"}, remoteOK)
+	node := newFakeNode(t, "node-c", []string{"vision"}, remoteOK)
 	cfg := config.Default()
 	cfg.DelegateRemotes = []string{node.srv.URL}
 	local := &localRunner{res: core.Result{OK: true, Data: json.RawMessage(`{"answer":"local"}`)}}
 
 	res := Run(context.Background(), cfg, local, assessReq(pngFile(t)), "auto")
-	if string(res.Data) != string(remoteOK.Data) || res.Meta.Placement != "remote: local gpu busy" || res.Meta.Node != "lenovo" {
+	if string(res.Data) != string(remoteOK.Data) || res.Meta.Placement != "remote: local gpu busy" || res.Meta.Node != "node-c" {
 		t.Fatalf("result = %+v, want the node's result stamped busy", res)
 	}
 	if local.count() != 0 {
@@ -293,7 +293,7 @@ func TestAutoGoesRemoteOnABusyCardAndFallsBackLocal(t *testing.T) {
 // return the result, not an infrastructure defer (review finding).
 func TestWaitSurvivesATransientPollFailure(t *testing.T) {
 	setBusy(t, false)
-	node := newFakeNode(t, "lenovo", []string{"vision"}, remoteOK)
+	node := newFakeNode(t, "node-c", []string{"vision"}, remoteOK)
 	var flaky int32
 	mux := http.NewServeMux()
 	mux.Handle("/", node.srv.Config.Handler)
@@ -321,7 +321,7 @@ func TestWaitSurvivesATransientPollFailure(t *testing.T) {
 // the wait at once with an infrastructure defer naming it.
 func TestWaitGivesUpOnAVanishedJob(t *testing.T) {
 	setBusy(t, false)
-	node := newFakeNode(t, "lenovo", []string{"vision"}, remoteOK)
+	node := newFakeNode(t, "node-c", []string{"vision"}, remoteOK)
 	mux := http.NewServeMux()
 	mux.Handle("/", node.srv.Config.Handler)
 	mux.HandleFunc("GET /fleet/jobs/{id}", func(w http.ResponseWriter, r *http.Request) {
@@ -342,7 +342,7 @@ func TestWaitGivesUpOnAVanishedJob(t *testing.T) {
 // exactly as the local loader does, before any node is probed.
 func TestImageIsCappedOnTheCallerSide(t *testing.T) {
 	setBusy(t, false)
-	node := newFakeNode(t, "lenovo", []string{"vision"}, remoteOK)
+	node := newFakeNode(t, "node-c", []string{"vision"}, remoteOK)
 	cfg := config.Default()
 	cfg.DelegateRemotes = []string{node.srv.URL}
 	cfg.VisionMaxImageBytes = 10

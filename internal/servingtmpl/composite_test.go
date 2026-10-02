@@ -71,7 +71,7 @@ func renderTriple(t *testing.T) (string, CompositeDecl) {
 	params.VLLMRuntime = vllmseat.Runtime{
 		User: "BOX\\operator", ProxyHost: "127.0.0.1",
 		StackDir: "C:/llama-swap", SeatDir: "C:/llama-swap/seat",
-		VenvDir: "/venv", HFHome: "/hf", Distro: "freetoken", WSLSeatDir: "/seat",
+		VenvDir: "/venv", HFHome: "/hf", Distro: "distro", WSLSeatDir: "/seat",
 	}
 	var kinds []string
 	for _, s := range p3.MediaSeats {

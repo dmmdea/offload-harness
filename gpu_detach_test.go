@@ -32,7 +32,7 @@ func TestGPUReserveDetachRequiresAnExplicitFor(t *testing.T) {
 // which config.Load maps to built-in DEFAULTS (IsNotExist → defaults, nil error)
 // — i.e. the machine's REAL lease directory. On a box whose card was held by a
 // render the wrapper form queued behind it for the default 8 h wait and the
-// whole root package timed out (2026-09-12, the ReadyPep render's media lease);
+// whole root package timed out (2026-09-12, a brand video render's media lease);
 // on an idle box the --detach case would have taken a real 8 h "training"
 // lease. Both calls now arbitrate a temp lease root (leaseFixture) with a
 // fail-fast wait, and the --detach case is steered into the LATER

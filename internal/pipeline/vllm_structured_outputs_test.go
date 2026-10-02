@@ -254,7 +254,7 @@ func TestLedgerRowCarriesTheRepackAttemptCount(t *testing.T) {
 }
 
 // TestIsVLLMSeatResolvesAnAliasThroughTheRoster is the case the fix lives or
-// dies on. The Qube's agent seat is BOUND as `agent-pool-3card`, an alias of
+// dies on. <node-b>'s agent seat is BOUND as `agent-pool-3card`, an alias of
 // `qwen3.8-27b-vllm-3card`, and it is the CANONICAL id that `vllm_seats`
 // lists. A gate that matched the declared roster exactly would have left the
 // three-card box — the single largest consumer of the re-pack path — sending

@@ -5,35 +5,32 @@ import (
 	"testing"
 )
 
-// The fixtures below mirror the live Qube/<node-b> shapes the fleetnode parser
+// The fixtures below mirror the live <node-b> shapes the fleetnode parser
 // was born from: two near-twin 16 GiB Blackwell cards at PCI index 0/1. The
-// UUIDs are the real ones the composite tier's display-card pin names (the
-// 5070 Ti, GPU-2a44…, is the display card that must never host a compute
+// UUIDs are placeholders shaped like the ones the composite tier's display-card pin names (the
+// 5070 Ti, GPU-8888…, is the display card that must never host a compute
 // seat), so a FreeGiB lookup by UUID prefix is tested against the exact key
 // the placement package will pass.
 const (
-	qube5060TiUUID = "GPU-3ee161b5-c188-495b-eaeb-291e6e6e1d97" // index 0, 16311 MiB total
-	qube5070TiUUID = "GPU-2a44210f-6739-2d89-0e21-44cd5143faf7" // index 1, 16303 MiB total
-
 	node5060TiUUID = "GPU-1111aaaa-2222-3333-4444-555566667777" // index 0, 16311 MiB total
 	node5070TiUUID = "GPU-8888bbbb-9999-cccc-dddd-eeeeffff0000" // index 1, 16303 MiB total
 )
 
 // TestFreeGiBMatchesByIndexOrUUID pins the two key forms the placement guards
 // use to find the display card: a bare nvidia-smi index ("1") and a UUID
-// prefix ("GPU-2a44210f"). The Qube's live config pins the display card by
+// prefix ("GPU-8888bbbb"). <node-b>'s live config pins the display card by
 // UUID because the board reorders indices on power loss, so a UUID lookup
 // must resolve to the same card an index lookup does — and an index that no
 // device carries must read as "unknown", never as a number.
 func TestFreeGiBMatchesByIndexOrUUID(t *testing.T) {
-	devs, err := ParseSmiMemoryDevices("0, GPU-3ee161b5-c188-495b-eaeb-291e6e6e1d97, NVIDIA GeForce RTX 5060 Ti, 16311, 261, 0\n1, GPU-2a44210f-6739-2d89-0e21-44cd5143faf7, NVIDIA GeForce RTX 5070 Ti, 16303, 1498, 1\n")
+	devs, err := ParseSmiMemoryDevices("0, GPU-1111aaaa-2222-3333-4444-555566667777, NVIDIA GeForce RTX 5060 Ti, 16311, 261, 0\n1, GPU-8888bbbb-9999-cccc-dddd-eeeeffff0000, NVIDIA GeForce RTX 5070 Ti, 16303, 1498, 1\n")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if f, ok := FreeGiB(devs, "1"); !ok || f < 14.4 || f > 14.5 {
 		t.Fatalf("by index: %v %v", f, ok)
 	}
-	if f, ok := FreeGiB(devs, "GPU-2a44210f"); !ok || f < 14.4 {
+	if f, ok := FreeGiB(devs, "GPU-8888bbbb"); !ok || f < 14.4 {
 		t.Fatalf("by uuid prefix: %v %v", f, ok)
 	}
 	if _, ok := FreeGiB(devs, "7"); ok {
@@ -50,18 +47,18 @@ func TestFreeGiBMatchesByIndexOrUUID(t *testing.T) {
 // one that reads it as infinite would admit onto a card it cannot see, so the
 // bool is the only honest answer.
 func TestFreeGiBKeyEdgeCases(t *testing.T) {
-	devs, err := ParseSmiMemoryDevices("0, " + qube5060TiUUID + ", NVIDIA GeForce RTX 5060 Ti, 16311, 261\n" +
-		"1, " + qube5070TiUUID + ", NVIDIA GeForce RTX 5070 Ti, 16303, 1498\n")
+	devs, err := ParseSmiMemoryDevices("0, " + node5060TiUUID + ", NVIDIA GeForce RTX 5060 Ti, 16311, 261\n" +
+		"1, " + node5070TiUUID + ", NVIDIA GeForce RTX 5070 Ti, 16303, 1498\n")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if f, ok := FreeGiB(devs, qube5070TiUUID); !ok || f < 14.4 || f > 14.5 {
+	if f, ok := FreeGiB(devs, node5070TiUUID); !ok || f < 14.4 || f > 14.5 {
 		t.Fatalf("full uuid: %v %v", f, ok)
 	}
-	if f, ok := FreeGiB(devs, strings.ToLower("GPU-2A44210F")); !ok || f < 14.4 {
+	if f, ok := FreeGiB(devs, strings.ToLower("GPU-8888BBBB")); !ok || f < 14.4 {
 		t.Fatalf("lower-case uuid prefix: %v %v", f, ok)
 	}
-	if f, ok := FreeGiB(devs, "GPU-2A44210F"); !ok || f < 14.4 {
+	if f, ok := FreeGiB(devs, "GPU-8888BBBB"); !ok || f < 14.4 {
 		t.Fatalf("upper-case uuid prefix: %v %v", f, ok)
 	}
 	if f, ok := FreeGiB(devs, " 0 "); !ok || f < 15.6 || f > 15.7 {
@@ -288,12 +285,12 @@ func TestParseSmiMemoryDevices_MalformedUtilizationKeptWithValidMemory(t *testin
 // device list that a guard could read as "no card is busy".
 func TestReadUsesTheInjectedRunnerAndHonoursItsError(t *testing.T) {
 	devs, err := ReadWith(func() (string, error) {
-		return "0, " + qube5060TiUUID + ", NVIDIA GeForce RTX 5060 Ti, 16311, 261\n", nil
+		return "0, " + node5060TiUUID + ", NVIDIA GeForce RTX 5060 Ti, 16311, 261\n", nil
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(devs) != 1 || devs[0].UUID != qube5060TiUUID {
+	if len(devs) != 1 || devs[0].UUID != node5060TiUUID {
 		t.Fatalf("devices = %+v", devs)
 	}
 	if _, err := ReadWith(func() (string, error) { return "", errExecFailed }); err == nil {
@@ -328,18 +325,18 @@ func TestHostFreeRAMGiBIsPlausibleWhereSupported(t *testing.T) {
 // and the earlier heuristic would have flagged the card the harness works on.
 func TestDisplayCardUUIDs(t *testing.T) {
 	const (
-		c0 = "GPU-3ee161b5-c188-495b-eaeb-291e6e6e1d97"
-		c1 = "GPU-2a44210f-6739-2d89-0e21-44cd5143faf7" // the Qube's display card
-		c2 = "GPU-0c3843d3-5721-d9f7-47fe-89fdb8373e24"
+		c0 = "GPU-1111aaaa-2222-3333-4444-555566667777"
+		c1 = "GPU-8888bbbb-9999-cccc-dddd-eeeeffff0000" // <node-b>'s display card
+		c2 = "GPU-3333cccc-0000-0000-0000-000000000000"
 	)
-	qube := []Device{
+	nodeB := []Device{
 		{Index: 0, UUID: c0, DisplayActive: false},
 		{Index: 1, UUID: c1, DisplayActive: true},
 		{Index: 2, UUID: c2, DisplayActive: false},
 	}
-	got := DisplayCardUUIDs(qube)
+	got := DisplayCardUUIDs(nodeB)
 	if !got[c1] || got[c0] || got[c2] || len(got) != 1 {
-		t.Fatalf("Qube: want only card 1 flagged, got %v", got)
+		t.Fatalf("node-b: want only card 1 flagged, got %v", got)
 	}
 	// Single-GPU box: its only card IS the display card, and it runs seats there.
 	if got := DisplayCardUUIDs([]Device{{Index: 0, UUID: c1, DisplayActive: true}}); got != nil {
@@ -359,7 +356,7 @@ func TestDisplayCardUUIDs(t *testing.T) {
 // at all. Neither may read as "this is the operator's screen" — the point of
 // excluding a card is that we are SURE.
 func TestDisplayActiveParsesOnlyAnExactEnabled(t *testing.T) {
-	const uuid = "GPU-2a44210f-6739-2d89-0e21-44cd5143faf7"
+	const uuid = "GPU-8888bbbb-9999-cccc-dddd-eeeeffff0000"
 	for _, tc := range []struct {
 		name string
 		line string

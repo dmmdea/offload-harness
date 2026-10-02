@@ -5,14 +5,16 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
+	"github.com/dmmdea/offload-harness/internal/hwdetect"
 	"github.com/dmmdea/offload-harness/internal/tierseed"
 )
 
 // TestClassifyConfigDriftNamesTheHandWiredWin pins the four classes on the exact shape that hid
-// the binxarn agent seat: the node carried a hand-set agent_model the seed did not write, while
+// the <node-f> agent seat: the node carried a hand-set agent_model the seed did not write, while
 // the seed wrote a DIFFERENT value, and a node-local endpoint that no tier owns must stay silent.
 func TestClassifyConfigDriftNamesTheHandWiredWin(t *testing.T) {
 	seed := map[string]any{
@@ -70,7 +72,7 @@ func TestClassifyConfigDriftPutsDriftFirst(t *testing.T) {
 	}
 }
 
-// TestClassifyConfigDriftSeesABindingNoTierSeeds pins the blind spot the first cut had: the Qube's
+// TestClassifyConfigDriftSeesABindingNoTierSeeds pins the blind spot the first cut had: <node-b>'s
 // image-edit and animate routes were wired by hand and are seeded by NO tier, so a comparison over
 // seed-owned keys alone could not see them. They must surface as UNSEEDED; a node-local endpoint or
 // path must not.
@@ -122,6 +124,7 @@ func TestSeedOwnedKeysIncludeTheAcceleratorKeys(t *testing.T) {
 // audit-config against that tier and returns what it printed and whether it reported drift.
 func auditNode(t *testing.T, tier, home string, extra map[string]any, adjust func(live map[string]any)) (string, error) {
 	t.Helper()
+	stubDetectedRAMTier(t, "min") // hermetic: the audit would otherwise read this machine's RAM
 	doc, err := tierseed.LoadDoc(".")
 	if err != nil {
 		t.Fatal(err)
@@ -284,6 +287,320 @@ func TestAuditConfigSeedOwnsTheRK3588UnconstrainedSeats(t *testing.T) {
 		got := classifyConfigDrift(seed, tc.live, owned, isBindingKey)
 		if len(got) != 1 || got[0].Key != "unconstrained_seats" || got[0].Class != tc.want {
 			t.Errorf("%s: got %+v, want one %s finding", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestClassifyConfigDriftTreatsKeyPrefixAsNodeOwned pins the one place audit-config does not compare a
+// value whole: the key_prefix of each kv_cache_server binding belongs to the node (a seeded node keeps the
+// prefix it was seeded with, and install does not rewrite config.json), so a prefix-only difference
+// between two lists of bindings is not drift. Every other difference is, and so is a shape the rule
+// does not cover: a legacy single object, or a list holding something that is not an object.
+func TestClassifyConfigDriftTreatsKeyPrefixAsNodeOwned(t *testing.T) {
+	// The prefixes are built rather than pasted, so no line reads key_prefix next to an opaque
+	// string (the shape the tree's secret scanner classifies as a generic API key).
+	prefixA, prefixB := "seat-"+"alpha", "seat-"+"beta"
+	binding := func(addr, seat, prefix string) map[string]any {
+		b := map[string]any{"enabled": true, "store": "fs_native", "address": addr, "seat": seat}
+		if prefix != "" {
+			b["key_prefix"] = prefix
+		}
+		return b
+	}
+	// The seed carries its bindings as a typed list (what tierseed writes); a live config decodes to []any.
+	seedList := func(bs ...map[string]any) any { return bs }
+	liveList := func(bs ...map[string]any) any {
+		out := make([]any, len(bs))
+		for i, b := range bs {
+			out[i] = b
+		}
+		return out
+	}
+	one := binding("/mnt/kv/one", "seat-one", prefixA)
+	oneOtherPrefix := binding("/mnt/kv/one", "seat-one", prefixB)
+	oneNoPrefix := binding("/mnt/kv/one", "seat-one", "")
+	oneOtherAddr := binding("/mnt/kv/elsewhere", "seat-one", prefixA)
+	two := binding("/mnt/kv/two", "seat-two", prefixA)
+
+	classify := func(t testing.TB, seedVal, liveVal any) configDrift {
+		t.Helper()
+		seed := map[string]any{"kv_cache_server": seedVal}
+		live := map[string]any{"kv_cache_server": liveVal}
+		for _, f := range classifyConfigDrift(seed, live, map[string]bool{"kv_cache_server": true}, isBindingKey) {
+			if f.Key == "kv_cache_server" {
+				return f
+			}
+		}
+		t.Fatal("kv_cache_server was not reported at all")
+		return configDrift{}
+	}
+
+	for _, c := range []struct {
+		name       string
+		seed, live any
+		want       configDriftClass
+	}{
+		{"both lists, prefix-only difference", seedList(one), liveList(oneOtherPrefix), driftMatch},
+		{"both lists, identical", seedList(one), liveList(one), driftMatch},
+		{"both lists, an address differs", seedList(one), liveList(oneOtherAddr), driftDifferent},
+		{"live has an extra binding", seedList(one), liveList(one, two), driftDifferent},
+		{"live is missing a binding", seedList(one, two), liveList(one), driftDifferent},
+		{"live binding without a prefix against a seed that has one", seedList(one), liveList(oneNoPrefix), driftMatch},
+		{"seed binding without a prefix against a live one that has one", seedList(oneNoPrefix), liveList(one), driftMatch},
+		{"live legacy single object against the list seed, same prefix", seedList(one), one, driftDifferent},
+		{"live legacy single object against the list seed, other prefix", seedList(one), oneOtherPrefix, driftDifferent},
+		{"list live against a legacy-object seed", one, liveList(one), driftDifferent},
+		{"a list holding a non-object is compared whole", []any{one, "x"}, []any{oneOtherPrefix, "x"}, driftDifferent},
+		{"a list against a string", seedList(one), "x", driftDifferent},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if got := classify(t, c.seed, c.live); got.Class != c.want {
+				t.Errorf("classified %q, want %q", got.Class, c.want)
+			}
+		})
+	}
+
+	t.Run("the report keeps both prefixes and the inputs are not mutated", func(t *testing.T) {
+		seedVal, liveVal := seedList(one), liveList(oneOtherPrefix)
+		before := func() string {
+			s, _ := json.Marshal(seedVal)
+			l, _ := json.Marshal(liveVal)
+			return string(s) + "|" + string(l)
+		}
+		was := before()
+		got := classify(t, seedVal, liveVal)
+		if got.Class != driftMatch {
+			t.Fatalf("classified %q, want MATCH", got.Class)
+		}
+		if after := before(); after != was {
+			t.Errorf("the inputs were modified: %s -> %s", was, after)
+		}
+		s, _ := json.Marshal(got.Seed)
+		l, _ := json.Marshal(got.Live)
+		if !strings.Contains(string(s), prefixA) || !strings.Contains(string(l), prefixB) {
+			t.Errorf("the report must still show both prefixes, got seed %s live %s", s, l)
+		}
+	})
+}
+
+// ramGbOfTier is a RAM size that classifies as each tier, for a stub that must speak with a size too.
+var ramGbOfTier = map[string]int{"min": 8, "low": 32, "mid": 64, "high": 128}
+
+// stubDetectedRAMTier makes the audit see a box of the given RAM tier, whatever machine runs the suite.
+func stubDetectedRAMTier(t *testing.T, tier string) {
+	t.Helper()
+	prev := auditDetectRAMTier
+	auditDetectRAMTier = func() (string, int, error) { return tier, ramGbOfTier[tier], nil }
+	t.Cleanup(func() { auditDetectRAMTier = prev })
+}
+
+// The audit must compare the seed the installer WOULD write on this box, and that includes the RAM
+// overlay of the tier the box detects. `none` stays selectable, and a RAM tier below mid has no overlay.
+func TestResolveAuditRAMTier(t *testing.T) {
+	cases := []struct {
+		flag, detected string
+		overlay, tier  string
+		source         string
+		wantErr        bool
+	}{
+		{"", "mid", "mid", "mid", "detected", false},
+		{"auto", "high", "high", "high", "detected", false},
+		{"", "low", "", "low", "detected", false},
+		{"", "min", "", "min", "detected", false},
+		{"none", "mid", "", "none", "--ram-tier", false},
+		{"mid", "low", "mid", "mid", "--ram-tier", false},
+		{"HIGH", "min", "high", "high", "--ram-tier", false},
+		{"low", "high", "", "low", "--ram-tier", false},
+		{"huge", "mid", "", "", "", true},
+	}
+	for _, c := range cases {
+		got, err := resolveAuditRAMTier(c.flag, func() (string, int, error) { return c.detected, ramGbOfTier[c.detected], nil })
+		if (err != nil) != c.wantErr {
+			t.Errorf("flag %q detected %q: err=%v, wantErr=%v", c.flag, c.detected, err, c.wantErr)
+			continue
+		}
+		if c.wantErr {
+			continue
+		}
+		if got.Overlay != c.overlay || got.Tier != c.tier || got.Source != c.source {
+			t.Errorf("flag %q detected %q: got %+v, want overlay=%q tier=%q source=%q", c.flag, c.detected, got, c.overlay, c.tier, c.source)
+		}
+	}
+}
+
+// auditRAMNode audits a node whose config is blackwell-8's seed WITH the mid RAM overlay applied
+// (what an install on a 64 GB box writes), under the given extra flags.
+func auditRAMNode(t *testing.T, flags ...string) (string, error) {
+	t.Helper()
+	doc, err := tierseed.LoadDoc(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	home := t.TempDir()
+	seed, err := tierseed.Resolve(doc.Profiles["blackwell-8"], "blackwell-8", tierseed.Options{Home: home, GOOS: "linux", RAMTier: "mid"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(cfg, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var runErr error
+	out := captureStdout(t, func() {
+		runErr = runAuditConfig(append([]string{"--config", cfg, "--tier", "blackwell-8", "--root", ".", "--home", home,
+			"--goos", "linux", "--vllm-seat-active", "false"}, flags...))
+	})
+	return out, runErr
+}
+
+// The false positive this fixes: a 64 GB box carries the overlay, the default audit compared the
+// base seed only and called every overlay key drift.
+func TestAuditConfigDefaultsToTheDetectedRAMTier(t *testing.T) {
+	stubDetectedRAMTier(t, "mid")
+	out, err := auditRAMNode(t)
+	if err != nil {
+		t.Fatalf("a mid-RAM box carrying the mid overlay must audit clean by default, got %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "ram-tier=mid") || !strings.Contains(out, "detected") || !strings.Contains(out, "config_seed_ram_mid_high") {
+		t.Errorf("the text output must say which RAM overlay was compared, got:\n%s", out)
+	}
+}
+
+// `none` stays selectable: the base seed alone, so the overlay-carried keys read as drift again.
+func TestAuditConfigRAMTierNoneComparesTheBaseSeed(t *testing.T) {
+	stubDetectedRAMTier(t, "mid")
+	out, err := auditRAMNode(t, "--ram-tier", "none")
+	if !errors.Is(err, errConfigDrift) {
+		t.Fatalf("--ram-tier none compares the base seed, so a node carrying the overlay must drift, got %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "ram-tier=none") || !strings.Contains(out, "base seed only") {
+		t.Errorf("the text output must say the base seed alone was compared, got:\n%s", out)
+	}
+}
+
+// A detected tier below mid has no overlay: the audit compares the base seed and says so.
+func TestAuditConfigDetectedLowRAMHasNoOverlay(t *testing.T) {
+	stubDetectedRAMTier(t, "low")
+	out, err := auditRAMNode(t)
+	if !errors.Is(err, errConfigDrift) {
+		t.Fatalf("a low-RAM box has no overlay, so a node carrying one must drift, got %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "ram-tier=low") || !strings.Contains(out, "base seed only") {
+		t.Errorf("got:\n%s", out)
+	}
+}
+
+func TestAuditConfigRejectsAnUnknownRAMTier(t *testing.T) {
+	stubDetectedRAMTier(t, "mid")
+	_, err := auditRAMNode(t, "--ram-tier", "huge")
+	if err == nil || errors.Is(err, errConfigDrift) || !strings.Contains(err.Error(), "ram-tier") {
+		t.Fatalf("an unknown --ram-tier must be refused by name, got %v", err)
+	}
+}
+
+func TestAuditConfigJSONNamesTheRAMOverlay(t *testing.T) {
+	stubDetectedRAMTier(t, "mid")
+	for _, c := range []struct {
+		flags            []string
+		tier, src, overl string
+	}{
+		{nil, "mid", "detected", "config_seed_ram_mid_high"},
+		{[]string{"--ram-tier", "none"}, "none", "--ram-tier", "none"},
+	} {
+		out, _ := auditRAMNode(t, append([]string{"--json"}, c.flags...)...)
+		var rep map[string]any
+		if err := json.Unmarshal([]byte(out), &rep); err != nil {
+			t.Fatalf("--json output is not JSON: %v\n%s", err, out)
+		}
+		if rep["ram_tier"] != c.tier || rep["ram_tier_source"] != c.src || rep["ram_overlay"] != c.overl {
+			t.Errorf("flags %v: ram_tier=%v ram_tier_source=%v ram_overlay=%v, want %s / %s / %s",
+				c.flags, rep["ram_tier"], rep["ram_tier_source"], rep["ram_overlay"], c.tier, c.src, c.overl)
+		}
+	}
+}
+
+// A failed RAM probe reads as 0 GB, which classifies as tier min and would pick the base seed with no
+// word said. The audit must refuse and ask for --ram-tier instead of guessing.
+func TestAuditConfigRefusesAFailedRAMProbe(t *testing.T) {
+	prev := auditDetectFacts
+	auditDetectFacts = func() hwdetect.Facts { return hwdetect.Facts{RAMGb: 0} }
+	t.Cleanup(func() { auditDetectFacts = prev })
+	for _, flags := range [][]string{nil, {"--ram-tier", "auto"}} {
+		out, err := auditRAMNode(t, flags...)
+		if err == nil || errors.Is(err, errConfigDrift) || !strings.Contains(err.Error(), "--ram-tier") || !strings.Contains(err.Error(), "0 GB") {
+			t.Fatalf("flags %v: a failed RAM probe must be refused with a pointer to --ram-tier, got %v\n%s", flags, err, out)
+		}
+		if strings.Contains(out, "ram-tier=min") {
+			t.Errorf("flags %v: the audit must not quietly fall back to tier min, got:\n%s", flags, out)
+		}
+	}
+	// A named tier never consults the probe, so a box whose probe fails can still be audited.
+	if out, err := auditRAMNode(t, "--ram-tier", "mid"); err != nil {
+		t.Fatalf("an explicit --ram-tier must not need the probe, got %v\n%s", err, out)
+	}
+	if out, err := auditRAMNode(t, "--ram-tier", "none"); !errors.Is(err, errConfigDrift) {
+		t.Fatalf("--ram-tier none must not need the probe either, got %v\n%s", err, out)
+	}
+}
+
+// The header names the RAM the probe read, so a wrong detection is visible; a named tier has no probe to report.
+func TestAuditConfigHeaderNamesTheDetectedRAM(t *testing.T) {
+	stubDetectedRAMTier(t, "mid")
+	out, err := auditRAMNode(t)
+	if err != nil {
+		t.Fatalf("got %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "ram-tier=mid (detected, 64 GB;") {
+		t.Errorf("the header must name the detected RAM in GB, got:\n%s", out)
+	}
+	out, _ = auditRAMNode(t, "--ram-tier", "mid")
+	if strings.Contains(out, " GB") || !strings.Contains(out, "ram-tier=mid (--ram-tier;") {
+		t.Errorf("a named tier has no detected GB to show, got:\n%s", out)
+	}
+}
+
+// Detection reads THIS machine. Pointed at another node's config (--config, --home, a foreign --goos)
+// without a named tier, the overlay compared is this machine's RAM tier, and the audit says so on stderr
+// (stdout stays the report, JSON included).
+func TestAuditConfigWarnsWhenTheRAMTierIsThisMachinesNotTheNodes(t *testing.T) {
+	stubDetectedRAMTier(t, "mid")
+	for _, flags := range [][]string{nil, {"--ram-tier", "auto"}} {
+		var out string
+		warn := captureStderr(t, func() { out, _ = auditRAMNode(t, flags...) })
+		if !strings.Contains(warn, "warning") || !strings.Contains(warn, "this machine's RAM tier") || !strings.Contains(warn, "--ram-tier") {
+			t.Errorf("flags %v: auditing another node's config on a detected RAM tier must warn, got stderr %q", flags, warn)
+		}
+		if strings.Contains(out, "warning") {
+			t.Errorf("flags %v: the warning belongs on stderr, not in the report:\n%s", flags, out)
+		}
+	}
+	for _, flags := range [][]string{{"--ram-tier", "mid"}, {"--ram-tier", "none"}, {"--ram-tier", "low"}} {
+		if warn := captureStderr(t, func() { auditRAMNode(t, flags...) }); warn != "" {
+			t.Errorf("flags %v: a named tier is the operator's own choice, no warning expected, got %q", flags, warn)
+		}
+	}
+}
+
+// Auditing this very node (config from the environment, this platform) compares the right RAM, so no warning.
+func TestAuditConfigDoesNotWarnForThisMachinesOwnConfig(t *testing.T) {
+	stubDetectedRAMTier(t, "mid")
+	cfg := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(cfg, []byte(`{"tier_profile":"blackwell-8"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LOCAL_OFFLOAD_CONFIG", cfg)
+	for _, flags := range [][]string{nil, {"--goos", runtime.GOOS}} {
+		warn := captureStderr(t, func() {
+			captureStdout(t, func() {
+				_ = runAuditConfig(append([]string{"--root", ".", "--vllm-seat-active", "false"}, flags...))
+			})
+		})
+		if warn != "" {
+			t.Errorf("flags %v: this machine's own config needs no warning, got %q", flags, warn)
 		}
 	}
 }

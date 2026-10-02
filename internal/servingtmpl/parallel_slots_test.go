@@ -18,7 +18,7 @@ import (
 //
 // It ships as its own entry, and the reason is the thing this gate protects. llama.cpp
 // DIVIDES -c among its slots: eight slots at --ctx-size 131072 serve 16,384 tokens
-// each. The same night's Lenovo arm measured the mechanism in-house ("--parallel 8
+// each. The same night's <node-c> arm measured the mechanism in-house ("--parallel 8
 // -c 32768" -> "16k/32k prompts exceed the 4k/slot window"). Both pair tiers declare
 // qwen3.8-27b as their fallback agent lane at fallback_agent_ctx_tokens 131072, so
 // moving the flag onto that seat would serve an eighth of the advertised window --

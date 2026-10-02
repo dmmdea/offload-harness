@@ -139,7 +139,7 @@ func TestAgentAuthPrecedesKnownJobReack(t *testing.T) {
 // TestMediaLaneByteIdenticalWithTokenConfigured is the deployed-client pin
 // (reshape delta 10): the SAME media dispatch + poll, against a server with a
 // token configured vs one without, must produce byte-for-byte identical
-// responses — auth v1 touches the agent lane only, and the Aorus 0.62.1 media
+// responses — auth v1 touches the agent lane only, and the <node-a> 0.62.1 media
 // client (which sends no Authorization header) must never 401.
 func TestMediaLaneByteIdenticalWithTokenConfigured(t *testing.T) {
 	const dispatchBody = `{"job_id":"media-1","task_type":"image-gen","payload":{"prompt":"hi"}}`

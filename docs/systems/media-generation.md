@@ -403,7 +403,7 @@ value is inert there), and `native` forces that loader and refuses a `.gguf` exp
 seeds `native` (`blackwell-8`) goes back to GGUF experts by changing three keys, both experts and the loader.
 It was a constant 7 in `render/wf-wan22-i2v.mjs`, and on an 8 GB card under the driver's
 "Prefer No Sysmem Fallback" policy 7 asks ~8.4 GB of a 15.4 GB Q8_0 expert and OOMs, while 11 got through
-the load and hung the card (OptiPlex reg3b/reg3c, 2026-09-22). Each node sets the value it MEASURED; the
+the load and hung the card (<node-e> reg3b/reg3c, 2026-09-22). Each node sets the value it MEASURED; the
 pipeline passes it as `--wan-vvram-gb`. It is not the LTX-2.5 pool key: that one borrows VRAM from a
 donor card, this one parks weights in RAM. The runner also asks the running ComfyUI for every node class
 the graph names before submitting (`render/comfy-nodes.mjs`), so a missing pack is a one-line
@@ -447,7 +447,7 @@ plus this pinned commit). `render/comfy-nodes.mjs` (`NODE_PACKS`) and
 `internal/mediacap/routeneeds.go` (`nodePacks`/`packHint`) both carry the pin+mirror note in the
 operator-facing `MISSING_NODE` hint, so a box missing the pack is told where to get the frozen,
 patched code, not just the (soon read-only) upstream URL. All four fleet Windows/Linux ComfyUI
-installs (Qube, OptiPlex, Aorus, Lenovo) are aligned to this commit (2026-09-24) — see the
+installs (<node-b>, <node-e>, <node-a>, <node-c>) are aligned to this commit (2026-09-24) — see the
 per-node rev table and the A/B seat-switch decision in
 `Ecosystem/Benchmarks and Optimizations/2026-09-22-qwen-image-21-hyperframes/infra/multigpu-archival-actions-2026-09-24.md`
 (operator's Drive, not this repo). Re-check the archive-coordination thread (#223)
@@ -539,6 +539,21 @@ an overlay key outside those prefixes or not a config key (typo), a forbidden ke
 `*_license`, the prompt refiner), a missing/empty `license`, a missing `commercial_use`, a family name
 outside `[a-z0-9._-]`, or a name that collides with the default binding's own family. Every family is
 also checked by the same binding-trap warnings as the default, with its name in front.
+
+**Video families carry the pair too (CT-47).** A `videogen_families[name]` entry may declare `license`
+and `commercial_use`, both or neither (the load refuses one without the other, naming the family). It is
+the video analogue of `imagegen_license` / `imagegen_commercial_use`, with two differences: nothing
+requires it, because video family selection was never a licensing gate (every family stays reachable
+through `model`), and it describes the MODEL, so `ResolveVideoFamilyBinding` reads it from the family's
+own entry even for this box's default family, whose weights still come from the flat `videogen_*` keys.
+A `generate_video` result then carries `license` and `commercial_use`, tagged with the family that
+rendered (an override request gets the overridden family's pair, not the seat's), its ledger row carries
+`license`, `offload_status` lists both under each `media.video_family_bindings` row (null when
+undeclared), and `local-offload doctor` prints a `license:` line under a family that declares one. No
+warning text rides along (operator order 2026-10-01). A family that declares none adds nothing and
+reads as UNKNOWN. No value ships as a default: the repo's only sourced statements of the video
+licences are the names and conditions in `render/templates-license-map.json` (read from the hosting
+cards and digests, not from the licence texts in full), and its `conditional` class is not a bool.
 
 **Every result is tagged.** Results carry `family` (the default binding's own name for an unnamed
 request), and `license` + `commercial_use` whenever the binding declares them (no warning sentence
@@ -718,7 +733,7 @@ typed `FFMPEG_UNAVAILABLE` error raised by `main()` before the GPU lock or Comfy
 (F-38, 2026-09-24), not a silent skip** — the pre-fix behavior (degrade to a no-op skip and ship the
 raw, unverified render) let the gate go silently inert fleet-wide on every node that never set an
 explicit `ffmpeg_path`, since the config default `"ffmpeg"` is a bare name that `existsSync()`
-always read as missing (reproduced identically on the Lenovo and the Aorus). `gpugen.ClassifyErr`
+always read as missing (reproduced identically on <node-c> and <node-a>). `gpugen.ClassifyErr`
 maps `FFMPEG_UNAVAILABLE` to the `ffmpeg_unavailable` class, mirroring `dead_air` below.
 
 **A `gpugen`-killed timeout is a typed `timeout`, not a generic failure (found 2026-09-23).**
@@ -806,7 +821,7 @@ the files they name — the same gates the pipeline routes on. Three verdicts pe
 Both reporting surfaces read from it: `local-offload doctor`'s media section (a
 `BOUND-BUT-MISSING` route exits non-zero) and the MCP `offload_status` tool's `media.routes`.
 
-**What a render-script route loads (OptiPlex parity audit, 2026-09-23).** `generate_video`,
+**What a render-script route loads (<node-e> parity audit, 2026-09-23).** `generate_video`,
 `animate_character` and both `generate_audio` kinds used to be `CONFIGURED` as soon as their script
 existed; on the 8 GB reference box that was three green rows over routes that failed when called. The
 verdict now covers what the script loads (`internal/mediacap/routeneeds.go`):

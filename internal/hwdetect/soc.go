@@ -11,10 +11,10 @@ const socCompatiblePath = "/proc/device-tree/compatible"
 
 // rk3588Tokens are the SoC-level tokens of the RK3588 family, and a board carries
 // exactly one of them. The vendor 6.1 kernel's device tree names the board
-// `rockchip,rk3588s-orangepi-5` and then the SoC `rockchip,rk3588`; a mainline device
-// tree names the board `xunlong,orangepi-5` and then the SoC `rockchip,rk3588s`. Both
+// `rockchip,rk3588s-exampleboard-5` and then the SoC `rockchip,rk3588`; a mainline device
+// tree names the board `vendor,exampleboard-5` and then the SoC `rockchip,rk3588s`. Both
 // spellings must match, and EXACTLY: a prefix match would also accept the board token
-// `rockchip,rk3588s-orangepi-5` by itself, and every RK3588 variant nobody has measured.
+// `rockchip,rk3588s-exampleboard-5` by itself, and every RK3588 variant nobody has measured.
 var rk3588Tokens = map[string]bool{"rockchip,rk3588": true, "rockchip,rk3588s": true}
 
 // DetectSoC recognises a supported SoC from the device tree and reports the Facts it

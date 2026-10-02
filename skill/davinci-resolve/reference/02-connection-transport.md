@@ -18,7 +18,7 @@
    21.1 ships `C:\Program Files\Blackmagic Design\DaVinci Resolve\ResolvePython\ResolvePython.exe`
    (Python 3.14.4, `import DaVinciResolveScript` with no env vars, no pip) — prefer it as the pin
    for new deploys (`deploy.ps1 -PythonPin`). The per-machine crash class was NOT reproduced on
-   21.1 (09 §2); the Dell has not been re-measured on 21.1, so keep `_probe.py` in the deploy gate
+   21.1 (09 §2); the editing rig has not been re-measured on 21.1, so keep `_probe.py` in the deploy gate
    and still scrub `PYTHONHOME`/`PYTHONPATH` from child envs.
 
 4. A **project page must be open** for writes (see "page null" below).
@@ -76,7 +76,7 @@ On 21.x `resolve.DisableBackgroundTasksForCurrentResolveSession()` suppresses au
 background tasks for the REST of that Resolve session; there is no re-enable — restart Resolve to
 get auto-backup back. Tell the editor when you used it.
 
-## `page == null` ⇒ writes silently fail [measured 2026-08-31 Dell, 2026-09-01 workstation]
+## `page == null` ⇒ writes silently fail [measured 2026-08-31 editing rig, 2026-09-01 workstation]
 When Resolve sits on the Project Manager (or a freshly launched "Untitled Project" with no page
 open), `GetCurrentPage()` returns None. All READS still answer (status, projects, pool,
 timelines, render-presets, even `GetSetting()`), but `CreateProject`, `ImportMedia`,
@@ -89,7 +89,7 @@ CLI's "no project with that name" message is wrong in that one case.
 **`CreateProject(name)` ALSO works from page-null [measured 2026-09-01 workstation, Studio 21.0.4.5, Disk
 DB, zero projects]:** `CreateProject("_ref_scratch")` returned the Project, page went None → `cut`,
 and every subsequent write (timeline, generator, Text+, markers, render) worked. So a box with
-ZERO projects is not a blocker either — create one from script. (The Dell measurement of
+ZERO projects is not a blocker either — create one from script. (The editing rig measurement of
 `CreateProject` failing on 2026-08-31 was through the CLI on a box whose console session is owned
 by another user; re-measure there before treating it as a Resolve rule.) The workstation's Local
 Database now contains `_ref_scratch` (empty, disposable) — `load-project _ref_scratch --yes` is

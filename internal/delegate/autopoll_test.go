@@ -374,7 +374,7 @@ func TestAutoPollNoteRidesASuccessfulResultToo(t *testing.T) {
 		seatRate:   map[string]any{"tok_s": 20.0, "cold_load_sec": 30.0, "samples": 5, "min_turn_sec": 235},
 		seatBudget: map[string]any{"step_tokens": 1024, "final_tokens": 4096, "thinking": "auto"},
 		pollByJob: func(string, int64) (map[string]any, int) {
-			return doneWire(t, remoteWire("the qube answer", `{"answer":"42"}`)), http.StatusOK
+			return doneWire(t, remoteWire("the zorblax answer", `{"answer":"42"}`)), http.StatusOK
 		},
 	}
 	results, sum, err := Run(t.Context(), testCfg(t), neverLocal(t), []core.AgentContract{autoContract()}, "remote", []string{node.server().URL})

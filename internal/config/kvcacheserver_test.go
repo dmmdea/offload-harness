@@ -78,7 +78,7 @@ func TestKVCacheServerRefusesPublicAndMalformed(t *testing.T) {
 
 func TestKVCacheServerAcceptsLANTailnetAndDefaults(t *testing.T) {
 	withTailnet(t, "tailnnnnnn.ts.net")
-	for _, addr := range []string{"10.1.2.3:18799", "192.168.1.20:6379", "127.0.0.1:18799", "[::ffff:10.1.2.3]:18799", "[fd00::1]:6379", "lenovo:18799", "lenovo.local:18799", "box.tailnnnnnn.ts.net:18799", "  10.1.2.3:18799  "} {
+	for _, addr := range []string{"10.1.2.3:18799", "192.168.1.20:6379", "127.0.0.1:18799", "[::ffff:10.1.2.3]:18799", "[fd00::1]:6379", "node-c:18799", "node-c.local:18799", "box.tailnnnnnn.ts.net:18799", "  10.1.2.3:18799  "} {
 		k := KVCacheServer{Enabled: true, Address: addr, Seat: "qwen3.8-27b-vllm"}
 		if err := ValidateKVCacheServer(&k); err != nil {
 			t.Errorf("%s: %v", addr, err)
@@ -98,14 +98,14 @@ func TestKVCacheServerAcceptsLANTailnetAndDefaults(t *testing.T) {
 		t.Fatalf("CGNAT address must be accepted: %v", err)
 	}
 	// fs_native takes an absolute mounted path — never a network location.
-	k := KVCacheServer{Enabled: true, Store: "fs_native", Address: "/mnt/lenovo-kv", Seat: "s"}
+	k := KVCacheServer{Enabled: true, Store: "fs_native", Address: "/mnt/node-c-kv", Seat: "s"}
 	if err := ValidateKVCacheServer(&k); err != nil {
 		t.Fatalf("fs_native: %v", err)
 	}
 	if k.AddressIsIPLiteral() {
 		t.Fatal("a path is not an IP literal")
 	}
-	if !(KVCacheServer{Address: "10.1.2.3:18799"}).AddressIsIPLiteral() || (KVCacheServer{Address: "lenovo:18799"}).AddressIsIPLiteral() {
+	if !(KVCacheServer{Address: "10.1.2.3:18799"}).AddressIsIPLiteral() || (KVCacheServer{Address: "node-c:18799"}).AddressIsIPLiteral() {
 		t.Fatal("AddressIsIPLiteral misclassifies")
 	}
 	explicit := KVCacheServer{Enabled: true, Address: "10.1.2.3:18799", ChunkSize: 1568, KeyPrefix: "gen2"}
@@ -126,7 +126,7 @@ func TestKVCacheServerLoadAttributesTheKey(t *testing.T) {
 	if _, err := Load(p); err == nil || !strings.Contains(err.Error(), "kv_cache_server.address") {
 		t.Fatalf("expected a kv_cache_server.address refusal, got %v", err)
 	}
-	good := `{"kv_cache_server":{"enabled":true,"store":"valkey","address":" 10.1.2.3:18799 ","l1_staging_gb":8,"chunk_size":784,"key_prefix":"qube-seat-v7","seat":"qwen3.8-27b-vllm"}}`
+	good := `{"kv_cache_server":{"enabled":true,"store":"valkey","address":" 10.1.2.3:18799 ","l1_staging_gb":8,"chunk_size":784,"key_prefix":"seat-v7","seat":"qwen3.8-27b-vllm"}}`
 	if err := os.WriteFile(p, []byte(good), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -140,7 +140,7 @@ func TestKVCacheServerLoadAttributesTheKey(t *testing.T) {
 		t.Fatalf("the legacy single object must decode to a one-element list, got %+v", c.KVCacheServers)
 	}
 	b := c.KVCacheServers.For("qwen3.8-27b-vllm")
-	if b == nil || !b.Enabled || b.Address != "10.1.2.3:18799" || b.EffectiveKeyPrefix() != "qube-seat-v7" {
+	if b == nil || !b.Enabled || b.Address != "10.1.2.3:18799" || b.EffectiveKeyPrefix() != "seat-v7" {
 		t.Fatalf("round-trip lost or failed to normalize the block: %+v", b)
 	}
 	raw, _ := json.Marshal(b)

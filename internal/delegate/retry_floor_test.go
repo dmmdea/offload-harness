@@ -33,7 +33,7 @@ func emptyFinalLocal(calls *atomic.Int64) LocalRunner {
 // is not a wrong answer another seat corrects; no dispatch, a named note.
 func TestRunRetrySkippedWhenTheFirstAttemptEndedOnAnEmptyFinal(t *testing.T) {
 	compressPolls(t, 10*time.Millisecond, 2*time.Second)
-	node, url := eligibleNode(t, "node-a", "qube from A")
+	node, url := eligibleNode(t, "node-a", "zorblax from A")
 	var localCalls atomic.Int64
 	results, sum, err := Run(context.Background(), testCfg(t), emptyFinalLocal(&localCalls), contracts(1), "spread", []string{url})
 	if err != nil {
@@ -56,7 +56,7 @@ func TestRunRetrySkippedWhenTheFirstAttemptEndedOnAnEmptyFinal(t *testing.T) {
 // which knob set the floor.
 func TestRunRetryFloorComesFromConfig(t *testing.T) {
 	compressPolls(t, 10*time.Millisecond, 2*time.Second)
-	node, url := eligibleNode(t, "node-a", "qube from A")
+	node, url := eligibleNode(t, "node-a", "zorblax from A")
 	cfg := testCfg(t)
 	cfg.AgentRetryMinSec = 300
 	var localCalls atomic.Int64
@@ -94,7 +94,7 @@ func TestRunRetryFloorComesFromConfig(t *testing.T) {
 // TestRetrySeatBusyReadsTheNodeCeiling pins the other side of it.
 func TestRunRetryNeverLandsOnASeatAlreadyRunningAnotherJob(t *testing.T) {
 	compressPolls(t, 10*time.Millisecond, 2*time.Second)
-	node, url := eligibleNode(t, "node-a", "qube from A")
+	node, url := eligibleNode(t, "node-a", "zorblax from A")
 	node.jobsRunning, node.queueDepth = 4, 4
 	node.maxConcurrentJobs = 4 // every worker busy: the retry can only queue
 	var localCalls atomic.Int64
@@ -113,7 +113,7 @@ func TestRunRetryNeverLandsOnASeatAlreadyRunningAnotherJob(t *testing.T) {
 	// before the batch; the busy check must read the node NOW, not that
 	// snapshot. The node is idle at the initial probe and turns busy while the
 	// local first attempt runs — a cached read would let the retry land.
-	live, liveURL := eligibleNode(t, "node-live", "qube from live")
+	live, liveURL := eligibleNode(t, "node-live", "zorblax from live")
 	var busyNow atomic.Int64
 	live.maxConcurrentJobs = 1
 	live.jobsRunningFn = func() int { return int(busyNow.Load()) }
@@ -155,7 +155,7 @@ func TestRunRetryNeverLandsOnASeatAlreadyRunningAnotherJob(t *testing.T) {
 // note naming the publisher; a fast one lets it run.
 func TestRunRetryFloorComesFromTheRetrySeat(t *testing.T) {
 	compressPolls(t, 10*time.Millisecond, 2*time.Second)
-	slow, slowURL := eligibleNode(t, "node-slow", "qube from slow")
+	slow, slowURL := eligibleNode(t, "node-slow", "zorblax from slow")
 	slow.seatRate = map[string]any{"tok_s": 30.0, "cold_load_sec": 210.0, "samples": 5, "min_turn_sec": 484}
 	slow.seatBudget = map[string]any{"step_tokens": 4096, "final_tokens": 8192, "thinking": "off"}
 	var localCalls atomic.Int64
@@ -173,7 +173,7 @@ func TestRunRetryFloorComesFromTheRetrySeat(t *testing.T) {
 		t.Fatalf("retry_note = %q, want the retry seat's 757 s floor and its publisher named", pr.RetryNote)
 	}
 	// The same contract with a FAST retry seat: 5 + (4096+4096)/100 = 86.92 → 87 s < 600 → the retry runs.
-	fast, fastURL := eligibleNode(t, "node-fast", "qube from fast")
+	fast, fastURL := eligibleNode(t, "node-fast", "zorblax from fast")
 	fast.seatRate = map[string]any{"tok_s": 100.0, "cold_load_sec": 5.0, "samples": 3, "min_turn_sec": 46}
 	fast.seatBudget = map[string]any{"step_tokens": 1024, "final_tokens": 4096, "thinking": "off"}
 	c2 := contracts(1)

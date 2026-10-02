@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-// Register D-128, MEASURED 2026-09-18 on the Qube pair seat (qwen3.8-27b-vllm,
+// Register D-128, MEASURED 2026-09-18 on the <node-b> pair seat (qwen3.8-27b-vllm,
 // vLLM behind llama-swap): a /v1/chat/completions request with logprobs:true
 // and top_logprobs:5 answers with the OpenAI shape
 // choices[0].logprobs.content[] — each entry carrying token, logprob, bytes and

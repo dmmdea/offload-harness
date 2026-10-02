@@ -148,7 +148,7 @@ func TestAPlacementRefusedAfterTheCallDeadlineIsTheDeadlinesDefer(t *testing.T) 
 	compressPolls(t, 5*time.Millisecond, time.Second)
 	compressWait(t, 20*time.Millisecond, 0)
 	a, aURL := refusingNode(t, "node-a", http.StatusNotFound, nil)
-	b, bURL := acceptingNode(t, "node-b", "qube from B", func(f *fakeNode) {
+	b, bURL := acceptingNode(t, "node-b", "zorblax from B", func(f *fakeNode) {
 		// B answers health at once until A has been asked, then takes longer than the call has.
 		f.healthDelayFn = func() time.Duration {
 			if a.dispatches.Load() > 0 {

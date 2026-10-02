@@ -24,7 +24,7 @@ import (
 // every subtask onto whichever one wins roster-order ties.
 func dealNode(t *testing.T, id string, maxConcurrent int, jobsRunning int) (*fakeNode, string) {
 	t.Helper()
-	f, url := acceptingNode(t, id, "qube from "+id, func(f *fakeNode) {
+	f, url := acceptingNode(t, id, "zorblax from "+id, func(f *fakeNode) {
 		f.maxConcurrentJobs = maxConcurrent
 		f.jobsRunning = jobsRunning
 		// queue_depth = jobs_running + jobs_queued by construction (nodeview.go);
@@ -44,7 +44,7 @@ func dealNode(t *testing.T, id string, maxConcurrent int, jobsRunning int) (*fak
 // pre-minted.
 func TestDealAutoRemotePreMintsAndReusesTheJobID(t *testing.T) {
 	compressPolls(t, 5*time.Millisecond, time.Second)
-	node, url := acceptingNode(t, "node-a", "qube answered", nil)
+	node, url := acceptingNode(t, "node-a", "zorblax answered", nil)
 
 	contract := remoteContract()
 	results, sum, err := Run(context.Background(), testCfg(t), neverLocal(t), []core.AgentContract{contract}, "remote", []string{url})
@@ -97,7 +97,7 @@ func TestRunAutoJointDealSpreadsAcrossThreeDistinctNodes(t *testing.T) {
 
 	var localCalls atomic.Int64
 	subtasks := []core.AgentContract{remoteContract(), remoteContract(), remoteContract()}
-	subtasks[0].Goal, subtasks[1].Goal, subtasks[2].Goal = "qube task one", "qube task two", "qube task three"
+	subtasks[0].Goal, subtasks[1].Goal, subtasks[2].Goal = "zorblax task one", "zorblax task two", "zorblax task three"
 	results, sum, err := Run(context.Background(), cfg, passingLocal(&localCalls), subtasks, "auto", []string{urlA, urlB, urlC})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -134,7 +134,7 @@ func TestRunAutoJointDealGivesAFullNodeZeroSubtasks(t *testing.T) {
 	subtasks := make([]core.AgentContract, 8)
 	for i := range subtasks {
 		c := remoteContract()
-		c.Goal = "qube extraction task"
+		c.Goal = "zorblax extraction task"
 		subtasks[i] = c
 	}
 	results, sum, err := Run(context.Background(), testCfg(t), neverLocal(t), subtasks, "remote", []string{fullURL, idleURL})
@@ -170,8 +170,8 @@ func TestRunAutoJointDealBothFullGoesToCapacityWait(t *testing.T) {
 	// room left is a legitimate "queue it there" target for the wait, not
 	// this test's scenario.
 	full := func(f *fakeNode) { f.maxConcurrentJobs, f.jobsRunning, f.queueDepth, f.maxQueueDepth = 1, 1, 1, 1 }
-	a, urlA := acceptingNode(t, "node-a", "qube from a", full)
-	b, urlB := acceptingNode(t, "node-b", "qube from b", full)
+	a, urlA := acceptingNode(t, "node-a", "zorblax from a", full)
+	b, urlB := acceptingNode(t, "node-b", "zorblax from b", full)
 
 	cfg := testCfg(t)
 	cfg.AgentPlacementWaitSec = 1 // enable the wait, short so the test stays fast
@@ -241,7 +241,7 @@ func TestPlaceAutoRemoteCapacityWaitNamesEachNodesHeadroom(t *testing.T) {
 func TestRunAutoJointDealNamesADeadRemoteAsProbe(t *testing.T) {
 	compressPolls(t, 5*time.Millisecond, time.Second)
 	noProbeMemo(t)
-	_, chosenURL := acceptingNode(t, "node-chosen", "qube from chosen", nil)
+	_, chosenURL := acceptingNode(t, "node-chosen", "zorblax from chosen", nil)
 	// deadListener (probe_fanout_test.go): accepts the TCP connection and
 	// hangs up with no HTTP response at all — probeUnreachable's shape, so
 	// FetchNodeView returns a transport error and the base lands in `failed`.

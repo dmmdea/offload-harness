@@ -11,8 +11,8 @@ import (
 // TestDualBlackwellSeedsThePairSeatWithTheCacheServer pins the operator's
 // correction of 2026-09-08: blackwell-2x16 is the RTX 5060 Ti PAIR, and the
 // tier seeds the same 27B vLLM TP2 seat blackwell-3x16 seeds — same operating
-// point, same Lenovo cache server — with the device pair renumbered for a
-// two-card box (0,1 instead of 0,2). Every Qube-class tier benefits from the
+// point, same <node-c> cache server — with the device pair renumbered for a
+// two-card box (0,1 instead of 0,2). Every workstation-class tier benefits from the
 // cache server; a tier that seeds the llama.cpp fallback while its reference
 // box serves the vLLM seat is the ADR 0035 defect, again.
 //
@@ -61,7 +61,7 @@ func TestDualBlackwellSeedsThePairSeatWithTheCacheServer(t *testing.T) {
 	s := two.VLLMSeat
 	if s == nil {
 		t.Fatal("blackwell-2x16 declares no vllm_seat. The tier IS the 5060 Ti pair the production " +
-			"seat runs on; a fresh install must serve agent-pool with the Lenovo cache server, not the " +
+			"seat runs on; a fresh install must serve agent-pool with the <node-c> cache server, not the " +
 			"llama.cpp fallback (operator correction 2026-09-08, overturning 0.114.1)")
 	}
 	if s.Device != "0,1" {
@@ -71,9 +71,9 @@ func TestDualBlackwellSeedsThePairSeatWithTheCacheServer(t *testing.T) {
 		t.Errorf("vllm_seat tensor_parallel = %d, want 2", s.TensorParallel)
 	}
 	if s.CacheServer == nil || s.CacheServer.Store != "fs_native" || s.CacheServer.Address == "" {
-		t.Errorf("vllm_seat has no fs_native cache server — every Qube-class tier benefits from the Lenovo store (got %+v)", s.CacheServer)
+		t.Errorf("vllm_seat has no fs_native cache server — every workstation-class tier benefits from the <node-c> store (got %+v)", s.CacheServer)
 	}
-	// Same operating point as the Qube's 2-card pair seat (seat-tp2.env): the numbers were
+	// Same operating point as <node-b>'s 2-card pair seat (seat-tp2.env): the numbers were
 	// measured on this exact silicon, so a divergence is a typo, not a decision. Until
 	// 2026-09-21 the 3-card tier seeded that pair and this test compared the two tiers
 	// directly; the 3-card tier now seeds the three-card FLAGSHIP (operator 2026-09-19) and
@@ -131,7 +131,7 @@ func TestDualBlackwellSeedsThePairSeatWithTheCacheServer(t *testing.T) {
 	}
 	// tripleUtil was the 3-card tier's PAIR seat (display card outside it). The tier's seat
 	// is now the pipeline flagship, which pins kv_cache_memory_bytes and so ignores
-	// utilization; 0.90 stays the figure for the Qube's opt-in pair, recorded in seat-tp2.env.
+	// utilization; 0.90 stays the figure for <node-b>'s opt-in pair, recorded in seat-tp2.env.
 	_ = tripleUtil
 	if !strings.Contains(s.Aliases[0]+strings.Join(s.Aliases, ","), "agent-pool") {
 		t.Errorf("vllm_seat aliases %v lack agent-pool — the harness binds to that alias", s.Aliases)

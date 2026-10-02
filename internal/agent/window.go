@@ -28,7 +28,7 @@ const FallbackContextTokens = 8192
 // coldStartWait bounds the per-model passthrough probes TOGETHER. llama-swap
 // holds a request for a model that is not loaded until that model's health
 // check passes, so these probes are also the wait for a cold start — and a vLLM
-// seat's cold start is minutes. Measured 2026-09-16 on the Qube agent-pool seat:
+// seat's cold start is minutes. Measured 2026-09-16 on the <node-b> agent-pool seat:
 // `starting` at 3 s, `ready` at 222 s. The old 60 s per-request timeout gave up
 // at 60 s on /props and again at 120 s on /v1/models, the bare-root /props
 // answered 404, and the run budgeted 8,192 against a 114,688-token window. Ten

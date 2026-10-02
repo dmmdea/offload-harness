@@ -15,7 +15,7 @@ import (
 // Hailo lane (NPU) must wire the accelerator lanes (Accel) too. Found live on
 // 2026-09-08: the fleet-node delegation builder (internal/pipeline/agenttask.go)
 // and the prompt-replay builder (main.go) passed NPU only, so a remote contract
-// against the Lenovo was told offload_classify_image did not exist while the
+// against <node-c> was told offload_classify_image did not exist while the
 // same seat run locally had it. A per-package unit test cannot see this — the
 // lanes are correct in isolation; the defect is a builder that forgets one.
 func TestEveryAgentBuilderWiresEveryAcceleratorLane(t *testing.T) {

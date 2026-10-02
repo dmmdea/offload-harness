@@ -64,13 +64,13 @@ func TestRunAutoBusyReadsTheLocalSeatsInFlightCountNotJustTheLease(t *testing.T)
 // on the runner" half of W-01: two subtasks placed through the SAME runner
 // must not each pay their own local-busy probe.
 func TestRunAutoBusyProbedOncePerRunNotPerSubtask(t *testing.T) {
-	// The output must PASS acceptance ("contains:qube") so neither subtask
+	// The output must PASS acceptance ("contains:zorblax") so neither subtask
 	// triggers the verification retry — retrySeatBusy makes its OWN fresh
 	// probe by design (D-46: the retry seat's load must be read live, not
 	// from a snapshot a sibling subtask may have since invalidated), and that
 	// probe is deliberately uncached. Counting it here would test the wrong
 	// thing.
-	_, url := eligibleNode(t, "node-a", "qube answered")
+	_, url := eligibleNode(t, "node-a", "zorblax answered")
 	cfg := testCfg(t)
 	var probes atomic.Int64
 	var localCalls atomic.Int64

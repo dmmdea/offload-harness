@@ -6,7 +6,7 @@ import (
 )
 
 // fleet-serve advertises the installer manifest's accelerator list when it has
-// one, else the harness config's (Coral design D6). The Lenovo is a hand-built
+// one, else the harness config's (Coral design D6). <node-c> is a hand-built
 // node with NO installed.json — before this fallback its health could never
 // list a device, and a delegator could never route to it.
 func TestFleetAcceleratorsManifestThenConfig(t *testing.T) {

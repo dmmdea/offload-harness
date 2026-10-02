@@ -24,7 +24,7 @@ a Windows class.
 | [blackwell-3x16](blackwell-3x16.md) | triple-blackwell | 131072 | q8_0 | gemma4-26b-a4b | `gpu` | comfyui (krea2) + ocr/stt/vision seat | — |
 | [blackwell-48](blackwell-48.md) | cuda-resident | 131072 | f16 | gemma4-26b-a4b | `gpu` | comfyui (krea2) + stt/vision seat | — |
 | [blackwell-72](blackwell-72.md) | cuda-resident | 131072 | f16 | gemma4-26b-a4b | `gpu` | comfyui (krea2) + stt/vision seat | — |
-| [blackwell-8](blackwell-8.md) | cuda | 16384 | q8_0 | offload-e4b | dropped | yes + ocr/stt/vision seat | — |
+| [blackwell-8](blackwell-8.md) | cuda | 16384 | q8_0 | offload-e4b | dropped | yes + ocr/stt/vision seat (+2 extra) | — |
 | [cpu](cpu.md) | cpu | 8192 | f16 | offload-e4b | `cpu_moe` | stt/vision seat | — |
 | [dual-gpu](dual-gpu.md) | dual-cuda | 32768 | q8_0 | gemma4-26b-a4b | `gpu` | stt/vision seat | — |
 | [rockchip-rk3588](rockchip-rk3588.md) | rk3588 | 8192 | f16 | qwen3.5-2b-npu | dropped | yes + rkllm seat | — |

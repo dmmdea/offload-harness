@@ -873,8 +873,8 @@ retry note names the publisher, and only a node that publishes no rate falls bac
 `min_turn_sec` (the 2026-09-10 shape: a 201 s floor from the 4B cleared, the retry landed on the 27B whose own floor
 was ≈ 484 s). `seat_budget` is also what a caller reads to MATCH budgets across seats — a delegator's config does not
 travel with the contract. Reference (2026-09-10, ledger-01 on both
-seats): the Qube 27B TP2 seat at ~30 tok/s needs ≈ 600 s thinking off / ≈ 730 s auto INCLUDING a 210 s cold load for a
-12-step, 8,192-token-final contract — a 600 s box default is at the edge and 900 s is the honest wall; the Lenovo 4B at
+seats): the <node-b> 27B TP2 seat at ~30 tok/s needs ≈ 600 s thinking off / ≈ 730 s auto INCLUDING a 210 s cold load for a
+12-step, 8,192-token-final contract — a 600 s box default is at the edge and 900 s is the honest wall; the <node-c> 4B at
 ~30 tok/s answers the same contract in one step in 250–380 s with a 34 s cold load.
 
 **One question before the wall: the seat coherence probe (register D-118).** A seat can be HEALTHY by every gate the
@@ -912,7 +912,7 @@ by itself. Set `agent_coherence_probe: "always"` on a box whose seat has gone Na
 on every run instead, at one ≤ 96-token completion per contract.
 
 **The final budget fits the wall (0.122.1, register D-95).** Sizing told the caller a contract would not fit; it did
-nothing about the run in flight, which still opened its final answer at the configured 4× budget. On the Lenovo 4B seat
+nothing about the run in flight, which still opened its final answer at the configured 4× budget. On the <node-c> 4B seat
 (~15 tok/s) a list-heavy extraction with an `output_schema` owed an 8,192-token final PLUS an 8,192-token re-pack — the
 node's own `wall_note` priced that at 1,166–1,310 s against a 900 s wall, and on 2026-09-14 `METHODOLOGY.md` and
 `SELF-CONTROL.md` hit the wall instead of answering (at the 4,096 budget the same contracts were CUT instead: three of
@@ -950,7 +950,7 @@ as before, with `final_reissue=list_cap` and BOTH `finish_reason`s on the record
 
 **The re-issue no longer asks the partial to be JSON-shaped (0.123.3, register D-95b).** 0.122.1 gated it on the cut
 answer starting with `{` or `[`, on the reasoning that "cap every list" says nothing to a truncated narrative. On the
-Lenovo 4B that excluded every run it was built for: the seat answers a schema contract in its OWN prose shape
+<node-c> 4B that excluded every run it was built for: the seat answers a schema contract in its OWN prose shape
 (`summary (≤100 words):` / `mechanisms:` / `- item`), which the structured re-pack reads perfectly well, so the live
 readback of `METHODOLOGY.md` on 2026-09-14 still deferred at 381 s with `output_truncated` and no re-issue at all. Any
 `length`-cut final on a schema contract now earns the one re-issue; the wall gate is what bounds it.
@@ -1043,7 +1043,7 @@ measured seat for that tier), and otherwise is DERIVED from `resident_tier` when
 the workhorse. So running the agent no longer requires `-model <resident_tier>` — the `-model` flag
 remains an override. `agent_max_tokens` (0.113.9) is the planner's completion budget per call for `agent_run`
 and for delegated jobs this node serves (0 = the loop default of 1,024) — set 4096 for a THINKING seat, whose
-reasoning spends the same budget (the Qube 27B seat used 839 reasoning tokens of 1,024 and returned nothing,
+reasoning spends the same budget (the <node-b> 27B seat used 839 reasoning tokens of 1,024 and returned nothing,
 2026-09-04). A key named `max_tokens` is NOT read: the loader warns `unknown config key`. `agent_thinking`
 (0.115.8) is the seat's think-block policy on planner calls: `auto` (default) thinks every step and, when a
 step ends EMPTY (no content, no tool call — a think block that ate the budget, or a bare close), re-issues that
@@ -1084,7 +1084,7 @@ carries any measured override to apply.
 | `amd-rdna3` | `offload-e4b` (Vulkan) | 16384 (floor; canary → 32768) | f16 (floor; canary → q8_0) | `--cpu-moe` floor; canary → full-offload `-ngl 99` (~20–25 t/s on dual-channel DDR5) — see SETUP-AGENT.md, AMD RDNA3 chapter |
 | `amd-rdna3-dgpu` | `gemma4-26b-a4b` (Vulkan, discrete RX 7900-class ≥12 GB) | 32768 | q8_0 | full-GPU `-ngl 99` resident |
 | `ampere-6` | `offload-e4b` | 32768 | q8_0 (conservative default; f16 measured viable) | dropped (architectural — see the tier page) |
-| `amd-gcn` | `gemma4-e2b` (Vulkan; the CPU alt route was withdrawn 2026-09-24 — no model runs on CPU, ADR 0054 amendment; agent seat `qwen3.5-4b-agent`) | 32768 (8192 → 32768 measured 2026-09-20: 24k-token prompt in 278 s, 3.9 GiB GTT) | f16, flash-attn on (measured 2026-09-20 on binxarn: +4 % pp, neutral on Lucienne; the lane is DDR-bandwidth-bound, every RADV/ubatch/KV knob within ±4 %) | dropped |
+| `amd-gcn` | `gemma4-e2b` (Vulkan; the CPU alt route was withdrawn 2026-09-24 — no model runs on CPU, ADR 0054 amendment; agent seat `qwen3.5-4b-agent`) | 32768 (8192 → 32768 measured 2026-09-20: 24k-token prompt in 278 s, 3.9 GiB GTT) | f16, flash-attn on (measured 2026-09-20 on <node-f>: +4 % pp, neutral on Lucienne; the lane is DDR-bandwidth-bound, every RADV/ubatch/KV knob within ±4 %) | dropped |
 | `cpu` | `offload-e4b` (CPU) | 8192 | f16, flash-attn off | `--cpu-moe` when RAM ≥ ~56 GB; else dropped |
 | `rockchip-rk3588` | `qwen3.5-2b-npu` (Qwen3.5-2B W8A8 on the NPU via RKLLM, chat and vision: `vqa` and `ocr`, never `assess_image`; its own pipeline runs `classify` and `extract` with no grammar, from a prompt plus strict validation, and the fleet text lane is not advertised until measured); no llama.cpp entry (llama.cpp Vulkan faults the Mali GPU on this kernel/Mesa, measured), no model runs on the CPU, and `uma_reserve_gib` 3 holds RAM back for the host | the NPU seat 16384 | n/a (RKLLM) | dropped |
 
@@ -1130,7 +1130,7 @@ after two off-document answers (its reason appears among `probe_errors` as "quar
 
 **Capacity is your step — the wait only makes contention honest.** The 429 exists because ten
 reserved requests per model are shared by every session. Ready to paste into
-`C:\llama-swap\llama-swap.yaml` (Qube; back it up first), on the seats the harness binds
+`C:\llama-swap\llama-swap.yaml` (<node-b>; back it up first), on the seats the harness binds
 (`agent_model` qwen3.8-27b; cascade gemma-4-e2b / e4b / 12b / 26b):
 
 ```yaml
@@ -1166,7 +1166,7 @@ A vLLM seat's usable KV in VRAM is small on consumer cards (and on a Mamba-hybri
 "GPU KV cache size" banner overstates it: align-mode checkpoint blocks share the pool). Contexts
 that leave VRAM are recomputed. With LMCache MP and a **cache server** — a store on a second
 machine's RAM — they come back at parity cost instead (measured 2026-09-02, Qwen3.8-27B, 24k
-tokens: 3.86 s from a Lenovo over the LAN vs 24.68 s recompute, every token from the store; 20.6 s
+tokens: 3.86 s from <node-c> over the LAN vs 24.68 s recompute, every token from the store; 20.6 s
 when the store namespace was shared across layouts), the GPU
 stays free while the load streams, and they survive a seat swap. Same-box RAM as the tier is faster
 (0.50 s, 49.7×) but spends the serving PC's memory; the second device is the capacity route.
@@ -1188,7 +1188,7 @@ second device exists:
     "seat": "qwen3.8-27b-vllm",
     "kv_dtype": "fp8",
     "tensor_parallel": 2,
-    "status_file": "//wsl.localhost/<distro>/root/g7/seat-l2-qwen3.8-27b-vllm.status"
+    "status_file": "//wsl.localhost/<distro><seat-dir>/seat-l2-qwen3.8-27b-vllm.status"
   },
   {
     "enabled": true,
@@ -1199,7 +1199,7 @@ second device exists:
     "key_prefix": "seat-3card-fp8",
     "seat": "qwen3.8-27b-vllm-3card",
     "kv_dtype": "fp8",
-    "status_file": "//wsl.localhost/<distro>/root/g7/seat-l2-qwen3.8-27b-vllm-3card.status"
+    "status_file": "//wsl.localhost/<distro><seat-dir>/seat-l2-qwen3.8-27b-vllm-3card.status"
   }
 ]
 ```
@@ -1219,7 +1219,7 @@ second device exists:
 
   ```
   cache server (one binding per vLLM seat; the store backs every seat while the second device is online):
-    qwen3.8-27b-vllm:        OK    fs_native /mnt/kvcache/lmcache-seat-tp2-fp8 key_prefix=qube-seat-tp2-fp8 l1=8GB
+    qwen3.8-27b-vllm:        OK    fs_native /mnt/kvcache/lmcache-seat-tp2-fp8 key_prefix=seat-tp2-fp8 l1=8GB
     qwen3.8-27b-vllm-3card:  FAIL  no kv_cache_server binding — give this seat a store, or opt out explicitly with {"seat":"qwen3.8-27b-vllm-3card","storeless":true,"reason":"<why>"}
   ```
 
@@ -1250,7 +1250,7 @@ second device exists:
   the wrapper had restarted the MP server, with the reason in a traceback and HTTP 500 on the lane.
 
 The measured transport of choice is `fs_native` over a network share of the store's RAM disk (0.112.1+;
-Lenovo tmpfs over SMB 3.1.1: a 23.7k-token prefix back in 0.56–0.70 s vs 3.8 s through Valkey, 2026-09-04).
+<node-c> tmpfs over SMB 3.1.1: a 23.7k-token prefix back in 0.56–0.70 s vs 3.8 s through Valkey, 2026-09-04).
 The block then names the mounted path, and the seat's `seat.env` names the share the wrapper mounts first:
 
 ```json
@@ -1260,7 +1260,7 @@ The block then names the mounted path, and the seat's `seat.env` names the share
   "address": "/mnt/kvcache/lmcache-seat-tp2-v2",
   "l1_staging_gb": 8,
   "chunk_size": 784,
-  "key_prefix": "qube-seat-tp2-v2",
+  "key_prefix": "seat-tp2-v2",
   "seat": "qwen3.8-27b-vllm"
 }]
 ```
@@ -1273,7 +1273,7 @@ SEAT_L2_MOUNT_DIR=/mnt/kvcache
 SEAT_L2_MOUNT_OPTS=credentials=/root/.smbcred,vers=3.1.1,rsize=4194304,wsize=4194304,cache=none,actimeo=1,noserverino,nobrl
 SEAT_L2_MIN_MBPS=200                       # optional write floor: refuse to start on a crawling path (0 = off)
 SEAT_L2_MOUNT_SRCADDR=auto                 # optional: pin the CIFS source to the lowest-metric default route (two NICs on one subnet)
-SEAT_LMCACHE_PYTHONPATH=/root/g7/lmcache-overlay   # optional: load LMCache from an overlay (an unreleased fix), not the venv
+SEAT_LMCACHE_PYTHONPATH=<seat-dir>/lmcache-overlay   # optional: load LMCache from an overlay (an unreleased fix), not the venv
 ```
 
 - `SEAT_LMCACHE_PYTHONPATH` (optional, 0.113.13): a directory prepended to `PYTHONPATH` for BOTH the LMCache
@@ -1300,6 +1300,7 @@ SEAT_LMCACHE_PYTHONPATH=/root/g7/lmcache-overlay   # optional: load LMCache from
 - `key_prefix` is one namespace per stack generation: change it (or flush the store) whenever the
   engine layout, the KV dtype or the LMCache build changes — objects written under another
   generation fail reads with "value size exceeds buffer capacity" and the tier silently pays nothing.
+  `audit-config` treats `key_prefix` as node-owned when both sides list their bindings.
 - `key_prefix` or `seat` is required when enabled: two seats must never share a namespace by accident.
 - `offload_status.kv_cache_server` LISTS every binding (`bindings[]`, each with its seat, store,
   address, key_prefix, l1_staging_gb and declared/enabled state) plus `unbound_seats` — the same
@@ -1386,7 +1387,7 @@ fallback for the whole run. When the probe still cannot answer, the box's `agent
 window; when it answers and disagrees with `agent_ctx_tokens`, the served window wins and the note says so.
 
 **Store steward (0.113.16) — `fleet_store_root`, `fleet_store_cap_gb`, `fleet_store_prune_every_jobs`, `fleet_store_prune_every_sec` (0.130.1: a time tick, default 60 s, because under a GPU lease no job completes on the node while a bench arm or the pair seat writes ~1 GB/min; negative disables it).** A node that owns a
-persistent KV page store on disk (the Lenovo's LMCache fs_native dataset) keeps it under budget between its own turns:
+persistent KV page store on disk (<node-c>'s LMCache fs_native dataset) keeps it under budget between its own turns:
 `cap = min(fleet_store_cap_gb, 0.8 × (used + free))`, prune oldest-first from 95 % of cap down to 85 %, after every N completed
 jobs (default 8) and on any health poll that finds it high. `/fleet/health` shows it under `store`. Set the root to the
 store dataset's mount (for example `/srv/kvstore`) and create the marker file `.storesteward` in it once (the steward
@@ -1683,8 +1684,8 @@ probing it — you never declare it:
 | `http://<node>:18811` (a **fleet node**) | the normal case on this fleet | `GET /fleet/health` → `served_models` | `POST /fleet/chat` with `fleet_auth_token` |
 | `http://<node>:11436` (a **llama-swap**) | only where llama-swap is reachable from this box | `GET /v1/models` | `/v1/chat/completions`, no credential |
 
-**Use the `:18811` node form on this fleet.** The Lenovo and the Aorus bind llama-swap to
-`127.0.0.1:11436` and nothing else, so the `:11436` form is unreachable from the Qube and the
+**Use the `:18811` node form on this fleet.** <node-c> and <node-a> bind llama-swap to
+`127.0.0.1:11436` and nothing else, so the `:11436` form is unreachable from <node-b> and the
 lane will never engage; binding llama-swap to the tailnet instead would be a new unauthenticated
 listener, which is why the node proxies the call behind its own bearer gate (the same door the
 vision lane uses). The node must be running a harness with the chat lane — check

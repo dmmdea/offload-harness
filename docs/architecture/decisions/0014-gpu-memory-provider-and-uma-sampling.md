@@ -45,7 +45,7 @@ break).
 - An AMD/Vulkan box fleet-serves and advertises honest numbers; the dispatcher needs no changes
   (the contract already speaks GiB and vendor/arch strings).
 - UMA totals are a *budget*, not exclusive VRAM — the dispatcher's margin logic already treats
-  free GiB as advisory, and the receipt loop (Juan's box) validates the projections.
+  free GiB as advisory, and the receipt loop (a contributor's amd-rdna3 box) validates the projections.
 - The nvidia-smi path stays the first choice everywhere it works, so every existing node's
   behavior and numbers are unchanged.
 - Off-Windows non-NVIDIA boxes still cannot fleet-serve (no generic provider there) — the gate

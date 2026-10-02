@@ -19,8 +19,8 @@ import (
 // default would hand the retry at most ~300 s.
 func TestRetryCarriesAnExplicitRemainderNeverTheAutoMarker(t *testing.T) {
 	compressPolls(t, 10*time.Millisecond, 2*time.Second)
-	nodeA, urlA := eligibleNode(t, "node-a", "wrong answer") // fails acceptance -> retryable
-	nodeB, urlB := eligibleNode(t, "node-b", "qube from B")  // passes acceptance
+	nodeA, urlA := eligibleNode(t, "node-a", "wrong answer")   // fails acceptance -> retryable
+	nodeB, urlB := eligibleNode(t, "node-b", "zorblax from B") // passes acceptance
 	var seenA, seenB atomic.Value
 	nodeA.onDispatch = func(_ string, c core.AgentContract) { seenA.Store(c) }
 	nodeB.onDispatch = func(_ string, c core.AgentContract) { seenB.Store(c) }

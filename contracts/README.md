@@ -59,8 +59,8 @@ every contract and returns warnings per subtask (`results[].acceptance_lint`, wa
   on 5/5 of the first organic contracts). Note `not_contains:<s>` counts as parrot-passable
   when `s` is absent from the goal — an echoed question trivially lacks it.
 - **UNGROUNDED** — a `contains:`/`regex:` matching nothing in the contract's own context docs
-  fails RIGHT answers (measured: `contains:OptiPlex` failed both seats on a task both did
-  right, because the word never appeared in the doc).
+  fails RIGHT answers (measured: a contains: check on a name the context docs never wrote
+  failed both seats on a task both did right).
 - **SHAPE-ONLY** — `nonempty:`/`min_items:` alone verify that fields exist, not that they are
   true (measured: "the docs directory does not exist" passed `nonempty:summary`).
 
@@ -106,7 +106,7 @@ scripts/write-door-gate.ps1                                  # this box's own se
 ```
 
 Measured 2026-09-15: 3/3 on a 4B vLLM seat (18 / 45 / 48 s) and t1 in 10 s on a 27B seat; `t4` is the shape
-measured the same day on the Aorus 9B llama.cpp seat, where a 1,024-token step budget cut the write mid-argument. The files
+measured the same day on the `<node-a>` 9B llama.cpp seat, where a 1,024-token step budget cut the write mid-argument. The files
 are pinned `eol=lf` in `.gitattributes` so a seat's LF diff applies on every checkout.
 
 ## `digest-8.json` — the parallel-sessions gate fixture (0.111.0)
@@ -157,3 +157,18 @@ is then attributable to the acceptance, not to the seats. Same inline `context`,
 local-offload delegate --contract contracts/digest-8-grounded.json --route local     # this box's seat
 local-offload delegate --contract contracts/digest-8-grounded.json --route remote --remote http://<node>:18811
 ```
+
+## Changing the inline text of a digest set
+
+The three digest sets carry this repo's ADRs inline, so an ADR edit can leave a fixture's copy stale. A change that
+only substitutes names in the inline `context` text (and in the `goal` and `context[].name` of a subtask that names a
+renamed ADR file), with every `acceptance` array byte-identical (provable with a diff of the parsed JSON), is exempt
+from the side-by-side rule above: that rule exists so a step in pass rate is attributable to the acceptance, not to the
+seats, and a name-only substitution moves neither. Any other change, a rebuilt `digest-adr-hard-8.json` that selects
+different ADRs included, still takes three K×8 passes beside the old file.
+
+Each set is sha-pinned by the sha256 of its committed (LF) bytes. A change records the old and new sha256 of every set
+it touches in the CHANGELOG entry of the release that carries it, and the old version stays reachable by commit id.
+`TestContractFixturesAreWellFormed` (root package) fails when a set loses a subtask, names a context doc that is not an
+ADR file, carries an acceptance string that does not parse or is UNGROUNDED, or has a `regex:` alternative that is
+missing from its docs or present in its goal.

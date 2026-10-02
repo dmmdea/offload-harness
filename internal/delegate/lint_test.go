@@ -59,9 +59,9 @@ func TestLintConjunctionSuppressesParrotWarn(t *testing.T) {
 }
 
 func TestLintUngrounded(t *testing.T) {
-	warns := lintContract("list the open decisions", "1. review queue 2. mirror config", "min_items:decisions:2", "contains:OptiPlex")
+	warns := lintContract("list the open decisions", "1. review queue 2. mirror config", "min_items:decisions:2", "contains:Zorblax")
 	wantWarn(t, warns, "UNGROUNDED")
-	warns = lintContract("list the open decisions", "1. review queue 2. mirror config", "regex:(?i)optiplex")
+	warns = lintContract("list the open decisions", "1. review queue 2. mirror config", "regex:(?i)zorblax")
 	wantWarn(t, warns, "UNGROUNDED")
 }
 

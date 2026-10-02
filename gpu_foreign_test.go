@@ -56,7 +56,7 @@ func TestClassifyForeignFiltersHarnessOwnedAndSmallResidents(t *testing.T) {
 	}
 }
 
-// Qube-shaped: 3 cards, index 1 is the display (nvidia-smi's own
+// Multi-card-shaped: 3 cards, index 1 is the display (nvidia-smi's own
 // display_active), the operator's ordinary desktop session sits ON it
 // (Code.exe, PAIR.exe, chrome.exe, SnippingTool.exe, msedgewebview2.exe,
 // explorer.exe, csrss.exe, opera.exe — the exact incident list, PDH-measured
@@ -107,11 +107,11 @@ func TestClassifyForeignIgnoresDisplayCardDesktopOnMultiCardBox(t *testing.T) {
 
 	got := classifyForeign(byPID, names, foreignDefaultMinMiB, displayOnly)
 	if len(got) != 1 || got[0].PID != 9416 || got[0].MiB != 1450 {
-		t.Fatalf("classifyForeign on the Qube-shaped desktop session = %+v, want exactly [Resolve pid 9416 1450 MiB]", got)
+		t.Fatalf("classifyForeign on the multi-card desktop session = %+v, want exactly [Resolve pid 9416 1450 MiB]", got)
 	}
 }
 
-// OptiPlex-shaped: ONE card, which is also the display (a single-GPU
+// Single-card-shaped: ONE card, which is also the display (a single-GPU
 // desktop). gpuprobe.DisplayCardUUIDs returns nil here BY DESIGN (a
 // display-card-only card is only ever excluded when a non-display card
 // exists to score instead) — so displayOnlyPIDs must also see nil
@@ -143,7 +143,7 @@ func TestClassifyForeignStillWarnsOnSingleCardBox(t *testing.T) {
 
 	got := classifyForeign(byPID, names, foreignDefaultMinMiB, displayOnly)
 	if len(got) != 1 || got[0].PID != 9416 || got[0].MiB != 1450 {
-		t.Fatalf("classifyForeign on the OptiPlex-shaped single-card box = %+v, want exactly [Resolve pid 9416 1450 MiB]", got)
+		t.Fatalf("classifyForeign on the single-card box = %+v, want exactly [Resolve pid 9416 1450 MiB]", got)
 	}
 }
 

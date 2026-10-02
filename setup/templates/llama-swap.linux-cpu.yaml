@@ -6,7 +6,7 @@
 #
 # Added 2026-09-20 beside linux-vulkan: the `cpu` profile existed with only a Windows
 # template, so a Linux box with no usable GPU could not be installed at all — and the
-# first dual-route node (binxarn: Vulkan iGPU AND a CPU route on the same box, operator
+# first dual-route node (<node-f>: Vulkan iGPU AND a CPU route on the same box, operator
 # direction 2026-09-20) needs this file as the second seat family.
 #
 # Serving invariants (grammar reliability — do NOT change): --jinja, no MTP,

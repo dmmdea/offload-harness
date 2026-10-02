@@ -51,7 +51,7 @@ Both existing vLLM guards iterate over whatever is declared and `continue` on a 
 
 So deleting a declaration does not turn a gate red — it removes the tier from the gate's iteration and the gate
 passes **vacuously**. The backstop at `agent_budget_test.go:90` fires only when NO tier declares a reasoning
-seat, and the two Qube tiers kept it green. ADR 0047 had even predicted both would go red and wrote that they
+seat, and the two `<node-b>` tiers kept it green. ADR 0047 had even predicted both would go red and wrote that they
 "must be re-pointed in the same change, not deleted"; they were neither re-pointed nor deleted — they were
 un-triggered, silently.
 
@@ -127,7 +127,7 @@ It was NOT paid by copying ampere-16's declaration, and the measurement is why t
 - **The tier's llama.cpp lane gets a seeded budget too.** `TestAReasoningSeatSeedsItsCompletionBudget` asks every tier
   with a reasoning vLLM seat for `config_seed.agent_max_tokens`, because that value is what a fresh install runs when the
   vLLM prerequisites are absent and the fallback (`gemma-4-26b-agent`) is the lane. blackwell-16 seeds **4,096** — stated
-  plainly: NOT a 26B measurement. It is the value the two Qube tiers seed for their 27B llama.cpp lane and the direction
+  plainly: NOT a 26B measurement. It is the value the two `<node-b>` tiers seed for their 27B llama.cpp lane and the direction
   the 9B measured (+0.62 at 4,096), applied to a thinking-heavy 26B; the alternative was the loop's silent 1,024. The
   measurement that settles it (1,024 vs 4,096, blind, on a 16 GB Blackwell card) is masterplan row D-119.
 - **Coverage now reads 4 of 16 tiers, 12 owing a seat.** The debt list shrank by one; the rule for the next

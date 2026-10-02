@@ -108,7 +108,7 @@ test("never ready => kills the child and throws", async () => {
 });
 
 test("ensureComfy: a child that dies before ever answering fails fast, not after the full poll budget", async () => {
-  // OptiPlex stall (bigger-models-2026-09-24.md "Phase 2 round 2" item 4): a
+  // <node-e> stall (bigger-models-2026-09-24.md "Phase 2 round 2" item 4): a
   // spawn that never actually produces a working ComfyUI (bad cwd/python path,
   // an early crash) used to be indistinguishable from a slow cold boot — the
   // loop just kept polling comfyUp() for the entire maxPolls budget. comfyUp

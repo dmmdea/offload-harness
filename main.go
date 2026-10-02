@@ -295,6 +295,7 @@ Usage:
                                          --against-render also re-derives each file from THIS binary's tier seeds and reports MATCH / STALE(keys) / UNSTAMPED / HAND-EDITED.
   local-offload audit-config [--config PATH] [--tier NAME] [--json] [--all]
                                          compare this node's live config.json against the seed its tier would install; lists every seed-owned key that is DIFFERENT, LIVE-ONLY (hand-wired, never written back to profiles.json) or SEED-ONLY. Exit 1 on drift.
+                                         --ram-tier defaults to THIS machine's detected RAM tier (the header names it, GB included); for another node's config (--config/--goos/--home) pass --ram-tier min|low|mid|high|none. A RAM probe that reads 0 GB is refused, never read as min.
                                          Exit 1 on a violation, a STALE config or a HAND-EDITED one; UNSTAMPED prints as a finding and does not fail. Flags come BEFORE the files.
   local-offload report [--out FILE]      READ-ONLY capability report for this machine (tier, serving, media routes) — Markdown, safe to send
   local-offload acceptance [--json]      the gate: EXERCISE every bound capability as this identity (lease writable, interpreters runnable, aliases live). Non-zero when a node must not be handed work.
@@ -338,6 +339,11 @@ func loadCfg(fs *flag.FlagSet) config.Config {
 func loadCfgWithSource(fs *flag.FlagSet) (config.Config, config.Source) {
 	cfg, src := config.LoadWithSource(fs.Lookup("config").Value.String())
 	config.WarnOnDefaults(src, os.Stderr)
+	// C-95: every verb that builds a delegator loads its config here (the MCP
+	// server behind agent_delegate/agent_run, delegate, acceptance, report), so
+	// the note that a config's own layers shadow its agent_model lives on this
+	// shared path, once per process, on stderr (MCP stdout is JSON-RPC).
+	config.WarnOnShadowedAgentModelOnce(src, cfg, os.Stderr)
 	return cfg, src
 }
 
@@ -1661,7 +1667,7 @@ var generateVideoValueFlags = map[string]bool{
 // option the offload_generate_video MCP tool takes (prompt, still, out, model,
 // negative, frames, width, height, steps, seed, reserve_vram, fast, hero, upscale):
 // --fast was the missing one, which left the distilled Wan recipe reachable only
-// through MCP (OptiPlex parity audit, 2026-09-23).
+// through MCP (<node-e> parity audit, 2026-09-23).
 func parseGenerateVideo(args []string, errorHandling flag.ErrorHandling) (generateVideoCLI, error) {
 	fs := flag.NewFlagSet("generate-video", errorHandling)
 	fs.String("config", "", "config file path")
@@ -2186,7 +2192,9 @@ func runDelegate(args []string) error {
 	if *tenant == "" {
 		*tenant = delegate.DefaultTenant()
 	}
-	cfg := loadCfg(fs)
+	// loadCfgWithSource says when this config's own layers shadow its agent_model
+	// (C-95), before any run defers on a seat the operator never wrote.
+	cfg, _ := loadCfgWithSource(fs)
 	// Same switch that gates the MCP tool's registration (roast delta 13): a
 	// box is a DELEGATOR only by explicit opt-in.
 	if !cfg.AgentDelegationEnabled {
@@ -2562,7 +2570,7 @@ func runFleetServe(args []string) error {
 	// The generic source is per-OS and per-tier (genericMemProvider): the WDDM
 	// registry+PDH provider on Windows, the amdgpu sysfs provider on Linux
 	// (vram_linux_amdgpu.go — the seam ADR 0014 left open; without it an AMD APU on
-	// Linux with a measured tier could not fleet-serve at all, binxarn 2026-09-20),
+	// Linux with a measured tier could not fleet-serve at all, <node-f> 2026-09-20),
 	// and /proc/meminfo less the operator's reserve for an SoC with no VRAM at all.
 	generic := genericMemProvider(runtime.GOOS, info.Profile, uma, cfg.UMAReserveGiB, "/")
 	prov, perr := fleetnode.ResolveProviderNamed(
@@ -2719,7 +2727,7 @@ func runFleetServe(args []string) error {
 		Backends: info.Backends(),
 		// ADR 0024: the manifest's additive-device list, advertised so
 		// a delegator can route NPU-owned work here. A hand-built node has no
-		// installed.json (the Lenovo, verified) and would never list its device;
+		// installed.json (<node-c>, verified) and would never list its device;
 		// the config's own list is the fallback then (Coral D6). The manifest
 		// wins when it lists anything, so the installer path is unchanged.
 		// A local-only device (register E-08) is dropped either way.
@@ -3033,7 +3041,7 @@ func doctorRun(cfg config.Config, routes []mediacap.Route, w io.Writer) error {
 	// them — a doctor that is red for llama-swap and silent about a broken media
 	// binding is the same blind spot in a different disguise.
 	mediaMissing := writeMediaSection(w, routes)
-	// sdcpp's Vulkan device pin (register: OptiPlex remediation 2026-09-23): a box
+	// sdcpp's Vulkan device pin (register: <node-e> remediation 2026-09-23): a box
 	// with an enabled integrated GPU enumerates it as Vulkan0, ahead of the
 	// discrete card, and the render script used to pin device 0 whenever the
 	// environment left it unset — every sdcpp render then ran on the iGPU at
@@ -3301,6 +3309,12 @@ func writeVideoFamilyBindingsSection(w io.Writer, rows []mediacap.VideoFamilyBin
 			keys = append(keys, k)
 		}
 		sort.Strings(keys)
+		// The declared license pair, as fields (CT-47; operator order 2026-10-01: no
+		// warning text). A family that declares none prints nothing, like an image
+		// family's route line.
+		if r.License != nil && r.CommercialUse != nil {
+			fmt.Fprintf(w, "    %-55s %s (commercial_use %t)\n", "license:", *r.License, *r.CommercialUse)
+		}
 		for _, k := range keys {
 			fmt.Fprintf(w, "    %-55s %s\n", k+":", r.Files[k])
 		}
@@ -4277,7 +4291,7 @@ func runEval(args []string) error {
 		p, cleanup, err := openPipeline(c)
 		if err != nil {
 			// Said, never swallowed: a pipeline that cannot open produced a
-			// silent `{}` report on the Aorus (2026-09-18, register A-102 (d)) that
+			// silent `{}` report on <node-a> (2026-09-18, register A-102 (d)) that
 			// read as "zero cases" for an hour.
 			fmt.Fprintf(os.Stderr, "eval: open pipeline: %v\n", err)
 			return nil

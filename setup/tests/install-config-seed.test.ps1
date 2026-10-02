@@ -146,7 +146,7 @@ Assert ([bool]$profiles.'ampere-8'.include_qwen35_9b)                      'ampe
 Assert ($profiles.'ampere-8'.agent_ctx_tokens -eq 65536)                   'ampere-8 agent_ctx_tokens raised to 65536 (mimo-9b-agent literal --ctx-size)'
 Assert ($profiles.'ampere-8'.ctx_size -eq 32768)                           'ampere-8 serves 32K (measured on-reference: E4B 3187 MiB, 9B 6111 MiB @32K)'
 # amd-gcn: mimo-9b-agent ADOPTED as this tier's bound agent seat (operator-approved,
-# MEASURED 2026-09-24 on binxarn): equal quality to qwen3.5-4b-agent within the test's
+# MEASURED 2026-09-24 on <node-f>): equal quality to qwen3.5-4b-agent within the test's
 # resolution at roughly HALF the wall (333 s vs 614 s). qwen3.5-4b-agent stays
 # include_qwen35_4b true and renders as the un-aliased ROLLBACK seat - the SAME
 # both-halves-move-together rule as blackwell-8/ampere-8, one weight class down.
@@ -353,7 +353,7 @@ foreach ($t in @($profiles.PSObject.Properties.Name)) {
   }
 }
 
-# --- The 26B download follows the resolved include_26b (OptiPlex parity audit, 2026-09-23) --
+# --- The 26B download follows the resolved include_26b (<node-e> parity audit, 2026-09-23) --
 # Step 5 added 'model-26b' on the family gate alone, so blackwell-8 (include_26b false,
 # moe_26b drop) downloaded 14.25 GB the rendered yaml never serves.
 Write-Host ""
@@ -412,7 +412,7 @@ Assert ($m2 -match '"accelerators":\s*\[') 'config accelerators serializes as a 
 $mjson = [ordered]@{ big_ram = $false; accelerators = @(@('hailo-8l')) } | ConvertTo-Json -Depth 6
 Assert ($mjson -match '"accelerators":\s*\[') 'manifest accelerators serializes as a JSON array (1 element, no unroll)'
 
-# --- Media-seat bindings: the missing tierseed.Resolve layer (field: OptiPlex 7060) ---
+# --- Media-seat bindings: the missing tierseed.Resolve layer (field: <node-e>) ---
 Write-Host ""
 Write-Host "== Get-MediaSeatBindings: seats bind vision_model/stt_model on the fresh path =="
 Assert ([bool](Get-Command Get-MediaSeatBindings -ErrorAction SilentlyContinue)) 'dot-source seam defines Get-MediaSeatBindings'
@@ -439,6 +439,26 @@ Assert ($null -eq (Get-MediaSeatBindings -ProfileRow $null))                'nul
 Assert ($null -eq (Get-MediaSeatBindings -ProfileRow ([pscustomobject]@{ config_seed = @{} }))) 'row without media_seats -> no bindings'
 $unknownKind = [pscustomobject]@{ media_seats = @([pscustomobject]@{ kind = 'aroma'; name = 'x' }) }
 Assert ($null -eq (Get-MediaSeatBindings -ProfileRow $unknownKind))         'unknown seat kind binds nothing (mirror of mediaseat.configKey)'
+# A-131: a registered extra (extra = true) binds nothing, whatever its kind and wherever it
+# sits in the list - mirror of mediaseat.Seat.BindingKey. Without the skip the LAST vision
+# seat wins, and an extra listed after the tier's own seat silently becomes vision_model.
+$primaryV = [pscustomobject]@{ kind = 'vision'; name = 'primary-vl' }
+$extraV   = [pscustomobject]@{ kind = 'vision'; name = 'extra-vl'; extra = $true }
+$extraV2  = [pscustomobject]@{ kind = 'vision'; name = 'extra-vl-2'; extra = $true }
+$bAfter   = Get-MediaSeatBindings -ProfileRow ([pscustomobject]@{ media_seats = @($primaryV, $extraV, $extraV2) })
+Assert ($bAfter.vision_model -eq 'primary-vl')                              'extras listed after the primary do not take vision_model'
+$bBefore  = Get-MediaSeatBindings -ProfileRow ([pscustomobject]@{ media_seats = @($extraV, $primaryV) })
+Assert ($bBefore.vision_model -eq 'primary-vl')                             'an extra listed before the primary does not take vision_model'
+Assert ($null -eq (Get-MediaSeatBindings -ProfileRow ([pscustomobject]@{ media_seats = @($extraV) }))) 'a row of only extras binds nothing (no empty object)'
+$extraStt = [pscustomobject]@{ kind = 'stt'; name = 'extra-stt'; extra = $true }
+$extraOcr = [pscustomobject]@{ kind = 'ocr'; name = 'extra-ocr'; extra = $true }
+Assert ($null -eq (Get-MediaSeatBindings -ProfileRow ([pscustomobject]@{ media_seats = @($extraStt, $extraOcr) }))) 'stt and ocr extras bind nothing either'
+$extraFalse = [pscustomobject]@{ kind = 'vision'; name = 'flag-off-vl'; extra = $false }
+Assert ((Get-MediaSeatBindings -ProfileRow ([pscustomobject]@{ media_seats = @($extraFalse) })).vision_model -eq 'flag-off-vl') 'extra = false still binds (only an explicit true skips)'
+# The shipped table: blackwell-8 seeds two extras, and neither is a binding.
+$b8extras = @($profiles.'blackwell-8'.media_seats | Where-Object { $_.PSObject.Properties['extra'] -and $_.extra })
+Assert ($b8extras.Count -eq 2)                                              'blackwell-8 ships its two vision extras'
+Assert (@($b8extras | ForEach-Object { $_.name } | Where-Object { $b8.vision_model -eq $_ -or $b8.ocr_model -eq $_ -or $b8.stt_model -eq $_ }).Count -eq 0) 'no blackwell-8 extra is named by a seat binding'
 
 # --- Host-tool seed: gimp_console_path / edit_python discovery rule -------------------
 Write-Host ""
@@ -481,6 +501,77 @@ foreach ($t in @('blackwell-3x16', 'blackwell-8', 'ampere-8', 'amd-gcn')) {
   Assert ($profiles.$t.config_seed.compose_script -eq 'render/compose-hyperframes.mjs') "$t seeds compose_script (render tree ships)"
 }
 Assert ($null -eq $profiles.cpu.config_seed -or $null -eq $profiles.cpu.config_seed.PSObject.Properties['compose_script']) 'cpu tier seeds no compose lane'
+
+# --- A-132: seed placeholders expand INSIDE objects (a named image family is an object) ---
+# Expand-SeedValue used to substitute __OFFLOAD_HOME__ / __EXE__ in strings and string arrays only,
+# so a path token inside a family block shipped as the literal token: a config that loads fine and
+# fails at render. tierseed.expand (Go) is the authoritative rule; this is its parity copy, and both
+# suites load the SAME fixture (internal/tierseed/testdata/nested-expand-parity.json).
+Write-Host ""
+Write-Host "== A-132: nested placeholder expansion (parity with tierseed.expand) =="
+function Get-SeedCanon {
+  param($V)
+  if ($null -eq $V) { return 'null' }
+  if ($V -is [string]) { return ($V | ConvertTo-Json -Compress) }
+  if ($V -is [bool]) { if ($V) { return 'true' } else { return 'false' } }
+  if ($V -is [System.Array]) { return '[' + ((@($V) | ForEach-Object { Get-SeedCanon $_ }) -join ',') + ']' }
+  if ($V -is [pscustomobject]) {
+    $parts = @($V.PSObject.Properties.Name | Sort-Object { $_ } | ForEach-Object { ('"' + $_ + '":') + (Get-SeedCanon $V.$_) })
+    return '{' + ($parts -join ',') + '}'
+  }
+  return [string]::Format([cultureinfo]::InvariantCulture, '{0}', $V)
+}
+$repoRoot = Split-Path -Parent $setupDir
+$fx = Get-Content -Raw (Join-Path (Join-Path (Join-Path (Join-Path $repoRoot 'internal') 'tierseed') 'testdata') 'nested-expand-parity.json') | ConvertFrom-Json
+$fxText = Merge-ConfigSeed -ConfigText '{"model":"x"}' -Seed $fx.seed -OffloadHome $fx.home
+$fxObj = $fxText | ConvertFrom-Json
+foreach ($name in @($fx.expected.PSObject.Properties.Name)) {
+  Assert ((Get-SeedCanon $fxObj.$name) -ceq (Get-SeedCanon $fx.expected.$name)) "parity fixture: '$name' expands exactly as tierseed.expand does"
+}
+Assert (-not ($fxText -match '__[A-Z0-9_]+__'))                              'parity fixture: no placeholder survives anywhere, objects included'
+Assert ($fxText -match '"one_element":\s*\[')                                'parity fixture: a 1-element array inside an object stays a JSON array'
+Assert ($fxText -match '"empty_array":\s*\[\s*\]')                           'parity fixture: an empty array inside an object stays a JSON array'
+Assert ($fxText -match '"empty_object":\s*\{\s*\}')                          'parity fixture: an empty object inside an object stays a JSON object'
+$fam = $fxObj.imagegen_families.'fam-a'
+Assert ($fam.commercial_use -is [bool] -and $fam.off -is [bool] -and $fam.off -eq $false) 'parity fixture: booleans inside an object stay booleans'
+Assert (($fam.imagegen_steps -is [int] -or $fam.imagegen_steps -is [long]) -and $fam.imagegen_steps -eq 8) 'parity fixture: integers inside an object stay numbers'
+Assert ($fam.deeper.again.n -eq 40 -and $fam.deeper.again.p -ceq 'D:/oh/dd')  'parity fixture: an object nested two deep expands'
+# Arrays recurse into EVERY element (Go: expand's []any case). The shapes PowerShell is liable to flatten or
+# stringify are asserted on the JSON text itself, not only on the parsed canon: a 1-element array holding an
+# object or an array must come out as that, not as its bare content.
+Assert ($fxText -match '"objects":\s*\[\s*\{\s*"p":\s*"D:/oh/o1"')                              'parity fixture: an object inside an array expands, an array of objects stays an array'
+Assert ($fxText -match '"one_object":\s*\[\s*\{\s*"p":\s*"D:/oh/solo"\s*\}\s*\]')               'parity fixture: a 1-element array holding an object stays an array of one object'
+Assert ($fxText -match '"one_nested":\s*\[\s*\[\s*"D:/oh/z"\s*\]\s*\]')                         'parity fixture: a 1-element array holding an array stays nested (not flattened)'
+Assert ($fxText -match '"matrix":\s*\[\s*\[\s*"D:/oh/a",\s*"b"\s*\],\s*\[\s*"\.exe"\s*\],\s*\[\s*\],\s*\[\s*\[\s*"D:/oh/deep"\s*\]\s*\]\s*\]') 'parity fixture: an array of arrays expands element by element, the empty inner array kept'
+Assert (($fxObj.imagegen_families.'fam-a'.objects[1].t -is [bool]) -and $fxObj.imagegen_families.'fam-a'.mixed.Count -eq 6) 'parity fixture: scalars inside arrayed objects keep their types, a mixed array keeps its length'
+# Without -OffloadHome the home token stays (pre-J2 behaviour), __EXE__ still expands - inside objects too.
+$fxNoHome = Merge-ConfigSeed -ConfigText '{"model":"x"}' -Seed $fx.seed
+Assert (($fxNoHome -match '__OFFLOAD_HOME__') -and -not ($fxNoHome -match '__EXE__')) 'nested: without -OffloadHome the home token is left, __EXE__ still expands'
+
+# The shipped consumer: blackwell-8 seeds Z-Image Turbo as a named sdcpp family with its OWN model paths.
+$b8cond = $profiles.'blackwell-8'.config_seed_ram_mid_high
+$b8text = Merge-ConfigSeed -ConfigText $tplText -Seed $b8cond -OffloadHome 'D:/oh'
+$zf = ($b8text | ConvertFrom-Json).imagegen_families.'z-image-turbo'
+Assert ($null -ne $zf)                                                       'blackwell-8 seeds the z-image-turbo family'
+Assert ($zf.imagegen_engine -ceq 'sdcpp' -and $zf.sdcpp_model_kind -ceq 'diffusion') 'z-image-turbo family binds the sdcpp engine, diffusion model kind'
+Assert ($zf.sdcpp_model -ceq 'D:/oh/models/z_image_turbo-Q8_0.gguf')         'z-image-turbo family carries its own diffusion model path under the install home'
+Assert ($zf.sdcpp_vae -ceq 'D:/oh/models/zimage_ae.safetensors')             'z-image-turbo family carries its own VAE path'
+Assert ($zf.sdcpp_llm -ceq 'D:/oh/models/Qwen3-4B-Instruct-2507-Q4_K_M.gguf') 'z-image-turbo family carries its own text-encoder path'
+Assert ($zf.license -ceq 'Apache-2.0' -and $zf.commercial_use -is [bool] -and $zf.commercial_use -eq $true) 'z-image-turbo family records its license pair (Apache-2.0, commercial)'
+Assert ((@($zf.sdcpp_extra_args) -join ' ') -ceq '--vae-tiling --offload-to-cpu --diffusion-fa --max-vram 6.5 --stream-layers') 'z-image-turbo family carries the measured 6.5 GB graph-cut arm'
+Assert (($zf.imagegen_steps -is [int] -or $zf.imagegen_steps -is [long]) -and $zf.imagegen_steps -eq 8 -and $zf.imagegen_cfg -eq 1) 'z-image-turbo family keeps its turbo recipe (8 steps, cfg 1)'
+Assert (($b8text | ConvertFrom-Json).imagegen_family -ceq 'hidream-o1-dev') 'the default image family is unchanged (z-image-turbo is a per-request opt-in)'
+# The overlay gate (Go: TestEveryShippedOverlayLoadsAndValidates), on the installer's side: no seed
+# layer of any tier may leave a placeholder in the config an install writes.
+foreach ($tid in @($profiles.PSObject.Properties.Name)) {
+  foreach ($layerName in @('config_seed', 'config_seed_ram_mid_high')) {
+    $layer = $profiles.$tid.$layerName
+    if ($null -eq $layer) { continue }
+    $layerText = Merge-ConfigSeed -ConfigText '{"model":"x"}' -Seed $layer -OffloadHome 'D:/oh'
+    $left = [regex]::Matches($layerText, '__[A-Z0-9]+(?:_[A-Z0-9]+)*__') | ForEach-Object { $_.Value } | Sort-Object -Unique
+    Assert (@($left).Count -eq 0) "overlay gate: $tid $layerName leaves no placeholder in the installed config ($(@($left) -join ','))"
+  }
+}
 
 if ($failures -eq 0) { Write-Host 'ALL PASS' -ForegroundColor Green; exit 0 }
 Write-Host "FAILURES: $failures" -ForegroundColor Red; exit 1

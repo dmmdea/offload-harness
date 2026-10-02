@@ -21,7 +21,7 @@ model id (the tier's VLM seat), so capabilities a small NPU serves natively and 
 detection, identity embeddings, object detection, depth, image embeddings — either ran as
 prompt-shaped VLM approximations or were not offered at all.
 
-The concrete device forcing the question: a Hailo-8L M.2 NPU on an OptiPlex 7060, with a
+The concrete device forcing the question: a Hailo-8L M.2 NPU on `<node-e>`, with a
 working HTTP inference sidecar in its own repository (Hailo-8L-Analysis-Pipelines).
 
 ## Decision

@@ -7,7 +7,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/config"
 )
 
-// flagshipLayers is the Qube as the operator ordered it on 2026-09-19: "the 3 card tier as the agent
+// flagshipLayers is <node-b> as the operator ordered it on 2026-09-19: "the 3 card tier as the agent
 // seat now and the 2 card tier to be the opt in one". The triple layer carries the agent seat and is
 // NOT opt-in; the pair keeps its seats but is entered by name only.
 func flagshipLayers() []config.LayerSpec {

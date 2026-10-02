@@ -23,15 +23,18 @@
 # (SEAT_STOP_ATTACHED=1: its own stdout already is that log); the stop task and cmdStop have no stdout to speak of, so it
 # appends to the log itself, and a worker named as stuck or an INCOMPLETE stop is not lost.
 set -u
+# The defaults below derive from the directory this script sits in (the logical path: a symlinked copy keeps the
+# directory it is linked from).
+HERE="$(cd "$(dirname "$0")" && pwd)"
 # An env file that was NAMED (the argument, or SEAT_ENV) and is not there is a mistake, not "no env file": falling back to
 # the default seat's ports and unit would stop whatever holds them. Only the default path may be absent (a box that
 # configures the seat through its environment).
-CFG="${1:-${SEAT_ENV:-/root/g7/seat.env}}"
+CFG="${1:-${SEAT_ENV:-$HERE/seat.env}}"
 if [ ! -f "$CFG" ] && { [ -n "${1:-}" ] || [ -n "${SEAT_ENV:-}" ]; }; then
   echo "seat_stop: env file $CFG not found - not guessing this seat's ports and unit; nothing was stopped"; exit 2
 fi
 [ -f "$CFG" ] && . "$CFG"
-LOG="${SEAT_LOG:-/root/g7/seat.log}"
+LOG="${SEAT_LOG:-$HERE/seat.log}"
 if [ -z "${SEAT_STOP_ATTACHED:-}" ] && [ -d "$(dirname "$LOG")" ]; then exec > >(tee -a "$LOG") 2>&1; fi
 PORT="${SEAT_PORT:-18797}"
 MP_UNIT="${SEAT_MP_UNIT:-lmcache-mp}"

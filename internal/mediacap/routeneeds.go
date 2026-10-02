@@ -16,7 +16,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/gpugen"
 )
 
-// What a route needs beyond its script (OptiPlex parity audit, 2026-09-23).
+// What a route needs beyond its script (<node-e> parity audit, 2026-09-23).
 //
 // generate_video, animate_character and both generate_audio kinds were CONFIGURED as
 // soon as their render script existed. On the 8 GB reference box that meant three green
@@ -249,6 +249,11 @@ type VideoFamilyBindingRow struct {
 	Family  string            `json:"family"`
 	Default bool              `json:"default"`
 	Files   map[string]string `json:"files"`
+	// License and CommercialUse are the family's declared pair (videogen_families[name],
+	// CT-47), null when it declares none: a reader treats that as UNKNOWN, never as
+	// commercial-safe — the same contract FamilyRow keeps for the image families.
+	License       *string `json:"license"`
+	CommercialUse *bool   `json:"commercial_use"`
 }
 
 // VideoFamilyBindingRows lists the resolved per-family video bindings (label ->
@@ -266,7 +271,12 @@ func VideoFamilyBindingRows(cfg config.Config) []VideoFamilyBindingRow {
 		for _, f := range videoFamilyFiles(name, fb) {
 			files[f.label] = f.name
 		}
-		out = append(out, VideoFamilyBindingRow{Family: name, Default: name == defaultFamily, Files: files})
+		row := VideoFamilyBindingRow{Family: name, Default: name == defaultFamily, Files: files, CommercialUse: fb.CommercialUse}
+		if fb.License != "" {
+			lic := fb.License
+			row.License = &lic
+		}
+		out = append(out, row)
 	}
 	return out
 }

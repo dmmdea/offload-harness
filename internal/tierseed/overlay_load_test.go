@@ -44,8 +44,8 @@ var leftoverToken = regexp.MustCompile(`__[A-Z0-9]+(?:_[A-Z0-9]+)*__`)
 // WITH its RAM overlay - through config.Load, the door every harness process opens. Nothing else in
 // the tree does: TestEveryShippedSeedIsValid stops at "every key is a Config field", and the closure
 // gates resolve the BASE seed only, so a family overlay with a typo'd key, a missing license pair, a
-// half-bound recipe or a placeholder that never expanded (expand() substitutes tokens in strings and
-// string arrays, never inside an object) could ship and die only on the first box that installed it.
+// half-bound recipe or a placeholder that never expanded (expand() once substituted tokens in strings and
+// string arrays only, never inside an object; A-132 made it recurse) could ship and die only on the first box that installed it.
 func TestEveryShippedOverlayLoadsAndValidates(t *testing.T) {
 	// A pooled tier warns when the launch environment lacks --disable-dynamic-vram; model a launch that
 	// carries it, so the gate judges the seed and not the host it runs on (a CI runner sets nothing).

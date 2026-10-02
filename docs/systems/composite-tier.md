@@ -170,7 +170,7 @@ The installer detects prerequisites and never builds them, and it does not rende
    5, and `single` on a box that also declares a pair keeps deferring (council R2: its agent
    seat is the one-card identity on the pair's own cards, never an agent placement); every
    other named layer resolves here — this is how a box's SECOND layer, whose agent
-   seat is not the planner default (the ampere-16 Lenovo's `fast` layer = the 35B digest
+   seat is not the planner default (<node-c>, ampere-16: its `fast` layer = the 35B digest
    seat beside its 27B GSQ on the one card), is reachable at all. A seat another layer holds
    loaded on the same card is named as the displacement (recorded, never acted on; llama-swap
    serialises the swap behind the loaded seat's in-flight work). The delegator decides FOR the

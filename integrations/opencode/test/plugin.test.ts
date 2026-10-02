@@ -150,7 +150,7 @@ describe("hooks", () => {
     await h["tool.execute.after"]!({ tool: "read", sessionID: "s5", callID: "r13", args: {} }, again);
     expect(again.output).toBe("x");
     // delegate use silences future tiers
-    const d = { title: "", output: '{"summary":{"infrastructure":0},"results":[{"placement":"local"},{"placement":"route=spread → lenovo (slot 2 of 2)"}]}', metadata: {} };
+    const d = { title: "", output: '{"summary":{"infrastructure":0},"results":[{"placement":"local"},{"placement":"route=spread → node-c (slot 2 of 2)"}]}', metadata: {} };
     await h["tool.execute.after"]!({ tool: "harness_agent_delegate", sessionID: "s5", callID: "d1", args: { route: "spread", subtasks: [{}, {}] } }, d);
     expect(d.output).toContain("pair landed");
     for (let i = 0; i < 40; i++) {

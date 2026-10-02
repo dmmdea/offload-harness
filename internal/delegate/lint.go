@@ -14,7 +14,7 @@
 //     because nothing failed). Measured: 5/5 of the first organic contracts.
 //   - ungrounded     — a contains:/regex: whose pattern appears nowhere in
 //     the contract's own context docs cannot distinguish a wrong answer from
-//     a defective contract. Measured: contains:OptiPlex failed BOTH seats on
+//     a defective contract. Measured: a contains: check on a name the context docs never wrote failed BOTH seats on
 //     a task both did right.
 //
 // WARN-ONLY by decision: the lint never blocks, never changes placement or
@@ -48,8 +48,8 @@ func LintAcceptance(c core.AgentContract) []string {
 	docsText := docs.String()
 
 	var warns []string
-	content := 0          // parsed content-anchored checks (contains/not_contains/regex)
-	parrotPassable := 0   // of those, how many the goal text alone satisfies
+	content := 0        // parsed content-anchored checks (contains/not_contains/regex)
+	parrotPassable := 0 // of those, how many the goal text alone satisfies
 	for _, raw := range c.Acceptance {
 		chk, err := core.ParseAcceptanceCheck(raw)
 		if err != nil {
@@ -60,7 +60,7 @@ func LintAcceptance(c core.AgentContract) []string {
 			content++
 			if !strings.Contains(docsText, chk.Arg) {
 				warns = append(warns, fmt.Sprintf(
-					"acceptance %q is UNGROUNDED: the substring appears nowhere in this contract's context docs, so it cannot distinguish a wrong answer from a defective contract (measured: contains:OptiPlex failed both seats on a task both did right) — anchor it to text that actually appears in the docs", raw))
+					"acceptance %q is UNGROUNDED: the substring appears nowhere in this contract's context docs, so it cannot distinguish a wrong answer from a defective contract (measured: a contains: check on a name the context docs never wrote failed both seats on a task both did right) — anchor it to text that actually appears in the docs", raw))
 			}
 			if strings.Contains(c.Goal, chk.Arg) {
 				parrotPassable++

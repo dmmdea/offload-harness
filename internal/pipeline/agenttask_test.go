@@ -96,7 +96,7 @@ type agentFake struct {
 	// repackDelay stalls every grammar completion — used to expire the
 	// contract's wall deadline inside the re-pack.
 	repackDelay time.Duration
-	// repackThinkingSeat models a THINKING agent seat (Qwen3-class, e.g. Qube's
+	// repackThinkingSeat models a THINKING agent seat (Qwen3-class, e.g. <node-b>'s
 	// own qwen3.8-27b) as measured live: with a grammar active and thinking
 	// left ON, the constrained output lands in `reasoning_content` and
 	// `content` comes back EMPTY. Sending
@@ -1299,7 +1299,7 @@ func TestRepackStructuredDisablesThinking(t *testing.T) {
 // A thinking template emits the grammar-constrained output into
 // `reasoning_content` and leaves `content` empty, so the re-pack failed both
 // attempts and the run deferred as an abstention — throwing away a finished,
-// correct answer. Qube's own agent seat is a thinking model, so this broke the
+// correct answer. <node-b>'s own agent seat is a thinking model, so this broke the
 // DEFAULT idle-local path. The seat below reproduces exactly that: empty
 // content for a grammar completion with thinking left on, valid JSON when the
 // flag is present.
@@ -1332,7 +1332,7 @@ func TestRunAgentTaskThinkingSeatRepackSucceeds(t *testing.T) {
 	}
 }
 
-// TestRunAgentTaskRepackFallsBackToChatWhenGrammarRouteMissing is the Lenovo
+// TestRunAgentTaskRepackFallsBackToChatWhenGrammarRouteMissing is the <node-c>
 // FreeToken shape found live 2026-08-27: an OpenAI-only engine serves no
 // native completion route, so both grammar re-pack attempts read an HTML 404
 // ("invalid character '<'") — and before the fallback, a seat that had just

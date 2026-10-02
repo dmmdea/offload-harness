@@ -11,15 +11,15 @@ import (
 	"github.com/dmmdea/offload-harness/internal/gpulease"
 )
 
-// Register D-94, live 2026-09-14 18:3x. A contract deferred on the Lenovo 4B
-// (output_truncated) and the cross-seat retry was placed on the LOCAL Qube seat
+// Register D-94, live 2026-09-14 18:3x. A contract deferred on the <node-c> 4B
+// (output_truncated) and the cross-seat retry was placed on the LOCAL <node-b> seat
 // whose lease was EXCLUSIVE — held by a measurement that had drained the cards
 // for itself. The retry dialled that seat anyway, sat at the model-affinity
 // cordon for the full `gpu-lease timeout after 5m0s (bound 5m0s)`, and then
-// deferred as capacity, while the Aorus node was eligible and idle the whole
+// deferred as capacity, while <node-a> was eligible and idle the whole
 // time. Retry note as recorded:
 //
-//	retry on Qube also deferred (capacity): gpu busy: gpu-lease timeout after 5m0s (bound 5m0s)
+//	retry on <node-b> also deferred (capacity): gpu busy: gpu-lease timeout after 5m0s (bound 5m0s)
 //
 // Three things were wrong and only the third is about waiting: the retry chose a
 // seat that could not admit it, it chose that seat over an idle remote, and it
@@ -83,8 +83,8 @@ func TestFencedNamesTheHoldsThatRefuseANewRun(t *testing.T) {
 // assertion about a note.
 func TestRetryPrefersAnIdleRemoteOverAFencedLocalSeat(t *testing.T) {
 	compressPolls(t, 10*time.Millisecond, 2*time.Second)
-	nodeA, urlA := eligibleNode(t, "node-a", "wrong answer") // fails acceptance -> retryable
-	nodeB, urlB := eligibleNode(t, "node-b", "qube from B")  // idle, passes acceptance
+	nodeA, urlA := eligibleNode(t, "node-a", "wrong answer")   // fails acceptance -> retryable
+	nodeB, urlB := eligibleNode(t, "node-b", "zorblax from B") // idle, passes acceptance
 	cfg := testCfg(t)
 	cfg.GPULockPath = holdFence(t, gpulease.Options{Reason: "5070 bench", Exclusive: true})
 

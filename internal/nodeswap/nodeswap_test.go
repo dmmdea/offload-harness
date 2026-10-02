@@ -485,7 +485,7 @@ func TestRun_InstallNewFailureRestartsOldBinary(t *testing.T) {
 // itself: when RenameFile(staged, target) fails with a cross-device error
 // (Windows: a different drive letter; Linux: EXDEV), Run copies the staged
 // binary into place instead, re-verifies the copy's sha256 before trusting
-// it, and installs from there — the 2026-09-24 Aorus rollout's "staged at
+// it, and installs from there — the 2026-09-24 <node-a> rollout's "staged at
 // C:\tmp\ against a D:\ target" case, which used to roll back cleanly but
 // never actually swap anything.
 func TestRun_CrossDeviceInstallCopiesVerifiesAndInstalls(t *testing.T) {
@@ -822,7 +822,7 @@ func TestRun_StandaloneNodeSkipsRestartAndVerifiesByHashAlone(t *testing.T) {
 }
 
 // TestRun_StandaloneNodeWaitsForGPULeaseToClear: gap 6b (d5207011 deploy
-// record, OptiPlex) — a standalone node has no fleet-serve queue depth to
+// record, <node-e>) — a standalone node has no fleet-serve queue depth to
 // read, but it CAN still be mid-render under a caller's own `gpu reserve`;
 // this used to be the operator's own manual "gpu status" check before the
 // swap. Same shape as TestRun_WaitsForIdleBeforeSwapping, GPU-lease flavored.
@@ -896,7 +896,7 @@ func TestRun_StandaloneNodeSkipsGPUWaitWhenDepsHasNone(t *testing.T) {
 func TestBackupPathFor(t *testing.T) {
 	cases := []struct{ suffix, want string }{
 		{"2026-09-24-pre-d5207011", "target.exe.bak-2026-09-24-pre-d5207011"},
-		// The d5207011 Qube deploy record's exact mistake: a suffix that ALREADY
+		// The d5207011 <node-b> deploy record's exact mistake: a suffix that ALREADY
 		// carries the tool's own "bak-" prefix must not double it.
 		{"bak-2026-09-24-pre-d5207011", "target.exe.bak-2026-09-24-pre-d5207011"},
 		{"BAK-2026-09-24", "target.exe.bak-2026-09-24"},

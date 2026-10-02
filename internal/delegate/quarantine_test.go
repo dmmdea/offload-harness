@@ -10,29 +10,29 @@ func TestQuarantineFlipsOnTheSecondStrikeAndExpires(t *testing.T) {
 	q := NewQuarantine(10 * time.Minute)
 	q.now = func() time.Time { return clock }
 
-	if q.Strike("http://lenovo:18811") {
+	if q.Strike("http://node-c:18811") {
 		t.Fatal("one strike must not quarantine")
 	}
-	if q.Blocked("http://lenovo:18811") {
+	if q.Blocked("http://node-c:18811") {
 		t.Fatal("not blocked after one strike")
 	}
-	if !q.Strike("http://lenovo:18811") {
+	if !q.Strike("http://node-c:18811") {
 		t.Fatal("the second strike must flip the node into quarantine")
 	}
-	if !q.Blocked("http://lenovo:18811") {
+	if !q.Blocked("http://node-c:18811") {
 		t.Fatal("blocked after two strikes")
 	}
-	if q.Strike("http://lenovo:18811") {
+	if q.Strike("http://node-c:18811") {
 		t.Fatal("a strike while blocked must not report a second flip")
 	}
-	if q.Blocked("http://aorus:18811") {
+	if q.Blocked("http://node-a:18811") {
 		t.Fatal("other nodes are unaffected")
 	}
 	clock = clock.Add(11 * time.Minute)
-	if q.Blocked("http://lenovo:18811") {
+	if q.Blocked("http://node-c:18811") {
 		t.Fatal("the block must expire after TTL")
 	}
-	if !q.Until("http://lenovo:18811").IsZero() {
+	if !q.Until("http://node-c:18811").IsZero() {
 		t.Fatal("Until must be zero once expired")
 	}
 }

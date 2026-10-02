@@ -110,7 +110,7 @@ func NewRecordlessOffload(cfg config.Config, model string, timeout time.Duration
 // reference box they cannot be resident together (the cascade pin shares the
 // planner's card; the interactive set is mutually exclusive by design) — so
 // loading the workhorse EVICTS the planner mid-run, and the next planner step
-// loads it back. Measured 2026-09-10 on the Qube 27B: three offload_triage
+// loads it back. Measured 2026-09-10 on the <node-b> 27B: three offload_triage
 // calls cost four 3-minute reloads and the entire 900 s wall. The planner
 // seat is already loaded and idle while the tool runs, so it is the free
 // model: onSeat reports that choice, and the caller renders those tier calls

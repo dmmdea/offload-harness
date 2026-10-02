@@ -9,12 +9,12 @@ Status: ACCEPTED (Layer 1 shipped 0.131.3, 2026-09-20; Layer 2 node side shipped
 
 ## Context
 
-Every llama-server in the fleet (b9934 on binxarn, b10964 on the Qube) carries an automatic
+Every llama-server in the fleet (b9934 on `<node-f>`, b10964 on `<node-b>`) carries an automatic
 host-RAM prompt cache: `--cache-ram N` (MiB, default 8192, `0` off). When a slot's KV is evicted
 by a new request the server parks it in RAM and restores it the moment a later request shares
 the prefix. The agent loop's steps share a growing prefix and re-delegated context docs share
 their whole prefix, so the harness already benefited — at one fixed figure on every box, from a
-4 GB Vivobook to a 64 GB Lenovo, and with nothing surviving the 5-minute idle unload.
+4 GB laptop to a 64 GB node (high RAM tier), and with nothing surviving the 5-minute idle unload.
 
 The same server exposes `--slot-save-path` plus `POST /slots/{id}?action=save|restore`, an
 explicit save of one slot's KV to a file and back. The harness never called it. LMCache does
@@ -29,7 +29,7 @@ seat, resolved from a top-level `profiles.json` map `cache_ram_mib_by_ram_tier` 
 than llama-server's own 8192 MiB default unless its RAM cannot carry it.** The first cut broke that
 rule — 2048 on the 32 GB nodes, 6144 on the 64 GB one — which would have been a silent cut below what
 those boxes had been running on, in the name of "sizing per tier". Only the min tier (a 4 GB
-Vivobook, where 8 GiB was never reachable) goes below the default. The figures are still unmeasured
+laptop, where 8 GiB was never reachable) goes below the default. The figures are still unmeasured
 against a real contract stream; that is Task 3a.
 An unresolvable tier renders the server default (8192) — the renderer never emits `0`, which
 would disable the cache. vLLM proxy entries never carry the flag.
@@ -50,12 +50,12 @@ best-effort with a 2 s timeout; a contract never blocks on the cache.
 - The gains are measured, not assumed: the plan's Task 3 runs the grounded digest fixtures
   twice per node and revises the map from the numbers before the figures are called tuned.
 - Files under `kvslots/` are portable between nodes serving the identical seat shape; pointing
-  the Qube pair and the Lenovo at the existing kvcache share is a later task, after the
+  the `<node-b>` pair and `<node-c>` at the existing kvcache share is a later task, after the
   single-node gain is on the record.
 - `setup/render.tests.ps1` asserts the flag; changing the map is a profiles.json change and goes
   matrix-first like every tier change.
 
-## Layer 1 is MEASURED, and the size is worth 18x (binxarn, 2026-09-21)
+## Layer 1 is MEASURED, and the size is worth 18x (`<node-f>`, 2026-09-21)
 
 The first cut of the tier map was sized by intuition and this measurement is why that was
 dangerous. The cache holds slot states EVICTED by a newer request, so it does nothing for one
@@ -82,7 +82,7 @@ same sweep at 16384 and 24576 on the 62 GB and 128 GB boxes (plan Task 3a).
 
 The endpoints are built, tested and correct against the real API. The capability underneath
 them is INERT on the build the fleet runs, and this section is the measurement that says so,
-taken on binxarn (llama.cpp b9934, Qwen3.5-4B UD-Q4_K_XL, 32k window, Vulkan) 2026-09-21.
+taken on `<node-f>` (llama.cpp b9934, Qwen3.5-4B UD-Q4_K_XL, 32k window, Vulkan) 2026-09-21.
 
 The call shape is right — measured, not assumed:
 
@@ -121,7 +121,7 @@ An adversarial review of the lane put two defects in the RENDERING path that hav
 do with whether a restore works, and both were then confirmed on the hardware:
 
 - `--slot-save-path` pointing at a directory that does not exist makes llama-server **refuse to
-  start**: `error while handling argument "--slot-save-path": not a directory: …` (binxarn,
+  start**: `error while handling argument "--slot-save-path": not a directory: …` (`<node-f>`,
   b9934). A node that renders it without that directory loses EVERY chat and agent seat, not
   just this lane. And the two ends are not tied: the node's slot directory comes from
   `OFFLOAD_HOME` at runtime, the flag from the render's `--home`, and the Windows fleet-node
@@ -149,7 +149,7 @@ point, the render creating the directory it names and the parallel seats being e
   restore-before-first-turn and the ledger fields on top of a capability measured at zero
   would be work that cannot pay, and a `kvslot_restore: hit` on a ledger row would be a lie.
 - The unblock condition is explicit: a llama.cpp build carrying PR #26004 (or equivalent),
-  re-run the table above on binxarn, and only a row where the restore arm beats the baseline
+  re-run the table above on `<node-f>`, and only a row where the restore arm beats the baseline
   reopens the delegator work.
 - Layer 1 is unaffected and is where the measured win lives today.
 

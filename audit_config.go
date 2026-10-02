@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"reflect"
+	"runtime"
 	"sort"
 	"strings"
 
@@ -19,8 +20,8 @@ import (
 // audit-config is the config.json half of the drift check that `audit-yaml --against-render`
 // does for the serving YAML. It exists because the YAML half was never the problem.
 //
-// Measured winners were wired BY HAND into a node's config.json — binxarn's qwen3.5-4b agent seat
-// and its lane keys, the Lenovo's layers and 35B digest seat, the Qube's image-edit / inpaint /
+// Measured winners were wired BY HAND into a node's config.json — <node-f>'s qwen3.5-4b agent seat
+// and its lane keys, <node-c>'s layers and 35B digest seat, <node-b>'s image-edit / inpaint /
 // animate routes — and never written back to profiles.json. Nothing compared the two, so the node
 // kept working, the seed kept the loser, and every fresh install (and every regeneration of the
 // tier matrix, which reads the seed) silently erased the win. The 2026-09-21 wiring-debt audit
@@ -39,7 +40,7 @@ const (
 	driftLiveOnly  configDriftClass = "LIVE-ONLY" // set by hand on the node; the seed does not carry it
 	driftSeedOnly  configDriftClass = "SEED-ONLY" // the seed writes it; the node does not have it
 	// UNSEEDED is a live binding that NO tier seeds at all. It is the blind spot of a seed-owned
-	// comparison: the Qube's image-edit, inpaint and animate routes were wired by hand, measured, and
+	// comparison: <node-b>'s image-edit, inpaint and animate routes were wired by hand, measured, and
 	// carried by no tier — so they were invisible to a check that only reads what seeds can write.
 	driftUnseeded configDriftClass = "UNSEEDED"
 )
@@ -90,7 +91,7 @@ func classifyConfigDrift(seed, live map[string]any, owned map[string]bool, isBin
 		switch {
 		case inSeed && inLive:
 			class := driftMatch
-			if !sameJSON(sv, lv) {
+			if !sameConfigValue(k, sv, lv) {
 				class = driftDifferent
 			}
 			out = append(out, configDrift{Key: k, Class: class, Live: lv, Seed: sv})
@@ -128,6 +129,53 @@ func sameJSON(a, b any) bool {
 		return false
 	}
 	return reflect.DeepEqual(na, nb)
+}
+
+// sameConfigValue compares one key's seed value with its live value. Every key is compared whole, as sameJSON does,
+// except kv_cache_server: the key_prefix of each of its bindings is the node's own (a seeded node keeps the prefix it was
+// seeded with, and install does not rewrite config.json), so a prefix-only difference is not drift. The exception is narrow
+// on purpose: it applies only when BOTH sides are lists of binding objects. A legacy single object (still accepted by the
+// loader), a string, null, a list holding anything that is not an object, or a list against a non-list is compared whole,
+// exactly as before, so a difference of shape still reads DIFFERENT.
+func sameConfigValue(key string, seedVal, liveVal any) bool {
+	if key != "kv_cache_server" {
+		return sameJSON(seedVal, liveVal)
+	}
+	ns, errS := normJSON(seedVal)
+	nl, errL := normJSON(liveVal)
+	if errS != nil || errL != nil {
+		return false
+	}
+	if bs, ok := withoutKeyPrefix(ns); ok {
+		if bl, ok := withoutKeyPrefix(nl); ok {
+			return reflect.DeepEqual(bs, bl)
+		}
+	}
+	return reflect.DeepEqual(ns, nl)
+}
+
+// withoutKeyPrefix returns a copy of v with key_prefix removed from every element, when v is a list whose every element
+// is an object; otherwise it reports false. The value it is given is never modified.
+func withoutKeyPrefix(v any) ([]any, bool) {
+	list, ok := v.([]any)
+	if !ok {
+		return nil, false
+	}
+	out := make([]any, len(list))
+	for i, el := range list {
+		m, ok := el.(map[string]any)
+		if !ok {
+			return nil, false
+		}
+		cp := make(map[string]any, len(m))
+		for k, val := range m {
+			if k != "key_prefix" {
+				cp[k] = val
+			}
+		}
+		out[i] = cp
+	}
+	return out, true
 }
 
 func normJSON(v any) (any, error) {
@@ -204,6 +252,90 @@ func withLiveAccelerators(seed, live map[string]any, doc tierseed.Doc, home, goo
 
 var errConfigDrift = errors.New("config drift")
 
+// auditDetectRAMTier is this machine's RAM tier (min|low|mid|high), the same value `detect` stamps.
+// It is a variable so a test can speak for a box of another size.
+var auditDetectRAMTier = func() (tier string, ramGb int, err error) {
+	f := auditDetectFacts()
+	// A probe that fails reads 0 GB, which classifies as tier min: the base seed, chosen without a word.
+	// That is a guess about the audited node, so refuse it and ask for the tier by name.
+	if f.RAMGb <= 0 {
+		return "", 0, errors.New("audit-config: the RAM probe read 0 GB on this machine, so there is no RAM tier to detect (0 GB would pass for tier min); pass --ram-tier min, low, mid, high or none explicitly")
+	}
+	return hwdetect.Classify(f).RAMTier, f.RAMGb, nil
+}
+
+// auditDetectFacts is the hardware probe behind auditDetectRAMTier, a variable so a test can make it fail.
+var auditDetectFacts = hwdetect.Detect
+
+// auditRAMResolution is which RAM tier an audit compared against and where that came from.
+type auditRAMResolution struct {
+	Tier       string // min|low|mid|high, or "none" when the overlay was switched off
+	Source     string // "detected" or "--ram-tier"
+	Overlay    string // the RAM tier handed to tierseed.Options: "mid"|"high", or "" for the base seed alone
+	DetectedGb int    // the RAM this machine's probe read, in GB; 0 when the tier was named, not detected
+}
+
+// resolveAuditRAMTier turns --ram-tier into the overlay the audit compares. Empty and "auto" mean the
+// tier this box detects: the installer applies the RAM overlay on a mid/high box, so an audit of the
+// BASE seed alone calls every overlay-carried key drift (23 of 38 rows on an 8 GB card with 64 GB RAM).
+// "none" keeps the base-seed comparison selectable. Only mid and high have an overlay (tierseed).
+func resolveAuditRAMTier(flag string, detect func() (string, int, error)) (auditRAMResolution, error) {
+	v := strings.ToLower(strings.TrimSpace(flag))
+	source, detectedGb := "--ram-tier", 0
+	if v == "" || v == "auto" {
+		tier, gb, err := detect()
+		if err != nil {
+			return auditRAMResolution{}, err
+		}
+		v, source, detectedGb = strings.ToLower(strings.TrimSpace(tier)), "detected", gb
+	}
+	switch v {
+	case "mid", "high":
+		return auditRAMResolution{Tier: v, Source: source, Overlay: v, DetectedGb: detectedGb}, nil
+	case "min", "low", "none":
+		return auditRAMResolution{Tier: v, Source: source, DetectedGb: detectedGb}, nil
+	}
+	return auditRAMResolution{}, fmt.Errorf("audit-config: --ram-tier must be auto, none, min, low, mid or high, got %q (%s)", flag, source)
+}
+
+// ramTierIsThisMachines is the warning an audit owes when the tier it compared came from THIS machine's
+// RAM probe but the config, platform or install root it audits can belong to another node. "" when there
+// is nothing to say: the tier was named, or the audit points at this machine's own config and platform.
+func ramTierIsThisMachines(r auditRAMResolution, cfgFlag, goos, home string) string {
+	if r.Source != "detected" {
+		return ""
+	}
+	if cfgFlag == "" && home == "" && (goos == "" || goos == runtime.GOOS) {
+		return ""
+	}
+	return fmt.Sprintf("audit-config: warning: the RAM overlay compared (ram-tier=%s, %d GB) is this machine's RAM tier, not necessarily the audited node's; pass --ram-tier min, low, mid, high or none to compare another node's config",
+		r.Tier, r.DetectedGb)
+}
+
+// describe says in words which seed the audit compared: the overlay's own name, or the base alone.
+func (r auditRAMResolution) describe() string {
+	if r.Overlay != "" {
+		return "base seed + config_seed_ram_mid_high overlay"
+	}
+	return "base seed only, no RAM overlay"
+}
+
+// sourceLabel is the source with the RAM the probe read when the tier was detected.
+func (r auditRAMResolution) sourceLabel() string {
+	if r.Source == "detected" {
+		return fmt.Sprintf("detected, %d GB", r.DetectedGb)
+	}
+	return r.Source
+}
+
+// ramOverlayName is the JSON spelling of the overlay compared: its config key, or "none".
+func ramOverlayName(r auditRAMResolution) string {
+	if r.Overlay != "" {
+		return "config_seed_ram_mid_high"
+	}
+	return "none"
+}
+
 func runAuditConfig(args []string) error {
 	fs := flag.NewFlagSet("audit-config", flag.ExitOnError)
 	cfgFlag := fs.String("config", "", "config file to audit (default: the harness's own resolution — $LOCAL_OFFLOAD_CONFIG, ./config.json, ~/.local-offload/config.json)")
@@ -216,7 +348,7 @@ func runAuditConfig(args []string) error {
 	// against a seed the installer would never have written - e.g. a vLLM box against its FALLBACK
 	// agent - and reports drift that is its own artifact.
 	goos := fs.String("goos", "", "target OS whose seed to compare against (default: this platform)")
-	ramTier := fs.String("ram-tier", "", "RAM tier overlay the installer would apply (mid | high; default: none)")
+	ramTier := fs.String("ram-tier", "", "RAM tier whose overlay to compare against: auto (THIS machine's detected RAM tier, as install applies; the default; pass a tier for another node's config) | none (the base seed alone) | min | low | mid | high")
 	vllmSeat := fs.String("vllm-seat-active", "auto", "whether this node serves the tier's vLLM agent seat: auto (detect locally, as install does) | true | false")
 	vllmVenv := fs.String("vllm-venv", "", "hand-built vLLM virtualenv for auto detection (default: <home>/vllm-env)")
 	hfHome := fs.String("hf-home", "", "HF cache root for auto detection (default: $HF_HOME, else <home>/hf)")
@@ -282,8 +414,15 @@ func runAuditConfig(args []string) error {
 	default:
 		return fmt.Errorf("audit-config: --vllm-seat-active must be auto, true or false, got %q", *vllmSeat)
 	}
+	ram, err := resolveAuditRAMTier(*ramTier, auditDetectRAMTier)
+	if err != nil {
+		return err
+	}
+	if w := ramTierIsThisMachines(ram, *cfgFlag, *goos, *home); w != "" {
+		fmt.Fprintln(os.Stderr, w)
+	}
 	seed, err := tierseed.Resolve(p, tier, tierseed.Options{
-		Home: installHome, GOOS: *goos, RAMTier: *ramTier, VLLMSeatActive: vllmActive, ExtraVLLMSeatsActive: extraActive,
+		Home: installHome, GOOS: *goos, RAMTier: ram.Overlay, VLLMSeatActive: vllmActive, ExtraVLLMSeatsActive: extraActive,
 	})
 	if err != nil {
 		return fmt.Errorf("audit-config: resolve %s: %w", tier, err)
@@ -302,15 +441,17 @@ func runAuditConfig(args []string) error {
 
 	if *asJSON {
 		b, err := json.MarshalIndent(map[string]any{
-			"config": path, "tier": tier, "tier_source": tierSource, "drifted": drifted, "findings": findings,
+			"config": path, "tier": tier, "tier_source": tierSource,
+			"ram_tier": ram.Tier, "ram_tier_source": ram.Source, "ram_overlay": ramOverlayName(ram),
+			"drifted": drifted, "findings": findings,
 		}, "", "  ")
 		if err != nil {
 			return err
 		}
 		fmt.Println(string(b))
 	} else {
-		fmt.Printf("audit-config: %s against tier %s (from %s; goos=%q ram-tier=%q vllm-seat-active=%v)\n",
-			path, tier, tierSource, *goos, *ramTier, vllmActive)
+		fmt.Printf("audit-config: %s against tier %s (from %s; goos=%q ram-tier=%s (%s; %s) vllm-seat-active=%v)\n",
+			path, tier, tierSource, *goos, ram.Tier, ram.sourceLabel(), ram.describe(), vllmActive)
 		for _, f := range findings {
 			if f.Class == driftMatch && !*showMatch {
 				continue

@@ -13,7 +13,7 @@ Tools: classify · object_detect · embed. Arguments and results have the shapes
 the same name: classify {image_path, domain?, top_k?}; object_detect {image_path, score_threshold?};
 embed {image_path}.
 
-Runtime facts this file encodes (measured on an Orange Pi 5, RK3588S, under the mainline 7.0 kernel with the
+Runtime facts this file encodes (measured on an RK3588S board, under the mainline 7.0 kernel with the
 rknpu 0.9.8 out-of-tree driver; the vendor 6.1 kernel's built-in driver runs the same runtime library, and
 every sysfs/debugfs read below degrades to null where a node is absent):
   * RKNN-Toolkit-Lite2 2.3.2's RKNNLite over librknnrt.so 2.3.2, models compiled for rk3588, core mask

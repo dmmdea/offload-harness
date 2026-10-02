@@ -1,10 +1,10 @@
 // Package nodeswap is the one reusable engine behind every Windows fleet-node
 // binary swap. It replaces the family of per-deploy, per-node .ps1 scripts
-// (aorus-swap-<sha>.ps1, deploy-node-exe.ps1, fleet-node-restart.ps1 stitched
+// (node-swap-<sha>.ps1, deploy-node-exe.ps1, fleet-node-restart.ps1 stitched
 // together by hand each release) with a single, unit-tested sequence that
 // every future deploy calls the same way.
 //
-// It exists because of a real outage: the 2026-09-24 Aorus 0.140.8 deploy ran
+// It exists because of a real outage: the 2026-09-24 <node-a> 0.140.8 deploy ran
 // its restart-and-verify phase over an interactive SSH session. Windows
 // OpenSSH kills the whole remote process tree on disconnect (see
 // docs/systems/node-swap.md and the windows-ssh-remote-ops-patterns house
@@ -51,7 +51,7 @@ type Plan struct {
 	BackupSuffix string
 
 	// HealthURL is this node's own /fleet/health. Empty means a standalone
-	// node with no fleet-serve endpoint (the OptiPlex pattern): the
+	// node with no fleet-serve endpoint (the <node-e> pattern): the
 	// fleet-serve idle-wait and the health half of post-restart verification
 	// are both skipped — instead the GPU LEASE is waited on (GPULockPath/
 	// GPUStateDir below), since a standalone node has no queue depth to read
@@ -74,13 +74,13 @@ type Plan struct {
 
 	// Exactly one of RestartTaskName / RestartCommand should be set for a
 	// fleet node; both empty means a standalone binary-only swap (no restart
-	// at all — the OptiPlex case named in the task).
+	// at all — the <node-e> case named in the task).
 	//
 	// RestartTaskName: a Windows scheduled task Stop/Start wraps the swap
-	// (the Aorus "\offload-fleet-node" pattern).
+	// (the <node-a> "\offload-fleet-node" pattern).
 	//
 	// RestartCommand: an arbitrary command that performs its own stop+launch
-	// (the Qube's fleet-node-restart.ps1, which launches via WMI/CIM because
+	// (<node-b>'s fleet-node-restart.ps1, which launches via WMI/CIM because
 	// this box has no scheduled task for fleet-serve). Run does not trust its
 	// exit code alone — verifyRunning re-derives PID/hash/health
 	// independently after it returns.
@@ -101,7 +101,7 @@ type Plan struct {
 	// ProcessMatch is the substring a fleet-serve command line must contain
 	// (default "fleet-serve"). MCPMatch identifies an idle MCP-server helper
 	// sharing the same exe (default " mcp") — the Windows-only class of
-	// holder documented in the 2026-09-24 OptiPlex deploy: an idle `... mcp`
+	// holder documented in the 2026-09-24 <node-e> deploy: an idle `... mcp`
 	// process can hold an OS-level handle on the exe and block the rename
 	// even with no active job. Only a process matching MCPMatch and NOT also
 	// matching ProcessMatch is ever stopped to clear a rename; any other
@@ -206,7 +206,7 @@ type Deps struct {
 	// outright when the two paths are not on the same volume/filesystem
 	// (Windows: a different drive letter — "The system cannot move the file
 	// to a different disk drive"; Linux/macOS: EXDEV, "invalid cross-device
-	// link"). The 2026-09-24 Aorus rollout hit this staging the new exe at
+	// link"). The 2026-09-24 <node-a> rollout hit this staging the new exe at
 	// C:\tmp\ against a D:\ target: the swap rolled back cleanly, but never
 	// happened. IsCrossDeviceRenameErr classifies a RenameFile error as this
 	// specific, recoverable shape (never any other failure); CopyFile
@@ -241,7 +241,7 @@ func (l *Logger) Printf(format string, args ...any) {
 
 // backupPathFor builds "<target>.bak-<suffix>". A caller-supplied suffix that
 // ITSELF already starts with "bak-" (case-insensitive) is trimmed of that
-// prefix first — the exact doubled "bak-bak-" mistake the d5207011 Qube
+// prefix first — the exact doubled "bak-bak-" mistake the d5207011 <node-b>
 // deploy record flagged (an operator passed --backup-suffix
 // "bak-2026-09-24-pre-d5207011", not knowing this function prepends its own
 // "bak-" too). Cosmetic-only either way (the file is still found and

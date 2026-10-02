@@ -122,7 +122,7 @@ func copyFile(src, dst string) error {
 // values" in the reserved APPLICATION_ERROR range, for package os's
 // internal use, and are never actually returned by any real Win32 API
 // (measured on a live cross-drive os.Rename, C:\ staged against a D:\
-// target — the exact 2026-09-24 Aorus rollout failure: errors.Is(err,
+// target — the exact 2026-09-24 <node-a> rollout failure: errors.Is(err,
 // syscall.EXDEV) is false; the error unwraps to syscall.Errno(17),
 // ERROR_NOT_SAME_DEVICE, "The system cannot move the file to a different
 // disk drive"). errno 17 is checked only when actually running on Windows —

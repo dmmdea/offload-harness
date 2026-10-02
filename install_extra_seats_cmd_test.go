@@ -271,6 +271,7 @@ func TestAuditConfigDecidesTheExtraSeatsTheWayTheInstallerDoes(t *testing.T) {
 	if err := os.WriteFile(cfg, raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	stubDetectedRAMTier(t, "min") // hermetic: the audit would otherwise read this machine's RAM
 	audit := func(seatFlags ...string) (string, error) {
 		var runErr error
 		out := captureStdout(t, func() {

@@ -698,7 +698,7 @@ func (p Params) vllmExtras() []*vllmseat.Spec {
 // every set by construction — which is the same guarantee `persistent` was reaching
 // for, in the residency system every template in this repo actually uses. (The
 // reference deployment's llama-swap uses `groups`; `persistent: true` was separately
-// measured FAILING on the Qube, where it silently degraded the memory stack to
+// measured FAILING on <node-b>, where it silently degraded the memory stack to
 // dense-only, which is why the templates moved to `matrix:`.)
 //
 // A tier that also declares EXTRA vLLM seats (Params.ExtraVLLMSeats) renders them beside
@@ -830,11 +830,12 @@ func matrixJoin(role string) string {
 // seatVarID derives the matrix var key for a seat. llama-swap REQUIRES a var key to
 // be alphanumeric and 1-8 characters (verified against the binary: a key of
 // "embeddinggemma" is rejected outright), so the seat's own name — which carries
-// hyphens and is usually longer — can never be the key. The kind is used because a
-// tier may declare at most one vision, stt or ocr seat (each writes a single config
-// field), which makes the id both stable and unique by construction. A text-only
-// rkllm seat writes no field, so a tier may declare several: the second and later ones
-// take the numbered ids below.
+// hyphens and is usually longer — can never be the key. The kind picks the base id
+// (vis, stt, ocr, rkllm), which keeps it stable. It is not unique on its own: a tier
+// may declare more than one seat of a kind, because a registered extra (Seat.Extra)
+// and a text-only rkllm seat write no binding key. The first seat of a kind takes the
+// base id; the second and later ones, in declaration order, take the numbered ids
+// below (vis2, vis3, ...). Uniqueness comes from the taken set, not from the kind.
 func seatVarID(s mediaseat.Seat, taken map[string]bool) (string, error) {
 	base := map[string]string{
 		mediaseat.KindVision: "vis", mediaseat.KindSTT: "stt", mediaseat.KindOCR: "ocr", mediaseat.KindRKLLM: "rkllm",
@@ -1098,7 +1099,9 @@ var envLineRe = regexp.MustCompile(`^ {4}env:\s*\[(.*)\]\s*$`)
 // Order matters — existing entries stay FIRST. The 26B declares
 // GGML_CUDA_DISABLE_GRAPHS=1 and must keep it in front, both because that is what
 // shipped and because appending is the only edit that cannot reorder a template's
-// own intent.
+// own intent. A key the block already sets is not added again (the existing value
+// wins), so a seat's own device pin survives and a second pass is a no-op, as the
+// PowerShell original's was.
 func injectGPUEnv(tmpl string, vars []string) string {
 	add := strings.Join(flowItems(vars), ", ")
 	lines := strings.Split(tmpl, "\n")
@@ -1140,8 +1143,21 @@ func injectGPUEnv(tmpl string, vars []string) string {
 				existing := strings.TrimSpace(m[1])
 				if existing == "" {
 					out = append(out, "    env: ["+add+"]")
+					continue
+				}
+				// A key the block already sets keeps its value (a per-seat device pin must
+				// win over the tier-wide one), which also makes a second pass a no-op.
+				missing := make([]string, 0, len(vars))
+				for _, v := range vars {
+					key, _, _ := strings.Cut(v, "=")
+					if !regexp.MustCompile(`(^|[\s,"])` + regexp.QuoteMeta(key) + `=`).MatchString(existing) {
+						missing = append(missing, v)
+					}
+				}
+				if len(missing) == 0 {
+					out = append(out, lines[j])
 				} else {
-					out = append(out, "    env: ["+existing+", "+add+"]")
+					out = append(out, "    env: ["+existing+", "+strings.Join(flowItems(missing), ", ")+"]")
 				}
 				continue
 			}
@@ -1445,7 +1461,7 @@ func (p Params) cacheRAMMiB() int {
 // slotSaveFlag renders NOTHING, on purpose, and the token stays wired so that
 // turning it back on is this one function (ADR 0056 Layer 2).
 //
-// MEASURED 2026-09-21 on binxarn (llama.cpp b9934), the two reasons:
+// MEASURED 2026-09-21 on <node-f> (llama.cpp b9934), the two reasons:
 //
 //  1. llama-server REFUSES TO START when the path does not exist —
 //     `error while handling argument "--slot-save-path": not a directory: …`.
