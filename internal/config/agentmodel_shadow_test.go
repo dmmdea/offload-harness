@@ -65,3 +65,33 @@ func TestWarnOnShadowedAgentModel(t *testing.T) {
 		t.Fatalf("an agreeing config must stay silent, got %q", buf.String())
 	}
 }
+
+// C-95: the shared loading path calls the Once variant on every load; a process
+// says each distinct (file, note) once, and a different file or a different
+// agent_model is a different note.
+func TestWarnOnShadowedAgentModelOnceDedupes(t *testing.T) {
+	cfg := CompositeFixture()
+	cfg.AgentModel = "scratch-seat-once-test"
+	a := Source{Path: "a-once-test.json"}
+	var buf bytes.Buffer
+	if !WarnOnShadowedAgentModelOnce(a, cfg, &buf) {
+		t.Fatal("the first load must warn")
+	}
+	if WarnOnShadowedAgentModelOnce(a, cfg, &buf) {
+		t.Fatal("the same file and note must not warn twice in one process")
+	}
+	if n := strings.Count(buf.String(), "note: config "); n != 1 {
+		t.Fatalf("want exactly one line, got %d in %q", n, buf.String())
+	}
+	if !WarnOnShadowedAgentModelOnce(Source{Path: "b-once-test.json"}, cfg, &buf) {
+		t.Fatal("a different file is a different note")
+	}
+	cfg.AgentModel = "scratch-seat-once-test-2"
+	if !WarnOnShadowedAgentModelOnce(a, cfg, &buf) {
+		t.Fatal("a different agent_model is a different note")
+	}
+	cfg.AgentModel = "agent-pool"
+	if WarnOnShadowedAgentModelOnce(Source{Path: "c-once-test.json"}, cfg, &buf) {
+		t.Fatal("an agreeing config must stay silent")
+	}
+}

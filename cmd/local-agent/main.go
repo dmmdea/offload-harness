@@ -192,6 +192,8 @@ func main() {
 	// binary silently ran on built-in defaults AND ignored the conventional config).
 	cfg, cfgSrc := config.LoadWithSource(*cfgPath)
 	config.WarnOnDefaults(cfgSrc, os.Stderr)
+	// C-95: same shared note as the main CLI (the agent seat is placed by layers).
+	config.WarnOnShadowedAgentModelOnce(cfgSrc, cfg, os.Stderr)
 	absRoot, err := filepath.Abs(*root)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error: bad --root:", err)
