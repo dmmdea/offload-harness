@@ -130,9 +130,9 @@ The installer detects prerequisites and never builds them, and it does not rende
    `vllm-35b-seat-cmd.sh` and `vllm-35b-seat-cmdstop.sh` in the same seat directory (`cmd` and `cmdStop`
    start and stop `vllm-35b-seat.service`); the polkit rule is the 27B's with the unit name changed. In
    the run script, point `--model` at the 35B snapshot, set `--served-model-name
-   qwen36-35b-a3b-gsq-vllm a2-pool-35b qwen36-35b-gsq`, `--max-num-seqs 8` and `--tool-call-parser
-   qwen3_coder`, and add `--language-model-only`; keep the window and utilisation the table records
-   (32,768 at `util 0.85`, the point measured to leave the embedder and the reranker room).
+   qwen36-35b-a3b-gsq-vllm a2-pool-35b qwen36-35b-gsq`, `--max-num-seqs 8`, `--max-num-batched-tokens 4096` (the 27B renders 2,048 since ADR 0049 Amendment 5; the 35B
+   was measured at 4,096) and `--tool-call-parser qwen3_coder`, and add `--language-model-only`; keep the window and
+   utilisation the table records (32,768 at `util 0.85`, the point measured to leave the embedder and the reranker room).
 5. **Then** re-run `install seed` and `install render` with the same flags: `install render` writes both
    llama-swap entries and `install seed` writes the layers, the roster and both bindings. `local-offload doctor` prints a storeless-OK line per seat, `offload_status` lists both
    layers, and a contract with `layer: "fast"` lands on the 35B.

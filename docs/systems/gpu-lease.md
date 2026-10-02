@@ -388,7 +388,8 @@ rule is that mem0 never yields; it sits on the utility card, so unloading it fre
 C-87, 2026-10-01). `render/gpu-lock.mjs` keeps the same set. An empty `memory_stack` means the default set: `embeddinggemma`,
 `bge-reranker-v2-m3` and `embeddinggemma-ams`, the id the memory authority node serves its embedder under (register A-122b:
 the first two did not name it, so a lease cleared it; a name the box does not serve is inert, and `internal/config` and
-`render/gpu-lock.mjs` carry the same list, kept equal by a test). A `memory_stack` the config names replaces the default
+`render/gpu-lock.mjs` carry the same list, kept equal by a test). Fleet reclaim (`fleet_reclaim.go`) does not read `memory_stack`: it keeps llama-swap's ttl -1/0 seats and the configured
+keep-set, so a ttl-300 member of the stack is still reclaimable there (register C-94). A `memory_stack` the config names replaces the default
 rather than adding to it, and the installer's seeded `config.json` names the first two. If the
 per-model route fails, the legacy `GET /unload` is used only when no stack member is resident. It unloads everything,
 whatever `?model=` says, so when the stack is resident or `/running` cannot be read, the reserve fails and names the

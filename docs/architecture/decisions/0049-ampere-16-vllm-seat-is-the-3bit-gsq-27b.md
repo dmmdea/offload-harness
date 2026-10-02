@@ -243,9 +243,9 @@ prematurely`).
 
 | point | result |
 |---|---|
-| util 0.87, 8 sequences, 4,096 batched tokens, reranker at `--ctx-size 8192 --batch-size 4096 --ubatch-size 4096` (Amendment 4) | KV pool 50,176 tokens; card peak **14,717 MiB** (seat 13,860, embedder 460, reranker 378), headroom 639 MiB; the reranker failed to start beside the loaded seat 7 times |
+| util 0.87, 8 sequences, 4,096 batched tokens, reranker at `--ctx-size 8192 --batch-size 4096 --ubatch-size 4096` (Amendment 4) | KV pool 50,176 tokens; card peak **14,717 MiB** (per-process at the peak sample: seat 13,860, embedder 460, reranker 378), headroom 639 MiB. The node's llama-swap log holds 7 undated reranker start failures beside a loaded seat (it carries no timestamps, so they may predate this point) |
 | util 0.85, 4 sequences, 2,048 batched tokens | did not start in that arm: unexplained, probably the previous engine still releasing VRAM; not re-run |
-| **util 0.84, 4 sequences, 2,048 batched tokens, reranker at `--ctx-size 4096 --batch-size 2048 --ubatch-size 2048`** | KV pool 45,472 tokens (29 blocks of 1,568, 1.39x the 32,768 window); seat 13,204 + embedder 458 + reranker 306 = card peak **13,987 MiB**, headroom **1,369 MiB**; the four requests finished in **544 s** where the 0.87 point needed 900+ s |
+| **util 0.84, 4 sequences, 2,048 batched tokens, reranker at `--ctx-size 4096 --batch-size 2048 --ubatch-size 2048`** | KV pool 45,472 tokens (29 blocks of 1,568, 1.39x the 32,768 window); card peak **13,987 MiB** (per-process at the peak sample: seat 13,204, embedder 458, reranker 306; nvidia-smi samples the card and the processes separately, so they do not sum exactly), headroom **1,369 MiB**; the four requests finished in **544 s** where the 0.87 point needed 900+ s |
 
 Amendment 4 recorded a KV pool of about 34k tokens for the 0.87 point on 2026-09-30; this load read 50,176 for the same
 declaration, and the two readings are not reconciled here. The 35B fast-layer seat (util 0.85, 8 sequences, 4,096 batched
@@ -280,6 +280,9 @@ runner's helper would have unloaded it. The default now lists it, appended so `E
 unchanged, in `internal/config` and in `render/gpu-lock.mjs`, and a test keeps the two lists equal
 ([gpu-lease.md](../../systems/gpu-lease.md)). The installer's seeded `config.json` keeps its explicit pair: a configured list
 replaces the default, and `llamaswap-pp-cli bind check` reports a `memory_stack` entry the box does not serve as dangling.
+The default covers `gpu reserve --unload-seat` and the render runner's helper only: fleet reclaim (`fleet_reclaim.go`) does
+not read `memory_stack` (it protects llama-swap's ttl -1/0 seats and the configured keep-set), so a ttl-300 embedder is still
+reclaimable there (register C-94).
 
 **Costs recorded.** The lane seat serves at most 4 sequences at once (it declared 8, and 32 before) and llama-swap's
 `concurrencyLimit` for it follows, 8 to 4; the harness's own local run cap defaults to 4, so its runs now reach the limit
