@@ -6,7 +6,89 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
-### Fixed
+## [0.160.0] - 2026-10-02 - The public tree carries roles, not machine names, behind a keyed leak gate; blackwell-8 seeds its vision extras and Z-Image Turbo
+
+### Added — the leak gate: real machine, person and brand names stay out of the tracked tree (register H-55)
+
+The tree named the operator's machines, people and brands in about 1,500 places across 313 files. Every one is now a role
+(`<node-a>` ... `<node-f>`, "the workstation", "the editing rig") or a tier id of the era a dated sentence describes, and a
+gate keeps them out.
+
+- **The gate.** `internal/leakgate` and `cmd/leakdigest` hold the matcher (word, exact, sub, case-sensitive and phrase
+  entries; camel, digit, underscore, hyphen, escape and percent glue; UTF-16, PNG text chunks, file names), the keyless shape
+  rules (real-shaped GPU ids, WSL paths naming a real distro) and the fail-closed scan set (an unknown binary, a long run, an
+  oversize file, a symlink or a path that cannot be read is a FATAL unless the digest file exempts it by blob). The list
+  itself is never in the tree: `testdata/leak-gate-digests.json` holds keyed digests of it, a MAC over the whole file and
+  three exempt rows (the Inter fonts). A canary entry is always appended and every scan must flag it.
+- **Tests.** `TestTrackedTreeCarriesNoDeniedNames` runs the keyed scan when a key is present (and SKIPs with its reason when
+  none is and none is required); `TestTrackedTreeCarriesNoShapedIdentifiers` needs no key, so forks are covered too;
+  `TestLeakGateKeyResolution` and `TestLeakGateScannerBehaviour` pin the key rules (missing, empty, malformed, wrong,
+  rotation through a previous key) with synthetic keys and names.
+- **CI.** The existing workflow's `Test` step reads the key from a repository secret and requires it on pushes and
+  same-repository pull requests; a fork's pull request runs keyless and its summary says `skipped`. The run summary carries
+  `leak gate: enforced (N files, M entries)`. The workflow gains `permissions: contents: read`; no trigger, job or workflow
+  was added.
+- **A byte-order mark is never a hiding place.** A marked file is scanned as decoded text, as raw bytes and in the other byte
+  order, and a mark whose payload is not UTF-16 is a FATAL.
+- **Proof.** On the pre-sweep base the keyed test fails with 1,494 findings in 309 files and the shape test with 39 in 9
+  (1,533 in total); the final tree passes both with the real key. Real names planted in a scratch copy (bare, glued, escaped,
+  upper case, a file name, UTF-16, a PNG text chunk, the canary, a GPU id) each fail at their own path, and the negatives
+  (`37060`, `15px`, a longer word that only contains a listed one, the product spelling of a listed distro) pass.
+- **Docs.** `docs/systems/leak-gate.md` (new), `docs/STYLE.md` (the naming rules), `docs/glossary.md` ("reference box" per
+  tier, "leak gate"), `CONTRIBUTING.md` (forks skip the gate; a maintainer runs it with `-count=1` and the key file),
+  `AGENTS.md`, `docs/README.md`.
+
+### Changed — the sweep behind the gate
+
+- Docs, ADRs, the CHANGELOG, tier pages, templates, setup strings, test fixtures and comments use the roles above. Machine
+  vendor and model names are gone; GPU, RAM and OS facts stay. Test fixture node ids are per-test labels chosen so sorted
+  output keeps its order; no assertion was edited.
+- Two ADR file names and one spec file name carried a machine name and were renamed; every link was updated.
+- The `kv_cache_server` `key_prefix` values lose their machine prefix (`seat-tp2-fp8`, `seat-3card-fp8`, ...).
+  `audit-config` now treats a `key_prefix` difference between two lists of bindings as node-owned, not drift (a seeded node
+  keeps the prefix it was seeded with).
+- The WSL seat scripts derive their directory from their own location, and the Go default seat directory is `/opt/seat`
+  (no production config sets the field, so served behaviour does not change).
+- The three skill libraries were regenerated at the source: the private scrub script's map was extended and re-run over a
+  pinned copy of the libraries as they stood in the tree, so no newer private measurement was imported.
+- The contract fixtures were rebuilt from the swept ADR text: every acceptance array is byte-identical and the intake lint
+  says the same as before. Context entries that were already a stale snapshot keep their old tail after the swept head.
+  sha256 of the committed blobs, old -> new: `digest-8.json` `5f90291d0e09b9e1b053d60095e360cbf21651d457df79af703baa785544383a`
+  -> `3aa399254e94f7c1a0e8d03a44ebe8cde3d6dcb5532d2a04db4fe2cead569a12`; `digest-8-grounded.json`
+  `86cea33822535e354d3564ad08ef6094fcd6e9ab61d1f972618ca3ce8b4ce199` ->
+  `f537df93ca571f269be4daf34761761559d96a18727a97ab344b63cf449fbf8a`; `digest-adr-hard-8.json`
+  `982cff36fb4dd2b8b462691bc56294dc09fa971bd6ee8e1b6969f85f81e07bc4` ->
+  `d84741352f0a60a82812e4def39f00883dd6a4e982bf5ec627a6693eeab7eb22`. `TestContractFixturesAreWellFormed` guards them.
+- Profile notes cite operator records by description rather than by file names that no longer exist.
+
+### Fixed — the GPU env injection keeps a key a model block already sets
+
+`setup/tests/install-cuda-build.test.ps1` still called a PowerShell helper that was deleted when the render moved to Go, so the
+suite failed and nothing tested the injection. Its assertions now live in Go (`inject_gpu_env_test.go`), and porting them
+showed the Go injection was not idempotent: a block that already set a key gained it again, so a seat's own device pin would be
+followed by the tier-wide value. An existing key now keeps its value and a second pass is a no-op. No shipped tier combines the
+two today, so rendered output does not change.
+
+### Fixed — fleet reclaim never reclaims a memory-stack member, whatever its ttl (register C-94)
+
+The reclaimable-VRAM advertisement (`fleet_reclaim.go`) protected llama-swap's ttl -1/0 seats and the configured keep-set, but
+never `memory_stack`. The house rule gives every model a 300 s idle ttl, so a mem0 stack member (including the memory
+authority's `embeddinggemma-ams`, added to the default stack in A-122b) was neither a ttl -1/0 seat nor in the keep-set, and a
+loaded one counted as reclaimable capacity: a job placed on that figure could take the embedder off the card. `gpu reserve
+--unload-seat` and `render/gpu-lock.mjs` already kept the stack; reclaim now keeps the same set.
+
+- **`anyReclaimable` checks the memory stack first, in both keep-set modes.** A loaded member is baseline by name (canonical id,
+  case and padding ignored, as `otherResidentModels` matches), whatever its ttl, and also on a box where no keep-set could be
+  read and the classifier falls back to the ttl field. A non-member at ttl 300 is still reclaimable.
+- **One reading of the set.** `effectiveMemoryStack(cfg)` (the configured `memory_stack`, or the default when empty; a configured
+  list replaces the default) now serves both `gpu reserve --unload-seat` and fleet reclaim, so the two cannot drift.
+- **Docs.** ADR 0049 Amendment 5 and `docs/systems/gpu-lease.md` no longer describe this as a known gap; `docs/systems/fleet-node.md`
+  documents the rule.
+- **Tests.** `TestFleetReclaimNeverReclaimsAMemoryStackMember` (every default member at ttl 300, keep-set known and unknown, a
+  non-member still reclaimable) and `TestFleetReclaimHonoursAConfiguredMemoryStack`, driven through `oursLoaded` against a fake
+  `/running` and a hermetic llama-swap YAML.
+
+### Fixed — the agent seat's source and the compared RAM overlay are named (C-95, I-40)
 
 - **Every config-loading verb says which source supplied the agent seat (register C-95).** A
   config copy run with `LOCAL_OFFLOAD_CONFIG` honoured its `endpoint` but sent every subtask to
@@ -25,12 +107,16 @@ Versioning: [SemVer](https://semver.org/).
   `config.WarnOnShadowedAgentModel`, `config.WarnOnShadowedAgentModelOnce`. README and
   `docs/systems/fleet-node.md` updated.
 - `audit-config` defaults `--ram-tier` to the RAM tier the machine detects (`auto`) instead of comparing the base seed alone, so the keys a RAM overlay carries on a mid or high RAM box no longer read as drift (23 of 38 rows on a blackwell-8 box with 64 GB were false positives). `--ram-tier none` keeps the base-seed comparison, `min`/`low`/`mid`/`high` name a tier explicitly, and an unknown value is refused. The text header and `--json` (`ram_tier`, `ram_tier_source`, `ram_overlay`) now say which RAM overlay was compared. (I-40) A node's config read from another machine (`--config`, `--home` or a foreign `--goos`) with no named `--ram-tier` prints a stderr warning that the overlay compared is this machine's RAM tier, and the header names the RAM the probe read in GB. A RAM probe that reads 0 GB is refused with a pointer to `--ram-tier`, where it used to pass for tier `min` and pick the base seed silently.
-### Added
+
+### Added — non-binding extra media seats; blackwell-8 seeds its two served vision extras (A-131)
+
 - **Non-binding media seats (`extra`).** A `media_seats` entry may set `"extra": true` (vision, ocr or stt seats). It renders into llama-swap with its aliases and matrix var like any seat, but `Seat.BindingKey()` answers empty: no config key is written and the one-writer check does not count it, so a tier can serve a second vision-class model beside the bound one. `setup/install.ps1` `Get-MediaSeatBindings` mirrors the skip (the Linux installer goes through `install seed`, the Go path). An extra is validated like any seat; `extra` on an `rkllm` seat and vision `tasks` on an extra are refused. Tier docs mark extras in the seat table and count them apart in the index. (register A-131)
 - **blackwell-8 seeds its two served vision extras**: `lfm2.5-vl` (aliases `lfm-vl`, `screen-vl`) and `gemma4-e4b-vision` (alias `gemma-vision`), ctx 8192, swappable, ttl 300. Caveat recorded in each seat's `measured` note: the rendered form adds `--reasoning off`, `-ngl 99` and the tier's q8_0 KV, which the hand-wired entries do not run, so it is not yet re-measured; an EN/ES OCR and spatial VQA pass comes before anyone swaps it in for a hand-wired entry.
 
-### Fixed
+### Fixed — the statements the extra seats falsified (A-131)
+
 - **Two statements the extra seats falsified are reworded.** ADR 0020 said a tier may declare at most one seat per kind, and the `seatVarID` doc comment said the kind makes the matrix var id unique. Neither holds once a tier can declare an extra or a text-only `rkllm` seat beside the bound one: the kind picks the base id (`vis`, `stt`, `ocr`, `rkllm`) and a second or later seat of the same kind takes the numbered ids (`vis2`, `vis3`, ...) in declaration order. ADR 0020 carries a dated amendment rather than a rewrite; no behaviour changed. (register A-131)
+
 ### Added — seed placeholders expand inside objects, and blackwell-8 seeds Z-Image Turbo as a named sdcpp image family (register A-132)
 
 `tierseed.expand` and the installer's `Expand-SeedValue` substituted `__OFFLOAD_HOME__` and `__EXE__` in strings and string
@@ -55,6 +141,7 @@ paths lived under the install home could not be seeded: the token shipped litera
   `family:z-image-turbo`. The default image binding (`hidream-o1-dev`) is unchanged; weights stay out-of-band like every seed.
 - The accelerator device tokens (`__HAILO_HOME__` and its siblings) are still substituted in top-level strings only; no
   accelerator seed carries a family object.
+
 ### Added — video families carry the licence pair (CT-47)
 
 - `videogen_families[name]` takes `license` (string) and `commercial_use` (bool), the same pair the image and edit
