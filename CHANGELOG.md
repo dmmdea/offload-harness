@@ -24,6 +24,7 @@ Versioning: [SemVer](https://semver.org/).
   helper. New: `Config.AgentModelShadowNote`, `Config.LayerSeatModels`,
   `config.WarnOnShadowedAgentModel`, `config.WarnOnShadowedAgentModelOnce`. README and
   `docs/systems/fleet-node.md` updated.
+- `audit-config` defaults `--ram-tier` to the RAM tier the machine detects (`auto`) instead of comparing the base seed alone, so the keys a RAM overlay carries on a mid or high RAM box no longer read as drift (23 of 38 rows on a blackwell-8 box with 64 GB were false positives). `--ram-tier none` keeps the base-seed comparison, `min`/`low`/`mid`/`high` name a tier explicitly, and an unknown value is refused. The text header and `--json` (`ram_tier`, `ram_tier_source`, `ram_overlay`) now say which RAM overlay was compared. (I-40) A node's config read from another machine (`--config`, `--home` or a foreign `--goos`) with no named `--ram-tier` prints a stderr warning that the overlay compared is this machine's RAM tier, and the header names the RAM the probe read in GB. A RAM probe that reads 0 GB is refused with a pointer to `--ram-tier`, where it used to pass for tier `min` and pick the base seed silently.
 
 ## [0.159.0] - 2026-10-02 - The ampere-16 vLLM seats move to vLLM 0.30.0 with a pinned KV pool; the compose lane pins HyperFrames 0.8.108
 
