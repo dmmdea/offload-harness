@@ -206,8 +206,8 @@ test("resolveFfmpeg: an explicit FFMPEG_PATH to a nonexistent file resolves to e
 // pre-fix resolveFfmpeg() treated ANY set FFMPEG_PATH as an exact file via
 // existsSync — existsSync("ffmpeg") is false, so this silently skipped the
 // entire over-render/trim/dead-air QA gate on every fleet node that had not
-// explicitly set ffmpeg_path (reproduced identically on the Lenovo and the
-// Aorus). resolveFfmpeg() must now also try an explicit-but-not-a-literal-file
+// explicitly set ffmpeg_path (reproduced identically on <node-c> and
+// <node-a>). resolveFfmpeg() must now also try an explicit-but-not-a-literal-file
 // FFMPEG_PATH as a PATH-searchable command name.
 
 test("resolveFfmpeg: a bare FFMPEG_PATH that is NOT a literal file but IS resolvable on PATH must resolve (F-38)", (t) => {

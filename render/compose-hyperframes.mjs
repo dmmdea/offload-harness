@@ -757,7 +757,7 @@ export async function runCompose(argv, { log = (s) => process.stdout.write(s + "
       // allowlisted PASSTHROUGH_ENV_KEYS set): browser ensure downloads chrome-
       // headless-shell from storage.googleapis.com, and plain dns.lookup's default
       // "verbatim" order can hand back an IPv6 address first with no fast failover
-      // on a box with a dead IPv6 route — a real hang measured on binxarn (wave
+      // on a box with a dead IPv6 route — a real hang measured on <node-f> (wave
       // session 5d227d30 §5a: curl's happy-eyeballs recovered in ~3s; the bare
       // download hung 7+ minutes). "ensure" only — path/lint/check/render/snapshot
       // touch no network.

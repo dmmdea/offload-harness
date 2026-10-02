@@ -22,7 +22,7 @@ $ErrorActionPreference = 'Stop'
 
 # Resolve the binary here, not in the param() default: under Windows PowerShell 5.1 a [CmdletBinding()]
 # script sees an empty $PSScriptRoot inside param() defaults, so the old Join-Path default threw at
-# parameter binding and the task exited 1 before any code ran (Aorus, found 2026-09-30).
+# parameter binding and the task exited 1 before any code ran (<node-a>, found 2026-09-30).
 if (-not $Bin) {
   $Bin = @($env:LOCAL_OFFLOAD_BIN, (Join-Path $PSScriptRoot '..\local-offload.exe')) |
     Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1

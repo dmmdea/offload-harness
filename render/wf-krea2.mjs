@@ -40,7 +40,7 @@
 // multigpu-archival-actions-2026-09-24.md): the stock `CLIPLoader`/`VAELoader`
 // nodes' "device" input only ever offers "default"/"cpu" — "default" is
 // ComfyUI's OWN device pick (fastest-first cuda:0), entirely independent of
-// poolCompute/poolDonor. On the Qube's 3x16 tier that "default" IS the
+// poolCompute/poolDonor. On <node-b>'s 3x16 tier that "default" IS the
 // display card, so every pooled krea2 render put the ~12 GiB Qwen3-VL-4B text
 // encoder there regardless of which two cards the DiT's own pool keys named —
 // unmeasured until this A/B, and not something either pool key could have
