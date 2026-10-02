@@ -22,7 +22,7 @@ func TestSeatRendersChatTemplateAndPromptTokensDetails(t *testing.T) {
 	}
 	env := files["qwen3.8-27b-vllm-3card.env"]
 	for _, want := range []string{
-		"--chat-template /root/g7/templates/qwen3-fold-system.jinja",
+		"--chat-template /opt/seat/templates/qwen3-fold-system.jinja",
 		"--enable-prompt-tokens-details",
 	} {
 		if !strings.Contains(env, want) {

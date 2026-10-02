@@ -19,8 +19,8 @@ import (
 // audit-config is the config.json half of the drift check that `audit-yaml --against-render`
 // does for the serving YAML. It exists because the YAML half was never the problem.
 //
-// Measured winners were wired BY HAND into a node's config.json — binxarn's qwen3.5-4b agent seat
-// and its lane keys, the Lenovo's layers and 35B digest seat, the Qube's image-edit / inpaint /
+// Measured winners were wired BY HAND into a node's config.json — <node-f>'s qwen3.5-4b agent seat
+// and its lane keys, <node-c>'s layers and 35B digest seat, <node-b>'s image-edit / inpaint /
 // animate routes — and never written back to profiles.json. Nothing compared the two, so the node
 // kept working, the seed kept the loser, and every fresh install (and every regeneration of the
 // tier matrix, which reads the seed) silently erased the win. The 2026-09-21 wiring-debt audit
@@ -39,7 +39,7 @@ const (
 	driftLiveOnly  configDriftClass = "LIVE-ONLY" // set by hand on the node; the seed does not carry it
 	driftSeedOnly  configDriftClass = "SEED-ONLY" // the seed writes it; the node does not have it
 	// UNSEEDED is a live binding that NO tier seeds at all. It is the blind spot of a seed-owned
-	// comparison: the Qube's image-edit, inpaint and animate routes were wired by hand, measured, and
+	// comparison: <node-b>'s image-edit, inpaint and animate routes were wired by hand, measured, and
 	// carried by no tier — so they were invisible to a check that only reads what seeds can write.
 	driftUnseeded configDriftClass = "UNSEEDED"
 )
@@ -90,7 +90,7 @@ func classifyConfigDrift(seed, live map[string]any, owned map[string]bool, isBin
 		switch {
 		case inSeed && inLive:
 			class := driftMatch
-			if !sameJSON(sv, lv) {
+			if !sameConfigValue(k, sv, lv) {
 				class = driftDifferent
 			}
 			out = append(out, configDrift{Key: k, Class: class, Live: lv, Seed: sv})
@@ -128,6 +128,53 @@ func sameJSON(a, b any) bool {
 		return false
 	}
 	return reflect.DeepEqual(na, nb)
+}
+
+// sameConfigValue compares one key's seed value with its live value. Every key is compared whole, as sameJSON does,
+// except kv_cache_server: the key_prefix of each of its bindings is the node's own (a seeded node keeps the prefix it was
+// seeded with, and install does not rewrite config.json), so a prefix-only difference is not drift. The exception is narrow
+// on purpose: it applies only when BOTH sides are lists of binding objects. A legacy single object (still accepted by the
+// loader), a string, null, a list holding anything that is not an object, or a list against a non-list is compared whole,
+// exactly as before, so a difference of shape still reads DIFFERENT.
+func sameConfigValue(key string, seedVal, liveVal any) bool {
+	if key != "kv_cache_server" {
+		return sameJSON(seedVal, liveVal)
+	}
+	ns, errS := normJSON(seedVal)
+	nl, errL := normJSON(liveVal)
+	if errS != nil || errL != nil {
+		return false
+	}
+	if bs, ok := withoutKeyPrefix(ns); ok {
+		if bl, ok := withoutKeyPrefix(nl); ok {
+			return reflect.DeepEqual(bs, bl)
+		}
+	}
+	return reflect.DeepEqual(ns, nl)
+}
+
+// withoutKeyPrefix returns a copy of v with key_prefix removed from every element, when v is a list whose every element
+// is an object; otherwise it reports false. The value it is given is never modified.
+func withoutKeyPrefix(v any) ([]any, bool) {
+	list, ok := v.([]any)
+	if !ok {
+		return nil, false
+	}
+	out := make([]any, len(list))
+	for i, el := range list {
+		m, ok := el.(map[string]any)
+		if !ok {
+			return nil, false
+		}
+		cp := make(map[string]any, len(m))
+		for k, val := range m {
+			if k != "key_prefix" {
+				cp[k] = val
+			}
+		}
+		out[i] = cp
+	}
+	return out, true
 }
 
 func normJSON(v any) (any, error) {

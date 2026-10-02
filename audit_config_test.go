@@ -12,7 +12,7 @@ import (
 )
 
 // TestClassifyConfigDriftNamesTheHandWiredWin pins the four classes on the exact shape that hid
-// the binxarn agent seat: the node carried a hand-set agent_model the seed did not write, while
+// the <node-f> agent seat: the node carried a hand-set agent_model the seed did not write, while
 // the seed wrote a DIFFERENT value, and a node-local endpoint that no tier owns must stay silent.
 func TestClassifyConfigDriftNamesTheHandWiredWin(t *testing.T) {
 	seed := map[string]any{
@@ -70,7 +70,7 @@ func TestClassifyConfigDriftPutsDriftFirst(t *testing.T) {
 	}
 }
 
-// TestClassifyConfigDriftSeesABindingNoTierSeeds pins the blind spot the first cut had: the Qube's
+// TestClassifyConfigDriftSeesABindingNoTierSeeds pins the blind spot the first cut had: <node-b>'s
 // image-edit and animate routes were wired by hand and are seeded by NO tier, so a comparison over
 // seed-owned keys alone could not see them. They must surface as UNSEEDED; a node-local endpoint or
 // path must not.
@@ -286,4 +286,96 @@ func TestAuditConfigSeedOwnsTheRK3588UnconstrainedSeats(t *testing.T) {
 			t.Errorf("%s: got %+v, want one %s finding", tc.name, got, tc.want)
 		}
 	}
+}
+
+// TestClassifyConfigDriftTreatsKeyPrefixAsNodeOwned pins the one place audit-config does not compare a
+// value whole: the key_prefix of each kv_cache_server binding belongs to the node (a seeded node keeps the
+// prefix it was seeded with, and install does not rewrite config.json), so a prefix-only difference
+// between two lists of bindings is not drift. Every other difference is, and so is a shape the rule
+// does not cover: a legacy single object, or a list holding something that is not an object.
+func TestClassifyConfigDriftTreatsKeyPrefixAsNodeOwned(t *testing.T) {
+	// The prefixes are built rather than pasted, so no line reads key_prefix next to an opaque
+	// string (the shape the tree's secret scanner classifies as a generic API key).
+	prefixA, prefixB := "seat-"+"alpha", "seat-"+"beta"
+	binding := func(addr, seat, prefix string) map[string]any {
+		b := map[string]any{"enabled": true, "store": "fs_native", "address": addr, "seat": seat}
+		if prefix != "" {
+			b["key_prefix"] = prefix
+		}
+		return b
+	}
+	// The seed carries its bindings as a typed list (what tierseed writes); a live config decodes to []any.
+	seedList := func(bs ...map[string]any) any { return bs }
+	liveList := func(bs ...map[string]any) any {
+		out := make([]any, len(bs))
+		for i, b := range bs {
+			out[i] = b
+		}
+		return out
+	}
+	one := binding("/mnt/kv/one", "seat-one", prefixA)
+	oneOtherPrefix := binding("/mnt/kv/one", "seat-one", prefixB)
+	oneNoPrefix := binding("/mnt/kv/one", "seat-one", "")
+	oneOtherAddr := binding("/mnt/kv/elsewhere", "seat-one", prefixA)
+	two := binding("/mnt/kv/two", "seat-two", prefixA)
+
+	classify := func(t testing.TB, seedVal, liveVal any) configDrift {
+		t.Helper()
+		seed := map[string]any{"kv_cache_server": seedVal}
+		live := map[string]any{"kv_cache_server": liveVal}
+		for _, f := range classifyConfigDrift(seed, live, map[string]bool{"kv_cache_server": true}, isBindingKey) {
+			if f.Key == "kv_cache_server" {
+				return f
+			}
+		}
+		t.Fatal("kv_cache_server was not reported at all")
+		return configDrift{}
+	}
+
+	for _, c := range []struct {
+		name       string
+		seed, live any
+		want       configDriftClass
+	}{
+		{"both lists, prefix-only difference", seedList(one), liveList(oneOtherPrefix), driftMatch},
+		{"both lists, identical", seedList(one), liveList(one), driftMatch},
+		{"both lists, an address differs", seedList(one), liveList(oneOtherAddr), driftDifferent},
+		{"live has an extra binding", seedList(one), liveList(one, two), driftDifferent},
+		{"live is missing a binding", seedList(one, two), liveList(one), driftDifferent},
+		{"live binding without a prefix against a seed that has one", seedList(one), liveList(oneNoPrefix), driftMatch},
+		{"seed binding without a prefix against a live one that has one", seedList(oneNoPrefix), liveList(one), driftMatch},
+		{"live legacy single object against the list seed, same prefix", seedList(one), one, driftDifferent},
+		{"live legacy single object against the list seed, other prefix", seedList(one), oneOtherPrefix, driftDifferent},
+		{"list live against a legacy-object seed", one, liveList(one), driftDifferent},
+		{"a list holding a non-object is compared whole", []any{one, "x"}, []any{oneOtherPrefix, "x"}, driftDifferent},
+		{"a list against a string", seedList(one), "x", driftDifferent},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if got := classify(t, c.seed, c.live); got.Class != c.want {
+				t.Errorf("classified %q, want %q", got.Class, c.want)
+			}
+		})
+	}
+
+	t.Run("the report keeps both prefixes and the inputs are not mutated", func(t *testing.T) {
+		seedVal, liveVal := seedList(one), liveList(oneOtherPrefix)
+		before := func() string {
+			s, _ := json.Marshal(seedVal)
+			l, _ := json.Marshal(liveVal)
+			return string(s) + "|" + string(l)
+		}
+		was := before()
+		got := classify(t, seedVal, liveVal)
+		if got.Class != driftMatch {
+			t.Fatalf("classified %q, want MATCH", got.Class)
+		}
+		if after := before(); after != was {
+			t.Errorf("the inputs were modified: %s -> %s", was, after)
+		}
+		s, _ := json.Marshal(got.Seed)
+		l, _ := json.Marshal(got.Live)
+		if !strings.Contains(string(s), prefixA) || !strings.Contains(string(l), prefixB) {
+			t.Errorf("the report must still show both prefixes, got seed %s live %s", s, l)
+		}
+	})
 }

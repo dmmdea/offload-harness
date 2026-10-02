@@ -13,11 +13,11 @@ import (
 // that no deployed config has to change to keep working.
 func TestLegacySingleObjectDecodesAsAOneElementList(t *testing.T) {
 	var l KVCacheServers
-	raw := `{"enabled":true,"store":"fs_native","address":"/mnt/kvcache/lmcache-seat-tp2-fp8","chunk_size":1568,"key_prefix":"qube-seat-tp2-fp8","seat":"qwen3.8-27b-vllm"}`
+	raw := `{"enabled":true,"store":"fs_native","address":"/mnt/kvcache/lmcache-seat-tp2-fp8","chunk_size":1568,"key_prefix":"seat-tp2-fp8","seat":"qwen3.8-27b-vllm"}`
 	if err := json.Unmarshal([]byte(raw), &l); err != nil {
 		t.Fatal(err)
 	}
-	if len(l) != 1 || l[0].Seat != "qwen3.8-27b-vllm" || l[0].EffectiveKeyPrefix() != "qube-seat-tp2-fp8" {
+	if len(l) != 1 || l[0].Seat != "qwen3.8-27b-vllm" || l[0].EffectiveKeyPrefix() != "seat-tp2-fp8" {
 		t.Fatalf("legacy object did not become its own one-element binding: %+v", l)
 	}
 	if l.For("qwen3.8-27b-vllm") == nil {
@@ -45,7 +45,7 @@ func TestLegacySingleObjectDecodesAsAOneElementList(t *testing.T) {
 	}
 	// A shape that is neither is refused BY KEY, naming both accepted spellings.
 	var bad KVCacheServers
-	err := json.Unmarshal([]byte(`"lenovo"`), &bad)
+	err := json.Unmarshal([]byte(`"node-c"`), &bad)
 	if err == nil || !strings.Contains(err.Error(), "kv_cache_server") {
 		t.Fatalf("a string must be refused naming the key, got %v", err)
 	}
@@ -56,7 +56,7 @@ func TestLegacySingleObjectDecodesAsAOneElementList(t *testing.T) {
 func TestBindingSelectionPrefersTheSeatOverTheDefault(t *testing.T) {
 	l := KVCacheServers{
 		{Enabled: true, Store: "fs_native", Address: "/mnt/kv/default", ChunkSize: 1568, KeyPrefix: "box-default"},
-		{Enabled: true, Store: "fs_native", Address: "/mnt/kv/3card", ChunkSize: 1568, KeyPrefix: "qube-3card", Seat: "qwen3.8-27b-vllm-3card"},
+		{Enabled: true, Store: "fs_native", Address: "/mnt/kv/3card", ChunkSize: 1568, KeyPrefix: "3card", Seat: "qwen3.8-27b-vllm-3card"},
 	}
 	if got := l.For("qwen3.8-27b-vllm-3card"); got == nil || got.Address != "/mnt/kv/3card" {
 		t.Fatalf("the seat's own binding must win over the default: %+v", got)
@@ -206,7 +206,7 @@ func TestLoadAttributesTheBindingAndTheKey(t *testing.T) {
 		t.Fatalf("expected a refusal naming binding 1 and the address key, got %v", err)
 	}
 	good := `{"vllm_seats":["pair","trio"],"kv_cache_server":[
-	  {"enabled":true,"store":"fs_native","address":" /mnt/kv/pair ","chunk_size":1568,"key_prefix":"qube-pair-fp8","seat":"pair","kv_dtype":"fp8","tensor_parallel":2},
+	  {"enabled":true,"store":"fs_native","address":" /mnt/kv/pair ","chunk_size":1568,"key_prefix":"pair-fp8","seat":"pair","kv_dtype":"fp8","tensor_parallel":2},
 	  {"seat":"trio","storeless":true,"reason":"three-stage pipeline seat: LMCache has no working L2 layout for it"}]}`
 	if err := os.WriteFile(p, []byte(good), 0o644); err != nil {
 		t.Fatal(err)

@@ -77,7 +77,7 @@ type Spec struct {
 	// MPHTTPPort is the MP server's HTTP frontend (loopback only). LMCache defaults it to
 	// 0.0.0.0:8080, which under WSL2 mirrored networking is the host's every interface and
 	// on this fleet is always somebody else's port; 0 = Port-7 (18797 engine / 18790 HTTP,
-	// the safe pick every port file of the fleet lists; 18793 is the Qube's LiteLLM reservation).
+	// the safe pick every port file of the fleet lists; 18793 is <node-b>'s LiteLLM reservation).
 	MPHTTPPort int `json:"mp_http_port,omitempty"`
 	// Device is CUDA_VISIBLE_DEVICES for the engine. It may name SEVERAL cards
 	// ("0,2"), in which case TensorParallel must equal how many — see its comment.
@@ -496,7 +496,7 @@ type Runtime struct {
 	// Linux case) means the two are the same path. It never reaches a rendered file.
 	HostPrefix string
 	// WSLSeatDir is the directory INSIDE that distro holding the seat env file and
-	// the two wrapper scripts. LaunchWindowsWSL only; empty = /root/g7.
+	// the two wrapper scripts. LaunchWindowsWSL only; empty = /opt/seat.
 	//
 	// It is a distro path, not a Windows one: the wrappers are executed by bash
 	// inside the distro, and a \\wsl$ path handed to bash is not a path at all.
@@ -508,7 +508,7 @@ func (r Runtime) wslSeatDir() string {
 	if r.WSLSeatDir != "" {
 		return r.WSLSeatDir
 	}
-	return "/root/g7"
+	return "/opt/seat"
 }
 
 // ModelDir is the absolute HF repo directory for this deployment.
@@ -749,7 +749,7 @@ func (s Spec) Detect(r Runtime) (bool, string) {
 // hostPath maps a path the ENGINE will see to one this process can stat.
 //
 // They are the same path on a Linux node. On a Windows box whose engine lives in WSL
-// they are not: the venv and the HF cache are distro paths, and statting "/root/g7/..."
+// they are not: the venv and the HF cache are distro paths, and statting "/opt/seat/..."
 // from Windows reports missing every time — which Detect would report as "build the
 // venv", sending an operator to rebuild something that is already there. The distro's
 // filesystem is reachable from the host under \\wsl.localhost\<distro>, so that is
@@ -1106,7 +1106,7 @@ func (s Spec) unloadTimeout() int {
 // The reference file setup/templates/vllm-seat/linux-systemd/llama-swap-entry.yaml
 // expresses residency with a legacy `groups: {persistent: true}` block, which is the
 // shape the reference box's llama-swap uses. Every template in this repo has moved to
-// `matrix:` — and `groups: persistent:true` was measured FAILING on the Qube, where
+// `matrix:` — and `groups: persistent:true` was measured FAILING on <node-b>, where
 // it silently degraded the memory stack to dense-only — so residency here is a matrix
 // membership instead: the renderer joins this seat to the residents set and gives it
 // a high evict cost. TestEntryMatchesTheReferenceTemplate keeps the two in step on

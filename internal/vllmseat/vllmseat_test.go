@@ -178,7 +178,7 @@ func TestArtifactsLeaveNoTokens(t *testing.T) {
 // reference, so the two can drift. Everything EXCEPT residency must agree: the
 // reference expresses residency with a legacy `groups: {persistent: true}` block and
 // the renderer uses a matrix membership instead (groups' persistent:true was measured
-// FAILING on the Qube, silently degrading the memory stack to dense-only).
+// FAILING on <node-b>, silently degrading the memory stack to dense-only).
 func TestEntryMatchesTheReferenceTemplate(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join(templatesDir(), "llama-swap-entry.yaml"))
 	if err != nil {

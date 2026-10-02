@@ -24,11 +24,13 @@
 # Every knob is overridden from seat.env (SEAT_* variables) without editing this file. The values
 # below are placeholders for a generic box; the operator's real ones live in seat.env, next to the
 # harness's config.json `kv_cache_server` block, which is what `offload_status` reports — keep them
-# in agreement (the status note says so).
+# in agreement (the status note says so). Path defaults (env file, log, venv, work directory) derive from the
+# directory the scripts sit in, so a copy installed anywhere keeps its own.
 set -u
-CFG="${1:-${SEAT_ENV:-/root/g7/seat.env}}"   # env file as $1 (wsl.exe passes no environment through), else SEAT_ENV, else the default
+HERE="$(cd "$(dirname "$0")" && pwd)"
+CFG="${1:-${SEAT_ENV:-$HERE/seat.env}}"   # env file as $1 (wsl.exe passes no environment through), else SEAT_ENV, else the default
 [ -f "$CFG" ] && . "$CFG"
-LOG="${SEAT_LOG:-/root/g7/seat.log}"
+LOG="${SEAT_LOG:-$HERE/seat.log}"
 MODEL="${SEAT_MODEL:-RedHatAI/Qwen3.8-27B-INT4}"
 NAME="${SEAT_NAME:-qwen3.8-27b-vllm}"
 PORT="${SEAT_PORT:-18797}"
@@ -37,7 +39,7 @@ MP_PORT="${SEAT_MP_PORT:-18796}"
 # 0.0.0.0:8080 - on a WSL2 distro in mirrored networking that is the HOST's LAN + tailnet, and 8080 is somebody else's port on
 # every box in this fleet (measured 2026-09-18: the production MP server logged `Uvicorn running on http://0.0.0.0:8080`).
 # Loopback only, on its own port (reference pairing 18797 engine / 18796 MP ZMQ / 18790 MP HTTP — 18790 is a listed safe pick
-# on every port file of the fleet; 18793 is the Qube's LiteLLM reservation); seat.env overrides it.
+# on every port file of the fleet; 18793 is <node-b>'s LiteLLM reservation); seat.env overrides it.
 MP_HTTP_PORT="${SEAT_MP_HTTP_PORT:-18790}"
 # SEAT_L1_GB default 2 for a seat with no measured value (register B-02; RSS ≈ L1 + 1.1 GiB). Measured seats set it in
 # seat.env: the pair 8 (2 starved its staging on 2026-09-21), the three-card flagship 16.
@@ -46,8 +48,8 @@ CHUNK="${SEAT_CHUNK:-784}"
 # The cache server (L2) is OPT-IN: empty = same-box tier only. `${VAR-default}` (no colon) so that
 # SEAT_L2= in seat.env is an explicit "off", not a fall-through to a default.
 L2="${SEAT_L2-}"
-VENV="${SEAT_VENV:-/root/g7/vllm-env}"
-WORK="${SEAT_WORKDIR:-/root/g7}"
+VENV="${SEAT_VENV:-$HERE/vllm-env}"
+WORK="${SEAT_WORKDIR:-$HERE}"
 # The MP server unit is per seat stack (default lmcache-mp). A scratch/benchmark stack in the same box MUST use
 # another unit name and port: on 2026-09-03 a benchmark arm on the seat's port and unit made llama-swap's health
 # check pass against the arm, so other sessions' contracts were served by an engine without the tool-call flags,
@@ -72,7 +74,7 @@ case "$KV_POLICY" in
   *) echo "seat_fg: REFUSING to start — SEAT_KV_LOAD_FAILURE_POLICY=$KV_POLICY (want recompute, fail, or empty)"; exit 1 ;;
 esac
 
-# fs_native over a network share (measured 2026-09-04: the Lenovo tmpfs over SMB 3.1.1 recovers a 23.7k-token prefix
+# fs_native over a network share (measured 2026-09-04: the <node-c> tmpfs over SMB 3.1.1 recovers a 23.7k-token prefix
 # in 2.6-2.9 s at fp16 and 0.80 s at fp8 KV, vs 3.8 / 0.92 s through Valkey). The share must be mounted BEFORE the
 # MP server opens its base_path, and a mount that fails must stop the seat: an unmounted base_path is a local
 # directory the adapter happily writes to, so the seat looks healthy and the cache server holds nothing.

@@ -370,7 +370,7 @@ func TestStatusReportsKVCacheServer(t *testing.T) {
 	}
 	cfg := config.Default()
 	// A closed local port: declared, valid, and provably unreachable within the 1 s dial.
-	binding := &config.KVCacheServer{Enabled: true, Address: "127.0.0.1:1", Seat: "qwen3.8-27b-vllm", KeyPrefix: "qube-seat-v7"}
+	binding := &config.KVCacheServer{Enabled: true, Address: "127.0.0.1:1", Seat: "qwen3.8-27b-vllm", KeyPrefix: "seat-v7"}
 	cfg.KVCacheServers = config.KVCacheServers{binding}
 	cfg.VLLMSeats = []string{"qwen3.8-27b-vllm"}
 	on := kvCacheServerView(context.Background(), cfg)
@@ -382,7 +382,7 @@ func TestStatusReportsKVCacheServer(t *testing.T) {
 		t.Fatalf("one binding must be listed, got %v", on["bindings"])
 	}
 	row := rows[0]
-	if row["seat"] != "qwen3.8-27b-vllm" || row["store"] != "valkey" || row["chunk_size"] != 784 || row["l1_staging_gb"] != 2 || row["key_prefix"] != "qube-seat-v7" {
+	if row["seat"] != "qwen3.8-27b-vllm" || row["store"] != "valkey" || row["chunk_size"] != 784 || row["l1_staging_gb"] != 2 || row["key_prefix"] != "seat-v7" {
 		t.Fatalf("enabled binding row wrong: %v", row)
 	}
 	if row["reachable"] != false || row["reachable_error"] == nil {
@@ -410,7 +410,7 @@ func TestStatusListsEveryBindingAndTheUnboundSeats(t *testing.T) {
 	cfg := config.Default()
 	cfg.VLLMSeats = []string{"pair", "trio", "quiet"}
 	cfg.KVCacheServers = config.KVCacheServers{
-		{Enabled: true, Store: "fs_native", Address: "/mnt/kv/pair", ChunkSize: 1568, KeyPrefix: "qube-pair-fp8", Seat: "pair", KVDtype: "fp8", TensorParallel: 2},
+		{Enabled: true, Store: "fs_native", Address: "/mnt/kv/pair", ChunkSize: 1568, KeyPrefix: "pair-fp8", Seat: "pair", KVDtype: "fp8", TensorParallel: 2},
 		{Seat: "trio", Storeless: true, Reason: "three-stage pipeline seat: no L2 layout works"},
 	}
 	v := kvCacheServerView(context.Background(), cfg)
@@ -421,7 +421,7 @@ func TestStatusListsEveryBindingAndTheUnboundSeats(t *testing.T) {
 	if len(rows) != 2 {
 		t.Fatalf("every binding is listed, got %v", v["bindings"])
 	}
-	if rows[0]["seat"] != "pair" || rows[0]["address"] != "/mnt/kv/pair" || rows[0]["key_prefix"] != "qube-pair-fp8" ||
+	if rows[0]["seat"] != "pair" || rows[0]["address"] != "/mnt/kv/pair" || rows[0]["key_prefix"] != "pair-fp8" ||
 		rows[0]["kv_dtype"] != "fp8" || rows[0]["tensor_parallel"] != 2 {
 		t.Errorf("the pair's own store dir and namespace must be reported: %v", rows[0])
 	}
@@ -498,9 +498,9 @@ func TestFleetViewPublishesServedModelsAndUtilization(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"node_id": "known-node", "agent_enabled": true, "agent_seat": "offload-e4b",
 			"agent_seat_resident": true, "agent_ctx_tokens": 8192, "queue_depth": 0,
-			"served_models":   []string{"offload-e4b"},
-			"gpu_util_pct":    42,
-			"gpu_util_known":  true,
+			"served_models":  []string{"offload-e4b"},
+			"gpu_util_pct":   42,
+			"gpu_util_known": true,
 		})
 	}))
 	defer known.Close()
@@ -550,7 +550,7 @@ func TestFleetViewPublishesServedModelsAndUtilization(t *testing.T) {
 	}
 }
 
-// TestStatusFleetLocalSeatWarmVLLMReportsItsWindow: the Qube's agent-pool seat
+// TestStatusFleetLocalSeatWarmVLLMReportsItsWindow: <node-b>'s agent-pool seat
 // is vLLM behind llama-swap — no /props (404) — so a WARM seat reported
 // `ctx_probe_error: HTTP 404` on every status call before 0.113.14. The window
 // vLLM does publish, max_model_len on its own /v1/models, must come back as
