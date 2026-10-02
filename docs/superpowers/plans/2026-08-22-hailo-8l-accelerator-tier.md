@@ -2,13 +2,13 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Give the offload-harness a `hailo-8l` *accelerator* that coexists with a box's GPU tier, so the OptiPlex 7060 runs `blackwell-8` + `hailo-8l` and Claude's `offload_*` vision calls for face identity, object detection, re-id, depth, low-light and image embeddings run on the NPU through a harness-spawned HTTP sidecar.
+**Goal:** Give the offload-harness a `hailo-8l` *accelerator* that coexists with a box's GPU tier, so `<node-e>` runs `blackwell-8` + `hailo-8l` and Claude's `offload_*` vision calls for face identity, object detection, re-id, depth, low-light and image embeddings run on the NPU through a harness-spawned HTTP sidecar.
 
 **Architecture:** An accelerator is ADDITIVE to the GPU tier, never a replacement: `profile` stays one string everywhere and a new `accelerators: []` list rides beside it (Verdict → installed.json → config.json). `profiles.json` gains a top-level `accelerators` map (separate from `profiles`, so every test that enumerates profiles is untouched). The Hailo repo's runtime gets a tiny stdlib HTTP wrapper (`server/http_server.py`, self-exits on idle); the harness gets `internal/hailoclient` (a `nimclient`-shaped client + an on-demand `Sidecar` manager) and seven gated `offload_*` tools mirroring `handleNIM` (direct handlers, not the pipeline — no cache/ledger coupling in v1). OCR keeps its GPU path and gains `engine:"npu"`.
 
 **Tech Stack:** Go 1.26 (`github.com/dmmdea/offload-harness`, `modelcontextprotocol/go-sdk`), PowerShell 5.1/7 (installer, dot-source test seam), Python 3.11 stdlib `http.server` (sidecar), openpyxl (tier matrix).
 
-**Spec:** Decisions locked by the operator 2026-08-22, recorded in `~/.claude/plans/optiplex7060-editor-rig-plan.md` row C3 and mem0 `76c64d48`. Recon (file:line map of the tier system) in the same row.
+**Spec:** Decisions locked by the operator 2026-08-22, recorded in the operator's editing-rig plan, row C3, and mem0 `76c64d48`. Recon (file:line map of the tier system) in the same row.
 
 ## Global Constraints
 
@@ -55,7 +55,7 @@
 - Create: `server/test_http_server.py`
 - Create: `hailo-http.cmd`
 - Modify: `README.md` (append section after "## Using it from Claude" equivalent — the "## Installation" section ends the file; append at end)
-- Modify: `P:\Port Directory\optiplex7060-ports.md` (create if absent)
+- Modify: the `<node-e>` ports file in the operator's port ledger (create if absent)
 
 **Interfaces:**
 - Produces (consumed by Task 7): `GET /health` → the `hailo_status()` dict, always HTTP 200. `POST /v1/{face_detect|face_embed|object_detect|person_embed|depth|enhance_low_light|ocr|embed}` with a JSON object body = that tool's keyword arguments → HTTP 200 with the tool's dict (structured `{"error":true,"kind":…}` dicts ALSO return 200 — they are results, mirroring MCP); unknown tool → 404 `{"error":true,"kind":"unknown_tool"}`; non-JSON/non-object body → 400 `{"error":true,"kind":"bad_request"}`. Default bind `127.0.0.1:18813`. Env `HAILO_SIDECAR_IDLE_SEC` (default 300): the process exits 0 after that many seconds with no request.
@@ -327,10 +327,10 @@ harness starts it on demand, so nothing runs when AI features are not in use.
 It refuses to bind anything but loopback — it is not an authenticated service.
 ```
 
-Create/append `P:\Port Directory\optiplex7060-ports.md`:
+Create/append the `<node-e>` ports file in the operator's port ledger:
 
 ```markdown
-# OptiPlex 7060 ports
+# <node-e> ports
 | Port | Owner | Notes |
 |---|---|---|
 | 11436 | llama-swap | hand-started, not persistent |
@@ -340,7 +340,7 @@ Create/append `P:\Port Directory\optiplex7060-ports.md`:
 
 - [ ] **Step 7: Smoke the real launcher (the only step that touches the NPU)**
 
-Run on the Dell after pulling the branch:
+Run on `<node-e>` after pulling the branch:
 `cmd /c "<hailo repo>\hailo-http.cmd --idle-sec 20"` in the background, then
 `curl -s http://127.0.0.1:18813/health` → `"enabled": true`;
 `curl -s -X POST http://127.0.0.1:18813/v1/object_detect -H "Content-Type: application/json" -d "{\"image_path\":\"<a jpg on D:>\"}"` → `{"objects":[…],"count":N}`.
@@ -400,7 +400,7 @@ In `setup/templates/profiles.json`, insert between the `"_fields": {…}` object
         "hailo_timeout_sec": 60,
         "hailo_idle_sec": 300
       },
-      "notes": "Hailo-8L M.2 (HM21LB1C2KAE), HailoRT 4.24.0 + model zoo v2.19.0 hailo8l HEFs — the current matched pair (5.x is the Hailo-10/15 line). Sidecar = harness-spawned on demand over loopback HTTP, self-exits idle (operator decision 2026-08-22: no scheduler, clean box). Measured on the OptiPlex 7060: ArcFace same-person 0.853 vs different ≤0.106; YOLOv8s on-chip NMS; TinyCLIP-61M 512-d. Windows cannot see the device as an NPU (no MCDM driver) — irrelevant to this route."
+      "notes": "Hailo-8L M.2 (HM21LB1C2KAE), HailoRT 4.24.0 + model zoo v2.19.0 hailo8l HEFs — the current matched pair (5.x is the Hailo-10/15 line). Sidecar = harness-spawned on demand over loopback HTTP, self-exits idle (operator decision 2026-08-22: no scheduler, clean box). Measured on <node-e>: ArcFace same-person 0.853 vs different ≤0.106; YOLOv8s on-chip NMS; TinyCLIP-61M 512-d. Windows cannot see the device as an NPU (no MCDM driver) — irrelevant to this route."
     }
   },
 ```
@@ -462,7 +462,7 @@ acc_ws.row_dimensions[ar + 1].height = 48
 - [ ] **Step 5: Regenerate the matrix (close Excel first) and verify the sheet**
 
 Run: `python "<ecosystem>/generate-tier-matrix.py" <trees>/harness-hailo/setup/templates/profiles.json`
-Expected: `saved … sheets: ['GPU Tier x Model Matrix', 'Accelerators', 'Qube Live Seats', 'llama-swap Roster', 'Tiers & Doctrine']`.
+Expected: `saved … sheets: ['GPU Tier x Model Matrix', 'Accelerators', 'Workstation Live Seats', 'llama-swap Roster', 'Tiers & Doctrine']`.
 Run: `python -c "import openpyxl; ws=openpyxl.load_workbook(r'<ecosystem>\Ecosystem\Arquitechture\2026-08-16_tier-model-matrix.xlsx')['Accelerators']; print(ws['A2'].value, '|', ws['C2'].value)"`
 Expected: `hailo-8l | face_detect, face_embed, object_detect, person_embed, depth, enhance_low_light, image_embed`.
 
@@ -1656,13 +1656,13 @@ Expected: all green; semgrep exit 0 (exit 2 = the scanner broke, investigate, ne
 
 ---
 
-### Task 10: Deploy to the OptiPlex 7060 and verify end-to-end
+### Task 10: Deploy to `<node-e>` and verify end-to-end
 
 **Files:** none in-repo (a capability report may be added under `docs/tiers/reports/` later; accelerators have no tier page by design).
 
-- [ ] **Step 1: Build and ship the harness exe** — on Qube: `go build -o offload-harness.exe .` in the merged `main` checkout; `scp offload-harness.exe <user>@<node>:'D:/offload-harness/offload-harness.exe'`; verify `& D:\offload-harness\offload-harness.exe --version` → `local-offload 0.81.0`.
+- [ ] **Step 1: Build and ship the harness exe** — on `<node-b>`: `go build -o offload-harness.exe .` in the merged `main` checkout; `scp offload-harness.exe <user>@<node>:'D:/offload-harness/offload-harness.exe'`; verify `& D:\offload-harness\offload-harness.exe --version` → `local-offload 0.81.0`.
 
-- [ ] **Step 2: Pull the Hailo repo on the Dell** — `git -C <hailo repo> pull` → `hailo-http.cmd` present.
+- [ ] **Step 2: Pull the Hailo repo on `<node-e>`** — `git -C <hailo repo> pull` → `hailo-http.cmd` present.
 
 - [ ] **Step 3: Seed the existing config (installer never rewrites an existing config.json)** — with Node, as done for the image keys, merge into `%USERPROFILE%\.local-offload\config.json`:
 
@@ -1673,11 +1673,11 @@ and append `"accelerators": ["hailo-8l"]` to `D:\offload-stack\installed.json` (
 
 - [ ] **Step 4: Verify the three things the done-criteria name**
 
-1. `offload_status` (via the harness MCP in a Dell Claude session, or `& D:\offload-harness\offload-harness.exe status` if the CLI exposes it) → `accelerators.hailo-8l.endpoint` present; first call `health_error` (not running) is expected.
+1. `offload_status` (via the harness MCP in a `<node-e>` Claude session, or `& D:\offload-harness\offload-harness.exe status` if the CLI exposes it) → `accelerators.hailo-8l.endpoint` present; first call `health_error` (not running) is expected.
 2. Call `offload_face_embed` on a real photo → `{faces:[{…embedding:[512]}],count:N}`; immediately after, `curl http://127.0.0.1:18813/health` → `loaded_networks` non-empty (the NPU ran, not a cache). Run `offload_object_detect` on a street photo → plausible labels.
 3. `offload_ocr` with `engine:"npu"` → `{text:…}` from PaddleOCR; without `engine` → the GPU path as before.
 4. Wait `hailo_idle_sec` + 10 s → `Get-Process python` no longer lists the sidecar; the next `offload_*` call spawns it again (cold ~2 s). Record both timings.
-5. `tools/list` on a box WITHOUT the accelerator (Qube) is unchanged: `claude mcp` tools count identical to before the upgrade.
+5. `tools/list` on a box WITHOUT the accelerator (`<node-b>`) is unchanged: `claude mcp` tools count identical to before the upgrade.
 
 - [ ] **Step 5: Evidence + records** — evidence file in the scratchpad with the pasted outputs; `docs/systems/accelerators.md` "Verified on" line (commit in a trivial follow-up PR if anything in the doc needs a measured number); clean-ship ledger line; mem0 evidence entry; plan file row C3 → ✅.
 
@@ -1685,7 +1685,7 @@ and append `"accelerators": ["hailo-8l"]` to `D:\offload-stack\installed.json` (
 
 ## Self-Review
 
-**Spec coverage:** (1) schema A → Tasks 3/4/6 (`accelerators` list in Verdict, installed.json, config; `profile` untouched). (2) sidecar + `hailoclient` mirroring `nimclient` → Tasks 1/7. (3) ownership → Task 8 (7 exclusive tools; OCR `engine:npu`; VQA untouched) + ADR/doc in Task 9. Matrix-first → Task 2 precedes all Go. Dell gets both tiers → Task 10. Gaps: none found; ledger accounting for NPU calls is an explicit v1 non-goal recorded in the doc.
+**Spec coverage:** (1) schema A → Tasks 3/4/6 (`accelerators` list in Verdict, installed.json, config; `profile` untouched). (2) sidecar + `hailoclient` mirroring `nimclient` → Tasks 1/7. (3) ownership → Task 8 (7 exclusive tools; OCR `engine:npu`; VQA untouched) + ADR/doc in Task 9. Matrix-first → Task 2 precedes all Go. `<node-e>` gets both tiers → Task 10. Gaps: none found; ledger accounting for NPU calls is an explicit v1 non-goal recorded in the doc.
 
 **Placeholder scan:** every code step carries the code; the two "follow the shape of X" instructions (ADR header, health-payload insertion point) name the exact file and the exact neighbouring symbol to grep.
 
