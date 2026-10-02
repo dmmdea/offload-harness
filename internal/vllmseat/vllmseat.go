@@ -112,12 +112,26 @@ type Spec struct {
 	// order ("25,29,10"). It must list exactly pipeline_parallel stages. Empty = vLLM's
 	// even split.
 	LayerPartition string `json:"layer_partition,omitempty"`
-	// KVCacheMemoryBytes is --kv-cache-memory-bytes: a FIXED KV budget per GPU instead
-	// of a profiled share of each card. It is how a pipeline seat that includes a
-	// DISPLAY card leaves that card room for the desktop: gpu_memory_utilization is one
-	// fraction for every rank, so profiling at the value the other cards can afford
-	// starves the display card (2026-09-04: the desktop fell to a 720p-class mode and
-	// needed a reboot).
+	// KVCacheMemoryBytes is --kv-cache-memory-bytes: a FIXED KV pool per GPU instead of
+	// a profiled share of each card. vLLM ignores gpu_memory_utilization while it is set
+	// (its CacheConfig documents the override), so the utilization stays declared as the
+	// value a reader and a re-measurement start from, not as the pool's size. Two measured
+	// reasons a seat declares it:
+	//
+	//   - A pipeline seat that includes a DISPLAY card leaves that card room for the
+	//     desktop: gpu_memory_utilization is one fraction for every rank, so profiling at
+	//     the value the other cards can afford starves the display card (2026-09-04: the
+	//     desktop fell to a 720p-class mode and needed a reboot).
+	//   - A utilization-sized pool is measured DURING startup profiling, device-wide, so
+	//     anything that moves the card's memory in that window shrinks it: a cold compile
+	//     cache (profiled activation 0.77 GiB against 0.41 warm) or a memory-stack model
+	//     loading beside the engine. Below one max_model_len request the start fails ("To
+	//     serve at least one request..."), reproduced on an empty card with the embedder
+	//     fired about 50 s in, and seen three times in the ampere-16 lane seat's own log.
+	//     That seat therefore starts with the pool its warm start sized (register A-129).
+	//
+	// Both launches render it: windows-wsl through SEAT_EXTRA_ARGS, linux-systemd through
+	// the run script's __KV_POOL__ token.
 	KVCacheMemoryBytes int64 `json:"kv_cache_memory_bytes,omitempty"`
 	// Launch selects the artifact set, because a seat is started differently on a
 	// Linux node and on a Windows box whose engine lives in WSL. Empty = the
@@ -603,11 +617,12 @@ func (s Spec) validate(tier string, lane bool) error {
 	req(s.TensorParallel >= 0, fmt.Sprintf("tensor_parallel %d cannot be negative", s.TensorParallel))
 	req(s.PipelineParallel >= 0, fmt.Sprintf("pipeline_parallel %d cannot be negative", s.PipelineParallel))
 	req(s.KVCacheMemoryBytes >= 0, fmt.Sprintf("kv_cache_memory_bytes %d cannot be negative", s.KVCacheMemoryBytes))
-	if s.pipelineParallel() > 1 || s.KVCacheMemoryBytes > 0 {
-		// The linux-systemd run script renders neither the pipeline flags nor the extra
-		// arguments, so a seat there would silently run as something else. Refuse it.
+	if s.pipelineParallel() > 1 {
+		// The linux-systemd run script renders no pipeline flags, so a pipeline seat there
+		// would silently run as a single-card seat. Refuse it. (kv_cache_memory_bytes is
+		// NOT in this check: both launches render it, the linux script through __KV_POOL__.)
 		req(s.launch() == LaunchWindowsWSL, fmt.Sprintf(
-			"pipeline_parallel / kv_cache_memory_bytes are rendered only by the %s launch, not %q", LaunchWindowsWSL, s.launch()))
+			"pipeline_parallel is rendered only by the %s launch, not %q", LaunchWindowsWSL, s.launch()))
 	}
 	if s.ChatTemplate != "" || s.EnablePromptTokensDetails {
 		// Same reason as above: only the windows-wsl env renders the argument tail.
@@ -928,6 +943,7 @@ func (s Spec) tokens(r Runtime) map[string]string {
 		"__MODEL_PATH__":       s.ModelPath,
 		"__MAX_MODEL_LEN__":    strconv.Itoa(s.MaxModelLen),
 		"__GPU_UTIL__":         strconv.FormatFloat(s.GPUMemoryUtilization, 'g', -1, 64),
+		"__KV_POOL__":          s.kvPoolArgs(),
 		"__MAX_NUM_SEQS__":     strconv.Itoa(s.MaxNumSeqs),
 		"__MAX_BATCHED__":      strconv.Itoa(s.MaxBatchedTokens),
 		"__KV_DTYPE__":         s.KVCacheDtype,
@@ -958,6 +974,16 @@ func (s Spec) pipelineParallel() int {
 		return s.PipelineParallel
 	}
 	return 1
+}
+
+// kvPoolArgs is the linux-systemd run script's `--kv-cache-memory-bytes N` argument, or ""
+// when the seat is utilization-sized. The empty case renders a double space in the script,
+// which bash ignores; it must never render the flag with 0 (vLLM would pin an empty pool).
+func (s Spec) kvPoolArgs() string {
+	if s.KVCacheMemoryBytes > 0 {
+		return "--kv-cache-memory-bytes " + strconv.FormatInt(s.KVCacheMemoryBytes, 10)
+	}
+	return ""
 }
 
 // partitionStages counts LayerPartition's stages (0 when unset).

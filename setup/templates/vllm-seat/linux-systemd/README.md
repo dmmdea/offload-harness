@@ -37,7 +37,7 @@ What the pattern buys, measured on the reference box (NVIDIA A2 16 GB, `ampere-1
 | file | role |
 |---|---|
 | `vllm-seat.service` | the persistent unit (edit user, paths, unit name) |
-| `vllm-seat-run.sh` | `ExecStart`: environment + the measured launch line; change the line here, `systemctl restart` the unit |
+| `vllm-seat-run.sh` | `ExecStart`: environment + the measured launch line (including the tier's fixed KV pool, `--kv-cache-memory-bytes`, when it declares one); change the line here, `systemctl restart` the unit |
 | `vllm-seat-cmd.sh` | llama-swap `cmd`: `systemctl reset-failed` + `start`, then block while the unit is active |
 | `vllm-seat-cmdstop.sh` | llama-swap `cmdStop`: `systemctl stop` (a real stop, so the unload frees the card) |
 | `50-llama-swap-vllm-seat.rules` | polkit: the llama-swap user may start/stop/restart/reset-failed THAT unit only |
@@ -58,6 +58,13 @@ What the pattern buys, measured on the reference box (NVIDIA A2 16 GB, `ampere-1
   `seat_config_*` row fields are absent for vLLM seats.
 - **llama-swap's own restart runs `cmdStop`** (it stops every loaded model on shutdown) — a config edit costs one engine
   reload; the preload hook re-attaches on start.
+- **A utilization-sized KV pool can fail a start that a warm one passes.** vLLM measures the pool during startup profiling,
+  device-wide, so a cold compile cache (profiled activation 0.77 GiB against 0.41 warm) or another model loading on the card in
+  that window shrinks it, and below one `--max-model-len` request the start fails (`To serve at least one request...`; ADR 0049
+  Amendment 6, register A-129: reproduced on an empty card with an embedder fired about 50 s in, and seen three times in a
+  production seat's log). A seat that shares its card declares `kv_cache_memory_bytes` in the tier table and the run script
+  carries it as `--kv-cache-memory-bytes N`; vLLM then ignores `--gpu-memory-utilization`. Pin the pool a warm start sized, and
+  re-measure the load beside the co-resident models whenever the pool, the utilization, the sequence count or the batch changes.
 - **Text-only trims the footprint**: `--limit-mm-per-prompt '{"image":0,"video":0}'` on a multimodal checkpoint dropped the
   weights from 5.11 to 4.48 GiB and removed the encoder-cache reservation; measure the pool from the `GPU KV cache size`
   banner at the utilization you intend to ship, never from arithmetic alone.
