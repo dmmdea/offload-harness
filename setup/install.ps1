@@ -737,6 +737,14 @@ function Merge-ConfigSeed {
         })
       return ,([object[]]$out)
     }
+    if ($Value -is [System.Management.Automation.PSCustomObject]) {
+      # A named family block (imagegen_families / gen_edit_families) is an OBJECT of strings, arrays and
+      # scalars: recurse so a path token inside it expands exactly like a top-level seed value. Parity copy
+      # of tierseed.expand's map case; both suites load internal/tierseed/testdata/nested-expand-parity.json.
+      $o = [ordered]@{}
+      foreach ($pp in $Value.PSObject.Properties) { $o[$pp.Name] = Expand-SeedValue -Value $pp.Value -HomeFwd $HomeFwd }
+      return [pscustomobject]$o
+    }
     return $Value
   }
   # vae_mode is a seed-only DIRECTIVE, not a config key: tierseed.Resolve translates it

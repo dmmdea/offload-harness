@@ -482,5 +482,68 @@ foreach ($t in @('blackwell-3x16', 'blackwell-8', 'ampere-8', 'amd-gcn')) {
 }
 Assert ($null -eq $profiles.cpu.config_seed -or $null -eq $profiles.cpu.config_seed.PSObject.Properties['compose_script']) 'cpu tier seeds no compose lane'
 
+# --- A-132: seed placeholders expand INSIDE objects (a named image family is an object) ---
+# Expand-SeedValue used to substitute __OFFLOAD_HOME__ / __EXE__ in strings and string arrays only,
+# so a path token inside a family block shipped as the literal token: a config that loads fine and
+# fails at render. tierseed.expand (Go) is the authoritative rule; this is its parity copy, and both
+# suites load the SAME fixture (internal/tierseed/testdata/nested-expand-parity.json).
+Write-Host ""
+Write-Host "== A-132: nested placeholder expansion (parity with tierseed.expand) =="
+function Get-SeedCanon {
+  param($V)
+  if ($null -eq $V) { return 'null' }
+  if ($V -is [string]) { return ($V | ConvertTo-Json -Compress) }
+  if ($V -is [bool]) { if ($V) { return 'true' } else { return 'false' } }
+  if ($V -is [System.Array]) { return '[' + ((@($V) | ForEach-Object { Get-SeedCanon $_ }) -join ',') + ']' }
+  if ($V -is [pscustomobject]) {
+    $parts = @($V.PSObject.Properties.Name | Sort-Object { $_ } | ForEach-Object { ('"' + $_ + '":') + (Get-SeedCanon $V.$_) })
+    return '{' + ($parts -join ',') + '}'
+  }
+  return [string]::Format([cultureinfo]::InvariantCulture, '{0}', $V)
+}
+$repoRoot = Split-Path -Parent $setupDir
+$fx = Get-Content -Raw (Join-Path (Join-Path (Join-Path (Join-Path $repoRoot 'internal') 'tierseed') 'testdata') 'nested-expand-parity.json') | ConvertFrom-Json
+$fxText = Merge-ConfigSeed -ConfigText '{"model":"x"}' -Seed $fx.seed -OffloadHome $fx.home
+$fxObj = $fxText | ConvertFrom-Json
+foreach ($name in @($fx.expected.PSObject.Properties.Name)) {
+  Assert ((Get-SeedCanon $fxObj.$name) -ceq (Get-SeedCanon $fx.expected.$name)) "parity fixture: '$name' expands exactly as tierseed.expand does"
+}
+Assert (-not ($fxText -match '__[A-Z0-9_]+__'))                              'parity fixture: no placeholder survives anywhere, objects included'
+Assert ($fxText -match '"one_element":\s*\[')                                'parity fixture: a 1-element array inside an object stays a JSON array'
+Assert ($fxText -match '"empty_array":\s*\[\s*\]')                           'parity fixture: an empty array inside an object stays a JSON array'
+Assert ($fxText -match '"empty_object":\s*\{\s*\}')                          'parity fixture: an empty object inside an object stays a JSON object'
+$fam = $fxObj.imagegen_families.'fam-a'
+Assert ($fam.commercial_use -is [bool] -and $fam.off -is [bool] -and $fam.off -eq $false) 'parity fixture: booleans inside an object stay booleans'
+Assert (($fam.imagegen_steps -is [int] -or $fam.imagegen_steps -is [long]) -and $fam.imagegen_steps -eq 8) 'parity fixture: integers inside an object stay numbers'
+Assert ($fam.deeper.again.n -eq 40 -and $fam.deeper.again.p -ceq 'D:/oh/dd')  'parity fixture: an object nested two deep expands'
+# Without -OffloadHome the home token stays (pre-J2 behaviour), __EXE__ still expands - inside objects too.
+$fxNoHome = Merge-ConfigSeed -ConfigText '{"model":"x"}' -Seed $fx.seed
+Assert (($fxNoHome -match '__OFFLOAD_HOME__') -and -not ($fxNoHome -match '__EXE__')) 'nested: without -OffloadHome the home token is left, __EXE__ still expands'
+
+# The shipped consumer: blackwell-8 seeds Z-Image Turbo as a named sdcpp family with its OWN model paths.
+$b8cond = $profiles.'blackwell-8'.config_seed_ram_mid_high
+$b8text = Merge-ConfigSeed -ConfigText $tplText -Seed $b8cond -OffloadHome 'D:/oh'
+$zf = ($b8text | ConvertFrom-Json).imagegen_families.'z-image-turbo'
+Assert ($null -ne $zf)                                                       'blackwell-8 seeds the z-image-turbo family'
+Assert ($zf.imagegen_engine -ceq 'sdcpp' -and $zf.sdcpp_model_kind -ceq 'diffusion') 'z-image-turbo family binds the sdcpp engine, diffusion model kind'
+Assert ($zf.sdcpp_model -ceq 'D:/oh/models/z_image_turbo-Q8_0.gguf')         'z-image-turbo family carries its own diffusion model path under the install home'
+Assert ($zf.sdcpp_vae -ceq 'D:/oh/models/zimage_ae.safetensors')             'z-image-turbo family carries its own VAE path'
+Assert ($zf.sdcpp_llm -ceq 'D:/oh/models/Qwen3-4B-Instruct-2507-Q4_K_M.gguf') 'z-image-turbo family carries its own text-encoder path'
+Assert ($zf.license -ceq 'Apache-2.0' -and $zf.commercial_use -is [bool] -and $zf.commercial_use -eq $true) 'z-image-turbo family records its license pair (Apache-2.0, commercial)'
+Assert ((@($zf.sdcpp_extra_args) -join ' ') -ceq '--vae-tiling --offload-to-cpu --diffusion-fa --max-vram 6.5 --stream-layers') 'z-image-turbo family carries the measured 6.5 GB graph-cut arm'
+Assert (($zf.imagegen_steps -is [int] -or $zf.imagegen_steps -is [long]) -and $zf.imagegen_steps -eq 8 -and $zf.imagegen_cfg -eq 1) 'z-image-turbo family keeps its turbo recipe (8 steps, cfg 1)'
+Assert (($b8text | ConvertFrom-Json).imagegen_family -ceq 'hidream-o1-dev') 'the default image family is unchanged (z-image-turbo is a per-request opt-in)'
+# The overlay gate (Go: TestEveryShippedOverlayLoadsAndValidates), on the installer's side: no seed
+# layer of any tier may leave a placeholder in the config an install writes.
+foreach ($tid in @($profiles.PSObject.Properties.Name)) {
+  foreach ($layerName in @('config_seed', 'config_seed_ram_mid_high')) {
+    $layer = $profiles.$tid.$layerName
+    if ($null -eq $layer) { continue }
+    $layerText = Merge-ConfigSeed -ConfigText '{"model":"x"}' -Seed $layer -OffloadHome 'D:/oh'
+    $left = [regex]::Matches($layerText, '__[A-Z0-9]+(?:_[A-Z0-9]+)*__') | ForEach-Object { $_.Value } | Sort-Object -Unique
+    Assert (@($left).Count -eq 0) "overlay gate: $tid $layerName leaves no placeholder in the installed config ($(@($left) -join ','))"
+  }
+}
+
 if ($failures -eq 0) { Write-Host 'ALL PASS' -ForegroundColor Green; exit 0 }
 Write-Host "FAILURES: $failures" -ForegroundColor Red; exit 1
