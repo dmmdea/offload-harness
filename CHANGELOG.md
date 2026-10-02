@@ -6,6 +6,132 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.159.0] - 2026-10-02 - The ampere-16 vLLM seats move to vLLM 0.30.0 with a pinned KV pool; the compose lane pins HyperFrames 0.8.108
+
+### Fixed — the ampere-16 lane seat starts with a fixed KV pool, so a cold compile cache or a memory-stack model loading mid-start can no longer fail its start; both seats move to vLLM 0.30.0 (registers A-119, A-129)
+
+The lane seat's start failed in production three times (`To serve at least one request...`). Its KV pool was sized by
+utilization (util 0.84), and vLLM measures such a pool during startup profiling, device-wide, so anything that moves the card's
+memory in that window changes it: a cold compile cache profiles a larger activation (0.77 GiB against 0.41 GiB warm), and a
+memory-stack model loading beside the engine shrinks the pool likewise. Either took it below one 32,768-token request. The
+cause was reproduced on an empty card by firing the embedder about 50 s into the start. The seat is now started with the pool
+its warm start sized, and a Linux seat can declare that pool at all (the field existed but only the windows-wsl launch rendered
+it). ADR 0049 Amendment 6 records the evidence.
+
+- **The linux-systemd run script renders `kv_cache_memory_bytes`.** `vllm-seat-run.sh` gains a `__KV_POOL__` token on the
+  launch line: `--kv-cache-memory-bytes N` when the seat declares a pool, empty otherwise, so a seat that declares none renders
+  exactly the flags it did (plus one space). `Validate` used to refuse `kv_cache_memory_bytes` on the linux-systemd launch
+  along with a pipeline; it now refuses only a pipeline there, which that script still renders no flags for. vLLM ignores
+  `gpu_memory_utilization` while a pool is pinned, so the field's comment, the script's header and the linux-systemd README now
+  say so and give the A-129 reason beside the display-card one.
+- **`ampere-16` seeds the pin.** The lane seat declares `kv_cache_memory_bytes` 1,524,713,390 (1.42 GiB, 45,472 tokens as vLLM
+  0.29.0 sized it warm) and `engine_min_version` 0.30.0. Its util 0.84, 4 sequences and 2,048-token batch are unchanged and
+  stay declared as the point the engine's workspace and the support models were measured at. Measured on vLLM 0.30.0 with the
+  pin, four concurrent ~20k-token requests beside the embedder and the reranker: card peak 13,951 of 15,356 MiB (1,405 MiB
+  free), digest-8 8/8 at the 900 s wall, and greedy output identical to 0.29.0 on 20 prompts.
+- **The 35B fast seat declares util 0.855** (was 0.85). vLLM 0.30.0 carries about 0.07 GiB more non-torch memory than 0.29.0
+  and util 0.85 lost 3 KV blocks; 0.855 gives a 96,416-token pool with 1,027-1,037 MiB free under load and digest-8 8/8. It
+  stays sized by utilization: no pin has been measured for it. Its unit is the operator's, so
+  [composite-tier.md](docs/systems/composite-tier.md) now says what the hand copy of the lane seat's run script must change:
+  drop `--kv-cache-memory-bytes` (the pool is the lane seat's) and set `--gpu-memory-utilization 0.855`.
+- **The tier pages print what the table declares.** The seat tables formatted utilization with `%.2f`, which turns 0.855 into
+  0.85; a value that needs a third digit now prints it, and every page that printed two digits is byte-identical. The pool row
+  says the utilization beside it is ignored. `docs/tiers/ampere-16.md` and `docs/tiers/blackwell-3x16.md` are regenerated.
+- **Guards.** `TestAmpere16VLLMSeatDeclaresItsMeasuredBoundLane` pins the pool; a new
+  `TestAmpere16LaneSeatDeclaresTheEngineItWasMeasuredOn` pins the engine version; `ampere16CoResidency` carries an exact pool per
+  seat (0 for a seat measured util-sized), because a smaller or absent pool is the failure and a pool nobody measured beside the
+  support models is the other direction; `TestAmpere16FastSeatDeclaresItsVLLM030Utilization` pins 0.855 exactly (the
+  co-residency ceiling alone would accept a seed left at 0.85); `TestAmpere16LaneSeatRendersItsPinnedPoolIntoTheLaunchLine`
+  renders the committed lane seat through the real template and requires the flag on the `exec vllm serve` command, not in a
+  comment. `vllmseat` tests cover both directions (a pinned seat renders the flag once, an unpinned seat renders none, a pool
+  validates on linux-systemd, a pipeline is still refused there, a negative pool is refused by name) and `tierdocs` tests cover
+  the exact utilization and the pool row on both tables. Each new or tightened test was mutation-checked: the mutant applied,
+  the test failed, and the file was restored byte for byte.
+- **What this does and does not reach.** A fresh install renders the pin. An existing box keeps its unit until
+  `local-offload install vllm-seat` is re-run and the two root steps it prints are taken. The 0.30.0 figures above come from the
+  acceptance arms run on the reference box; this change re-ran none of them, and its gates prove that the table declares them
+  and the template renders them.
+- **Thermal caveat (register A-130).** Sustained decode on the A2 throttles the card, so a tok/s declared for either seat
+  (`agent_seat_tok_s` 7.17, the 35B's 40.8 single-stream and 170 eight-stream) is a cool-card figure. No sustained rate was
+  measured here, and no declared rate changes.
+
+### Changed — the compose lane's pinned HyperFrames moves from 0.8.61 to 0.8.108, with the runner unchanged and one stricter gate
+
+`setup/hyperframes/package.json`, its lockfile and `PINNED_VERSION` in `render/compose-hyperframes.mjs` now name
+HyperFrames 0.8.108 (npm `latest` when measured, published 2026-10-02; 0.8.109 followed 1h40 later) instead of 0.8.61 (2026-09-22). The 47 releases in between were
+read (the GitHub release notes, then the two packages themselves) for anything the runner, its tests or the seven
+vetted templates depend on, and nothing in them needed a runner change. The one behaviour that moves is in the CLI's own
+gate, below. A node keeps working on 0.8.61 only until it runs the new runner: `assertPinnedInstall` refuses any install
+that is not the pin (`CLI_MISSING`, and the `hyperframes (compose runner)` row of `local-offload acceptance`), so each
+node needs the installer's hyperframes step (`npm ci --ignore-scripts` from the new lock, in place; the browser and the
+home directory are kept) before it takes the new runner. The fleet deploy does not run that step: it is done per
+node alongside the deploy that ships this runner (the release's deploy record lists each node's re-install).
+
+- **The pin and its supply chain.** The lock was regenerated from the committed one with `npm install --package-lock-only
+  --ignore-scripts`, so exactly the `hyperframes` entry changed (4 lines): every other entry keeps its version and
+  integrity. The new integrity (`sha512-RvHMA6…80xw==`) equals `npm view hyperframes@0.8.108 dist.integrity`.
+  `npm ci --ignore-scripts` from the committed files installs 72 packages, `npm audit signatures` verified all 72
+  registry signatures and 21 attestations (hyperframes' own SLSA provenance among them) and exits 0, and `npm audit`
+  finds 0 vulnerabilities. `allowScripts` stays `esbuild@0.25.12` alone: it is still the only package in the tree with an
+  install script, and hyperframes itself declares none. The dependency ranges of the two versions are identical. An
+  in-place upgrade of a 0.8.61 install (copy of a scratch install, new `package.json` and lock, `npm ci`, `npm audit
+  signatures`, `npm rebuild esbuild`, `browser`) ended at 0.8.108 with `matches_pin: true` and the existing Chrome kept.
+- **No breaking change reaches the runner.** `lint`, `check`, `render`, `snapshot` and `browser --help` are identical
+  between the versions apart from one sentence of `--page-side-compositing`. The JSON documents of `lint`, `check` and
+  `render --batch` have the same key paths and types on a clean and on a flawed composition (lint findings gain `line` and
+  `column`, which the runner does not read), `snapshot` writes the same file names (`frame-00-at-1s.png`, …) and
+  `browser path` / `--version` print the same shapes. All ten environment variables the runner sets are still read, the
+  update and skills block still sits behind `!hasJsonFlag` (the runner puts `--json` on every call), and
+  chrome-headless-shell is still 152.0.7977.30, so no node downloads a new browser. New upstream commands (`history`,
+  `clean`, `models`) are not on the allowlist and stay refused before a spawn.
+- **Still offline, still no phone-home.** The set of hosts named in the package differs by one placeholder
+  (`document.invalid`). A logging preload on the CLI's Node process (name lookups, `net` connects, `fetch`,
+  `http(s).request`, under the runner's own scrubbed environment) saw only loopback traffic for `lint`, `check`, `render`
+  and `snapshot` of all seven templates and for `--version` and `browser path`, on both versions. The same preload, set to
+  refuse instead of log, caught the `fonts.googleapis.com` request an undeclared family makes (a `title-card` with
+  `Roboto`), so the silence is not a blind spot on that side. Chrome's own page requests are outside the preload's reach;
+  that side rests on the templates' contract (no URL in the page, and a scan of each materialized project found none). The Inter faces the shared font kit vendors are still byte-identical to the producer's
+  embedded ones (all three hashes match; the data moved from `dist/cli.js` to a chunk file).
+- **Determinism holds inside the new version.** The 150-frame `title-card` (1920×1080, 30 fps, `mp4`, software GL) rendered
+  three times per version (`auto`, `auto`, 1 worker): 150 of 150 frames and the whole file identical across the three on
+  0.8.61, and the same on 0.8.108. `captions-bar` (`webm`, 240 frames) at 1, 2, 4, 6, `auto` and `auto` gave 15 of 15
+  identical pairs of decoded frames. Across versions: the three alpha overlays (`callout-label`, `captions-bar`,
+  `lower-third`) decode to identical frames (0 of 180, 240 and 180 differ; the files differ by 2 bytes, because the
+  `hyperframes_version` tag now holds the real version, where 0.8.61 wrote `0.0.0-dev`), and the four opaque `mp4`
+  templates do not (every frame differs: on the `title-card`, PSNR 53.0 to 57.0 dB, mean 54.0, at most 7 levels of a channel
+  on frame 0 and 41 on a later one at the glyph edges, and the radial glow's banding rings land on other pixels). Nothing
+  visible changes; a golden that pins the bytes of an opaque render has to be regenerated.
+- **Render time is flat.** Summed over nine renders (all seven templates, plus the `title-card` three times), the
+  renderer's own time is 212.5 s on 0.8.61 and 221.2 s on 0.8.108 (+4.1 %; per pair of renders from −4.8 % to +16.4 %, the
+  largest being one `title-card` run whose repeat was +0.7 %), and the whole runner call is 330.3 s against 329.7 s. The `title-card` takes 15.4 s
+  (mean of three) against 16.5 s, and 27.6 s against 28.1 s through the whole gated call.
+- **One gate is stricter: `check` fails text that spills out of its box.** `layout/text_box_overflow` is an error on 0.8.108
+  where 0.8.61 reported `canvas_overflow` as a warning and passed (`check` exit 0), so a composition whose text leaves its
+  box now defers `CHECK_FAILED: check exit 1: layout/text_box_overflow: Text extends outside its nearest visual/container
+  box.` where it used to render. It only matters for `html` and `project_dir` (the local doors) and for a template
+  pushed to its limits: the seven shipped templates pass strict `lint` (0 errors, 0 warnings) and `check` on both versions,
+  at their defaults and at every string variable's `maxLength` filled with ordinary prose (the same verdicts on both
+  versions, `lower-third` already fails the check at its limits on both). Only the `title-card` at 80 and 140 characters of
+  `WWWWWWWW` moves (0.8.61 rendered it, and read back the video shows the headline cut at the top and the subtitle at the
+  bottom of the frame; 0.8.108 refuses it). Pass `strict: false` to render such a page anyway.
+- **`captions-bar` was measured again, as the bump step requires.** Its README's Measured section now reads 0.8.108: 0
+  lint findings, `check` passed, VP9 `yuva420p`, 240 frames, 24.0 s at one worker and 27.2 s and 26.7 s at `auto`, 15
+  of 15 identical frame pairs across 1/2/4/6/`auto`/`auto` and identical to the 0.8.61 render, the frame at 1.5 s reads
+  "Captions follow the words", the alpha plane is 0 at 0.3 s, 2.8 s and 7.9 s and tops out at 255 inside each group, and the
+  bar, text and accent line are intact over flat grey and flat white. `hf-seek`, the undocumented event the template reads, is
+  still dispatched.
+- **Tests and docs.** The runner's test fixtures follow `PINNED_VERSION` instead of a literal, the lock-integrity assertion
+  carries the new value, and the pin, the SETUP-AGENT excerpt, ADR 0059 (the gates it depends on were checked again on the new
+  package), the shared font README and the `captions-bar` README name 0.8.108.
+
+Gates: `node --test render/*.test.mjs` 817 tests, 816 pass, 1 skipped (a ComfyUI-checkout test, as before), 0 fail (the 61
+compose tests all pass); `go build ./...` clean; `go test -count=1 ./internal/mediacap/... ./internal/pipeline/...
+./internal/fleetnode/... ./internal/config/...` and the root package pass; `pwsh -File setup/render.tests.ps1` with a freshly
+built binary: 182 PASS, 0 FAIL.
+
+Not in this change: updating the installs already on the nodes (the installer's hyperframes step does it, and the runner
+refuses a node until it has run), a pixel-golden test for the templates, and the Docker render mode.
+
 ## [0.158.3] - 2026-10-02 - The blackwell-8 media seed carries the roster the box runs: fp8 Wan pair on the native loader, fp8mixed edit unet, Qwen-Image-2.1 as an edit family
 
 ### Fixed — a fresh `blackwell-8` install seeds the media roster its reference box runs, not the 2026-08-23 first cut (register A-120)
