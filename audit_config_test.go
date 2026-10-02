@@ -5,9 +5,11 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
+	"github.com/dmmdea/offload-harness/internal/hwdetect"
 	"github.com/dmmdea/offload-harness/internal/tierseed"
 )
 
@@ -289,11 +291,14 @@ func TestAuditConfigSeedOwnsTheRK3588UnconstrainedSeats(t *testing.T) {
 	}
 }
 
+// ramGbOfTier is a RAM size that classifies as each tier, for a stub that must speak with a size too.
+var ramGbOfTier = map[string]int{"min": 8, "low": 32, "mid": 64, "high": 128}
+
 // stubDetectedRAMTier makes the audit see a box of the given RAM tier, whatever machine runs the suite.
 func stubDetectedRAMTier(t *testing.T, tier string) {
 	t.Helper()
 	prev := auditDetectRAMTier
-	auditDetectRAMTier = func() string { return tier }
+	auditDetectRAMTier = func() (string, int, error) { return tier, ramGbOfTier[tier], nil }
 	t.Cleanup(func() { auditDetectRAMTier = prev })
 }
 
@@ -317,7 +322,7 @@ func TestResolveAuditRAMTier(t *testing.T) {
 		{"huge", "mid", "", "", "", true},
 	}
 	for _, c := range cases {
-		got, err := resolveAuditRAMTier(c.flag, func() string { return c.detected })
+		got, err := resolveAuditRAMTier(c.flag, func() (string, int, error) { return c.detected, ramGbOfTier[c.detected], nil })
 		if (err != nil) != c.wantErr {
 			t.Errorf("flag %q detected %q: err=%v, wantErr=%v", c.flag, c.detected, err, c.wantErr)
 			continue
@@ -422,6 +427,88 @@ func TestAuditConfigJSONNamesTheRAMOverlay(t *testing.T) {
 		if rep["ram_tier"] != c.tier || rep["ram_tier_source"] != c.src || rep["ram_overlay"] != c.overl {
 			t.Errorf("flags %v: ram_tier=%v ram_tier_source=%v ram_overlay=%v, want %s / %s / %s",
 				c.flags, rep["ram_tier"], rep["ram_tier_source"], rep["ram_overlay"], c.tier, c.src, c.overl)
+		}
+	}
+}
+
+// A failed RAM probe reads as 0 GB, which classifies as tier min and would pick the base seed with no
+// word said. The audit must refuse and ask for --ram-tier instead of guessing.
+func TestAuditConfigRefusesAFailedRAMProbe(t *testing.T) {
+	prev := auditDetectFacts
+	auditDetectFacts = func() hwdetect.Facts { return hwdetect.Facts{RAMGb: 0} }
+	t.Cleanup(func() { auditDetectFacts = prev })
+	for _, flags := range [][]string{nil, {"--ram-tier", "auto"}} {
+		out, err := auditRAMNode(t, flags...)
+		if err == nil || errors.Is(err, errConfigDrift) || !strings.Contains(err.Error(), "--ram-tier") || !strings.Contains(err.Error(), "0 GB") {
+			t.Fatalf("flags %v: a failed RAM probe must be refused with a pointer to --ram-tier, got %v\n%s", flags, err, out)
+		}
+		if strings.Contains(out, "ram-tier=min") {
+			t.Errorf("flags %v: the audit must not quietly fall back to tier min, got:\n%s", flags, out)
+		}
+	}
+	// A named tier never consults the probe, so a box whose probe fails can still be audited.
+	if out, err := auditRAMNode(t, "--ram-tier", "mid"); err != nil {
+		t.Fatalf("an explicit --ram-tier must not need the probe, got %v\n%s", err, out)
+	}
+	if out, err := auditRAMNode(t, "--ram-tier", "none"); !errors.Is(err, errConfigDrift) {
+		t.Fatalf("--ram-tier none must not need the probe either, got %v\n%s", err, out)
+	}
+}
+
+// The header names the RAM the probe read, so a wrong detection is visible; a named tier has no probe to report.
+func TestAuditConfigHeaderNamesTheDetectedRAM(t *testing.T) {
+	stubDetectedRAMTier(t, "mid")
+	out, err := auditRAMNode(t)
+	if err != nil {
+		t.Fatalf("got %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "ram-tier=mid (detected, 64 GB;") {
+		t.Errorf("the header must name the detected RAM in GB, got:\n%s", out)
+	}
+	out, _ = auditRAMNode(t, "--ram-tier", "mid")
+	if strings.Contains(out, " GB") || !strings.Contains(out, "ram-tier=mid (--ram-tier;") {
+		t.Errorf("a named tier has no detected GB to show, got:\n%s", out)
+	}
+}
+
+// Detection reads THIS machine. Pointed at another node's config (--config, --home, a foreign --goos)
+// without a named tier, the overlay compared is this machine's RAM tier, and the audit says so on stderr
+// (stdout stays the report, JSON included).
+func TestAuditConfigWarnsWhenTheRAMTierIsThisMachinesNotTheNodes(t *testing.T) {
+	stubDetectedRAMTier(t, "mid")
+	for _, flags := range [][]string{nil, {"--ram-tier", "auto"}} {
+		var out string
+		warn := captureStderr(t, func() { out, _ = auditRAMNode(t, flags...) })
+		if !strings.Contains(warn, "warning") || !strings.Contains(warn, "this machine's RAM tier") || !strings.Contains(warn, "--ram-tier") {
+			t.Errorf("flags %v: auditing another node's config on a detected RAM tier must warn, got stderr %q", flags, warn)
+		}
+		if strings.Contains(out, "warning") {
+			t.Errorf("flags %v: the warning belongs on stderr, not in the report:\n%s", flags, out)
+		}
+	}
+	for _, flags := range [][]string{{"--ram-tier", "mid"}, {"--ram-tier", "none"}, {"--ram-tier", "low"}} {
+		if warn := captureStderr(t, func() { auditRAMNode(t, flags...) }); warn != "" {
+			t.Errorf("flags %v: a named tier is the operator's own choice, no warning expected, got %q", flags, warn)
+		}
+	}
+}
+
+// Auditing this very node (config from the environment, this platform) compares the right RAM, so no warning.
+func TestAuditConfigDoesNotWarnForThisMachinesOwnConfig(t *testing.T) {
+	stubDetectedRAMTier(t, "mid")
+	cfg := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(cfg, []byte(`{"tier_profile":"blackwell-8"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LOCAL_OFFLOAD_CONFIG", cfg)
+	for _, flags := range [][]string{nil, {"--goos", runtime.GOOS}} {
+		warn := captureStderr(t, func() {
+			captureStdout(t, func() {
+				_ = runAuditConfig(append([]string{"--root", ".", "--vllm-seat-active", "false"}, flags...))
+			})
+		})
+		if warn != "" {
+			t.Errorf("flags %v: this machine's own config needs no warning, got %q", flags, warn)
 		}
 	}
 }

@@ -361,8 +361,13 @@ with 64 GB of RAM 23 of the 38 rows it called drifted were overlay-carried false
 `--ram-tier none` to compare the base seed alone, `min` or `low` to speak for a smaller box
 (neither has an overlay), or `mid` or `high` to name one explicitly, which is what a node read
 over SSH needs: the auditing machine's RAM is not the node's. An unknown value is refused.
+Detection reads **this** machine only, so when `--config`, `--home` or a `--goos` other than this
+platform's point away from it and `--ram-tier` is not named, the audit prints a warning on stderr
+that the overlay compared is this machine's RAM tier and asks for `--ram-tier` for another node's
+config. A RAM probe that reads 0 GB is refused with the same pointer: 0 GB would classify as `min`,
+and the audit would pick the base seed without saying so.
 Both outputs say which seed was compared. The text header reads
-`ram-tier=mid (detected; base seed + config_seed_ram_mid_high overlay)` or
+`ram-tier=mid (detected, 64 GB; base seed + config_seed_ram_mid_high overlay)` or
 `ram-tier=none (--ram-tier; base seed only, no RAM overlay)`, and `--json` carries `ram_tier`,
 `ram_tier_source` (`detected` or `--ram-tier`) and `ram_overlay` (`config_seed_ram_mid_high` or
 `none`). `--vllm-seat-active auto` runs the installer's own
