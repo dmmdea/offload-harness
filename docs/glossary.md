@@ -129,6 +129,16 @@ grounding would be noise.
 Text is matched as a phrase; numbers are compared by value across locales (`2.354,40` and `2,354.40`
 are one amount), never as substrings of other numbers.
 
+## Leak gate
+
+The test that keeps the names of the operator's machines, people and brands out of this public repository.
+It scans every tracked file and every tracked file name against a list of denied names. The list is a
+secret, so the repository holds only keyed hashes of it (`testdata/leak-gate-digests.json`) and the key lives
+outside the repository: an Actions secret in CI, a key file on a maintainer's machine. Without the key the
+keyed test skips visibly, unless the run requires it (a push, or a pull request from this repository). Not
+to be confused with the older shape-only `TestTrackedTreeCarriesNoOperatorIdentity`, which names no value.
+See [systems/leak-gate.md](systems/leak-gate.md).
+
 ## Ledger
 
 The append-only JSONL record of offload calls and their savings, `fsync`ed per entry. Carries
@@ -232,6 +242,26 @@ Two unrelated meanings, distinguished by context:
 
 The pipeline construction the coding agent uses: nil cache, nil ledger, no shadow capture, no
 escalation. It exists so an agent's internal offload calls leave no trace in savings accounting.
+
+## Reference box
+
+The machine whose measurements a hardware tier's values come from: the seed values in
+`setup/templates/profiles.json`, the figures on the tier's page and its capability report were measured on
+it. The word names a different machine for each tier, so it is never used bare: write "the `<tier>`
+reference box" with a tier id, or use the node letter ([STYLE.md](STYLE.md#privacy), rule V4).
+
+| tier | its reference box |
+|---|---|
+| `ampere-8` | `<node-a>`, the RTX 3070 laptop (8 GB) |
+| `blackwell-16`, `blackwell-2x16`, `blackwell-3x16` | `<node-b>`, the workstation, in three eras: one RTX 5060 Ti until 2026-08-02 (`blackwell-16`, now historical), two cards until 2026-08-31 (`blackwell-2x16`), three cards since (`blackwell-3x16`) |
+| `ampere-6`, `ampere-16` | `<node-c>`, the Linux edge node: an RTX 3050 6 GB until 2026-09-04 (`ampere-6`, now historical), an NVIDIA A2 16 GB since (`ampere-16`) |
+| `blackwell-8` | `<node-e>`, the compact desktop (RTX 5060 8 GB), since 2026-08-19 |
+| `rockchip-rk3588` | `<node-d>`, the RK3588 board |
+| `amd-gcn` | `<node-f>`, the AMD APU mini-PC (Ryzen 5 5625U, Vega 7) |
+| any other tier | none: no machine of that class is in the fleet, so its figures are projected or contributed rather than measured on a fleet machine |
+
+A dated document keeps the era of its own date (rule V3): a sentence from August 2026 about the workstation
+names the tier the workstation was then, not the one it is now.
 
 ## Rigger
 

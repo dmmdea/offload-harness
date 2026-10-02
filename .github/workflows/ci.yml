@@ -6,6 +6,11 @@ on:
   pull_request:
     branches: [main]
 
+# Every job here only reads the repository (checkout, caches and artifacts use
+# their own runtime token). Added with the leak gate, whose key is a secret.
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -55,7 +60,19 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+      # H-55 leak gate (docs/systems/leak-gate.md). TestTrackedTreeCarriesNoDeniedNames
+      # reads the keyed list digest in testdata/ and needs the key. The secret is an
+      # empty string when it does not exist (a fork's pull request; the previous key on
+      # every ordinary run), and the test reads an empty value as "unset", never as a
+      # malformed key. REQUIRED is "1" on a push and on a pull request from this
+      # repository, where a missing key is a failure; on a fork's pull request it is
+      # empty and the test skips visibly (the summary line says "skipped"). The key is
+      # visible to everything this one step runs, so no other step gets it.
       - name: Test
+        env:
+          OFFLOAD_LEAK_GATE_KEY: ${{ secrets.OFFLOAD_LEAK_GATE_KEY }}
+          OFFLOAD_LEAK_GATE_KEY_PREV: ${{ secrets.OFFLOAD_LEAK_GATE_KEY_PREV }}
+          OFFLOAD_LEAK_GATE_REQUIRED: ${{ (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && '1' || '' }}
         run: go test ./...
 
       # resolve_runner_exe (linux-node-swap-launch.sh) is pure/synthetic like the

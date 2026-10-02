@@ -377,9 +377,27 @@ func scanFile(sc *Scanner, tf TrackedFile, fsys FS, max int64, exempt map[exempt
 
 	body := data
 	isPNG := false
+	var raw []byte     // set for a byte-order-marked file: its raw bytes are scanned too
+	var swapped []byte // and its payload read in the other byte order
+	invalid := false
 	switch {
 	case hasUTF16BOM(body):
-		body = decodeUTF16(body)
+		raw = data
+		// A mark that contradicts the payload's real byte order decodes to valid
+		// but foreign-looking text, and the real encoding's NULs split every name in
+		// the raw view; the other order's reading is what shows those names.
+		swapped, _ = decodeUTF16As(data[2:], data[0] != 0xFF)
+		var ok bool
+		if body, ok = decodeUTF16(body); !ok {
+			// A mark with a payload that is not UTF-16 (an odd length, an unpaired
+			// surrogate) is no text the decoder can read: fail closed like any
+			// other unknown binary. Valid or not, the raw bytes are scanned as
+			// well, because a plain ASCII file with a stray mark decodes to other
+			// scripts and would hide its names.
+			invalid = true
+			res.classes.Binaries++
+			failClosed(WhyBinary, "byte-order mark but not valid UTF-16 (the raw bytes were scanned)")
+		}
 	case IsPNG(body):
 		isPNG = true
 		info, perr := ParsePNG(body)
@@ -402,7 +420,7 @@ func scanFile(sc *Scanner, tf TrackedFile, fsys FS, max int64, exempt map[exempt
 	case strings.HasSuffix(strings.ToLower(tf.Path), ".png"):
 		fatal(0, ErrPNGSignature.Error())
 	}
-	if !isPNG && bytes.IndexByte(body[:min(len(body), sniffWindow)], 0) >= 0 {
+	if !isPNG && !invalid && bytes.IndexByte(body[:min(len(body), sniffWindow)], 0) >= 0 {
 		res.classes.Binaries++
 		if !strings.HasSuffix(strings.ToLower(tf.Path), ".png") {
 			failClosed(WhyBinary, "unknown binary (a NUL in the first 8000 bytes; the name was scanned)")
@@ -413,45 +431,107 @@ func scanFile(sc *Scanner, tf TrackedFile, fsys FS, max int64, exempt map[exempt
 		body = bytes.TrimPrefix(body, []byte{0xEF, 0xBB, 0xBF})
 	}
 
-	if sc != nil {
-		hits, long := sc.scanText(body, len(allow) > 0)
-		for _, h := range hits {
-			keep(h, false)
-		}
-		if len(long) > 0 {
-			res.classes.Runs96 += len(long)
-			if ok, stale := exemption(exempt, tf, WhyLongRun); !ok {
-				if stale {
-					fatal(0, staleReason(tf.Path))
-				} else {
-					last := 0
-					for _, line := range long {
-						if line != last {
-							fatal(line, "run over 96 characters")
-							last = line
+	// scanBody runs the matcher (and the shape rules) over one view of the file.
+	scanBody := func(b []byte) {
+		if sc != nil {
+			hits, long := sc.scanText(b, len(allow) > 0)
+			for _, h := range hits {
+				keep(h, false)
+			}
+			if len(long) > 0 {
+				res.classes.Runs96 += len(long)
+				if ok, stale := exemption(exempt, tf, WhyLongRun); !ok {
+					if stale {
+						fatal(0, staleReason(tf.Path))
+					} else {
+						last := 0
+						for _, line := range long {
+							if line != last {
+								fatal(line, "run over 96 characters")
+								last = line
+							}
 						}
 					}
 				}
 			}
 		}
-	}
-	if opts.Shapes {
-		for _, f := range ShapeFindings(tf.Path, body) {
-			res.findings = append(res.findings, f)
+		if opts.Shapes {
+			for _, f := range ShapeFindings(tf.Path, b) {
+				res.findings = append(res.findings, f)
+			}
 		}
 	}
+	scanBody(body)
+	for _, view := range [][]byte{raw, swapped} {
+		if view == nil {
+			continue
+		}
+		// The views of one file can report the same token more than once.
+		first := len(res.findings)
+		nFatals := len(res.fatals)
+		scanBody(view)
+		res.findings = dedupeFrom(res.findings, first)
+		res.fatals = dedupeFatalsFrom(res.fatals, nFatals)
+	}
 	return res
+}
+
+// dedupeFrom drops, from the findings after index first, every finding that
+// repeats one reported for the same path, line, mode and entry.
+func dedupeFrom(fs []Finding, first int) []Finding {
+	type key struct {
+		name       bool
+		line       int
+		mode, id   string
+		text, path string
+	}
+	seen := map[key]bool{}
+	for _, f := range fs[:first] {
+		seen[key{f.Name, f.Line, f.Mode, f.ID, f.Text, f.Path}] = true
+	}
+	out := fs[:first]
+	for _, f := range fs[first:] {
+		k := key{f.Name, f.Line, f.Mode, f.ID, f.Text, f.Path}
+		if !seen[k] {
+			seen[k] = true
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+// dedupeFatalsFrom drops, from the fatals after index first, the ones already
+// reported for the same path, line and reason.
+func dedupeFatalsFrom(fs []Fatal, first int) []Fatal {
+	seen := map[Fatal]bool{}
+	for _, f := range fs[:first] {
+		seen[f] = true
+	}
+	out := fs[:first]
+	for _, f := range fs[first:] {
+		if !seen[f] {
+			seen[f] = true
+			out = append(out, f)
+		}
+	}
+	return out
 }
 
 func hasUTF16BOM(b []byte) bool {
 	return len(b) >= 2 && (b[0] == 0xFF && b[1] == 0xFE || b[0] == 0xFE && b[1] == 0xFF)
 }
 
-// decodeUTF16 decodes a UTF-16 text with a byte-order mark to UTF-8. A dangling
-// odd byte is dropped and an unpaired surrogate becomes U+FFFD (a separator).
-func decodeUTF16(b []byte) []byte {
-	little := b[0] == 0xFF
-	b = b[2:]
+// decodeUTF16 decodes a UTF-16 text with a byte-order mark to UTF-8. ok is false
+// when the bytes are not valid UTF-16: an odd payload (a dangling byte, dropped
+// from the result), or an unpaired surrogate (which becomes U+FFFD, a separator).
+func decodeUTF16(b []byte) (out []byte, ok bool) {
+	return decodeUTF16As(b[2:], b[0] == 0xFF)
+}
+
+// decodeUTF16As decodes a UTF-16 payload (no mark) in the given byte order, with
+// decodeUTF16's validity rule.
+func decodeUTF16As(b []byte, little bool) (out []byte, ok bool) {
+	ok = len(b)%2 == 0
 	units := make([]uint16, 0, len(b)/2)
 	for i := 0; i+1 < len(b); i += 2 {
 		if little {
@@ -460,10 +540,22 @@ func decodeUTF16(b []byte) []byte {
 			units = append(units, uint16(b[i])<<8|uint16(b[i+1]))
 		}
 	}
+	for i := 0; i < len(units); i++ {
+		switch u := units[i]; {
+		case u >= 0xD800 && u < 0xDC00: // a high surrogate needs a low one next
+			if i+1 < len(units) && units[i+1] >= 0xDC00 && units[i+1] < 0xE000 {
+				i++
+			} else {
+				ok = false
+			}
+		case u >= 0xDC00 && u < 0xE000: // a low surrogate alone
+			ok = false
+		}
+	}
 	runes := utf16.Decode(units)
-	out := make([]byte, 0, len(runes))
+	out = make([]byte, 0, len(runes))
 	for _, r := range runes {
 		out = utf8.AppendRune(out, r)
 	}
-	return out
+	return out, ok
 }

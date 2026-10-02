@@ -118,9 +118,36 @@ This is the public canonical repository — everything tracked here is already p
 - Real machine hostnames.
 - Tailnet IP addresses or the tailnet domain name.
 - Local filesystem paths that leak a username or identity.
+- The names of the operator's machines, people or brands, in any spelling or encoding.
 
 Use placeholders instead — `<node-a>`, `<tailscale-ip>`, `<repo-root>`. Operator docs that must
 describe a two-node setup describe it generically.
+
+A test enforces this: the [leak gate](systems/leak-gate.md) fails the build when a tracked file, or a
+tracked file name, holds a denied name. The list it checks is a secret, so the repository carries only
+keyed hashes of it, and a failure names the path and line, never the text. The rules below say how to
+write what the gate leaves you; fix a finding by rewriting the text, never by asking for an exception.
+
+### Naming machines (V1 to V4)
+
+- **V1. A machine is a node letter.** In docs and comments write `<node-a>` through `<node-f>`, or a role
+  phrase that stays true over time ("the workstation", "the Linux edge node", "the RK3588 board"). A role
+  phrase never carries a tier id. In test fixtures a machine id is a per-test label (`node-a`, `node-b`,
+  optionally with a tier suffix) chosen so that sorted output keeps its order; it names no real machine.
+- **V2. A tier id states the hardware class AT THE TIME a dated sentence describes, never a machine's
+  name.** `ampere-8` is a class of hardware, not a host. A tier id goes into a file name only when the
+  document is about that tier.
+- **V3. Dated documents keep their own era.** ADRs, dated specs and plans, changelog entries and the frozen
+  roadmap use the letter. Add a tier id only where the original sentence already carried a hardware fact,
+  and take it from that date: never upgrade an old sentence to the machine's current tier. The
+  [glossary](glossary.md#reference-box) lists which machine sat behind each tier, and when.
+- **V4. "Reference box" is never bare.** Write "the `<tier>` reference box" with a tier id, or use the
+  letter. The word names a different machine for each tier; the [glossary](glossary.md#reference-box)
+  defines it per tier.
+
+A test, fixture or document that needs to show a denied name (to feed it to the gate, or to assert it is
+absent) builds it from parts at run time, split inside the word: the gate scans test sources like every
+other file.
 
 ## Keeping docs current
 
