@@ -671,7 +671,7 @@ route unbound (`compose_script: ""`, NOT CONFIGURED). A skipped lane is a legiti
 failure. What the step does:
 
 1. Copies `setup/hyperframes/package.json` + `package-lock.json` (npm `hyperframes`, exact pin,
-   lock integrity `sha512-OZec…FPmw==` for 0.8.61) to `<OFFLOAD_HOME>/hyperframes`.
+   lock integrity `sha512-RvHM…80xw==` for 0.8.108) to `<OFFLOAD_HOME>/hyperframes`.
 2. `npm ci --ignore-scripts`, which installs the lockfile's exact tree with no install script.
 3. `npm audit signatures`, which checks the registry signatures and SLSA provenance. **A failure is
    fatal and the installer stops.** Do not work around it. Surface it to the human, because the
@@ -680,7 +680,7 @@ failure. What the step does:
 5. `node render/compose-hyperframes.mjs browser --hyperframes-dir <dir>`, which runs `browser ensure`
    through the harness runner. The env is scrubbed and HyperFrames' state lands in
    `<dir>/home`. It downloads the CLI's pinned chrome-headless-shell from Chrome for Testing
-   (152.0.7977.30 for 0.8.61; 270 MB on disk on win64) and prints its path.
+   (152.0.7977.30 for 0.8.108, as for 0.8.61; 270 MB on disk on win64) and prints its path.
 6. Seeds `compose_script`, `hyperframes_dir` and `hyperframes_browser_path` into a **fresh**
    config. An existing config is never rewritten; the installer prints the three keys to add by
    hand.

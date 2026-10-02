@@ -41,14 +41,14 @@ const counter = (name) => { const f = join(here, name + ".count"); const n = exi
 const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 const flag = (n) => { const i = argv.indexOf(n); return i >= 0 ? argv[i + 1] : undefined; };
 const sub = argv[0];
-if (sub === "--version") { console.log(b.version || "0.8.61"); process.exit(0); }
+if (sub === "--version") { console.log(b.version); process.exit(0); }
 if (sub === "browser") {
   if (argv[1] === "ensure") { console.log("Path: " + b.browserPath); process.exit(0); }
   console.log(b.browserPath); process.exit(0);
 }
 if (sub === "lint") {
   const l = b.lint || {};
-  console.log(JSON.stringify({ ok: !l.errorCount, errorCount: l.errorCount || 0, warningCount: l.warningCount || 0, infoCount: 0, findings: l.findings || [], filesScanned: 1, _meta: { version: "0.8.61" } }, null, 2));
+  console.log(JSON.stringify({ ok: !l.errorCount, errorCount: l.errorCount || 0, warningCount: l.warningCount || 0, infoCount: 0, findings: l.findings || [], filesScanned: 1, _meta: { version: b.version } }, null, 2));
   process.exit(l.errorCount ? 1 : 0);
 }
 if (sub === "check") {
@@ -112,7 +112,7 @@ function fixture(behavior = {}, probe = probeDoc()) {
   writeFileSync(join(hf, "node_modules", "hyperframes", "package.json"), JSON.stringify({ name: "hyperframes", version: behavior.installed || PINNED_VERSION }));
   const browserPath = join(root, "chrome-headless-shell.exe");
   writeFileSync(browserPath, "chrome");
-  writeFileSync(join(bin, "behavior.json"), JSON.stringify({ browserPath, ...behavior }));
+  writeFileSync(join(bin, "behavior.json"), JSON.stringify({ browserPath, version: PINNED_VERSION, ...behavior }));
   const ffmpeg = join(root, "ffmpeg.exe");
   writeFileSync(ffmpeg, "ffmpeg");
   const ffprobe = join(root, "ffprobe-stub.mjs");
@@ -395,7 +395,7 @@ test("version and browser ops run through the same allowlist and env", () => {
   const fx = fixture();
   let r = fx.run(["version", "--hyperframes-dir", fx.hf]);
   assert.equal(r.status, 0, r.stdout);
-  assert.equal(r.last.version, "0.8.61");
+  assert.equal(r.last.version, PINNED_VERSION);
   assert.equal(r.last.matches_pin, true);
   r = fx.run(["browser", "--hyperframes-dir", fx.hf]);
   assert.equal(r.status, 0, r.stdout);
@@ -439,8 +439,8 @@ test("the runner's pin IS the committed lockfile's pin (one version, three place
   assert.equal(lock.packages["node_modules/hyperframes"].version, PINNED_VERSION);
   assert.equal(lock.packages[""].dependencies.hyperframes, PINNED_VERSION);
   assert.equal(lock.packages["node_modules/hyperframes"].integrity,
-    "sha512-OZeccCLZe7ZsfaAgfLB72mYCqQRQAKv5/WzHZgZRFHgWJggA1+5CxId9o5KsfSccJPrLtPTBAlDwi1e8Q/FPmw==",
-    "the lock carries the registry integrity verified for 0.8.61 — a bump must re-verify it");
+    "sha512-RvHMA6aEHNyBUm9g8fB7UW9kL0UCnqy/7QCWBlCjvMxiyaSeJQqOcTJS1VBPwM/2v49rvK293jdHT5091y80xw==",
+    "the lock carries the registry integrity verified for 0.8.108 — a bump must re-verify it");
   assert.equal(pkg.private, true);
   assert.deepEqual(Object.keys(pkg.dependencies), ["hyperframes"], "exactly one dependency");
   // npm >= 11 blocks dependency install scripts unless package.json approves them, which turns the

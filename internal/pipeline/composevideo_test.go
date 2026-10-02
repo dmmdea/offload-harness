@@ -48,7 +48,7 @@ const out = flag("--out"), result = flag("--result");
 if (mode === "fail") { writeFileSync(result, JSON.stringify({ ok: false, class: "LINT_ERRORS", detail: "2 lint error(s): missing_duration" })); console.log("COMPOSE-FAIL: LINT_ERRORS: 2 lint error(s)"); process.exit(1); }
 if (mode === "tailonly") { console.log("COMPOSE-FAIL: BROWSER_MISSING: pinned chrome-headless-shell not found"); process.exit(1); }
 if (mode === "ok") { mkdirSync(dirname(out), { recursive: true }); writeFileSync(out, "video"); }
-writeFileSync(result, JSON.stringify({ ok: true, engine: "hyperframes", version: "0.8.61", format: flag("--format"),
+writeFileSync(result, JSON.stringify({ ok: true, engine: "hyperframes", version: "0.8.108", format: flag("--format"),
   quality: flag("--quality"), workers: flag("--workers"), template: flag("--template") || "", video_path: out,
   duration_sec: 5, fps: 30, frames: 150, width: 1920, height: 1080, has_alpha: false, has_audio: false, codec: "h264",
   pix_fmt: "yuv420p", render_ms: 21245, lint: { errors: 0, warnings: 1 }, check: { ok: true, findings: [] }, snapshots: [] }));
