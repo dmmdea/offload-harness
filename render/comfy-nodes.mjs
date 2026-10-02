@@ -1,7 +1,7 @@
 // comfy-nodes.mjs — node-class preflight for the render runners: ask the running ComfyUI
 // whether it can build every node class a graph names BEFORE the graph is POSTed.
 //
-// Why (OptiPlex parity audit, 2026-09-23): the Wan 2.2 graph ends in VHS_VideoCombine, a
+// Why (<node-e> parity audit, 2026-09-23): the Wan 2.2 graph ends in VHS_VideoCombine, a
 // custom-node class. On a box without ComfyUI-VideoHelperSuite the POST came back 400
 // `missing_node_type`, the runner died on it through process.exit, and Windows libuv
 // aborted the exit (0xc0000409) — so the caller's defer read as a crash, not as "install

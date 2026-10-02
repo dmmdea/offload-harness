@@ -131,7 +131,7 @@ test("wf-qwen-image-21.mjs's RGBA template constants are what buildSdArgs reuses
   assert.equal(RGBA_PROMPT_SUFFIX, ". The image has alpha channel and the background is transparent.");
 });
 
-// --- Vulkan device auto-pick (2026-09-23 OptiPlex fix): this runner used to pin
+// --- Vulkan device auto-pick (2026-09-23 <node-e> fix): this runner used to pin
 // GGML_VK_VISIBLE_DEVICES=0 whenever unset, which on a box with an enabled
 // integrated GPU pinned the iGPU (Vulkan0 there) instead of the discrete card
 // (Vulkan1) — every render ran 100x slower with no error. These tests fix that
@@ -188,7 +188,7 @@ test("pickDiscreteVulkanDevice: returns the first discrete adapter's index; null
   assert.equal(pickDiscreteVulkanDevice([]), null);
 });
 
-test("resolveVulkanDevice: OptiPlex shape — iGPU at Vulkan0, RTX at Vulkan1 — auto-picks the RTX, never device 0", () => {
+test("resolveVulkanDevice: iGPU-plus-RTX shape — iGPU at Vulkan0, RTX at Vulkan1 — auto-picks the RTX, never device 0", () => {
   const got = resolveVulkanDevice("sd-cli", "", { list: () => TWO_DEVICE_LISTING });
   assert.equal(got, "1");
 });

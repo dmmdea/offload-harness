@@ -19,7 +19,7 @@
 # Verdict: PASS only when all four tasks succeed, every diff applies cleanly and every proof holds; any deferred /
 # failed_verification / refused (400: the node has not opted in) task is a FAIL that names the reason. Measured
 # 2026-09-14 (one task) and 2026-09-15 (t1-t3, 18 / 45 / 48 s on a 4B seat; 10 s for t1 on a 27B seat); t4 is the
-# shape measured on the Aorus 9B seat the same day, where a 1,024-token step budget cut the write mid-argument.
+# shape measured on the <node-a> 9B seat the same day, where a 1,024-token step budget cut the write mid-argument.
 param(
   [string]$Binary = "$PSScriptRoot\..\bin\local-offload.exe",
   [string]$Config = "$env:USERPROFILE\.local-offload\config.json",

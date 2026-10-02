@@ -151,7 +151,7 @@ function applyTrim(ffmpeg, out, seconds) {
 // ships as-is per house content-preservation rule). Either way, `out` at the
 // point of a persisting DEAD_AIR is EITHER genuinely mismatched-container bytes
 // (no trim ran, or it failed) — exactly the "FLAC bytes in a .wav name" finding
-// (R1, 2026-09-23 OptiPlex remediation) — OR a correctly-muxed file that still
+// (R1, 2026-09-23 <node-e> remediation) — OR a correctly-muxed file that still
 // failed content QA. Neither is a result to leave at the caller's requested
 // path, so cleanup removes it unconditionally rather than only in the narrower
 // mismatched-container case. `unlink` is injectable so this decision is unit-

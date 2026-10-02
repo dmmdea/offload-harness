@@ -22,7 +22,7 @@
 //
 // Alpha (D5, ADR 0058): stable-diffusion.cpp's qwen-image-2.1 VAE emits RGBA
 // UNCONDITIONALLY — there is no sd.cpp flag for it, the channel is just always there
-// (binxarn wave session 5d227d30 §3c measured this on an ORDINARY, non-RGBA prompt:
+// (<node-f> wave session 5d227d30 §3c measured this on an ORDINARY, non-RGBA prompt:
 // alpha 243-255, 5.53% of pixels < 255). Left alone, that hands every "opaque" render
 // a partially-transparent PNG a downstream compositor would read wrong. So this
 // runner, not sd-cli, owns the request's `transparent` contract end to end:
@@ -148,7 +148,7 @@ export function parseVulkanDeviceList(text) {
 const DISCRETE_INTEL_ARC_RE = /\barc\b[^0-9]{0,20}\b[ab]\d{3}\b/i;
 
 // isIntegratedGpuName: a known Intel-integrated part — never the adapter to pick
-// for a diffusion render (measured 2026-09-23 on the OptiPlex: 565-608 s/step on
+// for a diffusion render (measured 2026-09-23 on <node-e>: 565-608 s/step on
 // an Intel UHD 630 vs 4.85 s/step on the same box's RTX 5060).
 export function isIntegratedGpuName(name) {
   const n = name || "";
@@ -181,7 +181,7 @@ export function pickDiscreteVulkanDevice(devices) {
 // architecture rather than needing a module-level cache — which would also wrongly
 // leak a stale device across unrelated node:test cases sharing this process.
 //
-// Fixes the OptiPlex defect (2026-09-23, REMEDIATION R8): this runner used to pin
+// Fixes the <node-e> defect (2026-09-23, REMEDIATION R8): this runner used to pin
 // device 0 unconditionally whenever the environment left it unset. On a box with
 // an enabled integrated GPU, ggml-Vulkan enumerates the iGPU FIRST (Vulkan0 =
 // Intel UHD 630, Vulkan1 = the RTX 5060 there), so every render silently ran on

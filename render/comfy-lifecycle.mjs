@@ -242,7 +242,7 @@ export async function reuseVerdict({ api, comfyDir, profile, systemArgv = fetchS
 //
 // `spawn(..., { stdio: "ignore" })` used to discard every line ComfyUI itself ever
 // printed — memory-management decisions, node-level errors, the actual OS error
-// behind a failed render. The Aorus disk-space defect ("[Errno 28] No space left
+// behind a failed render. The <node-a> disk-space defect ("[Errno 28] No space left
 // on device") cost real diagnostic time because the ONLY signal available for a
 // failed production render was the terse /history execution_error JSON; the real
 // error was found only by building a stdout-capturing bypass copy of render/ by
@@ -424,7 +424,7 @@ export async function ensureComfy(opts = {}) {
   if (child && typeof child.pid === "number") {
     try { writeLaunch(comfyDir, { pid: child.pid, ownerPid: process.pid, args: ["main.py", ...flags], profile }); } catch {}
   }
-  // Fail-fast dead-child watchdog (OptiPlex stall, bigger-models-2026-09-24.md
+  // Fail-fast dead-child watchdog (<node-e> stall, bigger-models-2026-09-24.md
   // "Phase 2 round 2" item 4): the poll loop below only ever asked "is the HTTP
   // port open yet?" — a child that never actually started (ENOENT from a bad cwd
   // or a python that does not exist at `py`, which node_child_process reports

@@ -48,7 +48,7 @@ test("throw path: cleanup STILL runs, error propagates", async () => {
 
 // ---- F-38 audit, 2026-09-24: a render failure now carries ComfyUI's own console ----
 // tail, instead of a bare error with no diagnostic beyond the caller's own message
-// (the Aorus disk-space defect took a hand-built stdout-capturing bypass to find).
+// (the <node-a> disk-space defect took a hand-built stdout-capturing bypass to find).
 
 test("throw path: comfyChild present + a captured log => the error is enriched with its tail", async () => {
   const h = harness(); // comfyChild defaults to a truthy fake — we launched ComfyUI ourselves

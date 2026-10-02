@@ -33,8 +33,8 @@
 // output. That silently defeated the whole over-render/trim/dead-air fix above
 // on every fleet node that had not set an explicit ffmpeg_path (config.go's
 // default is the bare name "ffmpeg"; genEnv() always set FFMPEG_PATH=ffmpeg,
-// and existsSync("ffmpeg") is false — reproduced identically on the Lenovo and
-// the Aorus). comfy-music.mjs's main() now calls assertFfmpegAvailable() below
+// and existsSync("ffmpeg") is false — reproduced identically on <node-c> and
+// <node-a>). comfy-music.mjs's main() now calls assertFfmpegAvailable() below
 // BEFORE touching the GPU lock or ComfyUI: a music render nobody can verify is
 // not a usable result, so the lane fails loudly with a typed error instead.
 import { spawnSync } from "node:child_process";
