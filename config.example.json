@@ -206,7 +206,7 @@
   "home": "",
   "state_dir": "",
   "vision_gpu_wait_sec": 90,
-  "memory_stack": ["embeddinggemma","bge-reranker-v2-m3"],
+  "memory_stack": ["embeddinggemma","bge-reranker-v2-m3","embeddinggemma-ams"],
   "embed_model": "embeddinggemma",
   "temperature": 0,
   "max_retries": 1,

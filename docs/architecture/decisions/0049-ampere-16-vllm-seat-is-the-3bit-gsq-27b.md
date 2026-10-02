@@ -28,8 +28,16 @@ date: "2026-09-16"
 > 8 sequences.** The declared 32,768 @ util 0.90 with `max_num_seqs` 32 ran the engine at 14,788 MiB under four
 > concurrent 8k-token requests, so the embedder could not load and every memory write failed for 35 minutes. The seat
 > now declares util 0.87 and `max_num_seqs` 8 (engine peak 13,984 MiB, card peak 14,833 MiB with the embedder and the
-> reranker resident), and the 35B fast-layer seat util 0.85 — see *Amendment 4*. Where this header or Amendment 3
-> says 0.90, Amendment 4 governs.
+> reranker resident), and the 35B fast-layer seat util 0.85 — see *Amendment 4*.
+>
+> **Amendment 5, 2026-10-01 (register A-122b) — the reranker stays resident beside the loaded seat too; the operating
+> point moves to util 0.84 with 4 sequences and a 2,048-token batch.** At util 0.87 with 8 sequences and 4,096 batched
+> tokens the card peaked at 14,717 MiB with 639 MiB free under four concurrent ~20k-token requests, and the memory
+> stack's reranker failed to start beside the loaded seat 7 times. The seat now declares util 0.84, `max_num_seqs` 4 and
+> `max_num_batched_tokens` 2,048 (card peak 13,987 MiB, 1,369 MiB free, both support models resident), the reranker is
+> served at batch and ubatch 2,048 (`--ctx-size 4096` on the one-slot Linux templates), and the default `memory_stack`
+> names the memory authority node's embedder — see *Amendment 5*. Where this header, Amendment 3 or Amendment 4 names an
+> operating point (0.90 with 32 sequences, then 0.87 with 8), Amendment 5 governs.
 
 ## Context — the quant nobody had found
 
@@ -220,6 +228,69 @@ and a direct client past 8 gets llama-swap's 429. Its KV pool holds about one fu
 1.33x), so a second full-window request waits for KV. The 35B's pool falls from 3.73x to 2.05x of its window; the
 2026-09-18 note that the digest set runs with 0 preemptions on the larger pool is not re-measured on the smaller one.
 
+## Amendment 5 — the reranker stays resident beside the loaded seat with about 1 GiB free (operator order, 2026-10-01; register A-122b)
+
+**What happened.** Amendment 4's point (util 0.87, `max_num_seqs` 8, `max_num_batched_tokens` 4,096) was measured with the
+embedder and the reranker resident, and the card held. The operator's order of 2026-10-01 is stricter: the memory stack's
+embedder AND reranker stay resident beside the agent seat with about 1 GiB of the card free. A heavier load, run on the
+reference ampere-16 box under a GPU lease (four concurrent ~20k-token requests where Amendment 4 used 8k, a cold rerank
+issued 8 s into the load, rerank and embed every 2 s, `nvidia-smi` peaks), showed that Amendment 4's point does not meet
+it: the card peaked at **14,717 MiB** of 15,356 MiB (seat 13,860, embedder 460, reranker 378), leaving **639 MiB**, and
+the reranker failed to start beside the loaded seat **7 times** in the node's llama-swap log (`upstream command exited
+prematurely`).
+
+**What was measured** (one load for every row, both support models resident):
+
+| point | result |
+|---|---|
+| util 0.87, 8 sequences, 4,096 batched tokens, reranker at `--ctx-size 8192 --batch-size 4096 --ubatch-size 4096` (Amendment 4) | KV pool 50,176 tokens; card peak **14,717 MiB** (per-process at the peak sample: seat 13,860, embedder 460, reranker 378), headroom 639 MiB. The node's llama-swap log holds 7 undated reranker start failures beside a loaded seat (it carries no timestamps, so they may predate this point) |
+| util 0.85, 4 sequences, 2,048 batched tokens | did not start in that arm: unexplained, probably the previous engine still releasing VRAM; not re-run |
+| **util 0.84, 4 sequences, 2,048 batched tokens, reranker at `--ctx-size 4096 --batch-size 2048 --ubatch-size 2048`** | KV pool 45,472 tokens (29 blocks of 1,568, 1.39x the 32,768 window); card peak **13,987 MiB** (per-process at the peak sample: seat 13,204, embedder 458, reranker 306; nvidia-smi samples the card and the processes separately, so they do not sum exactly), headroom **1,369 MiB**; the four requests finished in **544 s** where the 0.87 point needed 900+ s |
+
+Amendment 4 recorded a KV pool of about 34k tokens for the 0.87 point on 2026-09-30; this load read 50,176 for the same
+declaration, and the two readings are not reconciled here. The 35B fast-layer seat (util 0.85, 8 sequences, 4,096 batched
+tokens) beside the smaller reranker leaves 969 MiB and is unchanged. The point has been live on the reference box since
+2026-10-01 19:31 and was verified there: the seat warm in 52 s, `/v1/rerank` answering 3 of 3 with the seat loaded, a real
+memory search reranked, and 13,565 of 15,356 MiB in use at idle.
+
+**The reranker's sizing.** The memory stack's reranker client truncates every document to 6,000 characters and sends each
+(query, document) pair as one non-causal sequence, which must fit one ubatch and one slot: at most about 1,500-2,000 tokens
+(confirmed by the memory stack's owners). A batch and ubatch of 2,048 cover it, and at that size the reranker holds 306 MiB
+where it held 378. `--ctx-size 4096` is the measured value where the reranker runs on one slot, the two Linux templates. The
+two Windows Blackwell templates start it with `--parallel 4`, and llama.cpp divides `--ctx-size` among its slots, so 4096 there
+would leave 1,024 tokens per slot, below a worst-case pair: they take the batch and ubatch of 2,048 and keep `--ctx-size 8192`,
+2,048 per slot, as before. That choice follows from the slot rule and the measured pair size, not from a run on those
+templates.
+
+**Decision.** `profiles.json` declares the lane seat at util 0.84, `max_num_seqs` 4 and `max_num_batched_tokens` 2,048; the
+32,768 window, `agent_ctx_tokens` and the 35B seat are unchanged. Graph capture and workspaces are sized by the sequence
+count and the batch budget as well as by the utilization share, so the three come down together. Amendment 4 brought the
+sequence count down with the utilization; this amendment brings it down further, with the batch budget, and the arms
+changed all three at once, so how much of the 656 MiB the seat gave back (13,860 to 13,204) belongs to each is not
+separated. Three guards pin the point.
+`TestAmpere16VLLMSeatDeclaresItsMeasuredBoundLane` pins the lane seat's exact values, now including the batch budget;
+`TestAmpere16VLLMSeatsStayAtOrUnderTheirMeasuredCoResidencyPoint` fails when either seat's util, sequence count or batch
+budget rises above its measured point; and `TestEveryTemplateServesTheRerankerAtTheMeasuredSizing` pins the reranker's batch,
+ubatch, context and slot count in every template that renders it. Raising any of them is a re-measurement beside both
+support models, not an edit.
+
+The same measurement found a gap beside the seat. The memory authority node serves its embedder as `embeddinggemma-ams`, which
+the default `memory_stack` (`embeddinggemma`, `bge-reranker-v2-m3`) did not name, so `gpu reserve --unload-seat` and the render
+runner's helper would have unloaded it. The default now lists it, appended so `EmbedModel()`'s fallback to the first element is
+unchanged, in `internal/config` and in `render/gpu-lock.mjs`, and a test keeps the two lists equal
+([gpu-lease.md](../../systems/gpu-lease.md)). The installer's seeded `config.json` keeps its explicit pair: a configured list
+replaces the default, and `llamaswap-pp-cli bind check` reports a `memory_stack` entry the box does not serve as dangling.
+The default covers `gpu reserve --unload-seat` and the render runner's helper only: fleet reclaim (`fleet_reclaim.go`) does
+not read `memory_stack` (it protects llama-swap's ttl -1/0 seats and the configured keep-set), so a ttl-300 embedder is still
+reclaimable there (register C-94).
+
+**Costs recorded.** The lane seat serves at most 4 sequences at once (it declared 8, and 32 before) and llama-swap's
+`concurrencyLimit` for it follows, 8 to 4; the harness's own local run cap defaults to 4, so its runs now reach the limit
+exactly, and a direct client past 4 gets llama-swap's 429. Its batch is 2,048 where it was 4,096, so a long prompt prefills in
+half-size steps. The four ~20k-token requests finished faster (544 s against 900+ s), but single-stream TTFT, the digest-8
+gate and the 4-stream aggregate were measured at the Amendment 3 point (util 0.90) and are not re-run at this one. The KV pool
+is 1.39x the window, where the same load read 1.53x at the 0.87 point.
+
 ## Consequences
 
 - `profiles.json` → `profiles["ampere-16"].vllm_seat` becomes `qwen38-27b-gsq-vllm`, `max_model_len` 49,152,
@@ -236,6 +307,9 @@ and a direct client past 8 gets llama-swap's 429. Its KV pool holds about one fu
   in `measured` as what the seat serves when it has the card to itself.
 - **Amended by Amendment 4:** the operating point is now 32,768 @ util 0.87 with `max_num_seqs` 8 (and the 35B seat at
   util 0.85); the 0.90 / 32 point is kept in `measured` as history.
+- **Amended by Amendment 5:** the operating point is now 32,768 @ util 0.84 with `max_num_seqs` 4 and
+  `max_num_batched_tokens` 2,048 (the 35B seat stays at util 0.85 / 8 / 4,096); the 0.87 / 8 point is kept in `measured`
+  as history.
 - **Not propagated** to blackwell-16 / volta-16. Neither has been measured on its own silicon and both still owe
   a vLLM seat ([ADR 0048](0048-vllm-is-a-first-class-engine-on-every-tier.md) counts the debt).
 

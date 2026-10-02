@@ -50,6 +50,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/llamaclient"
 	"github.com/dmmdea/offload-harness/internal/mediahash"
 	"github.com/dmmdea/offload-harness/internal/mediaops"
+	"github.com/dmmdea/offload-harness/internal/modelaffinity"
 	"github.com/dmmdea/offload-harness/internal/parser"
 	"github.com/dmmdea/offload-harness/internal/placement"
 	"github.com/dmmdea/offload-harness/internal/router"
@@ -264,7 +265,10 @@ func (p *Pipeline) EmbedMemoStats() (embedmemo.Stats, string) {
 
 func New(cfg config.Config, c *llamaclient.Client, ca *cache.Cache, l *ledger.Ledger) *Pipeline {
 	p := &Pipeline{cfg: cfg, client: c, cache: ca, led: l, lastHeal: map[string]time.Time{}, learnHashes: map[string]string{}}
-	p.stt = sttclient.New(cfg.Endpoint, time.Duration(cfg.STTRequestTimeoutSec)*time.Second)
+	// A held card is waited for gpu_wait_ms, like every other GPU door, and the HTTP timeout
+	// only caps that: the lease wait used to BE stt_request_timeout_sec (1,800 s), which is
+	// where the MCP client aborts an idle call (register C-89).
+	p.stt = sttclient.New(cfg.Endpoint, time.Duration(cfg.STTRequestTimeoutSec)*time.Second).WithFenceWait(p.gpuWait())
 	// LO-1: resolve the shared GPU lock path ONCE, the same way the Node render
 	// runners do, so the vision gate watches the exact lock the gen jobs hold.
 	p.gpuLockPath = gpulock.Path(cfg.GPULockPath, cfg.StateDir)
@@ -1130,8 +1134,10 @@ func isContextOverflow(reason string) bool {
 // on the whisper upstream, writes .srt/.txt/.segments.json to MediaDir, and
 // returns {gist, segments[](capped), language, duration_sec, num_segments,
 // *_path}. Any failure (no model / convert / model call / empty) defers to Opus.
-// It force-unloads the upstream after the call (zero-always-warm) unless
-// disabled. params: language (string), hq (bool -> the large-v3 upstream).
+// Zero-always-warm unless disabled: the last call out of a burst frees the upstream
+// (UnloadIfIdle, every model the burst warmed, once), and a call that finishes while
+// another is in line unloads nothing. params: language (string), hq (bool -> the
+// large-v3 upstream).
 func (p *Pipeline) runTranscribe(ctx context.Context, req core.Request, meta core.Meta, start time.Time) core.Result {
 	if p.cfg.STTModel == "" {
 		meta.LatencyMs = time.Since(start).Milliseconds()
@@ -1243,22 +1249,57 @@ func (p *Pipeline) runTranscribe(ctx context.Context, req core.Request, meta cor
 		}
 		tr, terr = p.stt.Transcribe(ctx, model, wav, prm)
 	}
-	// zero-always-warm: free the upstream's VRAM now (best-effort, short timeout).
+	// zero-always-warm: free the upstream's VRAM once the last call of a burst is done
+	// (best-effort, short timeout). UnloadIfIdle, not Unload (register C-91): with several
+	// transcriptions in line an unload after EACH one landed on the next call's inference,
+	// which llama-swap answers "matrix: model unloaded". It sends nothing while another call
+	// is waiting or running, so the last call out is the one that unloads — on either
+	// protocol, whether that last call succeeded or failed, and every model the burst warmed
+	// (a burst can mix stt_model and stt_model_hq, and the last call out knows only its own).
+	// Best-effort means the transcription is never failed for it, not that it is silent: a
+	// model that stays loaded because its unload failed is logged, since the ttl is then the
+	// only thing that will free it.
 	if p.cfg.STTUnloadAfter {
 		uctx, ucancel := context.WithTimeout(context.Background(), 10*time.Second)
-		_ = p.stt.Unload(uctx, model)
+		if uerr := p.stt.UnloadIfIdle(uctx); uerr != nil {
+			log.Printf("transcribe: zero-always-warm unload after a %s call failed (what it could not free stays loaded until its ttl): %v", model, uerr)
+		}
 		ucancel()
 	}
 	if terr != nil {
-		// ErrUpstreamNoSpeech (root-caused 2026-09-23): whisper-server's crash
-		// signature on audio with no speech content — music, tone, near-silence
-		// alike, confirmed NOT a cold-load or loudness effect (sttclient doc
-		// comment has the reproduction). This is semantically the same outcome as
-		// the clean "empty transcript" case just below (no speech found), so it
-		// gets the identical calm defer reason instead of the generic "transcribe
-		// call failed" wording, which reads as an infrastructure failure it is
-		// not. Retrying is deliberately not attempted: the same audio reliably
-		// crashes the server again.
+		// A held card is congestion, not a failure (register C-89): the request waited its
+		// gpu_wait_ms behind a render or an exclusive hold and the fence refused it. Filed
+		// as capacity — the class a delegator re-places and a caller can retry — with the
+		// holder named, and with the error class the ledger groups on. No other door files
+		// a refusal exactly this way; this is the union of two precedents. The agent doors
+		// (runAgentTask, agent_run, the review lane) file reason "gpu busy: ..." and defer
+		// class capacity, and set no error class. The vision tier files error class gpu_busy
+		// and "gpu busy: generation job holds the lock (...)", with no defer class, whenever
+		// the lease is still held when its wait ends (runVisionGen): any live holder, a text
+		// reservation included, whatever the reason text says; a lease refusal on its model
+		// call comes back from the affinity gate and is filed through classifyErr as
+		// "timeout", also with no defer class. Through classifyErr this refusal read
+		// "timeout" too (the lease error carries the word), which nothing can act on.
+		if modelaffinity.IsLeaseRefusal(terr) {
+			meta.LatencyMs = time.Since(start).Milliseconds()
+			meta.ErrClass = "gpu_busy"
+			reason := "gpu busy: " + terr.Error()
+			p.recordDefer(req.Task, meta, len(req.Audio), reason)
+			res := core.Deferf(reason, "", meta)
+			res.DeferClass = core.DeferClassCapacity
+			return res
+		}
+		// ErrUpstreamNoSpeech: the audio had no speech (register C-91). Either the
+		// upstream ANSWERED, successfully, with an empty transcript, or — whisper
+		// protocol only — it crashed on the audio (an empty-body 5xx, the F-35 crash of
+		// 2026-09-23) in a call that ran alone, with no unload sent by this process. Any
+		// other empty-body 5xx can be a model unloaded from under the call, which looks
+		// the same and used to report audio with speech as silent, so sttclient types it
+		// ErrUpstreamVanished instead. The call went through and found nothing to
+		// transcribe, so it is a calm defer rather than the "transcribe call failed"
+		// wording, which reads as an infrastructure failure it is not, and there is
+		// nothing to retry. An upstream that vanished mid-request falls through to the
+		// failure below.
 		if errors.Is(terr, sttclient.ErrUpstreamNoSpeech) {
 			meta.LatencyMs = time.Since(start).Milliseconds()
 			p.recordDefer(req.Task, meta, len(req.Audio), "empty transcript (no speech detected)")
@@ -3167,7 +3208,7 @@ func appendVoiceRecipe(args []string, cfg config.Config) []string {
 }
 
 // genEnv builds the extra env for a GPU-gen child: COMFY_DIR + MEMORY_STACK
-// (invariant 1: the CPU-only models freeLlamaSwap must never unload, sourced from
+// (invariant 1: the models freeLlamaSwap must never unload, sourced from
 // config rather than a buried const).
 //
 // It does NOT carry the lease. Callers append the env returned by acquireMediaLease,

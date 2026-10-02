@@ -198,3 +198,9 @@ Two further facts shaped the design:
   new claim, one a rival is still writing, the old holder back from the dead — is left alone. Found by reading and
   reproduced deterministically; whether it caused any live loss is unproven. Pinned by
   `TestASlowReclaimerNeverDeletesTheClaimTheFirstReclaimerMade` and `TestAClaimBeingWrittenIsNotRemovedAsDebris`.
+- **Extended 2026-10-01 (register C-87):** the memory stack is not CPU-only on every box, so "the CPU memory stack"
+  in the Context table no longer describes it there: it is small and, on the three-card reference box, served on the
+  utility card, and on a single-card tier it shares the render card. That row's zero still stands, because
+  `freeLlamaSwap` keeps the stack by name wherever it runs, and the lease's own unload step now does the same:
+  `gpu reserve --unload-seat` leaves the configured `memory_stack` resident, because mem0 never yields to a lease.
+  See [GPU lease](../../systems/gpu-lease.md).

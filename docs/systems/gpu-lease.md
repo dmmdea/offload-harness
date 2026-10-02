@@ -384,8 +384,16 @@ the lease (the card stays reserved, work keeps routing elsewhere) and exits non-
 `--unload-seat` (requires `--drain`) then frees the cards through `POST /api/models/unload/<model>` (legacy `GET /unload`
 as the fallback): the agent seat, and every other model `/running` lists, except the config's `memory_stack` (the mem0
 embedder and reranker). The stack stays resident and the run prints `kept the memory stack resident`. The operator's
-rule is that mem0 never yields; it sits on the utility card, so unloading it freed nothing a render could use (register
-C-87, 2026-10-01). `render/gpu-lock.mjs` keeps the same set. An empty `memory_stack` means the default pair (`embeddinggemma`, `bge-reranker-v2-m3`); a non-empty list replaces it, so a node whose embedder or reranker has another model name must list every member: an unlisted one is unloaded by `--unload-seat` like any other resident model, and by the render free step like any other tier. If the
+rule is that mem0 never yields. On the three-card reference box it sits on the utility card, so unloading it freed nothing a render could use; on a single-card tier it shares the render card (register
+C-87, 2026-10-01). `render/gpu-lock.mjs` keeps the same set. An empty `memory_stack` means the default set: `embeddinggemma`,
+`bge-reranker-v2-m3` and `embeddinggemma-ams`, the id the memory authority node serves its embedder under (register A-122b:
+the first two did not name it, so a lease cleared it; a name the box does not serve is inert, and `internal/config` and
+`render/gpu-lock.mjs` carry the same list, kept equal by a test). A non-empty list replaces the default rather than adding
+to it, and the installer's seeded `config.json` names the first two, so a node whose embedder or reranker has another
+model name must list every member: an unlisted one is unloaded by `--unload-seat` like any other resident model, and by
+the render free step like any other tier. Fleet reclaim (`fleet_reclaim.go`) does not read `memory_stack`: it keeps
+llama-swap's ttl -1/0 seats and the configured keep-set, so a ttl-300 member of the stack is still reclaimable there
+(register C-94). If the
 per-model route fails, the legacy `GET /unload` is used only when no stack member is resident. It unloads everything,
 whatever `?model=` says, so when the stack is resident or `/running` cannot be read, the reserve fails and names the
 stack. The wrapper form warms the seat back (`GET /upstream/<model>/health`) BEFORE releasing, so the first
@@ -597,7 +605,7 @@ literal that spells the route anywhere else), and it:
 | CLI window probes (`local-agent`, compaction eval) | ctx and the 10-minute cold-start budget | falls back to the configured window, as an unanswered probe always has |
 | seat-pin probe | none (one inspection) | no pin — the honest answer for telemetry |
 | tokenizer (`/tokenize`) | none | fails open for that step and is **not** counted toward the sticky downgrade (`LastFailFenced`); the completion that follows is the request that waits |
-| whisper transcription | the client's timeout | a `timeout`-class defer naming the holder |
+| whisper transcription | `gpu_wait_ms` (90 s by default; zero is one inspection), capped by the client's own timeout (`stt_request_timeout_sec`, 1,800 s) — register C-89, 2026-10-01 | a `capacity` defer (`gpu busy: …`, error class `gpu_busy`) naming the holder |
 | KV-slot lane | none | `409 seat-cold` |
 | fleet chat lane (`POST /fleet/chat` → `/v1/chat/completions`) | the caller's own budget (the request context) and `ChatProxyTimeout` | `503` whose body is the lease refusal ("gpu-lease timeout …"): the caller files it as congestion (`timeout`), never as a broken stack |
 | embedder (`/v1/embeddings`: the kNN pre-filter, `shadow-label`) | the embedder's own timeout | an error the kNN pre-filter fails open on, as on a slow embedder |

@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -21,6 +22,7 @@ import (
 // inference requests crash whisper-server, so the client must serialize them. The fake
 // server records the peak number of in-flight requests; with the mutex it must be 1.
 func TestTranscribeSerializesConcurrentCalls(t *testing.T) {
+	resetClientState(t)
 	var inflight, maxSeen int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		n := atomic.AddInt32(&inflight, 1)
@@ -55,31 +57,38 @@ func TestTranscribeSerializesConcurrentCalls(t *testing.T) {
 	}
 }
 
-// TestTranscribeEmptyBody502IsDescriptive guards that a crash-signature 5xx (empty
-// body) surfaces an accurate, diagnostic error rather than a bare status code.
-func TestTranscribeEmptyBody502IsDescriptive(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusBadGateway) // 502, empty body — the whisper crash signature
-	}))
-	defer srv.Close()
-	tmp := t.TempDir()
-	wav := filepath.Join(tmp, "a.wav")
-	_ = os.WriteFile(wav, []byte("RIFF"), 0o644)
-	c := New(srv.URL, 10*time.Second)
+// TestAnEmptyBody5xxOfACallThatRanAloneIsTheNoSpeechCrash (F-35, 2026-09-23; narrowed by
+// register C-91, whose first cut read every empty-body 5xx as a vanished upstream and whose
+// review put the case that can be told apart back). An empty-body 5xx is llama-swap's bare
+// answer when its connection to the upstream drops mid-request, and whisper.cpp does exit on
+// audio with no speech content, which is exactly that. An unload, a swap or a restart looks
+// the same, but a call that ran ALONE with no unload sent has none of those to blame on this
+// process: it is the crash, the calm no-speech verdict, and a retry would only crash the
+// server again. The calls that did not run alone are in nospeech_test.go.
+func TestAnEmptyBody5xxOfACallThatRanAloneIsTheNoSpeechCrash(t *testing.T) {
+	for _, status := range []int{http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			resetClientState(t)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(status) // an empty body
+			}))
+			defer srv.Close()
+			tmp := t.TempDir()
+			wav := filepath.Join(tmp, "a.wav")
+			_ = os.WriteFile(wav, []byte("RIFF"), 0o644)
+			c := New(srv.URL, 10*time.Second)
 
-	_, err := c.Transcribe(context.Background(), "whisper-stt", wav, DefaultParams())
-	if err == nil {
-		t.Fatal("expected an error on empty-body 502")
-	}
-	if !strings.Contains(err.Error(), "crashed") || !strings.Contains(err.Error(), "empty body") {
-		t.Errorf("empty-body 502 error should be descriptive (crash / no-speech hint); got: %v", err)
-	}
-	// F-35 regression follow-up (2026-09-23): the error must be MACHINE-detectable
-	// as "no speech", not just human-readable, so the pipeline can map it to the
-	// same calm defer the clean empty-transcript case uses instead of surfacing it
-	// as an infrastructure failure.
-	if !errors.Is(err, ErrUpstreamNoSpeech) {
-		t.Errorf("empty-body 502 must wrap ErrUpstreamNoSpeech so callers can errors.Is() it; got: %v", err)
+			_, err := c.Transcribe(context.Background(), "whisper-stt", wav, DefaultParams())
+			if !errors.Is(err, ErrUpstreamNoSpeech) {
+				t.Fatalf("a call that ran alone and got an empty-body %d: err = %v, want ErrUpstreamNoSpeech (the F-35 crash)", status, err)
+			}
+			if errors.Is(err, ErrUpstreamVanished) {
+				t.Errorf("a call that ran alone is the crash, not a vanished upstream: %v", err)
+			}
+			if !strings.Contains(err.Error(), "empty body") {
+				t.Errorf("the error should say what was seen (an empty body); got: %v", err)
+			}
+		})
 	}
 }
 
@@ -120,6 +129,7 @@ func TestBuildMultipartAutoLanguage(t *testing.T) {
 }
 
 func TestTranscribeParsesVerboseJSON(t *testing.T) {
+	resetClientState(t)
 	tmp := t.TempDir()
 	wav := filepath.Join(tmp, "a.wav")
 	if err := os.WriteFile(wav, []byte("RIFFfake-wav-bytes"), 0o644); err != nil {
@@ -169,6 +179,7 @@ func TestTranscribeParsesVerboseJSON(t *testing.T) {
 }
 
 func TestTranscribeHTTPErrorIsError(t *testing.T) {
+	resetClientState(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "model loading", http.StatusServiceUnavailable)
 	}))
@@ -271,6 +282,7 @@ func TestParseASRText(t *testing.T) {
 }
 
 func TestTranscribeOAIPostsMultipartAndParses(t *testing.T) {
+	resetClientState(t)
 	var gotPath, gotCT string
 	var sawFile bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -314,6 +326,7 @@ func TestTranscribeOAIPostsMultipartAndParses(t *testing.T) {
 }
 
 func TestTranscribeOAIErrorsAreErrors(t *testing.T) {
+	resetClientState(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":{"message":"File Not Found"}}`, 404)
 	}))

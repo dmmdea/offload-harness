@@ -570,11 +570,19 @@ type Config struct {
 	// STTMaxInlineSegments caps how many timestamped segments are inlined in the
 	// result (the rest live in the on-disk .segments.json pointer). Default 120.
 	STTMaxInlineSegments int `json:"stt_max_inline_segments,omitempty"`
-	// STTUnloadAfter force-unloads the whisper upstream after each transcription
-	// (zero-always-warm). Default true; set false for a known batch loop.
+	// STTUnloadAfter force-unloads the whisper upstream once the last transcription of
+	// a burst is done (zero-always-warm): concurrent calls share one load and the last
+	// one out frees it, every model the burst warmed (stt_model and stt_model_hq can
+	// share a burst), because an unload after EACH would land on the next call's
+	// inference (register C-91). A failed unload is logged and never fails the
+	// transcription. Default true; set false for a known batch loop.
 	STTUnloadAfter bool `json:"stt_unload_after,omitempty"`
 	// STTRequestTimeoutSec bounds one transcription HTTP call (long audio at
 	// 5-8x realtime). Default 1800 (30 min). Separate from RequestTimeoutSec.
+	// It does NOT set how long a transcription waits for a card a render holds: that
+	// is gpu_wait_ms (90 s by default) and this timeout only caps it (register C-89).
+	// It used to BE that wait, which is the limit at which the MCP client aborts an
+	// idle call.
 	STTRequestTimeoutSec int `json:"stt_request_timeout_sec,omitempty"`
 	// MediaDir is where transcribe writes .srt/.txt/.segments.json. Default
 	// <base>/media.
@@ -1176,7 +1184,13 @@ type Config struct {
 	// on the reference box, pinned to the utility card, not the render card (they ran
 	// on the CPU only from 2026-09-07 to 09-10). Sourced here (not a buried const) so a
 	// renamed/added 3rd member is honored. Threaded to the runner via the
-	// MEMORY_STACK env. Default {embeddinggemma, bge-reranker-v2-m3}. This is an
+	// MEMORY_STACK env. Default {embeddinggemma, bge-reranker-v2-m3, embeddinggemma-ams}:
+	// the third is the id the memory authority node serves its embedder under (register
+	// A-122b, 2026-10-01), which the first two did not cover, so a lease's --unload-seat and
+	// the render runner's helper would have unloaded it. A name a box does not serve is
+	// inert: the set only filters what llama-swap reports. Keep embeddinggemma FIRST:
+	// EmbedModel() falls back to MemoryStack[0]. render/gpu-lock.mjs's DEFAULT_MEMORY_STACK
+	// is the same list, and a test keeps the two in step. This is an
 	// UNORDERED keep-alive set — do NOT infer roles from position (use EmbedModel).
 	MemoryStack []string `json:"memory_stack,omitempty"`
 	// EmbedModelName is the embedding model the judge/kNN embedder requests. Kept
@@ -1918,7 +1932,7 @@ func Default() Config {
 		ComposeQuality:              "high",
 		BrowseTimeoutSec:            300,
 		BrowseMaxActions:            30,
-		MemoryStack:                 []string{"embeddinggemma", "bge-reranker-v2-m3"},
+		MemoryStack:                 []string{"embeddinggemma", "bge-reranker-v2-m3", "embeddinggemma-ams"},
 		EmbedModelName:              "embeddinggemma", // explicit; reorder-proof (not MemoryStack position)
 		Temperature:                 0,
 		MaxRetries:                  1,

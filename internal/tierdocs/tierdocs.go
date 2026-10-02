@@ -543,6 +543,7 @@ func agentSeatSection(p Profile) string {
 	fmt.Fprintf(&b, "| max_model_len | %d | the served window |\n", s.MaxModelLen)
 	fmt.Fprintf(&b, "| gpu_memory_utilization | %.2f | the engine's share of the card — chosen WITH the seat's co-residents in mind, not alone |\n", s.GPUMemoryUtilization)
 	fmt.Fprintf(&b, "| max_num_seqs | %d | the engine's concurrency, and the entry's `concurrencyLimit` |\n", s.MaxNumSeqs)
+	b.WriteString(batchedTokensRow(s.MaxBatchedTokens, "the engine's per-step token budget (`--max-num-batched-tokens`); with the sequence count it sizes the workspace the profiled share must cover, so it is a co-residency lever beside utilization"))
 	fmt.Fprintf(&b, "| kv_cache_dtype | `%s` | KV precision — backend-dependent, not free everywhere |\n", dash(s.KVCacheDtype))
 	fmt.Fprintf(&b, "| ttl_seconds | %d | idle window before the seat unloads and frees its cards |\n", s.TTLSeconds)
 	fmt.Fprintf(&b, "| launch | `%s` | which artifact set starts it |\n", dash(s.Launch))
@@ -631,6 +632,7 @@ func extraSeatsSection(p Profile) string {
 		fmt.Fprintf(&b, "| max_model_len | %d | the served window |\n", e.MaxModelLen)
 		fmt.Fprintf(&b, "| gpu_memory_utilization | %.2f | the engine's share of the card |\n", e.GPUMemoryUtilization)
 		fmt.Fprintf(&b, "| max_num_seqs | %d | the engine's concurrency, and the entry's `concurrencyLimit` |\n", e.MaxNumSeqs)
+		b.WriteString(batchedTokensRow(e.MaxBatchedTokens, "the engine's per-step token budget (`--max-num-batched-tokens`)"))
 		fmt.Fprintf(&b, "| kv_cache_dtype | `%s` | KV precision |\n", dash(e.KVCacheDtype))
 		fmt.Fprintf(&b, "| tool_call_parser / reasoning_parser | `%s` / `%s` | per model family, and not optional for an agent-shaped seat |\n", dash(e.ToolCallParser), dash(e.ReasoningParser))
 		fmt.Fprintf(&b, "| ttl_seconds | %d | idle window before the seat unloads and frees the card |\n", e.TTLSeconds)
@@ -722,6 +724,17 @@ func composesSection(p Profile) string {
 			l.Name, dash(l.Tier), "`"+strings.Join(l.Devices, "` / `")+"`", strings.Join(seats, "<br>"), guards, state)
 	}
 	return b.String()
+}
+
+// batchedTokensRow renders a seat's declared batch budget (vLLM max_num_batched_tokens) as a table row, and nothing
+// for a seat that declares none: a "0" there would read as a measured zero. ADR 0049 Amendment 5 (register A-122b)
+// made it one of the three levers the ampere-16 co-residency guard pins, so the page that states the operating
+// point states all three.
+func batchedTokensRow(n int, what string) string {
+	if n <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("| max_num_batched_tokens | %d | %s |\n", n, what)
 }
 
 // inflight renders a seat's declared concurrency (vLLM max_num_seqs) for the layer table,

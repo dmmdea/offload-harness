@@ -13,6 +13,11 @@
 // `progress` is a running counter (the spec asks for a strictly increasing value,
 // and a heartbeat has no new work to count); everything a reader needs is in the
 // message.
+//
+// A call with no subtasks reuses the same reporter as a bare liveness signal
+// (startHeartbeat, register C-89): offload_transcribe is one request to one upstream
+// and is silent for as long as its audio takes. It gets the opening notification and
+// the heartbeat, with a label in place of the subtask counts.
 
 package mcpserver
 
@@ -53,6 +58,10 @@ type progressReporter struct {
 	total    int
 	deadline time.Time
 	begun    time.Time
+	// label, when set, makes this a liveness reporter for a call with no subtasks
+	// (startHeartbeat): the opening names the call and a heartbeat says how long it has
+	// been running, where a delegation's counts subtasks done.
+	label string
 
 	events chan delegate.ProgressEvent
 	quit   chan struct{}
@@ -78,20 +87,47 @@ type progressReporter struct {
 // request that did not ask for it, and a unit test's bare request has no session
 // at all.
 func (s *Server) startProgress(ctx context.Context, req *mcp.CallToolRequest, total int, deadline time.Time) (onProgress func(delegate.ProgressEvent), stop func()) {
-	noop := func() {}
-	if req == nil || req.Params == nil || req.Session == nil {
-		return nil, noop
-	}
-	token := req.Params.GetProgressToken()
-	if token == nil {
-		return nil, noop
-	}
-	p := &progressReporter{
-		session: req.Session, token: token, total: total, deadline: deadline, begun: time.Now(),
-		events: make(chan delegate.ProgressEvent, progressQueue), quit: make(chan struct{}), done: make(chan struct{}),
+	p := newProgressReporter(req, total, deadline, "")
+	if p == nil {
+		return nil, func() {}
 	}
 	go p.run(ctx)
 	return p.observe, p.stop
+}
+
+// startHeartbeat is startProgress for a call with no subtasks (register C-89): the
+// opening notification names the call by label, and one more goes out every
+// progressHeartbeat while it runs, saying how long it has been running. It exists for
+// offload_transcribe, one request to one upstream that is silent for as long as the
+// audio takes: with a progress token the client hears the call is alive, without one
+// nothing is sent. The guards are startProgress's, and it returns the stop function
+// alone because there are no subtask events to feed it. Whether the reference client
+// restarts its timeout on progress is unverified (see the file header), so this keeps a
+// working call audible; it is not a bound on how long the call may wait.
+func (s *Server) startHeartbeat(ctx context.Context, req *mcp.CallToolRequest, label string) (stop func()) {
+	p := newProgressReporter(req, 0, time.Time{}, label)
+	if p == nil {
+		return func() {}
+	}
+	go p.run(ctx)
+	return p.stop
+}
+
+// newProgressReporter builds the reporter for req, or returns nil unless the request
+// carried a progress token and has a live session: the spec forbids progress for a request
+// that did not ask for it, and a unit test's bare request has no session at all.
+func newProgressReporter(req *mcp.CallToolRequest, total int, deadline time.Time, label string) *progressReporter {
+	if req == nil || req.Params == nil || req.Session == nil {
+		return nil
+	}
+	token := req.Params.GetProgressToken()
+	if token == nil {
+		return nil
+	}
+	return &progressReporter{
+		session: req.Session, token: token, total: total, deadline: deadline, begun: time.Now(), label: label,
+		events: make(chan delegate.ProgressEvent, progressQueue), quit: make(chan struct{}), done: make(chan struct{}),
+	}
 }
 
 // observe is the engine's callback. It runs on the engine's goroutines and never
@@ -185,6 +221,9 @@ func (p *progressReporter) write(ctx context.Context, msg string) {
 }
 
 func (p *progressReporter) opening() string {
+	if p.label != "" {
+		return p.label + " started"
+	}
 	return fmt.Sprintf("delegating %d subtask(s)%s", p.total, p.deadlineNote())
 }
 
@@ -200,6 +239,9 @@ func (p *progressReporter) describe(ev delegate.ProgressEvent) string {
 }
 
 func (p *progressReporter) heartbeat() string {
+	if p.label != "" {
+		return fmt.Sprintf("still working: %s running for %s", p.label, time.Since(p.begun).Round(time.Second))
+	}
 	return fmt.Sprintf("still working: %d of %d subtasks done after %s%s",
 		p.lastDone, p.total, time.Since(p.begun).Round(time.Second), p.deadlineNote())
 }

@@ -86,9 +86,12 @@ export function releaseLeaseUnloadMarker(lease) {
 // render could use. `gpu reserve --unload-seat` keeps them too (register C-87).
 //
 // SOURCED FROM CONFIG/ENV, not a buried const: the Go harness threads the config's
-// MemoryStack as MEMORY_STACK, so a renamed/added 3rd member is honored instead
-// of silently unloaded. The literal below is the fallback for a direct CLI run.
-const DEFAULT_MEMORY_STACK = ["embeddinggemma", "bge-reranker-v2-m3"];
+// MemoryStack as MEMORY_STACK, so a renamed or added member is honored instead
+// of silently unloaded. The literal below is the fallback for a direct CLI run. It is the
+// same list as config.Default().MemoryStack (internal/config), and a Go test reads this
+// line to keep the two in step: embeddinggemma-ams is the id the memory authority node
+// serves its embedder under (register A-122b), and a name a box does not serve is inert.
+const DEFAULT_MEMORY_STACK = ["embeddinggemma", "bge-reranker-v2-m3", "embeddinggemma-ams"];
 export function memoryStack(env = process.env.MEMORY_STACK) {
   if (env && env.trim()) {
     return new Set(env.split(",").map((s) => s.trim()).filter(Boolean));

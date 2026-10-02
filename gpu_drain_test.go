@@ -522,11 +522,13 @@ func TestUnloadSeatEmptyMemoryStackMeansTheDefault(t *testing.T) {
 // utility card, not the render card. On 2026-10-01 a media lease's
 // `--unload-seat` unloaded the reference box's mem0 embedder for nothing the render
 // could use (register C-87). render/gpu-lock.mjs has always kept the stack;
-// this side now does too.
+// this side now does too. The default stack also names embeddinggemma-ams, the id
+// the memory authority node serves its embedder under (register A-122b): without
+// it the lease cleared that node's embedder with the seat.
 func TestUnloadSeatNeverUnloadsTheMemoryStack(t *testing.T) {
-	f := newMultiSeatSwap("agent-pool", "qwen3.5-9b-vl", "embeddinggemma", "bge-reranker-v2-m3")
+	f := newMultiSeatSwap("agent-pool", "qwen3.5-9b-vl", "embeddinggemma", "bge-reranker-v2-m3", "embeddinggemma-ams")
 	calls, still := unloadSeatRun(t, f, "")
-	for _, m := range []string{"embeddinggemma", "bge-reranker-v2-m3"} {
+	for _, m := range []string{"embeddinggemma", "bge-reranker-v2-m3", "embeddinggemma-ams"} {
 		if !still[m] {
 			t.Errorf("memory-stack model %q was unloaded by --unload-seat; unload calls = %v", m, calls)
 		}
