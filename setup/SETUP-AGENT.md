@@ -195,8 +195,8 @@ non-commercial — ADR 0011).
 > pins a K-quant will download 15GB and then fail at load time, so pin the `_1` quant explicitly.
 
 **Qwen-Image-2.1 — an opt-in family (ADR 0058), never a default.** The installer never downloads
-its weights. `blackwell-8` seeds it as a named image family in its RAM-conditional layer
-(`config_seed_ram_mid_high`); any other node that should offer it binds it as a named
+its weights. `blackwell-8` seeds it as a named image family and a named edit family in its
+RAM-conditional layer (`config_seed_ram_mid_high`); any other node that should offer it binds it as a named
 `imagegen_families` / `gen_edit_families` overlay (how-to: `docs/OPERATOR-GUIDE.md` §3 "Add a named image or edit family";
 graph, schedules and launch profile: `docs/systems/media-generation.md`). Requirements: **ComfyUI ≥
 v0.37.0** (the 2.1 nodes; master ≥ `95539f56` recommended for the KV-cache placement fix), torch
@@ -227,19 +227,34 @@ an 8GB 3070 + 64GB RAM box, 2026-07-16). **J4: this binding is now AUTOMATIC on 
 `ram_tier` is mid/high (same RAM gate as the 26B cpu-moe path). The two tiers DIVERGE by operator
 decision: **`ampere-8` = the O1 bf16 IMAGE seat, image only** (no video/music — decision
 2026-07-23, standing for that tier pending its own bake). **`blackwell-8` (2026-08-23 REVERSAL,
-editor-box role; every seat measured on the OptiPlex reference box)** additionally seeds the wan22
-VIDEO lane (`videogen_unet_high/low` = `Wan2.2-I2V-A14B-{High,Low}Noise-Q8_0.gguf` + the lightx2v
-4-step LoRAs via per-request `fast`), `gen_edit_unet` = `qwen-image-edit-2511-Q5_1.gguf`
-(preset lightning8), `inpaint_ckpt` = `RealVisXL_V5.0_fp16.safetensors`, and
+editor-box role; every seat run on the OptiPlex reference box; the fp8mixed edit timing is owed at acceptance)** additionally seeds the wan22
+VIDEO lane (`videogen_unet_high/low` = the fp8_scaled pair
+`wan2.2_i2v_{high,low}_noise_14B_fp8_scaled.safetensors` on `videogen_wan_loader` `native`: register
+A-120, 2,029 s against 2,939 s for the Q8_0 pair at 832x480x81 on the reference box, measured 2026-09-24.
+The Q8_0 pair `Wan2.2-I2V-A14B-{High,Low}Noise-Q8_0.gguf` + the lightx2v 4-step LoRAs via per-request
+`fast` stay the documented opt-in, and going back to them changes THREE keys, both experts and the
+loader, because `native` refuses a `.gguf` expert), `gen_edit_unet` =
+`qwen_image_edit_2511_fp8mixed.safetensors` (preset lightning8; it passed on the 8GB card but was not
+timed there, every timed edit figure on that card is the Q5_1 file, and going back to
+`qwen-image-edit-2511-Q5_1.gguf` changes one key), `gen_edit_families` = the opt-in `qwen-image-2.1` edit
+family beside the default edit binding, `inpaint_ckpt` = `RealVisXL_V5.0_fp16.safetensors`, and
 `videogen_upscale_model`/`upscale_model` = `4x-UltraSharp.pth` — so a fresh blackwell-8 provision
-must stage those weight files too (out-of-band, LAN pre-seed), plus the vision seat's
-`Qwen3.5-9B-UD-Q4_K_XL.gguf` + `mmproj-Qwen3.5-9B-F16.gguf`. Low-RAM 8GB boxes still get no media
+must stage those weight files too (out-of-band, LAN pre-seed): the fp8 pair from
+`Comfy-Org/Wan_2.2_ComfyUI_Repackaged` and the edit unet from `Comfy-Org/Qwen-Image-Edit_ComfyUI` (their
+revisions and sha256 pins are in the tier notes, `docs/tiers/blackwell-8.md`) into ComfyUI's
+`diffusion_models/`, plus the two Wan builder defaults the seed leaves unbound
+(`umt5_xxl_fp8_e4m3fn_scaled.safetensors`, `wan_2.1_vae.safetensors`). Neither the fp8 pair nor the
+fp8mixed file is installer-pinned, so a box that staged only the Q8_0 pair and the Q5_1 file reports
+`BOUND-BUT-MISSING` in `doctor` until they are there; the `qwen-image-2.1` family's three files are the
+quality (bf16) set in the table above, and without them only that family reports it. Stage the vision seat's
+`Qwen3.5-9B-UD-Q4_K_XL.gguf` + `mmproj-Qwen3.5-9B-F16.gguf` as well. Low-RAM 8GB boxes still get no media
 binding; existing configs are never touched (bind manually there); model downloads stay
 out-of-band like the ≥16GB seeds.
 > K-quant caveat update, measured 2026-08-23 on `blackwell-8` at ComfyUI-GGUF HEAD:
 > `qwen-image-edit-2511-Q3_K_S` **loaded and rendered correctly** (quality-equal to Q5_1 on
-> text-fix + removal), so the issue-#247 reshape failure appears FIXED upstream. The seed still
-> pins Q5_1 (the fleet-proven quant); treat K-quants as usable-after-verifying on current nodes.
+> text-fix + removal), so the issue-#247 reshape failure appears FIXED upstream. The ≥16GB seeds
+> still pin Q5_1 (the fleet-proven quant; `blackwell-8` now seeds the fp8mixed file instead); treat
+> K-quants as usable-after-verifying on current nodes.
 
 ### Media seat weights (vision/STT/OCR) — out-of-band provisioning gotchas
 

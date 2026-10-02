@@ -6,6 +6,95 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.158.3] - 2026-10-02 - The blackwell-8 media seed carries the roster the box runs: fp8 Wan pair on the native loader, fp8mixed edit unet, Qwen-Image-2.1 as an edit family
+
+### Fixed — a fresh `blackwell-8` install seeds the media roster its reference box runs, not the 2026-08-23 first cut (register A-120)
+
+The `blackwell-8` RAM layer (`config_seed_ram_mid_high`) still seeded the first cut of the 8 GB media roster: the Q8_0
+Wan 2.2 pair through DisTorch2, the Q5_1 edit unet, and no edit family. The reference box had moved on (operator
+decision 2026-09-24) to the fp8_scaled pair on the native loader and the fp8mixed edit unet, and served Qwen-Image-2.1
+as an edit family from hand-written config. A fresh install of the tier therefore got a roster the box no longer runs,
+and the live `audit-config --ram-tier mid` of 2026-10-01 read three of those keys as DIFFERENT. The layer now seeds what ran, and the
+tier notes state the evidence level of each value. Existing configs are untouched, as ever: seeds apply only to a
+fresh `config.json`.
+
+- **Video: `videogen_unet_high`, `videogen_unet_low` and the new `videogen_wan_loader`.** The seed binds
+  `wan2.2_i2v_{high,low}_noise_14B_fp8_scaled.safetensors` with `videogen_wan_loader: "native"`. In the 2026-09-24 fp8
+  study, same still, prompt and seed 42 at 832x480x81 on the 20-step recipe, the fp8_scaled pair on the native loader
+  took 2,029 s at a 6,675 MiB VRAM peak (82% of the card) and about 24.5 GiB of host RAM; the Q8_0 pair through
+  DisTorch2 (virtual VRAM 12) took 2,939.4 s at 7,509 MiB (92%). That is 31% less wall time and more VRAM headroom,
+  with a PSNR of 27.7 dB and an SSIM of 0.926 between the two outputs and 7 frames inspected clean. The production CLI
+  measured 2,024.7 s after the config switch the same day. The loader moves with the pair: `native` refuses a `.gguf`
+  expert by name at render time, so going back to the Q8_0 pair is three keys (both experts, and the loader back to
+  empty or `gguf-distorch`). `videogen_wan_virtual_vram_gb` 12 is inert under `native` and stays for the GGUF arm;
+  `videogen_timeout_sec` stays 4500 (2.2 times the fp8 wall). The lightx2v 4-step `fast` opt-in is not measured on the
+  fp8 pair (520 s when baked 2026-08-23, 1,193.1 s when the Q8_0 pair was re-measured 2026-09-23).
+- **Edit: `gen_edit_unet`.** The seed binds `qwen_image_edit_2511_fp8mixed.safetensors`, preset `lightning8`
+  unchanged. The evidence level, plainly: on the reference box the fp8mixed file passed the sign-text instruction with
+  the text exact (2026-09-24) but was not timed there, and every timed edit figure from that box is the Q5_1 GGUF
+  (245 s at 17.9 s per step and 7,193 MiB on 2026-09-22; 268.1 s with `lightning8` and 113.8 s with `lightning4` on
+  2026-09-23). The roughly 2x (56.5 s against 107.0 s, PSNR 39.4 dB, SSIM 0.989, text exact on both) is a measurement
+  on a 16 GB-class card. The operator approved the switch on 2026-09-24, and the 8 GB timing is owed at the next
+  acceptance render. Going back is one key (`gen_edit_unet` = `qwen-image-edit-2511-Q5_1.gguf`; the builder picks its
+  loader by file extension).
+- **`gen_edit_families`.** `qwen-image-2.1` is seeded as a named opt-in edit family beside the default edit binding,
+  mirroring the image family the tier already seeds: unet `qwen_image_2.1_bf16.safetensors`, clip
+  `qwen3vl_8b_bf16.safetensors`, vae `qwen_image_2.1_vae_bf16.safetensors`, 40 steps, cfg 1, timeout 2,400 s, dynamic
+  VRAM on (a two-reference edit through it measured 375.0 s on 2026-09-23). Its licence is recorded as fields only
+  (`license`, `commercial_use: false`), with no warning text (operator order 2026-10-01); a live config that still
+  carries the older `(non-commercial)` wording reads DIFFERENT in `audit-config` until it is realigned. `audit-config`
+  did not see this key or `videogen_wan_loader` before (their suffixes are not binding suffixes); both are seed-owned
+  now, and audited when the RAM overlay is selected (`--ram-tier mid|high`): the default audit still compares the base
+  seed only (register I-40).
+- **New gates.** `internal/tierseed/overlay_load_test.go` exists because nothing validated the CONTENT of an overlay:
+  `TestEveryShippedSeedIsValid` stops at "every key is a `Config` field", and the closure gates resolve the base seed
+  only. `TestEveryShippedOverlayLoadsAndValidates` resolves every tier on windows and linux at ram tiers mid and high,
+  fails on a placeholder that survives expansion (expansion reaches strings and string arrays, never the inside of an
+  object), runs `config.Load` on what an install writes and fails on any load warning but the installer-owned
+  `compose_script` one, and resolves every image and edit family with its licence pair.
+  `TestSeededWanLoaderMatchesTheExperts` fails when a seed layer, alone or merged with the RAM overlay, pairs `native`
+  with a `.gguf` expert. The config door cannot see that (it depends on which unet applies), so the first render would
+  have been the first to say so. `setup/tests/install-config-seed.test.ps1` pins the new values and checks that the
+  nested family survives `Merge-ConfigSeed` as an object with its types intact. It pins them with `-is`, because
+  PowerShell's `-eq` coerces its right operand (`"False" -eq $false` and `"40" -eq 40` are both true). The seed suite
+  grows from 286 to 292 asserts and passes on pwsh 7 and Windows PowerShell 5.1; `setup/render.tests.ps1` passes on both.
+- **Mutants.** Fourteen mutants of the seed and of the installer, each turning the intended test red and each restored
+  byte for byte (sha256 checked): a `.gguf` expert beside `native` (the table lint and the PowerShell suite); `native`
+  replaced by `auto` (PowerShell only, and the Go lint correctly stays green, because `auto` with safetensors experts is
+  coherent); `native` only in the base layer with `.gguf` experts in the overlay (caught only by the merged-layer view);
+  the edit family with its licence removed, with `commercial_use` as the string `"false"`, with `gen_edit_steps` as the
+  string `"40"`, with `gen_edit_cfg` removed (a half-bound recipe, which is a load warning), with a `__OFFLOAD_HOME__`
+  token inside the family object, with the warning text back in the licence, and with 20 steps; the whole family
+  removed; the edit unet back to Q5_1 (PowerShell red, and `TestTierDocsAreCurrent` red until the page is regenerated);
+  and two installer mutants (`Expand-SeedValue` flattening a nested object, `Merge-ConfigSeed` serializing at depth 1).
+  The two string-typed mutants pass a PowerShell assert that compares with `-eq` alone, in both editions.
+- **Docs.** `docs/tiers/blackwell-8.md` is regenerated (the only generated page that changes; `config.example.json`
+  is unchanged), and its notes gain the D10 paragraph with the weight pins. `setup/SETUP-AGENT.md` tells a provisioner
+  to stage the fp8 pair, the fp8mixed unet and the two Wan builder defaults (neither pair is installer-pinned, so a box
+  that staged only the Q8_0 pair and the Q5_1 file reports `BOUND-BUT-MISSING` until they are there);
+  `docs/systems/media-generation.md` states the blackwell-8 exception to the Q8_0 and Q5_1 rows and what the loader key
+  does. The `hailo-8l` accelerator note says `HAILO_HOME` defaults to `<OFFLOAD_HOME>/hailo`, so an install whose
+  sidecar checkout lives elsewhere sets it before the installer runs.
+
+Not seeded, and why:
+- **Z-Image Turbo as a named image family.** A named family clears the flat `sdcpp_*` keys and must carry its own full
+  model paths, but `tierseed.expand` and `Expand-SeedValue` replace `__OFFLOAD_HOME__` in strings and string arrays
+  only, never inside an object, so the block would ship literal tokens. It waits for recursive expansion in both. The
+  flat `sdcpp_*` arm stays reachable by flipping `imagegen_engine`, and the image roster is still three models
+  (`hidream-o1-dev`, `qwen-image`, `qwen-image-2.1`).
+- **The second general vision seat and its siblings** (LFM2.5-VL, Gemma-4-E4B-vision, the high-quality whisper seat).
+  `mediaseat` allows one writer per bound key and has no non-binding seat kind, so they stay hand-wired until it does.
+  A rendered vision seat is also not byte-identical to the hand-wired flags, so adopting one needs a measurement.
+- **The five default script keys** (`videogen_script`, `voicegen_script`, `musicgen_script`, `run_graph_script`,
+  `sdcpp_script`): `config.Default()` already carries the same `render/` forms, so seeding them adds no capability.
+- **The HunyuanVideo-1.5 and MiniMax-H3 video families:** builder-default routes with no config key, and
+  `VideoFamilyBinding` has no licence field to hold their terms.
+- **Every other tier.** The 16 GB-class rows still seed Q5_1 (pinned by
+  `TestSixteenGBComfyTiersSeedTheMeasuredEditInpaintAnimateRoutes`) and the Q8_0 Wan pair (pinned by
+  `install-config-seed.test.ps1`). Moving them to fp8 is a separate decision.
+- The Q8_0 pair, the Q5_1 file and the lightx2v LoRAs stay on disk as the documented opt-in arms, and the weights are
+  provisioned out-of-band like every other ComfyUI model.
+
 ## [0.158.2] - 2026-10-02 - Concurrent transcriptions keep whisper loaded and wait `gpu_wait_ms` for a held card; the ampere-16 seat leaves the memory stack's reranker room
 
 ### Fixed — concurrent transcriptions no longer unload whisper from under each other, and "no speech" is never guessed from a failure something else may have caused (register C-91)

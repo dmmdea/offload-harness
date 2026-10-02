@@ -249,9 +249,26 @@ foreach ($tier8 in @('ampere-8', 'blackwell-8')) {
     # blackwell-8 on 2026-08-23 (editor-box role) and the seats were MEASURED on the
     # reference box (520s @832x480x81 I2V, peak 7751MiB — results doc section 0-R).
     Assert ($cond.videogen_family -eq 'wan22')                              'blackwell-8 conditional seed binds wan22 video (operator reversal 2026-08-23, measured)'
-    Assert ($cond.videogen_unet_high -like 'Wan2.2-I2V-A14B-HighNoise*')    'blackwell-8 seeds the measured high-noise unet'
-    Assert ($cond.videogen_unet_low -like 'Wan2.2-I2V-A14B-LowNoise*')      'blackwell-8 seeds the measured low-noise unet'
-    Assert ($cond.gen_edit_unet -like 'qwen-image-edit-2511*')              'blackwell-8 seeds the measured edit unet (2511)'
+    # A-120 (2026-10-01; operator ruling 2026-09-24): the roster that ran on the reference box
+    # supersedes the 2026-08-23 first cut named above (Q8_0 pair through DisTorch2, Q5_1 edit unet).
+    # Video is the fp8_scaled pair on the NATIVE loader and the loader moves WITH the pair: native
+    # refuses a .gguf expert by name, so rolling back to Q8_0 is three keys, never two. The edit unet
+    # is fp8mixed (untimed on the 8GB card; every timed edit figure there is Q5_1); rolling it back is
+    # one key. The tier notes carry the numbers; the Go gates are internal/tierseed/overlay_load_test.go.
+    Assert ($cond.videogen_unet_high -eq 'wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors') 'blackwell-8 seeds the fp8_scaled high-noise expert (2026-09-24 study: 2,029 s native vs 2,939 s Q8_0 through DisTorch2 at 832x480x81)'
+    Assert ($cond.videogen_unet_low -eq 'wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors')   'blackwell-8 seeds the fp8_scaled low-noise expert'
+    Assert ($cond.videogen_wan_loader -eq 'native')                         'blackwell-8 seeds the native Wan loader (it refuses a .gguf expert, so the pair and the loader move together)'
+    Assert ($cond.gen_edit_unet -eq 'qwen_image_edit_2511_fp8mixed.safetensors') 'blackwell-8 seeds the fp8mixed 2511 edit unet (operator-approved 2026-09-24)'
+    $ef = $cond.gen_edit_families.'qwen-image-2.1'
+    Assert ($null -ne $ef)                                                  'blackwell-8 seeds the qwen-image-2.1 edit family'
+    Assert ($ef.license -eq 'Qwen Research License' -and $ef.commercial_use -is [bool] -and $ef.commercial_use -eq $false) 'qwen-image-2.1 edit family records its license pair as fields only (a real boolean, no warning text, operator order 2026-10-01)'
+    Assert ($ef.gen_edit_family -eq 'qwen-image-2.1' -and $ef.gen_edit_steps -eq 40 -and $ef.gen_edit_cfg -eq 1) 'qwen-image-2.1 edit family binds the official 40 / 1.0 recipe together (a half-pair defers every edit)'
+    # PowerShell's -eq coerces its right operand to the LEFT operand's type: ("40" -eq 40) and ("False" -eq $false)
+    # are both True, so pin the scalar TYPES with -is or a merge that stringifies a nested family passes unnoticed.
+    $mEdit = (Merge-ConfigSeed -ConfigText $tpl -Seed $cond -OffloadHome 'D:\oh') | ConvertFrom-Json
+    $mf = $mEdit.gen_edit_families.'qwen-image-2.1'
+    Assert ($mf -is [pscustomobject]) 'the nested edit family survives Merge-ConfigSeed as an object, not a flattened string'
+    Assert ($mf.commercial_use -is [bool] -and $mf.commercial_use -eq $false -and ($mf.gen_edit_steps -is [int] -or $mf.gen_edit_steps -is [long]) -and $mf.gen_edit_steps -eq 40) 'the nested edit family keeps its scalar types through Merge-ConfigSeed (bool stays bool, 40 stays a number)'
     Assert ($cond.gen_edit_preset -eq 'lightning8')                         'blackwell-8 edit preset lightning8 (measured)'
     Assert ($cond.inpaint_ckpt -like 'RealVisXL*')                          'blackwell-8 seeds the RealVisXL inpaint ckpt'
     $musicKeys = @($cond.PSObject.Properties.Name | Where-Object { $_ -like 'musicgen_*' })

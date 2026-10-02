@@ -261,8 +261,10 @@ change will shift — prefer inpainting whenever a mask is possible. The route i
 the `gen_edit_*` keys (named `gen_edit`, not `edit`, because `edit_*` is the deterministic PIL
 route). Since 0.132.5 every ≥16 GB ComfyUI tier seeds them (and `blackwell-8` in its RAM layer):
 `gen_edit_script` `render/comfy-edit.mjs`, `gen_edit_unet` `qwen-image-edit-2511-Q5_1.gguf`,
-`gen_edit_preset` `lightning8`. A box without that seed defers until it binds `gen_edit_script`
-and `gen_edit_unet`. `gen_edit_preset` pairs steps+cfg+LoRA as a matched
+`gen_edit_preset` `lightning8`. `blackwell-8` seeds `qwen_image_edit_2511_fp8mixed.safetensors` for
+`gen_edit_unet` instead (register A-120): it passed on the 8 GB reference box but was not timed there, and the builder
+picks its loader by file extension, so the one key is the whole switch. A box without that seed defers
+until it binds `gen_edit_script` and `gen_edit_unet`. `gen_edit_preset` pairs steps+cfg+LoRA as a matched
 triple (`full` | `lightning8`, the default | `lightning4`), because a Lightning LoRA at full
 steps/cfg produces mush and the base at 4 steps produces noise, and either renders "successfully".
 The builder itself defaults neither steps nor cfg — it throws if either is missing
@@ -386,13 +388,20 @@ Hardware profiles seed these. The single-card 16 GB tiers (`blackwell-16`, `ampe
 and the 8 GB tiers' RAM layer bind **HiDream-O1** via `imagegen_family` — the official graph for that
 DiT, never the generic SDXL graph; the pooled and 32 GB-class Blackwell tiers (`blackwell-2x16`,
 `-3x16`, `-32`, `-48`, `-72`) bind **Krea 2 Turbo** (below). No tier makes a named family its default; `blackwell-8`'s RAM
-layer seeds `qwen-image-2.1` as an opt-in family.
-The Wan 2.2 video tiers bind **Wan 2.2 Q8_0** experts with an fp16 text encoder. **RealVisXL** is the SDXL-class inpainting default. The 8 GB
+layer seeds `qwen-image-2.1` as an opt-in family, for image generation and for the instruction edit.
+The Wan 2.2 video tiers bind **Wan 2.2 Q8_0** experts with an fp16 text encoder, except `blackwell-8`: its RAM layer
+binds the fp8_scaled pair on `videogen_wan_loader: "native"` and leaves the text encoder to the builder default
+(register A-120: 2,029 s against 2,939 s for the Q8_0 pair at 832x480x81 on the reference box, same still, prompt and
+seed). **RealVisXL** is the SDXL-class inpainting default. The 8 GB
 tiers stay SDXL-class for image generation until O1 on 8 GB is verified on real hardware.
 
 **The Wan DisTorch2 split is per card** (`videogen_wan_virtual_vram_gb`, default 7 = the builder's
 value). Both Wan experts load through DisTorch2 with `virtual_vram_gb` GiB parked in system RAM; the card
-holds the rest. It was a constant 7 in `render/wf-wan22-i2v.mjs`, and on an 8 GB card under the driver's
+holds the rest. That is the GGUF path: `videogen_wan_loader` (empty or `auto` by default) picks the loader per
+expert by file extension, a `.safetensors` expert goes through the core `UNETLoader` with no split at all (the
+value is inert there), and `native` forces that loader and refuses a `.gguf` expert by name, so a tier that
+seeds `native` (`blackwell-8`) goes back to GGUF experts by changing three keys, both experts and the loader.
+It was a constant 7 in `render/wf-wan22-i2v.mjs`, and on an 8 GB card under the driver's
 "Prefer No Sysmem Fallback" policy 7 asks ~8.4 GB of a 15.4 GB Q8_0 expert and OOMs, while 11 got through
 the load and hung the card (OptiPlex reg3b/reg3c, 2026-09-22). Each node sets the value it MEASURED; the
 pipeline passes it as `--wan-vvram-gb`. It is not the LTX-2.5 pool key: that one borrows VRAM from a
