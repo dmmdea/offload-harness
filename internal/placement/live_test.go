@@ -20,7 +20,7 @@ func TestSnapshotReadsEachSourceOncePerTTL(t *testing.T) {
 	s.now = func() time.Time { return now }
 	s.readGPU = func(context.Context) ([]gpuprobe.Device, error) {
 		gpuReads++
-		return []gpuprobe.Device{{Index: 0, UUID: "GPU-aaaa", FreeGiB: 2}, {Index: 1, UUID: "GPU-2a44210f-6739", FreeGiB: 15}, {Index: 2, UUID: "GPU-cccc", FreeGiB: 3}}, nil
+		return []gpuprobe.Device{{Index: 0, UUID: "GPU-aaaa", FreeGiB: 2}, {Index: 1, UUID: "GPU-8888bbbb-9999", FreeGiB: 15}, {Index: 2, UUID: "GPU-cccc", FreeGiB: 3}}, nil
 	}
 	s.readRAM = func() (float64, bool) { ramReads++; return 80, true }
 	s.readPresence = func(mode string, idle time.Duration) Presence {
@@ -46,10 +46,10 @@ func TestSnapshotReadsEachSourceOncePerTTL(t *testing.T) {
 		if free, ok := live.DeviceFree("1"); !ok || free != 15 {
 			t.Fatalf("device 1 free: %v %v", free, ok)
 		}
-		if free, ok := live.DeviceFree("GPU-2a44210f"); !ok || free != 15 {
+		if free, ok := live.DeviceFree("GPU-8888bbbb"); !ok || free != 15 {
 			t.Fatalf("UUID prefix resolves through the same probe: %v %v", free, ok)
 		}
-		if idx, ok := live.DeviceIndex("GPU-2a44210f"); !ok || idx != "1" {
+		if idx, ok := live.DeviceIndex("GPU-8888bbbb"); !ok || idx != "1" {
 			t.Fatalf("UUID → index: %q %v", idx, ok)
 		}
 		if _, ok := live.DeviceFree("7"); ok {
@@ -106,7 +106,7 @@ func TestSnapshotFailsClosedOnReaderErrorsAndUnknownOnAmbiguousSeats(t *testing.
 	if _, ok := live.DeviceFree("1"); ok {
 		t.Fatal("a failed probe is not ok")
 	}
-	if _, ok := live.DeviceIndex("GPU-2a44210f"); ok {
+	if _, ok := live.DeviceIndex("GPU-8888bbbb"); ok {
 		t.Fatal("a failed probe resolves nothing")
 	}
 	if _, ok := live.HostFree(); ok {

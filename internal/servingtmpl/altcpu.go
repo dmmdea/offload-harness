@@ -1,5 +1,5 @@
 // altcpu.go — the CPU seat family a dual-route node serves BESIDE its GPU seats
-// (operator direction 2026-09-20: binxarn, an AMD APU, runs both a Vulkan iGPU
+// (operator direction 2026-09-20: <node-f>, an AMD APU, runs both a Vulkan iGPU
 // route and a CPU route on the same box, and the harness offers both).
 //
 // A tier is one backend; its template is one backend's flags. This file renders

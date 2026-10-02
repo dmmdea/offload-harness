@@ -581,7 +581,7 @@ func familyList(fs []FamilyInfo) string {
 // alpha-flatten step both key off this same predicate to decide whether to keep or
 // drop the channel). Engine-independent on purpose: sd.cpp's build of the model
 // carries the identical RGBA VAE, so refusing transparency for the sdcpp engine was
-// never a model limit, only a gap in the runner (D5, binxarn wave session
+// never a model limit, only a gap in the runner (D5, <node-f> wave session
 // 5d227d30 §3b/§3c).
 func (c Config) SupportsTransparentImage() bool {
 	return c.ImageGenFamily == FamilyQwenImage21

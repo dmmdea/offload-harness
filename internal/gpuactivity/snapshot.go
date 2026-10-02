@@ -180,7 +180,7 @@ func Assess(v View) (verdict, note string) {
 	// box" (busy-outside). workUtil skips cards the harness provably cannot run
 	// on, and is the only thing allowed to say the holder is working.
 	//
-	// 2026-09-20, the Qube, while the operator played a game: the verdict read
+	// 2026-09-20, <node-b>, while the operator played a game: the verdict read
 	// `held-working — 33% on card 1 (RTX 5070 Ti)` while the lease holder had
 	// burned 4 SECONDS of CPU in 141 minutes and the two cards it actually
 	// fenced sat at 0%. Card 1 is the display card and that 33% was the game.
@@ -218,7 +218,7 @@ func Assess(v View) (verdict, note string) {
 	}
 
 	work := describeWork(v, now)
-	// A stale record never outranks live work: on 2026-09-14 the Lenovo read
+	// A stale record never outranks live work: on 2026-09-14 <node-c> read
 	// `stale-holder — nothing is running under it` while its seat was loading for
 	// a delegated run. The record is reported as a tail on whatever IS running,
 	// and is the verdict only when nothing else is.

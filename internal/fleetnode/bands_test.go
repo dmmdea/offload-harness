@@ -253,7 +253,7 @@ func TestTenantHeaderIsSanitized(t *testing.T) {
 	}
 	for _, tc := range []struct{ in, want string }{
 		{"session-A", "session-A"},
-		{"  qube-1234-99  ", "qube-1234-99"},
+		{"  node-b-1234-99  ", "node-b-1234-99"},
 		{"has space", ""},
 		{"tab\there", ""},
 		{"ünïcode", ""},
@@ -327,7 +327,6 @@ func TestHealthSaturationTracksTheRefusalStates(t *testing.T) {
 		}
 	}
 }
-
 
 // dispatchImageWith is dispatchImage with an extra envelope field (raw JSON,
 // e.g. `"priority":"high"`) — for the lenient-parse test on the media lane.

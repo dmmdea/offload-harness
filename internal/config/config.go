@@ -99,8 +99,8 @@ type Config struct {
 	CompletionPath string `json:"completion_path"`
 	// SeatEndpoints maps a model seat (the exact llama-swap model id or alias a
 	// call names) to a REMOTE OpenAI-compatible base URL serving that model —
-	// Phase A of multi-node delegation: {"lenovo-e4b": "http://node-c:11436"}
-	// makes every completion for that seat resolve to the Lenovo's llama-swap
+	// Phase A of multi-node delegation: {"node-c-e4b": "http://node-c:11436"}
+	// makes every completion for that seat resolve to <node-c>'s llama-swap
 	// instead of Endpoint, with zero job machinery. Empty/absent = every seat
 	// stays on Endpoint, byte-identical to a pre-seat build (pinned by test).
 	// Values are vetted TWICE to hold the never-cloud rule (ADR 0001): at load
@@ -317,7 +317,7 @@ type Config struct {
 	// AgentMaxTokens is the planner's completion budget per call for agent_run and
 	// for delegated agent jobs served by this node (the loop's max_tokens). 0 = the
 	// loop default (1,024). A THINKING seat spends its reasoning inside this budget:
-	// on the Qube's Qwen3.8-27B seat (`--reasoning-parser qwen3`) a digest used 839
+	// on <node-b>'s Qwen3.8-27B seat (`--reasoning-parser qwen3`) a digest used 839
 	// reasoning tokens of 1,024 and returned nothing (2026-09-04). The loop already
 	// raises a starved budget once, to 4x (cap 8,192), but that costs a failed attempt
 	// per contract; set 4096 here for a thinking seat so the first attempt fits. The
@@ -344,7 +344,7 @@ type Config struct {
 	// `temperature: 0` and no other sampling key.
 	//
 	// There is no recommended value here on purpose. Greedy decoding is what
-	// makes a small seat fall into a degenerate repetition loop (the Lenovo 4B
+	// makes a small seat fall into a degenerate repetition loop (the <node-c> 4B
 	// METHODOLOGY.md digest, 2026-09-14, repeated one four-line block ~20 times
 	// until the budget ran out), and the model card's cure — temperature 0.7,
 	// top_p 0.8, top_k 20, presence_penalty 1.5 for Qwen3.5 non-thinking — is a
@@ -400,7 +400,7 @@ type Config struct {
 	// or one seeded from a plain tier); nothing keys on it alone.
 	TierProfile string `json:"tier_profile,omitempty"`
 	// Tiers is every tier this box is a COMPLETE instance of: the installed one
-	// plus the tiers it composes (the Qube is a full blackwell-16 and a full
+	// plus the tiers it composes (<node-b> is a full blackwell-16 and a full
 	// blackwell-2x16 as well as blackwell-3x16). Advertised in health and status
 	// so the fleet and the matrix reason about three capacity rows, not one.
 	// Must include tier_profile. nil = one tier, byte-identical to before.
@@ -455,7 +455,7 @@ type Config struct {
 	// has recorded a measured rate of its own in <state root>/seat-rates.json
 	// (the first run whose completion generates ≥ 1,024 tokens records one; the
 	// store then wins). 0 = no estimate until measured. Reference numbers:
-	// the Qube 27B TP2 seat ≈ 30, the Lenovo 4B ≈ 30–35.
+	// the <node-b> 27B TP2 seat ≈ 30, the <node-c> 4B ≈ 30–35.
 	AgentSeatTokS float64 `json:"agent_seat_tok_s,omitempty"`
 	// AgentPlacementWaitSec (0.113.18) is how long a delegation subtask WAITS
 	// FOR CAPACITY when every node that could run it is full right now — each
@@ -465,7 +465,7 @@ type Config struct {
 	// health every few seconds and places the subtask on the FIRST node that
 	// frees (a remote whose saturation clears, or the local lease being
 	// released), so a contract is no longer lost because one node was busy for
-	// the minute it was dispatched ("Qube timed out", 2026-09-06). The wait is
+	// the minute it was dispatched ("<node-b> timed out", 2026-09-06). The wait is
 	// NOT charged to the contract's timeout_sec (like time provably spent queued
 	// on a node); it is bounded by this key alone. 0 = the built-in default
 	// (120 s); negative = do not wait (the pre-0.113.18 behaviour). A sheddable
@@ -541,7 +541,7 @@ type Config struct {
 	// "" (default) = ffmpeg's container default, libx264 on the CPU. "h264_nvenc" (or
 	// hevc_nvenc / av1_nvenc) moves those draft/QA re-encodes to the GPU's NVENC block,
 	// which frees CPU threads and never touches CUDA cores — measured 2026-09-05 on the
-	// Qube (CUDA-X plan task 4.2). Stream-copy ops (trim default, concat, mux_audio) and
+	// workstation (CUDA-X plan task 4.2). Stream-copy ops (trim default, concat, mux_audio) and
 	// frame extraction are unaffected. Requires an ffmpeg built with the encoder (the
 	// gyan full builds are); an absent encoder fails the op loudly, it does not fall back.
 	FFmpegVideoEncoder string `json:"ffmpeg_video_encoder,omitempty"`
@@ -1035,7 +1035,7 @@ type Config struct {
 	// EACH expert the loader parks in system RAM (donor "cpu"), so the card holds the
 	// rest. It was a constant 7 in render/wf-wan22-i2v.mjs, which is a per-card number:
 	// on an 8 GB card under the driver's "Prefer No Sysmem Fallback" policy, 7 on a
-	// 15.4 GB Q8_0 expert asks for ~8.4 GB and OOMs (OptiPlex reg3b, 2026-09-22), while
+	// 15.4 GB Q8_0 expert asks for ~8.4 GB and OOMs (<node-e> reg3b, 2026-09-22), while
 	// 11 got through the load and hung the card. Each node sets its MEASURED value.
 	// Default 7 = the builder's value, so a config without the key renders exactly as
 	// before; 0 or unset passes nothing and the builder keeps its own default; negative
@@ -1068,7 +1068,7 @@ type Config struct {
 	// rendered — so a request's explicit `model` override (offload_generate_video's
 	// documented per-request family switch) silently handed a DIFFERENT family's
 	// text encoder/transformer to the graph it built (bigger-models-2026-09-24.md,
-	// "Interim Phase 2 round 2": a bare Wan override on an ltx25-bound Qube would
+	// "Interim Phase 2 round 2": a bare Wan override on an ltx25-bound <node-b> would
 	// have received the LTX Gemma text encoder). videogen_families[name] is
 	// consulted ONLY when the resolved render family differs from this box's own
 	// videogen_family; the box's default family keeps reading the flat keys above
@@ -1597,7 +1597,7 @@ type Config struct {
 	// bbolt store at <state-root>/fleet-queue.db + the /fleet/queue/* routes).
 	// One node per fleet hosts; the always-on box is the intended holder.
 	FleetQueueHost bool `json:"fleet_queue_host,omitempty"`
-	// FleetQueueHolder is the holder's base URL (e.g. http://qube:18793).
+	// FleetQueueHolder is the holder's base URL (e.g. http://node-b:18793).
 	// Non-empty enables queue participation: delegators may submit with
 	// route:"queue", and a node that also sets FleetQueueClaim pulls eligible
 	// work from it. Tailnet-vetted at load like every fleet URL; empty = the
@@ -2054,7 +2054,7 @@ func loadArmed(path string) (Config, error) {
 			"  Text calls will not wait for a media render to finish with the card.\n", lerr)
 	}
 	// A config whose endpoint is ANOTHER box's engine (a bench config aimed at
-	// the Lenovo's arm) makes no local load: this box's machine-wide lease has
+	// <node-c>'s arm) makes no local load: this box's machine-wide lease has
 	// nothing to protect, and gating on it cordoned runs that never touched a
 	// local card (register C-58). Disarm, and say so once per process.
 	// The register of the harness's own seat requests (PAIR seat watcher) lives
@@ -2814,7 +2814,7 @@ func (c Config) ImageRouteConfigured() bool {
 // D1), so gating fleet advertisement/admission on ImageRouteConfigured alone made the
 // fleet HTTP door invisible to every request naming a family, even though
 // `local-offload doctor` showed the family fully CONFIGURED and it rendered correctly
-// through the CLI (binxarn wave session 5d227d30 §2a). The fleet capability gate
+// through the CLI (<node-f> wave session 5d227d30 §2a). The fleet capability gate
 // (fleetnode.taskConfiguredFor) and the health advertiser (fleetnode.ImageFamilies)
 // both key on this instead of ImageRouteConfigured alone.
 func (c Config) ImageGenAdvertisable() bool {

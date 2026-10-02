@@ -94,7 +94,7 @@ type Profile struct {
 	// AgentCtxTokens is the tier's agent context window. Resolve seeds it as
 	// agent_ctx_tokens unless config_seed or a vLLM seat binding already set it. It used
 	// to reach a config only through install.ps1, which wrote the tier field directly;
-	// install.sh never did, so every fresh LINUX node (binxarn, the Lenovo) got the code
+	// install.sh never did, so every fresh LINUX node (<node-f>, <node-c>) got the code
 	// default instead of the window its tier was measured at. Seeding it here gives both
 	// installers the same value from one place.
 	AgentCtxTokens int `json:"agent_ctx_tokens"`

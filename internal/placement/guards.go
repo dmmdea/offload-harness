@@ -17,7 +17,7 @@ import (
 // see, a presence the OS cannot tell — each refuses rather than admitting on
 // a number it never had. rowVerdict is a remote row's own answer and stands
 // in for a guard ONLY where that guard's reader is nil (the delegator has no
-// nvidia-smi on the Qube's display card; the Qube did, and said so); a live
+// nvidia-smi on <node-b>'s display card; <node-b> did, and said so); a live
 // reading always wins over a carried verdict.
 //
 // display_floor is `free(display) − seat.DisplayFootprintGiB ≥ floor` on the

@@ -9,7 +9,7 @@ import (
 
 // fakeDRM builds a /sys/class/drm lookalike. Values are bytes, as the kernel
 // publishes them. card0 is an NVIDIA node with no amdgpu files (must be skipped),
-// card1 is the APU under test — the binxarn shape on 2026-09-20: 512 MiB carve-out,
+// card1 is the APU under test — the <node-f> shape on 2026-09-20: 512 MiB carve-out,
 // 15,487 MiB GTT.
 func fakeDRM(t *testing.T) string {
 	t.Helper()

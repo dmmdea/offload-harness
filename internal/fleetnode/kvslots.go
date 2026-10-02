@@ -243,7 +243,7 @@ func (s *Server) handleKVSlot(w http.ResponseWriter, r *http.Request, action str
 	// with a discarded error would turn a changed field name — or a truncated
 	// read — into status:"ok" with zero tokens, and a delegator that trusted
 	// that would skip a prefill it never actually restored. Measured shape
-	// (llama.cpp b9934, binxarn 2026-09-21):
+	// (llama.cpp b9934, <node-f> 2026-09-21):
 	//   save    {"id_slot":0,"filename":"…","n_saved":3240,"n_written":158937840,…}
 	//   restore {"id_slot":0,"filename":"…","n_restored":3240,"n_read":158937840,…}
 	var up struct {

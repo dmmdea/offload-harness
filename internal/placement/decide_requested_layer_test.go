@@ -8,7 +8,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/core"
 )
 
-// oneCardLayers is the ampere-16 Lenovo as it declares layers (register
+// oneCardLayers is the ampere-16 <node-c> as it declares layers (register
 // A-100): one card, the planner default 27B GSQ under the single layer and the
 // 35B fast digest seat under a second layer named `fast`. Neither is a pair.
 func oneCardLayers() []config.LayerSpec {

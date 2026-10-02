@@ -78,7 +78,7 @@ func WarnOnDefaults(src Source, w io.Writer) bool {
 		// The file could not be DECODED, so Load returned the built-in defaults: the
 		// opposite of the validation case below. This branch used to fall into that one
 		// and print "the file's other settings ARE in effect" while the process ran on
-		// defaults (OptiPlex, 2026-09-23: a BOM-prefixed config, a run-graph on defaults).
+		// defaults (<node-e>, 2026-09-23: a BOM-prefixed config, a run-graph on defaults).
 		fmt.Fprintf(w, "WARNING: config at %s could NOT BE PARSED: %v\n"+
 			"  NOTHING from this file is in effect — this process runs on BUILT-IN DEFAULTS; machine bindings (vision, media, cascade tiers) are inactive and those calls will defer.\n"+
 			"  fleet-serve refuses to start on it; the MCP server starts but defers every tool except offload_status; one-shot CLI verbs proceed on the defaults. Fix the JSON.\n",

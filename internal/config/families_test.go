@@ -132,7 +132,7 @@ func TestEditFamilyOverlayResolves(t *testing.T) {
 	}
 }
 
-// A binxarn-shaped node: no default image binding at all (family-only, sdcpp
+// A <node-f>-shaped node: no default image binding at all (family-only, sdcpp
 // engine) — the family-only tier the fleet gate defect (D1) covers, distinct from
 // TestImageFamilyOverlayResolvesAsACompleteBinding's pooled-krea2-plus-family node.
 const sdcppFamilyOnlyCfg = `{
@@ -159,7 +159,7 @@ const sdcppFamilyOnlyCfg = `{
 // TestSdcppQwenImage21SupportsTransparent: D5's root cause — SupportsTransparentImage
 // used to unconditionally exclude the sdcpp engine (`ImageGenEngine != "sdcpp"`),
 // refusing transparent:true on every sdcpp binding regardless of family, even though
-// sd.cpp's qwen-image-2.1 build carries the identical RGBA VAE (binxarn wave session
+// sd.cpp's qwen-image-2.1 build carries the identical RGBA VAE (<node-f> wave session
 // 5d227d30 §3b/§3c: P1/P8 both came out RGBA from sd.cpp with zero ComfyUI involved).
 // A sibling sdcpp family with no RGBA VAE (z-image) must still be refused, so the fix
 // is "follow the family", not "always allow sdcpp".
