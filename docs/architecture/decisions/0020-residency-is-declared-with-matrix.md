@@ -56,7 +56,8 @@ upstream README:
 
 Because a var key cannot be the model name, `internal/servingtmpl` derives one from the
 seat KIND (`vis`, `stt`) — stable and unique by construction, since a tier may declare at
-most one seat per kind.
+most one seat per kind. *(Amended 2026-10-02: the kind picks the base id, but a tier can
+declare more than one seat of a kind; see the amendment at the end.)*
 
 Set membership for the optional 26B and for media seats is a TOKEN, not an expression
 edit: `__M26_ALT__` / `__M26_AND__` and `__SEATS_SWAPPABLE__` / `__SEATS_RESIDENT__`. The
@@ -94,3 +95,18 @@ guess.
 - **Edit set expressions programmatically instead of using tokens.** The renderer would
   have to infer whether a member joins with `|` or `&` — a property of the tier's
   intent that lives in the template, not in the seat.
+
+## Amendment 2026-10-02 (register A-131, a tier may declare more than one seat of a kind)
+
+One sentence of the Decision no longer holds: *"since a tier may declare at most one seat per
+kind"*. A seat flagged `extra: true` (a registered extra, [ADR 0019](0019-alias-backed-media-is-declared-per-tier.md))
+writes no binding key, and a text-only `rkllm` seat never wrote one, so a tier can declare a second
+or later seat of the same kind. What a tier still cannot do is bind two seats to one config key:
+that stays a single field with one writer.
+
+The var id is derived this way now. **The kind picks the base id** (`vis`, `stt`, `ocr`, `rkllm`);
+the first seat of a kind takes it, and the second and later seats of that kind take the numbered
+ids in declaration order (`vis2`, `vis3`, ...). Uniqueness is guaranteed by the set of ids already
+taken, not by the kind. The rule that matters for this ADR is unchanged: an id is alphanumeric,
+1 to 8 characters, and never the seat's name. The `seatVarID` doc comment in
+`internal/servingtmpl/servingtmpl.go` carries the same wording.
