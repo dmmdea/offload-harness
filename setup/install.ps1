@@ -728,14 +728,13 @@ function Merge-ConfigSeed {
       return $s.Replace('__EXE__', '.exe')
     }
     if ($Value -is [System.Array]) {
-      $out = @($Value | ForEach-Object {
-          if ($_ -is [string]) {
-            $e = $_
-            if ($HomeFwd) { $e = $e.Replace('__OFFLOAD_HOME__', $HomeFwd) }
-            $e.Replace('__EXE__', '.exe')
-          } else { $_ }
-        })
-      return ,([object[]]$out)
+      # Every element recurses (parity with tierseed.expand's []any case), so an object or an array inside
+      # an array expands too. A plain foreach, not a pipeline: a pipeline would unroll an element that is
+      # itself an array, and the call's own `,(...)` wrapper is undone by the assignment, so each element
+      # arrives as exactly what it was (a nested array stays a nested array, an empty one stays empty).
+      $out = [System.Collections.Generic.List[object]]::new()
+      foreach ($el in $Value) { $out.Add((Expand-SeedValue -Value $el -HomeFwd $HomeFwd)) }
+      return ,([object[]]$out.ToArray())
     }
     if ($Value -is [System.Management.Automation.PSCustomObject]) {
       # A named family block (imagegen_families / gen_edit_families) is an OBJECT of strings, arrays and
@@ -861,13 +860,16 @@ function Get-CompositeSeed {
       }
     }
   }
-  # ,([object[]]...) on both arrays: PowerShell unrolls a 1-element array on
-  # return, and a `tiers` that serialized as a bare string would make Go reject
-  # the whole config (the same trap Merge-ConfigSeed documents).
+  # [object[]] on both arrays, and NO leading comma: a hashtable value is never unrolled (the
+  # returned pscustomobject is not either), so the cast alone keeps a 1-element array an array.
+  # A comma here wraps the array in a SECOND array, which Expand-SeedValue (it now recurses into
+  # every array element, as tierseed.expand does) faithfully preserves: `tiers` then serialized
+  # as [["a","b"]] and Go rejected the whole config. The old string-only array branch flattened
+  # that extra level by accident.
   return [pscustomobject][ordered]@{
     tier_profile = $ProfileId
-    tiers        = ,([object[]]@(@($ProfileRow.composes) + $ProfileId))
-    layers       = ,([object[]]@($layers))
+    tiers        = [object[]]@(@($ProfileRow.composes) + $ProfileId)
+    layers       = [object[]]@($layers)
   }
 }
 

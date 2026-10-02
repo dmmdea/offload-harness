@@ -516,6 +516,14 @@ $fam = $fxObj.imagegen_families.'fam-a'
 Assert ($fam.commercial_use -is [bool] -and $fam.off -is [bool] -and $fam.off -eq $false) 'parity fixture: booleans inside an object stay booleans'
 Assert (($fam.imagegen_steps -is [int] -or $fam.imagegen_steps -is [long]) -and $fam.imagegen_steps -eq 8) 'parity fixture: integers inside an object stay numbers'
 Assert ($fam.deeper.again.n -eq 40 -and $fam.deeper.again.p -ceq 'D:/oh/dd')  'parity fixture: an object nested two deep expands'
+# Arrays recurse into EVERY element (Go: expand's []any case). The shapes PowerShell is liable to flatten or
+# stringify are asserted on the JSON text itself, not only on the parsed canon: a 1-element array holding an
+# object or an array must come out as that, not as its bare content.
+Assert ($fxText -match '"objects":\s*\[\s*\{\s*"p":\s*"D:/oh/o1"')                              'parity fixture: an object inside an array expands, an array of objects stays an array'
+Assert ($fxText -match '"one_object":\s*\[\s*\{\s*"p":\s*"D:/oh/solo"\s*\}\s*\]')               'parity fixture: a 1-element array holding an object stays an array of one object'
+Assert ($fxText -match '"one_nested":\s*\[\s*\[\s*"D:/oh/z"\s*\]\s*\]')                         'parity fixture: a 1-element array holding an array stays nested (not flattened)'
+Assert ($fxText -match '"matrix":\s*\[\s*\[\s*"D:/oh/a",\s*"b"\s*\],\s*\[\s*"\.exe"\s*\],\s*\[\s*\],\s*\[\s*\[\s*"D:/oh/deep"\s*\]\s*\]\s*\]') 'parity fixture: an array of arrays expands element by element, the empty inner array kept'
+Assert (($fxObj.imagegen_families.'fam-a'.objects[1].t -is [bool]) -and $fxObj.imagegen_families.'fam-a'.mixed.Count -eq 6) 'parity fixture: scalars inside arrayed objects keep their types, a mixed array keeps its length'
 # Without -OffloadHome the home token stays (pre-J2 behaviour), __EXE__ still expands - inside objects too.
 $fxNoHome = Merge-ConfigSeed -ConfigText '{"model":"x"}' -Seed $fx.seed
 Assert (($fxNoHome -match '__OFFLOAD_HOME__') -and -not ($fxNoHome -match '__EXE__')) 'nested: without -OffloadHome the home token is left, __EXE__ still expands'
