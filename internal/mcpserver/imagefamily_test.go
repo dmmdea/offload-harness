@@ -83,6 +83,29 @@ func TestImageFamilySurfaceIsAdvertised(t *testing.T) {
 	}
 }
 
+// The video tool names the license fields a generate_video result can carry, as the
+// two image tools do, and keeps the licence warning prose out (operator order
+// 2026-10-01). Only the video tool's own sentence is checked; the character-animation
+// tool returns no licence pair.
+func TestVideoToolAdvertisesLicenceFields(t *testing.T) {
+	descs := map[string]string{}
+	for _, tool := range listTools(t, config.Default()) {
+		descs[tool.Name] = tool.Description
+	}
+	d := descs["offload_generate_video"]
+	if !strings.Contains(d, "Returns {video_path, seed} plus license/commercial_use when the family declares them") {
+		t.Errorf("offload_generate_video description does not name the licence pair a result can carry: %s", d)
+	}
+	for _, w := range []string{"non-commercial", "research/evaluation", "brand or client", "license_note"} {
+		if strings.Contains(strings.ToLower(d), w) {
+			t.Errorf("offload_generate_video description carries licence warning prose %q", w)
+		}
+	}
+	if strings.Contains(descs["offload_animate_character"], "license") {
+		t.Error("offload_animate_character returns no licence pair; its description must not claim one")
+	}
+}
+
 // family / transparent / images reach the pipeline: each is observable as the
 // pipeline's own refusal, which runs before any lease or render.
 func TestImageFamilyParamsReachThePipeline(t *testing.T) {
@@ -160,5 +183,42 @@ func TestStatusListsImageAndEditFamilies(t *testing.T) {
 	routes, _ := media["routes"].(map[string]any)
 	if _, ok := routes["generate_image:qwen-image-2.1"]; !ok {
 		t.Errorf("media.routes lacks the family route: %v", routes)
+	}
+}
+
+// CT-47: offload_status media.video_family_bindings carries each family's license and
+// commercial_use beside its files — null when the family declares none (UNKNOWN).
+func TestStatusVideoFamilyBindingsCarryTheLicenseFields(t *testing.T) {
+	no := false
+	cfg := familyCfg(t)
+	cfg.VideoGenFamilies = map[string]config.VideoFamilyBinding{
+		"hunyuan": {License: "Example Community License", CommercialUse: &no},
+	}
+	s := New(pipeline.New(cfg, nil, nil, nil))
+	res, err := s.handleStatus(context.Background(), callReq(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	media, _ := decodeResult(t, res)["media"].(map[string]any)
+	rows, _ := media["video_family_bindings"].([]any)
+	if len(rows) == 0 {
+		t.Fatalf("media.video_family_bindings = %v", media["video_family_bindings"])
+	}
+	seen := map[string]map[string]any{}
+	for _, r := range rows {
+		m := r.(map[string]any)
+		seen[m["family"].(string)] = m
+		if _, ok := m["license"]; !ok {
+			t.Errorf("row %v lacks the license key", m)
+		}
+		if _, ok := m["commercial_use"]; !ok {
+			t.Errorf("row %v lacks the commercial_use key", m)
+		}
+	}
+	if hy := seen["hunyuan"]; hy["license"] != "Example Community License" || hy["commercial_use"] != false {
+		t.Errorf("hunyuan row = %v", hy)
+	}
+	if w := seen["wan22"]; w["license"] != nil || w["commercial_use"] != nil {
+		t.Errorf("wan22 declares none, row = %v must read null", w)
 	}
 }

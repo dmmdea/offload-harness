@@ -3309,6 +3309,12 @@ func writeVideoFamilyBindingsSection(w io.Writer, rows []mediacap.VideoFamilyBin
 			keys = append(keys, k)
 		}
 		sort.Strings(keys)
+		// The declared license pair, as fields (CT-47; operator order 2026-10-01: no
+		// warning text). A family that declares none prints nothing, like an image
+		// family's route line.
+		if r.License != nil && r.CommercialUse != nil {
+			fmt.Fprintf(w, "    %-55s %s (commercial_use %t)\n", "license:", *r.License, *r.CommercialUse)
+		}
 		for _, k := range keys {
 			fmt.Fprintf(w, "    %-55s %s\n", k+":", r.Files[k])
 		}

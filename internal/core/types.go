@@ -73,7 +73,8 @@ const (
 	// ComfyUI (HunyuanVideo 1.5 480p I2V / Wan 2.2). Its own branch in pipeline.Run
 	// (no text cascade, no grammar) — it shells out to render/comfy-video.mjs via
 	// internal/gpugen, which takes the shared single-slot GPU lock and starts/stops
-	// ComfyUI with process-tree-kill on timeout. Returns {video_path, seed}.
+	// ComfyUI with process-tree-kill on timeout. Returns {video_path, seed} plus
+	// license/commercial_use when the family declares them.
 	TaskGenerateVideo TaskType = "generate_video"
 	// TaskAnimateCharacter retargets the motion of a driver VIDEO onto a reference
 	// character IMAGE on the LOCAL ComfyUI (WAN-Animate-2 distilled — identity-

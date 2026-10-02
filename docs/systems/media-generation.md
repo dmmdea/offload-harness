@@ -540,6 +540,21 @@ an overlay key outside those prefixes or not a config key (typo), a forbidden ke
 outside `[a-z0-9._-]`, or a name that collides with the default binding's own family. Every family is
 also checked by the same binding-trap warnings as the default, with its name in front.
 
+**Video families carry the pair too (CT-47).** A `videogen_families[name]` entry may declare `license`
+and `commercial_use`, both or neither (the load refuses one without the other, naming the family). It is
+the video analogue of `imagegen_license` / `imagegen_commercial_use`, with two differences: nothing
+requires it, because video family selection was never a licensing gate (every family stays reachable
+through `model`), and it describes the MODEL, so `ResolveVideoFamilyBinding` reads it from the family's
+own entry even for this box's default family, whose weights still come from the flat `videogen_*` keys.
+A `generate_video` result then carries `license` and `commercial_use`, tagged with the family that
+rendered (an override request gets the overridden family's pair, not the seat's), its ledger row carries
+`license`, `offload_status` lists both under each `media.video_family_bindings` row (null when
+undeclared), and `local-offload doctor` prints a `license:` line under a family that declares one. No
+warning text rides along (operator order 2026-10-01). A family that declares none adds nothing and
+reads as UNKNOWN. No value ships as a default: the repo's only sourced statements of the video
+licences are the names and conditions in `render/templates-license-map.json` (read from the hosting
+cards and digests, not from the licence texts in full), and its `conditional` class is not a bool.
+
 **Every result is tagged.** Results carry `family` (the default binding's own name for an unnamed
 request), and `license` + `commercial_use` whenever the binding declares them (no warning sentence
 rides along: `license_note` was removed by operator order on 2026-10-01). The ledger row carries `license` (`ledger.Entry.License`; absent = UNKNOWN, never

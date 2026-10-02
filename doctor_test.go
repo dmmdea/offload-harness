@@ -190,3 +190,28 @@ func TestModelsReportUsesConfigValues(t *testing.T) {
 		t.Error("report must reflect a non-default escalation_model")
 	}
 }
+
+// CT-47: doctor's video family bindings section names a family's declared license and
+// commercial_use (the fields only, no warning prose, operator order 2026-10-01), and
+// prints nothing for a family that declares none.
+func TestDoctorVideoFamilyBindingsShowTheLicenseFields(t *testing.T) {
+	no := false
+	cfg := config.Default()
+	cfg.VideoGenFamilies = map[string]config.VideoFamilyBinding{
+		"hunyuan": {License: "Example Community License", CommercialUse: &no},
+	}
+	var out strings.Builder
+	writeVideoFamilyBindingsSection(&out, mediacap.VideoFamilyBindingRows(cfg))
+	got := out.String()
+	if !strings.Contains(got, "license:") || !strings.Contains(got, "Example Community License") || !strings.Contains(got, "commercial_use false") {
+		t.Errorf("hunyuan's license fields missing from the section:\n%s", got)
+	}
+	if n := strings.Count(got, "license:"); n != 1 {
+		t.Errorf("only the declaring family prints a license line, got %d:\n%s", n, got)
+	}
+	for _, warn := range []string{"warning", "WARNING", "research", "not for", "restricted"} {
+		if strings.Contains(got, warn) {
+			t.Errorf("the section must carry no warning text, found %q:\n%s", warn, got)
+		}
+	}
+}

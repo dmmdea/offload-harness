@@ -90,6 +90,16 @@ type VideoFamilyBinding struct {
 	UpscaleModel     string  `json:"upscale_model,omitempty"`
 	UpscaleWidth     int     `json:"upscale_width,omitempty"`
 	UpscaleHeight    int     `json:"upscale_height,omitempty"`
+	// License and CommercialUse declare the family's license, with the same
+	// contract as imagegen_license / imagegen_commercial_use: both or neither (a
+	// license with no commercial verdict cannot tag a result), published on every
+	// result, ledger row and status row, and nothing else — no warning text, no gate
+	// (CT-47, operator order 2026-10-01). Unlike the weight fields they belong to the
+	// MODEL FAMILY, so they apply to this box's own default family too (see
+	// ResolveVideoFamilyBinding). Empty / nil = undeclared, which a reader treats as
+	// UNKNOWN, never commercial-safe.
+	License       string `json:"license,omitempty"`
+	CommercialUse *bool  `json:"commercial_use,omitempty"`
 }
 
 // videoFamilyWanSentinel mirrors internal/pipeline's own unexported constant of
@@ -158,14 +168,27 @@ func (c Config) VideoDefaultFamilyBinding() VideoFamilyBinding {
 // that has never set videogen_families therefore behaves byte-for-byte as before
 // this key existed; an operator closes a specific leak by adding ONLY the keys
 // that need their own family-distinct value, nothing else has to change.
+//
+// The license pair is the one exception to "the default family never reads its
+// videogen_families entry": a license describes the model, not the weight files, so
+// the pair is read from the family's own entry whichever way the weights resolved
+// (the default family included), and a family with no entry carries none.
 func (c Config) ResolveVideoFamilyBinding(renderFamily string) VideoFamilyBinding {
 	renderFamily = strings.TrimSpace(renderFamily)
+	fb := c.VideoDefaultFamilyBinding()
 	if renderFamily != "" && renderFamily != c.defaultVideoFamily() {
 		if ov, ok := c.VideoGenFamilies[renderFamily]; ok {
-			return ov
+			fb = ov
 		}
 	}
-	return c.VideoDefaultFamilyBinding()
+	name := renderFamily
+	if name == "" {
+		name = c.defaultVideoFamily()
+	}
+	if ov, ok := c.VideoGenFamilies[name]; ok {
+		fb.License, fb.CommercialUse = ov.License, ov.CommercialUse
+	}
+	return fb
 }
 
 // overlayKind is the per-route contract for one families map.
@@ -370,12 +393,12 @@ func validateMediaEnums(c Config, where string) error {
 
 // validateVideoFamilies refuses an unknown videogen_families key by name — the
 // same "typo caught at the config door, not as a silently-ignored override"
-// reasoning as validateFamilies below. Unlike imagegen_families/gen_edit_families,
-// a video family binding carries no license overlay (video family selection was
-// never a licensing feature — every family is reachable per-request via `model`
-// with no commercial-use gate), so this only checks the map's own keys and each
-// entry's wan_loader enum. The native-vs-gguf mismatch (wan_loader:"native" with
-// a .gguf expert file) cannot be caught here — it depends on which unet actually
+// reasoning as validateFamilies below. A video family binding may declare a license
+// pair (CT-47; both or neither, like the image defaults), but video family selection
+// is still not a licensing gate — every family is reachable per-request via `model`
+// with no commercial-use gate and no required declaration — so this checks the map's
+// own keys, each entry's wan_loader enum and the pair. The native-vs-gguf mismatch
+// (wan_loader:"native" with a .gguf expert file) cannot be caught here — it depends on which unet actually
 // applies once an empty override falls back to the family's builder default —
 // so the builder (render/wf-wan22-i2v.mjs) refuses that combination itself, at
 // render time, with a named error.
@@ -394,6 +417,12 @@ func validateVideoFamilies(c Config) error {
 		case "", "auto", "native", "gguf-distorch":
 		default:
 			return fmt.Errorf("videogen_families[%q].wan_loader: %q is not \"\", \"auto\", \"native\" or \"gguf-distorch\"", name, b.WanLoader)
+		}
+		switch {
+		case strings.TrimSpace(b.License) != "" && b.CommercialUse == nil:
+			return fmt.Errorf("videogen_families[%q]: license is set but commercial_use is not — declare both (a license with no commercial verdict cannot tag a result)", name)
+		case strings.TrimSpace(b.License) == "" && b.CommercialUse != nil:
+			return fmt.Errorf("videogen_families[%q]: commercial_use is set but license is not — declare both", name)
 		}
 	}
 	return nil
