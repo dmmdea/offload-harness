@@ -31258,7 +31258,7 @@
     "temp": "D:\\Temp\\gimp-3.2-XK9YWV3"
    },
    "pdb_count": 1030,
-   "pdb_delta_vs_qube": "1030 vs 1033 = exactly the three gimp-mcp procedures, absent here",
+   "pdb_delta_vs_workstation": "1030 vs 1033 = exactly the three gimp-mcp procedures, absent here",
    "mcp_plugin_registered": false,
    "has_apng_export": false,
    "export_proc_count": 60,

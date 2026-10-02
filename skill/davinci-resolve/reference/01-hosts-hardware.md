@@ -2,7 +2,7 @@
 
 Check `hostname` first. Facts below were re-verified live 2026-09-01 unless dated otherwise.
 
-## Dell editing rig 7060 the editing rig — THE editing rig (PRIMARY, all MyTools work happens here)
+## The editing rig (PRIMARY, all MyTools work happens here)
 
 | Item | Value [measured 2026-09-01] |
 |---|---|
@@ -58,10 +58,10 @@ live-Resolve operation, render, and vision QA is pinned to the editing rig.
 | Use | offline authoring (edit-specs, ASS captions, Fusion `.setting` templates, generative assets), measurement, API dumps. Not the editor's machine — mutating test projects here is fine as long as they are named `_ref_*`/`_pp_*` and deleted |
 
 The live dump `live-dump-2026-09-01.json` was taken here; it is the same Resolve build as
-the Dell, so settings keys, render formats and codec ids transfer. NVIDIA codec entries also
-appear on the Dell because both are NVIDIA boxes.
+the editing rig, so settings keys, render formats and codec ids transfer. NVIDIA codec entries also
+appear on the editing rig because both are NVIDIA boxes.
 
-## laptop 15P the laptop — DORMANT for Resolve
+## The laptop — DORMANT for Resolve
 RTX 3070 8 GB, 64 GB. Resolve 21.0.4.5 installed but NO seat since 2026-08-28. The samuelgursky
 `davinci-resolve-mcp` v2.103.1 lives at `%USERPROFILE%\resolve-claude\` (deps pinned
 `mcp[cli]>=1.29,<2`). Only its vendored docs matter now (copied into the pipeline repo at
