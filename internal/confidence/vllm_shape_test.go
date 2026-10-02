@@ -8,7 +8,7 @@ import (
 )
 
 // Register D-128: the token stream a vLLM seat answers a classify call with
-// (measured 2026-09-18, Qube pair seat: `{`, `\n  "label": "`, `billing`, …)
+// (measured 2026-09-18, <node-b> pair seat: `{`, `\n  "label": "`, `billing`, …)
 // must yield a non-zero decision margin — the shape is the OpenAI one the
 // client decodes, so the gate can fire on a vLLM seat exactly as on llama.cpp.
 func TestMeasuredVLLMTokenStreamYieldsAMargin(t *testing.T) {

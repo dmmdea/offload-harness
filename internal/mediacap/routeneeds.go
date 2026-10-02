@@ -16,7 +16,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/gpugen"
 )
 
-// What a route needs beyond its script (OptiPlex parity audit, 2026-09-23).
+// What a route needs beyond its script (<node-e> parity audit, 2026-09-23).
 //
 // generate_video, animate_character and both generate_audio kinds were CONFIGURED as
 // soon as their render script existed. On the 8 GB reference box that meant three green

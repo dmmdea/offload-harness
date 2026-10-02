@@ -5,7 +5,7 @@
 // and start repeating itself, generating the same block until the completion
 // budget runs out. The engine reports that as an ordinary `length` cut (or
 // even as `stop`), so nothing downstream could tell it from an answer that
-// merely ran long: the Lenovo 4B's METHODOLOGY.md digest of 2026-09-14 spent
+// merely ran long: the <node-c> 4B's METHODOLOGY.md digest of 2026-09-14 spent
 // 381 s and its whole final budget emitting one four-line block about twenty
 // times, and the node deferred with the loop riding in `output`.
 //

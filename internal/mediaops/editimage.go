@@ -19,7 +19,7 @@ type EditOp struct {
 	// omitempty on an int drops the zero value from the JSON entirely — the worker
 	// (render/edit_image.py) then saw a missing "x" key and failed the whole pipeline
 	// with `pipeline failed: 'x'` (KeyError) instead of cropping/compositing at 0,0
-	// (found 2026-09-23 on the OptiPlex remediation pass). Width/Height keep
+	// (found 2026-09-23 on the <node-e> remediation pass). Width/Height keep
 	// omitempty: 0 is never valid for them (ValidateOps rejects it), so there is no
 	// zero-vs-absent ambiguity to protect against.
 	X      int `json:"x"`

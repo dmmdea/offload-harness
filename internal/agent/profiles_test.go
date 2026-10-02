@@ -326,7 +326,7 @@ func TestResearchProfileNPUToolsSurviveNarrowing(t *testing.T) {
 // TestProfileExemplarsCloseWithAFinalAnswer: an exemplar thread that ends on a tool
 // result is an OPEN conversation, and a small seat continues it instead of the
 // objective (the research profile's "latest stable Go version" thread produced the
-// Lenovo 4B's phantom digests, 2026-08-31…09-03, and quarantined both fleet nodes).
+// <node-c> 4B's phantom digests, 2026-08-31…09-03, and quarantined both fleet nodes).
 // Every profile's last exemplar must be the assistant's final, tool-less answer.
 func TestProfileExemplarsCloseWithAFinalAnswer(t *testing.T) {
 	for name, p := range profileRegistry {

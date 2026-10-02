@@ -21,7 +21,7 @@ func TestRecordAccelWritesOneLedgerRowPerCall(t *testing.T) {
 	p := New(config.Config{}, nil, nil, led)
 
 	p.RecordAccel("classify_image", "coral-edgetpu", 612, false, "")
-	p.RecordAccel("object_detect", "lenovo-ampere16:coral-edgetpu", 2048, true, "coral-edgetpu (fleet): sidecar busy")
+	p.RecordAccel("object_detect", "node-c-ampere16:coral-edgetpu", 2048, true, "coral-edgetpu (fleet): sidecar busy")
 
 	rows, err := ledger.ReadAll(path)
 	if err != nil {
@@ -33,7 +33,7 @@ func TestRecordAccelWritesOneLedgerRowPerCall(t *testing.T) {
 	if rows[0].Task != "classify_image" || rows[0].ModelTier != "coral-edgetpu" || rows[0].LatencyMs != 612 || rows[0].Deferred {
 		t.Errorf("local row: %+v", rows[0])
 	}
-	if rows[1].Task != "object_detect" || rows[1].ModelTier != "lenovo-ampere16:coral-edgetpu" || !rows[1].Deferred || rows[1].Reason == "" {
+	if rows[1].Task != "object_detect" || rows[1].ModelTier != "node-c-ampere16:coral-edgetpu" || !rows[1].Deferred || rows[1].Reason == "" {
 		t.Errorf("fleet defer row: %+v", rows[1])
 	}
 }

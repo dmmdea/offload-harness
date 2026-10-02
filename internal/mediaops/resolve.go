@@ -19,7 +19,7 @@ import (
 // and the JS render scripts used only os.Stat/existsSync) — so a box whose config
 // left ffmpeg_path at its bare "ffmpeg" default failed EVERY caller that used the
 // os.Stat-only half, even with ffmpeg correctly installed and on PATH (F-38,
-// 2026-09-24: reproduced identically on the Lenovo and the Aorus — see
+// 2026-09-24: reproduced identically on <node-c> and <node-a> — see
 // render/audio-qa.mjs's resolveFfmpeg for the JS side of the same bug class).
 //
 // Returns ("", false) for an empty binding. On success, returns the path that

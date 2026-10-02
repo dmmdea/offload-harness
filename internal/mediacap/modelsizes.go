@@ -6,7 +6,7 @@ package mediacap
 // fixed name. resolveBinding below uses it to catch a file that is only PARTWAY
 // copied into place: a bare os.Stat reports FOUND the instant a same-named file of
 // ANY size exists in the right class directory, which is exactly what happened on
-// the Qube during the 2026-09-23 media-route remediation — doctor printed
+// <node-b> during the 2026-09-23 media-route remediation — doctor printed
 // `animate_character: OK CONFIGURED` while a 16.65 GB unet was still ~70% written
 // (`internal/mediacap/modelbindings.go`'s resolveBinding, register F-38).
 //

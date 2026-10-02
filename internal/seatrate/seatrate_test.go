@@ -37,11 +37,11 @@ func TestRateIgnoresToolCallCompletions(t *testing.T) {
 	}
 }
 
-// TestComputeMatchesTheMeasuredQube27B: the 2026-09-10 ledger-01 legs on the
+// TestComputeMatchesTheMeasuredNodeB27B: the 2026-09-10 ledger-01 legs on the
 // 27B — cold load 210 s, 12 steps, 4,096-token steps, 8,192 final, 30 tok/s —
 // took 381 s (off) / 516 s (auto) warm, plus a 210 s cold load. The estimate
 // must land in that band and say "BELOW" for the 600 s box default.
-func TestComputeMatchesTheMeasuredQube27B(t *testing.T) {
+func TestComputeMatchesTheMeasuredNodeB27B(t *testing.T) {
 	in := Input{Seat: "agent-pool", TokS: 30, RateSamples: 5, ColdLoadSec: 210, MaxSteps: 12, StepBudget: 4096, FinalBudget: 8192, TimeoutSec: 600}
 	off := Compute(in)
 	// 210 + 11×(128/30 + 6) = 113 + 8192/30 = 273 → 596

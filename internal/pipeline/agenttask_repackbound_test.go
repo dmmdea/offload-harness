@@ -19,7 +19,7 @@ func lengthChat(content string) string {
 // as OutputTruncated — is a partial no re-pack can complete. The run must
 // name that at once (abstention, "output_truncated" in the reason, the
 // partial still in output) and spend ZERO seat completions on re-packing:
-// the 2026-09-10 Lenovo run spent ~690 s of re-generation on exactly this
+// the 2026-09-10 <node-c> run spent ~690 s of re-generation on exactly this
 // shape and deferred "wall timeout" on a loop that was done in four minutes.
 func TestRunAgentTaskTruncatedAnswerSkipsTheRepack(t *testing.T) {
 	partial := strings.Repeat("The ledger shows pass 4 measured ", 40)

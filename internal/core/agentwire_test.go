@@ -462,7 +462,7 @@ func TestAgentWireJSONTags(t *testing.T) {
 	}
 
 	result := AgentWireResult{
-		SchemaVersion: 1, NodeID: "lenovo", Seat: "offload-e4b", Output: "o",
+		SchemaVersion: 1, NodeID: "node-c", Seat: "offload-e4b", Output: "o",
 		Structured: json.RawMessage(`{}`), Steps: 3, StopReason: "done",
 		Deferred: true, Reason: "r", WallMs: 12, TokensOut: 9,
 		// A1 pins + prefill (0.81.0) — populated here so the enumeration below

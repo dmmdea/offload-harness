@@ -6,7 +6,7 @@
 // could not tell "the model said nothing" from "the model spent every token
 // thinking and was cut before it could answer": both arrived as an empty
 // content string. On 2026-09-10 that indistinguishability cost 20,526 tokens
-// on the Qube 27B seat and 9,628 on the Lenovo 4B for zero visible output,
+// on the <node-b> 27B seat and 9,628 on the <node-c> 4B for zero visible output,
 // then published the empty final as a finished answer (retrospective D-01).
 //
 // This file gives the loop the three things it needs: a per-call switch that

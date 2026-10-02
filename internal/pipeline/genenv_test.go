@@ -31,7 +31,7 @@ func findEnv(env []string, key string) (string, bool) {
 // which cannot see PATH resolution, so a bare "ffmpeg" always read as missing —
 // the music route's over-render/trim/dead-air QA gate silently skipped itself
 // on every fleet node that had not set an explicit ffmpeg_path (reproduced on
-// the Lenovo and the Aorus, 2026-09-23/24).
+// <node-c> and <node-a>, 2026-09-23/24).
 func TestGenEnv_FFmpegPath(t *testing.T) {
 	t.Run("default config: bare name resolvable on PATH resolves to an absolute path, never the bare name", func(t *testing.T) {
 		name := "go"

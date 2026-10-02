@@ -4,7 +4,7 @@
 // render/sdcpp-generate.mjs used to pin GGML_VK_VISIBLE_DEVICES=0 whenever the
 // environment left it unset, on the assumption that device 0 is the render GPU.
 // On a box with an enabled integrated GPU, ggml-Vulkan enumerates it FIRST: the
-// OptiPlex remediation (2026-09-23) measured Vulkan0 = Intel(R) UHD Graphics 630,
+// <node-e> remediation (2026-09-23) measured Vulkan0 = Intel(R) UHD Graphics 630,
 // Vulkan1 = NVIDIA GeForce RTX 5060 — every Z-Image render silently ran on the
 // iGPU at 565-608 s/step (the same recipe runs 4.85 s/step on the RTX). The
 // render script now auto-picks the first discrete adapter `sd-cli --list-devices`

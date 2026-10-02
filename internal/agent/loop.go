@@ -610,7 +610,7 @@ func exemplarsFor(ex []Msg, have map[string]Tool) []Msg {
 // grounded contracts (a goal plus attached context docs — every research digest,
 // most delegate fan-outs) need no tool-call demonstration: the answer is in the
 // file, and on a 4B seat ANY exemplar user turn competes with the objective —
-// measured 2026-09-03 on the Lenovo node: with the closed, marked, synthetic
+// measured 2026-09-03 on <node-c>: with the closed, marked, synthetic
 // exemplars of 0.113.1 a digest still answered the exemplar's topic ("does not
 // describe any maintenance windows") for a goal about eviction policies. Call it
 // after WithProfile (WithProfile re-installs the profile's exemplars).
@@ -1122,7 +1122,7 @@ func (l *Loop) run(ctx context.Context, objective string, bs *budgetState) (Resu
 		// Forced final step (0.115.19, register D-89): the LAST step of a
 		// multi-step run offers no tools and opens with an answer-now turn, so a
 		// seat that keeps calling tools ends with an answer attempt instead of
-		// `budget` and an empty Output. 2026-09-10: the Qube 27B (thinking off)
+		// `budget` and an empty Output. 2026-09-10: the <node-b> 27B (thinking off)
 		// spent all 12 steps of ledger-01 on read_file / search_files / list_dir
 		// with the whole 43 KB document already replayed into its transcript;
 		// the same-name cap fired on the 12th step and the run deferred with
@@ -1297,7 +1297,7 @@ func (l *Loop) run(ctx context.Context, objective string, bs *budgetState) (Resu
 			// missing closing quote". That is a budget defect — a ~3 KB write
 			// asked for in one call at a 1,024-token step budget — and filing
 			// it as a loop error made the node blame the stack
-			// (defer_class "infrastructure", 2026-09-15 on the Aorus 9B).
+			// (defer_class "infrastructure", 2026-09-15 on the <node-a> 9B).
 			//
 			// Classified BEFORE the overflow retry on purpose: the cut
 			// argument's own text can carry the words that retry keys on
@@ -1451,7 +1451,7 @@ func (l *Loop) run(ctx context.Context, objective string, bs *budgetState) (Resu
 		// Serve, so a backend that reports no timings yields "insufficient_data"
 		// rather than a fabricated 0% reuse.
 		// Repetition guard (D-95b). A seat can burn its whole completion budget
-		// on a DEGENERATE LOOP — the Lenovo 4B's METHODOLOGY.md digest of
+		// on a DEGENERATE LOOP — the <node-c> 4B's METHODOLOGY.md digest of
 		// 2026-09-14 repeated the same four-line block under `numbers:` about
 		// twenty times until the budget ran out, and the engine reported the
 		// run as an ordinary cut. Nothing downstream could tell that from an
@@ -1486,7 +1486,7 @@ func (l *Loop) run(ctx context.Context, objective string, bs *budgetState) (Resu
 			// long the lists could be. Tell it, once: same request, thinking
 			// off, the same budget, plus the schema's own caps spelled out
 			// ("cap every list at N items … keep every string under 200
-			// characters"). Measured 2026-09-14 on the Lenovo 4B: three of ten
+			// characters"). Measured 2026-09-14 on the <node-c> 4B: three of ten
 			// list-heavy extractions died exactly here. Gated on the wall
 			// holding one more turn, so this can never re-create the shape it
 			// fixes; bounded at one, so a seat that cuts the capped answer too
@@ -1529,7 +1529,7 @@ func (l *Loop) run(ctx context.Context, objective string, bs *budgetState) (Resu
 			// (StopEmpty). Until 0.115.8 the loop raised the budget 4x and re-ran,
 			// then nudged with a user turn and accepted a SECOND empty as "done" —
 			// three full-budget generations (1x + 4x + 4x; 20,526 tokens on the
-			// Qube 27B, 2026-09-10) and an empty final published as a result.
+			// <node-b> 27B, 2026-09-10) and an empty final published as a result.
 			//
 			// Now: re-issue THIS step once, at the final budget and (under
 			// ThinkingAuto) with thinking off — the same request, no nudge turn
@@ -1578,7 +1578,7 @@ func (l *Loop) run(ctx context.Context, objective string, bs *budgetState) (Resu
 		// and returns an empty answer.
 		if len(comp.Msg.ToolCalls) == 0 {
 			if marker := UnparsedToolCallMarker(comp.Msg.Content); marker != "" {
-				// 2026-09-04: the Qube 27B seat answered every digest with
+				// 2026-09-04: the <node-b> 27B seat answered every digest with
 				// "<tool_call><function=list_dir>…" as CONTENT — vLLM ran with
 				// --tool-call-parser hermes while the model's template emits the
 				// Qwen3 XML form, so nothing was parsed, the loop took the text as
@@ -2052,7 +2052,7 @@ func clip(s string, n int) string {
 // the completion budget twice — once at the step budget, once at the
 // wall-fitted final budget the re-issue opened at. Terminal, with an empty
 // Output and the arithmetic in StopNote; the node files it as a BUDGET defer,
-// never infrastructure. Measured 2026-09-15 on the Aorus 9B llama.cpp seat
+// never infrastructure. Measured 2026-09-15 on the <node-a> 9B llama.cpp seat
 // (step_tokens 1024, a ~3 KB single-call write): llama.cpp answered HTTP 500
 // "Failed to parse tool call arguments as JSON … invalid string: missing
 // closing quote" at column 2847 and the run was filed against the stack.
@@ -2170,7 +2170,7 @@ func cutToolCallNote(stepTokens, finalTokens, argChars int) string {
 // tool calls whose text still carries a tool-call block. The model DID call a
 // tool; the server's tool-call parser did not recognise the format. Treating
 // that text as a final answer is how a misconfigured seat "answers" every
-// contract with garbage (Qube 27B, 2026-09-04: hermes parser on a Qwen3 XML
+// contract with garbage (<node-b> 27B, 2026-09-04: hermes parser on a Qwen3 XML
 // template, 8/8 digests failed verification with findings about list_dir).
 var ErrUnparsedToolCall = errors.New("unparsed tool call in assistant content")
 

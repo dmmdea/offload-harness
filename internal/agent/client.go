@@ -109,7 +109,7 @@ type wireMsg struct {
 	// completion budget inside the think block (content: null, reasoning: the
 	// unclosed block, finish_reason: length) read as SILENCE — the loop raised
 	// the budget, nudged, and published an empty final as "done" (2026-09-10:
-	// 20,526 tokens for zero visible characters on the Qube 27B seat).
+	// 20,526 tokens for zero visible characters on the <node-b> 27B seat).
 	Reasoning string `json:"reasoning,omitempty"`
 }
 type wireToolDef struct {

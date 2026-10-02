@@ -32,7 +32,7 @@ type MediaRequest struct {
 	// VideoEncoder names the ffmpeg video encoder for the two ops that RE-ENCODE video
 	// (trim with Reencode, convert with video kept). "" = ffmpeg's container default
 	// (libx264 on the CPU). "h264_nvenc" moves draft/QA re-encodes to NVENC — measured
-	// 2026-09-05 on the Qube (CUDA-X plan task 4.2); set from config ffmpeg_video_encoder.
+	// 2026-09-05 on <node-b> (CUDA-X plan task 4.2); set from config ffmpeg_video_encoder.
 	VideoEncoder string
 }
 

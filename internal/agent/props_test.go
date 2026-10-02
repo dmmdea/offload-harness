@@ -12,7 +12,7 @@ import (
 )
 
 // propsFixture mirrors the live payload shape captured from a resident seat
-// (lenovo-ampere6 qwen3.5-4b-agent, llama-server b322-4df29be, 2026-08-21):
+// (node-c-ampere6 qwen3.5-4b-agent, llama-server b322-4df29be, 2026-08-21):
 // build_info, model_path, model_ftype, n_ctx, total_slots, sampler params
 // with reasoning_format, chat_template as a string, modalities as a bool map.
 func propsFixture() map[string]any {
