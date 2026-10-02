@@ -167,9 +167,14 @@ did run out, the refusal reached the caller as `transcribe call failed: gpu-leas
 **Decision.** The whisper client has its own lease-wait budget, `sttclient.Client.WithFenceWait`, that
 `pipeline.New` sets from `gpu_wait_ms`; the client's own timeout only caps it (`min` of the two), because a wait
 cannot outlast the request it is part of. Zero is a value, one inspection, as `gpu_wait_ms: 0` is for every other
-door; a client built without the option keeps waiting its timeout. A lease refusal is filed as the vision tier and
-the agent doors file theirs: error class `gpu_busy`, reason `gpu busy: <the holder>`, defer class `capacity`, the
-class a delegator re-places and a caller can retry. The timeout keeps bounding the HTTP call itself. A long
+door; a client built without the option keeps waiting its timeout. A lease refusal is filed with error class
+`gpu_busy`, reason `gpu busy: <the holder>` and defer class `capacity`, the class a delegator re-places and a
+caller can retry. That shape is the union of two precedents, and no door files it exactly: the agent doors (the
+delegation door's `runAgentTask`, `agent_run`, the review lane) file reason `gpu busy: …` and defer class
+`capacity` and set no error class, while the vision tier files error class `gpu_busy` and `gpu busy: generation
+job holds the lock (…)` with no defer class, and only when a generation job holds the lock (a lease refusal on
+its model call is filed through `classifyErr` as `timeout`, also with no defer class). The timeout keeps
+bounding the HTTP call itself. A long
 transcription also tells the client it is alive: when the request carries a progress token the server sends an
 opening notification and a heartbeat every 30 s ([ADR 0065](0065-the-whole-call-has-a-deadline-below-the-clients-abort.md)).
 Whether the reference client restarts its timeout on progress is still unverified, so the bounded wait is the fix and

@@ -1134,8 +1134,10 @@ func isContextOverflow(reason string) bool {
 // on the whisper upstream, writes .srt/.txt/.segments.json to MediaDir, and
 // returns {gist, segments[](capped), language, duration_sec, num_segments,
 // *_path}. Any failure (no model / convert / model call / empty) defers to Opus.
-// It force-unloads the upstream after the call (zero-always-warm) unless
-// disabled. params: language (string), hq (bool -> the large-v3 upstream).
+// Zero-always-warm unless disabled: the last call out of a burst frees the upstream
+// (UnloadIfIdle, every model the burst warmed, once), and a call that finishes while
+// another is in line unloads nothing. params: language (string), hq (bool -> the
+// large-v3 upstream).
 func (p *Pipeline) runTranscribe(ctx context.Context, req core.Request, meta core.Meta, start time.Time) core.Result {
 	if p.cfg.STTModel == "" {
 		meta.LatencyMs = time.Since(start).Milliseconds()
@@ -1268,9 +1270,15 @@ func (p *Pipeline) runTranscribe(ctx context.Context, req core.Request, meta cor
 		// A held card is congestion, not a failure (register C-89): the request waited its
 		// gpu_wait_ms behind a render or an exclusive hold and the fence refused it. Filed
 		// as capacity — the class a delegator re-places and a caller can retry — with the
-		// holder named, exactly as the vision tier and the agent doors file it. Through
-		// classifyErr it read "timeout" (the lease error carries the word) with no defer
-		// class, which nothing can act on.
+		// holder named, and with the error class the ledger groups on. No other door files
+		// a refusal exactly this way; this is the union of two precedents. The agent doors
+		// (runAgentTask, agent_run, the review lane) file reason "gpu busy: ..." and defer
+		// class capacity, and set no error class. The vision tier files error class gpu_busy
+		// and "gpu busy: generation job holds the lock (...)", with no defer class, and only
+		// when a generation job holds the lock (runVisionGen); a lease refusal on its model
+		// call comes back from the affinity gate and is filed through classifyErr as
+		// "timeout", also with no defer class. Through classifyErr this refusal read
+		// "timeout" too (the lease error carries the word), which nothing can act on.
 		if modelaffinity.IsLeaseRefusal(terr) {
 			meta.LatencyMs = time.Since(start).Milliseconds()
 			meta.ErrClass = "gpu_busy"

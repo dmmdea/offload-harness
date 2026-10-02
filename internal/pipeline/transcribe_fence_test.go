@@ -2,8 +2,10 @@ package pipeline
 
 // transcribe_fence_test.go pins register C-89 at the call site: a transcription that finds
 // the card held waits gpu_wait_ms, like every other GPU door, and then defers as CAPACITY
-// ("gpu busy: ...", error class gpu_busy), the shape the vision tier and the agent doors
-// already use. It used to wait the client's own timeout (stt_request_timeout_sec, 1,800 s,
+// ("gpu busy: ...", error class gpu_busy, defer class capacity). No other door files a
+// refusal quite that way: the agent doors set the reason and the defer class but no error
+// class, and the vision tier sets the error class but no defer class (ADR 0026, Extended
+// 2026-10-01). It used to wait the client's own timeout (stt_request_timeout_sec, 1,800 s,
 // the limit at which the MCP client aborts an idle call) and then fail as an unclassed
 // "transcribe call failed: gpu-lease timeout ...", which no delegator can re-place.
 
