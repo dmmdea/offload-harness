@@ -293,9 +293,11 @@ runner's helper would have unloaded it. The default now lists it, appended so `E
 unchanged, in `internal/config` and in `render/gpu-lock.mjs`, and a test keeps the two lists equal
 ([gpu-lease.md](../../systems/gpu-lease.md)). The installer's seeded `config.json` keeps its explicit pair: a configured list
 replaces the default, and `llamaswap-pp-cli bind check` reports a `memory_stack` entry the box does not serve as dangling.
-The default covers `gpu reserve --unload-seat` and the render runner's helper only: fleet reclaim (`fleet_reclaim.go`) does
-not read `memory_stack` (it protects llama-swap's ttl -1/0 seats and the configured keep-set), so a ttl-300 embedder is still
-reclaimable there (register C-94).
+The default first covered `gpu reserve --unload-seat` and the render runner's helper only: fleet reclaim (`fleet_reclaim.go`)
+did not read `memory_stack` (it protected llama-swap's ttl -1/0 seats and the configured keep-set), so a ttl-300 embedder was
+still reclaimable there. That gap is closed (register C-94): reclaim now keeps every `memory_stack` member, and the default set
+when the list is empty, by name and whatever the ttl, through the same `effectiveMemoryStack` that `--unload-seat` reads, with a
+test that a ttl-300 member is never reclaimed and a non-member still is.
 
 **Costs recorded.** The lane seat serves at most 4 sequences at once (it declared 8, and 32 before) and llama-swap's
 `concurrencyLimit` for it follows, 8 to 4; the harness's own local run cap defaults to 4, so its runs now reach the limit

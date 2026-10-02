@@ -799,6 +799,13 @@ no llama-swap YAML and no keep-set config can be read at all, the node falls bac
 old `ttl` reading rather than to "nothing is protected" — the permissive answer would fold
 a resident embedder into the idle baseline and make that node under-advertise forever.
 
+**The memory stack is protected by name, in both modes.** The house rule gives every model a
+300 s idle ttl, so a mem0 stack member is neither a `ttl: -1/0` seat nor in the keep-set, yet
+it is what `gpu reserve --unload-seat` and the render helper keep resident. Reclaim keeps the
+same set, `memory_stack` (the default set when empty), matched on the canonical id ignoring
+case and padding, before the keep-set is consulted and even when no keep-set could be read
+(register C-94). A non-member at ttl 300 is still reclaimable.
+
 **Unknown is published as absence.** Before any idle baseline has been observed, both
 numbers are OMITTED and only `vram_reclaim_source` is sent, explaining why. A consumer
 falls back to `vram_free_gb`. Over-promising costs a failed job; under-promising costs a
@@ -1468,7 +1475,7 @@ wait after ONE transient error, which is S-08 again, intermittently.
   the host free-RAM reader (leaf; fleetnode's `GPUDevice`/`ParseSmiMemoryDevices`/`HeadlineDevice`
   alias it)
 - [`fleet_reclaim.go`](../../fleet_reclaim.go) — `oursLoaded` / `anyReclaimable`: the keep-set
-  classification above, over `pkg/llamaswap`'s `Running()` + `IsProtected()`
+  and memory-stack classification above, over `pkg/llamaswap`'s `Running()` + `IsProtected()`
 - [`main.go`](../../main.go) — `fleet-serve` / `fleet-measure` verbs
 
 ## Related docs
