@@ -1,4 +1,4 @@
-# llama-swap.linux-rk3588.yaml — offload-harness on the Rockchip RK3588 (Orange Pi 5 class
+# llama-swap.linux-rk3588.yaml — offload-harness on the Rockchip RK3588 (RK3588S-class
 # SoC boards): llama.cpp on the Mali-G610 through the VULKAN backend (Mesa panvk, mainline
 # kernel), plus the NPU seats a tier declares (RKLLM, kind `rkllm`), all on ONE unified-memory
 # budget. Rendered by `local-offload install render`, which substitutes the __CTX__ /
