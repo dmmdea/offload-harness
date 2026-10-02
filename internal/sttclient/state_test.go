@@ -7,10 +7,11 @@ package sttclient
 // The set is keyed by base URL, and httptest hands out ephemeral ports that the OS reuses, so
 // a test that warmed a model on a base and never unloaded it left that entry for any later
 // test whose stand-in got the same port. An UnloadIfIdle there then sent an unload for a
-// model that test never used, and TestACallThatNeverReachedTheUpstreamUnloadsNothing failed
-// one run in a few under -count. resetClientState is what every test that transcribes calls
-// first; the test below shares ONE base across its subtests, which is what a reused port
-// does by chance, so the leak is reproduced on every run instead of now and then.
+// model that test never used, and TestACallThatNeverReachedTheUpstreamUnloadsNothing was
+// reported flaky under -count (a port is only sometimes reused: twenty repeated runs on the
+// unfixed code passed). resetClientState is what every test that transcribes calls first;
+// the test below shares ONE base across its subtests, which is what a reused port does by
+// chance, so the leak is reproduced on every run instead of now and then.
 
 import (
 	"context"
