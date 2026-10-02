@@ -7,7 +7,7 @@ date: "2026-09-30"
 
 ## Context
 
-The operator added a Rockchip RK3588 board (reference: an Orange Pi 5, RK3588S) to the fleet. It has no
+The operator added a Rockchip RK3588 board (reference: `<node-d>`, RK3588S) to the fleet. It has no
 NVIDIA or AMD GPU: 4x Cortex-A55 + 4x Cortex-A76, 7.7 GiB of LPDDR4X shared by the CPU, a Mali-G610 GPU
 and a 3-core 6 TOPS NPU. It also runs the operator's home-automation stack, and the operator's orders
 shape everything below: the CPU is reserved for that stack (no CPU inference, ADR 0054's amendment), part
@@ -62,7 +62,7 @@ Ubuntu's mainline 7.0 kernel on the operator's order ("latest kernel, latest dri
 
 ## Consequences
 
-- A second RK3588 board (Rock 5B, Orange Pi 5 Plus, ...) installs as this tier from the same detection,
+- A second RK3588 board (Rock 5B or another vendor's board, ...) installs as this tier from the same detection,
   but its NPU driver and model files are box work the installer does not do: the vendor runtime libraries,
   the DKMS driver on a mainline kernel, and the `.rkllm` / `.rknn` files.
 - The node registers with `fleet_agent_enabled: false`. It serves the vision lane (the NPU VLM) and the

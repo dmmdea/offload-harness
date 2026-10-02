@@ -3,7 +3,7 @@ status: Accepted
 date: "2026-08-28"
 ---
 
-# 0029 — The Lenovo agent lane stays on the 4B seat; FreeToken is parked there after a disqualifying live finding
+# 0029 — The ampere-6 agent lane stays on the 4B seat; FreeToken is parked there after a disqualifying live finding
 
 ## Context
 
@@ -17,7 +17,7 @@ tier itself was instrument-invalid, and a production-representative A/B
 ## What was built (and stays)
 
 - FreeToken 0.1.2 installed on the ZFS pool
-  (`/srv/ecosystem_backup/apps/freetoken`) with a **pool-local Python** —
+  (`<pool-path>`) with a **pool-local Python** —
   under `llama-swap.service`'s hardening (`ProtectSystem=strict`,
   `ProtectHome=yes`) a uv-managed venv is unusable until the interpreter is
   copied local and BOTH `_sysconfigdata_*.py` and `pyvenv.cfg`'s `home=` are
@@ -44,7 +44,7 @@ benchmark scores, and data-leakage-shaped besides.
 
 ## Decision
 
-`agent_model` on the Lenovo REVERTED to `qwen3.5-4b-agent` (verified: the
+`agent_model` on `<node-c>` REVERTED to `qwen3.5-4b-agent` (verified: the
 same contract passes on-seat in 18 s). The `gpt-oss-20b` llama-swap entry
 STAYS as an explicitly-addressed experimental seat — never the agent lane.
 

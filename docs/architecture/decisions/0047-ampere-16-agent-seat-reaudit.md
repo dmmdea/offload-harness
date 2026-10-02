@@ -13,8 +13,8 @@ date: "2026-09-16"
 
 ## Context
 
-The ampere-16 tier (reference box: Lenovo M720q, NVIDIA A2 16 GB, 15,356 MiB usable with ECC on) has run a
-4B agent seat since 2026-08-17 — first `qwen3.5-4b-agent` (llama.cpp, [0029](0029-lenovo-agent-lane-stays-on-the-4b-seat.md)),
+The ampere-16 tier (reference box: `<node-c>`, NVIDIA A2 16 GB, 15,356 MiB usable with ECC on) has run a
+4B agent seat since 2026-08-17 — first `qwen3.5-4b-agent` (llama.cpp, [0029](0029-ampere-6-agent-lane-stays-on-the-4b-seat.md)),
 then `qwen3.5-4b-vllm` (vLLM w4a16, [0035](0035-persistent-vllm-seat-behind-llama-swap.md)). Register A-07
 recorded on 2026-09-14 that "the measured tie stands" and that no larger candidate would be funded until a new
 model family shipped.
@@ -27,10 +27,10 @@ the operator named, each item with a number in the record:
 1. **The card ran at stock and thermally throttled from 2026-09-10 16:25 to 2026-09-15 10:20** (register A-103):
    a 2-minute reboot inside the powertune dwell left the crash cookie in place, so the accepted 40 W / 1200 MHz
    profile was skipped at every boot. Under load the passive card reached 86 °C and `sw_thermal_slowdown` within
-   60 s and sat at 232–980 MHz. Every Lenovo measurement in that window — including instrument run 2 of
+   60 s and sat at 232–980 MHz. Every `<node-c>` measurement in that window — including instrument run 2 of
    2026-09-14, the run that produced the "tie" — was taken on a throttled card. Contract walls of 300 s were hit
    by the larger candidates, and a wall is a completion failure the instrument counts against the candidate.
-2. **The Lenovo node ran a 1,024-token step budget** (no `agent_max_tokens` in its config; the Qube's had been
+2. **`<node-c>` ran a 1,024-token step budget** (no `agent_max_tokens` in its config; `<node-b>`'s had been
    raised to 4,096 on 2026-09-04). A Qwen3.5-9B spent 100 % of 1,024 tokens thinking and returned no answer; the
    loop's once-per-run 4× raise blunts but does not remove the bias (CORRECTION-2026-09-08). The published
    −1.53 against the 9B was withdrawn as unsupported; the re-run at a matched budget read −0.11.
@@ -182,14 +182,14 @@ reasoning seat, the second at the new binding. `TestAgentWindowMatchesWhatTheAge
 The measured window therefore ships as a number in three places that the test holds in agreement.
 
 **The engine.** The MTP drafter needs llama.cpp **b10991** (`--spec-type draft-mtp` with a Gemma-4 head needs
-b9549+; the Qwen `nextn` path needs the mainline MTP support). The Lenovo's production build is **b10454** and
+b9549+; the Qwen `nextn` path needs the mainline MTP support). `<node-c>`'s production build is **b10454** and
 20 llama-swap entries reference it by absolute path. The deploy is therefore surgical, not a fleet-wide bump:
 the b10991 `bin` directory (87 MB, binaries + `libggml*`/`libllama*`) is copied into the offload-stack build tree
 beside the incumbent, and ONLY the new agent entry points at it, with its own `LD_LIBRARY_PATH`. A full bump of
 the other 20 entries is a separate register item with its own re-verification (register A-89 names the ritual:
 a bump must touch the `${server}` macro and every launcher that hard-codes the path).
 
-**Live deploy (the Lenovo's llama-swap is hand-maintained, not rendered).** Three files, each backed up beside
+**Live deploy (`<node-c>`'s llama-swap is hand-maintained, not rendered).** Three files, each backed up beside
 itself: `apps/llama-swap/etc/config.yaml` (the new entry + its aliases, `ttl: 300`, heavy-group membership so it
 cannot co-reside with the vision seat), `apps/offload-stack/etc/config.json` (`agent_model`, `agent_ctx_tokens`),
 and the vLLM seat's unit only if the 4B stops being the fallback. Readback is `/fleet/health` reporting the new

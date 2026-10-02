@@ -128,7 +128,7 @@ The `ampere-16` reference box (NVIDIA A2 16 GB at a 40 W / 1200 MHz lock) served
 llama.cpp 4B seat with a 32k advertised window and `--parallel 1` — under three concurrent delegating sessions
 its subtasks queued 222–258 s behind four jobs on one slot (K×8 gate, 2026-09-06). vLLM on the same card
 fans out to 293 tok/s at 32 streams and, with `fp8_e5m2` KV (free on Ampere), holds a 262k-token pool at
-util 0.90. [ADR 0029](0029-lenovo-agent-lane-stays-on-the-4b-seat.md) had pinned the lane to the 4B seat after a
+util 0.90. [ADR 0029](0029-ampere-6-agent-lane-stays-on-the-4b-seat.md) had pinned the lane to the 4B seat after a
 FreeToken finding; that finding is about FreeToken, not about vLLM.
 
 The plan's phrase "point the fleet node at it (`endpoint`/`agent_model`)" hid a wrong turn: the node's
@@ -138,7 +138,7 @@ grammar-free chat re-pack all read `cfg.Endpoint`. The seat had to appear INSIDE
 
 Two ways to do that were on the table:
 
-1. **llama-swap spawns vLLM as a plain `cmd`** (the Qube's own vLLM seat pattern, born of WSL constraints).
+1. **llama-swap spawns vLLM as a plain `cmd`** (`<node-b>`'s own vLLM seat pattern, born of WSL constraints).
    The engine would inherit llama-swap's sandbox (`ProtectHome`, `ProtectSystem=strict`, private `/tmp`) —
    a different JIT/compile-cache environment from the one every arm was measured in — every llama-swap
    restart would be a 2–4 min engine reload, and nothing would bring the seat up at boot before the first
@@ -188,7 +188,7 @@ Two ways to do that were on the table:
   nothing evicts the seat automatically. The entry's comment names them; a measurement window takes the
   text lease (`--unload-seat`) first, which is the same verb the launcher scripts already use.
 - The harness's llama-server seat-pin probe (`/props`) 404s on vLLM — logged, non-fatal, `seat_config_*`
-  absent on those rows; the same as the Qube's vLLM seat.
+  absent on those rows; the same as `<node-b>`'s vLLM seat.
 - The tier SEED is unchanged: the seat is a hand-installed venv and unit, not something the installer
   renders. The tier page and the operator guide point here; the reference files live in
   `setup/templates/vllm-seat/linux-systemd/`.
@@ -206,7 +206,7 @@ Two ways to do that were on the table:
 
 ## Related
 
-- [0029](0029-lenovo-agent-lane-stays-on-the-4b-seat.md) — the seat binding it replaces (FreeToken finding unchanged)
+- [0029](0029-ampere-6-agent-lane-stays-on-the-4b-seat.md) — the seat binding it replaces (FreeToken finding unchanged)
 - [0023](0023-agent-lane-tailnet-auth-and-locality.md) — why the seat binds the Tailscale address
 - [`docs/systems/fleet-node.md`](../../systems/fleet-node.md) — `served_models`, residency, the lease verbs
 - [`setup/templates/vllm-seat/linux-systemd/`](../../../setup/templates/vllm-seat/linux-systemd/README.md) — the reference files

@@ -14,9 +14,9 @@ On 2026-09-01 several Claude Code sessions delegating in parallel reported the h
 schedule work and failing to deliver quality":
 
 - "the 27B seat timed out at 600 s and then hit llama-swap 429s (another session held the slots)"
-- "the Lenovo 4B seat returned the known phantom 'Go version' answer on 6 of 7 pages"
+- "the `<node-c>` 4B seat returned the known phantom 'Go version' answer on 6 of 7 pages"
 - "the two `offload_research` calls deferred (first exceeded the 8-contract cap, then llama-swap
-  answered 429 concurrency and the Lenovo seat produced the known off-goal digests), so I digested
+  answered 429 concurrency and the `<node-c>` seat produced the known off-goal digests), so I digested
   the official pages with direct fetches instead"
 
 Every failure ended the same way: the session bypassed the harness and spent cloud tokens — the
@@ -109,7 +109,7 @@ takes the top 24 words. The `docanchor` tag is kept, so quarantine semantics are
   Summarization*; Cao et al. 2022, *Hallucinated but Factual!*), which is why the bar is "one token
   from each half of twelve", not "many tokens".
 - Quarantine is per process, so a node fixed mid-day comes back without a restart and a flaky one is
-  re-tried after 30 minutes. The Lenovo fleet-node goal-swap bug itself stays open in `ROADMAP.md`;
+  re-tried after 30 minutes. The `<node-c>` fleet-node goal-swap bug itself stays open in `ROADMAP.md`;
   this change makes it fail loudly and stop being re-tried, it does not fix the node.
 - **Capacity is the operator's step, prepared here and not applied:** the 429 exists because
   `concurrencyLimit` (10) is shared by every session; raising it on the agent seats in
