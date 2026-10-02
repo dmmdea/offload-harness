@@ -138,7 +138,8 @@ func TestInpaintDefaults(t *testing.T) {
 
 // TestDefaultMemoryStack: the CPU memory stack the GPU-free helper must never unload
 // is sourced from config (not a buried const) so a renamed/added member is honored.
-// Default carries the two canonical CPU-only members.
+// Default carries the three canonical members: the embedder, the reranker and the id the
+// memory authority node serves its embedder under (register A-122b).
 // TestFleetDefaults: fleet-serve binds loopback:18811 by default (the
 // dispatcher owns 18810), the node id resolves to the hostname at serve time
 // (never baked into a shareable config), and the footprint sampler is "auto"
@@ -206,14 +207,29 @@ func TestFleetQueueLimitDefaultTracksConcurrency(t *testing.T) {
 
 func TestDefaultMemoryStack(t *testing.T) {
 	c := Default()
-	want := map[string]bool{"embeddinggemma": true, "bge-reranker-v2-m3": true}
+	want := map[string]bool{"embeddinggemma": true, "bge-reranker-v2-m3": true, "embeddinggemma-ams": true}
 	if len(c.MemoryStack) != len(want) {
 		t.Fatalf("MemoryStack = %v, want %v", c.MemoryStack, want)
 	}
+	seen := map[string]bool{}
 	for _, m := range c.MemoryStack {
 		if !want[m] {
 			t.Errorf("MemoryStack has unexpected member %q", m)
 		}
+		if seen[m] {
+			t.Errorf("MemoryStack lists %q twice", m)
+		}
+		seen[m] = true
+	}
+	// The memory authority node serves its embedder as embeddinggemma-ams (register A-122b): a default without it
+	// lets `gpu reserve --unload-seat` and the render runner's helper unload the embedder every memory write needs.
+	if !seen["embeddinggemma-ams"] {
+		t.Errorf("MemoryStack = %v, want it to keep embeddinggemma-ams resident", c.MemoryStack)
+	}
+	// EmbedModel() falls back to MemoryStack[0] for a config that only sets the stack, so the embedder stays first
+	// and the node-specific id is appended, never put first.
+	if c.MemoryStack[0] != "embeddinggemma" {
+		t.Errorf("MemoryStack[0] = %q, want embeddinggemma (EmbedModel's fallback)", c.MemoryStack[0])
 	}
 }
 

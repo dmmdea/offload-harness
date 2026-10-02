@@ -1176,7 +1176,13 @@ type Config struct {
 	// on the reference box, pinned to the utility card, not the render card (they ran
 	// on the CPU only from 2026-09-07 to 09-10). Sourced here (not a buried const) so a
 	// renamed/added 3rd member is honored. Threaded to the runner via the
-	// MEMORY_STACK env. Default {embeddinggemma, bge-reranker-v2-m3}. This is an
+	// MEMORY_STACK env. Default {embeddinggemma, bge-reranker-v2-m3, embeddinggemma-ams}:
+	// the third is the id the memory authority node serves its embedder under (register
+	// A-122b, 2026-10-01), which the first two did not cover, so a lease's --unload-seat and
+	// the render runner's helper would have unloaded it. A name a box does not serve is
+	// inert: the set only filters what llama-swap reports. Keep embeddinggemma FIRST:
+	// EmbedModel() falls back to MemoryStack[0]. render/gpu-lock.mjs's DEFAULT_MEMORY_STACK
+	// is the same list, and a test keeps the two in step. This is an
 	// UNORDERED keep-alive set — do NOT infer roles from position (use EmbedModel).
 	MemoryStack []string `json:"memory_stack,omitempty"`
 	// EmbedModelName is the embedding model the judge/kNN embedder requests. Kept
@@ -1918,7 +1924,7 @@ func Default() Config {
 		ComposeQuality:              "high",
 		BrowseTimeoutSec:            300,
 		BrowseMaxActions:            30,
-		MemoryStack:                 []string{"embeddinggemma", "bge-reranker-v2-m3"},
+		MemoryStack:                 []string{"embeddinggemma", "bge-reranker-v2-m3", "embeddinggemma-ams"},
 		EmbedModelName:              "embeddinggemma", // explicit; reorder-proof (not MemoryStack position)
 		Temperature:                 0,
 		MaxRetries:                  1,

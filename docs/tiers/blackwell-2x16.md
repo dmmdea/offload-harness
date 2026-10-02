@@ -28,6 +28,7 @@ one declaration, so the seat and the lane routing to it cannot disagree.
 | max_model_len | 163840 | the served window |
 | gpu_memory_utilization | 0.85 | the engine's share of the card — chosen WITH the seat's co-residents in mind, not alone |
 | max_num_seqs | 32 | the engine's concurrency, and the entry's `concurrencyLimit` |
+| max_num_batched_tokens | 3135 | the engine's per-step token budget (`--max-num-batched-tokens`); with the sequence count it sizes the workspace the profiled share must cover, so it is a co-residency lever beside utilization |
 | kv_cache_dtype | `fp8` | KV precision — backend-dependent, not free everywhere |
 | ttl_seconds | 300 | idle window before the seat unloads and frees its cards |
 | launch | `windows-wsl` | which artifact set starts it |

@@ -96,12 +96,15 @@ matrix that called the pair a valid combination would have llama-swap load the s
 an out-of-memory at the engine's first allocation. The seats stay resident-class: an ordinary chat request
 never evicts the agent lane, and asking for the 35B by name swaps it in.
 
-Beside whichever seat is loaded the card keeps the memory stack's support models, the embedder (452 MiB) and the
-reranker (372 MiB), and the memory embedder has absolute priority (operator order, 2026-09-30): the seats make room for
-it. So each seat's `gpu_memory_utilization` and `max_num_seqs` are capped at the point measured to leave both room on
-the 15,356 MiB card — the 27B at util 0.87 with 8 sequences, the 35B at util 0.85 ([ADR 0049](../architecture/decisions/0049-ampere-16-vllm-seat-is-the-3bit-gsq-27b.md)
-Amendment 4) — and `ampere16_coresidency_test.go` fails when either rises above it. The earlier declaration (util 0.90, 32
-sequences) ran the engine at 14,788 MiB and kept the embedder from loading for 35 minutes.
+Beside whichever seat is loaded the card keeps the memory stack's support models, the embedder (about 460 MiB) and the
+reranker (306-378 MiB, by its batch size). The memory embedder has absolute priority (operator order, 2026-09-30) and the
+reranker stays resident too, with about 1 GiB of the card free (operator order, 2026-10-01): the seats make room for
+them. So each seat's `gpu_memory_utilization`, `max_num_seqs` and `max_num_batched_tokens` are capped at the point measured
+to leave both room on the 15,356 MiB card — the 27B at util 0.84 with 4 sequences and a 2,048-token batch, the 35B at
+util 0.85 with 8 sequences and a 4,096-token batch ([ADR 0049](../architecture/decisions/0049-ampere-16-vllm-seat-is-the-3bit-gsq-27b.md)
+Amendments 4 and 5) — and `ampere16_coresidency_test.go` fails when either rises above it. The first declaration (util 0.90,
+32 sequences) ran the engine at 14,788 MiB and kept the embedder from loading for 35 minutes; the second (util 0.87, 8
+sequences, 4,096 batched tokens) left 639 MiB, and the reranker failed to start beside the loaded seat 7 times (register A-122b).
 
 ### What an operator still installs by hand on a fresh `ampere-16` box
 
@@ -127,9 +130,9 @@ The installer detects prerequisites and never builds them, and it does not rende
    `vllm-35b-seat-cmd.sh` and `vllm-35b-seat-cmdstop.sh` in the same seat directory (`cmd` and `cmdStop`
    start and stop `vllm-35b-seat.service`); the polkit rule is the 27B's with the unit name changed. In
    the run script, point `--model` at the 35B snapshot, set `--served-model-name
-   qwen36-35b-a3b-gsq-vllm a2-pool-35b qwen36-35b-gsq`, `--max-num-seqs 8` and `--tool-call-parser
-   qwen3_coder`, and add `--language-model-only`; keep the window and utilisation the table records
-   (32,768 at `util 0.85`, the point measured to leave the embedder and the reranker room).
+   qwen36-35b-a3b-gsq-vllm a2-pool-35b qwen36-35b-gsq`, `--max-num-seqs 8`, `--max-num-batched-tokens 4096` (the 27B renders 2,048 since ADR 0049 Amendment 5; the 35B
+   was measured at 4,096) and `--tool-call-parser qwen3_coder`, and add `--language-model-only`; keep the window and
+   utilisation the table records (32,768 at `util 0.85`, the point measured to leave the embedder and the reranker room).
 5. **Then** re-run `install seed` and `install render` with the same flags: `install render` writes both
    llama-swap entries and `install seed` writes the layers, the roster and both bindings. `local-offload doctor` prints a storeless-OK line per seat, `offload_status` lists both
    layers, and a contract with `layer: "fast"` lands on the 35B.

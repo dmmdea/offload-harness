@@ -198,9 +198,11 @@ models:
     # was an 8GB-era carryover — it remains CORRECT for small-VRAM tiers: the linux
     # (Lenovo-class) template ran it at -ngl 0 until 0.115.4; every template now serves it on the card (RAM is overflow only, operator 2026-09-10). Raw-logit scores are
     # device-independent, so admission-gate threshold calibration is unaffected.
+    # A-122b (measured 2026-10-01 on the Linux 16 GB tier): batch/ubatch 2048, because the memory stack scores each pair (at most ~2,000 tokens) as ONE non-causal
+    # sequence that must fit one ubatch. --ctx-size stays 8192: with --parallel 4 llama.cpp gives each slot ctx/4 = 2,048, and a pair must fit its slot.
     cmd: >-
       __LLAMA_BIN__/llama-server.exe -m __MODELS__/bge-reranker-v2-m3-Q4_K_M.gguf
-      --reranking --pooling rank --ctx-size 8192 --batch-size 4096 --ubatch-size 4096
+      --reranking --pooling rank --ctx-size 8192 --batch-size 2048 --ubatch-size 2048
       --parallel 4 -ngl 99 --port ${PORT} --host 127.0.0.1
     ttl: 300
 
