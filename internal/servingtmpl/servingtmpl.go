@@ -1099,7 +1099,9 @@ var envLineRe = regexp.MustCompile(`^ {4}env:\s*\[(.*)\]\s*$`)
 // Order matters — existing entries stay FIRST. The 26B declares
 // GGML_CUDA_DISABLE_GRAPHS=1 and must keep it in front, both because that is what
 // shipped and because appending is the only edit that cannot reorder a template's
-// own intent.
+// own intent. A key the block already sets is not added again (the existing value
+// wins), so a seat's own device pin survives and a second pass is a no-op, as the
+// PowerShell original's was.
 func injectGPUEnv(tmpl string, vars []string) string {
 	add := strings.Join(flowItems(vars), ", ")
 	lines := strings.Split(tmpl, "\n")
@@ -1141,8 +1143,21 @@ func injectGPUEnv(tmpl string, vars []string) string {
 				existing := strings.TrimSpace(m[1])
 				if existing == "" {
 					out = append(out, "    env: ["+add+"]")
+					continue
+				}
+				// A key the block already sets keeps its value (a per-seat device pin must
+				// win over the tier-wide one), which also makes a second pass a no-op.
+				missing := make([]string, 0, len(vars))
+				for _, v := range vars {
+					key, _, _ := strings.Cut(v, "=")
+					if !regexp.MustCompile(`(^|[\s,"])` + regexp.QuoteMeta(key) + `=`).MatchString(existing) {
+						missing = append(missing, v)
+					}
+				}
+				if len(missing) == 0 {
+					out = append(out, lines[j])
 				} else {
-					out = append(out, "    env: ["+existing+", "+add+"]")
+					out = append(out, "    env: ["+existing+", "+strings.Join(flowItems(missing), ", ")+"]")
 				}
 				continue
 			}
