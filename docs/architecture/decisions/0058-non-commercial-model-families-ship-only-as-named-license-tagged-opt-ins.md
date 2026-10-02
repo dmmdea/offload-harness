@@ -101,6 +101,14 @@ there for a caller that looks; the harness just stops repeating it. Rule 4 (neve
 seed default) is unchanged, and so is the config-load warning when the default binding names
 `qwen-image-2.1` — without its licence clause.
 
+## Amendment 2026-10-02 (video families carry the pair)
+
+`videogen_families[name]` takes the same `license` / `commercial_use` pair (both or neither, never
+required, no gate), read from the family's own entry for every family including the box's default one.
+A `generate_video` result, its ledger row, `offload_status` (`media.video_family_bindings`) and `doctor`
+publish it, with no warning text. No video family has a shipped value: the repo holds the licence names
+only in `render/templates-license-map.json`, and its `conditional` class is not a bool.
+
 ## Alternatives considered
 
 - **Evaluation-only through `offload_run_graph`.** The caller supplies the graph and the manifest.
