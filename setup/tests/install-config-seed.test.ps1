@@ -439,6 +439,26 @@ Assert ($null -eq (Get-MediaSeatBindings -ProfileRow $null))                'nul
 Assert ($null -eq (Get-MediaSeatBindings -ProfileRow ([pscustomobject]@{ config_seed = @{} }))) 'row without media_seats -> no bindings'
 $unknownKind = [pscustomobject]@{ media_seats = @([pscustomobject]@{ kind = 'aroma'; name = 'x' }) }
 Assert ($null -eq (Get-MediaSeatBindings -ProfileRow $unknownKind))         'unknown seat kind binds nothing (mirror of mediaseat.configKey)'
+# A-131: a registered extra (extra = true) binds nothing, whatever its kind and wherever it
+# sits in the list - mirror of mediaseat.Seat.BindingKey. Without the skip the LAST vision
+# seat wins, and an extra listed after the tier's own seat silently becomes vision_model.
+$primaryV = [pscustomobject]@{ kind = 'vision'; name = 'primary-vl' }
+$extraV   = [pscustomobject]@{ kind = 'vision'; name = 'extra-vl'; extra = $true }
+$extraV2  = [pscustomobject]@{ kind = 'vision'; name = 'extra-vl-2'; extra = $true }
+$bAfter   = Get-MediaSeatBindings -ProfileRow ([pscustomobject]@{ media_seats = @($primaryV, $extraV, $extraV2) })
+Assert ($bAfter.vision_model -eq 'primary-vl')                              'extras listed after the primary do not take vision_model'
+$bBefore  = Get-MediaSeatBindings -ProfileRow ([pscustomobject]@{ media_seats = @($extraV, $primaryV) })
+Assert ($bBefore.vision_model -eq 'primary-vl')                             'an extra listed before the primary does not take vision_model'
+Assert ($null -eq (Get-MediaSeatBindings -ProfileRow ([pscustomobject]@{ media_seats = @($extraV) }))) 'a row of only extras binds nothing (no empty object)'
+$extraStt = [pscustomobject]@{ kind = 'stt'; name = 'extra-stt'; extra = $true }
+$extraOcr = [pscustomobject]@{ kind = 'ocr'; name = 'extra-ocr'; extra = $true }
+Assert ($null -eq (Get-MediaSeatBindings -ProfileRow ([pscustomobject]@{ media_seats = @($extraStt, $extraOcr) }))) 'stt and ocr extras bind nothing either'
+$extraFalse = [pscustomobject]@{ kind = 'vision'; name = 'flag-off-vl'; extra = $false }
+Assert ((Get-MediaSeatBindings -ProfileRow ([pscustomobject]@{ media_seats = @($extraFalse) })).vision_model -eq 'flag-off-vl') 'extra = false still binds (only an explicit true skips)'
+# The shipped table: blackwell-8 seeds two extras, and neither is a binding.
+$b8extras = @($profiles.'blackwell-8'.media_seats | Where-Object { $_.PSObject.Properties['extra'] -and $_.extra })
+Assert ($b8extras.Count -eq 2)                                              'blackwell-8 ships its two vision extras'
+Assert (@($b8extras | ForEach-Object { $_.name } | Where-Object { $b8.vision_model -eq $_ -or $b8.ocr_model -eq $_ -or $b8.stt_model -eq $_ }).Count -eq 0) 'no blackwell-8 extra is named by a seat binding'
 
 # --- Host-tool seed: gimp_console_path / edit_python discovery rule -------------------
 Write-Host ""

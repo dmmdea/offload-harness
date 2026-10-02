@@ -260,7 +260,10 @@ out-of-band like the ≥16GB seeds.
 
 The tier's `media_seats` render into llama-swap.yaml and bind `vision_model`/`stt_model`/
 `ocr_model` in a fresh config automatically (0.83.0; `ocr` kind since 0.88.0), but the WEIGHTS
-stay operator-provisioned by design; the renderer WARNs on missing seat files. An `ocr` seat
+stay operator-provisioned by design; the renderer WARNs on missing seat files. That includes a
+registered extra (`extra: true`, e.g. blackwell-8's `lfm2.5-vl` and `gemma4-e4b-vision`): it renders but
+binds no key, and its weights (`LFM2.5-VL-3B-Q8_0.gguf` + `mmproj-LFM2.5-VL-3B-F16.gguf`; the E4B QAT gguf the
+tier already serves + `mmproj-gemma-4-E4B-F16.gguf`) are provisioned the same way. An `ocr` seat
 additionally needs its **chat template file** in the models dir (blackwell-8's paddleocr-vl:
 `PaddleOCR-VL-1.6.gguf` + `mmproj-PaddleOCR-VL-1.6.gguf` + `PaddleOCR-VL-1.6-chat_template.jinja`,
 all from `PaddlePaddle/PaddleOCR-VL-1.6-GGUF` — the model transcribes DEGRADED without the

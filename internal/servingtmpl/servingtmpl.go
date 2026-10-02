@@ -830,11 +830,12 @@ func matrixJoin(role string) string {
 // seatVarID derives the matrix var key for a seat. llama-swap REQUIRES a var key to
 // be alphanumeric and 1-8 characters (verified against the binary: a key of
 // "embeddinggemma" is rejected outright), so the seat's own name — which carries
-// hyphens and is usually longer — can never be the key. The kind is used because a
-// tier may declare at most one vision, stt or ocr seat (each writes a single config
-// field), which makes the id both stable and unique by construction. A text-only
-// rkllm seat writes no field, so a tier may declare several: the second and later ones
-// take the numbered ids below.
+// hyphens and is usually longer — can never be the key. The kind picks the base id
+// (vis, stt, ocr, rkllm), which keeps it stable. It is not unique on its own: a tier
+// may declare more than one seat of a kind, because a registered extra (Seat.Extra)
+// and a text-only rkllm seat write no binding key. The first seat of a kind takes the
+// base id; the second and later ones, in declaration order, take the numbered ids
+// below (vis2, vis3, ...). Uniqueness comes from the taken set, not from the kind.
 func seatVarID(s mediaseat.Seat, taken map[string]bool) (string, error) {
 	base := map[string]string{
 		mediaseat.KindVision: "vis", mediaseat.KindSTT: "stt", mediaseat.KindOCR: "ocr", mediaseat.KindRKLLM: "rkllm",

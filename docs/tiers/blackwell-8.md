@@ -30,6 +30,17 @@ binding can never name a seat that was not rendered:
 | `qwen3.5-9b-vl` | vision | `vision_model` | `Qwen3.5-9B-UD-Q4_K_XL.gguf` | swappable |
 | `paddleocr-vl` | ocr | `ocr_model` | `PaddleOCR-VL-1.6.gguf` | swappable |
 | `whisper-stt` | stt | `stt_model` | `ggml-large-v3-turbo.bin` | swappable |
+| `lfm2.5-vl` | vision | — (extra) | `LFM2.5-VL-3B-Q8_0.gguf` | swappable |
+| `gemma4-e4b-vision` | vision | — (extra) | `gemma-4-E4B-it-qat-UD-Q4_K_XL.gguf` | swappable |
+
+A seat marked `extra` is rendered into the llama-swap config and served by its name and aliases,
+but writes no config key and is not counted by the one-writer rule: nothing routes to it by default,
+and the seat above that binds the route keeps it. A caller reaches an extra by naming it. A rendered extra runs the harness
+template's flag shape (--reasoning off, -ngl 99, the tier's KV type), which can differ from a hand-wired entry
+for the same model, so measure the rendered form before treating it as that entry's replacement:
+
+- `lfm2.5-vl`, also answering to `lfm-vl`, `screen-vl`
+- `gemma4-e4b-vision`, also answering to `gemma-vision`
 
 A seat still needs its weights on the box — model downloads stay out-of-band, as with
 every seed.
