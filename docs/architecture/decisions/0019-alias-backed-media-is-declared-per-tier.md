@@ -57,6 +57,13 @@ that routes to it.**
    workstream exists to end.
 5. `stt_model` defaults to `""`, matching `vision_model`. A tier earns the binding by declaring
    the seat; a node with a hand-provisioned upstream sets it explicitly.
+6. A seat may be a **registered extra** (`extra: true`, A-131): a second vision, ocr or stt model the
+   tier serves by name and alias beside the bound one. `Seat.BindingKey()` answers `""` for it, so it
+   writes no config key and the one-writer check does not count it, and `Get-MediaSeatBindings` in
+   `setup/install.ps1` skips it the same way. It still renders (model entry, matrix var, residency
+   set) and is validated like any seat. It is refused on an `rkllm` seat (that kind still writes
+   `unconstrained_seats`/`text_tasks`) and takes no `tasks` (they ride the `vision_model` binding an
+   extra does not write). Nothing routes to an extra by default; a caller reaches it by naming it.
 
 ## Consequences
 

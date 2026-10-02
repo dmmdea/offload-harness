@@ -553,6 +553,12 @@ live-captured log lines, cosine). Go-side config round-tripping is covered by
   whisper-server seat (with its own loader path, since it is a separate binary) into the models map,
   and writes `stt_model` at the same time. A tier that declares no seat leaves `stt_model` empty and
   the route defers — it does not name an upstream nothing serves.
+- Expecting a second vision seat to bind. A tier may declare at most one seat per bound key, but a seat
+  flagged `extra: true` (a registered extra, e.g. blackwell-8's `lfm2.5-vl` and `gemma4-e4b-vision`) writes no
+  key and is not counted: it renders into llama-swap with its aliases and answers to them, and nothing
+  routes to it by default. A rendered extra runs the template's flag shape (`--reasoning off`, `-ngl 99`, the
+  tier's KV type), which can differ from a hand-wired entry of the same model, so the seat's `measured` note
+  says "rendered form not yet re-measured" until an EN/ES OCR and spatial VQA pass has been run on it.
 - Adding a profile without its self-test assertion.
 - Expecting the `ampere-8` band to start at 8 GB. It starts at 7.
 - Treating the profile string as fleet routing input. It is not.

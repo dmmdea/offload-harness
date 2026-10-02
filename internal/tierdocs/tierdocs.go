@@ -158,11 +158,21 @@ a Windows class.
 		}
 		if n := len(p.MediaSeats); n > 0 {
 			kinds := make([]string, 0, n)
+			extras := 0
 			for _, s := range p.MediaSeats {
+				// A registered extra binds no route, so it is not a capability the tier
+				// advertises: counted apart, never listed as a second "vision".
+				if s.Extra {
+					extras++
+					continue
+				}
 				kinds = append(kinds, s.Kind)
 			}
 			sort.Strings(kinds)
 			seats := "+ " + strings.Join(kinds, "/") + " seat"
+			if extras > 0 {
+				seats += fmt.Sprintf(" (+%d extra)", extras)
+			}
 			if media == "—" {
 				media = seats[2:]
 			} else {
@@ -271,9 +281,12 @@ func renderTier(name string, p Profile, reports []string) string {
 			bind := "—"
 			if k := s.BindingKey(); k != "" {
 				bind = "`" + k + "`"
+			} else if s.Extra {
+				bind = "— (extra)"
 			}
 			fmt.Fprintf(&b, "| `%s` | %s | %s | `%s` | %s |\n", s.Name, s.Kind, bind, s.Model, s.Residency)
 		}
+		b.WriteString(extraSeatNote(p.MediaSeats))
 		b.WriteString(rkllmSeatNote(p.MediaSeats))
 		b.WriteString("\nA seat still needs its weights on the box — model downloads stay out-of-band, as with\nevery seed.\n\n")
 	}
@@ -373,6 +386,32 @@ func renderTier(name string, p Profile, reports []string) string {
 	}
 	fmt.Fprintf(&b, "\n---\n\n[All tiers](README.md) · [profiles.json](../../setup/templates/profiles.json) · [installer](../systems/setup-installer.md)\n")
 	return b.String()
+}
+
+// extraSeatNote explains the `extra` rows of a tier's seat table: rendered into llama-swap and
+// reachable by name and alias, bound to no config key. "" when the tier declares none, so every
+// other tier's page is unchanged.
+func extraSeatNote(seats []mediaseat.Seat) string {
+	var lines []string
+	for _, s := range seats {
+		if !s.Extra {
+			continue
+		}
+		line := "- `" + s.Name + "`"
+		if len(s.Aliases) > 0 {
+			line += ", also answering to `" + strings.Join(s.Aliases, "`, `") + "`"
+		}
+		lines = append(lines, line)
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+	return "\nA seat marked `extra` is rendered into the llama-swap config and served by its name and aliases,\n" +
+		"but writes no config key and is not counted by the one-writer rule: nothing routes to it by default,\n" +
+		"and the seat above that binds the route keeps it. A caller reaches an extra by naming it. A rendered extra runs the harness\n" +
+		"template's flag shape (--reasoning off, -ngl 99, the tier's KV type), which can differ from a hand-wired entry\n" +
+		"for the same model, so measure the rendered form before treating it as that entry's replacement:\n\n" +
+		strings.Join(lines, "\n") + "\n"
 }
 
 // rkllmSeatNote describes the seats a table row cannot: an rkllm seat is not a llama.cpp

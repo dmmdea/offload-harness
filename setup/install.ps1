@@ -890,6 +890,10 @@ function Get-MediaSeatBindings {
   $out = [ordered]@{}
   foreach ($s in @($ProfileRow.media_seats)) {
     if ($null -eq $s) { continue }
+    # Mirror of mediaseat.Seat.BindingKey: a registered extra (extra = true) is rendered into
+    # llama-swap but binds NO config key, so it must not win the last-seat-takes-the-key loop
+    # below (A-131). Only an explicit true skips; absent or false binds as before.
+    if ($s.PSObject.Properties['extra'] -and $s.extra -eq $true) { continue }
     $k = $keyByKind[[string]$s.kind]
     if ($k) { $out[$k] = [string]$s.name }
     elseif ($s.kind) {
