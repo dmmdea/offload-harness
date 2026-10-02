@@ -13,12 +13,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"math"
 	"mime/multipart"
 	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -45,12 +47,14 @@ var inferMu sync.Mutex
 // however many Client values exist.
 var sttCalls atomic.Int64
 
-// warmed records, per llama-swap base and model, that a request has gone out to the
-// upstream since the last unload this process sent (register C-91). UnloadIfIdle unloads
-// only a model in it, which is what makes "one unload per burst" true when several
-// finishing calls reach it at once, and keeps a call that never reached the upstream (the
-// card was fenced, the wav would not read) from unloading anything. Guarded by inferMu.
-var warmed = map[string]bool{}
+// warmed records, per llama-swap base, the models a request has gone out to since the last
+// unload this process sent for them (register C-91). UnloadIfIdle unloads exactly these:
+// every model of its base and nothing else. That is what makes "one unload per burst" true
+// when several finishing calls reach it at once, what lets the last call out free a model an
+// earlier call of a mixed burst warmed (stt_model and stt_model_hq share the one slot), and
+// what keeps a call that never reached the upstream (the card was fenced, the wav would not
+// read) from unloading anything. Guarded by inferMu.
+var warmed = map[string]map[string]bool{}
 
 // Pending reports how many transcriptions in this process are waiting for the whisper
 // upstream or running on it (register C-91): the count UnloadIfIdle reads. It exists so a
@@ -231,7 +235,7 @@ func (c *Client) Transcribe(ctx context.Context, model, wavPath string, p Params
 	// waits for the connection to fully drain, not just for Do() to return.
 	inferMu.Lock()
 	defer inferMu.Unlock()
-	warmed[c.warmKey(model)] = true
+	c.markWarm(model)
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return Result{}, err
@@ -348,11 +352,25 @@ func (c *Client) Unload(ctx context.Context, model string) error {
 	return err
 }
 
-// warmKey names one (llama-swap base, model) pair in warmed.
-func (c *Client) warmKey(model string) string { return c.base + "\x00" + model }
+// markWarm records that a request has gone out to the upstream for model. Callers hold inferMu.
+func (c *Client) markWarm(model string) {
+	m := warmed[c.base]
+	if m == nil {
+		m = map[string]bool{}
+		warmed[c.base] = m
+	}
+	m[model] = true
+}
+
+// warmedModels lists, in name order, the models warmed on this client's base. Callers hold
+// inferMu.
+func (c *Client) warmedModels() []string {
+	return slices.Sorted(maps.Keys(warmed[c.base]))
+}
 
 // UnloadIfIdle is Unload for the zero-always-warm caller (register C-91): it frees the
-// upstream only when this is the last transcription of a burst, and only once per burst.
+// upstream only when this is the last transcription of a burst, only once per burst, and then
+// frees every model the burst warmed.
 //
 // The caller used to unload after EVERY call, holding nothing: inferMu is released when
 // Transcribe returns, so a call that finished while others were in line sent its unload
@@ -364,23 +382,35 @@ func (c *Client) warmKey(model string) string { return c.base + "\x00" + model }
 //
 //   - another call is waiting or running (sttCalls): that call is the last one out and
 //     unloads then, so a burst of N pays one cold start, not N;
-//   - the model was not used since the last unload (warmed): a call of the same burst
-//     already freed it, or this call never reached the upstream (the card was fenced, the
-//     wav would not read).
+//   - no model was used since the last unload (warmed): a call of the same burst already
+//     freed it, or this call never reached the upstream (the card was fenced, the wav would
+//     not read).
+//
+// What it frees is every model warmed on this client's base, not the model of the call that
+// happens to be last out. A burst can mix stt_model with stt_model_hq, or the two protocols
+// on two models; they share the one slot, so they are one burst, and the call that finishes
+// last knows only its own model. Unloading just that one left the first finisher's model
+// loaded until llama-swap's ttl, with nothing logged to say so. A call that never reached the
+// upstream warmed nothing, so on its own it still unloads nothing; as the last one out it
+// frees what the calls before it warmed.
+//
+// Each model is unloaded on its own. One that fails stays marked warm, so the next call out
+// retries it, and it does not stop the others; every failure is returned, joined, each naming
+// its model, and the ttl is the backstop. The caller logs the error and does not fail the
+// transcription for it.
 //
 // It never BLOCKS on inferMu, because a finished call must not hold its own answer back
 // for the length of the next call's inference: a 30-minute transcription would delay a
 // ten-second one's result by 30 minutes. That is safe because a failed TryLock always means
 // somebody else has the unload covered: the holder is a call that came in after the check
 // above (it is the last one out), or another UnloadIfIdle that has already seen an empty
-// line and will unload the model if it was used. The decision is taken on sttCalls BEFORE
-// the lock, so a call that only looked and went away never holds the slot against another.
+// line and will unload what was used. The decision is taken on sttCalls BEFORE the lock, so
+// a call that only looked and went away never holds the slot against another.
 //
-// The last call out unloads even when it failed: the pipeline calls this after every
-// call, so a burst whose final call was refused by the fence still frees the model its
-// earlier calls warmed. A failed unload leaves the model marked warm for the next one; the
-// ttl is the backstop, as it is for a mixed burst whose second model was left to it.
-func (c *Client) UnloadIfIdle(ctx context.Context, model string) error {
+// The last call out unloads even when it failed: the pipeline calls this after every call,
+// so a burst whose final call was refused by the fence still frees the models its earlier
+// calls warmed.
+func (c *Client) UnloadIfIdle(ctx context.Context) error {
 	if sttCalls.Load() > 0 {
 		return nil
 	}
@@ -388,15 +418,21 @@ func (c *Client) UnloadIfIdle(ctx context.Context, model string) error {
 		return nil
 	}
 	defer inferMu.Unlock()
-	key := c.warmKey(model)
-	if sttCalls.Load() > 0 || !warmed[key] {
+	if sttCalls.Load() > 0 {
 		return nil
 	}
-	if err := c.Unload(ctx, model); err != nil {
-		return err
+	var errs []error
+	for _, model := range c.warmedModels() {
+		if err := c.Unload(ctx, model); err != nil {
+			errs = append(errs, fmt.Errorf("unload %q: %w", model, err))
+			continue
+		}
+		delete(warmed[c.base], model)
 	}
-	delete(warmed, key)
-	return nil
+	if len(warmed[c.base]) == 0 {
+		delete(warmed, c.base)
+	}
+	return errors.Join(errs...)
 }
 
 // SRT renders segments as SubRip text (1-indexed, HH:MM:SS,mmm timestamps).
@@ -518,7 +554,7 @@ func (c *Client) TranscribeOAI(ctx context.Context, model, wavPath string) (Resu
 
 	inferMu.Lock()
 	defer inferMu.Unlock()
-	warmed[c.warmKey(model)] = true
+	c.markWarm(model)
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return Result{}, err

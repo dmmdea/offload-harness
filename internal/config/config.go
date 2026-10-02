@@ -572,8 +572,10 @@ type Config struct {
 	STTMaxInlineSegments int `json:"stt_max_inline_segments,omitempty"`
 	// STTUnloadAfter force-unloads the whisper upstream once the last transcription of
 	// a burst is done (zero-always-warm): concurrent calls share one load and the last
-	// one out frees it, because an unload after EACH would land on the next call's
-	// inference (register C-91). Default true; set false for a known batch loop.
+	// one out frees it, every model the burst warmed (stt_model and stt_model_hq can
+	// share a burst), because an unload after EACH would land on the next call's
+	// inference (register C-91). A failed unload is logged and never fails the
+	// transcription. Default true; set false for a known batch loop.
 	STTUnloadAfter bool `json:"stt_unload_after,omitempty"`
 	// STTRequestTimeoutSec bounds one transcription HTTP call (long audio at
 	// 5-8x realtime). Default 1800 (30 min). Separate from RequestTimeoutSec.

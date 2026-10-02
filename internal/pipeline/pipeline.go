@@ -1252,10 +1252,16 @@ func (p *Pipeline) runTranscribe(ctx context.Context, req core.Request, meta cor
 	// transcriptions in line an unload after EACH one landed on the next call's inference,
 	// which llama-swap answers "matrix: model unloaded". It sends nothing while another call
 	// is waiting or running, so the last call out is the one that unloads — on either
-	// protocol, and whether that last call succeeded or failed.
+	// protocol, whether that last call succeeded or failed, and every model the burst warmed
+	// (a burst can mix stt_model and stt_model_hq, and the last call out knows only its own).
+	// Best-effort means the transcription is never failed for it, not that it is silent: a
+	// model that stays loaded because its unload failed is logged, since the ttl is then the
+	// only thing that will free it.
 	if p.cfg.STTUnloadAfter {
 		uctx, ucancel := context.WithTimeout(context.Background(), 10*time.Second)
-		_ = p.stt.UnloadIfIdle(uctx, model)
+		if uerr := p.stt.UnloadIfIdle(uctx); uerr != nil {
+			log.Printf("transcribe: zero-always-warm unload after a %s call failed (what it could not free stays loaded until its ttl): %v", model, uerr)
+		}
 		ucancel()
 	}
 	if terr != nil {

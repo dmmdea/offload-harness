@@ -10,10 +10,12 @@ package sttclient
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -25,9 +27,10 @@ import (
 
 // unloadSeen is what one unload request found when it arrived.
 type unloadSeen struct {
-	inflight int // inference requests being served at that moment
-	served   int // inference requests already finished
-	pending  int // transcriptions in this process still waiting for the upstream or running on it
+	model    string // the model the unload was for
+	inflight int    // inference requests being served at that moment
+	served   int    // inference requests already finished
+	pending  int    // transcriptions in this process still waiting for the upstream or running on it
 }
 
 // burstSwap stands in for llama-swap on the routes a transcription and its unload use. An
@@ -49,6 +52,11 @@ type burstSwap struct {
 	// signalled (once) when the first unload arrives.
 	unloadHold chan struct{}
 	unloadSeen chan struct{}
+	// models is the roster /v1/models answers (default: the one whisper model, which carries
+	// the aliases the harness binds). unloadStatus makes the unload of a model answer that
+	// HTTP status instead of 200 (guarded by mu; see setUnloadStatus).
+	models       []string
+	unloadStatus map[string]int
 
 	mu                              sync.Mutex
 	gated                           bool
@@ -64,6 +72,7 @@ func newBurstSwap(t *testing.T, hold time.Duration) *burstSwap {
 		hold:    hold,
 		running: `{"running":[{"model":"whisper-stt","state":"ready","ttl":300}]}`,
 		abort:   make(chan struct{}),
+		models:  []string{"whisper-stt"},
 	}
 	s.srv = httptest.NewServer(http.HandlerFunc(s.serve))
 	t.Cleanup(s.srv.Close)
@@ -73,14 +82,16 @@ func newBurstSwap(t *testing.T, hold time.Duration) *burstSwap {
 func (s *burstSwap) serve(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.URL.Path == "/v1/models":
-		_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"whisper-stt","meta":{"llamaswap":{"aliases":["whisper","stt"]}}}]}`))
+		_, _ = w.Write([]byte(s.rosterBody()))
 	case r.URL.Path == "/running":
 		s.mu.Lock()
 		body := s.running
 		s.mu.Unlock()
 		_, _ = w.Write([]byte(body))
 	case strings.HasPrefix(r.URL.Path, "/api/models/unload/"):
-		s.unload()
+		if status := s.unload(strings.TrimPrefix(r.URL.Path, "/api/models/unload/")); status != 0 {
+			http.Error(w, "unload failed", status)
+		}
 	case strings.HasPrefix(r.URL.Path, "/upstream/"):
 		s.inference(w, r)
 	default:
@@ -88,15 +99,37 @@ func (s *burstSwap) serve(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *burstSwap) unload() {
+// rosterBody is the /v1/models answer: the first model carries the aliases the harness binds.
+func (s *burstSwap) rosterBody() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var b strings.Builder
+	b.WriteString(`{"object":"list","data":[`)
+	for i, m := range s.models {
+		if i > 0 {
+			b.WriteString(",")
+		}
+		if i == 0 {
+			fmt.Fprintf(&b, `{"id":%q,"meta":{"llamaswap":{"aliases":["whisper","stt"]}}}`, m)
+		} else {
+			fmt.Fprintf(&b, `{"id":%q}`, m)
+		}
+	}
+	b.WriteString("]}")
+	return b.String()
+}
+
+// unload records one unload request and returns the HTTP status it is to answer (0 = 200).
+func (s *burstSwap) unload(model string) int {
 	s.mu.Lock()
 	s.events = append(s.events, "unload")
-	s.unloads = append(s.unloads, unloadSeen{inflight: s.inflight, served: s.served, pending: Pending()})
+	s.unloads = append(s.unloads, unloadSeen{model: model, inflight: s.inflight, served: s.served, pending: Pending()})
 	if s.inflight > 0 {
 		close(s.abort)
 		s.abort = make(chan struct{})
 	}
 	first := len(s.unloads) == 1
+	status := s.unloadStatus[model]
 	s.mu.Unlock()
 	if first && s.unloadSeen != nil {
 		close(s.unloadSeen)
@@ -104,6 +137,33 @@ func (s *burstSwap) unload() {
 	if s.unloadHold != nil {
 		<-s.unloadHold
 	}
+	return status
+}
+
+// setUnloadStatus makes the unload of one model answer status (0 puts it back to 200).
+func (s *burstSwap) setUnloadStatus(model string, status int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.unloadStatus == nil {
+		s.unloadStatus = map[string]int{}
+	}
+	if status == 0 {
+		delete(s.unloadStatus, model)
+		return
+	}
+	s.unloadStatus[model] = status
+}
+
+// unloadedModels lists, sorted, the model of every unload request that has arrived.
+func (s *burstSwap) unloadedModels() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []string
+	for _, u := range s.unloads {
+		out = append(out, u.model)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // inferences is how many inference requests have arrived so far.
@@ -227,7 +287,7 @@ func TestABurstOfTranscriptionsPaysOneUnloadAfterTheLastCall(t *testing.T) {
 					} else {
 						_, errs[i] = c.Transcribe(context.Background(), "whisper-stt", wav, DefaultParams())
 					}
-					_ = c.UnloadIfIdle(context.Background(), "whisper-stt")
+					_ = c.UnloadIfIdle(context.Background())
 				}(i)
 			}
 			wg.Wait()
@@ -286,7 +346,7 @@ func TestACallThatNeverReachedTheUpstreamUnloadsNothing(t *testing.T) {
 	if _, terr := c.Transcribe(context.Background(), "whisper-stt", writeTestWav(t), DefaultParams()); !modelaffinity.IsLeaseRefusal(terr) {
 		t.Fatalf("Transcribe = %v, want the fence's lease refusal", terr)
 	}
-	if err := c.UnloadIfIdle(context.Background(), "whisper-stt"); err != nil {
+	if err := c.UnloadIfIdle(context.Background()); err != nil {
 		t.Fatalf("UnloadIfIdle: %v", err)
 	}
 	fake.mu.Lock()
@@ -345,7 +405,7 @@ func TestAnUnloadIsSentOncePerWarmUp(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i := 0; i < 3; i++ {
-		if err := c.UnloadIfIdle(context.Background(), "whisper-stt"); err != nil {
+		if err := c.UnloadIfIdle(context.Background()); err != nil {
 			t.Fatalf("UnloadIfIdle %d: %v", i, err)
 		}
 	}
@@ -355,7 +415,7 @@ func TestAnUnloadIsSentOncePerWarmUp(t *testing.T) {
 	if _, err := c.Transcribe(context.Background(), "whisper-stt", wav, DefaultParams()); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.UnloadIfIdle(context.Background(), "whisper-stt"); err != nil {
+	if err := c.UnloadIfIdle(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if got := unloads(); got != 2 {
@@ -383,7 +443,7 @@ func TestAnUnloadHoldsTheSlotAgainstTheNextCall(t *testing.T) {
 	}
 	var wg sync.WaitGroup
 	wg.Add(2)
-	go func() { defer wg.Done(); _ = c.UnloadIfIdle(context.Background(), "whisper-stt") }()
+	go func() { defer wg.Done(); _ = c.UnloadIfIdle(context.Background()) }()
 	select {
 	case <-fake.unloadSeen:
 	case <-time.After(5 * time.Second):
@@ -432,7 +492,7 @@ func TestAFinishedCallIsNotHeldBackByTheNextCallsInference(t *testing.T) {
 		go func() {
 			_, _ = c.Transcribe(context.Background(), "whisper-stt", wav, DefaultParams())
 			<-gate
-			_ = c.UnloadIfIdle(context.Background(), "whisper-stt")
+			_ = c.UnloadIfIdle(context.Background())
 			done <- struct{}{}
 		}()
 	}
@@ -510,7 +570,7 @@ func TestTheLastCallOutUnloadsEvenWhenTheFenceRefusedIt(t *testing.T) {
 		bErr <- err
 	}()
 	waitPending(t, 1)
-	if err := c.UnloadIfIdle(ctx, "whisper-stt"); err != nil {
+	if err := c.UnloadIfIdle(ctx); err != nil {
 		t.Fatalf("call A's UnloadIfIdle: %v", err)
 	}
 	if n := fake.unloadCount(); n != 0 {
@@ -519,7 +579,7 @@ func TestTheLastCallOutUnloadsEvenWhenTheFenceRefusedIt(t *testing.T) {
 	if err := <-bErr; !modelaffinity.IsLeaseRefusal(err) {
 		t.Fatalf("call B = %v, want the fence's lease refusal", err)
 	}
-	if err := c.UnloadIfIdle(ctx, "whisper-stt"); err != nil {
+	if err := c.UnloadIfIdle(ctx); err != nil {
 		t.Fatalf("call B's UnloadIfIdle: %v", err)
 	}
 	if n := fake.unloadCount(); n != 1 {

@@ -25,7 +25,7 @@ func resetClientState(t *testing.T) {
 	forget := func() {
 		inferMu.Lock()
 		defer inferMu.Unlock()
-		warmed = map[string]bool{}
+		warmed = map[string]map[string]bool{}
 	}
 	forget()
 	t.Cleanup(forget)
@@ -44,7 +44,7 @@ func TestClientStateDoesNotLeakFromOneTestToTheNext(t *testing.T) {
 	freed := func(t *testing.T) {
 		t.Helper()
 		before := fake.unloadCount()
-		if err := c.UnloadIfIdle(ctx, "whisper-stt"); err != nil {
+		if err := c.UnloadIfIdle(ctx); err != nil {
 			t.Fatalf("UnloadIfIdle: %v", err)
 		}
 		if n := fake.unloadCount() - before; n != 0 {
@@ -63,7 +63,7 @@ func TestClientStateDoesNotLeakFromOneTestToTheNext(t *testing.T) {
 	t.Run("a test that never resets leaves a model warm", func(t *testing.T) {
 		inferMu.Lock()
 		defer inferMu.Unlock()
-		warmed[c.warmKey("whisper-stt")] = true
+		c.markWarm("whisper-stt")
 	})
 	t.Run("and a test that resets starts without it", func(t *testing.T) {
 		resetClientState(t)

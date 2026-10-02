@@ -40,6 +40,9 @@ type swapStandIn struct {
 	hold   chan struct{} // closed by the test to let the first inference finish
 	firstN chan struct{} // closed when the first inference arrives
 	later  time.Duration
+	// unloadStatus, when set, is the HTTP status an unload answers instead of 200: the unload
+	// still counts as sent, it just fails.
+	unloadStatus int
 
 	mu       sync.Mutex
 	arrived  int
@@ -69,6 +72,9 @@ func newSwapStandIn(t *testing.T, model string, later time.Duration) *swapStandI
 				s.abort = make(chan struct{})
 			}
 			s.mu.Unlock()
+			if s.unloadStatus != 0 {
+				http.Error(w, "unload failed", s.unloadStatus)
+			}
 		case strings.HasPrefix(r.URL.Path, "/upstream/"):
 			s.inference(w)
 		default:

@@ -206,9 +206,14 @@ never to the text cascade. The upstream is single-slot, so one process-wide mute
 inference POSTs, and every call counts itself in line from its first statement until it returns. The
 zero-always-warm unload (`stt_unload_after`, default on) runs after every call but only the last one out
 does anything: `UnloadIfIdle` sends it holding that mutex, and only when no call is waiting or running
-and the model was used since the last unload. A burst of concurrent transcriptions therefore shares one
-load and pays one cold start (register C-91; the unload used to follow every call and landed on the next
-call's inference, which llama-swap answers `matrix: model unloaded`). A card a render holds is waited for
+and a model was used since the last unload. It frees every model the burst warmed on that upstream, not
+only the last call's own (`stt_model` and `stt_model_hq` can share a burst, and the call that finishes
+last knows only its own). Each model is unloaded on its own: a failure on one neither stops the others
+nor is forgotten (the model stays marked warm for the next call out, and the log names the model that
+stays loaded until its ttl), and the transcription is never failed for it. A burst of concurrent
+transcriptions therefore shares one load and pays one cold start (register C-91; the unload used to
+follow every call and landed on the next call's inference, which llama-swap answers
+`matrix: model unloaded`). A card a render holds is waited for
 `gpu_wait_ms` like every other GPU door (the HTTP timeout, `stt_request_timeout_sec`, only caps that wait), and the
 refusal is a `capacity` defer, `gpu busy: …` (register C-89). The verdict "no speech"
 (`ErrUpstreamNoSpeech`, the defer reason `empty transcript (no speech detected)`) is reserved for an
