@@ -156,7 +156,7 @@ full text and `render/compose-hyperframes.test.mjs` enforces the part a machine 
 | You see | It means | Do |
 |---|---|---|
 | `BAD_INPUT` naming a variable | not declared, wrong type, or over `maxLength` | read the template README's table and fix the value |
-| `LINT_ERRORS` or `CHECK_FAILED` | the composition failed its own gates (runtime error, layout, contrast) | read `check.findings`; for a template you edited, fix the page |
+| `LINT_ERRORS` or `CHECK_FAILED` | the composition failed its own gates (runtime error, layout, contrast; since 0.8.108 also text spilling out of its box, `layout/text_box_overflow`) | read `check.findings`; shorten the text, fix the page you edited, or pass `strict: false` to accept a clipped render |
 | `RENDER_FAILED` after a good `check` | the output failed the ffprobe gate | read the detail; wrong size or missing alpha is a template or format bug |
 | `DISK_HEADROOM` | not enough free space for the frames (above one worker every frame is stored, 8.3 MB at 1080p) | render the clip with `workers: 1`, which streams the frames; else point `compose_cache_dir` at a larger drive |
 | `TIMEOUT` | `compose_timeout_sec` elapsed | shorten the clip, or split it (captions: a smaller `--chunk-sec` than the 300 s default), then retry |
