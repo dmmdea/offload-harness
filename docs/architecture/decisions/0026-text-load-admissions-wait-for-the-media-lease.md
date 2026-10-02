@@ -172,8 +172,9 @@ door; a client built without the option keeps waiting its timeout. A lease refus
 caller can retry. That shape is the union of two precedents, and no door files it exactly: the agent doors (the
 delegation door's `runAgentTask`, `agent_run`, the review lane) file reason `gpu busy: …` and defer class
 `capacity` and set no error class, while the vision tier files error class `gpu_busy` and `gpu busy: generation
-job holds the lock (…)` with no defer class, and only when a generation job holds the lock (a lease refusal on
-its model call is filed through `classifyErr` as `timeout`, also with no defer class). The timeout keeps
+job holds the lock (…)` with no defer class whenever the lease is still held when its wait ends, by any live
+holder, a text reservation included, whatever the reason text says (a lease refusal on its model call is filed
+through `classifyErr` as `timeout`, also with no defer class). The timeout keeps
 bounding the HTTP call itself. A long
 transcription also tells the client it is alive: when the request carries a progress token the server sends an
 opening notification and a heartbeat every 30 s ([ADR 0065](0065-the-whole-call-has-a-deadline-below-the-clients-abort.md)).

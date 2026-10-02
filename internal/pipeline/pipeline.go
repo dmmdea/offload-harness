@@ -1274,8 +1274,9 @@ func (p *Pipeline) runTranscribe(ctx context.Context, req core.Request, meta cor
 		// a refusal exactly this way; this is the union of two precedents. The agent doors
 		// (runAgentTask, agent_run, the review lane) file reason "gpu busy: ..." and defer
 		// class capacity, and set no error class. The vision tier files error class gpu_busy
-		// and "gpu busy: generation job holds the lock (...)", with no defer class, and only
-		// when a generation job holds the lock (runVisionGen); a lease refusal on its model
+		// and "gpu busy: generation job holds the lock (...)", with no defer class, whenever
+		// the lease is still held when its wait ends (runVisionGen): any live holder, a text
+		// reservation included, whatever the reason text says; a lease refusal on its model
 		// call comes back from the affinity gate and is filed through classifyErr as
 		// "timeout", also with no defer class. Through classifyErr this refusal read
 		// "timeout" too (the lease error carries the word), which nothing can act on.
