@@ -38,6 +38,15 @@ date: "2026-09-16"
 > served at batch and ubatch 2,048 (`--ctx-size 4096` on the one-slot Linux templates), and the default `memory_stack`
 > names the memory authority node's embedder — see *Amendment 5*. Where this header, Amendment 3 or Amendment 4 names an
 > operating point (0.90 with 32 sequences, then 0.87 with 8), Amendment 5 governs.
+>
+> **Amendment 6, 2026-10-02 (registers A-119, A-129) — the lane seat's KV pool is pinned, the 35B moves to util 0.855, and
+> both seats run vLLM 0.30.0.** A utilization-sized pool is measured during startup profiling, device-wide, and a cold
+> compile cache or a memory-stack model loading in that window shrank the lane seat's below one 32,768-token request: three
+> production start failures, reproduced on an empty card. The seat is now started with `--kv-cache-memory-bytes 1524713390`
+> (the 1.42 GiB pool vLLM 0.29.0 sized warm; vLLM then ignores the utilization): card peak 13,951 of 15,356 MiB with 1,405 MiB
+> free at 0.30.0, digest-8 8/8. The 35B, whose pool lost 3 KV blocks at util 0.85 on 0.30.0, declares util 0.855. A declared
+> tok/s is a cool-card figure (register A-130) — see *Amendment 6*. Amendment 5's util, sequence count and batch for the lane
+> seat stand; Amendment 6 adds the pool and moves the 35B.
 
 ## Context — the quant nobody had found
 
@@ -75,6 +84,9 @@ prerequisites and falls back to the llama.cpp seat with a stated reason when the
 that silently needs an engine the box does not run is the failure mode that rule exists to prevent. Note also
 that the patch is **not** upstream: vLLM `main` still constructs a stock three-argument
 `VocabParallelEmbedding` for Qwen3.5, so this is a carried patch, not a version wait.
+
+> **Amendment 6 (2026-10-02):** the reference box runs vLLM 0.30.0 and the seat's `engine_min_version` now reads `0.30.0`, the
+> engine the pinned operating point was measured on. The block above is the 2026-09-16 declaration.
 
 ## What was measured
 
@@ -291,6 +303,62 @@ half-size steps. The four ~20k-token requests finished faster (544 s against 900
 gate and the 4-stream aggregate were measured at the Amendment 3 point (util 0.90) and are not re-run at this one. The KV pool
 is 1.39x the window, where the same load read 1.53x at the 0.87 point.
 
+## Amendment 6 — the lane seat's KV pool is pinned; the 35B moves to util 0.855; both seats run vLLM 0.30.0 (registers A-119, A-129; 2026-10-02)
+
+**What happened (register A-129).** The lane seat's start failed in production three times (`To serve at least one request...`; the
+three failures are in the seat's own log). Amendment 5 left its KV pool sized by utilization (util 0.84), and vLLM measures such a
+pool during startup profiling, device-wide: anything else that moves the card's memory in that window changes the pool. Two
+things did. A cold compile cache profiles a larger activation (0.77 GiB against 0.41 GiB on a warm cache), and a memory-stack
+model loading beside the engine in that window shrinks the pool likewise; either took it below one 32,768-token request
+(Amendment 4 puts that at 1.29 GiB) and the start failed. The second was reproduced on an empty card by firing the embedder about
+50 s into the start. A seat that is meant to share its card with the memory stack's embedder and reranker cannot have a pool
+that depends on what else is loading during its start.
+
+**What was measured** (the reference ampere-16 box, by the acceptance arms of the vLLM 0.30.0 move; this change re-ran none of them):
+
+| point | result |
+|---|---|
+| lane seat, vLLM 0.29.0, util 0.84, pool sized by profiling, cold compile cache | profiled activation 0.77 GiB (0.41 warm); the start can fail below one request (three production failures; reproduced on an empty card with the embedder fired at about 50 s) |
+| **lane seat, vLLM 0.30.0, `--kv-cache-memory-bytes 1524713390`** (1.42 GiB, the pool 0.29.0 sized on a warm start, 45,472 tokens), four concurrent ~20k-token requests beside the embedder and the reranker | card peak **13,951** of 15,356 MiB, **1,405 MiB** free; digest-8 **8/8** at the 900 s wall; greedy output identical to 0.29.0 on 20 prompts |
+| 35B seat, vLLM 0.30.0, util 0.85 | 0.30.0 carries about 0.07 GiB more non-torch memory than 0.29.0, and the pool lost 3 KV blocks |
+| **35B seat, vLLM 0.30.0, util 0.855** (8 sequences, 4,096 batched tokens) | KV pool **96,416 tokens**; **1,027-1,037 MiB** free under load beside the embedder and the reranker; digest-8 **8/8** |
+
+vLLM ignores `gpu_memory_utilization` once `kv_cache_memory_bytes` is set (its `CacheConfig` documents the override), so the
+lane seat's util 0.84, `max_num_seqs` 4 and `max_num_batched_tokens` 2,048 stay declared as the point the engine's workspace and
+the support models were measured at, not as the pool's size, and the co-residency guard still caps them.
+
+**Decision.**
+
+1. `profiles.json` declares the lane seat's `kv_cache_memory_bytes` as 1,524,713,390 and its documentary `engine_min_version` as
+   `0.30.0`. The 35B declares util 0.855. The 35B stays sized by utilization: the pool was measured and seeded for the lane seat
+   only, and no pin has been measured for the 35B (its pool at util 0.855 is about 2.9x its window where the lane seat's pinned
+   pool is 1.39x).
+2. **The renderer reaches the field.** `kv_cache_memory_bytes` already existed (the 3-card pipeline flagship pins it so the
+   display card keeps its desktop), but only the windows-wsl launch rendered it, through `SEAT_EXTRA_ARGS`, and the validator
+   refused it on the linux-systemd launch, which is what the ampere-16 reference unit is. The linux-systemd run script now carries
+   a `__KV_POOL__` token on the launch line (`--kv-cache-memory-bytes N` when declared, empty otherwise), and the validator refuses
+   only a pipeline there. The tier pages print the utilization as declared (`0.855`; `%.2f` printed the 35B's as `0.85`, the point
+   it was moved off) and the pool row says the utilization beside it is ignored.
+3. **Guards.** `TestAmpere16VLLMSeatDeclaresItsMeasuredBoundLane` pins the pool, and `TestAmpere16LaneSeatDeclaresTheEngineItWasMeasuredOn`
+   the engine version. `ampere16CoResidency` gains an exact per-seat pool (0 for a seat measured util-sized), because a smaller or
+   absent pool is the failure this amendment exists to end and a pool nobody measured beside the support models is the other
+   direction. `TestAmpere16FastSeatDeclaresItsVLLM030Utilization` pins 0.855 exactly: the co-residency ceiling alone would accept a
+   seed left at 0.85, which is the point that lost blocks. `TestAmpere16LaneSeatRendersItsPinnedPoolIntoTheLaunchLine` renders the
+   committed lane seat through the real template and requires the flag on the `exec vllm serve` command, not in a comment.
+4. **The hand-installed 35B unit** copies the lane seat's rendered run script ([composite-tier.md](../../systems/composite-tier.md)),
+   so that copy now has to DROP `--kv-cache-memory-bytes` and set `--gpu-memory-utilization 0.855`: the pool is the lane seat's,
+   and vLLM would ignore the utilization beside it.
+
+**Thermal caveat (register A-130).** Sustained decode on the A2 throttles the card, so a tok/s declared for either seat
+(`agent_seat_tok_s` 7.17 here, the 35B's 40.8 single-stream and 170 eight-stream figures) is a cool-card figure, not a sustained
+one. No sustained-decode rate was measured for this amendment, and it changes no declared rate.
+
+**Costs recorded.** The pool no longer follows the card: with a fixed 1.42 GiB the lane seat keeps its 1.39x window whether or not
+the card has more memory free, and a change to the co-resident models, to vLLM or to the utilization-sized workspace
+(`max_num_seqs`, `max_num_batched_tokens`) moves the card peak without moving the pool, so any of them is a re-measurement beside
+both support models, not an edit. The 0.30.0 figures above come from the acceptance arms run on the reference box; the seed
+carries them as recorded, and the repository's gates prove only that the table declares them and the template renders them.
+
 ## Consequences
 
 - `profiles.json` → `profiles["ampere-16"].vllm_seat` becomes `qwen38-27b-gsq-vllm`, `max_model_len` 49,152,
@@ -310,6 +378,9 @@ is 1.39x the window, where the same load read 1.53x at the 0.87 point.
 - **Amended by Amendment 5:** the operating point is now 32,768 @ util 0.84 with `max_num_seqs` 4 and
   `max_num_batched_tokens` 2,048 (the 35B seat stays at util 0.85 / 8 / 4,096); the 0.87 / 8 point is kept in `measured`
   as history.
+- **Amended by Amendment 6:** the lane seat is started with a fixed 1,524,713,390-byte KV pool (`kv_cache_memory_bytes`;
+  vLLM ignores the utilization while it is set) and the 35B declares util 0.855; `engine_min_version` reads 0.30.0. The
+  linux-systemd run script renders the pool, so a Linux seat can declare it.
 - **Not propagated** to blackwell-16 / volta-16. Neither has been measured on its own silicon and both still owe
   a vLLM seat ([ADR 0048](0048-vllm-is-a-first-class-engine-on-every-tier.md) counts the debt).
 
@@ -319,4 +390,6 @@ A vLLM release that upstreams the Qwen3.5 quantized-embedding path (the patch is
 27B that fits 16 GB by quantizing its embedding; mem0's embedder leaving the Lenovo (removes the co-residency
 block on binding the GSQ at its declared window); a vLLM-loadable 27B quant that closes the 0.94 coverage gap
 (the matched-window result is in — a new quant, not a bigger window, is what would re-open this); and any change
-to the reference card's free VRAM, since the 49,152 window was fitted against what the box actually had free.
+to the reference card's free VRAM, since the 49,152 window was fitted against what the box actually had free. Amendment 6
+adds: a vLLM release that changes how a utilization-sized KV pool is measured at startup (the pin exists because of how it is),
+and any change to the footprint of the memory stack's embedder or reranker (the pinned pool was measured beside them).
