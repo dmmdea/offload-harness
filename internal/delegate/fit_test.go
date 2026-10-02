@@ -182,23 +182,23 @@ func equalStrings(got, want []string) bool {
 // with equal ceilings every implementation passes, which is how a collapse can
 // ship green.
 func TestDealSpreadSameShapedFanOutReachesEverySeat(t *testing.T) {
-	qube := NodeView{NodeID: "qube", AgentEnabled: true, AgentResident: true, AgentCtxTokens: 131072}
-	aorus := NodeView{NodeID: "aorus", AgentEnabled: true, AgentResident: true, AgentCtxTokens: 32768}
-	lenovo := NodeView{NodeID: "lenovo", AgentEnabled: true, AgentResident: true, AgentCtxTokens: 32768}
+	nodeB := NodeView{NodeID: "node-b", AgentEnabled: true, AgentResident: true, AgentCtxTokens: 131072}
+	nodeA := NodeView{NodeID: "node-a", AgentEnabled: true, AgentResident: true, AgentCtxTokens: 32768}
+	nodeC := NodeView{NodeID: "node-c", AgentEnabled: true, AgentResident: true, AgentCtxTokens: 32768}
 
 	for _, tc := range []struct{ name, goal string }{
 		{"mechanical", fitMechGoal},
 		{"reasoning", fitReasonGoal},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			r := fitRunner(qube, aorus, lenovo)
+			r := fitRunner(nodeB, nodeA, nodeC)
 			where, _ := deal(r, repeatGoal(tc.goal, 8)...)
 
 			counts := map[string]int{}
 			for _, id := range where {
 				counts[id]++
 			}
-			for _, id := range []string{"local-box", "qube", "aorus", "lenovo"} {
+			for _, id := range []string{"local-box", "node-b", "node-a", "node-c"} {
 				if counts[id] != 2 {
 					t.Errorf("%s got %d of 8 subtasks, want 2 — deal was %v", id, counts[id], where)
 				}

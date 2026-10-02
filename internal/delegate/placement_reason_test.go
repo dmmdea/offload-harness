@@ -18,9 +18,9 @@ import (
 func TestRunPlacementReasonNamesEveryRemoteWithAVerdict(t *testing.T) {
 	compressPolls(t, 5*time.Millisecond, time.Second)
 
-	_, chosenURL := acceptingNode(t, "node-chosen", "qube from chosen", nil)
+	_, chosenURL := acceptingNode(t, "node-chosen", "zorblax from chosen", nil)
 
-	slow, slowURL := acceptingNode(t, "node-slow", "qube from slow (must not be dispatched)", func(f *fakeNode) {
+	slow, slowURL := acceptingNode(t, "node-slow", "zorblax from slow (must not be dispatched)", func(f *fakeNode) {
 		// 0.3 tok/s: one tool step and a 64-token answer need ~640 s, so a 300 s
 		// wall cannot hold ANY answer — the rider's refusal, not a slow-but-able
 		// seat (5.4 tok/s answers this class in ~40 s and is a ranking matter).
@@ -28,7 +28,7 @@ func TestRunPlacementReasonNamesEveryRemoteWithAVerdict(t *testing.T) {
 		f.seatBudget = map[string]any{"step_tokens": 8192, "thinking": "off"}
 	})
 
-	full, capURL := acceptingNode(t, "node-cap", "qube from cap (must not be dispatched)", func(f *fakeNode) {
+	full, capURL := acceptingNode(t, "node-cap", "zorblax from cap (must not be dispatched)", func(f *fakeNode) {
 		f.maxConcurrentJobs = 1
 		f.jobsRunning = 1
 		f.queueDepth = 1

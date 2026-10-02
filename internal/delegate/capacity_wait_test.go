@@ -52,7 +52,7 @@ func TestRunWaitsForCapacityAndLandsWhenTheNodeFrees(t *testing.T) {
 	compressPolls(t, 5*time.Millisecond, time.Second)
 	compressWait(t, 20*time.Millisecond, 0)
 	var seenBudget atomic.Int64
-	node, url := acceptingNode(t, "node-busy", "qube after the wait", func(f *fakeNode) {
+	node, url := acceptingNode(t, "node-busy", "zorblax after the wait", func(f *fakeNode) {
 		f.dispatchHook = freesAfter(2, http.StatusServiceUnavailable)
 		f.onDispatch = func(_ string, c core.AgentContract) { seenBudget.Store(int64(c.TimeoutSec)) }
 	})
@@ -255,7 +255,7 @@ func TestRunSheddableIsShedNotWaited(t *testing.T) {
 func TestRunReservedLocalLandsOnARemoteThatFrees(t *testing.T) {
 	compressPolls(t, 5*time.Millisecond, time.Second)
 	compressWait(t, 20*time.Millisecond, 0)
-	node, url := acceptingNode(t, "node-remote", "qube from the remote", func(f *fakeNode) {
+	node, url := acceptingNode(t, "node-remote", "zorblax from the remote", func(f *fakeNode) {
 		f.dispatchHook = freesAfter(1, http.StatusServiceUnavailable)
 	})
 	dir, _ := holdLease(t, gpulease.ClassText, "weights A/B")
@@ -335,7 +335,7 @@ func TestRunWaitDisabledKeepsThePreWaitOutcome(t *testing.T) {
 // header, never a new envelope field (older nodes reject unknown fields).
 func TestDispatchCarriesBandAndTenant(t *testing.T) {
 	compressPolls(t, 5*time.Millisecond, time.Second)
-	node, url := acceptingNode(t, "node-a", "qube", nil)
+	node, url := acceptingNode(t, "node-a", "zorblax", nil)
 	cfg := testCfg(t)
 
 	_, sum, err := RunWith(t.Context(), cfg, neverLocal(t),

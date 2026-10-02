@@ -17,7 +17,7 @@ import (
 // ALONE — held, whatever the duration or the node's own busy verdict —
 // hard-excluded (the 0.113.16 rule this test originally pinned). That is
 // exactly the declared-window-over-quiet-cards shape S-15 measures (47
-// contracts burned 300 s each; the Qube had zero agent jobs in flight in 10
+// contracts burned 300 s each; <node-b> had zero agent jobs in flight in 10
 // of them): a lease the node has not even called BUSY yet, let alone
 // exclusive or draining, no longer excludes a remote on its own. See
 // busylease_test.go's TestRemoteEligibleExcludesABusyLease for the full
@@ -47,9 +47,9 @@ func TestRemoteEligible_TextLeasedNodeIsIneligible(t *testing.T) {
 // arm (lease cleared) still reaches that defensive line, so the wording is
 // the lease's and not a rewrite of the fallback.
 func TestNoEligibleRemoteNamesTheLeasedNode(t *testing.T) {
-	r := &runner{remotes: []string{"http://lenovo:18811"}}
+	r := &runner{remotes: []string{"http://node-c:18811"}}
 	v := eligibleRemote()
-	v.NodeID = "lenovo-ampere16"
+	v.NodeID = "node-c-ampere16"
 	// EXCLUSIVE, not merely held (W-14): a plain held-and-not-yet-busy text
 	// lease no longer excludes on its own (TestRemoteEligible_TextLeasedNodeIsIneligible),
 	// so this fixture must fence the card the way remoteEligible actually
@@ -57,7 +57,7 @@ func TestNoEligibleRemoteNamesTheLeasedNode(t *testing.T) {
 	// lease by its own rule, which is independent of the gate.
 	v.LeasedText, v.LeaseExclusive = true, true
 	reason, class := r.noEligibleRemote(schemaSubtask(), []NodeView{v}, nil)
-	if !strings.Contains(reason, "text GPU lease") || !strings.Contains(reason, "lenovo-ampere16") || strings.Contains(reason, "please report") {
+	if !strings.Contains(reason, "text GPU lease") || !strings.Contains(reason, "node-c-ampere16") || strings.Contains(reason, "please report") {
 		t.Fatalf("reason must name the lease and the node: %q", reason)
 	}
 	if class != core.DeferClassInfrastructure {

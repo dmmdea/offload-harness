@@ -10,7 +10,7 @@ import (
 	placetable "github.com/dmmdea/offload-harness/internal/placement"
 )
 
-// oneCardRows is the ampere-16 Lenovo's advertised rows once it declares a
+// oneCardRows is the ampere-16 <node-c>'s advertised rows once it declares a
 // `single` layer (the 27B GSQ planner default) and a `fast` layer (the 35B
 // digest seat) on its one card — register A-100.
 func oneCardRows(t *testing.T) []placetable.LayerRow {
@@ -84,12 +84,12 @@ func TestRemoteDecisionRefusesANodeWithoutTheRequestedLayer(t *testing.T) {
 func TestPlaceSendsANamedLayerToTheNodeThatDeclaresIt(t *testing.T) {
 	st := schemaSubtask()
 	st.Contract.Layer = "fast"
-	lenovo := eligibleRemote()
-	lenovo.Layers = oneCardRows(t)
+	nodeC := eligibleRemote()
+	nodeC.Layers = oneCardRows(t)
 
 	// Idle local, plain box: the idle-local rule would keep it and run the
 	// planner seat; a named layer goes to the node that declares it.
-	if got := Place("seed", st, localNode(), []NodeView{lenovo}, false); got.NodeID != "lenovo" {
+	if got := Place("seed", st, localNode(), []NodeView{nodeC}, false); got.NodeID != "node-c" {
 		t.Fatalf("idle plain local kept a contract naming a layer it does not declare: placed on %q", got.NodeID)
 	}
 	// No node declares it: local still, where runner.decide defers by name.
@@ -98,13 +98,13 @@ func TestPlaceSendsANamedLayerToTheNodeThatDeclaresIt(t *testing.T) {
 		t.Fatalf("with no node declaring the layer the contract must land local (to defer by name), got %q", got.NodeID)
 	}
 	// An unnamed contract keeps the idle-local rule byte for byte.
-	if got := Place("seed", schemaSubtask(), localNode(), []NodeView{lenovo}, false); !got.Local {
+	if got := Place("seed", schemaSubtask(), localNode(), []NodeView{nodeC}, false); !got.Local {
 		t.Fatalf("idle local must still win an unnamed contract, got %q", got.NodeID)
 	}
 	// A composite local that declares the layer keeps it.
 	local := localNode()
 	local.Layers = oneCardRows(t)
-	if got := Place("seed", st, local, []NodeView{lenovo}, false); !got.Local {
+	if got := Place("seed", st, local, []NodeView{nodeC}, false); !got.Local {
 		t.Fatalf("an idle local that declares the layer must keep it, got %q", got.NodeID)
 	}
 }

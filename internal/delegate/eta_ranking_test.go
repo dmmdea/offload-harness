@@ -52,18 +52,18 @@ func oneStepSubtask(goal string, timeoutSec int) Subtask {
 // either seat arbitrarily).
 func TestPlaceMechanicalPrefersTheFasterSeatOnEqualWindows(t *testing.T) {
 	st := oneStepSubtask("extract every field from the report", 300)
-	slow := etaFixtureRemote("lenovo", 8192, 5, 0)
-	fast := etaFixtureRemote("aorus", 8192, 34, 0)
+	slow := etaFixtureRemote("node-c", 8192, 5, 0)
+	fast := etaFixtureRemote("node-a", 8192, 34, 0)
 	slow.QueueDepth, fast.QueueDepth = 1, 1
 
 	got := Place("job-a", st, localNode(), []NodeView{slow, fast}, true)
-	if got.NodeID != "aorus" {
-		t.Fatalf("Place chose %q, want the 34 tok/s seat (aorus)", got.NodeID)
+	if got.NodeID != "node-a" {
+		t.Fatalf("Place chose %q, want the 34 tok/s seat (node-a)", got.NodeID)
 	}
 	// Order in the roster must not matter.
 	got = Place("job-a", st, localNode(), []NodeView{fast, slow}, true)
-	if got.NodeID != "aorus" {
-		t.Fatalf("Place chose %q with the roster reversed, still want aorus", got.NodeID)
+	if got.NodeID != "node-a" {
+		t.Fatalf("Place chose %q with the roster reversed, still want node-a", got.NodeID)
 	}
 }
 
@@ -73,8 +73,8 @@ func TestPlaceMechanicalPrefersTheFasterSeatOnEqualWindows(t *testing.T) {
 // faster seat — window is the PRIMARY key for reasoning, not eta.
 func TestPlaceReasoningPrefersTheRoomierSeatEvenWhenSlower(t *testing.T) {
 	st := oneStepSubtask("explain why the build failed across these files", 300)
-	small := etaFixtureRemote("aorus", 8192, 34, 0)  // small window, fast
-	roomy := etaFixtureRemote("lenovo", 32768, 5, 0) // roomy window, slow — must still not floor
+	small := etaFixtureRemote("node-a", 8192, 34, 0) // small window, fast
+	roomy := etaFixtureRemote("node-c", 32768, 5, 0) // roomy window, slow — must still not floor
 	small.QueueDepth, roomy.QueueDepth = 1, 1
 
 	if ok, reason := feasibleFinal(st, roomy); !ok {
@@ -82,8 +82,8 @@ func TestPlaceReasoningPrefersTheRoomierSeatEvenWhenSlower(t *testing.T) {
 	}
 
 	got := Place("job-b", st, localNode(), []NodeView{small, roomy}, true)
-	if got.NodeID != "lenovo" {
-		t.Fatalf("Place chose %q, want the roomier seat (lenovo) for reasoning-shaped work", got.NodeID)
+	if got.NodeID != "node-c" {
+		t.Fatalf("Place chose %q, want the roomier seat (node-c) for reasoning-shaped work", got.NodeID)
 	}
 }
 

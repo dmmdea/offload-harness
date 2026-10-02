@@ -11,13 +11,13 @@ import (
 	"github.com/dmmdea/offload-harness/internal/core"
 )
 
-// lenovoShapedGSQ mirrors the diagnosis's Lenovo GSQ shape: 5.4 tok/s, 69 s
+// nodeCShapedGSQ mirrors the diagnosis's <node-c> GSQ shape: 5.4 tok/s, 69 s
 // cold, not currently loaded, a step budget of 8192 (matching MaxSteps==1's
 // "final = stepTokens" override so the CONFIGURED final is exactly 8192, the
 // exact worked example the review cites).
-func lenovoShapedGSQ() NodeView {
+func nodeCShapedGSQ() NodeView {
 	v := eligibleRemote()
-	v.NodeID = "lenovo-gsq"
+	v.NodeID = "node-c-gsq"
 	loaded := false
 	v.SeatLoaded = &loaded
 	v.SeatRate = &SeatRateView{TokS: 5.4, ColdLoadSec: 69, Samples: 4, MinTurnSec: 1594}
@@ -41,13 +41,13 @@ func mechanicalSchemaAutoContract() Subtask {
 }
 
 // TestEtaForDoesNotDoubleCountAFittedRepack is the exact worked example from
-// the review: a 900 s auto wall on the Lenovo-shaped seat fits the final to
+// the review: a 900 s auto wall on the <node-c>-shaped seat fits the final to
 // ~2187 tokens: the eta must stay AT OR UNDER the wall it was fitted to, not
 // ~1960 s from charging the re-pack at its unfitted 8192-token size on top of
 // the fitted final.
 func TestEtaForDoesNotDoubleCountAFittedRepack(t *testing.T) {
 	st := mechanicalSchemaAutoContract()
-	v := lenovoShapedGSQ()
+	v := nodeCShapedGSQ()
 
 	// Confirm the fixture actually reaches the auto-wall cap (900 s) and a
 	// final genuinely NARROWED below its configured 8192, matching the worked example —

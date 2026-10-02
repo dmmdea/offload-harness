@@ -12,8 +12,8 @@ import (
 	"github.com/dmmdea/offload-harness/internal/core"
 )
 
-// Register C-58 (operator 2026-09-18: "nvidia pair showing the qube doing
-// lenovo work"): a route=local run whose config endpoint is ANOTHER box's
+// Register C-58 (operator 2026-09-18: "nvidia pair showing <node-b> doing
+// <node-c> work"): a route=local run whose config endpoint is ANOTHER box's
 // engine is that box's work. The ledger row names that host as the node, the
 // placement reason says so, and the PAIR card is scheduled on that member —
 // not on this box's identity.
@@ -21,7 +21,7 @@ func TestLocalRunAgainstAnotherBoxsEngineIsAttributedToThatBox(t *testing.T) {
 	pairAppDir(t)
 	// The endpoint's host is a cluster member with its own PAIR uuid.
 	members := filepath.Join(os.Getenv("OFFLOAD_PAIR_APPDIR"), "cluster", "members.json")
-	if err := os.WriteFile(members, []byte(`[{"name":"node-a","nodeUuid":"self-uuid"},{"name":"node-b","nodeUuid":"lenovo-uuid"}]`), 0o644); err != nil {
+	if err := os.WriteFile(members, []byte(`[{"name":"node-a","nodeUuid":"self-uuid"},{"name":"node-b","nodeUuid":"node-b-uuid"}]`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	c := &pairCapture{}
@@ -58,7 +58,7 @@ func TestLocalRunAgainstAnotherBoxsEngineIsAttributedToThatBox(t *testing.T) {
 		t.Fatalf("frames = %d, want 2: %v", len(frames), frames)
 	}
 	a, b := pairInfo(frames[0]), pairInfo(frames[1])
-	if a["scheduledOn"] != "lenovo-uuid" || b["scheduledOn"] != "lenovo-uuid" {
+	if a["scheduledOn"] != "node-b-uuid" || b["scheduledOn"] != "node-b-uuid" {
 		t.Fatalf("the PAIR card must be scheduled on the engine's box, got %v / %v", a["scheduledOn"], b["scheduledOn"])
 	}
 }

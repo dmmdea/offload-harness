@@ -363,7 +363,7 @@ func TestRemoteCardTurnsRunningOnWork(t *testing.T) {
 				t: t, token: "sekrit", agentEnabled: true, resident: true, ctxTokens: 8192, nodeID: "fake-node",
 				pollState: func(n int64) (map[string]any, int) {
 					if n >= 5 {
-						return doneWire(t, remoteWire("the qube answer", `{"answer":"42"}`)), http.StatusOK
+						return doneWire(t, remoteWire("the zorblax answer", `{"answer":"42"}`)), http.StatusOK
 					}
 					phase := "cold-load"
 					if n <= 1 {

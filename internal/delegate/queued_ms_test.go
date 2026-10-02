@@ -12,7 +12,7 @@ import (
 func runWithQueuedMs(t *testing.T) (string, []PlacedResult, Summary) {
 	t.Helper()
 	compressPolls(t, 5*time.Millisecond, time.Second)
-	w := remoteWire("the qube answer", `{"answer":"42"}`)
+	w := remoteWire("the zorblax answer", `{"answer":"42"}`)
 	w.QueuedMs = 91234
 	node := &fakeNode{
 		t: t, token: "sekrit", agentEnabled: true, resident: true, ctxTokens: 8192, nodeID: "fake-node",

@@ -421,9 +421,9 @@ func eligibilityVerdict(st Subtask, r NodeView) (eligible bool, word, detail str
 	}
 	// A node advertising a held TEXT lease is not a target at all (0.113.16):
 	// its card is reserved for a measurement, exactly as Reserved() makes the
-	// LOCAL seat a non-target. Before this a leased Lenovo had to STOP its fleet
+	// LOCAL seat a non-target. Before this a leased <node-c> had to STOP its fleet
 	// node to keep foreign digests off the card, and every in-flight remote job
-	// on it was cut ("Lenovo dropped mid-way", 2026-09-06).
+	// on it was cut ("<node-c> dropped mid-way", 2026-09-06).
 	// leaseFenceReason (W-14, register S-15) is what decides whether the lease
 	// is a HARD refusal here — see its own doc for the exclusive/draining/media
 	// cases that still fence, and the plain-text-busy case that no longer does.
@@ -478,7 +478,7 @@ func eligibilityVerdict(st Subtask, r NodeView) (eligible bool, word, detail str
 // that does not declare it defers by name and is ineligible for this
 // contract, so the dispatch lands only where the requested seat is served.
 // Before this the free choice overwrote the caller's layer on the dispatched
-// copy, and a request for the Lenovo's fast layer ran on its planner default.
+// copy, and a request for <node-c>'s fast layer ran on its planner default.
 func remoteDecision(st Subtask, r NodeView) (placetable.Decision, bool) {
 	if len(r.Layers) == 0 {
 		return placetable.Decision{}, false

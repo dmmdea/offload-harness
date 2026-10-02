@@ -24,7 +24,7 @@ import (
 	placetable "github.com/dmmdea/offload-harness/internal/placement"
 )
 
-// compositeTestCfg is testCfg with the Qube's four layers declared: the
+// compositeTestCfg is testCfg with <node-b>'s four layers declared: the
 // reference composite box, rooted in a temp dir like every other test config.
 func compositeTestCfg(t *testing.T) config.Config {
 	t.Helper()
@@ -88,7 +88,7 @@ func echoingLocal(got *LocalOptions, calls *atomic.Int64) LocalRunner {
 			seat = "local-seat"
 		}
 		return core.AgentWireResult{SchemaVersion: core.AgentWireSchemaVersion, NodeID: "local", Seat: seat,
-			Output: "qube answered locally", Structured: json.RawMessage(`{"answer":"qube"}`), StopReason: "done", Placed: opts.Placed}, nil
+			Output: "zorblax answered locally", Structured: json.RawMessage(`{"answer":"zorblax"}`), StopReason: "done", Placed: opts.Placed}, nil
 	}
 }
 

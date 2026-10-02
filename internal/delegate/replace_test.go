@@ -64,7 +64,7 @@ func acceptingNode(t *testing.T, id, output string, tune func(*fakeNode)) (*fake
 func TestRunReplacesA503RefusalOnAnotherNode(t *testing.T) {
 	compressPolls(t, 5*time.Millisecond, time.Second)
 	full, fullURL := refusingNode(t, "node-full", http.StatusServiceUnavailable, nil)
-	idle, idleURL := acceptingNode(t, "node-idle", "qube from the idle node", nil)
+	idle, idleURL := acceptingNode(t, "node-idle", "zorblax from the idle node", nil)
 
 	results, sum, err := Run(t.Context(), testCfg(t), neverLocal(t),
 		[]core.AgentContract{remoteContract()}, "remote", []string{fullURL, idleURL})
@@ -107,7 +107,7 @@ func TestRunUnreachableNodeIsReplaced(t *testing.T) {
 		pollState:      func(int64) (map[string]any, int) { return nil, http.StatusNotFound },
 	}
 	deadURL := dead.server().URL
-	live, liveURL := acceptingNode(t, "node-live", "qube from the live node", nil)
+	live, liveURL := acceptingNode(t, "node-live", "zorblax from the live node", nil)
 
 	results, sum, err := Run(t.Context(), testCfg(t), neverLocal(t),
 		[]core.AgentContract{remoteContract()}, "remote", []string{deadURL, liveURL})
@@ -230,7 +230,7 @@ func TestRun400ClassRefusalIsNeverReplaced(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			bad, badURL := refusingNode(t, "node-bad", tc.status, nil)
-			good, goodURL := acceptingNode(t, "node-good", "qube from the good node", nil)
+			good, goodURL := acceptingNode(t, "node-good", "zorblax from the good node", nil)
 
 			results, sum, err := Run(t.Context(), testCfg(t), neverLocal(t),
 				[]core.AgentContract{remoteContract()}, "remote", []string{badURL, goodURL})
@@ -270,7 +270,7 @@ func TestRunReplacementNeverExceedsTheContractBudget(t *testing.T) {
 		}
 	})
 	var got atomic.Int64
-	_, takerURL := acceptingNode(t, "node-taker", "qube from the taker", func(f *fakeNode) {
+	_, takerURL := acceptingNode(t, "node-taker", "zorblax from the taker", func(f *fakeNode) {
 		f.onDispatch = func(_ string, c core.AgentContract) { got.Store(int64(c.TimeoutSec)) }
 	})
 
@@ -622,11 +622,11 @@ func TestRunPlacementPrefersHeadroomOverASaturatedNode(t *testing.T) {
 	// and the saturated one is listed FIRST and is SHALLOWER, so under the old
 	// lowest-queue_depth rule it won every time and answered 503 every time.
 	// Only "it is at its published admission ceiling" can move the placement.
-	saturated, satURL := acceptingNode(t, "node-saturated", "qube from the saturated node", func(f *fakeNode) {
+	saturated, satURL := acceptingNode(t, "node-saturated", "zorblax from the saturated node", func(f *fakeNode) {
 		f.queueDepth, f.jobsQueued, f.jobsRunning = 1, 0, 1
 		f.maxConcurrentJobs, f.maxQueueDepth = 4, 1 // 1 of 1 admitted: the next dispatch is a 503
 	})
-	_, roomyURL := acceptingNode(t, "node-roomy", "qube from the roomy node", func(f *fakeNode) {
+	_, roomyURL := acceptingNode(t, "node-roomy", "zorblax from the roomy node", func(f *fakeNode) {
 		f.queueDepth, f.jobsQueued, f.jobsRunning = 4, 0, 4
 		f.maxConcurrentJobs, f.maxQueueDepth = 8, 32 // 4 of 32 admitted, 4 of 8 workers busy
 	})
@@ -702,11 +702,11 @@ func TestRunReplacementDoesNotDisturbTheRedispatchPath(t *testing.T) {
 		if n == 1 {
 			return map[string]any{"status": "error", "error": "unknown job"}, http.StatusNotFound
 		}
-		w := remoteWire("qube answer", `{"answer":"42"}`)
+		w := remoteWire("zorblax answer", `{"answer":"42"}`)
 		w.NodeID = "node-forgetful"
 		return doneWire(t, w), http.StatusOK
 	}
-	other, otherURL := acceptingNode(t, "node-other", "qube from the other node", nil)
+	other, otherURL := acceptingNode(t, "node-other", "zorblax from the other node", nil)
 	srv := node.server()
 
 	results, sum, err := Run(t.Context(), testCfg(t), neverLocal(t),
@@ -796,7 +796,7 @@ func TestRunReplacementBudgetIsRemeasuredAfterSelection(t *testing.T) {
 	noProbeMemo(t)
 	_, slowURL := refusingNode(t, "node-slow", http.StatusServiceUnavailable, nil)
 	var got atomic.Int64
-	_, takerURL := acceptingNode(t, "node-taker", "qube from the taker", func(f *fakeNode) {
+	_, takerURL := acceptingNode(t, "node-taker", "zorblax from the taker", func(f *fakeNode) {
 		f.healthDelay = 1200 * time.Millisecond
 		f.onDispatch = func(_ string, c core.AgentContract) { got.Store(int64(c.TimeoutSec)) }
 	})

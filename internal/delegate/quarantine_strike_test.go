@@ -11,7 +11,7 @@ import (
 func TestStrikeOnFingerprintKeysOnlyOnTheDocanchorTag(t *testing.T) {
 	q := NewQuarantine(10 * time.Minute)
 	r := &runner{quarantine: q}
-	base := "http://lenovo:18811"
+	base := "http://node-c:18811"
 
 	r.strikeOnFingerprint(base, []string{"contains:setpts: not found in output", "min_items:items:3: got 1"})
 	r.strikeOnFingerprint(base, []string{"contains:setpts: not found in output"})

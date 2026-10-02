@@ -7,7 +7,7 @@ import (
 
 // Quarantine is the process-scoped memory of fleet nodes whose answers failed
 // the DOCUMENT FINGERPRINT check (research.DocFingerprint) — the shape of the
-// Lenovo 4B's phantom "latest Go version" digests (2026-08-31 … 09-01): a
+// <node-c> 4B's phantom "latest Go version" digests (2026-08-31 … 09-01): a
 // result that passes as a result while sharing nothing with the page it was
 // handed. Two strikes within TTL block the node for TTL; the block expires on
 // its own, so a flaky node is re-tried later without operator action.

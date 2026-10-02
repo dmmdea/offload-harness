@@ -187,8 +187,8 @@ func TestRunAutoMediaLeaseStillRunsLocal(t *testing.T) {
 // and two eligible remotes, four subtasks must land 0 local / 2 A / 2 B.
 func TestRunSpreadReservedLocalDealsRemotesOnly(t *testing.T) {
 	compressPolls(t, 10*time.Millisecond, 2*time.Second)
-	nodeA, urlA := eligibleNode(t, "node-a", "qube from A")
-	nodeB, urlB := eligibleNode(t, "node-b", "qube from B")
+	nodeA, urlA := eligibleNode(t, "node-a", "zorblax from A")
+	nodeB, urlB := eligibleNode(t, "node-b", "zorblax from B")
 	dir, _ := holdLease(t, gpulease.ClassText, "weights A/B")
 	cfg := testCfg(t)
 	cfg.GPULockPath = dir
@@ -261,8 +261,8 @@ var _ = json.RawMessage(nil) // keep the import set identical to the sibling tes
 // lease at all. Only a TEXT reservation removes the local slot.
 func TestRunSpreadMediaLeaseDealsAsBefore(t *testing.T) {
 	compressPolls(t, 10*time.Millisecond, 2*time.Second)
-	nodeA, urlA := eligibleNode(t, "node-a", "qube from A")
-	nodeB, urlB := eligibleNode(t, "node-b", "qube from B")
+	nodeA, urlA := eligibleNode(t, "node-a", "zorblax from A")
+	nodeB, urlB := eligibleNode(t, "node-b", "zorblax from B")
 	dir, _ := holdLease(t, gpulease.ClassMedia, "render")
 	cfg := testCfg(t)
 	cfg.GPULockPath = dir

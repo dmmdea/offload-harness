@@ -14,7 +14,7 @@ import (
 // FetchNodeView must decode LOOSELY per FLEET-NODE.md so staggered node
 // deploys never turn an additive field into a flag-day upgrade.
 const agentHealthJSON = `{
-	"node_id": "lenovo-node", "schema_version": 1,
+	"node_id": "node-c", "schema_version": 1,
 	"gpu_vendor": "nvidia", "gpu_arch": "ampere",
 	"vram_total_gb": 6, "vram_free_gb": 5.5,
 	"supported_task_types": ["agent"],
@@ -67,7 +67,7 @@ func TestFetchNodeViewMapsAgentFields(t *testing.T) {
 		t.Fatalf("FetchNodeView: %v", err)
 	}
 	want := NodeView{
-		NodeID:         "lenovo-node",
+		NodeID:         "node-c",
 		AgentEnabled:   true,
 		AgentSeat:      "offload-e4b",
 		AgentResident:  true,

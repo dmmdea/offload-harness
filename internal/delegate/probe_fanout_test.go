@@ -330,7 +330,7 @@ func TestCapacityWaitTickIsBoundedByThePerBaseProbe(t *testing.T) {
 	shortProbeTimeout(t, 300*time.Millisecond)
 
 	blackURL, _ := blackHole(t)
-	node, url := acceptingNode(t, "node-busy", "qube after the wait", func(f *fakeNode) {
+	node, url := acceptingNode(t, "node-busy", "zorblax after the wait", func(f *fakeNode) {
 		f.dispatchHook = freesAfter(3, http.StatusServiceUnavailable)
 	})
 	cfg := testCfg(t)
@@ -439,7 +439,7 @@ func TestCapacityWaitLandsOnASlowButHealthyRemote(t *testing.T) {
 	compressWait(t, 100*time.Millisecond, 0)
 	shortProbeTimeout(t, time.Second)
 
-	node, url := acceptingNode(t, "node-slow-health", "qube after the wait", func(f *fakeNode) {
+	node, url := acceptingNode(t, "node-slow-health", "zorblax after the wait", func(f *fakeNode) {
 		f.healthDelay = 400 * time.Millisecond
 		f.dispatchHook = freesAfter(1, http.StatusServiceUnavailable)
 	})

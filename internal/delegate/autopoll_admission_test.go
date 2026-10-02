@@ -96,7 +96,7 @@ func TestAutoContractIsNotAbandonedDuringTheNodesAdmissionWindow(t *testing.T) {
 			case e < admission+work:
 				return map[string]any{"state": "running", "wall_sec": core.AgentTimeoutSecDefault}, http.StatusOK
 			default:
-				return doneWire(t, remoteWire("the qube answer", `{"answer":"42"}`)), http.StatusOK
+				return doneWire(t, remoteWire("the zorblax answer", `{"answer":"42"}`)), http.StatusOK
 			}
 		},
 	}
