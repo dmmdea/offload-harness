@@ -2186,7 +2186,10 @@ func runDelegate(args []string) error {
 	if *tenant == "" {
 		*tenant = delegate.DefaultTenant()
 	}
-	cfg := loadCfg(fs)
+	cfg, cfgSrc := loadCfgWithSource(fs)
+	// C-95: when this config's own layers shadow its agent_model, say so (and
+	// which file) before any run defers on a seat the operator never wrote.
+	config.WarnOnShadowedAgentModel(cfgSrc, cfg, os.Stderr)
 	// Same switch that gates the MCP tool's registration (roast delta 13): a
 	// box is a DELEGATOR only by explicit opt-in.
 	if !cfg.AgentDelegationEnabled {

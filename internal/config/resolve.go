@@ -99,6 +99,23 @@ func WarnOnDefaults(src Source, w io.Writer) bool {
 	return false
 }
 
+// WarnOnShadowedAgentModel prints one line when cfg's agent_model is shadowed by
+// the layers it also declares (AgentModelShadowNote), naming the file that
+// supplied both so a config copy is the first suspect rather than the node's own
+// configuration. Returns whether it warned. Register C-95.
+func WarnOnShadowedAgentModel(src Source, cfg Config, w io.Writer) bool {
+	note := cfg.AgentModelShadowNote()
+	if note == "" {
+		return false
+	}
+	from := "built-in defaults"
+	if src.Path != "" {
+		from = src.Path
+	}
+	fmt.Fprintf(w, "note: config %s: %s\n", from, note)
+	return true
+}
+
 // SourceLine renders a one-line, truthful config-source disclosure (doctor's first line).
 // It must never credit a file that was not actually read.
 func SourceLine(src Source) string {

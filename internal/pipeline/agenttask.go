@@ -98,6 +98,25 @@ const (
 // matters to an operator, repeating it per run is noise.
 var warnSeatPin sync.Once
 
+// seatSourceNote says where a run's seat came from when it is NOT the config's own
+// planner seat, "" when it is. Appended to the roster defer so a placed or
+// delegator-chosen seat is never mistaken for the agent_model the operator wrote
+// (register C-95: a config copy that kept the node's layers).
+func (p *Pipeline) seatSourceNote(seat string, placed *core.Placed) string {
+	planner := p.cfg.AgentPlannerModel("")
+	if seat == "" || seat == planner {
+		return ""
+	}
+	key := "agent_model"
+	if strings.TrimSpace(p.cfg.AgentModel) == "" {
+		key = "model"
+	}
+	if placed != nil && placed.Layer != "" {
+		return fmt.Sprintf(" - the seat was chosen by placement (layer %q, role %q), not by this config's %s %q; a config that declares layers lets placement pick the seat", placed.Layer, placed.Role, key, planner)
+	}
+	return fmt.Sprintf(" - the seat was set by the caller or delegator, not by this config's %s %q", key, planner)
+}
+
 func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core.Meta, start time.Time) core.Result {
 	// Params shape errors are internal wiring bugs (this task type is only
 	// reachable through buildAgentRun), so they are honest job-level ERRORS —
@@ -497,7 +516,11 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		// swallowing it turns the follow-on loop error into a mystery.
 		log.Printf("agent task: seat roster probe of %s failed (proceeding; the loop will surface any real transport failure): %v", p.cfg.Endpoint, rerr)
 	} else if roster.Len() > 0 && !roster.Serves(seat) {
-		return deferWire(core.DeferClassConfig, fmt.Sprintf("agent seat %q is not in the endpoint's served roster", seat))
+		// Name the source when it is not the config's own planner key (register
+		// C-95): a seat a placement decision or a delegator chose is not the seat
+		// the operator wrote under agent_model, and a config copy that kept the
+		// node's layers deferred here on a seat it never named.
+		return deferWire(core.DeferClassConfig, fmt.Sprintf("agent seat %q is not in the endpoint's served roster%s", seat, p.seatSourceNote(seat, placedPtr)))
 	}
 	// The SERVED-WINDOW probe is the last admission step, and it runs HERE —
 	// before the wall context exists (register S-24). agent.ProbeServedWindow
