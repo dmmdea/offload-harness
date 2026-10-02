@@ -6,6 +6,178 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.158.2] - 2026-10-02 - Concurrent transcriptions keep whisper loaded and wait `gpu_wait_ms` for a held card; the ampere-16 seat leaves the memory stack's reranker room
+
+### Fixed — concurrent transcriptions no longer unload whisper from under each other, and "no speech" is never guessed from a failure something else may have caused (register C-91)
+
+`offload_transcribe` sent its zero-always-warm unload after every call and held nothing while it did: the single-slot
+inference mutex is released when `Transcribe` returns, so a call that finished while others were in line unloaded whisper
+onto the next call's inference. llama-swap answered the victim `matrix: model unloaded` with a 500, and every call queued
+behind it paid a cold start. The same unload fed a second defect: an answer cut off by it read as an empty body, an
+empty-body 5xx was filed as `ErrUpstreamNoSpeech`, and a recording with speech in it reached its caller as `empty
+transcript (no speech detected)`.
+
+- `Transcribe` and `TranscribeOAI` count themselves into a process-wide in-line count on their first statement (before the
+  fenced URL wait and the queue on the mutex) and out when they return. The new `Client.UnloadIfIdle(ctx)` replaces
+  the bare `Unload` in `runTranscribe` (one call site, shared by the whisper and the hq/OpenAI protocols). It unloads
+  holding the mutex, only when no call is waiting or running and a model was used since the last unload: a burst of
+  concurrent calls pays one cold start, and the last call out, even a failed or fence-refused one, is the one that
+  unloads. A call that never reached the upstream (a fence refusal, an unreadable wav) unloads nothing.
+- It frees every model the burst warmed on that upstream, not only the last call's own. A burst can mix `stt_model` and
+  `stt_model_hq` (or the two protocols on two models), they share the one slot, and the call that finishes last knows only
+  its own model, so unloading just that one left the first finisher's model loaded until llama-swap's ttl with nothing to
+  say so. Each model is unloaded on its own: a failure on one does not stop the others, stays marked warm for the next call
+  out, and is returned naming its model. `runTranscribe` logs it (`zero-always-warm unload after a <model> call failed ...`)
+  and never fails the transcription for it; the error used to be discarded.
+- `UnloadIfIdle` never blocks a finished call on the next call's inference. It checks the in-line count first and takes the
+  slot with `TryLock`, because a blocking lock would hold a ten-second transcription's answer back for the length of a
+  30-minute one's.
+- `ErrUpstreamNoSpeech` ("the audio had no speech") is produced for an upstream that answered 200 with an empty transcript
+  (both protocols) and, on the whisper protocol only, for the F-35 crash: an empty-body 5xx in a call that ran alone, with no
+  other transcription in line from the moment it joined and no unload sent or going out. This process's own unloads no longer
+  land on a call in flight, so such a call has no cause of its making left, and a retry would only crash the server again and
+  cost the restart. Any other empty-body 5xx, or an answer cut off mid-read (the read error was discarded), is the new typed
+  `ErrUpstreamVanished` (`the upstream vanished mid-request`) on both protocols, whose message says it was unloaded,
+  swapped, restarted or crashed under the call: whisper.cpp's exit on audio with no speech content leaves the same bare status
+  an unload leaves, and with another call or an unload overlapping it this process cannot say which it was, so it is a failed
+  call a caller can retry, never a claim that the audio is silent. **This narrows the 2026-09-23 mapping**, which read every
+  empty-body 5xx as no speech. What the rule cannot see is another process doing the same to the same upstream (another
+  session's harness, a `gpu reserve` drain, llama-swap swapping the slot for another model): an alone call that dies that way
+  still reads as no speech. The OpenAI path never reads no-speech off a failure (nothing says that path crashes on such
+  audio). "Alone" is an arrival count and the in-line count taken together under one small mutex, plus an unload count and an
+  unload-in-flight count kept by `Client.Unload`, read when a call joins and when it fails.
+- The comment on `Unload` that said its caller holds the single-slot mutex is corrected: no caller did. The `runTranscribe`
+  doc comment that said it "force-unloads the upstream after the call" now describes the last-call-out unload.
+- The `sttclient` tests reset the client's package-global state per test (`resetClientState`, called by all 19 tests that
+  transcribe). The set of warmed models is keyed by llama-swap base and httptest reuses ports now and then, so
+  `TestACallThatNeverReachedTheUpstreamUnloadsNothing` was flaky under `-count` (twenty repeated runs of the unfixed package
+  happened to pass, so the frequency is unmeasured). A regression test shares one base across its subtests, so the leak
+  reproduces on every run; `go test -count=20 ./internal/sttclient/` passes.
+- Tests: 21 new, 2 rewritten (the two tests that pinned the 2026-09-23 mapping for every empty-body 5xx now pin it for a
+  call that ran alone, with sibling tests for the calls that did not). The burst test (six concurrent calls against a
+  llama-swap stand-in that aborts what an unload finds in flight) failed on the old behaviour with five calls answered
+  `matrix: model unloaded` and six unloads for six calls, and the pipeline test with a failed call and two unloads for two.
+  The review's findings were each seen failing before their fix: the mixed burst unloaded only the last call's model, the
+  "ran alone" tests answered `vanished mid-request` against a stub that never reads a call as alone, the cut-off 200 came back
+  as an untyped decode error, the leak test sent an unload for a model it never warmed, and the unlogged unload failure through
+  the mutant that restores the discarded error. 33 mutants measured against the fixed code each turn the intended test red (each
+  term of the alone check, each typed return, the OpenAI asymmetry, the line accounting, the unload set and its failure
+  handling, the log line, the pipeline mapping, both halves of the reset helper). Three of the first round's mutants (either
+  waiter check alone, a blocking lock beside the waiter check) stay green because each of those guards covers the other.
+- Docs: `docs/systems/offload-pipeline.md` (Transcription), the `stt_unload_after` comment in `internal/config`.
+
+### Fixed — `offload_transcribe` waits `gpu_wait_ms` for a held card, defers it as capacity, and tells the client it is alive (register C-89)
+
+A transcription under a held GPU waited up to `stt_request_timeout_sec` (1,800 s) for the card: the whisper client handed its
+HTTP timeout to the lease fence as the lease-wait budget, while every other GPU door waits `gpu_wait_ms` (90 s by default).
+The MCP client aborts an idle call at the same 1,800 s, so the two raced, and when the wait did run out the refusal reached
+the caller as `transcribe call failed: gpu-lease timeout …`, error class `timeout` and no defer class, which a delegator
+cannot re-place. A long transcription that did run was silent to the client for as long as its audio took.
+
+- `sttclient.Client` gains `WithFenceWait(d)`, the lease-wait budget, and `fencedURL` waits `min(fence wait, HTTP timeout)`.
+  Zero is a value, one inspection, as `gpu_wait_ms: 0` is for every other door; only a client built without the option
+  waits its HTTP timeout. `pipeline.New` sets it from `gpu_wait_ms`.
+- `runTranscribe` files a lease refusal with error class `gpu_busy`, reason `gpu busy: <holder, how long it has held the card,
+  its declared window>` and `defer_class: capacity`, the class a delegator re-places and a caller can retry. No door files it
+  exactly that way: the agent doors set the reason and the defer class but no error class, and the vision tier sets the error
+  class but no defer class (whenever the lease is still held when its wait ends, by any live holder, a text reservation included; a lease refusal on its model call is filed as
+  `timeout`). It is checked before the no-speech verdict and before the generic call-failed wording.
+- `offload_transcribe` sends progress notifications when the request carries a progress token: an opening one
+  (`offload_transcribe started`) and a heartbeat every 30 s (`still working: offload_transcribe running for 4m0s`). The
+  delegation doors' reporter serves it: `progressReporter` gains a label for a call with no subtasks, and `startHeartbeat`
+  mirrors `startProgress`'s guards (no token, no session, nothing sent). Whether the reference client restarts its timeout on
+  progress is still unverified (ADR 0065), so the bounded wait is the fix and the heartbeat is a courtesy.
+- Tests: five new, one rewritten (`TestTranscribeUnderAFenceNeverReachesUpstream` pinned "waits inside the client's timeout").
+  Four of the six failed on the old code: the fence tests waited out a 2 s client timeout instead of a 300 ms fence wait
+  (and instead of one inspection for zero), the pipeline test deferred after 4.1 s as `timeout` with no defer class, and
+  the heartbeat test saw no notification at all. The other two guard the cap by the client's timeout and the opt-in on a
+  progress token, and pass on the old code by design. Twelve mutants each turn one red.
+- Docs: `docs/systems/gpu-lease.md` (the whisper row), ADR 0026 (Extended 2026-10-01), `docs/systems/mcp-server.md`
+  (progress notifications), `docs/systems/offload-pipeline.md`, the `stt_request_timeout_sec` comment in `internal/config`.
+
+### Fixed — the ampere-16 seat leaves the memory stack's reranker room too, and the reranker is sized for the pair it scores (register A-122b)
+
+The ampere-16 seed (util 0.87, `max_num_seqs` 8, `max_num_batched_tokens` 4096, ADR 0049 Amendment 4) kept the memory
+embedder resident but not the reranker. On 2026-10-01, on the ampere-16 reference box under a GPU lease, with four
+concurrent ~20k-token requests, a cold rerank 8 s into the load and rerank + embed every 2 s, the card peaked at 14,717 of
+15,356 MiB (seat 13,860, embedder 460, reranker 378), 639 MiB free, and the reranker failed to start beside the loaded seat
+7 times (`upstream command exited prematurely` in the node's llama-swap log). The operator's order is that the embedder AND
+the reranker stay resident beside the agent seat with about 1 GiB free. At util 0.84, 4 sequences and 2,048 batched tokens,
+with the reranker at `--ctx-size 4096 --batch-size 2048 --ubatch-size 2048`, the card peaked at 13,987 MiB (seat 13,204,
+embedder 458, reranker 306), 1,369 MiB free; the KV pool is 45,472 tokens (29 blocks of 1,568, 1.39x the unchanged 32,768
+window), and the four requests finished in 544 s where the old point needed 900+ s. util 0.85 with 4 sequences did not start
+in that arm (unexplained, probably the previous engine still releasing VRAM; not re-run). That point has run on the
+reference box since 2026-10-01 19:31 (seat warm in 52 s, `/v1/rerank` 3 of 3 with the seat loaded, 13,565 of 15,356 MiB at
+idle); this change makes it what a fresh install or re-render seeds. The 35B fast-layer seat (util 0.85 / 8 / 4096, 969 MiB
+free beside the smaller reranker) is unchanged.
+
+- `setup/templates/profiles.json`: the ampere-16 `vllm_seat` declares util 0.84, `max_num_seqs` 4 and
+  `max_num_batched_tokens` 2048; the window and `agent_ctx_tokens` stay 32768. Its `measured` note marks the 2026-09-30
+  point superseded and carries the A-122b measurement.
+- The reranker in the four llama-swap templates that render the memory stack. The memory stack's client truncates each
+  document to 6,000 characters and sends every (query, document) pair as one non-causal sequence, at most about 1,500-2,000
+  tokens, which must fit one ubatch and one slot. `--batch-size 2048 --ubatch-size 2048` is applied to all four (it was
+  4096/4096). `--ctx-size` becomes 4096 on `linux-cuda` and `linux-vulkan`, where the reranker has one slot, and
+  **stays 8192 on `win-dual-blackwell` and `win-triple-blackwell`**, which start it with `--parallel 4`: llama.cpp divides
+  `--ctx-size` among its slots, so 4096 there would leave 1,024 tokens per slot, below a worst-case pair. The two Windows
+  templates therefore take the measured batch and ubatch but not the measured context; their 2,048-token slots are
+  unchanged. `linux-cuda` is the template the measured tier renders; `linux-vulkan` and the two Windows templates take
+  these numbers on the slot rule and the pair size, not on runs of their own.
+- The default `memory_stack` is now `embeddinggemma`, `bge-reranker-v2-m3` and `embeddinggemma-ams`. The memory authority
+  node serves its embedder under that id, which the default did not name, so `gpu reserve --unload-seat` (0.158.1, register
+  C-87), and the render runner's helper, would have cleared it. `config.Default()` and `DEFAULT_MEMORY_STACK` in
+  `render/gpu-lock.mjs` both gain it, appended so `EmbedModel()` still falls back to `embeddinggemma`; a test reads the
+  Node literal and requires it to equal the Go default; `config.example.json` is regenerated, since it must round-trip to
+  the default. A name a box does not serve is inert: the set only filters what llama-swap reports.
+  - `setup/templates/config.json` keeps its explicit pair on purpose. It is written into every Windows install, a
+    configured `memory_stack` replaces the default rather than extending it, and `llamaswap-pp-cli bind check` reports a
+    `memory_stack` entry that resolves to no roster model as dangling and exits with the typed model-not-found code
+    (`tools/llamaswap/internal/cli/bind_check.go`), so a node-specific id in the seed would flag every other box. The same
+    holds for anyone who copies `config.example.json` verbatim onto a box that does not serve `embeddinggemma-ams`: `bind
+    check` lists `memory_stack[2]` as dangling there. A node that serves its embedder under its own id names it in its
+    config.
+  - `fleet_reclaim.go` and `tools/llamaswap` hold no literal memory-stack list, so there was nothing to extend there. Their
+    keep-set is the llama-swap YAML's resident seats (`ttl` -1 or 0), the CLI config's `keep_set` and
+    `LLAMASWAP_KEEP_SET` (the CLI adds `--keepset`). This default does not reach them: an embedder seat with `ttl: 300`
+    stays reclaimable to fleet reclaim unless it is named through one of those. Not changed here.
+- Guards. `TestAmpere16VLLMSeatDeclaresItsMeasuredBoundLane` pins 0.84 / 4 / 2048 (it still fails on 0.87 / 8 and on
+  0.90 / 32, and now on the batch budget too); `ampere16_coresidency_test.go` gains a `maxBatched` ceiling (27B 2048, 35B
+  4096) and requires the A-122b measurement in the seat's note; new `TestEveryTemplateServesTheRerankerAtTheMeasuredSizing`
+  pins each template's reranker batch, ubatch, context and slot count, exact in both directions; new
+  `TestSeatTablesStateTheBatchBudget`; new `TestMemoryStackDefaultsAgreeBetweenGoAndTheRenderHelper`.
+- Docs: ADR 0049 Amendment 5 (header note, the measured table, the decision, the costs, a Consequences bullet, the index
+  row), `docs/tiers/` regenerated (the seat tables gain a `max_num_batched_tokens` row, so `ampere-16`, `blackwell-16`,
+  `blackwell-2x16` and `blackwell-3x16` change), `docs/systems/composite-tier.md`, `docs/systems/gpu-lease.md`. The tier
+  matrix workbook's carried live-seat cells (the ampere-16 lane row and the two roster rows) were updated by hand; its
+  generated sheets regenerate cell-for-cell identical from this `profiles.json`.
+- Costs: the lane seat serves at most 4 sequences at once (it declared 8, and 32 before) and its `concurrencyLimit`
+  follows; its batch halves. Single-stream TTFT, the digest-8 gate and the 4-stream aggregate were measured at the
+  Amendment 3 point and are not re-run here. The single layer's `footprint_gib` (13.9) is now conservative against the
+  measured 13,204 MiB seat and was left alone.
+- Tests: three new (`TestEveryTemplateServesTheRerankerAtTheMeasuredSizing`, `TestSeatTablesStateTheBatchBudget`,
+  `TestMemoryStackDefaultsAgreeBetweenGoAndTheRenderHelper`) and six existing ones tightened (the bound-lane pin, the
+  co-residency ceiling, its note check, `TestDefaultMemoryStack`, `TestUnloadSeatNeverUnloadsTheMemoryStack`, the Node
+  default). Fourteen mutants, each applied by an exact-count replacement and each restored with a clean `git diff`
+  afterwards, turn the intended guard red: the seat back at util 0.87, at 8 sequences, at 4096 batched tokens, at the
+  Amendment 4 point (0.87 / 8 / 4096) and at the Amendment 3 point (0.90 / 32); a batch of 1024 (the exact pin, not the
+  ceiling); the 35B above its ceiling; the reranker back at 8192/4096/4096 in `linux-cuda`, `linux-vulkan` and
+  `win-triple-blackwell`, and at a literal 4096 context with `--parallel 4` in `win-dual-blackwell`; and the third
+  memory-stack member dropped from the Go default, and from the Node default (caught by the drift test and by the Node
+  test). `node --test render/gpu-lock.test.mjs render/withgpuslot.test.mjs` passes 39 of 39 and
+  `pwsh -File setup/render.tests.ps1` passes in full.
+
+### Docs — the memory stack is not CPU-only on every tier (documentation sweep, round 2)
+
+Round 2 of the 2026-10-01 sweep corrected the places that still described the memory stack as CPU-only, or every
+GPU-resident model as unloaded before a render (register C-87).
+- `docs/systems/gpu-lease.md`: mem0 sits on the utility card on the three-card reference box and shares the render
+  card on a single-card tier.
+- `docs/systems/coding-agent.md`, `docs/glossary.md`, `docs/systems/media-generation.md`: the render free step and the
+  zero-warm posture keep the memory stack (the mem0 embedder and reranker) resident.
+- ADR 0018: a dated note that the Context table's "CPU memory stack" no longer describes every box, and that
+  `gpu reserve --unload-seat` keeps the configured `memory_stack`.
+- `internal/pipeline/pipeline.go`: a comment called the never-unload set "CPU-only models".
+
 ### Docs — the docs describe 0.158.1 as it runs
 
 A documentation sweep after 0.158.1 checked each surface against the shipped behaviour and corrected what had gone stale.
