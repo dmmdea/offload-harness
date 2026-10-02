@@ -619,3 +619,77 @@ func TestResolveFileList(t *testing.T) {
 		}
 	}
 }
+
+// TestScanTreeBOMThatIsNotUTF16IsNeverSilentlySkipped: a file that starts with a
+// byte-order mark but is not valid UTF-16 (an odd payload, an unpaired
+// surrogate) used to be "decoded" into noise and scanned as such, so a listed
+// name in its raw bytes passed unseen. The raw bytes are scanned too, and a file
+// that does not decode is a Fatal (exempt only by path and blob, like any other
+// unknown binary). Valid UTF-16 with a mark is still decoded and scanned.
+func TestScanTreeBOMThatIsNotUTF16IsNeverSilentlySkipped(t *testing.T) {
+	m := plainMatcher(t)
+	bom := []byte{0xFF, 0xFE}
+	cat := func(parts ...[]byte) []byte {
+		var out []byte
+		for _, p := range parts {
+			out = append(out, p...)
+		}
+		return out
+	}
+	u16 := func(units ...uint16) []byte {
+		var out []byte
+		for _, u := range units {
+			out = append(out, byte(u), byte(u>>8))
+		}
+		return out
+	}
+	// "zor" + a lone high surrogate + "blax": decoded, the name is split by the
+	// replacement character, so only the Fatal can flag it.
+	split := u16('z', 'o', 'r', 0xD800, 'b', 'l', 'a', 'x')
+	rows := []struct {
+		name      string
+		data      []byte
+		wantFatal bool
+		wantFind  bool
+	}{
+		{"odd payload, ASCII name, non-text bytes", cat(bom, []byte("zorblax"), []byte{0x00, 0x01}), true, true},
+		{"BOM then plain ASCII text", cat(bom, []byte("zorblax")), true, true},
+		{"even payload of plain ASCII text decodes to other scripts", cat(bom, []byte("zorblax!")), false, true},
+		{"unpaired surrogate splits the name", cat(bom, split), true, false},
+		{"big-endian mark with an odd payload", cat([]byte{0xFE, 0xFF}, []byte("zorblax")), true, true},
+		{"valid little-endian text", utf16Bytes("a zorblax b", false, true), false, true},
+		{"valid big-endian text", utf16Bytes("a zorblax b", true, true), false, true},
+		{"valid little-endian text, nothing listed", utf16Bytes("nothing here", false, true), false, false},
+	}
+	for _, r := range rows {
+		t.Run(r.name, func(t *testing.T) {
+			rep := scanOf(t, m, memFS{"t.txt": {data: r.data}}, nil, nil, ScanOptions{})
+			if gotFatal := len(rep.Fatals) > 0; gotFatal != r.wantFatal {
+				t.Errorf("fatal = %v (%+v), want %v", gotFatal, rep.Fatals, r.wantFatal)
+			}
+			if gotFind := len(rep.Findings) > 0; gotFind != r.wantFind {
+				t.Errorf("findings = %v (%v), want %v", gotFind, findingKeys(rep), r.wantFind)
+			}
+		})
+	}
+	// an exempt row bound to the blob accepts the file as it does any other
+	// binary; the finding in its raw bytes is still reported.
+	bad := cat(bom, []byte("zorblax"))
+	exempt := []ExemptRow{{Path: "t.txt", Blob: blobA, Why: WhyBinary}}
+	fsys := memFS{"t.txt": {data: bad}}
+	rep := scanOf(t, m, fsys, nil, map[string]string{"t.txt": blobA}, ScanOptions{Exempt: exempt})
+	if len(rep.Fatals) != 0 || len(rep.Findings) == 0 {
+		t.Errorf("exempt BOM file: fatals %+v findings %v", rep.Fatals, findingKeys(rep))
+	}
+	rep = scanOf(t, m, fsys, nil, map[string]string{"t.txt": blobB}, ScanOptions{Exempt: exempt})
+	if !hasFatal(rep, "t.txt", "stale") {
+		t.Errorf("a stale exempt row must say so: %+v", rep.Fatals)
+	}
+	// nothing the scan reports carries matched text.
+	rep = scanOf(t, m, memFS{"t.txt": {data: bad}}, nil, nil, ScanOptions{})
+	for _, f := range rep.Fatals {
+		if strings.Contains(strings.ToLower(f.Reason), "zorblax") {
+			t.Errorf("a fatal carries matched text: %q", f.Reason)
+		}
+	}
+}
