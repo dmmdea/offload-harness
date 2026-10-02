@@ -4,7 +4,7 @@
 //
 // HyperFrames (npm `hyperframes`, HeyGen, Apache-2.0) renders an HTML/CSS composition to video
 // with headless Chrome + FFmpeg. Its defaults do not fit this harness, and every guard below is
-// tied to a behaviour read in the pinned source (0.8.61):
+// tied to a behaviour read in the 0.8.61 source and re-checked on the pinned 0.8.108 package:
 //
 //   - it phones home (PostHog telemetry on by default)            -> HYPERFRAMES_NO_TELEMETRY=1, DO_NOT_TRACK=1
 //   - every command without --json pings the npm registry and GitHub (update + skills checks),
@@ -41,7 +41,7 @@ import { tmpdir } from "node:os";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-export const PINNED_VERSION = "0.8.61";
+export const PINNED_VERSION = "0.8.108";
 export const CLI_ENTRY = join("node_modules", "hyperframes", "bin", "hyperframes.mjs");
 export const DEFAULT_TEMPLATES_DIR = join(__dirname, "compose-templates");
 
@@ -157,7 +157,9 @@ export function assertAllowedInvocation(args) {
 
 // ---------------------------------------------------------------------------------------------
 // Argument builders — one per step, each verified against the 0.8.61 source (render.ts:130-409,
-// check.ts CHECK_COMMAND_ARGS, lint.ts, snapshot.ts:656-724, browser.ts).
+// check.ts CHECK_COMMAND_ARGS, lint.ts, snapshot.ts:656-724, browser.ts; the line numbers are 0.8.61's) and
+// re-checked on the pinned 0.8.108 package, whose --help for lint, check, render, snapshot and browser is
+// identical to 0.8.61's apart from one description (--page-side-compositing).
 // ---------------------------------------------------------------------------------------------
 export const FORMATS = Object.freeze(["mp4", "webm", "mov", "png-sequence", "gif"]);
 export const QUALITIES = Object.freeze(["draft", "standard", "high"]);

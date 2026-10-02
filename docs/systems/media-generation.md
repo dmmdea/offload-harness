@@ -1039,7 +1039,7 @@ and writes it into its result file.
 | class | cause |
 |---|---|
 | `BAD_INPUT` | the request broke a rule (inputs, enums, template name, variables), decided before any spawn |
-| `LINT_ERRORS` / `CHECK_FAILED` | the composition failed its own gates |
+| `LINT_ERRORS` / `CHECK_FAILED` | the composition failed its own gates (since HyperFrames 0.8.108 this includes text that spills out of its box, `layout/text_box_overflow`, which 0.8.61 rendered clipped; `strict: false` accepts it) |
 | `RENDER_FAILED` | a failed row, or an output that failed the ffprobe gate |
 | `BROWSER_MISSING` / `FFMPEG_MISSING` / `CLI_MISSING` | the pinned Chrome, ffmpeg/ffprobe or the pinned CLI is absent |
 | `SPAWN_EBUSY` | an antivirus lock on ffmpeg ([hyperframes#4058](https://github.com/heygen-com/hyperframes/issues/4058)); retried once, then this class |
