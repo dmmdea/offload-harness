@@ -105,7 +105,7 @@ only if that layer's guards admit it right now: a dormant layer refuses outright
 display card refuses by the guard's name, before any seat is touched. Both agent doors take
 `context_class: "long"`, an input to placement rather than a seat name; the delegation door's
 subtasks also take `layer`, a composite node's declared layer id whose agent seat the subtask
-runs on (register A-100: the Lenovo's `fast` layer is its 35B digest seat — a node that does
+runs on (register A-100: <node-c>'s `fast` layer is its 35B digest seat — a node that does
 not declare the layer is ineligible for that subtask, an idle local box that does not declare it
 does not keep it (route=auto reads the fleet for it, route=spread never deals it the local slot: register A-108), and with no
 node declaring it the subtask defers naming the layer), and every result and

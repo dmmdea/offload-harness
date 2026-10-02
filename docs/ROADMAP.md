@@ -4,7 +4,7 @@
 
 ## Where the plan lives
 
-Plan v3 is kept in the operator's ecosystem workspace, outside this repo (the drive letter is per machine: `G:` on the Qube, `D:` on the laptop):
+Plan v3 is kept in the operator's ecosystem workspace, outside this repo (the drive letter differs per machine):
 
 | file | holds |
 |---|---|
