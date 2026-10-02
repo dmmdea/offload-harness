@@ -375,3 +375,4 @@ live outside it.
 The default GPU posture: nothing GPU-resident persists between media jobs, except the memory stack (the mem0 embedder and reranker stay resident). The card is cleared before
 a render and returned afterward, so text inference remains usable. See
 [flows/zero-warm-generation.md](flows/zero-warm-generation.md).
+zqleakcanary9
