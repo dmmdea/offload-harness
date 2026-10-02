@@ -49,6 +49,8 @@ where the code lives.
 - [systems/pair-workloads.md](systems/pair-workloads.md) — harness jobs in NVIDIA Personal AI
   Router's Jobs list: the workload frame contract, the two emit sources (delegate runner, ledger
   observer), the `pair_workloads_*` keys, and the patched PAIR worker the ingress needs
+- [systems/leak-gate.md](systems/leak-gate.md) — the privacy gate: a keyed list of denied names, the
+  tests that fail the build on a hit, the key and CI wiring, and what it does not cover
 
 ## Hardware tiers — what YOUR machine gets
 

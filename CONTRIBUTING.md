@@ -57,6 +57,28 @@ Documentation lives in [`docs/`](docs/README.md) and is part of the change, not 
 - Conventions, the ADR schema, and the privacy rules for published files are in
   [`docs/STYLE.md`](docs/STYLE.md).
 
+## The leak gate
+
+This repository is public, and the names of the maintainer's machines, people and brands must never reach
+it. `go test ./...` includes a gate that scans every tracked file and file name against a list of denied
+names. The list is secret: the repository carries only keyed hashes of it (`testdata/leak-gate-digests.json`),
+and a failure prints the path, the line and an opaque entry id, never the text.
+
+- **If it fails on your change,** rewrite the text with the repository's vocabulary (a node letter or a role
+  phrase; [`docs/STYLE.md`](docs/STYLE.md#privacy), rules V1 to V4) and push again. There is no allow list.
+  A test or fixture that must show a denied name builds it from parts at run time, because the gate scans test
+  sources too.
+- **From a fork, the keyed test skips.** GitHub withholds the key from a fork's pull request, so `go test
+  ./...` there says `leak gate: skipped` in the run summary. The keyless tests (the shape rules, the key table,
+  the digest file's own checks) still run. A maintainer runs the keyed test on your checkout before merging,
+  and the push run on `main` is the backstop.
+- **A maintainer runs it with the key file:** `OFFLOAD_LEAK_GATE_KEY_FILE=<key file> go test -count=1 -run
+  TestTrackedTreeCarriesNoDeniedNames .` (`-count=1`, because the key file is outside the module and Go's test
+  cache cannot see it change).
+
+How it works, how the key is handled and what it does not cover:
+[`docs/systems/leak-gate.md`](docs/systems/leak-gate.md).
+
 ## Versioning
 
 This project follows [SemVer](https://semver.org/). **Four sources name the version and MUST be

@@ -39,6 +39,9 @@ Detailed documentation lives in `docs/`. This file only routes you there.
   (`offload_browse` / agent `browse`): sidecar protocol, deny-list, doors, and what leaves the machine (ADR 0060).
 - [`docs/systems/opencode-integration.md`](docs/systems/opencode-integration.md) — the harness inside
   opencode: MCP registration, rules parity, and the `opencode-local-offload` plugin.
+- [`docs/systems/leak-gate.md`](docs/systems/leak-gate.md) — the privacy gate: write machine, person and
+  brand names as node letters and role phrases ([`docs/STYLE.md`](docs/STYLE.md#privacy)), never the real
+  name; the test fails the build on a hit and there is no allow list.
 - [`docs/architecture/decisions/`](docs/architecture/decisions/README.md) — Architecture Decision
   Records. **Only `Accepted` status is current guidance.**
 - [`docs/glossary.md`](docs/glossary.md) — terms with a specific meaning here (Defer, Tier,
