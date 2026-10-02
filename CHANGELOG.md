@@ -31,6 +31,30 @@ Versioning: [SemVer](https://semver.org/).
 
 ### Fixed
 - **Two statements the extra seats falsified are reworded.** ADR 0020 said a tier may declare at most one seat per kind, and the `seatVarID` doc comment said the kind makes the matrix var id unique. Neither holds once a tier can declare an extra or a text-only `rkllm` seat beside the bound one: the kind picks the base id (`vis`, `stt`, `ocr`, `rkllm`) and a second or later seat of the same kind takes the numbered ids (`vis2`, `vis3`, ...) in declaration order. ADR 0020 carries a dated amendment rather than a rewrite; no behaviour changed. (register A-131)
+### Added — seed placeholders expand inside objects, and blackwell-8 seeds Z-Image Turbo as a named sdcpp image family (register A-132)
+
+`tierseed.expand` and the installer's `Expand-SeedValue` substituted `__OFFLOAD_HOME__` and `__EXE__` in strings and string
+arrays only, never inside an object. A named image family is an object, and it must carry its own model paths (a named
+family clears the flat `sdcpp_*` model keys and the runner passes `sdcpp_model` to `sd-cli` verbatim), so a family whose
+paths lived under the install home could not be seeded: the token shipped literally, a config that loads and fails at render.
+
+- Both expanders now recurse into objects (any depth, arrays and scalars inside included) and into every array element. The Go
+  side builds a new object and never rewrites the profile's own; the PowerShell side mirrors it. The installer's array
+  branch had expanded string elements only, so an object or an array inside an array (`[{"p": "<token>/x"}]`, `[["<token>/x"]]`)
+  kept its token even though Go expanded it; it now calls `Expand-SeedValue` on each element and keeps the `,([object[]]...)`
+  wrapper that stops PowerShell flattening a one-element or nested array. Both suites load one shared fixture
+  (`internal/tierseed/testdata/nested-expand-parity.json`, with array-of-object, array-of-array, one-element and mixed
+  arrays), so the two implementations cannot drift apart unnoticed.
+  Recursing exposed one producer: `Get-CompositeSeed` wrapped `tiers` and `layers` in a second array with a stray leading comma
+  (a hashtable value is never unrolled), which the old string-only branch had flattened by accident; the comma is gone, and
+  `setup/render.tests.ps1` (composite-tier parity) holds it.
+- The overlay gate (`TestEveryShippedOverlayLoadsAndValidates`) already failed on a surviving token inside a family; the
+  installer suite now holds the same line (no tier layer may leave a placeholder in the config an install writes).
+- `blackwell-8` seeds `z-image-turbo` in `imagegen_families` (Q8_0 diffusion GGUF, `zimage_ae` VAE, Qwen3-4B text encoder,
+  the measured 6.5 GB graph-cut arm, 8 steps, cfg 1, Apache-2.0), so a fresh install keeps the per-request
+  `family:z-image-turbo`. The default image binding (`hidream-o1-dev`) is unchanged; weights stay out-of-band like every seed.
+- The accelerator device tokens (`__HAILO_HOME__` and its siblings) are still substituted in top-level strings only; no
+  accelerator seed carries a family object.
 
 ## [0.159.0] - 2026-10-02 - The ampere-16 vLLM seats move to vLLM 0.30.0 with a pinned KV pool; the compose lane pins HyperFrames 0.8.108
 
@@ -202,7 +226,7 @@ fresh `config.json`.
   `TestEveryShippedSeedIsValid` stops at "every key is a `Config` field", and the closure gates resolve the base seed
   only. `TestEveryShippedOverlayLoadsAndValidates` resolves every tier on windows and linux at ram tiers mid and high,
   fails on a placeholder that survives expansion (expansion reaches strings and string arrays, never the inside of an
-  object), runs `config.Load` on what an install writes and fails on any load warning but the installer-owned
+  object; superseded by A-132), runs `config.Load` on what an install writes and fails on any load warning but the installer-owned
   `compose_script` one, and resolves every image and edit family with its licence pair.
   `TestSeededWanLoaderMatchesTheExperts` fails when a seed layer, alone or merged with the RAM overlay, pairs `native`
   with a `.gguf` expert. The config door cannot see that (it depends on which unet applies), so the first render would
@@ -231,9 +255,10 @@ fresh `config.json`.
 Not seeded, and why:
 - **Z-Image Turbo as a named image family.** A named family clears the flat `sdcpp_*` keys and must carry its own full
   model paths, but `tierseed.expand` and `Expand-SeedValue` replace `__OFFLOAD_HOME__` in strings and string arrays
-  only, never inside an object, so the block would ship literal tokens. It waits for recursive expansion in both. The
+  only, never inside an object, so the block would ship literal tokens. It waits for recursive expansion in both (superseded by A-132: both expand inside objects now and
+  `blackwell-8` seeds it). The
   flat `sdcpp_*` arm stays reachable by flipping `imagegen_engine`, and the image roster is still three models
-  (`hidream-o1-dev`, `qwen-image`, `qwen-image-2.1`).
+  (`hidream-o1-dev`, `qwen-image`, `qwen-image-2.1`) (superseded by A-132: four, with `z-image-turbo`).
 - **The second general vision seat and its siblings** (LFM2.5-VL, Gemma-4-E4B-vision, the high-quality whisper seat).
   `mediaseat` allows one writer per bound key and has no non-binding seat kind, so they stay hand-wired until it does.
   A rendered vision seat is also not byte-identical to the hand-wired flags, so adopting one needs a measurement.

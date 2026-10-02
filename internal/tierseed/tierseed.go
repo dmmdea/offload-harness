@@ -980,6 +980,16 @@ func expand(v any, home, exe string) any {
 			out = append(out, expand(e, home, exe))
 		}
 		return out
+	case map[string]any:
+		// A named family (imagegen_families / gen_edit_families) is an object of strings, string arrays and
+		// scalars; its path tokens must expand like a top-level seed value, or the family ships a literal
+		// "__OFFLOAD_HOME__/..." the runner passes verbatim. A NEW object, never the profile's own: the
+		// seed table is shared by every Resolve call. setup/install.ps1 Expand-SeedValue mirrors this.
+		out := make(map[string]any, len(t))
+		for k, e := range t {
+			out[k] = expand(e, home, exe)
+		}
+		return out
 	default:
 		return v
 	}
