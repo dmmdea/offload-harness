@@ -31,7 +31,7 @@ not assume it does.
 
 | Property | Measured | How |
 |---|---|---|
-| Chassis | Lenovo ThinkCentre M720q (10T8S28P00) | `dmidecode -t system` |
+| Chassis | vendor DMI product string not recorded | `dmidecode -t system` |
 | CPU | **Intel i9-9900**, 8C/16T, 3.1 GHz base / 5.0 GHz max, 16 MiB L3, 1 NUMA node | `lscpu` |
 | CPU ISA | AVX, **AVX2**, F16C, FMA — **no AVX-512, no VNNI, no AMX** | `/proc/cpuinfo` |
 | RAM | **2 × 16 GB DDR4-2667, dual channel** (both channels populated), 42.7 GB/s theoretical | `dmidecode -t memory` |
@@ -42,7 +42,7 @@ not assume it does.
 | VRAM free | **5424 MiB of 6144** — the desktop compositor holds only 380 MiB, no compute apps | `nvidia-smi` |
 | PCIe | **LnkCap gen3 (8 GT/s) × 16** — idle reading of "gen1 × 8 (downgraded)" is ASPM downtrain | `lspci -vv` |
 | Storage | Samsung PM9C1a 512 GB NVMe, **DRAM-less**, 2035 MB/s O_DIRECT read | `hdparm -t --direct` |
-| Model store | ZFS dataset `ecosystem_backup/apps/offload-stack`, 80 GB quota | `zfs list` |
+| Model store | ZFS dataset `<pool>/apps/offload-stack`, 80 GB quota | `zfs list` |
 | RAM band | **`low`** (31 GB; bands are ≥120 high, ≥56 mid, ≥28 low, else min) | `detect.ps1: Get-RamTier` |
 
 ### What that hardware implies before any model is loaded

@@ -5,7 +5,7 @@
 > Single source of truth for the BUILD SEQUENCE. The design detail lives in the chapter briefs and ADRs (linked at the bottom); this file owns the ORDER, and the order is **decided** — not a menu. **Last updated 2026-08-26** (frontier-update refresh; the file had gone ~100 minor versions stale at 2026-06-26 / 0.4.1).
 
 ## Framing
-Give the harness local capability — text · image · audio · video, each across 3 angles (**understand · generate · edit**) — so grunt work never reaches a paid context. Dual-track: public generalist + a private **Danmar Auto Reviews**-optimized track. Hard rules carried through every phase:
+Give the harness local capability — text · image · audio · video, each across 3 angles (**understand · generate · edit**) — so grunt work never reaches a paid context. Dual-track: public generalist + a private **MyTools auto-review**-optimized track. Hard rules carried through every phase:
 - **never-call-cloud** (defer to Opus on low confidence; `offload_nim` is the one opt-in exception)
 - **GBNF grammar path is sacred** (raw `grammar` field; never `--json-schema`)
 - **zero-always-warm** (llama-swap `ttl:300` + force-unload; ComfyUI `--disable-smart-memory --cache-none` + `/free`)
@@ -18,12 +18,12 @@ This file used to say the target was an "**8 GB single-user** box (RTX 3070 Mobi
 
 | node | tier | role |
 |---|---|---|
-| **Qube** | **3x Blackwell 16GB = 48.9 GB** since 2026-08-31 (RTX 5060 Ti @17:00 + RTX 5070 Ti @65:00 (display) + RTX 5060 Ti @B5:00), 128 GB RAM, Win 11 — **no tier id covers this shape**; `blackwell-2x16` is what its 2-card seats run as (cards 0+2) | primary; agent seat `agent-pool` (`qwen3.8-27b-vllm`), all media engines, mem0 authority |
-| **Aorus 15P-XD** | `ampere-8` — RTX 3070 **Mobile** 8GB, 64 GB RAM, Win 11 | fleet node, agent seat `qwen3.5-9b-agent` |
-| **Lenovo M720q** | `ampere-16` — **NVIDIA A2 16GB** since 2026-09-04 (was `ampere-6` / RTX 3050 6GB), 64 GB RAM, Ubuntu; Coral Edge TPU on M.2 | fleet node, agent seat **`qwen38-27b-agent`** (Qwen3.8-27B UD-IQ3_S + embedded MTP head, 49,152 window, `ttl: 300`) since 2026-09-16 — ADR 0047, blind 24/24 over the 4B it replaces; the llama.cpp 4B stays as the fallback and the hand-built `qwen3.5-4b-vllm` unit is left installed but unbound; LMCache L2 store |
-| **Dell OptiPlex 7060** | `blackwell-8` — RTX 5060 8GB (Gen3 x4, PCH slot) + Hailo-8L NPU, 64 GB RAM, Win 11 | editor box / accelerator tier |
+| **<node-b>** | **3x Blackwell 16GB = 48.9 GB** since 2026-08-31 (RTX 5060 Ti @17:00 + RTX 5070 Ti @65:00 (display) + RTX 5060 Ti @B5:00), 128 GB RAM, Win 11 — **no tier id covers this shape**; `blackwell-2x16` is what its 2-card seats run as (cards 0+2) | primary; agent seat `agent-pool` (`qwen3.8-27b-vllm`), all media engines, mem0 authority |
+| **<node-a>** | `ampere-8` — RTX 3070 **Mobile** 8GB, 64 GB RAM, Win 11 | fleet node, agent seat `qwen3.5-9b-agent` |
+| **<node-c>** | `ampere-16` — **NVIDIA A2 16GB** since 2026-09-04 (was `ampere-6` / RTX 3050 6GB), 64 GB RAM, Ubuntu; Coral Edge TPU on M.2 | fleet node, agent seat **`qwen38-27b-agent`** (Qwen3.8-27B UD-IQ3_S + embedded MTP head, 49,152 window, `ttl: 300`) since 2026-09-16 — ADR 0047, blind 24/24 over the 4B it replaces; the llama.cpp 4B stays as the fallback and the hand-built `qwen3.5-4b-vllm` unit is left installed but unbound; LMCache L2 store |
+| **<node-e>** | `blackwell-8` — RTX 5060 8GB (Gen3 x4, PCH slot) + Hailo-8L NPU, 64 GB RAM, Win 11 | editor box / accelerator tier |
 
-> **Fleet-table corrections 2026-09-07.** Three rows above were stale and one was simply wrong, in a file that records the third Qube GPU further down the same page: the Qube gained a third card 2026-08-31, the Lenovo's RTX 3050 was replaced by an A2 16GB 2026-09-04, and the **Dell OptiPlex 7060 was listed as `ampere-8` when every other authority in this repo calls it `blackwell-8`** (`docs/tiers/blackwell-8.md`, CHANGELOG 0.75.0 / 0.84.0 / 0.87.0 / 0.92.0, `docs/systems/setup-installer.md`, and the box's own 2026-08-19 installer verdict `{"profile":"blackwell-8", ...}`). Anyone rebuilding a tier map from this table would have mis-assigned that box. **Known gap, not a typo:** the 3-card Qube has no tier id at all — `blackwell-2x16` requires exactly two GPUs and `blackwell-48` means ONE 48GB card, so `setup/detect.ps1`'s `Get-Profile` files a 3x Blackwell rig as `dual-gpu` (its own self-test asserts `'3x blackwell -> dual-gpu'`), i.e. the fleet's most-measured machine currently classifies into one of its least-measured tiers. A `blackwell-3x16` rule is proposed, not shipped.
+> **Fleet-table corrections 2026-09-07.** Three rows above were stale and one was simply wrong, in a file that records the third <node-b> GPU further down the same page: <node-b> gained a third card 2026-08-31, <node-c>'s RTX 3050 was replaced by an A2 16GB 2026-09-04, and the **<node-e> was listed as `ampere-8` when every other authority in this repo calls it `blackwell-8`** (`docs/tiers/blackwell-8.md`, CHANGELOG 0.75.0 / 0.84.0 / 0.87.0 / 0.92.0, `docs/systems/setup-installer.md`, and the box's own 2026-08-19 installer verdict `{"profile":"blackwell-8", ...}`). Anyone rebuilding a tier map from this table would have mis-assigned that box. **Known gap, not a typo:** the 3-card <node-b> has no tier id at all — `blackwell-2x16` requires exactly two GPUs and `blackwell-48` means ONE 48GB card, so `setup/detect.ps1`'s `Get-Profile` files a 3x Blackwell rig as `dual-gpu` (its own self-test asserts `'3x blackwell -> dual-gpu'`), i.e. the fleet's most-measured machine currently classifies into one of its least-measured tiers. A `blackwell-3x16` rule is proposed, not shipped.
 
 A tier is a **hardware class, not a Windows class** (0.29.0), and **deployment state is never a constraint** hardened into a spec — nodes are addressed by endpoint, never by assumed placement.
 
@@ -53,7 +53,7 @@ The 2026-06 build order below is **closed**. What it called Phase 2 shipped in f
 - **Delegation entry points.** `offload_ask` (0.96.0) + result cache (0.98.0), `offload_review_diff` clean-context review lane (0.97.0), acceptance lint (0.88.0), live fleet roster in `offload_status` (0.95.0).
 - **Beyond the original scope.** Hailo-8L accelerator tier (0.82.0–0.86.0, ADR 0024), vendored printed CLIs under `tools/` (0.50.0–0.54.0), `video_watch` end-to-end viewing (0.93.0), in-tree opencode integration (0.91.0), the repo-local docs system (0.22.1).
 
-**Still open from the old order:** Phase 3 **video** editing / DaVinci Resolve (image editing shipped; the video cut-list path did not) and the **Danmar Auto Reviews capstone**. Both are parked below, behind the frontier update.
+**Still open from the old order:** Phase 3 **video** editing / DaVinci Resolve (image editing shipped; the video cut-list path did not) and the **MyTools auto-review capstone**. Both are parked below, behind the frontier update.
 
 ---
 
@@ -63,20 +63,20 @@ Everything the operator approved on 2026-08-27/28 shipped, deployed, and behavio
 
 - **T4 closed** (#195): MiniMax-H3 + WAN-Animate-2 wired from the official templates, bake-off verdicts recorded above. **H3 then SEATED** as the opt-in `model:"h3"` videogen family (#198, 0.107.0, deployed-path render verified); the **r2v DiT** (20.97 GB) is on disk for the reference-to-video lane. **WAN-Animate ROUTED** (#196, 0.106.0): `offload_animate_character` + `animate-character` + fleet task `animate`, live-verified; the template's `gpu/int8` pose cache hard-kills ComfyUI under ComfyUI-MultiGPU (filed as MultiGPU#219 after a clean-ComfyUI differential exonerated core).
 - **Delegation durability shipped** (#199, ADR 0028, 0.108.0): the push-side intent ledger + orphan recovery. **Option B built DARK** (#203, ADR 0030, 0.109.0): `internal/fleetqueue` + claim loops + `route:"queue"`, inert until its three config keys are bound — enabling stays scoreboard-gated.
-- **Lenovo FreeToken agent lane: attempted, REVERSED** (ADR 0029, #202): fully wired (pool install under systemd hardening, llama-swap-managed seat), then the real delegation path caught **cross-request response contamination** — reverted to the 4B seat (re-verified). The arc's harness fixes stay fleet-wide: grammar-free chat re-pack fallback (#200, 0.108.1) + schema-guided scalar coercion (#201, 0.108.2) — prerequisites for ANY OpenAI-only seat.
+- **<node-c> FreeToken agent lane: attempted, REVERSED** (ADR 0029, #202): fully wired (pool install under systemd hardening, llama-swap-managed seat), then the real delegation path caught **cross-request response contamination** — reverted to the 4B seat (re-verified). The arc's harness fixes stay fleet-wide: grammar-free chat re-pack fallback (#200, 0.108.1) + schema-guided scalar coercion (#201, 0.108.2) — prerequisites for ANY OpenAI-only seat.
 - **video_watch at scale proven**: a 44-min 4K published video fully analyzed (45 windows @1024px + whisper), catching a leftover Veo AI-stock watermark; the tail-window/ffmpeg-9 fixes + the WaitFree deflake shipped in #197 (0.106.1, closes #81).
-- **Fleet parity**: Qube + Lenovo + Aorus all at **0.109.0** (Aorus topped up 2026-08-28 the moment it reappeared from a shared overnight outage: binary swap under `D:\offload-stack\bin` with the old process killed first — cycling the task does not reload, FLEET-NODE.md gotcha 3 — then `/fleet/health` 0.109.0 and a forced-remote `agent_delegate` contract passing on BOTH remote seats, 9B in 3.0 s / 4B in 15 s). Aorus native llama.cpp **b10621** + llama-swap v251. Its WSL llama stack is RETIRED (native flip 2026-08-25) — rebuilt as a spare, unit disabled; do not start it (WSL mirrored networking port-collides with the native listener). **The fleet-node boot trigger is PROVEN**: the 2026-08-25 S4U + `-AtStartup` registration fired on that reboot with nobody logged in (`LastRunTime` == boot time, launcher log "node UP") — the "admin run" item was already done, not pending.
-- **sd.cpp on the reference box** (0.109.0 changelog): master-829-0a565f2 official win-cuda12 + the Lenovo's exact sdxl-turbo Q4_0, bound as `sdcpp_bin`/`sdcpp_model` in both deployed configs, render-verified; **fallback only** — `imagegen_engine` unchanged, H3-via-sd.cpp stays parked on upstream #1871 (open). *(The "sd.cpp on Qube" entry in Parked below is superseded by this.)*
+- **Fleet parity**: <node-b> + <node-c> + <node-a> all at **0.109.0** (<node-a> topped up 2026-08-28 the moment it reappeared from a shared overnight outage: binary swap under `D:\offload-stack\bin` with the old process killed first — cycling the task does not reload, FLEET-NODE.md gotcha 3 — then `/fleet/health` 0.109.0 and a forced-remote `agent_delegate` contract passing on BOTH remote seats, 9B in 3.0 s / 4B in 15 s). <node-a> native llama.cpp **b10621** + llama-swap v251. Its WSL llama stack is RETIRED (native flip 2026-08-25) — rebuilt as a spare, unit disabled; do not start it (WSL mirrored networking port-collides with the native listener). **The fleet-node boot trigger is PROVEN**: the 2026-08-25 S4U + `-AtStartup` registration fired on that reboot with nobody logged in (`LastRunTime` == boot time, launcher log "node UP") — the "admin run" item was already done, not pending.
+- **sd.cpp on the <node-b> reference box** (0.109.0 changelog): master-829-0a565f2 official win-cuda12 + <node-c>'s exact sdxl-turbo Q4_0, bound as `sdcpp_bin`/`sdcpp_model` in both deployed configs, render-verified; **fallback only** — `imagegen_engine` unchanged, H3-via-sd.cpp stays parked on upstream #1871 (open). *(The "sd.cpp on <node-b>" entry in Parked below is superseded by this.)*
 - **T1-A hibernation verified LIVE on b10621** (operator-ordered check): seat_start → save → committed vault blob at `U:\kvstate`, no scheduled task involved; the old "one UAC consent blocks go-live" claim was stale.
 - Also closed: disk reclaim (old llama.cpp trees + cu128 venv), leak-scan hooks on all 7 public-origin clones, Docker-leftovers resolved on the reference box, pull-queue decision doc retired into ADRs 0028/0030.
 
-- **KV-layer research arc (2026-08-28, LMCache/vLLM) — RESEARCHED + MEASURED, design gate OPEN.** Handover: `Ecosystem/Benchmarks and Optimizations/2026-08-28-lmcache-kv-layer-research-handover.md` (operator drive). Verdicts: LMCache is vLLM-only (no llama.cpp/GGUF path exists or is tracked); its MP server must share the GPU host (CUDA IPC + `/dev/shm`), so a second box can only be an L2 tier (Valkey/RESP, NFS `fs`, S3) — that is the Lenovo's role once its A2 lands. Spike on Qube-WSL (Qwen3.5-9B FP8, 5060 Ti): a CPU KV tier turns the post-eviction re-prefill of a 12 k-token contract from **2.97 s into 0.33 s** — delivered by **vLLM's native `OffloadingConnector`**; LMCache itself cannot run its fast paths under WSL2 (legacy CUDA IPC is dead there, measured; the IPC-free path rejects hybrid KV groups and its pickle fallback measured 11.6 s, slower than recompute). Real-path `delegate` through vLLM passed (needs `--enable-auto-tool-choice --tool-call-parser qwen3_coder` and thinking off server-side). A vLLM side-process on a shared card loses to the 27B seat — a vLLM seat needs its own card. **Options awaiting the operator:** C = contract packing in the harness (docs-first, block-aligned; engine-independent) · A′ = a vLLM seat behind llama-swap with the native CPU tier on the third GPU · LMCache MP on the Linux Lenovo (network L2 / same-model sharing) · B = first-class `engine: vllm` with the pooled build. Nothing built until chosen.
+- **KV-layer research arc (2026-08-28, LMCache/vLLM) — RESEARCHED + MEASURED, design gate OPEN.** Handover: `Ecosystem/Benchmarks and Optimizations/2026-08-28-lmcache-kv-layer-research-handover.md` (operator drive). Verdicts: LMCache is vLLM-only (no llama.cpp/GGUF path exists or is tracked); its MP server must share the GPU host (CUDA IPC + `/dev/shm`), so a second box can only be an L2 tier (Valkey/RESP, NFS `fs`, S3) — that is <node-c>'s role once its A2 lands. Spike on <node-b> WSL (Qwen3.5-9B FP8, 5060 Ti): a CPU KV tier turns the post-eviction re-prefill of a 12 k-token contract from **2.97 s into 0.33 s** — delivered by **vLLM's native `OffloadingConnector`**; LMCache itself cannot run its fast paths under WSL2 (legacy CUDA IPC is dead there, measured; the IPC-free path rejects hybrid KV groups and its pickle fallback measured 11.6 s, slower than recompute). Real-path `delegate` through vLLM passed (needs `--enable-auto-tool-choice --tool-call-parser qwen3_coder` and thinking off server-side). A vLLM side-process on a shared card loses to the 27B seat — a vLLM seat needs its own card. **Options awaiting the operator:** C = contract packing in the harness (docs-first, block-aligned; engine-independent) · A′ = a vLLM seat behind llama-swap with the native CPU tier on the third GPU · LMCache MP on the Linux <node-c> (network L2 / same-model sharing) · B = first-class `engine: vllm` with the pooled build. Nothing built until chosen.
 
-- **HARNESS-FIRST ENFORCED (2026-08-30, operator order after the "three Opus agents, zero contracts" incident; ADR 0031).** Advisory nudges never moved the adoption metric (autopsy 2026-08-18: zero organic agent lanes; audit 2026-08-21: 72 % of bulk-read sessions used no offload); the guards that deny did. Shipped: (a) claude-config PR #33 — `offload-first-guard.js` DENIES a read-only subagent spawn unless the prompt carries `harness-exempt: <web|write|judgment|capacity> — <reason>` (H15 classifier reused; judgment/implementation spawns untouched; every decision in the dispatch log), `harness-loop-guard.js` DENIES bulk network loops in the session shell (≥ 8 iterations or list-driven); 21-case test suite; constitution rewritten to the enforced contract. (b) **0.110.0** (PR #208) — `offload_research` MCP tool + `local-offload research`: URLs in, pages fetched DELEGATOR-side under a public-web guard (no loopback/private/link-local/.local/tailnet/CGNAT; redirects re-checked; 2 MiB / 96 KiB caps), stripped to text, one grounded contract per page across the fleet (route spread) — "needs the web" is no longer a cloud-subagent reason. Contract rules measured live: the goal must name the MATERIALIZED context file and tell the seat to read it (a "do not open anything" goal made 3/3 seats report the document missing); acceptance = regex alternation of page-only tokens, hex blobs excluded; the structured re-pack budget went 512 → 1024 (root cause of the "invalid json: unexpected end of JSON input" abstention class, incl. the 2026-08-28 long-extraction ones). Live: 3 LMCache pages → faithful digests on Qube 27B (57–73 s) and Lenovo 4B (54 s). Deployed: Qube MCP binary + Lenovo 0.110.0; **Aorus pending (offline)**. Re-measure with the 2026-08-21 metric (organic `agent_delegate`/`offload_research` in non-harness-dev sessions) ~2026-09-13.
+- **HARNESS-FIRST ENFORCED (2026-08-30, operator order after the "three Opus agents, zero contracts" incident; ADR 0031).** Advisory nudges never moved the adoption metric (autopsy 2026-08-18: zero organic agent lanes; audit 2026-08-21: 72 % of bulk-read sessions used no offload); the guards that deny did. Shipped: (a) claude-config PR #33 — `offload-first-guard.js` DENIES a read-only subagent spawn unless the prompt carries `harness-exempt: <web|write|judgment|capacity> — <reason>` (H15 classifier reused; judgment/implementation spawns untouched; every decision in the dispatch log), `harness-loop-guard.js` DENIES bulk network loops in the session shell (≥ 8 iterations or list-driven); 21-case test suite; constitution rewritten to the enforced contract. (b) **0.110.0** (PR #208) — `offload_research` MCP tool + `local-offload research`: URLs in, pages fetched DELEGATOR-side under a public-web guard (no loopback/private/link-local/.local/tailnet/CGNAT; redirects re-checked; 2 MiB / 96 KiB caps), stripped to text, one grounded contract per page across the fleet (route spread) — "needs the web" is no longer a cloud-subagent reason. Contract rules measured live: the goal must name the MATERIALIZED context file and tell the seat to read it (a "do not open anything" goal made 3/3 seats report the document missing); acceptance = regex alternation of page-only tokens, hex blobs excluded; the structured re-pack budget went 512 → 1024 (root cause of the "invalid json: unexpected end of JSON input" abstention class, incl. the 2026-08-28 long-extraction ones). Live: 3 LMCache pages → faithful digests on <node-b> 27B (57–73 s) and <node-c> 4B (54 s). Deployed: <node-b> MCP binary + <node-c> 0.110.0; **<node-a> pending (offline)**. Re-measure with the 2026-08-21 metric (organic `agent_delegate`/`offload_research` in non-harness-dev sessions) ~2026-09-13.
 
 - **48 GB TIER OPENED (2026-08-31): third GPU installed (2× 5060 Ti + 5070 Ti = 48.9 GB); full-roster frontier research COMPLETE, candidates DOWNLOADED, testing next.** Research doc (proposal + §6.5 measurement gates): operator drive `Ecosystem/Benchmarks and Optimizations/2026-08-31-48gb-tier-roster-research.md`. Method: harness-first — 27 sources digested via `offload_research` on the local seats, zero cloud subagents. Headlines: Flash-Next both re-eval triggers FIRED (llama.cpp mainline merge 2026-08-27 ≥ b10664 + FreeToken qwen4_exp); proposal = new opt-in big seat Flash-Next UD-IQ4_XS with experts/PLE in RAM; the 27B stays the cascade agent seat (size-class outlier — no 2026 release in 40–150B beats it, 70B dense NOT seated); VL-32B for vision/ocr; escalation/reasoning promote within the Gemma-4 family; stt_hq = whisper-large-v3; Krea 2 RAW + LTX-2.5 bf16 quality lanes; Chatterbox v3; FLUX.2-dev/Ideogram license-gated OUT. ~320 GB of candidates downloaded and verified (incl. Qwen2.5-72B Q4 as the operator-requested 70B 3-card pooling reference, and the disk-swap-lost H3 r2v DiT RESTORED); manifest `V:\models\_48gb-download-manifest.txt`. **NEW PLACEMENT RULE (operator): 2-card models live on the 5060 Ti pair; the 5070 Ti is interactive-first and joins only for over-2-card work.** Testing session: llama.cpp ≥ b10666 first, then the §6.5 gates; tier matrix updates FIRST on every decision.
 
-**Standing next actions:** the monthly sweep (first October nightshift) carries the watches — FreeToken#240, llama.cpp PR#27742 (Flash-Next), MultiGPU#219, sd.cpp#1871, ADR 0029's contamination differential, ADR 0030's enabling scoreboard. Aorus housekeeping, operator-decided 2026-08-28: Docker Desktop stays installed (service stopped/manual, `docker-desktop` WSL distro stopped — leave it); the 33 stale `local-offload*.exe` backups (631 MB) were deleted from `D:\offload-stack\bin`, leaving the live 0.109.0 + one pre-0.109.0 backup; the node's port file now carries its verified adapter facts. Its `D:\repos\local-offload` clone is **vestigial**, not "gated": nothing runs from it — the MCP server and the fleet task execute `D:\offload-stack\bin\local-offload.exe`, and the harness config's `imagegen_script` points at `D:\offload-stack\bin\render\` (all 65 render `.mjs` hash-identical to this repo at 0.109.0). The private repo went moat-only (its PR #22), so that clone can never fast-forward again; delete it or replace it with a public-canonical clone for on-box builds — an operator call, not a blocker.
+**Standing next actions:** the monthly sweep (first October nightshift) carries the watches — FreeToken#240, llama.cpp PR#27742 (Flash-Next), MultiGPU#219, sd.cpp#1871, ADR 0029's contamination differential, ADR 0030's enabling scoreboard. <node-a> housekeeping, operator-decided 2026-08-28: Docker Desktop stays installed (service stopped/manual, `docker-desktop` WSL distro stopped — leave it); the 33 stale `local-offload*.exe` backups (631 MB) were deleted from `D:\offload-stack\bin`, leaving the live 0.109.0 + one pre-0.109.0 backup; the node's port file now carries its verified adapter facts. Its `D:\repos\local-offload` clone is **vestigial**, not "gated": nothing runs from it — the MCP server and the fleet task execute `D:\offload-stack\bin\local-offload.exe`, and the harness config's `imagegen_script` points at `D:\offload-stack\bin\render\` (all 65 render `.mjs` hash-identical to this repo at 0.109.0). The private repo went moat-only (its PR #22), so that clone can never fast-forward again; delete it or replace it with a public-canonical clone for on-box builds — an operator call, not a blocker.
 
 **Contract-authoring note (measured 2026-08-28 on both remote seats):** a goal that says "Read the document…" sends the 9B seat hunting for a file and it fails acceptance; "The context document `<name>` is already provided to you…" passes on the 9B and the 4B alike. Inline context is not a file — say so in the goal.
 
@@ -84,7 +84,7 @@ Everything the operator approved on 2026-08-27/28 shipped, deployed, and behavio
 
 ## Decided order — frontier update (2026-08-26)
 
-Source: `2026-08-26-offload-stack-frontier-update-handover.md` (research session). **Every version number below was re-verified live on Qube on 2026-08-26** before being written here — §8 of that handover warned its own numbers were single-sourced, and four of its cautions turned out to be already satisfied (recorded in "Corrections" at the end of this section).
+Source: `2026-08-26-offload-stack-frontier-update-handover.md` (research session). **Every version number below was re-verified live on <node-b> on 2026-08-26** before being written here — §8 of that handover warned its own numbers were single-sourced, and four of its cautions turned out to be already satisfied (recorded in "Corrections" at the end of this section).
 
 ### ROUND 2 — 2026-08-27 morning (operator review feedback, 9 items, all executed)
 
@@ -142,33 +142,33 @@ advisories; (2) verify against live state, upgrade side-by-side with backups, on
 batch; (3) prove every upgrade with a named live check (not exit codes); (4) fold in the
 deliberate holds — Go major (json v2) and go-sdk v1.7 (breaking MCP protocol) — as their
 own tested migrations when their month comes; (5) update ROADMAP + tier matrix + port files
-+ mem0 in the same pass. Fleet rule: Qube + Lenovo same night; Aorus the moment it answers.
++ mem0 in the same pass. Fleet rule: <node-b> + <node-c> same night; <node-a> the moment it answers.
 
 ### NIGHTSHIFT 2026-08-27 — FreeToken measured on both nodes; Flash-Next testing COMPLETE
 
 **FreeToken** (FlashML-org, arxiv 2608.16157 — edge-native MoE serving; Apache-2.0, 8.5k stars),
-tested per operator direction on Qube and Lenovo with a calibrated 18-task exact-answer
+tested per operator direction on <node-b> and <node-c> with a calibrated 18-task exact-answer
 instrument (dead-endpoint 0/N proven before any number was trusted):
 
 | node | model | result | comparator |
 |---|---|---|---|
-| Qube (1×16GB via WSL distro `freetoken`) | Qwen3.6-35B-A3B-FP8 | **24/24**, warm decode 15.5 tok/s | incumbent 27B (2 cards): 24/24, 20.2 tok/s |
-| **Lenovo (6GB RTX 3050)** | **gpt-oss-20b MXFP4** | **36/36 in 712 s** | **4B seat: 32/36 in 1368 s** |
+| <node-b> (1×16GB via WSL distro `<distro>`) | Qwen3.6-35B-A3B-FP8 | **24/24**, warm decode 15.5 tok/s | incumbent 27B (2 cards): 24/24, 20.2 tok/s |
+| **<node-c> (6GB RTX 3050)** | **gpt-oss-20b MXFP4** | **36/36 in 712 s** | **4B seat: 32/36 in 1368 s** |
 
-The Lenovo row is the headline: a **5× bigger model, more correct, half the wall, same 6 GB
-card**. On Qube the wall gap vs the incumbent is Qwen3.6's 4.2× thinking-token verbosity, not
+<node-c> row is the headline: a **5× bigger model, more correct, half the wall, same 6 GB
+card**. On <node-b> the wall gap vs the incumbent is Qwen3.6's 4.2× thinking-token verbosity, not
 engine speed. Constraints that bound integration: **no grammar/json_schema** (the GBNF cascade
 can never ride it); the GGUF loader rejects Unsloth UD quants (our whole GGUF library —
 safetensors/MXFP4/q4_0 only); on a 6 GB box FreeToken and the llama-swap seat are mutually
-exclusive tenants (measured: 502s while ft held the card); Linux-only CLI (Qube = dedicated WSL
-distro, isolated from mem0's; Lenovo = ZFS pool install — home-dir quota kills `[accel]`,
+exclusive tenants (measured: 502s while ft held the card); Linux-only CLI (<node-b> = dedicated WSL
+distro, isolated from mem0's; <node-c> = ZFS pool install — home-dir quota kills `[accel]`,
 `UV_CACHE_DIR`+`HF_HOME` must live on the pool). `--moe-backend` auto-selection is already
 optimal for FP8 checkpoints (hybrid/cpu reject `fp8_block` experts).
 
 **Integration verdict:** a real adoption case on the **ampere-6 tier agent/delegation lane**
 (tool-call parser present, quality win measured) and as the **opt-in >VRAM MoE engine** on
-Qube (the colibri niche). The harness reaches it as a plain OpenAI endpoint — config, not
-code. Needs an ADR + port-file rows (Qube :1919 WSL, Lenovo :1920) before production wiring —
+<node-b> (the colibri niche). The harness reaches it as a plain OpenAI endpoint — config, not
+code. Needs an ADR + port-file rows (<node-b> :1919 WSL, <node-c> :1920) before production wiring —
 surfaced for the operator, not wired unattended.
 
 **Flash-Next, completed on the correct quant.** UD-IQ4_XS (93.68 GB byte-verified, the best
@@ -191,7 +191,7 @@ shows the 262k-native advantage. FreeToken is not an alternative path (arch unsu
 ### 48GB GATES + 3-CARD OPTIMIZATION — 2026-08-31 → 09-01 (operator-decided via lavish review)
 
 Every §6.5 measurement gate ran; the operator approved seatings from the evidence; the
-3-card placement law was enforced fleet-wide on Qube. Full ledger:
+3-card placement law was enforced fleet-wide on <node-b>. Full ledger:
 `Benchmarks and Optimizations/2026-08-31-48gb-gates-NOTES.md` (Drive). Canonical matrix
 updated first per house rule. Highlights, each with its named check:
 
@@ -268,7 +268,7 @@ updated first per house rule. Highlights, each with its named check:
 - [ ] re-verify the GGUF quants still load after merge — a re-shaped conversion path can invalidate quants published against the old one
 - [ ] tier matrix updated **first** (house rule)
 
-### T1 — MEASURED ON QUBE, 2026-08-26
+### T1 — MEASURED ON <node-b>, 2026-08-26
 
 **It runs.** Built PR head `0b19188` from source (MSVC 19.44 + CUDA 12.8, `CMAKE_CUDA_ARCHITECTURES=120`), pulled `unsloth/Qwen3.8-Flash-Next-GGUF` UD-Q2_K_XL and byte-verified all three shards (78,869,128,864 exact). Loads in 20.8 s under mmap and returns coherent output with visible reasoning.
 
@@ -385,8 +385,8 @@ UPDATED RIGHT NOW." Executed same-night; every row below is live-verified, not a
 | torch | 2.11.0+cu128 | **2.13.0+cu130** (+tv 0.28.0, +ta 2.11.0) | kitchen CUDA gate open; 8/8 W4A4 shapes pass (cu128 failed 5/8) |
 | ComfyUI | 0.32.0 | **v0.34.0** (frontend 1.49.6 as pinned) | E2E 1920×1088 image render through the harness |
 | CUDA toolkit | 12.8 | **13.3.1** side-by-side (12.8 kept — see SageAttention) | nvcc V13.3.73; driver 616.56 untouched (13.x installer ships no driver) |
-| Go / Node / Python / GIMP / ffmpeg | 1.26.5 / 24.18.0 / 3.14.6 / 3.2 / 7.1 | **1.26.7 / 24.20.0 / 3.14.7 / 3.2.4 / 9.0.1** | installers exit 0; ffmpeg out of the venv at `D:\Dev	oolsfmpeg-9.0.1`, config repointed |
-| harness | 0.103.0 | **0.105.0** (PRs #187, #188) | deployed Qube + Lenovo, `fleet/health` verified |
+| Go / Node / Python / GIMP / ffmpeg | 1.26.5 / 24.18.0 / 3.14.6 / 3.2 / 7.1 | **1.26.7 / 24.20.0 / 3.14.7 / 3.2.4 / 9.0.1** | installers exit 0; ffmpeg out of the venv at `<repo-root>/tools/ffmpeg-9.0.1`, config repointed |
+| harness | 0.103.0 | **0.105.0** (PRs #187, #188) | deployed <node-b> + <node-c>, `fleet/health` verified |
 | custom nodes | 4 stale | all at remote HEAD | Manager, VideoHelperSuite, Inpaint-CropAndStitch, RMBG |
 
 **Version policy adopted (operator-prompted): take the project's RELEASED version, never
@@ -423,7 +423,7 @@ denies machine-wide media for at most 10 minutes, not 60.
   uninstalled (0 registry entries remain), machine `CUDA_PATH` → v13.3, v12.8 PATH
   segments removed; a 12 KB empty dir husk remains (unregistered, harmless). nvcc
   13.3.73 is the only toolkit; torch cu130 + llama.cpp b10621 verified after.
-- **Aorus** — offline throughout; parity debt now spans harness 0.102.0→0.105.0 AND the
+- **<node-a>** — offline throughout; parity debt now spans harness 0.102.0→0.105.0 AND the
   whole stack. First action when it answers.
 - **Go 1.27.0** — deliberate hold (encoding/json v2 is its own migration).
 - **go-sdk v1.7.0** — deliberate hold (breaking protocol change).
@@ -480,14 +480,14 @@ denies machine-wide media for at most 10 minutes, not 60.
 
 ### T5. llama.cpp + llama-swap — one fleet-wide pass
 
-- **llama.cpp b10435 → b10639.** Urgent for a second, unrelated reason: **b10435 sits inside a confirmed 10–15× generation-throughput regression window** (#27084/#27126); the fix `22b8e310b` is 12 commits past our build. Blast radius is CPU-side generation, so the **Lenovo 6GB tier, the Aorus node, and every `--n-cpu-moe` path** are directly exposed. Land on b10639, not an intermediate build — three merge/revert pairs sit inside the window. CLI surface is identical (two added flags, zero removals), so launch lines carry over verbatim. Rollback: b10435 and b10356 are still on disk.
+- **llama.cpp b10435 → b10639.** Urgent for a second, unrelated reason: **b10435 sits inside a confirmed 10–15× generation-throughput regression window** (#27084/#27126); the fix `22b8e310b` is 12 commits past our build. Blast radius is CPU-side generation, so the **<node-c> 6GB tier, <node-a> node, and every `--n-cpu-moe` path** are directly exposed. Land on b10639, not an intermediate build — three merge/revert pairs sit inside the window. CLI surface is identical (two added flags, zero removals), so launch lines carry over verbatim. Rollback: b10435 and b10356 are still on disk.
   - Watch **#26347** (`/v1/models` now needs the API key when `--api-key` is set) and **#27626** (server rejects prefilled assistant messages carrying tool calls — an agent loop replaying a partial turn will error).
   - `-sm tensor` is new but still **EXPERIMENTAL** — do not adopt for the dual-GPU seats.
 - **llama-swap v249 → v251.** Config schema identical. Fixes a v249 log-flood regression.
 
 ### T6. Config fix — the media lease TTL (§9)
 
-`imagegen_timeout_sec` is passed **both** as the render's process-tree-kill timeout **and** as the media lease TTL (`internal/pipeline/pipeline.go` → `acquireMediaLease("image-gen", timeout, …)`). Deployed on Qube it is **3600** — a 60-minute machine-wide media lease for a job that finishes in one to two minutes. With 14 concurrent `local-offload` processes contending on one machine-wide lease, **one wedged render denies media to every other session for up to an hour.**
+`imagegen_timeout_sec` is passed **both** as the render's process-tree-kill timeout **and** as the media lease TTL (`internal/pipeline/pipeline.go` → `acquireMediaLease("image-gen", timeout, …)`). Deployed on <node-b> it is **3600** — a 60-minute machine-wide media lease for a job that finishes in one to two minutes. With 14 concurrent `local-offload` processes contending on one machine-wide lease, **one wedged render denies media to every other session for up to an hour.**
 
 Set it to **600**. The code default is already 720 (`config.go:1102`); only the deployed `~/.local-offload/config.json` carries 3600. Config change, not code.
 
@@ -495,15 +495,15 @@ Set it to **600**. The code default is already 720 (`config.go:1102`); only the 
 
 Four of its cautions were already satisfied, and one number was wrong:
 
-| Handover said | Live on Qube | Consequence |
+| Handover said | Live on <node-b> | Consequence |
 |---|---|---|
 | NVIDIA driver 610.88 → upgrade to 616.56 | **already 616.56** | §4 step 1 is **done**; drop it |
-| Qube MCP process stale at 0.101.0 | delegation result reports **`harness_version: 0.103.0`** | §11.0 **resolved**; no restart needed |
+| <node-b> MCP process stale at 0.101.0 | delegation result reports **`harness_version: 0.103.0`** | §11.0 **resolved**; no restart needed |
 | Pin `-fa` explicitly per seat (#27137, 2.3× risk) | **already pinned** — 11 seats carry `--flash-attn on`, **zero** `-fa auto` | no action |
 | ffmpeg 9 removed `-vsync`/`-filter_complex_script`/etc. — grep first | **zero hits** across `render/` + `internal/` | ffmpeg bump is unblocked |
 | llama-swap v251 error envelope will break string parsing | `gpugen.ClassifyErr` matches **substrings** (`out of memory`, `cudamalloc`) that survive JSON encapsulation; `"llama-server 5"` is our own `Error()` format | low risk — confirm, don't fear |
 
-Still true and still blocking: **Aorus unreachable** (ping 100% loss, `fleet/health` deadline exceeded), so it is off parity at 0.102.0 while the fleet is at 0.103.0. House rule treats parity as first-class — deploy the moment it answers.
+Still true and still blocking: **<node-a> unreachable** (ping 100% loss, `fleet/health` deadline exceeded), so it is off parity at 0.102.0 while the fleet is at 0.103.0. House rule treats parity as first-class — deploy the moment it answers.
 
 ---
 
@@ -542,11 +542,11 @@ Video gen (Wan 2.2 14B / Hunyuan 1.5 — already on disk — via `comfy-render`-
 ### 4. Phase 3 — Editing  (needs the Resolve spend → last of the build)
 Claude-driven cut-lists (WhisperX-JSON → OTIO/EDL + `auto-editor`) + cleanup (DeepFilterNet3 → MossFormer2; ffmpeg two-pass loudnorm → -14 LUFS) + **DaVinci Resolve Studio** (the $295 one-time spend, **approved but only purchased at this phase, with the operator**). Design: CHAPTER-audio (edit) + CHAPTER-video (DaVinci).
 
-### 5. Danmar Auto Reviews capstone  (last, deepest)
+### 5. MyTools auto-review capstone  (last, deepest)
 The private optimized track: no-avatar (chest-cam + b-roll), 6-month backlog, short+long form, two machines (3070 + editor's 5060). Deep channel analysis via the **Youtube-Analyst** skill. Built once the generalist capabilities exist.
 
 ### Parallel / needs the operator (not on the critical path)
-- **Docker leftovers** — RESOLVED on the reference box (verified 2026-08-27): Docker Desktop is not installed, no docker processes, no docker WSL distros — nothing to keep or kill there. Remaining: one check on the Aorus at its next parity pass.
+- **Docker leftovers** — RESOLVED on the <node-b> reference box (verified 2026-08-27): Docker Desktop is not installed, no docker processes, no docker WSL distros — nothing to keep or kill there. Remaining: one check on <node-a> at its next parity pass.
 - **Resolve purchase** — at Phase 3, still unpurchased.
 - **DiffusionGemma** — WATCH only; re-eval when PR #24423 merges with `llama-server` AND grammar-under-diffusion lands in llama.cpp. *Merge status not re-checked in the 2026-08-26 refresh.*
 
@@ -554,11 +554,11 @@ The private optimized track: no-avatar (chest-cam + b-roll), 6-month backlog, sh
 
 ## Parked (behind the frontier update)
 
-- **Phase 3 — video editing / DaVinci Resolve.** ⚠️ Correction 2026-08-27 (operator): the Resolve Studio spend line was STALE — **Resolve Studio is purchased and ACTIVATED on the OptiPlex editor rig** (Sofia's account), the DaVinci bridge shipped (danmar-video-pipeline PR #3, `resolve.cmd build` live on the rig, identity-verified `f759aaa`), and the `davinci-resolve` skill drives real edits. What Phase 3 still holds is only the **automation half**: transcript-driven cut-lists (WhisperX-JSON → OTIO/EDL + `auto-editor` silence cuts), audio cleanup (DeepFilterNet3 → MossFormer2, two-pass loudnorm to −14 LUFS), and a harness editing verb. The image half of "edit" shipped long ago (op pack 0.21.0, generative edit 0.44.0, inpaint 0.20.0, upscale 0.77.0). Feeds the Danmar Auto Reviews capstone, whose review-side capability (44-min 4K `video_watch` + transcribe, catches details like leftover AI-stock watermarks) was proven 2026-08-27.
-- **Danmar Auto Reviews capstone.** The private optimized track (no-avatar chest-cam + b-roll, 6-month backlog, short + long form, two machines). Built once the generalist capabilities exist — unchanged.
+- **Phase 3 — video editing / DaVinci Resolve.** ⚠️ Correction 2026-08-27 (operator): the Resolve Studio spend line was STALE — **Resolve Studio is purchased and ACTIVATED on <node-e> editor rig** (a collaborator's account), the DaVinci bridge shipped (mytools-video-pipeline PR #3, `resolve.cmd build` live on the rig, identity-verified `f759aaa`), and the `davinci-resolve` skill drives real edits. What Phase 3 still holds is only the **automation half**: transcript-driven cut-lists (WhisperX-JSON → OTIO/EDL + `auto-editor` silence cuts), audio cleanup (DeepFilterNet3 → MossFormer2, two-pass loudnorm to −14 LUFS), and a harness editing verb. The image half of "edit" shipped long ago (op pack 0.21.0, generative edit 0.44.0, inpaint 0.20.0, upscale 0.77.0). Feeds the MyTools auto-review capstone, whose review-side capability (44-min 4K `video_watch` + transcribe, catches details like leftover AI-stock watermarks) was proven 2026-08-27.
+- **MyTools auto-review capstone.** The private optimized track (no-avatar chest-cam + b-roll, 6-month backlog, short + long form, two machines). Built once the generalist capabilities exist — unchanged.
 - **The empty `stt_hq` slot.** Empty **by decision**, not oversight: `qwen3-asr` was removed 2026-08-14 after tying whisper-turbo on every clean house sample, and `stt_model_hq` was deliberately cleared (empty falls back to `stt_model` by design). **Re-open only with field/noisy audio as the test set.** Candidates then: `nvidia/parakeet-tdt-0.6b-v3` (whisper.cpp has Parakeet code present but **not built** in our tree), `ggml-large-v3` full, `nvidia/canary-1b-v2`.
 - **Roster challengers, none adopted, all need a bake-off.** Gemma-4 QAT chat-template re-pull (the unsloth repos were re-committed 2026-07-17 with a fix under the **same filenames** — verify by hub revision, not filename); MTP drafters exist for every Gemma-4 size but we wire one only on `gemma-4-12b`; `PaddlePaddle/PaddleOCR-VL-1.6-GGUF` vs `qwen3-vl-8b`; `nvidia/Nemotron-3-Embed-8B-BF16` as an embedding challenger.
-- **sd.cpp on Qube.** Not installed (`sdcpp_bin` empty) though the harness has first-class config keys and `render/sdcpp-generate.mjs`; it **is** live on the Lenovo. Interesting only because sd.cpp has day-1 MiniMax-H3 support — but issue **#1871 "Poor video and audio quality with Minimax H3"** is **OPEN**, so treat it as a fallback, not the primary. Wire H3 in ComfyUI first (T4).
+- **sd.cpp on <node-b>.** Not installed (`sdcpp_bin` empty) though the harness has first-class config keys and `render/sdcpp-generate.mjs`; it **is** live on <node-c>. Interesting only because sd.cpp has day-1 MiniMax-H3 support — but issue **#1871 "Poor video and audio quality with Minimax H3"** is **OPEN**, so treat it as a fallback, not the primary. Wire H3 in ComfyUI first (T4).
 
 ## Source briefs (design detail)
 Kept in the operator's ecosystem notes, outside this repo (the previously-listed absolute path went stale when the drive letter changed):

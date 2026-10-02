@@ -117,14 +117,14 @@ The seeded keys (coral-edgetpu):
 `CORAL_HOME` (`install seed --coral-home`, default `<OFFLOAD_HOME>/coral`) holds the sidecar's
 own venv (`venv/`, built from the box's staged cp314 wheels: ai-edge-litert, numpy, pillow),
 its `models/`, and `accelerators/coral/` either copied flat (the seed's `__CORAL_HOME__/coral-http.sh`)
-or checked out beneath it (`<home>/accelerators/coral/`, the Lenovo) — the launcher finds the home
+or checked out beneath it (`<home>/accelerators/coral/`, <node-c>) — the launcher finds the home
 by walking up to `venv/`. An empty `__HAILO_HOME__`/`__CORAL_HOME__`
 is **refused** at seed time (0.114.0) instead of rendering a launcher at the filesystem root.
 
 `install.sh` merged no accelerator seed at all until 0.114.0 — install.ps1 always had. It now
 passes detect's verdict to `install seed --accelerators` and writes `installed.json`; and
 `fleet-serve` falls back to `config.accelerators` when the manifest lists none, so a hand-built
-node (the Lenovo has no `installed.json`) still advertises its device in `/fleet/health`.
+node (<node-c> has no `installed.json`) still advertises its device in `/fleet/health`.
 The Hailo-8L is the one exception: it is local-only and no source publishes it (see Fleet routing
 below).
 
@@ -137,7 +137,7 @@ sysfs and never matches):
 
 | Kernel | Where the driver names itself | Files read |
 |---|---|---|
-| Vendor 6.1 BSP (driver built in) | the NPU platform device is its DRM node's own device; the `cardN` it takes follows probe order (the display subsystem is `card0`, the NPU `card1` on the reference Orange Pi 5, RK3588S) | `/sys/class/drm/card0` … `card3/device/uevent` |
+| Vendor 6.1 BSP (driver built in) | the NPU platform device is its DRM node's own device; the `cardN` it takes follows probe order (the display subsystem is `card0`, the NPU `card1` on the reference RK3588S board) | `/sys/class/drm/card0` … `card3/device/uevent` |
 | Mainline (7.0 measured) with the out-of-tree `rknpu` module (DKMS, 0.9.8) | the NPU's DRM card (`card2` there) hangs off a virtual `/sys/devices/rknpu` whose uevent is **empty**; the line is on the NPU's three core platform devices (`OF_COMPATIBLE_0=rockchip,rk3588-rknn-core`), and any one bound is enough | `/sys/bus/platform/devices/fdab0000.npu`, `fdac0000.npu`, `fdad0000.npu` `/uevent` |
 | Mainline with the in-tree `rocket` driver | the same core devices report `DRIVER=rocket` | **not a match**: the RKNN runtime does not run on it, so listing it would register tools whose first call can never succeed |
 
@@ -387,7 +387,7 @@ The zoo and toolkit files are Rockchip's (zoo code Apache-2.0). The classifier's
   Python demo does), applies per-class NMS, and reads the three stride branches in any order. The
   score-sum branch is ignored: the zoo's Python demo replaces it with ones and its C demo uses it
   only to skip cells early. The defaults are the zoo demo's own: score threshold 0.25, NMS IoU 0.45.
-- **Measured on the NPU (Orange Pi 5, RK3588S, 2026-09-30).** The pinned files ran on the board
+- **Measured on the NPU (<node-d>, RK3588S, 2026-09-30).** The pinned files ran on the board
   (librknnrt 2.3.2, rknpu 0.9.8, one NPU core) over the same evaluation lists as the host FP32
   baselines below, with a post-processing port that reproduces those baselines on the host to the
   fourth decimal:
@@ -475,7 +475,7 @@ equal to `hailo_endpoint`'s on a box that lists it. The Coral and the RKNPU are 
 probe is per call, at the node). The node's `supported_task_types` gains `accel` exactly when it
 lists a device the fleet may use; `NodeView.Accelerators` decodes the same field for the delegator.
 
-Measured 2026-09-08 from the Qube (no device) against the Lenovo (`coral-edgetpu`): see the
+Measured 2026-09-08 from <node-b> (no device) against <node-c> (`coral-edgetpu`): see the
 gate lines in the CHANGELOG entry for 0.115.0.
 
 ## Status

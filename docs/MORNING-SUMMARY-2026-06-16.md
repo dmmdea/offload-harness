@@ -39,7 +39,7 @@ Built ik_llama.cpp in its own dir + benchmarked vs the live mainline engine on s
 - Verify-then-assert paid off twice: the benchmark said adopt, the gate said no; and #1765 said reject-for-TG, wrong on our build.
 
 ## ⚠️ Flagged for the operator
-- **ES tests are CLEAN synthetic TTS, not real noisy field audio.** Capability is proven; noisy chest-cam ES robustness + VAD-threshold tuning need ONE short real Colombian clip (I did NOT touch the Danmar footage per guardrail). Point me at one and I'll benchmark turbo-vs-`--hq` on it.
+- **ES tests are CLEAN synthetic TTS, not real noisy field audio.** Capability is proven; noisy chest-cam ES robustness + VAD-threshold tuning need ONE short real Colombian clip (I did NOT touch the MyTools footage per guardrail). Point me at one and I'll benchmark turbo-vs-`--hq` on it.
 - **No es_CO (Colombian) TTS voice exists in Piper** — used es_MX (Mexican, the closest LatAm). For **Phase 2 (TTS generation)** the channel's generated voice should be sourced Colombian/LatAm (cultural fit); for STT this phase, whisper is accent-robust so it's not blocking.
 - whisper drops some written accents (qué→que). Cosmetic; a Spanish accent-restoration post-pass (or just accepting it) is a future nicety.
 - Installed in WSL for testing (no spend): Piper TTS in `~/piper-venv` + es_ES/es_MX voices in `~/piper-voices` (for generating test audio). Not part of the harness.

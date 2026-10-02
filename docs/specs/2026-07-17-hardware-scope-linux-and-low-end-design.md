@@ -30,7 +30,7 @@ escalates to cannot fit?"**
 
 ## 1. The machine under test
 
-A Lenovo laptop running CachyOS (Linux 6.18), which lands squarely in the `amd-gcn` profile:
+A laptop running CachyOS (Linux 6.18), which lands squarely in the `amd-gcn` profile:
 
 | Property | Measured value | How |
 |---|---|---|

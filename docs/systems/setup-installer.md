@@ -229,7 +229,7 @@ group names a model that does not exist. The **download** follows the same flag:
 resolves the profile (`Resolve-ProfileParams`, the RAM gate included) before it builds the
 download set, and `Get-FamilyModelKeys` adds `model-26b` only when the resolved
 `include_26b` is true. It used to add it on the family gate alone, so `blackwell-8`
-(`include_26b: false`) fetched 14.25 GB the rendered yaml never serves (OptiPlex parity
+(`include_26b: false`) fetched 14.25 GB the rendered yaml never serves (<node-e> parity
 audit, 2026-09-23).
 
 #### The `rk3588` backend (Rockchip SoC boards)
@@ -336,9 +336,9 @@ gate that is red on every box from day one is a gate nobody reads.
 drift actually lived. Measured winners were wired **by hand into a node's config** and never
 written back to `profiles.json`:
 
-- binxarn's `qwen3.5-4b-agent` seat and its four lane keys;
-- the Lenovo's layers, its 35B digest seat and its cascade rungs;
-- the Qube's image-edit, inpaint and animate routes.
+- <node-f>'s `qwen3.5-4b-agent` seat and its four lane keys;
+- <node-c>'s layers, its 35B digest seat and its cascade rungs;
+- <node-b>'s image-edit, inpaint and animate routes.
 
 The node kept working, the seed kept the loser, and every fresh install lost the win. Every
 regeneration of the tier matrix, which reads the seed, erased it from the record too. The
@@ -373,7 +373,7 @@ drift it exists to show.
 
 `UNSEEDED` exists because a seed-owned comparison alone was blind to the worst case. A media
 route that no tier carries is invisible to a check that reads only what seeds can write. That
-is exactly how the Qube's image-edit and animate wins stayed node-only. Empty-string values
+is exactly how <node-b>'s image-edit and animate wins stayed node-only. Empty-string values
 are unbound routes and are not reported. `nim_*` keys are the cloud escalation account, not a
 seat, and are not reported either.
 
