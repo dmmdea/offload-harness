@@ -99,7 +99,7 @@ type KVCacheServer struct {
 	// dial, so this file is the only end-to-end readback the box has (B-29): status
 	// publishes it as `reachable` true/false with the line and its age. On a WSL2
 	// seat the path is the host-visible one
-	// (`//wsl.localhost/<distro>/root/g7/seat-l2-<seat id>.status`). A binding that
+	// (`//wsl.localhost/<distro><seat-dir>/seat-l2-<seat id>.status`). A binding that
 	// still names `seat-l2.status` reads a file a re-rendered seat no longer writes
 	// (a frozen verdict, or unreadable): repoint it. Empty = not declared; status
 	// says so instead of guessing.

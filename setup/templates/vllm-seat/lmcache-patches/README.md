@@ -38,8 +38,11 @@ Copy this directory into the seat directory inside the distro (the same place as
 stopped:
 
 ```sh
-VENV=/root/g7/vllm-env OVERLAY=/root/g7/lmcache-overlay bash lmcache-patches/repatch-lmcache-overlay.sh
+VENV=<seat-dir>/vllm-env OVERLAY=<seat-dir>/lmcache-overlay bash lmcache-patches/repatch-lmcache-overlay.sh
 ```
+
+When the script runs from `lmcache-patches/` inside the seat directory, `VENV`, `OVERLAY`, `SEAT_FG` and `SEAT_ENVS`
+default to paths under that directory; set `SEAT_DIR` to name it when the script runs from anywhere else.
 
 The script builds `$OVERLAY.new`, applies the patches in order, checks one import marker per patch plus the smoke test,
 writes `.overlay-provenance` (base version, and each patch's name and sha256), and swaps the new tree in only while no
@@ -47,7 +50,7 @@ running MP server has the old one loaded. The previous tree is kept at `$OVERLAY
 `mv $OVERLAY.prev $OVERLAY` with the seat stopped. Rebuild after every `lmcache` upgrade in the venv.
 
 To build a second overlay beside a live one (a new vLLM/LMCache venv under test), give both variables new paths:
-`VENV=/root/g7/vllm-env-new OVERLAY=/root/g7/lmcache-overlay-new`. The live seat is not touched.
+`VENV=<seat-dir>/vllm-env-new OVERLAY=<seat-dir>/lmcache-overlay-new`. The live seat is not touched.
 
 ## After a version change
 

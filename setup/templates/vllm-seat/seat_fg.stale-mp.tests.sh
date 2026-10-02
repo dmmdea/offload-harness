@@ -50,7 +50,7 @@ done
 T="$(mktemp -d)"
 trap 'rc=$?; builtin kill -9 $(cat "$T"/*.pid 2>/dev/null) 2>/dev/null; [ -n "${UNIT_STARTED:-}" ] && systemctl stop "lmcache-mp-scratch-$$" >/dev/null 2>&1; rm -rf "$T"; exit $rc' EXIT
 # The stop script appends its own output to the seat log when nothing else carries it there; here that is a scratch file, never the
-# real /root/g7/seat.log of whatever box runs this.
+# real <seat-dir>/seat.log of whatever box runs this.
 SEAT_LOG="$T/seat.log"; export SEAT_LOG
 fail=0
 pass() { echo "PASS $1"; }
@@ -542,5 +542,18 @@ if cmp -s "$T/seat_fg.sh" "$T/mut2/seat_fg.sh"; then failcase "mutation 2" "the 
 elif guard_holds "$T/mut2"; then failcase "mutation 2" "dropping the MP HTTP port refusal went UNDETECTED: the foreign-holder test does not guard the refusal"
 else pass "mutation: dropping the final MP HTTP port refusal is caught"; fi
 guard_holds "$T" && pass "the unmutated stack holds the foreign-holder guard" || failcase "control" "the unmutated stack lost the foreign-holder guard"
+
+# 16. the path defaults derive from the directory the scripts sit in: copies placed in a scratch directory resolve the env file, the log,
+# the venv and the work directory beside themselves, and the environment still wins. The real default lines are extracted from the
+# scripts (HERE through WORK in seat_fg.sh, HERE through LOG in seat_stop.sh) and evaluated with the copy's own path as $0.
+mkdir -p "$T/derive"; cp "$HERE/seat_fg.sh" "$HERE/seat_stop.sh" "$T/derive/"; D="$(cd "$T/derive" && pwd)"
+fg_eval='eval "$(sed -n "/^HERE=/,/^WORK=/p" "$0")"; printf "%s|%s|%s|%s|%s" "$HERE" "$CFG" "$LOG" "$VENV" "$WORK"'
+stop_eval='eval "$(sed -n "/^HERE=/,/^LOG=/p" "$0")"; printf "%s|%s|%s" "$HERE" "$CFG" "$LOG"'
+got_fg="$(cd / && env -u SEAT_ENV -u SEAT_LOG -u SEAT_VENV -u SEAT_WORKDIR bash -c "set -u; $fg_eval" "$D/seat_fg.sh" 2>&1)"
+got_stop="$(cd / && env -u SEAT_ENV -u SEAT_LOG bash -c "set -u; $stop_eval" "$D/seat_stop.sh" 2>&1)"
+if [ "$got_fg" = "$D|$D/seat.env|$D/seat.log|$D/vllm-env|$D" ] && [ "$got_stop" = "$D|$D/seat.env|$D/seat.log" ]; then pass "a copy of the scripts resolves its env file, log, venv and work directory beside itself"
+else failcase "directory defaults" "seat_fg.sh: $got_fg / seat_stop.sh: $got_stop"; fi
+got_env="$(cd / && SEAT_ENV=/e/x.env SEAT_LOG=/e/l.log SEAT_VENV=/e/v SEAT_WORKDIR=/e/w bash -c "set -u; $fg_eval" "$D/seat_fg.sh" 2>&1)"
+if [ "$got_env" = "$D|/e/x.env|/e/l.log|/e/v|/e/w" ]; then pass "the environment still overrides every derived default"; else failcase "directory defaults" "environment overrides: $got_env"; fi
 
 [ $fail -eq 0 ] && echo "ALL PASS" || { echo "FAILURES"; exit 1; }

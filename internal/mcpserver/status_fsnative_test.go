@@ -21,7 +21,7 @@ func TestStatusReadsFSNativeReachabilityFromTheSeatStatusFile(t *testing.T) {
 	dir := t.TempDir()
 	statusFile := filepath.Join(dir, "seat-l2.status")
 	cfg := config.Default()
-	binding := &config.KVCacheServer{Enabled: true, Store: "fs_native", Address: "/mnt/kvcache/lmcache-seat", Seat: "qwen3.8-27b-vllm", KeyPrefix: "qube-seat-fs", StatusFile: statusFile}
+	binding := &config.KVCacheServer{Enabled: true, Store: "fs_native", Address: "/mnt/kvcache/lmcache-seat", Seat: "qwen3.8-27b-vllm", KeyPrefix: "seat-fs", StatusFile: statusFile}
 	cfg.KVCacheServers = config.KVCacheServers{binding}
 	cfg.VLLMSeats = []string{"qwen3.8-27b-vllm"}
 	row := func() map[string]any {

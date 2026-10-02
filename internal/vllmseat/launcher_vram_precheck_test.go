@@ -54,7 +54,7 @@ func TestRenderedEnvCarriesPerSeatStatusFileAndHangWatchdog(t *testing.T) {
 	// A Windows checkout may carry the template with CRLF; the lines are what is asserted.
 	env := strings.ReplaceAll(files["qwen3.8-27b-vllm-3card.env"], "\r\n", "\n")
 	for _, want := range []string{
-		"\nSEAT_L2_STATUS_FILE=/root/g7/seat-l2-qwen3.8-27b-vllm-3card.status\n",
+		"\nSEAT_L2_STATUS_FILE=/opt/seat/seat-l2-qwen3.8-27b-vllm-3card.status\n",
 		"\nexport VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=120\n",
 	} {
 		if !strings.Contains(env, want) {

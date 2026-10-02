@@ -31,15 +31,21 @@
 # A patch whose change is already in the base (patch -R --dry-run applies) is SKIPPED and recorded, never forced.
 #
 #   bash repatch-lmcache-overlay.sh                                          # rebuild the default overlay
-#   VENV=/root/g7/vllm-env-030 OVERLAY=/root/g7/lmcache-overlay-055 bash repatch-lmcache-overlay.sh
+#   VENV=<seat-dir>/vllm-env-030 OVERLAY=<seat-dir>/lmcache-overlay-055 bash repatch-lmcache-overlay.sh
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VENV="${VENV:-/root/g7/vllm-env}"
-OVERLAY="${OVERLAY:-/root/g7/lmcache-overlay}"
+# The seat directory: SEAT_DIR when given, else the parent of this script's directory, but only when seat_fg.sh sits
+# there (lmcache-patches/ is copied into the seat directory). A copy run from anywhere else stops and asks for it instead
+# of guessing, unless VENV, OVERLAY, SEAT_FG and SEAT_ENVS are all given.
+SEAT_DIR="${SEAT_DIR:-}"
+[ -n "$SEAT_DIR" ] || { [ -f "$HERE/../seat_fg.sh" ] && SEAT_DIR="$(cd "$HERE/.." && pwd)"; }
+NEED_SEAT_DIR="repatch: SEAT_DIR is not set and seat_fg.sh is not in the parent of $HERE - set SEAT_DIR to the seat directory"
+VENV="${VENV:-${SEAT_DIR:?$NEED_SEAT_DIR}/vllm-env}"
+OVERLAY="${OVERLAY:-${SEAT_DIR:?$NEED_SEAT_DIR}/lmcache-overlay}"
 PATCHES="${PATCHES:-$HERE}"
 MP_UNITS="${MP_UNITS:-lmcache-mp}"   # systemd units that may load the overlay; the swap refuses while one that does is active
-SEAT_FG="${SEAT_FG:-/root/g7/seat_fg.sh}"
-SEAT_ENVS="${SEAT_ENVS:-/root/g7/seat-*.env}"
+SEAT_FG="${SEAT_FG:-${SEAT_DIR:?$NEED_SEAT_DIR}/seat_fg.sh}"
+SEAT_ENVS="${SEAT_ENVS:-${SEAT_DIR:?$NEED_SEAT_DIR}/seat-*.env}"
 PY="$VENV/bin/python"
 
 SP="$("$PY" -c 'import lmcache,os;print(os.path.dirname(lmcache.__file__))' 2>/dev/null)"

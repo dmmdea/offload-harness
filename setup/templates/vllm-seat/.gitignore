@@ -1,0 +1,7 @@
+# Runtime outputs of the seat scripts: their defaults sit beside them, so a script run from a checkout writes here.
+seat.log
+lmcache-mp.log
+.dxg-failures
+.*.log-offset
+seat-l2.status
+seat-l2-*.status

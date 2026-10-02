@@ -14,7 +14,7 @@ func wslTemplatesDir() string {
 
 // flagship is the 3-card reference workstation's agent seat: the 27B on the 5060 Ti
 // PAIR (devices 0 and 2 in PCI order), tensor parallel, fp8 KV, cache server on the
-// Lenovo export. Device 1 is the 5070 Ti display card and is absent by law.
+// <node-c> export. Device 1 is the 5070 Ti display card and is absent by law.
 func flagship() Spec {
 	return Spec{
 		ID:                   "qwen3.8-27b-vllm",
@@ -39,7 +39,7 @@ func flagship() Spec {
 		AgentCtxTokens:       163840,
 		CacheServer: &CacheServer{
 			Store: "fs_native", Address: "/mnt/kvcache/lmcache-seat-tp2-fp8",
-			L1StagingGB: 8, ChunkSize: 1568, KeyPrefix: "qube-seat-tp2-fp8",
+			L1StagingGB: 8, ChunkSize: 1568, KeyPrefix: "seat-tp2-fp8",
 			MaxCapacityGB: 45, PruneGB: 45, NumWorkers: 8,
 			MountDir: "/mnt/kvcache", MinMBPS: 200,
 		},
@@ -56,12 +56,12 @@ func pinned() Spec {
 
 func wslRT() Runtime {
 	return Runtime{
-		User: "QUBE\\operator", ProxyHost: "127.0.0.1",
+		User: "BOX\\operator", ProxyHost: "127.0.0.1",
 		StackDir: "C:/llama-swap", SeatDir: "C:/llama-swap/seat",
-		VenvDir: "/root/g7/vllm-env", HFHome: "/hf",
-		LMCacheOverlay: "/root/g7/lmcache-overlay",
+		VenvDir: "/opt/seat/vllm-env", HFHome: "/hf",
+		LMCacheOverlay: "/opt/seat/lmcache-overlay",
 		CacheMountSrc:  "//store.example/kvcache", CacheMountOpts: "vers=3.1.1",
-		Distro: "freetoken", WSLSeatDir: "/root/g7",
+		Distro: "distro", WSLSeatDir: "/opt/seat",
 	}
 }
 
@@ -171,7 +171,7 @@ func TestRenderedEnvCarriesTheMeasuredOperatingPoint(t *testing.T) {
 		"SEAT_MP_PORT=18796",
 		"SEAT_L2_MIN_MBPS=200",
 		"SEAT_L2_PRUNE_GB=45",
-		"SEAT_LMCACHE_PYTHONPATH=/root/g7/lmcache-overlay",
+		"SEAT_LMCACHE_PYTHONPATH=/opt/seat/lmcache-overlay",
 		`SEAT_EXTRA_ARGS="--enable-auto-tool-choice --tool-call-parser qwen3_xml --reasoning-parser qwen3 --kv-cache-dtype fp8"`,
 	} {
 		if !strings.Contains(env, want) {
@@ -233,7 +233,7 @@ func TestConfigBlockDerivesTheHarnessHalf(t *testing.T) {
 	}
 	for k, want := range map[string]any{
 		"enabled": true, "store": "fs_native", "chunk_size": 1568,
-		"key_prefix": "qube-seat-tp2-fp8", "seat": "qwen3.8-27b-vllm", "l1_staging_gb": 8,
+		"key_prefix": "seat-tp2-fp8", "seat": "qwen3.8-27b-vllm", "l1_staging_gb": 8,
 	} {
 		if b[k] != want {
 			t.Errorf("config block %s = %v, want %v", k, b[k], want)

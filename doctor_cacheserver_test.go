@@ -19,7 +19,7 @@ func TestDoctorFailsAVLLMSeatWithNoCacheServerBinding(t *testing.T) {
 	cfg.VLLMSeats = []string{"qwen3.8-27b-vllm", "qwen3.8-27b-vllm-3card"}
 	cfg.KVCacheServers = config.KVCacheServers{
 		{Enabled: true, Store: "fs_native", Address: "/mnt/kvcache/lmcache-seat-tp2-fp8", ChunkSize: 1568,
-			KeyPrefix: "qube-seat-tp2-fp8", Seat: "qwen3.8-27b-vllm", KVDtype: "fp8", TensorParallel: 2},
+			KeyPrefix: "seat-tp2-fp8", Seat: "qwen3.8-27b-vllm", KVDtype: "fp8", TensorParallel: 2},
 	}
 	var out strings.Builder
 	err := doctorRun(cfg, nil, &out)
@@ -35,7 +35,7 @@ func TestDoctorFailsAVLLMSeatWithNoCacheServerBinding(t *testing.T) {
 	}
 	// The covered seat is reported OK, with the store it actually got — the whole
 	// point is that each seat carries its OWN directory and namespace.
-	if !strings.Contains(got, "OK    fs_native /mnt/kvcache/lmcache-seat-tp2-fp8 key_prefix=qube-seat-tp2-fp8") {
+	if !strings.Contains(got, "OK    fs_native /mnt/kvcache/lmcache-seat-tp2-fp8 key_prefix=seat-tp2-fp8") {
 		t.Errorf("the bound seat must report its own store and namespace:\n%s", got)
 	}
 	// The failure line must say how to opt out, or the gate is a wall.

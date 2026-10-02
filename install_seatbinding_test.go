@@ -26,7 +26,7 @@ func seatFixture(id string) vllmseat.Spec {
 		Fallback: "qwen3.8-27b", FallbackCtx: 131072, AgentCtxTokens: 163840,
 		CacheServer: &vllmseat.CacheServer{
 			Store: "fs_native", Address: "/mnt/kvcache/lmcache-seat-tp2-fp8",
-			L1StagingGB: 8, ChunkSize: 1568, KeyPrefix: "qube-seat-tp2-fp8",
+			L1StagingGB: 8, ChunkSize: 1568, KeyPrefix: "seat-tp2-fp8",
 			MaxCapacityGB: 45, PruneGB: 45, NumWorkers: 8,
 			MountDir: "/mnt/kvcache", MinMBPS: 200,
 		},
@@ -51,7 +51,7 @@ func TestSeatRenderPicksItsOwnBinding(t *testing.T) {
 	// file reads as `key_prefix":"<opaque string>"` — the shape the tree's secret
 	// scanner classifies as a generic API key.
 	const pairGen, trioGen = "tp2-fp8", "pp3-fp16"
-	pairPrefix, trioPrefix := "qube-seat-"+pairGen, "qube-seat-"+trioGen
+	pairPrefix, trioPrefix := "seat-"+pairGen, "seat-"+trioGen
 	cfgPath := writeConfig(t, fmt.Sprintf(`{"vllm_seats":["qwen3.8-27b-vllm","qwen3.8-27b-vllm-3card"],"kv_cache_server":[
 	  {"enabled":true,"store":"fs_native","address":"/mnt/kvcache/lmcache-seat-%s","chunk_size":1568,"l1_staging_gb":8,"key_prefix":%q,"seat":"qwen3.8-27b-vllm","kv_dtype":"fp8","tensor_parallel":2},
 	  {"enabled":true,"store":"fs_native","address":"/mnt/kvcache/lmcache-seat-%s","chunk_size":784,"l1_staging_gb":12,"key_prefix":%q,"seat":"qwen3.8-27b-vllm-3card","kv_dtype":"fp16","tensor_parallel":3}]}`,
@@ -162,7 +162,7 @@ func TestSeatRenderWithoutABindingKeepsTheTierDeclaration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s.CacheServer == nil || s.CacheServer.KeyPrefix != "qube-seat-tp2-fp8" {
+	if s.CacheServer == nil || s.CacheServer.KeyPrefix != "seat-tp2-fp8" {
 		t.Fatalf("the tier's declaration must survive an unbound seat: %+v", s.CacheServer)
 	}
 }
@@ -189,9 +189,9 @@ func renderRT() vllmseat.Runtime {
 	return vllmseat.Runtime{
 		User: "BOX\\operator", ProxyHost: "127.0.0.1",
 		StackDir: "C:/llama-swap", SeatDir: "C:/llama-swap/seat",
-		VenvDir: "/root/g7/vllm-env", HFHome: "/hf",
-		LMCacheOverlay: "/root/g7/lmcache-overlay",
+		VenvDir: "/opt/seat/vllm-env", HFHome: "/hf",
+		LMCacheOverlay: "/opt/seat/lmcache-overlay",
 		CacheMountSrc:  "//store.example/kvcache", CacheMountOpts: "vers=3.1.1",
-		Distro: "freetoken", WSLSeatDir: "/root/g7",
+		Distro: "distro", WSLSeatDir: "/opt/seat",
 	}
 }

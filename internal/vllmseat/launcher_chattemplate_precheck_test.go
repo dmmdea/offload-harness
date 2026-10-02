@@ -52,10 +52,10 @@ func TestRenderedEnvTellsTheOperatorToCopyTemplates(t *testing.T) {
 		t.Fatal(err)
 	}
 	env := strings.ReplaceAll(files[s.ID+".env"], "\r\n", "\n")
-	if !strings.Contains(env, "--chat-template /root/g7/templates/qwen3-fold-system.jinja") {
+	if !strings.Contains(env, "--chat-template /opt/seat/templates/qwen3-fold-system.jinja") {
 		t.Fatal("rendered SEAT_EXTRA_ARGS does not pass the installed template path")
 	}
-	if !strings.Contains(env, "# Copy ALL of it into /root/g7: when the tier names a shipped chat template, the render includes\n# templates/<name> and SEAT_EXTRA_ARGS names /root/g7/templates/<name>") {
+	if !strings.Contains(env, "# Copy ALL of it into /opt/seat: when the tier names a shipped chat template, the render includes\n# templates/<name> and SEAT_EXTRA_ARGS names /opt/seat/templates/<name>") {
 		t.Fatal("the rendered env header no longer tells the operator to copy templates/ into the seat directory")
 	}
 	if _, ok := files["templates/qwen3-fold-system.jinja"]; !ok {

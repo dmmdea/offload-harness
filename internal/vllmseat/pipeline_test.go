@@ -6,7 +6,7 @@ import (
 )
 
 // pipelineFlagship is the 3-card agent seat the operator ordered on 2026-09-19 ("the 3 card tier as
-// the agent seat now and the 2 card tier to be the opt in one"): the 27B across all three Qube cards
+// the agent seat now and the 2 card tier to be the opt in one"): the 27B across all three <node-b> cards
 // as a pipeline, the 5070 Ti (card 1) LAST so it carries the lightest share, card 0 lighter than
 // card 2 (card 2 has the better cooling), a fixed KV budget so the display card keeps room for the
 // desktop. Values are illustrative of the shape; the measured operating point is pinned in the tier.
