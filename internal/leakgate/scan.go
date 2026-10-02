@@ -377,11 +377,16 @@ func scanFile(sc *Scanner, tf TrackedFile, fsys FS, max int64, exempt map[exempt
 
 	body := data
 	isPNG := false
-	var raw []byte // set for a byte-order-marked file: its raw bytes are scanned too
+	var raw []byte     // set for a byte-order-marked file: its raw bytes are scanned too
+	var swapped []byte // and its payload read in the other byte order
 	invalid := false
 	switch {
 	case hasUTF16BOM(body):
 		raw = data
+		// A mark that contradicts the payload's real byte order decodes to valid
+		// but foreign-looking text, and the real encoding's NULs split every name in
+		// the raw view; the other order's reading is what shows those names.
+		swapped, _ = decodeUTF16As(data[2:], data[0] != 0xFF)
 		var ok bool
 		if body, ok = decodeUTF16(body); !ok {
 			// A mark with a payload that is not UTF-16 (an odd length, an unpaired
@@ -457,11 +462,14 @@ func scanFile(sc *Scanner, tf TrackedFile, fsys FS, max int64, exempt map[exempt
 		}
 	}
 	scanBody(body)
-	if raw != nil {
-		// The two views of one file can report the same token twice.
+	for _, view := range [][]byte{raw, swapped} {
+		if view == nil {
+			continue
+		}
+		// The views of one file can report the same token more than once.
 		first := len(res.findings)
 		nFatals := len(res.fatals)
-		scanBody(raw)
+		scanBody(view)
 		res.findings = dedupeFrom(res.findings, first)
 		res.fatals = dedupeFatalsFrom(res.fatals, nFatals)
 	}
@@ -517,8 +525,12 @@ func hasUTF16BOM(b []byte) bool {
 // when the bytes are not valid UTF-16: an odd payload (a dangling byte, dropped
 // from the result), or an unpaired surrogate (which becomes U+FFFD, a separator).
 func decodeUTF16(b []byte) (out []byte, ok bool) {
-	little := b[0] == 0xFF
-	b = b[2:]
+	return decodeUTF16As(b[2:], b[0] == 0xFF)
+}
+
+// decodeUTF16As decodes a UTF-16 payload (no mark) in the given byte order, with
+// decodeUTF16's validity rule.
+func decodeUTF16As(b []byte, little bool) (out []byte, ok bool) {
 	ok = len(b)%2 == 0
 	units := make([]uint16, 0, len(b)/2)
 	for i := 0; i+1 < len(b); i += 2 {

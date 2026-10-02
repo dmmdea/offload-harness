@@ -659,6 +659,8 @@ func TestScanTreeBOMThatIsNotUTF16IsNeverSilentlySkipped(t *testing.T) {
 		{"big-endian mark with an odd payload", cat([]byte{0xFE, 0xFF}, []byte("zorblax")), true, true},
 		{"valid little-endian text", utf16Bytes("a zorblax b", false, true), false, true},
 		{"valid big-endian text", utf16Bytes("a zorblax b", true, true), false, true},
+		{"little-endian mark over a big-endian payload", cat(bom, utf16Bytes("a zorblax b", true, false)), false, true},
+		{"big-endian mark over a little-endian payload", cat([]byte{0xFE, 0xFF}, utf16Bytes("a zorblax b", false, false)), false, true},
 		{"valid little-endian text, nothing listed", utf16Bytes("nothing here", false, true), false, false},
 	}
 	for _, r := range rows {

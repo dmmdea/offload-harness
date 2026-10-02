@@ -302,6 +302,9 @@ func TestTrackedTreeCarriesNoDeniedNames(t *testing.T) {
 	if len(rep.Findings) > 0 || len(rep.Fatals) > 0 {
 		t.Fatalf("%s", leakGateFailure(rep, leakGatePlainLegend(key)))
 	}
+	if rep.Missing > 0 {
+		t.Logf("leak gate: %d tracked path(s) missing from the work tree (their names were scanned)", rep.Missing)
+	}
 	leakGateSummary(t, leakGateEnforcedLine(rep.Scanned, len(df.Entries)))
 }
 
@@ -338,6 +341,9 @@ func TestTrackedTreeCarriesNoShapedIdentifiers(t *testing.T) {
 	})
 	if len(rep.Findings) > 0 || len(rep.Fatals) > 0 {
 		t.Fatalf("%s", leakGateFailure(rep, nil))
+	}
+	if rep.Missing > 0 {
+		t.Logf("leak gate: %d tracked path(s) missing from the work tree (their names were scanned)", rep.Missing)
 	}
 }
 
@@ -637,6 +643,8 @@ func TestLeakGateDigestFileIsWellFormed(t *testing.T) {
 		for _, f := range files {
 			blobs[f.Path] = f.Blob
 		}
+	} else {
+		t.Logf("no git file set (%v): exempt rows checked for presence only, not for their blob ids", err)
 	}
 	for _, x := range df.Exempt {
 		if _, err := os.Stat(filepath.FromSlash(x.Path)); err != nil {
