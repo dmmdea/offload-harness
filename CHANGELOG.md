@@ -1163,7 +1163,7 @@ Operator order (2026-09-30): no licence costs, so no AGPL or GPL model ships. Th
 - **Classifier preprocessing.** A spec carrying `resize_short` and `crop` gets the torchvision evaluation recipe (short side to 232, bilinear, centred 224 crop, cut from the source and resampled once, so an extreme aspect ratio builds no huge intermediate); a spec without them is squashed to the input size as before.
 - **A missing label file no longer says to convert.** The `model_missing` hint for a label file is `run fetch-models.sh`; only the model file itself says `--convert`.
 - **Not yet run on the NPU.** The three new files were converted and checked on rknn-toolkit2's simulator; `test_server.py` decodes the simulator's own tensors when `RKNPU_SIM_DIR` names the benchmark's `sim/` folder (PP-YOLOE on `bus.jpg`: person 0.950 / 0.935 / 0.923, bus 0.893, person 0.473, handbag 0.411; ResNet-50 on the zoo's dog photo: Shih-Tzu in both builds). Latency, memory and INT8 accuracy on the board are unmeasured; `docs/systems/accelerators.md` records the host FP32 baselines the board's INT8 figures are to be checked against. A box that already runs the sidecar needs the three new `.rknn` files copied to its models directory (`fetch-models.sh` reports them MISSING until then); the old `resnet18` and `yolov8n` files are no longer served.
-- **Measured on the NPU (Orange Pi 5, 2026-09-30), same 500 COCO / 1000 ImageNetV2 images as the host baselines:** ppyoloe_s INT8 mAP@[.5:.95] 0.4255 (host FP32 0.4360; 56 ms per inference on one NPU core); resnet50tv2-i8 top-1 69.7 % (FP32 69.9; 13 ms), resnet50tv2-fp16 69.9 % (30 ms), so the INT8 build is served. The Coral Edge TPU on the same COCO list: EfficientDet-Lite0/1/2 0.270 / 0.313 / 0.356. Evidence: the operator's benchmark records (outside this repository).
+- **Measured on the NPU (`<node-d>`, 2026-09-30), same 500 COCO / 1000 ImageNetV2 images as the host baselines:** ppyoloe_s INT8 mAP@[.5:.95] 0.4255 (host FP32 0.4360; 56 ms per inference on one NPU core); resnet50tv2-i8 top-1 69.7 % (FP32 69.9; 13 ms), resnet50tv2-fp16 69.9 % (30 ms), so the INT8 build is served. The Coral Edge TPU on the same COCO list: EfficientDet-Lite0/1/2 0.270 / 0.313 / 0.356. Evidence: the operator's benchmark records (outside this repository).
 
 ## [0.150.0] - 2026-09-30 - a read-only catalog of the ComfyUI workflow templates a node carries (Comfy templates phase A)
 
@@ -1531,7 +1531,7 @@ with and without the flag, local-agent's listen guard — each red against the p
 
 ### Added — the `rockchip-rk3588` tier (ADR 0062)
 
-An RK3588 board (reference: an Orange Pi 5) used to classify as `cpu`, and `fleet-serve` refused to start
+An RK3588 board (reference: `<node-d>`) used to classify as `cpu`, and `fleet-serve` refused to start
 on it: no PCI GPU, no GPU memory source. `hwdetect` now recognises the SoC from the device tree (vendor
 and mainline spellings), a `linux-meminfo` provider advertises MemTotal less `uma_reserve_gib` as the
 node's capacity, and the tier renders from its own template with no CPU seat. Measured on the reference
@@ -1821,7 +1821,7 @@ adding only the keys that need their own family-distinct value. `doctor` and `of
 
 `ensureComfy` (`render/comfy-lifecycle.mjs`) spawned `python main.py` and then only ever
 polled the HTTP health check — a child that failed to start (bad cwd/python path — reproduced
-via the OptiPlex fp8-native study's direct `comfy-video.mjs --graph` invocation, "Interim
+via the `<node-e>` fp8-native study's direct `comfy-video.mjs --graph` invocation, "Interim
 Phase 2 round 2" item 4) or crashed on the way up looked identical to a slow cold boot: no
 process tree, 0% GPU, port never open, the GPU lease held the whole time, and the loop kept
 silently polling for the entire `COMFY_START_WAIT_SEC` budget (default 10 min) before failing
@@ -1847,7 +1847,7 @@ without this flag, this file's own teardown would free/unload the model after ev
 
 (`deploy-d5207011.md` findings.) (a) `setup/linux-node-swap-launch.sh`, the detached-launch
 sibling of the Windows PowerShell launcher (`setsid nohup ... &`, the same
-`local-offload node-swap` engine, no separate hand-rolled polling script) — the Lenovo's own
+`local-offload node-swap` engine, no separate hand-rolled polling script) — `<node-c>`'s own
 ad-hoc deploy script hardcoded `curl http://127.0.0.1:.../fleet/health` while fleet-serve
 there binds only its tailnet address, and an unguarded fallback read every failed poll as
 "still busy" for ~46 minutes; `--health-url` is now also auto-resolved from this node's own
@@ -1857,7 +1857,7 @@ from a guess, and never when that address is still loopback/wildcard. (b) A stan
 (`internal/nodeswap.waitGPUFree`, the same `internal/gpulease` resolution `gpu status` uses) —
 previously the caller had to check `gpu status` by hand. (c) `backupPathFor` strips one
 redundant leading `bak-` from an operator-supplied `--backup-suffix` before prepending its
-own, so a suffix that already reads `bak-...` (the exact d5207011 Qube deploy mistake) no
+own, so a suffix that already reads `bak-...` (the exact d5207011 `<node-b>` deploy mistake) no
 longer doubles into `<target>.bak-bak-...`.
 
 ### Fixed — pooled krea2/LTX-2.5 text encoder and VAE no longer load onto the display card
@@ -1877,7 +1877,7 @@ the pool's donor device — never the unnamed default. Unpooled builds are uncha
 ### Fixed — foreign-GPU-memory warning no longer fires on an ordinary desktop session
 
 `gpu status`/`gpu reserve`'s foreign-GPU-memory warning (PR #469) flagged the operator's own
-desktop apps (Code.exe, chrome.exe, SnippingTool.exe, explorer.exe, ...) on the Qube because
+desktop apps (Code.exe, chrome.exe, SnippingTool.exe, explorer.exe, ...) on `<node-b>` because
 the Windows PDH source it reads has no per-card identity and the noise floor (64 MiB) let
 ordinary desktop residents through. Fixed: the per-process floor rises to 512 MiB (configurable
 via `foreign_gpu_min_mib`), the OS shell/desktop denylist grows (csrss, explorer, and the
@@ -1905,7 +1905,7 @@ per-node alignment/A-B record live on the operator's Drive under
 
 ### Changed — blackwell-8 and ampere-16 tier seeds carry the 2026-09-23/24 reference-box measurements
 
-Both reference boxes (OptiPlex 7060 / blackwell-8, Lenovo M720q A2 / ampere-16) got a harness
+Both reference boxes (`<node-e>` / blackwell-8, `<node-c>` A2 / ampere-16) got a harness
 remediation pass on 2026-09-23/24; a fresh install of either tier now gets what was measured
 instead of the prior provisional defaults. `docs/tiers/ampere-16.md` and `docs/tiers/blackwell-8.md`
 regenerated (`go run ./cmd/gentiers`).
@@ -1933,9 +1933,9 @@ Confirmed unchanged, already correct: blackwell-3x16's `comfy_cuda_device` `"2"`
 redirect (measured, but a literal per-box drive path, not a tier-general rule) and `ffmpeg_path`
 on any tier (PR #471 already makes a bare `"ffmpeg"` resolve via PATH).
 
-### Fixed — OptiPlex parity: doctor checks what a route loads, the 26B download honours the tier, `generate-video --fast`, the Wan lane defers cleanly, a BOM config loads
+### Fixed — compact-desktop parity: doctor checks what a route loads, the 26B download honours the tier, `generate-video --fast`, the Wan lane defers cleanly, a BOM config loads
 
-Five harness defects from the OptiPlex 7060 (blackwell-8) media parity audit, 2026-09-23.
+Five harness defects from `<node-e>` (blackwell-8) media parity audit, 2026-09-23.
 
 - **`doctor` (and `offload_status` / `acceptance`) no longer call a route CONFIGURED because its script
   exists.** `generate_video`, `animate_character` and both `generate_audio` kinds now also check what
@@ -1969,7 +1969,7 @@ Five harness defects from the OptiPlex 7060 (blackwell-8) media parity audit, 20
   finding. Separate from `videogen_pool_vvram_gb` (LTX-2.5: VRAM borrowed from a donor card).
 - **A config.json saved with a UTF-8 byte-order mark loads, and a config that cannot be parsed says the truth.**
   PowerShell 5.1 writes a BOM; `encoding/json` refused it, and the warning then said "the file's other settings
-  ARE in effect" while the process ran on built-in defaults (a run-graph on the OptiPlex did exactly that). The
+  ARE in effect" while the process ran on built-in defaults (a run-graph on `<node-e>` did exactly that). The
   loader strips a leading BOM (`config.StripBOM`, also used by `audit-config` and local-agent's `--env-rules` /
   `--setup` files). A file that still does not decode is a `config.ParseError`: the value is exactly the built-in
   defaults (a JSON type error used to leave a half-read file), and the stderr warning, doctor's `config:` rows and
@@ -2283,7 +2283,7 @@ the seat's own literal `--ctx-size` (`TestAgentWindowMatchesWhatTheAgentSeatServ
 
 ## [0.140.8] - 2026-09-24 - the GPU lease queue is strictly FIFO for a returning holder, a blocked seat/text-load admission gets a fair turn, `--unload-seat` clears every resident model, and `gpu reserve`/`gpu status` name foreign VRAM holders
 
-Four GPU-lease fairness defects measured live during the OptiPlex 7060 remediation (2026-09-23,
+Four GPU-lease fairness defects measured live during the `<node-e>` remediation (2026-09-23,
 `REMEDIATION-2026-09-23.md` sections R2-R4 and the noise-repro notes), each pinned by a test broken
 then restored at its real call site.
 
@@ -2310,7 +2310,7 @@ then restored at its real call site.
   media/text `Acquire` queue behind it exactly like a real lease waiter, guaranteeing the admission is
   noticed and released before the next chained lease can retake the card.
 - **`gpu reserve --unload-seat` now unloads every OTHER resident llama-swap model, not only the
-  configured agent seat.** Measured: the OptiPlex vision seat `qwen3.5-9b-vl`, loaded by another
+  configured agent seat.** Measured: the `<node-e>` vision seat `qwen3.5-9b-vl`, loaded by another
   client, stayed resident through an entire media lease on an 8 GB card and only aged out at its ttl.
   `maintainSeat` now reads `/running` before unloading and unloads every other model it lists (best-
   effort: an unreadable `/running` never blocks the agent seat's own unload), and reports what it
@@ -2329,8 +2329,8 @@ then restored at its real call site.
 
 ## [0.140.7] - 2026-09-24 - the music QA gate stopped silently skipping itself fleet-wide, ComfyUI's own console output is captured for failed renders, and doctor catches a model file still mid-copy
 
-Three media-lane defects found during the 2026-09-23/24 Lenovo/Aorus/OptiPlex media-route
-remediation (`infra/routes-lenovo-2026-09-23.md`, `infra/routes-qube-aorus-2026-09-23.md`).
+Three media-lane defects found during the 2026-09-23/24 `<node-c>`/`<node-a>`/`<node-e>` media-route
+remediation (the operator's per-node route records, 2026-09-23).
 
 ### Fixed
 
@@ -2341,7 +2341,7 @@ remediation (`infra/routes-lenovo-2026-09-23.md`, `infra/routes-qube-aorus-2026-
   treated a set `FFMPEG_PATH` as an exact file via `existsSync()`, which cannot see PATH
   resolution, so it read `"ffmpeg"` as missing and the whole gate degraded to a silent skip,
   shipping the raw, unverified render with its known ACE-Step dead-air tail (reproduced
-  identically on the Lenovo and the Aorus). `genEnv()` now resolves `ffmpeg_path` through PATH
+  identically on `<node-c>` and `<node-a>`). `genEnv()` now resolves `ffmpeg_path` through PATH
   (`internal/mediaops.ResolveBinary`, shared with `mediacap.binaryPresent` and
   `internal/mediaops.RunMedia`, which had the identical bug) and threads the resolved absolute
   path; `resolveFfmpeg()` also now tries a set-but-bare `FFMPEG_PATH` as a PATH-searchable command.
@@ -2351,14 +2351,14 @@ remediation (`infra/routes-lenovo-2026-09-23.md`, `infra/routes-qube-aorus-2026-
   checked only `ffmpeg`, so a box with ffmpeg but no ffprobe stayed green while `offload_media`
   and the music gate deferred at call time).
 - **ComfyUI's own stdout/stderr were discarded** (`stdio: "ignore"`), so a ComfyUI-side failure
-  (e.g. `[Errno 28] No space left on device` on the Aorus) surfaced only as a terse
+  (e.g. `[Errno 28] No space left on device` on `<node-a>`) surfaced only as a terse
   `/history execution_error` JSON — finding the real cause took a hand-built stdout-capturing
   bypass copy of `render/`. `render/comfy-lifecycle.mjs` now captures a harness-launched ComfyUI's
   console to a rotating, 5 MB-bounded log file beside the install (`offload-comfyui.log`, up to 3
   previous runs kept), and `withGpuSlot` (`render/gpu-lock.mjs`) appends its last ~20 lines to a
   render failure's error message — never for a reused foreign instance.
 - **`doctor`'s model-binding check was `os.Stat`-only**, so it reported a route `OK CONFIGURED`
-  the instant a same-named file of any size existed — reproduced live on the Qube: a 16.65 GB
+  the instant a same-named file of any size existed — reproduced live on `<node-b>`: a 16.65 GB
   WAN-Animate-2 unet read as configured at ~70% copied. `internal/mediacap/resolveBinding` now
   compares the file's size against `knownModelSizes` (mirroring `setup/install.ps1`'s `$PINNED`
   models, cross-checked by `TestKnownModelSizesMatchInstaller`) whenever the configured name is
@@ -2368,11 +2368,11 @@ remediation (`infra/routes-lenovo-2026-09-23.md`, `infra/routes-qube-aorus-2026-
 
 ## [0.140.6] - 2026-09-23 - every node reports its own work to PAIR, lease jobs get a card, and a media card reads "running" only once it holds the GPU
 
-### Fixed — PAIR showed only the Qube's delegations while the other nodes ran at 84-100 %
+### Fixed — PAIR showed only the workstation's delegations while the other nodes ran at 84-100 %
 
 Operator report 2026-09-23 ("work is not being properly shown as routed"): every open card read
-"Running on Qube" while the Aorus ran a seat bench and a ComfyUI diagnostic, the Lenovo a Wan 2.2
-smoke render and binxarn a tuning sweep. None of it was delegation, and none of it reached PAIR.
+"Running on `<node-b>`" while `<node-a>` ran a seat bench and a ComfyUI diagnostic, `<node-c>` a Wan 2.2
+smoke render and `<node-f>` a tuning sweep. None of it was delegation, and none of it reached PAIR.
 
 - **Jobs under `gpu reserve -- <cmd>` get a card** (`gpu_leasecard.go`). The lease queue is where
   the house runs every bench, render and measurement on every node. The wrapper now owns one card:
@@ -2386,14 +2386,14 @@ smoke render and binxarn a tuning sweep. None of it was delegation, and none of 
 - **`pair_workloads_enabled` is safe on every box.** Work a fleet node serves for another box
   (the `fleet` door) is now skipped by `Begin` and by the ledger observer, as `agent` rows always
   were, so enabling reporting on a fleet node no longer shows a delegation twice, and the node's
-  OWN work (a CLI render started over ssh, a lease job) reaches PAIR. Enabled on the Lenovo and
-  binxarn in the same deploy (backups `*.pre-pair-workloads`).
+  OWN work (a CLI render started over ssh, a lease job) reaches PAIR. Enabled on `<node-c>` and
+  `<node-f>` in the same deploy (backups `*.pre-pair-workloads`).
 - **A media call's card opens `queued` and turns `running` when the lane holds the GPU**
   (`core.MarkWorking`, fired by `acquireMediaLease` and the compose slot). 0.140.5 opened it
   `running`, so a call waiting behind another job read "Running" through the wait; a transcription
   waiting minutes for whisper behind the 3-card seat did exactly that. `transcribe` cannot see its
   engine start (the wait is a load inside llama-swap), so its card stays queued until it ends.
-- Not covered: work started outside the harness altogether (binxarn's root tuning scripts). Run it
+- Not covered: work started outside the harness altogether (`<node-f>`'s root tuning scripts). Run it
   under `gpu reserve -- <cmd>` and it gets a card.
 
 ## [0.140.5] - 2026-09-23 - PAIR's Jobs list shows long media calls while they run, and a delegation reads "running" only once its seat works
@@ -2404,8 +2404,8 @@ Three gaps between what the fleet was doing and what NVIDIA PAIR's Jobs list sho
 against live cards on 2026-09-23 (docs/systems/pair-workloads.md).
 
 - **A long tool call now has a card while it runs.** A tool call reached PAIR only through its
-  ledger row, written when the call ENDS, so a ten-minute `animate_character` render on the
-  OptiPlex held its GPU at 100 % with no card at all. `Pipeline.Run` now opens a `running` card
+  ledger row, written when the call ENDS, so a ten-minute `animate_character` render on
+  `<node-e>` held its GPU at 100 % with no card at all. `Pipeline.Run` now opens a `running` card
   when a media call starts (`pairworkloads.Emitter.Begin`, `internal/pairworkloads/calls.go`) and
   the call's own ledger row closes THAT card: same id, engine and start, the row's model and
   outcome. A call that writes no row (a cache hit) is closed by the return of `Run`, and a call that
@@ -2414,21 +2414,21 @@ against live cards on 2026-09-23 (docs/systems/pair-workloads.md).
   PAIR keys a card on its engine, and a text or vision call learns llamacpp vs vllm only as it
   runs, so those short calls keep the single terminal card.
 - **A delegation reads "running" only once the seat is working on it.** The running frame went
-  out at the node's ack (remote) or the hand-off to the runner (local), so the Qube's agent-pool
-  and the Lenovo 27B showed "Running" through a 2-minute seat load while their cards sat at
+  out at the node's ack (remote) or the hand-off to the runner (local), so `<node-b>`'s agent-pool
+  and the `<node-c>` 27B showed "Running" through a 2-minute seat load while their cards sat at
   0 %. The card now stays `queued` through admission and cold load and turns `running` on the
   first sign the seat is serving the request (`seatWorking`, `internal/delegate/pairevents.go`):
   a streamed token, a decode, a tool call, a re-pack, or a prefill older than 8 s (the seat
   probe names a load within 5 s). Remote runs read it from the poll's `progress`, local runs from
   their own progress reports; a run that reports no progress at all turns running after 30 s. A
   run that never worked closes with no `startedAt`.
-- The third gap was configuration, not code: the OptiPlex's config lacked
+- The third gap was configuration, not code: `<node-e>`'s config lacked
   `pair_workloads_enabled`, so none of its own calls ever reached PAIR. Enabled there
   (backup `config.json.pre-pair-workloads`); it serves no delegations, so no job shows twice.
 
-## [0.140.4] - 2026-09-23 - four media-lane defects from the OptiPlex remediation: animate_character's silent no-op, a crop at the origin, sdcpp's iGPU pin, an untyped audio timeout
+## [0.140.4] - 2026-09-23 - four media-lane defects from the compact-desktop remediation: animate_character's silent no-op, a crop at the origin, sdcpp's iGPU pin, an untyped audio timeout
 
-Four defects surfaced by the OptiPlex 7060 media-lane remediation (2026-09-23), each reproduced from the
+Four defects surfaced by `<node-e>` media-lane remediation (2026-09-23), each reproduced from the
 code path (not just observed live) and covered by a test broken-then-restored at its real call site.
 
 - **`animate_character` returned the driving video unmodified, on every box, every time — a harness
@@ -2438,7 +2438,7 @@ code path (not just observed live) and covered by a test broken-then-restored at
   echoes a UI preview of its own input into its `outputs` entry — the same shape as a real result — and
   in `wf-wan-animate2.mjs` that loader's id ("240") sorts before the real `SaveVideo` node's id ("246"),
   so the loader's echoed preview was always picked first: full 806s render, exit 0, "WROTE `<out>`"
-  printed, and the file on disk byte-identical to the driver video (measured on the OptiPlex; confirmed
+  printed, and the file on disk byte-identical to the driver video (measured on `<node-e>`; confirmed
   by sha256 + frame inspection). `firstOutputFile` now takes an optional second argument, the API-format
   graph the caller already holds, and skips any node whose graph `class_type` starts with `Load` — a
   loader never legitimately produces the result, whatever kind of file it echoes. Every caller
@@ -2453,7 +2453,7 @@ code path (not just observed live) and covered by a test broken-then-restored at
   `omitempty` on X/Y (Width/Height keep it — 0 is never valid there), and the Python side now defaults
   safely (`op.get("x") or 0`) as defense in depth, matching the pattern the composite/text ops already used.
 - **sdcpp (stable-diffusion.cpp / Vulkan) pinned device 0 whenever `GGML_VK_VISIBLE_DEVICES` was unset,
-  which is the integrated GPU on any box with one enabled.** Measured on the OptiPlex: Vulkan0 = Intel UHD
+  which is the integrated GPU on any box with one enabled.** Measured on `<node-e>`: Vulkan0 = Intel UHD
   630, Vulkan1 = the RTX 5060; every Z-Image render silently ran on the iGPU at 565-608s/step (the same
   recipe runs at 4.85s/step on the RTX). `render/sdcpp-generate.mjs` now parses `<bin> --list-devices`
   and auto-picks the first discrete (NVIDIA/AMD) adapter when the env is unset, falling back to device 0
@@ -2732,7 +2732,7 @@ request, even after its one re-seeded retry.
   on every sdcpp binding regardless of family.** `SplitImageWithAlpha` — the ComfyUI graph's
   channel-drop step D5 specifies for the non-transparent default — had no sdcpp equivalent, so an
   ordinary prompt on the sdcpp engine handed back a PNG with a real (if visually subtle) alpha
-  channel (measured live on binxarn: 5.53% of pixels < 255 on a non-RGBA prompt). Separately,
+  channel (measured live on `<node-f>`: 5.53% of pixels < 255 on a non-RGBA prompt). Separately,
   `config.SupportsTransparentImage` excluded the sdcpp engine unconditionally
   (`ImageGenEngine != "sdcpp"`), so `transparent:true` was refused for qwen-image-2.1 on sdcpp even
   though sd.cpp's build of the model carries the identical RGBA VAE — the refusal message also
@@ -3232,7 +3232,7 @@ request, even after its one re-seeded retry.
 
 ## [0.133.0] - 2026-09-22 - PAIR shows direct traffic on the vLLM seats
 
-- **Seat load that bypassed the harness never reached PAIR.** On 2026-09-22 the Qube's three
+- **Seat load that bypassed the harness never reached PAIR.** On 2026-09-22 `<node-b>`'s three
   cards sat at 100 % for hours under a curl soak against llama-swap while PAIR's Jobs list was
   empty: PAIR only shows work somebody reports, and only the harness reports. New
   `pair_seat_activity_enabled` (off by default): fleet-serve polls each ready `vllm_seats` seat's
@@ -3253,7 +3253,7 @@ request, even after its one re-seeded retry.
 - Tests: seat watcher (direct card lifecycle, harness-only load raises nothing, one-poll blips,
   seat exit, unreadable metrics, shutdown, disabled), marker register (count, dead/stale markers),
   Admit marks on-box and not off-box. Mutants on the subtraction, the Admit marker and the debounce
-  each go red. Live: the watcher's readers against the Qube's llama-swap read the 3-card seat's
+  each go red. Live: the watcher's readers against `<node-b>`'s llama-swap read the 3-card seat's
   load (1, the soak) with 0 harness markers.
 
 ## [0.132.8] - 2026-09-22 - PAIR frames are delivered before a CLI process exits
@@ -3268,7 +3268,7 @@ request, even after its one re-seeded retry.
 
 ## [0.132.7] - 2026-09-22 - PAIR cards name vLLM for an alias-bound vLLM seat
 
-- **PAIR labelled the Qube's flagship jobs `llamacpp`.** `EngineFor` reads the engine off the seat
+- **PAIR labelled `<node-b>`'s flagship jobs `llamacpp`.** `EngineFor` reads the engine off the seat
   NAME, and the agent seat is bound as `agent-pool`, an alias of `qwen3.8-27b-vllm-3card`. The
   emitter now carries the box's `vllm_seats` and endpoint; `Emitter.LocalEngine` labels a local seat
   `vllm` when it is declared directly or its roster canonical id is (cached 10 min, 30 s after a
@@ -3299,10 +3299,10 @@ request, even after its one re-seeded retry.
   own ("2,1,0"); the Go seed and the installer's PowerShell fill both honour it (render tests caught the mismatch).
 - **Placement.** The free agent choice goes to the `triple` layer when it carries a non-opt-in agent seat; the pair is
   opt-in by name (`contract.layer: pair`). A box whose triple is opt-in or absent keeps the pair, unchanged.
-- **The pair.** The Qube keeps serving the 2-card tp2 seat as the opt-in `agent-pool-2card` (163,840). The seed holds
+- **The pair.** `<node-b>` keeps serving the 2-card tp2 seat as the opt-in `agent-pool-2card` (163,840). The seed holds
   one vLLM seat per tier (register A-113), so on a fresh install the pair's agent seat is the llama.cpp 27B the tier
   renders on the same cards.
-- **Open.** LMCache stores the flagship's pages in the Lenovo store (~205 MB per 1568-token chunk), but the pipeline
+- **Open.** LMCache stores the flagship's pages in the `<node-c>` store (~205 MB per 1568-token chunk), but the pipeline
   lookup serves none back after eviction (0 external hits) — a miss recomputes, no worse than the storeless seat it
   replaces. The L1 staging is 8 GB, not the 2 GB default: a 2 GB L1 failed this model's stores.
 
@@ -3312,15 +3312,15 @@ request, even after its one re-seeded retry.
   the model the tier chose and the script that runs it — `internal/mediacap` reports the route NOT
   CONFIGURED when either is empty, and there is no default. Eight tiers (blackwell-16/32/2x16/3x16/48/72,
   ampere-16, volta-16) seeded an image model with no `imagegen_script`, and thirteen seeded
-  `upscale_model` while no tier anywhere seeded `upscale_script`. The Qube served both only because they
+  `upscale_model` while no tier anywhere seeded `upscale_script`. `<node-b>` served both only because they
   were wired by hand. Every ComfyUI tier now seeds both halves.
 - **The two 8 GB tiers' image script pointed at a directory that does not exist.** ampere-8 and
   blackwell-8 seeded `__OFFLOAD_HOME__/render/comfy-generate.mjs`; both installers put `render/` next to the
   BINARY (`<home>/bin/render`), and a relative script resolves there (`gpugen.ResolveScriptIn`). Measured on
-  the Aorus: `D:/offload-stack/render` absent, `D:/offload-stack/bin/render` present — the Aorus worked
+  `<node-a>`: `D:/offload-stack/render` absent, `D:/offload-stack/bin/render` present — `<node-a>` worked
   only because it was hand-set. Seeds now use the relative `render/…` form.
 - **Edit, inpaint and animate are seeded on every 16 GB+ ComfyUI tier** — the three routes that were
-  measured, kept and served on the Qube and seeded nowhere: Qwen-Image-Edit-2511 Q5_1 + lightning8
+  measured, kept and served on `<node-b>` and seeded nowhere: Qwen-Image-Edit-2511 Q5_1 + lightning8
   ("frontier confirmed ≥16GB edit primitive"), RealVisXL V5 inpaint, WAN-Animate-2 int8 (15.9 GB on one
   16 GB card; operator 2026-08-27 "route WAN-Animate as a media capability"). blackwell-8 already seeded
   the edit UNET and inpaint checkpoint but not their scripts, so both routes deferred there too.
@@ -3332,7 +3332,7 @@ request, even after its one re-seeded retry.
 
 - **The AMD tier's agent seat was the one model measured to fail.** `amd-gcn` named no
   `agent_model`, so the tierseed fallback made its `resident_tier` — `gemma4-e2b` — the agent planner
-  seat on every fresh install. On binxarn, `gemma4-e2b` FAILED the agent contract in 18.6 s and
+  seat on every fresh install. On `<node-f>`, `gemma4-e2b` FAILED the agent contract in 18.6 s and
   `offload-e4b` in 31 s, while `qwen3.5-4b-agent` passed three times (smoke 44.7 s, a real contract
   188 s, a 32k contract 143 s) — and existed only as a hand edit on the node. `resident_tier` is now
   `offload-e4b` (Vulkan pp512 129.08 / tg128 11.93 measured there), and the tier seeds the agent seat
@@ -3341,7 +3341,7 @@ request, even after its one re-seeded retry.
   `fleet_agent_enabled`. The note's "Weakest path: E2B … PROJECTED" clause, overturned by those
   measurements, is marked superseded.
 - **RAM is overflow only, now in the seeds.** `ampere-8` and `blackwell-8` (8 GB discrete cards)
-  seeded the 26B with `moe_26b: "cpu_moe"` — every expert in RAM — and the Aorus served it that way,
+  seeded the 26B with `moe_26b: "cpu_moe"` — every expert in RAM — and `<node-a>` served it that way,
   against the operator's 2026-09-10 rule. Both tiers now drop the 26B, and seed their escalation and
   reasoning rungs explicitly on `qwen3.5-9b-agent` (the largest model the tier serves) instead of
   falling to a code default that would name a model no longer rendered. Rung quality on the 9B is
@@ -3350,14 +3350,14 @@ request, even after its one re-seeded retry.
 - **Two gates so neither comes back.** `TestNoGPUTierParksTheMoEExpertsInRAM` fails any GPU tier
   that seeds `cpu_moe`. `TestEveryAgentSeatIsChosenNotDerived` fails any tier whose agent seat comes
   from the silent `resident_tier` fallback; `blackwell-32` (projected, no box) now names the seat it
-  used to derive, with no behaviour change. `TestAmdGcnSeedsTheSeatItWasMeasuredOn` pins the binxarn
+  used to derive, with no behaviour change. `TestAmdGcnSeedsTheSeatItWasMeasuredOn` pins `<node-f>`
   measurements. All three were RED on the previous seeds and name the defects exactly.
 - **`audit-config`: the drift check that was missing.** `audit-yaml --against-render` audits the
   serving YAML; nothing compared a node's `config.json` against its tier seed, and that is where
   every measured win was being wired by hand and never written back. It resolves the seed exactly as
   `install seed` does (`--goos`, `--ram-tier`, the vLLM-seat detection) and reports seed-owned keys
-  as DIFFERENT / LIVE-ONLY / UNSEEDED / SEED-ONLY. First fleet run: binxarn 0 drifted keys after this
-  release's AMD fix, the Qube 28, the Aorus 12, the Lenovo 30 — the wiring-debt program works those
+  as DIFFERENT / LIVE-ONLY / UNSEEDED / SEED-ONLY. First fleet run: `<node-f>` 0 drifted keys after this
+  release's AMD fix, `<node-b>` 28, `<node-a>` 12, `<node-c>` 30 — the wiring-debt program works those
   down. Reports under `plans/offload-harness/2026-09-21-wiring-debt/drift-*.txt`.
 - **A Linux install now gets its tier's agent window.** `install.ps1` wrote `agent_ctx_tokens` from
   the tier field directly; `install.sh` never did, and the seed did not carry it, so every fresh
@@ -3370,14 +3370,14 @@ request, even after its one re-seeded retry.
 - **`display_active`, not a guess from the process list (ADR 0057 revised).** 0.132.2 decided
   which card drove a display by inference: "`nvidia-smi` could not size this process, so it is the
   desktop". That was wrong twice over. `[N/A]` memory is a WDDM property, not a graphics-process
-  property — `nvidia-smi` types all 24 of the Qube's desktop rows `C+G` and can size none of them —
+  property — `nvidia-smi` types all 24 of `<node-b>`'s desktop rows `C+G` and can size none of them —
   and a native-Windows CUDA seat (ComfyUI, which the 3-card law pins to card 0 or 2) produces the
   same shape. The heuristic would have flagged the card the harness was WORKING on, dropped it from
   `work_util_pct`, and made a saturated node advertise itself as idle — inverting the defect it was
   written to cure. `--query-gpu=display_active` answers it directly and rides the per-device query
-  every reader already runs, so it costs no extra `nvidia-smi` call. Measured 2026-09-21: Qube
-  (3 cards, operator gaming) `Disabled/ENABLED/Disabled`; Lenovo (headless Linux A2) `Disabled`;
-  Aorus (laptop, screen on the iGPU) `Disabled`.
+  every reader already runs, so it costs no extra `nvidia-smi` call. Measured 2026-09-21: `<node-b>`
+  (3 cards, operator gaming) `Disabled/ENABLED/Disabled`; `<node-c>` (headless Linux A2) `Disabled`;
+  `<node-a>` (laptop, screen on the iGPU) `Disabled`.
 - **Less machinery, not more.** Because the answer now rides the device sample the health tick
   already takes, the fleet node's separate display probe, its 30 s cadence and its carry-forward
   are all gone. Nothing to go stale, nothing to expire, one fewer driver call.
@@ -3426,7 +3426,7 @@ request, even after its one re-seeded retry.
   there by necessity).
 - **An engine the harness launches never marks its own card.** `[N/A]` memory is a WDDM property,
   not a graphics-process property — nvidia-smi cannot size ANY process there, compute included. On
-  the Qube the harness's seats happen to be invisible to that query (llama-swap runs in session 0,
+  `<node-b>` the harness's seats happen to be invisible to that query (llama-swap runs in session 0,
   the fleet node in the operator's session), but that is a session accident: on a node where they
   share one, a CUDA seat would look exactly like the desktop and its card would drop out of the
   placement figure, making a BUSY node advertise itself as idle. Over-flagging sends work to a
@@ -3449,14 +3449,14 @@ request, even after its one re-seeded retry.
   the MAX utilization across every card, so on a box anyone was using the desktop or a game kept
   the verdict pinned at `held-working` — and because that outranks `held-idle`, the verdict built
   for a stalled holder could never fire there.
-  Measured on the Qube 2026-09-20 while the operator played a game: `gpu status` read
+  Measured on `<node-b>` 2026-09-20 while the operator played a game: `gpu status` read
   `held-working — 33% on card 1 (RTX 5070 Ti)` while the lease holder had spent **4 seconds of CPU
   in 141 minutes**, had spawned nothing, and the two cards it actually fenced sat at 0%. Card 1 is
   the display card and that 33% was the game. Three jobs queued behind a holder doing nothing, and
   telling that apart took reading the holder's CPU time and children by hand.
 - Which card is a display card is taken from EVIDENCE, not config: on Windows/WDDM nvidia-smi
   reports graphics processes under `--query-compute-apps` with `[N/A]` memory, and those are the
-  desktop. On the Qube all 28 such rows sat on card 1 while the harness's own resident seat on
+  desktop. On `<node-b>` all 28 such rows sat on card 1 while the harness's own resident seat on
   card 0 produced no row at all. On Linux that query lists only CUDA processes with real memory, so
   nothing is flagged and every card stays eligible — unchanged everywhere but the case this fixes.
 - A display card is excluded ONLY when a non-display card exists. A single-GPU box (a laptop, an
@@ -3492,7 +3492,7 @@ request, even after its one re-seeded retry.
   nodes below the default they had been running on — sizing per tier in the losing direction. Only the
   min tier (a 4 GB box) stays under the default, which is the case the map existed for.
 - **Layer 1's size is now measured and it is worth 18x.** A, B, C, A with ~11.6k-token prompts on
-  binxarn's 32k seat: at `--cache-ram 1024` the repeat of A re-processes all 11,606 tokens
+  `<node-f>`'s 32k seat: at `--cache-ram 1024` the repeat of A re-processes all 11,606 tokens
   (110.8 s), at 8192 it re-processes 516 (6.2 s). The cache only matters when several contexts
   share a seat — the shape of a delegation stream — and the 0.131.3 map put the fleet's two 32 GB
   nodes at 2048, between those arms. That is what 0.131.4's floor rule prevents; ADR 0056 carries
@@ -3511,7 +3511,7 @@ request, even after its one re-seeded retry.
   lane refuses to start a COLD seat, because `/upstream/<seat>/…` starts one and that would defeat
   the 5-minute idle unload, ignore a drain or a GPU lease, and save an empty slot over a good file;
   and the post-save sweep never evicts the file that save just wrote.
-- **MEASURED INERT on b9934 and the delegator side is BLOCKED because of it.** On binxarn, a
+- **MEASURED INERT on b9934 and the delegator side is BLOCKED because of it.** On `<node-f>`, a
   restore of 3,231 tokens (151 MB, 25 ms) leaves the next identical request paying the full
   27.2 s prefill — same as no restore, in all three call shapes — while the same run's control
   shows the 0.131.3 RAM cache cutting 27.2 s to 4.6 s. `GET /slots` shows why: a restore
@@ -3538,11 +3538,11 @@ request, even after its one re-seeded retry.
 - Every llama.cpp seat renders `--cache-ram __CACHE_RAM__` from the new top-level profiles map
   `cache_ram_mib_by_ram_tier` (min 1024 / low 2048 / mid 6144 / high 12288 MiB; starting values,
   measured and revised by Task 3 of the prompt-cache plan). llama-server's host-RAM prompt cache
-  had been running at its fixed 8192 default on every box; a 4 GB Vivobook and a 64 GB Lenovo got
+  had been running at its fixed 8192 default on every box; a 4 GB laptop and a 64 GB node (high RAM tier) got
   the same figure. An unset figure renders 8192, never 0 (`Params.cacheRAMMiB()`), so an older
   caller cannot switch the cache off by omission. vLLM seats are untouched (LMCache, ADR 0045).
 - `render.tests.ps1` asserts the flag on the ampere-8/mid row; `TestCacheRAMFollowsTheRAMTier`.
-- `amd-gcn` window 8192 → 32768 (`ctx_size` + `agent_ctx_tokens`), measured on binxarn: a 23,889-token
+- `amd-gcn` window 8192 → 32768 (`ctx_size` + `agent_ctx_tokens`), measured on `<node-f>`: a 23,889-token
   prompt in 277.5 s at 86 tok/s on the Vulkan agent seat with 3.9 GiB of GTT, and 8.4 s on the repeat
   (the RAM prompt cache at work). The installer self-test row follows.
 - Plan: `plans/2026-09-20-llamacpp-prompt-cache-tiers.md` (operator-approved 2026-09-20); Layer 2
@@ -3559,20 +3559,20 @@ request, even after its one re-seeded retry.
 ## [0.131.1] - 2026-09-20 - Liveness walls: the unmeasured prefill prior was 4x too optimistic, and vLLM seats were never measured
 
 ### Fixed
-- **The first live proof of 0.131.0 filed a FALSE STALL on the Lenovo 27B GSQ seat** — `stalled: no progress for 94s in prefill (allowed 94s: 17041 tok / 400 tok/s assumed x 1.5 + 30s)` — while the seat was prefilling ~12k uncached tokens at its real ~130 tok/s. Two defects: the unmeasured prior (400 tok/s) was 3-4x too optimistic for a 3-bit GSQ seat on an A2, and `prefill_tok_s` could never be MEASURED on a vLLM seat because the prefill accounting read llama.cpp `timings` only. Now the prior is 100 tok/s, and every streamed completion records its time to first delta (`Completion.FirstDeltaMS`); the loop publishes per-call `(uncached prompt tokens, first-delta ms)` samples on `Result.PrefillSamples`, and the pipeline folds the largest into the seat-rates store on EVERY run, deferred ones included — the run a false stall costs is the run that measures the seat.
+- **The first live proof of 0.131.0 filed a FALSE STALL on the `<node-c>` 27B GSQ seat** — `stalled: no progress for 94s in prefill (allowed 94s: 17041 tok / 400 tok/s assumed x 1.5 + 30s)` — while the seat was prefilling ~12k uncached tokens at its real ~130 tok/s. Two defects: the unmeasured prior (400 tok/s) was 3-4x too optimistic for a 3-bit GSQ seat on an A2, and `prefill_tok_s` could never be MEASURED on a vLLM seat because the prefill accounting read llama.cpp `timings` only. Now the prior is 100 tok/s, and every streamed completion records its time to first delta (`Completion.FirstDeltaMS`); the loop publishes per-call `(uncached prompt tokens, first-delta ms)` samples on `Result.PrefillSamples`, and the pipeline folds the largest into the seat-rates store on EVERY run, deferred ones included — the run a false stall costs is the run that measures the seat.
 - **`tok_per_s` on the ledger was still 0 on short runs** — the column came only from the calibrated seat rate (>= 1,024-token completions). The wire now carries `observed_tok_s` (the liveness monitor's smoothed rate over the run's deltas) and both ledger rows prefer the calibrated rate, then the observed one; the seat-rates store still reads only the calibrated sample.
 
 ## [0.131.0] - 2026-09-20 - Liveness walls: a run is ended by a stall or a ceiling, never by its wall expiring while the seat produces
 
 ### Changed
-- **Liveness walls (ADR 0055): a contract is ended by a STALL or by a safety CEILING, never by its wall expiring while the seat is still producing.** Every seat completion now streams (`stream: true`, `stream_options.include_usage`), and each delta is a progress event; the wall (`timeout_sec` / the auto wall) is the EXPECTATION, still reported as `wall_sec`, no longer a kill. The stall allowance is dynamic per phase — prefill at the seat's measured prefill rate (new `prefill_tok_s` in the seat-rates store), decoding at 20 deltas of the decode rate, a tool's own cap + slack, all floored at 60 s — and a stall is filed `stalled: …` as infrastructure with the arithmetic in the reason; the ceiling is `max(3 × estimate, 2 × wall, 1800 s)` capped at 4 h and filed `ceiling …` as budget. `wall timeout after Ns` is retired from the node's vocabulary. Telemetry: the run registry and `gpu status` / `offload_status` carry `last_progress_ms`, `tok_s`, `live_phase`, `allowance_ms` beside the process heartbeat (C-32); `/fleet/jobs/{id}` publishes `progress` + `stall_allowance_sec` + `ceiling_sec`; the wire result carries `ceiling_sec` / `stall_allowance_sec` / `last_progress_ms`; the ledger's `agent_delegate` row fills `tok_per_s`. The delegator polls while the node reports progress, bounded by the node's ceiling. Measured cause: on 2026-09-20 every wall timeout in the ledger was a producing job (949 tok in 984 s on the Lenovo 27B; 6,236 tok in 769 s on the Qube pair).
+- **Liveness walls (ADR 0055): a contract is ended by a STALL or by a safety CEILING, never by its wall expiring while the seat is still producing.** Every seat completion now streams (`stream: true`, `stream_options.include_usage`), and each delta is a progress event; the wall (`timeout_sec` / the auto wall) is the EXPECTATION, still reported as `wall_sec`, no longer a kill. The stall allowance is dynamic per phase — prefill at the seat's measured prefill rate (new `prefill_tok_s` in the seat-rates store), decoding at 20 deltas of the decode rate, a tool's own cap + slack, all floored at 60 s — and a stall is filed `stalled: …` as infrastructure with the arithmetic in the reason; the ceiling is `max(3 × estimate, 2 × wall, 1800 s)` capped at 4 h and filed `ceiling …` as budget. `wall timeout after Ns` is retired from the node's vocabulary. Telemetry: the run registry and `gpu status` / `offload_status` carry `last_progress_ms`, `tok_s`, `live_phase`, `allowance_ms` beside the process heartbeat (C-32); `/fleet/jobs/{id}` publishes `progress` + `stall_allowance_sec` + `ceiling_sec`; the wire result carries `ceiling_sec` / `stall_allowance_sec` / `last_progress_ms`; the ledger's `agent_delegate` row fills `tok_per_s`. The delegator polls while the node reports progress, bounded by the node's ceiling. Measured cause: on 2026-09-20 every wall timeout in the ledger was a producing job (949 tok in 984 s on the `<node-c>` 27B; 6,236 tok in 769 s on the `<node-b>` pair).
 - **vLLM-CPU measured on the first Linux AMD node** (`cpu` and `amd-gcn` notes): builds and seats only with `--enforce-eager` + a 4 GB KV pool on a 30 GB box, at 3.1 tok/s vs 9.27 for llama.cpp CPU on the same family — recorded, not seated. (#422)
 
 ## [0.130.8] - 2026-09-20 - amd-gcn: flash-attn ON, measured; the iGPU lane's optimization pass is on the record
 
 - `amd-gcn` renders `--flash-attn on`. The tier had carried `off` on an untested "older Vulkan FA unreliable"
   claim; two GCN boxes now say otherwise at b9934 — neutral on the Lucienne laptop (2026-07-17) and
-  +4 % pp512 / +1 % tg128 on binxarn (2026-09-20: 266.2/23.1 vs 256.1/22.8, E2B UD-Q4_K_XL).
+  +4 % pp512 / +1 % tg128 on `<node-f>` (2026-09-20: 266.2/23.1 vs 256.1/22.8, E2B UD-Q4_K_XL).
 - The tier notes carry the research-first optimization pass (RADV guide #23295, Vulkan thread #10879, the
   Vega APU toolkit, the amdttm GTT posts) and its measured sweep: `RADV_PERFTEST=nogttspill`, ubatch
   128..1024, q8_0 KV, DPM `high`, ryzenadj fclk pins — every knob within ±4 %; the lane is
@@ -3583,10 +3583,10 @@ request, even after its one re-seeded retry.
 ## [0.130.7] - 2026-09-20 - amd-gcn gets the Qwen3.5-4B agent seat (measured on the first Linux AMD node)
 
 ### Changed
-- **`amd-gcn` declares `include_qwen35_4b: true`.** On binxarn the fleet's grounded smoke contract fails on the tier's
+- **`amd-gcn` declares `include_qwen35_4b: true`.** On `<node-f>` the fleet's grounded smoke contract fails on the tier's
   gemma4-e2b planner (no tool call, 18.6 s) and on the offload-e4b workhorse (same shape, 31 s), and passes on the
   Qwen3.5-4B agent seat (44.7 s). Rendered configs for this tier now carry `qwen3.5-4b-agent`; the installer downloads its
-  GGUF. Nodes on this tier should publish `agent_seat_tok_s` (10 on binxarn) so the wall is sized from a rate — the first run
+  GGUF. Nodes on this tier should publish `agent_seat_tok_s` (10 on `<node-f>`) so the wall is sized from a rate — the first run
   without one deferred at the grammar re-pack with 1 s of wall left. (#421)
 
 ## [0.130.6] - 2026-09-20 - the first Linux AMD node: detect, templates and a Linux GPU memory provider
@@ -3611,7 +3611,7 @@ request, even after its one re-seeded retry.
 - **`seat_closure_test.renderParams` never set `Backend`**, so every closure render treated the `cpu` tier as a GPU tier
   (seats gained `-ngl`/`--flash-attn` the installer never emits). (#416)
 
-Measured on the first node (binxarn, Ryzen 5 5625U / Vega 7, Ubuntu 26.04, llama.cpp `b9934` release builds, 512 MiB
+Measured on the first node (`<node-f>`, Ryzen 5 5625U / Vega 7, Ubuntu 26.04, llama.cpp `b9934` release builds, 512 MiB
 carve-out): Vulkan E2B pp512 256 / tg128 22.8 t/s, E4B 129 / 11.9; CPU E2B 109 / 21.5. Six protocol tasks 0/6 deferred.
 
 ## [0.130.5] - 2026-09-19 - a forwarded accelerator call's PAIR card names the device and the node that ran it
@@ -3670,7 +3670,7 @@ carve-out): Vulkan E2B pp512 256 / tg128 22.8 t/s, E4B 129 / 11.9; CPU E2B 109 /
 - **The KV store steward could not fire while a GPU lease kept jobs off the node** (register B-48 / B-16, L5): its
   scan ran after every `fleet_store_prune_every_jobs` completed jobs or on a health poll above the high mark, and under a
   lease no fleet job completes — exactly when a bench arm or the pair seat writes pages at ~1 GB/min. Measured
-  2026-09-18 on the Lenovo: a tick at 20:26, then the dataset went 53 → 71 GB (its quota, `ENOSPC`, 15 failed store
+  2026-09-18 on `<node-c>`: a tick at 20:26, then the dataset went 53 → 71 GB (its quota, `ENOSPC`, 15 failed store
   tasks on the A2 seat) by 20:54 with no tick between. `fleet_store_prune_every_sec` (default 60, negative disables)
   adds a time tick (`storesteward.Every`); a tick below the high mark is one directory walk and one statfs.
   `TestEveryTicksOnTimeAndStopsWithTheContext`.
@@ -3718,16 +3718,16 @@ carve-out): Vulkan E2B pp512 256 / tg128 22.8 t/s, E4B 129 / 11.9; CPU E2B 109 /
 
 ### Fixed
 - **A route=local run against another box's engine was attributed to this box** (register C-58, operator
-  2026-09-18: "nvidia pair showing the qube doing lenovo work"). Bench configs on the Qube set `endpoint` to
-  the Lenovo's vLLM arm (`http://node-b:18797`, `agent_model: a2-pool`); the delegator ran the loop
+  2026-09-18: "nvidia pair showing `<node-b>` doing `<node-c>` work"). Bench configs on `<node-b>` set `endpoint` to
+  `<node-c>`'s vLLM arm (`http://node-b:18797`, `agent_model: a2-pool`); the delegator ran the loop
   here against that engine and stamped the ledger row and the PAIR card with its own hostname — 20 cards on
-  the Qube's UUID for work the Lenovo did (measured: the arm's `prompt_tokens_total` rose by the gate's
-  87,354 tokens, the Qube seat served none). `modelaffinity.EndpointHost` now names the endpoint's box when
+  `<node-b>`'s UUID for work `<node-c>` did (measured: the arm's `prompt_tokens_total` rose by the gate's
+  87,354 tokens, the `<node-b>` seat served none). `modelaffinity.EndpointHost` now names the endpoint's box when
   it is not loopback, `localhost` or this machine; a local run then carries that host as its node, its
   placement reason says `engine <endpoint> is <host>'s (attributed there)`, and the PAIR card is scheduled on
   that member. The same reading disarms this box's text-load gate in `config.Load` (one note per process):
   a run that never touches a local card is no longer deferred `gpu busy` by this box's lease (8 of 16
-  contracts were, in 0.7 s, while the Qube's cards sat under a lease and the work was on the Lenovo).
+  contracts were, in 0.7 s, while `<node-b>`'s cards sat under a lease and the work was on `<node-c>`).
 
 - **`calibrate` had never fitted a threshold, and the cause was file plumbing, not the 60-row floor**
   (register D-126): the only classify/triage label writer appends to the confhead labels sidecar
@@ -3736,7 +3736,7 @@ carve-out): Vulkan E2B pp512 256 / tg128 22.8 t/s, E4B 129 / 11.9; CPU E2B 109 /
   labeled-row source (ledger + sidecar), a missing file is a 0-row source, and the report names each source
   with its usable-row count. Red test `TestRunSourcesFitsFromTheLabelsSidecar`.
 ### Verified
-- **A vLLM seat's logprobs reach the confidence gate unchanged** (register D-128, measured 2026-09-18 on the Qube pair seat):
+- **A vLLM seat's logprobs reach the confidence gate unchanged** (register D-128, measured 2026-09-18 on the `<node-b>` pair seat):
   vLLM's `/v1/chat/completions` answers the OpenAI `logprobs.content[]` shape the client decodes; the legacy
   `top_logprobs` list-of-dicts belongs to `/v1/completions`, which the harness never calls. Pinned by
   `TestVLLMChatLogprobShapeDecodesIntoTopAlternatives` and `TestMeasuredVLLMTokenStreamYieldsAMargin`.
@@ -3757,7 +3757,7 @@ carve-out): Vulkan E2B pp512 256 / tg128 22.8 t/s, E4B 129 / 11.9; CPU E2B 109 /
 ### Fixed
 - **A vLLM seat is no longer constrained by a GBNF grammar it discards** (register D-129, ADR 0002
   amendment 2026-09-18): the seats `vllm_seats` declares — matched case-insensitively and
-  **alias-resolved through the live llama-swap roster**, so the Qube's `agent-pool-3card` alias of
+  **alias-resolved through the live llama-swap roster**, so `<node-b>`'s `agent-pool-3card` alias of
   `qwen3.8-27b-vllm-3card` counts — now receive vLLM's own `structured_outputs: {"json": <schema>}`
   and **no `grammar`** on both send sites (the in-loop tier path in `attempt`, the structured re-pack
   in `repackStructured`), plus the non-thinking render, since vLLM applies the constraint to the whole
@@ -3788,7 +3788,7 @@ carve-out): Vulkan E2B pp512 256 / tg128 22.8 t/s, E4B 129 / 11.9; CPU E2B 109 /
   deadline error. Progress (a step advance, an in-flight change, a load finishing) resets the bound.
 
 ### Fixed
-- **A releasing holder's warm-back raced the next lease's `--unload-seat`** (register D-124, the Lenovo, 2026-09-18
+- **A releasing holder's warm-back raced the next lease's `--unload-seat`** (register D-124, `<node-c>`, 2026-09-18
   02:57): a wrapper whose command had been cut warmed the agent seat after the next queued lease had already taken the
   card, drained an "idle" seat and unloaded it; the unload killed the engine, the seat unit's `Restart=on-failure`
   brought it back 20 s later on the new holder's EXCLUSIVE card, and three measurement rows read the seat's 10 GiB
@@ -3806,7 +3806,7 @@ carve-out): Vulkan E2B pp512 256 / tg128 22.8 t/s, E4B 129 / 11.9; CPU E2B 109 /
   the moment the unit's invocation changes, so a systemd relaunch is a seat llama-swap no longer tracks and no lease
   can order — the mechanism that put the 27B under another lease's window above. The template is now `Restart=no`
   (ADR 0035 amended); a crashed seat is reloaded by llama-swap on the next request, which the lease gate orders like
-  any other load. Deployed by hand on the Lenovo's two seat units (backups beside them).
+  any other load. Deployed by hand on `<node-c>`'s two seat units (backups beside them).
 - **The drain could read no run at all between two steps.** The run registry rewrites a run's record on every
   step (tmp + rename, in-place on Windows when the rename meets a reader), and `Registry.List` skipped a record
   it caught empty, absent or torn — a 2 ms poll then printed a run-less `1 in flight` line (the print-cadence
@@ -3834,7 +3834,7 @@ carve-out): Vulkan E2B pp512 256 / tg128 22.8 t/s, E4B 129 / 11.9; CPU E2B 109 /
   private video-pipeline repo, the dev and cloud drive paths and a tailnet address; the identity lint
   passes. The unredacted originals stay in the operator's `~/.claude/skills`.
 
-## [0.129.0] - 2026-09-18 - a contract can name the layer it runs on (the Lenovo fast digest seat by name); the digest-adr-hard-8 contract set
+## [0.129.0] - 2026-09-18 - a contract can name the layer it runs on (the Linux edge node's fast digest seat by name); the digest-adr-hard-8 contract set
 
 ### Added
 - **A contract can name the layer it runs on** (register A-100, the measured fast-seat lever): the
@@ -3846,7 +3846,7 @@ carve-out): Vulkan E2B pp512 256 / tg128 22.8 t/s, E4B 129 / 11.9; CPU E2B 109 /
   remote's rows — so a node that does not declare the layer is ineligible for that subtask, an idle
   local box that does not declare it does not keep it, and with no node declaring it the subtask
   defers naming the layer (never a silent run on the planner seat). Before this the table keyed every agent row on the pair
-  and the triple: a one-card box (the ampere-16 Lenovo) that declared layers became ineligible for
+  and the triple: a one-card box (the ampere-16 node, `<node-c>`) that declared layers became ineligible for
   every contract, and its second layer — the 35B digest seat beside the 27B GSQ (digest-8 164.8 s vs
   1,597.8 s, blind coverage 4.65 vs 8.53, so by name only, never the default) — deferred "no layer
   serves an agent contract" when requested. Red tests on both seams
@@ -3861,7 +3861,7 @@ carve-out): Vulkan E2B pp512 256 / tg128 22.8 t/s, E4B 129 / 11.9; CPU E2B 109 /
 
 ### Changed
 - The `SEAT_MP_HTTP_PORT` default (0.128.3) moves from 18793 to **18790** and the spec default from engine port − 4 to
-  engine port − 7: 18793 is the Qube port file's LiteLLM gateway reservation (`0.0.0.0`, LAN + tailnet), which under WSL2
+  engine port − 7: 18793 is `<node-b>` port file's LiteLLM gateway reservation (`0.0.0.0`, LAN + tailnet), which under WSL2
   mirrored networking would collide with the seat's loopback bind; 18790 is the safe pick every port file of the fleet lists.
 
 ## [0.128.3] - 2026-09-18 - the vLLM seat launcher binds the LMCache MP HTTP frontend to loopback on its own port
@@ -3905,8 +3905,8 @@ carve-out): Vulkan E2B pp512 256 / tg128 22.8 t/s, E4B 129 / 11.9; CPU E2B 109 /
 
 ### Fixed
 - **The feasibility floor refused seats that answer, and charged a cold load the wall never pays** (0.128.0 regression,
-  found by the deploy smoke: a cold Aorus was refused a 60 s contract it completes in ~25 s — `fitted final 0 < floor 1024`
-  — while the Lenovo slipped through on the fitter's "no opinion" early return and printed an eta of 4,682 s for a 60 s
+  found by the deploy smoke: a cold `<node-a>` was refused a 60 s contract it completes in ~25 s — `fitted final 0 < floor 1024`
+  — while `<node-c>` slipped through on the fitter's "no opinion" early return and printed an eta of 4,682 s for a 60 s
   wall). `feasibleFinal` now asks the INV-5 rider's question and nothing more: can the seat produce one tool step and a
   minimal 64-token answer inside the wall, with no think block, no re-pack and NO cold load (admission pays the cold load
   outside the wall, D-64). Everything above that floor is a ranking matter: `etaFor` fits the final to the WALL (not the
@@ -4518,7 +4518,7 @@ carve-out): Vulkan E2B pp512 256 / tg128 22.8 t/s, E4B 129 / 11.9; CPU E2B 109 /
 
 ### Fixed
 - **A cold seat no longer runs its whole task at an 8,192-token window.** On 2026-09-16 the same `agent_run`
-  reported `ctx_window` 8,192 cold and 114,688 warm, minutes apart, on the Qube `agent-pool` seat: a silent 14x
+  reported `ctx_window` 8,192 cold and 114,688 warm, minutes apart, on `<node-b>` `agent-pool` seat: a silent 14x
   loss that exhausted five compactions and truncated every file read. Replayed against the unloaded seat,
   llama-swap reported `starting` at 3 s and `ready` at **222 s**, while the window probe gave each per-model URL
   a fixed 60 s timeout, gave up at 60 s and 120 s, fell to the bare-root `/props` (404) and returned the
@@ -4549,7 +4549,7 @@ carve-out): Vulkan E2B pp512 256 / tg128 22.8 t/s, E4B 129 / 11.9; CPU E2B 109 /
   `TestAdmitOffBoxIgnoresTheLocalLease` and `TestFleetLaneSkipsTheLocalLeaseWait` reproduced the live shape against a
   held media lease, then went green.
 - `scripts/write-door-gate.ps1` applied NOTHING and then judged the unpatched copy (register D-114 readback, 2026-09-15 0.125.0
-  gate on the Aorus 9B: VERDICT 1/4 while every seat diff was correct — t4 was exactly `Status: draft` → `Status: final`).
+  gate on the `<node-a>` 9B: VERDICT 1/4 while every seat diff was correct — t4 was exactly `Status: draft` → `Status: final`).
   `git -C <copy> apply` from a SUBDIRECTORY of this repository resolves patch paths against the repository root and skips
   every path outside the subdirectory with exit 0 (`Skipped patch …`). The proof now `git init`s a throwaway repository in
   the fresh copy so the copy is the root, and a skip — or any apply that reports no `Applied patch` — fails the task
@@ -4564,7 +4564,7 @@ carve-out): Vulkan E2B pp512 256 / tg128 22.8 t/s, E4B 129 / 11.9; CPU E2B 109 /
   quote`, vLLM-shaped engines return the completion on `finish_reason: length` with the fragment attached.
   The loop returned `stop_reason: error` and the node filed `defer_class: infrastructure` with `write_note:
   the seat wrote nothing` - the stack blamed for a ~3 KB single-call write asked for at a 1,024-token step
-  budget (measured 2026-09-15, Aorus 9B, 2 steps / 135 s). Now `internal/agent/loop.go` recognises both shapes,
+  budget (measured 2026-09-15, `<node-a>` 9B, 2 steps / 135 s). Now `internal/agent/loop.go` recognises both shapes,
   re-issues the SAME step ONCE at the wall-fitted final budget (4,096 on the fleet seats) with the transcript
   unchanged and the fragment never appended or executed, and on a second cut ends the run on the new
   `stop_reason: tool_call_cut` whose `stop_note` names both budgets and the partial argument size
@@ -4708,7 +4708,7 @@ carve-out): Vulkan E2B pp512 256 / tg128 22.8 t/s, E4B 129 / 11.9; CPU E2B 109 /
 
 ## [0.123.3] - 2026-09-14 - a cut prose final is re-issued; repetition loops are cut; agent_sampling (D-95b)
 
-Register D-95b, from the live readback of 0.122.1 on the Lenovo 4B seat (`qwen3.5-4b-vllm`, vLLM 0.28.0, step 1,024 /
+Register D-95b, from the live readback of 0.122.1 on the `<node-c>` 4B seat (`qwen3.5-4b-vllm`, vLLM 0.28.0, step 1,024 /
 final 4,096, thinking off, 14.9 tok/s). The `METHODOLOGY.md` digest STILL deferred at 381 s with `output_truncated` and
 `re-pack skipped … a partial cannot be re-packed`, for two reasons 0.122.1 did not cover: the partial was PROSE-shaped
 (`summary (≤100 words):` / `mechanisms:` / `- item` — that seat's normal answer on a schema contract, which the
@@ -4755,7 +4755,7 @@ measured 5060 Ti pair (devices 0 and 2) and the RTX 5070 Ti that drives the desk
 it simultaneously a complete `blackwell-16`, a complete `blackwell-2x16`, and the installed
 `blackwell-3x16`. Filing it as one row made the fleet read one capacity row where three exist and
 turned every placement into a fixed binding. The operator's directive was to make the box *be*
-its tiers ("Qube = blackwell-16 / 2x16 / 3x16 routed per task") and the design council's verdict
+its tiers ("`<node-b>` = blackwell-16 / 2x16 / 3x16 routed per task") and the design council's verdict
 was RESHAPE: window overflow escalates to the PAIR's long seat and only when the pair's agent seat
 is idle, saturation is recorded and never acted on, one placement table serves local and remote
 alike, the display-card guards fail closed with footprint arithmetic, and the display layer ships
@@ -4946,7 +4946,7 @@ them, each with the gate that keeps it wired and an assertion that it does NOT a
   ledger "FAIRNESS ARM par8-pair").
   **It ships as its own entry rather than as a flag on the seat, and that is the whole decision.** llama.cpp
   divides `-c` among its slots: eight slots at `--ctx-size 131072` serve **16,384 tokens each**. The same
-  night's Lenovo arm measured the mechanism in-house (`--parallel 8 -c 32768` → "16k/32k prompts exceed the
+  night's `<node-c>` arm measured the mechanism in-house (`--parallel 8 -c 32768` → "16k/32k prompts exceed the
   4k/slot window"). Both pair tiers declare `qwen3.8-27b` as their fallback agent lane at
   `fallback_agent_ctx_tokens: 131072`, so moving the flag onto that seat would have served an eighth of the
   advertised window — the advertise-more-than-you-serve defect `blackwell-8` shipped once already. Both entries
@@ -5026,7 +5026,7 @@ them, each with the gate that keeps it wired and an assertion that it does NOT a
 - **The final answer's completion budget now FITS the wall that is left** (`internal/seatrate`,
   `internal/agent/loop.go`, `internal/pipeline/agenttask.go`; register D-95). The budget was
   `FinalBudgetFor` alone — 4x the step budget, cap 8,192 — whatever the wall could actually decode.
-  Measured 2026-09-14 on the Lenovo 4B seat (`qwen3.5-4b-vllm`, ~15 tok/s): list-heavy grounded
+  Measured 2026-09-14 on the `<node-c>` 4B seat (`qwen3.5-4b-vllm`, ~15 tok/s): list-heavy grounded
   extractions with an `output_schema` owed a 8,192-token final PLUS an 8,192-token re-pack, which the
   harness's own `wall_note` priced at 1,166–1,310 s against a 900 s wall. Three of ten contracts died
   there — at the 4,096 budget they were cut (`finish_reason=length` → `output_truncated` → re-pack
@@ -5102,7 +5102,7 @@ them, each with the gate that keeps it wired and an assertion that it does NOT a
   ledger "FAIRNESS ARM par8-pair").
   **It ships as its own entry rather than as a flag on the seat, and that is the whole decision.** llama.cpp
   divides `-c` among its slots: eight slots at `--ctx-size 131072` serve **16,384 tokens each**. The same
-  night's Lenovo arm measured the mechanism in-house (`--parallel 8 -c 32768` → "16k/32k prompts exceed the
+  night's `<node-c>` arm measured the mechanism in-house (`--parallel 8 -c 32768` → "16k/32k prompts exceed the
   4k/slot window"). Both pair tiers declare `qwen3.8-27b` as their fallback agent lane at
   `fallback_agent_ctx_tokens: 131072`, so moving the flag onto that seat would have served an eighth of the
   advertised window — the advertise-more-than-you-serve defect `blackwell-8` shipped once already. Both entries
@@ -5222,7 +5222,7 @@ fix instead.
 
 ### Changed
 - **Register B-01 - `kv_cache_server` is a LIST of per-seat bindings, and the box declares its vLLM
-  roster.** The block bound one store to one `seat` name (the deployed Qube config: `seat:
+  roster.** The block bound one store to one `seat` name (the deployed `<node-b>` config: `seat:
   "qwen3.8-27b-vllm"`), which was right while a box ran one vLLM seat and wrong the moment one did
   not: the reference workstation runs the tensor-parallel pair AND an opt-in 3-card layout, the
   second box runs its own small seat, and the shape gave the others nothing to be — a seat with no
@@ -5433,7 +5433,7 @@ is dropped here rather than re-applied; what D-92 still lacked was the delegator
   re-pack term for a schema contract, and falls back to the first attempt's `min_turn_sec` (named as the
   fallback in the retry note) when the retry seat published none. `TestRunRetryFloorComesFromTheRetrySeat`,
   `TestFetchNodeViewMapsSeatRateAndBudget`, `TestHealthPublishesSeatBudgetAndRate`.
-- **Register H-04 (why `seat_budget` exists).** The standard quality instrument's first live arm ran on the Lenovo
+- **Register H-04 (why `seat_budget` exists).** The standard quality instrument's first live arm ran on `<node-c>`
   at the NODE's `agent_max_tokens` (1,024, so a 4,096-token final) while the delegator declared 4,096: a
   delegator's config does not travel with the contract. Matched budgets across seats are read from `seat_budget`,
   never assumed from the caller's config.
@@ -5455,7 +5455,7 @@ is dropped here rather than re-applied; what D-92 still lacked was the delegator
 
 ## [0.117.1] - 2026-09-14 - live work outranks a stale lease record
 
-Found by the 0.117.0 live proof on the Lenovo: its lease root held a record from a dead bake-off holder, and
+Found by the 0.117.0 live proof on `<node-c>`: its lease root held a record from a dead bake-off holder, and
 while the seat was visibly loading for a delegated run `gpu status` said `stale-holder — nothing is running
 under it`. The stale verdict sat above the working ones.
 
@@ -5534,7 +5534,7 @@ what the cards were DOING, only that something held them.
 ## [0.116.1] - 2026-09-12 - the ampere-16 vision seat is the measured winner
 
 The `ampere-16` tier seeded `qwen3-vl-8b` for vision as a J-media inheritance from `blackwell-16`; it was
-never run on the tier's reference box (the Lenovo M720q's A2 16 GB), which served `gemma4-e4b-vision` by
+never run on the tier's reference box (`<node-c>`'s A2 16 GB), which served `gemma4-e4b-vision` by
 hand. The 0.116.0 vision lane made the seat worth measuring: four candidates through the harness's OWN
 `assess_image` / `ocr` / `vqa` over a labelled two-phase set on that box (record:
 `Benchmarks and Optimizations/2026-09-12-a2-vision-bakeoff/`).
@@ -5560,7 +5560,7 @@ hand. The 0.116.0 vision lane made the seat worth measuring: four candidates thr
 The harness could place text work on fleet nodes (`agent_delegate`) but every image call —
 `offload_vqa`, `offload_assess_image`, `offload_ocr` — ran against the local endpoint, so a fleet
 node with an idle card and a vision seat sat unused while image QA queued behind the local render.
-The first question was what `:8080` on the Lenovo wanted a credential for: it is `pzdash` (Basic
+The first question was what `:8080` on `<node-c>` wanted a credential for: it is `pzdash` (Basic
 Auth), not an inference server at all, and the node's llama-swap listens on loopback only — so the
 lane proxies through `:18811`, and nothing new is bound.
 
@@ -5590,13 +5590,13 @@ lane proxies through `:18811`, and nothing new is bound.
   roster INDEX (an id is not an address).
 
 ### Operator notes
-- The Lenovo A2 reports 15,356 MiB, not 16,384, because **ECC is enabled** (`nvidia-smi -q -d ECC`:
+- The `<node-c>` A2 reports 15,356 MiB, not 16,384, because **ECC is enabled** (`nvidia-smi -q -d ECC`:
   Current Enabled); GDDR6 ECC is in-band and costs 1/16 of the frame buffer. `nvidia-smi -e 0` +
   reboot restores the full 16 GiB at the cost of ECC — an operator decision, not made here.
 
 ## [0.115.23] - 2026-09-10 - the re-pack cannot eat the wall
 
-Register D-91, found by the D-03 live probe: the Lenovo 4B's final answer came back `length`-cut at 4,096 tokens
+Register D-91, found by the D-03 live probe: the `<node-c>` 4B's final answer came back `length`-cut at 4,096 tokens
 (12,100 chars), the loop was `done` after four minutes, and the structured re-pack then ran two grammar attempts
 and the chat lane over the cut text — three full re-generations, ~690 s — into the 900 s wall, so a finished run
 deferred `wall timeout after 900s` with nothing on the wire to say where the time went.
@@ -5670,7 +5670,7 @@ bytes, and the only way to tell them apart was the delegation log.
 
 ## [0.115.19] - 2026-09-10 - the last step asks for the answer
 
-Register D-89, found by the D-43 measurement on 0.115.18: the Qube 27B (thinking off) spent all 12 steps of
+Register D-89, found by the D-43 measurement on 0.115.18: the `<node-b>` 27B (thinking off) spent all 12 steps of
 ledger-01 on `read_file` / `search_files` / `list_dir` and the run deferred `step budget exhausted` with nothing,
 although the whole 43 KB document had been replayed into its transcript. The trigger was an ungrounded goal
 instruction in the contract (a SEGMENT-ID the document does not contain — the 27B hunted for it); the harness
@@ -5699,7 +5699,7 @@ turn.
 
 ## [0.115.18] - 2026-09-10 - in-loop offload tools ride the planner seat
 
-Register D-88, found by the D-43 measurement on 0.115.17: both Qube legs lost their 900 s wall because the 27B
+Register D-88, found by the D-43 measurement on 0.115.17: both `<node-b>` legs lost their 900 s wall because the 27B
 planner called `offload_triage` three times, and each call loaded the workhorse (`gemma-4-e4b`) on the SAME
 llama-swap — the cascade pin shares the planner's card and the `interactive` set is mutually exclusive by
 design — so llama-swap evicted the 27B and the next step reloaded it: four 3-minute reloads per leg
@@ -5748,7 +5748,7 @@ every idle model unloads at five minutes — were enforced by hand: the template
   resident template's `# offload-seats: … ttl=none` directive (pre-rule, "a resident seat never unloads") made
   the renderer skip the ttl the 0.115.7 template fix had put on every static entry. The token is now ignored,
   every rendered seat carries `ttl: 300`, and the old test is inverted. Its first run over the LIVE configs
-  found the Aorus memory-stack lane (embeddinggemma, bge-reranker-v2-m3) still on `--n-gpu-layers 0`; fixed
+  found `<node-a>` memory-stack lane (embeddinggemma, bge-reranker-v2-m3) still on `--n-gpu-layers 0`; fixed
   on the box the same hour.
 - Not covered yet: `--n-cpu-moe` above the tier's measured spill (no per-tier spill field exists to compare
   against), seat-unit `[Install]`, and UUID-vs-index pins (A-87) — separate rows.
@@ -5815,8 +5815,8 @@ final.
 
 Register D-64. The admission pre-flight (0.111.0) waited for ANOTHER model's swap before starting the
 contract's wall, but a seat that was simply not loaded loaded on the loop's first call — inside the wall.
-Under `ttl 300` that is the common case: the Lenovo vLLM seat cold-started seven times in two hours on
-2026-09-10, 125–250 s each plus a Triton JIT, and 89 of the Qube seat's 184 budget defers had `steps: 0`.
+Under `ttl 300` that is the common case: the `<node-c>` vLLM seat cold-started seven times in two hours on
+2026-09-10, 125–250 s each plus a Triton JIT, and 89 of the `<node-b>` seat's 184 budget defers had `steps: 0`.
 
 - `warmSeat`: when the seat is absent from `/running` after the pre-flight, one GET through llama-swap's
   per-model passthrough (`/upstream/<seat>/v1/models`) makes it load, bounded by the admission budget's
@@ -5843,7 +5843,7 @@ character '�' after array element` — an abstention the caller could not tell
 
 Register D-46. The verification retry ran inside whatever the first attempt left of `timeout_sec` with a
 10 s floor, on whichever different node the placer chose. On 2026-09-10 a 603 s empty first attempt of a
-900 s contract handed the Qube 27B a 296 s retry: it generated 4,178 tokens of think and timed out, on a seat
+900 s contract handed the `<node-b>` 27B a 296 s retry: it generated 4,178 tokens of think and timed out, on a seat
 that was already mid-generation for another job. Over 318 retries in the corpus the pass rate was 13 %.
 
 - Config `agent_retry_min_sec`: the least remaining budget a retry starts with (0 = the historical 10 s).
@@ -5864,7 +5864,7 @@ result of the week to one path: on a vLLM thinking seat (`--reasoning-parser qwe
 decoded only `reasoning_content`, so the loop read silence — raised the budget 4x, re-ran, nudged with a user
 turn, re-ran, and published the second empty as `done`; the node re-packed `""` into a schema-valid all-empty
 object; the delegator failed it on acceptance and retried on a cold seat with the wall's leftovers. 20,526
-tokens on the Qube 27B and 9,628 on the Lenovo 4B for zero visible characters, then a retry that timed out.
+tokens on the `<node-b>` 27B and 9,628 on the `<node-c>` 4B for zero visible characters, then a retry that timed out.
 
 - `internal/agent/client.go` (D-41): decodes vLLM's `reasoning` key and
   `usage.completion_tokens_details.reasoning_tokens` alongside `reasoning_content`; a reasoning channel cut on
@@ -5950,7 +5950,7 @@ rows on purpose: the summary counts it as tokens saved).
 
 Operator rule, 2026-09-10 02:00, after finding 80 GB of host RAM in use: THE THREE CARDS (and the fleet's
 other two) DO THE INFERENCE — RAM IS OVERFLOW ONLY — and EVERY IDLE MODEL UNLOADS AFTER 5 MINUTES on every
-engine and every node. The live Qube yaml had two `-ngl 0` residents (moved off 5060 Ti #1 by a 09-07
+engine and every node. The live `<node-b>` yaml had two `-ngl 0` residents (moved off 5060 Ti #1 by a 09-07
 session) and two Flash-Next entries parking 28–32 expert layers in RAM; the templates rendered the same
 shapes on a fresh install.
 
@@ -5963,7 +5963,7 @@ shapes on a fresh install.
   `qwen3.8-27b-262k`.
 - The only sanctioned host-RAM use remains spill of a model that does not fit its card (the 26B's
   `--n-cpu-moe`). Partner rules recorded in the operator's constitution: the ≥30 % harness-share floor and
-  the Lenovo cache server backing every vLLM seat (a follow-up: `kv_cache_server` still binds one seat).
+  the `<node-c>` cache server backing every vLLM seat (a follow-up: `kv_cache_server` still binds one seat).
 
 ## [0.115.3] - 2026-09-10 - the linux template's 26B graphs flag follows the tier, as the windows templates already did
 
@@ -6010,25 +6010,25 @@ look reasonable, and no instruction surface said otherwise.
 
 ## [0.115.1] - 2026-09-09 - a slow or missing cache server degrades the vLLM seat, never refuses it
 
-For hours on 2026-09-09 every delegation on the Qube came back HTTP 500: `seat_fg.sh` refused to start
+For hours on 2026-09-09 every delegation on `<node-b>` came back HTTP 500: `seat_fg.sh` refused to start
 the 27B seat because the cache-server share wrote at ~36 MB/s (under `SEAT_L2_MIN_MBPS=200`), llama-swap
 turned each refusal into a 500, and sessions concluded "delegation is not viable" and did the work in
 the cloud context — the exact failure the harness exists to prevent, caused by a cache ACCELERATOR being
-slow. (The slowness itself was a degraded WSL mirrored datapath after a Qube reboot: WSL→Lenovo 311 Mbit/s
+slow. (The slowness itself was a degraded WSL mirrored datapath after a `<node-b>` reboot: WSL→`<node-c>` 311 Mbit/s
 while the Windows host wrote 640 MB/s to the same share; a further reboot restored 7.8 Gbit/s.)
 
 - `seat_fg.sh`: a share that will not mount, cannot be probed, or writes under the floor now routes through
   `degrade_l2` — `SEAT_L2` is emptied (the MP server registers no store), the log says `CACHE SERVER
   DEGRADED — <why>`, `$WORK/seat-l2.status` records `degraded <when> reason=<why>` / `ok <when> mbps=<n>`,
   and the seat serves the same-box tier (L1 only). The only refusal left is the port-already-bound case.
-  Verified live on the Qube under the slow share: the next start logged the degradation, pinned its KV
+  Verified live on `<node-b>` under the slow share: the next start logged the degradation, pinned its KV
   pool and loaded. `TestSeatLauncherDegradesInsteadOfRefusingOnACacheServerFault` pins the template.
 - `docs/systems/cache-server.md` describes the degrade path and the status file.
 
 ## [0.115.0] - 2026-09-08 - accelerator work travels to the box that has the device (Coral Phase B)
 
-The Coral was fully served on the Lenovo and unreachable from the Qube except by a hand-routed
-`agent_delegate` contract naming a path on the Lenovo's disk. Operator: "ship it" (routing),
+The Coral was fully served on `<node-c>` and unreachable from `<node-b>` except by a hand-routed
+`agent_delegate` contract naming a path on `<node-c>`'s disk. Operator: "ship it" (routing),
 "fix it" (the path). Both, per ADR 0038:
 
 - **Fleet task `accel`** — `{accelerator, tool, args, image_b64?, image_name?}`: the node writes the
@@ -6050,9 +6050,9 @@ The Coral was fully served on the Lenovo and unreachable from the Qube except by
 
 0.114.1 declared the 2-card tier had no vLLM seat, from an arm that spanned the RTX 5070 Ti display
 card. That measured the wrong thing: the tier's two cards ARE the 5060 Ti pair, and the production
-seat has run TP2 on exactly that pair since 2026-09-03 with the Lenovo cache server. Operator
+seat has run TP2 on exactly that pair since 2026-09-03 with the `<node-c>` cache server. Operator
 correction the same afternoon. `blackwell-2x16` now seeds `blackwell-3x16`'s `vllm_seat` verbatim
-except `device: "0,1"` (the pair on a 2-card box), including the fs_native cache server on the Lenovo,
+except `device: "0,1"` (the pair on a 2-card box), including the fs_native cache server on `<node-c>`,
 so a fresh install of the tier serves `agent-pool` at 163,840 instead of falling back to llama.cpp.
 `TestDualBlackwellSeedsThePairSeatWithTheCacheServer` replaces the 0.114.1 test; the display-card arm
 stays in the record only as the reason no seat is pinned to the 5070 Ti. Docs/tiers regenerated.
@@ -6071,7 +6071,7 @@ any future copy of the seat across without a contradicting measurement. Docs/tie
 
 ## [0.114.0] - 2026-09-08 - the Coral Edge TPU is a second harness accelerator
 
-The Lenovo M720q has carried a Coral Edge TPU since 2026-09-04 — driven, tuned and measured
+`<node-c>` has carried a Coral Edge TPU since 2026-09-04 — driven, tuned and measured
 (MobileNet v2 iNat p50 3.16 ms / ~300 inf/s, 70-71 C sustained, no throttle) — and nothing in
 the harness knew it existed. The harness had exactly one pattern for "a device beside the GPU",
 the Hailo-8L lane (ADR 0024); this release applies it to the Coral, per the reviewed design in
@@ -6105,21 +6105,21 @@ the Hailo-8L lane (ADR 0024); this release applies it to the Coral, per the revi
   (`internal/mcpserver/acceltools.go`); the agent loop gained `AccelLane`s
   (`pipeline.NewLoopAccel`, `agent.ReadOnlyToolsWithLanes`) in config order, with the old
   single-lane `NPU` path kept for every existing caller.
-- **Every agent builder wires every lane.** The live harness-path gate (a remote contract on the
-  Lenovo calling `offload_classify_image`) found the fleet-node delegation builder and the
+- **Every agent builder wires every lane.** The live harness-path gate (a remote contract on
+  `<node-c>` calling `offload_classify_image`) found the fleet-node delegation builder and the
   prompt-replay builder passing the Hailo lane only — the Coral tools existed for a local `agent_run`
   and were invisible to the same seat via `agent_delegate route=remote`. Both pass `Accel` now, and a
   root test parses every builder literal and fails on `NPU` without `Accel`. The same gate then
   caught the launcher: `coral-http.sh` read `$1` as the idle seconds where the harness passes
   `--idle-sec <n>`, and resolved `CORAL_HOME` one level up, so under the fleet unit it exited 2 before
   the sidecar started. It now parses the harness call shape, walks up to `venv/` for the home (flat
-  or nested layout), and `test_server.py` runs the launcher with a stub python. Gate result on the
-  Lenovo: `agent_delegate route=remote` → `offload_classify_image` → `Ara macao (Scarlet Macaw)`
+  or nested layout), and `test_server.py` runs the launcher with a stub python. Gate result on
+  `<node-c>`: `agent_delegate route=remote` → `offload_classify_image` → `Ara macao (Scarlet Macaw)`
   0.746, 18 s wall, sidecar spawned by the harness.
 - **Two installer gaps closed on the way.** `install.sh` merged NO accelerator seed at all
   (install.ps1 always had) — it now passes detect's verdict to `install seed --accelerators`
   and writes `installed.json`. And `fleet-serve` read `accelerators` only from that manifest,
-  which a hand-built node (the Lenovo, verified) does not have — health now falls back to the
+  which a hand-built node (`<node-c>`, verified) does not have — health now falls back to the
   config's own list when the manifest lists none (D6), so the device is advertised and a
   delegator can route to it.
 - **Config keys** `coral_endpoint` / `coral_sidecar_cmd` / `coral_timeout_sec` (30 — a cold
@@ -6411,8 +6411,8 @@ from a written figure").
 `blackwell-8.ctx_size` stays **16384**. It governs the CASCADE seats (e4b/e2b and the cpu_moe 26B), not the agent
 seat, and the 32K fit above was measured on the 9B alone — reading it as evidence for the cascade is exactly the
 notes-field-as-measurement error this table keeps being bitten by. `ampere-8` ships 32768 for the cascade on the
-same 8 GB class, so the raise is plausible and probably right; it needs one llama-bench pass on the Dell OptiPlex
-7060 reference box before it ships, not an inference from a sibling.
+same 8 GB class, so the raise is plausible and probably right; it needs one llama-bench pass on the `<node-e>`
+reference box before it ships, not an inference from a sibling.
 
 ### Gate
 `TestAgentWindowMatchesWhatTheAgentSeatServes` — for every tier declaring an agent seat, the advertised window must
@@ -6525,7 +6525,7 @@ describing machines that have since changed and tiers that have since been measu
   for three cards (`dual-gpu`).
 - **`docs/systems/fleet-node.md`** described <node-b> in the present tense as a 2x16 GiB box; it has been 3x16 GiB
   since 2026-08-31. **`docs/systems/accelerators.md`**'s "today that is one device" is a fleet inventory claim that
-  ignores the measured Coral on the Lenovo (device measured, harness lane still an unmerged draft).
+  ignores the measured Coral on `<node-c>` (device measured, harness lane still an unmerged draft).
 - **`README.md`** generalised a 780M/RDNA3 figure to all AMD: prompt processing is ~4x CPU on RDNA3 but a measured
   **1.26x** on GCN, because Vega has no matrix cores.
 - **`docs/OPERATOR-GUIDE.md`** had no `blackwell-2x16` row at all — the tier with the most measurements behind it.
@@ -6543,13 +6543,13 @@ above the measurements that refute it. Documentation only: no code paths, no ser
 **Why a `notes` field cannot carry measurement status, which is the root cause of all three.** The field ACCUMULATES
 rather than supersedes, and nothing ever removes a superseded clause. `blackwell-8`'s note carried
 "PROJECTED here (the reference is the ampere-8 laptop, not this exact card)" from 2026-07-28, immediately followed in
-the same string by four rounds of on-box OptiPlex 7060 measurement from 2026-08-19 through 2026-08-25.
+the same string by four rounds of on-box `<node-e>` measurement from 2026-08-19 through 2026-08-25.
 `blackwell-16`'s note asserted PROVEN, PROJECTED, and "informed by a LIVE REFERENCE, not a runtime measurement" about
 the SAME seat. A reader deriving status from these strings gets the wrong answer, and one did.
 
 **`amd-gcn`: "PROJECTED — no GCN box measured" → MEASURED 2026-07-17.** This was wrong for over a month while
 this repo's own measurement record sat in `docs/specs/2026-07-17-hardware-scope-linux-and-low-end-design.md`, whose
-title is literally the first measurements ever taken on config #12. A collaborator's CachyOS Lenovo (Ryzen 5 5500U,
+title is literally the first measurements ever taken on config #12. A collaborator's CachyOS laptop (Ryzen 5 5500U,
 Radeon Lucienne / Vega-GCN gfx90c-class, RADV RENOIR, 21 GiB RAM) ran llama-bench at the pinned b9934 Vulkan build with
 the byte-identical pinned E2B — pp512 213.31 / tg128 14.86 t/s, quiesced control 208.64 / 14.63, FA on 209.82 /
 14.94 — plus six end-to-end tasks through the real CLI at this tier's own invariants (3 s to 59 s, doctor OK, 0 of 6
@@ -6559,23 +6559,23 @@ performance-NEUTRAL here, so the FA-off default is free but its stated reason st
 (`matrix cores: none`). Still open, and still in the note: a whisper.cpp Vulkan build for the STT seat.
 
 **`blackwell-8`: the fossil "PROJECTED here" clause marked SUPERSEDED, with the on-box record beside it.** The tier has
-had its own reference box since 2026-08-19 — a Dell OptiPlex 7060 with an RTX 5060 8GB (sm_120) on a Gen3 x4 PCH
+had its own reference box since 2026-08-19 — `<node-e>` with an RTX 5060 8GB (sm_120) on a Gen3 x4 PCH
 slot — and it is the FIRST box in the fleet where `detect.ps1` resolved a tier and `install.ps1` rendered its config.
 Measured there: the 2026-08-22 agent bake in which this tier's DEPLOYED e4b entry scored 0% x2 extraction with zero
 tool calls while qwen3.5-9b think-off scored 100% x2 (the reason the tier seats the 9B at 32768), the 2026-08-24 speed
 legs (pp512 1638.93, pp2048 1877.80, tg128 49.43 t/s), an 11-leg media roster bake, and 26B cpu_moe soaks. The
 install-time WARN "CUDA-13.3 cuBLAS on sm_120 = ~5.6x slower prefill" was FALSIFIED on that box (b9934 == b10603).
 
-**`blackwell-16`: the PROVEN/PROJECTED contradiction resolved into a dated statement.** The Qube ran as this tier on a
+**`blackwell-16`: the PROVEN/PROJECTED contradiction resolved into a dated statement.** `<node-b>` ran as this tier on a
 single RTX 5060 Ti 16GB from 2026-07-12 to 2026-08-02, with six committed llama-bench receipts, a 4-rung roster
 validation, and the capability report already checked in at `docs/tiers/reports/blackwell-16-node-b.md`. The note now
 also says what is NOT true: the box never ran `install.ps1`, so this tier's INSTALLER-RENDERED serving params were
 never selftested there, and the "3.9 min / 2048" HiDream figure is prose with no timing artifact. It has no CURRENT
 reference box — that machine has three cards now.
 
-**`docs/ROADMAP.md` fleet table: three stale rows and one wrong one.** The **Dell OptiPlex 7060 was listed as
-`ampere-8`** while every other authority in this repo calls it `blackwell-8`; the Qube row predated its third GPU
-(recorded further down the same page); the Lenovo row predated the A2 16GB swap. The table now also states the known
+**`docs/ROADMAP.md` fleet table: three stale rows and one wrong one.** The **`<node-e>` was listed as
+`ampere-8`** while every other authority in this repo calls it `blackwell-8`; the `<node-b>` row predated its third GPU
+(recorded further down the same page); the `<node-c>` row predated the A2 16GB swap. The table now also states the known
 gap it was papering over: a 3x Blackwell rig has no tier id, so `Get-Profile` files it as `dual-gpu` — its own
 self-test asserts `'3x blackwell -> dual-gpu'` — which means the fleet's most-measured machine classifies into one
 of its least-measured tiers. `blackwell-3x16` is proposed, not shipped.
@@ -6588,14 +6588,14 @@ Operator rule, stated plainly: *"install defaults have always needed to be updat
 capability."* The tier/model matrix audit found the reverse had been happening — defaults sat where they were first written while the
 reference box moved on.
 
-**`blackwell-2x16` `ctx_size` and `agent_ctx_tokens`: 32768 → 131072.** The reference box for this tier IS the live Qube workstation, and its
+**`blackwell-2x16` `ctx_size` and `agent_ctx_tokens`: 32768 → 131072.** The reference box for this tier IS the live `<node-b>` workstation, and its
 llama-swap serves the tier's OWN seeded agent model at four times the seeded window: `qwen3.8-27b --ctx-size 131072` (the tier's
 `config_seed.agent_model`), `gemma-4-26b-agent --ctx-size 131072` (the 26B-class resident), and the same 27B weights at `--ctx-size 262144` on
 the long-context twin. So 32768 was an un-raised default, not a fit limit — and the tier's own note already said "PROJECTED as a tier; the
 reference box is live — promote values to measured as the bake-offs land". The bake-offs landed. `docs/tiers/blackwell-2x16.md` regenerated.
 
-**Deliberately NOT propagated, and the notes say why.** `blackwell-16` / `volta-16` / `dual-gpu` stay at 32768: that 131072 was measured on the
-Qube's TWO-card pool, and nothing has measured a 26B at 131072 on ONE 16 GB card — which is that entire band. `ampere-16` also stays at 32768:
+**Deliberately NOT propagated, and the notes say why.** `blackwell-16` / `volta-16` / `dual-gpu` stay at 32768: that 131072 was measured on
+`<node-b>`'s TWO-card pool, and nothing has measured a 26B at 131072 on ONE 16 GB card — which is that entire band. `ampere-16` also stays at 32768:
 its own 131072 datum comes from the persistent vLLM seat, and `setup/templates/vllm-seat/` only DOCUMENTS that as a manual pattern (a grep of
 `setup/*.ps1|*.sh` finds no reference), so a fresh install there still renders the llama.cpp 4B seat that was measured at 32768. Raising a seed
 to a window its rendered seat was never measured at would ship a number, not a capability.
@@ -6615,7 +6615,7 @@ test's own temp home. `GPULockPath` specifically, because it is the highest-prec
 environment, which `StateDir` alone would not. Two guards pin both halves.
 
 **Fixed — fleet-smoke named the LOCAL box as the node under test (#250).** A forced remote route that finds nothing eligible returns a DEFER
-carrying the local node and seat — the box that made the decision, not one that ran anything — so the row read `Qube / agent-pool / DEFER`
+carrying the local node and seat — the box that made the decision, not one that ran anything — so the row read `<node-b> / agent-pool / DEFER`
 and the base that was actually unreachable went unnamed. (The issue was filed as "the dispatcher's own local row always DEFERs"; there is in
 fact no separate local row, it is the remote's row coming back local.) The verdict and the non-zero exit were always correct — an unexercised
 node is real fleet signal — so only the label changed: `PlacedResult.Unplaced` is now exported and set on that path, and fleet-smoke drops
@@ -6829,7 +6829,7 @@ no path configured) instead of the old benign "held by another process".
 
 **Changed — the local rotation slot is contested under load (`agent_spread_local_slot`, default `skip-when-busy`).** `route=spread`
 dealt subtask 0 (and every `i mod len == 0` slot) to the local seat unconditionally. With K delegating sessions that meant K × 3 of every
-8 subtasks stacked on one local seat while the remotes idled — the K×8 gate's remaining tail after the Lenovo seat replacement was
+8 subtasks stacked on one local seat while the remotes idled — the K×8 gate's remaining tail after the `<node-c>` seat replacement was
 exactly that (first-local subtask 155–189 s under K=3 vs 91–105 s for its siblings; K=2 wall 1.55× the K=1 wall against a 1.5×
 bound). The deal now reads the local seat's in-flight count ONCE when it is computed (the same reader the drain uses: vLLM
 running + waiting, llama-server processing slots, through llama-swap) and, when the seat already holds a request, deals the local
@@ -6842,7 +6842,7 @@ reason line of every affected subtask names the in-flight count it read. Operato
 **Fixed — `gpu reserve --drain` on an ALIAS-bound seat.** The in-flight reader matched llama-swap's `/running` by the CONFIGURED
 seat name, but `/running` lists canonical ids only — on the reference box the seat is bound as `agent-pool` for `qwen3.8-27b-vllm`,
 so the drain read "not loaded: nothing to drain" and returned at once on a seat that could be mid-request (silent since 0.113.16;
-the Lenovo, where the seat is bound by its id, was unaffected, which is why the L7 proofs passed). The reader now lives in
+`<node-c>`, where the seat is bound by its id, was unaffected, which is why the L7 proofs passed). The reader now lives in
 `internal/seatload`, resolves the name through the roster (`swapclient.Roster.Canonical`: id or alias → id) before consulting
 `/running`, and falls back to the bare name when the roster cannot be read. Tests: an alias-bound seat listed under its id is
 read as loaded with its count; the parsers and the never-touch-an-unloaded-upstream rule move with the code.
@@ -6865,7 +6865,7 @@ tier SEED is unchanged (the seat is a hand-installed venv, not something the ins
 
 **Fixed.** Every llama.cpp seat on this fleet is launched without `--metrics`, so the seat's `/metrics` answers `501` and the
 drain — fail-closed by design, "could not read" is never "idle" — polled until `--drain-timeout` and gave up on a WARM seat
-(the Lenovo, 2026-09-06 20:09, first window of the L7 script migration; the 20:09:02 window had passed only because the seat
+(`<node-c>`, 2026-09-06 20:09, first window of the L7 script migration; the 20:09:02 window had passed only because the seat
 was cold). On `501` (older builds `404`) the drain now reads llama-server's `GET /slots` through llama-swap and counts the
 slots that are `is_processing`; two consecutive idle reads are still required, which also covers llama-server's deferred
 queue (a queued request is not in `/slots` — it becomes a processing slot the instant one frees). Any other non-200 from
@@ -6882,7 +6882,7 @@ has room (a node that just refused is not re-asked for 10 s). The idle time is c
 time provably spent queued on a node); the attempts are charged as always. When nothing frees inside the wait the outcome is a
 DEFER of class `capacity` (new: "not this contract's turn" — not a broken stack, not a seat that ran out of budget; the reserved
 case keeps the holder-naming `infrastructure` deferral). Wire: `summary.waited`, `results[].capacity_wait_sec`. Why: the
-2026-09-06 "Qube timed out" incident — a contract dispatched during the one minute a seat was unloaded burned its 300 s on one
+2026-09-06 "`<node-b>` timed out" incident — a contract dispatched during the one minute a seat was unloaded burned its 300 s on one
 node. Fixed alongside: a remote's 503 used to fall back onto a RESERVED local seat through the re-placement path (the
 2026-09-05 incident through a side door) — the local last resort now honours the lease.
 
@@ -6924,13 +6924,13 @@ shed 503 with the band-0 control admitted, lenient `priority`, tenant sanitizati
 explained it with the defensive "no remote passed the capability gate although 1 answered … (placement and gate disagree —
 please report)" line, because the explanation path predates the lease. It now says which remote(s) hold a text lease
 (class infrastructure), and appends the contract-side reason when the others could not take it either. Seen live on the
-first lease on the Lenovo (2026-09-06 17:22); test with a lease-cleared control arm that still reaches the defensive line.
+first lease on `<node-c>` (2026-09-06 17:22); test with a lease-cleared control arm that still reaches the defensive line.
 
 ## [0.113.16] — 2026-09-06 — the fleet node keeps its KV store under budget between turns, and a leased node re-routes instead of dropping
 
 **Added — store steward (`fleet_store_root`, `fleet_store_cap_gb`, `fleet_store_prune_every_jobs`).** A node that owns a
-persistent KV page store on disk (the LMCache fs_native pages the production seat writes over SMB into a dataset on the
-Lenovo) now keeps it under a budget the box computes: `cap = min(fleet_store_cap_gb, 0.8 × (used + free))`, high mark 95 %,
+persistent KV page store on disk (the LMCache fs_native pages the production seat writes over SMB into a dataset on
+`<node-c>`) now keeps it under a budget the box computes: `cap = min(fleet_store_cap_gb, 0.8 × (used + free))`, high mark 95 %,
 low mark 85 %, oldest-first by mtime, files younger than 60 s never touched. The steward scans after every
 `fleet_store_prune_every_jobs` completed jobs (default 8, one spread), on any health poll that finds the store above its high
 mark, and once at start; `/fleet/health` publishes `store` (used/cap/high/low, files, last scan/prune, removed, error). Why:
@@ -6944,8 +6944,8 @@ root can never become a purge of some other tree, and a prune stays forensically
 whenever the machine-wide lease is HELD; the delegator reads it and treats a node under a TEXT lease as ineligible (the same
 rule that makes the local seat a non-target since 0.113.14), and the node's own `/fleet/dispatch` refuses NEW work under a
 text lease with the re-placeable 503 the queue cap uses, naming the holder — so a delegator of any version places the subtask
-elsewhere. Media leases (renders arbitrated on the node) are untouched. Why: a measurement window on the Lenovo had to STOP
-the fleet node to keep foreign digests off the card, cutting in-flight remote work ("Lenovo dropped mid-way", 2026-09-06).
+elsewhere. Media leases (renders arbitrated on the node) are untouched. Why: a measurement window on `<node-c>` had to STOP
+the fleet node to keep foreign digests off the card, cutting in-flight remote work ("`<node-c>` dropped mid-way", 2026-09-06).
 
 **Added — `gpu reserve --drain [--drain-timeout 2m] [--unload-seat]`, `gpu release --warm-seat`.** After taking the lease,
 `--drain` waits until the agent seat reports no request in flight (llama-swap `/running` first — an unloaded seat is idle and
@@ -6984,7 +6984,7 @@ not gated; a media lease keeps steering only (arbitrated at the model-affinity g
 behaviour is unchanged.
 
 **Fixed.** The served-window probe (`agent_run`, `agent_delegate`, the cascade repack, `offload_status`) read llama-server's
-`/props` only; a vLLM seat behind llama-swap has no `/props` (404), so every run on the Qube's 163,840-token agent-pool seat
+`/props` only; a vLLM seat behind llama-swap has no `/props` (404), so every run on `<node-b>`'s 163,840-token agent-pool seat
 silently budgeted the conservative 8,192-token fallback and `offload_status` reported `ctx_probe_error: HTTP 404` whenever the
 seat was warm. The probe now falls back to the backend's own `/upstream/<model>/v1/models` `max_model_len` (vLLM's field;
 absent on llama-server, so the order is safe), and the llama-swap client gains `ContextWindow` with the same loaded-only
@@ -7023,7 +7023,7 @@ stop, warning with the holders when VRAM is still held.
 video kept — and did so on ffmpeg's container default, `libx264` on the CPU (CUDA-X plan task 4.1 inventory). The
 new config key `ffmpeg_video_encoder` (e.g. `h264_nvenc`) names the encoder for those two ops; stream-copy ops,
 frame extraction and probe are untouched, and an absent encoder fails loudly rather than falling back. Measured
-on the Qube (task 4.2) before the key was set there.
+on `<node-b>` (task 4.2) before the key was set there.
 
 ## [0.113.9] — 2026-09-04 — `agent_max_tokens` is a real config key; the seat wrapper waits for its cards to clear
 
@@ -7052,7 +7052,7 @@ times). OPERATOR-GUIDE gains the `fs_native` example (config block + seat.env); 
 
 ## [0.113.7] — 2026-09-04 — vLLM seat template: mount the cache-server share for fs_native, refuse to start without it
 
-**Added.** The clean matrix (chain R, 2026-09-04) measured `fs_native` over the Lenovo's tmpfs on SMB 3.1.1 as the
+**Added.** The clean matrix (chain R, 2026-09-04) measured `fs_native` over `<node-c>`'s tmpfs on SMB 3.1.1 as the
 best cache-server transport at both KV precisions (fp16: 2.6–2.9 s vs Valkey 3.8 s; fp8: 0.80 s vs 0.92 s for a
 23.7k-token prefix). `setup/templates/vllm-seat/seat_fg.sh` now mounts the share before the MP server starts
 (`SEAT_L2_MOUNT_SRC`, `SEAT_L2_MOUNT_DIR`, optional `SEAT_L2_MOUNT_OPTS` / `SEAT_L2_MOUNT_TYPE`) and refuses to
@@ -7063,7 +7063,7 @@ measurements and that a three-stage pipeline seat gets nothing from any L2.
 
 ## [0.113.6] — 2026-09-04 — an empty final message is nudged once before it counts as the answer
 
-**Fixed.** After its tool steps the Qube 27B seat sometimes closed with an EMPTY assistant message (delegation
+**Fixed.** After its tool steps the `<node-b>` 27B seat sometimes closed with an EMPTY assistant message (delegation
 log: 4 steps, stop `done`, 17 output tokens — a bare think block), and the contract failed with no findings and
 no summary while the same document digested fine when asked directly. The loop now treats an empty final
 message (no content, no tool calls) as "not an answer yet": it appends one plain user turn asking for the
@@ -7073,7 +7073,7 @@ answer in the requested shape and continues; a second empty message ends the run
 
 ## [0.113.5] — 2026-09-04 — a completion budget starved by reasoning is raised once, not returned empty
 
-**Fixed.** On the Qube 27B seat (Qwen3.8 with `--reasoning-parser qwen3`) a digest spent 839 of the loop's
+**Fixed.** On the `<node-b>` 27B seat (Qwen3.8 with `--reasoning-parser qwen3`) a digest spent 839 of the loop's
 default 1,024 completion tokens thinking; the visible answer was cut (`finish_reason: length`) or empty, and
 5 of 8 digest contracts came back with no findings and no summary. Reasoning counts against `max_tokens`, so a
 thinking model needs a larger budget than a plain one. The loop now re-issues a step ONCE with a 4× budget
@@ -7117,7 +7117,7 @@ the runner maps it to a `config` defer naming the fix (the seat's parser flags).
 ## [0.113.2] — 2026-09-03 — document-grounded contracts run without few-shot exemplars
 
 **Fixed — the second cut of the phantom-digest defect.** 0.113.1 closed, marked and synthesised the profile
-exemplars; validated on the Lenovo 4B seat, a digest still answered the exemplar's topic ("does not describe
+exemplars; validated on the `<node-c>` 4B seat, a digest still answered the exemplar's topic ("does not describe
 any maintenance windows") for a goal about eviction policies. On a small seat ANY exemplar user turn competes
 with the objective, whatever its wording. A contract that carries context documents (every `offload_research`
 digest, most delegate fan-outs) has its answer in the attached file and needs no tool-call demonstration, so
@@ -7131,7 +7131,7 @@ tool-use runs (`agent_run`, bare-goal contracts) keep their few-shot. The run me
 ## [0.113.1] — 2026-09-03 — profile exemplars: closed, marked, synthetic (the phantom "Go version" digests)
 
 **Fixed — the fleet's off-goal "latest stable Go version" answers were the harness's own few-shot.**
-Since 2026-08-31 the Lenovo 4B seat (and, on 2026-09-03, both fleet nodes) intermittently answered research
+Since 2026-08-31 the `<node-c>` 4B seat (and, on 2026-09-03, both fleet nodes) intermittently answered research
 digests with "the user's question about the latest stable Go version cannot be answered from this document",
 failed acceptance, and were quarantined for off-document answers. ADR 0029/0032 and the ROADMAP recorded it
 as "dispatch-path contamination"; `internal/research` grew a document fingerprint to *detect* it. The source
@@ -7209,7 +7209,7 @@ operator's metric for the second device is capacity, not speed
 ## [0.111.0] — 2026-09-02 — scheduling + delivery quality under parallel sessions (masterplan #1)
 
 Several parallel sessions reported on 2026-09-01: 27B seat "timed out at 600 s", llama-swap 429s
-while another session held the slots, the Lenovo 4B seat's phantom "Go version" digests passing as
+while another session held the slots, the `<node-c>` 4B seat's phantom "Go version" digests passing as
 results, `offload_research` deferring on the 8-contract cap — and every session then bypassed the
 harness. Mechanism verified against llama-swap v251's source before anything was built
 ([ADR 0032](docs/architecture/decisions/0032-a-peer-held-seat-is-waited-for-not-deferred.md)).
@@ -7249,9 +7249,9 @@ harness. Mechanism verified against llama-swap v251's source before anything was
 Canonical home for the GIMP skill (installed copy: `~/.claude/skills/gimp`). Lean `SKILL.md` router plus
 `reference/` — README with ten rules, hosts/install, connection modes (console, GUI, gimp-mcp, Script-Fu
 server), CLI/batch, Python API, editing playbook, export formats (23 verified), scripting, 46-row failure
-catalog, and `live-dump-qube-2026-09-01.json` (902 PDB signatures, 28 enums, 258 GEGL ops with property
+catalog, and the 2026-09-01 live-dump file (902 PDB signatures, 28 enums, 258 GEGL ops with property
 tables, 79 gimp-mcp tools, export choice nicks). Every fact tagged measured/doc/community/inferred; measured
-on the Qube against GIMP 3.2.4. Backs the `flatten_design` / `instantiate_design` image ops.
+on `<node-b>` against GIMP 3.2.4. Backs the `flatten_design` / `instantiate_design` image ops.
 
 ## [0.110.0] - 2026-08-30
 
@@ -7309,7 +7309,7 @@ keys are bound (an unconfigured fleet runs byte-identically):
 ### Added — sd.cpp on the reference box (fallback engine binding)
 
 stable-diffusion.cpp master-829-0a565f2 (official win-cuda12) at
-C:/sd.cpp-<commit> with the Lenovo's exact sdxl-turbo Q4_0 GGUF mirrored;
+C:/sd.cpp-<commit> with `<node-c>`'s exact sdxl-turbo Q4_0 GGUF mirrored;
 sdcpp_bin/sdcpp_model bound in both deployed configs, imagegen_engine
 UNCHANGED (ComfyUI/krea2 stays primary). Live render verified through
 render/sdcpp-generate.mjs under a GPU lease. H3-via-sd.cpp stays parked on
@@ -7330,7 +7330,7 @@ re-validate in full. Structural failures still fail honestly.
 
 ### Fixed — agent re-pack falls back to the chat route when the seat has no native completion path
 
-Found live wiring the Lenovo FreeToken agent seat: the structured re-pack's
+Found live wiring the `<node-c>` FreeToken agent seat: the structured re-pack's
 grammar call rides the native llama-server completion route, which an
 OpenAI-only engine does not serve — llama-swap proxies it, the engine 404s
 with HTML, and the re-pack read "invalid json: invalid character '<'". A seat
@@ -8007,8 +8007,8 @@ donor enum returns `["cpu","cuda:0","cuda:1"]` and the krea2 pooled graph valida
   each aligned window of `len(nodes)` slots still gives every eligible seat at most one subtask.
   This is not a refinement, it is the whole safety property: an unconstrained re-pick sends the
   smallest seat every mechanical subtask and the roomiest every reasoning one. Measured on a
-  `{local, qube 131k, aorus 32k, lenovo 32k}` roster — 8 mechanical subtasks landed
-  `local 2 / aorus 4 / lenovo 2 / qube 0` and 8 reasoning subtasks landed `local 2 / qube 6`, with
+  `{local, <node-b> 131k, <node-a> 32k, <node-c> 32k}` roster — 8 mechanical subtasks landed
+  `local 2 / <node-a> 4 / <node-c> 2 / <node-b> 0` and 8 reasoning subtasks landed `local 2 / <node-b> 6`, with
   `runConcurrency = 4` dispatching siblings to the same seat while another sat idle. That is the
   stacking `route:"spread"` was built to remove. Constrained, both deal `2/2/2/2`, mechanical
   dispatching the small seats first and reasoning the roomiest first.
@@ -8031,7 +8031,7 @@ donor enum returns `["cpu","cuda:0","cuda:1"]` and the krea2 pooled graph valida
   leaves the rotation's pick in place — and the placement test goes red in both directions, the
   mechanical contract landing on the big seat and the reasoning one on the small seat. (b) Drop the
   cycle bookkeeping so the fit score re-picks freely, and the fan-out test goes red reproducing the
-  collapse above exactly (`qube 0` under mechanical, `qube 6` under reasoning). The fan-out test
+  collapse above exactly (`<node-b> 0` under mechanical, `<node-b> 6` under reasoning). The fan-out test
   uses an UNEQUAL-ceiling roster on purpose: with equal ceilings every implementation passes, which
   is how such a collapse ships green.
 
@@ -8367,7 +8367,7 @@ donor enum returns `["cpu","cuda:0","cuda:1"]` and the krea2 pooled graph valida
 ## [0.94.0] - 2026-08-25
 
 ### Changed — ampere-8 agent seat: qwen3.5-9b adopted on its own reference bake (twin parity restored)
-- Operator-approved 2026-08-25 after the tier's OWN on-reference leg-2 quality bake (Aorus RTX 3070,
+- Operator-approved 2026-08-25 after the tier's OWN on-reference leg-2 quality bake (`<node-a>` RTX 3070,
   2026-08-24; blackwell-8 protocol replicated exactly — same fixtures/grader, fresh server per rep,
   /props-verified, n=2 per shape, thinking OFF): **9B think-off 100%x2 extraction + 5/5x2
   search+reason at 3 steps (6s reasoning wall)** vs the E4B incumbent's **0%x2 extraction** (zero
@@ -8383,7 +8383,7 @@ donor enum returns `["cpu","cuda:0","cuda:1"]` and the krea2 pooled graph valida
   detect/plan/render/acceptance on the reference box (acceptance 6/6 PASS; the box's BOM-corrupt
   home config was repaired bytewise, backup kept).
 - Tier-matrix xlsx regenerated FIRST and row-verified (ground-truth rule). Evidence:
-  `Benchmarks and Optimizations/2026-08-24-aorus-ampere8-standup.md`.
+  `Benchmarks and Optimizations/2026-08-24-node-a-ampere8-standup.md`.
 - `install-config-seed.test.ps1` pin flipped: asserts the adopted seat (both halves + 32K).
 
 ## [0.93.2] - 2026-08-25
@@ -8398,7 +8398,7 @@ donor enum returns `["cpu","cuda:0","cuda:1"]` and the krea2 pooled graph valida
 ## [0.93.1] - 2026-08-25
 
 ### Fixed — `video_watch`: a truncated window is kept as partial evidence
-- First live sweep on the OptiPlex (30-s short, 4 windows) lost 2 windows to `vision output
+- First live sweep on `<node-e>` (30-s short, 4 windows) lost 2 windows to `vision output
   truncated`: 8 verbose per-frame notes overflowed the 400-token per-window budget and the
   window was dropped, so the synthesis reported those seconds as unverified. Now: the per-window
   prompt asks for COMPACT one-line notes (`<T s> …`, `same` for unchanged frames), the budget is
@@ -8410,8 +8410,8 @@ donor enum returns `["cpu","cuda:0","cuda:1"]` and the krea2 pooled graph valida
 ### Added — `video-watch` / `offload_video_watch`: watch a video END TO END
 - `video_describe` samples `video_max_frames` at `video_fps` from the HEAD of a file — on the
   defaults (12 @ 2 fps) it sees the first six seconds of a thirty-second short and answers
-  "I cannot tell" about the rest (measured 2026-08-24 on the OptiPlex 7060 while reviewing a
-  Danmar RX-8 short). `video_watch` removes that ceiling: it probes the duration (ffprobe next
+  "I cannot tell" about the rest (measured 2026-08-24 on `<node-e>` while reviewing a
+  MyTools RX-8 short). `video_watch` removes that ceiling: it probes the duration (ffprobe next
   to `ffmpeg_path`), plans fixed windows (`window_sec`, default 8), samples each window at `fps`
   (default 1 frame per second of the ENTIRE file, `max_frames`/`frame_width` per window), runs
   every window through the SAME per-call machinery as `video_describe` (cache keyed on the
@@ -8443,7 +8443,7 @@ donor enum returns `["cpu","cuda:0","cuda:1"]` and the krea2 pooled graph valida
   permissively-licensed image model) via the ComfyUI engine (`imagegen_engine:""`,
   `imagegen_family:"hidream-o1-dev"`, `imagegen_ckpt:"hidream_o1_image_dev_mxfp8.safetensors"`,
   `imagegen_script:comfy-generate.mjs`, 28 steps / cfg 1; VAE + text-encoder come from the
-  checkpoint). **Validated on-box** 2026-08-25 on the OptiPlex 7060 reference box: 2048^2 render,
+  checkpoint). **Validated on-box** 2026-08-25 on the `<node-e>` reference box: 2048^2 render,
   ~118 s incl. cold load, editorial quality, ~7.8 GB peak (fits 8 GB with minimal RAM offload).
 - **Z-Image Turbo demoted to the operator-selectable SPEED opt-in** — the `sdcpp_*` keys are
   retained in the seed; flip `imagegen_engine` to `"sdcpp"` + `imagegen_family` to `"z-image-turbo"`
@@ -8630,7 +8630,7 @@ cross-seat retry fires), and three authoring shapes — each MEASURED in the sta
 quietly disable it: PARROT-PASSABLE (every content check also satisfied by the goal text; an
 echoed question passes as verified and the retry never fires — 5/5 of the first organic
 contracts), UNGROUNDED (`contains:`/`regex:` matching nothing in the contract's own context
-docs — `contains:OptiPlex` failed both seats on a task both did right), and SHAPE-ONLY
+docs — `contains:Zorblax` failed both seats on a task both did right), and SHAPE-ONLY
 (`nonempty:`/`min_items:` alone — "the docs directory does not exist" passed
 `nonempty:summary`).
 
@@ -8649,9 +8649,9 @@ docs — `contains:OptiPlex` failed both seats on a task both did right), and SH
 
 ### Changed — blackwell-8 media roster: measured seats for the editor box (operator-approved)
 
-The blackwell-8 tier encodes the roster MEASURED on its reference box (OptiPlex 7060,
+The blackwell-8 tier encodes the roster MEASURED on its reference box (`<node-e>`,
 2026-08-23 nightshift; full results: the ecosystem benchmarks doc
-`2026-08-23-dell-media-roster-research.md` §0-R):
+on media-roster research, 2026-08-23, §0-R):
 
 - **Video (REVERSAL of the 2026-07-23 "IMAGE ONLY on 8GB" decision, by the operator, for
   this tier's editor role):** `config_seed_ram_mid_high` seeds the wan22 I2V lane —
@@ -8735,7 +8735,7 @@ MCP surface had 7 NPU tools while a loop on the same box had zero:
 The blackwell-8 tier seats **Qwen3.5-9B UD-Q4_K_XL** as its agent planner
 (`include_qwen35_9b` + `config_seed.agent_model: qwen3.5-9b-agent`), replacing the
 E4B-by-fallback lane that the 2026-08-22 on-box quality bake measured at **0% extraction
-×2** (zero tool calls) on the tier's own reference box (OptiPlex 7060, RTX 5060 8GB).
+×2** (zero tool calls) on the tier's own reference box (`<node-e>`, RTX 5060 8GB).
 The seated configuration swept the same bake: **100% extraction ×2 + 5/5 search+reason ×2**
 under default (off) thinking, at **6344 MiB @16K / 6696 MiB @32K** — the Gated-DeltaNet
 hybrid's small KV is why a 9B fits an 8GB card at 32K, and the entry serves an explicit
@@ -8754,9 +8754,9 @@ reference copy; deliberately NOT family-gated — it is the only thing between t
 lane and a 0% planner), and `warnMissingGatedModels`. The 4B and 9B seats are **mutually
 exclusive** (both claim the `agent-seat` alias): `Render` refuses a tier setting both, and
 the profile table is lint-pinned. SECOND deliberate twin-parity break: **ampere-8 keeps its
-E4B fallback lane** pending its own on-box bake (Aorus offline; seat-lifecycle rule) —
+E4B fallback lane** pending its own on-box bake (`<node-a>` offline; seat-lifecycle rule) —
 recorded in both tiers' notes. Deploys to existing boxes are config-regen + weight
-download; the Dell (powered off today) picks the seat up at its next config regen.
+download; `<node-e>` (powered off today) picks the seat up at its next config regen.
 
 ## [0.83.0] - 2026-08-22
 
@@ -8767,7 +8767,7 @@ mirrored every seed layer EXCEPT the final one: `mediaseat.Bindings`, the sole w
 `vision_model`/`stt_model`. So a seat-declaring tier rendered its vision/STT seats into
 llama-swap.yaml while writing a config.json that never routed to them — `offload_vqa`/
 `offload_ocr`/`offload_transcribe` deferred "no route" with the seats sitting in the roster
-(field case: OptiPlex 7060 blackwell-8, 2026-08-22, wired by hand). New
+(field case: `<node-e>` blackwell-8, 2026-08-22, wired by hand). New
 `Get-MediaSeatBindings` mirrors the Go rule (change `tierseed.Resolve` FIRST, then the copy)
 and merges as the last tier layer, before the accelerator seed. Closure-tested across every
 seat-declaring tier in `install-config-seed.test.ps1`.
@@ -8859,8 +8859,8 @@ recorded at the source, on every delegate run, both arms:
 
 - **`route: "spread"`** for `agent_delegate` / `delegate`: one call deals its subtasks round-robin across
   the local seat AND every fleet node that passes the hard gate, concurrently. Measured on 2026-08-21
-  before this existed: four concurrent contracts under `auto` all ran on Qube's 27B seat ("local
-  idle"), and under `remote` all four ran on Lenovo — the fleet never ran in parallel from one call.
+  before this existed: four concurrent contracts under `auto` all ran on `<node-b>`'s 27B seat ("local
+  idle"), and under `remote` all four ran on `<node-c>` — the fleet never ran in parallel from one call.
 - **Retry on a different node** after `failed_verification` or an `abstention` defer: one more attempt
   (local → best eligible remote, remote → local) under a fresh job id; the better attempt is published
   with `retried_on` / `retry_note`, the summary gains `retried` / `retry_recovered`. Transport
@@ -9020,7 +9020,7 @@ are the remaining instances found by the memory-frontier Phase 2 re-aim pass.
 
 ## [0.75.0] - 2026-08-20
 ### blackwell-8 image seat: Z-Image + SDXL (operator decision 2026-08-20)
-The tier's reference box exists now (OptiPlex 7060, RTX 5060 8GB @ Gen3 x4, rebuilt 2026-08-19),
+The tier's reference box exists now (`<node-e>`, RTX 5060 8GB @ Gen3 x4, rebuilt 2026-08-19),
 and the operator decided its image lane: **Z-Image Turbo primary** via the sdcpp engine — the
 amd-rdna3-proven binding (Q8_0 diffusion GGUF + zimage_ae VAE + Qwen3-4B text encoder,
 steps 8 / cfg 1) — with **SDXL pre-staged** on the ComfyUI route (`imagegen_ckpt`
@@ -9031,7 +9031,7 @@ renders mush on RealVis). `vae_mode` is `tiling`, not the AMD seed's `cpu`: the 
 rejected the verbatim copy with its measured reason (cpu = 7.8x slower on CUDA backends) —
 the gate working as designed. This DELIBERATELY breaks ampere-8/blackwell-8 field parity on
 hardware grounds (sm_120 FP8-class model); ampere-8 keeps HiDream-O1, its one verified
-measurement, and both tiers' notes record the split. The Dell's LIVE config is owned by its
+measurement, and both tiers' notes record the split. `<node-e>`'s LIVE config is owned by its
 own session; this seed is the durable tier encoding for fresh installs.
 
 ## [0.74.0] - 2026-08-19
@@ -9529,7 +9529,7 @@ re-packs the agent loop's final text into the contract's `output_schema` with on
 completion on the same seat. A THINKING chat template (Qwen3-class) emits that grammar-constrained
 output into `reasoning_content` and returns `content` EMPTY — so the re-pack failed, retried, failed
 again, and the run deferred as `abstention` with `output failed schema: invalid json: unexpected end
-of JSON input`, discarding a result the loop had already produced correctly. Qube's own agent seat
+of JSON input`, discarding a result the loop had already produced correctly. `<node-b>`'s own agent seat
 (`qwen3.8-27b`, the Leg-1 winner) is a thinking model, so this broke the quality-first default path.
 
 **The trigger is the grammar, not the budget.** Measured live against `http://127.0.0.1:11436`, same
@@ -11005,7 +11005,7 @@ Docs-only: no `VERSION` bump, matching the repo's precedent for #93 and #99.
 with `-ngl 99` on the utility card (operator decision 2026-08-13). The `-ngl 0` pin was
 an 8 GB-era carryover that cost 2.4–4.6 s per 20-doc rerank against ~143 ms typical on
 GPU (measured on the reference box). Small-VRAM tiers deliberately keep CPU: the
-linux (Lenovo-class) template is unchanged. Raw-logit scores are device-independent,
+linux (edge-node-class) template is unchanged. Raw-logit scores are device-independent,
 so downstream threshold calibration (mem0 admission gate) is unaffected. Brings the
 template back in parity with the live <node-b> config, which was flipped the same day —
 template regeneration would previously have silently reverted the fix.
@@ -11672,7 +11672,7 @@ TEMPLATE, not just the card, because that is what decides whether VRAM is additi
   roughly half of the ~11 GB the original design left for 64K q8_0 KV, leaving ~5 GB. The 8B (~10 GB)
   would not fit at all. Nothing swaps on this template, so an operator who finds KV tight should drop a
   seat rather than expect recovery. **`blackwell-48`/`72`** have real room for the 8B (~33 of 48/72 GB).
-- **`amd-rdna3` (Juan's tier, the D9 audit gap) and `amd-rdna3-dgpu`** — STT via the whisper.cpp Vulkan
+- **`amd-rdna3` (a contributor's tier, the D9 audit gap) and `amd-rdna3-dgpu`** — STT via the whisper.cpp Vulkan
   build; vision reuses the tier's resident E4B+mmproj and keeps the CLIP encoder on CPU
   (`--no-mmproj-offload`). Both pin the Vulkan ICD. The dgpu variant keeps the smaller seat as a
   CONSERVATIVE choice for an unmeasured Vulkan part — not because a 10 GB seat could not fit: it is
@@ -12163,8 +12163,8 @@ had gone stale against `groups:` in 0.36.0 (that suite is not in CI, so it drift
   volume, which is selectable only with `--allow-os-volume` and is then recorded as a deliberate
   choice; among the rest most free space wins.
   - **Ties break on path depth, then name.** On ZFS every dataset of a pool reports the same free
-    space, so a name-only tie-break puts the harness under whatever sorts first — measured on the
-    Lenovo, that is `/srv/apps/adventurelog` rather than the pool root.
+    space, so a name-only tie-break puts the harness under whatever sorts first — measured on
+    `<node-c>`, that is `/srv/apps/adventurelog` rather than the pool root.
   - Selection (`internal/volumes.Pick`) is **pure and unit-tested**; only enumeration is
     platform-specific (kernel32 on Windows, `/proc/mounts` + `statfs` on Unix), so the policy cannot
     drift between operating systems. Free space uses the UNPRIVILEGED figure on Unix (`Bavail`, not
@@ -12739,7 +12739,7 @@ had gone stale against `groups:` in 0.36.0 (that suite is not in CI, so it drift
 
 ## [0.22.22] - 2026-07-24
 
-### Added — J4: 8GB-tier first-class sub-item + per-box device seams (Juan-tier Q0, phase 4 of 5)
+### Added — J4: 8GB-tier first-class sub-item + per-box device seams (amd-rdna3-tier Q0, phase 4 of 5)
 - **RAM-conditional 8GB media seed**: `ampere-8`/`blackwell-8` carry `config_seed_ram_mid_high` —
   install.ps1 merges it on top of the base seed ONLY when `ram_tier` is mid/high (the same RAM
   gate as the 26B cpu-moe path): the VERIFIED quality-first HiDream-O1 bf16 IMAGE seat (5.9
@@ -12755,7 +12755,7 @@ had gone stale against `groups:` in 0.36.0 (that suite is not in CI, so it drift
 
 ## [0.22.21] - 2026-07-24
 
-### Added — J3: fleet-node citizenship for non-NVIDIA GPUs (Juan-tier Q0, phase 3 of 5)
+### Added — J3: fleet-node citizenship for non-NVIDIA GPUs (amd-rdna3-tier Q0, phase 3 of 5)
 - **GPU memory provider seam** (ADR 0014): `fleet-serve` resolves its memory source instead of
   assuming `nvidia-smi` — nvidia-smi first (existing NVIDIA nodes byte-identical), else the
   **windows-generic WDDM provider**: capacity from the display-class registry
@@ -12779,7 +12779,7 @@ had gone stale against `groups:` in 0.36.0 (that suite is not in CI, so it drift
 
 ## [0.22.20] - 2026-07-24
 
-### Added — J2: the sd.cpp media tier (Juan-tier Q0, phase 2 of 5)
+### Added — J2: the sd.cpp media tier (amd-rdna3-tier Q0, phase 2 of 5)
 - **Second image engine.** `imagegen_engine:"sdcpp"` routes `generate_image` to
   **stable-diffusion.cpp** via the new `render/sdcpp-generate.mjs` — a single native Vulkan
   binary, spawn-per-job under the shared GPU lock, zero-warm by construction, no ComfyUI/Python
@@ -12812,7 +12812,7 @@ had gone stale against `groups:` in 0.36.0 (that suite is not in CI, so it drift
 
 ## [0.22.19] - 2026-07-24
 
-### Added — J1: the AMD RDNA3 text tier goes first-class (Juan-tier Q0, phase 1 of 5)
+### Added — J1: the AMD RDNA3 text tier goes first-class (amd-rdna3-tier Q0, phase 1 of 5)
 - **H3 canary suite in `selftest.ps1`** (new `receipt.canaries` block; runs by default on a
   Vulkan backend, `OFFLOAD_SELFTEST_CANARIES=1|0` forces on/off; never verdict-changing —
   each PASS *authorizes* one config promotion the installing agent applies per the runbook):
