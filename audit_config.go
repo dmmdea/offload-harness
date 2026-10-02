@@ -204,6 +204,52 @@ func withLiveAccelerators(seed, live map[string]any, doc tierseed.Doc, home, goo
 
 var errConfigDrift = errors.New("config drift")
 
+// auditDetectRAMTier is this machine's RAM tier (min|low|mid|high), the same value `detect` stamps.
+// It is a variable so a test can speak for a box of another size.
+var auditDetectRAMTier = func() string { return hwdetect.Classify(hwdetect.Detect()).RAMTier }
+
+// auditRAMResolution is which RAM tier an audit compared against and where that came from.
+type auditRAMResolution struct {
+	Tier    string // min|low|mid|high, or "none" when the overlay was switched off
+	Source  string // "detected" or "--ram-tier"
+	Overlay string // the RAM tier handed to tierseed.Options: "mid"|"high", or "" for the base seed alone
+}
+
+// resolveAuditRAMTier turns --ram-tier into the overlay the audit compares. Empty and "auto" mean the
+// tier this box detects: the installer applies the RAM overlay on a mid/high box, so an audit of the
+// BASE seed alone calls every overlay-carried key drift (23 of 38 rows on an 8 GB card with 64 GB RAM).
+// "none" keeps the base-seed comparison selectable. Only mid and high have an overlay (tierseed).
+func resolveAuditRAMTier(flag string, detect func() string) (auditRAMResolution, error) {
+	v := strings.ToLower(strings.TrimSpace(flag))
+	source := "--ram-tier"
+	if v == "" || v == "auto" {
+		v, source = strings.ToLower(strings.TrimSpace(detect())), "detected"
+	}
+	switch v {
+	case "mid", "high":
+		return auditRAMResolution{Tier: v, Source: source, Overlay: v}, nil
+	case "min", "low", "none":
+		return auditRAMResolution{Tier: v, Source: source}, nil
+	}
+	return auditRAMResolution{}, fmt.Errorf("audit-config: --ram-tier must be auto, none, min, low, mid or high, got %q (%s)", flag, source)
+}
+
+// describe says in words which seed the audit compared: the overlay's own name, or the base alone.
+func (r auditRAMResolution) describe() string {
+	if r.Overlay != "" {
+		return "base seed + config_seed_ram_mid_high overlay"
+	}
+	return "base seed only, no RAM overlay"
+}
+
+// ramOverlayName is the JSON spelling of the overlay compared: its config key, or "none".
+func ramOverlayName(r auditRAMResolution) string {
+	if r.Overlay != "" {
+		return "config_seed_ram_mid_high"
+	}
+	return "none"
+}
+
 func runAuditConfig(args []string) error {
 	fs := flag.NewFlagSet("audit-config", flag.ExitOnError)
 	cfgFlag := fs.String("config", "", "config file to audit (default: the harness's own resolution — $LOCAL_OFFLOAD_CONFIG, ./config.json, ~/.local-offload/config.json)")
@@ -216,7 +262,7 @@ func runAuditConfig(args []string) error {
 	// against a seed the installer would never have written - e.g. a vLLM box against its FALLBACK
 	// agent - and reports drift that is its own artifact.
 	goos := fs.String("goos", "", "target OS whose seed to compare against (default: this platform)")
-	ramTier := fs.String("ram-tier", "", "RAM tier overlay the installer would apply (mid | high; default: none)")
+	ramTier := fs.String("ram-tier", "", "RAM tier whose overlay to compare against: auto (this machine's detected RAM tier, as install applies; the default) | none (the base seed alone) | min | low | mid | high")
 	vllmSeat := fs.String("vllm-seat-active", "auto", "whether this node serves the tier's vLLM agent seat: auto (detect locally, as install does) | true | false")
 	vllmVenv := fs.String("vllm-venv", "", "hand-built vLLM virtualenv for auto detection (default: <home>/vllm-env)")
 	hfHome := fs.String("hf-home", "", "HF cache root for auto detection (default: $HF_HOME, else <home>/hf)")
@@ -282,8 +328,12 @@ func runAuditConfig(args []string) error {
 	default:
 		return fmt.Errorf("audit-config: --vllm-seat-active must be auto, true or false, got %q", *vllmSeat)
 	}
+	ram, err := resolveAuditRAMTier(*ramTier, auditDetectRAMTier)
+	if err != nil {
+		return err
+	}
 	seed, err := tierseed.Resolve(p, tier, tierseed.Options{
-		Home: installHome, GOOS: *goos, RAMTier: *ramTier, VLLMSeatActive: vllmActive, ExtraVLLMSeatsActive: extraActive,
+		Home: installHome, GOOS: *goos, RAMTier: ram.Overlay, VLLMSeatActive: vllmActive, ExtraVLLMSeatsActive: extraActive,
 	})
 	if err != nil {
 		return fmt.Errorf("audit-config: resolve %s: %w", tier, err)
@@ -302,15 +352,17 @@ func runAuditConfig(args []string) error {
 
 	if *asJSON {
 		b, err := json.MarshalIndent(map[string]any{
-			"config": path, "tier": tier, "tier_source": tierSource, "drifted": drifted, "findings": findings,
+			"config": path, "tier": tier, "tier_source": tierSource,
+			"ram_tier": ram.Tier, "ram_tier_source": ram.Source, "ram_overlay": ramOverlayName(ram),
+			"drifted": drifted, "findings": findings,
 		}, "", "  ")
 		if err != nil {
 			return err
 		}
 		fmt.Println(string(b))
 	} else {
-		fmt.Printf("audit-config: %s against tier %s (from %s; goos=%q ram-tier=%q vllm-seat-active=%v)\n",
-			path, tier, tierSource, *goos, *ramTier, vllmActive)
+		fmt.Printf("audit-config: %s against tier %s (from %s; goos=%q ram-tier=%s (%s; %s) vllm-seat-active=%v)\n",
+			path, tier, tierSource, *goos, ram.Tier, ram.Source, ram.describe(), vllmActive)
 		for _, f := range findings {
 			if f.Class == driftMatch && !*showMatch {
 				continue

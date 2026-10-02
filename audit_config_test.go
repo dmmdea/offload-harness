@@ -122,6 +122,7 @@ func TestSeedOwnedKeysIncludeTheAcceleratorKeys(t *testing.T) {
 // audit-config against that tier and returns what it printed and whether it reported drift.
 func auditNode(t *testing.T, tier, home string, extra map[string]any, adjust func(live map[string]any)) (string, error) {
 	t.Helper()
+	stubDetectedRAMTier(t, "min") // hermetic: the audit would otherwise read this machine's RAM
 	doc, err := tierseed.LoadDoc(".")
 	if err != nil {
 		t.Fatal(err)
@@ -284,6 +285,143 @@ func TestAuditConfigSeedOwnsTheRK3588UnconstrainedSeats(t *testing.T) {
 		got := classifyConfigDrift(seed, tc.live, owned, isBindingKey)
 		if len(got) != 1 || got[0].Key != "unconstrained_seats" || got[0].Class != tc.want {
 			t.Errorf("%s: got %+v, want one %s finding", tc.name, got, tc.want)
+		}
+	}
+}
+
+// stubDetectedRAMTier makes the audit see a box of the given RAM tier, whatever machine runs the suite.
+func stubDetectedRAMTier(t *testing.T, tier string) {
+	t.Helper()
+	prev := auditDetectRAMTier
+	auditDetectRAMTier = func() string { return tier }
+	t.Cleanup(func() { auditDetectRAMTier = prev })
+}
+
+// The audit must compare the seed the installer WOULD write on this box, and that includes the RAM
+// overlay of the tier the box detects. `none` stays selectable, and a RAM tier below mid has no overlay.
+func TestResolveAuditRAMTier(t *testing.T) {
+	cases := []struct {
+		flag, detected string
+		overlay, tier  string
+		source         string
+		wantErr        bool
+	}{
+		{"", "mid", "mid", "mid", "detected", false},
+		{"auto", "high", "high", "high", "detected", false},
+		{"", "low", "", "low", "detected", false},
+		{"", "min", "", "min", "detected", false},
+		{"none", "mid", "", "none", "--ram-tier", false},
+		{"mid", "low", "mid", "mid", "--ram-tier", false},
+		{"HIGH", "min", "high", "high", "--ram-tier", false},
+		{"low", "high", "", "low", "--ram-tier", false},
+		{"huge", "mid", "", "", "", true},
+	}
+	for _, c := range cases {
+		got, err := resolveAuditRAMTier(c.flag, func() string { return c.detected })
+		if (err != nil) != c.wantErr {
+			t.Errorf("flag %q detected %q: err=%v, wantErr=%v", c.flag, c.detected, err, c.wantErr)
+			continue
+		}
+		if c.wantErr {
+			continue
+		}
+		if got.Overlay != c.overlay || got.Tier != c.tier || got.Source != c.source {
+			t.Errorf("flag %q detected %q: got %+v, want overlay=%q tier=%q source=%q", c.flag, c.detected, got, c.overlay, c.tier, c.source)
+		}
+	}
+}
+
+// auditRAMNode audits a node whose config is blackwell-8's seed WITH the mid RAM overlay applied
+// (what an install on a 64 GB box writes), under the given extra flags.
+func auditRAMNode(t *testing.T, flags ...string) (string, error) {
+	t.Helper()
+	doc, err := tierseed.LoadDoc(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	home := t.TempDir()
+	seed, err := tierseed.Resolve(doc.Profiles["blackwell-8"], "blackwell-8", tierseed.Options{Home: home, GOOS: "linux", RAMTier: "mid"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(cfg, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var runErr error
+	out := captureStdout(t, func() {
+		runErr = runAuditConfig(append([]string{"--config", cfg, "--tier", "blackwell-8", "--root", ".", "--home", home,
+			"--goos", "linux", "--vllm-seat-active", "false"}, flags...))
+	})
+	return out, runErr
+}
+
+// The false positive this fixes: a 64 GB box carries the overlay, the default audit compared the
+// base seed only and called every overlay key drift.
+func TestAuditConfigDefaultsToTheDetectedRAMTier(t *testing.T) {
+	stubDetectedRAMTier(t, "mid")
+	out, err := auditRAMNode(t)
+	if err != nil {
+		t.Fatalf("a mid-RAM box carrying the mid overlay must audit clean by default, got %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "ram-tier=mid") || !strings.Contains(out, "detected") || !strings.Contains(out, "config_seed_ram_mid_high") {
+		t.Errorf("the text output must say which RAM overlay was compared, got:\n%s", out)
+	}
+}
+
+// `none` stays selectable: the base seed alone, so the overlay-carried keys read as drift again.
+func TestAuditConfigRAMTierNoneComparesTheBaseSeed(t *testing.T) {
+	stubDetectedRAMTier(t, "mid")
+	out, err := auditRAMNode(t, "--ram-tier", "none")
+	if !errors.Is(err, errConfigDrift) {
+		t.Fatalf("--ram-tier none compares the base seed, so a node carrying the overlay must drift, got %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "ram-tier=none") || !strings.Contains(out, "base seed only") {
+		t.Errorf("the text output must say the base seed alone was compared, got:\n%s", out)
+	}
+}
+
+// A detected tier below mid has no overlay: the audit compares the base seed and says so.
+func TestAuditConfigDetectedLowRAMHasNoOverlay(t *testing.T) {
+	stubDetectedRAMTier(t, "low")
+	out, err := auditRAMNode(t)
+	if !errors.Is(err, errConfigDrift) {
+		t.Fatalf("a low-RAM box has no overlay, so a node carrying one must drift, got %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "ram-tier=low") || !strings.Contains(out, "base seed only") {
+		t.Errorf("got:\n%s", out)
+	}
+}
+
+func TestAuditConfigRejectsAnUnknownRAMTier(t *testing.T) {
+	stubDetectedRAMTier(t, "mid")
+	_, err := auditRAMNode(t, "--ram-tier", "huge")
+	if err == nil || errors.Is(err, errConfigDrift) || !strings.Contains(err.Error(), "ram-tier") {
+		t.Fatalf("an unknown --ram-tier must be refused by name, got %v", err)
+	}
+}
+
+func TestAuditConfigJSONNamesTheRAMOverlay(t *testing.T) {
+	stubDetectedRAMTier(t, "mid")
+	for _, c := range []struct {
+		flags            []string
+		tier, src, overl string
+	}{
+		{nil, "mid", "detected", "config_seed_ram_mid_high"},
+		{[]string{"--ram-tier", "none"}, "none", "--ram-tier", "none"},
+	} {
+		out, _ := auditRAMNode(t, append([]string{"--json"}, c.flags...)...)
+		var rep map[string]any
+		if err := json.Unmarshal([]byte(out), &rep); err != nil {
+			t.Fatalf("--json output is not JSON: %v\n%s", err, out)
+		}
+		if rep["ram_tier"] != c.tier || rep["ram_tier_source"] != c.src || rep["ram_overlay"] != c.overl {
+			t.Errorf("flags %v: ram_tier=%v ram_tier_source=%v ram_overlay=%v, want %s / %s / %s",
+				c.flags, rep["ram_tier"], rep["ram_tier_source"], rep["ram_overlay"], c.tier, c.src, c.overl)
 		}
 	}
 }

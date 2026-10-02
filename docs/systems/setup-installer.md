@@ -345,14 +345,27 @@ regeneration of the tier matrix, which reads the seed, erased it from the record
 2026-09-21 wiring-debt audit found this pattern on every node it read.
 
 ```
-local-offload audit-config                                   # this node, its own tier
+local-offload audit-config                                   # this node, its own tier and detected RAM tier
 local-offload audit-config --config node.json --tier ampere-16 --home /srv/x     --goos linux --ram-tier mid --vllm-seat-active true      # a node read over SSH
 ```
 
 It resolves the tier seed **exactly as `install seed` does**, with the same `--goos`,
 `--ram-tier` and vLLM-seat detection. Skip them and the audit compares the node against a seed
 the installer would never have written, such as a vLLM box against its fallback agent, and
-reports drift that is its own artifact. `--vllm-seat-active auto` runs the installer's own
+reports drift that is its own artifact.
+
+`--ram-tier` defaults to **auto**: the RAM tier this machine detects (`detect` stamps the same
+value), so a 64 GB box is compared against the base seed **plus** the `config_seed_ram_mid_high`
+overlay its installer applied. It used to default to the base seed alone, and on a blackwell-8 box
+with 64 GB of RAM 23 of the 38 rows it called drifted were overlay-carried false positives. Pass
+`--ram-tier none` to compare the base seed alone, `min` or `low` to speak for a smaller box
+(neither has an overlay), or `mid` or `high` to name one explicitly, which is what a node read
+over SSH needs: the auditing machine's RAM is not the node's. An unknown value is refused.
+Both outputs say which seed was compared. The text header reads
+`ram-tier=mid (detected; base seed + config_seed_ram_mid_high overlay)` or
+`ram-tier=none (--ram-tier; base seed only, no RAM overlay)`, and `--json` carries `ram_tier`,
+`ram_tier_source` (`detected` or `--ram-tier`) and `ram_overlay` (`config_seed_ram_mid_high` or
+`none`). `--vllm-seat-active auto` runs the installer's own
 detection, which is right for the local box. Pass `true` or `false` for a remote one. The flag speaks
 for the tier's vLLM seats as a set: `true` says the node serves the lane seat and every extra seat,
 `false` none, and `auto` detects each seat on its own (the venv plus that seat's weights, and for an extra
