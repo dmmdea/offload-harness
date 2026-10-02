@@ -264,7 +264,11 @@ take no deadline.
 "subtask 2 of 8 finished (succeeded) on <node>; 3 of 8 done" — counted against the whole call, across the
 chunks of a batched research call), and a heartbeat every 30 s while nothing changes ("still working: 3
 of 8 subtasks done after 4m0s; call deadline in 20m0s"). `progress` is a running counter (the spec asks
-for a strictly increasing value; a heartbeat has no new work to count). It is strictly opt-in and
+for a strictly increasing value; a heartbeat has no new work to count). `offload_transcribe` (register C-89)
+gets the opening notification and the same 30 s heartbeat with no subtask counts ("offload_transcribe started",
+then "still working: offload_transcribe running for 4m0s"): one request to one whisper upstream is silent for as
+long as its audio takes, and it has no whole-call deadline of its own (its HTTP call is bounded by
+`stt_request_timeout_sec`, its wait for a card a render holds by `gpu_wait_ms`). It is strictly opt-in and
 additive: no token, no notification, and a slow client cannot slow a subtask (events go through a
 bounded queue that drops rather than blocks). In the MCP TypeScript client SDK the token is sent only
 when the caller passes `onprogress`, and the request timeout restarts on a progress update only when

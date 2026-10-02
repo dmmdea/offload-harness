@@ -570,11 +570,19 @@ type Config struct {
 	// STTMaxInlineSegments caps how many timestamped segments are inlined in the
 	// result (the rest live in the on-disk .segments.json pointer). Default 120.
 	STTMaxInlineSegments int `json:"stt_max_inline_segments,omitempty"`
-	// STTUnloadAfter force-unloads the whisper upstream after each transcription
-	// (zero-always-warm). Default true; set false for a known batch loop.
+	// STTUnloadAfter force-unloads the whisper upstream once the last transcription of
+	// a burst is done (zero-always-warm): concurrent calls share one load and the last
+	// one out frees it, every model the burst warmed (stt_model and stt_model_hq can
+	// share a burst), because an unload after EACH would land on the next call's
+	// inference (register C-91). A failed unload is logged and never fails the
+	// transcription. Default true; set false for a known batch loop.
 	STTUnloadAfter bool `json:"stt_unload_after,omitempty"`
 	// STTRequestTimeoutSec bounds one transcription HTTP call (long audio at
 	// 5-8x realtime). Default 1800 (30 min). Separate from RequestTimeoutSec.
+	// It does NOT set how long a transcription waits for a card a render holds: that
+	// is gpu_wait_ms (90 s by default) and this timeout only caps it (register C-89).
+	// It used to BE that wait, which is the limit at which the MCP client aborts an
+	// idle call.
 	STTRequestTimeoutSec int `json:"stt_request_timeout_sec,omitempty"`
 	// MediaDir is where transcribe writes .srt/.txt/.segments.json. Default
 	// <base>/media.

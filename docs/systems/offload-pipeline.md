@@ -200,6 +200,33 @@ empty = OCR rides `vision_model`, byte-identical to before. The alias is resolve
 through, so the call, the cache key, the circuit breaker, and the ledger all name the model that
 actually ran; `offload_status`'s roster reports the effective `ocr` model, falling back to vision.
 
+**Transcription** (`offload_transcribe`) is its own branch: the audio is converted to a 16 kHz mono wav
+and posted to the whisper upstream through llama-swap's per-model passthrough (`internal/sttclient`),
+never to the text cascade. The upstream is single-slot, so one process-wide mutex serializes the
+inference POSTs, and every call counts itself in line from its first statement until it returns. The
+zero-always-warm unload (`stt_unload_after`, default on) runs after every call but only the last one out
+does anything: `UnloadIfIdle` sends it holding that mutex, and only when no call is waiting or running
+and a model was used since the last unload. It frees every model the burst warmed on that upstream, not
+only the last call's own (`stt_model` and `stt_model_hq` can share a burst, and the call that finishes
+last knows only its own). Each model is unloaded on its own: a failure on one neither stops the others
+nor is forgotten (the model stays marked warm for the next call out, and the log names the model that
+stays loaded until its ttl), and the transcription is never failed for it. A burst of concurrent
+transcriptions therefore shares one load and pays one cold start (register C-91; the unload used to
+follow every call and landed on the next call's inference, which llama-swap answers
+`matrix: model unloaded`). A card a render holds is waited for
+`gpu_wait_ms` like every other GPU door (the HTTP timeout, `stt_request_timeout_sec`, only caps that wait), and the
+refusal is a `capacity` defer, `gpu busy: …` (register C-89). The verdict "no speech"
+(`ErrUpstreamNoSpeech`, the defer reason `empty transcript (no speech detected)`) is an upstream that
+answered 200 with an empty transcript or, on the whisper protocol only, whisper.cpp's exit on audio with
+no speech content (an empty-body 5xx, the F-35 crash) in a call that ran alone: no other transcription was
+in line from the moment it joined and this process sent no unload meanwhile, so nothing of its own can have
+taken the model away. Any other empty-body 5xx, or an answer cut off mid-read, is `ErrUpstreamVanished`:
+an unload, a swap, a restart and that crash all look the same, and with another call or an unload
+overlapping it this process cannot say which it was, so it is a failed call a caller can retry, never a
+claim that the audio is silent. The OpenAI protocol never reads no-speech off a failure (nothing says that
+path crashes on such audio). What the rule cannot see is another process doing the same to the same
+upstream: an alone call that dies that way reads as no speech.
+
 ## Important flows
 
 - [../flows/cascade-escalation-and-defer.md](../flows/cascade-escalation-and-defer.md) — the walk in
@@ -617,6 +644,8 @@ routing solver and the guard's reading and staleness rules. `internal/grounding/
   methods and where the gate is taken
 - [`internal/llamaclient/lanes.go`](../../internal/llamaclient/lanes.go) — `resolveEndpoint`, whose
   base decision the gate consumes and never re-decides
+- [`internal/sttclient/sttclient.go`](../../internal/sttclient/sttclient.go) — the whisper client: the
+  single-slot mutex, the in-line count, `UnloadIfIdle`, and where the no-speech verdict is produced
 
 ## Related docs
 
