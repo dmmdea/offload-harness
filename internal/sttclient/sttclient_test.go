@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -56,34 +57,38 @@ func TestTranscribeSerializesConcurrentCalls(t *testing.T) {
 	}
 }
 
-// TestTranscribeEmptyBody502IsNotANoSpeechVerdict (register C-91; this test pinned the
-// opposite until 2026-10-01). An empty-body 5xx is llama-swap's bare answer when its
-// connection to the upstream drops mid-request, and an unload, a swap, a restart and a
-// crash all look like that. It used to wrap ErrUpstreamNoSpeech (F-35, 2026-09-23:
-// whisper.cpp does exit on audio with no speech content), so a call whose model was
-// unloaded from under it — audio WITH speech — was reported to its caller as silent. The
-// status cannot tell the two apart, so the error says what is known, that the upstream
-// vanished, and leaves "no speech" to an upstream that answered (see nospeech_test.go).
-func TestTranscribeEmptyBody502IsNotANoSpeechVerdict(t *testing.T) {
-	resetClientState(t)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusBadGateway) // 502, empty body
-	}))
-	defer srv.Close()
-	tmp := t.TempDir()
-	wav := filepath.Join(tmp, "a.wav")
-	_ = os.WriteFile(wav, []byte("RIFF"), 0o644)
-	c := New(srv.URL, 10*time.Second)
+// TestAnEmptyBody5xxOfACallThatRanAloneIsTheNoSpeechCrash (F-35, 2026-09-23; narrowed by
+// register C-91, whose first cut read every empty-body 5xx as a vanished upstream and whose
+// review put the case that can be told apart back). An empty-body 5xx is llama-swap's bare
+// answer when its connection to the upstream drops mid-request, and whisper.cpp does exit on
+// audio with no speech content, which is exactly that. An unload, a swap or a restart looks
+// the same, but a call that ran ALONE with no unload sent has none of those to blame on this
+// process: it is the crash, the calm no-speech verdict, and a retry would only crash the
+// server again. The calls that did not run alone are in nospeech_test.go.
+func TestAnEmptyBody5xxOfACallThatRanAloneIsTheNoSpeechCrash(t *testing.T) {
+	for _, status := range []int{http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			resetClientState(t)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(status) // an empty body
+			}))
+			defer srv.Close()
+			tmp := t.TempDir()
+			wav := filepath.Join(tmp, "a.wav")
+			_ = os.WriteFile(wav, []byte("RIFF"), 0o644)
+			c := New(srv.URL, 10*time.Second)
 
-	_, err := c.Transcribe(context.Background(), "whisper-stt", wav, DefaultParams())
-	if err == nil {
-		t.Fatal("expected an error on empty-body 502")
-	}
-	if !strings.Contains(err.Error(), "empty body") || !strings.Contains(err.Error(), "vanished") {
-		t.Errorf("empty-body 502 error should say the upstream vanished mid-request; got: %v", err)
-	}
-	if errors.Is(err, ErrUpstreamNoSpeech) {
-		t.Errorf("an empty-body 502 must not be reported as no speech — an unloaded model looks the same; got: %v", err)
+			_, err := c.Transcribe(context.Background(), "whisper-stt", wav, DefaultParams())
+			if !errors.Is(err, ErrUpstreamNoSpeech) {
+				t.Fatalf("a call that ran alone and got an empty-body %d: err = %v, want ErrUpstreamNoSpeech (the F-35 crash)", status, err)
+			}
+			if errors.Is(err, ErrUpstreamVanished) {
+				t.Errorf("a call that ran alone is the crash, not a vanished upstream: %v", err)
+			}
+			if !strings.Contains(err.Error(), "empty body") {
+				t.Errorf("the error should say what was seen (an empty body); got: %v", err)
+			}
+		})
 	}
 }
 

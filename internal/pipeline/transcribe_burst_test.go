@@ -43,6 +43,9 @@ type swapStandIn struct {
 	// unloadStatus, when set, is the HTTP status an unload answers instead of 200: the unload
 	// still counts as sent, it just fails.
 	unloadStatus int
+	// inferStatus, when set, is the bare status (no body) an inference answers instead of a
+	// transcript: what llama-swap says when its connection to the model drops.
+	inferStatus int
 
 	mu       sync.Mutex
 	arrived  int
@@ -119,6 +122,10 @@ func (s *swapStandIn) inference(w http.ResponseWriter) {
 	s.mu.Unlock()
 	if aborted {
 		http.Error(w, `{"error":"unspecific error: matrix: model unloaded","src":"llama-swap"}`, http.StatusInternalServerError)
+		return
+	}
+	if s.inferStatus != 0 {
+		w.WriteHeader(s.inferStatus)
 		return
 	}
 	_, _ = w.Write([]byte(`{"language":"english","duration":1,"text":"hello","segments":[{"id":0,"start":0,"end":1,"text":"hello"}]}`))

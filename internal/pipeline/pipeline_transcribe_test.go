@@ -5,12 +5,15 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/llamaclient"
+	"github.com/dmmdea/offload-harness/internal/sttclient"
 )
 
 // No STTModel configured -> transcribe defers without converting/calling.
@@ -34,15 +37,13 @@ func TestTranscribeBadAudioDefers(t *testing.T) {
 	}
 }
 
-// TestTranscribeVanishedUpstreamIsAFailureNotNoSpeech (register C-91; this test pinned
-// the opposite from F-35, 2026-09-23, until 2026-10-01). An empty-body 5xx is the bare
-// answer of an upstream that vanished mid-request, and a model unloaded from under a
-// call looks exactly like whisper-server's exit on audio with no speech content. The F-35
-// mapping turned both into the calm "empty transcript (no speech detected)" defer, so a
-// recording with speech in it was reported to its caller as silent. Now the defer says the
-// call failed — a caller can retry it — and no-speech is reserved for an upstream that
-// answered (the next test).
-func TestTranscribeVanishedUpstreamIsAFailureNotNoSpeech(t *testing.T) {
+// TestTranscribeACrashOfACallThatRanAloneDefersAsNoSpeech (the F-35 case, 2026-09-23;
+// narrowed by register C-91, whose first cut read every empty-body 5xx as a vanished upstream,
+// and put back in its review for the case that can be told apart). whisper.cpp exits on audio
+// with no speech content, and llama-swap answers that with a bare 5xx. A call that ran alone,
+// with no unload sent by this process, has nothing of its own to blame, so it defers calmly as
+// no speech: a retry would only crash the server again and cost the restart.
+func TestTranscribeACrashOfACallThatRanAloneDefersAsNoSpeech(t *testing.T) {
 	ffmpeg := lookFFmpeg()
 	if ffmpeg == "" {
 		t.Skip("ffmpeg not on PATH; this test needs a real convert to reach the STT call")
@@ -50,7 +51,7 @@ func TestTranscribeVanishedUpstreamIsAFailureNotNoSpeech(t *testing.T) {
 	wav := makeSilentWav(t, ffmpeg)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusBadGateway) // 502, empty body: the upstream vanished
+		w.WriteHeader(http.StatusBadGateway) // 502, empty body: the crash signature
 	}))
 	defer srv.Close()
 
@@ -61,17 +62,71 @@ func TestTranscribeVanishedUpstreamIsAFailureNotNoSpeech(t *testing.T) {
 	p := gatePipeline(t, cfg, gateCache(t))
 
 	res := p.Run(context.Background(), core.Request{Task: core.TaskTranscribe, Audio: wav})
-	if res.OK {
-		t.Fatalf("want a deferred failure, got OK=true with data=%s", res.Data)
+	if res.OK || !res.Deferred {
+		t.Fatalf("want a deferred no-speech result, got OK=%v Deferred=%v data=%s", res.OK, res.Deferred, res.Data)
 	}
-	if !res.Deferred {
-		t.Fatal("want Deferred=true on an upstream that vanished")
+	if res.Reason != "empty transcript (no speech detected)" {
+		t.Errorf("reason = %q, want the calm no-speech defer for the F-35 crash of a call that ran alone", res.Reason)
 	}
-	if !strings.HasPrefix(res.Reason, "transcribe call failed:") || !strings.Contains(res.Reason, "vanished") {
-		t.Errorf("reason = %q, want the call-failed defer that says the upstream vanished", res.Reason)
+}
+
+// TestTranscribeCallsThatLoseTheUpstreamTogetherFailInsteadOfClaimingNoSpeech (register C-91):
+// two calls overlap and the upstream answers both with the same bare 5xx. Either may have been
+// hurt by the other (an unload, a swap, a restart), so neither is told its audio was silent:
+// the defer says the call failed and the upstream vanished, which a caller can retry.
+func TestTranscribeCallsThatLoseTheUpstreamTogetherFailInsteadOfClaimingNoSpeech(t *testing.T) {
+	ffmpeg := lookFFmpeg()
+	if ffmpeg == "" {
+		t.Skip("ffmpeg not on PATH; this test needs a real convert to reach the STT call")
 	}
-	if strings.Contains(res.Reason, "(no speech detected)") {
-		t.Errorf("reason claims the audio had no speech although nothing answered: %q", res.Reason)
+	isolateSwapKeepSet(t)
+	cfg := gateCfg(t)
+	cfg.MediaDir = t.TempDir()
+	cfg.FFmpegPath = ffmpeg
+	fake := newSwapStandIn(t, cfg.STTModel, time.Millisecond)
+	fake.inferStatus = http.StatusBadGateway
+	cfg.Endpoint = fake.srv.URL
+	p := gatePipeline(t, cfg, nil)
+
+	var wg sync.WaitGroup
+	var a, b core.Result
+	run := func(out *core.Result) {
+		wav := makeSilentWav(t, ffmpeg)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			*out = p.Run(context.Background(), core.Request{Task: core.TaskTranscribe, Audio: wav})
+		}()
+	}
+	run(&a)
+	select {
+	case <-fake.firstN:
+	case <-time.After(30 * time.Second):
+		close(fake.hold)
+		t.Fatal("call A never reached the upstream")
+	}
+	run(&b)
+	for deadline := time.Now().Add(30 * time.Second); sttclient.Pending() < 2; time.Sleep(5 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			close(fake.hold)
+			wg.Wait()
+			t.Fatalf("call B never got in line behind A (pending = %d)", sttclient.Pending())
+		}
+	}
+	close(fake.hold)
+	wg.Wait()
+
+	for name, res := range map[string]core.Result{"A": a, "B": b} {
+		if res.OK || !res.Deferred {
+			t.Errorf("call %s: want a deferred failure, got OK=%v Deferred=%v", name, res.OK, res.Deferred)
+			continue
+		}
+		if !strings.HasPrefix(res.Reason, "transcribe call failed:") || !strings.Contains(res.Reason, "vanished") {
+			t.Errorf("call %s: reason = %q, want the call-failed defer that says the upstream vanished", name, res.Reason)
+		}
+		if strings.Contains(res.Reason, "(no speech detected)") {
+			t.Errorf("call %s: reason claims the audio had no speech although another call overlapped it: %q", name, res.Reason)
+		}
 	}
 }
 

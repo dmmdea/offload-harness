@@ -216,10 +216,16 @@ follow every call and landed on the next call's inference, which llama-swap answ
 `matrix: model unloaded`). A card a render holds is waited for
 `gpu_wait_ms` like every other GPU door (the HTTP timeout, `stt_request_timeout_sec`, only caps that wait), and the
 refusal is a `capacity` defer, `gpu busy: …` (register C-89). The verdict "no speech"
-(`ErrUpstreamNoSpeech`, the defer reason `empty transcript (no speech detected)`) is reserved for an
-upstream that answered 200 with an empty transcript. An upstream that vanished mid-request — an empty-body
-5xx, or an answer cut off mid-read, which an unload, a swap, a restart and whisper.cpp's exit on audio with
-no speech content all produce — is a failed call a caller can retry, never a claim that the audio is silent.
+(`ErrUpstreamNoSpeech`, the defer reason `empty transcript (no speech detected)`) is an upstream that
+answered 200 with an empty transcript or, on the whisper protocol only, whisper.cpp's exit on audio with
+no speech content (an empty-body 5xx, the F-35 crash) in a call that ran alone: no other transcription was
+in line from the moment it joined and this process sent no unload meanwhile, so nothing of its own can have
+taken the model away. Any other empty-body 5xx, or an answer cut off mid-read, is `ErrUpstreamVanished`:
+an unload, a swap, a restart and that crash all look the same, and with another call or an unload
+overlapping it this process cannot say which it was, so it is a failed call a caller can retry, never a
+claim that the audio is silent. The OpenAI protocol never reads no-speech off a failure (nothing says that
+path crashes on such audio). What the rule cannot see is another process doing the same to the same
+upstream: an alone call that dies that way reads as no speech.
 
 ## Important flows
 
