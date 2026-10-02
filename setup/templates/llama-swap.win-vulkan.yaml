@@ -8,7 +8,7 @@
 # / MOE-26B tokens from setup/templates/profiles.json. amd-rdna3 renders 16K/f16/
 # FA-on as the SAFE FLOOR (selftest's H3 canaries measure the promotions: ctx 32K,
 # q8_0 KV, 26B full-offload — the agent applies them canary-gated per SETUP-AGENT.md);
-# amd-rdna3-dgpu renders 32K/q8_0 (discrete card); amd-gcn renders 32K/f16/FA-on (32K + FA measured +4 % pp on binxarn 2026-09-20)
+# amd-rdna3-dgpu renders 32K/q8_0 (discrete card); amd-gcn renders 32K/f16/FA-on (32K + FA measured +4 % pp on <node-f> 2026-09-20)
 # (weakest path). If the selftest hits allocation failures, the 26B profile switches
 # to cpu-moe (experts in RAM).
 #
@@ -67,7 +67,7 @@ models:
   # AGENT seat for the SMALL tiers: Qwen3.5-4B, gated on the tier's include_qwen35_4b
   # exactly as on linux-vulkan (the renderer strips the block, its matrix var and its
   # set membership together). A tier is a hardware class: amd-gcn declares this seat
-  # (measured 2026-09-20 on binxarn — the E2B planner and the E4B workhorse both fail
+  # (measured 2026-09-20 on <node-f> — the E2B planner and the E4B workhorse both fail
   # the fleet's grounded smoke contract, this seat passes it), so the Windows Vulkan
   # render must carry it too. Flags EXPLICIT, not ${common}: the seat was measured under
   # llama.cpp's DEFAULT reasoning behaviour. NO sampling flags: the agent loop sends

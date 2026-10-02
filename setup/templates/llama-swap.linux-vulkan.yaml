@@ -8,7 +8,7 @@
 #
 # Added 2026-09-20: until then the ONLY Vulkan template was win-vulkan, so an AMD box
 # on Linux had a measured tier (amd-gcn, 2026-07-17) and no way to render it —
-# `install.sh` died at "no serving template for linux/vulkan" (binxarn, Ryzen 5 5625U).
+# `install.sh` died at "no serving template for linux/vulkan" (<node-f>, Ryzen 5 5625U).
 #
 # Serving invariants (grammar reliability — do NOT change): --jinja, no MTP,
 # reasoning off — the reasoning-off invariant binds the CASCADE seats; the *-agent

@@ -146,7 +146,7 @@ models:
   #
   # Why a twin and not a flag on the seat above. llama.cpp divides `-c` among its
   # slots: at --parallel N each slot serves n_ctx/N, measured in-house the same night
-  # (`--parallel 8 -c 32768` on the Lenovo: "16k/32k prompts exceed the 4k/slot
+  # (`--parallel 8 -c 32768` on <node-c>: "16k/32k prompts exceed the 4k/slot
   # window"). So --parallel 8 on the seat above would cut the tier's fallback agent
   # window from 131,072 to 16,384 while the profile still advertised 131,072 - the
   # advertise-more-than-you-serve defect this repo already gates elsewhere. The seat
@@ -196,7 +196,7 @@ models:
     # rerank vs ~143ms typical / ~1.2s worst-case on GPU (measured on the reference
     # dual-Blackwell box). The old "-ngl 0 buys back VRAM for ~zero latency cost" note
     # was an 8GB-era carryover — it remains CORRECT for small-VRAM tiers: the linux
-    # (Lenovo-class) template ran it at -ngl 0 until 0.115.4; every template now serves it on the card (RAM is overflow only, operator 2026-09-10). Raw-logit scores are
+    # (<node-c>-class) template ran it at -ngl 0 until 0.115.4; every template now serves it on the card (RAM is overflow only, operator 2026-09-10). Raw-logit scores are
     # device-independent, so admission-gate threshold calibration is unaffected.
     # A-122b (measured 2026-10-01 on the Linux 16 GB tier): batch/ubatch 2048, because the memory stack scores each pair (at most ~2,000 tokens) as ONE non-causal
     # sequence that must fit one ubatch. --ctx-size stays 8192: with --parallel 4 llama.cpp gives each slot ctx/4 = 2,048, and a pair must fit its slot.
