@@ -440,6 +440,15 @@ type Options struct {
 	// the takeover that reads them.
 	YieldGrace time.Duration
 	OnYield    string
+
+	// QueuedSince, when set, is the arrival time the waiter this call registers carries instead
+	// of now: a call that is handed a place in line keeps the position that place had.
+	QueuedSince time.Time
+	// ResumeToken names a place-keeping token (tokens.go) this call resumes. If the token can
+	// still be resumed the waiter carries its original arrival time and the token is consumed;
+	// if not, the call is a new arrival. LeaveToken reuses the id, so a caller keeps one name for
+	// its place across re-calls.
+	ResumeToken string
 }
 
 // Manager binds a resolved state root. Construct with Open, which performs the
@@ -464,6 +473,8 @@ type Manager struct {
 	// set this directly to observe heartbeat staleness without a real 15s wait,
 	// the same seam pattern as sleep/pollEvery.
 	waiterHeartbeatTTL time.Duration
+	// tokenGrace overrides TokenGrace (tokens.go); zero means the default. Tests shrink it.
+	tokenGrace time.Duration
 	// cardScoped is the per-host switch (config gpu_card_scoped_leases). Off, a
 	// device-scoped acquisition is refused and nothing but whole-node records is ever
 	// written. Reading is never gated: a reader must understand a v2 directory whether

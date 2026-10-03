@@ -133,7 +133,10 @@ type Waiter struct {
 	// pre-v2 reader ignores the field, which reads the waiter as whole-node: the
 	// conservative direction.
 	Devices []string `json:"devices,omitempty"`
-	path    string
+	// Token names the place-keeping token this waiter resumed (tokens.go), so it never queues
+	// behind its own. An older reader ignores the field.
+	Token string `json:"token,omitempty"`
+	path  string
 }
 
 // Since is when the waiter started queueing.
@@ -171,7 +174,17 @@ func (m *Manager) registerWaiter(class Class, opts Options) (Waiter, func()) {
 		return Waiter{}, func() {}
 	}
 	pid := os.Getpid()
-	w := Waiter{PID: pid, Class: class, Reason: clipCommand(opts.Reason), SinceMs: m.now().UnixMilli(), Devices: opts.Devices}
+	// A call that resumes a place in line keeps the arrival time it left with (tokens.go); one
+	// that was handed an arrival time (QueuedSince) carries that; otherwise it arrives now.
+	since := m.now()
+	if !opts.QueuedSince.IsZero() {
+		since = opts.QueuedSince
+	}
+	resumed := ""
+	if tok, ok := m.ResumeToken(opts.ResumeToken); ok {
+		since, resumed = tok.Since(), tok.ID
+	}
+	w := Waiter{PID: pid, Class: class, Reason: clipCommand(opts.Reason), SinceMs: since.UnixMilli(), Devices: opts.Devices, Token: resumed}
 	if st, ok := m.procStart(pid); ok {
 		w.StartTimeMs = st
 	}
@@ -184,6 +197,10 @@ func (m *Manager) registerWaiter(class Class, opts Options) (Waiter, func()) {
 		return Waiter{}, func() {}
 	}
 	w.path = path
+	// The live waiter stands for the token from here: consume it, so the line counts one place.
+	if resumed != "" {
+		m.DropToken(resumed)
+	}
 	// removeClaim, not a bare os.Remove: since isFrontOfQueue makes this directory
 	// a HOT path — every queued waiter reads it on every poll tick — a plain
 	// os.Remove is no longer safe. On Windows a reader blocks a delete (the same
@@ -237,7 +254,9 @@ func (m *Manager) isFrontOfQueue(self Waiter) bool {
 			return false
 		}
 	}
-	return true
+	// A token is a waiter that is not there: it holds its place for the grace and is ignored after
+	// it (tokens.go), by every waiter, a whole-node barrier included.
+	return !m.tokenBlocks(self)
 }
 
 // waiterStaleWindow is how long a waiter's record may go unrefreshed before a
