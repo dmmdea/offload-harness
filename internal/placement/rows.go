@@ -13,12 +13,19 @@ import (
 // run the same Decide over them. Every measured number is omitempty; role is
 // always present because a seat without a role cannot be resolved.
 type SeatRow struct {
-	Role        string `json:"role"`
-	Model       string `json:"model,omitempty"`
-	Device      string `json:"device,omitempty"`
-	CtxTokens   int    `json:"ctx_tokens,omitempty"`
-	MaxInflight int    `json:"max_inflight,omitempty"`
-	Loaded      bool   `json:"loaded,omitempty"`
+	Role   string `json:"role"`
+	Model  string `json:"model,omitempty"`
+	Device string `json:"device,omitempty"`
+	// DeviceIDs are the lease ids (lower-cased GPU UUIDs) of the cards Device names,
+	// resolved by the node that owns the seat against its own card table (WithDeviceIDs).
+	// A delegator reading a lease on that node compares them with the lease's devices; it
+	// cannot resolve a bare pin itself, because which index space it is in is the node's
+	// fact. Absent when the node could not place the pin, which reads as every card, and on
+	// a node one release behind.
+	DeviceIDs   []string `json:"device_ids,omitempty"`
+	CtxTokens   int      `json:"ctx_tokens,omitempty"`
+	MaxInflight int      `json:"max_inflight,omitempty"`
+	Loaded      bool     `json:"loaded,omitempty"`
 	// Served is the ROSTER fact, not an occupancy one: the llama-swap behind
 	// this box answers for the seat's model (by id or alias). It exists
 	// because a fleet node's health is a cached read that never probes

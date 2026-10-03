@@ -96,9 +96,21 @@ func (i Info) For(ids []string) Info {
 	if len(ids) == 0 || !i.Held {
 		return i
 	}
+	return i.Where(func(l Info) bool { return l.Touches(ids) })
+}
+
+// Where narrows an inspection to the live leases keep accepts, in the shape For returns: no
+// lease is the zero Info, one is the Info itself, several are the lowest epoch with Leases
+// carrying each. A consumer that asks about only some leases (the ones that refuse new work,
+// the ones that sit on a seat's cards) filters here and then asks the predicates it always
+// asked of the result.
+func (i Info) Where(keepLease func(Info) bool) Info {
+	if !i.Held {
+		return Info{}
+	}
 	var keep []Info
 	for _, l := range i.Each() {
-		if l.Touches(ids) {
+		if keepLease(l) {
 			keep = append(keep, l)
 		}
 	}
