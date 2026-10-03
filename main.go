@@ -29,8 +29,8 @@ import (
 	"github.com/dmmdea/offload-harness/internal/buildinfo"
 	"github.com/dmmdea/offload-harness/internal/cache"
 	"github.com/dmmdea/offload-harness/internal/calibration"
-	"github.com/dmmdea/offload-harness/internal/confhead"
 	"github.com/dmmdea/offload-harness/internal/composeremote"
+	"github.com/dmmdea/offload-harness/internal/confhead"
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/delegate"
@@ -2181,7 +2181,7 @@ func runDelegate(args []string) error {
 	fs := flag.NewFlagSet("delegate", flag.ExitOnError)
 	fs.String("config", "", "config file path")
 	contractPath := fs.String("contract", "", "path to the delegation contract JSON: one subtask object or an array of up to 8 (fields: goal, context, context_paths, output_schema, acceptance, profile, max_steps, timeout_sec)")
-	route := fs.String("route", "auto", "placement route: auto (idle-local wins) | spread (across the local seat AND every eligible fleet node, concurrently; subtask 0 stays local unless it names a layer this box does not declare, the remote slots are fit-scored from the goal text) | local (force in-process) | remote (force a fleet node)")
+	route := fs.String("route", "auto", "placement route: auto (idle-local wins) | spread (across the local seat AND every eligible fleet node, concurrently; subtask 0 stays local unless it names a layer this box does not declare, the remote slots are fit-scored from the goal text) | local (force in-process) | remote (force a fleet node). A box with no agent seat (a delegation client) is never a placement: auto and spread go to the fleet")
 	readRoot := fs.String("read-root", "", "directory context_paths may be read from (default: the current dir)")
 	var remotes repeatedFlag
 	fs.Var(&remotes, "remote", "remote fleet node base URL, tailnet-only (repeatable)")

@@ -881,7 +881,8 @@ func RunWith(ctx context.Context, cfg config.Config, local LocalRunner, subtasks
 		}
 		// The fleet is read when the local seat is busy and, for an idle one, only when some
 		// contract names a layer this box does not declare (register A-108): that contract is dealt
-		// to the node that declares it, and nothing else about an idle box needs the roster.
+		// to the node that declares it, and nothing else about an idle box needs the roster. A box
+		// with no agent seat at all (a delegation client) reads it for every contract, the same way.
 		localView := r.localView()
 		readFleet := busy
 		for _, c := range subtasks {
@@ -3055,7 +3056,7 @@ func (r *runner) replacementNode(ctx context.Context, contract core.AgentContrac
 	// fall back on: it could only defer there by name. Returning here sends a refusal that was a place
 	// in line (pl.capacityRefusal) to the capacity wait, for the node that declares the layer.
 	if !r.localServesLayer(r.localView(), contract) {
-		return placement{}, head + fmt.Sprintf(", and this box declares no layer %s, so the local seat cannot take it", contract.Layer), false
+		return placement{}, head + ", and " + localRefusal(r.localView(), contract) + ", so the local seat cannot take it", false
 	}
 	// A text lease reserves the local seat for re-placement exactly as it does
 	// for first placement (0.113.18; before this a remote's 503 fell straight
@@ -3603,9 +3604,12 @@ func (r *runner) alternativeNode(ctx context.Context, first PlacedResult, contra
 		// and with none there is no retry.
 		if !r.localServesLayer(localView, contract) {
 			if chosen, base, found := r.remoteAlternative(ctx, st, pl); found {
+				because := " — the local seat declares no layer " + contract.Layer
+				if seatless(localView) {
+					because = " — " + noLocalSeat
+				}
 				return placement{view: chosen, base: base,
-					reason: "retry on " + chosen.NodeID + " after " + nodeLabel(first) + " " + why +
-						" — the local seat declares no layer " + contract.Layer}, "", true
+					reason: "retry on " + chosen.NodeID + " after " + nodeLabel(first) + " " + why + because}, "", true
 			}
 			return placement{}, "", false
 		}
@@ -4140,7 +4144,12 @@ func (r *runner) probeLocalBusy(ctx context.Context) busyReading {
 		return r.localBusyProbe(ctx)
 	}
 	endpoint, seat := strings.TrimSpace(r.cfg.Endpoint), strings.TrimSpace(r.cfg.AgentPlannerModel(""))
-	if endpoint == "" || seat == "" {
+	if seat == "" {
+		// Nothing to probe and nothing to deal: a box with no agent seat is never given a slot
+		// (localServesLayer), so "idle" would misreport it.
+		return busyReading{note: noLocalSeat}
+	}
+	if endpoint == "" {
 		log.Printf("delegate: local seat busy probe skipped (endpoint %q, agent seat %q); dealing the local slot as idle", endpoint, seat)
 		return busyReading{note: "no local endpoint or agent seat configured"}
 	}
@@ -4390,13 +4399,39 @@ func (r *runner) localView() NodeView {
 // and the first test DecideOnLayer applies (an undeclared layer defers by name), so a box that fails it
 // can only ever have deferred the contract. A view that does carry rows (Place's own convention, and what
 // a white-box deal is handed) is honoured as well.
+//
+// A view that names no agent seat serves no contract (seatless): a delegation client names no model,
+// so every contract it places goes to the fleet or waits in line for it, the same way a contract naming
+// an undeclared layer does, instead of landing on a seat that can only defer it.
 func (r *runner) localServesLayer(local NodeView, c core.AgentContract) bool {
+	if seatless(local) {
+		return false
+	}
 	if c.Layer == "" || declaresLayer(local, c.Layer) {
 		return true
 	}
 	_, declared := r.cfg.Layer(c.Layer)
 	return declared
 }
+
+// seatless reports whether the local view names no agent seat. localView fills it with the resolution
+// the local run makes (agent_model, else model); a delegation client (`install client`) writes both
+// empty, so its local run could only defer "no agent seat resolvable".
+func seatless(local NodeView) bool {
+	return strings.TrimSpace(local.AgentSeat) == ""
+}
+
+// localRefusal says why the local seat cannot take c, for a placement reason. It is called only where
+// localServesLayer said no.
+func localRefusal(local NodeView, c core.AgentContract) string {
+	if seatless(local) {
+		return noLocalSeat
+	}
+	return "this box declares no layer " + c.Layer
+}
+
+// noLocalSeat is the placement-reason phrase for a box with no agent seat.
+const noLocalSeat = "this box has no agent seat (agent_model and model are both empty: a delegation client)"
 
 // attempt places (per route, or as forced by a retry) and executes one
 // subtask, then verifies and records it. Every return path passes through
@@ -4562,7 +4597,7 @@ func (r *runner) attempt(ctx context.Context, i int, contract core.AgentContract
 			chosen = localView
 			reason = "local busy; no eligible remote — " + why + " (queued-local beats ineligible-remote)"
 			if !localServes {
-				reason = fmt.Sprintf("no eligible remote, and this box declares no layer %s so the seat cannot take it (%s)", contract.Layer, why)
+				reason = fmt.Sprintf("no eligible remote, and %s so the seat cannot take it (%s)", localRefusal(localView, contract), why)
 			}
 			deadFleet = class == core.DeferClassInfrastructure
 		default:
