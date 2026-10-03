@@ -78,11 +78,13 @@ func TestADetachedHolderWhoseLeaseWasTakenAwayStopsNoInstances(t *testing.T) {
 	}
 }
 
-// ... and the one that ends at its window, still holding the lease, does stop them.
+// ... and the one that ends at its window, still holding the lease, does stop them. Since the
+// bounded terms (P9) a detached holder ends at its window only with --release-at-expiry; without
+// it the lease stays and reads overdue, so this case asks for the release.
 func TestADetachedHolderThatEndsAtItsWindowStillStopsItsInstances(t *testing.T) {
 	cfgPath, comfyDir, m := scopedComfyFixture(t)
 	calls := recordStops(t, m, nil)
-	args := holdArgs("media", 1200*time.Millisecond, 0, gpulease.Options{Reason: "kept", Devices: []string{"gpu-test-0"}}, nil, cfgPath)
+	args := append(holdArgs("media", 1200*time.Millisecond, 0, gpulease.Options{Reason: "kept", Devices: []string{"gpu-test-0"}}, nil, cfgPath), "--release-at-expiry")
 	done := make(chan error, 1)
 	go func() { done <- runGPUHold(args[2:]) }()
 	ls := waitForLeases(t, m, 1)
