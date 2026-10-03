@@ -43,6 +43,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/delegate"
 	"github.com/dmmdea/offload-harness/internal/imageio"
 	"github.com/dmmdea/offload-harness/internal/netguard"
+	"github.com/dmmdea/offload-harness/internal/pairworkloads"
 )
 
 // Route values. RouteLocal is the default: an empty route means local.
@@ -121,11 +122,16 @@ func Run(ctx context.Context, cfg config.Config, runner Runner, req core.Request
 	case RouteLocal:
 		return runner.Run(ctx, req)
 	case RouteRemote:
-		res, err := Call(ctx, cfg, req)
+		// A call sent to a node is the remote lane's own: it writes its ledger row and, once a node
+		// is chosen, its one PAIR card (D5/D6).
+		h := core.BeginRemote(runner, req, r)
+		res, err := callWith(ctx, cfg, req, h)
 		if err != nil {
-			return placementDefer(err, "remote: forced")
+			res = placementDefer(err, "remote: forced")
+		} else {
+			res.Meta.Placement = "remote: forced"
 		}
-		res.Meta.Placement = "remote: forced"
+		h.Finish(res)
 		return res
 	}
 	// auto
@@ -134,14 +140,18 @@ func Run(ctx context.Context, cfg config.Config, runner Runner, req core.Request
 		res.Meta.Placement = "local: gpu idle"
 		return res
 	}
-	res, err := Call(ctx, cfg, req)
+	h := core.BeginRemote(runner, req, r)
+	res, err := callWith(ctx, cfg, req, h)
 	if err == nil {
 		res.Meta.Placement = "remote: local gpu busy"
+		h.Finish(res)
 		return res
 	}
 	// Busy local, no usable remote: queued-local beats ineligible-remote, the
 	// same rule Place applies to a contract. The reason travels so a slow call
-	// is attributable.
+	// is attributable. The local run writes its own row; an attempt that never
+	// reached a node leaves nothing behind, one that did leaves a failed card.
+	h.Discard(err.Error())
 	res = runner.Run(ctx, req)
 	res.Meta.Placement = "local: gpu busy, " + err.Error()
 	return res
@@ -177,6 +187,11 @@ func (e *placementError) Error() string { return e.msg }
 // the caller maps to a defer class; the node's own result — including its
 // defers — comes back as the core.Result it produced.
 func Call(ctx context.Context, cfg config.Config, req core.Request) (core.Result, error) {
+	return callWith(ctx, cfg, req, core.NopAttribution{})
+}
+
+// callWith is Call reporting the dispatch and the node's progress to h (core.RemoteAttribution).
+func callWith(ctx context.Context, cfg config.Config, req core.Request, h core.RemoteAttribution) (core.Result, error) {
 	start := time.Now()
 	if len(cfg.DelegateRemotes) == 0 {
 		return core.Result{}, &placementError{core.DeferClassConfig, "no delegate_remotes configured — nothing to place the vision task on"}
@@ -194,11 +209,11 @@ func Call(ctx context.Context, cfg config.Config, req core.Request) (core.Result
 	if err != nil {
 		return core.Result{}, err
 	}
-	jobID, err := dispatch(ctx, cfg, base, req, dataURI)
+	jobID, err := dispatch(ctx, cfg, base, node, req, dataURI, h)
 	if err != nil {
 		return core.Result{}, err
 	}
-	res, err := wait(ctx, cfg, base, jobID)
+	res, err := wait(ctx, cfg, base, jobID, h)
 	if err != nil {
 		return core.Result{}, &placementError{core.DeferClassInfrastructure, fmt.Sprintf("node %s: %v", node, err)}
 	}
@@ -266,7 +281,7 @@ type payload struct {
 	Brief    string `json:"brief,omitempty"`
 }
 
-func dispatch(ctx context.Context, cfg config.Config, base string, req core.Request, dataURI string) (string, error) {
+func dispatch(ctx context.Context, cfg config.Config, base, node string, req core.Request, dataURI string, h core.RemoteAttribution) (string, error) {
 	var rnd [8]byte
 	if _, err := rand.Read(rnd[:]); err != nil {
 		return "", &placementError{core.DeferClassInfrastructure, "job id: " + err.Error()}
@@ -290,6 +305,10 @@ func dispatch(ctx context.Context, cfg config.Config, base string, req core.Requ
 	}
 	hreq.Header.Set("Content-Type", "application/json")
 	auth(cfg, hreq)
+	// Who asked, and whether the serving node must card the job because this box will not (D7/D11).
+	pairworkloads.WireHeadersFor(cfg, hreq.Header)
+	// The call's one PAIR card opens here, on the node about to receive the job.
+	h.Dispatched(base, node, p.JobID)
 	resp, err := HTTPClient.Do(hreq)
 	if err != nil {
 		return "", &placementError{core.DeferClassInfrastructure, fmt.Sprintf("dispatch %s: %v", base, err)}
@@ -329,7 +348,7 @@ type jobWire struct {
 // the job (evicted, or the node restarted), so no later poll can succeed.
 // maxPollFailures consecutive failures give up so a dead node costs bounded
 // time, not the whole budget.
-func wait(ctx context.Context, cfg config.Config, base, jobID string) (core.Result, error) {
+func wait(ctx context.Context, cfg config.Config, base, jobID string, h core.RemoteAttribution) (core.Result, error) {
 	failures := 0
 	for {
 		pctx, cancel := context.WithTimeout(ctx, dispatchTimeout)
@@ -355,6 +374,8 @@ func wait(ctx context.Context, cfg config.Config, base, jobID string) (core.Resu
 		}
 		failures = 0
 		switch j.State {
+		case "running":
+			h.Running()
 		case "done":
 			var res core.Result
 			if len(j.Data) == 0 || json.Unmarshal(j.Data, &res) != nil {

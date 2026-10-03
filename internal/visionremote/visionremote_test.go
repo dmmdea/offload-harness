@@ -33,6 +33,7 @@ type fakeNode struct {
 	mu       sync.Mutex
 	payload  map[string]any
 	auth     string
+	hdr      http.Header // header of the last dispatch (the attribution headers ride it)
 	polls    int
 	srv      *httptest.Server
 	visionOK bool
@@ -60,6 +61,7 @@ func newFakeNode(t *testing.T, node string, tasks []string, res core.Result) *fa
 		f.mu.Lock()
 		f.payload = p
 		f.auth = r.Header.Get("Authorization")
+		f.hdr = r.Header.Clone()
 		f.visionOK = true
 		f.mu.Unlock()
 		if f.refuse != 0 {
@@ -80,6 +82,12 @@ func newFakeNode(t *testing.T, node string, tasks []string, res core.Result) *fa
 	f.srv = httptest.NewServer(mux)
 	t.Cleanup(f.srv.Close)
 	return f
+}
+
+func (f *fakeNode) dispatchHeader() http.Header {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.hdr.Clone()
 }
 
 func (f *fakeNode) dispatched() (map[string]any, string) {

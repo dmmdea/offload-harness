@@ -131,6 +131,12 @@ type Emitter struct {
 	selfUUID string
 	members  map[string]string // lower(name) -> uuid
 	byAddr   map[string]string // lower(ipAddress) -> uuid
+	// selfName is this box's own member name (members.json entry carrying selfUUID), lowercased.
+	selfName string
+	// viewName / viewAddr are PAIR's VIEW-ONLY nodes (configs/view-only-nodes.json), which are not
+	// cluster members: lower(name) / lower(address) -> uuid. Consulted after the members.
+	viewName map[string]string
+	viewAddr map[string]string
 	// resolved remembers, per job, the node UUID an in-flight frame resolved
 	// to, so a terminal frame whose names resolve to nothing (a node that
 	// reports its fleet id, not its hostname) keeps the card where the job
@@ -229,20 +235,27 @@ func (e *Emitter) identity() (self string, members map[string]string) {
 func (e *Emitter) identityFull() (self string, members, byAddr map[string]string) {
 	e.idMu.Lock()
 	defer e.idMu.Unlock()
+	e.loadIdentityLocked()
+	return e.selfUUID, e.members, e.byAddr
+}
+
+// loadIdentityLocked (re)reads PAIR's identity files when the cache is older than
+// identityTTL. Caller holds idMu.
+func (e *Emitter) loadIdentityLocked() {
 	if !e.idAt.IsZero() && time.Since(e.idAt) < identityTTL {
-		return e.selfUUID, e.members, e.byAddr
+		return
 	}
 	e.idAt = time.Now()
-	e.selfUUID, e.members, e.byAddr = "", nil, nil
+	e.selfUUID, e.members, e.byAddr, e.selfName, e.viewName, e.viewAddr = "", nil, nil, "", nil, nil
 	raw, err := os.ReadFile(filepath.Join(e.appDir, "node-id.json"))
 	if err != nil {
-		return "", nil, nil
+		return
 	}
 	var nid struct {
 		NodeUUID string `json:"node_uuid"`
 	}
 	if json.Unmarshal(raw, &nid) != nil || nid.NodeUUID == "" {
-		return "", nil, nil
+		return
 	}
 	e.selfUUID = nid.NodeUUID
 	e.members = map[string]string{}
@@ -260,6 +273,9 @@ func (e *Emitter) identityFull() (self string, members, byAddr map[string]string
 				}
 				if m.Name != "" {
 					e.members[strings.ToLower(m.Name)] = m.NodeUUID
+					if m.NodeUUID == e.selfUUID {
+						e.selfName = strings.ToLower(strings.TrimSpace(m.Name))
+					}
 				}
 				if a := strings.ToLower(strings.TrimSpace(m.IPAddress)); a != "" && a != "127.0.0.1" && a != "::1" {
 					e.byAddr[a] = m.NodeUUID
@@ -267,7 +283,41 @@ func (e *Emitter) identityFull() (self string, members, byAddr map[string]string
 			}
 		}
 	}
-	return e.selfUUID, e.members, e.byAddr
+	e.loadViewOnlyLocked()
+}
+
+// viewOnlyNodesFile is PAIR's list of nodes the desktop can see but that are not cluster members
+// (fork desktop/src/electron/service-bridge/view-only-nodes.ts), relative to the app dir.
+var viewOnlyNodesFile = filepath.Join("configs", "view-only-nodes.json")
+
+// loadViewOnlyLocked reads the view-only list: a JSON array of {name, address, port, nodeUuid}. A
+// missing, empty or malformed file means no view-only nodes, never an error: the members still
+// resolve. An entry without a nodeUuid, or naming neither a name nor an address, is skipped.
+func (e *Emitter) loadViewOnlyLocked() {
+	raw, err := os.ReadFile(filepath.Join(e.appDir, viewOnlyNodesFile))
+	if err != nil {
+		return
+	}
+	var list []struct {
+		Name     string `json:"name"`
+		Address  string `json:"address"`
+		NodeUUID string `json:"nodeUuid"`
+	}
+	if json.Unmarshal(raw, &list) != nil {
+		return
+	}
+	e.viewName, e.viewAddr = map[string]string{}, map[string]string{}
+	for _, n := range list {
+		if strings.TrimSpace(n.NodeUUID) == "" {
+			continue
+		}
+		if k := strings.ToLower(strings.TrimSpace(n.Name)); k != "" {
+			e.viewName[k] = n.NodeUUID
+		}
+		if k := strings.ToLower(strings.TrimSpace(n.Address)); k != "" {
+			e.viewAddr[k] = n.NodeUUID
+		}
+	}
 }
 
 // resolveNode turns the names a job's node is known by into the PAIR UUID
@@ -301,6 +351,18 @@ func (e *Emitter) resolveNode(ev Event) (uuid string, ok bool) {
 			return u, true
 		}
 		if u, hit := byAddr[n]; hit {
+			e.remember(ev.JobID, u, terminal)
+			return u, true
+		}
+	}
+	// A view-only node is not a cluster member, so the members above always win; a job that ran on
+	// one still names it (D10: 256 cards of a view-only node read scheduledOn null).
+	for _, n := range names {
+		if u, hit := e.viewName[n]; hit {
+			e.remember(ev.JobID, u, terminal)
+			return u, true
+		}
+		if u, hit := e.viewAddr[n]; hit {
 			e.remember(ev.JobID, u, terminal)
 			return u, true
 		}
@@ -359,6 +421,9 @@ func MethodFor(state string) string {
 // job, and the card's engine badge is how PAIR tells them apart. An rkllm seat
 // (chat and vision on the RK3588 NPU, named "<model>-npu") is the same device.
 func EngineFor(task, seat string) string {
+	// A fleet task type spells its words with dashes (compose-video, run-graph); the harness task
+	// names use underscores.
+	task = strings.ReplaceAll(task, "-", "_")
 	s := strings.ToLower(seat)
 	name, _, _ := strings.Cut(s, "@") // a failed forward is recorded "<seat>@fleet"
 	switch {
@@ -370,14 +435,14 @@ func EngineFor(task, seat string) string {
 		return "rknpu"
 	case strings.Contains(s, "vllm"):
 		return "vllm"
-	case strings.Contains(s, "whisper"), task == "transcribe":
+	case strings.Contains(s, "whisper"), task == "transcribe", task == "stt":
 		return "whispercpp"
 	}
 	switch task {
 	case "generate_image", "inpaint_image", "edit_image_generative", "upscale_image",
 		"generate_video", "animate_character", "generate_audio", "run_graph":
 		return "comfyui"
-	case "compose_video":
+	case "compose_video", "compose_project":
 		// HyperFrames on the CPU (ADR 0059): no model and no llama.cpp job.
 		return "hyperframes"
 	}
@@ -641,6 +706,10 @@ func (e *Emitter) AttachLedger(l *ledger.Ledger) {
 		// Work this box served FOR another (a fleet dispatch) is the asking
 		// box's card, not a second one here.
 		if row.Door == FleetDoor {
+			return
+		}
+		// A remote call's writer carded it (or deliberately did not: no node was chosen).
+		if row.CardByCaller {
 			return
 		}
 		if row.CacheHit {

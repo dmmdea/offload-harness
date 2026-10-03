@@ -51,6 +51,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/mediahash"
 	"github.com/dmmdea/offload-harness/internal/mediaops"
 	"github.com/dmmdea/offload-harness/internal/modelaffinity"
+	"github.com/dmmdea/offload-harness/internal/pairworkloads"
 	"github.com/dmmdea/offload-harness/internal/parser"
 	"github.com/dmmdea/offload-harness/internal/placement"
 	"github.com/dmmdea/offload-harness/internal/router"
@@ -75,15 +76,16 @@ type Pipeline struct {
 	seatRatesPath string
 	cfg           config.Config
 	client        *llamaclient.Client
-	stt           *sttclient.Client  // whisper-server transcribe client (audio never hits the text cascade)
-	cache         *cache.Cache       // may be nil
-	led           *ledger.Ledger     // may be nil
-	tracker       CallTracker        // nil = no PAIR running cards
-	thresholds    map[string]float64 // per-task conformal margin thresholds (Phase 2); nil = config constant
-	breakers      *breaker.Group     // per-tier circuit breakers (Phase 3)
-	router        *router.Model      // entry-tier router (Phase 5); nil = static rule
-	overrides     *tierOverrides     // health-driven per-tier timeouts/degraded (Phase 4); nil = none
-	healMu        sync.Mutex         // Phase 7 autoheal rate-limit
+	stt           *sttclient.Client      // whisper-server transcribe client (audio never hits the text cascade)
+	cache         *cache.Cache           // may be nil
+	led           *ledger.Ledger         // may be nil
+	tracker       CallTracker            // nil = no PAIR running cards
+	pair          *pairworkloads.Emitter // nil = remote calls open no PAIR card (remoteattr.go)
+	thresholds    map[string]float64     // per-task conformal margin thresholds (Phase 2); nil = config constant
+	breakers      *breaker.Group         // per-tier circuit breakers (Phase 3)
+	router        *router.Model          // entry-tier router (Phase 5); nil = static rule
+	overrides     *tierOverrides         // health-driven per-tier timeouts/degraded (Phase 4); nil = none
+	healMu        sync.Mutex             // Phase 7 autoheal rate-limit
 	lastHeal      map[string]time.Time
 	// Phase 2 Task 4: opt-in correctness head + per-task p(correct) thresholds.
 	// Both nil/empty unless cfg.ConfHeadEnabled — the gate is inert otherwise.
@@ -391,6 +393,8 @@ func (p *Pipeline) Run(ctx context.Context, req core.Request) (res core.Result) 
 	// under, carried to the ledger row the same way the door is, so a node's row
 	// joins to the delegator's on one equality.
 	meta.FleetJobID = req.FleetJobID
+	// The asker's name a fleet node was told (X-Offload-Asker), carried to the ledger row the same way.
+	meta.Requester = req.Requester
 
 	if !req.Task.Valid() {
 		return core.Deferf("unknown task "+string(req.Task), "", meta)
@@ -4609,6 +4613,8 @@ func entryFrom(task core.TaskType, meta core.Meta, deferred bool, inputChars int
 		Door: meta.Door,
 		// The fleet job id of a dispatched call (ADR 0064); empty on any other.
 		FleetJobID: meta.FleetJobID,
+		// Who a fleet node ran the job for (D11); empty on any other row.
+		Requester: meta.Requester,
 		// The media binding's license (ADR 0058); empty on text rows.
 		License: meta.License,
 		// Same read the delegation log does (delegate.record): per-row, so a

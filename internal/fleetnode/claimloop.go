@@ -114,12 +114,34 @@ func (s *Server) claimOne(ctx context.Context, client *http.Client, holder, node
 		s.settle(ctx, client, holder, cfg, "nack", job.ID, nodeID, nil, "build: "+berr.Error())
 		return job.ID, true
 	}
+	// A pulled job is attributed exactly like a pushed one (D9): the door is "fleet", so the asker's
+	// card is the only one (before, the node carded it too), the asker's name goes on this node's
+	// row, and a job whose asker signalled that it will not card it gets its card from this node.
+	// The submitter's headers reached us on the queued job.
+	asker := core.SanitizeAsker(job.Asker)
+	spec := s.claimSpec(job.TaskType, cleanup)
+	card := s.newNodeCard(string(breq.Task), spec.Model, job.ID, asker, job.PairCard == core.PairCardNode)
+	spec.OnDropped = func() {
+		cleanup()
+		card.fail("the job was dropped before it started (withdrawn, or the node drained)")
+	}
 	run := func(rctx context.Context) (json.RawMessage, error) {
 		defer cleanup()
 		// The same fleet job id the push door stamps (ADR 0064, register C-63): a
 		// pulled job is known to the holder, and to its ledger row, by this id.
 		breq.FleetJobID = job.ID
+		breq.Door = dispatchDoor(breq.Door)
+		breq.Requester = asker
+		card.running()
+		finished := false
+		defer func() {
+			if !finished {
+				card.fail("the node's job run failed unexpectedly")
+			}
+		}()
 		res := s.runner.Run(rctx, breq)
+		finished = true
+		card.finish(res)
 		if job.TaskType == string(core.TaskAgentRun) && res.OK {
 			// The same seat-proof write the push door makes (server.go's
 			// dispatch run closure): a pulled contract that completed a call
@@ -155,8 +177,9 @@ func (s *Server) claimOne(ctx context.Context, client *http.Client, holder, node
 	// Band and Tenant are NOT set: fleetqueue.Job does not carry them, so
 	// there is nothing honest to fill them with. A pulled job therefore rides
 	// the default band, which is what it did before this change.
-	spec := s.claimSpec(job.TaskType, cleanup)
+	card.queued()
 	if created := s.jobs.Admit(job.ID, spec, run); !created {
+		card.discard()
 		// Already known locally (a lease-expiry re-claim of our own job):
 		// the original run's settle will ack; nothing to RUN.
 		//

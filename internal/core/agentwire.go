@@ -22,6 +22,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/dmmdea/offload-harness/internal/gbnf"
 )
@@ -240,6 +241,53 @@ func ClampBand(b int) int {
 
 // TenantHeader carries the delegator's tenant id on a dispatch (0.113.18).
 const TenantHeader = "X-Offload-Tenant"
+
+// Attribution headers (PAIR routing fixes, D7/D11). Both ride the request that creates work on a fleet
+// node and are ignored by a node that predates them, so a mixed-version fleet behaves as before.
+//
+//	AskerHeader     who asked: the asker's PAIR member name when its emitter is enabled and resolves, else
+//	                its short lowercase hostname. The node records it on its ledger row (Requester).
+//	PairCardHeader  PairCardNode, sent ONLY when the asker will not card the job itself (its PAIR emitter
+//	                is not enabled): the serving node then emits the card. An asker that sends nothing
+//	                (every older build) keeps today's behaviour, so a job is never carded twice.
+const (
+	AskerHeader    = "X-Offload-Asker"
+	PairCardHeader = "X-Offload-Pair-Card"
+	PairCardNode   = "node"
+	// AskerMaxLen bounds the asker name a node accepts: the value is untrusted, is stored on a ledger row
+	// and rides a PAIR card's requester text.
+	AskerMaxLen = 64
+)
+
+// SanitizeAsker reduces an untrusted asker name to printable text of at most AskerMaxLen characters:
+// control and non-printing characters are dropped, runs of whitespace fold to one space. "" = none.
+func SanitizeAsker(s string) string {
+	var b strings.Builder
+	n, space := 0, false
+	for _, r := range s {
+		if unicode.IsSpace(r) {
+			space = b.Len() > 0
+			continue
+		}
+		if !unicode.IsPrint(r) {
+			continue
+		}
+		if space {
+			if n+2 > AskerMaxLen {
+				break
+			}
+			b.WriteByte(' ')
+			n++
+			space = false
+		}
+		if n+1 > AskerMaxLen {
+			break
+		}
+		b.WriteRune(r)
+		n++
+	}
+	return b.String()
+}
 
 // AgentContract is the versioned, self-contained delegation request (§S2).
 // Self-contained means: everything the remote loop may read is INLINE in

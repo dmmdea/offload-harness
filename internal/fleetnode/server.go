@@ -37,6 +37,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/gpulease"
 	"github.com/dmmdea/offload-harness/internal/hostsample"
 	"github.com/dmmdea/offload-harness/internal/netguard"
+	"github.com/dmmdea/offload-harness/internal/pairworkloads"
 	"github.com/dmmdea/offload-harness/internal/placement"
 	"github.com/dmmdea/offload-harness/internal/seatload"
 	"github.com/dmmdea/offload-harness/internal/seatrate"
@@ -148,6 +149,10 @@ type Options struct {
 	// media lane never consults it.
 	LoopbackListener bool
 	Cfg              config.Config
+	// Pair is this node's PAIR emitter (pairworkloads.New(FromConfig(cfg))). The node uses it for ONE
+	// thing: the card of a job whose asker signalled core.PairCardHeader = "node" because it will not
+	// card the job itself. nil, or an emitter that is not Enabled, cards nothing.
+	Pair *pairworkloads.Emitter
 	// KVSlotDir is the directory the seats' --slot-save-path points at (ADR 0056
 	// Layer 2); empty = the kvslot lane answers 501. KVSlotCapGiB bounds it (0 = 8).
 	KVSlotDir    string
@@ -2284,6 +2289,29 @@ func (s *Server) admit(w http.ResponseWriter, r *http.Request, env dispatchEnvel
 		return
 	}
 
+	specModel := env.ModelFamily
+	if env.TaskType == string(core.TaskAgentRun) {
+		specModel = s.agentSeat
+		// A contract dispatched AT A LAYER runs on that layer's seat, so the
+		// feed names it rather than the planner default (ADR 0039). This is
+		// the DECLARED seat: the authoritative decision — guards, window, the
+		// long-seat choice — is made at execution with the live readers
+		// (pipeline.runAgentTask), and a refusal there is published on the
+		// result's placed block. Admission metadata may not wait on a probe,
+		// and a row that says "agent-pool" while the 262k twin holds the
+		// cards is the untruth this build exists to end.
+		if s.opts.Cfg.Composite() {
+			if seat, ok := placement.SeatOnLayer(s.opts.Cfg.Layers, dispatchedLayer(env.Payload)); ok {
+				specModel = seat
+			}
+		}
+	}
+
+	// Who asked, and whether the asker wants THIS node to card the job (it signals that only when it
+	// will not card the job itself). The asker's name is recorded on this node's row either way.
+	asker, nodeCards := askerOf(r)
+	card := s.newNodeCard(string(req.Task), specModel, env.JobID, asker, nodeCards)
+
 	run := func(ctx context.Context) (json.RawMessage, error) {
 		defer cleanup() // temp files live exactly as long as the job
 		// The wall report (register D-116): the executing lane publishes the
@@ -2305,7 +2333,19 @@ func (s *Server) admit(w http.ResponseWriter, r *http.Request, env dispatchEnvel
 		// under, so this node's ledger row joins to the delegator's row on one
 		// equality instead of on a guess at latency.
 		req.FleetJobID = jobID
+		// D11: who the job was for, on this node's row; D7: the card, when the asker signalled that
+		// it will not card the job itself. A run that panics closes the card failed on its way out.
+		req.Requester = asker
+		card.running()
+		finished := false
+		defer func() {
+			if !finished {
+				card.fail("the node's job run failed unexpectedly")
+			}
+		}()
 		res := s.runner.Run(ctx, req)
+		finished = true
+		card.finish(res)
 		if env.TaskType == string(core.TaskAgentRun) && res.OK {
 			// The one fact this result proves about the advertised seat —
 			// a completed call on it — goes into the residency cache now,
@@ -2345,47 +2385,42 @@ func (s *Server) admit(w http.ResponseWriter, r *http.Request, env dispatchEnvel
 	// strands a directory under pipeline-jobs/ until the next start sweeps it.
 	// The store clears the hook at claim, so exactly one of the two paths ever
 	// runs the cleanup.
-	specModel := env.ModelFamily
-	if env.TaskType == string(core.TaskAgentRun) {
-		specModel = s.agentSeat
-		// A contract dispatched AT A LAYER runs on that layer's seat, so the
-		// feed names it rather than the planner default (ADR 0039). This is
-		// the DECLARED seat: the authoritative decision — guards, window, the
-		// long-seat choice — is made at execution with the live readers
-		// (pipeline.runAgentTask), and a refusal there is published on the
-		// result's placed block. Admission metadata may not wait on a probe,
-		// and a row that says "agent-pool" while the 262k twin holds the
-		// cards is the untruth this build exists to end.
-		if s.opts.Cfg.Composite() {
-			if seat, ok := placement.SeatOnLayer(s.opts.Cfg.Layers, dispatchedLayer(env.Payload)); ok {
-				specModel = seat
-			}
-		}
-	}
 	spec := AcceptSpec{
-		Agent:     env.TaskType == string(core.TaskAgentRun),
-		Gated:     gatedJob(env.TaskType),
-		Uncapped:  !s.concurrencyCapped(env.TaskType),
-		OnDropped: cleanup,
-		Task:      env.TaskType,
-		Model:     specModel,
-		Band:      band,
-		Tenant:    tenant,
+		Agent:    env.TaskType == string(core.TaskAgentRun),
+		Gated:    gatedJob(env.TaskType),
+		Uncapped: !s.concurrencyCapped(env.TaskType),
+		// A job drained before it started never reaches the closure above, so the card it opened
+		// (queued, below) closes here.
+		OnDropped: func() {
+			cleanup()
+			card.fail("the job was dropped before it started (withdrawn, or the node drained)")
+		},
+		Task:   env.TaskType,
+		Model:  specModel,
+		Band:   band,
+		Tenant: tenant,
 		// A pushed agent dispatch is polled for by the delegator that sent it, so
 		// the poll lease applies to it (ADR 0064). Media and vision jobs are polled
 		// by other clients on cadences this node does not control, and a job the
 		// pull queue claimed is never polled at all — neither is leased.
 		PollLeased: env.TaskType == string(core.TaskAgentRun),
 	}
+	// The card opens BEFORE Admit, not after: the job can start (and even finish) on its own worker
+	// before Admit returns, and a queued frame emitted after a terminal one would re-create the
+	// open-card marker the terminal frame removed.
+	card.queued()
 	if !s.jobs.Admit(env.JobID, spec, run) {
 		cleanup() // duplicate/drain refusal: this request's materialized files never run
 		view, ok := s.jobs.Get(env.JobID)
 		if !ok {
 			// Accept refused but the id is absent: drain began between the
 			// Draining() check and Accept.
+			card.fail("node draining")
 			writeError(w, http.StatusServiceUnavailable, "node draining")
 			return
 		}
+		// A duplicate of a job this node already holds: its own card (if it has one) stands.
+		card.discard()
 		// Contract refusal semantics: the dispatcher treats ANY non-202
 		// dispatch response as a REFUSAL, and the media dispatcher may then
 		// re-dispatch the same job_id to another node. So a duplicate for a

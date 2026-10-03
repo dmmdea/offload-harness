@@ -219,6 +219,18 @@ type Entry struct {
 	// joining the two ledgers is one equality instead of a guess on latency. Empty
 	// on a job that never left this box.
 	FleetJobID string `json:"fleet_job_id,omitempty"`
+	// Node and NodeID say where a REMOTE call ran, on the asker's row for it (PAIR routing fixes,
+	// D5/D6): Node is the host of the dispatch URL (the name PAIR's members carry), NodeID the fleet
+	// node id its health reported. Empty on every row of a call that ran on this box.
+	Node   string `json:"node,omitempty"`
+	NodeID string `json:"node_id,omitempty"`
+	// Requester is who a fleet node ran the row's work for: the asker name the dispatch carried
+	// (X-Offload-Asker, sanitized). Written on the NODE's row; empty on an asker's own row.
+	Requester string `json:"requester,omitempty"`
+	// CardByCaller marks a row whose PAIR card the writer already decided and emitted (or chose not
+	// to emit: a remote call that never reached a node has none): the ledger observer must not card
+	// it a second time. Absent on every row the observer cards.
+	CardByCaller bool `json:"card_by_caller,omitempty"`
 	// ReasonCode is the closed-set code for why the job ended the way it did (see
 	// reasoncode.go), written on every agent_delegate row: ReasonOK for a job that
 	// completed, so its presence never depends on the job having failed.

@@ -435,6 +435,9 @@ func openPipeline(cfg config.Config) (*pipeline.Pipeline, func(), error) {
 	p := pipeline.New(cfg, client, ca, led)
 	// A long media call opens its card when it starts (calls.go).
 	p.SetCallTracker(pair)
+	// A call routed to a fleet node opens its card and writes its asker row through here
+	// (D5/D6, internal/pairworkloads/remote.go).
+	p.SetPairEmitter(pair)
 	return p, func() {
 		if ca != nil {
 			ca.Close()
@@ -2718,8 +2721,11 @@ func runFleetServe(args []string) error {
 		return gpulease.InspectDir(dir)
 	}
 	srv := fleetnode.New(p, jobs, fleetnode.Options{
-		NodeID:   nodeID,
-		Version:  version,
+		NodeID:  nodeID,
+		Version: version,
+		// The card of a job whose asker will not card it itself (D7): this node's own emitter, so
+		// an in-flight card of a killed fleet-serve still gets an orphan marker and is closed.
+		Pair:     pairworkloads.New(pairworkloads.FromConfig(cfg)),
 		Reclaim:  reclaim,
 		Snapshot: sampler.Load,
 		Lease:    leaseRead,

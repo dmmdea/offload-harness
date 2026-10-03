@@ -187,6 +187,11 @@ type Request struct {
 	// because Params feeds the result-cache key, and a job-unique id there would
 	// make every dispatched request miss.
 	FleetJobID string `json:"fleet_job_id,omitempty"`
+	// Requester is the asker's name (AskerHeader, sanitized), stamped by a fleet node on the request it
+	// builds for a job another box asked for. It rides to the ledger row as Meta.Requester so the
+	// node's row says who the work was for. Documentary only, like Door and FleetJobID: it never
+	// routes, gates or keys a cache.
+	Requester string `json:"requester,omitempty"`
 }
 
 // Meta is per-call telemetry returned to the caller and recorded in the ledger.
@@ -433,6 +438,9 @@ type Meta struct {
 	// in Pipeline.Run and mapped onto ledger.Entry.FleetJobID; omitempty, so a call
 	// no fleet node dispatched publishes byte-identically to before.
 	FleetJobID string `json:"fleet_job_id,omitempty"`
+	// Requester is the Request.Requester carried through to telemetry: who a fleet node's
+	// row was run for. Copied in Pipeline.Run and mapped onto ledger.Entry.Requester; omitempty.
+	Requester string `json:"requester,omitempty"`
 	// License is the license of the media binding that produced this result (ADR
 	// 0058: a named family always declares one; a default binding may). Mapped onto
 	// ledger.Entry.License so the ledger can answer "which renders came out of a

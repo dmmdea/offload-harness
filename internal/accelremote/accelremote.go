@@ -29,6 +29,7 @@ import (
 
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/pairworkloads"
 )
 
 // Budget bounds one forwarded call end to end: a cold sidecar spawn on the
@@ -169,6 +170,8 @@ func dispatch(ctx context.Context, cfg config.Config, base string, payload []byt
 	}
 	req.Header.Set("Content-Type", "application/json")
 	auth(cfg, req)
+	// Who asked, and whether the serving node must card the job because this box will not (D7/D11).
+	pairworkloads.WireHeadersFor(cfg, req.Header)
 	resp, err := HTTPClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("dispatch %s: %w", base, err)
