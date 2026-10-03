@@ -6,6 +6,22 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.164.0] - 2026-10-03 - Media calls take one card, leases have bounded terms, the fleet reports per card
+
+**GPU routing, milestone 2, wave A.** Three phases of the routing plan, each built test-first, reviewed and fixed:
+
+- **Per-card media admission (P13b).** A harness media call (image, edit, inpaint, upscale, animate, music, un-pooled
+  video) now leases ONE card through the allocator and runs on that card's own ComfyUI instance, instead of fencing the
+  whole box. Waiters keep their place with a waiter token instead of a `gpu_busy` defer. A kept instance no longer holds
+  its runner open, and the lease holder stops it at release. The desktop card counts as a display card when a monitor is
+  attached, so it is never auto-picked. An unkeyed runner given a non-default `--api` no longer starts a stray default
+  instance. Hosts without card-scoped leases keep the whole-node behaviour byte for byte.
+- **Bounded terms (P9).** A lease is granted one term at a time and renewed while its owner or its progress vouches for
+  it. A lease past its window is labelled expired and the queue is told why; nothing is ever freed, reclaimed or killed
+  by a deadline. A detached holder keeps holding when its window ends unless it was started with `--release-at-expiry`.
+- **Fleet per-card truth (P7).** Nodes report their leases per card, so a remote lease fences only the contracts whose
+  cards it sits on; `node-swap --cards` never stops a process that holds a lease on a card it would touch.
+
 ### Changed — a lease on one card fences a remote node only for the contracts that run on it (GPU routing P7, register C-86)
 
 With card-scoped leases several leases are live at once, but a node's health described only the lowest epoch in one
