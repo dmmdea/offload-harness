@@ -1097,16 +1097,16 @@ type healthPayload struct {
 	// gaming read 33% while every card the harness could use sat at 0%.
 	// WorkUtilKnown is its validity flag; a node that predates the field omits
 	// both, and a consumer then falls back to GpuUtilPct.
-	WorkUtilPct           int              `json:"work_util_pct"`
-	WorkUtilKnown         bool             `json:"work_util_known"`
-	SupportedTaskTypes    []string         `json:"supported_task_types"`
-	LoadableModelFamilies []string         `json:"loadable_model_families"`
+	WorkUtilPct           int      `json:"work_util_pct"`
+	WorkUtilKnown         bool     `json:"work_util_known"`
+	SupportedTaskTypes    []string `json:"supported_task_types"`
+	LoadableModelFamilies []string `json:"loadable_model_families"`
 	// MediaRoutes (ADR 0072) is each file-backed media route this node derives from its own disk and
 	// its verdict (CONFIGURED / NOT CONFIGURED / BOUND-BUT-MISSING), cached at most 60 s: the reason a
 	// media task is absent from supported_task_types. Additive; a node that predates it omits the key,
 	// which a reader takes as unknown, never as "none".
-	MediaRoutes []MediaRouteHealth `json:"media_routes,omitempty"`
-	ModelFootprints       []FootprintEntry `json:"model_footprints"`
+	MediaRoutes     []MediaRouteHealth `json:"media_routes,omitempty"`
+	ModelFootprints []FootprintEntry   `json:"model_footprints"`
 	// ImageFamilies are the bindings an image-gen payload's `family` can select
 	// (ADR 0058), each with its license: a dispatcher routing brand work must skip
 	// a family whose commercial_use is false, and read a null license as UNKNOWN.
