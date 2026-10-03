@@ -382,6 +382,9 @@ func TestLeasesWireIsReadByEveryHealthReader(t *testing.T) {
 	cfg.AgentModel = "agent-pool"
 	cfg.AgentCtxTokens = 262144
 	cfg.FleetAuthToken = "wire-token"
+	// The test's own home, state and lease directories: nothing here reads or writes the machine's.
+	home := t.TempDir()
+	cfg.Home, cfg.StateDir, cfg.GPULockPath = home, filepath.Join(home, "state"), filepath.Join(home, "gpu-lease")
 	jobs := fleetnode.NewJobs(time.Hour, cfg.FleetConcurrencyLimit())
 	t.Cleanup(func() { jobs.DrainAndStop(2 * time.Second) })
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -409,9 +410,13 @@ func TestSaturationClosesOnAWholeNodeLeaseAndOnUnknownCards(t *testing.T) {
 }
 
 // flagshipNodeCfg is the flagship box as a fleet node: the triple seat (cards 0,1,2) is the
-// home agent seat, and the single layer's agent seat sits on card 0.
-func flagshipNodeCfg(endpoint string) config.Config {
+// home agent seat, and the single layer's agent seat sits on card 0. Its home, state and lease
+// directories are the test's own, so nothing here reads or writes the machine's.
+func flagshipNodeCfg(t *testing.T, endpoint string) config.Config {
+	t.Helper()
 	cfg := agentHealthCfg(endpoint)
+	home := t.TempDir()
+	cfg.Home, cfg.StateDir, cfg.GPULockPath = home, filepath.Join(home, "state"), filepath.Join(home, "gpu-lease")
 	fx := config.FlagshipFixture()
 	cfg.TierProfile, cfg.Tiers, cfg.Layers = fx.TierProfile, fx.Tiers, fx.Layers
 	cfg.AgentModel = "agent-pool"
@@ -434,7 +439,7 @@ func TestHealthSeatRowsCarryTheirCardsAsLeaseIDs(t *testing.T) {
 	roster := multiRoster(t, &probes, map[string][]string{"agent-pool": {"agent-pool"}, "gemma-4-26b-agent": nil})
 	opts := authOpts(true)
 	opts.Snapshot = threeCardSnapshot
-	s, _ := newTestServer(t, flagshipNodeCfg(roster.URL), &fakeRunner{}, opts)
+	s, _ := newTestServer(t, flagshipNodeCfg(t, roster.URL), &fakeRunner{}, opts)
 	_ = do(t, s, http.MethodGet, "/fleet/health", "", nil)
 	waitForResidencyProbe(t, s)
 	m := decodeMap(t, do(t, s, http.MethodGet, "/fleet/health", "", nil))
@@ -478,7 +483,7 @@ func leasedFlagshipNode(t *testing.T, info gpulease.Info) *Server {
 	opts := authOpts(true)
 	opts.Snapshot = threeCardSnapshot
 	opts.Lease = func() gpulease.Info { return info }
-	s, _ := newTestServer(t, flagshipNodeCfg(roster.URL), &fakeRunner{}, opts)
+	s, _ := newTestServer(t, flagshipNodeCfg(t, roster.URL), &fakeRunner{}, opts)
 	return s
 }
 

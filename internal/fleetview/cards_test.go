@@ -42,7 +42,7 @@ func foldOne(t *testing.T, health map[string]any) Node {
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
-	p := NewPoller(config.Config{}, []string{srv.URL}, 20*time.Millisecond, 3)
+	p := NewPoller(config.Config{Home: t.TempDir()}, []string{srv.URL}, 20*time.Millisecond, 3)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	go p.Run(ctx)
