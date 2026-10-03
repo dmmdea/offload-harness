@@ -966,7 +966,15 @@ func (p *Pipeline) runVisionGen(ctx context.Context, req core.Request, built tas
 	// the harness itself never calls a cloud model). Wait for
 	// the slot (bounded, cheap dir-stat poll) instead of burning a doomed call;
 	// if it never frees, defer with a distinct, actionable reason.
-	if info := gpulock.WaitFree(ctx, p.gpuLockPath, p.visionGPUWait, p.visionGPUPoll); info.Held {
+	//
+	// The wait is for a lease on the cards THIS seat is pinned to (plan P4): the delegator's auto
+	// route reads the lease the same way, and a render on another card is not one to wait for
+	// (reading it whole-node here deferred a call the fleet used to serve).
+	visionModel := meta.Model
+	readLease := func(dir string) gpulease.Info {
+		return modelaffinity.ScopeToModel(modelaffinity.InspectLease(dir), visionModel)
+	}
+	if info := gpulock.WaitFreeScoped(ctx, p.gpuLockPath, p.visionGPUWait, p.visionGPUPoll, readLease); info.Held {
 		meta.LatencyMs = time.Since(start).Milliseconds()
 		meta.ErrClass = "gpu_busy"
 		reason := fmt.Sprintf("gpu busy: generation job holds the lock (%ds)", int(info.Age/time.Second))
@@ -3309,7 +3317,9 @@ func ambientLeaseEnv() ([]string, error) {
 	}
 	// The fence, applied at the boundary: an epoch that is no longer current means the
 	// card was handed to somebody else while our parent was suspended.
-	if info := gpulease.InspectDir(dir); !info.Held || info.Epoch != epoch {
+	// Per epoch: with card-scoped leases several are live at once, and comparing against
+	// the lowest epoch would fence out every other lease's child.
+	if !gpulease.EpochIsCurrent(dir, epoch) {
 		return nil, fmt.Errorf("inherited gpu lease (epoch %d) is no longer current at %s; "+
 			"the card was handed to another holder", epoch, dir)
 	}

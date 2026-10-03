@@ -30,6 +30,7 @@
 import { writeFileSync, readFileSync, renameSync, unlinkSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { withGpuSlot } from "./gpu-lock.mjs";
+import { comfyApi } from "./comfy-lifecycle.mjs";
 import { firstOutputFile } from "./comfy-output.mjs";
 import { buildAceStep } from "./wf-acestep.mjs";
 import { resolveCli, submitGraph, pollOutputs, fetchView, finalizeRun } from "./comfy-submit.mjs";
@@ -219,7 +220,7 @@ async function generate(out, API, graph, seed, { ffmpeg, ffprobe, seconds, rende
 async function main() {
   const { pos, flags } = parseArgs(process.argv.slice(2));
   const out = pos[0];
-  const API = flags.api || process.env.COMFY_API || "http://127.0.0.1:8188";
+  const API = comfyApi(flags.api);
   if (!out) { console.error('usage: node comfy-music.mjs <out.flac> "<style tags>" [--lyrics "..."] [--seconds N] [--seed N] [--reserve-vram X]   |   <out.flac> --graph wf.json'); process.exit(2); }
   // Resolved once, up front: whether to over-render (and later trim) depends on
   // ffmpeg/ffprobe being available, and buildAceStep's `seconds` has to be decided
@@ -233,7 +234,7 @@ async function main() {
   const trim = !flags.graph && !!ffmpeg && !!ffprobe;
   const { graph, seed, seconds, renderSeconds } = buildGraphFromArgs(pos, flags, { trim });
   await withGpuSlot(
-    { noLock: flags["no-lock"], keepComfy: flags["keep-comfy"], comfyManaged: true, reserveVram: flags["reserve-vram"] || RESERVE_VRAM_DEFAULT },
+    { noLock: flags["no-lock"], keepComfy: flags["keep-comfy"], comfyManaged: true, api: API, reserveVram: flags["reserve-vram"] || RESERVE_VRAM_DEFAULT },
     () => generate(out, API, graph, seed, { ffmpeg, ffprobe, seconds, renderSeconds }),
   );
 }

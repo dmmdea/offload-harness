@@ -30,7 +30,8 @@
 //     and treat a mismatch as a dead holder.
 //
 //  4. TWO CLASSES. `media` (image/video/audio/run-graph) and `text` (a reservation taken
-//     by a benchmark/eval). Both are EXCLUSIVE — one card, one holder. The distinction is
+//     by a benchmark/eval). Both are EXCLUSIVE — one card, one holder (a lease that names no
+//     cards holds them all; one that names its cards, devices.go, holds only those). The distinction is
 //     not access control, it is intent: only a `media` holder may unload models, and a
 //     `text` reservation makes a dispatched render WAIT instead of destroying the run.
 //     Ordinary interactive text calls are deliberately NOT lease participants: thousands
@@ -128,13 +129,49 @@ const QueueHint = "local-offload gpu reserve --wait 8h --drain --unload-seat --f
 // ErrHeld is returned by TryAcquire when the card is legitimately held by someone
 // else. It carries the current holder so a caller can report an honest ETA rather
 // than a bare failure.
-type ErrHeld struct{ Info Info }
+type ErrHeld struct {
+	Info Info
+	// mgr, when set, lets Error() say what is wrong with a lease that is held but not
+	// healthy (its owner gone, its progress stalled, its window long past) and the
+	// command that frees it. Unexported: an ErrHeld built by hand reads as it always did.
+	mgr *Manager
+}
+
+// heldErr builds the refusal for a lease this Manager saw held.
+//
+// ErrHeld.Error() reads: it derives the lease's standing from the session registry and the
+// orphan marker a status surface recorded (StandingReadOnly), and it never writes or takes
+// the epoch lock, so formatting one is safe anywhere, including inside a withEpochLock
+// closure. Only the status surfaces (`gpu status`, offload_status, the fleet health) stamp
+// the marker.
+func (m *Manager) heldErr(info Info) *ErrHeld {
+	return &ErrHeld{Info: info, mgr: m}
+}
+
+// HeldError is the refusal for a lease info that a caller of this Manager read as held and
+// is reporting itself (a CLI that must compare the holder's pid before it queues). It is
+// the same error TryAcquire returns, so it says what is wrong with an unhealthy lease and
+// how to free it.
+func (m *Manager) HeldError(info Info) *ErrHeld { return m.heldErr(info) }
 
 func (e *ErrHeld) Error() string {
+	s := e.baseError()
+	if e.mgr != nil {
+		if why := e.mgr.ExplainHeld(e.Info, 0); why != "" {
+			s += " — " + why
+		}
+	}
+	return s
+}
+
+func (e *ErrHeld) baseError() string {
 	s := fmt.Sprintf("GPU held by %s (pid %d, held %s, reason %q",
 		e.Info.Class, e.Info.PID, e.Info.Age.Round(time.Second), e.Info.Reason)
 	if e.Info.Exclusive {
 		s += ", exclusive"
+	}
+	if len(e.Info.Devices) > 0 {
+		s += ", cards " + strings.Join(e.Info.Devices, ",")
 	}
 	// The declared window is what a waiter decides on — "held" alone sends it away,
 	// "held until 11:40" lets it queue for the right length.
@@ -187,7 +224,50 @@ type Meta struct {
 	// argv, clipped), so a reader of `gpu status` sees WHAT holds the cards, not
 	// only who.
 	Command string `json:"command,omitempty"`
+
+	// --- record v2 (card-scoped leases). Every field is omitempty and unknown to a
+	// pre-v2 reader, which ignores it: a record without Devices is whole-node. ---
+
+	// Devices are the GPU UUIDs this lease claims. Empty = the whole node.
+	Devices []string `json:"devices,omitempty"`
+	// Group labels leases taken together for one job; informational.
+	Group string `json:"group,omitempty"`
+	// WrapperVersion is the build of the process that holds the lease.
+	WrapperVersion string `json:"wrapper_version,omitempty"`
+	// State is "granting" while a v2 grant is in flight under the epoch lock and
+	// "active" once every card claim exists. Empty on a whole-node record.
+	State string `json:"state,omitempty"`
+
+	// --- ownership (plan P8). Additive and omitempty: a record without Owner is an
+	// UNKNOWN owner, never an orphan. See owner.go. ---
+
+	// Owner is who asked for the lease (a session, a process, or a remote host).
+	Owner *Owner `json:"owner,omitempty"`
+	// Unattended: nobody is expected at the desk; the lease is judged by its progress
+	// contract and its window, never by whether its owner is still around.
+	Unattended bool `json:"unattended,omitempty"`
+	// Progress is the progress contract: a file the job appends to and the window in
+	// which it must move.
+	Progress *Progress `json:"progress,omitempty"`
+	// YieldGraceMs and OnYield are the job's own terms for being asked to stop (how long
+	// it needs, and the command that makes it stop at a clean boundary). Recorded here;
+	// the takeover that reads them is a later change.
+	YieldGraceMs int64  `json:"yield_grace_ms,omitempty"`
+	OnYield      string `json:"on_yield,omitempty"`
+	// OnYieldDir is the working directory of the process that took the lease, recorded
+	// with OnYield: the takeover that runs the command later does not share it, and a
+	// relative command ("touch work/STOP") means a different file from another directory.
+	OnYieldDir string `json:"on_yield_dir,omitempty"`
+	// Format is the record format of the binary that WROTE the record (RecordFormat). A
+	// record without it was written by a binary that predates card-scoped leases: it cannot
+	// declare cards, so a reader may INFER what it holds (infer.go). A record that carries it
+	// is a statement by a binary that could have declared cards, so a whole-node record
+	// carrying it means the whole node and is never narrowed by inference.
+	Format int `json:"format,omitempty"`
 }
+
+// RecordFormat is the Meta.Format every binary that understands card-scoped leases stamps.
+const RecordFormat = 2
 
 // Info is one point-in-time inspection.
 type Info struct {
@@ -211,6 +291,96 @@ type Info struct {
 	// HeartbeatAt is the holder's last renewal (the per-epoch heartbeat file,
 	// else the acquisition stamp). Zero when unknown.
 	HeartbeatAt time.Time
+	// Devices are the cards this lease claims (GPU UUIDs); empty = the whole node.
+	Devices []string
+	// Epochs lists every live lease's epoch, lowest first. Epoch is the lowest of
+	// them. A directory holds several leases at once only when card-scoped leases are
+	// in use; a whole-node lease is always a single epoch.
+	Epochs []uint64
+	// Group and WrapperVersion mirror the record's v2 fields.
+	Group          string
+	WrapperVersion string
+	// Legacy is true when the record was written by a binary that predates card-scoped
+	// leases (no Meta.Format, no wrapper version) and declares no cards. Only such a record
+	// is ever scoped by the evidence rule (infer.go): its writer could not have named cards,
+	// so its silence is not a statement. A whole-node record from a binary that could have
+	// declared cards (an explicit --whole-node, a reserve with the writer flag off, the
+	// pipeline's own media lease) is the whole node by its writer's word.
+	Legacy bool
+	// Inferred is the card set a LEGACY whole-node record was scoped to by the evidence
+	// rule (effective.go). It is never the record's claim: Devices stays what the record
+	// declares, so the card table and the allocator read the lease as the whole node it
+	// is. Consumers that ask "does this lease sit on my card" read EffectiveDevices.
+	// Scope names where the effective set came from (the zero value reads as declared
+	// when Devices is set and whole-node otherwise); ScopeWhy is the sentence behind a
+	// legacy lease that stayed whole-node or was scoped; ScopeWidened marks an inferred
+	// set that grew after it was first established.
+	Inferred     []string
+	Scope        ScopeSource
+	ScopeWhy     string
+	ScopeWidened bool
+	// AcquiredAt is when the lease was taken (the acquirer's own stamp).
+	AcquiredAt time.Time
+	// Owner, Unattended, Progress, YieldGraceMs and OnYield mirror the record's
+	// ownership fields (owner.go). Owner is nil for a record that names none.
+	Owner        *Owner
+	Unattended   bool
+	Progress     *Progress
+	YieldGraceMs int64
+	OnYield      string
+	OnYieldDir   string
+	// Leases lists every live lease on its own (lowest epoch first) when MORE THAN ONE
+	// is live; it is nil otherwise. Info itself describes only the lowest, so a consumer
+	// that decides "does a lease fence me" from Class, Exclusive and Draining must walk
+	// Each(), or it judges one lease and is blind to the rest. Each entry carries its own
+	// epoch only (Epochs has one element) and no Leases of its own.
+	Leases []Info
+}
+
+// Each returns the leases an Info describes, one Info per lease: Leases when several are
+// live, else the Info itself. A consumer's per-lease question (does THIS lease fence me,
+// am I running UNDER this lease) is asked of each element, never of the lowest-epoch
+// summary.
+func (i Info) Each() []Info {
+	if len(i.Leases) > 0 {
+		return i.Leases
+	}
+	return []Info{i}
+}
+
+// Lease returns the record of one live lease of this inspection by epoch. Info itself
+// describes only the lowest, so a consumer reporting something about ANOTHER lease (the
+// most escalated of several: its owner, its progress contract, the command that takes it
+// over) reads that lease's own record here and never mixes it with the lowest epoch's.
+func (i Info) Lease(epoch uint64) (Info, bool) {
+	if !i.Held || epoch == 0 {
+		return Info{}, false
+	}
+	for _, l := range i.Each() {
+		if l.Epoch == epoch {
+			return l, true
+		}
+	}
+	return Info{}, false
+}
+
+// HoldsEpoch reports whether epoch is one of the live leases this inspection saw.
+// It is the comparison every "is this process inside the held lease" site must use:
+// `info.Epoch == epoch` is wrong the moment a second lease is live, because Epoch is
+// only the lowest of them.
+func (i Info) HoldsEpoch(epoch uint64) bool {
+	if !i.Held || epoch == 0 {
+		return false
+	}
+	if len(i.Epochs) == 0 {
+		return i.Epoch == epoch
+	}
+	for _, e := range i.Epochs {
+		if e == epoch {
+			return true
+		}
+	}
+	return false
 }
 
 // Options configure an acquisition.
@@ -245,6 +415,31 @@ type Options struct {
 	Draining bool
 	// Command is recorded as Meta.Command (clipped to commandClip runes).
 	Command string
+	// Devices names the cards the lease holds, by GPU UUID (plan invariant I2). Empty
+	// is a WHOLE-NODE lease, the only kind that existed before record v2. A non-empty
+	// set writes a v2 lease (per-card claims) and is refused unless the host has
+	// enabled card-scoped leases (Manager.SetCardScoped).
+	Devices []string
+	// Group names a set of leases taken for one job (a fan-out batch); informational.
+	Group string
+	// WrapperVersion is the build that holds the lease. P11's takeover reads its
+	// absence as "a legacy wrapper that cannot honour a yield request".
+	WrapperVersion string
+
+	// Owner is who asked for the lease; the zero Owner records none (unknown).
+	Owner Owner
+	// Unattended declares that nobody is expected at the desk. It requires a declared
+	// TTL and a progress contract (ProgressFile and Stall), or the acquisition is refused
+	// (ErrUnattendedContract).
+	Unattended bool
+	// ProgressFile and Stall are the progress contract: the file the job appends to and
+	// how long it may go without that file moving. Both or neither.
+	ProgressFile string
+	Stall        time.Duration
+	// YieldGrace and OnYield are the job's terms for being asked to stop; recorded for
+	// the takeover that reads them.
+	YieldGrace time.Duration
+	OnYield    string
 }
 
 // Manager binds a resolved state root. Construct with Open, which performs the
@@ -269,6 +464,91 @@ type Manager struct {
 	// set this directly to observe heartbeat staleness without a real 15s wait,
 	// the same seam pattern as sleep/pollEvery.
 	waiterHeartbeatTTL time.Duration
+	// cardScoped is the per-host switch (config gpu_card_scoped_leases). Off, a
+	// device-scoped acquisition is refused and nothing but whole-node records is ever
+	// written. Reading is never gated: a reader must understand a v2 directory whether
+	// or not this process writes one (invariant I7).
+	cardScoped bool
+	// afterClaimHook, when set, runs right after a whole-node acquisition has made its
+	// meta.json claim and before it verifies there is no device lease. Tests use it to
+	// land a device lease in exactly that window; production never sets it.
+	afterClaimHook func()
+	// legacyWriter makes this Manager write records the way a binary that predates card-scoped
+	// leases did (no Format stamp). A test seam: production never sets it.
+	legacyWriter bool
+	// statHook and removeHook are test seams for filesystem failures a unit test
+	// cannot otherwise provoke portably (an access error on e/, a removal that is
+	// refused). nil means os.Stat and removeClaim; production never sets them.
+	statHook   func(path string) (os.FileInfo, error)
+	removeHook func(path string) error
+	// writeProbe is a test seam for "this process cannot write the lease directory"; nil
+	// means a real probe.
+	writeProbe func(dir string) error
+}
+
+// ErrCardScopedOff is returned by an acquisition that names devices on a host that
+// has not enabled card-scoped leases.
+var ErrCardScopedOff = errors.New("gpulease: card-scoped leases are not enabled on this host (config gpu_card_scoped_leases); " +
+	"a lease that names devices cannot be written, and an older binary on this host would read it as a free card")
+
+// EmulateLegacyWriter makes this Manager write records as a binary that predates card-scoped
+// leases did: no Format stamp, so a reader sees a LEGACY whole-node record that the evidence
+// rule (infer.go) may scope. It exists for the tests of every consumer of that rule, which
+// have to hold a lease the way the one that prompted it was held; production never calls it.
+func (m *Manager) EmulateLegacyWriter() { m.legacyWriter = true }
+
+// SetCardScoped turns the device-scoped WRITER on or off for this Manager. It is the
+// raw switch and checks nothing: production callers go through ApplyCardScopedConfig.
+func (m *Manager) SetCardScoped(on bool) { m.cardScoped = on }
+
+// CardScoped reports whether this Manager may write card-scoped leases (the per-host
+// switch, after ApplyCardScopedConfig).
+func (m *Manager) CardScoped() bool { return m.cardScoped }
+
+// ErrReaderAuditMissing is returned by ApplyCardScopedConfig when the config asks for
+// card-scoped leases and the host has no green reader audit.
+var ErrReaderAuditMissing = errors.New("gpulease: gpu_card_scoped_leases is set but this host has no green reader audit")
+
+// ApplyCardScopedConfig is the production entry for the per-host switch (config
+// gpu_card_scoped_leases). Asking for the writer is not enough: a binary or Node reader
+// that predates the format reads a directory holding only device leases as a FREE card,
+// so the writer stays off until the host carries a green reader audit, the marker file
+// reader-audit.json beside the epoch counter. `gpu doctor` is the one writer of that
+// marker, and it writes "green" only when every binary copy (node-swap backups and
+// running images included), media-repo wrapper copy and Node reader it can find
+// understands the per-epoch fence. This turns invariant I7 (audit before any writer)
+// from a convention into a mechanism: no marker, no device lease.
+//
+// Off, it only switches the writer off. On without a green marker it leaves the writer
+// off and returns an error wrapping ErrReaderAuditMissing that names the marker.
+func (m *Manager) ApplyCardScopedConfig(on bool) error {
+	if !on {
+		m.cardScoped = false
+		return nil
+	}
+	if !m.readerAuditGreen() {
+		m.cardScoped = false
+		return fmt.Errorf("%w: card-scoped leases stay off; the writer needs the marker %s with {\"result\":\"green\"}, "+
+			"which `gpu doctor` writes once no binary or Node reader on this host predates the per-epoch fence",
+			ErrReaderAuditMissing, m.readerAuditPath())
+	}
+	m.cardScoped = true
+	return nil
+}
+
+// readerAuditPath is the marker `gpu doctor` writes.
+func (m *Manager) readerAuditPath() string { return filepath.Join(m.gpuDir(), "reader-audit.json") }
+
+// readerAuditGreen reads the marker. Anything but a readable {"result":"green"} is no audit.
+func (m *Manager) readerAuditGreen() bool {
+	b, err := os.ReadFile(m.readerAuditPath())
+	if err != nil {
+		return false
+	}
+	var a struct {
+		Result string `json:"result"`
+	}
+	return json.Unmarshal(b, &a) == nil && a.Result == "green"
 }
 
 // pause waits between Acquire probes, tolerating a Manager built without a sleep seam.
@@ -419,6 +699,9 @@ func OpenAt(lockOverride, stateDir string) (*Manager, error) {
 // Root is the resolved state root (for diagnostics and for threading to the Node
 // side as GPU_LEASE_DIR).
 func (m *Manager) Root() string { return m.root }
+
+// Dir is the resolved lease directory this Manager reads and writes.
+func (m *Manager) Dir() string { return m.leaseDir() }
 func (m *Manager) gpuDir() string {
 	if m.leaseOverride != "" {
 		return filepath.Dir(m.leaseOverride)
@@ -445,7 +728,9 @@ func (m *Manager) clearUnloadMarkers() {
 		return
 	}
 	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), "unloaded.") || strings.HasPrefix(e.Name(), "hb.") {
+		// seen.<epoch> is the inferred-scope sidecar of a legacy lease (infer.go); a legacy
+		// release is the only writer of a whole-node record, so sweeping all of them is safe.
+		if strings.HasPrefix(e.Name(), "unloaded.") || strings.HasPrefix(e.Name(), "hb.") || strings.HasPrefix(e.Name(), seenPrefix) || strings.HasPrefix(e.Name(), orphanMarkPrefix) {
 			_ = removeClaim(filepath.Join(m.leaseDir(), e.Name()))
 		}
 	}
@@ -625,6 +910,12 @@ func (m *Manager) reclaimable(meta *Meta, now time.Time) bool {
 // heartbeat became a per-epoch file, a record-only reader saw a frozen RenewedAtMs and
 // would call a live, renewing holder stale as soon as its declared window lapsed. Same
 // divergence as the path split and the schema split, one more layer down.
+//
+// With card-scoped leases a directory can hold several leases at once. The Info it
+// returns is the lowest live epoch's, so a caller that knows nothing about devices
+// reads ANY live lease as a held card (the conservative reading, and today's for a
+// whole-node lease); Info.Epochs lists every live epoch and InspectLeases returns one
+// Info per lease.
 func InspectDir(leaseDir string) Info { return inspectDirAt(leaseDir, time.Now(), DefaultHeartbeatTTL) }
 
 func inspectDirAt(leaseDir string, now time.Time, hbTTL time.Duration) Info {
@@ -642,22 +933,7 @@ func InspectDirDetail(leaseDir string) (Info, *Meta, bool) {
 }
 
 func inspectDirDetailAt(leaseDir string, now time.Time, hbTTL time.Duration) (Info, *Meta, bool) {
-	b, err := os.ReadFile(filepath.Join(leaseDir, metaFileName))
-	if err != nil {
-		return Info{}, nil, false
-	}
-	var meta Meta
-	if json.Unmarshal(b, &meta) != nil {
-		return Info{}, nil, false
-	}
-	effective := meta
-	effective.RenewedAtMs = heartbeatAt(leaseDir, &meta)
-	if Reclaimable(&effective, now, hbTTL, processStart) {
-		return Info{}, &meta, true
-	}
-	info := infoFrom(&meta, now)
-	info.HeartbeatAt = time.UnixMilli(effective.RenewedAtMs)
-	return info, &meta, false
+	return reader{dir: leaseDir, now: now, hbTTL: hbTTL, procStart: processStart}.detail()
 }
 
 // heartbeatAt reads the per-epoch heartbeat beside a lease record, falling back to the
@@ -680,6 +956,14 @@ func infoFrom(meta *Meta, now time.Time) Info {
 	if age < 0 {
 		age = 0
 	}
+	// A record with no declared end (missing, zero or negative expires_at_ms) has
+	// no window: leave ExpiresAt as the zero Time, which every reader already
+	// guards with IsZero. time.UnixMilli(0) is 1970, which IsZero rejects, so it
+	// read as a window that lapsed decades ago.
+	var expires time.Time
+	if meta.ExpiresAtMs > 0 {
+		expires = time.UnixMilli(meta.ExpiresAtMs)
+	}
 	return Info{
 		Held:      true,
 		Class:     meta.Class,
@@ -689,30 +973,46 @@ func infoFrom(meta *Meta, now time.Time) Info {
 		Reason:    meta.Reason,
 		Origin:    meta.Origin,
 		JobID:     meta.JobID,
-		ExpiresAt: time.UnixMilli(meta.ExpiresAtMs),
+		ExpiresAt: expires,
 		Exclusive: meta.Exclusive,
 		Draining:  meta.Draining,
 		Command:   meta.Command,
+
+		Devices:        append([]string(nil), meta.Devices...),
+		Epochs:         []uint64{meta.Epoch},
+		Group:          meta.Group,
+		WrapperVersion: meta.WrapperVersion,
+		AcquiredAt:     time.UnixMilli(meta.AcquiredAtMs),
+		Unattended:     meta.Unattended,
+		YieldGraceMs:   meta.YieldGraceMs,
+		OnYield:        meta.OnYield,
+		OnYieldDir:     meta.OnYieldDir,
+		Owner:          cloneOwner(meta.Owner),
+		Progress:       cloneProgress(meta.Progress),
+		Legacy:         len(meta.Devices) == 0 && meta.Format < RecordFormat && strings.TrimSpace(meta.WrapperVersion) == "",
 	}
 }
 
-// Inspect reports the current lease state. A reclaimable lease reports NOT held.
-func (m *Manager) Inspect() Info {
-	meta, err := m.readMeta()
-	if err != nil || meta == nil {
-		return Info{}
+func cloneOwner(o *Owner) *Owner {
+	if o == nil {
+		return nil
 	}
-	now := m.now()
-	if m.reclaimable(meta, now) {
-		return Info{}
-	}
-	// ONE builder. A second copy of the field list here is how Exclusive would
-	// reach ErrHeld but not Inspect — the vision gate and the load gate read
-	// through this path, and they are the readers the flag exists for.
-	info := infoFrom(meta, now)
-	info.HeartbeatAt = time.UnixMilli(m.lastHeartbeat(meta))
-	return info
+	c := *o
+	return &c
 }
+
+func cloneProgress(p *Progress) *Progress {
+	if p == nil {
+		return nil
+	}
+	c := *p
+	return &c
+}
+
+// Inspect reports the current lease state. A reclaimable lease reports NOT held. With
+// card-scoped leases it reports the lowest live epoch (see InspectDir); InspectFor and
+// Leases narrow it.
+func (m *Manager) Inspect() Info { return m.reader().primary() }
 
 func (m *Manager) readMeta() (*Meta, error) {
 	b, err := os.ReadFile(m.metaPath())
@@ -735,6 +1035,10 @@ type Lease struct {
 	mgr   *Manager
 	epoch uint64
 	class Class
+	// v2 marks a card-scoped lease: its record is e/<epoch>.json and its fence is the
+	// per-card claims, not meta.json. devices are the cards it holds.
+	v2      bool
+	devices []string
 	// done is set once by the first Release. Atomic because a holder's
 	// release paths can run concurrently (a deferred Release beside a cleanup
 	// or signal path) — a plain bool was a data race under -race.
@@ -747,11 +1051,28 @@ func (l *Lease) Epoch() uint64 { return l.epoch }
 func (l *Lease) Class() Class  { return l.class }
 func (l *Lease) Dir() string   { return l.mgr.leaseDir() }
 
+// Devices are the cards the lease holds (GPU UUIDs); empty = the whole node.
+func (l *Lease) Devices() []string { return append([]string(nil), l.devices...) }
+
 // TryAcquire attempts to take the card once. It returns *ErrHeld when someone else
 // legitimately holds it, so the caller can report a real ETA instead of a bare error.
 func (m *Manager) TryAcquire(class Class, opts Options) (*Lease, error) {
 	if !class.Valid() {
 		return nil, fmt.Errorf("gpulease: unknown class %q (want %q or %q)", class, ClassMedia, ClassText)
+	}
+	if verr := opts.validateOwnership(); verr != nil {
+		return nil, verr
+	}
+	devs, derr := NormalizeDevices(opts.Devices)
+	if derr != nil {
+		return nil, derr
+	}
+	if len(devs) > 0 {
+		if !m.cardScoped {
+			return nil, ErrCardScopedOff
+		}
+		opts.Devices = devs
+		return m.tryAcquireDevices(class, opts, devs)
 	}
 	for attempt := 0; attempt < 3; attempt++ {
 		// CHEAP PROBE FIRST. A waiter re-tries once a second, and issuing a fencing
@@ -762,7 +1083,7 @@ func (m *Manager) TryAcquire(class Class, opts Options) (*Lease, error) {
 		// optimisation: the O_EXCL claim below is still the sole arbiter, so a card that
 		// frees between this read and that create just costs one wasted iteration.
 		if info := m.Inspect(); info.Held {
-			return nil, &ErrHeld{Info: info}
+			return nil, m.heldErr(info)
 		}
 
 		// THE DIRECTORY IS A CONTAINER, NEVER A CLAIM. Creating it must be
@@ -801,6 +1122,21 @@ func (m *Manager) TryAcquire(class Class, opts Options) (*Lease, error) {
 				_ = removeClaim(m.metaPath()) // drop a claim we could not complete
 				return nil, fmt.Errorf("gpulease: writing lease claim: %w", errors.Join(werr, cerr))
 			}
+			if m.afterClaimHook != nil {
+				m.afterClaimHook()
+			}
+			// A card-scoped lease may have been granted while we were claiming: the
+			// two kinds arbitrate under the epoch lock (see verifyNoDeviceLeases). A
+			// host that has never written a device lease has no e/ directory and pays
+			// nothing here.
+			if m.hasV2Dir() {
+				if verr := m.verifyNoDeviceLeases(epoch); verr != nil {
+					return nil, verr
+				}
+			}
+			// What an older binary's release leaves behind (seen.<epoch>, the inferred-scope
+			// sidecar of a lease it knew nothing about) is debris the moment its lease is gone.
+			m.sweepSeen(map[uint64]bool{epoch: true})
 			return &Lease{mgr: m, epoch: epoch, class: class}, nil
 		}
 		if !os.IsExist(err) {
@@ -816,7 +1152,7 @@ func (m *Manager) TryAcquire(class Class, opts Options) (*Lease, error) {
 			return nil, &ErrHeld{Info: Info{Held: true, Reason: "claim in progress"}}
 		}
 		if !m.reclaimable(meta, m.now()) {
-			return nil, &ErrHeld{Info: m.holderInfo(meta)}
+			return nil, m.heldErr(m.holderInfo(meta))
 		}
 		// Remove only the CLAIM, never the container: another acquirer may be working
 		// inside this directory right now.
@@ -826,7 +1162,7 @@ func (m *Manager) TryAcquire(class Class, opts Options) (*Lease, error) {
 			return nil, fmt.Errorf("gpulease: cannot reclaim the stale lease at %s: %w", m.metaPath(), err)
 		}
 	}
-	return nil, &ErrHeld{Info: m.holderInfo(nil)}
+	return nil, m.heldErr(m.holderInfo(nil))
 }
 
 // removeStaleClaim removes the claim ONLY IF it is still stale when looked at
@@ -905,6 +1241,16 @@ func (m *Manager) holderInfo(meta *Meta) Info {
 // Only *ErrHeld is retried. An unwritable or cloud-synced lease location is returned
 // immediately: it is a configuration fault, and waiting cannot fix it.
 func (m *Manager) Acquire(class Class, opts Options) (*Lease, error) {
+	// A device request is validated and flag-checked BEFORE it queues: waiting for a
+	// lease this host can never write is a hang, not a queue.
+	devs, derr := NormalizeDevices(opts.Devices)
+	if derr != nil {
+		return nil, derr
+	}
+	if len(devs) > 0 && !m.cardScoped {
+		return nil, ErrCardScopedOff
+	}
+	opts.Devices = devs
 	if opts.Wait <= 0 {
 		return m.TryAcquire(class, opts)
 	}
@@ -944,9 +1290,9 @@ func (m *Manager) Acquire(class Class, opts Options) (*Lease, error) {
 	//
 	// Unless the caller said WaitOut: for it the window is information, not
 	// a verdict (see Options.WaitOut).
-	if info := m.Inspect(); info.Held && !opts.WaitOut && info.Class == ClassText &&
+	if info := m.InspectFor(devs); info.Held && !opts.WaitOut && info.Class == ClassText &&
 		!info.ExpiresAt.IsZero() && info.ExpiresAt.After(deadline) {
-		return nil, &ErrHeld{Info: info}
+		return nil, m.heldErr(info)
 	}
 
 	// REGISTER BEFORE THE FIRST CLAIM ATTEMPT, not after it (register D-1xx,
@@ -1043,8 +1389,8 @@ func (m *Manager) Acquire(class Class, opts Options) (*Lease, error) {
 // an entry that never tries — would be silently lost. Named after whichever
 // OTHER waiter is still ahead of self, when Inspect itself has nothing to say.
 func queueTimeoutErr(m *Manager, self Waiter) error {
-	if info := m.Inspect(); info.Held {
-		return &ErrHeld{Info: info}
+	if info := m.InspectFor(self.Devices); info.Held {
+		return m.heldErr(info)
 	}
 	for _, w := range m.Waiters() {
 		if w.path == self.path {
@@ -1096,6 +1442,13 @@ func (m *Manager) record(epoch uint64, class Class, opts Options) ([]byte, error
 		Exclusive:    opts.Exclusive && class == ClassText,
 		Draining:     opts.Draining,
 		Command:      clipCommand(opts.Command),
+
+		Group:          strings.TrimSpace(opts.Group),
+		WrapperVersion: strings.TrimSpace(opts.WrapperVersion),
+	}
+	m.stampOwnership(&meta, opts)
+	if !m.legacyWriter {
+		meta.Format = RecordFormat
 	}
 	b, err := json.Marshal(&meta)
 	if err != nil {
@@ -1117,12 +1470,9 @@ func (m *Manager) record(epoch uint64, class Class, opts Options) ([]byte, error
 func (m *Manager) bumpEpoch() (uint64, error) {
 	var next uint64
 	err := m.withEpochLock(func() error {
-		cur, rerr := m.readEpoch()
-		if rerr != nil {
-			return rerr
-		}
-		next = cur + 1
-		return m.writeEpoch(next)
+		var berr error
+		next, berr = m.bumpEpochLocked()
+		return berr
 	})
 	if err != nil {
 		return 0, err
@@ -1261,9 +1611,15 @@ func (m *Manager) writeEpoch(v uint64) error {
 // Check is the FENCE. Call it immediately before every irreversible action:
 // unloading models, submitting a graph to ComfyUI, promoting an output file.
 // A non-nil error means we no longer hold the card and must abort — not retry.
+//
+// For a card-scoped lease the fence is per epoch: its own record is there and each of
+// its cards still names its epoch. It never compares against another lease's epoch.
 func (l *Lease) Check() error {
 	if l.done.Load() {
 		return errors.New("gpulease: lease already released")
+	}
+	if l.v2 {
+		return l.checkV2()
 	}
 	meta, err := l.mgr.readMeta()
 	if err != nil || meta == nil {
@@ -1325,6 +1681,9 @@ func (l *Lease) Renew() error {
 // stops existing (a concurrent TryAcquire still meets an existing file). The
 // epoch itself is never moved by this path.
 func (m *Manager) Restamp(epoch uint64, fn func(*Meta)) error {
+	if _, serr := os.Stat(epochRecordPath(m.leaseDir(), epoch)); serr == nil {
+		return m.restampV2(epoch, fn)
+	}
 	return m.withEpochLock(func() error {
 		meta, err := m.readMeta()
 		if err != nil || meta == nil {
@@ -1366,6 +1725,9 @@ func (l *Lease) Restamp(fn func(*Meta)) error {
 	if l.done.Load() {
 		return errors.New("gpulease: lease already released")
 	}
+	if l.v2 {
+		return l.mgr.restampV2(l.epoch, fn)
+	}
 	return l.mgr.Restamp(l.epoch, fn)
 }
 
@@ -1397,6 +1759,9 @@ func (m *Manager) lastHeartbeat(meta *Meta) int64 {
 // own, so releasing never has to kill a process by pid — which would be unsafe under
 // pid recycling.
 func (m *Manager) ReleaseByEpoch(epoch uint64) (bool, error) {
+	if released, handled, err := m.releaseByEpochV2(epoch); handled {
+		return released, err
+	}
 	meta, err := m.readMeta()
 	if err != nil || meta == nil {
 		return false, nil // nothing held
@@ -1419,6 +1784,15 @@ func (m *Manager) ReleaseByEpoch(epoch uint64) (bool, error) {
 func (l *Lease) Release() error {
 	if !l.done.CompareAndSwap(false, true) {
 		return nil // released already, or another caller is releasing it now
+	}
+	if l.v2 {
+		if err := l.mgr.releaseV2(l.epoch); err != nil {
+			// The lease is still held. Leave it releasable: the caller was told, and a
+			// second Release (or `gpu release`) is the retry.
+			l.done.Store(false)
+			return fmt.Errorf("gpulease: releasing lease: %w", err)
+		}
+		return nil
 	}
 	meta, err := l.mgr.readMeta()
 	if err != nil || meta == nil {

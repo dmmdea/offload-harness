@@ -115,8 +115,13 @@ Two further facts shaped the design:
    so a dead run could hold the card for its full declared window. Each half has a test.
 
 6. **`Release()` is epoch-guarded.** A fenced-out straggler must never delete the CURRENT holder's
-   lease. Leaking a lease is recoverable — it expires; silently handing the GPU to a third party
-   is not.
+   lease. Leaking a lease is recoverable: the next acquirer reclaims it once its holder is gone,
+   or once its heartbeat is stale AND its declared window has ended. (An earlier wording said a
+   lease "expires". It does not: a holder that is alive and heartbeating keeps its claim past
+   its declared window, which is correct, because the window is an estimate and freeing a card
+   under a live job is the incident. Such a lease is surfaced as `held-overdue` and its
+   standing is derived from its owner and progress, see ADR 0070; nothing frees it but its
+   holder or a takeover.) Silently handing the GPU to a third party is not recoverable.
 
 7. **There is exactly ONE implementation, and Node is not it.** `internal/gpulease` owns
    acquisition, staleness, fencing, the epoch counter, path resolution (`LeaseDir`) and
@@ -198,6 +203,49 @@ Two further facts shaped the design:
   new claim, one a rival is still writing, the old holder back from the dead — is left alone. Found by reading and
   reproduced deterministically; whether it caused any live loss is unproven. Pinned by
   `TestASlowReclaimerNeverDeletesTheClaimTheFirstReclaimerMade` and `TestAClaimBeingWrittenIsNotRemovedAsDebris`.
+- **Amended 2026-10-02 (register C-86, plan P2): a lease may name its cards.** "One card, one holder" stands per card,
+  but the lease was whole-node, so a job on one card of a multi-card box fenced the others. A lease may now carry a set
+  of GPU UUIDs (`e/<epoch>.json` plus one exclusively-created `cards/<id>.claim` per card); two leases conflict when
+  either is whole-node or their sets intersect. Three consequences of the original design change. **The fence is per
+  epoch**, not a compare against one shared `meta.json` epoch, which with several live leases would fence out every
+  one but the lowest; it is applied in Go, in `gpu-lock.mjs`, in `gpulock` and at the pipeline's inherited-lease
+  boundary. **Whole-node and device grants arbitrate under the epoch lock on both sides**, because the whole-node
+  token (`O_EXCL meta.json`) and the card claims are different atomic tokens. **Expiry still never frees a card**: a
+  reader judges a device lease by the reclaim rule above, and only an acquirer wanting the cards removes a dead
+  lease's files, one lease at a time. A whole-node grant also sweeps device leases the reclaim rule calls reclaimable before it judges, so a stalled but
+  living holder is fenced exactly as a whole-node reclaim fenced the old holder (by deleting its record). The exemption for
+  "this process runs under the lease" is **per lease**: consumers walk `Info.Each()` and a child of lease A is exempt from A
+  alone. The writer is a per-host switch, default off, because a binary that predates the format reads a directory holding
+  only device leases as free; it needs both the config key and a green reader audit marker (`gpu/reader-audit.json`,
+  written by `gpu doctor`), enforced in code by `ApplyCardScopedConfig`. **Deviation from plan rev 2, pending acceptance:**
+  the synthetic pid-0 `meta.json` umbrella the plan specified is not written. Its premise was verified against the real
+  0.158.3 and 0.160.0 binaries (a pid-0 record is held for its declared window and reclaimed after it), so it was dropped as
+  a second source of truth, not because it failed; the audit gate stands in for it until the plan owner decides. Pinned by
+  `TestSecondDeviceLeaseSurvivesFirstEpochRelease`, `TestHigherEpochDeviceLeaseIsNeverFencedByALowerOne`,
+  `TestWholeNodeAndDeviceGrantsNeverBothWinConcurrently`, `TestNoCardEverHasTwoClaims*` and
+  `TestOldReaderFixtureSeesFreeOverV2DirAndTheFlagIsWhatGatesIt`. See [GPU lease](../../systems/gpu-lease.md).
+- **Amended 2026-10-02 (register C-86, plan P3): the lease can be asked for by card, and the host is audited before it may
+  write one.** `gpu reserve --devices|--cards|--whole-node` chooses the cards; with none of them the cards the wrapped command
+  names itself (`CUDA_VISIBLE_DEVICES`, `--cuda-device`, `COMFY_CUDA_DEVICE`) become the set, and what cannot be resolved
+  (ComfyUI's FASTEST_FIRST order is not reported by nvidia-smi and is declared in `gpu_comfy_order`, never guessed) falls
+  back to the whole node with a note. The allocator takes cards that are unclaimed, not the display card, not under a foreign
+  compute process, with the VRAM and host RAM the job declares, preferring cards with no resident seat; a busy card stays a
+  place in line (a request that must wait queues on the cards free now plus the first claimed ones that would fit), and the
+  allocation and the claim are one loop, so two reserves that read the same free card do not both pick it. A lease holds
+  cards and does not confine the command: a command that names no card of its own is pinned to the cards it named or was
+  allocated with `CUDA_VISIBLE_DEVICES` and `CUDA_DEVICE_ORDER=PCI_BUS_ID`; one that pins itself with `--cuda-device` or
+  `COMFY_CUDA_DEVICE` is left alone and warned about when its pin falls outside the lease, and a `CUDA_VISIBLE_DEVICES`
+  inherited from the shell that reaches outside the lease is replaced. A host with the switch off reads no card table and derives nothing: explicit device flags there are an error,
+  not a silent whole-node lease. `gpu doctor` is the audit that stands in for the dropped pid-0 umbrella: it scans every
+  harness binary it can reach (backups, the agent binary, copies under any name found by content, running images) and every
+  Node reader for the format signature, which every binary that links the lease package carries, never executes them, fails
+  closed, lists what it did not search, and `--write-audit` records the verdict (red revokes a stale green); a green covers
+  only what it reached, so enabling the writer needs it to include the agent binary and every media repository's own copy.
+  Pinned by
+  `TestEnvDerivedDevicesFromComfyCudaDevice`, `TestAllocatorSkipsDisplayClaimedForeignAndQuarantined`,
+  `TestAllocatorSkipsWhenHostRamHeadroomLow`, `TestAllocatorPrefersCardWithNoResidentSeat`,
+  `TestDoctorFlagsNonFormatAwareBinary`, `TestDoctorFlagsNodeReaderWithoutPerEpochFence`, `TestStatusJSONHasPerCardRows` and
+  `TestPlanFlagOffHostNeitherReadsCardsNorDerivesDevices`. See [GPU lease](../../systems/gpu-lease.md).
 - **Extended 2026-10-01 (register C-87):** the memory stack is not CPU-only on every box, so "the CPU memory stack"
   in the Context table no longer describes it there: it is small and, on the three-card reference box, served on the
   utility card, and on a single-card tier it shares the render card. That row's zero still stands, because

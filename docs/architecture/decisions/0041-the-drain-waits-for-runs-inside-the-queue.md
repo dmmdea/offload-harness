@@ -129,6 +129,20 @@ otherwise unchanged. Pinned by `TestADrainingReserveThatLosesItsLeaseQueuesAgain
 `TestADrainingReserveQueuesBehindTheAcquirerThatTookItsCard` and
 `TestADrainingReserveThatLosesItsLeaseFailsLoudlyWhenAskedNotToQueue`.
 
+## Extended 2026-10-02: the drain waits for runs on the leased cards (register C-86, plan P5)
+
+With card-scoped leases (ADR [0018](0018-machine-wide-fenced-gpu-lease.md)) a lease holds some cards, so the drain waits for
+what is on **those** cards. `maintainSeatScoped` receives the lease's card ids; a seat is on them when its declared pin
+intersects (a seat whose pin is unknown, cannot be placed or is read without a card table is on them: every doubt keeps
+today's behaviour). The run registry records each run's seat pins (`Run.Devices`) and the drain waits for registered runs whose
+pins intersect the lease, whatever seat they run on, skipping the agent seat's own gauge when that seat sits on other cards. A
+run on card 0 therefore does not hold a card-2 lease's drain, and the registered-run rule that keeps the drain from reading a
+step gap as idle is unchanged for the cards that are leased. The unload takes the same cut (the seats on the leased cards, the
+memory stack never, the legacy total unload refused while a model that must stay is resident), and the render lane's unload
+is handed the list (`GPU_LEASE_UNLOAD_MODELS`). A single-card seat's run-cap line is its card's. See
+[GPU lease](../../systems/gpu-lease.md), "Drain, unload and the render lane". Pinned by `TestDrainWaitsOnlyForIntersectingRuns`,
+`TestUnloadSeatOnlyUnloadsIntersectingModels` and `TestRunCapCountsPerCardForSingleCardSeats`.
+
 ## Evidence
 
 llama-swap log 2026-09-14 (two drain windows of 61 polls at 7 ms each, the 3m26.9s

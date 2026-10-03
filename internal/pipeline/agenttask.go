@@ -305,7 +305,10 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	// budget here — never inside the wall — and defers with the holder named.
 	// Before this, the warm-up below loaded the seat straight past the fence
 	// (10:20:03 on 2026-09-14, onto cards a render held).
-	act := gpuactivity.Start(p.cfg.GPULockPath, p.cfg.StateDir, gpuactivity.Run{Seat: seat, Kind: "contract", Origin: nodeID, Goal: contract.Goal, MaxSteps: contract.MaxSteps, Phase: gpuactivity.PhaseAdmission})
+	// The run records the pins of its seat (plan P5): a drain waits only for runs on the cards a
+	// lease holds, and a single-card seat's run-cap line is its card's.
+	seatPins, _ := modelaffinity.PinsFor(seat)
+	act := gpuactivity.Start(p.cfg.GPULockPath, p.cfg.StateDir, gpuactivity.Run{Seat: seat, Kind: "contract", Origin: nodeID, Goal: contract.Goal, MaxSteps: contract.MaxSteps, Phase: gpuactivity.PhaseAdmission, Devices: seatPins})
 	defer act.End()
 	// ONE admission budget for the cordon, the pre-flight and the warm-up: the
 	// three share a deadline, and the time spent at the cordon is reported as
@@ -332,8 +335,12 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	// what AwaitRunSlot will do has to read what AwaitRunSlot reads, or the two
 	// can disagree — and a process that never loaded a config has that gate
 	// deliberately inert, which this check must be too.
+	//
+	// The read is narrowed to the cards THIS seat is pinned to (plan P4): a media render on
+	// card 2 is not a fence on a seat that lives on card 0, and AwaitRunSlot below reads
+	// the same narrowed lease, so the pre-check still predicts what the cordon will do.
 	if dir := modelaffinity.GPULeaseDir(); dir != "" {
-		lease := gpulease.InspectDir(dir)
+		lease := modelaffinity.ScopeToModel(modelaffinity.InspectLease(dir), seat)
 		if fenced, why := delegate.ForeignFence(lease); fenced {
 			return deferWire(core.DeferClassCapacity, fmt.Sprintf(
 				"gpu busy: %s; no new run is admitted on this box until it is released (%s)", why, delegate.HolderLine(lease)))
@@ -356,7 +363,10 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	if reg, rerr := gpuactivity.Open(p.cfg.GPULockPath, p.cfg.StateDir); rerr == nil {
 		capStart := time.Now()
 		capEnd := modelaffinity.SeatCapDeadline(ctx, capStart, wall, admissionEnd)
-		if serr := modelaffinity.AwaitSeatSlotReporting(ctx, reg.OnSeat, seat, "", act.ID(), p.cfg.FleetConcurrencyLimit(), capEnd, seatLineHeartbeat(ctx, act)); serr != nil {
+		seatRuns := func(now time.Time, names ...string) []gpuactivity.Run {
+			return reg.OnSeatPinned(now, seatPins, names...)
+		}
+		if serr := modelaffinity.AwaitSeatSlotReporting(ctx, seatRuns, seat, "", act.ID(), p.cfg.FleetConcurrencyLimit(), capEnd, seatLineHeartbeat(ctx, act)); serr != nil {
 			admitted = cordonWait(cordonStart)
 			admitNote = "held at the seat cap for the run's wall"
 			return deferWire(core.DeferClassCapacity, "seat busy: "+serr.Error())
@@ -436,6 +446,17 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 			admitNote = warmNote
 		} else {
 			admitNote += "; " + warmNote
+		}
+	}
+	// THE SEAT RACE RULE (plan P4). The warm-up passed the lease fence before it loaded the
+	// seat, so a lease claimed during the load (and whose --unload-seat ran before the model
+	// was resident) now holds cards this seat has landed on. The seat yields: it unloads
+	// itself, and the contract is re-placeable (capacity) instead of running beside a render.
+	if warmLoaded {
+		if yielded, why := modelaffinity.YieldIfFenced(ctx, p.cfg.Endpoint, seat); yielded {
+			return deferWire(core.DeferClassCapacity, "gpu busy: "+why+"; the seat yielded the cards and this contract is re-placeable")
+		} else if why != "" {
+			log.Printf("agent task: seat %s: %s", seat, why)
 		}
 	}
 	if warmSt.Refused >= 500 {
@@ -734,8 +755,18 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 				"this node does not open the browse door: agent_allow_browse is false or the browse lane is not configured in the config it loaded")
 		}
 		browseFn = NewLoopBrowse(p.cfg, "agent_delegate")
-		browseAudit = agent.DefaultAuditPath()
 	}
+	// The broker audit trail (register SF-02): with audit_all_doors off (the
+	// default) only a browse run attaches one, exactly as before; warn attaches an
+	// advisory trail to every delegated and fleet contract, enforce an enforcing one.
+	audit := agent.DoorAudit(p.cfg.AuditAllDoorsMode(), contract.AllowBrowse, p.cfg.BaseDir())
+	if audit.Refuse != "" {
+		return deferWire(core.DeferClassConfig, audit.Refuse)
+	}
+	if audit.Note != "" {
+		log.Printf("agent task: %s", audit.Note)
+	}
+	browseAudit = audit.Path
 	writeLimit := (*agent.WriteLimit)(nil)
 	allowWrite, writeWorktree := false, ""
 	if door != nil {
@@ -789,6 +820,13 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		Browse:        browseFn,
 		BrowseTimeout: LoopBrowseTimeout(p.cfg),
 		AuditPath:     browseAudit,
+		AuditAdvisory: audit.Advisory,
+		ReadFloor:     p.cfg.AgentReadFloor,
+		AuditChain:    p.cfg.AuditChain,
+
+		// SF-02: a denial the enforcing trail causes names audit_all_doors.
+		AuditEnforcedByKey: audit.Enforced,
+
 	})
 	if berr != nil {
 		if errors.Is(berr, core.ErrAgentEnvRules) {
@@ -804,6 +842,7 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		// green result for work that never touched the page.
 		return deferWire(core.DeferClassConfig, "browse was asked for but not granted: "+strings.Join(built.Notes, "; "))
 	}
+	defer built.EndAudit() // close this run's chain on the trail (SF-08, audit_chain)
 
 	// Window budgeting parity with handleAgentRun: the SERVED window (probed and
 	// resolved above, on the admission budget; conservative fallback when
@@ -3268,6 +3307,12 @@ func AutoWallFor(cfg config.Config, contract core.AgentContract, seat string, kn
 // machine-local seat-rates store (else the configured agent_seat_tok_s).
 // Exported beside AutoWallFor so the delegator's anti-drift test can size the
 // same contract on the node's arithmetic and on its own (register D-116).
+//
+// Known gap (register C-56): the configured agent_seat_tok_s is the AGENT seat's
+// rate, but the case below applies it to any seat the store has no entry for,
+// including a placed or overridden one this node runs. The agent_run door's own
+// sizing (Pipeline.SizeRun) withholds it from every other seat; the node's callers
+// do not. Fix that here before the node refuses a wall on its estimate.
 func SeatPolicyFor(cfg config.Config, seat string, known seatrate.Seat) seatrate.SeatPolicy {
 	p := seatrate.SeatPolicy{Seat: seat, StepTokens: cfg.AgentMaxTokens, Thinking: cfg.AgentThinking, ColdLoadSec: known.ColdLoadSec}
 	switch {

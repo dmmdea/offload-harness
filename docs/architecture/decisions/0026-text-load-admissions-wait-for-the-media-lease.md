@@ -187,6 +187,35 @@ upstream is not interrupted by a lease taken after it started. Code: `internal/s
 `internal/mcpserver/progress.go` (`startHeartbeat`); tests: `internal/sttclient/fence_test.go`,
 `internal/pipeline/transcribe_fence_test.go`, `internal/mcpserver/transcribe_progress_test.go`.
 
+## Extended 2026-10-02: the gate asks about the seat's cards, and the seat yields a race (register C-86, plan P4)
+
+The gate asked "is a lease held", so a render on one card of a three-card box made every text load on the box wait. With
+card-scoped leases (ADR [0018](0018-machine-wide-fenced-gpu-lease.md)) the question is narrower: **does a held lease sit on a
+card this seat is pinned to.** The seat's pin is the layer seat's `device` (the pin it is launched with), armed from
+`config.Load` beside the lease directory (`modelaffinity.SetSeatPins`; `config.ModelPins` reads it from the layers), so a
+render on card 2 no longer queues a seat on card 0, and still queues the flagship that spans every card.
+
+The direction of every doubt stays "fence", so the amendment cannot loosen the original rule where it does not know: a model
+nobody declared a pin for, a pin the card table cannot place, an unreadable card table and a whole-node lease all read as
+every card, exactly as before. The card table is an nvidia-smi exec, so it is read only when a held lease names cards and is
+memoised for two seconds; the unfenced path is still one read of a file that usually does not exist. The exemption for "this
+process runs under the lease" is still per lease.
+
+A second change closes the window this ADR already named ("a lease taken microseconds after the read"). A load that passed
+the gate before the claim becomes resident after the lease's unload, on cards the lease now holds. The gate cannot close that
+(the load is llama-swap's), so the **seat yields**: when the batch that may have loaded the model drains, and after the
+delegation door's cold-load warm-up, the seat re-reads the lease and, if one it does not hold fences loads on its cards and the
+engine shows nothing in flight, it unloads itself through the llama-swap client (whose keep-set refuses the memory stack).
+A legacy whole-node lease (one an older binary wrote) whose card set the evidence rule infers, on a host that has turned
+the inference on (`gpu_legacy_scope_inference`, off by default), can grow after a seat was admitted; the seat's own release
+re-reads the wider scope and yields by the same rule. No read of the lease unloads anything, and the rule covers an
+`Admit`-gated batch's release and the delegation door's warm-up, not a load through `AwaitUpstream` or `AwaitModelRoute`.
+The seat always yields, never the long job, and nothing signals a process.
+See [GPU lease](../../systems/gpu-lease.md), "Consumers read a seat's cards, not the node". Pinned by
+`TestSeatOnFreeCardLoadsUnderMediaLeaseOnOtherCard`, `TestSeatWithUnknownPinStillBlocked`, `TestTripleSeatFencedByCard2Lease`,
+`TestSeatLoadRacingDeviceGrantSeatYields`, `TestWarmUpRacingADeviceLeaseYieldsTheSeat` and
+`TestInferredScopeWideningEvictsSeatNotLongJob`.
+
 ## Alternatives considered
 
 - **Probe llama-swap for residency and gate only true loads.** Rejected. A `media` holder unloads

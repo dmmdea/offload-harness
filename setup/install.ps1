@@ -10,6 +10,11 @@
 #                 detected serving profile — used by -RenderOnly and by testing a synthetic box)
 #                 OFFLOAD_CUDA_DRIVER / OFFLOAD_CUDA_TOOLKIT (H4: override detect's
 #                 cuda_driver/cuda_toolkit for the CUDA build selection — synthetic-box testing)
+#                 OFFLOAD_DATA_HOME (register C-92: the directory a FRESH config.json gets as its
+#                 `home`, where the cache, ledger, media and delegation log live; default: a
+#                 directory on the data drive `local-offload install volumes --data` picks: never
+#                 the OS drive, a cloud-synced virtual drive or a FAT volume) | OFFLOAD_ALLOW_OS_DATA=1 (the explicit decision to keep data on the OS
+#                 drive, e.g. a one-disk machine; recorded, never a silent fallback)
 #
 # -RenderOnly (H2): resolve the profile + render llama-swap.yaml ONLY (Step 1 + Step 6),
 #                 Rendering is DELEGATED to `local-offload install render` (ADR 0021), so
@@ -917,6 +922,67 @@ function Get-MediaSeatBindings {
   return [pscustomobject]$out
 }
 
+# Data home (register C-92; operator rule: C: holds Windows and program installs, never
+# data). With no `home` key the harness keeps its cache, ledger, media, delegation log,
+# pipeline jobs and footprints under the user profile, i.e. on the OS drive. install.sh
+# has always written `home` from `local-offload install volumes`; this is the same
+# decision for Windows. PURE: the impure probe (running `install volumes --json --data`) lives at
+# the Step 8 call site so the rule stays unit-testable, like Get-HostToolSeed.
+#   -VolumesJson : the stdout of `local-offload install volumes --json --data` ('' when it failed)
+#   -Override    : $env:OFFLOAD_DATA_HOME, an explicit directory (the operator's choice)
+#   -OsDrive     : the drive Windows boots from, e.g. 'C:' ($env:SystemDrive)
+#   -AllowOS     : $env:OFFLOAD_ALLOW_OS_DATA=1, the explicit, recorded decision to keep
+#                  data on the OS drive (a one-disk machine); never a silent fallback.
+# Returns @{ Home; Because; Error }. Home is spelled with forward slashes (every Windows
+# API accepts them and the JSON needs no escaping); Error is set instead of Home when
+# there is nowhere acceptable to put the data - the installer then fails LOUD naming both
+# overrides, exactly as install.sh dies on "no eligible install volume".
+# The volume list must come from `install volumes --data` (see Get-DataVolumeArgs): the plain
+# install rule names a cloud-synced virtual drive or a FAT volume whenever it reports the most
+# free space, so a choice that does not carry the data_target marker is refused, not trusted.
+function Get-DataHome {
+  param([string]$VolumesJson = '', [string]$Override = '', [string]$OsDrive = 'C:', [bool]$AllowOS = $false)
+  $drive = { param($p) if ($p -match '^\s*(?:\\\\\?\\)?([A-Za-z]):') { return ($Matches[1].ToUpper() + ':') } return '' }
+  $osLetter = & $drive $OsDrive
+  if ($Override -and $Override.Trim()) {
+    $home1 = $Override.Trim().Replace('\', '/').TrimEnd('/')
+    $onOs = ($osLetter -ne '') -and ((& $drive $home1) -eq $osLetter)
+    if ($onOs -and -not $AllowOS) {
+      return [pscustomobject]@{ Home = ''; Because = ''; Error = "OFFLOAD_DATA_HOME=$Override is on the OS drive $osLetter, which holds Windows and program installs and never data. Pick a directory on a data drive, or set OFFLOAD_ALLOW_OS_DATA=1 to keep the data there on purpose." }
+    }
+    return [pscustomobject]@{ Home = $home1; Because = 'given (OFFLOAD_DATA_HOME)'; Error = '' }
+  }
+  $doc = $null
+  if ($VolumesJson -and $VolumesJson.Trim()) {
+    try { $doc = $VolumesJson | ConvertFrom-Json } catch { $doc = $null }
+  }
+  if ($null -eq $doc) {
+    return [pscustomobject]@{ Home = ''; Because = ''; Error = "could not read the output of 'local-offload install volumes --json'. Run it by hand to see why, then set OFFLOAD_DATA_HOME=<a directory on a data drive>." }
+  }
+  $choice = $doc.PSObject.Properties['choice']
+  if ($choice -and $choice.Value -and $choice.Value.volume -and $choice.Value.volume.root) {
+    $marker = $doc.PSObject.Properties['data_target']
+    if (-not ($marker -and $marker.Value -eq $true)) {
+      return [pscustomobject]@{ Home = ''; Because = ''; Error = "the volume choice did not come from 'local-offload install volumes --data', so it may name a cloud-synced virtual drive or a FAT volume that cannot hold a database. Run that command by hand to see its answer, then set OFFLOAD_DATA_HOME=<a directory on a data drive>." }
+    }
+    $root = ([string]$choice.Value.volume.root).Replace('\', '/').TrimEnd('/')
+    return [pscustomobject]@{ Home = "$root/local-offload"; Because = [string]$choice.Value.because; Error = '' }
+  }
+  $why = 'no volumes were enumerated'
+  if ($doc.PSObject.Properties['error'] -and $doc.error) { $why = [string]$doc.error }
+  return [pscustomobject]@{ Home = ''; Because = ''; Error = "no eligible data volume ($why). Set OFFLOAD_DATA_HOME=<a directory on a data drive>, or OFFLOAD_ALLOW_OS_DATA=1 to keep the data on the OS drive on purpose." }
+}
+
+# The arguments of the volume probe Step 8 runs. --data is not optional: without it the probe
+# answers with the plain install rule, which Get-DataHome refuses. -AllowOS is the explicit,
+# recorded decision to keep data on the OS drive (OFFLOAD_ALLOW_OS_DATA=1), never a default.
+function Get-DataVolumeArgs {
+  param([bool]$AllowOS = $false)
+  $a = @('install', 'volumes', '--json', '--data')
+  if ($AllowOS) { $a += '--allow-os-volume' }
+  return ,$a
+}
+
 # Host-tool seed for the complementary media routes (flatten_design / edit_image).
 # Which GIMP or python a BOX carries is machine state, not tier state, so there
 # is no Go/tier authority to mirror — this is best-effort DISCOVERY, applied only
@@ -1673,6 +1739,7 @@ if ($hfSkipWhy) {
 # ---------------------------------------------------------------------------
 $cfgDir  = Join-Path $HOME '.local-offload'
 $cfgDest = Join-Path $cfgDir 'config.json'
+$script:dataHomeChoice = $null   # set by Step 8 when it writes a fresh config; recorded in installed.json
 Step 'harness config -> ~/.local-offload/config.json' `
   { Test-Path $cfgDest } `
   {
@@ -1794,9 +1861,40 @@ Step 'harness config -> ~/.local-offload/config.json' `
       $cfgText = Merge-ConfigSeed -ConfigText $cfgText -Seed $accSeed -OffloadHome $HOME_DIR
       Write-Host "      accelerators ($($accelerators -join ',')): $(@($accSeed.PSObject.Properties.Name) -join ', ')" -ForegroundColor DarkGray
     }
+    # Data home (register C-92; operator rule: C: holds Windows and program installs,
+    # never data). One explicit `home` on a data drive moves every derived path (cache,
+    # ledger, media, svg, delegation log, pipeline jobs, footprints), exactly as install.sh
+    # has always written it. The drive comes from `local-offload install volumes --data` (most
+    # free space, never the OS drive, a cloud-synced virtual drive or a FAT volume; see
+    # Get-DataVolumeArgs); when nothing qualifies this FAILS rather than falling back
+    # to C: (OFFLOAD_DATA_HOME / OFFLOAD_ALLOW_OS_DATA=1 are the two explicit ways forward).
+    # Only this fresh-config path writes it: an existing config.json keeps its own home.
+    $allowOsData = ($env:OFFLOAD_ALLOW_OS_DATA -eq '1')
+    $volArgs = Get-DataVolumeArgs -AllowOS $allowOsData
+    $volJson = ''
+    $dataHomeExe = Resolve-HarnessExe
+    $prevEapVol = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'   # a non-zero exit (no eligible volume) still prints the JSON the rule reads
+    try { $volJson = (@(& $dataHomeExe @volArgs 2>$null) -join "`n") } catch { $volJson = '' } finally { $ErrorActionPreference = $prevEapVol }
+    $dh = Get-DataHome -VolumesJson $volJson -Override $env:OFFLOAD_DATA_HOME -OsDrive $env:SystemDrive -AllowOS $allowOsData
+    if ($dh.Error) { throw "data home: $($dh.Error)" }
+    New-Item -ItemType Directory -Force -Path $dh.Home | Out-Null
+    $cfgText = Merge-ConfigSeed -ConfigText $cfgText -Seed ([pscustomobject]@{ home = $dh.Home })
+    $script:dataHomeChoice = $dh
+    Write-Host "      data home: $($dh.Home) ($($dh.Because))" -ForegroundColor DarkGray
     $noBomCfg = New-Object System.Text.UTF8Encoding($false)
     [System.IO.File]::WriteAllText($cfgDest, $cfgText, $noBomCfg)
   }
+
+# An EXISTING config is never rewritten, so a box whose config names no home is told
+# how to move its data off the OS drive (the copy is `local-offload data migrate`).
+if (-not $script:dataHomeChoice -and (Test-Path $cfgDest)) {
+  $cfgHomeProbe = $null
+  try { $cfgHomeProbe = Get-Content -Raw $cfgDest | ConvertFrom-Json } catch { $cfgHomeProbe = $null }
+  if ($cfgHomeProbe -and -not ($cfgHomeProbe.PSObject.Properties['home'] -and $cfgHomeProbe.home)) {
+    Write-Host "NOTE  $cfgDest sets no home, so this node keeps its data under the user profile on the OS drive. Run 'local-offload data status' to see it and 'local-offload data migrate' to copy it to a data drive (never a move, never a junction)." -ForegroundColor Yellow
+  }
+}
 
 # An EXISTING config is never rewritten, so a box that just gained the lane is told
 # exactly which three keys bind it.
@@ -1846,6 +1944,15 @@ $manifest = [ordered]@{
   components     = $manifestComponents
   models         = @($modelKeys | ForEach-Object { @{ name = $PINNED[$_].name; sha256 = $PINNED[$_].sha } })
 }
+# Where the data went and why (register C-92), so a later operator can see the choice
+# without re-deriving it. A re-run that keeps an existing config carries the old record.
+if ($script:dataHomeChoice) {
+  $manifest['data_home'] = $script:dataHomeChoice.Home
+  $manifest['data_home_because'] = $script:dataHomeChoice.Because
+} elseif ($manifestOld -and $manifestOld.PSObject.Properties['data_home']) {
+  $manifest['data_home'] = $manifestOld.data_home
+  if ($manifestOld.PSObject.Properties['data_home_because']) { $manifest['data_home_because'] = $manifestOld.data_home_because }
+}
 $manifest | ConvertTo-Json -Depth 6 | Set-Content -Path $manifestPath -Encoding UTF8
 
 # ---------------------------------------------------------------------------
@@ -1885,6 +1992,7 @@ if ($derivedSeat) {
 Write-Host ""
 $verdict = @{ installed = $true; backend = $backend; render_backend = $tplBackend; profile = $profileId;
   ram_tier = $ramTier; big_ram = $bigRam; agent_ctx_tokens = $agentCtxTokens; home = $HOME_DIR;
+  data_home = $(if ($script:dataHomeChoice) { $script:dataHomeChoice.Home } else { $null });
   next = 'run selftest.ps1' } | ConvertTo-Json -Compress
 try { Stop-Transcript | Out-Null } catch {}
 $verdict

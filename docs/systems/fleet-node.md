@@ -433,6 +433,46 @@ publishing idle slots while its card was gone, and placement routed work TOWARD 
 node that would turn work away never advertises a free slot; and the saturation SCORE is computed from the CAPPED running set, the same set
 `idle_slot` measures, because feeding it the all-jobs count let a node publish `score 1.0` and `idle_slot true` in one payload.
 
+**Overdue (GPU routing P1).** The lease block also carries `overdue`, true only while the lease is HELD and its declared window has already
+ended (omitted otherwise, so an unchanged lease publishes the same bytes). A held lease means its holder is alive and heartbeating, and a
+`--for` window is not a ceiling for a wrapper holder, so a lease can outlive what it asked for. Before this the remaining time was clamped to
+zero first, which is below every threshold, so such a lease read `busy: false` and the node looked free for exactly the lease that was
+demonstrably still using the cards. The rule is now `busy = held AND (remaining > fleet_busy_lease_sec OR overdue)`: the short-lease rule
+(a render under the threshold never makes the node a non-target) is the first clause and is unchanged; a negative `fleet_busy_lease_sec` still
+turns the whole duration rule off, so an operator who disabled it does not get overdue-busy back, though `overdue` itself is still published
+because it is a fact, not a verdict. `remaining_sec` is omitted for an overdue lease (its zero is `omitempty`). The delegator decodes it as
+`NodeView.LeaseOverdue`, **not** as `LeaseBusy`: a busy non-text lease is a hard exclusion, and an abandoned lease must rank the node last
+without making it unroutable for longer than it was before. `betterRemote`'s lease key now has three rungs (clean, long lease, overdue), and
+the node-side gate still queues whatever arrives. The overdue busy is **not** folded into the node's own refusing flag (the one behind
+`saturation.high` and `idle_slot`): a media lease does not make dispatch turn work away, so an overdue node keeps advertising the room it has,
+and the delegator's capacity wait (`hasRoom`) still asks it when it is the only remote; only a long lease inside its window and a text lease
+set `saturation.high`, as before. A lease record with no declared end (a missing, zero or negative `expires_at_ms`, which a hand-edited, foreign or
+truncated record can carry) reads as an unset end in `gpulease.Info`, so it is never overdue against 1970. A delegator one release behind reads the overdue lease's `busy: true` as it reads any busy
+lease; that is the intended fleet-wide meaning of "the card is not free". The fleet deploy never reads this verdict: its wait-idle step takes
+job counts from health and the lease from the lease directory (`gpulease` Inspect), pinned by `healthwire_compat_test.go`.
+
+**Free cards (GPU routing P1).** The delegator decodes the node's `gpu_devices[]` (it dropped it before) and ranks nodes on per-card truth
+instead of the one utilisation scalar. A card is **free** when it is not a display card, its utilisation is known and under 15 % (the line
+`gpu status` draws for "the cards are busy under the lease"; an unknown is never idle) and it has the VRAM, which is the placement seat's
+published footprint split across the cards it spans, or a quarter of the card when no footprint is published. A layer whose seat spans N cards
+needs N free ones. A warm seat fills its own card, so a seat the node says is loaded (health `seat_loaded`, or the layer row's `loaded`) vouches
+for the VRAM of as many idle cards as it spans: a node serving from a resident seat does not lose to a cold node for being warm. It vouches for
+VRAM only, never for utilisation, and a node that does not say whether its seat is loaded gets no credit. Nothing matches a seat pin to a card by index (a CUDA index and nvidia-smi's PCI order can differ), so every card is a
+candidate. `betterRemote` gains a per-node tier after the ETA key: a node with a free card beats one whose cards are all busy, and a node that
+published no per-card truth sits between them, so an older node is neither credited nor blamed. `route=auto/remote` spends a node's free cards
+as it deals subtasks (a node with two free cards is preferred for its first two, not its third) and `route=spread` uses the tier as the first
+key inside a deal cycle, so the one-subtask-per-seat-per-cycle invariant is untouched. This is ranking, never a gate: `max_concurrent_jobs`
+stays the hard ceiling, a node with no free card still takes work (it queues on the node), and `offload_status` shows `free_cards` and
+`cards_total` per node. What it does not do yet: the node's own admission and the local seat's gate still use the lease's whole-node scope; per-card leases
+are later phases of the GPU routing plan.
+
+**What the lease is doing (plan P8, ADR 0070).** The lease block also carries `orphaned` and `stalled`, each absent unless
+true and the worst across the node's live leases: an attended lease whose owner has been gone past `gpu_orphan_grace_min`,
+a lease whose progress file stopped moving inside its stall window. A lease whose declared window ended while its holder
+still renews is the block's existing expiry-based `overdue` key (the routing change), deliberately not published a second
+time from the standing: one source for one wire key. They describe the lease and refuse nothing; a node one release behind
+omits them, which decodes to false. Ranking such a node behind a healthy one is the delegator's call.
+
 **`serving_config_spec_sha256`** / **`serving_config_state`** (0.123.0, ADR 0043) — the rendered llama-swap config's
 provenance. These are **new keys on this existing endpoint**: no new route, no new bind, and every pre-0.123.0
 delegator keeps decoding the payload unchanged. The spec hash is the config's identity (the sha256 of the closed

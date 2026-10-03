@@ -50,11 +50,17 @@ type grepMatch struct {
 // SearchTool builds the search_files tool, scoped to root (the worktree). It is
 // read-only and registered alongside list_dir / read_file.
 func SearchTool(root string) (Tool, error) {
+	return gatedSearchTool(root, nil)
+}
+
+// gatedSearchTool is SearchTool with the read floor's gate (SF-07): matches in a file the
+// gate refuses are withheld, and the output says how many.
+func gatedSearchTool(root string, gate *readGate) (Tool, error) {
 	absRoot, err := filepath.Abs(root)
 	if err != nil {
 		return Tool{}, err
 	}
-	s := &scope{root: absRoot}
+	s := &scope{root: absRoot, gate: gate}
 	return Tool{
 		ToolSpec: ToolSpec{
 			Name: "search_files",
@@ -111,9 +117,59 @@ func (s *scope) searchFiles(ctx context.Context, args string) (string, error) {
 		baseAbs = filepath.Join(s.root, rel)
 	}
 
+	// The read floor (SF-07). Under enforce the search never opens a floored file:
+	// the walk skips it (and a floored directory) BEFORE reading a byte, on the
+	// resolved base so a short-name or symlinked path is the file it names. Nothing
+	// says how many files were skipped, so a pattern cannot probe a secret's content.
+	if s.gate != nil && s.gate.mode == "enforce" {
+		if err := s.gate.check(s.root, rel); err != nil {
+			return "", err // the requested directory itself is secret material
+		}
+		realRoot, rerr := filepath.EvalSymlinks(s.root)
+		if rerr != nil {
+			realRoot = s.root
+		}
+		realBase, berr := filepath.EvalSymlinks(baseAbs)
+		if berr != nil {
+			realBase = baseAbs
+		}
+		skip := func(p string, d fs.DirEntry) bool {
+			fromRoot, err := filepath.Rel(realRoot, p)
+			if err != nil {
+				return true
+			}
+			if d.Type()&fs.ModeSymlink != 0 {
+				return s.gate.refuses(realRoot, fromRoot) // resolves the link
+			}
+			_, _, caught := s.gate.hit("", fromRoot) // lexical: the walk sees real names
+			return caught
+		}
+		matches, capped, err := grepGoWalkSkip(realBase, re, in.Glob, skip)
+		if err != nil {
+			return "", err
+		}
+		return renderGrep(matches, capped, in.Pattern, in.Mode), nil
+	}
+
 	matches, capped, err := grepBackend(ctx, baseAbs, re, in.Glob)
 	if err != nil {
 		return "", err
+	}
+	if s.gate != nil {
+		// warn: the search read these files; record each floored one once.
+		seen := map[string]bool{}
+		for _, m := range matches {
+			fromRoot := m.path
+			if rel != "." {
+				fromRoot = filepath.ToSlash(filepath.Join(rel, m.path))
+			}
+			if !seen[fromRoot] {
+				seen[fromRoot] = true
+				if err := s.gate.check(s.root, fromRoot); err != nil {
+					return "", err // an enforcing trail that could not record the read
+				}
+			}
+		}
 	}
 	return renderGrep(matches, capped, in.Pattern, in.Mode), nil
 }
@@ -134,7 +190,8 @@ func grepBackend(ctx context.Context, baseAbs string, re *regexp.Regexp, glob st
 // We pass the ORIGINAL regex source to rg and re-cap in Go so output is
 // identical to the Go path. --max-count per file plus an overall slice cap keep
 // it bounded. rg respects .gitignore by default.
-func grepRipgrep(ctx context.Context, rgPath, baseAbs string, re *regexp.Regexp, glob string) ([]grepMatch, bool, bool) {
+// ripgrepArgs is the rg command line for one search (a seam for the parity test).
+func ripgrepArgs(baseAbs string, re *regexp.Regexp, glob string) []string {
 	rgArgs := []string{
 		"--line-number",
 		"--no-heading",
@@ -142,10 +199,17 @@ func grepRipgrep(ctx context.Context, rgPath, baseAbs string, re *regexp.Regexp,
 		"--color", "never",
 		"--max-count", strconv.Itoa(maxGrepMatches + 1), // per-file bound; global cap applied below
 	}
+	// --hidden with .git excluded: the Go walk searches dotfiles, so without it the
+	// two backends answered differently for .env, .github and the like.
+	rgArgs = append(rgArgs, "--hidden", "--glob", "!.git")
 	if glob != "" {
 		rgArgs = append(rgArgs, "--glob", glob)
 	}
-	rgArgs = append(rgArgs, "--regexp", re.String(), baseAbs)
+	return append(rgArgs, "--regexp", re.String(), baseAbs)
+}
+
+func grepRipgrep(ctx context.Context, rgPath, baseAbs string, re *regexp.Regexp, glob string) ([]grepMatch, bool, bool) {
+	rgArgs := ripgrepArgs(baseAbs, re, glob)
 
 	cmd := exec.CommandContext(ctx, rgPath, rgArgs...)
 	var out, errBuf bytes.Buffer
@@ -217,6 +281,13 @@ func parseRgLine(line, baseAbs string) (grepMatch, bool) {
 // .git directory and applies a minimal root-.gitignore filter, mirroring the
 // spirit of rg's defaults. Output (relative paths, 100-cap) matches the rg path.
 func grepGoWalk(baseAbs string, re *regexp.Regexp, glob string) ([]grepMatch, bool, error) {
+	return grepGoWalkSkip(baseAbs, re, glob, nil)
+}
+
+// grepGoWalkSkip is grepGoWalk with a skip predicate consulted for every entry BEFORE
+// it is read (the read floor's enforce mode, SF-07); a skipped directory is not
+// descended. nil skips nothing.
+func grepGoWalkSkip(baseAbs string, re *regexp.Regexp, glob string, skip func(p string, d fs.DirEntry) bool) ([]grepMatch, bool, error) {
 	ignore := loadGitignore(baseAbs)
 	var matches []grepMatch
 	capped := false
@@ -226,6 +297,12 @@ func grepGoWalk(baseAbs string, re *regexp.Regexp, glob string) ([]grepMatch, bo
 			return nil // skip unreadable entries rather than aborting the whole search
 		}
 		name := d.Name()
+		if skip != nil && p != baseAbs && skip(p, d) {
+			if d.IsDir() {
+				return fs.SkipDir
+			}
+			return nil
+		}
 		if d.IsDir() {
 			if name == ".git" {
 				return fs.SkipDir

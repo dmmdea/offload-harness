@@ -32,7 +32,8 @@ posture is. `.gitignore` remains writable. The rule exists because of a real reg
 fresh-context review wrote files into `.git/hooks/`.
 
 **The audit trail lives outside any worktree** — by default
-`~/.local-offload/agent-audit.jsonl`, append-only JSONL at mode `0600`. This is enforced at
+`~/.local-offload/agent-audit.jsonl` *(amended 2026-10-02: under the harness install root, see the
+amendment below)*, append-only JSONL at mode `0600`. This is enforced at
 construction, not by convention: `Build()` computes the audit path's location relative to the
 worktree and **fails the build outright** if it resolves inside, with a message naming the problem
 ("the agent could clobber it"). The ask-queue is held to the same rule.
@@ -80,3 +81,16 @@ write fails, so an action that cannot be recorded does not happen.
 ## Related docs
 
 - [0003-policy-broker-and-capability-flags-off-by-default.md](0003-policy-broker-and-capability-flags-off-by-default.md)
+
+## Amendment 2026-10-02 (register C-92, the audit trail follows the install root)
+
+The default location in the Decision no longer holds. The audit trail, the ask queue and the per-goal
+traces are data that grows, and on a node whose install root (`home` in the config) sits on a data drive
+they kept landing under `~/.local-offload` on the OS drive. They now default to `agent-audit.jsonl`,
+`agent-asks.jsonl` and `agent-traces` under the install root: `home` when it is set, else
+`~/.local-offload`, which is where every earlier release wrote them, so a node with no `home` is
+unchanged. What this ADR protects is unchanged: the path is still outside any worktree and `Build()` still
+fails outright when it resolves inside one; a relative install root counts as none, because it could sit
+inside the worktree. For a node that already had a `home`, the old trail stays at the old path and new
+entries start a new file: nothing moves or merges them, and the agent names both paths once per process
+when it finds the old one.

@@ -70,7 +70,7 @@ func githubDo(ctx context.Context, client *http.Client, pol *Policy, token, meth
 // the repo. worktreeRoot is where github_upload_file reads local files from.
 func GitHubTools(pol *Policy, token, defaultRepo, worktreeRoot string) []Tool {
 	client := newFetchClient(pol)
-	s := &scope{root: worktreeRoot}
+	s := &scope{root: worktreeRoot, gate: policyReadGate(pol)}
 	need := func() (string, bool) {
 		if strings.TrimSpace(token) == "" {
 			return "NOT performed: no GitHub token configured (set GITHUB_TOKEN when starting the server)", false
@@ -175,6 +175,10 @@ func GitHubTools(pol *Policy, token, defaultRepo, worktreeRoot string) []Tool {
 			dest := strings.TrimSpace(in.Dest)
 			if dest == "" {
 				dest = in.Path
+			}
+			// The read floor (SF-07): never upload secret material off-box.
+			if err := s.gate.check(s.root, in.Path); err != nil {
+				return "", err
 			}
 			// Read the worktree file (os.Root-confined).
 			r, rel, err := s.open(in.Path)

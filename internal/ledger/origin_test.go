@@ -144,3 +144,22 @@ func TestOldRowsWithoutProvenanceParseAsUnattributed(t *testing.T) {
 		t.Fatalf("a pre-0.124.0 row must read as unattributed, not invented: %+v", e)
 	}
 }
+
+// OriginFromEnv is the uncached twin of ProcessOrigin: a caller that names the owner of a
+// GPU lease must read the session the same way the ledger attributes rows to it.
+func TestOriginFromEnvAppliesTheSameRuleAsProcessOrigin(t *testing.T) {
+	env := envMap(map[string]string{"LOCAL_OFFLOAD_ORIGIN": "opencode-9", "CLAUDE_CODE_SESSION_ID": "sess-claude"})
+	if got := OriginFromEnv(env).Session; got != "opencode-9" {
+		t.Fatalf("the explicit label wins: %q", got)
+	}
+	if got := OriginFromEnv(envMap(map[string]string{"CLAUDE_CODE_SESSION_ID": "sess-claude"})).Session; got != "sess-claude" {
+		t.Fatalf("the Claude session id: %q", got)
+	}
+	if got := OriginFromEnv(envMap(nil)).Session; got != "" {
+		t.Fatalf("an unnamed caller is unattributed: %q", got)
+	}
+	// Uncached: two different environments give two answers, which ProcessOrigin cannot.
+	if OriginFromEnv(envMap(map[string]string{"LOCAL_OFFLOAD_ORIGIN": "a"})).Session == OriginFromEnv(envMap(map[string]string{"LOCAL_OFFLOAD_ORIGIN": "b"})).Session {
+		t.Fatal("OriginFromEnv must not cache")
+	}
+}

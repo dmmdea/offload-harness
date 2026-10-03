@@ -30,9 +30,10 @@
 // the other family (exit 2): a flag a graph never reads is a render that silently
 // differs from what was asked.
 import { copyFileSync, readFileSync, writeFileSync, unlinkSync, statSync } from "node:fs";
-import { join, basename } from "node:path";
+import { join } from "node:path";
 import { withGpuSlot } from "./gpu-lock.mjs";
-import { COMFY_DIR } from "./comfy-lifecycle.mjs";
+import { COMFY_DIR, comfyApi } from "./comfy-lifecycle.mjs";
+import { stagedInputName } from "./comfy-input.mjs";
 import { buildQwenImageEdit, QWEN_EDIT_PRESETS, resolveEditMegapixels } from "./wf-qwen-image-edit.mjs";
 import {
   buildQwenImage21Edit, QWEN_IMAGE_21_MAX_REFS, QWEN_IMAGE_21_RESOLUTION,
@@ -192,10 +193,10 @@ function defaultExists(p) {
  * name onto `staged` AS IT LANDS — so a copy that fails half-way still leaves the
  * caller's finally a complete list of what to remove.
  */
-export function stageInputs(sources, staged, { inputDir, copy = copyFileSync, now = Date.now } = {}) {
+export function stageInputs(sources, staged, { inputDir, copy = copyFileSync, now = Date.now, pid, rand } = {}) {
   const stamp = now();
   sources.forEach((p, i) => {
-    const name = `edit_in_${stamp}_${i}_${basename(p)}`;
+    const name = stagedInputName("edit_in", p, { now: () => stamp, pid, rand, n: i });
     copy(p, join(inputDir, name));
     staged.push(name);
   });
@@ -209,7 +210,7 @@ export function unstageInputs(staged, { inputDir, unlink = unlinkSync } = {}) {
 
 async function main() {
   const { pos, flags, refs } = parseEditArgs(process.argv.slice(2));
-  const API = flags.api || process.env.COMFY_API || "http://127.0.0.1:8188";
+  const API = comfyApi(flags.api);
   let plan;
   try {
     plan = planEdit({ pos, flags, refs });
@@ -247,7 +248,7 @@ async function main() {
   }
 
   await withGpuSlot(
-    { noLock: flags["no-lock"], comfyManaged: true, reserveVram: flags["reserve-vram"] },
+    { noLock: flags["no-lock"], comfyManaged: true, api: API, reserveVram: flags["reserve-vram"] },
     render,
   );
 }

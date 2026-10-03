@@ -1,0 +1,41 @@
+{
+  "activity.holder": [
+    "age_s",
+    "alive",
+    "class",
+    "command",
+    "draining",
+    "epoch",
+    "exclusive",
+    "heartbeat_age_s",
+    "orphan_grace_s",
+    "orphaned",
+    "orphaned_for_s",
+    "orphaned_since",
+    "overdue",
+    "overdue_by_s",
+    "owner_pid",
+    "owner_session",
+    "owner_state",
+    "pid",
+    "reason"
+  ],
+  "view": [
+    "activity",
+    "age_s",
+    "class",
+    "command",
+    "draining",
+    "epoch",
+    "exclusive",
+    "expires_at",
+    "held",
+    "note",
+    "origin",
+    "owner",
+    "pid",
+    "queue_with",
+    "reason",
+    "verdict"
+  ]
+}

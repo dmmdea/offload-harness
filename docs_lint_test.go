@@ -148,3 +148,52 @@ func TestADRNumbersAreUnique(t *testing.T) {
 		}
 	}
 }
+
+// TestVerdictDocTableComplete: every verdict `gpu status` and offload_status can print
+// (the Verdict* constants in internal/gpuactivity/snapshot.go) has a row in the verdict
+// table of docs/systems/gpu-lease.md, and every row names a verdict that exists. A verdict
+// a reader meets with no meaning written down is how "held" came to be read as "busy,
+// refuse"; this fails the change that adds a word without saying what it means.
+func TestVerdictDocTableComplete(t *testing.T) {
+	src, err := os.ReadFile(filepath.FromSlash("internal/gpuactivity/snapshot.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	constRe := regexp.MustCompile(`(?m)^\s*Verdict[A-Za-z]+\s*=\s*"([a-z][a-z-]*)"`)
+	inCode := map[string]bool{}
+	for _, m := range constRe.FindAllStringSubmatch(string(src), -1) {
+		inCode[m[1]] = true
+	}
+	if len(inCode) < 7 {
+		t.Fatalf("found only %d Verdict constants in snapshot.go; the pattern no longer matches how they are declared", len(inCode))
+	}
+
+	doc, err := os.ReadFile(filepath.FromSlash("docs/systems/gpu-lease.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := strings.ReplaceAll(string(doc), "\r\n", "\n")
+	start := strings.Index(text, "| verdict | meaning |")
+	if start < 0 {
+		t.Fatal("docs/systems/gpu-lease.md has no verdict table (header `| verdict | meaning |`)")
+	}
+	table := text[start:]
+	if end := strings.Index(table, "\n\n"); end >= 0 {
+		table = table[:end]
+	}
+	rowRe := regexp.MustCompile(`(?m)^\|\s*` + "`" + `([a-z][a-z-]*)` + "`" + `\s*\|`)
+	inDoc := map[string]bool{}
+	for _, m := range rowRe.FindAllStringSubmatch(table, -1) {
+		inDoc[m[1]] = true
+	}
+	for v := range inCode {
+		if !inDoc[v] {
+			t.Errorf("verdict %q is in internal/gpuactivity/snapshot.go but has no row in the verdict table of docs/systems/gpu-lease.md", v)
+		}
+	}
+	for v := range inDoc {
+		if !inCode[v] {
+			t.Errorf("the verdict table of docs/systems/gpu-lease.md has a row for %q, which internal/gpuactivity/snapshot.go does not define", v)
+		}
+	}
+}

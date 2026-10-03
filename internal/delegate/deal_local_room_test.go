@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/gpuactivity"
 )
 
@@ -92,5 +93,47 @@ func TestLocalSlotAheadIsMemoisedForTheProbeTTL(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 	if free, _ := r.localSlotAhead(); free {
 		t.Fatal("a reading older than the TTL was served from the memo")
+	}
+}
+
+// A seat pinned to ONE card shares that card with every other seat on it (plan P5): its run-cap
+// line is the card's, so a run of another seat on the same card takes a slot, and a run on
+// another card does not. A seat that spans cards keeps the per-seat line.
+func TestRunCapCountsPerCardForSingleCardSeats(t *testing.T) {
+	flagship := config.FlagshipFixture()
+	newRunner := func(t *testing.T, planner string) *runner {
+		t.Helper()
+		cfg := testCfg(t)
+		cfg.Layers, cfg.TierProfile, cfg.Tiers = flagship.Layers, flagship.TierProfile, flagship.Tiers
+		cfg.AgentModel = planner
+		cfg.FleetMaxConcurrentJobs = 3
+		return &runner{cfg: cfg}
+	}
+	start := func(t *testing.T, r *runner, run gpuactivity.Run) {
+		t.Helper()
+		run.Kind, run.Goal, run.Phase = "contract", "x", gpuactivity.PhaseRunning
+		h := gpuactivity.Start(r.cfg.GPULockPath, r.cfg.StateDir, run)
+		if h == nil {
+			t.Fatal("fixture: could not register a run")
+		}
+		t.Cleanup(h.End)
+	}
+
+	r := newRunner(t, "gemma-4-26b-agent") // the single layer's agent seat, pinned to card 0
+	start(t, r, gpuactivity.Run{Seat: "gemma-4-26b-agent", Devices: []string{"0"}})
+	start(t, r, gpuactivity.Run{Seat: "another-seat-on-card-0", Devices: []string{"0"}})
+	start(t, r, gpuactivity.Run{Seat: "whisper-stt", Devices: []string{"2"}})
+	room, note := r.localRunCapRoom()
+	if room != 1 || !strings.Contains(note, "on card 0") || !strings.Contains(note, "2 run(s)") {
+		t.Fatalf("room = %d (%q): the two runs on card 0 are the line, the run on card 2 is not", room, note)
+	}
+
+	// The flagship spans every card: per-seat, only its own run counts.
+	r2 := newRunner(t, "agent-pool")
+	start(t, r2, gpuactivity.Run{Seat: "agent-pool", Devices: []string{"0", "1", "2"}})
+	start(t, r2, gpuactivity.Run{Seat: "another-seat-on-card-0", Devices: []string{"0"}})
+	room, note = r2.localRunCapRoom()
+	if room != 2 || !strings.Contains(note, "on seat agent-pool") {
+		t.Fatalf("a seat that spans cards keeps the per-seat line: room = %d (%q), want 2", room, note)
 	}
 }

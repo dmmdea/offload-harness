@@ -6,7 +6,8 @@
 // caller still tears the session down at the batch boundary). tts.mjs does
 // NOT use this (its Chatterbox worker is not ComfyUI; it passes comfyManaged:false to
 // withGpuSlot). Dependency-free; deps are injectable purely for tests.
-import { existsSync, createWriteStream, renameSync, rmSync, readFileSync } from "node:fs";
+import { existsSync, createWriteStream, renameSync, rmSync, readFileSync, mkdirSync } from "node:fs";
+import { createServer } from "node:net";
 import { join } from "node:path";
 import { spawn as nodeSpawn, spawnSync as nodeSpawnSync } from "node:child_process";
 import { readLaunchOwner, writeLaunchOwner, clearLaunchOwner, harnessLaunched, pidAlive as defaultPidAlive } from "./comfy-ownership.mjs";
@@ -38,6 +39,138 @@ export function resolveComfyPy(comfyDir = COMFY_DIR, env = process.env) {
 
 export const COMFY_DIR = resolveComfyDir();
 export const COMFY_PY = resolveComfyPy(COMFY_DIR);
+
+// --- per-card instances (plan P13a) ---------------------------------------------------
+//
+// One ComfyUI per card lets two media jobs run on two cards at once. The DEFAULT instance
+// (key "") is today's single ComfyUI, left byte-identical: same argv, same launch marker,
+// same console log, same spawn env, no bind check. An instance is keyed ONLY by an explicit
+// COMFY_INSTANCE or by the card it is bound to (COMFY_CARD_UUID); a port on its own never
+// makes one. A keyed instance owns a port (given by --api / COMFY_API, else the base
+// COMFY_PORT_BASE + COMFY_INSTANCE_INDEX), its own output and temp directories (one folder
+// per instance, <comfyDir>/instances/<key>, see instancePaths), its own launch marker and
+// console log, and, when bound to a card, a pin by GPU uuid.
+//
+// WHY A UUID AND NEVER AN INDEX. --cuda-device N counts in CUDA's default fastest-first
+// order, not the driver's, so on a box with a display card index 0 can be that card, and
+// any index taken from the driver or from a lease lands on the wrong one. CUDA_VISIBLE_DEVICES
+// accepts the card's uuid, which names exactly one card in every ordering (measured on the
+// 3-card tier: the process sees one device, of that uuid's model). So the child env carries
+// the uuid and the argv carries NO --cuda-device (main.py would rewrite the env from it).
+
+export const DEFAULT_COMFY_PORT = 8188;
+export const DEFAULT_COMFY_API = "http://127.0.0.1:8188";
+/** First port handed to a keyed instance that was not given an api; the next ones follow by index. */
+export const COMFY_PORT_BASE = 8189;
+
+const INSTANCE_KEY_RE = /^[A-Za-z0-9_-]{1,48}$/;
+const GPU_UUID_RE = /^GPU-[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
+const instanceError = (msg) => new Error("COMFY-INSTANCE-INVALID: " + msg);
+
+/** parseCardUuid: COMFY_CARD_UUID, validated ("" = no card). An index is not an identity. */
+function parseCardUuid(env) {
+  const v = String(env.COMFY_CARD_UUID ?? "").trim();
+  if (v && !GPU_UUID_RE.test(v)) throw instanceError("COMFY_CARD_UUID must be a full GPU uuid as the driver prints it (GPU-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx), not an index");
+  return v;
+}
+
+/** cardInstanceKey: the stable instance key of a card, from the head of its uuid. */
+export function cardInstanceKey(uuid) {
+  return "g" + String(uuid).slice(4, 12).toLowerCase();
+}
+
+function intEnv(env, name, dflt, lo, hi) {
+  const raw = String(env[name] ?? "").trim();
+  if (!raw) return dflt;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < lo || n > hi) throw instanceError(`${name} must be an integer from ${lo} to ${hi}, got '${raw}'`);
+  return n;
+}
+
+/**
+ * resolveInstance: which ComfyUI this run drives. `api` is the --api flag (or undefined);
+ * the env supplies COMFY_API, COMFY_INSTANCE, COMFY_CARD_UUID, COMFY_PORT_BASE and
+ * COMFY_INSTANCE_INDEX. Returns { key, port, api, cardUuid }. With neither an
+ * explicit key nor a card the key is "" and `api` is the caller's string VERBATIM (or the
+ * default), exactly as the runners resolved it before instances existed.
+ */
+export function resolveInstance({ api, env = process.env } = {}) {
+  const given = api || env.COMFY_API || "";
+  const explicit = String(env.COMFY_INSTANCE ?? "").trim();
+  if (explicit && !INSTANCE_KEY_RE.test(explicit)) {
+    throw instanceError(`COMFY_INSTANCE must be 1 to 48 letters, digits, '-' or '_', got '${explicit}'`);
+  }
+  const cardUuid = parseCardUuid(env);
+  let port = null;
+  try { const p = new URL(given || DEFAULT_COMFY_API).port; if (p) port = Number(p); } catch {}
+  if (!explicit && !cardUuid) {
+    const effective = given || DEFAULT_COMFY_API;
+    return { key: "", port: port ?? DEFAULT_COMFY_PORT, api: effective, cardUuid: "" };
+  }
+  const key = explicit || cardInstanceKey(cardUuid);
+  if (given) {
+    if (port === null || port === DEFAULT_COMFY_PORT) {
+      throw instanceError(`instance '${key}' cannot use the default port ${DEFAULT_COMFY_PORT}, which belongs to the unkeyed instance (give it its own --api / COMFY_API port)`);
+    }
+    return { key, port, api: given, cardUuid };
+  }
+  const base = intEnv(env, "COMFY_PORT_BASE", COMFY_PORT_BASE, 1024, 65535);
+  const idx = intEnv(env, "COMFY_INSTANCE_INDEX", 0, 0, 63);
+  if (base + idx > 65535) throw instanceError(`COMFY_PORT_BASE ${base} + COMFY_INSTANCE_INDEX ${idx} is past the last port`);
+  const u = new URL(DEFAULT_COMFY_API);
+  u.port = String(base + idx);
+  return { key, port: base + idx, api: u.origin, cardUuid };
+}
+
+/** comfyApi: the api a runner talks to, from its --api flag and the instance env. */
+export function comfyApi(flagApi, env = process.env) {
+  return resolveInstance({ api: flagApi, env }).api;
+}
+
+/**
+ * instancePaths: a keyed instance's own directories (input stays shared), all under one
+ * folder, <comfyDir>/instances/<key>. `tempBase` is the value --temp-directory takes; ComfyUI
+ * appends "/temp" to it itself (main.py), so `tempDir` is the directory it really uses. They
+ * are deliberately NOT under <comfyDir>/temp or <comfyDir>/output: the default instance wipes
+ * <comfyDir>/temp on every start (cleanup_temp_filesystem), which would delete the temp files
+ * of a keyed instance running at the time.
+ */
+export function instancePaths(comfyDir, key) {
+  const root = join(comfyDir, "instances", key);
+  return { outputDir: join(root, "output"), tempBase: root, tempDir: join(root, "temp") };
+}
+
+/**
+ * bindHosts: the addresses ComfyUI will listen on, which the bind check must probe. It
+ * listens on 127.0.0.1 unless its --listen flag (read here from the extra args, last
+ * occurrence wins as in argparse) says otherwise: a bare --listen is every interface, a
+ * comma list is each address in it. The host the runner spells in its api is where a client
+ * reaches ComfyUI, not where ComfyUI binds ("localhost" can resolve to ::1 first).
+ */
+export function bindHosts(extraArgs = "") {
+  const toks = String(extraArgs || "").split(/\s+/).filter(Boolean);
+  let value = null;
+  for (let i = 0; i < toks.length; i++) {
+    if (toks[i] === "--listen") value = toks[i + 1] !== undefined && !toks[i + 1].startsWith("-") ? toks[i + 1] : "";
+    else if (toks[i].startsWith("--listen=")) value = toks[i].slice("--listen=".length);
+  }
+  if (value === null) return ["127.0.0.1"];
+  const hosts = value.split(",").map((h) => h.trim()).filter(Boolean);
+  return hosts.length ? hosts : ["0.0.0.0", "::"];
+}
+
+/**
+ * portIsFree: can this process listen on host:port? A false answer means something else
+ * holds it (or the OS refuses us), and either way the launch must not go ahead. It only
+ * ever binds and releases; it never talks to, signals or kills the holder.
+ */
+export function portIsFree(port, host) {
+  return new Promise((resolve) => {
+    const srv = createServer();
+    srv.once("error", () => resolve(false));
+    srv.listen({ port, host }, () => srv.close(() => resolve(true)));
+  });
+}
 
 // cudaVisibleEnv: ComfyUI >= 0.34 defaults WINDOWS to CUDA_VISIBLE_DEVICES=0 when the
 // operator passed no device selection (upstream #15737 "Limit Windows multi-GPU
@@ -106,10 +239,19 @@ export function resolveLaunchProfile(env = process.env) {
   if (dynamicVram && dynamicVram !== "on" && dynamicVram !== "off") {
     throw new Error(`COMFY_DYNAMIC_VRAM must be on, off or unset, got '${env.COMFY_DYNAMIC_VRAM}'`);
   }
-  return { cudaDevice, dynamicVram };
+  const cardUuid = parseCardUuid(env);
+  // A keyed instance (an explicit COMFY_INSTANCE, or a card in COMFY_CARD_UUID) is pinned by
+  // uuid or not at all: an index counts in CUDA's fastest-first order, not the driver's, so on
+  // a box with a display card it lands on a different card than the one a lease or a uuid names.
+  const explicitKey = String(env.COMFY_INSTANCE ?? "").trim();
+  if (cudaDevice && (cardUuid || explicitKey)) {
+    throw new Error(`COMFY-INSTANCE-CONFLICT: COMFY_CUDA_DEVICE ('${cudaDevice}') cannot be combined with an instance key (COMFY_INSTANCE, or the card in COMFY_CARD_UUID): an index counts cards in a different order than a uuid or a lease does, so a keyed instance never takes one (its pin is the card uuid): unset COMFY_CUDA_DEVICE`);
+  }
+  // cardUuid joins the profile only when set, so an unbound profile keeps today's exact shape.
+  return { cudaDevice, dynamicVram, ...(cardUuid ? { cardUuid } : {}) };
 }
 
-const profileRequested = (p) => !!(p && (p.cudaDevice || p.dynamicVram));
+const profileRequested = (p) => !!(p && (p.cudaDevice || p.dynamicVram || p.cardUuid));
 
 /** Remove every `flag value` pair (and a `flag=value` form) from an argv list. */
 function stripValued(args, flag) {
@@ -129,7 +271,7 @@ function stripValued(args, flag) {
  * or --default-device the extra args carry — argparse takes the last occurrence, so
  * leaving them in would silently override the binding.
  */
-export function launchFlags({ reserveVram = "1.0", warm = false, extraArgs = "", profile = { cudaDevice: "", dynamicVram: "" }, warn = () => {} } = {}) {
+export function launchFlags({ reserveVram = "1.0", warm = false, extraArgs = "", profile = { cudaDevice: "", dynamicVram: "" }, instance = null, comfyDir = "", warn = () => {} } = {}) {
   const flags = ["--disable-smart-memory"];
   // warm: a BATCH session keeps ComfyUI's model cache ON so the checkpoint loads once
   // for N renders; the caller still tears the whole session down at the batch boundary
@@ -140,7 +282,13 @@ export function launchFlags({ reserveVram = "1.0", warm = false, extraArgs = "",
   // the per-box escape hatch for non-CUDA backends (--directml, device pinning)
   // without touching shared code. Empty/unset = byte-identical launch.
   let extra = String(extraArgs || "").split(/\s+/).filter(Boolean);
-  if (profile.cudaDevice) {
+  if (profile.cardUuid) {
+    // A card pin by uuid lives in the child env (CUDA_VISIBLE_DEVICES), never in a flag:
+    // --cuda-device would rewrite that env from an index in a different order.
+    const had = extra.some((f) => /^--(cuda|default)-device(=|$)/.test(f));
+    extra = stripValued(stripValued(extra, "--cuda-device"), "--default-device");
+    if (had) warn("COMFY-INSTANCE-WARN: the extra args carry --cuda-device/--default-device, which would override this instance's card pin by uuid; dropped");
+  } else if (profile.cudaDevice) {
     extra = stripValued(stripValued(extra, "--cuda-device"), "--default-device");
     flags.push("--cuda-device", profile.cudaDevice);
   }
@@ -152,6 +300,16 @@ export function launchFlags({ reserveVram = "1.0", warm = false, extraArgs = "",
     }
   } else if (profile.dynamicVram === "off" && !extra.includes("--disable-dynamic-vram")) {
     extra.push("--disable-dynamic-vram");
+  }
+  if (instance && instance.key) {
+    // The instance owns its port and directories: an extra arg naming one would silently
+    // put it back on a shared one (argparse keeps the last occurrence).
+    const owned = ["--port", "--output-directory", "--temp-directory"];
+    const had = extra.some((f) => owned.some((o) => f === o || f.startsWith(o + "=")));
+    for (const o of owned) extra = stripValued(extra, o);
+    if (had) warn(`COMFY-INSTANCE-WARN: the extra args carry ${owned.join("/")}, which would move instance '${instance.key}' off its own port and directories; dropped`);
+    const { outputDir, tempBase } = instancePaths(comfyDir, instance.key);
+    flags.push("--port", String(instance.port), "--output-directory", outputDir, "--temp-directory", tempBase);
   }
   flags.push(...extra);
   return flags;
@@ -192,6 +350,12 @@ export function profileMismatch(argv, profile) {
       why.push(`it runs with ${got ? "--cuda-device " + got : "no --cuda-device (every visible card, ComfyUI's default device first)"}; this binding needs --cuda-device ${profile.cudaDevice}`);
     }
   }
+  if (profile.cardUuid) {
+    // The uuid itself lives in the process env, which /system_stats does not report (the
+    // launch marker proves it, see reuseVerdict); the argv can still disprove the pin.
+    const got = argvFlagValue(argv, "--cuda-device");
+    if (got !== null) why.push(`it runs with --cuda-device ${got}, which overrides a card pin by uuid`);
+  }
   if (profile.dynamicVram) {
     const on = argvDynamicVram(argv);
     if ((profile.dynamicVram === "on") !== on) {
@@ -215,20 +379,70 @@ export async function fetchSystemArgv(api) {
 }
 
 /**
+ * keyedOwnershipGap: why a ComfyUI answering on a keyed instance's port is NOT shown to be
+ * that instance ("" = shown). The proof is the keyed launch marker (this key, this port, a
+ * live pid, the exact recorded argv) AND the live argv carrying the instance's own --port and
+ * --output-directory, so a marker cannot vouch for a process that is not on the instance's
+ * port and directories.
+ */
+function keyedOwnershipGap({ marker, argv, comfyDir, key, port, alive }) {
+  const who = `instance '${key}' on port ${port}`;
+  if (!harnessLaunched(marker, argv, alive)) {
+    return `nothing shows that this ComfyUI is ${who}: no launch marker of this harness matches a live process running exactly this argv, so it was not started by this harness for that instance and is not reused (stop it, or give the instance another port)`;
+  }
+  if (marker.key !== key || marker.port !== port) {
+    return `its launch marker is for instance '${marker.key ?? ""}' on port ${marker.port ?? ""}, not ${who}, so it is not reused`;
+  }
+  if (argvFlagValue(argv, "--port") !== String(port)) {
+    return `it runs with ${argvFlagValue(argv, "--port") === null ? "no --port" : "--port " + argvFlagValue(argv, "--port")}; ${who} needs --port ${port}, so it is not reused`;
+  }
+  const outputDir = instancePaths(comfyDir, key).outputDir;
+  if (argvFlagValue(argv, "--output-directory") !== outputDir) {
+    return `it runs with ${argvFlagValue(argv, "--output-directory") === null ? "no --output-directory" : "--output-directory " + argvFlagValue(argv, "--output-directory")}; ${who} needs --output-directory ${outputDir}, so it is not reused`;
+  }
+  return "";
+}
+
+/**
  * reuseVerdict decides what to do with a ComfyUI that is ALREADY listening:
- *   { reuse: true }                  — no profile requested, or its argv honours it;
+ *   { reuse: true }                  — the default instance with no profile requested, or
+ *                                      its argv honours it; a keyed instance only on proof
+ *                                      that it is that instance (keyedOwnershipGap);
  *   { restart: true, pid, reason }   — the harness launched it (fingerprint match), its
  *                                      spawner is gone, and its profile is wrong: ours
  *                                      to replace;
  *   { reuse: false, reason }         — anything else: refuse (COMFY-PROFILE-MISMATCH).
  * A foreign instance is never killed — the harness cannot know what else it serves.
  */
-export async function reuseVerdict({ api, comfyDir, profile, systemArgv = fetchSystemArgv, readLaunch = readLaunchOwner, alive = defaultPidAlive }) {
-  if (!profileRequested(profile)) return { reuse: true };
+export async function reuseVerdict({ api, comfyDir, profile, key = "", port = null, systemArgv = fetchSystemArgv, readLaunch = readLaunchOwner, alive = defaultPidAlive }) {
+  // The default instance is reused as it always was. A KEYED instance never is without proof:
+  // whatever answers on its port could be another key's instance, another launcher's ComfyUI
+  // or a foreign one, none of which uses this instance's directories, marker or log.
+  if (!key && !profileRequested(profile)) return { reuse: true };
   const argv = await systemArgv(api);
-  const reason = profileMismatch(argv, profile);
+  let reason = profileMismatch(argv, profile);
+  // A card pin by uuid cannot be read off a running process (/system_stats lists device
+  // names, and two cards of one model are indistinguishable), so it is provable only by
+  // the keyed launch marker: the instance is ours (live pid + the exact argv) AND was
+  // launched on this very card. Anything else is a mismatch, never a pass.
+  const marker = comfyDir && (reason || key || profile.cardUuid) ? (key ? readLaunch(comfyDir, key) : readLaunch(comfyDir)) : null;
+  if (!reason && profile.cardUuid) {
+    const got = harnessLaunched(marker, argv, alive) ? String((marker.profile && marker.profile.cardUuid) || "") : null;
+    if (got === null) {
+      reason = `its card pin cannot be read from a running process, and no launch marker of this harness proves it was started on card ${profile.cardUuid}`;
+    } else if (got.toLowerCase() !== profile.cardUuid.toLowerCase()) {
+      reason = `it was launched ${got ? "on card " + got : "with no card pin"}; this binding needs card ${profile.cardUuid}`;
+    }
+  }
+  if (!reason && key) {
+    // Whose instance this is: the marker is this key's, on this port, for a live process whose
+    // argv is exactly the recorded one and carries the instance's own port and output
+    // directory. A gap is a refusal, never a restart: an instance that cannot be shown to be
+    // this one is not ours to stop.
+    const gap = keyedOwnershipGap({ marker, argv, comfyDir, key, port, alive });
+    if (gap) return { reuse: false, reason: gap };
+  }
   if (!reason) return { reuse: true };
-  const marker = comfyDir ? readLaunch(comfyDir) : null;
   if (harnessLaunched(marker, argv, alive)) {
     if (typeof marker.ownerPid === "number" && marker.ownerPid !== process.pid && alive(marker.ownerPid)) {
       return { reuse: false, reason: `${reason} — it is harness-launched but still in use by process ${marker.ownerPid}` };
@@ -258,17 +472,18 @@ const COMFY_LOG_KEEP = 3; // previous runs kept as .1..3 (logrotate-style) besid
 export const COMFY_LOG_TAIL_LINES = 20;
 
 /** comfyLogPath: this run's ComfyUI console capture, beside the install (matches the
- * .offload-owned.json / .offload-launch.json convention in comfy-ownership.mjs). */
-export function comfyLogPath(comfyDir = COMFY_DIR) {
-  return join(comfyDir, "offload-comfyui.log");
+ * .offload-owned.json / .offload-launch.json convention in comfy-ownership.mjs). A keyed
+ * (per-card) instance has its own file, so two instances never interleave one log. */
+export function comfyLogPath(comfyDir = COMFY_DIR, key = "") {
+  return join(comfyDir, key ? `offload-comfyui-${key}.log` : "offload-comfyui.log");
 }
 
 /** rotateComfyLog: age out old numbered logs and free the current filename for the
  * new run, so a long-lived box never accumulates unbounded ComfyUI console history.
  * Best-effort: a rotation failure (e.g. a concurrent reader holding the file open on
  * Windows) must never block a render. */
-export function rotateComfyLog(comfyDir = COMFY_DIR) {
-  const base = comfyLogPath(comfyDir);
+export function rotateComfyLog(comfyDir = COMFY_DIR, key = "") {
+  const base = comfyLogPath(comfyDir, key);
   try {
     const oldest = `${base}.${COMFY_LOG_KEEP}`;
     if (existsSync(oldest)) rmSync(oldest, { force: true });
@@ -283,9 +498,9 @@ export function rotateComfyLog(comfyDir = COMFY_DIR) {
 /** tailComfyLog: the last `n` lines of THIS run's ComfyUI console capture, or ""
  * when there is none (no harness-managed launch this run, or nothing captured yet).
  * Synchronous — only ever called once, on a render failure, never on the happy path. */
-export function tailComfyLog(comfyDir = COMFY_DIR, n = COMFY_LOG_TAIL_LINES) {
+export function tailComfyLog(comfyDir = COMFY_DIR, n = COMFY_LOG_TAIL_LINES, key = "") {
   try {
-    const text = readFileSync(comfyLogPath(comfyDir), "utf8");
+    const text = readFileSync(comfyLogPath(comfyDir, key), "utf8");
     const lines = text.split(/\r?\n/);
     if (lines.length && lines[lines.length - 1] === "") lines.pop();
     return lines.slice(-n).join("\n");
@@ -300,12 +515,12 @@ export function tailComfyLog(comfyDir = COMFY_DIR, n = COMFY_LOG_TAIL_LINES) {
  * `spawn` (tests inject one that returns a bare `{ kill() {} }`, with no
  * stdout/stderr/once) — a logging failure must never take down, or even alter the
  * behaviour of, the render it exists to help diagnose. */
-function captureComfyOutput(child, comfyDir) {
+function captureComfyOutput(child, comfyDir, key = "") {
   if (!child) return;
-  rotateComfyLog(comfyDir);
+  rotateComfyLog(comfyDir, key);
   let ws;
   try {
-    ws = createWriteStream(comfyLogPath(comfyDir), { flags: "a" });
+    ws = createWriteStream(comfyLogPath(comfyDir, key), { flags: "a" });
     // createWriteStream's own open() failure (e.g. a synthetic test comfyDir that
     // does not exist on disk) surfaces asynchronously as an "error" event, not a
     // thrown exception — an unhandled one would crash the whole process. Swallow
@@ -336,6 +551,35 @@ function captureComfyOutput(child, comfyDir) {
   try { child.once?.("error", close); } catch {}
 }
 
+/**
+ * stopComfy replaces a harness-launched ComfyUI that cannot serve this binding: kill it by
+ * the pid its launch marker recorded (the caller has already checked the fingerprint, so
+ * this never runs against an instance the harness did not start), wait for its port to go
+ * quiet, then clear its marker (the keyed one for a keyed instance).
+ */
+export async function stopComfy({ api, comfyDir, key = "", pid, reason, up, killPid, clearLaunch, log, pollMs, stopPolls }) {
+  log(`COMFY-PROFILE-RESTART: stopping harness-launched ComfyUI pid ${pid} on ${api} (${reason})`);
+  try { killPid(pid); } catch {}
+  let down = false;
+  for (let i = 0; i < stopPolls; i++) {
+    await new Promise((r) => setTimeout(r, pollMs));
+    if (!(await up(api))) { down = true; break; }
+  }
+  if (!down) {
+    const line = `COMFY-PROFILE-MISMATCH: ComfyUI on ${api} (harness-launched pid ${pid}) did not stop after a kill: ${reason}`;
+    log(line);
+    throw new Error(line);
+  }
+  try { if (key) clearLaunch(comfyDir, key); else clearLaunch(comfyDir); } catch {}
+}
+
+/** leaseEpochOf: the lease epoch the harness handed this process (GPU_LEASE_EPOCH), or null. */
+function leaseEpochOf(env) {
+  const raw = String(env.GPU_LEASE_EPOCH ?? "").trim();
+  const n = Number(raw);
+  return raw !== "" && Number.isInteger(n) && n >= 0 ? n : null;
+}
+
 // ensureComfy: if ComfyUI is already up, reuse it — unless this binding carries a launch
 // profile the running instance contradicts (then: restart it when the harness launched
 // it and nobody holds it, otherwise refuse with a COMFY-PROFILE-MISMATCH line; never
@@ -348,7 +592,7 @@ function captureComfyOutput(child, comfyDir) {
 // for tests only; production calls use the real defaults.
 export async function ensureComfy(opts = {}) {
   const {
-    api = process.env.COMFY_API || "http://127.0.0.1:8188",
+    api: apiOpt,
     comfyDir = COMFY_DIR,
     py = COMFY_PY,
     reserveVram = "1.0",
@@ -363,6 +607,8 @@ export async function ensureComfy(opts = {}) {
     clearLaunch = clearLaunchOwner,
     alive = defaultPidAlive,
     killPid = (pid) => process.kill(pid),
+    portFree = portIsFree,
+    mkdirs = (d) => mkdirSync(d, { recursive: true }),
     log = (line) => console.error(line),
     pollMs = 2000,
     // Startup budget: a laptop cold start (custom nodes + models on a slow disk)
@@ -371,9 +617,13 @@ export async function ensureComfy(opts = {}) {
     maxPolls = Math.max(1, Math.ceil(Number(process.env.COMFY_START_WAIT_SEC || 600) * 1000 / 2000)),
     stopPolls = 15,
   } = opts;
+  // Which instance this is: the default one (key "", today's behaviour) or a keyed
+  // per-card one. The api defaults exactly as before (COMFY_API, else the default port).
+  const instance = resolveInstance({ api: apiOpt || process.env.COMFY_API, env });
+  const { api, key } = instance;
   const profile = resolveLaunchProfile(env);
   if (await up(api)) {
-    const v = await reuseVerdict({ api, comfyDir, profile, systemArgv, readLaunch, alive });
+    const v = await reuseVerdict({ api, comfyDir, profile, key, port: instance.port, systemArgv, readLaunch, alive });
     if (v.reuse) return null; // already running and fit for this binding — don't manage it
     if (!v.restart) {
       const line = "COMFY-PROFILE-MISMATCH: ComfyUI on " + api + ": " + v.reason;
@@ -382,32 +632,49 @@ export async function ensureComfy(opts = {}) {
     }
     // Ours, orphaned (a --keep-comfy session or a crashed teardown), wrong profile:
     // replace it rather than render on the wrong card.
-    log(`COMFY-PROFILE-RESTART: stopping harness-launched ComfyUI pid ${v.pid} on ${api} (${v.reason})`);
-    try { killPid(v.pid); } catch {}
-    let down = false;
-    for (let i = 0; i < stopPolls; i++) {
-      await new Promise((r) => setTimeout(r, pollMs));
-      if (!(await up(api))) { down = true; break; }
-    }
-    if (!down) {
-      const line = `COMFY-PROFILE-MISMATCH: ComfyUI on ${api} (harness-launched pid ${v.pid}) did not stop after a kill: ${v.reason}`;
-      log(line);
-      throw new Error(line);
-    }
-    try { clearLaunch(comfyDir); } catch {}
+    await stopComfy({ api, comfyDir, key, pid: v.pid, reason: v.reason, up, killPid, clearLaunch, log, pollMs, stopPolls });
   }
   // An unbound COMFY_DIR must fail with its reason, not with a bad cwd from spawn(): on a
   // machine with no ComfyUI binding the caller's defer should say WHY.
   if (!comfyDir) {
     throw new Error("COMFY_DIR is not set — this machine has no ComfyUI install bound (set comfy_dir in the harness config)");
   }
-  const flags = launchFlags({ reserveVram, warm, extraArgs: env.COMFY_EXTRA_ARGS, profile, warn: log });
+  if (key) {
+    // A keyed instance has its own port: bind-check it before launching. Nothing answered
+    // as ComfyUI on it (see up(api) above), so whatever holds it is not ours to reuse, and
+    // never ours to kill: refuse, loudly, and leave it alone. The probe goes to every address
+    // ComfyUI will listen on (127.0.0.1 unless its --listen says otherwise), not to the host
+    // the api happens to spell: "localhost" can resolve to ::1 first, which would miss a
+    // holder on 127.0.0.1.
+    for (const host of bindHosts(env.COMFY_EXTRA_ARGS)) {
+      if (!(await portFree(instance.port, host))) {
+        const line = `COMFY-PORT-TAKEN: port ${instance.port} on ${host} for ComfyUI instance '${key}' is held by a process that does not answer as ComfyUI on ${api}; not launching onto it, and not stopping it (free the port, or give the instance another one)`;
+        log(line);
+        throw new Error(line);
+      }
+    }
+    // ComfyUI makes these itself on first use; creating them first keeps a read-only
+    // surprise (a missing parent) from surfacing mid-render. Best-effort. tempDir is the
+    // directory ComfyUI really uses (it appends /temp to --temp-directory).
+    const { outputDir, tempDir } = instancePaths(comfyDir, key);
+    for (const d of [outputDir, tempDir]) { try { mkdirs(d); } catch {} }
+  }
+  const flags = launchFlags({ reserveVram, warm, extraArgs: env.COMFY_EXTRA_ARGS, profile, instance: key ? instance : null, comfyDir, warn: log });
   // A --cuda-device launch has already scoped the cards (main.py rewrites
   // CUDA_VISIBLE_DEVICES to it), so the multi-GPU visibility restore below does not
   // apply — and neither does its --disable-pinned-memory: one visible card is not the
   // multi-device pinned-transfer case, and pinned memory is what keeps a streamed
   // (dynamic VRAM) bf16 DiT fast.
-  const spawnEnv = flags.includes("--cuda-device") ? env : envFor();
+  // A card-bound instance is pinned by uuid in the child env, which is the whole pin:
+  // one visible card, so neither the multi-GPU restore nor --cuda-device applies.
+  const spawnEnv = profile.cardUuid ? { ...env, CUDA_VISIBLE_DEVICES: profile.cardUuid }
+    : flags.includes("--cuda-device") ? env : envFor();
+  // A keyed instance with no card is not pinned to anything: it sees every card its
+  // environment shows, the display card included. That is the operator's explicit choice
+  // (a side-by-side instance, a test), so it is allowed, but never silent.
+  if (key && !profile.cardUuid && env.CUDA_VISIBLE_DEVICES === undefined && !flags.includes("--cuda-device")) {
+    log(`COMFY-INSTANCE-WARN: instance '${key}' is not bound to a card (no COMFY_CARD_UUID), so nothing pins it: it sees every card this environment shows, the display card included`);
+  }
   // Upstream's own guidance for the multi-GPU Windows path it now hides by default:
   // "pass --cuda-device all --disable-pinned-memory" — pinned memory with multiple
   // visible devices risks CUDA host-transfer failures on Windows (#15737). We restore
@@ -417,12 +684,20 @@ export async function ensureComfy(opts = {}) {
     flags.push("--disable-pinned-memory");
   }
   const child = spawn(py, ["main.py", ...flags], { cwd: comfyDir, stdio: ["ignore", "pipe", "pipe"], detached: false, env: spawnEnv });
-  captureComfyOutput(child, comfyDir);
+  captureComfyOutput(child, comfyDir, key);
   // Record the launch so a later job can tell this instance from a foreign one (the
   // fingerprint is pid + this exact argv). Best-effort: without it, a later profile
-  // mismatch refuses instead of restarting — the safe direction.
+  // mismatch refuses instead of restarting — the safe direction. A keyed instance's record
+  // also names its key, its port and the lease epoch it was launched under.
   if (child && typeof child.pid === "number") {
-    try { writeLaunch(comfyDir, { pid: child.pid, ownerPid: process.pid, args: ["main.py", ...flags], profile }); } catch {}
+    const rec = { pid: child.pid, ownerPid: process.pid, args: ["main.py", ...flags], profile };
+    if (key) {
+      rec.key = key;
+      rec.port = instance.port;
+      const epoch = leaseEpochOf(env);
+      if (epoch !== null) rec.leaseEpoch = epoch;
+    }
+    try { writeLaunch(comfyDir, rec); } catch {}
   }
   // Fail-fast dead-child watchdog (<node-e> stall, bigger-models-2026-09-24.md
   // "Phase 2 round 2" item 4): the poll loop below only ever asked "is the HTTP
@@ -447,10 +722,10 @@ export async function ensureComfy(opts = {}) {
     await new Promise((r) => setTimeout(r, pollMs));
     if (await up(api)) return child;
     if (earlyExit) {
-      const tail = tailComfyLog(comfyDir);
+      const tail = tailComfyLog(comfyDir, undefined, key);
       const seeLog = tail
-        ? `\nlast ComfyUI console output (${comfyLogPath(comfyDir)}):\n${tail}`
-        : `\n(no ComfyUI console output captured — see ${comfyLogPath(comfyDir)})`;
+        ? `\nlast ComfyUI console output (${comfyLogPath(comfyDir, key)}):\n${tail}`
+        : `\n(no ComfyUI console output captured — see ${comfyLogPath(comfyDir, key)})`;
       throw new Error(`COMFY-BOOT-FAILED: ${py} main.py in ${comfyDir} ${earlyExit.detail}${seeLog}`);
     }
   }

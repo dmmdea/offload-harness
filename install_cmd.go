@@ -42,15 +42,20 @@ func runInstall(args []string) error {
 	}
 }
 
+// installVolumesList enumerates the mounted volumes; a test seam, so `install volumes` can be
+// run against a machine the test describes.
+var installVolumesList = volumes.List
+
 func runInstallVolumes(args []string) error {
 	fs := flag.NewFlagSet("install volumes", flag.ExitOnError)
 	asJSON := fs.Bool("json", false, "emit the enumeration + choice as JSON (for the installer wrappers)")
 	minFreeGB := fs.Int("min-free-gb", 0, "minimum free space a volume must have to qualify (0 = the built-in floor)")
 	all := fs.Bool("all", false, "list every filesystem instead of the roomiest ones")
 	allowOS := fs.Bool("allow-os-volume", false, "permit the OS volume when nothing else qualifies — an explicit decision, never a fallback")
+	data := fs.Bool("data", false, "pick the volume that will hold harness DATA (a database, a ledger, media): also skip cloud-synced virtual drives and FAT-family filesystems. The JSON then carries \"data_target\": true")
 	_ = fs.Parse(args)
 
-	vols, err := volumes.List()
+	vols, err := installVolumesList()
 	if err != nil {
 		return fmt.Errorf("enumerating volumes: %w", err)
 	}
@@ -58,10 +63,19 @@ func runInstallVolumes(args []string) error {
 	if *minFreeGB > 0 {
 		opt.MinFreeBytes = uint64(*minFreeGB) * volumes.GiB
 	}
-	choice, pickErr := volumes.Pick(vols, opt)
+	pick := volumes.Pick
+	if *data {
+		pick = volumes.PickData
+	}
+	choice, pickErr := pick(vols, opt)
 
 	if *asJSON {
 		payload := map[string]any{"volumes": vols}
+		if *data {
+			// The installer reads this to know the choice came from the data-volume rule and
+			// not from the plain install rule, which would name a cloud drive.
+			payload["data_target"] = true
+		}
 		if pickErr != nil {
 			payload["error"] = pickErr.Error()
 		} else {
@@ -99,6 +113,9 @@ func runInstallVolumes(args []string) error {
 			note = "removable — never an install target"
 		case v.Network:
 			note = "network share — never an install target"
+		}
+		if why := volumes.DataVolumeReason(v); *data && why != "" {
+			note = strings.TrimSpace(note + "  not a data target: " + why)
 		}
 		if pickErr == nil && v.Root == choice.Volume.Root {
 			note = strings.TrimSpace(note + "  <== install target")

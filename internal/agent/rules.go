@@ -69,7 +69,7 @@ type Rule struct {
 // validate rejects a rule that could loosen policy or that can never match.
 func (r Rule) validate() error {
 	switch r.Kind {
-	case ActWrite, ActDelete, ActFetch, ActBrowse:
+	case ActWrite, ActDelete, ActFetch, ActBrowse, ActRead:
 	case ActShell:
 		return fmt.Errorf("rule %q: shell rules are not supported — command lines are not structurally matchable; the OS cage owns shell containment", r.Glob)
 	default:

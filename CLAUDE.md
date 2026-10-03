@@ -139,8 +139,8 @@ prompt/exemplars; can only narrow — UNSET resolves to config `agent_profile`, 
    description says so). `run_shell` (`--allow-shell`) is **Linux only**.
 4. **Worktree confinement:** writes are confined to `--worktree` (default `--root`); the agent must
    never write outside it or into `.git`.
-5. **Audit trail lives OUTSIDE any worktree** (`~/.local-offload/agent-audit.jsonl`) so a run cannot
-   tamper with its own log.
+5. **Audit trail lives OUTSIDE any worktree** (`agent-audit.jsonl` under the harness install root: config
+   `home`, else `~/.local-offload`) so a run cannot tamper with its own log.
 6. **Loopback-only serve:** `local-agent --serve` refuses a non-loopback `--listen` unless
    `--listen-trusted-network` is passed. Keep it that way.
 
