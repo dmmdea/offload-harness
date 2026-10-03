@@ -514,6 +514,20 @@ delegator sends), `+1` urgent; anything else is clamped, and a non-integer `prio
 was ignored before). The tenant is printable ASCII ≤ 96 bytes, else anonymous; the delegator sends `host-pid-start`
 (`delegate.DefaultTenant`, `LOCAL_OFFLOAD_TENANT` overrides) — one MCP server = one Claude session = one tenant.
 
+**Every dispatch also names its asker (unreleased).** Two more headers ride the request that creates work,
+for the same reason the tenant does (a header is ignored by a node one release behind; a new envelope field
+would `400` on it): `X-Offload-Asker` carries who asked (the asker's PAIR member name when it reports to PAIR
+and is a member, else its short lowercase hostname), and `X-Offload-Pair-Card: node` is sent ONLY by an asker
+that will not card the job itself (its PAIR emitter is not enabled). `admit` records the sanitized asker
+(printable, at most 64 characters, `core.SanitizeAsker`) as `requester` on the node's ledger row and, on the
+signal, when the node's own emitter is enabled, emits the job's one PAIR card from the node (queued at admit,
+running at start, terminal at finish; `fleetnode/nodecard.go`). Asking boxes send them on `/fleet/dispatch`,
+`/fleet/vision`, `/fleet/text`, `/fleet/compose-project` and `/fleet/queue/submit`; the queue holder stores both
+on the job (`fleetqueue.Job.Asker`, `PairCard`), so the claim loop applies them to a pulled job exactly as
+`admit` does to a pushed one — and now also stamps a pulled job's door `fleet` (`dispatchDoor`), which it did
+not before. A claim of a job the node already holds (a lease-expiry re-claim) opens no card, and a claim a
+draining node refuses closes its card failed. Details and the rollout reasoning: [pair-workloads](pair-workloads.md).
+
 **The store claims by band → tenant → arrival** (`Jobs.claimLocked`): highest effective band first (a sheddable job that has
 waited `bandAgingAfter` = 60 s counts as band 0), then the claimable tenant served least recently (`Jobs.served`, a claim
 sequence per tenant, pruned by the janitor), then the pending index. Anonymous tenants (older delegators) are one tenant, so
@@ -1485,6 +1499,8 @@ wait after ONE transient error, which is S-08 again, intermittently.
 - [`internal/fleetnode/server.go`](../../internal/fleetnode/server.go) — routes, payloads, duplicate
   semantics, agent-lane auth gates, agent health advertisement
 - [`internal/fleetnode/auth.go`](../../internal/fleetnode/auth.go) — the bearer credential check
+- [`internal/fleetnode/nodecard.go`](../../internal/fleetnode/nodecard.go) — the asker headers
+  (`askerOf`) and the node's fallback PAIR card for a job its asker will not card
 - [`internal/fleetnode/jobs.go`](../../internal/fleetnode/jobs.go) — state machine, the admit-then-
   schedule queue and its concurrency limit, eviction, drain, the agent job marker
 - [`internal/fleetnode/tasks.go`](../../internal/fleetnode/tasks.go) — `agentTaskConfigured`,

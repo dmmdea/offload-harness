@@ -435,6 +435,9 @@ func openPipeline(cfg config.Config) (*pipeline.Pipeline, func(), error) {
 	p := pipeline.New(cfg, client, ca, led)
 	// A long media call opens its card when it starts (calls.go).
 	p.SetCallTracker(pair)
+	// A call routed to a fleet node opens its card and writes its asker row through here
+	// (D5/D6, internal/pairworkloads/remote.go).
+	p.SetPairEmitter(pair)
 	return p, func() {
 		if ca != nil {
 			ca.Close()
@@ -2717,9 +2720,13 @@ func runFleetServe(args []string) error {
 		}
 		return gpulease.InspectDir(dir)
 	}
+	nodePair := pairworkloads.New(pairworkloads.FromConfig(cfg))
 	srv := fleetnode.New(p, jobs, fleetnode.Options{
-		NodeID:   nodeID,
-		Version:  version,
+		NodeID:  nodeID,
+		Version: version,
+		// The card of a job whose asker will not card it itself (D7): this node's own emitter, so
+		// an in-flight card of a killed fleet-serve still gets an orphan marker and is closed.
+		Pair:     nodePair,
 		Reclaim:  reclaim,
 		Snapshot: sampler.Load,
 		Lease:    leaseRead,
@@ -2811,11 +2818,21 @@ func runFleetServe(args []string) error {
 		// Drain BEFORE closing the listener: new dispatches already 503, but
 		// pollers can still read states while in-flight renders finish.
 		fmt.Fprintln(os.Stderr, "[fleet-serve] interrupt — draining jobs (up to 30s); survivors are marked error:\"interrupted\"")
-		jobs.DrainAndStop(30 * time.Second)
+		fleetServeDrain(jobs, nodePair, 30*time.Second)
 		ln.Close()
 		<-errCh
 		return nil
 	}
+}
+
+// fleetServeDrain is fleet-serve's shutdown drain: it stops the job store (in-flight jobs finish, the
+// never-started ones are dropped), then waits for the node emitter's background posts. The terminal
+// frames of the jobs that just finished, and the failed frames of the dropped ones, are posted from
+// goroutines the process would otherwise exit under: the card of a job that completed would be left
+// open and closed failed by the next process's orphan sweep. Each post is bounded (2 s), so the wait is.
+func fleetServeDrain(jobs *fleetnode.Jobs, pair *pairworkloads.Emitter, timeout time.Duration) {
+	jobs.DrainAndStop(timeout)
+	pair.Wait()
 }
 
 // runFleetMeasure primes an empty footprint store: one minimal render per

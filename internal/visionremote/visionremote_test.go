@@ -24,18 +24,22 @@ import (
 // fakeNode is a fleet node that advertises the given tasks (and lease), records
 // the vision dispatch it receives, and answers the job with a core.Result.
 type fakeNode struct {
-	node     string
-	tasks    []string
-	vtasks   []string // health vision_tasks; nil = not published (serves all three)
-	leased   bool
-	result   core.Result
-	refuse   int // non-zero: answer the dispatch with this status
-	mu       sync.Mutex
-	payload  map[string]any
-	auth     string
-	polls    int
-	srv      *httptest.Server
-	visionOK bool
+	node    string
+	tasks   []string
+	vtasks  []string // health vision_tasks; nil = not published (serves all three)
+	leased  bool
+	result  core.Result
+	refuse  int // non-zero: answer the dispatch with this status
+	mu      sync.Mutex
+	payload map[string]any
+	auth    string
+	hdr     http.Header // header of the last dispatch (the attribution headers ride it)
+	// runningFirst makes the first poll answer state "running" (the node says the job started)
+	// before the done answer.
+	runningFirst bool
+	polls        int
+	srv          *httptest.Server
+	visionOK     bool
 }
 
 func newFakeNode(t *testing.T, node string, tasks []string, res core.Result) *fakeNode {
@@ -60,6 +64,7 @@ func newFakeNode(t *testing.T, node string, tasks []string, res core.Result) *fa
 		f.mu.Lock()
 		f.payload = p
 		f.auth = r.Header.Get("Authorization")
+		f.hdr = r.Header.Clone()
 		f.visionOK = true
 		f.mu.Unlock()
 		if f.refuse != 0 {
@@ -73,13 +78,24 @@ func newFakeNode(t *testing.T, node string, tasks []string, res core.Result) *fa
 	mux.HandleFunc("GET /fleet/jobs/{id}", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		f.polls++
+		first := f.polls == 1
 		f.mu.Unlock()
+		if f.runningFirst && first {
+			json.NewEncoder(w).Encode(map[string]any{"job_id": r.PathValue("id"), "state": "running"})
+			return
+		}
 		data, _ := json.Marshal(f.result)
 		json.NewEncoder(w).Encode(map[string]any{"job_id": r.PathValue("id"), "state": "done", "data": json.RawMessage(data)})
 	})
 	f.srv = httptest.NewServer(mux)
 	t.Cleanup(f.srv.Close)
 	return f
+}
+
+func (f *fakeNode) dispatchHeader() http.Header {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.hdr.Clone()
 }
 
 func (f *fakeNode) dispatched() (map[string]any, string) {

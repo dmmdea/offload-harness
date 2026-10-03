@@ -18,6 +18,7 @@ import (
 
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/pairworkloads"
 )
 
 const queuePollEvery = 3 * time.Second
@@ -98,6 +99,9 @@ func queueSubmit(ctx context.Context, cfg config.Config, holder, jobID, taskType
 	if cfg.FleetAuthToken != "" {
 		req.Header.Set("Authorization", "Bearer "+cfg.FleetAuthToken)
 	}
+	// Who asked, and whether the claiming node must card the job because this box will not: they ride
+	// the queued job to its claimant (D7/D9/D11).
+	pairworkloads.WireHeadersFor(cfg, req.Header)
 	resp, err := fleetClient.Do(req)
 	if err != nil {
 		return err

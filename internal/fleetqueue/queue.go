@@ -63,6 +63,19 @@ type Job struct {
 	Result     json.RawMessage `json:"result,omitempty"`
 	Error      string          `json:"error,omitempty"`
 	Submitted  int64           `json:"submitted"`
+	// Asker and PairCard carry the submitter's attribution headers (core.AskerHeader and
+	// core.PairCardHeader) to whichever node claims the job, so a pulled job behaves exactly like a
+	// pushed one: the claiming node records who asked and, when PairCard is "node", cards the job
+	// itself. Both are omitted on a job a pre-attribution submitter queued, which a claimant reads as
+	// "nothing asked, nothing signalled".
+	Asker    string `json:"asker,omitempty"`
+	PairCard string `json:"pair_card,omitempty"`
+}
+
+// Attribution is who submitted a job and whether the claiming node must card it (see Job).
+type Attribution struct {
+	Asker    string
+	PairCard string
 }
 
 // Queue is the durable store. All methods are safe for concurrent use; bbolt
@@ -124,6 +137,11 @@ func (q *Queue) put(tx *bolt.Tx, j *Job) error {
 // Submit stores a new queued job. Idempotent on id: re-submitting an existing
 // job (lost-ack retry) returns its current state without touching it.
 func (q *Queue) Submit(id, taskType string, payload json.RawMessage, timeoutSec int) (state string, err error) {
+	return q.SubmitAttributed(id, taskType, payload, timeoutSec, Attribution{})
+}
+
+// SubmitAttributed is Submit for a submitter that names itself and signals who cards the job.
+func (q *Queue) SubmitAttributed(id, taskType string, payload json.RawMessage, timeoutSec int, a Attribution) (state string, err error) {
 	if id == "" || taskType == "" {
 		return "", errors.New("fleetqueue: id and task_type required")
 	}
@@ -140,6 +158,7 @@ func (q *Queue) Submit(id, taskType string, payload json.RawMessage, timeoutSec 
 		return q.put(tx, &Job{
 			ID: id, TaskType: taskType, Payload: payload, TimeoutSec: timeoutSec,
 			State: StateQueued, Submitted: q.clock().Unix(),
+			Asker: a.Asker, PairCard: a.PairCard,
 		})
 	})
 	return state, err
