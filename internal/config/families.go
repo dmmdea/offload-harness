@@ -100,7 +100,39 @@ type VideoFamilyBinding struct {
 	// UNKNOWN, never commercial-safe.
 	License       string `json:"license,omitempty"`
 	CommercialUse *bool  `json:"commercial_use,omitempty"`
+
+	// Engine selects the renderer for this family: "" or "comfy" = ComfyUI through
+	// render/comfy-video.mjs (every field above); "sdcpp" = stable-diffusion.cpp's
+	// `sd-cli -M vid_gen` through render/sdcpp-video.mjs, a spawn-per-job native
+	// binary on a Vulkan GPU (no ComfyUI, no Python). An sdcpp family may carry any
+	// name (see Config.SdcppVideoFamily), and its entry wins wholesale: none of the
+	// flat videogen_* weight keys reach it. FPS, Width, Height and Frames above are
+	// shared with the comfy fields.
+	Engine string `json:"engine,omitempty"`
+	// SdcppBin is the sd-cli binary; SdcppModel the diffusion model (--diffusion-model);
+	// SdcppHighNoiseModel the optional Wan2.2 high-noise expert (--high-noise-diffusion-model);
+	// SdcppVAE and SdcppT5xxl the companion files. All full paths.
+	SdcppBin            string `json:"sdcpp_bin,omitempty"`
+	SdcppModel          string `json:"sdcpp_model,omitempty"`
+	SdcppHighNoiseModel string `json:"sdcpp_high_noise_model,omitempty"`
+	SdcppVAE            string `json:"sdcpp_vae,omitempty"`
+	SdcppT5xxl          string `json:"sdcpp_t5xxl,omitempty"`
+	// SdcppBackend is sd-cli's --backend value (e.g. "vulkan0"). REQUIRED when the
+	// engine is sdcpp and never a CPU assignment: no model runs on CPU on this engine
+	// (see CPUBackendRefusal).
+	SdcppBackend string `json:"sdcpp_backend,omitempty"`
+	// SdcppExtraArgs are appended to the sd-cli invocation after the script's own flags.
+	SdcppExtraArgs []string `json:"sdcpp_extra_args,omitempty"`
+	// Steps, CFG, FlowShift and Sampler are the family's sampling recipe (0 / ""
+	// = sd-cli's own default). A per-request `steps` wins over Steps.
+	Steps     int     `json:"steps,omitempty"`
+	CFG       float64 `json:"cfg,omitempty"`
+	FlowShift float64 `json:"flow_shift,omitempty"`
+	Sampler   string  `json:"sampler,omitempty"`
 }
+
+// UsesSdcpp reports a video binding whose engine is stable-diffusion.cpp.
+func (b VideoFamilyBinding) UsesSdcpp() bool { return b.Engine == EngineSdcpp }
 
 // videoFamilyWanSentinel mirrors internal/pipeline's own unexported constant of
 // the same value (render/comfy-video.mjs's runner default family). Both packages
@@ -184,6 +216,13 @@ func (c Config) ResolveVideoFamilyBinding(renderFamily string) VideoFamilyBindin
 	name := renderFamily
 	if name == "" {
 		name = c.defaultVideoFamily()
+	}
+	// An sdcpp entry (CT-49) is a whole binding for ITS family, the box's default
+	// included: the flat videogen_* keys name ComfyUI filenames and mean nothing to
+	// sd-cli, so falling back to them would hand it comfy weights. No pre-existing
+	// config sets engine, so this branch never fires for one.
+	if ov, ok := c.VideoGenFamilies[name]; ok && ov.UsesSdcpp() {
+		return ov
 	}
 	if ov, ok := c.VideoGenFamilies[name]; ok {
 		fb.License, fb.CommercialUse = ov.License, ov.CommercialUse
@@ -404,15 +443,20 @@ func validateMediaEnums(c Config, where string) error {
 // render time, with a named error.
 func validateVideoFamilies(c Config) error {
 	for _, name := range sortedVideoFamilyNames(c.VideoGenFamilies) {
-		if !knownVideoFamilies[name] {
+		b := c.VideoGenFamilies[name]
+		if err := validateVideoFamilyEngine(name, b); err != nil {
+			return err
+		}
+		// A named sdcpp family may carry any name (it has no runner-dispatch
+		// literal to mirror); every other entry must be one of the runner's families.
+		if !knownVideoFamilies[name] && !b.UsesSdcpp() {
 			names := make([]string, 0, len(knownVideoFamilies))
 			for n := range knownVideoFamilies {
 				names = append(names, n)
 			}
 			sort.Strings(names)
-			return fmt.Errorf("videogen_families[%q]: unknown video family (valid: %s)", name, strings.Join(names, ", "))
+			return fmt.Errorf("videogen_families[%q]: unknown video family (valid: %s; or any name that sets \"engine\": \"sdcpp\")", name, strings.Join(names, ", "))
 		}
-		b := c.VideoGenFamilies[name]
 		switch b.WanLoader {
 		case "", "auto", "native", "gguf-distorch":
 		default:

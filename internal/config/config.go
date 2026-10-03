@@ -1107,6 +1107,9 @@ type Config struct {
 	// one family's cross-family leak by adding only that family's entry here —
 	// see (Config).ResolveVideoFamilyBinding.
 	VideoGenFamilies map[string]VideoFamilyBinding `json:"videogen_families,omitempty"`
+	// VideoGenSdcppScript is the runner for a videogen_families entry whose engine is
+	// "sdcpp" (CT-49; default render/sdcpp-video.mjs, resolved against the executable dir).
+	VideoGenSdcppScript string `json:"videogen_sdcpp_script,omitempty"`
 	// LTX-2.5 per-machine weight bindings (filenames under the ComfyUI model dirs;
 	// empty = the render script's family defaults). Transformer = the int8 convrot
 	// DiT; the conv VIDEO VAE pairs with it; the AUDIO VAE and ×2 latent spatial
@@ -1143,6 +1146,65 @@ type Config struct {
 	// resolution for the driver resize (0 = the builder's 482x854 template default).
 	AnimateGenWidth  int `json:"animategen_width,omitempty"`
 	AnimateGenHeight int `json:"animategen_height,omitempty"`
+	// --- iGPU media engines (CT-49): animate / voice / music on a Vulkan iGPU ---
+	// Every key below is optional and a box that sets none of them behaves exactly as
+	// before. The engines are spawn-per-job native CLIs under the media lease, and NO
+	// model runs on CPU on any of them: a cpu (or unset) backend is refused at config
+	// load (doctor fails), in mediacap and in the pipeline (a typed defer), and the
+	// render scripts fail with CPU_PLACEMENT when their engine's log shows a module on
+	// the CPU.
+	//
+	// AnimateGenEngine: "" = ComfyUI WAN-Animate-2 (animategen_script, above);
+	// "sdcpp" = render/sdcpp-animate.mjs: ffmpeg frames -> depth-anything.cpp depth
+	// PNGs -> sd.cpp Wan2.1 VACE 1.3B with the depth directory as --control-video.
+	AnimateGenEngine string `json:"animategen_engine,omitempty"`
+	// AnimateGenSdcppScript is the runner (default render/sdcpp-animate.mjs, resolved
+	// against the executable dir like every render script).
+	AnimateGenSdcppScript string `json:"animategen_sdcpp_script,omitempty"`
+	// AnimateGenSdcppBin / Model / VAE / T5xxl are full paths: sd-cli, the VACE GGUF,
+	// the Wan2.1 VAE and the T5 text encoder. AnimateGenSdcppBackend is sd-cli's
+	// --backend (required, never cpu); the depth step runs on the same device.
+	AnimateGenSdcppBin     string `json:"animategen_sdcpp_bin,omitempty"`
+	AnimateGenSdcppModel   string `json:"animategen_sdcpp_model,omitempty"`
+	AnimateGenSdcppVAE     string `json:"animategen_sdcpp_vae,omitempty"`
+	AnimateGenSdcppT5xxl   string `json:"animategen_sdcpp_t5xxl,omitempty"`
+	AnimateGenSdcppBackend string `json:"animategen_sdcpp_backend,omitempty"`
+	// AnimateGenSdcppExtraArgs are appended to the sd-cli invocation.
+	AnimateGenSdcppExtraArgs []string `json:"animategen_sdcpp_extra_args,omitempty"`
+	// AnimateGenDepthBin / AnimateGenDepthModel are the depth-anything.cpp binary and its
+	// GGUF (full paths). AnimateGenDepthExtraArgs are appended to its invocation (its CLI
+	// flags are bound in render/sdcpp-animate.mjs; this is the escape hatch).
+	AnimateGenDepthBin       string   `json:"animategen_depth_bin,omitempty"`
+	AnimateGenDepthModel     string   `json:"animategen_depth_model,omitempty"`
+	AnimateGenDepthExtraArgs []string `json:"animategen_depth_extra_args,omitempty"`
+	// AnimateGenSteps / CFG / FlowShift are the sdcpp animate recipe (0 = sd-cli's own
+	// default); a per-request steps wins.
+	AnimateGenSteps     int     `json:"animategen_steps,omitempty"`
+	AnimateGenCFG       float64 `json:"animategen_cfg,omitempty"`
+	AnimateGenFlowShift float64 `json:"animategen_flow_shift,omitempty"`
+	// VoiceGenEngine: "" = today's Chatterbox python worker (voicegen_script, tts.mjs);
+	// "audiocpp" = render/audiocpp-generate.mjs --kind voice (audio.cpp's chatterbox
+	// family, `--task tts`, or `clon` when a clone reference is given).
+	VoiceGenEngine string `json:"voicegen_engine,omitempty"`
+	// MusicGenEngine: "" = ComfyUI ACE-Step (musicgen_script, comfy-music.mjs);
+	// "audiocpp" = render/audiocpp-generate.mjs --kind music (audio.cpp's ace_step
+	// family, `--task gen`).
+	MusicGenEngine string `json:"musicgen_engine,omitempty"`
+	// AudiocppScript is the runner for both audio kinds (default
+	// render/audiocpp-generate.mjs). AudiocppBin is audiocpp_cli (full path).
+	// AudiocppBackend (required, never cpu) and AudiocppDevice (a device index; "" = 0)
+	// are its --backend and --device. AudiocppVoiceFamily / AudiocppMusicFamily are the
+	// --family values ("" = chatterbox / ace_step); the *Model keys are the --model
+	// paths (a GGUF file or a model package directory). AudiocppExtraArgs are appended.
+	AudiocppScript      string   `json:"audiocpp_script,omitempty"`
+	AudiocppBin         string   `json:"audiocpp_bin,omitempty"`
+	AudiocppBackend     string   `json:"audiocpp_backend,omitempty"`
+	AudiocppDevice      string   `json:"audiocpp_device,omitempty"`
+	AudiocppVoiceFamily string   `json:"audiocpp_voice_family,omitempty"`
+	AudiocppVoiceModel  string   `json:"audiocpp_voice_model,omitempty"`
+	AudiocppMusicFamily string   `json:"audiocpp_music_family,omitempty"`
+	AudiocppMusicModel  string   `json:"audiocpp_music_model,omitempty"`
+	AudiocppExtraArgs   []string `json:"audiocpp_extra_args,omitempty"`
 	// AudioGenTimeoutSec bounds one audio synthesis (TTS or ACE-Step). Default 720 (12min).
 	AudioGenTimeoutSec int `json:"audiogen_timeout_sec,omitempty"`
 	// GPUWaitMs is how long ANY GPU job queues behind the current lease holder before it
@@ -1981,6 +2043,9 @@ func Default() Config {
 		UpscaleModel:                "", // per-machine ESRGAN filename; falls back to videogen_upscale_model; both empty = defer
 		UpscaleTimeoutSec:           600,
 		VideoGenScript:              "render/comfy-video.mjs",
+		VideoGenSdcppScript:         "render/sdcpp-video.mjs",
+		AnimateGenSdcppScript:       "render/sdcpp-animate.mjs",
+		AudiocppScript:              "render/audiocpp-generate.mjs",
 		RunGraphScript:              "render/comfy-run-graph.mjs",
 		VoiceGenScript:              "render/tts.mjs",
 		SdcppScript:                 "render/sdcpp-generate.mjs",
@@ -2227,6 +2292,11 @@ func load(path string) (Config, error) {
 	// key or a family with no license would otherwise surface only as a render that
 	// silently used the wrong binding, or a result with no license tag.
 	if err := validateFamilies(c); err != nil {
+		return c, err
+	}
+	// The iGPU media engines (CT-49): a cpu or unset backend is refused here, so
+	// `doctor` (which loads the config first) fails on it by name.
+	if err := validateIGPUMedia(c); err != nil {
 		return c, err
 	}
 	// Install the operator's tailnet zone BEFORE any endpoint is vetted — the
@@ -2719,6 +2789,9 @@ func pathFields(c *Config) []*string {
 		&c.ImageGenScript, &c.NodePath, &c.ComfyDir,
 		&c.SdcppScript, &c.SdcppBin, &c.SdcppModel, &c.SdcppVAE, &c.SdcppClipL, &c.SdcppClipG, &c.SdcppT5, &c.SdcppLLM,
 		&c.InpaintScript, &c.GenEditScript, &c.UpscaleScript,
+		&c.AnimateGenSdcppBin, &c.AnimateGenSdcppModel, &c.AnimateGenSdcppVAE, &c.AnimateGenSdcppT5xxl,
+		&c.AnimateGenDepthBin, &c.AnimateGenDepthModel, &c.AnimateGenSdcppScript, &c.VideoGenSdcppScript,
+		&c.AudiocppScript, &c.AudiocppBin, &c.AudiocppVoiceModel, &c.AudiocppMusicModel,
 		&c.VideoGenScript, &c.AnimateGenScript, &c.RunGraphScript, &c.VoiceGenScript, &c.MusicGenScript, &c.GPULockPath, &c.StateDir,
 		&c.VoiceGenRef, &c.VoiceGenFTModel, &c.VoiceGenFTBaseDir, &c.VoiceGenFTRef,
 		&c.EditPython, &c.GimpConsolePath,
@@ -2742,6 +2815,7 @@ func expandUserPaths(c *Config, home string) {
 		*p = ExpandTilde(*p, home)
 	}
 	expandPipelinePaths(c, home)
+	expandVideoFamilyPaths(c, home)
 }
 
 // expandPipelinePaths tilde-expands each pipelines entry's script/workdir.
