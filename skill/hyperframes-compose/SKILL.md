@@ -22,8 +22,12 @@ design is in `docs/systems/media-generation.md` (Composition).
   unpinned upstream; `upgrade`, `add`, `tts` and `transcribe` pull code or models from the network;
   `capture` calls cloud services; the rest are refused by the runner and would be a cloud path if they
   were not.
-- **Never `npx skills add` (or any skill installer) for HyperFrames, its registry, or a teaching kit for
-  it.** The house skill is this one. Do not install upstream's or a kit's skills.
+- **Never `npx skills add` (or any skill installer, `claude plugin install` included) for HyperFrames,
+  its registry, or a teaching kit for it.** Those installers track upstream `main` and write into every
+  agent's skills folder. The house skill is this one. When an operator wants a teaching kit's or
+  upstream's skills, they live in a private copy the operator keeps: pinned to the CLI tag this lane pins,
+  wired to this lane, with every paid or cloud step removed, and opened as a workspace rather than
+  installed by an installer.
 - **`html` and `project_dir` are trusted code only.** HyperFrames' Chrome runs without a sandbox. Never
   pass a third-party page. The fleet door accepts only the vetted templates under
   `render/compose-templates/`, by name, with typed variables.

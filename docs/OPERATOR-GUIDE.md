@@ -541,7 +541,10 @@ runtime's `hf-seek` event, which the package dispatches but does not document, s
 sample, confirm a known group is on screen at a known time (the frame at 1.5 s shows "Captions follow
 the words"), and record the new version in the Measured section of its README (a test fails until that
 section names the pin). Never `npm install -g hyperframes`: a global HyperFrames self-upgrades in a
-detached process.
+detached process. When the release ships, run `local-offload install hyperframes` and then
+`local-offload acceptance` on every node with the lane, right after its binary and render tree are
+swapped: the new runner refuses the old install, so until then that node's `doctor` reads
+`compose_video` BOUND-BUT-MISSING and every composition defers `CLI_MISSING`.
 
 ## 4. Drive the coding agent
 

@@ -10,9 +10,10 @@ their `@font-face` rules at `shared/fonts/…`.
 | `fonts/inter-latin-900-normal.woff2` | Inter 900, latin | `d5c0ed7b8b5dde97d48b97947d740bbd8ad3ba9f2c5cc6b8280f16acba2d828e` |
 
 **Source.** The files come from `@fontsource/inter@5.2.8` (npm, `files/`). They are byte-identical to
-the faces the HyperFrames 0.8.108 producer embeds for `Inter`: the three hashes above were compared
+the faces the HyperFrames 0.8.114 producer embeds for `Inter`: the three hashes above were compared
 against the base64 payloads in `node_modules/hyperframes/dist/chunk-ZLJXATSQ.js` (the font data lived in
-`dist/cli.js` until the package split its bundle, and the three faces are the same in 0.8.61).
+`dist/cli.js` until the package split its bundle, and the three faces are the same in 0.8.61). That chunk
+is byte-identical in 0.8.108 and 0.8.114 (983,580 bytes, the same SHA-256).
 
 **Why they are vendored.** If the page does not declare a family with `@font-face`, the HyperFrames
 compiler resolves it by requesting the Google Fonts CSS API at render time, even for families it

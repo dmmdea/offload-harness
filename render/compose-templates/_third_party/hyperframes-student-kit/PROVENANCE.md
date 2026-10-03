@@ -2,8 +2,10 @@
 
 Several templates in `render/compose-templates/` are adapted from card designs in a community
 teaching kit for HyperFrames. This folder keeps the kit's licence texts exactly as received and records
-what was taken from it and what was not. The kit is a reference, never an install: none of its
-scripts, skills or CLI calls run anywhere in this repository.
+what was taken from it and what was not. For this repository the kit is a reference: none of its
+scripts, skills or CLI calls run anywhere in it. (Since 2026-10-02 the operator also keeps a private copy
+of the kit, pinned and wired to the compose lane with its paid and cloud steps removed, as a workspace of
+its own. Nothing from that copy is redistributed here.)
 
 | | |
 |---|---|
@@ -69,4 +71,4 @@ git checkout 0d30152a82b9ceb93cfdd9bdbf46f0d5ab3cde86
 ```
 
 Run that in a throwaway folder outside any repository, on a shell that does not rewrite leading slashes.
-Nothing else from the kit is needed, and nothing from it should be installed.
+Nothing else from the kit is needed for this check.

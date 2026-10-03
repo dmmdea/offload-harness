@@ -1,6 +1,7 @@
 package mediacap
 
 import (
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -12,12 +13,13 @@ import (
 func composeBox(t *testing.T) (exeDir string, cfg func() configForCompose) {
 	t.Helper()
 	exeDir = t.TempDir()
-	touch(t, exeDir, "render/compose-hyperframes.mjs")
+	writeFile(t, touch(t, exeDir, "render/compose-hyperframes.mjs"), "export const PINNED_VERSION = \"0.8.114\";\n")
 	touch(t, exeDir, "render/compose-templates/title-card/index.html")
 	touch(t, exeDir, "render/compose-templates/lower-third/index.html")
 	touch(t, exeDir, "render/compose-templates/_shared/fonts/x.woff2")
 	hf := filepath.Join(exeDir, "hf")
 	touch(t, exeDir, "hf/node_modules/hyperframes/bin/hyperframes.mjs")
+	writeFile(t, touch(t, exeDir, "hf/node_modules/hyperframes/package.json"), `{"name":"hyperframes","version":"0.8.114"}`)
 	browser := touch(t, exeDir, "hf/chrome/chrome-headless-shell.exe")
 	ext := ""
 	if runtime.GOOS == "windows" {
@@ -108,6 +110,30 @@ func TestComposeRouteNeedsFfprobe(t *testing.T) {
 	}
 	if r := composeRouteFor(t, exeDir, base()); r.State != Configured {
 		t.Fatalf("control: ffprobe beside ffmpeg must be CONFIGURED even with an empty PATH, got %s (%s)", r.State, r.Detail)
+	}
+}
+
+// TestComposeRouteDriftedInstallIsBoundButMissing: the runner refuses every op while the
+// install holds another version than its pin, so status must not read CONFIGURED then — the
+// 0.159.0 pin move left a box answering CLI_MISSING to every composition while doctor and
+// offload_status both said CONFIGURED.
+func TestComposeRouteDriftedInstallIsBoundButMissing(t *testing.T) {
+	exeDir, base := composeBox(t)
+	if r := composeRouteFor(t, exeDir, base()); r.State != Configured || !strings.Contains(r.Detail, "hyperframes=0.8.114") {
+		t.Fatalf("control: a matching install is CONFIGURED and names its pin, got %s (%s)", r.State, r.Detail)
+	}
+	writeFile(t, filepath.Join(exeDir, "hf", "node_modules", "hyperframes", "package.json"), `{"name":"hyperframes","version":"0.8.108"}`)
+	r := composeRouteFor(t, exeDir, base())
+	if r.State != BoundButMissing || !strings.Contains(r.Detail, "holds hyperframes 0.8.108, not the runner's pin 0.8.114") ||
+		!strings.Contains(r.Detail, "local-offload install hyperframes") {
+		t.Fatalf("compose_video = %s (%s), want BOUND-BUT-MISSING naming both versions and the fix", r.State, r.Detail)
+	}
+}
+
+func writeFile(t *testing.T, p, s string) {
+	t.Helper()
+	if err := os.WriteFile(p, []byte(s), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }
 

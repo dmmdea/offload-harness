@@ -102,20 +102,21 @@ default sample, and a known group on screen at a known time).
 
 ## Measured
 
-Rendered on 2026-10-02 through `render/compose-hyperframes.mjs` with HyperFrames 0.8.108, on a 36-thread Windows
-box with software GL. The same sample was first measured on 0.8.61 on 2026-09-30, and every figure below was taken
-again after the pin moved. The default three-group sample, `webm`, quality `high`:
+Rendered on 2026-10-02 through `render/compose-hyperframes.mjs` with HyperFrames 0.8.114, on a 36-thread Windows
+box with software GL. The same sample was first measured on 0.8.61 on 2026-09-30 and again on 0.8.108 earlier on
+2026-10-02, and every figure below was taken again after the pin moved to 0.8.114. The default three-group sample,
+`webm`, quality `high`:
 
 - `lint` found 0 errors and 0 warnings, and `check` passed;
 - ffprobe read VP9 `yuva420p`, 1920×1080, 30 fps, 240 frames and 8.000 s, no audio stream;
-- HyperFrames' render time was 24.0 s at 1 worker and 27.2 s and 26.7 s at `auto` (15.0 s, and 17.0 s and 16.7 s,
-  per 150 frames);
+- HyperFrames' render time was 22.9 s at 1 worker, 21.7 s, 20.6 s and 20.6 s at 2, 4 and 6 workers, and 24.1 s and
+  23.9 s at `auto` (0.8.108 on the same box: 24.0 s at 1 worker, 27.2 s and 26.7 s at `auto`);
 - rendered at 1, 2, 4 and 6 workers and at `auto` twice, all 15 pairs of decoded frames (libvpx decoder, so the
-  alpha is in the comparison) were identical, and they are identical to the frames the 0.8.61 render of the same
-  sample decodes to (0 of 240 differ);
+  alpha is in the comparison) were identical, and they are identical to the frames a 0.8.108 render of the same
+  sample decodes to (0 of 240 differ), which matched the 0.8.61 render the same way;
 - the frame at 1.5 s showed "Captions follow the words"; the alpha plane was 0 everywhere at 0.3 s (before the first
-  group), inside each group (1.5 s, 4.0 s and 6.0 s) it had a maximum of 255 and a mean between 7.7 and 8.5, and it
-  was 0 again in the gap at 2.8 s and after the last group ended, at 7.9 s;
+  group), inside each group (1.5 s, 4.0 s and 6.0 s) it had a maximum of 255 and a mean of 7.99, 7.66 and 8.50, and
+  it was 0 again in the gap at 2.8 s and after the last group ended, at 7.9 s;
 - a caption composited over flat grey and over flat white showed the bar, the text and the accent line intact.
 
 The helper reads what `offload_transcribe` really writes. Its `words[]` entries are whisper-server's tokens, not

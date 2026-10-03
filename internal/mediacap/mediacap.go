@@ -34,6 +34,7 @@ import (
 
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/gpugen"
+	"github.com/dmmdea/offload-harness/internal/hfinstall"
 	"github.com/dmmdea/offload-harness/internal/mediaops"
 )
 
@@ -330,6 +331,15 @@ func composeRoute(cfg config.Config, exeDir string) (Route, bool) {
 	}
 	r.Detail += "; ffprobe=" + probe
 	if script, err := gpugen.ResolveScriptIn(cfg.ComposeScript, exeDir); err == nil {
+		// The runner refuses every op while the install holds anything but its pin
+		// (CLI_MISSING), so a drifted install is the middle verdict here too: status
+		// and the first composition must give the same answer.
+		if derr := hfinstall.Drift(script, cfg.HyperframesDir); derr != nil {
+			return Route{Name: name, Engine: engine, State: BoundButMissing, Detail: derr.Error()}, true
+		}
+		if pin, perr := hfinstall.RunnerPin(script); perr == nil {
+			r.Detail += "; hyperframes=" + pin
+		}
 		if names := composeTemplates(filepath.Join(filepath.Dir(script), "compose-templates")); len(names) > 0 {
 			r.Detail += "; templates=" + strings.Join(names, ",")
 		}

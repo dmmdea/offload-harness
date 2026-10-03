@@ -684,7 +684,7 @@ route unbound (`compose_script: ""`, NOT CONFIGURED). A skipped lane is a legiti
 failure. What the step does:
 
 1. Copies `setup/hyperframes/package.json` + `package-lock.json` (npm `hyperframes`, exact pin,
-   lock integrity `sha512-RvHM…80xw==` for 0.8.108) to `<OFFLOAD_HOME>/hyperframes`.
+   lock integrity `sha512-dIHd…RAQ==` for 0.8.114) to `<OFFLOAD_HOME>/hyperframes`.
 2. `npm ci --ignore-scripts`, which installs the lockfile's exact tree with no install script.
 3. `npm audit signatures`, which checks the registry signatures and SLSA provenance. **A failure is
    fatal and the installer stops.** Do not work around it. Surface it to the human, because the
@@ -693,10 +693,30 @@ failure. What the step does:
 5. `node render/compose-hyperframes.mjs browser --hyperframes-dir <dir>`, which runs `browser ensure`
    through the harness runner. The env is scrubbed and HyperFrames' state lands in
    `<dir>/home`. It downloads the CLI's pinned chrome-headless-shell from Chrome for Testing
-   (152.0.7977.30 for 0.8.108, as for 0.8.61; 270 MB on disk on win64) and prints its path.
+   (152.0.7977.30 for 0.8.114, as for 0.8.108 and 0.8.61; 270 MB on disk on win64) and prints its path.
 6. Seeds `compose_script`, `hyperframes_dir` and `hyperframes_browser_path` into a **fresh**
    config. An existing config is never rewritten; the installer prints the three keys to add by
    hand.
+
+On a node that is already installed, `local-offload install hyperframes` runs steps 1-5 on their own,
+from the `package.json` and lock the binary carries, so a node with no repository checkout can do it.
+It works in the config's `hyperframes_dir` (or `--dir`) and never leaves the node worse off:
+
+- it refuses before touching anything when the runner beside the binary pins another version, or when
+  the directory holds something other than a harness install;
+- a healthy install (the committed package files, the pinned version and a tree `npm ls` accepts) is
+  kept and only re-verified;
+- anything else is built in `<dir>/.install-staging`, where `npm ci` and `npm audit signatures` run, so
+  a failure there leaves the live install exactly as it was; only a verified tree is swapped in, and the
+  replaced one is kept as `<dir>/node_modules.prev` (with `package.json.prev` and `package-lock.json.prev`)
+  for a rollback to an older release;
+- `npm rebuild esbuild` and the runner's `browser` and `version` ops then run on the new tree, and if one
+  fails the previous install is put back.
+
+It fails when the config binds another Chrome build than the pin resolves (it names the value to set),
+and gives up after `--timeout` (45 minutes by default). A release that moves the pin needs it on every
+node with the lane: until it runs, `doctor` reads `compose_video` BOUND-BUT-MISSING ("holds hyperframes
+X, not the runner's pin Y") and every composition defers `CLI_MISSING`.
 
 Rules for the installing agent:
 
@@ -711,7 +731,10 @@ Rules for the installing agent:
 - On a Linux node, chrome-headless-shell needs the usual Chrome shared libraries (`libnss3`,
   `libatk-bridge2.0-0`, `libgbm1`, …). If one is missing, Chrome fails to launch, and the defer
   detail carries the launch error, which names the library. This is expected from Puppeteer's
-  launch error; no Linux node has been verified yet.
+  launch error. Two x86-64 Linux nodes have rendered through the lane with the libraries they already
+  had: one on 0.8.61, and on 2026-10-02 another ran `local-offload install hyperframes` into an empty
+  directory and rendered `title-card` (mp4) and `lower-third` (webm, alpha present) on 0.8.114, both
+  with `lint` 0/0 and `check` passing.
 
 ---
 
