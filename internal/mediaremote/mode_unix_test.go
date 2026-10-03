@@ -50,7 +50,7 @@ func TestFetchedOutputsLandAs0644LessTheUmask(t *testing.T) {
 func TestReplacingAnExistingOutKeepsItsPermissionBits(t *testing.T) {
 	prev := syscall.Umask(0o022)
 	defer syscall.Umask(prev)
-	for _, mode := range []os.FileMode{0o600, 0o640} {
+	for _, mode := range []os.FileMode{0o600, 0o640, 0o664, 0o666} {
 		n := startNode(t, nodeOpts{})
 		cfg := clientCfg(t, n)
 		out := filepath.Join(t.TempDir(), "main.png")

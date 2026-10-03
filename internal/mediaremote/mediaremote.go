@@ -752,9 +752,9 @@ type staged struct {
 // output may claim its path. A mismatch or a failed download removes every temp and every claimed name and
 // leaves the caller's destinations as they were; if a placement fails part-way the error says which files
 // already landed. The caller's out is placed last. Fetched files are 0644 less the umask, except that an
-// out which already exists keeps that file's permission bits. Before claiming
-// in a directory, leftovers of a fetch that never finished (stale temps and empty job-prefixed claims) are
-// swept.
+// out which already exists keeps that file's permission bits (the stage is chmod-ed to them, so the umask
+// does not mask them). Before claiming a name in a directory, leftovers of a fetch that never finished
+// (stale temps and empty job-prefixed claims) are swept.
 func fetchOutputs(ctx context.Context, cfg config.Config, base string, data json.RawMessage, to outputDest, jobID, node string) (json.RawMessage, error) {
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.UseNumber()
@@ -883,15 +883,15 @@ func fetchOutputs(ctx context.Context, cfg config.Config, base string, data json
 
 	unverified := false
 	for _, it := range items {
-		perm := stagePerm
+		perm, exact := stagePerm, false
 		if it.explicit {
 			// Replacing a file the caller already has keeps its permission bits (a private 0600 out stays
 			// 0600); a new out is 0644 less the umask like every other fetched file.
 			if fi, err := os.Stat(it.dst); err == nil && fi.Mode().IsRegular() {
-				perm = fi.Mode().Perm()
+				perm, exact = fi.Mode().Perm(), true
 			}
 		}
-		tmp, got, err := download(ctx, cfg, base, it.name, filepath.Dir(it.dst), perm)
+		tmp, got, err := download(ctx, cfg, base, it.name, filepath.Dir(it.dst), perm, exact)
 		if err != nil {
 			cleanup()
 			return nil, err
@@ -1020,8 +1020,9 @@ func nodeName(p string) (string, error) {
 }
 
 // download fetches one file into a unique temp file in dir and returns that temp path and the sha256 of
-// the bytes written. On any failure no temp file is left behind.
-func download(ctx context.Context, cfg config.Config, base, name, dir string, perm os.FileMode) (tmp, sum string, err error) {
+// the bytes written. exact means perm is the mode of a file being replaced and is applied with fchmod, past
+// the umask. On any failure no temp file is left behind.
+func download(ctx context.Context, cfg config.Config, base, name, dir string, perm os.FileMode, exact bool) (tmp, sum string, err error) {
 	fctx, cancel := context.WithTimeout(ctx, fetchTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(fctx, http.MethodGet, base+"/fleet/media/"+url.PathEscape(name), nil)
@@ -1043,6 +1044,14 @@ func download(ctx context.Context, cfg config.Config, base, name, dir string, pe
 		return "", "", err
 	}
 	tmp = f.Name()
+	if exact {
+		// fchmod ignores the umask: an existing out of 0664 must come back 0664, not 0644.
+		if err := f.Chmod(perm); err != nil {
+			f.Close()
+			os.Remove(tmp)
+			return "", "", err
+		}
+	}
 	h := sha256.New()
 	if _, err := io.Copy(io.MultiWriter(f, h), resp.Body); err != nil {
 		f.Close()
@@ -1110,7 +1119,7 @@ const (
 )
 
 // staleAfter is how old a fetch leftover must be before the sweep takes it: the longest call budget (the
-// same Budgets the client runs a call under, 2 to 6 hours) plus an hour, so that no call another process
+// same Budgets the client runs a call under, 1 to 6 hours) plus an hour, so that no call another process
 // is still running can have its claims or temps taken. A call also refreshes the mtime of everything it
 // holds after each download (touch), so a long multi-output fetch never ages toward the threshold.
 func staleAfter() time.Duration {

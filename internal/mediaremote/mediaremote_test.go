@@ -666,6 +666,9 @@ type fakeOpts struct {
 	alternate int
 	// mediaHang makes GET /fleet/media block until the client gives up.
 	mediaHang bool
+	// dispatchHang makes POST /fleet/dispatch and /fleet/media-job block until the client gives up: the node
+	// never answers, so the call's deadline passes while the job is still being sent.
+	dispatchHang bool
 }
 
 // fakeLog is what a fake node saw.
@@ -739,6 +742,12 @@ func fakeNode(t *testing.T, o fakeOpts) *httptest.Server {
 			fmt.Fprintf(w, `{"node_id":"fake-%d","schema_version":1,"supported_task_types":%s,"queue_depth":%d,"jobs_running":%d%s}`,
 				time.Now().UnixNano()%1000, tasks, o.queue+o.running, o.running, extra)
 		case strings.HasPrefix(r.URL.Path, "/fleet/dispatch"), strings.HasPrefix(r.URL.Path, "/fleet/media-job"):
+			if o.dispatchHang {
+				// The server only notices a client that went away once the request body is read.
+				_, _ = io.Copy(io.Discard, r.Body)
+				<-r.Context().Done()
+				return
+			}
 			if o.status != 0 {
 				w.WriteHeader(o.status)
 				fmt.Fprint(w, `{"status":"error","error":"fake refusal"}`)

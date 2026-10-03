@@ -151,3 +151,40 @@ func TestAMultiOutputFetchKeepsItsClaimsFresh(t *testing.T) {
 		}
 	}
 }
+
+// ---- T2: the SENDING phase: the node never answers the POST, the budget ends the call ----------------
+
+// A deadline that passes while the job is still being sent is the one phase where the client cannot know
+// whether the node admitted the job: it says it was sending, says the job cannot be recalled, and sends no
+// DELETE (a media job cannot be withdrawn, ADR 0064).
+func TestABudgetThatEndsWhileTheJobIsBeingSentSaysSoAndSendsNoDelete(t *testing.T) {
+	withBudget(t, taskImage, 300*time.Millisecond)
+	log := &fakeLog{}
+	fake := fakeNode(t, fakeOpts{tasks: []string{"image-gen"}, dispatchHang: true, log: log})
+	cfg := config.Config{MediaDir: t.TempDir(), FleetAuthToken: "tok", DelegateRemotes: []string{fake.URL}}
+	start := time.Now()
+	res := Run(context.Background(), cfg, &recordingRunner{}, imageReq(), "remote", nil)
+	if res.OK || res.DeferClass != core.DeferClassBudget {
+		t.Fatalf("%+v", res)
+	}
+	if time.Since(start) > 5*time.Second {
+		t.Errorf("a budget defer must return at once, took %v", time.Since(start))
+	}
+	if got := log.seen("/fleet/dispatch"); len(got) == 0 {
+		t.Fatal("test premise: the POST must have reached the node")
+	}
+	if got := log.seen("/fleet/jobs/"); len(got) != 0 {
+		t.Errorf("the job was never acknowledged, so it must not be polled: %v", got)
+	}
+	if del := log.deleted(); len(del) != 0 {
+		t.Errorf("a media job cannot be withdrawn, so no DELETE may be sent: %+v", del)
+	}
+	for _, want := range []string{"sending the job", "cannot be recalled", "remote job media-"} {
+		if !strings.Contains(res.Reason, want) {
+			t.Errorf("the defer must say %q: %s", want, res.Reason)
+		}
+	}
+	if strings.Contains(res.Reason, "was rendering") || strings.Contains(res.Reason, "finished the render") {
+		t.Errorf("wrong phase wording: %s", res.Reason)
+	}
+}

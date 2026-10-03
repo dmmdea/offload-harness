@@ -110,7 +110,7 @@ Tests: `TestAnInFlightMediaJobDoesNotPinItsRequestBody`, `TestMediaJobFileFields
   of time.
 - **Leftovers of a fetch that never finished are swept** from the destination directory before names are claimed: stale
   `.media-fetch-*.part` temps and zero-byte `media-<16 hex>-*` claim files (bounded to 4096 entries scanned and 256 removed,
-  logged). "Stale" is older than the longest call budget (2 to 6 hours, the same `Budgets` a call runs under) plus an hour, so
+  logged). "Stale" is older than the longest call budget (1 to 6 hours, the same `Budgets` a call runs under) plus an hour, so
   no call still running can lose its files, and a call refreshes the modification time of its own claims and finished temps
   after each download, so a long multi-output fetch never ages toward it. Two limits are deliberate: a crash mid-fetch can leave
   an empty claim under the node's bare file name (the primary), which the sweep does not remove because it cannot tell it from
