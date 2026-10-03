@@ -345,13 +345,13 @@ func oneLine(s string, max int) string {
 
 // statusPair is the "pair" block: which way this box's PAIR emitter reports (local ingress, node-info
 // fallback, relay <member route URL>, or off with the reason). nil (absent from the full answer) when
-// pair_workloads_enabled is off. Building it reads the emitter's identity (its documented probes on a
-// box whose node-id.json is unreadable) and, in auto relay mode, the delegate_remotes' health.
+// pair_workloads_enabled is off. It reads the per-config emitter the wire headers use (identity, and in
+// auto relay mode the delegate_remotes' health, cached), so a status call probes nothing a call just did.
 func statusPair(cfg config.Config) any {
 	if !cfg.PairWorkloadsEnabled {
 		return nil
 	}
-	m := pairworkloads.New(pairworkloads.FromConfig(cfg)).Mode()
+	m := pairworkloads.ModeFor(cfg)
 	out := map[string]any{"mode": m.Mode}
 	if m.Relay != "" {
 		out["relay"] = m.Relay

@@ -36,7 +36,10 @@ import (
 
 var (
 	// sttOutputRe is what the transcribe pipeline names an upload's outputs: its private temp file is
-	// stt-<digits>.<ext> (os.CreateTemp), and mediaBase appends 8 hex of the content identity.
+	// stt-<digits>.<ext> (os.CreateTemp: the random part is a decimal number), and mediaBase appends 8
+	// hex of the content identity. The PRODUCER's shape is pinned against this same literal in
+	// internal/pipeline (TestMediaBaseOfAnSTTUploadMatchesTheNodesGatedShape): drift on either side
+	// would open the bearer gate and starve the sweep without a consumer-side test noticing.
 	sttOutputRe = regexp.MustCompile(`^stt-[0-9]+-[0-9a-f]{8}\.(srt|txt|segments\.json)$`)
 	// projectOutputRe is the stem buildComposeProject gives a project render: its video and the
 	// renderer's snapshots beside it.

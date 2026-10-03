@@ -9,6 +9,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -284,6 +286,69 @@ func TestTranscribeCacheHitWithMissingFilesIsAMiss(t *testing.T) {
 	for _, k := range []string{"srt_path", "text_path", "json_path"} {
 		if _, err := os.Stat(data2[k].(string)); err != nil {
 			t.Errorf("the redone call's %s is missing: %v", k, err)
+		}
+	}
+}
+
+// The fleet node's media route gates and sweeps an stt upload's transcripts by NAME
+// (internal/fleetnode/media_gate.go: sttOutputRe, `^stt-[0-9]+-[0-9a-f]{8}\.(srt|txt|segments\.json)$`).
+// The producer is this pipeline: the door's private file is os.CreateTemp(dir, "stt-*.<ext>") (stt-
+// plus a decimal random number) and the outputs are mediaBase(...) plus the extension. If either
+// side drifts the node's bearer gate fails OPEN and its sweep deletes nothing, with every test on
+// the consumer's side still green, so the REAL producer is pinned here against the same literal.
+var sttUploadOutputRe = regexp.MustCompile(`^stt-[0-9]+-[0-9a-f]{8}\.(srt|txt|segments\.json)$`)
+
+func TestMediaBaseOfAnSTTUploadMatchesTheNodesGatedShape(t *testing.T) {
+	dir := t.TempDir()
+	f, err := os.CreateTemp(dir, "stt-*.ogg") // exactly the door's call (fleetnode.buildSTTUpload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	base := filepath.Base(mediaBase(t.TempDir(), f.Name(), "media:sha256:sz=1:"+strings.Repeat("a", 64)+"|model=m|lang=|proto=whisper"))
+	for _, ext := range []string{".srt", ".txt", ".segments.json"} {
+		if !sttUploadOutputRe.MatchString(base + ext) {
+			t.Errorf("the transcript name %q does not match the node's gated shape %s", base+ext, sttUploadOutputRe)
+		}
+	}
+}
+
+// The same through the real transcribe path: the files an upload-named audio file's call writes.
+func TestTranscribeOutputsOfAnSTTUploadMatchTheNodesGatedShape(t *testing.T) {
+	ffmpeg := lookFFmpeg()
+	if ffmpeg == "" {
+		t.Skip("ffmpeg not on PATH")
+	}
+	wav := makeSilentWav(t, ffmpeg)
+	raw, err := os.ReadFile(wav)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.CreateTemp(t.TempDir(), "stt-*.wav")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Write(raw); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	cfg := gateCfg(t)
+	cfg.MediaDir = t.TempDir()
+	cfg.FFmpegPath = ffmpeg
+	cfg.Endpoint = fakeWhisper(t)
+	p := gatePipeline(t, cfg, gateCache(t))
+	res := p.Run(context.Background(), core.Request{Task: core.TaskTranscribe, Audio: f.Name()})
+	if !res.OK {
+		t.Fatalf("transcribe deferred: %s", res.Reason)
+	}
+	var data map[string]any
+	if err := json.Unmarshal(res.Data, &data); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"srt_path", "text_path", "json_path"} {
+		name := filepath.Base(data[k].(string))
+		if !sttUploadOutputRe.MatchString(name) {
+			t.Errorf("%s = %q does not match the node's gated shape %s", k, name, sttUploadOutputRe)
 		}
 	}
 }

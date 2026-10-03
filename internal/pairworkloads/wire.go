@@ -79,17 +79,31 @@ var (
 // X-Offload-Pair-Card: the asker cards the job through its relay and the serving node must not card
 // it too (one job, one card).
 func WireHeadersFor(cfg config.Config, h http.Header) {
+	cachedEmitter(cfg).SetWireHeaders(h)
+}
+
+// ModeFor is the mode of the emitter a box with this config reports through (Emitter.Mode), read
+// from the same per-config cached emitter WireHeadersFor asks, so a status call does not re-probe
+// the relay members' health on every call: the probes cost once per process, then once per
+// verdict TTL in the background.
+func ModeFor(cfg config.Config) ModeInfo {
+	return cachedEmitter(cfg).Mode()
+}
+
+// cachedEmitter is the identity-only emitter for cfg, one per (enabled, endpoint, app dir, node-info
+// URL, relay).
+func cachedEmitter(cfg config.Config) *Emitter {
 	c := FromConfig(cfg)
 	key := strings.Join([]string{boolKey(c.Enabled), c.Endpoint, strings.TrimSpace(os.Getenv("OFFLOAD_PAIR_APPDIR")), c.NodeInfoURL, c.Relay.signature()}, "|")
 	wireMu.Lock()
+	defer wireMu.Unlock()
 	e, ok := wireEmitters[key]
 	if !ok {
 		// No state dir: this emitter only reads identity, it never emits a frame.
 		e = New(Config{Enabled: c.Enabled, Endpoint: c.Endpoint, NodeInfoURL: c.NodeInfoURL, Relay: c.Relay})
 		wireEmitters[key] = e
 	}
-	wireMu.Unlock()
-	e.SetWireHeaders(h)
+	return e
 }
 
 func boolKey(b bool) string {

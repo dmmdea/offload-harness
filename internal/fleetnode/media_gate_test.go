@@ -42,7 +42,14 @@ func writeMedia(t *testing.T, dir, name string, age time.Duration) string {
 	return p
 }
 
+// sttOutputShape is sttOutputRe's text, written out here and in internal/pipeline's producer pin: a
+// change to either side has to touch both.
+const sttOutputShape = `^stt-[0-9]+-[0-9a-f]{8}\.(srt|txt|segments\.json)$`
+
 func TestGatedMediaNames(t *testing.T) {
+	if sttOutputRe.String() != sttOutputShape {
+		t.Fatalf("sttOutputRe = %s, want %s: update internal/pipeline's producer pin with it", sttOutputRe, sttOutputShape)
+	}
 	for _, n := range []string{gatedSRT, gatedTXT, gatedJSON, gatedMP4, gatedSnap, "composeproj-0123456789abcdef.webm", "stt-7-ffffffff.srt"} {
 		if !gatedMediaName(n) {
 			t.Errorf("%q must be a gated output", n)
